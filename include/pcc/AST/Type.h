@@ -5,7 +5,9 @@
 // equivalence: every `array`/`record`/enumeration written in the source is a
 // distinct type, so type identity is pointer identity.
 //
-//   simple:     integer, real, boolean, char, enumerations, subranges
+//   simple:     integer types, real, boolean, char, enumerations, subranges
+//               (Turbo/FPC adds int64, cardinal, byte, word, shortint and
+//               smallint; longint is integer)
 //   structured: arrays, records (with variant parts)
 //   internal:   String (a string literal of length N), Error
 //
@@ -90,8 +92,12 @@ public:
   bool isValidResultType() const { return isSimple() || isPointer(); }
   bool isStructured() const { return isArray() || isRecord() || isShortString(); }
 
-  /// Integer-like after stripping subranges (integer or a subrange of it).
+  /// Integer-like after stripping subranges (an integer type or a subrange
+  /// of one).
   bool isIntegerLike() const;
+  /// Integer-like with a signed host type (integer, int64, shortint,
+  /// smallint). Unsigned hosts are byte, word and cardinal.
+  bool isSignedIntegerLike() const;
   /// integer, real, or a subrange of integer.
   bool isNumeric() const { return isIntegerLike() || isReal(); }
 
@@ -115,7 +121,7 @@ public:
 };
 
 /// The predeclared simple types and the error type.
-class BuiltinType final : public Type {
+class BuiltinType : public Type {
 public:
   explicit BuiltinType(TypeKind K) : Type(K) {}
   static bool classof(const Type *T) {
@@ -127,6 +133,22 @@ public:
       return false;
     }
   }
+};
+
+/// A predeclared integer type: integer (= longint, 32-bit signed), and in
+/// --mode=tp also int64, cardinal, byte, word, shortint, smallint.
+class IntegerType final : public BuiltinType {
+  unsigned Bits;
+  bool Signed;
+  llvm::StringRef Name;
+
+public:
+  IntegerType(unsigned Bits, bool Signed, llvm::StringRef Name)
+      : BuiltinType(TK_Integer), Bits(Bits), Signed(Signed), Name(Name) {}
+  unsigned getBits() const { return Bits; }
+  bool isSigned() const { return Signed; }
+  llvm::StringRef getIntegerName() const { return Name; }
+  static bool classof(const Type *T) { return T->getKind() == TK_Integer; }
 };
 
 /// (red, green, blue) -- values 0..N-1.
@@ -281,12 +303,18 @@ inline bool needsStringCompare(Type *L, Type *R) {
 /// True if T is, or contains, a file type (files cannot be copied).
 bool containsFile(Type *T);
 
-/// Bounds of an ordinal type: integer [-2^31, 2^31-1], char [0, 255],
-/// boolean [0, 1], enum [0, N-1], subrange [Lo, Hi].
+/// Bounds of an ordinal type: integer [-2^31, 2^31-1] (other integer types
+/// by width and signedness), char [0, 255], boolean [0, 1], enum [0, N-1],
+/// subrange [Lo, Hi].
 struct OrdinalBounds {
   int64_t Lo, Hi;
 };
 OrdinalBounds getOrdinalBounds(Type *T);
+
+/// Are A and B ordinal types with the same host? All integer types count as
+/// one host (Turbo/FPC): they are compatible, and assignment between them is
+/// range-checked.
+bool haveSameOrdinalHost(Type *A, Type *B);
 
 } // namespace pcc
 

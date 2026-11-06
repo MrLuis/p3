@@ -2,7 +2,8 @@
 //
 // Lowering (PLAN.md section 6):
 //
-//   integer -> i32   real -> double   char -> i8   enum -> i32
+//   integer -> i32 (int64 -> i64, cardinal -> i32, byte/shortint -> i8,
+//   word/smallint -> i16)   real -> double   char -> i8   enum -> i32
 //   boolean -> i1 in registers / i8 in memory   subrange -> its host type
 //   array   -> [N x T]        record -> struct (variants overlay a buffer)
 //
@@ -50,7 +51,8 @@ namespace {
 /// and the C library functions we call.
 struct Runtime {
   llvm::FunctionCallee Init, Fini, WriteStr, WriteChar, WriteInt, WriteBool,
-      WriteReal, Writeln, ReadInt, ReadChar, ReadReal, Readln, RuntimeError,
+      WriteReal, Writeln, ReadInt, ReadInt64, ReadChar, ReadReal, Readln,
+      RuntimeError,
       Memcmp, Atan, New, Dispose, FileNew, FileFree, ProgramParam, Reset,
       Rewrite, Get, Put, Page, Eof, Eoln, Buffer, ReadElem, WriteElem,
       SetJmp, LongJmp, StrAssign, StrConcat, StrCompare, StrCopy, StrPos,
@@ -78,11 +80,12 @@ struct Runtime {
     // Text I/O: the first argument is the PasFile*.
     WriteStr = Decl("__pas_write_str", Void, {Ptr, Ptr, I64, I32});
     WriteChar = Decl("__pas_write_char", Void, {Ptr, I8, I32});
-    WriteInt = Decl("__pas_write_int", Void, {Ptr, I32, I32});
+    WriteInt = Decl("__pas_write_int", Void, {Ptr, I64, I32});
     WriteBool = Decl("__pas_write_bool", Void, {Ptr, I32, I32});
     WriteReal = Decl("__pas_write_real", Void, {Ptr, F64, I32, I32});
     Writeln = Decl("__pas_writeln", Void, {Ptr});
     ReadInt = Decl("__pas_read_int", I32, {Ptr});
+    ReadInt64 = Decl("__pas_read_int64", I64, {Ptr});
     ReadChar = Decl("__pas_read_char", I8, {Ptr});
     ReadReal = Decl("__pas_read_real", F64, {Ptr});
     Readln = Decl("__pas_readln", Void, {Ptr});
@@ -209,7 +212,8 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
 
   llvm::Type *lowerType(Type *T) {
     switch (T->getKind()) {
-    case Type::TK_Integer: return B.getInt32Ty();
+    case Type::TK_Integer:
+      return B.getIntNTy(llvm::cast<IntegerType>(T)->getBits());
     case Type::TK_Real:    return B.getDoubleTy();
     case Type::TK_Boolean: return B.getInt8Ty();
     case Type::TK_Char:    return B.getInt8Ty();
@@ -402,9 +406,30 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
                                               CGOpts.OverflowChecks);
   }
 
-  /// Ordinal values compare as signed if their host is integer, unsigned
-  /// otherwise (char 0..255, boolean, enum 0..N-1).
-  static bool isSignedOrdinal(Type *T) { return T->isIntegerLike(); }
+  /// Ordinal values compare as signed if their host is a signed integer
+  /// type, unsigned otherwise (byte, word, cardinal, char, boolean, enum).
+  static bool isSignedOrdinal(Type *T) { return T->isSignedIntegerLike(); }
+
+  /// Converts an ordinal register value of type From to the register type of
+  /// To (sign- or zero-extending by From, or truncating). No range check.
+  llvm::Value *convertOrdinal(llvm::Value *V, Type *From, Type *To) {
+    llvm::Type *Dst = regType(To);
+    if (V->getType() == Dst)
+      return V;
+    if (Dst->isIntegerTy(1))
+      return B.CreateICmpNE(V, llvm::ConstantInt::get(V->getType(), 0));
+    return isSignedOrdinal(From) ? B.CreateSExtOrTrunc(V, Dst)
+                                 : B.CreateZExtOrTrunc(V, Dst);
+  }
+
+  /// An integer expression as i32 (field widths, string positions).
+  llvm::Value *emitI32(Expr *E) {
+    return B.CreateTrunc(toI64(visitExpr(E), E->getType()), B.getInt32Ty());
+  }
+
+  static unsigned intBits(Type *T) {
+    return llvm::cast<IntegerType>(T->getBase())->getBits();
+  }
 
   /// Widens an ordinal register value to i64 for range comparisons.
   llvm::Value *toI64(llvm::Value *V, Type *T) {
@@ -433,9 +458,11 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
   llvm::Value *convertForAssign(llvm::Value *V, Type *From, Type *To,
                                 SourceLocation L) {
     if (To->isReal() && !From->isReal())
-      return B.CreateSIToFP(V, B.getDoubleTy(), "toreal");
-    if (To->isOrdinal())
+      return toDouble(V, From);
+    if (To->isOrdinal() && From->isOrdinal()) {
       emitRangeCheck(V, From, To, L);
+      return convertOrdinal(V, From, To);
+    }
     if (auto *TS = llvm::dyn_cast<SetType>(To); TS && rangeChecks(L)) {
       OrdinalBounds TB = getOrdinalBounds(TS->getElementType());
       auto *FS = llvm::cast<SetType>(From);
@@ -520,8 +547,8 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
       return B.CreateCall(RT.StrPos, {emitPStr(Args[0]), emitPStr(Args[1])});
     case BuiltinKind::Copy: {
       llvm::Value *Tmp = newStringTemp();
-      B.CreateCall(RT.StrCopy, {Tmp, emitPStr(Args[0]), visitExpr(Args[1]),
-                                visitExpr(Args[2])});
+      B.CreateCall(RT.StrCopy, {Tmp, emitPStr(Args[0]), emitI32(Args[1]),
+                                emitI32(Args[2])});
       return Tmp;
     }
     default: { // Concat
@@ -595,17 +622,45 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
   }
 
   llvm::Value *toDouble(llvm::Value *V, Type *T) {
-    return T->isReal() ? V : B.CreateSIToFP(V, B.getDoubleTy(), "toreal");
+    if (T->isReal())
+      return V;
+    return isSignedOrdinal(T) ? B.CreateSIToFP(V, B.getDoubleTy(), "toreal")
+                              : B.CreateUIToFP(V, B.getDoubleTy(), "toreal");
   }
 
-  /// L op R with an overflow check (sadd/ssub/smul.with.overflow).
+  /// L op R (Add, Sub or Mul) in a signed or unsigned integer type, with
+  /// an overflow check if enabled.
+  llvm::Value *emitCheckedArith(BinaryOp Op, bool Signed, llvm::Value *L,
+                                llvm::Value *R, SourceLocation Loc,
+                                const llvm::Twine &Name) {
+    llvm::Intrinsic::ID ID;
+    switch (Op) {
+    case BinaryOp::Add:
+      ID = Signed ? llvm::Intrinsic::sadd_with_overflow
+                  : llvm::Intrinsic::uadd_with_overflow;
+      break;
+    case BinaryOp::Sub:
+      ID = Signed ? llvm::Intrinsic::ssub_with_overflow
+                  : llvm::Intrinsic::usub_with_overflow;
+      break;
+    default:
+      ID = Signed ? llvm::Intrinsic::smul_with_overflow
+                  : llvm::Intrinsic::umul_with_overflow;
+      break;
+    }
+    return emitCheckedArith(ID, L, R, Loc, Name);
+  }
+
+  /// L op R with an overflow check (s/u add/sub/mul.with.overflow).
   llvm::Value *emitCheckedArith(llvm::Intrinsic::ID ID, llvm::Value *L,
                                 llvm::Value *R, SourceLocation Loc,
                                 const llvm::Twine &Name) {
     if (!overflowChecks(Loc)) {
       switch (ID) {
-      case llvm::Intrinsic::sadd_with_overflow: return B.CreateAdd(L, R, Name);
-      case llvm::Intrinsic::ssub_with_overflow: return B.CreateSub(L, R, Name);
+      case llvm::Intrinsic::sadd_with_overflow:
+      case llvm::Intrinsic::uadd_with_overflow: return B.CreateAdd(L, R, Name);
+      case llvm::Intrinsic::ssub_with_overflow:
+      case llvm::Intrinsic::usub_with_overflow: return B.CreateSub(L, R, Name);
       default: return B.CreateMul(L, R, Name);
       }
     }
@@ -847,7 +902,11 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
   llvm::DIType *buildDebugType(Type *T) {
     using namespace llvm::dwarf;
     switch (T->getKind()) {
-    case Type::TK_Integer: return DIB->createBasicType("integer", 32, DW_ATE_signed);
+    case Type::TK_Integer: {
+      auto *I = llvm::cast<IntegerType>(T);
+      return DIB->createBasicType(I->getIntegerName(), I->getBits(),
+                                  I->isSigned() ? DW_ATE_signed : DW_ATE_unsigned);
+    }
     case Type::TK_Real:    return DIB->createBasicType("real", 64, DW_ATE_float);
     case Type::TK_Boolean: return DIB->createBasicType("boolean", 8, DW_ATE_boolean);
     case Type::TK_Char:    return DIB->createBasicType("char", 8, DW_ATE_unsigned_char);
@@ -1314,40 +1373,52 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
     return C && !C->isMinusOne();
   }
 
-  llvm::Value *emitDiv(llvm::Value *L, llvm::Value *R, SourceLocation Loc) {
+  llvm::Constant *intConst(llvm::Value *Like, int64_t V) {
+    return llvm::ConstantInt::get(Like->getType(), static_cast<uint64_t>(V), true);
+  }
+
+  llvm::Value *emitDiv(llvm::Value *L, llvm::Value *R, bool Signed,
+                       SourceLocation Loc) {
     if (!isConstNonZero(R))
-      emitRuntimeCheck(B.CreateICmpEQ(R, B.getInt32(0)), "division by zero",
+      emitRuntimeCheck(B.CreateICmpEQ(R, intConst(R, 0)), "division by zero",
                        Loc);
+    if (!Signed)
+      return B.CreateUDiv(L, R, "div");
     // INT_MIN div -1 overflows (and traps on x86).
     if (!isConstNotMinusOne(R)) {
-      llvm::Value *Overflow =
-          B.CreateAnd(B.CreateICmpEQ(L, B.getInt32(INT32_MIN)),
-                      B.CreateICmpEQ(R, B.getInt32(-1)));
+      llvm::Value *Min = llvm::ConstantInt::get(
+          L->getType(),
+          llvm::APInt::getSignedMinValue(L->getType()->getIntegerBitWidth()));
+      llvm::Value *Overflow = B.CreateAnd(B.CreateICmpEQ(L, Min),
+                                          B.CreateICmpEQ(R, intConst(R, -1)));
       emitRuntimeCheck(Overflow, "integer overflow in 'div'", Loc);
     }
     return B.CreateSDiv(L, R, "div");
   }
 
-  llvm::Value *emitMod(llvm::Value *L, llvm::Value *R, SourceLocation Loc) {
+  llvm::Value *emitMod(llvm::Value *L, llvm::Value *R, bool Signed,
+                       SourceLocation Loc) {
     if (LangOpts.Mode == LangMode::ISO) {
       // ISO 7185 6.7.2.2: error if j <= 0; result is i - k*j with
       // 0 <= result < j.
       auto *CR = llvm::dyn_cast<llvm::ConstantInt>(R);
       if (!CR || !CR->getValue().isStrictlyPositive())
-        emitRuntimeCheck(B.CreateICmpSLE(R, B.getInt32(0)),
+        emitRuntimeCheck(B.CreateICmpSLE(R, intConst(R, 0)),
                          "'mod' by zero or a negative number", Loc);
       llvm::Value *Rem = B.CreateSRem(L, R);
       llvm::Value *Fixed = B.CreateAdd(Rem, R);
-      return B.CreateSelect(B.CreateICmpSLT(Rem, B.getInt32(0)), Fixed, Rem,
+      return B.CreateSelect(B.CreateICmpSLT(Rem, intConst(Rem, 0)), Fixed, Rem,
                             "mod");
     }
     // Turbo/FPC: sign follows the dividend (like C %).
     if (!isConstNonZero(R))
-      emitRuntimeCheck(B.CreateICmpEQ(R, B.getInt32(0)), "division by zero",
+      emitRuntimeCheck(B.CreateICmpEQ(R, intConst(R, 0)), "division by zero",
                        Loc);
+    if (!Signed)
+      return B.CreateURem(L, R, "mod");
     // x mod -1 == 0, but INT_MIN srem -1 traps on x86: divide by 1 instead.
-    llvm::Value *SafeR = B.CreateSelect(B.CreateICmpEQ(R, B.getInt32(-1)),
-                                        B.getInt32(1), R);
+    llvm::Value *SafeR = B.CreateSelect(B.CreateICmpEQ(R, intConst(R, -1)),
+                                        intConst(R, 1), R);
     return B.CreateSRem(L, SafeR, "mod");
   }
 
@@ -1417,6 +1488,11 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
     }
     llvm::Value *L = visitExpr(E->getLHS());
     llvm::Value *R = visitExpr(E->getRHS());
+    if (Type *OpTy = E->getOperandType()) { // integers of possibly different types
+      L = convertOrdinal(L, LT, OpTy);
+      R = convertOrdinal(R, RTy, OpTy);
+      return compareInts(Op, L, R, isSignedOrdinal(OpTy));
+    }
     return compareInts(Op, L, R, isSignedOrdinal(LT));
   }
 
@@ -1501,9 +1577,9 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
     llvm::Value *Precision = B.getInt32(-1);
     if (auto *F = llvm::dyn_cast<FormattedExpr>(Arg)) {
       Value = F->getValue();
-      Width = visitExpr(F->getWidth());
+      Width = emitI32(F->getWidth());
       if (F->getPrecision())
-        Precision = visitExpr(F->getPrecision());
+        Precision = emitI32(F->getPrecision());
     }
 
     Type *T = Value->getType();
@@ -1524,7 +1600,7 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
     else if (T->getBase()->isBoolean())
       B.CreateCall(RT.WriteBool, {File, B.CreateZExt(V, B.getInt32Ty()), Width});
     else
-      B.CreateCall(RT.WriteInt, {File, V, Width});
+      B.CreateCall(RT.WriteInt, {File, toI64(V, T), Width});
   }
 
   void emitReadArg(llvm::Value *File, Expr *Arg) {
@@ -1538,10 +1614,25 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
       B.CreateStore(B.CreateCall(RT.ReadReal, {File}), Addr);
       return;
     }
-    bool IsChar = T->getBase()->isChar();
-    llvm::Value *V = B.CreateCall(IsChar ? RT.ReadChar : RT.ReadInt, {File});
-    emitRangeCheck(V, T->getBase(), T, Arg->getBeginLoc());
-    B.CreateStore(V, Addr);
+    if (T->getBase()->isChar()) {
+      llvm::Value *V = B.CreateCall(RT.ReadChar, {File});
+      emitRangeCheck(V, T->getBase(), T, Arg->getBeginLoc());
+      B.CreateStore(V, Addr);
+      return;
+    }
+    // Integers: read as i32 (or i64 for types that need it), then check the
+    // value against the target type.
+    bool Wide = intBits(T) == 64 || !isSignedOrdinal(T);
+    llvm::Value *V = B.CreateCall(Wide ? RT.ReadInt64 : RT.ReadInt, {File});
+    llvm::Value *X = B.CreateSExt(V, B.getInt64Ty());
+    OrdinalBounds TB = getOrdinalBounds(T);
+    if (rangeChecks(Arg->getBeginLoc()) &&
+        (TB.Lo > (Wide ? INT64_MIN : INT32_MIN) ||
+         TB.Hi < (Wide ? INT64_MAX : INT32_MAX)))
+      emitRuntimeCheck(B.CreateOr(B.CreateICmpSLT(X, B.getInt64(TB.Lo)),
+                                  B.CreateICmpSGT(X, B.getInt64(TB.Hi))),
+                       "value out of range", Arg->getBeginLoc());
+    B.CreateStore(B.CreateTrunc(X, regType(T)), Addr);
   }
 
   /// pack(a, i, z) / unpack(z, a, i): packed and unpacked arrays share a
@@ -1595,27 +1686,32 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
     Type *AT = ArgE->getType();
     llvm::Value *Arg = visitExpr(ArgE);
     SourceLocation Loc = E->getBeginLoc();
-    auto *I32 = B.getInt32Ty();
 
     switch (BD->getBuiltinKind()) {
-    case BuiltinKind::Abs:
+    case BuiltinKind::Abs: {
       if (AT->isReal())
         return B.CreateUnaryIntrinsic(llvm::Intrinsic::fabs, Arg, nullptr, "abs");
+      Arg = convertOrdinal(Arg, AT, E->getType());
+      if (!isSignedOrdinal(E->getType()))
+        return Arg;
+      llvm::Value *Min = llvm::ConstantInt::get(
+          Arg->getType(),
+          llvm::APInt::getSignedMinValue(Arg->getType()->getIntegerBitWidth()));
       if (overflowChecks(Loc))
-        emitRuntimeCheck(B.CreateICmpEQ(Arg, B.getInt32(INT32_MIN)),
-                         "integer overflow in 'abs'", Loc);
+        emitRuntimeCheck(B.CreateICmpEQ(Arg, Min), "integer overflow in 'abs'", Loc);
       return B.CreateBinaryIntrinsic(llvm::Intrinsic::abs, Arg, B.getFalse(),
                                      nullptr, "abs");
+    }
     case BuiltinKind::Sqr:
       if (AT->isReal())
         return B.CreateFMul(Arg, Arg, "sqr");
-      return emitCheckedArith(llvm::Intrinsic::smul_with_overflow, Arg, Arg,
-                              Loc, "sqr");
+      Arg = convertOrdinal(Arg, AT, E->getType());
+      return emitCheckedArith(BinaryOp::Mul, isSignedOrdinal(E->getType()), Arg,
+                              Arg, Loc, "sqr");
     case BuiltinKind::Odd:
       return B.CreateTrunc(Arg, B.getInt1Ty(), "odd");
     case BuiltinKind::Ord:
-      return isSignedOrdinal(AT) ? B.CreateSExtOrTrunc(Arg, I32, "ord")
-                                 : B.CreateZExtOrTrunc(Arg, I32, "ord");
+      return convertOrdinal(Arg, AT, E->getType());
     case BuiltinKind::Chr:
       emitRangeCheck(Arg, AT, E->getType(), Loc, "'chr' argument out of range");
       return B.CreateTrunc(Arg, B.getInt8Ty(), "chr");
@@ -1660,21 +1756,33 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
     case BuiltinKind::Trunc:
     case BuiltinKind::Round: {
       if (!AT->isReal())
-        return Arg;
+        return convertOrdinal(Arg, AT, E->getType());
       bool IsRound = BD->getBuiltinKind() == BuiltinKind::Round;
       // ISO: round() rounds halves away from zero, like llvm.round.
+      // Turbo/FPC round halves to even (banker's rounding).
       llvm::Value *X =
-          IsRound ? B.CreateUnaryIntrinsic(llvm::Intrinsic::round, Arg) : Arg;
+          !IsRound ? Arg
+          : B.CreateUnaryIntrinsic(LangOpts.Mode == LangMode::ISO
+                                       ? llvm::Intrinsic::round
+                                       : llvm::Intrinsic::roundeven,
+                                   Arg);
+      llvm::Type *ResTy = regType(E->getType());
       if (rangeChecks(Loc)) {
-        auto *Lo = llvm::ConstantFP::get(B.getDoubleTy(), -2147483649.0);
-        auto *Hi = llvm::ConstantFP::get(B.getDoubleTy(), 2147483648.0);
-        // Also catches NaN (unordered comparisons are true).
-        emitRuntimeCheck(B.CreateOr(B.CreateFCmpULE(X, Lo), B.CreateFCmpUGE(X, Hi)),
-                         IsRound ? "'round' result does not fit in integer"
-                                 : "'trunc' result does not fit in integer",
+        // The result must lie in the integer (or int64) range; the bounds
+        // are exact doubles. Also catches NaN (unordered comparisons are true).
+        bool Is64 = ResTy->isIntegerTy(64);
+        auto *Lo = llvm::ConstantFP::get(B.getDoubleTy(),
+                                         Is64 ? -9223372036854775808.0 : -2147483649.0);
+        auto *Hi = llvm::ConstantFP::get(B.getDoubleTy(),
+                                         Is64 ? 9223372036854775808.0 : 2147483648.0);
+        llvm::Value *Low = Is64 ? B.CreateFCmpULT(X, Lo) : B.CreateFCmpULE(X, Lo);
+        emitRuntimeCheck(B.CreateOr(Low, B.CreateFCmpUGE(X, Hi)),
+                         (llvm::Twine(IsRound ? "'round'" : "'trunc'") +
+                          " result does not fit in " + E->getType()->getName())
+                             .str(),
                          Loc);
       }
-      return B.CreateFPToSI(X, I32, IsRound ? "round" : "trunc");
+      return B.CreateFPToSI(X, ResTy, IsRound ? "round" : "trunc");
     }
     default:
       llvm_unreachable("not a builtin function");
@@ -1845,14 +1953,14 @@ public:
     }
     case BuiltinKind::Delete: {
       auto A = S->getArgs();
-      B.CreateCall(RT.StrDelete, {emitAddress(A[0]), visitExpr(A[1]), visitExpr(A[2])});
+      B.CreateCall(RT.StrDelete, {emitAddress(A[0]), emitI32(A[1]), emitI32(A[2])});
       return;
     }
     case BuiltinKind::Insert: {
       auto A = S->getArgs();
       auto *SS = llvm::cast<ShortStringType>(A[1]->getType());
       B.CreateCall(RT.StrInsert, {emitPStr(A[0]), emitAddress(A[1]),
-                                  B.getInt32(SS->getMaxLength()), visitExpr(A[2])});
+                                  B.getInt32(SS->getMaxLength()), emitI32(A[2])});
       return;
     }
     case BuiltinKind::Inc:
@@ -1862,14 +1970,22 @@ public:
       llvm::Value *Addr = emitAddress(Var);
       llvm::Value *Old = loadScalar(Addr, T);
       llvm::Value *Step =
-          S->getArgs().size() == 2 ? visitExpr(S->getArgs()[1]) : B.getInt32(1);
-      // Compute in i64 so the range check sees the true result.
-      llvm::Value *Wide = B.CreateAdd(
-          toI64(Old, T),
-          BD->getBuiltinKind() == BuiltinKind::Inc
-              ? B.CreateSExt(Step, B.getInt64Ty())
-              : B.CreateNeg(B.CreateSExt(Step, B.getInt64Ty())));
+          S->getArgs().size() == 2
+              ? toI64(visitExpr(S->getArgs()[1]), S->getArgs()[1]->getType())
+              : B.getInt64(1);
+      bool IsInc = BD->getBuiltinKind() == BuiltinKind::Inc;
       SourceLocation L = S->getBeginLoc();
+      if (T->isIntegerLike() && intBits(T) == 64) { // no wider type to check in
+        llvm::Value *New = emitCheckedArith(IsInc ? BinaryOp::Add : BinaryOp::Sub,
+                                            /*Signed=*/true, Old, Step, L,
+                                            S->getCallee().Name);
+        emitRangeCheck(New, T->getBase(), T, L);
+        storeScalar(Addr, New, T);
+        return;
+      }
+      // Compute in i64 so the range check sees the true result.
+      llvm::Value *Wide =
+          B.CreateAdd(toI64(Old, T), IsInc ? Step : B.CreateNeg(Step));
       if (T->isIntegerLike() ? overflowChecks(L) || rangeChecks(L) : rangeChecks(L)) {
         OrdinalBounds Bd = getOrdinalBounds(T);
         emitRuntimeCheck(B.CreateOr(B.CreateICmpSLT(Wide, B.getInt64(Bd.Lo)),
@@ -1980,9 +2096,13 @@ public:
 
     llvm::Value *Start = visitExpr(S->getInit());
     llvm::Value *Final = visitExpr(S->getFinal());
-    llvm::Value *Enter =
-        Down ? (Signed ? B.CreateICmpSGE(Start, Final) : B.CreateICmpUGE(Start, Final))
-             : (Signed ? B.CreateICmpSLE(Start, Final) : B.CreateICmpULE(Start, Final));
+    // The bounds may have other integer types than the variable: compare
+    // them as i64, check them, then convert them to the variable's type.
+    llvm::Value *Start64 = toI64(Start, S->getInit()->getType());
+    llvm::Value *Final64 = toI64(Final, S->getFinal()->getType());
+    llvm::Value *Enter = Down ? B.CreateICmpSGE(Start64, Final64)
+                              : B.CreateICmpSLE(Start64, Final64);
+    (void)Signed;
     auto *CheckBB = newBlock("for.check");
     auto *LoopBB = newBlock("for.body");
     auto *LatchBB = newBlock("for.latch");
@@ -1997,6 +2117,8 @@ public:
                    S->getInit()->getBeginLoc(), "'for' loop bound out of range");
     emitRangeCheck(Final, S->getFinal()->getType(), VarTy,
                    S->getFinal()->getBeginLoc(), "'for' loop bound out of range");
+    Start = convertOrdinal(Start, S->getInit()->getType(), VarTy);
+    Final = convertOrdinal(Final, S->getFinal()->getType(), VarTy);
     llvm::BasicBlock *PreBB = B.GetInsertBlock();
     B.CreateBr(LoopBB);
 
@@ -2114,7 +2236,7 @@ public:
   //===--------------------------------------------------------------------===//
 
   llvm::Value *visitIntegerLiteralExpr(IntegerLiteralExpr *E) {
-    return B.getInt32(static_cast<uint32_t>(E->getValue()));
+    return llvm::ConstantInt::get(regType(E->getType()), E->getValue());
   }
 
   llvm::Value *visitRealLiteralExpr(RealLiteralExpr *E) {
@@ -2153,14 +2275,17 @@ public:
 
   llvm::Value *visitUnaryExpr(UnaryExpr *E) {
     llvm::Value *V = visitExpr(E->getOperand());
+    Type *T = E->getType();
+    if (T->isIntegerLike()) // promoted operand (byte -> integer, ...)
+      V = convertOrdinal(V, E->getOperand()->getType(), T);
     switch (E->getOp()) {
     case UnaryOp::Plus:
       return V;
     case UnaryOp::Minus:
-      if (E->getType()->isReal())
+      if (T->isReal())
         return B.CreateFNeg(V, "neg");
-      return emitCheckedArith(llvm::Intrinsic::ssub_with_overflow,
-                              B.getInt32(0), V, E->getOpLoc(), "neg");
+      return emitCheckedArith(BinaryOp::Sub, isSignedOrdinal(T), intConst(V, 0),
+                              V, E->getOpLoc(), "neg");
     case UnaryOp::Not:
       return B.CreateNot(V, "not");
     }
@@ -2209,23 +2334,33 @@ public:
     }
 
     SourceLocation Loc = E->getOpLoc();
+    // Integer operators: both operands in the operand type chosen by Sema.
+    bool Signed = true;
+    if (Type *OpTy = E->getOperandType()) {
+      L = convertOrdinal(L, LT, OpTy);
+      R = convertOrdinal(R, RTy, OpTy);
+      Signed = isSignedOrdinal(OpTy);
+    }
     switch (Op) {
     // Turbo/FPC bitwise operators (booleans: xor only).
     case BinaryOp::And: return B.CreateAnd(L, R, "and");
     case BinaryOp::Or:  return B.CreateOr(L, R, "or");
     case BinaryOp::Xor: return B.CreateXor(L, R, "xor");
-    case BinaryOp::Shl:
-      return B.CreateShl(L, B.CreateAnd(R, B.getInt32(31)), "shl");
-    case BinaryOp::Shr: // logical, like Turbo/FPC
-      return B.CreateLShr(L, B.CreateAnd(R, B.getInt32(31)), "shr");
-    case BinaryOp::Add:
-      return emitCheckedArith(llvm::Intrinsic::sadd_with_overflow, L, R, Loc, "add");
-    case BinaryOp::Sub:
-      return emitCheckedArith(llvm::Intrinsic::ssub_with_overflow, L, R, Loc, "sub");
-    case BinaryOp::Mul:
-      return emitCheckedArith(llvm::Intrinsic::smul_with_overflow, L, R, Loc, "mul");
-    case BinaryOp::IntDiv: return emitDiv(L, R, Loc);
-    case BinaryOp::Mod:    return emitMod(L, R, Loc);
+    case BinaryOp::Shl: {
+      unsigned Bits = L->getType()->getIntegerBitWidth();
+      return B.CreateShl(L, B.CreateAnd(R, intConst(R, Bits - 1)), "shl");
+    }
+    case BinaryOp::Shr: { // logical, like Turbo/FPC
+      unsigned Bits = L->getType()->getIntegerBitWidth();
+      return B.CreateLShr(L, B.CreateAnd(R, intConst(R, Bits - 1)), "shr");
+    }
+    case BinaryOp::Add: case BinaryOp::Sub: case BinaryOp::Mul:
+      return emitCheckedArith(Op, Signed, L, R, Loc,
+                              Op == BinaryOp::Add   ? "add"
+                              : Op == BinaryOp::Sub ? "sub"
+                                                    : "mul");
+    case BinaryOp::IntDiv: return emitDiv(L, R, Signed, Loc);
+    case BinaryOp::Mod:    return emitMod(L, R, Signed, Loc);
     default:
       llvm_unreachable("operator rejected by Sema");
     }

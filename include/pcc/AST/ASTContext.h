@@ -26,7 +26,14 @@ class ASTContext {
 
   // Predeclared types (singletons).
   BuiltinType ErrorTy{Type::TK_Error};
-  BuiltinType IntegerTy{Type::TK_Integer};
+  IntegerType IntegerTy{32, true, "integer"};
+  // Turbo/FPC integer types.
+  IntegerType Int64Ty{64, true, "int64"};
+  IntegerType CardinalTy{32, false, "cardinal"};
+  IntegerType ByteTy{8, false, "byte"};
+  IntegerType WordTy{16, false, "word"};
+  IntegerType ShortIntTy{8, true, "shortint"};
+  IntegerType SmallIntTy{16, true, "smallint"};
   BuiltinType RealTy{Type::TK_Real};
   BuiltinType BooleanTy{Type::TK_Boolean};
   BuiltinType CharTy{Type::TK_Char};
@@ -47,6 +54,12 @@ public:
 
   Type *getErrorType() { return &ErrorTy; }
   Type *getIntegerType() { return &IntegerTy; }
+  Type *getInt64Type() { return &Int64Ty; }
+  Type *getCardinalType() { return &CardinalTy; }
+  Type *getByteType() { return &ByteTy; }
+  Type *getWordType() { return &WordTy; }
+  Type *getShortIntType() { return &ShortIntTy; }
+  Type *getSmallIntType() { return &SmallIntTy; }
   Type *getRealType() { return &RealTy; }
   Type *getBooleanType() { return &BooleanTy; }
   Type *getCharType() { return &CharTy; }

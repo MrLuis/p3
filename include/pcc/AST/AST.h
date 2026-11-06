@@ -185,6 +185,9 @@ class BinaryExpr final : public Expr {
   BinaryOp Op;
   SourceLocation OpLoc;
   Expr *LHS, *RHS;
+  /// Set by Sema for integer operators and comparisons: the integer type
+  /// both operands are converted to before the operation.
+  Type *OperandTy = nullptr;
 
 public:
   BinaryExpr(SourceRange R, BinaryOp Op, SourceLocation OpLoc, Expr *LHS,
@@ -194,6 +197,8 @@ public:
   SourceLocation getOpLoc() const { return OpLoc; }
   Expr *getLHS() const { return LHS; }
   Expr *getRHS() const { return RHS; }
+  Type *getOperandType() const { return OperandTy; }
+  void setOperandType(Type *T) { OperandTy = T; }
   static bool classof(const Expr *E) { return E->getKind() == EK_Binary; }
 };
 

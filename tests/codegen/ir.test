@@ -11,7 +11,7 @@
 ; CHECK-NEXT:   call void @__pas_write_char(ptr [[F1]], i8 97, i32 0)
 ; CHECK-NEXT:   [[F2:%.*]] = load ptr, ptr @__pas_output
 ; CHECK-NEXT:   call void @__pas_write_str(ptr [[F2]], ptr @.str, i64 2, i32 0)
-; CHECK-NEXT:   call void @__pas_write_int(ptr [[F2]], i32 7, i32 0)
+; CHECK-NEXT:   call void @__pas_write_int(ptr [[F2]], i64 7, i32 0)
 ; CHECK-NEXT:   call void @__pas_writeln(ptr [[F2]])
 ; Every function ends in one exit block (the target of TP's `exit`).
 ; CHECK-NEXT:   br label %exit

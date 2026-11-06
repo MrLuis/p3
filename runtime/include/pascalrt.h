@@ -4,7 +4,7 @@
  * itself (src/codegen/CodeGen.cpp); this header documents the ABI and lets
  * the runtime be tested from C. Keep both in sync.
  *
- * Pascal integer = int32_t, char = char (8-bit), real = double,
+ * Pascal integer = int32_t (int64 = int64_t), char = char (8-bit), real = double,
  * field width 0 = "default", runtime errors exit with status 2.
  *
  *===------------------------------------------------------------------------===*/
@@ -72,7 +72,7 @@ void __pas_write_elem(PasFile *f, const void *src);
  * booleans longer than their field width are truncated; numbers never are. */
 void __pas_write_str(PasFile *f, const char *s, int64_t len, int32_t width);
 void __pas_write_char(PasFile *f, char c, int32_t width);
-void __pas_write_int(PasFile *f, int32_t v, int32_t width);
+void __pas_write_int(PasFile *f, int64_t v, int32_t width); /* any integer type */
 void __pas_write_bool(PasFile *f, int32_t b, int32_t width); /* true/false */
 /* frac < 0: floating-point form " d.dddE+ddd" (default width 22); frac >= 0:
  * fixed-point form with that many fraction digits (ISO 6.9.3.4). */
@@ -83,6 +83,7 @@ void __pas_writeln(PasFile *f);
  * Integers and reals skip blanks and line ends first. A line end reads as
  * ' ' (eoln is then true). Reading past the end is a runtime error. */
 int32_t __pas_read_int(PasFile *f);
+int64_t __pas_read_int64(PasFile *f); /* int64 and unsigned targets */
 double __pas_read_real(PasFile *f);
 char __pas_read_char(PasFile *f);
 void __pas_readln(PasFile *f);

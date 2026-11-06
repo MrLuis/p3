@@ -12,6 +12,19 @@ bool Type::isIntegerLike() const {
   return T->isInteger();
 }
 
+bool Type::isSignedIntegerLike() const {
+  const Type *T = this;
+  while (auto *S = llvm::dyn_cast<SubrangeType>(T))
+    T = S->getHost();
+  auto *I = llvm::dyn_cast<IntegerType>(T);
+  return I && I->isSigned();
+}
+
+bool pcc::haveSameOrdinalHost(Type *A, Type *B) {
+  Type *X = A->getBase(), *Y = B->getBase();
+  return X == Y || (X->isInteger() && Y->isInteger());
+}
+
 Type *Type::getBase() {
   Type *T = this;
   while (auto *S = llvm::dyn_cast<SubrangeType>(T))
@@ -70,7 +83,15 @@ FieldDecl *RecordType::findField(llvm::StringRef Name) const {
 
 OrdinalBounds pcc::getOrdinalBounds(Type *T) {
   switch (T->getKind()) {
-  case Type::TK_Integer: return {INT32_MIN, INT32_MAX};
+  case Type::TK_Integer: {
+    auto *I = llvm::cast<IntegerType>(T);
+    unsigned Bits = I->getBits();
+    if (I->isSigned())
+      return {Bits == 64 ? INT64_MIN : -(int64_t(1) << (Bits - 1)),
+              Bits == 64 ? INT64_MAX : (int64_t(1) << (Bits - 1)) - 1};
+    // Unsigned 64-bit (qword) is not supported: bounds must fit int64.
+    return {0, (int64_t(1) << Bits) - 1};
+  }
   case Type::TK_Char:    return {0, 255};
   case Type::TK_Boolean: return {0, 1};
   case Type::TK_Enum:
@@ -103,7 +124,8 @@ std::string Type::getName() const {
     return DeclName.str();
   switch (Kind) {
   case TK_Error:   return "<error>";
-  case TK_Integer: return "integer";
+  case TK_Integer:
+    return llvm::cast<IntegerType>(this)->getIntegerName().str();
   case TK_Real:    return "real";
   case TK_Boolean: return "boolean";
   case TK_Char:    return "char";

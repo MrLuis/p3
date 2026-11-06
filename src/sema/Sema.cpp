@@ -113,8 +113,20 @@ class Checker : public StmtVisitor<Checker>,
     Ty("boolean", Ctx.getBooleanType());
     Ty("char", Ctx.getCharType());
     Ty("text", Ctx.getTextType());
-    if (!isISO())
+    if (!isISO()) {
       Ty("pointer", Ctx.getUntypedPointerType());
+      // Turbo/FPC integer types; longint is integer (32-bit), and double is
+      // real.
+      Ty("longint", Ctx.getIntegerType());
+      Ty("int64", Ctx.getInt64Type());
+      Ty("cardinal", Ctx.getCardinalType());
+      Ty("longword", Ctx.getCardinalType());
+      Ty("byte", Ctx.getByteType());
+      Ty("word", Ctx.getWordType());
+      Ty("shortint", Ctx.getShortIntType());
+      Ty("smallint", Ctx.getSmallIntType());
+      Ty("double", Ctx.getRealType());
+    }
 
     // The standard files (ISO 7185 6.10).
     for (llvm::StringRef N : {"input", "output"}) {
@@ -215,6 +227,44 @@ class Checker : public StmtVisitor<Checker>,
 
   static std::string quoted(Type *T) { return "'" + T->getName() + "'"; }
 
+  //===--------------------------------------------------------------------===//
+  // Integer types (Turbo/FPC rules; ISO has only `integer`)
+  //===--------------------------------------------------------------------===//
+
+  /// Integer operands narrower than 32 bits widen to integer.
+  Type *promoteInteger(Type *T) {
+    auto *I = llvm::cast<IntegerType>(T->getBase());
+    return I->getBits() < 32 ? Ctx.getIntegerType() : I;
+  }
+
+  /// Is E a constant that a cardinal can hold?
+  bool isCardinalConstant(Expr *E) {
+    auto C = fold(E);
+    return C && C->Value.K == ConstValue::Ordinal && C->Value.Int >= 0 &&
+           C->Value.Int <= UINT32_MAX;
+  }
+
+  /// The type integer operands LE and RE are converted to for an operator:
+  /// int64 if either is int64; cardinal if both are unsigned (or the other
+  /// is a constant that fits); int64 when cardinal meets a signed value
+  /// (so no value is lost, as in FPC); integer otherwise.
+  Type *integerOperandType(Expr *LE, Type *L, Expr *RE, Type *R) {
+    Type *PL = promoteInteger(L), *PR = promoteInteger(R);
+    Type *I64 = Ctx.getInt64Type(), *Card = Ctx.getCardinalType();
+    if (PL == I64 || PR == I64)
+      return I64;
+    if (PL == Card && PR == Card)
+      return Card;
+    if (PL == Card || PR == Card) {
+      Expr *Other = PL == Card ? RE : LE;
+      Type *OtherTy = PL == Card ? R : L;
+      if (!OtherTy->isSignedIntegerLike() || isCardinalConstant(Other))
+        return Card;
+      return I64;
+    }
+    return Ctx.getIntegerType();
+  }
+
   /// Type-checks E once (later calls return the cached type).
   Type *check(Expr *E) {
     if (Type *Cached = E->getType())
@@ -242,10 +292,10 @@ class Checker : public StmtVisitor<Checker>,
     if (A->isSet() && B->isSet()) {
       auto *SA = llvm::cast<SetType>(A), *SB = llvm::cast<SetType>(B);
       return SA->isEmptySet() || SB->isEmptySet() ||
-             SA->getElementType()->getBase() == SB->getElementType()->getBase();
+             haveSameOrdinalHost(SA->getElementType(), SB->getElementType());
     }
     if (A->isOrdinal() && B->isOrdinal())
-      return A->getBase() == B->getBase();
+      return haveSameOrdinalHost(A, B);
     if (A->isStringType() && B->isStringType())
       return A->getStringLength() == B->getStringLength();
     return false;
@@ -266,7 +316,7 @@ class Checker : public StmtVisitor<Checker>,
     if (Target->isSet() && Value->isSet())
       return areCompatible(Target, Value); // range-checked at runtime
     if (Target->isOrdinal() && Value->isOrdinal())
-      return Target->getBase() == Value->getBase(); // range-checked at runtime
+      return haveSameOrdinalHost(Target, Value); // range-checked at runtime
     if (Target->isStringType() && Value->isStringType() &&
         !Target->isStringLiteral())
       return Target->getStringLength() == Value->getStringLength();
@@ -348,7 +398,8 @@ class Checker : public StmtVisitor<Checker>,
       case UnaryOp::Minus:
         if (V->Value.K == ConstValue::Real)
           return Constant{T, ConstValue::real(-V->Value.RealVal)};
-        return Constant{T, ConstValue::ordinal(-V->Value.Int)};
+        return Constant{T, ConstValue::ordinal(static_cast<int64_t>(
+                               0 - static_cast<uint64_t>(V->Value.Int)))};
       case UnaryOp::Not:
         return Constant{T, ConstValue::ordinal(!V->Value.Int)};
       }
@@ -365,16 +416,21 @@ class Checker : public StmtVisitor<Checker>,
       double X = asReal(*L), Y = asReal(*R);
       auto Ord = [&](int64_t V) { return Constant{T, ConstValue::ordinal(V)}; };
       auto Real = [&](double V) { return Constant{T, ConstValue::real(V)}; };
+      // Wrap around in 64 bits (no undefined behavior); results that do not
+      // fit their type are reported by evaluateConstant.
+      auto UA = static_cast<uint64_t>(A), UC = static_cast<uint64_t>(C);
+      bool Wide = T->isIntegerLike() &&
+                  llvm::cast<IntegerType>(T->getBase())->getBits() == 64;
       switch (B->getOp()) {
-      case BinaryOp::Add: return IsReal ? Real(X + Y) : Ord(A + C);
-      case BinaryOp::Sub: return IsReal ? Real(X - Y) : Ord(A - C);
-      case BinaryOp::Mul: return IsReal ? Real(X * Y) : Ord(A * C);
+      case BinaryOp::Add: return IsReal ? Real(X + Y) : Ord(static_cast<int64_t>(UA + UC));
+      case BinaryOp::Sub: return IsReal ? Real(X - Y) : Ord(static_cast<int64_t>(UA - UC));
+      case BinaryOp::Mul: return IsReal ? Real(X * Y) : Ord(static_cast<int64_t>(UA * UC));
       case BinaryOp::RealDiv:
         if (Y == 0)
           return std::nullopt;
         return Real(X / Y);
       case BinaryOp::IntDiv:
-        if (C == 0)
+        if (C == 0 || (A == INT64_MIN && C == -1))
           return std::nullopt;
         return Ord(A / C);
       case BinaryOp::Mod:
@@ -385,8 +441,12 @@ class Checker : public StmtVisitor<Checker>,
       case BinaryOp::Or:  return T->isBoolean() ? Ord(A || C) : Ord(A | C);
       case BinaryOp::Xor: return Ord(A ^ C);
       case BinaryOp::Shl:
+        if (Wide)
+          return Ord(static_cast<int64_t>(UA << (C & 63)));
         return Ord(static_cast<int32_t>(static_cast<uint32_t>(A) << (C & 31)));
       case BinaryOp::Shr:
+        if (Wide)
+          return Ord(static_cast<int64_t>(UA >> (C & 63)));
         return Ord(static_cast<int32_t>(static_cast<uint32_t>(A) >> (C & 31)));
       case BinaryOp::Eq:  return Ord(IsReal ? X == Y : A == C);
       case BinaryOp::Ne:  return Ord(IsReal ? X != Y : A != C);
@@ -448,11 +508,20 @@ class Checker : public StmtVisitor<Checker>,
                   "constant expressions are a Turbo/Free Pascal extension; "
                   "use --mode=tp",
                   {E->getRange()});
-    if (C->Value.K == ConstValue::Ordinal && C->Ty->isIntegerLike() &&
-        (C->Value.Int > PascalMaxInt || C->Value.Int < -PascalMaxInt - 1)) {
-      Diags.error(E->getBeginLoc(), "constant value is out of range for integer",
-                  {E->getRange()});
-      return std::nullopt;
+    if (C->Value.K == ConstValue::Ordinal && C->Ty->isIntegerLike()) {
+      OrdinalBounds Bd = getOrdinalBounds(C->Ty->getBase());
+      if (C->Value.Int < Bd.Lo || C->Value.Int > Bd.Hi) {
+        // Turbo/FPC: integer constant expressions widen to int64.
+        if (!isISO() && C->Ty->getBase()->isSignedIntegerLike()) {
+          C->Ty = Ctx.getInt64Type();
+          return C;
+        }
+        Diags.error(E->getBeginLoc(),
+                    "constant value is out of range for " +
+                        C->Ty->getBase()->getName(),
+                    {E->getRange()});
+        return std::nullopt;
+      }
     }
     return C;
   }
@@ -536,7 +605,7 @@ class Checker : public StmtVisitor<Checker>,
                     {SS->getRange()});
         return errorType();
       }
-      if (Lo->Ty->getBase() != Hi->Ty->getBase()) {
+      if (!haveSameOrdinalHost(Lo->Ty, Hi->Ty)) {
         Diags.error(SS->getBeginLoc(),
                     "subrange bounds have different types (" +
                         quoted(Lo->Ty->getBase()) + " and " +
@@ -553,8 +622,13 @@ class Checker : public StmtVisitor<Checker>,
                     {SS->getRange()});
         return errorType();
       }
-      return Ctx.create<SubrangeType>(Lo->Ty->getBase(), Lo->Value.Int,
-                                      Hi->Value.Int);
+      // Integer bounds of different types (1..5000000000): the wider host.
+      Type *Host = Lo->Ty->getBase();
+      if (Host->isInteger() &&
+          llvm::cast<IntegerType>(Hi->Ty->getBase())->getBits() >
+              llvm::cast<IntegerType>(Host)->getBits())
+        Host = Hi->Ty->getBase();
+      return Ctx.create<SubrangeType>(Host, Lo->Value.Int, Hi->Value.Int);
     }
 
     case TypeSpec::TS_Array: {
@@ -572,10 +646,11 @@ class Checker : public StmtVisitor<Checker>,
                           quoted(Idx),
                       {IdxTS->getRange()});
           OK = false;
-        } else if (Idx->isInteger()) {
+        } else if (Idx->isInteger() &&
+                   llvm::cast<IntegerType>(Idx)->getBits() >= 32) {
           Diags.error(IdxTS->getBeginLoc(),
-                      "array index type 'integer' is too large; use a "
-                      "subrange such as 1..100",
+                      "array index type " + quoted(Idx) +
+                          " is too large; use a subrange such as 1..100",
                       {IdxTS->getRange()});
           OK = false;
         }
@@ -1667,13 +1742,14 @@ class Checker : public StmtVisitor<Checker>,
     case BuiltinKind::Sqr:
       if (!Expect(T->isNumeric(), "a numeric"))
         return errorType();
-      return T->isReal() ? Ctx.getRealType() : Ctx.getIntegerType();
+      return T->isReal() ? Ctx.getRealType() : promoteInteger(T);
     case BuiltinKind::Odd:
       return Expect(T->isIntegerLike(), "an integer") ? Ctx.getBooleanType()
                                                       : errorType();
     case BuiltinKind::Ord:
-      return Expect(T->isOrdinal(), "an ordinal") ? Ctx.getIntegerType()
-                                                  : errorType();
+      if (!Expect(T->isOrdinal(), "an ordinal"))
+        return errorType();
+      return T->isIntegerLike() ? promoteInteger(T) : Ctx.getIntegerType();
     case BuiltinKind::Chr:
       return Expect(T->isIntegerLike(), "an integer") ? Ctx.getCharType()
                                                       : errorType();
@@ -1686,8 +1762,10 @@ class Checker : public StmtVisitor<Checker>,
                                                  : errorType();
     case BuiltinKind::Trunc:
     case BuiltinKind::Round:
-      return Expect(T->isNumeric(), "a real") ? Ctx.getIntegerType()
-                                              : errorType();
+      if (!Expect(T->isNumeric(), "a real"))
+        return errorType();
+      // Turbo/FPC: the result is an int64.
+      return isISO() ? Ctx.getIntegerType() : Ctx.getInt64Type();
     default:
       llvm_unreachable("not a builtin function");
     }
@@ -2099,10 +2177,15 @@ public:
   //===--------------------------------------------------------------------===//
 
   Type *visitIntegerLiteralExpr(IntegerLiteralExpr *E) {
-    if (E->getValue() > static_cast<uint64_t>(PascalMaxInt))
-      Diags.error(E->getBeginLoc(),
-                  "integer literal exceeds maxint (2147483647)",
-                  {E->getRange()});
+    if (E->getValue() <= static_cast<uint64_t>(PascalMaxInt))
+      return Ctx.getIntegerType();
+    // Turbo/FPC: larger literals are int64 constants.
+    if (!isISO() && E->getValue() <= static_cast<uint64_t>(INT64_MAX))
+      return Ctx.getInt64Type();
+    Diags.error(E->getBeginLoc(),
+                isISO() ? "integer literal exceeds maxint (2147483647)"
+                        : "integer literal exceeds the range of int64",
+                {E->getRange()});
     return Ctx.getIntegerType();
   }
 
@@ -2200,10 +2283,16 @@ public:
     if (E->getOp() == UnaryOp::Not) {
       if (T->getBase()->isBoolean())
         return Ctx.getBooleanType();
-      if (!isISO() && T->isIntegerLike()) // Turbo/FPC: bitwise not
-        return Ctx.getIntegerType();
+      if (!isISO() && T->isIntegerLike()) // Turbo/FPC: bitwise not, same type
+        return T->getBase();
     } else if (T->isNumeric()) {
-      return T->isReal() ? Ctx.getRealType() : Ctx.getIntegerType();
+      if (T->isReal())
+        return Ctx.getRealType();
+      Type *P = promoteInteger(T);
+      // -cardinal can be negative (FPC: int64).
+      return E->getOp() == UnaryOp::Minus && P == Ctx.getCardinalType()
+                 ? Ctx.getInt64Type()
+                 : P;
     }
     Diags.error(E->getOpLoc(),
                 llvm::Twine("invalid operand to '") + getOpSpelling(E->getOp()) +
@@ -2247,34 +2336,47 @@ public:
         (areCompatible(L, R) || (L->isNil() && R->isNil())))
       return Ctx.getBooleanType();
 
+    bool BothIntegers = L->isIntegerLike() && R->isIntegerLike();
+    auto IntegerOp = [&]() {
+      Type *T = integerOperandType(E->getLHS(), L, E->getRHS(), R);
+      E->setOperandType(T);
+      return T;
+    };
     switch (Op) {
     case BinaryOp::Add: case BinaryOp::Sub: case BinaryOp::Mul:
+      if (BothIntegers)
+        return IntegerOp();
       if (L->isNumeric() && R->isNumeric())
-        return L->isReal() || R->isReal() ? Ctx.getRealType()
-                                          : Ctx.getIntegerType();
+        return Ctx.getRealType();
       break;
     case BinaryOp::RealDiv:
       if (L->isNumeric() && R->isNumeric())
         return Ctx.getRealType();
       break;
     case BinaryOp::IntDiv: case BinaryOp::Mod:
-      if (L->isIntegerLike() && R->isIntegerLike())
-        return Ctx.getIntegerType();
+      if (BothIntegers)
+        return IntegerOp();
       break;
     case BinaryOp::And: case BinaryOp::Or: case BinaryOp::Xor:
       if (L->getBase()->isBoolean() && R->getBase()->isBoolean() &&
           (Op != BinaryOp::Xor || !isISO()))
         return Ctx.getBooleanType();
       // Turbo/FPC: bitwise on integers.
-      if (!isISO() && L->isIntegerLike() && R->isIntegerLike())
-        return Ctx.getIntegerType();
+      if (!isISO() && BothIntegers)
+        return IntegerOp();
       break;
     case BinaryOp::Shl: case BinaryOp::Shr:
-      if (L->isIntegerLike() && R->isIntegerLike())
-        return Ctx.getIntegerType();
+      if (BothIntegers) { // the left operand's (promoted) type
+        E->setOperandType(promoteInteger(L));
+        return E->getOperandType();
+      }
       break;
     case BinaryOp::Eq: case BinaryOp::Ne: case BinaryOp::Lt:
     case BinaryOp::Le: case BinaryOp::Gt: case BinaryOp::Ge:
+      if (BothIntegers) {
+        IntegerOp();
+        return Ctx.getBooleanType();
+      }
       if (L->isNumeric() && R->isNumeric())
         return Ctx.getBooleanType();
       if (L->isOrdinal() && R->isOrdinal() && areCompatible(L, R))
@@ -2293,7 +2395,7 @@ public:
     case BinaryOp::In:
       if (L->isOrdinal() && R->isSet() &&
           (llvm::cast<SetType>(R)->isEmptySet() ||
-           llvm::cast<SetType>(R)->getElementType()->getBase() == L->getBase()))
+           haveSameOrdinalHost(llvm::cast<SetType>(R)->getElementType(), L)))
         return Ctx.getBooleanType();
       break;
     }
@@ -2480,7 +2582,7 @@ public:
         }
         if (!Base) {
           Base = T->getBase();
-        } else if (T->getBase() != Base) {
+        } else if (!haveSameOrdinalHost(T, Base)) {
           Diags.error(X->getBeginLoc(),
                       "set element of type " + quoted(T) +
                           " does not match earlier elements of type " +

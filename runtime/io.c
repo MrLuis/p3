@@ -288,10 +288,10 @@ void __pas_write_char(PasFile *f, char c, int32_t width) {
   putc((unsigned char)c, f->fp);
 }
 
-void __pas_write_int(PasFile *f, int32_t v, int32_t width) {
+void __pas_write_int(PasFile *f, int64_t v, int32_t width) {
   need_generate(f);
-  char buf[16];
-  int n = snprintf(buf, sizeof buf, "%" PRId32, v);
+  char buf[24];
+  int n = snprintf(buf, sizeof buf, "%" PRId64, v);
   pad(f, width - n); /* integers are never truncated */
   fwrite(buf, 1, (size_t)n, f->fp);
 }
@@ -370,7 +370,8 @@ static void skip_blanks(PasFile *f, const char *what) {
   }
 }
 
-int32_t __pas_read_int(PasFile *f) {
+/* Reads an integer whose magnitude is at most limit (+1 if negative). */
+static int64_t read_integer(PasFile *f, uint64_t limit) {
   need_inspect(f);
   skip_blanks(f, "an integer");
   int negative = 0;
@@ -382,15 +383,24 @@ int32_t __pas_read_int(PasFile *f) {
   }
   if (c < '0' || c > '9' || f->eoln)
     file_error(f, "invalid integer in input");
-  int64_t value = 0;
+  uint64_t value = 0;
   while (c >= '0' && c <= '9' && !f->eoln) {
-    value = value * 10 + (c - '0');
-    if (value > (int64_t)INT32_MAX + negative)
+    unsigned d = (unsigned)(c - '0');
+    if (value > (limit + (uint64_t)negative - d) / 10)
       file_error(f, "integer in input is out of range");
+    value = value * 10 + d;
     advance(f);
     c = peek(f);
   }
-  return (int32_t)(negative ? -value : value);
+  return negative ? (int64_t)(0 - value) : (int64_t)value;
+}
+
+int32_t __pas_read_int(PasFile *f) {
+  return (int32_t)read_integer(f, INT32_MAX);
+}
+
+int64_t __pas_read_int64(PasFile *f) {
+  return read_integer(f, INT64_MAX);
 }
 
 double __pas_read_real(PasFile *f) {
