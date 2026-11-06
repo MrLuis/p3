@@ -8,6 +8,8 @@
 #include "llvm/ADT/SmallString.h"
 #include "llvm/ADT/StringExtras.h"
 #include "llvm/Support/Error.h"
+#include "llvm/Support/FileSystem.h"
+#include "llvm/Support/Path.h"
 
 using namespace pcc;
 
@@ -60,9 +62,66 @@ void Lexer::skipBlockComment(unsigned OpenLen, llvm::StringRef Close) {
   if (Rest.starts_with("$"))
     handleDirective(Start, Rest.slice(1, Pos));
   Cur = Rest.data() + Pos + Close.size();
+  if (!PendingInclude.empty())
+    enterPendingInclude(); // the included text follows the comment
+}
+
+void Lexer::enterPendingInclude() {
+  std::string Name = std::move(PendingInclude);
+  PendingInclude.clear();
+  if (IncludeStack.size() >= 16) {
+    Diags.error(PendingIncludeLoc, "include files are nested too deeply");
+    return;
+  }
+  // Next to the including file, then the -I directories.
+  llvm::SmallVector<std::string, 4> Dirs;
+  FileID FID = IncludeSM->getFileID(locOf(BufBegin));
+  Dirs.push_back(
+      llvm::sys::path::parent_path(IncludeSM->getFilename(FID)).str());
+  Dirs.append(IncludeDirs.begin(), IncludeDirs.end());
+  std::string Found;
+  for (const std::string &Dir : Dirs) {
+    llvm::SmallString<256> Path(Dir);
+    llvm::sys::path::append(Path, Name);
+    if (llvm::sys::fs::is_regular_file(Path)) {
+      Found = std::string(Path);
+      break;
+    }
+  }
+  if (Found.empty()) {
+    Diags.error(PendingIncludeLoc,
+                "cannot find include file '" + Name +
+                    "' (looked next to this file and in -I directories)");
+    return;
+  }
+  auto IncOrErr = IncludeSM->loadFile(Found);
+  if (!IncOrErr) {
+    Diags.error(PendingIncludeLoc, "cannot open include file '" + Found + "'");
+    return;
+  }
+  IncludeStack.push_back({BufBegin, BufEnd, Cur});
+  llvm::StringRef Buf = IncludeSM->getBufferData(*IncOrErr);
+  Cur = BufBegin = Buf.data();
+  BufEnd = Buf.data() + Buf.size();
 }
 
 void Lexer::handleDirective(const char *Start, llvm::StringRef Text) {
+  // {$I file} / {$INCLUDE file}: include a source file.
+  llvm::StringRef Word = Text.take_while(llvm::isAlpha);
+  llvm::StringRef Arg = Text.drop_front(Word.size()).trim();
+  if ((Word.equals_insensitive("i") || Word.equals_insensitive("include")) &&
+      !Arg.empty() && Arg != "+" && Arg != "-") {
+    if (Arg.size() >= 2 && Arg.front() == '\'' && Arg.back() == '\'')
+      Arg = Arg.drop_front().drop_back();
+    if (!IncludeSM) {
+      Diags.warning(locOf(Start), "include directive ignored here");
+      return;
+    }
+    PendingInclude = Arg.str();
+    PendingIncludeLoc = locOf(Start);
+    return;
+  }
+
   // Switch list: letter followed by + or -, comma separated: $R-,Q+
   llvm::SmallVector<llvm::StringRef, 4> Parts;
   Text.split(Parts, ',');
@@ -298,6 +357,13 @@ void Lexer::lex(Token &T) {
     const char *Start = Cur;
 
     if (Cur >= BufEnd) {
+      if (!IncludeStack.empty()) { // back to the including file
+        IncludeFrame F = IncludeStack.pop_back_val();
+        BufBegin = F.BufBegin;
+        BufEnd = F.BufEnd;
+        Cur = F.Cur;
+        continue;
+      }
       formToken(T, tok::eof, Start);
       return;
     }

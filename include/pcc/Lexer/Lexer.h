@@ -18,6 +18,11 @@
 #include "pcc/Basic/LangOptions.h"
 #include "pcc/Basic/SourceLocation.h"
 #include "pcc/Lexer/Token.h"
+#include "llvm/ADT/ArrayRef.h"
+#include "llvm/ADT/SmallVector.h"
+
+#include <string>
+#include <vector>
 
 namespace pcc {
 
@@ -35,6 +40,17 @@ class Lexer {
   const char *BufEnd;
   const char *Cur;
   CheckDirectives *Directives = nullptr;
+
+  // {$I file} (Turbo/FPC): the including buffers, innermost last.
+  struct IncludeFrame {
+    const char *BufBegin, *BufEnd, *Cur;
+  };
+  llvm::SmallVector<IncludeFrame, 4> IncludeStack;
+  SourceManager *IncludeSM = nullptr; ///< null: includes are not supported
+  std::vector<std::string> IncludeDirs;
+  std::string PendingInclude;          ///< file named by the last {$I ...}
+  SourceLocation PendingIncludeLoc;
+  void enterPendingInclude();
 
   void handleDirective(const char *Start, llvm::StringRef Text);
 
@@ -62,6 +78,13 @@ public:
 
   /// Where to record {$R±} / {$Q±} switches (null: ignore directives).
   void setDirectives(CheckDirectives *D) { Directives = D; }
+
+  /// Enables {$I file}: files are searched next to the including file,
+  /// then in Dirs, and loaded into SM.
+  void setIncludeSupport(SourceManager &SM, llvm::ArrayRef<std::string> Dirs) {
+    IncludeSM = &SM;
+    IncludeDirs.assign(Dirs.begin(), Dirs.end());
+  }
 };
 
 } // namespace pcc

@@ -329,6 +329,21 @@ public:
   static bool classof(const Expr *E) { return E->getKind() == EK_Aggregate; }
 };
 
+/// A call through a procedural value that is not a plain name (Turbo/FPC):
+/// passes[i].run(v). Calls through procedural variables and parameters
+/// named directly are CallExpr / ProcCallStmt.
+class IndirectCallExpr final : public Expr {
+  Expr *Callee;
+  llvm::ArrayRef<Expr *> Args;
+
+public:
+  IndirectCallExpr(SourceRange R, Expr *Callee, llvm::ArrayRef<Expr *> Args)
+      : Expr(EK_IndirectCall, R), Callee(Callee), Args(Args) {}
+  Expr *getCallee() const { return Callee; }
+  llvm::ArrayRef<Expr *> getArgs() const { return Args; }
+  static bool classof(const Expr *E) { return E->getKind() == EK_IndirectCall; }
+};
+
 //===----------------------------------------------------------------------===//
 // Statements
 //===----------------------------------------------------------------------===//
@@ -535,6 +550,19 @@ public:
   llvm::ArrayRef<WithContext *> getRecords() const { return Records; }
   Stmt *getBody() const { return Body; }
   static bool classof(const Stmt *S) { return S->getKind() == SK_With; }
+};
+
+/// A procedure call through a procedural value that is not a plain name:
+/// `handlers[k](x);`, `r.p;` (Turbo/FPC). Call holds the callee and
+/// arguments.
+class IndirectCallStmt final : public Stmt {
+  IndirectCallExpr *Call;
+
+public:
+  IndirectCallStmt(SourceRange R, IndirectCallExpr *Call)
+      : Stmt(SK_IndirectCall, R), Call(Call) {}
+  IndirectCallExpr *getCall() const { return Call; }
+  static bool classof(const Stmt *S) { return S->getKind() == SK_IndirectCall; }
 };
 
 /// 10: Body

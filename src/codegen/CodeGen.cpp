@@ -1412,13 +1412,42 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
     return emitCallTo(Functions[R], staticLinkFor(R), R->getParams(), Args);
   }
 
-  /// Call through a procedural / functional parameter.
+  /// Call through a procedural / functional parameter or variable.
   llvm::Value *emitIndirectCall(VarDecl *V, llvm::ArrayRef<Expr *> Args) {
     auto *RT = llvm::cast<RoutineType>(V->getType());
     llvm::Value *Pair = B.CreateLoad(memType(RT), varAddress(V));
+    // Parameters always hold a routine; variables may be nil.
+    return emitCallThrough(Pair, RT, Args, V->isParam() ? SourceLocation()
+                                                          : V->getLocation());
+  }
+
+  /// Calls the {function, static link} pair Pair of type RT. NilCheckLoc:
+  /// where to report a nil procedural value (invalid: no check).
+  llvm::Value *emitCallThrough(llvm::Value *Pair, RoutineType *RT,
+                               llvm::ArrayRef<Expr *> Args,
+                               SourceLocation NilCheckLoc) {
+    llvm::Value *Fn = B.CreateExtractValue(Pair, 0);
+    if (NilCheckLoc.isValid() && rangeChecks(NilCheckLoc))
+      emitRuntimeCheck(B.CreateIsNull(Fn), "call through a nil procedural value",
+                       NilCheckLoc);
     llvm::FunctionType *FTy = routineFnType(RT->getParams(), RT->getResult());
-    return emitCallTo({FTy, B.CreateExtractValue(Pair, 0)},
-                      B.CreateExtractValue(Pair, 1), RT->getParams(), Args);
+    return emitCallTo({FTy, Fn}, B.CreateExtractValue(Pair, 1), RT->getParams(),
+                      Args);
+  }
+
+  /// A procedural value of type T (Turbo/FPC): @routine, nil, or a
+  /// procedural variable / field / element.
+  llvm::Value *emitRoutinePair(Expr *E, Type *T) {
+    if (llvm::isa<NilExpr>(E))
+      return llvm::Constant::getNullValue(memType(T));
+    if (auto *A = llvm::dyn_cast<AddrOfExpr>(E)) {
+      auto *R = llvm::cast<RoutineDecl>(
+          llvm::cast<NameRefExpr>(A->getOperand())->getDecl());
+      llvm::Value *Pair = llvm::UndefValue::get(memType(T));
+      Pair = B.CreateInsertValue(Pair, Functions[R], 0);
+      return B.CreateInsertValue(Pair, staticLinkFor(R), 1);
+    }
+    return B.CreateLoad(memType(T), emitAddress(E));
   }
 
   //===--------------------------------------------------------------------===//
@@ -2053,6 +2082,11 @@ public:
       copyAggregate(Dst, emitAddress(Value), TT);
       return;
     }
+    if (llvm::isa<RoutineType>(TT)) { // procedural variable (Turbo/FPC)
+      llvm::Value *Pair = emitRoutinePair(Value, TT);
+      B.CreateStore(Pair, emitAddress(Target));
+      return;
+    }
     llvm::Value *V = convertForAssign(visitExpr(Value), Value->getType(), TT,
                                       Value->getBeginLoc());
     storeScalar(emitAddress(Target), V, TT);
@@ -2100,6 +2134,19 @@ public:
     case BuiltinKind::Break:
     case BuiltinKind::Continue:
     case BuiltinKind::Exit: {
+      if (!S->getArgs().empty()) { // exit(value): set the result first
+        VarDecl *Result = CurRoutine->getResultVar();
+        Expr *Value = S->getArgs()[0];
+        Type *RT = Result->getType();
+        llvm::Value *Addr = varAddress(Result);
+        if (auto *SS = llvm::dyn_cast<ShortStringType>(RT))
+          emitStringAssign(Addr, SS, Value);
+        else
+          storeScalar(Addr,
+                      convertForAssign(visitExpr(Value), Value->getType(), RT,
+                                       Value->getBeginLoc()),
+                      RT);
+      }
       llvm::BasicBlock *Target =
           BD->getBuiltinKind() == BuiltinKind::Exit       ? ExitBlock
           : BD->getBuiltinKind() == BuiltinKind::Continue ? Loops.back().first
@@ -2225,6 +2272,10 @@ public:
     default:
       llvm_unreachable("Sema only allows procedures here");
     }
+  }
+
+  void visitIndirectCallStmt(IndirectCallStmt *S) {
+    visitIndirectCallExpr(S->getCall());
   }
 
   void visitIfStmt(IfStmt *S) {
@@ -2458,8 +2509,11 @@ public:
         (llvm::isa<VarDecl>(D) || llvm::isa<FieldDecl>(D)))
       return emitAddress(E);
     if (auto *V = llvm::dyn_cast<VarDecl>(D);
-        V && llvm::isa_and_nonnull<RoutineType>(V->getType()))
+        V && llvm::isa_and_nonnull<RoutineType>(V->getType())) {
+      if (llvm::isa<RoutineType>(E->getType())) // the value itself (TP)
+        return B.CreateLoad(memType(V->getType()), varAddress(V));
       return emitIndirectCall(V, {}); // parameterless functional parameter
+    }
     if (llvm::isa<VarDecl>(D) || llvm::isa<FieldDecl>(D))
       return loadScalar(emitAddress(E), E->getType(), E->getName().Name);
     if (auto *R = llvm::dyn_cast<RoutineDecl>(D))
@@ -2584,6 +2638,13 @@ public:
 
   llvm::Value *visitFormattedExpr(FormattedExpr *) {
     llvm_unreachable("formatted expressions are handled by emitWriteArg");
+  }
+
+  llvm::Value *visitIndirectCallExpr(IndirectCallExpr *E) {
+    Expr *Callee = E->getCallee();
+    auto *RT = llvm::cast<RoutineType>(Callee->getType());
+    llvm::Value *Pair = B.CreateLoad(memType(RT), emitAddress(Callee));
+    return emitCallThrough(Pair, RT, E->getArgs(), Callee->getBeginLoc());
   }
 
   llvm::Value *visitAggregateExpr(AggregateExpr *) {

@@ -324,6 +324,14 @@ class Checker : public StmtVisitor<Checker>,
       return true; // truncated to the target's length at runtime
     if (Target->isSet() && Value->isSet())
       return areCompatible(Target, Value); // range-checked at runtime
+    // Procedural values (Turbo/FPC): congruent headings, or nil.
+    if (auto *TR = llvm::dyn_cast<RoutineType>(Target)) {
+      if (Value->isNil())
+        return true;
+      auto *VR = llvm::dyn_cast<RoutineType>(Value);
+      return VR && congruent(TR->getParams(), TR->getResult(), VR->getParams(),
+                             VR->getResult());
+    }
     if (Target->isOrdinal() && Value->isOrdinal())
       return haveSameOrdinalHost(Target, Value); // range-checked at runtime
     if (Target->isStringType() && Value->isStringType() &&
@@ -1498,7 +1506,8 @@ class Checker : public StmtVisitor<Checker>,
                       "': expected " + llvm::Twine(Params.size()) + ", got " +
                       llvm::Twine(Args.size()),
                   {CallRange});
-      noteDeclaredHere(R);
+      if (R)
+        noteDeclaredHere(R);
       for (Expr *A : Args)
         if (!llvm::isa<FormattedExpr>(A))
           check(A);
@@ -2346,10 +2355,31 @@ public:
                       "'" + Callee.Spelling + "' is only allowed inside a loop",
                       {Callee.getRange()});
         return;
-      case BuiltinKind::Exit:
-        if (!S->getArgs().empty())
-          Diags.error(Callee.Loc, "'exit' takes no arguments", {S->getRange()});
+      case BuiltinKind::Exit: {
+        auto Args = S->getArgs();
+        if (Args.empty())
+          return;
+        // exit(value) (Turbo/FPC): sets the function result, then exits.
+        if (Args.size() > 1 || !CurRoutine || !CurRoutine->isFunction()) {
+          Diags.error(Callee.Loc,
+                      Args.size() > 1
+                          ? "'exit' takes at most one argument"
+                          : "'exit' with a value is only allowed in a function",
+                      {S->getRange()});
+          for (Expr *A : Args)
+            check(A);
+          return;
+        }
+        Type *T = check(Args[0]);
+        Type *RT = CurRoutine->getResultType();
+        ResultAssigned.insert(CurRoutine);
+        if (!T->isError() && !RT->isError() && !isAssignable(RT, T))
+          Diags.error(Args[0]->getBeginLoc(),
+                      "cannot return a value of type " + quoted(T) +
+                          " from a function of type " + quoted(RT),
+                      {Args[0]->getRange()});
         return;
+      }
       case BuiltinKind::Inc: case BuiltinKind::Dec:
         return checkIncDec(S);
       case BuiltinKind::Delete: case BuiltinKind::Insert:
@@ -2428,6 +2458,15 @@ public:
     return errorType();
   }
 
+  void visitIndirectCallStmt(IndirectCallStmt *S) {
+    DirectSequence = nullptr;
+    IndirectCallExpr *Call = S->getCall();
+    if (RoutineType *RT = checkIndirectCallee(Call))
+      Call->setType(RT->isFunction() ? RT->getResult() : RT);
+    else
+      Call->setType(errorType());
+  }
+
   void visitAssignStmt(AssignStmt *S) {
     Expr *Target = S->getTarget();
     Type *TargetTy;
@@ -2443,7 +2482,7 @@ public:
       }
     }
 
-    Type *ValueTy = check(S->getValue());
+    Type *ValueTy = checkValueFor(TargetTy, S->getValue());
     if (TargetTy->isError() || ValueTy->isError())
       return;
     if (!checkModifiable(Target))
@@ -2990,6 +3029,58 @@ public:
 
   Type *visitNilExpr(NilExpr *) { return Ctx.getNilType(); }
 
+  /// Checks a value assigned to a target of type TargetTy. A procedural
+  /// variable named as the value of a procedural target is copied, not
+  /// called.
+  Type *checkValueFor(Type *TargetTy, Expr *Value) {
+    if (llvm::isa<RoutineType>(TargetTy))
+      if (auto *N = llvm::dyn_cast<NameRefExpr>(Value)) {
+        auto *V = llvm::dyn_cast_or_null<VarDecl>(Cur->lookup(N->getName().Name));
+        if (V && llvm::isa_and_nonnull<RoutineType>(V->getType())) {
+          N->setDecl(V);
+          N->setType(V->getType());
+          Used.insert(V);
+          return V->getType();
+        }
+      }
+    return check(Value);
+  }
+
+  /// The procedural type of a call through a designator, or null after a
+  /// diagnostic.
+  RoutineType *checkIndirectCallee(IndirectCallExpr *E) {
+    Type *T = check(E->getCallee());
+    if (T->isError())
+      return nullptr;
+    auto *RT = llvm::dyn_cast<RoutineType>(T);
+    if (!RT) {
+      Diags.error(E->getCallee()->getBeginLoc(),
+                  "called value of type " + quoted(T) +
+                      " is not a procedure or function",
+                  {E->getCallee()->getRange()});
+      for (Expr *A : E->getArgs())
+        check(A);
+      return nullptr;
+    }
+    Identifier Name;
+    Name.Spelling = "procedural value";
+    Name.Loc = E->getBeginLoc();
+    checkCallArgs(RT->getParams(), nullptr, Name, E->getArgs(), E->getRange());
+    return RT;
+  }
+
+  Type *visitIndirectCallExpr(IndirectCallExpr *E) {
+    RoutineType *RT = checkIndirectCallee(E);
+    if (!RT)
+      return errorType();
+    if (!RT->isFunction()) {
+      Diags.error(E->getBeginLoc(), "procedure does not return a value",
+                  {E->getRange()});
+      return errorType();
+    }
+    return RT->getResult();
+  }
+
   Type *visitAggregateExpr(AggregateExpr *E) {
     Diags.error(E->getBeginLoc(),
                 "a parenthesized list is only allowed as the value of a typed "
@@ -2999,6 +3090,22 @@ public:
   }
 
   Type *visitAddrOfExpr(AddrOfExpr *E) {
+    // @routine (Turbo/FPC): a procedural value.
+    if (auto *N = llvm::dyn_cast<NameRefExpr>(E->getOperand()))
+      if (auto *R = llvm::dyn_cast_or_null<RoutineDecl>(Cur->lookup(N->getName().Name))) {
+        N->setDecl(R);
+        if (R->getParent() || R->isExternal()) {
+          Diags.error(N->getBeginLoc(),
+                      "'@" + N->getName().Spelling + "': only routines declared "
+                      "at program or unit level can be procedural values",
+                      {N->getRange()});
+          return errorType();
+        }
+        auto *T = Ctx.create<RoutineType>(
+            R->getParams(), R->isFunction() ? R->getResultType() : nullptr);
+        N->setType(T);
+        return T;
+      }
     Type *T = check(E->getOperand());
     if (T->isError())
       return errorType();

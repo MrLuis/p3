@@ -693,6 +693,24 @@ TypeSpec *Parser::parseType() {
       return nullptr;
     return Ctx.create<FileTypeSpec>(SourceRange(Start, PrevTokEnd), Elem);
   }
+  case tok::kw_procedure:
+  case tok::kw_function: {
+    // Procedural type (Turbo/FPC): procedure(params) / function(params): T
+    if (Packed || LangOpts.Mode != LangMode::TP)
+      break;
+    bool IsFunction = Tok.is(tok::kw_function);
+    consumeToken();
+    llvm::SmallVector<VarDecl *, 4> Params;
+    if (Tok.is(tok::l_paren) && !parseFormalParams(Params))
+      return nullptr;
+    TypeSpec *Result = nullptr;
+    if (IsFunction && (!expect(tok::colon, "before the result type") ||
+                       !(Result = parseTypeIdentifier("function result type"))))
+      return nullptr;
+    return Ctx.create<RoutineTypeSpec>(SourceRange(Start, PrevTokEnd),
+                                       IsFunction,
+                                       Ctx.copyArray<VarDecl *>(Params), Result);
+  }
   case tok::caret: {
     if (Packed)
       break;
@@ -1067,6 +1085,16 @@ Stmt *Parser::parseAssignmentOrCall() {
     }
     return Ctx.create<AssignStmt>(SourceRange(Start, PrevTokEnd), Target,
                                   AssignLoc, Value);
+  }
+
+  // Turbo/FPC: a procedure call through a procedural value: r.p(x); a[i];
+  if (HasSelectors && LangOpts.Mode == LangMode::TP &&
+      Tok.isOneOf(tok::semi, tok::kw_end, tok::kw_else, tok::kw_until, tok::eof)) {
+    auto *Call = llvm::dyn_cast<IndirectCallExpr>(Target);
+    if (!Call) // r.p without arguments
+      Call = Ctx.create<IndirectCallExpr>(Target->getRange(), Target,
+                                          llvm::ArrayRef<Expr *>());
+    return Ctx.create<IndirectCallStmt>(SourceRange(Start, PrevTokEnd), Call);
   }
 
   if (HasSelectors) {
@@ -1566,6 +1594,18 @@ Expr *Parser::parseSelectors(Expr *Base) {
       consumeToken();
       Base = Ctx.create<DerefExpr>(SourceRange(Base->getBeginLoc(), PrevTokEnd),
                                    Base);
+      continue;
+    }
+    // Turbo/FPC: a call through a procedural value, passes[i].run(v).
+    // (A plain name followed by '(' is a CallExpr / ProcCallStmt.)
+    if (Tok.is(tok::l_paren) && LangOpts.Mode == LangMode::TP &&
+        !llvm::isa<NameRefExpr>(Base)) {
+      llvm::SmallVector<Expr *, 4> Args;
+      if (!parseActualParams(Args, /*AllowFormat=*/false) && Args.empty())
+        return nullptr;
+      Base = Ctx.create<IndirectCallExpr>(
+          SourceRange(Base->getBeginLoc(), PrevTokEnd), Base,
+          Ctx.copyArray<Expr *>(Args));
       continue;
     }
     return Base;

@@ -221,6 +221,12 @@ public:
     for (Expr *Arg : S->getArgs())
       visitExpr(Arg);
   }
+  void visitIndirectCallStmt(IndirectCallStmt *S) {
+    line("IndirectCallStmt");
+    loc(S->getBeginLoc());
+    IndentScope I(Indent);
+    visitExpr(S->getCall());
+  }
   void visitAssignStmt(AssignStmt *S) {
     line("AssignStmt");
     loc(S->getBeginLoc());
@@ -414,6 +420,14 @@ public:
     line("CallExpr '") << E->getCallee().Name << '\'';
     end(E);
     IndentScope I(Indent);
+    for (Expr *Arg : E->getArgs())
+      visitExpr(Arg);
+  }
+  void visitIndirectCallExpr(IndirectCallExpr *E) {
+    line("IndirectCallExpr");
+    end(E);
+    IndentScope I(Indent);
+    visitExpr(E->getCallee());
     for (Expr *Arg : E->getArgs())
       visitExpr(Arg);
   }

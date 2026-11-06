@@ -155,6 +155,7 @@ bool Driver::runPipeline(FileID FID) {
   CheckDirectives Directives;
   Lexer Lex(SM, FID, Diags, Strings, LangOpts);
   Lex.setDirectives(&Directives);
+  Lex.setIncludeSupport(SM, Opts.IncludeDirs);
   Parser P(Lex, Diags, Ctx);
   ProgramDecl *Program = P.parseProgram();
   llvm::SmallVector<UnitDecl *, 4> Units;
@@ -277,6 +278,7 @@ void Driver::loadUnits(llvm::ArrayRef<Identifier> Uses, ASTContext &Ctx,
     }
     Lexers.push_back(std::make_unique<Lexer>(SM, *FIDOrErr, Diags, Strings, LangOpts));
     Lexers.back()->setDirectives(&Directives);
+    Lexers.back()->setIncludeSupport(SM, Opts.IncludeDirs);
     UnitDecl *Unit = Parser(*Lexers.back(), Diags, Ctx).parseUnit();
     if (!Unit) {
       InProgress.erase(U.Name);
@@ -307,6 +309,7 @@ void Driver::loadUnits(llvm::ArrayRef<Identifier> Uses, ASTContext &Ctx,
 void Driver::dumpTokens(FileID FID, llvm::raw_ostream &OS) {
   // One token per line:  <line>:<col> <kind> '<spelling>' [value]
   Lexer L(SM, FID, Diags, Strings, LangOpts);
+  L.setIncludeSupport(SM, Opts.IncludeDirs);
   Token T;
   do {
     L.lex(T);
