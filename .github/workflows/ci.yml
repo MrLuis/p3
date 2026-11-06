@@ -7,6 +7,8 @@ on:
 jobs:
   build-and-test:
     runs-on: ubuntu-24.04
+    permissions:
+      contents: write  # gh release create, for seed-v* tags only
     env:
       LLVM_VERSION: 19
     steps:
@@ -43,3 +45,31 @@ jobs:
       # S10: the whole test suite against the stage 2 compiler.
       - name: Test suite with stage 2
         run: PCC_UNDER_TEST=$PWD/build/bootstrap/stage2/bin/pcc lit -sv build/tests
+
+      # S11: the stage-1 seed. Build it, bootstrap from it without the C++
+      # pcc, and keep it as an artifact; a pushed tag seed-v* publishes it
+      # as a GitHub release.
+      - name: Build the stage-1 seed
+        run: ninja -C build seed
+
+      - name: Bootstrap from the seed
+        run: |
+          python3 utils/seed.py bootstrap --require-same \
+            --seed build/seed/pcc-seed-*.tar.gz --llvm-config llvm-config-$LLVM_VERSION
+
+      - name: Upload the seed
+        uses: actions/upload-artifact@v4
+        with:
+          name: pcc-seed
+          path: |
+            build/seed/*.tar.gz
+            build/seed/*.tar.gz.sha256
+
+      - name: Publish the seed (tags seed-v*)
+        if: startsWith(github.ref, 'refs/tags/seed-v')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" build/seed/*.tar.gz build/seed/*.tar.gz.sha256 \
+            --title "pcc stage-1 seed $GITHUB_REF_NAME" \
+            --notes "Bootstrap the self-hosted compiler without the C++ pcc: utils/seed.py bootstrap --seed <file> (see SELFHOST.md)."

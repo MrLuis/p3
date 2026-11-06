@@ -78,6 +78,10 @@ Testing:
   leads to the same IR. `utils/selfhost-diff.py --ref A --new B
   --action=--emit-llvm --extra="-o -" ...` compares any two compilers' IR
   on more inputs (fuzz corpora).
+- The stage-1 seed: `ninja -C build seed` writes `build/seed/pcc-seed-*`;
+  `utils/seed.py bootstrap --seed <seed> [--from ir]` bootstraps from it
+  without the C++ pcc (needs `cc`, libLLVM 19 and `llvm-config`, and clang
+  for `--from ir`). See SELFHOST.md S11.
 - Separate units: `utils/bootstrap.py --separate` also builds the compiler
   from its separately compiled units (each unit with `-c`, then `pcc.pas`
   with `-fseparate-units`; objects are written next to the sources, so it

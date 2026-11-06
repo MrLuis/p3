@@ -46,6 +46,11 @@ pcc --mode=tp -I lib -fseparate-units main.pas -o main
 
 `-L dir` and `-l name` pass library options to the linker.
 
+**Self-hosting:** pcc is also written in Pascal ([selfhost/](selfhost/),
+[SELFHOST.md](SELFHOST.md)); `ninja -C build check-bootstrap` builds it with
+itself, and `utils/seed.py` makes and uses a stage-1 *seed* (a binary plus
+the compiler's LLVM IR) to bootstrap it without this C++ compiler.
+
 **ISO 7185 conformance:** the Pascal-P5 test `iso7185pat.pas` passes all 793
 checks (`utils/iso7185pat.py build/bin/pcc`).
 

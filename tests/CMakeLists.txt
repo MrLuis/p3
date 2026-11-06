@@ -52,4 +52,13 @@ if(Python3_FOUND)
     DEPENDS pcc pascalrt
     COMMENT "Bootstrapping the self-hosted compiler"
     USES_TERMINAL)
+  # The stage-1 seed (S11): build/seed/pcc-seed-<version>-<triple>[.tar.gz].
+  add_custom_target(seed
+    COMMAND ${Python3_EXECUTABLE} ${PROJECT_SOURCE_DIR}/utils/seed.py make
+            --pcc $<TARGET_FILE:pcc> --runtime $<TARGET_FILE:pascalrt>
+            --flags ${PROJECT_BINARY_DIR}/selfhost/flags.txt
+            --out ${PROJECT_BINARY_DIR}/seed
+    DEPENDS pcc pascalrt
+    COMMENT "Building the stage-1 seed"
+    USES_TERMINAL)
 endif()
