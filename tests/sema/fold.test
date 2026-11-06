@@ -1,0 +1,20 @@
+; Constant folding details the self-hosted Sema must match (S6): bitwise
+; 'not' in the operand's type, round per mode (halves to even in Turbo mode), trunc
+; of an out-of-range value is not folded; "did you mean" ties go to the
+; alphabetically first name.
+; RUN: not %pcc --mode=tp --emit-ast %S/Inputs/fold.pas 2>%t.err | FileCheck --check-prefix=TP %s
+; RUN: FileCheck --check-prefix=ERR %s < %t.err
+; RUN: not %pcc --emit-ast %S/Inputs/fold.pas 2>&1 | FileCheck --check-prefix=ISO %s
+
+; TP: ConstDecl 'c1' : integer = -6
+; TP: ConstDecl 'c2' : byte = 55
+; TP: ConstDecl 'c3' : int64 = 2
+; TP: ConstDecl 'c4' : int64 = 4
+; TP: ConstDecl 'c5' : int64 = -7
+; TP: ConstDecl 'c6' : <error>
+; ERR: fold.pas:8:8: error: constant value must be a constant
+; ERR: fold.pas:12:3: error: use of undeclared identifier 'abx'; did you mean 'abc'?
+
+; ISO rounds halves away from zero (and rejects the TP-only parts).
+; ISO: fold.pas:5:8: error: constant expressions are a Turbo/Free Pascal extension; use --mode=tp
+; ISO: ConstDecl 'c3' : integer = 3

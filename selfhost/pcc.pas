@@ -1,9 +1,10 @@
 program pcc;
 { The self-hosted Pascal compiler: command line and pipeline. It accepts
   the C++ pcc's options (src/driver/main.cpp) and must behave the same.
-  Implemented so far: --emit-tokens (S4), --emit-parse-tree (S5). }
+  Implemented so far: --emit-tokens (S4), --emit-parse-tree (S5),
+  --emit-ast and semantic checks (S6). }
 
-uses pcsys, pcutil, pcdiag, pclex, pcast, pcparse, pcprint;
+uses pcsys, pcutil, pcdiag, pclex, pcast, pctypes, pcparse, pcprint, pcsema;
 
 type
   TAction = (actTokens, actParseTree, actAST, actLLVM, actAsm, actObj, actExe);
@@ -302,7 +303,7 @@ end;
 
 var
   fid: longint;
-  ok: boolean;
+  ok, semaOK: boolean;
   prog: PDecl;
 begin
   sysInit;
@@ -330,6 +331,7 @@ begin
   listInit(units);
   mapInit(unitsDone);
   mapInit(inProgress);
+  initTypes;
   case action of
     actParseTree:
       begin
@@ -345,8 +347,25 @@ begin
         ok := writeOutput;
       end;
   else
-    diagError(noLoc, 'this action is not implemented in the self-hosted ' +
-                     'compiler yet (only --emit-tokens and --emit-parse-tree)');
+    begin
+      { --emit-ast and the code-generating actions: parse, load units and
+        check (Sema is skipped after syntax errors) }
+      prog := parseProgram(fid, mode);
+      if not diagHasErrors then
+        loadUnits(prog^.progUses);
+      semaOK := false;
+      if not diagHasErrors then
+        semaOK := semaCheck(prog, units, mode);
+      if action = actAST then
+      begin
+        { the dump is written even after errors; types appear if Sema ran }
+        printAST(outBuf, prog);
+        ok := writeOutput;
+      end
+      else if semaOK then
+        diagError(noLoc, 'code generation is not implemented in the ' +
+                         'self-hosted compiler yet');
+    end;
   end;
   if ok and not diagHasErrors then
     sysExit(0);

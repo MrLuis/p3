@@ -63,6 +63,13 @@ class Parser {
   ASTContext &Ctx;
   const LangOptions &LangOpts;
 
+  /// Nesting of expressions, statements and types being parsed. Deeper
+  /// than MaxNesting is a fatal error (instead of a stack overflow).
+  unsigned Nesting = 0;
+  static constexpr unsigned MaxNesting = 256;
+  /// Enters one nesting level; false (after a fatal error) if too deep.
+  bool enterNesting();
+
   Token Tok;                  ///< current lookahead token
   Token PeekTok;              ///< the token after Tok, if HasPeek
   bool HasPeek = false;
@@ -105,6 +112,7 @@ class Parser {
 
   // Types
   TypeSpec *parseType();
+  TypeSpec *parseTypeImpl();
   TypeSpec *parseSimpleType();
   TypeSpec *parseTypeIdentifier(llvm::StringRef Context);
   TypeSpec *parseArrayType(SourceLocation Start, bool Packed);
@@ -120,6 +128,7 @@ class Parser {
                               tok::TokenKind Terminator,
                               SourceLocation OpenLoc, llvm::StringRef OpenWord);
   Stmt *parseStatement();
+  Stmt *parseStatementImpl();
   Stmt *parseAssignmentOrCall();
   Stmt *parseIfStmt();
   Stmt *parseWhileStmt();
@@ -135,6 +144,7 @@ class Parser {
 
   // Expressions
   Expr *parseExpression();
+  Expr *parseExpressionImpl();
   Expr *parseSimpleExpression();
   Expr *parseTerm();
   Expr *parseFactor();

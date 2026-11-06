@@ -20,9 +20,15 @@ implementation
 type
   TTokenSet = set of TTokenKind;
 
+const
+  maxNesting = 256;
+
 var
   lx: TLexer;
   mode: TLangMode;
+  { expressions, statements and types being parsed; deeper than maxNesting
+    is a fatal error instead of a stack overflow }
+  nesting: longint;
   tok, peekTok: TToken;
   hasPeek: boolean;
   prevTokEnd: TLoc;
@@ -35,6 +41,7 @@ begin
   lexInit(lx, fid, m);
   hasPeek := false;
   prevTokEnd := noLoc;
+  nesting := 0;
   lexNext(lx, tok);
 end;
 
@@ -190,6 +197,20 @@ function startsDeclarationPart: boolean;
 begin
   startsDeclarationPart := tok.kind in [tkKwLabel, tkKwConst, tkKwType,
                                         tkKwVar, tkKwProcedure, tkKwFunction];
+end;
+
+{ Enters one nesting level; false (after a fatal error) if too deep. }
+function enterNesting: boolean;
+begin
+  if nesting >= maxNesting then
+  begin
+    if not diagShouldStop then
+      diagFatal(tok.loc, 'nesting too deep (more than ' + intToStr(maxNesting) +
+                ' levels of expressions, statements or types)');
+    exit(false);
+  end;
+  nesting := nesting + 1;
+  enterNesting := true;
 end;
 
 function isIdentifierNamed(const s: string): boolean;
@@ -969,7 +990,7 @@ function parseArrayType(start: TLoc; packed_: boolean): PTypeSpec; forward;
 function parseRecordType(start: TLoc; packed_: boolean): PTypeSpec; forward;
 
 { type = simpleType | ["packed"] (arrayType | recordType) . }
-function parseType: PTypeSpec;
+function parseTypeImpl: PTypeSpec;
 var
   start: TLoc;
   isPacked, isFunction, isSet: boolean;
@@ -978,7 +999,7 @@ var
   params: TPtrList;
   target: TIdent;
 begin
-  parseType := nil;
+  parseTypeImpl := nil;
   start := tok.loc;
   isPacked := tryConsume(tkKwPacked);
   case tok.kind of
@@ -1067,7 +1088,15 @@ begin
     diagError(tok.loc, '''packed'' must be followed by ''array'', ''record'' or ''set''');
     exit;
   end;
-  parseType := parseSimpleType;
+  parseTypeImpl := parseSimpleType;
+end;
+
+function parseType: PTypeSpec;
+begin
+  if not enterNesting then
+    exit(nil);
+  parseType := parseTypeImpl;
+  nesting := nesting - 1;
 end;
 
 { typeIdent (ISO requires these for parameters and function results) }
@@ -1419,7 +1448,7 @@ function parseForStmt: PNode; forward;
 function parseCaseStmt: PNode; forward;
 function parseWithStmt: PNode; forward;
 
-function parseStatement: PNode;
+function parseStatementImpl: PNode;
 var
   gotoLoc, start, l: TLoc;
   lbl: TIdent;
@@ -1469,7 +1498,15 @@ begin
   end;
   l := tok.loc;
   skipUntil([tkSemi, tkKwEnd]);
-  parseStatement := emptyStmt(l);
+  parseStatementImpl := emptyStmt(l);
+end;
+
+function parseStatement: PNode;
+begin
+  if not enterNesting then
+    exit(emptyStmt(tok.loc));
+  parseStatement := parseStatementImpl;
+  nesting := nesting - 1;
 end;
 
 function nameRef(const id: TIdent): PNode;
@@ -2073,13 +2110,13 @@ begin
 end;
 
 { expression = simpleExpr [ relOp simpleExpr ] . }
-function parseExpression: PNode;
+function parseExpressionImpl: PNode;
 var
   lhs, rhs, res: PNode;
   op, op2: TBinaryOp;
   opLoc: TLoc;
 begin
-  parseExpression := nil;
+  parseExpressionImpl := nil;
   lhs := parseSimpleExpression;
   if lhs = nil then
     exit;
@@ -2108,7 +2145,15 @@ begin
         exit;
     end;
   end;
-  parseExpression := res;
+  parseExpressionImpl := res;
+end;
+
+function parseExpression: PNode;
+begin
+  if not enterNesting then
+    exit(nil);
+  parseExpression := parseExpressionImpl;
+  nesting := nesting - 1;
 end;
 
 function parseTerm: PNode; forward;

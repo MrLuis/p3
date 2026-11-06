@@ -124,6 +124,18 @@ bool Parser::startsDeclarationPart() const {
                      tok::kw_procedure, tok::kw_function);
 }
 
+bool Parser::enterNesting() {
+  if (Nesting >= MaxNesting) {
+    if (!Diags.shouldStop())
+      Diags.fatal(Tok.getLocation(),
+                  "nesting too deep (more than " + llvm::Twine(MaxNesting) +
+                      " levels of expressions, statements or types)");
+    return false;
+  }
+  ++Nesting;
+  return true;
+}
+
 bool Parser::isIdentifierNamed(llvm::StringRef Name) const {
   return Tok.is(tok::identifier) && Tok.getIdentifier() == Name;
 }
@@ -657,8 +669,16 @@ bool Parser::parseFormalParams(llvm::SmallVectorImpl<VarDecl *> &Params) {
 // Types
 //===----------------------------------------------------------------------===//
 
-// type = simpleType | ["packed"] (arrayType | recordType) .
 TypeSpec *Parser::parseType() {
+  if (!enterNesting())
+    return nullptr;
+  TypeSpec *TS = parseTypeImpl();
+  --Nesting;
+  return TS;
+}
+
+// type = simpleType | ["packed"] (arrayType | recordType) .
+TypeSpec *Parser::parseTypeImpl() {
   SourceLocation Start = Tok.getLocation();
   bool Packed = tryConsume(tok::kw_packed);
   switch (Tok.getKind()) {
@@ -1000,6 +1020,14 @@ void Parser::parseStatementSequence(llvm::SmallVectorImpl<Stmt *> &Body,
 }
 
 Stmt *Parser::parseStatement() {
+  if (!enterNesting())
+    return Ctx.create<EmptyStmt>(Tok.getLocation());
+  Stmt *S = parseStatementImpl();
+  --Nesting;
+  return S;
+}
+
+Stmt *Parser::parseStatementImpl() {
   switch (Tok.getKind()) {
   case tok::identifier:
     return parseAssignmentOrCall();
@@ -1476,8 +1504,16 @@ static Expr *makeBinary(ASTContext &Ctx, BinaryOp Op, SourceLocation OpLoc,
   return Ctx.create<BinaryExpr>(Range, Op, OpLoc, L, R);
 }
 
-// expression = simpleExpr [ relOp simpleExpr ] .
 Expr *Parser::parseExpression() {
+  if (!enterNesting())
+    return nullptr;
+  Expr *E = parseExpressionImpl();
+  --Nesting;
+  return E;
+}
+
+// expression = simpleExpr [ relOp simpleExpr ] .
+Expr *Parser::parseExpressionImpl() {
   Expr *LHS = parseSimpleExpression();
   if (!LHS)
     return nullptr;

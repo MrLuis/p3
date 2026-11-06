@@ -99,6 +99,20 @@ function formatG(x: double; prec: longint): string;
 procedure bufAddEscaped(var b: TBuf; p: PCharArray; start, count: int64);
 function lowerChar(c: char): char;
 function lowerStr(const s: string): string;
+{ Real arithmetic that never traps. Free Pascal stops on floating-point
+  overflow; these return +-infinity instead, exactly like IEEE arithmetic
+  (the C++ compiler's). realDiv requires y <> 0. }
+function realInfinity(negative: boolean): double;
+function realAdd(x, y: double): double;
+function realSub(x, y: double): double;
+function realMul(x, y: double): double;
+function realDiv(x, y: double): double;
+function realIsInf(x: double): boolean;
+function realIsNaN(x: double): boolean;
+{ A quiet NaN (as ARM produces for inf - inf; x86's default NaN also has
+  the sign bit set). }
+function realNaN: double;
+
 { Paths (llvm::sys::path): the directory part ('' for a bare name), and a
   directory joined with a name. }
 function pathDirName(const path: string): string;
@@ -833,6 +847,137 @@ begin
     pathJoin := dir + name
   else
     pathJoin := dir + '/' + name;
+end;
+
+function realInfinity(negative: boolean): double;
+var
+  o: TDoubleBits;
+begin
+  o.bits := $7FF0000000000000;
+  if negative then
+    o.bits := o.bits or low(int64);
+  realInfinity := o.d;
+end;
+
+function realIsNaN(x: double): boolean;
+var
+  o: TDoubleBits;
+begin
+  o.d := x;
+  realIsNaN := ((o.bits and $7FF0000000000000) = $7FF0000000000000) and
+               ((o.bits and $FFFFFFFFFFFFF) <> 0);
+end;
+
+function realNaN: double;
+var
+  o: TDoubleBits;
+begin
+  o.bits := $7FF8000000000000;
+  realNaN := o.d;
+end;
+
+function realIsInf(x: double): boolean;
+var
+  o: TDoubleBits;
+begin
+  o.d := x;
+  realIsInf := (o.bits and $7FFFFFFFFFFFFFFF) = $7FF0000000000000;
+end;
+
+{ The binary exponent e with 2^e <= |x| < 2^(e+1); x <> 0, finite. }
+function realExponent(x: double): longint;
+var
+  o: TDoubleBits;
+  e: longint;
+  m: int64;
+begin
+  o.d := x;
+  e := longint((o.bits shr 52) and $7FF);
+  if e > 0 then
+    exit(e - 1023);
+  m := o.bits and $FFFFFFFFFFFFF; { subnormal }
+  e := -1075;
+  while m <> 0 do
+  begin
+    m := m shr 1;
+    e := e + 1;
+  end;
+  realExponent := e;
+end;
+
+function maxDouble: double;
+var
+  o: TDoubleBits;
+begin
+  o.bits := $7FEFFFFFFFFFFFFF;
+  maxDouble := o.d;
+end;
+
+function realAdd(x, y: double): double;
+var
+  h: double;
+begin
+  if realIsNaN(x) or realIsNaN(y) then
+    exit(realNaN);
+  if realIsInf(x) and realIsInf(y) and ((x < 0) <> (y < 0)) then
+    exit(realNaN); { inf - inf }
+  if (x = 0) or (y = 0) or realIsInf(x) or realIsInf(y) then
+    exit(x + y);
+  { below 2^1023 each, the sum cannot round past the largest double }
+  if (realExponent(x) <= 1022) and (realExponent(y) <= 1022) then
+    exit(x + y);
+  { halving is exact at this size: fl(x/2 + y/2) = fl(x + y) / 2 }
+  h := x * 0.5 + y * 0.5;
+  if abs(h) > maxDouble * 0.5 then
+    exit(realInfinity(h < 0));
+  realAdd := h * 2;
+end;
+
+function realSub(x, y: double): double;
+begin
+  realSub := realAdd(x, -y);
+end;
+
+function realMul(x, y: double): double;
+var
+  e: longint;
+  p: double;
+begin
+  if realIsNaN(x) or realIsNaN(y) then
+    exit(realNaN);
+  if ((x = 0) and realIsInf(y)) or ((y = 0) and realIsInf(x)) then
+    exit(realNaN); { 0 * inf }
+  if (x = 0) or (y = 0) or realIsInf(x) or realIsInf(y) then
+    exit(x * y);
+  e := realExponent(x) + realExponent(y);
+  if e <= 1021 then { |xy| < 2^(e+2) <= 2^1023 }
+    exit(x * y);
+  if e >= 1024 then { |xy| >= 2^1024 }
+    exit(realInfinity((x < 0) <> (y < 0)));
+  p := (x * 0.25) * y; { exact scaling by 1/4 }
+  if abs(p) > maxDouble * 0.25 then
+    exit(realInfinity(p < 0));
+  realMul := p * 4;
+end;
+
+function realDiv(x, y: double): double;
+var
+  e: longint;
+  q: double;
+begin
+  if realIsNaN(x) or realIsNaN(y) or (realIsInf(x) and realIsInf(y)) then
+    exit(realNaN); { inf / inf }
+  if (x = 0) or realIsInf(x) or realIsInf(y) then
+    exit(x / y);
+  e := realExponent(x) - realExponent(y);
+  if e <= 1021 then { |x/y| < 2^(e+1) <= 2^1022 }
+    exit(x / y);
+  if e >= 1025 then { |x/y| > 2^(e-1) >= 2^1024 }
+    exit(realInfinity((x < 0) <> (y < 0)));
+  q := (x * 0.125) / y; { exact scaling by 1/8 }
+  if abs(q) > maxDouble * 0.125 then
+    exit(realInfinity(q < 0));
+  realDiv := q * 8;
 end;
 
 function lowerChar(c: char): char;

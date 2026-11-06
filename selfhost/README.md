@@ -16,9 +16,13 @@ fpc -Mobjfpc -Sh- -Cr -Co -FUbuild/fpc-units -obuild/pcc-fpc selfhost/pcc.pas
 | `pclex.pas` | lexer, directives, `{$I}` includes |
 | `pcast.pas` | the syntax tree (variant records in the arena) |
 | `pcparse.pas` | recursive-descent parser with the C++ parser's error recovery |
-| `pcprint.pas` | tree dumps (`--emit-parse-tree`) |
+| `pcprint.pas` | tree dumps (`--emit-ast`, `--emit-parse-tree`) |
+| `pctypes.pas` | semantic types: constructors, predicates, names |
+| `pcscope.pas` | name scopes (with scopes, unit imports) |
+| `pcsema.pas`, `pcsemastmt.inc` | semantic analysis (Sema.cpp) |
+| `builtins.inc` | generated from `include/pcc/AST/Builtins.def` |
 | `tokens.inc` | generated from `include/pcc/Lexer/TokenKinds.def` by `utils/gen-selfhost-tables.py` |
-| `pcc.pas` | the driver: options, unit loading, `--emit-tokens`, `--emit-parse-tree` |
+| `pcc.pas` | the driver: options, unit loading, `--emit-tokens`, `--emit-parse-tree`, `--emit-ast` |
 
 Testing:
 
@@ -28,4 +32,6 @@ Testing:
   (`--action=--emit-parse-tree` for the parser). Add `--all-files <fuzz
   corpus>` for fuzzer inputs.
 - `utils/selfhost-lint.py selfhost/*.pas`: dialect rules.
+- `PCC_UNDER_TEST=build/pcc-self lit -sv build/tests/sema`: the C++ test
+  suite run against the Pascal compiler (sema, lexer and parser pass).
 - lit runs all of these: `tests/run/selfhost.test`, `tests/selfhost/*.test`.

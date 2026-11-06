@@ -28,5 +28,8 @@ config.substitutions.append((r"\bFileCheck\b", config.filecheck))
 config.substitutions.append(("%pcc-unittests",
                              os.path.join(config.pcc_tools_dir, "pcc-unittests")))
 # Always disable colors so output is stable when run from a terminal.
-config.substitutions.append(("%pcc",
-                             os.path.join(config.pcc_tools_dir, "pcc") + " -fdiagnostics-color=never"))
+# PCC_UNDER_TEST=<path> runs the suite with another compiler as %pcc, e.g.
+# the self-hosted one (SELFHOST.md): lit -sv build/tests/sema
+pcc_under_test = os.environ.get("PCC_UNDER_TEST") or \
+    os.path.join(config.pcc_tools_dir, "pcc")
+config.substitutions.append(("%pcc", pcc_under_test + " -fdiagnostics-color=never"))

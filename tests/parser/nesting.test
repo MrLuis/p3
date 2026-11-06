@@ -1,0 +1,16 @@
+; Nesting deeper than 256 levels of expressions, statements or types is a
+; fatal error, not a stack overflow (found by fuzzing, S6).
+; RUN: python3 -c "print('program p; begin x := ' + '('*300 + '1' + ')'*300 + ' end.')" > %t.e.pas
+; RUN: not %pcc --emit-ast %t.e.pas 2>&1 | FileCheck --check-prefix=EXPR %s
+; RUN: python3 -c "print('program p; begin ' + 'begin '*300 + 'end; '*300 + 'end.')" > %t.s.pas
+; RUN: not %pcc --emit-ast %t.s.pas 2>&1 | FileCheck --check-prefix=STMT %s
+; RUN: python3 -c "print('program p; type t = ' + 'array[1..2] of '*300 + 'integer; begin end.')" > %t.t.pas
+; RUN: not %pcc --emit-ast %t.t.pas 2>&1 | FileCheck --check-prefix=TYPE %s
+; 250 levels are fine.
+; RUN: python3 -c "print('program p; var x: integer; begin x := ' + '('*250 + '1' + ')'*250 + ' end.')" > %t.ok.pas
+; RUN: %pcc --emit-ast %t.ok.pas | FileCheck --check-prefix=OK %s
+
+; EXPR: e.pas:1:278: fatal error: nesting too deep (more than 256 levels of expressions, statements or types)
+; STMT: fatal error: nesting too deep
+; TYPE: fatal error: nesting too deep
+; OK: AssignStmt

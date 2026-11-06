@@ -8,11 +8,16 @@ unit pcast;
   TPtrList.
 
   Fields that Sema fills in (types, resolved declarations, constant
-  values) are untyped pointers until Sema exists (S6). }
+  values) are marked (Sema). Semantic types are TType (Type.h): integer
+  types, real, boolean, char, enumerations, subranges, string literals,
+  arrays, records, pointers, nil, sets, files, procedural types and short
+  strings. Types are compared by identity (name equivalence). }
 
 interface
 
 uses pcsys, pcutil, pcdiag;
+
+{$I builtins.inc}
 
 type
   { a name as written: name is the lower-case interned name (nil when
@@ -49,21 +54,47 @@ type
   PDecl = ^TDecl;
   PTypeSpec = ^TTypeSpec;
   PBlock = ^TBlock;
+  PType = ^TType;
+  PWithContext = ^TWithContext;
+  PFieldList = ^TFieldList;
+
+  TTypeKind = (tyError, tyInteger, tyReal, tyBoolean, tyChar, tyEnum,
+               tySubrange, tyStringLit, tyArray, tyRecord, tyPointer, tyNil,
+               tySet, tyFile, tyRoutine, tyShortString);
+
+  TType = record
+    kind: TTypeKind;
+    id: longint;     { unique: maps keyed by type use it }
+    declName: PName; { first name given in a type declaration, or nil }
+    case TTypeKind of
+      tyInteger: (bits: longint; isSigned: boolean; intName: PName);
+      tyEnum: (enumValues: TPtrList); { of PDecl (dkConst) }
+      tySubrange: (host: PType; lo, hi: int64);
+      tyStringLit: (strLength: int64);
+      tyArray: (indexType, elementType: PType; isPackedArray: boolean);
+      tyRecord: (fieldList: PFieldList; allFields: TPtrList; { of PDecl }
+                 isPackedRecord: boolean);
+      tyPointer: (pointee: PType; untyped: boolean);
+      tySet: (setElement: PType); { nil: the empty set [] }
+      tyFile: (fileElement: PType; isText: boolean);
+      tyRoutine: (routineParams: TPtrList; routineResult: PType);
+      tyShortString: (maxLength: longint);
+  end;
 
   TNode = record
     kind: TNodeKind;
     b, e: TLoc;      { source range [b, e) }
-    typ: pointer;    { expressions: the type (Sema) }
+    typ: PType;      { expressions: the type (Sema) }
     case TNodeKind of
       nkIntegerLit: (intValue: int64);
       nkRealLit: (realValue: double);
       nkStringLit: (strValue: PName);
-      nkNameRef: (ref: TIdent; refDecl: PDecl; refWith: pointer);
+      nkNameRef: (ref: TIdent; refDecl: PDecl; refWith: PWithContext);
       { paren: the inner expression; deref: the pointer; addrof: the operand }
       nkParen, nkDeref, nkAddrOf: (inner: PNode);
       nkUnary: (uop: TUnaryOp; operand: PNode);
       nkBinary: (bop: TBinaryOp; opLoc: TLoc; lhs, rhs: PNode;
-                 operandType: pointer);
+                 operandType: PType);
       { call / proccall: callee named; indirectcall: calleeExpr; the
         indirect call statement holds an nkIndirectCall in calleeExpr }
       nkCall, nkProcCall, nkIndirectCall, nkIndirectCallStmt:
@@ -112,7 +143,6 @@ type
     body: PNode;
   end;
 
-  PWithContext = ^TWithContext;
   TWithContext = record
     rec: PNode;
   end;
@@ -120,13 +150,12 @@ type
   TTypeSpecKind = (tsNamed, tsEnum, tsSubrange, tsArray, tsRecord,
                    tsPointer, tsSet, tsFile, tsRoutine, tsString);
 
-  PFieldList = ^TFieldList;
   PVariantPart = ^TVariantPart;
 
   TTypeSpec = record
     kind: TTypeSpecKind;
     b, e: TLoc;
-    resolved: pointer; { Sema }
+    resolved: PType; { Sema }
     case TTypeSpecKind of
       { named: the type name; pointer: the pointee's name }
       tsNamed, tsPointer: (tname: TIdent);
@@ -153,7 +182,7 @@ type
   TVariantPart = record
     tag: PDecl;         { the tag field, if named }
     tagSpec: PTypeSpec;
-    tagType: pointer;   { Sema }
+    tagType: PType;     { Sema }
     variants: TPtrList; { of PVariant }
     caseLoc: TLoc;
   end;
@@ -170,19 +199,29 @@ type
   TDecl = record
     kind: TDeclKind;
     ident: TIdent;
-    loc: TLoc;
+    loc: TLoc;          { noLoc for predeclared entities }
+    { Sema: referenced anywhere; a function whose result is assigned; the
+      number of labels in this routine targeted by non-local gotos }
+    isUsed, resultAssigned: boolean;
+    nonLocalLabels: longint;
     case TDeclKind of
-      dkVar: (varSpec: PTypeSpec; varType: pointer; varKind: TVarKind;
+      { owner: the routine whose frame holds it; nil for program-level
+        variables and typed constants (Sema) }
+      dkVar: (varSpec: PTypeSpec; varType: PType; varKind: TVarKind;
               owner: PDecl; init: PNode; initValue: TConstValue);
-      dkConst: (constInit: PNode; constType: pointer; constValue: TConstValue);
-      dkType: (typeSpec: PTypeSpec; declType: pointer);
-      dkField: (fieldSpec: PTypeSpec; fieldType: pointer);
+      dkConst: (constInit: PNode; constType: PType; constValue: TConstValue);
+      dkType: (typeSpec: PTypeSpec; declType: PType);
+      dkField: (fieldSpec: PTypeSpec; fieldType: PType);
       dkRoutine: (isFunction, hasParamList, isForward, isExternal: boolean;
-                  params: TPtrList; resultSpec: PTypeSpec; resultType: pointer;
+                  params: TPtrList; resultSpec: PTypeSpec; resultType: PType;
                   body: PBlock; externalName: PName;
                   canonical, parent, resultVar: PDecl; level: longint);
-      dkBuiltin: (builtin: longint; isProcedure: boolean);
-      dkLabel: (labelOwner: PDecl; labelTarget: PNode);
+      dkBuiltin: (builtin: TBuiltinKind; isProcedure: boolean);
+      { labels (Sema): the statement labeled, the statement sequence that
+        directly contains it, whether that is the block's outermost one,
+        and whether a goto from a nested routine targets it }
+      dkLabel: (labelOwner: PDecl; labelTarget: PNode; labelSequence: pointer;
+                labelTopLevel, labelNonLocal: boolean; labelIndex: longint);
       dkProgram: (progParams: TPtrList; progUses: TPtrList; progBlock: PBlock);
       dkUnit: (ifaceUses, implUses: TPtrList; iface, impl: PBlock);
   end;

@@ -4,22 +4,26 @@ unit pcprint;
 
     BinaryExpr '+' : integer <3:10>
 
-  So far the parse-tree form (--emit-parse-tree, S5): the tree as parsed,
-  with type specs, typed-constant values, uses clauses and units; no Sema
-  results. }
+  Two forms: --emit-ast (S6) shows the program with Sema's results (types,
+  constant values, declaration kinds); --emit-parse-tree (S5) shows the
+  tree as parsed, with type specs, typed-constant values, uses clauses and
+  units. }
 
 interface
 
-uses pcsys, pcutil, pcdiag, pcast;
+uses pcsys, pcutil, pcdiag, pcast, pctypes;
 
 { Appends the parse tree of the units (in load order) and the program. }
 procedure printParseTree(var outText: TBuf; prog: PDecl; const units: TPtrList);
+{ Appends the AST of the program (with types once Sema has run). }
+procedure printAST(var outText: TBuf; prog: PDecl);
 
 implementation
 
 var
   outBuf: TBuf;
   indent: longint;
+  parseTree: boolean; { --emit-parse-tree rather than --emit-ast }
 
 procedure line(const nodeName: string);
 var
@@ -58,10 +62,125 @@ begin
   bufAddChar(outBuf, '"');
 end;
 
-{ the type (none before Sema) and the location of an expression }
+{ " : type" once Sema has set one }
+procedure typeSuffix(t: PType);
+begin
+  if t <> nil then
+  begin
+    bufAdd(outBuf, ' : ');
+    bufAddTypeName(outBuf, t);
+  end;
+end;
+
+{ the type and the location of an expression }
 procedure endExpr(e: PNode);
 begin
+  typeSuffix(e^.typ);
   loc(e^.b);
+end;
+
+function declKindName(d: PDecl): string;
+begin
+  case d^.kind of
+    dkProgram: declKindName := 'program';
+    dkVar:
+      case d^.varKind of
+        vkVariable: declKindName := 'variable';
+        vkResult: declKindName := 'function result';
+      else
+        declKindName := 'parameter';
+      end;
+    dkConst: declKindName := 'constant';
+    dkType: declKindName := 'type';
+    dkField: declKindName := 'field';
+    dkLabel: declKindName := 'label';
+    dkUnit: declKindName := 'unit';
+    dkRoutine:
+      if d^.isFunction then
+        declKindName := 'function'
+      else
+        declKindName := 'procedure';
+  else
+    if d^.isProcedure then
+      declKindName := 'procedure'
+    else
+      declKindName := 'function';
+  end;
+end;
+
+{ Like the type name, but spells out a named type's structure. }
+procedure addDescribedType(t: PType);
+var
+  i: longint;
+  f, c: PDecl;
+begin
+  if t^.declName = nil then
+  begin
+    bufAddTypeName(outBuf, t);
+    exit;
+  end;
+  case t^.kind of
+    tyArray:
+      begin
+        if t^.isPackedArray then
+          bufAdd(outBuf, 'packed ');
+        bufAdd(outBuf, 'array [');
+        bufAddTypeName(outBuf, t^.indexType);
+        bufAdd(outBuf, '] of ');
+        bufAddTypeName(outBuf, t^.elementType);
+      end;
+    tyRecord:
+      begin
+        bufAdd(outBuf, 'record');
+        for i := 0 to t^.allFields.count - 1 do
+        begin
+          f := PDecl(listGet(t^.allFields, i));
+          bufAddChar(outBuf, ' ');
+          bufAddName(outBuf, f^.ident.name);
+          bufAdd(outBuf, ': ');
+          if f^.fieldType <> nil then
+            bufAddTypeName(outBuf, f^.fieldType)
+          else
+            bufAddChar(outBuf, '?');
+          bufAddChar(outBuf, ';');
+        end;
+        bufAdd(outBuf, ' end');
+      end;
+    tySubrange:
+      begin
+        bufAddTypeName(outBuf, t^.host);
+        bufAdd(outBuf, ' ' + intToStr(t^.lo) + '..' + intToStr(t^.hi));
+      end;
+    tyEnum:
+      begin
+        bufAddChar(outBuf, '(');
+        for i := 0 to t^.enumValues.count - 1 do
+        begin
+          c := PDecl(listGet(t^.enumValues, i));
+          if i > 0 then
+            bufAdd(outBuf, ', ');
+          bufAddName(outBuf, c^.ident.name);
+        end;
+        bufAddChar(outBuf, ')');
+      end;
+  else
+    bufAddTypeName(outBuf, t);
+  end;
+end;
+
+procedure printConstValue(const v: TConstValue);
+begin
+  case v.kind of
+    ckOrdinal: bufAdd(outBuf, ' = ' + intToStr(v.intVal));
+    ckReal: bufAdd(outBuf, ' = ' + formatG(v.realVal, 6));
+    ckString:
+      begin
+        bufAdd(outBuf, ' = ');
+        quoted(v.strVal);
+      end;
+  else
+    ;
+  end;
 end;
 
 procedure visitExpr(e: PNode); forward;
@@ -254,9 +373,11 @@ begin
     dkConst:
       begin
         lineName('ConstDecl ''', d^.ident.name);
+        typeSuffix(d^.constType);
+        printConstValue(d^.constValue);
         loc(d^.loc);
         { before Sema the constant has no value: show its expression }
-        if d^.constInit <> nil then
+        if (d^.constType = nil) and (d^.constInit <> nil) then
         begin
           indent := indent + 2;
           visitExpr(d^.constInit);
@@ -266,10 +387,18 @@ begin
     dkType:
       begin
         lineName('TypeDecl ''', d^.ident.name);
+        if d^.declType <> nil then
+        begin
+          bufAdd(outBuf, ' = ');
+          addDescribedType(d^.declType);
+        end;
         loc(d^.loc);
-        indent := indent + 2;
-        printTypeSpec(d^.typeSpec);
-        indent := indent - 2;
+        if parseTree then
+        begin
+          indent := indent + 2;
+          printTypeSpec(d^.typeSpec);
+          indent := indent - 2;
+        end;
       end;
     dkVar:
       begin
@@ -279,6 +408,19 @@ begin
           vkValueParam: lineName('ParamDecl ''', d^.ident.name);
         else
           lineName('VarDecl ''', d^.ident.name);
+        end;
+        if not parseTree then
+        begin
+          if d^.varType <> nil then
+            typeSuffix(d^.varType)
+          else if (d^.varSpec <> nil) and (d^.varSpec^.kind = tsNamed) then
+          begin
+            bufAdd(outBuf, ' : ''');
+            bufAddName(outBuf, d^.varSpec^.tname.spelling);
+            bufAddChar(outBuf, '''');
+          end;
+          loc(d^.loc);
+          exit;
         end;
         loc(d^.loc);
         indent := indent + 2;
@@ -299,6 +441,7 @@ begin
           lineName('FunctionDecl ''', d^.ident.name)
         else
           lineName('ProcedureDecl ''', d^.ident.name);
+        typeSuffix(d^.resultType);
         if d^.isForward then
           bufAdd(outBuf, ' forward');
         if d^.isExternal then
@@ -310,11 +453,14 @@ begin
             bufAddName(outBuf, d^.externalName);
           bufAddChar(outBuf, '''');
         end;
+        if d^.canonical <> nil then
+          bufAdd(outBuf, ' definition');
         loc(d^.loc);
         indent := indent + 2;
-        for i := 0 to d^.params.count - 1 do
-          printDecl(PDecl(listGet(d^.params, i)));
-        if d^.resultSpec <> nil then
+        if d^.canonical = nil then
+          for i := 0 to d^.params.count - 1 do
+            printDecl(PDecl(listGet(d^.params, i)));
+        if parseTree and (d^.resultSpec <> nil) then
         begin
           line('Result');
           loc(d^.resultSpec^.b);
@@ -386,7 +532,8 @@ begin
     lineName('ProgramParam ''', id^.name);
     loc(id^.loc);
   end;
-  printUses(p^.progUses);
+  if parseTree then
+    printUses(p^.progUses);
   if p^.progBlock <> nil then
     printBlock(p^.progBlock);
   indent := indent - 2;
@@ -470,7 +617,7 @@ begin
     nkProcCall:
       begin
         lineName('ProcCallStmt ''', s^.callee.name);
-        if s^.hasParens then
+        if parseTree and s^.hasParens then
           bufAdd(outBuf, ' ()');
         loc(s^.b);
         indent := indent + 2;
@@ -556,6 +703,8 @@ begin
       begin
         line('GotoStmt ');
         bufAddName(outBuf, s^.lbl.name);
+        if (s^.lblDecl <> nil) and s^.lblDecl^.labelNonLocal then
+          bufAdd(outBuf, ' non-local');
         loc(s^.b);
       end;
     nkWith:
@@ -604,6 +753,10 @@ begin
     nkNameRef:
       begin
         lineName('NameRefExpr ''', e^.ref.name);
+        if e^.refDecl <> nil then
+          bufAdd(outBuf, ' ' + declKindName(e^.refDecl));
+        if e^.refWith <> nil then
+          bufAdd(outBuf, ' (with)');
         endExpr(e);
       end;
     nkParen:
@@ -745,8 +898,18 @@ var
 begin
   outBuf := outText;
   indent := 0;
+  parseTree := true;
   for i := 0 to units.count - 1 do
     printUnit(PDecl(listGet(units, i)));
+  printProgram(prog);
+  outText := outBuf;
+end;
+
+procedure printAST(var outText: TBuf; prog: PDecl);
+begin
+  outBuf := outText;
+  indent := 0;
+  parseTree := false;
   printProgram(prog);
   outText := outBuf;
 end;

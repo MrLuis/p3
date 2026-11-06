@@ -1,0 +1,603 @@
+unit pctypes;
+{ Semantic types of the self-hosted compiler: the predeclared types and the
+  type constructors (the C++ ASTContext), and the predicates, bounds and
+  names of src/ast/Type.cpp. TType itself is declared in pcast. }
+
+interface
+
+uses pcsys, pcutil, pcdiag, pcast;
+
+type
+  TOrdinalBounds = record
+    lo, hi: int64;
+  end;
+
+var
+  { predeclared types (singletons) }
+  tyErrorT, tyIntegerT, tyInt64T, tyCardinalT, tyByteT, tyWordT,
+  tyShortIntT, tySmallIntT, tyRealT, tyBooleanT, tyCharT, tyNilT,
+  tyEmptySetT, tyTextT, tyUntypedPointerT: PType;
+
+procedure initTypes;
+function newType(kind: TTypeKind): PType;
+function newIntegerType(bits: longint; signed: boolean; const name: string): PType;
+function newEnumType: PType;
+function newSubrangeType(host: PType; lo, hi: int64): PType;
+function newArrayType(index, element: PType; packed_: boolean): PType;
+function newRecordType(fl: PFieldList; const all: TPtrList; packed_: boolean): PType;
+function newPointerType(pointee: PType): PType;
+function newSetType(element: PType): PType;
+function newFileType(element: PType): PType;
+function newRoutineType(const params: TPtrList; result_: PType): PType;
+{ shared by element / length (all short string types are compatible) }
+function setConstructorType(element: PType): PType;
+function stringLiteralType(len: int64): PType;
+function shortStringType(maxLen: longint): PType;
+
+{ The first name given to t in a type declaration. }
+procedure setDeclName(t: PType; name: PName);
+{ integer, real, boolean, char, nil and the error type: never renamed }
+function isBuiltinType(t: PType): boolean;
+
+function isOrdinal(t: PType): boolean;
+function isSimple(t: PType): boolean;
+function isValidResultType(t: PType): boolean;
+function isStructured(t: PType): boolean;
+function getBase(t: PType): PType;
+function isIntegerLike(t: PType): boolean;
+function isSignedIntegerLike(t: PType): boolean;
+function isNumeric(t: PType): boolean;
+function isStringType(t: PType): boolean;
+function getStringLength(t: PType): int64;
+function isStringish(t: PType): boolean;
+function isTextFile(t: PType): boolean;
+function isEmptySet(t: PType): boolean;
+function isUntypedPointer(t: PType): boolean;
+function containsFile(t: PType): boolean;
+function findField(rec: PType; name: PName): PDecl;
+function getOrdinalBounds(t: PType): TOrdinalBounds;
+{ All integer types count as one host (Turbo/FPC). }
+function haveSameOrdinalHost(a, b: PType): boolean;
+{ Do L and R compare as short strings (Turbo/FPC)? }
+function needsStringCompare(l, r: PType): boolean;
+
+{ Type::getName, appended to b. }
+procedure bufAddTypeName(var b: TBuf; t: PType);
+{ A value of ordinal type t as in diagnostics: 'c', chr(n), true, red, 42. }
+procedure bufAddOrdinal(var b: TBuf; t: PType; v: int64);
+
+implementation
+
+var
+  nextTypeId: longint;
+  setTypes, stringLitTypes, shortStringTypes: TIntMap;
+
+function newType(kind: TTypeKind): PType;
+var
+  t: PType;
+begin
+  t := PType(arenaAlloc(sizeof(TType)));
+  t^.kind := kind;
+  nextTypeId := nextTypeId + 1;
+  t^.id := nextTypeId;
+  t^.declName := nil;
+  newType := t;
+end;
+
+function newIntegerType(bits: longint; signed: boolean; const name: string): PType;
+var
+  t: PType;
+begin
+  t := newType(tyInteger);
+  t^.bits := bits;
+  t^.isSigned := signed;
+  t^.intName := intern(name);
+  newIntegerType := t;
+end;
+
+function newEnumType: PType;
+var
+  t: PType;
+begin
+  t := newType(tyEnum);
+  listInit(t^.enumValues);
+  newEnumType := t;
+end;
+
+function newSubrangeType(host: PType; lo, hi: int64): PType;
+var
+  t: PType;
+begin
+  t := newType(tySubrange);
+  t^.host := host;
+  t^.lo := lo;
+  t^.hi := hi;
+  newSubrangeType := t;
+end;
+
+function newArrayType(index, element: PType; packed_: boolean): PType;
+var
+  t: PType;
+begin
+  t := newType(tyArray);
+  t^.indexType := index;
+  t^.elementType := element;
+  t^.isPackedArray := packed_;
+  newArrayType := t;
+end;
+
+function newRecordType(fl: PFieldList; const all: TPtrList; packed_: boolean): PType;
+var
+  t: PType;
+begin
+  t := newType(tyRecord);
+  t^.fieldList := fl;
+  t^.allFields := all;
+  t^.isPackedRecord := packed_;
+  newRecordType := t;
+end;
+
+function newPointerType(pointee: PType): PType;
+var
+  t: PType;
+begin
+  t := newType(tyPointer);
+  t^.pointee := pointee;
+  t^.untyped := false;
+  newPointerType := t;
+end;
+
+function newSetType(element: PType): PType;
+var
+  t: PType;
+begin
+  t := newType(tySet);
+  t^.setElement := element;
+  newSetType := t;
+end;
+
+function newFileType(element: PType): PType;
+var
+  t: PType;
+begin
+  t := newType(tyFile);
+  t^.fileElement := element;
+  t^.isText := false;
+  newFileType := t;
+end;
+
+function newRoutineType(const params: TPtrList; result_: PType): PType;
+var
+  t: PType;
+begin
+  t := newType(tyRoutine);
+  t^.routineParams := params;
+  t^.routineResult := result_;
+  newRoutineType := t;
+end;
+
+procedure initTypes;
+begin
+  mapInit(setTypes);
+  mapInit(stringLitTypes);
+  mapInit(shortStringTypes);
+  tyErrorT := newType(tyError);
+  tyIntegerT := newIntegerType(32, true, 'integer');
+  tyInt64T := newIntegerType(64, true, 'int64');
+  tyCardinalT := newIntegerType(32, false, 'cardinal');
+  tyByteT := newIntegerType(8, false, 'byte');
+  tyWordT := newIntegerType(16, false, 'word');
+  tyShortIntT := newIntegerType(8, true, 'shortint');
+  tySmallIntT := newIntegerType(16, true, 'smallint');
+  tyRealT := newType(tyReal);
+  tyBooleanT := newType(tyBoolean);
+  tyCharT := newType(tyChar);
+  tyNilT := newType(tyNil);
+  tyEmptySetT := newSetType(nil);
+  tyTextT := newFileType(tyCharT);
+  tyTextT^.isText := true;
+  tyUntypedPointerT := newPointerType(nil);
+  tyUntypedPointerT^.untyped := true;
+end;
+
+function setConstructorType(element: PType): PType;
+var
+  t: PType;
+begin
+  if element = nil then
+    exit(tyEmptySetT);
+  t := PType(mapGet(setTypes, element^.id));
+  if t = nil then
+  begin
+    t := newSetType(element);
+    mapPut(setTypes, element^.id, t);
+  end;
+  setConstructorType := t;
+end;
+
+function stringLiteralType(len: int64): PType;
+var
+  t: PType;
+begin
+  t := PType(mapGet(stringLitTypes, len));
+  if t = nil then
+  begin
+    t := newType(tyStringLit);
+    t^.strLength := len;
+    mapPut(stringLitTypes, len, t);
+  end;
+  stringLiteralType := t;
+end;
+
+function shortStringType(maxLen: longint): PType;
+var
+  t: PType;
+begin
+  t := PType(mapGet(shortStringTypes, maxLen));
+  if t = nil then
+  begin
+    t := newType(tyShortString);
+    t^.maxLength := maxLen;
+    mapPut(shortStringTypes, maxLen, t);
+  end;
+  shortStringType := t;
+end;
+
+procedure setDeclName(t: PType; name: PName);
+begin
+  if t^.declName = nil then
+    t^.declName := name;
+end;
+
+function isBuiltinType(t: PType): boolean;
+begin
+  isBuiltinType := t^.kind in [tyError, tyInteger, tyReal, tyBoolean, tyChar, tyNil];
+end;
+
+function isOrdinal(t: PType): boolean;
+begin
+  isOrdinal := t^.kind in [tyInteger, tyBoolean, tyChar, tyEnum, tySubrange];
+end;
+
+function isSimple(t: PType): boolean;
+begin
+  isSimple := isOrdinal(t) or (t^.kind = tyReal);
+end;
+
+function isValidResultType(t: PType): boolean;
+begin
+  isValidResultType := isSimple(t) or (t^.kind = tyPointer);
+end;
+
+function isStructured(t: PType): boolean;
+begin
+  isStructured := t^.kind in [tyArray, tyRecord, tyShortString];
+end;
+
+function getBase(t: PType): PType;
+begin
+  while t^.kind = tySubrange do
+    t := t^.host;
+  getBase := t;
+end;
+
+function isIntegerLike(t: PType): boolean;
+begin
+  isIntegerLike := getBase(t)^.kind = tyInteger;
+end;
+
+function isSignedIntegerLike(t: PType): boolean;
+var
+  b: PType;
+begin
+  b := getBase(t);
+  isSignedIntegerLike := (b^.kind = tyInteger) and b^.isSigned;
+end;
+
+function isNumeric(t: PType): boolean;
+begin
+  isNumeric := isIntegerLike(t) or (t^.kind = tyReal);
+end;
+
+{ a string literal, or packed array [1..n] of char }
+function isStringType(t: PType): boolean;
+var
+  idx: PType;
+begin
+  if t^.kind = tyStringLit then
+    exit(true);
+  if (t^.kind <> tyArray) or not t^.isPackedArray or
+     (t^.elementType^.kind <> tyChar) then
+    exit(false);
+  idx := t^.indexType;
+  isStringType := (idx^.kind = tySubrange) and (idx^.host^.kind = tyInteger) and
+                  (idx^.lo = 1) and (idx^.hi >= 1);
+end;
+
+function getStringLength(t: PType): int64;
+begin
+  if t^.kind = tyStringLit then
+    getStringLength := t^.strLength
+  else
+    getStringLength := t^.indexType^.hi;
+end;
+
+function isStringish(t: PType): boolean;
+begin
+  isStringish := (t^.kind = tyShortString) or isStringType(t) or
+                 (getBase(t)^.kind = tyChar);
+end;
+
+function isTextFile(t: PType): boolean;
+begin
+  isTextFile := (t^.kind = tyFile) and t^.isText;
+end;
+
+function isEmptySet(t: PType): boolean;
+begin
+  isEmptySet := (t^.kind = tySet) and (t^.setElement = nil);
+end;
+
+function isUntypedPointer(t: PType): boolean;
+begin
+  isUntypedPointer := (t^.kind = tyPointer) and t^.untyped;
+end;
+
+function containsFile(t: PType): boolean;
+var
+  i: longint;
+  f: PDecl;
+begin
+  case t^.kind of
+    tyFile: containsFile := true;
+    tyArray: containsFile := containsFile(t^.elementType);
+    tyRecord:
+      begin
+        for i := 0 to t^.allFields.count - 1 do
+        begin
+          f := PDecl(listGet(t^.allFields, i));
+          if (f^.fieldType <> nil) and containsFile(f^.fieldType) then
+            exit(true);
+        end;
+        containsFile := false;
+      end;
+  else
+    containsFile := false;
+  end;
+end;
+
+function findField(rec: PType; name: PName): PDecl;
+var
+  i: longint;
+  f: PDecl;
+begin
+  for i := 0 to rec^.allFields.count - 1 do
+  begin
+    f := PDecl(listGet(rec^.allFields, i));
+    if f^.ident.name = name then
+      exit(f);
+  end;
+  findField := nil;
+end;
+
+function getOrdinalBounds(t: PType): TOrdinalBounds;
+var
+  b: TOrdinalBounds;
+begin
+  case t^.kind of
+    tyInteger:
+      if t^.isSigned then
+      begin
+        if t^.bits = 64 then
+        begin
+          b.lo := low(int64);
+          b.hi := high(int64);
+        end
+        else
+        begin
+          b.lo := -(int64(1) shl (t^.bits - 1));
+          b.hi := (int64(1) shl (t^.bits - 1)) - 1;
+        end;
+      end
+      else
+      begin
+        b.lo := 0;
+        b.hi := (int64(1) shl t^.bits) - 1;
+      end;
+    tyChar:
+      begin
+        b.lo := 0;
+        b.hi := 255;
+      end;
+    tyBoolean:
+      begin
+        b.lo := 0;
+        b.hi := 1;
+      end;
+    tyEnum:
+      begin
+        b.lo := 0;
+        b.hi := t^.enumValues.count - 1;
+      end;
+    tySubrange:
+      begin
+        b.lo := t^.lo;
+        b.hi := t^.hi;
+      end;
+  else
+    begin
+      b.lo := 0;
+      b.hi := -1;
+    end;
+  end;
+  getOrdinalBounds := b;
+end;
+
+function haveSameOrdinalHost(a, b: PType): boolean;
+var
+  x, y: PType;
+begin
+  x := getBase(a);
+  y := getBase(b);
+  haveSameOrdinalHost := (x = y) or ((x^.kind = tyInteger) and (y^.kind = tyInteger));
+end;
+
+function needsStringCompare(l, r: PType): boolean;
+begin
+  if not isStringish(l) or not isStringish(r) then
+    exit(false);
+  if (getBase(l)^.kind = tyChar) and (getBase(r)^.kind = tyChar) then
+    exit(false);
+  if isStringType(l) and isStringType(r) and
+     (getStringLength(l) = getStringLength(r)) then
+    exit(false);
+  needsStringCompare := true;
+end;
+
+procedure bufAddOrdinal(var b: TBuf; t: PType; v: int64);
+var
+  base: PType;
+  c: char;
+begin
+  base := getBase(t);
+  if base^.kind = tyChar then
+  begin
+    c := chr(longint(v and 255));
+    if (c >= ' ') and (c <= '~') then
+    begin
+      bufAddChar(b, '''');
+      bufAddChar(b, c);
+      bufAddChar(b, '''');
+    end
+    else
+      bufAdd(b, 'chr(' + intToStr(v) + ')');
+    exit;
+  end;
+  if base^.kind = tyBoolean then
+  begin
+    if v <> 0 then
+      bufAdd(b, 'true')
+    else
+      bufAdd(b, 'false');
+    exit;
+  end;
+  if (base^.kind = tyEnum) and (v >= 0) and (v < base^.enumValues.count) then
+  begin
+    bufAddName(b, PDecl(listGet(base^.enumValues, longint(v)))^.ident.spelling);
+    exit;
+  end;
+  bufAddInt(b, v);
+end;
+
+procedure bufAddTypeName(var b: TBuf; t: PType);
+var
+  i: longint;
+  p: PDecl;
+begin
+  if t^.declName <> nil then
+  begin
+    bufAddName(b, t^.declName);
+    exit;
+  end;
+  case t^.kind of
+    tyError: bufAdd(b, '<error>');
+    tyInteger: bufAddName(b, t^.intName);
+    tyReal: bufAdd(b, 'real');
+    tyBoolean: bufAdd(b, 'boolean');
+    tyChar: bufAdd(b, 'char');
+    tyStringLit: bufAdd(b, 'string of length ' + intToStr(t^.strLength));
+    tyEnum:
+      begin
+        bufAddChar(b, '(');
+        for i := 0 to t^.enumValues.count - 1 do
+        begin
+          if i > 0 then
+            bufAdd(b, ', ');
+          bufAddName(b, PDecl(listGet(t^.enumValues, i))^.ident.spelling);
+        end;
+        bufAddChar(b, ')');
+      end;
+    tySubrange:
+      begin
+        bufAddOrdinal(b, t^.host, t^.lo);
+        bufAdd(b, '..');
+        bufAddOrdinal(b, t^.host, t^.hi);
+      end;
+    tyArray:
+      begin
+        if t^.isPackedArray then
+          bufAdd(b, 'packed ');
+        bufAdd(b, 'array [');
+        bufAddTypeName(b, t^.indexType);
+        bufAdd(b, '] of ');
+        bufAddTypeName(b, t^.elementType);
+      end;
+    tyRecord:
+      if t^.isPackedRecord then
+        bufAdd(b, 'packed record')
+      else
+        bufAdd(b, 'record');
+    tyPointer:
+      if t^.untyped then
+        bufAdd(b, 'pointer')
+      else
+      begin
+        bufAddChar(b, '^');
+        if t^.pointee <> nil then
+          bufAddTypeName(b, t^.pointee)
+        else
+          bufAddChar(b, '?');
+      end;
+    tyNil: bufAdd(b, 'nil');
+    tyShortString:
+      if t^.maxLength = 255 then
+        bufAdd(b, 'string')
+      else
+        bufAdd(b, 'string[' + intToStr(t^.maxLength) + ']');
+    tyRoutine:
+      begin
+        if t^.routineResult <> nil then
+          bufAdd(b, 'function(')
+        else
+          bufAdd(b, 'procedure(');
+        for i := 0 to t^.routineParams.count - 1 do
+        begin
+          p := PDecl(listGet(t^.routineParams, i));
+          if i > 0 then
+            bufAdd(b, '; ');
+          if p^.varKind = vkVarParam then
+            bufAdd(b, 'var ')
+          else if p^.varKind = vkConstParam then
+            bufAdd(b, 'const ');
+          if p^.varType <> nil then
+            bufAddTypeName(b, p^.varType)
+          else
+            bufAddChar(b, '?');
+        end;
+        bufAddChar(b, ')');
+        if t^.routineResult <> nil then
+        begin
+          bufAdd(b, ': ');
+          bufAddTypeName(b, t^.routineResult);
+        end;
+      end;
+    tyFile:
+      if t^.isText then
+        bufAdd(b, 'text')
+      else
+      begin
+        bufAdd(b, 'file of ');
+        bufAddTypeName(b, t^.fileElement);
+      end;
+    tySet:
+      if t^.setElement <> nil then
+      begin
+        bufAdd(b, 'set of ');
+        bufAddTypeName(b, t^.setElement);
+      end
+      else
+        bufAdd(b, 'empty set');
+  end;
+end;
+
+end.

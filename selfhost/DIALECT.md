@@ -128,6 +128,9 @@ More rules:
   `halt(code)` is allowed only in the driver.
 - **Not allowed:** `goto`/`label`, `with`, and assigning to a `for` loop
   variable or using it after the loop.
+- **`for` loop variables are locals** of the routine containing the loop,
+  never a variable of an enclosing routine (FPC and ISO Pascal reject that;
+  pcc accepts it in TP mode).
 - **Boolean operators:** `and` and `or` short-circuit, and code relies on it:
   `(p <> nil) and (p^.x = 1)`.
 - **Order of evaluation:** code must not depend on the order in which
@@ -147,6 +150,10 @@ More rules:
     `reallocmem(p, n)` on `nil` allocates.
 - **Pointer arithmetic:** none, and no `pchar` indexing. Index a pointer to a
   large array type instead (section 5).
+- **A statement never starts with a typecast or call** followed by
+  selectors (`PNode(p)^.next := nil`): pcc's parser reads `name(` at the
+  start of a statement as a procedure call. Assign the cast to a variable
+  first.
 - **Untyped pointers** are never dereferenced: cast first,
   `fillchar(PCharArray(p)^, n, 0)` (FPC accepts `p^`, pcc does not).
 
