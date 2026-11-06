@@ -358,6 +358,36 @@ void Parser::parseDeclarations(llvm::SmallVectorImpl<Decl *> &Decls,
   }
 }
 
+// typedConstValue = expression | aggregate .
+// aggregate = "(" typedConstValue { "," typedConstValue } ")"
+//           | "(" ident ":" typedConstValue { ";" ident ":" typedConstValue } ")" .
+// A parenthesized scalar `(1 + 2)` parses as a one-element aggregate.
+Expr *Parser::parseTypedConstValue() {
+  if (Tok.isNot(tok::l_paren))
+    return parseExpression();
+  SourceLocation LParen = consumeToken();
+  llvm::SmallVector<AggregateElement *, 8> Elems;
+  bool RecordForm = Tok.is(tok::identifier) && peekToken().is(tok::colon);
+  do {
+    if (RecordForm && Tok.is(tok::r_paren))
+      break; // (x: 1; y: 2;) -- trailing ';'
+    Identifier Field;
+    if (RecordForm && (!expectIdentifier(Field, "field name") ||
+                       !expect(tok::colon, "after field name")))
+      return nullptr;
+    Expr *V = parseTypedConstValue();
+    if (!V)
+      return nullptr;
+    Elems.push_back(Ctx.create<AggregateElement>(Field, V));
+  } while (tryConsume(RecordForm ? tok::semi : tok::comma));
+  if (!expect(tok::r_paren, "after typed constant value")) {
+    Diags.note(LParen, "to match this '('");
+    return nullptr;
+  }
+  return Ctx.create<AggregateExpr>(SourceRange(LParen, PrevTokEnd),
+                                   Ctx.copyArray<AggregateElement *>(Elems));
+}
+
 // constPart = "const" ident "=" constExpr ";" { ident "=" constExpr ";" } .
 void Parser::parseConstPart(llvm::SmallVectorImpl<Decl *> &Decls) {
   consumeToken(); // 'const'
@@ -374,7 +404,7 @@ void Parser::parseConstPart(llvm::SmallVectorImpl<Decl *> &Decls) {
       TypeSpec *TS = parseType();
       Expr *Init = nullptr;
       if (TS && expect(tok::equal, "in typed constant") &&
-          (Init = parseExpression())) {
+          (Init = parseTypedConstValue())) {
         auto *V = Ctx.create<VarDecl>(Name, TS);
         V->setInit(Init);
         Decls.push_back(V);
@@ -492,6 +522,42 @@ RoutineDecl *Parser::parseRoutineDecl(bool HeadingOnly) {
     skipUntil({tok::semi, tok::kw_begin, tok::kw_var, tok::kw_const,
                tok::kw_type});
   tryConsume(tok::semi);
+
+  // Turbo/FPC directives:  cdecl;  external ['lib'] [name 'symbol'];
+  bool IsExternal = false;
+  llvm::StringRef ExternalName;
+  while (LangOpts.Mode == LangMode::TP) {
+    if (isIdentifierNamed("cdecl")) { // the only calling convention
+      consumeToken();
+      expect(tok::semi, "after 'cdecl'");
+      continue;
+    }
+    if (!isIdentifierNamed("external"))
+      break;
+    consumeToken();
+    IsExternal = true;
+    if (Tok.is(tok::string_literal)) // library name: linking is the user's job
+      consumeToken();
+    if (isIdentifierNamed("name")) {
+      consumeToken();
+      if (Tok.is(tok::string_literal)) {
+        ExternalName = Tok.getStringValue();
+        consumeToken();
+      } else {
+        Diags.error(Tok.getLocation(), "expected the external symbol name");
+      }
+    }
+    expect(tok::semi, "after 'external'");
+  }
+  if (IsExternal) {
+    if (!Name.isValid())
+      return nullptr;
+    auto *R = Ctx.create<RoutineDecl>(Loc, Name, IsFunction,
+                                      Ctx.copyArray<VarDecl *>(Params),
+                                      HasParamList, ResultTS, nullptr, false);
+    R->setExternal(ExternalName);
+    return R;
+  }
 
   if (HeadingOnly) // interface part of a unit: the body comes later
     return Name.isValid()

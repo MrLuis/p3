@@ -306,6 +306,29 @@ public:
   static bool classof(const Expr *E) { return E->getKind() == EK_AddrOf; }
 };
 
+/// One element of an aggregate: `value` or `field: value`.
+struct AggregateElement {
+  Identifier Field;   ///< invalid for positional (array) elements
+  Expr *Value;        ///< an expression or a nested AggregateExpr
+  ConstValue Folded;  ///< set by Sema for expression values
+  AggregateElement(Identifier Field, Expr *Value) : Field(Field), Value(Value) {}
+};
+
+/// The value of a structured typed constant (Turbo/FPC):
+///   array:  (v1, v2, ...)        record:  (f1: v1; f2: v2)
+class AggregateExpr final : public Expr {
+  llvm::ArrayRef<AggregateElement *> Elements;
+
+public:
+  AggregateExpr(SourceRange R, llvm::ArrayRef<AggregateElement *> Elements)
+      : Expr(EK_Aggregate, R), Elements(Elements) {}
+  llvm::ArrayRef<AggregateElement *> getElements() const { return Elements; }
+  bool isRecordForm() const {
+    return !Elements.empty() && Elements[0]->Field.isValid();
+  }
+  static bool classof(const Expr *E) { return E->getKind() == EK_Aggregate; }
+};
+
 //===----------------------------------------------------------------------===//
 // Statements
 //===----------------------------------------------------------------------===//
@@ -885,6 +908,9 @@ class RoutineDecl final : public Decl {
   RoutineDecl *Parent = nullptr;    ///< enclosing routine; null at program level
   unsigned Level = 1;               ///< 1 = declared in the program block
   VarDecl *ResultVar = nullptr;     ///< functions: storage for the result
+  /// Turbo/FPC `external ['lib'] [name 'sym']`: a C function, no body.
+  bool IsExternal = false;
+  llvm::StringRef ExternalName;     ///< the C symbol (empty: the Pascal name)
 
 public:
   RoutineDecl(SourceLocation Loc, Identifier Name, bool IsFunction,
@@ -917,6 +943,12 @@ public:
   void setResultVar(VarDecl *V) { ResultVar = V; }
   /// Nested routines get a hidden pointer to the parent's frame.
   bool hasStaticLink() const { return Parent != nullptr; }
+  bool isExternal() const { return IsExternal; }
+  llvm::StringRef getExternalName() const { return ExternalName; }
+  void setExternal(llvm::StringRef Sym) {
+    IsExternal = true;
+    ExternalName = Sym;
+  }
   static bool classof(const Decl *D) { return D->getKind() == DK_Routine; }
 };
 

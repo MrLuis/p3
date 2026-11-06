@@ -155,6 +155,7 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
 
   llvm::DenseMap<VarDecl *, llvm::GlobalVariable *> Globals;
   llvm::DenseMap<RoutineDecl *, llvm::Function *> Functions;
+  llvm::DenseMap<RoutineDecl *, llvm::FunctionCallee> ExternalFns;
   llvm::DenseMap<RoutineDecl *, llvm::StructType *> FrameTypes;
   llvm::DenseMap<VarDecl *, unsigned> FrameSlots;
   llvm::DenseMap<Type *, llvm::Type *> LoweredTypes;
@@ -1089,8 +1090,46 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
 
   /// Initial value of a typed constant (or zero).
   llvm::Constant *initializerFor(VarDecl *V, llvm::Type *Ty) {
-    const ConstValue &C = V->getInitValue();
-    Type *T = V->getType();
+    if (V->getInit())
+      return constantFor(V->getInit(), V->getInitValue(), V->getType(), Ty);
+    return llvm::Constant::getNullValue(Ty);
+  }
+
+  /// The constant for a typed-constant initializer Init of type T (memory
+  /// type Ty); Folded is Sema's value for non-aggregates.
+  llvm::Constant *constantFor(Expr *Init, const ConstValue &Folded, Type *T,
+                              llvm::Type *Ty) {
+    auto *Agg = llvm::dyn_cast<AggregateExpr>(Init);
+    if (!Agg)
+      return scalarConstant(Folded, T, Ty);
+    auto Elems = Agg->getElements();
+    if (auto *A = llvm::dyn_cast<ArrayType>(T)) {
+      auto *ATy = llvm::cast<llvm::ArrayType>(Ty);
+      llvm::SmallVector<llvm::Constant *, 16> Values;
+      for (AggregateElement *El : Elems)
+        Values.push_back(constantFor(El->Value, El->Folded, A->getElementType(),
+                                     ATy->getElementType()));
+      return llvm::ConstantArray::get(ATy, Values);
+    }
+    if (auto *R = llvm::dyn_cast<RecordType>(T)) {
+      // Fixed fields only (Sema rejects variant parts); missing ones are 0.
+      auto *ST = llvm::cast<llvm::StructType>(Ty);
+      llvm::SmallVector<llvm::Constant *, 16> Values;
+      auto Fixed = R->getFieldList()->Fixed;
+      for (unsigned I = 0; I < Fixed.size(); ++I) {
+        llvm::Type *FTy = ST->getElementType(I);
+        llvm::Constant *C = llvm::Constant::getNullValue(FTy);
+        for (AggregateElement *El : Elems)
+          if (El->Field.Name == Fixed[I]->getName().Name)
+            C = constantFor(El->Value, El->Folded, Fixed[I]->getType(), FTy);
+        Values.push_back(C);
+      }
+      return llvm::ConstantStruct::get(ST, Values);
+    }
+    return constantFor(Elems[0]->Value, Folded, T, Ty); // (scalar)
+  }
+
+  llvm::Constant *scalarConstant(const ConstValue &C, Type *T, llvm::Type *Ty) {
     switch (C.K) {
     case ConstValue::Ordinal:
       if (T->isReal())
@@ -1162,11 +1201,27 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
     return llvm::FunctionType::get(RetTy, ParamTys, false);
   }
 
+  /// An external (C) routine: no static link, C types.
+  void declareExternal(RoutineDecl *R) {
+    llvm::SmallVector<llvm::Type *, 8> ParamTys;
+    for (VarDecl *P : R->getParams())
+      ParamTys.push_back(P->isVarParam() ? B.getPtrTy() : regType(P->getType()));
+    llvm::Type *RetTy = R->isFunction() ? regType(R->getResultType()) : B.getVoidTy();
+    llvm::StringRef Sym = R->getExternalName().empty() ? R->getName().Spelling
+                                                       : R->getExternalName();
+    ExternalFns[R] = M.getOrInsertFunction(
+        Sym, llvm::FunctionType::get(RetTy, ParamTys, /*isVarArg=*/false));
+  }
+
   void declareRoutines(Block &Blk) {
     for (Decl *D : Blk.getDecls()) {
       auto *R = llvm::dyn_cast<RoutineDecl>(D);
       if (!R || R->isRedeclaration())
         continue; // the forward declaration is the canonical node
+      if (R->isExternal()) {
+        declareExternal(R);
+        continue;
+      }
 
       // Frame: [static link], params, locals, [result].
       llvm::SmallVector<llvm::Type *, 8> Slots;
@@ -1298,11 +1353,15 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
   llvm::Value *emitCallTo(llvm::FunctionCallee Callee, llvm::Value *Link,
                           llvm::ArrayRef<VarDecl *> Params,
                           llvm::ArrayRef<Expr *> Args) {
-    llvm::SmallVector<llvm::Value *, 8> Values{Link};
+    llvm::SmallVector<llvm::Value *, 8> Values;
+    if (Link) // external (C) routines have none
+      Values.push_back(Link);
     for (size_t I = 0; I < Args.size(); ++I) {
       VarDecl *P = Params[I];
       Expr *Arg = Args[I];
-      if (llvm::isa<RoutineType>(P->getType()))
+      if (llvm::Constant *CStr = cStringFor(P->getType(), Arg))
+        Values.push_back(CStr);
+      else if (llvm::isa<RoutineType>(P->getType()))
         Values.push_back(emitRoutineValue(Arg));
       else if (P->isConstParam() && P->getType()->isShortString())
         Values.push_back(emitPStr(Arg)); // read-only: no copy
@@ -1328,7 +1387,28 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
     return Result;
   }
 
+  /// A string constant passed for a pchar parameter: a NUL-terminated copy.
+  llvm::Constant *cStringFor(Type *ParamTy, Expr *Arg) {
+    auto *P = llvm::dyn_cast<PointerType>(ParamTy);
+    if (!P || P->isUntyped() || !P->getPointee() || !P->getPointee()->isChar())
+      return nullptr;
+    if (auto *SL = llvm::dyn_cast<StringLiteralExpr>(Arg))
+      return B.CreateGlobalString(SL->getValue(), ".cstr");
+    auto *N = llvm::dyn_cast<NameRefExpr>(Arg);
+    auto *C = N ? llvm::dyn_cast_or_null<ConstDecl>(N->getDecl()) : nullptr;
+    if (!C)
+      return nullptr;
+    if (C->getValue().K == ConstValue::String)
+      return B.CreateGlobalString(C->getValue().Str, ".cstr");
+    if (C->getValue().K == ConstValue::Ordinal && C->getType()->getBase()->isChar())
+      return B.CreateGlobalString(
+          std::string(1, static_cast<char>(C->getValue().Int)), ".cstr");
+    return nullptr;
+  }
+
   llvm::Value *emitCall(RoutineDecl *R, llvm::ArrayRef<Expr *> Args) {
+    if (R->isExternal())
+      return emitCallTo(ExternalFns[R], nullptr, R->getParams(), Args);
     return emitCallTo(Functions[R], staticLinkFor(R), R->getParams(), Args);
   }
 
@@ -2504,6 +2584,10 @@ public:
 
   llvm::Value *visitFormattedExpr(FormattedExpr *) {
     llvm_unreachable("formatted expressions are handled by emitWriteArg");
+  }
+
+  llvm::Value *visitAggregateExpr(AggregateExpr *) {
+    llvm_unreachable("aggregates only initialize typed constants");
   }
 
   llvm::Value *visitAddrOfExpr(AddrOfExpr *E) {

@@ -126,6 +126,10 @@ class Checker : public StmtVisitor<Checker>,
       Ty("shortint", Ctx.getShortIntType());
       Ty("smallint", Ctx.getSmallIntType());
       Ty("double", Ctx.getRealType());
+      // pchar: a pointer to char, for C strings (external routines).
+      auto *PChar = Ctx.create<PointerType>(Ctx.getCharType());
+      PChar->setDeclName("pchar");
+      Ty("pchar", PChar);
     }
 
     // The standard files (ISO 7185 6.10).
@@ -897,24 +901,123 @@ class Checker : public StmtVisitor<Checker>,
       // Typed constants are static: they keep their value across calls.
       V->setOwner(nullptr);
       Used.insert(V);
-      if (auto C = evaluateConstant(Init, "typed constant value")) {
-        Type *T = V->getType();
-        if (!T->isError() && !(T->isSimple() || T->isShortString() ||
-                               T->isStringType()))
-          Diags.error(Init->getBeginLoc(),
-                      "typed constants of type " + quoted(T) +
-                          " are not supported (only simple types and strings)",
-                      {Init->getRange()});
-        else if (!T->isError() && !isAssignable(T, C->Ty))
-          Diags.error(Init->getBeginLoc(),
-                      "cannot initialize " + quoted(T) + " with a value of type " +
-                          quoted(C->Ty),
-                      {Init->getRange()});
-        else
-          V->setInitValue(C->Value);
-      }
+      ConstValue Folded;
+      if (!V->getType()->isError() && checkConstInit(Init, V->getType(), Folded))
+        V->setInitValue(Folded);
     }
     declare(V);
+  }
+
+  /// Is T an array of char (any index type) that a string constant of
+  /// length N initializes (Turbo/FPC)?
+  static bool isCharArrayOfLength(Type *T, uint64_t N) {
+    auto *A = llvm::dyn_cast<ArrayType>(T);
+    if (!A || !A->getElementType()->isChar())
+      return false;
+    OrdinalBounds Bd = getOrdinalBounds(A->getIndexType());
+    return static_cast<uint64_t>(Bd.Hi - Bd.Lo + 1) == N;
+  }
+
+  /// Checks the initial value of a typed constant of type T: a constant
+  /// expression (folded into Folded) or, for arrays and records, an
+  /// aggregate whose elements are checked recursively.
+  bool checkConstInit(Expr *Init, Type *T, ConstValue &Folded) {
+    if (auto *Agg = llvm::dyn_cast<AggregateExpr>(Init)) {
+      Agg->setType(T);
+      auto Elems = Agg->getElements();
+      if (auto *A = llvm::dyn_cast<ArrayType>(T)) {
+        OrdinalBounds Bd = getOrdinalBounds(A->getIndexType());
+        uint64_t Want = static_cast<uint64_t>(Bd.Hi - Bd.Lo + 1);
+        if (Agg->isRecordForm() || Elems.size() != Want) {
+          Diags.error(Init->getBeginLoc(),
+                      "initializer for " + quoted(T) + " must list " +
+                          std::to_string(Want) + " element" +
+                          (Want == 1 ? "" : "s") + ", separated by ','",
+                      {Init->getRange()});
+          return false;
+        }
+        bool OK = true;
+        for (AggregateElement *El : Elems)
+          OK &= checkConstInit(El->Value, A->getElementType(), El->Folded);
+        return OK;
+      }
+      if (auto *R = llvm::dyn_cast<RecordType>(T)) {
+        if (R->getFieldList()->Variant) {
+          Diags.error(Init->getBeginLoc(),
+                      "typed constants of records with variant parts are not "
+                      "supported",
+                      {Init->getRange()});
+          return false;
+        }
+        if (!Agg->isRecordForm()) {
+          Diags.error(Init->getBeginLoc(),
+                      "initializer for record " + quoted(T) +
+                          " must name its fields: (field: value; ...)",
+                      {Init->getRange()});
+          return false;
+        }
+        bool OK = true;
+        llvm::StringSet<> Seen;
+        for (AggregateElement *El : Elems) {
+          FieldDecl *F = R->findField(El->Field.Name);
+          if (!F) {
+            Diags.error(El->Field.Loc,
+                        "no field named '" + El->Field.Spelling + "' in " +
+                            quoted(T),
+                        {El->Field.getRange()});
+            OK = false;
+            continue;
+          }
+          if (!Seen.insert(El->Field.Name).second) {
+            Diags.error(El->Field.Loc,
+                        "field '" + El->Field.Spelling + "' is initialized twice",
+                        {El->Field.getRange()});
+            OK = false;
+            continue;
+          }
+          OK &= checkConstInit(El->Value, F->getType(), El->Folded);
+        }
+        return OK;
+      }
+      if (Elems.size() == 1 && !Agg->isRecordForm()) // (1 + 2) for a scalar
+        return checkConstInit(Elems[0]->Value, T, Folded);
+      Diags.error(Init->getBeginLoc(),
+                  "a parenthesized list cannot initialize " + quoted(T),
+                  {Init->getRange()});
+      return false;
+    }
+
+    auto C = evaluateConstant(Init, "typed constant value");
+    if (!C)
+      return false;
+    bool CharArray = C->Value.K == ConstValue::String &&
+                     isCharArrayOfLength(T, C->Value.Str.size());
+    if (!CharArray && !(T->isSimple() || T->isShortString() || T->isStringType())) {
+      Diags.error(Init->getBeginLoc(),
+                  "typed constants of type " + quoted(T) +
+                      " need a parenthesized initializer",
+                  {Init->getRange()});
+      return false;
+    }
+    if (!CharArray && !isAssignable(T, C->Ty)) {
+      Diags.error(Init->getBeginLoc(),
+                  "cannot initialize " + quoted(T) + " with a value of type " +
+                      quoted(C->Ty),
+                  {Init->getRange()});
+      return false;
+    }
+    if (C->Value.K == ConstValue::Ordinal && T->isOrdinal()) {
+      OrdinalBounds Bd = getOrdinalBounds(T);
+      if (C->Value.Int < Bd.Lo || C->Value.Int > Bd.Hi) {
+        Diags.error(Init->getBeginLoc(),
+                    "value " + formatValue(C->Ty, C->Value.Int) +
+                        " is out of range for " + quoted(T),
+                    {Init->getRange()});
+        return false;
+      }
+    }
+    Folded = C->Value;
+    return true;
   }
 
   /// Resolves a routine's parameter and result types.
@@ -1006,8 +1109,52 @@ class Checker : public StmtVisitor<Checker>,
 
     resolveSignature(R);
     declare(R);
+    if (R->isExternal())
+      checkExternal(R);
     if (R->getBody())
       checkRoutineBody(R);
+  }
+
+  /// External (C) routines: declared at the outermost level, with
+  /// parameters and result of types that have a C equivalent.
+  void checkExternal(RoutineDecl *R) {
+    if (CurRoutine)
+      Diags.error(R->getName().Loc,
+                  "external routine '" + R->getName().Spelling +
+                      "' must be declared at program or unit level",
+                  {R->getName().getRange()});
+    auto CType = [](Type *T) {
+      return T->isError() || T->isReal() || T->isPointer() ||
+             (T->isOrdinal() && !T->getBase()->isBoolean());
+    };
+    for (VarDecl *P : R->getParams())
+      if (P->getType() && !P->isVarParam() && !CType(P->getType()))
+        Diags.error(P->getLocation(),
+                    "parameter '" + P->getName().Spelling + "' of external routine '" +
+                        R->getName().Spelling + "' has type " +
+                        quoted(P->getType()) +
+                        "; use integer, real, char, pointer or var parameters",
+                    {P->getName().getRange()});
+    if (R->isFunction() && !CType(R->getResultType()))
+      Diags.error(R->getName().Loc,
+                  "external function '" + R->getName().Spelling +
+                      "' cannot return " + quoted(R->getResultType()),
+                  {R->getName().getRange()});
+  }
+
+  /// A string constant passed where a pchar is expected (Turbo/FPC): the
+  /// compiler supplies a NUL-terminated copy.
+  bool isPCharLiteral(Type *Target, Expr *Value) {
+    auto *P = llvm::dyn_cast<PointerType>(Target);
+    if (isISO() || !P || P->isUntyped() || !P->getPointee() ||
+        !P->getPointee()->isChar())
+      return false;
+    if (llvm::isa<StringLiteralExpr>(Value))
+      return true;
+    auto *N = llvm::dyn_cast<NameRefExpr>(Value);
+    auto *C = N ? llvm::dyn_cast_or_null<ConstDecl>(N->getDecl()) : nullptr;
+    return C && (C->getValue().K == ConstValue::String ||
+                 (C->getType() && C->getType()->getBase()->isChar()));
   }
 
   void checkRoutineBody(RoutineDecl *R) {
@@ -1399,7 +1546,7 @@ class Checker : public StmtVisitor<Checker>,
           checkNotForControlVar(Arg);
         continue;
       }
-      if (!isAssignable(PT, AT))
+      if (!isAssignable(PT, AT) && !isPCharLiteral(PT, Arg))
         Diags.error(Arg->getBeginLoc(),
                     "cannot pass a value of type " + quoted(AT) +
                         " to parameter '" + PName.Spelling + "' of type " +
@@ -2084,7 +2231,8 @@ public:
     CurUnitInterface = Iface.get();
     declareAll(*U.getImplementation());
     for (Decl *D : U.getInterface()->getDecls())
-      if (auto *R = llvm::dyn_cast<RoutineDecl>(D); R && !R->getBody())
+      if (auto *R = llvm::dyn_cast<RoutineDecl>(D);
+          R && !R->getBody() && !R->isExternal())
         Diags.error(R->getName().Loc,
                     "'" + R->getName().Spelling +
                         "' is declared in the interface of unit '" +
@@ -2841,6 +2989,14 @@ public:
   }
 
   Type *visitNilExpr(NilExpr *) { return Ctx.getNilType(); }
+
+  Type *visitAggregateExpr(AggregateExpr *E) {
+    Diags.error(E->getBeginLoc(),
+                "a parenthesized list is only allowed as the value of a typed "
+                "constant",
+                {E->getRange()});
+    return errorType();
+  }
 
   Type *visitAddrOfExpr(AddrOfExpr *E) {
     Type *T = check(E->getOperand());

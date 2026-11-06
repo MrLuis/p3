@@ -116,6 +116,11 @@ class ASTPrinter : public StmtVisitor<ASTPrinter>,
         type(R->getResultType());
       if (R->isForward())
         OS << " forward";
+      if (R->isExternal())
+        OS << " external '"
+           << (R->getExternalName().empty() ? R->getName().Spelling
+                                            : R->getExternalName())
+           << '\'';
       if (R->isRedeclaration())
         OS << " definition";
       loc(R->getLocation());
@@ -325,6 +330,21 @@ public:
     end(E);
     IndentScope I(Indent);
     visitExpr(E->getBase());
+  }
+
+  void visitAggregateExpr(AggregateExpr *E) {
+    line("AggregateExpr");
+    end(E);
+    IndentScope I(Indent);
+    for (AggregateElement *El : E->getElements()) {
+      if (El->Field.isValid()) {
+        line("Field '") << El->Field.Name << '\'';
+        IndentScope J(Indent);
+        visitExpr(El->Value);
+      } else {
+        visitExpr(El->Value);
+      }
+    }
   }
 
   void visitAddrOfExpr(AddrOfExpr *E) {

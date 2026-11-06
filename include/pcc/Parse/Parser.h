@@ -89,6 +89,8 @@ class Parser {
   bool startsStatement() const;
   bool startsDeclarationPart() const;
   bool isIdentifierNamed(llvm::StringRef Name) const;
+  /// The value of a typed constant: an expression or (TP) an aggregate.
+  Expr *parseTypedConstValue();
 
   // Declarations
   Block *parseBlock();
