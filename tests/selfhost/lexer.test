@@ -1,0 +1,10 @@
+; S4: the self-hosted lexer. The generated tables must be current, the
+; sources must follow the dialect, and the Pascal compiler built by pcc must
+; print exactly the same --emit-tokens output, diagnostics and exit status
+; as the C++ pcc for every .pas file in the repository, in both modes.
+; (Also run, by hand: the fuzz corpus and iso7185pat.pas; see SELFHOST.md.)
+; RUN: python3 %S/../../utils/gen-selfhost-tables.py --check
+; RUN: python3 %S/../../utils/selfhost-lint.py %S/../../selfhost/pcsys.pas %S/../../selfhost/pcutil.pas %S/../../selfhost/pcdiag.pas %S/../../selfhost/pclex.pas %S/../../selfhost/pcc.pas
+; RUN: %pcc --mode=tp -I %S/../../selfhost %S/../../selfhost/pcc.pas -o %t.pcc
+; RUN: python3 %S/../../utils/selfhost-diff.py --ref pcc --new %t.pcc %S/.. %S/../../selfhost | FileCheck %s
+; CHECK: runs, 0 differ

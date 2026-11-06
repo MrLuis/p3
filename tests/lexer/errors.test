@@ -41,3 +41,8 @@
 ; LIMIT:      many-errors.pas:2:1: error: invalid character '#'
 ; LIMIT:      pcc: fatal error: too many errors emitted, stopping now
 ; LIMIT-NOT:  error:
+
+; A NUL byte is shown as \x00 (two hex digits).
+; RUN: printf 'program a;\000 begin end.' > %t.nul.pas
+; RUN: not %pcc --emit-tokens %t.nul.pas 2>&1 | FileCheck --check-prefix=NUL %s
+; NUL: error: invalid character '\x00' in source

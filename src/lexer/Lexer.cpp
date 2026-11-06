@@ -433,9 +433,12 @@ void Lexer::lex(Token &T) {
     }
 
     // Invalid character: report, skip it, and keep lexing.
-    std::string Shown =
-        llvm::isPrint(C) ? std::string(1, C)
-                         : "\\x" + llvm::utohexstr((unsigned char)C, false, 2);
+    // Two hex digits. (llvm::utohexstr with a width prints "000" for 0.)
+    static const char Hex[] = "0123456789ABCDEF";
+    unsigned char U = static_cast<unsigned char>(C);
+    std::string Shown = llvm::isPrint(C)
+                            ? std::string(1, C)
+                            : std::string("\\x") + Hex[U >> 4] + Hex[U & 15];
     Diags.error(locOf(Start), "invalid character '" + Shown + "' in source",
                 {SourceRange(locOf(Start), locOf(Cur))});
   }

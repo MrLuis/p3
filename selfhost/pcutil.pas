@@ -90,6 +90,13 @@ procedure bufWrite(const b: TBuf; f: pointer);
 
 { Text }
 function intToStr(v: int64): string;
+{ v's 64 bits read as an unsigned number (literals up to 2^64-1). }
+function uintToStr(v: int64): string;
+{ C printf "%.<prec>g" of x, exactly (correctly rounded, as glibc). }
+function formatG(x: double; prec: longint): string;
+{ Appends p[start..start+count) escaped like llvm::raw_ostream::
+  write_escaped: \\ \t \n \" and octal escapes for unprintable bytes. }
+procedure bufAddEscaped(var b: TBuf; p: PCharArray; start, count: int64);
 function lowerChar(c: char): char;
 function lowerStr(const s: string): string;
 
@@ -549,6 +556,254 @@ begin
   if neg then
     s := '-' + s;
   intToStr := s;
+end;
+
+function uintToStr(v: int64): string;
+var
+  q, r: int64;
+begin
+  if v >= 0 then
+    exit(intToStr(v));
+  { u div 10 = (u shr 1) div 5; the remainder wraps back into 0..9 }
+  q := (v shr 1) div 5;
+  {$Q-}{$R-}
+  r := v - q * 10;
+  {$Q+}{$R+}
+  uintToStr := intToStr(q) + chr(ord('0') + longint(r));
+end;
+
+type
+  TDoubleBits = record
+    case boolean of
+      true: (d: double);
+      false: (bits: int64);
+  end;
+  { a big natural number: base 1e9 limbs, least significant first }
+  TBigNum = record
+    limb: array[0..127] of int64;
+    count: longint;
+  end;
+  TDigits = array[0..1199] of char;
+
+procedure bigMul(var n: TBigNum; factor: int64);
+var
+  i: longint;
+  carry, t: int64;
+begin
+  carry := 0;
+  for i := 0 to n.count - 1 do
+  begin
+    t := n.limb[i] * factor + carry;
+    n.limb[i] := t mod 1000000000;
+    carry := t div 1000000000;
+  end;
+  while carry > 0 do
+  begin
+    n.limb[n.count] := carry mod 1000000000;
+    carry := carry div 1000000000;
+    n.count := n.count + 1;
+  end;
+end;
+
+{ The decimal digits of n into d (most significant first); returns the
+  number of digits. }
+function bigDigits(const n: TBigNum; var d: TDigits): longint;
+var
+  i, j, len: longint;
+  v: int64;
+  part: array[0..8] of char;
+begin
+  len := 0;
+  for i := n.count - 1 downto 0 do
+  begin
+    v := n.limb[i];
+    for j := 8 downto 0 do
+    begin
+      part[j] := chr(ord('0') + longint(v mod 10));
+      v := v div 10;
+    end;
+    for j := 0 to 8 do
+      if (len > 0) or (part[j] <> '0') or ((i = 0) and (j = 8)) then
+      begin
+        d[len] := part[j];
+        len := len + 1;
+      end;
+  end;
+  bigDigits := len;
+end;
+
+function formatG(x: double; prec: longint): string;
+var
+  o: TDoubleBits;
+  neg: boolean;
+  expBits, e2, len, decExp, i, k: longint;
+  mant: int64;
+  n: TBigNum;
+  d: TDigits;
+  roundUp: boolean;
+  s, mantissa, frac: string;
+begin
+  o.d := x;
+  neg := o.bits < 0;
+  expBits := longint((o.bits shr 52) and $7FF);
+  mant := o.bits and $FFFFFFFFFFFFF;
+  if neg then
+    s := '-'
+  else
+    s := '';
+  if expBits = $7FF then
+  begin
+    if mant = 0 then
+      exit(s + 'inf');
+    exit(s + 'nan');
+  end;
+  if (expBits = 0) and (mant = 0) then
+    exit(s + '0');
+  if prec <= 0 then
+    prec := 1;
+  { x = mant * 2^e2 }
+  if expBits = 0 then
+    e2 := -1074
+  else
+  begin
+    mant := mant + (int64(1) shl 52);
+    e2 := expBits - 1075;
+  end;
+  { exact decimal digits: x = digits * 10^decExp }
+  n.count := 0;
+  while mant > 0 do
+  begin
+    n.limb[n.count] := mant mod 1000000000;
+    mant := mant div 1000000000;
+    n.count := n.count + 1;
+  end;
+  decExp := 0;
+  if e2 >= 0 then
+    for i := 1 to e2 do
+      bigMul(n, 2)
+  else
+  begin
+    { mant / 2^k = mant * 5^k / 10^k }
+    for i := 1 to -e2 do
+      bigMul(n, 5);
+    decExp := e2;
+  end;
+  len := bigDigits(n, d);
+  { round to prec significant digits, half to even on the exact value }
+  if len > prec then
+  begin
+    roundUp := false;
+    if d[prec] > '5' then
+      roundUp := true
+    else if d[prec] = '5' then
+    begin
+      for k := prec + 1 to len - 1 do
+        if d[k] <> '0' then
+          roundUp := true;
+      if not roundUp then
+        roundUp := odd(ord(d[prec - 1]) - ord('0'));
+    end;
+    decExp := decExp + (len - prec);
+    len := prec;
+    if roundUp then
+    begin
+      k := len - 1;
+      while (k >= 0) and (d[k] = '9') do
+      begin
+        d[k] := '0';
+        k := k - 1;
+      end;
+      if k >= 0 then
+        d[k] := chr(ord(d[k]) + 1)
+      else
+      begin
+        { 999 -> 1000: one more digit; drop the last zero }
+        for k := len - 1 downto 1 do
+          d[k] := d[k - 1];
+        d[0] := '1';
+        decExp := decExp + 1;
+      end;
+    end;
+  end;
+  while len < prec do
+  begin
+    d[len] := '0';
+    len := len + 1;
+    decExp := decExp - 1;
+  end;
+  { the exponent of the first digit }
+  k := len - 1 + decExp;
+  if (k < -4) or (k >= prec) then
+  begin
+    mantissa := d[0];
+    frac := '';
+    for i := 1 to prec - 1 do
+      frac := frac + d[i];
+    while (length(frac) > 0) and (frac[length(frac)] = '0') do
+      delete(frac, length(frac), 1);
+    if frac <> '' then
+      mantissa := mantissa + '.' + frac;
+    if k < 0 then
+      mantissa := mantissa + 'e-'
+    else
+      mantissa := mantissa + 'e+';
+    if abs(k) < 10 then
+      mantissa := mantissa + '0';
+    formatG := s + mantissa + intToStr(abs(k));
+    exit;
+  end;
+  { fixed notation with prec - 1 - k fraction digits }
+  if k >= 0 then
+  begin
+    for i := 0 to k do
+      s := s + d[i];
+    frac := '';
+    for i := k + 1 to prec - 1 do
+      frac := frac + d[i];
+  end
+  else
+  begin
+    s := s + '0';
+    frac := '';
+    for i := 1 to -k - 1 do
+      frac := frac + '0';
+    for i := 0 to prec - 1 do
+      frac := frac + d[i];
+  end;
+  while (length(frac) > 0) and (frac[length(frac)] = '0') do
+    delete(frac, length(frac), 1);
+  if frac <> '' then
+    s := s + '.' + frac;
+  formatG := s;
+end;
+
+procedure bufAddEscaped(var b: TBuf; p: PCharArray; start, count: int64);
+var
+  i: int64;
+  c: char;
+begin
+  {$R-}
+  for i := start to start + count - 1 do
+  begin
+    c := p^[i];
+    case c of
+      '\': bufAdd(b, '\\');
+      #9: bufAdd(b, '\t');
+      #10: bufAdd(b, '\n');
+      '"': bufAdd(b, '\"');
+    else
+      if (c >= ' ') and (c <= '~') then
+        bufAddChar(b, c)
+      else
+      begin
+        bufAddChar(b, '\');
+        bufAddChar(b, chr(ord('0') + (ord(c) shr 6) and 7));
+        bufAddChar(b, chr(ord('0') + (ord(c) shr 3) and 7));
+        bufAddChar(b, chr(ord('0') + ord(c) and 7));
+      end;
+    end;
+  end;
+  {$R+}
 end;
 
 function lowerChar(c: char): char;

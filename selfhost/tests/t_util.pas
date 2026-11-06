@@ -3,6 +3,14 @@ program t_util;
 
 uses pcsys, pcutil;
 
+procedure checkG(x: double; const want: string);
+begin
+  if formatG(x, 6) = want then
+    sysWrite(sysOut, 'ok   %g ' + want + #10)
+  else
+    sysWrite(sysOut, 'FAIL %g ' + want + ': got ' + formatG(x, 6) + #10);
+end;
+
 procedure check(ok: boolean; const what: string);
 begin
   if ok then
@@ -107,5 +115,31 @@ begin
   sysWrite(sysOut, intToStr(0) + ' ' + intToStr(7) + ' ' + intToStr(-7) + ' ' +
                    intToStr(high(int64)) + ' ' + intToStr(low(int64)) + #10);
   check(lowerStr('MixedCase_09') = 'mixedcase_09', 'lowerStr');
+
+  { formatG = C printf %g (expected values from Python's '%g') }
+  checkG(0.1, '0.1');
+  checkG(1e10, '1e+10');
+  checkG(123456, '123456');
+  checkG(1234567, '1.23457e+06');
+  checkG(0.0001, '0.0001');
+  checkG(0.00001234, '1.234e-05');
+  checkG(-2.5, '-2.5');
+  checkG(1e-310, '1e-310');
+  checkG(1.7976931348623157e308, '1.79769e+308');
+  checkG(5e-324, '4.94066e-324');
+  checkG(100, '100');
+  checkG(0.5, '0.5');
+  checkG(9.9999996, '10');
+  checkG(2.5e-5, '2.5e-05');
+  check(formatG(1.0, 17) = '1', 'formatG precision 17');
+  check(uintToStr(-1) = '18446744073709551615', 'uintToStr(2^64-1)');
+  check(uintToStr(low(int64)) = '9223372036854775808', 'uintToStr(2^63)');
+  check(uintToStr(42) = '42', 'uintToStr small');
+  bufInit(b);
+  s := 'a\b' + #9 + '"' + #10 + #0 + #200;
+  bufAddEscaped(b, PCharArray(@s[1]), 0, length(s));
+  bufAddChar(b, #10);
+  bufWrite(b, sysOut);
+  bufFree(b);
   sysFlush;
 end.

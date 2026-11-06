@@ -25,13 +25,18 @@ procedure sysFlush;
 { Flushes the output streams and ends the program with the given status. }
 procedure sysExit(code: longint);
 
-{ Reads a whole file into a new buffer of len bytes followed by #0.
-  Returns false if it cannot be opened or read. }
+{ Reads a whole file ('-': standard input) into a new buffer of len bytes
+  followed by #0. Returns false if it cannot be opened or read. }
 function sysReadFile(const path: string; var data: PCharArray;
                      var len: int64): boolean;
 { Writes count bytes of p to a file; false on failure. }
 function sysWriteFile(const path: string; p: PCharArray; count: int64): boolean;
+{ Why path cannot be read, as strerror would say it (errno is not portable
+  to reach): missing, or present but unreadable. }
+function sysOpenError(const path: string): string;
 function sysFileExists(const path: string): boolean;
+{ Does path name a file that is not a directory? }
+function sysIsRegularFile(const path: string): boolean;
 procedure sysRemoveFile(const path: string);
 
 { The environment variable name, if set. }
@@ -42,6 +47,8 @@ function sysRun(const cmd: string): longint;
 function sysIsTerminal(fd: longint): boolean;
 { The double written in s (C strtod); ok is false if s is not a number. }
 function sysStrToReal(const s: string; var ok: boolean): double;
+{ +infinity (built from its bits: computing it would trap under FPC). }
+function sysInfinity: double;
 
 implementation
 
@@ -111,7 +118,10 @@ begin
   data := nil;
   len := 0;
   toC(path, cpath);
-  f := c_fopen(@cpath[1], 'rb');
+  if path = '-' then
+    f := c_fdopen(0, 'rb')
+  else
+    f := c_fopen(@cpath[1], 'rb');
   if f = nil then
     exit;
   cap := 65536;
@@ -127,7 +137,8 @@ begin
     {$R+}
     len := len + got;
   until got = 0;
-  c_fclose(f);
+  if path <> '-' then
+    c_fclose(f);
   {$R-}
   data^[len] := #0;
   {$R+}
@@ -149,6 +160,19 @@ begin
   sysWriteFile := ok;
 end;
 
+function c_access(path: pchar; mode: longint): longint; cdecl; external 'c' name 'access';
+
+function sysOpenError(const path: string): string;
+var
+  cpath: string;
+begin
+  toC(path, cpath);
+  if c_access(@cpath[1], 0) <> 0 then
+    sysOpenError := 'No such file or directory'
+  else
+    sysOpenError := 'Permission denied';
+end;
+
 function sysFileExists(const path: string): boolean;
 var
   cpath: string;
@@ -159,6 +183,23 @@ begin
   if f <> nil then
     c_fclose(f);
   sysFileExists := f <> nil;
+end;
+
+function c_opendir(path: pchar): pointer; cdecl; external 'c' name 'opendir';
+function c_closedir(d: pointer): longint; cdecl; external 'c' name 'closedir';
+
+function sysIsRegularFile(const path: string): boolean;
+var
+  cpath: string;
+  d: pointer;
+begin
+  if not sysFileExists(path) then
+    exit(false);
+  toC(path, cpath);
+  d := c_opendir(@cpath[1]);
+  if d <> nil then
+    c_closedir(d);
+  sysIsRegularFile := d = nil;
 end;
 
 procedure sysRemoveFile(const path: string);
@@ -207,6 +248,20 @@ end;
 function sysIsTerminal(fd: longint): boolean;
 begin
   sysIsTerminal := c_isatty(fd) <> 0;
+end;
+
+function sysInfinity: double;
+type
+  TOverlay = record
+    case boolean of
+      true: (d: double);
+      false: (bits: int64);
+  end;
+var
+  o: TOverlay;
+begin
+  o.bits := $7FF0000000000000;
+  sysInfinity := o.d;
 end;
 
 function sysStrToReal(const s: string; var ok: boolean): double;

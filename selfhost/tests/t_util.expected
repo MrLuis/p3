@@ -25,3 +25,22 @@ ok   bufCharAt
 WriteLn -42
 0 7 -7 9223372036854775807 -9223372036854775808
 ok   lowerStr
+ok   %g 0.1
+ok   %g 1e+10
+ok   %g 123456
+ok   %g 1.23457e+06
+ok   %g 0.0001
+ok   %g 1.234e-05
+ok   %g -2.5
+ok   %g 1e-310
+ok   %g 1.79769e+308
+ok   %g 4.94066e-324
+ok   %g 100
+ok   %g 0.5
+ok   %g 10
+ok   %g 2.5e-05
+ok   formatG precision 17
+ok   uintToStr(2^64-1)
+ok   uintToStr(2^63)
+ok   uintToStr small
+a\\b\t\"\n\000\310
