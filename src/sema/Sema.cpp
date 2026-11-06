@@ -188,16 +188,26 @@ class Checker : public StmtVisitor<Checker>,
     unsigned Best =
         (Name.size() <= 3 ? 1 : std::max<unsigned>(2, Name.size() / 3)) + 1;
     std::string Result;
-    for (const Scope *S = Cur; S; S = S->getParent())
+    // Inner scopes win; within a scope, the closest name, and among equally
+    // close ones the alphabetically first (independent of hash order, so
+    // the self-hosted compiler can match it).
+    for (const Scope *S = Cur; S; S = S->getParent()) {
+      unsigned ScopeBest = Best;
+      std::string ScopeResult;
       S->forEachName([&](llvm::StringRef Candidate) {
         if (Candidate.starts_with("#") || Candidate == Name)
           return;
         unsigned D = Name.edit_distance(Candidate, true, Best - 1);
-        if (D < Best) {
-          Best = D;
-          Result = Candidate.str();
+        if (D < ScopeBest || (D == ScopeBest && D < Best && Candidate < ScopeResult)) {
+          ScopeBest = D;
+          ScopeResult = Candidate.str();
         }
       });
+      if (ScopeBest < Best) {
+        Best = ScopeBest;
+        Result = ScopeResult;
+      }
+    }
     return Result;
   }
 
@@ -448,8 +458,10 @@ class Checker : public StmtVisitor<Checker>,
           return Constant{T, ConstValue::real(-V->Value.RealVal)};
         return Constant{T, ConstValue::ordinal(static_cast<int64_t>(
                                0 - static_cast<uint64_t>(V->Value.Int)))};
-      case UnaryOp::Not:
-        return Constant{T, ConstValue::ordinal(!V->Value.Int)};
+      case UnaryOp::Not: // boolean not, or bitwise in the operand's type
+        if (T->getBase()->isBoolean())
+          return Constant{T, ConstValue::ordinal(!V->Value.Int)};
+        return Constant{T, ConstValue::ordinal(castOrdinalValue(~V->Value.Int, T))};
       }
       return std::nullopt;
     }
@@ -532,21 +544,33 @@ class Checker : public StmtVisitor<Checker>,
       if (!V || V->Value.K == ConstValue::String)
         return std::nullopt;
       auto Ord = [&](int64_t X) { return Constant{T, ConstValue::ordinal(X)}; };
+      // Integer results wrap around in 64 bits (no undefined behavior).
+      auto U = static_cast<uint64_t>(V->Value.Int);
       switch (BD->getBuiltinKind()) {
       case BuiltinKind::Ord: case BuiltinKind::Chr: return Ord(V->Value.Int);
-      case BuiltinKind::Succ: return Ord(V->Value.Int + 1);
-      case BuiltinKind::Pred: return Ord(V->Value.Int - 1);
+      case BuiltinKind::Succ: return Ord(static_cast<int64_t>(U + 1));
+      case BuiltinKind::Pred: return Ord(static_cast<int64_t>(U - 1));
       case BuiltinKind::Odd:  return Ord(V->Value.Int & 1);
       case BuiltinKind::Abs:
         if (V->Value.K == ConstValue::Real)
           return Constant{T, ConstValue::real(std::fabs(V->Value.RealVal))};
-        return Ord(V->Value.Int < 0 ? -V->Value.Int : V->Value.Int);
+        return Ord(V->Value.Int < 0 ? static_cast<int64_t>(0 - U) : V->Value.Int);
       case BuiltinKind::Sqr:
         if (V->Value.K == ConstValue::Real)
           return Constant{T, ConstValue::real(V->Value.RealVal * V->Value.RealVal)};
-        return Ord(V->Value.Int * V->Value.Int);
-      case BuiltinKind::Trunc: return Ord(static_cast<int64_t>(asReal(*V)));
-      case BuiltinKind::Round: return Ord(static_cast<int64_t>(std::round(asReal(*V))));
+        return Ord(static_cast<int64_t>(U * U));
+      case BuiltinKind::Trunc:
+      case BuiltinKind::Round: {
+        // ISO rounds halves away from zero; Turbo/FPC to even (as codegen).
+        double X = asReal(*V);
+        if (BD->getBuiltinKind() == BuiltinKind::Round)
+          X = isISO() ? std::round(X) : std::nearbyint(X);
+        else
+          X = std::trunc(X);
+        if (!(X >= -9223372036854775808.0 && X < 9223372036854775808.0))
+          return std::nullopt; // out of range: left to the runtime check
+        return Ord(static_cast<int64_t>(X));
+      }
       default: return std::nullopt;
       }
     }
