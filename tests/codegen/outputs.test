@@ -1,0 +1,37 @@
+; Output kinds: -c, -S, --emit-llvm, executables, default names, cross targets.
+; RUN: rm -rf %t.dir && mkdir -p %t.dir
+
+; RUN: %pcc -c %S/../driver/Inputs/hello.pas -o %t.dir/hello.o
+; RUN: llvm-nm %t.dir/hello.o | FileCheck --check-prefix=OBJ %s
+; OBJ-DAG: T main
+; OBJ-DAG: U __pas_init
+; OBJ-DAG: U __pas_write_str
+
+; RUN: %pcc -S %S/../driver/Inputs/hello.pas -o %t.dir/hello.s
+; RUN: FileCheck --check-prefix=ASM %s < %t.dir/hello.s
+; ASM: main:
+
+; Default output names are derived from the input file.
+; RUN: cd %t.dir && %pcc -c %S/../driver/Inputs/hello.pas && %pcc -S %S/../driver/Inputs/hello.pas
+; RUN: cd %t.dir && %pcc --emit-llvm %S/../driver/Inputs/hello.pas && %pcc %S/../driver/Inputs/hello.pas
+; RUN: cd %t.dir && ls hello.o hello.s hello.ll hello
+; RUN: %t.dir/hello | FileCheck --check-prefix=EXEC %s
+; RUN: FileCheck --check-prefix=IR %s < %t.dir/hello.ll
+; EXEC: Hello, World!
+; IR: define i32 @main(
+
+; Cross compilation to objects works for any LLVM target...
+; RUN: %pcc -c --target=riscv64-unknown-linux-gnu %S/../driver/Inputs/hello.pas -o %t.dir/rv.o
+; RUN: llvm-readobj --file-headers %t.dir/rv.o | FileCheck --check-prefix=RV %s
+; RV: Machine: EM_RISCV
+; ...but linking executables is host-only for now.
+; RUN: not %pcc --target=riscv64-unknown-linux-gnu %S/../driver/Inputs/hello.pas -o %t.dir/rv 2>&1 | FileCheck --check-prefix=XLINK %s
+; XLINK: error: linking for a non-host target ('riscv64-unknown-linux-gnu') is not supported yet; use -c, -S or --emit-llvm
+
+; -g is accepted but not implemented yet.
+; RUN: %pcc -g -c %S/../driver/Inputs/hello.pas -o %t.dir/g.o 2>&1 | FileCheck --check-prefix=G %s
+; G: warning: debug information (-g) is not implemented yet; ignored
+
+; Missing runtime library is reported clearly.
+; RUN: env PCC_RUNTIME_LIB=%t.dir/nope.a not %pcc %S/../driver/Inputs/hello.pas -o %t.dir/x 2>&1 | FileCheck --check-prefix=NORT %s
+; NORT: error: cannot find the Pascal runtime library '{{.*}}nope.a'; set PCC_RUNTIME_LIB

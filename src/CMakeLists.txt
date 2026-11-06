@@ -14,10 +14,32 @@ add_library(pccLexer STATIC
 )
 target_link_libraries(pccLexer PUBLIC pccBasic)
 
+add_library(pccAST STATIC
+  ast/ASTPrinter.cpp
+)
+target_link_libraries(pccAST PUBLIC pccBasic)
+
+add_library(pccParse STATIC
+  parse/Parser.cpp
+)
+target_link_libraries(pccParse PUBLIC pccLexer pccAST)
+
+add_library(pccSema STATIC
+  sema/Sema.cpp
+)
+target_link_libraries(pccSema PUBLIC pccAST)
+
+add_library(pccCodeGen STATIC
+  codegen/CodeGen.cpp
+  codegen/Backend.cpp
+)
+target_link_libraries(pccCodeGen PUBLIC pccAST)
+
 add_library(pccDriver STATIC
   driver/Driver.cpp
+  driver/Linker.cpp
 )
-target_link_libraries(pccDriver PUBLIC pccLexer)
+target_link_libraries(pccDriver PUBLIC pccParse pccSema pccCodeGen)
 
 add_executable(pcc driver/main.cpp)
 target_link_libraries(pcc PRIVATE pccDriver)

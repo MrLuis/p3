@@ -1,0 +1,36 @@
+; --emit-ast for the M2 grammar: program heading, compound / empty /
+; procedure-call statements, integer / string / char literals.
+
+; RUN: %pcc --emit-ast %S/../driver/Inputs/hello.pas | FileCheck --check-prefix=HELLO %s
+; HELLO:      ProgramDecl 'hello' <1:1>
+; HELLO-NEXT:   ProgramParam 'output' <1:15>
+; HELLO-NEXT:   CompoundStmt <2:1>
+; HELLO-NEXT:     ProcCallStmt 'writeln' <3:3>
+; HELLO-NEXT:       StringLiteralExpr "Hello, World!" <3:11>
+; HELLO-EMPTY:
+
+; RUN: %pcc --emit-ast %S/Inputs/statements.pas | FileCheck --check-prefix=STMTS %s
+; STMTS:      ProgramDecl 'stmts' <1:1>
+; STMTS-NEXT:   CompoundStmt <2:1>
+; STMTS-NEXT:     ProcCallStmt 'writeln' <3:3>
+; STMTS-NEXT:     ProcCallStmt 'write' <4:3>
+; STMTS-NEXT:       CharLiteralExpr "a" <4:9>
+; STMTS-NEXT:       StringLiteralExpr "bc" <4:14>
+; STMTS-NEXT:       IntegerLiteralExpr 42 <4:20>
+; STMTS-NEXT:     EmptyStmt <5:3>
+; STMTS-NEXT:     CompoundStmt <6:3>
+; STMTS-NEXT:       ProcCallStmt 'writeln' <7:5>
+; STMTS-NEXT:         StringLiteralExpr "nested" <7:13>
+; STMTS-NEXT:     EmptyStmt <9:1>
+; STMTS-EMPTY:
+
+; Program parameters are optional; an empty body holds one empty statement.
+; RUN: %pcc --emit-ast %S/Inputs/minimal.pas | FileCheck --check-prefix=MIN %s
+; MIN:      ProgramDecl 'm' <1:1>
+; MIN-NEXT:   CompoundStmt <1:12>
+; MIN-NEXT:     EmptyStmt <1:18>
+; MIN-EMPTY:
+
+; Text after the final '.' is ignored with a warning (exit code 0).
+; RUN: %pcc --emit-ast %S/Inputs/trailing.pas 2>&1 >/dev/null | FileCheck --check-prefix=TRAIL %s
+; TRAIL: trailing.pas:4:1: warning: text after end of program is ignored

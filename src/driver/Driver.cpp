@@ -1,11 +1,24 @@
 #include "pcc/Driver/Driver.h"
+#include "pcc/AST/ASTContext.h"
+#include "pcc/AST/ASTPrinter.h"
+#include "pcc/CodeGen/Backend.h"
+#include "pcc/CodeGen/CodeGen.h"
+#include "pcc/Driver/Linker.h"
 #include "pcc/Lexer/Lexer.h"
+#include "pcc/Parse/Parser.h"
+#include "pcc/Sema/Sema.h"
+
+#include "llvm/ADT/SmallString.h"
+#include "llvm/IR/LLVMContext.h"
+#include "llvm/IR/Module.h"
+#include "llvm/Support/ErrorHandling.h"
+#include "llvm/Support/FileUtilities.h"
+#include "llvm/Target/TargetMachine.h"
 
 #include "llvm/MC/TargetRegistry.h"
 #include "llvm/Support/FileSystem.h"
 #include "llvm/Support/Format.h"
 #include "llvm/Support/Path.h"
-#include "llvm/Support/TargetSelect.h"
 #include "llvm/Support/raw_ostream.h"
 #include "llvm/TargetParser/Host.h"
 #include "llvm/TargetParser/Triple.h"
@@ -79,7 +92,7 @@ bool Driver::validateOptions() {
 }
 
 bool Driver::validateTarget() {
-  llvm::InitializeAllTargetInfos();
+  initializeAllLLVMTargets();
   std::string TripleStr = Opts.TargetTriple.empty()
                               ? llvm::sys::getDefaultTargetTriple()
                               : llvm::Triple::normalize(Opts.TargetTriple);
@@ -104,24 +117,102 @@ int Driver::run() {
   }
 
   FileID FID = *FIDOrErr;
+  bool OK = runPipeline(FID);
+  return OK && !Diags.hasErrors() ? 0 : 1;
+}
 
-  // Pipeline stages are added milestone by milestone:
-  //   M1 lexer -> M2 parser/AST -> M4 sema -> M3 codegen/object/link.
-  if (Opts.Act != Action::EmitTokens) {
-    Diags.error(llvm::Twine(getActionName(Opts.Act)) +
-                " is not implemented yet");
-    return 1;
-  }
-
+/// Opens Opts.OutputFile for a text dump, reporting failures.
+static std::unique_ptr<llvm::raw_fd_ostream>
+openTextOutput(llvm::StringRef Path, DiagnosticsEngine &Diags) {
   std::error_code EC;
-  llvm::raw_fd_ostream Out(Opts.OutputFile, EC, llvm::sys::fs::OF_Text);
+  auto OS = std::make_unique<llvm::raw_fd_ostream>(Path, EC,
+                                                   llvm::sys::fs::OF_Text);
   if (EC) {
-    Diags.error("cannot open output file '" + llvm::Twine(Opts.OutputFile) +
-                "': " + EC.message());
-    return 1;
+    Diags.error("cannot open output file '" + Path + "': " + EC.message());
+    return nullptr;
   }
-  dumpTokens(FID, Out);
-  return Diags.hasErrors() ? 1 : 0;
+  return OS;
+}
+
+bool Driver::runPipeline(FileID FID) {
+  // --- M1: lexing ---------------------------------------------------------
+  if (Opts.Act == Action::EmitTokens) {
+    auto OS = openTextOutput(Opts.OutputFile, Diags);
+    if (!OS)
+      return false;
+    dumpTokens(FID, *OS);
+    return true;
+  }
+
+  // --- M2: parsing --------------------------------------------------------
+  ASTContext Ctx(Strings);
+  Lexer Lex(SM, FID, Diags, Strings, LangOpts);
+  Parser P(Lex, Diags, Ctx);
+  ProgramDecl *Program = P.parseProgram();
+
+  if (Opts.Act == Action::EmitAST) {
+    // Dump even after errors: a partial tree helps debugging the parser.
+    auto OS = openTextOutput(Opts.OutputFile, Diags);
+    if (!OS)
+      return false;
+    printAST(*Program, SM, *OS);
+    return true;
+  }
+  if (Diags.hasErrors())
+    return false;
+
+  // --- semantic analysis (minimal until M4) -------------------------------
+  if (!Sema(Diags).check(*Program))
+    return false;
+
+  // --- M3: code generation ------------------------------------------------
+  if (Opts.DebugInfo)
+    Diags.warning("debug information (-g) is not implemented yet; ignored");
+
+  bool IsHost = llvm::Triple(Opts.TargetTriple) ==
+                llvm::Triple(llvm::sys::getDefaultTargetTriple());
+  if (Opts.Act == Action::EmitExe && !IsHost) {
+    Diags.error("linking for a non-host target ('" +
+                llvm::Twine(Opts.TargetTriple) +
+                "') is not supported yet; use -c, -S or --emit-llvm");
+    return false;
+  }
+
+  auto TM = createTargetMachine(Opts.TargetTriple, Opts.OptLevel, Diags);
+  if (!TM)
+    return false;
+
+  llvm::LLVMContext LLVMCtx;
+  auto M = generateModule(*Program, LLVMCtx, *TM,
+                          SM.getFilename(FID));
+  if (!verifyModule(*M, Diags))
+    return false;
+  optimizeModule(*M, *TM, Opts.OptLevel);
+
+  switch (Opts.Act) {
+  case Action::EmitLLVM:
+    return emitOutput(*M, *TM, OutputKind::LLVMIR, Opts.OutputFile, Diags);
+  case Action::EmitAsm:
+    return emitOutput(*M, *TM, OutputKind::Assembly, Opts.OutputFile, Diags);
+  case Action::EmitObj:
+    return emitOutput(*M, *TM, OutputKind::Object, Opts.OutputFile, Diags);
+  case Action::EmitExe:
+    break;
+  default:
+    llvm_unreachable("dump actions handled above");
+  }
+
+  // Executable: object file in a temp dir, then link.
+  llvm::SmallString<128> ObjPath;
+  if (std::error_code EC =
+          llvm::sys::fs::createTemporaryFile("pcc", "o", ObjPath)) {
+    Diags.error("cannot create temporary file: " + EC.message());
+    return false;
+  }
+  llvm::FileRemover RemoveObj(ObjPath);
+  if (!emitOutput(*M, *TM, OutputKind::Object, ObjPath, Diags))
+    return false;
+  return linkExecutable(ObjPath, Opts.OutputFile, Diags);
 }
 
 void Driver::dumpTokens(FileID FID, llvm::raw_ostream &OS) {

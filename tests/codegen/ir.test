@@ -1,0 +1,21 @@
+; LLVM IR for write/writeln lowering (PLAN.md section 6).
+; RUN: %pcc --emit-llvm %S/Inputs/write.pas -o - | FileCheck %s
+; CHECK: @.str = private unnamed_addr constant [3 x i8] c"bc\00"
+; CHECK: declare void @__pas_init(i32, ptr)
+; CHECK: define i32 @main(i32 %argc, ptr %argv) {
+; CHECK-NEXT: entry:
+; CHECK-NEXT:   call void @__pas_init(i32 %argc, ptr %argv)
+; CHECK-NEXT:   call void @__pas_write_char(i8 97, i32 0)
+; CHECK-NEXT:   call void @__pas_write_str(ptr @.str, i64 2, i32 0)
+; CHECK-NEXT:   call void @__pas_write_int(i32 7, i32 0)
+; CHECK-NEXT:   call void @__pas_writeln()
+; CHECK-NEXT:   call void @__pas_fini()
+; CHECK-NEXT:   ret i32 0
+; CHECK-NEXT: }
+
+; The optimizer keeps the observable runtime calls.
+; RUN: %pcc --emit-llvm -O2 %S/Inputs/write.pas -o - | FileCheck --check-prefix=O2 %s
+; O2: define {{.*}}i32 @main(
+; O2: call void @__pas_write_char(i8 97, i32 0)
+; O2: call void @__pas_writeln()
+; O2: ret i32 0

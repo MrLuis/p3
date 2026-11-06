@@ -1,0 +1,28 @@
+//===- ASTNodes.def - Every AST node class ------------------------*- C++ -*-===//
+//
+// X-macro list of concrete AST node classes. Adding a node here makes the
+// visitors (ASTVisitor.h) fail to compile until every visitor handles it.
+//
+//   EXPR(Name)  -> class NameExpr  : Expr, kind Expr::EK_Name
+//   STMT(Name)  -> class NameStmt  : Stmt, kind Stmt::SK_Name
+//
+//===----------------------------------------------------------------------===//
+
+#ifndef EXPR
+#define EXPR(CLASS)
+#endif
+#ifndef STMT
+#define STMT(CLASS)
+#endif
+
+// Expressions (M2). M4 adds names, unary/binary operators, function calls.
+EXPR(IntegerLiteral)
+EXPR(StringLiteral)
+
+// Statements (M2). M4 adds assignment; M5 if/while/repeat/for/case.
+STMT(Empty)
+STMT(Compound)
+STMT(ProcCall)
+
+#undef STMT
+#undef EXPR

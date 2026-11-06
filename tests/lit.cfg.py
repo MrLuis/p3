@@ -12,7 +12,7 @@ import lit.formats
 config.name = "pcc"
 config.test_format = lit.formats.ShTest(execute_external=False)
 config.suffixes = [".pas", ".test"]
-config.excludes = ["Inputs", "CMakeLists.txt", "lit.cfg.py", "lit.site.cfg.py"]
+config.excludes = ["Inputs", "CMakeLists.txt", "lit.cfg.py", "lit.site.cfg.py", "README.md"]
 
 config.test_source_root = os.path.dirname(__file__)
 config.test_exec_root = os.path.join(config.pcc_obj_root, "tests")

@@ -3,8 +3,21 @@
 `pcc` compiles Pascal (ISO 7185, with optional Turbo/Free Pascal extensions)
 to native executables through LLVM. See [PLAN.md](PLAN.md) for the roadmap.
 
-**Status:** M1 (lexer) complete: `pcc --emit-tokens` tokenizes ISO Pascal
-(plus Turbo/FPC keywords with `--mode=tp`). The parser (M2) is next.
+**Status:** M3 complete: programs made of `write`/`writeln` calls with string,
+char and integer literals compile to native executables. Next up is M4
+(variables, expressions, type checking).
+
+```pascal
+program hello(output);
+begin
+  writeln('Hello, World!')
+end.
+```
+
+```sh
+$ pcc hello.pas && ./hello
+Hello, World!
+```
 
 ## Requirements
 
@@ -12,6 +25,9 @@ to native executables through LLVM. See [PLAN.md](PLAN.md) for the roadmap.
   `llvm-19-dev llvm-19-tools clang-19`; macOS: `brew install llvm@19`
 - CMake ≥ 3.20, Ninja, a C++20 compiler
 - `lit` (`pip install lit`)
+- At run time, a C compiler driver (`clang` or `cc`) is used as the linker;
+  override with `PCC_CC`. The runtime library is found at
+  `<pcc dir>/../lib/libpascalrt.a` (override with `PCC_RUNTIME_LIB`).
 
 ## Build & test
 
@@ -37,9 +53,14 @@ pcc --help                    # all options (-O0..3, -g, --target, --mode=iso|tp
 
 | Path | Contents |
 |---|---|
-| `include/pcc/`, `src/` | compiler sources (`basic/` = source manager & diagnostics, `driver/` = CLI) |
-| `runtime/` | `libpascalrt` C runtime (from M3) |
-| `tests/` | lit tests (`*.test`, `*.pas`) and C++ unit tests (`tests/unit/`) |
+| `src/basic/` | source manager, diagnostics |
+| `src/lexer/` | tokens (`TokenKinds.def`) and lexer |
+| `src/ast/`, `src/parse/` | AST nodes (`ASTNodes.def`), printer, recursive-descent parser |
+| `src/sema/` | semantic checks |
+| `src/codegen/` | AST → LLVM IR, optimization, object/asm emission |
+| `src/driver/` | command line, pipeline, linking |
+| `runtime/` | `libpascalrt` C runtime (ABI in `runtime/include/pascalrt.h`) |
+| `tests/` | lit tests: `lexer/ parser/ sema/ codegen/ driver/`, `run/` (compile + execute + diff), C++ unit tests in `unit/` |
 
 ## Writing tests
 

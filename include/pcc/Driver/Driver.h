@@ -24,6 +24,9 @@ class Driver {
   bool validateOptions();
   bool validateTarget();
 
+  /// lex -> parse -> sema -> codegen -> emit/link, stopping at Opts.Act.
+  bool runPipeline(FileID FID);
+
   /// --emit-tokens
   void dumpTokens(FileID FID, llvm::raw_ostream &OS);
 
