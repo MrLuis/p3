@@ -1,0 +1,13 @@
+; --emit-tokens writes to stdout by default, or to -o <file>.
+; RUN: %pcc --emit-tokens %S/Inputs/hello.pas | FileCheck %s
+; RUN: %pcc --emit-tokens %S/Inputs/hello.pas -o %t.tokens
+; RUN: FileCheck %s < %t.tokens
+; CHECK:      1:1 kw_program 'program'
+; CHECK-NEXT: 1:9 identifier 'hello' name=hello
+; CHECK:      3:3 identifier 'writeln' name=writeln
+; CHECK-NEXT: 3:10 l_paren '('
+; CHECK-NEXT: 3:11 string_literal ''Hello, World!'' value="Hello, World!"
+; CHECK-NEXT: 3:26 r_paren ')'
+; CHECK-NEXT: 4:1 kw_end 'end'
+; CHECK-NEXT: 4:4 period '.'
+; CHECK-NEXT: 5:1 eof ''

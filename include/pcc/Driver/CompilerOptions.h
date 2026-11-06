@@ -7,6 +7,8 @@
 #ifndef PCC_DRIVER_COMPILEROPTIONS_H
 #define PCC_DRIVER_COMPILEROPTIONS_H
 
+#include "pcc/Basic/LangOptions.h"
+
 #include <string>
 
 namespace pcc {
@@ -19,12 +21,6 @@ enum class Action {
   EmitAsm,    ///< -S            : target assembly (.s)
   EmitObj,    ///< -c            : object file (.o)
   EmitExe,    ///< (default)     : linked executable
-};
-
-/// Accepted language dialect.
-enum class LangMode {
-  ISO, ///< ISO 7185 Standard Pascal
-  TP,  ///< Turbo / Free Pascal extensions
 };
 
 enum class ColorMode { Auto, Always, Never };

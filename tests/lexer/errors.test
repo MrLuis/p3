@@ -1,0 +1,43 @@
+; Lexer error reporting and recovery. Diagnostics go to stderr, tokens to
+; stdout, so each is checked separately. The lexer always recovers and the
+; exit code is 1.
+
+; RUN: not %pcc --emit-tokens %S/Inputs/unterminated-string.pas 2>%t.err | FileCheck --check-prefix=STR %s
+; RUN: FileCheck --check-prefix=STR-ERR %s < %t.err
+; STR-ERR: unterminated-string.pas:1:6: error: unterminated string literal
+; STR:      1:6 string_literal ''abc' value="abc"
+; STR-NEXT: 2:1 identifier 'b'
+
+; RUN: not %pcc --emit-tokens %S/Inputs/unterminated-brace.pas 2>%t.err | FileCheck --check-prefix=CMT %s
+; RUN: FileCheck --check-prefix=CMT-ERR %s < %t.err
+; RUN: not %pcc --emit-tokens %S/Inputs/unterminated-paren.pas 2>&1 >/dev/null | FileCheck --check-prefix=CMT-ERR2 %s
+; CMT-ERR: unterminated-brace.pas:1:3: error: unterminated comment
+; CMT-ERR2: unterminated-paren.pas:1:3: error: unterminated comment
+; CMT:      1:1 identifier 'a'
+; CMT-NEXT: eof
+
+; RUN: not %pcc --emit-tokens %S/Inputs/invalid-chars.pas 2>%t.err | FileCheck --check-prefix=INV %s
+; RUN: FileCheck --check-prefix=INV-ERR %s < %t.err
+; INV-ERR: invalid-chars.pas:1:3: error: invalid character '#' in source
+; INV-ERR: invalid-chars.pas:1:7: error: invalid character '?' in source
+; INV-ERR: invalid-chars.pas:1:9: error: invalid character '$' in source
+; INV-ERR: invalid-chars.pas:1:11: error: invalid character '"' in source
+; INV-ERR: invalid-chars.pas:1:13: error: invalid character '"' in source
+; INV-ERR: invalid-chars.pas:1:15: error: invalid character '~' in source
+; INV:      1:1 identifier 'a'
+; INV-NEXT: 1:5 identifier 'b'
+; INV-NEXT: 1:12 identifier 'c'
+; INV-NEXT: 1:17 identifier 'd'
+; INV-NEXT: eof
+
+; RUN: not %pcc --emit-tokens %S/Inputs/bad-numbers.pas 2>&1 >/dev/null | FileCheck --check-prefix=NUM %s
+; NUM: bad-numbers.pas:1:6: error: integer literal is too large
+; NUM: bad-numbers.pas:2:6: error: real literal is too large
+; NUM: bad-numbers.pas:3:9: error: expected digits in exponent
+
+; The error limit stops lexing.
+; RUN: not %pcc --emit-tokens -ferror-limit=2 %S/Inputs/many-errors.pas 2>&1 >/dev/null | FileCheck --check-prefix=LIMIT %s
+; LIMIT:      many-errors.pas:1:1: error: invalid character '#'
+; LIMIT:      many-errors.pas:2:1: error: invalid character '#'
+; LIMIT:      pcc: fatal error: too many errors emitted, stopping now
+; LIMIT-NOT:  error:

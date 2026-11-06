@@ -1,0 +1,14 @@
+; String / char literals with '' escapes.
+; RUN: %pcc --emit-tokens %S/Inputs/strings.pas | FileCheck %s
+; RUN: not %pcc --emit-tokens %S/Inputs/empty-string.pas 2>&1 >/dev/null | FileCheck --check-prefix=ISO-EMPTY %s
+; RUN: %pcc --emit-tokens --mode=tp %S/Inputs/empty-string.pas | FileCheck --check-prefix=TP-EMPTY %s
+
+; CHECK:      1:1 string_literal ''Hello, World!'' value="Hello, World!"
+; CHECK-NEXT: 1:17 string_literal ''c'' value="c"
+; CHECK-NEXT: 1:21 string_literal ''It''s'' value="It's"
+; CHECK-NEXT: 1:29 string_literal '''''' value="'"
+; CHECK-NEXT: 1:34 string_literal ''a{b}c'' value="a{b}c"
+; CHECK-NEXT: 1:42 string_literal ''(*x*)'' value="(*x*)"
+; CHECK-NEXT: eof
+; ISO-EMPTY: empty-string.pas:1:6: error: empty string literal is not allowed in ISO Pascal
+; TP-EMPTY: 1:6 string_literal '''' value=""

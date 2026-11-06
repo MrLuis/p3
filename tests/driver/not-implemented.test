@@ -1,8 +1,8 @@
-; M0: every pipeline action is accepted but not implemented yet.
+; Pipeline actions that are accepted but not implemented yet.
 ; Update these checks as milestones land.
 
-; RUN: not %pcc --emit-tokens %S/Inputs/hello.pas 2>&1 | FileCheck --check-prefix=TOK %s
-; TOK: pcc: error: --emit-tokens is not implemented yet
+; RUN: not %pcc --emit-ast %S/Inputs/hello.pas 2>&1 | FileCheck --check-prefix=AST %s
+; AST: pcc: error: --emit-ast is not implemented yet
 
 ; RUN: not %pcc -c %S/Inputs/hello.pas 2>&1 | FileCheck --check-prefix=OBJ %s
 ; OBJ: pcc: error: -c is not implemented yet

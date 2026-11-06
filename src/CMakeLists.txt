@@ -8,10 +8,16 @@ add_library(pccBasic STATIC
 target_include_directories(pccBasic PUBLIC ${PROJECT_BINARY_DIR}/include)
 target_link_libraries(pccBasic PUBLIC ${PCC_LLVM_LIBS})
 
+add_library(pccLexer STATIC
+  lexer/TokenKinds.cpp
+  lexer/Lexer.cpp
+)
+target_link_libraries(pccLexer PUBLIC pccBasic)
+
 add_library(pccDriver STATIC
   driver/Driver.cpp
 )
-target_link_libraries(pccDriver PUBLIC pccBasic)
+target_link_libraries(pccDriver PUBLIC pccLexer)
 
 add_executable(pcc driver/main.cpp)
 target_link_libraries(pcc PRIVATE pccDriver)

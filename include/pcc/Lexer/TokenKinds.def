@@ -1,0 +1,120 @@
+//===- TokenKinds.def - Every Pascal token ------------------------*- C++ -*-===//
+//
+// The complete token catalog from PLAN.md §4, declared once (X-macro).
+// The parser only accepts a token once its milestone lands, but the lexer
+// recognizes all of them from M1 on.
+//
+//   TOK(ID)                     special / literal tokens
+//   PUNCT(ID, SPELLING)         operators and punctuation
+//   KEYWORD(ID, SPELLING, FLAGS) reserved words
+//
+// Keyword FLAGS:
+//   KEYISO  reserved in every mode (ISO 7185)
+//   KEYTP   reserved only with Turbo/Free Pascal extensions (--mode=tp)
+//
+// Note: the C++ alternative tokens (and, or, not, xor) cannot be pasted in the
+// preprocessor, hence the explicit ID + SPELLING pairs.
+//
+//===----------------------------------------------------------------------===//
+
+#ifndef TOK
+#define TOK(ID)
+#endif
+#ifndef PUNCT
+#define PUNCT(ID, SP) TOK(ID)
+#endif
+#ifndef KEYWORD
+#define KEYWORD(ID, SP, FLAGS) TOK(ID)
+#endif
+
+//===--- Special tokens ---------------------------------------------------===//
+TOK(unknown)          // invalid input (lexer already reported it)
+TOK(eof)
+TOK(identifier)       // foo, Foo, FOO (case-insensitive)
+TOK(integer_literal)  // 42                                         (M1)
+TOK(real_literal)     // 3.14, 1E10, 2.5e-3                         (M1)
+TOK(string_literal)   // 'text', 'It''s', 'c' (a char when length 1) (M1)
+TOK(directive)        // {$R+}  -- reserved, emitted from M11
+
+//===--- Operators and punctuation (PLAN §4.4) ----------------------------===//
+PUNCT(plus,          "+")
+PUNCT(minus,         "-")
+PUNCT(star,          "*")
+PUNCT(slash,         "/")
+PUNCT(equal,         "=")
+PUNCT(not_equal,     "<>")
+PUNCT(less,          "<")
+PUNCT(less_equal,    "<=")
+PUNCT(greater,       ">")
+PUNCT(greater_equal, ">=")
+PUNCT(colon_equal,   ":=")
+PUNCT(colon,         ":")
+PUNCT(semi,          ";")
+PUNCT(comma,         ",")
+PUNCT(period,        ".")
+PUNCT(dotdot,        "..")
+PUNCT(l_paren,       "(")
+PUNCT(r_paren,       ")")
+PUNCT(l_square,      "[")   // also "(."
+PUNCT(r_square,      "]")   // also ".)"
+PUNCT(caret,         "^")   // also "@" in ISO mode
+PUNCT(at,            "@")   // address-of, --mode=tp only
+
+//===--- ISO 7185 reserved words (35) (PLAN §4.2) -------------------------===//
+KEYWORD(kw_and,       "and",       KEYISO)
+KEYWORD(kw_array,     "array",     KEYISO)
+KEYWORD(kw_begin,     "begin",     KEYISO)
+KEYWORD(kw_case,      "case",      KEYISO)
+KEYWORD(kw_const,     "const",     KEYISO)
+KEYWORD(kw_div,       "div",       KEYISO)
+KEYWORD(kw_do,        "do",        KEYISO)
+KEYWORD(kw_downto,    "downto",    KEYISO)
+KEYWORD(kw_else,      "else",      KEYISO)
+KEYWORD(kw_end,       "end",       KEYISO)
+KEYWORD(kw_file,      "file",      KEYISO)
+KEYWORD(kw_for,       "for",       KEYISO)
+KEYWORD(kw_function,  "function",  KEYISO)
+KEYWORD(kw_goto,      "goto",      KEYISO)
+KEYWORD(kw_if,        "if",        KEYISO)
+KEYWORD(kw_in,        "in",        KEYISO)
+KEYWORD(kw_label,     "label",     KEYISO)
+KEYWORD(kw_mod,       "mod",       KEYISO)
+KEYWORD(kw_nil,       "nil",       KEYISO)
+KEYWORD(kw_not,       "not",       KEYISO)
+KEYWORD(kw_of,        "of",        KEYISO)
+KEYWORD(kw_or,        "or",        KEYISO)
+KEYWORD(kw_packed,    "packed",    KEYISO)
+KEYWORD(kw_procedure, "procedure", KEYISO)
+KEYWORD(kw_program,   "program",   KEYISO)
+KEYWORD(kw_record,    "record",    KEYISO)
+KEYWORD(kw_repeat,    "repeat",    KEYISO)
+KEYWORD(kw_set,       "set",       KEYISO)
+KEYWORD(kw_then,      "then",      KEYISO)
+KEYWORD(kw_to,        "to",        KEYISO)
+KEYWORD(kw_type,      "type",      KEYISO)
+KEYWORD(kw_until,     "until",     KEYISO)
+KEYWORD(kw_var,       "var",       KEYISO)
+KEYWORD(kw_while,     "while",     KEYISO)
+KEYWORD(kw_with,      "with",      KEYISO)
+
+//===--- Turbo / Free Pascal reserved words (PLAN §4.3, M12) --------------===//
+// break / continue / exit are predeclared identifiers, not keywords.
+KEYWORD(kw_unit,           "unit",           KEYTP)
+KEYWORD(kw_interface,      "interface",      KEYTP)
+KEYWORD(kw_implementation, "implementation", KEYTP)
+KEYWORD(kw_uses,           "uses",           KEYTP)
+KEYWORD(kw_initialization, "initialization", KEYTP)
+KEYWORD(kw_finalization,   "finalization",   KEYTP)
+KEYWORD(kw_string,         "string",         KEYTP)
+KEYWORD(kw_shl,            "shl",            KEYTP)
+KEYWORD(kw_shr,            "shr",            KEYTP)
+KEYWORD(kw_xor,            "xor",            KEYTP)
+KEYWORD(kw_inline,         "inline",         KEYTP)
+KEYWORD(kw_asm,            "asm",            KEYTP)
+KEYWORD(kw_object,         "object",         KEYTP)
+KEYWORD(kw_constructor,    "constructor",    KEYTP)
+KEYWORD(kw_destructor,     "destructor",     KEYTP)
+
+#undef KEYWORD
+#undef PUNCT
+#undef TOK

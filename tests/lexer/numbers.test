@@ -1,0 +1,32 @@
+; Integer and real literals; '1..10' must not lex as a real.
+; RUN: %pcc --emit-tokens %S/Inputs/numbers.pas | FileCheck %s
+
+; CHECK:      1:1 integer_literal '0' value=0
+; CHECK-NEXT: 1:3 integer_literal '42' value=42
+; CHECK-NEXT: 1:6 integer_literal '2147483647' value=2147483647
+; CHECK-NEXT: 1:17 integer_literal '18446744073709551615' value=18446744073709551615
+; CHECK-NEXT: 2:1 real_literal '3.14' value=3.14
+; CHECK-NEXT: 2:6 real_literal '0.5' value=0.5
+; CHECK-NEXT: 2:10 real_literal '1E10' value=1e+10
+; CHECK-NEXT: 2:15 real_literal '1e-3' value=0.001
+; CHECK-NEXT: 2:20 real_literal '2.5E+2' value=250
+; CHECK-NEXT: 2:27 real_literal '007.250' value=7.25
+; CHECK-NEXT: 3:1 identifier 'a'
+; CHECK-NEXT: 3:2 l_square '['
+; CHECK-NEXT: 3:3 integer_literal '1' value=1
+; CHECK-NEXT: 3:4 dotdot '..'
+; CHECK-NEXT: 3:6 integer_literal '10' value=10
+; CHECK-NEXT: 3:8 r_square ']'
+; A '.' not followed by a digit ends the number:
+; CHECK-NEXT: 3:10 identifier 'x'
+; CHECK-NEXT: 3:11 period '.'
+; CHECK-NEXT: 3:12 integer_literal '5'
+; CHECK-NEXT: 3:14 integer_literal '1' value=1
+; CHECK-NEXT: 3:15 r_square '.)'
+; An 'e' without digits is not an exponent:
+; CHECK-NEXT: 3:18 integer_literal '2' value=2
+; CHECK-NEXT: 3:19 identifier 'e'
+; CHECK-NEXT: 3:21 integer_literal '3' value=3
+; CHECK-NEXT: 3:22 period '.'
+; CHECK-NEXT: 3:23 identifier 'e5'
+; CHECK-NEXT: eof

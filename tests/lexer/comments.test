@@ -1,0 +1,13 @@
+; Comments: { } and (* *), multi-line, no nesting, tokens glued to comments.
+; RUN: %pcc --emit-tokens %S/Inputs/comments.pas | FileCheck %s
+
+; CHECK:      1:1 identifier 'a'
+; CHECK-NEXT: 1:5 identifier 'b'
+; CHECK-NEXT: 1:11 identifier 'c'
+; CHECK-NEXT: 4:1 identifier 'd'
+; CHECK-NEXT: 4:20 identifier 'e'
+; CHECK-NEXT: 5:18 identifier 'f'
+; CHECK-NEXT: 6:24 identifier 'g'
+; CHECK-NEXT: 7:3 identifier 'h'
+; CHECK-NEXT: 7:8 identifier 'i'
+; CHECK-NEXT: eof

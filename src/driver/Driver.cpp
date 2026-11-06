@@ -1,6 +1,9 @@
 #include "pcc/Driver/Driver.h"
+#include "pcc/Lexer/Lexer.h"
 
 #include "llvm/MC/TargetRegistry.h"
+#include "llvm/Support/FileSystem.h"
+#include "llvm/Support/Format.h"
 #include "llvm/Support/Path.h"
 #include "llvm/Support/TargetSelect.h"
 #include "llvm/Support/raw_ostream.h"
@@ -49,7 +52,8 @@ std::string pcc::getDefaultOutputFile(const CompilerOptions &Opts) {
 //===----------------------------------------------------------------------===//
 
 Driver::Driver(CompilerOptions O, llvm::raw_ostream &DiagOS)
-    : Opts(std::move(O)), Diags(SM, DiagOS) {
+    : Opts(std::move(O)), LangOpts(LangOptions::forMode(Opts.Mode)),
+      Diags(SM, DiagOS) {
   Diags.setErrorLimit(Opts.ErrorLimit);
   Diags.setWarningsAsErrors(Opts.WarningsAsErrors);
   switch (Opts.Color) {
@@ -99,9 +103,54 @@ int Driver::run() {
     return 1;
   }
 
+  FileID FID = *FIDOrErr;
+
   // Pipeline stages are added milestone by milestone:
   //   M1 lexer -> M2 parser/AST -> M4 sema -> M3 codegen/object/link.
-  Diags.error(llvm::Twine(getActionName(Opts.Act)) +
-              " is not implemented yet");
+  if (Opts.Act != Action::EmitTokens) {
+    Diags.error(llvm::Twine(getActionName(Opts.Act)) +
+                " is not implemented yet");
+    return 1;
+  }
+
+  std::error_code EC;
+  llvm::raw_fd_ostream Out(Opts.OutputFile, EC, llvm::sys::fs::OF_Text);
+  if (EC) {
+    Diags.error("cannot open output file '" + llvm::Twine(Opts.OutputFile) +
+                "': " + EC.message());
+    return 1;
+  }
+  dumpTokens(FID, Out);
   return Diags.hasErrors() ? 1 : 0;
+}
+
+void Driver::dumpTokens(FileID FID, llvm::raw_ostream &OS) {
+  // One token per line:  <line>:<col> <kind> '<spelling>' [value]
+  Lexer L(SM, FID, Diags, Strings, LangOpts);
+  Token T;
+  do {
+    L.lex(T);
+    PresumedLoc P = SM.getPresumedLoc(T.getLocation());
+    OS << P.Line << ':' << P.Column << ' ' << tok::getTokenName(T.getKind())
+       << " '" << T.getRawText() << '\'';
+    switch (T.getKind()) {
+    case tok::identifier:
+      OS << " name=" << T.getIdentifier();
+      break;
+    case tok::integer_literal:
+      OS << " value=" << T.getIntegerValue();
+      break;
+    case tok::real_literal:
+      OS << " value=" << llvm::format("%g", T.getRealValue());
+      break;
+    case tok::string_literal:
+      OS << " value=\"";
+      OS.write_escaped(T.getStringValue());
+      OS << '"';
+      break;
+    default:
+      break;
+    }
+    OS << '\n';
+  } while (T.isNot(tok::eof) && !Diags.shouldStop());
 }

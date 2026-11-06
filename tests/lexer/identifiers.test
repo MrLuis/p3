@@ -1,0 +1,13 @@
+; Identifiers are case-insensitive; the canonical name is lowercase.
+; RUN: %pcc --emit-tokens %S/Inputs/identifiers.pas | FileCheck %s
+
+; CHECK:      1:1 identifier 'Foo' name=foo
+; CHECK-NEXT: 1:5 identifier 'FOO' name=foo
+; CHECK-NEXT: 1:9 identifier 'foo' name=foo
+; CHECK-NEXT: 1:13 identifier 'x1' name=x1
+; CHECK-NEXT: 1:16 identifier 'a_b' name=a_b
+; CHECK-NEXT: 1:20 identifier '_tmp' name=_tmp
+; CHECK-NEXT: 1:25 identifier 'MaxInt' name=maxint
+; CHECK-NEXT: 1:32 identifier 'Program1' name=program1
+; CHECK-NEXT: 1:41 identifier 'programX' name=programx
+; CHECK-NEXT: eof

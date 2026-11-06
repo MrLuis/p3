@@ -3,7 +3,9 @@
 #define PCC_DRIVER_DRIVER_H
 
 #include "pcc/Basic/Diagnostics.h"
+#include "pcc/Basic/LangOptions.h"
 #include "pcc/Basic/SourceManager.h"
+#include "pcc/Basic/StringPool.h"
 #include "pcc/Driver/CompilerOptions.h"
 
 namespace llvm {
@@ -14,11 +16,16 @@ namespace pcc {
 
 class Driver {
   CompilerOptions Opts;
+  LangOptions LangOpts;
   SourceManager SM;
   DiagnosticsEngine Diags;
+  StringPool Strings;
 
   bool validateOptions();
   bool validateTarget();
+
+  /// --emit-tokens
+  void dumpTokens(FileID FID, llvm::raw_ostream &OS);
 
 public:
   Driver(CompilerOptions Opts, llvm::raw_ostream &DiagOS);

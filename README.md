@@ -3,8 +3,8 @@
 `pcc` compiles Pascal (ISO 7185, with optional Turbo/Free Pascal extensions)
 to native executables through LLVM. See [PLAN.md](PLAN.md) for the roadmap.
 
-**Status:** M0 (project setup) complete. The driver, diagnostics engine and
-test harness are in place; the lexer (M1) is next.
+**Status:** M1 (lexer) complete: `pcc --emit-tokens` tokenizes ISO Pascal
+(plus Turbo/FPC keywords with `--mode=tp`). The parser (M2) is next.
 
 ## Requirements
 

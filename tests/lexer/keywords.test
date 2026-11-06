@@ -1,0 +1,77 @@
+; All reserved words (PLAN.md 4.2/4.3), mixed case.
+; RUN: %pcc --emit-tokens %S/Inputs/keywords.pas | FileCheck --check-prefixes=CHECK,ISO %s
+; RUN: %pcc --emit-tokens --mode=tp %S/Inputs/keywords.pas | FileCheck --check-prefixes=CHECK,TP %s
+
+; CHECK: 1:1 kw_and 'AND'
+; CHECK-NEXT: 1:{{[0-9]+}} kw_array 'Array'
+; CHECK-NEXT: 1:{{[0-9]+}} kw_begin 'begin'
+; CHECK-NEXT: 1:{{[0-9]+}} kw_case 'CASE'
+; CHECK-NEXT: 1:{{[0-9]+}} kw_const 'Const'
+; CHECK-NEXT: 1:{{[0-9]+}} kw_div 'div'
+; CHECK-NEXT: 1:{{[0-9]+}} kw_do 'DO'
+; CHECK-NEXT: 1:{{[0-9]+}} kw_downto 'Downto'
+; CHECK-NEXT: 1:{{[0-9]+}} kw_else 'else'
+; CHECK-NEXT: 1:{{[0-9]+}} kw_end 'END'
+; CHECK-NEXT: 1:{{[0-9]+}} kw_file 'File'
+; CHECK-NEXT: 1:{{[0-9]+}} kw_for 'for'
+; CHECK-NEXT: 1:{{[0-9]+}} kw_function 'FUNCTION'
+; CHECK-NEXT: 1:{{[0-9]+}} kw_goto 'Goto'
+; CHECK-NEXT: 1:{{[0-9]+}} kw_if 'if'
+; CHECK-NEXT: 1:{{[0-9]+}} kw_in 'IN'
+; CHECK-NEXT: 1:{{[0-9]+}} kw_label 'Label'
+; CHECK-NEXT: 1:{{[0-9]+}} kw_mod 'mod'
+; CHECK-NEXT: 1:{{[0-9]+}} kw_nil 'NIL'
+; CHECK-NEXT: 1:{{[0-9]+}} kw_not 'Not'
+; CHECK-NEXT: 1:{{[0-9]+}} kw_of 'of'
+; CHECK-NEXT: 1:{{[0-9]+}} kw_or 'OR'
+; CHECK-NEXT: 1:{{[0-9]+}} kw_packed 'Packed'
+; CHECK-NEXT: 1:{{[0-9]+}} kw_procedure 'procedure'
+; CHECK-NEXT: 1:{{[0-9]+}} kw_program 'PROGRAM'
+; CHECK-NEXT: 1:{{[0-9]+}} kw_record 'Record'
+; CHECK-NEXT: 1:{{[0-9]+}} kw_repeat 'repeat'
+; CHECK-NEXT: 1:{{[0-9]+}} kw_set 'SET'
+; CHECK-NEXT: 1:{{[0-9]+}} kw_then 'Then'
+; CHECK-NEXT: 1:{{[0-9]+}} kw_to 'to'
+; CHECK-NEXT: 1:{{[0-9]+}} kw_type 'TYPE'
+; CHECK-NEXT: 1:{{[0-9]+}} kw_until 'Until'
+; CHECK-NEXT: 1:{{[0-9]+}} kw_var 'var'
+; CHECK-NEXT: 1:{{[0-9]+}} kw_while 'WHILE'
+; CHECK-NEXT: 1:{{[0-9]+}} kw_with 'With'
+; ISO-NEXT: 2:1 identifier 'unit' name=unit
+; ISO-NEXT: 2:{{[0-9]+}} identifier 'interface' name=interface
+; ISO-NEXT: 2:{{[0-9]+}} identifier 'implementation' name=implementation
+; ISO-NEXT: 2:{{[0-9]+}} identifier 'uses' name=uses
+; ISO-NEXT: 2:{{[0-9]+}} identifier 'initialization' name=initialization
+; ISO-NEXT: 2:{{[0-9]+}} identifier 'finalization' name=finalization
+; ISO-NEXT: 2:{{[0-9]+}} identifier 'string' name=string
+; ISO-NEXT: 2:{{[0-9]+}} identifier 'shl' name=shl
+; ISO-NEXT: 2:{{[0-9]+}} identifier 'shr' name=shr
+; ISO-NEXT: 2:{{[0-9]+}} identifier 'xor' name=xor
+; ISO-NEXT: 2:{{[0-9]+}} identifier 'inline' name=inline
+; ISO-NEXT: 2:{{[0-9]+}} identifier 'asm' name=asm
+; ISO-NEXT: 2:{{[0-9]+}} identifier 'object' name=object
+; ISO-NEXT: 2:{{[0-9]+}} identifier 'constructor' name=constructor
+; ISO-NEXT: 2:{{[0-9]+}} identifier 'destructor' name=destructor
+; TP-NEXT: 2:1 kw_unit 'unit'
+; TP-NEXT: 2:{{[0-9]+}} kw_interface 'interface'
+; TP-NEXT: 2:{{[0-9]+}} kw_implementation 'implementation'
+; TP-NEXT: 2:{{[0-9]+}} kw_uses 'uses'
+; TP-NEXT: 2:{{[0-9]+}} kw_initialization 'initialization'
+; TP-NEXT: 2:{{[0-9]+}} kw_finalization 'finalization'
+; TP-NEXT: 2:{{[0-9]+}} kw_string 'string'
+; TP-NEXT: 2:{{[0-9]+}} kw_shl 'shl'
+; TP-NEXT: 2:{{[0-9]+}} kw_shr 'shr'
+; TP-NEXT: 2:{{[0-9]+}} kw_xor 'xor'
+; TP-NEXT: 2:{{[0-9]+}} kw_inline 'inline'
+; TP-NEXT: 2:{{[0-9]+}} kw_asm 'asm'
+; TP-NEXT: 2:{{[0-9]+}} kw_object 'object'
+; TP-NEXT: 2:{{[0-9]+}} kw_constructor 'constructor'
+; TP-NEXT: 2:{{[0-9]+}} kw_destructor 'destructor'
+; CHECK-NEXT: 3:1 identifier 'break' name=break
+; CHECK-NEXT: 3:{{[0-9]+}} identifier 'continue' name=continue
+; CHECK-NEXT: 3:{{[0-9]+}} identifier 'exit' name=exit
+; CHECK-NEXT: 3:{{[0-9]+}} identifier 'forward' name=forward
+; CHECK-NEXT: 3:{{[0-9]+}} identifier 'otherwise' name=otherwise
+; CHECK-NEXT: 3:{{[0-9]+}} identifier 'integer' name=integer
+; CHECK-NEXT: 3:{{[0-9]+}} identifier 'writeln' name=writeln
+; CHECK-NEXT: eof
