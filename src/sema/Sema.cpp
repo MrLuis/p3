@@ -1049,8 +1049,10 @@ class Checker : public StmtVisitor<Checker>,
     } else {
       ResultTy = resolveType(R->getResultTypeSpec());
       // ISO 7185 6.6.2: the result type is a simple type (or a pointer).
+      // Turbo/FPC also return strings and records (without files).
       if (!ResultTy->isError() && !ResultTy->isValidResultType() &&
-          !ResultTy->isShortString()) {
+          !ResultTy->isShortString() &&
+          !(!isISO() && ResultTy->isRecord() && !containsFile(ResultTy))) {
         Diags.error(R->getResultTypeSpec()->getBeginLoc(),
                     "function result type must be a simple or pointer type, not " +
                         quoted(ResultTy),

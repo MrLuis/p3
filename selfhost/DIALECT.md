@@ -81,7 +81,9 @@ More rules:
   parameters (`var x` without a type) except in the built-ins
   `fillchar`/`move`, and no default parameter values or overloading.
 - **Function results:** assign to the function name. `Result` is not used,
-  and there is no local or parameter named `result`.
+  and there is no local or parameter named `result`. Functions may return
+  simple types, pointers, strings and records (not arrays); a record
+  result can be selected from directly (`makeRange(a, b).e`).
 - **Typed constants:** they are read-only (objfpc allows writing them, pcc
   does not). They may be arrays (including indexed by an enumeration) and
   records, including arrays of records.
@@ -128,6 +130,8 @@ More rules:
     `reallocmem(p, n)` on `nil` allocates.
 - **Pointer arithmetic:** none, and no `pchar` indexing. Index a pointer to a
   large array type instead (section 5).
+- **Untyped pointers** are never dereferenced: cast first,
+  `fillchar(PCharArray(p)^, n, 0)` (FPC accepts `p^`, pcc does not).
 
 ## 5. Idioms the dialect relies on
 

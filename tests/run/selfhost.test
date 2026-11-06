@@ -1,0 +1,5 @@
+; The self-hosted compiler's unit tests (selfhost/tests, SELFHOST.md S3),
+; built with pcc. selfhost/tests/t_diag.expected is also checked against the
+; C++ diagnostics engine by pcc-unittests (SelfhostDiagTest.cpp).
+; RUN: %S/../../selfhost/tests/run.sh pcc pcc | FileCheck %s
+; CHECK: 2 passed, 0 failed

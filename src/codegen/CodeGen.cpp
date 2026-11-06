@@ -777,7 +777,7 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
     }
     if (auto *R = llvm::dyn_cast<RecordType>(T))
       for (FieldDecl *F : R->getFieldList()->Fixed)
-        emitFileLifetime(fieldAddress(Addr, F), F->getType(), Init);
+        emitFileLifetime(fieldAddress(Addr, R, F), F->getType(), Init);
   }
 
   /// Creates the PasFile objects for the file variables among Decls.
@@ -814,7 +814,12 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
     return Slot;
   }
 
-  llvm::Value *fieldAddress(llvm::Value *RecordAddr, FieldDecl *F) {
+  /// Address of field F of record type RT at RecordAddr. Field offsets are
+  /// recorded when the record is laid out, which may not have happened yet
+  /// (a record reached only through pointers), so lay it out first.
+  llvm::Value *fieldAddress(llvm::Value *RecordAddr, Type *RT, FieldDecl *F) {
+    memType(RT);
+    assert(FieldOffsets.count(F) && "field of another record type");
     return B.CreateConstInBoundsGEP1_64(B.getInt8Ty(), RecordAddr,
                                         FieldOffsets[F], F->getName().Name);
   }
@@ -827,8 +832,11 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
       auto *N = llvm::cast<NameRefExpr>(E);
       if (auto *V = llvm::dyn_cast<VarDecl>(N->getDecl()))
         return varAddress(V);
+      if (llvm::isa<RoutineDecl>(N->getDecl())) // f: a record or string result
+        return visitExpr(E);
       if (auto *F = llvm::dyn_cast<FieldDecl>(N->getDecl()))
-        return fieldAddress(WithAddrs.lookup(N->getWith()), F);
+        return fieldAddress(WithAddrs.lookup(N->getWith()),
+                            N->getWith()->Record->getType(), F);
       auto *C = llvm::cast<ConstDecl>(N->getDecl());
       return getStringConstant(C->getValue().Str);
     }
@@ -836,6 +844,11 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
       return getStringConstant(llvm::cast<StringLiteralExpr>(E)->getValue());
     case Expr::EK_Paren:
       return emitAddress(llvm::cast<ParenExpr>(E)->getInner());
+    case Expr::EK_Call:
+    case Expr::EK_IndirectCall:
+      // A record (or string) function result: a temporary holding it.
+      assert(E->getType()->isStructured() && "call result has no address");
+      return visitExpr(E);
     case Expr::EK_Index: {
       auto *I = llvm::cast<IndexExpr>(E);
       if (auto *SS = llvm::dyn_cast<ShortStringType>(I->getBase()->getType())) {
@@ -876,7 +889,8 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
     }
     case Expr::EK_Field: {
       auto *F = llvm::cast<FieldExpr>(E);
-      return fieldAddress(emitAddress(F->getBase()), F->getFieldDecl());
+      return fieldAddress(emitAddress(F->getBase()), F->getBase()->getType(),
+                          F->getFieldDecl());
     }
     case Expr::EK_Deref: {
       auto *D = llvm::cast<DerefExpr>(E);
@@ -988,7 +1002,8 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
     }
     case Type::TK_Pointer: {
       Type *P = llvm::cast<PointerType>(T)->getPointee();
-      return DIB->createPointerType(debugType(P), 64);
+      // `pointer` (untyped) is a void pointer.
+      return DIB->createPointerType(P ? debugType(P) : nullptr, 64);
     }
     case Type::TK_Set: {
       llvm::Metadata *Sub = DIB->getOrCreateSubrange(0, 32);
@@ -1378,8 +1393,9 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
                                           P->getType(), Arg->getBeginLoc()));
     }
     llvm::Value *Result = B.CreateCall(Callee, Values);
-    // A string result comes back by value; expressions use its address.
-    if (Result->getType()->isArrayTy()) {
+    // A string or record result comes back by value; expressions use its
+    // address.
+    if (Result->getType()->isArrayTy() || Result->getType()->isStructTy()) {
       llvm::Value *Tmp = createTemp(Result->getType(), "result");
       B.CreateStore(Result, Tmp);
       return Tmp;
@@ -2141,6 +2157,8 @@ public:
         llvm::Value *Addr = varAddress(Result);
         if (auto *SS = llvm::dyn_cast<ShortStringType>(RT))
           emitStringAssign(Addr, SS, Value);
+        else if (RT->isStructured())
+          copyAggregate(Addr, emitAddress(Value), RT);
         else
           storeScalar(Addr,
                       convertForAssign(visitExpr(Value), Value->getType(), RT,

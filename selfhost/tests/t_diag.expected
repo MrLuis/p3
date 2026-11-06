@@ -1,0 +1,33 @@
+presumed 1:1
+presumed 3:7
+presumed 6:5
+presumed 8:5
+diag.txt:3:7: error: use of undeclared identifier 'y'
+        x := y; { tab }
+        ~    ^
+diag.txt:4:3: warning: non-ASCII line
+  café := 1;
+diag.txt:5:8: note: range over two lines
+  a := b +
+       ^~~
+diag.txt:5:3: warning: variable 'a' is declared but never used [-Wunused-variable]
+  a := b +
+  ^
+diag.txt:8:5: error: unexpected end of file
+end.
+    ^
+diag.txt:7:293: error: far into a long line
+  zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz := 1;
+  ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^~~~~~~~~~
+pcc: error: cannot open file 'nope.pas'
+diag.txt:6:5: note: note after an error
+    c;
+    ^
+diag.txt:6:5: error: promoted to an error
+    c;
+    ^
+diag.txt:3:2: error: last error
+        x := y; { tab }
+        ^
+pcc: fatal error: too many errors emitted, stopping now [-ferror-limit=]
+errors: 6, warnings: 2

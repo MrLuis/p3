@@ -1,0 +1,27 @@
+ok   arena memory is zeroed
+ok   arena blocks are distinct
+ok   large arena block
+ok   list grows to 10000
+ok   listSet / listGet
+ok   listPop
+ok   listPop shrinks
+ok   listFree
+ok   equal strings intern to one name
+ok   names are case-sensitive (callers lower-case identifiers)
+ok   nameStr
+ok   nameEquals
+ok   the empty name
+ok   ids are given in order
+ok   20000 names survive pool growth
+names interned: 20003
+hash(pcc) = 1280301573
+ok   empty map
+ok   map get / overwrite
+ok   map count
+ok   mapHas
+ok   negative keys
+ok   buffer of 4000 chars
+ok   bufCharAt
+WriteLn -42
+0 7 -7 9223372036854775807 -9223372036854775808
+ok   lowerStr

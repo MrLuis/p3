@@ -1,5 +1,9 @@
 # Unit tests (C++), run through lit like everything else.
-add_executable(pcc-unittests unit/UnitTestMain.cpp unit/DiagnosticsTest.cpp)
+add_executable(pcc-unittests unit/UnitTestMain.cpp unit/DiagnosticsTest.cpp
+  unit/SelfhostDiagTest.cpp)
+# The selfhost diagnostics test reads selfhost/tests/ from the source tree.
+target_compile_definitions(pcc-unittests PRIVATE
+  PCC_SOURCE_DIR="${PROJECT_SOURCE_DIR}")
 target_link_libraries(pcc-unittests PRIVATE pccDriver)
 set_target_properties(pcc-unittests PROPERTIES
   RUNTIME_OUTPUT_DIRECTORY ${PROJECT_BINARY_DIR}/bin)
