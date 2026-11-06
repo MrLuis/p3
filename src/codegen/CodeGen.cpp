@@ -45,7 +45,7 @@ namespace {
 struct Runtime {
   llvm::FunctionCallee Init, Fini, WriteStr, WriteChar, WriteInt, WriteBool,
       WriteReal, Writeln, ReadInt, ReadChar, ReadReal, Readln, RuntimeError,
-      Memcmp, Atan;
+      Memcmp, Atan, New, Dispose;
 
   explicit Runtime(llvm::Module &M) {
     llvm::LLVMContext &C = M.getContext();
@@ -81,6 +81,8 @@ struct Runtime {
     RE->addFnAttr(llvm::Attribute::NoReturn);
     RE->addFnAttr(llvm::Attribute::Cold);
     Memcmp = Decl("memcmp", I32, {Ptr, Ptr, I64});
+    New = Decl("__pas_new", Ptr, {I64});
+    Dispose = Decl("__pas_dispose", Void, {Ptr});
     Atan = Decl("atan", F64, {F64});
   }
 };
@@ -148,11 +150,19 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
                              : ("record." + T->getDeclName()).str();
       return layoutFieldList(R->getFieldList(), Name, /*BaseOffset=*/0);
     }
+    case Type::TK_Pointer:
+    case Type::TK_Nil:
+      return B.getPtrTy();
+    case Type::TK_Set:
+      return setType();
     case Type::TK_Error:
       break;
     }
     llvm_unreachable("type has no storage representation");
   }
+
+  /// Sets are 256-bit masks: bit i is set iff ord(i) is a member.
+  llvm::IntegerType *setType() { return B.getIntNTy(256); }
 
   /// Register representation: like memType, but booleans are i1.
   llvm::Type *regType(Type *T) {
@@ -317,14 +327,86 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
   }
 
   /// Converts a value for assignment / parameter passing: integer -> real,
-  /// and range-checks ordinal values against the target type.
+  /// and range-checks ordinal values (and set members) against the target.
   llvm::Value *convertForAssign(llvm::Value *V, Type *From, Type *To,
                                 SourceLocation L) {
     if (To->isReal() && !From->isReal())
       return B.CreateSIToFP(V, B.getDoubleTy(), "toreal");
     if (To->isOrdinal())
       emitRangeCheck(V, From, To, L);
+    if (auto *TS = llvm::dyn_cast<SetType>(To); TS && CGOpts.RangeChecks) {
+      OrdinalBounds TB = getOrdinalBounds(TS->getElementType());
+      auto *FS = llvm::cast<SetType>(From);
+      OrdinalBounds FB = FS->isEmptySet()
+                             ? TB
+                             : getOrdinalBounds(FS->getElementType()->getBase());
+      if (FS->isEmptySet() || (FB.Lo >= TB.Lo && FB.Hi <= TB.Hi))
+        return V;
+      llvm::Value *Outside = B.CreateAnd(V, B.CreateNot(constRangeMask(TB.Lo, TB.Hi)));
+      emitRuntimeCheck(B.CreateICmpNE(Outside, llvm::ConstantInt::get(setType(), 0)),
+                       "set member out of range", L);
+    }
     return V;
+  }
+
+  //===--------------------------------------------------------------------===//
+  // Sets
+  //===--------------------------------------------------------------------===//
+
+  llvm::Constant *constRangeMask(int64_t Lo, int64_t Hi) {
+    llvm::APInt M = llvm::APInt::getBitsSet(256, static_cast<unsigned>(Lo),
+                                            static_cast<unsigned>(Hi) + 1);
+    return llvm::ConstantInt::get(setType(), M);
+  }
+
+  /// Ordinal value -> bit index (i256), checking 0..255 under range checks.
+  llvm::Value *setIndex(llvm::Value *V, Type *T, SourceLocation L) {
+    llvm::Value *X = toI64(V, T);
+    OrdinalBounds Bd = getOrdinalBounds(T);
+    if (CGOpts.RangeChecks && (Bd.Lo < 0 || Bd.Hi > 255))
+      emitRuntimeCheck(B.CreateICmpUGT(X, B.getInt64(255)),
+                       "set element out of range 0..255", L);
+    return B.CreateZExt(B.CreateAnd(X, B.getInt64(255)), setType());
+  }
+
+  llvm::Value *emitSetCtor(SetCtorExpr *E) {
+    llvm::Value *Result = llvm::ConstantInt::get(setType(), 0);
+    llvm::Value *One = llvm::ConstantInt::get(setType(), 1);
+    llvm::Value *AllOnes = llvm::ConstantInt::getAllOnesValue(setType());
+    for (const SetElement &El : E->getElements()) {
+      Type *LT = El.Lo->getType();
+      llvm::Value *Lo = visitExpr(El.Lo);
+      if (!El.Hi) {
+        Result = B.CreateOr(Result, B.CreateShl(One, setIndex(Lo, LT, El.Lo->getBeginLoc())));
+        continue;
+      }
+      llvm::Value *Hi = visitExpr(El.Hi);
+      Type *HT = El.Hi->getType();
+      // Bits Lo..Hi, or nothing if Lo > Hi.
+      llvm::Value *Empty = isSignedOrdinal(LT) ? B.CreateICmpSGT(Lo, Hi)
+                                               : B.CreateICmpUGT(Lo, Hi);
+      llvm::Value *LoI = setIndex(Lo, LT, El.Lo->getBeginLoc());
+      llvm::Value *HiI = setIndex(Hi, HT, El.Hi->getBeginLoc());
+      llvm::Value *HiMask = B.CreateSelect(
+          B.CreateICmpEQ(HiI, llvm::ConstantInt::get(setType(), 255)), AllOnes,
+          B.CreateSub(B.CreateShl(One, B.CreateAdd(HiI, One)), One));
+      llvm::Value *LoMask = B.CreateNot(B.CreateSub(B.CreateShl(One, LoI), One));
+      llvm::Value *Range = B.CreateSelect(
+          Empty, llvm::ConstantInt::get(setType(), 0), B.CreateAnd(HiMask, LoMask));
+      Result = B.CreateOr(Result, Range);
+    }
+    return Result;
+  }
+
+  /// x in s  ==  0 <= x <= 255 and bit x of s is set
+  llvm::Value *emitIn(BinaryExpr *E) {
+    Type *XT = E->getLHS()->getType();
+    llvm::Value *X = toI64(visitExpr(E->getLHS()), XT);
+    llvm::Value *S = visitExpr(E->getRHS());
+    llvm::Value *InRange = B.CreateICmpULE(X, B.getInt64(255));
+    llvm::Value *Idx = B.CreateZExt(B.CreateAnd(X, B.getInt64(255)), setType());
+    llvm::Value *Bit = B.CreateTrunc(B.CreateLShr(S, Idx), B.getInt1Ty());
+    return B.CreateAnd(InRange, Bit, "in");
   }
 
   llvm::Value *toDouble(llvm::Value *V, Type *T) {
@@ -419,6 +501,14 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
     case Expr::EK_Field: {
       auto *F = llvm::cast<FieldExpr>(E);
       return fieldAddress(emitAddress(F->getBase()), F->getFieldDecl());
+    }
+    case Expr::EK_Deref: {
+      auto *D = llvm::cast<DerefExpr>(E);
+      llvm::Value *P = visitExpr(D->getBase());
+      if (CGOpts.RangeChecks)
+        emitRuntimeCheck(B.CreateIsNull(P), "dereference of a nil pointer",
+                         D->getBase()->getBeginLoc());
+      return P;
     }
     default:
       llvm_unreachable("expression has no address");
@@ -646,6 +736,25 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
   llvm::Value *emitCompare(BinaryExpr *E) {
     BinaryOp Op = E->getOp();
     Type *LT = E->getLHS()->getType(), *RTy = E->getRHS()->getType();
+    if (Op == BinaryOp::In)
+      return emitIn(E);
+    if (LT->isSet()) {
+      llvm::Value *L = visitExpr(E->getLHS()), *R = visitExpr(E->getRHS());
+      llvm::Value *Zero = llvm::ConstantInt::get(setType(), 0);
+      switch (Op) {
+      case BinaryOp::Eq: return B.CreateICmpEQ(L, R, "cmp");
+      case BinaryOp::Ne: return B.CreateICmpNE(L, R, "cmp");
+      case BinaryOp::Le: // L is a subset of R
+        return B.CreateICmpEQ(B.CreateAnd(L, B.CreateNot(R)), Zero, "subset");
+      default:           // L is a superset of R
+        return B.CreateICmpEQ(B.CreateAnd(R, B.CreateNot(L)), Zero, "superset");
+      }
+    }
+    if (LT->isPointer() || LT->isNil()) {
+      llvm::Value *L = visitExpr(E->getLHS()), *R = visitExpr(E->getRHS());
+      return Op == BinaryOp::Eq ? B.CreateICmpEQ(L, R, "cmp")
+                                : B.CreateICmpNE(L, R, "cmp");
+    }
 
     if (LT->isStringType()) {
       // Equal-length strings compare lexicographically (unsigned chars).
@@ -886,6 +995,18 @@ public:
       if (BD->getBuiltinKind() == BuiltinKind::Readln)
         B.CreateCall(RT.Readln);
       return;
+    case BuiltinKind::New: {
+      Expr *Arg = S->getArgs()[0];
+      Type *Pointee = llvm::cast<PointerType>(Arg->getType())->getPointee();
+      llvm::Value *Mem = B.CreateCall(RT.New, {B.getInt64(sizeOf(Pointee))});
+      B.CreateStore(Mem, emitAddress(Arg));
+      return;
+    }
+    case BuiltinKind::Dispose: {
+      Expr *Arg = S->getArgs()[0];
+      B.CreateCall(RT.Dispose, {visitExpr(Arg)});
+      return;
+    }
     default:
       llvm_unreachable("Sema only allows procedures here");
     }
@@ -1117,6 +1238,14 @@ public:
     llvm::Value *L = visitExpr(E->getLHS());
     llvm::Value *R = visitExpr(E->getRHS());
 
+    if (E->getType()->isSet()) {
+      switch (Op) {
+      case BinaryOp::Add: return B.CreateOr(L, R, "union");
+      case BinaryOp::Mul: return B.CreateAnd(L, R, "intersection");
+      default:            return B.CreateAnd(L, B.CreateNot(R), "difference");
+      }
+    }
+
     if (E->getType()->isReal()) {
       L = toDouble(L, LT);
       R = toDouble(R, RTy);
@@ -1157,6 +1286,16 @@ public:
   llvm::Value *visitFormattedExpr(FormattedExpr *) {
     llvm_unreachable("formatted expressions are handled by emitWriteArg");
   }
+
+  llvm::Value *visitNilExpr(NilExpr *) {
+    return llvm::ConstantPointerNull::get(B.getPtrTy());
+  }
+
+  llvm::Value *visitDerefExpr(DerefExpr *E) {
+    return loadScalar(emitAddress(E), E->getType());
+  }
+
+  llvm::Value *visitSetCtorExpr(SetCtorExpr *E) { return emitSetCtor(E); }
 
   llvm::Value *visitIndexExpr(IndexExpr *E) {
     return loadScalar(emitAddress(E), E->getType());

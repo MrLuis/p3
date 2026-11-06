@@ -30,6 +30,9 @@ class ASTContext {
   BuiltinType RealTy{Type::TK_Real};
   BuiltinType BooleanTy{Type::TK_Boolean};
   BuiltinType CharTy{Type::TK_Char};
+  BuiltinType NilTy{Type::TK_Nil};
+  SetType EmptySetTy{nullptr};
+  llvm::DenseMap<Type *, SetType *> SetTypes;
   llvm::DenseMap<uint64_t, StringLiteralType *> StringLiteralTypes;
 
 public:
@@ -44,6 +47,16 @@ public:
   Type *getRealType() { return &RealTy; }
   Type *getBooleanType() { return &BooleanTy; }
   Type *getCharType() { return &CharTy; }
+  Type *getNilType() { return &NilTy; }
+  /// The type of a set constructor with elements of (host) type Element.
+  Type *getSetConstructorType(Type *Element) {
+    if (!Element)
+      return &EmptySetTy;
+    SetType *&T = SetTypes[Element];
+    if (!T)
+      T = create<SetType>(Element);
+    return T;
+  }
   /// The type of a string literal with Length (> 1) characters.
   Type *getStringLiteralType(uint64_t Length) {
     StringLiteralType *&T = StringLiteralTypes[Length];

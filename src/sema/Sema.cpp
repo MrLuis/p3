@@ -37,7 +37,6 @@ bool isFutureBuiltin(llvm::StringRef Name) {
   static const llvm::StringSet<> Names = {
       "text", "input", "output",                               // files (M10)
       "reset", "rewrite", "get", "put", "page", "eof", "eoln", // files (M10)
-      "new", "dispose",                                        // M9
       "pack", "unpack"};                                       // M10
   return Names.contains(Name);
 }
@@ -64,6 +63,11 @@ class Checker : public StmtVisitor<Checker>,
 
   /// Functions whose result has been assigned somewhere in their body.
   llvm::DenseSet<RoutineDecl *> ResultAssigned;
+
+  /// `^T` where T was not declared yet: resolved at the end of the type
+  /// section (ISO 7185 6.2.2.9 allows pointers to later types).
+  llvm::SmallVector<std::pair<PointerTypeSpec *, PointerType *>, 4>
+      PendingPointers;
 
   Type *errorType() { return Ctx.getErrorType(); }
   bool isISO() const { return LangOpts.Mode == LangMode::ISO; }
@@ -151,6 +155,13 @@ class Checker : public StmtVisitor<Checker>,
   static bool areCompatible(Type *A, Type *B) {
     if (A == B)
       return true;
+    if ((A->isPointer() && B->isNil()) || (A->isNil() && B->isPointer()))
+      return true;
+    if (A->isSet() && B->isSet()) {
+      auto *SA = llvm::cast<SetType>(A), *SB = llvm::cast<SetType>(B);
+      return SA->isEmptySet() || SB->isEmptySet() ||
+             SA->getElementType()->getBase() == SB->getElementType()->getBase();
+    }
     if (A->isOrdinal() && B->isOrdinal())
       return A->getBase() == B->getBase();
     if (A->isStringType() && B->isStringType())
@@ -164,6 +175,10 @@ class Checker : public StmtVisitor<Checker>,
       return true;
     if (Target->isReal() && Value->isIntegerLike())
       return true;
+    if (Target->isPointer() && Value->isNil())
+      return true;
+    if (Target->isSet() && Value->isSet())
+      return areCompatible(Target, Value); // range-checked at runtime
     if (Target->isOrdinal() && Value->isOrdinal())
       return Target->getBase() == Value->getBase(); // range-checked at runtime
     if (Target->isStringType() && Value->isStringType() &&
@@ -183,7 +198,8 @@ class Checker : public StmtVisitor<Checker>,
       return isVariableReference(I->getBase());
     if (auto *F = llvm::dyn_cast<FieldExpr>(E))
       return isVariableReference(F->getBase());
-    return false;
+    // p^ is a variable even when p is a function result.
+    return llvm::isa<DerefExpr>(E);
   }
 
   //===--------------------------------------------------------------------===//
@@ -482,6 +498,48 @@ class Checker : public StmtVisitor<Checker>,
       return T;
     }
 
+    case TypeSpec::TS_Pointer: {
+      auto *PS = llvm::cast<PointerTypeSpec>(TS);
+      const Identifier &Id = PS->getTarget();
+      Decl *D = Cur->lookup(Id.Name);
+      if (!D) {
+        auto *P = Ctx.create<PointerType>(nullptr);
+        PendingPointers.push_back({PS, P});
+        return P;
+      }
+      if (auto *TD = llvm::dyn_cast<TypeDecl>(D))
+        return Ctx.create<PointerType>(TD->getType() ? TD->getType()
+                                                     : errorType());
+      Diags.error(Id.Loc,
+                  "'" + Id.Spelling + "' is a " + D->getKindName() +
+                      ", not a type",
+                  {Id.getRange()});
+      return errorType();
+    }
+
+    case TypeSpec::TS_Set: {
+      auto *SS = llvm::cast<SetTypeSpec>(TS);
+      Type *Elem = resolveType(SS->getElement());
+      if (Elem->isError())
+        return errorType();
+      if (!Elem->isOrdinal()) {
+        Diags.error(SS->getElement()->getBeginLoc(),
+                    "set element type must be an ordinal type, not " +
+                        quoted(Elem),
+                    {SS->getElement()->getRange()});
+        return errorType();
+      }
+      OrdinalBounds Bd = getOrdinalBounds(Elem);
+      if (Bd.Lo < 0 || Bd.Hi > 255) {
+        Diags.error(SS->getElement()->getBeginLoc(),
+                    "set element type " + quoted(Elem) +
+                        " has values outside 0..255; use a subrange",
+                    {SS->getElement()->getRange()});
+        return errorType();
+      }
+      return Ctx.create<SetType>(Elem);
+    }
+
     case TypeSpec::TS_Record: {
       auto *RS = llvm::cast<RecordTypeSpec>(TS);
       llvm::SmallVector<FieldDecl *, 16> All;
@@ -583,9 +641,9 @@ class Checker : public StmtVisitor<Checker>,
     } else {
       ResultTy = resolveType(R->getResultTypeSpec());
       // ISO 7185 6.6.2: the result type is a simple type (or a pointer).
-      if (!ResultTy->isError() && !ResultTy->isSimple()) {
+      if (!ResultTy->isError() && !ResultTy->isValidResultType()) {
         Diags.error(R->getResultTypeSpec()->getBeginLoc(),
-                    "function result type must be a simple type, not " +
+                    "function result type must be a simple or pointer type, not " +
                         quoted(ResultTy),
                     {R->getResultTypeSpec()->getRange()});
         ResultTy = errorType();
@@ -679,10 +737,27 @@ class Checker : public StmtVisitor<Checker>,
     CurRoutine = SavedRoutine;
   }
 
+  void resolvePendingPointers() {
+    for (auto &[PS, P] : PendingPointers) {
+      const Identifier &Id = PS->getTarget();
+      auto *TD = llvm::dyn_cast_or_null<TypeDecl>(Cur->lookup(Id.Name));
+      if (TD && TD->getType()) {
+        P->setPointee(TD->getType());
+        continue;
+      }
+      Diags.error(Id.Loc, "unknown type name '" + Id.Spelling + "'",
+                  {Id.getRange()});
+      P->setPointee(errorType());
+    }
+    PendingPointers.clear();
+  }
+
   void checkBlock(Block &B) {
     for (Decl *D : B.getDecls()) {
       if (Diags.shouldStop())
         return;
+      if (!llvm::isa<TypeDecl>(D))
+        resolvePendingPointers();
       switch (D->getKind()) {
       case Decl::DK_Const:   declareConst(llvm::cast<ConstDecl>(D)); break;
       case Decl::DK_Type:    declareType(llvm::cast<TypeDecl>(D)); break;
@@ -691,6 +766,7 @@ class Checker : public StmtVisitor<Checker>,
       default: llvm_unreachable("unexpected declaration in block");
       }
     }
+    resolvePendingPointers();
     // ISO 7185 6.1.4: every forward declaration needs a definition in the
     // same block.
     for (Decl *D : B.getDecls())
@@ -945,6 +1021,32 @@ class Checker : public StmtVisitor<Checker>,
     }
   }
 
+  void checkNewDispose(ProcCallStmt *S) {
+    const Identifier &Callee = S->getCallee();
+    if (S->getArgs().size() != 1) {
+      Diags.error(Callee.Loc,
+                  "'" + Callee.Spelling + "' expects 1 argument" +
+                      (S->getArgs().size() > 1
+                           ? " (variant selectors are not supported)"
+                           : ""),
+                  {S->getRange()});
+      return;
+    }
+    Expr *Arg = S->getArgs()[0];
+    Type *T = check(Arg);
+    if (T->isError())
+      return;
+    if (!T->isPointer())
+      Diags.error(Arg->getBeginLoc(),
+                  "'" + Callee.Spelling + "' expects a pointer variable, not " +
+                      "a value of type " + quoted(T),
+                  {Arg->getRange()});
+    else if (!isVariableReference(Arg))
+      Diags.error(Arg->getBeginLoc(),
+                  "argument to '" + Callee.Spelling + "' must be a variable",
+                  {Arg->getRange()});
+  }
+
   //===--------------------------------------------------------------------===//
   // Built-in function calls
   //===--------------------------------------------------------------------===//
@@ -1047,6 +1149,8 @@ public:
       case BuiltinKind::Writeln: return checkWrite(S, /*IsWriteln=*/true);
       case BuiltinKind::Read:    return checkRead(S, /*IsReadln=*/false);
       case BuiltinKind::Readln:  return checkRead(S, /*IsReadln=*/true);
+      case BuiltinKind::New:
+      case BuiltinKind::Dispose: return checkNewDispose(S);
       default: llvm_unreachable("not a builtin procedure");
       }
     }
@@ -1381,6 +1485,27 @@ public:
       return errorType();
 
     BinaryOp Op = E->getOp();
+    if (L->isSet() && R->isSet() && Op != BinaryOp::In) {
+      if (!areCompatible(L, R)) {
+        Diags.error(E->getOpLoc(),
+                    "incompatible set types " + quoted(L) + " and " + quoted(R),
+                    {E->getLHS()->getRange(), E->getRHS()->getRange()});
+        return errorType();
+      }
+      switch (Op) {
+      case BinaryOp::Add: case BinaryOp::Sub: case BinaryOp::Mul:
+        return llvm::cast<SetType>(L)->isEmptySet() ? R : L;
+      case BinaryOp::Eq: case BinaryOp::Ne: case BinaryOp::Le: case BinaryOp::Ge:
+        return Ctx.getBooleanType(); // <= is "subset of", >= "superset of"
+      default:
+        break;
+      }
+    }
+    if ((Op == BinaryOp::Eq || Op == BinaryOp::Ne) &&
+        (L->isPointer() || L->isNil()) && (R->isPointer() || R->isNil()) &&
+        (areCompatible(L, R) || (L->isNil() && R->isNil())))
+      return Ctx.getBooleanType();
+
     switch (Op) {
     case BinaryOp::Add: case BinaryOp::Sub: case BinaryOp::Mul:
       if (L->isNumeric() && R->isNumeric())
@@ -1417,8 +1542,11 @@ public:
       }
       break;
     case BinaryOp::In:
-      Diags.error(E->getOpLoc(), "'in' (sets) is not supported yet");
-      return errorType();
+      if (L->isOrdinal() && R->isSet() &&
+          (llvm::cast<SetType>(R)->isEmptySet() ||
+           llvm::cast<SetType>(R)->getElementType()->getBase() == L->getBase()))
+        return Ctx.getBooleanType();
+      break;
     }
 
     Diags.error(E->getOpLoc(),
@@ -1520,6 +1648,64 @@ public:
                     {E->getIndex()->getRange()});
     }
     return AT->getElementType();
+  }
+
+  Type *visitNilExpr(NilExpr *) { return Ctx.getNilType(); }
+
+  Type *visitDerefExpr(DerefExpr *E) {
+    Type *T = check(E->getBase());
+    if (T->isError())
+      return errorType();
+    if (auto *P = llvm::dyn_cast<PointerType>(T))
+      return P->getPointee() ? P->getPointee() : errorType();
+    Diags.error(E->getBase()->getBeginLoc(),
+                "'^' applied to a value of type " + quoted(T) +
+                    ", which is not a pointer",
+                {E->getBase()->getRange()});
+    return errorType();
+  }
+
+  Type *visitSetCtorExpr(SetCtorExpr *E) {
+    Type *Base = nullptr;
+    bool OK = true;
+    for (const SetElement &El : E->getElements()) {
+      for (Expr *X : {El.Lo, El.Hi}) {
+        if (!X)
+          continue;
+        Type *T = check(X);
+        if (T->isError()) {
+          OK = false;
+          continue;
+        }
+        if (!T->isOrdinal()) {
+          Diags.error(X->getBeginLoc(),
+                      "set elements must be of an ordinal type, not " +
+                          quoted(T),
+                      {X->getRange()});
+          OK = false;
+          continue;
+        }
+        if (!Base) {
+          Base = T->getBase();
+        } else if (T->getBase() != Base) {
+          Diags.error(X->getBeginLoc(),
+                      "set element of type " + quoted(T) +
+                          " does not match earlier elements of type " +
+                          quoted(Base),
+                      {X->getRange()});
+          OK = false;
+          continue;
+        }
+        if (auto C = fold(X); C && (C->Value.Int < 0 || C->Value.Int > 255)) {
+          Diags.error(X->getBeginLoc(),
+                      "set element " + formatValue(T, C->Value.Int) +
+                          " is outside 0..255",
+                      {X->getRange()});
+          OK = false;
+        }
+      }
+    }
+    return OK ? Ctx.getSetConstructorType(Base) : errorType();
   }
 
   Type *visitFieldExpr(FieldExpr *E) {

@@ -2,7 +2,7 @@
 ; RUN: not %pcc -ferror-limit=0 -c %S/Inputs/routines.pas -o %t.o 2>&1 | FileCheck %s
 
 ; CHECK: routines.pas:10:10: warning: function 'f' never assigns its result
-; CHECK: routines.pas:15:15: error: function result type must be a simple type, not 'Arr'
+; CHECK: routines.pas:15:15: error: function result type must be a simple or pointer type, not 'Arr'
 ; CHECK: routines.pas:19:16: error: duplicate parameter name 'a'
 ; CHECK: routines.pas:19:13: note: previous parameter is here
 ; CHECK: routines.pas:26:10: error: heading of 'later' does not match its forward declaration

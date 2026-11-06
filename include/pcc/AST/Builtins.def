@@ -22,6 +22,10 @@ BUILTIN_PROC(Writeln, "writeln")
 BUILTIN_PROC(Read,    "read")
 BUILTIN_PROC(Readln,  "readln")
 
+// Dynamic allocation (M9).
+BUILTIN_PROC(New,     "new")
+BUILTIN_PROC(Dispose, "dispose")
+
 // Arithmetic / ordinal functions (M4); abs/sqr also take reals (M7).
 BUILTIN_FUNC(Abs,  "abs")
 BUILTIN_FUNC(Sqr,  "sqr")

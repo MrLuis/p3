@@ -309,6 +309,27 @@ public:
     visitExpr(E->getBase());
   }
 
+  void visitNilExpr(NilExpr *E) {
+    line("NilExpr");
+    end(E);
+  }
+  void visitDerefExpr(DerefExpr *E) {
+    line("DerefExpr");
+    end(E);
+    IndentScope I(Indent);
+    visitExpr(E->getBase());
+  }
+  void visitSetCtorExpr(SetCtorExpr *E) {
+    line("SetCtorExpr");
+    end(E);
+    IndentScope I(Indent);
+    for (const SetElement &El : E->getElements()) {
+      visitExpr(El.Lo);
+      if (El.Hi)
+        visitExpr(El.Hi);
+    }
+  }
+
   void visitIntegerLiteralExpr(IntegerLiteralExpr *E) {
     line("IntegerLiteralExpr ") << E->getValue();
     end(E);

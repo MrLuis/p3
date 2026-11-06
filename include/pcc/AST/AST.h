@@ -256,6 +256,40 @@ public:
   static bool classof(const Expr *E) { return E->getKind() == EK_Field; }
 };
 
+/// nil
+class NilExpr final : public Expr {
+public:
+  explicit NilExpr(SourceRange R) : Expr(EK_Nil, R) {}
+  static bool classof(const Expr *E) { return E->getKind() == EK_Nil; }
+};
+
+/// p^ (also the buffer variable f^ of a file, M10)
+class DerefExpr final : public Expr {
+  Expr *Base;
+
+public:
+  DerefExpr(SourceRange R, Expr *Base) : Expr(EK_Deref, R), Base(Base) {}
+  Expr *getBase() const { return Base; }
+  static bool classof(const Expr *E) { return E->getKind() == EK_Deref; }
+};
+
+/// One member of a set constructor: `e` or `lo..hi`.
+struct SetElement {
+  Expr *Lo;
+  Expr *Hi; ///< null unless a range
+};
+
+/// [1, 3..5, c]
+class SetCtorExpr final : public Expr {
+  llvm::ArrayRef<SetElement> Elements;
+
+public:
+  SetCtorExpr(SourceRange R, llvm::ArrayRef<SetElement> Elements)
+      : Expr(EK_SetCtor, R), Elements(Elements) {}
+  llvm::ArrayRef<SetElement> getElements() const { return Elements; }
+  static bool classof(const Expr *E) { return E->getKind() == EK_SetCtor; }
+};
+
 //===----------------------------------------------------------------------===//
 // Statements
 //===----------------------------------------------------------------------===//
@@ -470,7 +504,9 @@ public:
 
 class TypeSpec {
 public:
-  enum TypeSpecKind { TS_Named, TS_Enum, TS_Subrange, TS_Array, TS_Record };
+  enum TypeSpecKind {
+    TS_Named, TS_Enum, TS_Subrange, TS_Array, TS_Record, TS_Pointer, TS_Set
+  };
 
 private:
   const TypeSpecKind Kind;
@@ -573,6 +609,28 @@ public:
   FieldList *getFields() const { return Fields; }
   bool isPacked() const { return Packed; }
   static bool classof(const TypeSpec *T) { return T->getKind() == TS_Record; }
+};
+
+/// ^TypeName
+class PointerTypeSpec final : public TypeSpec {
+  Identifier Target;
+
+public:
+  PointerTypeSpec(SourceRange R, Identifier Target)
+      : TypeSpec(TS_Pointer, R), Target(Target) {}
+  const Identifier &getTarget() const { return Target; }
+  static bool classof(const TypeSpec *T) { return T->getKind() == TS_Pointer; }
+};
+
+/// [packed] set of Element
+class SetTypeSpec final : public TypeSpec {
+  TypeSpec *Element;
+
+public:
+  SetTypeSpec(SourceRange R, TypeSpec *Element)
+      : TypeSpec(TS_Set, R), Element(Element) {}
+  TypeSpec *getElement() const { return Element; }
+  static bool classof(const TypeSpec *T) { return T->getKind() == TS_Set; }
 };
 
 //===----------------------------------------------------------------------===//

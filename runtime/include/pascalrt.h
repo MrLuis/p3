@@ -46,6 +46,11 @@ double __pas_read_real(void);
 char __pas_read_char(void);
 void __pas_readln(void);
 
+/* new / dispose (M9). __pas_new returns zeroed memory; disposing nil is a
+ * runtime error. */
+void *__pas_new(int64_t size);
+void __pas_dispose(void *p);
+
 /* Reports a runtime error and terminates with exit status 2. The compiler
  * passes messages like "division by zero at prog.pas:12:9". */
 void __pas_runtime_error(const char *msg) __attribute__((noreturn));

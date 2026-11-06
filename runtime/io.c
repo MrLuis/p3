@@ -211,3 +211,18 @@ double __pas_read_real(void) {
     __pas_runtime_error("invalid real number in input");
   return strtod(buf, NULL);
 }
+
+/*===- Heap -----------------------------------------------------------------===*/
+
+void *__pas_new(int64_t size) {
+  void *p = calloc(1, size > 0 ? (size_t)size : 1);
+  if (!p)
+    __pas_runtime_error("out of memory in 'new'");
+  return p;
+}
+
+void __pas_dispose(void *p) {
+  if (!p)
+    __pas_runtime_error("'dispose' of a nil pointer");
+  free(p);
+}

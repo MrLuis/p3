@@ -1,0 +1,17 @@
+; M9: pointer and set type checking.
+; RUN: not %pcc -ferror-limit=0 -c %S/Inputs/ptrsets.pas -o %t.o 2>&1 | FileCheck %s
+
+; CHECK: ptrsets.pas:4:15: error: set element type 'integer' has values outside 0..255; use a subrange
+; CHECK: ptrsets.pas:5:15: error: set element type must be an ordinal type, not 'real'
+; CHECK: ptrsets.pas:3:9: error: unknown type name 'Missing'
+; CHECK: ptrsets.pas:11:5: error: assigning to 'PI' from incompatible type '^char'
+; CHECK: ptrsets.pas:12:5: error: assigning to 'integer' from incompatible type 'PI'
+; CHECK: ptrsets.pas:13:7: error: 'new' expects a pointer variable, not a value of type 'integer'
+; CHECK: ptrsets.pas:14:3: error: 'dispose' expects 1 argument (variant selectors are not supported)
+; CHECK: ptrsets.pas:15:3: error: '^' applied to a value of type 'integer', which is not a pointer
+; CHECK: ptrsets.pas:16:12: error: set element of type 'char' does not match earlier elements of type 'integer'
+; CHECK: ptrsets.pas:17:9: error: set element 300 is outside 0..255
+; CHECK: ptrsets.pas:18:8: error: invalid operands to 'in' ('char' and 'Small')
+; CHECK: ptrsets.pas:19:8: error: invalid operands to '<' ('Small' and 'set of integer')
+; CHECK: ptrsets.pas:20:11: error: cannot write a value of type 'PI'
+; CHECK-NOT: error:

@@ -26,3 +26,11 @@
 ; RUN: %t/unchecked | FileCheck --check-prefix=UNCHECKED %s
 ; UNCHECKED: 11
 ; UNCHECKED-NEXT: -2147483648
+
+; M9: nil dereference, dispose(nil), out-of-range set members.
+; RUN: %pcc %S/Inputs/checks/nilderef.pas -o %t/nilderef && not %t/nilderef 2>&1 | FileCheck --check-prefix=NIL %s
+; NIL: Runtime error: dereference of a nil pointer at {{.*}}nilderef.pas:6:3
+; RUN: %pcc %S/Inputs/checks/disposenil.pas -o %t/disposenil && not %t/disposenil 2>&1 | FileCheck --check-prefix=DISPOSE %s
+; DISPOSE: Runtime error: 'dispose' of a nil pointer
+; RUN: %pcc %S/Inputs/checks/setrange.pas -o %t/setrange && not %t/setrange 2>&1 | FileCheck --check-prefix=SETRANGE %s
+; SETRANGE: Runtime error: set member out of range at {{.*}}setrange.pas:5:8

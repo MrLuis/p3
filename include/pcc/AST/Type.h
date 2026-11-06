@@ -41,6 +41,9 @@ public:
     TK_String,   ///< a string literal of length != 1
     TK_Array,
     TK_Record,
+    TK_Pointer,  ///< ^T                                         (M9)
+    TK_Nil,      ///< the type of `nil`, compatible with every pointer
+    TK_Set,      ///< set of T (T's values must lie in 0..255)   (M9)
   };
 
 private:
@@ -63,6 +66,9 @@ public:
   bool isStringLiteral() const { return Kind == TK_String; }
   bool isArray() const { return Kind == TK_Array; }
   bool isRecord() const { return Kind == TK_Record; }
+  bool isPointer() const { return Kind == TK_Pointer; }
+  bool isNil() const { return Kind == TK_Nil; }
+  bool isSet() const { return Kind == TK_Set; }
 
   /// ISO 7185 6.4.2.1: integer, boolean, char, enumerations and subranges.
   bool isOrdinal() const {
@@ -70,6 +76,8 @@ public:
            Kind == TK_Enum || Kind == TK_Subrange;
   }
   bool isSimple() const { return isOrdinal() || isReal(); }
+  /// Types a function may return (ISO 6.6.2: simple or pointer).
+  bool isValidResultType() const { return isSimple() || isPointer(); }
   bool isStructured() const { return isArray() || isRecord(); }
 
   /// Integer-like after stripping subranges (integer or a subrange of it).
@@ -103,6 +111,7 @@ public:
   static bool classof(const Type *T) {
     switch (T->getKind()) {
     case TK_Error: case TK_Integer: case TK_Real: case TK_Boolean: case TK_Char:
+    case TK_Nil:
       return true;
     default:
       return false;
@@ -179,6 +188,30 @@ public:
   FieldDecl *findField(llvm::StringRef Name) const;
   bool isPacked() const { return Packed; }
   static bool classof(const Type *T) { return T->getKind() == TK_Record; }
+};
+
+/// ^T. The pointee may be declared later in the same type section, so it is
+/// filled in once known.
+class PointerType final : public Type {
+  Type *Pointee;
+
+public:
+  explicit PointerType(Type *Pointee) : Type(TK_Pointer), Pointee(Pointee) {}
+  Type *getPointee() const { return Pointee; }
+  void setPointee(Type *T) { Pointee = T; }
+  static bool classof(const Type *T) { return T->getKind() == TK_Pointer; }
+};
+
+/// set of Element. Element is null for the empty set `[]`, which is
+/// compatible with every set type.
+class SetType final : public Type {
+  Type *Element;
+
+public:
+  explicit SetType(Type *Element) : Type(TK_Set), Element(Element) {}
+  Type *getElementType() const { return Element; }
+  bool isEmptySet() const { return Element == nullptr; }
+  static bool classof(const Type *T) { return T->getKind() == TK_Set; }
 };
 
 /// Bounds of an ordinal type: integer [-2^31, 2^31-1], char [0, 255],

@@ -447,17 +447,34 @@ TypeSpec *Parser::parseType() {
     return parseArrayType(Start, Packed);
   case tok::kw_record:
     return parseRecordType(Start, Packed);
-  case tok::kw_set:
+  case tok::kw_set: {
+    consumeToken();
+    if (!expect(tok::kw_of, "after 'set'"))
+      return nullptr;
+    TypeSpec *Elem = parseSimpleType();
+    if (!Elem)
+      return nullptr;
+    return Ctx.create<SetTypeSpec>(SourceRange(Start, PrevTokEnd), Elem);
+  }
   case tok::kw_file:
-    unsupported("'" + Tok.getRawText().lower() + "' types are");
+    unsupported("'file' types are");
     return nullptr;
-  case tok::caret:
-    unsupported("pointer types are");
-    return nullptr;
+  case tok::caret: {
+    if (Packed)
+      break;
+    consumeToken();
+    Identifier Target;
+    if (!expectIdentifier(Target, "type name after '^'"))
+      return nullptr;
+    return Ctx.create<PointerTypeSpec>(SourceRange(Start, PrevTokEnd), Target);
+  }
   default:
+    break;
+  }
+  {
     if (Packed) {
       Diags.error(Tok.getLocation(),
-                  "'packed' must be followed by 'array' or 'record'");
+                  "'packed' must be followed by 'array', 'record' or 'set'");
       return nullptr;
     }
     return parseSimpleType();
@@ -1292,8 +1309,10 @@ Expr *Parser::parseSelectors(Expr *Base) {
       continue;
     }
     if (Tok.is(tok::caret)) {
-      unsupported("pointer dereferencing is");
-      return nullptr;
+      consumeToken();
+      Base = Ctx.create<DerefExpr>(SourceRange(Base->getBeginLoc(), PrevTokEnd),
+                                   Base);
+      continue;
     }
     return Base;
   }
@@ -1367,13 +1386,33 @@ Expr *Parser::parseFactor() {
     return Ctx.create<UnaryExpr>(
         SourceRange(OpLoc, Operand->getRange().getEnd()), Op, Operand);
   }
-  case tok::kw_nil:
-    unsupported("'nil' is");
+  case tok::kw_nil: {
+    auto *E = Ctx.create<NilExpr>(Tok.getRange());
     consumeToken();
-    return nullptr;
-  case tok::l_square:
-    unsupported("set constructors are");
-    return nullptr;
+    return E;
+  }
+  case tok::l_square: {
+    // set constructor: "[" [ elem { "," elem } ] "]" ; elem = expr [".." expr]
+    SourceLocation LBrack = consumeToken();
+    llvm::SmallVector<SetElement, 8> Elems;
+    if (Tok.isNot(tok::r_square)) {
+      do {
+        Expr *Lo = parseExpression();
+        if (!Lo)
+          return nullptr;
+        Expr *Hi = nullptr;
+        if (tryConsume(tok::dotdot) && !(Hi = parseExpression()))
+          return nullptr;
+        Elems.push_back({Lo, Hi});
+      } while (tryConsume(tok::comma));
+    }
+    if (!expect(tok::r_square, "after set elements")) {
+      Diags.note(LBrack, "to match this '['");
+      return nullptr;
+    }
+    return Ctx.create<SetCtorExpr>(SourceRange(LBrack, PrevTokEnd),
+                                   Ctx.copyArray<SetElement>(Elems));
+  }
   default:
     Diags.error(Tok.getLocation(), "expected expression");
     return nullptr;

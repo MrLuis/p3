@@ -108,6 +108,16 @@ std::string Type::getName() const {
   case TK_Record:
     return llvm::cast<RecordType>(this)->isPacked() ? "packed record"
                                                     : "record";
+  case TK_Pointer: {
+    Type *P = llvm::cast<PointerType>(this)->getPointee();
+    return "^" + (P ? P->getName() : std::string("?"));
+  }
+  case TK_Nil:
+    return "nil";
+  case TK_Set: {
+    Type *E = llvm::cast<SetType>(this)->getElementType();
+    return E ? "set of " + E->getName() : "empty set";
+  }
   }
   return "?";
 }
