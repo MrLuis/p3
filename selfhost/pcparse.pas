@@ -14,6 +14,10 @@ uses pcsys, pcutil, pcdiag, pclex, pcast;
 function parseProgram(fid: longint; mode: TLangMode): PDecl;
 { Parses a unit file (Turbo/FPC); nil on a fatal syntax error. }
 function parseUnit(fid: longint; mode: TLangMode): PDecl;
+{ The main input: a unit if it starts with 'unit' (Turbo/FPC; isUnit is
+  set, and the unit is parsed only if parseUnits), else a program. }
+function parseInput(fid: longint; mode: TLangMode; parseUnits: boolean;
+                    var isUnit: boolean): PDecl;
 
 implementation
 
@@ -434,6 +438,19 @@ function parseUnit(fid: longint; mode: TLangMode): PDecl;
 begin
   startParser(fid, mode);
   parseUnit := parseUnitHere;
+end;
+
+function parseInput(fid: longint; mode: TLangMode; parseUnits: boolean;
+                    var isUnit: boolean): PDecl;
+begin
+  startParser(fid, mode);
+  isUnit := tok.kind = tkKwUnit;
+  if isUnit and not parseUnits then
+    parseInput := nil
+  else if isUnit then
+    parseInput := parseUnitHere
+  else
+    parseInput := parseProgramHere;
 end;
 
 { --- Blocks and declarations --- }

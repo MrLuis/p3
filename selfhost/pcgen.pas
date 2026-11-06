@@ -27,7 +27,13 @@ uses pcsys, pcutil, pcdiag, pclex, pcast, pctypes, pcir;
 procedure generateModule(prog: PDecl; const units: TPtrList; m: TLangMode;
                          rangeChecksOn, overflowChecksOn: boolean;
                          const sourceName, triple, dataLayout: string;
-                         debugInfo, optimized: boolean; var outText: TBuf);
+                         debugInfo, optimized, separateUnits: boolean; var outText: TBuf);
+{ The module for unit u, compiled on its own (CodeGen.cpp's
+  generateUnitModule); deps: the units it uses, dependency order. }
+procedure generateUnitModule(u: PDecl; const deps: TPtrList; m: TLangMode;
+                             rangeChecksOn, overflowChecksOn: boolean;
+                             const sourceName, triple, dataLayout: string;
+                             debugInfo, optimized: boolean; var outText: TBuf);
 
 implementation
 
@@ -53,6 +59,7 @@ var
   mainJmpBuf: TV;
   hasMainJmpBuf: boolean;
   routinePairT, jmpBufT: PIRType;
+  separate: boolean;         { units compiled separately (S11) }
 
 { --- Small helpers --- }
 

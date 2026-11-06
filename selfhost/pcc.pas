@@ -17,7 +17,7 @@ var
   mode: TLangMode;
   errorLimit: longint;
   werror, noUnusedVariable: boolean;
-  rangeChecksOn, overflowChecksOn, debugInfo: boolean;
+  rangeChecksOn, overflowChecksOn, debugInfo, separateUnits: boolean;
   optLevel: longint;
   outBuf: TBuf;
 
@@ -124,6 +124,7 @@ begin
   helpLine('  --ferror-limit=<N>           - Stop after N errors (0 = no limit)');
   helpLine('  --fno-overflow-checks        - Disable runtime integer overflow checks');
   helpLine('  --fno-range-checks           - Disable runtime range checks (subranges, array indices, ...)');
+  helpLine('  --fseparate-units            - Link separately compiled units (each compiled with -c to <unit>.o next to its source)');
   helpLine('  -g                           - Generate debug information');
   helpLine('  -l <name>                    - Link with library <name>');
   helpLine('  --mode=<value>               - Language dialect:');
@@ -134,11 +135,11 @@ begin
 end;
 
 const
-  numFlags = 14;
+  numFlags = 15;
   flagNames: array[1..numFlags] of string[20] = (
     'help', 'help-list', 'version', 'emit-tokens', 'emit-ast', 'emit-parse-tree',
     'emit-llvm', 'S', 'c', 'Werror', 'Wno-unused-variable', 'fno-overflow-checks',
-    'fno-range-checks', 'g');
+    'fno-range-checks', 'fseparate-units', 'g');
   numValueOpts = 9;
   valueOptNames: array[1..numValueOpts] of string[20] = (
     'o', 'mode', 'fdiagnostics-color', 'ferror-limit', 'target', 'I', 'O', 'L', 'l');
@@ -285,6 +286,7 @@ begin
   rangeChecksOn := true;
   overflowChecksOn := true;
   debugInfo := false;
+  separateUnits := false;
   positionalOnly := false;
   i := 1;
   while i <= paramcount do
@@ -356,6 +358,8 @@ begin
       overflowChecksOn := false
     else if name = 'g' then
       debugInfo := true
+    else if name = 'fseparate-units' then
+      separateUnits := true
     else if name = 'o' then
       outputFile := takeValue
     else if name = 'mode' then
@@ -441,6 +445,9 @@ var
   unitsDone: TIntMap;   { name id -> PDecl }
   inProgress: TIntMap;  { name id -> non-nil while being loaded }
 
+var
+  selfUnit: PName;      { the unit being compiled, if any: using it is circular }
+
 procedure visitUnit(const u: TIdent);
 var
   dirs: TPtrList;
@@ -450,7 +457,7 @@ var
 begin
   if mapHas(unitsDone, u.name^.id) or diagShouldStop then
     exit;
-  if mapGet(inProgress, u.name^.id) <> nil then
+  if (mapGet(inProgress, u.name^.id) <> nil) or (u.name = selfUnit) then
   begin
     diagErrorR(u.loc, 'circular unit reference to ''' + nameStr(u.spelling) + '''',
                identRange(u));
@@ -526,6 +533,96 @@ begin
     visitUnit(PIdent(listGet(usesList, i))^);
 end;
 
+{ llvm::sys::path::replace_extension(path, 'o') }
+function objectPath(const path: string): string;
+var
+  i: longint;
+  r: string;
+begin
+  r := path;
+  for i := length(r) downto 1 do
+  begin
+    if r[i] = '/' then
+      break;
+    if r[i] = '.' then
+    begin
+      r := copy(r, 1, i - 1);
+      break;
+    end;
+  end;
+  objectPath := r + '.o';
+end;
+
+{ The objects of separately compiled units, next to their sources; false
+  (and an error) if one is missing. }
+function findUnitObjects(var objects: TPtrList): boolean;
+var
+  i, f, line, col: longint;
+  u: PDecl;
+  obj: string;
+begin
+  findUnitObjects := false;
+  for i := 0 to units.count - 1 do
+  begin
+    u := PDecl(listGet(units, i));
+    smPresumed(u^.loc, f, line, col);
+    obj := objectPath(smFileName(f));
+    if not sysFileExists(obj) then
+    begin
+      diagError(noLoc, 'cannot find ''' + obj + ''', the object file of unit ''' +
+                       nameStr(u^.ident.spelling) + '''; compile the unit with -c');
+      exit;
+    end;
+    listAdd(objects, intern(obj));
+  end;
+  findUnitObjects := true;
+end;
+
+{ A unit file as the input: its own module (S11). }
+function compileUnit(fid: longint): boolean;
+var
+  u: PDecl;
+  isUnit: boolean;
+  uses_: TPtrList;
+  i: longint;
+  layout: string;
+  kind: TOutputKind;
+  noObjects: TPtrList;
+begin
+  compileUnit := false;
+  u := parseInput(fid, mode, true, isUnit);
+  if (u = nil) or diagHasErrors then
+    exit;
+  listInit(uses_);
+  for i := 0 to u^.ifaceUses.count - 1 do
+    listAdd(uses_, listGet(u^.ifaceUses, i));
+  for i := 0 to u^.implUses.count - 1 do
+    listAdd(uses_, listGet(u^.implUses, i));
+  selfUnit := u^.ident.name;
+  loadUnits(uses_);
+  if diagHasErrors or not semaCheckUnit(u, units, mode) then
+    exit;
+  if action = actExe then
+  begin
+    diagError(noLoc, '''' + inputFile + ''' is a unit: compile it with -c, -S or ' +
+                     '--emit-llvm and link it into a program built with -fseparate-units');
+    exit;
+  end;
+  if not moduleLayout(targetTriple, layout) then
+    exit;
+  generateUnitModule(u, units, mode, rangeChecksOn, overflowChecksOn, smFileName(fid),
+                     targetTriple, layout, debugInfo, optLevel > 0, outBuf);
+  case action of
+    actLLVM: kind := okLLVM;
+    actAsm: kind := okAsm;
+  else
+    kind := okObj;
+  end;
+  listInit(noObjects);
+  compileUnit := emitOutput(outBuf, smFileName(fid), kind, optLevel, targetTriple,
+                            outputFile, noObjects);
+end;
+
 { The input file's name without directory and extension ('a' for standard
   input), like llvm::sys::path::stem. }
 function inputStem: string;
@@ -572,6 +669,8 @@ var
   prog: PDecl;
   kind: TOutputKind;
   modLayout: string;
+  isUnit: boolean;
+  unitObjects: TPtrList;
 begin
   sysInit;
   diagInit;
@@ -611,11 +710,29 @@ begin
   listInit(units);
   mapInit(unitsDone);
   mapInit(inProgress);
+  selfUnit := nil;
   initTypes;
+  isUnit := false;
+  if action <> actTokens then
+  begin
+    { a unit file? (Turbo/FPC) }
+    prog := parseInput(fid, mode, false, isUnit);
+    if isUnit and ((action = actParseTree) or (action = actAST)) then
+    begin
+      diagError(noLoc, '''' + inputFile + ''' is a unit; --emit-parse-tree and ' +
+                       '--emit-ast need a program');
+      sysExit(1);
+    end;
+    if isUnit then
+    begin
+      if compileUnit(fid) and not diagHasErrors then
+        sysExit(0);
+      sysExit(1);
+    end;
+  end;
   case action of
     actParseTree:
       begin
-        prog := parseProgram(fid, mode);
         if not diagHasErrors then
           loadUnits(prog^.progUses);
         printParseTree(outBuf, prog, units);
@@ -630,12 +747,11 @@ begin
     begin
       { --emit-ast and the code-generating actions: parse, load units and
         check (Sema is skipped after syntax errors) }
-      prog := parseProgram(fid, mode);
       if not diagHasErrors then
         loadUnits(prog^.progUses);
       semaOK := false;
       if not diagHasErrors then
-        semaOK := semaCheck(prog, units, mode);
+        semaOK := semaCheck(prog, units, mode, separateUnits);
       if action = actAST then
       begin
         { the dump is written even after errors; types appear if Sema ran }
@@ -646,9 +762,12 @@ begin
       begin
         if not moduleLayout(targetTriple, modLayout) then
           sysExit(1);
+        listInit(unitObjects);
+        if separateUnits and (action = actExe) and not findUnitObjects(unitObjects) then
+          sysExit(1);
         generateModule(prog, units, mode, rangeChecksOn, overflowChecksOn,
                        smFileName(fid), targetTriple, modLayout, debugInfo, optLevel > 0,
-                       outBuf);
+                       separateUnits, outBuf);
         case action of
           actLLVM: kind := okLLVM;
           actAsm: kind := okAsm;
@@ -656,7 +775,8 @@ begin
         else
           kind := okExe;
         end;
-        ok := emitOutput(outBuf, smFileName(fid), kind, optLevel, targetTriple, outputFile);
+        ok := emitOutput(outBuf, smFileName(fid), kind, optLevel, targetTriple, outputFile,
+                         unitObjects);
       end;
     end;
   end;

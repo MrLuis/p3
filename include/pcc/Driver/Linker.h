@@ -26,7 +26,9 @@ class DiagnosticsEngine;
 std::string findRuntimeLibrary();
 
 /// Returns false (after reporting) on failure.
-bool linkExecutable(llvm::StringRef ObjectFile, llvm::StringRef OutputFile,
+bool linkExecutable(llvm::StringRef ObjectFile,
+                    llvm::ArrayRef<std::string> UnitObjects,
+                    llvm::StringRef OutputFile,
                     llvm::ArrayRef<std::string> LibraryDirs,
                     llvm::ArrayRef<std::string> Libraries,
                     DiagnosticsEngine &Diags);

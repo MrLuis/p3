@@ -1496,7 +1496,7 @@ begin
   begin
     c := name[i];
     if not (((c >= 'a') and (c <= 'z')) or ((c >= 'A') and (c <= 'Z')) or
-            ((c >= '0') and (c <= '9')) or (c = '.') or (c = '_') or (c = '$') or
+            ((c >= '0') and (c <= '9')) or (c = '.') or (c = '_') or
             (c = '-')) then
       plain := false;
   end;
@@ -2577,6 +2577,9 @@ var
   p: PGlobal;
 begin
   name := copy(g.v, 2, 255);
+  { a quoted name (@"pas.u$x") }
+  if (length(name) >= 2) and (name[1] = '"') then
+    name := copy(name, 2, length(name) - 2);
   p := PGlobal(mapGet(globalByName, intern(name)^.id));
   if p <> nil then
     p^.dbg := m;

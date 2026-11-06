@@ -980,13 +980,23 @@ var
   init: TV;
 begin
   ty := memType(v^.varType);
-  if v^.init <> nil then
-    init := constantFor(v^.init, v^.initValue, v^.varType, ty)
+  if v^.cgImported then
+    { a variable of a separately compiled unit: declared only }
+    v^.cgValue := irBox(irGlobal(nm(v^.cgExport), 'external', ty, irNull, false, false,
+                                 true, 0))
   else
-    init := irZero(ty);
-  v^.cgValue := irBox(irGlobal('pas.' + nm(v^.ident.name), 'internal', ty, init, false,
-                               false, false, 0));
-  if dbgOn then
+  begin
+    if v^.init <> nil then
+      init := constantFor(v^.init, v^.initValue, v^.varType, ty)
+    else
+      init := irZero(ty);
+    if v^.cgExport <> nil then
+      v^.cgValue := irBox(irGlobal(nm(v^.cgExport), '', ty, init, false, false, false, 0))
+    else
+      v^.cgValue := irBox(irGlobal('pas.' + nm(v^.ident.name), 'internal', ty, init, false,
+                                   false, false, 0));
+  end;
+  if dbgOn and not v^.cgImported then
     declareGlobalDebugInfo(v, PTVBox(v^.cgValue)^);
 end;
 
@@ -1080,6 +1090,20 @@ begin
       declareExternal(r);
       continue;
     end;
+    if r^.cgImported then
+    begin
+      { a routine of a separately compiled unit: declared only }
+      listInit(params);
+      listAdd(params, irPtrT);
+      for j := 0 to r^.params.count - 1 do
+        listAdd(params, paramIRType(PDecl(listGet(r^.params, j))));
+      ret := irVoidT;
+      if r^.isFunction then
+        ret := regType(r^.resultType);
+      r^.cgFunc := irDeclareFunction(nm(r^.cgExport), ret, params, '', '');
+      listFree(params);
+      continue;
+    end;
     listInit(slots);
     if r^.parent <> nil then
       listAdd(slots, irPtrT);
@@ -1115,7 +1139,10 @@ begin
     ret := irVoidT;
     if r^.isFunction then
       ret := regType(r^.resultType);
-    f := irCreateFunction(name, 'internal', ret, params);
+    if r^.cgExport <> nil then
+      f := irCreateFunction(nm(r^.cgExport), '', ret, params)
+    else
+      f := irCreateFunction(name, 'internal', ret, params);
     listFree(params);
     irSetArgName(f, 0, 'link');
     for j := 0 to r^.params.count - 1 do
@@ -1205,6 +1232,31 @@ begin
     irRetVoid;
 end;
 
+{ --- Separate units (S11) --- }
+
+{ The external symbols of unit u's interface variables and routines:
+  pas.<unit>$<name>; imported: u was compiled separately (declared only). }
+procedure collectExports(u: PDecl; imported: boolean);
+var
+  i: longint;
+  d: PDecl;
+begin
+  for i := 0 to u^.iface^.decls.count - 1 do
+  begin
+    d := PDecl(listGet(u^.iface^.decls, i));
+    if (d^.kind = dkVar) or ((d^.kind = dkRoutine) and not d^.isExternal) then
+    begin
+      d^.cgExport := intern('pas.' + nm(u^.ident.name) + '$' + nm(d^.ident.name));
+      d^.cgImported := imported;
+    end;
+  end;
+end;
+
+function initName(u: PDecl): string;
+begin
+  initName := 'pas.' + nm(u^.ident.name) + '$$init';
+end;
+
 { --- The program --- }
 
 procedure emitMainBody(prog: PDecl; const units: TPtrList; mainFn: PIRFunc);
@@ -1215,6 +1267,7 @@ var
   ignored, tp: TV;
   entry: PIRBlock;
   noParams: TPtrList;
+  initFn: PIRFunc;
 begin
   blk := prog^.progBlock;
   curFn := mainFn;
@@ -1237,18 +1290,36 @@ begin
     tp := irGlobal('__pas_tp_mode', 'external', irI32, irNull, false, false, true, 0);
     irStore(i32c(1), tp);
   end;
-  { units: their files, then their initialization parts, in uses order }
-  for i := 0 to units.count - 1 do
+  if separate then
   begin
-    u := PDecl(listGet(units, i));
-    initFileVars(u^.iface^.decls, false);
-    initFileVars(u^.impl^.decls, false);
-  end;
-  for i := 0 to units.count - 1 do
+    { separately compiled units initialize themselves, in uses order }
+    for i := 0 to units.count - 1 do
+    begin
+      u := PDecl(listGet(units, i));
+      initFn := irFindFunction(initName(u));
+      if initFn = nil then
+      begin
+        listInit(noParams);
+        initFn := irDeclareFunction(initName(u), irVoidT, noParams, '', '');
+      end;
+      ignored := call0(initFn, '');
+    end;
+  end
+  else
   begin
-    u := PDecl(listGet(units, i));
-    if u^.impl^.body <> nil then
-      visitStmt(u^.impl^.body);
+    { units: their files, then their initialization parts, in uses order }
+    for i := 0 to units.count - 1 do
+    begin
+      u := PDecl(listGet(units, i));
+      initFileVars(u^.iface^.decls, false);
+      initFileVars(u^.impl^.decls, false);
+    end;
+    for i := 0 to units.count - 1 do
+    begin
+      u := PDecl(listGet(units, i));
+      if u^.impl^.body <> nil then
+        visitStmt(u^.impl^.body);
+    end;
   end;
   initFileVars(blk^.decls, true);
   if hasMainJmpBuf then
@@ -1261,20 +1332,14 @@ begin
   irRet(i32c(0));
 end;
 
-procedure generateModule(prog: PDecl; const units: TPtrList; m: TLangMode;
-                         rangeChecksOn, overflowChecksOn: boolean;
-                         const sourceName, triple, dataLayout: string;
-                         debugInfo, optimized: boolean; var outText: TBuf);
+procedure startModule(m: TLangMode; rangeChecksOn, overflowChecksOn: boolean;
+                      const sourceName, triple, dataLayout: string);
 var
-  i: longint;
-  u: PDecl;
   fields: TPtrList;
-  mainFn: PIRFunc;
 begin
   mode := m;
   optRange := rangeChecksOn;
   optOverflow := overflowChecksOn;
-  progDecl := prog;
   curRoutine := nil;
   mapInit(lowered);
   mapInit(stringConsts);
@@ -1289,8 +1354,91 @@ begin
   listFree(fields);
   { generous for every supported libc (glibc: 200-312 bytes, macOS: 192) }
   jmpBufT := irArray(64, irI64);
-
   declareRuntime;
+end;
+
+procedure startDebugInfo(debugInfo, optimized: boolean; const sourceName: string);
+begin
+  dbgOn := debugInfo;
+  dbgOptimized := optimized;
+  curSP := nil;
+  if dbgOn then
+    initDebugInfo(sourceName);
+end;
+
+procedure generateUnitModule(u: PDecl; const deps: TPtrList; m: TLangMode;
+                             rangeChecksOn, overflowChecksOn: boolean;
+                             const sourceName, triple, dataLayout: string;
+                             debugInfo, optimized: boolean; var outText: TBuf);
+var
+  i: longint;
+  d: PDecl;
+  noParams: TPtrList;
+  initFn: PIRFunc;
+  entry: PIRBlock;
+begin
+  separate := true;
+  progDecl := nil;
+  startModule(m, rangeChecksOn, overflowChecksOn, sourceName, triple, dataLayout);
+  listInit(noParams);
+  initFn := irCreateFunction(initName(u), '', irVoidT, noParams);
+  startDebugInfo(debugInfo, optimized, sourceName);
+  for i := 0 to deps.count - 1 do
+    collectExports(PDecl(listGet(deps, i)), true);
+  collectExports(u, false);
+  for i := 0 to deps.count - 1 do
+    emitGlobals(PDecl(listGet(deps, i))^.iface);
+  emitGlobals(u^.iface);
+  emitGlobals(u^.impl);
+  for i := 0 to deps.count - 1 do
+  begin
+    d := PDecl(listGet(deps, i));
+    declareRoutines(d^.iface);
+  end;
+  declareRoutines(u^.iface);
+  declareRoutines(u^.impl);
+  for i := 0 to routinesToEmit.count - 1 do
+    emitRoutineBody(PDecl(listGet(routinesToEmit, i)));
+
+  { the initialization part: files, then the statements }
+  curFn := initFn;
+  curRoutine := nil;
+  curFrame := irNull;
+  curSP := nil;
+  if dbgOn then
+    curSP := createSubprogram(initFn, nm(u^.ident.spelling), unitFile, lineOf(u^.loc), nil,
+                              noParams, nil);
+  irBeginBody(initFn);
+  irSetDebugLoc(nil);
+  entry := irNewBlock('entry');
+  irSetInsertPoint(entry);
+  setDebugLoc(u^.loc);
+  initFileVars(u^.iface^.decls, false);
+  initFileVars(u^.impl^.decls, false);
+  exitBlock := irNewBlock('exit');
+  if u^.impl^.body <> nil then
+    visitStmt(u^.impl^.body);
+  irBr(exitBlock);
+  irSetInsertPoint(exitBlock);
+  irRetVoid;
+  if dbgOn then
+    finalizeDebugInfo;
+  irWriteModule(outText);
+end;
+
+procedure generateModule(prog: PDecl; const units: TPtrList; m: TLangMode;
+                         rangeChecksOn, overflowChecksOn: boolean;
+                         const sourceName, triple, dataLayout: string;
+                         debugInfo, optimized, separateUnits: boolean; var outText: TBuf);
+var
+  i: longint;
+  u: PDecl;
+  fields: TPtrList;
+  mainFn: PIRFunc;
+begin
+  separate := separateUnits;
+  progDecl := prog;
+  startModule(m, rangeChecksOn, overflowChecksOn, sourceName, triple, dataLayout);
   listInit(fields);
   listAdd(fields, irI32);
   listAdd(fields, irPtrT);
@@ -1298,17 +1446,17 @@ begin
   listFree(fields);
   irSetArgName(mainFn, 0, 'argc');
   irSetArgName(mainFn, 1, 'argv');
-  dbgOn := debugInfo;
-  dbgOptimized := optimized;
-  curSP := nil;
-  if dbgOn then
-    initDebugInfo(sourceName);
+  startDebugInfo(debugInfo, optimized, sourceName);
+  if separate then
+    for i := 0 to units.count - 1 do
+      collectExports(PDecl(listGet(units, i)), true);
 
   for i := 0 to units.count - 1 do
   begin
     u := PDecl(listGet(units, i));
     emitGlobals(u^.iface);
-    emitGlobals(u^.impl);
+    if not separate then
+      emitGlobals(u^.impl);
   end;
   emitGlobals(prog^.progBlock);
   if hasNonLocalLabels(prog^.progBlock) then
@@ -1322,7 +1470,8 @@ begin
   begin
     u := PDecl(listGet(units, i));
     declareRoutines(u^.iface);
-    declareRoutines(u^.impl);
+    if not separate then
+      declareRoutines(u^.impl);
   end;
   declareRoutines(prog^.progBlock);
   for i := 0 to routinesToEmit.count - 1 do

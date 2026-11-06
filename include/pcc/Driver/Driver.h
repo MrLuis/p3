@@ -15,7 +15,14 @@ namespace llvm {
 class raw_ostream;
 }
 
+namespace llvm {
+class Module;
+class TargetMachine;
+} // namespace llvm
+
 namespace pcc {
+
+class Parser;
 
 class ASTContext;
 class CheckDirectives;
@@ -35,9 +42,18 @@ class Driver {
   /// lex -> parse -> sema -> codegen -> emit/link, stopping at Opts.Act.
   bool runPipeline(FileID FID);
 
+  /// Self: the unit being compiled, if any (using it is circular).
   void loadUnits(llvm::ArrayRef<Identifier> Uses, ASTContext &Ctx,
                  CheckDirectives &Directives,
-                 llvm::SmallVectorImpl<UnitDecl *> &Ordered);
+                 llvm::SmallVectorImpl<UnitDecl *> &Ordered,
+                 llvm::StringRef Self = "");
+
+  /// Verifies, optimizes and writes M (or links it with UnitObjects).
+  bool finishModule(llvm::Module &M, llvm::TargetMachine &TM,
+                    llvm::ArrayRef<std::string> UnitObjects);
+  /// The pipeline for a unit file: its own module (S11).
+  bool compileUnit(Parser &P, FileID FID, ASTContext &Ctx,
+                   CheckDirectives &Directives);
 
   /// --emit-tokens
   void dumpTokens(FileID FID, llvm::raw_ostream &OS);

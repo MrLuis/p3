@@ -39,7 +39,9 @@ static std::string findLinkerDriver(DiagnosticsEngine &Diags) {
   return "";
 }
 
-bool pcc::linkExecutable(llvm::StringRef ObjectFile, llvm::StringRef OutputFile,
+bool pcc::linkExecutable(llvm::StringRef ObjectFile,
+                         llvm::ArrayRef<std::string> UnitObjects,
+                         llvm::StringRef OutputFile,
                          llvm::ArrayRef<std::string> LibraryDirs,
                          llvm::ArrayRef<std::string> Libraries,
                          DiagnosticsEngine &Diags) {
@@ -60,7 +62,9 @@ bool pcc::linkExecutable(llvm::StringRef ObjectFile, llvm::StringRef OutputFile,
     Extra.push_back("-L" + D);
   for (const std::string &L : Libraries)
     Extra.push_back("-l" + L);
-  llvm::SmallVector<llvm::StringRef, 8> Args = {CC, ObjectFile, RuntimeLib};
+  llvm::SmallVector<llvm::StringRef, 8> Args = {CC, ObjectFile};
+  Args.append(UnitObjects.begin(), UnitObjects.end());
+  Args.push_back(RuntimeLib);
   Args.append(Extra.begin(), Extra.end());
   Args.append({"-lm", "-o", OutputFile});
 

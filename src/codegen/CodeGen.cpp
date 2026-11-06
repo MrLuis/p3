@@ -30,6 +30,7 @@
 #include "pcc/Basic/SourceManager.h"
 
 #include "llvm/ADT/DenseMap.h"
+#include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/StringMap.h"
 #include "llvm/BinaryFormat/Dwarf.h"
 #include "llvm/IR/DIBuilder.h"
@@ -192,6 +193,41 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
     }
     return F;
   }
+  /// Separate units (S11): the symbols of units' interface variables and
+  /// routines, and those of units compiled separately (declared only).
+  llvm::DenseMap<Decl *, std::string> ExportNames;
+  llvm::DenseSet<Decl *> ImportedDecls;
+
+  void collectExports(UnitDecl &U, bool Imported) {
+    for (Decl *D : U.getInterface()->getDecls()) {
+      auto *R = llvm::dyn_cast<RoutineDecl>(D);
+      if (!llvm::isa<VarDecl>(D) && !(R && !R->isExternal()))
+        continue;
+      ExportNames[D] = ("pas." + U.getName().Name + "$" + D->getName().Name).str();
+      if (Imported)
+        ImportedDecls.insert(D);
+    }
+  }
+
+  static std::string initName(UnitDecl &U) {
+    return ("pas." + U.getName().Name + "$$init").str();
+  }
+
+  /// A unit-level or program variable's global.
+  llvm::GlobalVariable *createGlobal(VarDecl *V, llvm::Type *Ty,
+                                     llvm::Constant *Init) {
+    auto It = ExportNames.find(V);
+    if (It == ExportNames.end())
+      return new llvm::GlobalVariable(M, Ty, /*isConstant=*/false,
+                                      llvm::GlobalValue::InternalLinkage, Init,
+                                      "pas." + V->getName().Name);
+    bool Imported = ImportedDecls.count(V);
+    auto *G = new llvm::GlobalVariable(M, Ty, /*isConstant=*/false,
+                                       llvm::GlobalValue::ExternalLinkage,
+                                       Imported ? nullptr : Init, It->second);
+    return G;
+  }
+
   llvm::DenseMap<RoutineDecl *, unsigned> JmpBufSlots; ///< frame slot
   llvm::GlobalVariable *MainJmpBuf = nullptr;
 
@@ -1186,10 +1222,10 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
 
   void emitStaticVar(VarDecl *V) {
     llvm::Type *Ty = memType(V->getType());
-    Globals[V] = new llvm::GlobalVariable(
-        M, Ty, /*isConstant=*/false, llvm::GlobalValue::InternalLinkage,
-        initializerFor(V, Ty), "pas." + V->getName().Name);
-    if (DIB)
+    bool Imported = ImportedDecls.count(V);
+    Globals[V] =
+        createGlobal(V, Ty, Imported ? nullptr : initializerFor(V, Ty));
+    if (DIB && !Imported)
       declareGlobalDebugInfo(V, Globals[V]);
   }
 
@@ -1205,10 +1241,8 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
       llvm::Type *Ty = memType(V->getType());
       // ISO leaves variables undefined; zero-initializing makes programs
       // deterministic at no cost for globals.
-      Globals[V] = new llvm::GlobalVariable(
-          M, Ty, /*isConstant=*/false, llvm::GlobalValue::InternalLinkage,
-          llvm::Constant::getNullValue(Ty), "pas." + V->getName().Name);
-      if (DIB)
+      Globals[V] = createGlobal(V, Ty, llvm::Constant::getNullValue(Ty));
+      if (DIB && !ImportedDecls.count(V))
         declareGlobalDebugInfo(V, Globals[V]);
     }
   }
@@ -1249,6 +1283,14 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
         declareExternal(R);
         continue;
       }
+      if (ImportedDecls.count(R)) {
+        // A routine of a separately compiled unit: declared only.
+        Functions[R] = llvm::Function::Create(
+            routineFnType(R->getParams(),
+                          R->isFunction() ? R->getResultType() : nullptr),
+            llvm::Function::ExternalLinkage, ExportNames[R], M);
+        continue;
+      }
 
       // Frame: [static link], params, locals, [result].
       llvm::SmallVector<llvm::Type *, 8> Slots;
@@ -1280,10 +1322,13 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
                                                  "frame." + Name.substr(4) + ".jb");
       }
 
+      auto Export = ExportNames.find(R);
       auto *F = llvm::Function::Create(
           routineFnType(R->getParams(),
                         R->isFunction() ? R->getResultType() : nullptr),
-          llvm::Function::InternalLinkage, Name, M);
+          Export == ExportNames.end() ? llvm::Function::InternalLinkage
+                                      : llvm::Function::ExternalLinkage,
+          Export == ExportNames.end() ? Name : Export->second, M);
       unsigned ArgNo = 0;
       F->getArg(ArgNo++)->setName("link");
       for (VarDecl *P : R->getParams())
@@ -2020,11 +2065,16 @@ public:
     Main->getArg(1)->setName("argv");
 
     Block &Blk = *P.getBlock();
+    bool Separate = CGOpts.SeparateUnits;
     if (CGOpts.DebugInfo)
       initDebugInfo(M.getSourceFileName());
+    if (Separate)
+      for (UnitDecl *U : Units)
+        collectExports(*U, /*Imported=*/true);
     for (UnitDecl *U : Units) {
       emitGlobals(*U->getInterface());
-      emitGlobals(*U->getImplementation());
+      if (!Separate)
+        emitGlobals(*U->getImplementation());
     }
     emitGlobals(Blk);
     if (hasNonLocalLabels(Blk)) { // needed by gotos in routine bodies
@@ -2035,7 +2085,8 @@ public:
     }
     for (UnitDecl *U : Units) {
       declareRoutines(*U->getInterface());
-      declareRoutines(*U->getImplementation());
+      if (!Separate)
+        declareRoutines(*U->getImplementation());
     }
     declareRoutines(Blk);
     for (RoutineDecl *R : RoutinesToEmit)
@@ -2061,13 +2112,20 @@ public:
     for (const Identifier &Param : P.getParams())
       if (Param.Name != "input" && Param.Name != "output")
         ParamIndex.try_emplace(Param.Name, ParamIndex.size() + 1);
-    // Units: their files, then their initialization parts, in uses order.
-    for (UnitDecl *U : Units) {
-      initFileVars(U->getInterface()->getDecls(), nullptr);
-      initFileVars(U->getImplementation()->getDecls(), nullptr);
+    if (Separate) {
+      // Separately compiled units initialize themselves, in uses order.
+      for (UnitDecl *U : Units)
+        B.CreateCall(M.getOrInsertFunction(
+            initName(*U), llvm::FunctionType::get(B.getVoidTy(), false)));
+    } else {
+      // Units: their files, then their initialization parts, in uses order.
+      for (UnitDecl *U : Units) {
+        initFileVars(U->getInterface()->getDecls(), nullptr);
+        initFileVars(U->getImplementation()->getDecls(), nullptr);
+      }
+      for (UnitDecl *U : Units)
+        visitStmt(U->getImplementation()->getBody());
     }
-    for (UnitDecl *U : Units)
-      visitStmt(U->getImplementation()->getBody());
     initFileVars(Blk.getDecls(), &ParamIndex);
     if (MainJmpBuf)
       emitSetJmpDispatch(Blk, MainJmpBuf);
@@ -2077,6 +2135,49 @@ public:
     B.SetInsertPoint(ExitBlock);
     B.CreateCall(RT.Fini);
     B.CreateRet(B.getInt32(0));
+    if (DIB)
+      DIB->finalize();
+  }
+
+  /// A unit compiled on its own: its variables and routines, and its
+  /// initialization part as pas.<unit>$$init (files, then the statements).
+  void emitUnit(UnitDecl &U, llvm::ArrayRef<UnitDecl *> Deps) {
+    llvm::LLVMContext &C = M.getContext();
+    llvm::Function *Init = llvm::Function::Create(
+        llvm::FunctionType::get(B.getVoidTy(), false),
+        llvm::Function::ExternalLinkage, initName(U), M);
+    if (CGOpts.DebugInfo)
+      initDebugInfo(M.getSourceFileName());
+    for (UnitDecl *D : Deps)
+      collectExports(*D, /*Imported=*/true);
+    collectExports(U, /*Imported=*/false);
+    for (UnitDecl *D : Deps)
+      emitGlobals(*D->getInterface());
+    emitGlobals(*U.getInterface());
+    emitGlobals(*U.getImplementation());
+    for (UnitDecl *D : Deps)
+      declareRoutines(*D->getInterface());
+    declareRoutines(*U.getInterface());
+    declareRoutines(*U.getImplementation());
+    for (RoutineDecl *R : RoutinesToEmit)
+      emitRoutineBody(R);
+
+    CurFn = Init;
+    CurRoutine = nullptr;
+    CurFrame = nullptr;
+    CurSP = DIB ? createSubprogram(Init, U.getName().Spelling, DIUnitFile,
+                                   lineOf(U.getLocation()), nullptr, {})
+                : nullptr;
+    B.SetCurrentDebugLocation(llvm::DebugLoc());
+    B.SetInsertPoint(llvm::BasicBlock::Create(C, "entry", Init));
+    setDebugLoc(U.getLocation());
+    initFileVars(U.getInterface()->getDecls(), nullptr);
+    initFileVars(U.getImplementation()->getDecls(), nullptr);
+    ExitBlock = newBlock("exit");
+    visitStmt(U.getImplementation()->getBody());
+    B.CreateBr(ExitBlock);
+    B.SetInsertPoint(ExitBlock);
+    B.CreateRetVoid();
     if (DIB)
       DIB->finalize();
   }
@@ -2725,5 +2826,18 @@ pcc::generateModule(ProgramDecl &P, llvm::ArrayRef<UnitDecl *> Units,
   M->setTargetTriple(TM.getTargetTriple().str());
   M->setDataLayout(TM.createDataLayout());
   CodeGenModule(*M, SM, LangOpts, CGOpts).emitProgram(P, Units);
+  return M;
+}
+
+std::unique_ptr<llvm::Module>
+pcc::generateUnitModule(UnitDecl &U, llvm::ArrayRef<UnitDecl *> Deps,
+                        const SourceManager &SM, const LangOptions &LangOpts,
+                        const CodeGenOptions &CGOpts, llvm::LLVMContext &Ctx,
+                        llvm::TargetMachine &TM, llvm::StringRef SourceFileName) {
+  auto M = std::make_unique<llvm::Module>(SourceFileName, Ctx);
+  M->setSourceFileName(SourceFileName);
+  M->setTargetTriple(TM.getTargetTriple().str());
+  M->setDataLayout(TM.createDataLayout());
+  CodeGenModule(*M, SM, LangOpts, CGOpts).emitUnit(U, Deps);
   return M;
 }

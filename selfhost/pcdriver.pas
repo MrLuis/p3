@@ -23,7 +23,7 @@ function moduleLayout(const triple: string; var layout: string): boolean;
 { Writes the IR module ir (named name) as kind to path ('-': standard
   output) at optimization level opt for triple. }
 function emitOutput(const ir: TBuf; const name: string; kind: TOutputKind; opt: longint;
-                    const triple, path: string): boolean;
+                    const triple, path: string; const unitObjects: TPtrList): boolean;
 { -l and -L options, passed to the linker. }
 procedure addLinkerArg(const arg: string);
 { --version }
@@ -199,7 +199,8 @@ begin
   moduleLayout := true;
 end;
 
-function linkExecutable(const obj, path: string): boolean;
+function linkExecutable(const obj: string; const unitObjects: TPtrList;
+                        const path: string): boolean;
 var
   runtime, cc: string;
   cmd: TBuf;
@@ -219,6 +220,8 @@ begin
   bufInit(cmd);
   addArg(cmd, cc);
   addArg(cmd, obj);
+  for i := 0 to unitObjects.count - 1 do
+    addArg(cmd, nameStr(PName(listGet(unitObjects, i))));
   addArg(cmd, runtime);
   { -L directories, then -l libraries (each in command-line order) }
   for i := 0 to libraryDirs.count - 1 do
@@ -267,7 +270,7 @@ begin
 end;
 
 function emitOutput(const ir: TBuf; const name: string; kind: TOutputKind; opt: longint;
-                    const triple, path: string): boolean;
+                    const triple, path: string; const unitObjects: TPtrList): boolean;
 var
   target, tm, m: pointer;
   err: TBuf;
@@ -326,7 +329,7 @@ begin
       diagError(noLoc, 'cannot create temporary file');
       exit;
     end;
-    ok := writeText(code, obj) and linkExecutable(obj, path);
+    ok := writeText(code, obj) and linkExecutable(obj, unitObjects, path);
     sysRemoveFile(obj);
     exit(ok);
   end;

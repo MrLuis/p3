@@ -39,7 +39,13 @@ public:
 
   /// Returns true if the program is valid. Units must be in dependency
   /// order (a unit before the units and program that use it).
-  bool check(ProgramDecl &P, llvm::ArrayRef<UnitDecl *> Units = {});
+  /// SeparateUnits: the units were compiled separately; only their
+  /// interfaces are checked.
+  bool check(ProgramDecl &P, llvm::ArrayRef<UnitDecl *> Units = {},
+             bool SeparateUnits = false);
+  /// Checks unit U, compiled on its own; Deps (dependency order) are the
+  /// units it uses, directly or not, of which only the interfaces matter.
+  bool checkUnit(UnitDecl &U, llvm::ArrayRef<UnitDecl *> Deps);
 };
 
 } // namespace pcc

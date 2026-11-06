@@ -78,4 +78,8 @@ Testing:
   leads to the same IR. `utils/selfhost-diff.py --ref A --new B
   --action=--emit-llvm --extra="-o -" ...` compares any two compilers' IR
   on more inputs (fuzz corpora).
+- Separate units: `utils/bootstrap.py --separate` also builds the compiler
+  from its separately compiled units (each unit with `-c`, then `pcc.pas`
+  with `-fseparate-units`; objects are written next to the sources, so it
+  works on a copy of `selfhost/`).
 - lit runs all of these: `tests/run/selfhost.test`, `tests/selfhost/*.test`.

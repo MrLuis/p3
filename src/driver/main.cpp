@@ -52,6 +52,12 @@ static cl::list<std::string>
     Libraries("l", cl::Prefix, cl::desc("Link with library <name>"),
               cl::value_desc("name"), cl::cat(PccCategory));
 
+static cl::opt<bool> SeparateUnits(
+    "fseparate-units",
+    cl::desc("Link separately compiled units (each compiled with -c to "
+             "<unit>.o next to its source)"),
+    cl::cat(PccCategory));
+
 static cl::opt<bool> DebugInfo("g", cl::desc("Generate debug information"),
                                cl::cat(PccCategory));
 
@@ -120,6 +126,7 @@ int main(int argc, char **argv) {
   Opts.IncludeDirs.assign(IncludeDirs.begin(), IncludeDirs.end());
   Opts.LibraryDirs.assign(LibraryDirs.begin(), LibraryDirs.end());
   Opts.Libraries.assign(Libraries.begin(), Libraries.end());
+  Opts.SeparateUnits = SeparateUnits;
   Opts.TargetTriple = TargetTriple;
   Opts.Color = Color;
   Opts.ErrorLimit = ErrorLimit;

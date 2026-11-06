@@ -12,7 +12,11 @@ uses pcsys, pcutil, pcdiag, pclex, pcast, pctypes, pcscope;
 
 { Checks the units (dependencies first) and the program. Returns true if
   they are valid. }
-function semaCheck(prog: PDecl; const units: TPtrList; m: TLangMode): boolean;
+function semaCheck(prog: PDecl; const units: TPtrList; m: TLangMode;
+                   separateUnits: boolean): boolean;
+{ Checks unit u, compiled on its own; deps (dependency order) are the
+  units it uses, directly or not, of which only the interfaces matter. }
+function semaCheckUnit(u: PDecl; const deps: TPtrList; m: TLangMode): boolean;
 
 implementation
 
@@ -2326,7 +2330,9 @@ begin
   end;
 end;
 
-procedure checkUnit(u: PDecl);
+{ interfaceOnly: u was compiled separately, so only its interface is
+  declared, for the units and program using it }
+procedure checkUnit(u: PDecl; interfaceOnly: boolean);
 var
   iface, impl: PScope;
   i: longint;
@@ -2336,6 +2342,17 @@ begin
   importUnits(iface, u^.ifaceUses);
   cur := iface;
   declareAll(u^.iface);
+  if interfaceOnly then
+  begin
+    for i := 0 to u^.iface^.decls.count - 1 do
+    begin
+      r := PDecl(listGet(u^.iface^.decls, i));
+      r^.isUsed := true;
+    end;
+    mapPut(unitInterfaces, u^.ident.name^.id, iface);
+    cur := standard;
+    exit;
+  end;
 
   impl := newScope(iface);
   importUnits(impl, u^.implUses);
@@ -2367,13 +2384,9 @@ begin
   cur := standard;
 end;
 
-function semaCheck(prog: PDecl; const units: TPtrList; m: TLangMode): boolean;
-var
-  errorsBefore, i: longint;
-  programScope: PScope;
+procedure semaInit(m: TLangMode);
 begin
   mode := m;
-  errorsBefore := diagNumErrors;
   bufInit(msg);
   listInit(activeFors);
   listInit(pendingPointers);
@@ -2389,9 +2402,18 @@ begin
   standard := newScope(nil);
   cur := standard;
   declareStandardScope;
+end;
 
+function semaCheck(prog: PDecl; const units: TPtrList; m: TLangMode;
+                   separateUnits: boolean): boolean;
+var
+  errorsBefore, i: longint;
+  programScope: PScope;
+begin
+  errorsBefore := diagNumErrors;
+  semaInit(m);
   for i := 0 to units.count - 1 do
-    checkUnit(PDecl(listGet(units, i)));
+    checkUnit(PDecl(listGet(units, i)), separateUnits);
   checkProgramParams(prog);
   programScope := newScope(standard);
   importUnits(programScope, prog^.progUses);
@@ -2401,6 +2423,19 @@ begin
   checkGotos;
   cur := standard;
   semaCheck := (diagNumErrors = errorsBefore) and not diagShouldStop;
+end;
+
+function semaCheckUnit(u: PDecl; const deps: TPtrList; m: TLangMode): boolean;
+var
+  errorsBefore, i: longint;
+begin
+  errorsBefore := diagNumErrors;
+  semaInit(m);
+  for i := 0 to deps.count - 1 do
+    checkUnit(PDecl(listGet(deps, i)), true);
+  checkUnit(u, false);
+  checkGotos;
+  semaCheckUnit := (diagNumErrors = errorsBefore) and not diagShouldStop;
 end;
 
 end.

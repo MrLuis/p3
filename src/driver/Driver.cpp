@@ -159,6 +159,8 @@ bool Driver::runPipeline(FileID FID) {
   Lex.setDirectives(&Directives);
   Lex.setIncludeSupport(SM, Opts.IncludeDirs);
   Parser P(Lex, Diags, Ctx);
+  if (P.startsWithUnit())
+    return compileUnit(P, FID, Ctx, Directives);
   ProgramDecl *Program = P.parseProgram();
   llvm::SmallVector<UnitDecl *, 4> Units;
   if (!Diags.hasErrors())
@@ -175,7 +177,8 @@ bool Driver::runPipeline(FileID FID) {
   // --- M4: semantic analysis (skipped after syntax errors) ---------------
   bool SyntaxOK = !Diags.hasErrors();
   bool SemaOK = SyntaxOK && !Diags.hasErrors() &&
-                Sema(Ctx, Diags, LangOpts).check(*Program, Units);
+                Sema(Ctx, Diags, LangOpts).check(*Program, Units,
+                                                 Opts.SeparateUnits);
 
   if (Opts.Act == Action::EmitAST) {
     // Dump even after errors: a partial tree helps debugging. Types are
@@ -211,8 +214,71 @@ bool Driver::runPipeline(FileID FID) {
   CGOpts.Directives = &Directives;
   CGOpts.DebugInfo = Opts.DebugInfo;
   CGOpts.OptLevel = Opts.OptLevel;
+  CGOpts.SeparateUnits = Opts.SeparateUnits;
+
+  // Separately compiled units: their objects, next to their sources.
+  std::vector<std::string> UnitObjects;
+  if (Opts.SeparateUnits && Opts.Act == Action::EmitExe)
+    for (UnitDecl *U : Units) {
+      llvm::SmallString<256> Obj(
+          SM.getPresumedLoc(U->getLocation()).Filename);
+      llvm::sys::path::replace_extension(Obj, "o");
+      if (!llvm::sys::fs::exists(Obj)) {
+        Diags.error("cannot find '" + Obj + "', the object file of unit '" +
+                    U->getName().Spelling + "'; compile the unit with -c");
+        return false;
+      }
+      UnitObjects.push_back(std::string(Obj));
+    }
+
   auto M = generateModule(*Program, Units, SM, LangOpts, CGOpts, LLVMCtx, *TM,
                           SM.getFilename(FID));
+  return finishModule(*M, *TM, UnitObjects);
+}
+
+bool Driver::compileUnit(Parser &P, FileID FID, ASTContext &Ctx,
+                         CheckDirectives &Directives) {
+  if (Opts.Act == Action::EmitParseTree || Opts.Act == Action::EmitAST) {
+    Diags.error("'" + llvm::Twine(Opts.InputFile) +
+                "' is a unit; --emit-parse-tree and --emit-ast need a program");
+    return false;
+  }
+  UnitDecl *Unit = P.parseUnit();
+  if (!Unit || Diags.hasErrors())
+    return false;
+  llvm::SmallVector<Identifier, 8> Uses(Unit->getInterfaceUses());
+  Uses.append(Unit->getImplementationUses().begin(),
+              Unit->getImplementationUses().end());
+  llvm::SmallVector<UnitDecl *, 4> Deps;
+  loadUnits(Uses, Ctx, Directives, Deps, Unit->getName().Name);
+  if (Diags.hasErrors() || !Sema(Ctx, Diags, LangOpts).checkUnit(*Unit, Deps))
+    return false;
+  if (Opts.Act == Action::EmitExe) {
+    Diags.error("'" + llvm::Twine(Opts.InputFile) +
+                "' is a unit: compile it with -c, -S or --emit-llvm and link "
+                "it into a program built with -fseparate-units");
+    return false;
+  }
+  auto TM = createTargetMachine(Opts.TargetTriple, Opts.OptLevel, Diags);
+  if (!TM)
+    return false;
+  llvm::LLVMContext LLVMCtx;
+  CodeGenOptions CGOpts;
+  CGOpts.RangeChecks = Opts.RangeChecks;
+  CGOpts.OverflowChecks = Opts.OverflowChecks;
+  CGOpts.Directives = &Directives;
+  CGOpts.DebugInfo = Opts.DebugInfo;
+  CGOpts.OptLevel = Opts.OptLevel;
+  CGOpts.SeparateUnits = true;
+  auto M = generateUnitModule(*Unit, Deps, SM, LangOpts, CGOpts, LLVMCtx, *TM,
+                              SM.getFilename(FID));
+  return finishModule(*M, *TM, {});
+}
+
+bool Driver::finishModule(llvm::Module &Mod, llvm::TargetMachine &TMRef,
+                          llvm::ArrayRef<std::string> UnitObjects) {
+  llvm::Module *M = &Mod;
+  llvm::TargetMachine *TM = &TMRef;
   if (!verifyModule(*M, Diags))
     return false;
   // At -O0 the module stays as generated: LLVM's O0 pipeline would only
@@ -245,16 +311,19 @@ bool Driver::runPipeline(FileID FID) {
   llvm::FileRemover RemoveObj(ObjPath);
   if (!emitOutput(*M, *TM, OutputKind::Object, ObjPath, Diags))
     return false;
-  return linkExecutable(ObjPath, Opts.OutputFile, Opts.LibraryDirs, Opts.Libraries,
-                        Diags);
+  return linkExecutable(ObjPath, UnitObjects, Opts.OutputFile, Opts.LibraryDirs,
+                        Opts.Libraries, Diags);
 }
 
 /// Finds, parses and orders (dependencies first) the units named in Uses.
 void Driver::loadUnits(llvm::ArrayRef<Identifier> Uses, ASTContext &Ctx,
                        CheckDirectives &Directives,
-                       llvm::SmallVectorImpl<UnitDecl *> &Ordered) {
+                       llvm::SmallVectorImpl<UnitDecl *> &Ordered,
+                       llvm::StringRef Self) {
   llvm::StringMap<UnitDecl *> Done;
   llvm::StringSet<> InProgress;
+  if (!Self.empty())
+    InProgress.insert(Self);
   std::vector<std::unique_ptr<Lexer>> Lexers;
 
   std::function<void(const Identifier &)> Visit = [&](const Identifier &U) {

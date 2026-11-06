@@ -32,6 +32,20 @@ functions (`cdecl; external 'c' name 'strlen'`); `{$I file}`; `paramcount
 paramstr halt`. This is the dialect the self-hosted compiler is written in
 (see [SELFHOST.md](SELFHOST.md) and [selfhost/DIALECT.md](selfhost/DIALECT.md)).
 
+Units are compiled into the program by default. They can also be compiled
+separately: `pcc --mode=tp -c unit.pas` writes `unit.o` (its interface
+variables and routines are the symbols `pas.<unit>$<name>`, its
+initialization part `pas.<unit>$$init`), and a program built with
+`-fseparate-units` uses those objects (from next to each unit's source)
+instead of compiling the units again:
+
+```sh
+pcc --mode=tp -c lib/mathutils.pas && pcc --mode=tp -I lib -c shapes.pas
+pcc --mode=tp -I lib -fseparate-units main.pas -o main
+```
+
+`-L dir` and `-l name` pass library options to the linker.
+
 **ISO 7185 conformance:** the Pascal-P5 test `iso7185pat.pas` passes all 793
 checks (`utils/iso7185pat.py build/bin/pcc`).
 

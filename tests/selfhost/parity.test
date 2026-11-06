@@ -11,4 +11,7 @@
 ; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-llvm --extra="-o -" --modes=tp --ref pcc --new %t.pcc %S/../../selfhost/pcc.pas | FileCheck %s
 ; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-llvm --extra="-g -o -" --modes=iso --ref pcc --new %t.pcc %t.gen/iso | FileCheck %s
 ; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-llvm --extra="-g -o -" --modes=tp --ref pcc --new %t.pcc %t.gen/tp | FileCheck %s
+; Separate units (S11): the unit modules and the program importing them.
+; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-llvm --extra="-I %S/../run/Inputs/units/lib -o -" --modes=tp --ref pcc --new %t.pcc %S/../run/Inputs/units | FileCheck %s
+; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-llvm --extra="-I %S/../run/Inputs/units/lib -fseparate-units -g -o -" --modes=tp --ref pcc --new %t.pcc %S/../run/Inputs/units | FileCheck %s
 ; CHECK: runs, 0 differ

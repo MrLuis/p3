@@ -18,7 +18,10 @@ Each stage is installed as <work>/stageN/bin/pcc with the runtime in
      is deterministic; --no-exe-compare skips this);
   4. stage 3 builds and runs hello.pas;
   5. with --fpc: an independent stage 1 built by Free Pascal leads to the
-     same stage 2 IR.
+     same stage 2 IR;
+  6. with --separate: stage 3 builds the compiler from separately compiled
+     units (each unit with -c, then pcc.pas with -fseparate-units), and
+     that compiler writes the same IR.
 
 The self-hosted compiler links with libLLVM (its LLVM-C back end, S11):
 --flags gives the build options CMake wrote to build/selfhost/flags.txt.
@@ -127,6 +130,8 @@ def main():
                     help="also bootstrap from a Free Pascal stage 1")
     ap.add_argument("--modules", action="store_true",
                     help="compare stage 2 and 3 IR for every .pas file")
+    ap.add_argument("--separate", action="store_true",
+                    help="also build the compiler from separately compiled units")
     ap.add_argument("--no-exe-compare", action="store_true",
                     help="do not require identical stage 2 and 3 executables")
     args = ap.parse_args()
@@ -211,6 +216,28 @@ def main():
                 log("the Free Pascal path gives the same IR")
             else:
                 failures.append("the Free Pascal path gives different IR")
+
+    # 6. Separate unit compilation.
+    if args.separate:
+        src = os.path.join(work, "separate")
+        shutil.copytree(SELFHOST, src)
+        sep = install(work, "stage3-separate", args.runtime)
+        log("building the compiler from separately compiled units with stage 3")
+        for f in sorted(os.listdir(src)):
+            if f.endswith(".pas") and f != "pcc.pas":
+                text = open(os.path.join(src, f)).read()
+                if text.lstrip().lower().startswith("unit "):
+                    run([stages[3], "--mode=tp", "-O%d" % args.opt] + FLAGS +
+                        ["-c", os.path.join(src, f), "-o",
+                         os.path.join(src, f[:-4] + ".o")])
+        run([stages[3], "--mode=tp", "-O%d" % args.opt, "-fseparate-units"] + FLAGS +
+            ["-I", src, os.path.join(src, "pcc.pas"), "-o", sep])
+        ir = os.path.join(work, "stage3-separate.ll")
+        emit_ir(sep, ir)
+        if filecmp.cmp(ir, irs[2], shallow=False):
+            log("the separately built compiler gives the same IR")
+        else:
+            failures.append("the separately built compiler gives different IR")
 
     for f in failures:
         log("FAIL: " + f)

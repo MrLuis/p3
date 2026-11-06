@@ -165,6 +165,9 @@ public:
 
   /// Parses a unit file (Turbo/FPC). Returns null on a fatal syntax error.
   UnitDecl *parseUnit();
+
+  /// Does the input start with `unit` (a unit file, Turbo/FPC)?
+  bool startsWithUnit() const { return Tok.is(tok::kw_unit); }
 };
 
 } // namespace pcc

@@ -2254,11 +2254,21 @@ public:
     }
   }
 
-  void checkUnit(UnitDecl &U) {
+  /// Checks unit U. InterfaceOnly: U was compiled separately (S11), so
+  /// only its interface is declared, for the units and program using it.
+  void checkUnit(UnitDecl &U, bool InterfaceOnly = false) {
     auto Iface = std::make_unique<Scope>(&Standard);
     importUnits(*Iface, U.getInterfaceUses());
     Cur = Iface.get();
     declareAll(*U.getInterface());
+    if (InterfaceOnly) {
+      for (Decl *D : U.getInterface()->getDecls())
+        Used.insert(D);
+      UnitInterfaces[U.getName().Name] = Iface.get();
+      UnitScopes.push_back(std::move(Iface));
+      Cur = &Standard;
+      return;
+    }
 
     auto Impl = std::make_unique<Scope>(Iface.get());
     importUnits(*Impl, U.getImplementationUses());
@@ -2285,9 +2295,10 @@ public:
     Cur = &Standard;
   }
 
-  void checkProgram(ProgramDecl &P, llvm::ArrayRef<UnitDecl *> Units) {
+  void checkProgram(ProgramDecl &P, llvm::ArrayRef<UnitDecl *> Units,
+                    bool SeparateUnits) {
     for (UnitDecl *U : Units)
-      checkUnit(*U);
+      checkUnit(*U, SeparateUnits);
     checkProgramParams(P);
     Scope ProgramScope(&Standard);
     importUnits(ProgramScope, P.getUses());
@@ -2296,6 +2307,14 @@ public:
     checkProgramParamDecls(P);
     checkGotos();
     Cur = &Standard;
+  }
+
+  /// A unit compiled on its own: the units it uses were compiled separately.
+  void checkSeparateUnit(UnitDecl &U, llvm::ArrayRef<UnitDecl *> Deps) {
+    for (UnitDecl *D : Deps)
+      checkUnit(*D, /*InterfaceOnly=*/true);
+    checkUnit(U);
+    checkGotos();
   }
 
   //===--------------------------------------------------------------------===//
@@ -3235,8 +3254,16 @@ public:
 
 } // namespace
 
-bool Sema::check(ProgramDecl &P, llvm::ArrayRef<UnitDecl *> Units) {
+bool Sema::check(ProgramDecl &P, llvm::ArrayRef<UnitDecl *> Units,
+                 bool SeparateUnits) {
   unsigned ErrorsBefore = Diags.getNumErrors();
-  Checker(Ctx, Diags, LangOpts).checkProgram(P, Units);
+  Checker(Ctx, Diags, LangOpts).checkProgram(P, Units, SeparateUnits);
+  return Diags.getNumErrors() == ErrorsBefore && !Diags.shouldStop();
+}
+
+bool Sema::checkUnit(UnitDecl &U, llvm::ArrayRef<UnitDecl *> Deps) {
+  unsigned ErrorsBefore = Diags.getNumErrors();
+  Checker C(Ctx, Diags, LangOpts);
+  C.checkSeparateUnit(U, Deps);
   return Diags.getNumErrors() == ErrorsBefore && !Diags.shouldStop();
 }

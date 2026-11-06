@@ -209,6 +209,10 @@ type
       a routine's function, frame type and jmp_buf slot, the frame slot of
       a local, a field's byte offset, a label's basic block }
     cgValue, cgFunc, cgFrame, cgBlock, cgDbg: pointer;
+    { separate units: the external symbol of an interface variable or
+      routine (nil: none), and whether its unit was compiled separately }
+    cgExport: PName;
+    cgImported: boolean;
     cgSlot, cgJmpSlot: longint;
     cgOffset: int64;
     case TDeclKind of

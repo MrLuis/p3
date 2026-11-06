@@ -1,0 +1,41 @@
+; S11: separate unit compilation. Each unit is compiled on its own with -c
+; (its interface variables and routines become external symbols
+; pas.<unit>$<name>, its initialization part pas.<unit>$$init); the program,
+; built with -fseparate-units, declares them, calls the initialization
+; functions in dependency order and links <unit>.o from next to each
+; unit's source. It must behave like the whole-program build (units.test).
+; RUN: rm -rf %t && mkdir -p %t && cp -r %S/Inputs/units/. %t/
+; RUN: %pcc --mode=tp -I %t/lib -c %t/lib/mathutils.pas -o %t/lib/mathutils.o
+; RUN: %pcc --mode=tp -I %t/lib -c %t/shapes.pas -o %t/shapes.o
+; RUN: %pcc --mode=tp -I %t/lib -fseparate-units %t/main.pas -o %t/main
+; RUN: %t/main | FileCheck %s
+; CHECK:      MathUtils ready
+; CHECK-NEXT: Shapes ready
+; CHECK-NEXT: square with side 7 has area 49
+; CHECK-NEXT: gcd(84, 36) = 12
+; CHECK-NEXT: square called 1 times; 2*pi ~ 6.28
+;
+; The symbols.
+; RUN: %pcc --mode=tp -I %t/lib --emit-llvm %t/lib/mathutils.pas -o - | FileCheck --check-prefix=UNIT %s
+; UNIT-DAG: @"pas.mathutils$calls" = global i32 0
+; UNIT-DAG: define i32 @"pas.mathutils$square"(ptr %link, i32 %x)
+; UNIT-DAG: define void @"pas.mathutils$$init"()
+; RUN: %pcc --mode=tp -I %t/lib -fseparate-units --emit-llvm %t/main.pas -o %t/main.ll
+; RUN: FileCheck --check-prefix=PROG %s < %t/main.ll
+; RUN: FileCheck --check-prefix=INIT %s < %t/main.ll
+; PROG-DAG: @"pas.mathutils$calls" = external global i32
+; PROG-DAG: declare i32 @"pas.mathutils$gcd"(ptr, i32, i32)
+; INIT: call void @"pas.mathutils$$init"()
+; INIT-NEXT: call void @"pas.shapes$$init"()
+;
+; Errors: a unit is not a program; objects must exist; no unit uses itself.
+; RUN: not %pcc --mode=tp -I %t/lib %t/shapes.pas -o %t/x 2>&1 | FileCheck --check-prefix=LINK %s
+; LINK: error: '{{.*}}shapes.pas' is a unit: compile it with -c, -S or --emit-llvm and link it into a program built with -fseparate-units
+; RUN: not %pcc --mode=tp -I %t/lib --emit-ast %t/shapes.pas 2>&1 | FileCheck --check-prefix=DUMP %s
+; DUMP: error: '{{.*}}shapes.pas' is a unit; --emit-parse-tree and --emit-ast need a program
+; RUN: rm %t/shapes.o
+; RUN: not %pcc --mode=tp -I %t/lib -fseparate-units %t/main.pas -o %t/main2 2>&1 | FileCheck --check-prefix=MISSING %s
+; MISSING: error: cannot find '{{.*}}shapes.o', the object file of unit 'Shapes'; compile the unit with -c
+; RUN: printf 'unit selfy;\ninterface\nuses selfy;\nimplementation\nend.\n' > %t/selfy.pas
+; RUN: not %pcc --mode=tp -c %t/selfy.pas -o %t/selfy.o 2>&1 | FileCheck --check-prefix=CYCLE %s
+; CYCLE: error: circular unit reference to 'selfy'
