@@ -17,7 +17,8 @@ jobs:
           wget -q https://apt.llvm.org/llvm.sh
           sudo bash llvm.sh "$LLVM_VERSION"
           sudo apt-get install -y "llvm-$LLVM_VERSION-dev" "llvm-$LLVM_VERSION-tools" \
-            "clang-$LLVM_VERSION" ninja-build zlib1g-dev libzstd-dev libedit-dev libxml2-dev
+            "clang-$LLVM_VERSION" ninja-build zlib1g-dev libzstd-dev libedit-dev libxml2-dev \
+            fp-compiler
           pip install lit
 
       - name: Configure
@@ -33,3 +34,15 @@ jobs:
 
       - name: Test
         run: ninja -C build check
+
+      # SELFHOST.md S9: stage 1 (built by pcc) -> stage 2 -> stage 3, plus a
+      # stage 1 built by Free Pascal; all must write identical IR.
+      - name: Bootstrap the self-hosted compiler
+        run: ninja -C build check-bootstrap
+
+      # The test suite against the stage 2 compiler (S10 parity, so far
+      # without the IR-text tests and -g).
+      - name: Test suite with stage 2
+        run: |
+          PCC_UNDER_TEST=$PWD/build/bootstrap/stage2/bin/pcc \
+            lit -sv build/tests --filter-out 'codegen/(control|ir|frames|vars|debuginfo)\.test'

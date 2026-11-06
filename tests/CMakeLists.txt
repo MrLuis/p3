@@ -32,3 +32,23 @@ else()
     "  lit:       pipx install lit   (or pip install lit)\n"
     "  FileCheck: pipx install filecheck   (or llvm-${PCC_LLVM_VERSION}-tools on Debian/Ubuntu)")
 endif()
+
+# The bootstrap of the self-hosted compiler (SELFHOST.md S9): stage 1 built
+# by pcc, stages 2 and 3 by the previous stage; their IR (for the compiler
+# and every .pas file) and the stage 2 and 3 executables must be identical.
+# Adds the Free Pascal path when fpc is installed.
+find_package(Python3 COMPONENTS Interpreter)
+find_program(FPC_EXECUTABLE fpc)
+if(Python3_FOUND)
+  set(PCC_BOOTSTRAP_ARGS --modules)
+  if(FPC_EXECUTABLE)
+    list(APPEND PCC_BOOTSTRAP_ARGS --fpc)
+  endif()
+  add_custom_target(check-bootstrap
+    COMMAND ${Python3_EXECUTABLE} ${PROJECT_SOURCE_DIR}/utils/bootstrap.py
+            --pcc $<TARGET_FILE:pcc> --runtime $<TARGET_FILE:pascalrt>
+            --work ${PROJECT_BINARY_DIR}/bootstrap ${PCC_BOOTSTRAP_ARGS}
+    DEPENDS pcc pascalrt
+    COMMENT "Bootstrapping the self-hosted compiler"
+    USES_TERMINAL)
+endif()

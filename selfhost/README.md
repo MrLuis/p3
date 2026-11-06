@@ -50,10 +50,14 @@ Testing:
   the `codegen/` tests that match IR text, see SELFHOST.md S10, and debug
   information); `utils/iso7185pat.py build/pcc-self` runs the ISO
   conformance test (793/793).
-- The bootstrap: `build/pcc-self --mode=tp -I selfhost selfhost/pcc.pas -o
-  stage2` builds stage 2, which must write the same `--emit-llvm` output for
-  its own source as `build/pcc-self`. The pcc-built, FPC-built and
-  stage 2 compilers must write identical IR for every input:
-  `utils/selfhost-diff.py --ref build/pcc-self --new build/pcc-fpc
-  --action=--emit-llvm --extra="-o -" ...`.
+- The bootstrap: `ninja -C build check-bootstrap` runs `utils/bootstrap.py`,
+  which builds stage 1 (by pcc), stage 2 (by stage 1) and stage 3 (by stage
+  2) into `build/bootstrap/stageN/{bin,lib}` and checks that stages 1-3
+  write the same IR for `pcc.pas`, that stages 2 and 3 write the same IR
+  for every `.pas` file of the repository in both modes, that the stage 2
+  and stage 3 executables are identical, and that stage 3 builds a working
+  program; with `fpc` installed also that a stage 1 built by Free Pascal
+  leads to the same IR. `utils/selfhost-diff.py --ref A --new B
+  --action=--emit-llvm --extra="-o -" ...` compares any two compilers' IR
+  on more inputs (fuzz corpora).
 - lit runs all of these: `tests/run/selfhost.test`, `tests/selfhost/*.test`.
