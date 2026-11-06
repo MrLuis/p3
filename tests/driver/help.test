@@ -1,0 +1,16 @@
+; RUN: %pcc --help | FileCheck %s
+; CHECK: USAGE: pcc [options] <input.pas>
+; CHECK-DAG: -o <file>
+; CHECK-DAG: --emit-tokens
+; CHECK-DAG: --emit-ast
+; CHECK-DAG: --emit-llvm
+; CHECK-DAG: -c
+; CHECK-DAG: -S
+; CHECK-DAG: -O <level>
+; CHECK-DAG: -g
+; CHECK-DAG: --target=<triple>
+; CHECK-DAG: --mode=<value>
+; CHECK-DAG: -ferror-limit=<N>
+; Generic LLVM options must stay hidden.
+; RUN: %pcc --help | FileCheck --check-prefix=HIDDEN %s
+; HIDDEN-NOT: -print-after
