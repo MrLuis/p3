@@ -18,7 +18,7 @@ Lexer::Lexer(const SourceManager &SM, FileID FID, DiagnosticsEngine &Diags,
              StringPool &Strings, const LangOptions &LangOpts)
     : Diags(Diags), Strings(Strings), LangOpts(LangOpts) {
   llvm::StringRef Buf = SM.getBufferData(FID);
-  Cur = Buf.data();
+  Cur = BufBegin = Buf.data();
   BufEnd = Buf.data() + Buf.size();
   // MemoryBuffers are NUL-terminated, so peeking one char past a token
   // (e.g. Cur[1]) is always safe, even at BufEnd.
@@ -72,7 +72,7 @@ void Lexer::handleDirective(const char *Start, llvm::StringRef Text) {
       char Letter = llvm::toUpper(P[0]);
       bool On = P[1] == '+';
       if (Directives && (Letter == 'R' || Letter == 'Q'))
-        Directives->add(locOf(Start),
+        Directives->add(locOf(Start), BufBegin, BufEnd,
                         Letter == 'R' ? CheckDirectives::Range
                                       : CheckDirectives::Overflow,
                         On);
@@ -102,7 +102,13 @@ void Lexer::skipWhitespaceAndComments() {
         continue;
       }
       return;
-    // TODO(M12): '//' line comments in --mode=tp.
+    case '/':
+      if (LangOpts.Mode == LangMode::TP && Cur[1] == '/') { // // to end of line
+        while (Cur < BufEnd && *Cur != '\n')
+          ++Cur;
+        continue;
+      }
+      return;
     default:
       return;
     }
@@ -203,27 +209,72 @@ void Lexer::lexNumber(Token &T) {
   T.RealValue = F.convertToDouble();
 }
 
+/// $FF, %1010, &17 (Turbo/FPC). Cur points after the prefix character.
+void Lexer::lexBasedNumber(Token &T, const char *Start, unsigned Radix) {
+  while (llvm::isAlnum(*Cur))
+    ++Cur;
+  formToken(T, tok::integer_literal, Start);
+  uint64_t V;
+  if (llvm::StringRef(Start + 1, Cur - Start - 1).getAsInteger(Radix, V)) {
+    Diags.error(locOf(Start), "invalid base-" + llvm::Twine(Radix) + " number",
+                {T.getRange()});
+    V = 0;
+  }
+  T.IntValue = V;
+}
+
 //===----------------------------------------------------------------------===//
 // Strings:  'text'  with '' denoting one quote. May not span lines.
+// --mode=tp also accepts control characters #13 / #$0D, glued to quoted
+// parts: 'line'#13#10'next'.
 //===----------------------------------------------------------------------===//
 
 void Lexer::lexString(Token &T) {
-  const char *Start = Cur++;
+  const char *Start = Cur;
   llvm::SmallString<64> Value;
-  bool Terminated = false;
+  bool Terminated = true;
+  bool TP = LangOpts.Mode == LangMode::TP;
 
-  while (Cur < BufEnd && *Cur != '\n' && *Cur != '\r') {
+  while (Terminated) {
     if (*Cur == '\'') {
-      if (Cur[1] == '\'') {
-        Value.push_back('\'');
-        Cur += 2;
-        continue;
-      }
       ++Cur;
-      Terminated = true;
+      Terminated = false;
+      while (Cur < BufEnd && *Cur != '\n' && *Cur != '\r') {
+        if (*Cur == '\'') {
+          if (Cur[1] == '\'') {
+            Value.push_back('\'');
+            Cur += 2;
+            continue;
+          }
+          ++Cur;
+          Terminated = true;
+          break;
+        }
+        Value.push_back(*Cur++);
+      }
+    } else if (TP && *Cur == '#') {
+      const char *CodeStart = Cur++;
+      unsigned Radix = 10;
+      if (*Cur == '$') {
+        Radix = 16;
+        ++Cur;
+      }
+      const char *Digits = Cur;
+      while (llvm::isAlnum(*Cur))
+        ++Cur;
+      unsigned Code;
+      if (llvm::StringRef(Digits, Cur - Digits).getAsInteger(Radix, Code) ||
+          Code > 255) {
+        Diags.error(locOf(CodeStart), "invalid character code",
+                    {SourceRange(locOf(CodeStart), locOf(Cur))});
+        Code = 0;
+      }
+      Value.push_back(static_cast<char>(Code));
+    } else {
       break;
     }
-    Value.push_back(*Cur++);
+    if (!TP)
+      break; // ISO: one quoted part per token
   }
 
   formToken(T, tok::string_literal, Start);
@@ -256,8 +307,15 @@ void Lexer::lex(Token &T) {
       return lexIdentifier(T);
     if (llvm::isDigit(C))
       return lexNumber(T);
-    if (C == '\'')
+    bool TP = LangOpts.Mode == LangMode::TP;
+    if (C == '\'' || (TP && C == '#'))
       return lexString(T);
+    if (TP && ((C == '$' && llvm::isHexDigit(Cur[1])) ||
+               (C == '%' && (Cur[1] == '0' || Cur[1] == '1')) ||
+               (C == '&' && Cur[1] >= '0' && Cur[1] <= '7'))) {
+      ++Cur;
+      return lexBasedNumber(T, Start, C == '$' ? 16 : C == '%' ? 2 : 8);
+    }
 
     ++Cur;
     tok::TokenKind K = tok::unknown;

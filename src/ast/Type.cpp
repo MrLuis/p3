@@ -38,6 +38,11 @@ uint64_t Type::getStringLength() const {
       llvm::cast<SubrangeType>(A->getIndexType())->getHi());
 }
 
+bool Type::isStringish() const {
+  return isShortString() || isStringType() ||
+         const_cast<Type *>(this)->getBase()->isChar();
+}
+
 bool Type::isTextFile() const {
   auto *F = llvm::dyn_cast<FileType>(this);
   return F && F->isText();
@@ -127,11 +132,17 @@ std::string Type::getName() const {
     return llvm::cast<RecordType>(this)->isPacked() ? "packed record"
                                                     : "record";
   case TK_Pointer: {
+    if (llvm::cast<PointerType>(this)->isUntyped())
+      return "pointer";
     Type *P = llvm::cast<PointerType>(this)->getPointee();
     return "^" + (P ? P->getName() : std::string("?"));
   }
   case TK_Nil:
     return "nil";
+  case TK_ShortString: {
+    unsigned N = llvm::cast<ShortStringType>(this)->getMaxLength();
+    return N == 255 ? "string" : "string[" + std::to_string(N) + "]";
+  }
   case TK_Routine: {
     auto *R = llvm::cast<RoutineType>(this);
     std::string S = R->isFunction() ? "function(" : "procedure(";

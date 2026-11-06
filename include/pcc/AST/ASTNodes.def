@@ -30,6 +30,7 @@ EXPR(Field)           // r.f                                   (M8)
 EXPR(Nil)             // nil                                   (M9)
 EXPR(Deref)           // p^                                    (M9)
 EXPR(SetCtor)         // [1, 3..5, c]                          (M9)
+EXPR(AddrOf)          // @x                                    (M12, TP)
 
 // Statements
 STMT(Empty)

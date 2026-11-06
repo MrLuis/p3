@@ -24,22 +24,25 @@ public:
 
 private:
   struct Event {
-    const char *Where; ///< pointer into the source buffer
+    const char *Where;            ///< pointer into the source buffer
+    const char *BufBegin, *BufEnd; ///< the buffer (events apply per file)
     Switch S;
     bool On;
   };
   llvm::SmallVector<Event, 4> Events; ///< in source order
 
 public:
-  void add(SourceLocation L, Switch S, bool On) {
-    Events.push_back({L.getPointer(), S, On});
+  void add(SourceLocation L, const char *BufBegin, const char *BufEnd,
+           Switch S, bool On) {
+    Events.push_back({L.getPointer(), BufBegin, BufEnd, S, On});
   }
 
   /// State of switch S at L, starting from Default.
   bool isEnabled(Switch S, SourceLocation L, bool Default) const {
     bool On = Default;
     for (const Event &E : Events)
-      if (E.S == S && (!L.isValid() || E.Where <= L.getPointer()))
+      if (E.S == S && L.isValid() && E.BufBegin <= L.getPointer() &&
+          L.getPointer() <= E.BufEnd && E.Where <= L.getPointer())
         On = E.On;
     return On;
   }

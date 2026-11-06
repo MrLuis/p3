@@ -67,10 +67,10 @@ struct ConstValue {
 enum class UnaryOp { Plus, Minus, Not };
 
 enum class BinaryOp {
-  // adding operators
-  Add, Sub, Or,
-  // multiplying operators
-  Mul, RealDiv, IntDiv, Mod, And,
+  // adding operators (Xor: Turbo/FPC)
+  Add, Sub, Or, Xor,
+  // multiplying operators (Shl, Shr: Turbo/FPC)
+  Mul, RealDiv, IntDiv, Mod, And, Shl, Shr,
   // relational operators
   Eq, Ne, Lt, Le, Gt, Ge, In,
 };
@@ -289,6 +289,16 @@ public:
       : Expr(EK_SetCtor, R), Elements(Elements) {}
   llvm::ArrayRef<SetElement> getElements() const { return Elements; }
   static bool classof(const Expr *E) { return E->getKind() == EK_SetCtor; }
+};
+
+/// @x  (Turbo/FPC): an untyped pointer to a variable.
+class AddrOfExpr final : public Expr {
+  Expr *Operand;
+
+public:
+  AddrOfExpr(SourceRange R, Expr *Operand) : Expr(EK_AddrOf, R), Operand(Operand) {}
+  Expr *getOperand() const { return Operand; }
+  static bool classof(const Expr *E) { return E->getKind() == EK_AddrOf; }
 };
 
 //===----------------------------------------------------------------------===//
@@ -536,7 +546,7 @@ class TypeSpec {
 public:
   enum TypeSpecKind {
     TS_Named, TS_Enum, TS_Subrange, TS_Array, TS_Record, TS_Pointer, TS_Set,
-    TS_File, TS_Routine
+    TS_File, TS_Routine, TS_String
   };
 
 private:
@@ -673,6 +683,17 @@ public:
   static bool classof(const TypeSpec *T) { return T->getKind() == TS_Routine; }
 };
 
+/// string [ '[' MaxLen ']' ]  (Turbo/FPC)
+class StringTypeSpec final : public TypeSpec {
+  Expr *MaxLen; ///< null for plain `string` (255)
+
+public:
+  StringTypeSpec(SourceRange R, Expr *MaxLen)
+      : TypeSpec(TS_String, R), MaxLen(MaxLen) {}
+  Expr *getMaxLength() const { return MaxLen; }
+  static bool classof(const TypeSpec *T) { return T->getKind() == TS_String; }
+};
+
 /// [packed] file of Element
 class FileTypeSpec final : public TypeSpec {
   TypeSpec *Element;
@@ -703,7 +724,7 @@ class Decl {
 public:
   enum DeclKind {
     DK_Program, DK_Var, DK_Const, DK_Type, DK_Field, DK_Routine, DK_Builtin,
-    DK_Label
+    DK_Label, DK_Unit
   };
 
 private:
@@ -734,6 +755,10 @@ private:
   Type *Ty = nullptr;           ///< set by Sema
   VarKind VK;
   RoutineDecl *Owner = nullptr; ///< null for program-level variables
+  /// Turbo/FPC typed constant `const x: T = v;`: an initialized variable
+  /// with static storage (even inside a routine).
+  Expr *Init = nullptr;
+  ConstValue InitValue;         ///< set by Sema
 
 public:
   VarDecl(Identifier Name, TypeSpec *TS, VarKind VK = Variable)
@@ -746,6 +771,11 @@ public:
   bool isVarParam() const { return VK == VarParam; }
   RoutineDecl *getOwner() const { return Owner; }
   void setOwner(RoutineDecl *R) { Owner = R; }
+  Expr *getInit() const { return Init; }
+  void setInit(Expr *E) { Init = E; }
+  bool isTypedConst() const { return Init != nullptr; }
+  const ConstValue &getInitValue() const { return InitValue; }
+  void setInitValue(ConstValue V) { InitValue = V; }
   static bool classof(const Decl *D) { return D->getKind() == DK_Var; }
 };
 
@@ -915,18 +945,46 @@ public:
   CompoundStmt *getBody() const { return Body; }
 };
 
-/// program Name(input, output); <block> .
+/// program Name(input, output); [uses U1, U2;] <block> .
 class ProgramDecl final : public Decl {
   llvm::ArrayRef<Identifier> Params;
+  llvm::ArrayRef<Identifier> Uses; ///< Turbo/FPC units
   Block *Body;
 
 public:
   ProgramDecl(SourceLocation Loc, Identifier Name,
-              llvm::ArrayRef<Identifier> Params, Block *Body)
-      : Decl(DK_Program, Loc, Name), Params(Params), Body(Body) {}
+              llvm::ArrayRef<Identifier> Params, Block *Body,
+              llvm::ArrayRef<Identifier> Uses = {})
+      : Decl(DK_Program, Loc, Name), Params(Params), Uses(Uses), Body(Body) {}
   llvm::ArrayRef<Identifier> getParams() const { return Params; }
+  llvm::ArrayRef<Identifier> getUses() const { return Uses; }
   Block *getBlock() const { return Body; }
   static bool classof(const Decl *D) { return D->getKind() == DK_Program; }
+};
+
+/// unit Name; interface [uses ...] decls implementation [uses ...] decls
+/// [begin|initialization stmts] end.     (Turbo/FPC)
+/// Interface routine headings are forward declarations completed in the
+/// implementation part.
+class UnitDecl final : public Decl {
+  llvm::ArrayRef<Identifier> InterfaceUses, ImplementationUses;
+  Block *Interface;      ///< declarations only (Body is empty)
+  Block *Implementation; ///< declarations + initialization statements
+
+public:
+  UnitDecl(SourceLocation Loc, Identifier Name,
+           llvm::ArrayRef<Identifier> InterfaceUses, Block *Interface,
+           llvm::ArrayRef<Identifier> ImplementationUses, Block *Implementation)
+      : Decl(DK_Unit, Loc, Name), InterfaceUses(InterfaceUses),
+        ImplementationUses(ImplementationUses), Interface(Interface),
+        Implementation(Implementation) {}
+  llvm::ArrayRef<Identifier> getInterfaceUses() const { return InterfaceUses; }
+  llvm::ArrayRef<Identifier> getImplementationUses() const {
+    return ImplementationUses;
+  }
+  Block *getInterface() const { return Interface; }
+  Block *getImplementation() const { return Implementation; }
+  static bool classof(const Decl *D) { return D->getKind() == DK_Unit; }
 };
 
 } // namespace pcc

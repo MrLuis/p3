@@ -326,6 +326,12 @@ public:
     visitExpr(E->getBase());
   }
 
+  void visitAddrOfExpr(AddrOfExpr *E) {
+    line("AddrOfExpr");
+    end(E);
+    IndentScope I(Indent);
+    visitExpr(E->getOperand());
+  }
   void visitNilExpr(NilExpr *E) {
     line("NilExpr");
     end(E);

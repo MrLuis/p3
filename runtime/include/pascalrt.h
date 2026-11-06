@@ -24,6 +24,10 @@ extern "C" {
 void __pas_init(int32_t argc, char **argv);
 void __pas_fini(void);
 
+/* Nonzero in --mode=tp programs (set by main): field widths are minimums
+ * (no truncation) and booleans print as TRUE/FALSE. */
+extern int32_t __pas_tp_mode;
+
 /* Reports a runtime error ("Runtime error: <msg>") and exits with status 2.
  * The compiler passes messages like "division by zero at prog.pas:12:9". */
 void __pas_runtime_error(const char *msg) __attribute__((noreturn));
@@ -82,6 +86,20 @@ int32_t __pas_read_int(PasFile *f);
 double __pas_read_real(PasFile *f);
 char __pas_read_char(PasFile *f);
 void __pas_readln(PasFile *f);
+
+/*===- Short strings (Turbo/FPC `string`, M12) ------------------------------===
+ * A short string is a length byte followed by up to 255 chars. `maxlen` is
+ * the capacity of the destination; longer results are truncated. */
+void __pas_str_assign(unsigned char *dst, int32_t maxlen, const unsigned char *src);
+void __pas_str_concat(unsigned char *dst, const unsigned char *a, const unsigned char *b);
+int32_t __pas_str_compare(const unsigned char *a, const unsigned char *b);
+void __pas_str_copy(unsigned char *dst, const unsigned char *s, int32_t index, int32_t count);
+int32_t __pas_str_pos(const unsigned char *sub, const unsigned char *s);
+void __pas_str_delete(unsigned char *s, int32_t index, int32_t count);
+void __pas_str_insert(const unsigned char *src, unsigned char *s, int32_t maxlen, int32_t index);
+void __pas_write_pstr(PasFile *f, const unsigned char *s, int32_t width);
+/* Reads the rest of the current line (not the line end) into dst. */
+void __pas_read_str(PasFile *f, unsigned char *dst, int32_t maxlen);
 
 /*===- Heap -----------------------------------------------------------------===*/
 

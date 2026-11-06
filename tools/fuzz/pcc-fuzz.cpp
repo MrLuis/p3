@@ -68,7 +68,7 @@ extern "C" int LLVMFuzzerTestOneInput(const uint8_t *Data, size_t Size) {
 
   llvm::LLVMContext LLVMCtx;
   CodeGenOptions CGOpts;
-  auto M = generateModule(*Program, SM, LO, CGOpts, LLVMCtx, targetMachine(),
+  auto M = generateModule(*Program, {}, SM, LO, CGOpts, LLVMCtx, targetMachine(),
                           "fuzz.pas");
   if (llvm::verifyModule(*M, &llvm::errs())) {
     llvm::errs() << "invalid IR for input:\n"

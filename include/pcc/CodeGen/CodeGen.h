@@ -2,6 +2,7 @@
 #ifndef PCC_CODEGEN_CODEGEN_H
 #define PCC_CODEGEN_CODEGEN_H
 
+#include "llvm/ADT/ArrayRef.h"
 #include "llvm/ADT/StringRef.h"
 
 #include <memory>
@@ -16,6 +17,7 @@ namespace pcc {
 
 class CheckDirectives;
 class ProgramDecl;
+class UnitDecl;
 class SourceManager;
 struct LangOptions;
 
@@ -40,7 +42,8 @@ struct CodeGenOptions {
 /// internal function. SM is used to put source locations into runtime error
 /// messages.
 std::unique_ptr<llvm::Module>
-generateModule(ProgramDecl &P, const SourceManager &SM,
+generateModule(ProgramDecl &P, llvm::ArrayRef<UnitDecl *> Units,
+               const SourceManager &SM,
                const LangOptions &LangOpts, const CodeGenOptions &CGOpts,
                llvm::LLVMContext &Ctx, llvm::TargetMachine &TM,
                llvm::StringRef SourceFileName);

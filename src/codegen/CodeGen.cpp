@@ -53,7 +53,8 @@ struct Runtime {
       WriteReal, Writeln, ReadInt, ReadChar, ReadReal, Readln, RuntimeError,
       Memcmp, Atan, New, Dispose, FileNew, FileFree, ProgramParam, Reset,
       Rewrite, Get, Put, Page, Eof, Eoln, Buffer, ReadElem, WriteElem,
-      SetJmp, LongJmp;
+      SetJmp, LongJmp, StrAssign, StrConcat, StrCompare, StrCopy, StrPos,
+      StrDelete, StrInsert, WritePStr, ReadStr;
 
   explicit Runtime(llvm::Module &M) {
     llvm::LLVMContext &C = M.getContext();
@@ -107,6 +108,16 @@ struct Runtime {
     New = Decl("__pas_new", Ptr, {I64});
     Dispose = Decl("__pas_dispose", Void, {Ptr});
     Atan = Decl("atan", F64, {F64});
+    // Short strings (Turbo/FPC).
+    StrAssign = Decl("__pas_str_assign", Void, {Ptr, I32, Ptr});
+    StrConcat = Decl("__pas_str_concat", Void, {Ptr, Ptr, Ptr});
+    StrCompare = Decl("__pas_str_compare", I32, {Ptr, Ptr});
+    StrCopy = Decl("__pas_str_copy", Void, {Ptr, Ptr, I32, I32});
+    StrPos = Decl("__pas_str_pos", I32, {Ptr, Ptr});
+    StrDelete = Decl("__pas_str_delete", Void, {Ptr, I32, I32});
+    StrInsert = Decl("__pas_str_insert", Void, {Ptr, Ptr, I32, I32});
+    WritePStr = Decl("__pas_write_pstr", Void, {Ptr, Ptr, I32});
+    ReadStr = Decl("__pas_read_str", Void, {Ptr, Ptr, I32});
     // Non-local goto. The underscore variants do not save the signal mask.
     SetJmp = Decl("_setjmp", I32, {Ptr});
     llvm::cast<llvm::Function>(SetJmp.getCallee())
@@ -142,6 +153,9 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
   llvm::StringMap<llvm::GlobalVariable *> StringConstants;
   std::vector<RoutineDecl *> RoutinesToEmit;
   llvm::DenseMap<LabelDecl *, llvm::BasicBlock *> LabelBlocks;
+  /// Enclosing loops: {continue target, break target} (Turbo/FPC).
+  llvm::SmallVector<std::pair<llvm::BasicBlock *, llvm::BasicBlock *>, 4> Loops;
+  llvm::BasicBlock *ExitBlock = nullptr; ///< target of `exit`
 
   // Debug information (-g).
   std::unique_ptr<llvm::DIBuilder> DIB;
@@ -150,6 +164,23 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
   llvm::DISubprogram *CurSP = nullptr;
   llvm::DenseMap<Type *, llvm::DIType *> DITypes;
   llvm::DenseMap<RoutineDecl *, llvm::DISubprogram *> Subprograms;
+  llvm::StringMap<llvm::DIFile *> DIFiles;
+  llvm::DenseMap<std::pair<llvm::DISubprogram *, llvm::DIFile *>,
+                 llvm::DILexicalBlockFile *> FileScopes;
+
+  llvm::DIFile *diFileFor(SourceLocation L) {
+    PresumedLoc P = SM.getPresumedLoc(L);
+    if (!P.isValid())
+      return DIUnitFile;
+    llvm::DIFile *&F = DIFiles[P.Filename];
+    if (!F) {
+      llvm::SmallString<256> Abs(P.Filename);
+      llvm::sys::fs::make_absolute(Abs);
+      F = DIB->createFile(llvm::sys::path::filename(Abs),
+                          llvm::sys::path::parent_path(Abs));
+    }
+    return F;
+  }
   llvm::DenseMap<RoutineDecl *, unsigned> JmpBufSlots; ///< frame slot
   llvm::GlobalVariable *MainJmpBuf = nullptr;
 
@@ -207,6 +238,9 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
       return B.getPtrTy();
     case Type::TK_Set:
       return setType();
+    case Type::TK_ShortString: // length byte + chars
+      return llvm::ArrayType::get(
+          B.getInt8Ty(), llvm::cast<ShortStringType>(T)->getMaxLength() + 1);
     case Type::TK_Routine: // {function, static link}
       return llvm::StructType::get(B.getPtrTy(), B.getPtrTy());
     case Type::TK_Error:
@@ -415,6 +449,89 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
                        "set member out of range", L);
     }
     return V;
+  }
+
+  //===--------------------------------------------------------------------===//
+  // Short strings (Turbo/FPC): values are pointers to length-prefixed bytes
+  //===--------------------------------------------------------------------===//
+
+  llvm::GlobalVariable *getPStrConstant(llvm::StringRef S) {
+    std::string Bytes(1, static_cast<char>(std::min<size_t>(S.size(), 255)));
+    Bytes += S.take_front(255).str();
+    return getStringConstant(Bytes);
+  }
+
+  llvm::Value *newStringTemp(unsigned MaxLen = 255) {
+    return createTemp(llvm::ArrayType::get(B.getInt8Ty(), MaxLen + 1), "str");
+  }
+
+  /// Any string-like expression as a pointer to a length-prefixed string.
+  llvm::Value *emitPStr(Expr *E) {
+    Type *T = E->getType();
+    if (T->isShortString())
+      return visitExpr(E); // designators yield their address, results a temp
+    if (auto *SL = llvm::dyn_cast<StringLiteralExpr>(E))
+      return getPStrConstant(SL->getValue());
+    if (auto *N = llvm::dyn_cast<NameRefExpr>(E))
+      if (auto *C = llvm::dyn_cast<ConstDecl>(N->getDecl());
+          C && C->getValue().K == ConstValue::String)
+        return getPStrConstant(C->getValue().Str);
+    if (T->getBase()->isChar()) {
+      llvm::Value *Tmp = newStringTemp(1);
+      B.CreateStore(B.getInt8(1), Tmp);
+      B.CreateStore(visitExpr(E), B.CreateConstGEP1_64(B.getInt8Ty(), Tmp, 1));
+      return Tmp;
+    }
+    // packed array [1..n] of char
+    uint64_t N = T->getStringLength();
+    llvm::Value *Tmp = newStringTemp(static_cast<unsigned>(std::min<uint64_t>(N, 255)));
+    B.CreateStore(B.getInt8(static_cast<uint8_t>(std::min<uint64_t>(N, 255))), Tmp);
+    B.CreateMemCpy(B.CreateConstGEP1_64(B.getInt8Ty(), Tmp, 1), llvm::MaybeAlign(1),
+                   emitAddress(E), llvm::MaybeAlign(1), std::min<uint64_t>(N, 255));
+    return Tmp;
+  }
+
+  void emitStringAssign(llvm::Value *Dst, ShortStringType *T, Expr *Value) {
+    B.CreateCall(RT.StrAssign,
+                 {Dst, B.getInt32(T->getMaxLength()), emitPStr(Value)});
+  }
+
+  llvm::Value *emitStringFunction(CallExpr *E, BuiltinKind K) {
+    auto Args = E->getArgs();
+    switch (K) {
+    case BuiltinKind::Length: {
+      Type *T = Args[0]->getType();
+      if (T->isShortString())
+        return B.CreateZExt(B.CreateLoad(B.getInt8Ty(), emitPStr(Args[0])),
+                            B.getInt32Ty(), "length");
+      if (T->getBase()->isChar()) {
+        visitExpr(Args[0]);
+        return B.getInt32(1);
+      }
+      return B.getInt32(static_cast<uint32_t>(T->getStringLength()));
+    }
+    case BuiltinKind::UpCase: {
+      llvm::Value *C = visitExpr(Args[0]);
+      llvm::Value *IsLower = B.CreateAnd(B.CreateICmpUGE(C, B.getInt8('a')),
+                                         B.CreateICmpULE(C, B.getInt8('z')));
+      return B.CreateSelect(IsLower, B.CreateSub(C, B.getInt8(32)), C, "upcase");
+    }
+    case BuiltinKind::Pos:
+      return B.CreateCall(RT.StrPos, {emitPStr(Args[0]), emitPStr(Args[1])});
+    case BuiltinKind::Copy: {
+      llvm::Value *Tmp = newStringTemp();
+      B.CreateCall(RT.StrCopy, {Tmp, emitPStr(Args[0]), visitExpr(Args[1]),
+                                visitExpr(Args[2])});
+      return Tmp;
+    }
+    default: { // Concat
+      llvm::Value *Tmp = newStringTemp();
+      B.CreateCall(RT.StrAssign, {Tmp, B.getInt32(255), emitPStr(Args[0])});
+      for (Expr *A : Args.drop_front())
+        B.CreateCall(RT.StrConcat, {Tmp, Tmp, emitPStr(A)});
+      return Tmp;
+    }
+    }
   }
 
   //===--------------------------------------------------------------------===//
@@ -651,6 +768,19 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
       return emitAddress(llvm::cast<ParenExpr>(E)->getInner());
     case Expr::EK_Index: {
       auto *I = llvm::cast<IndexExpr>(E);
+      if (auto *SS = llvm::dyn_cast<ShortStringType>(I->getBase()->getType())) {
+        llvm::Value *Base = emitAddress(I->getBase());
+        llvm::Value *Idx = visitExpr(I->getIndex());
+        Type *IdxTy = I->getIndex()->getType();
+        if (rangeChecks(I->getIndex()->getBeginLoc())) {
+          llvm::Value *X = toI64(Idx, IdxTy);
+          emitRuntimeCheck(
+              B.CreateOr(B.CreateICmpSLT(X, B.getInt64(0)),
+                         B.CreateICmpSGT(X, B.getInt64(SS->getMaxLength()))),
+              "string index out of bounds", I->getIndex()->getBeginLoc());
+        }
+        return B.CreateInBoundsGEP(B.getInt8Ty(), Base, toI64(Idx, IdxTy));
+      }
       auto *AT = llvm::cast<ArrayType>(I->getBase()->getType());
       llvm::Value *Base = emitAddress(I->getBase());
       llvm::Value *Idx = visitExpr(I->getIndex());
@@ -790,7 +920,8 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
   llvm::DISubprogram *createSubprogram(llvm::Function *F, llvm::StringRef Name,
                                        llvm::DIScope *Scope, unsigned Line,
                                        Type *Result,
-                                       llvm::ArrayRef<VarDecl *> Params) {
+                                       llvm::ArrayRef<VarDecl *> Params,
+                                       llvm::DIFile *File = nullptr) {
     llvm::SmallVector<llvm::Metadata *, 8> Sig{Result ? debugType(Result) : nullptr};
     for (VarDecl *P : Params)
       Sig.push_back(P->isVarParam()
@@ -798,7 +929,7 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
                                                    debugType(P->getType()), 64)
                         : debugType(P->getType()));
     auto *SP = DIB->createFunction(
-        Scope, Name, /*LinkageName=*/"", DIUnitFile, Line,
+        Scope, Name, /*LinkageName=*/"", File ? File : DIUnitFile, Line,
         DIB->createSubroutineType(DIB->getOrCreateTypeArray(Sig)), Line,
         llvm::DINode::FlagPrototyped,
         llvm::DISubprogram::SPFlagDefinition |
@@ -812,9 +943,20 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
     if (!DIB || !CurSP)
       return;
     PresumedLoc P = SM.getPresumedLoc(L);
-    if (P.isValid())
-      B.SetCurrentDebugLocation(
-          llvm::DILocation::get(M.getContext(), P.Line, P.Column, CurSP));
+    if (!P.isValid())
+      return;
+    // Code from another file (a unit's initialization inside main) needs a
+    // scope naming that file.
+    llvm::DIScope *Scope = CurSP;
+    llvm::DIFile *F = diFileFor(L);
+    if (F != CurSP->getFile()) {
+      llvm::DILexicalBlockFile *&LBF = FileScopes[{CurSP, F}];
+      if (!LBF)
+        LBF = DIB->createLexicalBlockFile(CurSP, F);
+      Scope = LBF;
+    }
+    B.SetCurrentDebugLocation(
+        llvm::DILocation::get(M.getContext(), P.Line, P.Column, Scope));
   }
 
   /// Describes the frame slots of R (params, locals, result) to the
@@ -842,7 +984,7 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
     for (VarDecl *P : R->getParams())
       Declare(P, ArgNo++);
     for (Decl *D : R->getBody()->getDecls())
-      if (auto *V = llvm::dyn_cast<VarDecl>(D))
+      if (auto *V = llvm::dyn_cast<VarDecl>(D); V && !V->isTypedConst())
         Declare(V, 0);
     if (R->isFunction())
       Declare(R->getResultVar(), 0);
@@ -860,11 +1002,55 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
   // Declarations
   //===--------------------------------------------------------------------===//
 
+  /// Initial value of a typed constant (or zero).
+  llvm::Constant *initializerFor(VarDecl *V, llvm::Type *Ty) {
+    const ConstValue &C = V->getInitValue();
+    Type *T = V->getType();
+    switch (C.K) {
+    case ConstValue::Ordinal:
+      if (T->isReal())
+        return llvm::ConstantFP::get(Ty, static_cast<double>(C.Int));
+      if (T->isShortString()) // a char
+        return initializerForString(std::string(1, static_cast<char>(C.Int)), Ty, T);
+      return llvm::ConstantInt::get(Ty, static_cast<uint64_t>(C.Int), true);
+    case ConstValue::Real:
+      return llvm::ConstantFP::get(Ty, C.RealVal);
+    case ConstValue::String:
+      return initializerForString(C.Str.str(), Ty, T);
+    case ConstValue::None:
+      break;
+    }
+    return llvm::Constant::getNullValue(Ty);
+  }
+
+  llvm::Constant *initializerForString(std::string S, llvm::Type *Ty, Type *T) {
+    uint64_t Size = llvm::cast<llvm::ArrayType>(Ty)->getNumElements();
+    if (auto *SS = llvm::dyn_cast<ShortStringType>(T)) {
+      S = S.substr(0, SS->getMaxLength());
+      S.insert(S.begin(), static_cast<char>(S.size()));
+    }
+    S.resize(Size, '\0');
+    return llvm::ConstantDataArray::getString(M.getContext(), S, false);
+  }
+
+  void emitStaticVar(VarDecl *V) {
+    llvm::Type *Ty = memType(V->getType());
+    Globals[V] = new llvm::GlobalVariable(
+        M, Ty, /*isConstant=*/false, llvm::GlobalValue::InternalLinkage,
+        initializerFor(V, Ty), "pas." + V->getName().Name);
+    if (DIB)
+      declareGlobalDebugInfo(V, Globals[V]);
+  }
+
   void emitGlobals(Block &Blk) {
     for (Decl *D : Blk.getDecls()) {
       auto *V = llvm::dyn_cast<VarDecl>(D);
       if (!V)
         continue;
+      if (V->isTypedConst()) {
+        emitStaticVar(V);
+        continue;
+      }
       llvm::Type *Ty = memType(V->getType());
       // ISO leaves variables undefined; zero-initializing makes programs
       // deterministic at no cost for globals.
@@ -908,8 +1094,12 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
       for (VarDecl *P : R->getParams())
         AddSlot(P);
       for (Decl *Local : R->getBody()->getDecls())
-        if (auto *V = llvm::dyn_cast<VarDecl>(Local))
-          AddSlot(V);
+        if (auto *V = llvm::dyn_cast<VarDecl>(Local)) {
+          if (V->isTypedConst())
+            emitStaticVar(V); // static storage, local scope
+          else
+            AddSlot(V);
+        }
       if (R->isFunction())
         AddSlot(R->getResultVar());
       std::string Name = mangle(R);
@@ -938,9 +1128,10 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
         // debuggers look up enclosing variables through DW_AT_static_link,
         // which LLVM cannot emit. Use the debugger's `up` to reach them.
         Subprograms[R] = createSubprogram(
-            F, R->getName().Spelling, DIUnitFile,
+            F, R->getName().Spelling, diFileFor(R->getLocation()),
             lineOf(R->getLocation()),
-            R->isFunction() ? R->getResultType() : nullptr, R->getParams());
+            R->isFunction() ? R->getResultType() : nullptr, R->getParams(),
+            diFileFor(R->getLocation()));
 
       declareRoutines(*R->getBody());
     }
@@ -981,7 +1172,10 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
     if (JmpBufSlots.count(R))
       emitSetJmpDispatch(*R->getBody(),
                          B.CreateStructGEP(FrameTy, CurFrame, JmpBufSlots[R]));
+    ExitBlock = newBlock("exit");
     visitStmt(R->getBody()->getBody());
+    B.CreateBr(ExitBlock);
+    B.SetInsertPoint(ExitBlock);
     for (Decl *D : R->getBody()->getDecls())
       if (auto *V = llvm::dyn_cast<VarDecl>(D))
         emitFileLifetime(varAddress(V), V->getType(), /*Init=*/false);
@@ -1025,13 +1219,26 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
       Expr *Arg = Args[I];
       if (llvm::isa<RoutineType>(P->getType()))
         Values.push_back(emitRoutineValue(Arg));
-      else if (P->isVarParam() || P->getType()->isStructured())
+      else if (auto *SS = llvm::dyn_cast<ShortStringType>(P->getType());
+               SS && !P->isVarParam()) {
+        // The callee copies MaxLen+1 bytes: pass a full-size temporary.
+        llvm::Value *Tmp = newStringTemp(SS->getMaxLength());
+        emitStringAssign(Tmp, SS, Arg);
+        Values.push_back(Tmp);
+      } else if (P->isVarParam() || P->getType()->isStructured())
         Values.push_back(emitAddress(Arg));
       else
         Values.push_back(convertForAssign(visitExpr(Arg), Arg->getType(),
                                           P->getType(), Arg->getBeginLoc()));
     }
-    return B.CreateCall(Callee, Values);
+    llvm::Value *Result = B.CreateCall(Callee, Values);
+    // A string result comes back by value; expressions use its address.
+    if (Result->getType()->isArrayTy()) {
+      llvm::Value *Tmp = createTemp(Result->getType(), "result");
+      B.CreateStore(Result, Tmp);
+      return Tmp;
+    }
+    return Result;
   }
 
   llvm::Value *emitCall(RoutineDecl *R, llvm::ArrayRef<Expr *> Args) {
@@ -1176,6 +1383,11 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
         return B.CreateICmpEQ(B.CreateAnd(R, B.CreateNot(L)), Zero, "superset");
       }
     }
+    if (needsStringCompare(LT, RTy)) { // Turbo/FPC string comparison
+      llvm::Value *Cmp = B.CreateCall(
+          RT.StrCompare, {emitPStr(E->getLHS()), emitPStr(E->getRHS())});
+      return compareInts(Op, Cmp, B.getInt32(0), /*Signed=*/true);
+    }
     if (LT->isPointer() || LT->isNil()) {
       llvm::Value *L = visitExpr(E->getLHS()), *R = visitExpr(E->getRHS());
       return Op == BinaryOp::Eq ? B.CreateICmpEQ(L, R, "cmp")
@@ -1295,6 +1507,10 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
     }
 
     Type *T = Value->getType();
+    if (T->isShortString()) {
+      B.CreateCall(RT.WritePStr, {File, emitPStr(Value), Width});
+      return;
+    }
     if (T->isStringType()) {
       B.CreateCall(RT.WriteStr, {File, emitAddress(Value),
                                  B.getInt64(T->getStringLength()), Width});
@@ -1314,6 +1530,10 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
   void emitReadArg(llvm::Value *File, Expr *Arg) {
     Type *T = Arg->getType();
     llvm::Value *Addr = emitAddress(Arg);
+    if (auto *SS = llvm::dyn_cast<ShortStringType>(T)) {
+      B.CreateCall(RT.ReadStr, {File, Addr, B.getInt32(SS->getMaxLength())});
+      return;
+    }
     if (T->isReal()) {
       B.CreateStore(B.CreateCall(RT.ReadReal, {File}), Addr);
       return;
@@ -1361,6 +1581,13 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
   }
 
   llvm::Value *emitBuiltinCall(CallExpr *E, BuiltinDecl *BD) {
+    switch (BD->getBuiltinKind()) {
+    case BuiltinKind::Length: case BuiltinKind::Copy: case BuiltinKind::Pos:
+    case BuiltinKind::Concat: case BuiltinKind::UpCase:
+      return emitStringFunction(E, BD->getBuiltinKind());
+    default:
+      break;
+    }
     if (BD->getBuiltinKind() == BuiltinKind::Eof ||
         BD->getBuiltinKind() == BuiltinKind::Eoln)
       return emitFileQuery(BD->getBuiltinKind(), E->getArgs()[0]);
@@ -1460,7 +1687,7 @@ public:
       : M(M), DL(M.getDataLayout()), B(M.getContext()), RT(M), SM(SM),
         LangOpts(LangOpts), CGOpts(CGOpts) {}
 
-  void emitProgram(ProgramDecl &P) {
+  void emitProgram(ProgramDecl &P, llvm::ArrayRef<UnitDecl *> Units) {
     llvm::LLVMContext &C = M.getContext();
     auto *MainTy = llvm::FunctionType::get(
         B.getInt32Ty(), {B.getInt32Ty(), llvm::PointerType::getUnqual(C)},
@@ -1473,12 +1700,20 @@ public:
     Block &Blk = *P.getBlock();
     if (CGOpts.DebugInfo)
       initDebugInfo(M.getSourceFileName());
+    for (UnitDecl *U : Units) {
+      emitGlobals(*U->getInterface());
+      emitGlobals(*U->getImplementation());
+    }
     emitGlobals(Blk);
     if (hasNonLocalLabels(Blk)) { // needed by gotos in routine bodies
       MainJmpBuf = new llvm::GlobalVariable(
           M, jmpBufType(), false, llvm::GlobalValue::InternalLinkage,
           llvm::Constant::getNullValue(jmpBufType()), "pas.jmpbuf");
       MainJmpBuf->setAlignment(llvm::Align(16));
+    }
+    for (UnitDecl *U : Units) {
+      declareRoutines(*U->getInterface());
+      declareRoutines(*U->getImplementation());
     }
     declareRoutines(Blk);
     for (RoutineDecl *R : RoutinesToEmit)
@@ -1494,15 +1729,30 @@ public:
     B.SetInsertPoint(llvm::BasicBlock::Create(C, "entry", Main));
     setDebugLoc(P.getLocation());
     B.CreateCall(RT.Init, {Main->getArg(0), Main->getArg(1)});
+    if (LangOpts.Mode == LangMode::TP)
+      B.CreateStore(B.getInt32(1),
+                    new llvm::GlobalVariable(M, B.getInt32Ty(), false,
+                                             llvm::GlobalValue::ExternalLinkage,
+                                             nullptr, "__pas_tp_mode"));
     // Program parameters other than input/output bind to argv[1], ...
     llvm::StringMap<unsigned> ParamIndex;
     for (const Identifier &Param : P.getParams())
       if (Param.Name != "input" && Param.Name != "output")
         ParamIndex.try_emplace(Param.Name, ParamIndex.size() + 1);
+    // Units: their files, then their initialization parts, in uses order.
+    for (UnitDecl *U : Units) {
+      initFileVars(U->getInterface()->getDecls(), nullptr);
+      initFileVars(U->getImplementation()->getDecls(), nullptr);
+    }
+    for (UnitDecl *U : Units)
+      visitStmt(U->getImplementation()->getBody());
     initFileVars(Blk.getDecls(), &ParamIndex);
     if (MainJmpBuf)
       emitSetJmpDispatch(Blk, MainJmpBuf);
+    ExitBlock = newBlock("exit");
     visitStmt(Blk.getBody());
+    B.CreateBr(ExitBlock);
+    B.SetInsertPoint(ExitBlock);
     B.CreateCall(RT.Fini);
     B.CreateRet(B.getInt32(0));
     if (DIB)
@@ -1529,6 +1779,10 @@ public:
   void visitAssignStmt(AssignStmt *S) {
     Expr *Target = S->getTarget(), *Value = S->getValue();
     Type *TT = Target->getType();
+    if (auto *SS = llvm::dyn_cast<ShortStringType>(TT)) {
+      emitStringAssign(emitAddress(Target), SS, Value);
+      return;
+    }
     if (TT->isStructured()) {
       llvm::Value *Dst = emitAddress(Target);
       copyAggregate(Dst, emitAddress(Value), TT);
@@ -1578,6 +1832,56 @@ public:
     case BuiltinKind::Unpack:
       emitPackUnpack(S, BD->getBuiltinKind() == BuiltinKind::Pack);
       return;
+    case BuiltinKind::Break:
+    case BuiltinKind::Continue:
+    case BuiltinKind::Exit: {
+      llvm::BasicBlock *Target =
+          BD->getBuiltinKind() == BuiltinKind::Exit       ? ExitBlock
+          : BD->getBuiltinKind() == BuiltinKind::Continue ? Loops.back().first
+                                                          : Loops.back().second;
+      B.CreateBr(Target);
+      B.SetInsertPoint(newBlock("after.jump")); // unreachable code follows
+      return;
+    }
+    case BuiltinKind::Delete: {
+      auto A = S->getArgs();
+      B.CreateCall(RT.StrDelete, {emitAddress(A[0]), visitExpr(A[1]), visitExpr(A[2])});
+      return;
+    }
+    case BuiltinKind::Insert: {
+      auto A = S->getArgs();
+      auto *SS = llvm::cast<ShortStringType>(A[1]->getType());
+      B.CreateCall(RT.StrInsert, {emitPStr(A[0]), emitAddress(A[1]),
+                                  B.getInt32(SS->getMaxLength()), visitExpr(A[2])});
+      return;
+    }
+    case BuiltinKind::Inc:
+    case BuiltinKind::Dec: {
+      Expr *Var = S->getArgs()[0];
+      Type *T = Var->getType();
+      llvm::Value *Addr = emitAddress(Var);
+      llvm::Value *Old = loadScalar(Addr, T);
+      llvm::Value *Step =
+          S->getArgs().size() == 2 ? visitExpr(S->getArgs()[1]) : B.getInt32(1);
+      // Compute in i64 so the range check sees the true result.
+      llvm::Value *Wide = B.CreateAdd(
+          toI64(Old, T),
+          BD->getBuiltinKind() == BuiltinKind::Inc
+              ? B.CreateSExt(Step, B.getInt64Ty())
+              : B.CreateNeg(B.CreateSExt(Step, B.getInt64Ty())));
+      SourceLocation L = S->getBeginLoc();
+      if (T->isIntegerLike() ? overflowChecks(L) || rangeChecks(L) : rangeChecks(L)) {
+        OrdinalBounds Bd = getOrdinalBounds(T);
+        emitRuntimeCheck(B.CreateOr(B.CreateICmpSLT(Wide, B.getInt64(Bd.Lo)),
+                                    B.CreateICmpSGT(Wide, B.getInt64(Bd.Hi))),
+                         T->isIntegerLike() ? "integer overflow in '" +
+                                                  S->getCallee().Name.str() + "'"
+                                            : "value out of range",
+                         L);
+      }
+      storeScalar(Addr, B.CreateTrunc(Wide, regType(T)), T);
+      return;
+    }
     case BuiltinKind::New: {
       Expr *Arg = S->getArgs()[0];
       Type *Pointee = llvm::cast<PointerType>(Arg->getType())->getPointee();
@@ -1633,7 +1937,9 @@ public:
     B.CreateCondBr(visitExpr(S->getCond()), BodyBB, EndBB);
 
     B.SetInsertPoint(BodyBB);
+    Loops.push_back({CondBB, EndBB});
     visitStmt(S->getBody());
+    Loops.pop_back();
     B.CreateBr(CondBB);
 
     B.SetInsertPoint(EndBB);
@@ -1641,12 +1947,17 @@ public:
 
   void visitRepeatStmt(RepeatStmt *S) {
     auto *BodyBB = newBlock("repeat.body");
+    auto *CondBB = newBlock("repeat.cond");
     auto *EndBB = newBlock("repeat.end");
     B.CreateBr(BodyBB);
 
     B.SetInsertPoint(BodyBB);
+    Loops.push_back({CondBB, EndBB});
     for (Stmt *Child : S->getBody())
       visitStmt(Child);
+    Loops.pop_back();
+    B.CreateBr(CondBB);
+    B.SetInsertPoint(CondBB);
     B.CreateCondBr(visitExpr(S->getCond()), EndBB, BodyBB);
 
     B.SetInsertPoint(EndBB);
@@ -1674,6 +1985,7 @@ public:
              : (Signed ? B.CreateICmpSLE(Start, Final) : B.CreateICmpULE(Start, Final));
     auto *CheckBB = newBlock("for.check");
     auto *LoopBB = newBlock("for.body");
+    auto *LatchBB = newBlock("for.latch");
     auto *IncBB = newBlock("for.inc");
     auto *EndBB = newBlock("for.end");
     B.CreateCondBr(Enter, CheckBB, EndBB);
@@ -1692,7 +2004,11 @@ public:
     llvm::PHINode *I = B.CreatePHI(Start->getType(), 2, V->getName().Name);
     I->addIncoming(Start, PreBB);
     storeScalar(varAddress(V), I, VarTy);
+    Loops.push_back({LatchBB, EndBB});
     visitStmt(S->getBody());
+    Loops.pop_back();
+    B.CreateBr(LatchBB);
+    B.SetInsertPoint(LatchBB);
     B.CreateCondBr(B.CreateICmpEQ(I, Final, "for.done"), EndBB, IncBB);
 
     B.SetInsertPoint(IncBB);
@@ -1813,6 +2129,9 @@ public:
 
   llvm::Value *visitNameRefExpr(NameRefExpr *E) {
     Decl *D = E->getDecl();
+    if (E->getType()->isShortString() &&
+        (llvm::isa<VarDecl>(D) || llvm::isa<FieldDecl>(D)))
+      return emitAddress(E);
     if (auto *V = llvm::dyn_cast<VarDecl>(D);
         V && llvm::isa_and_nonnull<RoutineType>(V->getType()))
       return emitIndirectCall(V, {}); // parameterless functional parameter
@@ -1850,8 +2169,14 @@ public:
 
   llvm::Value *visitBinaryExpr(BinaryExpr *E) {
     BinaryOp Op = E->getOp();
-    if (Op == BinaryOp::And || Op == BinaryOp::Or)
+    if ((Op == BinaryOp::And || Op == BinaryOp::Or) && E->getType()->isBoolean())
       return emitShortCircuit(E);
+    if (E->getType()->isShortString()) { // Turbo/FPC concatenation
+      llvm::Value *Tmp = newStringTemp();
+      B.CreateCall(RT.StrConcat,
+                   {Tmp, emitPStr(E->getLHS()), emitPStr(E->getRHS())});
+      return Tmp;
+    }
     if (isRelational(Op))
       return emitCompare(E);
 
@@ -1885,6 +2210,14 @@ public:
 
     SourceLocation Loc = E->getOpLoc();
     switch (Op) {
+    // Turbo/FPC bitwise operators (booleans: xor only).
+    case BinaryOp::And: return B.CreateAnd(L, R, "and");
+    case BinaryOp::Or:  return B.CreateOr(L, R, "or");
+    case BinaryOp::Xor: return B.CreateXor(L, R, "xor");
+    case BinaryOp::Shl:
+      return B.CreateShl(L, B.CreateAnd(R, B.getInt32(31)), "shl");
+    case BinaryOp::Shr: // logical, like Turbo/FPC
+      return B.CreateLShr(L, B.CreateAnd(R, B.getInt32(31)), "shr");
     case BinaryOp::Add:
       return emitCheckedArith(llvm::Intrinsic::sadd_with_overflow, L, R, Loc, "add");
     case BinaryOp::Sub:
@@ -1910,21 +2243,31 @@ public:
     llvm_unreachable("formatted expressions are handled by emitWriteArg");
   }
 
+  llvm::Value *visitAddrOfExpr(AddrOfExpr *E) {
+    return emitAddress(E->getOperand());
+  }
+
   llvm::Value *visitNilExpr(NilExpr *) {
     return llvm::ConstantPointerNull::get(B.getPtrTy());
   }
 
   llvm::Value *visitDerefExpr(DerefExpr *E) {
+    if (E->getType()->isShortString())
+      return emitAddress(E);
     return loadScalar(emitAddress(E), E->getType());
   }
 
   llvm::Value *visitSetCtorExpr(SetCtorExpr *E) { return emitSetCtor(E); }
 
   llvm::Value *visitIndexExpr(IndexExpr *E) {
+    if (E->getType()->isShortString())
+      return emitAddress(E);
     return loadScalar(emitAddress(E), E->getType());
   }
 
   llvm::Value *visitFieldExpr(FieldExpr *E) {
+    if (E->getType()->isShortString())
+      return emitAddress(E);
     return loadScalar(emitAddress(E), E->getType(), E->getField().Name);
   }
 };
@@ -1932,7 +2275,8 @@ public:
 } // namespace
 
 std::unique_ptr<llvm::Module>
-pcc::generateModule(ProgramDecl &P, const SourceManager &SM,
+pcc::generateModule(ProgramDecl &P, llvm::ArrayRef<UnitDecl *> Units,
+                    const SourceManager &SM,
                     const LangOptions &LangOpts, const CodeGenOptions &CGOpts,
                     llvm::LLVMContext &Ctx, llvm::TargetMachine &TM,
                     llvm::StringRef SourceFileName) {
@@ -1940,6 +2284,6 @@ pcc::generateModule(ProgramDecl &P, const SourceManager &SM,
   M->setSourceFileName(SourceFileName);
   M->setTargetTriple(TM.getTargetTriple().str());
   M->setDataLayout(TM.createDataLayout());
-  CodeGenModule(*M, SM, LangOpts, CGOpts).emitProgram(P);
+  CodeGenModule(*M, SM, LangOpts, CGOpts).emitProgram(P, Units);
   return M;
 }

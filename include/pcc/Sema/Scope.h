@@ -22,6 +22,8 @@ class Scope {
   llvm::StringMap<Decl *> Symbols; ///< keyed by canonical (lowercase) name
   RecordType *WithRecord = nullptr;
   WithContext *With = nullptr;
+  /// Interface scopes of used units (Turbo/FPC); later ones take precedence.
+  llvm::SmallVector<const Scope *, 2> Imports;
 
 public:
   explicit Scope(Scope *Parent = nullptr) : Parent(Parent) {}
@@ -30,6 +32,13 @@ public:
       : Parent(Parent), WithRecord(Record), With(W) {}
 
   Scope *getParent() const { return Parent; }
+  void addImport(const Scope *S) { Imports.push_back(S); }
+
+  /// Names declared directly in this scope (not imports).
+  Decl *lookupOwn(llvm::StringRef Name) const {
+    auto It = Symbols.find(Name);
+    return It == Symbols.end() ? nullptr : It->second;
+  }
 
   /// Returns the existing declaration if Name is already declared in *this*
   /// scope (and does not insert), or nullptr on success.
@@ -47,13 +56,20 @@ public:
     }
     for (const auto &Entry : Symbols)
       Fn(Entry.getKey());
+    for (const Scope *I : Imports)
+      for (const auto &Entry : I->Symbols)
+        Fn(Entry.getKey());
   }
 
   Decl *lookupLocal(llvm::StringRef Name) const {
     if (WithRecord)
       return WithRecord->findField(Name);
-    auto It = Symbols.find(Name);
-    return It == Symbols.end() ? nullptr : It->second;
+    if (Decl *D = lookupOwn(Name))
+      return D;
+    for (auto It = Imports.rbegin(); It != Imports.rend(); ++It)
+      if (Decl *D = (*It)->lookupOwn(Name))
+        return D;
+    return nullptr;
   }
 
   /// Innermost declaration of Name visible from this scope. If it is a field

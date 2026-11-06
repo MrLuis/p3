@@ -10,6 +10,9 @@
 #include "pcc/Sema/Sema.h"
 
 #include "llvm/ADT/SmallString.h"
+#include "llvm/ADT/StringSet.h"
+
+#include <functional>
 #include "llvm/IR/LLVMContext.h"
 #include "llvm/IR/Module.h"
 #include "llvm/Support/ErrorHandling.h"
@@ -154,10 +157,14 @@ bool Driver::runPipeline(FileID FID) {
   Lex.setDirectives(&Directives);
   Parser P(Lex, Diags, Ctx);
   ProgramDecl *Program = P.parseProgram();
+  llvm::SmallVector<UnitDecl *, 4> Units;
+  if (!Diags.hasErrors())
+    loadUnits(Program->getUses(), Ctx, Directives, Units);
 
   // --- M4: semantic analysis (skipped after syntax errors) ---------------
   bool SyntaxOK = !Diags.hasErrors();
-  bool SemaOK = SyntaxOK && Sema(Ctx, Diags, LangOpts).check(*Program);
+  bool SemaOK = SyntaxOK && !Diags.hasErrors() &&
+                Sema(Ctx, Diags, LangOpts).check(*Program, Units);
 
   if (Opts.Act == Action::EmitAST) {
     // Dump even after errors: a partial tree helps debugging. Types are
@@ -193,7 +200,7 @@ bool Driver::runPipeline(FileID FID) {
   CGOpts.Directives = &Directives;
   CGOpts.DebugInfo = Opts.DebugInfo;
   CGOpts.OptLevel = Opts.OptLevel;
-  auto M = generateModule(*Program, SM, LangOpts, CGOpts, LLVMCtx, *TM,
+  auto M = generateModule(*Program, Units, SM, LangOpts, CGOpts, LLVMCtx, *TM,
                           SM.getFilename(FID));
   if (!verifyModule(*M, Diags))
     return false;
@@ -223,6 +230,78 @@ bool Driver::runPipeline(FileID FID) {
   if (!emitOutput(*M, *TM, OutputKind::Object, ObjPath, Diags))
     return false;
   return linkExecutable(ObjPath, Opts.OutputFile, Diags);
+}
+
+/// Finds, parses and orders (dependencies first) the units named in Uses.
+void Driver::loadUnits(llvm::ArrayRef<Identifier> Uses, ASTContext &Ctx,
+                       CheckDirectives &Directives,
+                       llvm::SmallVectorImpl<UnitDecl *> &Ordered) {
+  llvm::StringMap<UnitDecl *> Done;
+  llvm::StringSet<> InProgress;
+  std::vector<std::unique_ptr<Lexer>> Lexers;
+
+  std::function<void(const Identifier &)> Visit = [&](const Identifier &U) {
+    if (Done.count(U.Name) || Diags.shouldStop())
+      return;
+    if (!InProgress.insert(U.Name).second) {
+      Diags.error(U.Loc, "circular unit reference to '" + U.Spelling + "'",
+                  {U.getRange()});
+      return;
+    }
+    // Search the input's directory, then -I directories.
+    llvm::SmallVector<std::string, 4> Dirs{
+        llvm::sys::path::parent_path(Opts.InputFile).str()};
+    Dirs.append(Opts.IncludeDirs.begin(), Opts.IncludeDirs.end());
+    std::string Found;
+    for (const std::string &Dir : Dirs) {
+      for (std::string Base : {U.Name.str(), U.Spelling.str()})
+        for (const char *Ext : {".pas", ".pp"}) {
+          llvm::SmallString<256> Path(Dir);
+          llvm::sys::path::append(Path, Base + Ext);
+          if (Found.empty() && llvm::sys::fs::exists(Path))
+            Found = std::string(Path);
+        }
+    }
+    if (Found.empty()) {
+      InProgress.erase(U.Name);
+      Diags.error(U.Loc,
+                  "cannot find unit '" + U.Spelling + "' (looked for " +
+                      U.Name + ".pas next to the program and in -I directories)",
+                  {U.getRange()});
+      return;
+    }
+    auto FIDOrErr = SM.loadFile(Found);
+    if (!FIDOrErr) {
+      Diags.error(U.Loc, "cannot open unit file '" + llvm::Twine(Found) + "'");
+      return;
+    }
+    Lexers.push_back(std::make_unique<Lexer>(SM, *FIDOrErr, Diags, Strings, LangOpts));
+    Lexers.back()->setDirectives(&Directives);
+    UnitDecl *Unit = Parser(*Lexers.back(), Diags, Ctx).parseUnit();
+    if (!Unit) {
+      InProgress.erase(U.Name);
+      return;
+    }
+    if (Unit->getName().Name != U.Name)
+      Diags.error(Unit->getName().Loc,
+                  "file '" + llvm::Twine(Found) + "' declares unit '" +
+                      Unit->getName().Spelling + "', expected '" + U.Spelling +
+                      "'");
+    for (const Identifier &Dep : Unit->getInterfaceUses())
+      Visit(Dep);
+    for (const Identifier &Dep : Unit->getImplementationUses())
+      Visit(Dep);
+    InProgress.erase(U.Name);
+    Done[U.Name] = Unit;
+    Ordered.push_back(Unit);
+  };
+
+  if (!Uses.empty() && LangOpts.Mode == LangMode::ISO) {
+    Diags.error(Uses[0].Loc, "units are a Turbo/Free Pascal extension; use --mode=tp");
+    return;
+  }
+  for (const Identifier &U : Uses)
+    Visit(U);
 }
 
 void Driver::dumpTokens(FileID FID, llvm::raw_ostream &OS) {

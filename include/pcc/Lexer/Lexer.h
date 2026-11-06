@@ -31,6 +31,7 @@ class Lexer {
   StringPool &Strings;
   LangOptions LangOpts;
 
+  const char *BufBegin;
   const char *BufEnd;
   const char *Cur;
   CheckDirectives *Directives = nullptr;
@@ -43,6 +44,7 @@ class Lexer {
   void lexIdentifier(Token &T);
   void lexNumber(Token &T);
   void lexString(Token &T);
+  void lexBasedNumber(Token &T, const char *Start, unsigned Radix);
 
   void formToken(Token &T, tok::TokenKind K, const char *Start);
   SourceLocation locOf(const char *P) const {

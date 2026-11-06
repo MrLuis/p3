@@ -40,6 +40,9 @@ static struct PasFile std_input, std_output;
 PasFile *__pas_input = &std_input;
 PasFile *__pas_output = &std_output;
 static struct PasFile *all_files;
+/* Set by main() in --mode=tp: field widths never truncate, and booleans
+ * print as TRUE/FALSE (Turbo/FPC conventions). */
+int32_t __pas_tp_mode;
 static int prog_argc;
 static char **prog_argv;
 
@@ -269,10 +272,12 @@ static void pad(PasFile *f, int32_t n) {
 void __pas_write_str(PasFile *f, const char *s, int64_t len, int32_t width) {
   need_generate(f);
   if (width > 0) {
-    if (len > width)
-      len = width; /* ISO 7185: truncate */
-    else
+    if (len > width) {
+      if (!__pas_tp_mode)
+        len = width; /* ISO 7185: truncate */
+    } else {
       pad(f, width - (int32_t)len);
+    }
   }
   fwrite(s, 1, (size_t)len, f->fp);
 }
@@ -293,9 +298,9 @@ void __pas_write_int(PasFile *f, int32_t v, int32_t width) {
 
 void __pas_write_bool(PasFile *f, int32_t b, int32_t width) {
   if (b)
-    __pas_write_str(f, "true", 4, width);
+    __pas_write_str(f, __pas_tp_mode ? "TRUE" : "true", 4, width);
   else
-    __pas_write_str(f, "false", 5, width);
+    __pas_write_str(f, __pas_tp_mode ? "FALSE" : "false", 5, width);
 }
 
 void __pas_write_real(PasFile *f, double x, int32_t width, int32_t frac) {
@@ -466,4 +471,98 @@ void __pas_dispose(void *p) {
   if (!p)
     __pas_runtime_error("'dispose' of a nil pointer");
   free(p);
+}
+
+/*===- Short strings --------------------------------------------------------===*/
+
+void __pas_str_assign(unsigned char *dst, int32_t maxlen, const unsigned char *src) {
+  int32_t n = src[0] < maxlen ? src[0] : maxlen;
+  memmove(dst + 1, src + 1, (size_t)n); /* src may overlap dst */
+  dst[0] = (unsigned char)n;
+}
+
+void __pas_str_concat(unsigned char *dst, const unsigned char *a, const unsigned char *b) {
+  unsigned char tmp[256];
+  int32_t na = a[0], nb = b[0];
+  if (na + nb > 255)
+    nb = 255 - na;
+  memcpy(tmp + 1, a + 1, (size_t)na);
+  memcpy(tmp + 1 + na, b + 1, (size_t)nb);
+  tmp[0] = (unsigned char)(na + nb);
+  memcpy(dst, tmp, (size_t)tmp[0] + 1);
+}
+
+int32_t __pas_str_compare(const unsigned char *a, const unsigned char *b) {
+  int32_t n = a[0] < b[0] ? a[0] : b[0];
+  int c = memcmp(a + 1, b + 1, (size_t)n);
+  if (c)
+    return c < 0 ? -1 : 1;
+  return a[0] < b[0] ? -1 : a[0] > b[0];
+}
+
+void __pas_str_copy(unsigned char *dst, const unsigned char *s, int32_t index,
+                    int32_t count) {
+  /* Turbo semantics: out-of-range positions yield what is available. */
+  if (index < 1)
+    index = 1;
+  if (count < 0 || index > s[0])
+    count = 0;
+  if (count > s[0] - index + 1)
+    count = s[0] - index + 1;
+  memmove(dst + 1, s + index, (size_t)count);
+  dst[0] = (unsigned char)count;
+}
+
+int32_t __pas_str_pos(const unsigned char *sub, const unsigned char *s) {
+  if (sub[0] == 0)
+    return 0;
+  for (int32_t i = 1; i + sub[0] - 1 <= s[0]; ++i)
+    if (memcmp(s + i, sub + 1, sub[0]) == 0)
+      return i;
+  return 0;
+}
+
+void __pas_str_delete(unsigned char *s, int32_t index, int32_t count) {
+  if (index < 1 || index > s[0] || count <= 0)
+    return;
+  if (count > s[0] - index + 1)
+    count = s[0] - index + 1;
+  memmove(s + index, s + index + count, (size_t)(s[0] - index - count + 1));
+  s[0] = (unsigned char)(s[0] - count);
+}
+
+void __pas_str_insert(const unsigned char *src, unsigned char *s, int32_t maxlen,
+                      int32_t index) {
+  unsigned char tmp[512];
+  if (index < 1)
+    index = 1;
+  if (index > s[0] + 1)
+    index = s[0] + 1;
+  int32_t head = index - 1, tail = s[0] - head;
+  memcpy(tmp, s + 1, (size_t)head);
+  memcpy(tmp + head, src + 1, src[0]);
+  memcpy(tmp + head + src[0], s + index, (size_t)tail);
+  int32_t n = head + src[0] + tail;
+  if (n > maxlen)
+    n = maxlen;
+  memcpy(s + 1, tmp, (size_t)n);
+  s[0] = (unsigned char)n;
+}
+
+void __pas_write_pstr(PasFile *f, const unsigned char *s, int32_t width) {
+  __pas_write_str(f, (const char *)s + 1, s[0], width);
+}
+
+void __pas_read_str(PasFile *f, unsigned char *dst, int32_t maxlen) {
+  need_inspect(f);
+  int32_t n = 0;
+  for (;;) {
+    int c = peek(f);
+    if (c < 0 || f->eoln)
+      break;
+    if (n < maxlen)
+      dst[1 + n++] = (unsigned char)c;
+    advance(f);
+  }
+  dst[0] = (unsigned char)n;
 }

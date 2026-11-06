@@ -13,6 +13,8 @@
 #ifndef PCC_SEMA_SEMA_H
 #define PCC_SEMA_SEMA_H
 
+#include "llvm/ADT/ArrayRef.h"
+
 #include <cstdint>
 
 namespace pcc {
@@ -20,6 +22,7 @@ namespace pcc {
 class ASTContext;
 class DiagnosticsEngine;
 class ProgramDecl;
+class UnitDecl;
 struct LangOptions;
 
 /// Largest value of the predeclared type `integer` (we lower it to i32).
@@ -34,8 +37,9 @@ public:
   Sema(ASTContext &Ctx, DiagnosticsEngine &Diags, const LangOptions &LangOpts)
       : Ctx(Ctx), Diags(Diags), LangOpts(LangOpts) {}
 
-  /// Returns true if the program is valid.
-  bool check(ProgramDecl &P);
+  /// Returns true if the program is valid. Units must be in dependency
+  /// order (a unit before the units and program that use it).
+  bool check(ProgramDecl &P, llvm::ArrayRef<UnitDecl *> Units = {});
 };
 
 } // namespace pcc

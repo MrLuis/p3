@@ -35,6 +35,20 @@ BUILTIN_FUNC(Eoln,    "eoln")
 BUILTIN_PROC(Pack,    "pack")
 BUILTIN_PROC(Unpack,  "unpack")
 
+// Turbo/Free Pascal (M12, --mode=tp only).
+BUILTIN_PROC(Break,    "break")
+BUILTIN_PROC(Continue, "continue")
+BUILTIN_PROC(Exit,     "exit")
+BUILTIN_PROC(Inc,      "inc")
+BUILTIN_PROC(Dec,      "dec")
+BUILTIN_PROC(Delete,   "delete")
+BUILTIN_PROC(Insert,   "insert")
+BUILTIN_FUNC(Length,   "length")
+BUILTIN_FUNC(Copy,     "copy")
+BUILTIN_FUNC(Pos,      "pos")
+BUILTIN_FUNC(Concat,   "concat")
+BUILTIN_FUNC(UpCase,   "upcase")
+
 // Dynamic allocation (M9).
 BUILTIN_PROC(New,     "new")
 BUILTIN_PROC(Dispose, "dispose")

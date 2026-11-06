@@ -173,6 +173,10 @@ ProgramDecl *Parser::parseProgram() {
     tryConsume(tok::semi);
   }
 
+  llvm::SmallVector<Identifier, 4> Uses;
+  if (Tok.is(tok::kw_uses))
+    parseUsesClause(Uses);
+
   Block *B = parseBlock();
 
   if (!Diags.shouldStop()) {
@@ -186,7 +190,68 @@ ProgramDecl *Parser::parseProgram() {
   }
 
   return Ctx.create<ProgramDecl>(ProgramLoc, Name,
-                                 Ctx.copyArray<Identifier>(Params), B);
+                                 Ctx.copyArray<Identifier>(Params), B,
+                                 Ctx.copyArray<Identifier>(Uses));
+}
+
+// uses = "uses" ident { "," ident } ";" .
+bool Parser::parseUsesClause(llvm::SmallVectorImpl<Identifier> &Uses) {
+  consumeToken(); // 'uses'
+  if (!parseIdentList(Uses, "unit name") || !expect(tok::semi, "after uses clause")) {
+    skipUntil({tok::semi, tok::kw_begin, tok::kw_var, tok::kw_const,
+               tok::kw_type, tok::kw_procedure, tok::kw_function});
+    tryConsume(tok::semi);
+    return false;
+  }
+  return true;
+}
+
+// unit = "unit" ident ";" "interface" [uses] decls
+//        "implementation" [uses] decls [("begin"|"initialization") stmts] "end" "." .
+UnitDecl *Parser::parseUnit() {
+  SourceLocation UnitLoc = Tok.getLocation();
+  if (!tryConsume(tok::kw_unit)) {
+    Diags.error(Tok.getLocation(), "expected 'unit'");
+    return nullptr;
+  }
+  Identifier Name;
+  if (!expectIdentifier(Name, "unit name") || !expect(tok::semi, "after unit name"))
+    return nullptr;
+
+  if (!expect(tok::kw_interface, "after unit heading"))
+    return nullptr;
+  llvm::SmallVector<Identifier, 4> IfaceUses, ImplUses;
+  if (Tok.is(tok::kw_uses))
+    parseUsesClause(IfaceUses);
+  llvm::SmallVector<Decl *, 16> IfaceDecls;
+  parseDeclarations(IfaceDecls, /*InInterface=*/true);
+
+  if (!expect(tok::kw_implementation, "after the interface part"))
+    return nullptr;
+  if (Tok.is(tok::kw_uses))
+    parseUsesClause(ImplUses);
+  llvm::SmallVector<Decl *, 16> ImplDecls;
+  parseDeclarations(ImplDecls, /*InInterface=*/false);
+
+  // Optional initialization part.
+  llvm::SmallVector<Stmt *, 8> Init;
+  SourceLocation InitLoc = Tok.getLocation();
+  if (Tok.isOneOf(tok::kw_begin, tok::kw_initialization)) {
+    InitLoc = consumeToken();
+    parseStatementSequence(Init, tok::kw_end, InitLoc, "begin");
+  }
+  SourceLocation EndLoc = Tok.getEndLocation();
+  if (!expect(tok::kw_end, "at end of unit") || !expect(tok::period, "after 'end'"))
+    return nullptr;
+
+  auto *Empty = Ctx.create<CompoundStmt>(SourceRange(InitLoc), llvm::ArrayRef<Stmt *>());
+  auto *Body = Ctx.create<CompoundStmt>(SourceRange(InitLoc, EndLoc),
+                                        Ctx.copyArray<Stmt *>(Init));
+  return Ctx.create<UnitDecl>(
+      UnitLoc, Name, Ctx.copyArray<Identifier>(IfaceUses),
+      Ctx.create<Block>(Ctx.copyArray<Decl *>(IfaceDecls), Empty),
+      Ctx.copyArray<Identifier>(ImplUses),
+      Ctx.create<Block>(Ctx.copyArray<Decl *>(ImplDecls), Body));
 }
 
 //===----------------------------------------------------------------------===//
@@ -206,6 +271,25 @@ static int sectionRank(tok::TokenKind K) {
 
 Block *Parser::parseBlock() {
   llvm::SmallVector<Decl *, 16> Decls;
+  parseDeclarations(Decls, /*InInterface=*/false);
+
+  CompoundStmt *Body = nullptr;
+  if (Tok.is(tok::kw_begin)) {
+    Body = parseCompoundStmt();
+  } else {
+    Diags.error(Tok.getLocation(), "expected 'begin'");
+    skipUntil({tok::kw_begin});
+    if (Tok.is(tok::kw_begin))
+      Body = parseCompoundStmt();
+  }
+  if (!Body)
+    Body = Ctx.create<CompoundStmt>(SourceRange(Tok.getLocation()),
+                                    llvm::ArrayRef<Stmt *>());
+  return Ctx.create<Block>(Ctx.copyArray<Decl *>(Decls), Body);
+}
+
+void Parser::parseDeclarations(llvm::SmallVectorImpl<Decl *> &Decls,
+                               bool InInterface) {
   int LastRank = -1;
   llvm::StringRef LastWord;
 
@@ -242,7 +326,7 @@ Block *Parser::parseBlock() {
       break;
     case tok::kw_procedure:
     case tok::kw_function:
-      if (RoutineDecl *R = parseRoutineDecl())
+      if (RoutineDecl *R = parseRoutineDecl(InInterface))
         Decls.push_back(R);
       break;
     default: { // label 1, 2, 3;
@@ -264,20 +348,6 @@ Block *Parser::parseBlock() {
     }
     }
   }
-
-  CompoundStmt *Body = nullptr;
-  if (Tok.is(tok::kw_begin)) {
-    Body = parseCompoundStmt();
-  } else {
-    Diags.error(Tok.getLocation(), "expected 'begin'");
-    skipUntil({tok::kw_begin});
-    if (Tok.is(tok::kw_begin))
-      Body = parseCompoundStmt();
-  }
-  if (!Body)
-    Body = Ctx.create<CompoundStmt>(SourceRange(Tok.getLocation()),
-                                    llvm::ArrayRef<Stmt *>());
-  return Ctx.create<Block>(Ctx.copyArray<Decl *>(Decls), Body);
 }
 
 // constPart = "const" ident "=" constExpr ";" { ident "=" constExpr ";" } .
@@ -290,10 +360,29 @@ void Parser::parseConstPart(llvm::SmallVectorImpl<Decl *> &Decls) {
   while (Tok.is(tok::identifier) && !Diags.shouldStop()) {
     Identifier Name = makeIdentifier(Tok);
     consumeToken();
+    if (Tok.is(tok::colon) && LangOpts.Mode == LangMode::TP) {
+      // Typed constant: const x: T = value;
+      consumeToken();
+      TypeSpec *TS = parseType();
+      Expr *Init = nullptr;
+      if (TS && expect(tok::equal, "in typed constant") &&
+          (Init = parseExpression())) {
+        auto *V = Ctx.create<VarDecl>(Name, TS);
+        V->setInit(Init);
+        Decls.push_back(V);
+      } else {
+        skipUntil({tok::semi, tok::kw_begin});
+      }
+      if (!expect(tok::semi, "after typed constant")) {
+        skipUntil({tok::semi, tok::kw_begin});
+        tryConsume(tok::semi);
+      }
+      continue;
+    }
     if (Tok.is(tok::colon_equal) || Tok.is(tok::colon)) {
       Diags.error(Tok.getLocation(),
-                  "expected '=' in constant declaration (typed constants are "
-                  "not supported)",
+                  "expected '=' in constant declaration (typed constants need "
+                  "--mode=tp)",
                   {Tok.getRange()});
       skipUntil({tok::semi, tok::kw_begin});
       tryConsume(tok::semi);
@@ -368,7 +457,7 @@ void Parser::parseVarPart(llvm::SmallVectorImpl<Decl *> &Decls) {
 
 // routineDecl = ("procedure" ident [params] | "function" ident [params]
 //               [":" typeIdent]) ";" ( "forward" | block ) ";" .
-RoutineDecl *Parser::parseRoutineDecl() {
+RoutineDecl *Parser::parseRoutineDecl(bool HeadingOnly) {
   bool IsFunction = Tok.is(tok::kw_function);
   const char *Kind = IsFunction ? "function" : "procedure";
   SourceLocation Loc = consumeToken();
@@ -395,6 +484,13 @@ RoutineDecl *Parser::parseRoutineDecl() {
     skipUntil({tok::semi, tok::kw_begin, tok::kw_var, tok::kw_const,
                tok::kw_type});
   tryConsume(tok::semi);
+
+  if (HeadingOnly) // interface part of a unit: the body comes later
+    return Name.isValid()
+               ? Ctx.create<RoutineDecl>(Loc, Name, IsFunction,
+                                         Ctx.copyArray<VarDecl *>(Params),
+                                         HasParamList, ResultTS, nullptr, true)
+               : nullptr;
 
   if (isIdentifierNamed("forward")) {
     consumeToken();
@@ -498,6 +594,15 @@ TypeSpec *Parser::parseType() {
       return nullptr;
     return Ctx.create<SetTypeSpec>(SourceRange(Start, PrevTokEnd), Elem);
   }
+  case tok::kw_string: { // string [ '[' N ']' ]
+    consumeToken();
+    Expr *MaxLen = nullptr;
+    if (tryConsume(tok::l_square)) {
+      if (!(MaxLen = parseExpression()) || !expect(tok::r_square, "after string length"))
+        return nullptr;
+    }
+    return Ctx.create<StringTypeSpec>(SourceRange(Start, PrevTokEnd), MaxLen);
+  }
   case tok::kw_file: {
     consumeToken();
     if (!expect(tok::kw_of, "after 'file'"))
@@ -531,6 +636,11 @@ TypeSpec *Parser::parseType() {
 
 // typeIdent (ISO requires these for parameters and function results)
 TypeSpec *Parser::parseTypeIdentifier(llvm::StringRef Context) {
+  if (Tok.is(tok::kw_string)) { // Turbo/FPC: `string` names a type here
+    auto *TS = Ctx.create<StringTypeSpec>(Tok.getRange(), nullptr);
+    consumeToken();
+    return TS;
+  }
   if (Tok.is(tok::identifier)) {
     auto *TS = Ctx.create<NamedTypeSpec>(makeIdentifier(Tok));
     consumeToken();
@@ -1233,6 +1343,7 @@ std::optional<BinaryOp> Parser::peekAddOp() const {
   case tok::plus:  return BinaryOp::Add;
   case tok::minus: return BinaryOp::Sub;
   case tok::kw_or: return BinaryOp::Or;
+  case tok::kw_xor: return BinaryOp::Xor;
   default:         return std::nullopt;
   }
 }
@@ -1244,6 +1355,8 @@ std::optional<BinaryOp> Parser::peekMulOp() const {
   case tok::kw_div: return BinaryOp::IntDiv;
   case tok::kw_mod: return BinaryOp::Mod;
   case tok::kw_and: return BinaryOp::And;
+  case tok::kw_shl: return BinaryOp::Shl;
+  case tok::kw_shr: return BinaryOp::Shr;
   default:          return std::nullopt;
   }
 }
@@ -1445,6 +1558,13 @@ Expr *Parser::parseFactor() {
       return nullptr;
     return Ctx.create<UnaryExpr>(
         SourceRange(OpLoc, Operand->getRange().getEnd()), Op, Operand);
+  }
+  case tok::at: { // @x (Turbo/FPC)
+    SourceLocation AtLoc = consumeToken();
+    Expr *Operand = parseDesignator();
+    if (!Operand)
+      return nullptr;
+    return Ctx.create<AddrOfExpr>(SourceRange(AtLoc, PrevTokEnd), Operand);
   }
   case tok::kw_nil: {
     auto *E = Ctx.create<NilExpr>(Tok.getRange());

@@ -8,11 +8,19 @@
 #include "pcc/Basic/StringPool.h"
 #include "pcc/Driver/CompilerOptions.h"
 
+#include "llvm/ADT/ArrayRef.h"
+#include "llvm/ADT/SmallVector.h"
+
 namespace llvm {
 class raw_ostream;
 }
 
 namespace pcc {
+
+class ASTContext;
+class CheckDirectives;
+struct Identifier;
+class UnitDecl;
 
 class Driver {
   CompilerOptions Opts;
@@ -26,6 +34,10 @@ class Driver {
 
   /// lex -> parse -> sema -> codegen -> emit/link, stopping at Opts.Act.
   bool runPipeline(FileID FID);
+
+  void loadUnits(llvm::ArrayRef<Identifier> Uses, ASTContext &Ctx,
+                 CheckDirectives &Directives,
+                 llvm::SmallVectorImpl<UnitDecl *> &Ordered);
 
   /// --emit-tokens
   void dumpTokens(FileID FID, llvm::raw_ostream &OS);

@@ -33,8 +33,10 @@ class ASTContext {
   BuiltinType NilTy{Type::TK_Nil};
   SetType EmptySetTy{nullptr};
   FileType TextTy{&CharTy, /*IsText=*/true};
+  PointerType UntypedPointerTy{nullptr, /*Untyped=*/true};
   llvm::DenseMap<Type *, SetType *> SetTypes;
   llvm::DenseMap<uint64_t, StringLiteralType *> StringLiteralTypes;
+  llvm::DenseMap<unsigned, ShortStringType *> ShortStringTypes;
 
 public:
   explicit ASTContext(StringPool &Strings) : Strings(Strings) {}
@@ -50,6 +52,7 @@ public:
   Type *getCharType() { return &CharTy; }
   Type *getNilType() { return &NilTy; }
   Type *getTextType() { return &TextTy; }
+  Type *getUntypedPointerType() { return &UntypedPointerTy; }
   /// The type of a set constructor with elements of (host) type Element.
   Type *getSetConstructorType(Type *Element) {
     if (!Element)
@@ -64,6 +67,14 @@ public:
     StringLiteralType *&T = StringLiteralTypes[Length];
     if (!T)
       T = create<StringLiteralType>(Length);
+    return T;
+  }
+
+  /// string[MaxLen]; all short string types are compatible (Turbo/FPC).
+  Type *getShortStringType(unsigned MaxLen = 255) {
+    ShortStringType *&T = ShortStringTypes[MaxLen];
+    if (!T)
+      T = create<ShortStringType>(MaxLen);
     return T;
   }
 

@@ -10,6 +10,7 @@
 #include "pcc/Basic/LangOptions.h"
 
 #include <string>
+#include <vector>
 
 namespace pcc {
 
@@ -33,6 +34,7 @@ struct CompilerOptions {
   unsigned OptLevel = 0;    ///< 0..3
   bool DebugInfo = false;   ///< -g
   std::string TargetTriple; ///< empty = host
+  std::vector<std::string> IncludeDirs; ///< -I: where to look for units
   ColorMode Color = ColorMode::Auto;
   unsigned ErrorLimit = 20; ///< 0 = unlimited
   bool WarningsAsErrors = false;

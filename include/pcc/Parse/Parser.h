@@ -92,10 +92,13 @@ class Parser {
 
   // Declarations
   Block *parseBlock();
+  /// Declaration parts; InInterface: routine headings without bodies.
+  void parseDeclarations(llvm::SmallVectorImpl<Decl *> &Decls, bool InInterface);
+  bool parseUsesClause(llvm::SmallVectorImpl<Identifier> &Uses);
   void parseConstPart(llvm::SmallVectorImpl<Decl *> &Decls);
   void parseTypePart(llvm::SmallVectorImpl<Decl *> &Decls);
   void parseVarPart(llvm::SmallVectorImpl<Decl *> &Decls);
-  RoutineDecl *parseRoutineDecl();
+  RoutineDecl *parseRoutineDecl(bool HeadingOnly = false);
   bool parseFormalParams(llvm::SmallVectorImpl<VarDecl *> &Params);
 
   // Types
@@ -147,6 +150,9 @@ public:
   /// Parses a whole program. Always returns a (possibly partial) AST;
   /// check the DiagnosticsEngine for errors.
   ProgramDecl *parseProgram();
+
+  /// Parses a unit file (Turbo/FPC). Returns null on a fatal syntax error.
+  UnitDecl *parseUnit();
 };
 
 } // namespace pcc

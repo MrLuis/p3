@@ -16,6 +16,9 @@ const char *pcc::getOpSpelling(BinaryOp Op) {
   case BinaryOp::Add:     return "+";
   case BinaryOp::Sub:     return "-";
   case BinaryOp::Or:      return "or";
+  case BinaryOp::Xor:     return "xor";
+  case BinaryOp::Shl:     return "shl";
+  case BinaryOp::Shr:     return "shr";
   case BinaryOp::Mul:     return "*";
   case BinaryOp::RealDiv: return "/";
   case BinaryOp::IntDiv:  return "div";
@@ -55,6 +58,7 @@ const char *Decl::getKindName() const {
   case DK_Type:    return "type";
   case DK_Field:   return "field";
   case DK_Label:   return "label";
+  case DK_Unit:    return "unit";
   case DK_Routine:
     return llvm::cast<RoutineDecl>(this)->isFunction() ? "function"
                                                        : "procedure";

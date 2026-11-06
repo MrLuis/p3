@@ -47,6 +47,7 @@ public:
     TK_Set,      ///< set of T (T's values must lie in 0..255)   (M9)
     TK_File,     ///< file of T, text                            (M10)
     TK_Routine,  ///< a procedural/functional parameter's type   (M10)
+    TK_ShortString, ///< Turbo/FPC string[N]: length byte + N chars (M12)
   };
 
 private:
@@ -73,6 +74,10 @@ public:
   bool isNil() const { return Kind == TK_Nil; }
   bool isSet() const { return Kind == TK_Set; }
   bool isFile() const { return Kind == TK_File; }
+  bool isShortString() const { return Kind == TK_ShortString; }
+  /// Anything that converts to a short string: short strings, string types,
+  /// and chars (Turbo/FPC).
+  bool isStringish() const;
   bool isTextFile() const;
 
   /// ISO 7185 6.4.2.1: integer, boolean, char, enumerations and subranges.
@@ -83,7 +88,7 @@ public:
   bool isSimple() const { return isOrdinal() || isReal(); }
   /// Types a function may return (ISO 6.6.2: simple or pointer).
   bool isValidResultType() const { return isSimple() || isPointer(); }
-  bool isStructured() const { return isArray() || isRecord(); }
+  bool isStructured() const { return isArray() || isRecord() || isShortString(); }
 
   /// Integer-like after stripping subranges (integer or a subrange of it).
   bool isIntegerLike() const;
@@ -199,9 +204,12 @@ public:
 /// filled in once known.
 class PointerType final : public Type {
   Type *Pointee;
+  bool Untyped = false; ///< Turbo/FPC `pointer`
 
 public:
-  explicit PointerType(Type *Pointee) : Type(TK_Pointer), Pointee(Pointee) {}
+  explicit PointerType(Type *Pointee, bool Untyped = false)
+      : Type(TK_Pointer), Pointee(Pointee), Untyped(Untyped) {}
+  bool isUntyped() const { return Untyped; }
   Type *getPointee() const { return Pointee; }
   void setPointee(Type *T) { Pointee = T; }
   static bool classof(const Type *T) { return T->getKind() == TK_Pointer; }
@@ -232,6 +240,17 @@ public:
   static bool classof(const Type *T) { return T->getKind() == TK_File; }
 };
 
+/// string[MaxLen] (Turbo/FPC); `string` is string[255].
+class ShortStringType final : public Type {
+  unsigned MaxLen;
+
+public:
+  explicit ShortStringType(unsigned MaxLen)
+      : Type(TK_ShortString), MaxLen(MaxLen) {}
+  unsigned getMaxLength() const { return MaxLen; }
+  static bool classof(const Type *T) { return T->getKind() == TK_ShortString; }
+};
+
 /// The type of a procedural (Result == null) or functional parameter.
 class RoutineType final : public Type {
   llvm::ArrayRef<VarDecl *> Params;
@@ -245,6 +264,19 @@ public:
   bool isFunction() const { return Result != nullptr; }
   static bool classof(const Type *T) { return T->getKind() == TK_Routine; }
 };
+
+/// Turbo/FPC: do L and R compare as short strings? (Two chars, or two ISO
+/// string types of equal length, keep their own comparisons.)
+inline bool needsStringCompare(Type *L, Type *R) {
+  if (!L->isStringish() || !R->isStringish())
+    return false;
+  if (L->getBase()->isChar() && R->getBase()->isChar())
+    return false;
+  if (L->isStringType() && R->isStringType() &&
+      L->getStringLength() == R->getStringLength())
+    return false;
+  return true;
+}
 
 /// True if T is, or contains, a file type (files cannot be copied).
 bool containsFile(Type *T);

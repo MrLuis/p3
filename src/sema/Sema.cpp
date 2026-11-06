@@ -52,11 +52,17 @@ class Checker : public StmtVisitor<Checker>,
 
   Scope Standard;              ///< predeclared entities
   Scope *Cur = &Standard;
+  /// Units: interface and implementation scopes, by canonical unit name.
+  std::vector<std::unique_ptr<Scope>> UnitScopes;
+  llvm::StringMap<Scope *> UnitInterfaces;
+  Scope *CurUnitInterface = nullptr; ///< while checking an implementation
   RoutineDecl *CurRoutine = nullptr; ///< null in the program block
 
   /// Enclosing for statements, innermost last. Their control variables must
   /// not be assigned in the loop body (ISO 7185 6.8.3.9 "threatened").
   llvm::SmallVector<ForStmt *, 4> ActiveFors;
+
+  unsigned LoopDepth = 0; ///< for break / continue
 
   /// Functions whose result has been assigned somewhere in their body.
   llvm::DenseSet<RoutineDecl *> ResultAssigned;
@@ -107,6 +113,8 @@ class Checker : public StmtVisitor<Checker>,
     Ty("boolean", Ctx.getBooleanType());
     Ty("char", Ctx.getCharType());
     Ty("text", Ctx.getTextType());
+    if (!isISO())
+      Ty("pointer", Ctx.getUntypedPointerType());
 
     // The standard files (ISO 7185 6.10).
     for (llvm::StringRef N : {"input", "output"}) {
@@ -125,12 +133,27 @@ class Checker : public StmtVisitor<Checker>,
     Const("maxint", Ctx.getIntegerType(), PascalMaxInt);
 
 #define BUILTIN_PROC(ID, NAME)                                                 \
-  Standard.insert(NAME, Ctx.create<BuiltinDecl>(predeclaredName(NAME),         \
-                                                BuiltinKind::ID, true));
+  if (!isTPOnly(BuiltinKind::ID) || !isISO())                                  \
+    Standard.insert(NAME, Ctx.create<BuiltinDecl>(predeclaredName(NAME),       \
+                                                  BuiltinKind::ID, true));
 #define BUILTIN_FUNC(ID, NAME)                                                 \
-  Standard.insert(NAME, Ctx.create<BuiltinDecl>(predeclaredName(NAME),         \
-                                                BuiltinKind::ID, false));
+  if (!isTPOnly(BuiltinKind::ID) || !isISO())                                  \
+    Standard.insert(NAME, Ctx.create<BuiltinDecl>(predeclaredName(NAME),       \
+                                                  BuiltinKind::ID, false));
 #include "pcc/AST/Builtins.def"
+  }
+
+  /// Turbo/FPC builtins, predeclared only with --mode=tp.
+  static bool isTPOnly(BuiltinKind K) {
+    switch (K) {
+    case BuiltinKind::Break: case BuiltinKind::Continue: case BuiltinKind::Exit:
+    case BuiltinKind::Inc: case BuiltinKind::Dec: case BuiltinKind::Delete:
+    case BuiltinKind::Insert: case BuiltinKind::Length: case BuiltinKind::Copy:
+    case BuiltinKind::Pos: case BuiltinKind::Concat: case BuiltinKind::UpCase:
+      return true;
+    default:
+      return false;
+    }
   }
 
   //===--------------------------------------------------------------------===//
@@ -212,6 +235,10 @@ class Checker : public StmtVisitor<Checker>,
       return true;
     if ((A->isPointer() && B->isNil()) || (A->isNil() && B->isPointer()))
       return true;
+    if (A->isPointer() && B->isPointer() &&
+        (llvm::cast<PointerType>(A)->isUntyped() ||
+         llvm::cast<PointerType>(B)->isUntyped()))
+      return true; // Turbo/FPC untyped `pointer`
     if (A->isSet() && B->isSet()) {
       auto *SA = llvm::cast<SetType>(A), *SB = llvm::cast<SetType>(B);
       return SA->isEmptySet() || SB->isEmptySet() ||
@@ -232,8 +259,10 @@ class Checker : public StmtVisitor<Checker>,
       return true;
     if (Target->isReal() && Value->isIntegerLike())
       return true;
-    if (Target->isPointer() && Value->isNil())
-      return true;
+    if (Target->isPointer() && (Value->isNil() || Value->isPointer()))
+      return areCompatible(Target, Value);
+    if (Target->isShortString() && Value->isStringish())
+      return true; // truncated to the target's length at runtime
     if (Target->isSet() && Value->isSet())
       return areCompatible(Target, Value); // range-checked at runtime
     if (Target->isOrdinal() && Value->isOrdinal())
@@ -352,8 +381,13 @@ class Checker : public StmtVisitor<Checker>,
         if (C <= 0)
           return std::nullopt;
         return Ord(((A % C) + C) % C);
-      case BinaryOp::And: return Ord(A && C);
-      case BinaryOp::Or:  return Ord(A || C);
+      case BinaryOp::And: return T->isBoolean() ? Ord(A && C) : Ord(A & C);
+      case BinaryOp::Or:  return T->isBoolean() ? Ord(A || C) : Ord(A | C);
+      case BinaryOp::Xor: return Ord(A ^ C);
+      case BinaryOp::Shl:
+        return Ord(static_cast<int32_t>(static_cast<uint32_t>(A) << (C & 31)));
+      case BinaryOp::Shr:
+        return Ord(static_cast<int32_t>(static_cast<uint32_t>(A) >> (C & 31)));
       case BinaryOp::Eq:  return Ord(IsReal ? X == Y : A == C);
       case BinaryOp::Ne:  return Ord(IsReal ? X != Y : A != C);
       case BinaryOp::Lt:  return Ord(IsReal ? X < Y : A < C);
@@ -582,6 +616,22 @@ class Checker : public StmtVisitor<Checker>,
       return Ctx.create<RoutineType>(RS->getParams(), Result);
     }
 
+    case TypeSpec::TS_String: {
+      auto *SS = llvm::cast<StringTypeSpec>(TS);
+      if (!SS->getMaxLength())
+        return Ctx.getShortStringType(255);
+      auto C = evaluateConstant(SS->getMaxLength(), "string length");
+      if (!C)
+        return errorType();
+      if (!C->Ty->isIntegerLike() || C->Value.Int < 1 || C->Value.Int > 255) {
+        Diags.error(SS->getMaxLength()->getBeginLoc(),
+                    "string length must be an integer in 1..255",
+                    {SS->getMaxLength()->getRange()});
+        return errorType();
+      }
+      return Ctx.getShortStringType(static_cast<unsigned>(C->Value.Int));
+    }
+
     case TypeSpec::TS_File: {
       auto *FS = llvm::cast<FileTypeSpec>(TS);
       Type *Elem = resolveType(FS->getElement());
@@ -702,6 +752,27 @@ class Checker : public StmtVisitor<Checker>,
   void declareVar(VarDecl *V) {
     V->setType(resolveType(V->getTypeSpec()));
     V->setOwner(CurRoutine);
+    if (Expr *Init = V->getInit()) {
+      // Typed constants are static: they keep their value across calls.
+      V->setOwner(nullptr);
+      Used.insert(V);
+      if (auto C = evaluateConstant(Init, "typed constant value")) {
+        Type *T = V->getType();
+        if (!T->isError() && !(T->isSimple() || T->isShortString() ||
+                               T->isStringType()))
+          Diags.error(Init->getBeginLoc(),
+                      "typed constants of type " + quoted(T) +
+                          " are not supported (only simple types and strings)",
+                      {Init->getRange()});
+        else if (!T->isError() && !isAssignable(T, C->Ty))
+          Diags.error(Init->getBeginLoc(),
+                      "cannot initialize " + quoted(T) + " with a value of type " +
+                          quoted(C->Ty),
+                      {Init->getRange()});
+        else
+          V->setInitValue(C->Value);
+      }
+    }
     declare(V);
   }
 
@@ -726,7 +797,8 @@ class Checker : public StmtVisitor<Checker>,
     } else {
       ResultTy = resolveType(R->getResultTypeSpec());
       // ISO 7185 6.6.2: the result type is a simple type (or a pointer).
-      if (!ResultTy->isError() && !ResultTy->isValidResultType()) {
+      if (!ResultTy->isError() && !ResultTy->isValidResultType() &&
+          !ResultTy->isShortString()) {
         Diags.error(R->getResultTypeSpec()->getBeginLoc(),
                     "function result type must be a simple or pointer type, not " +
                         quoted(ResultTy),
@@ -758,7 +830,10 @@ class Checker : public StmtVisitor<Checker>,
     const Identifier &Id = R->getName();
 
     // The definition of an earlier `forward` declaration?
-    auto *Fwd = llvm::dyn_cast_or_null<RoutineDecl>(Cur->lookupLocal(Id.Name));
+    auto *Fwd = llvm::dyn_cast_or_null<RoutineDecl>(Cur->lookupOwn(Id.Name));
+    if (!Fwd && CurUnitInterface && !CurRoutine) // an interface heading
+      Fwd = llvm::dyn_cast_or_null<RoutineDecl>(
+          CurUnitInterface->lookupOwn(Id.Name));
     if (Fwd && Fwd->isForward() && !Fwd->getBody() && R->getBody()) {
       if (Fwd->isFunction() != R->isFunction()) {
         Diags.error(Id.Loc,
@@ -846,6 +921,11 @@ class Checker : public StmtVisitor<Checker>,
   }
 
   void checkBlock(Block &B) {
+    declareAll(B);
+    finishBlock(B, /*WarnUnused=*/true);
+  }
+
+  void declareAll(Block &B) {
     for (Decl *D : B.getDecls()) {
       if (Diags.shouldStop())
         return;
@@ -871,6 +951,9 @@ class Checker : public StmtVisitor<Checker>,
       }
     }
     resolvePendingPointers();
+  }
+
+  void finishBlock(Block &B, bool WarnUnused) {
     // ISO 7185 6.1.4: every forward declaration needs a definition in the
     // same block.
     for (Decl *D : B.getDecls())
@@ -886,7 +969,7 @@ class Checker : public StmtVisitor<Checker>,
     RoutineBody = SavedBody;
 
     for (Decl *D : B.getDecls())
-      if (auto *V = llvm::dyn_cast<VarDecl>(D); V && !Used.count(V))
+      if (auto *V = llvm::dyn_cast<VarDecl>(D); WarnUnused && V && !Used.count(V))
         Diags.warning("unused-variable", V->getLocation(),
                       "variable '" + V->getName().Spelling +
                           "' is declared but never used",
@@ -1188,7 +1271,7 @@ class Checker : public StmtVisitor<Checker>,
 
   static bool isWritable(Type *T) {
     return T->isIntegerLike() || T->isReal() || T->getBase()->isChar() ||
-           T->getBase()->isBoolean() || T->isStringType();
+           T->getBase()->isBoolean() || T->isStringType() || T->isShortString();
   }
 
   /// If the first argument of read/write/... is a file, checks and returns
@@ -1318,7 +1401,8 @@ class Checker : public StmtVisitor<Checker>,
                     {Arg->getRange()});
         continue;
       }
-      if (!T->isIntegerLike() && !T->getBase()->isChar() && !T->isReal())
+      if (!T->isIntegerLike() && !T->getBase()->isChar() && !T->isReal() &&
+          !T->isShortString())
         Diags.error(Arg->getBeginLoc(),
                     "cannot read a value of type " + quoted(T) +
                         " (only integer, real and char)",
@@ -1393,6 +1477,57 @@ class Checker : public StmtVisitor<Checker>,
   /// new(p [, tag constants]) / dispose(p [, tag constants]). The tags
   /// select record variants (ISO 6.6.5.3); storage is always allocated for
   /// the largest variant, so they are only checked.
+  /// delete(var s, index, count) / insert(source, var s, index)
+  void checkDeleteInsert(ProcCallStmt *S, bool IsInsert) {
+    const Identifier &Callee = S->getCallee();
+    auto Args = S->getArgs();
+    if (Args.size() != 3) {
+      Diags.error(Callee.Loc, "'" + Callee.Spelling + "' expects 3 arguments",
+                  {S->getRange()});
+      return;
+    }
+    Expr *Str = IsInsert ? Args[1] : Args[0];
+    for (Expr *A : Args) {
+      Type *T = check(A);
+      if (T->isError())
+        continue;
+      if (A == Str) {
+        if (!T->isShortString() || !isVariableReference(A))
+          Diags.error(A->getBeginLoc(), "expected a string variable",
+                      {A->getRange()});
+      } else if (IsInsert && A == Args[0]) {
+        if (!T->isStringish())
+          Diags.error(A->getBeginLoc(), "expected a string", {A->getRange()});
+      } else if (!T->isIntegerLike()) {
+        Diags.error(A->getBeginLoc(), "expected an integer", {A->getRange()});
+      }
+    }
+  }
+
+  /// inc(x [, n]) / dec(x [, n]): x an ordinal variable, n an integer.
+  void checkIncDec(ProcCallStmt *S) {
+    const Identifier &Callee = S->getCallee();
+    auto Args = S->getArgs();
+    if (Args.empty() || Args.size() > 2) {
+      Diags.error(Callee.Loc, "'" + Callee.Spelling + "' expects 1 or 2 arguments",
+                  {S->getRange()});
+      return;
+    }
+    Type *T = check(Args[0]);
+    if (!T->isError() && (!T->isOrdinal() || !isVariableReference(Args[0])))
+      Diags.error(Args[0]->getBeginLoc(),
+                  "'" + Callee.Spelling + "' expects an ordinal variable",
+                  {Args[0]->getRange()});
+    else if (!T->isError())
+      checkNotForControlVar(Args[0]);
+    if (Args.size() == 2) {
+      Type *N = check(Args[1]);
+      if (!N->isError() && !N->isIntegerLike())
+        Diags.error(Args[1]->getBeginLoc(), "step must be an integer",
+                    {Args[1]->getRange()});
+    }
+  }
+
   void checkNewDispose(ProcCallStmt *S, bool IsNew) {
     const Identifier &Callee = S->getCallee();
     if (S->getArgs().empty()) {
@@ -1422,9 +1557,75 @@ class Checker : public StmtVisitor<Checker>,
   // Built-in function calls
   //===--------------------------------------------------------------------===//
 
+  Type *checkStringFunction(CallExpr *E, BuiltinDecl *BD,
+                            llvm::ArrayRef<Type *> ArgTypes) {
+    const Identifier &Callee = E->getCallee();
+    auto Args = E->getArgs();
+    for (Type *T : ArgTypes)
+      if (T->isError())
+        return errorType();
+    auto Bad = [&](Expr *A, llvm::StringRef What) {
+      Diags.error(A->getBeginLoc(),
+                  "'" + Callee.Spelling + "' expects " + What, {A->getRange()});
+      return errorType();
+    };
+    auto Arity = [&](size_t N) {
+      if (Args.size() == N)
+        return true;
+      Diags.error(Callee.Loc,
+                  "'" + Callee.Spelling + "' expects " + llvm::Twine(N) +
+                      " argument" + (N == 1 ? "" : "s"),
+                  {E->getRange()});
+      return false;
+    };
+    switch (BD->getBuiltinKind()) {
+    case BuiltinKind::Length:
+      if (!Arity(1))
+        return errorType();
+      return ArgTypes[0]->isStringish() ? Ctx.getIntegerType()
+                                        : Bad(Args[0], "a string");
+    case BuiltinKind::UpCase:
+      if (!Arity(1))
+        return errorType();
+      return ArgTypes[0]->getBase()->isChar() ? Ctx.getCharType()
+                                              : Bad(Args[0], "a char");
+    case BuiltinKind::Pos:
+      if (!Arity(2))
+        return errorType();
+      for (size_t I = 0; I < 2; ++I)
+        if (!ArgTypes[I]->isStringish())
+          return Bad(Args[I], "strings");
+      return Ctx.getIntegerType();
+    case BuiltinKind::Copy:
+      if (!Arity(3))
+        return errorType();
+      if (!ArgTypes[0]->isStringish())
+        return Bad(Args[0], "a string");
+      if (!ArgTypes[1]->isIntegerLike() || !ArgTypes[2]->isIntegerLike())
+        return Bad(Args[1], "integer index and count");
+      return Ctx.getShortStringType();
+    default: // Concat
+      if (Args.empty()) {
+        Diags.error(Callee.Loc, "'concat' expects strings", {E->getRange()});
+        return errorType();
+      }
+      for (size_t I = 0; I < Args.size(); ++I)
+        if (!ArgTypes[I]->isStringish())
+          return Bad(Args[I], "strings");
+      return Ctx.getShortStringType();
+    }
+  }
+
   Type *checkBuiltinFunction(CallExpr *E, BuiltinDecl *BD,
                              llvm::ArrayRef<Type *> ArgTypes) {
     const Identifier &Callee = E->getCallee();
+    switch (BD->getBuiltinKind()) {
+    case BuiltinKind::Length: case BuiltinKind::Copy: case BuiltinKind::Pos:
+    case BuiltinKind::Concat: case BuiltinKind::UpCase:
+      return checkStringFunction(E, BD, ArgTypes);
+    default:
+      break;
+    }
     if (ArgTypes.size() != 1) {
       Diags.error(Callee.Loc,
                   "'" + Callee.Spelling + "' expects 1 argument, got " +
@@ -1498,9 +1699,51 @@ public:
     declareStandardScope();
   }
 
-  void checkProgram(ProgramDecl &P) {
+  /// Makes the interfaces of the units in Uses visible in S.
+  void importUnits(Scope &S, llvm::ArrayRef<Identifier> Uses) {
+    for (const Identifier &U : Uses) {
+      if (Scope *I = UnitInterfaces.lookup(U.Name))
+        S.addImport(I);
+      // Missing units are reported by the driver.
+    }
+  }
+
+  void checkUnit(UnitDecl &U) {
+    auto Iface = std::make_unique<Scope>(&Standard);
+    importUnits(*Iface, U.getInterfaceUses());
+    Cur = Iface.get();
+    declareAll(*U.getInterface());
+
+    auto Impl = std::make_unique<Scope>(Iface.get());
+    importUnits(*Impl, U.getImplementationUses());
+    Cur = Impl.get();
+    CurUnitInterface = Iface.get();
+    declareAll(*U.getImplementation());
+    for (Decl *D : U.getInterface()->getDecls())
+      if (auto *R = llvm::dyn_cast<RoutineDecl>(D); R && !R->getBody())
+        Diags.error(R->getName().Loc,
+                    "'" + R->getName().Spelling +
+                        "' is declared in the interface of unit '" +
+                        U.getName().Spelling + "' but not implemented",
+                    {R->getName().getRange()});
+    finishBlock(*U.getImplementation(), /*WarnUnused=*/true);
+    CurUnitInterface = nullptr;
+
+    // Interface variables may be used by other units: never "unused".
+    for (Decl *D : U.getInterface()->getDecls())
+      Used.insert(D);
+    UnitInterfaces[U.getName().Name] = Iface.get();
+    UnitScopes.push_back(std::move(Iface));
+    UnitScopes.push_back(std::move(Impl));
+    Cur = &Standard;
+  }
+
+  void checkProgram(ProgramDecl &P, llvm::ArrayRef<UnitDecl *> Units) {
+    for (UnitDecl *U : Units)
+      checkUnit(*U);
     checkProgramParams(P);
     Scope ProgramScope(&Standard);
+    importUnits(ProgramScope, P.getUses());
     Cur = &ProgramScope;
     checkBlock(*P.getBlock());
     checkProgramParamDecls(P);
@@ -1582,12 +1825,30 @@ public:
       case BuiltinKind::Reset: case BuiltinKind::Rewrite:
       case BuiltinKind::Get: case BuiltinKind::Put: case BuiltinKind::Page:
         return checkFileProc(S, BD->getBuiltinKind() == BuiltinKind::Page);
+      case BuiltinKind::Break: case BuiltinKind::Continue:
+        if (!S->getArgs().empty())
+          Diags.error(Callee.Loc, "'" + Callee.Spelling + "' takes no arguments",
+                      {S->getRange()});
+        else if (!LoopDepth)
+          Diags.error(Callee.Loc,
+                      "'" + Callee.Spelling + "' is only allowed inside a loop",
+                      {Callee.getRange()});
+        return;
+      case BuiltinKind::Exit:
+        if (!S->getArgs().empty())
+          Diags.error(Callee.Loc, "'exit' takes no arguments", {S->getRange()});
+        return;
+      case BuiltinKind::Inc: case BuiltinKind::Dec:
+        return checkIncDec(S);
+      case BuiltinKind::Delete: case BuiltinKind::Insert:
+        return checkDeleteInsert(S, BD->getBuiltinKind() == BuiltinKind::Insert);
       case BuiltinKind::Pack: case BuiltinKind::Unpack:
         return checkPackUnpack(S, BD->getBuiltinKind() == BuiltinKind::Pack);
       default: llvm_unreachable("not a builtin procedure");
       }
     }
-    if (auto *R = llvm::dyn_cast<RoutineDecl>(D); R && R->isProcedure())
+    if (auto *R = llvm::dyn_cast<RoutineDecl>(D);
+        R && (R->isProcedure() || !isISO())) // TP: discard a function result
       return checkCallArgs(R, Callee, S->getArgs(), S->getRange());
     if (auto *V = llvm::dyn_cast<VarDecl>(D))
       if (auto *RT = llvm::dyn_cast_or_null<RoutineType>(V->getType());
@@ -1692,11 +1953,15 @@ public:
   void visitWhileStmt(WhileStmt *S) {
     DirectSequence = nullptr;
     checkCondition(S->getCond(), "while");
+    ++LoopDepth;
     visitStmt(S->getBody());
+    --LoopDepth;
   }
 
   void visitRepeatStmt(RepeatStmt *S) {
+    ++LoopDepth;
     visitSequence(S, S->getBody());
+    --LoopDepth;
     checkCondition(S->getCond(), "until");
   }
 
@@ -1755,7 +2020,9 @@ public:
 
     if (Usable)
       ActiveFors.push_back(S);
+    ++LoopDepth;
     visitStmt(S->getBody());
+    --LoopDepth;
     if (Usable)
       ActiveFors.pop_back();
   }
@@ -1933,6 +2200,8 @@ public:
     if (E->getOp() == UnaryOp::Not) {
       if (T->getBase()->isBoolean())
         return Ctx.getBooleanType();
+      if (!isISO() && T->isIntegerLike()) // Turbo/FPC: bitwise not
+        return Ctx.getIntegerType();
     } else if (T->isNumeric()) {
       return T->isReal() ? Ctx.getRealType() : Ctx.getIntegerType();
     }
@@ -1950,6 +2219,13 @@ public:
       return errorType();
 
     BinaryOp Op = E->getOp();
+    // Turbo/FPC strings: + concatenates, comparisons work for any lengths.
+    if (!isISO() && L->isStringish() && R->isStringish()) {
+      if (Op == BinaryOp::Add && !(L->isNumeric() || R->isNumeric()))
+        return Ctx.getShortStringType();
+      if (isRelational(Op) && Op != BinaryOp::In && needsStringCompare(L, R))
+        return Ctx.getBooleanType();
+    }
     if (L->isSet() && R->isSet() && Op != BinaryOp::In) {
       if (!areCompatible(L, R)) {
         Diags.error(E->getOpLoc(),
@@ -1985,9 +2261,17 @@ public:
       if (L->isIntegerLike() && R->isIntegerLike())
         return Ctx.getIntegerType();
       break;
-    case BinaryOp::And: case BinaryOp::Or:
-      if (L->getBase()->isBoolean() && R->getBase()->isBoolean())
+    case BinaryOp::And: case BinaryOp::Or: case BinaryOp::Xor:
+      if (L->getBase()->isBoolean() && R->getBase()->isBoolean() &&
+          (Op != BinaryOp::Xor || !isISO()))
         return Ctx.getBooleanType();
+      // Turbo/FPC: bitwise on integers.
+      if (!isISO() && L->isIntegerLike() && R->isIntegerLike())
+        return Ctx.getIntegerType();
+      break;
+    case BinaryOp::Shl: case BinaryOp::Shr:
+      if (L->isIntegerLike() && R->isIntegerLike())
+        return Ctx.getIntegerType();
       break;
     case BinaryOp::Eq: case BinaryOp::Ne: case BinaryOp::Lt:
     case BinaryOp::Le: case BinaryOp::Gt: case BinaryOp::Ge:
@@ -2093,6 +2377,22 @@ public:
     Type *IT = check(E->getIndex());
     if (BT->isError() || IT->isError())
       return errorType();
+    if (auto *SS = llvm::dyn_cast<ShortStringType>(BT)) {
+      // s[0] is the length byte, s[1..N] the characters.
+      if (!IT->isIntegerLike()) {
+        Diags.error(E->getIndex()->getBeginLoc(), "string index must be an integer",
+                    {E->getIndex()->getRange()});
+        return errorType();
+      }
+      if (auto C = fold(E->getIndex());
+          C && (C->Value.Int < 0 || C->Value.Int > SS->getMaxLength()))
+        Diags.error(E->getIndex()->getBeginLoc(),
+                    "string index " + std::to_string(C->Value.Int) +
+                        " is out of bounds 0.." +
+                        std::to_string(SS->getMaxLength()),
+                    {E->getIndex()->getRange()});
+      return Ctx.getCharType();
+    }
     auto *AT = llvm::dyn_cast<ArrayType>(BT);
     if (!AT) {
       Diags.error(E->getIndex()->getBeginLoc(),
@@ -2124,12 +2424,31 @@ public:
 
   Type *visitNilExpr(NilExpr *) { return Ctx.getNilType(); }
 
+  Type *visitAddrOfExpr(AddrOfExpr *E) {
+    Type *T = check(E->getOperand());
+    if (T->isError())
+      return errorType();
+    if (!isVariableReference(E->getOperand())) {
+      Diags.error(E->getOperand()->getBeginLoc(),
+                  "'@' requires a variable", {E->getOperand()->getRange()});
+      return errorType();
+    }
+    return Ctx.getUntypedPointerType();
+  }
+
   Type *visitDerefExpr(DerefExpr *E) {
     Type *T = check(E->getBase());
     if (T->isError())
       return errorType();
-    if (auto *P = llvm::dyn_cast<PointerType>(T))
+    if (auto *P = llvm::dyn_cast<PointerType>(T)) {
+      if (P->isUntyped()) {
+        Diags.error(E->getBase()->getBeginLoc(),
+                    "cannot dereference an untyped pointer",
+                    {E->getBase()->getRange()});
+        return errorType();
+      }
       return P->getPointee() ? P->getPointee() : errorType();
+    }
     if (auto *F = llvm::dyn_cast<FileType>(T))
       return F->getElementType(); // the buffer variable f^
     Diags.error(E->getBase()->getBeginLoc(),
@@ -2209,8 +2528,8 @@ public:
 
 } // namespace
 
-bool Sema::check(ProgramDecl &P) {
+bool Sema::check(ProgramDecl &P, llvm::ArrayRef<UnitDecl *> Units) {
   unsigned ErrorsBefore = Diags.getNumErrors();
-  Checker(Ctx, Diags, LangOpts).checkProgram(P);
+  Checker(Ctx, Diags, LangOpts).checkProgram(P, Units);
   return Diags.getNumErrors() == ErrorsBefore && !Diags.shouldStop();
 }

@@ -37,6 +37,10 @@ static cl::opt<unsigned> OptLevel("O", cl::Prefix, cl::init(0),
                                   cl::value_desc("level"),
                                   cl::cat(PccCategory));
 
+static cl::list<std::string>
+    IncludeDirs("I", cl::Prefix, cl::desc("Add a directory to search for units"),
+                cl::value_desc("dir"), cl::cat(PccCategory));
+
 static cl::opt<bool> DebugInfo("g", cl::desc("Generate debug information"),
                                cl::cat(PccCategory));
 
@@ -102,6 +106,7 @@ int main(int argc, char **argv) {
   Opts.Mode = Mode;
   Opts.OptLevel = OptLevel;
   Opts.DebugInfo = DebugInfo;
+  Opts.IncludeDirs.assign(IncludeDirs.begin(), IncludeDirs.end());
   Opts.TargetTriple = TargetTriple;
   Opts.Color = Color;
   Opts.ErrorLimit = ErrorLimit;
