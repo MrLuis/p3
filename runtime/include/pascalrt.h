@@ -107,6 +107,17 @@ void __pas_read_str(PasFile *f, unsigned char *dst, int32_t maxlen);
 /* new / dispose. __pas_new returns zeroed memory; disposing nil is an error. */
 void *__pas_new(int64_t size);
 void __pas_dispose(void *p);
+/* reallocmem (Turbo/FPC): realloc; size <= 0 frees and returns NULL. getmem
+ * uses __pas_new, freemem calls free(). */
+void *__pas_realloc(void *p, int64_t size);
+
+/*===- Program (Turbo/FPC) --------------------------------------------------===*/
+
+/* halt(code): flushes files like __pas_fini, then exits with code. */
+void __pas_halt(int32_t code) __attribute__((noreturn));
+int32_t __pas_paramcount(void);
+/* paramstr(index) into a short string (index 0 is the program name). */
+void __pas_paramstr(unsigned char *dst, int32_t index);
 
 #ifdef __cplusplus
 }

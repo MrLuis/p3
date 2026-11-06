@@ -523,7 +523,7 @@ RoutineDecl *Parser::parseRoutineDecl(bool HeadingOnly) {
 }
 
 // params = "(" section { ";" section } ")" ;
-// section = ["var"] identList ":" typeIdent .
+// section = ["var" | "const"] identList ":" typeIdent .   ("const": TP)
 bool Parser::parseFormalParams(llvm::SmallVectorImpl<VarDecl *> &Params) {
   SourceLocation LParen = consumeToken(); // '('
   do {
@@ -557,6 +557,11 @@ bool Parser::parseFormalParams(llvm::SmallVectorImpl<VarDecl *> &Params) {
       continue;
     }
     bool IsVar = tryConsume(tok::kw_var);
+    bool IsConst = false;
+    if (!IsVar && Tok.is(tok::kw_const) && LangOpts.Mode == LangMode::TP) {
+      consumeToken();
+      IsConst = true;
+    }
     llvm::SmallVector<Identifier, 4> Names;
     if (!parseIdentList(Names, "parameter name") ||
         !expect(tok::colon, "after parameter name")) {
@@ -570,7 +575,9 @@ bool Parser::parseFormalParams(llvm::SmallVectorImpl<VarDecl *> &Params) {
     }
     for (const Identifier &N : Names)
       Params.push_back(Ctx.create<VarDecl>(
-          N, TS, IsVar ? VarDecl::VarParam : VarDecl::ValueParam));
+          N, TS,
+          IsVar ? VarDecl::VarParam
+                : IsConst ? VarDecl::ConstParam : VarDecl::ValueParam));
   } while (tryConsume(tok::semi));
 
   if (!expect(tok::r_paren, "after parameters")) {
@@ -1527,8 +1534,13 @@ Expr *Parser::parseFactor() {
       llvm::SmallVector<Expr *, 4> Args;
       if (!parseActualParams(Args, /*AllowFormat=*/false) && Args.empty())
         return nullptr;
-      return Ctx.create<CallExpr>(SourceRange(Name.Loc, PrevTokEnd), Name,
-                                  Ctx.copyArray<Expr *>(Args));
+      Expr *Call = Ctx.create<CallExpr>(SourceRange(Name.Loc, PrevTokEnd), Name,
+                                        Ctx.copyArray<Expr *>(Args));
+      // Turbo/FPC: a call (or typecast) can be dereferenced and selected
+      // from: PNode(p)^.next, f(x)[1].
+      if (LangOpts.Mode == LangMode::TP)
+        return parseSelectors(Call);
+      return Call;
     }
     return parseSelectors(Ctx.create<NameRefExpr>(Name));
   }

@@ -162,6 +162,11 @@ class Checker : public StmtVisitor<Checker>,
     case BuiltinKind::Inc: case BuiltinKind::Dec: case BuiltinKind::Delete:
     case BuiltinKind::Insert: case BuiltinKind::Length: case BuiltinKind::Copy:
     case BuiltinKind::Pos: case BuiltinKind::Concat: case BuiltinKind::UpCase:
+    case BuiltinKind::GetMem: case BuiltinKind::FreeMem:
+    case BuiltinKind::ReallocMem: case BuiltinKind::FillChar:
+    case BuiltinKind::Move: case BuiltinKind::Halt: case BuiltinKind::SizeOf:
+    case BuiltinKind::Low: case BuiltinKind::High: case BuiltinKind::Assigned:
+    case BuiltinKind::ParamCount: case BuiltinKind::ParamStr:
       return true;
     default:
       return false;
@@ -338,6 +343,37 @@ class Checker : public StmtVisitor<Checker>,
     return llvm::isa<DerefExpr>(E);
   }
 
+  /// The `const` parameter a designator is part of (x, x[i], x.f; not x^,
+  /// whose target is a different variable), if any.
+  static VarDecl *constParamRoot(Expr *E) {
+    while (true) {
+      if (auto *I = llvm::dyn_cast<IndexExpr>(E)) {
+        E = I->getBase();
+      } else if (auto *F = llvm::dyn_cast<FieldExpr>(E)) {
+        E = F->getBase();
+      } else if (auto *P = llvm::dyn_cast<ParenExpr>(E)) {
+        E = P->getInner();
+      } else {
+        auto *N = llvm::dyn_cast<NameRefExpr>(E);
+        auto *V = N ? llvm::dyn_cast_or_null<VarDecl>(N->getDecl()) : nullptr;
+        return V && V->isConstParam() ? V : nullptr;
+      }
+    }
+  }
+
+  /// Reports a change to a `const` parameter. Returns false if reported.
+  bool checkModifiable(Expr *E) {
+    VarDecl *V = constParamRoot(E);
+    if (!V)
+      return true;
+    Diags.error(E->getBeginLoc(),
+                "cannot modify constant parameter '" + V->getName().Spelling +
+                    "'",
+                {E->getRange()});
+    noteDeclaredHere(V);
+    return false;
+  }
+
   //===--------------------------------------------------------------------===//
   // Constant folding
   //===--------------------------------------------------------------------===//
@@ -460,9 +496,26 @@ class Checker : public StmtVisitor<Checker>,
     }
     case Expr::EK_Call: {
       auto *Call = llvm::cast<CallExpr>(E);
+      if (llvm::isa_and_nonnull<TypeDecl>(Call->getDecl())) { // T(x)
+        auto V = fold(Call->getArgs()[0]);
+        if (!V || V->Value.K != ConstValue::Ordinal || !T->isOrdinal())
+          return std::nullopt;
+        return Constant{T, ConstValue::ordinal(castOrdinalValue(V->Value.Int, T))};
+      }
       auto *BD = llvm::dyn_cast_or_null<BuiltinDecl>(Call->getDecl());
       if (!BD || Call->getArgs().size() != 1)
         return std::nullopt;
+      if (BD->getBuiltinKind() == BuiltinKind::Low ||
+          BD->getBuiltinKind() == BuiltinKind::High) {
+        bool IsHigh = BD->getBuiltinKind() == BuiltinKind::High;
+        Type *AT = Call->getArgs()[0]->getType();
+        if (auto *SS = llvm::dyn_cast<ShortStringType>(AT))
+          return Constant{T, ConstValue::ordinal(IsHigh ? SS->getMaxLength() : 0)};
+        if (auto *A = llvm::dyn_cast<ArrayType>(AT))
+          AT = A->getIndexType();
+        OrdinalBounds Bd = getOrdinalBounds(AT);
+        return Constant{T, ConstValue::ordinal(IsHigh ? Bd.Hi : Bd.Lo)};
+      }
       auto V = fold(Call->getArgs()[0]);
       if (!V || V->Value.K == ConstValue::String)
         return std::nullopt;
@@ -524,6 +577,19 @@ class Checker : public StmtVisitor<Checker>,
       }
     }
     return C;
+  }
+
+  /// The value of a typecast T(V): integer types wrap to their width
+  /// (byte(300) = 44); other ordinal types keep the value.
+  static int64_t castOrdinalValue(int64_t V, Type *T) {
+    auto *I = llvm::dyn_cast<IntegerType>(T->getBase());
+    if (!I || I->getBits() == 64)
+      return V;
+    uint64_t Mask = (uint64_t(1) << I->getBits()) - 1;
+    uint64_t U = static_cast<uint64_t>(V) & Mask;
+    if (I->isSigned() && (U >> (I->getBits() - 1)))
+      U |= ~Mask; // sign-extend
+    return static_cast<int64_t>(U);
   }
 
   static std::string formatValue(Type *T, int64_t V) {
@@ -1321,6 +1387,8 @@ class Checker : public StmtVisitor<Checker>,
         }
         // ISO 7185 6.6.3.3: actual and formal var parameters have the
         // *same* type.
+        if (!checkModifiable(Arg))
+          continue;
         if (AT != PT)
           Diags.error(Arg->getBeginLoc(),
                       "argument of type " + quoted(AT) + " for 'var' "
@@ -1482,7 +1550,7 @@ class Checker : public StmtVisitor<Checker>,
                     "cannot read a value of type " + quoted(T) +
                         " (only integer, real and char)",
                     {Arg->getRange()});
-      else
+      else if (checkModifiable(Arg))
         checkNotForControlVar(Arg);
     }
   }
@@ -1570,6 +1638,8 @@ class Checker : public StmtVisitor<Checker>,
         if (!T->isShortString() || !isVariableReference(A))
           Diags.error(A->getBeginLoc(), "expected a string variable",
                       {A->getRange()});
+        else
+          checkModifiable(A);
       } else if (IsInsert && A == Args[0]) {
         if (!T->isStringish())
           Diags.error(A->getBeginLoc(), "expected a string", {A->getRange()});
@@ -1593,7 +1663,7 @@ class Checker : public StmtVisitor<Checker>,
       Diags.error(Args[0]->getBeginLoc(),
                   "'" + Callee.Spelling + "' expects an ordinal variable",
                   {Args[0]->getRange()});
-    else if (!T->isError())
+    else if (!T->isError() && checkModifiable(Args[0]))
       checkNotForControlVar(Args[0]);
     if (Args.size() == 2) {
       Type *N = check(Args[1]);
@@ -1623,6 +1693,8 @@ class Checker : public StmtVisitor<Checker>,
       else if (IsNew && !isVariableReference(Arg))
         Diags.error(Arg->getBeginLoc(), "argument to 'new' must be a variable",
                     {Arg->getRange()});
+      else if (IsNew)
+        checkModifiable(Arg);
     }
     for (Expr *Tag : S->getArgs().drop_front())
       evaluateConstant(Tag, "variant selector");
@@ -1768,6 +1840,220 @@ class Checker : public StmtVisitor<Checker>,
       return isISO() ? Ctx.getIntegerType() : Ctx.getInt64Type();
     default:
       llvm_unreachable("not a builtin function");
+    }
+  }
+
+  /// T(x) (Turbo/FPC): between ordinal types (integer types wrap, nothing
+  /// is range-checked) and between pointer types.
+  Type *checkTypecast(CallExpr *E, TypeDecl *TD) {
+    Type *T = TD->getType() ? TD->getType() : errorType();
+    auto Args = E->getArgs();
+    if (Args.size() != 1) {
+      Diags.error(E->getCallee().Loc,
+                  "a typecast to " + quoted(T) + " takes exactly one value",
+                  {E->getRange()});
+      for (Expr *A : Args)
+        check(A);
+      return errorType();
+    }
+    Type *AT = check(Args[0]);
+    if (T->isError() || AT->isError())
+      return errorType();
+    if ((T->isOrdinal() && AT->isOrdinal()) ||
+        (T->isPointer() && (AT->isPointer() || AT->isNil())))
+      return T;
+    Diags.error(E->getBeginLoc(),
+                "invalid typecast from " + quoted(AT) + " to " + quoted(T) +
+                    " (only between ordinal types and between pointer types)",
+                {E->getRange()});
+    return errorType();
+  }
+
+  /// A type name or an expression as the argument of sizeof/low/high:
+  /// returns its type (also stored on the argument).
+  Type *checkTypeOrValue(Expr *Arg) {
+    if (auto *N = llvm::dyn_cast<NameRefExpr>(Arg))
+      if (auto *TD = llvm::dyn_cast_or_null<TypeDecl>(Cur->lookup(N->getName().Name))) {
+        N->setDecl(TD);
+        Type *T = TD->getType() ? TD->getType() : errorType();
+        N->setType(T);
+        return T;
+      }
+    return check(Arg);
+  }
+
+  /// Built-in functions whose arguments are not ordinary values (type
+  /// names, procedural variables) or that take no arguments. Returns
+  /// nullopt for the others.
+  std::optional<Type *> checkSpecialBuiltin(CallExpr *E, BuiltinDecl *BD) {
+    const Identifier &Callee = E->getCallee();
+    auto Args = E->getArgs();
+    auto Arity = [&](size_t N) {
+      if (Args.size() == N)
+        return true;
+      Diags.error(Callee.Loc,
+                  "'" + Callee.Spelling + "' expects " + llvm::Twine(N) +
+                      " argument" + (N == 1 ? "" : "s"),
+                  {E->getRange()});
+      for (Expr *A : Args)
+        check(A);
+      return false;
+    };
+    switch (BD->getBuiltinKind()) {
+    case BuiltinKind::SizeOf: {
+      if (!Arity(1))
+        return errorType();
+      Type *T = checkTypeOrValue(Args[0]);
+      if (T->isError())
+        return errorType();
+      if (containsFile(T) || T->isStringLiteral() || T->isNil() ||
+          (llvm::isa<SetType>(T) && llvm::cast<SetType>(T)->isEmptySet())) {
+        Diags.error(Args[0]->getBeginLoc(),
+                    "'sizeof' cannot be applied to " + quoted(T),
+                    {Args[0]->getRange()});
+        return errorType();
+      }
+      return Ctx.getInt64Type();
+    }
+    case BuiltinKind::Low:
+    case BuiltinKind::High: {
+      if (!Arity(1))
+        return errorType();
+      Type *T = checkTypeOrValue(Args[0]);
+      if (T->isError())
+        return errorType();
+      if (T->isShortString())
+        return Ctx.getIntegerType();
+      if (auto *A = llvm::dyn_cast<ArrayType>(T))
+        return A->getIndexType();
+      if (T->isOrdinal())
+        return T;
+      Diags.error(Args[0]->getBeginLoc(),
+                  "'" + Callee.Spelling +
+                      "' expects an ordinal type, an array or a string, not " +
+                      quoted(T),
+                  {Args[0]->getRange()});
+      return errorType();
+    }
+    case BuiltinKind::Assigned: {
+      if (!Arity(1))
+        return errorType();
+      Type *T;
+      // A procedural variable is tested, not called.
+      auto *N = llvm::dyn_cast<NameRefExpr>(Args[0]);
+      auto *V = N ? llvm::dyn_cast_or_null<VarDecl>(Cur->lookup(N->getName().Name))
+                  : nullptr;
+      if (V && llvm::isa_and_nonnull<RoutineType>(V->getType())) {
+        N->setDecl(V);
+        N->setType(V->getType());
+        Used.insert(V);
+        T = V->getType();
+      } else {
+        T = check(Args[0]);
+      }
+      if (T->isError())
+        return errorType();
+      if (!T->isPointer() && !llvm::isa<RoutineType>(T)) {
+        Diags.error(Args[0]->getBeginLoc(),
+                    "'assigned' expects a pointer or a procedural variable, not " +
+                        quoted(T),
+                    {Args[0]->getRange()});
+        return errorType();
+      }
+      return Ctx.getBooleanType();
+    }
+    case BuiltinKind::ParamCount:
+      if (!Arity(0))
+        return errorType();
+      return Ctx.getIntegerType();
+    case BuiltinKind::ParamStr: {
+      if (!Arity(1))
+        return errorType();
+      Type *T = check(Args[0]);
+      if (!T->isError() && !T->isIntegerLike()) {
+        Diags.error(Args[0]->getBeginLoc(),
+                    "'paramstr' expects an integer, not " + quoted(T),
+                    {Args[0]->getRange()});
+        return errorType();
+      }
+      return Ctx.getShortStringType();
+    }
+    default:
+      return std::nullopt;
+    }
+  }
+
+  /// getmem(p, n) freemem(p) reallocmem(p, n) fillchar(x, n, v)
+  /// move(src, dst, n) halt[(code)]  (Turbo/FPC)
+  void checkMemoryProc(ProcCallStmt *S, BuiltinKind K) {
+    const Identifier &Callee = S->getCallee();
+    auto Args = S->getArgs();
+    size_t Want = K == BuiltinKind::FreeMem ? 1
+                  : K == BuiltinKind::GetMem || K == BuiltinKind::ReallocMem ? 2
+                                                                            : 3;
+    if (K == BuiltinKind::Halt) {
+      if (Args.size() > 1)
+        Diags.error(Callee.Loc, "'halt' expects at most 1 argument",
+                    {S->getRange()});
+      else if (Args.size() == 1) {
+        Type *T = check(Args[0]);
+        if (!T->isError() && !T->isIntegerLike())
+          Diags.error(Args[0]->getBeginLoc(),
+                      "'halt' expects an integer exit code, not " + quoted(T),
+                      {Args[0]->getRange()});
+      }
+      return;
+    }
+    if (Args.size() != Want) {
+      Diags.error(Callee.Loc,
+                  "'" + Callee.Spelling + "' expects " + llvm::Twine(Want) +
+                      " argument" + (Want == 1 ? "" : "s"),
+                  {S->getRange()});
+      for (Expr *A : Args)
+        check(A);
+      return;
+    }
+    auto Expect = [&](Expr *A, bool OK, llvm::StringRef What) {
+      if (!OK)
+        Diags.error(A->getBeginLoc(),
+                    "'" + Callee.Spelling + "' expects " + What,
+                    {A->getRange()});
+    };
+    llvm::SmallVector<Type *, 3> T;
+    for (Expr *A : Args)
+      T.push_back(check(A));
+    for (Type *X : T)
+      if (X->isError())
+        return;
+    switch (K) {
+    case BuiltinKind::GetMem:
+    case BuiltinKind::ReallocMem:
+      Expect(Args[0], T[0]->isPointer() && isVariableReference(Args[0]),
+             "a pointer variable");
+      Expect(Args[1], T[1]->isIntegerLike(), "an integer size");
+      if (T[0]->isPointer() && isVariableReference(Args[0]))
+        checkModifiable(Args[0]);
+      return;
+    case BuiltinKind::FreeMem:
+      Expect(Args[0], T[0]->isPointer(), "a pointer");
+      return;
+    case BuiltinKind::FillChar:
+      Expect(Args[0], isVariableReference(Args[0]) && !containsFile(T[0]),
+             "a variable");
+      Expect(Args[1], T[1]->isIntegerLike(), "an integer count");
+      Expect(Args[2], T[2]->isOrdinal(), "an ordinal fill value");
+      if (isVariableReference(Args[0]))
+        checkModifiable(Args[0]);
+      return;
+    default: // Move
+      Expect(Args[0], isVariableReference(Args[0]) && !containsFile(T[0]),
+             "a source variable");
+      Expect(Args[1], isVariableReference(Args[1]) && !containsFile(T[1]),
+             "a destination variable");
+      Expect(Args[2], T[2]->isIntegerLike(), "an integer count");
+      if (isVariableReference(Args[1]))
+        checkModifiable(Args[1]);
+      return;
     }
   }
 
@@ -1922,6 +2208,10 @@ public:
         return checkDeleteInsert(S, BD->getBuiltinKind() == BuiltinKind::Insert);
       case BuiltinKind::Pack: case BuiltinKind::Unpack:
         return checkPackUnpack(S, BD->getBuiltinKind() == BuiltinKind::Pack);
+      case BuiltinKind::GetMem: case BuiltinKind::FreeMem:
+      case BuiltinKind::ReallocMem: case BuiltinKind::FillChar:
+      case BuiltinKind::Move: case BuiltinKind::Halt:
+        return checkMemoryProc(S, BD->getBuiltinKind());
       default: llvm_unreachable("not a builtin procedure");
       }
     }
@@ -2007,6 +2297,8 @@ public:
 
     Type *ValueTy = check(S->getValue());
     if (TargetTy->isError() || ValueTy->isError())
+      return;
+    if (!checkModifiable(Target))
       return;
     if (containsFile(TargetTy)) {
       Diags.error(S->getAssignLoc(), "files cannot be assigned",
@@ -2255,6 +2547,8 @@ public:
       if (auto K = llvm::cast<BuiltinDecl>(D)->getBuiltinKind();
           K == BuiltinKind::Eof || K == BuiltinKind::Eoln)
         return Ctx.getBooleanType();
+      if (llvm::cast<BuiltinDecl>(D)->getBuiltinKind() == BuiltinKind::ParamCount)
+        return Ctx.getIntegerType();
       if (llvm::cast<BuiltinDecl>(D)->isFunction()) {
         Diags.error(Id.Loc, "missing argument in call to '" + Id.Spelling + "'",
                     {Id.getRange()});
@@ -2438,6 +2732,12 @@ public:
         return RT->getResult();
       }
 
+    if (auto *TD = llvm::dyn_cast<TypeDecl>(D); TD && !isISO())
+      return checkTypecast(E, TD);
+    if (auto *BD = llvm::dyn_cast<BuiltinDecl>(D))
+      if (auto T = checkSpecialBuiltin(E, BD))
+        return *T;
+
     llvm::SmallVector<Type *, 4> ArgTypes;
     for (Expr *Arg : E->getArgs())
       ArgTypes.push_back(check(Arg));
@@ -2492,6 +2792,22 @@ public:
                     "string index " + std::to_string(C->Value.Int) +
                         " is out of bounds 0.." +
                         std::to_string(SS->getMaxLength()),
+                    {E->getIndex()->getRange()});
+      return Ctx.getCharType();
+    }
+    if (auto *SL = llvm::dyn_cast<StringLiteralType>(BT); SL && !isISO()) {
+      // Turbo/FPC: a string constant can be indexed, 1..N.
+      if (!IT->isIntegerLike()) {
+        Diags.error(E->getIndex()->getBeginLoc(), "string index must be an integer",
+                    {E->getIndex()->getRange()});
+        return errorType();
+      }
+      if (auto C = fold(E->getIndex());
+          C && (C->Value.Int < 1 ||
+                static_cast<uint64_t>(C->Value.Int) > SL->getLength()))
+        Diags.error(E->getIndex()->getBeginLoc(),
+                    "string index " + std::to_string(C->Value.Int) +
+                        " is out of bounds 1.." + std::to_string(SL->getLength()),
                     {E->getIndex()->getRange()});
       return Ctx.getCharType();
     }

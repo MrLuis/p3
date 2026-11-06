@@ -49,6 +49,20 @@ BUILTIN_FUNC(Pos,      "pos")
 BUILTIN_FUNC(Concat,   "concat")
 BUILTIN_FUNC(UpCase,   "upcase")
 
+// Turbo/FPC memory, type and program built-ins (S1).
+BUILTIN_PROC(GetMem,     "getmem")
+BUILTIN_PROC(FreeMem,    "freemem")
+BUILTIN_PROC(ReallocMem, "reallocmem")
+BUILTIN_PROC(FillChar,   "fillchar")
+BUILTIN_PROC(Move,       "move")
+BUILTIN_PROC(Halt,       "halt")
+BUILTIN_FUNC(SizeOf,     "sizeof")
+BUILTIN_FUNC(Low,        "low")
+BUILTIN_FUNC(High,       "high")
+BUILTIN_FUNC(Assigned,   "assigned")
+BUILTIN_FUNC(ParamCount, "paramcount")
+BUILTIN_FUNC(ParamStr,   "paramstr")
+
 // Dynamic allocation (M9).
 BUILTIN_PROC(New,     "new")
 BUILTIN_PROC(Dispose, "dispose")

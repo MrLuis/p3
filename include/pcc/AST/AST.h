@@ -753,7 +753,9 @@ public:
 /// A variable, a formal parameter, or a function's result slot.
 class VarDecl final : public Decl {
 public:
-  enum VarKind { Variable, ValueParam, VarParam, Result };
+  /// ConstParam (Turbo/FPC `const x: T`): read-only; strings and structured
+  /// values are passed by reference.
+  enum VarKind { Variable, ValueParam, VarParam, ConstParam, Result };
 
 private:
   TypeSpec *TS;
@@ -772,8 +774,11 @@ public:
   Type *getType() const { return Ty; }
   void setType(Type *T) { Ty = T; }
   VarKind getVarKind() const { return VK; }
-  bool isParam() const { return VK == ValueParam || VK == VarParam; }
+  bool isParam() const {
+    return VK == ValueParam || VK == VarParam || VK == ConstParam;
+  }
   bool isVarParam() const { return VK == VarParam; }
+  bool isConstParam() const { return VK == ConstParam; }
   RoutineDecl *getOwner() const { return Owner; }
   void setOwner(RoutineDecl *R) { Owner = R; }
   Expr *getInit() const { return Init; }

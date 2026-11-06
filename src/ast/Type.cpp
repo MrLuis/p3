@@ -170,7 +170,10 @@ std::string Type::getName() const {
     std::string S = R->isFunction() ? "function(" : "procedure(";
     for (size_t I = 0; I < R->getParams().size(); ++I) {
       VarDecl *P = R->getParams()[I];
-      S += (I ? "; " : "") + std::string(P->isVarParam() ? "var " : "") +
+      S += (I ? "; " : "") +
+           std::string(P->isVarParam()     ? "var "
+                       : P->isConstParam() ? "const "
+                                           : "") +
            (P->getType() ? P->getType()->getName() : "?");
     }
     S += ")";

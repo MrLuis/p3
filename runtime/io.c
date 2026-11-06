@@ -483,6 +483,35 @@ void __pas_dispose(void *p) {
   free(p);
 }
 
+void *__pas_realloc(void *p, int64_t size) {
+  if (size <= 0) {
+    free(p);
+    return NULL;
+  }
+  void *q = realloc(p, (size_t)size);
+  if (!q)
+    __pas_runtime_error("out of memory in 'reallocmem'");
+  return q;
+}
+
+/*===- Program (Turbo/FPC) --------------------------------------------------===*/
+
+void __pas_halt(int32_t code) {
+  __pas_fini();
+  exit(code);
+}
+
+int32_t __pas_paramcount(void) { return prog_argc > 0 ? prog_argc - 1 : 0; }
+
+void __pas_paramstr(unsigned char *dst, int32_t index) {
+  const char *s = index >= 0 && index < prog_argc ? prog_argv[index] : "";
+  size_t n = strlen(s);
+  if (n > 255)
+    n = 255;
+  dst[0] = (unsigned char)n;
+  memcpy(dst + 1, s, n);
+}
+
 /*===- Short strings --------------------------------------------------------===*/
 
 void __pas_str_assign(unsigned char *dst, int32_t maxlen, const unsigned char *src) {

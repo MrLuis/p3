@@ -100,6 +100,7 @@ class ASTPrinter : public StmtVisitor<ASTPrinter>,
     case Decl::DK_Var: {
       auto *V = llvm::cast<VarDecl>(D);
       const char *Kind = V->getVarKind() == VarDecl::VarParam ? "ParamDecl var '"
+                         : V->getVarKind() == VarDecl::ConstParam ? "ParamDecl const '"
                          : V->getVarKind() == VarDecl::ValueParam ? "ParamDecl '"
                                                                   : "VarDecl '";
       line(Kind) << V->getName().Name << '\'';

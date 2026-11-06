@@ -56,7 +56,8 @@ struct Runtime {
       Memcmp, Atan, New, Dispose, FileNew, FileFree, ProgramParam, Reset,
       Rewrite, Get, Put, Page, Eof, Eoln, Buffer, ReadElem, WriteElem,
       SetJmp, LongJmp, StrAssign, StrConcat, StrCompare, StrCopy, StrPos,
-      StrDelete, StrInsert, WritePStr, ReadStr;
+      StrDelete, StrInsert, WritePStr, ReadStr, Free, Realloc, Halt,
+      ParamCount, ParamStr;
 
   explicit Runtime(llvm::Module &M) {
     llvm::LLVMContext &C = M.getContext();
@@ -111,6 +112,12 @@ struct Runtime {
     New = Decl("__pas_new", Ptr, {I64});
     Dispose = Decl("__pas_dispose", Void, {Ptr});
     Atan = Decl("atan", F64, {F64});
+    Free = Decl("free", Void, {Ptr});
+    Realloc = Decl("__pas_realloc", Ptr, {Ptr, I64});
+    Halt = Decl("__pas_halt", Void, {I32});
+    llvm::cast<llvm::Function>(Halt.getCallee())->addFnAttr(llvm::Attribute::NoReturn);
+    ParamCount = Decl("__pas_paramcount", I32, {});
+    ParamStr = Decl("__pas_paramstr", Void, {Ptr, I32});
     // Short strings (Turbo/FPC).
     StrAssign = Decl("__pas_str_assign", Void, {Ptr, I32, Ptr});
     StrConcat = Decl("__pas_str_concat", Void, {Ptr, Ptr, Ptr});
@@ -673,6 +680,13 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
   // Variables and frames
   //===--------------------------------------------------------------------===//
 
+  /// Parameters passed as a pointer to the caller's variable: var
+  /// parameters, and const parameters of string and structured types.
+  static bool isByRef(VarDecl *V) {
+    return V->isVarParam() ||
+           (V->isConstParam() && V->getType()->isStructured());
+  }
+
   static std::string mangle(RoutineDecl *R) {
     std::string Name = R->getName().Name.str();
     for (RoutineDecl *P = R->getParent(); P; P = P->getParent())
@@ -794,7 +808,7 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
     RoutineDecl *Owner = V->getOwner();
     llvm::Value *Slot = B.CreateStructGEP(FrameTypes[Owner], framePtrFor(Owner),
                                           FrameSlots[V], V->getName().Name);
-    if (V->isVarParam())
+    if (isByRef(V))
       return B.CreateLoad(B.getPtrTy(), Slot, V->getName().Name + ".ref");
     return Slot;
   }
@@ -835,6 +849,18 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
               "string index out of bounds", I->getIndex()->getBeginLoc());
         }
         return B.CreateInBoundsGEP(B.getInt8Ty(), Base, toI64(Idx, IdxTy));
+      }
+      if (auto *SL = llvm::dyn_cast<StringLiteralType>(I->getBase()->getType())) {
+        // A string constant (Turbo/FPC): its characters are 1..N.
+        llvm::Value *Base = emitAddress(I->getBase());
+        llvm::Value *X = toI64(visitExpr(I->getIndex()), I->getIndex()->getType());
+        if (rangeChecks(I->getIndex()->getBeginLoc()))
+          emitRuntimeCheck(
+              B.CreateOr(B.CreateICmpSLT(X, B.getInt64(1)),
+                         B.CreateICmpSGT(X, B.getInt64(SL->getLength()))),
+              "string index out of bounds", I->getIndex()->getBeginLoc());
+        return B.CreateInBoundsGEP(B.getInt8Ty(), Base,
+                                   B.CreateSub(X, B.getInt64(1)));
       }
       auto *AT = llvm::cast<ArrayType>(I->getBase()->getType());
       llvm::Value *Base = emitAddress(I->getBase());
@@ -983,7 +1009,7 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
                                        llvm::DIFile *File = nullptr) {
     llvm::SmallVector<llvm::Metadata *, 8> Sig{Result ? debugType(Result) : nullptr};
     for (VarDecl *P : Params)
-      Sig.push_back(P->isVarParam()
+      Sig.push_back(isByRef(P)
                         ? DIB->createReferenceType(llvm::dwarf::DW_TAG_reference_type,
                                                    debugType(P->getType()), 64)
                         : debugType(P->getType()));
@@ -1033,7 +1059,7 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
                                           DIUnitFile, Line, Ty);
       llvm::SmallVector<uint64_t, 4> Ops{llvm::dwarf::DW_OP_plus_uconst,
                                          SL->getElementOffset(FrameSlots[V])};
-      if (V->isVarParam())
+      if (isByRef(V))
         Ops.push_back(llvm::dwarf::DW_OP_deref);
       DIB->insertDeclare(CurFrame, DV, DIB->createExpression(Ops),
                          llvm::DILocation::get(M.getContext(), Line, 0, CurSP),
@@ -1148,7 +1174,7 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
         Slots.push_back(B.getPtrTy());
       auto AddSlot = [&](VarDecl *V) {
         FrameSlots[V] = Slots.size();
-        Slots.push_back(V->isVarParam() ? B.getPtrTy() : memType(V->getType()));
+        Slots.push_back(isByRef(V) ? B.getPtrTy() : memType(V->getType()));
       };
       for (VarDecl *P : R->getParams())
         AddSlot(P);
@@ -1219,7 +1245,7 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
     for (VarDecl *P : R->getParams()) {
       llvm::Value *Arg = F->getArg(ArgNo++);
       llvm::Value *Slot = B.CreateStructGEP(FrameTy, CurFrame, FrameSlots[P]);
-      if (P->isVarParam())
+      if (isByRef(P))
         B.CreateStore(Arg, Slot);
       else if (P->getType()->isStructured())
         copyAggregate(Slot, Arg, P->getType()); // value semantics
@@ -1278,6 +1304,8 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
       Expr *Arg = Args[I];
       if (llvm::isa<RoutineType>(P->getType()))
         Values.push_back(emitRoutineValue(Arg));
+      else if (P->isConstParam() && P->getType()->isShortString())
+        Values.push_back(emitPStr(Arg)); // read-only: no copy
       else if (auto *SS = llvm::dyn_cast<ShortStringType>(P->getType());
                SS && !P->isVarParam()) {
         // The callee copies MaxLen+1 bytes: pass a full-size temporary.
@@ -1671,7 +1699,56 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
     return B.CreateICmpNE(R, B.getInt32(0), K == BuiltinKind::Eof ? "eof" : "eoln");
   }
 
+  /// T(x): ordinal conversions keep the low bits (sign/zero-extending by
+  /// the source); pointer casts change only the type.
+  llvm::Value *emitTypecast(CallExpr *E) {
+    Expr *Arg = E->getArgs()[0];
+    llvm::Value *V = visitExpr(Arg);
+    if (E->getType()->isOrdinal())
+      return convertOrdinal(V, Arg->getType(), E->getType());
+    return V;
+  }
+
   llvm::Value *emitBuiltinCall(CallExpr *E, BuiltinDecl *BD) {
+    switch (BD->getBuiltinKind()) {
+    case BuiltinKind::SizeOf: // the argument is not evaluated
+      return B.getInt64(sizeOf(E->getArgs()[0]->getType()));
+    case BuiltinKind::Low:
+    case BuiltinKind::High: {
+      bool IsHigh = BD->getBuiltinKind() == BuiltinKind::High;
+      Type *AT = E->getArgs()[0]->getType();
+      int64_t V;
+      if (auto *SS = llvm::dyn_cast<ShortStringType>(AT)) {
+        V = IsHigh ? SS->getMaxLength() : 0;
+      } else {
+        if (auto *A = llvm::dyn_cast<ArrayType>(AT))
+          AT = A->getIndexType();
+        OrdinalBounds Bd = getOrdinalBounds(AT);
+        V = IsHigh ? Bd.Hi : Bd.Lo;
+      }
+      return llvm::ConstantInt::get(regType(E->getType()),
+                                    static_cast<uint64_t>(V), true);
+    }
+    case BuiltinKind::Assigned: {
+      Expr *Arg = E->getArgs()[0];
+      llvm::Value *P;
+      if (llvm::isa<RoutineType>(Arg->getType()))
+        P = B.CreateExtractValue(
+            B.CreateLoad(memType(Arg->getType()), emitAddress(Arg)), 0);
+      else
+        P = visitExpr(Arg);
+      return B.CreateIsNotNull(P, "assigned");
+    }
+    case BuiltinKind::ParamCount:
+      return B.CreateCall(RT.ParamCount, {}, "paramcount");
+    case BuiltinKind::ParamStr: {
+      llvm::Value *Tmp = newStringTemp();
+      B.CreateCall(RT.ParamStr, {Tmp, emitI32(E->getArgs()[0])});
+      return Tmp;
+    }
+    default:
+      break;
+    }
     switch (BD->getBuiltinKind()) {
     case BuiltinKind::Length: case BuiltinKind::Copy: case BuiltinKind::Pos:
     case BuiltinKind::Concat: case BuiltinKind::UpCase:
@@ -1998,6 +2075,52 @@ public:
       storeScalar(Addr, B.CreateTrunc(Wide, regType(T)), T);
       return;
     }
+    case BuiltinKind::GetMem: {
+      auto A = S->getArgs();
+      llvm::Value *Mem =
+          B.CreateCall(RT.New, {toI64(visitExpr(A[1]), A[1]->getType())});
+      B.CreateStore(Mem, emitAddress(A[0]));
+      return;
+    }
+    case BuiltinKind::FreeMem:
+      B.CreateCall(RT.Free, {visitExpr(S->getArgs()[0])});
+      return;
+    case BuiltinKind::ReallocMem: {
+      auto A = S->getArgs();
+      llvm::Value *Addr = emitAddress(A[0]);
+      llvm::Value *Size = toI64(visitExpr(A[1]), A[1]->getType());
+      llvm::Value *Old = B.CreateLoad(B.getPtrTy(), Addr);
+      B.CreateStore(B.CreateCall(RT.Realloc, {Old, Size}), Addr);
+      return;
+    }
+    case BuiltinKind::FillChar:
+    case BuiltinKind::Move: {
+      // A negative count does nothing.
+      auto A = S->getArgs();
+      bool IsFill = BD->getBuiltinKind() == BuiltinKind::FillChar;
+      llvm::Value *Dst = emitAddress(A[IsFill ? 0 : 1]);
+      Expr *CountE = A[IsFill ? 1 : 2];
+      llvm::Value *Count = toI64(visitExpr(CountE), CountE->getType());
+      Count = B.CreateSelect(B.CreateICmpSLT(Count, B.getInt64(0)),
+                             B.getInt64(0), Count);
+      if (IsFill) {
+        llvm::Value *V = B.CreateTrunc(toI64(visitExpr(A[2]), A[2]->getType()),
+                                       B.getInt8Ty());
+        B.CreateMemSet(Dst, V, Count, llvm::MaybeAlign(1));
+      } else {
+        B.CreateMemMove(Dst, llvm::MaybeAlign(1), emitAddress(A[0]),
+                        llvm::MaybeAlign(1), Count);
+      }
+      return;
+    }
+    case BuiltinKind::Halt: {
+      llvm::Value *Code =
+          S->getArgs().empty() ? B.getInt32(0) : emitI32(S->getArgs()[0]);
+      B.CreateCall(RT.Halt, {Code});
+      B.CreateUnreachable();
+      B.SetInsertPoint(newBlock("after.halt")); // unreachable code follows
+      return;
+    }
     case BuiltinKind::New: {
       Expr *Arg = S->getArgs()[0];
       Type *Pointee = llvm::cast<PointerType>(Arg->getType())->getPointee();
@@ -2261,8 +2384,11 @@ public:
       return loadScalar(emitAddress(E), E->getType(), E->getName().Name);
     if (auto *R = llvm::dyn_cast<RoutineDecl>(D))
       return emitCall(R, {}); // parameterless function
-    if (auto *BD = llvm::dyn_cast<BuiltinDecl>(D))
+    if (auto *BD = llvm::dyn_cast<BuiltinDecl>(D)) {
+      if (BD->getBuiltinKind() == BuiltinKind::ParamCount)
+        return B.CreateCall(RT.ParamCount, {}, "paramcount");
       return emitFileQuery(BD->getBuiltinKind(), nullptr); // eof / eoln
+    }
     auto *C = llvm::cast<ConstDecl>(D);
     const ConstValue &V = C->getValue();
     if (V.K == ConstValue::Real)
@@ -2367,6 +2493,8 @@ public:
   }
 
   llvm::Value *visitCallExpr(CallExpr *E) {
+    if (llvm::isa<TypeDecl>(E->getDecl()))
+      return emitTypecast(E);
     if (auto *R = llvm::dyn_cast<RoutineDecl>(E->getDecl()))
       return emitCall(R, E->getArgs());
     if (auto *V = llvm::dyn_cast<VarDecl>(E->getDecl()))
