@@ -18,6 +18,7 @@ namespace pcc {
 enum class Action {
   EmitTokens, ///< --emit-tokens : dump lexer output
   EmitAST,    ///< --emit-ast    : dump the parsed AST
+  EmitParseTree, ///< --emit-parse-tree : the AST without Sema, with units
   EmitLLVM,   ///< --emit-llvm   : textual LLVM IR (.ll)
   EmitAsm,    ///< -S            : target assembly (.s)
   EmitObj,    ///< -c            : object file (.o)

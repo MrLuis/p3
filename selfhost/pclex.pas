@@ -75,7 +75,7 @@ type
     loc: TLoc;
     fid: longint;
     sw: TCheckSwitch;
-    on: boolean;
+    isOn: boolean;
   end;
 
 var
@@ -227,7 +227,7 @@ end;
 
 { --- Directives --- }
 
-procedure addDirective(const lx: TLexer; loc: TLoc; sw: TCheckSwitch; on: boolean);
+procedure addDirective(const lx: TLexer; loc: TLoc; sw: TCheckSwitch; isOn: boolean);
 var
   d: PDirective;
 begin
@@ -235,7 +235,7 @@ begin
   d^.loc := loc;
   d^.fid := lx.fid;
   d^.sw := sw;
-  d^.on := on;
+  d^.isOn := isOn;
   listAdd(directives, d);
 end;
 
@@ -243,17 +243,17 @@ function checkEnabled(sw: TCheckSwitch; loc: TLoc; default: boolean): boolean;
 var
   i, fid: longint;
   d: PDirective;
-  on: boolean;
+  isOn: boolean;
 begin
-  on := default;
+  isOn := default;
   fid := smFileOf(loc);
   for i := 0 to directives.count - 1 do
   begin
     d := PDirective(listGet(directives, i));
     if (d^.sw = sw) and (fid <> 0) and (d^.fid = fid) and (d^.loc <= loc) then
-      on := d^.on;
+      isOn := d^.isOn;
   end;
-  checkEnabled := on;
+  checkEnabled := isOn;
 end;
 
 function upperChar(c: char): char;
@@ -347,31 +347,6 @@ begin
   end;
 end;
 
-function dirName(const path: string): string;
-var
-  i: longint;
-begin
-  i := length(path);
-  while (i > 0) and (path[i] <> '/') do
-    i := i - 1;
-  if i = 0 then
-    dirName := ''
-  else if i = 1 then
-    dirName := '/'
-  else
-    dirName := copy(path, 1, i - 1);
-end;
-
-function joinPath(const dir, name: string): string;
-begin
-  if dir = '' then
-    joinPath := name
-  else if dir[length(dir)] = '/' then
-    joinPath := dir + name
-  else
-    joinPath := dir + '/' + name;
-end;
-
 { The file name as a C string sees it: up to a NUL byte (the C++ compiler
   passes it to the file system the same way). }
 function includeName(const b: TBuf): string;
@@ -406,13 +381,13 @@ begin
   end;
   { next to the including file, then the -I directories }
   found := '';
-  candidate := joinPath(dirName(smFileName(lx.fid)), name);
+  candidate := pathJoin(pathDirName(smFileName(lx.fid)), name);
   if sysIsRegularFile(candidate) then
     found := candidate;
   i := 0;
   while (found = '') and (i < includeDirs.count) do
   begin
-    candidate := joinPath(nameStr(PName(listGet(includeDirs, i))), name);
+    candidate := pathJoin(nameStr(PName(listGet(includeDirs, i))), name);
     if sysIsRegularFile(candidate) then
       found := candidate;
     i := i + 1;

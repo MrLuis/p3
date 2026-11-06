@@ -1,12 +1,12 @@
 program pcc;
 { The self-hosted Pascal compiler: command line and pipeline. It accepts
   the C++ pcc's options (src/driver/main.cpp) and must behave the same.
-  Implemented so far: --emit-tokens (S4). }
+  Implemented so far: --emit-tokens (S4), --emit-parse-tree (S5). }
 
-uses pcsys, pcutil, pcdiag, pclex;
+uses pcsys, pcutil, pcdiag, pclex, pcast, pcparse, pcprint;
 
 type
-  TAction = (actTokens, actAST, actLLVM, actAsm, actObj, actExe);
+  TAction = (actTokens, actParseTree, actAST, actLLVM, actAsm, actObj, actExe);
 
 var
   inputFile, outputFile: string;
@@ -15,7 +15,7 @@ var
   errorLimit: longint;
   werror, noUnusedVariable: boolean;
   optLevel: longint;
-  out: TBuf;
+  outBuf: TBuf;
 
 procedure usageError(const msg: string);
 begin
@@ -98,6 +98,8 @@ begin
     end;
     if opt = 'emit-tokens' then
       action := actTokens
+    else if opt = 'emit-parse-tree' then
+      action := actParseTree
     else if opt = 'emit-ast' then
       action := actAST
     else if opt = 'emit-llvm' then
@@ -162,44 +164,136 @@ begin
   repeat
     lexNext(lx, t);
     smPresumed(t.loc, f, line, col);
-    bufAddInt(out, line);
-    bufAddChar(out, ':');
-    bufAddInt(out, col);
-    bufAddChar(out, ' ');
-    bufAdd(out, tokenNames[t.kind]);
-    bufAdd(out, ' ''');
-    bufAddTokenText(out, t);
-    bufAddChar(out, '''');
+    bufAddInt(outBuf, line);
+    bufAddChar(outBuf, ':');
+    bufAddInt(outBuf, col);
+    bufAddChar(outBuf, ' ');
+    bufAdd(outBuf, tokenNames[t.kind]);
+    bufAdd(outBuf, ' ''');
+    bufAddTokenText(outBuf, t);
+    bufAddChar(outBuf, '''');
     case t.kind of
       tkIdentifier:
         begin
-          bufAdd(out, ' name=');
-          bufAddName(out, t.name);
+          bufAdd(outBuf, ' name=');
+          bufAddName(outBuf, t.name);
         end;
       tkIntegerLiteral:
-        bufAdd(out, ' value=' + uintToStr(t.intValue));
+        bufAdd(outBuf, ' value=' + uintToStr(t.intValue));
       tkRealLiteral:
-        bufAdd(out, ' value=' + formatG(t.realValue, 6));
+        bufAdd(outBuf, ' value=' + formatG(t.realValue, 6));
       tkStringLiteral:
         begin
-          bufAdd(out, ' value="');
-          bufAddEscaped(out, t.strValue^.chars, 0, t.strValue^.len);
-          bufAddChar(out, '"');
+          bufAdd(outBuf, ' value="');
+          bufAddEscaped(outBuf, t.strValue^.chars, 0, t.strValue^.len);
+          bufAddChar(outBuf, '"');
         end;
     else
       ;
     end;
-    bufAddChar(out, #10);
+    bufAddChar(outBuf, #10);
   until (t.kind = tkEof) or diagShouldStop;
 end;
 
-{ Writes out to the output file ('-': standard output). }
+{ --- Units (Driver::loadUnits) --- }
+
+var
+  units: TPtrList;      { of PDecl, dependencies first }
+  unitsDone: TIntMap;   { name id -> PDecl }
+  inProgress: TIntMap;  { name id -> non-nil while being loaded }
+
+procedure visitUnit(const u: TIdent);
+var
+  dirs: TPtrList;
+  found, path, base, ext: string;
+  i, b, x, fid: longint;
+  unitDecl: PDecl;
+begin
+  if mapHas(unitsDone, u.name^.id) or diagShouldStop then
+    exit;
+  if mapGet(inProgress, u.name^.id) <> nil then
+  begin
+    diagErrorR(u.loc, 'circular unit reference to ''' + nameStr(u.spelling) + '''',
+               identRange(u));
+    exit;
+  end;
+  mapPut(inProgress, u.name^.id, u.name);
+  { the input's directory, then -I directories }
+  listInit(dirs);
+  listAdd(dirs, intern(pathDirName(inputFile)));
+  for i := 0 to includeDirs.count - 1 do
+    listAdd(dirs, listGet(includeDirs, i));
+  found := '';
+  for i := 0 to dirs.count - 1 do
+    for b := 1 to 2 do
+      for x := 1 to 2 do
+      begin
+        if b = 1 then
+          base := nameStr(u.name)
+        else
+          base := nameStr(u.spelling);
+        if x = 1 then
+          ext := '.pas'
+        else
+          ext := '.pp';
+        path := pathJoin(nameStr(PName(listGet(dirs, i))), base + ext);
+        if (found = '') and sysFileExists(path) then
+          found := path;
+      end;
+  if found = '' then
+  begin
+    mapPut(inProgress, u.name^.id, nil);
+    diagErrorR(u.loc, 'cannot find unit ''' + nameStr(u.spelling) +
+               ''' (looked for ' + nameStr(u.name) +
+               '.pas next to the program and in -I directories)', identRange(u));
+    exit;
+  end;
+  if not smLoadFile(found, fid) then
+  begin
+    diagError(u.loc, 'cannot open unit file ''' + found + '''');
+    exit;
+  end;
+  unitDecl := parseUnit(fid, mode);
+  if unitDecl = nil then
+  begin
+    mapPut(inProgress, u.name^.id, nil);
+    exit;
+  end;
+  if unitDecl^.ident.name <> u.name then
+    diagError(unitDecl^.ident.loc, 'file ''' + found + ''' declares unit ''' +
+              nameStr(unitDecl^.ident.spelling) + ''', expected ''' +
+              nameStr(u.spelling) + '''');
+  for i := 0 to unitDecl^.ifaceUses.count - 1 do
+    visitUnit(PIdent(listGet(unitDecl^.ifaceUses, i))^);
+  for i := 0 to unitDecl^.implUses.count - 1 do
+    visitUnit(PIdent(listGet(unitDecl^.implUses, i))^);
+  mapPut(inProgress, u.name^.id, nil);
+  mapPut(unitsDone, u.name^.id, unitDecl);
+  listAdd(units, unitDecl);
+end;
+
+{ Finds, parses and orders (dependencies first) the units in usesList. }
+procedure loadUnits(const usesList: TPtrList);
+var
+  i: longint;
+begin
+  if (usesList.count > 0) and (mode = lmISO) then
+  begin
+    diagError(PIdent(listGet(usesList, 0))^.loc,
+              'units are a Turbo/Free Pascal extension; use --mode=tp');
+    exit;
+  end;
+  for i := 0 to usesList.count - 1 do
+    visitUnit(PIdent(listGet(usesList, i))^);
+end;
+
+{ Writes outBuf to the output file ('-': standard output). }
 function writeOutput: boolean;
 begin
   writeOutput := true;
   if outputFile = '-' then
-    bufWrite(out, sysOut)
-  else if not sysWriteFile(outputFile, out.data, out.len) then
+    bufWrite(outBuf, sysOut)
+  else if not sysWriteFile(outputFile, outBuf.data, outBuf.len) then
   begin
     diagError(noLoc, 'cannot open output file ''' + outputFile + '''');
     writeOutput := false;
@@ -209,11 +303,12 @@ end;
 var
   fid: longint;
   ok: boolean;
+  prog: PDecl;
 begin
   sysInit;
   diagInit;
   listInit(includeDirs);
-  bufInit(out);
+  bufInit(outBuf);
   parseArgs;
   diagSetErrorLimit(errorLimit);
   diagSetWarningsAsErrors(werror);
@@ -232,7 +327,18 @@ begin
                sysOpenError(inputFile));
 
   ok := false;
+  listInit(units);
+  mapInit(unitsDone);
+  mapInit(inProgress);
   case action of
+    actParseTree:
+      begin
+        prog := parseProgram(fid, mode);
+        if not diagHasErrors then
+          loadUnits(prog^.progUses);
+        printParseTree(outBuf, prog, units);
+        ok := writeOutput;
+      end;
     actTokens:
       begin
         dumpTokens(fid);
@@ -240,7 +346,7 @@ begin
       end;
   else
     diagError(noLoc, 'this action is not implemented in the self-hosted ' +
-                     'compiler yet (only --emit-tokens)');
+                     'compiler yet (only --emit-tokens and --emit-parse-tree)');
   end;
   if ok and not diagHasErrors then
     sysExit(0);

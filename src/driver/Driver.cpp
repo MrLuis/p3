@@ -37,6 +37,7 @@ const char *pcc::getActionName(Action A) {
   switch (A) {
   case Action::EmitTokens: return "--emit-tokens";
   case Action::EmitAST:    return "--emit-ast";
+  case Action::EmitParseTree: return "--emit-parse-tree";
   case Action::EmitLLVM:   return "--emit-llvm";
   case Action::EmitAsm:    return "-S";
   case Action::EmitObj:    return "-c";
@@ -46,7 +47,8 @@ const char *pcc::getActionName(Action A) {
 }
 
 std::string pcc::getDefaultOutputFile(const CompilerOptions &Opts) {
-  if (Opts.Act == Action::EmitTokens || Opts.Act == Action::EmitAST)
+  if (Opts.Act == Action::EmitTokens || Opts.Act == Action::EmitAST ||
+      Opts.Act == Action::EmitParseTree)
     return "-";
 
   llvm::StringRef Stem = llvm::sys::path::stem(Opts.InputFile);
@@ -161,6 +163,14 @@ bool Driver::runPipeline(FileID FID) {
   llvm::SmallVector<UnitDecl *, 4> Units;
   if (!Diags.hasErrors())
     loadUnits(Program->getUses(), Ctx, Directives, Units);
+
+  if (Opts.Act == Action::EmitParseTree) { // the parser alone (S5)
+    auto OS = openTextOutput(Opts.OutputFile, Diags);
+    if (!OS)
+      return false;
+    printParseTree(*Program, Units, SM, *OS);
+    return true;
+  }
 
   // --- M4: semantic analysis (skipped after syntax errors) ---------------
   bool SyntaxOK = !Diags.hasErrors();

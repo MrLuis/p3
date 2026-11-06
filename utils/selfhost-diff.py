@@ -30,7 +30,8 @@ def run(cmd):
         return "timeout", b"", b""
 
 def compare(args, path, mode):
-    common = [args.action, "--mode=" + mode, "-fdiagnostics-color=never", path]
+    common = [args.action, "--mode=" + mode, "-fdiagnostics-color=never"] + \
+             args.extra.split() + [path]
     ref = run([args.ref] + common)
     new = run([args.new] + common)
     if ref == new:
@@ -54,6 +55,7 @@ def main():
     ap.add_argument("--jobs", type=int, default=os.cpu_count() or 4)
     ap.add_argument("--show", type=int, default=5)
     ap.add_argument("--all-files", action="store_true")
+    ap.add_argument("--extra", default="", help="more options, e.g. '-I dir'")
     ap.add_argument("paths", nargs="+")
     args = ap.parse_args()
     jobs = [(p, m) for p in inputs(args.paths, args.all_files)

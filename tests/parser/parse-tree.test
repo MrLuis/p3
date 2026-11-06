@@ -1,0 +1,62 @@
+; --emit-parse-tree: the parser's output without Sema, with type specs,
+; typed-constant values, uses clauses and units (SELFHOST.md S5).
+; RUN: not %pcc --mode=tp --emit-parse-tree %S/Inputs/parse-tree.pas 2>%t.err | FileCheck %s
+; RUN: FileCheck --check-prefix=ERR %s < %t.err
+
+; CHECK:      ProgramDecl 'pt' <1:1>
+; CHECK-NEXT:   Uses 'shapes' <2:6>
+; CHECK-NEXT:   TypeDecl 'tkind' <4:3>
+; CHECK-NEXT:     EnumTypeSpec <4:11>
+; CHECK-NEXT:       EnumValue 'ka' <4:12>
+; CHECK-NEXT:       EnumValue 'kb' <4:16>
+; CHECK-NEXT:   TypeDecl 'trec' <5:3>
+; CHECK-NEXT:     RecordTypeSpec packed <5:10>
+; CHECK-NEXT:       FieldDecl 'x' <6:5>
+; CHECK-NEXT:         NamedTypeSpec 'longint' <6:11>
+; CHECK-NEXT:       FieldDecl 'y' <6:8>
+; CHECK-NEXT:         NamedTypeSpec 'longint' <6:11>
+; CHECK-NEXT:       VariantPart <7:5>
+; CHECK-NEXT:         TagField 'k' <7:10>
+; CHECK-NEXT:         NamedTypeSpec 'tkind' <7:13>
+; CHECK-NEXT:         Variant <8:7>
+; CHECK-NEXT:           CaseLabel <8:7>
+; CHECK-NEXT:             NameRefExpr 'ka' <8:7>
+; CHECK-NEXT:           FieldDecl 's' <8:12>
+; CHECK-NEXT:             StringTypeSpec <8:15>
+; CHECK-NEXT:               IntegerLiteralExpr 8 <8:22>
+; CHECK-NEXT:         Variant <9:7>
+; CHECK-NEXT:           CaseLabel <9:7>
+; CHECK-NEXT:             NameRefExpr 'kb' <9:7>
+; CHECK-NEXT:           FieldDecl 'p' <9:12>
+; CHECK-NEXT:             PointerTypeSpec 'trec' <9:15>
+; CHECK-NEXT:   TypeDecl 'tfn' <11:3>
+; CHECK-NEXT:     RoutineTypeSpec function <11:9>
+; CHECK-NEXT:       ParamDecl const 'a' <11:24>
+; CHECK-NEXT:         StringTypeSpec <11:27>
+; CHECK-NEXT:       ParamDecl var 'b' <11:39>
+; CHECK-NEXT:         NamedTypeSpec 'longint' <11:42>
+; CHECK-NEXT:       Result <11:52>
+; CHECK-NEXT:         NamedTypeSpec 'boolean' <11:52>
+; CHECK-NEXT:   VarDecl 'tab' <13:3>
+; CHECK-NEXT:     ArrayTypeSpec <13:8>
+; CHECK-NEXT:       SubrangeTypeSpec <13:14>
+; CHECK-NEXT:         IntegerLiteralExpr 1 <13:14>
+; CHECK-NEXT:         IntegerLiteralExpr 2 <13:17>
+; CHECK-NEXT:       NamedTypeSpec 'trec' <13:23>
+; CHECK-NEXT:     Init <13:30>
+; CHECK-NEXT:       AggregateExpr <13:30>
+; CHECK-NEXT:         AggregateExpr <13:31>
+; CHECK-NEXT:           Field 'x' <13:32>
+; CHECK-NEXT:             IntegerLiteralExpr 1 <13:35>
+; CHECK-NEXT:           Field 'y' <13:38>
+; CHECK-NEXT:             IntegerLiteralExpr 2 <13:41>
+; CHECK:        ProcedureDecl 'ext' external 'puts' <14:1>
+; CHECK-NEXT:     ParamDecl 'p' <14:15>
+; CHECK-NEXT:       NamedTypeSpec 'pchar' <14:18>
+; CHECK:          IndirectCallStmt <17:3>
+; CHECK-NEXT:       IndirectCallExpr <17:3>
+; CHECK-NEXT:         FieldExpr 'f' <17:3>
+
+; The empty argument list is an error; units are not loaded after one.
+; ERR: parse-tree.pas:16:11: error: expected expression
+; ERR-NOT: cannot find unit

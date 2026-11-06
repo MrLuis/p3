@@ -99,6 +99,10 @@ function formatG(x: double; prec: longint): string;
 procedure bufAddEscaped(var b: TBuf; p: PCharArray; start, count: int64);
 function lowerChar(c: char): char;
 function lowerStr(const s: string): string;
+{ Paths (llvm::sys::path): the directory part ('' for a bare name), and a
+  directory joined with a name. }
+function pathDirName(const path: string): string;
+function pathJoin(const dir, name: string): string;
 
 implementation
 
@@ -804,6 +808,31 @@ begin
     end;
   end;
   {$R+}
+end;
+
+function pathDirName(const path: string): string;
+var
+  i: longint;
+begin
+  i := length(path);
+  while (i > 0) and (path[i] <> '/') do
+    i := i - 1;
+  if i = 0 then
+    pathDirName := ''
+  else if i = 1 then
+    pathDirName := '/'
+  else
+    pathDirName := copy(path, 1, i - 1);
+end;
+
+function pathJoin(const dir, name: string): string;
+begin
+  if dir = '' then
+    pathJoin := name
+  else if dir[length(dir)] = '/' then
+    pathJoin := dir + name
+  else
+    pathJoin := dir + '/' + name;
 end;
 
 function lowerChar(c: char): char;

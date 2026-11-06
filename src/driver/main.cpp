@@ -27,6 +27,8 @@ static cl::opt<Action> Act(
     cl::values(
         clEnumValN(Action::EmitTokens, "emit-tokens", "Dump lexer tokens"),
         clEnumValN(Action::EmitAST, "emit-ast", "Dump the parsed AST"),
+        clEnumValN(Action::EmitParseTree, "emit-parse-tree",
+                   "Dump the parse tree (no semantic analysis; for testing)"),
         clEnumValN(Action::EmitLLVM, "emit-llvm", "Emit LLVM IR (.ll)"),
         clEnumValN(Action::EmitAsm, "S", "Emit target assembly (.s)"),
         clEnumValN(Action::EmitObj, "c", "Emit an object file (.o)")),

@@ -24,7 +24,8 @@ for src in "$here"/d[0-9][0-9]_*.pas; do
   name=$(basename "$src" .pas)
   exe=$work/$name
   if [ "$compiler" = fpc ]; then
-    # objfpc mode with short strings; range and overflow checks on, as in pcc.
+    # objfpc mode with short strings; range and overflow
+    # checks on, as in pcc.
     fpc -v0 -Mobjfpc -Sh- -Cr -Co -Fu"$here" -Fi"$here" -FU"$work" \
         -o"$exe" "$src" >"$work/$name.log" 2>&1
   else

@@ -27,6 +27,7 @@ class ASTPrinter : public StmtVisitor<ASTPrinter>,
   const SourceManager &SM;
   llvm::raw_ostream &OS;
   unsigned Indent = 0;
+  bool ParseTree = false; ///< --emit-parse-tree: also type specs, units, ...
 
   struct IndentScope {
     unsigned &I;
@@ -95,6 +96,10 @@ class ASTPrinter : public StmtVisitor<ASTPrinter>,
       if (T->getType())
         OS << " = " << describeType(T->getType());
       loc(T->getLocation());
+      if (ParseTree) {
+        IndentScope I(Indent);
+        printTypeSpec(T->getTypeSpec());
+      }
       return;
     }
     case Decl::DK_Var: {
@@ -104,8 +109,19 @@ class ASTPrinter : public StmtVisitor<ASTPrinter>,
                          : V->getVarKind() == VarDecl::ValueParam ? "ParamDecl '"
                                                                   : "VarDecl '";
       line(Kind) << V->getName().Name << '\'';
-      typeSpec(V->getTypeSpec(), V->getType());
+      if (!ParseTree)
+        typeSpec(V->getTypeSpec(), V->getType());
       loc(V->getLocation());
+      if (ParseTree) {
+        IndentScope I(Indent);
+        printTypeSpec(V->getTypeSpec());
+        if (V->getInit()) {
+          line("Init");
+          loc(V->getInit()->getBeginLoc());
+          IndentScope J(Indent);
+          visitExpr(V->getInit());
+        }
+      }
       return;
     }
     case Decl::DK_Routine: {
@@ -128,6 +144,12 @@ class ASTPrinter : public StmtVisitor<ASTPrinter>,
       if (!R->isRedeclaration())
         for (VarDecl *P : R->getParams())
           printDecl(P);
+      if (ParseTree && R->getResultTypeSpec()) {
+        line("Result");
+        loc(R->getResultTypeSpec()->getBeginLoc());
+        IndentScope J(Indent);
+        printTypeSpec(R->getResultTypeSpec());
+      }
       if (Block *B = R->getBody(); B && !R->isForward())
         printBlock(*B);
       return;
@@ -180,6 +202,134 @@ class ASTPrinter : public StmtVisitor<ASTPrinter>,
     }
   }
 
+  void printTypeSpec(TypeSpec *TS) {
+    if (!TS)
+      return;
+    switch (TS->getKind()) {
+    case TypeSpec::TS_Named:
+      line("NamedTypeSpec '") << llvm::cast<NamedTypeSpec>(TS)->getName().Name << '\'';
+      loc(TS->getBeginLoc());
+      return;
+    case TypeSpec::TS_Enum:
+      line("EnumTypeSpec");
+      loc(TS->getBeginLoc());
+      {
+        IndentScope I(Indent);
+        for (const Identifier &N : llvm::cast<EnumTypeSpec>(TS)->getNames()) {
+          line("EnumValue '") << N.Name << '\'';
+          loc(N.Loc);
+        }
+      }
+      return;
+    case TypeSpec::TS_Subrange: {
+      auto *S = llvm::cast<SubrangeTypeSpec>(TS);
+      line("SubrangeTypeSpec");
+      loc(TS->getBeginLoc());
+      IndentScope I(Indent);
+      visitExpr(S->getLo());
+      visitExpr(S->getHi());
+      return;
+    }
+    case TypeSpec::TS_Array: {
+      auto *A = llvm::cast<ArrayTypeSpec>(TS);
+      line(A->isPacked() ? "ArrayTypeSpec packed" : "ArrayTypeSpec");
+      loc(TS->getBeginLoc());
+      IndentScope I(Indent);
+      for (TypeSpec *Idx : A->getIndexes())
+        printTypeSpec(Idx);
+      printTypeSpec(A->getElement());
+      return;
+    }
+    case TypeSpec::TS_Record: {
+      auto *R = llvm::cast<RecordTypeSpec>(TS);
+      line(R->isPacked() ? "RecordTypeSpec packed" : "RecordTypeSpec");
+      loc(TS->getBeginLoc());
+      IndentScope I(Indent);
+      printFieldList(R->getFields());
+      return;
+    }
+    case TypeSpec::TS_Pointer:
+      line("PointerTypeSpec '") << llvm::cast<PointerTypeSpec>(TS)->getTarget().Name
+                                << '\'';
+      loc(TS->getBeginLoc());
+      return;
+    case TypeSpec::TS_Set:
+    case TypeSpec::TS_File: {
+      bool IsSet = TS->getKind() == TypeSpec::TS_Set;
+      line(IsSet ? "SetTypeSpec" : "FileTypeSpec");
+      loc(TS->getBeginLoc());
+      IndentScope I(Indent);
+      printTypeSpec(IsSet ? llvm::cast<SetTypeSpec>(TS)->getElement()
+                          : llvm::cast<FileTypeSpec>(TS)->getElement());
+      return;
+    }
+    case TypeSpec::TS_Routine: {
+      auto *R = llvm::cast<RoutineTypeSpec>(TS);
+      line(R->isFunction() ? "RoutineTypeSpec function" : "RoutineTypeSpec procedure");
+      loc(TS->getBeginLoc());
+      IndentScope I(Indent);
+      for (VarDecl *P : R->getParams())
+        printDecl(P);
+      if (R->getResult()) {
+        line("Result");
+        loc(R->getResult()->getBeginLoc());
+        IndentScope J(Indent);
+        printTypeSpec(R->getResult());
+      }
+      return;
+    }
+    case TypeSpec::TS_String: {
+      auto *S = llvm::cast<StringTypeSpec>(TS);
+      line("StringTypeSpec");
+      loc(TS->getBeginLoc());
+      if (S->getMaxLength()) {
+        IndentScope I(Indent);
+        visitExpr(S->getMaxLength());
+      }
+      return;
+    }
+    }
+  }
+
+  void printFieldList(FieldList *FL) {
+    for (FieldDecl *F : FL->Fixed) {
+      line("FieldDecl '") << F->getName().Name << '\'';
+      loc(F->getLocation());
+      IndentScope I(Indent);
+      printTypeSpec(F->getTypeSpec());
+    }
+    VariantPart *VP = FL->Variant;
+    if (!VP)
+      return;
+    line("VariantPart");
+    loc(VP->CaseLoc);
+    IndentScope I(Indent);
+    if (VP->Tag) {
+      line("TagField '") << VP->Tag->getName().Name << '\'';
+      loc(VP->Tag->getLocation());
+    }
+    printTypeSpec(VP->TagTypeSpec);
+    for (Variant *V : VP->Variants) {
+      line("Variant");
+      loc(V->Labels.empty() ? VP->CaseLoc : V->Labels[0]->Lo->getBeginLoc());
+      IndentScope J(Indent);
+      for (CaseLabel *L : V->Labels) {
+        line("CaseLabel");
+        loc(L->Lo->getBeginLoc());
+        IndentScope K(Indent);
+        visitExpr(L->Lo);
+      }
+      printFieldList(V->Fields);
+    }
+  }
+
+  void printUses(llvm::ArrayRef<Identifier> Uses) {
+    for (const Identifier &U : Uses) {
+      line("Uses '") << U.Name << '\'';
+      loc(U.Loc);
+    }
+  }
+
   void printBlock(Block &B) {
     for (Decl *D : B.getDecls())
       printDecl(D);
@@ -188,7 +338,27 @@ class ASTPrinter : public StmtVisitor<ASTPrinter>,
   }
 
 public:
-  ASTPrinter(const SourceManager &SM, llvm::raw_ostream &OS) : SM(SM), OS(OS) {}
+  ASTPrinter(const SourceManager &SM, llvm::raw_ostream &OS, bool ParseTree = false)
+      : SM(SM), OS(OS), ParseTree(ParseTree) {}
+
+  void printUnit(UnitDecl &U) {
+    line("UnitDecl '") << U.getName().Name << '\'';
+    loc(U.getLocation());
+    IndentScope S(Indent);
+    line("Interface");
+    loc(U.getLocation());
+    {
+      IndentScope I(Indent);
+      printUses(U.getInterfaceUses());
+      for (Decl *D : U.getInterface()->getDecls())
+        printDecl(D);
+    }
+    line("Implementation");
+    loc(U.getLocation());
+    IndentScope I(Indent);
+    printUses(U.getImplementationUses());
+    printBlock(*U.getImplementation());
+  }
 
   void printProgram(ProgramDecl &P) {
     line("ProgramDecl '") << P.getName().Name << '\'';
@@ -198,6 +368,8 @@ public:
       line("ProgramParam '") << Param.Name << '\'';
       loc(Param.Loc);
     }
+    if (ParseTree)
+      printUses(P.getUses());
     if (Block *B = P.getBlock())
       printBlock(*B);
   }
@@ -216,6 +388,8 @@ public:
   }
   void visitProcCallStmt(ProcCallStmt *S) {
     line("ProcCallStmt '") << S->getCallee().Name << '\'';
+    if (ParseTree && S->hasParens())
+      OS << " ()";
     loc(S->getBeginLoc());
     IndentScope I(Indent);
     for (Expr *Arg : S->getArgs())
@@ -345,6 +519,7 @@ public:
     for (AggregateElement *El : E->getElements()) {
       if (El->Field.isValid()) {
         line("Field '") << El->Field.Name << '\'';
+        loc(El->Field.Loc);
         IndentScope J(Indent);
         visitExpr(El->Value);
       } else {
@@ -447,4 +622,12 @@ public:
 void pcc::printAST(ProgramDecl &P, const SourceManager &SM,
                    llvm::raw_ostream &OS) {
   ASTPrinter(SM, OS).printProgram(P);
+}
+
+void pcc::printParseTree(ProgramDecl &P, llvm::ArrayRef<UnitDecl *> Units,
+                         const SourceManager &SM, llvm::raw_ostream &OS) {
+  ASTPrinter Printer(SM, OS, /*ParseTree=*/true);
+  for (UnitDecl *U : Units)
+    Printer.printUnit(*U);
+  Printer.printProgram(P);
 }

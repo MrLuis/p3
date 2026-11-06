@@ -58,7 +58,7 @@ function noRange: TRange;
 { Diagnostics }
 procedure diagInit;
 procedure diagSetErrorLimit(n: longint);
-procedure diagSetWarningsAsErrors(on: boolean);
+procedure diagSetWarningsAsErrors(enabled: boolean);
 procedure diagDisableWarning(const group: string);
 function diagWarningEnabled(const group: string): boolean;
 
@@ -303,9 +303,9 @@ begin
   errorLimit := n;
 end;
 
-procedure diagSetWarningsAsErrors(on: boolean);
+procedure diagSetWarningsAsErrors(enabled: boolean);
 begin
-  warningsAsErrors := on;
+  warningsAsErrors := enabled;
 end;
 
 procedure diagDisableWarning(const group: string);
@@ -325,8 +325,8 @@ begin
   diagWarningEnabled := true;
 end;
 
-{ Appends line [lineStart, lineEnd) of data to out, tabs expanded. }
-procedure addSourceLine(var out: TBuf; data: PCharArray;
+{ Appends line [lineStart, lineEnd) of data to outText, tabs expanded. }
+procedure addSourceLine(var outText: TBuf; data: PCharArray;
                         lineStart, lineEnd: int64);
 var
   i: int64;
@@ -340,21 +340,21 @@ begin
     c := data^[i];
     if c = #9 then
       repeat
-        bufAddChar(out, ' ');
+        bufAddChar(outText, ' ');
         outCol := outCol + 1;
       until outCol mod tabStop = 0
     else
     begin
-      bufAddChar(out, c);
+      bufAddChar(outText, c);
       outCol := outCol + 1;
     end;
   end;
   {$R+}
-  bufAddChar(out, #10);
+  bufAddChar(outText, #10);
 end;
 
 { The source line of loc and a caret line under it (llvm::SMDiagnostic). }
-procedure addExcerpt(var out: TBuf; loc: TLoc; r1, r2: TRange);
+procedure addExcerpt(var outText: TBuf; loc: TLoc; r1, r2: TRange);
 var
   f: PSourceFile;
   data: PCharArray;
@@ -379,7 +379,7 @@ begin
   for i := lineStart to lineEnd - 1 do
     if ord(data^[i]) >= 128 then
     begin
-      addSourceLine(out, data, lineStart, lineEnd);
+      addSourceLine(outText, data, lineStart, lineEnd);
       exit;
     end;
   {$R+}
@@ -420,29 +420,29 @@ begin
   { no trailing blanks }
   while (caret.len > 0) and (bufCharAt(caret, caret.len - 1) = ' ') do
     caret.len := caret.len - 1;
-  addSourceLine(out, data, lineStart, lineEnd);
+  addSourceLine(outText, data, lineStart, lineEnd);
   { the caret line, with a tab where the source line has one }
   outCol := 0;
   {$R-}
   for i := 0 to caret.len - 1 do
     if (i >= numColumns) or (data^[lineStart + i] <> #9) then
     begin
-      bufAddChar(out, caret.data^[i]);
+      bufAddChar(outText, caret.data^[i]);
       outCol := outCol + 1;
     end
     else
       repeat
-        bufAddChar(out, caret.data^[i]);
+        bufAddChar(outText, caret.data^[i]);
         outCol := outCol + 1;
       until outCol mod tabStop = 0;
   {$R+}
-  bufAddChar(out, #10);
+  bufAddChar(outText, #10);
   bufFree(caret);
 end;
 
 { "file:line:col: ". SMDiagnostic shows standard input ("-") as <stdin>;
   fatal errors print the name as it is. }
-procedure addPosition(var out: TBuf; loc: TLoc; mapStdin: boolean);
+procedure addPosition(var outText: TBuf; loc: TLoc; mapStdin: boolean);
 var
   fid, line, col: longint;
   name: string;
@@ -451,41 +451,41 @@ begin
   name := smFileName(fid);
   if mapStdin and (name = '-') then
     name := '<stdin>';
-  bufAdd(out, name);
-  bufAddChar(out, ':');
-  bufAddInt(out, line);
-  bufAddChar(out, ':');
-  bufAddInt(out, col);
-  bufAdd(out, ': ');
+  bufAdd(outText, name);
+  bufAddChar(outText, ':');
+  bufAddInt(outText, line);
+  bufAddChar(outText, ':');
+  bufAddInt(outText, col);
+  bufAdd(outText, ': ');
 end;
 
 procedure emit(sev: TSeverity; loc: TLoc; const msg: TBuf; r1, r2: TRange);
 var
-  out: TBuf;
+  outText: TBuf;
   valid: boolean;
 begin
-  bufInit(out);
+  bufInit(outText);
   valid := smFileOf(loc) <> 0;
   if valid then
-    addPosition(out, loc, sev <> sevFatal)
+    addPosition(outText, loc, sev <> sevFatal)
   else
   begin
-    bufAdd(out, diagProgName);
-    bufAdd(out, ': ');
+    bufAdd(outText, diagProgName);
+    bufAdd(outText, ': ');
   end;
   case sev of
-    sevNote: bufAdd(out, 'note: ');
-    sevRemark: bufAdd(out, 'remark: ');
-    sevWarning: bufAdd(out, 'warning: ');
-    sevError: bufAdd(out, 'error: ');
-    sevFatal: bufAdd(out, 'fatal error: ');
+    sevNote: bufAdd(outText, 'note: ');
+    sevRemark: bufAdd(outText, 'remark: ');
+    sevWarning: bufAdd(outText, 'warning: ');
+    sevError: bufAdd(outText, 'error: ');
+    sevFatal: bufAdd(outText, 'fatal error: ');
   end;
-  bufAddChars(out, msg.data, 0, msg.len);
-  bufAddChar(out, #10);
+  bufAddChars(outText, msg.data, 0, msg.len);
+  bufAddChar(outText, #10);
   if valid and (sev <> sevFatal) then
-    addExcerpt(out, loc, r1, r2);
-  bufWrite(out, diagStream);
-  bufFree(out);
+    addExcerpt(outText, loc, r1, r2);
+  bufWrite(outText, diagStream);
+  bufFree(outText);
 end;
 
 procedure emitTooManyErrors;

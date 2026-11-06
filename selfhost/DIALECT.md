@@ -11,6 +11,12 @@ compilers below. Anything not listed here is not allowed.
 | pcc (the target) | `pcc --mode=tp -I selfhost` |
 | Free Pascal 3.2.2 (the reference) | `fpc -Mobjfpc -Sh- -Cr -Co` |
 
+FPC's `-Mtp` mode would match pcc more closely (no nested comments, no
+`Result`), but FPC 3.2.2 miscompiles sets with more than 64 possible
+elements in that mode (found in S5: `[e19, e33]` also contains `e64`), and
+the parser uses sets of the 79 token kinds. The rules below cover the
+objfpc differences instead; `utils/selfhost-lint.py` checks them.
+
 Free Pascal is the second compiler for three reasons:
 
 - It proves the dialect is real Pascal with one meaning.
@@ -45,8 +51,9 @@ with pcc.
   There is no `{$mode}`, `{$H}`, `{$ifdef}` or any other directive. The mode
   is set on the command line.
 - **Comments:** `{ }` and `//`. A comment must not contain `{`, `}`, `(*` or
-  `*)`. FPC's objfpc mode nests `{ }` comments and TP mode does not, so text
-  such as `{ see {$R-} }` parses differently in the two compilers.
+  `*)`: text such as `{ see {$R-} }` ends at the first closer, and FPC's
+  other modes would read it as a nested comment. Write grammar notes with
+  braces as `//` comments.
 - **Program header:** `program pcc;` with no program parameters.
 
 ## 2. Types
@@ -88,18 +95,21 @@ More rules:
   parameters (`var x` without a type) except in the built-ins
   `fillchar`/`move`, and no default parameter values or overloading.
 - **Function results:** assign to the function name. `Result` is not used,
-  and there is no local or parameter named `result`. Functions may return
+  and there is no local or parameter named `result`. A function without
+  parameters never uses its own name in its body except as `f := ...`: in
+  objfpc mode the name is the result variable, in pcc a recursive call
+  (call it through a helper function instead). Functions may return
   simple types, pointers, strings and records (not arrays); a record
   result can be selected from directly (`makeRange(a, b).e`).
-- **Typed constants:** they are read-only (objfpc allows writing them, pcc
+- **Typed constants:** they are read-only (FPC allows writing them, pcc
   does not). They may be arrays (including indexed by an enumeration) and
   records, including arrays of records.
 - **Procedural types:** `type TVisit = procedure(k: TTokKind);`. Assign with
   `v := @routine`, call with `v(x)`, test with `assigned(v)`, and clear with
   `v := nil`. Only global (non-nested) routines may be assigned.
-  Procedural types always take at least one parameter: a bare name `f` of
-  a parameterless procedural variable is a call in pcc but the value itself
-  in FPC's objfpc mode.
+  Procedural types always take at least one parameter: what a bare name
+  `f` of a parameterless procedural variable means differs between the
+  compilers' modes.
 - **External C functions:** `function c_strlen(s: pchar): int64; cdecl;
   external 'c' name 'strlen';`
   - Names start with `c_`, and all of them live in the unit `pcsys`.
@@ -207,8 +217,9 @@ Further rules:
   in the same scope when case is ignored.
 - Names must not shadow System routines (`length`, `copy`, `move`, `pos`,
   `str`, `val`, `exit`, `halt`, `assigned`, …).
-- Reserved words of either compiler are never used as identifiers. FPC's
-  objfpc mode adds `as class except exports finally initialization
+- Reserved words of either compiler are never used as identifiers, nor
+  FPC's reserved words and modifiers of its other modes (so the code stays
+  portable to them): `as class except exports finally initialization
   finalization inherited is library on operator out property raise
   resourcestring threadvar try`, and pcc's TP mode adds `inline asm object
   constructor destructor shl shr xor string unit interface implementation
