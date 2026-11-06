@@ -1,0 +1,36 @@
+ProgramDecl 'prec' <1:1>
+  VarDecl 'x' : integer <2:5>
+  VarDecl 'b' : boolean <2:17>
+  CompoundStmt <3:1>
+    AssignStmt <4:3>
+      NameRefExpr 'x' variable : integer <4:3>
+      BinaryExpr '+' : integer <4:8>
+        IntegerLiteralExpr 1 : integer <4:8>
+        BinaryExpr '*' : integer <4:12>
+          IntegerLiteralExpr 2 : integer <4:12>
+          IntegerLiteralExpr 3 : integer <4:16>
+    AssignStmt <5:3>
+      NameRefExpr 'x' variable : integer <5:3>
+      UnaryExpr '-' : integer <5:8>
+        BinaryExpr '*' : integer <5:9>
+          IntegerLiteralExpr 2 : integer <5:9>
+          IntegerLiteralExpr 3 : integer <5:13>
+    AssignStmt <6:3>
+      NameRefExpr 'b' variable : boolean <6:3>
+      BinaryExpr 'or' : boolean <6:8>
+        BinaryExpr 'and' : boolean <6:8>
+          UnaryExpr 'not' : boolean <6:8>
+            NameRefExpr 'b' variable : boolean <6:12>
+          ParenExpr : boolean <6:18>
+            BinaryExpr '<' : boolean <6:19>
+              NameRefExpr 'x' variable : integer <6:19>
+              IntegerLiteralExpr 3 : integer <6:23>
+        NameRefExpr 'b' variable : boolean <6:29>
+    AssignStmt <7:3>
+      NameRefExpr 'x' variable : integer <7:3>
+      BinaryExpr '*' : integer <7:8>
+        ParenExpr : integer <7:8>
+          BinaryExpr '+' : integer <7:9>
+            IntegerLiteralExpr 1 : integer <7:9>
+            IntegerLiteralExpr 2 : integer <7:13>
+        IntegerLiteralExpr 3 : integer <7:18>

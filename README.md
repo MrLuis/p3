@@ -3,20 +3,25 @@
 `pcc` compiles Pascal (ISO 7185, with optional Turbo/Free Pascal extensions)
 to native executables through LLVM. See [PLAN.md](PLAN.md) for the roadmap.
 
-**Status:** M3 complete: programs made of `write`/`writeln` calls with string,
-char and integer literals compile to native executables. Next up is M4
-(variables, expressions, type checking).
+**Status:** M4 complete: integer/boolean/char variables, full ISO expression
+syntax and type checking, `read`/`readln`, `write` field widths, and the
+standard functions `abs sqr odd ord chr succ pred`. Next up is M5 (`if`,
+`while`, `repeat`, `for`, `case`).
 
 ```pascal
-program hello(output);
+program Sum(input, output);
+var a, b: integer;
 begin
-  writeln('Hello, World!')
+  read(a, b);
+  writeln(a, ' + ', b, ' = ', a + b:1);
+  writeln('even? ', not odd(a + b))
 end.
 ```
 
 ```sh
-$ pcc hello.pas && ./hello
-Hello, World!
+$ pcc sum.pas && echo "17 25" | ./sum
+17 + 25 = 42
+even? true
 ```
 
 ## Requirements

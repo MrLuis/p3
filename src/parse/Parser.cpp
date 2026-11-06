@@ -3,12 +3,10 @@
 #include "pcc/Basic/Diagnostics.h"
 #include "pcc/Lexer/Lexer.h"
 
-#include "llvm/ADT/SmallVector.h"
-
 using namespace pcc;
 
 Parser::Parser(Lexer &Lex, DiagnosticsEngine &Diags, ASTContext &Ctx)
-    : Lex(Lex), Diags(Diags), Ctx(Ctx) {
+    : Lex(Lex), Diags(Diags), Ctx(Ctx), LangOpts(Lex.getLangOpts()) {
   Lex.lex(Tok);
 }
 
@@ -80,6 +78,11 @@ bool Parser::startsStatement() const {
                      tok::kw_with, tok::kw_goto, tok::integer_literal);
 }
 
+bool Parser::startsDeclarationPart() const {
+  return Tok.isOneOf(tok::kw_label, tok::kw_const, tok::kw_type, tok::kw_var,
+                     tok::kw_procedure, tok::kw_function);
+}
+
 //===----------------------------------------------------------------------===//
 // program = "program" ident [ "(" identList ")" ] ";" block "." .
 //===----------------------------------------------------------------------===//
@@ -91,8 +94,10 @@ ProgramDecl *Parser::parseProgram() {
 
   if (!tryConsume(tok::kw_program)) {
     Diags.error(Tok.getLocation(), "expected 'program'");
-    // Recover by looking for the program body.
-    skipUntil({tok::kw_begin});
+    // Recover by looking for the program's block.
+    while (Tok.isNot(tok::eof) && !Tok.is(tok::kw_begin) &&
+           !startsDeclarationPart())
+      consumeToken();
   } else {
     if (Tok.is(tok::identifier)) {
       Name = makeIdentifier(Tok);
@@ -135,18 +140,29 @@ ProgramDecl *Parser::parseProgram() {
     }
   }
 
-  return Ctx.create<ProgramDecl>(ProgramLoc, Name, Ctx.copyArray<Identifier>(Params), B);
+  return Ctx.create<ProgramDecl>(ProgramLoc, Name,
+                                 Ctx.copyArray<Identifier>(Params), B);
 }
 
 //===----------------------------------------------------------------------===//
-// block = [declarations] compoundStmt .
+// block = [ varPart ] compoundStmt .
 //===----------------------------------------------------------------------===//
 
 Block *Parser::parseBlock() {
-  // Declaration parts arrive in M4 (var), M6 (procedure/function),
-  // M7 (const/type) and M10 (label). Report and skip them for now.
-  while (Tok.isOneOf(tok::kw_label, tok::kw_const, tok::kw_type, tok::kw_var,
-                     tok::kw_procedure, tok::kw_function)) {
+  llvm::SmallVector<VarDecl *, 8> Vars;
+  bool SeenVarPart = false;
+
+  while (startsDeclarationPart() && !Diags.shouldStop()) {
+    if (Tok.is(tok::kw_var)) {
+      if (SeenVarPart && LangOpts.Mode == LangMode::ISO)
+        Diags.error(Tok.getLocation(),
+                    "ISO Pascal allows only one 'var' section per block",
+                    {Tok.getRange()});
+      SeenVarPart = true;
+      parseVarPart(Vars);
+      continue;
+    }
+    // label (M10), const/type (M7), procedure/function (M6).
     unsupported("'" + Tok.getRawText().lower() + "' declarations are");
     consumeToken();
     skipUntil({tok::kw_begin, tok::kw_label, tok::kw_const, tok::kw_type,
@@ -165,7 +181,77 @@ Block *Parser::parseBlock() {
   if (!Body)
     Body = Ctx.create<CompoundStmt>(SourceRange(Tok.getLocation()),
                                     llvm::ArrayRef<Stmt *>());
-  return Ctx.create<Block>(Body);
+  return Ctx.create<Block>(Ctx.copyArray<VarDecl *>(Vars), Body);
+}
+
+// varPart = "var" identList ":" type ";" { identList ":" type ";" } .
+void Parser::parseVarPart(llvm::SmallVectorImpl<VarDecl *> &Vars) {
+  consumeToken(); // 'var'
+  if (Tok.isNot(tok::identifier)) {
+    Diags.error(Tok.getLocation(), "expected variable name after 'var'");
+    return;
+  }
+
+  while (Tok.is(tok::identifier) && !Diags.shouldStop()) {
+    llvm::SmallVector<Identifier, 4> Names;
+    do {
+      if (Tok.isNot(tok::identifier)) {
+        Diags.error(Tok.getLocation(), "expected variable name");
+        break;
+      }
+      Names.push_back(makeIdentifier(Tok));
+      consumeToken();
+    } while (tryConsume(tok::comma));
+
+    TypeSpec *TS = nullptr;
+    if (expect(tok::colon, "after variable name"))
+      TS = parseType();
+
+    if (!TS) {
+      skipUntil({tok::semi, tok::kw_begin});
+    } else {
+      for (const Identifier &N : Names)
+        Vars.push_back(Ctx.create<VarDecl>(N, TS));
+    }
+
+    if (!expect(tok::semi, "after variable declaration")) {
+      skipUntil({tok::semi, tok::kw_begin});
+      tryConsume(tok::semi);
+    }
+  }
+}
+
+// type = typeIdent .   (M7+: enumerations, subranges, structured types)
+TypeSpec *Parser::parseType() {
+  if (Tok.is(tok::identifier)) {
+    auto *TS = Ctx.create<NamedTypeSpec>(makeIdentifier(Tok));
+    consumeToken();
+    return TS;
+  }
+  switch (Tok.getKind()) {
+  case tok::kw_array:
+  case tok::kw_record:
+  case tok::kw_set:
+  case tok::kw_file:
+  case tok::kw_packed:
+    unsupported("'" + Tok.getRawText().lower() + "' types are");
+    return nullptr;
+  case tok::caret:
+    unsupported("pointer types are");
+    return nullptr;
+  case tok::l_paren:
+    unsupported("enumerated types are");
+    return nullptr;
+  case tok::integer_literal:
+  case tok::string_literal:
+  case tok::minus:
+  case tok::plus:
+    unsupported("subrange types are");
+    return nullptr;
+  default:
+    Diags.error(Tok.getLocation(), "expected type");
+    return nullptr;
+  }
 }
 
 //===----------------------------------------------------------------------===//
@@ -210,13 +296,13 @@ CompoundStmt *Parser::parseCompoundStmt() {
 }
 
 //===----------------------------------------------------------------------===//
-// statement = [ procCall | compound ] .
+// statement = [ assignment | procCall | compound ] .
 //===----------------------------------------------------------------------===//
 
 Stmt *Parser::parseStatement() {
   switch (Tok.getKind()) {
   case tok::identifier:
-    return parseProcCall();
+    return parseAssignmentOrCall();
   case tok::kw_begin:
     return parseCompoundStmt();
 
@@ -250,56 +336,216 @@ Stmt *Parser::parseStatement() {
   return Ctx.create<EmptyStmt>(L);
 }
 
-//===----------------------------------------------------------------------===//
-// procCall = ident [ "(" expression { "," expression } ")" ] .
-//===----------------------------------------------------------------------===//
-
-Stmt *Parser::parseProcCall() {
-  Identifier Callee = makeIdentifier(Tok);
+// assignment = ident ":=" expression .
+// procCall   = ident [ "(" actualParam { "," actualParam } ")" ] .
+Stmt *Parser::parseAssignmentOrCall() {
+  Identifier Name = makeIdentifier(Tok);
   SourceLocation Start = consumeToken();
 
-  if (Tok.isOneOf(tok::colon_equal, tok::l_square, tok::period, tok::caret)) {
-    unsupported("assignment statements are");
+  if (Tok.isOneOf(tok::l_square, tok::period, tok::caret)) {
+    unsupported(Tok.is(tok::l_square) ? "array indexing is"
+                : Tok.is(tok::period) ? "record field access is"
+                                      : "pointer dereferencing is");
     skipUntil({tok::semi, tok::kw_end});
     return Ctx.create<EmptyStmt>(Start);
   }
 
-  llvm::SmallVector<Expr *, 4> Args;
-  bool HasParens = false;
-  if (Tok.is(tok::l_paren)) {
-    HasParens = true;
-    SourceLocation LParen = consumeToken();
-    if (Tok.is(tok::r_paren)) {
-      Diags.error(Tok.getLocation(), "expected expression",
-                  {SourceRange(LParen, Tok.getEndLocation())});
-      Diags.note(LParen, "an empty argument list '()' is not allowed; "
-                         "omit the parentheses");
-    } else {
-      do {
-        if (Expr *E = parseExpression()) {
-          Args.push_back(E);
-          if (Tok.is(tok::colon)) {
-            unsupported("field width specifiers are");
-            skipUntil({tok::comma, tok::r_paren, tok::semi, tok::kw_end});
-          }
-        } else {
-          skipUntil({tok::comma, tok::r_paren, tok::semi, tok::kw_end});
-        }
-      } while (tryConsume(tok::comma));
+  // Common slip: '=' where ':=' was meant. Report it, then parse the
+  // statement as an assignment anyway.
+  if (Tok.is(tok::equal))
+    Diags.error(Tok.getLocation(), "expected ':=' in assignment, found '='",
+                {Tok.getRange()});
+
+  if (Tok.isOneOf(tok::colon_equal, tok::equal)) {
+    SourceLocation AssignLoc = consumeToken();
+    auto *Target = Ctx.create<NameRefExpr>(Name);
+    Expr *Value = parseExpression();
+    if (!Value) {
+      skipUntil({tok::semi, tok::kw_end});
+      return Ctx.create<EmptyStmt>(Start);
     }
-    if (!expect(tok::r_paren, "after arguments"))
-      Diags.note(LParen, "to match this '('");
+    return Ctx.create<AssignStmt>(SourceRange(Start, PrevTokEnd), Target,
+                                  AssignLoc, Value);
   }
 
-  return Ctx.create<ProcCallStmt>(SourceRange(Start, PrevTokEnd), Callee,
+  llvm::SmallVector<Expr *, 4> Args;
+  bool HasParens = Tok.is(tok::l_paren);
+  if (HasParens)
+    parseActualParams(Args, /*AllowFormat=*/true);
+
+  return Ctx.create<ProcCallStmt>(SourceRange(Start, PrevTokEnd), Name,
                                   Ctx.copyArray<Expr *>(Args), HasParens);
 }
 
+bool Parser::parseActualParams(llvm::SmallVectorImpl<Expr *> &Args,
+                               bool AllowFormat) {
+  SourceLocation LParen = consumeToken(); // '('
+  if (Tok.is(tok::r_paren)) {
+    Diags.error(Tok.getLocation(), "expected expression",
+                {SourceRange(LParen, Tok.getEndLocation())});
+    Diags.note(LParen, "an empty argument list '()' is not allowed; "
+                       "omit the parentheses");
+    consumeToken();
+    return false;
+  }
+
+  do {
+    Expr *E = parseExpression();
+    if (!E) {
+      skipUntil({tok::comma, tok::r_paren, tok::semi, tok::kw_end});
+      continue;
+    }
+    if (AllowFormat && Tok.is(tok::colon)) {
+      consumeToken();
+      Expr *Width = parseExpression();
+      Expr *Precision = nullptr;
+      bool OK = Width != nullptr;
+      if (OK && tryConsume(tok::colon)) {
+        Precision = parseExpression();
+        OK = Precision != nullptr;
+      }
+      if (!OK) {
+        skipUntil({tok::comma, tok::r_paren, tok::semi, tok::kw_end});
+        continue;
+      }
+      E = Ctx.create<FormattedExpr>(SourceRange(E->getBeginLoc(), PrevTokEnd),
+                                    E, Width, Precision);
+    }
+    Args.push_back(E);
+  } while (tryConsume(tok::comma));
+
+  if (!expect(tok::r_paren, "after arguments")) {
+    Diags.note(LParen, "to match this '('");
+    return false;
+  }
+  return true;
+}
+
 //===----------------------------------------------------------------------===//
-// expression = integerLiteral | stringLiteral .
+// Expressions
 //===----------------------------------------------------------------------===//
 
+std::optional<BinaryOp> Parser::peekRelOp() const {
+  switch (Tok.getKind()) {
+  case tok::equal:         return BinaryOp::Eq;
+  case tok::not_equal:     return BinaryOp::Ne;
+  case tok::less:          return BinaryOp::Lt;
+  case tok::less_equal:    return BinaryOp::Le;
+  case tok::greater:       return BinaryOp::Gt;
+  case tok::greater_equal: return BinaryOp::Ge;
+  case tok::kw_in:         return BinaryOp::In;
+  default:                 return std::nullopt;
+  }
+}
+
+std::optional<BinaryOp> Parser::peekAddOp() const {
+  switch (Tok.getKind()) {
+  case tok::plus:  return BinaryOp::Add;
+  case tok::minus: return BinaryOp::Sub;
+  case tok::kw_or: return BinaryOp::Or;
+  default:         return std::nullopt;
+  }
+}
+
+std::optional<BinaryOp> Parser::peekMulOp() const {
+  switch (Tok.getKind()) {
+  case tok::star:   return BinaryOp::Mul;
+  case tok::slash:  return BinaryOp::RealDiv;
+  case tok::kw_div: return BinaryOp::IntDiv;
+  case tok::kw_mod: return BinaryOp::Mod;
+  case tok::kw_and: return BinaryOp::And;
+  default:          return std::nullopt;
+  }
+}
+
+static Expr *makeBinary(ASTContext &Ctx, BinaryOp Op, SourceLocation OpLoc,
+                        Expr *L, Expr *R) {
+  SourceRange Range(L->getBeginLoc(), R->getRange().getEnd());
+  return Ctx.create<BinaryExpr>(Range, Op, OpLoc, L, R);
+}
+
+// expression = simpleExpr [ relOp simpleExpr ] .
 Expr *Parser::parseExpression() {
+  Expr *LHS = parseSimpleExpression();
+  if (!LHS)
+    return nullptr;
+
+  auto Op = peekRelOp();
+  if (!Op)
+    return LHS;
+  SourceLocation OpLoc = consumeToken();
+  Expr *RHS = parseSimpleExpression();
+  if (!RHS)
+    return nullptr;
+  Expr *Result = makeBinary(Ctx, *Op, OpLoc, LHS, RHS);
+
+  // `a < b and c < d` parses as `a < (b and c)` followed by `< d`.
+  if (peekRelOp()) {
+    Diags.error(Tok.getLocation(), "comparison operators cannot be chained",
+                {Tok.getRange()});
+    if (auto *B = llvm::dyn_cast<BinaryExpr>(RHS);
+        B && (B->getOp() == BinaryOp::And || B->getOp() == BinaryOp::Or))
+      Diags.note(B->getOpLoc(),
+                 llvm::Twine("'") + getOpSpelling(B->getOp()) +
+                     "' binds more tightly than comparison operators; use "
+                     "parentheses, e.g. '(a < b) " + getOpSpelling(B->getOp()) +
+                     " (c < d)'");
+    // Recover: consume the rest of the chain.
+    while (peekRelOp()) {
+      consumeToken();
+      if (!parseSimpleExpression())
+        return nullptr;
+    }
+  }
+  return Result;
+}
+
+// simpleExpr = [ "+" | "-" ] term { addOp term } .
+Expr *Parser::parseSimpleExpression() {
+  Expr *LHS;
+  if (Tok.isOneOf(tok::plus, tok::minus)) {
+    // ISO: the sign applies to the whole first term: -a*b == -(a*b).
+    UnaryOp Op = Tok.is(tok::plus) ? UnaryOp::Plus : UnaryOp::Minus;
+    SourceLocation OpLoc = consumeToken();
+    Expr *Operand = parseTerm();
+    if (!Operand)
+      return nullptr;
+    LHS = Ctx.create<UnaryExpr>(SourceRange(OpLoc, Operand->getRange().getEnd()),
+                                Op, Operand);
+  } else {
+    LHS = parseTerm();
+  }
+  if (!LHS)
+    return nullptr;
+
+  while (auto Op = peekAddOp()) {
+    SourceLocation OpLoc = consumeToken();
+    Expr *RHS = parseTerm();
+    if (!RHS)
+      return nullptr;
+    LHS = makeBinary(Ctx, *Op, OpLoc, LHS, RHS);
+  }
+  return LHS;
+}
+
+// term = factor { mulOp factor } .
+Expr *Parser::parseTerm() {
+  Expr *LHS = parseFactor();
+  if (!LHS)
+    return nullptr;
+  while (auto Op = peekMulOp()) {
+    SourceLocation OpLoc = consumeToken();
+    Expr *RHS = parseFactor();
+    if (!RHS)
+      return nullptr;
+    LHS = makeBinary(Ctx, *Op, OpLoc, LHS, RHS);
+  }
+  return LHS;
+}
+
+// factor = unsignedConst | ident | ident "(" exprList ")"
+//        | "(" expression ")" | "not" factor .
+Expr *Parser::parseFactor() {
   switch (Tok.getKind()) {
   case tok::integer_literal: {
     auto *E = Ctx.create<IntegerLiteralExpr>(Tok.getRange(),
@@ -313,16 +559,69 @@ Expr *Parser::parseExpression() {
     consumeToken();
     return E;
   }
-  // Valid starts of expressions that later milestones implement.
-  case tok::identifier:
-  case tok::real_literal:
-  case tok::l_paren:
-  case tok::l_square:
+  case tok::identifier: {
+    Identifier Name = makeIdentifier(Tok);
+    consumeToken();
+    if (Tok.is(tok::l_paren)) {
+      llvm::SmallVector<Expr *, 4> Args;
+      if (!parseActualParams(Args, /*AllowFormat=*/false) && Args.empty())
+        return nullptr;
+      return Ctx.create<CallExpr>(SourceRange(Name.Loc, PrevTokEnd), Name,
+                                  Ctx.copyArray<Expr *>(Args));
+    }
+    if (Tok.isOneOf(tok::l_square, tok::period, tok::caret)) {
+      unsupported(Tok.is(tok::l_square) ? "array indexing is"
+                  : Tok.is(tok::period) ? "record field access is"
+                                        : "pointer dereferencing is");
+      return nullptr;
+    }
+    return Ctx.create<NameRefExpr>(Name);
+  }
+  case tok::l_paren: {
+    SourceLocation LParen = consumeToken();
+    Expr *Inner = parseExpression();
+    if (!Inner)
+      return nullptr;
+    if (!expect(tok::r_paren, "after expression")) {
+      Diags.note(LParen, "to match this '('");
+      return nullptr;
+    }
+    return Ctx.create<ParenExpr>(SourceRange(LParen, PrevTokEnd), Inner);
+  }
+  case tok::kw_not: {
+    SourceLocation OpLoc = consumeToken();
+    Expr *Operand = parseFactor();
+    if (!Operand)
+      return nullptr;
+    return Ctx.create<UnaryExpr>(
+        SourceRange(OpLoc, Operand->getRange().getEnd()), UnaryOp::Not, Operand);
+  }
   case tok::plus:
-  case tok::minus:
-  case tok::kw_not:
+  case tok::minus: {
+    // A sign inside a term (`a * -b`). ISO only allows a sign at the start of
+    // a simple expression; Turbo/FPC accept it anywhere.
+    if (LangOpts.Mode == LangMode::ISO)
+      Diags.error(Tok.getLocation(),
+                  "a sign is not allowed here in ISO Pascal; use parentheses",
+                  {Tok.getRange()});
+    UnaryOp Op = Tok.is(tok::plus) ? UnaryOp::Plus : UnaryOp::Minus;
+    SourceLocation OpLoc = consumeToken();
+    Expr *Operand = parseFactor();
+    if (!Operand)
+      return nullptr;
+    return Ctx.create<UnaryExpr>(
+        SourceRange(OpLoc, Operand->getRange().getEnd()), Op, Operand);
+  }
+  case tok::real_literal:
+    unsupported("real numbers are");
+    consumeToken();
+    return nullptr;
   case tok::kw_nil:
-    unsupported("this kind of expression is");
+    unsupported("'nil' is");
+    consumeToken();
+    return nullptr;
+  case tok::l_square:
+    unsupported("set constructors are");
     return nullptr;
   default:
     Diags.error(Tok.getLocation(), "expected expression");

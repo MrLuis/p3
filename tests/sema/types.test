@@ -1,0 +1,47 @@
+; Name resolution and type checking (M4).
+; RUN: not %pcc -ferror-limit=0 -c %S/Inputs/types.pas -o %t.o 2>&1 | FileCheck %s
+
+; Declarations
+; CHECK: types.pas:3:5: error: redefinition of 'i'
+; CHECK: types.pas:2:5: note: previous definition is here
+; CHECK: types.pas:4:8: error: type 'real' is not supported yet
+; CHECK: types.pas:5:8: error: unknown type name 'intger'
+; CHECK: types.pas:6:8: error: 'writeln' is a procedure, not a type
+
+; Assignment compatibility and operators
+; CHECK: types.pas:8:5: error: assigning to 'integer' from incompatible type 'boolean'
+; CHECK: types.pas:9:5: error: assigning to 'char' from incompatible type 'string'
+; CHECK: types.pas:10:10: error: invalid operands to '+' ('integer' and 'char')
+; CHECK: types.pas:11:10: error: real division '/' is not supported yet; use 'div' for integer division
+; CHECK: types.pas:12:8: error: invalid operand to '-' ('boolean')
+; CHECK: types.pas:13:8: error: invalid operand to 'not' ('integer')
+
+; Builtin functions
+; CHECK: types.pas:14:12: error: 'abs' expects an integer argument, not 'char'
+; CHECK: types.pas:15:12: error: 'chr' expects an integer argument, not 'char'
+; CHECK: types.pas:16:8: error: 'ord' expects 1 argument, got 2
+
+; Assignment targets, write/read arguments
+; CHECK: types.pas:17:3: error: cannot assign to constant 'maxint'
+; CHECK: types.pas:18:13: error: field width must be an integer, not 'char'
+; CHECK: types.pas:18:22: error: a precision (':n') is only allowed for real values
+; CHECK: types.pas:19:8: error: cannot read a value of type 'boolean' (only integer and char are supported yet)
+; CHECK: types.pas:19:11: error: argument to 'read' must be a variable
+; CHECK: types.pas:19:14: error: argument to 'read' must be a variable
+
+; Misused names
+; CHECK: types.pas:20:3: error: function 'abs' cannot be called as a statement; use its result
+; CHECK: types.pas:21:3: error: 'i' is a variable, not a procedure
+; CHECK: types.pas:2:5: note: 'i' declared here
+; CHECK: types.pas:22:8: error: procedure 'writeln' does not return a value
+; CHECK: types.pas:23:8: error: missing argument in call to 'abs'
+; CHECK: types.pas:24:3: error: use of undeclared identifier 'x'
+; CHECK: types.pas:25:8: error: 'integer' is a type, not a value
+; CHECK: types.pas:26:8: error: 'sqrt' is not supported yet
+; CHECK: types.pas:27:10: error: invalid operands to '=' ('integer' and 'char')
+; CHECK-NOT: error:
+
+; Predeclared names can be redefined in the program block.
+; RUN: %pcc --emit-ast %S/Inputs/shadow.pas | FileCheck --check-prefix=SHADOW %s
+; SHADOW: VarDecl 'integer' : char
+; SHADOW: NameRefExpr 'integer' variable : char

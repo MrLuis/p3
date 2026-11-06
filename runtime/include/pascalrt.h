@@ -28,9 +28,21 @@ void __pas_fini(void);
 void __pas_write_str(const char *s, int64_t len, int32_t width);
 void __pas_write_char(char c, int32_t width);
 void __pas_write_int(int32_t v, int32_t width);
+void __pas_write_bool(int32_t b, int32_t width); /* "true" / "false" */
 void __pas_writeln(void);
 
-/* Reports a runtime error and terminates with exit status 2. */
+/* read / readln on the standard file `input` (ISO 7185 6.9.1, 6.9.2).
+ * read_int skips blanks and line ends, then reads an optionally signed
+ * decimal integer; it is a runtime error if none follows or it overflows.
+ * read_char returns the next character; the end of a line reads as ' '.
+ * readln skips to the start of the next line. Reading past the end of the
+ * file is a runtime error. */
+int32_t __pas_read_int(void);
+char __pas_read_char(void);
+void __pas_readln(void);
+
+/* Reports a runtime error and terminates with exit status 2. The compiler
+ * passes messages like "division by zero at prog.pas:12:9". */
 void __pas_runtime_error(const char *msg) __attribute__((noreturn));
 
 #ifdef __cplusplus

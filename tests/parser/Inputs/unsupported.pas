@@ -1,8 +1,8 @@
 program p;
-var x: integer;
+const n = 1;
 begin
-  x := 1;
   if 1 then writeln;
-  writeln(-1);
-  writeln(1:5)
+  x := 1.5;
+  a[1] := 2;
+  writeln(nil)
 end.

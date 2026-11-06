@@ -15,6 +15,7 @@ add_library(pccLexer STATIC
 target_link_libraries(pccLexer PUBLIC pccBasic)
 
 add_library(pccAST STATIC
+  ast/AST.cpp
   ast/ASTPrinter.cpp
 )
 target_link_libraries(pccAST PUBLIC pccBasic)

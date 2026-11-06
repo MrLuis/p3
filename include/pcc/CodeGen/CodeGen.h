@@ -15,13 +15,17 @@ class TargetMachine;
 namespace pcc {
 
 class ProgramDecl;
+class SourceManager;
+struct LangOptions;
 
 /// Lowers a Sema-checked program to an LLVM module for TM's target.
-/// The program body becomes `int main(int argc, char **argv)`.
-std::unique_ptr<llvm::Module> generateModule(ProgramDecl &P,
-                                             llvm::LLVMContext &Ctx,
-                                             llvm::TargetMachine &TM,
-                                             llvm::StringRef SourceFileName);
+/// The program body becomes `int main(int argc, char **argv)`; program
+/// variables become internal globals. SM is used to put source locations
+/// into runtime error messages.
+std::unique_ptr<llvm::Module>
+generateModule(ProgramDecl &P, const SourceManager &SM,
+               const LangOptions &LangOpts, llvm::LLVMContext &Ctx,
+               llvm::TargetMachine &TM, llvm::StringRef SourceFileName);
 
 } // namespace pcc
 

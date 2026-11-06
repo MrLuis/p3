@@ -1,0 +1,35 @@
+//===- Builtins.def - Predeclared procedures and functions --------*- C++ -*-===//
+//
+// Required procedures/functions of ISO 7185 6.6.5-6.6.6 that are implemented.
+// Names listed in PLAN.md 4.5 but not here yet are reported as
+// "not supported yet" by Sema (see FutureBuiltins in Sema.cpp).
+//
+//   BUILTIN_PROC(ID, NAME)   used as a statement
+//   BUILTIN_FUNC(ID, NAME)   used in an expression
+//
+//===----------------------------------------------------------------------===//
+
+#ifndef BUILTIN_PROC
+#define BUILTIN_PROC(ID, NAME)
+#endif
+#ifndef BUILTIN_FUNC
+#define BUILTIN_FUNC(ID, NAME)
+#endif
+
+// I/O on the standard files (M2/M4). Files proper: M10.
+BUILTIN_PROC(Write,   "write")
+BUILTIN_PROC(Writeln, "writeln")
+BUILTIN_PROC(Read,    "read")
+BUILTIN_PROC(Readln,  "readln")
+
+// Arithmetic / ordinal functions (M4). Real versions of abs/sqr: M7.
+BUILTIN_FUNC(Abs,  "abs")
+BUILTIN_FUNC(Sqr,  "sqr")
+BUILTIN_FUNC(Odd,  "odd")
+BUILTIN_FUNC(Ord,  "ord")
+BUILTIN_FUNC(Chr,  "chr")
+BUILTIN_FUNC(Succ, "succ")
+BUILTIN_FUNC(Pred, "pred")
+
+#undef BUILTIN_FUNC
+#undef BUILTIN_PROC

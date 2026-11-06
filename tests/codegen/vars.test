@@ -1,0 +1,26 @@
+; M4 lowering: globals, boolean storage as i8, signed vs unsigned compares,
+; runtime-checked div.
+; RUN: %pcc --emit-llvm %S/Inputs/vars.pas -o - | FileCheck %s
+; CHECK-DAG: @x = internal global i32 0
+; CHECK-DAG: @b = internal global i8 0
+; CHECK-DAG: @c = internal global i8 0
+; CHECK-DAG: @.rterr = private unnamed_addr constant {{.*}} c"division by zero at {{.*}}vars.pas:8:10\00"
+; CHECK: declare void @__pas_runtime_error(ptr) #[[ATTR:[0-9]+]]
+; CHECK: define i32 @main(
+; CHECK:   store i32 1, ptr @x
+; CHECK:   [[X:%.*]] = load i32, ptr @x
+; CHECK:   [[CMP:%.*]] = icmp slt i32 [[X]], 2
+; CHECK:   [[B:%.*]] = zext i1 [[CMP]] to i8
+; CHECK:   store i8 [[B]], ptr @b
+; CHECK:   icmp ugt i8 {{%.*}}, 97
+; A constant non-zero divisor needs no checks:
+; CHECK-NOT: rt.error
+; CHECK:   sdiv i32 {{%.*}}, 3
+; A variable divisor is checked:
+; CHECK:   icmp eq i32 {{%.*}}, 0
+; CHECK:   br i1 {{%.*}}, label %rt.error, label %rt.ok, !prof
+; CHECK: rt.error:
+; CHECK:   call void @__pas_runtime_error(ptr @.rterr)
+; CHECK-NEXT: unreachable
+; CHECK:   sdiv i32 {{%.*}}, {{%x[0-9]+}}
+; CHECK: attributes #[[ATTR]] = { cold noreturn nounwind }

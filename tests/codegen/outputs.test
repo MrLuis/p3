@@ -3,9 +3,10 @@
 
 ; RUN: %pcc -c %S/../driver/Inputs/hello.pas -o %t.dir/hello.o
 ; RUN: llvm-nm %t.dir/hello.o | FileCheck --check-prefix=OBJ %s
-; OBJ-DAG: T main
-; OBJ-DAG: U __pas_init
-; OBJ-DAG: U __pas_write_str
+; Mach-O (macOS) prefixes C symbols with '_'.
+; OBJ-DAG: T {{_?}}main
+; OBJ-DAG: U {{_?}}__pas_init
+; OBJ-DAG: U {{_?}}__pas_write_str
 
 ; RUN: %pcc -S %S/../driver/Inputs/hello.pas -o %t.dir/hello.s
 ; RUN: FileCheck --check-prefix=ASM %s < %t.dir/hello.s

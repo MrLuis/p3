@@ -1,0 +1,33 @@
+; Runtime errors print "Runtime error: <what> at <file>:<line>:<col>" on
+; stderr and exit with status 2; earlier output is flushed first.
+
+; RUN: %pcc %S/Inputs/div0.pas -o %t.div0
+; RUN: not %t.div0 > %t.div0.out 2> %t.div0.err
+; RUN: FileCheck --check-prefix=OUT %s < %t.div0.out
+; RUN: FileCheck --check-prefix=DIV0 %s < %t.div0.err
+; OUT: before
+; DIV0: Runtime error: division by zero at {{.*}}div0.pas:6:13
+
+; ISO: `mod` by a non-positive number is an error; Turbo/FPC follow C.
+; RUN: %pcc %S/Inputs/modneg.pas -o %t.modneg
+; RUN: not %t.modneg 2>&1 | FileCheck --check-prefix=MOD-ISO %s
+; MOD-ISO: Runtime error: 'mod' by zero or a negative number at {{.*}}modneg.pas:5:13
+; RUN: %pcc --mode=tp %S/Inputs/modneg.pas -o %t.modneg.tp
+; RUN: %t.modneg.tp | FileCheck --check-prefix=MOD-TP %s
+; MOD-TP: 1
+
+; -2147483648 div -1 does not fit in an integer (and would trap on x86).
+; RUN: %pcc %S/Inputs/divoverflow.pas -o %t.ovf
+; RUN: not %t.ovf 2>&1 | FileCheck --check-prefix=OVF %s
+; OVF: Runtime error: integer overflow in 'div' at {{.*}}divoverflow.pas:5:13
+
+; Bad input.
+; RUN: %pcc %S/Inputs/readint.pas -o %t.read
+; RUN: echo "  -2147483648" | %t.read | FileCheck --check-prefix=MININT %s
+; MININT: -2147483648
+; RUN: echo "abc" | not %t.read 2>&1 | FileCheck --check-prefix=BAD %s
+; BAD: Runtime error: invalid integer in input
+; RUN: echo "2147483648" | not %t.read 2>&1 | FileCheck --check-prefix=RANGE %s
+; RANGE: Runtime error: integer in input is out of range
+; RUN: not %t.read < %S/Inputs/empty.input 2>&1 | FileCheck --check-prefix=EOF %s
+; EOF: Runtime error: unexpected end of file while reading an integer

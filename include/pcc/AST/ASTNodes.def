@@ -15,14 +15,21 @@
 #define STMT(CLASS)
 #endif
 
-// Expressions (M2). M4 adds names, unary/binary operators, function calls.
-EXPR(IntegerLiteral)
-EXPR(StringLiteral)
+// Expressions
+EXPR(IntegerLiteral)  // 42
+EXPR(StringLiteral)   // 'abc', 'c'
+EXPR(NameRef)         // x, maxint, true                       (M4)
+EXPR(Paren)           // ( e )                                 (M4)
+EXPR(Unary)           // -e, +e, not e                         (M4)
+EXPR(Binary)          // a + b, a div b, a < b, a and b, ...   (M4)
+EXPR(Call)            // abs(x), ord(c)                        (M4)
+EXPR(Formatted)       // e:width[:precision] in write/writeln  (M4)
 
-// Statements (M2). M4 adds assignment; M5 if/while/repeat/for/case.
+// Statements
 STMT(Empty)
 STMT(Compound)
 STMT(ProcCall)
+STMT(Assign)          // x := e                                (M4)
 
 #undef STMT
 #undef EXPR

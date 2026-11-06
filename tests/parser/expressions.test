@@ -1,0 +1,35 @@
+; M4 expressions and declarations.
+
+; ISO precedence: not > multiplying (* div mod and) > adding (+ - or) >
+; relational; a leading sign applies to the whole first term.
+; RUN: %pcc --emit-ast %S/Inputs/precedence.pas -o %t.ast
+; RUN: diff %S/Inputs/precedence.ast %t.ast
+
+; `a < b and c < d` is the classic Pascal precedence trap.
+; RUN: not %pcc --emit-ast %S/Inputs/chained.pas 2>&1 >/dev/null | FileCheck --check-prefix=CHAIN %s
+; CHAIN: chained.pas:4:21: error: comparison operators cannot be chained
+; CHAIN: chained.pas:4:15: note: 'and' binds more tightly than comparison operators; use parentheses, e.g. '(a < b) and (c < d)'
+
+; A sign inside a term is an error in ISO mode but fine in TP mode.
+; RUN: not %pcc --emit-ast %S/Inputs/sign.pas 2>&1 >/dev/null | FileCheck --check-prefix=SIGN %s
+; RUN: %pcc --mode=tp --emit-ast %S/Inputs/sign.pas | FileCheck --check-prefix=SIGN-TP %s
+; SIGN: sign.pas:4:12: error: a sign is not allowed here in ISO Pascal; use parentheses
+; SIGN-TP: BinaryExpr '*'
+; SIGN-TP: UnaryExpr '-'
+
+; RUN: not %pcc --emit-ast %S/Inputs/eq-assign.pas 2>&1 >/dev/null | FileCheck --check-prefix=EQ %s
+; EQ: eq-assign.pas:4:5: error: expected ':=' in assignment, found '='
+
+; ISO allows one var section per block; Turbo/FPC allow several.
+; RUN: not %pcc --emit-ast %S/Inputs/two-var.pas 2>&1 >/dev/null | FileCheck --check-prefix=TWOVAR %s
+; RUN: %pcc --mode=tp --emit-ast %S/Inputs/two-var.pas | FileCheck --check-prefix=TWOVAR-TP %s
+; TWOVAR: two-var.pas:3:1: error: ISO Pascal allows only one 'var' section per block
+; TWOVAR-TP: VarDecl 'a' : integer
+; TWOVAR-TP: VarDecl 'b' : char
+
+; Structured / enumerated / subrange types come later.
+; RUN: not %pcc --emit-ast %S/Inputs/var-types.pas 2>&1 >/dev/null | FileCheck --check-prefix=TYPES %s
+; TYPES: var-types.pas:2:8: error: 'array' types are not supported yet
+; TYPES: var-types.pas:3:8: error: pointer types are not supported yet
+; TYPES: var-types.pas:4:8: error: enumerated types are not supported yet
+; TYPES: var-types.pas:5:8: error: subrange types are not supported yet

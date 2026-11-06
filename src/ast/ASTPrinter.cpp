@@ -1,5 +1,18 @@
+//===- ASTPrinter.cpp - --emit-ast ----------------------------------------===//
+//
+// One node per line, indented by depth:
+//
+//   BinaryExpr '+' : integer <3:10>
+//   ^node       ^detail ^type  ^location
+//
+// Types appear once Sema has run (i.e. when the program has no syntax
+// errors).
+//
+//===----------------------------------------------------------------------===//
+
 #include "pcc/AST/ASTPrinter.h"
 #include "pcc/AST/ASTVisitor.h"
+#include "pcc/AST/Type.h"
 #include "pcc/Basic/SourceManager.h"
 
 #include "llvm/Support/raw_ostream.h"
@@ -8,7 +21,8 @@ using namespace pcc;
 
 namespace {
 
-class ASTPrinter : public StmtVisitor<ASTPrinter>, public ExprVisitor<ASTPrinter> {
+class ASTPrinter : public StmtVisitor<ASTPrinter>,
+                   public ExprVisitor<ASTPrinter> {
   const SourceManager &SM;
   llvm::raw_ostream &OS;
   unsigned Indent = 0;
@@ -22,6 +36,10 @@ class ASTPrinter : public StmtVisitor<ASTPrinter>, public ExprVisitor<ASTPrinter
   llvm::raw_ostream &line(llvm::StringRef NodeName) {
     return OS.indent(Indent) << NodeName;
   }
+  void type(Type *T) {
+    if (T)
+      OS << " : " << T->getName();
+  }
   void loc(SourceLocation L) {
     PresumedLoc P = SM.getPresumedLoc(L);
     if (P.isValid())
@@ -29,6 +47,10 @@ class ASTPrinter : public StmtVisitor<ASTPrinter>, public ExprVisitor<ASTPrinter
     else
       OS << " <invalid>";
     OS << '\n';
+  }
+  void end(Expr *E) {
+    type(E->getType());
+    loc(E->getBeginLoc());
   }
   void quoted(llvm::StringRef S) {
     OS << '"';
@@ -47,9 +69,19 @@ public:
       line("ProgramParam '") << Param.Name << '\'';
       loc(Param.Loc);
     }
-    if (Block *B = P.getBlock())
-      if (B->getBody())
-        visitStmt(B->getBody());
+    Block *B = P.getBlock();
+    if (!B)
+      return;
+    for (VarDecl *V : B->getVars()) {
+      line("VarDecl '") << V->getName().Name << '\'';
+      if (V->getType())
+        type(V->getType());
+      else if (auto *N = llvm::dyn_cast<NamedTypeSpec>(V->getTypeSpec()))
+        OS << " : '" << N->getName().Spelling << '\'';
+      loc(V->getLocation());
+    }
+    if (B->getBody())
+      visitStmt(B->getBody());
   }
 
   // Statements
@@ -71,16 +103,64 @@ public:
     for (Expr *Arg : S->getArgs())
       visitExpr(Arg);
   }
+  void visitAssignStmt(AssignStmt *S) {
+    line("AssignStmt");
+    loc(S->getBeginLoc());
+    IndentScope I(Indent);
+    visitExpr(S->getTarget());
+    visitExpr(S->getValue());
+  }
 
   // Expressions
   void visitIntegerLiteralExpr(IntegerLiteralExpr *E) {
     line("IntegerLiteralExpr ") << E->getValue();
-    loc(E->getBeginLoc());
+    end(E);
   }
   void visitStringLiteralExpr(StringLiteralExpr *E) {
     line(E->isCharLiteral() ? "CharLiteralExpr " : "StringLiteralExpr ");
     quoted(E->getValue());
-    loc(E->getBeginLoc());
+    end(E);
+  }
+  void visitNameRefExpr(NameRefExpr *E) {
+    line("NameRefExpr '") << E->getName().Name << '\'';
+    if (Decl *D = E->getDecl())
+      OS << ' ' << D->getKindName();
+    end(E);
+  }
+  void visitParenExpr(ParenExpr *E) {
+    line("ParenExpr");
+    end(E);
+    IndentScope I(Indent);
+    visitExpr(E->getInner());
+  }
+  void visitUnaryExpr(UnaryExpr *E) {
+    line("UnaryExpr '") << getOpSpelling(E->getOp()) << '\'';
+    end(E);
+    IndentScope I(Indent);
+    visitExpr(E->getOperand());
+  }
+  void visitBinaryExpr(BinaryExpr *E) {
+    line("BinaryExpr '") << getOpSpelling(E->getOp()) << '\'';
+    end(E);
+    IndentScope I(Indent);
+    visitExpr(E->getLHS());
+    visitExpr(E->getRHS());
+  }
+  void visitCallExpr(CallExpr *E) {
+    line("CallExpr '") << E->getCallee().Name << '\'';
+    end(E);
+    IndentScope I(Indent);
+    for (Expr *Arg : E->getArgs())
+      visitExpr(Arg);
+  }
+  void visitFormattedExpr(FormattedExpr *E) {
+    line("FormattedExpr");
+    end(E);
+    IndentScope I(Indent);
+    visitExpr(E->getValue());
+    visitExpr(E->getWidth());
+    if (E->getPrecision())
+      visitExpr(E->getPrecision());
   }
 };
 

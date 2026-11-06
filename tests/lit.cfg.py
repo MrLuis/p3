@@ -21,6 +21,10 @@ config.test_exec_root = os.path.join(config.pcc_obj_root, "tests")
 for d in (config.llvm_tools_dir, config.pcc_tools_dir):
     config.environment["PATH"] = os.pathsep.join((d, config.environment["PATH"]))
 
+# RUN lines say `FileCheck`; point that at whichever implementation CMake
+# found (LLVM's, or the Python port `filecheck`).
+config.substitutions.append((r"\bFileCheck\b", config.filecheck))
+
 config.substitutions.append(("%pcc-unittests",
                              os.path.join(config.pcc_tools_dir, "pcc-unittests")))
 # Always disable colors so output is stable when run from a terminal.

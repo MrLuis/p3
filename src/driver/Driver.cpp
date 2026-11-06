@@ -150,19 +150,20 @@ bool Driver::runPipeline(FileID FID) {
   Parser P(Lex, Diags, Ctx);
   ProgramDecl *Program = P.parseProgram();
 
+  // --- M4: semantic analysis (skipped after syntax errors) ---------------
+  bool SyntaxOK = !Diags.hasErrors();
+  bool SemaOK = SyntaxOK && Sema(Ctx, Diags, LangOpts).check(*Program);
+
   if (Opts.Act == Action::EmitAST) {
-    // Dump even after errors: a partial tree helps debugging the parser.
+    // Dump even after errors: a partial tree helps debugging. Types are
+    // shown when Sema ran.
     auto OS = openTextOutput(Opts.OutputFile, Diags);
     if (!OS)
       return false;
     printAST(*Program, SM, *OS);
     return true;
   }
-  if (Diags.hasErrors())
-    return false;
-
-  // --- semantic analysis (minimal until M4) -------------------------------
-  if (!Sema(Diags).check(*Program))
+  if (!SemaOK)
     return false;
 
   // --- M3: code generation ------------------------------------------------
@@ -183,7 +184,7 @@ bool Driver::runPipeline(FileID FID) {
     return false;
 
   llvm::LLVMContext LLVMCtx;
-  auto M = generateModule(*Program, LLVMCtx, *TM,
+  auto M = generateModule(*Program, SM, LangOpts, LLVMCtx, *TM,
                           SM.getFilename(FID));
   if (!verifyModule(*M, Diags))
     return false;

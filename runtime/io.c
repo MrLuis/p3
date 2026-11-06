@@ -52,3 +52,64 @@ void __pas_runtime_error(const char *msg) {
   fprintf(stderr, "Runtime error: %s\n", msg);
   exit(2);
 }
+
+void __pas_write_bool(int32_t b, int32_t width) {
+  if (b)
+    __pas_write_str("true", 4, width);
+  else
+    __pas_write_str("false", 5, width);
+}
+
+/*===- Input ----------------------------------------------------------------===*/
+
+static int peek_input(void) {
+  int c = getchar();
+  if (c != EOF)
+    ungetc(c, stdin);
+  return c;
+}
+
+int32_t __pas_read_int(void) {
+  int c;
+  do
+    c = getchar();
+  while (c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\f' ||
+         c == '\v');
+  if (c == EOF)
+    __pas_runtime_error("unexpected end of file while reading an integer");
+
+  int negative = 0;
+  if (c == '+' || c == '-') {
+    negative = c == '-';
+    c = getchar();
+  }
+  if (c < '0' || c > '9')
+    __pas_runtime_error("invalid integer in input");
+
+  int64_t value = 0;
+  while (c >= '0' && c <= '9') {
+    value = value * 10 + (c - '0');
+    if (value > (int64_t)INT32_MAX + negative)
+      __pas_runtime_error("integer in input is out of range");
+    c = getchar();
+  }
+  if (c != EOF)
+    ungetc(c, stdin);
+  return (int32_t)(negative ? -value : value);
+}
+
+char __pas_read_char(void) {
+  int c = getchar();
+  if (c == EOF)
+    __pas_runtime_error("unexpected end of file while reading a char");
+  if (c == '\r' && peek_input() == '\n')
+    c = getchar(); /* CRLF counts as one line end */
+  return c == '\n' ? ' ' : (char)c;
+}
+
+void __pas_readln(void) {
+  int c;
+  do
+    c = getchar();
+  while (c != '\n' && c != EOF);
+}
