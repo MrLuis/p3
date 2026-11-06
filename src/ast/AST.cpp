@@ -54,6 +54,7 @@ const char *Decl::getKindName() const {
   case DK_Const:   return "constant";
   case DK_Type:    return "type";
   case DK_Field:   return "field";
+  case DK_Label:   return "label";
   case DK_Routine:
     return llvm::cast<RoutineDecl>(this)->isFunction() ? "function"
                                                        : "procedure";

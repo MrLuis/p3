@@ -42,6 +42,8 @@ STMT(Repeat)
 STMT(For)
 STMT(Case)
 STMT(With)            // with r1, r2 do s                      (M8)
+STMT(Labeled)         // 10: s                                 (M10)
+STMT(Goto)            // goto 10                               (M10)
 
 #undef STMT
 #undef EXPR

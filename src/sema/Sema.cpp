@@ -34,11 +34,8 @@ namespace {
 /// Predeclared names from PLAN.md 4.5 that later milestones implement. Using
 /// one gives "not supported yet" instead of "undeclared identifier".
 bool isFutureBuiltin(llvm::StringRef Name) {
-  static const llvm::StringSet<> Names = {
-      "text", "input", "output",                               // files (M10)
-      "reset", "rewrite", "get", "put", "page", "eof", "eoln", // files (M10)
-      "pack", "unpack"};                                       // M10
-  return Names.contains(Name);
+  (void)Name; // every name of PLAN.md 4.5 is implemented
+  return false;
 }
 
 /// A folded constant.
@@ -69,6 +66,22 @@ class Checker : public StmtVisitor<Checker>,
   llvm::SmallVector<std::pair<PointerTypeSpec *, PointerType *>, 4>
       PendingPointers;
 
+  // goto / labels (ISO 7185 6.8.1). Containers holds the enclosing statement
+  // sequences and labeled statements of the statement being checked; each
+  // goto remembers them and is validated once all labels are defined.
+  llvm::SmallVector<const void *, 16> Containers;
+  const void *DirectSequence = nullptr; ///< sequence of the current statement
+  CompoundStmt *RoutineBody = nullptr;  ///< outermost sequence of the block
+  struct PendingGoto {
+    GotoStmt *S;
+    llvm::SmallVector<const void *, 16> Containers;
+    RoutineDecl *From;
+  };
+  std::vector<PendingGoto> PendingGotos;
+  llvm::DenseMap<RoutineDecl *, unsigned> NonLocalLabelCount;
+
+  static std::string labelKey(llvm::StringRef Name) { return "#" + Name.str(); }
+
   Type *errorType() { return Ctx.getErrorType(); }
   bool isISO() const { return LangOpts.Mode == LangMode::ISO; }
 
@@ -90,6 +103,14 @@ class Checker : public StmtVisitor<Checker>,
     Ty("real", Ctx.getRealType());
     Ty("boolean", Ctx.getBooleanType());
     Ty("char", Ctx.getCharType());
+    Ty("text", Ctx.getTextType());
+
+    // The standard files (ISO 7185 6.10).
+    for (llvm::StringRef N : {"input", "output"}) {
+      auto *V = Ctx.create<VarDecl>(predeclaredName(N), nullptr);
+      V->setType(Ctx.getTextType());
+      Standard.insert(N, V);
+    }
 
     auto Const = [&](llvm::StringRef N, Type *T, int64_t V) {
       Standard.insert(N, Ctx.create<ConstDecl>(SourceLocation(),
@@ -140,7 +161,10 @@ class Checker : public StmtVisitor<Checker>,
 
   static std::string quoted(Type *T) { return "'" + T->getName() + "'"; }
 
+  /// Type-checks E once (later calls return the cached type).
   Type *check(Expr *E) {
+    if (Type *Cached = E->getType())
+      return Cached;
     Type *T = visitExpr(E);
     E->setType(T);
     return T;
@@ -171,6 +195,8 @@ class Checker : public StmtVisitor<Checker>,
 
   /// Can a value of type Value be assigned to a variable of type Target?
   static bool isAssignable(Type *Target, Type *Value) {
+    if (containsFile(Target) || containsFile(Value))
+      return false; // files cannot be copied
     if (Target == Value)
       return true;
     if (Target->isReal() && Value->isIntegerLike())
@@ -499,22 +525,43 @@ class Checker : public StmtVisitor<Checker>,
     }
 
     case TypeSpec::TS_Pointer: {
-      auto *PS = llvm::cast<PointerTypeSpec>(TS);
-      const Identifier &Id = PS->getTarget();
-      Decl *D = Cur->lookup(Id.Name);
-      if (!D) {
-        auto *P = Ctx.create<PointerType>(nullptr);
-        PendingPointers.push_back({PS, P});
-        return P;
+      // Always resolved at the end of the type section: `^T` binds to a T
+      // declared later in the same block even if an outer T is visible.
+      auto *P = Ctx.create<PointerType>(nullptr);
+      PendingPointers.push_back({llvm::cast<PointerTypeSpec>(TS), P});
+      return P;
+    }
+
+    case TypeSpec::TS_Routine: {
+      auto *RS = llvm::cast<RoutineTypeSpec>(TS);
+      for (VarDecl *P : RS->getParams())
+        P->setType(resolveType(P->getTypeSpec()));
+      Type *Result = nullptr;
+      if (RS->isFunction()) {
+        Result = resolveType(RS->getResult());
+        if (!Result->isError() && !Result->isValidResultType()) {
+          Diags.error(RS->getResult()->getBeginLoc(),
+                      "function result type must be a simple or pointer "
+                      "type, not " + quoted(Result),
+                      {RS->getResult()->getRange()});
+          Result = errorType();
+        }
       }
-      if (auto *TD = llvm::dyn_cast<TypeDecl>(D))
-        return Ctx.create<PointerType>(TD->getType() ? TD->getType()
-                                                     : errorType());
-      Diags.error(Id.Loc,
-                  "'" + Id.Spelling + "' is a " + D->getKindName() +
-                      ", not a type",
-                  {Id.getRange()});
-      return errorType();
+      return Ctx.create<RoutineType>(RS->getParams(), Result);
+    }
+
+    case TypeSpec::TS_File: {
+      auto *FS = llvm::cast<FileTypeSpec>(TS);
+      Type *Elem = resolveType(FS->getElement());
+      if (Elem->isError())
+        return errorType();
+      if (containsFile(Elem)) {
+        Diags.error(FS->getElement()->getBeginLoc(),
+                    "the components of a file cannot be files",
+                    {FS->getElement()->getRange()});
+        return errorType();
+      }
+      return Ctx.create<FileType>(Elem, false);
     }
 
     case TypeSpec::TS_Set: {
@@ -574,6 +621,7 @@ class Checker : public StmtVisitor<Checker>,
     for (FieldDecl *F : FL->Fixed) {
       F->setType(resolveType(F->getTypeSpec()));
       OK &= !F->getType()->isError();
+
       OK &= addField(F, All, Seen);
     }
     VariantPart *VP = FL->Variant;
@@ -630,6 +678,11 @@ class Checker : public StmtVisitor<Checker>,
     for (VarDecl *P : R->getParams()) {
       P->setOwner(R);
       P->setType(resolveType(P->getTypeSpec()));
+      if (!P->isVarParam() && containsFile(P->getType()))
+        Diags.error(P->getLocation(),
+                    "file parameter '" + P->getName().Spelling +
+                        "' must be a 'var' parameter",
+                    {P->getName().getRange()});
     }
     if (!R->isFunction())
       return;
@@ -740,13 +793,20 @@ class Checker : public StmtVisitor<Checker>,
   void resolvePendingPointers() {
     for (auto &[PS, P] : PendingPointers) {
       const Identifier &Id = PS->getTarget();
-      auto *TD = llvm::dyn_cast_or_null<TypeDecl>(Cur->lookup(Id.Name));
+      Decl *D = Cur->lookup(Id.Name);
+      auto *TD = llvm::dyn_cast_or_null<TypeDecl>(D);
       if (TD && TD->getType()) {
         P->setPointee(TD->getType());
         continue;
       }
-      Diags.error(Id.Loc, "unknown type name '" + Id.Spelling + "'",
-                  {Id.getRange()});
+      if (D)
+        Diags.error(Id.Loc,
+                    "'" + Id.Spelling + "' is a " + D->getKindName() +
+                        ", not a type",
+                    {Id.getRange()});
+      else
+        Diags.error(Id.Loc, "unknown type name '" + Id.Spelling + "'",
+                    {Id.getRange()});
       P->setPointee(errorType());
     }
     PendingPointers.clear();
@@ -763,6 +823,17 @@ class Checker : public StmtVisitor<Checker>,
       case Decl::DK_Type:    declareType(llvm::cast<TypeDecl>(D)); break;
       case Decl::DK_Var:     declareVar(llvm::cast<VarDecl>(D)); break;
       case Decl::DK_Routine: declareRoutine(llvm::cast<RoutineDecl>(D)); break;
+      case Decl::DK_Label: {
+        auto *L = llvm::cast<LabelDecl>(D);
+        L->setOwner(CurRoutine);
+        if (Decl *Prev = Cur->insert(labelKey(L->getName().Name), L)) {
+          Diags.error(L->getLocation(),
+                      "label " + L->getName().Name + " is declared twice",
+                      {L->getName().getRange()});
+          Diags.note(Prev->getLocation(), "previous declaration is here");
+        }
+        break;
+      }
       default: llvm_unreachable("unexpected declaration in block");
       }
     }
@@ -776,7 +847,53 @@ class Checker : public StmtVisitor<Checker>,
                     "'" + R->getName().Spelling +
                         "' is declared forward but never defined",
                     {R->getName().getRange()});
+    CompoundStmt *SavedBody = RoutineBody;
+    RoutineBody = B.getBody();
     visitStmt(B.getBody());
+    RoutineBody = SavedBody;
+
+    // ISO 7185 6.8.1: every declared label prefixes exactly one statement.
+    for (Decl *D : B.getDecls())
+      if (auto *L = llvm::dyn_cast<LabelDecl>(D);
+          L && !L->getTarget() &&
+          Cur->lookupLocal(labelKey(L->getName().Name)) == L) // not a duplicate
+        Diags.error(L->getLocation(),
+                    "label " + L->getName().Name +
+                        " is declared but does not label any statement",
+                    {L->getName().getRange()});
+  }
+
+  void checkGotos() {
+    for (PendingGoto &G : PendingGotos) {
+      LabelDecl *L = G.S->getDecl();
+      if (!L || !L->getTarget())
+        continue;
+      bool OK;
+      if (L->getOwner() == G.From) {
+        OK = llvm::is_contained(G.Containers, L->getTarget()) ||
+             (L->getSequence() &&
+              llvm::is_contained(G.Containers, L->getSequence()));
+      } else {
+        // A goto out of a nested routine may only target the outermost
+        // statement sequence of the enclosing block.
+        OK = L->isTopLevel();
+        if (OK) {
+          L->setNonLocal();
+          if (!L->getIndex())
+            L->setIndex(++NonLocalLabelCount[L->getOwner()]);
+        }
+      }
+      if (!OK) {
+        Diags.error(G.S->getBeginLoc(),
+                    "'goto " + L->getName().Name +
+                        "' jumps into a statement that does not contain it",
+                    {G.S->getRange()});
+        Diags.note(L->getTarget()->getBeginLoc(),
+                   "label " + L->getName().Name +
+                       " is here; it can only be reached from its own "
+                       "statement sequence");
+      }
+    }
   }
 
   void checkProgramParams(ProgramDecl &P) {
@@ -790,14 +907,24 @@ class Checker : public StmtVisitor<Checker>,
         Diags.note(It->second, "previous occurrence is here");
         continue;
       }
-      // ISO 7185 6.10: other parameters must be declared as file variables
-      // in the program block (supported from M10).
-      if (Param.Name != "input" && Param.Name != "output")
-        Diags.error(Param.Loc,
-                    "program parameter '" + Param.Spelling +
-                        "' is not declared (only 'input' and 'output' are "
-                        "supported yet)",
-                    {Param.getRange()});
+    }
+  }
+
+  /// ISO 7185 6.10: program parameters other than input/output must be
+  /// declared as file variables in the program block. They are bound to the
+  /// command-line arguments in order.
+  void checkProgramParamDecls(ProgramDecl &P) {
+    for (const Identifier &Param : P.getParams()) {
+      if (Param.Name == "input" || Param.Name == "output")
+        continue;
+      Decl *D = Cur->lookupLocal(Param.Name);
+      auto *V = llvm::dyn_cast_or_null<VarDecl>(D);
+      if (V && V->getType() && (V->getType()->isFile() || V->getType()->isError()))
+        continue;
+      Diags.error(Param.Loc,
+                  "program parameter '" + Param.Spelling +
+                      "' must be declared as a file variable in the program",
+                  {Param.getRange()});
     }
   }
 
@@ -874,10 +1001,82 @@ class Checker : public StmtVisitor<Checker>,
     return OK;
   }
 
+  /// ISO 7185 6.6.3.6: a procedure/function passed as an argument must have
+  /// congruent parameter lists (same kinds, identical types) and result.
+  static bool congruent(llvm::ArrayRef<VarDecl *> A, Type *AResult,
+                        llvm::ArrayRef<VarDecl *> B, Type *BResult) {
+    if (A.size() != B.size() || (AResult == nullptr) != (BResult == nullptr) ||
+        (AResult && AResult != BResult))
+      return false;
+    for (size_t I = 0; I < A.size(); ++I) {
+      if (A[I]->getVarKind() != B[I]->getVarKind())
+        return false;
+      Type *TA = A[I]->getType(), *TB = B[I]->getType();
+      auto *RA = llvm::dyn_cast_or_null<RoutineType>(TA);
+      auto *RB = llvm::dyn_cast_or_null<RoutineType>(TB);
+      if (RA && RB) {
+        if (!congruent(RA->getParams(), RA->getResult(), RB->getParams(),
+                       RB->getResult()))
+          return false;
+      } else if (TA != TB) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  /// An argument for a procedural/functional parameter: the name of a
+  /// routine (or of another procedural parameter) with a congruent heading.
+  void checkRoutineArg(Expr *Arg, VarDecl *P, RoutineType *Formal) {
+    const char *Kind = Formal->isFunction() ? "function" : "procedure";
+    auto *N = llvm::dyn_cast<NameRefExpr>(Arg);
+    Decl *D = N ? Cur->lookup(N->getName().Name) : nullptr;
+    llvm::ArrayRef<VarDecl *> Params;
+    Type *Result = nullptr;
+    bool Found = false;
+    if (auto *R = llvm::dyn_cast_or_null<RoutineDecl>(D)) {
+      Params = R->getParams();
+      Result = R->isFunction() ? R->getResultType() : nullptr;
+      Found = true;
+    } else if (auto *V = llvm::dyn_cast_or_null<VarDecl>(D)) {
+      if (auto *RT = llvm::dyn_cast_or_null<RoutineType>(V->getType())) {
+        Params = RT->getParams();
+        Result = RT->getResult();
+        Found = true;
+      }
+    }
+    if (!Found) {
+      Diags.error(Arg->getBeginLoc(),
+                  llvm::Twine("argument for ") + Kind + " parameter '" +
+                      P->getName().Spelling + "' must be the name of a " +
+                      Kind +
+                      (llvm::isa_and_nonnull<BuiltinDecl>(D)
+                           ? " (required procedures and functions cannot be "
+                             "passed)"
+                           : ""),
+                  {Arg->getRange()});
+      return;
+    }
+    N->setDecl(D);
+    N->setType(P->getType());
+    if (!congruent(Formal->getParams(), Formal->getResult(), Params, Result))
+      Diags.error(Arg->getBeginLoc(),
+                  "'" + N->getName().Spelling +
+                      "' does not match the heading of parameter '" +
+                      P->getName().Spelling + "' (" + quoted(Formal) + ")",
+                  {Arg->getRange()});
+  }
+
   /// Checks the arguments of a call to a user routine.
   void checkCallArgs(RoutineDecl *R, const Identifier &Callee,
                      llvm::ArrayRef<Expr *> Args, SourceRange CallRange) {
-    auto Params = R->getParams();
+    checkCallArgs(R->getParams(), R, Callee, Args, CallRange);
+  }
+
+  void checkCallArgs(llvm::ArrayRef<VarDecl *> Params, Decl *CalleeDecl,
+                     const Identifier &Callee, llvm::ArrayRef<Expr *> Args,
+                     SourceRange CallRange) {
+    Decl *R = CalleeDecl;
     if (Args.size() != Params.size()) {
       Diags.error(Callee.Loc,
                   llvm::Twine(Args.size() < Params.size() ? "too few"
@@ -900,6 +1099,10 @@ class Checker : public StmtVisitor<Checker>,
         Diags.error(F->getWidth()->getBeginLoc(),
                     "field widths are only allowed in 'write' and 'writeln'",
                     {F->getWidth()->getRange()});
+        continue;
+      }
+      if (auto *RT = llvm::dyn_cast_or_null<RoutineType>(P->getType())) {
+        checkRoutineArg(Arg, P, RT);
         continue;
       }
       Type *AT = check(Arg);
@@ -946,14 +1149,52 @@ class Checker : public StmtVisitor<Checker>,
            T->getBase()->isBoolean() || T->isStringType();
   }
 
+  /// If the first argument of read/write/... is a file, checks and returns
+  /// it; otherwise returns null.
+  FileType *checkFileArg(ProcCallStmt *S) {
+    if (S->getArgs().empty() || llvm::isa<FormattedExpr>(S->getArgs()[0]))
+      return nullptr;
+    Expr *First = S->getArgs()[0];
+    Type *T = check(First);
+    auto *F = llvm::dyn_cast<FileType>(T);
+    if (F && !isVariableReference(First)) {
+      Diags.error(First->getBeginLoc(), "file argument must be a variable",
+                  {First->getRange()});
+      return nullptr;
+    }
+    return F;
+  }
+
   void checkWrite(ProcCallStmt *S, bool IsWriteln) {
     const Identifier &Callee = S->getCallee();
-    if (!IsWriteln && S->getArgs().empty())
+    FileType *File = checkFileArg(S);
+    auto Args = S->getArgs().drop_front(File ? 1 : 0);
+    if (!IsWriteln && Args.empty())
       Diags.error(Callee.Loc,
                   "'" + Callee.Spelling + "' requires at least one argument",
                   {Callee.getRange()});
+    if (File && !File->isText()) {
+      if (IsWriteln)
+        Diags.error(Callee.Loc, "'writeln' requires a text file",
+                    {Callee.getRange()});
+      for (Expr *Arg : Args) {
+        if (auto *F = llvm::dyn_cast<FormattedExpr>(Arg)) {
+          Diags.error(F->getWidth()->getBeginLoc(),
+                      "field widths are only allowed for text files",
+                      {F->getWidth()->getRange()});
+          continue;
+        }
+        Type *T = check(Arg);
+        if (!T->isError() && !isAssignable(File->getElementType(), T))
+          Diags.error(Arg->getBeginLoc(),
+                      "cannot write a value of type " + quoted(T) +
+                          " to a " + quoted(File),
+                      {Arg->getRange()});
+      }
+      return;
+    }
 
-    for (Expr *Arg : S->getArgs()) {
+    for (Expr *Arg : Args) {
       Expr *Value = Arg, *Width = nullptr, *Precision = nullptr;
       auto *F = llvm::dyn_cast<FormattedExpr>(Arg);
       if (F) {
@@ -990,12 +1231,36 @@ class Checker : public StmtVisitor<Checker>,
 
   void checkRead(ProcCallStmt *S, bool IsReadln) {
     const Identifier &Callee = S->getCallee();
-    if (!IsReadln && S->getArgs().empty())
+    FileType *File = checkFileArg(S);
+    auto Args = S->getArgs().drop_front(File ? 1 : 0);
+    if (!IsReadln && Args.empty())
       Diags.error(Callee.Loc,
                   "'" + Callee.Spelling + "' requires at least one argument",
                   {Callee.getRange()});
+    if (File && !File->isText()) {
+      if (IsReadln)
+        Diags.error(Callee.Loc, "'readln' requires a text file",
+                    {Callee.getRange()});
+      for (Expr *Arg : Args) {
+        Type *T = check(Arg);
+        if (T->isError())
+          continue;
+        if (!isVariableReference(Arg))
+          Diags.error(Arg->getBeginLoc(),
+                      "argument to '" + Callee.Spelling + "' must be a variable",
+                      {Arg->getRange()});
+        else if (!isAssignable(T, File->getElementType()))
+          Diags.error(Arg->getBeginLoc(),
+                      "cannot read a component of " + quoted(File) +
+                          " into a variable of type " + quoted(T),
+                      {Arg->getRange()});
+        else
+          checkNotForControlVar(Arg);
+      }
+      return;
+    }
 
-    for (Expr *Arg : S->getArgs()) {
+    for (Expr *Arg : Args) {
       if (auto *F = llvm::dyn_cast<FormattedExpr>(Arg)) {
         Diags.error(F->getWidth()->getBeginLoc(),
                     "field widths are only allowed in 'write' and 'writeln'",
@@ -1021,30 +1286,94 @@ class Checker : public StmtVisitor<Checker>,
     }
   }
 
-  void checkNewDispose(ProcCallStmt *S) {
+  /// reset/rewrite/get/put(f) and page[(f)].
+  void checkFileProc(ProcCallStmt *S, bool IsPage) {
     const Identifier &Callee = S->getCallee();
-    if (S->getArgs().size() != 1) {
+    auto Args = S->getArgs();
+    if (IsPage && Args.empty())
+      return; // page(output)
+    if (Args.size() != 1) {
+      Diags.error(Callee.Loc, "'" + Callee.Spelling + "' expects 1 file argument",
+                  {S->getRange()});
+      return;
+    }
+    Type *T = check(Args[0]);
+    if (T->isError())
+      return;
+    if (!T->isFile() || !isVariableReference(Args[0]))
+      Diags.error(Args[0]->getBeginLoc(),
+                  "'" + Callee.Spelling + "' expects a file variable, not a " +
+                      "value of type " + quoted(T),
+                  {Args[0]->getRange()});
+    else if (IsPage && !T->isTextFile())
+      Diags.error(Args[0]->getBeginLoc(), "'page' requires a text file",
+                  {Args[0]->getRange()});
+  }
+
+  /// pack(a, i, z): z := a[i..]   unpack(z, a, i): a[i..] := z
+  void checkPackUnpack(ProcCallStmt *S, bool IsPack) {
+    const Identifier &Callee = S->getCallee();
+    auto Args = S->getArgs();
+    if (Args.size() != 3) {
+      Diags.error(Callee.Loc, "'" + Callee.Spelling + "' expects 3 arguments",
+                  {S->getRange()});
+      return;
+    }
+    Expr *Unpacked = IsPack ? Args[0] : Args[1];
+    Expr *Index = IsPack ? Args[1] : Args[2];
+    Expr *Packed = IsPack ? Args[2] : Args[0];
+    Type *UT = check(Unpacked), *IT = check(Index), *PT = check(Packed);
+    if (UT->isError() || IT->isError() || PT->isError())
+      return;
+    auto *UA = llvm::dyn_cast<ArrayType>(UT);
+    auto *PA = llvm::dyn_cast<ArrayType>(PT);
+    if (!UA || UA->isPacked() || !isVariableReference(Unpacked)) {
+      Diags.error(Unpacked->getBeginLoc(), "expected an unpacked array variable",
+                  {Unpacked->getRange()});
+      return;
+    }
+    if (!PA || !PA->isPacked() || !isVariableReference(Packed)) {
+      Diags.error(Packed->getBeginLoc(), "expected a packed array variable",
+                  {Packed->getRange()});
+      return;
+    }
+    if (UA->getElementType() != PA->getElementType())
+      Diags.error(Packed->getBeginLoc(),
+                  "packed and unpacked arrays must have the same component type",
+                  {Packed->getRange()});
+    if (!areCompatible(IT, UA->getIndexType()))
+      Diags.error(Index->getBeginLoc(),
+                  "index of type " + quoted(IT) + " does not match " +
+                      quoted(UA->getIndexType()),
+                  {Index->getRange()});
+  }
+
+  /// new(p [, tag constants]) / dispose(p [, tag constants]). The tags
+  /// select record variants (ISO 6.6.5.3); storage is always allocated for
+  /// the largest variant, so they are only checked.
+  void checkNewDispose(ProcCallStmt *S, bool IsNew) {
+    const Identifier &Callee = S->getCallee();
+    if (S->getArgs().empty()) {
       Diags.error(Callee.Loc,
-                  "'" + Callee.Spelling + "' expects 1 argument" +
-                      (S->getArgs().size() > 1
-                           ? " (variant selectors are not supported)"
-                           : ""),
+                  "'" + Callee.Spelling + "' expects a pointer argument",
                   {S->getRange()});
       return;
     }
     Expr *Arg = S->getArgs()[0];
     Type *T = check(Arg);
-    if (T->isError())
-      return;
-    if (!T->isPointer())
-      Diags.error(Arg->getBeginLoc(),
-                  "'" + Callee.Spelling + "' expects a pointer variable, not " +
-                      "a value of type " + quoted(T),
-                  {Arg->getRange()});
-    else if (!isVariableReference(Arg))
-      Diags.error(Arg->getBeginLoc(),
-                  "argument to '" + Callee.Spelling + "' must be a variable",
-                  {Arg->getRange()});
+    if (!T->isError()) {
+      if (!T->isPointer())
+        Diags.error(Arg->getBeginLoc(),
+                    "'" + Callee.Spelling + "' expects a pointer " +
+                        (IsNew ? "variable" : "") + ", not a value of type " +
+                        quoted(T),
+                    {Arg->getRange()});
+      else if (IsNew && !isVariableReference(Arg))
+        Diags.error(Arg->getBeginLoc(), "argument to 'new' must be a variable",
+                    {Arg->getRange()});
+    }
+    for (Expr *Tag : S->getArgs().drop_front())
+      evaluateConstant(Tag, "variant selector");
   }
 
   //===--------------------------------------------------------------------===//
@@ -1065,6 +1394,21 @@ class Checker : public StmtVisitor<Checker>,
     if (T->isError())
       return errorType();
     Expr *Arg = E->getArgs()[0];
+
+    if (BD->getBuiltinKind() == BuiltinKind::Eof ||
+        BD->getBuiltinKind() == BuiltinKind::Eoln) {
+      bool IsEoln = BD->getBuiltinKind() == BuiltinKind::Eoln;
+      if (!T->isFile() || !isVariableReference(Arg) ||
+          (IsEoln && !T->isTextFile())) {
+        Diags.error(Arg->getBeginLoc(),
+                    "'" + Callee.Spelling + "' expects a " +
+                        (IsEoln ? "text " : "") + "file variable, not " +
+                        quoted(T),
+                    {Arg->getRange()});
+        return errorType();
+      }
+      return Ctx.getBooleanType();
+    }
 
     auto Expect = [&](bool OK, llvm::StringRef What) {
       if (!OK)
@@ -1117,6 +1461,8 @@ public:
     Scope ProgramScope(&Standard);
     Cur = &ProgramScope;
     checkBlock(*P.getBlock());
+    checkProgramParamDecls(P);
+    checkGotos();
     Cur = &Standard;
   }
 
@@ -1126,12 +1472,52 @@ public:
 
   void visitEmptyStmt(EmptyStmt *) {}
 
-  void visitCompoundStmt(CompoundStmt *S) {
-    for (Stmt *Child : S->getBody()) {
+  void visitSequence(const void *Seq, llvm::ArrayRef<Stmt *> Body) {
+    Containers.push_back(Seq);
+    for (Stmt *Child : Body) {
       if (Diags.shouldStop())
-        return;
+        break;
+      DirectSequence = Seq;
       visitStmt(Child);
     }
+    DirectSequence = nullptr;
+    Containers.pop_back();
+  }
+
+  void visitCompoundStmt(CompoundStmt *S) { visitSequence(S, S->getBody()); }
+
+  void visitLabeledStmt(LabeledStmt *S) {
+    const void *Seq = DirectSequence;
+    DirectSequence = nullptr;
+    const Identifier &Id = S->getLabel();
+    auto *L = llvm::dyn_cast_or_null<LabelDecl>(Cur->lookup(labelKey(Id.Name)));
+    if (!L || L->getOwner() != CurRoutine) {
+      Diags.error(Id.Loc,
+                  "label " + Id.Name + " is not declared in this block",
+                  {Id.getRange()});
+    } else if (L->getTarget()) {
+      Diags.error(Id.Loc, "label " + Id.Name + " labels more than one statement",
+                  {Id.getRange()});
+      Diags.note(L->getTarget()->getBeginLoc(), "previous use is here");
+    } else {
+      S->setDecl(L);
+      L->setTarget(S, Seq, Seq && Seq == RoutineBody);
+    }
+    Containers.push_back(S);
+    visitStmt(S->getBody());
+    Containers.pop_back();
+  }
+
+  void visitGotoStmt(GotoStmt *S) {
+    DirectSequence = nullptr;
+    const Identifier &Id = S->getLabel();
+    auto *L = llvm::dyn_cast_or_null<LabelDecl>(Cur->lookup(labelKey(Id.Name)));
+    if (!L) {
+      Diags.error(Id.Loc, "use of undeclared label " + Id.Name, {Id.getRange()});
+      return;
+    }
+    S->setDecl(L);
+    PendingGotos.push_back({S, Containers, CurRoutine});
   }
 
   void visitProcCallStmt(ProcCallStmt *S) {
@@ -1149,13 +1535,23 @@ public:
       case BuiltinKind::Writeln: return checkWrite(S, /*IsWriteln=*/true);
       case BuiltinKind::Read:    return checkRead(S, /*IsReadln=*/false);
       case BuiltinKind::Readln:  return checkRead(S, /*IsReadln=*/true);
-      case BuiltinKind::New:
-      case BuiltinKind::Dispose: return checkNewDispose(S);
+      case BuiltinKind::New:     return checkNewDispose(S, /*IsNew=*/true);
+      case BuiltinKind::Dispose: return checkNewDispose(S, /*IsNew=*/false);
+      case BuiltinKind::Reset: case BuiltinKind::Rewrite:
+      case BuiltinKind::Get: case BuiltinKind::Put: case BuiltinKind::Page:
+        return checkFileProc(S, BD->getBuiltinKind() == BuiltinKind::Page);
+      case BuiltinKind::Pack: case BuiltinKind::Unpack:
+        return checkPackUnpack(S, BD->getBuiltinKind() == BuiltinKind::Pack);
       default: llvm_unreachable("not a builtin procedure");
       }
     }
     if (auto *R = llvm::dyn_cast<RoutineDecl>(D); R && R->isProcedure())
       return checkCallArgs(R, Callee, S->getArgs(), S->getRange());
+    if (auto *V = llvm::dyn_cast<VarDecl>(D))
+      if (auto *RT = llvm::dyn_cast_or_null<RoutineType>(V->getType());
+          RT && !RT->isFunction())
+        return checkCallArgs(RT->getParams(), V, Callee, S->getArgs(),
+                             S->getRange());
 
     if (llvm::isa<BuiltinDecl>(D) || llvm::isa<RoutineDecl>(D))
       Diags.error(Callee.Loc,
@@ -1230,6 +1626,11 @@ public:
     Type *ValueTy = check(S->getValue());
     if (TargetTy->isError() || ValueTy->isError())
       return;
+    if (containsFile(TargetTy)) {
+      Diags.error(S->getAssignLoc(), "files cannot be assigned",
+                  {Target->getRange()});
+      return;
+    }
     if (!isAssignable(TargetTy, ValueTy))
       Diags.error(S->getAssignLoc(),
                   "assigning to " + quoted(TargetTy) +
@@ -1238,6 +1639,7 @@ public:
   }
 
   void visitIfStmt(IfStmt *S) {
+    DirectSequence = nullptr;
     checkCondition(S->getCond(), "if");
     visitStmt(S->getThen());
     if (S->getElse())
@@ -1245,17 +1647,18 @@ public:
   }
 
   void visitWhileStmt(WhileStmt *S) {
+    DirectSequence = nullptr;
     checkCondition(S->getCond(), "while");
     visitStmt(S->getBody());
   }
 
   void visitRepeatStmt(RepeatStmt *S) {
-    for (Stmt *Child : S->getBody())
-      visitStmt(Child);
+    visitSequence(S, S->getBody());
     checkCondition(S->getCond(), "until");
   }
 
   void visitForStmt(ForStmt *S) {
+    DirectSequence = nullptr;
     NameRefExpr *VarRef = S->getVar();
     const Identifier &Id = VarRef->getName();
     Type *VarTy = errorType();
@@ -1314,6 +1717,7 @@ public:
   }
 
   void visitCaseStmt(CaseStmt *S) {
+    DirectSequence = nullptr;
     Type *SelTy = check(S->getSelector());
     if (!SelTy->isError() && !SelTy->isOrdinal()) {
       Diags.error(S->getSelector()->getBeginLoc(),
@@ -1346,11 +1750,11 @@ public:
       }
       visitStmt(Arm->getBody());
     }
-    for (Stmt *Child : S->getElseBody())
-      visitStmt(Child);
+    visitSequence(S->getElseBody().data(), S->getElseBody());
   }
 
   void visitWithStmt(WithStmt *S) {
+    DirectSequence = nullptr;
     // Each record opens a scope; they nest left to right.
     llvm::SmallVector<std::unique_ptr<Scope>, 2> Scopes;
     Scope *Saved = Cur;
@@ -1412,6 +1816,18 @@ public:
     switch (D->getKind()) {
     case Decl::DK_Var: {
       Type *T = llvm::cast<VarDecl>(D)->getType();
+      if (auto *RT = llvm::dyn_cast_or_null<RoutineType>(T)) {
+        // A functional parameter without arguments is a call.
+        if (RT->isFunction() && RT->getParams().empty())
+          return RT->getResult();
+        Diags.error(Id.Loc,
+                    RT->isFunction()
+                        ? "missing arguments in call to '" + Id.Spelling + "'"
+                        : "procedure '" + Id.Spelling +
+                              "' does not return a value",
+                    {Id.getRange()});
+        return errorType();
+      }
       return T ? T : errorType();
     }
     case Decl::DK_Field: {
@@ -1440,6 +1856,10 @@ public:
       return R->getResultType(); // a call without arguments
     }
     case Decl::DK_Builtin:
+      // eof / eoln without arguments test `input`.
+      if (auto K = llvm::cast<BuiltinDecl>(D)->getBuiltinKind();
+          K == BuiltinKind::Eof || K == BuiltinKind::Eoln)
+        return Ctx.getBooleanType();
       if (llvm::cast<BuiltinDecl>(D)->isFunction()) {
         Diags.error(Id.Loc, "missing argument in call to '" + Id.Spelling + "'",
                     {Id.getRange()});
@@ -1580,6 +2000,13 @@ public:
       return errorType();
     }
 
+    if (auto *V = llvm::dyn_cast<VarDecl>(D))
+      if (auto *RT = llvm::dyn_cast_or_null<RoutineType>(V->getType());
+          RT && RT->isFunction()) {
+        checkCallArgs(RT->getParams(), V, Callee, E->getArgs(), E->getRange());
+        return RT->getResult();
+      }
+
     llvm::SmallVector<Type *, 4> ArgTypes;
     for (Expr *Arg : E->getArgs())
       ArgTypes.push_back(check(Arg));
@@ -1658,6 +2085,8 @@ public:
       return errorType();
     if (auto *P = llvm::dyn_cast<PointerType>(T))
       return P->getPointee() ? P->getPointee() : errorType();
+    if (auto *F = llvm::dyn_cast<FileType>(T))
+      return F->getElementType(); // the buffer variable f^
     Diags.error(E->getBase()->getBeginLoc(),
                 "'^' applied to a value of type " + quoted(T) +
                     ", which is not a pointer",

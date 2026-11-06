@@ -28,6 +28,7 @@ namespace pcc {
 
 class Decl;
 class FieldDecl;
+class LabelDecl;
 class RoutineDecl;
 class Type;
 class TypeSpec;
@@ -498,6 +499,35 @@ public:
   static bool classof(const Stmt *S) { return S->getKind() == SK_With; }
 };
 
+/// 10: Body
+class LabeledStmt final : public Stmt {
+  Identifier Label;
+  Stmt *Body;
+  LabelDecl *D = nullptr; ///< set by Sema
+
+public:
+  LabeledStmt(SourceRange R, Identifier Label, Stmt *Body)
+      : Stmt(SK_Labeled, R), Label(Label), Body(Body) {}
+  const Identifier &getLabel() const { return Label; }
+  Stmt *getBody() const { return Body; }
+  LabelDecl *getDecl() const { return D; }
+  void setDecl(LabelDecl *L) { D = L; }
+  static bool classof(const Stmt *S) { return S->getKind() == SK_Labeled; }
+};
+
+/// goto 10
+class GotoStmt final : public Stmt {
+  Identifier Label;
+  LabelDecl *D = nullptr; ///< set by Sema
+
+public:
+  GotoStmt(SourceRange R, Identifier Label) : Stmt(SK_Goto, R), Label(Label) {}
+  const Identifier &getLabel() const { return Label; }
+  LabelDecl *getDecl() const { return D; }
+  void setDecl(LabelDecl *L) { D = L; }
+  static bool classof(const Stmt *S) { return S->getKind() == SK_Goto; }
+};
+
 //===----------------------------------------------------------------------===//
 // Written types
 //===----------------------------------------------------------------------===//
@@ -505,7 +535,8 @@ public:
 class TypeSpec {
 public:
   enum TypeSpecKind {
-    TS_Named, TS_Enum, TS_Subrange, TS_Array, TS_Record, TS_Pointer, TS_Set
+    TS_Named, TS_Enum, TS_Subrange, TS_Array, TS_Record, TS_Pointer, TS_Set,
+    TS_File, TS_Routine
   };
 
 private:
@@ -622,6 +653,37 @@ public:
   static bool classof(const TypeSpec *T) { return T->getKind() == TS_Pointer; }
 };
 
+class VarDecl;
+
+/// The heading of a procedural / functional parameter:
+/// `procedure p(x: integer)` or `function f(x: real): real`.
+class RoutineTypeSpec final : public TypeSpec {
+  bool IsFunction;
+  llvm::ArrayRef<VarDecl *> Params;
+  TypeSpec *Result; ///< functions only
+
+public:
+  RoutineTypeSpec(SourceRange R, bool IsFunction,
+                  llvm::ArrayRef<VarDecl *> Params, TypeSpec *Result)
+      : TypeSpec(TS_Routine, R), IsFunction(IsFunction), Params(Params),
+        Result(Result) {}
+  bool isFunction() const { return IsFunction; }
+  llvm::ArrayRef<VarDecl *> getParams() const { return Params; }
+  TypeSpec *getResult() const { return Result; }
+  static bool classof(const TypeSpec *T) { return T->getKind() == TS_Routine; }
+};
+
+/// [packed] file of Element
+class FileTypeSpec final : public TypeSpec {
+  TypeSpec *Element;
+
+public:
+  FileTypeSpec(SourceRange R, TypeSpec *Element)
+      : TypeSpec(TS_File, R), Element(Element) {}
+  TypeSpec *getElement() const { return Element; }
+  static bool classof(const TypeSpec *T) { return T->getKind() == TS_File; }
+};
+
 /// [packed] set of Element
 class SetTypeSpec final : public TypeSpec {
   TypeSpec *Element;
@@ -640,7 +702,8 @@ public:
 class Decl {
 public:
   enum DeclKind {
-    DK_Program, DK_Var, DK_Const, DK_Type, DK_Field, DK_Routine, DK_Builtin
+    DK_Program, DK_Var, DK_Const, DK_Type, DK_Field, DK_Routine, DK_Builtin,
+    DK_Label
   };
 
 private:
@@ -732,6 +795,36 @@ public:
   Type *getType() const { return Ty; }
   void setType(Type *T) { Ty = T; }
   static bool classof(const Decl *D) { return D->getKind() == DK_Field; }
+};
+
+/// label 10;  (the name is the label's value, e.g. "10" for `0010`)
+class LabelDecl final : public Decl {
+  RoutineDecl *Owner = nullptr;   ///< null for program-level labels
+  LabeledStmt *Target = nullptr;  ///< the statement it prefixes
+  /// The statement sequence (compound / repeat body) that directly contains
+  /// Target, or null. Gotos must be inside Target or inside this sequence.
+  const void *Sequence = nullptr;
+  bool TopLevel = false;          ///< in the block's outermost sequence
+  bool NonLocal = false;          ///< target of a goto from a nested routine
+  unsigned Index = 0;             ///< 1-based id for non-local gotos
+
+public:
+  explicit LabelDecl(Identifier Name) : Decl(DK_Label, Name.Loc, Name) {}
+  RoutineDecl *getOwner() const { return Owner; }
+  void setOwner(RoutineDecl *R) { Owner = R; }
+  LabeledStmt *getTarget() const { return Target; }
+  const void *getSequence() const { return Sequence; }
+  bool isTopLevel() const { return TopLevel; }
+  void setTarget(LabeledStmt *S, const void *Seq, bool Top) {
+    Target = S;
+    Sequence = Seq;
+    TopLevel = Top;
+  }
+  bool isNonLocal() const { return NonLocal; }
+  void setNonLocal() { NonLocal = true; }
+  unsigned getIndex() const { return Index; }
+  void setIndex(unsigned I) { Index = I; }
+  static bool classof(const Decl *D) { return D->getKind() == DK_Label; }
 };
 
 class Block;

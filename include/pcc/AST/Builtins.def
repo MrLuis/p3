@@ -22,6 +22,19 @@ BUILTIN_PROC(Writeln, "writeln")
 BUILTIN_PROC(Read,    "read")
 BUILTIN_PROC(Readln,  "readln")
 
+// Files (M10). eof/eoln default to `input`, page to `output`.
+BUILTIN_PROC(Reset,   "reset")
+BUILTIN_PROC(Rewrite, "rewrite")
+BUILTIN_PROC(Get,     "get")
+BUILTIN_PROC(Put,     "put")
+BUILTIN_PROC(Page,    "page")
+BUILTIN_FUNC(Eof,     "eof")
+BUILTIN_FUNC(Eoln,    "eoln")
+
+// Transfer between packed and unpacked arrays (M10).
+BUILTIN_PROC(Pack,    "pack")
+BUILTIN_PROC(Unpack,  "unpack")
+
 // Dynamic allocation (M9).
 BUILTIN_PROC(New,     "new")
 BUILTIN_PROC(Dispose, "dispose")

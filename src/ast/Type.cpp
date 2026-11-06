@@ -38,6 +38,24 @@ uint64_t Type::getStringLength() const {
       llvm::cast<SubrangeType>(A->getIndexType())->getHi());
 }
 
+bool Type::isTextFile() const {
+  auto *F = llvm::dyn_cast<FileType>(this);
+  return F && F->isText();
+}
+
+bool pcc::containsFile(Type *T) {
+  if (T->isFile())
+    return true;
+  if (auto *A = llvm::dyn_cast<ArrayType>(T))
+    return containsFile(A->getElementType());
+  if (auto *R = llvm::dyn_cast<RecordType>(T)) {
+    for (FieldDecl *F : R->getAllFields())
+      if (F->getType() && containsFile(F->getType()))
+        return true;
+  }
+  return false;
+}
+
 FieldDecl *RecordType::findField(llvm::StringRef Name) const {
   for (FieldDecl *F : AllFields)
     if (F->getName().Name == Name)
@@ -114,6 +132,23 @@ std::string Type::getName() const {
   }
   case TK_Nil:
     return "nil";
+  case TK_Routine: {
+    auto *R = llvm::cast<RoutineType>(this);
+    std::string S = R->isFunction() ? "function(" : "procedure(";
+    for (size_t I = 0; I < R->getParams().size(); ++I) {
+      VarDecl *P = R->getParams()[I];
+      S += (I ? "; " : "") + std::string(P->isVarParam() ? "var " : "") +
+           (P->getType() ? P->getType()->getName() : "?");
+    }
+    S += ")";
+    if (R->isFunction())
+      S += ": " + R->getResult()->getName();
+    return S;
+  }
+  case TK_File: {
+    auto *F = llvm::cast<FileType>(this);
+    return F->isText() ? "text" : "file of " + F->getElementType()->getName();
+  }
   case TK_Set: {
     Type *E = llvm::cast<SetType>(this)->getElementType();
     return E ? "set of " + E->getName() : "empty set";

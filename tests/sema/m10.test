@@ -1,0 +1,21 @@
+; M10: labels/goto, procedural parameters, files.
+; RUN: not %pcc -ferror-limit=0 -c %S/Inputs/m10.pas -o %t.o 2>&1 | FileCheck %s
+
+; CHECK: m10.pas:2:16: error: label 3 is declared twice
+; CHECK: m10.pas:2:13: note: previous declaration is here
+; CHECK: m10.pas:4:13: error: file parameter 'f' must be a 'var' parameter
+; CHECK: m10.pas:8:8: error: use of undeclared label 4
+; CHECK: m10.pas:12:5: error: files cannot be assigned
+; CHECK: m10.pas:13:12: error: cannot write a value of type 'char' to a 'file of integer'
+; CHECK: m10.pas:14:3: error: 'writeln' requires a text file
+; CHECK: m10.pas:15:3: error: 'readln' requires a text file
+; CHECK: m10.pas:16:5: error: 'takesReal' does not match the heading of parameter 'x' ('procedure(integer)')
+; CHECK: m10.pas:17:5: error: argument for procedure parameter 'x' must be the name of a procedure (required procedures and functions cannot be passed)
+; CHECK: m10.pas:18:5: error: argument for procedure parameter 'x' must be the name of a procedure
+; CHECK: m10.pas:19:11: error: 'eoln' expects a text file variable, not 'file of integer'
+; CHECK: m10.pas:20:9: error: 'reset' expects a file variable, not a value of type 'integer'
+; CHECK: m10.pas:2:13: error: label 3 is declared but does not label any statement
+; CHECK: m10.pas:1:19: error: program parameter 'missing' must be declared as a file variable in the program
+; CHECK: m10.pas:10:3: error: 'goto 2' jumps into a statement that does not contain it
+; CHECK: m10.pas:9:23: note: label 2 is here; it can only be reached from its own statement sequence
+; CHECK-NOT: error:

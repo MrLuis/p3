@@ -27,12 +27,6 @@
 ; EMPTY: empty-parens.pas:3:11: error: expected expression
 ; EMPTY: empty-parens.pas:3:10: note: an empty argument list '()' is not allowed; omit the parentheses
 
-; Constructs of later milestones get a clear "not supported yet", and the
-; parser recovers after each one.
-; RUN: not %pcc --emit-ast %S/Inputs/unsupported.pas 2>&1 >/dev/null | FileCheck --check-prefix=UNSUP %s
-; UNSUP: unsupported.pas:2:1: error: 'label' declarations are not supported yet
-; UNSUP: unsupported.pas:4:3: error: 'goto' statements are not supported yet
-; UNSUP-NOT: error:
 
 ; Errors stop compilation before code generation.
 ; RUN: not %pcc -c %S/Inputs/missing-period.pas -o %t.o 2>&1 | FileCheck --check-prefix=DOT %s

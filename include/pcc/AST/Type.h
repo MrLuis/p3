@@ -26,6 +26,7 @@ namespace pcc {
 
 class ConstDecl;
 class FieldDecl;
+class VarDecl;
 struct FieldList;
 
 class Type {
@@ -44,6 +45,8 @@ public:
     TK_Pointer,  ///< ^T                                         (M9)
     TK_Nil,      ///< the type of `nil`, compatible with every pointer
     TK_Set,      ///< set of T (T's values must lie in 0..255)   (M9)
+    TK_File,     ///< file of T, text                            (M10)
+    TK_Routine,  ///< a procedural/functional parameter's type   (M10)
   };
 
 private:
@@ -69,6 +72,8 @@ public:
   bool isPointer() const { return Kind == TK_Pointer; }
   bool isNil() const { return Kind == TK_Nil; }
   bool isSet() const { return Kind == TK_Set; }
+  bool isFile() const { return Kind == TK_File; }
+  bool isTextFile() const;
 
   /// ISO 7185 6.4.2.1: integer, boolean, char, enumerations and subranges.
   bool isOrdinal() const {
@@ -213,6 +218,36 @@ public:
   bool isEmptySet() const { return Element == nullptr; }
   static bool classof(const Type *T) { return T->getKind() == TK_Set; }
 };
+
+/// file of Element; `text` is the predeclared file of char with lines.
+class FileType final : public Type {
+  Type *Element;
+  bool IsText;
+
+public:
+  FileType(Type *Element, bool IsText)
+      : Type(TK_File), Element(Element), IsText(IsText) {}
+  Type *getElementType() const { return Element; }
+  bool isText() const { return IsText; }
+  static bool classof(const Type *T) { return T->getKind() == TK_File; }
+};
+
+/// The type of a procedural (Result == null) or functional parameter.
+class RoutineType final : public Type {
+  llvm::ArrayRef<VarDecl *> Params;
+  Type *Result;
+
+public:
+  RoutineType(llvm::ArrayRef<VarDecl *> Params, Type *Result)
+      : Type(TK_Routine), Params(Params), Result(Result) {}
+  llvm::ArrayRef<VarDecl *> getParams() const { return Params; }
+  Type *getResult() const { return Result; }
+  bool isFunction() const { return Result != nullptr; }
+  static bool classof(const Type *T) { return T->getKind() == TK_Routine; }
+};
+
+/// True if T is, or contains, a file type (files cannot be copied).
+bool containsFile(Type *T);
 
 /// Bounds of an ordinal type: integer [-2^31, 2^31-1], char [0, 255],
 /// boolean [0, 1], enum [0, N-1], subrange [Lo, Hi].

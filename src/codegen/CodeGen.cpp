@@ -45,7 +45,9 @@ namespace {
 struct Runtime {
   llvm::FunctionCallee Init, Fini, WriteStr, WriteChar, WriteInt, WriteBool,
       WriteReal, Writeln, ReadInt, ReadChar, ReadReal, Readln, RuntimeError,
-      Memcmp, Atan, New, Dispose;
+      Memcmp, Atan, New, Dispose, FileNew, FileFree, ProgramParam, Reset,
+      Rewrite, Get, Put, Page, Eof, Eoln, Buffer, ReadElem, WriteElem,
+      SetJmp, LongJmp;
 
   explicit Runtime(llvm::Module &M) {
     llvm::LLVMContext &C = M.getContext();
@@ -66,16 +68,31 @@ struct Runtime {
     };
     Init = Decl("__pas_init", Void, {I32, Ptr});
     Fini = Decl("__pas_fini", Void, {});
-    WriteStr = Decl("__pas_write_str", Void, {Ptr, I64, I32});
-    WriteChar = Decl("__pas_write_char", Void, {I8, I32});
-    WriteInt = Decl("__pas_write_int", Void, {I32, I32});
-    WriteBool = Decl("__pas_write_bool", Void, {I32, I32});
-    WriteReal = Decl("__pas_write_real", Void, {F64, I32, I32});
-    Writeln = Decl("__pas_writeln", Void, {});
-    ReadInt = Decl("__pas_read_int", I32, {});
-    ReadChar = Decl("__pas_read_char", I8, {});
-    ReadReal = Decl("__pas_read_real", F64, {});
-    Readln = Decl("__pas_readln", Void, {});
+    // Text I/O: the first argument is the PasFile*.
+    WriteStr = Decl("__pas_write_str", Void, {Ptr, Ptr, I64, I32});
+    WriteChar = Decl("__pas_write_char", Void, {Ptr, I8, I32});
+    WriteInt = Decl("__pas_write_int", Void, {Ptr, I32, I32});
+    WriteBool = Decl("__pas_write_bool", Void, {Ptr, I32, I32});
+    WriteReal = Decl("__pas_write_real", Void, {Ptr, F64, I32, I32});
+    Writeln = Decl("__pas_writeln", Void, {Ptr});
+    ReadInt = Decl("__pas_read_int", I32, {Ptr});
+    ReadChar = Decl("__pas_read_char", I8, {Ptr});
+    ReadReal = Decl("__pas_read_real", F64, {Ptr});
+    Readln = Decl("__pas_readln", Void, {Ptr});
+    // Files.
+    FileNew = Decl("__pas_file_new", Ptr, {I64, I32, Ptr});
+    FileFree = Decl("__pas_file_free", Void, {Ptr});
+    ProgramParam = Decl("__pas_program_param", Ptr, {I32, Ptr});
+    Reset = Decl("__pas_reset", Void, {Ptr});
+    Rewrite = Decl("__pas_rewrite", Void, {Ptr});
+    Get = Decl("__pas_get", Void, {Ptr});
+    Put = Decl("__pas_put", Void, {Ptr});
+    Page = Decl("__pas_page", Void, {Ptr});
+    Eof = Decl("__pas_eof", I32, {Ptr});
+    Eoln = Decl("__pas_eoln", I32, {Ptr});
+    Buffer = Decl("__pas_buffer", Ptr, {Ptr});
+    ReadElem = Decl("__pas_read_elem", Void, {Ptr, Ptr});
+    WriteElem = Decl("__pas_write_elem", Void, {Ptr, Ptr});
     RuntimeError = Decl("__pas_runtime_error", Void, {Ptr});
     auto *RE = llvm::cast<llvm::Function>(RuntimeError.getCallee());
     RE->addFnAttr(llvm::Attribute::NoReturn);
@@ -84,6 +101,13 @@ struct Runtime {
     New = Decl("__pas_new", Ptr, {I64});
     Dispose = Decl("__pas_dispose", Void, {Ptr});
     Atan = Decl("atan", F64, {F64});
+    // Non-local goto. The underscore variants do not save the signal mask.
+    SetJmp = Decl("_setjmp", I32, {Ptr});
+    llvm::cast<llvm::Function>(SetJmp.getCallee())
+        ->addFnAttr(llvm::Attribute::ReturnsTwice);
+    LongJmp = Decl("_longjmp", Void, {Ptr, I32});
+    llvm::cast<llvm::Function>(LongJmp.getCallee())
+        ->addFnAttr(llvm::Attribute::NoReturn);
   }
 };
 
@@ -111,6 +135,19 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
   llvm::DenseMap<WithContext *, llvm::Value *> WithAddrs;
   llvm::StringMap<llvm::GlobalVariable *> StringConstants;
   std::vector<RoutineDecl *> RoutinesToEmit;
+  llvm::DenseMap<LabelDecl *, llvm::BasicBlock *> LabelBlocks;
+  llvm::DenseMap<RoutineDecl *, unsigned> JmpBufSlots; ///< frame slot
+  llvm::GlobalVariable *MainJmpBuf = nullptr;
+
+  /// Generous for every supported libc (glibc: 200-312 bytes, macOS: 192).
+  llvm::Type *jmpBufType() { return llvm::ArrayType::get(B.getInt64Ty(), 64); }
+
+  static bool hasNonLocalLabels(Block &Blk) {
+    for (Decl *D : Blk.getDecls())
+      if (auto *L = llvm::dyn_cast<LabelDecl>(D); L && L->isNonLocal())
+        return true;
+    return false;
+  }
 
   //===--------------------------------------------------------------------===//
   // Types
@@ -152,9 +189,12 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
     }
     case Type::TK_Pointer:
     case Type::TK_Nil:
+    case Type::TK_File: // a PasFile* owned by the runtime
       return B.getPtrTy();
     case Type::TK_Set:
       return setType();
+    case Type::TK_Routine: // {function, static link}
+      return llvm::StructType::get(B.getPtrTy(), B.getPtrTy());
     case Type::TK_Error:
       break;
     }
@@ -452,9 +492,105 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
     return Frame;
   }
 
+  /// Address of the variable holding the PasFile* of input / output.
+  llvm::GlobalVariable *standardFile(llvm::StringRef Name) {
+    std::string Sym = ("__pas_" + Name).str();
+    if (auto *G = M.getNamedGlobal(Sym))
+      return G;
+    return new llvm::GlobalVariable(M, B.getPtrTy(), false,
+                                    llvm::GlobalValue::ExternalLinkage, nullptr,
+                                    Sym);
+  }
+
+  llvm::Value *loadFile(llvm::Value *VarAddr) {
+    return B.CreateLoad(B.getPtrTy(), VarAddr, "file");
+  }
+  llvm::Value *outputFile() { return loadFile(standardFile("output")); }
+  llvm::Value *inputFile() { return loadFile(standardFile("input")); }
+
+  /// Allocates a temporary in the entry block of the current function.
+  llvm::Value *createTemp(llvm::Type *Ty, const llvm::Twine &Name = "tmp") {
+    llvm::IRBuilder<> Entry(&CurFn->getEntryBlock(),
+                            CurFn->getEntryBlock().begin());
+    return Entry.CreateAlloca(Ty, nullptr, Name);
+  }
+
+  /// Calls Fn(elementAddress) for every element of array A at Addr.
+  void forEachElement(llvm::Value *Addr, ArrayType *A,
+                      llvm::function_ref<void(llvm::Value *)> Fn) {
+    OrdinalBounds Bd = getOrdinalBounds(A->getIndexType());
+    uint64_t Count = static_cast<uint64_t>(Bd.Hi - Bd.Lo + 1);
+    llvm::BasicBlock *Pre = B.GetInsertBlock();
+    auto *Loop = newBlock("files.loop");
+    auto *Done = newBlock("files.done");
+    B.CreateBr(Loop);
+    B.SetInsertPoint(Loop);
+    llvm::PHINode *I = B.CreatePHI(B.getInt64Ty(), 2, "i");
+    I->addIncoming(B.getInt64(0), Pre);
+    Fn(B.CreateInBoundsGEP(memType(A), Addr, {B.getInt64(0), I}));
+    llvm::Value *Next = B.CreateAdd(I, B.getInt64(1));
+    I->addIncoming(Next, B.GetInsertBlock());
+    B.CreateCondBr(B.CreateICmpEQ(Next, B.getInt64(Count)), Done, Loop);
+    B.SetInsertPoint(Done);
+  }
+
+  /// Creates (Init) or releases (!Init) the PasFile objects of all files in
+  /// an object of type T at Addr: plain files, arrays of files, and file
+  /// fields of records (fixed parts).
+  void emitFileLifetime(llvm::Value *Addr, Type *T, bool Init,
+                        llvm::Value *Name = nullptr) {
+    if (!containsFile(T))
+      return;
+    if (auto *FT = llvm::dyn_cast<FileType>(T)) {
+      if (!Init) {
+        B.CreateCall(RT.FileFree, {loadFile(Addr)});
+        return;
+      }
+      if (!Name)
+        Name = llvm::ConstantPointerNull::get(B.getPtrTy());
+      llvm::Value *F = B.CreateCall(
+          RT.FileNew, {B.getInt64(FT->isText() ? 1 : sizeOf(FT->getElementType())),
+                       B.getInt32(FT->isText()), Name});
+      B.CreateStore(F, Addr);
+      return;
+    }
+    if (auto *A = llvm::dyn_cast<ArrayType>(T)) {
+      forEachElement(Addr, A, [&](llvm::Value *Elem) {
+        emitFileLifetime(Elem, A->getElementType(), Init);
+      });
+      return;
+    }
+    if (auto *R = llvm::dyn_cast<RecordType>(T))
+      for (FieldDecl *F : R->getFieldList()->Fixed)
+        emitFileLifetime(fieldAddress(Addr, F), F->getType(), Init);
+  }
+
+  /// Creates the PasFile objects for the file variables among Decls.
+  /// ParamIndex maps program-parameter names to their argv position.
+  void initFileVars(llvm::ArrayRef<Decl *> Decls,
+                    const llvm::StringMap<unsigned> *ParamIndex) {
+    for (Decl *D : Decls) {
+      auto *V = llvm::dyn_cast<VarDecl>(D);
+      if (!V || !containsFile(V->getType()))
+        continue;
+      llvm::Value *Name = nullptr;
+      if (ParamIndex) {
+        auto It = ParamIndex->find(V->getName().Name);
+        if (It != ParamIndex->end())
+          Name = B.CreateCall(RT.ProgramParam,
+                              {B.getInt32(It->second),
+                               B.CreateGlobalString(V->getName().Spelling)});
+      }
+      emitFileLifetime(varAddress(V), V->getType(), /*Init=*/true, Name);
+    }
+  }
+
   llvm::Value *varAddress(VarDecl *V) {
-    if (!V->getOwner())
+    if (!V->getOwner()) {
+      if (V->isPredeclared())
+        return standardFile(V->getName().Name);
       return Globals.lookup(V);
+    }
     RoutineDecl *Owner = V->getOwner();
     llvm::Value *Slot = B.CreateStructGEP(FrameTypes[Owner], framePtrFor(Owner),
                                           FrameSlots[V], V->getName().Name);
@@ -504,6 +640,8 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
     }
     case Expr::EK_Deref: {
       auto *D = llvm::cast<DerefExpr>(E);
+      if (D->getBase()->getType()->isFile()) // buffer variable f^
+        return B.CreateCall(RT.Buffer, {loadFile(emitAddress(D->getBase()))});
       llvm::Value *P = visitExpr(D->getBase());
       if (CGOpts.RangeChecks)
         emitRuntimeCheck(B.CreateIsNull(P), "dereference of a nil pointer",
@@ -535,6 +673,19 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
 
   /// Creates LLVM functions and frame types for every routine in Blk
   /// (recursively), and queues their bodies for emission.
+  /// Every routine takes its static link first (null at program level), so
+  /// procedural parameters can call any routine the same way.
+  llvm::FunctionType *routineFnType(llvm::ArrayRef<VarDecl *> Params,
+                                    Type *Result) {
+    llvm::SmallVector<llvm::Type *, 8> ParamTys{B.getPtrTy()};
+    for (VarDecl *P : Params)
+      ParamTys.push_back(P->isVarParam() || P->getType()->isStructured()
+                             ? B.getPtrTy()
+                             : regType(P->getType()));
+    llvm::Type *RetTy = Result ? regType(Result) : B.getVoidTy();
+    return llvm::FunctionType::get(RetTy, ParamTys, false);
+  }
+
   void declareRoutines(Block &Blk) {
     for (Decl *D : Blk.getDecls()) {
       auto *R = llvm::dyn_cast<RoutineDecl>(D);
@@ -560,22 +711,19 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
       FrameTypes[R] = llvm::StructType::create(M.getContext(), Slots,
                                                "frame." + Name.substr(4));
 
-      // Signature: [static link], params (var and aggregates by pointer).
-      llvm::SmallVector<llvm::Type *, 8> ParamTys;
-      if (R->hasStaticLink())
-        ParamTys.push_back(B.getPtrTy());
-      for (VarDecl *P : R->getParams())
-        ParamTys.push_back(P->isVarParam() || P->getType()->isStructured()
-                               ? B.getPtrTy()
-                               : regType(P->getType()));
-      llvm::Type *RetTy = R->isFunction() ? regType(R->getResultType())
-                                          : B.getVoidTy();
+      if (hasNonLocalLabels(*R->getBody())) {
+        JmpBufSlots[R] = Slots.size();
+        Slots.push_back(jmpBufType());
+        FrameTypes[R] = llvm::StructType::create(M.getContext(), Slots,
+                                                 "frame." + Name.substr(4) + ".jb");
+      }
+
       auto *F = llvm::Function::Create(
-          llvm::FunctionType::get(RetTy, ParamTys, false),
+          routineFnType(R->getParams(),
+                        R->isFunction() ? R->getResultType() : nullptr),
           llvm::Function::InternalLinkage, Name, M);
       unsigned ArgNo = 0;
-      if (R->hasStaticLink())
-        F->getArg(ArgNo++)->setName("link");
+      F->getArg(ArgNo++)->setName("link");
       for (VarDecl *P : R->getParams())
         F->getArg(ArgNo++)->setName(P->getName().Name);
       Functions[R] = F;
@@ -597,9 +745,9 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
     B.CreateMemSet(CurFrame, B.getInt8(0), DL.getTypeAllocSize(FrameTy),
                    DL.getABITypeAlign(FrameTy));
 
-    unsigned ArgNo = 0;
+    unsigned ArgNo = 1;
     if (R->hasStaticLink())
-      B.CreateStore(F->getArg(ArgNo++), B.CreateStructGEP(FrameTy, CurFrame, 0));
+      B.CreateStore(F->getArg(0), B.CreateStructGEP(FrameTy, CurFrame, 0));
     for (VarDecl *P : R->getParams()) {
       llvm::Value *Arg = F->getArg(ArgNo++);
       llvm::Value *Slot = B.CreateStructGEP(FrameTy, CurFrame, FrameSlots[P]);
@@ -611,7 +759,14 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
         storeScalar(Slot, Arg, P->getType());
     }
 
+    initFileVars(R->getBody()->getDecls(), nullptr);
+    if (JmpBufSlots.count(R))
+      emitSetJmpDispatch(*R->getBody(),
+                         B.CreateStructGEP(FrameTy, CurFrame, JmpBufSlots[R]));
     visitStmt(R->getBody()->getBody());
+    for (Decl *D : R->getBody()->getDecls())
+      if (auto *V = llvm::dyn_cast<VarDecl>(D))
+        emitFileLifetime(varAddress(V), V->getType(), /*Init=*/false);
 
     if (R->isFunction()) {
       VarDecl *Result = R->getResultVar();
@@ -627,21 +782,74 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
   // Calls
   //===--------------------------------------------------------------------===//
 
-  llvm::Value *emitCall(RoutineDecl *R, llvm::ArrayRef<Expr *> Args) {
-    llvm::SmallVector<llvm::Value *, 8> Values;
-    if (R->hasStaticLink())
-      Values.push_back(framePtrFor(R->getParent()));
+  llvm::Value *staticLinkFor(RoutineDecl *R) {
+    return R->hasStaticLink() ? framePtrFor(R->getParent())
+                              : llvm::ConstantPointerNull::get(B.getPtrTy());
+  }
+
+  /// {function, static link} for a routine passed as a procedural argument.
+  llvm::Value *emitRoutineValue(Expr *Arg) {
+    Decl *D = llvm::cast<NameRefExpr>(Arg)->getDecl();
+    if (auto *V = llvm::dyn_cast<VarDecl>(D)) // forwarding a parameter
+      return B.CreateLoad(memType(V->getType()), varAddress(V));
+    auto *R = llvm::cast<RoutineDecl>(D);
+    llvm::Value *Pair = llvm::UndefValue::get(memType(Arg->getType()));
+    Pair = B.CreateInsertValue(Pair, Functions[R], 0);
+    return B.CreateInsertValue(Pair, staticLinkFor(R), 1);
+  }
+
+  llvm::Value *emitCallTo(llvm::FunctionCallee Callee, llvm::Value *Link,
+                          llvm::ArrayRef<VarDecl *> Params,
+                          llvm::ArrayRef<Expr *> Args) {
+    llvm::SmallVector<llvm::Value *, 8> Values{Link};
     for (size_t I = 0; I < Args.size(); ++I) {
-      VarDecl *P = R->getParams()[I];
+      VarDecl *P = Params[I];
       Expr *Arg = Args[I];
-      if (P->isVarParam() || P->getType()->isStructured()) {
+      if (llvm::isa<RoutineType>(P->getType()))
+        Values.push_back(emitRoutineValue(Arg));
+      else if (P->isVarParam() || P->getType()->isStructured())
         Values.push_back(emitAddress(Arg));
-        continue;
-      }
-      Values.push_back(convertForAssign(visitExpr(Arg), Arg->getType(),
-                                        P->getType(), Arg->getBeginLoc()));
+      else
+        Values.push_back(convertForAssign(visitExpr(Arg), Arg->getType(),
+                                          P->getType(), Arg->getBeginLoc()));
     }
-    return B.CreateCall(Functions[R], Values);
+    return B.CreateCall(Callee, Values);
+  }
+
+  llvm::Value *emitCall(RoutineDecl *R, llvm::ArrayRef<Expr *> Args) {
+    return emitCallTo(Functions[R], staticLinkFor(R), R->getParams(), Args);
+  }
+
+  /// Call through a procedural / functional parameter.
+  llvm::Value *emitIndirectCall(VarDecl *V, llvm::ArrayRef<Expr *> Args) {
+    auto *RT = llvm::cast<RoutineType>(V->getType());
+    llvm::Value *Pair = B.CreateLoad(memType(RT), varAddress(V));
+    llvm::FunctionType *FTy = routineFnType(RT->getParams(), RT->getResult());
+    return emitCallTo({FTy, B.CreateExtractValue(Pair, 0)},
+                      B.CreateExtractValue(Pair, 1), RT->getParams(), Args);
+  }
+
+  //===--------------------------------------------------------------------===//
+  // goto
+  //===--------------------------------------------------------------------===//
+
+  llvm::BasicBlock *labelBlock(LabelDecl *L) {
+    llvm::BasicBlock *&BB = LabelBlocks[L];
+    if (!BB)
+      BB = newBlock("label." + L->getName().Name);
+    return BB;
+  }
+
+  /// At entry of a block that is the target of non-local gotos:
+  /// switch (_setjmp(buf)) { case k: goto label_k; }
+  void emitSetJmpDispatch(Block &Blk, llvm::Value *Buf) {
+    llvm::Value *R = B.CreateCall(RT.SetJmp, {Buf}, "jmp");
+    auto *Start = newBlock("body");
+    llvm::SwitchInst *SW = B.CreateSwitch(R, Start);
+    for (Decl *D : Blk.getDecls())
+      if (auto *L = llvm::dyn_cast<LabelDecl>(D); L && L->isNonLocal())
+        SW->addCase(B.getInt32(L->getIndex()), labelBlock(L));
+    B.SetInsertPoint(Start);
   }
 
   //===--------------------------------------------------------------------===//
@@ -786,7 +994,78 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
   // Built-in procedures and functions
   //===--------------------------------------------------------------------===//
 
-  void emitWriteArg(Expr *Arg) {
+  /// Splits off a leading file argument of read/write; returns the PasFile*.
+  llvm::Value *fileTarget(llvm::ArrayRef<Expr *> &Args, bool Input,
+                          FileType *&FT) {
+    FT = nullptr;
+    if (!Args.empty() && Args[0]->getType() && Args[0]->getType()->isFile()) {
+      FT = llvm::cast<FileType>(Args[0]->getType());
+      llvm::Value *F = loadFile(emitAddress(Args[0]));
+      Args = Args.drop_front();
+      return F;
+    }
+    return Input ? inputFile() : outputFile();
+  }
+
+  /// Address of a value convertible to type T: the designator itself if it
+  /// already has type T, else a temporary holding the converted value.
+  llvm::Value *addressForValue(Expr *E, Type *T) {
+    if (E->getType() == T && (T->isStructured() || T->isStringType()))
+      return emitAddress(E);
+    if (T->isStructured()) {
+      llvm::Value *Tmp = createTemp(memType(T));
+      copyAggregate(Tmp, emitAddress(E), T);
+      return Tmp;
+    }
+    llvm::Value *Tmp = createTemp(memType(T));
+    storeScalar(Tmp, convertForAssign(visitExpr(E), E->getType(), T,
+                                      E->getBeginLoc()),
+                T);
+    return Tmp;
+  }
+
+  void emitWrite(ProcCallStmt *S, bool IsWriteln) {
+    llvm::ArrayRef<Expr *> Args = S->getArgs();
+    FileType *FT;
+    llvm::Value *File = fileTarget(Args, /*Input=*/false, FT);
+    if (FT && !FT->isText()) {
+      for (Expr *Arg : Args)
+        B.CreateCall(RT.WriteElem,
+                     {File, addressForValue(Arg, FT->getElementType())});
+      return;
+    }
+    for (Expr *Arg : Args)
+      emitWriteArg(File, Arg);
+    if (IsWriteln)
+      B.CreateCall(RT.Writeln, {File});
+  }
+
+  void emitRead(ProcCallStmt *S, bool IsReadln) {
+    llvm::ArrayRef<Expr *> Args = S->getArgs();
+    FileType *FT;
+    llvm::Value *File = fileTarget(Args, /*Input=*/true, FT);
+    if (FT && !FT->isText()) {
+      Type *Elem = FT->getElementType();
+      for (Expr *Arg : Args) {
+        if (Arg->getType() == Elem) {
+          B.CreateCall(RT.ReadElem, {File, emitAddress(Arg)});
+          continue;
+        }
+        llvm::Value *Tmp = createTemp(memType(Elem));
+        B.CreateCall(RT.ReadElem, {File, Tmp});
+        llvm::Value *V = convertForAssign(loadScalar(Tmp, Elem), Elem,
+                                          Arg->getType(), Arg->getBeginLoc());
+        storeScalar(emitAddress(Arg), V, Arg->getType());
+      }
+      return;
+    }
+    for (Expr *Arg : Args)
+      emitReadArg(File, Arg);
+    if (IsReadln)
+      B.CreateCall(RT.Readln, {File});
+  }
+
+  void emitWriteArg(llvm::Value *File, Expr *Arg) {
     Expr *Value = Arg;
     llvm::Value *Width = B.getInt32(0); // no field width
     llvm::Value *Precision = B.getInt32(-1);
@@ -799,35 +1078,74 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
 
     Type *T = Value->getType();
     if (T->isStringType()) {
-      B.CreateCall(RT.WriteStr, {emitAddress(Value),
+      B.CreateCall(RT.WriteStr, {File, emitAddress(Value),
                                  B.getInt64(T->getStringLength()), Width});
       return;
     }
     llvm::Value *V = visitExpr(Value);
     if (T->isReal())
-      B.CreateCall(RT.WriteReal, {V, Width, Precision});
+      B.CreateCall(RT.WriteReal, {File, V, Width, Precision});
     else if (T->getBase()->isChar())
-      B.CreateCall(RT.WriteChar, {V, Width});
+      B.CreateCall(RT.WriteChar, {File, V, Width});
     else if (T->getBase()->isBoolean())
-      B.CreateCall(RT.WriteBool, {B.CreateZExt(V, B.getInt32Ty()), Width});
+      B.CreateCall(RT.WriteBool, {File, B.CreateZExt(V, B.getInt32Ty()), Width});
     else
-      B.CreateCall(RT.WriteInt, {V, Width});
+      B.CreateCall(RT.WriteInt, {File, V, Width});
   }
 
-  void emitReadArg(Expr *Arg) {
+  void emitReadArg(llvm::Value *File, Expr *Arg) {
     Type *T = Arg->getType();
     llvm::Value *Addr = emitAddress(Arg);
     if (T->isReal()) {
-      B.CreateStore(B.CreateCall(RT.ReadReal), Addr);
+      B.CreateStore(B.CreateCall(RT.ReadReal, {File}), Addr);
       return;
     }
     bool IsChar = T->getBase()->isChar();
-    llvm::Value *V = B.CreateCall(IsChar ? RT.ReadChar : RT.ReadInt);
+    llvm::Value *V = B.CreateCall(IsChar ? RT.ReadChar : RT.ReadInt, {File});
     emitRangeCheck(V, T->getBase(), T, Arg->getBeginLoc());
     B.CreateStore(V, Addr);
   }
 
+  /// pack(a, i, z) / unpack(z, a, i): packed and unpacked arrays share a
+  /// representation, so both are a bounds-checked memcpy.
+  void emitPackUnpack(ProcCallStmt *S, bool IsPack) {
+    auto Args = S->getArgs();
+    Expr *Unpacked = IsPack ? Args[0] : Args[1];
+    Expr *Index = IsPack ? Args[1] : Args[2];
+    Expr *Packed = IsPack ? Args[2] : Args[0];
+    auto *UA = llvm::cast<ArrayType>(Unpacked->getType());
+    auto *PA = llvm::cast<ArrayType>(Packed->getType());
+    OrdinalBounds UB = getOrdinalBounds(UA->getIndexType());
+    OrdinalBounds PB = getOrdinalBounds(PA->getIndexType());
+    int64_t Count = PB.Hi - PB.Lo + 1;
+    llvm::Value *I = toI64(visitExpr(Index), Index->getType());
+    if (CGOpts.RangeChecks)
+      emitRuntimeCheck(
+          B.CreateOr(B.CreateICmpSLT(I, B.getInt64(UB.Lo)),
+                     B.CreateICmpSGT(I, B.getInt64(UB.Hi - Count + 1))),
+          IsPack ? "'pack' index out of range" : "'unpack' index out of range",
+          Index->getBeginLoc());
+    llvm::Value *Elem = B.CreateInBoundsGEP(
+        memType(UA), emitAddress(Unpacked),
+        {B.getInt64(0), B.CreateSub(I, B.getInt64(UB.Lo))});
+    llvm::Value *PackedAddr = emitAddress(Packed);
+    uint64_t Bytes = Count * sizeOf(UA->getElementType());
+    if (IsPack)
+      B.CreateMemCpy(PackedAddr, llvm::MaybeAlign(1), Elem, llvm::MaybeAlign(1), Bytes);
+    else
+      B.CreateMemCpy(Elem, llvm::MaybeAlign(1), PackedAddr, llvm::MaybeAlign(1), Bytes);
+  }
+
+  llvm::Value *emitFileQuery(BuiltinKind K, Expr *FileArg) {
+    llvm::Value *File = FileArg ? loadFile(emitAddress(FileArg)) : inputFile();
+    llvm::Value *R = B.CreateCall(K == BuiltinKind::Eof ? RT.Eof : RT.Eoln, {File});
+    return B.CreateICmpNE(R, B.getInt32(0), K == BuiltinKind::Eof ? "eof" : "eoln");
+  }
+
   llvm::Value *emitBuiltinCall(CallExpr *E, BuiltinDecl *BD) {
+    if (BD->getBuiltinKind() == BuiltinKind::Eof ||
+        BD->getBuiltinKind() == BuiltinKind::Eoln)
+      return emitFileQuery(BD->getBuiltinKind(), E->getArgs()[0]);
     Expr *ArgE = E->getArgs()[0];
     Type *AT = ArgE->getType();
     llvm::Value *Arg = visitExpr(ArgE);
@@ -936,6 +1254,12 @@ public:
 
     Block &Blk = *P.getBlock();
     emitGlobals(Blk);
+    if (hasNonLocalLabels(Blk)) { // needed by gotos in routine bodies
+      MainJmpBuf = new llvm::GlobalVariable(
+          M, jmpBufType(), false, llvm::GlobalValue::InternalLinkage,
+          llvm::Constant::getNullValue(jmpBufType()), "pas.jmpbuf");
+      MainJmpBuf->setAlignment(llvm::Align(16));
+    }
     declareRoutines(Blk);
     for (RoutineDecl *R : RoutinesToEmit)
       emitRoutineBody(R);
@@ -945,6 +1269,14 @@ public:
     CurFrame = nullptr;
     B.SetInsertPoint(llvm::BasicBlock::Create(C, "entry", Main));
     B.CreateCall(RT.Init, {Main->getArg(0), Main->getArg(1)});
+    // Program parameters other than input/output bind to argv[1], ...
+    llvm::StringMap<unsigned> ParamIndex;
+    for (const Identifier &Param : P.getParams())
+      if (Param.Name != "input" && Param.Name != "output")
+        ParamIndex.try_emplace(Param.Name, ParamIndex.size() + 1);
+    initFileVars(Blk.getDecls(), &ParamIndex);
+    if (MainJmpBuf)
+      emitSetJmpDispatch(Blk, MainJmpBuf);
     visitStmt(Blk.getBody());
     B.CreateCall(RT.Fini);
     B.CreateRet(B.getInt32(0));
@@ -979,32 +1311,59 @@ public:
       emitCall(R, S->getArgs());
       return;
     }
+    if (auto *V = llvm::dyn_cast<VarDecl>(S->getDecl())) {
+      emitIndirectCall(V, S->getArgs());
+      return;
+    }
     auto *BD = llvm::cast<BuiltinDecl>(S->getDecl());
     switch (BD->getBuiltinKind()) {
     case BuiltinKind::Write:
     case BuiltinKind::Writeln:
-      for (Expr *Arg : S->getArgs())
-        emitWriteArg(Arg);
-      if (BD->getBuiltinKind() == BuiltinKind::Writeln)
-        B.CreateCall(RT.Writeln);
+      emitWrite(S, BD->getBuiltinKind() == BuiltinKind::Writeln);
       return;
     case BuiltinKind::Read:
     case BuiltinKind::Readln:
-      for (Expr *Arg : S->getArgs())
-        emitReadArg(Arg);
-      if (BD->getBuiltinKind() == BuiltinKind::Readln)
-        B.CreateCall(RT.Readln);
+      emitRead(S, BD->getBuiltinKind() == BuiltinKind::Readln);
+      return;
+    case BuiltinKind::Reset: case BuiltinKind::Rewrite: case BuiltinKind::Get:
+    case BuiltinKind::Put: case BuiltinKind::Page: {
+      llvm::FunctionCallee Fn;
+      switch (BD->getBuiltinKind()) {
+      case BuiltinKind::Reset:   Fn = RT.Reset; break;
+      case BuiltinKind::Rewrite: Fn = RT.Rewrite; break;
+      case BuiltinKind::Get:     Fn = RT.Get; break;
+      case BuiltinKind::Put:     Fn = RT.Put; break;
+      default:                   Fn = RT.Page; break;
+      }
+      llvm::Value *File = S->getArgs().empty()
+                              ? outputFile()
+                              : loadFile(emitAddress(S->getArgs()[0]));
+      B.CreateCall(Fn, {File});
+      return;
+    }
+    case BuiltinKind::Pack:
+    case BuiltinKind::Unpack:
+      emitPackUnpack(S, BD->getBuiltinKind() == BuiltinKind::Pack);
       return;
     case BuiltinKind::New: {
       Expr *Arg = S->getArgs()[0];
       Type *Pointee = llvm::cast<PointerType>(Arg->getType())->getPointee();
       llvm::Value *Mem = B.CreateCall(RT.New, {B.getInt64(sizeOf(Pointee))});
+      emitFileLifetime(Mem, Pointee, /*Init=*/true);
       B.CreateStore(Mem, emitAddress(Arg));
       return;
     }
     case BuiltinKind::Dispose: {
       Expr *Arg = S->getArgs()[0];
-      B.CreateCall(RT.Dispose, {visitExpr(Arg)});
+      llvm::Value *P = visitExpr(Arg);
+      Type *Pointee = llvm::cast<PointerType>(Arg->getType())->getPointee();
+      if (containsFile(Pointee)) {
+        if (CGOpts.RangeChecks)
+          emitRuntimeCheck(B.CreateIsNull(P), "'dispose' of a nil pointer",
+                           Arg->getBeginLoc());
+        emitFileLifetime(P, Pointee, /*Init=*/false);
+      }
+      B.CreateCall(RT.Dispose, {P});
       return;
     }
     default:
@@ -1170,6 +1529,30 @@ public:
     B.SetInsertPoint(EndBB);
   }
 
+  void visitLabeledStmt(LabeledStmt *S) {
+    llvm::BasicBlock *BB = labelBlock(S->getDecl());
+    B.CreateBr(BB);
+    B.SetInsertPoint(BB);
+    visitStmt(S->getBody());
+  }
+
+  void visitGotoStmt(GotoStmt *S) {
+    LabelDecl *L = S->getDecl();
+    if (L->getOwner() == CurRoutine) {
+      B.CreateBr(labelBlock(L));
+    } else {
+      // Non-local: unwind to the owner's activation with _longjmp.
+      RoutineDecl *Owner = L->getOwner();
+      llvm::Value *Buf =
+          Owner ? B.CreateStructGEP(FrameTypes[Owner], framePtrFor(Owner),
+                                    JmpBufSlots[Owner])
+                : static_cast<llvm::Value *>(MainJmpBuf);
+      B.CreateCall(RT.LongJmp, {Buf, B.getInt32(L->getIndex())});
+      B.CreateUnreachable();
+    }
+    B.SetInsertPoint(newBlock("after.goto")); // unreachable code follows
+  }
+
   void visitWithStmt(WithStmt *S) {
     // The record designators are evaluated once, on entry (ISO 6.8.3.10).
     for (WithContext *W : S->getRecords())
@@ -1197,10 +1580,15 @@ public:
 
   llvm::Value *visitNameRefExpr(NameRefExpr *E) {
     Decl *D = E->getDecl();
+    if (auto *V = llvm::dyn_cast<VarDecl>(D);
+        V && llvm::isa_and_nonnull<RoutineType>(V->getType()))
+      return emitIndirectCall(V, {}); // parameterless functional parameter
     if (llvm::isa<VarDecl>(D) || llvm::isa<FieldDecl>(D))
       return loadScalar(emitAddress(E), E->getType(), E->getName().Name);
     if (auto *R = llvm::dyn_cast<RoutineDecl>(D))
       return emitCall(R, {}); // parameterless function
+    if (auto *BD = llvm::dyn_cast<BuiltinDecl>(D))
+      return emitFileQuery(BD->getBuiltinKind(), nullptr); // eof / eoln
     auto *C = llvm::cast<ConstDecl>(D);
     const ConstValue &V = C->getValue();
     if (V.K == ConstValue::Real)
@@ -1280,6 +1668,8 @@ public:
   llvm::Value *visitCallExpr(CallExpr *E) {
     if (auto *R = llvm::dyn_cast<RoutineDecl>(E->getDecl()))
       return emitCall(R, E->getArgs());
+    if (auto *V = llvm::dyn_cast<VarDecl>(E->getDecl()))
+      return emitIndirectCall(V, E->getArgs());
     return emitBuiltinCall(E, llvm::cast<BuiltinDecl>(E->getDecl()));
   }
 

@@ -8,6 +8,5 @@
 ; RUN: not %pcc --emit-ast %S/Inputs/decl-syntax.pas 2>&1 >/dev/null | FileCheck --check-prefix=SYNTAX %s
 ; SYNTAX: decl-syntax.pas:2:16: error: conformant array parameters are not supported yet
 ; SYNTAX: decl-syntax.pas:4:15: error: expected parameter name
-; SYNTAX: decl-syntax.pas:6:13: error: procedural and functional parameters are not supported yet
 ; SYNTAX: decl-syntax.pas:8:1: error: in ISO Pascal, 'type' declarations must come before 'procedure' declarations; use --mode=tp to mix them
 ; SYNTAX: decl-syntax.pas:9:1: error: expected field name, 'case' or 'end' in record

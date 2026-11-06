@@ -79,6 +79,7 @@ class Parser {
   void skipUntil(std::initializer_list<tok::TokenKind> Stop);
   static std::string describe(tok::TokenKind K);
   Identifier makeIdentifier(const Token &T) const;
+  Identifier makeLabel(const Token &T) const;
   /// Consumes an identifier into Out, or reports "expected <What>".
   bool expectIdentifier(Identifier &Out, llvm::StringRef What);
   bool parseIdentList(llvm::SmallVectorImpl<Identifier> &Names,

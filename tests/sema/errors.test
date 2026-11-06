@@ -1,9 +1,9 @@
 ; Semantic checks available before M4 (scopes and types arrive in M4).
 ; RUN: not %pcc -c %S/Inputs/errors.pas -o %t.o 2>&1 | FileCheck %s
-; CHECK: errors.pas:1:26: error: program parameter 'data' is not declared (only 'input' and 'output' are supported yet)
 ; CHECK: errors.pas:1:32: error: duplicate program parameter 'output'
 ; CHECK: errors.pas:1:18: note: previous occurrence is here
 ; CHECK: errors.pas:3:3: error: use of undeclared identifier 'foo'
 ; CHECK: errors.pas:4:3: error: 'Write' requires at least one argument
 ; CHECK: errors.pas:5:23: error: integer literal exceeds maxint (2147483647)
+; CHECK: errors.pas:1:26: error: program parameter 'data' must be declared as a file variable in the program
 ; CHECK-NOT: error:

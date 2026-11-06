@@ -1,5 +1,20 @@
 ; Comments: { } and (* *), multi-line, no nesting, tokens glued to comments.
-; RUN: %pcc --emit-tokens %S/Inputs/comments.pas | FileCheck %s
+; Turbo/FPC pair the delimiters strictly ('}' inside (* *) is just text):
+; RUN: %pcc --mode=tp --emit-tokens %S/Inputs/comments.pas | FileCheck %s
+
+; ISO 7185 6.1.8: '{' == '(*' and '}' == '*)', so either closer ends either
+; kind of comment.
+; RUN: %pcc --emit-tokens %S/Inputs/comments-iso.pas | FileCheck --check-prefix=ISO %s
+; RUN: %pcc --mode=tp --emit-tokens %S/Inputs/comments-iso.pas | FileCheck --check-prefix=TP %s
+; ISO:      1:1 identifier 'a'
+; ISO-NEXT: 1:29 identifier 'b'
+; ISO-NEXT: 2:1 identifier 'c'
+; ISO-NEXT: 2:26 identifier 'd'
+; ISO-NEXT: eof
+; TP:       1:1 identifier 'a'
+; TP-NEXT:  2:26 identifier 'd'
+; TP-NEXT:  eof
+
 
 ; CHECK:      1:1 identifier 'a'
 ; CHECK-NEXT: 1:5 identifier 'b'

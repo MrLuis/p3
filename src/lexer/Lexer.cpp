@@ -39,6 +39,16 @@ void Lexer::skipBlockComment(unsigned OpenLen, llvm::StringRef Close) {
   const char *Start = Cur;
   llvm::StringRef Rest(Cur + OpenLen, BufEnd - (Cur + OpenLen));
   size_t Pos = Rest.find(Close);
+  if (LangOpts.Mode == LangMode::ISO) {
+    // ISO 7185 6.1.8: '{' / '(*' and '}' / '*)' are equivalent, so either
+    // closer ends either kind of comment. (Turbo/FPC pair them strictly.)
+    llvm::StringRef Other = Close == "}" ? "*)" : "}";
+    size_t OtherPos = Rest.find(Other);
+    if (OtherPos < Pos) {
+      Pos = OtherPos;
+      Close = Other;
+    }
+  }
   if (Pos == llvm::StringRef::npos) {
     Diags.error(locOf(Start), "unterminated comment",
                 {SourceRange(locOf(Start), locOf(Start + OpenLen))});

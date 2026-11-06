@@ -7,7 +7,6 @@
 ; CHECK: ptrsets.pas:11:5: error: assigning to 'PI' from incompatible type '^char'
 ; CHECK: ptrsets.pas:12:5: error: assigning to 'integer' from incompatible type 'PI'
 ; CHECK: ptrsets.pas:13:7: error: 'new' expects a pointer variable, not a value of type 'integer'
-; CHECK: ptrsets.pas:14:3: error: 'dispose' expects 1 argument (variant selectors are not supported)
 ; CHECK: ptrsets.pas:15:3: error: '^' applied to a value of type 'integer', which is not a pointer
 ; CHECK: ptrsets.pas:16:12: error: set element of type 'char' does not match earlier elements of type 'integer'
 ; CHECK: ptrsets.pas:17:9: error: set element 300 is outside 0..255

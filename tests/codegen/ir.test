@@ -6,10 +6,13 @@
 ; CHECK: define i32 @main(i32 %argc, ptr %argv) {
 ; CHECK-NEXT: entry:
 ; CHECK-NEXT:   call void @__pas_init(i32 %argc, ptr %argv)
-; CHECK-NEXT:   call void @__pas_write_char(i8 97, i32 0)
-; CHECK-NEXT:   call void @__pas_write_str(ptr @.str, i64 2, i32 0)
-; CHECK-NEXT:   call void @__pas_write_int(i32 7, i32 0)
-; CHECK-NEXT:   call void @__pas_writeln()
+; Text I/O goes through the PasFile* of `output`.
+; CHECK-NEXT:   [[F1:%.*]] = load ptr, ptr @__pas_output
+; CHECK-NEXT:   call void @__pas_write_char(ptr [[F1]], i8 97, i32 0)
+; CHECK-NEXT:   [[F2:%.*]] = load ptr, ptr @__pas_output
+; CHECK-NEXT:   call void @__pas_write_str(ptr [[F2]], ptr @.str, i64 2, i32 0)
+; CHECK-NEXT:   call void @__pas_write_int(ptr [[F2]], i32 7, i32 0)
+; CHECK-NEXT:   call void @__pas_writeln(ptr [[F2]])
 ; CHECK-NEXT:   call void @__pas_fini()
 ; CHECK-NEXT:   ret i32 0
 ; CHECK-NEXT: }
@@ -17,6 +20,6 @@
 ; The optimizer keeps the observable runtime calls.
 ; RUN: %pcc --emit-llvm -O2 %S/Inputs/write.pas -o - | FileCheck --check-prefix=O2 %s
 ; O2: define {{.*}}i32 @main(
-; O2: call void @__pas_write_char(i8 97, i32 0)
-; O2: call void @__pas_writeln()
+; O2: call void @__pas_write_char(ptr {{.*}}, i8 97, i32 0)
+; O2: call void @__pas_writeln(ptr
 ; O2: ret i32 0

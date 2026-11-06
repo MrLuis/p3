@@ -126,6 +126,10 @@ class ASTPrinter : public StmtVisitor<ASTPrinter>,
         printBlock(*B);
       return;
     }
+    case Decl::DK_Label:
+      line("LabelDecl ") << D->getName().Name;
+      loc(D->getLocation());
+      return;
     default:
       line("Decl '") << D->getName().Name << '\'';
       loc(D->getLocation());
@@ -282,6 +286,19 @@ public:
   }
 
   // Expressions
+  void visitLabeledStmt(LabeledStmt *S) {
+    line("LabeledStmt ") << S->getLabel().Name;
+    loc(S->getBeginLoc());
+    IndentScope I(Indent);
+    visitStmt(S->getBody());
+  }
+  void visitGotoStmt(GotoStmt *S) {
+    line("GotoStmt ") << S->getLabel().Name;
+    if (S->getDecl() && S->getDecl()->isNonLocal())
+      OS << " non-local";
+    loc(S->getBeginLoc());
+  }
+
   void visitWithStmt(WithStmt *S) {
     line("WithStmt");
     loc(S->getBeginLoc());

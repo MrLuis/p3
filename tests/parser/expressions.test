@@ -26,7 +26,3 @@
 ; TWOVAR: two-var.pas:3:1: error: ISO Pascal allows only one 'var' section per block
 ; TWOVAR-TP: VarDecl 'a' : integer
 ; TWOVAR-TP: VarDecl 'b' : char
-
-; File types come later (M10).
-; RUN: not %pcc --emit-ast %S/Inputs/var-types.pas 2>&1 >/dev/null | FileCheck --check-prefix=TYPES %s
-; TYPES: var-types.pas:4:8: error: 'file' types are not supported yet

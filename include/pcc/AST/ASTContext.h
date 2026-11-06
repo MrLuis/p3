@@ -32,6 +32,7 @@ class ASTContext {
   BuiltinType CharTy{Type::TK_Char};
   BuiltinType NilTy{Type::TK_Nil};
   SetType EmptySetTy{nullptr};
+  FileType TextTy{&CharTy, /*IsText=*/true};
   llvm::DenseMap<Type *, SetType *> SetTypes;
   llvm::DenseMap<uint64_t, StringLiteralType *> StringLiteralTypes;
 
@@ -48,6 +49,7 @@ public:
   Type *getBooleanType() { return &BooleanTy; }
   Type *getCharType() { return &CharTy; }
   Type *getNilType() { return &NilTy; }
+  Type *getTextType() { return &TextTy; }
   /// The type of a set constructor with elements of (host) type Element.
   Type *getSetConstructorType(Type *Element) {
     if (!Element)

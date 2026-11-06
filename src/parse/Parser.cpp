@@ -81,6 +81,13 @@ Identifier Parser::makeIdentifier(const Token &T) const {
   return {T.getIdentifier(), T.getRawText(), T.getLocation()};
 }
 
+Identifier Parser::makeLabel(const Token &T) const {
+  // Labels are compared by value: `0010` and `10` are the same label.
+  llvm::StringRef Name =
+      Ctx.getStrings().intern(std::to_string(T.getIntegerValue()));
+  return {Name, T.getRawText(), T.getLocation()};
+}
+
 bool Parser::expectIdentifier(Identifier &Out, llvm::StringRef What) {
   if (Tok.isNot(tok::identifier)) {
     Diags.error(Tok.getLocation(), "expected " + What);
@@ -238,12 +245,23 @@ Block *Parser::parseBlock() {
       if (RoutineDecl *R = parseRoutineDecl())
         Decls.push_back(R);
       break;
-    default: // label (M10)
-      unsupported("'" + Word + "' declarations are");
+    default: { // label 1, 2, 3;
       consumeToken();
-      skipUntil({tok::kw_begin, tok::kw_label, tok::kw_const, tok::kw_type,
-                 tok::kw_var, tok::kw_procedure, tok::kw_function});
+      do {
+        if (Tok.isNot(tok::integer_literal)) {
+          Diags.error(Tok.getLocation(), "expected label number");
+          skipUntil({tok::semi, tok::kw_begin});
+          break;
+        }
+        Decls.push_back(Ctx.create<LabelDecl>(makeLabel(Tok)));
+        consumeToken();
+      } while (tryConsume(tok::comma));
+      if (!expect(tok::semi, "after label declaration")) {
+        skipUntil({tok::semi, tok::kw_begin});
+        tryConsume(tok::semi);
+      }
       break;
+    }
     }
   }
 
@@ -406,8 +424,32 @@ bool Parser::parseFormalParams(llvm::SmallVectorImpl<VarDecl *> &Params) {
   SourceLocation LParen = consumeToken(); // '('
   do {
     if (Tok.isOneOf(tok::kw_procedure, tok::kw_function)) {
-      unsupported("procedural and functional parameters are");
-      skipUntil({tok::semi, tok::r_paren});
+      // procedure p(params) / function f(params): T
+      bool IsFunction = Tok.is(tok::kw_function);
+      SourceLocation Start = consumeToken();
+      Identifier Name;
+      if (!expectIdentifier(Name, "parameter name")) {
+        skipUntil({tok::semi, tok::r_paren});
+        continue;
+      }
+      llvm::SmallVector<VarDecl *, 4> Inner;
+      if (Tok.is(tok::l_paren) && !parseFormalParams(Inner)) {
+        skipUntil({tok::semi, tok::r_paren});
+        continue;
+      }
+      TypeSpec *Result = nullptr;
+      if (IsFunction) {
+        if (!expect(tok::colon, "before the result type of a functional parameter") ||
+            !(Result = parseTypeIdentifier("function result type"))) {
+          skipUntil({tok::semi, tok::r_paren});
+          continue;
+        }
+      }
+      auto *TS = Ctx.create<RoutineTypeSpec>(SourceRange(Start, PrevTokEnd),
+                                             IsFunction,
+                                             Ctx.copyArray<VarDecl *>(Inner),
+                                             Result);
+      Params.push_back(Ctx.create<VarDecl>(Name, TS, VarDecl::ValueParam));
       continue;
     }
     bool IsVar = tryConsume(tok::kw_var);
@@ -456,9 +498,15 @@ TypeSpec *Parser::parseType() {
       return nullptr;
     return Ctx.create<SetTypeSpec>(SourceRange(Start, PrevTokEnd), Elem);
   }
-  case tok::kw_file:
-    unsupported("'file' types are");
-    return nullptr;
+  case tok::kw_file: {
+    consumeToken();
+    if (!expect(tok::kw_of, "after 'file'"))
+      return nullptr;
+    TypeSpec *Elem = parseType();
+    if (!Elem)
+      return nullptr;
+    return Ctx.create<FileTypeSpec>(SourceRange(Start, PrevTokEnd), Elem);
+  }
   case tok::caret: {
     if (Packed)
       break;
@@ -769,12 +817,24 @@ Stmt *Parser::parseStatement() {
   case tok::eof:
     return Ctx.create<EmptyStmt>(Tok.getLocation());
 
-  case tok::kw_goto: // M10
-    unsupported("'goto' statements are");
-    break;
-  case tok::integer_literal:
-    unsupported("statement labels are");
-    break;
+  case tok::kw_goto: {
+    SourceLocation GotoLoc = consumeToken();
+    if (Tok.isNot(tok::integer_literal)) {
+      Diags.error(Tok.getLocation(), "expected label number after 'goto'");
+      break;
+    }
+    Identifier Label = makeLabel(Tok);
+    consumeToken();
+    return Ctx.create<GotoStmt>(SourceRange(GotoLoc, PrevTokEnd), Label);
+  }
+  case tok::integer_literal: {
+    Identifier Label = makeLabel(Tok);
+    SourceLocation Start = consumeToken();
+    if (!expect(tok::colon, "after statement label"))
+      break;
+    Stmt *Body = parseStatement();
+    return Ctx.create<LabeledStmt>(SourceRange(Start, PrevTokEnd), Label, Body);
+  }
   default:
     Diags.error(Tok.getLocation(), "expected statement");
     break;
