@@ -63,11 +63,21 @@ function c_getenv(name: pchar): pchar; cdecl; external 'c' name 'getenv';
 function c_system(cmd: pchar): longint; cdecl; external 'c' name 'system';
 function c_isatty(fd: longint): longint; cdecl; external 'c' name 'isatty';
 function c_strtod(s: pchar; endp: pointer): double; cdecl; external 'c' name 'strtod';
+function c_setvbuf(f: pointer; buf: pointer; mode: longint; size: int64): longint; cdecl;
+  external 'c' name 'setvbuf';
+
+const
+  ioUnbuffered = 2; { _IONBF on glibc and macOS }
 
 procedure sysInit;
+var
+  ignored: longint;
 begin
   sysOut := c_fdopen(1, 'w');
   sysErr := c_fdopen(2, 'w');
+  { diagnostics appear as they are reported, before any output written at
+    the end (like llvm::errs) }
+  ignored := c_setvbuf(sysErr, nil, ioUnbuffered, 0);
 end;
 
 procedure sysWrite(f: pointer; const s: string);

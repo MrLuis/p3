@@ -2,9 +2,9 @@ program pcc;
 { The self-hosted Pascal compiler: command line and pipeline. It accepts
   the C++ pcc's options (src/driver/main.cpp) and must behave the same.
   Implemented so far: --emit-tokens (S4), --emit-parse-tree (S5),
-  --emit-ast and semantic checks (S6). }
+  --emit-ast and semantic checks (S6), --emit-llvm (S7). }
 
-uses pcsys, pcutil, pcdiag, pclex, pcast, pctypes, pcparse, pcprint, pcsema;
+uses pcsys, pcutil, pcdiag, pclex, pcast, pctypes, pcparse, pcprint, pcsema, pcgen;
 
 type
   TAction = (actTokens, actParseTree, actAST, actLLVM, actAsm, actObj, actExe);
@@ -15,6 +15,7 @@ var
   mode: TLangMode;
   errorLimit: longint;
   werror, noUnusedVariable: boolean;
+  rangeChecksOn, overflowChecksOn: boolean;
   optLevel: longint;
   outBuf: TBuf;
 
@@ -73,6 +74,8 @@ begin
   werror := false;
   noUnusedVariable := false;
   optLevel := 0;
+  rangeChecksOn := true;
+  overflowChecksOn := true;
   i := 1;
   while i <= paramcount do
   begin
@@ -134,9 +137,12 @@ begin
       werror := true
     else if opt = 'Wno-unused-variable' then
       noUnusedVariable := true
-    else if (opt = 'g') or (opt = 'fno-range-checks') or
-            (opt = 'fno-overflow-checks') then
-      { code generation options: accepted for later milestones }
+    else if opt = 'fno-range-checks' then
+      rangeChecksOn := false
+    else if opt = 'fno-overflow-checks' then
+      overflowChecksOn := false
+    else if opt = 'g' then
+      { debug information: accepted, not produced yet }
     else if opt = 'target' then
       value := takeValue
     else if startsWith(opt, 'I') then
@@ -288,6 +294,33 @@ begin
     visitUnit(PIdent(listGet(usesList, i))^);
 end;
 
+{ The input file's name without directory and extension ('a' for standard
+  input), like llvm::sys::path::stem. }
+function inputStem: string;
+var
+  s: string;
+  i: longint;
+begin
+  s := inputFile;
+  for i := length(s) downto 1 do
+    if s[i] = '/' then
+    begin
+      s := copy(s, i + 1, 255);
+      break;
+    end;
+  if (s = '.') or (s = '..') then
+    exit(s);
+  for i := length(s) downto 2 do
+    if s[i] = '.' then
+    begin
+      s := copy(s, 1, i - 1);
+      break;
+    end;
+  if (s = '') or (inputFile = '-') then
+    s := 'a';
+  inputStem := s;
+end;
+
 { Writes outBuf to the output file ('-': standard output). }
 function writeOutput: boolean;
 begin
@@ -321,7 +354,12 @@ begin
     usageError('invalid optimization level ''-O' + intToStr(optLevel) +
                ''' (expected 0-3)');
   if outputFile = '' then
-    outputFile := '-'; { the dumps; other outputs are not implemented yet }
+  begin
+    if action = actLLVM then
+      outputFile := inputStem + '.ll'
+    else
+      outputFile := '-'; { the dumps; other outputs are not implemented yet }
+  end;
 
   if not smLoadFile(inputFile, fid) then
     usageError('cannot open input file ''' + inputFile + ''': ' +
@@ -362,9 +400,15 @@ begin
         printAST(outBuf, prog);
         ok := writeOutput;
       end
+      else if semaOK and (action = actLLVM) then
+      begin
+        generateModule(prog, units, mode, rangeChecksOn, overflowChecksOn,
+                       smFileName(fid), outBuf);
+        ok := writeOutput;
+      end
       else if semaOK then
-        diagError(noLoc, 'code generation is not implemented in the ' +
-                         'self-hosted compiler yet');
+        diagError(noLoc, 'assembly, object and executable output are not ' +
+                         'implemented in the self-hosted compiler yet');
     end;
   end;
   if ok and not diagHasErrors then

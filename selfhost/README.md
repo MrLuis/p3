@@ -22,7 +22,9 @@ fpc -Mobjfpc -Sh- -Cr -Co -FUbuild/fpc-units -obuild/pcc-fpc selfhost/pcc.pas
 | `pcsema.pas`, `pcsemastmt.inc` | semantic analysis (Sema.cpp) |
 | `builtins.inc` | generated from `include/pcc/AST/Builtins.def` |
 | `tokens.inc` | generated from `include/pcc/Lexer/TokenKinds.def` by `utils/gen-selfhost-tables.py` |
-| `pcc.pas` | the driver: options, unit loading, `--emit-tokens`, `--emit-parse-tree`, `--emit-ast` |
+| `pcir.pas` | a builder for textual LLVM IR (types with 64-bit layout, values, instructions) |
+| `pcgen.pas`, `pcgenstmt.inc` | code generation (CodeGen.cpp): `--emit-llvm` |
+| `pcc.pas` | the driver: options, unit loading, `--emit-tokens`, `--emit-parse-tree`, `--emit-ast`, `--emit-llvm` |
 
 Testing:
 
@@ -34,4 +36,17 @@ Testing:
 - `utils/selfhost-lint.py selfhost/*.pas`: dialect rules.
 - `PCC_UNDER_TEST=build/pcc-self lit -sv build/tests/sema`: the C++ test
   suite run against the Pascal compiler (sema, lexer and parser pass).
+- Until the Pascal compiler has its own driver (S8), `utils/selfhost-cc.py`
+  is a pcc front for it: it runs `--emit-llvm`, checks the IR with
+  `opt -passes=verify` and lets clang assemble and link it with the runtime.
+  `SELFHOST_PCC=build/pcc-self PCC_UNDER_TEST=$PWD/utils/selfhost-cc.py lit
+  build/tests/run` runs the run tests (all pass), and
+  `SELFHOST_PCC=build/pcc-self utils/iso7185pat.py $PWD/utils/selfhost-cc.py`
+  the ISO conformance test (793/793).
+- The bootstrap: `build/pcc-self --mode=tp -I selfhost selfhost/pcc.pas
+  --emit-llvm -o stage2.ll`, link it into stage 2 (as above), and stage 2
+  must write the same IR for its own source. The pcc-built, FPC-built and
+  stage 2 compilers must write identical IR for every input:
+  `utils/selfhost-diff.py --ref build/pcc-self --new build/pcc-fpc
+  --action=--emit-llvm --extra="-o -" ...`.
 - lit runs all of these: `tests/run/selfhost.test`, `tests/selfhost/*.test`.

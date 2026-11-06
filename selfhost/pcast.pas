@@ -145,6 +145,7 @@ type
 
   TWithContext = record
     rec: PNode;
+    cgAddr: PName; { code generation: the record's address }
   end;
 
   TTypeSpecKind = (tsNamed, tsEnum, tsSubrange, tsArray, tsRecord,
@@ -204,6 +205,14 @@ type
       number of labels in this routine targeted by non-local gotos }
     isUsed, resultAssigned: boolean;
     nonLocalLabels: longint;
+    { code generation: the global or function symbol, the frame slot of a
+      local, a field's byte offset, a routine's frame type (a PIRType) and
+      jmp_buf slot, a label's basic block }
+    cgName: PName;
+    cgSlot, cgJmpSlot: longint;
+    cgOffset: int64;
+    cgFrame: pointer;
+    cgLabel: PName;
     case TDeclKind of
       { owner: the routine whose frame holds it; nil for program-level
         variables and typed constants (Sema) }
