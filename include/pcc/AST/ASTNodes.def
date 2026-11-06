@@ -30,6 +30,11 @@ STMT(Empty)
 STMT(Compound)
 STMT(ProcCall)
 STMT(Assign)          // x := e                                (M4)
+STMT(If)              // if c then s [else s]                  (M5)
+STMT(While)           // while c do s                          (M5)
+STMT(Repeat)          // repeat s; s until c                   (M5)
+STMT(For)             // for v := a to|downto b do s           (M5)
+STMT(Case)            // case e of 1: s; 2, 3: s end           (M5)
 
 #undef STMT
 #undef EXPR

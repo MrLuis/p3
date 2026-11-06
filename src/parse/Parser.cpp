@@ -261,38 +261,56 @@ TypeSpec *Parser::parseType() {
 CompoundStmt *Parser::parseCompoundStmt() {
   SourceLocation BeginLoc = consumeToken(); // 'begin'
   llvm::SmallVector<Stmt *, 8> Body;
+  parseStatementSequence(Body, tok::kw_end, BeginLoc, "begin");
+  SourceLocation EndLoc = Tok.getEndLocation();
+  tryConsume(tok::kw_end);
+  return Ctx.create<CompoundStmt>(SourceRange(BeginLoc, EndLoc),
+                                  Ctx.copyArray<Stmt *>(Body));
+}
+
+void Parser::parseStatementSequence(llvm::SmallVectorImpl<Stmt *> &Body,
+                                    tok::TokenKind Terminator,
+                                    SourceLocation OpenLoc,
+                                    llvm::StringRef OpenWord) {
+  auto NoteOpen = [&] {
+    Diags.note(OpenLoc, "to match this '" + OpenWord + "'");
+  };
 
   while (!Diags.shouldStop()) {
     Body.push_back(parseStatement());
 
-    if (tryConsume(tok::semi))
+    if (Tok.is(tok::semi)) {
+      SourceLocation SemiLoc = consumeToken();
+      // `if c then s; else t` -- the ';' already ended the if statement.
+      if (Tok.is(tok::kw_else)) {
+        Diags.error(SemiLoc, "';' before 'else' ends the 'if' statement; "
+                             "remove the ';'");
+        consumeToken(); // recover by treating the else branch as a statement
+      }
       continue;
-    if (Tok.is(tok::kw_end))
-      break;
+    }
+    if (Tok.is(Terminator))
+      return;
     if (Tok.is(tok::eof)) {
-      Diags.error(Tok.getLocation(), "expected 'end'");
-      Diags.note(BeginLoc, "to match this 'begin'");
-      break;
+      Diags.error(Tok.getLocation(), "expected " + describe(Terminator));
+      NoteOpen();
+      return;
     }
     if (startsStatement()) {
       // Most likely a forgotten ';' -- report it and carry on parsing.
       Diags.error(PrevTokEnd, "expected ';' between statements");
       continue;
     }
-    Diags.error(Tok.getLocation(), "expected ';' or 'end' after statement");
-    skipUntil({tok::semi, tok::kw_end});
+    Diags.error(Tok.getLocation(), "expected ';' or " + describe(Terminator) +
+                                       " after statement");
+    skipUntil({tok::semi, Terminator});
     if (tryConsume(tok::semi))
       continue;
-    if (Tok.isNot(tok::kw_end)) {
-      Diags.note(BeginLoc, "to match this 'begin'");
-      break;
+    if (Tok.isNot(Terminator)) {
+      NoteOpen();
+      return;
     }
   }
-
-  SourceLocation EndLoc = Tok.getEndLocation();
-  tryConsume(tok::kw_end);
-  return Ctx.create<CompoundStmt>(SourceRange(BeginLoc, EndLoc),
-                                  Ctx.copyArray<Stmt *>(Body));
 }
 
 //===----------------------------------------------------------------------===//
@@ -305,6 +323,16 @@ Stmt *Parser::parseStatement() {
     return parseAssignmentOrCall();
   case tok::kw_begin:
     return parseCompoundStmt();
+  case tok::kw_if:
+    return parseIfStmt();
+  case tok::kw_while:
+    return parseWhileStmt();
+  case tok::kw_repeat:
+    return parseRepeatStmt();
+  case tok::kw_for:
+    return parseForStmt();
+  case tok::kw_case:
+    return parseCaseStmt();
 
   // The empty statement: nothing before a separator or terminator.
   case tok::semi:
@@ -314,13 +342,8 @@ Stmt *Parser::parseStatement() {
   case tok::eof:
     return Ctx.create<EmptyStmt>(Tok.getLocation());
 
-  case tok::kw_if:
-  case tok::kw_while:
-  case tok::kw_repeat:
-  case tok::kw_for:
-  case tok::kw_case:
-  case tok::kw_with:
-  case tok::kw_goto:
+  case tok::kw_with: // M8
+  case tok::kw_goto: // M10
     unsupported("'" + Tok.getRawText().lower() + "' statements are");
     break;
   case tok::integer_literal:
@@ -419,6 +442,252 @@ bool Parser::parseActualParams(llvm::SmallVectorImpl<Expr *> &Args,
     return false;
   }
   return true;
+}
+
+//===----------------------------------------------------------------------===//
+// Structured statements (M5)
+//===----------------------------------------------------------------------===//
+
+// if = "if" expression "then" statement [ "else" statement ] .
+// The dangling else binds to the nearest if: the inner parseIfStmt sees the
+// 'else' first.
+Stmt *Parser::parseIfStmt() {
+  SourceLocation IfLoc = consumeToken();
+  Expr *Cond = parseExpression();
+  if (!Cond) {
+    skipUntil({tok::kw_then, tok::semi, tok::kw_end});
+    if (Tok.isNot(tok::kw_then))
+      return Ctx.create<EmptyStmt>(IfLoc);
+  }
+  if (!expect(tok::kw_then, "after 'if' condition") && !startsStatement()) {
+    skipUntil({tok::semi, tok::kw_end});
+    return Ctx.create<EmptyStmt>(IfLoc);
+  }
+  Stmt *Then = parseStatement();
+  Stmt *Else = nullptr;
+  if (tryConsume(tok::kw_else))
+    Else = parseStatement();
+  if (!Cond)
+    return Ctx.create<EmptyStmt>(IfLoc);
+  return Ctx.create<IfStmt>(SourceRange(IfLoc, PrevTokEnd), Cond, Then, Else);
+}
+
+// while = "while" expression "do" statement .
+Stmt *Parser::parseWhileStmt() {
+  SourceLocation WhileLoc = consumeToken();
+  Expr *Cond = parseExpression();
+  if (!Cond)
+    skipUntil({tok::kw_do, tok::semi, tok::kw_end});
+  if (!expect(tok::kw_do, "after 'while' condition") && !startsStatement()) {
+    skipUntil({tok::semi, tok::kw_end});
+    return Ctx.create<EmptyStmt>(WhileLoc);
+  }
+  Stmt *Body = parseStatement();
+  if (!Cond)
+    return Ctx.create<EmptyStmt>(WhileLoc);
+  return Ctx.create<WhileStmt>(SourceRange(WhileLoc, PrevTokEnd), Cond, Body);
+}
+
+// repeat = "repeat" stmtSeq "until" expression .
+Stmt *Parser::parseRepeatStmt() {
+  SourceLocation RepeatLoc = consumeToken();
+  llvm::SmallVector<Stmt *, 8> Body;
+  parseStatementSequence(Body, tok::kw_until, RepeatLoc, "repeat");
+  if (!tryConsume(tok::kw_until))
+    return Ctx.create<EmptyStmt>(RepeatLoc);
+  Expr *Cond = parseExpression();
+  if (!Cond)
+    return Ctx.create<EmptyStmt>(RepeatLoc);
+  return Ctx.create<RepeatStmt>(SourceRange(RepeatLoc, PrevTokEnd),
+                                Ctx.copyArray<Stmt *>(Body), Cond);
+}
+
+// for = "for" ident ":=" expression ("to"|"downto") expression "do" statement .
+Stmt *Parser::parseForStmt() {
+  SourceLocation ForLoc = consumeToken();
+  auto Fail = [&] {
+    skipUntil({tok::semi, tok::kw_end});
+    return Ctx.create<EmptyStmt>(ForLoc);
+  };
+
+  if (Tok.isNot(tok::identifier)) {
+    Diags.error(Tok.getLocation(), "expected control variable after 'for'");
+    return Fail();
+  }
+  auto *Var = Ctx.create<NameRefExpr>(makeIdentifier(Tok));
+  consumeToken();
+
+  if (Tok.is(tok::equal)) {
+    Diags.error(Tok.getLocation(), "expected ':=' in 'for' statement, found '='",
+                {Tok.getRange()});
+    consumeToken();
+  } else if (!expect(tok::colon_equal, "after 'for' control variable")) {
+    return Fail();
+  }
+
+  Expr *Init = parseExpression();
+  if (!Init)
+    return Fail();
+
+  bool Downto = Tok.is(tok::kw_downto);
+  if (!Tok.isOneOf(tok::kw_to, tok::kw_downto)) {
+    Diags.error(PrevTokEnd, "expected 'to' or 'downto' in 'for' statement");
+    return Fail();
+  }
+  consumeToken();
+
+  Expr *Final = parseExpression();
+  if (!Final)
+    return Fail();
+  if (!expect(tok::kw_do, "in 'for' statement") && !startsStatement())
+    return Fail();
+
+  Stmt *Body = parseStatement();
+  return Ctx.create<ForStmt>(SourceRange(ForLoc, PrevTokEnd), Var, Init, Final,
+                             Downto, Body);
+}
+
+bool Parser::isCaseElse() const {
+  return Tok.is(tok::kw_else) ||
+         (Tok.is(tok::identifier) && Tok.getIdentifier() == "otherwise");
+}
+
+// case = "case" expression "of" caseArm { ";" caseArm } [ ";" ]
+//        [ ("else"|"otherwise") stmtSeq ] "end" .
+Stmt *Parser::parseCaseStmt() {
+  SourceLocation CaseLoc = consumeToken();
+  Expr *Selector = parseExpression();
+  if (!Selector)
+    skipUntil({tok::kw_of, tok::kw_end});
+  if (!expect(tok::kw_of, "after 'case' selector")) {
+    skipUntil({tok::kw_end});
+    tryConsume(tok::kw_end);
+    return Ctx.create<EmptyStmt>(CaseLoc);
+  }
+
+  llvm::SmallVector<CaseArm *, 8> Arms;
+  llvm::SmallVector<Stmt *, 4> ElseBody;
+  SourceLocation ElseLoc;
+  bool OK = Selector != nullptr;
+
+  while (!Diags.shouldStop() && Tok.isNot(tok::kw_end) &&
+         Tok.isNot(tok::eof)) {
+    if (isCaseElse()) {
+      if (LangOpts.Mode == LangMode::ISO)
+        Diags.error(Tok.getLocation(),
+                    "'" + Tok.getRawText() +
+                        "' in a 'case' statement is a Turbo/Free Pascal "
+                        "extension; use --mode=tp",
+                    {Tok.getRange()});
+      ElseLoc = consumeToken();
+      tryConsume(tok::colon); // some dialects write `otherwise:`
+      parseStatementSequence(ElseBody, tok::kw_end, CaseLoc, "case");
+      break;
+    }
+
+    llvm::SmallVector<CaseLabel *, 4> Labels;
+    do {
+      if (CaseLabel *L = parseCaseLabel())
+        Labels.push_back(L);
+      else
+        OK = false;
+    } while (tryConsume(tok::comma));
+
+    if (!expect(tok::colon, "after case label")) {
+      OK = false;
+      skipUntil({tok::semi, tok::kw_end});
+      if (tryConsume(tok::semi))
+        continue;
+      break;
+    }
+    Stmt *Body = parseStatement();
+    Arms.push_back(Ctx.create<CaseArm>(Ctx.copyArray<CaseLabel *>(Labels), Body));
+
+    if (tryConsume(tok::semi))
+      continue;
+    if (Tok.is(tok::kw_end) || isCaseElse())
+      continue;
+    Diags.error(PrevTokEnd, "expected ';' or 'end' after case arm");
+    OK = false;
+    skipUntil({tok::semi, tok::kw_end});
+    tryConsume(tok::semi);
+  }
+
+  if (Arms.empty() && OK) {
+    Diags.error(Tok.getLocation(), "a 'case' statement needs at least one "
+                                   "case label");
+    OK = false;
+  }
+  SourceLocation EndLoc = Tok.getEndLocation();
+  if (!tryConsume(tok::kw_end)) {
+    Diags.error(Tok.getLocation(), "expected 'end' at end of 'case' statement");
+    Diags.note(CaseLoc, "to match this 'case'");
+    return Ctx.create<EmptyStmt>(CaseLoc);
+  }
+  if (!OK)
+    return Ctx.create<EmptyStmt>(CaseLoc);
+  return Ctx.create<CaseStmt>(SourceRange(CaseLoc, EndLoc), Selector,
+                              Ctx.copyArray<CaseArm *>(Arms), ElseLoc,
+                              Ctx.copyArray<Stmt *>(ElseBody));
+}
+
+// caseLabel = constant [ ".." constant ] .
+CaseLabel *Parser::parseCaseLabel() {
+  Expr *Lo = parseConstant();
+  if (!Lo)
+    return nullptr;
+  Expr *Hi = nullptr;
+  if (Tok.is(tok::dotdot)) {
+    if (LangOpts.Mode == LangMode::ISO)
+      Diags.error(Tok.getLocation(),
+                  "case label ranges are a Turbo/Free Pascal extension; use "
+                  "--mode=tp",
+                  {Tok.getRange()});
+    consumeToken();
+    Hi = parseConstant();
+    if (!Hi)
+      return nullptr;
+  }
+  return Ctx.create<CaseLabel>(Lo, Hi);
+}
+
+// constant = [ "+" | "-" ] ( unsignedInteger | ident ) | string .
+Expr *Parser::parseConstant() {
+  if (Tok.isOneOf(tok::plus, tok::minus)) {
+    UnaryOp Op = Tok.is(tok::plus) ? UnaryOp::Plus : UnaryOp::Minus;
+    SourceLocation OpLoc = consumeToken();
+    Expr *Operand = nullptr;
+    if (Tok.is(tok::integer_literal)) {
+      Operand = Ctx.create<IntegerLiteralExpr>(Tok.getRange(),
+                                               Tok.getIntegerValue());
+    } else if (Tok.is(tok::identifier)) {
+      Operand = Ctx.create<NameRefExpr>(makeIdentifier(Tok));
+    } else {
+      Diags.error(Tok.getLocation(), "expected constant after sign");
+      return nullptr;
+    }
+    consumeToken();
+    return Ctx.create<UnaryExpr>(
+        SourceRange(OpLoc, Operand->getRange().getEnd()), Op, Operand);
+  }
+
+  Expr *E = nullptr;
+  switch (Tok.getKind()) {
+  case tok::integer_literal:
+    E = Ctx.create<IntegerLiteralExpr>(Tok.getRange(), Tok.getIntegerValue());
+    break;
+  case tok::string_literal:
+    E = Ctx.create<StringLiteralExpr>(Tok.getRange(), Tok.getStringValue());
+    break;
+  case tok::identifier:
+    E = Ctx.create<NameRefExpr>(makeIdentifier(Tok));
+    break;
+  default:
+    Diags.error(Tok.getLocation(), "expected constant");
+    return nullptr;
+  }
+  consumeToken();
+  return E;
 }
 
 //===----------------------------------------------------------------------===//

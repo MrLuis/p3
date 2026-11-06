@@ -1,0 +1,5 @@
+program w;
+var x: integer;
+begin
+  while x > 0 x := x - 1
+end.

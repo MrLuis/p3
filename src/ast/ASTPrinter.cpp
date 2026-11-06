@@ -111,6 +111,68 @@ public:
     visitExpr(S->getValue());
   }
 
+  void visitIfStmt(IfStmt *S) {
+    line(S->getElse() ? "IfStmt has_else" : "IfStmt");
+    loc(S->getBeginLoc());
+    IndentScope I(Indent);
+    visitExpr(S->getCond());
+    visitStmt(S->getThen());
+    if (S->getElse())
+      visitStmt(S->getElse());
+  }
+  void visitWhileStmt(WhileStmt *S) {
+    line("WhileStmt");
+    loc(S->getBeginLoc());
+    IndentScope I(Indent);
+    visitExpr(S->getCond());
+    visitStmt(S->getBody());
+  }
+  void visitRepeatStmt(RepeatStmt *S) {
+    line("RepeatStmt");
+    loc(S->getBeginLoc());
+    IndentScope I(Indent);
+    for (Stmt *Child : S->getBody())
+      visitStmt(Child);
+    visitExpr(S->getCond());
+  }
+  void visitForStmt(ForStmt *S) {
+    line(S->isDownto() ? "ForStmt downto" : "ForStmt to");
+    loc(S->getBeginLoc());
+    IndentScope I(Indent);
+    visitExpr(S->getVar());
+    visitExpr(S->getInit());
+    visitExpr(S->getFinal());
+    visitStmt(S->getBody());
+  }
+  void visitCaseStmt(CaseStmt *S) {
+    line("CaseStmt");
+    loc(S->getBeginLoc());
+    IndentScope I(Indent);
+    visitExpr(S->getSelector());
+    for (CaseArm *Arm : S->getArms()) {
+      line("CaseArm");
+      loc(Arm->getLabels().empty() ? Arm->getBody()->getBeginLoc()
+                                   : Arm->getLabels()[0]->Lo->getBeginLoc());
+      IndentScope J(Indent);
+      for (CaseLabel *L : Arm->getLabels()) {
+        line(L->isRange() ? "CaseLabelRange" : "CaseLabel");
+        loc(L->Lo->getBeginLoc());
+        IndentScope K(Indent);
+        visitExpr(L->Lo);
+        if (L->Hi)
+          visitExpr(L->Hi);
+      }
+      visitStmt(Arm->getBody());
+    }
+    if (S->hasElse()) {
+      line("CaseElse");
+      loc(S->getElseLoc());
+      IndentScope J(Indent);
+      for (Stmt *Child : S->getElseBody())
+        visitStmt(Child);
+    }
+  }
+
   // Expressions
   void visitIntegerLiteralExpr(IntegerLiteralExpr *E) {
     line("IntegerLiteralExpr ") << E->getValue();

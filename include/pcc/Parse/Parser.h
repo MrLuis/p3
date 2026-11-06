@@ -6,8 +6,20 @@
 //   block       = [ varPart ] compoundStmt .     (label/const/type/routines later)
 //   varPart     = "var" identList ":" type ";" { identList ":" type ";" } .
 //   type        = typeIdent .                     (structured types: M7+)
-//   compound    = "begin" statement { ";" statement } "end" .
-//   statement   = [ assignment | procCall | compound ] .
+//   compound    = "begin" stmtSeq "end" .
+//   stmtSeq     = statement { ";" statement } .
+//   statement   = [ assignment | procCall | compound | if | while | repeat
+//                 | for | case ] .
+//   if          = "if" expression "then" statement [ "else" statement ] .
+//   while       = "while" expression "do" statement .
+//   repeat      = "repeat" stmtSeq "until" expression .
+//   for         = "for" ident ":=" expression ("to"|"downto") expression
+//                 "do" statement .
+//   case        = "case" expression "of" caseArm { ";" caseArm } [ ";" ]
+//                 [ ("else"|"otherwise") stmtSeq ] "end" .   (else: TP)
+//   caseArm     = caseLabel { "," caseLabel } ":" statement .
+//   caseLabel   = constant [ ".." constant ] .                  (range: TP)
+//   constant    = [ "+" | "-" ] ( unsignedInteger | ident ) | string .
 //   assignment  = ident ":=" expression .
 //   procCall    = ident [ "(" actualParam { "," actualParam } ")" ] .
 //   actualParam = expression [ ":" expression [ ":" expression ] ] .
@@ -78,7 +90,20 @@ class Parser {
 
   // Statements
   CompoundStmt *parseCompoundStmt();
+  /// Parses statements separated by ';' up to (not including) Terminator.
+  /// OpenLoc/OpenWord name the construct for "to match this ..." notes.
+  void parseStatementSequence(llvm::SmallVectorImpl<Stmt *> &Body,
+                              tok::TokenKind Terminator,
+                              SourceLocation OpenLoc, llvm::StringRef OpenWord);
   Stmt *parseStatement();
+  Stmt *parseIfStmt();
+  Stmt *parseWhileStmt();
+  Stmt *parseRepeatStmt();
+  Stmt *parseForStmt();
+  Stmt *parseCaseStmt();
+  CaseLabel *parseCaseLabel();
+  Expr *parseConstant();
+  bool isCaseElse() const;
   Stmt *parseAssignmentOrCall();
   /// "(" param { "," param } ")" -- AllowFormat permits e:w:p (write/writeln).
   bool parseActualParams(llvm::SmallVectorImpl<Expr *> &Args, bool AllowFormat);

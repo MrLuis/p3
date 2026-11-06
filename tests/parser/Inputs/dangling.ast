@@ -1,0 +1,15 @@
+ProgramDecl 'd' <1:1>
+  VarDecl 'a' : boolean <2:5>
+  VarDecl 'b' : boolean <2:8>
+  VarDecl 'x' : integer <2:20>
+  CompoundStmt <3:1>
+    IfStmt <4:3>
+      NameRefExpr 'a' variable : boolean <4:6>
+      IfStmt has_else <4:13>
+        NameRefExpr 'b' variable : boolean <4:16>
+        AssignStmt <4:23>
+          NameRefExpr 'x' variable : integer <4:23>
+          IntegerLiteralExpr 1 : integer <4:28>
+        AssignStmt <4:35>
+          NameRefExpr 'x' variable : integer <4:35>
+          IntegerLiteralExpr 2 : integer <4:40>

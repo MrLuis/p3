@@ -1,0 +1,36 @@
+; M5 statement syntax.
+
+; The dangling else belongs to the nearest if.
+; RUN: %pcc --emit-ast %S/Inputs/dangling.pas -o %t.ast
+; RUN: diff %S/Inputs/dangling.ast %t.ast
+
+; RUN: not %pcc --emit-ast %S/Inputs/semi-else.pas 2>&1 >/dev/null | FileCheck --check-prefix=SEMI %s
+; SEMI: semi-else.pas:4:23: error: ';' before 'else' ends the 'if' statement; remove the ';'
+; SEMI-NOT: error:
+
+; RUN: not %pcc --emit-ast %S/Inputs/missing-then.pas 2>&1 >/dev/null | FileCheck --check-prefix=THEN %s
+; THEN: missing-then.pas:4:11: error: expected 'then' after 'if' condition
+; THEN-NOT: error:
+
+; RUN: not %pcc --emit-ast %S/Inputs/missing-do.pas 2>&1 >/dev/null | FileCheck --check-prefix=DO %s
+; DO: missing-do.pas:4:14: error: expected 'do' after 'while' condition
+; DO-NOT: error:
+
+; RUN: not %pcc --emit-ast %S/Inputs/missing-until.pas 2>&1 >/dev/null | FileCheck --check-prefix=UNTIL %s
+; UNTIL: missing-until.pas:5:1: error: expected ';' or 'until' after statement
+; UNTIL: missing-until.pas:3:3: note: to match this 'repeat'
+
+; RUN: not %pcc --emit-ast %S/Inputs/for-errors.pas 2>&1 >/dev/null | FileCheck --check-prefix=FOR %s
+; FOR: for-errors.pas:4:13: error: expected 'to' or 'downto' in 'for' statement
+; FOR: for-errors.pas:5:9: error: expected ':=' in 'for' statement, found '='
+; FOR-NOT: error:
+
+; Case label ranges and else/otherwise are Turbo/FPC extensions.
+; RUN: not %pcc --emit-ast %S/Inputs/case-errors.pas 2>&1 >/dev/null | FileCheck --check-prefix=CASE %s
+; CASE: case-errors.pas:5:6: error: case label ranges are a Turbo/Free Pascal extension; use --mode=tp
+; CASE: case-errors.pas:7:3: error: 'else' in a 'case' statement is a Turbo/Free Pascal extension; use --mode=tp
+; CASE: case-errors.pas:10:3: error: a 'case' statement needs at least one case label
+; CASE-NOT: error:
+; RUN: not %pcc --mode=tp --emit-ast %S/Inputs/case-errors.pas 2>&1 >/dev/null | FileCheck --check-prefix=CASE-TP %s
+; CASE-TP-NOT: extension
+; CASE-TP: case-errors.pas:10:3: error: a 'case' statement needs at least one case label

@@ -7,7 +7,10 @@
 
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/StringMap.h"
+#include "llvm/ADT/StringExtras.h"
 #include "llvm/ADT/StringSet.h"
+
+#include <optional>
 
 using namespace pcc;
 
@@ -38,6 +41,10 @@ class Checker : public StmtVisitor<Checker>,
   /// Variables declared together (`a, b: T`) share one TypeSpec; resolve it
   /// once so a bad type is reported once.
   llvm::DenseMap<TypeSpec *, Type *> ResolvedTypeSpecs;
+
+  /// Enclosing for statements, innermost last. Their control variables must
+  /// not be assigned in the loop body (ISO 7185 6.8.3.9 "threatened").
+  llvm::SmallVector<ForStmt *, 4> ActiveFors;
 
   Type *errorType() { return Ctx.getErrorType(); }
 
@@ -168,6 +175,104 @@ class Checker : public StmtVisitor<Checker>,
   }
 
   //===--------------------------------------------------------------------===//
+  // Control flow helpers
+  //===--------------------------------------------------------------------===//
+
+  void checkCondition(Expr *Cond, llvm::StringRef Keyword) {
+    Type *T = check(Cond);
+    if (!T->isError() && !T->isBoolean())
+      Diags.error(Cond->getBeginLoc(),
+                  "condition of '" + Keyword + "' must be of type 'boolean', "
+                  "not " + quoted(T),
+                  {Cond->getRange()});
+  }
+
+  /// Reports an assignment (or read) to the control variable of an
+  /// enclosing for statement. Returns true if one was reported.
+  bool checkNotForControlVar(Decl *D, SourceLocation Loc, SourceRange Range) {
+    for (ForStmt *F : ActiveFors) {
+      if (F->getVar()->getDecl() != D)
+        continue;
+      Diags.error(Loc,
+                  "cannot assign to '" + D->getName().Spelling +
+                      "' inside a 'for' loop that it controls",
+                  {Range});
+      Diags.note(F->getBeginLoc(), "'for' loop is here");
+      return true;
+    }
+    return false;
+  }
+
+  /// Value of a constant expression (case labels): integer/char literals,
+  /// constant names and signed constants. Types must already be checked.
+  std::optional<int64_t> evaluateConstant(Expr *E) {
+    if (auto *IL = llvm::dyn_cast<IntegerLiteralExpr>(E))
+      return static_cast<int64_t>(IL->getValue());
+    if (auto *SL = llvm::dyn_cast<StringLiteralExpr>(E))
+      return SL->isCharLiteral()
+                 ? std::optional<int64_t>(static_cast<uint8_t>(SL->getValue()[0]))
+                 : std::nullopt;
+    if (auto *NR = llvm::dyn_cast<NameRefExpr>(E))
+      if (auto *C = llvm::dyn_cast_or_null<ConstDecl>(NR->getDecl()))
+        return C->getValue();
+    if (auto *U = llvm::dyn_cast<UnaryExpr>(E)) {
+      auto V = evaluateConstant(U->getOperand());
+      if (!V || U->getOp() == UnaryOp::Not)
+        return std::nullopt;
+      return U->getOp() == UnaryOp::Minus ? -*V : *V;
+    }
+    return std::nullopt;
+  }
+
+  static std::string formatValue(Type *T, int64_t V) {
+    if (T->isChar())
+      return llvm::isPrint(static_cast<char>(V))
+                 ? "'" + std::string(1, static_cast<char>(V)) + "'"
+                 : "chr(" + std::to_string(V) + ")";
+    if (T->isBoolean())
+      return V ? "true" : "false";
+    return std::to_string(V);
+  }
+
+  /// Checks one case label; returns false if it is unusable.
+  bool checkCaseLabel(CaseLabel *L, Type *SelTy) {
+    bool OK = true;
+    for (Expr *E : {L->Lo, L->Hi}) {
+      if (!E)
+        continue;
+      Type *T = check(E);
+      if (T->isError()) {
+        OK = false;
+        continue;
+      }
+      auto V = evaluateConstant(E);
+      if (!V) {
+        Diags.error(E->getBeginLoc(), "case label must be a constant",
+                    {E->getRange()});
+        OK = false;
+        continue;
+      }
+      if (!SelTy->isError() && T != SelTy) {
+        Diags.error(E->getBeginLoc(),
+                    "case label of type " + quoted(T) +
+                        " does not match selector type " + quoted(SelTy),
+                    {E->getRange()});
+        OK = false;
+        continue;
+      }
+      (E == L->Lo ? L->LoValue : L->HiValue) = *V;
+    }
+    if (!L->Hi)
+      L->HiValue = L->LoValue;
+    if (OK && L->LoValue > L->HiValue) {
+      Diags.error(L->Lo->getBeginLoc(), "case label range is empty",
+                  {L->getRange()});
+      OK = false;
+    }
+    return OK;
+  }
+
+  //===--------------------------------------------------------------------===//
   // Built-in procedure calls
   //===--------------------------------------------------------------------===//
 
@@ -237,6 +342,9 @@ class Checker : public StmtVisitor<Checker>,
                     "cannot read a value of type " + quoted(T) +
                         " (only integer and char are supported yet)",
                     {Arg->getRange()});
+      else if (Ref->getDecl())
+        checkNotForControlVar(Ref->getDecl(), Arg->getBeginLoc(),
+                              Arg->getRange());
     }
   }
 
@@ -360,6 +468,7 @@ public:
       Target->setDecl(D);
       if (auto *V = llvm::dyn_cast<VarDecl>(D)) {
         TargetTy = V->getType() ? V->getType() : errorType();
+        checkNotForControlVar(V, Id.Loc, Id.getRange());
       } else {
         // Function-result assignment (`f := ...` inside f) arrives in M6.
         Diags.error(Id.Loc,
@@ -383,6 +492,108 @@ public:
                   "assigning to " + quoted(TargetTy) +
                       " from incompatible type " + quoted(ValueTy),
                   {Target->getRange(), S->getValue()->getRange()});
+  }
+
+  void visitIfStmt(IfStmt *S) {
+    checkCondition(S->getCond(), "if");
+    visitStmt(S->getThen());
+    if (S->getElse())
+      visitStmt(S->getElse());
+  }
+
+  void visitWhileStmt(WhileStmt *S) {
+    checkCondition(S->getCond(), "while");
+    visitStmt(S->getBody());
+  }
+
+  void visitRepeatStmt(RepeatStmt *S) {
+    for (Stmt *Child : S->getBody())
+      visitStmt(Child);
+    checkCondition(S->getCond(), "until");
+  }
+
+  void visitForStmt(ForStmt *S) {
+    NameRefExpr *VarRef = S->getVar();
+    const Identifier &Id = VarRef->getName();
+    Type *VarTy = errorType();
+    bool Usable = false;
+
+    if (Decl *D = Cur->lookup(Id.Name)) {
+      VarRef->setDecl(D);
+      auto *V = llvm::dyn_cast<VarDecl>(D);
+      if (!V) {
+        Diags.error(Id.Loc,
+                    "'for' loop control variable must be a variable, but '" +
+                        Id.Spelling + "' is a " + D->getKindName(),
+                    {Id.getRange()});
+        noteDeclaredHere(D);
+      } else if (V->getType() && !V->getType()->isError()) {
+        VarTy = V->getType();
+        if (!VarTy->isOrdinal())
+          Diags.error(Id.Loc,
+                      "'for' loop control variable must be of an ordinal "
+                      "type, not " + quoted(VarTy),
+                      {Id.getRange()});
+        else if (!checkNotForControlVar(V, Id.Loc, Id.getRange()))
+          Usable = true;
+      }
+    } else {
+      diagUndeclared(Id);
+    }
+    VarRef->setType(VarTy);
+
+    for (Expr *Bound : {S->getInit(), S->getFinal()}) {
+      Type *T = check(Bound);
+      if (Usable && !T->isError() && T != VarTy)
+        Diags.error(Bound->getBeginLoc(),
+                    "'for' loop " +
+                        llvm::Twine(Bound == S->getInit() ? "initial"
+                                                          : "final") +
+                        " value of type " + quoted(T) +
+                        " does not match control variable of type " +
+                        quoted(VarTy),
+                    {Bound->getRange()});
+    }
+
+    if (Usable)
+      ActiveFors.push_back(S);
+    visitStmt(S->getBody());
+    if (Usable)
+      ActiveFors.pop_back();
+  }
+
+  void visitCaseStmt(CaseStmt *S) {
+    Type *SelTy = check(S->getSelector());
+    if (!SelTy->isError() && !SelTy->isOrdinal()) {
+      Diags.error(S->getSelector()->getBeginLoc(),
+                  "'case' selector must be of an ordinal type, not " +
+                      quoted(SelTy),
+                  {S->getSelector()->getRange()});
+      SelTy = errorType();
+    }
+
+    // ISO 7185 6.8.3.5: no value may appear in more than one label.
+    llvm::SmallVector<CaseLabel *, 16> Seen;
+    for (CaseArm *Arm : S->getArms()) {
+      for (CaseLabel *L : Arm->getLabels()) {
+        if (!checkCaseLabel(L, SelTy) || SelTy->isError())
+          continue;
+        for (CaseLabel *Prev : Seen) {
+          if (L->LoValue > Prev->HiValue || L->HiValue < Prev->LoValue)
+            continue;
+          int64_t Dup = std::max(L->LoValue, Prev->LoValue);
+          Diags.error(L->Lo->getBeginLoc(),
+                      "duplicate case label value " + formatValue(SelTy, Dup),
+                      {L->getRange()});
+          Diags.note(Prev->Lo->getBeginLoc(), "previous case label is here");
+          break;
+        }
+        Seen.push_back(L);
+      }
+      visitStmt(Arm->getBody());
+    }
+    for (Stmt *Child : S->getElseBody())
+      visitStmt(Child);
   }
 
   //===--------------------------------------------------------------------===//

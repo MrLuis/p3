@@ -31,3 +31,8 @@
 ; RANGE: Runtime error: integer in input is out of range
 ; RUN: not %t.read < %S/Inputs/empty.input 2>&1 | FileCheck --check-prefix=EOF %s
 ; EOF: Runtime error: unexpected end of file while reading an integer
+
+; ISO 7185 6.8.3.5: a case statement without a matching label is an error.
+; RUN: %pcc %S/Inputs/caseless.pas -o %t.case
+; RUN: not %t.case 2>&1 | FileCheck --check-prefix=CASE %s
+; CASE: Runtime error: no 'case' label matches the selector value at {{.*}}caseless.pas:5:3

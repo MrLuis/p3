@@ -1,0 +1,24 @@
+; M5 lowering: for loops test for the final value before stepping (no
+; overflow), case becomes a switch with an ISO runtime error by default.
+; RUN: %pcc --emit-llvm %S/Inputs/loops.pas -o - | FileCheck %s
+; CHECK: for.body:
+; CHECK-NEXT: [[I:%i]] = phi i32 {{.*}}[ 1, %{{[a-z.]+}} ]
+; CHECK-NEXT: store i32 [[I]], ptr @i
+; CHECK:      [[DONE:%.*]] = icmp eq i32 [[I]], 10
+; CHECK-NEXT: br i1 [[DONE]], label %for.end{{.*}}, label %for.inc
+; CHECK: for.inc:
+; CHECK-NEXT: {{%.*}} = add i32 [[I]], 1
+; CHECK-NEXT: br label %for.body
+; CHECK: switch i32 {{%.*}}, label %case.default [
+; CHECK-NEXT: i32 1, label %[[ARM1:case.arm[0-9]*]]
+; CHECK-NEXT: i32 2, label %[[ARM2:case.arm[0-9]*]]
+; CHECK-NEXT: i32 3, label %[[ARM2]]
+; CHECK-NEXT: ]
+; CHECK: case.default:
+; CHECK-NEXT: call void @__pas_runtime_error(
+; CHECK-NEXT: unreachable
+
+; Turbo/FPC mode: no match does nothing.
+; RUN: %pcc --mode=tp --emit-llvm %S/Inputs/loops.pas -o - | FileCheck --check-prefix=TP %s
+; TP: case.default:
+; TP-NEXT: br label %case.end

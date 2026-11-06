@@ -1,0 +1,39 @@
+1
+2
+Fizz
+4
+Buzz
+Fizz
+7
+8
+Fizz
+Buzz
+11
+Fizz
+13
+14
+FizzBuzz
+inner else
+2 3 5 7 11 13 17 19 23 29 
+collatz(27) steps: 111
+once
+edcba
+321
+123 n=6
+false true 
+iterations up to maxint: 3
+iterations down to minint: 3
+  1  2  3
+  2  4  6
+  3  6  9
+minus one
+even
+odd
+even
+odd
+a vowel
+b consonant
+c consonant
+d consonant
+e vowel
+seven is odd

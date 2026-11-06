@@ -3,10 +3,10 @@
 `pcc` compiles Pascal (ISO 7185, with optional Turbo/Free Pascal extensions)
 to native executables through LLVM. See [PLAN.md](PLAN.md) for the roadmap.
 
-**Status:** M4 complete: integer/boolean/char variables, full ISO expression
-syntax and type checking, `read`/`readln`, `write` field widths, and the
-standard functions `abs sqr odd ord chr succ pred`. Next up is M5 (`if`,
-`while`, `repeat`, `for`, `case`).
+**Status:** M5 complete: integer/boolean/char variables, full ISO expressions
+with type checking, `read`/`readln`/`write`/`writeln`, the standard functions
+`abs sqr odd ord chr succ pred`, and all structured statements: `if`,
+`while`, `repeat`, `for`, `case`. Next up is M6 (procedures and functions).
 
 ```pascal
 program Sum(input, output);

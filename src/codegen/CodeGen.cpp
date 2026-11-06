@@ -6,6 +6,9 @@
 //   and/or -> short-circuit (ISO leaves the evaluation order open)
 //   div/mod -> runtime error on division by zero / overflow; ISO mode uses
 //              ISO 7185 6.7.2.2 `mod` (divisor > 0, result >= 0)
+//   for     -> counter in a register, compared with the final value *before*
+//              incrementing, so `for i := 1 to maxint` cannot overflow
+//   case    -> `switch`; no matching label is a runtime error in ISO mode
 //
 //===----------------------------------------------------------------------===//
 
@@ -128,6 +131,23 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
         .str();
   }
 
+  /// __pas_runtime_error("<Msg> at file:line:col"); unreachable.
+  /// Leaves the builder without an insertion block's terminator to add to:
+  /// callers must set a new insertion point afterwards.
+  void emitRuntimeError(llvm::StringRef Msg, SourceLocation L) {
+    llvm::Constant *Text =
+        B.CreateGlobalString((Msg + where(L)).str(), ".rterr");
+    B.CreateCall(RT.RuntimeError, {Text});
+    B.CreateUnreachable();
+  }
+
+  llvm::BasicBlock *newBlock(const llvm::Twine &Name) {
+    return llvm::BasicBlock::Create(M.getContext(), Name, CurFn);
+  }
+
+  /// Ordinal types: integer is signed, char and boolean are unsigned.
+  static bool isSignedOrdinal(Type *T) { return T->isInteger(); }
+
   /// if (Cond) __pas_runtime_error("<Msg> at file:line:col");
   void emitRuntimeCheck(llvm::Value *Cond, llvm::StringRef Msg,
                         SourceLocation L) {
@@ -138,11 +158,7 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
     B.CreateCondBr(Cond, ErrBB, ContBB, MDB.createUnlikelyBranchWeights());
 
     B.SetInsertPoint(ErrBB);
-    llvm::Constant *Text =
-        B.CreateGlobalString((Msg + where(L)).str(), ".rterr");
-    B.CreateCall(RT.RuntimeError, {Text});
-    B.CreateUnreachable();
-
+    emitRuntimeError(Msg, L);
     B.SetInsertPoint(ContBB);
   }
 
@@ -342,6 +358,152 @@ public:
     default:
       llvm_unreachable("Sema only allows builtin procedures here");
     }
+  }
+
+  void visitIfStmt(IfStmt *S) {
+    llvm::Value *Cond = visitExpr(S->getCond());
+    auto *ThenBB = newBlock("if.then");
+    auto *EndBB = newBlock("if.end");
+    auto *ElseBB = S->getElse() ? newBlock("if.else") : EndBB;
+    B.CreateCondBr(Cond, ThenBB, ElseBB);
+
+    B.SetInsertPoint(ThenBB);
+    visitStmt(S->getThen());
+    B.CreateBr(EndBB);
+
+    if (S->getElse()) {
+      B.SetInsertPoint(ElseBB);
+      visitStmt(S->getElse());
+      B.CreateBr(EndBB);
+    }
+    B.SetInsertPoint(EndBB);
+  }
+
+  void visitWhileStmt(WhileStmt *S) {
+    auto *CondBB = newBlock("while.cond");
+    auto *BodyBB = newBlock("while.body");
+    auto *EndBB = newBlock("while.end");
+    B.CreateBr(CondBB);
+
+    B.SetInsertPoint(CondBB);
+    B.CreateCondBr(visitExpr(S->getCond()), BodyBB, EndBB);
+
+    B.SetInsertPoint(BodyBB);
+    visitStmt(S->getBody());
+    B.CreateBr(CondBB);
+
+    B.SetInsertPoint(EndBB);
+  }
+
+  void visitRepeatStmt(RepeatStmt *S) {
+    auto *BodyBB = newBlock("repeat.body");
+    auto *EndBB = newBlock("repeat.end");
+    B.CreateBr(BodyBB);
+
+    B.SetInsertPoint(BodyBB);
+    for (Stmt *Child : S->getBody())
+      visitStmt(Child);
+    B.CreateCondBr(visitExpr(S->getCond()), EndBB, BodyBB);
+
+    B.SetInsertPoint(EndBB);
+  }
+
+  //   start = Init; final = Final            (each evaluated once)
+  //   if !(start <= final) goto end          (>= for downto)
+  // loop:
+  //   i = phi [start, pre], [next, inc]; Var := i
+  //   Body
+  //   if i == final goto end                 (test before stepping: no
+  // inc:                                      overflow at maxint)
+  //   next = i + 1 (- 1); goto loop
+  void visitForStmt(ForStmt *S) {
+    auto *V = llvm::cast<VarDecl>(S->getVar()->getDecl());
+    bool Signed = isSignedOrdinal(V->getType());
+    bool Down = S->isDownto();
+
+    llvm::Value *Start = visitExpr(S->getInit());
+    llvm::Value *Final = visitExpr(S->getFinal());
+    llvm::Value *Enter =
+        Down ? (Signed ? B.CreateICmpSGE(Start, Final) : B.CreateICmpUGE(Start, Final))
+             : (Signed ? B.CreateICmpSLE(Start, Final) : B.CreateICmpULE(Start, Final));
+    llvm::BasicBlock *PreBB = B.GetInsertBlock();
+    auto *LoopBB = newBlock("for.body");
+    auto *IncBB = newBlock("for.inc");
+    auto *EndBB = newBlock("for.end");
+    B.CreateCondBr(Enter, LoopBB, EndBB);
+
+    B.SetInsertPoint(LoopBB);
+    llvm::PHINode *I = B.CreatePHI(Start->getType(), 2, V->getName().Name);
+    I->addIncoming(Start, PreBB);
+    emitStore(V, I);
+    visitStmt(S->getBody());
+    B.CreateCondBr(B.CreateICmpEQ(I, Final, "for.done"), EndBB, IncBB);
+
+    B.SetInsertPoint(IncBB);
+    llvm::Value *One = llvm::ConstantInt::get(I->getType(), 1);
+    llvm::Value *Next = Down ? B.CreateSub(I, One, "for.next")
+                             : B.CreateAdd(I, One, "for.next");
+    I->addIncoming(Next, IncBB);
+    B.CreateBr(LoopBB);
+
+    B.SetInsertPoint(EndBB);
+  }
+
+  void visitCaseStmt(CaseStmt *S) {
+    llvm::Value *Sel = visitExpr(S->getSelector());
+    auto *SelTy = llvm::cast<llvm::IntegerType>(Sel->getType());
+    bool Signed = isSignedOrdinal(S->getSelector()->getType());
+    auto *DefaultBB = newBlock("case.default");
+    auto *EndBB = newBlock("case.end");
+    llvm::SwitchInst *Switch = B.CreateSwitch(Sel, DefaultBB);
+
+    // Ranges (TP) are expanded into switch cases when small; large ones are
+    // tested with comparisons in the default block.
+    constexpr int64_t MaxExpandedRange = 256;
+    struct LargeRange { int64_t Lo, Hi; llvm::BasicBlock *Target; };
+    llvm::SmallVector<LargeRange, 4> LargeRanges;
+
+    auto Const = [&](int64_t V) {
+      return llvm::ConstantInt::get(SelTy, static_cast<uint64_t>(V), Signed);
+    };
+
+    for (CaseArm *Arm : S->getArms()) {
+      auto *ArmBB = newBlock("case.arm");
+      for (CaseLabel *L : Arm->getLabels()) {
+        if (L->HiValue - L->LoValue >= MaxExpandedRange) {
+          LargeRanges.push_back({L->LoValue, L->HiValue, ArmBB});
+          continue;
+        }
+        for (int64_t V = L->LoValue; V <= L->HiValue; ++V)
+          Switch->addCase(Const(V), ArmBB);
+      }
+      B.SetInsertPoint(ArmBB);
+      visitStmt(Arm->getBody());
+      B.CreateBr(EndBB);
+    }
+
+    B.SetInsertPoint(DefaultBB);
+    for (const LargeRange &R : LargeRanges) {
+      llvm::Value *InRange = B.CreateAnd(
+          Signed ? B.CreateICmpSGE(Sel, Const(R.Lo)) : B.CreateICmpUGE(Sel, Const(R.Lo)),
+          Signed ? B.CreateICmpSLE(Sel, Const(R.Hi)) : B.CreateICmpULE(Sel, Const(R.Hi)));
+      auto *NextBB = newBlock("case.range");
+      B.CreateCondBr(InRange, R.Target, NextBB);
+      B.SetInsertPoint(NextBB);
+    }
+    if (S->hasElse()) {
+      for (Stmt *Child : S->getElseBody())
+        visitStmt(Child);
+      B.CreateBr(EndBB);
+    } else if (LangOpts.Mode == LangMode::ISO) {
+      // ISO 7185 6.8.3.5: it is an error if no label equals the selector.
+      emitRuntimeError("no 'case' label matches the selector value",
+                       S->getBeginLoc());
+    } else {
+      B.CreateBr(EndBB); // Turbo/FPC: do nothing
+    }
+
+    B.SetInsertPoint(EndBB);
   }
 
   //===--------------------------------------------------------------------===//

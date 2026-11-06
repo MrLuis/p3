@@ -1,0 +1,38 @@
+; M5 semantic checks.
+; RUN: not %pcc -ferror-limit=0 -c %S/Inputs/control.pas -o %t.o 2>&1 | FileCheck %s
+
+; CHECK: control.pas:4:6: error: condition of 'if' must be of type 'boolean', not 'integer'
+; CHECK: control.pas:5:9: error: condition of 'while' must be of type 'boolean', not 'char'
+; CHECK: control.pas:6:16: error: condition of 'until' must be of type 'boolean', not 'integer'
+
+; for: control variable and bounds
+; CHECK: control.pas:7:7: error: 'for' loop control variable must be a variable, but 'maxint' is a constant
+; CHECK: control.pas:8:13: error: 'for' loop initial value of type 'integer' does not match control variable of type 'char'
+; CHECK: control.pas:8:18: error: 'for' loop final value of type 'integer' does not match control variable of type 'char'
+; CHECK: control.pas:9:17: error: 'for' loop final value of type 'char' does not match control variable of type 'integer'
+
+; ISO 7185 6.8.3.9: the body must not assign ("threaten") the control variable.
+; CHECK: control.pas:11:5: error: cannot assign to 'i' inside a 'for' loop that it controls
+; CHECK: control.pas:10:3: note: 'for' loop is here
+; CHECK: control.pas:12:10: error: cannot assign to 'i' inside a 'for' loop that it controls
+; CHECK: control.pas:10:3: note: 'for' loop is here
+; CHECK: control.pas:13:9: error: cannot assign to 'i' inside a 'for' loop that it controls
+; CHECK: control.pas:10:3: note: 'for' loop is here
+; CHECK: control.pas:15:7: error: use of undeclared identifier 'k'
+
+; case labels
+; CHECK: control.pas:18:5: error: case label of type 'char' does not match selector type 'integer'
+; CHECK: control.pas:19:8: error: duplicate case label value 1
+; CHECK: control.pas:17:5: note: previous case label is here
+; CHECK: control.pas:20:5: error: case label must be a constant
+; CHECK-NOT: error:
+
+; Duplicate detection also covers overlapping ranges and chars.
+; RUN: not %pcc --mode=tp -c %S/Inputs/case-ranges.pas -o %t.o 2>&1 | FileCheck --check-prefix=RANGE %s
+; RANGE: case-ranges.pas:6:5: error: duplicate case label value 5
+; RANGE: case-ranges.pas:5:5: note: previous case label is here
+; RANGE: case-ranges.pas:10:5: error: duplicate case label value 'b'
+; RANGE: case-ranges.pas:9:5: note: previous case label is here
+; RANGE: case-ranges.pas:11:5: error: case label range is empty
+; RANGE: case-ranges.pas:13:8: error: 'case' selector must be of an ordinal type, not 'string'
+; RANGE-NOT: error:

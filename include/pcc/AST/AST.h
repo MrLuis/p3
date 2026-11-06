@@ -270,6 +270,116 @@ public:
   static bool classof(const Stmt *S) { return S->getKind() == SK_Assign; }
 };
 
+/// if Cond then Then [else Else]
+class IfStmt final : public Stmt {
+  Expr *Cond;
+  Stmt *Then;
+  Stmt *Else; ///< null without an else part
+
+public:
+  IfStmt(SourceRange R, Expr *Cond, Stmt *Then, Stmt *Else)
+      : Stmt(SK_If, R), Cond(Cond), Then(Then), Else(Else) {}
+  Expr *getCond() const { return Cond; }
+  Stmt *getThen() const { return Then; }
+  Stmt *getElse() const { return Else; }
+  static bool classof(const Stmt *S) { return S->getKind() == SK_If; }
+};
+
+/// while Cond do Body
+class WhileStmt final : public Stmt {
+  Expr *Cond;
+  Stmt *Body;
+
+public:
+  WhileStmt(SourceRange R, Expr *Cond, Stmt *Body)
+      : Stmt(SK_While, R), Cond(Cond), Body(Body) {}
+  Expr *getCond() const { return Cond; }
+  Stmt *getBody() const { return Body; }
+  static bool classof(const Stmt *S) { return S->getKind() == SK_While; }
+};
+
+/// repeat S1; S2; ... until Cond
+class RepeatStmt final : public Stmt {
+  llvm::ArrayRef<Stmt *> Body;
+  Expr *Cond;
+
+public:
+  RepeatStmt(SourceRange R, llvm::ArrayRef<Stmt *> Body, Expr *Cond)
+      : Stmt(SK_Repeat, R), Body(Body), Cond(Cond) {}
+  llvm::ArrayRef<Stmt *> getBody() const { return Body; }
+  Expr *getCond() const { return Cond; }
+  static bool classof(const Stmt *S) { return S->getKind() == SK_Repeat; }
+};
+
+/// for Var := Init to|downto Final do Body
+class ForStmt final : public Stmt {
+  NameRefExpr *Var;
+  Expr *Init;
+  Expr *Final;
+  bool Downto;
+  Stmt *Body;
+
+public:
+  ForStmt(SourceRange R, NameRefExpr *Var, Expr *Init, Expr *Final,
+          bool Downto, Stmt *Body)
+      : Stmt(SK_For, R), Var(Var), Init(Init), Final(Final), Downto(Downto),
+        Body(Body) {}
+  NameRefExpr *getVar() const { return Var; }
+  Expr *getInit() const { return Init; }
+  Expr *getFinal() const { return Final; }
+  bool isDownto() const { return Downto; }
+  Stmt *getBody() const { return Body; }
+  static bool classof(const Stmt *S) { return S->getKind() == SK_For; }
+};
+
+/// One case label: a constant, or (--mode=tp) a range `Lo..Hi`.
+/// Sema evaluates the constants into LoValue/HiValue.
+struct CaseLabel {
+  Expr *Lo;
+  Expr *Hi; ///< null unless a range
+  int64_t LoValue = 0;
+  int64_t HiValue = 0;
+
+  CaseLabel(Expr *Lo, Expr *Hi) : Lo(Lo), Hi(Hi) {}
+  bool isRange() const { return Hi != nullptr; }
+  SourceRange getRange() const {
+    return {Lo->getBeginLoc(), (Hi ? Hi : Lo)->getRange().getEnd()};
+  }
+};
+
+/// `1, 3..5: Body` inside a case statement.
+class CaseArm {
+  llvm::ArrayRef<CaseLabel *> Labels;
+  Stmt *Body;
+
+public:
+  CaseArm(llvm::ArrayRef<CaseLabel *> Labels, Stmt *Body)
+      : Labels(Labels), Body(Body) {}
+  llvm::ArrayRef<CaseLabel *> getLabels() const { return Labels; }
+  Stmt *getBody() const { return Body; }
+};
+
+/// case Selector of Arms [else ElseBody] end
+/// (`else`/`otherwise` is a Turbo/FPC extension.)
+class CaseStmt final : public Stmt {
+  Expr *Selector;
+  llvm::ArrayRef<CaseArm *> Arms;
+  llvm::ArrayRef<Stmt *> ElseBody;
+  SourceLocation ElseLoc; ///< valid iff there is an else part
+
+public:
+  CaseStmt(SourceRange R, Expr *Selector, llvm::ArrayRef<CaseArm *> Arms,
+           SourceLocation ElseLoc, llvm::ArrayRef<Stmt *> ElseBody)
+      : Stmt(SK_Case, R), Selector(Selector), Arms(Arms), ElseBody(ElseBody),
+        ElseLoc(ElseLoc) {}
+  Expr *getSelector() const { return Selector; }
+  llvm::ArrayRef<CaseArm *> getArms() const { return Arms; }
+  bool hasElse() const { return ElseLoc.isValid(); }
+  SourceLocation getElseLoc() const { return ElseLoc; }
+  llvm::ArrayRef<Stmt *> getElseBody() const { return ElseBody; }
+  static bool classof(const Stmt *S) { return S->getKind() == SK_Case; }
+};
+
 //===----------------------------------------------------------------------===//
 // Written types
 //===----------------------------------------------------------------------===//
