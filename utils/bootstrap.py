@@ -20,14 +20,19 @@ Each stage is installed as <work>/stageN/bin/pcc with the runtime in
   5. with --fpc: an independent stage 1 built by Free Pascal leads to the
      same stage 2 IR.
 
+The self-hosted compiler links with libLLVM (its LLVM-C back end, S11):
+--flags gives the build options CMake wrote to build/selfhost/flags.txt.
+
 Usage:
   utils/bootstrap.py --pcc build/bin/pcc --runtime build/lib/libpascalrt.a \\
-      [--work build/bootstrap] [-O N] [--fpc] [--modules] [--no-exe-compare]
+      [--flags build/selfhost/flags.txt] [--work build/bootstrap] [-O N]
+      [--fpc] [--modules] [--no-exe-compare]
 Exit status 0 if every check passes.
 """
 import argparse
 import filecmp
 import os
+import shlex
 import shutil
 import subprocess
 import sys
@@ -60,12 +65,33 @@ def install(work, name, runtime):
     return os.path.join(stage, "bin", "pcc")
 
 
+FLAGS = []
+
+
 def build_stage(compiler, out, opt):
-    run([compiler, "--mode=tp", "-O%d" % opt, "-I", SELFHOST, SOURCE, "-o", out])
+    run([compiler, "--mode=tp", "-O%d" % opt] + FLAGS + ["-I", SELFHOST, SOURCE, "-o", out])
 
 
 def emit_ir(compiler, out):
-    run([compiler, "--mode=tp", "-I", SELFHOST, SOURCE, "--emit-llvm", "-o", out])
+    run([compiler, "--mode=tp"] + FLAGS + ["-I", SELFHOST, SOURCE, "--emit-llvm", "-o", out])
+
+
+def fpc_flags():
+    """The pcc build flags as Free Pascal options."""
+    out = []
+    i = 0
+    while i < len(FLAGS):
+        f = FLAGS[i]
+        if f == "-I":
+            out.append("-Fi" + FLAGS[i + 1])
+            i += 2
+            continue
+        if f.startswith("-I"):
+            out.append("-Fi" + f[2:])
+        elif f.startswith("-L") or f.startswith("-l"):
+            out.append("-k" + f)
+        i += 1
+    return out
 
 
 def pas_files():
@@ -93,6 +119,8 @@ def main():
     ap.add_argument("--pcc", required=True, help="the C++ pcc (stage 0)")
     ap.add_argument("--runtime", required=True, help="libpascalrt.a")
     ap.add_argument("--work", default=os.path.join(ROOT, "build", "bootstrap"))
+    ap.add_argument("--flags", default=os.path.join(ROOT, "build", "selfhost", "flags.txt"),
+                    help="file with the options that build selfhost/pcc.pas")
     ap.add_argument("-O", dest="opt", type=int, default=2,
                     help="optimization level of the stages (default 2)")
     ap.add_argument("--fpc", action="store_true",
@@ -102,6 +130,7 @@ def main():
     ap.add_argument("--no-exe-compare", action="store_true",
                     help="do not require identical stage 2 and 3 executables")
     args = ap.parse_args()
+    FLAGS.extend(shlex.split(open(args.flags).read()))
 
     work = os.path.abspath(args.work)
     if os.path.exists(work):
@@ -170,7 +199,7 @@ def main():
             s1 = install(work, "stage1-fpc", args.runtime)
             log("building stage 1 with Free Pascal")
             run([fpc, "-v0", "-Mobjfpc", "-Sh-", "-Cr", "-Co", "-FU" + units,
-                 "-Fu" + SELFHOST, "-o" + s1, SOURCE])
+                 "-Fu" + SELFHOST] + fpc_flags() + ["-o" + s1, SOURCE])
             s2 = install(work, "stage2-fpc", args.runtime)
             build_stage(s1, s2, args.opt)
             ir1 = os.path.join(work, "stage1-fpc.ll")

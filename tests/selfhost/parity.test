@@ -2,7 +2,7 @@
 ; byte for byte, with and without -g: for the programs of the run tests,
 ; the compiler's own source, and random programs from utils/gen-pascal.py.
 ; (By hand, at scale: see selfhost/README.md.)
-; RUN: %pcc --mode=tp -I %S/../../selfhost %S/../../selfhost/pcc.pas -o %t.pcc
+; RUN: %pcc --mode=tp %selfhost-flags -I %S/../../selfhost %S/../../selfhost/pcc.pas -o %t.pcc
 ; RUN: rm -rf %t.gen && mkdir -p %t.gen/iso %t.gen/tp
 ; RUN: python3 %S/../../utils/gen-pascal.py --mode iso --count 15 --seed 5 --out %t.gen/iso
 ; RUN: python3 %S/../../utils/gen-pascal.py --mode tp --count 15 --seed 6 --out %t.gen/tp

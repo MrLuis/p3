@@ -5,5 +5,6 @@ config.pcc_obj_root = "@PROJECT_BINARY_DIR@"
 config.pcc_tools_dir = "@PROJECT_BINARY_DIR@/bin"
 config.llvm_tools_dir = "@LLVM_TOOLS_BINARY_DIR@"
 config.filecheck = "@FILECHECK_EXECUTABLE@"
+config.selfhost_flags = "@PCC_SELFHOST_FLAGS@"
 
 lit_config.load_config(config, "@CMAKE_CURRENT_SOURCE_DIR@/lit.cfg.py")

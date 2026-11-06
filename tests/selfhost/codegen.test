@@ -5,7 +5,7 @@
 ; that writes the same IR: the bootstrap fixed point. (By hand also: the
 ; whole lit suite with PCC_UNDER_TEST, iso7185pat.pas, and identical IR from
 ; the pcc-built, FPC-built and stage 2 compilers; see selfhost/README.md.)
-; RUN: %pcc --mode=tp -I %S/../../selfhost %S/../../selfhost/pcc.pas -o %t.pcc
+; RUN: %pcc --mode=tp %selfhost-flags -I %S/../../selfhost %S/../../selfhost/pcc.pas -o %t.pcc
 ;
 ; Valid IR, also for units.
 ; RUN: %t.pcc --emit-llvm %S/../run/control.pas -o - | opt -passes=verify -disable-output
@@ -37,7 +37,7 @@
 ; NORT: error: cannot find the Pascal runtime library '{{.*}}lib{{/|\\}}libpascalrt.a'; set PCC_RUNTIME_LIB
 ;
 ; The bootstrap fixed point.
-; RUN: %t.pcc --mode=tp -I %S/../../selfhost %S/../../selfhost/pcc.pas --emit-llvm -o %t.stage2.ll
-; RUN: env PCC_RUNTIME_LIB=%pcc-runtime-lib %t.pcc --mode=tp -I %S/../../selfhost %S/../../selfhost/pcc.pas -o %t.stage2
-; RUN: %t.stage2 --mode=tp -I %S/../../selfhost %S/../../selfhost/pcc.pas --emit-llvm -o %t.stage3.ll
+; RUN: %t.pcc --mode=tp %selfhost-flags -I %S/../../selfhost %S/../../selfhost/pcc.pas --emit-llvm -o %t.stage2.ll
+; RUN: env PCC_RUNTIME_LIB=%pcc-runtime-lib %t.pcc --mode=tp %selfhost-flags -I %S/../../selfhost %S/../../selfhost/pcc.pas -o %t.stage2
+; RUN: %t.stage2 --mode=tp %selfhost-flags -I %S/../../selfhost %S/../../selfhost/pcc.pas --emit-llvm -o %t.stage3.ll
 ; RUN: diff %t.stage2.ll %t.stage3.ll

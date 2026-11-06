@@ -6,8 +6,8 @@
 ; corpus, mutants and iso7185pat.pas, and the FPC-built compiler; see
 ; selfhost/README.md.)
 ; RUN: python3 %S/../../utils/gen-selfhost-tables.py --check
-; RUN: python3 %S/../../utils/selfhost-lint.py %S/../../selfhost/pcsys.pas %S/../../selfhost/pcutil.pas %S/../../selfhost/pcdiag.pas %S/../../selfhost/pclex.pas %S/../../selfhost/pcast.pas %S/../../selfhost/pctypes.pas %S/../../selfhost/pcscope.pas %S/../../selfhost/pcsema.pas %S/../../selfhost/pcsemastmt.inc %S/../../selfhost/pcparse.pas %S/../../selfhost/pcprint.pas %S/../../selfhost/pcir.pas %S/../../selfhost/pcgen.pas %S/../../selfhost/pcgenstmt.inc %S/../../selfhost/pcgendbg.inc %S/../../selfhost/pcdriver.pas %S/../../selfhost/pcc.pas
-; RUN: %pcc --mode=tp -I %S/../../selfhost %S/../../selfhost/pcc.pas -o %t.pcc
+; RUN: python3 %S/../../utils/selfhost-lint.py %S/../../selfhost/pcsys.pas %S/../../selfhost/pcutil.pas %S/../../selfhost/pcdiag.pas %S/../../selfhost/pclex.pas %S/../../selfhost/pcast.pas %S/../../selfhost/pctypes.pas %S/../../selfhost/pcscope.pas %S/../../selfhost/pcsema.pas %S/../../selfhost/pcsemastmt.inc %S/../../selfhost/pcparse.pas %S/../../selfhost/pcprint.pas %S/../../selfhost/pcir.pas %S/../../selfhost/pcgen.pas %S/../../selfhost/pcgenstmt.inc %S/../../selfhost/pcgendbg.inc %S/../../selfhost/pcdriver.pas %S/../../selfhost/pcllvm.pas %S/../../selfhost/pcc.pas
+; RUN: %pcc --mode=tp %selfhost-flags -I %S/../../selfhost %S/../../selfhost/pcc.pas -o %t.pcc
 ; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-tokens --ref pcc --new %t.pcc %S/.. %S/../../selfhost | FileCheck %s
 ; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-parse-tree --ref pcc --new %t.pcc %S/.. %S/../../selfhost | FileCheck %s
 ; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-ast --ref pcc --new %t.pcc %S/.. %S/../../selfhost | FileCheck %s

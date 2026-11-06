@@ -1,31 +1,31 @@
 unit pcdriver;
-{ The back end of the driver (SELFHOST.md decision D2): the IR text that
-  pcgen writes is optimized, assembled and compiled by clang, and the
-  object file linked with the Pascal runtime by a C compiler, like
-  src/driver/Linker.cpp does.
-
-  Tools: $PCC_CLANG, else clang-19 or clang on $PATH, compiles the IR;
-  $PCC_CC, else clang-19, clang, cc or gcc, links. The runtime library is
-  $PCC_RUNTIME_LIB, else ../lib/libpascalrt.a next to the executable.
-
-  The generated code assumes the data layout of a 64-bit target (pcir). }
+{ The back end of the driver: src/codegen/Backend.cpp and
+  src/driver/Linker.cpp. The IR text pcgen writes is compiled in process
+  by libLLVM (pcllvm): parsed, verified, optimized with the same pass
+  pipeline as the C++ pcc and emitted by a target machine set up like its
+  own (SELFHOST.md S11). Executables are linked with the Pascal runtime by
+  a C compiler: $PCC_CC, else clang-19, clang, cc or gcc. The runtime
+  library is $PCC_RUNTIME_LIB, else ../lib/libpascalrt.a next to the
+  executable. }
 
 interface
 
-uses pcsys, pcutil, pcdiag;
+uses pcsys, pcutil, pcdiag, pcllvm;
 
 type
   TOutputKind = (okLLVM, okAsm, okObj, okExe);
 
-{ Checks --target (empty: the host), and normalizes it into triple. }
+{ Checks --target and normalizes it into triple; empty: the default
+  target. }
 function validateTarget(var triple: string): boolean;
-{ Writes the IR module ir as kind to path ('-': standard output) at
-  optimization level opt for triple ('' for the host). }
-function emitOutput(const ir: TBuf; kind: TOutputKind; opt: longint;
+{ The data layout of triple's target. }
+function moduleLayout(const triple: string; var layout: string): boolean;
+{ Writes the IR module ir (named name) as kind to path ('-': standard
+  output) at optimization level opt for triple. }
+function emitOutput(const ir: TBuf; const name: string; kind: TOutputKind; opt: longint;
                     const triple, path: string): boolean;
-{ The module's target triple (as the C++ pcc writes it: --target
-  normalized, else the default triple) and data layout (asked of clang). }
-function moduleTarget(const triple: string; var moduleTriple, layout: string): boolean;
+{ -l and -L options, passed to the linker. }
+procedure addLinkerArg(const arg: string);
 { --version }
 procedure printVersion;
 
@@ -34,8 +34,15 @@ implementation
 {$I version.inc}
 
 var
-  clangPath: string;   { '' until found }
-  hostTriple: string;  { '' until asked }
+  libraryDirs, libraries: TPtrList; { of PName: -L, -l arguments }
+
+procedure addLinkerArg(const arg: string);
+begin
+  if copy(arg, 1, 2) = '-L' then
+    listAdd(libraryDirs, intern(arg))
+  else
+    listAdd(libraries, intern(arg));
+end;
 
 { s quoted for the shell }
 function shellQuote(const s: string): string;
@@ -57,11 +64,6 @@ begin
   if cmd.len > 0 then
     bufAddChar(cmd, ' ');
   bufAdd(cmd, shellQuote(s));
-end;
-
-function run(const cmd: TBuf): longint;
-begin
-  run := sysRunChars(cmd.data, cmd.len);
 end;
 
 { The tool named by the environment variable env (a path, or a name to
@@ -96,29 +98,6 @@ begin
     else
       name := name + names[i];
   findTool := '';
-end;
-
-{ clang, for compiling IR; reports an error if none is found. }
-function findClang(var path: string): boolean;
-var
-  fromEnv: boolean;
-  value: string;
-begin
-  if clangPath = '' then
-  begin
-    clangPath := findTool('PCC_CLANG', 'clang-19 clang', fromEnv);
-    if clangPath = '' then
-    begin
-      if fromEnv and sysGetEnv('PCC_CLANG', value) then
-        diagError(noLoc, 'cannot find clang ''' + value + ''' (from PCC_CLANG)')
-      else
-        diagError(noLoc, 'cannot find clang to compile the generated LLVM IR ' +
-                         '(tried clang-19, clang); set PCC_CLANG');
-      exit(false);
-    end;
-  end;
-  path := clangPath;
-  findClang := true;
 end;
 
 function findLinkerDriver: string;
@@ -185,250 +164,46 @@ begin
   findRuntimeLibrary := removeDots(pathJoin(pathDirName(exe), '../lib/libpascalrt.a'));
 end;
 
-{ The first line a command prints on standard output ('' if it fails). }
-function captureLine(var cmd: TBuf): string;
-var
-  tmp, line: string;
-  data: PCharArray;
-  len, i: int64;
-begin
-  captureLine := '';
-  tmp := sysTempFile('.txt');
-  if tmp = '' then
-    exit;
-  bufAdd(cmd, ' > ' + shellQuote(tmp) + ' 2>/dev/null');
-  if (run(cmd) = 0) and sysReadFile(tmp, data, len) then
-  begin
-    line := '';
-    i := 0;
-    {$R-}
-    while (i < len) and (data^[i] <> #10) and (length(line) < 255) do
-    begin
-      line := line + data^[i];
-      i := i + 1;
-    end;
-    {$R+}
-    captureLine := line;
-  end;
-  sysRemoveFile(tmp);
-end;
-
-{ The line of a command's standard output that starts with prefix, after
-  the prefix ('' if none). }
-function captureAfter(var cmd: TBuf; const prefix: string): string;
-var
-  tmp, line: string;
-  data: PCharArray;
-  len, i: int64;
-begin
-  captureAfter := '';
-  tmp := sysTempFile('.txt');
-  if tmp = '' then
-    exit;
-  bufAdd(cmd, ' > ' + shellQuote(tmp) + ' 2>/dev/null');
-  if (run(cmd) = 0) and sysReadFile(tmp, data, len) then
-  begin
-    line := '';
-    {$R-}
-    for i := 0 to len do
-      if (i = len) or (data^[i] = #10) then
-      begin
-        if copy(line, 1, length(prefix)) = prefix then
-        begin
-          captureAfter := copy(line, length(prefix) + 1, 255);
-          break;
-        end;
-        line := '';
-      end
-      else if length(line) < 255 then
-        line := line + data^[i];
-    {$R+}
-  end;
-  sysRemoveFile(tmp);
-end;
-
-{ The host's target triple, as clang reports it. }
-function defaultTriple: string;
-var
-  cmd: TBuf;
-  clang: string;
-begin
-  if (hostTriple = '') and findClang(clang) then
-  begin
-    bufInit(cmd);
-    addArg(cmd, clang);
-    addArg(cmd, '-print-target-triple');
-    hostTriple := captureLine(cmd);
-    bufFree(cmd);
-  end;
-  defaultTriple := hostTriple;
-end;
-
-{ Architectures LLVM has targets for (the first triple component). }
-function knownArch(const arch: string): boolean;
-const
-  numArchs = 46;
-  archs: array[1..numArchs] of string[15] = (
-    'aarch64', 'aarch64_be', 'aarch64_32', 'arm64', 'arm64_32', 'arm', 'armeb',
-    'thumb', 'thumbeb', 'x86_64', 'x86_64h', 'amd64', 'i386', 'i486', 'i586',
-    'i686', 'x86', 'riscv32', 'riscv64', 'wasm32', 'wasm64', 'powerpc',
-    'powerpcle', 'powerpc64', 'powerpc64le', 'ppc', 'ppc64', 'ppc64le',
-    'mips', 'mipsel', 'mips64', 'mips64el', 'sparc', 'sparcv9', 'sparcel',
-    's390x', 'systemz', 'loongarch32', 'loongarch64', 'hexagon', 'avr',
-    'msp430', 'bpf', 'bpfel', 'bpfeb', 've');
-var
-  i: longint;
-begin
-  for i := 1 to numArchs do
-    if arch = archs[i] then
-      exit(true);
-  { arm and thumb carry a version: armv7a, thumbv7m, ... }
-  knownArch := (copy(arch, 1, 4) = 'armv') or (copy(arch, 1, 6) = 'thumbv') or
-               (copy(arch, 1, 7) = 'aarch64');
-end;
-
-{ llvm::Triple::normalize for the common cases: a missing vendor becomes
-  'unknown' (x86_64-linux-gnu -> x86_64-unknown-linux-gnu). }
-function normalizeTriple(const t: string): string;
-var
-  parts: array[0..5] of string[64];
-  n, i: longint;
-  os, r: string;
-begin
-  n := 0;
-  parts[0] := '';
-  for i := 1 to length(t) do
-    if (t[i] = '-') and (n < 5) then
-    begin
-      n := n + 1;
-      parts[n] := '';
-    end
-    else
-      parts[n] := parts[n] + t[i];
-  n := n + 1;
-  if n < 2 then
-    exit(t);
-  os := parts[1];
-  if (copy(os, 1, 5) = 'linux') or (copy(os, 1, 6) = 'darwin') or
-     (copy(os, 1, 5) = 'macos') or (copy(os, 1, 3) = 'ios') or
-     (copy(os, 1, 7) = 'windows') or (copy(os, 1, 7) = 'freebsd') or
-     (copy(os, 1, 6) = 'netbsd') or (copy(os, 1, 7) = 'openbsd') or
-     (os = 'wasi') or (os = 'none') or (os = 'emscripten') then
-  begin
-    r := parts[0] + '-unknown';
-    for i := 1 to n - 1 do
-      r := r + '-' + parts[i];
-    exit(r);
-  end;
-  normalizeTriple := t;
-end;
-
-function moduleTarget(const triple: string; var moduleTriple, layout: string): boolean;
-var
-  clang: string;
-  cmd: TBuf;
-  l: string;
-begin
-  moduleTarget := false;
-  if triple = '' then
-    moduleTriple := defaultTriple
-  else
-    moduleTriple := triple;
-  if not findClang(clang) then
-    exit;
-  bufInit(cmd);
-  addArg(cmd, clang);
-  addArg(cmd, '--target=' + moduleTriple);
-  addArg(cmd, '-S');
-  addArg(cmd, '-emit-llvm');
-  addArg(cmd, '-x');
-  addArg(cmd, 'c');
-  addArg(cmd, '/dev/null');
-  addArg(cmd, '-o');
-  addArg(cmd, '-');
-  l := captureAfter(cmd, 'target datalayout = "');
-  bufFree(cmd);
-  if l = '' then
-  begin
-    diagError(noLoc, 'cannot get the data layout of target ''' + moduleTriple +
-                     ''' from ''' + clang + '''');
-    exit;
-  end;
-  layout := copy(l, 1, length(l) - 1); { without the closing quote }
-  moduleTarget := true;
-end;
-
 function validateTarget(var triple: string): boolean;
 var
-  arch: string;
+  err: string;
 begin
   if triple = '' then
+    triple := llvmDefaultTriple
+  else
+    triple := llvmNormalizeTriple(triple);
+  if llvmLookupTarget(triple, err) = nil then
   begin
-    { the host: nothing to check (clang knows it) }
-    validateTarget := true;
-    exit;
-  end;
-  triple := normalizeTriple(triple);
-  arch := triple;
-  if pos('-', arch) > 0 then
-    arch := copy(arch, 1, pos('-', arch) - 1);
-  if not knownArch(arch) then
-  begin
-    diagError(noLoc, 'unsupported target ''' + triple +
-                     ''': No available targets are compatible with triple "' +
-                     triple + '"');
+    diagError(noLoc, 'unsupported target ''' + triple + ''': ' + err);
     exit(false);
   end;
   validateTarget := true;
 end;
 
-{ Runs clang on the IR in llPath: '-S', '-c' or '-S -emit-llvm'. }
-function runClang(const llPath, mode1, mode2: string; opt: longint;
-                  const triple, path: string): boolean;
+function moduleLayout(const triple: string; var layout: string): boolean;
 var
-  cmd: TBuf;
-  clang: string;
-  status: longint;
+  err: string;
+  target, tm: pointer;
 begin
-  runClang := false;
-  if not findClang(clang) then
+  moduleLayout := false;
+  target := llvmLookupTarget(triple, err);
+  if target = nil then
     exit;
-  bufInit(cmd);
-  addArg(cmd, clang);
-  addArg(cmd, mode1);
-  if mode2 <> '' then
-    addArg(cmd, mode2);
-  if mode2 = '' then
+  tm := llvmTargetMachine(target, triple, 0);
+  if tm = nil then
   begin
-    { assembly and objects as the C++ pcc writes them: no comments, no
-      address-significance table }
-    addArg(cmd, '-fno-verbose-asm');
-    addArg(cmd, '-fno-addrsig');
-  end;
-  addArg(cmd, '-O' + intToStr(opt));
-  if triple <> '' then
-    addArg(cmd, '--target=' + triple);
-  { the IR has no triple: clang supplies the target's }
-  addArg(cmd, '-Wno-override-module');
-  addArg(cmd, llPath);
-  addArg(cmd, '-o');
-  addArg(cmd, path);
-  status := run(cmd);
-  bufFree(cmd);
-  if status <> 0 then
-  begin
-    diagError(noLoc, 'compiling the generated LLVM IR with ''' + clang +
-                     ''' failed with exit code ' + intToStr(status));
+    diagError(noLoc, 'could not create target machine for ''' + triple + '''');
     exit;
   end;
-  runClang := true;
+  layout := llvmDataLayout(tm);
+  moduleLayout := true;
 end;
 
 function linkExecutable(const obj, path: string): boolean;
 var
   runtime, cc: string;
   cmd: TBuf;
-  status: longint;
+  status, i: longint;
 begin
   linkExecutable := false;
   runtime := findRuntimeLibrary;
@@ -445,10 +220,15 @@ begin
   addArg(cmd, cc);
   addArg(cmd, obj);
   addArg(cmd, runtime);
+  { -L directories, then -l libraries (each in command-line order) }
+  for i := 0 to libraryDirs.count - 1 do
+    addArg(cmd, nameStr(PName(listGet(libraryDirs, i))));
+  for i := 0 to libraries.count - 1 do
+    addArg(cmd, nameStr(PName(listGet(libraries, i))));
   addArg(cmd, '-lm');
   addArg(cmd, '-o');
   addArg(cmd, path);
-  status := run(cmd);
+  status := sysRunChars(cmd.data, cmd.len);
   bufFree(cmd);
   if status < 0 then
   begin
@@ -475,125 +255,99 @@ begin
   end;
 end;
 
-function emitOutput(const ir: TBuf; kind: TOutputKind; opt: longint;
+procedure reportLLVMError(sev: TSeverity; const prefix: string; const err: TBuf);
+var
+  b: TBuf;
+begin
+  bufInit(b);
+  bufAdd(b, prefix);
+  bufAddChars(b, err.data, 0, err.len);
+  diagReportBuf(sev, noLoc, b, noRange, noRange);
+  bufFree(b);
+end;
+
+function emitOutput(const ir: TBuf; const name: string; kind: TOutputKind; opt: longint;
                     const triple, path: string): boolean;
 var
-  ll, obj: string;
+  target, tm, m: pointer;
+  err: TBuf;
+  e, obj: string;
   ok: boolean;
+  code: TBuf;
 begin
+  emitOutput := false;
+  { at -O0 the IR is printed as generated, like the C++ pcc does }
   if (kind = okLLVM) and (opt = 0) then
     exit(writeText(ir, path));
-  if (kind = okExe) and (triple <> '') and (triple <> defaultTriple) then
+  if (kind = okExe) and (triple <> llvmDefaultTriple) then
   begin
     diagError(noLoc, 'linking for a non-host target (''' + triple +
                      ''') is not supported yet; use -c, -S or --emit-llvm');
-    exit(false);
+    exit;
   end;
-  ll := sysTempFile('.ll');
-  if ll = '' then
+  target := llvmLookupTarget(triple, e);
+  tm := nil;
+  if target <> nil then
+    tm := llvmTargetMachine(target, triple, opt);
+  if tm = nil then
   begin
-    diagError(noLoc, 'cannot create temporary file');
-    exit(false);
+    diagError(noLoc, 'could not create target machine for ''' + triple + '''');
+    exit;
   end;
-  ok := writeText(ir, ll);
-  if ok then
-    case kind of
-      okLLVM: ok := runClang(ll, '-S', '-emit-llvm', opt, triple, path);
-      okAsm: ok := runClang(ll, '-S', '', opt, triple, path);
-      okObj: ok := runClang(ll, '-c', '', opt, triple, path);
-    else
-      begin
-        obj := sysTempFile('.o');
-        if obj = '' then
-        begin
-          diagError(noLoc, 'cannot create temporary file');
-          ok := false;
-        end
-        else
-        begin
-          ok := runClang(ll, '-c', '', opt, triple, obj) and linkExecutable(obj, path);
-          sysRemoveFile(obj);
-        end;
-      end;
+  bufInit(err);
+  m := llvmParseAndOptimize(ir, name, tm, opt, err);
+  if m = nil then
+  begin
+    reportLLVMError(sevFatal, 'internal compiler error: generated invalid LLVM IR:' + #10,
+                    err);
+    exit;
+  end;
+  if kind = okLLVM then
+  begin
+    ok := llvmPrintModule(m, path, err);
+    if not ok then
+      reportLLVMError(sevError, 'cannot open output file ''' + path + ''': ', err);
+    bufFree(err);
+    exit(ok);
+  end;
+  bufInit(code);
+  if not llvmEmit(tm, m, kind <> okAsm, code, err) then
+  begin
+    reportLLVMError(sevError, 'target ''' + triple + ''' cannot emit this kind of file: ',
+                    err);
+    exit;
+  end;
+  bufFree(err);
+  if kind = okExe then
+  begin
+    obj := sysTempFile('.o');
+    if obj = '' then
+    begin
+      diagError(noLoc, 'cannot create temporary file');
+      exit;
     end;
-  sysRemoveFile(ll);
+    ok := writeText(code, obj) and linkExecutable(obj, path);
+    sysRemoveFile(obj);
+    exit(ok);
+  end;
+  ok := writeText(code, path);
+  { an object file needs a seekable stream (as LLVM's writer does) }
+  if ok and (kind = okObj) and (path = '-') and not sysIsSeekable(1) then
+  begin
+    diagError(noLoc, 'error writing ''-'': Illegal seek');
+    ok := false;
+  end;
   emitOutput := ok;
 end;
 
-{ "clang version 19.1.7 (...)" -> 19.1.7 }
-function versionIn(const line: string): string;
-var
-  i: longint;
-  v: string;
-begin
-  versionIn := 'unknown';
-  i := pos('version ', line);
-  if i = 0 then
-    exit;
-  i := i + 8;
-  v := '';
-  while (i <= length(line)) and (line[i] <> ' ') do
-  begin
-    v := v + line[i];
-    i := i + 1;
-  end;
-  versionIn := v;
-end;
-
 procedure printVersion;
-var
-  clang, llvmVersion, cpu, line, llc: string;
-  cmd: TBuf;
-  data: PCharArray;
-  len, i: int64;
-  tmp: string;
 begin
-  llvmVersion := 'unknown';
-  cpu := '';
-  if findClang(clang) then
-  begin
-    bufInit(cmd);
-    addArg(cmd, clang);
-    addArg(cmd, '--version');
-    llvmVersion := versionIn(captureLine(cmd));
-    bufFree(cmd);
-    { llc next to clang knows the host CPU }
-    llc := pathJoin(pathDirName(sysRealPath(clang)), 'llc');
-    tmp := sysTempFile('.txt');
-    if sysIsExecutable(llc) and (tmp <> '') then
-    begin
-      bufInit(cmd);
-      addArg(cmd, llc);
-      addArg(cmd, '--version');
-      bufAdd(cmd, ' > ' + shellQuote(tmp) + ' 2>/dev/null');
-      if (run(cmd) = 0) and sysReadFile(tmp, data, len) then
-      begin
-        line := '';
-        {$R-}
-        for i := 0 to len - 1 do
-          if data^[i] = #10 then
-          begin
-            if pos('Host CPU: ', line) > 0 then
-              cpu := copy(line, pos('Host CPU: ', line) + 10, 255);
-            line := '';
-          end
-          else if length(line) < 255 then
-            line := line + data^[i];
-        {$R+}
-      end;
-      bufFree(cmd);
-    end;
-    if tmp <> '' then
-      sysRemoveFile(tmp);
-  end;
   sysWrite(sysOut, 'pcc version ' + pccVersion + ' (LLVM ' + llvmVersion + ')' + #10);
-  sysWrite(sysOut, '  Default target: ' + defaultTriple + #10);
-  if (cpu = '') or (cpu = '(unknown)') then
-    cpu := 'generic'; { as llvm::sys::getHostCPUName says }
-  sysWrite(sysOut, '  Host CPU: ' + cpu + #10);
+  sysWrite(sysOut, '  Default target: ' + llvmDefaultTriple + #10);
+  sysWrite(sysOut, '  Host CPU: ' + llvmHostCPU + #10);
 end;
 
 begin
-  clangPath := '';
-  hostTriple := '';
+  listInit(libraryDirs);
+  listInit(libraries);
 end.

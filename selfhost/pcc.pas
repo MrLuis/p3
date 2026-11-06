@@ -106,6 +106,7 @@ begin
   helpLine('pcc options:');
   helpLine('');
   helpLine('  -I <dir>                     - Add a directory to search for units');
+  helpLine('  -L <dir>                     - Add a directory to search for libraries (linking)');
   helpLine('  -O <level>                   - Optimization level (0-3)');
   helpLine('  Output kind (default: linked executable):');
   helpLine('      --emit-tokens               - Dump lexer tokens');
@@ -124,6 +125,7 @@ begin
   helpLine('  --fno-overflow-checks        - Disable runtime integer overflow checks');
   helpLine('  --fno-range-checks           - Disable runtime range checks (subranges, array indices, ...)');
   helpLine('  -g                           - Generate debug information');
+  helpLine('  -l <name>                    - Link with library <name>');
   helpLine('  --mode=<value>               - Language dialect:');
   helpLine('    =iso                       -   ISO 7185 Pascal');
   helpLine('    =tp                        -   Turbo/Free Pascal extensions');
@@ -137,9 +139,9 @@ const
     'help', 'help-list', 'version', 'emit-tokens', 'emit-ast', 'emit-parse-tree',
     'emit-llvm', 'S', 'c', 'Werror', 'Wno-unused-variable', 'fno-overflow-checks',
     'fno-range-checks', 'g');
-  numValueOpts = 7;
+  numValueOpts = 9;
   valueOptNames: array[1..numValueOpts] of string[20] = (
-    'o', 'mode', 'fdiagnostics-color', 'ferror-limit', 'target', 'I', 'O');
+    'o', 'mode', 'fdiagnostics-color', 'ferror-limit', 'target', 'I', 'O', 'L', 'l');
 
 function isFlag(const name: string): boolean;
 var
@@ -314,9 +316,9 @@ begin
       name := copy(body, 1, pos('=', body) - 1);
       value := copy(body, pos('=', body) + 1, 255);
     end;
-    { -Idir, -O2: prefix options }
+    { -Idir, -O2, -lname, -Ldir: prefix options }
     if not isFlag(name) and not isValueOpt(name) and (body <> '') and
-       ((body[1] = 'I') or (body[1] = 'O')) then
+       ((body[1] = 'I') or (body[1] = 'O') or (body[1] = 'l') or (body[1] = 'L')) then
     begin
       name := body[1];
       value := copy(body, 2, 255);
@@ -381,6 +383,10 @@ begin
       listAdd(includeDirs, intern(takeValue))
     else if name = 'O' then
       optLevel := parseUInt(name, takeValue)
+    else if name = 'l' then
+      addLinkerArg('-l' + takeValue)
+    else if name = 'L' then
+      addLinkerArg('-L' + takeValue)
     else
       unknownArgument(arg, body);
     i := i + 1;
@@ -565,7 +571,7 @@ var
   ok, semaOK: boolean;
   prog: PDecl;
   kind: TOutputKind;
-  modTriple, modLayout: string;
+  modLayout: string;
 begin
   sysInit;
   diagInit;
@@ -638,10 +644,10 @@ begin
       end
       else if semaOK then
       begin
-        if not moduleTarget(targetTriple, modTriple, modLayout) then
+        if not moduleLayout(targetTriple, modLayout) then
           sysExit(1);
         generateModule(prog, units, mode, rangeChecksOn, overflowChecksOn,
-                       smFileName(fid), modTriple, modLayout, debugInfo, optLevel > 0,
+                       smFileName(fid), targetTriple, modLayout, debugInfo, optLevel > 0,
                        outBuf);
         case action of
           actLLVM: kind := okLLVM;
@@ -650,7 +656,7 @@ begin
         else
           kind := okExe;
         end;
-        ok := emitOutput(outBuf, kind, optLevel, targetTriple, outputFile);
+        ok := emitOutput(outBuf, smFileName(fid), kind, optLevel, targetTriple, outputFile);
       end;
     end;
   end;

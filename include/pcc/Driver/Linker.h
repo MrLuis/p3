@@ -13,6 +13,7 @@
 #ifndef PCC_DRIVER_LINKER_H
 #define PCC_DRIVER_LINKER_H
 
+#include "llvm/ADT/ArrayRef.h"
 #include "llvm/ADT/StringRef.h"
 
 #include <string>
@@ -26,6 +27,8 @@ std::string findRuntimeLibrary();
 
 /// Returns false (after reporting) on failure.
 bool linkExecutable(llvm::StringRef ObjectFile, llvm::StringRef OutputFile,
+                    llvm::ArrayRef<std::string> LibraryDirs,
+                    llvm::ArrayRef<std::string> Libraries,
                     DiagnosticsEngine &Diags);
 
 } // namespace pcc

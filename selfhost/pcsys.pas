@@ -55,6 +55,8 @@ function sysRealPath(const path: string): string;
 function sysFindProgram(const name: string): string;
 { Is path an executable file? }
 function sysIsExecutable(const path: string): boolean;
+{ Can fd be positioned (a file, not a pipe or terminal)? }
+function sysIsSeekable(fd: longint): boolean;
 { The current directory ('' if unknown). }
 function sysGetCwd: string;
 { The path of this program's executable, links resolved; '' if unknown. }
@@ -382,6 +384,13 @@ begin
 end;
 
 function c_getcwd(buf: pchar; size: int64): pchar; cdecl; external 'c' name 'getcwd';
+function c_lseek(fd: longint; offset: int64; whence: longint): int64; cdecl;
+  external 'c' name 'lseek';
+
+function sysIsSeekable(fd: longint): boolean;
+begin
+  sysIsSeekable := c_lseek(fd, 0, 1) <> -1; { SEEK_CUR }
+end;
 
 function sysGetCwd: string;
 var

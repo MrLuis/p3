@@ -40,6 +40,8 @@ static std::string findLinkerDriver(DiagnosticsEngine &Diags) {
 }
 
 bool pcc::linkExecutable(llvm::StringRef ObjectFile, llvm::StringRef OutputFile,
+                         llvm::ArrayRef<std::string> LibraryDirs,
+                         llvm::ArrayRef<std::string> Libraries,
                          DiagnosticsEngine &Diags) {
   std::string RuntimeLib = findRuntimeLibrary();
   if (!llvm::sys::fs::exists(RuntimeLib)) {
@@ -52,8 +54,15 @@ bool pcc::linkExecutable(llvm::StringRef ObjectFile, llvm::StringRef OutputFile,
   if (CC.empty())
     return false;
 
-  llvm::SmallVector<llvm::StringRef, 8> Args = {
-      CC, ObjectFile, RuntimeLib, "-lm", "-o", OutputFile};
+  // -L directories, then -l libraries (each in command-line order).
+  std::vector<std::string> Extra;
+  for (const std::string &D : LibraryDirs)
+    Extra.push_back("-L" + D);
+  for (const std::string &L : Libraries)
+    Extra.push_back("-l" + L);
+  llvm::SmallVector<llvm::StringRef, 8> Args = {CC, ObjectFile, RuntimeLib};
+  Args.append(Extra.begin(), Extra.end());
+  Args.append({"-lm", "-o", OutputFile});
 
   std::string ErrMsg;
   int RC = llvm::sys::ExecuteAndWait(CC, Args, /*Env=*/std::nullopt,

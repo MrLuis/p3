@@ -25,6 +25,9 @@ for d in (config.llvm_tools_dir, config.pcc_tools_dir):
 # found (LLVM's, or the Python port `filecheck`).
 config.substitutions.append((r"\bFileCheck\b", config.filecheck))
 
+# %selfhost-flags: the options that build selfhost/pcc.pas (its LLVM-C
+# backend's include file and libLLVM; before %pcc, a prefix of it).
+config.substitutions.append(("%selfhost-flags", config.selfhost_flags))
 # %pcc-runtime-lib: this build's runtime, for compilers not installed next
 # to it (before %pcc, which is a prefix of it).
 config.substitutions.append(
@@ -37,8 +40,7 @@ config.substitutions.append(("%pcc-unittests",
 pcc_under_test = os.environ.get("PCC_UNDER_TEST") or \
     os.path.join(config.pcc_tools_dir, "pcc")
 config.substitutions.append(("%pcc", pcc_under_test + " -fdiagnostics-color=never"))
-# The tools and runtime pcc uses, if set; the self-hosted compiler also
-# reads PCC_CLANG (selfhost/pcdriver.pas).
-for var in ("PCC_RUNTIME_LIB", "PCC_CC", "PCC_CLANG"):
+# The tools and runtime pcc uses, if set.
+for var in ("PCC_RUNTIME_LIB", "PCC_CC"):
     if os.environ.get(var):
         config.environment[var] = os.environ[var]

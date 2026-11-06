@@ -245,7 +245,8 @@ bool Driver::runPipeline(FileID FID) {
   llvm::FileRemover RemoveObj(ObjPath);
   if (!emitOutput(*M, *TM, OutputKind::Object, ObjPath, Diags))
     return false;
-  return linkExecutable(ObjPath, Opts.OutputFile, Diags);
+  return linkExecutable(ObjPath, Opts.OutputFile, Opts.LibraryDirs, Opts.Libraries,
+                        Diags);
 }
 
 /// Finds, parses and orders (dependencies first) the units named in Uses.

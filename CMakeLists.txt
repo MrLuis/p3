@@ -49,6 +49,31 @@ add_subdirectory(src)
 add_subdirectory(runtime)
 
 # ---------------------------------------------------------------------------
+# The self-hosted compiler (SELFHOST.md S11) links with libLLVM through the
+# LLVM-C API. Its LLVM-specific parts live in the build directory:
+#   selfhost/llvmtargets.inc  the target initializers of this LLVM
+#   selfhost/flags.txt        the options to build selfhost/pcc.pas with pcc
+# ---------------------------------------------------------------------------
+set(PCC_SELFHOST_DIR ${PROJECT_BINARY_DIR}/selfhost)
+file(MAKE_DIRECTORY ${PCC_SELFHOST_DIR})
+find_package(Python3 COMPONENTS Interpreter)
+list(GET LLVM_INCLUDE_DIRS 0 PCC_LLVM_INCLUDE_DIR)
+if(Python3_FOUND)
+  execute_process(COMMAND ${Python3_EXECUTABLE}
+                          ${PROJECT_SOURCE_DIR}/utils/gen-llvm-targets.py
+                          ${PCC_LLVM_INCLUDE_DIR} ${PCC_SELFHOST_DIR}/llvmtargets.inc)
+endif()
+find_program(PCC_LLVM_CONFIG NAMES llvm-config-${PCC_LLVM_VERSION} llvm-config
+             HINTS ${LLVM_TOOLS_BINARY_DIR} NO_DEFAULT_PATH)
+execute_process(COMMAND ${PCC_LLVM_CONFIG} --libdir
+                OUTPUT_VARIABLE PCC_LLVM_LIBDIR OUTPUT_STRIP_TRAILING_WHITESPACE)
+execute_process(COMMAND ${PCC_LLVM_CONFIG} --link-shared --libs
+                OUTPUT_VARIABLE PCC_LLVM_LIBS OUTPUT_STRIP_TRAILING_WHITESPACE)
+set(PCC_SELFHOST_FLAGS "-I ${PCC_SELFHOST_DIR} -L${PCC_LLVM_LIBDIR} ${PCC_LLVM_LIBS}")
+file(WRITE ${PCC_SELFHOST_DIR}/flags.txt "${PCC_SELFHOST_FLAGS}\n")
+message(STATUS "Self-hosted compiler build flags: ${PCC_SELFHOST_FLAGS}")
+
+# ---------------------------------------------------------------------------
 # Tests
 # ---------------------------------------------------------------------------
 enable_testing()

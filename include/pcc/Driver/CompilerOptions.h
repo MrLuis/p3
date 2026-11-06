@@ -36,6 +36,8 @@ struct CompilerOptions {
   bool DebugInfo = false;   ///< -g
   std::string TargetTriple; ///< empty = host
   std::vector<std::string> IncludeDirs; ///< -I: where to look for units
+  std::vector<std::string> LibraryDirs; ///< -L: passed to the linker
+  std::vector<std::string> Libraries;   ///< -l: passed to the linker
   ColorMode Color = ColorMode::Auto;
   unsigned ErrorLimit = 20; ///< 0 = unlimited
   bool WarningsAsErrors = false;

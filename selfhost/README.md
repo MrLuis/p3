@@ -1,11 +1,17 @@
 # The self-hosted pcc
 
 pcc written in Pascal (the dialect in [DIALECT.md](DIALECT.md)); the plan is
-[../SELFHOST.md](../SELFHOST.md). It builds with pcc and with Free Pascal:
+[../SELFHOST.md](../SELFHOST.md). It links with libLLVM (its back end calls
+the LLVM-C API), so it needs two things from the CMake build: the target
+initializers of that LLVM (`build/selfhost/llvmtargets.inc`, written by
+`utils/gen-llvm-targets.py`) and the link options, both in
+`build/selfhost/flags.txt` (e.g. `-I build/selfhost -L/usr/lib/llvm-19/lib
+-lLLVM-19`). It builds with pcc and with Free Pascal:
 
 ```sh
-build/bin/pcc --mode=tp -I selfhost selfhost/pcc.pas -o build/pcc-self
-fpc -Mobjfpc -Sh- -Cr -Co -FUbuild/fpc-units -obuild/pcc-fpc selfhost/pcc.pas
+build/bin/pcc --mode=tp $(cat build/selfhost/flags.txt) -I selfhost selfhost/pcc.pas -o build/pcc-self
+fpc -Mobjfpc -Sh- -Cr -Co -FUbuild/fpc-units -Fibuild/selfhost \
+    -k-L/usr/lib/llvm-19/lib -k-lLLVM-19 -obuild/pcc-fpc selfhost/pcc.pas
 ```
 
 | File | Contents |
@@ -25,15 +31,22 @@ fpc -Mobjfpc -Sh- -Cr -Co -FUbuild/fpc-units -obuild/pcc-fpc selfhost/pcc.pas
 | `pcir.pas` | a builder for textual LLVM IR that prints exactly as LLVM 19 prints the C++ pcc's module: constant folding, names, block order, alignments, metadata |
 | `pcgen.pas`, `pcgenstmt.inc`, `pcgendbg.inc` | code generation and debug information (CodeGen.cpp) |
 | `pcdriver.pas` | the back end of the driver: clang for `-S`, `-c` and `-O`, linking with the runtime, `--target`, `--version` |
+| `pcllvm.pas` | the LLVM-C API: parse, verify, optimize and emit in process (Backend.cpp) |
 | `version.inc` | generated from `CMakeLists.txt` |
 | `pcc.pas` | the driver: options (as llvm::cl parses them), unit loading, the dumps, code generation |
 
-The Pascal compiler writes LLVM IR and runs clang to optimize, assemble and
-compile it (`$PCC_CLANG`, else `clang-19` or `clang` on `$PATH`), then links
-like the C++ pcc (`$PCC_CC`, else clang-19, clang, cc or gcc) with
-`$PCC_RUNTIME_LIB`, else `../lib/libpascalrt.a` next to its executable. Its
-data layout is the target's, as clang reports it. Its `--emit-llvm` output is
-byte-identical to the C++ pcc's (SELFHOST.md S10).
+The Pascal compiler writes LLVM IR as text, then libLLVM parses, verifies,
+optimizes (the same `default<On>` pipeline as the C++ pcc) and compiles it
+in process, with a target machine set up like the C++ pcc's; the default
+triple, data layout, host CPU and target checks come from LLVM too. It
+links like the C++ pcc (`$PCC_CC`, else clang-19, clang, cc or gcc) with
+`$PCC_RUNTIME_LIB`, else `../lib/libpascalrt.a` next to its executable; `-L`
+and `-l` add libraries. Its `--emit-llvm` output at `-O0` is byte-identical
+to the C++ pcc's (SELFHOST.md S10), and so are `-S` and `-c` at `-O0`. At
+`-O1`-`-O3` the code can differ slightly: the C++ pcc optimizes the module it
+built in memory, the Pascal compiler one parsed from text, whose use lists
+are in another order (which a few passes depend on) and whose name counters
+start at zero.
 
 Testing:
 

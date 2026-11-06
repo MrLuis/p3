@@ -47,7 +47,8 @@ if(Python3_FOUND)
   add_custom_target(check-bootstrap
     COMMAND ${Python3_EXECUTABLE} ${PROJECT_SOURCE_DIR}/utils/bootstrap.py
             --pcc $<TARGET_FILE:pcc> --runtime $<TARGET_FILE:pascalrt>
-            --work ${PROJECT_BINARY_DIR}/bootstrap ${PCC_BOOTSTRAP_ARGS}
+            --work ${PROJECT_BINARY_DIR}/bootstrap
+            --flags ${PROJECT_BINARY_DIR}/selfhost/flags.txt ${PCC_BOOTSTRAP_ARGS}
     DEPENDS pcc pascalrt
     COMMENT "Bootstrapping the self-hosted compiler"
     USES_TERMINAL)
