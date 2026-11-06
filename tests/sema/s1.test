@@ -1,0 +1,25 @@
+; S1 (Turbo/FPC) semantic errors: sized integers, typecasts, typed
+; constants, const parameters, external routines, procedural values,
+; exit(value), sizeof/low/high/assigned.
+; RUN: not %pcc --mode=tp -ferror-limit=0 -c %S/Inputs/s1/errors.pas -o %t.o 2>&1 | FileCheck %s
+; RUN: not %pcc --mode=tp -c %S/Inputs/s1/missing-include.pas -o %t.o 2>&1 | FileCheck --check-prefix=INC %s
+
+; CHECK: errors.pas:6:16: error: array index type 'int64' is too large; use a subrange such as 1..100
+; CHECK: errors.pas:8:33: error: initializer for 'array [1..3] of integer' must list 3 elements, separated by ','
+; CHECK: errors.pas:9:16: error: no field named 'b' in 'TRec'
+; CHECK: errors.pas:16:16: error: parameter 'r' of external routine 'c_bad' has type 'TRec'; use integer, real, char, pointer or var parameters
+; CHECK: errors.pas:19:3: error: cannot modify constant parameter 's'
+; CHECK: errors.pas:20:3: error: cannot modify constant parameter 'r'
+; CHECK: errors.pas:21:7: error: cannot modify constant parameter 'r'
+; CHECK: errors.pas:29:9: error: '@inner': only routines declared at program or unit level can be procedural values
+; CHECK: errors.pas:30:3: error: 'exit' with a value is only allowed in a function
+; CHECK: errors.pas:33:8: error: invalid typecast from 'real' to 'integer' (only between ordinal types and between pointer types)
+; CHECK: errors.pas:34:8: error: invalid typecast from 'integer' to 'PInt' (only between ordinal types and between pointer types)
+; CHECK: errors.pas:35:15: error: 'sizeof' cannot be applied to 'text'
+; CHECK: errors.pas:36:12: error: 'low' expects an ordinal type, an array or a string, not 'real'
+; CHECK: errors.pas:37:20: error: 'assigned' expects a pointer or a procedural variable, not 'integer'
+; CHECK: errors.pas:38:8: error: integer literal exceeds the range of int64
+; CHECK: errors.pas:39:8: error: 'p' is a variable, not a function
+; CHECK-NOT: error:
+
+; INC: missing-include.pas:2:1: error: cannot find include file 'nowhere.inc' (looked next to this file and in -I directories)

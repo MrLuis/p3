@@ -21,6 +21,17 @@ to native executables through LLVM. See [PLAN.md](PLAN.md) for the roadmap.
 - `-g` debug info (gdb/lldb), "did you mean" diagnostics, cross-compiling
   objects with `--target`
 
+With `--mode=tp`, Turbo/Free Pascal extensions: units (`uses`, `-I`),
+`string`/`string[N]` and string routines, `break continue exit(value) inc
+dec`, `shl shr xor`, `$hex %bin #13` literals, `//` comments; the integer
+types `longint int64 cardinal byte word shortint smallint` (FPC widening
+rules); typecasts `T(x)`; `pointer`, `pchar`, `@`, `getmem freemem
+reallocmem fillchar move sizeof low high assigned`; `const` parameters;
+procedural types; typed constants including arrays and records; external C
+functions (`cdecl; external 'c' name 'strlen'`); `{$I file}`; `paramcount
+paramstr halt`. This is the dialect the self-hosted compiler is written in
+(see [SELFHOST.md](SELFHOST.md) and [selfhost/DIALECT.md](selfhost/DIALECT.md)).
+
 **ISO 7185 conformance:** the Pascal-P5 test `iso7185pat.pas` passes all 793
 checks (`utils/iso7185pat.py build/bin/pcc`).
 

@@ -5,6 +5,9 @@
   RUN: %pcc --mode=tp %s -o %t
   RUN:  %t > %t.out
   RUN: diff %S/ints.expected %t.out
+  RUN: %pcc --mode=tp -O2 %s -o %t.O2
+  RUN:  %t.O2 > %t.O2.out
+  RUN: diff %S/ints.expected %t.O2.out
 }
 program ints;
 var b: byte; w: word; si: shortint; c, h: cardinal; i6: int64; li: longint; k: longint; d: double;

@@ -1,0 +1,15 @@
+255 -56 4464 4294967295 -1 2 a
+TRUE 255 FALSE TRUE 0 9 10 -128 65535
+add 0 3
+sub 1 7
+mul 2 11
+10 4 21 TRUE
+chars 5
+1000 333833500
+TRUE
+ababcde---
+25 hello single
+negative zero positive
+101 102 103
+TRUE TRUE 5000000000
+sub 2
