@@ -55,6 +55,8 @@ function sysRealPath(const path: string): string;
 function sysFindProgram(const name: string): string;
 { Is path an executable file? }
 function sysIsExecutable(const path: string): boolean;
+{ The current directory ('' if unknown). }
+function sysGetCwd: string;
 { The path of this program's executable, links resolved; '' if unknown. }
 function sysExecutablePath: string;
 { Is file descriptor fd (1: stdout, 2: stderr) a terminal? }
@@ -377,6 +379,17 @@ begin
     i := i + 1;
   until p^[i - 1] = #0;
   {$R+}
+end;
+
+function c_getcwd(buf: pchar; size: int64): pchar; cdecl; external 'c' name 'getcwd';
+
+function sysGetCwd: string;
+var
+  buf: array[0..4095] of char;
+begin
+  if c_getcwd(@buf[0], 4096) = nil then
+    exit('');
+  sysGetCwd := fromC(PCharArray(@buf[0]));
 end;
 
 function sysExecutablePath: string;

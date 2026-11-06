@@ -1,6 +1,6 @@
 unit pcgen;
-{ Code generation: a checked program and its units to textual LLVM IR; the
-  port of src/codegen/CodeGen.cpp, whose header describes the lowering:
+{ Code generation: a checked program and its units to LLVM IR; the port of
+  src/codegen/CodeGen.cpp, whose header describes the lowering:
 
     integer types -> iN, real -> double, char -> i8, enum -> i32,
     boolean -> i1 in registers and i8 in memory, set -> i256,
@@ -10,10 +10,12 @@ unit pcgen;
       parameters and result live in a frame struct; nested routines reach
       enclosing frames through static links (frame field 0)
 
-  Values are TV (pcir): the IR type and the text of the value. Wherever
-  more than one argument emits instructions, they are evaluated one at a
-  time into locals, so the IR does not depend on the order in which the
-  compiler compiling this one evaluates arguments.
+  The module must print exactly as the C++ pcc's (SELFHOST.md S10), so
+  this code creates the same values, with the same names, in the same
+  order as CodeGen.cpp; pcir folds constants and prints like LLVM. Where
+  the C++ code passes several instruction-creating expressions to one
+  call, they are evaluated left to right (in locals), as clang, which
+  builds the C++ pcc, evaluates them.
 
   Not yet: debug information (-g). }
 
@@ -24,20 +26,16 @@ uses pcsys, pcutil, pcdiag, pclex, pcast, pctypes, pcir;
 { Appends the module for prog and its units (dependencies first). }
 procedure generateModule(prog: PDecl; const units: TPtrList; m: TLangMode;
                          rangeChecksOn, overflowChecksOn: boolean;
-                         const sourceName: string; var outText: TBuf);
+                         const sourceName, triple, dataLayout: string;
+                         debugInfo, optimized: boolean; var outText: TBuf);
 
 implementation
 
 type
-  PCounter = ^TCounter;
-  TCounter = record
-    n: longint;
-  end;
-
   PLargeRange = ^TLargeRange;
   TLargeRange = record
     lo, hi: int64;
-    target: PName;
+    target: PIRBlock;
   end;
 
 var
@@ -45,14 +43,15 @@ var
   optRange, optOverflow: boolean;
   progDecl: PDecl;
   curRoutine: PDecl;         { nil while emitting main }
+  curFn: PIRFunc;
   curFrame: TV;
   lowered: TIntMap;          { type id -> PIRType }
-  stringConsts: TIntMap;     { name id of the bytes -> PName of the global }
-  symCounts: TIntMap;        { symbol name id -> PCounter }
+  stringConsts: TIntMap;     { name id of the bytes -> PTVBox of the global }
   routinesToEmit: TPtrList;  { of PDecl }
-  loopLabels: TPtrList;      { of PName: continue and break targets, in pairs }
-  exitLabel: string;
-  mainJmpBuf: string;        { '' if the program block has no jmp_buf }
+  loopBlocks: TPtrList;      { of PIRBlock: continue and break targets, in pairs }
+  exitBlock: PIRBlock;
+  mainJmpBuf: TV;
+  hasMainJmpBuf: boolean;
   routinePairT, jmpBufT: PIRType;
 
 { --- Small helpers --- }
@@ -78,11 +77,6 @@ end;
 function i8c(v: int64): TV;
 begin
   i8c := irConstInt(irI8, v);
-end;
-
-function ptrV(const s: string): TV;
-begin
-  ptrV := irV(irPtrT, s);
 end;
 
 function isSignedOrdinal(t: PType): boolean;
@@ -113,156 +107,287 @@ begin
     canon := r;
 end;
 
-{ A symbol name not used before: base, else base.1, base.2, ... }
-function uniqueSym(const base: string): string;
-var
-  key: PName;
-  c: PCounter;
+function nm(n: PName): string;
 begin
-  key := intern(base);
-  c := PCounter(mapGet(symCounts, key^.id));
-  if c = nil then
-  begin
-    c := PCounter(arenaAlloc(sizeof(TCounter)));
-    c^.n := 0;
-    mapPut(symCounts, key^.id, c);
-    exit(base);
-  end;
-  c^.n := c^.n + 1;
-  uniqueSym := base + '.' + intToStr(c^.n);
+  nm := nameStr(n);
 end;
 
-{ --- Runtime and intrinsic calls --- }
+{ --- Calls --- }
 
-function rtAttrs(const name: string): string;
+function typeOfSpec(const s: string): PIRType;
 begin
-  if name = '__pas_runtime_error' then
-    rtAttrs := 'noreturn cold nounwind'
-  else if (name = '__pas_halt') or (name = '_longjmp') then
-    rtAttrs := 'noreturn nounwind'
-  else if name = '_setjmp' then
-    rtAttrs := 'returns_twice nounwind'
+  if s = 'i8' then
+    typeOfSpec := irI8
+  else if s = 'i32' then
+    typeOfSpec := irI32
+  else if s = 'i64' then
+    typeOfSpec := irI64
+  else if s = 'double' then
+    typeOfSpec := irDoubleT
+  else if s = 'ptr' then
+    typeOfSpec := irPtrT
   else
-    rtAttrs := 'nounwind';
+    typeOfSpec := irVoidT;
 end;
 
-function rtCall(ret: PIRType; const name, params: string; const args: TBuf): TV;
+{ A declaration with parameter types given as 'i32,ptr'. }
+procedure declareRT(const name, ret, params, attrs: string);
+var
+  list: TPtrList;
+  part: string;
+  i: longint;
+  ignored: PIRFunc;
 begin
-  irDeclare(name, 'declare ' + ret^.text + ' @' + name + '(' + params + ') ' +
-            rtAttrs(name));
-  rtCall := irCall(ret, '@' + name, args);
+  listInit(list);
+  part := '';
+  for i := 1 to length(params) + 1 do
+    if (i > length(params)) or (params[i] = ',') then
+    begin
+      if part <> '' then
+        listAdd(list, typeOfSpec(part));
+      part := '';
+    end
+    else
+      part := part + params[i];
+  ignored := irDeclareFunction(name, typeOfSpec(ret), list, attrs, '');
+  listFree(list);
 end;
 
-function rt0(ret: PIRType; const name: string): TV;
+{ The runtime and C library functions, in the order of the C++ Runtime. }
+procedure declareRuntime;
+const
+  nu = 'nounwind';
+begin
+  declareRT('__pas_init', 'void', 'i32,ptr', nu);
+  declareRT('__pas_fini', 'void', '', nu);
+  declareRT('__pas_write_str', 'void', 'ptr,ptr,i64,i32', nu);
+  declareRT('__pas_write_char', 'void', 'ptr,i8,i32', nu);
+  declareRT('__pas_write_int', 'void', 'ptr,i64,i32', nu);
+  declareRT('__pas_write_bool', 'void', 'ptr,i32,i32', nu);
+  declareRT('__pas_write_real', 'void', 'ptr,double,i32,i32', nu);
+  declareRT('__pas_writeln', 'void', 'ptr', nu);
+  declareRT('__pas_read_int', 'i32', 'ptr', nu);
+  declareRT('__pas_read_int64', 'i64', 'ptr', nu);
+  declareRT('__pas_read_char', 'i8', 'ptr', nu);
+  declareRT('__pas_read_real', 'double', 'ptr', nu);
+  declareRT('__pas_readln', 'void', 'ptr', nu);
+  declareRT('__pas_file_new', 'ptr', 'i64,i32,ptr', nu);
+  declareRT('__pas_file_free', 'void', 'ptr', nu);
+  declareRT('__pas_program_param', 'ptr', 'i32,ptr', nu);
+  declareRT('__pas_reset', 'void', 'ptr', nu);
+  declareRT('__pas_rewrite', 'void', 'ptr', nu);
+  declareRT('__pas_get', 'void', 'ptr', nu);
+  declareRT('__pas_put', 'void', 'ptr', nu);
+  declareRT('__pas_page', 'void', 'ptr', nu);
+  declareRT('__pas_eof', 'i32', 'ptr', nu);
+  declareRT('__pas_eoln', 'i32', 'ptr', nu);
+  declareRT('__pas_buffer', 'ptr', 'ptr', nu);
+  declareRT('__pas_read_elem', 'void', 'ptr,ptr', nu);
+  declareRT('__pas_write_elem', 'void', 'ptr,ptr', nu);
+  declareRT('__pas_runtime_error', 'void', 'ptr', 'cold noreturn nounwind');
+  declareRT('memcmp', 'i32', 'ptr,ptr,i64', nu);
+  declareRT('__pas_new', 'ptr', 'i64', nu);
+  declareRT('__pas_dispose', 'void', 'ptr', nu);
+  declareRT('atan', 'double', 'double', nu);
+  declareRT('free', 'void', 'ptr', nu);
+  declareRT('__pas_realloc', 'ptr', 'ptr,i64', nu);
+  declareRT('__pas_halt', 'void', 'i32', 'noreturn nounwind');
+  declareRT('__pas_paramcount', 'i32', '', nu);
+  declareRT('__pas_paramstr', 'void', 'ptr,i32', nu);
+  declareRT('__pas_str_assign', 'void', 'ptr,i32,ptr', nu);
+  declareRT('__pas_str_concat', 'void', 'ptr,ptr,ptr', nu);
+  declareRT('__pas_str_compare', 'i32', 'ptr,ptr', nu);
+  declareRT('__pas_str_copy', 'void', 'ptr,ptr,i32,i32', nu);
+  declareRT('__pas_str_pos', 'i32', 'ptr,ptr', nu);
+  declareRT('__pas_str_delete', 'void', 'ptr,i32,i32', nu);
+  declareRT('__pas_str_insert', 'void', 'ptr,ptr,i32,i32', nu);
+  declareRT('__pas_write_pstr', 'void', 'ptr,ptr,i32', nu);
+  declareRT('__pas_read_str', 'void', 'ptr,ptr,i32', nu);
+  declareRT('_setjmp', 'i32', 'ptr', 'nounwind returns_twice');
+  declareRT('_longjmp', 'void', 'ptr,i32', 'noreturn nounwind');
+end;
+
+const
+  speculatable = 'nocallback nofree nosync nounwind speculatable willreturn memory(none)';
+
+{ An intrinsic, declared on first use (Intrinsic::getDeclaration). }
+function intrinsic(const name: string; ret: PIRType; const p1, p2: PIRType;
+                   const attrs, paramText: string): PIRFunc;
+var
+  f: PIRFunc;
+  list: TPtrList;
+begin
+  f := irFindFunction(name);
+  if f <> nil then
+    exit(f);
+  listInit(list);
+  if p1 <> nil then
+    listAdd(list, p1);
+  if p2 <> nil then
+    listAdd(list, p2);
+  f := irDeclareFunction(name, ret, list, attrs, paramText);
+  listFree(list);
+  intrinsic := f;
+end;
+
+function rtFn(const name: string): PIRFunc;
+begin
+  rtFn := irFindFunction(name);
+end;
+
+function call0(f: PIRFunc; const name: string): TV;
 var
   a: TBuf;
 begin
-  irArgsStart(a);
-  rt0 := rtCall(ret, name, '', a);
+  bufInit(a);
+  call0 := irCall(f, a, name);
   bufFree(a);
 end;
 
-function rt1(ret: PIRType; const name, params: string; const x: TV): TV;
+function call1(f: PIRFunc; const x: TV; const name: string): TV;
 var
   a: TBuf;
 begin
-  irArgsStart(a);
+  bufInit(a);
   irArgsAdd(a, x);
-  rt1 := rtCall(ret, name, params, a);
+  call1 := irCall(f, a, name);
   bufFree(a);
 end;
 
-function rt2(ret: PIRType; const name, params: string; const x, y: TV): TV;
+function call2(f: PIRFunc; const x, y: TV; const name: string): TV;
 var
   a: TBuf;
 begin
-  irArgsStart(a);
+  bufInit(a);
   irArgsAdd(a, x);
   irArgsAdd(a, y);
-  rt2 := rtCall(ret, name, params, a);
+  call2 := irCall(f, a, name);
   bufFree(a);
 end;
 
-function rt3(ret: PIRType; const name, params: string; const x, y, z: TV): TV;
+function call3(f: PIRFunc; const x, y, z: TV; const name: string): TV;
 var
   a: TBuf;
 begin
-  irArgsStart(a);
+  bufInit(a);
   irArgsAdd(a, x);
   irArgsAdd(a, y);
   irArgsAdd(a, z);
-  rt3 := rtCall(ret, name, params, a);
+  call3 := irCall(f, a, name);
   bufFree(a);
 end;
 
-function rt4(ret: PIRType; const name, params: string; const x, y, z, w: TV): TV;
+function call4(f: PIRFunc; const x, y, z, w: TV; const name: string): TV;
 var
   a: TBuf;
 begin
-  irArgsStart(a);
+  bufInit(a);
   irArgsAdd(a, x);
   irArgsAdd(a, y);
   irArgsAdd(a, z);
   irArgsAdd(a, w);
-  rt4 := rtCall(ret, name, params, a);
+  call4 := irCall(f, a, name);
   bufFree(a);
 end;
 
-{ the same for void calls }
-procedure rtv0(const name: string);
+{ void runtime calls }
+procedure rtv1(const fn: string; const x: TV);
 var
   ignored: TV;
 begin
-  ignored := rt0(irVoidT, name);
+  ignored := call1(rtFn(fn), x, '');
 end;
 
-procedure rtv1(const name, params: string; const x: TV);
+procedure rtv2(const fn: string; const x, y: TV);
 var
   ignored: TV;
 begin
-  ignored := rt1(irVoidT, name, params, x);
+  ignored := call2(rtFn(fn), x, y, '');
 end;
 
-procedure rtv2(const name, params: string; const x, y: TV);
+procedure rtv3(const fn: string; const x, y, z: TV);
 var
   ignored: TV;
 begin
-  ignored := rt2(irVoidT, name, params, x, y);
+  ignored := call3(rtFn(fn), x, y, z, '');
 end;
 
-procedure rtv3(const name, params: string; const x, y, z: TV);
+procedure rtv4(const fn: string; const x, y, z, w: TV);
 var
   ignored: TV;
 begin
-  ignored := rt3(irVoidT, name, params, x, y, z);
+  ignored := call4(rtFn(fn), x, y, z, w, '');
 end;
 
-procedure rtv4(const name, params: string; const x, y, z, w: TV);
+{ IRBuilder::CreateMemCpy / CreateMemMove / CreateMemSet }
+procedure memTransfer(const fname, paramText: string; const dst, src, n: TV);
 var
+  f: PIRFunc;
+  a: TBuf;
   ignored: TV;
 begin
-  ignored := rt4(irVoidT, name, params, x, y, z, w);
+  f := intrinsic(fname, irVoidT, nil, nil,
+                 'nocallback nofree nounwind willreturn memory(argmem: readwrite)', paramText);
+  if f^.params.count = 0 then
+  begin
+    listAdd(f^.params, irPtrT);
+    listAdd(f^.params, irPtrT);
+    listAdd(f^.params, irI64);
+    listAdd(f^.params, irI1);
+  end;
+  bufInit(a);
+  irArgsAddAttr(a, dst, 'align 1');
+  irArgsAddAttr(a, src, 'align 1');
+  irArgsAdd(a, n);
+  irArgsAdd(a, irConstBool(false));
+  ignored := irCall(f, a, '');
+  bufFree(a);
 end;
 
 procedure emitMemCpy(const dst, src, n: TV);
 begin
-  rtv4('llvm.memcpy.p0.p0.i64', 'ptr, ptr, i64, i1', dst, src, n, irConstBool(false));
+  memTransfer('llvm.memcpy.p0.p0.i64',
+              'ptr noalias nocapture writeonly, ptr noalias nocapture readonly, i64, i1 immarg',
+              dst, src, n);
 end;
 
 procedure emitMemMove(const dst, src, n: TV);
 begin
-  rtv4('llvm.memmove.p0.p0.i64', 'ptr, ptr, i64, i1', dst, src, n, irConstBool(false));
+  memTransfer('llvm.memmove.p0.p0.i64',
+              'ptr nocapture writeonly, ptr nocapture readonly, i64, i1 immarg',
+              dst, src, n);
 end;
 
-procedure emitMemSet(const dst, v, n: TV);
+procedure emitMemSet(const dst, v, n: TV; align: int64);
+var
+  f: PIRFunc;
+  a: TBuf;
+  ignored: TV;
 begin
-  rtv4('llvm.memset.p0.i64', 'ptr, i8, i64, i1', dst, v, n, irConstBool(false));
+  f := intrinsic('llvm.memset.p0.i64', irVoidT, nil, nil,
+                 'nocallback nofree nounwind willreturn memory(argmem: write)',
+                 'ptr nocapture writeonly, i8, i64, i1 immarg');
+  if f^.params.count = 0 then
+  begin
+    listAdd(f^.params, irPtrT);
+    listAdd(f^.params, irI8);
+    listAdd(f^.params, irI64);
+    listAdd(f^.params, irI1);
+  end;
+  bufInit(a);
+  irArgsAddAttr(a, dst, 'align ' + intToStr(align));
+  irArgsAdd(a, v);
+  irArgsAdd(a, n);
+  irArgsAdd(a, irConstBool(false));
+  ignored := irCall(f, a, '');
+  bufFree(a);
 end;
 
-{ a double -> double intrinsic or C function }
-function mathCall(const name: string; const x: TV): TV;
+{ a double -> double intrinsic (CreateUnaryIntrinsic) }
+function unaryIntrinsic(const which: string; const x: TV; const name: string): TV;
 begin
-  mathCall := rt1(irDoubleT, name, 'double', x);
+  unaryIntrinsic := call1(intrinsic('llvm.' + which + '.f64', irDoubleT, irDoubleT, nil,
+                                    speculatable, ''), x, name);
 end;
 
 { --- Types --- }
@@ -378,7 +503,7 @@ begin
         if t^.declName = nil then
           name := 'record'
         else
-          name := 'record.' + nameStr(t^.declName);
+          name := 'record.' + nm(t^.declName);
         lowerType := layoutFieldList(t^.fieldList, name, 0);
       end;
     tyPointer, tyNil, tyFile: lowerType := irPtrT;
@@ -419,13 +544,13 @@ end;
 
 { --- Scalars in memory --- }
 
-function loadScalar(const p: TV; t: PType): TV;
+function loadScalar(const p: TV; t: PType; const name: string): TV;
 var
   raw: TV;
 begin
-  raw := irLoad(memType(t), p);
+  raw := irLoad(memType(t), p, name);
   if isBoolBase(t) then
-    loadScalar := irCast('trunc', raw, irI1)
+    loadScalar := irCast('trunc', raw, irI1, '')
   else
     loadScalar := raw;
 end;
@@ -436,7 +561,7 @@ var
 begin
   x := v;
   if isBoolBase(t) then
-    x := irCast('zext', v, irI8);
+    x := irCast('zext', v, irI8, '');
   irStore(x, p);
 end;
 
@@ -445,20 +570,22 @@ begin
   emitMemCpy(dst, src, i64c(sizeOf_(t)));
 end;
 
-{ The address of a private constant holding bytes (no NUL), shared by
+{ The address of a private constant holding the bytes (no NUL), shared by
   equal byte strings. }
 function getStringConstant(p: PCharArray; start, count: int64): TV;
 var
-  key, g: PName;
+  key: PName;
+  g: PTVBox;
 begin
   key := internChars(p, start, count);
-  g := PName(mapGet(stringConsts, key^.id));
+  g := PTVBox(mapGet(stringConsts, key^.id));
   if g = nil then
   begin
-    g := intern(irStringConstant(p, start, count, false));
+    g := irBox(irGlobal('.str', 'private', irArray(count, irI8),
+                        irConstBytes(p, start, count), true, true, false, 0));
     mapPut(stringConsts, key^.id, g);
   end;
-  getStringConstant := ptrV(nameStr(g));
+  getStringConstant := g^;
 end;
 
 function getNameConstant(n: PName): TV;
@@ -466,10 +593,17 @@ begin
   getNameConstant := getStringConstant(n^.chars, 0, n^.len);
 end;
 
-{ A NUL-terminated copy of the bytes (C strings). }
-function globalCString(p: PCharArray; start, count: int64): TV;
+{ IRBuilder::CreateGlobalString: a NUL-terminated private constant. }
+function globalString(p: PCharArray; start, count: int64; const name: string): TV;
+var
+  b: TBuf;
 begin
-  globalCString := ptrV(irStringConstant(p, start, count, true));
+  bufInit(b);
+  bufAddChars(b, p, start, count);
+  bufAddChar(b, #0);
+  globalString := irGlobal(name, 'private', irArray(count + 1, irI8),
+                           irConstBytes(b.data, 0, b.len), true, true, false, 1);
+  bufFree(b);
 end;
 
 { --- Runtime checks --- }
@@ -486,33 +620,53 @@ begin
   bufAdd(b, ':' + intToStr(line) + ':' + intToStr(col));
 end;
 
-{ __pas_runtime_error("<msg> at file:line:col"); unreachable. Callers start
-  a new block afterwards. }
+{ __pas_runtime_error("<msg> at file:line:col"); unreachable. Callers set a
+  new insertion point afterwards. }
+procedure emitRuntimeErrorB(const msg: TBuf; loc: TLoc);
+var
+  b: TBuf;
+begin
+  bufInit(b);
+  bufAddChars(b, msg.data, 0, msg.len);
+  bufAddWhere(b, loc);
+  rtv1('__pas_runtime_error', globalString(b.data, 0, b.len, '.rterr'));
+  irUnreachable;
+  bufFree(b);
+end;
+
 procedure emitRuntimeError(const msg: string; loc: TLoc);
 var
   b: TBuf;
 begin
   bufInit(b);
   bufAdd(b, msg);
-  bufAddWhere(b, loc);
-  rtv1('__pas_runtime_error', 'ptr', globalCString(b.data, 0, b.len));
-  irUnreachable;
+  emitRuntimeErrorB(b, loc);
   bufFree(b);
 end;
 
-{ if cond then __pas_runtime_error("<msg> at file:line:col") }
+{ if cond then __pas_runtime_error(...) }
+procedure emitRuntimeCheckB(const cond: TV; const msg: TBuf; loc: TLoc);
+var
+  errB, okB: PIRBlock;
+begin
+  if (cond.kind = vkInt) and irIsNullValue(cond) then
+    exit; { provably fine }
+  errB := irNewBlock('rt.error');
+  okB := irNewBlock('rt.ok');
+  irCondBr(cond, errB, okB, true);
+  irSetInsertPoint(errB);
+  emitRuntimeErrorB(msg, loc);
+  irSetInsertPoint(okB);
+end;
+
 procedure emitRuntimeCheck(const cond: TV; const msg: string; loc: TLoc);
 var
-  errL, okL: string;
+  b: TBuf;
 begin
-  if cond.v = 'false' then
-    exit; { provably fine }
-  errL := irNewLabel('rt.error');
-  okL := irNewLabel('rt.ok');
-  irCondBr(cond, errL, okL);
-  irStartBlock(errL);
-  emitRuntimeError(msg, loc);
-  irStartBlock(okL);
+  bufInit(b);
+  bufAdd(b, msg);
+  emitRuntimeCheckB(cond, b, loc);
+  bufFree(b);
 end;
 
 function rangeChecks(loc: TLoc): boolean;
@@ -535,24 +689,22 @@ begin
   if irSameType(v.t, d) then
     exit(v);
   if d^.bits = 1 then
-    exit(irICmp('ne', v, irConstInt(v.t, 0)));
+    exit(irICmp('ne', v, irConstInt(v.t, 0), ''));
   if d^.bits < v.t^.bits then
-    convertOrdinal := irCast('trunc', v, d)
+    convertOrdinal := irCast('trunc', v, d, '')
   else if isSignedOrdinal(src) then
-    convertOrdinal := irCast('sext', v, d)
+    convertOrdinal := irCast('sext', v, d, '')
   else
-    convertOrdinal := irCast('zext', v, d);
+    convertOrdinal := irCast('zext', v, d, '');
 end;
 
-{ An ordinal register value widened to i64. }
+{ An ordinal register value widened to i64 (CreateSExt / CreateZExt). }
 function toI64(const v: TV; t: PType): TV;
 begin
-  if v.t^.bits = 64 then
-    exit(v);
   if isSignedOrdinal(t) then
-    toI64 := irCast('sext', v, irI64)
+    toI64 := irCast('sext', v, irI64, '')
   else
-    toI64 := irCast('zext', v, irI64);
+    toI64 := irCast('zext', v, irI64, '');
 end;
 
 function toDouble(const v: TV; t: PType): TV;
@@ -560,9 +712,9 @@ begin
   if t^.kind = tyReal then
     exit(v);
   if isSignedOrdinal(t) then
-    toDouble := irCast('sitofp', v, irDoubleT)
+    toDouble := irCast('sitofp', v, irDoubleT, 'toreal')
   else
-    toDouble := irCast('uitofp', v, irDoubleT);
+    toDouble := irCast('uitofp', v, irDoubleT, 'toreal');
 end;
 
 { x < lo or x > hi, for an i64 x }
@@ -570,9 +722,9 @@ function outsideRange(const x: TV; lo, hi: int64): TV;
 var
   below, above: TV;
 begin
-  below := irICmp('slt', x, i64c(lo));
-  above := irICmp('sgt', x, i64c(hi));
-  outsideRange := irBin('or', below, above);
+  below := irICmp('slt', x, i64c(lo), '');
+  above := irICmp('sgt', x, i64c(hi), '');
+  outsideRange := irBin('or', below, above, '');
 end;
 
 { Checks that ordinal value v (of type src) lies within target's bounds. }
@@ -595,34 +747,21 @@ begin
   emitRangeCheckMsg(v, src, target, loc, 'value out of range');
 end;
 
-function hexChar(v: longint): char;
-begin
-  if v < 10 then
-    hexChar := chr(ord('0') + v)
-  else
-    hexChar := chr(ord('A') + v - 10);
-end;
-
-{ The i256 with bits lo..hi set (or all others, if invert). }
+{ The i256 with bits lo..hi set, or all the other bits. }
 function setMaskConst(lo, hi: int64; invert: boolean): TV;
 var
-  s: string;
-  k, bit, nib, idx: longint;
+  l: TLimbs;
+  k: longint;
+  inside: boolean;
 begin
-  s := 'u0x';
-  for k := 63 downto 0 do
+  limbsOfInt(0, l);
+  for k := 0 to 255 do
   begin
-    nib := 0;
-    for bit := 3 downto 0 do
-    begin
-      idx := 4 * k + bit;
-      nib := nib * 2;
-      if ((idx >= lo) and (idx <= hi)) <> invert then
-        nib := nib + 1;
-    end;
-    s := s + hexChar(nib);
+    inside := (k >= lo) and (k <= hi);
+    if inside <> invert then
+      l[k div 32] := l[k div 32] or (int64(1) shl (k mod 32));
   end;
-  setMaskConst := irV(irI256, s);
+  setMaskConst := irConstLimbs(irI256, l);
 end;
 
 { Converts a value for assignment or parameter passing: integer to real,
@@ -639,7 +778,7 @@ begin
     emitRangeCheck(v, src, dst, loc);
     exit(convertOrdinal(v, src, dst));
   end;
-  if (dst^.kind = tySet) and (dst^.setElement <> nil) and rangeChecks(loc) then
+  if (dst^.kind = tySet) and rangeChecks(loc) then
   begin
     tb := getOrdinalBounds(dst^.setElement);
     if isEmptySet(src) then
@@ -647,37 +786,39 @@ begin
     fb := getOrdinalBounds(getBase(src^.setElement));
     if (fb.lo >= tb.lo) and (fb.hi <= tb.hi) then
       exit(v);
-    outside := irBin('and', v, setMaskConst(tb.lo, tb.hi, true));
-    emitRuntimeCheck(irICmp('ne', outside, irZero(irI256)),
+    outside := irBin('and', v, setMaskConst(tb.lo, tb.hi, true), '');
+    emitRuntimeCheck(irICmp('ne', outside, irZero(irI256), ''),
                      'set member out of range', loc);
   end;
   convertForAssign := v;
 end;
 
-{ l op r ('add', 'sub' or 'mul') with an overflow check if enabled. }
+{ l op r ('add', 'sub' or 'mul') with an overflow check if enabled }
 function emitCheckedArith(const op: string; signed: boolean; const l, r: TV;
-                          loc: TLoc): TV;
+                          loc: TLoc; const name: string): TV;
 var
-  name: string;
+  fname: string;
   fields: TPtrList;
   pairT: PIRType;
+  f: PIRFunc;
   res, ovf: TV;
 begin
   if not overflowChecks(loc) then
-    exit(irBin(op, l, r));
+    exit(irBin(op, l, r, name));
   if signed then
-    name := 'llvm.s' + op + '.with.overflow.' + l.t^.text
+    fname := 'llvm.s' + op + '.with.overflow.' + l.t^.text
   else
-    name := 'llvm.u' + op + '.with.overflow.' + l.t^.text;
+    fname := 'llvm.u' + op + '.with.overflow.' + l.t^.text;
   listInit(fields);
   listAdd(fields, l.t);
   listAdd(fields, irI1);
   pairT := irStructLit(fields);
   listFree(fields);
-  res := rt2(pairT, name, l.t^.text + ', ' + l.t^.text, l, r);
-  ovf := irExtract(res, 1, irI1);
+  f := intrinsic(fname, pairT, l.t, l.t, speculatable, '');
+  res := call2(f, l, r, '');
+  ovf := irExtract(res, 1, irI1, '');
   emitRuntimeCheck(ovf, 'integer overflow', loc);
-  emitCheckedArith := irExtract(res, 0, l.t);
+  emitCheckedArith := irExtract(res, 0, l.t, name);
 end;
 
 { --- Variables and frames --- }
@@ -698,11 +839,11 @@ var
   s: string;
   p: PDecl;
 begin
-  s := nameStr(r^.ident.name);
+  s := nm(r^.ident.name);
   p := r^.parent;
   while p <> nil do
   begin
-    s := nameStr(p^.ident.name) + '.' + s;
+    s := nm(p^.ident.name) + '.' + s;
     p := p^.parent;
   end;
   mangle := 'pas.' + s;
@@ -711,6 +852,11 @@ end;
 function frameType(r: PDecl): PIRType;
 begin
   frameType := PIRType(r^.cgFrame);
+end;
+
+function fnOf(r: PDecl): PIRFunc;
+begin
+  fnOf := PIRFunc(r^.cgFunc);
 end;
 
 { The frame of routine target, reached from the current routine through
@@ -724,8 +870,8 @@ begin
   r := curRoutine;
   while (r <> target) and (r <> nil) do
   begin
-    slot := irStructGEP(frameType(r), frame, 0);
-    frame := irLoad(irPtrT, slot);
+    slot := irStructGEP(frameType(r), frame, 0, '');
+    frame := irLoad(irPtrT, slot, 'link');
     r := r^.parent;
   end;
   framePtrFor := frame;
@@ -733,14 +879,18 @@ end;
 
 { The variable holding the PasFile of input / output. }
 function standardFile(const name: string): TV;
+var
+  g: TV;
 begin
-  irDeclare('__pas_' + name, '@__pas_' + name + ' = external global ptr');
-  standardFile := ptrV('@__pas_' + name);
+  if irFindGlobal('__pas_' + name, g) then
+    exit(g);
+  standardFile := irGlobal('__pas_' + name, 'external', irPtrT, irNull, false, false,
+                           true, 0);
 end;
 
 function loadFile(const varAddr: TV): TV;
 begin
-  loadFile := irLoad(irPtrT, varAddr);
+  loadFile := irLoad(irPtrT, varAddr, 'file');
 end;
 
 function outputFile: TV;
@@ -753,26 +903,22 @@ begin
   inputFile := loadFile(standardFile('input'));
 end;
 
-function createTemp(t: PIRType): TV;
-begin
-  createTemp := irAlloca(t, 'tmp');
-end;
-
 function varAddress(v: PDecl): TV;
 var
   owner: PDecl;
-  slot: TV;
+  slot, frame: TV;
 begin
   owner := v^.owner;
   if owner = nil then
   begin
     if v^.loc = noLoc then
-      exit(standardFile(nameStr(v^.ident.name)));
-    exit(ptrV(nameStr(v^.cgName)));
+      exit(standardFile(nm(v^.ident.name)));
+    exit(PTVBox(v^.cgValue)^);
   end;
-  slot := irStructGEP(frameType(owner), framePtrFor(owner), v^.cgSlot);
+  frame := framePtrFor(owner);
+  slot := irStructGEP(frameType(owner), frame, v^.cgSlot, nm(v^.ident.name));
   if isByRef(v) then
-    exit(irLoad(irPtrT, slot));
+    exit(irLoad(irPtrT, slot, nm(v^.ident.name) + '.ref'));
   varAddress := slot;
 end;
 
@@ -783,18 +929,19 @@ var
   ignored: PIRType;
 begin
   ignored := memType(rt);
-  fieldAddress := irByteGEP(recAddr, f^.cgOffset);
+  fieldAddress := irGEP1(irI8, recAddr, i64c(f^.cgOffset), true, nm(f^.ident.name));
 end;
 
 { Creates (init) or releases the PasFile objects of all files in an object
   of type t at addr: files, arrays of files and file fields of records
-  (fixed parts). name: the external file name for a program parameter. }
+  (fixed parts). name: the external name of a program parameter. }
 procedure emitFileLifetime(const addr: TV; t: PType; init: boolean; const name: TV);
 var
   size: int64;
-  f, i, elem, cond: TV;
+  f, i, elem, next, done: TV;
   bd: TOrdinalBounds;
-  pre, loopL, nextL, doneL, nextName: string;
+  pre, loopB, doneB: PIRBlock;
+  phi: PIRInst;
   j: longint;
   fd: PDecl;
   textFlag: longint;
@@ -806,7 +953,7 @@ begin
       begin
         if not init then
         begin
-          rtv1('__pas_file_free', 'ptr', loadFile(addr));
+          rtv1('__pas_file_free', loadFile(addr));
           exit;
         end;
         if t^.isText then
@@ -819,29 +966,27 @@ begin
           size := sizeOf_(t^.fileElement);
           textFlag := 0;
         end;
-        f := rt3(irPtrT, '__pas_file_new', 'i64, i32, ptr', i64c(size),
-                 i32c(textFlag), name);
+        f := call3(rtFn('__pas_file_new'), i64c(size), i32c(textFlag), name, '');
         irStore(f, addr);
       end;
     tyArray:
       begin
+        { forEachElement }
         bd := getOrdinalBounds(t^.indexType);
-        pre := irCurrentBlock;
-        loopL := irNewLabel('files.loop');
-        nextL := irNewLabel('files.next');
-        doneL := irNewLabel('files.done');
-        irBr(loopL);
-        irStartBlock(loopL);
-        nextName := irTmp;
-        i := irPhi2(irI64, '0', pre, nextName, nextL);
-        elem := irArrayGEP(memType(t), addr, i);
+        pre := irInsertBlock;
+        loopB := irNewBlock('files.loop');
+        doneB := irNewBlock('files.done');
+        irBr(loopB);
+        irSetInsertPoint(loopB);
+        i := irPhi(irI64, 'i', phi);
+        irAddIncoming(phi, i64c(0), pre);
+        elem := irGEP2(memType(t), addr, i64c(0), i, '');
         emitFileLifetime(elem, t^.elementType, init, irNull);
-        irBr(nextL);
-        irStartBlock(nextL);
-        irBinNamed(nextName, 'add', i, i64c(1));
-        cond := irICmp('eq', irV(irI64, nextName), i64c(bd.hi - bd.lo + 1));
-        irCondBr(cond, doneL, loopL);
-        irStartBlock(doneL);
+        next := irBin('add', i, i64c(1), '');
+        irAddIncoming(phi, next, irInsertBlock);
+        done := irICmp('eq', next, i64c(bd.hi - bd.lo + 1), '');
+        irCondBr(done, doneB, loopB, false);
+        irSetInsertPoint(doneB);
       end;
     tyRecord:
       for j := 0 to t^.fieldList^.fixed.count - 1 do
@@ -854,8 +999,8 @@ begin
   end;
 end;
 
-{ The argv position of a program parameter (other than input/output) named
-  name: 1, 2, ... for distinct names in order; 0 if none. }
+{ The argv position of a program parameter (other than input/output):
+  1, 2, ... for distinct names in order; 0 if none. }
 function programParamIndex(name: PName): longint;
 var
   i, j, n: longint;
@@ -890,7 +1035,7 @@ procedure initFileVars(const decls: TPtrList; isProgram: boolean);
 var
   i, idx: longint;
   v: PDecl;
-  name: TV;
+  name, s: TV;
 begin
   for i := 0 to decls.count - 1 do
   begin
@@ -902,12 +1047,16 @@ begin
     begin
       idx := programParamIndex(v^.ident.name);
       if idx > 0 then
-        name := rt2(irPtrT, '__pas_program_param', 'i32, ptr', i32c(idx),
-                    globalCString(v^.ident.spelling^.chars, 0, v^.ident.spelling^.len));
+      begin
+        s := globalString(v^.ident.spelling^.chars, 0, v^.ident.spelling^.len, '');
+        name := call2(rtFn('__pas_program_param'), i32c(idx), s, '');
+      end;
     end;
     emitFileLifetime(varAddress(v), v^.varType, true, name);
   end;
 end;
+
+{$I pcgendbg.inc}
 
 { --- Expressions: forward declarations --- }
 
@@ -917,11 +1066,10 @@ procedure visitStmt(s: PNode); forward;
 
 function emitI32(e: PNode): TV;
 begin
-  emitI32 := irCast('trunc', toI64(visitExpr(e), e^.typ), irI32);
+  emitI32 := irCast('trunc', toI64(visitExpr(e), e^.typ), irI32, '');
 end;
 
-{ --- Short strings (Turbo/FPC): values are pointers to length-prefixed
-  bytes --- }
+{ --- Short strings (Turbo/FPC) --- }
 
 function getPStrConstant(p: PCharArray; start, count: int64): TV;
 var
@@ -938,7 +1086,7 @@ end;
 
 function newStringTemp(maxLen: int64): TV;
 begin
-  newStringTemp := irAlloca(irArray(maxLen + 1, irI8), 'str');
+  newStringTemp := irCreateTemp(irArray(maxLen + 1, irI8), 'str');
 end;
 
 { Any string-like expression as a pointer to a length-prefixed string. }
@@ -946,7 +1094,7 @@ function emitPStr(e: PNode): TV;
 var
   t: PType;
   d: PDecl;
-  tmp, c, src: TV;
+  tmp, c, dst, src: TV;
   n: int64;
 begin
   t := e^.typ;
@@ -965,15 +1113,17 @@ begin
     tmp := newStringTemp(1);
     irStore(i8c(1), tmp);
     c := visitExpr(e);
-    irStore(c, irByteGEP(tmp, 1));
+    dst := irGEP1(irI8, tmp, i64c(1), false, '');
+    irStore(c, dst);
     exit(tmp);
   end;
   { packed array [1..n] of char }
   n := imin(getStringLength(t), 255);
   tmp := newStringTemp(n);
   irStore(i8c(n), tmp);
+  dst := irGEP1(irI8, tmp, i64c(1), false, '');
   src := emitAddress(e);
-  emitMemCpy(irByteGEP(tmp, 1), src, i64c(n));
+  emitMemCpy(dst, src, i64c(n));
   emitPStr := tmp;
 end;
 
@@ -982,14 +1132,14 @@ var
   src: TV;
 begin
   src := emitPStr(value);
-  rtv3('__pas_str_assign', 'ptr, i32, ptr', dst, i32c(t^.maxLength), src);
+  rtv3('__pas_str_assign', dst, i32c(t^.maxLength), src);
 end;
 
 function emitStringFunction(e: PNode; k: TBuiltinKind): TV;
 var
-  a0, a1, a2: PNode;
+  a0: PNode;
   t: PType;
-  c, lo, hi, isLower, dec, s0, s1, tmp, n1, n2, ignored: TV;
+  c, lo, hi, isLower, dec, s0, s1, tmp, n1, n2, ignored, len: TV;
   i: longint;
 begin
   a0 := PNode(listGet(e^.args, 0));
@@ -999,8 +1149,8 @@ begin
         t := a0^.typ;
         if t^.kind = tyShortString then
         begin
-          s0 := emitPStr(a0);
-          exit(irCast('zext', irLoad(irI8, s0), irI32));
+          len := irLoad(irI8, emitPStr(a0), '');
+          exit(irCast('zext', len, irI32, 'length'));
         end;
         if isCharBase(t) then
         begin
@@ -1012,28 +1162,25 @@ begin
     bkUpCase:
       begin
         c := visitExpr(a0);
-        lo := irICmp('uge', c, i8c(ord('a')));
-        hi := irICmp('ule', c, i8c(ord('z')));
-        isLower := irBin('and', lo, hi);
-        dec := irBin('sub', c, i8c(32));
-        exit(irSelect(isLower, dec, c));
+        lo := irICmp('uge', c, i8c(ord('a')), '');
+        hi := irICmp('ule', c, i8c(ord('z')), '');
+        isLower := irBin('and', lo, hi, '');
+        dec := irBin('sub', c, i8c(32), '');
+        exit(irSelect(isLower, dec, c, 'upcase'));
       end;
     bkPos:
       begin
-        a1 := PNode(listGet(e^.args, 1));
         s0 := emitPStr(a0);
-        s1 := emitPStr(a1);
-        exit(rt2(irI32, '__pas_str_pos', 'ptr, ptr', s0, s1));
+        s1 := emitPStr(PNode(listGet(e^.args, 1)));
+        exit(call2(rtFn('__pas_str_pos'), s0, s1, ''));
       end;
     bkCopy:
       begin
-        a1 := PNode(listGet(e^.args, 1));
-        a2 := PNode(listGet(e^.args, 2));
         tmp := newStringTemp(255);
         s0 := emitPStr(a0);
-        n1 := emitI32(a1);
-        n2 := emitI32(a2);
-        rtv4('__pas_str_copy', 'ptr, ptr, i32, i32', tmp, s0, n1, n2);
+        n1 := emitI32(PNode(listGet(e^.args, 1)));
+        n2 := emitI32(PNode(listGet(e^.args, 2)));
+        rtv4('__pas_str_copy', tmp, s0, n1, n2);
         exit(tmp);
       end;
   else
@@ -1041,11 +1188,11 @@ begin
       { concat }
       tmp := newStringTemp(255);
       s0 := emitPStr(a0);
-      rtv3('__pas_str_assign', 'ptr, i32, ptr', tmp, i32c(255), s0);
+      rtv3('__pas_str_assign', tmp, i32c(255), s0);
       for i := 1 to e^.args.count - 1 do
       begin
         s1 := emitPStr(PNode(listGet(e^.args, i)));
-        rtv3('__pas_str_concat', 'ptr, ptr, ptr', tmp, tmp, s1);
+        rtv3('__pas_str_concat', tmp, tmp, s1);
       end;
       emitStringFunction := tmp;
     end;
@@ -1063,14 +1210,15 @@ begin
   x := toI64(v, t);
   bd := getOrdinalBounds(t);
   if rangeChecks(loc) and ((bd.lo < 0) or (bd.hi > 255)) then
-    emitRuntimeCheck(irICmp('ugt', x, i64c(255)), 'set element out of range 0..255', loc);
-  masked := irBin('and', x, i64c(255));
-  setIndex := irCast('zext', masked, irI256);
+    emitRuntimeCheck(irICmp('ugt', x, i64c(255), ''), 'set element out of range 0..255',
+                     loc);
+  masked := irBin('and', x, i64c(255), '');
+  setIndex := irCast('zext', masked, irI256, '');
 end;
 
 function emitSetCtor(e: PNode): TV;
 var
-  res, one, lo, hi, empty, loI, hiI, isTop, shifted, below, hiMask, loBits,
+  res, one, allOnes, lo, hi, empty, loI, hiI, isTop, shifted, below, hiMask, loBits,
   loMask, both, range_: TV;
   i: longint;
   el: PSetElement;
@@ -1078,6 +1226,7 @@ var
 begin
   res := irZero(irI256);
   one := irConstInt(irI256, 1);
+  allOnes := irConstInt(irI256, -1);
   for i := 0 to e^.setElems.count - 1 do
   begin
     el := PSetElement(listGet(e^.setElems, i));
@@ -1086,30 +1235,30 @@ begin
     if el^.hi = nil then
     begin
       loI := setIndex(lo, lt, el^.lo^.b);
-      shifted := irBin('shl', one, loI);
-      res := irBin('or', res, shifted);
+      shifted := irBin('shl', one, loI, '');
+      res := irBin('or', res, shifted, '');
       continue;
     end;
     hi := visitExpr(el^.hi);
     ht := el^.hi^.typ;
     { bits lo..hi, or none if lo > hi }
     if isSignedOrdinal(lt) then
-      empty := irICmp('sgt', lo, hi)
+      empty := irICmp('sgt', lo, hi, '')
     else
-      empty := irICmp('ugt', lo, hi);
+      empty := irICmp('ugt', lo, hi, '');
     loI := setIndex(lo, lt, el^.lo^.b);
     hiI := setIndex(hi, ht, el^.hi^.b);
-    isTop := irICmp('eq', hiI, irConstInt(irI256, 255));
-    shifted := irBin('add', hiI, one);
-    shifted := irBin('shl', one, shifted);
-    below := irBin('sub', shifted, one);
-    hiMask := irSelect(isTop, irConstInt(irI256, -1), below);
-    loBits := irBin('shl', one, loI);
-    loBits := irBin('sub', loBits, one);
-    loMask := irBin('xor', loBits, irConstInt(irI256, -1));
-    both := irBin('and', hiMask, loMask);
-    range_ := irSelect(empty, irZero(irI256), both);
-    res := irBin('or', res, range_);
+    isTop := irICmp('eq', hiI, irConstInt(irI256, 255), '');
+    shifted := irBin('add', hiI, one, '');
+    shifted := irBin('shl', one, shifted, '');
+    below := irBin('sub', shifted, one, '');
+    hiMask := irSelect(isTop, allOnes, below, '');
+    loBits := irBin('shl', one, loI, '');
+    loBits := irBin('sub', loBits, one, '');
+    loMask := irBin('xor', loBits, allOnes, '');
+    both := irBin('and', hiMask, loMask, '');
+    range_ := irSelect(empty, irZero(irI256), both, '');
+    res := irBin('or', res, range_, '');
   end;
   emitSetCtor := res;
 end;
@@ -1121,12 +1270,12 @@ var
 begin
   x := toI64(visitExpr(e^.lhs), e^.lhs^.typ);
   s := visitExpr(e^.rhs);
-  inRange := irICmp('ule', x, i64c(255));
-  idx := irBin('and', x, i64c(255));
-  idx := irCast('zext', idx, irI256);
-  shifted := irBin('lshr', s, idx);
-  bit := irCast('trunc', shifted, irI1);
-  emitIn := irBin('and', inRange, bit);
+  inRange := irICmp('ule', x, i64c(255), '');
+  idx := irBin('and', x, i64c(255), '');
+  idx := irCast('zext', idx, irI256, '');
+  shifted := irBin('lshr', s, idx, '');
+  bit := irCast('trunc', shifted, irI1, '');
+  emitIn := irBin('and', inRange, bit, 'in');
 end;
 
 { --- Addresses --- }
@@ -1149,7 +1298,7 @@ begin
           dkField:
             begin
               w := e^.refWith;
-              emitAddress := fieldAddress(ptrV(nameStr(w^.cgAddr)), w^.rec^.typ, d);
+              emitAddress := fieldAddress(PTVBox(w^.cgAddr)^, w^.rec^.typ, d);
             end;
         else
           emitAddress := getNameConstant(d^.constValue.strVal);
@@ -1168,13 +1317,13 @@ begin
         begin
           base := emitAddress(e^.base);
           idx := visitExpr(e^.index);
-          x := toI64(idx, idxTy);
           if rangeChecks(e^.index^.b) then
           begin
+            x := toI64(idx, idxTy);
             bad := outsideRange(x, 0, bt^.maxLength);
             emitRuntimeCheck(bad, 'string index out of bounds', e^.index^.b);
           end;
-          exit(irByteGEPv(base, x));
+          exit(irGEP1(irI8, base, toI64(idx, idxTy), true, ''));
         end;
         if bt^.kind = tyStringLit then
         begin
@@ -1186,16 +1335,16 @@ begin
             bad := outsideRange(x, 1, bt^.strLength);
             emitRuntimeCheck(bad, 'string index out of bounds', e^.index^.b);
           end;
-          offset := irBin('sub', x, i64c(1));
-          exit(irByteGEPv(base, offset));
+          offset := irBin('sub', x, i64c(1), '');
+          exit(irGEP1(irI8, base, offset, true, ''));
         end;
         base := emitAddress(e^.base);
         idx := visitExpr(e^.index);
         emitRangeCheckMsg(idx, idxTy, bt^.indexType, e^.index^.b,
                           'array index out of bounds');
         bd := getOrdinalBounds(bt^.indexType);
-        offset := irBin('sub', toI64(idx, idxTy), i64c(bd.lo));
-        emitAddress := irArrayGEP(memType(bt), base, offset);
+        offset := irBin('sub', toI64(idx, idxTy), i64c(bd.lo), 'idx');
+        emitAddress := irGEP2(memType(bt), base, i64c(0), offset, '');
       end;
     nkField:
       begin
@@ -1205,10 +1354,10 @@ begin
     nkDeref:
       begin
         if e^.inner^.typ^.kind = tyFile then { the buffer variable f^ }
-          exit(rt1(irPtrT, '__pas_buffer', 'ptr', loadFile(emitAddress(e^.inner))));
+          exit(call1(rtFn('__pas_buffer'), loadFile(emitAddress(e^.inner)), ''));
         base := visitExpr(e^.inner);
         if rangeChecks(e^.inner^.b) then
-          emitRuntimeCheck(irICmp('eq', base, irNull), 'dereference of a nil pointer',
+          emitRuntimeCheck(irICmp('eq', base, irNull, ''), 'dereference of a nil pointer',
                            e^.inner^.b);
         emitAddress := base;
       end;
@@ -1219,14 +1368,6 @@ end;
 
 { --- Calls --- }
 
-function retTypeOf(result_: PType): PIRType;
-begin
-  if result_ = nil then
-    retTypeOf := irVoidT
-  else
-    retTypeOf := regType(result_);
-end;
-
 function staticLinkFor(r: PDecl): TV;
 begin
   if r^.parent <> nil then
@@ -1235,14 +1376,15 @@ begin
     staticLinkFor := irNull;
 end;
 
+{ the pair (function, static link) for a routine }
 function routinePairOf(r: PDecl): TV;
 var
   pair, link: TV;
 begin
   r := canon(r);
-  pair := irInsert(irUndef(routinePairT), ptrV(nameStr(r^.cgName)), 0);
+  pair := irInsert(irUndef(routinePairT), irFuncRef(fnOf(r)), 0, '');
   link := staticLinkFor(r);
-  routinePairOf := irInsert(pair, link, 1);
+  routinePairOf := irInsert(pair, link, 1, '');
 end;
 
 { The routine value passed for a procedural parameter. }
@@ -1252,7 +1394,7 @@ var
 begin
   d := arg^.refDecl;
   if d^.kind = dkVar then { forwarding a parameter }
-    exit(irLoad(memType(d^.varType), varAddress(d)));
+    exit(irLoad(memType(d^.varType), varAddress(d), ''));
   emitRoutineValue := routinePairOf(d);
 end;
 
@@ -1268,7 +1410,7 @@ begin
     exit;
   if arg^.kind = nkStringLit then
   begin
-    v := globalCString(arg^.strValue^.chars, 0, arg^.strValue^.len);
+    v := globalString(arg^.strValue^.chars, 0, arg^.strValue^.len, '.cstr');
     exit(true);
   end;
   if arg^.kind <> nkNameRef then
@@ -1278,19 +1420,19 @@ begin
     exit;
   if d^.constValue.kind = ckString then
   begin
-    v := globalCString(d^.constValue.strVal^.chars, 0, d^.constValue.strVal^.len);
+    v := globalString(d^.constValue.strVal^.chars, 0, d^.constValue.strVal^.len, '.cstr');
     exit(true);
   end;
   if (d^.constValue.kind = ckOrdinal) and (getBase(d^.constType)^.kind = tyChar) then
   begin
     c := chr(d^.constValue.intVal and 255);
-    v := ptrV(irStringConstant(PCharArray(@c), 0, 1, true));
+    v := globalString(PCharArray(@c), 0, 1, '.cstr');
     exit(true);
   end;
 end;
 
-function emitCallTo(ret: PIRType; const callee: string; const link: TV;
-                    hasLink: boolean; const params, args: TPtrList): TV;
+function emitCallTo(ret: PIRType; const callee: TV; const link: TV; hasLink: boolean;
+                    const params, args: TPtrList): TV;
 var
   buf: TBuf;
   i: longint;
@@ -1299,7 +1441,7 @@ var
   v, tmp, res: TV;
   pt: PType;
 begin
-  irArgsStart(buf);
+  bufInit(buf);
   if hasLink then { external (C) routines have none }
     irArgsAdd(buf, link);
   for i := 0 to args.count - 1 do
@@ -1325,13 +1467,13 @@ begin
     else
       irArgsAdd(buf, convertForAssign(visitExpr(arg), arg^.typ, pt, arg^.b));
   end;
-  res := irCall(ret, callee, buf);
+  res := irCallPtr(ret, callee, buf, '');
   bufFree(buf);
   { a string or record result comes back by value; expressions use its
     address }
   if ret^.kind in [ikArray, ikStruct] then
   begin
-    tmp := createTemp(ret);
+    tmp := irCreateTemp(ret, 'result');
     irStore(res, tmp);
     exit(tmp);
   end;
@@ -1340,16 +1482,21 @@ end;
 
 function emitCall(r: PDecl; const args: TPtrList): TV;
 var
-  rt: PIRType;
+  f: PIRFunc;
 begin
   r := canon(r);
-  if r^.isFunction then
-    rt := regType(r^.resultType)
-  else
-    rt := irVoidT;
+  f := fnOf(r);
   if r^.isExternal then
-    exit(emitCallTo(rt, nameStr(r^.cgName), irNull, false, r^.params, args));
-  emitCall := emitCallTo(rt, nameStr(r^.cgName), staticLinkFor(r), true, r^.params, args);
+    exit(emitCallTo(f^.ret, irFuncRef(f), irNull, false, r^.params, args));
+  emitCall := emitCallTo(f^.ret, irFuncRef(f), staticLinkFor(r), true, r^.params, args);
+end;
+
+function retTypeOf(result_: PType): PIRType;
+begin
+  if result_ = nil then
+    retTypeOf := irVoidT
+  else
+    retTypeOf := regType(result_);
 end;
 
 { Calls the routine value pair of type rt; nilLoc: where to report a nil
@@ -1358,12 +1505,12 @@ function emitCallThrough(const pair: TV; rt: PType; const args: TPtrList; nilLoc
 var
   fn, link: TV;
 begin
-  fn := irExtract(pair, 0, irPtrT);
+  fn := irExtract(pair, 0, irPtrT, '');
   if (nilLoc <> noLoc) and rangeChecks(nilLoc) then
-    emitRuntimeCheck(irICmp('eq', fn, irNull), 'call through a nil procedural value',
+    emitRuntimeCheck(irICmp('eq', fn, irNull, ''), 'call through a nil procedural value',
                      nilLoc);
-  link := irExtract(pair, 1, irPtrT);
-  emitCallThrough := emitCallTo(retTypeOf(rt^.routineResult), fn.v, link, true,
+  link := irExtract(pair, 1, irPtrT, '');
+  emitCallThrough := emitCallTo(retTypeOf(rt^.routineResult), fn, link, true,
                                 rt^.routineParams, args);
 end;
 
@@ -1373,7 +1520,7 @@ var
   pair: TV;
   loc: TLoc;
 begin
-  pair := irLoad(memType(v^.varType), varAddress(v));
+  pair := irLoad(memType(v^.varType), varAddress(v), '');
   { parameters always hold a routine; variables may be nil }
   loc := v^.loc;
   if isParamDecl(v) then
@@ -1381,15 +1528,15 @@ begin
   emitIndirectCall := emitCallThrough(pair, v^.varType, args, loc);
 end;
 
-{ A procedural value of type t (Turbo/FPC): @routine, nil, or a procedural
-  variable, field or element. }
+{ A procedural value of type t (Turbo/FPC): @routine, nil, or a
+  procedural variable, field or element. }
 function emitRoutinePair(e: PNode; t: PType): TV;
 begin
   if e^.kind = nkNil then
     exit(irZero(memType(t)));
   if e^.kind = nkAddrOf then
     exit(routinePairOf(e^.inner^.refDecl));
-  emitRoutinePair := irLoad(memType(t), emitAddress(e));
+  emitRoutinePair := irLoad(memType(t), emitAddress(e), '');
 end;
 
 { --- Operators --- }
@@ -1397,40 +1544,46 @@ end;
 function emitShortCircuit(e: PNode): TV;
 var
   isAnd: boolean;
-  l, r: TV;
-  lhsEnd, rhsEnd, rhsL, endL, shortValue: string;
+  l, r, res: TV;
+  lhsEnd, rhsEnd, rhsB, endB: PIRBlock;
+  phi: PIRInst;
 begin
   isAnd := e^.bop = boAnd;
   l := visitExpr(e^.lhs);
-  lhsEnd := irCurrentBlock;
+  lhsEnd := irInsertBlock;
   if isAnd then
   begin
-    rhsL := irNewLabel('and.rhs');
-    endL := irNewLabel('and.end');
-    irCondBr(l, rhsL, endL);
-    shortValue := 'false';
+    rhsB := irNewBlock('and.rhs');
+    endB := irNewBlock('and.end');
+    irCondBr(l, rhsB, endB, false);
   end
   else
   begin
-    rhsL := irNewLabel('or.rhs');
-    endL := irNewLabel('or.end');
-    irCondBr(l, endL, rhsL);
-    shortValue := 'true';
+    rhsB := irNewBlock('or.rhs');
+    endB := irNewBlock('or.end');
+    irCondBr(l, endB, rhsB, false);
   end;
-  irStartBlock(rhsL);
+  irSetInsertPoint(rhsB);
   r := visitExpr(e^.rhs);
-  rhsEnd := irCurrentBlock;
-  irBr(endL);
-  irStartBlock(endL);
-  emitShortCircuit := irPhi2(irI1, shortValue, lhsEnd, r.v, rhsEnd);
+  rhsEnd := irInsertBlock;
+  irBr(endB);
+  irSetInsertPoint(endB);
+  if isAnd then
+    res := irPhi(irI1, 'and', phi)
+  else
+    res := irPhi(irI1, 'or', phi);
+  irAddIncoming(phi, irConstBool(not isAnd), lhsEnd);
+  irAddIncoming(phi, r, rhsEnd);
+  emitShortCircuit := res;
 end;
 
 function signedMin(t: PIRType): TV;
+var
+  l: TLimbs;
 begin
-  if t^.bits = 64 then
-    signedMin := irV(t, '-9223372036854775808')
-  else
-    signedMin := irConstInt(t, int64(1) shl (t^.bits - 1));
+  limbsOfInt(0, l);
+  l[(t^.bits - 1) div 32] := int64(1) shl ((t^.bits - 1) mod 32);
+  signedMin := irConstLimbs(t, l);
 end;
 
 function emitDiv(const l, r: TV; signed: boolean; loc: TLoc): TV;
@@ -1441,17 +1594,17 @@ var
 begin
   isConst := irIsConstInt(r, c);
   if not isConst or (c = 0) then
-    emitRuntimeCheck(irICmp('eq', r, irConstInt(r.t, 0)), 'division by zero', loc);
+    emitRuntimeCheck(irICmp('eq', r, irConstInt(r.t, 0), ''), 'division by zero', loc);
   if not signed then
-    exit(irBin('udiv', l, r));
+    exit(irBin('udiv', l, r, 'div'));
   { the minimum div -1 overflows (and traps on x86) }
   if not isConst or (c = -1) then
   begin
-    a := irICmp('eq', l, signedMin(l.t));
-    b := irICmp('eq', r, irConstInt(r.t, -1));
-    emitRuntimeCheck(irBin('and', a, b), 'integer overflow in ''div''', loc);
+    a := irICmp('eq', l, signedMin(l.t), '');
+    b := irICmp('eq', r, irConstInt(r.t, -1), '');
+    emitRuntimeCheck(irBin('and', a, b, ''), 'integer overflow in ''div''', loc);
   end;
-  emitDiv := irBin('sdiv', l, r);
+  emitDiv := irBin('sdiv', l, r, 'div');
 end;
 
 function emitMod(const l, r: TV; signed: boolean; loc: TLoc): TV;
@@ -1466,22 +1619,22 @@ begin
     { ISO 7185 6.7.2.2: an error if j <= 0; the result is i - k*j with
       0 <= result < j }
     if not isConst or (c <= 0) then
-      emitRuntimeCheck(irICmp('sle', r, irConstInt(r.t, 0)),
+      emitRuntimeCheck(irICmp('sle', r, irConstInt(r.t, 0), ''),
                        '''mod'' by zero or a negative number', loc);
-    rem := irBin('srem', l, r);
-    fixed := irBin('add', rem, r);
-    neg := irICmp('slt', rem, irConstInt(rem.t, 0));
-    exit(irSelect(neg, fixed, rem));
+    rem := irBin('srem', l, r, '');
+    fixed := irBin('add', rem, r, '');
+    neg := irICmp('slt', rem, irConstInt(rem.t, 0), '');
+    exit(irSelect(neg, fixed, rem, 'mod'));
   end;
   { Turbo/FPC: the sign follows the dividend (like C %) }
   if not isConst or (c = 0) then
-    emitRuntimeCheck(irICmp('eq', r, irConstInt(r.t, 0)), 'division by zero', loc);
+    emitRuntimeCheck(irICmp('eq', r, irConstInt(r.t, 0), ''), 'division by zero', loc);
   if not signed then
-    exit(irBin('urem', l, r));
+    exit(irBin('urem', l, r, 'mod'));
   { x mod -1 = 0, but the minimum srem -1 traps on x86: divide by 1 }
-  isMinus := irICmp('eq', r, irConstInt(r.t, -1));
-  safeR := irSelect(isMinus, irConstInt(r.t, 1), r);
-  emitMod := irBin('srem', l, safeR);
+  isMinus := irICmp('eq', r, irConstInt(r.t, -1), '');
+  safeR := irSelect(isMinus, irConstInt(r.t, 1), r, '');
+  emitMod := irBin('srem', l, safeR, 'mod');
 end;
 
 function compareInts(op: TBinaryOp; const l, r: TV; signed: boolean): TV;
@@ -1497,14 +1650,14 @@ begin
   else
     if signed then p := 'sge' else p := 'uge';
   end;
-  compareInts := irICmp(p, l, r);
+  compareInts := irICmp(p, l, r, 'cmp');
 end;
 
 function emitCompare(e: PNode): TV;
 var
   op: TBinaryOp;
   lt, rt: PType;
-  l, r, cmp, notR, notL: TV;
+  l, r, cmp, notX, masked: TV;
   p: string;
 begin
   op := e^.bop;
@@ -1517,19 +1670,21 @@ begin
     l := visitExpr(e^.lhs);
     r := visitExpr(e^.rhs);
     case op of
-      boEq: exit(irICmp('eq', l, r));
-      boNe: exit(irICmp('ne', l, r));
+      boEq: exit(irICmp('eq', l, r, 'cmp'));
+      boNe: exit(irICmp('ne', l, r, 'cmp'));
       boLe:
         begin
           { l is a subset of r }
-          notR := irBin('xor', r, irConstInt(irI256, -1));
-          exit(irICmp('eq', irBin('and', l, notR), irZero(irI256)));
+          notX := irBin('xor', r, irConstInt(irI256, -1), '');
+          masked := irBin('and', l, notX, '');
+          exit(irICmp('eq', masked, irZero(irI256), 'subset'));
         end;
     else
       begin
         { l is a superset of r }
-        notL := irBin('xor', l, irConstInt(irI256, -1));
-        exit(irICmp('eq', irBin('and', r, notL), irZero(irI256)));
+        notX := irBin('xor', l, irConstInt(irI256, -1), '');
+        masked := irBin('and', r, notX, '');
+        exit(irICmp('eq', masked, irZero(irI256), 'superset'));
       end;
     end;
   end;
@@ -1538,7 +1693,7 @@ begin
     { Turbo/FPC string comparison }
     l := emitPStr(e^.lhs);
     r := emitPStr(e^.rhs);
-    cmp := rt2(irI32, '__pas_str_compare', 'ptr, ptr', l, r);
+    cmp := call2(rtFn('__pas_str_compare'), l, r, '');
     exit(compareInts(op, cmp, i32c(0), true));
   end;
   if (lt^.kind = tyPointer) or (lt^.kind = tyNil) then
@@ -1546,15 +1701,15 @@ begin
     l := visitExpr(e^.lhs);
     r := visitExpr(e^.rhs);
     if op = boEq then
-      exit(irICmp('eq', l, r));
-    exit(irICmp('ne', l, r));
+      exit(irICmp('eq', l, r, 'cmp'));
+    exit(irICmp('ne', l, r, 'cmp'));
   end;
   if isStringType(lt) then
   begin
     { equal-length strings compare lexicographically (unsigned chars) }
     l := emitAddress(e^.lhs);
     r := emitAddress(e^.rhs);
-    cmp := rt3(irI32, 'memcmp', 'ptr, ptr, i64', l, r, i64c(getStringLength(lt)));
+    cmp := call3(rtFn('memcmp'), l, r, i64c(getStringLength(lt)), '');
     exit(compareInts(op, cmp, i32c(0), true));
   end;
   if (lt^.kind = tyReal) or (rt^.kind = tyReal) then
@@ -1570,7 +1725,7 @@ begin
     else
       p := 'oge';
     end;
-    exit(irFCmp(p, l, r));
+    exit(irFCmp(p, l, r, 'cmp'));
   end;
   l := visitExpr(e^.lhs);
   r := visitExpr(e^.rhs);
@@ -1595,10 +1750,12 @@ begin
   else
     f := inputFile;
   if k = bkEof then
-    r := rt1(irI32, '__pas_eof', 'ptr', f)
-  else
-    r := rt1(irI32, '__pas_eoln', 'ptr', f);
-  emitFileQuery := irICmp('ne', r, i32c(0));
+  begin
+    r := call1(rtFn('__pas_eof'), f, '');
+    exit(irICmp('ne', r, i32c(0), 'eof'));
+  end;
+  r := call1(rtFn('__pas_eoln'), f, '');
+  emitFileQuery := irICmp('ne', r, i32c(0), 'eoln');
 end;
 
 { T(x): ordinal conversions keep the low bits (extending by the source);
@@ -1619,11 +1776,7 @@ function emitRoundTrunc(e: PNode; const arg: TV; at: PType; isRound: boolean): T
 var
   x, low, high, bad: TV;
   resT: PIRType;
-  is64: boolean;
-  lo, hi: double;
   msg: TBuf;
-  b: TBuf;
-  errL, okL: string;
 begin
   if at^.kind <> tyReal then
     exit(convertOrdinal(arg, at, e^.typ));
@@ -1633,30 +1786,24 @@ begin
   if isRound then
   begin
     if mode = lmISO then
-      x := mathCall('llvm.round.f64', arg)
+      x := unaryIntrinsic('round', arg, '')
     else
-      x := mathCall('llvm.roundeven.f64', arg);
+      x := unaryIntrinsic('roundeven', arg, '');
   end;
   resT := regType(e^.typ);
   if rangeChecks(e^.b) then
   begin
     { the result must lie in the integer (or int64) range; the bounds are
       exact doubles. NaN fails too (unordered comparisons are true). }
-    is64 := resT^.bits = 64;
-    if is64 then
-    begin
-      lo := -9223372036854775808.0;
-      hi := 9223372036854775808.0;
-      low := irFCmp('ult', x, irConstDouble(lo));
-    end
+    if resT^.bits = 64 then
+      low := irFCmp('ult', x, irConstDouble(-9223372036854775808.0), '')
     else
-    begin
-      lo := -2147483649.0;
-      hi := 2147483648.0;
-      low := irFCmp('ule', x, irConstDouble(lo));
-    end;
-    high := irFCmp('uge', x, irConstDouble(hi));
-    bad := irBin('or', low, high);
+      low := irFCmp('ule', x, irConstDouble(-2147483649.0), '');
+    if resT^.bits = 64 then
+      high := irFCmp('uge', x, irConstDouble(9223372036854775808.0), '')
+    else
+      high := irFCmp('uge', x, irConstDouble(2147483648.0), '');
+    bad := irBin('or', low, high, '');
     bufInit(msg);
     if isRound then
       bufAdd(msg, '''round''')
@@ -1664,21 +1811,13 @@ begin
       bufAdd(msg, '''trunc''');
     bufAdd(msg, ' result does not fit in ');
     bufAddTypeName(msg, e^.typ);
-    { emitRuntimeCheck with a message of any length }
-    errL := irNewLabel('rt.error');
-    okL := irNewLabel('rt.ok');
-    irCondBr(bad, errL, okL);
-    irStartBlock(errL);
-    bufInit(b);
-    bufAddChars(b, msg.data, 0, msg.len);
-    bufAddWhere(b, e^.b);
-    rtv1('__pas_runtime_error', 'ptr', globalCString(b.data, 0, b.len));
-    irUnreachable;
-    bufFree(b);
+    emitRuntimeCheckB(bad, msg, e^.b);
     bufFree(msg);
-    irStartBlock(okL);
   end;
-  emitRoundTrunc := irCast('fptosi', x, resT);
+  if isRound then
+    emitRoundTrunc := irCast('fptosi', x, resT, 'round')
+  else
+    emitRoundTrunc := irCast('fptosi', x, resT, 'trunc');
 end;
 
 function emitBuiltinCall(e: PNode; k: TBuiltinKind): TV;
@@ -1691,6 +1830,7 @@ var
   loc: TLoc;
   isSucc: boolean;
   r: PIRType;
+  f: PIRFunc;
 begin
   case k of
     bkSizeOf: { the argument is not evaluated }
@@ -1722,20 +1862,20 @@ begin
         argE := PNode(listGet(e^.args, 0));
         if argE^.typ^.kind = tyRoutine then
         begin
-          tmp := irLoad(memType(argE^.typ), emitAddress(argE));
-          p := irExtract(tmp, 0, irPtrT);
+          tmp := irLoad(memType(argE^.typ), emitAddress(argE), '');
+          p := irExtract(tmp, 0, irPtrT, '');
         end
         else
           p := visitExpr(argE);
-        exit(irICmp('ne', p, irNull));
+        exit(irICmp('ne', p, irNull, 'assigned'));
       end;
     bkParamCount:
-      exit(rt0(irI32, '__pas_paramcount'));
+      exit(call0(rtFn('__pas_paramcount'), 'paramcount'));
     bkParamStr:
       begin
         tmp := newStringTemp(255);
         x := emitI32(PNode(listGet(e^.args, 0)));
-        rtv2('__pas_paramstr', 'ptr, i32', tmp, x);
+        rtv2('__pas_paramstr', tmp, x);
         exit(tmp);
       end;
     bkLength, bkCopy, bkPos, bkConcat, bkUpCase:
@@ -1754,31 +1894,33 @@ begin
     bkAbs:
       begin
         if at^.kind = tyReal then
-          exit(mathCall('llvm.fabs.f64', arg));
+          exit(unaryIntrinsic('fabs', arg, 'abs'));
         arg := convertOrdinal(arg, at, e^.typ);
         if not isSignedOrdinal(e^.typ) then
           exit(arg);
         if overflowChecks(loc) then
-          emitRuntimeCheck(irICmp('eq', arg, signedMin(arg.t)),
+          emitRuntimeCheck(irICmp('eq', arg, signedMin(arg.t), ''),
                            'integer overflow in ''abs''', loc);
         r := arg.t;
-        exit(rt2(r, 'llvm.abs.' + r^.text, r^.text + ', i1', arg, irConstBool(false)));
+        f := intrinsic('llvm.abs.' + r^.text, r, r, irI1, speculatable,
+                       r^.text + ', i1 immarg');
+        exit(call2(f, arg, irConstBool(false), 'abs'));
       end;
     bkSqr:
       begin
         if at^.kind = tyReal then
-          exit(irBin('fmul', arg, arg));
+          exit(irBin('fmul', arg, arg, 'sqr'));
         arg := convertOrdinal(arg, at, e^.typ);
-        exit(emitCheckedArith('mul', isSignedOrdinal(e^.typ), arg, arg, loc));
+        exit(emitCheckedArith('mul', isSignedOrdinal(e^.typ), arg, arg, loc, 'sqr'));
       end;
     bkOdd:
-      exit(irCast('trunc', arg, irI1));
+      exit(irCast('trunc', arg, irI1, 'odd'));
     bkOrd:
       exit(convertOrdinal(arg, at, e^.typ));
     bkChr:
       begin
         emitRangeCheckMsg(arg, at, e^.typ, loc, '''chr'' argument out of range');
-        exit(irCast('trunc', arg, irI8));
+        exit(irCast('trunc', arg, irI8, 'chr'));
       end;
     bkSucc, bkPred:
       begin
@@ -1790,39 +1932,39 @@ begin
           x := toI64(arg, t);
           if isSucc then
           begin
-            bad := irICmp('eq', x, i64c(bd.hi));
+            bad := irICmp('eq', x, i64c(bd.hi), '');
             emitRuntimeCheck(bad, '''succ'' of the last value of its type', loc);
           end
           else
           begin
-            bad := irICmp('eq', x, i64c(bd.lo));
+            bad := irICmp('eq', x, i64c(bd.lo), '');
             emitRuntimeCheck(bad, '''pred'' of the first value of its type', loc);
           end;
         end;
         one := irConstInt(arg.t, 1);
         if isSucc then
-          exit(irBin('add', arg, one));
-        exit(irBin('sub', arg, one));
+          exit(irBin('add', arg, one, 'succ'));
+        exit(irBin('sub', arg, one, 'pred'));
       end;
-    bkSin: exit(mathCall('llvm.sin.f64', toDouble(arg, at)));
-    bkCos: exit(mathCall('llvm.cos.f64', toDouble(arg, at)));
-    bkExp: exit(mathCall('llvm.exp.f64', toDouble(arg, at)));
-    bkArctan: exit(mathCall('atan', toDouble(arg, at)));
+    bkSin: exit(unaryIntrinsic('sin', toDouble(arg, at), ''));
+    bkCos: exit(unaryIntrinsic('cos', toDouble(arg, at), ''));
+    bkExp: exit(unaryIntrinsic('exp', toDouble(arg, at), ''));
+    bkArctan: exit(call1(rtFn('atan'), toDouble(arg, at), ''));
     bkLn:
       begin
         x := toDouble(arg, at);
         if rangeChecks(loc) then
-          emitRuntimeCheck(irFCmp('ule', x, irConstDouble(0.0)),
+          emitRuntimeCheck(irFCmp('ule', x, irConstDouble(0.0), ''),
                            '''ln'' of zero or a negative number', loc);
-        exit(mathCall('llvm.log.f64', x));
+        exit(unaryIntrinsic('log', x, ''));
       end;
     bkSqrt:
       begin
         x := toDouble(arg, at);
         if rangeChecks(loc) then
-          emitRuntimeCheck(irFCmp('ult', x, irConstDouble(0.0)),
+          emitRuntimeCheck(irFCmp('ult', x, irConstDouble(0.0), ''),
                            '''sqrt'' of a negative number', loc);
-        exit(mathCall('llvm.sqrt.f64', x));
+        exit(unaryIntrinsic('sqrt', x, ''));
       end;
     bkTrunc, bkRound:
       exit(emitRoundTrunc(e, arg, at, k = bkRound));
@@ -1844,12 +1986,12 @@ begin
   if (d^.kind = dkVar) and (d^.varType <> nil) and (d^.varType^.kind = tyRoutine) then
   begin
     if e^.typ^.kind = tyRoutine then { the value itself (Turbo/FPC) }
-      exit(irLoad(memType(d^.varType), varAddress(d)));
+      exit(irLoad(memType(d^.varType), varAddress(d), ''));
     listInit(noArgs);
     exit(emitIndirectCall(d, noArgs)); { a parameterless functional parameter }
   end;
   if d^.kind in [dkVar, dkField] then
-    exit(loadScalar(emitAddress(e), e^.typ));
+    exit(loadScalar(emitAddress(e), e^.typ, nm(e^.ref.name)));
   if d^.kind = dkRoutine then
   begin
     listInit(noArgs);
@@ -1858,7 +2000,7 @@ begin
   if d^.kind = dkBuiltin then
   begin
     if d^.builtin = bkParamCount then
-      exit(rt0(irI32, '__pas_paramcount'));
+      exit(call0(rtFn('__pas_paramcount'), 'paramcount'));
     exit(emitFileQuery(d^.builtin, nil)); { eof / eoln }
   end;
   if d^.constValue.kind = ckReal then
@@ -1868,7 +2010,7 @@ end;
 
 function visitUnary(e: PNode): TV;
 var
-  v, r: TV;
+  v: TV;
   t: PType;
 begin
   v := visitExpr(e^.operand);
@@ -1879,16 +2021,12 @@ begin
     uoPlus: visitUnary := v;
     uoMinus:
       if t^.kind = tyReal then
-      begin
-        r := irV(irDoubleT, irTmp);
-        irEmit(r.v + ' = fneg double ' + v.v);
-        visitUnary := r;
-      end
+        visitUnary := irFNeg(v, 'neg')
       else
         visitUnary := emitCheckedArith('sub', isSignedOrdinal(t), irConstInt(v.t, 0),
-                                       v, e^.b);
+                                       v, e^.b, 'neg');
   else
-    visitUnary := irBin('xor', v, irConstInt(v.t, -1));
+    visitUnary := irBin('xor', v, irConstInt(v.t, -1), 'not');
   end;
 end;
 
@@ -1909,7 +2047,7 @@ begin
     tmp := newStringTemp(255);
     l := emitPStr(e^.lhs);
     r := emitPStr(e^.rhs);
-    rtv3('__pas_str_concat', 'ptr, ptr, ptr', tmp, l, r);
+    rtv3('__pas_str_concat', tmp, l, r);
     exit(tmp);
   end;
   if isRelational(op) then
@@ -1923,12 +2061,12 @@ begin
   if e^.typ^.kind = tySet then
   begin
     case op of
-      boAdd: exit(irBin('or', l, r));
-      boMul: exit(irBin('and', l, r));
+      boAdd: exit(irBin('or', l, r, 'union'));
+      boMul: exit(irBin('and', l, r, 'intersection'));
     else
       begin
-        notR := irBin('xor', r, irConstInt(irI256, -1));
-        exit(irBin('and', l, notR));
+        notR := irBin('xor', r, irConstInt(irI256, -1), '');
+        exit(irBin('and', l, notR, 'difference'));
       end;
     end;
   end;
@@ -1938,14 +2076,14 @@ begin
     l := toDouble(l, lt);
     r := toDouble(r, rt);
     case op of
-      boAdd: exit(irBin('fadd', l, r));
-      boSub: exit(irBin('fsub', l, r));
-      boMul: exit(irBin('fmul', l, r));
+      boAdd: exit(irBin('fadd', l, r, 'add'));
+      boSub: exit(irBin('fsub', l, r, 'sub'));
+      boMul: exit(irBin('fmul', l, r, 'mul'));
     else
       begin
-        emitRuntimeCheck(irFCmp('oeq', r, irConstDouble(0.0)), 'division by zero',
+        emitRuntimeCheck(irFCmp('oeq', r, irConstDouble(0.0), ''), 'division by zero',
                          e^.opLoc);
-        exit(irBin('fdiv', l, r));
+        exit(irBin('fdiv', l, r, 'div'));
       end;
     end;
   end;
@@ -1962,23 +2100,23 @@ begin
   end;
   case op of
     { Turbo/FPC bitwise operators (booleans: xor only) }
-    boAnd: visitBinary := irBin('and', l, r);
-    boOr: visitBinary := irBin('or', l, r);
-    boXor: visitBinary := irBin('xor', l, r);
+    boAnd: visitBinary := irBin('and', l, r, 'and');
+    boOr: visitBinary := irBin('or', l, r, 'or');
+    boXor: visitBinary := irBin('xor', l, r, 'xor');
     boShl:
       begin
-        masked := irBin('and', r, irConstInt(r.t, l.t^.bits - 1));
-        visitBinary := irBin('shl', l, masked);
+        masked := irBin('and', r, irConstInt(r.t, l.t^.bits - 1), '');
+        visitBinary := irBin('shl', l, masked, 'shl');
       end;
     boShr:
       begin
         { logical, like Turbo/FPC }
-        masked := irBin('and', r, irConstInt(r.t, l.t^.bits - 1));
-        visitBinary := irBin('lshr', l, masked);
+        masked := irBin('and', r, irConstInt(r.t, l.t^.bits - 1), '');
+        visitBinary := irBin('lshr', l, masked, 'shr');
       end;
-    boAdd: visitBinary := emitCheckedArith('add', signed, l, r, loc);
-    boSub: visitBinary := emitCheckedArith('sub', signed, l, r, loc);
-    boMul: visitBinary := emitCheckedArith('mul', signed, l, r, loc);
+    boAdd: visitBinary := emitCheckedArith('add', signed, l, r, loc, 'add');
+    boSub: visitBinary := emitCheckedArith('sub', signed, l, r, loc, 'sub');
+    boMul: visitBinary := emitCheckedArith('mul', signed, l, r, loc, 'mul');
     boIntDiv: visitBinary := emitDiv(l, r, signed, loc);
     boMod: visitBinary := emitMod(l, r, signed, loc);
   else
@@ -2006,7 +2144,7 @@ var
   pair: TV;
 begin
   callee := e^.calleeExpr;
-  pair := irLoad(memType(callee^.typ), emitAddress(callee));
+  pair := irLoad(memType(callee^.typ), emitAddress(callee), '');
   visitIndirectCall := emitCallThrough(pair, callee^.typ, e^.args, callee^.b);
 end;
 
@@ -2027,11 +2165,16 @@ begin
     nkAddrOf: visitExpr := emitAddress(e^.inner);
     nkNil: visitExpr := irNull;
     nkSetCtor: visitExpr := emitSetCtor(e);
-    nkDeref, nkIndex, nkField:
+    nkDeref, nkIndex:
       if e^.typ^.kind = tyShortString then
         visitExpr := emitAddress(e)
       else
-        visitExpr := loadScalar(emitAddress(e), e^.typ);
+        visitExpr := loadScalar(emitAddress(e), e^.typ, '');
+    nkField:
+      if e^.typ^.kind = tyShortString then
+        visitExpr := emitAddress(e)
+      else
+        visitExpr := loadScalar(emitAddress(e), e^.typ, nm(e^.fieldName.name));
   else
     { formatted expressions and aggregates are handled by their users }
     visitExpr := irZero(irI32);

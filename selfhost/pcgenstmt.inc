@@ -36,12 +36,13 @@ var
 begin
   if (e^.typ = t) and (isStructured(t) or isStringType(t)) then
     exit(emitAddress(e));
-  tmp := createTemp(memType(t));
   if isStructured(t) then
   begin
+    tmp := irCreateTemp(memType(t), 'tmp');
     copyAggregate(tmp, emitAddress(e), t);
     exit(tmp);
   end;
+  tmp := irCreateTemp(memType(t), 'tmp');
   v := convertForAssign(visitExpr(e), e^.typ, t, e^.b);
   storeScalar(tmp, v, t);
   addressForValue := tmp;
@@ -67,27 +68,27 @@ begin
   if t^.kind = tyShortString then
   begin
     s := emitPStr(value);
-    rtv3('__pas_write_pstr', 'ptr, ptr, i32', f, s, width);
+    rtv3('__pas_write_pstr', f, s, width);
     exit;
   end;
   if isStringType(t) then
   begin
     s := emitAddress(value);
-    rtv4('__pas_write_str', 'ptr, ptr, i64, i32', f, s, i64c(getStringLength(t)), width);
+    rtv4('__pas_write_str', f, s, i64c(getStringLength(t)), width);
     exit;
   end;
   v := visitExpr(value);
   if t^.kind = tyReal then
-    rtv4('__pas_write_real', 'ptr, double, i32, i32', f, v, width, prec)
+    rtv4('__pas_write_real', f, v, width, prec)
   else if isCharBase(t) then
-    rtv3('__pas_write_char', 'ptr, i8, i32', f, v, width)
+    rtv3('__pas_write_char', f, v, width)
   else if isBoolBase(t) then
   begin
-    b := irCast('zext', v, irI32);
-    rtv3('__pas_write_bool', 'ptr, i32, i32', f, b, width);
+    b := irCast('zext', v, irI32, '');
+    rtv3('__pas_write_bool', f, b, width);
   end
   else
-    rtv3('__pas_write_int', 'ptr, i64, i32', f, toI64(v, t), width);
+    rtv3('__pas_write_int', f, toI64(v, t), width);
 end;
 
 procedure emitWrite(s: PNode; isWriteln: boolean);
@@ -95,23 +96,21 @@ var
   ft: PType;
   f, a: TV;
   first, i: longint;
-  arg: PNode;
 begin
   f := fileTarget(s^.args, false, ft, first);
   if (ft <> nil) and not ft^.isText then
   begin
     for i := first to s^.args.count - 1 do
     begin
-      arg := PNode(listGet(s^.args, i));
-      a := addressForValue(arg, ft^.fileElement);
-      rtv2('__pas_write_elem', 'ptr, ptr', f, a);
+      a := addressForValue(PNode(listGet(s^.args, i)), ft^.fileElement);
+      rtv2('__pas_write_elem', f, a);
     end;
     exit;
   end;
   for i := first to s^.args.count - 1 do
     emitWriteArg(f, PNode(listGet(s^.args, i)));
   if isWriteln then
-    rtv1('__pas_writeln', 'ptr', f);
+    rtv1('__pas_writeln', f);
 end;
 
 procedure emitReadArg(const f: TV; arg: PNode);
@@ -126,17 +125,17 @@ begin
   addr := emitAddress(arg);
   if t^.kind = tyShortString then
   begin
-    rtv3('__pas_read_str', 'ptr, ptr, i32', f, addr, i32c(t^.maxLength));
+    rtv3('__pas_read_str', f, addr, i32c(t^.maxLength));
     exit;
   end;
   if t^.kind = tyReal then
   begin
-    irStore(rt1(irDoubleT, '__pas_read_real', 'ptr', f), addr);
+    irStore(call1(rtFn('__pas_read_real'), f, ''), addr);
     exit;
   end;
   if isCharBase(t) then
   begin
-    v := rt1(irI8, '__pas_read_char', 'ptr', f);
+    v := call1(rtFn('__pas_read_char'), f, '');
     emitRangeCheck(v, getBase(t), t, arg^.b);
     irStore(v, addr);
     exit;
@@ -146,24 +145,24 @@ begin
   wide := (intBits(t) = 64) or not isSignedOrdinal(t);
   if wide then
   begin
-    v := rt1(irI64, '__pas_read_int64', 'ptr', f);
+    v := call1(rtFn('__pas_read_int64'), f, '');
     minV := -9223372036854775807 - 1;
     maxV := 9223372036854775807;
   end
   else
   begin
-    v := rt1(irI32, '__pas_read_int', 'ptr', f);
+    v := call1(rtFn('__pas_read_int'), f, '');
     minV := -2147483648;
     maxV := 2147483647;
   end;
-  x := irCast('sext', v, irI64);
+  x := irCast('sext', v, irI64, '');
   tb := getOrdinalBounds(t);
   if rangeChecks(arg^.b) and ((tb.lo > minV) or (tb.hi < maxV)) then
   begin
     bad := outsideRange(x, tb.lo, tb.hi);
     emitRuntimeCheck(bad, 'value out of range', arg^.b);
   end;
-  irStore(irCast('trunc', x, regType(t)), addr);
+  irStore(irCast('trunc', x, regType(t), ''), addr);
 end;
 
 procedure emitRead(s: PNode; isReadln: boolean);
@@ -182,12 +181,12 @@ begin
       arg := PNode(listGet(s^.args, i));
       if arg^.typ = elem then
       begin
-        rtv2('__pas_read_elem', 'ptr, ptr', f, emitAddress(arg));
+        rtv2('__pas_read_elem', f, emitAddress(arg));
         continue;
       end;
-      tmp := createTemp(memType(elem));
-      rtv2('__pas_read_elem', 'ptr, ptr', f, tmp);
-      v := convertForAssign(loadScalar(tmp, elem), elem, arg^.typ, arg^.b);
+      tmp := irCreateTemp(memType(elem), 'tmp');
+      rtv2('__pas_read_elem', f, tmp);
+      v := convertForAssign(loadScalar(tmp, elem, ''), elem, arg^.typ, arg^.b);
       addr := emitAddress(arg);
       storeScalar(addr, v, arg^.typ);
     end;
@@ -196,7 +195,7 @@ begin
   for i := first to s^.args.count - 1 do
     emitReadArg(f, PNode(listGet(s^.args, i)));
   if isReadln then
-    rtv1('__pas_readln', 'ptr', f);
+    rtv1('__pas_readln', f);
 end;
 
 { pack(a, i, z) / unpack(z, a, i): packed and unpacked arrays share a
@@ -236,8 +235,8 @@ begin
       emitRuntimeCheck(bad, '''unpack'' index out of range', index^.b);
   end;
   base := emitAddress(unpacked);
-  offset := irBin('sub', i, i64c(ub.lo));
-  elem := irArrayGEP(memType(ua), base, offset);
+  offset := irBin('sub', i, i64c(ub.lo), '');
+  elem := irGEP2(memType(ua), base, i64c(0), offset, '');
   packedAddr := emitAddress(packed_);
   bytes := count * sizeOf_(ua^.elementType);
   if isPack then
@@ -248,11 +247,11 @@ end;
 
 { --- goto --- }
 
-function labelBlock(l: PDecl): string;
+function labelBlock(l: PDecl): PIRBlock;
 begin
-  if l^.cgLabel = nil then
-    l^.cgLabel := intern(irNewLabel('label.' + nameStr(l^.ident.name)));
-  labelBlock := nameStr(l^.cgLabel);
+  if l^.cgBlock = nil then
+    l^.cgBlock := irNewBlock('label.' + nm(l^.ident.name));
+  labelBlock := PIRBlock(l^.cgBlock);
 end;
 
 function hasNonLocalLabels(blk: PBlock): boolean;
@@ -274,41 +273,37 @@ end;
 procedure emitSetJmpDispatch(blk: PBlock; const buf: TV);
 var
   r: TV;
-  start: string;
-  sw: TBuf;
+  start: PIRBlock;
+  sw: PIRInst;
   i: longint;
   d: PDecl;
 begin
-  r := rt1(irI32, '_setjmp', 'ptr', buf);
-  start := irNewLabel('body');
-  bufInit(sw);
-  bufAdd(sw, 'switch i32 ' + r.v + ', label %' + start + ' [');
+  r := call1(rtFn('_setjmp'), buf, 'jmp');
+  start := irNewBlock('body');
+  sw := irSwitch(r, start);
   for i := 0 to blk^.decls.count - 1 do
   begin
     d := PDecl(listGet(blk^.decls, i));
     if (d^.kind = dkLabel) and d^.labelNonLocal then
-      bufAdd(sw, ' i32 ' + intToStr(d^.labelIndex) + ', label %' + labelBlock(d));
+      irAddCase(sw, i32c(d^.labelIndex), labelBlock(d));
   end;
-  bufAdd(sw, ' ]');
-  irEmitTermBuf(sw);
-  bufFree(sw);
-  irStartBlock(start);
+  irSetInsertPoint(start);
 end;
 
 { --- Statements --- }
 
-procedure pushLoop(const continueL, breakL: string);
+procedure pushLoop(continueB, breakB: PIRBlock);
 begin
-  listAdd(loopLabels, intern(continueL));
-  listAdd(loopLabels, intern(breakL));
+  listAdd(loopBlocks, continueB);
+  listAdd(loopBlocks, breakB);
 end;
 
 procedure popLoop;
 var
   ignored: pointer;
 begin
-  ignored := listPop(loopLabels);
-  ignored := listPop(loopLabels);
+  ignored := listPop(loopBlocks);
+  ignored := listPop(loopBlocks);
 end;
 
 procedure visitAssign(s: PNode);
@@ -371,7 +366,7 @@ procedure emitIncDec(s: PNode; isInc: boolean);
 var
   varE, stepE: PNode;
   t: PType;
-  addr, old, step, nv, wide, neg, bad: TV;
+  addr, old, step, nv, wide, old64, neg, bad: TV;
   loc: TLoc;
   bd: TOrdinalBounds;
   check: boolean;
@@ -379,7 +374,7 @@ begin
   varE := PNode(listGet(s^.args, 0));
   t := varE^.typ;
   addr := emitAddress(varE);
-  old := loadScalar(addr, t);
+  old := loadScalar(addr, t, '');
   if s^.args.count = 2 then
   begin
     stepE := PNode(listGet(s^.args, 1));
@@ -392,20 +387,21 @@ begin
   begin
     { no wider type to check in }
     if isInc then
-      nv := emitCheckedArith('add', true, old, step, loc)
+      nv := emitCheckedArith('add', true, old, step, loc, nm(s^.callee.name))
     else
-      nv := emitCheckedArith('sub', true, old, step, loc);
+      nv := emitCheckedArith('sub', true, old, step, loc, nm(s^.callee.name));
     emitRangeCheck(nv, getBase(t), t, loc);
     storeScalar(addr, nv, t);
     exit;
   end;
   { computed in i64 so the range check sees the true result }
+  old64 := toI64(old, t);
   if isInc then
-    wide := irBin('add', toI64(old, t), step)
+    wide := irBin('add', old64, step, '')
   else
   begin
-    neg := irBin('sub', i64c(0), step);
-    wide := irBin('add', toI64(old, t), neg);
+    neg := irBin('sub', i64c(0), step, '');
+    wide := irBin('add', old64, neg, '');
   end;
   if isIntegerLike(t) then
     check := overflowChecks(loc) or rangeChecks(loc)
@@ -416,20 +412,20 @@ begin
     bd := getOrdinalBounds(t);
     bad := outsideRange(wide, bd.lo, bd.hi);
     if isIntegerLike(t) then
-      emitRuntimeCheck(bad, 'integer overflow in ''' + nameStr(s^.callee.name) + '''', loc)
+      emitRuntimeCheck(bad, 'integer overflow in ''' + nm(s^.callee.name) + '''', loc)
     else
       emitRuntimeCheck(bad, 'value out of range', loc);
   end;
-  storeScalar(addr, irCast('trunc', wide, regType(t)), t);
+  storeScalar(addr, irCast('trunc', wide, regType(t), ''), t);
 end;
 
 procedure visitProcCall(s: PNode);
 var
   d: PDecl;
   k: TBuiltinKind;
-  ignored, f, a0, a1, a2, mem, sz, old, dst, cnt, neg, v, code, p: TV;
+  ignored, f, a0, a1, a2, mem, sz, old, dst, cnt, neg, v, code, p, src: TV;
   arg, countE: PNode;
-  target: string;
+  target: PIRBlock;
   isFill: boolean;
   pointee: PType;
 begin
@@ -455,12 +451,12 @@ begin
         else
           f := loadFile(emitAddress(PNode(listGet(s^.args, 0))));
         case k of
-          bkReset: rtv1('__pas_reset', 'ptr', f);
-          bkRewrite: rtv1('__pas_rewrite', 'ptr', f);
-          bkGet: rtv1('__pas_get', 'ptr', f);
-          bkPut: rtv1('__pas_put', 'ptr', f);
+          bkReset: rtv1('__pas_reset', f);
+          bkRewrite: rtv1('__pas_rewrite', f);
+          bkGet: rtv1('__pas_get', f);
+          bkPut: rtv1('__pas_put', f);
         else
-          rtv1('__pas_page', 'ptr', f);
+          rtv1('__pas_page', f);
         end;
       end;
     bkPack, bkUnpack: emitPackUnpack(s, k = bkPack);
@@ -469,20 +465,20 @@ begin
         if s^.args.count > 0 then
           emitSetResult(PNode(listGet(s^.args, 0)));
         if k = bkExit then
-          target := exitLabel
+          target := exitBlock
         else if k = bkContinue then
-          target := nameStr(PName(listGet(loopLabels, loopLabels.count - 2)))
+          target := PIRBlock(listGet(loopBlocks, loopBlocks.count - 2))
         else
-          target := nameStr(PName(listGet(loopLabels, loopLabels.count - 1)));
+          target := PIRBlock(listGet(loopBlocks, loopBlocks.count - 1));
         irBr(target);
-        irStartBlock(irNewLabel('after.jump')); { unreachable code follows }
+        irSetInsertPoint(irNewBlock('after.jump')); { unreachable code follows }
       end;
     bkDelete:
       begin
         a0 := emitAddress(PNode(listGet(s^.args, 0)));
         a1 := emitI32(PNode(listGet(s^.args, 1)));
         a2 := emitI32(PNode(listGet(s^.args, 2)));
-        rtv3('__pas_str_delete', 'ptr, i32, i32', a0, a1, a2);
+        rtv3('__pas_str_delete', a0, a1, a2);
       end;
     bkInsert:
       begin
@@ -490,26 +486,25 @@ begin
         a0 := emitPStr(PNode(listGet(s^.args, 0)));
         a1 := emitAddress(arg);
         a2 := emitI32(PNode(listGet(s^.args, 2)));
-        rtv4('__pas_str_insert', 'ptr, ptr, i32, i32', a0, a1,
-             i32c(arg^.typ^.maxLength), a2);
+        rtv4('__pas_str_insert', a0, a1, i32c(arg^.typ^.maxLength), a2);
       end;
     bkInc, bkDec: emitIncDec(s, k = bkInc);
     bkGetMem:
       begin
         arg := PNode(listGet(s^.args, 1));
         sz := toI64(visitExpr(arg), arg^.typ);
-        mem := rt1(irPtrT, '__pas_new', 'i64', sz);
+        mem := call1(rtFn('__pas_new'), sz, '');
         irStore(mem, emitAddress(PNode(listGet(s^.args, 0))));
       end;
     bkFreeMem:
-      rtv1('free', 'ptr', visitExpr(PNode(listGet(s^.args, 0))));
+      rtv1('free', visitExpr(PNode(listGet(s^.args, 0))));
     bkReallocMem:
       begin
         a0 := emitAddress(PNode(listGet(s^.args, 0)));
         arg := PNode(listGet(s^.args, 1));
         sz := toI64(visitExpr(arg), arg^.typ);
-        old := irLoad(irPtrT, a0);
-        mem := rt2(irPtrT, '__pas_realloc', 'ptr, i64', old, sz);
+        old := irLoad(irPtrT, a0, '');
+        mem := call2(rtFn('__pas_realloc'), old, sz, '');
         irStore(mem, a0);
       end;
     bkFillChar, bkMove:
@@ -527,16 +522,19 @@ begin
           countE := PNode(listGet(s^.args, 2));
         end;
         cnt := toI64(visitExpr(countE), countE^.typ);
-        neg := irICmp('slt', cnt, i64c(0));
-        cnt := irSelect(neg, i64c(0), cnt);
+        neg := irICmp('slt', cnt, i64c(0), '');
+        cnt := irSelect(neg, i64c(0), cnt, '');
         if isFill then
         begin
           arg := PNode(listGet(s^.args, 2));
-          v := irCast('trunc', toI64(visitExpr(arg), arg^.typ), irI8);
-          emitMemSet(dst, v, cnt);
+          v := irCast('trunc', toI64(visitExpr(arg), arg^.typ), irI8, '');
+          emitMemSet(dst, v, cnt, 1);
         end
         else
-          emitMemMove(dst, emitAddress(PNode(listGet(s^.args, 0))), cnt);
+        begin
+          src := emitAddress(PNode(listGet(s^.args, 0)));
+          emitMemMove(dst, src, cnt);
+        end;
       end;
     bkHalt:
       begin
@@ -544,15 +542,15 @@ begin
           code := i32c(0)
         else
           code := emitI32(PNode(listGet(s^.args, 0)));
-        rtv1('__pas_halt', 'i32', code);
+        rtv1('__pas_halt', code);
         irUnreachable;
-        irStartBlock(irNewLabel('after.halt')); { unreachable code follows }
+        irSetInsertPoint(irNewBlock('after.halt')); { unreachable code follows }
       end;
     bkNew:
       begin
         arg := PNode(listGet(s^.args, 0));
         pointee := arg^.typ^.pointee;
-        mem := rt1(irPtrT, '__pas_new', 'i64', i64c(sizeOf_(pointee)));
+        mem := call1(rtFn('__pas_new'), i64c(sizeOf_(pointee)), '');
         emitFileLifetime(mem, pointee, true, irNull);
         irStore(mem, emitAddress(arg));
       end;
@@ -564,11 +562,11 @@ begin
         if containsFile(pointee) then
         begin
           if rangeChecks(arg^.b) then
-            emitRuntimeCheck(irICmp('eq', p, irNull), '''dispose'' of a nil pointer',
+            emitRuntimeCheck(irICmp('eq', p, irNull, ''), '''dispose'' of a nil pointer',
                              arg^.b);
           emitFileLifetime(p, pointee, false, irNull);
         end;
-        rtv1('__pas_dispose', 'ptr', p);
+        rtv1('__pas_dispose', p);
       end;
   else
     ; { Sema allows only procedures here }
@@ -578,63 +576,63 @@ end;
 procedure visitIf(s: PNode);
 var
   c: TV;
-  thenL, endL, elseL: string;
+  thenB, endB, elseB: PIRBlock;
 begin
   c := visitExpr(s^.cond);
-  thenL := irNewLabel('if.then');
-  endL := irNewLabel('if.end');
-  elseL := endL;
+  thenB := irNewBlock('if.then');
+  endB := irNewBlock('if.end');
+  elseB := endB;
   if s^.elseStmt <> nil then
-    elseL := irNewLabel('if.else');
-  irCondBr(c, thenL, elseL);
-  irStartBlock(thenL);
+    elseB := irNewBlock('if.else');
+  irCondBr(c, thenB, elseB, false);
+  irSetInsertPoint(thenB);
   visitStmt(s^.thenStmt);
-  irBr(endL);
+  irBr(endB);
   if s^.elseStmt <> nil then
   begin
-    irStartBlock(elseL);
+    irSetInsertPoint(elseB);
     visitStmt(s^.elseStmt);
-    irBr(endL);
+    irBr(endB);
   end;
-  irStartBlock(endL);
+  irSetInsertPoint(endB);
 end;
 
 procedure visitWhile(s: PNode);
 var
-  condL, bodyL, endL: string;
+  condB, bodyB, endB: PIRBlock;
 begin
-  condL := irNewLabel('while.cond');
-  bodyL := irNewLabel('while.body');
-  endL := irNewLabel('while.end');
-  irBr(condL);
-  irStartBlock(condL);
-  irCondBr(visitExpr(s^.cond), bodyL, endL);
-  irStartBlock(bodyL);
-  pushLoop(condL, endL);
+  condB := irNewBlock('while.cond');
+  bodyB := irNewBlock('while.body');
+  endB := irNewBlock('while.end');
+  irBr(condB);
+  irSetInsertPoint(condB);
+  irCondBr(visitExpr(s^.cond), bodyB, endB, false);
+  irSetInsertPoint(bodyB);
+  pushLoop(condB, endB);
   visitStmt(s^.thenStmt);
   popLoop;
-  irBr(condL);
-  irStartBlock(endL);
+  irBr(condB);
+  irSetInsertPoint(endB);
 end;
 
 procedure visitRepeat(s: PNode);
 var
-  bodyL, condL, endL: string;
+  bodyB, condB, endB: PIRBlock;
   i: longint;
 begin
-  bodyL := irNewLabel('repeat.body');
-  condL := irNewLabel('repeat.cond');
-  endL := irNewLabel('repeat.end');
-  irBr(bodyL);
-  irStartBlock(bodyL);
-  pushLoop(condL, endL);
+  bodyB := irNewBlock('repeat.body');
+  condB := irNewBlock('repeat.cond');
+  endB := irNewBlock('repeat.end');
+  irBr(bodyB);
+  irSetInsertPoint(bodyB);
+  pushLoop(condB, endB);
   for i := 0 to s^.stmts.count - 1 do
     visitStmt(PNode(listGet(s^.stmts, i)));
   popLoop;
-  irBr(condL);
-  irStartBlock(condL);
-  irCondBr(visitExpr(s^.untilCond), endL, bodyL);
-  irStartBlock(endL);
+  irBr(condB);
+  irSetInsertPoint(condB);
+  irCondBr(visitExpr(s^.untilCond), endB, bodyB, false);
+  irSetInsertPoint(endB);
 end;
 
 {   start = Init; final = Final            (each evaluated once)
@@ -651,8 +649,9 @@ var
   v: PDecl;
   varTy: PType;
   down: boolean;
-  start, final, start64, final64, enter, i, done: TV;
-  checkL, loopL, latchL, incL, endL, preL, nextName, op: string;
+  start, final, start64, final64, enter, i, done, next: TV;
+  checkB, loopB, latchB, incB, endB, preB: PIRBlock;
+  phi: PIRInst;
 begin
   v := s^.forVar^.refDecl;
   varTy := v^.varType;
@@ -664,48 +663,48 @@ begin
   start64 := toI64(start, s^.forInit^.typ);
   final64 := toI64(final, s^.forFinal^.typ);
   if down then
-    enter := irICmp('sge', start64, final64)
+    enter := irICmp('sge', start64, final64, '')
   else
-    enter := irICmp('sle', start64, final64);
-  checkL := irNewLabel('for.check');
-  loopL := irNewLabel('for.body');
-  latchL := irNewLabel('for.latch');
-  incL := irNewLabel('for.inc');
-  endL := irNewLabel('for.end');
-  irCondBr(enter, checkL, endL);
+    enter := irICmp('sle', start64, final64, '');
+  checkB := irNewBlock('for.check');
+  loopB := irNewBlock('for.body');
+  latchB := irNewBlock('for.latch');
+  incB := irNewBlock('for.inc');
+  endB := irNewBlock('for.end');
+  irCondBr(enter, checkB, endB, false);
 
   { ISO 6.8.3.9: if the loop runs, both bounds must be assignment
     compatible with the control variable }
-  irStartBlock(checkL);
+  irSetInsertPoint(checkB);
   emitRangeCheckMsg(start, s^.forInit^.typ, varTy, s^.forInit^.b,
                     '''for'' loop bound out of range');
   emitRangeCheckMsg(final, s^.forFinal^.typ, varTy, s^.forFinal^.b,
                     '''for'' loop bound out of range');
   start := convertOrdinal(start, s^.forInit^.typ, varTy);
   final := convertOrdinal(final, s^.forFinal^.typ, varTy);
-  preL := irCurrentBlock;
-  irBr(loopL);
+  preB := irInsertBlock;
+  irBr(loopB);
 
-  irStartBlock(loopL);
-  nextName := irTmp;
-  i := irPhi2(start.t, start.v, preL, nextName, incL);
+  irSetInsertPoint(loopB);
+  i := irPhi(start.t, nm(v^.ident.name), phi);
+  irAddIncoming(phi, start, preB);
   storeScalar(varAddress(v), i, varTy);
-  pushLoop(latchL, endL);
+  pushLoop(latchB, endB);
   visitStmt(s^.forBody);
   popLoop;
-  irBr(latchL);
-  irStartBlock(latchL);
-  done := irICmp('eq', i, final);
-  irCondBr(done, endL, incL);
+  irBr(latchB);
+  irSetInsertPoint(latchB);
+  done := irICmp('eq', i, final, 'for.done');
+  irCondBr(done, endB, incB, false);
 
-  irStartBlock(incL);
+  irSetInsertPoint(incB);
   if down then
-    op := 'sub'
+    next := irBin('sub', i, irConstInt(i.t, 1), 'for.next')
   else
-    op := 'add';
-  irBinNamed(nextName, op, i, irConstInt(i.t, 1));
-  irBr(loopL);
-  irStartBlock(endL);
+    next := irBin('add', i, irConstInt(i.t, 1), 'for.next');
+  irAddIncoming(phi, next, incB);
+  irBr(loopB);
+  irSetInsertPoint(endB);
 end;
 
 procedure visitCase(s: PNode);
@@ -714,31 +713,27 @@ const
 var
   sel, lo, hi, inRange: TV;
   signed: boolean;
-  defaultL, endL, nextL: string;
-  armLabels, largeRanges: TPtrList;
-  sw: TBuf;
+  defaultB, endB, armB, nextB: PIRBlock;
+  largeRanges: TPtrList;
+  sw: PIRInst;
   i, j: longint;
   arm: PCaseArm;
   cl: PCaseLabel;
-  armL: PName;
   v: int64;
   lr: PLargeRange;
 begin
   sel := visitExpr(s^.selector);
   signed := isSignedOrdinal(s^.selector^.typ);
-  defaultL := irNewLabel('case.default');
-  endL := irNewLabel('case.end');
+  defaultB := irNewBlock('case.default');
+  endB := irNewBlock('case.end');
+  sw := irSwitch(sel, defaultB);
   { ranges (Turbo/FPC) become switch cases when small; large ones are
     tested with comparisons in the default block }
-  listInit(armLabels);
   listInit(largeRanges);
-  bufInit(sw);
-  bufAdd(sw, 'switch ' + sel.t^.text + ' ' + sel.v + ', label %' + defaultL + ' [');
   for i := 0 to s^.arms.count - 1 do
   begin
     arm := PCaseArm(listGet(s^.arms, i));
-    armL := intern(irNewLabel('case.arm'));
-    listAdd(armLabels, armL);
+    armB := irNewBlock('case.arm');
     for j := 0 to arm^.labels.count - 1 do
     begin
       cl := PCaseLabel(listGet(arm^.labels, j));
@@ -747,70 +742,60 @@ begin
         lr := PLargeRange(arenaAlloc(sizeof(TLargeRange)));
         lr^.lo := cl^.loValue;
         lr^.hi := cl^.hiValue;
-        lr^.target := armL;
+        lr^.target := armB;
         listAdd(largeRanges, lr);
         continue;
       end;
       v := cl^.loValue;
       while v <= cl^.hiValue do
       begin
-        bufAdd(sw, ' ' + sel.t^.text + ' ' + irConstInt(sel.t, v).v + ', label %' +
-                   nameStr(armL));
+        irAddCase(sw, irConstInt(sel.t, v), armB);
         v := v + 1;
       end;
     end;
-  end;
-  bufAdd(sw, ' ]');
-  irEmitTermBuf(sw);
-  bufFree(sw);
-
-  for i := 0 to s^.arms.count - 1 do
-  begin
-    arm := PCaseArm(listGet(s^.arms, i));
-    irStartBlock(nameStr(PName(listGet(armLabels, i))));
+    irSetInsertPoint(armB);
     visitStmt(arm^.body);
-    irBr(endL);
+    irBr(endB);
   end;
 
-  irStartBlock(defaultL);
+  irSetInsertPoint(defaultB);
   for i := 0 to largeRanges.count - 1 do
   begin
     lr := PLargeRange(listGet(largeRanges, i));
     if signed then
     begin
-      lo := irICmp('sge', sel, irConstInt(sel.t, lr^.lo));
-      hi := irICmp('sle', sel, irConstInt(sel.t, lr^.hi));
+      lo := irICmp('sge', sel, irConstInt(sel.t, lr^.lo), '');
+      hi := irICmp('sle', sel, irConstInt(sel.t, lr^.hi), '');
     end
     else
     begin
-      lo := irICmp('uge', sel, irConstInt(sel.t, lr^.lo));
-      hi := irICmp('ule', sel, irConstInt(sel.t, lr^.hi));
+      lo := irICmp('uge', sel, irConstInt(sel.t, lr^.lo), '');
+      hi := irICmp('ule', sel, irConstInt(sel.t, lr^.hi), '');
     end;
-    inRange := irBin('and', lo, hi);
-    nextL := irNewLabel('case.range');
-    irCondBr(inRange, nameStr(lr^.target), nextL);
-    irStartBlock(nextL);
+    inRange := irBin('and', lo, hi, '');
+    nextB := irNewBlock('case.range');
+    irCondBr(inRange, lr^.target, nextB, false);
+    irSetInsertPoint(nextB);
   end;
   if s^.elseLoc <> noLoc then
   begin
     for i := 0 to s^.elseBody.count - 1 do
       visitStmt(PNode(listGet(s^.elseBody, i)));
-    irBr(endL);
+    irBr(endB);
   end
   else if mode = lmISO then
     { ISO 7185 6.8.3.5: an error if no label equals the selector }
     emitRuntimeError('no ''case'' label matches the selector value', s^.b)
   else
-    irBr(endL); { Turbo/FPC: nothing }
-  irStartBlock(endL);
-  listFree(armLabels);
+    irBr(endB); { Turbo/FPC: nothing }
+  irSetInsertPoint(endB);
   listFree(largeRanges);
 end;
 
 procedure visitGoto(s: PNode);
 var
   l, owner: PDecl;
-  buf: TV;
+  buf, frame: TV;
 begin
   l := s^.lblDecl;
   if l^.labelOwner = curRoutine then
@@ -820,13 +805,16 @@ begin
     { non-local: unwind to the owner's activation with _longjmp }
     owner := l^.labelOwner;
     if owner <> nil then
-      buf := irStructGEP(frameType(owner), framePtrFor(owner), owner^.cgJmpSlot)
+    begin
+      frame := framePtrFor(owner);
+      buf := irStructGEP(frameType(owner), frame, owner^.cgJmpSlot, '');
+    end
     else
-      buf := ptrV(mainJmpBuf);
-    rtv2('_longjmp', 'ptr, i32', buf, i32c(l^.labelIndex));
+      buf := mainJmpBuf;
+    rtv2('_longjmp', buf, i32c(l^.labelIndex));
     irUnreachable;
   end;
-  irStartBlock(irNewLabel('after.goto')); { unreachable code follows }
+  irSetInsertPoint(irNewBlock('after.goto')); { unreachable code follows }
 end;
 
 procedure visitWith(s: PNode);
@@ -838,7 +826,7 @@ begin
   for i := 0 to s^.withRecords.count - 1 do
   begin
     w := PWithContext(listGet(s^.withRecords, i));
-    w^.cgAddr := intern(emitAddress(w^.rec).v);
+    w^.cgAddr := irBox(emitAddress(w^.rec));
   end;
   visitStmt(s^.withBody);
 end;
@@ -847,8 +835,10 @@ procedure visitStmt(s: PNode);
 var
   i: longint;
   ignored: TV;
-  lbl: string;
+  b: PIRBlock;
 begin
+  { statements carry their source position into the debug information }
+  setDebugLoc(s^.b);
   case s^.kind of
     nkEmpty: ;
     nkCompound:
@@ -864,9 +854,9 @@ begin
     nkCase: visitCase(s);
     nkLabeled:
       begin
-        lbl := labelBlock(s^.lblDecl);
-        irBr(lbl);
-        irStartBlock(lbl);
+        b := labelBlock(s^.lblDecl);
+        irBr(b);
+        irSetInsertPoint(b);
         visitStmt(s^.lblBody);
       end;
     nkGoto: visitGoto(s);
@@ -878,11 +868,10 @@ end;
 
 { --- Declarations --- }
 
-{ The initializer bytes of a string or char constant for an object of
-  type t (memory type ty): length-prefixed for short strings, padded with
-  NULs or cut to the size. }
-procedure addStringInit(var b: TBuf; p: PCharArray; start, count: int64; ty: PIRType;
-                        t: PType);
+{ The bytes of a string or char constant for an object of type t (memory
+  type ty): length-prefixed for short strings, padded with NULs or cut to
+  the size (initializerForString). }
+function stringInit(p: PCharArray; start, count: int64; ty: PIRType; t: PType): TV;
 var
   bytes: TBuf;
   n: int64;
@@ -898,11 +887,11 @@ begin
     bufAddChars(bytes, p, start, count);
   while bytes.len < ty^.count do
     bufAddChar(bytes, #0);
-  irAddCString(b, bytes.data, 0, ty^.count);
+  stringInit := irConstBytes(bytes.data, 0, ty^.count);
   bufFree(bytes);
 end;
 
-procedure addScalarConst(var b: TBuf; const c: TConstValue; t: PType; ty: PIRType);
+function scalarConstant(const c: TConstValue; t: PType; ty: PIRType): TV;
 var
   x: double;
   ch: char;
@@ -912,68 +901,54 @@ begin
       if t^.kind = tyReal then
       begin
         x := c.intVal;
-        bufAdd(b, irConstDouble(x).v);
+        scalarConstant := irConstDouble(x);
       end
       else if t^.kind = tyShortString then
       begin
         { a char }
         ch := chr(c.intVal and 255);
-        addStringInit(b, PCharArray(@ch), 0, 1, ty, t);
+        scalarConstant := stringInit(PCharArray(@ch), 0, 1, ty, t);
       end
       else
-        bufAdd(b, irConstInt(ty, c.intVal).v);
-    ckReal: bufAdd(b, irConstDouble(c.realVal).v);
-    ckString: addStringInit(b, c.strVal^.chars, 0, c.strVal^.len, ty, t);
+        scalarConstant := irConstInt(ty, c.intVal);
+    ckReal: scalarConstant := irConstDouble(c.realVal);
+    ckString: scalarConstant := stringInit(c.strVal^.chars, 0, c.strVal^.len, ty, t);
   else
-    bufAdd(b, irZero(ty).v);
+    scalarConstant := irZero(ty);
   end;
 end;
 
 { The constant for a typed-constant initializer init of type t (memory
   type ty); folded is Sema's value for non-aggregates. }
-procedure addConstant(var b: TBuf; init: PNode; const folded: TConstValue; t: PType;
-                      ty: PIRType);
+function constantFor(init: PNode; const folded: TConstValue; t: PType; ty: PIRType): TV;
 var
   i, j: longint;
   el, match: PAggElement;
   f: PDecl;
   fty: PIRType;
+  elems: TPtrList;
 begin
   if init^.kind <> nkAggregate then
-  begin
-    addScalarConst(b, folded, t, ty);
-    exit;
-  end;
+    exit(scalarConstant(folded, t, ty));
+  listInit(elems);
   if t^.kind = tyArray then
   begin
-    bufAddChar(b, '[');
     for i := 0 to init^.aggElems.count - 1 do
     begin
       el := PAggElement(listGet(init^.aggElems, i));
-      if i > 0 then
-        bufAdd(b, ', ');
-      bufAdd(b, ty^.elem^.text + ' ');
-      addConstant(b, el^.value, el^.folded, t^.elementType, ty^.elem);
+      listAdd(elems, irBox(constantFor(el^.value, el^.folded, t^.elementType, ty^.elem)));
     end;
-    bufAddChar(b, ']');
+    constantFor := irConstArray(ty, elems);
+    listFree(elems);
     exit;
   end;
   if t^.kind = tyRecord then
   begin
     { fixed fields only (Sema rejects variant parts); missing ones are 0 }
-    if t^.fieldList^.fixed.count = 0 then
-    begin
-      bufAdd(b, '{}');
-      exit;
-    end;
-    bufAdd(b, '{ ');
     for i := 0 to t^.fieldList^.fixed.count - 1 do
     begin
       f := PDecl(listGet(t^.fieldList^.fixed, i));
       fty := PIRType(listGet(ty^.fields, i));
-      if i > 0 then
-        bufAdd(b, ', ');
-      bufAdd(b, fty^.text + ' ');
       match := nil;
       for j := 0 to init^.aggElems.count - 1 do
       begin
@@ -982,16 +957,18 @@ begin
           match := el;
       end;
       if match <> nil then
-        addConstant(b, match^.value, match^.folded, f^.fieldType, fty)
+        listAdd(elems, irBox(constantFor(match^.value, match^.folded, f^.fieldType, fty)))
       else
-        bufAdd(b, irZero(fty).v);
+        listAdd(elems, irBox(irZero(fty)));
     end;
-    bufAdd(b, ' }');
+    constantFor := irConstStruct(ty, elems);
+    listFree(elems);
     exit;
   end;
   { a scalar in parentheses }
+  listFree(elems);
   el := PAggElement(listGet(init^.aggElems, 0));
-  addConstant(b, el^.value, folded, t, ty);
+  constantFor := constantFor(el^.value, folded, t, ty);
 end;
 
 { A static variable: a typed constant, or a variable of the program or of
@@ -1000,19 +977,17 @@ end;
 procedure emitStaticVar(v: PDecl);
 var
   ty: PIRType;
-  name: string;
-  init: TBuf;
+  init: TV;
 begin
   ty := memType(v^.varType);
-  name := '@' + uniqueSym('pas.' + nameStr(v^.ident.name));
-  v^.cgName := intern(name);
-  bufInit(init);
   if v^.init <> nil then
-    addConstant(init, v^.init, v^.initValue, v^.varType, ty)
+    init := constantFor(v^.init, v^.initValue, v^.varType, ty)
   else
-    bufAdd(init, irZero(ty).v);
-  irGlobalBuf(name, 'internal', ty, init, false, 0);
-  bufFree(init);
+    init := irZero(ty);
+  v^.cgValue := irBox(irGlobal('pas.' + nm(v^.ident.name), 'internal', ty, init, false,
+                               false, false, 0));
+  if dbgOn then
+    declareGlobalDebugInfo(v, PTVBox(v^.cgValue)^);
 end;
 
 procedure emitGlobals(blk: PBlock);
@@ -1036,46 +1011,54 @@ begin
     paramIRType := regType(p^.varType);
 end;
 
-{ An external (C) routine: no static link, C types. }
+{ An external (C) routine: no static link, C types (getOrInsertFunction). }
 procedure declareExternal(r: PDecl);
 var
-  sym, decl: string;
+  sym: string;
   i: longint;
   p: PDecl;
   ret: PIRType;
+  params: TPtrList;
+  f: PIRFunc;
 begin
   if r^.externalName <> nil then
-    sym := nameStr(r^.externalName)
+    sym := nm(r^.externalName)
   else
-    sym := nameStr(r^.ident.spelling);
-  ret := retTypeOf(nil);
-  if r^.isFunction then
-    ret := regType(r^.resultType);
-  decl := 'declare ' + ret^.text + ' @"' + sym + '"(';
-  for i := 0 to r^.params.count - 1 do
+    sym := nm(r^.ident.spelling);
+  f := irFindFunction(sym);
+  if f = nil then
   begin
-    p := PDecl(listGet(r^.params, i));
-    if i > 0 then
-      decl := decl + ', ';
-    if p^.varKind = vkVarParam then
-      decl := decl + 'ptr'
-    else
-      decl := decl + regType(p^.varType)^.text;
+    listInit(params);
+    for i := 0 to r^.params.count - 1 do
+    begin
+      p := PDecl(listGet(r^.params, i));
+      if p^.varKind = vkVarParam then
+        listAdd(params, irPtrT)
+      else
+        listAdd(params, regType(p^.varType));
+    end;
+    ret := retTypeOf(nil);
+    if r^.isFunction then
+      ret := regType(r^.resultType);
+    f := irDeclareFunction(sym, ret, params, '', '');
+    listFree(params);
   end;
-  irDeclare(sym, decl + ')');
-  r^.cgName := intern('@"' + sym + '"');
+  r^.cgFunc := f;
 end;
 
-{ Lays out the frames of the routines declared in blk (recursively) and
-  queues their bodies. Frame: [static link], parameters, locals, [result],
-  [jmp_buf]. Every routine takes its static link first (null at the outer
-  level), so procedural parameters can call any routine the same way. }
+{ Lays out the frames of the routines declared in blk (recursively),
+  creates their functions and queues their bodies. Frame: [static link],
+  parameters, locals, [result], [jmp_buf]. Every routine takes its static
+  link first (null at the outer level), so procedural parameters can call
+  any routine the same way. }
 procedure declareRoutines(blk: PBlock);
 var
   i, j: longint;
-  r, v: PDecl;
-  slots: TPtrList;
+  r, v, p: PDecl;
+  slots, params: TPtrList;
   name: string;
+  f: PIRFunc;
+  ret: PIRType;
 
   procedure addSlot(x: PDecl);
   begin
@@ -1114,18 +1097,46 @@ begin
     end;
     if r^.isFunction then
       addSlot(r^.resultVar);
-    name := uniqueSym(mangle(r));
+    name := mangle(r);
+    r^.cgFrame := irStructNamed('frame.' + copy(name, 5, 255), slots);
     r^.cgJmpSlot := -1;
     if hasNonLocalLabels(r^.body) then
     begin
       r^.cgJmpSlot := slots.count;
       listAdd(slots, jmpBufT);
       r^.cgFrame := irStructNamed('frame.' + copy(name, 5, 255) + '.jb', slots);
-    end
-    else
-      r^.cgFrame := irStructNamed('frame.' + copy(name, 5, 255), slots);
+    end;
     listFree(slots);
-    r^.cgName := intern('@' + name);
+
+    listInit(params);
+    listAdd(params, irPtrT);
+    for j := 0 to r^.params.count - 1 do
+      listAdd(params, paramIRType(PDecl(listGet(r^.params, j))));
+    ret := irVoidT;
+    if r^.isFunction then
+      ret := regType(r^.resultType);
+    f := irCreateFunction(name, 'internal', ret, params);
+    listFree(params);
+    irSetArgName(f, 0, 'link');
+    for j := 0 to r^.params.count - 1 do
+    begin
+      p := PDecl(listGet(r^.params, j));
+      irSetArgName(f, j + 1, nm(p^.ident.name));
+    end;
+    r^.cgFunc := f;
+    if dbgOn then
+    begin
+      { file scope even for nested routines: lexical nesting would make
+        debuggers look up enclosing variables through DW_AT_static_link,
+        which LLVM cannot emit }
+      if r^.isFunction then
+        r^.cgDbg := createSubprogram(f, nm(r^.ident.spelling), diFileFor(r^.loc),
+                                     lineOf(r^.loc), r^.resultType, r^.params,
+                                     diFileFor(r^.loc))
+      else
+        r^.cgDbg := createSubprogram(f, nm(r^.ident.spelling), diFileFor(r^.loc),
+                                     lineOf(r^.loc), nil, r^.params, diFileFor(r^.loc));
+    end;
     listAdd(routinesToEmit, r);
     declareRoutines(r^.body);
   end;
@@ -1133,41 +1144,35 @@ end;
 
 procedure emitRoutineBody(r: PDecl);
 var
-  header: TBuf;
   frameT: PIRType;
   i: longint;
   p, v, res: PDecl;
-  arg, slot: TV;
+  arg, slot, ret: TV;
+  f: PIRFunc;
+  entry: PIRBlock;
 begin
+  f := fnOf(r);
+  curFn := f;
   curRoutine := r;
+  curSP := PSPInfo(r^.cgDbg);
+  irBeginBody(f);
+  irSetDebugLoc(nil);
+  entry := irNewBlock('entry');
+  irSetInsertPoint(entry);
+  setDebugLoc(r^.loc);
   frameT := frameType(r);
-  bufInit(header);
-  bufAdd(header, 'define internal ' + retTypeOf(nil)^.text);
-  if r^.isFunction then
-  begin
-    bufClear(header);
-    bufAdd(header, 'define internal ' + regType(r^.resultType)^.text);
-  end;
-  bufAdd(header, ' ' + nameStr(r^.cgName) + '(ptr %link');
-  for i := 0 to r^.params.count - 1 do
-  begin
-    p := PDecl(listGet(r^.params, i));
-    bufAdd(header, ', ' + paramIRType(p)^.text + ' %p' + intToStr(i));
-  end;
-  bufAddChar(header, ')');
-  irBeginFunction(header);
-  bufFree(header);
-
   curFrame := irAlloca(frameT, 'frame');
   { ISO leaves locals undefined; start from zero for determinism }
-  emitMemSet(curFrame, i8c(0), i64c(frameT^.size));
+  emitMemSet(curFrame, i8c(0), i64c(frameT^.size), frameT^.align);
+  if dbgOn then
+    declareFrameVariables(r);
   if r^.parent <> nil then
-    irStore(ptrV('%link'), irStructGEP(frameT, curFrame, 0));
+    irStore(irArg(f, 0), irStructGEP(frameT, curFrame, 0, ''));
   for i := 0 to r^.params.count - 1 do
   begin
     p := PDecl(listGet(r^.params, i));
-    arg := irV(paramIRType(p), '%p' + intToStr(i));
-    slot := irStructGEP(frameT, curFrame, p^.cgSlot);
+    arg := irArg(f, i + 1);
+    slot := irStructGEP(frameT, curFrame, p^.cgSlot, '');
     if isByRef(p) then
       irStore(arg, slot)
     else if isStructured(p^.varType) then
@@ -1178,11 +1183,11 @@ begin
 
   initFileVars(r^.body^.decls, false);
   if r^.cgJmpSlot >= 0 then
-    emitSetJmpDispatch(r^.body, irStructGEP(frameT, curFrame, r^.cgJmpSlot));
-  exitLabel := irNewLabel('exit');
+    emitSetJmpDispatch(r^.body, irStructGEP(frameT, curFrame, r^.cgJmpSlot, ''));
+  exitBlock := irNewBlock('exit');
   visitStmt(r^.body^.body);
-  irBr(exitLabel);
-  irStartBlock(exitLabel);
+  irBr(exitBlock);
+  irSetInsertPoint(exitBlock);
   for i := 0 to r^.body^.decls.count - 1 do
   begin
     v := PDecl(listGet(r^.body^.decls, i));
@@ -1192,35 +1197,45 @@ begin
   if r^.isFunction then
   begin
     res := r^.resultVar;
-    slot := irStructGEP(frameT, curFrame, res^.cgSlot);
-    irRet(loadScalar(slot, res^.varType));
+    slot := irStructGEP(frameT, curFrame, res^.cgSlot, '');
+    ret := loadScalar(slot, res^.varType, 'result');
+    irRet(ret);
   end
   else
     irRetVoid;
-  irEndFunction;
 end;
 
 { --- The program --- }
 
-procedure emitMain(prog: PDecl; const units: TPtrList);
+procedure emitMainBody(prog: PDecl; const units: TPtrList; mainFn: PIRFunc);
 var
-  header: TBuf;
   blk: PBlock;
   i: longint;
   u: PDecl;
+  ignored, tp: TV;
+  entry: PIRBlock;
+  noParams: TPtrList;
 begin
   blk := prog^.progBlock;
+  curFn := mainFn;
   curRoutine := nil;
   curFrame := irNull;
-  bufInit(header);
-  bufAdd(header, 'define i32 @main(i32 %argc, ptr %argv)');
-  irBeginFunction(header);
-  bufFree(header);
-  rtv2('__pas_init', 'i32, ptr', irV(irI32, '%argc'), ptrV('%argv'));
+  curSP := nil;
+  if dbgOn then
+  begin
+    listInit(noParams);
+    curSP := createSubprogram(mainFn, 'main', unitFile, lineOf(prog^.loc), nil, noParams, nil);
+  end;
+  irBeginBody(mainFn);
+  irSetDebugLoc(nil);
+  entry := irNewBlock('entry');
+  irSetInsertPoint(entry);
+  setDebugLoc(prog^.loc);
+  ignored := call2(rtFn('__pas_init'), irArg(mainFn, 0), irArg(mainFn, 1), '');
   if mode = lmTP then
   begin
-    irDeclare('__pas_tp_mode', '@__pas_tp_mode = external global i32');
-    irStore(i32c(1), ptrV('@__pas_tp_mode'));
+    tp := irGlobal('__pas_tp_mode', 'external', irI32, irNull, false, false, true, 0);
+    irStore(i32c(1), tp);
   end;
   { units: their files, then their initialization parts, in uses order }
   for i := 0 to units.count - 1 do
@@ -1236,24 +1251,25 @@ begin
       visitStmt(u^.impl^.body);
   end;
   initFileVars(blk^.decls, true);
-  if mainJmpBuf <> '' then
-    emitSetJmpDispatch(blk, ptrV(mainJmpBuf));
-  exitLabel := irNewLabel('exit');
+  if hasMainJmpBuf then
+    emitSetJmpDispatch(blk, mainJmpBuf);
+  exitBlock := irNewBlock('exit');
   visitStmt(blk^.body);
-  irBr(exitLabel);
-  irStartBlock(exitLabel);
-  rtv0('__pas_fini');
+  irBr(exitBlock);
+  irSetInsertPoint(exitBlock);
+  ignored := call0(rtFn('__pas_fini'), '');
   irRet(i32c(0));
-  irEndFunction;
 end;
 
 procedure generateModule(prog: PDecl; const units: TPtrList; m: TLangMode;
                          rangeChecksOn, overflowChecksOn: boolean;
-                         const sourceName: string; var outText: TBuf);
+                         const sourceName, triple, dataLayout: string;
+                         debugInfo, optimized: boolean; var outText: TBuf);
 var
   i: longint;
   u: PDecl;
   fields: TPtrList;
+  mainFn: PIRFunc;
 begin
   mode := m;
   optRange := rangeChecksOn;
@@ -1262,11 +1278,10 @@ begin
   curRoutine := nil;
   mapInit(lowered);
   mapInit(stringConsts);
-  mapInit(symCounts);
   listInit(routinesToEmit);
-  listInit(loopLabels);
-  mainJmpBuf := '';
-  irInit(sourceName);
+  listInit(loopBlocks);
+  hasMainJmpBuf := false;
+  irInit(sourceName, triple, dataLayout);
   listInit(fields);
   listAdd(fields, irPtrT);
   listAdd(fields, irPtrT);
@@ -1274,6 +1289,20 @@ begin
   listFree(fields);
   { generous for every supported libc (glibc: 200-312 bytes, macOS: 192) }
   jmpBufT := irArray(64, irI64);
+
+  declareRuntime;
+  listInit(fields);
+  listAdd(fields, irI32);
+  listAdd(fields, irPtrT);
+  mainFn := irCreateFunction('main', '', irI32, fields);
+  listFree(fields);
+  irSetArgName(mainFn, 0, 'argc');
+  irSetArgName(mainFn, 1, 'argv');
+  dbgOn := debugInfo;
+  dbgOptimized := optimized;
+  curSP := nil;
+  if dbgOn then
+    initDebugInfo(sourceName);
 
   for i := 0 to units.count - 1 do
   begin
@@ -1285,8 +1314,9 @@ begin
   if hasNonLocalLabels(prog^.progBlock) then
   begin
     { needed by gotos in routine bodies }
-    mainJmpBuf := '@' + uniqueSym('pas.jmpbuf');
-    irGlobal(mainJmpBuf, 'internal', jmpBufT, 'zeroinitializer', false, 16);
+    mainJmpBuf := irGlobal('pas.jmpbuf', 'internal', jmpBufT, irZero(jmpBufT), false,
+                           false, false, 16);
+    hasMainJmpBuf := true;
   end;
   for i := 0 to units.count - 1 do
   begin
@@ -1297,6 +1327,8 @@ begin
   declareRoutines(prog^.progBlock);
   for i := 0 to routinesToEmit.count - 1 do
     emitRoutineBody(PDecl(listGet(routinesToEmit, i)));
-  emitMain(prog, units);
+  emitMainBody(prog, units, mainFn);
+  if dbgOn then
+    finalizeDebugInfo;
   irWriteModule(outText);
 end;

@@ -17,7 +17,7 @@ var
   mode: TLangMode;
   errorLimit: longint;
   werror, noUnusedVariable: boolean;
-  rangeChecksOn, overflowChecksOn: boolean;
+  rangeChecksOn, overflowChecksOn, debugInfo: boolean;
   optLevel: longint;
   outBuf: TBuf;
 
@@ -282,6 +282,7 @@ begin
   optLevel := 0;
   rangeChecksOn := true;
   overflowChecksOn := true;
+  debugInfo := false;
   positionalOnly := false;
   i := 1;
   while i <= paramcount do
@@ -352,7 +353,7 @@ begin
     else if name = 'fno-overflow-checks' then
       overflowChecksOn := false
     else if name = 'g' then
-      { debug information: accepted, not produced yet (S11) }
+      debugInfo := true
     else if name = 'o' then
       outputFile := takeValue
     else if name = 'mode' then
@@ -564,6 +565,7 @@ var
   ok, semaOK: boolean;
   prog: PDecl;
   kind: TOutputKind;
+  modTriple, modLayout: string;
 begin
   sysInit;
   diagInit;
@@ -636,8 +638,11 @@ begin
       end
       else if semaOK then
       begin
+        if not moduleTarget(targetTriple, modTriple, modLayout) then
+          sysExit(1);
         generateModule(prog, units, mode, rangeChecksOn, overflowChecksOn,
-                       smFileName(fid), outBuf);
+                       smFileName(fid), modTriple, modLayout, debugInfo, optLevel > 0,
+                       outBuf);
         case action of
           actLLVM: kind := okLLVM;
           actAsm: kind := okAsm;

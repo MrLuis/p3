@@ -23,6 +23,9 @@ function validateTarget(var triple: string): boolean;
   optimization level opt for triple ('' for the host). }
 function emitOutput(const ir: TBuf; kind: TOutputKind; opt: longint;
                     const triple, path: string): boolean;
+{ The module's target triple (as the C++ pcc writes it: --target
+  normalized, else the default triple) and data layout (asked of clang). }
+function moduleTarget(const triple: string; var moduleTriple, layout: string): boolean;
 { --version }
 procedure printVersion;
 
@@ -210,6 +213,40 @@ begin
   sysRemoveFile(tmp);
 end;
 
+{ The line of a command's standard output that starts with prefix, after
+  the prefix ('' if none). }
+function captureAfter(var cmd: TBuf; const prefix: string): string;
+var
+  tmp, line: string;
+  data: PCharArray;
+  len, i: int64;
+begin
+  captureAfter := '';
+  tmp := sysTempFile('.txt');
+  if tmp = '' then
+    exit;
+  bufAdd(cmd, ' > ' + shellQuote(tmp) + ' 2>/dev/null');
+  if (run(cmd) = 0) and sysReadFile(tmp, data, len) then
+  begin
+    line := '';
+    {$R-}
+    for i := 0 to len do
+      if (i = len) or (data^[i] = #10) then
+      begin
+        if copy(line, 1, length(prefix)) = prefix then
+        begin
+          captureAfter := copy(line, length(prefix) + 1, 255);
+          break;
+        end;
+        line := '';
+      end
+      else if length(line) < 255 then
+        line := line + data^[i];
+    {$R+}
+  end;
+  sysRemoveFile(tmp);
+end;
+
 { The host's target triple, as clang reports it. }
 function defaultTriple: string;
 var
@@ -250,6 +287,77 @@ begin
                (copy(arch, 1, 7) = 'aarch64');
 end;
 
+{ llvm::Triple::normalize for the common cases: a missing vendor becomes
+  'unknown' (x86_64-linux-gnu -> x86_64-unknown-linux-gnu). }
+function normalizeTriple(const t: string): string;
+var
+  parts: array[0..5] of string[64];
+  n, i: longint;
+  os, r: string;
+begin
+  n := 0;
+  parts[0] := '';
+  for i := 1 to length(t) do
+    if (t[i] = '-') and (n < 5) then
+    begin
+      n := n + 1;
+      parts[n] := '';
+    end
+    else
+      parts[n] := parts[n] + t[i];
+  n := n + 1;
+  if n < 2 then
+    exit(t);
+  os := parts[1];
+  if (copy(os, 1, 5) = 'linux') or (copy(os, 1, 6) = 'darwin') or
+     (copy(os, 1, 5) = 'macos') or (copy(os, 1, 3) = 'ios') or
+     (copy(os, 1, 7) = 'windows') or (copy(os, 1, 7) = 'freebsd') or
+     (copy(os, 1, 6) = 'netbsd') or (copy(os, 1, 7) = 'openbsd') or
+     (os = 'wasi') or (os = 'none') or (os = 'emscripten') then
+  begin
+    r := parts[0] + '-unknown';
+    for i := 1 to n - 1 do
+      r := r + '-' + parts[i];
+    exit(r);
+  end;
+  normalizeTriple := t;
+end;
+
+function moduleTarget(const triple: string; var moduleTriple, layout: string): boolean;
+var
+  clang: string;
+  cmd: TBuf;
+  l: string;
+begin
+  moduleTarget := false;
+  if triple = '' then
+    moduleTriple := defaultTriple
+  else
+    moduleTriple := triple;
+  if not findClang(clang) then
+    exit;
+  bufInit(cmd);
+  addArg(cmd, clang);
+  addArg(cmd, '--target=' + moduleTriple);
+  addArg(cmd, '-S');
+  addArg(cmd, '-emit-llvm');
+  addArg(cmd, '-x');
+  addArg(cmd, 'c');
+  addArg(cmd, '/dev/null');
+  addArg(cmd, '-o');
+  addArg(cmd, '-');
+  l := captureAfter(cmd, 'target datalayout = "');
+  bufFree(cmd);
+  if l = '' then
+  begin
+    diagError(noLoc, 'cannot get the data layout of target ''' + moduleTriple +
+                     ''' from ''' + clang + '''');
+    exit;
+  end;
+  layout := copy(l, 1, length(l) - 1); { without the closing quote }
+  moduleTarget := true;
+end;
+
 function validateTarget(var triple: string): boolean;
 var
   arch: string;
@@ -260,6 +368,7 @@ begin
     validateTarget := true;
     exit;
   end;
+  triple := normalizeTriple(triple);
   arch := triple;
   if pos('-', arch) > 0 then
     arch := copy(arch, 1, pos('-', arch) - 1);

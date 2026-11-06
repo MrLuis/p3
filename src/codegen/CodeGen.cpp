@@ -445,6 +445,19 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
                               : B.CreateZExt(V, B.getInt64Ty());
   }
 
+  /// X < Lo or X > Hi, for an i64 X.
+  ///
+  /// Throughout this file, instructions are created one statement at a
+  /// time, never as two arguments of one call: C++ leaves the order of
+  /// argument evaluation unspecified, and the IR must not depend on the
+  /// compiler that built pcc (the self-hosted compiler writes the same IR,
+  /// SELFHOST.md S10).
+  llvm::Value *outsideRange(llvm::Value *X, int64_t Lo, int64_t Hi) {
+    llvm::Value *Below = B.CreateICmpSLT(X, B.getInt64(Lo));
+    llvm::Value *Above = B.CreateICmpSGT(X, B.getInt64(Hi));
+    return B.CreateOr(Below, Above);
+  }
+
   /// Checks that ordinal value V (of type From) lies within Target's bounds.
   void emitRangeCheck(llvm::Value *V, Type *From, Type *Target,
                       SourceLocation L,
@@ -456,9 +469,7 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
     if (FB.Lo >= TB.Lo && FB.Hi <= TB.Hi)
       return; // every value of From fits
     llvm::Value *X = toI64(V, From);
-    llvm::Value *Bad = B.CreateOr(B.CreateICmpSLT(X, B.getInt64(TB.Lo)),
-                                  B.CreateICmpSGT(X, B.getInt64(TB.Hi)));
-    emitRuntimeCheck(Bad, Msg, L);
+    emitRuntimeCheck(outsideRange(X, TB.Lo, TB.Hi), Msg, L);
   }
 
   /// Converts a value for assignment / parameter passing: integer -> real,
@@ -514,15 +525,18 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
     if (T->getBase()->isChar()) {
       llvm::Value *Tmp = newStringTemp(1);
       B.CreateStore(B.getInt8(1), Tmp);
-      B.CreateStore(visitExpr(E), B.CreateConstGEP1_64(B.getInt8Ty(), Tmp, 1));
+      llvm::Value *C = visitExpr(E);
+      B.CreateStore(C, B.CreateConstGEP1_64(B.getInt8Ty(), Tmp, 1));
       return Tmp;
     }
     // packed array [1..n] of char
     uint64_t N = T->getStringLength();
     llvm::Value *Tmp = newStringTemp(static_cast<unsigned>(std::min<uint64_t>(N, 255)));
     B.CreateStore(B.getInt8(static_cast<uint8_t>(std::min<uint64_t>(N, 255))), Tmp);
-    B.CreateMemCpy(B.CreateConstGEP1_64(B.getInt8Ty(), Tmp, 1), llvm::MaybeAlign(1),
-                   emitAddress(E), llvm::MaybeAlign(1), std::min<uint64_t>(N, 255));
+    llvm::Value *Dst = B.CreateConstGEP1_64(B.getInt8Ty(), Tmp, 1);
+    llvm::Value *Src = emitAddress(E);
+    B.CreateMemCpy(Dst, llvm::MaybeAlign(1), Src, llvm::MaybeAlign(1),
+                   std::min<uint64_t>(N, 255));
     return Tmp;
   }
 
@@ -547,8 +561,9 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
     }
     case BuiltinKind::UpCase: {
       llvm::Value *C = visitExpr(Args[0]);
-      llvm::Value *IsLower = B.CreateAnd(B.CreateICmpUGE(C, B.getInt8('a')),
-                                         B.CreateICmpULE(C, B.getInt8('z')));
+      llvm::Value *GeA = B.CreateICmpUGE(C, B.getInt8('a'));
+      llvm::Value *LeZ = B.CreateICmpULE(C, B.getInt8('z'));
+      llvm::Value *IsLower = B.CreateAnd(GeA, LeZ);
       return B.CreateSelect(IsLower, B.CreateSub(C, B.getInt8(32)), C, "upcase");
     }
     case BuiltinKind::Pos:
@@ -607,9 +622,10 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
                                                : B.CreateICmpUGT(Lo, Hi);
       llvm::Value *LoI = setIndex(Lo, LT, El.Lo->getBeginLoc());
       llvm::Value *HiI = setIndex(Hi, HT, El.Hi->getBeginLoc());
-      llvm::Value *HiMask = B.CreateSelect(
-          B.CreateICmpEQ(HiI, llvm::ConstantInt::get(setType(), 255)), AllOnes,
-          B.CreateSub(B.CreateShl(One, B.CreateAdd(HiI, One)), One));
+      llvm::Value *IsTop =
+          B.CreateICmpEQ(HiI, llvm::ConstantInt::get(setType(), 255));
+      llvm::Value *Below = B.CreateSub(B.CreateShl(One, B.CreateAdd(HiI, One)), One);
+      llvm::Value *HiMask = B.CreateSelect(IsTop, AllOnes, Below);
       llvm::Value *LoMask = B.CreateNot(B.CreateSub(B.CreateShl(One, LoI), One));
       llvm::Value *Range = B.CreateSelect(
           Empty, llvm::ConstantInt::get(setType(), 0), B.CreateAnd(HiMask, LoMask));
@@ -857,10 +873,8 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
         Type *IdxTy = I->getIndex()->getType();
         if (rangeChecks(I->getIndex()->getBeginLoc())) {
           llvm::Value *X = toI64(Idx, IdxTy);
-          emitRuntimeCheck(
-              B.CreateOr(B.CreateICmpSLT(X, B.getInt64(0)),
-                         B.CreateICmpSGT(X, B.getInt64(SS->getMaxLength()))),
-              "string index out of bounds", I->getIndex()->getBeginLoc());
+          emitRuntimeCheck(outsideRange(X, 0, SS->getMaxLength()),
+                           "string index out of bounds", I->getIndex()->getBeginLoc());
         }
         return B.CreateInBoundsGEP(B.getInt8Ty(), Base, toI64(Idx, IdxTy));
       }
@@ -869,10 +883,8 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
         llvm::Value *Base = emitAddress(I->getBase());
         llvm::Value *X = toI64(visitExpr(I->getIndex()), I->getIndex()->getType());
         if (rangeChecks(I->getIndex()->getBeginLoc()))
-          emitRuntimeCheck(
-              B.CreateOr(B.CreateICmpSLT(X, B.getInt64(1)),
-                         B.CreateICmpSGT(X, B.getInt64(SL->getLength()))),
-              "string index out of bounds", I->getIndex()->getBeginLoc());
+          emitRuntimeCheck(outsideRange(X, 1, static_cast<int64_t>(SL->getLength())),
+                           "string index out of bounds", I->getIndex()->getBeginLoc());
         return B.CreateInBoundsGEP(B.getInt8Ty(), Base,
                                    B.CreateSub(X, B.getInt64(1)));
       }
@@ -1542,8 +1554,9 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
       llvm::Value *Min = llvm::ConstantInt::get(
           L->getType(),
           llvm::APInt::getSignedMinValue(L->getType()->getIntegerBitWidth()));
-      llvm::Value *Overflow = B.CreateAnd(B.CreateICmpEQ(L, Min),
-                                          B.CreateICmpEQ(R, intConst(R, -1)));
+      llvm::Value *IsMin = B.CreateICmpEQ(L, Min);
+      llvm::Value *IsMinusOne = B.CreateICmpEQ(R, intConst(R, -1));
+      llvm::Value *Overflow = B.CreateAnd(IsMin, IsMinusOne);
       emitRuntimeCheck(Overflow, "integer overflow in 'div'", Loc);
     }
     return B.CreateSDiv(L, R, "div");
@@ -1782,9 +1795,8 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
     if (rangeChecks(Arg->getBeginLoc()) &&
         (TB.Lo > (Wide ? INT64_MIN : INT32_MIN) ||
          TB.Hi < (Wide ? INT64_MAX : INT32_MAX)))
-      emitRuntimeCheck(B.CreateOr(B.CreateICmpSLT(X, B.getInt64(TB.Lo)),
-                                  B.CreateICmpSGT(X, B.getInt64(TB.Hi))),
-                       "value out of range", Arg->getBeginLoc());
+      emitRuntimeCheck(outsideRange(X, TB.Lo, TB.Hi), "value out of range",
+                       Arg->getBeginLoc());
     B.CreateStore(B.CreateTrunc(X, regType(T)), Addr);
   }
 
@@ -1803,13 +1815,13 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
     llvm::Value *I = toI64(visitExpr(Index), Index->getType());
     if (rangeChecks(Index->getBeginLoc()))
       emitRuntimeCheck(
-          B.CreateOr(B.CreateICmpSLT(I, B.getInt64(UB.Lo)),
-                     B.CreateICmpSGT(I, B.getInt64(UB.Hi - Count + 1))),
+          outsideRange(I, UB.Lo, UB.Hi - Count + 1),
           IsPack ? "'pack' index out of range" : "'unpack' index out of range",
           Index->getBeginLoc());
-    llvm::Value *Elem = B.CreateInBoundsGEP(
-        memType(UA), emitAddress(Unpacked),
-        {B.getInt64(0), B.CreateSub(I, B.getInt64(UB.Lo))});
+    llvm::Value *Base = emitAddress(Unpacked);
+    llvm::Value *Offset = B.CreateSub(I, B.getInt64(UB.Lo));
+    llvm::Value *Elem =
+        B.CreateInBoundsGEP(memType(UA), Base, {B.getInt64(0), Offset});
     llvm::Value *PackedAddr = emitAddress(Packed);
     uint64_t Bytes = Count * sizeOf(UA->getElementType());
     if (IsPack)
@@ -2206,12 +2218,12 @@ public:
         return;
       }
       // Compute in i64 so the range check sees the true result.
-      llvm::Value *Wide =
-          B.CreateAdd(toI64(Old, T), IsInc ? Step : B.CreateNeg(Step));
+      llvm::Value *Old64 = toI64(Old, T);
+      llvm::Value *Delta = IsInc ? Step : B.CreateNeg(Step);
+      llvm::Value *Wide = B.CreateAdd(Old64, Delta);
       if (T->isIntegerLike() ? overflowChecks(L) || rangeChecks(L) : rangeChecks(L)) {
         OrdinalBounds Bd = getOrdinalBounds(T);
-        emitRuntimeCheck(B.CreateOr(B.CreateICmpSLT(Wide, B.getInt64(Bd.Lo)),
-                                    B.CreateICmpSGT(Wide, B.getInt64(Bd.Hi))),
+        emitRuntimeCheck(outsideRange(Wide, Bd.Lo, Bd.Hi),
                          T->isIntegerLike() ? "integer overflow in '" +
                                                   S->getCallee().Name.str() + "'"
                                             : "value out of range",
@@ -2450,9 +2462,11 @@ public:
 
     B.SetInsertPoint(DefaultBB);
     for (const LargeRange &R : LargeRanges) {
-      llvm::Value *InRange = B.CreateAnd(
-          Signed ? B.CreateICmpSGE(Sel, Const(R.Lo)) : B.CreateICmpUGE(Sel, Const(R.Lo)),
-          Signed ? B.CreateICmpSLE(Sel, Const(R.Hi)) : B.CreateICmpULE(Sel, Const(R.Hi)));
+      llvm::Value *AboveLo =
+          Signed ? B.CreateICmpSGE(Sel, Const(R.Lo)) : B.CreateICmpUGE(Sel, Const(R.Lo));
+      llvm::Value *BelowHi =
+          Signed ? B.CreateICmpSLE(Sel, Const(R.Hi)) : B.CreateICmpULE(Sel, Const(R.Hi));
+      llvm::Value *InRange = B.CreateAnd(AboveLo, BelowHi);
       auto *NextBB = newBlock("case.range");
       B.CreateCondBr(InRange, R.Target, NextBB);
       B.SetInsertPoint(NextBB);

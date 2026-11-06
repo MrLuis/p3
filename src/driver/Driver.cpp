@@ -215,7 +215,12 @@ bool Driver::runPipeline(FileID FID) {
                           SM.getFilename(FID));
   if (!verifyModule(*M, Diags))
     return false;
-  optimizeModule(*M, *TM, Opts.OptLevel);
+  // At -O0 the module stays as generated: LLVM's O0 pipeline would only
+  // run target-registered passes (AArch64 adds a loop pass whose
+  // LoopSimplify reshapes loops), making -O0 IR differ between targets
+  // and from the self-hosted compiler's (SELFHOST.md S10).
+  if (Opts.OptLevel > 0)
+    optimizeModule(*M, *TM, Opts.OptLevel);
 
   switch (Opts.Act) {
   case Action::EmitLLVM:

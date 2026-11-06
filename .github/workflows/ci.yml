@@ -40,9 +40,6 @@ jobs:
       - name: Bootstrap the self-hosted compiler
         run: ninja -C build check-bootstrap
 
-      # The test suite against the stage 2 compiler (S10 parity, so far
-      # without the IR-text tests and -g).
+      # S10: the whole test suite against the stage 2 compiler.
       - name: Test suite with stage 2
-        run: |
-          PCC_UNDER_TEST=$PWD/build/bootstrap/stage2/bin/pcc \
-            lit -sv build/tests --filter-out 'codegen/(control|ir|frames|vars|debuginfo)\.test'
+        run: PCC_UNDER_TEST=$PWD/build/bootstrap/stage2/bin/pcc lit -sv build/tests
