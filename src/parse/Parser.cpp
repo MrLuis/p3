@@ -174,8 +174,16 @@ ProgramDecl *Parser::parseProgram() {
   }
 
   llvm::SmallVector<Identifier, 4> Uses;
-  if (Tok.is(tok::kw_uses))
+  if (Tok.is(tok::kw_uses)) {
     parseUsesClause(Uses);
+  } else if (isIdentifierNamed("uses") && peekToken().is(tok::identifier)) {
+    // `uses` is not reserved in ISO Pascal.
+    Diags.error(Tok.getLocation(),
+                "units are a Turbo/Free Pascal extension; use --mode=tp",
+                {Tok.getRange()});
+    skipUntil({tok::semi});
+    tryConsume(tok::semi);
+  }
 
   Block *B = parseBlock();
 

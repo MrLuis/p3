@@ -1,0 +1,17 @@
+; M12 (Turbo/FPC) semantic errors.
+; RUN: not %pcc --mode=tp -ferror-limit=0 -c %S/Inputs/m12.pas -o %t.o 2>&1 | FileCheck %s
+
+; CHECK: m12.pas:2:20: error: string length must be an integer in 1..255
+; CHECK: m12.pas:5:3: error: 'break' is only allowed inside a loop
+; CHECK: m12.pas:6:8: error: cannot dereference an untyped pointer
+; CHECK: m12.pas:7:7: error: 'inc' expects an ordinal variable
+; CHECK: m12.pas:8:5: error: assigning to 'string[5]' from incompatible type 'integer'
+; CHECK: m12.pas:9:15: error: 'length' expects a string
+; CHECK: m12.pas:10:13: error: expected an integer
+; CHECK: m12.pas:11:12: error: invalid operands to 'shl' ('char' and 'integer')
+; CHECK-NOT: error:
+
+; Turbo/FPC syntax is rejected in ISO mode.
+; RUN: not %pcc -ferror-limit=0 -c %S/Inputs/tp-in-iso.pas -o %t.o 2>&1 | FileCheck --check-prefix=ISO %s
+; ISO: tp-in-iso.pas:2:8: error: expected '=' in constant declaration (typed constants need --mode=tp)
+; ISO: tp-in-iso.pas:5:8: error: invalid character '$' in source

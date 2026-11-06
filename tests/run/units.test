@@ -1,0 +1,9 @@
+; M12: units. main uses Shapes (next to it) and MathUtils (found via -I);
+; Shapes itself uses MathUtils. Initialization parts run in dependency order.
+; RUN: %pcc --mode=tp -I %S/Inputs/units/lib %S/Inputs/units/main.pas -o %t
+; RUN: %t | FileCheck %s
+; CHECK:      MathUtils ready
+; CHECK-NEXT: Shapes ready
+; CHECK-NEXT: square with side 7 has area 49
+; CHECK-NEXT: gcd(84, 36) = 12
+; CHECK-NEXT: square called 1 times; 2*pi ~ 6.28
