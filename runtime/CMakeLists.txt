@@ -2,6 +2,8 @@
 # Lands in <build>/lib so the compiler finds it at <bindir>/../lib.
 add_library(pascalrt STATIC io.c)
 target_include_directories(pascalrt PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
+# DWARF 4 like pcc's own output: GNU ld mis-merges mixed DWARF 4/5 objects.
+target_compile_options(pascalrt PRIVATE $<$<CONFIG:Debug>:-gdwarf-4>)
 set_target_properties(pascalrt PROPERTIES
   C_STANDARD 11
   POSITION_INDEPENDENT_CODE ON

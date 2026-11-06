@@ -34,3 +34,11 @@
 ; DISPOSE: Runtime error: 'dispose' of a nil pointer
 ; RUN: %pcc %S/Inputs/checks/setrange.pas -o %t/setrange && not %t/setrange 2>&1 | FileCheck --check-prefix=SETRANGE %s
 ; SETRANGE: Runtime error: set member out of range at {{.*}}setrange.pas:5:8
+
+; M11: {$R-} / {$R+} switch range checks from their position onward.
+; RUN: %pcc %S/Inputs/checks/directives.pas -o %t/directives
+; RUN: not %t/directives > %t/directives.out 2> %t/directives.err
+; RUN: FileCheck --check-prefix=DIR-OUT %s < %t/directives.out
+; RUN: FileCheck --check-prefix=DIR-ERR %s < %t/directives.err
+; DIR-OUT: unchecked 11
+; DIR-ERR: Runtime error: value out of range at {{.*}}directives.pas:8:8

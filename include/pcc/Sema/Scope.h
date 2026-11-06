@@ -38,6 +38,17 @@ public:
     return Inserted ? nullptr : It->second;
   }
 
+  /// Calls Fn(name) for each name declared directly in this scope.
+  template <typename FnT> void forEachName(FnT Fn) const {
+    if (WithRecord) {
+      for (FieldDecl *F : WithRecord->getAllFields())
+        Fn(F->getName().Name);
+      return;
+    }
+    for (const auto &Entry : Symbols)
+      Fn(Entry.getKey());
+  }
+
   Decl *lookupLocal(llvm::StringRef Name) const {
     if (WithRecord)
       return WithRecord->findField(Name);

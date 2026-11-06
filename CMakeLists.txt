@@ -53,3 +53,14 @@ add_subdirectory(runtime)
 # ---------------------------------------------------------------------------
 enable_testing()
 add_subdirectory(tests)
+
+# ---------------------------------------------------------------------------
+# Fuzzing (see tools/fuzz/pcc-fuzz.cpp)
+# ---------------------------------------------------------------------------
+option(PCC_ENABLE_FUZZING "Build the libFuzzer target pcc-fuzz" OFF)
+if(PCC_ENABLE_FUZZING)
+  add_executable(pcc-fuzz tools/fuzz/pcc-fuzz.cpp)
+  target_link_libraries(pcc-fuzz PRIVATE pccDriver)
+  target_link_options(pcc-fuzz PRIVATE -fsanitize=fuzzer,address,undefined)
+  set_target_properties(pcc-fuzz PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${PROJECT_BINARY_DIR}/bin)
+endif()

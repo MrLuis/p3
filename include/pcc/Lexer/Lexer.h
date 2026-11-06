@@ -8,8 +8,8 @@
 // keywords (case-insensitive), integer and real literals, '...' strings with
 // '' escapes, every operator/punctuator incl. (. .) and @.
 //
-// Later milestones (TODO): {$...} directives (M11); // comments, $hex,
-// %binary, &octal and #nn character codes (M12).
+// Compiler directives {$R±} / {$Q±} are recorded (M11). Turbo/FPC lexical
+// extensions arrive with M12.
 //
 //===----------------------------------------------------------------------===//
 #ifndef PCC_LEXER_LEXER_H
@@ -21,6 +21,7 @@
 
 namespace pcc {
 
+class CheckDirectives;
 class DiagnosticsEngine;
 class SourceManager;
 class StringPool;
@@ -32,6 +33,9 @@ class Lexer {
 
   const char *BufEnd;
   const char *Cur;
+  CheckDirectives *Directives = nullptr;
+
+  void handleDirective(const char *Start, llvm::StringRef Text);
 
   void skipWhitespaceAndComments();
   void skipBlockComment(unsigned OpenLen, llvm::StringRef Close);
@@ -53,6 +57,9 @@ public:
   void lex(Token &T);
 
   const LangOptions &getLangOpts() const { return LangOpts; }
+
+  /// Where to record {$R±} / {$Q±} switches (null: ignore directives).
+  void setDirectives(CheckDirectives *D) { Directives = D; }
 };
 
 } // namespace pcc

@@ -3,7 +3,7 @@
 `pcc` compiles Pascal (ISO 7185, with optional Turbo/Free Pascal extensions)
 to native executables through LLVM. See [PLAN.md](PLAN.md) for the roadmap.
 
-**Status:** M8 complete. Supported so far:
+**Status:** M11 complete (full ISO 7185 level 0). Supported:
 
 - procedures and functions: value and `var` parameters, recursion, `forward`,
   nested routines with access to enclosing variables
@@ -14,9 +14,25 @@ to native executables through LLVM. See [PLAN.md](PLAN.md) for the roadmap.
 - `read`/`readln`/`write`/`writeln` with field widths; the standard functions
   `abs sqr odd ord chr succ pred sin cos exp ln sqrt arctan trunc round`
 - runtime checks for ranges, array bounds and integer overflow (on by
-  default; `-fno-range-checks`, `-fno-overflow-checks`)
+  default; `-fno-range-checks`, `-fno-overflow-checks`, or `{$R-}` / `{$Q-}`
+  in the source)
+- pointers, sets, files (text and typed; program parameters bind to
+  command-line arguments), `goto`, procedural parameters, `pack`/`unpack`
+- `-g` debug info (gdb/lldb), "did you mean" diagnostics, cross-compiling
+  objects with `--target`
 
-Next up is M9 (pointers and sets).
+**ISO 7185 conformance:** the Pascal-P5 test `iso7185pat.pas` passes all 793
+checks (`utils/iso7185pat.py build/bin/pcc`).
+
+## Fuzzing
+
+```sh
+cmake -S . -B build-fuzz -G Ninja -DPCC_ENABLE_FUZZING=ON \
+  -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++ \
+  -DCMAKE_CXX_FLAGS="-fsanitize=fuzzer-no-link,address,undefined"
+ninja -C build-fuzz pcc-fuzz
+build-fuzz/bin/pcc-fuzz -max_total_time=300 corpus/ tests/run tests/*/Inputs
+```
 
 ```pascal
 program Sum(input, output);

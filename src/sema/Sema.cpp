@@ -61,6 +61,9 @@ class Checker : public StmtVisitor<Checker>,
   /// Functions whose result has been assigned somewhere in their body.
   llvm::DenseSet<RoutineDecl *> ResultAssigned;
 
+  /// Variables referenced anywhere (read or written).
+  llvm::DenseSet<Decl *> Used;
+
   /// `^T` where T was not declared yet: resolved at the end of the type
   /// section (ISO 7185 6.2.2.9 allows pointers to later types).
   llvm::SmallVector<std::pair<PointerTypeSpec *, PointerType *>, 4>
@@ -134,13 +137,41 @@ class Checker : public StmtVisitor<Checker>,
   // Diagnostics helpers
   //===--------------------------------------------------------------------===//
 
+  /// The visible name closest to Name (edit distance), for "did you mean".
+  std::string suggest(llvm::StringRef Name) const {
+    // Allow one edit for short names, else a third of the length (at least
+    // two, so a swapped pair of letters is found).
+    unsigned Best =
+        (Name.size() <= 3 ? 1 : std::max<unsigned>(2, Name.size() / 3)) + 1;
+    std::string Result;
+    for (const Scope *S = Cur; S; S = S->getParent())
+      S->forEachName([&](llvm::StringRef Candidate) {
+        if (Candidate.starts_with("#") || Candidate == Name)
+          return;
+        unsigned D = Name.edit_distance(Candidate, true, Best - 1);
+        if (D < Best) {
+          Best = D;
+          Result = Candidate.str();
+        }
+      });
+    return Result;
+  }
+
+  std::string didYouMean(llvm::StringRef Name) const {
+    std::string S = suggest(Name);
+    if (S.empty())
+      return "";
+    // Show the name as it was declared (Point, not point).
+    if (Decl *D = Cur->lookup(S); D && !D->getName().Spelling.empty())
+      S = D->getName().Spelling.str();
+    return "; did you mean '" + S + "'?";
+  }
+
   void diagUndeclared(const Identifier &Id) {
-    if (isFutureBuiltin(Id.Name))
-      Diags.error(Id.Loc, "'" + Id.Spelling + "' is not supported yet",
-                  {Id.getRange()});
-    else
-      Diags.error(Id.Loc, "use of undeclared identifier '" + Id.Spelling + "'",
-                  {Id.getRange()});
+    Diags.error(Id.Loc,
+                "use of undeclared identifier '" + Id.Spelling + "'" +
+                    didYouMean(Id.Name),
+                {Id.getRange()});
   }
 
   void noteDeclaredHere(Decl *D) {
@@ -430,7 +461,8 @@ class Checker : public StmtVisitor<Checker>,
           Diags.error(Id.Loc, "type '" + Id.Spelling + "' is not supported yet",
                       {Id.getRange()});
         else
-          Diags.error(Id.Loc, "unknown type name '" + Id.Spelling + "'",
+          Diags.error(Id.Loc, "unknown type name '" + Id.Spelling + "'" +
+                        didYouMean(Id.Name),
                       {Id.getRange()});
         return errorType();
       }
@@ -805,7 +837,8 @@ class Checker : public StmtVisitor<Checker>,
                         ", not a type",
                     {Id.getRange()});
       else
-        Diags.error(Id.Loc, "unknown type name '" + Id.Spelling + "'",
+        Diags.error(Id.Loc, "unknown type name '" + Id.Spelling + "'" +
+                        didYouMean(Id.Name),
                     {Id.getRange()});
       P->setPointee(errorType());
     }
@@ -851,6 +884,13 @@ class Checker : public StmtVisitor<Checker>,
     RoutineBody = B.getBody();
     visitStmt(B.getBody());
     RoutineBody = SavedBody;
+
+    for (Decl *D : B.getDecls())
+      if (auto *V = llvm::dyn_cast<VarDecl>(D); V && !Used.count(V))
+        Diags.warning("unused-variable", V->getLocation(),
+                      "variable '" + V->getName().Spelling +
+                          "' is declared but never used",
+                      {V->getName().getRange()});
 
     // ISO 7185 6.8.1: every declared label prefixes exactly one statement.
     for (Decl *D : B.getDecls())
@@ -919,6 +959,8 @@ class Checker : public StmtVisitor<Checker>,
         continue;
       Decl *D = Cur->lookupLocal(Param.Name);
       auto *V = llvm::dyn_cast_or_null<VarDecl>(D);
+      if (V)
+        Used.insert(V); // bound to a command-line argument
       if (V && V->getType() && (V->getType()->isFile() || V->getType()->isError()))
         continue;
       Diags.error(Param.Loc,
@@ -1593,6 +1635,7 @@ public:
 
     Target->setDecl(D);
     Target->setWith(W);
+    Used.insert(D);
     if (auto *V = llvm::dyn_cast<VarDecl>(D)) {
       checkNotForControlVar(Target);
       return V->getType() ? V->getType() : errorType();
@@ -1666,6 +1709,7 @@ public:
 
     if (Decl *D = Cur->lookup(Id.Name)) {
       VarRef->setDecl(D);
+      Used.insert(D);
       auto *V = llvm::dyn_cast<VarDecl>(D);
       if (!V) {
         Diags.error(Id.Loc,
@@ -1812,6 +1856,7 @@ public:
     }
     E->setDecl(D);
     E->setWith(W);
+    Used.insert(D);
 
     switch (D->getKind()) {
     case Decl::DK_Var: {

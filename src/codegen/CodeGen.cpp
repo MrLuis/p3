@@ -24,16 +24,22 @@
 #include "pcc/CodeGen/CodeGen.h"
 #include "pcc/AST/ASTVisitor.h"
 #include "pcc/AST/Type.h"
+#include "pcc/Basic/Directives.h"
 #include "pcc/Basic/LangOptions.h"
 #include "pcc/Basic/SourceManager.h"
 
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/StringMap.h"
+#include "llvm/BinaryFormat/Dwarf.h"
+#include "llvm/IR/DIBuilder.h"
 #include "llvm/IR/IRBuilder.h"
 #include "llvm/IR/Intrinsics.h"
 #include "llvm/IR/LLVMContext.h"
 #include "llvm/IR/MDBuilder.h"
 #include "llvm/IR/Module.h"
+#include "llvm/ADT/SmallString.h"
+#include "llvm/Support/FileSystem.h"
+#include "llvm/Support/Path.h"
 #include "llvm/Target/TargetMachine.h"
 
 using namespace pcc;
@@ -136,6 +142,14 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
   llvm::StringMap<llvm::GlobalVariable *> StringConstants;
   std::vector<RoutineDecl *> RoutinesToEmit;
   llvm::DenseMap<LabelDecl *, llvm::BasicBlock *> LabelBlocks;
+
+  // Debug information (-g).
+  std::unique_ptr<llvm::DIBuilder> DIB;
+  llvm::DICompileUnit *CU = nullptr;
+  llvm::DIFile *DIUnitFile = nullptr;
+  llvm::DISubprogram *CurSP = nullptr;
+  llvm::DenseMap<Type *, llvm::DIType *> DITypes;
+  llvm::DenseMap<RoutineDecl *, llvm::DISubprogram *> Subprograms;
   llvm::DenseMap<RoutineDecl *, unsigned> JmpBufSlots; ///< frame slot
   llvm::GlobalVariable *MainJmpBuf = nullptr;
 
@@ -340,6 +354,20 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
     B.SetInsertPoint(ContBB);
   }
 
+  /// Are range / overflow checks on at L? (command line, then {$R±}/{$Q±})
+  bool rangeChecks(SourceLocation L) const {
+    return !CGOpts.Directives
+               ? CGOpts.RangeChecks
+               : CGOpts.Directives->isEnabled(CheckDirectives::Range, L,
+                                              CGOpts.RangeChecks);
+  }
+  bool overflowChecks(SourceLocation L) const {
+    return !CGOpts.Directives
+               ? CGOpts.OverflowChecks
+               : CGOpts.Directives->isEnabled(CheckDirectives::Overflow, L,
+                                              CGOpts.OverflowChecks);
+  }
+
   /// Ordinal values compare as signed if their host is integer, unsigned
   /// otherwise (char 0..255, boolean, enum 0..N-1).
   static bool isSignedOrdinal(Type *T) { return T->isIntegerLike(); }
@@ -354,7 +382,7 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
   void emitRangeCheck(llvm::Value *V, Type *From, Type *Target,
                       SourceLocation L,
                       llvm::StringRef Msg = "value out of range") {
-    if (!CGOpts.RangeChecks || !Target->isOrdinal())
+    if (!rangeChecks(L) || !Target->isOrdinal())
       return;
     OrdinalBounds TB = getOrdinalBounds(Target);
     OrdinalBounds FB = getOrdinalBounds(From);
@@ -374,7 +402,7 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
       return B.CreateSIToFP(V, B.getDoubleTy(), "toreal");
     if (To->isOrdinal())
       emitRangeCheck(V, From, To, L);
-    if (auto *TS = llvm::dyn_cast<SetType>(To); TS && CGOpts.RangeChecks) {
+    if (auto *TS = llvm::dyn_cast<SetType>(To); TS && rangeChecks(L)) {
       OrdinalBounds TB = getOrdinalBounds(TS->getElementType());
       auto *FS = llvm::cast<SetType>(From);
       OrdinalBounds FB = FS->isEmptySet()
@@ -403,7 +431,7 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
   llvm::Value *setIndex(llvm::Value *V, Type *T, SourceLocation L) {
     llvm::Value *X = toI64(V, T);
     OrdinalBounds Bd = getOrdinalBounds(T);
-    if (CGOpts.RangeChecks && (Bd.Lo < 0 || Bd.Hi > 255))
+    if (rangeChecks(L) && (Bd.Lo < 0 || Bd.Hi > 255))
       emitRuntimeCheck(B.CreateICmpUGT(X, B.getInt64(255)),
                        "set element out of range 0..255", L);
     return B.CreateZExt(B.CreateAnd(X, B.getInt64(255)), setType());
@@ -457,7 +485,7 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
   llvm::Value *emitCheckedArith(llvm::Intrinsic::ID ID, llvm::Value *L,
                                 llvm::Value *R, SourceLocation Loc,
                                 const llvm::Twine &Name) {
-    if (!CGOpts.OverflowChecks) {
+    if (!overflowChecks(Loc)) {
       switch (ID) {
       case llvm::Intrinsic::sadd_with_overflow: return B.CreateAdd(L, R, Name);
       case llvm::Intrinsic::ssub_with_overflow: return B.CreateSub(L, R, Name);
@@ -643,7 +671,7 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
       if (D->getBase()->getType()->isFile()) // buffer variable f^
         return B.CreateCall(RT.Buffer, {loadFile(emitAddress(D->getBase()))});
       llvm::Value *P = visitExpr(D->getBase());
-      if (CGOpts.RangeChecks)
+      if (rangeChecks(D->getBase()->getBeginLoc()))
         emitRuntimeCheck(B.CreateIsNull(P), "dereference of a nil pointer",
                          D->getBase()->getBeginLoc());
       return P;
@@ -651,6 +679,181 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
     default:
       llvm_unreachable("expression has no address");
     }
+  }
+
+  //===--------------------------------------------------------------------===//
+  // Debug information
+  //===--------------------------------------------------------------------===//
+
+  unsigned lineOf(SourceLocation L) const { return SM.getPresumedLoc(L).Line; }
+
+  void initDebugInfo(llvm::StringRef SourceFileName) {
+    DIB = std::make_unique<llvm::DIBuilder>(M);
+    llvm::SmallString<256> Abs(SourceFileName);
+    llvm::sys::fs::make_absolute(Abs);
+    DIUnitFile = DIB->createFile(llvm::sys::path::filename(Abs),
+                                 llvm::sys::path::parent_path(Abs));
+    CU = DIB->createCompileUnit(llvm::dwarf::DW_LANG_Pascal83, DIUnitFile,
+                                "pcc", CGOpts.OptLevel > 0, "", 0);
+    M.addModuleFlag(llvm::Module::Warning, "Debug Info Version",
+                    llvm::DEBUG_METADATA_VERSION);
+    // DWARF 4: GNU ld mis-merges DWARF 5 string-offset tables when our
+    // objects are linked with clang-compiled ones (libpascalrt).
+    M.addModuleFlag(llvm::Module::Warning, "Dwarf Version", 4);
+  }
+
+  llvm::DIType *debugType(Type *T) {
+    if (llvm::DIType *D = DITypes.lookup(T))
+      return D;
+    llvm::DIType *D = buildDebugType(T);
+    // Named arrays, subranges, pointers ...: a typedef carries the name.
+    if (!T->getDeclName().empty() && !T->isRecord() && !T->isEnum() &&
+        !llvm::isa<BuiltinType>(T))
+      D = DIB->createTypedef(D, T->getDeclName(), DIUnitFile, 0, CU);
+    DITypes[T] = D;
+    return D;
+  }
+
+  llvm::DIType *buildDebugType(Type *T) {
+    using namespace llvm::dwarf;
+    switch (T->getKind()) {
+    case Type::TK_Integer: return DIB->createBasicType("integer", 32, DW_ATE_signed);
+    case Type::TK_Real:    return DIB->createBasicType("real", 64, DW_ATE_float);
+    case Type::TK_Boolean: return DIB->createBasicType("boolean", 8, DW_ATE_boolean);
+    case Type::TK_Char:    return DIB->createBasicType("char", 8, DW_ATE_unsigned_char);
+    case Type::TK_Subrange:
+      return debugType(llvm::cast<SubrangeType>(T)->getHost());
+    case Type::TK_Enum: {
+      llvm::SmallVector<llvm::Metadata *, 8> Enumerators;
+      for (ConstDecl *C : llvm::cast<EnumType>(T)->getValues())
+        Enumerators.push_back(DIB->createEnumerator(C->getName().Spelling,
+                                                    C->getValue().Int));
+      return DIB->createEnumerationType(
+          CU, T->getDeclName(), DIUnitFile, 0, 32, 32,
+          DIB->getOrCreateArray(Enumerators),
+          DIB->createBasicType("integer", 32, DW_ATE_signed));
+    }
+    case Type::TK_String:
+    case Type::TK_Array: {
+      Type *Elem = T->isStringLiteral() ? static_cast<Type *>(nullptr)
+                                        : llvm::cast<ArrayType>(T)->getElementType();
+      llvm::DIType *ElemDI =
+          Elem ? debugType(Elem) : DIB->createBasicType("char", 8, DW_ATE_unsigned_char);
+      int64_t Lo = 1, Count;
+      if (auto *A = llvm::dyn_cast<ArrayType>(T)) {
+        OrdinalBounds Bd = getOrdinalBounds(A->getIndexType());
+        Lo = Bd.Lo;
+        Count = Bd.Hi - Bd.Lo + 1;
+      } else {
+        Count = static_cast<int64_t>(T->getStringLength());
+      }
+      llvm::Metadata *Sub = DIB->getOrCreateSubrange(Lo, Count);
+      return DIB->createArrayType(sizeOf(T) * 8, 0, ElemDI,
+                                  DIB->getOrCreateArray({Sub}));
+    }
+    case Type::TK_Record: {
+      auto *R = llvm::cast<RecordType>(T);
+      memType(T); // computes the field offsets
+      // Forward-declare first: fields may point back to this record.
+      llvm::DICompositeType *Fwd = DIB->createReplaceableCompositeType(
+          DW_TAG_structure_type, T->getDeclName(), CU, DIUnitFile, 0);
+      DITypes[T] = Fwd;
+      llvm::SmallVector<llvm::Metadata *, 8> Members;
+      for (FieldDecl *F : R->getAllFields())
+        Members.push_back(DIB->createMemberType(
+            Fwd, F->getName().Spelling, DIUnitFile, lineOf(F->getLocation()),
+            sizeOf(F->getType()) * 8, 0, FieldOffsets[F] * 8,
+            llvm::DINode::FlagZero, debugType(F->getType())));
+      llvm::DICompositeType *Def = DIB->createStructType(
+          CU, T->getDeclName(), DIUnitFile, 0, sizeOf(T) * 8, 0,
+          llvm::DINode::FlagZero, nullptr, DIB->getOrCreateArray(Members));
+      Fwd->replaceAllUsesWith(Def);
+      return Def;
+    }
+    case Type::TK_Pointer: {
+      Type *P = llvm::cast<PointerType>(T)->getPointee();
+      return DIB->createPointerType(debugType(P), 64);
+    }
+    case Type::TK_Set: {
+      llvm::Metadata *Sub = DIB->getOrCreateSubrange(0, 32);
+      return DIB->createArrayType(
+          256, 0, DIB->createBasicType("byte", 8, DW_ATE_unsigned),
+          DIB->getOrCreateArray({Sub}));
+    }
+    case Type::TK_File:
+      return DIB->createPointerType(DIB->createUnspecifiedType("PasFile"), 64);
+    default: // procedural values, nil
+      return DIB->createUnspecifiedType(T->getName());
+    }
+  }
+
+  llvm::DISubprogram *createSubprogram(llvm::Function *F, llvm::StringRef Name,
+                                       llvm::DIScope *Scope, unsigned Line,
+                                       Type *Result,
+                                       llvm::ArrayRef<VarDecl *> Params) {
+    llvm::SmallVector<llvm::Metadata *, 8> Sig{Result ? debugType(Result) : nullptr};
+    for (VarDecl *P : Params)
+      Sig.push_back(P->isVarParam()
+                        ? DIB->createReferenceType(llvm::dwarf::DW_TAG_reference_type,
+                                                   debugType(P->getType()), 64)
+                        : debugType(P->getType()));
+    auto *SP = DIB->createFunction(
+        Scope, Name, /*LinkageName=*/"", DIUnitFile, Line,
+        DIB->createSubroutineType(DIB->getOrCreateTypeArray(Sig)), Line,
+        llvm::DINode::FlagPrototyped,
+        llvm::DISubprogram::SPFlagDefinition |
+            (CGOpts.OptLevel ? llvm::DISubprogram::SPFlagOptimized
+                             : llvm::DISubprogram::SPFlagZero));
+    F->setSubprogram(SP);
+    return SP;
+  }
+
+  void setDebugLoc(SourceLocation L) {
+    if (!DIB || !CurSP)
+      return;
+    PresumedLoc P = SM.getPresumedLoc(L);
+    if (P.isValid())
+      B.SetCurrentDebugLocation(
+          llvm::DILocation::get(M.getContext(), P.Line, P.Column, CurSP));
+  }
+
+  /// Describes the frame slots of R (params, locals, result) to the
+  /// debugger as offsets into the frame alloca.
+  void declareFrameVariables(RoutineDecl *R) {
+    llvm::StructType *FrameTy = FrameTypes[R];
+    const llvm::StructLayout *SL = DL.getStructLayout(FrameTy);
+    auto Declare = [&](VarDecl *V, unsigned ArgNo) {
+      llvm::DIType *Ty = debugType(V->getType());
+      unsigned Line = lineOf(V->getLocation());
+      llvm::DILocalVariable *DV =
+          ArgNo ? DIB->createParameterVariable(CurSP, V->getName().Spelling, ArgNo,
+                                               DIUnitFile, Line, Ty)
+                : DIB->createAutoVariable(CurSP, V->getName().Spelling,
+                                          DIUnitFile, Line, Ty);
+      llvm::SmallVector<uint64_t, 4> Ops{llvm::dwarf::DW_OP_plus_uconst,
+                                         SL->getElementOffset(FrameSlots[V])};
+      if (V->isVarParam())
+        Ops.push_back(llvm::dwarf::DW_OP_deref);
+      DIB->insertDeclare(CurFrame, DV, DIB->createExpression(Ops),
+                         llvm::DILocation::get(M.getContext(), Line, 0, CurSP),
+                         B.GetInsertBlock());
+    };
+    unsigned ArgNo = 1;
+    for (VarDecl *P : R->getParams())
+      Declare(P, ArgNo++);
+    for (Decl *D : R->getBody()->getDecls())
+      if (auto *V = llvm::dyn_cast<VarDecl>(D))
+        Declare(V, 0);
+    if (R->isFunction())
+      Declare(R->getResultVar(), 0);
+  }
+
+  void declareGlobalDebugInfo(VarDecl *V, llvm::GlobalVariable *G) {
+    G->addDebugInfo(DIB->createGlobalVariableExpression(
+        // No linkage name: debuggers would show "pas.x" instead of "x".
+        CU, V->getName().Spelling, /*LinkageName=*/"", DIUnitFile,
+        lineOf(V->getLocation()), debugType(V->getType()),
+        /*IsLocalToUnit=*/true));
   }
 
   //===--------------------------------------------------------------------===//
@@ -668,6 +871,8 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
       Globals[V] = new llvm::GlobalVariable(
           M, Ty, /*isConstant=*/false, llvm::GlobalValue::InternalLinkage,
           llvm::Constant::getNullValue(Ty), "pas." + V->getName().Name);
+      if (DIB)
+        declareGlobalDebugInfo(V, Globals[V]);
     }
   }
 
@@ -728,6 +933,14 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
         F->getArg(ArgNo++)->setName(P->getName().Name);
       Functions[R] = F;
       RoutinesToEmit.push_back(R);
+      if (DIB)
+        // File scope even for nested routines: lexical nesting would make
+        // debuggers look up enclosing variables through DW_AT_static_link,
+        // which LLVM cannot emit. Use the debugger's `up` to reach them.
+        Subprograms[R] = createSubprogram(
+            F, R->getName().Spelling, DIUnitFile,
+            lineOf(R->getLocation()),
+            R->isFunction() ? R->getResultType() : nullptr, R->getParams());
 
       declareRoutines(*R->getBody());
     }
@@ -737,13 +950,18 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
     llvm::Function *F = Functions[R];
     CurFn = F;
     CurRoutine = R;
+    CurSP = DIB ? Subprograms[R] : nullptr;
+    B.SetCurrentDebugLocation(llvm::DebugLoc());
     B.SetInsertPoint(llvm::BasicBlock::Create(M.getContext(), "entry", F));
+    setDebugLoc(R->getLocation());
 
     llvm::StructType *FrameTy = FrameTypes[R];
     CurFrame = B.CreateAlloca(FrameTy, nullptr, "frame");
     // ISO leaves locals undefined; start from zero for determinism.
     B.CreateMemSet(CurFrame, B.getInt8(0), DL.getTypeAllocSize(FrameTy),
                    DL.getABITypeAlign(FrameTy));
+    if (DIB)
+      declareFrameVariables(R);
 
     unsigned ArgNo = 1;
     if (R->hasStaticLink())
@@ -1119,7 +1337,7 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
     OrdinalBounds PB = getOrdinalBounds(PA->getIndexType());
     int64_t Count = PB.Hi - PB.Lo + 1;
     llvm::Value *I = toI64(visitExpr(Index), Index->getType());
-    if (CGOpts.RangeChecks)
+    if (rangeChecks(Index->getBeginLoc()))
       emitRuntimeCheck(
           B.CreateOr(B.CreateICmpSLT(I, B.getInt64(UB.Lo)),
                      B.CreateICmpSGT(I, B.getInt64(UB.Hi - Count + 1))),
@@ -1156,7 +1374,7 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
     case BuiltinKind::Abs:
       if (AT->isReal())
         return B.CreateUnaryIntrinsic(llvm::Intrinsic::fabs, Arg, nullptr, "abs");
-      if (CGOpts.OverflowChecks)
+      if (overflowChecks(Loc))
         emitRuntimeCheck(B.CreateICmpEQ(Arg, B.getInt32(INT32_MIN)),
                          "integer overflow in 'abs'", Loc);
       return B.CreateBinaryIntrinsic(llvm::Intrinsic::abs, Arg, B.getFalse(),
@@ -1179,7 +1397,7 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
       bool IsSucc = BD->getBuiltinKind() == BuiltinKind::Succ;
       Type *Base = AT->getBase();
       OrdinalBounds Bd = getOrdinalBounds(Base);
-      if (CGOpts.RangeChecks)
+      if (rangeChecks(Loc))
         emitRuntimeCheck(
             B.CreateICmpEQ(toI64(Arg, Base), B.getInt64(IsSucc ? Bd.Hi : Bd.Lo)),
             IsSucc ? "'succ' of the last value of its type"
@@ -1198,7 +1416,7 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
       return B.CreateCall(RT.Atan, {toDouble(Arg, AT)});
     case BuiltinKind::Ln: {
       llvm::Value *X = toDouble(Arg, AT);
-      if (CGOpts.RangeChecks)
+      if (rangeChecks(Loc))
         emitRuntimeCheck(
             B.CreateFCmpULE(X, llvm::ConstantFP::get(B.getDoubleTy(), 0.0)),
             "'ln' of zero or a negative number", Loc);
@@ -1206,7 +1424,7 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
     }
     case BuiltinKind::Sqrt: {
       llvm::Value *X = toDouble(Arg, AT);
-      if (CGOpts.RangeChecks)
+      if (rangeChecks(Loc))
         emitRuntimeCheck(
             B.CreateFCmpULT(X, llvm::ConstantFP::get(B.getDoubleTy(), 0.0)),
             "'sqrt' of a negative number", Loc);
@@ -1220,7 +1438,7 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
       // ISO: round() rounds halves away from zero, like llvm.round.
       llvm::Value *X =
           IsRound ? B.CreateUnaryIntrinsic(llvm::Intrinsic::round, Arg) : Arg;
-      if (CGOpts.RangeChecks) {
+      if (rangeChecks(Loc)) {
         auto *Lo = llvm::ConstantFP::get(B.getDoubleTy(), -2147483649.0);
         auto *Hi = llvm::ConstantFP::get(B.getDoubleTy(), 2147483648.0);
         // Also catches NaN (unordered comparisons are true).
@@ -1253,6 +1471,8 @@ public:
     Main->getArg(1)->setName("argv");
 
     Block &Blk = *P.getBlock();
+    if (CGOpts.DebugInfo)
+      initDebugInfo(M.getSourceFileName());
     emitGlobals(Blk);
     if (hasNonLocalLabels(Blk)) { // needed by gotos in routine bodies
       MainJmpBuf = new llvm::GlobalVariable(
@@ -1267,7 +1487,12 @@ public:
     CurFn = Main;
     CurRoutine = nullptr;
     CurFrame = nullptr;
+    CurSP = DIB ? createSubprogram(Main, "main", DIUnitFile,
+                                   lineOf(P.getLocation()), nullptr, {})
+                : nullptr;
+    B.SetCurrentDebugLocation(llvm::DebugLoc());
     B.SetInsertPoint(llvm::BasicBlock::Create(C, "entry", Main));
+    setDebugLoc(P.getLocation());
     B.CreateCall(RT.Init, {Main->getArg(0), Main->getArg(1)});
     // Program parameters other than input/output bind to argv[1], ...
     llvm::StringMap<unsigned> ParamIndex;
@@ -1280,6 +1505,14 @@ public:
     visitStmt(Blk.getBody());
     B.CreateCall(RT.Fini);
     B.CreateRet(B.getInt32(0));
+    if (DIB)
+      DIB->finalize();
+  }
+
+  /// Statements carry their source position into the debug info.
+  void visitStmt(Stmt *S) {
+    setDebugLoc(S->getBeginLoc());
+    StmtVisitor<CodeGenModule>::visitStmt(S);
   }
 
   //===--------------------------------------------------------------------===//
@@ -1358,7 +1591,7 @@ public:
       llvm::Value *P = visitExpr(Arg);
       Type *Pointee = llvm::cast<PointerType>(Arg->getType())->getPointee();
       if (containsFile(Pointee)) {
-        if (CGOpts.RangeChecks)
+        if (rangeChecks(Arg->getBeginLoc()))
           emitRuntimeCheck(B.CreateIsNull(P), "'dispose' of a nil pointer",
                            Arg->getBeginLoc());
         emitFileLifetime(P, Pointee, /*Init=*/false);

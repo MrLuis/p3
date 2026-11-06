@@ -25,13 +25,25 @@
 ; RUN: %pcc -c --target=riscv64-unknown-linux-gnu %S/../driver/Inputs/hello.pas -o %t.dir/rv.o
 ; RUN: llvm-readobj --file-headers %t.dir/rv.o | FileCheck --check-prefix=RV %s
 ; RV: Machine: EM_RISCV
+; M11: object files for the main object formats (the input uses setjmp-based
+; non-local goto, files and procedural parameters).
+; RUN: %pcc -c -O2 --target=x86_64-unknown-linux-gnu %S/../run/gotoproc.pas -o %t.dir/x86.o
+; RUN: llvm-readobj --file-headers %t.dir/x86.o | FileCheck --check-prefix=ELF %s
+; ELF: Format: elf64-x86-64
+; RUN: %pcc -c -O2 --target=aarch64-apple-darwin %S/../run/gotoproc.pas -o %t.dir/macho.o
+; RUN: llvm-readobj --file-headers %t.dir/macho.o | FileCheck --check-prefix=MACHO %s
+; MACHO: Format: Mach-O arm64
+; RUN: %pcc -c -O2 --target=x86_64-pc-windows-msvc %S/../run/gotoproc.pas -o %t.dir/coff.o
+; RUN: llvm-readobj --file-headers %t.dir/coff.o | FileCheck --check-prefix=COFF %s
+; COFF: Format: COFF-x86-64
+; RUN: %pcc -c -O2 --target=wasm32-unknown-wasi %S/../run/gotoproc.pas -o %t.dir/wasm.o
+; RUN: llvm-readobj --file-headers %t.dir/wasm.o | FileCheck --check-prefix=WASM %s
+; WASM: Format: WASM
+
 ; ...but linking executables is host-only for now.
 ; RUN: not %pcc --target=riscv64-unknown-linux-gnu %S/../driver/Inputs/hello.pas -o %t.dir/rv 2>&1 | FileCheck --check-prefix=XLINK %s
 ; XLINK: error: linking for a non-host target ('riscv64-unknown-linux-gnu') is not supported yet; use -c, -S or --emit-llvm
 
-; -g is accepted but not implemented yet.
-; RUN: %pcc -g -c %S/../driver/Inputs/hello.pas -o %t.dir/g.o 2>&1 | FileCheck --check-prefix=G %s
-; G: warning: debug information (-g) is not implemented yet; ignored
 
 ; Missing runtime library is reported clearly.
 ; RUN: env PCC_RUNTIME_LIB=%t.dir/nope.a not %pcc %S/../driver/Inputs/hello.pas -o %t.dir/x 2>&1 | FileCheck --check-prefix=NORT %s

@@ -66,6 +66,11 @@ static cl::opt<unsigned>
 static cl::opt<bool> Werror("Werror", cl::desc("Treat warnings as errors"),
                             cl::cat(PccCategory));
 
+static cl::opt<bool>
+    NoUnusedVariable("Wno-unused-variable",
+                     cl::desc("Do not warn about unused variables"),
+                     cl::cat(PccCategory));
+
 static cl::opt<bool> NoRangeChecks(
     "fno-range-checks",
     cl::desc("Disable runtime range checks (subranges, array indices, ...)"),
@@ -102,6 +107,7 @@ int main(int argc, char **argv) {
   Opts.ErrorLimit = ErrorLimit;
   Opts.WarningsAsErrors = Werror;
   Opts.RangeChecks = !NoRangeChecks;
+  Opts.WarnUnusedVariables = !NoUnusedVariable;
   Opts.OverflowChecks = !NoOverflowChecks;
 
   Driver D(std::move(Opts), llvm::errs());

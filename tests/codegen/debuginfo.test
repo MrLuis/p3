@@ -1,0 +1,48 @@
+; M11: -g emits DWARF (version 4) that debuggers understand: Pascal names,
+; records/enums/arrays, globals, and frame-based locals and parameters
+; (var parameters are dereferenced). Checked interactively with gdb; here
+; with llvm-dwarfdump.
+; RUN: %pcc -g -c %S/Inputs/debuginfo.pas -o %t.o
+; RUN: llvm-dwarfdump --verify %t.o | FileCheck --check-prefix=VERIFY %s
+; VERIFY: No errors.
+; RUN: llvm-dwarfdump --debug-info %t.o | FileCheck %s
+
+; CHECK: DW_AT_language (DW_LANG_Pascal83)
+; CHECK: DW_TAG_variable
+; CHECK-NEXT: DW_AT_name ("p")
+; CHECK: DW_TAG_structure_type
+; CHECK-NEXT: DW_AT_name ("Point")
+; CHECK: DW_TAG_member
+; CHECK-NEXT: DW_AT_name ("x")
+; CHECK: DW_TAG_enumeration_type
+; CHECK: DW_AT_name ("Color")
+; CHECK: DW_TAG_enumerator
+; CHECK-NEXT: DW_AT_name ("red")
+; CHECK: DW_TAG_variable
+; CHECK-NEXT: DW_AT_name ("g")
+; CHECK: DW_TAG_array_type
+; CHECK: DW_TAG_subrange_type
+; CHECK: DW_AT_count (0x03)
+; CHECK: DW_TAG_subprogram
+; CHECK: DW_AT_name ("main")
+; CHECK: DW_TAG_subprogram
+; CHECK: DW_AT_name ("accumulate")
+; CHECK: DW_TAG_formal_parameter
+; CHECK-NEXT: DW_AT_location (DW_OP_fbreg +{{[0-9]+}}, DW_OP_plus_uconst 0x0, DW_OP_deref)
+; CHECK-NEXT: DW_AT_name ("acc")
+; CHECK: DW_TAG_variable
+; CHECK-NEXT: DW_AT_location (DW_OP_fbreg +{{[0-9]+}}, DW_OP_plus_uconst 0xc)
+; CHECK-NEXT: DW_AT_name ("doubled")
+; CHECK: DW_TAG_subprogram
+; CHECK: DW_AT_name ("bump")
+
+; Line table: statements map to their source lines.
+; RUN: llvm-dwarfdump --debug-line %t.o | FileCheck --check-prefix=LINES %s
+; LINES: debuginfo.pas
+; LINES-DAG: {{^0x[0-9a-f]+ +23 }}
+; LINES-DAG: {{^0x[0-9a-f]+ +26 }}
+
+; Without -g there is no debug info.
+; RUN: %pcc -c %S/Inputs/debuginfo.pas -o %t.nodebug.o
+; RUN: llvm-dwarfdump --debug-info %t.nodebug.o | FileCheck --check-prefix=NODEBUG %s
+; NODEBUG-NOT: DW_TAG_compile_unit

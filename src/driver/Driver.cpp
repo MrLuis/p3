@@ -1,6 +1,7 @@
 #include "pcc/Driver/Driver.h"
 #include "pcc/AST/ASTContext.h"
 #include "pcc/AST/ASTPrinter.h"
+#include "pcc/Basic/Directives.h"
 #include "pcc/CodeGen/Backend.h"
 #include "pcc/CodeGen/CodeGen.h"
 #include "pcc/Driver/Linker.h"
@@ -69,6 +70,8 @@ Driver::Driver(CompilerOptions O, llvm::raw_ostream &DiagOS)
       Diags(SM, DiagOS) {
   Diags.setErrorLimit(Opts.ErrorLimit);
   Diags.setWarningsAsErrors(Opts.WarningsAsErrors);
+  if (!Opts.WarnUnusedVariables)
+    Diags.disableWarning("unused-variable");
   switch (Opts.Color) {
   case ColorMode::Always: Diags.setShowColors(true); break;
   case ColorMode::Never:  Diags.setShowColors(false); break;
@@ -146,7 +149,9 @@ bool Driver::runPipeline(FileID FID) {
 
   // --- M2: parsing --------------------------------------------------------
   ASTContext Ctx(Strings);
+  CheckDirectives Directives;
   Lexer Lex(SM, FID, Diags, Strings, LangOpts);
+  Lex.setDirectives(&Directives);
   Parser P(Lex, Diags, Ctx);
   ProgramDecl *Program = P.parseProgram();
 
@@ -167,8 +172,6 @@ bool Driver::runPipeline(FileID FID) {
     return false;
 
   // --- M3: code generation ------------------------------------------------
-  if (Opts.DebugInfo)
-    Diags.warning("debug information (-g) is not implemented yet; ignored");
 
   bool IsHost = llvm::Triple(Opts.TargetTriple) ==
                 llvm::Triple(llvm::sys::getDefaultTargetTriple());
@@ -187,6 +190,9 @@ bool Driver::runPipeline(FileID FID) {
   CodeGenOptions CGOpts;
   CGOpts.RangeChecks = Opts.RangeChecks;
   CGOpts.OverflowChecks = Opts.OverflowChecks;
+  CGOpts.Directives = &Directives;
+  CGOpts.DebugInfo = Opts.DebugInfo;
+  CGOpts.OptLevel = Opts.OptLevel;
   auto M = generateModule(*Program, SM, LangOpts, CGOpts, LLVMCtx, *TM,
                           SM.getFilename(FID));
   if (!verifyModule(*M, Diags))

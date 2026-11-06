@@ -1,0 +1,12 @@
+; M11: did-you-mean suggestions and unused-variable warnings.
+; RUN: not %pcc -c %S/Inputs/suggest.pas -o %t.o 2>&1 | FileCheck %s
+; RUN: not %pcc -Wno-unused-variable -c %S/Inputs/suggest.pas -o %t.o 2>&1 | FileCheck --check-prefix=QUIET %s
+; QUIET-NOT: warning:
+
+; CHECK: suggest.pas:3:32: error: unknown type name 'Pont'; did you mean 'Point'?
+; CHECK: suggest.pas:5:3: error: use of undeclared identifier 'cuont'; did you mean 'count'?
+; CHECK: suggest.pas:6:11: error: use of undeclared identifier 'coutn'; did you mean 'count'?
+; CHECK: suggest.pas:7:12: error: use of undeclared identifier 'maxit'; did you mean 'maxint'?
+; CHECK: suggest.pas:8:3: error: use of undeclared identifier 'wirteln'; did you mean 'writeln'?
+; CHECK: suggest.pas:3:12: warning: variable 'unused' is declared but never used [-Wunused-variable]
+; CHECK: suggest.pas:3:29: warning: variable 'p' is declared but never used [-Wunused-variable]

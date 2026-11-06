@@ -15,6 +15,7 @@
 
 #include "pcc/Basic/SourceLocation.h"
 #include "llvm/ADT/ArrayRef.h"
+#include "llvm/ADT/StringSet.h"
 #include "llvm/ADT/Twine.h"
 
 #include <string>
@@ -37,6 +38,7 @@ class DiagnosticsEngine {
   bool ShowColors = false;
   bool WarningsAsErrors = false;
   unsigned ErrorLimit = 0; ///< 0 = unlimited
+  llvm::StringSet<> DisabledWarnings; ///< groups turned off with -Wno-<group>
 
   unsigned NumErrors = 0;
   unsigned NumWarnings = 0;
@@ -67,6 +69,15 @@ public:
                llvm::ArrayRef<SourceRange> Ranges = {}) {
     report(Severity::Warning, Loc, Msg, Ranges);
   }
+  /// A warning in a named group ("unused-variable"); printed with a
+  /// "[-W<group>]" suffix unless the group is disabled.
+  void warning(llvm::StringRef Group, SourceLocation Loc, const llvm::Twine &Msg,
+               llvm::ArrayRef<SourceRange> Ranges = {}) {
+    if (!DisabledWarnings.contains(Group))
+      report(Severity::Warning, Loc, Msg + " [-W" + Group + "]", Ranges);
+  }
+  void disableWarning(llvm::StringRef Group) { DisabledWarnings.insert(Group); }
+
   void note(SourceLocation Loc, const llvm::Twine &Msg,
             llvm::ArrayRef<SourceRange> Ranges = {}) {
     report(Severity::Note, Loc, Msg, Ranges);

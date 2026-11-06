@@ -1,5 +1,6 @@
 #include "pcc/Lexer/Lexer.h"
 #include "pcc/Basic/Diagnostics.h"
+#include "pcc/Basic/Directives.h"
 #include "pcc/Basic/SourceManager.h"
 #include "pcc/Basic/StringPool.h"
 
@@ -55,8 +56,35 @@ void Lexer::skipBlockComment(unsigned OpenLen, llvm::StringRef Close) {
     Cur = BufEnd;
     return;
   }
-  // TODO(M11): a comment starting with '$' is a compiler directive.
+  // A comment starting with '$' is a compiler directive: {$R-}.
+  if (Rest.starts_with("$"))
+    handleDirective(Start, Rest.slice(1, Pos));
   Cur = Rest.data() + Pos + Close.size();
+}
+
+void Lexer::handleDirective(const char *Start, llvm::StringRef Text) {
+  // Switch list: letter followed by + or -, comma separated: $R-,Q+
+  llvm::SmallVector<llvm::StringRef, 4> Parts;
+  Text.split(Parts, ',');
+  for (llvm::StringRef P : Parts) {
+    P = P.trim();
+    if (P.size() == 2 && llvm::isAlpha(P[0]) && (P[1] == '+' || P[1] == '-')) {
+      char Letter = llvm::toUpper(P[0]);
+      bool On = P[1] == '+';
+      if (Directives && (Letter == 'R' || Letter == 'Q'))
+        Directives->add(locOf(Start),
+                        Letter == 'R' ? CheckDirectives::Range
+                                      : CheckDirectives::Overflow,
+                        On);
+      continue; // other switches (listing, boolean evaluation, ...) ignored
+    }
+    if (P.empty())
+      continue;
+    // Listing / other compiler switches ({$l-}, {$I file}, ...) are ignored.
+    Diags.warning(locOf(Start),
+                  "compiler directive '$" + P + "' is not supported; ignored");
+    break;
+  }
 }
 
 void Lexer::skipWhitespaceAndComments() {

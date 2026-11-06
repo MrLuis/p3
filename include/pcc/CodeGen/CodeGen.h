@@ -14,6 +14,7 @@ class TargetMachine;
 
 namespace pcc {
 
+class CheckDirectives;
 class ProgramDecl;
 class SourceManager;
 struct LangOptions;
@@ -25,6 +26,12 @@ struct CodeGenOptions {
   bool RangeChecks = true;
   /// Integer + - * abs sqr and unary minus.
   bool OverflowChecks = true;
+  /// {$R±} / {$Q±} switches found in the source (may be null).
+  const CheckDirectives *Directives = nullptr;
+  /// -g: emit DWARF debug information.
+  bool DebugInfo = false;
+  /// For the debug info's "optimized" flag.
+  unsigned OptLevel = 0;
 };
 
 /// Lowers a Sema-checked program to an LLVM module for TM's target.
