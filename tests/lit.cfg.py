@@ -25,6 +25,10 @@ for d in (config.llvm_tools_dir, config.pcc_tools_dir):
 # found (LLVM's, or the Python port `filecheck`).
 config.substitutions.append((r"\bFileCheck\b", config.filecheck))
 
+# %pcc-runtime-lib: this build's runtime, for compilers not installed next
+# to it (before %pcc, which is a prefix of it).
+config.substitutions.append(
+    ("%pcc-runtime-lib", os.path.join(config.pcc_obj_root, "lib", "libpascalrt.a")))
 config.substitutions.append(("%pcc-unittests",
                              os.path.join(config.pcc_tools_dir, "pcc-unittests")))
 # Always disable colors so output is stable when run from a terminal.
@@ -33,18 +37,8 @@ config.substitutions.append(("%pcc-unittests",
 pcc_under_test = os.environ.get("PCC_UNDER_TEST") or \
     os.path.join(config.pcc_tools_dir, "pcc")
 config.substitutions.append(("%pcc", pcc_under_test + " -fdiagnostics-color=never"))
-# %selfhost-cc: utils/selfhost-cc.py, a pcc front for the self-hosted
-# compiler until it has its own driver (S8). It reads SELFHOST_PCC (set in
-# RUN lines or the environment), LLVM_BIN and PCC_RUNTIME_LIB (defaults:
-# the LLVM tools found by CMake and this build's runtime).
-config.substitutions.append(
-    ("%selfhost-cc",
-     "python3 " + os.path.join(config.pcc_src_root, "utils", "selfhost-cc.py")))
-config.environment["LLVM_BIN"] = config.llvm_tools_dir
-config.environment["PCC_RUNTIME_LIB"] = os.path.join(config.pcc_obj_root, "lib",
-                                                     "libpascalrt.a")
-for var in ("SELFHOST_PCC", "LLVM_BIN", "PCC_RUNTIME_LIB"):
+# The tools and runtime pcc uses, if set; the self-hosted compiler also
+# reads PCC_CLANG (selfhost/pcdriver.pas).
+for var in ("PCC_RUNTIME_LIB", "PCC_CC", "PCC_CLANG"):
     if os.environ.get(var):
         config.environment[var] = os.environ[var]
-if os.path.exists(os.path.join(config.environment["LLVM_BIN"], "clang")):
-    config.available_features.add("selfhost-clang")

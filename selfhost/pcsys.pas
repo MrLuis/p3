@@ -43,6 +43,20 @@ procedure sysRemoveFile(const path: string);
 function sysGetEnv(const name: string; var value: string): boolean;
 { Runs a shell command; returns its exit status (-1 if it did not run). }
 function sysRun(const cmd: string): longint;
+{ the same for a command of any length: count bytes at p }
+function sysRunChars(p: PCharArray; count: int64): longint;
+{ A new empty file in $TMPDIR (or /tmp) named pcc-XXXXXX<suffix>; '' if
+  it cannot be created. }
+function sysTempFile(const suffix: string): string;
+{ The absolute path of path with links resolved (C realpath); '' if it
+  does not exist. }
+function sysRealPath(const path: string): string;
+{ The first executable file named name in a directory of $PATH; ''. }
+function sysFindProgram(const name: string): string;
+{ Is path an executable file? }
+function sysIsExecutable(const path: string): boolean;
+{ The path of this program's executable, links resolved; '' if unknown. }
+function sysExecutablePath: string;
 { Is file descriptor fd (1: stdout, 2: stderr) a terminal? }
 function sysIsTerminal(fd: longint): boolean;
 { The double written in s (C strtod); ok is false if s is not a number. }
@@ -63,6 +77,12 @@ function c_getenv(name: pchar): pchar; cdecl; external 'c' name 'getenv';
 function c_system(cmd: pchar): longint; cdecl; external 'c' name 'system';
 function c_isatty(fd: longint): longint; cdecl; external 'c' name 'isatty';
 function c_strtod(s: pchar; endp: pointer): double; cdecl; external 'c' name 'strtod';
+function c_mkstemps(template: pchar; suffixLen: longint): longint; cdecl;
+  external 'c' name 'mkstemps';
+function c_close(fd: longint): longint; cdecl; external 'c' name 'close';
+function c_realpath(path: pchar; resolved: pchar): pchar; cdecl;
+  external 'c' name 'realpath';
+procedure c_free(p: pointer); cdecl; external 'c' name 'free';
 function c_setvbuf(f: pointer; buf: pointer; mode: longint; size: int64): longint; cdecl;
   external 'c' name 'setvbuf';
 
@@ -253,6 +273,122 @@ begin
   if status = -1 then
     exit(-1);
   sysRun := (status shr 8) and 255; { exit status of a normal exit }
+end;
+
+function sysRunChars(p: PCharArray; count: int64): longint;
+var
+  cmd: PCharArray;
+  status: longint;
+begin
+  sysFlush;
+  getmem(cmd, count + 1);
+  {$R-}
+  move(p^[0], cmd^[0], count);
+  cmd^[count] := #0;
+  {$R+}
+  status := c_system(pchar(cmd));
+  freemem(cmd);
+  if status = -1 then
+    exit(-1);
+  sysRunChars := (status shr 8) and 255;
+end;
+
+{ The C string p (at most 255 characters). }
+function fromC(p: PCharArray): string;
+var
+  s: string;
+  i: longint;
+begin
+  s := '';
+  i := 0;
+  {$R-}
+  while (p^[i] <> #0) and (i < 255) do
+  begin
+    s := s + p^[i];
+    i := i + 1;
+  end;
+  {$R+}
+  fromC := s;
+end;
+
+function sysTempFile(const suffix: string): string;
+var
+  dir, t: string;
+  fd: longint;
+begin
+  if not sysGetEnv('TMPDIR', dir) or (dir = '') then
+    dir := '/tmp';
+  if dir[length(dir)] <> '/' then
+    dir := dir + '/';
+  toC(dir + 'pcc-XXXXXX' + suffix, t);
+  fd := c_mkstemps(@t[1], length(suffix));
+  if fd < 0 then
+    exit('');
+  c_close(fd);
+  sysTempFile := copy(t, 1, length(t) - 1);
+end;
+
+function sysRealPath(const path: string): string;
+var
+  cpath: string;
+  r: PCharArray;
+begin
+  toC(path, cpath);
+  r := PCharArray(c_realpath(@cpath[1], nil));
+  if r = nil then
+    exit('');
+  sysRealPath := fromC(r);
+  c_free(r);
+end;
+
+function sysIsExecutable(const path: string): boolean;
+var
+  cpath: string;
+begin
+  toC(path, cpath);
+  sysIsExecutable := sysIsRegularFile(path) and (c_access(@cpath[1], 1) = 0);
+end;
+
+function sysFindProgram(const name: string): string;
+var
+  p: PCharArray;
+  dir, candidate: string;
+  i: longint;
+begin
+  sysFindProgram := '';
+  p := PCharArray(c_getenv('PATH'));
+  if p = nil then
+    exit;
+  i := 0;
+  dir := '';
+  {$R-}
+  repeat
+    if (p^[i] = ':') or (p^[i] = #0) then
+    begin
+      if dir = '' then
+        dir := '.';
+      candidate := dir + '/' + name;
+      if sysIsExecutable(candidate) then
+        exit(candidate);
+      dir := '';
+    end
+    else if length(dir) < 255 then
+      dir := dir + p^[i];
+    i := i + 1;
+  until p^[i - 1] = #0;
+  {$R+}
+end;
+
+function sysExecutablePath: string;
+var
+  exe: string;
+begin
+  exe := paramstr(0);
+  if pos('/', exe) = 0 then
+    exe := sysFindProgram(exe);
+  if exe = '' then
+    exit('');
+  sysExecutablePath := sysRealPath(exe);
 end;
 
 function sysIsTerminal(fd: longint): boolean;

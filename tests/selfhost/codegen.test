@@ -1,36 +1,43 @@
-; S7: the self-hosted code generator. The Pascal compiler built by pcc must
-; write IR that passes the verifier, compile run tests to programs with the
-; expected output (%selfhost-cc lets clang assemble and link its IR), and
-; compile itself to a stage 2 compiler that writes the same IR: the
-; bootstrap fixed point. (By hand also: the whole run/ suite and
-; iso7185pat.pas through utils/selfhost-cc.py, and identical IR from the
-; pcc-built, FPC-built and stage 2 compilers; see selfhost/README.md.)
-; REQUIRES: selfhost-clang
+; S7-S8: the self-hosted code generator and driver. The Pascal compiler
+; built by pcc must write IR that passes the verifier, build run tests into
+; programs with the expected output (its driver lets clang assemble the IR
+; and links with the runtime), and compile itself into a stage 2 compiler
+; that writes the same IR: the bootstrap fixed point. (By hand also: the
+; whole lit suite with PCC_UNDER_TEST, iso7185pat.pas, and identical IR from
+; the pcc-built, FPC-built and stage 2 compilers; see selfhost/README.md.)
 ; RUN: %pcc --mode=tp -I %S/../../selfhost %S/../../selfhost/pcc.pas -o %t.pcc
 ;
-; Programs, ISO and Turbo mode.
-; RUN: env SELFHOST_PCC=%t.pcc %selfhost-cc %S/../run/arith.pas -o %t.arith
+; Valid IR, also for units.
+; RUN: %t.pcc --emit-llvm %S/../run/control.pas -o - | opt -passes=verify -disable-output
+; RUN: %t.pcc --mode=tp --emit-llvm -I %S/../run/Inputs/units/lib %S/../run/Inputs/units/main.pas -o - | opt -passes=verify -disable-output
+;
+; Programs, ISO and Turbo mode, at -O0 and -O2.
+; RUN: env PCC_RUNTIME_LIB=%pcc-runtime-lib %t.pcc %S/../run/arith.pas -o %t.arith
 ; RUN: %t.arith > %t.arith.out && diff %S/../run/arith.expected %t.arith.out
-; RUN: env SELFHOST_PCC=%t.pcc %selfhost-cc %S/../run/routines.pas -o %t.routines
+; RUN: env PCC_RUNTIME_LIB=%pcc-runtime-lib %t.pcc -O2 %S/../run/routines.pas -o %t.routines
 ; RUN: %t.routines > %t.routines.out && diff %S/../run/routines.expected %t.routines.out
-; RUN: env SELFHOST_PCC=%t.pcc %selfhost-cc %S/../run/gotoproc.pas -o %t.gotoproc
+; RUN: env PCC_RUNTIME_LIB=%pcc-runtime-lib %t.pcc %S/../run/gotoproc.pas -o %t.gotoproc
 ; RUN: %t.gotoproc > %t.gotoproc.out && diff %S/../run/gotoproc.expected %t.gotoproc.out
-; RUN: env SELFHOST_PCC=%t.pcc %selfhost-cc %S/../run/ptrsets.pas -o %t.ptrsets
+; RUN: env PCC_RUNTIME_LIB=%pcc-runtime-lib %t.pcc %S/../run/ptrsets.pas -o %t.ptrsets
 ; RUN: %t.ptrsets > %t.ptrsets.out && diff %S/../run/ptrsets.expected %t.ptrsets.out
-; RUN: env SELFHOST_PCC=%t.pcc %selfhost-cc --mode=tp %S/../run/records.pas -o %t.records
+; RUN: env PCC_RUNTIME_LIB=%pcc-runtime-lib %t.pcc --mode=tp %S/../run/records.pas -o %t.records
 ; RUN: %t.records > %t.records.out && diff %S/../run/records.expected %t.records.out
-; RUN: env SELFHOST_PCC=%t.pcc %selfhost-cc --mode=tp %S/../run/tpa.pas -o %t.tpa
+; RUN: env PCC_RUNTIME_LIB=%pcc-runtime-lib %t.pcc --mode=tp -O2 %S/../run/tpa.pas -o %t.tpa
 ; RUN: %t.tpa > %t.tpa.out && diff %S/../run/tpa.expected %t.tpa.out
-; RUN: env SELFHOST_PCC=%t.pcc %selfhost-cc --mode=tp %S/../run/ints.pas -o %t.ints
+; RUN: env PCC_RUNTIME_LIB=%pcc-runtime-lib %t.pcc --mode=tp %S/../run/ints.pas -o %t.ints
 ; RUN: %t.ints > %t.ints.out && diff %S/../run/ints.expected %t.ints.out
 ;
 ; A runtime error.
-; RUN: env SELFHOST_PCC=%t.pcc %selfhost-cc %S/Inputs/rterr.pas -o %t.rterr
+; RUN: env PCC_RUNTIME_LIB=%pcc-runtime-lib %t.pcc %S/Inputs/rterr.pas -o %t.rterr
 ; RUN: not %t.rterr 2>&1 | FileCheck --check-prefix=RTERR %s
 ; RTERR: value out of range at {{.*}}rterr.pas:7:12
 ;
+; The driver: the runtime is looked for next to the executable.
+; RUN: env -u PCC_RUNTIME_LIB not %t.pcc %S/Inputs/rterr.pas -o %t.none 2>&1 | FileCheck --check-prefix=NORT %s
+; NORT: error: cannot find the Pascal runtime library '{{.*}}lib{{/|\\}}libpascalrt.a'; set PCC_RUNTIME_LIB
+;
 ; The bootstrap fixed point.
 ; RUN: %t.pcc --mode=tp -I %S/../../selfhost %S/../../selfhost/pcc.pas --emit-llvm -o %t.stage2.ll
-; RUN: env SELFHOST_PCC=%t.pcc %selfhost-cc --mode=tp -I %S/../../selfhost %S/../../selfhost/pcc.pas -o %t.stage2
+; RUN: env PCC_RUNTIME_LIB=%pcc-runtime-lib %t.pcc --mode=tp -I %S/../../selfhost %S/../../selfhost/pcc.pas -o %t.stage2
 ; RUN: %t.stage2 --mode=tp -I %S/../../selfhost %S/../../selfhost/pcc.pas --emit-llvm -o %t.stage3.ll
 ; RUN: diff %t.stage2.ll %t.stage3.ll

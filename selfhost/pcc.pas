@@ -1,10 +1,12 @@
 program pcc;
 { The self-hosted Pascal compiler: command line and pipeline. It accepts
   the C++ pcc's options (src/driver/main.cpp) and must behave the same.
-  Implemented so far: --emit-tokens (S4), --emit-parse-tree (S5),
-  --emit-ast and semantic checks (S6), --emit-llvm (S7). }
+  The dumps (--emit-tokens, --emit-parse-tree, --emit-ast) are written
+  here; the IR from pcgen goes to pcdriver, which runs clang and the
+  linker for -S, -c, -O and executables. }
 
-uses pcsys, pcutil, pcdiag, pclex, pcast, pctypes, pcparse, pcprint, pcsema, pcgen;
+uses pcsys, pcutil, pcdiag, pclex, pcast, pctypes, pcparse, pcprint, pcsema, pcgen,
+     pcdriver;
 
 type
   TAction = (actTokens, actParseTree, actAST, actLLVM, actAsm, actObj, actExe);
@@ -25,49 +27,253 @@ begin
   sysExit(1);
 end;
 
-function startsWith(const s, prefix: string): boolean;
+{ The command-line parser's errors (llvm::cl): "<program>: <msg>". }
+function programName: string;
+var
+  s: string;
+  i: longint;
 begin
-  startsWith := copy(s, 1, length(prefix)) = prefix;
+  s := paramstr(0);
+  for i := length(s) downto 1 do
+    if s[i] = '/' then
+    begin
+      s := copy(s, i + 1, 255);
+      break;
+    end;
+  programName := s;
 end;
 
-{ A non-negative decimal number, or -1. }
-function parseCount(const s: string): longint;
+procedure clError(const msg: string);
+begin
+  sysWrite(sysErr, programName + ': ' + msg + #10);
+  sysExit(1);
+end;
+
+{ How llvm::cl prints an option name: -x for one letter, else --name. }
+function dashed(const name: string): string;
+begin
+  if length(name) = 1 then
+    dashed := '-' + name
+  else
+    dashed := '--' + name;
+end;
+
+procedure clOptionError(const name, msg: string);
+begin
+  clError('for the ' + dashed(name) + ' option: ' + msg);
+end;
+
+{ An unsigned number, as llvm::cl reads it for option name. }
+function parseUInt(const name, s: string): longint;
 var
   i: longint;
   v: int64;
+  bad: boolean;
 begin
-  if (s = '') or (length(s) > 9) then
-    exit(-1);
   v := 0;
+  bad := (s = '') or (length(s) > 10);
   for i := 1 to length(s) do
-  begin
     if (s[i] < '0') or (s[i] > '9') then
-      exit(-1);
-    v := v * 10 + ord(s[i]) - ord('0');
-  end;
-  parseCount := longint(v);
+      bad := true
+    else if not bad then
+      v := v * 10 + ord(s[i]) - ord('0');
+  if bad or (v > 4294967295) then
+    clOptionError(name, '''' + s + ''' value invalid for uint argument!');
+  if v > 2147483647 then
+    v := 2147483647;
+  parseUInt := longint(v);
 end;
+
+procedure helpLine(const s: string);
+begin
+  sysWrite(sysOut, s + #10);
+end;
+
+procedure printHelp;
+begin
+  helpLine('OVERVIEW: pcc - Pascal compiler targeting LLVM');
+  helpLine('');
+  helpLine('USAGE: pcc [options] <input.pas>');
+  helpLine('');
+  helpLine('OPTIONS:');
+  helpLine('');
+  helpLine('Generic Options:');
+  helpLine('');
+  helpLine('  --help                       - Display available options (--help-hidden for more)');
+  helpLine('  --help-list                  - Display list of available options (--help-list-hidden for more)');
+  helpLine('  --version                    - Display the version of this program');
+  helpLine('');
+  helpLine('pcc options:');
+  helpLine('');
+  helpLine('  -I <dir>                     - Add a directory to search for units');
+  helpLine('  -O <level>                   - Optimization level (0-3)');
+  helpLine('  Output kind (default: linked executable):');
+  helpLine('      --emit-tokens               - Dump lexer tokens');
+  helpLine('      --emit-ast                  - Dump the parsed AST');
+  helpLine('      --emit-parse-tree           - Dump the parse tree (no semantic analysis; for testing)');
+  helpLine('      --emit-llvm                 - Emit LLVM IR (.ll)');
+  helpLine('      -S                         - Emit target assembly (.s)');
+  helpLine('      -c                         - Emit an object file (.o)');
+  helpLine('  --Werror                     - Treat warnings as errors');
+  helpLine('  --Wno-unused-variable        - Do not warn about unused variables');
+  helpLine('  --fdiagnostics-color=<value> - Colorize diagnostics:');
+  helpLine('    =auto                      -   If stderr is a tty');
+  helpLine('    =always                    -   Always');
+  helpLine('    =never                     -   Never');
+  helpLine('  --ferror-limit=<N>           - Stop after N errors (0 = no limit)');
+  helpLine('  --fno-overflow-checks        - Disable runtime integer overflow checks');
+  helpLine('  --fno-range-checks           - Disable runtime range checks (subranges, array indices, ...)');
+  helpLine('  -g                           - Generate debug information');
+  helpLine('  --mode=<value>               - Language dialect:');
+  helpLine('    =iso                       -   ISO 7185 Pascal');
+  helpLine('    =tp                        -   Turbo/Free Pascal extensions');
+  helpLine('  -o <file>                    - Write output to <file>');
+  helpLine('  --target=<triple>            - Target triple (default: host)');
+end;
+
+const
+  numFlags = 14;
+  flagNames: array[1..numFlags] of string[20] = (
+    'help', 'help-list', 'version', 'emit-tokens', 'emit-ast', 'emit-parse-tree',
+    'emit-llvm', 'S', 'c', 'Werror', 'Wno-unused-variable', 'fno-overflow-checks',
+    'fno-range-checks', 'g');
+  numValueOpts = 7;
+  valueOptNames: array[1..numValueOpts] of string[20] = (
+    'o', 'mode', 'fdiagnostics-color', 'ferror-limit', 'target', 'I', 'O');
+
+function isFlag(const name: string): boolean;
+var
+  i: longint;
+begin
+  for i := 1 to numFlags do
+    if flagNames[i] = name then
+      exit(true);
+  isFlag := false;
+end;
+
+function isValueOpt(const name: string): boolean;
+var
+  i: longint;
+begin
+  for i := 1 to numValueOpts do
+    if valueOptNames[i] = name then
+      exit(true);
+  isValueOpt := false;
+end;
+
+{ The edit distance of a and b, replacements allowed
+  (llvm::StringRef::edit_distance). }
+function editDistance(const a, b: string): longint;
+var
+  row: array[0..255] of longint;
+  i, j, prev, cur: longint;
+begin
+  for j := 0 to length(b) do
+    row[j] := j;
+  for i := 1 to length(a) do
+  begin
+    prev := row[0];
+    row[0] := i;
+    for j := 1 to length(b) do
+    begin
+      cur := row[j];
+      if a[i] = b[j] then
+        row[j] := prev
+      else
+      begin
+        row[j] := prev + 1;
+        if row[j - 1] + 1 < row[j] then
+          row[j] := row[j - 1] + 1;
+        if cur + 1 < row[j] then
+          row[j] := cur + 1;
+      end;
+      prev := cur;
+    end;
+  end;
+  editDistance := row[length(b)];
+end;
+
+{ "Unknown command line argument", with the nearest of pcc's options (as
+  llvm::cl suggests it). }
+procedure unknownArgument(const arg, body: string);
+var
+  i, d, best: longint;
+  lhs, rhs, nearest, name: string;
+  hasEq: boolean;
+begin
+  sysWrite(sysErr, programName + ': Unknown command line argument ''' + arg +
+                   '''.  Try: ''' + paramstr(0) + ' --help''' + #10);
+  hasEq := pos('=', body) > 0;
+  lhs := body;
+  rhs := '';
+  if hasEq then
+  begin
+    lhs := copy(body, 1, pos('=', body) - 1);
+    rhs := copy(body, pos('=', body) + 1, 255);
+  end;
+  best := -1;
+  nearest := '';
+  for i := 1 to numFlags + numValueOpts do
+  begin
+    if i <= numFlags then
+    begin
+      name := flagNames[i];
+      d := editDistance(name, body);
+    end
+    else
+    begin
+      name := valueOptNames[i - numFlags];
+      d := editDistance(name, lhs);
+    end;
+    if (best < 0) or (d < best) then
+    begin
+      best := d;
+      if (i <= numFlags) or not hasEq then
+        nearest := dashed(name)
+      else
+        nearest := dashed(name) + '=' + rhs;
+    end;
+  end;
+  sysWrite(sysErr, programName + ': Did you mean ''' + nearest + '''?' + #10);
+  sysExit(1);
+end;
+
+var
+  targetTriple: string;
 
 procedure parseArgs;
 var
-  i, n: longint;
-  arg, opt, value: string;
-  haveValue: boolean;
+  i: longint;
+  arg, body, name, value: string;
+  hasValue, positionalOnly: boolean;
 
-  { The value of "-opt=value" or of the next argument. }
+  { The value of "-name=value" or of the next argument. }
   function takeValue: string;
   begin
-    if haveValue then
+    if hasValue then
       exit(value);
     if i >= paramcount then
-      usageError('option ''-' + opt + ''' needs a value');
+      clOptionError(name, 'requires a value!');
     i := i + 1;
     takeValue := paramstr(i);
+  end;
+
+  procedure positional;
+  begin
+    if inputFile <> '' then
+    begin
+      sysWrite(sysErr, programName + ': Too many positional arguments specified!' + #10);
+      sysWrite(sysErr, 'Can specify at most 1 positional arguments: See: ' +
+                       paramstr(0) + ' --help' + #10);
+      sysExit(1);
+    end;
+    inputFile := arg;
   end;
 
 begin
   inputFile := '';
   outputFile := '';
+  targetTriple := '';
   action := actExe;
   mode := lmISO;
   errorLimit := 20;
@@ -76,45 +282,80 @@ begin
   optLevel := 0;
   rangeChecksOn := true;
   overflowChecksOn := true;
+  positionalOnly := false;
   i := 1;
   while i <= paramcount do
   begin
     arg := paramstr(i);
-    if (length(arg) < 2) or (arg[1] <> '-') then
+    if positionalOnly or (length(arg) < 2) or (arg[1] <> '-') then
     begin
       { '-' alone is standard input }
-      if inputFile <> '' then
-        usageError('more than one input file');
-      inputFile := arg;
+      positional;
       i := i + 1;
       continue;
     end;
-    { -opt / --opt, optionally =value }
-    opt := copy(arg, 2, 255);
-    if (opt <> '') and (opt[1] = '-') then
-      opt := copy(opt, 2, 255);
-    haveValue := pos('=', opt) > 0;
-    value := '';
-    if haveValue then
+    if arg = '--' then
     begin
-      value := copy(opt, pos('=', opt) + 1, 255);
-      opt := copy(opt, 1, pos('=', opt) - 1);
+      { only positional arguments follow }
+      positionalOnly := true;
+      i := i + 1;
+      continue;
     end;
-    if opt = 'emit-tokens' then
+    { -name / --name, optionally =value }
+    body := copy(arg, 2, 255);
+    if body[1] = '-' then
+      body := copy(body, 2, 255);
+    name := body;
+    value := '';
+    hasValue := pos('=', body) > 0;
+    if hasValue then
+    begin
+      name := copy(body, 1, pos('=', body) - 1);
+      value := copy(body, pos('=', body) + 1, 255);
+    end;
+    { -Idir, -O2: prefix options }
+    if not isFlag(name) and not isValueOpt(name) and (body <> '') and
+       ((body[1] = 'I') or (body[1] = 'O')) then
+    begin
+      name := body[1];
+      value := copy(body, 2, 255);
+      hasValue := true;
+    end;
+    if (name = 'help') or (name = 'help-list') then
+    begin
+      printHelp;
+      sysExit(0);
+    end
+    else if name = 'version' then
+    begin
+      printVersion;
+      sysExit(0);
+    end
+    else if name = 'emit-tokens' then
       action := actTokens
-    else if opt = 'emit-parse-tree' then
+    else if name = 'emit-parse-tree' then
       action := actParseTree
-    else if opt = 'emit-ast' then
+    else if name = 'emit-ast' then
       action := actAST
-    else if opt = 'emit-llvm' then
+    else if name = 'emit-llvm' then
       action := actLLVM
-    else if opt = 'S' then
+    else if name = 'S' then
       action := actAsm
-    else if opt = 'c' then
+    else if name = 'c' then
       action := actObj
-    else if opt = 'o' then
+    else if name = 'Werror' then
+      werror := true
+    else if name = 'Wno-unused-variable' then
+      noUnusedVariable := true
+    else if name = 'fno-range-checks' then
+      rangeChecksOn := false
+    else if name = 'fno-overflow-checks' then
+      overflowChecksOn := false
+    else if name = 'g' then
+      { debug information: accepted, not produced yet (S11) }
+    else if name = 'o' then
       outputFile := takeValue
-    else if opt = 'mode' then
+    else if name = 'mode' then
     begin
       value := takeValue;
       if value = 'tp' then
@@ -122,41 +363,25 @@ begin
       else if value = 'iso' then
         mode := lmISO
       else
-        usageError('invalid --mode ''' + value + ''' (expected iso or tp)');
+        clOptionError(name, 'Cannot find option named ''' + value + '''!');
     end
-    else if opt = 'ferror-limit' then
+    else if name = 'fdiagnostics-color' then
     begin
-      n := parseCount(takeValue);
-      if n < 0 then
-        usageError('invalid -ferror-limit value');
-      errorLimit := n;
+      value := takeValue;
+      if (value <> 'auto') and (value <> 'always') and (value <> 'never') then
+        clOptionError(name, 'Cannot find option named ''' + value + '''!');
+      { colors are not supported yet }
     end
-    else if opt = 'fdiagnostics-color' then
-      value := takeValue { colors are not supported yet }
-    else if opt = 'Werror' then
-      werror := true
-    else if opt = 'Wno-unused-variable' then
-      noUnusedVariable := true
-    else if opt = 'fno-range-checks' then
-      rangeChecksOn := false
-    else if opt = 'fno-overflow-checks' then
-      overflowChecksOn := false
-    else if opt = 'g' then
-      { debug information: accepted, not produced yet }
-    else if opt = 'target' then
-      value := takeValue
-    else if startsWith(opt, 'I') then
-    begin
-      if length(opt) > 1 then
-        value := copy(opt, 2, 255)
-      else
-        value := takeValue;
-      listAdd(includeDirs, intern(value));
-    end
-    else if startsWith(opt, 'O') and (length(opt) = 2) then
-      optLevel := ord(opt[2]) - ord('0')
+    else if name = 'ferror-limit' then
+      errorLimit := parseUInt(name, takeValue)
+    else if name = 'target' then
+      targetTriple := takeValue
+    else if name = 'I' then
+      listAdd(includeDirs, intern(takeValue))
+    else if name = 'O' then
+      optLevel := parseUInt(name, takeValue)
     else
-      usageError('unknown option ''' + arg + '''');
+      unknownArgument(arg, body);
     i := i + 1;
   end;
 end;
@@ -338,6 +563,7 @@ var
   fid: longint;
   ok, semaOK: boolean;
   prog: PDecl;
+  kind: TOutputKind;
 begin
   sysInit;
   diagInit;
@@ -353,13 +579,21 @@ begin
   if optLevel > 3 then
     usageError('invalid optimization level ''-O' + intToStr(optLevel) +
                ''' (expected 0-3)');
+  if not validateTarget(targetTriple) then
+    sysExit(1);
   if outputFile = '' then
-  begin
-    if action = actLLVM then
-      outputFile := inputStem + '.ll'
+    case action of
+      actLLVM: outputFile := inputStem + '.ll';
+      actAsm: outputFile := inputStem + '.s';
+      actObj: outputFile := inputStem + '.o';
+      actExe:
+        if inputFile = '-' then
+          outputFile := 'a.out'
+        else
+          outputFile := inputStem;
     else
-      outputFile := '-'; { the dumps; other outputs are not implemented yet }
-  end;
+      outputFile := '-';
+    end;
 
   if not smLoadFile(inputFile, fid) then
     usageError('cannot open input file ''' + inputFile + ''': ' +
@@ -400,15 +634,19 @@ begin
         printAST(outBuf, prog);
         ok := writeOutput;
       end
-      else if semaOK and (action = actLLVM) then
+      else if semaOK then
       begin
         generateModule(prog, units, mode, rangeChecksOn, overflowChecksOn,
                        smFileName(fid), outBuf);
-        ok := writeOutput;
-      end
-      else if semaOK then
-        diagError(noLoc, 'assembly, object and executable output are not ' +
-                         'implemented in the self-hosted compiler yet');
+        case action of
+          actLLVM: kind := okLLVM;
+          actAsm: kind := okAsm;
+          actObj: kind := okObj;
+        else
+          kind := okExe;
+        end;
+        ok := emitOutput(outBuf, kind, optLevel, targetTriple, outputFile);
+      end;
     end;
   end;
   if ok and not diagHasErrors then
