@@ -1,0 +1,19 @@
+ProgramDecl 'a' <1:1>
+  ConstDecl 'n' : integer = 3 <2:7>
+  TypeDecl 'v' = array [1..3] of integer <3:6>
+  VarDecl 'x' : V <4:5>
+  FunctionDecl 'sq' : integer <5:1>
+    ParamDecl 'k' : integer <5:13>
+    CompoundStmt <6:1>
+      AssignStmt <7:3>
+        NameRefExpr 'sq' function result : integer <7:3>
+        BinaryExpr '*' : integer <7:9>
+          NameRefExpr 'k' parameter : integer <7:9>
+          NameRefExpr 'k' parameter : integer <7:13>
+  CompoundStmt <9:1>
+    AssignStmt <10:3>
+      IndexExpr : integer <10:3>
+        NameRefExpr 'x' variable : V <10:3>
+        IntegerLiteralExpr 1 : integer <10:5>
+      CallExpr 'sq' : integer <10:11>
+        NameRefExpr 'n' constant : integer <10:14>

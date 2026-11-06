@@ -45,9 +45,18 @@ bool pcc::isRelational(BinaryOp Op) {
 const char *Decl::getKindName() const {
   switch (Kind) {
   case DK_Program: return "program";
-  case DK_Var:     return "variable";
+  case DK_Var:
+    switch (llvm::cast<VarDecl>(this)->getVarKind()) {
+    case VarDecl::Variable: return "variable";
+    case VarDecl::Result:   return "function result";
+    default:                return "parameter";
+    }
   case DK_Const:   return "constant";
   case DK_Type:    return "type";
+  case DK_Field:   return "field";
+  case DK_Routine:
+    return llvm::cast<RoutineDecl>(this)->isFunction() ? "function"
+                                                       : "procedure";
   case DK_Builtin:
     return llvm::cast<BuiltinDecl>(this)->isProcedure() ? "procedure"
                                                         : "function";

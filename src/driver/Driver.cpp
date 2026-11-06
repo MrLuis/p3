@@ -184,7 +184,10 @@ bool Driver::runPipeline(FileID FID) {
     return false;
 
   llvm::LLVMContext LLVMCtx;
-  auto M = generateModule(*Program, SM, LangOpts, LLVMCtx, *TM,
+  CodeGenOptions CGOpts;
+  CGOpts.RangeChecks = Opts.RangeChecks;
+  CGOpts.OverflowChecks = Opts.OverflowChecks;
+  auto M = generateModule(*Program, SM, LangOpts, CGOpts, LLVMCtx, *TM,
                           SM.getFilename(FID));
   if (!verifyModule(*M, Diags))
     return false;

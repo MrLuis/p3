@@ -27,9 +27,8 @@
 ; TWOVAR-TP: VarDecl 'a' : integer
 ; TWOVAR-TP: VarDecl 'b' : char
 
-; Structured / enumerated / subrange types come later.
+; Pointer, set and file types come later (M9/M10).
 ; RUN: not %pcc --emit-ast %S/Inputs/var-types.pas 2>&1 >/dev/null | FileCheck --check-prefix=TYPES %s
-; TYPES: var-types.pas:2:8: error: 'array' types are not supported yet
+; TYPES: var-types.pas:2:8: error: 'set' types are not supported yet
 ; TYPES: var-types.pas:3:8: error: pointer types are not supported yet
-; TYPES: var-types.pas:4:8: error: enumerated types are not supported yet
-; TYPES: var-types.pas:5:8: error: subrange types are not supported yet
+; TYPES: var-types.pas:4:8: error: 'file' types are not supported yet

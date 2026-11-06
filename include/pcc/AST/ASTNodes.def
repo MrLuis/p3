@@ -17,24 +17,28 @@
 
 // Expressions
 EXPR(IntegerLiteral)  // 42
+EXPR(RealLiteral)     // 3.14, 1e10                            (M7)
 EXPR(StringLiteral)   // 'abc', 'c'
-EXPR(NameRef)         // x, maxint, true                       (M4)
-EXPR(Paren)           // ( e )                                 (M4)
-EXPR(Unary)           // -e, +e, not e                         (M4)
-EXPR(Binary)          // a + b, a div b, a < b, a and b, ...   (M4)
-EXPR(Call)            // abs(x), ord(c)                        (M4)
-EXPR(Formatted)       // e:width[:precision] in write/writeln  (M4)
+EXPR(NameRef)         // x, maxint, true, red, f (call w/o args)
+EXPR(Paren)           // ( e )
+EXPR(Unary)           // -e, +e, not e
+EXPR(Binary)          // a + b, a div b, a < b, a and b, ...
+EXPR(Call)            // abs(x), f(1, 2)
+EXPR(Formatted)       // e:width[:precision] in write/writeln
+EXPR(Index)           // a[i]                                  (M8)
+EXPR(Field)           // r.f                                   (M8)
 
 // Statements
 STMT(Empty)
 STMT(Compound)
 STMT(ProcCall)
-STMT(Assign)          // x := e                                (M4)
-STMT(If)              // if c then s [else s]                  (M5)
-STMT(While)           // while c do s                          (M5)
-STMT(Repeat)          // repeat s; s until c                   (M5)
-STMT(For)             // for v := a to|downto b do s           (M5)
-STMT(Case)            // case e of 1: s; 2, 3: s end           (M5)
+STMT(Assign)
+STMT(If)
+STMT(While)
+STMT(Repeat)
+STMT(For)
+STMT(Case)
+STMT(With)            // with r1, r2 do s                      (M8)
 
 #undef STMT
 #undef EXPR

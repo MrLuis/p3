@@ -66,6 +66,16 @@ static cl::opt<unsigned>
 static cl::opt<bool> Werror("Werror", cl::desc("Treat warnings as errors"),
                             cl::cat(PccCategory));
 
+static cl::opt<bool> NoRangeChecks(
+    "fno-range-checks",
+    cl::desc("Disable runtime range checks (subranges, array indices, ...)"),
+    cl::cat(PccCategory));
+
+static cl::opt<bool>
+    NoOverflowChecks("fno-overflow-checks",
+                     cl::desc("Disable runtime integer overflow checks"),
+                     cl::cat(PccCategory));
+
 static void printVersion(llvm::raw_ostream &OS) {
   OS << "pcc version " PCC_VERSION_STRING " (LLVM " LLVM_VERSION_STRING ")\n"
      << "  Default target: " << llvm::sys::getDefaultTargetTriple() << '\n'
@@ -91,6 +101,8 @@ int main(int argc, char **argv) {
   Opts.Color = Color;
   Opts.ErrorLimit = ErrorLimit;
   Opts.WarningsAsErrors = Werror;
+  Opts.RangeChecks = !NoRangeChecks;
+  Opts.OverflowChecks = !NoOverflowChecks;
 
   Driver D(std::move(Opts), llvm::errs());
   return D.run();

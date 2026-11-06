@@ -113,3 +113,101 @@ void __pas_readln(void) {
     c = getchar();
   while (c != '\n' && c != EOF);
 }
+
+/*===- Reals ----------------------------------------------------------------===*/
+
+#include <math.h>
+#include <string.h>
+
+void __pas_write_real(double x, int32_t width, int32_t frac) {
+  char buf[512];
+  int n;
+  if (isnan(x) || isinf(x)) {
+    const char *s = isnan(x) ? "NaN" : (x < 0 ? "-Inf" : " Inf");
+    __pas_write_str(s, (int64_t)strlen(s), width);
+    return;
+  }
+  if (frac >= 0) {
+    /* Fixed-point: [-]digits.fraction, right-aligned in `width`. */
+    n = snprintf(buf, sizeof buf, "%.*f", frac > 300 ? 300 : frac, x);
+  } else {
+    /* Floating-point: a sign position (' ' or '-'), one digit, '.',
+     * DecPlaces digits, 'E', exponent sign, 3 exponent digits.
+     * ActWidth = max(width, 9) where 9 = 1 decimal place minimum;
+     * DecPlaces = ActWidth - ExpDigits - 5. Default width is 22. */
+    int total = width > 0 ? width : 22;
+    if (total < 9)
+      total = 9;
+    int dec = total - 3 - 5;
+    if (dec > 300)
+      dec = 300;
+    char tmp[512];
+    snprintf(tmp, sizeof tmp, "%.*E", dec, fabs(x));
+    /* tmp = "d.ddddE+XX" or "d.ddddE-XXX": rewrite the exponent with
+     * exactly three digits. */
+    char *e = strchr(tmp, 'E');
+    int exponent = atoi(e + 1);
+    *e = '\0';
+    n = snprintf(buf, sizeof buf, "%c%sE%c%03d", signbit(x) ? '-' : ' ', tmp,
+                 exponent < 0 ? '-' : '+', exponent < 0 ? -exponent : exponent);
+  }
+  if (n < 0)
+    n = 0;
+  if (n > (int)sizeof buf - 1)
+    n = (int)sizeof buf - 1;
+  pad(width - n); /* reals are never truncated */
+  fwrite(buf, 1, (size_t)n, stdout);
+}
+
+double __pas_read_real(void) {
+  int c;
+  do
+    c = getchar();
+  while (c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\f' ||
+         c == '\v');
+  if (c == EOF)
+    __pas_runtime_error("unexpected end of file while reading a real");
+
+  /* Collect [sign] digits [. digits] [(e|E) [sign] digits]. */
+  char buf[128];
+  size_t n = 0;
+#define PUSH(ch) do { if (n < sizeof buf - 1) buf[n++] = (char)(ch); } while (0)
+  if (c == '+' || c == '-') {
+    PUSH(c);
+    c = getchar();
+  }
+  int digits = 0;
+  while (c >= '0' && c <= '9') {
+    PUSH(c);
+    digits++;
+    c = getchar();
+  }
+  if (c == '.') {
+    PUSH(c);
+    c = getchar();
+    while (c >= '0' && c <= '9') {
+      PUSH(c);
+      digits++;
+      c = getchar();
+    }
+  }
+  if (digits && (c == 'e' || c == 'E')) {
+    PUSH(c);
+    c = getchar();
+    if (c == '+' || c == '-') {
+      PUSH(c);
+      c = getchar();
+    }
+    while (c >= '0' && c <= '9') {
+      PUSH(c);
+      c = getchar();
+    }
+  }
+#undef PUSH
+  if (c != EOF)
+    ungetc(c, stdin);
+  buf[n] = '\0';
+  if (!digits)
+    __pas_runtime_error("invalid real number in input");
+  return strtod(buf, NULL);
+}

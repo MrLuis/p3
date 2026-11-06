@@ -34,5 +34,5 @@
 ; RANGE: case-ranges.pas:10:5: error: duplicate case label value 'b'
 ; RANGE: case-ranges.pas:9:5: note: previous case label is here
 ; RANGE: case-ranges.pas:11:5: error: case label range is empty
-; RANGE: case-ranges.pas:13:8: error: 'case' selector must be of an ordinal type, not 'string'
+; RANGE: case-ranges.pas:13:8: error: 'case' selector must be of an ordinal type, not 'string of length 3'
 ; RANGE-NOT: error:

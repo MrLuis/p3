@@ -1,0 +1,28 @@
+; M7: runtime range and overflow checks (on by default; ISO calls these
+; conditions errors). Each prints the source location and exits with 2.
+; RUN: rm -rf %t && mkdir -p %t
+
+; RUN: %pcc %S/Inputs/checks/subrange.pas -o %t/subrange && not %t/subrange 2>&1 | FileCheck --check-prefix=SUBRANGE %s
+; SUBRANGE: Runtime error: value out of range at {{.*}}subrange.pas:6:8
+; RUN: %pcc %S/Inputs/checks/index.pas -o %t/index && not %t/index 2>&1 | FileCheck --check-prefix=INDEX %s
+; INDEX: Runtime error: array index out of bounds at {{.*}}index.pas:6:5
+; RUN: %pcc %S/Inputs/checks/overflow.pas -o %t/overflow && not %t/overflow 2>&1 | FileCheck --check-prefix=OVERFLOW %s
+; OVERFLOW: Runtime error: integer overflow at {{.*}}overflow.pas:6:10
+; RUN: %pcc %S/Inputs/checks/mul.pas -o %t/mul && not %t/mul 2>&1 | FileCheck --check-prefix=MUL %s
+; MUL: Runtime error: integer overflow at {{.*}}mul.pas:6:10
+; RUN: %pcc %S/Inputs/checks/succ.pas -o %t/succ && not %t/succ 2>&1 | FileCheck --check-prefix=SUCC %s
+; SUCC: Runtime error: 'succ' of the last value of its type at {{.*}}succ.pas:6:19
+; RUN: %pcc %S/Inputs/checks/chr.pas -o %t/chr && not %t/chr 2>&1 | FileCheck --check-prefix=CHR %s
+; CHR: Runtime error: 'chr' argument out of range at {{.*}}chr.pas:6:11
+; RUN: %pcc %S/Inputs/checks/sqrt.pas -o %t/sqrt && not %t/sqrt 2>&1 | FileCheck --check-prefix=SQRT %s
+; SQRT: Runtime error: 'sqrt' of a negative number at {{.*}}sqrt.pas:6:8
+; RUN: %pcc %S/Inputs/checks/trunc.pas -o %t/trunc && not %t/trunc 2>&1 | FileCheck --check-prefix=TRUNC %s
+; TRUNC: Runtime error: 'trunc' result does not fit in integer at {{.*}}trunc.pas:6:19
+; RUN: %pcc %S/Inputs/checks/realdiv.pas -o %t/realdiv && not %t/realdiv 2>&1 | FileCheck --check-prefix=REALDIV %s
+; REALDIV: Runtime error: division by zero at {{.*}}realdiv.pas:6:10
+
+; -fno-range-checks / -fno-overflow-checks turn them off.
+; RUN: %pcc -fno-range-checks -fno-overflow-checks %S/Inputs/checks/unchecked.pas -o %t/unchecked
+; RUN: %t/unchecked | FileCheck --check-prefix=UNCHECKED %s
+; UNCHECKED: 11
+; UNCHECKED-NEXT: -2147483648

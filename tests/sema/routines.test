@@ -1,0 +1,28 @@
+; M6: procedure and function declarations and calls.
+; RUN: not %pcc -ferror-limit=0 -c %S/Inputs/routines.pas -o %t.o 2>&1 | FileCheck %s
+
+; CHECK: routines.pas:10:10: warning: function 'f' never assigns its result
+; CHECK: routines.pas:15:15: error: function result type must be a simple type, not 'Arr'
+; CHECK: routines.pas:19:16: error: duplicate parameter name 'a'
+; CHECK: routines.pas:19:13: note: previous parameter is here
+; CHECK: routines.pas:26:10: error: heading of 'later' does not match its forward declaration
+; CHECK: routines.pas:23:1: note: forward declaration is here
+; ISO 7185 6.8.3.9: the control variable must be local to the routine.
+; CHECK: routines.pas:33:7: error: 'for' loop control variable 'g' must be a local variable of the enclosing block
+; CHECK: routines.pas:3:5: note: 'g' declared here
+; CHECK: routines.pas:24:11: error: 'missing' is declared forward but never defined
+; CHECK: routines.pas:37:3: error: too few arguments in call to 'p': expected 2, got 1
+; CHECK: routines.pas:5:1: note: 'p' declared here
+; CHECK: routines.pas:38:8: error: argument for 'var' parameter 'y' must be a variable
+; CHECK: routines.pas:39:8: error: argument for 'var' parameter 'y' must be a variable
+; CHECK: routines.pas:40:5: error: cannot pass a value of type 'char' to parameter 'x' of type 'integer'
+; CHECK: routines.pas:41:8: error: procedure 'p' does not return a value
+; CHECK: routines.pas:42:3: error: function 'f' cannot be called as a statement; use its result
+; CHECK: routines.pas:43:3: error: cannot assign to function 'f' outside its body
+; CHECK: routines.pas:44:8: error: missing arguments in call to 'f'
+; CHECK: routines.pas:45:11: error: too many arguments in call to 'f': expected 1, got 2
+; CHECK-NOT: error:
+
+; Turbo/FPC allow a global for-loop variable.
+; RUN: not %pcc --mode=tp -ferror-limit=0 -c %S/Inputs/routines.pas -o %t.o 2>&1 | FileCheck --check-prefix=TP %s
+; TP-NOT: must be a local variable

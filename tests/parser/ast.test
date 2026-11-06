@@ -6,7 +6,7 @@
 ; HELLO-NEXT:   ProgramParam 'output' <1:15>
 ; HELLO-NEXT:   CompoundStmt <2:1>
 ; HELLO-NEXT:     ProcCallStmt 'writeln' <3:3>
-; HELLO-NEXT:       StringLiteralExpr "Hello, World!" : string <3:11>
+; HELLO-NEXT:       StringLiteralExpr "Hello, World!" : string of length 13 <3:11>
 ; HELLO-EMPTY:
 
 ; RUN: %pcc --emit-ast %S/Inputs/statements.pas | FileCheck --check-prefix=STMTS %s
@@ -15,12 +15,12 @@
 ; STMTS-NEXT:     ProcCallStmt 'writeln' <3:3>
 ; STMTS-NEXT:     ProcCallStmt 'write' <4:3>
 ; STMTS-NEXT:       CharLiteralExpr "a" : char <4:9>
-; STMTS-NEXT:       StringLiteralExpr "bc" : string <4:14>
+; STMTS-NEXT:       StringLiteralExpr "bc" : string of length 2 <4:14>
 ; STMTS-NEXT:       IntegerLiteralExpr 42 : integer <4:20>
 ; STMTS-NEXT:     EmptyStmt <5:3>
 ; STMTS-NEXT:     CompoundStmt <6:3>
 ; STMTS-NEXT:       ProcCallStmt 'writeln' <7:5>
-; STMTS-NEXT:         StringLiteralExpr "nested" : string <7:13>
+; STMTS-NEXT:         StringLiteralExpr "nested" : string of length 6 <7:13>
 ; STMTS-NEXT:     EmptyStmt <9:1>
 ; STMTS-EMPTY:
 

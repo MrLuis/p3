@@ -17,8 +17,21 @@ Parser::Parser(Lexer &Lex, DiagnosticsEngine &Diags, ASTContext &Ctx)
 SourceLocation Parser::consumeToken() {
   SourceLocation L = Tok.getLocation();
   PrevTokEnd = Tok.getEndLocation();
-  Lex.lex(Tok);
+  if (HasPeek) {
+    Tok = PeekTok;
+    HasPeek = false;
+  } else {
+    Lex.lex(Tok);
+  }
   return L;
+}
+
+const Token &Parser::peekToken() {
+  if (!HasPeek) {
+    Lex.lex(PeekTok);
+    HasPeek = true;
+  }
+  return PeekTok;
 }
 
 bool Parser::tryConsume(tok::TokenKind K) {
@@ -68,6 +81,27 @@ Identifier Parser::makeIdentifier(const Token &T) const {
   return {T.getIdentifier(), T.getRawText(), T.getLocation()};
 }
 
+bool Parser::expectIdentifier(Identifier &Out, llvm::StringRef What) {
+  if (Tok.isNot(tok::identifier)) {
+    Diags.error(Tok.getLocation(), "expected " + What);
+    return false;
+  }
+  Out = makeIdentifier(Tok);
+  consumeToken();
+  return true;
+}
+
+bool Parser::parseIdentList(llvm::SmallVectorImpl<Identifier> &Names,
+                            llvm::StringRef What) {
+  do {
+    Identifier Id;
+    if (!expectIdentifier(Id, What))
+      return false;
+    Names.push_back(Id);
+  } while (tryConsume(tok::comma));
+  return true;
+}
+
 void Parser::unsupported(llvm::StringRef What) {
   Diags.error(Tok.getLocation(), What + " not supported yet", {Tok.getRange()});
 }
@@ -81,6 +115,10 @@ bool Parser::startsStatement() const {
 bool Parser::startsDeclarationPart() const {
   return Tok.isOneOf(tok::kw_label, tok::kw_const, tok::kw_type, tok::kw_var,
                      tok::kw_procedure, tok::kw_function);
+}
+
+bool Parser::isIdentifierNamed(llvm::StringRef Name) const {
+  return Tok.is(tok::identifier) && Tok.getIdentifier() == Name;
 }
 
 //===----------------------------------------------------------------------===//
@@ -145,28 +183,68 @@ ProgramDecl *Parser::parseProgram() {
 }
 
 //===----------------------------------------------------------------------===//
-// block = [ varPart ] compoundStmt .
+// block = { declaration parts } compoundStmt .
 //===----------------------------------------------------------------------===//
 
+/// ISO 7185 6.2.1 order of declaration parts.
+static int sectionRank(tok::TokenKind K) {
+  switch (K) {
+  case tok::kw_label: return 0;
+  case tok::kw_const: return 1;
+  case tok::kw_type:  return 2;
+  case tok::kw_var:   return 3;
+  default:            return 4; // procedure / function
+  }
+}
+
 Block *Parser::parseBlock() {
-  llvm::SmallVector<VarDecl *, 8> Vars;
-  bool SeenVarPart = false;
+  llvm::SmallVector<Decl *, 16> Decls;
+  int LastRank = -1;
+  llvm::StringRef LastWord;
 
   while (startsDeclarationPart() && !Diags.shouldStop()) {
-    if (Tok.is(tok::kw_var)) {
-      if (SeenVarPart && LangOpts.Mode == LangMode::ISO)
+    int Rank = sectionRank(Tok.getKind());
+    std::string Word = Tok.getRawText().lower();
+    if (LangOpts.Mode == LangMode::ISO) {
+      if (Rank < LastRank)
         Diags.error(Tok.getLocation(),
-                    "ISO Pascal allows only one 'var' section per block",
+                    "in ISO Pascal, '" + Word +
+                        "' declarations must come before '" + LastWord +
+                        "' declarations; use --mode=tp to mix them",
                     {Tok.getRange()});
-      SeenVarPart = true;
-      parseVarPart(Vars);
-      continue;
+      else if (Rank == LastRank && Rank != 4)
+        Diags.error(Tok.getLocation(),
+                    "ISO Pascal allows only one '" + Word +
+                        "' section per block",
+                    {Tok.getRange()});
     }
-    // label (M10), const/type (M7), procedure/function (M6).
-    unsupported("'" + Tok.getRawText().lower() + "' declarations are");
-    consumeToken();
-    skipUntil({tok::kw_begin, tok::kw_label, tok::kw_const, tok::kw_type,
-               tok::kw_var, tok::kw_procedure, tok::kw_function});
+    if (Rank >= LastRank) {
+      LastRank = Rank;
+      LastWord = tok::getSpelling(Tok.getKind());
+    }
+
+    switch (Tok.getKind()) {
+    case tok::kw_const:
+      parseConstPart(Decls);
+      break;
+    case tok::kw_type:
+      parseTypePart(Decls);
+      break;
+    case tok::kw_var:
+      parseVarPart(Decls);
+      break;
+    case tok::kw_procedure:
+    case tok::kw_function:
+      if (RoutineDecl *R = parseRoutineDecl())
+        Decls.push_back(R);
+      break;
+    default: // label (M10)
+      unsupported("'" + Word + "' declarations are");
+      consumeToken();
+      skipUntil({tok::kw_begin, tok::kw_label, tok::kw_const, tok::kw_type,
+                 tok::kw_var, tok::kw_procedure, tok::kw_function});
+      break;
+    }
   }
 
   CompoundStmt *Body = nullptr;
@@ -181,11 +259,68 @@ Block *Parser::parseBlock() {
   if (!Body)
     Body = Ctx.create<CompoundStmt>(SourceRange(Tok.getLocation()),
                                     llvm::ArrayRef<Stmt *>());
-  return Ctx.create<Block>(Ctx.copyArray<VarDecl *>(Vars), Body);
+  return Ctx.create<Block>(Ctx.copyArray<Decl *>(Decls), Body);
+}
+
+// constPart = "const" ident "=" constExpr ";" { ident "=" constExpr ";" } .
+void Parser::parseConstPart(llvm::SmallVectorImpl<Decl *> &Decls) {
+  consumeToken(); // 'const'
+  if (Tok.isNot(tok::identifier)) {
+    Diags.error(Tok.getLocation(), "expected constant name after 'const'");
+    return;
+  }
+  while (Tok.is(tok::identifier) && !Diags.shouldStop()) {
+    Identifier Name = makeIdentifier(Tok);
+    consumeToken();
+    if (Tok.is(tok::colon_equal) || Tok.is(tok::colon)) {
+      Diags.error(Tok.getLocation(),
+                  "expected '=' in constant declaration (typed constants are "
+                  "not supported)",
+                  {Tok.getRange()});
+      skipUntil({tok::semi, tok::kw_begin});
+      tryConsume(tok::semi);
+      continue;
+    }
+    Expr *Init = nullptr;
+    if (expect(tok::equal, "after constant name"))
+      Init = parseExpression();
+    if (Init)
+      Decls.push_back(Ctx.create<ConstDecl>(Name.Loc, Name, Init));
+    else
+      skipUntil({tok::semi, tok::kw_begin});
+    if (!expect(tok::semi, "after constant declaration")) {
+      skipUntil({tok::semi, tok::kw_begin});
+      tryConsume(tok::semi);
+    }
+  }
+}
+
+// typePart = "type" ident "=" type ";" { ident "=" type ";" } .
+void Parser::parseTypePart(llvm::SmallVectorImpl<Decl *> &Decls) {
+  consumeToken(); // 'type'
+  if (Tok.isNot(tok::identifier)) {
+    Diags.error(Tok.getLocation(), "expected type name after 'type'");
+    return;
+  }
+  while (Tok.is(tok::identifier) && !Diags.shouldStop()) {
+    Identifier Name = makeIdentifier(Tok);
+    consumeToken();
+    TypeSpec *TS = nullptr;
+    if (expect(tok::equal, "after type name"))
+      TS = parseType();
+    if (TS)
+      Decls.push_back(Ctx.create<TypeDecl>(Name.Loc, Name, TS));
+    else
+      skipUntil({tok::semi, tok::kw_begin});
+    if (!expect(tok::semi, "after type declaration")) {
+      skipUntil({tok::semi, tok::kw_begin});
+      tryConsume(tok::semi);
+    }
+  }
 }
 
 // varPart = "var" identList ":" type ";" { identList ":" type ";" } .
-void Parser::parseVarPart(llvm::SmallVectorImpl<VarDecl *> &Vars) {
+void Parser::parseVarPart(llvm::SmallVectorImpl<Decl *> &Decls) {
   consumeToken(); // 'var'
   if (Tok.isNot(tok::identifier)) {
     Diags.error(Tok.getLocation(), "expected variable name after 'var'");
@@ -194,24 +329,16 @@ void Parser::parseVarPart(llvm::SmallVectorImpl<VarDecl *> &Vars) {
 
   while (Tok.is(tok::identifier) && !Diags.shouldStop()) {
     llvm::SmallVector<Identifier, 4> Names;
-    do {
-      if (Tok.isNot(tok::identifier)) {
-        Diags.error(Tok.getLocation(), "expected variable name");
-        break;
-      }
-      Names.push_back(makeIdentifier(Tok));
-      consumeToken();
-    } while (tryConsume(tok::comma));
-
     TypeSpec *TS = nullptr;
-    if (expect(tok::colon, "after variable name"))
+    if (parseIdentList(Names, "variable name") &&
+        expect(tok::colon, "after variable name"))
       TS = parseType();
 
     if (!TS) {
       skipUntil({tok::semi, tok::kw_begin});
     } else {
       for (const Identifier &N : Names)
-        Vars.push_back(Ctx.create<VarDecl>(N, TS));
+        Decls.push_back(Ctx.create<VarDecl>(N, TS));
     }
 
     if (!expect(tok::semi, "after variable declaration")) {
@@ -221,41 +348,326 @@ void Parser::parseVarPart(llvm::SmallVectorImpl<VarDecl *> &Vars) {
   }
 }
 
-// type = typeIdent .   (M7+: enumerations, subranges, structured types)
-TypeSpec *Parser::parseType() {
-  if (Tok.is(tok::identifier)) {
-    auto *TS = Ctx.create<NamedTypeSpec>(makeIdentifier(Tok));
-    consumeToken();
-    return TS;
+// routineDecl = ("procedure" ident [params] | "function" ident [params]
+//               [":" typeIdent]) ";" ( "forward" | block ) ";" .
+RoutineDecl *Parser::parseRoutineDecl() {
+  bool IsFunction = Tok.is(tok::kw_function);
+  const char *Kind = IsFunction ? "function" : "procedure";
+  SourceLocation Loc = consumeToken();
+
+  Identifier Name;
+  if (!expectIdentifier(Name, std::string(Kind) + " name")) {
+    skipUntil({tok::semi, tok::kw_begin});
+    tryConsume(tok::semi);
   }
+
+  llvm::SmallVector<VarDecl *, 4> Params;
+  bool HasParamList = Tok.is(tok::l_paren);
+  if (HasParamList && !parseFormalParams(Params))
+    skipUntil({tok::colon, tok::semi, tok::kw_begin});
+
+  TypeSpec *ResultTS = nullptr;
+  if (tryConsume(tok::colon)) {
+    if (!IsFunction)
+      Diags.error(PrevTokEnd, "a procedure cannot have a result type");
+    ResultTS = parseTypeIdentifier("function result type");
+  }
+
+  if (!expect(tok::semi, std::string("after ") + Kind + " heading"))
+    skipUntil({tok::semi, tok::kw_begin, tok::kw_var, tok::kw_const,
+               tok::kw_type});
+  tryConsume(tok::semi);
+
+  if (isIdentifierNamed("forward")) {
+    consumeToken();
+    expect(tok::semi, "after 'forward'");
+    if (!Name.isValid())
+      return nullptr;
+    return Ctx.create<RoutineDecl>(Loc, Name, IsFunction,
+                                   Ctx.copyArray<VarDecl *>(Params),
+                                   HasParamList, ResultTS, nullptr, true);
+  }
+
+  Block *Body = parseBlock();
+  if (!expect(tok::semi, std::string("after ") + Kind + " body")) {
+    skipUntil({tok::semi, tok::kw_begin, tok::kw_procedure, tok::kw_function});
+    tryConsume(tok::semi);
+  }
+  if (!Name.isValid())
+    return nullptr;
+  return Ctx.create<RoutineDecl>(Loc, Name, IsFunction,
+                                 Ctx.copyArray<VarDecl *>(Params), HasParamList,
+                                 ResultTS, Body, false);
+}
+
+// params = "(" section { ";" section } ")" ;
+// section = ["var"] identList ":" typeIdent .
+bool Parser::parseFormalParams(llvm::SmallVectorImpl<VarDecl *> &Params) {
+  SourceLocation LParen = consumeToken(); // '('
+  do {
+    if (Tok.isOneOf(tok::kw_procedure, tok::kw_function)) {
+      unsupported("procedural and functional parameters are");
+      skipUntil({tok::semi, tok::r_paren});
+      continue;
+    }
+    bool IsVar = tryConsume(tok::kw_var);
+    llvm::SmallVector<Identifier, 4> Names;
+    if (!parseIdentList(Names, "parameter name") ||
+        !expect(tok::colon, "after parameter name")) {
+      skipUntil({tok::semi, tok::r_paren});
+      continue;
+    }
+    TypeSpec *TS = parseTypeIdentifier("parameter type");
+    if (!TS) {
+      skipUntil({tok::semi, tok::r_paren});
+      continue;
+    }
+    for (const Identifier &N : Names)
+      Params.push_back(Ctx.create<VarDecl>(
+          N, TS, IsVar ? VarDecl::VarParam : VarDecl::ValueParam));
+  } while (tryConsume(tok::semi));
+
+  if (!expect(tok::r_paren, "after parameters")) {
+    Diags.note(LParen, "to match this '('");
+    return false;
+  }
+  return true;
+}
+
+//===----------------------------------------------------------------------===//
+// Types
+//===----------------------------------------------------------------------===//
+
+// type = simpleType | ["packed"] (arrayType | recordType) .
+TypeSpec *Parser::parseType() {
+  SourceLocation Start = Tok.getLocation();
+  bool Packed = tryConsume(tok::kw_packed);
   switch (Tok.getKind()) {
   case tok::kw_array:
+    return parseArrayType(Start, Packed);
   case tok::kw_record:
+    return parseRecordType(Start, Packed);
   case tok::kw_set:
   case tok::kw_file:
-  case tok::kw_packed:
     unsupported("'" + Tok.getRawText().lower() + "' types are");
     return nullptr;
   case tok::caret:
     unsupported("pointer types are");
     return nullptr;
-  case tok::l_paren:
-    unsupported("enumerated types are");
-    return nullptr;
-  case tok::integer_literal:
-  case tok::string_literal:
-  case tok::minus:
-  case tok::plus:
-    unsupported("subrange types are");
-    return nullptr;
   default:
-    Diags.error(Tok.getLocation(), "expected type");
-    return nullptr;
+    if (Packed) {
+      Diags.error(Tok.getLocation(),
+                  "'packed' must be followed by 'array' or 'record'");
+      return nullptr;
+    }
+    return parseSimpleType();
   }
 }
 
+// typeIdent (ISO requires these for parameters and function results)
+TypeSpec *Parser::parseTypeIdentifier(llvm::StringRef Context) {
+  if (Tok.is(tok::identifier)) {
+    auto *TS = Ctx.create<NamedTypeSpec>(makeIdentifier(Tok));
+    consumeToken();
+    return TS;
+  }
+  if (Tok.isOneOf(tok::kw_array, tok::kw_packed) && Context == "parameter type")
+    unsupported("conformant array parameters are");
+  else
+    Diags.error(Tok.getLocation(),
+                "expected type name for " + Context +
+                    " (declare the type in a 'type' section)");
+  return nullptr;
+}
+
+/// Tokens that can continue a constant expression after an identifier.
+static bool continuesConstExpr(tok::TokenKind K) {
+  switch (K) {
+  case tok::dotdot: case tok::plus: case tok::minus: case tok::star:
+  case tok::kw_div: case tok::kw_mod:
+    return true;
+  default:
+    return false;
+  }
+}
+
+// simpleType = typeIdent | "(" identList ")" | constExpr ".." constExpr .
+TypeSpec *Parser::parseSimpleType() {
+  SourceLocation Start = Tok.getLocation();
+
+  if (Tok.is(tok::l_paren)) {
+    consumeToken();
+    llvm::SmallVector<Identifier, 8> Names;
+    if (!parseIdentList(Names, "enumeration value name"))
+      return nullptr;
+    if (!expect(tok::r_paren, "after enumeration values"))
+      return nullptr;
+    return Ctx.create<EnumTypeSpec>(SourceRange(Start, PrevTokEnd),
+                                    Ctx.copyArray<Identifier>(Names));
+  }
+
+  if (Tok.is(tok::identifier) && !continuesConstExpr(peekToken().getKind())) {
+    auto *TS = Ctx.create<NamedTypeSpec>(makeIdentifier(Tok));
+    consumeToken();
+    return TS;
+  }
+
+  if (!Tok.isOneOf(tok::identifier, tok::integer_literal, tok::string_literal,
+                   tok::plus, tok::minus)) {
+    Diags.error(Tok.getLocation(), "expected type");
+    return nullptr;
+  }
+  // Subrange: constant bounds (constant expressions in --mode=tp; Sema
+  // enforces the ISO form).
+  Expr *Lo = parseSimpleExpression();
+  if (!Lo)
+    return nullptr;
+  if (!expect(tok::dotdot, "in subrange type"))
+    return nullptr;
+  Expr *Hi = parseSimpleExpression();
+  if (!Hi)
+    return nullptr;
+  return Ctx.create<SubrangeTypeSpec>(SourceRange(Start, PrevTokEnd), Lo, Hi);
+}
+
+// arrayType = "array" "[" simpleType { "," simpleType } "]" "of" type .
+TypeSpec *Parser::parseArrayType(SourceLocation Start, bool Packed) {
+  consumeToken(); // 'array'
+  SourceLocation LBrack = Tok.getLocation();
+  if (!expect(tok::l_square, "after 'array'"))
+    return nullptr;
+  llvm::SmallVector<TypeSpec *, 2> Indexes;
+  do {
+    TypeSpec *Idx = parseSimpleType();
+    if (!Idx)
+      return nullptr;
+    Indexes.push_back(Idx);
+  } while (tryConsume(tok::comma));
+  if (!expect(tok::r_square, "after array index types")) {
+    Diags.note(LBrack, "to match this '['");
+    return nullptr;
+  }
+  if (!expect(tok::kw_of, "after array index types"))
+    return nullptr;
+  TypeSpec *Elem = parseType();
+  if (!Elem)
+    return nullptr;
+  return Ctx.create<ArrayTypeSpec>(SourceRange(Start, PrevTokEnd),
+                                   Ctx.copyArray<TypeSpec *>(Indexes), Elem,
+                                   Packed);
+}
+
+// recordType = "record" fieldList "end" .
+TypeSpec *Parser::parseRecordType(SourceLocation Start, bool Packed) {
+  SourceLocation RecordLoc = consumeToken(); // 'record'
+  FieldList *Fields = parseFieldList(tok::kw_end);
+  if (!Fields)
+    return nullptr;
+  if (!expect(tok::kw_end, "at end of record type")) {
+    Diags.note(RecordLoc, "to match this 'record'");
+    return nullptr;
+  }
+  return Ctx.create<RecordTypeSpec>(SourceRange(Start, PrevTokEnd), Fields,
+                                    Packed);
+}
+
+// fieldList = [ identList ":" type { ";" identList ":" type } ]
+//             [ ";" variantPart ] [ ";" ] .
+FieldList *Parser::parseFieldList(tok::TokenKind Close) {
+  llvm::SmallVector<FieldDecl *, 8> Fixed;
+  while (Tok.is(tok::identifier)) {
+    llvm::SmallVector<Identifier, 4> Names;
+    if (!parseIdentList(Names, "field name") ||
+        !expect(tok::colon, "after field name"))
+      return nullptr;
+    TypeSpec *TS = parseType();
+    if (!TS)
+      return nullptr;
+    for (const Identifier &N : Names)
+      Fixed.push_back(Ctx.create<FieldDecl>(N, TS));
+    if (!tryConsume(tok::semi))
+      break;
+  }
+
+  VariantPart *VP = nullptr;
+  if (Tok.is(tok::kw_case)) {
+    VP = parseVariantPart(Close);
+    if (!VP)
+      return nullptr;
+    tryConsume(tok::semi);
+  }
+
+  if (Tok.isNot(Close)) {
+    Diags.error(Tok.getLocation(),
+                "expected field name, 'case' or " + describe(Close) +
+                    " in record");
+    return nullptr;
+  }
+  auto *FL = Ctx.create<FieldList>();
+  FL->Fixed = Ctx.copyArray<FieldDecl *>(Fixed);
+  FL->Variant = VP;
+  return FL;
+}
+
+// variantPart = "case" [ ident ":" ] typeIdent "of" variant { ";" variant } .
+// variant     = caseLabel { "," caseLabel } ":" "(" fieldList ")" .
+VariantPart *Parser::parseVariantPart(tok::TokenKind Close) {
+  auto *VP = Ctx.create<VariantPart>();
+  VP->CaseLoc = consumeToken(); // 'case'
+
+  Identifier First;
+  if (!expectIdentifier(First, "variant tag or tag type after 'case'"))
+    return nullptr;
+  if (tryConsume(tok::colon)) {
+    TypeSpec *TagTS = parseTypeIdentifier("variant tag type");
+    if (!TagTS)
+      return nullptr;
+    VP->Tag = Ctx.create<FieldDecl>(First, TagTS);
+    VP->TagTypeSpec = TagTS;
+  } else {
+    VP->TagTypeSpec = Ctx.create<NamedTypeSpec>(First);
+  }
+  if (!expect(tok::kw_of, "after variant tag"))
+    return nullptr;
+
+  llvm::SmallVector<Variant *, 4> Variants;
+  while (Tok.isNot(Close) && Tok.isNot(tok::eof)) {
+    llvm::SmallVector<CaseLabel *, 4> Labels;
+    do {
+      CaseLabel *L = parseCaseLabel(/*AllowRange=*/false);
+      if (!L)
+        return nullptr;
+      Labels.push_back(L);
+    } while (tryConsume(tok::comma));
+    if (!expect(tok::colon, "after variant label"))
+      return nullptr;
+    SourceLocation LParen = Tok.getLocation();
+    if (!expect(tok::l_paren, "before variant fields"))
+      return nullptr;
+    FieldList *Fields = parseFieldList(tok::r_paren);
+    if (!Fields)
+      return nullptr;
+    if (!expect(tok::r_paren, "after variant fields")) {
+      Diags.note(LParen, "to match this '('");
+      return nullptr;
+    }
+    auto *V = Ctx.create<Variant>();
+    V->Labels = Ctx.copyArray<CaseLabel *>(Labels);
+    V->Fields = Fields;
+    Variants.push_back(V);
+    if (!tryConsume(tok::semi))
+      break;
+  }
+  if (Variants.empty()) {
+    Diags.error(Tok.getLocation(), "expected at least one variant");
+    return nullptr;
+  }
+  VP->Variants = Ctx.copyArray<Variant *>(Variants);
+  return VP;
+}
+
 //===----------------------------------------------------------------------===//
-// compound = "begin" statement { ";" statement } "end" .
+// Statements
 //===----------------------------------------------------------------------===//
 
 CompoundStmt *Parser::parseCompoundStmt() {
@@ -313,10 +725,6 @@ void Parser::parseStatementSequence(llvm::SmallVectorImpl<Stmt *> &Body,
   }
 }
 
-//===----------------------------------------------------------------------===//
-// statement = [ assignment | procCall | compound ] .
-//===----------------------------------------------------------------------===//
-
 Stmt *Parser::parseStatement() {
   switch (Tok.getKind()) {
   case tok::identifier:
@@ -333,6 +741,8 @@ Stmt *Parser::parseStatement() {
     return parseForStmt();
   case tok::kw_case:
     return parseCaseStmt();
+  case tok::kw_with:
+    return parseWithStmt();
 
   // The empty statement: nothing before a separator or terminator.
   case tok::semi:
@@ -342,9 +752,8 @@ Stmt *Parser::parseStatement() {
   case tok::eof:
     return Ctx.create<EmptyStmt>(Tok.getLocation());
 
-  case tok::kw_with: // M8
   case tok::kw_goto: // M10
-    unsupported("'" + Tok.getRawText().lower() + "' statements are");
+    unsupported("'goto' statements are");
     break;
   case tok::integer_literal:
     unsupported("statement labels are");
@@ -359,18 +768,20 @@ Stmt *Parser::parseStatement() {
   return Ctx.create<EmptyStmt>(L);
 }
 
-// assignment = ident ":=" expression .
+// assignment = designator ":=" expression .
 // procCall   = ident [ "(" actualParam { "," actualParam } ")" ] .
 Stmt *Parser::parseAssignmentOrCall() {
   Identifier Name = makeIdentifier(Tok);
   SourceLocation Start = consumeToken();
 
-  if (Tok.isOneOf(tok::l_square, tok::period, tok::caret)) {
-    unsupported(Tok.is(tok::l_square) ? "array indexing is"
-                : Tok.is(tok::period) ? "record field access is"
-                                      : "pointer dereferencing is");
-    skipUntil({tok::semi, tok::kw_end});
-    return Ctx.create<EmptyStmt>(Start);
+  Expr *Target = Ctx.create<NameRefExpr>(Name);
+  bool HasSelectors = Tok.isOneOf(tok::l_square, tok::period, tok::caret);
+  if (HasSelectors) {
+    Target = parseSelectors(Target);
+    if (!Target) {
+      skipUntil({tok::semi, tok::kw_end});
+      return Ctx.create<EmptyStmt>(Start);
+    }
   }
 
   // Common slip: '=' where ':=' was meant. Report it, then parse the
@@ -381,7 +792,6 @@ Stmt *Parser::parseAssignmentOrCall() {
 
   if (Tok.isOneOf(tok::colon_equal, tok::equal)) {
     SourceLocation AssignLoc = consumeToken();
-    auto *Target = Ctx.create<NameRefExpr>(Name);
     Expr *Value = parseExpression();
     if (!Value) {
       skipUntil({tok::semi, tok::kw_end});
@@ -389,6 +799,12 @@ Stmt *Parser::parseAssignmentOrCall() {
     }
     return Ctx.create<AssignStmt>(SourceRange(Start, PrevTokEnd), Target,
                                   AssignLoc, Value);
+  }
+
+  if (HasSelectors) {
+    Diags.error(PrevTokEnd, "expected ':=' after variable");
+    skipUntil({tok::semi, tok::kw_end});
+    return Ctx.create<EmptyStmt>(Start);
   }
 
   llvm::SmallVector<Expr *, 4> Args;
@@ -445,7 +861,7 @@ bool Parser::parseActualParams(llvm::SmallVectorImpl<Expr *> &Args,
 }
 
 //===----------------------------------------------------------------------===//
-// Structured statements (M5)
+// Structured statements
 //===----------------------------------------------------------------------===//
 
 // if = "if" expression "then" statement [ "else" statement ] .
@@ -548,8 +964,7 @@ Stmt *Parser::parseForStmt() {
 }
 
 bool Parser::isCaseElse() const {
-  return Tok.is(tok::kw_else) ||
-         (Tok.is(tok::identifier) && Tok.getIdentifier() == "otherwise");
+  return Tok.is(tok::kw_else) || isIdentifierNamed("otherwise");
 }
 
 // case = "case" expression "of" caseArm { ";" caseArm } [ ";" ]
@@ -587,7 +1002,7 @@ Stmt *Parser::parseCaseStmt() {
 
     llvm::SmallVector<CaseLabel *, 4> Labels;
     do {
-      if (CaseLabel *L = parseCaseLabel())
+      if (CaseLabel *L = parseCaseLabel(/*AllowRange=*/true))
         Labels.push_back(L);
       else
         OK = false;
@@ -632,13 +1047,16 @@ Stmt *Parser::parseCaseStmt() {
 }
 
 // caseLabel = constant [ ".." constant ] .
-CaseLabel *Parser::parseCaseLabel() {
+CaseLabel *Parser::parseCaseLabel(bool AllowRange) {
   Expr *Lo = parseConstant();
   if (!Lo)
     return nullptr;
   Expr *Hi = nullptr;
   if (Tok.is(tok::dotdot)) {
-    if (LangOpts.Mode == LangMode::ISO)
+    if (!AllowRange)
+      Diags.error(Tok.getLocation(), "ranges are not allowed in variant labels",
+                  {Tok.getRange()});
+    else if (LangOpts.Mode == LangMode::ISO)
       Diags.error(Tok.getLocation(),
                   "case label ranges are a Turbo/Free Pascal extension; use "
                   "--mode=tp",
@@ -651,7 +1069,7 @@ CaseLabel *Parser::parseCaseLabel() {
   return Ctx.create<CaseLabel>(Lo, Hi);
 }
 
-// constant = [ "+" | "-" ] ( unsignedInteger | ident ) | string .
+// constant = [ "+" | "-" ] ( unsignedNumber | ident ) | string .
 Expr *Parser::parseConstant() {
   if (Tok.isOneOf(tok::plus, tok::minus)) {
     UnaryOp Op = Tok.is(tok::plus) ? UnaryOp::Plus : UnaryOp::Minus;
@@ -660,6 +1078,8 @@ Expr *Parser::parseConstant() {
     if (Tok.is(tok::integer_literal)) {
       Operand = Ctx.create<IntegerLiteralExpr>(Tok.getRange(),
                                                Tok.getIntegerValue());
+    } else if (Tok.is(tok::real_literal)) {
+      Operand = Ctx.create<RealLiteralExpr>(Tok.getRange(), Tok.getRealValue());
     } else if (Tok.is(tok::identifier)) {
       Operand = Ctx.create<NameRefExpr>(makeIdentifier(Tok));
     } else {
@@ -676,6 +1096,9 @@ Expr *Parser::parseConstant() {
   case tok::integer_literal:
     E = Ctx.create<IntegerLiteralExpr>(Tok.getRange(), Tok.getIntegerValue());
     break;
+  case tok::real_literal:
+    E = Ctx.create<RealLiteralExpr>(Tok.getRange(), Tok.getRealValue());
+    break;
   case tok::string_literal:
     E = Ctx.create<StringLiteralExpr>(Tok.getRange(), Tok.getStringValue());
     break;
@@ -688,6 +1111,27 @@ Expr *Parser::parseConstant() {
   }
   consumeToken();
   return E;
+}
+
+// with = "with" designator { "," designator } "do" statement .
+Stmt *Parser::parseWithStmt() {
+  SourceLocation WithLoc = consumeToken();
+  llvm::SmallVector<WithContext *, 2> Records;
+  do {
+    Expr *R = parseDesignator();
+    if (!R) {
+      skipUntil({tok::semi, tok::kw_end});
+      return Ctx.create<EmptyStmt>(WithLoc);
+    }
+    Records.push_back(Ctx.create<WithContext>(R));
+  } while (tryConsume(tok::comma));
+  if (!expect(tok::kw_do, "after 'with' records") && !startsStatement()) {
+    skipUntil({tok::semi, tok::kw_end});
+    return Ctx.create<EmptyStmt>(WithLoc);
+  }
+  Stmt *Body = parseStatement();
+  return Ctx.create<WithStmt>(SourceRange(WithLoc, PrevTokEnd),
+                              Ctx.copyArray<WithContext *>(Records), Body);
 }
 
 //===----------------------------------------------------------------------===//
@@ -812,13 +1256,61 @@ Expr *Parser::parseTerm() {
   return LHS;
 }
 
-// factor = unsignedConst | ident | ident "(" exprList ")"
+// designator = ident { "[" expression { "," expression } "]" | "." ident } .
+Expr *Parser::parseDesignator() {
+  Identifier Name;
+  if (!expectIdentifier(Name, "variable name"))
+    return nullptr;
+  return parseSelectors(Ctx.create<NameRefExpr>(Name));
+}
+
+Expr *Parser::parseSelectors(Expr *Base) {
+  while (true) {
+    if (Tok.is(tok::l_square)) {
+      SourceLocation LBrack = consumeToken();
+      do {
+        Expr *Idx = parseExpression();
+        if (!Idx)
+          return nullptr;
+        Base = Ctx.create<IndexExpr>(SourceRange(Base->getBeginLoc(),
+                                                 Idx->getRange().getEnd()),
+                                     Base, Idx);
+      } while (tryConsume(tok::comma));
+      if (!expect(tok::r_square, "after array index")) {
+        Diags.note(LBrack, "to match this '['");
+        return nullptr;
+      }
+      continue;
+    }
+    if (Tok.is(tok::period)) {
+      consumeToken();
+      Identifier Field;
+      if (!expectIdentifier(Field, "field name after '.'"))
+        return nullptr;
+      Base = Ctx.create<FieldExpr>(SourceRange(Base->getBeginLoc(), PrevTokEnd),
+                                   Base, Field);
+      continue;
+    }
+    if (Tok.is(tok::caret)) {
+      unsupported("pointer dereferencing is");
+      return nullptr;
+    }
+    return Base;
+  }
+}
+
+// factor = unsignedConst | designator | ident "(" args ")"
 //        | "(" expression ")" | "not" factor .
 Expr *Parser::parseFactor() {
   switch (Tok.getKind()) {
   case tok::integer_literal: {
     auto *E = Ctx.create<IntegerLiteralExpr>(Tok.getRange(),
                                              Tok.getIntegerValue());
+    consumeToken();
+    return E;
+  }
+  case tok::real_literal: {
+    auto *E = Ctx.create<RealLiteralExpr>(Tok.getRange(), Tok.getRealValue());
     consumeToken();
     return E;
   }
@@ -838,13 +1330,7 @@ Expr *Parser::parseFactor() {
       return Ctx.create<CallExpr>(SourceRange(Name.Loc, PrevTokEnd), Name,
                                   Ctx.copyArray<Expr *>(Args));
     }
-    if (Tok.isOneOf(tok::l_square, tok::period, tok::caret)) {
-      unsupported(Tok.is(tok::l_square) ? "array indexing is"
-                  : Tok.is(tok::period) ? "record field access is"
-                                        : "pointer dereferencing is");
-      return nullptr;
-    }
-    return Ctx.create<NameRefExpr>(Name);
+    return parseSelectors(Ctx.create<NameRefExpr>(Name));
   }
   case tok::l_paren: {
     SourceLocation LParen = consumeToken();
@@ -881,10 +1367,6 @@ Expr *Parser::parseFactor() {
     return Ctx.create<UnaryExpr>(
         SourceRange(OpLoc, Operand->getRange().getEnd()), Op, Operand);
   }
-  case tok::real_literal:
-    unsupported("real numbers are");
-    consumeToken();
-    return nullptr;
   case tok::kw_nil:
     unsupported("'nil' is");
     consumeToken();

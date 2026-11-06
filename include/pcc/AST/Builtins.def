@@ -22,7 +22,7 @@ BUILTIN_PROC(Writeln, "writeln")
 BUILTIN_PROC(Read,    "read")
 BUILTIN_PROC(Readln,  "readln")
 
-// Arithmetic / ordinal functions (M4). Real versions of abs/sqr: M7.
+// Arithmetic / ordinal functions (M4); abs/sqr also take reals (M7).
 BUILTIN_FUNC(Abs,  "abs")
 BUILTIN_FUNC(Sqr,  "sqr")
 BUILTIN_FUNC(Odd,  "odd")
@@ -30,6 +30,16 @@ BUILTIN_FUNC(Ord,  "ord")
 BUILTIN_FUNC(Chr,  "chr")
 BUILTIN_FUNC(Succ, "succ")
 BUILTIN_FUNC(Pred, "pred")
+
+// Real functions (M7). Integer arguments are converted to real.
+BUILTIN_FUNC(Sin,    "sin")
+BUILTIN_FUNC(Cos,    "cos")
+BUILTIN_FUNC(Exp,    "exp")
+BUILTIN_FUNC(Ln,     "ln")
+BUILTIN_FUNC(Sqrt,   "sqrt")
+BUILTIN_FUNC(Arctan, "arctan")
+BUILTIN_FUNC(Trunc,  "trunc")
+BUILTIN_FUNC(Round,  "round")
 
 #undef BUILTIN_FUNC
 #undef BUILTIN_PROC

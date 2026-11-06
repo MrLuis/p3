@@ -2,15 +2,16 @@
 //
 // Node families, each with LLVM-style RTTI (isa<>/cast<>/dyn_cast<>):
 //
-//   Expr      - values (literals, names, operators, calls)
-//   Stmt      - actions (compound, procedure call, assignment, ...)
-//   Decl      - named entities (program, variables, constants, types,
-//               predeclared routines)
-//   TypeSpec  - a type as written in the source (`integer`; later
-//               `array [1..10] of char`, ...). Sema maps it to a Type.
+//   Expr      - values (literals, names, operators, calls, a[i], r.f)
+//   Stmt      - actions
+//   Decl      - named entities: program, variables/parameters, constants,
+//               types, record fields, procedures/functions, builtins
+//   TypeSpec  - a type as written (`integer`, `1..10`, `array [..] of T`,
+//               `record ... end`); Sema maps it to a Type
 //
-// The parser builds the tree; Sema fills in the semantic links (Expr types,
-// resolved declarations). Every node records its source range.
+// The parser builds the tree; Sema fills in the semantic links (types,
+// resolved declarations, constant values). All nodes live in the ASTContext
+// arena and must stay trivially destructible.
 //
 //===----------------------------------------------------------------------===//
 #ifndef PCC_AST_AST_H
@@ -26,7 +27,11 @@
 namespace pcc {
 
 class Decl;
+class FieldDecl;
+class RoutineDecl;
 class Type;
+class TypeSpec;
+struct WithContext;
 
 /// A name as it appears in the source.
 struct Identifier {
@@ -38,6 +43,20 @@ struct Identifier {
   SourceRange getRange() const {
     return {Loc, Loc.getLocWithOffset(static_cast<int>(Spelling.size()))};
   }
+};
+
+/// Value of a constant (Sema-computed).
+struct ConstValue {
+  enum Kind { None, Ordinal, Real, String };
+  Kind K = None;
+  int64_t Int = 0;      ///< Ordinal: integer, char code, boolean, enum index
+  double RealVal = 0;   ///< Real
+  llvm::StringRef Str;  ///< String (interned)
+
+  static ConstValue ordinal(int64_t V) { ConstValue C; C.K = Ordinal; C.Int = V; return C; }
+  static ConstValue real(double V) { ConstValue C; C.K = Real; C.RealVal = V; return C; }
+  static ConstValue string(llvm::StringRef S) { ConstValue C; C.K = String; C.Str = S; return C; }
+  bool isValid() const { return K != None; }
 };
 
 //===----------------------------------------------------------------------===//
@@ -98,6 +117,16 @@ public:
   static bool classof(const Expr *E) { return E->getKind() == EK_IntegerLiteral; }
 };
 
+/// 3.14
+class RealLiteralExpr final : public Expr {
+  double Value;
+
+public:
+  RealLiteralExpr(SourceRange R, double V) : Expr(EK_RealLiteral, R), Value(V) {}
+  double getValue() const { return Value; }
+  static bool classof(const Expr *E) { return E->getKind() == EK_RealLiteral; }
+};
+
 /// 'text'. A literal of exactly one character denotes a char value.
 class StringLiteralExpr final : public Expr {
   llvm::StringRef Value; ///< '' already unescaped
@@ -110,10 +139,12 @@ public:
   static bool classof(const Expr *E) { return E->getKind() == EK_StringLiteral; }
 };
 
-/// A use of a declared name: variable, constant, ...
+/// A use of a declared name: variable, constant, field (inside `with`),
+/// or a parameterless function (a call).
 class NameRefExpr final : public Expr {
   Identifier Name;
-  Decl *D = nullptr; ///< set by Sema
+  Decl *D = nullptr;              ///< set by Sema
+  WithContext *With = nullptr;    ///< set by Sema for fields found via `with`
 
 public:
   explicit NameRefExpr(Identifier Name)
@@ -121,6 +152,8 @@ public:
   const Identifier &getName() const { return Name; }
   Decl *getDecl() const { return D; }
   void setDecl(Decl *NewD) { D = NewD; }
+  WithContext *getWith() const { return With; }
+  void setWith(WithContext *W) { With = W; }
   static bool classof(const Expr *E) { return E->getKind() == EK_NameRef; }
 };
 
@@ -163,11 +196,11 @@ public:
   static bool classof(const Expr *E) { return E->getKind() == EK_Binary; }
 };
 
-/// Function call in an expression: abs(x). (User functions: M6.)
+/// Function call: abs(x), f(1, 2).
 class CallExpr final : public Expr {
   Identifier Callee;
   llvm::ArrayRef<Expr *> Args;
-  Decl *D = nullptr; ///< set by Sema
+  Decl *D = nullptr; ///< set by Sema: BuiltinDecl or RoutineDecl
 
 public:
   CallExpr(SourceRange R, Identifier Callee, llvm::ArrayRef<Expr *> Args)
@@ -192,6 +225,35 @@ public:
   Expr *getWidth() const { return Width; }
   Expr *getPrecision() const { return Precision; }
   static bool classof(const Expr *E) { return E->getKind() == EK_Formatted; }
+};
+
+/// a[i]. `a[i, j]` is parsed as `a[i][j]`.
+class IndexExpr final : public Expr {
+  Expr *Base;
+  Expr *Index;
+
+public:
+  IndexExpr(SourceRange R, Expr *Base, Expr *Index)
+      : Expr(EK_Index, R), Base(Base), Index(Index) {}
+  Expr *getBase() const { return Base; }
+  Expr *getIndex() const { return Index; }
+  static bool classof(const Expr *E) { return E->getKind() == EK_Index; }
+};
+
+/// r.f
+class FieldExpr final : public Expr {
+  Expr *Base;
+  Identifier Field;
+  FieldDecl *FD = nullptr; ///< set by Sema
+
+public:
+  FieldExpr(SourceRange R, Expr *Base, Identifier Field)
+      : Expr(EK_Field, R), Base(Base), Field(Field) {}
+  Expr *getBase() const { return Base; }
+  const Identifier &getField() const { return Field; }
+  FieldDecl *getFieldDecl() const { return FD; }
+  void setFieldDecl(FieldDecl *F) { FD = F; }
+  static bool classof(const Expr *E) { return E->getKind() == EK_Field; }
 };
 
 //===----------------------------------------------------------------------===//
@@ -236,12 +298,12 @@ public:
   static bool classof(const Stmt *S) { return S->getKind() == SK_Compound; }
 };
 
-/// writeln('hi', x:5)   or   readln
+/// writeln('hi', x:5), p(1, y), readln
 class ProcCallStmt final : public Stmt {
   Identifier Callee;
   llvm::ArrayRef<Expr *> Args;
   bool HasParens;
-  Decl *D = nullptr; ///< set by Sema
+  Decl *D = nullptr; ///< set by Sema: BuiltinDecl or RoutineDecl
 
 public:
   ProcCallStmt(SourceRange R, Identifier Callee, llvm::ArrayRef<Expr *> Args,
@@ -255,7 +317,7 @@ public:
   static bool classof(const Stmt *S) { return S->getKind() == SK_ProcCall; }
 };
 
-/// target := value
+/// target := value  (target: variable, a[i], r.f, or a function's result)
 class AssignStmt final : public Stmt {
   Expr *Target;
   Expr *Value;
@@ -332,8 +394,9 @@ public:
   static bool classof(const Stmt *S) { return S->getKind() == SK_For; }
 };
 
-/// One case label: a constant, or (--mode=tp) a range `Lo..Hi`.
-/// Sema evaluates the constants into LoValue/HiValue.
+/// One case label (also used for record variant labels): a constant, or
+/// (--mode=tp in case statements) a range `Lo..Hi`. Sema evaluates the
+/// constants into LoValue/HiValue.
 struct CaseLabel {
   Expr *Lo;
   Expr *Hi; ///< null unless a range
@@ -380,17 +443,39 @@ public:
   static bool classof(const Stmt *S) { return S->getKind() == SK_Case; }
 };
 
+/// One record variable of a with statement. Field names found through it
+/// point here (NameRefExpr::getWith), and codegen evaluates the record's
+/// address once per with statement.
+struct WithContext {
+  Expr *Record;
+  explicit WithContext(Expr *Record) : Record(Record) {}
+};
+
+/// with r1, r2 do Body   ==   with r1 do with r2 do Body
+class WithStmt final : public Stmt {
+  llvm::ArrayRef<WithContext *> Records;
+  Stmt *Body;
+
+public:
+  WithStmt(SourceRange R, llvm::ArrayRef<WithContext *> Records, Stmt *Body)
+      : Stmt(SK_With, R), Records(Records), Body(Body) {}
+  llvm::ArrayRef<WithContext *> getRecords() const { return Records; }
+  Stmt *getBody() const { return Body; }
+  static bool classof(const Stmt *S) { return S->getKind() == SK_With; }
+};
+
 //===----------------------------------------------------------------------===//
 // Written types
 //===----------------------------------------------------------------------===//
 
 class TypeSpec {
 public:
-  enum TypeSpecKind { TS_Named };
+  enum TypeSpecKind { TS_Named, TS_Enum, TS_Subrange, TS_Array, TS_Record };
 
 private:
   const TypeSpecKind Kind;
   SourceRange Range;
+  Type *Resolved = nullptr; ///< set by Sema (shared by `a, b: T`)
 
 protected:
   TypeSpec(TypeSpecKind K, SourceRange R) : Kind(K), Range(R) {}
@@ -399,6 +484,8 @@ public:
   TypeSpecKind getKind() const { return Kind; }
   SourceRange getRange() const { return Range; }
   SourceLocation getBeginLoc() const { return Range.getBegin(); }
+  Type *getResolved() const { return Resolved; }
+  void setResolved(Type *T) { Resolved = T; }
 };
 
 /// A type identifier: integer, char, MyType.
@@ -412,13 +499,91 @@ public:
   static bool classof(const TypeSpec *T) { return T->getKind() == TS_Named; }
 };
 
+/// (red, green, blue)
+class EnumTypeSpec final : public TypeSpec {
+  llvm::ArrayRef<Identifier> Names;
+
+public:
+  EnumTypeSpec(SourceRange R, llvm::ArrayRef<Identifier> Names)
+      : TypeSpec(TS_Enum, R), Names(Names) {}
+  llvm::ArrayRef<Identifier> getNames() const { return Names; }
+  static bool classof(const TypeSpec *T) { return T->getKind() == TS_Enum; }
+};
+
+/// Lo..Hi
+class SubrangeTypeSpec final : public TypeSpec {
+  Expr *Lo, *Hi;
+
+public:
+  SubrangeTypeSpec(SourceRange R, Expr *Lo, Expr *Hi)
+      : TypeSpec(TS_Subrange, R), Lo(Lo), Hi(Hi) {}
+  Expr *getLo() const { return Lo; }
+  Expr *getHi() const { return Hi; }
+  static bool classof(const TypeSpec *T) { return T->getKind() == TS_Subrange; }
+};
+
+/// [packed] array [I1, I2] of Elem
+class ArrayTypeSpec final : public TypeSpec {
+  llvm::ArrayRef<TypeSpec *> Indexes;
+  TypeSpec *Element;
+  bool Packed;
+
+public:
+  ArrayTypeSpec(SourceRange R, llvm::ArrayRef<TypeSpec *> Indexes,
+                TypeSpec *Element, bool Packed)
+      : TypeSpec(TS_Array, R), Indexes(Indexes), Element(Element),
+        Packed(Packed) {}
+  llvm::ArrayRef<TypeSpec *> getIndexes() const { return Indexes; }
+  TypeSpec *getElement() const { return Element; }
+  bool isPacked() const { return Packed; }
+  static bool classof(const TypeSpec *T) { return T->getKind() == TS_Array; }
+};
+
+struct VariantPart;
+
+/// Fields of a record (or of one record variant).
+struct FieldList {
+  llvm::ArrayRef<FieldDecl *> Fixed;
+  VariantPart *Variant = nullptr;
+};
+
+/// One variant: `1, 2: (x, y: integer)`.
+struct Variant {
+  llvm::ArrayRef<CaseLabel *> Labels;
+  FieldList *Fields;
+};
+
+/// case [tag:] TagType of Variants
+struct VariantPart {
+  FieldDecl *Tag = nullptr;             ///< the tag field, if named
+  TypeSpec *TagTypeSpec = nullptr;      ///< always a type identifier
+  Type *TagType = nullptr;              ///< set by Sema
+  llvm::ArrayRef<Variant *> Variants;
+  SourceLocation CaseLoc;
+};
+
+/// [packed] record FieldList end
+class RecordTypeSpec final : public TypeSpec {
+  FieldList *Fields;
+  bool Packed;
+
+public:
+  RecordTypeSpec(SourceRange R, FieldList *Fields, bool Packed)
+      : TypeSpec(TS_Record, R), Fields(Fields), Packed(Packed) {}
+  FieldList *getFields() const { return Fields; }
+  bool isPacked() const { return Packed; }
+  static bool classof(const TypeSpec *T) { return T->getKind() == TS_Record; }
+};
+
 //===----------------------------------------------------------------------===//
 // Declarations
 //===----------------------------------------------------------------------===//
 
 class Decl {
 public:
-  enum DeclKind { DK_Program, DK_Var, DK_Const, DK_Type, DK_Builtin };
+  enum DeclKind {
+    DK_Program, DK_Var, DK_Const, DK_Type, DK_Field, DK_Routine, DK_Builtin
+  };
 
 private:
   const DeclKind Kind;
@@ -438,42 +603,130 @@ public:
   const char *getKindName() const;
 };
 
-/// var x: integer;
+/// A variable, a formal parameter, or a function's result slot.
 class VarDecl final : public Decl {
+public:
+  enum VarKind { Variable, ValueParam, VarParam, Result };
+
+private:
   TypeSpec *TS;
-  Type *Ty = nullptr; ///< set by Sema
+  Type *Ty = nullptr;           ///< set by Sema
+  VarKind VK;
+  RoutineDecl *Owner = nullptr; ///< null for program-level variables
 
 public:
-  VarDecl(Identifier Name, TypeSpec *TS) : Decl(DK_Var, Name.Loc, Name), TS(TS) {}
+  VarDecl(Identifier Name, TypeSpec *TS, VarKind VK = Variable)
+      : Decl(DK_Var, Name.Loc, Name), TS(TS), VK(VK) {}
   TypeSpec *getTypeSpec() const { return TS; }
   Type *getType() const { return Ty; }
   void setType(Type *T) { Ty = T; }
+  VarKind getVarKind() const { return VK; }
+  bool isParam() const { return VK == ValueParam || VK == VarParam; }
+  bool isVarParam() const { return VK == VarParam; }
+  RoutineDecl *getOwner() const { return Owner; }
+  void setOwner(RoutineDecl *R) { Owner = R; }
   static bool classof(const Decl *D) { return D->getKind() == DK_Var; }
 };
 
-/// A named constant. M4: only the predeclared true/false/maxint.
-/// M7 adds `const` declarations.
+/// const N = 10;  -- also predeclared true/false/maxint and enum values.
 class ConstDecl final : public Decl {
-  Type *Ty;
-  int64_t Value;
+  Expr *Init;         ///< null for predeclared constants and enum values
+  Type *Ty = nullptr; ///< set by Sema (or at creation)
+  ConstValue Value;
 
 public:
-  ConstDecl(SourceLocation Loc, Identifier Name, Type *Ty, int64_t Value)
-      : Decl(DK_Const, Loc, Name), Ty(Ty), Value(Value) {}
+  ConstDecl(SourceLocation Loc, Identifier Name, Expr *Init)
+      : Decl(DK_Const, Loc, Name), Init(Init) {}
+  ConstDecl(SourceLocation Loc, Identifier Name, Type *Ty, ConstValue V)
+      : Decl(DK_Const, Loc, Name), Init(nullptr), Ty(Ty), Value(V) {}
+  Expr *getInit() const { return Init; }
   Type *getType() const { return Ty; }
-  int64_t getValue() const { return Value; }
+  const ConstValue &getValue() const { return Value; }
+  void setValue(Type *T, ConstValue V) { Ty = T; Value = V; }
   static bool classof(const Decl *D) { return D->getKind() == DK_Const; }
 };
 
-/// A named type. M4: only the predeclared integer/boolean/char.
+/// type T = ...;  -- also the predeclared integer/real/boolean/char.
 class TypeDecl final : public Decl {
-  Type *Ty;
+  TypeSpec *TS;       ///< null for predeclared types
+  Type *Ty = nullptr;
 
 public:
+  TypeDecl(SourceLocation Loc, Identifier Name, TypeSpec *TS)
+      : Decl(DK_Type, Loc, Name), TS(TS) {}
   TypeDecl(SourceLocation Loc, Identifier Name, Type *Ty)
-      : Decl(DK_Type, Loc, Name), Ty(Ty) {}
+      : Decl(DK_Type, Loc, Name), TS(nullptr), Ty(Ty) {}
+  TypeSpec *getTypeSpec() const { return TS; }
   Type *getType() const { return Ty; }
+  void setType(Type *T) { Ty = T; }
   static bool classof(const Decl *D) { return D->getKind() == DK_Type; }
+};
+
+/// A record field.
+class FieldDecl final : public Decl {
+  TypeSpec *TS;
+  Type *Ty = nullptr;
+
+public:
+  FieldDecl(Identifier Name, TypeSpec *TS)
+      : Decl(DK_Field, Name.Loc, Name), TS(TS) {}
+  TypeSpec *getTypeSpec() const { return TS; }
+  Type *getType() const { return Ty; }
+  void setType(Type *T) { Ty = T; }
+  static bool classof(const Decl *D) { return D->getKind() == DK_Field; }
+};
+
+class Block;
+
+/// procedure P(params); block;     function F(params): T; block;
+/// A `forward` declaration and its later definition are two nodes; Sema
+/// moves the definition's block onto the forward one (the canonical decl)
+/// and marks the definition as a redeclaration.
+class RoutineDecl final : public Decl {
+  bool IsFunction;
+  llvm::ArrayRef<VarDecl *> Params;
+  bool HasParamList;            ///< parentheses were written
+  TypeSpec *ResultTS;           ///< functions only (may be omitted after forward)
+  Type *ResultTy = nullptr;     ///< set by Sema
+  Block *Body;                  ///< null for a forward declaration
+  bool IsForward;
+  RoutineDecl *Canonical = nullptr; ///< set on a definition of a forward decl
+  RoutineDecl *Parent = nullptr;    ///< enclosing routine; null at program level
+  unsigned Level = 1;               ///< 1 = declared in the program block
+  VarDecl *ResultVar = nullptr;     ///< functions: storage for the result
+
+public:
+  RoutineDecl(SourceLocation Loc, Identifier Name, bool IsFunction,
+              llvm::ArrayRef<VarDecl *> Params, bool HasParamList,
+              TypeSpec *ResultTS, Block *Body, bool IsForward)
+      : Decl(DK_Routine, Loc, Name), IsFunction(IsFunction), Params(Params),
+        HasParamList(HasParamList), ResultTS(ResultTS), Body(Body),
+        IsForward(IsForward) {}
+
+  bool isFunction() const { return IsFunction; }
+  bool isProcedure() const { return !IsFunction; }
+  llvm::ArrayRef<VarDecl *> getParams() const { return Params; }
+  bool hasParamList() const { return HasParamList; }
+  TypeSpec *getResultTypeSpec() const { return ResultTS; }
+  Type *getResultType() const { return ResultTy; }
+  void setResultType(Type *T) { ResultTy = T; }
+  Block *getBody() const { return Body; }
+  void setBody(Block *B) { Body = B; }
+  bool isForward() const { return IsForward; }
+  RoutineDecl *getCanonical() const { return Canonical; }
+  void setCanonical(RoutineDecl *C) { Canonical = C; }
+  bool isRedeclaration() const { return Canonical != nullptr; }
+  RoutineDecl *getParent() const { return Parent; }
+  unsigned getLevel() const { return Level; }
+  void setParent(RoutineDecl *P) {
+    Parent = P;
+    Level = P ? P->Level + 1 : 1;
+  }
+  VarDecl *getResultVar() const { return ResultVar; }
+  void setResultVar(VarDecl *V) { ResultVar = V; }
+  /// Nested routines get a hidden pointer to the parent's frame.
+  bool hasStaticLink() const { return Parent != nullptr; }
+  static bool classof(const Decl *D) { return D->getKind() == DK_Routine; }
 };
 
 enum class BuiltinKind {
@@ -497,16 +750,17 @@ public:
   static bool classof(const Decl *D) { return D->getKind() == DK_Builtin; }
 };
 
-/// ISO 7185 block: declaration parts followed by the statement part.
-/// M4 has the variable part; label/const/type/routines arrive later.
+/// ISO 7185 block: declarations followed by the statement part. Decls keeps
+/// source order (const, type, var and routine declarations, interleaved in
+/// --mode=tp).
 class Block {
-  llvm::ArrayRef<VarDecl *> Vars;
+  llvm::ArrayRef<Decl *> Decls;
   CompoundStmt *Body;
 
 public:
-  Block(llvm::ArrayRef<VarDecl *> Vars, CompoundStmt *Body)
-      : Vars(Vars), Body(Body) {}
-  llvm::ArrayRef<VarDecl *> getVars() const { return Vars; }
+  Block(llvm::ArrayRef<Decl *> Decls, CompoundStmt *Body)
+      : Decls(Decls), Body(Body) {}
+  llvm::ArrayRef<Decl *> getDecls() const { return Decls; }
   CompoundStmt *getBody() const { return Body; }
 };
 

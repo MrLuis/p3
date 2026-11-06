@@ -1,0 +1,10 @@
+fact(10) = 3628800
+fib(20) = 6765
+a = 2, b = 1
+ack(2, 3) = 9
+count = 25
+depthSum(3) = 600
+viaNested(21) = 42
+isEven(10) = true, isOdd(7) = true
+fortyTwo + 1 = 43
+g = 7

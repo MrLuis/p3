@@ -1,6 +1,7 @@
 ; LLVM IR for write/writeln lowering (PLAN.md section 6).
 ; RUN: %pcc --emit-llvm %S/Inputs/write.pas -o - | FileCheck %s
-; CHECK: @.str = private unnamed_addr constant [3 x i8] c"bc\00"
+; Strings are stored without a terminating NUL; their length is passed explicitly.
+; CHECK: @.str = private unnamed_addr constant [2 x i8] c"bc"
 ; CHECK: declare void @__pas_init(i32, ptr)
 ; CHECK: define i32 @main(i32 %argc, ptr %argv) {
 ; CHECK-NEXT: entry:

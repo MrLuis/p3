@@ -1,0 +1,30 @@
+; M7/M8: constants, types, arrays, records, strings.
+; RUN: not %pcc -ferror-limit=0 -c %S/Inputs/decls.pas -o %t.o 2>&1 | FileCheck %s
+
+; CHECK: decls.pas:4:7: error: constant expressions are a Turbo/Free Pascal extension; use --mode=tp
+; CHECK: decls.pas:9:10: error: subrange lower bound 5 is greater than upper bound 1
+; CHECK: decls.pas:10:10: error: subrange bounds have different types ('integer' and 'char')
+; CHECK: decls.pas:11:17: error: array index type 'integer' is too large; use a subrange such as 1..100
+; CHECK: decls.pas:12:17: error: array index type must be an ordinal type, not 'real'
+; CHECK: decls.pas:13:28: error: duplicate field name 'x'
+; CHECK: decls.pas:13:16: note: previous field is here
+; Enumeration values are declared in the enclosing scope.
+; CHECK: decls.pas:15:19: error: redefinition of 'red'
+; CHECK: decls.pas:14:12: note: previous definition is here
+; ISO name equivalence: identically written types are still different.
+; CHECK: decls.pas:21:6: error: assigning to 'T1' from incompatible type 'T2'
+; CHECK: decls.pas:22:6: error: array index 4 is out of bounds 1..3
+; CHECK: decls.pas:23:6: error: array index of type 'char' does not match index type '1..3'
+; CHECK: decls.pas:24:5: error: subscripted value is not an array (type 'integer')
+; CHECK: decls.pas:25:6: error: no field named 'z' in 'record'
+; CHECK: decls.pas:26:5: error: '.' applied to a value of type 'integer', which is not a record
+; CHECK: decls.pas:27:8: error: 'with' requires a record, not a value of type 'integer'
+; CHECK: decls.pas:28:6: error: assigning to 'Str5' from incompatible type 'string of length 3'
+; CHECK: decls.pas:30:9: error: cannot compare strings of different lengths (5 and 6)
+; CHECK: decls.pas:31:5: error: assigning to 'integer' from incompatible type 'real'
+; CHECK: decls.pas:33:11: error: cannot write a value of type 'Color'
+; CHECK-NOT: error:
+
+; Constant expressions are fine in TP mode.
+; RUN: not %pcc --mode=tp -ferror-limit=0 -c %S/Inputs/decls.pas -o %t.o 2>&1 | FileCheck --check-prefix=TP %s
+; TP-NOT: constant expressions

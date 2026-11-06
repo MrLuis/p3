@@ -30,10 +30,10 @@
 ; Constructs of later milestones get a clear "not supported yet", and the
 ; parser recovers after each one.
 ; RUN: not %pcc --emit-ast %S/Inputs/unsupported.pas 2>&1 >/dev/null | FileCheck --check-prefix=UNSUP %s
-; UNSUP: unsupported.pas:2:1: error: 'const' declarations are not supported yet
+; UNSUP: unsupported.pas:2:1: error: 'label' declarations are not supported yet
 ; UNSUP: unsupported.pas:4:3: error: 'goto' statements are not supported yet
-; UNSUP: unsupported.pas:5:8: error: real numbers are not supported yet
-; UNSUP: unsupported.pas:6:4: error: array indexing is not supported yet
+; UNSUP: unsupported.pas:5:4: error: pointer dereferencing is not supported yet
+; UNSUP: unsupported.pas:6:8: error: set constructors are not supported yet
 ; UNSUP: unsupported.pas:7:11: error: 'nil' is not supported yet
 ; UNSUP-NOT: error:
 

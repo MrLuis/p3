@@ -1,40 +1,38 @@
 //===- Parser.h - Recursive-descent Pascal parser -----------------*- C++ -*-===//
 //
-// Grammar accepted so far (M4):
+// Grammar accepted so far (M8):
 //
 //   program     = "program" ident [ "(" identList ")" ] ";" block "." .
-//   block       = [ varPart ] compoundStmt .     (label/const/type/routines later)
+//   block       = { constPart | typePart | varPart | routineDecl } compound .
+//                 (ISO: in that order, each part at most once; TP: any order)
+//   constPart   = "const" ident "=" constExpr ";" { ident "=" constExpr ";" } .
+//   typePart    = "type" ident "=" type ";" { ident "=" type ";" } .
 //   varPart     = "var" identList ":" type ";" { identList ":" type ";" } .
-//   type        = typeIdent .                     (structured types: M7+)
-//   compound    = "begin" stmtSeq "end" .
-//   stmtSeq     = statement { ";" statement } .
+//   routineDecl = ("procedure" ident [params] | "function" ident [params]
+//                 [":" typeIdent]) ";" ( "forward" | block ) ";" .
+//   params      = "(" ["var"] identList ":" typeIdent { ";" ... } ")" .
+//
+//   type        = simpleType | ["packed"] (arrayType | recordType) .
+//   simpleType  = typeIdent | "(" identList ")" | constExpr ".." constExpr .
+//   arrayType   = "array" "[" simpleType { "," simpleType } "]" "of" type .
+//   recordType  = "record" fieldList "end" .
+//   fieldList   = [ identList ":" type { ";" identList ":" type } ]
+//                 [ ";" variantPart ] [ ";" ] .
+//   variantPart = "case" [ ident ":" ] typeIdent "of"
+//                 caseLabels ":" "(" fieldList ")" { ";" ... } .
+//
 //   statement   = [ assignment | procCall | compound | if | while | repeat
-//                 | for | case ] .
-//   if          = "if" expression "then" statement [ "else" statement ] .
-//   while       = "while" expression "do" statement .
-//   repeat      = "repeat" stmtSeq "until" expression .
-//   for         = "for" ident ":=" expression ("to"|"downto") expression
-//                 "do" statement .
-//   case        = "case" expression "of" caseArm { ";" caseArm } [ ";" ]
-//                 [ ("else"|"otherwise") stmtSeq ] "end" .   (else: TP)
-//   caseArm     = caseLabel { "," caseLabel } ":" statement .
-//   caseLabel   = constant [ ".." constant ] .                  (range: TP)
-//   constant    = [ "+" | "-" ] ( unsignedInteger | ident ) | string .
-//   assignment  = ident ":=" expression .
-//   procCall    = ident [ "(" actualParam { "," actualParam } ")" ] .
-//   actualParam = expression [ ":" expression [ ":" expression ] ] .
+//                 | for | case | with ] .
+//   assignment  = designator ":=" expression .
+//   designator  = ident { "[" expression { "," expression } "]" | "." ident } .
+//   with        = "with" designator { "," designator } "do" statement .
+//   (if/while/repeat/for/case: see M5 notes in the implementation)
 //
 //   expression  = simpleExpr [ relOp simpleExpr ] .
 //   simpleExpr  = [ "+" | "-" ] term { addOp term } .
 //   term        = factor { mulOp factor } .
-//   factor      = unsignedConst | ident | ident "(" exprList ")"
+//   factor      = unsignedNumber | string | designator | ident "(" args ")"
 //               | "(" expression ")" | "not" factor .
-//   relOp = "=" | "<>" | "<" | "<=" | ">" | ">=" | "in"
-//   addOp = "+" | "-" | "or"       mulOp = "*" | "/" | "div" | "mod" | "and"
-//
-// Note Pascal's precedence: `and` is a multiplying and `or` an adding
-// operator, so `a < b and c < d` means `a < (b and c) < d` -- which is an
-// error we diagnose with a hint to add parentheses.
 //
 // Error recovery: report, then skip to a synchronizing token (';', 'end',
 // 'begin', ...) and continue. Constructs from later milestones are reported
@@ -66,10 +64,13 @@ class Parser {
   const LangOptions &LangOpts;
 
   Token Tok;                  ///< current lookahead token
+  Token PeekTok;              ///< the token after Tok, if HasPeek
+  bool HasPeek = false;
   SourceLocation PrevTokEnd;  ///< end of the last consumed token
 
   // Token helpers
   SourceLocation consumeToken();
+  const Token &peekToken();
   bool tryConsume(tok::TokenKind K);
   /// If the current token is K, consume it. Otherwise report
   /// "expected 'K' <Context>" right after the previous token and return false.
@@ -78,15 +79,32 @@ class Parser {
   void skipUntil(std::initializer_list<tok::TokenKind> Stop);
   static std::string describe(tok::TokenKind K);
   Identifier makeIdentifier(const Token &T) const;
+  /// Consumes an identifier into Out, or reports "expected <What>".
+  bool expectIdentifier(Identifier &Out, llvm::StringRef What);
+  bool parseIdentList(llvm::SmallVectorImpl<Identifier> &Names,
+                      llvm::StringRef What);
   void unsupported(llvm::StringRef What);
 
   bool startsStatement() const;
   bool startsDeclarationPart() const;
+  bool isIdentifierNamed(llvm::StringRef Name) const;
 
   // Declarations
   Block *parseBlock();
-  void parseVarPart(llvm::SmallVectorImpl<VarDecl *> &Vars);
+  void parseConstPart(llvm::SmallVectorImpl<Decl *> &Decls);
+  void parseTypePart(llvm::SmallVectorImpl<Decl *> &Decls);
+  void parseVarPart(llvm::SmallVectorImpl<Decl *> &Decls);
+  RoutineDecl *parseRoutineDecl();
+  bool parseFormalParams(llvm::SmallVectorImpl<VarDecl *> &Params);
+
+  // Types
   TypeSpec *parseType();
+  TypeSpec *parseSimpleType();
+  TypeSpec *parseTypeIdentifier(llvm::StringRef Context);
+  TypeSpec *parseArrayType(SourceLocation Start, bool Packed);
+  TypeSpec *parseRecordType(SourceLocation Start, bool Packed);
+  FieldList *parseFieldList(tok::TokenKind Close);
+  VariantPart *parseVariantPart(tok::TokenKind Close);
 
   // Statements
   CompoundStmt *parseCompoundStmt();
@@ -96,15 +114,16 @@ class Parser {
                               tok::TokenKind Terminator,
                               SourceLocation OpenLoc, llvm::StringRef OpenWord);
   Stmt *parseStatement();
+  Stmt *parseAssignmentOrCall();
   Stmt *parseIfStmt();
   Stmt *parseWhileStmt();
   Stmt *parseRepeatStmt();
   Stmt *parseForStmt();
   Stmt *parseCaseStmt();
-  CaseLabel *parseCaseLabel();
+  Stmt *parseWithStmt();
+  CaseLabel *parseCaseLabel(bool AllowRange);
   Expr *parseConstant();
   bool isCaseElse() const;
-  Stmt *parseAssignmentOrCall();
   /// "(" param { "," param } ")" -- AllowFormat permits e:w:p (write/writeln).
   bool parseActualParams(llvm::SmallVectorImpl<Expr *> &Args, bool AllowFormat);
 
@@ -113,6 +132,10 @@ class Parser {
   Expr *parseSimpleExpression();
   Expr *parseTerm();
   Expr *parseFactor();
+  /// Applies `[...]` and `.field` selectors to Base.
+  Expr *parseSelectors(Expr *Base);
+  /// ident { selector }
+  Expr *parseDesignator();
   std::optional<BinaryOp> peekRelOp() const;
   std::optional<BinaryOp> peekAddOp() const;
   std::optional<BinaryOp> peekMulOp() const;

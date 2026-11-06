@@ -3,10 +3,20 @@
 `pcc` compiles Pascal (ISO 7185, with optional Turbo/Free Pascal extensions)
 to native executables through LLVM. See [PLAN.md](PLAN.md) for the roadmap.
 
-**Status:** M5 complete: integer/boolean/char variables, full ISO expressions
-with type checking, `read`/`readln`/`write`/`writeln`, the standard functions
-`abs sqr odd ord chr succ pred`, and all structured statements: `if`,
-`while`, `repeat`, `for`, `case`. Next up is M6 (procedures and functions).
+**Status:** M8 complete. Supported so far:
+
+- procedures and functions: value and `var` parameters, recursion, `forward`,
+  nested routines with access to enclosing variables
+- `const` and `type` declarations; `integer`, `real`, `boolean`, `char`,
+  enumerations, subranges, arrays (multi-dimensional), records (with variant
+  parts), strings (`packed array [1..n] of char`), `with`
+- all statements except `goto`; full ISO expressions and type checking
+- `read`/`readln`/`write`/`writeln` with field widths; the standard functions
+  `abs sqr odd ord chr succ pred sin cos exp ln sqrt arctan trunc round`
+- runtime checks for ranges, array bounds and integer overflow (on by
+  default; `-fno-range-checks`, `-fno-overflow-checks`)
+
+Next up is M9 (pointers and sets).
 
 ```pascal
 program Sum(input, output);

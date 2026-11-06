@@ -3,7 +3,7 @@
 ; RUN: %pcc --emit-llvm %S/Inputs/loops.pas -o - | FileCheck %s
 ; CHECK: for.body:
 ; CHECK-NEXT: [[I:%i]] = phi i32 {{.*}}[ 1, %{{[a-z.]+}} ]
-; CHECK-NEXT: store i32 [[I]], ptr @i
+; CHECK-NEXT: store i32 [[I]], ptr @pas.i
 ; CHECK:      [[DONE:%.*]] = icmp eq i32 [[I]], 10
 ; CHECK-NEXT: br i1 [[DONE]], label %for.end{{.*}}, label %for.inc
 ; CHECK: for.inc:

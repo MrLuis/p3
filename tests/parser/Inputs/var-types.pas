@@ -1,7 +1,6 @@
 program v;
-var a: array;
+var a: set of char;
     b: ^integer;
-    c: (red, green);
-    d: 1..10;
+    c: file of char;
 begin
 end.

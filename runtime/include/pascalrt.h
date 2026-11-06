@@ -29,6 +29,10 @@ void __pas_write_str(const char *s, int64_t len, int32_t width);
 void __pas_write_char(char c, int32_t width);
 void __pas_write_int(int32_t v, int32_t width);
 void __pas_write_bool(int32_t b, int32_t width); /* "true" / "false" */
+/* Reals (ISO 7185 6.9.3.4). frac < 0: floating-point form " d.dddE+ddd"
+ * (default width 22, i.e. 14 fraction digits); frac >= 0: fixed-point form
+ * with that many fraction digits. */
+void __pas_write_real(double x, int32_t width, int32_t frac);
 void __pas_writeln(void);
 
 /* read / readln on the standard file `input` (ISO 7185 6.9.1, 6.9.2).
@@ -38,6 +42,7 @@ void __pas_writeln(void);
  * readln skips to the start of the next line. Reading past the end of the
  * file is a runtime error. */
 int32_t __pas_read_int(void);
+double __pas_read_real(void);
 char __pas_read_char(void);
 void __pas_readln(void);
 
