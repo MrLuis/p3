@@ -6,6 +6,7 @@
 #   %pcc-unittests  the C++ unit test binary
 #   FileCheck, not  from the LLVM tools directory
 import os
+import sys
 
 import lit.formats
 
@@ -27,7 +28,15 @@ config.substitutions.append((r"\bFileCheck\b", config.filecheck))
 
 # %selfhost-flags: the options that build selfhost/pcc.pas (its LLVM-C
 # backend's include file and libLLVM; before %pcc, a prefix of it).
-config.substitutions.append(("%selfhost-flags", config.selfhost_flags))
+# A build directory configured before S11 lacks selfhost_flags: the
+# selfhost tests are then skipped (re-run cmake to get them).
+selfhost_flags = getattr(config, "selfhost_flags", None)
+if selfhost_flags is None:
+    lit_config.note("build directory predates the self-hosted compiler's "
+                    "build flags: re-run cmake to run the selfhost tests")
+else:
+    config.available_features.add("selfhost-build")
+config.substitutions.append(("%selfhost-flags", selfhost_flags or ""))
 # %pcc-runtime-lib: this build's runtime, for compilers not installed next
 # to it (before %pcc, which is a prefix of it).
 config.substitutions.append(
@@ -44,3 +53,14 @@ config.substitutions.append(("%pcc", pcc_under_test + " -fdiagnostics-color=neve
 for var in ("PCC_RUNTIME_LIB", "PCC_CC"):
     if os.environ.get(var):
         config.environment[var] = os.environ[var]
+
+# On macOS the LLVM tools directory put on PATH above usually holds a
+# Homebrew clang-19, which pcc's driver tries first for linking. Its config
+# file pins an SDK (-isysroot) that need not match the installed Command
+# Line Tools, and it ignores SDKROOT, so links fail (`library not found for
+# -lm`). Link with the system C compiler instead, unless PCC_CC is set.
+if sys.platform == "darwin" and not os.environ.get("PCC_CC"):
+    if os.access("/usr/bin/cc", os.X_OK):
+        config.environment["PCC_CC"] = "/usr/bin/cc"
+    else:
+        lit_config.warning("no /usr/bin/cc to link with; set PCC_CC")
