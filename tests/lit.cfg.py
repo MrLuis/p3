@@ -28,15 +28,23 @@ config.substitutions.append((r"\bFileCheck\b", config.filecheck))
 
 # %selfhost-flags: the options that build selfhost/pcc.pas (its LLVM-C
 # backend's include file and libLLVM; before %pcc, a prefix of it).
-# A build directory configured before S11 lacks selfhost_flags: the
-# selfhost tests are then skipped (re-run cmake to get them).
+# Tests using it say REQUIRES: selfhost-build.
+#
+# Every cmake run regenerates lit.site.cfg.py with selfhost_flags, so it is
+# missing only when lit runs on a build directory last configured before
+# S11 (whose %pcc is then stale too). The selfhost tests are skipped, with
+# a warning so a green run does not hide that they did not run. A test
+# that uses %selfhost-flags without the REQUIRES line gets an option pcc
+# rejects by name, not an empty string and puzzling link errors.
 selfhost_flags = getattr(config, "selfhost_flags", None)
 if selfhost_flags is None:
-    lit_config.note("build directory predates the self-hosted compiler's "
-                    "build flags: re-run cmake to run the selfhost tests")
+    lit_config.warning("build directory predates the self-hosted compiler's "
+                       "build flags: the selfhost tests are skipped; re-run "
+                       "cmake to run them")
+    selfhost_flags = "--missing-selfhost-flags-rerun-cmake"
 else:
     config.available_features.add("selfhost-build")
-config.substitutions.append(("%selfhost-flags", selfhost_flags or ""))
+config.substitutions.append(("%selfhost-flags", selfhost_flags))
 # %pcc-runtime-lib: this build's runtime, for compilers not installed next
 # to it (before %pcc, which is a prefix of it).
 config.substitutions.append(
