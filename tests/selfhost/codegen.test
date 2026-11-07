@@ -5,6 +5,7 @@
 ; that writes the same IR: the bootstrap fixed point. (By hand also: the
 ; whole lit suite with PCC_UNDER_TEST, iso7185pat.pas, and identical IR from
 ; the pcc-built, FPC-built and stage 2 compilers; see selfhost/README.md.)
+; REQUIRES: selfhost-build
 ; RUN: %pcc --mode=tp %selfhost-flags -I %S/../../selfhost %S/../../selfhost/pcc.pas -o %t.pcc
 ;
 ; Valid IR, also for units.
