@@ -53,25 +53,55 @@ add_subdirectory(runtime)
 # LLVM-C API. Its LLVM-specific parts live in the build directory:
 #   selfhost/llvmtargets.inc  the target initializers of this LLVM
 #   selfhost/flags.txt        the options to build selfhost/pcc.pas with pcc
+# Both are needed; if either cannot be made (no Python 3, no llvm-config),
+# PCC_SELFHOST_FLAGS stays empty, flags.txt is not written, and the
+# selfhost tests and bootstrap targets are left out with a warning. The
+# C++ pcc builds and is tested as usual.
 # ---------------------------------------------------------------------------
 set(PCC_SELFHOST_DIR ${PROJECT_BINARY_DIR}/selfhost)
 file(MAKE_DIRECTORY ${PCC_SELFHOST_DIR})
+set(PCC_SELFHOST_FLAGS "")
+set(PCC_SELFHOST_PROBLEM "")
 find_package(Python3 COMPONENTS Interpreter)
 list(GET LLVM_INCLUDE_DIRS 0 PCC_LLVM_INCLUDE_DIR)
 if(Python3_FOUND)
   execute_process(COMMAND ${Python3_EXECUTABLE}
                           ${PROJECT_SOURCE_DIR}/utils/gen-llvm-targets.py
-                          ${PCC_LLVM_INCLUDE_DIR} ${PCC_SELFHOST_DIR}/llvmtargets.inc)
+                          ${PCC_LLVM_INCLUDE_DIR} ${PCC_SELFHOST_DIR}/llvmtargets.inc
+                  RESULT_VARIABLE PCC_GEN_TARGETS_RESULT)
+  if(NOT PCC_GEN_TARGETS_RESULT EQUAL 0)
+    set(PCC_SELFHOST_PROBLEM "utils/gen-llvm-targets.py failed (${PCC_GEN_TARGETS_RESULT})")
+  endif()
+else()
+  set(PCC_SELFHOST_PROBLEM "no Python 3 to generate selfhost/llvmtargets.inc")
 endif()
 find_program(PCC_LLVM_CONFIG NAMES llvm-config-${PCC_LLVM_VERSION} llvm-config
              HINTS ${LLVM_TOOLS_BINARY_DIR} NO_DEFAULT_PATH)
-execute_process(COMMAND ${PCC_LLVM_CONFIG} --libdir
-                OUTPUT_VARIABLE PCC_LLVM_LIBDIR OUTPUT_STRIP_TRAILING_WHITESPACE)
-execute_process(COMMAND ${PCC_LLVM_CONFIG} --link-shared --libs
-                OUTPUT_VARIABLE PCC_LLVM_LIBS OUTPUT_STRIP_TRAILING_WHITESPACE)
-set(PCC_SELFHOST_FLAGS "-I ${PCC_SELFHOST_DIR} -L${PCC_LLVM_LIBDIR} ${PCC_LLVM_LIBS}")
-file(WRITE ${PCC_SELFHOST_DIR}/flags.txt "${PCC_SELFHOST_FLAGS}\n")
-message(STATUS "Self-hosted compiler build flags: ${PCC_SELFHOST_FLAGS}")
+if(NOT PCC_SELFHOST_PROBLEM AND NOT PCC_LLVM_CONFIG)
+  set(PCC_SELFHOST_PROBLEM "no llvm-config in ${LLVM_TOOLS_BINARY_DIR}")
+endif()
+if(NOT PCC_SELFHOST_PROBLEM)
+  execute_process(COMMAND ${PCC_LLVM_CONFIG} --libdir
+                  OUTPUT_VARIABLE PCC_LLVM_LIBDIR OUTPUT_STRIP_TRAILING_WHITESPACE
+                  RESULT_VARIABLE PCC_LIBDIR_RESULT)
+  execute_process(COMMAND ${PCC_LLVM_CONFIG} --link-shared --libs
+                  OUTPUT_VARIABLE PCC_LLVM_LIBS OUTPUT_STRIP_TRAILING_WHITESPACE
+                  RESULT_VARIABLE PCC_LIBS_RESULT)
+  if(NOT PCC_LIBDIR_RESULT EQUAL 0 OR NOT PCC_LIBS_RESULT EQUAL 0
+     OR PCC_LLVM_LIBDIR STREQUAL "" OR PCC_LLVM_LIBS STREQUAL "")
+    set(PCC_SELFHOST_PROBLEM
+        "${PCC_LLVM_CONFIG} gave no libLLVM to link (--libdir, --link-shared --libs)")
+  endif()
+endif()
+if(PCC_SELFHOST_PROBLEM)
+  file(REMOVE ${PCC_SELFHOST_DIR}/flags.txt)
+  message(WARNING "The self-hosted compiler cannot be built: ${PCC_SELFHOST_PROBLEM}. "
+                  "Its tests and the check-bootstrap and seed targets are left out.")
+else()
+  set(PCC_SELFHOST_FLAGS "-I ${PCC_SELFHOST_DIR} -L${PCC_LLVM_LIBDIR} ${PCC_LLVM_LIBS}")
+  file(WRITE ${PCC_SELFHOST_DIR}/flags.txt "${PCC_SELFHOST_FLAGS}\n")
+  message(STATUS "Self-hosted compiler build flags: ${PCC_SELFHOST_FLAGS}")
+endif()
 
 # ---------------------------------------------------------------------------
 # Tests

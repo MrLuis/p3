@@ -32,18 +32,25 @@ config.substitutions.append((r"\bFileCheck\b", config.filecheck))
 #
 # Every cmake run regenerates lit.site.cfg.py with selfhost_flags, so it is
 # missing only when lit runs on a build directory last configured before
-# S11 (whose %pcc is then stale too). The selfhost tests are skipped, with
-# a warning so a green run does not hide that they did not run. A test
-# that uses %selfhost-flags without the REQUIRES line gets an option pcc
-# rejects by name, not an empty string and puzzling link errors.
+# S11 (whose %pcc is then stale too). It is empty when cmake could not set
+# up the self-hosted build (no Python 3 or llvm-config; cmake warned why).
+# Either way the selfhost tests are skipped, with a warning so a green run
+# does not hide that they did not run. A test that uses %selfhost-flags
+# without the REQUIRES line gets an option pcc rejects by name, not an
+# empty string and puzzling link errors.
 selfhost_flags = getattr(config, "selfhost_flags", None)
 if selfhost_flags is None:
     lit_config.warning("build directory predates the self-hosted compiler's "
                        "build flags: the selfhost tests are skipped; re-run "
                        "cmake to run them")
-    selfhost_flags = "--missing-selfhost-flags-rerun-cmake"
+elif not selfhost_flags:
+    lit_config.warning("cmake could not set up the self-hosted compiler's "
+                       "build (see its warning): the selfhost tests are "
+                       "skipped")
 else:
     config.available_features.add("selfhost-build")
+if not selfhost_flags:
+    selfhost_flags = "--missing-selfhost-flags-rerun-cmake"
 config.substitutions.append(("%selfhost-flags", selfhost_flags))
 # %pcc-runtime-lib: this build's runtime, for compilers not installed next
 # to it (before %pcc, which is a prefix of it).

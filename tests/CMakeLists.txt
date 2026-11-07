@@ -39,7 +39,8 @@ endif()
 # Adds the Free Pascal path when fpc is installed.
 find_package(Python3 COMPONENTS Interpreter)
 find_program(FPC_EXECUTABLE fpc)
-if(Python3_FOUND)
+# Both need the self-hosted compiler's build flags (top-level CMakeLists.txt).
+if(Python3_FOUND AND PCC_SELFHOST_FLAGS)
   set(PCC_BOOTSTRAP_ARGS --modules --separate)
   if(FPC_EXECUTABLE)
     list(APPEND PCC_BOOTSTRAP_ARGS --fpc)
