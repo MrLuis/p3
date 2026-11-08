@@ -24,6 +24,15 @@ Lexer::Lexer(const SourceManager &SM, FileID FID, DiagnosticsEngine &Diags,
   BufEnd = Buf.data() + Buf.size();
   // MemoryBuffers are NUL-terminated, so peeking one char past a token
   // (e.g. Cur[1]) is always safe, even at BufEnd.
+  Defines.insert("PCC");
+  Defines.insert(LangOpts.Mode == LangMode::ISO  ? "PCC_ISO"
+                 : LangOpts.Mode == LangMode::TP ? "PCC_TP"
+                                                 : "PCC_OBJFPC");
+}
+
+void Lexer::setDefines(llvm::ArrayRef<std::string> Names) {
+  for (const std::string &N : Names)
+    Defines.insert(llvm::StringRef(N).upper());
 }
 
 void Lexer::formToken(Token &T, tok::TokenKind K, const char *Start) {
@@ -106,9 +115,13 @@ void Lexer::enterPendingInclude() {
 }
 
 void Lexer::handleDirective(const char *Start, llvm::StringRef Text) {
-  // {$I file} / {$INCLUDE file}: include a source file.
   llvm::StringRef Word = Text.take_while(llvm::isAlpha);
   llvm::StringRef Arg = Text.drop_front(Word.size()).trim();
+  if (handleConditional(Start, Word, Arg))
+    return;
+  if (!isActive())
+    return; // in a branch that is not compiled
+  // {$I file} / {$INCLUDE file}: include a source file.
   if ((Word.equals_insensitive("i") || Word.equals_insensitive("include")) &&
       !Arg.empty() && Arg != "+" && Arg != "-") {
     if (Arg.size() >= 2 && Arg.front() == '\'' && Arg.back() == '\'')
@@ -153,6 +166,252 @@ void Lexer::handleDirective(const char *Start, llvm::StringRef Text) {
   }
 }
 
+//===----------------------------------------------------------------------===//
+// Conditional compilation
+//===----------------------------------------------------------------------===//
+
+namespace {
+/// Evaluates the expression of {$IF} / {$ELSEIF}: defined(NAME), true,
+/// false, not, and, or and parentheses.
+class ConditionParser {
+  llvm::StringRef S;
+  size_t P = 0;
+  const llvm::StringSet<> &Defines;
+
+  llvm::StringRef peek() {
+    while (P < S.size() && llvm::isSpace(S[P]))
+      ++P;
+    if (P >= S.size())
+      return {};
+    size_t E = P;
+    if (isIdentStart(S[E]))
+      while (E < S.size() && isIdentBody(S[E]))
+        ++E;
+    else
+      ++E;
+    return S.slice(P, E);
+  }
+  bool accept(llvm::StringRef W) {
+    if (!peek().equals_insensitive(W))
+      return false;
+    P += W.size();
+    return true;
+  }
+  bool parseOr() {
+    bool V = parseAnd();
+    while (accept("or")) {
+      bool R = parseAnd();
+      V = V || R;
+    }
+    return V;
+  }
+  bool parseAnd() {
+    bool V = parseNot();
+    while (accept("and")) {
+      bool R = parseNot();
+      V = V && R;
+    }
+    return V;
+  }
+  bool parseNot() {
+    if (accept("not"))
+      return !parseNot();
+    return parsePrimary();
+  }
+  bool parsePrimary() {
+    if (accept("(")) {
+      bool V = parseOr();
+      if (!accept(")"))
+        Bad = true;
+      return V;
+    }
+    if (accept("true"))
+      return true;
+    if (accept("false"))
+      return false;
+    if (accept("defined")) {
+      if (!accept("(")) {
+        Bad = true;
+        return false;
+      }
+      llvm::StringRef Name = peek();
+      if (Name.empty() || !isIdentStart(Name[0])) {
+        Bad = true;
+        return false;
+      }
+      P += Name.size();
+      if (!accept(")"))
+        Bad = true;
+      return Defines.contains(Name.upper());
+    }
+    Bad = true;
+    return false;
+  }
+
+public:
+  bool Bad = false;
+  ConditionParser(llvm::StringRef S, const llvm::StringSet<> &Defines)
+      : S(S), Defines(Defines) {}
+  bool parse() {
+    bool V = parseOr();
+    if (!peek().empty())
+      Bad = true;
+    return V;
+  }
+};
+} // namespace
+
+bool Lexer::evalCondition(const char *Start, llvm::StringRef Expr) {
+  ConditionParser CP(Expr, Defines);
+  bool V = CP.parse();
+  if (!CP.Bad)
+    return V;
+  Diags.error(locOf(Start),
+              "unsupported $IF expression; expected defined(NAME), true, "
+              "false, not, and, or and parentheses");
+  return false;
+}
+
+bool Lexer::handleConditional(const char *Start, llvm::StringRef Word,
+                              llvm::StringRef Arg) {
+  enum Kind { If, IfDef, IfNDef, IfOpt, ElseIf, Else, EndIf, Define, Undef };
+  static const struct {
+    const char *Spelling, *Name;
+    Kind K;
+  } Table[] = {{"if", "$IF", If},           {"ifdef", "$IFDEF", IfDef},
+               {"ifndef", "$IFNDEF", IfNDef}, {"ifopt", "$IFOPT", IfOpt},
+               {"elseif", "$ELSEIF", ElseIf}, {"else", "$ELSE", Else},
+               {"endif", "$ENDIF", EndIf},    {"ifend", "$IFEND", EndIf},
+               {"define", "$DEFINE", Define}, {"undef", "$UNDEF", Undef}};
+  const char *Name = nullptr;
+  Kind K = If;
+  for (const auto &E : Table)
+    if (Word.equals_insensitive(E.Spelling)) {
+      Name = E.Name;
+      K = E.K;
+    }
+  if (!Name)
+    return false;
+
+  bool Active = isActive();
+  unsigned Depth = IncludeStack.size();
+  // The symbol named by $DEFINE, $UNDEF, $IFDEF and $IFNDEF.
+  llvm::StringRef Sym;
+  if (!Arg.empty() && isIdentStart(Arg[0]))
+    Sym = Arg.take_while(isIdentBody);
+  auto NeedSymbol = [&] {
+    if (!Sym.empty())
+      return true;
+    Diags.error(locOf(Start),
+                "expected a symbol name after " + llvm::Twine(Name));
+    return false;
+  };
+
+  switch (K) {
+  case Define:
+  case Undef:
+    if (!Active || !NeedSymbol())
+      return true;
+    if (Arg.drop_front(Sym.size()).ltrim().starts_with(":=")) {
+      Diags.error(locOf(Start), "macros ({$DEFINE NAME := value}) are not "
+                                "supported");
+      return true;
+    }
+    if (K == Define)
+      Defines.insert(Sym.upper());
+    else
+      Defines.erase(Sym.upper());
+    return true;
+  case If:
+  case IfDef:
+  case IfNDef:
+  case IfOpt: {
+    bool C = false;
+    if (Active) {
+      if (K == If)
+        C = evalCondition(Start, Arg);
+      else if (K == IfOpt)
+        Diags.error(locOf(Start), "$IFOPT is not supported");
+      else if (NeedSymbol())
+        C = Defines.contains(Sym.upper()) == (K == IfDef);
+    }
+    Conditionals.push_back(
+        {locOf(Start), Name, Active, Active && C, Active && C, false, Depth});
+    return true;
+  }
+  case ElseIf:
+  case Else:
+  case EndIf:
+    break;
+  }
+
+  // $ELSEIF, $ELSE, $ENDIF: they continue a conditional of the same file.
+  if (Conditionals.empty() || Conditionals.back().Depth != Depth) {
+    Diags.error(locOf(Start),
+                llvm::Twine(Name) + " without a matching $IF or $IFDEF");
+    return true;
+  }
+  Conditional &C = Conditionals.back();
+  if (K == EndIf) {
+    Conditionals.pop_back();
+    return true;
+  }
+  if (C.SeenElse) {
+    Diags.error(locOf(Start), llvm::Twine(Name) + " after $ELSE");
+    C.Active = false;
+    return true;
+  }
+  if (K == ElseIf && llvm::StringRef(C.Name) != "$IF") {
+    Diags.error(locOf(Start), "$ELSEIF cannot continue " + llvm::Twine(C.Name) +
+                                  "; use $ELSE");
+    C.Active = false;
+    return true;
+  }
+  if (K == Else) {
+    C.SeenElse = true;
+    C.Active = C.ParentActive && !C.Taken;
+  } else {
+    C.Active = C.ParentActive && !C.Taken && evalCondition(Start, Arg);
+  }
+  C.Taken = C.Taken || C.Active;
+  return true;
+}
+
+void Lexer::skipInactive() {
+  // Only comments (which may be conditional directives), strings and //
+  // comments matter here; everything else is skipped unchecked.
+  while (Cur < BufEnd && !isActive()) {
+    char C = *Cur;
+    if (C == '{') {
+      skipBlockComment(1, "}");
+    } else if (C == '(' && Cur[1] == '*') {
+      skipBlockComment(2, "*)");
+    } else if (C == '/' && Cur[1] == '/' && LangOpts.Mode != LangMode::ISO) {
+      while (Cur < BufEnd && *Cur != '\n')
+        ++Cur;
+    } else if (C == '\'') {
+      ++Cur;
+      while (Cur < BufEnd && *Cur != '\'' && *Cur != '\n')
+        ++Cur;
+      if (Cur < BufEnd && *Cur == '\'')
+        ++Cur;
+    } else {
+      ++Cur;
+    }
+  }
+}
+
+void Lexer::closeConditionals() {
+  while (!Conditionals.empty() &&
+         Conditionals.back().Depth == IncludeStack.size()) {
+    Diags.error(Conditionals.back().Loc,
+                llvm::Twine(Conditionals.back().Name) +
+                    " is not terminated; expected $ENDIF before the end of "
+                    "the file");
+    Conditionals.pop_back();
+  }
+}
+
 void Lexer::skipWhitespaceAndComments() {
   while (Cur < BufEnd) {
     switch (*Cur) {
@@ -161,10 +420,14 @@ void Lexer::skipWhitespaceAndComments() {
       continue;
     case '{':
       skipBlockComment(1, "}");
+      if (!isActive())
+        skipInactive();
       continue;
     case '(':
       if (Cur[1] == '*') {
         skipBlockComment(2, "*)");
+        if (!isActive())
+          skipInactive();
         continue;
       }
       return;
@@ -364,6 +627,7 @@ void Lexer::lex(Token &T) {
     const char *Start = Cur;
 
     if (Cur >= BufEnd) {
+      closeConditionals();
       if (!IncludeStack.empty()) { // back to the including file
         IncludeFrame F = IncludeStack.pop_back_val();
         BufBegin = F.BufBegin;

@@ -9,7 +9,10 @@
 // '' escapes, every operator/punctuator incl. (. .) and @.
 //
 // Compiler directives {$R±} / {$Q±} are recorded (M11). Turbo/FPC lexical
-// extensions arrive with M12.
+// extensions arrive with M12. Conditional compilation ({$DEFINE}, {$UNDEF},
+// {$IFDEF}, {$IFNDEF}, {$IF}, {$ELSEIF}, {$ELSE}, {$ENDIF}, {$IFEND}) is
+// done here: the text of a branch that is not compiled is skipped, and only
+// its comments, strings and conditional directives are recognized.
 //
 //===----------------------------------------------------------------------===//
 #ifndef PCC_LEXER_LEXER_H
@@ -20,6 +23,7 @@
 #include "pcc/Lexer/Token.h"
 #include "llvm/ADT/ArrayRef.h"
 #include "llvm/ADT/SmallVector.h"
+#include "llvm/ADT/StringSet.h"
 
 #include <string>
 #include <vector>
@@ -54,6 +58,32 @@ class Lexer {
 
   void handleDirective(const char *Start, llvm::StringRef Text);
 
+  // Conditional compilation. Symbols are kept in upper case; a file starts
+  // with the predefined and command-line ones, and its include files share
+  // them.
+  llvm::StringSet<> Defines;
+  struct Conditional {
+    SourceLocation Loc; ///< the opening {$IF...}
+    const char *Name;   ///< its directive, e.g. "$IFDEF"
+    bool ParentActive;  ///< the text around the conditional is compiled
+    bool Active;        ///< the current branch is compiled
+    bool Taken;         ///< some branch has been compiled
+    bool SeenElse;
+    unsigned Depth;     ///< include depth of the opening directive
+  };
+  llvm::SmallVector<Conditional, 8> Conditionals;
+  bool isActive() const {
+    return Conditionals.empty() || Conditionals.back().Active;
+  }
+  /// Handles Word if it is a conditional-compilation directive.
+  bool handleConditional(const char *Start, llvm::StringRef Word,
+                         llvm::StringRef Arg);
+  bool evalCondition(const char *Start, llvm::StringRef Expr);
+  /// Skips the text of a branch that is not compiled.
+  void skipInactive();
+  /// At the end of a buffer: reports the conditionals it left open.
+  void closeConditionals();
+
   void skipWhitespaceAndComments();
   void skipBlockComment(unsigned OpenLen, llvm::StringRef Close);
 
@@ -75,6 +105,9 @@ public:
   void lex(Token &T);
 
   const LangOptions &getLangOpts() const { return LangOpts; }
+
+  /// Defines symbols for conditional compilation (-d NAME).
+  void setDefines(llvm::ArrayRef<std::string> Names);
 
   /// Where to record {$R±} / {$Q±} switches (null: ignore directives).
   void setDirectives(CheckDirectives *D) { Directives = D; }

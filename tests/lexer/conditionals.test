@@ -1,0 +1,48 @@
+; Conditional compilation in the lexer: the predefined symbols (PCC and one
+; for the mode), -d, skipped text (only comments, strings and conditional
+; directives are recognized in it), conditionals around and in include
+; files, and the errors.
+; RUN: %pcc --emit-tokens %S/Inputs/cond/modes.pas | FileCheck --check-prefix=ISO %s
+; ISO:      1:14 identifier 'a'
+; ISO-NEXT: 2:18 identifier 'iso'
+; ISO-NEXT: 6:45 identifier 'nocmdline'
+; ISO-NEXT: 9:44 identifier 'z'
+; ISO-NEXT: eof
+; RUN: %pcc --mode=tp -dCmdLine --emit-tokens %S/Inputs/cond/modes.pas | FileCheck --check-prefix=TP %s
+; TP:      1:14 identifier 'a'
+; TP-NEXT: 3:17 identifier 'tp'
+; TP-NEXT: 5:18 identifier 'cmdline'
+; TP-NEXT: 9:44 identifier 'z'
+; TP-NEXT: eof
+; RUN: %pcc --mode=objfpc -d cmdline -d Other --emit-tokens %S/Inputs/cond/modes.pas | FileCheck --check-prefix=OBJ %s
+; OBJ:      1:14 identifier 'a'
+; OBJ-NEXT: 4:21 identifier 'objfpc'
+; OBJ-NEXT: 5:18 identifier 'cmdline'
+; OBJ-NEXT: 9:44 identifier 'z'
+
+; An include file shares the including file's symbols; a conditional must
+; end in the file that starts it, and an include directive in a skipped
+; branch is not followed.
+; RUN: not %pcc --mode=tp --emit-tokens %S/Inputs/cond/include.pas 2>&1 | FileCheck --check-prefix=INC %s
+; INC:      cond.inc:3:1: error: $ENDIF without a matching $IF or $IFDEF
+; INC:      cond.inc:4:1: error: $IFDEF is not terminated; expected $ENDIF before the end of the file
+; INC:      2:15 identifier 'i'
+; INC:      10:21 identifier 'a'
+; INC-NEXT: 11:17 identifier 'b'
+; INC-NOT:  error
+; INC:      eof
+
+; RUN: not %pcc --mode=tp -ferror-limit=0 --emit-tokens %S/Inputs/cond/errors.pas 2>&1 >/dev/null | FileCheck --check-prefix=ERR %s
+; ERR:      errors.pas:2:1: error: $ELSE without a matching $IF or $IFDEF
+; ERR-NEXT: {$else}
+; ERR-NEXT: ^
+; ERR-NEXT: errors.pas:3:1: error: unsupported $IF expression; expected defined(NAME), true, false, not, and, or and parentheses
+; ERR:      errors.pas:5:1: error: unsupported $IF expression
+; ERR:      errors.pas:7:1: error: expected a symbol name after $DEFINE
+; ERR:      errors.pas:8:1: error: macros ({$DEFINE NAME := value}) are not supported
+; ERR:      errors.pas:9:1: error: $IFOPT is not supported
+; ERR:      errors.pas:12:1: error: $ELSE after $ELSE
+; ERR:      errors.pas:13:1: error: $ELSEIF after $ELSE
+; ERR:      errors.pas:16:1: error: $ELSEIF cannot continue $IFNDEF; use $ELSE
+; ERR:      errors.pas:25:1: error: $IFDEF is not terminated; expected $ENDIF before the end of the file
+; ERR-NOT:  error:

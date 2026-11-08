@@ -44,6 +44,11 @@ static cl::list<std::string>
                 cl::value_desc("dir"), cl::cat(PccCategory));
 
 static cl::list<std::string>
+    Defines("d", cl::Prefix,
+            cl::desc("Define a symbol for conditional compilation ({$IFDEF})"),
+            cl::value_desc("name"), cl::cat(PccCategory));
+
+static cl::list<std::string>
     LibraryDirs("L", cl::Prefix,
                 cl::desc("Add a directory to search for libraries (linking)"),
                 cl::value_desc("dir"), cl::cat(PccCategory));
@@ -128,6 +133,7 @@ int main(int argc, char **argv) {
   Opts.IncludeDirs.assign(IncludeDirs.begin(), IncludeDirs.end());
   Opts.LibraryDirs.assign(LibraryDirs.begin(), LibraryDirs.end());
   Opts.Libraries.assign(Libraries.begin(), Libraries.end());
+  Opts.Defines.assign(Defines.begin(), Defines.end());
   Opts.SeparateUnits = SeparateUnits;
   Opts.TargetTriple = TargetTriple;
   Opts.Color = Color;

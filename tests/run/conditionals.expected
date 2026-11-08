@@ -1,0 +1,10 @@
+mode debug, level 1, level2 gone TRUE
+compiled by pcc
+in tp mode
+extra was defined on the command line
+1: debug, elseif true
+2: debug, elseif true
+parentheses
+second elseif
+(*$...*) directives
+the end

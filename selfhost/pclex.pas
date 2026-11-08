@@ -6,7 +6,11 @@ unit pclex;
   ISO 7185 tokens plus, with --mode=tp, Turbo/FPC ones: // comments,
   $hex %bin &oct numbers, #13 character codes glued to strings, '@'.
   Comments starting with '$' are directives: R+/R- and Q+/Q- switch
-  runtime checks (recorded for code generation), I file includes a file. }
+  runtime checks (recorded for code generation), I file includes a file.
+  Conditional compilation (DEFINE, UNDEF, IFDEF, IFNDEF, IF, ELSEIF, ELSE,
+  ENDIF, IFEND) is done here: the text of a branch that is not compiled is
+  skipped, and only its comments, strings and conditional directives are
+  recognized. }
 
 interface
 
@@ -45,12 +49,18 @@ type
     hasPendingInclude: boolean;
     pendingInclude: TBuf; { the file named by the last include directive }
     pendingIncludeLoc: TLoc;
+    { conditional compilation: the defined symbols (upper-case name id ->
+      non-nil) and the open conditionals (of PConditional), innermost last }
+    defines: TIntMap;
+    conds: TPtrList;
   end;
 
 var
   { -I directories, searched for included files after the including
     file's directory. }
   includeDirs: TPtrList; { of PName }
+  { -d symbols, defined in every file }
+  commandLineDefines: TPtrList; { of PName }
 
 procedure lexInit(var lx: TLexer; fid: longint; mode: TLangMode);
 procedure lexNext(var lx: TLexer; var t: TToken);
@@ -82,6 +92,18 @@ var
   keywordMap: TIntMap; { name id -> PKeyword }
   keywordsReady: boolean;
   directives: TPtrList; { of PDirective, in source order }
+
+type
+  PConditional = ^TConditional;
+  TConditional = record
+    loc: TLoc;            { the opening directive }
+    name: string[8];      { its directive, e.g. '$IFDEF' }
+    parentActive: boolean; { the text around the conditional is compiled }
+    active: boolean;      { the current branch is compiled }
+    taken: boolean;       { some branch has been compiled }
+    seenElse: boolean;
+    depth: longint;       { include depth of the opening directive }
+  end;
 
 procedure initKeywords;
 var
@@ -160,7 +182,34 @@ begin
   lx.cur := cur;
 end;
 
+function upperName(const s: string): PName;
+var
+  i: longint;
+  u: string;
+begin
+  u := s;
+  for i := 1 to length(u) do
+    if (u[i] >= 'a') and (u[i] <= 'z') then
+      u[i] := chr(ord(u[i]) - 32);
+  upperName := intern(u);
+end;
+
+procedure defineSymbol(var lx: TLexer; const s: string; isOn: boolean);
+begin
+  if isOn then
+    mapPut(lx.defines, upperName(s)^.id, upperName(s))
+  else
+    mapPut(lx.defines, upperName(s)^.id, nil);
+end;
+
+function isDefined(const lx: TLexer; const s: string): boolean;
+begin
+  isDefined := mapGet(lx.defines, upperName(s)^.id) <> nil;
+end;
+
 procedure lexInit(var lx: TLexer; fid: longint; mode: TLangMode);
+var
+  i: longint;
 begin
   if not keywordsReady then
     initKeywords;
@@ -170,6 +219,17 @@ begin
   lx.hasPendingInclude := false;
   bufInit(lx.pendingInclude);
   lx.pendingIncludeLoc := noLoc;
+  mapInit(lx.defines);
+  listInit(lx.conds);
+  defineSymbol(lx, 'PCC', true);
+  if mode = lmISO then
+    defineSymbol(lx, 'PCC_ISO', true)
+  else if mode = lmTP then
+    defineSymbol(lx, 'PCC_TP', true)
+  else
+    defineSymbol(lx, 'PCC_OBJFPC', true);
+  for i := 0 to commandLineDefines.count - 1 do
+    defineSymbol(lx, nameStr(PName(listGet(commandLineDefines, i))), true);
 end;
 
 procedure formToken(var lx: TLexer; var t: TToken; k: TTokenKind; start: int64);
@@ -270,6 +330,315 @@ begin
   isTrimSpace := c in [' ', #9, #10, #11, #12, #13];
 end;
 
+{ --- Conditional compilation --- }
+
+function isActive(const lx: TLexer): boolean;
+begin
+  if lx.conds.count = 0 then
+    isActive := true
+  else
+    isActive := PConditional(listGet(lx.conds, lx.conds.count - 1))^.active;
+end;
+
+{ The expression of $IF / $ELSEIF in [b, e): defined(NAME), true, false,
+  not, and, or and parentheses. }
+function evalCondition(var lx: TLexer; start, b, e: int64): boolean;
+var
+  p: int64;
+  bad: boolean;
+  v: boolean;
+
+  { The next word (an identifier or one other character), lower case. }
+  function peek: string;
+  var
+    q: int64;
+    s: string;
+  begin
+    while (p < e) and isTrimSpace(at(lx, p)) do
+      p := p + 1;
+    s := '';
+    if p >= e then
+      exit('');
+    q := p;
+    if isIdentStart(at(lx, q)) then
+      while (q < e) and isIdentBody(at(lx, q)) do
+      begin
+        if length(s) < 255 then
+          s := s + lowerChar(at(lx, q));
+        q := q + 1;
+      end
+    else
+      s := at(lx, q);
+    peek := s;
+  end;
+
+  { The length of the next word. }
+  function peekLen: int64;
+  var
+    q: int64;
+  begin
+    peek;
+    q := p;
+    if (q < e) and isIdentStart(at(lx, q)) then
+      while (q < e) and isIdentBody(at(lx, q)) do
+        q := q + 1
+    else if q < e then
+      q := q + 1;
+    peekLen := q - p;
+  end;
+
+  function accept(const w: string): boolean;
+  begin
+    if peek <> w then
+      exit(false);
+    p := p + peekLen;
+    accept := true;
+  end;
+
+  function parseOr: boolean; forward;
+
+  function parsePrimary: boolean;
+  var
+    name: string;
+    i: longint;
+    q: int64;
+  begin
+    parsePrimary := false;
+    if accept('(') then
+    begin
+      parsePrimary := parseOr;
+      if not accept(')') then
+        bad := true;
+      exit;
+    end;
+    if accept('true') then
+      exit(true);
+    if accept('false') then
+      exit(false);
+    if accept('defined') then
+    begin
+      if not accept('(') then
+      begin
+        bad := true;
+        exit(false);
+      end;
+      name := peek;
+      if (name = '') or not isIdentStart(name[1]) then
+      begin
+        bad := true;
+        exit(false);
+      end;
+      { the name as written (peek lower-cases it, upperName ignores case) }
+      name := '';
+      q := p;
+      for i := 1 to longint(peekLen) do
+      begin
+        if length(name) < 255 then
+          name := name + at(lx, q);
+        q := q + 1;
+      end;
+      p := q;
+      if not accept(')') then
+        bad := true;
+      exit(isDefined(lx, name));
+    end;
+    bad := true;
+  end;
+
+  { A loop, not recursion: in Free Pascal, a function's name without
+    arguments in its own body is its result, not a call. }
+  function parseNot: boolean;
+  var
+    negate: boolean;
+  begin
+    negate := false;
+    while accept('not') do
+      negate := not negate;
+    parseNot := parsePrimary <> negate;
+  end;
+
+  function parseAnd: boolean;
+  var
+    l, r: boolean;
+  begin
+    l := parseNot;
+    while accept('and') do
+    begin
+      r := parseNot;
+      l := l and r;
+    end;
+    parseAnd := l;
+  end;
+
+  function parseOr: boolean;
+  var
+    l, r: boolean;
+  begin
+    l := parseAnd;
+    while accept('or') do
+    begin
+      r := parseAnd;
+      l := l or r;
+    end;
+    parseOr := l;
+  end;
+
+begin
+  p := b;
+  bad := false;
+  v := parseOr;
+  if peek <> '' then
+    bad := true;
+  if not bad then
+    exit(v);
+  diagError(locOf(lx, start), 'unsupported $IF expression; expected ' +
+            'defined(NAME), true, false, not, and, or and parentheses');
+  evalCondition := false;
+end;
+
+{ Handles word if it is a conditional-compilation directive; its argument
+  is [b, e), trimmed. }
+function handleConditional(var lx: TLexer; start: int64; const word: string;
+                           b, e: int64): boolean;
+var
+  name, sym: string;
+  q: int64;
+  isActiveNow, c: boolean;
+  depth: longint;
+  cond: PConditional;
+
+  function needSymbol: boolean;
+  begin
+    if sym <> '' then
+      exit(true);
+    diagError(locOf(lx, start), 'expected a symbol name after ' + name);
+    needSymbol := false;
+  end;
+
+begin
+  handleConditional := true;
+  if word = 'if' then name := '$IF'
+  else if word = 'ifdef' then name := '$IFDEF'
+  else if word = 'ifndef' then name := '$IFNDEF'
+  else if word = 'ifopt' then name := '$IFOPT'
+  else if word = 'elseif' then name := '$ELSEIF'
+  else if word = 'else' then name := '$ELSE'
+  else if word = 'endif' then name := '$ENDIF'
+  else if word = 'ifend' then name := '$IFEND'
+  else if word = 'define' then name := '$DEFINE'
+  else if word = 'undef' then name := '$UNDEF'
+  else
+    exit(false);
+
+  isActiveNow := isActive(lx);
+  depth := lx.includes.count;
+  { the symbol named by $DEFINE, $UNDEF, $IFDEF and $IFNDEF }
+  sym := '';
+  q := b;
+  if (q < e) and isIdentStart(at(lx, q)) then
+    while (q < e) and isIdentBody(at(lx, q)) do
+    begin
+      if length(sym) < 255 then
+        sym := sym + at(lx, q);
+      q := q + 1;
+    end;
+
+  if (name = '$DEFINE') or (name = '$UNDEF') then
+  begin
+    if not isActiveNow or not needSymbol then
+      exit;
+    while (q < e) and isTrimSpace(at(lx, q)) do
+      q := q + 1;
+    if (q + 1 < e) and (at(lx, q) = ':') and (at(lx, q + 1) = '=') then
+    begin
+      diagError(locOf(lx, start), 'macros ({$DEFINE NAME := value}) are ' +
+                'not supported');
+      exit;
+    end;
+    defineSymbol(lx, sym, name = '$DEFINE');
+    exit;
+  end;
+
+  if (name = '$IF') or (name = '$IFDEF') or (name = '$IFNDEF') or
+     (name = '$IFOPT') then
+  begin
+    c := false;
+    if isActiveNow then
+    begin
+      if name = '$IF' then
+        c := evalCondition(lx, start, b, e)
+      else if name = '$IFOPT' then
+        diagError(locOf(lx, start), '$IFOPT is not supported')
+      else if needSymbol then
+        c := isDefined(lx, sym) = (name = '$IFDEF');
+    end;
+    cond := PConditional(arenaAlloc(sizeof(TConditional)));
+    cond^.loc := locOf(lx, start);
+    cond^.name := name;
+    cond^.parentActive := isActiveNow;
+    cond^.active := isActiveNow and c;
+    cond^.taken := isActiveNow and c;
+    cond^.seenElse := false;
+    cond^.depth := depth;
+    listAdd(lx.conds, cond);
+    exit;
+  end;
+
+  { $ELSEIF, $ELSE, $ENDIF: they continue a conditional of the same file }
+  cond := nil;
+  if lx.conds.count > 0 then
+    cond := PConditional(listGet(lx.conds, lx.conds.count - 1));
+  if (cond = nil) or (cond^.depth <> depth) then
+  begin
+    diagError(locOf(lx, start), name + ' without a matching $IF or $IFDEF');
+    exit;
+  end;
+  if (name = '$ENDIF') or (name = '$IFEND') then
+  begin
+    listPop(lx.conds);
+    exit;
+  end;
+  if cond^.seenElse then
+  begin
+    diagError(locOf(lx, start), name + ' after $ELSE');
+    cond^.active := false;
+    exit;
+  end;
+  if (name = '$ELSEIF') and (cond^.name <> '$IF') then
+  begin
+    diagError(locOf(lx, start), '$ELSEIF cannot continue ' + cond^.name +
+              '; use $ELSE');
+    cond^.active := false;
+    exit;
+  end;
+  if name = '$ELSE' then
+  begin
+    cond^.seenElse := true;
+    cond^.active := cond^.parentActive and not cond^.taken;
+  end
+  else if cond^.parentActive and not cond^.taken then
+    cond^.active := evalCondition(lx, start, b, e)
+  else
+    cond^.active := false;
+  cond^.taken := cond^.taken or cond^.active;
+end;
+
+{ At the end of a buffer: reports the conditionals it left open. }
+procedure closeConditionals(var lx: TLexer);
+var
+  cond: PConditional;
+begin
+  while lx.conds.count > 0 do
+  begin
+    cond := PConditional(listGet(lx.conds, lx.conds.count - 1));
+    if cond^.depth <> lx.includes.count then
+      exit;
+    diagError(cond^.loc, cond^.name + ' is not terminated; expected $ENDIF ' +
+              'before the end of the file');
+    listPop(lx.conds);
+  end;
+end;
+
 { Directive text [textStart, textEnd) (after the '$', up to the comment
   closer); start is the offset of the comment opener. The text can be long
   and span lines, so it is handled as offsets, not as a string. }
@@ -280,7 +649,6 @@ var
   msg: TBuf;
   c: char;
 begin
-  { $I file / $INCLUDE file }
   p := textStart;
   word := '';
   while (p < textEnd) and isAlpha(at(lx, p)) do
@@ -295,6 +663,11 @@ begin
     b := b + 1;
   while (e > b) and isTrimSpace(at(lx, e - 1)) do
     e := e - 1;
+  if handleConditional(lx, start, word, b, e) then
+    exit;
+  if not isActive(lx) then
+    exit; { in a branch that is not compiled }
+  { $I file / $INCLUDE file }
   if ((word = 'i') or (word = 'include')) and (e > b) and
      not ((e - b = 1) and ((at(lx, b) = '+') or (at(lx, b) = '-'))) then
   begin
@@ -483,6 +856,38 @@ begin
     enterPendingInclude(lx); { the included text follows the comment }
 end;
 
+{ Skips the text of a branch that is not compiled: only comments (which
+  may be conditional directives), strings and // comments matter. }
+procedure skipInactive(var lx: TLexer);
+var
+  c: char;
+begin
+  while (lx.cur < lx.len) and not isActive(lx) do
+  begin
+    c := at(lx, lx.cur);
+    if c = '{' then
+      skipBlockComment(lx, 1, '}')
+    else if (c = '(') and (at(lx, lx.cur + 1) = '*') then
+      skipBlockComment(lx, 2, '*)')
+    else if (c = '/') and (at(lx, lx.cur + 1) = '/') and (lx.mode <> lmISO) then
+    begin
+      while (lx.cur < lx.len) and (at(lx, lx.cur) <> #10) do
+        lx.cur := lx.cur + 1;
+    end
+    else if c = '''' then
+    begin
+      lx.cur := lx.cur + 1;
+      while (lx.cur < lx.len) and (at(lx, lx.cur) <> '''') and
+            (at(lx, lx.cur) <> #10) do
+        lx.cur := lx.cur + 1;
+      if (lx.cur < lx.len) and (at(lx, lx.cur) = '''') then
+        lx.cur := lx.cur + 1;
+    end
+    else
+      lx.cur := lx.cur + 1;
+  end;
+end;
+
 procedure skipWhitespaceAndComments(var lx: TLexer);
 var
   c: char;
@@ -494,10 +899,18 @@ begin
       ' ', #9, #13, #10, #12, #11:
         lx.cur := lx.cur + 1;
       '{':
-        skipBlockComment(lx, 1, '}');
+        begin
+          skipBlockComment(lx, 1, '}');
+          if not isActive(lx) then
+            skipInactive(lx);
+        end;
       '(':
         if at(lx, lx.cur + 1) = '*' then
-          skipBlockComment(lx, 2, '*)')
+        begin
+          skipBlockComment(lx, 2, '*)');
+          if not isActive(lx) then
+            skipInactive(lx);
+        end
         else
           exit;
       '/':
@@ -881,6 +1294,7 @@ begin
     start := lx.cur;
     if lx.cur >= lx.len then
     begin
+      closeConditionals(lx);
       if lx.includes.count > 0 then
       begin
         { back to the including file }

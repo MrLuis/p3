@@ -38,6 +38,7 @@ struct CompilerOptions {
   std::vector<std::string> IncludeDirs; ///< -I: where to look for units
   std::vector<std::string> LibraryDirs; ///< -L: passed to the linker
   std::vector<std::string> Libraries;   ///< -l: passed to the linker
+  std::vector<std::string> Defines;     ///< -d: conditional symbols
   /// -fseparate-units: the program's units were compiled separately (with
   /// -c, to <unit>.o next to their sources); link those objects.
   bool SeparateUnits = false;

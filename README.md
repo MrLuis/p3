@@ -159,6 +159,31 @@ pcc --mode=tp -I lib -fseparate-units main.pas -o main
 
 `-L dir` and `-l name` pass library options to the linker.
 
+**Conditional compilation** (every mode), as in Free Pascal:
+
+```pascal
+{$DEFINE TRACE}                  { also -d TRACE / -dTRACE on the command line }
+{$IFDEF TRACE} writeln('enter'); {$ENDIF}
+{$IF defined(PCC_OBJFPC) and not defined(SLOW)}
+  ...
+{$ELSEIF defined(PCC_TP)}
+  ...
+{$ELSE}
+  ...
+{$ENDIF}                         { or $IFEND }
+```
+
+`$DEFINE`, `$UNDEF`, `$IFDEF`, `$IFNDEF`, `$IF` / `$ELSEIF` (expressions of
+`defined(NAME)`, `true`, `false`, `not`, `and`, `or` and parentheses),
+`$ELSE`, `$ENDIF` and `$IFEND`; symbols are case-insensitive. `PCC` is
+predefined, and so is one of `PCC_ISO`, `PCC_TP` and `PCC_OBJFPC` (the
+mode). Each file (program or unit) starts with only these and the `-d`
+symbols; an include file shares its includer's symbols, and a conditional
+must end in the file that starts it. The text of a branch that is not
+compiled is only scanned for comments, strings and conditional
+directives. Macros (`{$DEFINE X := 1}`), `$IFOPT` and other `$IF`
+expressions are not supported.
+
 **Self-hosting:** pcc is also written in Pascal ([selfhost/](selfhost/),
 [SELFHOST.md](SELFHOST.md)); `ninja -C build check-bootstrap` builds it with
 itself, and `utils/seed.py` makes and uses a stage-1 *seed* (a binary plus

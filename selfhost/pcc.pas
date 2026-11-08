@@ -117,6 +117,7 @@ begin
   helpLine('      -c                         - Emit an object file (.o)');
   helpLine('  --Werror                     - Treat warnings as errors');
   helpLine('  --Wno-unused-variable        - Do not warn about unused variables');
+  helpLine('  -d <name>                    - Define a symbol for conditional compilation ({$IFDEF})');
   helpLine('  --fdiagnostics-color=<value> - Colorize diagnostics:');
   helpLine('    =auto                      -   If stderr is a tty');
   helpLine('    =always                    -   Always');
@@ -141,9 +142,10 @@ const
     'help', 'help-list', 'version', 'emit-tokens', 'emit-ast', 'emit-parse-tree',
     'emit-llvm', 'S', 'c', 'Werror', 'Wno-unused-variable', 'fno-overflow-checks',
     'fno-range-checks', 'fseparate-units', 'g');
-  numValueOpts = 9;
+  numValueOpts = 10;
   valueOptNames: array[1..numValueOpts] of string[20] = (
-    'o', 'mode', 'fdiagnostics-color', 'ferror-limit', 'target', 'I', 'O', 'L', 'l');
+    'o', 'mode', 'fdiagnostics-color', 'ferror-limit', 'target', 'I', 'O', 'L', 'l',
+    'd');
 
 function isFlag(const name: string): boolean;
 var
@@ -319,9 +321,10 @@ begin
       name := copy(body, 1, pos('=', body) - 1);
       value := copy(body, pos('=', body) + 1, 255);
     end;
-    { -Idir, -O2, -lname, -Ldir: prefix options }
+    { -Idir, -O2, -lname, -Ldir, -dNAME: prefix options }
     if not isFlag(name) and not isValueOpt(name) and (body <> '') and
-       ((body[1] = 'I') or (body[1] = 'O') or (body[1] = 'l') or (body[1] = 'L')) then
+       ((body[1] = 'I') or (body[1] = 'O') or (body[1] = 'l') or (body[1] = 'L') or
+        (body[1] = 'd')) then
     begin
       name := body[1];
       value := copy(body, 2, 255);
@@ -388,6 +391,8 @@ begin
       targetTriple := takeValue
     else if name = 'I' then
       listAdd(includeDirs, intern(takeValue))
+    else if name = 'd' then
+      listAdd(commandLineDefines, intern(takeValue))
     else if name = 'O' then
       optLevel := parseUInt(name, takeValue)
     else if name = 'l' then
@@ -682,6 +687,7 @@ begin
   sysInit;
   diagInit;
   listInit(includeDirs);
+  listInit(commandLineDefines);
   bufInit(outBuf);
   parseArgs;
   diagSetErrorLimit(errorLimit);

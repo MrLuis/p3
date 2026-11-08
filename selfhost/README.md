@@ -19,7 +19,7 @@ fpc -Mobjfpc -Sh- -Cr -Co -FUbuild/fpc-units -Fibuild/selfhost \
 | `pcsys.pas` | the only unit calling C: files, output, environment, processes |
 | `pcutil.pas` | arena, interned names, lists, maps, buffers, `%g` formatting |
 | `pcdiag.pas` | source manager and diagnostics (same output as the C++ pcc) |
-| `pclex.pas` | lexer, directives, `{$I}` includes |
+| `pclex.pas` | lexer, directives, `{$I}` includes, conditional compilation |
 | `pcast.pas` | the syntax tree (variant records in the arena) |
 | `pcparse.pas` | recursive-descent parser with the C++ parser's error recovery |
 | `pcprint.pas` | tree dumps (`--emit-ast`, `--emit-parse-tree`) |
