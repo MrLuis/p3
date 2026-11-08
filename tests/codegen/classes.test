@@ -1,0 +1,55 @@
+; Classes (--mode=objfpc): an object is a heap block that starts with its
+; class's VMT, a constant array [parent VMT, name, virtual methods...];
+; TObject's VMT and Destroy (slot 0) are in the runtime. Methods take Self
+; after the static link and keep it in their frame.
+; RUN: %pcc --mode=objfpc --emit-llvm %S/Inputs/classes.pas -o - | FileCheck %s
+
+; CHECK: %frame.ta.v = type { ptr, i32 }
+; CHECK: @vmt.ta = internal constant [4 x ptr] [ptr @__pas_tobject_vmt, ptr @.str, ptr @__pas_tobject_destroy, ptr @pas.ta.v]
+; CHECK: @vmt.tb = internal constant [4 x ptr] [ptr @vmt.ta, ptr @.str.1, ptr @__pas_tobject_destroy, ptr @pas.tb.v]
+; CHECK: @__pas_tobject_vmt = external constant [3 x ptr]
+; CHECK: @.str = private unnamed_addr constant [3 x i8] c"\02TA"
+
+; TB.Create: TObject's constructor does nothing; the object is 24 bytes
+; (VMT pointer, X, padding, Y).
+; CHECK-LABEL: define i32 @main(
+; CHECK:      %obj = call ptr @__pas_new(i64 24)
+; CHECK-NEXT: store ptr @vmt.tb, ptr %obj, align 8
+; A virtual call (checked for nil): slot 1 is at index 3 of the VMT.
+; CHECK:      %vmt = load ptr, ptr %a, align 8
+; CHECK-NEXT: %[[SLOT:[0-9]+]] = getelementptr inbounds ptr, ptr %vmt, i64 3
+; CHECK-NEXT: %method = load ptr, ptr %[[SLOT]], align 8
+; CHECK-NEXT: call void %method(ptr null, ptr %a, i32 2)
+; A static method.
+; CHECK:      call void @pas.ta.s(ptr null, ptr %a1)
+; CHECK:      call i32 @__pas_class_is(ptr %a2, ptr @vmt.tb)
+; Free: Destroy (slot 0) unless nil, then release.
+; CHECK:      br i1 %{{[0-9]+}}, label %free.end, label %free.do
+; CHECK:      getelementptr inbounds ptr, ptr %vmt4, i64 2
+; CHECK:      call void @__pas_dispose(ptr %a3)
+
+; CHECK-LABEL: define internal void @pas.ta.v(ptr %link, ptr %self, i32 %n)
+; CHECK:      store ptr %self, ptr %0, align 8
+; CHECK:      %x = getelementptr inbounds i8, ptr %self4, i64 8
+
+; inherited V(N + 1): a static call.
+; CHECK-LABEL: define internal void @pas.tb.v(ptr %link, ptr %self, i32 %n)
+; CHECK:      call void @pas.ta.v(ptr null, ptr %self2, i32 %add)
+
+; -g: a class is a pointer to a structure of its fields; methods are named
+; Class.Method, at their implementation, with Self as first parameter.
+; RUN: %pcc --mode=objfpc -g -c %S/Inputs/classes.pas -o %t.o
+; RUN: llvm-dwarfdump --verify %t.o | FileCheck --check-prefix=VERIFY %s
+; VERIFY: No errors.
+; RUN: llvm-dwarfdump --debug-info %t.o | FileCheck --check-prefix=DEBUG %s
+; DEBUG:      DW_TAG_structure_type
+; DEBUG-NEXT: DW_AT_name ("TA")
+; DEBUG:      DW_TAG_member
+; DEBUG-NEXT: DW_AT_name ("X")
+; DEBUG:      DW_AT_data_member_location (0x08)
+; DEBUG:      DW_TAG_subprogram
+; DEBUG:      DW_AT_name ("TA.V")
+; DEBUG:      DW_AT_decl_line (12)
+; DEBUG:      DW_TAG_formal_parameter
+; DEBUG:      DW_AT_name ("Self")
+; DEBUG:      DW_AT_type ({{.*}} "TA *")

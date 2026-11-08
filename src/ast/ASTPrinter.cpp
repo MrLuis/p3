@@ -126,10 +126,22 @@ class ASTPrinter : public StmtVisitor<ASTPrinter>,
     }
     case Decl::DK_Routine: {
       auto *R = llvm::cast<RoutineDecl>(D);
-      line(R->isFunction() ? "FunctionDecl '" : "ProcedureDecl '")
-          << R->getName().Name << '\'';
+      line(R->isConstructor()  ? "ConstructorDecl '"
+           : R->isDestructor() ? "DestructorDecl '"
+           : R->isFunction()   ? "FunctionDecl '"
+                               : "ProcedureDecl '");
+      if (R->getClassName().isValid())
+        OS << R->getClassName().Name << '.';
+      OS << R->getName().Name << '\'';
       if (R->getResultType())
         type(R->getResultType());
+      visibility(R);
+      if (R->isVirtual())
+        OS << " virtual";
+      if (R->isOverride())
+        OS << " override";
+      if (R->isAbstract())
+        OS << " abstract";
       if (R->isForward())
         OS << " forward";
       if (R->isExternal())
@@ -158,10 +170,49 @@ class ASTPrinter : public StmtVisitor<ASTPrinter>,
       line("LabelDecl ") << D->getName().Name;
       loc(D->getLocation());
       return;
+    case Decl::DK_Field: { // a field of a class
+      auto *F = llvm::cast<FieldDecl>(D);
+      line("FieldDecl '") << F->getName().Name << '\'';
+      if (!ParseTree)
+        typeSpec(F->getTypeSpec(), F->getType());
+      visibility(F);
+      loc(F->getLocation());
+      if (ParseTree) {
+        IndentScope I(Indent);
+        printTypeSpec(F->getTypeSpec());
+      }
+      return;
+    }
+    case Decl::DK_Property: {
+      auto *P = llvm::cast<PropertyDecl>(D);
+      line("PropertyDecl '") << P->getName().Name << '\'';
+      if (!ParseTree)
+        typeSpec(P->getTypeSpec(), P->getType());
+      if (P->getReadName().isValid())
+        OS << " read '" << P->getReadName().Name << '\'';
+      if (P->getWriteName().isValid())
+        OS << " write '" << P->getWriteName().Name << '\'';
+      visibility(P);
+      loc(P->getLocation());
+      if (ParseTree) {
+        IndentScope I(Indent);
+        printTypeSpec(P->getTypeSpec());
+      }
+      return;
+    }
     default:
       line("Decl '") << D->getName().Name << '\'';
       loc(D->getLocation());
       return;
+    }
+  }
+
+  void visibility(Decl *D) {
+    switch (D->getVisibility()) {
+    case Visibility::Public:    break;
+    case Visibility::Published: OS << " published"; break;
+    case Visibility::Protected: OS << " protected"; break;
+    case Visibility::Private:   OS << " private"; break;
     }
   }
 
@@ -196,6 +247,11 @@ class ASTPrinter : public StmtVisitor<ASTPrinter>,
       for (size_t I = 0; I < Values.size(); ++I)
         S += (I ? ", " : "") + Values[I]->getName().Name.str();
       return S + ")";
+    }
+    case Type::TK_Class: {
+      auto *C = llvm::cast<ClassType>(T);
+      return C->getParent() ? "class(" + C->getParent()->getName() + ")"
+                            : std::string("class");
     }
     default:
       return Name;
@@ -276,6 +332,17 @@ class ASTPrinter : public StmtVisitor<ASTPrinter>,
         IndentScope J(Indent);
         printTypeSpec(R->getResult());
       }
+      return;
+    }
+    case TypeSpec::TS_Class: {
+      auto *C = llvm::cast<ClassTypeSpec>(TS);
+      line(C->isForward() ? "ClassTypeSpec forward" : "ClassTypeSpec");
+      if (C->getParent().isValid())
+        OS << " '" << C->getParent().Name << '\'';
+      loc(TS->getBeginLoc());
+      IndentScope I(Indent);
+      for (Decl *M : C->getMembers())
+        printDecl(M);
       return;
     }
     case TypeSpec::TS_String: {
@@ -569,7 +636,13 @@ public:
     if (Decl *D = E->getDecl())
       OS << ' ' << D->getKindName();
     if (E->getWith())
-      OS << " (with)";
+      OS << (E->getWith()->IsSelf ? " (self)" : " (with)");
+    end(E);
+  }
+  void visitInheritedExpr(InheritedExpr *E) {
+    line("InheritedExpr");
+    if (!E->isBare())
+      OS << " '" << E->getName().Name << '\'';
     end(E);
   }
   void visitParenExpr(ParenExpr *E) {

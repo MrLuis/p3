@@ -60,6 +60,15 @@ var
   pendingGotos: TPtrList;     { of PPendingGoto }
   programLabelCount: longint; { non-local labels of the program block }
   msg: TBuf;                  { the diagnostic being built }
+  { objfpc: the program or unit being checked (private members are visible
+    in the module declaring their class); the target of the assignment
+    being checked (a property there is written, not read); the predeclared
+    class TObject; the classes declared forward (their type declarations)
+    in the current type section }
+  curModule: pointer;
+  curAssignTarget: PNode;
+  tobjectType: PType;
+  pendingClasses: TPtrList;
 
 { --- Small helpers --- }
 
@@ -233,8 +242,13 @@ begin
     dkField: kindName := 'field';
     dkLabel: kindName := 'label';
     dkUnit: kindName := 'unit';
+    dkProperty: kindName := 'property';
     dkRoutine:
-      if d^.isFunction then
+      if d^.methodKind = mtConstructor then
+        kindName := 'constructor'
+      else if d^.methodKind = mtDestructor then
+        kindName := 'destructor'
+      else if d^.isFunction then
         kindName := 'function'
       else
         kindName := 'procedure';
@@ -443,6 +457,64 @@ begin
   scopeInsert(standard, d^.ident.name, d);
 end;
 
+{ The identifier of a predeclared member: the lower-case name, spelled as
+  in Free Pascal. }
+function memberIdent(const spelling: string): TIdent;
+var
+  id: TIdent;
+begin
+  id.name := intern(lowerStr(spelling));
+  id.spelling := intern(spelling);
+  id.loc := noLoc;
+  memberIdent := id;
+end;
+
+function newTObjectMethod(const spelling: string; mk: TMethodKind;
+                          res: PType; om: TObjMethod): PDecl;
+var
+  r: PDecl;
+begin
+  r := newDecl(dkRoutine, memberIdent(spelling), noLoc);
+  r^.isFunction := res <> nil;
+  listInit(r^.params);
+  r^.level := 1;
+  r^.methodKind := mk;
+  r^.methodClassName := noIdent;
+  r^.ownerClass := tobjectType;
+  r^.objMethod := om;
+  r^.resultType := res;
+  r^.vmtIndex := -1;
+  newTObjectMethod := r;
+end;
+
+{ class TObject: constructor Create; destructor Destroy; virtual;
+  procedure Free; function ClassName: string; (bodies in code generation
+  and the runtime). Destroy is virtual method 0. }
+procedure declareTObject;
+var
+  members, fields, vtable: TPtrList;
+  destroy, d: PDecl;
+begin
+  tobjectType := newClassType;
+  setDeclName(tobjectType, intern('TObject'));
+  listInit(members);
+  listInit(fields);
+  listInit(vtable);
+  destroy := newTObjectMethod('Destroy', mtDestructor, nil, obDestroy);
+  destroy^.isVirtual := true;
+  destroy^.vmtIndex := 0;
+  listAdd(members, newTObjectMethod('Create', mtConstructor, nil, obCreate));
+  listAdd(members, destroy);
+  listAdd(members, newTObjectMethod('Free', mtMethod, nil, obFree));
+  listAdd(members, newTObjectMethod('ClassName', mtMethod, shortStringType(255),
+                                    obClassName));
+  listAdd(vtable, destroy);
+  defineClass(tobjectType, nil, members, fields, vtable, nil);
+  d := newDecl(dkType, memberIdent('TObject'), noLoc);
+  d^.declType := tobjectType;
+  scopeInsert(standard, d^.ident.name, d);
+end;
+
 procedure declareStandardScope;
 var
   pchar: PType;
@@ -473,6 +545,8 @@ begin
     setDeclName(pchar, intern('pchar'));
     stdType('pchar', pchar);
   end;
+  if mode = lmObjFPC then
+    declareTObject;
   { the standard files }
   for f := 1 to 2 do
   begin
@@ -580,6 +654,11 @@ begin
   if ((a^.kind = tyPointer) and (b^.kind = tyNil)) or
      ((a^.kind = tyNil) and (b^.kind = tyPointer)) then
     exit(true);
+  if ((a^.kind = tyClass) and (b^.kind = tyNil)) or
+     ((a^.kind = tyNil) and (b^.kind = tyClass)) then
+    exit(true);
+  if (a^.kind = tyClass) and (b^.kind = tyClass) then { related classes (objfpc) }
+    exit(inheritsFrom(a, b) or inheritsFrom(b, a));
   if (a^.kind = tyPointer) and (b^.kind = tyPointer) and
      (a^.untyped or b^.untyped) then
     exit(true); { Turbo/FPC untyped pointer }
@@ -604,6 +683,13 @@ begin
     exit(true);
   if (target^.kind = tyPointer) and ((value^.kind = tyNil) or (value^.kind = tyPointer)) then
     exit(areCompatible(target, value));
+  { classes (objfpc): an object of the class or a descendant, or nil; any
+    object fits an untyped pointer }
+  if target^.kind = tyClass then
+    exit((value^.kind = tyNil) or
+         ((value^.kind = tyClass) and inheritsFrom(value, target)));
+  if (target^.kind = tyPointer) and (value^.kind = tyClass) then
+    exit(target^.untyped);
   if (target^.kind = tyShortString) and isStringish(value) then
     exit(true); { truncated to the target's length at run time }
   if (target^.kind = tySet) and (value^.kind = tySet) then
@@ -625,6 +711,12 @@ begin
   isAssignable := false;
 end;
 
+{ Is e (already checked) a value of a class type? }
+function isObject(e: PNode): boolean;
+begin
+  isObject := (e^.typ <> nil) and (e^.typ^.kind = tyClass);
+end;
+
 { Can e be used where a variable is required? }
 function isVariableReference(e: PNode): boolean;
 var
@@ -636,7 +728,14 @@ begin
         d := e^.refDecl;
         isVariableReference := (d <> nil) and (d^.kind in [dkVar, dkField]);
       end;
-    nkIndex, nkField:
+    nkField:
+      { obj.f is a variable like p^.f, whatever obj is (objfpc) }
+      if isObject(e^.base) then
+        isVariableReference := (e^.fieldDecl <> nil) and
+                               (e^.fieldDecl^.kind = dkField)
+      else
+        isVariableReference := isVariableReference(e^.base);
+    nkIndex:
       isVariableReference := isVariableReference(e^.base);
     nkDeref:
       isVariableReference := true; { p^ is a variable even for a call's result }
@@ -645,12 +744,19 @@ begin
   end;
 end;
 
-{ The const parameter a designator is part of (x, x[i], x.f; not x^). }
+{ The const parameter a designator is part of (x, x[i], x.f; not x^ or
+  obj.f). }
 function constParamRoot(e: PNode): PDecl;
 begin
   while true do
     case e^.kind of
-      nkIndex, nkField: e := e^.base;
+      nkIndex: e := e^.base;
+      nkField:
+        begin
+          if isObject(e^.base) then
+            exit(nil);
+          e := e^.base;
+        end;
       nkParen: e := e^.inner;
     else
       begin
@@ -1338,6 +1444,11 @@ begin
           exit;
         buildType := newRecordType(ts^.fields, all, ts^.recPacked);
       end;
+    tsClass:
+      begin
+        ms('a class type must be declared in a ''type'' section');
+        errR(ts^.b, specRange(ts));
+      end;
   end;
 end;
 
@@ -1373,10 +1484,603 @@ begin
   declare(c);
 end;
 
+procedure declareClass(td: PDecl); forward;
+
 procedure declareType(td: PDecl);
 begin
+  if td^.typeSpec^.kind = tsClass then
+  begin
+    declareClass(td);
+    exit;
+  end;
   td^.declType := resolveType(td^.typeSpec, td^.ident.spelling);
   declare(td);
+end;
+
+{ --- Classes (objfpc) --- }
+
+procedure resolveSignature(r: PDecl); forward;
+procedure checkRoutineBody(r: PDecl); forward;
+function sameSignature(a, b: PDecl): boolean; forward;
+
+{ 'TFoo.Bar' (without quotes) }
+procedure maQualified(c: PType; const id: TIdent);
+begin
+  bufAddTypeName(msg, c);
+  ma('.');
+  maN(id.spelling);
+end;
+
+procedure defineClassMembers(c: PType; ts: PTypeSpec); forward;
+
+{ TFoo = class ... end;  /  TFoo = class; }
+procedure declareClass(td: PDecl);
+var
+  ts: PTypeSpec;
+  c: PType;
+  i, j: longint;
+  pd: PDecl;
+begin
+  ts := td^.typeSpec;
+  if curRoutine <> nil then
+  begin
+    ms('class ''');
+    maN(td^.ident.spelling);
+    ma(''' must be declared at program or unit level');
+    errR(td^.ident.loc, identRange(td^.ident));
+    td^.declType := errorType;
+    ts^.resolved := errorType;
+    declare(td);
+    exit;
+  end;
+  { the definition of a class declared forward in this type section? }
+  if not ts^.isForwardClass then
+    for i := 0 to pendingClasses.count - 1 do
+    begin
+      pd := PDecl(listGet(pendingClasses, i));
+      if (pd^.ident.name = td^.ident.name) and
+         (scopeLookupOwn(cur, td^.ident.name) = pd) then
+      begin
+        { remove it, keeping the others in order }
+        for j := i to pendingClasses.count - 2 do
+          listSet(pendingClasses, j, listGet(pendingClasses, j + 1));
+        listPop(pendingClasses);
+        c := pd^.declType;
+        td^.declType := c;
+        ts^.resolved := c;
+        defineClassMembers(c, ts);
+        exit;
+      end;
+    end;
+  c := newClassType;
+  setDeclName(c, td^.ident.spelling);
+  c^.classModule := curModule;
+  td^.declType := c;
+  ts^.resolved := c;
+  declare(td); { before the members, which may refer to the class }
+  if ts^.isForwardClass then
+  begin
+    listAdd(pendingClasses, td);
+    exit;
+  end;
+  defineClassMembers(c, ts);
+end;
+
+{ A forward class must be defined in the same type section. }
+procedure checkPendingClasses;
+var
+  i: longint;
+  td: PDecl;
+  members: TPtrList;
+begin
+  for i := 0 to pendingClasses.count - 1 do
+  begin
+    td := PDecl(listGet(pendingClasses, i));
+    ms('class ''');
+    maN(td^.ident.spelling);
+    ma(''' is declared forward but never defined');
+    errR(td^.ident.loc, identRange(td^.ident));
+    listInit(members);
+    defineClass(td^.declType, tobjectType, members,
+                tobjectType^.classAllFields, tobjectType^.classVTable,
+                curModule);
+  end;
+  listClear(pendingClasses);
+end;
+
+{ The defined class named id (a parent class or a method's class), or nil
+  after a diagnostic. }
+function lookupClass(const id: TIdent): PType;
+var
+  d: PDecl;
+  c: PType;
+begin
+  lookupClass := nil;
+  d := lookup(id.name);
+  if d = nil then
+  begin
+    ms('unknown class name ''');
+    maN(id.spelling);
+    ma('''');
+    maDidYouMean(id.name);
+    errR(id.loc, identRange(id));
+    exit;
+  end;
+  if (d^.kind = dkType) and (d^.declType <> nil) and isError(d^.declType) then
+    exit;
+  c := nil;
+  if (d^.kind = dkType) and (d^.declType <> nil) and
+     (d^.declType^.kind = tyClass) then
+    c := d^.declType;
+  if c = nil then
+  begin
+    ms('''');
+    maN(id.spelling);
+    ma(''' is not a class type');
+    errR(id.loc, identRange(id));
+    noteDeclaredHere(d);
+    exit;
+  end;
+  if not c^.classDefined then
+  begin
+    ms('class ''');
+    maN(id.spelling);
+    ma(''' is not defined yet (only declared forward)');
+    errR(id.loc, identRange(id));
+    exit;
+  end;
+  lookupClass := c;
+end;
+
+{ The hidden parameter Self of method r of class c. }
+procedure makeSelf(r: PDecl; c: PType);
+var
+  self_: PDecl;
+begin
+  self_ := newDecl(dkVar, memberIdent('Self'), noLoc);
+  self_^.varKind := vkValueParam;
+  self_^.varType := c;
+  self_^.owner := r;
+  r^.selfVar := self_;
+end;
+
+function sameHeading(a, b: PDecl): boolean;
+begin
+  sameHeading := (a^.methodKind = b^.methodKind) and
+                 (a^.isFunction = b^.isFunction) and sameSignature(a, b) and
+                 (not a^.isFunction or (a^.resultType = b^.resultType));
+end;
+
+procedure defineMethod(c, parentClass: PType; r, inh: PDecl; owner: PType;
+                       var vtable: TPtrList);
+begin
+  r^.ownerClass := c;
+  r^.parent := nil;
+  r^.level := 1;
+  resolveSignature(r);
+  makeSelf(r, c);
+  if (r^.methodKind = mtConstructor) and (r^.isVirtual or r^.isOverride) then
+  begin
+    ms('virtual constructors are not supported');
+    errR(r^.ident.loc, identRange(r^.ident));
+    exit;
+  end;
+  if r^.isVirtual and r^.isOverride then
+  begin
+    ms('method ''');
+    maN(r^.ident.spelling);
+    ma(''' cannot be both ''virtual'' and ''override''');
+    errR(r^.ident.loc, identRange(r^.ident));
+    exit;
+  end;
+  if r^.isAbstract and not r^.isVirtual and not r^.isOverride then
+  begin
+    ms('abstract method ''');
+    maN(r^.ident.spelling);
+    ma(''' must be ''virtual''');
+    errR(r^.ident.loc, identRange(r^.ident));
+    exit;
+  end;
+  if r^.isOverride then
+  begin
+    if (inh = nil) or (inh^.vmtIndex < 0) then
+    begin
+      ms('method ''');
+      maN(r^.ident.spelling);
+      ma(''' is marked ''override'' but there is no virtual method ''');
+      maN(r^.ident.spelling);
+      ma(''' to override in ');
+      maT(parentClass);
+      errR(r^.ident.loc, identRange(r^.ident));
+      if inh <> nil then
+        noteDeclaredHere(inh);
+      exit;
+    end;
+    if not sameHeading(inh, r) then
+    begin
+      ms('heading of ''');
+      maN(r^.ident.spelling);
+      ma(''' does not match the method it overrides in ');
+      maT(owner);
+      errR(r^.ident.loc, identRange(r^.ident));
+      noteDeclaredHere(inh);
+      exit;
+    end;
+    r^.vmtIndex := inh^.vmtIndex;
+    listSet(vtable, inh^.vmtIndex, r);
+    exit;
+  end;
+  if r^.isVirtual then
+  begin
+    r^.vmtIndex := vtable.count;
+    listAdd(vtable, r);
+  end;
+end;
+
+{ A property's accessor named id: a member declared before it in class c,
+  or one of the parent's; nil after a diagnostic. }
+function findAccessor(c, parentClass: PType; const own: TIntMap;
+                      const id: TIdent): PDecl;
+var
+  d: PDecl;
+  owner: PType;
+begin
+  d := PDecl(mapGet(own, id.name^.id));
+  if d = nil then
+    d := findMember(parentClass, id.name, owner);
+  if d = nil then
+  begin
+    ms('no field or method named ''');
+    maN(id.spelling);
+    ma(''' in ');
+    maT(c);
+    errR(id.loc, identRange(id));
+  end;
+  findAccessor := d;
+end;
+
+{ property P: T read R write W -- R: a field of type T or a function
+  without parameters returning T; W: a field of type T or a procedure with
+  one value or const parameter of type T. }
+procedure definePropertyAccessors(c, parentClass: PType; p: PDecl;
+                                  const own: TIntMap);
+var
+  t: PType;
+  rd, wr, prm: PDecl;
+  ok: boolean;
+begin
+  t := resolveType(p^.propSpec, nil);
+  p^.propType := t;
+  if not identValid(p^.readName) and not identValid(p^.writeName) then
+  begin
+    ms('property ''');
+    maN(p^.ident.spelling);
+    ma(''' needs a ''read'' or ''write'' accessor');
+    errR(p^.loc, identRange(p^.ident));
+    exit;
+  end;
+  rd := nil;
+  wr := nil;
+  if identValid(p^.readName) then
+    rd := findAccessor(c, parentClass, own, p^.readName);
+  if rd <> nil then
+  begin
+    ok := ((rd^.kind = dkField) and (rd^.fieldType = t)) or
+          ((rd^.kind = dkRoutine) and rd^.isFunction and
+           (rd^.params.count = 0) and (rd^.resultType = t));
+    if not ok and not isError(t) then
+    begin
+      ms('''');
+      maN(p^.readName.spelling);
+      ma(''' cannot be read as property ''');
+      maN(p^.ident.spelling);
+      ma(''' of type ');
+      maT(t);
+      ma(' (use a field of that type or a function without parameters ' +
+         'returning it)');
+      errR(p^.readName.loc, identRange(p^.readName));
+      rd := nil;
+    end;
+  end;
+  if identValid(p^.writeName) then
+    wr := findAccessor(c, parentClass, own, p^.writeName);
+  if wr <> nil then
+  begin
+    ok := (wr^.kind = dkField) and (wr^.fieldType = t);
+    if not ok and (wr^.kind = dkRoutine) and (wr^.methodKind = mtMethod) and
+       not wr^.isFunction and (wr^.params.count = 1) then
+    begin
+      prm := PDecl(listGet(wr^.params, 0));
+      ok := (prm^.varKind <> vkVarParam) and (prm^.varType = t);
+    end;
+    if not ok and not isError(t) then
+    begin
+      ms('''');
+      maN(p^.writeName.spelling);
+      ma(''' cannot be written as property ''');
+      maN(p^.ident.spelling);
+      ma(''' of type ');
+      maT(t);
+      ma(' (use a field of that type or a procedure with one parameter ' +
+         'of it)');
+      errR(p^.writeName.loc, identRange(p^.writeName));
+      wr := nil;
+    end;
+  end;
+  p^.readDecl := rd;
+  p^.writeDecl := wr;
+end;
+
+procedure defineClassMembers(c: PType; ts: PTypeSpec);
+var
+  parentClass, owner, pc: PType;
+  members, fields, vtable: TPtrList;
+  own: TIntMap;
+  i: longint;
+  m, prev, inh: PDecl;
+begin
+  parentClass := tobjectType;
+  if identValid(ts^.parentName) then
+  begin
+    if ts^.parentName.name = intern(lowerStr(nameStr(c^.declName))) then
+    begin
+      ms('class ');
+      maT(c);
+      ma(' cannot inherit from itself');
+      errR(ts^.parentName.loc, identRange(ts^.parentName));
+    end
+    else
+    begin
+      pc := lookupClass(ts^.parentName);
+      if pc <> nil then
+        parentClass := pc;
+    end;
+  end;
+
+  listInit(members);
+  listInit(fields);
+  for i := 0 to parentClass^.classAllFields.count - 1 do
+    listAdd(fields, listGet(parentClass^.classAllFields, i));
+  listInit(vtable);
+  for i := 0 to parentClass^.classVTable.count - 1 do
+    listAdd(vtable, listGet(parentClass^.classVTable, i));
+  mapInit(own);
+  for i := 0 to ts^.memberList.count - 1 do
+  begin
+    m := PDecl(listGet(ts^.memberList, i));
+    prev := PDecl(mapGet(own, m^.ident.name^.id));
+    if prev <> nil then
+    begin
+      ms('redefinition of ''');
+      maN(m^.ident.spelling);
+      ma('''');
+      errR(m^.ident.loc, identRange(m^.ident));
+      ms('previous definition is here');
+      note(prev^.loc);
+      continue;
+    end;
+    owner := nil;
+    inh := findMember(parentClass, m^.ident.name, owner);
+    if (inh <> nil) and not ((m^.kind = dkRoutine) and (inh^.kind = dkRoutine)) then
+    begin
+      ms('''');
+      maN(m^.ident.spelling);
+      ma(''' is already declared in class ');
+      maT(owner);
+      errR(m^.ident.loc, identRange(m^.ident));
+      noteDeclaredHere(inh);
+      continue;
+    end;
+    mapPut(own, m^.ident.name^.id, m);
+    listAdd(members, m);
+    case m^.kind of
+      dkField:
+        begin
+          m^.fieldType := resolveType(m^.fieldSpec, nil);
+          if containsFile(m^.fieldType) then
+          begin
+            ms('a field of a class cannot be a file');
+            errR(m^.ident.loc, identRange(m^.ident));
+          end;
+          listAdd(fields, m);
+        end;
+      dkRoutine:
+        begin
+          if (inh <> nil) and (inh^.kind <> dkRoutine) then
+            inh := nil;
+          defineMethod(c, parentClass, m, inh, owner, vtable);
+        end;
+    else
+      definePropertyAccessors(c, parentClass, m, own);
+    end;
+  end;
+  defineClass(c, parentClass, members, fields, vtable, curModule);
+end;
+
+{ procedure TFoo.Bar ...; begin ... end;  -- the body of a method. }
+procedure declareMethodBody(r: PDecl);
+var
+  c, rt: PType;
+  m, p: PDecl;
+  i: longint;
+begin
+  if curRoutine <> nil then
+  begin
+    ms('method ''');
+    maN(r^.methodClassName.spelling);
+    ma('.');
+    maN(r^.ident.spelling);
+    ma(''' must be implemented at program or unit level');
+    errR(r^.methodClassName.loc, identRange(r^.methodClassName));
+    exit;
+  end;
+  c := lookupClass(r^.methodClassName);
+  if c = nil then
+    exit;
+  m := findOwnMember(c, r^.ident.name);
+  if (m <> nil) and ((m^.kind <> dkRoutine) or (m^.objMethod <> obNone)) then
+    m := nil;
+  if m = nil then
+  begin
+    ms('class ');
+    maT(c);
+    ma(' has no method ''');
+    maN(r^.ident.spelling);
+    ma('''');
+    errR(r^.ident.loc, identRange(r^.ident));
+    exit;
+  end;
+  if c^.classModule <> curModule then
+  begin
+    ms('method ''');
+    maQualified(c, m^.ident);
+    ma(''' must be implemented where its class is declared');
+    errR(r^.ident.loc, identRange(r^.ident));
+    exit;
+  end;
+  if (m^.methodKind <> r^.methodKind) or (m^.isFunction <> r^.isFunction) then
+  begin
+    ms('''');
+    maQualified(c, m^.ident);
+    ma(''' was declared as a ' + kindName(m));
+    errR(r^.ident.loc, identRange(r^.ident));
+    noteDeclaredHere(m);
+    exit;
+  end;
+  if m^.isAbstract then
+  begin
+    ms('abstract method ''');
+    maQualified(c, m^.ident);
+    ma(''' cannot have a body');
+    errR(r^.ident.loc, identRange(r^.ident));
+    noteDeclaredHere(m);
+    exit;
+  end;
+  if m^.body <> nil then
+  begin
+    ms('redefinition of ''');
+    maQualified(c, m^.ident);
+    ma('''');
+    errR(r^.ident.loc, identRange(r^.ident));
+    exit;
+  end;
+  if r^.hasParamList or (r^.resultSpec <> nil) then
+  begin
+    for i := 0 to r^.params.count - 1 do
+    begin
+      p := PDecl(listGet(r^.params, i));
+      p^.varType := resolveType(p^.varSpec, nil);
+    end;
+    rt := nil;
+    if r^.resultSpec <> nil then
+      rt := resolveType(r^.resultSpec, nil);
+    if not sameSignature(m, r) or ((rt <> nil) and (rt <> m^.resultType)) then
+    begin
+      ms('heading of ''');
+      maQualified(c, m^.ident);
+      ma(''' does not match its declaration');
+      errR(r^.ident.loc, identRange(r^.ident));
+      noteDeclaredHere(m);
+    end;
+  end;
+  m^.body := r^.body;
+  m^.implDecl := r;
+  r^.canonical := m;
+  checkRoutineBody(m);
+end;
+
+{ Every method of the classes declared in b has a body. }
+procedure checkMethodsImplemented(b: PBlock);
+var
+  i, j: longint;
+  d, r: PDecl;
+  c: PType;
+begin
+  for i := 0 to b^.decls.count - 1 do
+  begin
+    d := PDecl(listGet(b^.decls, i));
+    if (d^.kind <> dkType) or (d^.typeSpec^.kind <> tsClass) or
+       d^.typeSpec^.isForwardClass then
+      continue;
+    c := d^.declType;
+    if (c = nil) or (c^.kind <> tyClass) then
+      continue;
+    for j := 0 to d^.typeSpec^.memberList.count - 1 do
+    begin
+      r := PDecl(listGet(d^.typeSpec^.memberList, j));
+      if (r^.kind = dkRoutine) and (r^.ownerClass = c) and not r^.isAbstract and
+         (r^.body = nil) then
+      begin
+        ms('method ''');
+        maQualified(c, r^.ident);
+        ma(''' is declared but never implemented');
+        errR(r^.ident.loc, identRange(r^.ident));
+      end;
+    end;
+  end;
+end;
+
+{ The method whose body (or a routine nested in it) is being checked. }
+function enclosingMethod: PDecl;
+var
+  r: PDecl;
+begin
+  r := curRoutine;
+  while r <> nil do
+  begin
+    if r^.methodKind <> mtNone then
+      exit(r);
+    r := r^.parent;
+  end;
+  enclosingMethod := nil;
+end;
+
+{ The class whose members a with context exposes (nil for records). }
+function classOfWith(w: PWithContext): PType;
+begin
+  classOfWith := nil;
+  if (w <> nil) and (w^.rec^.typ <> nil) and (w^.rec^.typ^.kind = tyClass) then
+    classOfWith := w^.rec^.typ;
+end;
+
+{ Reports use of a private or protected member d of class owner where it
+  is not visible: private members are visible in the program or unit
+  declaring the class, protected ones also in methods of descendants. }
+procedure checkMemberAccess(d: PDecl; owner: PType; const id: TIdent);
+var
+  m: PDecl;
+begin
+  if (d^.vis = vsPublic) or (d^.vis = vsPublished) or (owner = nil) or
+     (owner^.classModule = curModule) then
+    exit;
+  if d^.vis = vsProtected then
+  begin
+    m := enclosingMethod;
+    if (m <> nil) and inheritsFrom(m^.ownerClass, owner) then
+      exit;
+  end;
+  ms('''');
+  maN(id.spelling);
+  if d^.vis = vsPrivate then
+    ma(''' is a private member of ')
+  else
+    ma(''' is a protected member of ');
+  maT(owner);
+  errR(id.loc, identRange(id));
+  noteDeclaredHere(d);
+end;
+
+{ Visibility of a member found by name through a class scope. }
+procedure checkScopeAccess(d: PDecl; w: PWithContext; const id: TIdent);
+var
+  c, owner: PType;
+begin
+  c := classOfWith(w);
+  if c = nil then
+    exit;
+  owner := nil;
+  findMember(c, id.name, owner);
+  checkMemberAccess(d, owner, id);
 end;
 
 { Is t an array of char (any index type) that a string constant of length
@@ -1619,8 +2323,6 @@ begin
   sameSignature := true;
 end;
 
-procedure checkRoutineBody(r: PDecl); forward;
-
 { External (C) routines: at the outermost level, with C-compatible types. }
 procedure checkExternal(r: PDecl);
 
@@ -1677,6 +2379,11 @@ begin
     r^.level := curRoutine^.level + 1
   else
     r^.level := 1;
+  if identValid(r^.methodClassName) then
+  begin
+    declareMethodBody(r);
+    exit;
+  end;
   { the definition of an earlier forward declaration? }
   fwd := scopeLookupOwn(cur, r^.ident.name);
   if (fwd <> nil) and (fwd^.kind <> dkRoutine) then
@@ -1800,7 +2507,10 @@ begin
       exit;
     d := PDecl(listGet(b^.decls, i));
     if d^.kind <> dkType then
+    begin
       resolvePendingPointers;
+      checkPendingClasses;
+    end;
     case d^.kind of
       dkConst: declareConst(d);
       dkType: declareType(d);
@@ -1825,6 +2535,7 @@ begin
     end;
   end;
   resolvePendingPointers;
+  checkPendingClasses;
 end;
 
 procedure visitStmt(s: PNode); forward;
@@ -1848,6 +2559,7 @@ begin
       errR(d^.ident.loc, identRange(d^.ident));
     end;
   end;
+  checkMethodsImplemented(b);
   savedBody := routineBody;
   routineBody := b^.body;
   visitStmt(b^.body);
@@ -1892,11 +2604,27 @@ var
   savedScope: PScope;
   savedRoutine, p, prev: PDecl;
   i: longint;
+  selfRef: PNode;
+  w: PWithContext;
 begin
   savedScope := cur;
   savedRoutine := curRoutine;
+  if r^.methodKind <> mtNone then
+  begin
+    { a method sees the members of its class through Self }
+    selfRef := newNode(nkNameRef, noLoc, noLoc);
+    selfRef^.ref := r^.selfVar^.ident;
+    selfRef^.refDecl := r^.selfVar;
+    selfRef^.typ := r^.ownerClass;
+    w := PWithContext(arenaAlloc(sizeof(TWithContext)));
+    w^.rec := selfRef;
+    w^.isSelf := true;
+    cur := newClassScope(cur, r^.ownerClass, w);
+  end;
   cur := newScope(cur);
   curRoutine := r;
+  if r^.methodKind <> mtNone then
+    scopeInsert(cur, r^.selfVar^.ident.name, r^.selfVar);
   for i := 0 to r^.params.count - 1 do
   begin
     p := PDecl(listGet(r^.params, i));
@@ -1907,10 +2635,21 @@ begin
       maN(p^.ident.spelling);
       ma('''');
       errR(p^.loc, identRange(p^.ident));
-      ms('previous parameter is here');
-      note(prev^.loc);
+      if isPredeclared(prev) then
+      begin
+        ms('''Self'' is the object a method is called on');
+        note(p^.loc);
+      end
+      else
+      begin
+        ms('previous parameter is here');
+        note(prev^.loc);
+      end;
     end;
   end;
+  { objfpc: Result names the function result }
+  if (mode = lmObjFPC) and r^.isFunction and (r^.resultVar <> nil) then
+    scopeInsert(cur, intern('result'), r^.resultVar);
   checkBlock(r^.body);
   if r^.isFunction and not r^.resultAssigned and not isError(r^.resultType) then
   begin
@@ -2183,7 +2922,7 @@ begin
   listInit(params);
   res := nil;
   found := false;
-  if (d <> nil) and (d^.kind = dkRoutine) then
+  if (d <> nil) and (d^.kind = dkRoutine) and (d^.methodKind = mtNone) then
   begin
     params := d^.params;
     if d^.isFunction then
@@ -2338,6 +3077,7 @@ var
   i: longint;
   r: PDecl;
 begin
+  curModule := u;
   iface := newScope(standard);
   importUnits(iface, u^.ifaceUses);
   cur := iface;
@@ -2372,6 +3112,7 @@ begin
       errR(r^.ident.loc, identRange(r^.ident));
     end;
   end;
+  checkMethodsImplemented(u^.iface);
   finishBlock(u^.impl, true);
   curUnitInterface := nil;
   { interface variables may be used by other units: never unused }
@@ -2399,6 +3140,10 @@ begin
   curRoutine := nil;
   curUnitInterface := nil;
   programLabelCount := 0;
+  curModule := nil;
+  curAssignTarget := nil;
+  tobjectType := nil;
+  listInit(pendingClasses);
   standard := newScope(nil);
   cur := standard;
   declareStandardScope;
@@ -2415,6 +3160,7 @@ begin
   for i := 0 to units.count - 1 do
     checkUnit(PDecl(listGet(units, i)), separateUnits);
   checkProgramParams(prog);
+  curModule := prog;
   programScope := newScope(standard);
   importUnits(programScope, prog^.progUses);
   cur := programScope;

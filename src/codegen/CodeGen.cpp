@@ -16,6 +16,12 @@
 //   var parameters      -> pointer stored in the frame
 //   value arrays/records -> passed by pointer, copied into the callee frame
 //
+//   objects (objfpc) -> a pointer to a heap block: [VMT pointer, ancestors'
+//     fields, own fields]. A class's VMT is a constant [2 + N x ptr]:
+//     parent VMT, class name (length-prefixed), then the N virtual methods.
+//     TObject's VMT and destructor are in the runtime. Methods take Self
+//     after the static link.
+//
 //   and/or -> short-circuit;  for -> test the final value before stepping
 //   case   -> switch; no matching label is a runtime error in ISO mode
 //   runtime checks (CodeGenOptions) call __pas_runtime_error("... at f:l:c")
@@ -161,6 +167,11 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
   llvm::DenseMap<VarDecl *, unsigned> FrameSlots;
   llvm::DenseMap<Type *, llvm::Type *> LoweredTypes;
   llvm::DenseMap<FieldDecl *, uint64_t> FieldOffsets;
+  /// Classes (objfpc): instance layouts (used only for offsets and sizes)
+  /// and VMTs, in the order the classes were declared.
+  llvm::DenseMap<ClassType *, llvm::StructType *> ClassLayouts;
+  llvm::DenseMap<ClassType *, llvm::GlobalVariable *> VMTs;
+  std::vector<ClassType *> VMTsToDefine;
   llvm::DenseMap<WithContext *, llvm::Value *> WithAddrs;
   llvm::StringMap<llvm::GlobalVariable *> StringConstants;
   std::vector<RoutineDecl *> RoutinesToEmit;
@@ -200,6 +211,21 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
 
   void collectExports(UnitDecl &U, bool Imported) {
     for (Decl *D : U.getInterface()->getDecls()) {
+      if (ClassType *C = definedClass(D)) {
+        // A class: its VMT and its methods.
+        std::string Prefix =
+            ("pas." + U.getName().Name + "$" + C->getDeclName().lower()).str();
+        ExportNames[D] = Prefix + "$vmt";
+        if (Imported)
+          ImportedDecls.insert(D);
+        for (Decl *M : C->getMembers())
+          if (auto *R = llvm::dyn_cast<RoutineDecl>(M); R && !R->isAbstract()) {
+            ExportNames[R] = Prefix + "." + R->getName().Name.str();
+            if (Imported)
+              ImportedDecls.insert(R);
+          }
+        continue;
+      }
       auto *R = llvm::dyn_cast<RoutineDecl>(D);
       if (!llvm::isa<VarDecl>(D) && !(R && !R->isExternal()))
         continue;
@@ -233,6 +259,17 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
 
   /// Generous for every supported libc (glibc: 200-312 bytes, macOS: 192).
   llvm::Type *jmpBufType() { return llvm::ArrayType::get(B.getInt64Ty(), 64); }
+
+  /// The class D defines (a type declaration `TFoo = class ... end`, not a
+  /// forward one), or null.
+  static ClassType *definedClass(Decl *D) {
+    auto *TD = llvm::dyn_cast<TypeDecl>(D);
+    auto *CS = TD ? llvm::dyn_cast_or_null<ClassTypeSpec>(TD->getTypeSpec())
+                  : nullptr;
+    if (!CS || CS->isForward())
+      return nullptr;
+    return llvm::dyn_cast_or_null<ClassType>(TD->getType());
+  }
 
   static bool hasNonLocalLabels(Block &Blk) {
     for (Decl *D : Blk.getDecls())
@@ -291,6 +328,8 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
           B.getInt8Ty(), llvm::cast<ShortStringType>(T)->getMaxLength() + 1);
     case Type::TK_Routine: // {function, static link}
       return llvm::StructType::get(B.getPtrTy(), B.getPtrTy());
+    case Type::TK_Class: // a reference to the object
+      return B.getPtrTy();
     case Type::TK_Error:
       break;
     }
@@ -362,6 +401,28 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
   }
 
   uint64_t sizeOf(Type *T) { return DL.getTypeAllocSize(memType(T)); }
+
+  /// The layout of an object of class C: VMT pointer, then all fields.
+  /// Records each field's offset; a prefix of fields has the same offsets
+  /// in every descendant.
+  llvm::StructType *classLayout(ClassType *C) {
+    if (llvm::StructType *ST = ClassLayouts.lookup(C))
+      return ST;
+    llvm::SmallVector<llvm::Type *, 8> Elems{B.getPtrTy()};
+    for (FieldDecl *F : C->getAllFields())
+      Elems.push_back(memType(F->getType()));
+    llvm::StructType *ST = llvm::StructType::create(
+        M.getContext(), Elems, ("class." + C->getDeclName()).str());
+    const llvm::StructLayout *SL = DL.getStructLayout(ST);
+    for (size_t I = 0; I < C->getAllFields().size(); ++I)
+      FieldOffsets[C->getAllFields()[I]] = SL->getElementOffset(I + 1);
+    ClassLayouts[C] = ST;
+    return ST;
+  }
+
+  uint64_t instanceSize(ClassType *C) {
+    return DL.getTypeAllocSize(classLayout(C));
+  }
 
   //===--------------------------------------------------------------------===//
   // Scalars in memory
@@ -740,11 +801,14 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
            (V->isConstParam() && V->getType()->isStructured());
   }
 
+  /// pas.<outer>.<name> for routines, pas.<class>.<name> for methods.
   static std::string mangle(RoutineDecl *R) {
-    std::string Name = R->getName().Name.str();
-    for (RoutineDecl *P = R->getParent(); P; P = P->getParent())
-      Name = P->getName().Name.str() + "." + Name;
-    return "pas." + Name;
+    if (R->isMethod())
+      return "pas." + R->getClass()->getDeclName().lower() + "." +
+             R->getName().Name.str();
+    if (RoutineDecl *P = R->getParent())
+      return mangle(P) + "." + R->getName().Name.str();
+    return "pas." + R->getName().Name.str();
   }
 
   /// Pointer to the frame of routine Target, reached from the current
@@ -870,7 +934,10 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
   /// recorded when the record is laid out, which may not have happened yet
   /// (a record reached only through pointers), so lay it out first.
   llvm::Value *fieldAddress(llvm::Value *RecordAddr, Type *RT, FieldDecl *F) {
-    memType(RT);
+    if (auto *C = llvm::dyn_cast<ClassType>(RT))
+      classLayout(C); // RecordAddr is the object
+    else
+      memType(RT);
     assert(FieldOffsets.count(F) && "field of another record type");
     return B.CreateConstInBoundsGEP1_64(B.getInt8Ty(), RecordAddr,
                                         FieldOffsets[F], F->getName().Name);
@@ -887,8 +954,13 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
       if (llvm::isa<RoutineDecl>(N->getDecl())) // f: a record or string result
         return visitExpr(E);
       if (auto *F = llvm::dyn_cast<FieldDecl>(N->getDecl()))
-        return fieldAddress(WithAddrs.lookup(N->getWith()),
+        return fieldAddress(withBase(N->getWith()),
                             N->getWith()->Record->getType(), F);
+      if (auto *P = llvm::dyn_cast<PropertyDecl>(N->getDecl())) {
+        WithContext *W = N->getWith();
+        return emitPropertyRead(P, withBase(W),
+                                llvm::cast<ClassType>(W->Record->getType()));
+      }
       auto *C = llvm::cast<ConstDecl>(N->getDecl());
       return getStringConstant(C->getValue().Str);
     }
@@ -898,6 +970,7 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
       return emitAddress(llvm::cast<ParenExpr>(E)->getInner());
     case Expr::EK_Call:
     case Expr::EK_IndirectCall:
+    case Expr::EK_Inherited:
       // A record (or string) function result: a temporary holding it.
       assert(E->getType()->isStructured() && "call result has no address");
       return visitExpr(E);
@@ -937,6 +1010,11 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
     }
     case Expr::EK_Field: {
       auto *F = llvm::cast<FieldExpr>(E);
+      if (auto *C = llvm::dyn_cast<ClassType>(F->getBase()->getType())) {
+        if (!llvm::isa<FieldDecl>(F->getMember()))
+          return emitMemberValue(F); // a structured property or result
+        return fieldAddress(emitObject(F->getBase()), C, F->getFieldDecl());
+      }
       return fieldAddress(emitAddress(F->getBase()), F->getBase()->getType(),
                           F->getFieldDecl());
     }
@@ -982,7 +1060,7 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
     llvm::DIType *D = buildDebugType(T);
     // Named arrays, subranges, pointers ...: a typedef carries the name.
     if (!T->getDeclName().empty() && !T->isRecord() && !T->isEnum() &&
-        !llvm::isa<BuiltinType>(T))
+        !T->isClass() && !llvm::isa<BuiltinType>(T))
       D = DIB->createTypedef(D, T->getDeclName(), DIUnitFile, 0, CU);
     DITypes[T] = D;
     return D;
@@ -1061,6 +1139,26 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
     }
     case Type::TK_File:
       return DIB->createPointerType(DIB->createUnspecifiedType("PasFile"), 64);
+    case Type::TK_Class: {
+      // A pointer to a structure holding the fields (after the VMT pointer).
+      auto *C = llvm::cast<ClassType>(T);
+      classLayout(C);
+      llvm::DICompositeType *Fwd = DIB->createReplaceableCompositeType(
+          DW_TAG_structure_type, T->getDeclName(), CU, DIUnitFile, 0);
+      llvm::DIType *Ptr = DIB->createPointerType(Fwd, 64);
+      DITypes[T] = Ptr; // fields may refer to the class
+      llvm::SmallVector<llvm::Metadata *, 8> Members;
+      for (FieldDecl *F : C->getAllFields())
+        Members.push_back(DIB->createMemberType(
+            Fwd, F->getName().Spelling, DIUnitFile, lineOf(F->getLocation()),
+            sizeOf(F->getType()) * 8, 0, FieldOffsets[F] * 8,
+            llvm::DINode::FlagZero, debugType(F->getType())));
+      llvm::DICompositeType *Def = DIB->createStructType(
+          CU, T->getDeclName(), DIUnitFile, 0, instanceSize(C) * 8, 0,
+          llvm::DINode::FlagZero, nullptr, DIB->getOrCreateArray(Members));
+      Fwd->replaceAllUsesWith(Def);
+      return Ptr;
+    }
     default: // procedural values, nil
       return DIB->createUnspecifiedType(T->getName());
     }
@@ -1070,8 +1168,11 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
                                        llvm::DIScope *Scope, unsigned Line,
                                        Type *Result,
                                        llvm::ArrayRef<VarDecl *> Params,
-                                       llvm::DIFile *File = nullptr) {
+                                       llvm::DIFile *File = nullptr,
+                                       VarDecl *Self = nullptr) {
     llvm::SmallVector<llvm::Metadata *, 8> Sig{Result ? debugType(Result) : nullptr};
+    if (Self)
+      Sig.push_back(debugType(Self->getType()));
     for (VarDecl *P : Params)
       Sig.push_back(isByRef(P)
                         ? DIB->createReferenceType(llvm::dwarf::DW_TAG_reference_type,
@@ -1115,7 +1216,8 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
     const llvm::StructLayout *SL = DL.getStructLayout(FrameTy);
     auto Declare = [&](VarDecl *V, unsigned ArgNo) {
       llvm::DIType *Ty = debugType(V->getType());
-      unsigned Line = lineOf(V->getLocation());
+      // Self has no location of its own: the method's.
+      unsigned Line = lineOf(V->isPredeclared() ? R->getBodyLocation() : V->getLocation());
       llvm::DILocalVariable *DV =
           ArgNo ? DIB->createParameterVariable(CurSP, V->getName().Spelling, ArgNo,
                                                DIUnitFile, Line, Ty)
@@ -1130,6 +1232,8 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
                          B.GetInsertBlock());
     };
     unsigned ArgNo = 1;
+    if (R->isMethod())
+      Declare(R->getSelfVar(), ArgNo++);
     for (VarDecl *P : R->getParams())
       Declare(P, ArgNo++);
     for (Decl *D : R->getBody()->getDecls())
@@ -1252,14 +1356,22 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
   /// Every routine takes its static link first (null at program level), so
   /// procedural parameters can call any routine the same way.
   llvm::FunctionType *routineFnType(llvm::ArrayRef<VarDecl *> Params,
-                                    Type *Result) {
+                                    Type *Result, bool HasSelf = false) {
     llvm::SmallVector<llvm::Type *, 8> ParamTys{B.getPtrTy()};
+    if (HasSelf) // methods: Self after the static link
+      ParamTys.push_back(B.getPtrTy());
     for (VarDecl *P : Params)
       ParamTys.push_back(P->isVarParam() || P->getType()->isStructured()
                              ? B.getPtrTy()
                              : regType(P->getType()));
     llvm::Type *RetTy = Result ? regType(Result) : B.getVoidTy();
     return llvm::FunctionType::get(RetTy, ParamTys, false);
+  }
+
+  llvm::FunctionType *routineFnType(RoutineDecl *R) {
+    return routineFnType(R->getParams(),
+                         R->isFunction() ? R->getResultType() : nullptr,
+                         R->isMethod());
   }
 
   /// An external (C) routine: no static link, C types.
@@ -1276,7 +1388,15 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
 
   void declareRoutines(Block &Blk) {
     for (Decl *D : Blk.getDecls()) {
+      if (ClassType *C = definedClass(D)) {
+        declareClass(D, C);
+        continue;
+      }
       auto *R = llvm::dyn_cast<RoutineDecl>(D);
+      if (R && R->isRedeclaration() && R->getCanonical()->isMethod()) {
+        declareRoutine(R->getCanonical()); // a method's implementation
+        continue;
+      }
       if (!R || R->isRedeclaration())
         continue; // the forward declaration is the canonical node
       if (R->isExternal()) {
@@ -1286,67 +1406,151 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
       if (ImportedDecls.count(R)) {
         // A routine of a separately compiled unit: declared only.
         Functions[R] = llvm::Function::Create(
-            routineFnType(R->getParams(),
-                          R->isFunction() ? R->getResultType() : nullptr),
-            llvm::Function::ExternalLinkage, ExportNames[R], M);
+            routineFnType(R), llvm::Function::ExternalLinkage, ExportNames[R], M);
         continue;
       }
-
-      // Frame: [static link], params, locals, [result].
-      llvm::SmallVector<llvm::Type *, 8> Slots;
-      if (R->hasStaticLink())
-        Slots.push_back(B.getPtrTy());
-      auto AddSlot = [&](VarDecl *V) {
-        FrameSlots[V] = Slots.size();
-        Slots.push_back(isByRef(V) ? B.getPtrTy() : memType(V->getType()));
-      };
-      for (VarDecl *P : R->getParams())
-        AddSlot(P);
-      for (Decl *Local : R->getBody()->getDecls())
-        if (auto *V = llvm::dyn_cast<VarDecl>(Local)) {
-          if (V->isTypedConst())
-            emitStaticVar(V); // static storage, local scope
-          else
-            AddSlot(V);
-        }
-      if (R->isFunction())
-        AddSlot(R->getResultVar());
-      std::string Name = mangle(R);
-      FrameTypes[R] = llvm::StructType::create(M.getContext(), Slots,
-                                               "frame." + Name.substr(4));
-
-      if (hasNonLocalLabels(*R->getBody())) {
-        JmpBufSlots[R] = Slots.size();
-        Slots.push_back(jmpBufType());
-        FrameTypes[R] = llvm::StructType::create(M.getContext(), Slots,
-                                                 "frame." + Name.substr(4) + ".jb");
-      }
-
-      auto Export = ExportNames.find(R);
-      auto *F = llvm::Function::Create(
-          routineFnType(R->getParams(),
-                        R->isFunction() ? R->getResultType() : nullptr),
-          Export == ExportNames.end() ? llvm::Function::InternalLinkage
-                                      : llvm::Function::ExternalLinkage,
-          Export == ExportNames.end() ? Name : Export->second, M);
-      unsigned ArgNo = 0;
-      F->getArg(ArgNo++)->setName("link");
-      for (VarDecl *P : R->getParams())
-        F->getArg(ArgNo++)->setName(P->getName().Name);
-      Functions[R] = F;
-      RoutinesToEmit.push_back(R);
-      if (DIB)
-        // File scope even for nested routines: lexical nesting would make
-        // debuggers look up enclosing variables through DW_AT_static_link,
-        // which LLVM cannot emit. Use the debugger's `up` to reach them.
-        Subprograms[R] = createSubprogram(
-            F, R->getName().Spelling, diFileFor(R->getLocation()),
-            lineOf(R->getLocation()),
-            R->isFunction() ? R->getResultType() : nullptr, R->getParams(),
-            diFileFor(R->getLocation()));
-
-      declareRoutines(*R->getBody());
+      declareRoutine(R);
     }
+  }
+
+  /// A class: its VMT (defined once all methods are declared), and for a
+  /// class of a separately compiled unit its methods' declarations.
+  void declareClass(Decl *D, ClassType *C) {
+    auto Export = ExportNames.find(D);
+    bool Imported = ImportedDecls.count(D);
+    auto *Ty = llvm::ArrayType::get(B.getPtrTy(), 2 + C->getVTable().size());
+    std::string Name = Export == ExportNames.end()
+                           ? "vmt." + C->getDeclName().lower()
+                           : Export->second;
+    VMTs[C] = new llvm::GlobalVariable(
+        M, Ty, /*isConstant=*/true,
+        Export == ExportNames.end() ? llvm::GlobalValue::InternalLinkage
+                                    : llvm::GlobalValue::ExternalLinkage,
+        nullptr, Name);
+    if (!Imported) {
+      VMTsToDefine.push_back(C);
+      return;
+    }
+    for (Decl *M : C->getMembers())
+      if (auto *R = llvm::dyn_cast<RoutineDecl>(M); R && !R->isAbstract())
+        Functions[R] = llvm::Function::Create(routineFnType(R),
+                                              llvm::Function::ExternalLinkage,
+                                              ExportNames[R], this->M);
+  }
+
+  /// A runtime function used only by programs with classes.
+  llvm::FunctionCallee classRuntime(llvm::StringRef Name, llvm::Type *Ret,
+                                    llvm::ArrayRef<llvm::Type *> Params) {
+    llvm::FunctionCallee F = M.getOrInsertFunction(
+        Name, llvm::FunctionType::get(Ret, Params, /*isVarArg=*/false));
+    llvm::cast<llvm::Function>(F.getCallee())->addFnAttr(llvm::Attribute::NoUnwind);
+    return F;
+  }
+
+  /// The VMT of C; TObject's is in the runtime.
+  llvm::Constant *vmtOf(ClassType *C) {
+    if (llvm::GlobalVariable *G = VMTs.lookup(C))
+      return G;
+    llvm::GlobalVariable *G = M.getNamedGlobal("__pas_tobject_vmt");
+    if (!G)
+      G = new llvm::GlobalVariable(
+          M, llvm::ArrayType::get(B.getPtrTy(), 3), /*isConstant=*/true,
+          llvm::GlobalValue::ExternalLinkage, nullptr, "__pas_tobject_vmt");
+    VMTs[C] = G;
+    return G;
+  }
+
+  /// Fills in the VMTs: parent VMT, class name, virtual methods.
+  void defineVMTs() {
+    for (ClassType *C : VMTsToDefine) {
+      llvm::SmallVector<llvm::Constant *, 8> Slots;
+      Slots.push_back(vmtOf(C->getParent()));
+      Slots.push_back(getPStrConstant(C->getDeclName()));
+      for (RoutineDecl *R : C->getVTable()) {
+        if (R->getBuiltin() == TObjectMethod::Destroy)
+          Slots.push_back(llvm::cast<llvm::Function>(
+              classRuntime("__pas_tobject_destroy", B.getVoidTy(),
+                           {B.getPtrTy(), B.getPtrTy()})
+                  .getCallee()));
+        else if (R->isAbstract())
+          Slots.push_back(llvm::cast<llvm::Function>(
+              classRuntime("__pas_abstract_error", B.getVoidTy(), {})
+                  .getCallee()));
+        else
+          Slots.push_back(Functions[R]);
+      }
+      auto *G = llvm::cast<llvm::GlobalVariable>(VMTs[C]);
+      G->setInitializer(llvm::ConstantArray::get(
+          llvm::cast<llvm::ArrayType>(G->getValueType()), Slots));
+    }
+    VMTsToDefine.clear();
+  }
+
+  /// Creates the LLVM function and frame type of routine R (a method: of
+  /// its canonical declaration), queues its body and declares the
+  /// routines nested in it.
+  void declareRoutine(RoutineDecl *R) {
+    // Frame: [static link], [Self], params, locals, [result].
+    llvm::SmallVector<llvm::Type *, 8> Slots;
+    if (R->hasStaticLink())
+      Slots.push_back(B.getPtrTy());
+    auto AddSlot = [&](VarDecl *V) {
+      FrameSlots[V] = Slots.size();
+      Slots.push_back(isByRef(V) ? B.getPtrTy() : memType(V->getType()));
+    };
+    if (R->isMethod())
+      AddSlot(R->getSelfVar());
+    for (VarDecl *P : R->getParams())
+      AddSlot(P);
+    for (Decl *Local : R->getBody()->getDecls())
+      if (auto *V = llvm::dyn_cast<VarDecl>(Local)) {
+        if (V->isTypedConst())
+          emitStaticVar(V); // static storage, local scope
+        else
+          AddSlot(V);
+      }
+    if (R->isFunction())
+      AddSlot(R->getResultVar());
+    std::string Name = mangle(R);
+    FrameTypes[R] = llvm::StructType::create(M.getContext(), Slots,
+                                             "frame." + Name.substr(4));
+
+    if (hasNonLocalLabels(*R->getBody())) {
+      JmpBufSlots[R] = Slots.size();
+      Slots.push_back(jmpBufType());
+      FrameTypes[R] = llvm::StructType::create(M.getContext(), Slots,
+                                               "frame." + Name.substr(4) + ".jb");
+    }
+
+    auto Export = ExportNames.find(R);
+    auto *F = llvm::Function::Create(
+        routineFnType(R),
+        Export == ExportNames.end() ? llvm::Function::InternalLinkage
+                                    : llvm::Function::ExternalLinkage,
+        Export == ExportNames.end() ? Name : Export->second, M);
+    unsigned ArgNo = 0;
+    F->getArg(ArgNo++)->setName("link");
+    if (R->isMethod())
+      F->getArg(ArgNo++)->setName("self");
+    for (VarDecl *P : R->getParams())
+      F->getArg(ArgNo++)->setName(P->getName().Name);
+    Functions[R] = F;
+    RoutinesToEmit.push_back(R);
+    if (DIB)
+      // File scope even for nested routines: lexical nesting would make
+      // debuggers look up enclosing variables through DW_AT_static_link,
+      // which LLVM cannot emit. Use the debugger's `up` to reach them.
+      Subprograms[R] = createSubprogram(
+          F,
+          R->isMethod() ? R->getClass()->getName() + "." +
+                              R->getName().Spelling.str()
+                        : R->getName().Spelling.str(),
+          diFileFor(R->getBodyLocation()), lineOf(R->getBodyLocation()),
+          R->isFunction() ? R->getResultType() : nullptr, R->getParams(),
+          diFileFor(R->getBodyLocation()),
+          R->isMethod() ? R->getSelfVar() : nullptr);
+
+    declareRoutines(*R->getBody());
   }
 
   void emitRoutineBody(RoutineDecl *R) {
@@ -1356,7 +1560,7 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
     CurSP = DIB ? Subprograms[R] : nullptr;
     B.SetCurrentDebugLocation(llvm::DebugLoc());
     B.SetInsertPoint(llvm::BasicBlock::Create(M.getContext(), "entry", F));
-    setDebugLoc(R->getLocation());
+    setDebugLoc(R->getBodyLocation());
 
     llvm::StructType *FrameTy = FrameTypes[R];
     CurFrame = B.CreateAlloca(FrameTy, nullptr, "frame");
@@ -1369,6 +1573,9 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
     unsigned ArgNo = 1;
     if (R->hasStaticLink())
       B.CreateStore(F->getArg(0), B.CreateStructGEP(FrameTy, CurFrame, 0));
+    if (R->isMethod())
+      B.CreateStore(F->getArg(ArgNo++),
+                    B.CreateStructGEP(FrameTy, CurFrame, FrameSlots[R->getSelfVar()]));
     for (VarDecl *P : R->getParams()) {
       llvm::Value *Arg = F->getArg(ArgNo++);
       llvm::Value *Slot = B.CreateStructGEP(FrameTy, CurFrame, FrameSlots[P]);
@@ -1424,10 +1631,13 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
 
   llvm::Value *emitCallTo(llvm::FunctionCallee Callee, llvm::Value *Link,
                           llvm::ArrayRef<VarDecl *> Params,
-                          llvm::ArrayRef<Expr *> Args) {
+                          llvm::ArrayRef<Expr *> Args,
+                          llvm::Value *Self = nullptr) {
     llvm::SmallVector<llvm::Value *, 8> Values;
     if (Link) // external (C) routines have none
       Values.push_back(Link);
+    if (Self) // methods
+      Values.push_back(Self);
     for (size_t I = 0; I < Args.size(); ++I) {
       VarDecl *P = Params[I];
       Expr *Arg = Args[I];
@@ -1521,6 +1731,161 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
       return B.CreateInsertValue(Pair, staticLinkFor(R), 1);
     }
     return B.CreateLoad(memType(T), emitAddress(E));
+  }
+
+  //===--------------------------------------------------------------------===//
+  // Objects and methods (objfpc)
+  //===--------------------------------------------------------------------===//
+
+  /// The object a with context stands for (Self for a method body), or the
+  /// address of a with statement's record.
+  llvm::Value *withBase(WithContext *W) {
+    if (W->IsSelf)
+      return visitExpr(W->Record); // load Self
+    return WithAddrs.lookup(W);
+  }
+
+  /// if (Obj == nil) runtime error, under range checks.
+  void emitNilObjectCheck(llvm::Value *Obj, SourceLocation L) {
+    if (rangeChecks(L))
+      emitRuntimeCheck(B.CreateIsNull(Obj), "use of a nil object reference", L);
+  }
+
+  /// The object an expression of a class type refers to, checked for nil.
+  llvm::Value *emitObject(Expr *E) {
+    llvm::Value *Obj = visitExpr(E);
+    emitNilObjectCheck(Obj, E->getBeginLoc());
+    return Obj;
+  }
+
+  /// Address of virtual method Index in the VMT of object Obj.
+  llvm::Value *loadVirtual(llvm::Value *Obj, unsigned Index) {
+    llvm::Value *VMT = B.CreateLoad(B.getPtrTy(), Obj, "vmt");
+    llvm::Value *Slot = B.CreateConstInBoundsGEP1_64(B.getPtrTy(), VMT, 2 + Index);
+    return B.CreateLoad(B.getPtrTy(), Slot, "method");
+  }
+
+  /// obj.Free: if obj <> nil then obj.Destroy (virtual) and release it.
+  void emitFree(llvm::Value *Obj) {
+    auto *DoBB = newBlock("free.do");
+    auto *EndBB = newBlock("free.end");
+    B.CreateCondBr(B.CreateIsNull(Obj), EndBB, DoBB);
+    B.SetInsertPoint(DoBB);
+    llvm::Value *Fn = loadVirtual(Obj, 0);
+    llvm::FunctionType *FTy =
+        llvm::FunctionType::get(B.getVoidTy(), {B.getPtrTy(), B.getPtrTy()}, false);
+    B.CreateCall(FTy, Fn, {llvm::ConstantPointerNull::get(B.getPtrTy()), Obj});
+    B.CreateCall(RT.Dispose, {Obj});
+    B.CreateBr(EndBB);
+    B.SetInsertPoint(EndBB);
+  }
+
+  /// Calls method R on object Obj. Inherited: a static call of the
+  /// inherited method (no dispatch, a destructor does not release the
+  /// object); otherwise a virtual method is called through the VMT and a
+  /// destructor releases the object afterwards. Returns the result (an
+  /// address for strings and records), or null.
+  llvm::Value *emitMethodCall(RoutineDecl *R, llvm::Value *Obj,
+                              llvm::ArrayRef<Expr *> Args, bool Inherited,
+                              SourceLocation L) {
+    switch (R->getBuiltin()) {
+    case TObjectMethod::Create: // TObject's constructor does nothing
+      return nullptr;
+    case TObjectMethod::Free:
+      emitFree(Obj);
+      return nullptr;
+    case TObjectMethod::ClassName: {
+      llvm::Value *VMT = B.CreateLoad(B.getPtrTy(), Obj, "vmt");
+      llvm::Value *Slot = B.CreateConstInBoundsGEP1_64(B.getPtrTy(), VMT, 1);
+      return B.CreateLoad(B.getPtrTy(), Slot, "classname");
+    }
+    case TObjectMethod::Destroy:
+      if (Inherited) // TObject's destructor does nothing
+        return nullptr;
+      break;
+    case TObjectMethod::None:
+      break;
+    }
+    llvm::Value *Result;
+    if (!Inherited && R->isDispatched()) {
+      emitNilObjectCheck(Obj, L);
+      llvm::Value *Fn = loadVirtual(Obj, static_cast<unsigned>(R->getVMTIndex()));
+      Result = emitCallTo({routineFnType(R), Fn},
+                          llvm::ConstantPointerNull::get(B.getPtrTy()),
+                          R->getParams(), Args, Obj);
+    } else {
+      Result = emitCallTo(Functions[R], llvm::ConstantPointerNull::get(B.getPtrTy()),
+                          R->getParams(), Args, Obj);
+    }
+    if (R->isDestructor() && !Inherited)
+      B.CreateCall(RT.Dispose, {Obj});
+    return R->isFunction() ? Result : nullptr;
+  }
+
+  /// TFoo.Create(args): a new object of class C, initialized by Ctor.
+  llvm::Value *emitConstruction(ClassType *C, RoutineDecl *Ctor,
+                                llvm::ArrayRef<Expr *> Args, SourceLocation L) {
+    llvm::Value *Obj =
+        B.CreateCall(RT.New, {B.getInt64(instanceSize(C))}, "obj");
+    B.CreateStore(vmtOf(C), Obj);
+    emitMethodCall(Ctor, Obj, Args, /*Inherited=*/true, L);
+    return Obj;
+  }
+
+  /// obj.M(args) or TFoo.Create(args) through FieldExpr F.
+  llvm::Value *emitMemberCall(FieldExpr *F, llvm::ArrayRef<Expr *> Args) {
+    auto *R = llvm::cast<RoutineDecl>(F->getMember());
+    if (auto *N = llvm::dyn_cast<NameRefExpr>(F->getBase());
+        N && llvm::isa<TypeDecl>(N->getDecl()))
+      return emitConstruction(llvm::cast<ClassType>(N->getType()), R, Args,
+                              F->getBeginLoc());
+    // Not checked for nil: Free accepts nil, and a static method may be
+    // called on nil (as in Free Pascal); virtual calls are checked.
+    llvm::Value *Obj = visitExpr(F->getBase());
+    return emitMethodCall(R, Obj, Args, /*Inherited=*/false, F->getField().Loc);
+  }
+
+  /// inherited [M] [(args)]: on the enclosing method's Self.
+  llvm::Value *emitInheritedCall(InheritedExpr *I, llvm::ArrayRef<Expr *> Args) {
+    if (!I->getMethod()) // a bare `inherited` with no inherited method
+      return nullptr;
+    llvm::Value *Self = B.CreateLoad(B.getPtrTy(),
+                                     varAddress(I->getEnclosing()->getSelfVar()),
+                                     "self");
+    if (I->isBare() && Args.empty())
+      Args = I->getImplicitArgs();
+    return emitMethodCall(I->getMethod(), Self, Args, /*Inherited=*/true,
+                          I->getBeginLoc());
+  }
+
+  /// The value of property P of object Obj (static class C): an address
+  /// for strings and records.
+  llvm::Value *emitPropertyRead(PropertyDecl *P, llvm::Value *Obj, ClassType *C) {
+    Type *T = P->getType();
+    if (auto *F = llvm::dyn_cast<FieldDecl>(P->getRead())) {
+      llvm::Value *Addr = fieldAddress(Obj, C, F);
+      if (T->isStructured())
+        return Addr;
+      return loadScalar(Addr, T, P->getName().Name);
+    }
+    return emitMethodCall(llvm::cast<RoutineDecl>(P->getRead()), Obj, {},
+                          /*Inherited=*/false, P->getLocation());
+  }
+
+  /// A member of a class used as a value through FieldExpr F: a field, a
+  /// property, or a call of a method without arguments.
+  llvm::Value *emitMemberValue(FieldExpr *F) {
+    Decl *D = F->getMember();
+    if (llvm::isa<RoutineDecl>(D))
+      return emitMemberCall(F, {});
+    auto *C = llvm::cast<ClassType>(F->getBase()->getType());
+    llvm::Value *Obj = emitObject(F->getBase());
+    if (auto *P = llvm::dyn_cast<PropertyDecl>(D))
+      return emitPropertyRead(P, Obj, C);
+    llvm::Value *Addr = fieldAddress(Obj, C, F->getFieldDecl());
+    if (F->getType()->isShortString())
+      return Addr;
+    return loadScalar(Addr, F->getType(), F->getField().Name);
   }
 
   //===--------------------------------------------------------------------===//
@@ -1670,7 +2035,7 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
           RT.StrCompare, {emitPStr(E->getLHS()), emitPStr(E->getRHS())});
       return compareInts(Op, Cmp, B.getInt32(0), /*Signed=*/true);
     }
-    if (LT->isPointer() || LT->isNil()) {
+    if (LT->isPointer() || LT->isNil() || LT->isClass()) {
       llvm::Value *L = visitExpr(E->getLHS()), *R = visitExpr(E->getRHS());
       return Op == BinaryOp::Eq ? B.CreateICmpEQ(L, R, "cmp")
                                 : B.CreateICmpNE(L, R, "cmp");
@@ -2089,6 +2454,7 @@ public:
         declareRoutines(*U->getImplementation());
     }
     declareRoutines(Blk);
+    defineVMTs();
     for (RoutineDecl *R : RoutinesToEmit)
       emitRoutineBody(R);
 
@@ -2102,7 +2468,7 @@ public:
     B.SetInsertPoint(llvm::BasicBlock::Create(C, "entry", Main));
     setDebugLoc(P.getLocation());
     B.CreateCall(RT.Init, {Main->getArg(0), Main->getArg(1)});
-    if (LangOpts.Mode == LangMode::TP)
+    if (LangOpts.Mode != LangMode::ISO)
       B.CreateStore(B.getInt32(1),
                     new llvm::GlobalVariable(M, B.getInt32Ty(), false,
                                              llvm::GlobalValue::ExternalLinkage,
@@ -2159,6 +2525,7 @@ public:
       declareRoutines(*D->getInterface());
     declareRoutines(*U.getInterface());
     declareRoutines(*U.getImplementation());
+    defineVMTs();
     for (RoutineDecl *R : RoutinesToEmit)
       emitRoutineBody(R);
 
@@ -2202,6 +2569,10 @@ public:
   void visitAssignStmt(AssignStmt *S) {
     Expr *Target = S->getTarget(), *Value = S->getValue();
     Type *TT = Target->getType();
+    if (PropertyDecl *P = assignedProperty(Target)) {
+      emitPropertyWrite(P, Target, Value);
+      return;
+    }
     if (auto *SS = llvm::dyn_cast<ShortStringType>(TT)) {
       emitStringAssign(emitAddress(Target), SS, Value);
       return;
@@ -2221,9 +2592,58 @@ public:
     storeScalar(emitAddress(Target), V, TT);
   }
 
+  static PropertyDecl *assignedProperty(Expr *Target) {
+    if (auto *N = llvm::dyn_cast<NameRefExpr>(Target))
+      return llvm::dyn_cast_or_null<PropertyDecl>(N->getDecl());
+    if (auto *F = llvm::dyn_cast<FieldExpr>(Target))
+      return llvm::dyn_cast_or_null<PropertyDecl>(F->getMember());
+    return nullptr;
+  }
+
+  /// Target := Value for a property Target: stores into its field or
+  /// calls its write procedure.
+  void emitPropertyWrite(PropertyDecl *P, Expr *Target, Expr *Value) {
+    llvm::Value *Obj;
+    ClassType *C;
+    if (auto *N = llvm::dyn_cast<NameRefExpr>(Target)) {
+      Obj = withBase(N->getWith());
+      C = llvm::cast<ClassType>(N->getWith()->Record->getType());
+    } else {
+      auto *F = llvm::cast<FieldExpr>(Target);
+      Obj = emitObject(F->getBase());
+      C = llvm::cast<ClassType>(F->getBase()->getType());
+    }
+    if (auto *R = llvm::dyn_cast<RoutineDecl>(P->getWrite())) {
+      emitMethodCall(R, Obj, {Value}, /*Inherited=*/false, Target->getBeginLoc());
+      return;
+    }
+    Type *T = P->getType();
+    llvm::Value *Addr = fieldAddress(Obj, C, llvm::cast<FieldDecl>(P->getWrite()));
+    if (auto *SS = llvm::dyn_cast<ShortStringType>(T)) {
+      emitStringAssign(Addr, SS, Value);
+      return;
+    }
+    if (T->isStructured()) {
+      copyAggregate(Addr, emitAddress(Value), T);
+      return;
+    }
+    if (llvm::isa<RoutineType>(T)) {
+      B.CreateStore(emitRoutinePair(Value, T), Addr);
+      return;
+    }
+    storeScalar(Addr,
+                convertForAssign(visitExpr(Value), Value->getType(), T,
+                                 Value->getBeginLoc()),
+                T);
+  }
+
   void visitProcCallStmt(ProcCallStmt *S) {
     if (auto *R = llvm::dyn_cast<RoutineDecl>(S->getDecl())) {
-      emitCall(R, S->getArgs());
+      if (R->isMethod()) // through Self or a with statement's object
+        emitMethodCall(R, withBase(S->getWith()), S->getArgs(),
+                       /*Inherited=*/false, S->getBeginLoc());
+      else
+        emitCall(R, S->getArgs());
       return;
     }
     if (auto *V = llvm::dyn_cast<VarDecl>(S->getDecl())) {
@@ -2613,8 +3033,10 @@ public:
 
   void visitWithStmt(WithStmt *S) {
     // The record designators are evaluated once, on entry (ISO 6.8.3.10).
+    // An object (objfpc) is evaluated, a record's address taken.
     for (WithContext *W : S->getRecords())
-      WithAddrs[W] = emitAddress(W->Record);
+      WithAddrs[W] = W->Record->getType()->isClass() ? emitObject(W->Record)
+                                                     : emitAddress(W->Record);
     visitStmt(S->getBody());
   }
 
@@ -2638,6 +3060,14 @@ public:
 
   llvm::Value *visitNameRefExpr(NameRefExpr *E) {
     Decl *D = E->getDecl();
+    if (auto *P = llvm::dyn_cast<PropertyDecl>(D)) {
+      WithContext *W = E->getWith();
+      return emitPropertyRead(P, withBase(W),
+                              llvm::cast<ClassType>(W->Record->getType()));
+    }
+    if (auto *R = llvm::dyn_cast<RoutineDecl>(D); R && R->isMethod())
+      return emitMethodCall(R, withBase(E->getWith()), {}, /*Inherited=*/false,
+                            E->getBeginLoc());
     if (E->getType()->isShortString() &&
         (llvm::isa<VarDecl>(D) || llvm::isa<FieldDecl>(D)))
       return emitAddress(E);
@@ -2685,8 +3115,27 @@ public:
     llvm_unreachable("bad unary op");
   }
 
+  /// obj is TFoo / obj as TFoo: the runtime walks obj's VMT chain.
+  llvm::Value *emitIsAs(BinaryExpr *E) {
+    llvm::Value *Obj = visitExpr(E->getLHS());
+    llvm::Constant *VMT = vmtOf(llvm::cast<ClassType>(E->getRHS()->getType()));
+    if (E->getOp() == BinaryOp::Is) {
+      llvm::Value *R = B.CreateCall(
+          classRuntime("__pas_class_is", B.getInt32Ty(), {B.getPtrTy(), B.getPtrTy()}),
+          {Obj, VMT});
+      return B.CreateICmpNE(R, B.getInt32(0), "is");
+    }
+    llvm::Constant *Msg = B.CreateGlobalString(
+        ("invalid class typecast" + where(E->getOpLoc())), ".rterr");
+    return B.CreateCall(classRuntime("__pas_class_as", B.getPtrTy(),
+                                     {B.getPtrTy(), B.getPtrTy(), B.getPtrTy()}),
+                        {Obj, VMT, Msg}, "as");
+  }
+
   llvm::Value *visitBinaryExpr(BinaryExpr *E) {
     BinaryOp Op = E->getOp();
+    if (Op == BinaryOp::Is || Op == BinaryOp::As)
+      return emitIsAs(E);
     if ((Op == BinaryOp::And || Op == BinaryOp::Or) && E->getType()->isBoolean())
       return emitShortCircuit(E);
     if (E->getType()->isShortString()) { // Turbo/FPC concatenation
@@ -2762,8 +3211,12 @@ public:
   llvm::Value *visitCallExpr(CallExpr *E) {
     if (llvm::isa<TypeDecl>(E->getDecl()))
       return emitTypecast(E);
-    if (auto *R = llvm::dyn_cast<RoutineDecl>(E->getDecl()))
+    if (auto *R = llvm::dyn_cast<RoutineDecl>(E->getDecl())) {
+      if (R->isMethod())
+        return emitMethodCall(R, withBase(E->getWith()), E->getArgs(),
+                              /*Inherited=*/false, E->getBeginLoc());
       return emitCall(R, E->getArgs());
+    }
     if (auto *V = llvm::dyn_cast<VarDecl>(E->getDecl()))
       return emitIndirectCall(V, E->getArgs());
     return emitBuiltinCall(E, llvm::cast<BuiltinDecl>(E->getDecl()));
@@ -2775,9 +3228,18 @@ public:
 
   llvm::Value *visitIndirectCallExpr(IndirectCallExpr *E) {
     Expr *Callee = E->getCallee();
+    if (auto *I = llvm::dyn_cast<InheritedExpr>(Callee))
+      return emitInheritedCall(I, E->getArgs());
+    if (auto *F = llvm::dyn_cast<FieldExpr>(Callee);
+        F && llvm::isa_and_nonnull<RoutineDecl>(F->getMember()))
+      return emitMemberCall(F, E->getArgs());
     auto *RT = llvm::cast<RoutineType>(Callee->getType());
     llvm::Value *Pair = B.CreateLoad(memType(RT), emitAddress(Callee));
     return emitCallThrough(Pair, RT, E->getArgs(), Callee->getBeginLoc());
+  }
+
+  llvm::Value *visitInheritedExpr(InheritedExpr *E) {
+    return emitInheritedCall(E, {});
   }
 
   llvm::Value *visitAggregateExpr(AggregateExpr *) {
@@ -2807,6 +3269,9 @@ public:
   }
 
   llvm::Value *visitFieldExpr(FieldExpr *E) {
+    if (!llvm::isa_and_nonnull<FieldDecl>(E->getMember()) ||
+        E->getBase()->getType()->isClass())
+      return emitMemberValue(E); // objfpc: a member of an object
     if (E->getType()->isShortString())
       return emitAddress(E);
     return loadScalar(emitAddress(E), E->getType(), E->getField().Name);

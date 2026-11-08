@@ -1,0 +1,79 @@
+; Classes (--mode=objfpc): declaration and use errors.
+; RUN: not %pcc --mode=objfpc -ferror-limit=0 -c %S/Inputs/classes/errors.pas -o %t.o 2>&1 | FileCheck %s
+; CHECK: errors.pas:10:15: error: abstract method 'R' must be 'virtual'
+; CHECK: errors.pas:13:30: error: no field or method named 'Nope' in 'TA'
+; CHECK: errors.pas:14:27: error: 'FX' cannot be read as property 'W' of type 'real' (use a field of that type or a function without parameters returning it)
+; CHECK: errors.pas:17:15: error: method 'Q' is marked 'override' but there is no virtual method 'Q' to override in 'TA'
+; CHECK: errors.pas:8:5: note: 'Q' declared here
+; CHECK: errors.pas:18:15: error: heading of 'P' does not match the method it overrides in 'TA'
+; CHECK: errors.pas:7:5: note: 'P' declared here
+; CHECK: errors.pas:19:5: error: 'FX' is already declared in class 'TA'
+; CHECK: errors.pas:5:5: note: 'FX' declared here
+; CHECK: errors.pas:20:17: error: virtual constructors are not supported
+; CHECK: errors.pas:22:14: error: unknown class name 'TNoSuch'
+; CHECK: errors.pas:25:14: error: class 'TD' is not defined yet (only declared forward)
+; CHECK: errors.pas:26:14: error: 'integer' is not a class type
+; CHECK: errors.pas:27:14: error: class 'TG' cannot inherit from itself
+; CHECK: errors.pas:24:3: error: class 'TD' is declared forward but never defined
+; CHECK: errors.pas:34:14: error: class 'TA' has no method 'Nope'
+; CHECK: errors.pas:35:13: error: 'TA.P' was declared as a procedure
+; CHECK: errors.pas:7:5: note: 'P' declared here
+; CHECK: errors.pas:36:11: error: unknown class name 'TZ'; did you mean 'TA'?
+; CHECK: errors.pas:37:14: error: heading of 'TA.Q' does not match its declaration
+; CHECK: errors.pas:8:5: note: 'Q' declared here
+; CHECK: errors.pas:38:14: error: 'TA.F' was declared as a function
+; CHECK: errors.pas:9:5: note: 'F' declared here
+; CHECK: errors.pas:17:15: error: method 'TB.Q' is declared but never implemented
+; CHECK: errors.pas:18:15: error: method 'TB.P' is declared but never implemented
+; CHECK: errors.pas:20:17: error: method 'TB.Make' is declared but never implemented
+; CHECK: errors.pas:41:5: error: property 'X' is read-only
+; CHECK: errors.pas:11:14: note: 'X' declared here
+; CHECK: errors.pas:42:10: error: property 'Y' is write-only
+; CHECK: errors.pas:12:14: note: 'Y' declared here
+; CHECK: errors.pas:43:10: error: no member named 'Missing' in class 'TA'
+; CHECK: errors.pas:44:5: error: too many arguments in call to 'Q': expected 0, got 1
+; CHECK: errors.pas:8:5: note: 'Q' declared here
+; CHECK: errors.pas:45:5: error: assigning to 'TB' from incompatible type 'TA'
+; CHECK: errors.pas:47:5: error: assigning to 'integer' from incompatible type 'TA'
+; CHECK: errors.pas:48:11: error: the right operand of 'is' must be the name of a class type
+; CHECK: errors.pas:49:8: error: invalid operands to 'is' ('integer' and 'TA')
+; CHECK: errors.pas:51:8: error: invalid operands to 'is' ('record' and 'TA')
+; CHECK: errors.pas:52:11: error: only a constructor can be called through the class name 'TA'; 'P' is a procedure
+; CHECK: errors.pas:53:3: error: 'inherited' is only allowed in a method
+; CHECK: errors.pas:55:11: error: cannot write a value of type 'TA'
+; CHECK: errors.pas:56:10: error: no member named 'Prop' in class 'TA'
+; CHECK: errors.pas:57:5: error: procedure 'P' does not return a value
+; CHECK-NOT: {{error|warning}}:
+;
+; RUN: not %pcc --mode=objfpc -ferror-limit=0 -c %S/Inputs/classes/more.pas -o %t.o 2>&1 | FileCheck --check-prefix=MORE %s
+; MORE: more.pas:16:13: error: no inherited method 'P' in 'TObject'
+; MORE: more.pas:17:3: error: use of undeclared identifier 'Sh'
+; MORE: more.pas:6:14: warning: function 'G' never assigns its result
+; MORE: more.pas:24:13: error: too many arguments in call to 'V': expected 0, got 1
+; MORE: more.pas:5:5: note: 'V' declared here
+; MORE: more.pas:30:11: error: missing arguments in call to 'Create'
+; MORE: more.pas:7:5: note: 'Create' declared here
+; MORE: more.pas:31:11: error: too many arguments in call to 'Create': expected 1, got 2
+; MORE: more.pas:7:5: note: 'Create' declared here
+; MORE: more.pas:32:5: error: no member named 'Show' in class 'TB'; did you mean 'Shw'?
+; MORE: more.pas:33:3: error: cannot assign to procedure 'P'
+; MORE: more.pas:4:5: note: 'P' declared here
+; MORE: more.pas:34:3: error: use of undeclared identifier 'Q'; did you mean 'x'?
+; MORE: more.pas:34:9: error: '@V': methods cannot be procedural values
+; MORE: more.pas:36:14: error: class 'TB' has no method 'P'
+; MORE: more.pas:42:8: error: invalid operands to '=' ('TA' and 'integer')
+; MORE: more.pas:45:8: error: invalid typecast from 'integer' to 'TA' (only between ordinal types and between pointer types)
+; MORE: more.pas:47:3: error: use of undeclared identifier 'x'; did you mean 'A'?
+; MORE: more.pas:38:24: warning: variable 'Q' is declared but never used [-Wunused-variable]
+; MORE-NOT: {{error|warning}}:
+;
+; Private members are visible in the unit declaring the class, protected
+; ones also in methods of descendants.
+; RUN: not %pcc --mode=objfpc -ferror-limit=0 -I %S/../run/Inputs/classes/lib -c %S/Inputs/classes/visibility.pas -o %t.o 2>&1 | FileCheck --check-prefix=VIS %s
+; VIS: visibility.pas:9:13: error: 'FName' is a private member of 'TAnimal'
+; VIS: animals.pas:6:5: note: 'FName' declared here
+; VIS: visibility.pas:14:22: error: 'Sound' is a protected member of 'TAnimal'
+; VIS: animals.pas:9:5: note: 'Sound' declared here
+; VIS: visibility.pas:14:31: error: 'FLegs' is a private member of 'TAnimal'
+; VIS: animals.pas:7:5: note: 'FLegs' declared here
+; VIS-NOT: {{error|warning}}:

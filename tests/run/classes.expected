@@ -1,0 +1,22 @@
+circle area 12.57
+[rect area 12.00
+]
+SetW 10
+[rect area 40.00
+]
+FALSE TRUE TCircle
+TRUE TCircle TRUE
+FALSE FALSE
+destroying disc
+destroying rect
+TRUE
+55
+list freed
+add 5; add 5; 
+count=10 log=++
+count=10 log=++
+logged 10
+3628800 TRUE 10
+1 10 TRUE TRUE
+1
+count=42 log=

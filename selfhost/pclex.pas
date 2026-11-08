@@ -15,7 +15,7 @@ uses pcsys, pcutil, pcdiag;
 {$I tokens.inc}
 
 type
-  TLangMode = (lmISO, lmTP);
+  TLangMode = (lmISO, lmTP, lmObjFPC);
 
   TToken = record
     kind: TTokenKind;
@@ -487,7 +487,7 @@ begin
         else
           exit;
       '/':
-        if (lx.mode = lmTP) and (at(lx, lx.cur + 1) = '/') then
+        if (lx.mode <> lmISO) and (at(lx, lx.cur + 1) = '/') then
           while (lx.cur < lx.len) and (at(lx, lx.cur) <> #10) do
             lx.cur := lx.cur + 1
         else
@@ -518,7 +518,7 @@ begin
   bufFree(lower);
   kind := tkIdentifier;
   k := PKeyword(mapGet(keywordMap, name^.id));
-  if (k <> nil) and (not k^.tpOnly or (lx.mode = lmTP)) then
+  if (k <> nil) and (ord(lx.mode) >= k^.level) then
     kind := k^.kind;
   formToken(lx, t, kind, start);
   if kind = tkIdentifier then
@@ -775,7 +775,7 @@ begin
   start := lx.cur;
   bufInit(value);
   terminated := true;
-  tp := lx.mode = lmTP;
+  tp := lx.mode <> lmISO;
   while terminated do
   begin
     if at(lx, lx.cur) = '''' then
@@ -860,7 +860,7 @@ var
   frame: PIncludeFrame;
   shown: string;
 begin
-  tp := lx.mode = lmTP;
+  tp := lx.mode <> lmISO;
   while true do
   begin
     skipWhitespaceAndComments(lx);

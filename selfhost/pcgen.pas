@@ -9,6 +9,9 @@ unit pcgen;
     routines -> internal functions @pas.<outer>.<name> whose locals,
       parameters and result live in a frame struct; nested routines reach
       enclosing frames through static links (frame field 0)
+    objects (objfpc) -> a pointer to a heap block [VMT pointer, fields];
+      a class's VMT is a constant [2 + N x ptr]: parent VMT, class name,
+      virtual methods; methods take Self after the static link
 
   The module must print exactly as the C++ pcc's (SELFHOST.md S10), so
   this code creates the same values, with the same names, in the same
@@ -60,6 +63,11 @@ var
   hasMainJmpBuf: boolean;
   routinePairT, jmpBufT: PIRType;
   separate: boolean;         { units compiled separately (S11) }
+  { classes (objfpc): instance layouts (for offsets and sizes only) and
+    VMTs by type id; the classes whose VMTs are defined in this module, in
+    declaration order }
+  classLayouts, vmts: TIntMap;
+  vmtsToDefine: TPtrList;
 
 { --- Small helpers --- }
 
@@ -517,6 +525,7 @@ begin
     tySet: lowerType := irI256;
     tyShortString: lowerType := irArray(t^.maxLength + 1, irI8);
     tyRoutine: lowerType := routinePairT;
+    tyClass: lowerType := irPtrT; { a reference to the object }
   else
     lowerType := irI8;
   end;
@@ -547,6 +556,42 @@ end;
 function sizeOf_(t: PType): int64;
 begin
   sizeOf_ := memType(t)^.size;
+end;
+
+{ The layout of an object of class c: VMT pointer, then all fields;
+  records each field's offset (a prefix of fields has the same offsets in
+  every descendant). }
+function classLayout(c: PType): PIRType;
+var
+  st: PIRType;
+  elems: TPtrList;
+  i: longint;
+  f: PDecl;
+begin
+  st := PIRType(mapGet(classLayouts, c^.id));
+  if st <> nil then
+    exit(st);
+  listInit(elems);
+  listAdd(elems, irPtrT);
+  for i := 0 to c^.classAllFields.count - 1 do
+  begin
+    f := PDecl(listGet(c^.classAllFields, i));
+    listAdd(elems, memType(f^.fieldType));
+  end;
+  st := irStructNamed('class.' + nm(c^.declName), elems);
+  listFree(elems);
+  for i := 0 to c^.classAllFields.count - 1 do
+  begin
+    f := PDecl(listGet(c^.classAllFields, i));
+    f^.cgOffset := irFieldOffset(st, i + 1);
+  end;
+  mapPut(classLayouts, c^.id, st);
+  classLayout := st;
+end;
+
+function instanceSize(c: PType): int64;
+begin
+  instanceSize := classLayout(c)^.size;
 end;
 
 { --- Scalars in memory --- }
@@ -841,18 +886,22 @@ begin
   isParamDecl := v^.varKind in [vkValueParam, vkVarParam, vkConstParam];
 end;
 
+{ pas.<outer>.<name> for routines, pas.<class>.<name> for methods. }
 function mangle(r: PDecl): string;
 var
   s: string;
   p: PDecl;
 begin
   s := nm(r^.ident.name);
-  p := r^.parent;
-  while p <> nil do
+  p := r;
+  while p^.parent <> nil do
   begin
-    s := nm(p^.ident.name) + '.' + s;
     p := p^.parent;
+    s := nm(p^.ident.name) + '.' + s;
   end;
+  if p^.methodKind <> mtNone then
+    { s starts with the method's name }
+    s := lowerStr(nm(p^.ownerClass^.declName)) + '.' + s;
   mangle := 'pas.' + s;
 end;
 
@@ -935,7 +984,10 @@ function fieldAddress(const recAddr: TV; rt: PType; f: PDecl): TV;
 var
   ignored: PIRType;
 begin
-  ignored := memType(rt);
+  if rt^.kind = tyClass then
+    ignored := classLayout(rt) { recAddr is the object }
+  else
+    ignored := memType(rt);
   fieldAddress := irGEP1(irI8, recAddr, i64c(f^.cgOffset), true, nm(f^.ident.name));
 end;
 
@@ -1063,6 +1115,15 @@ begin
   end;
 end;
 
+{ Where routine r's body is: a method's implementation, else r. }
+function bodyLoc(r: PDecl): TLoc;
+begin
+  if (r^.methodKind <> mtNone) and (r^.implDecl <> nil) then
+    bodyLoc := r^.implDecl^.loc
+  else
+    bodyLoc := r^.loc;
+end;
+
 {$I pcgendbg.inc}
 
 { --- Expressions: forward declarations --- }
@@ -1070,6 +1131,10 @@ end;
 function visitExpr(e: PNode): TV; forward;
 function emitAddress(e: PNode): TV; forward;
 procedure visitStmt(s: PNode); forward;
+function withBase(w: PWithContext): TV; forward;
+function emitObject(e: PNode): TV; forward;
+function emitPropertyRead(p: PDecl; const obj: TV; c: PType): TV; forward;
+function emitMemberValue(e: PNode): TV; forward;
 
 function emitI32(e: PNode): TV;
 begin
@@ -1305,7 +1370,12 @@ begin
           dkField:
             begin
               w := e^.refWith;
-              emitAddress := fieldAddress(PTVBox(w^.cgAddr)^, w^.rec^.typ, d);
+              emitAddress := fieldAddress(withBase(w), w^.rec^.typ, d);
+            end;
+          dkProperty:
+            begin
+              w := e^.refWith;
+              emitAddress := emitPropertyRead(d, withBase(w), w^.rec^.typ);
             end;
         else
           emitAddress := getNameConstant(d^.constValue.strVal);
@@ -1313,7 +1383,7 @@ begin
       end;
     nkStringLit: emitAddress := getNameConstant(e^.strValue);
     nkParen: emitAddress := emitAddress(e^.inner);
-    nkCall, nkIndirectCall:
+    nkCall, nkIndirectCall, nkInherited:
       { a record or string function result: a temporary holding it }
       emitAddress := visitExpr(e);
     nkIndex:
@@ -1355,6 +1425,13 @@ begin
       end;
     nkField:
       begin
+        if e^.base^.typ^.kind = tyClass then
+        begin
+          if e^.fieldDecl^.kind <> dkField then
+            exit(emitMemberValue(e)); { a structured property or result }
+          base := emitObject(e^.base);
+          exit(fieldAddress(base, e^.base^.typ, e^.fieldDecl));
+        end;
         base := emitAddress(e^.base);
         emitAddress := fieldAddress(base, e^.base^.typ, e^.fieldDecl);
       end;
@@ -1438,8 +1515,9 @@ begin
   end;
 end;
 
-function emitCallTo(ret: PIRType; const callee: TV; const link: TV; hasLink: boolean;
-                    const params, args: TPtrList): TV;
+function emitCallToSelf(ret: PIRType; const callee: TV; const link: TV;
+                        hasLink: boolean; const self_: TV; hasSelf: boolean;
+                        const params, args: TPtrList): TV;
 var
   buf: TBuf;
   i: longint;
@@ -1451,6 +1529,8 @@ begin
   bufInit(buf);
   if hasLink then { external (C) routines have none }
     irArgsAdd(buf, link);
+  if hasSelf then { methods }
+    irArgsAdd(buf, self_);
   for i := 0 to args.count - 1 do
   begin
     p := PDecl(listGet(params, i));
@@ -1484,7 +1564,13 @@ begin
     irStore(res, tmp);
     exit(tmp);
   end;
-  emitCallTo := res;
+  emitCallToSelf := res;
+end;
+
+function emitCallTo(ret: PIRType; const callee: TV; const link: TV; hasLink: boolean;
+                    const params, args: TPtrList): TV;
+begin
+  emitCallTo := emitCallToSelf(ret, callee, link, hasLink, irNull, false, params, args);
 end;
 
 function emitCall(r: PDecl; const args: TPtrList): TV;
@@ -1544,6 +1630,260 @@ begin
   if e^.kind = nkAddrOf then
     exit(routinePairOf(e^.inner^.refDecl));
   emitRoutinePair := irLoad(memType(t), emitAddress(e), '');
+end;
+
+{ --- Objects and methods (objfpc) --- }
+
+{ The object a with context stands for (Self for a method body), or the
+  address of a with statement's record. }
+function withBase(w: PWithContext): TV;
+begin
+  if w^.isSelf then
+    withBase := visitExpr(w^.rec) { load Self }
+  else
+    withBase := PTVBox(w^.cgAddr)^;
+end;
+
+{ if obj = nil then a runtime error, under range checks }
+procedure emitNilObjectCheck(const obj: TV; loc: TLoc);
+begin
+  if rangeChecks(loc) then
+    emitRuntimeCheck(irICmp('eq', obj, irNull, ''), 'use of a nil object reference', loc);
+end;
+
+{ The object an expression of a class type refers to, checked for nil. }
+function emitObject(e: PNode): TV;
+var
+  obj: TV;
+begin
+  obj := visitExpr(e);
+  emitNilObjectCheck(obj, e^.b);
+  emitObject := obj;
+end;
+
+{ The address of virtual method index in the VMT of object obj. }
+function loadVirtual(const obj: TV; index: longint): TV;
+var
+  vmt, slot: TV;
+begin
+  vmt := irLoad(irPtrT, obj, 'vmt');
+  slot := irGEP1(irPtrT, vmt, i64c(2 + index), true, '');
+  loadVirtual := irLoad(irPtrT, slot, 'method');
+end;
+
+{ A runtime function used only by programs with classes. }
+function classRuntime(const name, ret, params: string): PIRFunc;
+var
+  f: PIRFunc;
+begin
+  f := irFindFunction(name);
+  if f = nil then
+  begin
+    declareRT(name, ret, params, 'nounwind');
+    f := irFindFunction(name);
+  end;
+  classRuntime := f;
+end;
+
+{ The VMT of class c; TObject's is in the runtime. }
+function vmtOf(c: PType): TV;
+var
+  g: PTVBox;
+  v: TV;
+begin
+  g := PTVBox(mapGet(vmts, c^.id));
+  if g <> nil then
+    exit(g^);
+  if not irFindGlobal('__pas_tobject_vmt', v) then
+    v := irGlobal('__pas_tobject_vmt', 'external', irArray(3, irPtrT), irNull, true,
+                  false, true, 0);
+  mapPut(vmts, c^.id, irBox(v));
+  vmtOf := v;
+end;
+
+function methodFnType(r: PDecl): PIRType;
+begin
+  if r^.isFunction then
+    methodFnType := regType(r^.resultType)
+  else
+    methodFnType := irVoidT;
+end;
+
+{ obj.Free: if obj <> nil then obj.Destroy (virtual), then release it. }
+procedure emitFree(const obj: TV);
+var
+  doB, endB: PIRBlock;
+  fn, ignored: TV;
+  args: TBuf;
+begin
+  doB := irNewBlock('free.do');
+  endB := irNewBlock('free.end');
+  irCondBr(irICmp('eq', obj, irNull, ''), endB, doB, false);
+  irSetInsertPoint(doB);
+  fn := loadVirtual(obj, 0);
+  bufInit(args);
+  irArgsAdd(args, irNull);
+  irArgsAdd(args, obj);
+  ignored := irCallPtr(irVoidT, fn, args, '');
+  bufFree(args);
+  rtv1('__pas_dispose', obj);
+  irBr(endB);
+  irSetInsertPoint(endB);
+end;
+
+{ Calls method r on object obj. inherited: a static call of the inherited
+  method (no dispatch; a destructor does not release the object);
+  otherwise a virtual method is called through the VMT, and a destructor
+  releases the object afterwards. The result (an address for strings and
+  records), or irNull for a call without a value. }
+function emitMethodCall(r: PDecl; const obj: TV; const args: TPtrList;
+                        inherited_: boolean; loc: TLoc): TV;
+var
+  vmt, slot, fn, res: TV;
+  f: PIRFunc;
+begin
+  emitMethodCall := irNull;
+  case r^.objMethod of
+    obCreate: exit; { TObject's constructor does nothing }
+    obFree:
+      begin
+        emitFree(obj);
+        exit;
+      end;
+    obClassName:
+      begin
+        vmt := irLoad(irPtrT, obj, 'vmt');
+        slot := irGEP1(irPtrT, vmt, i64c(1), true, '');
+        exit(irLoad(irPtrT, slot, 'classname'));
+      end;
+    obDestroy:
+      if inherited_ then { TObject's destructor does nothing }
+        exit;
+  else
+    ;
+  end;
+  if not inherited_ and (r^.vmtIndex >= 0) then
+  begin
+    emitNilObjectCheck(obj, loc);
+    fn := loadVirtual(obj, r^.vmtIndex);
+    res := emitCallToSelf(methodFnType(r), fn, irNull, true, obj, true, r^.params, args);
+  end
+  else
+  begin
+    f := fnOf(r);
+    res := emitCallToSelf(f^.ret, irFuncRef(f), irNull, true, obj, true, r^.params, args);
+  end;
+  if (r^.methodKind = mtDestructor) and not inherited_ then
+    rtv1('__pas_dispose', obj);
+  if r^.isFunction then
+    emitMethodCall := res;
+end;
+
+{ TFoo.Create(args): a new object of class c, initialized by ctor. }
+function emitConstruction(c: PType; ctor: PDecl; const args: TPtrList; loc: TLoc): TV;
+var
+  obj, ignored: TV;
+begin
+  obj := call1(rtFn('__pas_new'), i64c(instanceSize(c)), 'obj');
+  irStore(vmtOf(c), obj);
+  ignored := emitMethodCall(ctor, obj, args, true, loc);
+  emitConstruction := obj;
+end;
+
+{ obj.M(args) or TFoo.Create(args) through e (an nkField). }
+function emitMemberCall(e: PNode; const args: TPtrList): TV;
+var
+  r: PDecl;
+  obj: TV;
+begin
+  r := e^.fieldDecl;
+  if (e^.base^.kind = nkNameRef) and (e^.base^.refDecl^.kind = dkType) then
+    exit(emitConstruction(e^.base^.typ, r, args, e^.b));
+  { not checked for nil: Free accepts nil, and a static method may be
+    called on nil (as in Free Pascal); virtual calls are checked }
+  obj := visitExpr(e^.base);
+  emitMemberCall := emitMethodCall(r, obj, args, false, e^.fieldName.loc);
+end;
+
+{ inherited [M] [(args)]: on the enclosing method's Self. }
+function emitInheritedCall(e: PNode; const args: TPtrList): TV;
+var
+  self_: TV;
+begin
+  if e^.inhMethod = nil then { a bare inherited with no inherited method }
+    exit(irNull);
+  self_ := irLoad(irPtrT, varAddress(e^.inhEnclosing^.selfVar), 'self');
+  if not identValid(e^.inhName) and (args.count = 0) then
+    emitInheritedCall := emitMethodCall(e^.inhMethod, self_, e^.inhArgs, true, e^.b)
+  else
+    emitInheritedCall := emitMethodCall(e^.inhMethod, self_, args, true, e^.b);
+end;
+
+{ The value of property p of object obj (static class c): an address for
+  strings and records. }
+function emitPropertyRead(p: PDecl; const obj: TV; c: PType): TV;
+var
+  t: PType;
+  addr: TV;
+  noArgs: TPtrList;
+begin
+  t := p^.propType;
+  if p^.readDecl^.kind = dkField then
+  begin
+    addr := fieldAddress(obj, c, p^.readDecl);
+    if isStructured(t) then
+      exit(addr);
+    exit(loadScalar(addr, t, nm(p^.ident.name)));
+  end;
+  listInit(noArgs);
+  emitPropertyRead := emitMethodCall(p^.readDecl, obj, noArgs, false, p^.loc);
+end;
+
+{ A member of a class used as a value through e (an nkField): a field, a
+  property, or a call of a method without arguments. }
+function emitMemberValue(e: PNode): TV;
+var
+  d: PDecl;
+  c: PType;
+  obj, addr: TV;
+  noArgs: TPtrList;
+begin
+  d := e^.fieldDecl;
+  if d^.kind = dkRoutine then
+  begin
+    listInit(noArgs);
+    exit(emitMemberCall(e, noArgs));
+  end;
+  c := e^.base^.typ;
+  obj := emitObject(e^.base);
+  if d^.kind = dkProperty then
+    exit(emitPropertyRead(d, obj, c));
+  addr := fieldAddress(obj, c, d);
+  if e^.typ^.kind = tyShortString then
+    exit(addr);
+  emitMemberValue := loadScalar(addr, e^.typ, nm(e^.fieldName.name));
+end;
+
+{ obj is TFoo / obj as TFoo: the runtime walks obj's chain of VMTs. }
+function emitIsAs(e: PNode): TV;
+var
+  obj, vmt, r, msgG: TV;
+  b: TBuf;
+begin
+  obj := visitExpr(e^.lhs);
+  vmt := vmtOf(e^.rhs^.typ);
+  if e^.bop = boIs then
+  begin
+    r := call2(classRuntime('__pas_class_is', 'i32', 'ptr,ptr'), obj, vmt, '');
+    exit(irICmp('ne', r, i32c(0), 'is'));
+  end;
+  bufInit(b);
+  bufAdd(b, 'invalid class typecast');
+  bufAddWhere(b, e^.opLoc);
+  msgG := globalString(b.data, 0, b.len, '.rterr');
+  bufFree(b);
+  emitIsAs := call3(classRuntime('__pas_class_as', 'ptr', 'ptr,ptr,ptr'), obj, vmt, msgG,
+                    'as');
 end;
 
 { --- Operators --- }
@@ -1703,7 +2043,7 @@ begin
     cmp := call2(rtFn('__pas_str_compare'), l, r, '');
     exit(compareInts(op, cmp, i32c(0), true));
   end;
-  if (lt^.kind = tyPointer) or (lt^.kind = tyNil) then
+  if (lt^.kind = tyPointer) or (lt^.kind = tyNil) or (lt^.kind = tyClass) then
   begin
     l := visitExpr(e^.lhs);
     r := visitExpr(e^.rhs);
@@ -1988,6 +2328,13 @@ var
   noArgs: TPtrList;
 begin
   d := e^.refDecl;
+  if d^.kind = dkProperty then
+    exit(emitPropertyRead(d, withBase(e^.refWith), e^.refWith^.rec^.typ));
+  if (d^.kind = dkRoutine) and (d^.methodKind <> mtNone) then
+  begin
+    listInit(noArgs);
+    exit(emitMethodCall(d, withBase(e^.refWith), noArgs, false, e^.b));
+  end;
   if (e^.typ^.kind = tyShortString) and (d^.kind in [dkVar, dkField]) then
     exit(emitAddress(e));
   if (d^.kind = dkVar) and (d^.varType <> nil) and (d^.varType^.kind = tyRoutine) then
@@ -2046,6 +2393,8 @@ var
   loc: TLoc;
 begin
   op := e^.bop;
+  if op in [boIs, boAs] then
+    exit(emitIsAs(e));
   if (op in [boAnd, boOr]) and (e^.typ^.kind = tyBoolean) then
     exit(emitShortCircuit(e));
   if e^.typ^.kind = tyShortString then
@@ -2138,7 +2487,11 @@ begin
   d := e^.callDecl;
   case d^.kind of
     dkType: visitCall := emitTypecast(e);
-    dkRoutine: visitCall := emitCall(d, e^.args);
+    dkRoutine:
+      if d^.methodKind <> mtNone then
+        visitCall := emitMethodCall(d, withBase(e^.callWith), e^.args, false, e^.b)
+      else
+        visitCall := emitCall(d, e^.args);
     dkVar: visitCall := emitIndirectCall(d, e^.args);
   else
     visitCall := emitBuiltinCall(e, d^.builtin);
@@ -2151,11 +2504,18 @@ var
   pair: TV;
 begin
   callee := e^.calleeExpr;
+  if callee^.kind = nkInherited then
+    exit(emitInheritedCall(callee, e^.args));
+  if (callee^.kind = nkField) and (callee^.fieldDecl <> nil) and
+     (callee^.fieldDecl^.kind = dkRoutine) then
+    exit(emitMemberCall(callee, e^.args));
   pair := irLoad(memType(callee^.typ), emitAddress(callee), '');
   visitIndirectCall := emitCallThrough(pair, callee^.typ, e^.args, callee^.b);
 end;
 
 function visitExpr(e: PNode): TV;
+var
+  noArgs: TPtrList;
 begin
   case e^.kind of
     nkIntegerLit: visitExpr := irConstInt(regType(e^.typ), e^.intValue);
@@ -2178,10 +2538,17 @@ begin
       else
         visitExpr := loadScalar(emitAddress(e), e^.typ, '');
     nkField:
-      if e^.typ^.kind = tyShortString then
+      if (e^.fieldDecl^.kind <> dkField) or (e^.base^.typ^.kind = tyClass) then
+        visitExpr := emitMemberValue(e) { objfpc: a member of an object }
+      else if e^.typ^.kind = tyShortString then
         visitExpr := emitAddress(e)
       else
         visitExpr := loadScalar(emitAddress(e), e^.typ, nm(e^.fieldName.name));
+    nkInherited:
+      begin
+        listInit(noArgs);
+        visitExpr := emitInheritedCall(e, noArgs);
+      end;
   else
     { formatted expressions and aggregates are handled by their users }
     visitExpr := irZero(irI32);

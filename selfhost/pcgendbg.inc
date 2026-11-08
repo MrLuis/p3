@@ -251,7 +251,7 @@ var
   elems: TPtrList;
   i: longint;
   c, f: PDecl;
-  intT, elemDI, tup, def, member: PMeta;
+  intT, elemDI, tup, def, member, ptr: PMeta;
   lo, count: int64;
   bd: TOrdinalBounds;
   b: TBuf;
@@ -348,6 +348,39 @@ begin
                                   subrange(0, 32));
     tyFile:
       buildDebugType := pointerType(unspecifiedType('PasFile'), 'DW_TAG_pointer_type');
+    tyClass:
+      begin
+        { a pointer to a structure holding the fields (after the VMT pointer) }
+        ignored := classLayout(t);
+        def := irMetaPlaceholder;
+        ptr := pointerType(def, 'DW_TAG_pointer_type');
+        mapPut(diTypes, t^.id, ptr); { fields may refer to the class }
+        listInit(elems);
+        for i := 0 to t^.classAllFields.count - 1 do
+        begin
+          f := PDecl(listGet(t^.classAllFields, i));
+          s := '!DIDerivedType(tag: DW_TAG_member, name: ' + mdStr(nm(f^.ident.spelling)) +
+               ', scope: ' + ref(def) + ', file: ' + ref(unitFile) +
+               sizeField('line', lineOf(f^.loc));
+          member := debugType(f^.fieldType);
+          s := s + ', baseType: ' + ref(member) + sizeField('size', sizeOf_(f^.fieldType) * 8) +
+               sizeField('offset', f^.cgOffset * 8) + ')';
+          listAdd(elems, md(false, s, unitFile, def, member, nil));
+        end;
+        tup := mdTuple(elems);
+        listFree(elems);
+        bufInit(b);
+        bufAdd(b, '!DICompositeType(tag: DW_TAG_structure_type, ' + nameField(t^.declName) +
+                  'file: ' + ref(unitFile) + sizeField('size', instanceSize(t) * 8) +
+                  ', elements: ' + ref(tup) + ')');
+        listInit(elems);
+        listAdd(elems, unitFile);
+        listAdd(elems, tup);
+        irMetaFill(def, b, elems);
+        listFree(elems);
+        bufFree(b);
+        buildDebugType := ptr;
+      end;
   else
     begin
       { procedural values, nil }
@@ -372,7 +405,7 @@ begin
   d := buildDebugType(t);
   { named arrays, subranges, pointers ...: a typedef carries the name }
   if (t^.declName <> nil) and (t^.kind <> tyRecord) and (t^.kind <> tyEnum) and
-     not isBuiltinType(t) then
+     (t^.kind <> tyClass) and not isBuiltinType(t) then
     d := md(false, '!DIDerivedType(tag: DW_TAG_typedef, name: ' + mdStr(nm(t^.declName)) +
                    ', file: ' + ref(unitFile) + ', baseType: ' + ref(d) + ')',
             unitFile, d, nil, nil);
@@ -382,7 +415,8 @@ end;
 
 { DIBuilder::createFunction for a definition (filled in at the end) }
 function createSubprogram(f: PIRFunc; const name: string; scopeFile: PMeta; line: longint;
-                          result_: PType; const params: TPtrList; file_: PMeta): PSPInfo;
+                          result_: PType; const params: TPtrList; file_: PMeta;
+                          self_: PDecl): PSPInfo;
 var
   sig: TPtrList;
   i: longint;
@@ -395,6 +429,8 @@ begin
     listAdd(sig, debugType(result_))
   else
     listAdd(sig, nil);
+  if self_ <> nil then { methods: Self first }
+    listAdd(sig, debugType(self_^.varType));
   for i := 0 to params.count - 1 do
   begin
     p := PDecl(listGet(params, i));
@@ -467,7 +503,11 @@ var
     s, expr: string;
   begin
     ty := debugType(x^.varType);
-    line := lineOf(x^.loc);
+    { Self has no location of its own: the method's }
+    if x^.loc = noLoc then
+      line := lineOf(bodyLoc(r))
+    else
+      line := lineOf(x^.loc);
     s := '!DILocalVariable(name: ' + mdStr(nm(x^.ident.spelling));
     if arg > 0 then
       s := s + ', arg: ' + intToStr(arg);
@@ -487,6 +527,11 @@ var
 begin
   frameT := frameType(r);
   argNo := 1;
+  if r^.methodKind <> mtNone then
+  begin
+    declare(r^.selfVar, argNo);
+    argNo := argNo + 1;
+  end;
   for i := 0 to r^.params.count - 1 do
   begin
     declare(PDecl(listGet(r^.params, i)), argNo);

@@ -73,7 +73,8 @@ tok::TokenKind tok::getKeywordKind(llvm::StringRef LowerName,
   if (It == keywordTable().end())
     return identifier;
   unsigned Flags = It->second.Flags;
-  if ((Flags & KEYISO) || ((Flags & KEYTP) && LangOpts.TPKeywords))
+  if ((Flags & KEYISO) || ((Flags & KEYTP) && LangOpts.TPKeywords) ||
+      ((Flags & KEYOBJ) && LangOpts.ObjKeywords))
     return It->second.Kind;
   return identifier;
 }

@@ -5,7 +5,9 @@
 // declaration hides an outer one with the same name -- even predeclared
 // ones, e.g. `var integer: char;` is legal (if unwise).
 //
-// A `with r do` statement opens a scope whose names are r's fields.
+// A `with r do` statement opens a scope whose names are r's fields. In
+// objfpc, `with obj do` and every method body open a scope whose names are
+// the members of a class and its ancestors.
 //
 //===----------------------------------------------------------------------===//
 #ifndef PCC_SEMA_SCOPE_H
@@ -21,6 +23,7 @@ class Scope {
   Scope *Parent;
   llvm::StringMap<Decl *> Symbols; ///< keyed by canonical (lowercase) name
   RecordType *WithRecord = nullptr;
+  ClassType *WithClass = nullptr;
   WithContext *With = nullptr;
   /// Interface scopes of used units (Turbo/FPC); later ones take precedence.
   llvm::SmallVector<const Scope *, 2> Imports;
@@ -30,6 +33,9 @@ public:
   /// A `with` scope exposing Record's fields.
   Scope(Scope *Parent, RecordType *Record, WithContext *W)
       : Parent(Parent), WithRecord(Record), With(W) {}
+  /// A scope exposing the members of class C (a method body, or `with`).
+  Scope(Scope *Parent, ClassType *C, WithContext *W)
+      : Parent(Parent), WithClass(C), With(W) {}
 
   Scope *getParent() const { return Parent; }
   void addImport(const Scope *S) { Imports.push_back(S); }
@@ -54,6 +60,12 @@ public:
         Fn(F->getName().Name);
       return;
     }
+    if (WithClass) {
+      for (const ClassType *C = WithClass; C; C = C->getParent())
+        for (Decl *D : C->getMembers())
+          Fn(D->getName().Name);
+      return;
+    }
     for (const auto &Entry : Symbols)
       Fn(Entry.getKey());
     for (const Scope *I : Imports)
@@ -64,6 +76,8 @@ public:
   Decl *lookupLocal(llvm::StringRef Name) const {
     if (WithRecord)
       return WithRecord->findField(Name);
+    if (WithClass)
+      return WithClass->findMember(Name);
     if (Decl *D = lookupOwn(Name))
       return D;
     for (auto It = Imports.rbegin(); It != Imports.rend(); ++It)

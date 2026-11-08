@@ -54,9 +54,12 @@ extern "C" int LLVMFuzzerTestOneInput(const uint8_t *Data, size_t Size) {
   FileID FID = SM.addBuffer(
       llvm::StringRef(reinterpret_cast<const char *>(Data), Size), "fuzz.pas");
 
-  // The first byte picks the dialect, so both get coverage.
-  LangOptions LO = LangOptions::forMode(Size && (Data[0] & 1) ? LangMode::TP
-                                                              : LangMode::ISO);
+  // The first byte picks the dialect, so all get coverage: ISO when even,
+  // else Turbo/FPC, with classes (objfpc) when bit 1 is set too.
+  LangMode Mode = LangMode::ISO;
+  if (Size && (Data[0] & 1))
+    Mode = (Data[0] & 2) ? LangMode::ObjFPC : LangMode::TP;
+  LangOptions LO = LangOptions::forMode(Mode);
   StringPool Strings;
   ASTContext Ctx(Strings);
   Lexer Lex(SM, FID, Diags, Strings, LO);

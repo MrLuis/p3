@@ -35,6 +35,10 @@ fpc -Mobjfpc -Sh- -Cr -Co -FUbuild/fpc-units -Fibuild/selfhost \
 | `version.inc` | generated from `CMakeLists.txt` |
 | `pcc.pas` | the driver: options (as llvm::cl parses them), unit loading, the dumps, code generation |
 
+It accepts the same languages as the C++ pcc, including classes with
+`--mode=objfpc` (PLAN.md M13), though it is itself written without them
+(DIALECT.md).
+
 The Pascal compiler writes LLVM IR as text, then libLLVM parses, verifies,
 optimizes (the same `default<On>` pipeline as the C++ pcc) and compiles it
 in process, with a target machine set up like the C++ pcc's; the default

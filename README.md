@@ -32,6 +32,54 @@ functions (`cdecl; external 'c' name 'strlen'`); `{$I file}`; `paramcount
 paramstr halt`. This is the dialect the self-hosted compiler is written in
 (see [SELFHOST.md](SELFHOST.md) and [selfhost/DIALECT.md](selfhost/DIALECT.md)).
 
+With `--mode=objfpc`, everything of `--mode=tp` plus classes, as in Free
+Pascal's objfpc mode (`class inherited is as property` become reserved):
+
+```pascal
+type
+  TShape = class                 { implicitly class(TObject) }
+  private
+    FName: string;
+  public
+    constructor Create(const AName: string);
+    function Area: real; virtual; abstract;
+    procedure Show; virtual;
+    property Name: string read FName write FName;
+  end;
+  TSquare = class(TShape)
+    Side: real;
+    function Area: real; override;
+  end;
+
+function TSquare.Area: real;
+begin
+  Result := Side * Side;         { Result names the function result }
+end;
+...
+  S := TSquare.Create('square'); { allocates, then runs the constructor }
+  if S is TSquare then (S as TSquare).Side := 2;
+  S.Show;                        { virtual dispatch }
+  S.Free;                        { Destroy (virtual) unless nil, then release }
+```
+
+Supported: fields, methods, constructors and destructors (called through
+the class they allocate, called on an object they do not), `virtual`,
+`override` and `abstract` methods, `inherited` (with or without a method
+name and arguments), `Self`, properties with field or method accessors,
+`private protected public published` (private: visible in the declaring
+program or unit; protected: also in descendants' methods), forward
+declarations (`TNode = class;`), `is`, `as`, typecasts, `with` on objects,
+`Result` in functions, and the root class `TObject` (`Create`, `Destroy`,
+`Free`, `ClassName`). Classes work in units, compiled whole or separately.
+Objects live on the heap: a variable of a class type holds a reference
+(`nil` by default), and the object starts with a pointer to its class's
+VMT. Calls of virtual methods and field accesses through a `nil` reference
+are runtime errors under range checks, as are a failed `as` and calling an
+abstract method. Not supported (reported as such): class references (`class
+of`), class methods and variables, interfaces, exceptions, overloading,
+`strict` visibility, array, indexed and default properties, and virtual
+constructors.
+
 Units are compiled into the program by default. They can also be compiled
 separately: `pcc --mode=tp -c unit.pas` writes `unit.o` (its interface
 variables and routines are the symbols `pas.<unit>$<name>`, its
@@ -107,7 +155,7 @@ pcc -S hello.pas              # assembly
 pcc --emit-llvm hello.pas     # LLVM IR
 pcc --emit-tokens hello.pas   # lexer dump
 pcc --emit-ast hello.pas      # AST dump
-pcc --help                    # all options (-O0..3, -g, --target, --mode=iso|tp, ...)
+pcc --help                    # all options (-O0..3, -g, --target, --mode=iso|tp|objfpc, ...)
 ```
 
 ## Layout

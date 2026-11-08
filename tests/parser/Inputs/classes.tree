@@ -1,0 +1,110 @@
+ProgramDecl 'classes' <1:1>
+  TypeDecl 'tbase' <3:3>
+    ClassTypeSpec forward <3:11>
+  TypeDecl 'tbase' <4:3>
+    ClassTypeSpec <4:11>
+      FieldDecl 'fx' private <6:5>
+        NamedTypeSpec 'integer' <6:9>
+      ProcedureDecl 'setx' protected virtual <8:5>
+        ParamDecl 'v' <8:20>
+          NamedTypeSpec 'integer' <8:23>
+      ConstructorDecl 'create' <10:5>
+        ParamDecl 'ax' <10:24>
+          NamedTypeSpec 'integer' <10:28>
+      DestructorDecl 'destroy' override <11:5>
+      FunctionDecl 'twice' virtual abstract <12:5>
+        Result <12:21>
+          NamedTypeSpec 'integer' <12:21>
+      PropertyDecl 'x' read 'fx' write 'setx' <13:14>
+        NamedTypeSpec 'integer' <13:17>
+      FieldDecl 'tag' published <15:5>
+        StringTypeSpec <15:10>
+  TypeDecl 'tderived' <17:3>
+    ClassTypeSpec 'tbase' <17:14>
+      FunctionDecl 'twice' override <18:5>
+        Result <18:21>
+          NamedTypeSpec 'integer' <18:21>
+  TypeDecl 'tempty' <20:3>
+    ClassTypeSpec 'tderived' <20:12>
+  ConstructorDecl 'tbase.create' <21:1>
+    ParamDecl 'ax' <21:26>
+      NamedTypeSpec 'integer' <21:30>
+    CompoundStmt <22:1>
+      IndirectCallStmt <23:3>
+        IndirectCallExpr <23:3>
+          InheritedExpr 'create' <23:3>
+      AssignStmt <24:3>
+        NameRefExpr 'x' <24:3>
+        NameRefExpr 'ax' <24:8>
+      EmptyStmt <25:1>
+  DestructorDecl 'tbase.destroy' <26:1>
+    CompoundStmt <27:1>
+      IndirectCallStmt <28:3>
+        IndirectCallExpr <28:3>
+          InheritedExpr <28:3>
+      EmptyStmt <29:1>
+  ProcedureDecl 'tbase.setx' <30:1>
+    ParamDecl 'v' <30:22>
+      NamedTypeSpec 'integer' <30:25>
+    CompoundStmt <31:1>
+      AssignStmt <32:3>
+        NameRefExpr 'fx' <32:3>
+        NameRefExpr 'v' <32:9>
+      EmptyStmt <33:1>
+  FunctionDecl 'tderived.twice' <34:1>
+    Result <34:26>
+      NamedTypeSpec 'integer' <34:26>
+    CompoundStmt <35:1>
+      AssignStmt <36:3>
+        NameRefExpr 'result' <36:3>
+        BinaryExpr '*' <36:13>
+          NameRefExpr 'x' <36:13>
+          IntegerLiteralExpr 2 <36:17>
+      EmptyStmt <37:1>
+  VarDecl 'b' <39:3>
+    NamedTypeSpec 'tbase' <39:6>
+  CompoundStmt <40:1>
+    AssignStmt <41:3>
+      NameRefExpr 'b' <41:3>
+      IndirectCallExpr <41:8>
+        FieldExpr 'create' <41:8>
+          NameRefExpr 'tderived' <41:8>
+        IntegerLiteralExpr 2 <41:24>
+    IfStmt <42:3>
+      BinaryExpr 'and' <42:6>
+        ParenExpr <42:6>
+          BinaryExpr 'is' <42:7>
+            NameRefExpr 'b' <42:7>
+            NameRefExpr 'tderived' <42:12>
+        ParenExpr <42:26>
+          BinaryExpr '>' <42:27>
+            FieldExpr 'twice' <42:27>
+              ParenExpr <42:27>
+                BinaryExpr 'as' <42:28>
+                  NameRefExpr 'b' <42:28>
+                  NameRefExpr 'tderived' <42:33>
+            IntegerLiteralExpr 0 <42:51>
+      AssignStmt <43:5>
+        FieldExpr 'tag' <43:5>
+          ParenExpr <43:5>
+            BinaryExpr 'as' <43:6>
+              NameRefExpr 'b' <43:6>
+              NameRefExpr 'tempty' <43:11>
+        CharLiteralExpr "x" <43:26>
+    AssignStmt <44:3>
+      FieldExpr 'x' <44:3>
+        CallExpr 'tderived' <44:3>
+          NameRefExpr 'b' <44:12>
+      IntegerLiteralExpr 3 <44:20>
+    WithStmt <45:3>
+      NameRefExpr 'b' <45:8>
+      AssignStmt <45:13>
+        NameRefExpr 'x' <45:13>
+        BinaryExpr '+' <45:18>
+          NameRefExpr 'x' <45:18>
+          IntegerLiteralExpr 1 <45:22>
+    IndirectCallStmt <46:3>
+      IndirectCallExpr <46:3>
+        FieldExpr 'free' <46:3>
+          NameRefExpr 'b' <46:3>
+    EmptyStmt <47:1>

@@ -1,0 +1,80 @@
+ProgramDecl 'classes' <1:1>
+  TypeDecl 'tbase' = class(TObject) <3:3>
+  TypeDecl 'tbase' = class(TObject) <4:3>
+  TypeDecl 'tderived' = class(TBase) <17:3>
+  TypeDecl 'tempty' = class(TDerived) <20:3>
+  ConstructorDecl 'tbase.create' definition <21:1>
+    CompoundStmt <22:1>
+      IndirectCallStmt <23:3>
+        IndirectCallExpr <23:3>
+          InheritedExpr 'create' <23:3>
+      AssignStmt <24:3>
+        NameRefExpr 'x' property (self) : integer <24:3>
+        NameRefExpr 'ax' parameter : integer <24:8>
+      EmptyStmt <25:1>
+  DestructorDecl 'tbase.destroy' definition <26:1>
+    CompoundStmt <27:1>
+      IndirectCallStmt <28:3>
+        IndirectCallExpr <28:3>
+          InheritedExpr <28:3>
+      EmptyStmt <29:1>
+  ProcedureDecl 'tbase.setx' definition <30:1>
+    CompoundStmt <31:1>
+      AssignStmt <32:3>
+        NameRefExpr 'fx' field (self) : integer <32:3>
+        NameRefExpr 'v' parameter : integer <32:9>
+      EmptyStmt <33:1>
+  FunctionDecl 'tderived.twice' definition <34:1>
+    CompoundStmt <35:1>
+      AssignStmt <36:3>
+        NameRefExpr 'result' function result : integer <36:3>
+        BinaryExpr '*' : integer <36:13>
+          NameRefExpr 'x' property (self) : integer <36:13>
+          IntegerLiteralExpr 2 : integer <36:17>
+      EmptyStmt <37:1>
+  VarDecl 'b' : TBase <39:3>
+  CompoundStmt <40:1>
+    AssignStmt <41:3>
+      NameRefExpr 'b' variable : TBase <41:3>
+      IndirectCallExpr : TDerived <41:8>
+        FieldExpr 'create' : TDerived <41:8>
+          NameRefExpr 'tderived' type : TDerived <41:8>
+        IntegerLiteralExpr 2 : integer <41:24>
+    IfStmt <42:3>
+      BinaryExpr 'and' : boolean <42:6>
+        ParenExpr : boolean <42:6>
+          BinaryExpr 'is' : boolean <42:7>
+            NameRefExpr 'b' variable : TBase <42:7>
+            NameRefExpr 'tderived' type : TDerived <42:12>
+        ParenExpr : boolean <42:26>
+          BinaryExpr '>' : boolean <42:27>
+            FieldExpr 'twice' : integer <42:27>
+              ParenExpr : TDerived <42:27>
+                BinaryExpr 'as' : TDerived <42:28>
+                  NameRefExpr 'b' variable : TBase <42:28>
+                  NameRefExpr 'tderived' type : TDerived <42:33>
+            IntegerLiteralExpr 0 : integer <42:51>
+      AssignStmt <43:5>
+        FieldExpr 'tag' : string <43:5>
+          ParenExpr : TEmpty <43:5>
+            BinaryExpr 'as' : TEmpty <43:6>
+              NameRefExpr 'b' variable : TBase <43:6>
+              NameRefExpr 'tempty' type : TEmpty <43:11>
+        CharLiteralExpr "x" : char <43:26>
+    AssignStmt <44:3>
+      FieldExpr 'x' : integer <44:3>
+        CallExpr 'tderived' : TDerived <44:3>
+          NameRefExpr 'b' variable : TBase <44:12>
+      IntegerLiteralExpr 3 : integer <44:20>
+    WithStmt <45:3>
+      NameRefExpr 'b' variable : TBase <45:8>
+      AssignStmt <45:13>
+        NameRefExpr 'x' property (with) : integer <45:13>
+        BinaryExpr '+' : integer <45:18>
+          NameRefExpr 'x' property (with) : integer <45:18>
+          IntegerLiteralExpr 1 : integer <45:22>
+    IndirectCallStmt <46:3>
+      IndirectCallExpr <46:3>
+        FieldExpr 'free' <46:3>
+          NameRefExpr 'b' variable : TBase <46:3>
+    EmptyStmt <47:1>

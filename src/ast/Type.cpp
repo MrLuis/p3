@@ -74,6 +74,31 @@ bool pcc::containsFile(Type *T) {
   return false;
 }
 
+Decl *ClassType::findOwnMember(llvm::StringRef Name) const {
+  for (Decl *D : Members)
+    if (D->getName().Name == Name)
+      return D;
+  return nullptr;
+}
+
+Decl *ClassType::findMember(llvm::StringRef Name,
+                            const ClassType **Owner) const {
+  for (const ClassType *C = this; C; C = C->Parent)
+    if (Decl *D = C->findOwnMember(Name)) {
+      if (Owner)
+        *Owner = C;
+      return D;
+    }
+  return nullptr;
+}
+
+bool ClassType::inheritsFrom(const ClassType *C) const {
+  for (const ClassType *X = this; X; X = X->Parent)
+    if (X == C)
+      return true;
+  return false;
+}
+
 FieldDecl *RecordType::findField(llvm::StringRef Name) const {
   for (FieldDecl *F : AllFields)
     if (F->getName().Name == Name)
@@ -189,6 +214,8 @@ std::string Type::getName() const {
     Type *E = llvm::cast<SetType>(this)->getElementType();
     return E ? "set of " + E->getName() : "empty set";
   }
+  case TK_Class:
+    return "class";
   }
   return "?";
 }

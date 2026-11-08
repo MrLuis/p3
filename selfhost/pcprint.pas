@@ -95,8 +95,13 @@ begin
     dkField: declKindName := 'field';
     dkLabel: declKindName := 'label';
     dkUnit: declKindName := 'unit';
+    dkProperty: declKindName := 'property';
     dkRoutine:
-      if d^.isFunction then
+      if d^.methodKind = mtConstructor then
+        declKindName := 'constructor'
+      else if d^.methodKind = mtDestructor then
+        declKindName := 'destructor'
+      else if d^.isFunction then
         declKindName := 'function'
       else
         declKindName := 'procedure';
@@ -163,8 +168,29 @@ begin
         end;
         bufAddChar(outBuf, ')');
       end;
+    tyClass:
+      if t^.classParent <> nil then
+      begin
+        bufAdd(outBuf, 'class(');
+        bufAddTypeName(outBuf, t^.classParent);
+        bufAddChar(outBuf, ')');
+      end
+      else
+        bufAdd(outBuf, 'class');
   else
     bufAddTypeName(outBuf, t);
+  end;
+end;
+
+{ " private" etc. after a class member }
+procedure visibilitySuffix(d: PDecl);
+begin
+  case d^.vis of
+    vsPublished: bufAdd(outBuf, ' published');
+    vsProtected: bufAdd(outBuf, ' protected');
+    vsPrivate: bufAdd(outBuf, ' private');
+  else
+    ;
   end;
 end;
 
@@ -349,6 +375,24 @@ begin
           indent := indent - 2;
         end;
       end;
+    tsClass:
+      begin
+        if ts^.isForwardClass then
+          line('ClassTypeSpec forward')
+        else
+          line('ClassTypeSpec');
+        if identValid(ts^.parentName) then
+        begin
+          bufAdd(outBuf, ' ''');
+          bufAddName(outBuf, ts^.parentName.name);
+          bufAddChar(outBuf, '''');
+        end;
+        loc(ts^.b);
+        indent := indent + 2;
+        for i := 0 to ts^.memberList.count - 1 do
+          printDecl(PDecl(listGet(ts^.memberList, i)));
+        indent := indent - 2;
+      end;
   end;
 end;
 
@@ -365,9 +409,24 @@ begin
   end;
 end;
 
+{ " : T" for a declaration's type: the resolved type, else the name of a
+  named type spec }
+procedure declTypeSuffix(ts: PTypeSpec; t: PType);
+begin
+  if t <> nil then
+    typeSuffix(t)
+  else if (ts <> nil) and (ts^.kind = tsNamed) then
+  begin
+    bufAdd(outBuf, ' : ''');
+    bufAddName(outBuf, ts^.tname.spelling);
+    bufAddChar(outBuf, '''');
+  end;
+end;
+
 procedure printDecl(d: PDecl);
 var
   i: longint;
+  kindPrefix: string;
 begin
   case d^.kind of
     dkConst:
@@ -437,11 +496,30 @@ begin
       end;
     dkRoutine:
       begin
-        if d^.isFunction then
-          lineName('FunctionDecl ''', d^.ident.name)
+        if d^.methodKind = mtConstructor then
+          kindPrefix := 'ConstructorDecl '''
+        else if d^.methodKind = mtDestructor then
+          kindPrefix := 'DestructorDecl '''
+        else if d^.isFunction then
+          kindPrefix := 'FunctionDecl '''
         else
-          lineName('ProcedureDecl ''', d^.ident.name);
+          kindPrefix := 'ProcedureDecl ''';
+        line(kindPrefix);
+        if identValid(d^.methodClassName) then
+        begin
+          bufAddName(outBuf, d^.methodClassName.name);
+          bufAddChar(outBuf, '.');
+        end;
+        bufAddName(outBuf, d^.ident.name);
+        bufAddChar(outBuf, '''');
         typeSuffix(d^.resultType);
+        visibilitySuffix(d);
+        if d^.isVirtual then
+          bufAdd(outBuf, ' virtual');
+        if d^.isOverride then
+          bufAdd(outBuf, ' override');
+        if d^.isAbstract then
+          bufAdd(outBuf, ' abstract');
         if d^.isForward then
           bufAdd(outBuf, ' forward');
         if d^.isExternal then
@@ -477,6 +555,46 @@ begin
         line('LabelDecl ');
         bufAddName(outBuf, d^.ident.name);
         loc(d^.loc);
+      end;
+    dkField: { a field of a class }
+      begin
+        lineName('FieldDecl ''', d^.ident.name);
+        if not parseTree then
+          declTypeSuffix(d^.fieldSpec, d^.fieldType);
+        visibilitySuffix(d);
+        loc(d^.loc);
+        if parseTree then
+        begin
+          indent := indent + 2;
+          printTypeSpec(d^.fieldSpec);
+          indent := indent - 2;
+        end;
+      end;
+    dkProperty:
+      begin
+        lineName('PropertyDecl ''', d^.ident.name);
+        if not parseTree then
+          declTypeSuffix(d^.propSpec, d^.propType);
+        if identValid(d^.readName) then
+        begin
+          bufAdd(outBuf, ' read ''');
+          bufAddName(outBuf, d^.readName.name);
+          bufAddChar(outBuf, '''');
+        end;
+        if identValid(d^.writeName) then
+        begin
+          bufAdd(outBuf, ' write ''');
+          bufAddName(outBuf, d^.writeName.name);
+          bufAddChar(outBuf, '''');
+        end;
+        visibilitySuffix(d);
+        loc(d^.loc);
+        if parseTree then
+        begin
+          indent := indent + 2;
+          printTypeSpec(d^.propSpec);
+          indent := indent - 2;
+        end;
       end;
   else
     begin
@@ -756,7 +874,23 @@ begin
         if e^.refDecl <> nil then
           bufAdd(outBuf, ' ' + declKindName(e^.refDecl));
         if e^.refWith <> nil then
-          bufAdd(outBuf, ' (with)');
+        begin
+          if e^.refWith^.isSelf then
+            bufAdd(outBuf, ' (self)')
+          else
+            bufAdd(outBuf, ' (with)');
+        end;
+        endExpr(e);
+      end;
+    nkInherited:
+      begin
+        line('InheritedExpr');
+        if identValid(e^.inhName) then
+        begin
+          bufAdd(outBuf, ' ''');
+          bufAddName(outBuf, e^.inhName.name);
+          bufAddChar(outBuf, '''');
+        end;
         endExpr(e);
       end;
     nkParen:

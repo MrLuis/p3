@@ -1,0 +1,24 @@
+; Classes (--mode=objfpc): the parse tree and the checked tree of a program
+; with classes, and the syntax that is rejected.
+; RUN: %pcc --mode=objfpc --emit-parse-tree %S/Inputs/classes.pas -o %t.tree
+; RUN: diff %S/Inputs/classes.tree %t.tree
+; RUN: %pcc --mode=objfpc --emit-ast %S/Inputs/classes.pas -o %t.ast
+; RUN: diff %S/Inputs/classes.ast %t.ast
+
+; RUN: not %pcc --mode=objfpc -ferror-limit=0 --emit-parse-tree %S/Inputs/class-syntax.pas 2>&1 >/dev/null | FileCheck --check-prefix=SYNTAX %s
+; SYNTAX: class-syntax.pas:3:14: error: class reference types are not supported yet
+; SYNTAX: class-syntax.pas:4:21: error: interfaces are not supported yet
+; SYNTAX: class-syntax.pas:6:5: error: 'strict' visibility is not supported yet
+; SYNTAX: class-syntax.pas:9:18: error: 'overload' on methods is not supported yet
+; SYNTAX: class-syntax.pas:12:19: error: array properties are not supported yet
+; SYNTAX: class-syntax.pas:15:32: error: 'default' in a property is not supported yet
+; SYNTAX: class-syntax.pas:18:5: error: class methods and class variables are not supported yet
+; SYNTAX: class-syntax.pas:21:5: error: expected a field, method or property declaration, or 'end'
+; SYNTAX: class-syntax.pas:24:24: error: a constructor cannot have a result type
+; SYNTAX: class-syntax.pas:26:13: error: a constructor must be declared in a class; implement it as 'constructor TClass.Make'
+; SYNTAX-NOT: error:
+
+; Without --mode=objfpc, `class` is not a reserved word.
+; RUN: not %pcc --mode=tp --emit-parse-tree %S/Inputs/classes.pas 2>&1 >/dev/null | FileCheck --check-prefix=TP %s
+; TP: classes.pas:4:11: error: classes are an Object Pascal extension; use --mode=objfpc
+; RUN: not %pcc --emit-parse-tree %S/Inputs/classes.pas 2>&1 >/dev/null | FileCheck --check-prefix=TP %s

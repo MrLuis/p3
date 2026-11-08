@@ -494,6 +494,35 @@ void *__pas_realloc(void *p, int64_t size) {
   return q;
 }
 
+/*===- Classes (--mode=objfpc) ---------------------------------------------===*/
+
+void __pas_tobject_destroy(void *link, void *self) {
+  (void)link;
+  (void)self;
+}
+
+void *const __pas_tobject_vmt[3] = {
+    NULL, (void *)"\007TObject", (void *)(uintptr_t)__pas_tobject_destroy};
+
+int32_t __pas_class_is(const void *obj, const void *vmt) {
+  if (!obj)
+    return 0;
+  for (void *const *v = *(void *const *const *)obj; v; v = (void *const *)v[0])
+    if (v == vmt)
+      return 1;
+  return 0;
+}
+
+void *__pas_class_as(void *obj, const void *vmt, const char *msg) {
+  if (obj && !__pas_class_is(obj, vmt))
+    __pas_runtime_error(msg);
+  return obj;
+}
+
+void __pas_abstract_error(void) {
+  __pas_runtime_error("call of an abstract method");
+}
+
 /*===- Program (Turbo/FPC) --------------------------------------------------===*/
 
 void __pas_halt(int32_t code) {

@@ -27,7 +27,9 @@
 namespace pcc {
 
 class ConstDecl;
+class Decl;
 class FieldDecl;
+class RoutineDecl;
 class VarDecl;
 struct FieldList;
 
@@ -50,6 +52,7 @@ public:
     TK_File,     ///< file of T, text                            (M10)
     TK_Routine,  ///< a procedural/functional parameter's type   (M10)
     TK_ShortString, ///< Turbo/FPC string[N]: length byte + N chars (M12)
+    TK_Class,    ///< class ... end (objfpc): a reference to an object
   };
 
 private:
@@ -77,6 +80,7 @@ public:
   bool isSet() const { return Kind == TK_Set; }
   bool isFile() const { return Kind == TK_File; }
   bool isShortString() const { return Kind == TK_ShortString; }
+  bool isClass() const { return Kind == TK_Class; }
   /// Anything that converts to a short string: short strings, string types,
   /// and chars (Turbo/FPC).
   bool isStringish() const;
@@ -88,8 +92,8 @@ public:
            Kind == TK_Enum || Kind == TK_Subrange;
   }
   bool isSimple() const { return isOrdinal() || isReal(); }
-  /// Types a function may return (ISO 6.6.2: simple or pointer).
-  bool isValidResultType() const { return isSimple() || isPointer(); }
+  /// Types a function may return (ISO 6.6.2: simple or pointer; classes).
+  bool isValidResultType() const { return isSimple() || isPointer() || isClass(); }
   bool isStructured() const { return isArray() || isRecord() || isShortString(); }
 
   /// Integer-like after stripping subranges (an integer type or a subrange
@@ -285,6 +289,48 @@ public:
   Type *getResult() const { return Result; }
   bool isFunction() const { return Result != nullptr; }
   static bool classof(const Type *T) { return T->getKind() == TK_Routine; }
+};
+
+/// class [(Parent)] ... end (objfpc). A value of a class type is a pointer
+/// to an object: a block on the heap that starts with a pointer to its
+/// class's VMT (virtual method table), followed by the fields of its
+/// ancestors and its own. Forward declarations (`TFoo = class;`) create the
+/// type undefined; the full declaration fills it in.
+class ClassType final : public Type {
+  ClassType *Parent = nullptr;          ///< null only for TObject
+  llvm::ArrayRef<Decl *> Members;       ///< own members, in source order
+  llvm::ArrayRef<FieldDecl *> AllFields; ///< ancestors' fields, then own
+  llvm::ArrayRef<RoutineDecl *> VTable; ///< the virtual methods, by slot
+  const void *Module = nullptr; ///< the program or unit declaring it
+  bool Defined = false;
+
+public:
+  ClassType() : Type(TK_Class) {}
+  ClassType *getParent() const { return Parent; }
+  llvm::ArrayRef<Decl *> getMembers() const { return Members; }
+  llvm::ArrayRef<FieldDecl *> getAllFields() const { return AllFields; }
+  llvm::ArrayRef<RoutineDecl *> getVTable() const { return VTable; }
+  const void *getModule() const { return Module; }
+  bool isDefined() const { return Defined; }
+  void define(ClassType *P, llvm::ArrayRef<Decl *> M,
+              llvm::ArrayRef<FieldDecl *> Fields,
+              llvm::ArrayRef<RoutineDecl *> VT, const void *Mod) {
+    Parent = P;
+    Members = M;
+    AllFields = Fields;
+    VTable = VT;
+    Module = Mod;
+    Defined = true;
+  }
+  void setModule(const void *Mod) { Module = Mod; }
+  /// The member Name declared in this class itself.
+  Decl *findOwnMember(llvm::StringRef Name) const;
+  /// The member Name of this class or its nearest ancestor declaring it;
+  /// *Owner receives that class.
+  Decl *findMember(llvm::StringRef Name, const ClassType **Owner = nullptr) const;
+  /// Is this class C or a descendant of C?
+  bool inheritsFrom(const ClassType *C) const;
+  static bool classof(const Type *T) { return T->getKind() == TK_Class; }
 };
 
 /// Turbo/FPC: do L and R compare as short strings? (Two chars, or two ISO

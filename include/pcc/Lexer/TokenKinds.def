@@ -10,7 +10,9 @@
 //
 // Keyword FLAGS:
 //   KEYISO  reserved in every mode (ISO 7185)
-//   KEYTP   reserved only with Turbo/Free Pascal extensions (--mode=tp)
+//   KEYTP   reserved only with Turbo/Free Pascal extensions (--mode=tp,
+//           --mode=objfpc)
+//   KEYOBJ  reserved only with Object Pascal classes (--mode=objfpc)
 //
 // Note: the C++ alternative tokens (and, or, not, xor) cannot be pasted in the
 // preprocessor, hence the explicit ID + SPELLING pairs.
@@ -114,6 +116,13 @@ KEYWORD(kw_asm,            "asm",            KEYTP)
 KEYWORD(kw_object,         "object",         KEYTP)
 KEYWORD(kw_constructor,    "constructor",    KEYTP)
 KEYWORD(kw_destructor,     "destructor",     KEYTP)
+
+//===--- Object Pascal reserved words (--mode=objfpc) ---------------------===//
+KEYWORD(kw_class,          "class",          KEYOBJ)
+KEYWORD(kw_inherited,      "inherited",      KEYOBJ)
+KEYWORD(kw_is,             "is",             KEYOBJ)
+KEYWORD(kw_as,             "as",             KEYOBJ)
+KEYWORD(kw_property,       "property",       KEYOBJ)
 
 #undef KEYWORD
 #undef PUNCT

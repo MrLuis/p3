@@ -116,10 +116,13 @@ void Parser::unsupported(llvm::StringRef What) {
 bool Parser::startsStatement() const {
   return Tok.isOneOf(tok::identifier, tok::kw_begin, tok::kw_if,
                      tok::kw_while, tok::kw_repeat, tok::kw_for, tok::kw_case,
-                     tok::kw_with, tok::kw_goto, tok::integer_literal);
+                     tok::kw_with, tok::kw_goto, tok::integer_literal,
+                     tok::kw_inherited);
 }
 
 bool Parser::startsDeclarationPart() const {
+  if (LangOpts.ObjKeywords && Tok.isOneOf(tok::kw_constructor, tok::kw_destructor))
+    return true; // method implementations
   return Tok.isOneOf(tok::kw_label, tok::kw_const, tok::kw_type, tok::kw_var,
                      tok::kw_procedure, tok::kw_function);
 }
@@ -346,6 +349,8 @@ void Parser::parseDeclarations(llvm::SmallVectorImpl<Decl *> &Decls,
       break;
     case tok::kw_procedure:
     case tok::kw_function:
+    case tok::kw_constructor:
+    case tok::kw_destructor:
       if (RoutineDecl *R = parseRoutineDecl(InInterface))
         Decls.push_back(R);
       break;
@@ -410,7 +415,7 @@ void Parser::parseConstPart(llvm::SmallVectorImpl<Decl *> &Decls) {
   while (Tok.is(tok::identifier) && !Diags.shouldStop()) {
     Identifier Name = makeIdentifier(Tok);
     consumeToken();
-    if (Tok.is(tok::colon) && LangOpts.Mode == LangMode::TP) {
+    if (Tok.is(tok::colon) && LangOpts.Mode != LangMode::ISO) {
       // Typed constant: const x: T = value;
       consumeToken();
       TypeSpec *TS = parseType();
@@ -505,18 +510,54 @@ void Parser::parseVarPart(llvm::SmallVectorImpl<Decl *> &Decls) {
   }
 }
 
-// routineDecl = ("procedure" ident [params] | "function" ident [params]
+static MethodKind methodKindOf(tok::TokenKind K) {
+  switch (K) {
+  case tok::kw_constructor: return MethodKind::Constructor;
+  case tok::kw_destructor:  return MethodKind::Destructor;
+  default:                  return MethodKind::None;
+  }
+}
+
+static const char *routineKindWord(tok::TokenKind K) {
+  switch (K) {
+  case tok::kw_function:    return "function";
+  case tok::kw_constructor: return "constructor";
+  case tok::kw_destructor:  return "destructor";
+  default:                  return "procedure";
+  }
+}
+
+// routineDecl = ("procedure" name [params] | "function" name [params]
 //               [":" typeIdent]) ";" ( "forward" | block ) ";" .
+// name = ident [ "." ident ]   (objfpc: a method implementation, TClass.M;
+// constructors and destructors are always methods)
 RoutineDecl *Parser::parseRoutineDecl(bool HeadingOnly) {
   bool IsFunction = Tok.is(tok::kw_function);
-  const char *Kind = IsFunction ? "function" : "procedure";
+  MethodKind MK = methodKindOf(Tok.getKind());
+  const char *Kind = routineKindWord(Tok.getKind());
   SourceLocation Loc = consumeToken();
 
-  Identifier Name;
+  Identifier Name, ClassName;
   if (!expectIdentifier(Name, std::string(Kind) + " name")) {
     skipUntil({tok::semi, tok::kw_begin});
     tryConsume(tok::semi);
+  } else if (LangOpts.ObjKeywords && Tok.is(tok::period)) {
+    consumeToken();
+    ClassName = Name;
+    if (!expectIdentifier(Name, "method name after '.'")) {
+      Name = Identifier();
+      skipUntil({tok::semi, tok::kw_begin});
+      tryConsume(tok::semi);
+    }
   }
+  if (Name.isValid() && MK != MethodKind::None && !ClassName.isValid())
+    Diags.error(Name.Loc,
+                std::string("a ") + Kind +
+                    " must be declared in a class; implement it as '" + Kind +
+                    " TClass." + Name.Spelling.str() + "'",
+                {Name.getRange()});
+  if (ClassName.isValid() && MK == MethodKind::None)
+    MK = MethodKind::Method;
 
   llvm::SmallVector<VarDecl *, 4> Params;
   bool HasParamList = Tok.is(tok::l_paren);
@@ -526,7 +567,8 @@ RoutineDecl *Parser::parseRoutineDecl(bool HeadingOnly) {
   TypeSpec *ResultTS = nullptr;
   if (tryConsume(tok::colon)) {
     if (!IsFunction)
-      Diags.error(PrevTokEnd, "a procedure cannot have a result type");
+      Diags.error(PrevTokEnd, std::string("a ") + Kind +
+                                  " cannot have a result type");
     ResultTS = parseTypeIdentifier("function result type");
   }
 
@@ -538,7 +580,7 @@ RoutineDecl *Parser::parseRoutineDecl(bool HeadingOnly) {
   // Turbo/FPC directives:  cdecl;  external ['lib'] [name 'symbol'];
   bool IsExternal = false;
   llvm::StringRef ExternalName;
-  while (LangOpts.Mode == LangMode::TP) {
+  while (LangOpts.Mode != LangMode::ISO) {
     if (isIdentifierNamed("cdecl")) { // the only calling convention
       consumeToken();
       expect(tok::semi, "after 'cdecl'");
@@ -571,6 +613,12 @@ RoutineDecl *Parser::parseRoutineDecl(bool HeadingOnly) {
     return R;
   }
 
+  if (HeadingOnly && ClassName.isValid()) {
+    Diags.error(ClassName.Loc,
+                "methods are implemented in the implementation part of a unit",
+                {SourceRange(ClassName.Loc, Name.getRange().getEnd())});
+    return nullptr;
+  }
   if (HeadingOnly) // interface part of a unit: the body comes later
     return Name.isValid()
                ? Ctx.create<RoutineDecl>(Loc, Name, IsFunction,
@@ -595,9 +643,211 @@ RoutineDecl *Parser::parseRoutineDecl(bool HeadingOnly) {
   }
   if (!Name.isValid())
     return nullptr;
-  return Ctx.create<RoutineDecl>(Loc, Name, IsFunction,
-                                 Ctx.copyArray<VarDecl *>(Params), HasParamList,
-                                 ResultTS, Body, false);
+  auto *R = Ctx.create<RoutineDecl>(Loc, Name, IsFunction,
+                                    Ctx.copyArray<VarDecl *>(Params),
+                                    HasParamList, ResultTS, Body, false);
+  R->setMethodKind(MK);
+  R->setClassName(ClassName);
+  return R;
+}
+
+// methodHeading = ("procedure" | "function" | "constructor" | "destructor")
+//                 ident [params] [":" typeIdent] ";" { directive ";" } .
+// directive     = "virtual" | "override" | "abstract" .
+RoutineDecl *Parser::parseMethodHeading() {
+  bool IsFunction = Tok.is(tok::kw_function);
+  MethodKind MK = methodKindOf(Tok.getKind());
+  if (MK == MethodKind::None)
+    MK = MethodKind::Method;
+  const char *Kind = routineKindWord(Tok.getKind());
+  SourceLocation Loc = consumeToken();
+
+  Identifier Name;
+  if (!expectIdentifier(Name, std::string(Kind) + " name"))
+    return nullptr;
+  llvm::SmallVector<VarDecl *, 4> Params;
+  bool HasParamList = Tok.is(tok::l_paren);
+  if (HasParamList && !parseFormalParams(Params))
+    return nullptr;
+  TypeSpec *ResultTS = nullptr;
+  if (tryConsume(tok::colon)) {
+    if (!IsFunction)
+      Diags.error(PrevTokEnd, std::string("a ") + Kind +
+                                  " cannot have a result type");
+    if (!(ResultTS = parseTypeIdentifier("function result type")))
+      return nullptr;
+  }
+  if (!expect(tok::semi, std::string("after ") + Kind + " heading"))
+    return nullptr;
+
+  bool Virtual = false, Override = false, Abstract = false;
+  while (Tok.is(tok::identifier)) {
+    llvm::StringRef W = Tok.getIdentifier();
+    if (W == "virtual") {
+      Virtual = true;
+    } else if (W == "override") {
+      Override = true;
+    } else if (W == "abstract") {
+      Abstract = true;
+    } else if (W == "reintroduce" || W == "overload" || W == "dynamic" ||
+               W == "static" || W == "message" || W == "final" ||
+               W == "cdecl" || W == "external" || W == "forward") {
+      unsupported("'" + W.str() + "' on methods is");
+      return nullptr;
+    } else {
+      break; // the next member (a field)
+    }
+    std::string Word = W.str();
+    consumeToken();
+    if (!expect(tok::semi, "after '" + Word + "'"))
+      return nullptr;
+  }
+  auto *R = Ctx.create<RoutineDecl>(Loc, Name, IsFunction,
+                                    Ctx.copyArray<VarDecl *>(Params),
+                                    HasParamList, ResultTS, nullptr, false);
+  R->setMethodKind(MK);
+  R->setDirectives(Virtual, Override, Abstract);
+  return R;
+}
+
+// property = "property" ident ":" typeIdent [ "read" ident ] [ "write" ident ] ";" .
+PropertyDecl *Parser::parsePropertyDecl() {
+  consumeToken(); // 'property'
+  Identifier Name;
+  if (!expectIdentifier(Name, "property name"))
+    return nullptr;
+  if (Tok.is(tok::l_square)) {
+    unsupported("array properties are");
+    return nullptr;
+  }
+  if (!expect(tok::colon, "after property name"))
+    return nullptr;
+  TypeSpec *TS = parseTypeIdentifier("property type");
+  if (!TS)
+    return nullptr;
+  Identifier Read, Write;
+  while (Tok.is(tok::identifier)) {
+    llvm::StringRef W = Tok.getIdentifier();
+    if (W == "read" || W == "write") {
+      consumeToken();
+      if (!expectIdentifier(W == "read" ? Read : Write,
+                            "field or method name after '" + W.str() + "'"))
+        return nullptr;
+      continue;
+    }
+    if (W == "default" || W == "nodefault" || W == "stored" || W == "index" ||
+        W == "implements") {
+      unsupported("'" + W.str() + "' in a property is");
+      return nullptr;
+    }
+    break;
+  }
+  if (!expect(tok::semi, "after property declaration"))
+    return nullptr;
+  return Ctx.create<PropertyDecl>(Name, TS, Read, Write);
+}
+
+// classType = "class" ";"                                  (forward)
+//           | "class" [ "(" ident ")" ] ( ";"? | { member } "end" ) .
+// member    = visibility | identList ":" type ";" | methodHeading | property .
+TypeSpec *Parser::parseClassType(SourceLocation Start) {
+  SourceLocation ClassLoc = consumeToken(); // 'class'
+  if (Tok.is(tok::semi)) // TFoo = class;
+    return Ctx.create<ClassTypeSpec>(SourceRange(Start, PrevTokEnd),
+                                     Identifier(), llvm::ArrayRef<Decl *>(),
+                                     /*Forward=*/true);
+  if (Tok.is(tok::kw_of)) {
+    unsupported("class reference types are");
+    return nullptr;
+  }
+  Identifier Parent;
+  if (Tok.is(tok::l_paren)) {
+    SourceLocation LParen = consumeToken();
+    if (!expectIdentifier(Parent, "parent class name"))
+      return nullptr;
+    if (Tok.is(tok::comma)) {
+      unsupported("interfaces are");
+      return nullptr;
+    }
+    if (!expect(tok::r_paren, "after parent class name")) {
+      Diags.note(LParen, "to match this '('");
+      return nullptr;
+    }
+    if (Tok.is(tok::semi)) // TFoo = class(TBar);
+      return Ctx.create<ClassTypeSpec>(SourceRange(Start, PrevTokEnd), Parent,
+                                       llvm::ArrayRef<Decl *>(), false);
+  }
+
+  llvm::SmallVector<Decl *, 16> Members;
+  Visibility Vis = Visibility::Public;
+  auto Fail = [&]() -> TypeSpec * {
+    skipUntil({tok::kw_end});
+    tryConsume(tok::kw_end);
+    return nullptr;
+  };
+  while (Tok.isNot(tok::kw_end) && Tok.isNot(tok::eof) && !Diags.shouldStop()) {
+    if (Tok.is(tok::identifier)) {
+      llvm::StringRef W = Tok.getIdentifier();
+      if (W == "private" || W == "protected" || W == "public" ||
+          W == "published") {
+        Vis = W == "private"     ? Visibility::Private
+              : W == "protected" ? Visibility::Protected
+              : W == "public"    ? Visibility::Public
+                                 : Visibility::Published;
+        consumeToken();
+        continue;
+      }
+      if (W == "strict") {
+        unsupported("'strict' visibility is");
+        return Fail();
+      }
+      llvm::SmallVector<Identifier, 4> Names;
+      if (!parseIdentList(Names, "field name") ||
+          !expect(tok::colon, "after field name"))
+        return Fail();
+      TypeSpec *TS = parseType();
+      if (!TS)
+        return Fail();
+      for (const Identifier &N : Names) {
+        auto *F = Ctx.create<FieldDecl>(N, TS);
+        F->setVisibility(Vis);
+        Members.push_back(F);
+      }
+      if (!expect(tok::semi, "after field declaration"))
+        return Fail();
+      continue;
+    }
+    if (Tok.isOneOf(tok::kw_procedure, tok::kw_function, tok::kw_constructor,
+                    tok::kw_destructor)) {
+      RoutineDecl *R = parseMethodHeading();
+      if (!R)
+        return Fail();
+      R->setVisibility(Vis);
+      Members.push_back(R);
+      continue;
+    }
+    if (Tok.is(tok::kw_property)) {
+      PropertyDecl *P = parsePropertyDecl();
+      if (!P)
+        return Fail();
+      P->setVisibility(Vis);
+      Members.push_back(P);
+      continue;
+    }
+    if (Tok.is(tok::kw_class)) {
+      unsupported("class methods and class variables are");
+      return Fail();
+    }
+    Diags.error(Tok.getLocation(),
+                "expected a field, method or property declaration, or 'end'");
+    return Fail();
+  }
+  if (!expect(tok::kw_end, "at end of class type")) {
+    Diags.note(ClassLoc, "to match this 'class'");
+    return nullptr;
+  }
+  return Ctx.create<ClassTypeSpec>(SourceRange(Start, PrevTokEnd), Parent,
+                                   Ctx.copyArray<Decl *>(Members), false);
 }
 
 // params = "(" section { ";" section } ")" ;
@@ -636,7 +886,7 @@ bool Parser::parseFormalParams(llvm::SmallVectorImpl<VarDecl *> &Params) {
     }
     bool IsVar = tryConsume(tok::kw_var);
     bool IsConst = false;
-    if (!IsVar && Tok.is(tok::kw_const) && LangOpts.Mode == LangMode::TP) {
+    if (!IsVar && Tok.is(tok::kw_const) && LangOpts.Mode != LangMode::ISO) {
       consumeToken();
       IsConst = true;
     }
@@ -686,6 +936,10 @@ TypeSpec *Parser::parseTypeImpl() {
     return parseArrayType(Start, Packed);
   case tok::kw_record:
     return parseRecordType(Start, Packed);
+  case tok::kw_class:
+    if (Packed)
+      break;
+    return parseClassType(Start);
   case tok::kw_set: {
     consumeToken();
     if (!expect(tok::kw_of, "after 'set'"))
@@ -716,7 +970,7 @@ TypeSpec *Parser::parseTypeImpl() {
   case tok::kw_procedure:
   case tok::kw_function: {
     // Procedural type (Turbo/FPC): procedure(params) / function(params): T
-    if (Packed || LangOpts.Mode != LangMode::TP)
+    if (Packed || LangOpts.Mode == LangMode::ISO)
       break;
     bool IsFunction = Tok.is(tok::kw_function);
     consumeToken();
@@ -747,6 +1001,17 @@ TypeSpec *Parser::parseTypeImpl() {
     if (Packed) {
       Diags.error(Tok.getLocation(),
                   "'packed' must be followed by 'array', 'record' or 'set'");
+      return nullptr;
+    }
+    // `class` is not reserved without classes: TFoo = class ... end
+    if (isIdentifierNamed("class") &&
+        peekToken().isOneOf(tok::l_paren, tok::identifier, tok::kw_end,
+                            tok::kw_procedure, tok::kw_function)) {
+      Diags.error(Tok.getLocation(),
+                  "classes are an Object Pascal extension; use --mode=objfpc",
+                  {Tok.getRange()});
+      skipUntil({tok::kw_end}); // skip the class body
+      tryConsume(tok::kw_end);
       return nullptr;
     }
     return parseSimpleType();
@@ -1045,6 +1310,28 @@ Stmt *Parser::parseStatementImpl() {
     return parseCaseStmt();
   case tok::kw_with:
     return parseWithStmt();
+  case tok::l_paren: { // objfpc: (obj as TFoo).Show;
+    if (!LangOpts.ObjKeywords) {
+      Diags.error(Tok.getLocation(), "expected statement");
+      break;
+    }
+    SourceLocation Start = Tok.getLocation();
+    Expr *Target = parseFactor();
+    if (!Target) {
+      skipUntil({tok::semi, tok::kw_end});
+      return Ctx.create<EmptyStmt>(Start);
+    }
+    return finishDesignatorStmt(Start, Target);
+  }
+  case tok::kw_inherited: {
+    SourceLocation Start = Tok.getLocation();
+    Expr *Target = parseInherited();
+    if (!Target) {
+      skipUntil({tok::semi, tok::kw_end});
+      return Ctx.create<EmptyStmt>(Start);
+    }
+    return finishDesignatorStmt(Start, Target);
+  }
 
   // The empty statement: nothing before a separator or terminator.
   case tok::semi:
@@ -1096,6 +1383,7 @@ Stmt *Parser::parseAssignmentOrCall() {
       skipUntil({tok::semi, tok::kw_end});
       return Ctx.create<EmptyStmt>(Start);
     }
+    return finishDesignatorStmt(Start, Target);
   }
 
   // Common slip: '=' where ':=' was meant. Report it, then parse the
@@ -1115,8 +1403,48 @@ Stmt *Parser::parseAssignmentOrCall() {
                                   AssignLoc, Value);
   }
 
-  // Turbo/FPC: a procedure call through a procedural value: r.p(x); a[i];
-  if (HasSelectors && LangOpts.Mode == LangMode::TP &&
+  llvm::SmallVector<Expr *, 4> Args;
+  bool HasParens = Tok.is(tok::l_paren);
+  if (HasParens)
+    parseActualParams(Args, /*AllowFormat=*/true);
+
+  // objfpc: selectors after a call or typecast, TFoo(x).Show; f(1)^.n := 2;
+  if (HasParens && LangOpts.ObjKeywords &&
+      Tok.isOneOf(tok::l_square, tok::period, tok::caret)) {
+    Expr *Call = Ctx.create<CallExpr>(SourceRange(Start, PrevTokEnd), Name,
+                                      Ctx.copyArray<Expr *>(Args));
+    Target = parseSelectors(Call);
+    if (!Target) {
+      skipUntil({tok::semi, tok::kw_end});
+      return Ctx.create<EmptyStmt>(Start);
+    }
+    return finishDesignatorStmt(Start, Target);
+  }
+
+  return Ctx.create<ProcCallStmt>(SourceRange(Start, PrevTokEnd), Name,
+                                  Ctx.copyArray<Expr *>(Args), HasParens);
+}
+
+// The rest of a statement that starts with a designator with selectors:
+// an assignment, or (Turbo/FPC) a call through a procedural value or a
+// method call: r.p(x); a[i]; obj.Show; inherited Create(x);
+Stmt *Parser::finishDesignatorStmt(SourceLocation Start, Expr *Target) {
+  if (Tok.is(tok::equal))
+    Diags.error(Tok.getLocation(), "expected ':=' in assignment, found '='",
+                {Tok.getRange()});
+
+  if (Tok.isOneOf(tok::colon_equal, tok::equal)) {
+    SourceLocation AssignLoc = consumeToken();
+    Expr *Value = parseExpression();
+    if (!Value) {
+      skipUntil({tok::semi, tok::kw_end});
+      return Ctx.create<EmptyStmt>(Start);
+    }
+    return Ctx.create<AssignStmt>(SourceRange(Start, PrevTokEnd), Target,
+                                  AssignLoc, Value);
+  }
+
+  if (LangOpts.Mode != LangMode::ISO &&
       Tok.isOneOf(tok::semi, tok::kw_end, tok::kw_else, tok::kw_until, tok::eof)) {
     auto *Call = llvm::dyn_cast<IndirectCallExpr>(Target);
     if (!Call) // r.p without arguments
@@ -1125,19 +1453,21 @@ Stmt *Parser::parseAssignmentOrCall() {
     return Ctx.create<IndirectCallStmt>(SourceRange(Start, PrevTokEnd), Call);
   }
 
-  if (HasSelectors) {
-    Diags.error(PrevTokEnd, "expected ':=' after variable");
-    skipUntil({tok::semi, tok::kw_end});
-    return Ctx.create<EmptyStmt>(Start);
+  Diags.error(PrevTokEnd, "expected ':=' after variable");
+  skipUntil({tok::semi, tok::kw_end});
+  return Ctx.create<EmptyStmt>(Start);
+}
+
+// inherited [ ident ] { selector }   (objfpc)
+Expr *Parser::parseInherited() {
+  SourceLocation Loc = consumeToken(); // 'inherited'
+  Identifier Name;
+  if (Tok.is(tok::identifier)) {
+    Name = makeIdentifier(Tok);
+    consumeToken();
   }
-
-  llvm::SmallVector<Expr *, 4> Args;
-  bool HasParens = Tok.is(tok::l_paren);
-  if (HasParens)
-    parseActualParams(Args, /*AllowFormat=*/true);
-
-  return Ctx.create<ProcCallStmt>(SourceRange(Start, PrevTokEnd), Name,
-                                  Ctx.copyArray<Expr *>(Args), HasParens);
+  return parseSelectors(
+      Ctx.create<InheritedExpr>(SourceRange(Loc, PrevTokEnd), Name));
 }
 
 bool Parser::parseActualParams(llvm::SmallVectorImpl<Expr *> &Args,
@@ -1471,6 +1801,7 @@ std::optional<BinaryOp> Parser::peekRelOp() const {
   case tok::greater:       return BinaryOp::Gt;
   case tok::greater_equal: return BinaryOp::Ge;
   case tok::kw_in:         return BinaryOp::In;
+  case tok::kw_is:         return BinaryOp::Is;
   default:                 return std::nullopt;
   }
 }
@@ -1494,6 +1825,7 @@ std::optional<BinaryOp> Parser::peekMulOp() const {
   case tok::kw_and: return BinaryOp::And;
   case tok::kw_shl: return BinaryOp::Shl;
   case tok::kw_shr: return BinaryOp::Shr;
+  case tok::kw_as:  return BinaryOp::As;
   default:          return std::nullopt;
   }
 }
@@ -1634,7 +1966,7 @@ Expr *Parser::parseSelectors(Expr *Base) {
     }
     // Turbo/FPC: a call through a procedural value, passes[i].run(v).
     // (A plain name followed by '(' is a CallExpr / ProcCallStmt.)
-    if (Tok.is(tok::l_paren) && LangOpts.Mode == LangMode::TP &&
+    if (Tok.is(tok::l_paren) && LangOpts.Mode != LangMode::ISO &&
         !llvm::isa<NameRefExpr>(Base)) {
       llvm::SmallVector<Expr *, 4> Args;
       if (!parseActualParams(Args, /*AllowFormat=*/false) && Args.empty())
@@ -1680,7 +2012,7 @@ Expr *Parser::parseFactor() {
                                         Ctx.copyArray<Expr *>(Args));
       // Turbo/FPC: a call (or typecast) can be dereferenced and selected
       // from: PNode(p)^.next, f(x)[1].
-      if (LangOpts.Mode == LangMode::TP)
+      if (LangOpts.Mode != LangMode::ISO)
         return parseSelectors(Call);
       return Call;
     }
@@ -1695,8 +2027,14 @@ Expr *Parser::parseFactor() {
       Diags.note(LParen, "to match this '('");
       return nullptr;
     }
-    return Ctx.create<ParenExpr>(SourceRange(LParen, PrevTokEnd), Inner);
+    Expr *Paren = Ctx.create<ParenExpr>(SourceRange(LParen, PrevTokEnd), Inner);
+    // objfpc: (obj as TFoo).Show
+    if (LangOpts.ObjKeywords && Tok.isOneOf(tok::period, tok::caret, tok::l_square))
+      return parseSelectors(Paren);
+    return Paren;
   }
+  case tok::kw_inherited:
+    return parseInherited();
   case tok::kw_not: {
     SourceLocation OpLoc = consumeToken();
     Expr *Operand = parseFactor();

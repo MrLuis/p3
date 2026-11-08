@@ -12,7 +12,7 @@
 ; RUN: %t.pcc --emit-llvm %S/../run/control.pas -o - | opt -passes=verify -disable-output
 ; RUN: %t.pcc --mode=tp --emit-llvm -I %S/../run/Inputs/units/lib %S/../run/Inputs/units/main.pas -o - | opt -passes=verify -disable-output
 ;
-; Programs, ISO and Turbo mode, at -O0 and -O2.
+; Programs, ISO, Turbo and objfpc mode, at -O0 and -O2.
 ; RUN: env PCC_RUNTIME_LIB=%pcc-runtime-lib %t.pcc %S/../run/arith.pas -o %t.arith
 ; RUN: %t.arith > %t.arith.out && diff %S/../run/arith.expected %t.arith.out
 ; RUN: env PCC_RUNTIME_LIB=%pcc-runtime-lib %t.pcc -O2 %S/../run/routines.pas -o %t.routines
@@ -27,6 +27,8 @@
 ; RUN: %t.tpa > %t.tpa.out && diff %S/../run/tpa.expected %t.tpa.out
 ; RUN: env PCC_RUNTIME_LIB=%pcc-runtime-lib %t.pcc --mode=tp %S/../run/ints.pas -o %t.ints
 ; RUN: %t.ints > %t.ints.out && diff %S/../run/ints.expected %t.ints.out
+; RUN: env PCC_RUNTIME_LIB=%pcc-runtime-lib %t.pcc --mode=objfpc %S/../run/classes.pas -o %t.classes
+; RUN: %t.classes > %t.classes.out && diff %S/../run/classes.expected %t.classes.out
 ;
 ; A runtime error.
 ; RUN: env PCC_RUNTIME_LIB=%pcc-runtime-lib %t.pcc %S/Inputs/rterr.pas -o %t.rterr

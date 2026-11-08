@@ -26,12 +26,14 @@
 
 namespace pcc {
 
+class ClassType;
 class Decl;
 class FieldDecl;
 class LabelDecl;
 class RoutineDecl;
 class Type;
 class TypeSpec;
+class VarDecl;
 struct WithContext;
 
 /// A name as it appears in the source.
@@ -69,10 +71,10 @@ enum class UnaryOp { Plus, Minus, Not };
 enum class BinaryOp {
   // adding operators (Xor: Turbo/FPC)
   Add, Sub, Or, Xor,
-  // multiplying operators (Shl, Shr: Turbo/FPC)
-  Mul, RealDiv, IntDiv, Mod, And, Shl, Shr,
-  // relational operators
-  Eq, Ne, Lt, Le, Gt, Ge, In,
+  // multiplying operators (Shl, Shr: Turbo/FPC; As: objfpc)
+  Mul, RealDiv, IntDiv, Mod, And, Shl, Shr, As,
+  // relational operators (Is: objfpc)
+  Eq, Ne, Lt, Le, Gt, Ge, In, Is,
 };
 
 const char *getOpSpelling(UnaryOp Op);
@@ -207,6 +209,9 @@ class CallExpr final : public Expr {
   Identifier Callee;
   llvm::ArrayRef<Expr *> Args;
   Decl *D = nullptr; ///< set by Sema: BuiltinDecl or RoutineDecl
+  /// Set by Sema for a method found through a class scope (objfpc): the
+  /// object it is called on (Self, or the object of a `with`).
+  WithContext *With = nullptr;
 
 public:
   CallExpr(SourceRange R, Identifier Callee, llvm::ArrayRef<Expr *> Args)
@@ -215,6 +220,8 @@ public:
   llvm::ArrayRef<Expr *> getArgs() const { return Args; }
   Decl *getDecl() const { return D; }
   void setDecl(Decl *NewD) { D = NewD; }
+  WithContext *getWith() const { return With; }
+  void setWith(WithContext *W) { With = W; }
   static bool classof(const Expr *E) { return E->getKind() == EK_Call; }
 };
 
@@ -246,19 +253,21 @@ public:
   static bool classof(const Expr *E) { return E->getKind() == EK_Index; }
 };
 
-/// r.f
+/// r.f -- also obj.member (objfpc): a field, method or property of a
+/// class, and TClass.Create (a constructor called through its class).
 class FieldExpr final : public Expr {
   Expr *Base;
   Identifier Field;
-  FieldDecl *FD = nullptr; ///< set by Sema
+  Decl *Member = nullptr; ///< set by Sema: FieldDecl, RoutineDecl, PropertyDecl
 
 public:
   FieldExpr(SourceRange R, Expr *Base, Identifier Field)
       : Expr(EK_Field, R), Base(Base), Field(Field) {}
   Expr *getBase() const { return Base; }
   const Identifier &getField() const { return Field; }
-  FieldDecl *getFieldDecl() const { return FD; }
-  void setFieldDecl(FieldDecl *F) { FD = F; }
+  FieldDecl *getFieldDecl() const;
+  Decl *getMember() const { return Member; }
+  void setMember(Decl *D) { Member = D; }
   static bool classof(const Expr *E) { return E->getKind() == EK_Field; }
 };
 
@@ -329,6 +338,31 @@ public:
   static bool classof(const Expr *E) { return E->getKind() == EK_Aggregate; }
 };
 
+/// inherited [Name] (objfpc): the method Name (by default the enclosing
+/// method's) of the enclosing method's parent class, called on Self without
+/// virtual dispatch. With arguments it is the callee of an
+/// IndirectCallExpr; a bare `inherited` passes the enclosing method's
+/// parameters (ImplicitArgs, made by Sema).
+class InheritedExpr final : public Expr {
+  Identifier Name;                      ///< invalid for a bare `inherited`
+  RoutineDecl *Method = nullptr;        ///< set by Sema (null: nothing to call)
+  RoutineDecl *Enclosing = nullptr;     ///< set by Sema: the calling method
+  llvm::ArrayRef<Expr *> ImplicitArgs;  ///< set by Sema for a bare `inherited`
+
+public:
+  InheritedExpr(SourceRange R, Identifier Name)
+      : Expr(EK_Inherited, R), Name(Name) {}
+  const Identifier &getName() const { return Name; }
+  bool isBare() const { return !Name.isValid(); }
+  RoutineDecl *getMethod() const { return Method; }
+  void setMethod(RoutineDecl *M) { Method = M; }
+  RoutineDecl *getEnclosing() const { return Enclosing; }
+  void setEnclosing(RoutineDecl *M) { Enclosing = M; }
+  llvm::ArrayRef<Expr *> getImplicitArgs() const { return ImplicitArgs; }
+  void setImplicitArgs(llvm::ArrayRef<Expr *> A) { ImplicitArgs = A; }
+  static bool classof(const Expr *E) { return E->getKind() == EK_Inherited; }
+};
+
 /// A call through a procedural value that is not a plain name (Turbo/FPC):
 /// passes[i].run(v). Calls through procedural variables and parameters
 /// named directly are CallExpr / ProcCallStmt.
@@ -392,6 +426,7 @@ class ProcCallStmt final : public Stmt {
   llvm::ArrayRef<Expr *> Args;
   bool HasParens;
   Decl *D = nullptr; ///< set by Sema: BuiltinDecl or RoutineDecl
+  WithContext *With = nullptr; ///< set by Sema for methods (see CallExpr)
 
 public:
   ProcCallStmt(SourceRange R, Identifier Callee, llvm::ArrayRef<Expr *> Args,
@@ -402,6 +437,8 @@ public:
   bool hasParens() const { return HasParens; }
   Decl *getDecl() const { return D; }
   void setDecl(Decl *NewD) { D = NewD; }
+  WithContext *getWith() const { return With; }
+  void setWith(WithContext *W) { With = W; }
   static bool classof(const Stmt *S) { return S->getKind() == SK_ProcCall; }
 };
 
@@ -533,10 +570,15 @@ public:
 
 /// One record variable of a with statement. Field names found through it
 /// point here (NameRefExpr::getWith), and codegen evaluates the record's
-/// address once per with statement.
+/// address once per with statement. In objfpc the "record" can be an object
+/// (a value of a class type, evaluated once), and every method body has an
+/// implicit context whose Record is `Self` (IsSelf), through which the
+/// members of its class are found.
 struct WithContext {
   Expr *Record;
-  explicit WithContext(Expr *Record) : Record(Record) {}
+  bool IsSelf = false;
+  explicit WithContext(Expr *Record, bool IsSelf = false)
+      : Record(Record), IsSelf(IsSelf) {}
 };
 
 /// with r1, r2 do Body   ==   with r1 do with r2 do Body
@@ -602,7 +644,7 @@ class TypeSpec {
 public:
   enum TypeSpecKind {
     TS_Named, TS_Enum, TS_Subrange, TS_Array, TS_Record, TS_Pointer, TS_Set,
-    TS_File, TS_Routine, TS_String
+    TS_File, TS_Routine, TS_String, TS_Class
   };
 
 private:
@@ -772,21 +814,44 @@ public:
   static bool classof(const TypeSpec *T) { return T->getKind() == TS_Set; }
 };
 
+/// class [(Parent)] members end   (objfpc); `class;` declares a class
+/// forward. Members are FieldDecls, RoutineDecls (method headings) and
+/// PropertyDecls in source order, each with its visibility.
+class ClassTypeSpec final : public TypeSpec {
+  Identifier Parent; ///< invalid: TObject
+  llvm::ArrayRef<Decl *> Members;
+  bool Forward;
+
+public:
+  ClassTypeSpec(SourceRange R, Identifier Parent, llvm::ArrayRef<Decl *> Members,
+                bool Forward)
+      : TypeSpec(TS_Class, R), Parent(Parent), Members(Members),
+        Forward(Forward) {}
+  const Identifier &getParent() const { return Parent; }
+  llvm::ArrayRef<Decl *> getMembers() const { return Members; }
+  bool isForward() const { return Forward; }
+  static bool classof(const TypeSpec *T) { return T->getKind() == TS_Class; }
+};
+
 //===----------------------------------------------------------------------===//
 // Declarations
 //===----------------------------------------------------------------------===//
+
+/// Visibility of a class member (objfpc). Records' fields are public.
+enum class Visibility : unsigned char { Public, Published, Protected, Private };
 
 class Decl {
 public:
   enum DeclKind {
     DK_Program, DK_Var, DK_Const, DK_Type, DK_Field, DK_Routine, DK_Builtin,
-    DK_Label, DK_Unit
+    DK_Label, DK_Unit, DK_Property
   };
 
 private:
   const DeclKind Kind;
   Identifier Name;
   SourceLocation Loc; ///< invalid for predeclared entities
+  Visibility Vis = Visibility::Public;
 
 protected:
   Decl(DeclKind K, SourceLocation Loc, Identifier Name)
@@ -797,6 +862,8 @@ public:
   const Identifier &getName() const { return Name; }
   SourceLocation getLocation() const { return Loc; }
   bool isPredeclared() const { return !Loc.isValid(); }
+  Visibility getVisibility() const { return Vis; }
+  void setVisibility(Visibility V) { Vis = V; }
   /// What this entity is, for diagnostics: "variable", "type", ...
   const char *getKindName() const;
 };
@@ -920,10 +987,18 @@ public:
 
 class Block;
 
+/// A routine that is a method (objfpc): declared in a class, implemented as
+/// `procedure TFoo.Name ...` at program or unit level.
+enum class MethodKind : unsigned char { None, Method, Constructor, Destructor };
+
+/// The methods of the predeclared class TObject, which have no Pascal body.
+enum class TObjectMethod : unsigned char { None, Create, Destroy, Free, ClassName };
+
 /// procedure P(params); block;     function F(params): T; block;
 /// A `forward` declaration and its later definition are two nodes; Sema
 /// moves the definition's block onto the forward one (the canonical decl)
-/// and marks the definition as a redeclaration.
+/// and marks the definition as a redeclaration. A method's canonical decl is
+/// its heading in the class; its implementation is a redeclaration.
 class RoutineDecl final : public Decl {
   bool IsFunction;
   llvm::ArrayRef<VarDecl *> Params;
@@ -939,6 +1014,15 @@ class RoutineDecl final : public Decl {
   /// Turbo/FPC `external ['lib'] [name 'sym']`: a C function, no body.
   bool IsExternal = false;
   llvm::StringRef ExternalName;     ///< the C symbol (empty: the Pascal name)
+  // Methods (objfpc).
+  MethodKind MK = MethodKind::None;
+  Identifier ClassName;             ///< `TFoo` of an implementation `TFoo.Bar`
+  bool Virtual = false, Override = false, Abstract = false;
+  ClassType *Class = nullptr;       ///< set by Sema: the class declaring it
+  VarDecl *SelfVar = nullptr;       ///< set by Sema: the hidden parameter
+  RoutineDecl *Impl = nullptr;      ///< set by Sema: a method's implementation
+  int VMTIndex = -1;                ///< set by Sema: slot of a virtual method
+  TObjectMethod Builtin = TObjectMethod::None;
 
 public:
   RoutineDecl(SourceLocation Loc, Identifier Name, bool IsFunction,
@@ -977,7 +1061,65 @@ public:
     IsExternal = true;
     ExternalName = Sym;
   }
+
+  MethodKind getMethodKind() const { return MK; }
+  void setMethodKind(MethodKind K) { MK = K; }
+  bool isMethod() const { return MK != MethodKind::None; }
+  bool isConstructor() const { return MK == MethodKind::Constructor; }
+  bool isDestructor() const { return MK == MethodKind::Destructor; }
+  const Identifier &getClassName() const { return ClassName; }
+  void setClassName(Identifier N) { ClassName = N; }
+  bool isVirtual() const { return Virtual; }
+  bool isOverride() const { return Override; }
+  bool isAbstract() const { return Abstract; }
+  void setDirectives(bool V, bool O, bool A) {
+    Virtual = V;
+    Override = O;
+    Abstract = A;
+  }
+  ClassType *getClass() const { return Class; }
+  void setClass(ClassType *C) { Class = C; }
+  RoutineDecl *getImplementation() const { return Impl; }
+  void setImplementation(RoutineDecl *R) { Impl = R; }
+  /// Where the body is: a method's implementation, else the declaration.
+  SourceLocation getBodyLocation() const {
+    return Impl ? Impl->getLocation() : getLocation();
+  }
+  VarDecl *getSelfVar() const { return SelfVar; }
+  void setSelfVar(VarDecl *V) { SelfVar = V; }
+  int getVMTIndex() const { return VMTIndex; }
+  void setVMTIndex(int I) { VMTIndex = I; }
+  bool isDispatched() const { return VMTIndex >= 0; }
+  TObjectMethod getBuiltin() const { return Builtin; }
+  void setBuiltin(TObjectMethod B) { Builtin = B; }
   static bool classof(const Decl *D) { return D->getKind() == DK_Routine; }
+};
+
+/// property Name: T read R write W;  (objfpc) R is a field or a function
+/// without parameters, W a field or a procedure with one parameter.
+class PropertyDecl final : public Decl {
+  TypeSpec *TS;
+  Type *Ty = nullptr;
+  Identifier ReadName, WriteName; ///< invalid when omitted
+  Decl *Read = nullptr, *Write = nullptr; ///< set by Sema
+
+public:
+  PropertyDecl(Identifier Name, TypeSpec *TS, Identifier ReadName,
+               Identifier WriteName)
+      : Decl(DK_Property, Name.Loc, Name), TS(TS), ReadName(ReadName),
+        WriteName(WriteName) {}
+  TypeSpec *getTypeSpec() const { return TS; }
+  Type *getType() const { return Ty; }
+  void setType(Type *T) { Ty = T; }
+  const Identifier &getReadName() const { return ReadName; }
+  const Identifier &getWriteName() const { return WriteName; }
+  Decl *getRead() const { return Read; }
+  Decl *getWrite() const { return Write; }
+  void setAccessors(Decl *R, Decl *W) {
+    Read = R;
+    Write = W;
+  }
+  static bool classof(const Decl *D) { return D->getKind() == DK_Property; }
 };
 
 enum class BuiltinKind {
@@ -1056,6 +1198,10 @@ public:
   Block *getImplementation() const { return Implementation; }
   static bool classof(const Decl *D) { return D->getKind() == DK_Unit; }
 };
+
+inline FieldDecl *FieldExpr::getFieldDecl() const {
+  return llvm::dyn_cast_or_null<FieldDecl>(Member);
+}
 
 } // namespace pcc
 

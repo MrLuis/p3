@@ -306,15 +306,81 @@ begin
   ignored := listPop(loopBlocks);
 end;
 
+{ The property an assignment targets, or nil. }
+function assignedProperty(target: PNode): PDecl;
+begin
+  assignedProperty := nil;
+  if (target^.kind = nkNameRef) and (target^.refDecl^.kind = dkProperty) then
+    assignedProperty := target^.refDecl
+  else if (target^.kind = nkField) and (target^.fieldDecl <> nil) and
+          (target^.fieldDecl^.kind = dkProperty) then
+    assignedProperty := target^.fieldDecl;
+end;
+
+{ target := value for a property target: stores into its field or calls
+  its write procedure. }
+procedure emitPropertyWrite(p: PDecl; target, value: PNode);
+var
+  obj, addr, ignored, pair, v: TV;
+  c, t: PType;
+  args: TPtrList;
+begin
+  if target^.kind = nkNameRef then
+  begin
+    obj := withBase(target^.refWith);
+    c := target^.refWith^.rec^.typ;
+  end
+  else
+  begin
+    obj := emitObject(target^.base);
+    c := target^.base^.typ;
+  end;
+  if p^.writeDecl^.kind = dkRoutine then
+  begin
+    listInit(args);
+    listAdd(args, value);
+    ignored := emitMethodCall(p^.writeDecl, obj, args, false, target^.b);
+    listFree(args);
+    exit;
+  end;
+  t := p^.propType;
+  addr := fieldAddress(obj, c, p^.writeDecl);
+  if t^.kind = tyShortString then
+  begin
+    emitStringAssign(addr, t, value);
+    exit;
+  end;
+  if isStructured(t) then
+  begin
+    copyAggregate(addr, emitAddress(value), t);
+    exit;
+  end;
+  if t^.kind = tyRoutine then
+  begin
+    pair := emitRoutinePair(value, t);
+    irStore(pair, addr);
+    exit;
+  end;
+  v := convertForAssign(visitExpr(value), value^.typ, t, value^.b);
+  storeScalar(addr, v, t);
+end;
+
 procedure visitAssign(s: PNode);
 var
   target, value: PNode;
   tt: PType;
   dst, src, pair, v: TV;
+  p: PDecl;
 begin
   target := s^.target;
   value := s^.value;
   tt := target^.typ;
+  p := assignedProperty(target);
+  if p <> nil then
+  begin
+    emitPropertyWrite(p, target, value);
+    exit;
+  end;
   if tt^.kind = tyShortString then
   begin
     emitStringAssign(emitAddress(target), tt, value);
@@ -432,7 +498,10 @@ begin
   d := s^.callDecl;
   if d^.kind = dkRoutine then
   begin
-    ignored := emitCall(d, s^.args);
+    if d^.methodKind <> mtNone then { through Self or a with statement's object }
+      ignored := emitMethodCall(d, withBase(s^.callWith), s^.args, false, s^.b)
+    else
+      ignored := emitCall(d, s^.args);
     exit;
   end;
   if d^.kind = dkVar then
@@ -826,7 +895,11 @@ begin
   for i := 0 to s^.withRecords.count - 1 do
   begin
     w := PWithContext(listGet(s^.withRecords, i));
-    w^.cgAddr := irBox(emitAddress(w^.rec));
+    { an object (objfpc) is evaluated, a record's address taken }
+    if w^.rec^.typ^.kind = tyClass then
+      w^.cgAddr := irBox(emitObject(w^.rec))
+    else
+      w^.cgAddr := irBox(emitAddress(w^.rec));
   end;
   visitStmt(s^.withBody);
 end;
@@ -1056,33 +1129,139 @@ begin
   r^.cgFunc := f;
 end;
 
-{ Lays out the frames of the routines declared in blk (recursively),
-  creates their functions and queues their bodies. Frame: [static link],
-  parameters, locals, [result], [jmp_buf]. Every routine takes its static
-  link first (null at the outer level), so procedural parameters can call
-  any routine the same way. }
-procedure declareRoutines(blk: PBlock);
+{ The class d (a type declaration) defines, not a forward one, or nil. }
+function definedClass(d: PDecl): PType;
+begin
+  definedClass := nil;
+  if (d^.kind = dkType) and (d^.typeSpec <> nil) and (d^.typeSpec^.kind = tsClass) and
+     not d^.typeSpec^.isForwardClass and (d^.declType <> nil) and
+     (d^.declType^.kind = tyClass) then
+    definedClass := d^.declType;
+end;
+
+{ The parameter types of routine r's function: static link, [Self], the
+  parameters. }
+procedure routineParamTypes(r: PDecl; var params: TPtrList);
+var
+  j: longint;
+begin
+  listAdd(params, irPtrT);
+  if r^.methodKind <> mtNone then
+    listAdd(params, irPtrT);
+  for j := 0 to r^.params.count - 1 do
+    listAdd(params, paramIRType(PDecl(listGet(r^.params, j))));
+end;
+
+function routineRetType(r: PDecl): PIRType;
+begin
+  if r^.isFunction then
+    routineRetType := regType(r^.resultType)
+  else
+    routineRetType := irVoidT;
+end;
+
+{ A class: its VMT (defined once all methods are declared), and for a
+  class of a separately compiled unit its methods' declarations. }
+procedure declareClassCG(d: PDecl; c: PType);
+var
+  ty: PIRType;
+  name, linkage: string;
+  i: longint;
+  m: PDecl;
+  params: TPtrList;
+begin
+  ty := irArray(2 + c^.classVTable.count, irPtrT);
+  if d^.cgExport = nil then
+  begin
+    name := 'vmt.' + lowerStr(nm(c^.declName));
+    linkage := 'internal';
+  end
+  else
+  begin
+    name := nm(d^.cgExport);
+    linkage := '';
+  end;
+  if d^.cgImported then
+    linkage := 'external';
+  mapPut(vmts, c^.id, irBox(irGlobal(name, linkage, ty, irNull, true, false, true, 0)));
+  if not d^.cgImported then
+  begin
+    listAdd(vmtsToDefine, c);
+    exit;
+  end;
+  for i := 0 to c^.classMembers.count - 1 do
+  begin
+    m := PDecl(listGet(c^.classMembers, i));
+    if (m^.kind = dkRoutine) and not m^.isAbstract then
+    begin
+      listInit(params);
+      routineParamTypes(m, params);
+      m^.cgFunc := irDeclareFunction(nm(m^.cgExport), routineRetType(m), params, '', '');
+      listFree(params);
+    end;
+  end;
+end;
+
+{ Fills in the VMTs: parent VMT, class name, virtual methods. }
+procedure defineVMTs;
 var
   i, j: longint;
-  r, v, p: PDecl;
-  slots, params: TPtrList;
-  name: string;
-  f: PIRFunc;
-  ret: PIRType;
-
-  procedure addSlot(x: PDecl);
+  c: PType;
+  r: PDecl;
+  elems: TPtrList;
+  g: PTVBox;
+begin
+  for i := 0 to vmtsToDefine.count - 1 do
   begin
-    x^.cgSlot := slots.count;
-    if isByRef(x) then
-      listAdd(slots, irPtrT)
-    else
-      listAdd(slots, memType(x^.varType));
+    c := PType(listGet(vmtsToDefine, i));
+    listInit(elems);
+    listAdd(elems, irBox(vmtOf(c^.classParent)));
+    listAdd(elems, irBox(getPStrConstant(c^.declName^.chars, 0, c^.declName^.len)));
+    for j := 0 to c^.classVTable.count - 1 do
+    begin
+      r := PDecl(listGet(c^.classVTable, j));
+      if r^.objMethod = obDestroy then
+        listAdd(elems, irBox(irFuncRef(classRuntime('__pas_tobject_destroy', 'void',
+                                                    'ptr,ptr'))))
+      else if r^.isAbstract then
+        listAdd(elems, irBox(irFuncRef(classRuntime('__pas_abstract_error', 'void', ''))))
+      else
+        listAdd(elems, irBox(irFuncRef(fnOf(r))));
+    end;
+    g := PTVBox(mapGet(vmts, c^.id));
+    irSetGlobalInit(g^, irConstArray(irArray(elems.count, irPtrT), elems));
+    listFree(elems);
   end;
+  listClear(vmtsToDefine);
+end;
 
+procedure declareRoutine(r: PDecl); forward;
+
+{ Lays out the frames of the routines declared in blk (recursively),
+  creates their functions and queues their bodies, and declares the
+  classes' VMTs. A method is declared where its implementation is. }
+procedure declareRoutines(blk: PBlock);
+var
+  i: longint;
+  r: PDecl;
+  c: PType;
+  params: TPtrList;
 begin
   for i := 0 to blk^.decls.count - 1 do
   begin
     r := PDecl(listGet(blk^.decls, i));
+    c := definedClass(r);
+    if c <> nil then
+    begin
+      declareClassCG(r, c);
+      continue;
+    end;
+    if (r^.kind = dkRoutine) and (r^.canonical <> nil) and
+       (r^.canonical^.methodKind <> mtNone) then
+    begin
+      declareRoutine(r^.canonical); { a method's implementation }
+      continue;
+    end;
     if (r^.kind <> dkRoutine) or (r^.canonical <> nil) then
       continue; { the forward declaration is the canonical node }
     if r^.isExternal then
@@ -1094,19 +1273,45 @@ begin
     begin
       { a routine of a separately compiled unit: declared only }
       listInit(params);
-      listAdd(params, irPtrT);
-      for j := 0 to r^.params.count - 1 do
-        listAdd(params, paramIRType(PDecl(listGet(r^.params, j))));
-      ret := irVoidT;
-      if r^.isFunction then
-        ret := regType(r^.resultType);
-      r^.cgFunc := irDeclareFunction(nm(r^.cgExport), ret, params, '', '');
+      routineParamTypes(r, params);
+      r^.cgFunc := irDeclareFunction(nm(r^.cgExport), routineRetType(r), params, '', '');
       listFree(params);
       continue;
     end;
+    declareRoutine(r);
+  end;
+end;
+
+{ The function and frame of routine r (of a method: its canonical
+  declaration): frame [static link], [Self], parameters, locals, [result],
+  [jmp_buf]. Every routine takes its static link first (null at the outer
+  level), so procedural parameters can call any routine the same way. }
+procedure declareRoutine(r: PDecl);
+var
+  j, argNo: longint;
+  v, p: PDecl;
+  slots, params: TPtrList;
+  name, dbgName: string;
+  f: PIRFunc;
+  ret: PIRType;
+  loc: TLoc;
+
+  procedure addSlot(x: PDecl);
+  begin
+    x^.cgSlot := slots.count;
+    if isByRef(x) then
+      listAdd(slots, irPtrT)
+    else
+      listAdd(slots, memType(x^.varType));
+  end;
+
+begin
+  begin
     listInit(slots);
     if r^.parent <> nil then
       listAdd(slots, irPtrT);
+    if r^.methodKind <> mtNone then
+      addSlot(r^.selfVar);
     for j := 0 to r^.params.count - 1 do
       addSlot(PDecl(listGet(r^.params, j)));
     for j := 0 to r^.body^.decls.count - 1 do
@@ -1133,22 +1338,24 @@ begin
     listFree(slots);
 
     listInit(params);
-    listAdd(params, irPtrT);
-    for j := 0 to r^.params.count - 1 do
-      listAdd(params, paramIRType(PDecl(listGet(r^.params, j))));
-    ret := irVoidT;
-    if r^.isFunction then
-      ret := regType(r^.resultType);
+    routineParamTypes(r, params);
+    ret := routineRetType(r);
     if r^.cgExport <> nil then
       f := irCreateFunction(nm(r^.cgExport), '', ret, params)
     else
       f := irCreateFunction(name, 'internal', ret, params);
     listFree(params);
     irSetArgName(f, 0, 'link');
+    argNo := 1;
+    if r^.methodKind <> mtNone then
+    begin
+      irSetArgName(f, 1, 'self');
+      argNo := 2;
+    end;
     for j := 0 to r^.params.count - 1 do
     begin
       p := PDecl(listGet(r^.params, j));
-      irSetArgName(f, j + 1, nm(p^.ident.name));
+      irSetArgName(f, j + argNo, nm(p^.ident.name));
     end;
     r^.cgFunc := f;
     if dbgOn then
@@ -1156,13 +1363,17 @@ begin
       { file scope even for nested routines: lexical nesting would make
         debuggers look up enclosing variables through DW_AT_static_link,
         which LLVM cannot emit }
+      loc := bodyLoc(r);
+      dbgName := nm(r^.ident.spelling);
+      if r^.methodKind <> mtNone then
+        dbgName := nm(r^.ownerClass^.declName) + '.' + dbgName;
       if r^.isFunction then
-        r^.cgDbg := createSubprogram(f, nm(r^.ident.spelling), diFileFor(r^.loc),
-                                     lineOf(r^.loc), r^.resultType, r^.params,
-                                     diFileFor(r^.loc))
+        r^.cgDbg := createSubprogram(f, dbgName, diFileFor(loc), lineOf(loc),
+                                     r^.resultType, r^.params, diFileFor(loc),
+                                     r^.selfVar)
       else
-        r^.cgDbg := createSubprogram(f, nm(r^.ident.spelling), diFileFor(r^.loc),
-                                     lineOf(r^.loc), nil, r^.params, diFileFor(r^.loc));
+        r^.cgDbg := createSubprogram(f, dbgName, diFileFor(loc), lineOf(loc), nil,
+                                     r^.params, diFileFor(loc), r^.selfVar);
     end;
     listAdd(routinesToEmit, r);
     declareRoutines(r^.body);
@@ -1172,7 +1383,7 @@ end;
 procedure emitRoutineBody(r: PDecl);
 var
   frameT: PIRType;
-  i: longint;
+  i, argNo: longint;
   p, v, res: PDecl;
   arg, slot, ret: TV;
   f: PIRFunc;
@@ -1186,7 +1397,7 @@ begin
   irSetDebugLoc(nil);
   entry := irNewBlock('entry');
   irSetInsertPoint(entry);
-  setDebugLoc(r^.loc);
+  setDebugLoc(bodyLoc(r));
   frameT := frameType(r);
   curFrame := irAlloca(frameT, 'frame');
   { ISO leaves locals undefined; start from zero for determinism }
@@ -1195,10 +1406,16 @@ begin
     declareFrameVariables(r);
   if r^.parent <> nil then
     irStore(irArg(f, 0), irStructGEP(frameT, curFrame, 0, ''));
+  argNo := 1;
+  if r^.methodKind <> mtNone then
+  begin
+    irStore(irArg(f, 1), irStructGEP(frameT, curFrame, r^.selfVar^.cgSlot, ''));
+    argNo := 2;
+  end;
   for i := 0 to r^.params.count - 1 do
   begin
     p := PDecl(listGet(r^.params, i));
-    arg := irArg(f, i + 1);
+    arg := irArg(f, i + argNo);
     slot := irStructGEP(frameT, curFrame, p^.cgSlot, '');
     if isByRef(p) then
       irStore(arg, slot)
@@ -1238,12 +1455,32 @@ end;
   pas.<unit>$<name>; imported: u was compiled separately (declared only). }
 procedure collectExports(u: PDecl; imported: boolean);
 var
-  i: longint;
-  d: PDecl;
+  i, j: longint;
+  d, m: PDecl;
+  c: PType;
+  prefix: string;
 begin
   for i := 0 to u^.iface^.decls.count - 1 do
   begin
     d := PDecl(listGet(u^.iface^.decls, i));
+    c := definedClass(d);
+    if c <> nil then
+    begin
+      { a class: its VMT and its methods }
+      prefix := 'pas.' + nm(u^.ident.name) + '$' + lowerStr(nm(c^.declName));
+      d^.cgExport := intern(prefix + '$vmt');
+      d^.cgImported := imported;
+      for j := 0 to c^.classMembers.count - 1 do
+      begin
+        m := PDecl(listGet(c^.classMembers, j));
+        if (m^.kind = dkRoutine) and not m^.isAbstract then
+        begin
+          m^.cgExport := intern(prefix + '.' + nm(m^.ident.name));
+          m^.cgImported := imported;
+        end;
+      end;
+      continue;
+    end;
     if (d^.kind = dkVar) or ((d^.kind = dkRoutine) and not d^.isExternal) then
     begin
       d^.cgExport := intern('pas.' + nm(u^.ident.name) + '$' + nm(d^.ident.name));
@@ -1277,7 +1514,8 @@ begin
   if dbgOn then
   begin
     listInit(noParams);
-    curSP := createSubprogram(mainFn, 'main', unitFile, lineOf(prog^.loc), nil, noParams, nil);
+    curSP := createSubprogram(mainFn, 'main', unitFile, lineOf(prog^.loc), nil, noParams, nil,
+                              nil);
   end;
   irBeginBody(mainFn);
   irSetDebugLoc(nil);
@@ -1285,7 +1523,7 @@ begin
   irSetInsertPoint(entry);
   setDebugLoc(prog^.loc);
   ignored := call2(rtFn('__pas_init'), irArg(mainFn, 0), irArg(mainFn, 1), '');
-  if mode = lmTP then
+  if mode <> lmISO then
   begin
     tp := irGlobal('__pas_tp_mode', 'external', irI32, irNull, false, false, true, 0);
     irStore(i32c(1), tp);
@@ -1343,6 +1581,9 @@ begin
   curRoutine := nil;
   mapInit(lowered);
   mapInit(stringConsts);
+  mapInit(classLayouts);
+  mapInit(vmts);
+  listInit(vmtsToDefine);
   listInit(routinesToEmit);
   listInit(loopBlocks);
   hasMainJmpBuf := false;
@@ -1397,6 +1638,7 @@ begin
   end;
   declareRoutines(u^.iface);
   declareRoutines(u^.impl);
+  defineVMTs;
   for i := 0 to routinesToEmit.count - 1 do
     emitRoutineBody(PDecl(listGet(routinesToEmit, i)));
 
@@ -1407,7 +1649,7 @@ begin
   curSP := nil;
   if dbgOn then
     curSP := createSubprogram(initFn, nm(u^.ident.spelling), unitFile, lineOf(u^.loc), nil,
-                              noParams, nil);
+                              noParams, nil, nil);
   irBeginBody(initFn);
   irSetDebugLoc(nil);
   entry := irNewBlock('entry');
@@ -1474,6 +1716,7 @@ begin
       declareRoutines(u^.impl);
   end;
   declareRoutines(prog^.progBlock);
+  defineVMTs;
   for i := 0 to routinesToEmit.count - 1 do
     emitRoutineBody(PDecl(listGet(routinesToEmit, i)));
   emitMainBody(prog, units, mainFn);

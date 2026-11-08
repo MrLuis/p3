@@ -119,6 +119,21 @@ int32_t __pas_paramcount(void);
 /* paramstr(index) into a short string (index 0 is the program name). */
 void __pas_paramstr(unsigned char *dst, int32_t index);
 
+/*===- Classes (--mode=objfpc) ---------------------------------------------===
+ * An object starts with a pointer to its class's VMT, an array of pointers:
+ * [0] the parent class's VMT (NULL for TObject), [1] the class name as a
+ * length-prefixed string, [2...] the virtual methods; [2] is Destroy.
+ * Methods take (static link, Self, parameters...). */
+extern void *const __pas_tobject_vmt[3];
+/* TObject.Destroy, which does nothing. */
+void __pas_tobject_destroy(void *link, void *self);
+/* obj is C: obj is not nil and C's VMT is in obj's chain of VMTs. */
+int32_t __pas_class_is(const void *obj, const void *vmt);
+/* obj as C: obj, or a runtime error `msg` if obj is not nil and not a C. */
+void *__pas_class_as(void *obj, const void *vmt, const char *msg);
+/* The VMT entry of an abstract method: a runtime error. */
+void __pas_abstract_error(void) __attribute__((noreturn));
+
 #ifdef __cplusplus
 }
 #endif

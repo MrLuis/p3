@@ -763,7 +763,8 @@ begin
   if isError(t) or isError(at) then
     exit;
   if (isOrdinal(t) and isOrdinal(at)) or
-     ((t^.kind = tyPointer) and ((at^.kind = tyPointer) or (at^.kind = tyNil))) then
+     ((t^.kind = tyPointer) and (at^.kind in [tyPointer, tyNil, tyClass])) or
+     ((t^.kind = tyClass) and (at^.kind in [tyClass, tyPointer, tyNil])) then
     exit(t);
   ms('invalid typecast from ');
   maT(at);
@@ -891,7 +892,8 @@ begin
           t := check(a0);
         if isError(t) then
           exit;
-        if (t^.kind <> tyPointer) and (t^.kind <> tyRoutine) then
+        if (t^.kind <> tyPointer) and (t^.kind <> tyClass) and
+           (t^.kind <> tyRoutine) then
         begin
           ms('''assigned'' expects a pointer or a procedural variable, not ');
           maT(t);
@@ -924,6 +926,475 @@ begin
 end;
 
 { --- Statements --- }
+
+{ --- Classes (objfpc): members, method calls, inherited --- }
+
+{ "; did you mean 'X'?" for a member name of class c: the closest member of
+  c or its ancestors (ties: the alphabetically first). }
+procedure maDidYouMeanMember(c: PType; name: PName);
+var
+  limit, best, dist, i: longint;
+  bestName, bestSpelling, cand: PName;
+  d: PDecl;
+begin
+  if name^.len <= 3 then
+    limit := 1
+  else if name^.len div 3 > 2 then
+    limit := name^.len div 3
+  else
+    limit := 2;
+  best := limit + 1;
+  bestName := nil;
+  bestSpelling := nil;
+  while c <> nil do
+  begin
+    for i := 0 to c^.classMembers.count - 1 do
+    begin
+      d := PDecl(listGet(c^.classMembers, i));
+      cand := d^.ident.name;
+      if cand = name then
+        continue;
+      dist := editDistance(name, cand);
+      if (dist < best) or
+         ((dist = best) and (dist <= limit) and nameLess(cand, bestName)) then
+      begin
+        best := dist;
+        bestName := cand;
+        bestSpelling := d^.ident.spelling;
+      end;
+    end;
+    c := c^.classParent;
+  end;
+  if bestName <> nil then
+  begin
+    ma('; did you mean ''');
+    maN(bestSpelling);
+    ma('''?');
+  end;
+end;
+
+{ A property used as a value: it needs a read accessor. }
+function checkPropertyRead(p: PDecl; e: PNode; const id: TIdent): PType;
+begin
+  if (e = curAssignTarget) or (p^.readDecl <> nil) or isError(p^.propType) or
+     identValid(p^.readName) then
+    exit(p^.propType);
+  ms('property ''');
+  maN(id.spelling);
+  ma(''' is write-only');
+  errR(id.loc, identRange(id));
+  noteDeclaredHere(p);
+  checkPropertyRead := errorType;
+end;
+
+{ The type of a property assigned to; it needs a write accessor. }
+function checkPropertyWrite(p: PDecl; const id: TIdent): PType;
+begin
+  if (p^.writeDecl <> nil) or isError(p^.propType) or
+     ((p^.readDecl = nil) and identValid(p^.writeName)) then
+    exit(p^.propType);
+  ms('property ''');
+  maN(id.spelling);
+  ma(''' is read-only');
+  errR(id.loc, identRange(id));
+  noteDeclaredHere(p);
+  checkPropertyWrite := errorType;
+end;
+
+{ Is the target of an assignment a property (written by its accessor)? }
+function assignedProperty(target: PNode): PDecl;
+begin
+  assignedProperty := nil;
+  if (target^.kind = nkNameRef) and (target^.refDecl <> nil) and
+     (target^.refDecl^.kind = dkProperty) then
+    assignedProperty := target^.refDecl
+  else if (target^.kind = nkField) and (target^.fieldDecl <> nil) and
+          (target^.fieldDecl^.kind = dkProperty) then
+    assignedProperty := target^.fieldDecl;
+end;
+
+{ TFoo in TFoo.Create (objfpc): a class named before '.'; nil otherwise. }
+function classNamedBy(base: PNode): PType;
+var
+  d: PDecl;
+begin
+  classNamedBy := nil;
+  if (base^.kind <> nkNameRef) or (mode <> lmObjFPC) then
+    exit;
+  d := lookup(base^.ref.name);
+  if (d <> nil) and (d^.kind = dkType) and (d^.declType <> nil) and
+     (d^.declType^.kind = tyClass) then
+  begin
+    base^.refDecl := d;
+    base^.typ := d^.declType;
+    classNamedBy := d^.declType;
+  end;
+end;
+
+{ Resolves r.f / obj.member / TFoo.Create; nil after a diagnostic. }
+function resolveMember(e: PNode): PDecl;
+var
+  viaClass, bt, owner: PType;
+  d: PDecl;
+begin
+  resolveMember := nil;
+  viaClass := classNamedBy(e^.base);
+  if viaClass <> nil then
+    bt := viaClass
+  else
+    bt := check(e^.base);
+  if isError(bt) then
+    exit;
+  if bt^.kind = tyRecord then
+  begin
+    d := findField(bt, e^.fieldName.name);
+    if d = nil then
+    begin
+      ms('no field named ''');
+      maN(e^.fieldName.spelling);
+      ma(''' in ');
+      maT(bt);
+      errR(e^.fieldName.loc, identRange(e^.fieldName));
+      exit;
+    end;
+    e^.fieldDecl := d;
+    exit(d);
+  end;
+  if bt^.kind <> tyClass then
+  begin
+    ms('''.'' applied to a value of type ');
+    maT(bt);
+    ma(', which is not a record');
+    errR(e^.fieldName.loc, nodeRange(e^.base));
+    exit;
+  end;
+  owner := nil;
+  d := findMember(bt, e^.fieldName.name, owner);
+  if d = nil then
+  begin
+    ms('no member named ''');
+    maN(e^.fieldName.spelling);
+    ma(''' in class ');
+    maT(bt);
+    maDidYouMeanMember(bt, e^.fieldName.name);
+    errR(e^.fieldName.loc, identRange(e^.fieldName));
+    exit;
+  end;
+  checkMemberAccess(d, owner, e^.fieldName);
+  if (viaClass <> nil) and
+     ((d^.kind <> dkRoutine) or (d^.methodKind <> mtConstructor)) then
+  begin
+    ms('only a constructor can be called through the class name ');
+    maT(bt);
+    ma('; ''');
+    maN(e^.fieldName.spelling);
+    ma(''' is a ' + kindName(d));
+    errR(e^.fieldName.loc, identRange(e^.fieldName));
+    exit;
+  end;
+  e^.fieldDecl := d;
+  resolveMember := d;
+end;
+
+{ The value of calling method r through e (obj.M or TFoo.Create): a
+  function's result, or the new object of a constructor called through its
+  class; nil if the call has no value. }
+function methodResultType(r: PDecl; e: PNode): PType;
+begin
+  methodResultType := nil;
+  if r^.isFunction then
+    methodResultType := r^.resultType
+  else if (r^.methodKind = mtConstructor) and (e^.base^.kind = nkNameRef) and
+          (e^.base^.refDecl <> nil) and (e^.base^.refDecl^.kind = dkType) then
+    methodResultType := e^.base^.typ;
+end;
+
+{ Is callee obj.M / TFoo.Create / inherited M -- a method call rather than
+  a call through a procedural value? }
+function isMethodCallee(callee: PNode): boolean;
+var
+  bt, owner: PType;
+  d: PDecl;
+begin
+  if callee^.kind = nkInherited then
+    exit(true);
+  if (callee^.kind <> nkField) or (mode <> lmObjFPC) then
+    exit(false);
+  if classNamedBy(callee^.base) <> nil then
+    exit(true);
+  bt := check(callee^.base);
+  if bt^.kind <> tyClass then
+    exit(false);
+  owner := nil;
+  d := findMember(bt, callee^.fieldName.name, owner);
+  isMethodCallee := (d <> nil) and (d^.kind = dkRoutine);
+end;
+
+{ inherited [name]: the inherited method, or nil (after a diagnostic, or
+  with nothing set for a bare inherited without an inherited method, which
+  does nothing). }
+function resolveInherited(e: PNode; var nothing: boolean): PDecl;
+var
+  encl, d: PDecl;
+  parentClass, owner: PType;
+  name: TIdent;
+  l: TLoc;
+begin
+  resolveInherited := nil;
+  nothing := false;
+  encl := enclosingMethod;
+  if encl = nil then
+  begin
+    ms('''inherited'' is only allowed in a method');
+    errR(e^.b, nodeRange(e));
+    exit;
+  end;
+  e^.inhEnclosing := encl;
+  parentClass := encl^.ownerClass^.classParent;
+  if identValid(e^.inhName) then
+    name := e^.inhName
+  else
+    name := encl^.ident;
+  d := nil;
+  owner := nil;
+  if parentClass <> nil then
+    d := findMember(parentClass, name.name, owner);
+  if (d = nil) or (d^.kind <> dkRoutine) then
+  begin
+    if not identValid(e^.inhName) and (d = nil) then
+    begin
+      nothing := true;
+      exit;
+    end;
+    if identValid(e^.inhName) then
+      l := name.loc
+    else
+      l := e^.b;
+    if d <> nil then
+    begin
+      ms('''inherited'' needs a method, but ''');
+      maN(name.spelling);
+      ma(''' in ');
+      maT(owner);
+      ma(' is a ' + kindName(d));
+      errR(l, nodeRange(e));
+      noteDeclaredHere(d);
+    end
+    else
+    begin
+      ms('no inherited method ''');
+      maN(name.spelling);
+      ma(''' in ');
+      if parentClass <> nil then
+        maT(parentClass)
+      else
+        ma('''TObject''');
+      errR(l, nodeRange(e));
+    end;
+    exit;
+  end;
+  checkMemberAccess(d, owner, name);
+  if d^.isAbstract then
+  begin
+    ms('cannot call abstract method ''');
+    maN(name.spelling);
+    ma('''');
+    errR(e^.b, nodeRange(e));
+    noteDeclaredHere(d);
+    exit;
+  end;
+  e^.inhMethod := d;
+  resolveInherited := d;
+end;
+
+{ inherited [name] [(args)] called: the result type or nil. }
+function checkInheritedCall(e: PNode; const args: TPtrList; callRange: TRange): PType;
+var
+  r, p: PDecl;
+  nothing: boolean;
+  name, pn: TIdent;
+  i: longint;
+  n: PNode;
+  rg: TRange;
+  implicit: TPtrList;
+begin
+  checkInheritedCall := nil;
+  r := resolveInherited(e, nothing);
+  if r = nil then
+  begin
+    for i := 0 to args.count - 1 do
+      check(PNode(listGet(args, i)));
+    if not nothing then
+      checkInheritedCall := errorType;
+    exit;
+  end;
+  if identValid(e^.inhName) then
+    name := e^.inhName
+  else
+    name := r^.ident;
+  if not identValid(e^.inhName) and (args.count = 0) then
+  begin
+    { the enclosing method's parameters, passed on unchanged }
+    listInit(implicit);
+    for i := 0 to e^.inhEnclosing^.params.count - 1 do
+    begin
+      p := PDecl(listGet(e^.inhEnclosing^.params, i));
+      pn := p^.ident;
+      pn.loc := e^.b;
+      rg := identRange(pn);
+      n := newNode(nkNameRef, rg.b, rg.e);
+      n^.ref := pn;
+      n^.refDecl := p;
+      if p^.varType <> nil then
+        n^.typ := p^.varType
+      else
+        n^.typ := errorType;
+      p^.isUsed := true;
+      listAdd(implicit, n);
+    end;
+    e^.inhArgs := implicit;
+    name.loc := e^.b;
+    checkCallArgs(r^.params, r, name, e^.inhArgs, callRange);
+  end
+  else
+    checkCallArgs(r^.params, r, name, args, callRange);
+  if r^.isFunction then
+  begin
+    e^.typ := r^.resultType;
+    checkInheritedCall := r^.resultType;
+  end;
+end;
+
+{ inherited name used as a value: a function without arguments. }
+function visitInherited(e: PNode): PType;
+var
+  r: PDecl;
+  nothing: boolean;
+begin
+  visitInherited := errorType;
+  if not identValid(e^.inhName) then
+  begin
+    ms('expected a method name after ''inherited'' in an expression');
+    errR(e^.b, nodeRange(e));
+    exit;
+  end;
+  r := resolveInherited(e, nothing);
+  if r = nil then
+    exit;
+  if r^.params.count > 0 then
+  begin
+    ms('missing arguments in call to ''');
+    maN(e^.inhName.spelling);
+    ma('''');
+    errR(e^.inhName.loc, identRange(e^.inhName));
+    noteDeclaredHere(r);
+    exit;
+  end;
+  if not r^.isFunction then
+  begin
+    ms(kindName(r) + ' ''');
+    maN(e^.inhName.spelling);
+    ma(''' does not return a value');
+    errR(e^.inhName.loc, identRange(e^.inhName));
+    exit;
+  end;
+  visitInherited := r^.resultType;
+end;
+
+{ obj.M(args), TFoo.Create(args), inherited M(args) (an nkIndirectCall):
+  the result type, nil for a call without a value, or the error type. }
+function checkMethodCall(e: PNode): PType;
+var
+  f, d: PDecl;
+  callee: PNode;
+  t: PType;
+  i: longint;
+begin
+  callee := e^.calleeExpr;
+  if callee^.kind = nkInherited then
+    exit(checkInheritedCall(callee, e^.args, nodeRange(e)));
+  d := resolveMember(callee);
+  if (d = nil) or (d^.kind <> dkRoutine) then
+  begin
+    for i := 0 to e^.args.count - 1 do
+      check(PNode(listGet(e^.args, i)));
+    exit(errorType);
+  end;
+  f := d;
+  checkCallArgs(f^.params, f, callee^.fieldName, e^.args, nodeRange(e));
+  t := methodResultType(f, callee);
+  if t <> nil then
+    callee^.typ := t;
+  checkMethodCall := t;
+end;
+
+{ obj is TFoo / obj as TFoo (objfpc) }
+function checkIsAs(e: PNode): PType;
+var
+  l, t, c: PType;
+  rhs: PNode;
+  d, td: PDecl;
+  op: string;
+begin
+  checkIsAs := errorType;
+  l := check(e^.lhs);
+  op := binaryOpSpelling(e^.bop);
+  c := nil;
+  rhs := e^.rhs;
+  td := nil;
+  if rhs^.kind = nkNameRef then
+  begin
+    d := lookup(rhs^.ref.name);
+    if (d <> nil) and (d^.kind = dkType) then
+      td := d;
+  end;
+  if td <> nil then
+  begin
+    t := td^.declType;
+    if t = nil then
+      t := errorType;
+    rhs^.refDecl := td;
+    rhs^.typ := t;
+    if isError(t) then
+      exit;
+    if t^.kind = tyClass then
+      c := t;
+  end
+  else if isError(check(rhs)) then
+    exit;
+  if c = nil then
+  begin
+    ms('the right operand of ''' + op + ''' must be the name of a class type');
+    errR(rhs^.b, nodeRange(rhs));
+    exit;
+  end;
+  if isError(l) then
+    exit;
+  if l^.kind <> tyClass then
+  begin
+    ms('invalid operands to ''' + op + ''' (');
+    maT(l);
+    ma(' and ');
+    maT(c);
+    ma(')');
+    errRR(e^.opLoc, nodeRange(e^.lhs), nodeRange(rhs));
+    exit;
+  end;
+  if not inheritsFrom(c, l) and not inheritsFrom(l, c) then
+  begin
+    ms('invalid operands to ''' + op + ''': ');
+    maT(l);
+    ma(' and ');
+    maT(c);
+    ma(' are unrelated classes');
+    errRR(e^.opLoc, nodeRange(e^.lhs), nodeRange(rhs));
+    exit;
+  end;
+  if e^.bop = boIs then
+    checkIsAs := tyBooleanT
+  else
+    checkIsAs := c;
+end;
 
 procedure visitSequence(seq: pointer; const body: TPtrList);
 var
@@ -1012,14 +1483,21 @@ var
   t, rt: PType;
   a0: PNode;
   i: longint;
+  w: PWithContext;
 begin
-  d := lookup(s^.callee.name);
+  w := nil;
+  d := scopeLookup(cur, s^.callee.name, w);
   if d = nil then
   begin
     diagUndeclared(s^.callee);
     exit;
   end;
   s^.callDecl := d;
+  if classOfWith(w) <> nil then
+  begin
+    s^.callWith := w;
+    checkScopeAccess(d, w, s^.callee);
+  end;
 
   if (d^.kind = dkBuiltin) and d^.isProcedure then
   begin
@@ -1129,6 +1607,7 @@ begin
     diagUndeclared(target^.ref);
     exit;
   end;
+  checkScopeAccess(d, w, target^.ref);
   if (d^.kind = dkRoutine) and d^.isFunction then
   begin
     enc := curRoutine;
@@ -1154,6 +1633,8 @@ begin
   if d^.kind = dkVar then
   begin
     checkNotForControlVar(target);
+    if d^.varKind = vkResult then { objfpc Result }
+      d^.owner^.resultAssigned := true;
     if d^.varType <> nil then
       checkNameTarget := d^.varType;
     exit;
@@ -1164,6 +1645,8 @@ begin
       checkNameTarget := d^.fieldType;
     exit;
   end;
+  if d^.kind = dkProperty then
+    exit(checkPropertyWrite(d, target^.ref));
   ms('cannot assign to ' + kindName(d) + ' ''');
   maN(target^.ref.spelling);
   ma('''');
@@ -1223,8 +1706,9 @@ end;
 
 procedure visitAssign(s: PNode);
 var
-  target: PNode;
+  target, savedTarget: PNode;
   targetTy, valueTy: PType;
+  p: PDecl;
 begin
   target := s^.target;
   if target^.kind = nkNameRef then
@@ -1234,8 +1718,17 @@ begin
   end
   else
   begin
+    savedTarget := curAssignTarget;
+    curAssignTarget := target;
     targetTy := check(target);
-    if not isError(targetTy) and not isVariableReference(target) then
+    curAssignTarget := savedTarget;
+    p := assignedProperty(target);
+    if (p <> nil) and not isError(targetTy) then
+    begin
+      targetTy := checkPropertyWrite(p, target^.fieldName);
+      target^.typ := targetTy;
+    end
+    else if not isError(targetTy) and not isVariableReference(target) then
     begin
       ms('expression is not assignable');
       errR(target^.b, nodeRange(target));
@@ -1415,6 +1908,11 @@ begin
     t := check(w^.rec);
     if isError(t) then
       continue;
+    if t^.kind = tyClass then { objfpc: an object }
+    begin
+      cur := newClassScope(cur, t, w);
+      continue;
+    end;
     if t^.kind <> tyRecord then
     begin
       ms('''with'' requires a record, not a value of type ');
@@ -1447,6 +1945,13 @@ begin
     nkIndirectCallStmt:
       begin
         directSequence := nil;
+        if isMethodCallee(s^.calleeExpr^.calleeExpr) then
+        begin
+          rt := checkMethodCall(s^.calleeExpr);
+          if rt <> nil then
+            s^.calleeExpr^.typ := rt;
+          exit;
+        end;
         rt := checkIndirectCallee(s^.calleeExpr);
         if rt = nil then
           s^.calleeExpr^.typ := errorType
@@ -1506,7 +2011,10 @@ begin
   e^.refDecl := d;
   e^.refWith := w;
   d^.isUsed := true;
+  checkScopeAccess(d, w, e^.ref);
   case d^.kind of
+    dkProperty:
+      visitNameRef := checkPropertyRead(d, e, e^.ref);
     dkVar:
       begin
         t := d^.varType;
@@ -1637,6 +2145,8 @@ var
 
 begin
   visitBinary := errorType;
+  if e^.bop in [boIs, boAs] then
+    exit(checkIsAs(e));
   l := check(e^.lhs);
   r := check(e^.rhs);
   if isError(l) or isError(r) then
@@ -1677,6 +2187,9 @@ begin
      ((r^.kind = tyPointer) or (r^.kind = tyNil)) and
      (areCompatible(l, r) or ((l^.kind = tyNil) and (r^.kind = tyNil))) then
     exit(tyBooleanT);
+  if (op in [boEq, boNe]) and ((l^.kind = tyClass) or (r^.kind = tyClass)) and
+     areCompatible(l, r) then
+    exit(tyBooleanT); { objects (objfpc) }
 
   bothIntegers := isIntegerLike(l) and isIntegerLike(r);
   case op of
@@ -1750,9 +2263,11 @@ var
   d: PDecl;
   i: longint;
   res: PType;
+  w: PWithContext;
 begin
   visitCall := errorType;
-  d := lookup(e^.callee.name);
+  w := nil;
+  d := scopeLookup(cur, e^.callee.name, w);
   if d = nil then
   begin
     diagUndeclared(e^.callee);
@@ -1761,6 +2276,11 @@ begin
     exit;
   end;
   e^.callDecl := d;
+  if classOfWith(w) <> nil then
+  begin
+    e^.callWith := w;
+    checkScopeAccess(d, w, e^.callee);
+  end;
   if d^.kind = dkRoutine then
   begin
     if d^.isFunction then
@@ -1915,6 +2435,14 @@ begin
     if (r <> nil) and (r^.kind = dkRoutine) then
     begin
       op^.refDecl := r;
+      if r^.methodKind <> mtNone then
+      begin
+        ms('''@');
+        maN(op^.ref.spelling);
+        ma(''': methods cannot be procedural values');
+        errR(op^.b, nodeRange(op));
+        exit;
+      end;
       if (r^.parent <> nil) or r^.isExternal then
       begin
         ms('''@');
@@ -2038,34 +2566,38 @@ end;
 
 function visitField(e: PNode): PType;
 var
-  bt: PType;
-  fd: PDecl;
+  d: PDecl;
+  t: PType;
 begin
   visitField := errorType;
-  bt := check(e^.base);
-  if isError(bt) then
+  d := resolveMember(e);
+  if d = nil then
     exit;
-  if bt^.kind <> tyRecord then
+  if d^.kind = dkField then
   begin
-    ms('''.'' applied to a value of type ');
-    maT(bt);
-    ma(', which is not a record');
-    errR(e^.fieldName.loc, nodeRange(e^.base));
+    if d^.fieldType <> nil then
+      visitField := d^.fieldType;
     exit;
   end;
-  fd := findField(bt, e^.fieldName.name);
-  if fd = nil then
+  if d^.kind = dkProperty then
+    exit(checkPropertyRead(d, e, e^.fieldName));
+  { a method used as a value: a call without arguments }
+  if d^.params.count > 0 then
   begin
-    ms('no field named ''');
+    ms('missing arguments in call to ''');
     maN(e^.fieldName.spelling);
-    ma(''' in ');
-    maT(bt);
+    ma('''');
     errR(e^.fieldName.loc, identRange(e^.fieldName));
+    noteDeclaredHere(d);
     exit;
   end;
-  e^.fieldDecl := fd;
-  if fd^.fieldType <> nil then
-    visitField := fd^.fieldType;
+  t := methodResultType(d, e);
+  if t <> nil then
+    exit(t);
+  ms(kindName(d) + ' ''');
+  maN(e^.fieldName.spelling);
+  ma(''' does not return a value');
+  errR(e^.fieldName.loc, identRange(e^.fieldName));
 end;
 
 function visitExpr(e: PNode): PType;
@@ -2120,8 +2652,18 @@ begin
         errR(e^.b, nodeRange(e));
         visitExpr := errorType;
       end;
+    nkInherited: visitExpr := visitInherited(e);
     nkIndirectCall:
       begin
+        if isMethodCallee(e^.calleeExpr) then
+        begin
+          t := checkMethodCall(e);
+          if t <> nil then
+            exit(t);
+          ms('procedure does not return a value');
+          errR(e^.b, nodeRange(e));
+          exit(errorType);
+        end;
         t := checkIndirectCallee(e);
         if t = nil then
           exit(errorType);

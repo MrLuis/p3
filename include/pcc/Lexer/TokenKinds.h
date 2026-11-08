@@ -17,7 +17,7 @@ enum TokenKind : unsigned short {
 };
 
 /// Keyword availability flags (see TokenKinds.def).
-enum KeywordFlags : unsigned { KEYISO = 0x1, KEYTP = 0x2 };
+enum KeywordFlags : unsigned { KEYISO = 0x1, KEYTP = 0x2, KEYOBJ = 0x4 };
 
 /// Enum name, e.g. "kw_program", "colon_equal", "identifier".
 const char *getTokenName(TokenKind K);

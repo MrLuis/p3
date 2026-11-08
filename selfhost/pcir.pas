@@ -171,6 +171,9 @@ function irGlobal(const name, linkage: string; t: PIRType; const init: TV;
                   isConstant, unnamedAddr, isDecl: boolean; align: longint): TV;
 { The global named name (M.getNamedGlobal). }
 function irFindGlobal(const name: string; var g: TV): boolean;
+{ Gives global g, created as a declaration without an alignment, its
+  initializer (GlobalVariable::setInitializer). }
+procedure irSetGlobalInit(const g: TV; const init: TV);
 
 { A declaration. params: of PIRType; attrs: the function attributes as
   LLVM prints them ('' for none); paramText: the parameter list if it has
@@ -1656,6 +1659,23 @@ begin
     exit(false);
   g := globalValue(p);
   irFindGlobal := true;
+end;
+
+procedure irSetGlobalInit(const g: TV; const init: TV);
+var
+  i: longint;
+  p: PGlobal;
+begin
+  for i := 0 to globals.count - 1 do
+  begin
+    p := PGlobal(listGet(globals, i));
+    if globalValue(p).v = g.v then
+    begin
+      bufAddChar(p^.text, ' ');
+      bufAdd(p^.text, init.v);
+      exit;
+    end;
+  end;
 end;
 
 function newFunc(const name: string; ret: PIRType; const params: TPtrList): PIRFunc;

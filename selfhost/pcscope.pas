@@ -1,7 +1,9 @@
 unit pcscope;
 { Name scopes for Sema; a port of include/pcc/Sema/Scope.h. A scope maps
   lower-case names to declarations; a `with` scope exposes a record's
-  fields; units add the interface scopes of the units they use. }
+  fields; units add the interface scopes of the units they use. In
+  objfpc, `with obj do` and every method body open a scope exposing the
+  members of a class and its ancestors. }
 
 interface
 
@@ -14,12 +16,14 @@ type
     symbols: TIntMap;      { name id -> PDecl }
     names: TPtrList;       { of PName, the names declared here }
     withRecord: PType;     { a with scope: the record type, else nil }
+    withClass: PType;      { a class scope: the class, else nil }
     withCtx: PWithContext;
     imports: TPtrList;     { of PScope: used units' interfaces (later win) }
   end;
 
 function newScope(parent: PScope): PScope;
 function newWithScope(parent: PScope; rec: PType; w: PWithContext): PScope;
+function newClassScope(parent: PScope; c: PType; w: PWithContext): PScope;
 procedure scopeAddImport(s, imported: PScope);
 { the declaration of name in s itself (not imports), or nil }
 function scopeLookupOwn(s: PScope; name: PName): PDecl;
@@ -45,6 +49,7 @@ begin
   mapInit(s^.symbols);
   listInit(s^.names);
   s^.withRecord := nil;
+  s^.withClass := nil;
   s^.withCtx := nil;
   listInit(s^.imports);
   newScope := s;
@@ -58,6 +63,16 @@ begin
   s^.withRecord := rec;
   s^.withCtx := w;
   newWithScope := s;
+end;
+
+function newClassScope(parent: PScope; c: PType; w: PWithContext): PScope;
+var
+  s: PScope;
+begin
+  s := newScope(parent);
+  s^.withClass := c;
+  s^.withCtx := w;
+  newClassScope := s;
 end;
 
 procedure scopeAddImport(s, imported: PScope);
@@ -86,9 +101,12 @@ function scopeLookupLocal(s: PScope; name: PName): PDecl;
 var
   d: PDecl;
   i: longint;
+  owner: PType;
 begin
   if s^.withRecord <> nil then
     exit(findField(s^.withRecord, name));
+  if s^.withClass <> nil then
+    exit(findMember(s^.withClass, name, owner));
   d := scopeLookupOwn(s, name);
   if d <> nil then
     exit(d);
@@ -129,11 +147,23 @@ procedure scopeNames(s: PScope; var names: TPtrList);
 var
   i, j: longint;
   imp: PScope;
+  c: PType;
 begin
   if s^.withRecord <> nil then
   begin
     for i := 0 to s^.withRecord^.allFields.count - 1 do
       listAdd(names, PDecl(listGet(s^.withRecord^.allFields, i))^.ident.name);
+    exit;
+  end;
+  if s^.withClass <> nil then
+  begin
+    c := s^.withClass;
+    while c <> nil do
+    begin
+      for i := 0 to c^.classMembers.count - 1 do
+        listAdd(names, PDecl(listGet(c^.classMembers, i))^.ident.name);
+      c := c^.classParent;
+    end;
     exit;
   end;
   for i := 0 to s^.names.count - 1 do

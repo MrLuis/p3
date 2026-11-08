@@ -69,7 +69,9 @@ static cl::opt<LangMode>
     Mode("mode", cl::desc("Language dialect:"), cl::init(LangMode::ISO),
          cl::values(clEnumValN(LangMode::ISO, "iso", "ISO 7185 Pascal"),
                     clEnumValN(LangMode::TP, "tp",
-                               "Turbo/Free Pascal extensions")),
+                               "Turbo/Free Pascal extensions"),
+                    clEnumValN(LangMode::ObjFPC, "objfpc",
+                               "Turbo/Free Pascal extensions and classes")),
          cl::cat(PccCategory));
 
 static cl::opt<ColorMode>

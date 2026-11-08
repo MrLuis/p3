@@ -33,7 +33,7 @@ def tokens_inc():
     out.append("  TKeywordInfo = record")
     out.append("    spelling: string[15];")
     out.append("    kind: TTokenKind;")
-    out.append("    tpOnly: boolean; { reserved only with --mode=tp }")
+    out.append("    level: byte; { reserved from this TLangMode on: 0 iso, 1 tp, 2 objfpc }")
     out.append("  end;")
     out.append("")
     out.append("const")
@@ -49,8 +49,8 @@ def tokens_inc():
     out.append("  numKeywords = %d;" % len(kws))
     out.append("  keywords: array[1..numKeywords] of TKeywordInfo = (")
     for i, t in enumerate(kws):
-        out.append("    (spelling: '%s'; kind: tk%s; tpOnly: %s)%s" % (
-            t[1], camel(t[0]), "true" if t[2] == "KEYTP" else "false",
+        out.append("    (spelling: '%s'; kind: tk%s; level: %d)%s" % (
+            t[1], camel(t[0]), {"KEYISO": 0, "KEYTP": 1, "KEYOBJ": 2}[t[2]],
             "," if i + 1 < len(kws) else ");"))
     return "\n".join(out) + "\n"
 

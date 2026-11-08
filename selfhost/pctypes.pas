@@ -29,6 +29,10 @@ function newPointerType(pointee: PType): PType;
 function newSetType(element: PType): PType;
 function newFileType(element: PType): PType;
 function newRoutineType(const params: TPtrList; result_: PType): PType;
+{ A class (objfpc), not defined yet: defineClass fills it in. }
+function newClassType: PType;
+procedure defineClass(t, parentClass: PType; const members, allFields,
+                      vtable: TPtrList; module: pointer);
 { shared by element / length (all short string types are compatible) }
 function setConstructorType(element: PType): PType;
 function stringLiteralType(len: int64): PType;
@@ -55,6 +59,12 @@ function isEmptySet(t: PType): boolean;
 function isUntypedPointer(t: PType): boolean;
 function containsFile(t: PType): boolean;
 function findField(rec: PType; name: PName): PDecl;
+{ Class members (objfpc): declared in class c itself; in c or its nearest
+  ancestor declaring it (owner receives that class); is c a or a
+  descendant of a? }
+function findOwnMember(c: PType; name: PName): PDecl;
+function findMember(c: PType; name: PName; var owner: PType): PDecl;
+function inheritsFrom(c, a: PType): boolean;
 function getOrdinalBounds(t: PType): TOrdinalBounds;
 { All integer types count as one host (Turbo/FPC). }
 function haveSameOrdinalHost(a, b: PType): boolean;
@@ -176,6 +186,31 @@ begin
   newRoutineType := t;
 end;
 
+function newClassType: PType;
+var
+  t: PType;
+begin
+  t := newType(tyClass);
+  t^.classParent := nil;
+  listInit(t^.classMembers);
+  listInit(t^.classAllFields);
+  listInit(t^.classVTable);
+  t^.classModule := nil;
+  t^.classDefined := false;
+  newClassType := t;
+end;
+
+procedure defineClass(t, parentClass: PType; const members, allFields,
+                      vtable: TPtrList; module: pointer);
+begin
+  t^.classParent := parentClass;
+  t^.classMembers := members;
+  t^.classAllFields := allFields;
+  t^.classVTable := vtable;
+  t^.classModule := module;
+  t^.classDefined := true;
+end;
+
 procedure initTypes;
 begin
   mapInit(setTypes);
@@ -266,7 +301,7 @@ end;
 
 function isValidResultType(t: PType): boolean;
 begin
-  isValidResultType := isSimple(t) or (t^.kind = tyPointer);
+  isValidResultType := isSimple(t) or (t^.kind in [tyPointer, tyClass]);
 end;
 
 function isStructured(t: PType): boolean;
@@ -378,6 +413,48 @@ begin
       exit(f);
   end;
   findField := nil;
+end;
+
+function findOwnMember(c: PType; name: PName): PDecl;
+var
+  i: longint;
+  d: PDecl;
+begin
+  for i := 0 to c^.classMembers.count - 1 do
+  begin
+    d := PDecl(listGet(c^.classMembers, i));
+    if d^.ident.name = name then
+      exit(d);
+  end;
+  findOwnMember := nil;
+end;
+
+function findMember(c: PType; name: PName; var owner: PType): PDecl;
+var
+  d: PDecl;
+begin
+  while c <> nil do
+  begin
+    d := findOwnMember(c, name);
+    if d <> nil then
+    begin
+      owner := c;
+      exit(d);
+    end;
+    c := c^.classParent;
+  end;
+  findMember := nil;
+end;
+
+function inheritsFrom(c, a: PType): boolean;
+begin
+  while c <> nil do
+  begin
+    if c = a then
+      exit(true);
+    c := c^.classParent;
+  end;
+  inheritsFrom := false;
 end;
 
 function getOrdinalBounds(t: PType): TOrdinalBounds;
@@ -549,6 +626,7 @@ begin
           bufAddChar(b, '?');
       end;
     tyNil: bufAdd(b, 'nil');
+    tyClass: bufAdd(b, 'class');
     tyShortString:
       if t^.maxLength = 255 then
         bufAdd(b, 'string')

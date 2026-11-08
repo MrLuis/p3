@@ -130,6 +130,7 @@ begin
   helpLine('  --mode=<value>               - Language dialect:');
   helpLine('    =iso                       -   ISO 7185 Pascal');
   helpLine('    =tp                        -   Turbo/Free Pascal extensions');
+  helpLine('    =objfpc                    -   Turbo/Free Pascal extensions and classes');
   helpLine('  -o <file>                    - Write output to <file>');
   helpLine('  --target=<triple>            - Target triple (default: host)');
 end;
@@ -367,6 +368,8 @@ begin
       value := takeValue;
       if value = 'tp' then
         mode := lmTP
+      else if value = 'objfpc' then
+        mode := lmObjFPC
       else if value = 'iso' then
         mode := lmISO
       else

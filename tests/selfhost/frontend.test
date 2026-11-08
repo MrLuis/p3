@@ -2,7 +2,7 @@
 ; current, the sources must follow the dialect, and the Pascal compiler
 ; built by pcc must print exactly the same --emit-tokens, --emit-parse-tree
 ; and --emit-ast output, diagnostics and exit status as the C++ pcc for
-; every .pas file in the repository, in both modes. (By hand also: the fuzz
+; every .pas file in the repository, in all modes. (By hand also: the fuzz
 ; corpus, mutants and iso7185pat.pas, and the FPC-built compiler; see
 ; selfhost/README.md.)
 ; REQUIRES: selfhost-build
@@ -13,4 +13,10 @@
 ; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-parse-tree --ref pcc --new %t.pcc %S/.. %S/../../selfhost | FileCheck %s
 ; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-ast --ref pcc --new %t.pcc %S/.. %S/../../selfhost | FileCheck %s
 ; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-parse-tree --modes=tp --extra="-I %S/../run/Inputs/units/lib" --ref pcc --new %t.pcc %S/../run/Inputs/units/main.pas | FileCheck %s
+; Classes (--mode=objfpc): every .pas file of the repository, and with
+; units and diagnostics for all errors.
+; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-tokens --modes=objfpc --ref pcc --new %t.pcc %S/.. | FileCheck %s
+; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-parse-tree --modes=objfpc --ref pcc --new %t.pcc %S/.. | FileCheck %s
+; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-ast --modes=objfpc --extra="-ferror-limit=0 -I %S/../run/Inputs/classes/lib" --ref pcc --new %t.pcc %S/.. | FileCheck %s
+; RUN: python3 %S/../../utils/selfhost-diff.py --action=-c --modes=objfpc --extra="-ferror-limit=0 -I %S/../run/Inputs/classes/lib -o /dev/null" --ref pcc --new %t.pcc %S/../sema/Inputs/classes %S/../run/Inputs/classes/lib | FileCheck %s
 ; CHECK: runs, 0 differ

@@ -11,7 +11,8 @@ unit pcast;
   values) are marked (Sema). Semantic types are TType (Type.h): integer
   types, real, boolean, char, enumerations, subranges, string literals,
   arrays, records, pointers, nil, sets, files, procedural types and short
-  strings. Types are compared by identity (name equivalence). }
+  strings, and (--mode=objfpc) classes. Types are compared by identity
+  (name equivalence). }
 
 interface
 
@@ -39,13 +40,14 @@ type
 
   TUnaryOp = (uoPlus, uoMinus, uoNot);
   TBinaryOp = (boAdd, boSub, boOr, boXor, boMul, boRealDiv, boIntDiv, boMod,
-               boAnd, boShl, boShr, boEq, boNe, boLt, boLe, boGt, boGe, boIn);
+               boAnd, boShl, boShr, boEq, boNe, boLt, boLe, boGt, boGe, boIn,
+               boIs, boAs);
 
   TNodeKind = (
     { expressions }
     nkIntegerLit, nkRealLit, nkStringLit, nkNameRef, nkParen, nkUnary,
     nkBinary, nkCall, nkFormatted, nkIndex, nkField, nkNil, nkDeref,
-    nkSetCtor, nkAddrOf, nkAggregate, nkIndirectCall,
+    nkSetCtor, nkAddrOf, nkAggregate, nkIndirectCall, nkInherited,
     { statements }
     nkEmpty, nkCompound, nkProcCall, nkAssign, nkIf, nkWhile, nkRepeat,
     nkFor, nkCase, nkWith, nkLabeled, nkGoto, nkIndirectCallStmt);
@@ -60,7 +62,7 @@ type
 
   TTypeKind = (tyError, tyInteger, tyReal, tyBoolean, tyChar, tyEnum,
                tySubrange, tyStringLit, tyArray, tyRecord, tyPointer, tyNil,
-               tySet, tyFile, tyRoutine, tyShortString);
+               tySet, tyFile, tyRoutine, tyShortString, tyClass);
 
   TType = record
     kind: TTypeKind;
@@ -79,6 +81,13 @@ type
       tyFile: (fileElement: PType; isText: boolean);
       tyRoutine: (routineParams: TPtrList; routineResult: PType);
       tyShortString: (maxLength: longint);
+      { a class (objfpc): its parent (nil only for TObject), own members in
+        source order, all fields (the ancestors' first), the virtual methods
+        by slot, the program or unit declaring it; a forward declaration
+        is not defined yet }
+      tyClass: (classParent: PType; classMembers, classAllFields,
+                classVTable: TPtrList; classModule: pointer;
+                classDefined: boolean);
   end;
 
   TNode = record
@@ -97,13 +106,21 @@ type
                  operandType: PType);
       { call / proccall: callee named; indirectcall: calleeExpr; the
         indirect call statement holds an nkIndirectCall in calleeExpr }
+      { callWith: a method found through a class scope is called on the
+        object of this with context (Self, or a with statement's) }
       nkCall, nkProcCall, nkIndirectCall, nkIndirectCallStmt:
         (callee: TIdent; args: TPtrList; hasParens: boolean;
-         calleeExpr: PNode; callDecl: PDecl);
+         calleeExpr: PNode; callDecl: PDecl; callWith: PWithContext);
       nkFormatted: (fmtValue, fmtWidth, fmtPrecision: PNode);
-      { index: base[index]; field: base.fieldName }
+      { index: base[index]; field: base.fieldName; fieldDecl is a field,
+        or (objfpc) a method or property of a class }
       nkIndex, nkField: (base, index: PNode; fieldName: TIdent;
                          fieldDecl: PDecl);
+      { inherited [inhName] (objfpc): the method called and the method
+        calling it (Sema); a bare inherited passes the calling method's
+        parameters (inhArgs, Sema) }
+      nkInherited: (inhName: TIdent; inhMethod, inhEnclosing: PDecl;
+                    inhArgs: TPtrList);
       nkSetCtor: (setElems: TPtrList);      { of PSetElement }
       nkAggregate: (aggElems: TPtrList);    { of PAggElement }
       { compound: stmts; repeat: stmts until untilCond }
@@ -143,13 +160,16 @@ type
     body: PNode;
   end;
 
+  { A record of a with statement, or (objfpc) an object: of a with
+    statement, or Self in a method body (isSelf). }
   TWithContext = record
     rec: PNode;
+    isSelf: boolean;
     cgAddr: pointer; { code generation: the record's address (a boxed value) }
   end;
 
   TTypeSpecKind = (tsNamed, tsEnum, tsSubrange, tsArray, tsRecord,
-                   tsPointer, tsSet, tsFile, tsRoutine, tsString);
+                   tsPointer, tsSet, tsFile, tsRoutine, tsString, tsClass);
 
   PVariantPart = ^TVariantPart;
 
@@ -167,6 +187,9 @@ type
       tsSet, tsFile: (elemSpec: PTypeSpec);
       tsRoutine: (rtIsFunction: boolean; rtParams: TPtrList; rtResult: PTypeSpec);
       tsString: (maxLen: PNode); { nil for plain string }
+      { class (objfpc): the parent's name (nil name: TObject), the members
+        (fields, method headings, properties) in source order }
+      tsClass: (parentName: TIdent; memberList: TPtrList; isForwardClass: boolean);
   end;
 
   TFieldList = record
@@ -194,8 +217,13 @@ type
   end;
 
   TDeclKind = (dkProgram, dkVar, dkConst, dkType, dkField, dkRoutine,
-               dkBuiltin, dkLabel, dkUnit);
+               dkBuiltin, dkLabel, dkUnit, dkProperty);
   TVarKind = (vkVariable, vkValueParam, vkVarParam, vkConstParam, vkResult);
+  { objfpc: the kind of a method, the methods of TObject (no Pascal body),
+    the visibility of a class member }
+  TMethodKind = (mtNone, mtMethod, mtConstructor, mtDestructor);
+  TObjMethod = (obNone, obCreate, obDestroy, obFree, obClassName);
+  TVisibility = (vsPublic, vsPublished, vsProtected, vsPrivate);
 
   TDecl = record
     kind: TDeclKind;
@@ -215,6 +243,7 @@ type
     cgImported: boolean;
     cgSlot, cgJmpSlot: longint;
     cgOffset: int64;
+    vis: TVisibility; { class members }
     case TDeclKind of
       { owner: the routine whose frame holds it; nil for program-level
         variables and typed constants (Sema) }
@@ -223,10 +252,18 @@ type
       dkConst: (constInit: PNode; constType: PType; constValue: TConstValue);
       dkType: (typeSpec: PTypeSpec; declType: PType);
       dkField: (fieldSpec: PTypeSpec; fieldType: PType);
+      { methods (objfpc): methodClassName: TFoo of an implementation
+        TFoo.Bar; ownerClass, selfVar (the hidden parameter), vmtIndex (a
+        virtual method's slot, else -1) and implDecl (the implementation of
+        a method heading): Sema }
       dkRoutine: (isFunction, hasParamList, isForward, isExternal: boolean;
                   params: TPtrList; resultSpec: PTypeSpec; resultType: PType;
                   body: PBlock; externalName: PName;
-                  canonical, parent, resultVar: PDecl; level: longint);
+                  canonical, parent, resultVar: PDecl; level: longint;
+                  methodKind: TMethodKind; methodClassName: TIdent;
+                  isVirtual, isOverride, isAbstract: boolean;
+                  ownerClass: PType; selfVar, implDecl: PDecl;
+                  vmtIndex: longint; objMethod: TObjMethod);
       dkBuiltin: (builtin: TBuiltinKind; isProcedure: boolean);
       { labels (Sema): the statement labeled, the statement sequence that
         directly contains it, whether that is the block's outermost one,
@@ -235,6 +272,9 @@ type
                 labelTopLevel, labelNonLocal: boolean; labelIndex: longint);
       dkProgram: (progParams: TPtrList; progUses: TPtrList; progBlock: PBlock);
       dkUnit: (ifaceUses, implUses: TPtrList; iface, impl: PBlock);
+      { property (objfpc): the accessors' names and declarations (Sema) }
+      dkProperty: (propSpec: PTypeSpec; propType: PType;
+                   readName, writeName: TIdent; readDecl, writeDecl: PDecl);
   end;
 
 function newNode(kind: TNodeKind; b, e: TLoc): PNode;
@@ -354,12 +394,14 @@ begin
     boGt: binaryOpSpelling := '>';
     boGe: binaryOpSpelling := '>=';
     boIn: binaryOpSpelling := 'in';
+    boIs: binaryOpSpelling := 'is';
+    boAs: binaryOpSpelling := 'as';
   end;
 end;
 
 function isRelational(op: TBinaryOp): boolean;
 begin
-  isRelational := op in [boEq, boNe, boLt, boLe, boGt, boGe, boIn];
+  isRelational := op in [boEq, boNe, boLt, boLe, boGt, boGe, boIn, boIs];
 end;
 
 end.

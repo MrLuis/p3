@@ -162,7 +162,7 @@ void Lexer::skipWhitespaceAndComments() {
       }
       return;
     case '/':
-      if (LangOpts.Mode == LangMode::TP && Cur[1] == '/') { // // to end of line
+      if (LangOpts.Mode != LangMode::ISO && Cur[1] == '/') { // // to end of line
         while (Cur < BufEnd && *Cur != '\n')
           ++Cur;
         continue;
@@ -292,7 +292,7 @@ void Lexer::lexString(Token &T) {
   const char *Start = Cur;
   llvm::SmallString<64> Value;
   bool Terminated = true;
-  bool TP = LangOpts.Mode == LangMode::TP;
+  bool TP = LangOpts.Mode != LangMode::ISO;
 
   while (Terminated) {
     if (*Cur == '\'') {
@@ -373,7 +373,7 @@ void Lexer::lex(Token &T) {
       return lexIdentifier(T);
     if (llvm::isDigit(C))
       return lexNumber(T);
-    bool TP = LangOpts.Mode == LangMode::TP;
+    bool TP = LangOpts.Mode != LangMode::ISO;
     if (C == '\'' || (TP && C == '#'))
       return lexString(T);
     if (TP && ((C == '$' && llvm::isHexDigit(Cur[1])) ||

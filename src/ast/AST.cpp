@@ -31,6 +31,8 @@ const char *pcc::getOpSpelling(BinaryOp Op) {
   case BinaryOp::Gt:      return ">";
   case BinaryOp::Ge:      return ">=";
   case BinaryOp::In:      return "in";
+  case BinaryOp::Is:      return "is";
+  case BinaryOp::As:      return "as";
   }
   return "?";
 }
@@ -38,7 +40,7 @@ const char *pcc::getOpSpelling(BinaryOp Op) {
 bool pcc::isRelational(BinaryOp Op) {
   switch (Op) {
   case BinaryOp::Eq: case BinaryOp::Ne: case BinaryOp::Lt: case BinaryOp::Le:
-  case BinaryOp::Gt: case BinaryOp::Ge: case BinaryOp::In:
+  case BinaryOp::Gt: case BinaryOp::Ge: case BinaryOp::In: case BinaryOp::Is:
     return true;
   default:
     return false;
@@ -59,9 +61,15 @@ const char *Decl::getKindName() const {
   case DK_Field:   return "field";
   case DK_Label:   return "label";
   case DK_Unit:    return "unit";
-  case DK_Routine:
-    return llvm::cast<RoutineDecl>(this)->isFunction() ? "function"
-                                                       : "procedure";
+  case DK_Property: return "property";
+  case DK_Routine: {
+    auto *R = llvm::cast<RoutineDecl>(this);
+    if (R->isConstructor())
+      return "constructor";
+    if (R->isDestructor())
+      return "destructor";
+    return R->isFunction() ? "function" : "procedure";
+  }
   case DK_Builtin:
     return llvm::cast<BuiltinDecl>(this)->isProcedure() ? "procedure"
                                                         : "function";

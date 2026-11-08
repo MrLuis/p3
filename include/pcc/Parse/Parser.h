@@ -108,6 +108,8 @@ class Parser {
   void parseTypePart(llvm::SmallVectorImpl<Decl *> &Decls);
   void parseVarPart(llvm::SmallVectorImpl<Decl *> &Decls);
   RoutineDecl *parseRoutineDecl(bool HeadingOnly = false);
+  RoutineDecl *parseMethodHeading();
+  PropertyDecl *parsePropertyDecl();
   bool parseFormalParams(llvm::SmallVectorImpl<VarDecl *> &Params);
 
   // Types
@@ -117,6 +119,7 @@ class Parser {
   TypeSpec *parseTypeIdentifier(llvm::StringRef Context);
   TypeSpec *parseArrayType(SourceLocation Start, bool Packed);
   TypeSpec *parseRecordType(SourceLocation Start, bool Packed);
+  TypeSpec *parseClassType(SourceLocation Start);
   FieldList *parseFieldList(tok::TokenKind Close);
   VariantPart *parseVariantPart(tok::TokenKind Close);
 
@@ -130,6 +133,8 @@ class Parser {
   Stmt *parseStatement();
   Stmt *parseStatementImpl();
   Stmt *parseAssignmentOrCall();
+  Stmt *finishDesignatorStmt(SourceLocation Start, Expr *Target);
+  Expr *parseInherited();
   Stmt *parseIfStmt();
   Stmt *parseWhileStmt();
   Stmt *parseRepeatStmt();
