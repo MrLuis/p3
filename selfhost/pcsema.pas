@@ -87,6 +87,9 @@ var
     and break/continue out of it, are not allowed there). objfpc has no
     gotos, so none can leave a try statement. }
   exceptionType: PType;
+  { COM interfaces (objfpc): IUnknown (= IInterface), their root, and
+    TInterfacedObject, the root of the classes implementing them }
+  iunknownType, interfacedType: PType;
   { class of C for each class C (by type id): the type of C used as a
     value and of Self in class methods }
   classRefs: TIntMap;
@@ -650,6 +653,60 @@ begin
   external_ := declareExceptionClass('EDivByZero', intError);
 end;
 
+{ IUnknown = interface end (COM; also named IInterface: Free Pascal's
+  QueryInterface, _AddRef and _Release are not declared, the compiled code
+  counts references itself) and
+    TInterfacedObject = class(TObject, IUnknown)
+    protected FRefCount: longint;
+    public property RefCount: longint read FRefCount; end;
+  Their iid and VMT are in the runtime. }
+procedure declareInterfacedObject;
+var
+  empty, members, fields, impls: TPtrList;
+  count, refCount, d: PDecl;
+  impl: PInterfaceImpl;
+begin
+  iunknownType := newInterfaceType;
+  setDeclName(iunknownType, intern('IUnknown'));
+  iunknownType^.intfCOM := true;
+  listInit(empty);
+  defineInterface(iunknownType, nil, empty, empty, nil);
+  d := newDecl(dkType, memberIdent('IUnknown'), noLoc);
+  d^.declType := iunknownType;
+  scopeInsert(standard, d^.ident.name, d);
+  d := newDecl(dkType, memberIdent('IInterface'), noLoc);
+  d^.declType := iunknownType;
+  scopeInsert(standard, d^.ident.name, d);
+
+  interfacedType := newClassType;
+  setDeclName(interfacedType, intern('TInterfacedObject'));
+  count := newDecl(dkField, memberIdent('FRefCount'), noLoc);
+  count^.fieldType := tyIntegerT;
+  count^.vis := vsProtected;
+  refCount := newDecl(dkProperty, memberIdent('RefCount'), noLoc);
+  refCount^.propType := tyIntegerT;
+  refCount^.readName := memberIdent('FRefCount');
+  refCount^.writeName := noIdent;
+  refCount^.readDecl := count;
+  refCount^.writeDecl := nil;
+  listInit(members);
+  listAdd(members, count);
+  listAdd(members, refCount);
+  listInit(fields);
+  listAdd(fields, count);
+  defineClass(interfacedType, tobjectType, members, fields,
+              tobjectType^.classVTable, nil);
+  impl := PInterfaceImpl(arenaAlloc(sizeof(TInterfaceImpl)));
+  impl^.intf := iunknownType;
+  listInit(impl^.methods);
+  listInit(impls);
+  listAdd(impls, impl);
+  interfacedType^.classInterfaces := impls;
+  d := newDecl(dkType, memberIdent('TInterfacedObject'), noLoc);
+  d^.declType := interfacedType;
+  scopeInsert(standard, d^.ident.name, d);
+end;
+
 procedure declareStandardScope;
 var
   pchar: PType;
@@ -684,6 +741,7 @@ begin
   begin
     declareTObject;
     declareException;
+    declareInterfacedObject;
   end;
   { the standard files }
   for f := 1 to 2 do
@@ -769,6 +827,16 @@ end;
 function visitExpr(e: PNode): PType; forward;
 
 { Type-checks e once (later calls return the cached type). }
+{ The current routine computes a managed value (see usesManaged). }
+procedure markUsesManaged;
+begin
+  if curRoutine = nil then
+    exit;
+  curRoutine^.usesManaged := true;
+  if curRoutine^.canonical <> nil then
+    curRoutine^.canonical^.usesManaged := true;
+end;
+
 function check(e: PNode): PType;
 var
   t: PType;
@@ -777,6 +845,8 @@ begin
     exit(e^.typ);
   t := visitExpr(e);
   e^.typ := t;
+  if isManaged(t) then
+    markUsesManaged;
   check := t;
 end;
 
@@ -1343,7 +1413,7 @@ end;
 function resolveFieldList(fl: PFieldList; var all: TPtrList; var seen: TIntMap): boolean;
 var
   ok: boolean;
-  i, j: longint;
+  i, j, first: longint;
   f: PDecl;
   vp: PVariantPart;
   tagTy: PType;
@@ -1385,8 +1455,20 @@ begin
     for j := 0 to v^.labels.count - 1 do
       if not checkLabel(PCaseLabel(listGet(v^.labels, j)), tagTy, 'variant label') then
         ok := false;
+    first := all.count;
     if not resolveFieldList(v^.fields, all, seen) then
       ok := false;
+    { the variants overlap, so their fields cannot be reference counted }
+    for j := first to all.count - 1 do
+    begin
+      f := PDecl(listGet(all, j));
+      if (f^.fieldType <> nil) and isManaged(f^.fieldType) then
+      begin
+        ms('a variant part cannot contain COM interfaces');
+        errR(f^.loc, identRange(f^.ident));
+        ok := false;
+      end;
+    end;
   end;
   resolveFieldList := ok;
 end;
@@ -1583,6 +1665,12 @@ begin
           errR(ts^.elemSpec^.b, specRange(ts^.elemSpec));
           exit;
         end;
+        if isManaged(elem) then
+        begin
+          ms('the components of a file cannot be COM interfaces');
+          errR(ts^.elemSpec^.b, specRange(ts^.elemSpec));
+          exit;
+        end;
         buildType := newFileType(elem);
       end;
     tsSet:
@@ -1619,6 +1707,11 @@ begin
     tsClass:
       begin
         ms('a class type must be declared in a ''type'' section');
+        errR(ts^.b, specRange(ts));
+      end;
+    tsInterface:
+      begin
+        ms('an interface type must be declared in a ''type'' section');
         errR(ts^.b, specRange(ts));
       end;
     tsClassRef: { class of TFoo (TFoo may be forward) }
@@ -2260,6 +2353,7 @@ begin
     end;
   t := newInterfaceType;
   setDeclName(t, td^.ident.spelling);
+  t^.intfCOM := not ts^.isCorba;
   td^.declType := t;
   ts^.resolved := t;
   declare(td);
@@ -2341,8 +2435,18 @@ var
   seen: TIntMap;
   k: longint;
   r, inh, prev: PDecl;
+
+  function kindName(t: PType): string;
+  begin
+    if t^.intfCOM then
+      kindName := 'COM'
+    else
+      kindName := 'CORBA';
+  end;
+
 begin
   parentIntf := nil;
+  i^.intfCOM := not ts^.isCorba;
   if identValid(ts^.intfParentName) then
   begin
     if ts^.intfParentName.name = intern(lowerStr(nameStr(i^.declName))) then
@@ -2354,7 +2458,18 @@ begin
     end
     else
       parentIntf := lookupInterface(ts^.intfParentName);
+    if (parentIntf <> nil) and (parentIntf^.intfCOM <> i^.intfCOM) then
+    begin
+      ms('a ' + kindName(i) + ' interface cannot inherit from the ' +
+         kindName(parentIntf) + ' interface ');
+      maT(parentIntf);
+      errR(ts^.intfParentName.loc, identRange(ts^.intfParentName));
+      parentIntf := nil;
+    end;
   end;
+  { a COM interface without a parent descends from IUnknown }
+  if (parentIntf = nil) and i^.intfCOM then
+    parentIntf := iunknownType;
   listInit(own);
   listInit(all);
   if parentIntf <> nil then
@@ -2515,6 +2630,21 @@ begin
   end;
   for k := 0 to ts^.interfaceNames.count - 1 do
     addListed(PIdent(listGet(ts^.interfaceNames, k)));
+  { the objects of COM interfaces are reference counted by
+    TInterfacedObject }
+  for k := 0 to listed.count - 1 do
+    if PType(listGet(listed, k))^.intfCOM and
+       not inheritsFrom(parentClass, interfacedType) then
+    begin
+      ms('class ');
+      maT(c);
+      ma(' implements the COM interface ');
+      maT(PType(listGet(listed, k)));
+      ma(', so it must descend from TInterfacedObject');
+      errR(PIdent(listGet(listedWhere, k))^.loc,
+           identRange(PIdent(listGet(listedWhere, k))^));
+      break;
+    end;
 
   listInit(members);
   listInit(fields);
@@ -3127,6 +3257,13 @@ begin
     begin
       ms('function result type must be a simple or pointer type, not ');
       maT(resultTy);
+      errR(r^.resultSpec^.b, specRange(r^.resultSpec));
+      resultTy := errorType;
+    end
+    else if not isError(resultTy) and (resultTy^.kind <> tyInterface) and
+            isManaged(resultTy) then
+    begin
+      ms('a function cannot return a record containing COM interfaces');
       errR(r^.resultSpec^.b, specRange(r^.resultSpec));
       resultTy := errorType;
     end;
@@ -4195,6 +4332,16 @@ var
   p: PDecl;
   at, pt: PType;
 begin
+  { a call whose result is discarded still holds it for a while }
+  if (calleeDecl <> nil) and (calleeDecl^.kind = dkRoutine) and
+     calleeDecl^.isFunction and (calleeDecl^.resultType <> nil) and
+     isManaged(calleeDecl^.resultType) then
+    markUsesManaged;
+  if (calleeDecl <> nil) and (calleeDecl^.kind = dkVar) and
+     (calleeDecl^.varType <> nil) and (calleeDecl^.varType^.kind = tyRoutine) and
+     (calleeDecl^.varType^.routineResult <> nil) and
+     isManaged(calleeDecl^.varType^.routineResult) then
+    markUsesManaged;
   if args.count <> params.count then
   begin
     if args.count < params.count then
@@ -4368,6 +4515,8 @@ begin
   curAssignTarget := nil;
   tobjectType := nil;
   exceptionType := nil;
+  iunknownType := nil;
+  interfacedType := nil;
   handlerDepth := 0;
   finallyLoopDepth := -1;
   listInit(pendingInterfaces);

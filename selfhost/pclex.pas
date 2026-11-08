@@ -53,6 +53,7 @@ type
       non-nil) and the open conditionals (of PConditional), innermost last }
     defines: TIntMap;
     conds: TPtrList;
+    corbaInterfaces: boolean; { $interfaces corba (default: com) }
   end;
 
 var
@@ -221,6 +222,7 @@ begin
   lx.pendingIncludeLoc := noLoc;
   mapInit(lx.defines);
   listInit(lx.conds);
+  lx.corbaInterfaces := false;
   defineSymbol(lx, 'PCC', true);
   if mode = lmISO then
     defineSymbol(lx, 'PCC_ISO', true)
@@ -682,7 +684,7 @@ begin
     lx.pendingIncludeLoc := locOf(lx, start);
     exit;
   end;
-  { $interfaces corba: pcc's interfaces (objfpc) are CORBA style only }
+  { $interfaces com / corba: the kind of the interfaces declared after it }
   if word = 'interfaces' then
   begin
     arg := '';
@@ -691,8 +693,12 @@ begin
       arg := arg + lowerChar(at(lx, b));
       b := b + 1;
     end;
-    if (arg <> 'corba') or (b < e) then
-      diagError(locOf(lx, start), 'only CORBA interfaces are supported; use ' +
+    if (arg = 'corba') and (b >= e) then
+      lx.corbaInterfaces := true
+    else if (arg = 'com') and (b >= e) then
+      lx.corbaInterfaces := false
+    else
+      diagError(locOf(lx, start), 'expected {$interfaces com} or ' +
                 '{$interfaces corba}');
     exit;
   end;

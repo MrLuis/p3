@@ -24,10 +24,10 @@
 ; A static method.
 ; CHECK:      call void @pas.ta.s(ptr null, ptr %a1)
 ; CHECK:      call i32 @__pas_class_is(ptr %a2, ptr @vmt.tb)
-; Free: Destroy (slot 0) unless nil, then release.
+; Free: Destroy (slot 0) unless nil, then free its fields' interfaces and memory.
 ; CHECK:      br i1 %{{[0-9]+}}, label %free.end, label %free.do
 ; CHECK:      getelementptr inbounds ptr, ptr %vmt4, i64 4
-; CHECK:      call void @__pas_dispose(ptr %a3)
+; CHECK:      call void @__pas_free_instance(ptr %a3)
 
 ; CHECK-LABEL: define internal void @pas.ta.v(ptr %link, ptr %self, i32 %n)
 ; CHECK:      store ptr %self, ptr %0, align 8

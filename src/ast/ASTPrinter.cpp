@@ -391,6 +391,8 @@ class ASTPrinter : public StmtVisitor<ASTPrinter>,
     case TypeSpec::TS_Interface: {
       auto *I = llvm::cast<InterfaceTypeSpec>(TS);
       line(I->isForward() ? "InterfaceTypeSpec forward" : "InterfaceTypeSpec");
+      if (!I->isCorba())
+        OS << " com";
       if (I->getParent().isValid())
         OS << " '" << I->getParent().Name << '\'';
       if (!I->getGUID().empty()) {

@@ -15,11 +15,12 @@
 ; CHECK: errors.pas:38:5: error: assigning to 'IB' from incompatible type 'IA'
 ; CHECK: errors.pas:41:5: error: assigning to 'integer' from incompatible type 'IA'
 ; CHECK: errors.pas:42:5: error: no method named 'R' in interface 'IA'
-; CHECK: errors.pas:43:8: error: invalid operands to 'is' ('IA' and 'IB'): the left operand must be an object
+; CHECK: errors.pas:43:8: error: invalid operands to 'is' ('IA' and 'IB'): the left operand must be an object or a COM interface
 ; CHECK: errors.pas:45:8: error: invalid typecast from 'IA' to 'TY' (only between ordinal types and between pointer types)
 ; CHECK-NOT: {{error|warning}}
 
-; Only CORBA interfaces are supported.
-; RUN: not %pcc --mode=objfpc -c %S/Inputs/interfaces/com.pas -o %t.o 2>&1 | FileCheck --check-prefix=NOTCOM %s
-; NOTCOM: com.pas:1:1: error: only CORBA interfaces are supported; use {$interfaces corba}
+; {$interfaces com} (the default) and {$interfaces corba}; nothing else.
+; RUN: not %pcc --mode=objfpc -c %S/Inputs/interfaces/com.pas -o %t.o 2>&1 | FileCheck --check-prefix=KIND %s
+; KIND: com.pas:3:1: error: expected {$interfaces com} or {$interfaces corba}
+; KIND-NOT: error
 ; RUN: %pcc --mode=objfpc -c %S/Inputs/interfaces/corba.pas -o %t.o 2>&1 | count 0

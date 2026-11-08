@@ -126,10 +126,36 @@ void __pas_paramstr(unsigned char *dst, int32_t index);
  * interface table or NULL, [4...] the virtual methods; [4] is Destroy. A
  * class reference is a VMT pointer. Methods take (static link, Self,
  * parameters...); a class method's Self is a class reference.
- * The interface table: [n, iid1, methods1, ..., iidn, methodsn] (n an
- * integer): the interfaces the class implements (CORBA style) and its
- * method tables for them. An interface value is {object, method table}. */
+ * The interface table: [n, cleanup, iid1, methods1, ..., iidn, methodsn]
+ * (n an integer): the interfaces the class implements and its method
+ * tables for them; cleanup (or NULL) releases the COM interfaces held by
+ * the class's own fields. An interface value is {object, method table}. */
 extern void *const __pas_tobject_vmt[5];
+/* COM interfaces: their objects are TInterfacedObjects, whose reference
+ * count (FRefCount, an int32) follows the VMT pointer. TInterfacedObject
+ * implements IUnknown (iid __pas_iunknown_iid). */
+extern void *const __pas_tinterfacedobject_vmt[5];
+extern const unsigned char __pas_iunknown_iid[];
+typedef struct PasIntf {
+  void *obj;
+  void *methods;
+} PasIntf;
+/* One more / one fewer reference to obj (NULL: nothing); the last one
+ * destroys and frees it. */
+void __pas_intf_addref(void *obj);
+void __pas_intf_release(void *obj);
+/* *dst := {obj, methods}: references the new object, then releases the
+ * old one. */
+void __pas_intf_assign(PasIntf *dst, void *obj, void *methods);
+/* Releases *p's object and sets *p to nil. */
+void __pas_intf_clear(PasIntf *p);
+/* While a TInterfacedObject's constructor runs its count is 1, so that
+ * references taken and dropped there do not free it. */
+void __pas_interfaced_construct(void *obj);
+void __pas_interfaced_constructed(void *obj);
+/* Frees an object after its destructor ran: releases the COM interfaces
+ * in its fields (each class's cleanup), then the memory. */
+void __pas_free_instance(void *obj);
 /* The method table of obj's class for the interface iid, or NULL (also if
  * obj is NULL). */
 void *__pas_intf_lookup(const void *obj, const void *iid);

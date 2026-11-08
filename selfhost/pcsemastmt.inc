@@ -1502,9 +1502,12 @@ var
   rhs: PNode;
   d, td: PDecl;
   op: string;
+  comObject: boolean;
 begin
   checkIsAs := errorType;
   l := check(e^.lhs);
+  { the left operand may be a COM interface (its object) }
+  comObject := (l^.kind = tyInterface) and l^.intfCOM;
   op := binaryOpSpelling(e^.bop);
   c := nil;
   rhs := e^.rhs;
@@ -1531,13 +1534,13 @@ begin
     begin
       if isError(l) then
         exit;
-      if l^.kind <> tyClass then
+      if (l^.kind <> tyClass) and not comObject then
       begin
         ms('invalid operands to ''' + op + ''' (');
         maT(l);
         ma(' and ');
         maT(t);
-        ma('): the left operand must be an object');
+        ma('): the left operand must be an object or a COM interface');
         errRR(e^.opLoc, nodeRange(e^.lhs), nodeRange(rhs));
         exit;
       end;
@@ -1557,6 +1560,12 @@ begin
   end;
   if isError(l) then
     exit;
+  if comObject then { its object's class is not known }
+  begin
+    if e^.bop = boIs then
+      exit(tyBooleanT);
+    exit(c);
+  end;
   if l^.kind <> tyClass then
   begin
     ms('invalid operands to ''' + op + ''' (');

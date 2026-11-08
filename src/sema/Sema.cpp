@@ -79,6 +79,10 @@ class Checker : public StmtVisitor<Checker>,
   /// The predeclared classes TObject and Exception (objfpc).
   ClassType *TObjectTy = nullptr;
   ClassType *ExceptionTy = nullptr;
+  /// IUnknown (= IInterface), the root of the COM interfaces, and
+  /// TInterfacedObject, the root of the classes implementing them.
+  InterfaceType *IUnknownTy = nullptr;
+  ClassType *TInterfacedObjectTy = nullptr;
   /// `class of C` for each class C: the type of C used as a value, and of
   /// Self in class methods (`TFooClass = class of TFoo` is a type of its own).
   llvm::DenseMap<ClassType *, ClassRefType *> ClassRefs;
@@ -179,6 +183,7 @@ class Checker : public StmtVisitor<Checker>,
     if (LangOpts.ObjKeywords) {
       declareTObject();
       declareException();
+      declareInterfacedObject();
     }
 
     // The standard files (ISO 7185 6.10).
@@ -317,6 +322,48 @@ class Checker : public StmtVisitor<Checker>,
     ClassType *External = declareExceptionClass("EExternal", ExceptionTy);
     ClassType *IntError = declareExceptionClass("EIntError", External);
     declareExceptionClass("EDivByZero", IntError);
+  }
+
+  /// IUnknown = interface end (COM; also named IInterface: Free Pascal's
+  /// QueryInterface, _AddRef and _Release are not declared, the compiled
+  /// code counts references itself) and
+  ///   TInterfacedObject = class(TObject, IUnknown)
+  ///   protected FRefCount: longint;
+  ///   public property RefCount: longint read FRefCount; end;
+  /// Their iid and VMT are in the runtime.
+  void declareInterfacedObject() {
+    IUnknownTy = Ctx.create<InterfaceType>();
+    IUnknownTy->setDeclName("IUnknown");
+    IUnknownTy->setCOM(true);
+    IUnknownTy->define(nullptr, {}, {}, nullptr);
+    Standard.insert("iunknown", Ctx.create<TypeDecl>(SourceLocation(),
+                                                     memberName("IUnknown"),
+                                                     IUnknownTy));
+    Standard.insert("iinterface", Ctx.create<TypeDecl>(SourceLocation(),
+                                                       memberName("IInterface"),
+                                                       IUnknownTy));
+
+    TInterfacedObjectTy = Ctx.create<ClassType>();
+    TInterfacedObjectTy->setDeclName("TInterfacedObject");
+    auto *Count = Ctx.create<FieldDecl>(memberName("FRefCount"), nullptr);
+    Count->setType(Ctx.getIntegerType());
+    Count->setVisibility(Visibility::Protected);
+    auto *RefCount = Ctx.create<PropertyDecl>(memberName("RefCount"), nullptr,
+                                              memberName("FRefCount"),
+                                              Identifier());
+    RefCount->setType(Ctx.getIntegerType());
+    RefCount->setAccessors(Count, nullptr);
+    Decl *Members[] = {Count, RefCount};
+    FieldDecl *Fields[] = {Count};
+    TInterfacedObjectTy->define(TObjectTy, Ctx.copyArray<Decl *>(Members),
+                                Ctx.copyArray<FieldDecl *>(Fields),
+                                TObjectTy->getVTable(), nullptr);
+    InterfaceImpl Impls[] = {{IUnknownTy, {}}};
+    TInterfacedObjectTy->setInterfaces(Ctx.copyArray<InterfaceImpl>(Impls));
+    Standard.insert("tinterfacedobject",
+                    Ctx.create<TypeDecl>(SourceLocation(),
+                                         memberName("TInterfacedObject"),
+                                         TInterfacedObjectTy));
   }
 
   /// A predeclared `Name = class(Parent);` (its VMT is in the runtime).
@@ -460,7 +507,18 @@ class Checker : public StmtVisitor<Checker>,
       return Cached;
     Type *T = visitExpr(E);
     E->setType(T);
+    if (isManaged(T))
+      markUsesManaged();
     return T;
+  }
+
+  /// The current routine computes a managed value (see usesManaged).
+  void markUsesManaged() {
+    if (!CurRoutine)
+      return;
+    CurRoutine->setUsesManaged();
+    if (RoutineDecl *C = CurRoutine->getCanonical())
+      C->setUsesManaged();
   }
 
   //===--------------------------------------------------------------------===//
@@ -1049,6 +1107,12 @@ class Checker : public StmtVisitor<Checker>,
                     {FS->getElement()->getRange()});
         return errorType();
       }
+      if (isManaged(Elem)) {
+        Diags.error(FS->getElement()->getBeginLoc(),
+                    "the components of a file cannot be COM interfaces",
+                    {FS->getElement()->getRange()});
+        return errorType();
+      }
       return Ctx.create<FileType>(Elem, false);
     }
 
@@ -1078,6 +1142,12 @@ class Checker : public StmtVisitor<Checker>,
     case TypeSpec::TS_Class:
       Diags.error(TS->getBeginLoc(),
                   "a class type must be declared in a 'type' section",
+                  {TS->getRange()});
+      return errorType();
+
+    case TypeSpec::TS_Interface:
+      Diags.error(TS->getBeginLoc(),
+                  "an interface type must be declared in a 'type' section",
                   {TS->getRange()});
       return errorType();
 
@@ -1162,7 +1232,16 @@ class Checker : public StmtVisitor<Checker>,
     for (Variant *V : VP->Variants) {
       for (CaseLabel *L : V->Labels)
         OK &= checkLabel(L, TagTy, "variant label");
+      size_t First = All.size();
       OK &= resolveFieldList(V->Fields, All, Seen);
+      // The variants overlap, so their fields cannot be reference counted.
+      for (size_t I = First; I < All.size(); ++I)
+        if (All[I]->getType() && isManaged(All[I]->getType())) {
+          Diags.error(All[I]->getLocation(),
+                      "a variant part cannot contain COM interfaces",
+                      {All[I]->getName().getRange()});
+          OK = false;
+        }
     }
     return OK;
   }
@@ -1285,6 +1364,7 @@ class Checker : public StmtVisitor<Checker>,
         }
     auto *I = Ctx.create<InterfaceType>();
     I->setDeclName(Id.Spelling);
+    I->setCOM(!IS->isCorba());
     TD->setType(I);
     IS->setResolved(I);
     declare(TD);
@@ -1337,6 +1417,7 @@ class Checker : public StmtVisitor<Checker>,
 
   void defineInterface(InterfaceType *I, InterfaceTypeSpec *IS) {
     InterfaceType *Parent = nullptr;
+    I->setCOM(!IS->isCorba());
     if (IS->getParent().isValid()) {
       const Identifier &PId = IS->getParent();
       if (PId.Name == I->getDeclName().lower())
@@ -1345,7 +1426,19 @@ class Checker : public StmtVisitor<Checker>,
                     {PId.getRange()});
       else
         Parent = lookupInterface(PId);
+      if (Parent && Parent->isCOM() != I->isCOM()) {
+        Diags.error(PId.Loc,
+                    llvm::Twine("a ") + (I->isCOM() ? "COM" : "CORBA") +
+                        " interface cannot inherit from the " +
+                        (Parent->isCOM() ? "COM" : "CORBA") + " interface '" +
+                        Parent->getName() + "'",
+                    {PId.getRange()});
+        Parent = nullptr;
+      }
     }
+    // A COM interface without a parent descends from IUnknown.
+    if (!Parent && I->isCOM())
+      Parent = IUnknownTy;
     llvm::SmallVector<RoutineDecl *, 8> Own, All;
     if (Parent)
       All.append(Parent->getAllMethods().begin(), Parent->getAllMethods().end());
@@ -1496,6 +1589,17 @@ class Checker : public StmtVisitor<Checker>,
     }
     for (const Identifier &Id : CS->getInterfaces())
       AddInterface(Id);
+    // The objects of COM interfaces are reference counted by
+    // TInterfacedObject.
+    for (auto &[I, Where] : Listed)
+      if (I->isCOM() && !Parent->inheritsFrom(TInterfacedObjectTy)) {
+        Diags.error(Where->Loc,
+                    "class '" + C->getName() + "' implements the COM interface '" +
+                        I->getName() +
+                        "', so it must descend from TInterfacedObject",
+                    {Where->getRange()});
+        break;
+      }
 
     llvm::SmallVector<Decl *, 16> Members;
     llvm::SmallVector<FieldDecl *, 16> Fields(Parent->getAllFields().begin(),
@@ -2147,6 +2251,13 @@ class Checker : public StmtVisitor<Checker>,
         Diags.error(R->getResultTypeSpec()->getBeginLoc(),
                     "function result type must be a simple or pointer type, not " +
                         quoted(ResultTy),
+                    {R->getResultTypeSpec()->getRange()});
+        ResultTy = errorType();
+      } else if (!ResultTy->isError() && !ResultTy->isInterface() &&
+                 isManaged(ResultTy)) {
+        Diags.error(R->getResultTypeSpec()->getBeginLoc(),
+                    "a function cannot return a record containing COM "
+                    "interfaces",
                     {R->getResultTypeSpec()->getRange()});
         ResultTy = errorType();
       }
@@ -2869,6 +2980,15 @@ class Checker : public StmtVisitor<Checker>,
                      const Identifier &Callee, llvm::ArrayRef<Expr *> Args,
                      SourceRange CallRange) {
     Decl *R = CalleeDecl;
+    // A call whose result is discarded still holds it for a while.
+    if (auto *RD = llvm::dyn_cast_or_null<RoutineDecl>(CalleeDecl);
+        RD && RD->isFunction() && RD->getResultType() &&
+        isManaged(RD->getResultType()))
+      markUsesManaged();
+    if (auto *V = llvm::dyn_cast_or_null<VarDecl>(CalleeDecl))
+      if (auto *RT = llvm::dyn_cast_or_null<RoutineType>(V->getType());
+          RT && RT->getResult() && isManaged(RT->getResult()))
+        markUsesManaged();
     if (Args.size() != Params.size()) {
       Diags.error(Callee.Loc,
                   llvm::Twine(Args.size() < Params.size() ? "too few"
@@ -4365,9 +4485,12 @@ public:
     return errorType();
   }
 
-  /// obj is TFoo / obj as TFoo (objfpc)
+  /// obj is TFoo / obj as TFoo (objfpc); the left operand may also be a
+  /// COM interface (its object).
   Type *checkIsAs(BinaryExpr *E) {
     Type *L = check(E->getLHS());
+    auto *LI = llvm::dyn_cast<InterfaceType>(L);
+    bool COMObject = LI && LI->isCOM();
     const char *Op = getOpSpelling(E->getOp());
     ClassType *C = nullptr;
     Expr *RHS = E->getRHS();
@@ -4385,11 +4508,12 @@ public:
       if (auto *I = llvm::dyn_cast<InterfaceType>(T)) {
         if (L->isError())
           return errorType();
-        if (!L->isClass()) {
+        if (!L->isClass() && !COMObject) {
           Diags.error(E->getOpLoc(),
                       llvm::Twine("invalid operands to '") + Op + "' (" +
                           quoted(L) + " and " + quoted(I) +
-                          "): the left operand must be an object",
+                          "): the left operand must be an object or a COM "
+                          "interface",
                       {E->getLHS()->getRange(), RHS->getRange()});
           return errorType();
         }
@@ -4407,6 +4531,8 @@ public:
     }
     if (L->isError())
       return errorType();
+    if (COMObject) // its object's class is not known
+      return E->getOp() == BinaryOp::Is ? Ctx.getBooleanType() : C;
     auto *LC = llvm::dyn_cast<ClassType>(L);
     if (!LC) {
       Diags.error(E->getOpLoc(),

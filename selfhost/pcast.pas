@@ -94,11 +94,13 @@ type
                 classDefined: boolean; classInterfaces: TPtrList);
       { class of C (objfpc): a reference to C or a descendant (its VMT) }
       tyClassRef: (refClass: PType);
-      { interface (objfpc, CORBA style): its parent, own methods (source
-        order) and all methods by slot (the parent's first); a value is
-        (object, method table) }
+      { interface (objfpc): its parent, own methods (source order) and all
+        methods by slot (the parent's first); a value is (object, method
+        table). COM interfaces (IUnknown and its descendants) are
+        reference counted, CORBA ones are not. }
       tyInterface: (intfParent: PType; intfMethods, intfAllMethods: TPtrList;
-                    intfModule: pointer; intfDefined: boolean);
+                    intfModule: pointer; intfDefined: boolean;
+                    intfCOM: boolean);
   end;
 
   TNode = record
@@ -238,9 +240,10 @@ type
       tsClass: (parentName: TIdent; memberList: TPtrList; isForwardClass: boolean;
                 interfaceNames: TPtrList);
       { interface (objfpc): the parent's name, method headings, forward,
-        the GUID string (no effect; nil: none) }
+        the GUID string (no effect; nil: none), declared under
+        $interfaces corba (else COM) }
       tsInterface: (intfParentName: TIdent; intfMemberList: TPtrList;
-                    isForwardIntf: boolean; guid: PName);
+                    isForwardIntf: boolean; guid: PName; isCorba: boolean);
   end;
 
   TFieldList = record
@@ -330,7 +333,11 @@ type
                   { a method heading of an interface (its slot: vmtIndex) }
                   routineIntf: PType;
                   ownerClass: PType; selfVar, implDecl: PDecl;
-                  vmtIndex: longint; objMethod: TObjMethod);
+                  vmtIndex: longint; objMethod: TObjMethod;
+                  { the body computes values of managed types (COM
+                    interfaces): code generation releases the references
+                    it holds when an exception leaves the routine (Sema) }
+                  usesManaged: boolean);
       dkBuiltin: (builtin: TBuiltinKind; isProcedure: boolean);
       { labels (Sema): the statement labeled, the statement sequence that
         directly contains it, whether that is the block's outermost one,

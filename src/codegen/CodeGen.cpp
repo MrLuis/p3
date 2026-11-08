@@ -217,6 +217,17 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
   /// `on E: TFoo do`: the variable E's storage.
   llvm::DenseMap<VarDecl *, llvm::Value *> HandlerVars;
 
+  /// Reference counting (COM interfaces). A function's COM interface result
+  /// is held in a temporary until the statement ends (LiveTemps: the
+  /// current statements', innermost last). A routine releases the
+  /// references in its value parameters, local variables and temporaries
+  /// (RoutineTemps) when it ends, also when an exception leaves it.
+  llvm::SmallVector<llvm::Value *, 4> LiveTemps;
+  llvm::SmallVector<llvm::Value *, 4> RoutineTemps;
+  /// Classes whose cleanup functions (releasing their own fields' COM
+  /// interfaces) are to be emitted.
+  std::vector<std::pair<ClassType *, llvm::Function *>> CleanupsToEmit;
+
   // Debug information (-g).
   std::unique_ptr<llvm::DIBuilder> DIB;
   llvm::DICompileUnit *CU = nullptr;
@@ -930,12 +941,13 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
 
   /// Calls Fn(elementAddress) for every element of array A at Addr.
   void forEachElement(llvm::Value *Addr, ArrayType *A,
-                      llvm::function_ref<void(llvm::Value *)> Fn) {
+                      llvm::function_ref<void(llvm::Value *)> Fn,
+                      llvm::StringRef What = "files") {
     OrdinalBounds Bd = getOrdinalBounds(A->getIndexType());
     uint64_t Count = static_cast<uint64_t>(Bd.Hi - Bd.Lo + 1);
     llvm::BasicBlock *Pre = B.GetInsertBlock();
-    auto *Loop = newBlock("files.loop");
-    auto *Done = newBlock("files.done");
+    auto *Loop = newBlock(What + ".loop");
+    auto *Done = newBlock(What + ".done");
     B.CreateBr(Loop);
     B.SetInsertPoint(Loop);
     llvm::PHINode *I = B.CreatePHI(B.getInt64Ty(), 2, "i");
@@ -1536,11 +1548,23 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
   /// The interface table of class C (null without interfaces): its
   /// interfaces' iids and method tables.
   llvm::Constant *interfaceTable(ClassType *C) {
-    if (C->getInterfaces().empty())
+    bool Cleanup = hasManagedFields(C);
+    if (C->getInterfaces().empty() && !Cleanup)
       return llvm::ConstantPointerNull::get(B.getPtrTy());
     std::string Name = C->getDeclName().lower();
-    llvm::SmallVector<llvm::Constant *, 8> Entries{llvm::ConstantExpr::getIntToPtr(
-        B.getInt64(C->getInterfaces().size()), B.getPtrTy())};
+    llvm::Constant *CleanupFn = llvm::ConstantPointerNull::get(B.getPtrTy());
+    if (Cleanup) {
+      auto *F = llvm::Function::Create(
+          llvm::FunctionType::get(B.getVoidTy(), {B.getPtrTy()}, false),
+          llvm::Function::InternalLinkage, "cleanup." + Name, M);
+      F->getArg(0)->setName("self");
+      CleanupsToEmit.push_back({C, F});
+      CleanupFn = F;
+    }
+    llvm::SmallVector<llvm::Constant *, 8> Entries{
+        llvm::ConstantExpr::getIntToPtr(B.getInt64(C->getInterfaces().size()),
+                                        B.getPtrTy()),
+        CleanupFn};
     for (const InterfaceImpl &I : C->getInterfaces()) {
       llvm::SmallVector<llvm::Constant *, 8> Methods;
       for (RoutineDecl *R : I.Methods)
@@ -1555,7 +1579,7 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
           M, Ty, /*isConstant=*/true, llvm::GlobalValue::InternalLinkage,
           llvm::ConstantArray::get(Ty, Methods),
           "itable." + Name + "." + I.Intf->getDeclName().lower());
-      Entries.push_back(IIDs[I.Intf]);
+      Entries.push_back(iidOf(I.Intf));
       Entries.push_back(T);
     }
     auto *Ty = llvm::ArrayType::get(B.getPtrTy(), Entries.size());
@@ -1733,6 +1757,9 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
     if (R->isMethod())
       B.CreateStore(F->getArg(ArgNo++),
                     B.CreateStructGEP(FrameTy, CurFrame, FrameSlots[R->getSelfVar()]));
+    // The variables holding COM interfaces: value parameters (one more
+    // reference each), then local variables (nil at first).
+    llvm::SmallVector<std::pair<llvm::Value *, Type *>, 4> Managed;
     for (VarDecl *P : R->getParams()) {
       llvm::Value *Arg = F->getArg(ArgNo++);
       llvm::Value *Slot = B.CreateStructGEP(FrameTy, CurFrame, FrameSlots[P]);
@@ -1742,19 +1769,58 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
         copyAggregate(Slot, Arg, P->getType()); // value semantics
       else
         storeScalar(Slot, Arg, P->getType());
+      if (!isByRef(P) && !P->isConstParam() && isManaged(P->getType())) {
+        addRefValue(Slot, P->getType());
+        Managed.push_back({Slot, P->getType()});
+      }
     }
+    for (Decl *D : R->getBody()->getDecls())
+      if (auto *V = llvm::dyn_cast<VarDecl>(D);
+          V && !V->isTypedConst() && isManaged(V->getType()))
+        Managed.push_back({varAddress(V), V->getType()});
+    VarDecl *ResultVar = R->isFunction() ? R->getResultVar() : nullptr;
+    bool ManagedResult = ResultVar && isManaged(ResultVar->getType());
 
     initFileVars(R->getBody()->getDecls(), nullptr);
     if (JmpBufSlots.count(R))
       emitSetJmpDispatch(*R->getBody(),
                          B.CreateStructGEP(FrameTy, CurFrame, JmpBufSlots[R]));
+    // An exception leaving the routine releases them too (and the result).
+    llvm::Value *ExcFrame = nullptr;
+    llvm::BasicBlock *Raised = nullptr;
+    if (!Managed.empty() || ManagedResult || R->usesManaged()) {
+      Raised = newBlock("managed.raise");
+      ExcFrame = emitProtect(Raised, "managed.body");
+    }
+    RoutineTemps.clear();
     ExitBlock = newBlock("exit");
     visitStmt(R->getBody()->getBody());
     B.CreateBr(ExitBlock);
     B.SetInsertPoint(ExitBlock);
+    auto Finalize = [&] {
+      for (auto &[Addr, T] : Managed)
+        finalizeValue(Addr, T);
+      for (llvm::Value *Slot : RoutineTemps)
+        B.CreateCall(intfRuntime("__pas_intf_clear"), {Slot});
+    };
+    if (ExcFrame)
+      B.CreateCall(excRuntime("__pas_exc_pop"), {ExcFrame});
+    Finalize();
     for (Decl *D : R->getBody()->getDecls())
       if (auto *V = llvm::dyn_cast<VarDecl>(D))
         emitFileLifetime(varAddress(V), V->getType(), /*Init=*/false);
+
+    if (Raised) {
+      llvm::BasicBlock *Ret = B.GetInsertBlock();
+      B.SetInsertPoint(Raised);
+      Finalize();
+      if (ManagedResult)
+        finalizeValue(varAddress(ResultVar), ResultVar->getType());
+      B.CreateCall(excRuntime("__pas_reraise"), {ExcFrame});
+      B.CreateUnreachable();
+      B.SetInsertPoint(Ret);
+    }
+    RoutineTemps.clear();
 
     if (R->isFunction()) {
       VarDecl *Result = R->getResultVar();
@@ -1791,7 +1857,8 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
   llvm::Value *emitCallTo(llvm::FunctionCallee Callee, llvm::Value *Link,
                           llvm::ArrayRef<VarDecl *> Params,
                           llvm::ArrayRef<Expr *> Args,
-                          llvm::Value *Self = nullptr) {
+                          llvm::Value *Self = nullptr,
+                          Type *ResultTy = nullptr) {
     llvm::SmallVector<llvm::Value *, 8> Values;
     if (Link) // external (C) routines have none
       Values.push_back(Link);
@@ -1808,7 +1875,13 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
       B.CreateStore(Result, Tmp);
       return Tmp;
     }
+    if (ResultTy && isManaged(ResultTy))
+      return holdResult(Result);
     return Result;
+  }
+
+  static Type *resultOf(RoutineDecl *R) {
+    return R->isFunction() ? R->getResultType() : nullptr;
   }
 
   /// Appends the values passed for Args (parameters Params) to Values.
@@ -1860,7 +1933,8 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
   llvm::Value *emitCall(RoutineDecl *R, llvm::ArrayRef<Expr *> Args) {
     if (R->isExternal())
       return emitCallTo(ExternalFns[R], nullptr, R->getParams(), Args);
-    return emitCallTo(Functions[R], staticLinkFor(R), R->getParams(), Args);
+    return emitCallTo(Functions[R], staticLinkFor(R), R->getParams(), Args,
+                      nullptr, resultOf(R));
   }
 
   /// Call through a procedural / functional parameter or variable.
@@ -1883,7 +1957,7 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
                        NilCheckLoc);
     llvm::FunctionType *FTy = routineFnType(RT->getParams(), RT->getResult());
     return emitCallTo({FTy, Fn}, B.CreateExtractValue(Pair, 1), RT->getParams(),
-                      Args);
+                      Args, nullptr, RT->getResult());
   }
 
   /// A procedural value of type T (Turbo/FPC): @routine, nil, or a
@@ -1907,6 +1981,164 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
 
   /// The object a with context stands for (Self for a method body), or the
   /// address of a with statement's record.
+  //===--------------------------------------------------------------------===//
+  // Reference counting (COM interfaces, objfpc)
+  //===--------------------------------------------------------------------===//
+
+  /// The runtime's reference counting entry points (runtime/io.c).
+  llvm::FunctionCallee intfRuntime(llvm::StringRef Name) {
+    llvm::Type *Ptr = B.getPtrTy();
+    if (Name == "__pas_intf_assign")
+      return classRuntime(Name, B.getVoidTy(), {Ptr, Ptr, Ptr});
+    // __pas_intf_addref(obj), __pas_intf_clear(addr), __pas_free_instance,
+    // __pas_interfaced_construct(ed)(obj)
+    return classRuntime(Name, B.getVoidTy(), {Ptr});
+  }
+
+  /// Releases the COM interfaces in the object of managed type T at Addr
+  /// and sets them to nil.
+  void finalizeValue(llvm::Value *Addr, Type *T) {
+    if (T->isInterface()) {
+      B.CreateCall(intfRuntime("__pas_intf_clear"), {Addr});
+      return;
+    }
+    if (auto *A = llvm::dyn_cast<ArrayType>(T)) {
+      forEachElement(
+          Addr, A,
+          [&](llvm::Value *Elem) { finalizeValue(Elem, A->getElementType()); },
+          "fini");
+      return;
+    }
+    auto *R = llvm::cast<RecordType>(T);
+    for (FieldDecl *F : R->getAllFields())
+      if (isManaged(F->getType()))
+        finalizeValue(fieldAddress(Addr, R, F), F->getType());
+  }
+
+  /// One more reference to each COM interface in the object of managed type
+  /// T at Addr (a copy was made).
+  void addRefValue(llvm::Value *Addr, Type *T) {
+    if (T->isInterface()) {
+      llvm::Value *Obj = B.CreateLoad(B.getPtrTy(), Addr, "obj");
+      B.CreateCall(intfRuntime("__pas_intf_addref"), {Obj});
+      return;
+    }
+    if (auto *A = llvm::dyn_cast<ArrayType>(T)) {
+      forEachElement(
+          Addr, A,
+          [&](llvm::Value *Elem) { addRefValue(Elem, A->getElementType()); },
+          "addref");
+      return;
+    }
+    auto *R = llvm::cast<RecordType>(T);
+    for (FieldDecl *F : R->getAllFields())
+      if (isManaged(F->getType()))
+        addRefValue(fieldAddress(Addr, R, F), F->getType());
+  }
+
+  /// *Dst := *Src for a record or array T with COM interfaces.
+  void copyManaged(llvm::Value *Dst, llvm::Value *Src, Type *T) {
+    addRefValue(Src, T);
+    finalizeValue(Dst, T);
+    copyAggregate(Dst, Src, T);
+  }
+
+  /// Addr^ := V for a COM interface.
+  void storeInterface(llvm::Value *Addr, llvm::Value *V) {
+    llvm::Value *Obj = B.CreateExtractValue(V, 0, "obj");
+    llvm::Value *Table = B.CreateExtractValue(V, 1, "itable");
+    B.CreateCall(intfRuntime("__pas_intf_assign"), {Addr, Obj, Table});
+  }
+
+  /// Stores V (scalar, of type T) at Addr: counted for COM interfaces.
+  void storeValue(llvm::Value *Addr, llvm::Value *V, Type *T) {
+    if (isManaged(T))
+      storeInterface(Addr, V);
+    else
+      storeScalar(Addr, V, T);
+  }
+
+  /// Copies the record or array T at Src to Dst: counted if managed.
+  void copyValue(llvm::Value *Dst, llvm::Value *Src, Type *T) {
+    if (isManaged(T))
+      copyManaged(Dst, Src, T);
+    else
+      copyAggregate(Dst, Src, T);
+  }
+
+  /// A function's result V, a COM interface (a reference the caller now
+  /// holds): kept in a temporary until the statement ends.
+  llvm::Value *holdResult(llvm::Value *V) {
+    llvm::IRBuilder<> Entry(&CurFn->getEntryBlock(),
+                            CurFn->getEntryBlock().begin());
+    llvm::Value *Slot = Entry.CreateAlloca(V->getType(), nullptr, "intf.tmp");
+    Entry.CreateStore(llvm::Constant::getNullValue(V->getType()), Slot);
+    B.CreateCall(intfRuntime("__pas_intf_clear"), {Slot}); // a loop's previous
+    B.CreateStore(V, Slot);
+    LiveTemps.push_back(Slot);
+    if (CurRoutine)
+      RoutineTemps.push_back(Slot);
+    return V;
+  }
+
+  /// Releases the temporaries held since LiveTemps had Mark entries.
+  void releaseTemps(size_t Mark) {
+    for (size_t I = Mark; I < LiveTemps.size(); ++I)
+      B.CreateCall(intfRuntime("__pas_intf_clear"), {LiveTemps[I]});
+    LiveTemps.resize(Mark);
+  }
+
+  /// Is C TInterfacedObject (the predeclared one) or a descendant?
+  static bool isInterfacedClass(const ClassType *C) {
+    for (; C; C = C->getParent())
+      if (!C->getModule() && C->getDeclName() == "TInterfacedObject")
+        return true;
+    return false;
+  }
+
+  /// Does class C have fields of its own holding COM interfaces?
+  static bool hasManagedFields(const ClassType *C) {
+    for (Decl *D : C->getMembers())
+      if (auto *F = llvm::dyn_cast<FieldDecl>(D); F && isManaged(F->getType()))
+        return true;
+    return false;
+  }
+
+  /// The iid of interface I (the predeclared IUnknown's is in the runtime).
+  llvm::Constant *iidOf(InterfaceType *I) {
+    if (llvm::GlobalVariable *G = IIDs.lookup(I))
+      return G;
+    std::string Name = "__pas_" + I->getDeclName().lower() + "_iid";
+    llvm::GlobalVariable *G = M.getNamedGlobal(Name);
+    if (!G)
+      G = new llvm::GlobalVariable(M, B.getInt8Ty(), /*isConstant=*/true,
+                                   llvm::GlobalValue::ExternalLinkage, nullptr,
+                                   Name);
+    IIDs[I] = G;
+    return G;
+  }
+
+  /// The cleanup function of class C: releases its own fields' COM
+  /// interfaces (the runtime calls it for each class of a freed object).
+  void emitCleanup(ClassType *C, llvm::Function *F) {
+    CurFn = F;
+    CurRoutine = nullptr;
+    CurFrame = nullptr;
+    CurSP = nullptr;
+    B.SetCurrentDebugLocation(llvm::DebugLoc());
+    B.SetInsertPoint(llvm::BasicBlock::Create(M.getContext(), "entry", F));
+    for (Decl *D : C->getMembers())
+      if (auto *Fd = llvm::dyn_cast<FieldDecl>(D); Fd && isManaged(Fd->getType()))
+        finalizeValue(fieldAddress(F->getArg(0), C, Fd), Fd->getType());
+    B.CreateRetVoid();
+  }
+
+  void emitCleanups() {
+    for (auto &[C, F] : CleanupsToEmit)
+      emitCleanup(C, F);
+    CleanupsToEmit.clear();
+  }
+
   llvm::Value *withBase(WithContext *W) {
     if (W->IsSelf)
       return visitExpr(W->Record); // load Self
@@ -1917,7 +2149,7 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
   llvm::Value *toInterface(llvm::Value *Obj, InterfaceType *I) {
     llvm::Value *Table = B.CreateCall(
         classRuntime("__pas_intf_lookup", B.getPtrTy(), {B.getPtrTy(), B.getPtrTy()}),
-        {Obj, IIDs[I]}, "itable");
+        {Obj, iidOf(I)}, "itable");
     return makeInterface(Obj, Table);
   }
 
@@ -1990,7 +2222,7 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
     llvm::FunctionType *FTy =
         llvm::FunctionType::get(B.getVoidTy(), {B.getPtrTy(), B.getPtrTy()}, false);
     B.CreateCall(FTy, Fn, {llvm::ConstantPointerNull::get(B.getPtrTy()), Obj});
-    B.CreateCall(RT.Dispose, {Obj});
+    B.CreateCall(intfRuntime("__pas_free_instance"), {Obj});
     B.CreateBr(EndBB);
     B.SetInsertPoint(EndBB);
   }
@@ -2057,7 +2289,7 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
         Fn = {routineFnType(R), loadVMTSlot(Self, 4 + R->getVMTIndex(), "method")};
       }
       Result = emitCallTo(Fn, llvm::ConstantPointerNull::get(B.getPtrTy()),
-                          R->getParams(), Args, Self);
+                          R->getParams(), Args, Self, resultOf(R));
       return R->isFunction() ? Result : nullptr;
     }
     if (!Inherited && R->isDispatched()) {
@@ -2065,13 +2297,13 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
       llvm::Value *Fn = loadVirtual(Obj, static_cast<unsigned>(R->getVMTIndex()));
       Result = emitCallTo({routineFnType(R), Fn},
                           llvm::ConstantPointerNull::get(B.getPtrTy()),
-                          R->getParams(), Args, Obj);
+                          R->getParams(), Args, Obj, resultOf(R));
     } else {
       Result = emitCallTo(Functions[R], llvm::ConstantPointerNull::get(B.getPtrTy()),
-                          R->getParams(), Args, Obj);
+                          R->getParams(), Args, Obj, resultOf(R));
     }
     if (R->isDestructor() && !Inherited)
-      B.CreateCall(RT.Dispose, {Obj});
+      B.CreateCall(intfRuntime("__pas_free_instance"), {Obj});
     return R->isFunction() ? Result : nullptr;
   }
 
@@ -2096,10 +2328,15 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
         B.CreateCall(RT.New, {B.getInt64(instanceSize(C))}, "obj");
     B.CreateStore(vmtOf(C), Obj);
     Values[1] = Obj;
+    bool Counted = isInterfacedClass(Ctor->getClass());
+    if (Counted)
+      B.CreateCall(intfRuntime("__pas_interfaced_construct"), {Obj});
     auto *Failed = newBlock("ctor.raise");
     llvm::Value *F = emitProtect(Failed, "ctor.call");
     B.CreateCall(Functions[Ctor], Values);
     B.CreateCall(excRuntime("__pas_exc_pop"), {F});
+    if (Counted)
+      B.CreateCall(intfRuntime("__pas_interfaced_constructed"), {Obj});
     auto *Done = newBlock("ctor.done");
     B.CreateBr(Done);
     B.SetInsertPoint(Failed);
@@ -2134,6 +2371,9 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
     emitArgValues(Ctor->getParams(), Args, Values);
     llvm::Value *Obj = Allocate();
     Values[1] = Obj;
+    bool Counted = isInterfacedClass(Ctor->getClass());
+    if (Counted)
+      B.CreateCall(intfRuntime("__pas_interfaced_construct"), {Obj});
     auto *Failed = newBlock("ctor.raise");
     llvm::Value *F = emitProtect(Failed, "ctor.call");
     if (Ctor->isDispatched())
@@ -2142,6 +2382,8 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
     else
       B.CreateCall(Functions[Ctor], Values);
     B.CreateCall(excRuntime("__pas_exc_pop"), {F});
+    if (Counted)
+      B.CreateCall(intfRuntime("__pas_interfaced_constructed"), {Obj});
     auto *Done = newBlock("ctor.done");
     B.CreateBr(Done);
     B.SetInsertPoint(Failed);
@@ -2167,7 +2409,7 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
       llvm::Value *Result =
           emitCallTo({routineFnType(R), Fn},
                      llvm::ConstantPointerNull::get(B.getPtrTy()),
-                     R->getParams(), Args, Obj);
+                     R->getParams(), Args, Obj, resultOf(R));
       return R->isFunction() ? Result : nullptr;
     }
     if (auto *N = llvm::dyn_cast<NameRefExpr>(F->getBase());
@@ -2848,6 +3090,7 @@ public:
     defineVMTs();
     for (RoutineDecl *R : RoutinesToEmit)
       emitRoutineBody(R);
+    emitCleanups();
 
     CurFn = Main;
     CurRoutine = nullptr;
@@ -2919,6 +3162,7 @@ public:
     defineVMTs();
     for (RoutineDecl *R : RoutinesToEmit)
       emitRoutineBody(R);
+    emitCleanups();
 
     CurFn = Init;
     CurRoutine = nullptr;
@@ -2943,7 +3187,9 @@ public:
   /// Statements carry their source position into the debug info.
   void visitStmt(Stmt *S) {
     setDebugLoc(S->getBeginLoc());
+    size_t Mark = LiveTemps.size();
     StmtVisitor<CodeGenModule>::visitStmt(S);
+    releaseTemps(Mark); // the results held by its expressions
   }
 
   //===--------------------------------------------------------------------===//
@@ -2970,7 +3216,7 @@ public:
     }
     if (TT->isStructured()) {
       llvm::Value *Dst = emitAddress(Target);
-      copyAggregate(Dst, emitAddress(Value), TT);
+      copyValue(Dst, emitAddress(Value), TT);
       return;
     }
     if (llvm::isa<RoutineType>(TT)) { // procedural variable (Turbo/FPC)
@@ -2980,7 +3226,7 @@ public:
     }
     llvm::Value *V = convertForAssign(visitExpr(Value), Value->getType(), TT,
                                       Value->getBeginLoc());
-    storeScalar(emitAddress(Target), V, TT);
+    storeValue(emitAddress(Target), V, TT);
   }
 
   static PropertyDecl *assignedProperty(Expr *Target) {
@@ -3024,17 +3270,17 @@ public:
       return;
     }
     if (T->isStructured()) {
-      copyAggregate(Addr, emitAddress(Value), T);
+      copyValue(Addr, emitAddress(Value), T);
       return;
     }
     if (llvm::isa<RoutineType>(T)) {
       B.CreateStore(emitRoutinePair(Value, T), Addr);
       return;
     }
-    storeScalar(Addr,
-                convertForAssign(visitExpr(Value), Value->getType(), T,
-                                 Value->getBeginLoc()),
-                T);
+    storeValue(Addr,
+               convertForAssign(visitExpr(Value), Value->getType(), T,
+                                Value->getBeginLoc()),
+               T);
   }
 
   void visitProcCallStmt(ProcCallStmt *S) {
@@ -3094,10 +3340,10 @@ public:
         else if (RT->isStructured())
           copyAggregate(Addr, emitAddress(Value), RT);
         else
-          storeScalar(Addr,
-                      convertForAssign(visitExpr(Value), Value->getType(), RT,
-                                       Value->getBeginLoc()),
-                      RT);
+          storeValue(Addr,
+                     convertForAssign(visitExpr(Value), Value->getType(), RT,
+                                      Value->getBeginLoc()),
+                     RT);
       }
       if (BD->getBuiltinKind() == BuiltinKind::Exit)
         emitJump(ExitBlock, 0);
@@ -3218,6 +3464,12 @@ public:
           emitRuntimeCheck(B.CreateIsNull(P), "'dispose' of a nil pointer",
                            Arg->getBeginLoc());
         emitFileLifetime(P, Pointee, /*Init=*/false);
+      }
+      if (isManaged(Pointee)) {
+        if (rangeChecks(Arg->getBeginLoc()))
+          emitRuntimeCheck(B.CreateIsNull(P), "'dispose' of a nil pointer",
+                           Arg->getBeginLoc());
+        finalizeValue(P, Pointee);
       }
       B.CreateCall(RT.Dispose, {P});
       return;
@@ -3744,12 +3996,14 @@ public:
   /// obj is TFoo / obj as TFoo: the runtime walks obj's VMT chain.
   llvm::Value *emitIsAs(BinaryExpr *E) {
     llvm::Value *Obj = visitExpr(E->getLHS());
+    if (E->getLHS()->getType()->isInterface()) // a COM interface's object
+      Obj = B.CreateExtractValue(Obj, 0, "obj");
     if (auto *I = llvm::dyn_cast<InterfaceType>(E->getRHS()->getType())) {
       if (E->getOp() == BinaryOp::Is) {
         llvm::Value *T = B.CreateCall(
             classRuntime("__pas_intf_lookup", B.getPtrTy(),
                          {B.getPtrTy(), B.getPtrTy()}),
-            {Obj, IIDs[I]});
+            {Obj, iidOf(I)});
         return B.CreateIsNotNull(T, "is");
       }
       llvm::Constant *Msg = B.CreateGlobalString(
@@ -3757,7 +4011,7 @@ public:
       llvm::Value *T = B.CreateCall(
           classRuntime("__pas_intf_as", B.getPtrTy(),
                        {B.getPtrTy(), B.getPtrTy(), B.getPtrTy()}),
-          {Obj, IIDs[I], Msg}, "itable");
+          {Obj, iidOf(I), Msg}, "itable");
       return makeInterface(Obj, T);
     }
     llvm::Constant *VMT = vmtOf(llvm::cast<ClassType>(E->getRHS()->getType()));

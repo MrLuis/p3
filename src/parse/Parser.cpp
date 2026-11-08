@@ -980,13 +980,15 @@ TypeSpec *Parser::parseClassType(SourceLocation Start) {
 
 // interfaceType = "interface" ";"                          (forward)
 //               | "interface" [ "(" ident ")" ] [ "[" string "]" ]
-//                 { methodHeading } "end" .               (objfpc, CORBA)
+//                 { methodHeading } "end" .               (objfpc)
+// COM or CORBA as set by the last {$interfaces ...} before it.
 TypeSpec *Parser::parseInterfaceType(SourceLocation Start) {
+  bool Corba = Lex.corbaInterfaces();
   SourceLocation IntfLoc = consumeToken(); // 'interface'
   if (Tok.is(tok::semi)) // IFoo = interface;
     return Ctx.create<InterfaceTypeSpec>(SourceRange(Start, PrevTokEnd),
                                          Identifier(), llvm::ArrayRef<Decl *>(),
-                                         /*Forward=*/true, "");
+                                         /*Forward=*/true, Corba, "");
   Identifier Parent;
   if (Tok.is(tok::l_paren)) {
     SourceLocation LParen = consumeToken();
@@ -1035,7 +1037,7 @@ TypeSpec *Parser::parseInterfaceType(SourceLocation Start) {
   }
   return Ctx.create<InterfaceTypeSpec>(SourceRange(Start, PrevTokEnd), Parent,
                                        Ctx.copyArray<Decl *>(Members), false,
-                                       GUID);
+                                       Corba, GUID);
 }
 
 // params = "(" section { ";" section } ")" ;

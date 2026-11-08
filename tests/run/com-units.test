@@ -1,0 +1,22 @@
+; COM interfaces in units (--mode=objfpc): a unit's TInterfacedObject
+; descendant with a field holding an interface, its interface variable,
+; and a program class extending it; compiled whole and separately. A class
+; with interface fields has a cleanup function in its interface table.
+; RUN: rm -rf %t && mkdir -p %t && cp -r %S/Inputs/com/. %t/
+; RUN: %pcc --mode=objfpc -I %t/lib %t/main.pas -o %t/whole
+; RUN: %t/whole | FileCheck %s
+; RUN: %pcc --mode=objfpc -c %t/lib/counters.pas -o %t/lib/counters.o
+; RUN: %pcc --mode=objfpc -I %t/lib -fseparate-units %t/main.pas -o %t/separate
+; RUN: %t/separate | FileCheck %s
+; CHECK:      + a
+; CHECK-NEXT: + double
+; CHECK-NEXT: 1 2 2 4 a
+; CHECK-NEXT: a still held by double
+; CHECK-NEXT: - double
+; CHECK-NEXT: - a
+; CHECK-NEXT: done
+;
+; RUN: %pcc --mode=objfpc --emit-llvm %t/lib/counters.pas -o - | FileCheck --check-prefix=UNIT %s
+; UNIT-DAG: @"pas.counters$tcounter$vmt" = constant [6 x ptr] [ptr @__pas_tinterfacedobject_vmt, ptr @.str, ptr inttoptr (i64 {{[0-9]+}} to ptr), ptr @intfs.tcounter, ptr @"pas.counters$tcounter.destroy", ptr @"pas.counters$tcounter.next"]
+; UNIT-DAG: @intfs.tcounter = internal constant [6 x ptr] [ptr inttoptr (i64 2 to ptr), ptr @cleanup.tcounter, ptr @__pas_iunknown_iid, ptr @itable.tcounter.iunknown, ptr @"pas.counters$icounter$iid", ptr @itable.tcounter.icounter]
+; UNIT-DAG: define internal void @cleanup.tcounter(ptr %self)

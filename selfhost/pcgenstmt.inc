@@ -412,7 +412,7 @@ begin
   end;
   if isStructured(t) then
   begin
-    copyAggregate(addr, emitAddress(value), t);
+    copyValue(addr, emitAddress(value), t);
     exit;
   end;
   if t^.kind = tyRoutine then
@@ -422,7 +422,7 @@ begin
     exit;
   end;
   v := convertForAssign(visitExpr(value), value^.typ, t, value^.b);
-  storeScalar(addr, v, t);
+  storeValue(addr, v, t);
 end;
 
 procedure visitAssign(s: PNode);
@@ -450,7 +450,7 @@ begin
   begin
     dst := emitAddress(target);
     src := emitAddress(value);
-    copyAggregate(dst, src, tt);
+    copyValue(dst, src, tt);
     exit;
   end;
   if tt^.kind = tyRoutine then
@@ -461,7 +461,7 @@ begin
     exit;
   end;
   v := convertForAssign(visitExpr(value), value^.typ, tt, value^.b);
-  storeScalar(emitAddress(target), v, tt);
+  storeValue(emitAddress(target), v, tt);
 end;
 
 { exit(value): sets the result first }
@@ -484,7 +484,7 @@ begin
   else
   begin
     v := convertForAssign(visitExpr(value), value^.typ, rt, value^.b);
-    storeScalar(addr, v, rt);
+    storeValue(addr, v, rt);
   end;
 end;
 
@@ -695,6 +695,13 @@ begin
             emitRuntimeCheck(irICmp('eq', p, irNull, ''), '''dispose'' of a nil pointer',
                              arg^.b);
           emitFileLifetime(p, pointee, false, irNull);
+        end;
+        if isManaged(pointee) then
+        begin
+          if rangeChecks(arg^.b) then
+            emitRuntimeCheck(irICmp('eq', p, irNull, ''), '''dispose'' of a nil pointer',
+                             arg^.b);
+          finalizeValue(p, pointee);
         end;
         rtv1('__pas_dispose', p);
       end;
@@ -1119,12 +1126,13 @@ end;
 
 procedure visitStmt(s: PNode);
 var
-  i: longint;
+  i, mark: longint;
   ignored: TV;
   b: PIRBlock;
 begin
   { statements carry their source position into the debug information }
   setDebugLoc(s^.b);
+  mark := liveTemps.count;
   case s^.kind of
     nkEmpty: ;
     nkCompound:
@@ -1156,6 +1164,7 @@ begin
   else
     ;
   end;
+  releaseTemps(mark); { the results held by its expressions }
 end;
 
 { --- Declarations --- }
@@ -1493,17 +1502,32 @@ end;
 function interfaceTable(c: PType): TV;
 var
   name: string;
-  entries, methods: TPtrList;
+  entries, methods, params: TPtrList;
   k, j: longint;
   impl: PInterfaceImpl;
   r: PDecl;
-  t: TV;
+  t, cleanupFn: TV;
+  cleanup: boolean;
+  f: PIRFunc;
 begin
-  if c^.classInterfaces.count = 0 then
+  cleanup := hasManagedFields(c);
+  if (c^.classInterfaces.count = 0) and not cleanup then
     exit(irNull);
   name := lowerStr(nm(c^.declName));
+  cleanupFn := irNull;
+  if cleanup then
+  begin
+    listInit(params);
+    listAdd(params, irPtrT);
+    f := irCreateFunction('cleanup.' + name, 'internal', irVoidT, params);
+    irSetArgName(f, 0, 'self');
+    listAdd(cleanupClasses, c);
+    listAdd(cleanupFns, f);
+    cleanupFn := irFuncRef(f);
+  end;
   listInit(entries);
   listAdd(entries, irBox(irConstIntToPtr(c^.classInterfaces.count)));
+  listAdd(entries, irBox(cleanupFn));
   for k := 0 to c^.classInterfaces.count - 1 do
   begin
     impl := PInterfaceImpl(listGet(c^.classInterfaces, k));
@@ -1716,15 +1740,64 @@ begin
   end;
 end;
 
+{ The cleanup function of class c: releases its own fields' COM
+  interfaces (the runtime calls it for each class of a freed object). }
+procedure emitCleanup(c: PType; f: PIRFunc);
+var
+  k: longint;
+  d: PDecl;
+begin
+  curFn := f;
+  curRoutine := nil;
+  curSP := nil;
+  irBeginBody(f);
+  irSetDebugLoc(nil);
+  irSetInsertPoint(irNewBlock('entry'));
+  for k := 0 to c^.classMembers.count - 1 do
+  begin
+    d := PDecl(listGet(c^.classMembers, k));
+    if (d^.kind = dkField) and isManaged(d^.fieldType) then
+      finalizeValue(fieldAddress(irArg(f, 0), c, d), d^.fieldType);
+  end;
+  irRetVoid;
+end;
+
+procedure emitCleanups;
+var
+  k: longint;
+begin
+  for k := 0 to cleanupClasses.count - 1 do
+    emitCleanup(PType(listGet(cleanupClasses, k)), PIRFunc(listGet(cleanupFns, k)));
+  listClear(cleanupClasses);
+  listClear(cleanupFns);
+end;
+
 procedure emitRoutineBody(r: PDecl);
 var
   frameT: PIRType;
   i, argNo: longint;
   p, v, res: PDecl;
-  arg, slot, ret: TV;
+  arg, slot, ret, excFrame: TV;
   f: PIRFunc;
-  entry: PIRBlock;
+  entry, raised, retB: PIRBlock;
+  managedAddrs, managedTypes: TPtrList; { of PTVBox / PType }
+  managedResult: boolean;
+
+  { releases the value parameters', local variables' and temporaries'
+    references }
+  procedure finalizeAll;
+  var
+    k: longint;
+  begin
+    for k := 0 to managedAddrs.count - 1 do
+      finalizeValue(PTVBox(listGet(managedAddrs, k))^, PType(listGet(managedTypes, k)));
+    for k := 0 to routineTemps.count - 1 do
+      intfCall1('__pas_intf_clear', PTVBox(listGet(routineTemps, k))^);
+  end;
+
 begin
+  listInit(managedAddrs);
+  listInit(managedTypes);
   f := fnOf(r);
   curFn := f;
   curRoutine := r;
@@ -1759,21 +1832,63 @@ begin
       copyAggregate(slot, arg, p^.varType) { value semantics }
     else
       storeScalar(slot, arg, p^.varType);
+    { the variables holding COM interfaces: value parameters (one more
+      reference each), then local variables (nil at first) }
+    if not isByRef(p) and (p^.varKind <> vkConstParam) and isManaged(p^.varType) then
+    begin
+      addRefValue(slot, p^.varType);
+      listAdd(managedAddrs, irBox(slot));
+      listAdd(managedTypes, p^.varType);
+    end;
   end;
+  for i := 0 to r^.body^.decls.count - 1 do
+  begin
+    v := PDecl(listGet(r^.body^.decls, i));
+    if (v^.kind = dkVar) and (v^.init = nil) and isManaged(v^.varType) then
+    begin
+      listAdd(managedAddrs, irBox(varAddress(v)));
+      listAdd(managedTypes, v^.varType);
+    end;
+  end;
+  managedResult := r^.isFunction and (r^.resultVar <> nil) and
+                   isManaged(r^.resultVar^.varType);
 
   initFileVars(r^.body^.decls, false);
   if r^.cgJmpSlot >= 0 then
     emitSetJmpDispatch(r^.body, irStructGEP(frameT, curFrame, r^.cgJmpSlot, ''));
+  { an exception leaving the routine releases them too (and the result) }
+  raised := nil;
+  if (managedAddrs.count > 0) or managedResult or r^.usesManaged then
+  begin
+    raised := irNewBlock('managed.raise');
+    excFrame := emitProtect(raised, 'managed.body');
+  end;
+  listClear(routineTemps);
   exitBlock := irNewBlock('exit');
   visitStmt(r^.body^.body);
   irBr(exitBlock);
   irSetInsertPoint(exitBlock);
+  if raised <> nil then
+    excCall1('__pas_exc_pop', excFrame);
+  finalizeAll;
   for i := 0 to r^.body^.decls.count - 1 do
   begin
     v := PDecl(listGet(r^.body^.decls, i));
     if v^.kind = dkVar then
       emitFileLifetime(varAddress(v), v^.varType, false, irNull);
   end;
+  if raised <> nil then
+  begin
+    retB := irInsertBlock;
+    irSetInsertPoint(raised);
+    finalizeAll;
+    if managedResult then
+      finalizeValue(varAddress(r^.resultVar), r^.resultVar^.varType);
+    excCall1('__pas_reraise', excFrame);
+    irUnreachable;
+    irSetInsertPoint(retB);
+  end;
+  listClear(routineTemps);
   if r^.isFunction then
   begin
     res := r^.resultVar;
@@ -1928,6 +2043,10 @@ begin
   mapInit(vmts);
   mapInit(iids);
   listInit(vmtsToDefine);
+  listInit(liveTemps);
+  listInit(routineTemps);
+  listInit(cleanupClasses);
+  listInit(cleanupFns);
   listInit(routinesToEmit);
   listInit(loopBlocks);
   hasMainJmpBuf := false;
@@ -1995,6 +2114,7 @@ begin
   defineVMTs;
   for i := 0 to routinesToEmit.count - 1 do
     emitRoutineBody(PDecl(listGet(routinesToEmit, i)));
+  emitCleanups;
 
   { the initialization part: files, then the statements }
   curFn := initFn;
@@ -2073,6 +2193,7 @@ begin
   defineVMTs;
   for i := 0 to routinesToEmit.count - 1 do
     emitRoutineBody(PDecl(listGet(routinesToEmit, i)));
+  emitCleanups;
   emitMainBody(prog, units, mainFn);
   if dbgOn then
     finalizeDebugInfo;

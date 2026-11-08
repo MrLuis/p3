@@ -507,6 +507,64 @@ void *const __pas_tobject_vmt[5] = {
     NULL, (void *)"\007TObject", (void *)(uintptr_t)sizeof(void *), NULL,
     (void *)(uintptr_t)__pas_tobject_destroy};
 
+/* TInterfacedObject: TObject, then FRefCount; implements IUnknown. */
+struct PasInterfacedObject {
+  void *const *vmt;
+  int32_t refcount;
+};
+const unsigned char __pas_iunknown_iid[] = "\010IUnknown";
+static void *const iunknown_methods[1] = {NULL};
+static void *const interfaced_intfs[4] = {
+    (void *)(uintptr_t)1, NULL, (void *)__pas_iunknown_iid,
+    (void *)iunknown_methods};
+void *const __pas_tinterfacedobject_vmt[5] = {
+    (void *)__pas_tobject_vmt, (void *)"\021TInterfacedObject",
+    (void *)(uintptr_t)sizeof(struct PasInterfacedObject),
+    (void *)interfaced_intfs, (void *)(uintptr_t)__pas_tobject_destroy};
+
+static int32_t *refcount_of(void *obj) {
+  return &((struct PasInterfacedObject *)obj)->refcount;
+}
+
+void __pas_intf_addref(void *obj) {
+  if (obj)
+    ++*refcount_of(obj);
+}
+
+void __pas_intf_release(void *obj) {
+  if (obj && --*refcount_of(obj) == 0)
+    __pas_free_object(obj);
+}
+
+void __pas_intf_assign(PasIntf *dst, void *obj, void *methods) {
+  __pas_intf_addref(obj);
+  void *old = dst->obj;
+  dst->obj = obj;
+  dst->methods = methods;
+  __pas_intf_release(old);
+}
+
+void __pas_intf_clear(PasIntf *p) {
+  void *old = p->obj;
+  p->obj = NULL;
+  p->methods = NULL;
+  __pas_intf_release(old);
+}
+
+void __pas_interfaced_construct(void *obj) { *refcount_of(obj) = 1; }
+
+void __pas_interfaced_constructed(void *obj) { --*refcount_of(obj); }
+
+void __pas_free_instance(void *obj) {
+  for (void *const *vmt = *(void *const *const *)obj; vmt;
+       vmt = (void *const *)vmt[0]) {
+    void *const *intfs = (void *const *)vmt[3];
+    if (intfs && intfs[1])
+      ((void (*)(void *))intfs[1])(obj);
+  }
+  free(obj);
+}
+
 void *__pas_intf_lookup(const void *obj, const void *iid) {
   if (!obj)
     return NULL;
@@ -515,8 +573,8 @@ void *__pas_intf_lookup(const void *obj, const void *iid) {
     return NULL;
   uintptr_t n = (uintptr_t)table[0];
   for (uintptr_t i = 0; i < n; ++i)
-    if (table[1 + 2 * i] == iid)
-      return table[2 + 2 * i];
+    if (table[2 + 2 * i] == iid)
+      return table[3 + 2 * i];
   return NULL;
 }
 
@@ -634,7 +692,7 @@ void __pas_free_object(void *obj) {
   void (*destroy)(void *, void *) =
       (void (*)(void *, void *))(*(void *const *const *)obj)[4];
   destroy(NULL, obj);
-  free(obj);
+  __pas_free_instance(obj);
 }
 
 void __pas_reraise_free(PasExcFrame *f, void *obj) {

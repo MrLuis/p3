@@ -30,8 +30,10 @@ public:
   const char *getPointer() const { return Loc.getPointer(); }
   llvm::SMLoc getSMLoc() const { return Loc; }
 
+  /// The location Offset characters on (an invalid location stays invalid:
+  /// predeclared names have none).
   SourceLocation getLocWithOffset(int Offset) const {
-    return fromPointer(getPointer() + Offset);
+    return isValid() ? fromPointer(getPointer() + Offset) : SourceLocation();
   }
 
   friend bool operator==(SourceLocation A, SourceLocation B) {

@@ -1,4 +1,4 @@
-program interfaces;
+program interfaces; {$interfaces corba}
 type
   IA = interface;
   IA = interface ['{A-GUID}']

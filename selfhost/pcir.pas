@@ -215,6 +215,9 @@ function irInsert(const agg, v: TV; idx: longint; const name: string): TV;
 { alloca at the insertion point, or at the start of the entry block }
 function irAlloca(t: PIRType; const name: string): TV;
 function irCreateTemp(t: PIRType; const name: string): TV;
+{ A temporary at the start of the entry block followed by a store of init
+  into it (an IRBuilder there creating both). }
+function irCreateTempInit(t: PIRType; const name: string; const init: TV): TV;
 { Calls; args: "i32 %x, ptr align 1 %p" (irArgsAdd / irArgsAddAttr). }
 procedure irArgsAdd(var args: TBuf; const v: TV);
 procedure irArgsAddAttr(var args: TBuf; const v: TV; const attr: string);
@@ -1202,15 +1205,6 @@ begin
   irConstDouble := r;
 end;
 
-function irConstIntToPtr(n: int64): TV;
-var
-  r: TV;
-begin
-  r := irV(irPtrT, 'inttoptr (i64 ' + intToStr(n) + ' to ptr)');
-  r.kind := vkConstExpr;
-  irConstIntToPtr := r;
-end;
-
 function irNull: TV;
 var
   r: TV;
@@ -1218,6 +1212,17 @@ begin
   r := irV(irPtrT, 'null');
   r.kind := vkNull;
   irNull := r;
+end;
+
+function irConstIntToPtr(n: int64): TV;
+var
+  r: TV;
+begin
+  if n = 0 then { the constant folder gives null }
+    exit(irNull);
+  r := irV(irPtrT, 'inttoptr (i64 ' + intToStr(n) + ' to ptr)');
+  r.kind := vkConstExpr;
+  irConstIntToPtr := r;
 end;
 
 function irZero(t: PIRType): TV;
@@ -2370,6 +2375,24 @@ begin
     i^.dbgLoc := nil;
   listAdd(cur^.entryTemps, i);
   irCreateTemp := irV(irPtrT, res);
+end;
+
+function irCreateTempInit(t: PIRType; const name: string; const init: TV): TV;
+var
+  slot: TV;
+  i, alloca: PIRInst;
+  res: string;
+begin
+  slot := irCreateTemp(t, name);
+  { entryTemps print newest first: the store goes in before its alloca }
+  alloca := PIRInst(listPop(cur^.entryTemps));
+  i := newInst(res, '', false);
+  bufAdd(i^.text, 'store ' + init.t^.text + ' ' + init.v + ', ptr ' + slot.v +
+         ', align ' + intToStr(init.t^.align));
+  i^.dbgLoc := alloca^.dbgLoc;
+  listAdd(cur^.entryTemps, i);
+  listAdd(cur^.entryTemps, alloca);
+  irCreateTempInit := slot;
 end;
 
 procedure irArgsAdd(var args: TBuf; const v: TV);

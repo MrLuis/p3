@@ -44,6 +44,7 @@ class Lexer {
   const char *BufEnd;
   const char *Cur;
   CheckDirectives *Directives = nullptr;
+  bool CorbaInterfaces = false; ///< {$interfaces corba} (default: com)
 
   // {$I file} (Turbo/FPC): the including buffers, innermost last.
   struct IncludeFrame {
@@ -105,6 +106,9 @@ public:
   void lex(Token &T);
 
   const LangOptions &getLangOpts() const { return LangOpts; }
+
+  /// Are interfaces declared here CORBA style ({$interfaces corba})?
+  bool corbaInterfaces() const { return CorbaInterfaces; }
 
   /// Defines symbols for conditional compilation (-d NAME).
   void setDefines(llvm::ArrayRef<std::string> Names);

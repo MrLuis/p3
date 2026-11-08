@@ -96,17 +96,39 @@ as are a failed `as` and calling an abstract method.
   wider integer types (`integer` before `int64` before `real`), the
   nearest ancestor class; a tie is an error. Overloads get the symbols
   `<name>$N`.
-- **Interfaces** (CORBA style, `{$interfaces corba}`; no reference
-  counting, no `IUnknown`): `IFoo = interface[(IBase)] ['GUID'] methods
-  end`, classes listing them (`class(TBase, IFoo, IBar)`, every method
+- **Interfaces:** `IFoo = interface[(IBase)] ['GUID'] methods end`,
+  classes listing them (`class(TBase, IFoo, IBar)`, every method
   implemented), interface variables, parameters and results, `obj is
   IFoo`, `obj as IFoo`, comparisons and `Assigned`. A value is {object,
   the object's class's method table}, so virtual implementations dispatch
-  as usual.
+  as usual. Interfaces are COM style unless `{$interfaces corba}` (as in
+  Free Pascal's objfpc mode):
+  - **COM interfaces** (`{$interfaces com}`, the default) descend from
+    `IUnknown` (= `IInterface`) and are reference counted. Their classes
+    descend from `TInterfacedObject` (property `RefCount`). An object is
+    freed when the last interface reference to it goes away: when a
+    variable or field is assigned or a routine ends (its local variables
+    and value parameters; also when an exception leaves it), when an
+    object or record holding the reference is freed, or with `dispose`.
+    `const` parameters take no reference. While a constructor runs the
+    count is 1, so `Self` can be passed as an interface there. A COM
+    interface also works as the left operand of `is` / `as` (`intf as
+    TFoo`, `intf is IBar`). COM interfaces cannot be in variant parts or
+    files, and a function cannot return a record holding them. Interface
+    types must be declared in a `type` section.
+  - **CORBA interfaces** (`{$interfaces corba}`) are not counted, and any
+    class can implement them.
+
+  Differences from Free Pascal: a function's interface result used
+  without a variable (`Make.Name`, or a call whose result is discarded)
+  is released when the statement ends, while Free Pascal keeps it in a
+  hidden temporary until the routine ends; comparing interfaces compares
+  their objects; global interface variables are not released at program
+  end; `QueryInterface`, `_AddRef` and `_Release` are not declared (the
+  compiled code counts references itself).
 
 Not supported (reported as such): class properties, class constructors
-and destructors, `stored`, `implements`, properties in interfaces, COM
-interfaces.
+and destructors, `stored`, `implements`, properties in interfaces.
 
 Exceptions (`--mode=objfpc`), as in Free Pascal:
 

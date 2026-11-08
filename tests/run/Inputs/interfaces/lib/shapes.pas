@@ -1,4 +1,4 @@
-unit shapes;
+unit shapes; {$interfaces corba}
 { An interface and a class implementing it, in a unit. }
 interface
 type

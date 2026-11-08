@@ -74,6 +74,19 @@ bool pcc::containsFile(Type *T) {
   return false;
 }
 
+bool pcc::isManaged(Type *T) {
+  if (auto *I = llvm::dyn_cast<InterfaceType>(T))
+    return I->isCOM();
+  if (auto *A = llvm::dyn_cast<ArrayType>(T))
+    return isManaged(A->getElementType());
+  if (auto *R = llvm::dyn_cast<RecordType>(T)) {
+    for (FieldDecl *F : R->getAllFields())
+      if (F->getType() && isManaged(F->getType()))
+        return true;
+  }
+  return false;
+}
+
 Decl *ClassType::findOwnMember(llvm::StringRef Name) const {
   for (Decl *D : Members)
     if (D->getName().Name == Name)

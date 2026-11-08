@@ -1,0 +1,52 @@
+; COM interfaces (--mode=objfpc): reference counting in the IR.
+; RUN: %pcc --mode=objfpc --emit-llvm %S/Inputs/com.pas -o - | FileCheck %s
+
+; A class with interface fields: its cleanup function is in its interface
+; table, after the number of interfaces (IUnknown, from TInterfacedObject,
+; and IA).
+; CHECK: @vmt.ta = internal constant [5 x ptr] [ptr @__pas_tinterfacedobject_vmt, ptr @.str, ptr inttoptr (i64 32 to ptr), ptr @intfs.ta, ptr @__pas_tobject_destroy]
+; CHECK: @itable.ta.iunknown = internal constant [0 x ptr] zeroinitializer
+; CHECK: @__pas_iunknown_iid = external constant i8
+; CHECK: @intfs.ta = internal constant [6 x ptr] [ptr inttoptr (i64 2 to ptr), ptr @cleanup.ta, ptr @__pas_iunknown_iid, ptr @itable.ta.iunknown, ptr @iid.ia, ptr @itable.ta.ia]
+
+; The main program: an object assigned to an interface variable.
+; CHECK-LABEL: define i32 @main
+; CHECK:      %itable = call ptr @__pas_intf_lookup(ptr %obj, ptr @iid.ia)
+; CHECK:      call void @__pas_intf_assign(ptr @pas.g, ptr %obj1, ptr %itable2)
+
+; A value parameter takes a reference; a const one does not. A routine with
+; interface variables is protected: an exception leaving it releases them.
+; CHECK-LABEL: define internal void @pas.use(ptr %link, { ptr, ptr } %a, { ptr, ptr } %b)
+; CHECK:      %intf.tmp = alloca { ptr, ptr }, align 8
+; CHECK-NEXT: store { ptr, ptr } zeroinitializer, ptr %intf.tmp, align 8
+; CHECK:      store { ptr, ptr } %a, ptr %[[A:[0-9]+]], align 8
+; CHECK-NEXT: %obj = load ptr, ptr %[[A]], align 8
+; CHECK-NEXT: call void @__pas_intf_addref(ptr %obj)
+; CHECK-NOT:  __pas_intf_addref
+; CHECK:      call void @__pas_exc_push(ptr %excframe, ptr %frame)
+; CHECK:      br i1 %{{[0-9]+}}, label %managed.raise, label %managed.body
+; CHECK:      managed.raise:
+; CHECK-NEXT: call void @__pas_intf_clear(ptr %[[A]])
+; CHECK-NEXT: call void @__pas_intf_clear(ptr %l)
+; CHECK-NEXT: call void @__pas_intf_clear(ptr %intf.tmp)
+; CHECK-NEXT: call void @__pas_reraise(ptr %excframe)
+; Assignment: references the new object, releases the old one.
+; CHECK:      call void @__pas_intf_assign(ptr %l3, ptr %obj4, ptr %itable)
+; A function's result is held until the statement ends.
+; CHECK:      %[[R:[0-9]+]] = call { ptr, ptr } @pas.make(ptr null)
+; CHECK-NEXT: call void @__pas_intf_clear(ptr %intf.tmp)
+; CHECK-NEXT: store { ptr, ptr } %[[R]], ptr %intf.tmp, align 8
+; CHECK:      exit:
+; CHECK-NEXT: call void @__pas_exc_pop(ptr %excframe)
+; CHECK-NEXT: call void @__pas_intf_clear(ptr %[[A]])
+; CHECK-NEXT: call void @__pas_intf_clear(ptr %l)
+; CHECK-NEXT: call void @__pas_intf_clear(ptr %intf.tmp)
+; CHECK:      call void @__pas_writeln(ptr %file)
+; CHECK-NEXT: call void @__pas_intf_clear(ptr %intf.tmp)
+
+; The cleanup function releases the class's own interface fields.
+; CHECK-LABEL: define internal void @cleanup.ta(ptr %self)
+; CHECK-NEXT: entry:
+; CHECK-NEXT: %other = getelementptr inbounds i8, ptr %self, i64 16
+; CHECK-NEXT: call void @__pas_intf_clear(ptr %other)
+; CHECK-NEXT: ret void

@@ -1,4 +1,4 @@
-program rterrors;
+program rterrors; {$interfaces corba}
 { A failed `as` on an interface, a call through a nil interface. }
 type
   IA = interface procedure P; end;

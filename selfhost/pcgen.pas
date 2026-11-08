@@ -96,6 +96,15 @@ var
   { interfaces' iids (by type id, PTVBox) }
   iids: TIntMap;
   vmtsToDefine: TPtrList;
+  { reference counting (COM interfaces): a function's COM interface result
+    is held in a temporary until the statement ends (liveTemps: the current
+    statements', innermost last, of PTVBox); a routine releases the
+    references in its value parameters, local variables and temporaries
+    (routineTemps) when it ends, also when an exception leaves it. The
+    classes whose cleanup functions are to be emitted (of PType) and the
+    functions (of PIRFunc). }
+  liveTemps, routineTemps: TPtrList;
+  cleanupClasses, cleanupFns: TPtrList;
 
 { --- Small helpers --- }
 
@@ -1574,6 +1583,190 @@ begin
   end;
 end;
 
+{ A runtime function used only by programs with classes. }
+function classRuntime(const name, ret, params: string): PIRFunc;
+var
+  f: PIRFunc;
+begin
+  f := irFindFunction(name);
+  if f = nil then
+  begin
+    declareRT(name, ret, params, 'nounwind');
+    f := irFindFunction(name);
+  end;
+  classRuntime := f;
+end;
+
+{ --- Reference counting (COM interfaces, objfpc) --- }
+
+{ The runtime's reference counting entry points (runtime/io.c). }
+function intfRuntime(const name: string): PIRFunc;
+begin
+  if name = '__pas_intf_assign' then
+    intfRuntime := classRuntime(name, 'void', 'ptr,ptr,ptr')
+  else
+    { __pas_intf_addref(obj), __pas_intf_clear(addr), __pas_free_instance,
+      __pas_interfaced_construct(ed)(obj) }
+    intfRuntime := classRuntime(name, 'void', 'ptr');
+end;
+
+procedure intfCall1(const name: string; const x: TV);
+var
+  ignored: TV;
+begin
+  ignored := call1(intfRuntime(name), x, '');
+end;
+
+{ Releases the COM interfaces in the object of managed type t at addr and
+  sets them to nil (addRef false), or takes one more reference to each (a
+  copy was made). }
+procedure manageValue(const addr: TV; t: PType; addRef: boolean);
+var
+  i, elem, next, done, obj: TV;
+  bd: TOrdinalBounds;
+  pre, loopB, doneB: PIRBlock;
+  phi: PIRInst;
+  j: longint;
+  fd: PDecl;
+  what: string;
+begin
+  case t^.kind of
+    tyInterface:
+      if addRef then
+      begin
+        obj := irLoad(irPtrT, addr, 'obj');
+        intfCall1('__pas_intf_addref', obj);
+      end
+      else
+        intfCall1('__pas_intf_clear', addr);
+    tyArray:
+      begin
+        if addRef then
+          what := 'addref'
+        else
+          what := 'fini';
+        bd := getOrdinalBounds(t^.indexType);
+        pre := irInsertBlock;
+        loopB := irNewBlock(what + '.loop');
+        doneB := irNewBlock(what + '.done');
+        irBr(loopB);
+        irSetInsertPoint(loopB);
+        i := irPhi(irI64, 'i', phi);
+        irAddIncoming(phi, i64c(0), pre);
+        elem := irGEP2(memType(t), addr, i64c(0), i, '');
+        manageValue(elem, t^.elementType, addRef);
+        next := irBin('add', i, i64c(1), '');
+        irAddIncoming(phi, next, irInsertBlock);
+        done := irICmp('eq', next, i64c(bd.hi - bd.lo + 1), '');
+        irCondBr(done, doneB, loopB, false);
+        irSetInsertPoint(doneB);
+      end;
+    tyRecord:
+      for j := 0 to t^.allFields.count - 1 do
+      begin
+        fd := PDecl(listGet(t^.allFields, j));
+        if isManaged(fd^.fieldType) then
+          manageValue(fieldAddress(addr, t, fd), fd^.fieldType, addRef);
+      end;
+  else
+    ;
+  end;
+end;
+
+procedure finalizeValue(const addr: TV; t: PType);
+begin
+  manageValue(addr, t, false);
+end;
+
+procedure addRefValue(const addr: TV; t: PType);
+begin
+  manageValue(addr, t, true);
+end;
+
+{ dst^ := src^ for a record or array t: counted if it holds COM
+  interfaces. }
+procedure copyValue(const dst, src: TV; t: PType);
+begin
+  if isManaged(t) then
+  begin
+    addRefValue(src, t);
+    finalizeValue(dst, t);
+  end;
+  copyAggregate(dst, src, t);
+end;
+
+{ addr^ := v for a COM interface. }
+procedure storeInterface(const addr, v: TV);
+var
+  obj, table, ignored: TV;
+begin
+  obj := irExtract(v, 0, irPtrT, 'obj');
+  table := irExtract(v, 1, irPtrT, 'itable');
+  ignored := call3(intfRuntime('__pas_intf_assign'), addr, obj, table, '');
+end;
+
+{ Stores v (scalar, of type t) at addr: counted for COM interfaces. }
+procedure storeValue(const addr, v: TV; t: PType);
+begin
+  if isManaged(t) then
+    storeInterface(addr, v)
+  else
+    storeScalar(addr, v, t);
+end;
+
+{ A function's result v, a COM interface (a reference the caller now
+  holds): kept in a temporary until the statement ends. }
+function holdResult(const v: TV): TV;
+var
+  slot: TV;
+begin
+  slot := irCreateTempInit(v.t, 'intf.tmp', irZero(v.t));
+  intfCall1('__pas_intf_clear', slot); { a loop's previous }
+  irStore(v, slot);
+  listAdd(liveTemps, irBox(slot));
+  if curRoutine <> nil then
+    listAdd(routineTemps, irBox(slot));
+  holdResult := v;
+end;
+
+{ Releases the temporaries held since liveTemps had mark entries. }
+procedure releaseTemps(mark: longint);
+var
+  k: longint;
+begin
+  for k := mark to liveTemps.count - 1 do
+    intfCall1('__pas_intf_clear', PTVBox(listGet(liveTemps, k))^);
+  while liveTemps.count > mark do
+    listPop(liveTemps);
+end;
+
+{ Is c TInterfacedObject (the predeclared one) or a descendant? }
+function isInterfacedClass(c: PType): boolean;
+begin
+  while c <> nil do
+  begin
+    if (c^.classModule = nil) and (nm(c^.declName) = 'TInterfacedObject') then
+      exit(true);
+    c := c^.classParent;
+  end;
+  isInterfacedClass := false;
+end;
+
+{ Does class c have fields of its own holding COM interfaces? }
+function hasManagedFields(c: PType): boolean;
+var
+  k: longint;
+  d: PDecl;
+begin
+  for k := 0 to c^.classMembers.count - 1 do
+  begin
+    d := PDecl(listGet(c^.classMembers, k));
+    if (d^.kind = dkField) and isManaged(d^.fieldType) then
+      exit(true);
+  end;
+  hasManagedFields := false;
+end;
+
 { Appends the values passed for args (parameters params) to buf. }
 procedure emitArgValues(const params, args: TPtrList; var buf: TBuf);
 var
@@ -1610,7 +1803,7 @@ end;
 
 function emitCallToSelf(ret: PIRType; const callee: TV; const link: TV;
                         hasLink: boolean; const self_: TV; hasSelf: boolean;
-                        const params, args: TPtrList): TV;
+                        const params, args: TPtrList; resTy: PType): TV;
 var
   buf: TBuf;
   tmp, res: TV;
@@ -1631,13 +1824,24 @@ begin
     irStore(res, tmp);
     exit(tmp);
   end;
+  if (resTy <> nil) and isManaged(resTy) then
+    exit(holdResult(res));
   emitCallToSelf := res;
 end;
 
 function emitCallTo(ret: PIRType; const callee: TV; const link: TV; hasLink: boolean;
-                    const params, args: TPtrList): TV;
+                    const params, args: TPtrList; resTy: PType): TV;
 begin
-  emitCallTo := emitCallToSelf(ret, callee, link, hasLink, irNull, false, params, args);
+  emitCallTo := emitCallToSelf(ret, callee, link, hasLink, irNull, false, params, args,
+                               resTy);
+end;
+
+function resultOf(r: PDecl): PType;
+begin
+  if r^.isFunction then
+    resultOf := r^.resultType
+  else
+    resultOf := nil;
 end;
 
 function emitCall(r: PDecl; const args: TPtrList): TV;
@@ -1647,8 +1851,9 @@ begin
   r := canon(r);
   f := fnOf(r);
   if r^.isExternal then
-    exit(emitCallTo(f^.ret, irFuncRef(f), irNull, false, r^.params, args));
-  emitCall := emitCallTo(f^.ret, irFuncRef(f), staticLinkFor(r), true, r^.params, args);
+    exit(emitCallTo(f^.ret, irFuncRef(f), irNull, false, r^.params, args, nil));
+  emitCall := emitCallTo(f^.ret, irFuncRef(f), staticLinkFor(r), true, r^.params, args,
+                         resultOf(r));
 end;
 
 function retTypeOf(result_: PType): PIRType;
@@ -1671,7 +1876,7 @@ begin
                      nilLoc);
   link := irExtract(pair, 1, irPtrT, '');
   emitCallThrough := emitCallTo(retTypeOf(rt^.routineResult), fn, link, true,
-                                rt^.routineParams, args);
+                                rt^.routineParams, args, rt^.routineResult);
 end;
 
 { A call through a procedural parameter or variable. }
@@ -1762,20 +1967,6 @@ begin
     exit(obj);
   emitNilObjectCheck(obj, loc);
   receiverClass := irLoad(irPtrT, obj, 'vmt');
-end;
-
-{ A runtime function used only by programs with classes. }
-function classRuntime(const name, ret, params: string): PIRFunc;
-var
-  f: PIRFunc;
-begin
-  f := irFindFunction(name);
-  if f = nil then
-  begin
-    declareRT(name, ret, params, 'nounwind');
-    f := irFindFunction(name);
-  end;
-  classRuntime := f;
 end;
 
 { The VMT of class c; the predeclared classes' (TObject, Exception,
@@ -1929,7 +2120,7 @@ begin
   irArgsAdd(args, obj);
   ignored := irCallPtr(irVoidT, fn, args, '');
   bufFree(args);
-  rtv1('__pas_dispose', obj);
+  intfCall1('__pas_free_instance', obj);
   irBr(endB);
   irSetInsertPoint(endB);
 end;
@@ -2003,12 +2194,14 @@ begin
     begin
       emitNilClassCheck(self_, loc);
       fn := loadVMTSlot(self_, 4 + r^.vmtIndex, 'method');
-      res := emitCallToSelf(methodFnType(r), fn, irNull, true, self_, true, r^.params, args);
+      res := emitCallToSelf(methodFnType(r), fn, irNull, true, self_, true, r^.params, args,
+                            resultOf(r));
     end
     else
     begin
       f := fnOf(r);
-      res := emitCallToSelf(f^.ret, irFuncRef(f), irNull, true, self_, true, r^.params, args);
+      res := emitCallToSelf(f^.ret, irFuncRef(f), irNull, true, self_, true, r^.params, args,
+                            resultOf(r));
     end;
     if r^.isFunction then
       emitMethodCallC := res;
@@ -2018,15 +2211,17 @@ begin
   begin
     emitNilObjectCheck(obj, loc);
     fn := loadVirtual(obj, r^.vmtIndex);
-    res := emitCallToSelf(methodFnType(r), fn, irNull, true, obj, true, r^.params, args);
+    res := emitCallToSelf(methodFnType(r), fn, irNull, true, obj, true, r^.params, args,
+                          resultOf(r));
   end
   else
   begin
     f := fnOf(r);
-    res := emitCallToSelf(f^.ret, irFuncRef(f), irNull, true, obj, true, r^.params, args);
+    res := emitCallToSelf(f^.ret, irFuncRef(f), irNull, true, obj, true, r^.params, args,
+                          resultOf(r));
   end;
   if (r^.methodKind = mtDestructor) and not inherited_ then
-    rtv1('__pas_dispose', obj);
+    intfCall1('__pas_free_instance', obj);
   if r^.isFunction then
     emitMethodCallC := res;
 end;
@@ -2039,9 +2234,21 @@ end;
 
 { --- Interfaces (objfpc, CORBA style) --- }
 
+{ The iid of interface i (the predeclared IUnknown's is in the runtime). }
 function iidOf(i: PType): TV;
+var
+  g: PTVBox;
+  v: TV;
+  name: string;
 begin
-  iidOf := PTVBox(mapGet(iids, i^.id))^;
+  g := PTVBox(mapGet(iids, i^.id));
+  if g <> nil then
+    exit(g^);
+  name := '__pas_' + lowerStr(nm(i^.declName)) + '_iid';
+  if not irFindGlobal(name, v) then
+    v := irGlobal(name, 'external', irI8, irNull, true, false, true, 0);
+  mapPut(iids, i^.id, irBox(v));
+  iidOf := v;
 end;
 
 function makeInterface(const obj, table: TV): TV;
@@ -2087,6 +2294,7 @@ var
   obj, ignored, f: TV;
   argBuf, buf: TBuf;
   failed, done: PIRBlock;
+  counted: boolean;
 begin
   if ctor^.objMethod <> obNone then
   begin
@@ -2099,6 +2307,9 @@ begin
   emitArgValues(ctor^.params, args, argBuf);
   obj := call1(rtFn('__pas_new'), i64c(instanceSize(c)), 'obj');
   irStore(vmtOf(c), obj);
+  counted := isInterfacedClass(ctor^.ownerClass);
+  if counted then
+    intfCall1('__pas_interfaced_construct', obj);
   failed := irNewBlock('ctor.raise');
   f := emitProtect(failed, 'ctor.call');
   bufInit(buf);
@@ -2113,6 +2324,8 @@ begin
   bufFree(buf);
   bufFree(argBuf);
   excCall1('__pas_exc_pop', f);
+  if counted then
+    intfCall1('__pas_interfaced_constructed', obj);
   done := irNewBlock('ctor.done');
   irBr(done);
   irSetInsertPoint(failed);
@@ -2143,6 +2356,7 @@ var
   argBuf, buf: TBuf;
   failed, done: PIRBlock;
   fun: PIRFunc;
+  counted: boolean;
 begin
   emitNilClassCheck(vmt, loc);
   if ctor^.objMethod <> obNone then
@@ -2154,6 +2368,9 @@ begin
   bufInit(argBuf);
   emitArgValues(ctor^.params, args, argBuf);
   obj := allocateThrough(vmt);
+  counted := isInterfacedClass(ctor^.ownerClass);
+  if counted then
+    intfCall1('__pas_interfaced_construct', obj);
   failed := irNewBlock('ctor.raise');
   f := emitProtect(failed, 'ctor.call');
   bufInit(buf);
@@ -2177,6 +2394,8 @@ begin
   bufFree(buf);
   bufFree(argBuf);
   excCall1('__pas_exc_pop', f);
+  if counted then
+    intfCall1('__pas_interfaced_constructed', obj);
   done := irNewBlock('ctor.done');
   irBr(done);
   irSetInsertPoint(failed);
@@ -2203,7 +2422,8 @@ begin
                        e^.fieldName.loc);
     slot := irGEP1(irPtrT, table, i64c(r^.vmtIndex), true, '');
     fn := irLoad(irPtrT, slot, 'method');
-    res := emitCallToSelf(methodFnType(r), fn, irNull, true, obj, true, r^.params, args);
+    res := emitCallToSelf(methodFnType(r), fn, irNull, true, obj, true, r^.params, args,
+                          resultOf(r));
     if r^.isFunction then
       exit(res);
     exit(irNull);
@@ -2357,6 +2577,8 @@ var
   b: TBuf;
 begin
   obj := visitExpr(e^.lhs);
+  if e^.lhs^.typ^.kind = tyInterface then { a COM interface's object }
+    obj := irExtract(obj, 0, irPtrT, 'obj');
   if e^.rhs^.typ^.kind = tyInterface then
   begin
     if e^.bop = boIs then

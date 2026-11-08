@@ -1539,8 +1539,11 @@ var
   guid: PName;
   m: PDecl;
   ts: PTypeSpec;
+  corba: boolean;
 begin
   parseInterfaceType := nil;
+  { COM or CORBA as set by the last $interfaces before it }
+  corba := lx.corbaInterfaces;
   intfLoc := consumeToken; { 'interface' }
   parentName := noIdent;
   listInit(members);
@@ -1552,6 +1555,7 @@ begin
     ts^.intfMemberList := members;
     ts^.isForwardIntf := true;
     ts^.guid := nil;
+    ts^.isCorba := corba;
     exit(ts);
   end;
   if tok.kind = tkLParen then
@@ -1609,6 +1613,7 @@ begin
   ts^.intfMemberList := members;
   ts^.isForwardIntf := false;
   ts^.guid := guid;
+  ts^.isCorba := corba;
   parseInterfaceType := ts;
 end;
 

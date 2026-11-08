@@ -1,0 +1,102 @@
+locals
+  + a
+  + b
+  + arr2
+  + box.item
+  leaving Locals
+  - a
+  - arr2
+  - box.item
+  - b
+assignment
+  + first
+  still first
+  + second
+  - first
+  self-assignment keeps second
+  - second
+  end of Assignment
+parameters
+  + param
+  by value param count 2
+  show param
+  + from ByVar
+  - param
+  now from ByVar
+  + temporary object
+  by value temporary object count 1
+  - temporary object
+  - from ByVar
+results and conversions
+  + square
+  square area 9
+  next 1 2
+  is: TRUE TRUE TRUE
+  as class: 3
+  assigned: TRUE TRUE TRUE
+  end of Conversions
+  - square
+an object, then an interface
+  + object
+  count 0
+  count 1
+  - object
+  released
+fields
+  + field
+  + pair 1
+  holder destroyed, fields next
+  - pair 1
+  - field
+properties
+  + via setter
+  via setter
+  + direct
+  - via setter
+  - direct
+  owner freed
+exceptions
+  + depth 0
+  + depth 1
+  + depth 2
+  - depth 2
+  - depth 1
+  - depth 0
+  caught stop at 2
+exit and finally
+  + early tmp
+  got early tmp
+  + early tmp
+  - early tmp
+  - early tmp
+  nil: TRUE
+  + in try
+  finally, x is in try
+  - in try
+records
+  + rec item
+  + rec more
+  copy keeps rec item and rec more
+  - rec item
+  copied again
+  + on the heap
+  - on the heap
+  disposed
+  - rec more
+constructor
+  + selfish
+  show selfish
+  constructed with count 1
+  - selfish
+discarded result
+  + discarded
+  - discarded
+loop
+  + loop 1
+  + loop 2
+  - loop 1
+  + loop 3
+  - loop 2
+  end of Loop
+  - loop 3
+done

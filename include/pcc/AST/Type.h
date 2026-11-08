@@ -361,8 +361,12 @@ public:
 
 /// interface [(Parent)] ... end (objfpc): methods by slot, the parent's
 /// first. A value is {object, the object's class's method table for it}.
+/// COM interfaces (the default; IUnknown and its descendants) are reference
+/// counted: their objects are TInterfacedObjects, freed when the last
+/// interface reference to them goes away. CORBA ones are not.
 class InterfaceType final : public Type {
   InterfaceType *Parent = nullptr;
+  bool COM = false;
   llvm::ArrayRef<RoutineDecl *> Methods;    ///< own, in source order
   llvm::ArrayRef<RoutineDecl *> AllMethods; ///< by slot
   const void *Module = nullptr;
@@ -375,6 +379,8 @@ public:
   llvm::ArrayRef<RoutineDecl *> getAllMethods() const { return AllMethods; }
   const void *getModule() const { return Module; }
   bool isDefined() const { return Defined; }
+  bool isCOM() const { return COM; }
+  void setCOM(bool C) { COM = C; }
   void define(InterfaceType *P, llvm::ArrayRef<RoutineDecl *> M,
               llvm::ArrayRef<RoutineDecl *> All, const void *Mod) {
     Parent = P;
@@ -418,6 +424,10 @@ inline bool needsStringCompare(Type *L, Type *R) {
 
 /// True if T is, or contains, a file type (files cannot be copied).
 bool containsFile(Type *T);
+
+/// True if T is, or contains, a COM interface (a reference-counted value:
+/// managed by the compiled code when assigned, copied and finalized).
+bool isManaged(Type *T);
 
 /// Bounds of an ordinal type: integer [-2^31, 2^31-1] (other integer types
 /// by width and signedness), char [0, 255], boolean [0, 1], enum [0, N-1],

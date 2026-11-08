@@ -1,4 +1,4 @@
-program draw;
+program draw; {$interfaces corba}
 uses shapes;
 type
   { A descendant overriding the methods, and a class of the program

@@ -442,6 +442,8 @@ begin
           line('InterfaceTypeSpec forward')
         else
           line('InterfaceTypeSpec');
+        if not ts^.isCorba then
+          bufAdd(outBuf, ' com');
         if identValid(ts^.intfParentName) then
         begin
           bufAdd(outBuf, ' ''');

@@ -928,17 +928,19 @@ class InterfaceTypeSpec final : public TypeSpec {
   Identifier Parent; ///< invalid: none
   llvm::ArrayRef<Decl *> Members;
   bool Forward;
+  bool Corba;           ///< declared under {$interfaces corba}
   llvm::StringRef GUID; ///< ['...'] (no effect)
 
 public:
   InterfaceTypeSpec(SourceRange R, Identifier Parent,
-                    llvm::ArrayRef<Decl *> Members, bool Forward,
+                    llvm::ArrayRef<Decl *> Members, bool Forward, bool Corba,
                     llvm::StringRef GUID)
       : TypeSpec(TS_Interface, R), Parent(Parent), Members(Members),
-        Forward(Forward), GUID(GUID) {}
+        Forward(Forward), Corba(Corba), GUID(GUID) {}
   const Identifier &getParent() const { return Parent; }
   llvm::ArrayRef<Decl *> getMembers() const { return Members; }
   bool isForward() const { return Forward; }
+  bool isCorba() const { return Corba; }
   llvm::StringRef getGUID() const { return GUID; }
   static bool classof(const TypeSpec *T) { return T->getKind() == TS_Interface; }
 };
@@ -1145,6 +1147,7 @@ class RoutineDecl final : public Decl {
   Type *ResultTy = nullptr;     ///< set by Sema
   Block *Body;                  ///< null for a forward declaration
   bool IsForward;
+  bool UsesManaged = false;
   RoutineDecl *Canonical = nullptr; ///< set on a definition of a forward decl
   RoutineDecl *Parent = nullptr;    ///< enclosing routine; null at program level
   unsigned Level = 1;               ///< 1 = declared in the program block
@@ -1200,6 +1203,11 @@ public:
   }
   VarDecl *getResultVar() const { return ResultVar; }
   void setResultVar(VarDecl *V) { ResultVar = V; }
+  /// Does the body compute values of managed types (COM interfaces)? Then
+  /// code generation releases the references it holds when an exception
+  /// leaves the routine.
+  bool usesManaged() const { return UsesManaged; }
+  void setUsesManaged() { UsesManaged = true; }
   /// Nested routines get a hidden pointer to the parent's frame.
   bool hasStaticLink() const { return Parent != nullptr; }
   bool isExternal() const { return IsExternal; }

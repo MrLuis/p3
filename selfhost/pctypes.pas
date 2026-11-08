@@ -66,6 +66,8 @@ function isTextFile(t: PType): boolean;
 function isEmptySet(t: PType): boolean;
 function isUntypedPointer(t: PType): boolean;
 function containsFile(t: PType): boolean;
+{ Is t, or does it contain, a COM interface (reference counted)? }
+function isManaged(t: PType): boolean;
 function findField(rec: PType; name: PName): PDecl;
 { Class members (objfpc): declared in class c itself; in c or its nearest
   ancestor declaring it (owner receives that class); is c a or a
@@ -228,6 +230,7 @@ begin
   listInit(t^.intfAllMethods);
   t^.intfModule := nil;
   t^.intfDefined := false;
+  t^.intfCOM := false;
   newInterfaceType := t;
 end;
 
@@ -465,6 +468,29 @@ begin
       end;
   else
     containsFile := false;
+  end;
+end;
+
+function isManaged(t: PType): boolean;
+var
+  i: longint;
+  f: PDecl;
+begin
+  case t^.kind of
+    tyInterface: isManaged := t^.intfCOM;
+    tyArray: isManaged := isManaged(t^.elementType);
+    tyRecord:
+      begin
+        for i := 0 to t^.allFields.count - 1 do
+        begin
+          f := PDecl(listGet(t^.allFields, i));
+          if (f^.fieldType <> nil) and isManaged(f^.fieldType) then
+            exit(true);
+        end;
+        isManaged := false;
+      end;
+  else
+    isManaged := false;
   end;
 end;
 

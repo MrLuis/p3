@@ -1,4 +1,4 @@
-program errors;
+program errors; {$interfaces corba}
 type
   IA = interface
     procedure P;

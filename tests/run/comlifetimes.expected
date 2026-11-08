@@ -1,0 +1,24 @@
+outer
+  + inner
+  outer has inner
+  - inner
+chain
+  + parent
+  + kid
+  - parent
+  kid alive: kid
+  - kid
+proc
+  + via proc var
+  via proc var
+  - via proc var
+raising
+  + finally
+  in finally
+  - finally
+  caught oops
+class vars
+  + shared
+  held by class var
+  - shared
+end
