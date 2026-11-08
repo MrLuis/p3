@@ -85,7 +85,11 @@ type
     tkKwInherited,
     tkKwIs,
     tkKwAs,
-    tkKwProperty);
+    tkKwProperty,
+    tkKwTry,
+    tkKwExcept,
+    tkKwFinally,
+    tkKwRaise);
   TKeywordInfo = record
     spelling: string[15];
     kind: TTokenKind;
@@ -178,7 +182,11 @@ const
     'kw_inherited',
     'kw_is',
     'kw_as',
-    'kw_property');
+    'kw_property',
+    'kw_try',
+    'kw_except',
+    'kw_finally',
+    'kw_raise');
   { spellings of punctuation and keywords ('' for the others) }
   tokenSpellings: array[TTokenKind] of string[15] = (
     '',
@@ -264,8 +272,12 @@ const
     'inherited',
     'is',
     'as',
-    'property');
-  numKeywords = 55;
+    'property',
+    'try',
+    'except',
+    'finally',
+    'raise');
+  numKeywords = 59;
   keywords: array[1..numKeywords] of TKeywordInfo = (
     (spelling: 'and'; kind: tkKwAnd; level: 0),
     (spelling: 'array'; kind: tkKwArray; level: 0),
@@ -321,4 +333,8 @@ const
     (spelling: 'inherited'; kind: tkKwInherited; level: 2),
     (spelling: 'is'; kind: tkKwIs; level: 2),
     (spelling: 'as'; kind: tkKwAs; level: 2),
-    (spelling: 'property'; kind: tkKwProperty; level: 2));
+    (spelling: 'property'; kind: tkKwProperty; level: 2),
+    (spelling: 'try'; kind: tkKwTry; level: 2),
+    (spelling: 'except'; kind: tkKwExcept; level: 2),
+    (spelling: 'finally'; kind: tkKwFinally; level: 2),
+    (spelling: 'raise'; kind: tkKwRaise; level: 2));

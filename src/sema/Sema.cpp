@@ -63,16 +63,50 @@ class Checker : public StmtVisitor<Checker>,
   /// The target of the assignment being checked: a property there is
   /// written, not read.
   Expr *CurAssignTarget = nullptr;
-  /// The predeclared class TObject (objfpc).
+  /// The procedural type an `@routine` is assigned to (picks an overload).
+  RoutineType *AddrOfTarget = nullptr;
+  /// The base of the IndexExpr being checked: an array property may appear
+  /// there without its indexes. Pending: such a base (or an IndexExpr
+  /// still short of indexes), with the property, the chain's root and the
+  /// indexes so far.
+  Expr *IndexBase = nullptr;
+  struct PendingIndex {
+    PropertyDecl *Prop;
+    Expr *Root;
+    llvm::SmallVector<Expr *, 2> Args;
+  };
+  llvm::DenseMap<Expr *, PendingIndex> PendingIndexes;
+  /// The predeclared classes TObject and Exception (objfpc).
   ClassType *TObjectTy = nullptr;
+  ClassType *ExceptionTy = nullptr;
+  /// `class of C` for each class C: the type of C used as a value, and of
+  /// Self in class methods (`TFooClass = class of TFoo` is a type of its own).
+  llvm::DenseMap<ClassType *, ClassRefType *> ClassRefs;
+
+  ClassRefType *classRefOf(ClassType *C) {
+    ClassRefType *&R = ClassRefs[C];
+    if (!R)
+      R = Ctx.create<ClassRefType>(C);
+    return R;
+  }
   /// `TFoo = class;` not defined yet in the current type section.
   llvm::SmallVector<std::pair<TypeDecl *, ClassType *>, 2> PendingClasses;
+  /// `IFoo = interface;` not defined yet in the current type section.
+  llvm::SmallVector<std::pair<TypeDecl *, InterfaceType *>, 2> PendingInterfaces;
 
   /// Enclosing for statements, innermost last. Their control variables must
   /// not be assigned in the loop body (ISO 7185 6.8.3.9 "threatened").
   llvm::SmallVector<ForStmt *, 4> ActiveFors;
 
   unsigned LoopDepth = 0; ///< for break / continue
+
+  // Exceptions (objfpc). HandlerDepth: exception handlers around the
+  // statement being checked (a bare `raise` needs one). FinallyLoopDepth:
+  // LoopDepth on entry to the innermost enclosing finally part, or -1; exit,
+  // and break/continue out of it, are not allowed there. (objfpc has no
+  // gotos, so none can leave a try statement.)
+  unsigned HandlerDepth = 0;
+  int FinallyLoopDepth = -1;
 
   /// Functions whose result has been assigned somewhere in their body.
   llvm::DenseSet<RoutineDecl *> ResultAssigned;
@@ -142,8 +176,10 @@ class Checker : public StmtVisitor<Checker>,
       Ty("pchar", PChar);
     }
 
-    if (LangOpts.ObjKeywords)
+    if (LangOpts.ObjKeywords) {
       declareTObject();
+      declareException();
+    }
 
     // The standard files (ISO 7185 6.10).
     for (llvm::StringRef N : {"input", "output"}) {
@@ -202,18 +238,95 @@ class Checker : public StmtVisitor<Checker>,
                                   TObjectMethod::Destroy);
     Destroy->setDirectives(/*Virtual=*/true, false, false);
     Destroy->setVMTIndex(0);
+    // TClass = class of TObject; class functions take Self = a class.
+    ClassRefType *TClass = classRefOf(TObjectTy);
+    auto ClassFn = [&](llvm::StringRef Name, Type *Result, TObjectMethod B) {
+      RoutineDecl *R = Method(Name, MethodKind::Method, Result, B);
+      R->setClassMethod();
+      return R;
+    };
+    auto *AClass = Ctx.create<VarDecl>(memberName("AClass"), nullptr,
+                                       VarDecl::ValueParam);
+    AClass->setType(TClass);
+    VarDecl *InheritsParams[] = {AClass};
+    auto *InheritsFrom = Ctx.create<RoutineDecl>(
+        SourceLocation(), memberName("InheritsFrom"), true,
+        Ctx.copyArray<VarDecl *>(InheritsParams), true, nullptr, nullptr, false);
+    InheritsFrom->setMethodKind(MethodKind::Method);
+    InheritsFrom->setClass(TObjectTy);
+    InheritsFrom->setBuiltin(TObjectMethod::InheritsFrom);
+    InheritsFrom->setResultType(Ctx.getBooleanType());
+    InheritsFrom->setClassMethod();
     Decl *Members[] = {
         Method("Create", MethodKind::Constructor, nullptr, TObjectMethod::Create),
         Destroy,
         Method("Free", MethodKind::Method, nullptr, TObjectMethod::Free),
-        Method("ClassName", MethodKind::Method, Ctx.getShortStringType(),
-               TObjectMethod::ClassName)};
+        ClassFn("ClassName", Ctx.getShortStringType(), TObjectMethod::ClassName),
+        Method("ClassType", MethodKind::Method, TClass, TObjectMethod::ClassType),
+        ClassFn("ClassParent", TClass, TObjectMethod::ClassParent),
+        InheritsFrom,
+        ClassFn("InstanceSize", Ctx.getInt64Type(), TObjectMethod::InstanceSize)};
     RoutineDecl *VTable[] = {Destroy};
     TObjectTy->define(nullptr, Ctx.copyArray<Decl *>(Members), {},
                       Ctx.copyArray<RoutineDecl *>(VTable), nullptr);
     Standard.insert("tobject", Ctx.create<TypeDecl>(SourceLocation(),
                                                     memberName("TObject"),
                                                     TObjectTy));
+    auto *TClassNamed = Ctx.create<ClassRefType>(TObjectTy);
+    TClassNamed->setDeclName("TClass");
+    Standard.insert("tclass", Ctx.create<TypeDecl>(SourceLocation(),
+                                                   memberName("TClass"),
+                                                   TClassNamed));
+  }
+
+  /// class Exception (Free Pascal's SysUtils): private FMessage: string;
+  /// constructor Create(const msg: string); property Message: string read
+  /// FMessage write FMessage. Its VMT is in the runtime, which prints the
+  /// message of an unhandled exception.
+  void declareException() {
+    ExceptionTy = Ctx.create<ClassType>();
+    ExceptionTy->setDeclName("Exception");
+    auto *Msg = Ctx.create<FieldDecl>(memberName("FMessage"), nullptr);
+    Msg->setType(Ctx.getShortStringType());
+    Msg->setVisibility(Visibility::Private);
+    auto *Param = Ctx.create<VarDecl>(memberName("msg"), nullptr,
+                                      VarDecl::ConstParam);
+    Param->setType(Ctx.getShortStringType());
+    VarDecl *Params[] = {Param};
+    auto *Create = Ctx.create<RoutineDecl>(
+        SourceLocation(), memberName("Create"), false,
+        Ctx.copyArray<VarDecl *>(Params), true, nullptr, nullptr, false);
+    Create->setMethodKind(MethodKind::Constructor);
+    Create->setClass(ExceptionTy);
+    Create->setBuiltin(TObjectMethod::ExceptionCreate);
+    auto *Message = Ctx.create<PropertyDecl>(memberName("Message"), nullptr,
+                                             memberName("FMessage"),
+                                             memberName("FMessage"));
+    Message->setType(Ctx.getShortStringType());
+    Message->setAccessors(Msg, Msg);
+    Decl *Members[] = {Msg, Create, Message};
+    llvm::SmallVector<FieldDecl *, 2> Fields(TObjectTy->getAllFields());
+    Fields.push_back(Msg);
+    ExceptionTy->define(TObjectTy, Ctx.copyArray<Decl *>(Members),
+                        Ctx.copyArray<FieldDecl *>(Fields),
+                        TObjectTy->getVTable(), nullptr);
+    Standard.insert("exception", Ctx.create<TypeDecl>(SourceLocation(),
+                                                      memberName("Exception"),
+                                                      ExceptionTy));
+    // The exception for integer div and mod by zero, as in SysUtils.
+    ClassType *External = declareExceptionClass("EExternal", ExceptionTy);
+    ClassType *IntError = declareExceptionClass("EIntError", External);
+    declareExceptionClass("EDivByZero", IntError);
+  }
+
+  /// A predeclared `Name = class(Parent);` (its VMT is in the runtime).
+  ClassType *declareExceptionClass(llvm::StringRef Name, ClassType *Parent) {
+    auto *C = Ctx.create<ClassType>();
+    C->setDeclName(Name);
+    C->define(Parent, {}, Parent->getAllFields(), Parent->getVTable(), nullptr);
+    Identifier Id = memberName(Name);
+    Standard.insert(Id.Name, Ctx.create<TypeDecl>(SourceLocation(), Id, C));
+    return C;
   }
 
   /// Turbo/FPC builtins, predeclared only with --mode=tp.
@@ -363,6 +476,19 @@ class Checker : public StmtVisitor<Checker>,
       return true;
     if ((A->isClass() && B->isNil()) || (A->isNil() && B->isClass()))
       return true;
+    if ((A->isClassRef() && B->isNil()) || (A->isNil() && B->isClassRef()))
+      return true;
+    if (A->isClassRef() && B->isClassRef()) { // related classes (objfpc)
+      ClassType *CA = llvm::cast<ClassRefType>(A)->getClass();
+      ClassType *CB = llvm::cast<ClassRefType>(B)->getClass();
+      return CA->inheritsFrom(CB) || CB->inheritsFrom(CA);
+    }
+    if ((A->isInterface() && B->isNil()) || (A->isNil() && B->isInterface()))
+      return true;
+    if (A->isInterface() && B->isInterface()) { // related interfaces
+      auto *IA = llvm::cast<InterfaceType>(A), *IB = llvm::cast<InterfaceType>(B);
+      return IA->inheritsFrom(IB) || IB->inheritsFrom(IA);
+    }
     if (A->isClass() && B->isClass()) // related classes (objfpc)
       return llvm::cast<ClassType>(A)->inheritsFrom(llvm::cast<ClassType>(B)) ||
              llvm::cast<ClassType>(B)->inheritsFrom(llvm::cast<ClassType>(A));
@@ -397,6 +523,23 @@ class Checker : public StmtVisitor<Checker>,
     if (auto *TC = llvm::dyn_cast<ClassType>(Target))
       return Value->isNil() || (Value->isClass() &&
                                 llvm::cast<ClassType>(Value)->inheritsFrom(TC));
+    // Interfaces: nil, a descendant interface, an object of a class that
+    // implements it (listed by the class or an ancestor).
+    if (auto *TI = llvm::dyn_cast<InterfaceType>(Target)) {
+      if (Value->isNil())
+        return true;
+      if (auto *VI = llvm::dyn_cast<InterfaceType>(Value))
+        return VI->inheritsFrom(TI);
+      if (auto *VC = llvm::dyn_cast<ClassType>(Value))
+        return VC->findInterface(TI) != nullptr;
+      return false;
+    }
+    // Class references: the class or a descendant, or nil.
+    if (auto *TR = llvm::dyn_cast<ClassRefType>(Target))
+      return Value->isNil() ||
+             (Value->isClassRef() &&
+              llvm::cast<ClassRefType>(Value)->getClass()->inheritsFrom(
+                  TR->getClass()));
     if (Target->isPointer() && Value->isClass())
       return llvm::cast<PointerType>(Target)->isUntyped();
     if (Target->isShortString() && Value->isStringish())
@@ -427,8 +570,10 @@ class Checker : public StmtVisitor<Checker>,
       return D && (llvm::isa<VarDecl>(D) || llvm::isa<FieldDecl>(D));
     }
     if (auto *I = llvm::dyn_cast<IndexExpr>(E))
-      return isVariableReference(I->getBase());
+      return !I->getProperty() && isVariableReference(I->getBase());
     if (auto *F = llvm::dyn_cast<FieldExpr>(E)) {
+      if (llvm::isa_and_nonnull<VarDecl>(F->getMember()))
+        return true; // a class variable
       // obj.f is a variable like p^.f, whatever obj is (objfpc).
       if (isObject(F->getBase()))
         return llvm::isa_and_nonnull<FieldDecl>(F->getMember());
@@ -448,9 +593,12 @@ class Checker : public StmtVisitor<Checker>,
   static VarDecl *constParamRoot(Expr *E) {
     while (true) {
       if (auto *I = llvm::dyn_cast<IndexExpr>(E)) {
+        if (I->getProperty())
+          return nullptr;
         E = I->getBase();
       } else if (auto *F = llvm::dyn_cast<FieldExpr>(E)) {
-        if (isObject(F->getBase()))
+        if (isObject(F->getBase()) ||
+            llvm::isa_and_nonnull<VarDecl>(F->getMember()))
           return nullptr;
         E = F->getBase();
       } else if (auto *P = llvm::dyn_cast<ParenExpr>(E)) {
@@ -933,6 +1081,29 @@ class Checker : public StmtVisitor<Checker>,
                   {TS->getRange()});
       return errorType();
 
+    case TypeSpec::TS_ClassRef: { // class of TFoo (TFoo may be forward)
+      const Identifier &Id = llvm::cast<ClassRefTypeSpec>(TS)->getClassName();
+      Decl *D = Cur->lookup(Id.Name);
+      auto *TD = llvm::dyn_cast_or_null<TypeDecl>(D);
+      if (TD && TD->getType() && TD->getType()->isError())
+        return errorType();
+      auto *C = TD ? llvm::dyn_cast_or_null<ClassType>(TD->getType()) : nullptr;
+      if (!C) {
+        if (!D)
+          Diags.error(Id.Loc,
+                      "unknown class name '" + Id.Spelling + "'" +
+                          didYouMean(Id.Name),
+                      {Id.getRange()});
+        else {
+          Diags.error(Id.Loc, "'" + Id.Spelling + "' is not a class type",
+                      {Id.getRange()});
+          noteDeclaredHere(D);
+        }
+        return errorType();
+      }
+      return Ctx.create<ClassRefType>(C);
+    }
+
     case TypeSpec::TS_Record: {
       auto *RS = llvm::cast<RecordTypeSpec>(TS);
       llvm::SmallVector<FieldDecl *, 16> All;
@@ -1011,6 +1182,8 @@ class Checker : public StmtVisitor<Checker>,
   void declareType(TypeDecl *TD) {
     if (auto *CS = llvm::dyn_cast<ClassTypeSpec>(TD->getTypeSpec()))
       return declareClass(TD, CS);
+    if (auto *IS = llvm::dyn_cast<InterfaceTypeSpec>(TD->getTypeSpec()))
+      return declareInterface(TD, IS);
     TD->setType(resolveType(TD->getTypeSpec(), TD->getName().Spelling));
     declare(TD);
   }
@@ -1072,6 +1245,175 @@ class Checker : public StmtVisitor<Checker>,
                 TObjectTy->getVTable(), CurModule);
     }
     PendingClasses.clear();
+    for (auto &[TD, I] : PendingInterfaces) {
+      Diags.error(TD->getName().Loc,
+                  "interface '" + TD->getName().Spelling +
+                      "' is declared forward but never defined",
+                  {TD->getName().getRange()});
+      I->define(nullptr, {}, {}, CurModule);
+    }
+    PendingInterfaces.clear();
+  }
+
+  //===--------------------------------------------------------------------===//
+  // Interfaces (objfpc, CORBA style)
+  //===--------------------------------------------------------------------===//
+
+  /// IFoo = interface ... end;  /  IFoo = interface;
+  void declareInterface(TypeDecl *TD, InterfaceTypeSpec *IS) {
+    const Identifier &Id = TD->getName();
+    if (CurRoutine) {
+      Diags.error(Id.Loc,
+                  "interface '" + Id.Spelling +
+                      "' must be declared at program or unit level",
+                  {Id.getRange()});
+      TD->setType(errorType());
+      IS->setResolved(errorType());
+      declare(TD);
+      return;
+    }
+    if (!IS->isForward())
+      for (auto It = PendingInterfaces.begin(); It != PendingInterfaces.end(); ++It)
+        if (It->first->getName().Name == Id.Name &&
+            Cur->lookupOwn(Id.Name) == It->first) {
+          InterfaceType *I = It->second;
+          PendingInterfaces.erase(It);
+          TD->setType(I);
+          IS->setResolved(I);
+          defineInterface(I, IS);
+          return;
+        }
+    auto *I = Ctx.create<InterfaceType>();
+    I->setDeclName(Id.Spelling);
+    TD->setType(I);
+    IS->setResolved(I);
+    declare(TD);
+    if (IS->isForward()) {
+      PendingInterfaces.push_back({TD, I});
+      return;
+    }
+    defineInterface(I, IS);
+  }
+
+  /// The interface named Id, or null after a diagnostic.
+  InterfaceType *lookupInterface(const Identifier &Id) {
+    Decl *D = Cur->lookup(Id.Name);
+    if (!D) {
+      Diags.error(Id.Loc,
+                  "unknown interface name '" + Id.Spelling + "'" +
+                      didYouMean(Id.Name),
+                  {Id.getRange()});
+      return nullptr;
+    }
+    auto *TD = llvm::dyn_cast<TypeDecl>(D);
+    if (TD && TD->getType() && TD->getType()->isError())
+      return nullptr;
+    auto *I = TD ? llvm::dyn_cast_or_null<InterfaceType>(TD->getType()) : nullptr;
+    if (!I) {
+      Diags.error(Id.Loc, "'" + Id.Spelling + "' is not an interface type",
+                  {Id.getRange()});
+      noteDeclaredHere(D);
+      return nullptr;
+    }
+    if (!I->isDefined()) {
+      Diags.error(Id.Loc,
+                  "interface '" + Id.Spelling +
+                      "' is not defined yet (only declared forward)",
+                  {Id.getRange()});
+      return nullptr;
+    }
+    return I;
+  }
+
+  /// The method Name of I or its nearest ancestor declaring it (the first
+  /// of its overloads).
+  static RoutineDecl *findInterfaceMethod(InterfaceType *I, llvm::StringRef Name) {
+    for (; I; I = I->getParent())
+      for (RoutineDecl *R : I->getMethods())
+        if (R->getName().Name == Name)
+          return R;
+    return nullptr;
+  }
+
+  void defineInterface(InterfaceType *I, InterfaceTypeSpec *IS) {
+    InterfaceType *Parent = nullptr;
+    if (IS->getParent().isValid()) {
+      const Identifier &PId = IS->getParent();
+      if (PId.Name == I->getDeclName().lower())
+        Diags.error(PId.Loc,
+                    "interface '" + I->getName() + "' cannot inherit from itself",
+                    {PId.getRange()});
+      else
+        Parent = lookupInterface(PId);
+    }
+    llvm::SmallVector<RoutineDecl *, 8> Own, All;
+    if (Parent)
+      All.append(Parent->getAllMethods().begin(), Parent->getAllMethods().end());
+    llvm::StringMap<RoutineDecl *> Seen;
+    for (Decl *M : IS->getMembers()) {
+      auto *R = llvm::cast<RoutineDecl>(M);
+      const Identifier &Id = R->getName();
+      R->setInterface(I);
+      R->setParent(nullptr);
+      resolveSignature(R);
+      if (R->isVirtual() || R->isOverride() || R->isAbstract()) {
+        Diags.error(Id.Loc,
+                    "the methods of an interface cannot be 'virtual', "
+                    "'override' or 'abstract'",
+                    {Id.getRange()});
+        continue;
+      }
+      if (RoutineDecl *Inh = Parent ? findInterfaceMethod(Parent, Id.Name) : nullptr) {
+        Diags.error(Id.Loc,
+                    "'" + Id.Spelling + "' is already declared in interface '" +
+                        Inh->getInterface()->getName() + "'",
+                    {Id.getRange()});
+        noteDeclaredHere(Inh);
+        continue;
+      }
+      if (RoutineDecl *Prev = Seen.lookup(Id.Name)) {
+        if (!addOverload(Prev, R))
+          continue;
+      } else {
+        Seen[Id.Name] = R;
+      }
+      R->setVMTIndex(static_cast<int>(All.size()));
+      All.push_back(R);
+      Own.push_back(R);
+    }
+    I->define(Parent, Ctx.copyArray<RoutineDecl *>(Own),
+              Ctx.copyArray<RoutineDecl *>(All), CurModule);
+  }
+
+  /// The methods of class C implementing the methods of interface I (by
+  /// slot): methods (not class methods) of C or its ancestors with the same
+  /// name and heading. Where: the interface's name in C's declaration, to
+  /// report a missing one (null: inherited, already checked).
+  llvm::ArrayRef<RoutineDecl *> implementInterface(ClassType *C, InterfaceType *I,
+                                                   const Identifier *Where) {
+    llvm::SmallVector<RoutineDecl *, 8> Impl;
+    for (RoutineDecl *M : I->getAllMethods()) {
+      RoutineDecl *Found = nullptr;
+      for (const ClassType *X = C; X && !Found; X = X->getParent())
+        for (auto *R = llvm::dyn_cast_or_null<RoutineDecl>(
+                 X->findOwnMember(M->getName().Name));
+             R && !Found; R = R->getNextOverload())
+          if (R->getMethodKind() == MethodKind::Method && !R->isClassMethod() &&
+              R->getBuiltin() == TObjectMethod::None &&
+              R->isFunction() == M->isFunction() && sameSignature(R, M) &&
+              (!M->isFunction() || R->getResultType() == M->getResultType()))
+            Found = R;
+      if (!Found && Where) {
+        Diags.error(Where->Loc,
+                    "class '" + C->getName() + "' does not implement '" +
+                        M->getInterface()->getName() + "." +
+                        M->getName().Spelling.str() + "'",
+                    {Where->getRange()});
+        noteDeclaredHere(M);
+      }
+      Impl.push_back(Found);
+    }
+    return Ctx.copyArray<RoutineDecl *>(Impl);
   }
 
   /// The class named Id (a parent class or a method's class), or null after
@@ -1108,29 +1450,52 @@ class Checker : public StmtVisitor<Checker>,
   void makeSelf(RoutineDecl *R, ClassType *C) {
     Identifier Name = memberName("Self");
     auto *Self = Ctx.create<VarDecl>(Name, nullptr, VarDecl::ValueParam);
-    Self->setType(C);
+    // In a class method, Self is the class (a class reference).
+    Self->setType(R->isClassMethod() ? static_cast<Type *>(classRefOf(C)) : C);
     Self->setOwner(R);
     R->setSelfVar(Self);
   }
 
   static bool sameHeading(RoutineDecl *A, RoutineDecl *B) {
     return A->getMethodKind() == B->getMethodKind() &&
+           A->isClassMethod() == B->isClassMethod() &&
            A->isFunction() == B->isFunction() && sameSignature(A, B) &&
            (!A->isFunction() || A->getResultType() == B->getResultType());
   }
 
   void defineClass(ClassType *C, ClassTypeSpec *CS) {
     ClassType *Parent = TObjectTy;
+    // class(TParent, I1, I2): the interfaces it implements (the first name
+    // may be one too).
+    llvm::SmallVector<std::pair<InterfaceType *, const Identifier *>, 2> Listed;
+    auto AddInterface = [&](const Identifier &Id) {
+      InterfaceType *I = lookupInterface(Id);
+      if (!I)
+        return;
+      for (auto &[J, _] : Listed)
+        if (J == I) {
+          Diags.error(Id.Loc,
+                      "interface '" + Id.Spelling + "' is listed twice",
+                      {Id.getRange()});
+          return;
+        }
+      Listed.push_back({I, &Id});
+    };
     if (CS->getParent().isValid()) {
       const Identifier &PId = CS->getParent();
+      auto *TD = llvm::dyn_cast_or_null<TypeDecl>(Cur->lookup(PId.Name));
       if (PId.Name == C->getDeclName().lower()) {
         Diags.error(PId.Loc,
                     "class '" + C->getName() + "' cannot inherit from itself",
                     {PId.getRange()});
+      } else if (TD && llvm::isa_and_nonnull<InterfaceType>(TD->getType())) {
+        AddInterface(PId);
       } else if (ClassType *P = lookupClass(PId)) {
         Parent = P;
       }
     }
+    for (const Identifier &Id : CS->getInterfaces())
+      AddInterface(Id);
 
     llvm::SmallVector<Decl *, 16> Members;
     llvm::SmallVector<FieldDecl *, 16> Fields(Parent->getAllFields().begin(),
@@ -1138,13 +1503,18 @@ class Checker : public StmtVisitor<Checker>,
     llvm::SmallVector<RoutineDecl *, 8> VTable(Parent->getVTable().begin(),
                                                Parent->getVTable().end());
     llvm::StringMap<Decl *> Own;
+    PropertyDecl *DefaultProp = nullptr;
     for (Decl *M : CS->getMembers()) {
       const Identifier &MN = M->getName();
+      RoutineDecl *OverloadOf = nullptr; // objfpc: an overloaded method
       if (Decl *Prev = Own.lookup(MN.Name)) {
-        Diags.error(MN.Loc, "redefinition of '" + MN.Spelling + "'",
-                    {MN.getRange()});
-        Diags.note(Prev->getLocation(), "previous definition is here");
-        continue;
+        OverloadOf = llvm::dyn_cast<RoutineDecl>(Prev);
+        if (!LangOpts.ObjKeywords || !OverloadOf || !llvm::isa<RoutineDecl>(M)) {
+          Diags.error(MN.Loc, "redefinition of '" + MN.Spelling + "'",
+                      {MN.getRange()});
+          Diags.note(Prev->getLocation(), "previous definition is here");
+          continue;
+        }
       }
       const ClassType *Owner = nullptr;
       Decl *Inherited = Parent->findMember(MN.Name, &Owner);
@@ -1157,7 +1527,8 @@ class Checker : public StmtVisitor<Checker>,
         noteDeclaredHere(Inherited);
         continue;
       }
-      Own[MN.Name] = M;
+      if (!OverloadOf)
+        Own[MN.Name] = M;
       Members.push_back(M);
 
       if (auto *F = llvm::dyn_cast<FieldDecl>(M)) {
@@ -1168,17 +1539,48 @@ class Checker : public StmtVisitor<Checker>,
         Fields.push_back(F);
         continue;
       }
+      if (auto *V = llvm::dyn_cast<VarDecl>(M)) { // class var: static storage
+        V->setType(resolveType(V->getTypeSpec()));
+        V->setVarClass(C);
+        if (containsFile(V->getType()))
+          Diags.error(MN.Loc, "a class variable cannot be a file",
+                      {MN.getRange()});
+        continue;
+      }
       if (auto *R = llvm::dyn_cast<RoutineDecl>(M)) {
         defineMethod(C, Parent, R,
                      llvm::dyn_cast_or_null<RoutineDecl>(Inherited), Owner,
                      VTable);
+        if (OverloadOf && !addOverload(OverloadOf, R)) {
+          R->setClass(nullptr); // rejected: not a member
+          Members.pop_back();
+        }
         continue;
       }
-      definePropertyAccessors(C, llvm::cast<PropertyDecl>(M), Own, Parent);
+      auto *P = llvm::cast<PropertyDecl>(M);
+      definePropertyAccessors(C, P, Own, Parent);
+      if (P->isDefault()) {
+        if (DefaultProp) {
+          Diags.error(MN.Loc,
+                      "class '" + C->getName() +
+                          "' already has a default property",
+                      {MN.getRange()});
+          noteDeclaredHere(DefaultProp);
+        }
+        DefaultProp = P;
+      }
     }
     C->define(Parent, Ctx.copyArray<Decl *>(Members),
               Ctx.copyArray<FieldDecl *>(Fields),
               Ctx.copyArray<RoutineDecl *>(VTable), CurModule);
+    // The interfaces: the parent's (with this class's overrides), then its own.
+    llvm::SmallVector<InterfaceImpl, 4> Impls;
+    for (const InterfaceImpl &PI : Parent->getInterfaces())
+      Impls.push_back({PI.Intf, implementInterface(C, PI.Intf, nullptr)});
+    for (auto &[I, Where] : Listed)
+      if (!Parent->findInterface(I))
+        Impls.push_back({I, implementInterface(C, I, Where)});
+    C->setInterfaces(Ctx.copyArray<InterfaceImpl>(Impls));
   }
 
   void defineMethod(ClassType *C, ClassType *Parent, RoutineDecl *R,
@@ -1191,10 +1593,14 @@ class Checker : public StmtVisitor<Checker>,
     resolveSignature(R);
     makeSelf(R, C);
     bool Virtual = R->isVirtual(), Override = R->isOverride();
-    if (R->isConstructor() && (Virtual || Override)) {
-      Diags.error(Id.Loc, "virtual constructors are not supported",
-                  {Id.getRange()});
-      return;
+    // Of overloaded inherited methods, the one with this heading.
+    if (Inherited && Inherited->isOverloaded()) {
+      RoutineDecl *Match = nullptr;
+      for (RoutineDecl *X = Inherited; X; X = X->getNextOverload())
+        if (sameSignature(X, R))
+          Match = X;
+      if (Match || Override)
+        Inherited = Match;
     }
     if (Virtual && Override) {
       Diags.error(Id.Loc,
@@ -1240,15 +1646,50 @@ class Checker : public StmtVisitor<Checker>,
     }
   }
 
-  /// property P: T read R write W -- R: a field of type T or a function
-  /// without parameters returning T; W: a field of type T or a procedure
-  /// with one value or const parameter of type T. Both must be declared
-  /// before the property.
+  /// property P[params]: T [index N] read R write W -- R: a field of type T
+  /// (a plain property) or a function returning T; W: a field of type T or
+  /// a procedure taking the value (a value or const parameter of type T).
+  /// The methods first take the index parameters of an array property
+  /// (same types and kinds), then N (an integer) for an indexed property.
+  /// Both must be declared before the property.
   void definePropertyAccessors(ClassType *C, PropertyDecl *P,
                                const llvm::StringMap<Decl *> &Own,
                                ClassType *Parent) {
     Type *T = resolveType(P->getTypeSpec());
     P->setType(T);
+    bool ParamsOK = true;
+    for (VarDecl *Param : P->getParams()) {
+      Param->setType(resolveType(Param->getTypeSpec()));
+      if (Param->getType()->isError())
+        ParamsOK = false;
+      if (Param->isVarParam()) {
+        Diags.error(Param->getLocation(),
+                    "the index parameters of a property cannot be 'var'",
+                    {Param->getName().getRange()});
+        ParamsOK = false;
+      }
+    }
+    if (Expr *E = P->getIndexSpec()) {
+      Type *IT = check(E);
+      if (!IT->isError() && (!IT->isIntegerLike() || !fold(E))) {
+        Diags.error(E->getBeginLoc(),
+                    "the index of a property must be an integer constant",
+                    {E->getRange()});
+        ParamsOK = false;
+      }
+    }
+    if (Expr *E = P->getDefaultValue()) {
+      Type *DT = check(E);
+      if (!DT->isError() && !T->isError() && (!fold(E) || !isAssignable(T, DT)))
+        Diags.error(E->getBeginLoc(),
+                    "the default value of property '" + P->getName().Spelling +
+                        "' must be a constant of type " + quoted(T),
+                    {E->getRange()});
+    }
+    if (P->isDefault() && !P->isArrayProperty())
+      Diags.error(P->getLocation(),
+                  "only an array property can be the default property",
+                  {P->getName().getRange()});
     if (!P->getReadName().isValid() && !P->getWriteName().isValid()) {
       Diags.error(P->getLocation(),
                   "property '" + P->getName().Spelling +
@@ -1267,20 +1708,60 @@ class Checker : public StmtVisitor<Checker>,
                     {Id.getRange()});
       return D;
     };
+    // An accessor method's leading parameters: the indexes, then N.
+    bool Plain = !P->isArrayProperty() && !P->getIndexSpec();
+    auto IndexParamsMatch = [&](RoutineDecl *R) {
+      auto Params = R->getParams();
+      size_t N = P->getParams().size();
+      if (Params.size() < N + (P->getIndexSpec() ? 1 : 0))
+        return false;
+      for (size_t I = 0; I < N; ++I)
+        if (Params[I]->getType() != P->getParams()[I]->getType() ||
+            Params[I]->getVarKind() != P->getParams()[I]->getVarKind())
+          return false;
+      if (P->getIndexSpec())
+        return !Params[N]->isVarParam() && Params[N]->getType() &&
+               Params[N]->getType()->isIntegerLike();
+      return true;
+    };
+    size_t Leading = P->getParams().size() + (P->getIndexSpec() ? 1 : 0);
+    auto Wanted = [&](bool IsRead) {
+      std::string S;
+      for (VarDecl *Param : P->getParams())
+        S += std::string(S.empty() ? "" : "; ") +
+             (Param->isConstParam() ? "const " : "") +
+             Param->getName().Spelling.str() + ": " +
+             Param->getType()->getName();
+      if (P->getIndexSpec())
+        S += std::string(S.empty() ? "" : "; ") + "index: integer";
+      if (!IsRead)
+        S += std::string(S.empty() ? "" : "; ") + "value: " + T->getName();
+      return IsRead ? "a function (" + S + "): " + T->getName()
+                    : "a procedure (" + S + ")";
+    };
     Decl *Read = nullptr, *Write = nullptr;
     if (P->getReadName().isValid() && (Read = Find(P->getReadName()))) {
       const Identifier &Id = P->getReadName();
       auto *F = llvm::dyn_cast<FieldDecl>(Read);
       auto *R = llvm::dyn_cast<RoutineDecl>(Read);
-      bool OK = (F && F->getType() == T) ||
-                (R && R->isFunction() && R->getParams().empty() &&
-                 R->getResultType() == T);
-      if (!OK && !T->isError()) {
+      auto Fits = [&](RoutineDecl *X) {
+        return X->isFunction() && X->getParams().size() == Leading &&
+               IndexParamsMatch(X) && X->getResultType() == T;
+      };
+      for (RoutineDecl *X = R; R && R->isOverloaded() && X; X = X->getNextOverload())
+        if (Fits(X)) { // of overloaded methods, the one that fits
+          Read = R = X;
+          break;
+        }
+      bool OK = (Plain && F && F->getType() == T) || (R && Fits(R));
+      if (!OK && !T->isError() && ParamsOK) {
         Diags.error(Id.Loc,
                     "'" + Id.Spelling + "' cannot be read as property '" +
                         P->getName().Spelling + "' of type " + quoted(T) +
-                        " (use a field of that type or a function without "
-                        "parameters returning it)",
+                        (Plain ? std::string(" (use a field of that type or a "
+                                             "function without parameters "
+                                             "returning it)")
+                               : " (use " + Wanted(true) + ")"),
                     {Id.getRange()});
         Read = nullptr;
       }
@@ -1289,22 +1770,40 @@ class Checker : public StmtVisitor<Checker>,
       const Identifier &Id = P->getWriteName();
       auto *F = llvm::dyn_cast<FieldDecl>(Write);
       auto *R = llvm::dyn_cast<RoutineDecl>(Write);
-      bool OK = (F && F->getType() == T) ||
-                (R && R->getMethodKind() == MethodKind::Method &&
-                 R->isProcedure() && R->getParams().size() == 1 &&
-                 !R->getParams()[0]->isVarParam() &&
-                 R->getParams()[0]->getType() == T);
-      if (!OK && !T->isError()) {
+      auto Fits = [&](RoutineDecl *X) {
+        return X->getMethodKind() == MethodKind::Method && X->isProcedure() &&
+               X->getParams().size() == Leading + 1 && IndexParamsMatch(X) &&
+               !X->getParams()[Leading]->isVarParam() &&
+               X->getParams()[Leading]->getType() == T;
+      };
+      for (RoutineDecl *X = R; R && R->isOverloaded() && X; X = X->getNextOverload())
+        if (Fits(X)) { // of overloaded methods, the one that fits
+          Write = R = X;
+          break;
+        }
+      bool OK = (Plain && F && F->getType() == T) || (R && Fits(R));
+      if (!OK && !T->isError() && ParamsOK) {
         Diags.error(Id.Loc,
                     "'" + Id.Spelling + "' cannot be written as property '" +
                         P->getName().Spelling + "' of type " + quoted(T) +
-                        " (use a field of that type or a procedure with one "
-                        "parameter of it)",
+                        (Plain ? std::string(" (use a field of that type or a "
+                                             "procedure with one parameter of "
+                                             "it)")
+                               : " (use " + Wanted(false) + ")"),
                     {Id.getRange()});
         Write = nullptr;
       }
     }
     P->setAccessors(Read, Write);
+  }
+
+  /// The default property of C or its nearest ancestor declaring one.
+  static PropertyDecl *defaultProperty(const ClassType *C) {
+    for (; C; C = C->getParent())
+      for (Decl *M : C->getMembers())
+        if (auto *P = llvm::dyn_cast<PropertyDecl>(M); P && P->isDefault())
+          return P;
+    return nullptr;
   }
 
   /// procedure TFoo.Bar ...; begin ... end;  -- the body of a method.
@@ -1328,6 +1827,24 @@ class Checker : public StmtVisitor<Checker>,
                   {Id.getRange()});
       return;
     }
+    if (M->isOverloaded()) { // objfpc: the method with this heading
+      for (VarDecl *P : R->getParams())
+        P->setType(resolveType(P->getTypeSpec()));
+      RoutineDecl *Match = nullptr;
+      for (RoutineDecl *X = M; X; X = X->getNextOverload())
+        if (sameSignature(X, R) && !X->getBody())
+          Match = X;
+      if (!Match) {
+        Diags.error(Id.Loc,
+                    "heading of '" + qualified(C, M->getName()) +
+                        "' does not match any of its overloads",
+                    {Id.getRange()});
+        for (RoutineDecl *X = M; X; X = X->getNextOverload())
+          Diags.note(X->getLocation(), "candidate: " + routineHeading(X));
+        return;
+      }
+      M = Match;
+    }
     std::string QName = qualified(C, M->getName());
     if (C->getModule() != CurModule) {
       Diags.error(Id.Loc,
@@ -1337,9 +1854,11 @@ class Checker : public StmtVisitor<Checker>,
       return;
     }
     if (M->getMethodKind() != R->getMethodKind() ||
-        M->isFunction() != R->isFunction()) {
+        M->isFunction() != R->isFunction() ||
+        M->isClassMethod() != R->isClassMethod()) {
       Diags.error(Id.Loc,
-                  "'" + QName + "' was declared as a " + M->getKindName(),
+                  "'" + QName + "' was declared as a " +
+                      (M->isClassMethod() ? "class " : "") + M->getKindName(),
                   {Id.getRange()});
       noteDeclaredHere(M);
       return;
@@ -1401,36 +1920,76 @@ class Checker : public StmtVisitor<Checker>,
     return nullptr;
   }
 
-  /// The class whose members a with context exposes (null for records).
+  /// The class whose members a with context exposes (null for records):
+  /// an object's, or in a class method Self's (a class reference).
   static ClassType *classOf(WithContext *W) {
-    return W ? llvm::dyn_cast_or_null<ClassType>(W->Record->getType()) : nullptr;
+    if (!W)
+      return nullptr;
+    if (auto *R = llvm::dyn_cast_or_null<ClassRefType>(W->Record->getType()))
+      return R->getClass();
+    return llvm::dyn_cast_or_null<ClassType>(W->Record->getType());
+  }
+
+  /// Is D an instance member (a field, a property, a method that is not a
+  /// class method or constructor)? Class methods cannot use them.
+  static bool isInstanceMember(Decl *D) {
+    if (llvm::isa<FieldDecl>(D) || llvm::isa<PropertyDecl>(D))
+      return true;
+    auto *R = llvm::dyn_cast<RoutineDecl>(D);
+    return R && R->isMethod() && !R->isClassMethod() && !R->isConstructor();
+  }
+
+  /// In a class method, Self is a class: a constructor called through it
+  /// creates an object of that class (its static type: Self's class).
+  static ClassType *constructedThroughSelf(RoutineDecl *R, WithContext *W) {
+    if (!R->isConstructor() || !W || !W->IsSelf)
+      return nullptr;
+    auto *CR = llvm::dyn_cast_or_null<ClassRefType>(W->Record->getType());
+    return CR ? CR->getClass() : nullptr;
   }
 
   /// Reports use of a private or protected member D of class Owner where it
   /// is not visible. Private members are visible in the program or unit
-  /// declaring the class, protected ones also in methods of descendants.
+  /// declaring the class, protected ones also in methods of descendants;
+  /// strict private members only in methods of the class, strict protected
+  /// ones also in methods of descendants.
   void checkMemberAccess(Decl *D, const ClassType *Owner, const Identifier &Id) {
     Visibility V = D->getVisibility();
-    if (V == Visibility::Public || V == Visibility::Published || !Owner ||
-        Owner->getModule() == CurModule)
+    if (V == Visibility::Public || V == Visibility::Published || !Owner)
       return;
-    if (V == Visibility::Protected)
-      if (RoutineDecl *M = enclosingMethod(); M && M->getClass()->inheritsFrom(Owner))
-        return;
+    bool Strict = V == Visibility::StrictPrivate || V == Visibility::StrictProtected;
+    if (!Strict && Owner->getModule() == CurModule)
+      return;
+    RoutineDecl *M = enclosingMethod();
+    if (M && (V == Visibility::StrictPrivate ? M->getClass() == Owner
+              : V != Visibility::Private  ? M->getClass()->inheritsFrom(Owner)
+                                          : false))
+      return;
+    const char *What = V == Visibility::Private           ? "private"
+                       : V == Visibility::Protected       ? "protected"
+                       : V == Visibility::StrictPrivate   ? "strict private"
+                                                          : "strict protected";
     Diags.error(Id.Loc,
-                "'" + Id.Spelling + "' is a " +
-                    (V == Visibility::Private ? "private" : "protected") +
-                    " member of '" + Owner->getName() + "'",
+                "'" + Id.Spelling + "' is a " + What + " member of '" +
+                    Owner->getName() + "'",
                 {Id.getRange()});
     noteDeclaredHere(D);
   }
 
-  /// Visibility of a member found by name through a class scope.
+  /// Visibility of a member found by name through a class scope; in a
+  /// class method (Self is a class), only class members are usable.
   void checkScopeAccess(Decl *D, WithContext *W, const Identifier &Id) {
     if (ClassType *C = classOf(W)) {
       const ClassType *Owner = nullptr;
       C->findMember(Id.Name, &Owner);
       checkMemberAccess(D, Owner, Id);
+      if (W->IsSelf && W->Record->getType()->isClassRef() && isInstanceMember(D)) {
+        Diags.error(Id.Loc,
+                    "instance member '" + Id.Spelling +
+                        "' cannot be used in a class method",
+                    {Id.getRange()});
+        noteDeclaredHere(D);
+      }
     }
   }
 
@@ -1616,12 +2175,38 @@ class Checker : public StmtVisitor<Checker>,
     if (R->getClassName().isValid())
       return declareMethodBody(R);
     const Identifier &Id = R->getName();
+    if (R->isClassMethod())
+      Diags.error(Id.Loc,
+                  "only a method can be a class " + std::string(R->getKindName()) +
+                      "; implement it as '" + R->getKindName() + " TClass." +
+                      Id.Spelling.str() + "'",
+                  {Id.getRange()});
 
     // The definition of an earlier `forward` declaration?
     auto *Fwd = llvm::dyn_cast_or_null<RoutineDecl>(Cur->lookupOwn(Id.Name));
-    if (!Fwd && CurUnitInterface && !CurRoutine) // an interface heading
+    bool InInterface = false;
+    if (!Fwd && CurUnitInterface && !CurRoutine) { // an interface heading
       Fwd = llvm::dyn_cast_or_null<RoutineDecl>(
           CurUnitInterface->lookupOwn(Id.Name));
+      InInterface = Fwd != nullptr;
+    }
+    // objfpc: of overloaded routines, the one with this heading.
+    if (Fwd && Fwd->isOverloaded() && R->getBody()) {
+      for (VarDecl *P : R->getParams())
+        P->setType(resolveType(P->getTypeSpec()));
+      RoutineDecl *Match = nullptr;
+      for (RoutineDecl *X = Fwd; X; X = X->getNextOverload())
+        if (X->isForward() && !X->getBody() && sameSignature(X, R))
+          Match = X;
+      Fwd = Match;
+      if (!Match && InInterface) {
+        Diags.error(Id.Loc,
+                    "overloads of '" + Id.Spelling +
+                        "' must all be declared in the interface",
+                    {Id.getRange()});
+        return;
+      }
+    }
     if (Fwd && Fwd->isForward() && !Fwd->getBody() && R->getBody()) {
       if (Fwd->isFunction() != R->isFunction()) {
         Diags.error(Id.Loc,
@@ -1652,11 +2237,222 @@ class Checker : public StmtVisitor<Checker>,
     }
 
     resolveSignature(R);
-    declare(R);
+    if (InInterface && LangOpts.ObjKeywords) { // a different heading
+      Diags.error(Id.Loc,
+                  "overloads of '" + Id.Spelling +
+                      "' must all be declared in the interface",
+                  {Id.getRange()});
+      return;
+    }
+    if (!declareRoutineName(R))
+      return;
     if (R->isExternal())
       checkExternal(R);
     if (R->getBody())
       checkRoutineBody(R);
+  }
+
+  /// Declares R; in objfpc, another routine of its name in the same scope
+  /// makes it an overload (with other parameters). False if R was rejected
+  /// as such (its body is not checked then).
+  bool declareRoutineName(RoutineDecl *R) {
+    if (LangOpts.ObjKeywords)
+      if (auto *First = llvm::dyn_cast_or_null<RoutineDecl>(
+              Cur->lookupOwn(R->getName().Name)))
+        return addOverload(First, R);
+    declare(R);
+    return true;
+  }
+
+  /// R (resolved) joins the overloads First...: its parameters must differ.
+  bool addOverload(RoutineDecl *First, RoutineDecl *R) {
+    for (RoutineDecl *X = First; X; X = X->getNextOverload())
+      if (sameSignature(X, R)) {
+        const Identifier &Id = R->getName();
+        Diags.error(Id.Loc,
+                    "redefinition of '" + Id.Spelling +
+                        "' (overloads must differ in their parameters)",
+                    {Id.getRange()});
+        Diags.note(X->getLocation(), "previous definition is here");
+        return false;
+      }
+    First->addOverload(R);
+    return true;
+  }
+
+  //===--------------------------------------------------------------------===//
+  // Overload resolution (objfpc)
+  //===--------------------------------------------------------------------===//
+
+  /// The routines a call of First's name may mean: First's overloads; for a
+  /// method with the `overload` directive also those of its ancestors that
+  /// it does not override.
+  void collectOverloads(RoutineDecl *First,
+                        llvm::SmallVectorImpl<RoutineDecl *> &Out) {
+    bool Directive = false;
+    size_t Start = Out.size();
+    for (RoutineDecl *X = First; X; X = X->getNextOverload()) {
+      Out.push_back(X);
+      Directive |= X->hasOverloadDirective();
+    }
+    if (!Directive || !First->isMethod() || !First->getClass())
+      return;
+    ClassType *Parent = First->getClass()->getParent();
+    auto *Up = Parent ? llvm::dyn_cast_or_null<RoutineDecl>(
+                            Parent->findMember(First->getName().Name))
+                      : nullptr;
+    if (!Up)
+      return;
+    llvm::SmallVector<RoutineDecl *, 4> Inherited;
+    collectOverloads(Up, Inherited);
+    for (RoutineDecl *Y : Inherited)
+      if (llvm::none_of(llvm::ArrayRef<RoutineDecl *>(Out).drop_front(Start),
+                        [&](RoutineDecl *X) { return sameSignature(X, Y); }))
+        Out.push_back(Y);
+  }
+
+  /// How far an argument of type A is from a parameter of type P (lower
+  /// is better): an exact type, a subrange of it, a wider integer type
+  /// (integer before int64), a same-size or narrower one, real, an
+  /// ancestor class (the nearest first), anything else assignable.
+  static unsigned conversionCost(Type *P, Type *A) {
+    if (P == A)
+      return 0;
+    Type *PB = P->getBase(), *AB = A->getBase();
+    if (PB == AB)
+      return 1;
+    if (PB->isInteger() && AB->isInteger()) {
+      unsigned PBits = llvm::cast<IntegerType>(PB)->getBits();
+      unsigned ABits = llvm::cast<IntegerType>(AB)->getBits();
+      if (PBits > ABits)
+        return PBits == 64 ? 3 : 2;
+      return PBits == ABits ? 4 : 5;
+    }
+    if (P->isReal() && AB->isInteger())
+      return 6;
+    if (P->isShortString() && (A->isShortString() || A->isStringLiteral()))
+      return 1;
+    if (P->isShortString() && AB->isChar())
+      return 2;
+    auto Distance = [](const ClassType *From, const ClassType *To) {
+      unsigned D = 0;
+      for (; From && From != To; From = From->getParent())
+        ++D;
+      return D;
+    };
+    if (auto *PC = llvm::dyn_cast<ClassType>(P))
+      if (auto *AC = llvm::dyn_cast<ClassType>(A))
+        return 1 + Distance(AC, PC);
+    if (auto *PR = llvm::dyn_cast<ClassRefType>(P))
+      if (auto *AR = llvm::dyn_cast<ClassRefType>(A))
+        return 1 + Distance(AR->getClass(), PR->getClass());
+    if (A->isNil())
+      return 1;
+    return 7;
+  }
+
+  /// Is Arg the name of a routine (passed for a procedural parameter)?
+  bool isRoutineName(Expr *Arg) {
+    auto *N = llvm::dyn_cast<NameRefExpr>(Arg);
+    return N && llvm::isa_and_nonnull<RoutineDecl>(Cur->lookup(N->getName().Name));
+  }
+
+  /// The cost of calling R with Args (types ArgTys; null: a routine's
+  /// name), or -1 if they do not fit.
+  int callCost(RoutineDecl *R, llvm::ArrayRef<Expr *> Args,
+               llvm::ArrayRef<Type *> ArgTys) {
+    auto Params = R->getParams();
+    if (Params.size() != Args.size())
+      return -1;
+    int Cost = 0;
+    for (size_t I = 0; I < Args.size(); ++I) {
+      Type *PT = Params[I]->getType();
+      Type *AT = ArgTys[I];
+      if (!PT || PT->isError())
+        return -1;
+      if (!AT) { // a routine's name: for a procedural parameter
+        if (!llvm::isa<RoutineType>(PT))
+          return -1;
+        continue;
+      }
+      if (Params[I]->isVarParam()) {
+        if (AT != PT || !isVariableReference(Args[I]))
+          return -1;
+        continue;
+      }
+      if (!isAssignable(PT, AT) && !isPCharLiteral(PT, Args[I]))
+        return -1;
+      Cost += static_cast<int>(conversionCost(PT, AT));
+    }
+    return Cost;
+  }
+
+  /// The routine of First's name that Args fit best: First itself unless
+  /// it is overloaded. Null after a diagnostic (no fit, or a tie).
+  RoutineDecl *resolveOverload(RoutineDecl *First, llvm::ArrayRef<Expr *> Args,
+                               const Identifier &Callee, SourceRange Range) {
+    llvm::SmallVector<RoutineDecl *, 4> Cands;
+    collectOverloads(First, Cands);
+    if (Cands.size() < 2)
+      return First;
+    llvm::SmallVector<Type *, 4> ArgTys;
+    for (Expr *A : Args) {
+      if (llvm::isa<FormattedExpr>(A))
+        return First; // reported with the call's arguments
+      Type *T = isRoutineName(A) ? nullptr : check(A);
+      if (T && T->isError())
+        return nullptr;
+      ArgTys.push_back(T);
+    }
+    RoutineDecl *Best = nullptr;
+    int BestCost = -1;
+    bool Tie = false;
+    for (RoutineDecl *R : Cands) {
+      int Cost = callCost(R, Args, ArgTys);
+      if (Cost < 0)
+        continue;
+      if (!Best || Cost < BestCost) {
+        Best = R;
+        BestCost = Cost;
+        Tie = false;
+      } else if (Cost == BestCost) {
+        Tie = true;
+      }
+    }
+    if (Best && !Tie)
+      return Best;
+    std::string Types;
+    for (size_t I = 0; I < ArgTys.size(); ++I)
+      Types += (I ? ", " : "") +
+               (ArgTys[I] ? ArgTys[I]->getName() : std::string("routine"));
+    Diags.error(Callee.Loc,
+                (Best ? "ambiguous call to overloaded '"
+                      : "no overload of '") +
+                    Callee.Spelling +
+                    (Best ? "' with arguments (" : "' takes arguments (") +
+                    Types + ")",
+                {Range});
+    for (RoutineDecl *R : Cands)
+      if (!Best || callCost(R, Args, ArgTys) == BestCost)
+        Diags.note(R->getLocation(), "candidate: " + routineHeading(R));
+    return nullptr;
+  }
+
+  /// "f(integer; var string): real" for diagnostics.
+  static std::string routineHeading(RoutineDecl *R) {
+    std::string S = R->getName().Spelling.str() + "(";
+    auto Params = R->getParams();
+    for (size_t I = 0; I < Params.size(); ++I)
+      S += std::string(I ? "; " : "") +
+           (Params[I]->isVarParam()     ? "var "
+            : Params[I]->isConstParam() ? "const "
+                                        : "") +
+           (Params[I]->getType() ? Params[I]->getType()->getName()
+                                 : std::string("?"));
+    S += ")";
+    if (R->isFunction() && R->getResultType())
+      S += ": " + R->getResultType()->getName();
+    return S;
   }
 
   /// External (C) routines: declared at the outermost level, with
@@ -1707,7 +2503,7 @@ class Checker : public StmtVisitor<Checker>,
     if (R->isMethod()) {
       auto *SelfRef = Ctx.create<NameRefExpr>(R->getSelfVar()->getName());
       SelfRef->setDecl(R->getSelfVar());
-      SelfRef->setType(R->getClass());
+      SelfRef->setType(R->getSelfVar()->getType());
       ClassScope = std::make_unique<Scope>(
           Cur, R->getClass(), Ctx.create<WithContext>(SelfRef, /*IsSelf=*/true));
     }
@@ -1819,7 +2615,13 @@ class Checker : public StmtVisitor<Checker>,
     checkMethodsImplemented(B);
     CompoundStmt *SavedBody = RoutineBody;
     RoutineBody = B.getBody();
+    unsigned SavedHandlers = HandlerDepth;
+    int SavedFinally = FinallyLoopDepth;
+    HandlerDepth = 0;
+    FinallyLoopDepth = -1;
     visitStmt(B.getBody());
+    HandlerDepth = SavedHandlers;
+    FinallyLoopDepth = SavedFinally;
     RoutineBody = SavedBody;
 
     for (Decl *D : B.getDecls())
@@ -2008,12 +2810,23 @@ class Checker : public StmtVisitor<Checker>,
   /// routine (or of another procedural parameter) with a congruent heading.
   void checkRoutineArg(Expr *Arg, VarDecl *P, RoutineType *Formal) {
     const char *Kind = Formal->isFunction() ? "function" : "procedure";
-    auto *N = llvm::dyn_cast<NameRefExpr>(Arg);
+    // Turbo/FPC: @f, as objfpc requires (the operand: a routine's name).
+    auto *A = isISO() ? nullptr : llvm::dyn_cast<AddrOfExpr>(Arg);
+    if (A)
+      A->setType(P->getType());
+    auto *N = llvm::dyn_cast<NameRefExpr>(A ? A->getOperand() : Arg);
     Decl *D = N ? Cur->lookup(N->getName().Name) : nullptr;
     llvm::ArrayRef<VarDecl *> Params;
     Type *Result = nullptr;
     bool Found = false;
     if (auto *R = llvm::dyn_cast_or_null<RoutineDecl>(D); R && !R->isMethod()) {
+      // objfpc: of overloaded routines, the one whose heading fits
+      for (RoutineDecl *X = R; R->isOverloaded() && X; X = X->getNextOverload())
+        if (congruent(Formal->getParams(), Formal->getResult(), X->getParams(),
+                      X->isFunction() ? X->getResultType() : nullptr)) {
+          D = R = X;
+          break;
+        }
       Params = R->getParams();
       Result = R->isFunction() ? R->getResultType() : nullptr;
       Found = true;
@@ -2575,7 +3388,12 @@ class Checker : public StmtVisitor<Checker>,
       return errorType();
     if ((T->isOrdinal() && AT->isOrdinal()) ||
         (T->isPointer() && (AT->isPointer() || AT->isNil() || AT->isClass())) ||
-        (T->isClass() && (AT->isClass() || AT->isPointer() || AT->isNil())))
+        (T->isClass() && (AT->isClass() || AT->isPointer() || AT->isNil())) ||
+        (T->isClassRef() && (AT->isClassRef() || AT->isNil())) ||
+        (T->isInterface() &&
+         (AT->isInterface() || AT->isNil() ||
+          (AT->isClass() &&
+           llvm::cast<ClassType>(AT)->findInterface(llvm::cast<InterfaceType>(T))))))
       return T;
     Diags.error(E->getBeginLoc(),
                 "invalid typecast from " + quoted(AT) + " to " + quoted(T) +
@@ -2668,7 +3486,8 @@ class Checker : public StmtVisitor<Checker>,
       }
       if (T->isError())
         return errorType();
-      if (!T->isPointer() && !T->isClass() && !llvm::isa<RoutineType>(T)) {
+      if (!T->isPointer() && !T->isClass() && !T->isInterface() &&
+          !llvm::isa<RoutineType>(T)) {
         Diags.error(Args[0]->getBeginLoc(),
                     "'assigned' expects a pointer or a procedural variable, not " +
                         quoted(T),
@@ -2915,6 +3734,11 @@ public:
       diagUndeclared(Callee);
       return;
     }
+    if (auto *R = llvm::dyn_cast<RoutineDecl>(D)) { // objfpc: overloads
+      D = resolveOverload(R, S->getArgs(), Callee, S->getRange());
+      if (!D)
+        return;
+    }
     S->setDecl(D);
     if (classOf(W)) {
       S->setWith(W);
@@ -2940,9 +3764,20 @@ public:
           Diags.error(Callee.Loc,
                       "'" + Callee.Spelling + "' is only allowed inside a loop",
                       {Callee.getRange()});
+        else if (FinallyLoopDepth >= 0 &&
+                 LoopDepth == static_cast<unsigned>(FinallyLoopDepth))
+          Diags.error(Callee.Loc,
+                      "'" + Callee.Spelling +
+                          "' cannot leave a 'finally' part",
+                      {Callee.getRange()});
         return;
       case BuiltinKind::Exit: {
         auto Args = S->getArgs();
+        if (FinallyLoopDepth >= 0)
+          Diags.error(Callee.Loc,
+                      "'" + Callee.Spelling +
+                          "' is not allowed in a 'finally' part",
+                      {Callee.getRange()});
         if (Args.empty())
           return;
         // exit(value) (Turbo/FPC): sets the function result, then exits.
@@ -3015,11 +3850,12 @@ public:
 
     if (auto *R = llvm::dyn_cast<RoutineDecl>(D); R && R->isFunction()) {
       for (RoutineDecl *Enc = CurRoutine; Enc; Enc = Enc->getParent())
-        if (Enc == R) {
-          Target->setDecl(R->getResultVar());
-          ResultAssigned.insert(R);
-          return R->getResultType();
-        }
+        for (RoutineDecl *X = R; X; X = X->getNextOverload()) // (overloads)
+          if (Enc == X) {
+            Target->setDecl(X->getResultVar());
+            ResultAssigned.insert(X);
+            return X->getResultType();
+          }
       Diags.error(Id.Loc,
                   "cannot assign to function '" + Id.Spelling +
                       "' outside its body",
@@ -3038,8 +3874,11 @@ public:
     }
     if (auto *F = llvm::dyn_cast<FieldDecl>(D))
       return F->getType() ? F->getType() : errorType();
-    if (auto *P = llvm::dyn_cast<PropertyDecl>(D))
+    if (auto *P = llvm::dyn_cast<PropertyDecl>(D)) {
+      if (!checkArrayPropertyUse(P, nullptr, Id))
+        return errorType();
       return checkPropertyWrite(P, Id);
+    }
 
     Diags.error(Id.Loc,
                 "cannot assign to " + llvm::Twine(D->getKindName()) + " '" +
@@ -3081,7 +3920,40 @@ public:
       return llvm::dyn_cast_or_null<PropertyDecl>(N->getDecl());
     if (auto *F = llvm::dyn_cast<FieldExpr>(Target))
       return llvm::dyn_cast_or_null<PropertyDecl>(F->getMember());
+    if (auto *I = llvm::dyn_cast<IndexExpr>(Target))
+      return I->getProperty();
     return nullptr;
+  }
+
+  /// The name an array property is used by (obj.P / P), or for a default
+  /// property, its name at the indexed object.
+  static Identifier propertyName(IndexExpr *E) {
+    Expr *Root = E->getPropertyRoot();
+    if (auto *F = llvm::dyn_cast<FieldExpr>(Root); F && F->getMember() == E->getProperty())
+      return F->getField();
+    if (auto *N = llvm::dyn_cast<NameRefExpr>(Root); N && N->getDecl() == E->getProperty())
+      return N->getName();
+    Identifier Id = E->getProperty()->getName();
+    Id.Loc = Root->getBeginLoc();
+    return Id;
+  }
+
+  /// An array property used without its indexes (outside IndexBase).
+  bool checkArrayPropertyUse(PropertyDecl *P, Expr *E, const Identifier &Id) {
+    if (!P->isArrayProperty())
+      return true;
+    if (E && E == IndexBase) {
+      PendingIndexes[E] = {P, E, {}};
+      return true;
+    }
+    Diags.error(Id.Loc,
+                "array property '" + Id.Spelling + "' needs " +
+                    (P->getParams().size() == 1
+                         ? std::string("an index")
+                         : std::to_string(P->getParams().size()) + " indexes"),
+                {Id.getRange()});
+    noteDeclaredHere(P);
+    return false;
   }
 
   void visitAssignStmt(AssignStmt *S) {
@@ -3096,7 +3968,9 @@ public:
       TargetTy = check(Target);
       CurAssignTarget = SavedTarget;
       if (auto *P = assignedProperty(Target); P && !TargetTy->isError()) {
-        TargetTy = checkPropertyWrite(P, llvm::cast<FieldExpr>(Target)->getField());
+        auto *I = llvm::dyn_cast<IndexExpr>(Target);
+        TargetTy = checkPropertyWrite(
+            P, I ? propertyName(I) : llvm::cast<FieldExpr>(Target)->getField());
         Target->setType(TargetTy);
       } else if (!TargetTy->isError() && !isVariableReference(Target)) {
         Diags.error(Target->getBeginLoc(), "expression is not assignable",
@@ -3120,6 +3994,63 @@ public:
                   "assigning to " + quoted(TargetTy) +
                       " from incompatible type " + quoted(ValueTy),
                   {Target->getRange(), S->getValue()->getRange()});
+  }
+
+  void visitTryStmt(TryStmt *S) {
+    DirectSequence = nullptr;
+    visitSequence(S, S->getBody());
+    if (S->isFinally()) {
+      int Saved = FinallyLoopDepth;
+      FinallyLoopDepth = static_cast<int>(LoopDepth);
+      visitSequence(S, S->getFinallyBody());
+      FinallyLoopDepth = Saved;
+      return;
+    }
+    ++HandlerDepth;
+    for (ExceptHandler *H : S->getHandlers()) {
+      if (Diags.shouldStop())
+        break;
+      checkHandler(H);
+    }
+    visitSequence(S, S->getExceptBody());
+    --HandlerDepth;
+  }
+
+  /// on [E:] TFoo do Body: E is a variable of type TFoo visible in Body.
+  void checkHandler(ExceptHandler *H) {
+    ClassType *C = lookupClass(H->getClassName());
+    H->setClass(C);
+    Scope HandlerScope(Cur);
+    if (H->getVarName().isValid()) {
+      auto *V = Ctx.create<VarDecl>(H->getVarName(), nullptr);
+      V->setType(C ? static_cast<Type *>(C) : errorType());
+      V->setOwner(CurRoutine);
+      H->setVar(V);
+      Used.insert(V);
+      HandlerScope.insert(V->getName().Name, V);
+    }
+    Scope *Saved = Cur;
+    Cur = &HandlerScope;
+    DirectSequence = nullptr;
+    visitStmt(H->getBody());
+    Cur = Saved;
+  }
+
+  void visitRaiseStmt(RaiseStmt *S) {
+    DirectSequence = nullptr;
+    if (!S->getObject()) {
+      if (!HandlerDepth)
+        Diags.error(S->getBeginLoc(),
+                    "'raise' without an object (a re-raise) is only allowed "
+                    "in an exception handler",
+                    {S->getRange()});
+      return;
+    }
+    Type *T = check(S->getObject());
+    if (!T->isError() && !llvm::isa<ClassType>(T))
+      Diags.error(S->getObject()->getBeginLoc(),
+                  "'raise' needs an object of a class type, not " + quoted(T),
+                  {S->getObject()->getRange()});
   }
 
   void visitIfStmt(IfStmt *S) {
@@ -3311,6 +4242,11 @@ public:
       diagUndeclared(Id);
       return errorType();
     }
+    if (auto *R = llvm::dyn_cast<RoutineDecl>(D)) { // objfpc: overloads
+      D = resolveOverload(R, {}, Id, Id.getRange());
+      if (!D)
+        return errorType();
+    }
     E->setDecl(D);
     E->setWith(W);
     Used.insert(D);
@@ -3342,9 +4278,13 @@ public:
       return T ? T : errorType();
     }
     case Decl::DK_Property:
+      if (!checkArrayPropertyUse(llvm::cast<PropertyDecl>(D), E, Id))
+        return errorType();
       return checkPropertyRead(llvm::cast<PropertyDecl>(D), E, Id);
     case Decl::DK_Routine: {
       auto *R = llvm::cast<RoutineDecl>(D);
+      if (ClassType *C = constructedThroughSelf(R, W); C && R->getParams().empty())
+        return C;
       if (R->isProcedure()) {
         Diags.error(Id.Loc,
                     "procedure '" + Id.Spelling + "' does not return a value",
@@ -3360,6 +4300,18 @@ public:
       }
       return R->getResultType(); // a call without arguments
     }
+    case Decl::DK_Type:
+      // objfpc: a class name as a value is that class (a class reference).
+      if (auto *C = llvm::dyn_cast_or_null<ClassType>(
+              llvm::cast<TypeDecl>(D)->getType());
+          C && LangOpts.ObjKeywords)
+        return classRefOf(C);
+      Diags.error(Id.Loc,
+                  "'" + Id.Spelling + "' is a " + D->getKindName() +
+                      ", not a value",
+                  {Id.getRange()});
+      noteDeclaredHere(D);
+      return errorType();
     case Decl::DK_Builtin:
       // eof / eoln without arguments test `input`.
       if (auto K = llvm::cast<BuiltinDecl>(D)->getBuiltinKind();
@@ -3429,13 +4381,27 @@ public:
       if (T->isError())
         return errorType();
       C = llvm::dyn_cast<ClassType>(T);
+      // obj is IFoo / obj as IFoo: does obj's class implement the interface?
+      if (auto *I = llvm::dyn_cast<InterfaceType>(T)) {
+        if (L->isError())
+          return errorType();
+        if (!L->isClass()) {
+          Diags.error(E->getOpLoc(),
+                      llvm::Twine("invalid operands to '") + Op + "' (" +
+                          quoted(L) + " and " + quoted(I) +
+                          "): the left operand must be an object",
+                      {E->getLHS()->getRange(), RHS->getRange()});
+          return errorType();
+        }
+        return E->getOp() == BinaryOp::Is ? Ctx.getBooleanType() : I;
+      }
     } else if (check(RHS)->isError()) {
       return errorType();
     }
     if (!C) {
       Diags.error(RHS->getBeginLoc(),
                   llvm::Twine("the right operand of '") + Op +
-                      "' must be the name of a class type",
+                      "' must be the name of a class or interface type",
                   {RHS->getRange()});
       return errorType();
     }
@@ -3496,8 +4462,10 @@ public:
         (areCompatible(L, R) || (L->isNil() && R->isNil())))
       return Ctx.getBooleanType();
     if ((Op == BinaryOp::Eq || Op == BinaryOp::Ne) &&
-        (L->isClass() || R->isClass()) && areCompatible(L, R))
-      return Ctx.getBooleanType(); // objects (objfpc)
+        (L->isClass() || R->isClass() || L->isClassRef() || R->isClassRef() ||
+         L->isInterface() || R->isInterface()) &&
+        areCompatible(L, R))
+      return Ctx.getBooleanType(); // objects and classes (objfpc)
 
     bool BothIntegers = L->isIntegerLike() && R->isIntegerLike();
     auto IntegerOp = [&]() {
@@ -3582,6 +4550,11 @@ public:
         check(Arg);
       return errorType();
     }
+    if (auto *R = llvm::dyn_cast<RoutineDecl>(D)) { // objfpc: overloads
+      D = resolveOverload(R, E->getArgs(), Callee, E->getRange());
+      if (!D)
+        return errorType();
+    }
     E->setDecl(D);
     if (classOf(W)) {
       E->setWith(W);
@@ -3592,6 +4565,10 @@ public:
       if (R->isFunction()) {
         checkCallArgs(R, Callee, E->getArgs(), E->getRange());
         return R->getResultType();
+      }
+      if (ClassType *C = constructedThroughSelf(R, W)) {
+        checkCallArgs(R, Callee, E->getArgs(), E->getRange());
+        return C;
       }
       for (Expr *Arg : E->getArgs())
         check(Arg);
@@ -3651,9 +4628,38 @@ public:
   }
 
   Type *visitIndexExpr(IndexExpr *E) {
+    Expr *SavedBase = IndexBase;
+    IndexBase = E->getBase();
     Type *BT = check(E->getBase());
+    IndexBase = SavedBase;
+    if (BT->isError())
+      return errorType();
+    if (LangOpts.ObjKeywords) {
+      // An array property: obj.P[i], P[i], obj[i] (the default property).
+      auto It = PendingIndexes.find(E->getBase());
+      if (It != PendingIndexes.end()) {
+        PendingIndex Pend = std::move(It->second);
+        PendingIndexes.erase(It);
+        return checkPropertyIndex(E, std::move(Pend));
+      }
+      if (auto *C = llvm::dyn_cast<ClassType>(BT)) {
+        PropertyDecl *P = defaultProperty(C);
+        if (!P) {
+          Diags.error(E->getIndex()->getBeginLoc(),
+                      "class " + quoted(C) + " has no default property",
+                      {E->getBase()->getRange()});
+          return errorType();
+        }
+        const ClassType *Owner = nullptr;
+        C->findMember(P->getName().Name, &Owner);
+        Identifier Id = P->getName();
+        Id.Loc = E->getBase()->getBeginLoc();
+        checkMemberAccess(P, Owner, Id);
+        return checkPropertyIndex(E, {P, E->getBase(), {}});
+      }
+    }
     Type *IT = check(E->getIndex());
-    if (BT->isError() || IT->isError())
+    if (IT->isError())
       return errorType();
     if (auto *SS = llvm::dyn_cast<ShortStringType>(BT)) {
       // s[0] is the length byte, s[1..N] the characters.
@@ -3716,12 +4722,52 @@ public:
     return AT->getElementType();
   }
 
+  /// One more index for the array property of Pend: while indexes are
+  /// missing, E itself is pending (if more follow); with all of them, they
+  /// are checked like arguments and E is the property access.
+  Type *checkPropertyIndex(IndexExpr *E, PendingIndex Pend) {
+    PropertyDecl *P = Pend.Prop;
+    Pend.Args.push_back(E->getIndex());
+    size_t N = P->getParams().size();
+    if (Pend.Args.size() < N) {
+      if (E == IndexBase) {
+        PendingIndexes[E] = std::move(Pend);
+        return P->getType();
+      }
+      E->setProperty(P, Pend.Root, Ctx.copyArray<Expr *>(Pend.Args));
+      Identifier Id = propertyName(E);
+      Diags.error(Id.Loc,
+                  "array property '" + Id.Spelling + "' needs " +
+                      std::to_string(N) + " indexes, got " +
+                      std::to_string(Pend.Args.size()),
+                  {E->getRange()});
+      noteDeclaredHere(P);
+      for (Expr *A : Pend.Args)
+        check(A);
+      return errorType();
+    }
+    E->setProperty(P, Pend.Root, Ctx.copyArray<Expr *>(Pend.Args));
+    Identifier Id = propertyName(E);
+    checkCallArgs(P->getParams(), P, Id, E->getPropertyArgs(), E->getRange());
+    if (E == CurAssignTarget)
+      return P->getType(); // checked by the assignment
+    return checkPropertyRead(P, E, Id);
+  }
+
   Type *visitNilExpr(NilExpr *) { return Ctx.getNilType(); }
 
   /// Checks a value assigned to a target of type TargetTy. A procedural
   /// variable named as the value of a procedural target is copied, not
   /// called.
   Type *checkValueFor(Type *TargetTy, Expr *Value) {
+    if (auto *RT = llvm::dyn_cast<RoutineType>(TargetTy);
+        RT && llvm::isa<AddrOfExpr>(Value)) { // @p picks an overload by RT
+      RoutineType *Saved = AddrOfTarget;
+      AddrOfTarget = RT;
+      Type *T = check(Value);
+      AddrOfTarget = Saved;
+      return T;
+    }
     if (llvm::isa<RoutineType>(TargetTy))
       if (auto *N = llvm::dyn_cast<NameRefExpr>(Value)) {
         auto *V = llvm::dyn_cast_or_null<VarDecl>(Cur->lookup(N->getName().Name));
@@ -3790,6 +4836,24 @@ public:
     // @routine (Turbo/FPC): a procedural value.
     if (auto *N = llvm::dyn_cast<NameRefExpr>(E->getOperand()))
       if (auto *R = llvm::dyn_cast_or_null<RoutineDecl>(Cur->lookup(N->getName().Name))) {
+        if (R->isOverloaded()) { // objfpc: the overload the target wants
+          RoutineDecl *Pick = nullptr;
+          for (RoutineDecl *X = R; AddrOfTarget && X; X = X->getNextOverload())
+            if (!Pick && congruent(AddrOfTarget->getParams(),
+                                   AddrOfTarget->getResult(), X->getParams(),
+                                   X->isFunction() ? X->getResultType() : nullptr))
+              Pick = X;
+          if (!Pick) {
+            Diags.error(N->getBeginLoc(),
+                        "'@" + N->getName().Spelling +
+                            "': '" + N->getName().Spelling +
+                            "' is overloaded; assign it to a procedural "
+                            "variable of the heading wanted",
+                        {N->getRange()});
+            return errorType();
+          }
+          R = Pick;
+        }
         N->setDecl(R);
         if (R->isMethod()) {
           Diags.error(N->getBeginLoc(),
@@ -3918,7 +4982,22 @@ public:
       E->setMember(FD);
       return FD;
     }
+    if (auto *I = llvm::dyn_cast<InterfaceType>(BT)) { // s.M, s: an interface
+      RoutineDecl *R = findInterfaceMethod(I, F.Name);
+      if (!R) {
+        Diags.error(F.Loc,
+                    "no method named '" + F.Spelling + "' in interface " +
+                        quoted(I),
+                    {F.getRange()});
+        return nullptr;
+      }
+      E->setMember(R);
+      return R;
+    }
     auto *C = llvm::dyn_cast<ClassType>(BT);
+    auto *ViaRef = llvm::dyn_cast<ClassRefType>(BT); // c.M, c: class of T
+    if (ViaRef)
+      C = ViaRef->getClass();
     if (!C) {
       Diags.error(F.Loc,
                   "'.' applied to a value of type " + quoted(BT) +
@@ -3936,13 +5015,18 @@ public:
       return nullptr;
     }
     checkMemberAccess(D, Owner, F);
-    if (ViaClass) {
-      auto *R = llvm::dyn_cast<RoutineDecl>(D);
-      if (!R || !R->isConstructor()) {
+    if (ViaClass || ViaRef) {
+      // Through a class: constructors, class methods, class variables.
+      bool OK = llvm::isa<VarDecl>(D);
+      if (auto *R = llvm::dyn_cast<RoutineDecl>(D))
+        OK = R->isConstructor() || R->isClassMethod();
+      if (!OK) {
         Diags.error(F.Loc,
-                    "only a constructor can be called through the class name '" +
-                        C->getName() + "'; '" + F.Spelling + "' is a " +
-                        D->getKindName(),
+                    "only constructors, class methods and class variables can "
+                    "be used through " +
+                        (ViaClass ? "the class name '" + C->getName() + "'"
+                                  : std::string("a class reference")) +
+                        "; '" + F.Spelling + "' is a " + D->getKindName(),
                     {F.getRange()});
         return nullptr;
       }
@@ -3974,6 +5058,9 @@ public:
 
   /// A property used as a value: it needs a read accessor.
   Type *checkPropertyRead(PropertyDecl *P, Expr *E, const Identifier &Id) {
+    if (P->isArrayProperty() && PendingIndexes.count(E) &&
+        !llvm::isa<IndexExpr>(E))
+      return P->getType(); // checked with its indexes
     if (E == CurAssignTarget || P->getRead() || P->getType()->isError() ||
         P->getReadName().isValid())
       return P->getType();
@@ -3990,10 +5077,18 @@ public:
     const Identifier &F = E->getField();
     if (auto *FD = llvm::dyn_cast<FieldDecl>(D))
       return FD->getType() ? FD->getType() : errorType();
-    if (auto *P = llvm::dyn_cast<PropertyDecl>(D))
+    if (auto *P = llvm::dyn_cast<PropertyDecl>(D)) {
+      if (!checkArrayPropertyUse(P, E, F))
+        return errorType();
       return checkPropertyRead(P, E, F);
+    }
+    if (auto *V = llvm::dyn_cast<VarDecl>(D)) // a class variable
+      return V->getType() ? V->getType() : errorType();
     // A method used as a value: a call without arguments.
-    auto *R = llvm::cast<RoutineDecl>(D);
+    auto *R = resolveOverload(llvm::cast<RoutineDecl>(D), {}, F, F.getRange());
+    if (!R)
+      return errorType();
+    E->setMember(R);
     if (!R->getParams().empty()) {
       Diags.error(F.Loc, "missing arguments in call to '" + F.Spelling + "'",
                   {F.getRange()});
@@ -4015,10 +5110,14 @@ public:
   static Type *methodResultType(RoutineDecl *R, FieldExpr *E) {
     if (R->isFunction())
       return R->getResultType();
-    if (R->isConstructor())
+    if (R->isConstructor()) {
       if (auto *N = llvm::dyn_cast<NameRefExpr>(E->getBase());
           N && llvm::isa_and_nonnull<TypeDecl>(N->getDecl()))
         return N->getType();
+      // c.Create, c: class of T: an object of class T (or a descendant)
+      if (auto *CR = llvm::dyn_cast_or_null<ClassRefType>(E->getBase()->getType()))
+        return CR->getClass();
+    }
     return nullptr;
   }
 
@@ -4033,7 +5132,11 @@ public:
     if (classNamedBy(F->getBase()))
       return true;
     Type *BT = check(F->getBase());
+    if (auto *I = llvm::dyn_cast<InterfaceType>(BT))
+      return findInterfaceMethod(I, F->getField().Name) != nullptr;
     auto *C = llvm::dyn_cast<ClassType>(BT);
+    if (auto *CR = llvm::dyn_cast<ClassRefType>(BT))
+      C = CR->getClass();
     return C && llvm::isa_and_nonnull<RoutineDecl>(C->findMember(F->getField().Name));
   }
 
@@ -4045,6 +5148,12 @@ public:
     auto *F = llvm::cast<FieldExpr>(E->getCallee());
     Decl *D = resolveMember(F);
     auto *R = llvm::dyn_cast_or_null<RoutineDecl>(D);
+    if (R) { // objfpc: overloads
+      R = resolveOverload(R, E->getArgs(), F->getField(), E->getRange());
+      if (!R)
+        return errorType();
+      F->setMember(R);
+    }
     if (!R) {
       for (Expr *A : E->getArgs())
         check(A);
@@ -4112,6 +5221,24 @@ public:
                            SourceRange Range) {
     bool Nothing;
     RoutineDecl *R = resolveInherited(I, Nothing);
+    if (R) { // objfpc: overloads; a bare inherited means the same heading
+      llvm::SmallVector<RoutineDecl *, 4> Cands;
+      collectOverloads(R, Cands);
+      if (Cands.size() > 1 && I->isBare() && Args.empty()) {
+        RoutineDecl *Same = nullptr;
+        for (RoutineDecl *X : Cands)
+          if (!Same && sameSignature(X, I->getEnclosing()))
+            Same = X;
+        if (Same)
+          R = Same;
+      } else if (Cands.size() > 1) {
+        R = resolveOverload(R, Args, I->isBare() ? R->getName() : I->getName(),
+                            Range);
+        if (!R)
+          return errorType();
+      }
+      I->setMethod(R);
+    }
     if (!R) {
       for (Expr *A : Args)
         check(A);

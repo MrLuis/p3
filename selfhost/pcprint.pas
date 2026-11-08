@@ -118,6 +118,7 @@ procedure addDescribedType(t: PType);
 var
   i: longint;
   f, c: PDecl;
+  open_: boolean;
 begin
   if t^.declName = nil then
   begin
@@ -169,26 +170,57 @@ begin
         bufAddChar(outBuf, ')');
       end;
     tyClass:
-      if t^.classParent <> nil then
       begin
-        bufAdd(outBuf, 'class(');
-        bufAddTypeName(outBuf, t^.classParent);
+        bufAdd(outBuf, 'class');
+        open_ := false;
+        if t^.classParent <> nil then
+        begin
+          bufAddChar(outBuf, '(');
+          bufAddTypeName(outBuf, t^.classParent);
+          open_ := true;
+        end;
+        for i := 0 to t^.classInterfaces.count - 1 do
+        begin
+          if open_ then
+            bufAdd(outBuf, ', ')
+          else
+            bufAddChar(outBuf, '(');
+          open_ := true;
+          bufAddTypeName(outBuf, PInterfaceImpl(listGet(t^.classInterfaces, i))^.intf);
+        end;
+        if open_ then
+          bufAddChar(outBuf, ')');
+      end;
+    tyInterface:
+      if t^.intfParent <> nil then
+      begin
+        bufAdd(outBuf, 'interface(');
+        bufAddTypeName(outBuf, t^.intfParent);
         bufAddChar(outBuf, ')');
       end
       else
-        bufAdd(outBuf, 'class');
+        bufAdd(outBuf, 'interface');
   else
     bufAddTypeName(outBuf, t);
   end;
 end;
 
 { " private" etc. after a class member }
+{ " #N": which routine of an overloaded name (objfpc) is meant }
+procedure overloadNumber(d: PDecl);
+begin
+  if (d <> nil) and (d^.kind = dkRoutine) and (d^.overloadIndex <> 0) then
+    bufAdd(outBuf, ' #' + intToStr(d^.overloadIndex));
+end;
+
 procedure visibilitySuffix(d: PDecl);
 begin
   case d^.vis of
     vsPublished: bufAdd(outBuf, ' published');
     vsProtected: bufAdd(outBuf, ' protected');
     vsPrivate: bufAdd(outBuf, ' private');
+    vsStrictProtected: bufAdd(outBuf, ' strict protected');
+    vsStrictPrivate: bufAdd(outBuf, ' strict private');
   else
     ;
   end;
@@ -364,6 +396,11 @@ begin
         end;
         indent := indent - 2;
       end;
+    tsClassRef:
+      begin
+        lineName('ClassRefTypeSpec ''', ts^.tname.name);
+        loc(ts^.b);
+      end;
     tsString:
       begin
         line('StringTypeSpec');
@@ -387,10 +424,39 @@ begin
           bufAddName(outBuf, ts^.parentName.name);
           bufAddChar(outBuf, '''');
         end;
+        for i := 0 to ts^.interfaceNames.count - 1 do
+        begin
+          bufAdd(outBuf, ', ''');
+          bufAddName(outBuf, PIdent(listGet(ts^.interfaceNames, i))^.name);
+          bufAddChar(outBuf, '''');
+        end;
         loc(ts^.b);
         indent := indent + 2;
         for i := 0 to ts^.memberList.count - 1 do
           printDecl(PDecl(listGet(ts^.memberList, i)));
+        indent := indent - 2;
+      end;
+    tsInterface:
+      begin
+        if ts^.isForwardIntf then
+          line('InterfaceTypeSpec forward')
+        else
+          line('InterfaceTypeSpec');
+        if identValid(ts^.intfParentName) then
+        begin
+          bufAdd(outBuf, ' ''');
+          bufAddName(outBuf, ts^.intfParentName.name);
+          bufAddChar(outBuf, '''');
+        end;
+        if (ts^.guid <> nil) and (ts^.guid^.len > 0) then
+        begin
+          bufAddChar(outBuf, ' ');
+          quoted(ts^.guid);
+        end;
+        loc(ts^.b);
+        indent := indent + 2;
+        for i := 0 to ts^.intfMemberList.count - 1 do
+          printDecl(PDecl(listGet(ts^.intfMemberList, i)));
         indent := indent - 2;
       end;
   end;
@@ -478,9 +544,15 @@ begin
             bufAddName(outBuf, d^.varSpec^.tname.spelling);
             bufAddChar(outBuf, '''');
           end;
+          if d^.isClassVar then
+            bufAdd(outBuf, ' class');
+          visibilitySuffix(d);
           loc(d^.loc);
           exit;
         end;
+        if d^.isClassVar then
+          bufAdd(outBuf, ' class');
+        visibilitySuffix(d);
         loc(d^.loc);
         indent := indent + 2;
         printTypeSpec(d^.varSpec);
@@ -513,6 +585,8 @@ begin
         bufAddName(outBuf, d^.ident.name);
         bufAddChar(outBuf, '''');
         typeSuffix(d^.resultType);
+        if d^.isClassMethod then
+          bufAdd(outBuf, ' class');
         visibilitySuffix(d);
         if d^.isVirtual then
           bufAdd(outBuf, ' virtual');
@@ -520,6 +594,9 @@ begin
           bufAdd(outBuf, ' override');
         if d^.isAbstract then
           bufAdd(outBuf, ' abstract');
+        if d^.hasOverloadDirective then
+          bufAdd(outBuf, ' overload');
+        overloadNumber(d);
         if d^.isForward then
           bufAdd(outBuf, ' forward');
         if d^.isExternal then
@@ -587,14 +664,34 @@ begin
           bufAddName(outBuf, d^.writeName.name);
           bufAddChar(outBuf, '''');
         end;
+        if d^.propIsDefault then
+          bufAdd(outBuf, ' default');
+        if d^.propNoDefault then
+          bufAdd(outBuf, ' nodefault');
         visibilitySuffix(d);
         loc(d^.loc);
+        indent := indent + 2;
+        for i := 0 to d^.propParams.count - 1 do { an array property's indexes }
+          printDecl(PDecl(listGet(d^.propParams, i)));
         if parseTree then
-        begin
-          indent := indent + 2;
           printTypeSpec(d^.propSpec);
+        if d^.propIndex <> nil then
+        begin
+          line('PropertyIndex');
+          loc(d^.propIndex^.b);
+          indent := indent + 2;
+          visitExpr(d^.propIndex);
           indent := indent - 2;
         end;
+        if d^.propDefaultValue <> nil then
+        begin
+          line('PropertyDefault');
+          loc(d^.propDefaultValue^.b);
+          indent := indent + 2;
+          visitExpr(d^.propDefaultValue);
+          indent := indent - 2;
+        end;
+        indent := indent - 2;
       end;
   else
     begin
@@ -667,6 +764,58 @@ begin
     visitStmt(PNode(listGet(l, i)));
 end;
 
+{ try (objfpc): TryStmt / TryBody stmts / ExceptPart [OnHandler...
+  ExceptElse] stmts, or FinallyPart stmts }
+procedure visitTry(s: PNode);
+var
+  i: longint;
+  h: PExceptHandler;
+begin
+  line('TryStmt');
+  loc(s^.b);
+  indent := indent + 2;
+  line('TryBody');
+  loc(s^.b);
+  indent := indent + 2;
+  visitStmtList(s^.tryBody);
+  indent := indent - 2;
+  if s^.isFinally then
+    line('FinallyPart')
+  else
+    line('ExceptPart');
+  loc(s^.partLoc);
+  indent := indent + 2;
+  for i := 0 to s^.handlers.count - 1 do
+  begin
+    h := PExceptHandler(listGet(s^.handlers, i));
+    line('OnHandler');
+    if identValid(h^.hVarName) then
+    begin
+      bufAdd(outBuf, ' ''');
+      bufAddName(outBuf, h^.hVarName.name);
+      bufAdd(outBuf, ''':');
+    end;
+    bufAdd(outBuf, ' ''');
+    bufAddName(outBuf, h^.hClassName.name);
+    bufAddChar(outBuf, '''');
+    loc(h^.onLoc);
+    indent := indent + 2;
+    visitStmt(h^.hBody);
+    indent := indent - 2;
+  end;
+  if s^.tryElseLoc <> noLoc then
+  begin
+    line('ExceptElse');
+    loc(s^.tryElseLoc);
+    indent := indent + 2;
+    visitStmtList(s^.partBody);
+    indent := indent - 2;
+  end
+  else
+    visitStmtList(s^.partBody);
+  indent := indent - 4;
+end;
+
 procedure visitCase(s: PNode);
 var
   i, j: longint;
@@ -737,6 +886,7 @@ begin
         lineName('ProcCallStmt ''', s^.callee.name);
         if parseTree and s^.hasParens then
           bufAdd(outBuf, ' ()');
+        overloadNumber(s^.callDecl);
         loc(s^.b);
         indent := indent + 2;
         for i := 0 to s^.args.count - 1 do
@@ -808,6 +958,19 @@ begin
       end;
     nkCase:
       visitCase(s);
+    nkTry:
+      visitTry(s);
+    nkRaise:
+      begin
+        line('RaiseStmt');
+        loc(s^.b);
+        if s^.raiseObj <> nil then
+        begin
+          indent := indent + 2;
+          visitExpr(s^.raiseObj);
+          indent := indent - 2;
+        end;
+      end;
     nkLabeled:
       begin
         line('LabeledStmt ');
@@ -873,6 +1036,7 @@ begin
         lineName('NameRefExpr ''', e^.ref.name);
         if e^.refDecl <> nil then
           bufAdd(outBuf, ' ' + declKindName(e^.refDecl));
+        overloadNumber(e^.refDecl);
         if e^.refWith <> nil then
         begin
           if e^.refWith^.isSelf then
@@ -921,6 +1085,7 @@ begin
     nkCall:
       begin
         lineName('CallExpr ''', e^.callee.name);
+        overloadNumber(e^.callDecl);
         endExpr(e);
         indent := indent + 2;
         for i := 0 to e^.args.count - 1 do
@@ -951,6 +1116,12 @@ begin
     nkIndex:
       begin
         line('IndexExpr');
+        if e^.idxProp <> nil then { objfpc: an array property }
+        begin
+          bufAdd(outBuf, ' property ''');
+          bufAddName(outBuf, e^.idxProp^.ident.name);
+          bufAddChar(outBuf, '''');
+        end;
         endExpr(e);
         indent := indent + 2;
         visitExpr(e^.base);
@@ -960,6 +1131,7 @@ begin
     nkField:
       begin
         lineName('FieldExpr ''', e^.fieldName.name);
+        overloadNumber(e^.fieldDecl);
         endExpr(e);
         indent := indent + 2;
         visitExpr(e^.base);

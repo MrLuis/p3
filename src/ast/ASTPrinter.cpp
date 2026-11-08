@@ -111,6 +111,9 @@ class ASTPrinter : public StmtVisitor<ASTPrinter>,
       line(Kind) << V->getName().Name << '\'';
       if (!ParseTree)
         typeSpec(V->getTypeSpec(), V->getType());
+      if (V->isClassVar())
+        OS << " class";
+      visibility(V);
       loc(V->getLocation());
       if (ParseTree) {
         IndentScope I(Indent);
@@ -135,6 +138,8 @@ class ASTPrinter : public StmtVisitor<ASTPrinter>,
       OS << R->getName().Name << '\'';
       if (R->getResultType())
         type(R->getResultType());
+      if (R->isClassMethod())
+        OS << " class";
       visibility(R);
       if (R->isVirtual())
         OS << " virtual";
@@ -142,6 +147,9 @@ class ASTPrinter : public StmtVisitor<ASTPrinter>,
         OS << " override";
       if (R->isAbstract())
         OS << " abstract";
+      if (R->hasOverloadDirective())
+        OS << " overload";
+      overloadNumber(R);
       if (R->isForward())
         OS << " forward";
       if (R->isExternal())
@@ -192,11 +200,28 @@ class ASTPrinter : public StmtVisitor<ASTPrinter>,
         OS << " read '" << P->getReadName().Name << '\'';
       if (P->getWriteName().isValid())
         OS << " write '" << P->getWriteName().Name << '\'';
+      if (P->isDefault())
+        OS << " default";
+      if (P->isNoDefault())
+        OS << " nodefault";
       visibility(P);
       loc(P->getLocation());
-      if (ParseTree) {
-        IndentScope I(Indent);
+      IndentScope I(Indent);
+      for (VarDecl *Param : P->getParams()) // an array property's indexes
+        printDecl(Param);
+      if (ParseTree)
         printTypeSpec(P->getTypeSpec());
+      if (Expr *E = P->getIndexSpec()) {
+        line("PropertyIndex");
+        loc(E->getBeginLoc());
+        IndentScope J(Indent);
+        visitExpr(E);
+      }
+      if (Expr *E = P->getDefaultValue()) {
+        line("PropertyDefault");
+        loc(E->getBeginLoc());
+        IndentScope J(Indent);
+        visitExpr(E);
       }
       return;
     }
@@ -207,12 +232,20 @@ class ASTPrinter : public StmtVisitor<ASTPrinter>,
     }
   }
 
+  /// " #N": which routine of an overloaded name (objfpc) is meant.
+  void overloadNumber(Decl *D) {
+    if (auto *R = llvm::dyn_cast_or_null<RoutineDecl>(D); R && R->isOverloaded())
+      OS << " #" << R->getOverloadIndex();
+  }
+
   void visibility(Decl *D) {
     switch (D->getVisibility()) {
     case Visibility::Public:    break;
     case Visibility::Published: OS << " published"; break;
     case Visibility::Protected: OS << " protected"; break;
     case Visibility::Private:   OS << " private"; break;
+    case Visibility::StrictProtected: OS << " strict protected"; break;
+    case Visibility::StrictPrivate:   OS << " strict private"; break;
     }
   }
 
@@ -250,8 +283,16 @@ class ASTPrinter : public StmtVisitor<ASTPrinter>,
     }
     case Type::TK_Class: {
       auto *C = llvm::cast<ClassType>(T);
-      return C->getParent() ? "class(" + C->getParent()->getName() + ")"
-                            : std::string("class");
+      std::string S = C->getParent() ? "class(" + C->getParent()->getName()
+                                     : std::string("class");
+      for (const InterfaceImpl &I : C->getInterfaces())
+        S += (S == "class" ? "(" : ", ") + I.Intf->getName();
+      return S == "class" ? S : S + ")";
+    }
+    case Type::TK_Interface: {
+      auto *I = llvm::cast<InterfaceType>(T);
+      return I->getParent() ? "interface(" + I->getParent()->getName() + ")"
+                            : std::string("interface");
     }
     default:
       return Name;
@@ -339,12 +380,34 @@ class ASTPrinter : public StmtVisitor<ASTPrinter>,
       line(C->isForward() ? "ClassTypeSpec forward" : "ClassTypeSpec");
       if (C->getParent().isValid())
         OS << " '" << C->getParent().Name << '\'';
+      for (const Identifier &I : C->getInterfaces())
+        OS << ", '" << I.Name << '\'';
       loc(TS->getBeginLoc());
       IndentScope I(Indent);
       for (Decl *M : C->getMembers())
         printDecl(M);
       return;
     }
+    case TypeSpec::TS_Interface: {
+      auto *I = llvm::cast<InterfaceTypeSpec>(TS);
+      line(I->isForward() ? "InterfaceTypeSpec forward" : "InterfaceTypeSpec");
+      if (I->getParent().isValid())
+        OS << " '" << I->getParent().Name << '\'';
+      if (!I->getGUID().empty()) {
+        OS << ' ';
+        quoted(I->getGUID());
+      }
+      loc(TS->getBeginLoc());
+      IndentScope J(Indent);
+      for (Decl *M : I->getMembers())
+        printDecl(M);
+      return;
+    }
+    case TypeSpec::TS_ClassRef:
+      line("ClassRefTypeSpec '")
+          << llvm::cast<ClassRefTypeSpec>(TS)->getClassName().Name << '\'';
+      loc(TS->getBeginLoc());
+      return;
     case TypeSpec::TS_String: {
       auto *S = llvm::cast<StringTypeSpec>(TS);
       line("StringTypeSpec");
@@ -457,6 +520,7 @@ public:
     line("ProcCallStmt '") << S->getCallee().Name << '\'';
     if (ParseTree && S->hasParens())
       OS << " ()";
+    overloadNumber(S->getDecl());
     loc(S->getBeginLoc());
     IndentScope I(Indent);
     for (Expr *Arg : S->getArgs())
@@ -552,6 +616,52 @@ public:
     loc(S->getBeginLoc());
   }
 
+  // try (objfpc):
+  //   TryStmt / TryBody stmts / ExceptPart [OnHandler... ExceptElse] stmts
+  //   or FinallyPart stmts
+  void visitTryStmt(TryStmt *S) {
+    line("TryStmt");
+    loc(S->getBeginLoc());
+    IndentScope I(Indent);
+    line("TryBody");
+    loc(S->getBeginLoc());
+    {
+      IndentScope J(Indent);
+      for (Stmt *Child : S->getBody())
+        visitStmt(Child);
+    }
+    line(S->isFinally() ? "FinallyPart" : "ExceptPart");
+    loc(S->getPartLoc());
+    IndentScope J(Indent);
+    for (ExceptHandler *H : S->getHandlers()) {
+      line("OnHandler");
+      if (H->getVarName().isValid())
+        OS << " '" << H->getVarName().Name << "':";
+      OS << " '" << H->getClassName().Name << '\'';
+      loc(H->getOnLoc());
+      IndentScope K(Indent);
+      visitStmt(H->getBody());
+    }
+    if (S->hasElse()) {
+      line("ExceptElse");
+      loc(S->getElseLoc());
+      IndentScope K(Indent);
+      for (Stmt *Child : S->getExceptBody())
+        visitStmt(Child);
+      return;
+    }
+    for (Stmt *Child : S->getExceptBody())
+      visitStmt(Child);
+  }
+  void visitRaiseStmt(RaiseStmt *S) {
+    line("RaiseStmt");
+    loc(S->getBeginLoc());
+    if (S->getObject()) {
+      IndentScope I(Indent);
+      visitExpr(S->getObject());
+    }
+  }
+
   void visitWithStmt(WithStmt *S) {
     line("WithStmt");
     loc(S->getBeginLoc());
@@ -567,6 +677,8 @@ public:
   }
   void visitIndexExpr(IndexExpr *E) {
     line("IndexExpr");
+    if (PropertyDecl *P = E->getProperty()) // objfpc: an array property
+      OS << " property '" << P->getName().Name << '\'';
     end(E);
     IndentScope I(Indent);
     visitExpr(E->getBase());
@@ -574,6 +686,7 @@ public:
   }
   void visitFieldExpr(FieldExpr *E) {
     line("FieldExpr '") << E->getField().Name << '\'';
+    overloadNumber(E->getMember());
     end(E);
     IndentScope I(Indent);
     visitExpr(E->getBase());
@@ -635,6 +748,7 @@ public:
     line("NameRefExpr '") << E->getName().Name << '\'';
     if (Decl *D = E->getDecl())
       OS << ' ' << D->getKindName();
+    overloadNumber(E->getDecl());
     if (E->getWith())
       OS << (E->getWith()->IsSelf ? " (self)" : " (with)");
     end(E);
@@ -666,6 +780,7 @@ public:
   }
   void visitCallExpr(CallExpr *E) {
     line("CallExpr '") << E->getCallee().Name << '\'';
+    overloadNumber(E->getDecl());
     end(E);
     IndentScope I(Indent);
     for (Expr *Arg : E->getArgs())

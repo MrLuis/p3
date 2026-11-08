@@ -1,0 +1,27 @@
+; Class references, class methods and class variables (--mode=objfpc):
+; class of T, what class methods and class references may use, class
+; method implementations, assignments and comparisons of class references.
+; RUN: not %pcc --mode=objfpc -ferror-limit=0 -c %S/Inputs/classrefs/errors.pas -o %t.o 2>&1 | FileCheck %s
+; CHECK: errors.pas:4:19: error: 'TRec' is not a class type
+; CHECK: errors.pas:3:3: note: 'TRec' declared here
+; CHECK: errors.pas:5:20: error: unknown class name 'TMissing'
+; CHECK: errors.pas:17:14: error: method 'CG' is marked 'override' but there is no virtual method 'CG' to override in 'TA'
+; CHECK: errors.pas:31:3: error: instance member 'F' cannot be used in a class method
+; CHECK: errors.pas:7:5: note: 'F' declared here
+; CHECK: errors.pas:32:3: error: instance member 'M' cannot be used in a class method
+; CHECK: errors.pas:9:5: note: 'M' declared here
+; CHECK: errors.pas:33:8: error: instance member 'P' cannot be used in a class method
+; CHECK: errors.pas:12:14: note: 'P' declared here
+; CHECK: errors.pas:38:14: error: 'TA.CM' was declared as a class procedure
+; CHECK: errors.pas:10:11: note: 'CM' declared here
+; CHECK: errors.pas:41:17: error: only a method can be a class procedure; implement it as 'procedure TClass.Free'
+; CHECK: errors.pas:48:5: error: assigning to 'TAClass' from incompatible type 'class of TOther'
+; CHECK: errors.pas:49:5: error: assigning to 'TOtherClass' from incompatible type 'TAClass'
+; CHECK: errors.pas:50:5: error: assigning to 'TAClass' from incompatible type 'TA'
+; CHECK: errors.pas:51:11: error: only constructors, class methods and class variables can be used through the class name 'TA'; 'F' is a field
+; CHECK: errors.pas:52:6: error: only constructors, class methods and class variables can be used through the class name 'TA'; 'M' is a procedure
+; CHECK: errors.pas:53:5: error: only constructors, class methods and class variables can be used through a class reference; 'M' is a procedure
+; CHECK: errors.pas:54:10: error: only constructors, class methods and class variables can be used through a class reference; 'F' is a field
+; CHECK: errors.pas:57:8: error: invalid operands to '=' ('TAClass' and 'TOtherClass')
+; CHECK: errors.pas:58:8: error: invalid operands to '=' ('TAClass' and 'class of TOther')
+; CHECK-NOT: error

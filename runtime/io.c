@@ -15,6 +15,8 @@
 
 #include <inttypes.h>
 #include <math.h>
+#include <setjmp.h>
+#include <stddef.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -501,16 +503,39 @@ void __pas_tobject_destroy(void *link, void *self) {
   (void)self;
 }
 
-void *const __pas_tobject_vmt[3] = {
-    NULL, (void *)"\007TObject", (void *)(uintptr_t)__pas_tobject_destroy};
+void *const __pas_tobject_vmt[5] = {
+    NULL, (void *)"\007TObject", (void *)(uintptr_t)sizeof(void *), NULL,
+    (void *)(uintptr_t)__pas_tobject_destroy};
 
-int32_t __pas_class_is(const void *obj, const void *vmt) {
+void *__pas_intf_lookup(const void *obj, const void *iid) {
   if (!obj)
-    return 0;
-  for (void *const *v = *(void *const *const *)obj; v; v = (void *const *)v[0])
+    return NULL;
+  void *const *table = (void *const *)(*(void *const *const *)obj)[3];
+  if (!table)
+    return NULL;
+  uintptr_t n = (uintptr_t)table[0];
+  for (uintptr_t i = 0; i < n; ++i)
+    if (table[1 + 2 * i] == iid)
+      return table[2 + 2 * i];
+  return NULL;
+}
+
+void *__pas_intf_as(const void *obj, const void *iid, const char *msg) {
+  void *t = __pas_intf_lookup(obj, iid);
+  if (obj && !t)
+    __pas_runtime_error(msg);
+  return t;
+}
+
+int32_t __pas_class_inherits(const void *cls, const void *vmt) {
+  for (void *const *v = cls; v; v = (void *const *)v[0])
     if (v == vmt)
       return 1;
   return 0;
+}
+
+int32_t __pas_class_is(const void *obj, const void *vmt) {
+  return obj && __pas_class_inherits(*(void *const *)obj, vmt);
 }
 
 void *__pas_class_as(void *obj, const void *vmt, const char *msg) {
@@ -521,6 +546,101 @@ void *__pas_class_as(void *obj, const void *vmt, const char *msg) {
 
 void __pas_abstract_error(void) {
   __pas_runtime_error("call of an abstract method");
+}
+
+/*===- Exceptions (--mode=objfpc) ------------------------------------------===
+ *
+ * Every try statement (and every exception handler while it runs) has a
+ * PasExcFrame in its routine's stack frame, linked into a stack whose top
+ * is `exc_top`. The compiled code pushes the frame, calls _setjmp on its
+ * buffer and pops it when the protected statements end. A raise pops the
+ * top frame, stores the exception in it and _longjmps there.
+ */
+
+_Static_assert(offsetof(PasExcFrame, buf) == 3 * sizeof(void *),
+               "the compiler addresses the jmp_buf at this offset");
+_Static_assert(sizeof(jmp_buf) <= sizeof(((PasExcFrame *)0)->buf),
+               "PasExcFrame.buf is too small for this C library's jmp_buf");
+
+static PasExcFrame *exc_top;
+
+/* An Exception instance: the VMT pointer, then Message (a short string). */
+struct PasExceptionObject {
+  void *const *vmt;
+  unsigned char message[256];
+};
+
+#define EXCEPTION_VMT(name, parent, text)                                      \
+  void *const name[5] = {(void *)(parent), (void *)(text),                     \
+                         (void *)(uintptr_t)sizeof(struct PasExceptionObject), \
+                         NULL, (void *)(uintptr_t)__pas_tobject_destroy}
+EXCEPTION_VMT(__pas_exception_vmt, __pas_tobject_vmt, "\011Exception");
+EXCEPTION_VMT(__pas_eexternal_vmt, __pas_exception_vmt, "\011EExternal");
+EXCEPTION_VMT(__pas_einterror_vmt, __pas_eexternal_vmt, "\011EIntError");
+EXCEPTION_VMT(__pas_edivbyzero_vmt, __pas_einterror_vmt, "\012EDivByZero");
+
+void __pas_exc_push(PasExcFrame *f, void *frame) {
+  (void)frame;
+  f->prev = exc_top;
+  exc_top = f;
+}
+
+void __pas_exc_pop(PasExcFrame *f) { exc_top = f->prev; }
+
+/* "Runtime error: unhandled exception <class> at <where>[: <message>]" */
+static void unhandled(void *obj, const char *where) {
+  const unsigned char *name = (*(const unsigned char *const *const *)obj)[1];
+  char msg[700];
+  int n = snprintf(msg, sizeof msg, "unhandled exception %.*s", name[0],
+                   (const char *)name + 1);
+  if (where && *where)
+    n += snprintf(msg + n, sizeof msg - (size_t)n, " at %s", where);
+  if (__pas_class_is(obj, __pas_exception_vmt)) {
+    const unsigned char *text = (const unsigned char *)obj + sizeof(void *);
+    snprintf(msg + n, sizeof msg - (size_t)n, ": %.*s", text[0],
+             (const char *)text + 1);
+  }
+  __pas_runtime_error(msg);
+}
+
+void __pas_raise(void *obj, const char *where) {
+  if (!obj) {
+    char msg[300];
+    snprintf(msg, sizeof msg, "'raise' of a nil object%s%s",
+             where && *where ? " at " : "", where ? where : "");
+    __pas_runtime_error(msg);
+  }
+  PasExcFrame *f = exc_top;
+  if (!f)
+    unhandled(obj, where);
+  exc_top = f->prev;
+  f->object = obj;
+  f->where = where;
+  _longjmp(*(jmp_buf *)(void *)f->buf, 1);
+}
+
+void __pas_reraise(PasExcFrame *f) { __pas_raise(f->object, f->where); }
+
+void __pas_raise_divzero(const char *where) {
+  static const char text[] = "Division by zero";
+  struct PasExceptionObject *e = __pas_new(sizeof *e);
+  e->vmt = __pas_edivbyzero_vmt;
+  e->message[0] = sizeof text - 1;
+  memcpy(e->message + 1, text, sizeof text - 1);
+  __pas_raise(e, where);
+}
+
+void __pas_free_object(void *obj) {
+  void (*destroy)(void *, void *) =
+      (void (*)(void *, void *))(*(void *const *const *)obj)[4];
+  destroy(NULL, obj);
+  free(obj);
+}
+
+void __pas_reraise_free(PasExcFrame *f, void *obj) {
+  if (obj != f->object)
+    __pas_free_object(obj);
+  __pas_reraise(f);
 }
 
 /*===- Program (Turbo/FPC) --------------------------------------------------===*/

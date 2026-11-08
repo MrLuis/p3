@@ -292,10 +292,20 @@ end;
 
 { --- Statements --- }
 
+{ The innermost cleanup (a PCleanup), or nil. }
+function topCleanup: pointer;
+begin
+  if cleanups.count = 0 then
+    topCleanup := nil
+  else
+    topCleanup := listGet(cleanups, cleanups.count - 1);
+end;
+
 procedure pushLoop(continueB, breakB: PIRBlock);
 begin
   listAdd(loopBlocks, continueB);
   listAdd(loopBlocks, breakB);
+  listAdd(loopBlocks, topCleanup);
 end;
 
 procedure popLoop;
@@ -304,6 +314,49 @@ var
 begin
   ignored := listPop(loopBlocks);
   ignored := listPop(loopBlocks);
+  ignored := listPop(loopBlocks);
+end;
+
+{ Branches to target (exit, break, continue), leaving the cleanups inside
+  stopAt (nil: all of them) on the way. }
+procedure emitJump(target: PIRBlock; stopAt: pointer);
+var
+  i: longint;
+  c: PCleanup;
+  cont: PIRBlock;
+begin
+  i := cleanups.count;
+  while (i > 0) and (listGet(cleanups, i - 1) <> stopAt) do
+  begin
+    c := PCleanup(listGet(cleanups, i - 1));
+    excCall1('__pas_exc_pop', c^.frame);
+    if c^.kind = clHandler then
+      excCall1('__pas_free_object', c^.obj)
+    else if c^.kind = clFinally then
+    begin
+      irStore(i32c(2 + c^.exits.count), c^.state);
+      cont := irNewBlock('finally.cont');
+      listAdd(c^.exits, cont);
+      irBr(c^.finallyB);
+      irSetInsertPoint(cont);
+    end;
+    i := i - 1;
+  end;
+  irBr(target);
+end;
+
+function newCleanup(kind: TCleanupKind; const frame: TV): PCleanup;
+var
+  c: PCleanup;
+begin
+  c := PCleanup(arenaAlloc(sizeof(TCleanup)));
+  c^.kind := kind;
+  c^.frame := frame;
+  c^.obj := irNull;
+  c^.state := irNull;
+  c^.finallyB := nil;
+  listInit(c^.exits);
+  newCleanup := c;
 end;
 
 { The property an assignment targets, or nil. }
@@ -314,7 +367,9 @@ begin
     assignedProperty := target^.refDecl
   else if (target^.kind = nkField) and (target^.fieldDecl <> nil) and
           (target^.fieldDecl^.kind = dkProperty) then
-    assignedProperty := target^.fieldDecl;
+    assignedProperty := target^.fieldDecl
+  else if target^.kind = nkIndex then
+    assignedProperty := target^.idxProp;
 end;
 
 { target := value for a property target: stores into its field or calls
@@ -323,9 +378,11 @@ procedure emitPropertyWrite(p: PDecl; target, value: PNode);
 var
   obj, addr, ignored, pair, v: TV;
   c, t: PType;
-  args: TPtrList;
+  args, noIndexes: TPtrList;
 begin
-  if target^.kind = nkNameRef then
+  if target^.kind = nkIndex then
+    obj := propertyObject(target, c)
+  else if target^.kind = nkNameRef then
   begin
     obj := withBase(target^.refWith);
     c := target^.refWith^.rec^.typ;
@@ -337,8 +394,11 @@ begin
   end;
   if p^.writeDecl^.kind = dkRoutine then
   begin
-    listInit(args);
-    listAdd(args, value);
+    listInit(noIndexes);
+    if target^.kind = nkIndex then
+      accessorArgs(p, target^.idxArgs, value, args)
+    else
+      accessorArgs(p, noIndexes, value, args);
     ignored := emitMethodCall(p^.writeDecl, obj, args, false, target^.b);
     listFree(args);
     exit;
@@ -491,7 +551,6 @@ var
   k: TBuiltinKind;
   ignored, f, a0, a1, a2, mem, sz, old, dst, cnt, neg, v, code, p, src: TV;
   arg, countE: PNode;
-  target: PIRBlock;
   isFill: boolean;
   pointee: PType;
 begin
@@ -499,7 +558,8 @@ begin
   if d^.kind = dkRoutine then
   begin
     if d^.methodKind <> mtNone then { through Self or a with statement's object }
-      ignored := emitMethodCall(d, withBase(s^.callWith), s^.args, false, s^.b)
+      ignored := emitMethodCallC(d, withBase(s^.callWith), s^.args, false, s^.b,
+                                 withIsClass(s^.callWith))
     else
       ignored := emitCall(d, s^.args);
     exit;
@@ -534,12 +594,13 @@ begin
         if s^.args.count > 0 then
           emitSetResult(PNode(listGet(s^.args, 0)));
         if k = bkExit then
-          target := exitBlock
+          emitJump(exitBlock, nil)
         else if k = bkContinue then
-          target := PIRBlock(listGet(loopBlocks, loopBlocks.count - 2))
+          emitJump(PIRBlock(listGet(loopBlocks, loopBlocks.count - 3)),
+                   listGet(loopBlocks, loopBlocks.count - 1))
         else
-          target := PIRBlock(listGet(loopBlocks, loopBlocks.count - 1));
-        irBr(target);
+          emitJump(PIRBlock(listGet(loopBlocks, loopBlocks.count - 2)),
+                   listGet(loopBlocks, loopBlocks.count - 1));
         irSetInsertPoint(irNewBlock('after.jump')); { unreachable code follows }
       end;
     bkDelete:
@@ -904,6 +965,158 @@ begin
   visitStmt(s^.withBody);
 end;
 
+{ --- Exceptions (objfpc) --- }
+
+procedure visitStmtList(const l: TPtrList);
+var
+  i: longint;
+begin
+  for i := 0 to l.count - 1 do
+    visitStmt(PNode(listGet(l, i)));
+end;
+
+{   push F; if (_setjmp(F)) goto except;  body; pop F; goto end
+  except:
+    exc = F.object; push H; if (_setjmp(H)) goto escape
+    if (exc is C1) [ E1 := exc; handler1; pop H; free exc; goto end ] ...
+    [else part; pop H; free exc; goto end]  or  pop H; reraise F
+  escape: (an exception left a handler) free exc unless it is the one
+    raised; reraise it }
+procedure emitTryExcept(s: PNode);
+var
+  exceptB, endB, escapeB, doB, nextB: PIRBlock;
+  f, obj, h, isv, slot: TV;
+  c: PCleanup;
+  ignored: pointer;
+  i: longint;
+  hd: PExceptHandler;
+
+  procedure handlerDone; { a handler ran to its end }
+  begin
+    excCall1('__pas_exc_pop', h);
+    excCall1('__pas_free_object', obj);
+    irBr(endB);
+  end;
+
+begin
+  exceptB := irNewBlock('try.except');
+  endB := irNewBlock('try.end');
+  f := emitProtect(exceptB, 'try.body');
+  listAdd(cleanups, newCleanup(clTryBody, f));
+  visitStmtList(s^.tryBody);
+  ignored := listPop(cleanups);
+  excCall1('__pas_exc_pop', f);
+  irBr(endB);
+
+  irSetInsertPoint(exceptB);
+  obj := irLoad(irPtrT, irStructGEP(excFrameT, f, 1, ''), 'exc');
+  escapeB := irNewBlock('handler.raise');
+  h := emitProtect(escapeB, 'handler.match');
+  c := newCleanup(clHandler, h);
+  c^.obj := obj;
+  listAdd(cleanups, c);
+  listAdd(handledFrames, irBox(f));
+  for i := 0 to s^.handlers.count - 1 do
+  begin
+    hd := PExceptHandler(listGet(s^.handlers, i));
+    isv := call2(classRuntime('__pas_class_is', 'i32', 'ptr,ptr'), obj,
+                 vmtOf(hd^.hClass), '');
+    doB := irNewBlock('handler.do');
+    nextB := irNewBlock('handler.next');
+    irCondBr(irICmp('ne', isv, i32c(0), ''), doB, nextB, false);
+    irSetInsertPoint(doB);
+    if hd^.hVar <> nil then
+    begin
+      slot := irCreateTemp(irPtrT, nm(hd^.hVar^.ident.name));
+      irStore(obj, slot);
+      hd^.hVar^.cgValue := irBox(slot);
+    end;
+    visitStmt(hd^.hBody);
+    handlerDone;
+    irSetInsertPoint(nextB);
+  end;
+  if (s^.handlers.count = 0) or (s^.tryElseLoc <> noLoc) then
+  begin
+    visitStmtList(s^.partBody);
+    handlerDone;
+  end
+  else
+  begin { no handler matches: on to the next try statement }
+    excCall1('__pas_exc_pop', h);
+    excCall1('__pas_reraise', f);
+    irUnreachable;
+  end;
+  ignored := listPop(handledFrames);
+  ignored := listPop(cleanups);
+
+  irSetInsertPoint(escapeB);
+  excCall2('__pas_reraise_free', h, obj);
+  irUnreachable;
+  irSetInsertPoint(endB);
+end;
+
+{   push F; if (_setjmp(F)) goto raised;  body; pop F; state = 0
+  finally:
+    finally part
+    switch (state) [0: end; 1: reraise F; 2 + k: exit k (exit, break or
+      continue out of the body)]
+  raised: state = 1; goto finally }
+procedure emitTryFinally(s: PNode);
+var
+  raisedB, finallyB, endB, reraiseB: PIRBlock;
+  state, f: TV;
+  c: PCleanup;
+  ignored: pointer;
+  sw: PIRInst;
+  k: longint;
+begin
+  raisedB := irNewBlock('finally.raise');
+  finallyB := irNewBlock('finally');
+  endB := irNewBlock('try.end');
+  state := irCreateTemp(irI32, 'finally.state');
+  f := emitProtect(raisedB, 'try.body');
+  c := newCleanup(clFinally, f);
+  c^.state := state;
+  c^.finallyB := finallyB;
+  listAdd(cleanups, c);
+  visitStmtList(s^.tryBody);
+  ignored := listPop(cleanups);
+  excCall1('__pas_exc_pop', f);
+  irStore(i32c(0), state);
+  irBr(finallyB);
+
+  irSetInsertPoint(raisedB);
+  irStore(i32c(1), state);
+  irBr(finallyB);
+
+  irSetInsertPoint(finallyB);
+  visitStmtList(s^.partBody);
+  reraiseB := irNewBlock('finally.reraise');
+  sw := irSwitch(irLoad(irI32, state, 'state'), endB);
+  irAddCase(sw, i32c(1), reraiseB);
+  for k := 0 to c^.exits.count - 1 do
+    irAddCase(sw, i32c(2 + k), PIRBlock(listGet(c^.exits, k)));
+  irSetInsertPoint(reraiseB);
+  excCall1('__pas_reraise', f);
+  irUnreachable;
+  irSetInsertPoint(endB);
+end;
+
+procedure visitRaise(s: PNode);
+var
+  obj: TV;
+begin
+  if s^.raiseObj = nil then
+    excCall1('__pas_reraise', PTVBox(listGet(handledFrames, handledFrames.count - 1))^)
+  else
+  begin
+    obj := visitExpr(s^.raiseObj);
+    excCall2('__pas_raise', obj, whereText(s^.b));
+  end;
+  irUnreachable;
+  irSetInsertPoint(irNewBlock('after.raise')); { unreachable code follows }
+end;
+
 procedure visitStmt(s: PNode);
 var
   i: longint;
@@ -934,6 +1147,12 @@ begin
       end;
     nkGoto: visitGoto(s);
     nkWith: visitWith(s);
+    nkTry:
+      if s^.isFinally then
+        emitTryFinally(s)
+      else
+        emitTryExcept(s);
+    nkRaise: visitRaise(s);
   else
     ;
   end;
@@ -1047,10 +1266,15 @@ end;
 { A static variable: a typed constant, or a variable of the program or of
   a unit (zero-initialized: ISO leaves them undefined; this makes programs
   deterministic at no cost). }
+function definedClass(d: PDecl): PType; forward;
+
+{ A program, unit or class variable (pas.<class>.<name>), or a typed
+  constant. }
 procedure emitStaticVar(v: PDecl);
 var
   ty: PIRType;
   init: TV;
+  name: string;
 begin
   ty := memType(v^.varType);
   if v^.cgImported then
@@ -1066,21 +1290,39 @@ begin
     if v^.cgExport <> nil then
       v^.cgValue := irBox(irGlobal(nm(v^.cgExport), '', ty, init, false, false, false, 0))
     else
-      v^.cgValue := irBox(irGlobal('pas.' + nm(v^.ident.name), 'internal', ty, init, false,
-                                   false, false, 0));
+    begin
+      if v^.isClassVar then
+        name := 'pas.' + lowerStr(nm(v^.varClass^.declName)) + '.' + nm(v^.ident.name)
+      else
+        name := 'pas.' + nm(v^.ident.name);
+      v^.cgValue := irBox(irGlobal(name, 'internal', ty, init, false, false, false, 0));
+    end;
   end;
-  if dbgOn and not v^.cgImported then
+  { class variables have no debug information }
+  if dbgOn and not v^.cgImported and not v^.isClassVar then
     declareGlobalDebugInfo(v, PTVBox(v^.cgValue)^);
 end;
 
 procedure emitGlobals(blk: PBlock);
 var
-  i: longint;
-  d: PDecl;
+  i, j: longint;
+  d, m: PDecl;
+  c: PType;
 begin
   for i := 0 to blk^.decls.count - 1 do
   begin
     d := PDecl(listGet(blk^.decls, i));
+    c := definedClass(d);
+    if c <> nil then { its class variables }
+    begin
+      for j := 0 to c^.classMembers.count - 1 do
+      begin
+        m := PDecl(listGet(c^.classMembers, j));
+        if m^.kind = dkVar then
+          emitStaticVar(m);
+      end;
+      continue;
+    end;
     if d^.kind = dkVar then
       emitStaticVar(d);
   end;
@@ -1130,6 +1372,16 @@ begin
 end;
 
 { The class d (a type declaration) defines, not a forward one, or nil. }
+{ the interface d defines (not a forward declaration), or nil }
+function definedInterface(d: PDecl): PType;
+begin
+  definedInterface := nil;
+  if (d^.kind = dkType) and (d^.typeSpec <> nil) and
+     (d^.typeSpec^.kind = tsInterface) and not d^.typeSpec^.isForwardIntf and
+     (d^.declType <> nil) and (d^.declType^.kind = tyInterface) then
+    definedInterface := d^.declType;
+end;
+
 function definedClass(d: PDecl): PType;
 begin
   definedClass := nil;
@@ -1170,7 +1422,7 @@ var
   m: PDecl;
   params: TPtrList;
 begin
-  ty := irArray(2 + c^.classVTable.count, irPtrT);
+  ty := irArray(4 + c^.classVTable.count, irPtrT);
   if d^.cgExport = nil then
   begin
     name := 'vmt.' + lowerStr(nm(c^.declName));
@@ -1202,6 +1454,82 @@ begin
   end;
 end;
 
+{ An interface's iid: a constant holding its name (length-prefixed),
+  pas.<unit>$<name>$iid for an interface of a unit's interface. }
+procedure declareInterfaceCG(d: PDecl; t: PType);
+var
+  b: TBuf;
+  name, linkage: string;
+  init: TV;
+  ty: PIRType;
+begin
+  bufInit(b);
+  bufAddChar(b, chr(t^.declName^.len));
+  bufAddChars(b, t^.declName^.chars, 0, t^.declName^.len);
+  ty := irArray(b.len, irI8);
+  init := irConstBytes(b.data, 0, b.len);
+  if d^.cgExport = nil then
+  begin
+    name := 'iid.' + lowerStr(nm(t^.declName));
+    linkage := 'internal';
+  end
+  else
+  begin
+    name := nm(d^.cgExport);
+    linkage := '';
+  end;
+  if d^.cgImported then
+  begin
+    linkage := 'external';
+    init := irNull;
+  end;
+  mapPut(iids, t^.id, irBox(irGlobal(name, linkage, ty, init, true, false,
+                                     d^.cgImported, 0)));
+  bufFree(b);
+end;
+
+{ The interface table of class c (null without interfaces): its
+  interfaces' iids and method tables. }
+function interfaceTable(c: PType): TV;
+var
+  name: string;
+  entries, methods: TPtrList;
+  k, j: longint;
+  impl: PInterfaceImpl;
+  r: PDecl;
+  t: TV;
+begin
+  if c^.classInterfaces.count = 0 then
+    exit(irNull);
+  name := lowerStr(nm(c^.declName));
+  listInit(entries);
+  listAdd(entries, irBox(irConstIntToPtr(c^.classInterfaces.count)));
+  for k := 0 to c^.classInterfaces.count - 1 do
+  begin
+    impl := PInterfaceImpl(listGet(c^.classInterfaces, k));
+    listInit(methods);
+    for j := 0 to impl^.methods.count - 1 do
+    begin
+      r := PDecl(listGet(impl^.methods, j));
+      if r^.isAbstract then
+        listAdd(methods, irBox(irFuncRef(classRuntime('__pas_abstract_error', 'void', ''))))
+      else
+        listAdd(methods, irBox(irFuncRef(fnOf(r))));
+    end;
+    t := irGlobal('itable.' + name + '.' + lowerStr(nm(impl^.intf^.declName)), 'internal',
+                  irArray(methods.count, irPtrT),
+                  irConstArray(irArray(methods.count, irPtrT), methods), true, false,
+                  false, 0);
+    listFree(methods);
+    listAdd(entries, irBox(iidOf(impl^.intf)));
+    listAdd(entries, irBox(t));
+  end;
+  interfaceTable := irGlobal('intfs.' + name, 'internal', irArray(entries.count, irPtrT),
+                             irConstArray(irArray(entries.count, irPtrT), entries),
+                             true, false, false, 0);
+  listFree(entries);
+end;
+
 { Fills in the VMTs: parent VMT, class name, virtual methods. }
 procedure defineVMTs;
 var
@@ -1217,6 +1545,8 @@ begin
     listInit(elems);
     listAdd(elems, irBox(vmtOf(c^.classParent)));
     listAdd(elems, irBox(getPStrConstant(c^.declName^.chars, 0, c^.declName^.len)));
+    listAdd(elems, irBox(irConstIntToPtr(instanceSize(c))));
+    listAdd(elems, irBox(interfaceTable(c)));
     for j := 0 to c^.classVTable.count - 1 do
     begin
       r := PDecl(listGet(c^.classVTable, j));
@@ -1254,6 +1584,12 @@ begin
     if c <> nil then
     begin
       declareClassCG(r, c);
+      continue;
+    end;
+    c := definedInterface(r);
+    if c <> nil then
+    begin
+      declareInterfaceCG(r, c);
       continue;
     end;
     if (r^.kind = dkRoutine) and (r^.canonical <> nil) and
@@ -1473,17 +1809,24 @@ begin
       for j := 0 to c^.classMembers.count - 1 do
       begin
         m := PDecl(listGet(c^.classMembers, j));
-        if (m^.kind = dkRoutine) and not m^.isAbstract then
-        begin
-          m^.cgExport := intern(prefix + '.' + nm(m^.ident.name));
+        if (m^.kind = dkVar) or ((m^.kind = dkRoutine) and not m^.isAbstract) then
+        begin { a class variable or a method }
+          m^.cgExport := intern(prefix + '.' + nm(m^.ident.name) + overloadSuffix(m));
           m^.cgImported := imported;
         end;
       end;
       continue;
     end;
+    if definedInterface(d) <> nil then { an interface: its iid }
+    begin
+      d^.cgExport := intern('pas.' + nm(u^.ident.name) + '$' + nm(d^.ident.name) + '$iid');
+      d^.cgImported := imported;
+      continue;
+    end;
     if (d^.kind = dkVar) or ((d^.kind = dkRoutine) and not d^.isExternal) then
     begin
-      d^.cgExport := intern('pas.' + nm(u^.ident.name) + '$' + nm(d^.ident.name));
+      d^.cgExport := intern('pas.' + nm(u^.ident.name) + '$' + nm(d^.ident.name) +
+                            overloadSuffix(d));
       d^.cgImported := imported;
     end;
   end;
@@ -1583,6 +1926,7 @@ begin
   mapInit(stringConsts);
   mapInit(classLayouts);
   mapInit(vmts);
+  mapInit(iids);
   listInit(vmtsToDefine);
   listInit(routinesToEmit);
   listInit(loopBlocks);
@@ -1595,6 +1939,16 @@ begin
   listFree(fields);
   { generous for every supported libc (glibc: 200-312 bytes, macOS: 192) }
   jmpBufT := irArray(64, irI64);
+  { PasExcFrame (runtime/include/pascalrt.h): prev, object, where, jmp_buf }
+  listInit(fields);
+  listAdd(fields, irPtrT);
+  listAdd(fields, irPtrT);
+  listAdd(fields, irPtrT);
+  listAdd(fields, jmpBufT);
+  excFrameT := irStructLit(fields);
+  listFree(fields);
+  listInit(cleanups);
+  listInit(handledFrames);
   declareRuntime;
 end;
 

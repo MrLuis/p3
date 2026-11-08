@@ -1,0 +1,57 @@
+ProgramDecl 'classrefs' <1:1>
+  TypeDecl 'ta' <3:3>
+    ClassTypeSpec forward <3:8>
+  TypeDecl 'taclass' <4:3>
+    ClassRefTypeSpec 'ta' <4:13>
+  TypeDecl 'ta' <5:3>
+    ClassTypeSpec <5:8>
+      VarDecl 'count' class <6:15>
+        NamedTypeSpec 'integer' <6:29>
+      VarDecl 'total' class <6:22>
+        NamedTypeSpec 'integer' <6:29>
+      FieldDecl 'name' <7:9>
+        StringTypeSpec <7:15>
+      FunctionDecl 'make' class virtual <8:11>
+        Result <8:26>
+          NamedTypeSpec 'ta' <8:26>
+      ConstructorDecl 'create' virtual <9:5>
+  FunctionDecl 'ta.make' class <11:7>
+    Result <11:25>
+      NamedTypeSpec 'ta' <11:25>
+    CompoundStmt <12:1>
+      AssignStmt <13:3>
+        NameRefExpr 'make' <13:3>
+        NameRefExpr 'create' <13:11>
+      EmptyStmt <14:1>
+  ConstructorDecl 'ta.create' <15:1>
+    CompoundStmt <16:1>
+      AssignStmt <17:3>
+        NameRefExpr 'count' <17:3>
+        BinaryExpr '+' <17:12>
+          NameRefExpr 'count' <17:12>
+          IntegerLiteralExpr 1 <17:20>
+      EmptyStmt <18:1>
+  VarDecl 'c' <20:3>
+    NamedTypeSpec 'taclass' <20:6>
+  VarDecl 'a' <21:3>
+    NamedTypeSpec 'ta' <21:6>
+  CompoundStmt <22:1>
+    AssignStmt <23:3>
+      NameRefExpr 'c' <23:3>
+      NameRefExpr 'ta' <23:8>
+    AssignStmt <24:3>
+      NameRefExpr 'a' <24:3>
+      FieldExpr 'create' <24:8>
+        NameRefExpr 'c' <24:8>
+    AssignStmt <25:3>
+      NameRefExpr 'a' <25:3>
+      FieldExpr 'make' <25:8>
+        NameRefExpr 'ta' <25:8>
+    ProcCallStmt 'writeln' () <26:3>
+      FieldExpr 'count' <26:11>
+        NameRefExpr 'ta' <26:11>
+      FieldExpr 'total' <26:21>
+        NameRefExpr 'a' <26:21>
+      FieldExpr 'classname' <26:30>
+        NameRefExpr 'c' <26:30>
+    EmptyStmt <27:1>

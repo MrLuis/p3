@@ -1,0 +1,34 @@
+integer 3
+int64 4
+real 2.50
+char c
+string text
+boolean TRUE
+pair 1 2
+integer 5
+integer 1
+integer 2
+int64 10000000000
+real 2.50
+  a dog of 3
+animal nobody
+dog rex
+animal rex
+animal tom / the animal tom
+  tom: ...
+  tom: ...
+  tom: ...
+  rex: woof
+  (2 times)
+  rex: woof
+  rex: woof
+  (1 times)
+  rex: woof
+nobody TDog
+swapped 7 3 right left
+twice 42 2.50
+apply 10 0.25
+values 20 20.0
+totals 0 4 9
+nested 9 2.25
+box 11 22 3

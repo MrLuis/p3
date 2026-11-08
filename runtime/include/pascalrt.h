@@ -122,9 +122,22 @@ void __pas_paramstr(unsigned char *dst, int32_t index);
 /*===- Classes (--mode=objfpc) ---------------------------------------------===
  * An object starts with a pointer to its class's VMT, an array of pointers:
  * [0] the parent class's VMT (NULL for TObject), [1] the class name as a
- * length-prefixed string, [2...] the virtual methods; [2] is Destroy.
- * Methods take (static link, Self, parameters...). */
-extern void *const __pas_tobject_vmt[3];
+ * length-prefixed string, [2] the instance size (an integer), [3] the
+ * interface table or NULL, [4...] the virtual methods; [4] is Destroy. A
+ * class reference is a VMT pointer. Methods take (static link, Self,
+ * parameters...); a class method's Self is a class reference.
+ * The interface table: [n, iid1, methods1, ..., iidn, methodsn] (n an
+ * integer): the interfaces the class implements (CORBA style) and its
+ * method tables for them. An interface value is {object, method table}. */
+extern void *const __pas_tobject_vmt[5];
+/* The method table of obj's class for the interface iid, or NULL (also if
+ * obj is NULL). */
+void *__pas_intf_lookup(const void *obj, const void *iid);
+/* obj as the interface: its table; a runtime error `msg` if obj is not nil
+ * and its class does not implement it. */
+void *__pas_intf_as(const void *obj, const void *iid, const char *msg);
+/* cls.InheritsFrom(vmt): vmt is in the chain of VMTs from cls. */
+int32_t __pas_class_inherits(const void *cls, const void *vmt);
 /* TObject.Destroy, which does nothing. */
 void __pas_tobject_destroy(void *link, void *self);
 /* obj is C: obj is not nil and C's VMT is in obj's chain of VMTs. */
@@ -133,6 +146,46 @@ int32_t __pas_class_is(const void *obj, const void *vmt);
 void *__pas_class_as(void *obj, const void *vmt, const char *msg);
 /* The VMT entry of an abstract method: a runtime error. */
 void __pas_abstract_error(void) __attribute__((noreturn));
+
+/*===- Exceptions (--mode=objfpc) ------------------------------------------===
+ * A PasExcFrame lives in the stack frame of the routine with the try
+ * statement (the compiler's type is { ptr, ptr, ptr, [64 x i64] }). The
+ * compiled code calls __pas_exc_push, then _setjmp(&f->buf): 0 runs the
+ * protected statements, which end with __pas_exc_pop; nonzero means an
+ * exception landed, f->object (already popped). Errors exit with status 2. */
+typedef struct PasExcFrame {
+  struct PasExcFrame *prev;
+  void *object;      /* the exception, once raised to this frame */
+  const char *where; /* "file:line:col" of its raise statement */
+  int64_t buf[64];   /* a jmp_buf */
+} PasExcFrame;
+
+/* Exception (Free Pascal's SysUtils): [TObject's VMT, "Exception",
+ * Destroy]; its instances hold the message, a short string, after the VMT
+ * pointer. */
+extern void *const __pas_exception_vmt[5];
+/* EExternal = class(Exception), EIntError = class(EExternal),
+ * EDivByZero = class(EIntError) (SysUtils). */
+extern void *const __pas_eexternal_vmt[5];
+extern void *const __pas_einterror_vmt[5];
+extern void *const __pas_edivbyzero_vmt[5];
+/* frame: the routine's frame (unused: passing it keeps the optimizer from
+ * holding its variables in registers across _setjmp), or NULL. */
+void __pas_exc_push(PasExcFrame *f, void *frame);
+void __pas_exc_pop(PasExcFrame *f);
+/* raise obj: to the innermost frame, else "unhandled exception". */
+void __pas_raise(void *obj, const char *where) __attribute__((noreturn));
+/* Integer div or mod by zero (objfpc): raises a new EDivByZero, with the
+ * message 'Division by zero'. */
+void __pas_raise_divzero(const char *where) __attribute__((noreturn));
+/* Raises f's exception again (after a finally part, or with no match). */
+void __pas_reraise(PasExcFrame *f) __attribute__((noreturn));
+/* obj.Destroy (virtual) and releases it: a handled exception. */
+void __pas_free_object(void *obj);
+/* Frees obj unless it is f's exception, then re-raises that: an exception
+ * leaving a handler (obj: the handled one) or a constructor (obj: the new
+ * object). */
+void __pas_reraise_free(PasExcFrame *f, void *obj) __attribute__((noreturn));
 
 #ifdef __cplusplus
 }

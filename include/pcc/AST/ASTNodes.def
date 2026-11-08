@@ -49,6 +49,8 @@ STMT(With)            // with r1, r2 do s                      (M8)
 STMT(Labeled)         // 10: s                                 (M10)
 STMT(Goto)            // goto 10                               (M10)
 STMT(IndirectCall)    // r.p(x); a[i];  (procedural values, S1, TP)
+STMT(Try)             // try ... except / finally ... end      (objfpc)
+STMT(Raise)           // raise [obj]                           (objfpc)
 
 #undef STMT
 #undef EXPR

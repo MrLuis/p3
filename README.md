@@ -66,19 +66,84 @@ Supported: fields, methods, constructors and destructors (called through
 the class they allocate, called on an object they do not), `virtual`,
 `override` and `abstract` methods, `inherited` (with or without a method
 name and arguments), `Self`, properties with field or method accessors,
-`private protected public published` (private: visible in the declaring
-program or unit; protected: also in descendants' methods), forward
-declarations (`TNode = class;`), `is`, `as`, typecasts, `with` on objects,
-`Result` in functions, and the root class `TObject` (`Create`, `Destroy`,
-`Free`, `ClassName`). Classes work in units, compiled whole or separately.
-Objects live on the heap: a variable of a class type holds a reference
-(`nil` by default), and the object starts with a pointer to its class's
-VMT. Calls of virtual methods and field accesses through a `nil` reference
-are runtime errors under range checks, as are a failed `as` and calling an
-abstract method. Not supported (reported as such): class references (`class
-of`), class methods and variables, interfaces, exceptions, overloading,
-`strict` visibility, array, indexed and default properties, and virtual
-constructors.
+`private protected public published` and `strict private`/`strict
+protected` (private: visible in the declaring program or unit; protected:
+also in descendants' methods; strict: only in the class's (and
+descendants') methods), forward declarations (`TNode = class;`), `is`,
+`as`, typecasts, `with` on objects, `Result` in functions, and the root
+class `TObject` (`Create`, `Destroy`, `Free`, `ClassName`, `ClassType`,
+`ClassParent`, `InheritsFrom`, `InstanceSize`). Classes work in units,
+compiled whole or separately. Objects live on the heap: a variable of a
+class type holds a reference (`nil` by default), and the object starts
+with a pointer to its class's VMT. Calls of virtual methods and field
+accesses through a `nil` reference are runtime errors under range checks,
+as are a failed `as` and calling an abstract method.
+
+- **Properties:** array properties (`property Items[i: integer]: T read
+  Get write Put`, several indexes), the default property (`; default;`:
+  `list[i]`), indexed properties (`index N`, passed to shared accessors),
+  `default V` / `nodefault` (no effect, as without streaming).
+- **Class references:** `TFooClass = class of TFoo`, `TClass`; a class
+  name is a value; `c.Create(...)` creates an object of the class `c`
+  holds, through a virtual constructor if the constructor is virtual.
+- **Class methods and variables:** `class procedure/function` (Self is the
+  class; may be virtual; called through a class name, a class reference
+  or an object), `class var` sections (one variable shared by the class
+  and its descendants).
+- **Overloading:** routines and methods of one name with different
+  parameters (the `overload` directive is optional; on a method it also
+  offers the ancestors' overloads). The best fit wins: exact types, then
+  wider integer types (`integer` before `int64` before `real`), the
+  nearest ancestor class; a tie is an error. Overloads get the symbols
+  `<name>$N`.
+- **Interfaces** (CORBA style, `{$interfaces corba}`; no reference
+  counting, no `IUnknown`): `IFoo = interface[(IBase)] ['GUID'] methods
+  end`, classes listing them (`class(TBase, IFoo, IBar)`, every method
+  implemented), interface variables, parameters and results, `obj is
+  IFoo`, `obj as IFoo`, comparisons and `Assigned`. A value is {object,
+  the object's class's method table}, so virtual implementations dispatch
+  as usual.
+
+Not supported (reported as such): class properties, class constructors
+and destructors, `stored`, `implements`, properties in interfaces, COM
+interfaces.
+
+Exceptions (`--mode=objfpc`), as in Free Pascal:
+
+```pascal
+uses sysutils;                   { built in: Exception is predeclared }
+type EParse = class(Exception);
+...
+try
+  try
+    if c < '0' then raise EParse.Create('not a digit');
+  finally
+    writeln('always');           { also after exit, break and continue }
+  end;
+except
+  on E: EParse do writeln(E.ClassName, ': ', E.Message);
+  on E: Exception do raise;      { re-raise }
+else
+  writeln('anything else');
+end;
+```
+
+Any object can be raised. Handlers are tried in order; with none matching
+(and no `else`), the exception goes on to the next `try`. The exception
+object is destroyed (`Destroy`, then released) when its handler ends,
+including through `exit`, `break` or `continue`, and when a new exception
+leaves the handler; a constructor that raises destroys its new object.
+`Exception` has `Create(msg)` and the property `Message`. Integer `div` and
+`mod` by zero raise `EDivByZero` (message `Division by zero`; its ancestors
+`EIntError` and `EExternal` are predeclared too), as in Free Pascal with
+SysUtils; other runtime errors (range and overflow checks, real division by
+zero, ...) are not exceptions. Following Free Pascal, `exit`, and
+`break`/`continue` out of a `finally` part, are errors, and so are labels
+and `goto` in `--mode=objfpc` (Free Pascal without `-Sg`). An unhandled
+exception is a runtime error that names the class, where it was raised and
+the message (`Runtime error: unhandled exception EParse at p.pas:12:5: not
+a digit`); `finally` parts run first. Exceptions are `_setjmp`/`_longjmp`
+based: each `try` statement pushes a frame on a stack kept by the runtime.
 
 Units are compiled into the program by default. They can also be compiled
 separately: `pcc --mode=tp -c unit.pas` writes `unit.o` (its interface

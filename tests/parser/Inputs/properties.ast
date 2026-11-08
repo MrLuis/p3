@@ -1,0 +1,33 @@
+ProgramDecl 'properties' <1:1>
+  TypeDecl 'ta' = class(TObject) <3:3>
+  FunctionDecl 'ta.g' definition <14:1>
+    CompoundStmt <14:54>
+      AssignStmt <14:60>
+        NameRefExpr 'g' function result : integer <14:60>
+        NameRefExpr 'i' parameter : integer <14:65>
+  FunctionDecl 'ta.h' definition <15:1>
+    CompoundStmt <15:37>
+      AssignStmt <15:43>
+        NameRefExpr 'h' function result : integer <15:43>
+        NameRefExpr 'k' parameter : integer <15:48>
+  VarDecl 'a' : TA <17:3>
+  CompoundStmt <18:1>
+    AssignStmt <19:3>
+      NameRefExpr 'a' variable : TA <19:3>
+      FieldExpr 'create' : TA <19:8>
+        NameRefExpr 'ta' type : TA <19:8>
+    ProcCallStmt 'writeln' <20:3>
+      IndexExpr property 'p' : integer <20:11>
+        IndexExpr : integer <20:11>
+          FieldExpr 'p' : integer <20:11>
+            NameRefExpr 'a' variable : TA <20:11>
+          IntegerLiteralExpr 1 : integer <20:15>
+        CharLiteralExpr "x" : char <20:18>
+      IndexExpr property 'p' : integer <20:24>
+        IndexExpr : integer <20:24>
+          NameRefExpr 'a' variable : TA <20:24>
+          IntegerLiteralExpr 2 : integer <20:26>
+        CharLiteralExpr "y" : char <20:29>
+      FieldExpr 'x' : integer <20:35>
+        NameRefExpr 'a' variable : TA <20:35>
+    EmptyStmt <21:1>

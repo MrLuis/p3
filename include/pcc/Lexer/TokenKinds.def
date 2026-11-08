@@ -123,6 +123,10 @@ KEYWORD(kw_inherited,      "inherited",      KEYOBJ)
 KEYWORD(kw_is,             "is",             KEYOBJ)
 KEYWORD(kw_as,             "as",             KEYOBJ)
 KEYWORD(kw_property,       "property",       KEYOBJ)
+KEYWORD(kw_try,            "try",            KEYOBJ)
+KEYWORD(kw_except,         "except",         KEYOBJ)
+KEYWORD(kw_finally,        "finally",        KEYOBJ)
+KEYWORD(kw_raise,          "raise",          KEYOBJ)
 
 #undef KEYWORD
 #undef PUNCT

@@ -1,0 +1,42 @@
+; Exceptions (--mode=objfpc): errors in raise and try statements.
+; RUN: not %pcc --mode=objfpc -ferror-limit=0 -c %S/Inputs/exceptions/errors.pas -o %t.o 2>&1 | FileCheck %s
+; A bare raise needs an enclosing handler of the same routine.
+; CHECK: errors.pas:10:3: error: 'raise' without an object (a re-raise) is only allowed in an exception handler
+; CHECK: errors.pas:14:9: error: 'raise' needs an object of a class type, not 'integer'
+; CHECK: errors.pas:15:9: error: 'raise' needs an object of a class type, not 'TRec'
+; CHECK: errors.pas:16:9: error: 'raise' needs an object of a class type, not 'nil'
+; CHECK: errors.pas:17:3: error: 'raise' without an object (a re-raise) is only allowed in an exception handler
+; CHECK: errors.pas:21:11: error: 'TRec' is not a class type
+; CHECK-NEXT: E: TRec
+; CHECK: errors.pas:3:3: note: 'TRec' declared here
+; CHECK: errors.pas:22:11: error: unknown class name 'Missing'
+; Free Pascal: "Control flow statements are not allowed in a finally block".
+; CHECK: errors.pas:27:5: error: 'exit' is not allowed in a 'finally' part
+; CHECK: errors.pas:32:7: error: 'break' cannot leave a 'finally' part
+; CHECK: errors.pas:33:7: error: 'continue' cannot leave a 'finally' part
+; EDivByZero is predeclared (line 38); the handler's variable is visible in
+; the handler only.
+; CHECK: errors.pas:40:11: error: use of undeclared identifier 'E'
+; CHECK-NOT: error
+
+; Exception's field is private; its constructor takes the message.
+; RUN: not %pcc --mode=objfpc -c %S/Inputs/exceptions/members.pas -o %t.o 2>&1 | FileCheck --check-prefix=MEMBERS %s
+; MEMBERS: members.pas:7:13: error: 'FMessage' is a private member of 'Exception'
+; MEMBERS: members.pas:8:18: error: missing arguments in call to 'Create'
+; MEMBERS-NOT: error
+
+; As in Free Pascal (without -Sg), objfpc has no labels and gotos: an error
+; at each label section and goto, nothing else.
+; RUN: not %pcc --mode=objfpc -ferror-limit=0 -c %S/Inputs/exceptions/goto.pas -o %t.o 2>&1 | FileCheck --check-prefix=GOTO %s
+; GOTO: goto.pas:2:1: error: labels and 'goto' are not supported with --mode=objfpc
+; GOTO: goto.pas:4:3: error: labels and 'goto' are not supported with --mode=objfpc
+; GOTO: goto.pas:7:3: error: labels and 'goto' are not supported with --mode=objfpc
+; GOTO-NOT: error
+; RUN: %pcc --mode=tp -c %S/Inputs/exceptions/goto.pas -o %t.o
+
+; Without --mode=objfpc there are no exceptions: try and raise are
+; identifiers, Exception is not declared and sysutils is an ordinary unit.
+; RUN: not %pcc --mode=tp -c %S/Inputs/exceptions/tp.pas -o %t.o 2>&1 | FileCheck --check-prefix=TP %s
+; TP: tp.pas:4:6: error: unknown type name 'Exception'
+; TP: tp.pas:5:6: error: unknown type name 'EDivByZero'
+; TP-NOT: error

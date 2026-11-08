@@ -1,0 +1,47 @@
+ProgramDecl 'interfaces' <1:1>
+  TypeDecl 'ia' = interface <3:3>
+  TypeDecl 'ia' = interface <4:3>
+  TypeDecl 'ib' = interface(IA) <7:3>
+  TypeDecl 'tc' = class(TObject, IB) <11:3>
+  ProcedureDecl 'tc.p' definition <16:1>
+    CompoundStmt <16:17>
+      EmptyStmt <16:23>
+  FunctionDecl 'tc.f' definition <17:1>
+    CompoundStmt <17:37>
+      AssignStmt <17:43>
+        NameRefExpr 'f' function result : integer <17:43>
+        NameRefExpr 'x' parameter : integer <17:48>
+  FunctionDecl 'tc.f' definition <18:1>
+    CompoundStmt <18:42>
+      AssignStmt <18:48>
+        NameRefExpr 'f' function result : integer <18:48>
+        CallExpr 'length' : integer <18:53>
+          NameRefExpr 's' parameter : string <18:60>
+  VarDecl 'b' : IB <20:3>
+  VarDecl 'a' : IA <21:3>
+  CompoundStmt <22:1>
+    AssignStmt <23:3>
+      NameRefExpr 'b' variable : IB <23:3>
+      FieldExpr 'create' : TC <23:8>
+        NameRefExpr 'tc' type : TC <23:8>
+    AssignStmt <24:3>
+      NameRefExpr 'a' variable : IA <24:3>
+      NameRefExpr 'b' variable : IB <24:8>
+    IndirectCallStmt <25:3>
+      IndirectCallExpr <25:3>
+        FieldExpr 'p' <25:3>
+          NameRefExpr 'a' variable : IA <25:3>
+    ProcCallStmt 'writeln' <26:3>
+      IndirectCallExpr : integer <26:11>
+        FieldExpr 'f' #1 : integer <26:11>
+          NameRefExpr 'b' variable : IB <26:11>
+        IntegerLiteralExpr 2 : integer <26:15>
+      IndirectCallExpr : integer <26:19>
+        FieldExpr 'f' #2 : integer <26:19>
+          NameRefExpr 'b' variable : IB <26:19>
+        CharLiteralExpr "x" : char <26:23>
+      BinaryExpr 'is' : boolean <26:29>
+        CallExpr 'tobject' : TObject <26:29>
+          NilExpr : nil <26:37>
+        NameRefExpr 'ia' type : IA <26:45>
+    EmptyStmt <27:1>

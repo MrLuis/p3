@@ -460,6 +460,10 @@ var
 begin
   if mapHas(unitsDone, u.name^.id) or diagShouldStop then
     exit;
+  { objfpc: what pcc has of Free Pascal's SysUtils (Exception) is
+    predeclared, so uses sysutils needs no file }
+  if (mode = lmObjFPC) and nameEquals(u.name, 'sysutils') then
+    exit;
   if (mapGet(inProgress, u.name^.id) <> nil) or (u.name = selfUnit) then
   begin
     diagErrorR(u.loc, 'circular unit reference to ''' + nameStr(u.spelling) + '''',

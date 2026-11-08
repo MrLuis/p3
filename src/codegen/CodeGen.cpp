@@ -17,10 +17,15 @@
 //   value arrays/records -> passed by pointer, copied into the callee frame
 //
 //   objects (objfpc) -> a pointer to a heap block: [VMT pointer, ancestors'
-//     fields, own fields]. A class's VMT is a constant [2 + N x ptr]:
-//     parent VMT, class name (length-prefixed), then the N virtual methods.
-//     TObject's VMT and destructor are in the runtime. Methods take Self
-//     after the static link.
+//     fields, own fields]. A class's VMT is a constant [4 + N x ptr]:
+//     parent VMT, class name (length-prefixed), instance size, interface
+//     table, then the N virtual methods. TObject's VMT and destructor are
+//     in the runtime. An interface (CORBA style) value is {object, method
+//     table}: the class's table for the interface, found through the
+//     object's VMT ([count, iid, table, iid, table, ...]; an interface's
+//     iid is a global of its own).
+//     Methods take Self after the static link; a class method's Self is a
+//     class reference (a VMT). Class variables are globals.
 //
 //   and/or -> short-circuit;  for -> test the final value before stepping
 //   case   -> switch; no matching label is a runtime error in ISO mode
@@ -176,9 +181,41 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
   llvm::StringMap<llvm::GlobalVariable *> StringConstants;
   std::vector<RoutineDecl *> RoutinesToEmit;
   llvm::DenseMap<LabelDecl *, llvm::BasicBlock *> LabelBlocks;
-  /// Enclosing loops: {continue target, break target} (Turbo/FPC).
-  llvm::SmallVector<std::pair<llvm::BasicBlock *, llvm::BasicBlock *>, 4> Loops;
+  /// Enclosing loops (Turbo/FPC): the targets of continue and break, and
+  /// the number of Cleanups around the loop.
+  struct LoopTargets {
+    llvm::BasicBlock *Continue, *Break;
+    size_t Cleanups;
+  };
+  llvm::SmallVector<LoopTargets, 4> Loops;
   llvm::BasicBlock *ExitBlock = nullptr; ///< target of `exit`
+
+  /// Exceptions (objfpc): the try statements and running handlers around
+  /// the statement being emitted, innermost last. exit, break and continue
+  /// leaving them pop their PasExcFrames (emitJump):
+  ///   TryBody  the protected statements of try..except: pop Frame
+  ///   Handler  an exception handler: pop Frame (the handler's), free Object
+  ///   Finally  the protected statements of try..finally: pop Frame, then
+  ///            run the finally part with State = 2 + k, after which it
+  ///            continues at Exits[k] (State 0: normal end, 1: exception)
+  struct Cleanup {
+    enum Kind { TryBody, Handler, Finally } K;
+    llvm::Value *Frame;
+    llvm::Value *Object = nullptr;
+    llvm::Value *State = nullptr;
+    llvm::BasicBlock *FinallyBB = nullptr;
+    llvm::SmallVector<llvm::BasicBlock *, 2> Exits;
+    Cleanup(Kind K, llvm::Value *Frame, llvm::Value *Object = nullptr,
+            llvm::Value *State = nullptr, llvm::BasicBlock *FinallyBB = nullptr)
+        : K(K), Frame(Frame), Object(Object), State(State),
+          FinallyBB(FinallyBB) {}
+  };
+  std::vector<Cleanup> Cleanups;
+  /// The try statements' frames of the running exception handlers,
+  /// innermost last: a bare `raise` raises the exception of the last.
+  llvm::SmallVector<llvm::Value *, 2> HandledFrames;
+  /// `on E: TFoo do`: the variable E's storage.
+  llvm::DenseMap<VarDecl *, llvm::Value *> HandlerVars;
 
   // Debug information (-g).
   std::unique_ptr<llvm::DIBuilder> DIB;
@@ -218,18 +255,34 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
         ExportNames[D] = Prefix + "$vmt";
         if (Imported)
           ImportedDecls.insert(D);
-        for (Decl *M : C->getMembers())
+        for (Decl *M : C->getMembers()) {
+          if (auto *V = llvm::dyn_cast<VarDecl>(M)) { // a class variable
+            ExportNames[V] = Prefix + "." + V->getName().Name.str();
+            if (Imported)
+              ImportedDecls.insert(V);
+            continue;
+          }
           if (auto *R = llvm::dyn_cast<RoutineDecl>(M); R && !R->isAbstract()) {
-            ExportNames[R] = Prefix + "." + R->getName().Name.str();
+            ExportNames[R] = Prefix + "." + R->getName().Name.str() +
+                             overloadSuffix(R);
             if (Imported)
               ImportedDecls.insert(R);
           }
+        }
+        continue;
+      }
+      if (definedInterface(D)) { // an interface: its iid
+        ExportNames[D] = ("pas." + U.getName().Name + "$" +
+                          D->getName().Name + "$iid").str();
+        if (Imported)
+          ImportedDecls.insert(D);
         continue;
       }
       auto *R = llvm::dyn_cast<RoutineDecl>(D);
       if (!llvm::isa<VarDecl>(D) && !(R && !R->isExternal()))
         continue;
-      ExportNames[D] = ("pas." + U.getName().Name + "$" + D->getName().Name).str();
+      ExportNames[D] = ("pas." + U.getName().Name + "$" + D->getName().Name).str() +
+                       (R ? overloadSuffix(R) : std::string());
       if (Imported)
         ImportedDecls.insert(D);
     }
@@ -239,14 +292,17 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
     return ("pas." + U.getName().Name + "$$init").str();
   }
 
-  /// A unit-level or program variable's global.
+  /// A unit-level or program variable's global (or a class variable's,
+  /// pas.<class>.<name>).
   llvm::GlobalVariable *createGlobal(VarDecl *V, llvm::Type *Ty,
                                      llvm::Constant *Init) {
     auto It = ExportNames.find(V);
     if (It == ExportNames.end())
-      return new llvm::GlobalVariable(M, Ty, /*isConstant=*/false,
-                                      llvm::GlobalValue::InternalLinkage, Init,
-                                      "pas." + V->getName().Name);
+      return new llvm::GlobalVariable(
+          M, Ty, /*isConstant=*/false, llvm::GlobalValue::InternalLinkage, Init,
+          V->getVarClass() ? "pas." + V->getVarClass()->getDeclName().lower() +
+                                 "." + V->getName().Name.str()
+                           : "pas." + V->getName().Name.str());
     bool Imported = ImportedDecls.count(V);
     auto *G = new llvm::GlobalVariable(M, Ty, /*isConstant=*/false,
                                        llvm::GlobalValue::ExternalLinkage,
@@ -259,6 +315,16 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
 
   /// Generous for every supported libc (glibc: 200-312 bytes, macOS: 192).
   llvm::Type *jmpBufType() { return llvm::ArrayType::get(B.getInt64Ty(), 64); }
+
+  /// The interface D defines (not a forward declaration), or null.
+  static InterfaceType *definedInterface(Decl *D) {
+    auto *TD = llvm::dyn_cast<TypeDecl>(D);
+    auto *IS = TD ? llvm::dyn_cast_or_null<InterfaceTypeSpec>(TD->getTypeSpec())
+                  : nullptr;
+    if (!IS || IS->isForward())
+      return nullptr;
+    return llvm::dyn_cast_or_null<InterfaceType>(TD->getType());
+  }
 
   /// The class D defines (a type declaration `TFoo = class ... end`, not a
   /// forward one), or null.
@@ -328,6 +394,9 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
           B.getInt8Ty(), llvm::cast<ShortStringType>(T)->getMaxLength() + 1);
     case Type::TK_Routine: // {function, static link}
       return llvm::StructType::get(B.getPtrTy(), B.getPtrTy());
+    case Type::TK_Interface: // {object, method table}
+      return llvm::StructType::get(B.getPtrTy(), B.getPtrTy());
+    case Type::TK_ClassRef: // a reference to the class's VMT
     case Type::TK_Class: // a reference to the object
       return B.getPtrTy();
     case Type::TK_Error:
@@ -573,6 +642,13 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
   /// and range-checks ordinal values (and set members) against the target.
   llvm::Value *convertForAssign(llvm::Value *V, Type *From, Type *To,
                                 SourceLocation L) {
+    if (auto *I = llvm::dyn_cast<InterfaceType>(To)) {
+      if (From->isNil())
+        return llvm::Constant::getNullValue(memType(To));
+      if (From->isClass())
+        return toInterface(V, I);
+      return V; // an interface (the same or a descendant)
+    }
     if (To->isReal() && !From->isReal())
       return toDouble(V, From);
     if (To->isOrdinal() && From->isOrdinal()) {
@@ -805,10 +881,16 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
   static std::string mangle(RoutineDecl *R) {
     if (R->isMethod())
       return "pas." + R->getClass()->getDeclName().lower() + "." +
-             R->getName().Name.str();
+             R->getName().Name.str() + overloadSuffix(R);
     if (RoutineDecl *P = R->getParent())
-      return mangle(P) + "." + R->getName().Name.str();
-    return "pas." + R->getName().Name.str();
+      return mangle(P) + "." + R->getName().Name.str() + overloadSuffix(R);
+    return "pas." + R->getName().Name.str() + overloadSuffix(R);
+  }
+
+  /// "$N" for the N-th routine of an overloaded name (objfpc).
+  static std::string overloadSuffix(RoutineDecl *R) {
+    return R->isOverloaded() ? "$" + std::to_string(R->getOverloadIndex())
+                             : std::string();
   }
 
   /// Pointer to the frame of routine Target, reached from the current
@@ -917,6 +999,8 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
   }
 
   llvm::Value *varAddress(VarDecl *V) {
+    if (llvm::Value *H = HandlerVars.lookup(V))
+      return H;
     if (!V->getOwner()) {
       if (V->isPredeclared())
         return standardFile(V->getName().Name);
@@ -976,6 +1060,8 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
       return visitExpr(E);
     case Expr::EK_Index: {
       auto *I = llvm::cast<IndexExpr>(E);
+      if (I->getProperty()) // a string or record value
+        return emitArrayPropertyRead(I);
       if (auto *SS = llvm::dyn_cast<ShortStringType>(I->getBase()->getType())) {
         llvm::Value *Base = emitAddress(I->getBase());
         llvm::Value *Idx = visitExpr(I->getIndex());
@@ -1010,6 +1096,8 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
     }
     case Expr::EK_Field: {
       auto *F = llvm::cast<FieldExpr>(E);
+      if (auto *V = llvm::dyn_cast_or_null<VarDecl>(F->getMember()))
+        return Globals[V]; // a class variable (the object is not evaluated)
       if (auto *C = llvm::dyn_cast<ClassType>(F->getBase()->getType())) {
         if (!llvm::isa<FieldDecl>(F->getMember()))
           return emitMemberValue(F); // a structured property or result
@@ -1335,6 +1423,14 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
 
   void emitGlobals(Block &Blk) {
     for (Decl *D : Blk.getDecls()) {
+      if (ClassType *C = definedClass(D)) { // class variables: no debug info
+        for (Decl *M : C->getMembers())
+          if (auto *V = llvm::dyn_cast<VarDecl>(M)) {
+            llvm::Type *Ty = memType(V->getType());
+            Globals[V] = createGlobal(V, Ty, llvm::Constant::getNullValue(Ty));
+          }
+        continue;
+      }
       auto *V = llvm::dyn_cast<VarDecl>(D);
       if (!V)
         continue;
@@ -1392,6 +1488,10 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
         declareClass(D, C);
         continue;
       }
+      if (InterfaceType *I = definedInterface(D)) {
+        declareInterface(D, I);
+        continue;
+      }
       auto *R = llvm::dyn_cast<RoutineDecl>(D);
       if (R && R->isRedeclaration() && R->getCanonical()->isMethod()) {
         declareRoutine(R->getCanonical()); // a method's implementation
@@ -1413,12 +1513,64 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
     }
   }
 
+  /// An interface's iid: a constant holding its name (length-prefixed),
+  /// pas.<unit>$<name>$iid for an interface of a unit's interface.
+  llvm::DenseMap<InterfaceType *, llvm::GlobalVariable *> IIDs;
+
+  void declareInterface(Decl *D, InterfaceType *I) {
+    auto Export = ExportNames.find(D);
+    std::string Text = std::string(1, static_cast<char>(I->getDeclName().size())) +
+                       I->getDeclName().str();
+    llvm::Constant *Init =
+        llvm::ConstantDataArray::getString(M.getContext(), Text, false);
+    auto *G = new llvm::GlobalVariable(
+        M, Init->getType(), /*isConstant=*/true,
+        Export == ExportNames.end() ? llvm::GlobalValue::InternalLinkage
+                                    : llvm::GlobalValue::ExternalLinkage,
+        ImportedDecls.count(D) ? nullptr : Init,
+        Export == ExportNames.end() ? "iid." + I->getDeclName().lower()
+                                    : Export->second);
+    IIDs[I] = G;
+  }
+
+  /// The interface table of class C (null without interfaces): its
+  /// interfaces' iids and method tables.
+  llvm::Constant *interfaceTable(ClassType *C) {
+    if (C->getInterfaces().empty())
+      return llvm::ConstantPointerNull::get(B.getPtrTy());
+    std::string Name = C->getDeclName().lower();
+    llvm::SmallVector<llvm::Constant *, 8> Entries{llvm::ConstantExpr::getIntToPtr(
+        B.getInt64(C->getInterfaces().size()), B.getPtrTy())};
+    for (const InterfaceImpl &I : C->getInterfaces()) {
+      llvm::SmallVector<llvm::Constant *, 8> Methods;
+      for (RoutineDecl *R : I.Methods)
+        Methods.push_back(
+            R->isAbstract()
+                ? llvm::cast<llvm::Function>(
+                      classRuntime("__pas_abstract_error", B.getVoidTy(), {})
+                          .getCallee())
+                : static_cast<llvm::Constant *>(Functions[R]));
+      auto *Ty = llvm::ArrayType::get(B.getPtrTy(), Methods.size());
+      auto *T = new llvm::GlobalVariable(
+          M, Ty, /*isConstant=*/true, llvm::GlobalValue::InternalLinkage,
+          llvm::ConstantArray::get(Ty, Methods),
+          "itable." + Name + "." + I.Intf->getDeclName().lower());
+      Entries.push_back(IIDs[I.Intf]);
+      Entries.push_back(T);
+    }
+    auto *Ty = llvm::ArrayType::get(B.getPtrTy(), Entries.size());
+    return new llvm::GlobalVariable(M, Ty, /*isConstant=*/true,
+                                    llvm::GlobalValue::InternalLinkage,
+                                    llvm::ConstantArray::get(Ty, Entries),
+                                    "intfs." + Name);
+  }
+
   /// A class: its VMT (defined once all methods are declared), and for a
   /// class of a separately compiled unit its methods' declarations.
   void declareClass(Decl *D, ClassType *C) {
     auto Export = ExportNames.find(D);
     bool Imported = ImportedDecls.count(D);
-    auto *Ty = llvm::ArrayType::get(B.getPtrTy(), 2 + C->getVTable().size());
+    auto *Ty = llvm::ArrayType::get(B.getPtrTy(), 4 + C->getVTable().size());
     std::string Name = Export == ExportNames.end()
                            ? "vmt." + C->getDeclName().lower()
                            : Export->second;
@@ -1447,15 +1599,17 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
     return F;
   }
 
-  /// The VMT of C; TObject's is in the runtime.
+  /// The VMT of C; the predeclared classes' (TObject, Exception, EDivByZero
+  /// and its ancestors) are in the runtime, as __pas_<class>_vmt.
   llvm::Constant *vmtOf(ClassType *C) {
     if (llvm::GlobalVariable *G = VMTs.lookup(C))
       return G;
-    llvm::GlobalVariable *G = M.getNamedGlobal("__pas_tobject_vmt");
+    std::string Name = "__pas_" + C->getDeclName().lower() + "_vmt";
+    llvm::GlobalVariable *G = M.getNamedGlobal(Name);
     if (!G)
       G = new llvm::GlobalVariable(
-          M, llvm::ArrayType::get(B.getPtrTy(), 3), /*isConstant=*/true,
-          llvm::GlobalValue::ExternalLinkage, nullptr, "__pas_tobject_vmt");
+          M, llvm::ArrayType::get(B.getPtrTy(), 5), /*isConstant=*/true,
+          llvm::GlobalValue::ExternalLinkage, nullptr, Name);
     VMTs[C] = G;
     return G;
   }
@@ -1466,6 +1620,9 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
       llvm::SmallVector<llvm::Constant *, 8> Slots;
       Slots.push_back(vmtOf(C->getParent()));
       Slots.push_back(getPStrConstant(C->getDeclName()));
+      Slots.push_back(llvm::ConstantExpr::getIntToPtr(
+          B.getInt64(instanceSize(C)), B.getPtrTy()));
+      Slots.push_back(interfaceTable(C));
       for (RoutineDecl *R : C->getVTable()) {
         if (R->getBuiltin() == TObjectMethod::Destroy)
           Slots.push_back(llvm::cast<llvm::Function>(
@@ -1620,6 +1777,8 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
 
   /// {function, static link} for a routine passed as a procedural argument.
   llvm::Value *emitRoutineValue(Expr *Arg) {
+    if (auto *A = llvm::dyn_cast<AddrOfExpr>(Arg)) // @f (Turbo/FPC)
+      Arg = A->getOperand();
     Decl *D = llvm::cast<NameRefExpr>(Arg)->getDecl();
     if (auto *V = llvm::dyn_cast<VarDecl>(D)) // forwarding a parameter
       return B.CreateLoad(memType(V->getType()), varAddress(V));
@@ -1638,6 +1797,24 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
       Values.push_back(Link);
     if (Self) // methods
       Values.push_back(Self);
+    emitArgValues(Params, Args, Values);
+    llvm::Value *Result = B.CreateCall(Callee, Values);
+    // A string or record result comes back by value; expressions use its
+    // address. (An interface, {ptr, ptr}, is a value.)
+    if (Result->getType()->isArrayTy() ||
+        (Result->getType()->isStructTy() &&
+         Result->getType() != llvm::StructType::get(B.getPtrTy(), B.getPtrTy()))) {
+      llvm::Value *Tmp = createTemp(Result->getType(), "result");
+      B.CreateStore(Result, Tmp);
+      return Tmp;
+    }
+    return Result;
+  }
+
+  /// Appends the values passed for Args (parameters Params) to Values.
+  void emitArgValues(llvm::ArrayRef<VarDecl *> Params,
+                     llvm::ArrayRef<Expr *> Args,
+                     llvm::SmallVectorImpl<llvm::Value *> &Values) {
     for (size_t I = 0; I < Args.size(); ++I) {
       VarDecl *P = Params[I];
       Expr *Arg = Args[I];
@@ -1659,15 +1836,6 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
         Values.push_back(convertForAssign(visitExpr(Arg), Arg->getType(),
                                           P->getType(), Arg->getBeginLoc()));
     }
-    llvm::Value *Result = B.CreateCall(Callee, Values);
-    // A string or record result comes back by value; expressions use its
-    // address.
-    if (Result->getType()->isArrayTy() || Result->getType()->isStructTy()) {
-      llvm::Value *Tmp = createTemp(Result->getType(), "result");
-      B.CreateStore(Result, Tmp);
-      return Tmp;
-    }
-    return Result;
   }
 
   /// A string constant passed for a pchar parameter: a NUL-terminated copy.
@@ -1745,6 +1913,30 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
     return WithAddrs.lookup(W);
   }
 
+  /// The interface I value of object Obj: {Obj, its class's table for I}.
+  llvm::Value *toInterface(llvm::Value *Obj, InterfaceType *I) {
+    llvm::Value *Table = B.CreateCall(
+        classRuntime("__pas_intf_lookup", B.getPtrTy(), {B.getPtrTy(), B.getPtrTy()}),
+        {Obj, IIDs[I]}, "itable");
+    return makeInterface(Obj, Table);
+  }
+
+  llvm::Value *makeInterface(llvm::Value *Obj, llvm::Value *Table) {
+    llvm::Type *Ty = llvm::StructType::get(B.getPtrTy(), B.getPtrTy());
+    llvm::Value *V = B.CreateInsertValue(llvm::UndefValue::get(Ty), Obj, 0);
+    return B.CreateInsertValue(V, Table, 1);
+  }
+
+  /// The object of an interface value (nil: itself).
+  llvm::Value *interfaceObject(llvm::Value *V) {
+    return V->getType()->isStructTy() ? B.CreateExtractValue(V, 0, "obj") : V;
+  }
+
+  /// Is W's object a class (Self in a class method)?
+  static bool withIsClass(WithContext *W) {
+    return W->Record->getType()->isClassRef();
+  }
+
   /// if (Obj == nil) runtime error, under range checks.
   void emitNilObjectCheck(llvm::Value *Obj, SourceLocation L) {
     if (rangeChecks(L))
@@ -1760,9 +1952,32 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
 
   /// Address of virtual method Index in the VMT of object Obj.
   llvm::Value *loadVirtual(llvm::Value *Obj, unsigned Index) {
-    llvm::Value *VMT = B.CreateLoad(B.getPtrTy(), Obj, "vmt");
-    llvm::Value *Slot = B.CreateConstInBoundsGEP1_64(B.getPtrTy(), VMT, 2 + Index);
-    return B.CreateLoad(B.getPtrTy(), Slot, "method");
+    return loadVMTSlot(B.CreateLoad(B.getPtrTy(), Obj, "vmt"), 4 + Index,
+                       "method");
+  }
+
+  /// Entry Slot of a VMT: 0 the parent's VMT, 1 the class name, 2 the
+  /// instance size, 3 the interface table, 4... the virtual methods.
+  llvm::Value *loadVMTSlot(llvm::Value *VMT, unsigned Slot,
+                           const llvm::Twine &Name) {
+    llvm::Value *P = B.CreateConstInBoundsGEP1_64(B.getPtrTy(), VMT, Slot);
+    return B.CreateLoad(B.getPtrTy(), P, Name);
+  }
+
+  /// The class (VMT) of a method call's receiver: Obj itself if SelfIsClass,
+  /// else the object's (checked for nil).
+  llvm::Value *receiverClass(llvm::Value *Obj, bool SelfIsClass,
+                             SourceLocation L) {
+    if (SelfIsClass)
+      return Obj;
+    emitNilObjectCheck(Obj, L);
+    return B.CreateLoad(B.getPtrTy(), Obj, "vmt");
+  }
+
+  /// if (VMT == nil) runtime error, under range checks.
+  void emitNilClassCheck(llvm::Value *VMT, SourceLocation L) {
+    if (rangeChecks(L))
+      emitRuntimeCheck(B.CreateIsNull(VMT), "use of a nil class reference", L);
   }
 
   /// obj.Free: if obj <> nil then obj.Destroy (virtual) and release it.
@@ -1785,20 +2000,47 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
   /// object); otherwise a virtual method is called through the VMT and a
   /// destructor releases the object afterwards. Returns the result (an
   /// address for strings and records), or null.
+  /// SelfIsClass: Obj is a class (a VMT), as in TFoo.M, c.M (c: class of
+  /// T) and in class methods; then R is a class method or a constructor,
+  /// which creates an object of that class.
   llvm::Value *emitMethodCall(RoutineDecl *R, llvm::Value *Obj,
                               llvm::ArrayRef<Expr *> Args, bool Inherited,
-                              SourceLocation L) {
+                              SourceLocation L, bool SelfIsClass = false) {
+    if (R->isConstructor() && SelfIsClass && !Inherited)
+      return emitConstructionThrough(Obj, R, Args, L);
     switch (R->getBuiltin()) {
     case TObjectMethod::Create: // TObject's constructor does nothing
       return nullptr;
+    case TObjectMethod::ClassType:
+      return B.CreateLoad(B.getPtrTy(), Obj, "vmt");
+    case TObjectMethod::ClassParent:
+      return loadVMTSlot(receiverClass(Obj, SelfIsClass, L), 0, "parent");
+    case TObjectMethod::InstanceSize:
+      return B.CreatePtrToInt(
+          loadVMTSlot(receiverClass(Obj, SelfIsClass, L), 2, "size"),
+          B.getInt64Ty(), "instancesize");
+    case TObjectMethod::InheritsFrom: {
+      llvm::Value *VMT = receiverClass(Obj, SelfIsClass, L);
+      llvm::Value *Arg = visitExpr(Args[0]);
+      llvm::FunctionCallee Fn = classRuntime(
+          "__pas_class_inherits", B.getInt32Ty(), {B.getPtrTy(), B.getPtrTy()});
+      llvm::Value *R = B.CreateCall(Fn, {VMT, Arg});
+      return B.CreateICmpNE(R, B.getInt32(0), "inherits");
+    }
+    case TObjectMethod::ExceptionCreate: { // FMessage := msg
+      ClassType *C = R->getClass();
+      auto *Msg = llvm::cast<FieldDecl>(C->findOwnMember("fmessage"));
+      emitStringAssign(fieldAddress(Obj, C, Msg),
+                       llvm::cast<ShortStringType>(Msg->getType()), Args[0]);
+      return nullptr;
+    }
     case TObjectMethod::Free:
       emitFree(Obj);
       return nullptr;
-    case TObjectMethod::ClassName: {
-      llvm::Value *VMT = B.CreateLoad(B.getPtrTy(), Obj, "vmt");
-      llvm::Value *Slot = B.CreateConstInBoundsGEP1_64(B.getPtrTy(), VMT, 1);
-      return B.CreateLoad(B.getPtrTy(), Slot, "classname");
-    }
+    case TObjectMethod::ClassName:
+      return loadVMTSlot(
+          SelfIsClass ? Obj : B.CreateLoad(B.getPtrTy(), Obj, "vmt"), 1,
+          "classname");
     case TObjectMethod::Destroy:
       if (Inherited) // TObject's destructor does nothing
         return nullptr;
@@ -1807,6 +2049,17 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
       break;
     }
     llvm::Value *Result;
+    if (R->isClassMethod()) { // Self: the class
+      llvm::Value *Self = receiverClass(Obj, SelfIsClass, L);
+      llvm::FunctionCallee Fn = Functions[R];
+      if (!Inherited && R->isDispatched()) {
+        emitNilClassCheck(Self, L);
+        Fn = {routineFnType(R), loadVMTSlot(Self, 4 + R->getVMTIndex(), "method")};
+      }
+      Result = emitCallTo(Fn, llvm::ConstantPointerNull::get(B.getPtrTy()),
+                          R->getParams(), Args, Self);
+      return R->isFunction() ? Result : nullptr;
+    }
     if (!Inherited && R->isDispatched()) {
       emitNilObjectCheck(Obj, L);
       llvm::Value *Fn = loadVirtual(Obj, static_cast<unsigned>(R->getVMTIndex()));
@@ -1823,22 +2076,111 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
   }
 
   /// TFoo.Create(args): a new object of class C, initialized by Ctor.
+  /// The arguments are evaluated first. An exception leaving a constructor
+  /// written in Pascal destroys and releases the new object (as in Free
+  /// Pascal), so the call runs protected.
   llvm::Value *emitConstruction(ClassType *C, RoutineDecl *Ctor,
                                 llvm::ArrayRef<Expr *> Args, SourceLocation L) {
+    if (Ctor->getBuiltin() != TObjectMethod::None) {
+      llvm::Value *Obj =
+          B.CreateCall(RT.New, {B.getInt64(instanceSize(C))}, "obj");
+      B.CreateStore(vmtOf(C), Obj);
+      emitMethodCall(Ctor, Obj, Args, /*Inherited=*/true, L);
+      return Obj;
+    }
+    llvm::SmallVector<llvm::Value *, 8> Values{
+        llvm::ConstantPointerNull::get(B.getPtrTy())};
+    Values.push_back(nullptr); // Self
+    emitArgValues(Ctor->getParams(), Args, Values);
     llvm::Value *Obj =
         B.CreateCall(RT.New, {B.getInt64(instanceSize(C))}, "obj");
     B.CreateStore(vmtOf(C), Obj);
-    emitMethodCall(Ctor, Obj, Args, /*Inherited=*/true, L);
+    Values[1] = Obj;
+    auto *Failed = newBlock("ctor.raise");
+    llvm::Value *F = emitProtect(Failed, "ctor.call");
+    B.CreateCall(Functions[Ctor], Values);
+    B.CreateCall(excRuntime("__pas_exc_pop"), {F});
+    auto *Done = newBlock("ctor.done");
+    B.CreateBr(Done);
+    B.SetInsertPoint(Failed);
+    B.CreateCall(excRuntime("__pas_reraise_free"), {F, Obj});
+    B.CreateUnreachable();
+    B.SetInsertPoint(Done);
+    return Obj;
+  }
+
+  /// c.Create(args) with c a class (a VMT; also Self in a class method): a
+  /// new object of the class c refers to, of its size, initialized by Ctor
+  /// (virtual: c's). Protected like emitConstruction.
+  llvm::Value *emitConstructionThrough(llvm::Value *VMT, RoutineDecl *Ctor,
+                                       llvm::ArrayRef<Expr *> Args,
+                                       SourceLocation L) {
+    emitNilClassCheck(VMT, L);
+    auto Allocate = [&] {
+      llvm::Value *Size =
+          B.CreatePtrToInt(loadVMTSlot(VMT, 2, "size"), B.getInt64Ty());
+      llvm::Value *Obj = B.CreateCall(RT.New, {Size}, "obj");
+      B.CreateStore(VMT, Obj);
+      return Obj;
+    };
+    if (Ctor->getBuiltin() != TObjectMethod::None) {
+      llvm::Value *Obj = Allocate();
+      emitMethodCall(Ctor, Obj, Args, /*Inherited=*/true, L);
+      return Obj;
+    }
+    llvm::SmallVector<llvm::Value *, 8> Values{
+        llvm::ConstantPointerNull::get(B.getPtrTy())};
+    Values.push_back(nullptr); // Self
+    emitArgValues(Ctor->getParams(), Args, Values);
+    llvm::Value *Obj = Allocate();
+    Values[1] = Obj;
+    auto *Failed = newBlock("ctor.raise");
+    llvm::Value *F = emitProtect(Failed, "ctor.call");
+    if (Ctor->isDispatched())
+      B.CreateCall(routineFnType(Ctor),
+                   loadVMTSlot(VMT, 4 + Ctor->getVMTIndex(), "ctor"), Values);
+    else
+      B.CreateCall(Functions[Ctor], Values);
+    B.CreateCall(excRuntime("__pas_exc_pop"), {F});
+    auto *Done = newBlock("ctor.done");
+    B.CreateBr(Done);
+    B.SetInsertPoint(Failed);
+    B.CreateCall(excRuntime("__pas_reraise_free"), {F, Obj});
+    B.CreateUnreachable();
+    B.SetInsertPoint(Done);
     return Obj;
   }
 
   /// obj.M(args) or TFoo.Create(args) through FieldExpr F.
   llvm::Value *emitMemberCall(FieldExpr *F, llvm::ArrayRef<Expr *> Args) {
     auto *R = llvm::cast<RoutineDecl>(F->getMember());
+    if (F->getBase()->getType()->isInterface()) { // through the method table
+      llvm::Value *V = visitExpr(F->getBase());
+      llvm::Value *Obj = B.CreateExtractValue(V, 0, "obj");
+      llvm::Value *Table = B.CreateExtractValue(V, 1, "itable");
+      if (rangeChecks(F->getField().Loc))
+        emitRuntimeCheck(B.CreateIsNull(Obj), "use of a nil interface reference",
+                         F->getField().Loc);
+      llvm::Value *Slot =
+          B.CreateConstInBoundsGEP1_64(B.getPtrTy(), Table, R->getVMTIndex());
+      llvm::Value *Fn = B.CreateLoad(B.getPtrTy(), Slot, "method");
+      llvm::Value *Result =
+          emitCallTo({routineFnType(R), Fn},
+                     llvm::ConstantPointerNull::get(B.getPtrTy()),
+                     R->getParams(), Args, Obj);
+      return R->isFunction() ? Result : nullptr;
+    }
     if (auto *N = llvm::dyn_cast<NameRefExpr>(F->getBase());
-        N && llvm::isa<TypeDecl>(N->getDecl()))
-      return emitConstruction(llvm::cast<ClassType>(N->getType()), R, Args,
-                              F->getBeginLoc());
+        N && llvm::isa<TypeDecl>(N->getDecl())) {
+      auto *C = llvm::cast<ClassType>(N->getType());
+      if (R->isConstructor())
+        return emitConstruction(C, R, Args, F->getBeginLoc());
+      return emitMethodCall(R, vmtOf(C), Args, /*Inherited=*/false,
+                            F->getField().Loc, /*SelfIsClass=*/true);
+    }
+    if (F->getBase()->getType()->isClassRef()) // c.M, c: class of T
+      return emitMethodCall(R, visitExpr(F->getBase()), Args, /*Inherited=*/false,
+                            F->getField().Loc, /*SelfIsClass=*/true);
     // Not checked for nil: Free accepts nil, and a static method may be
     // called on nil (as in Free Pascal); virtual calls are checked.
     llvm::Value *Obj = visitExpr(F->getBase());
@@ -1855,12 +2197,14 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
     if (I->isBare() && Args.empty())
       Args = I->getImplicitArgs();
     return emitMethodCall(I->getMethod(), Self, Args, /*Inherited=*/true,
-                          I->getBeginLoc());
+                          I->getBeginLoc(), I->getEnclosing()->isClassMethod());
   }
 
   /// The value of property P of object Obj (static class C): an address
   /// for strings and records.
-  llvm::Value *emitPropertyRead(PropertyDecl *P, llvm::Value *Obj, ClassType *C) {
+  /// Indexes: an array property's.
+  llvm::Value *emitPropertyRead(PropertyDecl *P, llvm::Value *Obj, ClassType *C,
+                                llvm::ArrayRef<Expr *> Indexes = {}) {
     Type *T = P->getType();
     if (auto *F = llvm::dyn_cast<FieldDecl>(P->getRead())) {
       llvm::Value *Addr = fieldAddress(Obj, C, F);
@@ -1868,8 +2212,48 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
         return Addr;
       return loadScalar(Addr, T, P->getName().Name);
     }
-    return emitMethodCall(llvm::cast<RoutineDecl>(P->getRead()), Obj, {},
+    return emitMethodCall(llvm::cast<RoutineDecl>(P->getRead()), Obj,
+                          accessorArgs(P, Indexes, nullptr),
                           /*Inherited=*/false, P->getLocation());
+  }
+
+  /// The arguments of a property's accessor method: the indexes of an
+  /// array property, the `index` constant, the value written (if any).
+  llvm::SmallVector<Expr *, 4> accessorArgs(PropertyDecl *P,
+                                            llvm::ArrayRef<Expr *> Indexes,
+                                            Expr *Value) {
+    llvm::SmallVector<Expr *, 4> Args(Indexes.begin(), Indexes.end());
+    if (Expr *I = P->getIndexSpec())
+      Args.push_back(I);
+    if (Value)
+      Args.push_back(Value);
+    return Args;
+  }
+
+  /// The object of an array property access E (obj.P[i], P[i], obj[i]),
+  /// and its static class C.
+  llvm::Value *propertyObject(IndexExpr *E, ClassType *&C) {
+    Expr *Root = E->getPropertyRoot();
+    if (auto *F = llvm::dyn_cast<FieldExpr>(Root);
+        F && F->getMember() == E->getProperty()) {
+      C = llvm::cast<ClassType>(F->getBase()->getType());
+      return emitObject(F->getBase());
+    }
+    if (auto *N = llvm::dyn_cast<NameRefExpr>(Root);
+        N && N->getDecl() == E->getProperty()) {
+      C = llvm::cast<ClassType>(N->getWith()->Record->getType());
+      return withBase(N->getWith());
+    }
+    C = llvm::cast<ClassType>(Root->getType()); // the default property
+    return emitObject(Root);
+  }
+
+  /// The value of array property access E (an address for strings and
+  /// records).
+  llvm::Value *emitArrayPropertyRead(IndexExpr *E) {
+    ClassType *C;
+    llvm::Value *Obj = propertyObject(E, C);
+    return emitPropertyRead(E->getProperty(), Obj, C, E->getPropertyArgs());
   }
 
   /// A member of a class used as a value through FieldExpr F: a field, a
@@ -1878,6 +2262,11 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
     Decl *D = F->getMember();
     if (llvm::isa<RoutineDecl>(D))
       return emitMemberCall(F, {});
+    if (auto *V = llvm::dyn_cast<VarDecl>(D)) { // a class variable
+      if (V->getType()->isShortString())
+        return Globals[V];
+      return loadScalar(Globals[V], V->getType(), V->getName().Name);
+    }
     auto *C = llvm::cast<ClassType>(F->getBase()->getType());
     llvm::Value *Obj = emitObject(F->getBase());
     if (auto *P = llvm::dyn_cast<PropertyDecl>(D))
@@ -1955,8 +2344,7 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
   llvm::Value *emitDiv(llvm::Value *L, llvm::Value *R, bool Signed,
                        SourceLocation Loc) {
     if (!isConstNonZero(R))
-      emitRuntimeCheck(B.CreateICmpEQ(R, intConst(R, 0)), "division by zero",
-                       Loc);
+      emitDivZeroCheck(B.CreateICmpEQ(R, intConst(R, 0)), Loc);
     if (!Signed)
       return B.CreateUDiv(L, R, "div");
     // INT_MIN div -1 overflows (and traps on x86).
@@ -1988,8 +2376,7 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
     }
     // Turbo/FPC: sign follows the dividend (like C %).
     if (!isConstNonZero(R))
-      emitRuntimeCheck(B.CreateICmpEQ(R, intConst(R, 0)), "division by zero",
-                       Loc);
+      emitDivZeroCheck(B.CreateICmpEQ(R, intConst(R, 0)), Loc);
     if (!Signed)
       return B.CreateURem(L, R, "mod");
     // x mod -1 == 0, but INT_MIN srem -1 traps on x86: divide by 1 instead.
@@ -2035,8 +2422,10 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
           RT.StrCompare, {emitPStr(E->getLHS()), emitPStr(E->getRHS())});
       return compareInts(Op, Cmp, B.getInt32(0), /*Signed=*/true);
     }
-    if (LT->isPointer() || LT->isNil() || LT->isClass()) {
-      llvm::Value *L = visitExpr(E->getLHS()), *R = visitExpr(E->getRHS());
+    if (LT->isPointer() || LT->isNil() || LT->isClass() || LT->isClassRef() ||
+        LT->isInterface()) { // interfaces: their objects
+      llvm::Value *L = interfaceObject(visitExpr(E->getLHS()));
+      llvm::Value *R = interfaceObject(visitExpr(E->getRHS()));
       return Op == BinaryOp::Eq ? B.CreateICmpEQ(L, R, "cmp")
                                 : B.CreateICmpNE(L, R, "cmp");
     }
@@ -2253,6 +2642,8 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
     llvm::Value *V = visitExpr(Arg);
     if (E->getType()->isOrdinal())
       return convertOrdinal(V, Arg->getType(), E->getType());
+    if (E->getType()->isInterface())
+      return convertForAssign(V, Arg->getType(), E->getType(), E->getBeginLoc());
     return V;
   }
 
@@ -2283,7 +2674,7 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
         P = B.CreateExtractValue(
             B.CreateLoad(memType(Arg->getType()), emitAddress(Arg)), 0);
       else
-        P = visitExpr(Arg);
+        P = interfaceObject(visitExpr(Arg));
       return B.CreateIsNotNull(P, "assigned");
     }
     case BuiltinKind::ParamCount:
@@ -2597,6 +2988,8 @@ public:
       return llvm::dyn_cast_or_null<PropertyDecl>(N->getDecl());
     if (auto *F = llvm::dyn_cast<FieldExpr>(Target))
       return llvm::dyn_cast_or_null<PropertyDecl>(F->getMember());
+    if (auto *I = llvm::dyn_cast<IndexExpr>(Target))
+      return I->getProperty();
     return nullptr;
   }
 
@@ -2605,7 +2998,9 @@ public:
   void emitPropertyWrite(PropertyDecl *P, Expr *Target, Expr *Value) {
     llvm::Value *Obj;
     ClassType *C;
-    if (auto *N = llvm::dyn_cast<NameRefExpr>(Target)) {
+    if (auto *I = llvm::dyn_cast<IndexExpr>(Target)) {
+      Obj = propertyObject(I, C);
+    } else if (auto *N = llvm::dyn_cast<NameRefExpr>(Target)) {
       Obj = withBase(N->getWith());
       C = llvm::cast<ClassType>(N->getWith()->Record->getType());
     } else {
@@ -2614,7 +3009,12 @@ public:
       C = llvm::cast<ClassType>(F->getBase()->getType());
     }
     if (auto *R = llvm::dyn_cast<RoutineDecl>(P->getWrite())) {
-      emitMethodCall(R, Obj, {Value}, /*Inherited=*/false, Target->getBeginLoc());
+      auto *I = llvm::dyn_cast<IndexExpr>(Target);
+      emitMethodCall(R, Obj,
+                     accessorArgs(P, I ? I->getPropertyArgs()
+                                       : llvm::ArrayRef<Expr *>(),
+                                  Value),
+                     /*Inherited=*/false, Target->getBeginLoc());
       return;
     }
     Type *T = P->getType();
@@ -2641,7 +3041,8 @@ public:
     if (auto *R = llvm::dyn_cast<RoutineDecl>(S->getDecl())) {
       if (R->isMethod()) // through Self or a with statement's object
         emitMethodCall(R, withBase(S->getWith()), S->getArgs(),
-                       /*Inherited=*/false, S->getBeginLoc());
+                       /*Inherited=*/false, S->getBeginLoc(),
+                       withIsClass(S->getWith()));
       else
         emitCall(R, S->getArgs());
       return;
@@ -2698,11 +3099,12 @@ public:
                                        Value->getBeginLoc()),
                       RT);
       }
-      llvm::BasicBlock *Target =
-          BD->getBuiltinKind() == BuiltinKind::Exit       ? ExitBlock
-          : BD->getBuiltinKind() == BuiltinKind::Continue ? Loops.back().first
-                                                          : Loops.back().second;
-      B.CreateBr(Target);
+      if (BD->getBuiltinKind() == BuiltinKind::Exit)
+        emitJump(ExitBlock, 0);
+      else if (BD->getBuiltinKind() == BuiltinKind::Continue)
+        emitJump(Loops.back().Continue, Loops.back().Cleanups);
+      else
+        emitJump(Loops.back().Break, Loops.back().Cleanups);
       B.SetInsertPoint(newBlock("after.jump")); // unreachable code follows
       return;
     }
@@ -2858,7 +3260,7 @@ public:
     B.CreateCondBr(visitExpr(S->getCond()), BodyBB, EndBB);
 
     B.SetInsertPoint(BodyBB);
-    Loops.push_back({CondBB, EndBB});
+    Loops.push_back({CondBB, EndBB, Cleanups.size()});
     visitStmt(S->getBody());
     Loops.pop_back();
     B.CreateBr(CondBB);
@@ -2873,7 +3275,7 @@ public:
     B.CreateBr(BodyBB);
 
     B.SetInsertPoint(BodyBB);
-    Loops.push_back({CondBB, EndBB});
+    Loops.push_back({CondBB, EndBB, Cleanups.size()});
     for (Stmt *Child : S->getBody())
       visitStmt(Child);
     Loops.pop_back();
@@ -2931,7 +3333,7 @@ public:
     llvm::PHINode *I = B.CreatePHI(Start->getType(), 2, V->getName().Name);
     I->addIncoming(Start, PreBB);
     storeScalar(varAddress(V), I, VarTy);
-    Loops.push_back({LatchBB, EndBB});
+    Loops.push_back({LatchBB, EndBB, Cleanups.size()});
     visitStmt(S->getBody());
     Loops.pop_back();
     B.CreateBr(LatchBB);
@@ -3031,6 +3433,228 @@ public:
     B.SetInsertPoint(newBlock("after.goto")); // unreachable code follows
   }
 
+  //===--------------------------------------------------------------------===//
+  // Exceptions (objfpc)
+  //===--------------------------------------------------------------------===//
+
+  /// PasExcFrame (runtime/include/pascalrt.h): prev, object, where, jmp_buf.
+  llvm::StructType *excFrameType() {
+    return llvm::StructType::get(B.getPtrTy(), B.getPtrTy(), B.getPtrTy(),
+                                 jmpBufType());
+  }
+
+  /// The runtime's exception entry points, declared when first used.
+  llvm::FunctionCallee excRuntime(llvm::StringRef Name) {
+    llvm::Type *Ptr = B.getPtrTy();
+    llvm::Type *Void = B.getVoidTy();
+    bool NoReturn = false;
+    llvm::FunctionCallee F;
+    if (Name == "__pas_exc_push")
+      F = classRuntime(Name, Void, {Ptr, Ptr});
+    else if (Name == "__pas_raise_divzero") {
+      F = classRuntime(Name, Void, {Ptr});
+      llvm::cast<llvm::Function>(F.getCallee())->addFnAttr(llvm::Attribute::Cold);
+      NoReturn = true;
+    } else if (Name == "__pas_raise" || Name == "__pas_reraise_free") {
+      F = classRuntime(Name, Void, {Ptr, Ptr});
+      NoReturn = true;
+    } else {
+      // __pas_exc_pop, __pas_free_object, __pas_reraise
+      F = classRuntime(Name, Void, {Ptr});
+      NoReturn = Name == "__pas_reraise";
+    }
+    if (NoReturn)
+      llvm::cast<llvm::Function>(F.getCallee())
+          ->addFnAttr(llvm::Attribute::NoReturn);
+    return F;
+  }
+
+  /// Pushes a new PasExcFrame and calls _setjmp on it: an exception raised
+  /// to the frame continues at Landing, the protected code in a new block
+  /// named BodyName (the insertion point). Returns the frame.
+  llvm::Value *emitProtect(llvm::BasicBlock *Landing, const llvm::Twine &BodyName) {
+    llvm::Value *F = createTemp(excFrameType(), "excframe");
+    // The routine's frame goes along so that the optimizer keeps its
+    // variables in memory, where _longjmp does not undo their changes.
+    llvm::Value *Frame =
+        CurFrame ? CurFrame : llvm::ConstantPointerNull::get(B.getPtrTy());
+    B.CreateCall(excRuntime("__pas_exc_push"), {F, Frame});
+    llvm::Value *R = B.CreateCall(
+        RT.SetJmp, {B.CreateStructGEP(excFrameType(), F, 3)}, "jmp");
+    auto *Body = newBlock(BodyName);
+    B.CreateCondBr(B.CreateICmpNE(R, B.getInt32(0)), Landing, Body);
+    B.SetInsertPoint(Body);
+    return F;
+  }
+
+  /// Branches to Target (exit, break, continue), leaving the Cleanups
+  /// above Depth on the way.
+  void emitJump(llvm::BasicBlock *Target, size_t Depth) {
+    for (size_t I = Cleanups.size(); I > Depth; --I) {
+      Cleanup &C = Cleanups[I - 1];
+      B.CreateCall(excRuntime("__pas_exc_pop"), {C.Frame});
+      if (C.K == Cleanup::Handler) {
+        B.CreateCall(excRuntime("__pas_free_object"), {C.Object});
+      } else if (C.K == Cleanup::Finally) {
+        B.CreateStore(B.getInt32(2 + C.Exits.size()), C.State);
+        auto *Cont = newBlock("finally.cont");
+        C.Exits.push_back(Cont);
+        B.CreateBr(C.FinallyBB);
+        B.SetInsertPoint(Cont);
+      }
+    }
+    B.CreateBr(Target);
+  }
+
+  void visitTryStmt(TryStmt *S) {
+    if (S->isFinally()) {
+      emitTryFinally(S);
+      return;
+    }
+    //   push F; if (_setjmp(F)) goto except;  body; pop F; goto end
+    // except:
+    //   exc = F.object; push H; if (_setjmp(H)) goto escape
+    //   if (exc is C1) { E1 := exc; handler1; pop H; free exc; goto end } ...
+    //   [else part; pop H; free exc; goto end]  or  pop H; reraise F
+    // escape: (an exception left a handler) free exc unless it is the one
+    //   raised; reraise it
+    auto *Except = newBlock("try.except");
+    auto *End = newBlock("try.end");
+    llvm::Value *F = emitProtect(Except, "try.body");
+    Cleanups.emplace_back(Cleanup::TryBody, F);
+    for (Stmt *Child : S->getBody())
+      visitStmt(Child);
+    Cleanups.pop_back();
+    B.CreateCall(excRuntime("__pas_exc_pop"), {F});
+    B.CreateBr(End);
+
+    B.SetInsertPoint(Except);
+    llvm::Value *Obj = B.CreateLoad(
+        B.getPtrTy(), B.CreateStructGEP(excFrameType(), F, 1), "exc");
+    auto *Escape = newBlock("handler.raise");
+    llvm::Value *H = emitProtect(Escape, "handler.match");
+    Cleanups.emplace_back(Cleanup::Handler, H, Obj);
+    HandledFrames.push_back(F);
+    auto Done = [&] { // a handler ran to its end
+      B.CreateCall(excRuntime("__pas_exc_pop"), {H});
+      B.CreateCall(excRuntime("__pas_free_object"), {Obj});
+      B.CreateBr(End);
+    };
+    for (ExceptHandler *Handler : S->getHandlers()) {
+      llvm::Value *Is = B.CreateCall(
+          classRuntime("__pas_class_is", B.getInt32Ty(),
+                       {B.getPtrTy(), B.getPtrTy()}),
+          {Obj, vmtOf(Handler->getClass())});
+      auto *Do = newBlock("handler.do");
+      auto *Next = newBlock("handler.next");
+      B.CreateCondBr(B.CreateICmpNE(Is, B.getInt32(0)), Do, Next);
+      B.SetInsertPoint(Do);
+      if (VarDecl *V = Handler->getVar()) {
+        llvm::Value *Slot = createTemp(B.getPtrTy(), V->getName().Name);
+        B.CreateStore(Obj, Slot);
+        HandlerVars[V] = Slot;
+      }
+      visitStmt(Handler->getBody());
+      Done();
+      B.SetInsertPoint(Next);
+    }
+    if (S->catchesAll()) {
+      for (Stmt *Child : S->getExceptBody())
+        visitStmt(Child);
+      Done();
+    } else { // no handler matches: on to the next try statement
+      B.CreateCall(excRuntime("__pas_exc_pop"), {H});
+      B.CreateCall(excRuntime("__pas_reraise"), {F});
+      B.CreateUnreachable();
+    }
+    HandledFrames.pop_back();
+    Cleanups.pop_back();
+
+    B.SetInsertPoint(Escape);
+    B.CreateCall(excRuntime("__pas_reraise_free"), {H, Obj});
+    B.CreateUnreachable();
+    B.SetInsertPoint(End);
+  }
+
+  //   push F; if (_setjmp(F)) goto raised;  body; pop F; state = 0
+  // finally:
+  //   finally part
+  //   switch (state) { 0: end; 1: reraise F; 2 + k: exit k (exit, break or
+  //     continue out of the body) }
+  // raised: state = 1; goto finally
+  void emitTryFinally(TryStmt *S) {
+    auto *Raised = newBlock("finally.raise");
+    auto *Finally = newBlock("finally");
+    auto *End = newBlock("try.end");
+    llvm::Value *State = createTemp(B.getInt32Ty(), "finally.state");
+    llvm::Value *F = emitProtect(Raised, "try.body");
+    Cleanups.emplace_back(Cleanup::Finally, F, nullptr, State, Finally);
+    for (Stmt *Child : S->getBody())
+      visitStmt(Child);
+    llvm::SmallVector<llvm::BasicBlock *, 2> Exits =
+        std::move(Cleanups.back().Exits);
+    Cleanups.pop_back();
+    B.CreateCall(excRuntime("__pas_exc_pop"), {F});
+    B.CreateStore(B.getInt32(0), State);
+    B.CreateBr(Finally);
+
+    B.SetInsertPoint(Raised);
+    B.CreateStore(B.getInt32(1), State);
+    B.CreateBr(Finally);
+
+    B.SetInsertPoint(Finally);
+    for (Stmt *Child : S->getFinallyBody())
+      visitStmt(Child);
+    auto *Reraise = newBlock("finally.reraise");
+    llvm::SwitchInst *SW =
+        B.CreateSwitch(B.CreateLoad(B.getInt32Ty(), State, "state"), End);
+    SW->addCase(B.getInt32(1), Reraise);
+    for (size_t K = 0; K < Exits.size(); ++K)
+      SW->addCase(B.getInt32(2 + K), Exits[K]);
+    B.SetInsertPoint(Reraise);
+    B.CreateCall(excRuntime("__pas_reraise"), {F});
+    B.CreateUnreachable();
+    B.SetInsertPoint(End);
+  }
+
+  /// "file:line:col" for the runtime's exception functions, or null.
+  llvm::Value *whereText(SourceLocation L) {
+    std::string Where = where(L);
+    if (Where.empty())
+      return llvm::ConstantPointerNull::get(B.getPtrTy());
+    return B.CreateGlobalString(Where.substr(4), ".where");
+  }
+
+  /// if (Cond) integer division by zero: a runtime error, or (objfpc) an
+  /// EDivByZero exception, as in Free Pascal with SysUtils.
+  void emitDivZeroCheck(llvm::Value *Cond, SourceLocation L) {
+    if (!LangOpts.ObjKeywords) {
+      emitRuntimeCheck(Cond, "division by zero", L);
+      return;
+    }
+    if (auto *C = llvm::dyn_cast<llvm::ConstantInt>(Cond); C && C->isZero())
+      return; // provably fine
+    auto *ErrBB = newBlock("rt.error");
+    auto *ContBB = newBlock("rt.ok");
+    llvm::MDBuilder MDB(M.getContext());
+    B.CreateCondBr(Cond, ErrBB, ContBB, MDB.createUnlikelyBranchWeights());
+    B.SetInsertPoint(ErrBB);
+    B.CreateCall(excRuntime("__pas_raise_divzero"), {whereText(L)});
+    B.CreateUnreachable();
+    B.SetInsertPoint(ContBB);
+  }
+
+  void visitRaiseStmt(RaiseStmt *S) {
+    if (S->isReraise()) {
+      B.CreateCall(excRuntime("__pas_reraise"), {HandledFrames.back()});
+    } else {
+      llvm::Value *Obj = visitExpr(S->getObject());
+      B.CreateCall(excRuntime("__pas_raise"), {Obj, whereText(S->getBeginLoc())});
+    }
+    B.CreateUnreachable();
+    B.SetInsertPoint(newBlock("after.raise")); // unreachable code follows
+  }
+
   void visitWithStmt(WithStmt *S) {
     // The record designators are evaluated once, on entry (ISO 6.8.3.10).
     // An object (objfpc) is evaluated, a record's address taken.
@@ -3067,7 +3691,9 @@ public:
     }
     if (auto *R = llvm::dyn_cast<RoutineDecl>(D); R && R->isMethod())
       return emitMethodCall(R, withBase(E->getWith()), {}, /*Inherited=*/false,
-                            E->getBeginLoc());
+                            E->getBeginLoc(), withIsClass(E->getWith()));
+    if (auto *TD = llvm::dyn_cast<TypeDecl>(D)) // a class as a value
+      return vmtOf(llvm::cast<ClassType>(TD->getType()));
     if (E->getType()->isShortString() &&
         (llvm::isa<VarDecl>(D) || llvm::isa<FieldDecl>(D)))
       return emitAddress(E);
@@ -3118,6 +3744,22 @@ public:
   /// obj is TFoo / obj as TFoo: the runtime walks obj's VMT chain.
   llvm::Value *emitIsAs(BinaryExpr *E) {
     llvm::Value *Obj = visitExpr(E->getLHS());
+    if (auto *I = llvm::dyn_cast<InterfaceType>(E->getRHS()->getType())) {
+      if (E->getOp() == BinaryOp::Is) {
+        llvm::Value *T = B.CreateCall(
+            classRuntime("__pas_intf_lookup", B.getPtrTy(),
+                         {B.getPtrTy(), B.getPtrTy()}),
+            {Obj, IIDs[I]});
+        return B.CreateIsNotNull(T, "is");
+      }
+      llvm::Constant *Msg = B.CreateGlobalString(
+          ("invalid interface typecast" + where(E->getOpLoc())), ".rterr");
+      llvm::Value *T = B.CreateCall(
+          classRuntime("__pas_intf_as", B.getPtrTy(),
+                       {B.getPtrTy(), B.getPtrTy(), B.getPtrTy()}),
+          {Obj, IIDs[I], Msg}, "itable");
+      return makeInterface(Obj, T);
+    }
     llvm::Constant *VMT = vmtOf(llvm::cast<ClassType>(E->getRHS()->getType()));
     if (E->getOp() == BinaryOp::Is) {
       llvm::Value *R = B.CreateCall(
@@ -3214,7 +3856,8 @@ public:
     if (auto *R = llvm::dyn_cast<RoutineDecl>(E->getDecl())) {
       if (R->isMethod())
         return emitMethodCall(R, withBase(E->getWith()), E->getArgs(),
-                              /*Inherited=*/false, E->getBeginLoc());
+                              /*Inherited=*/false, E->getBeginLoc(),
+                              withIsClass(E->getWith()));
       return emitCall(R, E->getArgs());
     }
     if (auto *V = llvm::dyn_cast<VarDecl>(E->getDecl()))
@@ -3263,6 +3906,8 @@ public:
   llvm::Value *visitSetCtorExpr(SetCtorExpr *E) { return emitSetCtor(E); }
 
   llvm::Value *visitIndexExpr(IndexExpr *E) {
+    if (E->getProperty())
+      return emitArrayPropertyRead(E);
     if (E->getType()->isShortString())
       return emitAddress(E);
     return loadScalar(emitAddress(E), E->getType());
@@ -3270,7 +3915,8 @@ public:
 
   llvm::Value *visitFieldExpr(FieldExpr *E) {
     if (!llvm::isa_and_nonnull<FieldDecl>(E->getMember()) ||
-        E->getBase()->getType()->isClass())
+        E->getBase()->getType()->isClass() ||
+        E->getBase()->getType()->isClassRef())
       return emitMemberValue(E); // objfpc: a member of an object
     if (E->getType()->isShortString())
       return emitAddress(E);

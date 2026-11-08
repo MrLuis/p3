@@ -27,12 +27,14 @@
 namespace pcc {
 
 class ClassType;
+class InterfaceType;
 class Decl;
 class FieldDecl;
 class LabelDecl;
 class RoutineDecl;
 class Type;
 class TypeSpec;
+class PropertyDecl;
 class VarDecl;
 struct WithContext;
 
@@ -244,12 +246,27 @@ public:
 class IndexExpr final : public Expr {
   Expr *Base;
   Expr *Index;
+  // objfpc: an array property, `obj.P[i, j]`, `P[i]` (through Self or with)
+  // or `obj[i]` (the default property), is the outermost IndexExpr of the
+  // chain `((root[i])[j])`; Sema sets the property, the chain's root
+  // (obj.P, P or obj) and the indices.
+  PropertyDecl *Prop = nullptr;
+  Expr *PropRoot = nullptr;
+  llvm::ArrayRef<Expr *> PropArgs;
 
 public:
   IndexExpr(SourceRange R, Expr *Base, Expr *Index)
       : Expr(EK_Index, R), Base(Base), Index(Index) {}
   Expr *getBase() const { return Base; }
   Expr *getIndex() const { return Index; }
+  PropertyDecl *getProperty() const { return Prop; }
+  Expr *getPropertyRoot() const { return PropRoot; }
+  llvm::ArrayRef<Expr *> getPropertyArgs() const { return PropArgs; }
+  void setProperty(PropertyDecl *P, Expr *Root, llvm::ArrayRef<Expr *> Args) {
+    Prop = P;
+    PropRoot = Root;
+    PropArgs = Args;
+  }
   static bool classof(const Expr *E) { return E->getKind() == EK_Index; }
 };
 
@@ -636,6 +653,74 @@ public:
   static bool classof(const Stmt *S) { return S->getKind() == SK_Goto; }
 };
 
+/// `on [Name:] Class do Body` in the except part of a try statement
+/// (objfpc). Name, if given, is a variable of the class type visible in
+/// Body only (Sema creates Var).
+class ExceptHandler {
+  Identifier VarName; ///< invalid for `on TFoo do`
+  Identifier ClassName;
+  Stmt *Body;
+  SourceLocation OnLoc;
+  VarDecl *Var = nullptr;     ///< set by Sema
+  ClassType *Class = nullptr; ///< set by Sema
+
+public:
+  ExceptHandler(SourceLocation OnLoc, Identifier VarName, Identifier ClassName,
+                Stmt *Body)
+      : VarName(VarName), ClassName(ClassName), Body(Body), OnLoc(OnLoc) {}
+  SourceLocation getOnLoc() const { return OnLoc; }
+  const Identifier &getVarName() const { return VarName; }
+  const Identifier &getClassName() const { return ClassName; }
+  Stmt *getBody() const { return Body; }
+  VarDecl *getVar() const { return Var; }
+  void setVar(VarDecl *V) { Var = V; }
+  ClassType *getClass() const { return Class; }
+  void setClass(ClassType *C) { Class = C; }
+};
+
+/// try Body except [Handlers [else ExceptBody] | ExceptBody] end
+/// try Body finally FinallyBody end                          (objfpc)
+/// Without handlers, ExceptBody handles every exception; with handlers,
+/// it is the else part (hasElse) for exceptions no handler matches.
+class TryStmt final : public Stmt {
+  llvm::ArrayRef<Stmt *> Body;
+  bool IsFinally;
+  SourceLocation PartLoc; ///< `except` or `finally`
+  llvm::ArrayRef<ExceptHandler *> Handlers;
+  SourceLocation ElseLoc; ///< valid iff handlers are followed by else
+  llvm::ArrayRef<Stmt *> HandlerBody; ///< except: ExceptBody; finally: FinallyBody
+
+public:
+  TryStmt(SourceRange R, llvm::ArrayRef<Stmt *> Body, bool IsFinally,
+          SourceLocation PartLoc, llvm::ArrayRef<ExceptHandler *> Handlers,
+          SourceLocation ElseLoc, llvm::ArrayRef<Stmt *> HandlerBody)
+      : Stmt(SK_Try, R), Body(Body), IsFinally(IsFinally), PartLoc(PartLoc),
+        Handlers(Handlers), ElseLoc(ElseLoc), HandlerBody(HandlerBody) {}
+  llvm::ArrayRef<Stmt *> getBody() const { return Body; }
+  bool isFinally() const { return IsFinally; }
+  SourceLocation getPartLoc() const { return PartLoc; }
+  llvm::ArrayRef<ExceptHandler *> getHandlers() const { return Handlers; }
+  bool hasElse() const { return ElseLoc.isValid(); }
+  SourceLocation getElseLoc() const { return ElseLoc; }
+  /// The except part (no handlers), the else part, or the finally part.
+  llvm::ArrayRef<Stmt *> getExceptBody() const { return HandlerBody; }
+  llvm::ArrayRef<Stmt *> getFinallyBody() const { return HandlerBody; }
+  /// Does the except part catch every exception (no handlers, or else)?
+  bool catchesAll() const { return Handlers.empty() || hasElse(); }
+  static bool classof(const Stmt *S) { return S->getKind() == SK_Try; }
+};
+
+/// raise Object, or a bare `raise` (re-raise, in an exception handler)
+class RaiseStmt final : public Stmt {
+  Expr *Object; ///< null for a re-raise
+
+public:
+  RaiseStmt(SourceRange R, Expr *Object) : Stmt(SK_Raise, R), Object(Object) {}
+  Expr *getObject() const { return Object; }
+  bool isReraise() const { return Object == nullptr; }
+  static bool classof(const Stmt *S) { return S->getKind() == SK_Raise; }
+};
+
 //===----------------------------------------------------------------------===//
 // Written types
 //===----------------------------------------------------------------------===//
@@ -644,7 +729,7 @@ class TypeSpec {
 public:
   enum TypeSpecKind {
     TS_Named, TS_Enum, TS_Subrange, TS_Array, TS_Record, TS_Pointer, TS_Set,
-    TS_File, TS_Routine, TS_String, TS_Class
+    TS_File, TS_Routine, TS_String, TS_Class, TS_ClassRef, TS_Interface
   };
 
 private:
@@ -818,7 +903,8 @@ public:
 /// forward. Members are FieldDecls, RoutineDecls (method headings) and
 /// PropertyDecls in source order, each with its visibility.
 class ClassTypeSpec final : public TypeSpec {
-  Identifier Parent; ///< invalid: TObject
+  Identifier Parent; ///< invalid: TObject (an interface: TObject too)
+  llvm::ArrayRef<Identifier> Interfaces; ///< the rest of class(P, I1, I2)
   llvm::ArrayRef<Decl *> Members;
   bool Forward;
 
@@ -828,9 +914,44 @@ public:
       : TypeSpec(TS_Class, R), Parent(Parent), Members(Members),
         Forward(Forward) {}
   const Identifier &getParent() const { return Parent; }
+  llvm::ArrayRef<Identifier> getInterfaces() const { return Interfaces; }
+  void setInterfaces(llvm::ArrayRef<Identifier> I) { Interfaces = I; }
   llvm::ArrayRef<Decl *> getMembers() const { return Members; }
   bool isForward() const { return Forward; }
   static bool classof(const TypeSpec *T) { return T->getKind() == TS_Class; }
+};
+
+/// interface [(Parent)] ['GUID'] method headings end  (objfpc, CORBA
+/// style: no reference counting). `IFoo = interface;` is a forward
+/// declaration.
+class InterfaceTypeSpec final : public TypeSpec {
+  Identifier Parent; ///< invalid: none
+  llvm::ArrayRef<Decl *> Members;
+  bool Forward;
+  llvm::StringRef GUID; ///< ['...'] (no effect)
+
+public:
+  InterfaceTypeSpec(SourceRange R, Identifier Parent,
+                    llvm::ArrayRef<Decl *> Members, bool Forward,
+                    llvm::StringRef GUID)
+      : TypeSpec(TS_Interface, R), Parent(Parent), Members(Members),
+        Forward(Forward), GUID(GUID) {}
+  const Identifier &getParent() const { return Parent; }
+  llvm::ArrayRef<Decl *> getMembers() const { return Members; }
+  bool isForward() const { return Forward; }
+  llvm::StringRef getGUID() const { return GUID; }
+  static bool classof(const TypeSpec *T) { return T->getKind() == TS_Interface; }
+};
+
+/// class of TFoo  (objfpc): a class reference type.
+class ClassRefTypeSpec final : public TypeSpec {
+  Identifier ClassName;
+
+public:
+  ClassRefTypeSpec(SourceRange R, Identifier ClassName)
+      : TypeSpec(TS_ClassRef, R), ClassName(ClassName) {}
+  const Identifier &getClassName() const { return ClassName; }
+  static bool classof(const TypeSpec *T) { return T->getKind() == TS_ClassRef; }
 };
 
 //===----------------------------------------------------------------------===//
@@ -838,7 +959,11 @@ public:
 //===----------------------------------------------------------------------===//
 
 /// Visibility of a class member (objfpc). Records' fields are public.
-enum class Visibility : unsigned char { Public, Published, Protected, Private };
+/// Strict private members are visible only in their class's methods, strict
+/// protected ones also in its descendants' (not in the rest of the module).
+enum class Visibility : unsigned char {
+  Public, Published, Protected, Private, StrictProtected, StrictPrivate
+};
 
 class Decl {
 public:
@@ -884,6 +1009,10 @@ private:
   /// with static storage (even inside a routine).
   Expr *Init = nullptr;
   ConstValue InitValue;         ///< set by Sema
+  /// objfpc `class var`: one static variable for the class and its
+  /// descendants (VarClass: set by Sema).
+  bool IsClassVar = false;
+  ClassType *VarClass = nullptr;
 
 public:
   VarDecl(Identifier Name, TypeSpec *TS, VarKind VK = Variable)
@@ -902,6 +1031,10 @@ public:
   Expr *getInit() const { return Init; }
   void setInit(Expr *E) { Init = E; }
   bool isTypedConst() const { return Init != nullptr; }
+  bool isClassVar() const { return IsClassVar; }
+  void setClassVar() { IsClassVar = true; }
+  ClassType *getVarClass() const { return VarClass; }
+  void setVarClass(ClassType *C) { VarClass = C; }
   const ConstValue &getInitValue() const { return InitValue; }
   void setInitValue(ConstValue V) { InitValue = V; }
   static bool classof(const Decl *D) { return D->getKind() == DK_Var; }
@@ -992,7 +1125,12 @@ class Block;
 enum class MethodKind : unsigned char { None, Method, Constructor, Destructor };
 
 /// The methods of the predeclared class TObject, which have no Pascal body.
-enum class TObjectMethod : unsigned char { None, Create, Destroy, Free, ClassName };
+/// Predeclared methods without a Pascal body: TObject's, and
+/// Exception.Create (objfpc).
+enum class TObjectMethod : unsigned char {
+  None, Create, Destroy, Free, ClassName, ExceptionCreate,
+  ClassType, ClassParent, InheritsFrom, InstanceSize
+};
 
 /// procedure P(params); block;     function F(params): T; block;
 /// A `forward` declaration and its later definition are two nodes; Sema
@@ -1018,6 +1156,15 @@ class RoutineDecl final : public Decl {
   MethodKind MK = MethodKind::None;
   Identifier ClassName;             ///< `TFoo` of an implementation `TFoo.Bar`
   bool Virtual = false, Override = false, Abstract = false;
+  bool ClassMethod = false;
+  /// Overloading (objfpc): the `overload` directive, the next routine of
+  /// the same name in the same scope or class (set by Sema), and this
+  /// one's number among them (1, 2, ...; 0 if not overloaded), which goes
+  /// into its symbol.
+  bool OverloadDirective = false;
+  InterfaceType *Intf = nullptr;
+  RoutineDecl *NextOverload = nullptr;
+  unsigned OverloadIndex = 0;
   ClassType *Class = nullptr;       ///< set by Sema: the class declaring it
   VarDecl *SelfVar = nullptr;       ///< set by Sema: the hidden parameter
   RoutineDecl *Impl = nullptr;      ///< set by Sema: a method's implementation
@@ -1069,6 +1216,25 @@ public:
   bool isDestructor() const { return MK == MethodKind::Destructor; }
   const Identifier &getClassName() const { return ClassName; }
   void setClassName(Identifier N) { ClassName = N; }
+  /// `class procedure` / `class function` (objfpc): Self is a class
+  /// reference, not an object.
+  bool isClassMethod() const { return ClassMethod; }
+  void setClassMethod() { ClassMethod = true; }
+  bool hasOverloadDirective() const { return OverloadDirective; }
+  void setOverloadDirective() { OverloadDirective = true; }
+  RoutineDecl *getNextOverload() const { return NextOverload; }
+  bool isOverloaded() const { return OverloadIndex != 0; }
+  unsigned getOverloadIndex() const { return OverloadIndex; }
+  /// Appends R to this overload set (this: its first routine).
+  void addOverload(RoutineDecl *R) {
+    if (!OverloadIndex)
+      OverloadIndex = 1;
+    RoutineDecl *Last = this;
+    while (Last->NextOverload)
+      Last = Last->NextOverload;
+    R->OverloadIndex = Last->OverloadIndex + 1;
+    Last->NextOverload = R;
+  }
   bool isVirtual() const { return Virtual; }
   bool isOverride() const { return Override; }
   bool isAbstract() const { return Abstract; }
@@ -1079,6 +1245,9 @@ public:
   }
   ClassType *getClass() const { return Class; }
   void setClass(ClassType *C) { Class = C; }
+  /// A method heading of an interface (its slot: getVMTIndex).
+  InterfaceType *getInterface() const { return Intf; }
+  void setInterface(InterfaceType *I) { Intf = I; }
   RoutineDecl *getImplementation() const { return Impl; }
   void setImplementation(RoutineDecl *R) { Impl = R; }
   /// Where the body is: a method's implementation, else the declaration.
@@ -1102,6 +1271,13 @@ class PropertyDecl final : public Decl {
   Type *Ty = nullptr;
   Identifier ReadName, WriteName; ///< invalid when omitted
   Decl *Read = nullptr, *Write = nullptr; ///< set by Sema
+  /// An array property `P[i: T]`: the index parameters, passed to the
+  /// accessors (methods) first.
+  llvm::ArrayRef<VarDecl *> Params;
+  Expr *IndexSpec = nullptr;    ///< `index N`: passed to the accessors next
+  Expr *DefaultValue = nullptr; ///< `default V` (for streaming; no effect)
+  bool IsDefault = false;       ///< `...; default;`: obj[i] means obj.P[i]
+  bool NoDefault = false;       ///< `nodefault` (no effect)
 
 public:
   PropertyDecl(Identifier Name, TypeSpec *TS, Identifier ReadName,
@@ -1119,6 +1295,17 @@ public:
     Read = R;
     Write = W;
   }
+  llvm::ArrayRef<VarDecl *> getParams() const { return Params; }
+  bool isArrayProperty() const { return !Params.empty(); }
+  void setParams(llvm::ArrayRef<VarDecl *> P) { Params = P; }
+  Expr *getIndexSpec() const { return IndexSpec; }
+  void setIndexSpec(Expr *E) { IndexSpec = E; }
+  Expr *getDefaultValue() const { return DefaultValue; }
+  void setDefaultValue(Expr *E) { DefaultValue = E; }
+  bool isDefault() const { return IsDefault; }
+  void setDefault() { IsDefault = true; }
+  bool isNoDefault() const { return NoDefault; }
+  void setNoDefault() { NoDefault = true; }
   static bool classof(const Decl *D) { return D->getKind() == DK_Property; }
 };
 

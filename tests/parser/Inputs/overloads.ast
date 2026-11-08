@@ -1,0 +1,42 @@
+ProgramDecl 'overloads' <1:1>
+  TypeDecl 'ta' = class(TObject) <3:3>
+  ProcedureDecl 'ta.m' definition <7:1>
+    CompoundStmt <7:29>
+      EmptyStmt <7:35>
+  ProcedureDecl 'ta.m' definition <8:1>
+    CompoundStmt <8:34>
+      EmptyStmt <8:40>
+  FunctionDecl 'f' : integer overload #1 <9:1>
+    ParamDecl 'x' : integer <9:12>
+    CompoundStmt <9:44>
+      AssignStmt <9:50>
+        NameRefExpr 'f' function result : integer <9:50>
+        NameRefExpr 'x' parameter : integer <9:55>
+  FunctionDecl 'f' : real overload #2 <10:1>
+    ParamDecl 'x' : real <10:12>
+    CompoundStmt <10:38>
+      AssignStmt <10:44>
+        NameRefExpr 'f' function result : real <10:44>
+        NameRefExpr 'x' parameter : real <10:49>
+  VarDecl 'a' : TA <12:3>
+  CompoundStmt <13:1>
+    AssignStmt <14:3>
+      NameRefExpr 'a' variable : TA <14:3>
+      FieldExpr 'create' : TA <14:8>
+        NameRefExpr 'ta' type : TA <14:8>
+    IndirectCallStmt <15:3>
+      IndirectCallExpr <15:3>
+        FieldExpr 'm' #1 <15:3>
+          NameRefExpr 'a' variable : TA <15:3>
+        IntegerLiteralExpr 1 : integer <15:7>
+    IndirectCallStmt <16:3>
+      IndirectCallExpr <16:3>
+        FieldExpr 'm' #2 <16:3>
+          NameRefExpr 'a' variable : TA <16:3>
+        CharLiteralExpr "s" : char <16:7>
+    ProcCallStmt 'writeln' <17:3>
+      CallExpr 'f' #1 : integer <17:11>
+        IntegerLiteralExpr 1 : integer <17:13>
+      CallExpr 'f' #2 : real <17:17>
+        RealLiteralExpr 2.5 : real <17:19>
+    EmptyStmt <18:1>

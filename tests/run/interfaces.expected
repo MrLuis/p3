@@ -1,0 +1,21 @@
+through interfaces
+  square: area 9
+  square: area 36
+  cube: area 4
+  shape: area 0
+  named square
+is and as
+  TRUE TRUE FALSE FALSE TRUE FALSE
+  a square of 6
+as:  a square of 6
+cube:  a square of 2
+  nil is IShape: FALSE
+  nil as IPrintable = nil: TRUE
+comparisons
+  TRUE TRUE TRUE FALSE TRUE FALSE
+counters
+  2 4 6
+  10 20 30
+canvas
+  largest: square 36
+  now: cube 400

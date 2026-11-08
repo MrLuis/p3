@@ -1,0 +1,31 @@
+; Properties and visibility (--mode=objfpc): accessors of array and indexed
+; properties, the default property, strict private and strict protected.
+; RUN: not %pcc --mode=objfpc -ferror-limit=0 -c %S/Inputs/properties/errors.pas -o %t.o 2>&1 | FileCheck %s
+; CHECK: errors.pas:14:14: error: class 'TA' already has a default property
+; CHECK: errors.pas:13:14: note: 'P' declared here
+; CHECK: errors.pas:15:42: error: 'FS' cannot be read as property 'R' of type 'integer' (use a function (i: integer): integer)
+; CHECK: errors.pas:16:39: error: 'G' cannot be read as property 'T' of type 'integer' (use a function (i: real): integer)
+; CHECK: errors.pas:17:41: error: 'GS' cannot be read as property 'U' of type 'integer' (use a function (s: string): integer)
+; CHECK: errors.pas:18:20: error: the index parameters of a property cannot be 'var'
+; CHECK: errors.pas:20:31: error: the index of a property must be an integer constant
+; CHECK: errors.pas:21:41: error: the default value of property 'Y' must be a constant of type 'integer'
+; CHECK: errors.pas:22:14: error: only an array property can be the default property
+; CHECK: errors.pas:22:14: error: class 'TA' already has a default property
+; CHECK: errors.pas:14:14: note: 'Q' declared here
+; CHECK: errors.pas:43:32: error: 'FS' is a strict private member of 'TA'
+; CHECK: errors.pas:5:5: note: 'FS' declared here
+; CHECK: errors.pas:47:10: error: 'FS' is a strict private member of 'TA'
+; CHECK: errors.pas:5:5: note: 'FS' declared here
+; CHECK: errors.pas:48:10: error: 'FP' is a strict protected member of 'TA'
+; CHECK: errors.pas:11:5: note: 'FP' declared here
+; CHECK: errors.pas:49:10: error: array property 'P' needs an index
+; CHECK: errors.pas:13:14: note: 'P' declared here
+; CHECK: errors.pas:50:5: error: array property 'P' needs an index
+; CHECK: errors.pas:13:14: note: 'P' declared here
+; CHECK: errors.pas:51:12: error: cannot pass a value of type 'char' to parameter 'i' of type 'integer'
+; CHECK: errors.pas:52:5: error: property 'RO' is read-only
+; CHECK: errors.pas:23:14: note: 'RO' declared here
+; CHECK: errors.pas:53:8: error: argument for 'var' parameter 'x' must be a variable
+; CHECK: errors.pas:54:8: error: argument for 'var' parameter 'x' must be a variable
+; CHECK: errors.pas:55:10: error: class 'TC' has no default property
+; CHECK-NOT: error

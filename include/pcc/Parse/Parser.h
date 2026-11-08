@@ -110,7 +110,9 @@ class Parser {
   RoutineDecl *parseRoutineDecl(bool HeadingOnly = false);
   RoutineDecl *parseMethodHeading();
   PropertyDecl *parsePropertyDecl();
-  bool parseFormalParams(llvm::SmallVectorImpl<VarDecl *> &Params);
+  /// Close: tok::r_paren, or tok::r_square for an array property's indexes.
+  bool parseFormalParams(llvm::SmallVectorImpl<VarDecl *> &Params,
+                         tok::TokenKind Close = tok::r_paren);
 
   // Types
   TypeSpec *parseType();
@@ -120,16 +122,20 @@ class Parser {
   TypeSpec *parseArrayType(SourceLocation Start, bool Packed);
   TypeSpec *parseRecordType(SourceLocation Start, bool Packed);
   TypeSpec *parseClassType(SourceLocation Start);
+  TypeSpec *parseInterfaceType(SourceLocation Start);
   FieldList *parseFieldList(tok::TokenKind Close);
   VariantPart *parseVariantPart(tok::TokenKind Close);
 
   // Statements
   CompoundStmt *parseCompoundStmt();
-  /// Parses statements separated by ';' up to (not including) Terminator.
-  /// OpenLoc/OpenWord name the construct for "to match this ..." notes.
+  /// Parses statements separated by ';' up to (not including) Terminator
+  /// (or Alt, if given: the body of a try statement ends at `except` or
+  /// `finally`). OpenLoc/OpenWord name the construct for "to match this
+  /// ..." notes.
   void parseStatementSequence(llvm::SmallVectorImpl<Stmt *> &Body,
                               tok::TokenKind Terminator,
-                              SourceLocation OpenLoc, llvm::StringRef OpenWord);
+                              SourceLocation OpenLoc, llvm::StringRef OpenWord,
+                              tok::TokenKind Alt = tok::eof);
   Stmt *parseStatement();
   Stmt *parseStatementImpl();
   Stmt *parseAssignmentOrCall();
@@ -141,6 +147,10 @@ class Parser {
   Stmt *parseForStmt();
   Stmt *parseCaseStmt();
   Stmt *parseWithStmt();
+  Stmt *parseTryStmt();
+  Stmt *parseRaiseStmt();
+  bool isOnHandler() const;
+  void diagNoGoto();
   CaseLabel *parseCaseLabel(bool AllowRange);
   Expr *parseConstant();
   bool isCaseElse() const;

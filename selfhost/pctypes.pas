@@ -31,6 +31,14 @@ function newFileType(element: PType): PType;
 function newRoutineType(const params: TPtrList; result_: PType): PType;
 { A class (objfpc), not defined yet: defineClass fills it in. }
 function newClassType: PType;
+function newClassRefType(c: PType): PType;
+function newInterfaceType: PType;
+procedure defineInterface(t, parentIntf: PType; const methods, allMethods: TPtrList;
+                          module: pointer);
+{ is interface i a or a descendant of a? }
+function interfaceInheritsFrom(i, a: PType): boolean;
+{ the interface implementation of class c for interface i, or nil }
+function findInterface(c, i: PType): PInterfaceImpl;
 procedure defineClass(t, parentClass: PType; const members, allFields,
                       vtable: TPtrList; module: pointer);
 { shared by element / length (all short string types are compatible) }
@@ -195,9 +203,67 @@ begin
   listInit(t^.classMembers);
   listInit(t^.classAllFields);
   listInit(t^.classVTable);
+  listInit(t^.classInterfaces);
   t^.classModule := nil;
   t^.classDefined := false;
   newClassType := t;
+end;
+
+function newClassRefType(c: PType): PType;
+var
+  t: PType;
+begin
+  t := newType(tyClassRef);
+  t^.refClass := c;
+  newClassRefType := t;
+end;
+
+function newInterfaceType: PType;
+var
+  t: PType;
+begin
+  t := newType(tyInterface);
+  t^.intfParent := nil;
+  listInit(t^.intfMethods);
+  listInit(t^.intfAllMethods);
+  t^.intfModule := nil;
+  t^.intfDefined := false;
+  newInterfaceType := t;
+end;
+
+procedure defineInterface(t, parentIntf: PType; const methods, allMethods: TPtrList;
+                          module: pointer);
+begin
+  t^.intfParent := parentIntf;
+  t^.intfMethods := methods;
+  t^.intfAllMethods := allMethods;
+  t^.intfModule := module;
+  t^.intfDefined := true;
+end;
+
+function interfaceInheritsFrom(i, a: PType): boolean;
+begin
+  interfaceInheritsFrom := false;
+  while i <> nil do
+  begin
+    if i = a then
+      exit(true);
+    i := i^.intfParent;
+  end;
+end;
+
+function findInterface(c, i: PType): PInterfaceImpl;
+var
+  k: longint;
+  x: PInterfaceImpl;
+begin
+  findInterface := nil;
+  for k := 0 to c^.classInterfaces.count - 1 do
+  begin
+    x := PInterfaceImpl(listGet(c^.classInterfaces, k));
+    if x^.intf = i then
+      exit(x);
+  end;
 end;
 
 procedure defineClass(t, parentClass: PType; const members, allFields,
@@ -301,7 +367,8 @@ end;
 
 function isValidResultType(t: PType): boolean;
 begin
-  isValidResultType := isSimple(t) or (t^.kind in [tyPointer, tyClass]);
+  isValidResultType := isSimple(t) or
+                       (t^.kind in [tyPointer, tyClass, tyClassRef, tyInterface]);
 end;
 
 function isStructured(t: PType): boolean;
@@ -627,6 +694,12 @@ begin
       end;
     tyNil: bufAdd(b, 'nil');
     tyClass: bufAdd(b, 'class');
+    tyClassRef:
+      begin
+        bufAdd(b, 'class of ');
+        bufAddTypeName(b, t^.refClass);
+      end;
+    tyInterface: bufAdd(b, 'interface');
     tyShortString:
       if t^.maxLength = 255 then
         bufAdd(b, 'string')

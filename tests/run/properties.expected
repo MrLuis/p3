@@ -1,0 +1,15 @@
+  m[1,1] := 23
+trace 45, size 3x3
+  m[0,2] := 7
+  m[2,0] := 14
+m[2,0] = 14, m[0,2] = 7
+row 2: 14 21 22; m.Rows[1].v[1] = 23
+matrix m / 3
+  renamed[1,0] := 99
+with renamed: 99 3
+  b[1,1] := 1
+big: size 2x3, trace 1
+  b[0] = 0, cells 0
+  b[1] = 10, cells 1
+a=5 b=2 c=1 d=1 e=0 
+e = 7

@@ -1,0 +1,25 @@
+; Runtime errors of exceptions (--mode=objfpc): unhandled exceptions report
+; their class, where they were raised and (Exception) their message; finally
+; parts run before; raising nil is an error. Exit status 2. Integer
+; division by zero raises EDivByZero (as in Free Pascal with SysUtils).
+; RUN: %pcc --mode=objfpc %S/Inputs/exceptions/rterrors.pas -o %t
+; RUN: not %t exception 2>&1 | FileCheck --check-prefix=EXC %s
+; EXC: Runtime error: unhandled exception Exception at {{.*}}rterrors.pas:22:5: boom
+; RUN: not %t subclass 2>&1 | FileCheck --check-prefix=SUB %s
+; SUB: finally runs first
+; SUB-NEXT: Runtime error: unhandled exception EParse at {{.*}}rterrors.pas:13:5: bad token
+; RUN: not %t plain 2>&1 | FileCheck --check-prefix=PLAIN %s
+; PLAIN: Runtime error: unhandled exception TPlain at {{.*}}rterrors.pas:26:5{{$}}
+; RUN: not %t nil 2>&1 | FileCheck --check-prefix=NIL %s
+; NIL: Runtime error: 'raise' of a nil object at {{.*}}rterrors.pas:28:5
+; A re-raise reports where the exception was first raised.
+; RUN: not %t reraise 2>&1 | FileCheck --check-prefix=RERAISE %s
+; RERAISE: handling first
+; RERAISE-NEXT: Runtime error: unhandled exception EParse at {{.*}}rterrors.pas:31:7: first
+; RUN: not %t unmatched 2>&1 | FileCheck --check-prefix=UNMATCHED %s
+; UNMATCHED-NOT: not this
+; UNMATCHED: Runtime error: unhandled exception TPlain at {{.*}}rterrors.pas:41:7
+; RUN: %t none | FileCheck --check-prefix=NONE %s
+; NONE: no error
+; RUN: not %t divzero 2>&1 | FileCheck --check-prefix=DIVZERO %s
+; DIVZERO: Runtime error: unhandled exception EDivByZero at {{.*}}rterrors.pas:46:23: Division by zero

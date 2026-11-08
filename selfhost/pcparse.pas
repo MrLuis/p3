@@ -194,13 +194,14 @@ function startsStatement: boolean;
 begin
   startsStatement := tok.kind in [tkIdentifier, tkKwBegin, tkKwIf, tkKwWhile,
                                   tkKwRepeat, tkKwFor, tkKwCase, tkKwWith,
-                                  tkKwGoto, tkIntegerLiteral, tkKwInherited];
+                                  tkKwGoto, tkIntegerLiteral, tkKwInherited,
+                                  tkKwTry, tkKwRaise];
 end;
 
 function startsDeclarationPart: boolean;
 begin
-  if (mode = lmObjFPC) and (tok.kind in [tkKwConstructor, tkKwDestructor]) then
-    exit(true); { method implementations }
+  if (mode = lmObjFPC) and (tok.kind in [tkKwConstructor, tkKwDestructor, tkKwClass]) then
+    exit(true); { method implementations (class procedure TFoo.P) }
   startsDeclarationPart := tok.kind in [tkKwLabel, tkKwConst, tkKwType,
                                         tkKwVar, tkKwProcedure, tkKwFunction];
 end;
@@ -217,6 +218,14 @@ begin
   end;
   nesting := nesting + 1;
   enterNesting := true;
+end;
+
+{ objfpc: as in Free Pascal (without -Sg), at label and at goto. The labels
+  and gotos are parsed as usual, so no other errors follow. }
+procedure diagNoGoto;
+begin
+  diagErrorR(tok.loc, 'labels and ''goto'' are not supported with --mode=objfpc',
+             tokenRange(tok));
 end;
 
 function isIdentifierNamed(const s: string): boolean;
@@ -251,6 +260,7 @@ function parseExpression: PNode; forward;
 function parseSimpleExpression: PNode; forward;
 function parseSelectors(base: PNode): PNode; forward;
 function parseFormalParams(var params: TPtrList): boolean; forward;
+function parseFormalParamsClose(var params: TPtrList; close: TTokenKind): boolean; forward;
 function parseCaseLabel(allowRange: boolean): PCaseLabel; forward;
 function parseActualParams(var args: TPtrList; allowFormat: boolean): boolean; forward;
 
@@ -703,7 +713,7 @@ function parseTypeIdentifier(const context: string): PTypeSpec; forward;
   constructors and destructors are always methods) }
 function parseRoutineDecl(headingOnly: boolean): PDecl;
 var
-  isFunction, hasParamList, isExternal: boolean;
+  isFunction, hasParamList, isExternal, overloadDir: boolean;
   kind: string;
   loc: TLoc;
   name, clsName: TIdent;
@@ -762,8 +772,10 @@ begin
     skipUntil([tkSemi, tkKwBegin, tkKwVar, tkKwConst, tkKwType]);
   tryConsume(tkSemi);
 
-  { Turbo/FPC directives:  cdecl;  external ['lib'] [name 'symbol']; }
+  { Turbo/FPC directives:  cdecl;  external ['lib'] [name 'symbol'];
+    objfpc: overload; }
   isExternal := false;
+  overloadDir := false;
   externalName := nil;
   while mode <> lmISO do
   begin
@@ -771,6 +783,13 @@ begin
     begin
       consumeToken;
       expect(tkSemi, 'after ''cdecl''');
+      continue;
+    end;
+    if (mode = lmObjFPC) and isIdentifierNamed('overload') then
+    begin
+      consumeToken;
+      overloadDir := true;
+      expect(tkSemi, 'after ''overload''');
       continue;
     end;
     if not isIdentifierNamed('external') then
@@ -800,6 +819,7 @@ begin
                     nil, false);
     r^.isExternal := true;
     r^.externalName := externalName;
+    r^.hasOverloadDirective := overloadDir;
     exit(r);
   end;
 
@@ -813,8 +833,12 @@ begin
   if headingOnly then { interface part of a unit: the body comes later }
   begin
     if identValid(name) then
-      parseRoutineDecl := newRoutine(loc, name, isFunction, params,
-                                     hasParamList, resultSpec, nil, true);
+    begin
+      r := newRoutine(loc, name, isFunction, params, hasParamList, resultSpec,
+                      nil, true);
+      r^.hasOverloadDirective := overloadDir;
+      parseRoutineDecl := r;
+    end;
     exit;
   end;
 
@@ -823,8 +847,12 @@ begin
     consumeToken;
     expect(tkSemi, 'after ''forward''');
     if identValid(name) then
-      parseRoutineDecl := newRoutine(loc, name, isFunction, params,
-                                     hasParamList, resultSpec, nil, true);
+    begin
+      r := newRoutine(loc, name, isFunction, params, hasParamList, resultSpec,
+                      nil, true);
+      r^.hasOverloadDirective := overloadDir;
+      parseRoutineDecl := r;
+    end;
     exit;
   end;
 
@@ -840,16 +868,18 @@ begin
                     body, false);
     r^.methodKind := mk;
     r^.methodClassName := clsName;
+    r^.hasOverloadDirective := overloadDir;
     parseRoutineDecl := r;
   end;
 end;
 
 // methodHeading = ("procedure" | "function" | "constructor" | "destructor")
 //                 ident [params] [":" typeIdent] ";" { directive ";" } .
-// directive     = "virtual" | "override" | "abstract" .
+// directive     = "virtual" | "override" | "abstract" | "overload"
+//               | "reintroduce" .
 function parseMethodHeading: PDecl;
 var
-  isFunction, hasParamList, isVirtual, isOverride, isAbstract: boolean;
+  isFunction, hasParamList, isVirtual, isOverride, isAbstract, overloadDir: boolean;
   mk: TMethodKind;
   kind, wd: string;
   loc: TLoc;
@@ -887,6 +917,7 @@ begin
   isVirtual := false;
   isOverride := false;
   isAbstract := false;
+  overloadDir := false;
   while tok.kind = tkIdentifier do
   begin
     wd := nameStr(tok.name);
@@ -896,8 +927,11 @@ begin
       isOverride := true
     else if wd = 'abstract' then
       isAbstract := true
-    else if (wd = 'reintroduce') or (wd = 'overload') or
-            (wd = 'dynamic') or (wd = 'static') or (wd = 'message') or
+    else if wd = 'overload' then
+      overloadDir := true
+    else if wd = 'reintroduce' then
+      { (hides an inherited virtual method without a warning: no effect) }
+    else if (wd = 'dynamic') or (wd = 'static') or (wd = 'message') or
             (wd = 'final') or (wd = 'cdecl') or (wd = 'external') or
             (wd = 'forward') then
     begin
@@ -916,25 +950,33 @@ begin
   r^.isVirtual := isVirtual;
   r^.isOverride := isOverride;
   r^.isAbstract := isAbstract;
+  r^.hasOverloadDirective := overloadDir;
   parseMethodHeading := r;
 end;
 
 // property = "property" ident ":" typeIdent [ "read" ident ] [ "write" ident ] ";" .
+{ property = "property" ident [ "[" params "]" ] ":" typeIdent
+             [ "index" constant ] [ "read" ident ] [ "write" ident ]
+             [ "default" constant | "nodefault" ] ";" [ "default" ";" ] . }
 function parsePropertyDecl: PDecl;
 var
   name, readName, writeName: TIdent;
   ts: PTypeSpec;
   wd: string;
   p: PDecl;
+  params: TPtrList;
+  indexE, defaultE, e: PNode;
+  noDefault: boolean;
 begin
   parsePropertyDecl := nil;
   consumeToken; { 'property' }
   if not expectIdentifier(name, 'property name') then
     exit;
+  listInit(params);
   if tok.kind = tkLSquare then
   begin
-    unsupported('array properties are');
-    exit;
+    if not parseFormalParamsClose(params, tkRSquare) or (params.count = 0) then
+      exit; { (an empty list was reported) }
   end;
   if not expect(tkColon, 'after property name') then
     exit;
@@ -943,6 +985,9 @@ begin
     exit;
   readName := noIdent;
   writeName := noIdent;
+  indexE := nil;
+  defaultE := nil;
+  noDefault := false;
   while tok.kind = tkIdentifier do
   begin
     wd := nameStr(tok.name);
@@ -960,8 +1005,25 @@ begin
         exit;
       continue;
     end;
-    if (wd = 'default') or (wd = 'nodefault') or (wd = 'stored') or
-       (wd = 'index') or (wd = 'implements') then
+    if (wd = 'index') or (wd = 'default') then
+    begin
+      consumeToken;
+      e := parseExpression;
+      if e = nil then
+        exit;
+      if wd = 'index' then
+        indexE := e
+      else
+        defaultE := e;
+      continue;
+    end;
+    if wd = 'nodefault' then
+    begin
+      consumeToken;
+      noDefault := true;
+      continue;
+    end;
+    if (wd = 'stored') or (wd = 'implements') then
     begin
       unsupported('''' + wd + ''' in a property is');
       exit;
@@ -974,6 +1036,19 @@ begin
   p^.propSpec := ts;
   p^.readName := readName;
   p^.writeName := writeName;
+  p^.propParams := params;
+  p^.propIndex := indexE;
+  p^.propDefaultValue := defaultE;
+  p^.propNoDefault := noDefault;
+  p^.propIsDefault := false;
+  { property Items[i: integer]: T read GetItem; default; }
+  if isIdentifierNamed('default') then
+  begin
+    consumeToken;
+    p^.propIsDefault := true;
+    if not expect(tkSemi, 'after ''default''') then
+      exit;
+  end;
   parsePropertyDecl := p;
 end;
 
@@ -1016,8 +1091,29 @@ begin
           if r <> nil then
             listAdd(decls, r);
         end;
+      tkKwClass: { class procedure TFoo.P ... }
+        begin
+          consumeToken;
+          if (tok.kind <> tkKwProcedure) and (tok.kind <> tkKwFunction) then
+          begin
+            diagError(tok.loc, 'expected ''procedure'' or ''function'' after ''class''');
+            skipUntil([tkSemi, tkKwBegin]);
+            tryConsume(tkSemi);
+          end
+          else
+          begin
+            r := parseRoutineDecl(inInterface);
+            if r <> nil then
+            begin
+              r^.isClassMethod := true;
+              listAdd(decls, r);
+            end;
+          end;
+        end;
     else
       begin { label 1, 2, 3; }
+        if mode = lmObjFPC then
+          diagNoGoto;
         consumeToken;
         repeat
           if tok.kind <> tkIntegerLiteral then
@@ -1093,6 +1189,12 @@ end;
 // params = "(" section { ";" section } ")" ;
 // section = ["var" | "const"] identList ":" typeIdent .   ("const": TP)
 function parseFormalParams(var params: TPtrList): boolean;
+begin
+  parseFormalParams := parseFormalParamsClose(params, tkRParen);
+end;
+
+{ close: tkRParen, or tkRSquare for an array property's indexes }
+function parseFormalParamsClose(var params: TPtrList; close: TTokenKind): boolean;
 var
   lparen, start: TLoc;
   isFunction, isVar, isConst: boolean;
@@ -1102,7 +1204,7 @@ var
   vk: TVarKind;
   i: longint;
 begin
-  lparen := consumeToken; { '(' }
+  lparen := consumeToken; { '(' or '[' }
   repeat
     if tok.kind in [tkKwProcedure, tkKwFunction] then
     begin
@@ -1111,13 +1213,13 @@ begin
       start := consumeToken;
       if not expectIdentifier(name, 'parameter name') then
       begin
-        skipUntil([tkSemi, tkRParen]);
+        skipUntil([tkSemi, close]);
         continue;
       end;
       listInit(inner);
       if (tok.kind = tkLParen) and not parseFormalParams(inner) then
       begin
-        skipUntil([tkSemi, tkRParen]);
+        skipUntil([tkSemi, close]);
         continue;
       end;
       resultSpec := nil;
@@ -1125,13 +1227,13 @@ begin
       begin
         if not expect(tkColon, 'before the result type of a functional parameter') then
         begin
-          skipUntil([tkSemi, tkRParen]);
+          skipUntil([tkSemi, close]);
           continue;
         end;
         resultSpec := parseTypeIdentifier('function result type');
         if resultSpec = nil then
         begin
-          skipUntil([tkSemi, tkRParen]);
+          skipUntil([tkSemi, close]);
           continue;
         end;
       end;
@@ -1153,13 +1255,13 @@ begin
     if not parseIdentList(names, 'parameter name') or
        not expect(tkColon, 'after parameter name') then
     begin
-      skipUntil([tkSemi, tkRParen]);
+      skipUntil([tkSemi, close]);
       continue;
     end;
     ts := parseTypeIdentifier('parameter type');
     if ts = nil then
     begin
-      skipUntil([tkSemi, tkRParen]);
+      skipUntil([tkSemi, close]);
       continue;
     end;
     if isVar then
@@ -1172,12 +1274,15 @@ begin
       listAdd(params, newVar(PIdent(listGet(names, i))^, ts, vk));
   until not tryConsume(tkSemi);
 
-  if not expect(tkRParen, 'after parameters') then
+  if not expect(close, 'after parameters') then
   begin
-    diagNote(lparen, 'to match this ''(''');
+    if close = tkRParen then
+      diagNote(lparen, 'to match this ''(''')
+    else
+      diagNote(lparen, 'to match this ''[''');
     exit(false);
   end;
-  parseFormalParams := true;
+  parseFormalParamsClose := true;
 end;
 
 { --- Types --- }
@@ -1222,7 +1327,9 @@ var
   ts: PTypeSpec;
   m: PDecl;
   i: longint;
-  failed: boolean;
+  failed, classVars: boolean;
+  className, intfName: TIdent;
+  intfNames: TPtrList;
 begin
   parseClassType := nil;
   classLoc := consumeToken; { 'class' }
@@ -1230,20 +1337,25 @@ begin
   parentName := noIdent;
   if tok.kind = tkSemi then { TFoo = class; }
     exit(classSpec(start, prevTokEnd, parentName, members, true));
-  if tok.kind = tkKwOf then
+  if tryConsume(tkKwOf) then { class of TFoo }
   begin
-    unsupported('class reference types are');
-    exit;
+    if not expectIdentifier(className, 'class name after ''class of''') then
+      exit;
+    ts := newTypeSpec(tsClassRef, start, prevTokEnd);
+    ts^.tname := className;
+    exit(ts);
   end;
+  listInit(intfNames); { class(TParent, I1, I2) }
   if tok.kind = tkLParen then
   begin
     lparen := consumeToken;
     if not expectIdentifier(parentName, 'parent class name') then
       exit;
-    if tok.kind = tkComma then
+    while tryConsume(tkComma) do
     begin
-      unsupported('interfaces are');
-      exit;
+      if not expectIdentifier(intfName, 'interface name') then
+        exit;
+      listAdd(intfNames, newIdent(intfName));
     end;
     if not expect(tkRParen, 'after parent class name') then
     begin
@@ -1251,11 +1363,16 @@ begin
       exit;
     end;
     if tok.kind = tkSemi then { TFoo = class(TBar); }
-      exit(classSpec(start, prevTokEnd, parentName, members, false));
+    begin
+      ts := classSpec(start, prevTokEnd, parentName, members, false);
+      ts^.interfaceNames := intfNames;
+      exit(ts);
+    end;
   end;
 
   vis := vsPublic;
   failed := false;
+  classVars := false; { in a class var section }
   while (tok.kind <> tkKwEnd) and (tok.kind <> tkEof) and not diagShouldStop do
   begin
     if tok.kind = tkIdentifier then
@@ -1272,14 +1389,26 @@ begin
           vis := vsPublic
         else
           vis := vsPublished;
+        classVars := false;
         consumeToken;
         continue;
       end;
-      if wd = 'strict' then
+      if wd = 'strict' then { strict private / strict protected }
       begin
-        unsupported('''strict'' visibility is');
-        failed := true;
-        break;
+        consumeToken;
+        if isIdentifierNamed('private') then
+          vis := vsStrictPrivate
+        else if isIdentifierNamed('protected') then
+          vis := vsStrictProtected
+        else
+        begin
+          diagError(tok.loc, 'expected ''private'' or ''protected'' after ''strict''');
+          failed := true;
+          break;
+        end;
+        classVars := false;
+        consumeToken;
+        continue;
       end;
       listInit(names);
       if not parseIdentList(names, 'field name') or
@@ -1296,9 +1425,17 @@ begin
       end;
       for i := 0 to names.count - 1 do
       begin
-        m := newDecl(dkField, PIdent(listGet(names, i))^,
-                     PIdent(listGet(names, i))^.loc);
-        m^.fieldSpec := ts;
+        if classVars then
+        begin
+          m := newVar(PIdent(listGet(names, i))^, ts, vkVariable);
+          m^.isClassVar := true;
+        end
+        else
+        begin
+          m := newDecl(dkField, PIdent(listGet(names, i))^,
+                       PIdent(listGet(names, i))^.loc);
+          m^.fieldSpec := ts;
+        end;
         m^.vis := vis;
         listAdd(members, m);
       end;
@@ -1307,6 +1444,11 @@ begin
         failed := true;
         break;
       end;
+      continue;
+    end;
+    if tryConsume(tkKwVar) then { instance fields again }
+    begin
+      classVars := false;
       continue;
     end;
     if tok.kind in [tkKwProcedure, tkKwFunction, tkKwConstructor,
@@ -1320,6 +1462,7 @@ begin
       end;
       m^.vis := vis;
       listAdd(members, m);
+      classVars := false;
       continue;
     end;
     if tok.kind = tkKwProperty then
@@ -1332,13 +1475,40 @@ begin
       end;
       m^.vis := vis;
       listAdd(members, m);
+      classVars := false;
       continue;
     end;
     if tok.kind = tkKwClass then
-      unsupported('class methods and class variables are')
-    else
-      diagError(tok.loc,
-                'expected a field, method or property declaration, or ''end''');
+    begin
+      consumeToken;
+      if tryConsume(tkKwVar) then { class var X: T; ... }
+      begin
+        classVars := true;
+        continue;
+      end;
+      if tok.kind in [tkKwProcedure, tkKwFunction] then
+      begin
+        m := parseMethodHeading;
+        if m = nil then
+        begin
+          failed := true;
+          break;
+        end;
+        m^.isClassMethod := true;
+        m^.vis := vis;
+        listAdd(members, m);
+        classVars := false;
+        continue;
+      end;
+      if tok.kind in [tkKwConstructor, tkKwDestructor, tkKwProperty] then
+        unsupported('class ' + lowerStr(rawText(tok)) + 's are')
+      else
+        diagError(tok.loc, 'expected ''var'', ''procedure'' or ''function'' after ''class''');
+      failed := true;
+      break;
+    end;
+    diagError(tok.loc,
+              'expected a field, method or property declaration, or ''end''');
     failed := true;
     break;
   end;
@@ -1353,7 +1523,93 @@ begin
     diagNote(classLoc, 'to match this ''class''');
     exit;
   end;
-  parseClassType := classSpec(start, prevTokEnd, parentName, members, false);
+  ts := classSpec(start, prevTokEnd, parentName, members, false);
+  ts^.interfaceNames := intfNames;
+  parseClassType := ts;
+end;
+
+{ interfaceType = "interface" ";"                          (forward)
+                | "interface" [ "(" ident ")" ] [ "[" string "]" ]
+                  method headings "end" .                 (objfpc, CORBA) }
+function parseInterfaceType(start: TLoc): PTypeSpec;
+var
+  intfLoc, lparen: TLoc;
+  parentName: TIdent;
+  members: TPtrList;
+  guid: PName;
+  m: PDecl;
+  ts: PTypeSpec;
+begin
+  parseInterfaceType := nil;
+  intfLoc := consumeToken; { 'interface' }
+  parentName := noIdent;
+  listInit(members);
+  guid := nil;
+  if tok.kind = tkSemi then { IFoo = interface; }
+  begin
+    ts := newTypeSpec(tsInterface, start, prevTokEnd);
+    ts^.intfParentName := parentName;
+    ts^.intfMemberList := members;
+    ts^.isForwardIntf := true;
+    ts^.guid := nil;
+    exit(ts);
+  end;
+  if tok.kind = tkLParen then
+  begin
+    lparen := consumeToken;
+    if not expectIdentifier(parentName, 'parent interface name') then
+      exit;
+    if not expect(tkRParen, 'after parent interface name') then
+    begin
+      diagNote(lparen, 'to match this ''(''');
+      exit;
+    end;
+  end;
+  if tryConsume(tkLSquare) then { ['GUID'] }
+  begin
+    if tok.kind <> tkStringLiteral then
+    begin
+      diagError(tok.loc, 'expected the interface''s GUID string');
+      exit;
+    end;
+    guid := tok.strValue;
+    consumeToken;
+    if not expect(tkRSquare, 'after the GUID') then
+      exit;
+  end;
+  while (tok.kind <> tkKwEnd) and (tok.kind <> tkEof) and not diagShouldStop do
+  begin
+    if tok.kind in [tkKwProcedure, tkKwFunction] then
+    begin
+      m := parseMethodHeading;
+      if m = nil then
+      begin
+        skipUntil([tkKwEnd]);
+        tryConsume(tkKwEnd);
+        exit;
+      end;
+      listAdd(members, m);
+      continue;
+    end;
+    if tok.kind = tkKwProperty then
+      unsupported('properties in interfaces are')
+    else
+      diagError(tok.loc, 'expected a method heading or ''end'' in an interface');
+    skipUntil([tkKwEnd]);
+    tryConsume(tkKwEnd);
+    exit;
+  end;
+  if not expect(tkKwEnd, 'at end of interface type') then
+  begin
+    diagNote(intfLoc, 'to match this ''interface''');
+    exit;
+  end;
+  ts := newTypeSpec(tsInterface, start, prevTokEnd);
+  ts^.intfParentName := parentName;
+  ts^.intfMemberList := members;
+  ts^.isForwardIntf := false;
+  ts^.guid := guid;
+  parseInterfaceType := ts;
 end;
 
 { type = simpleType | ["packed"] (arrayType | recordType) . }
@@ -1377,6 +1633,9 @@ begin
     tkKwClass:
       if not isPacked then
         exit(parseClassType(start));
+    tkKwInterface: { objfpc: an interface type }
+      if not isPacked and (mode = lmObjFPC) then
+        exit(parseInterfaceType(start));
     tkKwSet, tkKwFile:
       begin
         isSet := tok.kind = tkKwSet;
@@ -1773,10 +2032,15 @@ begin
   parseCompoundStmt := n;
 end;
 
-procedure parseStatementSequence(var body: TPtrList; terminator: TTokenKind;
-                                 openLoc: TLoc; const openWord: string);
+{ Parses statements separated by ';' up to (not including) terminator or
+  alt (tkEof: none; the body of a try statement ends at except or
+  finally). }
+procedure parseStatementSequenceAlt(var body: TPtrList;
+                                    terminator, alt: TTokenKind; openLoc: TLoc;
+                                    const openWord: string);
 var
   semiLoc: TLoc;
+  expected: string;
 begin
   while not diagShouldStop do
   begin
@@ -1794,11 +2058,15 @@ begin
       end;
       continue;
     end;
-    if tok.kind = terminator then
+    if (tok.kind = terminator) or ((alt <> tkEof) and (tok.kind = alt)) then
       exit;
-    if tok.kind = tkEof then
+    { 'end', or 'except' or 'finally' }
+    expected := describe(terminator);
+    if alt <> tkEof then
+      expected := expected + ' or ' + describe(alt);
+    if (tok.kind = tkEof) or ((alt <> tkEof) and (tok.kind = tkKwEnd)) then
     begin
-      diagError(tok.loc, 'expected ' + describe(terminator));
+      diagError(tok.loc, 'expected ' + expected);
       diagNote(openLoc, 'to match this ''' + openWord + '''');
       exit;
     end;
@@ -1808,17 +2076,25 @@ begin
       diagError(prevTokEnd, 'expected '';'' between statements');
       continue;
     end;
-    diagError(tok.loc, 'expected '';'' or ' + describe(terminator) +
-                       ' after statement');
-    skipUntil([tkSemi, terminator]);
+    if alt <> tkEof then
+      diagError(tok.loc, 'expected '';'', ' + expected + ' after statement')
+    else
+      diagError(tok.loc, 'expected '';'' or ' + expected + ' after statement');
+    skipUntil([tkSemi, terminator, alt]);
     if tryConsume(tkSemi) then
       continue;
-    if tok.kind <> terminator then
+    if (tok.kind <> terminator) and ((alt = tkEof) or (tok.kind <> alt)) then
     begin
       diagNote(openLoc, 'to match this ''' + openWord + '''');
       exit;
     end;
   end;
+end;
+
+procedure parseStatementSequence(var body: TPtrList; terminator: TTokenKind;
+                                 openLoc: TLoc; const openWord: string);
+begin
+  parseStatementSequenceAlt(body, terminator, tkEof, openLoc, openWord);
 end;
 
 function parseAssignmentOrCall: PNode; forward;
@@ -1831,6 +2107,8 @@ function parseRepeatStmt: PNode; forward;
 function parseForStmt: PNode; forward;
 function parseCaseStmt: PNode; forward;
 function parseWithStmt: PNode; forward;
+function parseTryStmt: PNode; forward;
+function parseRaiseStmt: PNode; forward;
 
 function parseStatementImpl: PNode;
 var
@@ -1847,6 +2125,8 @@ begin
     tkKwFor: exit(parseForStmt);
     tkKwCase: exit(parseCaseStmt);
     tkKwWith: exit(parseWithStmt);
+    tkKwTry: exit(parseTryStmt);
+    tkKwRaise: exit(parseRaiseStmt);
     tkLParen: { objfpc: (obj as TFoo).Show; }
       if mode <> lmObjFPC then
         diagError(tok.loc, 'expected statement')
@@ -1873,10 +2153,12 @@ begin
         exit(finishDesignatorStmt(start, n));
       end;
     { the empty statement: nothing before a separator or terminator }
-    tkSemi, tkKwEnd, tkKwElse, tkKwUntil, tkEof:
+    tkSemi, tkKwEnd, tkKwElse, tkKwUntil, tkKwExcept, tkKwFinally, tkEof:
       exit(emptyStmt(tok.loc));
     tkKwGoto:
       begin
+        if mode = lmObjFPC then
+          diagNoGoto;
         gotoLoc := consumeToken;
         if tok.kind <> tkIntegerLiteral then
           diagError(tok.loc, 'expected label number after ''goto''')
@@ -2488,6 +2770,144 @@ end;
 
 // with = "with" designator { "," designator } "do" statement .
 function parseDesignator: PNode; forward;
+
+{ on starts an exception handler at the start of an except part and after
+  a handler (it is not reserved). }
+function isOnHandler: boolean;
+begin
+  isOnHandler := isIdentifierNamed('on');
+end;
+
+{ tryStmt = "try" stmtSeq ( "except" exceptPart | "finally" stmtSeq ) "end" .
+  exceptPart = handler [ ";" handler ]... [ ";" ] [ "else" stmtSeq ] | stmtSeq .
+  handler = "on" [ ident ":" ] ident "do" statement .          (objfpc) }
+function parseTryStmt: PNode;
+var
+  tryLoc, partLoc, elseLoc, onLoc, endLoc: TLoc;
+  body, handlers, part: TPtrList;
+  isFin, ok, stop: boolean;
+  varName, className: TIdent;
+  hbody, n: PNode;
+  h: PExceptHandler;
+begin
+  tryLoc := consumeToken;
+  listInit(body);
+  parseStatementSequenceAlt(body, tkKwExcept, tkKwFinally, tryLoc, 'try');
+  if (tok.kind <> tkKwExcept) and (tok.kind <> tkKwFinally) then
+  begin
+    skipUntil([tkKwEnd]);
+    tryConsume(tkKwEnd);
+    exit(emptyStmt(tryLoc));
+  end;
+  isFin := tok.kind = tkKwFinally;
+  partLoc := consumeToken;
+  listInit(handlers);
+  listInit(part);
+  elseLoc := noLoc;
+  ok := true;
+  if not isFin and isOnHandler then
+  begin
+    stop := false;
+    while not stop and not diagShouldStop and isOnHandler do
+    begin
+      onLoc := consumeToken;
+      varName := noIdent;
+      if not expectIdentifier(className, 'exception class name after ''on''') then
+      begin
+        ok := false;
+        skipUntil([tkSemi, tkKwEnd]);
+        if not tryConsume(tkSemi) then
+          stop := true;
+        continue;
+      end;
+      if tryConsume(tkColon) then
+      begin
+        varName := className;
+        if not expectIdentifier(className, 'exception class name after '':''') then
+        begin
+          ok := false;
+          skipUntil([tkSemi, tkKwEnd]);
+          if not tryConsume(tkSemi) then
+            stop := true;
+          continue;
+        end;
+      end;
+      if not expect(tkKwDo, 'after the exception class') then
+      begin
+        ok := false;
+        skipUntil([tkSemi, tkKwEnd]);
+        if not tryConsume(tkSemi) then
+          stop := true;
+        continue;
+      end;
+      hbody := parseStatement;
+      h := PExceptHandler(arenaAlloc(sizeof(TExceptHandler)));
+      h^.onLoc := onLoc;
+      h^.hVarName := varName;
+      h^.hClassName := className;
+      h^.hBody := hbody;
+      h^.hVar := nil;
+      h^.hClass := nil;
+      listAdd(handlers, h);
+      if not tryConsume(tkSemi) then
+        stop := true;
+    end;
+    if tok.kind = tkKwElse then
+    begin
+      elseLoc := consumeToken;
+      parseStatementSequence(part, tkKwEnd, tryLoc, 'try');
+    end
+    else if (tok.kind <> tkKwEnd) and ok then
+    begin
+      diagError(tok.loc, 'expected ''on'', ''else'' or ''end'' in the ''except'' part');
+      ok := false;
+      skipUntil([tkKwEnd]);
+    end;
+  end
+  else
+    parseStatementSequence(part, tkKwEnd, tryLoc, 'try');
+  endLoc := tokenEnd(tok);
+  if not tryConsume(tkKwEnd) then
+  begin
+    if tok.kind <> tkEof then { at the end of file, the sequence reported it }
+      diagError(tok.loc, 'expected ''end'' at end of ''try'' statement');
+    diagNote(tryLoc, 'to match this ''try''');
+    exit(emptyStmt(tryLoc));
+  end;
+  if not ok then
+    exit(emptyStmt(tryLoc));
+  n := newNode(nkTry, tryLoc, endLoc);
+  n^.tryBody := body;
+  n^.isFinally := isFin;
+  n^.partLoc := partLoc;
+  n^.handlers := handlers;
+  n^.tryElseLoc := elseLoc;
+  n^.partBody := part;
+  parseTryStmt := n;
+end;
+
+{ raiseStmt = "raise" [ expression ] .                        (objfpc) }
+function parseRaiseStmt: PNode;
+var
+  raiseLoc: TLoc;
+  obj, n: PNode;
+begin
+  raiseLoc := consumeToken;
+  obj := nil;
+  if not (tok.kind in [tkSemi, tkKwEnd, tkKwElse, tkKwUntil, tkKwExcept,
+                       tkKwFinally, tkEof]) then
+  begin
+    obj := parseExpression;
+    if obj = nil then
+    begin
+      skipUntil([tkSemi, tkKwEnd]);
+      exit(emptyStmt(raiseLoc));
+    end;
+  end;
+  n := newNode(nkRaise, raiseLoc, prevTokEnd);
+  n^.raiseObj := obj;
+  parseRaiseStmt := n;
+end;
 
 function parseWithStmt: PNode;
 var

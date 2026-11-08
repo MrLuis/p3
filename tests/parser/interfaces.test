@@ -1,0 +1,6 @@
+; Interfaces (--mode=objfpc): the parse tree and checked tree of interface
+; types (forward, with a parent and a GUID) and classes listing them.
+; RUN: %pcc --mode=objfpc --emit-parse-tree %S/Inputs/interfaces.pas -o %t.tree
+; RUN: diff %S/Inputs/interfaces.tree %t.tree
+; RUN: %pcc --mode=objfpc --emit-ast %S/Inputs/interfaces.pas -o %t.ast
+; RUN: diff %S/Inputs/interfaces.ast %t.ast

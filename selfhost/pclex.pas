@@ -276,7 +276,7 @@ end;
 procedure handleDirective(var lx: TLexer; start: int64; textStart, textEnd: int64);
 var
   p, b, e, partEnd: int64;
-  word: string;
+  word, arg: string;
   msg: TBuf;
   c: char;
 begin
@@ -307,6 +307,20 @@ begin
     bufAddChars(lx.pendingInclude, lx.data, b, e - b);
     lx.hasPendingInclude := true;
     lx.pendingIncludeLoc := locOf(lx, start);
+    exit;
+  end;
+  { $interfaces corba: pcc's interfaces (objfpc) are CORBA style only }
+  if word = 'interfaces' then
+  begin
+    arg := '';
+    while (b < e) and (length(arg) < 20) do
+    begin
+      arg := arg + lowerChar(at(lx, b));
+      b := b + 1;
+    end;
+    if (arg <> 'corba') or (b < e) then
+      diagError(locOf(lx, start), 'only CORBA interfaces are supported; use ' +
+                '{$interfaces corba}');
     exit;
   end;
   { a switch list: R-,Q+ }

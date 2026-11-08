@@ -149,6 +149,8 @@ function irConstLimbs(t: PIRType; const l: TLimbs): TV;
 function irConstBool(b: boolean): TV;
 function irConstDouble(x: double): TV;
 function irNull: TV;
+{ the constant expression inttoptr (i64 n to ptr) }
+function irConstIntToPtr(n: int64): TV;
 function irZero(t: PIRType): TV;
 function irUndef(t: PIRType): TV;
 function irIsConst(const v: TV): boolean;
@@ -1198,6 +1200,15 @@ begin
   r.kind := vkFP;
   r.fp := x;
   irConstDouble := r;
+end;
+
+function irConstIntToPtr(n: int64): TV;
+var
+  r: TV;
+begin
+  r := irV(irPtrT, 'inttoptr (i64 ' + intToStr(n) + ' to ptr)');
+  r.kind := vkConstExpr;
+  irConstIntToPtr := r;
 end;
 
 function irNull: TV;

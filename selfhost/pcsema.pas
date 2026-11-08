@@ -42,6 +42,17 @@ type
     from: PDecl;
   end;
 
+  { objfpc: an array property used without (all) its indexes: the base of
+    the nkIndex being checked (node), with the property, the chain's root
+    and the indexes so far }
+  PPendingIndex = ^TPendingIndex;
+  TPendingIndex = record
+    node: PNode;
+    prop: PDecl;
+    root: PNode;
+    args: TPtrList;
+  end;
+
   TLongArray = array[0..$FFFFFFF] of longint;
   PLongArray = ^TLongArray;
 
@@ -69,6 +80,24 @@ var
   curAssignTarget: PNode;
   tobjectType: PType;
   pendingClasses: TPtrList;
+  pendingInterfaces: TPtrList; { interfaces declared forward (type decls) }
+  { exceptions (objfpc): the predeclared class Exception; the exception
+    handlers around the statement being checked (a bare raise needs one);
+    loopDepth on entry to the innermost enclosing finally part, or -1 (exit,
+    and break/continue out of it, are not allowed there). objfpc has no
+    gotos, so none can leave a try statement. }
+  exceptionType: PType;
+  { class of C for each class C (by type id): the type of C used as a
+    value and of Self in class methods }
+  classRefs: TIntMap;
+  handlerDepth: longint;
+  finallyLoopDepth: longint;
+  { the procedural type an @routine is assigned to (picks an overload) }
+  addrOfTarget: PType;
+  { the base of the nkIndex being checked: an array property may appear
+    there without its indexes; the pending ones (of PPendingIndex) }
+  indexBase: PNode;
+  pendingIndexes: TPtrList;
 
 { --- Small helpers --- }
 
@@ -490,10 +519,35 @@ end;
 { class TObject: constructor Create; destructor Destroy; virtual;
   procedure Free; function ClassName: string; (bodies in code generation
   and the runtime). Destroy is virtual method 0. }
+{ class of c (anonymous, shared) }
+function classRefOf(c: PType): PType;
+var
+  r: PType;
+begin
+  r := PType(mapGet(classRefs, c^.id));
+  if r = nil then
+  begin
+    r := newClassRefType(c);
+    mapPut(classRefs, c^.id, r);
+  end;
+  classRefOf := r;
+end;
+
+{ a class function of TObject: Self is a class }
+function newTObjectClassFn(const spelling: string; res: PType; om: TObjMethod): PDecl;
+var
+  r: PDecl;
+begin
+  r := newTObjectMethod(spelling, mtMethod, res, om);
+  r^.isClassMethod := true;
+  newTObjectClassFn := r;
+end;
+
 procedure declareTObject;
 var
   members, fields, vtable: TPtrList;
-  destroy, d: PDecl;
+  destroy, d, inheritsFrom_, aClass: PDecl;
+  tclass, named: PType;
 begin
   tobjectType := newClassType;
   setDeclName(tobjectType, intern('TObject'));
@@ -503,16 +557,97 @@ begin
   destroy := newTObjectMethod('Destroy', mtDestructor, nil, obDestroy);
   destroy^.isVirtual := true;
   destroy^.vmtIndex := 0;
+  { TClass = class of TObject }
+  tclass := classRefOf(tobjectType);
+  aClass := newDecl(dkVar, memberIdent('AClass'), noLoc);
+  aClass^.varKind := vkValueParam;
+  aClass^.varType := tclass;
+  inheritsFrom_ := newTObjectClassFn('InheritsFrom', tyBooleanT, obInheritsFrom);
+  inheritsFrom_^.hasParamList := true;
+  listAdd(inheritsFrom_^.params, aClass);
   listAdd(members, newTObjectMethod('Create', mtConstructor, nil, obCreate));
   listAdd(members, destroy);
   listAdd(members, newTObjectMethod('Free', mtMethod, nil, obFree));
-  listAdd(members, newTObjectMethod('ClassName', mtMethod, shortStringType(255),
-                                    obClassName));
+  listAdd(members, newTObjectClassFn('ClassName', shortStringType(255), obClassName));
+  listAdd(members, newTObjectMethod('ClassType', mtMethod, tclass, obClassType));
+  listAdd(members, newTObjectClassFn('ClassParent', tclass, obClassParent));
+  listAdd(members, inheritsFrom_);
+  listAdd(members, newTObjectClassFn('InstanceSize', tyInt64T, obInstanceSize));
   listAdd(vtable, destroy);
   defineClass(tobjectType, nil, members, fields, vtable, nil);
   d := newDecl(dkType, memberIdent('TObject'), noLoc);
   d^.declType := tobjectType;
   scopeInsert(standard, d^.ident.name, d);
+  named := newClassRefType(tobjectType);
+  setDeclName(named, intern('TClass'));
+  d := newDecl(dkType, memberIdent('TClass'), noLoc);
+  d^.declType := named;
+  scopeInsert(standard, d^.ident.name, d);
+end;
+
+{ class Exception (Free Pascal's SysUtils): private FMessage: string;
+  constructor Create(const msg: string); property Message: string read
+  FMessage write FMessage. Its VMT is in the runtime, which prints the
+  message of an unhandled exception. }
+{ A predeclared name = class(parent); (its VMT is in the runtime). }
+function declareExceptionClass(const name: string; parent: PType): PType;
+var
+  c: PType;
+  members: TPtrList;
+  d: PDecl;
+begin
+  c := newClassType;
+  setDeclName(c, intern(name));
+  listInit(members);
+  defineClass(c, parent, members, parent^.classAllFields, parent^.classVTable, nil);
+  d := newDecl(dkType, memberIdent(name), noLoc);
+  d^.declType := c;
+  scopeInsert(standard, d^.ident.name, d);
+  declareExceptionClass := c;
+end;
+
+procedure declareException;
+var
+  members, fields: TPtrList;
+  msgField, param, create, message, d: PDecl;
+  i: longint;
+  external_, intError: PType;
+begin
+  exceptionType := newClassType;
+  setDeclName(exceptionType, intern('Exception'));
+  msgField := newDecl(dkField, memberIdent('FMessage'), noLoc);
+  msgField^.fieldType := shortStringType(255);
+  msgField^.vis := vsPrivate;
+  param := newDecl(dkVar, memberIdent('msg'), noLoc);
+  param^.varKind := vkConstParam;
+  param^.varType := shortStringType(255);
+  create := newTObjectMethod('Create', mtConstructor, nil, obExceptionCreate);
+  create^.ownerClass := exceptionType;
+  create^.hasParamList := true;
+  listAdd(create^.params, param);
+  message := newDecl(dkProperty, memberIdent('Message'), noLoc);
+  message^.propType := shortStringType(255);
+  message^.readName := memberIdent('FMessage');
+  message^.writeName := memberIdent('FMessage');
+  message^.readDecl := msgField;
+  message^.writeDecl := msgField;
+  listInit(members);
+  listAdd(members, msgField);
+  listAdd(members, create);
+  listAdd(members, message);
+  listInit(fields);
+  for i := 0 to tobjectType^.classAllFields.count - 1 do
+    listAdd(fields, listGet(tobjectType^.classAllFields, i));
+  listAdd(fields, msgField);
+  defineClass(exceptionType, tobjectType, members, fields,
+              tobjectType^.classVTable, nil);
+  d := newDecl(dkType, memberIdent('Exception'), noLoc);
+  d^.declType := exceptionType;
+  scopeInsert(standard, d^.ident.name, d);
+  { the exception for integer div and mod by zero, as in SysUtils }
+  external_ := declareExceptionClass('EExternal', exceptionType);
+  intError := declareExceptionClass('EIntError', external_);
+  external_ := declareExceptionClass('EDivByZero', intError);
 end;
 
 procedure declareStandardScope;
@@ -546,7 +681,10 @@ begin
     stdType('pchar', pchar);
   end;
   if mode = lmObjFPC then
+  begin
     declareTObject;
+    declareException;
+  end;
   { the standard files }
   for f := 1 to 2 do
   begin
@@ -657,6 +795,16 @@ begin
   if ((a^.kind = tyClass) and (b^.kind = tyNil)) or
      ((a^.kind = tyNil) and (b^.kind = tyClass)) then
     exit(true);
+  if ((a^.kind = tyClassRef) and (b^.kind = tyNil)) or
+     ((a^.kind = tyNil) and (b^.kind = tyClassRef)) then
+    exit(true);
+  if (a^.kind = tyClassRef) and (b^.kind = tyClassRef) then { related classes }
+    exit(inheritsFrom(a^.refClass, b^.refClass) or inheritsFrom(b^.refClass, a^.refClass));
+  if ((a^.kind = tyInterface) and (b^.kind = tyNil)) or
+     ((a^.kind = tyNil) and (b^.kind = tyInterface)) then
+    exit(true);
+  if (a^.kind = tyInterface) and (b^.kind = tyInterface) then { related }
+    exit(interfaceInheritsFrom(a, b) or interfaceInheritsFrom(b, a));
   if (a^.kind = tyClass) and (b^.kind = tyClass) then { related classes (objfpc) }
     exit(inheritsFrom(a, b) or inheritsFrom(b, a));
   if (a^.kind = tyPointer) and (b^.kind = tyPointer) and
@@ -688,6 +836,22 @@ begin
   if target^.kind = tyClass then
     exit((value^.kind = tyNil) or
          ((value^.kind = tyClass) and inheritsFrom(value, target)));
+  { interfaces: nil, a descendant interface, an object of a class that
+    implements it (listed by the class or an ancestor) }
+  if target^.kind = tyInterface then
+  begin
+    if value^.kind = tyNil then
+      exit(true);
+    if value^.kind = tyInterface then
+      exit(interfaceInheritsFrom(value, target));
+    if value^.kind = tyClass then
+      exit(findInterface(value, target) <> nil);
+    exit(false);
+  end;
+  { class references: the class or a descendant, or nil }
+  if target^.kind = tyClassRef then
+    exit((value^.kind = tyNil) or
+         ((value^.kind = tyClassRef) and inheritsFrom(value^.refClass, target^.refClass)));
   if (target^.kind = tyPointer) and (value^.kind = tyClass) then
     exit(target^.untyped);
   if (target^.kind = tyShortString) and isStringish(value) then
@@ -730,13 +894,15 @@ begin
       end;
     nkField:
       { obj.f is a variable like p^.f, whatever obj is (objfpc) }
-      if isObject(e^.base) then
+      if (e^.fieldDecl <> nil) and (e^.fieldDecl^.kind = dkVar) then
+        isVariableReference := true { a class variable }
+      else if isObject(e^.base) then
         isVariableReference := (e^.fieldDecl <> nil) and
                                (e^.fieldDecl^.kind = dkField)
       else
         isVariableReference := isVariableReference(e^.base);
     nkIndex:
-      isVariableReference := isVariableReference(e^.base);
+      isVariableReference := (e^.idxProp = nil) and isVariableReference(e^.base);
     nkDeref:
       isVariableReference := true; { p^ is a variable even for a call's result }
   else
@@ -750,10 +916,16 @@ function constParamRoot(e: PNode): PDecl;
 begin
   while true do
     case e^.kind of
-      nkIndex: e := e^.base;
+      nkIndex:
+        begin
+          if e^.idxProp <> nil then
+            exit(nil);
+          e := e^.base;
+        end;
       nkField:
         begin
-          if isObject(e^.base) then
+          if isObject(e^.base) or
+             ((e^.fieldDecl <> nil) and (e^.fieldDecl^.kind = dkVar)) then
             exit(nil);
           e := e^.base;
         end;
@@ -1449,6 +1621,32 @@ begin
         ms('a class type must be declared in a ''type'' section');
         errR(ts^.b, specRange(ts));
       end;
+    tsClassRef: { class of TFoo (TFoo may be forward) }
+      begin
+        d := lookup(ts^.tname.name);
+        if (d <> nil) and (d^.kind = dkType) and (d^.declType <> nil) and
+           isError(d^.declType) then
+          exit;
+        if (d <> nil) and (d^.kind = dkType) and (d^.declType <> nil) and
+           (d^.declType^.kind = tyClass) then
+          exit(newClassRefType(d^.declType));
+        if d = nil then
+        begin
+          ms('unknown class name ''');
+          maN(ts^.tname.spelling);
+          ma('''');
+          maDidYouMean(ts^.tname.name);
+          errR(ts^.tname.loc, identRange(ts^.tname));
+        end
+        else
+        begin
+          ms('''');
+          maN(ts^.tname.spelling);
+          ma(''' is not a class type');
+          errR(ts^.tname.loc, identRange(ts^.tname));
+          noteDeclaredHere(d);
+        end;
+      end;
   end;
 end;
 
@@ -1485,12 +1683,18 @@ begin
 end;
 
 procedure declareClass(td: PDecl); forward;
+procedure declareInterface(td: PDecl); forward;
 
 procedure declareType(td: PDecl);
 begin
   if td^.typeSpec^.kind = tsClass then
   begin
     declareClass(td);
+    exit;
+  end;
+  if td^.typeSpec^.kind = tsInterface then
+  begin
+    declareInterface(td);
     exit;
   end;
   td^.declType := resolveType(td^.typeSpec, td^.ident.spelling);
@@ -1502,6 +1706,7 @@ end;
 procedure resolveSignature(r: PDecl); forward;
 procedure checkRoutineBody(r: PDecl); forward;
 function sameSignature(a, b: PDecl): boolean; forward;
+function addOverload(first, r: PDecl): boolean; forward;
 
 { 'TFoo.Bar' (without quotes) }
 procedure maQualified(c: PType; const id: TIdent);
@@ -1586,6 +1791,17 @@ begin
                 curModule);
   end;
   listClear(pendingClasses);
+  for i := 0 to pendingInterfaces.count - 1 do
+  begin
+    td := PDecl(listGet(pendingInterfaces, i));
+    ms('interface ''');
+    maN(td^.ident.spelling);
+    ma(''' is declared forward but never defined');
+    errR(td^.ident.loc, identRange(td^.ident));
+    listInit(members);
+    defineInterface(td^.declType, nil, members, members, curModule);
+  end;
+  listClear(pendingInterfaces);
 end;
 
 { The defined class named id (a parent class or a method's class), or nil
@@ -1639,7 +1855,11 @@ var
 begin
   self_ := newDecl(dkVar, memberIdent('Self'), noLoc);
   self_^.varKind := vkValueParam;
-  self_^.varType := c;
+  { in a class method, Self is the class (a class reference) }
+  if r^.isClassMethod then
+    self_^.varType := classRefOf(c)
+  else
+    self_^.varType := c;
   self_^.owner := r;
   r^.selfVar := self_;
 end;
@@ -1647,23 +1867,34 @@ end;
 function sameHeading(a, b: PDecl): boolean;
 begin
   sameHeading := (a^.methodKind = b^.methodKind) and
+                 (a^.isClassMethod = b^.isClassMethod) and
                  (a^.isFunction = b^.isFunction) and sameSignature(a, b) and
                  (not a^.isFunction or (a^.resultType = b^.resultType));
 end;
 
 procedure defineMethod(c, parentClass: PType; r, inh: PDecl; owner: PType;
                        var vtable: TPtrList);
+var
+  x, match: PDecl;
 begin
   r^.ownerClass := c;
   r^.parent := nil;
   r^.level := 1;
   resolveSignature(r);
   makeSelf(r, c);
-  if (r^.methodKind = mtConstructor) and (r^.isVirtual or r^.isOverride) then
+  { of overloaded inherited methods, the one with this heading }
+  if (inh <> nil) and (inh^.overloadIndex <> 0) then
   begin
-    ms('virtual constructors are not supported');
-    errR(r^.ident.loc, identRange(r^.ident));
-    exit;
+    match := nil;
+    x := inh;
+    while x <> nil do
+    begin
+      if sameSignature(x, r) then
+        match := x;
+      x := x^.nextOverload;
+    end;
+    if (match <> nil) or r^.isOverride then
+      inh := match;
   end;
   if r^.isVirtual and r^.isOverride then
   begin
@@ -1739,18 +1970,167 @@ begin
   findAccessor := d;
 end;
 
-{ property P: T read R write W -- R: a field of type T or a function
-  without parameters returning T; W: a field of type T or a procedure with
-  one value or const parameter of type T. }
+{ Do the leading parameters of accessor method r fit property p: its index
+  parameters (same types and kinds), then an integer for index N? }
+function indexParamsMatch(p, r: PDecl): boolean;
+var
+  i, n, extra: longint;
+  a, b: PDecl;
+begin
+  indexParamsMatch := false;
+  n := p^.propParams.count;
+  extra := 0;
+  if p^.propIndex <> nil then
+    extra := 1;
+  if r^.params.count < n + extra then
+    exit;
+  for i := 0 to n - 1 do
+  begin
+    a := PDecl(listGet(r^.params, i));
+    b := PDecl(listGet(p^.propParams, i));
+    if (a^.varType <> b^.varType) or (a^.varKind <> b^.varKind) then
+      exit;
+  end;
+  if p^.propIndex <> nil then
+  begin
+    a := PDecl(listGet(r^.params, n));
+    exit((a^.varKind <> vkVarParam) and (a^.varType <> nil) and
+         isIntegerLike(a^.varType));
+  end;
+  indexParamsMatch := true;
+end;
+
+{ Appends " (use a function (i: integer; ...): T)" (or a procedure, with
+  the value) to the message: the accessor property p wants. }
+procedure maWantedAccessor(p: PDecl; isRead: boolean);
+var
+  i: longint;
+  q: PDecl;
+  first: boolean;
+begin
+  if isRead then
+    ma(' (use a function (')
+  else
+    ma(' (use a procedure (');
+  first := true;
+  for i := 0 to p^.propParams.count - 1 do
+  begin
+    q := PDecl(listGet(p^.propParams, i));
+    if not first then
+      ma('; ');
+    first := false;
+    if q^.varKind = vkConstParam then
+      ma('const ');
+    maN(q^.ident.spelling);
+    ma(': ');
+    bufAddTypeName(msg, q^.varType);
+  end;
+  if p^.propIndex <> nil then
+  begin
+    if not first then
+      ma('; ');
+    first := false;
+    ma('index: integer');
+  end;
+  if not isRead then
+  begin
+    if not first then
+      ma('; ');
+    ma('value: ');
+    bufAddTypeName(msg, p^.propType);
+  end;
+  ma(')');
+  if isRead then
+  begin
+    ma(': ');
+    bufAddTypeName(msg, p^.propType);
+  end;
+  ma(')');
+end;
+
+{ Does routine x fit as property p's read accessor (leading: its index
+  parameters and N) / write accessor? }
+function readFits(p, x: PDecl; t: PType; leading: longint): boolean;
+begin
+  readFits := x^.isFunction and (x^.params.count = leading) and
+              indexParamsMatch(p, x) and (x^.resultType = t);
+end;
+
+function writeFits(p, x: PDecl; t: PType; leading: longint): boolean;
+var
+  prm: PDecl;
+begin
+  writeFits := false;
+  if (x^.methodKind = mtMethod) and not x^.isFunction and
+     (x^.params.count = leading + 1) and indexParamsMatch(p, x) then
+  begin
+    prm := PDecl(listGet(x^.params, leading));
+    writeFits := (prm^.varKind <> vkVarParam) and (prm^.varType = t);
+  end;
+end;
+
+{ property P[params]: T [index N] read R write W -- R: a field of type T
+  (a plain property) or a function returning T; W: a field of type T or a
+  procedure taking the value (a value or const parameter of type T). The
+  methods first take the index parameters of an array property (same types
+  and kinds), then N (an integer) for an indexed property. }
 procedure definePropertyAccessors(c, parentClass: PType; p: PDecl;
                                   const own: TIntMap);
 var
-  t: PType;
-  rd, wr, prm: PDecl;
-  ok: boolean;
+  t, it, dt: PType;
+  rd, wr, prm, x: PDecl;
+  ok, paramsOK, plain: boolean;
+  i, leading: longint;
+  folded: TConstant;
 begin
   t := resolveType(p^.propSpec, nil);
   p^.propType := t;
+  paramsOK := true;
+  for i := 0 to p^.propParams.count - 1 do
+  begin
+    prm := PDecl(listGet(p^.propParams, i));
+    prm^.varType := resolveType(prm^.varSpec, nil);
+    if isError(prm^.varType) then
+      paramsOK := false;
+    if prm^.varKind = vkVarParam then
+    begin
+      ms('the index parameters of a property cannot be ''var''');
+      errR(prm^.loc, identRange(prm^.ident));
+      paramsOK := false;
+    end;
+  end;
+  if p^.propIndex <> nil then
+  begin
+    it := check(p^.propIndex);
+    if not isError(it) and (not isIntegerLike(it) or not fold(p^.propIndex, folded)) then
+    begin
+      ms('the index of a property must be an integer constant');
+      errR(p^.propIndex^.b, nodeRange(p^.propIndex));
+      paramsOK := false;
+    end;
+  end;
+  if p^.propDefaultValue <> nil then
+  begin
+    dt := check(p^.propDefaultValue);
+    if not isError(dt) and not isError(t) and
+       (not fold(p^.propDefaultValue, folded) or not isAssignable(t, dt)) then
+    begin
+      ms('the default value of property ''');
+      maN(p^.ident.spelling);
+      ma(''' must be a constant of type ');
+      maT(t);
+      errR(p^.propDefaultValue^.b, nodeRange(p^.propDefaultValue));
+    end;
+  end;
+  if p^.propIsDefault and (p^.propParams.count = 0) then
+  begin
+    ms('only an array property can be the default property');
+    errR(p^.loc, identRange(p^.ident));
+  end;
+  plain := (p^.propParams.count = 0) and (p^.propIndex = nil);
+  leading := p^.propParams.count;
+  if p^.propIndex <> nil then
+    leading := leading + 1;
   if not identValid(p^.readName) and not identValid(p^.writeName) then
   begin
     ms('property ''');
@@ -1763,12 +2143,24 @@ begin
   wr := nil;
   if identValid(p^.readName) then
     rd := findAccessor(c, parentClass, own, p^.readName);
+  if (rd <> nil) and (rd^.kind = dkRoutine) and (rd^.overloadIndex <> 0) then
+  begin { of overloaded methods, the one that fits }
+    x := rd;
+    while x <> nil do
+    begin
+      if readFits(p, x, t, leading) then
+      begin
+        rd := x;
+        break;
+      end;
+      x := x^.nextOverload;
+    end;
+  end;
   if rd <> nil then
   begin
-    ok := ((rd^.kind = dkField) and (rd^.fieldType = t)) or
-          ((rd^.kind = dkRoutine) and rd^.isFunction and
-           (rd^.params.count = 0) and (rd^.resultType = t));
-    if not ok and not isError(t) then
+    ok := (plain and (rd^.kind = dkField) and (rd^.fieldType = t)) or
+          ((rd^.kind = dkRoutine) and readFits(p, rd, t, leading));
+    if not ok and not isError(t) and paramsOK then
     begin
       ms('''');
       maN(p^.readName.spelling);
@@ -1776,24 +2168,35 @@ begin
       maN(p^.ident.spelling);
       ma(''' of type ');
       maT(t);
-      ma(' (use a field of that type or a function without parameters ' +
-         'returning it)');
+      if plain then
+        ma(' (use a field of that type or a function without parameters ' +
+           'returning it)')
+      else
+        maWantedAccessor(p, true);
       errR(p^.readName.loc, identRange(p^.readName));
       rd := nil;
     end;
   end;
   if identValid(p^.writeName) then
     wr := findAccessor(c, parentClass, own, p^.writeName);
+  if (wr <> nil) and (wr^.kind = dkRoutine) and (wr^.overloadIndex <> 0) then
+  begin { of overloaded methods, the one that fits }
+    x := wr;
+    while x <> nil do
+    begin
+      if writeFits(p, x, t, leading) then
+      begin
+        wr := x;
+        break;
+      end;
+      x := x^.nextOverload;
+    end;
+  end;
   if wr <> nil then
   begin
-    ok := (wr^.kind = dkField) and (wr^.fieldType = t);
-    if not ok and (wr^.kind = dkRoutine) and (wr^.methodKind = mtMethod) and
-       not wr^.isFunction and (wr^.params.count = 1) then
-    begin
-      prm := PDecl(listGet(wr^.params, 0));
-      ok := (prm^.varKind <> vkVarParam) and (prm^.varType = t);
-    end;
-    if not ok and not isError(t) then
+    ok := (plain and (wr^.kind = dkField) and (wr^.fieldType = t)) or
+          ((wr^.kind = dkRoutine) and writeFits(p, wr, t, leading));
+    if not ok and not isError(t) and paramsOK then
     begin
       ms('''');
       maN(p^.writeName.spelling);
@@ -1801,8 +2204,11 @@ begin
       maN(p^.ident.spelling);
       ma(''' of type ');
       maT(t);
-      ma(' (use a field of that type or a procedure with one parameter ' +
-         'of it)');
+      if plain then
+        ma(' (use a field of that type or a procedure with one parameter ' +
+           'of it)')
+      else
+        maWantedAccessor(p, false);
       errR(p^.writeName.loc, identRange(p^.writeName));
       wr := nil;
     end;
@@ -1811,17 +2217,285 @@ begin
   p^.writeDecl := wr;
 end;
 
+{ --- Interfaces (objfpc, CORBA style) --- }
+
+{ IFoo = interface ... end;  /  IFoo = interface; }
+procedure defineInterfaceMembers(i: PType; ts: PTypeSpec); forward;
+
+procedure declareInterface(td: PDecl);
+var
+  ts: PTypeSpec;
+  t: PType;
+  k, j: longint;
+  pd: PDecl;
+begin
+  ts := td^.typeSpec;
+  if curRoutine <> nil then
+  begin
+    ms('interface ''');
+    maN(td^.ident.spelling);
+    ma(''' must be declared at program or unit level');
+    errR(td^.ident.loc, identRange(td^.ident));
+    td^.declType := errorType;
+    ts^.resolved := errorType;
+    declare(td);
+    exit;
+  end;
+  if not ts^.isForwardIntf then
+    for k := 0 to pendingInterfaces.count - 1 do
+    begin
+      pd := PDecl(listGet(pendingInterfaces, k));
+      if (pd^.ident.name = td^.ident.name) and
+         (scopeLookupOwn(cur, td^.ident.name) = pd) then
+      begin
+        for j := k to pendingInterfaces.count - 2 do
+          listSet(pendingInterfaces, j, listGet(pendingInterfaces, j + 1));
+        listPop(pendingInterfaces);
+        t := pd^.declType;
+        td^.declType := t;
+        ts^.resolved := t;
+        defineInterfaceMembers(t, ts);
+        exit;
+      end;
+    end;
+  t := newInterfaceType;
+  setDeclName(t, td^.ident.spelling);
+  td^.declType := t;
+  ts^.resolved := t;
+  declare(td);
+  if ts^.isForwardIntf then
+  begin
+    listAdd(pendingInterfaces, td);
+    exit;
+  end;
+  defineInterfaceMembers(t, ts);
+end;
+
+{ The defined interface named id, or nil after a diagnostic. }
+function lookupInterface(const id: TIdent): PType;
+var
+  d: PDecl;
+  t: PType;
+begin
+  lookupInterface := nil;
+  d := lookup(id.name);
+  if d = nil then
+  begin
+    ms('unknown interface name ''');
+    maN(id.spelling);
+    ma('''');
+    maDidYouMean(id.name);
+    errR(id.loc, identRange(id));
+    exit;
+  end;
+  if (d^.kind = dkType) and (d^.declType <> nil) and isError(d^.declType) then
+    exit;
+  t := nil;
+  if (d^.kind = dkType) and (d^.declType <> nil) and
+     (d^.declType^.kind = tyInterface) then
+    t := d^.declType;
+  if t = nil then
+  begin
+    ms('''');
+    maN(id.spelling);
+    ma(''' is not an interface type');
+    errR(id.loc, identRange(id));
+    noteDeclaredHere(d);
+    exit;
+  end;
+  if not t^.intfDefined then
+  begin
+    ms('interface ''');
+    maN(id.spelling);
+    ma(''' is not defined yet (only declared forward)');
+    errR(id.loc, identRange(id));
+    exit;
+  end;
+  lookupInterface := t;
+end;
+
+{ The method name of interface i or its nearest ancestor declaring it (the
+  first of its overloads). }
+function findInterfaceMethod(i: PType; name: PName): PDecl;
+var
+  k: longint;
+  r: PDecl;
+begin
+  findInterfaceMethod := nil;
+  while i <> nil do
+  begin
+    for k := 0 to i^.intfMethods.count - 1 do
+    begin
+      r := PDecl(listGet(i^.intfMethods, k));
+      if r^.ident.name = name then
+        exit(r);
+    end;
+    i := i^.intfParent;
+  end;
+end;
+
+procedure defineInterfaceMembers(i: PType; ts: PTypeSpec);
+var
+  parentIntf: PType;
+  own, all: TPtrList;
+  seen: TIntMap;
+  k: longint;
+  r, inh, prev: PDecl;
+begin
+  parentIntf := nil;
+  if identValid(ts^.intfParentName) then
+  begin
+    if ts^.intfParentName.name = intern(lowerStr(nameStr(i^.declName))) then
+    begin
+      ms('interface ');
+      maT(i);
+      ma(' cannot inherit from itself');
+      errR(ts^.intfParentName.loc, identRange(ts^.intfParentName));
+    end
+    else
+      parentIntf := lookupInterface(ts^.intfParentName);
+  end;
+  listInit(own);
+  listInit(all);
+  if parentIntf <> nil then
+    for k := 0 to parentIntf^.intfAllMethods.count - 1 do
+      listAdd(all, listGet(parentIntf^.intfAllMethods, k));
+  mapInit(seen);
+  for k := 0 to ts^.intfMemberList.count - 1 do
+  begin
+    r := PDecl(listGet(ts^.intfMemberList, k));
+    r^.routineIntf := i;
+    r^.parent := nil;
+    r^.level := 1;
+    resolveSignature(r);
+    if r^.isVirtual or r^.isOverride or r^.isAbstract then
+    begin
+      ms('the methods of an interface cannot be ''virtual'', ''override'' or ' +
+         '''abstract''');
+      errR(r^.ident.loc, identRange(r^.ident));
+      continue;
+    end;
+    inh := nil;
+    if parentIntf <> nil then
+      inh := findInterfaceMethod(parentIntf, r^.ident.name);
+    if inh <> nil then
+    begin
+      ms('''');
+      maN(r^.ident.spelling);
+      ma(''' is already declared in interface ');
+      maT(inh^.routineIntf);
+      errR(r^.ident.loc, identRange(r^.ident));
+      noteDeclaredHere(inh);
+      continue;
+    end;
+    prev := PDecl(mapGet(seen, r^.ident.name^.id));
+    if prev <> nil then
+    begin
+      if not addOverload(prev, r) then
+        continue;
+    end
+    else
+      mapPut(seen, r^.ident.name^.id, r);
+    r^.vmtIndex := all.count;
+    listAdd(all, r);
+    listAdd(own, r);
+  end;
+  defineInterface(i, parentIntf, own, all, curModule);
+end;
+
+{ The methods of class c implementing the methods of interface i (by
+  slot): methods (not class methods) of c or its ancestors with the same
+  name and heading. where: the interface's name in c's declaration, to
+  report a missing one (nil: inherited, already checked). }
+function implementInterface(c, i: PType; where: PIdent): PInterfaceImpl;
+var
+  impl: PInterfaceImpl;
+  k: longint;
+  m, r, found: PDecl;
+  x: PType;
+begin
+  impl := PInterfaceImpl(arenaAlloc(sizeof(TInterfaceImpl)));
+  impl^.intf := i;
+  listInit(impl^.methods);
+  for k := 0 to i^.intfAllMethods.count - 1 do
+  begin
+    m := PDecl(listGet(i^.intfAllMethods, k));
+    found := nil;
+    x := c;
+    while (x <> nil) and (found = nil) do
+    begin
+      r := findOwnMember(x, m^.ident.name);
+      if (r <> nil) and (r^.kind <> dkRoutine) then
+        r := nil;
+      while (r <> nil) and (found = nil) do
+      begin
+        if (r^.methodKind = mtMethod) and not r^.isClassMethod and
+           (r^.objMethod = obNone) and (r^.isFunction = m^.isFunction) and
+           sameSignature(r, m) and
+           (not m^.isFunction or (r^.resultType = m^.resultType)) then
+          found := r;
+        r := r^.nextOverload;
+      end;
+      x := x^.classParent;
+    end;
+    if (found = nil) and (where <> nil) then
+    begin
+      ms('class ');
+      maT(c);
+      ma(' does not implement ''');
+      bufAddTypeName(msg, m^.routineIntf);
+      ma('.');
+      maN(m^.ident.spelling);
+      ma('''');
+      errR(where^.loc, identRange(where^));
+      noteDeclaredHere(m);
+    end;
+    listAdd(impl^.methods, found);
+  end;
+  implementInterface := impl;
+end;
+
 procedure defineClassMembers(c: PType; ts: PTypeSpec);
 var
-  parentClass, owner, pc: PType;
-  members, fields, vtable: TPtrList;
+  parentClass, owner, pc, it: PType;
+  members, fields, vtable, listed, listedWhere, impls: TPtrList;
   own: TIntMap;
-  i: longint;
-  m, prev, inh: PDecl;
+  i, k: longint;
+  m, prev, inh, defaultProp, overloadOf, td: PDecl;
+  pi: PInterfaceImpl;
+
+  { the interfaces class(TParent, I1, I2) lists }
+  procedure addListed(id: PIdent);
+  var
+    t: PType;
+    j: longint;
+  begin
+    t := lookupInterface(id^);
+    if t = nil then
+      exit;
+    for j := 0 to listed.count - 1 do
+      if listGet(listed, j) = pointer(t) then
+      begin
+        ms('interface ''');
+        maN(id^.spelling);
+        ma(''' is listed twice');
+        errR(id^.loc, identRange(id^));
+        exit;
+      end;
+    listAdd(listed, t);
+    listAdd(listedWhere, id);
+  end;
+
 begin
+  defaultProp := nil;
   parentClass := tobjectType;
+  listInit(listed);
+  listInit(listedWhere);
   if identValid(ts^.parentName) then
   begin
+    td := lookup(ts^.parentName.name);
+    if (td <> nil) and (td^.kind <> dkType) then
+      td := nil;
     if ts^.parentName.name = intern(lowerStr(nameStr(c^.declName))) then
     begin
       ms('class ');
@@ -1829,6 +2503,9 @@ begin
       ma(' cannot inherit from itself');
       errR(ts^.parentName.loc, identRange(ts^.parentName));
     end
+    else if (td <> nil) and (td^.declType <> nil) and
+            (td^.declType^.kind = tyInterface) then
+      addListed(@ts^.parentName)
     else
     begin
       pc := lookupClass(ts^.parentName);
@@ -1836,6 +2513,8 @@ begin
         parentClass := pc;
     end;
   end;
+  for k := 0 to ts^.interfaceNames.count - 1 do
+    addListed(PIdent(listGet(ts^.interfaceNames, k)));
 
   listInit(members);
   listInit(fields);
@@ -1849,6 +2528,13 @@ begin
   begin
     m := PDecl(listGet(ts^.memberList, i));
     prev := PDecl(mapGet(own, m^.ident.name^.id));
+    overloadOf := nil; { objfpc: an overloaded method }
+    if (prev <> nil) and (mode = lmObjFPC) and (prev^.kind = dkRoutine) and
+       (m^.kind = dkRoutine) then
+    begin
+      overloadOf := prev;
+      prev := nil;
+    end;
     if prev <> nil then
     begin
       ms('redefinition of ''');
@@ -1871,7 +2557,8 @@ begin
       noteDeclaredHere(inh);
       continue;
     end;
-    mapPut(own, m^.ident.name^.id, m);
+    if overloadOf = nil then
+      mapPut(own, m^.ident.name^.id, m);
     listAdd(members, m);
     case m^.kind of
       dkField:
@@ -1889,19 +2576,83 @@ begin
           if (inh <> nil) and (inh^.kind <> dkRoutine) then
             inh := nil;
           defineMethod(c, parentClass, m, inh, owner, vtable);
+          if (overloadOf <> nil) and not addOverload(overloadOf, m) then
+          begin
+            m^.ownerClass := nil; { rejected: not a member }
+            listPop(members);
+          end;
+        end;
+      dkVar: { class var: static storage }
+        begin
+          m^.varType := resolveType(m^.varSpec, nil);
+          m^.varClass := c;
+          if containsFile(m^.varType) then
+          begin
+            ms('a class variable cannot be a file');
+            errR(m^.ident.loc, identRange(m^.ident));
+          end;
         end;
     else
-      definePropertyAccessors(c, parentClass, m, own);
+      begin
+        definePropertyAccessors(c, parentClass, m, own);
+        if m^.propIsDefault then
+        begin
+          if defaultProp <> nil then
+          begin
+            ms('class ');
+            maT(c);
+            ma(' already has a default property');
+            errR(m^.ident.loc, identRange(m^.ident));
+            noteDeclaredHere(defaultProp);
+          end;
+          defaultProp := m;
+        end;
+      end;
     end;
   end;
   defineClass(c, parentClass, members, fields, vtable, curModule);
+  { the interfaces: the parent's (with this class's overrides), then its own }
+  listInit(impls);
+  for k := 0 to parentClass^.classInterfaces.count - 1 do
+  begin
+    pi := PInterfaceImpl(listGet(parentClass^.classInterfaces, k));
+    listAdd(impls, implementInterface(c, pi^.intf, nil));
+  end;
+  for k := 0 to listed.count - 1 do
+  begin
+    it := PType(listGet(listed, k));
+    if findInterface(parentClass, it) = nil then
+      listAdd(impls, implementInterface(c, it, PIdent(listGet(listedWhere, k))));
+  end;
+  c^.classInterfaces := impls;
+end;
+
+{ The default property of c or its nearest ancestor declaring one. }
+function defaultProperty(c: PType): PDecl;
+var
+  i: longint;
+  m: PDecl;
+begin
+  defaultProperty := nil;
+  while c <> nil do
+  begin
+    for i := 0 to c^.classMembers.count - 1 do
+    begin
+      m := PDecl(listGet(c^.classMembers, i));
+      if (m^.kind = dkProperty) and m^.propIsDefault then
+        exit(m);
+    end;
+    c := c^.classParent;
+  end;
 end;
 
 { procedure TFoo.Bar ...; begin ... end;  -- the body of a method. }
+procedure maRoutineHeading(r: PDecl); forward;
+
 procedure declareMethodBody(r: PDecl);
 var
   c, rt: PType;
-  m, p: PDecl;
+  m, p, x, match: PDecl;
   i: longint;
 begin
   if curRoutine <> nil then
@@ -1930,6 +2681,39 @@ begin
     errR(r^.ident.loc, identRange(r^.ident));
     exit;
   end;
+  if m^.overloadIndex <> 0 then { objfpc: the method with this heading }
+  begin
+    for i := 0 to r^.params.count - 1 do
+    begin
+      p := PDecl(listGet(r^.params, i));
+      p^.varType := resolveType(p^.varSpec, nil);
+    end;
+    match := nil;
+    x := m;
+    while x <> nil do
+    begin
+      if sameSignature(x, r) and (x^.body = nil) then
+        match := x;
+      x := x^.nextOverload;
+    end;
+    if match = nil then
+    begin
+      ms('heading of ''');
+      maQualified(c, m^.ident);
+      ma(''' does not match any of its overloads');
+      errR(r^.ident.loc, identRange(r^.ident));
+      x := m;
+      while x <> nil do
+      begin
+        ms('candidate: ');
+        maRoutineHeading(x);
+        note(x^.loc);
+        x := x^.nextOverload;
+      end;
+      exit;
+    end;
+    m := match;
+  end;
   if c^.classModule <> curModule then
   begin
     ms('method ''');
@@ -1938,11 +2722,15 @@ begin
     errR(r^.ident.loc, identRange(r^.ident));
     exit;
   end;
-  if (m^.methodKind <> r^.methodKind) or (m^.isFunction <> r^.isFunction) then
+  if (m^.methodKind <> r^.methodKind) or (m^.isFunction <> r^.isFunction) or
+     (m^.isClassMethod <> r^.isClassMethod) then
   begin
     ms('''');
     maQualified(c, m^.ident);
-    ma(''' was declared as a ' + kindName(m));
+    if m^.isClassMethod then
+      ma(''' was declared as a class ' + kindName(m))
+    else
+      ma(''' was declared as a ' + kindName(m));
     errR(r^.ident.loc, identRange(r^.ident));
     noteDeclaredHere(m);
     exit;
@@ -2039,8 +2827,32 @@ end;
 function classOfWith(w: PWithContext): PType;
 begin
   classOfWith := nil;
-  if (w <> nil) and (w^.rec^.typ <> nil) and (w^.rec^.typ^.kind = tyClass) then
-    classOfWith := w^.rec^.typ;
+  if (w = nil) or (w^.rec^.typ = nil) then
+    exit;
+  if w^.rec^.typ^.kind = tyClass then
+    classOfWith := w^.rec^.typ
+  else if w^.rec^.typ^.kind = tyClassRef then { Self in a class method }
+    classOfWith := w^.rec^.typ^.refClass;
+end;
+
+{ Is d an instance member (a field, a property, a method that is not a
+  class method or constructor)? Class methods cannot use them. }
+function isInstanceMember(d: PDecl): boolean;
+begin
+  isInstanceMember := (d^.kind in [dkField, dkProperty]) or
+                      ((d^.kind = dkRoutine) and (d^.methodKind <> mtNone) and
+                       not d^.isClassMethod and (d^.methodKind <> mtConstructor));
+end;
+
+{ In a class method, Self is a class: a constructor called through it
+  creates an object of that class (its static type: Self's class). }
+function constructedThroughSelf(r: PDecl; w: PWithContext): PType;
+begin
+  constructedThroughSelf := nil;
+  if (r^.methodKind <> mtConstructor) or (w = nil) or not w^.isSelf then
+    exit;
+  if (w^.rec^.typ <> nil) and (w^.rec^.typ^.kind = tyClassRef) then
+    constructedThroughSelf := w^.rec^.typ^.refClass;
 end;
 
 { Reports use of a private or protected member d of class owner where it
@@ -2049,22 +2861,36 @@ end;
 procedure checkMemberAccess(d: PDecl; owner: PType; const id: TIdent);
 var
   m: PDecl;
+  strict_: boolean;
 begin
-  if (d^.vis = vsPublic) or (d^.vis = vsPublished) or (owner = nil) or
-     (owner^.classModule = curModule) then
+  if (d^.vis = vsPublic) or (d^.vis = vsPublished) or (owner = nil) then
     exit;
-  if d^.vis = vsProtected then
+  strict_ := d^.vis in [vsStrictPrivate, vsStrictProtected];
+  if not strict_ and (owner^.classModule = curModule) then
+    exit;
+  { strict private: methods of the class; (strict) protected: also of its
+    descendants }
+  m := enclosingMethod;
+  if m <> nil then
   begin
-    m := enclosingMethod;
-    if (m <> nil) and inheritsFrom(m^.ownerClass, owner) then
-      exit;
+    if d^.vis = vsStrictPrivate then
+    begin
+      if m^.ownerClass = owner then
+        exit;
+    end
+    else if d^.vis <> vsPrivate then
+      if inheritsFrom(m^.ownerClass, owner) then
+        exit;
   end;
   ms('''');
   maN(id.spelling);
-  if d^.vis = vsPrivate then
-    ma(''' is a private member of ')
+  case d^.vis of
+    vsPrivate: ma(''' is a private member of ');
+    vsProtected: ma(''' is a protected member of ');
+    vsStrictPrivate: ma(''' is a strict private member of ');
   else
-    ma(''' is a protected member of ');
+    ma(''' is a strict protected member of ');
+  end;
   maT(owner);
   errR(id.loc, identRange(id));
   noteDeclaredHere(d);
@@ -2081,6 +2907,14 @@ begin
   owner := nil;
   findMember(c, id.name, owner);
   checkMemberAccess(d, owner, id);
+  if w^.isSelf and (w^.rec^.typ^.kind = tyClassRef) and isInstanceMember(d) then
+  begin
+    ms('instance member ''');
+    maN(id.spelling);
+    ma(''' cannot be used in a class method');
+    errR(id.loc, identRange(id));
+    noteDeclaredHere(d);
+  end;
 end;
 
 { Is t an array of char (any index type) that a string constant of length
@@ -2368,11 +3202,61 @@ begin
   end;
 end;
 
+{ r (resolved) joins the overloads first...: its parameters must differ.
+  False after a diagnostic. }
+function addOverload(first, r: PDecl): boolean;
+var
+  x, last: PDecl;
+begin
+  addOverload := false;
+  x := first;
+  while x <> nil do
+  begin
+    if sameSignature(x, r) then
+    begin
+      ms('redefinition of ''');
+      maN(r^.ident.spelling);
+      ma(''' (overloads must differ in their parameters)');
+      errR(r^.ident.loc, identRange(r^.ident));
+      ms('previous definition is here');
+      note(x^.loc);
+      exit;
+    end;
+    x := x^.nextOverload;
+  end;
+  if first^.overloadIndex = 0 then
+    first^.overloadIndex := 1;
+  last := first;
+  while last^.nextOverload <> nil do
+    last := last^.nextOverload;
+  r^.overloadIndex := last^.overloadIndex + 1;
+  last^.nextOverload := r;
+  addOverload := true;
+end;
+
+{ Declares r; in objfpc, another routine of its name in the same scope
+  makes it an overload (with other parameters). False if r was rejected as
+  such (its body is not checked then). }
+function declareRoutineName(r: PDecl): boolean;
+var
+  first: PDecl;
+begin
+  if mode = lmObjFPC then
+  begin
+    first := scopeLookupOwn(cur, r^.ident.name);
+    if (first <> nil) and (first^.kind = dkRoutine) then
+      exit(addOverload(first, r));
+  end;
+  declare(r);
+  declareRoutineName := true;
+end;
+
 procedure declareRoutine(r: PDecl);
 var
-  fwd, p: PDecl;
+  fwd, p, x, match: PDecl;
   i: longint;
   rt: PType;
+  inInterface: boolean;
 begin
   r^.parent := curRoutine;
   if curRoutine <> nil then
@@ -2384,15 +3268,51 @@ begin
     declareMethodBody(r);
     exit;
   end;
+  if r^.isClassMethod then
+  begin
+    ms('only a method can be a class ' + kindName(r) + '; implement it as ''' +
+       kindName(r) + ' TClass.');
+    maN(r^.ident.spelling);
+    ma('''');
+    errR(r^.ident.loc, identRange(r^.ident));
+  end;
   { the definition of an earlier forward declaration? }
   fwd := scopeLookupOwn(cur, r^.ident.name);
   if (fwd <> nil) and (fwd^.kind <> dkRoutine) then
     fwd := nil;
+  inInterface := false;
   if (fwd = nil) and (curUnitInterface <> nil) and (curRoutine = nil) then
   begin
     fwd := scopeLookupOwn(curUnitInterface, r^.ident.name);
     if (fwd <> nil) and (fwd^.kind <> dkRoutine) then
       fwd := nil;
+    inInterface := fwd <> nil;
+  end;
+  { objfpc: of overloaded routines, the one with this heading }
+  if (fwd <> nil) and (fwd^.overloadIndex <> 0) and (r^.body <> nil) then
+  begin
+    for i := 0 to r^.params.count - 1 do
+    begin
+      p := PDecl(listGet(r^.params, i));
+      p^.varType := resolveType(p^.varSpec, nil);
+    end;
+    match := nil;
+    x := fwd;
+    while x <> nil do
+    begin
+      if x^.isForward and (x^.body = nil) and sameSignature(x, r) then
+        match := x;
+      x := x^.nextOverload;
+    end;
+    fwd := match;
+    if (match = nil) and inInterface then
+    begin
+      ms('overloads of ''');
+      maN(r^.ident.spelling);
+      ma(''' must all be declared in the interface');
+      errR(r^.ident.loc, identRange(r^.ident));
+      exit;
+    end;
   end;
   if (fwd <> nil) and fwd^.isForward and (fwd^.body = nil) and (r^.body <> nil) then
   begin
@@ -2434,7 +3354,16 @@ begin
   end;
 
   resolveSignature(r);
-  declare(r);
+  if inInterface and (mode = lmObjFPC) then { a different heading }
+  begin
+    ms('overloads of ''');
+    maN(r^.ident.spelling);
+    ma(''' must all be declared in the interface');
+    errR(r^.ident.loc, identRange(r^.ident));
+    exit;
+  end;
+  if not declareRoutineName(r) then
+    exit;
   if r^.isExternal then
     checkExternal(r);
   if r^.body <> nil then
@@ -2457,6 +3386,273 @@ begin
   isPCharLiteral := (c <> nil) and (c^.kind = dkConst) and
                     ((c^.constValue.kind = ckString) or
                      ((c^.constType <> nil) and (getBase(c^.constType)^.kind = tyChar)));
+end;
+
+{ --- Overload resolution (objfpc) --- }
+
+{ The routines a call of first's name may mean: first's overloads; for a
+  method with the overload directive also those of its ancestors that it
+  does not override. }
+procedure collectOverloads(first: PDecl; var outList: TPtrList);
+var
+  x, up, y: PDecl;
+  directive, dup: boolean;
+  start, i, j: longint;
+  inherited_: TPtrList;
+  parentClass, owner: PType;
+begin
+  directive := false;
+  start := outList.count;
+  x := first;
+  while x <> nil do
+  begin
+    listAdd(outList, x);
+    if x^.hasOverloadDirective then
+      directive := true;
+    x := x^.nextOverload;
+  end;
+  if not directive or (first^.methodKind = mtNone) or (first^.ownerClass = nil) then
+    exit;
+  parentClass := first^.ownerClass^.classParent;
+  if parentClass = nil then
+    exit;
+  owner := nil;
+  up := findMember(parentClass, first^.ident.name, owner);
+  if (up = nil) or (up^.kind <> dkRoutine) then
+    exit;
+  listInit(inherited_);
+  collectOverloads(up, inherited_);
+  for i := 0 to inherited_.count - 1 do
+  begin
+    y := PDecl(listGet(inherited_, i));
+    dup := false;
+    for j := start to outList.count - 1 do
+      if sameSignature(PDecl(listGet(outList, j)), y) then
+        dup := true;
+    if not dup then
+      listAdd(outList, y);
+  end;
+end;
+
+{ How far an argument of type a is from a parameter of type p (lower is
+  better): an exact type, a subrange of it, a wider integer type (integer
+  before int64), a same-size or narrower one, real, an ancestor class (the
+  nearest first), anything else assignable. }
+function conversionCost(p, a: PType): longint;
+var
+  pb, ab, c: PType;
+  d: longint;
+begin
+  if p = a then
+    exit(0);
+  pb := getBase(p);
+  ab := getBase(a);
+  if pb = ab then
+    exit(1);
+  if (pb^.kind = tyInteger) and (ab^.kind = tyInteger) then
+  begin
+    if pb^.bits > ab^.bits then
+    begin
+      if pb^.bits = 64 then
+        exit(3);
+      exit(2);
+    end;
+    if pb^.bits = ab^.bits then
+      exit(4);
+    exit(5);
+  end;
+  if (p^.kind = tyReal) and (ab^.kind = tyInteger) then
+    exit(6);
+  if (p^.kind = tyShortString) and (a^.kind in [tyShortString, tyStringLit]) then
+    exit(1);
+  if (p^.kind = tyShortString) and (ab^.kind = tyChar) then
+    exit(2);
+  if ((p^.kind = tyClass) and (a^.kind = tyClass)) or
+     ((p^.kind = tyClassRef) and (a^.kind = tyClassRef)) then
+  begin
+    if p^.kind = tyClassRef then
+    begin
+      p := p^.refClass;
+      a := a^.refClass;
+    end;
+    d := 0;
+    c := a;
+    while (c <> nil) and (c <> p) do
+    begin
+      d := d + 1;
+      c := c^.classParent;
+    end;
+    exit(1 + d);
+  end;
+  if a^.kind = tyNil then
+    exit(1);
+  conversionCost := 7;
+end;
+
+{ Is arg the name of a routine (passed for a procedural parameter)? }
+function isRoutineName(arg: PNode): boolean;
+var
+  d: PDecl;
+begin
+  isRoutineName := false;
+  if arg^.kind <> nkNameRef then
+    exit;
+  d := lookup(arg^.ref.name);
+  isRoutineName := (d <> nil) and (d^.kind = dkRoutine);
+end;
+
+{ The cost of calling r with args (types argTys; nil: a routine's name), or
+  -1 if they do not fit. }
+function callCost(r: PDecl; const args, argTys: TPtrList): longint;
+var
+  i, cost: longint;
+  p: PDecl;
+  pt, at: PType;
+  arg: PNode;
+begin
+  callCost := -1;
+  if r^.params.count <> args.count then
+    exit;
+  cost := 0;
+  for i := 0 to args.count - 1 do
+  begin
+    p := PDecl(listGet(r^.params, i));
+    pt := p^.varType;
+    at := PType(listGet(argTys, i));
+    arg := PNode(listGet(args, i));
+    if (pt = nil) or isError(pt) then
+      exit;
+    if at = nil then { a routine's name: for a procedural parameter }
+    begin
+      if pt^.kind <> tyRoutine then
+        exit;
+      continue;
+    end;
+    if p^.varKind = vkVarParam then
+    begin
+      if (at <> pt) or not isVariableReference(arg) then
+        exit;
+      continue;
+    end;
+    if not isAssignable(pt, at) and not isPCharLiteral(pt, arg) then
+      exit;
+    cost := cost + conversionCost(pt, at);
+  end;
+  callCost := cost;
+end;
+
+{ "f(integer; var string): real" for diagnostics }
+procedure maRoutineHeading(r: PDecl);
+var
+  i: longint;
+  p: PDecl;
+begin
+  maN(r^.ident.spelling);
+  ma('(');
+  for i := 0 to r^.params.count - 1 do
+  begin
+    p := PDecl(listGet(r^.params, i));
+    if i > 0 then
+      ma('; ');
+    if p^.varKind = vkVarParam then
+      ma('var ')
+    else if p^.varKind = vkConstParam then
+      ma('const ');
+    if p^.varType <> nil then
+      bufAddTypeName(msg, p^.varType)
+    else
+      ma('?');
+  end;
+  ma(')');
+  if r^.isFunction and (r^.resultType <> nil) then
+  begin
+    ma(': ');
+    bufAddTypeName(msg, r^.resultType);
+  end;
+end;
+
+{ The routine of first's name that args fit best: first itself unless it
+  is overloaded. nil after a diagnostic (no fit, or a tie). }
+function resolveOverload(first: PDecl; const args: TPtrList; const callee: TIdent;
+                         rng: TRange): PDecl;
+var
+  cands, argTys: TPtrList;
+  i, cost, bestCost: longint;
+  r, best: PDecl;
+  t: PType;
+  a: PNode;
+  tie: boolean;
+begin
+  resolveOverload := nil;
+  listInit(cands);
+  collectOverloads(first, cands);
+  if cands.count < 2 then
+    exit(first);
+  listInit(argTys);
+  for i := 0 to args.count - 1 do
+  begin
+    a := PNode(listGet(args, i));
+    if a^.kind = nkFormatted then
+      exit(first); { reported with the call's arguments }
+    if isRoutineName(a) then
+      t := nil
+    else
+      t := check(a);
+    if (t <> nil) and isError(t) then
+      exit;
+    listAdd(argTys, t);
+  end;
+  best := nil;
+  bestCost := -1;
+  tie := false;
+  for i := 0 to cands.count - 1 do
+  begin
+    r := PDecl(listGet(cands, i));
+    cost := callCost(r, args, argTys);
+    if cost < 0 then
+      continue;
+    if (best = nil) or (cost < bestCost) then
+    begin
+      best := r;
+      bestCost := cost;
+      tie := false;
+    end
+    else if cost = bestCost then
+      tie := true;
+  end;
+  if (best <> nil) and not tie then
+    exit(best);
+  if best <> nil then
+    ms('ambiguous call to overloaded ''')
+  else
+    ms('no overload of ''');
+  maN(callee.spelling);
+  if best <> nil then
+    ma(''' with arguments (')
+  else
+    ma(''' takes arguments (');
+  for i := 0 to argTys.count - 1 do
+  begin
+    if i > 0 then
+      ma(', ');
+    t := PType(listGet(argTys, i));
+    if t <> nil then
+      bufAddTypeName(msg, t)
+    else
+      ma('routine');
+  end;
+  ma(')');
+  errR(callee.loc, rng);
+  for i := 0 to cands.count - 1 do
+  begin
+    r := PDecl(listGet(cands, i));
+    if (best = nil) or (callCost(r, args, argTys) = bestCost) then
+    begin
+      ms('candidate: ');
+      maRoutineHeading(r);
+      note(r^.loc);
+    end;
+  end;
 end;
 
 procedure resolvePendingPointers;
@@ -2542,7 +3738,7 @@ procedure visitStmt(s: PNode); forward;
 
 procedure finishBlock(b: PBlock; warnUnused: boolean);
 var
-  i: longint;
+  i, savedHandlers, savedFinally: longint;
   d: PDecl;
   savedBody: PNode;
 begin
@@ -2562,7 +3758,13 @@ begin
   checkMethodsImplemented(b);
   savedBody := routineBody;
   routineBody := b^.body;
+  savedHandlers := handlerDepth;
+  savedFinally := finallyLoopDepth;
+  handlerDepth := 0;
+  finallyLoopDepth := -1;
   visitStmt(b^.body);
+  handlerDepth := savedHandlers;
+  finallyLoopDepth := savedFinally;
   routineBody := savedBody;
 
   for i := 0 to b^.decls.count - 1 do
@@ -2615,7 +3817,7 @@ begin
     selfRef := newNode(nkNameRef, noLoc, noLoc);
     selfRef^.ref := r^.selfVar^.ident;
     selfRef^.refDecl := r^.selfVar;
-    selfRef^.typ := r^.ownerClass;
+    selfRef^.typ := r^.selfVar^.varType;
     w := PWithContext(arenaAlloc(sizeof(TWithContext)));
     w^.rec := selfRef;
     w^.isSelf := true;
@@ -2907,23 +4109,45 @@ end;
 procedure checkRoutineArg(arg: PNode; p: PDecl; formal: PType);
 var
   kind: string;
-  d: PDecl;
+  d, x: PDecl;
   params: TPtrList;
-  res: PType;
+  res, xr: PType;
   found: boolean;
+  n: PNode;
 begin
   if formal^.routineResult <> nil then
     kind := 'function'
   else
     kind := 'procedure';
+  { Turbo/FPC: @f, as objfpc requires (the operand: a routine's name) }
+  n := arg;
+  if not isISO and (arg^.kind = nkAddrOf) then
+  begin
+    arg^.typ := p^.varType;
+    n := arg^.inner;
+  end;
   d := nil;
-  if arg^.kind = nkNameRef then
-    d := lookup(arg^.ref.name);
+  if n^.kind = nkNameRef then
+    d := lookup(n^.ref.name);
   listInit(params);
   res := nil;
   found := false;
   if (d <> nil) and (d^.kind = dkRoutine) and (d^.methodKind = mtNone) then
   begin
+    { objfpc: of overloaded routines, the one whose heading fits }
+    x := d;
+    while (d^.overloadIndex <> 0) and (x <> nil) do
+    begin
+      xr := nil;
+      if x^.isFunction then
+        xr := x^.resultType;
+      if congruent(formal^.routineParams, formal^.routineResult, x^.params, xr) then
+      begin
+        d := x;
+        break;
+      end;
+      x := x^.nextOverload;
+    end;
     params := d^.params;
     if d^.isFunction then
       res := d^.resultType;
@@ -2946,12 +4170,12 @@ begin
     errR(arg^.b, nodeRange(arg));
     exit;
   end;
-  arg^.refDecl := d;
-  arg^.typ := p^.varType;
+  n^.refDecl := d;
+  n^.typ := p^.varType;
   if not congruent(formal^.routineParams, formal^.routineResult, params, res) then
   begin
     ms('''');
-    maN(arg^.ref.spelling);
+    maN(n^.ref.spelling);
     ma(''' does not match the heading of parameter ''');
     maN(p^.ident.spelling);
     ma(''' (');
@@ -3143,6 +4367,14 @@ begin
   curModule := nil;
   curAssignTarget := nil;
   tobjectType := nil;
+  exceptionType := nil;
+  handlerDepth := 0;
+  finallyLoopDepth := -1;
+  listInit(pendingInterfaces);
+  mapInit(classRefs);
+  addrOfTarget := nil;
+  indexBase := nil;
+  listInit(pendingIndexes);
   listInit(pendingClasses);
   standard := newScope(nil);
   cur := standard;

@@ -50,7 +50,8 @@ type
     nkSetCtor, nkAddrOf, nkAggregate, nkIndirectCall, nkInherited,
     { statements }
     nkEmpty, nkCompound, nkProcCall, nkAssign, nkIf, nkWhile, nkRepeat,
-    nkFor, nkCase, nkWith, nkLabeled, nkGoto, nkIndirectCallStmt);
+    nkFor, nkCase, nkWith, nkLabeled, nkGoto, nkIndirectCallStmt,
+    nkTry, nkRaise);
 
   PNode = ^TNode;
   PDecl = ^TDecl;
@@ -62,7 +63,8 @@ type
 
   TTypeKind = (tyError, tyInteger, tyReal, tyBoolean, tyChar, tyEnum,
                tySubrange, tyStringLit, tyArray, tyRecord, tyPointer, tyNil,
-               tySet, tyFile, tyRoutine, tyShortString, tyClass);
+               tySet, tyFile, tyRoutine, tyShortString, tyClass, tyClassRef,
+               tyInterface);
 
   TType = record
     kind: TTypeKind;
@@ -85,9 +87,18 @@ type
         source order, all fields (the ancestors' first), the virtual methods
         by slot, the program or unit declaring it; a forward declaration
         is not defined yet }
+      { classInterfaces: the interfaces the class implements (listed by
+        it or an ancestor), of PInterfaceImpl (Sema) }
       tyClass: (classParent: PType; classMembers, classAllFields,
                 classVTable: TPtrList; classModule: pointer;
-                classDefined: boolean);
+                classDefined: boolean; classInterfaces: TPtrList);
+      { class of C (objfpc): a reference to C or a descendant (its VMT) }
+      tyClassRef: (refClass: PType);
+      { interface (objfpc, CORBA style): its parent, own methods (source
+        order) and all methods by slot (the parent's first); a value is
+        (object, method table) }
+      tyInterface: (intfParent: PType; intfMethods, intfAllMethods: TPtrList;
+                    intfModule: pointer; intfDefined: boolean);
   end;
 
   TNode = record
@@ -114,8 +125,13 @@ type
       nkFormatted: (fmtValue, fmtWidth, fmtPrecision: PNode);
       { index: base[index]; field: base.fieldName; fieldDecl is a field,
         or (objfpc) a method or property of a class }
+      { objfpc: an array property (obj.P[i, j], P[i] or obj[i], the default
+        property) is the outermost nkIndex of the chain ((root[i])[j]);
+        Sema sets the property (idxProp), the chain's root and the
+        indexes }
       nkIndex, nkField: (base, index: PNode; fieldName: TIdent;
-                         fieldDecl: PDecl);
+                         fieldDecl: PDecl; idxProp: PDecl; idxRoot: PNode;
+                         idxArgs: TPtrList);
       { inherited [inhName] (objfpc): the method called and the method
         calling it (Sema); a bare inherited passes the calling method's
         parameters (inhArgs, Sema) }
@@ -134,6 +150,33 @@ type
       nkWith: (withRecords: TPtrList; withBody: PNode); { of PWithContext }
       { labeled: lbl: lblBody; goto lbl }
       nkLabeled, nkGoto: (lbl: TIdent; lblBody: PNode; lblDecl: PDecl);
+      { try (objfpc): tryBody, then the except part (handlers, of
+        PExceptHandler, and partBody: without handlers the statements
+        handling every exception, else the else part, if tryElseLoc is
+        valid) or the finally part (isFinally, partBody) }
+      nkTry: (tryBody: TPtrList; isFinally: boolean; partLoc: TLoc;
+              handlers: TPtrList; tryElseLoc: TLoc; partBody: TPtrList);
+      { raise raiseObj; nil: a re-raise }
+      nkRaise: (raiseObj: PNode);
+  end;
+
+  { on [hVarName:] hClassName do hBody (objfpc); hVar (a dkVar, if
+    named) and hClass: Sema }
+  { an interface a class supports: the methods implementing the
+    interface's methods, by slot (of PDecl) }
+  PInterfaceImpl = ^TInterfaceImpl;
+  TInterfaceImpl = record
+    intf: PType;
+    methods: TPtrList;
+  end;
+
+  PExceptHandler = ^TExceptHandler;
+  TExceptHandler = record
+    onLoc: TLoc;
+    hVarName, hClassName: TIdent;
+    hBody: PNode;
+    hVar: PDecl;
+    hClass: PType;
   end;
 
   PSetElement = ^TSetElement;
@@ -169,7 +212,8 @@ type
   end;
 
   TTypeSpecKind = (tsNamed, tsEnum, tsSubrange, tsArray, tsRecord,
-                   tsPointer, tsSet, tsFile, tsRoutine, tsString, tsClass);
+                   tsPointer, tsSet, tsFile, tsRoutine, tsString, tsClass,
+                   tsClassRef, tsInterface);
 
   PVariantPart = ^TVariantPart;
 
@@ -178,8 +222,9 @@ type
     b, e: TLoc;
     resolved: PType; { Sema }
     case TTypeSpecKind of
-      { named: the type name; pointer: the pointee's name }
-      tsNamed, tsPointer: (tname: TIdent);
+      { named: the type name; pointer: the pointee's name; class ref
+        (objfpc): class of tname }
+      tsNamed, tsPointer, tsClassRef: (tname: TIdent);
       tsEnum: (enumNames: TPtrList); { of PIdent }
       tsSubrange: (lo, hi: PNode);
       tsArray: (indexes: TPtrList; element: PTypeSpec; arrPacked: boolean);
@@ -189,7 +234,13 @@ type
       tsString: (maxLen: PNode); { nil for plain string }
       { class (objfpc): the parent's name (nil name: TObject), the members
         (fields, method headings, properties) in source order }
-      tsClass: (parentName: TIdent; memberList: TPtrList; isForwardClass: boolean);
+      { (interfaceNames: the rest of class(P, I1, I2), of PIdent) }
+      tsClass: (parentName: TIdent; memberList: TPtrList; isForwardClass: boolean;
+                interfaceNames: TPtrList);
+      { interface (objfpc): the parent's name, method headings, forward,
+        the GUID string (no effect; nil: none) }
+      tsInterface: (intfParentName: TIdent; intfMemberList: TPtrList;
+                    isForwardIntf: boolean; guid: PName);
   end;
 
   TFieldList = record
@@ -222,8 +273,13 @@ type
   { objfpc: the kind of a method, the methods of TObject (no Pascal body),
     the visibility of a class member }
   TMethodKind = (mtNone, mtMethod, mtConstructor, mtDestructor);
-  TObjMethod = (obNone, obCreate, obDestroy, obFree, obClassName);
-  TVisibility = (vsPublic, vsPublished, vsProtected, vsPrivate);
+  TObjMethod = (obNone, obCreate, obDestroy, obFree, obClassName,
+                obExceptionCreate, obClassType, obClassParent, obInheritsFrom,
+                obInstanceSize);
+  { strict private: visible only in the class's methods; strict
+    protected: also in its descendants' (not in the rest of the module) }
+  TVisibility = (vsPublic, vsPublished, vsProtected, vsPrivate,
+                 vsStrictProtected, vsStrictPrivate);
 
   TDecl = record
     kind: TDeclKind;
@@ -247,8 +303,11 @@ type
     case TDeclKind of
       { owner: the routine whose frame holds it; nil for program-level
         variables and typed constants (Sema) }
+      { isClassVar (objfpc): a class var, static storage for the class
+        varClass (Sema) and its descendants }
       dkVar: (varSpec: PTypeSpec; varType: PType; varKind: TVarKind;
-              owner: PDecl; init: PNode; initValue: TConstValue);
+              owner: PDecl; init: PNode; initValue: TConstValue;
+              isClassVar: boolean; varClass: PType);
       dkConst: (constInit: PNode; constType: PType; constValue: TConstValue);
       dkType: (typeSpec: PTypeSpec; declType: PType);
       dkField: (fieldSpec: PTypeSpec; fieldType: PType);
@@ -261,7 +320,15 @@ type
                   body: PBlock; externalName: PName;
                   canonical, parent, resultVar: PDecl; level: longint;
                   methodKind: TMethodKind; methodClassName: TIdent;
-                  isVirtual, isOverride, isAbstract: boolean;
+                  isVirtual, isOverride, isAbstract, isClassMethod: boolean;
+                  { overloading (objfpc): the overload directive, the next
+                    routine of the name in the same scope or class and this
+                    one's number among them (1, 2, ...; 0: not overloaded),
+                    which goes into its symbol (Sema) }
+                  hasOverloadDirective: boolean; nextOverload: PDecl;
+                  overloadIndex: longint;
+                  { a method heading of an interface (its slot: vmtIndex) }
+                  routineIntf: PType;
                   ownerClass: PType; selfVar, implDecl: PDecl;
                   vmtIndex: longint; objMethod: TObjMethod);
       dkBuiltin: (builtin: TBuiltinKind; isProcedure: boolean);
@@ -273,8 +340,13 @@ type
       dkProgram: (progParams: TPtrList; progUses: TPtrList; progBlock: PBlock);
       dkUnit: (ifaceUses, implUses: TPtrList; iface, impl: PBlock);
       { property (objfpc): the accessors' names and declarations (Sema) }
+      { an array property's index parameters (passed to the accessors
+        first), index N (passed next), default V and nodefault (no effect),
+        a default array property (obj[i] means obj.P[i]) }
       dkProperty: (propSpec: PTypeSpec; propType: PType;
-                   readName, writeName: TIdent; readDecl, writeDecl: PDecl);
+                   readName, writeName: TIdent; readDecl, writeDecl: PDecl;
+                   propParams: TPtrList; propIndex, propDefaultValue: PNode;
+                   propIsDefault, propNoDefault: boolean);
   end;
 
 function newNode(kind: TNodeKind; b, e: TLoc): PNode;

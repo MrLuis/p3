@@ -73,11 +73,22 @@
 ; NOOBJ-NEXT: 3:{{[0-9]+}} identifier 'IS' name=is
 ; NOOBJ-NEXT: 3:{{[0-9]+}} identifier 'as' name=as
 ; NOOBJ-NEXT: 3:{{[0-9]+}} identifier 'property' name=property
+; NOOBJ-NEXT: 3:{{[0-9]+}} identifier 'Try' name=try
+; NOOBJ-NEXT: 3:{{[0-9]+}} identifier 'except' name=except
+; NOOBJ-NEXT: 3:{{[0-9]+}} identifier 'FINALLY' name=finally
+; NOOBJ-NEXT: 3:{{[0-9]+}} identifier 'raise' name=raise
+; NOOBJ-NEXT: 3:{{[0-9]+}} identifier 'on' name=on
 ; OBJ-NEXT: 3:1 kw_class 'class'
 ; OBJ-NEXT: 3:{{[0-9]+}} kw_inherited 'Inherited'
 ; OBJ-NEXT: 3:{{[0-9]+}} kw_is 'IS'
 ; OBJ-NEXT: 3:{{[0-9]+}} kw_as 'as'
 ; OBJ-NEXT: 3:{{[0-9]+}} kw_property 'property'
+; OBJ-NEXT: 3:{{[0-9]+}} kw_try 'Try'
+; OBJ-NEXT: 3:{{[0-9]+}} kw_except 'except'
+; OBJ-NEXT: 3:{{[0-9]+}} kw_finally 'FINALLY'
+; OBJ-NEXT: 3:{{[0-9]+}} kw_raise 'raise'
+; `on` (exception handlers) is not reserved.
+; OBJ-NEXT: 3:{{[0-9]+}} identifier 'on' name=on
 ; CHECK-NEXT: 4:1 identifier 'break' name=break
 ; CHECK-NEXT: 4:{{[0-9]+}} identifier 'continue' name=continue
 ; CHECK-NEXT: 4:{{[0-9]+}} identifier 'exit' name=exit

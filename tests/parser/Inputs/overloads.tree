@@ -1,0 +1,60 @@
+ProgramDecl 'overloads' <1:1>
+  TypeDecl 'ta' <3:3>
+    ClassTypeSpec <3:8>
+      ProcedureDecl 'm' overload <4:5>
+        ParamDecl 'x' <4:17>
+          NamedTypeSpec 'integer' <4:20>
+      ProcedureDecl 'm' overload <5:5>
+        ParamDecl const 's' <5:23>
+          StringTypeSpec <5:26>
+  ProcedureDecl 'ta.m' <7:1>
+    ParamDecl 'x' <7:16>
+      NamedTypeSpec 'integer' <7:19>
+    CompoundStmt <7:29>
+      EmptyStmt <7:35>
+  ProcedureDecl 'ta.m' <8:1>
+    ParamDecl const 's' <8:22>
+      StringTypeSpec <8:25>
+    CompoundStmt <8:34>
+      EmptyStmt <8:40>
+  FunctionDecl 'f' overload <9:1>
+    ParamDecl 'x' <9:12>
+      NamedTypeSpec 'integer' <9:15>
+    Result <9:25>
+      NamedTypeSpec 'integer' <9:25>
+    CompoundStmt <9:44>
+      AssignStmt <9:50>
+        NameRefExpr 'f' <9:50>
+        NameRefExpr 'x' <9:55>
+  FunctionDecl 'f' overload <10:1>
+    ParamDecl 'x' <10:12>
+      NamedTypeSpec 'real' <10:15>
+    Result <10:22>
+      NamedTypeSpec 'real' <10:22>
+    CompoundStmt <10:38>
+      AssignStmt <10:44>
+        NameRefExpr 'f' <10:44>
+        NameRefExpr 'x' <10:49>
+  VarDecl 'a' <12:3>
+    NamedTypeSpec 'ta' <12:6>
+  CompoundStmt <13:1>
+    AssignStmt <14:3>
+      NameRefExpr 'a' <14:3>
+      FieldExpr 'create' <14:8>
+        NameRefExpr 'ta' <14:8>
+    IndirectCallStmt <15:3>
+      IndirectCallExpr <15:3>
+        FieldExpr 'm' <15:3>
+          NameRefExpr 'a' <15:3>
+        IntegerLiteralExpr 1 <15:7>
+    IndirectCallStmt <16:3>
+      IndirectCallExpr <16:3>
+        FieldExpr 'm' <16:3>
+          NameRefExpr 'a' <16:3>
+        CharLiteralExpr "s" <16:7>
+    ProcCallStmt 'writeln' () <17:3>
+      CallExpr 'f' <17:11>
+        IntegerLiteralExpr 1 <17:13>
+      CallExpr 'f' <17:17>
+        RealLiteralExpr 2.5 <17:19>
+    EmptyStmt <18:1>

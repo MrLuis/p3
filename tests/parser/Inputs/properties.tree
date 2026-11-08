@@ -1,0 +1,73 @@
+ProgramDecl 'properties' <1:1>
+  TypeDecl 'ta' <3:3>
+    ClassTypeSpec <3:8>
+      FieldDecl 'f' strict private <5:5>
+        NamedTypeSpec 'integer' <5:8>
+      FunctionDecl 'g' strict protected <7:5>
+        ParamDecl 'i' <7:16>
+          NamedTypeSpec 'integer' <7:19>
+        ParamDecl const 's' <7:34>
+          StringTypeSpec <7:37>
+        Result <7:46>
+          NamedTypeSpec 'integer' <7:46>
+      FunctionDecl 'h' strict protected <8:5>
+        ParamDecl 'k' <8:16>
+          NamedTypeSpec 'integer' <8:19>
+        Result <8:29>
+          NamedTypeSpec 'integer' <8:29>
+      PropertyDecl 'p' read 'g' default <10:14>
+        ParamDecl 'i' <10:16>
+          NamedTypeSpec 'integer' <10:19>
+        ParamDecl const 's' <10:34>
+          StringTypeSpec <10:37>
+        NamedTypeSpec 'integer' <10:46>
+      PropertyDecl 'x' read 'h' <11:14>
+        NamedTypeSpec 'integer' <11:17>
+        PropertyIndex <11:31>
+          IntegerLiteralExpr 2 <11:31>
+        PropertyDefault <11:48>
+          IntegerLiteralExpr 4 <11:48>
+      PropertyDecl 'y' read 'f' nodefault <12:14>
+        NamedTypeSpec 'integer' <12:17>
+  FunctionDecl 'ta.g' <14:1>
+    ParamDecl 'i' <14:15>
+      NamedTypeSpec 'integer' <14:18>
+    ParamDecl const 's' <14:33>
+      StringTypeSpec <14:36>
+    Result <14:45>
+      NamedTypeSpec 'integer' <14:45>
+    CompoundStmt <14:54>
+      AssignStmt <14:60>
+        NameRefExpr 'g' <14:60>
+        NameRefExpr 'i' <14:65>
+  FunctionDecl 'ta.h' <15:1>
+    ParamDecl 'k' <15:15>
+      NamedTypeSpec 'integer' <15:18>
+    Result <15:28>
+      NamedTypeSpec 'integer' <15:28>
+    CompoundStmt <15:37>
+      AssignStmt <15:43>
+        NameRefExpr 'h' <15:43>
+        NameRefExpr 'k' <15:48>
+  VarDecl 'a' <17:3>
+    NamedTypeSpec 'ta' <17:6>
+  CompoundStmt <18:1>
+    AssignStmt <19:3>
+      NameRefExpr 'a' <19:3>
+      FieldExpr 'create' <19:8>
+        NameRefExpr 'ta' <19:8>
+    ProcCallStmt 'writeln' () <20:3>
+      IndexExpr <20:11>
+        IndexExpr <20:11>
+          FieldExpr 'p' <20:11>
+            NameRefExpr 'a' <20:11>
+          IntegerLiteralExpr 1 <20:15>
+        CharLiteralExpr "x" <20:18>
+      IndexExpr <20:24>
+        IndexExpr <20:24>
+          NameRefExpr 'a' <20:24>
+          IntegerLiteralExpr 2 <20:26>
+        CharLiteralExpr "y" <20:29>
+      FieldExpr 'x' <20:35>
+        NameRefExpr 'a' <20:35>
+    EmptyStmt <21:1>

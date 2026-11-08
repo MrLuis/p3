@@ -764,7 +764,11 @@ begin
     exit;
   if (isOrdinal(t) and isOrdinal(at)) or
      ((t^.kind = tyPointer) and (at^.kind in [tyPointer, tyNil, tyClass])) or
-     ((t^.kind = tyClass) and (at^.kind in [tyClass, tyPointer, tyNil])) then
+     ((t^.kind = tyClass) and (at^.kind in [tyClass, tyPointer, tyNil])) or
+     ((t^.kind = tyClassRef) and (at^.kind in [tyClassRef, tyNil])) or
+     ((t^.kind = tyInterface) and
+      ((at^.kind in [tyInterface, tyNil]) or
+       ((at^.kind = tyClass) and (findInterface(at, t) <> nil)))) then
     exit(t);
   ms('invalid typecast from ');
   maT(at);
@@ -893,7 +897,7 @@ begin
         if isError(t) then
           exit;
         if (t^.kind <> tyPointer) and (t^.kind <> tyClass) and
-           (t^.kind <> tyRoutine) then
+           (t^.kind <> tyInterface) and (t^.kind <> tyRoutine) then
         begin
           ms('''assigned'' expects a pointer or a procedural variable, not ');
           maT(t);
@@ -973,9 +977,100 @@ begin
   end;
 end;
 
+{ --- Array properties (objfpc) --- }
+
+function findPending(e: PNode): PPendingIndex;
+var
+  i: longint;
+  pi: PPendingIndex;
+begin
+  findPending := nil;
+  for i := 0 to pendingIndexes.count - 1 do
+  begin
+    pi := PPendingIndex(listGet(pendingIndexes, i));
+    if pi^.node = e then
+      exit(pi);
+  end;
+end;
+
+{ Records e (the base of an nkIndex being checked) as pending: an array
+  property short of indexes (replacing an older record of e). }
+procedure addPending(e: PNode; prop: PDecl; root: PNode; const args: TPtrList);
+var
+  pi: PPendingIndex;
+begin
+  pi := findPending(e);
+  if pi = nil then
+  begin
+    pi := PPendingIndex(arenaAlloc(sizeof(TPendingIndex)));
+    listAdd(pendingIndexes, pi);
+  end;
+  pi^.node := e;
+  pi^.prop := prop;
+  pi^.root := root;
+  pi^.args := args;
+end;
+
+procedure removePending(pi: PPendingIndex);
+var
+  i: longint;
+begin
+  for i := 0 to pendingIndexes.count - 1 do
+    if listGet(pendingIndexes, i) = pointer(pi) then
+    begin
+      listSet(pendingIndexes, i, listGet(pendingIndexes, pendingIndexes.count - 1));
+      listPop(pendingIndexes);
+      exit;
+    end;
+end;
+
+{ The name an array property access e is made by (obj.P / P), or for a
+  default property, its name at the indexed object. }
+function propertyName(e: PNode): TIdent;
+var
+  root: PNode;
+  id: TIdent;
+begin
+  root := e^.idxRoot;
+  if (root^.kind = nkField) and (root^.fieldDecl = e^.idxProp) then
+    exit(root^.fieldName);
+  if (root^.kind = nkNameRef) and (root^.refDecl = e^.idxProp) then
+    exit(root^.ref);
+  id := e^.idxProp^.ident;
+  id.loc := root^.b;
+  propertyName := id;
+end;
+
+{ An array property used without its indexes (outside indexBase). }
+function checkArrayPropertyUse(p: PDecl; e: PNode; const id: TIdent): boolean;
+var
+  noArgs: TPtrList;
+begin
+  checkArrayPropertyUse := true;
+  if p^.propParams.count = 0 then
+    exit;
+  if (e <> nil) and (e = indexBase) then
+  begin
+    listInit(noArgs);
+    addPending(e, p, e, noArgs);
+    exit;
+  end;
+  ms('array property ''');
+  maN(id.spelling);
+  if p^.propParams.count = 1 then
+    ma(''' needs an index')
+  else
+    ma(''' needs ' + intToStr(p^.propParams.count) + ' indexes');
+  errR(id.loc, identRange(id));
+  noteDeclaredHere(p);
+  checkArrayPropertyUse := false;
+end;
+
 { A property used as a value: it needs a read accessor. }
 function checkPropertyRead(p: PDecl; e: PNode; const id: TIdent): PType;
 begin
+  if (p^.propParams.count > 0) and (e^.kind <> nkIndex) and (findPending(e) <> nil) then
+    exit(p^.propType); { checked with its indexes }
   if (e = curAssignTarget) or (p^.readDecl <> nil) or isError(p^.propType) or
      identValid(p^.readName) then
     exit(p^.propType);
@@ -1010,7 +1105,9 @@ begin
     assignedProperty := target^.refDecl
   else if (target^.kind = nkField) and (target^.fieldDecl <> nil) and
           (target^.fieldDecl^.kind = dkProperty) then
-    assignedProperty := target^.fieldDecl;
+    assignedProperty := target^.fieldDecl
+  else if target^.kind = nkIndex then
+    assignedProperty := target^.idxProp;
 end;
 
 { TFoo in TFoo.Create (objfpc): a class named before '.'; nil otherwise. }
@@ -1036,6 +1133,7 @@ function resolveMember(e: PNode): PDecl;
 var
   viaClass, bt, owner: PType;
   d: PDecl;
+  viaRef, ok: boolean;
 begin
   resolveMember := nil;
   viaClass := classNamedBy(e^.base);
@@ -1060,6 +1158,24 @@ begin
     e^.fieldDecl := d;
     exit(d);
   end;
+  if bt^.kind = tyInterface then { s.M, s: an interface }
+  begin
+    d := findInterfaceMethod(bt, e^.fieldName.name);
+    if d = nil then
+    begin
+      ms('no method named ''');
+      maN(e^.fieldName.spelling);
+      ma(''' in interface ');
+      maT(bt);
+      errR(e^.fieldName.loc, identRange(e^.fieldName));
+      exit;
+    end;
+    e^.fieldDecl := d;
+    exit(d);
+  end;
+  viaRef := bt^.kind = tyClassRef; { c.M, c: class of T }
+  if viaRef then
+    bt := bt^.refClass;
   if bt^.kind <> tyClass then
   begin
     ms('''.'' applied to a value of type ');
@@ -1081,16 +1197,28 @@ begin
     exit;
   end;
   checkMemberAccess(d, owner, e^.fieldName);
-  if (viaClass <> nil) and
-     ((d^.kind <> dkRoutine) or (d^.methodKind <> mtConstructor)) then
+  if (viaClass <> nil) or viaRef then
   begin
-    ms('only a constructor can be called through the class name ');
-    maT(bt);
-    ma('; ''');
-    maN(e^.fieldName.spelling);
-    ma(''' is a ' + kindName(d));
-    errR(e^.fieldName.loc, identRange(e^.fieldName));
-    exit;
+    { through a class: constructors, class methods, class variables }
+    ok := d^.kind = dkVar;
+    if d^.kind = dkRoutine then
+      ok := (d^.methodKind = mtConstructor) or d^.isClassMethod;
+    if not ok then
+    begin
+      ms('only constructors, class methods and class variables can be used through ');
+      if viaClass <> nil then
+      begin
+        ma('the class name ');
+        maT(bt);
+      end
+      else
+        ma('a class reference');
+      ma('; ''');
+      maN(e^.fieldName.spelling);
+      ma(''' is a ' + kindName(d));
+      errR(e^.fieldName.loc, identRange(e^.fieldName));
+      exit;
+    end;
   end;
   e^.fieldDecl := d;
   resolveMember := d;
@@ -1106,7 +1234,10 @@ begin
     methodResultType := r^.resultType
   else if (r^.methodKind = mtConstructor) and (e^.base^.kind = nkNameRef) and
           (e^.base^.refDecl <> nil) and (e^.base^.refDecl^.kind = dkType) then
-    methodResultType := e^.base^.typ;
+    methodResultType := e^.base^.typ
+  else if (r^.methodKind = mtConstructor) and (e^.base^.typ <> nil) and
+          (e^.base^.typ^.kind = tyClassRef) then
+    methodResultType := e^.base^.typ^.refClass; { c.Create, c: class of T }
 end;
 
 { Is callee obj.M / TFoo.Create / inherited M -- a method call rather than
@@ -1123,6 +1254,10 @@ begin
   if classNamedBy(callee^.base) <> nil then
     exit(true);
   bt := check(callee^.base);
+  if bt^.kind = tyInterface then
+    exit(findInterfaceMethod(bt, callee^.fieldName.name) <> nil);
+  if bt^.kind = tyClassRef then
+    bt := bt^.refClass;
   if bt^.kind <> tyClass then
     exit(false);
   owner := nil;
@@ -1210,7 +1345,8 @@ end;
 { inherited [name] [(args)] called: the result type or nil. }
 function checkInheritedCall(e: PNode; const args: TPtrList; callRange: TRange): PType;
 var
-  r, p: PDecl;
+  r, p, same: PDecl;
+  cands: TPtrList;
   nothing: boolean;
   name, pn: TIdent;
   i: longint;
@@ -1220,6 +1356,30 @@ var
 begin
   checkInheritedCall := nil;
   r := resolveInherited(e, nothing);
+  if r <> nil then { objfpc: overloads; a bare inherited means the same heading }
+  begin
+    listInit(cands);
+    collectOverloads(r, cands);
+    if (cands.count > 1) and not identValid(e^.inhName) and (args.count = 0) then
+    begin
+      same := nil;
+      for i := 0 to cands.count - 1 do
+        if (same = nil) and sameSignature(PDecl(listGet(cands, i)), e^.inhEnclosing) then
+          same := PDecl(listGet(cands, i));
+      if same <> nil then
+        r := same;
+    end
+    else if cands.count > 1 then
+    begin
+      if identValid(e^.inhName) then
+        r := resolveOverload(r, args, e^.inhName, callRange)
+      else
+        r := resolveOverload(r, args, r^.ident, callRange);
+      if r = nil then
+        exit(errorType);
+    end;
+    e^.inhMethod := r;
+  end;
   if r = nil then
   begin
     for i := 0 to args.count - 1 do
@@ -1314,6 +1474,13 @@ begin
   if callee^.kind = nkInherited then
     exit(checkInheritedCall(callee, e^.args, nodeRange(e)));
   d := resolveMember(callee);
+  if (d <> nil) and (d^.kind = dkRoutine) then { objfpc: overloads }
+  begin
+    d := resolveOverload(d, e^.args, callee^.fieldName, nodeRange(e));
+    if d = nil then
+      exit(errorType);
+    callee^.fieldDecl := d;
+  end;
   if (d = nil) or (d^.kind <> dkRoutine) then
   begin
     for i := 0 to e^.args.count - 1 do
@@ -1359,12 +1526,32 @@ begin
       exit;
     if t^.kind = tyClass then
       c := t;
+    { obj is IFoo / obj as IFoo: does obj's class implement the interface? }
+    if t^.kind = tyInterface then
+    begin
+      if isError(l) then
+        exit;
+      if l^.kind <> tyClass then
+      begin
+        ms('invalid operands to ''' + op + ''' (');
+        maT(l);
+        ma(' and ');
+        maT(t);
+        ma('): the left operand must be an object');
+        errRR(e^.opLoc, nodeRange(e^.lhs), nodeRange(rhs));
+        exit;
+      end;
+      if e^.bop = boIs then
+        exit(tyBooleanT);
+      exit(t);
+    end;
   end
   else if isError(check(rhs)) then
     exit;
   if c = nil then
   begin
-    ms('the right operand of ''' + op + ''' must be the name of a class type');
+    ms('the right operand of ''' + op + ''' must be the name of a class or ' +
+       'interface type');
     errR(rhs^.b, nodeRange(rhs));
     exit;
   end;
@@ -1492,6 +1679,12 @@ begin
     diagUndeclared(s^.callee);
     exit;
   end;
+  if d^.kind = dkRoutine then { objfpc: overloads }
+  begin
+    d := resolveOverload(d, s^.args, s^.callee, nodeRange(s));
+    if d = nil then
+      exit;
+  end;
   s^.callDecl := d;
   if classOfWith(w) <> nil then
   begin
@@ -1524,9 +1717,23 @@ begin
           maCallee(s^.callee);
           ma(' is only allowed inside a loop');
           errR(s^.callee.loc, identRange(s^.callee));
+        end
+        else if (finallyLoopDepth >= 0) and (loopDepth = finallyLoopDepth) then
+        begin
+          ms('');
+          maCallee(s^.callee);
+          ma(' cannot leave a ''finally'' part');
+          errR(s^.callee.loc, identRange(s^.callee));
         end;
       bkExit:
         begin
+          if finallyLoopDepth >= 0 then
+          begin
+            ms('');
+            maCallee(s^.callee);
+            ma(' is not allowed in a ''finally'' part');
+            errR(s^.callee.loc, identRange(s^.callee));
+          end;
           if s^.args.count = 0 then
             exit;
           { exit(value) (Turbo/FPC): sets the function result, then exits }
@@ -1597,7 +1804,7 @@ end;
 function checkNameTarget(target: PNode): PType;
 var
   w: PWithContext;
-  d, enc: PDecl;
+  d, enc, x: PDecl;
 begin
   checkNameTarget := errorType;
   w := nil;
@@ -1613,11 +1820,16 @@ begin
     enc := curRoutine;
     while enc <> nil do
     begin
-      if enc = d then
+      x := d; { (overloads) }
+      while x <> nil do
       begin
-        target^.refDecl := d^.resultVar;
-        d^.resultAssigned := true;
-        exit(d^.resultType);
+        if enc = x then
+        begin
+          target^.refDecl := x^.resultVar;
+          x^.resultAssigned := true;
+          exit(x^.resultType);
+        end;
+        x := x^.nextOverload;
       end;
       enc := enc^.parent;
     end;
@@ -1646,7 +1858,11 @@ begin
     exit;
   end;
   if d^.kind = dkProperty then
+  begin
+    if not checkArrayPropertyUse(d, nil, target^.ref) then
+      exit(errorType);
     exit(checkPropertyWrite(d, target^.ref));
+  end;
   ms('cannot assign to ' + kindName(d) + ' ''');
   maN(target^.ref.spelling);
   ma('''');
@@ -1659,7 +1875,16 @@ end;
 function checkValueFor(targetTy: PType; value: PNode): PType;
 var
   v: PDecl;
+  saved: PType;
 begin
+  if (targetTy^.kind = tyRoutine) and (value^.kind = nkAddrOf) then
+  begin { @p picks an overload by the target's heading }
+    saved := addrOfTarget;
+    addrOfTarget := targetTy;
+    checkValueFor := check(value);
+    addrOfTarget := saved;
+    exit;
+  end;
   if (targetTy^.kind = tyRoutine) and (value^.kind = nkNameRef) then
   begin
     v := lookup(value^.ref.name);
@@ -1725,7 +1950,10 @@ begin
     p := assignedProperty(target);
     if (p <> nil) and not isError(targetTy) then
     begin
-      targetTy := checkPropertyWrite(p, target^.fieldName);
+      if target^.kind = nkIndex then
+        targetTy := checkPropertyWrite(p, propertyName(target))
+      else
+        targetTy := checkPropertyWrite(p, target^.fieldName);
       target^.typ := targetTy;
     end
     else if not isError(targetTy) and not isVariableReference(target) then
@@ -1932,6 +2160,84 @@ begin
   cur := saved;
 end;
 
+{ on [E:] TFoo do body: E is a variable of type TFoo visible in body. }
+procedure checkHandler(h: PExceptHandler);
+var
+  c: PType;
+  v: PDecl;
+  saved: PScope;
+begin
+  c := lookupClass(h^.hClassName);
+  h^.hClass := c;
+  saved := cur;
+  cur := newScope(saved);
+  if identValid(h^.hVarName) then
+  begin
+    v := newDecl(dkVar, h^.hVarName, h^.hVarName.loc);
+    v^.varKind := vkVariable;
+    if c <> nil then
+      v^.varType := c
+    else
+      v^.varType := errorType;
+    v^.owner := curRoutine;
+    v^.isUsed := true;
+    h^.hVar := v;
+    scopeInsert(cur, v^.ident.name, v);
+  end;
+  directSequence := nil;
+  visitStmt(h^.hBody);
+  cur := saved;
+end;
+
+procedure visitTry(s: PNode);
+var
+  i, saved: longint;
+begin
+  directSequence := nil;
+  visitSequence(s, s^.tryBody);
+  if s^.isFinally then
+  begin
+    saved := finallyLoopDepth;
+    finallyLoopDepth := loopDepth;
+    visitSequence(s, s^.partBody);
+    finallyLoopDepth := saved;
+    exit;
+  end;
+  handlerDepth := handlerDepth + 1;
+  for i := 0 to s^.handlers.count - 1 do
+  begin
+    if diagShouldStop then
+      break;
+    checkHandler(PExceptHandler(listGet(s^.handlers, i)));
+  end;
+  visitSequence(s, s^.partBody);
+  handlerDepth := handlerDepth - 1;
+end;
+
+procedure visitRaise(s: PNode);
+var
+  t: PType;
+begin
+  directSequence := nil;
+  if s^.raiseObj = nil then
+  begin
+    if handlerDepth = 0 then
+    begin
+      ms('''raise'' without an object (a re-raise) is only allowed in an ' +
+         'exception handler');
+      errR(s^.b, nodeRange(s));
+    end;
+    exit;
+  end;
+  t := check(s^.raiseObj);
+  if not isError(t) and (t^.kind <> tyClass) then
+  begin
+    ms('''raise'' needs an object of a class type, not ');
+    maT(t);
+    errR(s^.raiseObj^.b, nodeRange(s^.raiseObj));
+  end;
+end;
+
 procedure visitStmt(s: PNode);
 var
   rt: PType;
@@ -1987,6 +2293,8 @@ begin
     nkFor: visitFor(s);
     nkCase: visitCase(s);
     nkWith: visitWith(s);
+    nkTry: visitTry(s);
+    nkRaise: visitRaise(s);
   else
     ;
   end;
@@ -1999,6 +2307,7 @@ var
   w: PWithContext;
   d: PDecl;
   t: PType;
+  noArgs: TPtrList;
 begin
   visitNameRef := errorType;
   w := nil;
@@ -2008,13 +2317,21 @@ begin
     diagUndeclared(e^.ref);
     exit;
   end;
+  if d^.kind = dkRoutine then { objfpc: overloads }
+  begin
+    listInit(noArgs);
+    d := resolveOverload(d, noArgs, e^.ref, identRange(e^.ref));
+    if d = nil then
+      exit;
+  end;
   e^.refDecl := d;
   e^.refWith := w;
   d^.isUsed := true;
   checkScopeAccess(d, w, e^.ref);
   case d^.kind of
     dkProperty:
-      visitNameRef := checkPropertyRead(d, e, e^.ref);
+      if checkArrayPropertyUse(d, e, e^.ref) then
+        visitNameRef := checkPropertyRead(d, e, e^.ref);
     dkVar:
       begin
         t := d^.varType;
@@ -2049,6 +2366,8 @@ begin
         visitNameRef := d^.constType;
     dkRoutine:
       begin
+        if (constructedThroughSelf(d, w) <> nil) and (d^.params.count = 0) then
+          exit(constructedThroughSelf(d, w));
         if not d^.isFunction then
         begin
           ms('procedure ''');
@@ -2088,6 +2407,19 @@ begin
           ma(''' does not return a value');
         end;
         errR(e^.ref.loc, identRange(e^.ref));
+      end;
+    dkType:
+      { objfpc: a class name as a value is that class (a class reference) }
+      if (d^.declType <> nil) and (d^.declType^.kind = tyClass) and
+         (mode = lmObjFPC) then
+        visitNameRef := classRefOf(d^.declType)
+      else
+      begin
+        ms('''');
+        maN(e^.ref.spelling);
+        ma(''' is a ' + kindName(d) + ', not a value');
+        errR(e^.ref.loc, identRange(e^.ref));
+        noteDeclaredHere(d);
       end;
   else
     begin
@@ -2187,9 +2519,11 @@ begin
      ((r^.kind = tyPointer) or (r^.kind = tyNil)) and
      (areCompatible(l, r) or ((l^.kind = tyNil) and (r^.kind = tyNil))) then
     exit(tyBooleanT);
-  if (op in [boEq, boNe]) and ((l^.kind = tyClass) or (r^.kind = tyClass)) and
+  if (op in [boEq, boNe]) and
+     ((l^.kind in [tyClass, tyClassRef, tyInterface]) or
+      (r^.kind in [tyClass, tyClassRef, tyInterface])) and
      areCompatible(l, r) then
-    exit(tyBooleanT); { objects (objfpc) }
+    exit(tyBooleanT); { objects and classes (objfpc) }
 
   bothIntegers := isIntegerLike(l) and isIntegerLike(r);
   case op of
@@ -2275,6 +2609,12 @@ begin
       check(argNode(e, i));
     exit;
   end;
+  if d^.kind = dkRoutine then { objfpc: overloads }
+  begin
+    d := resolveOverload(d, e^.args, e^.callee, nodeRange(e));
+    if d = nil then
+      exit;
+  end;
   e^.callDecl := d;
   if classOfWith(w) <> nil then
   begin
@@ -2287,6 +2627,11 @@ begin
     begin
       checkCallArgs(d^.params, d, e^.callee, e^.args, nodeRange(e));
       exit(d^.resultType);
+    end;
+    if constructedThroughSelf(d, w) <> nil then
+    begin
+      checkCallArgs(d^.params, d, e^.callee, e^.args, nodeRange(e));
+      exit(constructedThroughSelf(d, w));
     end;
     for i := 0 to e^.args.count - 1 do
       check(argNode(e, i));
@@ -2335,16 +2680,104 @@ begin
   noteDeclaredHere(d);
 end;
 
+{ One more index for the array property of pending pi (for e): while
+  indexes are missing, e itself is pending (if more follow); with all of
+  them, they are checked like arguments and e is the property access. }
+function checkPropertyIndex(e: PNode; prop: PDecl; root: PNode;
+                            const soFar: TPtrList): PType;
+var
+  args: TPtrList;
+  i, n: longint;
+  id: TIdent;
+  ignored: PType;
+begin
+  listInit(args);
+  for i := 0 to soFar.count - 1 do
+    listAdd(args, listGet(soFar, i));
+  listAdd(args, e^.index);
+  n := prop^.propParams.count;
+  if args.count < n then
+  begin
+    if e = indexBase then
+    begin
+      addPending(e, prop, root, args);
+      exit(prop^.propType);
+    end;
+    e^.idxProp := prop;
+    e^.idxRoot := root;
+    e^.idxArgs := args;
+    id := propertyName(e);
+    ms('array property ''');
+    maN(id.spelling);
+    ma(''' needs ' + intToStr(n) + ' indexes, got ' + intToStr(args.count));
+    errR(id.loc, nodeRange(e));
+    noteDeclaredHere(prop);
+    for i := 0 to args.count - 1 do
+      ignored := check(PNode(listGet(args, i)));
+    exit(errorType);
+  end;
+  e^.idxProp := prop;
+  e^.idxRoot := root;
+  e^.idxArgs := args;
+  id := propertyName(e);
+  checkCallArgs(prop^.propParams, prop, id, args, nodeRange(e));
+  if e = curAssignTarget then
+    exit(prop^.propType); { checked by the assignment }
+  checkPropertyIndex := checkPropertyRead(prop, e, id);
+end;
+
 function visitIndex(e: PNode): PType;
 var
-  bt, it, idx: PType;
+  bt, it, idx, owner: PType;
   c: TConstant;
   bd: TOrdinalBounds;
+  savedBase, root: PNode;
+  pi: PPendingIndex;
+  prop: PDecl;
+  args: TPtrList;
+  id: TIdent;
 begin
   visitIndex := errorType;
+  savedBase := indexBase;
+  indexBase := e^.base;
   bt := check(e^.base);
+  indexBase := savedBase;
+  if isError(bt) then
+    exit;
+  if mode = lmObjFPC then
+  begin
+    { an array property: obj.P[i], P[i], obj[i] (the default property) }
+    pi := findPending(e^.base);
+    if pi <> nil then
+    begin
+      prop := pi^.prop;
+      root := pi^.root;
+      args := pi^.args;
+      removePending(pi);
+      exit(checkPropertyIndex(e, prop, root, args));
+    end;
+    if bt^.kind = tyClass then
+    begin
+      prop := defaultProperty(bt);
+      if prop = nil then
+      begin
+        ms('class ');
+        maT(bt);
+        ma(' has no default property');
+        errR(e^.index^.b, nodeRange(e^.base));
+        exit;
+      end;
+      owner := nil;
+      findMember(bt, prop^.ident.name, owner);
+      id := prop^.ident;
+      id.loc := e^.base^.b;
+      checkMemberAccess(prop, owner, id);
+      listInit(args);
+      exit(checkPropertyIndex(e, prop, e^.base, args));
+    end;
+  end;
   it := check(e^.index);
-  if isError(bt) or isError(it) then
+  if isError(it) then
     exit;
   if bt^.kind = tyShortString then
   begin
@@ -2422,8 +2855,8 @@ end;
 
 function visitAddrOf(e: PNode): PType;
 var
-  r: PDecl;
-  t: PType;
+  r, x, pick: PDecl;
+  t, xr: PType;
   op: PNode;
 begin
   visitAddrOf := errorType;
@@ -2434,6 +2867,33 @@ begin
     r := lookup(op^.ref.name);
     if (r <> nil) and (r^.kind = dkRoutine) then
     begin
+      if r^.overloadIndex <> 0 then { objfpc: the overload the target wants }
+      begin
+        pick := nil;
+        x := r;
+        while (addrOfTarget <> nil) and (x <> nil) do
+        begin
+          xr := nil;
+          if x^.isFunction then
+            xr := x^.resultType;
+          if (pick = nil) and congruent(addrOfTarget^.routineParams,
+                                        addrOfTarget^.routineResult, x^.params, xr) then
+            pick := x;
+          x := x^.nextOverload;
+        end;
+        if pick = nil then
+        begin
+          ms('''@');
+          maN(op^.ref.spelling);
+          ma(''': ''');
+          maN(op^.ref.spelling);
+          ma(''' is overloaded; assign it to a procedural variable of the ' +
+             'heading wanted');
+          errR(op^.b, nodeRange(op));
+          exit;
+        end;
+        r := pick;
+      end;
       op^.refDecl := r;
       if r^.methodKind <> mtNone then
       begin
@@ -2568,6 +3028,7 @@ function visitField(e: PNode): PType;
 var
   d: PDecl;
   t: PType;
+  noArgs: TPtrList;
 begin
   visitField := errorType;
   d := resolveMember(e);
@@ -2580,8 +3041,23 @@ begin
     exit;
   end;
   if d^.kind = dkProperty then
+  begin
+    if not checkArrayPropertyUse(d, e, e^.fieldName) then
+      exit;
     exit(checkPropertyRead(d, e, e^.fieldName));
+  end;
+  if d^.kind = dkVar then { a class variable }
+  begin
+    if d^.varType <> nil then
+      visitField := d^.varType;
+    exit;
+  end;
   { a method used as a value: a call without arguments }
+  listInit(noArgs);
+  d := resolveOverload(d, noArgs, e^.fieldName, identRange(e^.fieldName));
+  if d = nil then
+    exit;
+  e^.fieldDecl := d;
   if d^.params.count > 0 then
   begin
     ms('missing arguments in call to ''');

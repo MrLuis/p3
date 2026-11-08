@@ -1,0 +1,40 @@
+ProgramDecl 'classrefs' <1:1>
+  TypeDecl 'ta' = class(TObject) <3:3>
+  TypeDecl 'taclass' = TAClass <4:3>
+  TypeDecl 'ta' = class(TObject) <5:3>
+  FunctionDecl 'ta.make' class definition <11:7>
+    CompoundStmt <12:1>
+      AssignStmt <13:3>
+        NameRefExpr 'make' function result : TA <13:3>
+        NameRefExpr 'create' constructor (self) : TA <13:11>
+      EmptyStmt <14:1>
+  ConstructorDecl 'ta.create' definition <15:1>
+    CompoundStmt <16:1>
+      AssignStmt <17:3>
+        NameRefExpr 'count' variable (self) : integer <17:3>
+        BinaryExpr '+' : integer <17:12>
+          NameRefExpr 'count' variable (self) : integer <17:12>
+          IntegerLiteralExpr 1 : integer <17:20>
+      EmptyStmt <18:1>
+  VarDecl 'c' : TAClass <20:3>
+  VarDecl 'a' : TA <21:3>
+  CompoundStmt <22:1>
+    AssignStmt <23:3>
+      NameRefExpr 'c' variable : TAClass <23:3>
+      NameRefExpr 'ta' type : class of TA <23:8>
+    AssignStmt <24:3>
+      NameRefExpr 'a' variable : TA <24:3>
+      FieldExpr 'create' : TA <24:8>
+        NameRefExpr 'c' variable : TAClass <24:8>
+    AssignStmt <25:3>
+      NameRefExpr 'a' variable : TA <25:3>
+      FieldExpr 'make' : TA <25:8>
+        NameRefExpr 'ta' type : TA <25:8>
+    ProcCallStmt 'writeln' <26:3>
+      FieldExpr 'count' : integer <26:11>
+        NameRefExpr 'ta' type : TA <26:11>
+      FieldExpr 'total' : integer <26:21>
+        NameRefExpr 'a' variable : TA <26:21>
+      FieldExpr 'classname' : string <26:30>
+        NameRefExpr 'c' variable : TAClass <26:30>
+    EmptyStmt <27:1>

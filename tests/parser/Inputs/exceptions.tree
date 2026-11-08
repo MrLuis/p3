@@ -1,0 +1,63 @@
+ProgramDecl 'exceptions' <1:1>
+  Uses 'sysutils' <2:6>
+  TypeDecl 'emine' <4:3>
+    ClassTypeSpec 'exception' <4:11>
+  VarDecl 'i' <6:3>
+    NamedTypeSpec 'integer' <6:6>
+  CompoundStmt <7:1>
+    TryStmt <8:3>
+      TryBody <8:3>
+        AssignStmt <9:5>
+          NameRefExpr 'i' <9:5>
+          IntegerLiteralExpr 1 <9:10>
+        RaiseStmt <10:5>
+          IndirectCallExpr <10:11>
+            FieldExpr 'create' <10:11>
+              NameRefExpr 'emine' <10:11>
+            CharLiteralExpr "x" <10:24>
+      ExceptPart <11:3>
+        OnHandler 'e': 'emine' <12:5>
+          ProcCallStmt 'writeln' () <12:20>
+            FieldExpr 'message' <12:28>
+              NameRefExpr 'e' <12:28>
+        OnHandler 'exception' <13:5>
+          RaiseStmt <14:7>
+        ExceptElse <15:3>
+          ProcCallStmt 'writeln' () <16:5>
+            StringLiteralExpr "else" <16:13>
+          AssignStmt <17:5>
+            NameRefExpr 'i' <17:5>
+            IntegerLiteralExpr 2 <17:10>
+    TryStmt <19:3>
+      TryBody <19:3>
+        AssignStmt <20:5>
+          NameRefExpr 'i' <20:5>
+          IntegerLiteralExpr 3 <20:10>
+        EmptyStmt <21:3>
+      ExceptPart <21:3>
+        ProcCallStmt 'writeln' () <22:5>
+          StringLiteralExpr "all" <22:13>
+        RaiseStmt <23:5>
+    TryStmt <25:3>
+      TryBody <25:3>
+        EmptyStmt <26:3>
+      ExceptPart <26:3>
+        EmptyStmt <27:3>
+    TryStmt <28:3>
+      TryBody <28:3>
+        TryStmt <29:5>
+          TryBody <29:5>
+            AssignStmt <30:7>
+              NameRefExpr 'i' <30:7>
+              IntegerLiteralExpr 4 <30:12>
+            EmptyStmt <31:5>
+          FinallyPart <31:5>
+            AssignStmt <32:7>
+              NameRefExpr 'i' <32:7>
+              IntegerLiteralExpr 5 <32:12>
+            EmptyStmt <33:5>
+        EmptyStmt <34:3>
+      ExceptPart <34:3>
+        OnHandler 'e': 'emine' <35:5>
+          EmptyStmt <35:20>
+    EmptyStmt <37:1>

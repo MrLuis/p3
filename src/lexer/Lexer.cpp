@@ -121,6 +121,13 @@ void Lexer::handleDirective(const char *Start, llvm::StringRef Text) {
     PendingIncludeLoc = locOf(Start);
     return;
   }
+  // {$interfaces corba}: pcc's interfaces (objfpc) are CORBA style only.
+  if (Word.equals_insensitive("interfaces")) {
+    if (!Arg.equals_insensitive("corba"))
+      Diags.error(locOf(Start), "only CORBA interfaces are supported; use "
+                                "{$interfaces corba}");
+    return;
+  }
 
   // Switch list: letter followed by + or -, comma separated: $R-,Q+
   llvm::SmallVector<llvm::StringRef, 4> Parts;

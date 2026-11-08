@@ -1,0 +1,15 @@
+; Properties and visibility (--mode=objfpc): the parse tree and checked tree
+; of array, default and indexed properties and strict visibility, and the
+; syntax that is rejected.
+; RUN: %pcc --mode=objfpc --emit-parse-tree %S/Inputs/properties.pas -o %t.tree
+; RUN: diff %S/Inputs/properties.tree %t.tree
+; RUN: %pcc --mode=objfpc --emit-ast %S/Inputs/properties.pas -o %t.ast
+; RUN: diff %S/Inputs/properties.ast %t.ast
+
+; RUN: not %pcc --mode=objfpc -ferror-limit=0 --emit-parse-tree %S/Inputs/property-syntax.pas 2>&1 >/dev/null | FileCheck --check-prefix=SYNTAX %s
+; SYNTAX: property-syntax.pas:4:12: error: expected 'private' or 'protected' after 'strict'
+; SYNTAX: property-syntax.pas:7:26: error: expected ']' after parameters
+; SYNTAX: property-syntax.pas:7:15: note: to match this '['
+; SYNTAX: property-syntax.pas:10:32: error: 'stored' in a property is not supported yet
+; SYNTAX: property-syntax.pas:13:16: error: expected parameter name
+; SYNTAX-NOT: error:

@@ -47,6 +47,23 @@ type
     target: PIRBlock;
   end;
 
+  { Exceptions (objfpc): a try statement or running handler around the
+    statement being emitted. exit, break and continue leaving it pop its
+    PasExcFrame (emitJump):
+      clTryBody  the protected statements of try..except: pop frame
+      clHandler  an exception handler: pop frame (the handler's), free obj
+      clFinally  the protected statements of try..finally: pop frame, then
+                 run the finally part with state = 2 + k, after which it
+                 continues at exits[k] (state 0: normal end, 1: exception) }
+  TCleanupKind = (clTryBody, clHandler, clFinally);
+  PCleanup = ^TCleanup;
+  TCleanup = record
+    kind: TCleanupKind;
+    frame, obj, state: TV;
+    finallyB: PIRBlock;
+    exits: TPtrList; { of PIRBlock }
+  end;
+
 var
   mode: TLangMode;
   optRange, optOverflow: boolean;
@@ -57,7 +74,16 @@ var
   lowered: TIntMap;          { type id -> PIRType }
   stringConsts: TIntMap;     { name id of the bytes -> PTVBox of the global }
   routinesToEmit: TPtrList;  { of PDecl }
-  loopBlocks: TPtrList;      { of PIRBlock: continue and break targets, in pairs }
+  { continue and break targets and the innermost cleanup around the loop
+    (a PCleanup, or nil), in triples }
+  loopBlocks: TPtrList;
+  { exceptions (objfpc): the try statements and running handlers around the
+    statement being emitted, innermost last (of PCleanup); the frames of the
+    try statements whose handlers are running (of PTVBox), innermost last: a
+    bare raise raises the exception of the last; PasExcFrame's type }
+  cleanups: TPtrList;
+  handledFrames: TPtrList;
+  excFrameT: PIRType;
   exitBlock: PIRBlock;
   mainJmpBuf: TV;
   hasMainJmpBuf: boolean;
@@ -67,6 +93,8 @@ var
     VMTs by type id; the classes whose VMTs are defined in this module, in
     declaration order }
   classLayouts, vmts: TIntMap;
+  { interfaces' iids (by type id, PTVBox) }
+  iids: TIntMap;
   vmtsToDefine: TPtrList;
 
 { --- Small helpers --- }
@@ -526,6 +554,8 @@ begin
     tyShortString: lowerType := irArray(t^.maxLength + 1, irI8);
     tyRoutine: lowerType := routinePairT;
     tyClass: lowerType := irPtrT; { a reference to the object }
+    tyClassRef: lowerType := irPtrT; { a reference to the class's VMT }
+    tyInterface: lowerType := routinePairT; { (object, method table) }
   else
     lowerType := irI8;
   end;
@@ -818,11 +848,21 @@ end;
 
 { Converts a value for assignment or parameter passing: integer to real,
   and range checks of ordinal values (and set members) against the target. }
+function toInterface(const obj: TV; i: PType): TV; forward;
+
 function convertForAssign(const v: TV; src, dst: PType; loc: TLoc): TV;
 var
   tb, fb: TOrdinalBounds;
   outside: TV;
 begin
+  if dst^.kind = tyInterface then
+  begin
+    if src^.kind = tyNil then
+      exit(irZero(memType(dst)));
+    if src^.kind = tyClass then
+      exit(toInterface(v, dst));
+    exit(v); { an interface (the same or a descendant) }
+  end;
   if (dst^.kind = tyReal) and (src^.kind <> tyReal) then
     exit(toDouble(v, src));
   if isOrdinal(dst) and isOrdinal(src) then
@@ -887,17 +927,25 @@ begin
 end;
 
 { pas.<outer>.<name> for routines, pas.<class>.<name> for methods. }
+{ "$N" for the N-th routine of an overloaded name (objfpc) }
+function overloadSuffix(d: PDecl): string;
+begin
+  overloadSuffix := '';
+  if (d^.kind = dkRoutine) and (d^.overloadIndex <> 0) then
+    overloadSuffix := '$' + intToStr(d^.overloadIndex);
+end;
+
 function mangle(r: PDecl): string;
 var
   s: string;
   p: PDecl;
 begin
-  s := nm(r^.ident.name);
+  s := nm(r^.ident.name) + overloadSuffix(r);
   p := r;
   while p^.parent <> nil do
   begin
     p := p^.parent;
-    s := nm(p^.ident.name) + '.' + s;
+    s := nm(p^.ident.name) + overloadSuffix(p) + '.' + s;
   end;
   if p^.methodKind <> mtNone then
     { s starts with the method's name }
@@ -965,6 +1013,9 @@ var
   slot, frame: TV;
 begin
   owner := v^.owner;
+  { on E: TFoo do: E's storage (a temporary) }
+  if (owner <> nil) and (v^.cgValue <> nil) then
+    exit(PTVBox(v^.cgValue)^);
   if owner = nil then
   begin
     if v^.loc = noLoc then
@@ -1134,6 +1185,7 @@ procedure visitStmt(s: PNode); forward;
 function withBase(w: PWithContext): TV; forward;
 function emitObject(e: PNode): TV; forward;
 function emitPropertyRead(p: PDecl; const obj: TV; c: PType): TV; forward;
+function emitArrayPropertyRead(e: PNode): TV; forward;
 function emitMemberValue(e: PNode): TV; forward;
 
 function emitI32(e: PNode): TV;
@@ -1387,6 +1439,9 @@ begin
       { a record or string function result: a temporary holding it }
       emitAddress := visitExpr(e);
     nkIndex:
+      if e^.idxProp <> nil then { a string or record value }
+        emitAddress := emitArrayPropertyRead(e)
+      else
       begin
         bt := e^.base^.typ;
         idxTy := e^.index^.typ;
@@ -1425,6 +1480,8 @@ begin
       end;
     nkField:
       begin
+        if e^.fieldDecl^.kind = dkVar then { a class variable (not evaluating the object) }
+          exit(PTVBox(e^.fieldDecl^.cgValue)^);
         if e^.base^.typ^.kind = tyClass then
         begin
           if e^.fieldDecl^.kind <> dkField then
@@ -1476,6 +1533,8 @@ function emitRoutineValue(arg: PNode): TV;
 var
   d: PDecl;
 begin
+  if arg^.kind = nkAddrOf then { @f (Turbo/FPC) }
+    arg := arg^.inner;
   d := arg^.refDecl;
   if d^.kind = dkVar then { forwarding a parameter }
     exit(irLoad(memType(d^.varType), varAddress(d), ''));
@@ -1515,22 +1574,15 @@ begin
   end;
 end;
 
-function emitCallToSelf(ret: PIRType; const callee: TV; const link: TV;
-                        hasLink: boolean; const self_: TV; hasSelf: boolean;
-                        const params, args: TPtrList): TV;
+{ Appends the values passed for args (parameters params) to buf. }
+procedure emitArgValues(const params, args: TPtrList; var buf: TBuf);
 var
-  buf: TBuf;
   i: longint;
   p: PDecl;
   arg: PNode;
-  v, tmp, res: TV;
+  v, tmp: TV;
   pt: PType;
 begin
-  bufInit(buf);
-  if hasLink then { external (C) routines have none }
-    irArgsAdd(buf, link);
-  if hasSelf then { methods }
-    irArgsAdd(buf, self_);
   for i := 0 to args.count - 1 do
   begin
     p := PDecl(listGet(params, i));
@@ -1554,11 +1606,26 @@ begin
     else
       irArgsAdd(buf, convertForAssign(visitExpr(arg), arg^.typ, pt, arg^.b));
   end;
+end;
+
+function emitCallToSelf(ret: PIRType; const callee: TV; const link: TV;
+                        hasLink: boolean; const self_: TV; hasSelf: boolean;
+                        const params, args: TPtrList): TV;
+var
+  buf: TBuf;
+  tmp, res: TV;
+begin
+  bufInit(buf);
+  if hasLink then { external (C) routines have none }
+    irArgsAdd(buf, link);
+  if hasSelf then { methods }
+    irArgsAdd(buf, self_);
+  emitArgValues(params, args, buf);
   res := irCallPtr(ret, callee, buf, '');
   bufFree(buf);
   { a string or record result comes back by value; expressions use its
-    address }
-  if ret^.kind in [ikArray, ikStruct] then
+    address (an interface, (ptr, ptr), is a value) }
+  if (ret^.kind = ikArray) or ((ret^.kind = ikStruct) and not irSameType(ret, routinePairT)) then
   begin
     tmp := irCreateTemp(ret, 'result');
     irStore(res, tmp);
@@ -1661,14 +1728,40 @@ begin
   emitObject := obj;
 end;
 
+{ Entry slot of a VMT: 0 the parent's VMT, 1 the class name, 2 the
+  instance size, 3 the interface table, 4... the virtual methods. }
+function loadVMTSlot(const vmt: TV; slot: longint; const name: string): TV;
+var
+  p: TV;
+begin
+  p := irGEP1(irPtrT, vmt, i64c(slot), true, '');
+  loadVMTSlot := irLoad(irPtrT, p, name);
+end;
+
 { The address of virtual method index in the VMT of object obj. }
 function loadVirtual(const obj: TV; index: longint): TV;
 var
-  vmt, slot: TV;
+  vmt: TV;
 begin
   vmt := irLoad(irPtrT, obj, 'vmt');
-  slot := irGEP1(irPtrT, vmt, i64c(2 + index), true, '');
-  loadVirtual := irLoad(irPtrT, slot, 'method');
+  loadVirtual := loadVMTSlot(vmt, 4 + index, 'method');
+end;
+
+{ if vmt = nil then a runtime error, under range checks }
+procedure emitNilClassCheck(const vmt: TV; loc: TLoc);
+begin
+  if rangeChecks(loc) then
+    emitRuntimeCheck(irICmp('eq', vmt, irNull, ''), 'use of a nil class reference', loc);
+end;
+
+{ The class (VMT) of a method call's receiver: obj itself if selfIsClass,
+  else the object's (checked for nil). }
+function receiverClass(const obj: TV; selfIsClass: boolean; loc: TLoc): TV;
+begin
+  if selfIsClass then
+    exit(obj);
+  emitNilObjectCheck(obj, loc);
+  receiverClass := irLoad(irPtrT, obj, 'vmt');
 end;
 
 { A runtime function used only by programs with classes. }
@@ -1685,17 +1778,20 @@ begin
   classRuntime := f;
 end;
 
-{ The VMT of class c; TObject's is in the runtime. }
+{ The VMT of class c; the predeclared classes' (TObject, Exception,
+  EDivByZero and its ancestors) are in the runtime, as __pas_<class>_vmt. }
 function vmtOf(c: PType): TV;
 var
   g: PTVBox;
   v: TV;
+  name: string;
 begin
   g := PTVBox(mapGet(vmts, c^.id));
   if g <> nil then
     exit(g^);
-  if not irFindGlobal('__pas_tobject_vmt', v) then
-    v := irGlobal('__pas_tobject_vmt', 'external', irArray(3, irPtrT), irNull, true,
+  name := '__pas_' + lowerStr(nameStr(c^.declName)) + '_vmt';
+  if not irFindGlobal(name, v) then
+    v := irGlobal(name, 'external', irArray(5, irPtrT), irNull, true,
                   false, true, 0);
   mapPut(vmts, c^.id, irBox(v));
   vmtOf := v;
@@ -1707,6 +1803,113 @@ begin
     methodFnType := regType(r^.resultType)
   else
     methodFnType := irVoidT;
+end;
+
+{ --- Exceptions (objfpc) --- }
+
+{ The runtime's exception entry points, declared when first used. }
+function excRuntime(const name: string): PIRFunc;
+var
+  f: PIRFunc;
+  ret, params, attrs: string;
+begin
+  f := irFindFunction(name);
+  if f = nil then
+  begin
+    ret := 'void';
+    params := 'ptr';
+    attrs := 'nounwind';
+    if name = '__pas_exc_push' then
+      params := 'ptr,ptr'
+    else if name = '__pas_raise_divzero' then
+      attrs := 'cold noreturn nounwind'
+    else if (name = '__pas_raise') or (name = '__pas_reraise_free') then
+    begin
+      params := 'ptr,ptr';
+      attrs := 'noreturn nounwind';
+    end
+    else if name = '__pas_reraise' then
+      attrs := 'noreturn nounwind';
+    { otherwise __pas_exc_pop, __pas_free_object }
+    declareRT(name, ret, params, attrs);
+    f := irFindFunction(name);
+  end;
+  excRuntime := f;
+end;
+
+procedure excCall1(const name: string; const x: TV);
+var
+  ignored: TV;
+begin
+  ignored := call1(excRuntime(name), x, '');
+end;
+
+procedure excCall2(const name: string; const x, y: TV);
+var
+  ignored: TV;
+begin
+  ignored := call2(excRuntime(name), x, y, '');
+end;
+
+{ Pushes a new PasExcFrame and calls _setjmp on it: an exception raised to
+  the frame continues at landing, the protected code in a new block named
+  bodyName (the insertion point). Returns the frame. }
+function emitProtect(landing: PIRBlock; const bodyName: string): TV;
+var
+  f, frame, r: TV;
+  body: PIRBlock;
+begin
+  f := irCreateTemp(excFrameT, 'excframe');
+  { the routine's frame goes along so that the optimizer keeps its
+    variables in memory, where _longjmp does not undo their changes }
+  if curRoutine <> nil then
+    frame := curFrame
+  else
+    frame := irNull;
+  excCall2('__pas_exc_push', f, frame);
+  r := call1(rtFn('_setjmp'), irStructGEP(excFrameT, f, 3, ''), 'jmp');
+  body := irNewBlock(bodyName);
+  irCondBr(irICmp('ne', r, i32c(0), ''), landing, body, false);
+  irSetInsertPoint(body);
+  emitProtect := f;
+end;
+
+{ "file:line:col" for the runtime's exception functions, or null. }
+function whereText(loc: TLoc): TV;
+var
+  b: TBuf;
+  fid, line, col: longint;
+begin
+  if loc = noLoc then
+    exit(irNull);
+  bufInit(b);
+  smPresumed(loc, fid, line, col);
+  bufAdd(b, smFileName(fid));
+  bufAdd(b, ':' + intToStr(line) + ':' + intToStr(col));
+  whereText := globalString(b.data, 0, b.len, '.where');
+  bufFree(b);
+end;
+
+{ if cond: integer division by zero: a runtime error, or (objfpc) an
+  EDivByZero exception, as in Free Pascal with SysUtils. }
+procedure emitDivZeroCheck(const cond: TV; loc: TLoc);
+var
+  errB, okB: PIRBlock;
+begin
+  if mode <> lmObjFPC then
+  begin
+    emitRuntimeCheck(cond, 'division by zero', loc);
+    exit;
+  end;
+  if (cond.kind = vkInt) and irIsNullValue(cond) then
+    exit; { provably fine }
+  errB := irNewBlock('rt.error');
+  okB := irNewBlock('rt.ok');
+  irCondBr(cond, errB, okB, true);
+  irSetInsertPoint(errB);
+  excCall1('__pas_raise_divzero', whereText(loc));
+  irUnreachable;
+  irSetInsertPoint(okB);
 end;
 
 { obj.Free: if obj <> nil then obj.Destroy (virtual), then release it. }
@@ -1736,15 +1939,44 @@ end;
   otherwise a virtual method is called through the VMT, and a destructor
   releases the object afterwards. The result (an address for strings and
   records), or irNull for a call without a value. }
-function emitMethodCall(r: PDecl; const obj: TV; const args: TPtrList;
-                        inherited_: boolean; loc: TLoc): TV;
+function emitConstructionThrough(const vmt: TV; ctor: PDecl; const args: TPtrList;
+                                 loc: TLoc): TV; forward;
+
+{ selfIsClass: obj is a class (a VMT), as in TFoo.M, c.M (c: class of T)
+  and in class methods; then r is a class method or a constructor, which
+  creates an object of that class. }
+function emitMethodCallC(r: PDecl; const obj: TV; const args: TPtrList;
+                         inherited_: boolean; loc: TLoc; selfIsClass: boolean): TV;
 var
-  vmt, slot, fn, res: TV;
+  vmt, fn, res, self_, arg, inh: TV;
   f: PIRFunc;
+  msgField: PDecl;
 begin
-  emitMethodCall := irNull;
+  emitMethodCallC := irNull;
+  if (r^.methodKind = mtConstructor) and selfIsClass and not inherited_ then
+    exit(emitConstructionThrough(obj, r, args, loc));
   case r^.objMethod of
     obCreate: exit; { TObject's constructor does nothing }
+    obClassType: exit(irLoad(irPtrT, obj, 'vmt'));
+    obClassParent: exit(loadVMTSlot(receiverClass(obj, selfIsClass, loc), 0, 'parent'));
+    obInstanceSize:
+      exit(irCast('ptrtoint', loadVMTSlot(receiverClass(obj, selfIsClass, loc), 2, 'size'),
+                  irI64, 'instancesize'));
+    obInheritsFrom:
+      begin
+        vmt := receiverClass(obj, selfIsClass, loc);
+        arg := visitExpr(PNode(listGet(args, 0)));
+        f := classRuntime('__pas_class_inherits', 'i32', 'ptr,ptr');
+        inh := call2(f, vmt, arg, '');
+        exit(irICmp('ne', inh, i32c(0), 'inherits'));
+      end;
+    obExceptionCreate: { FMessage := msg }
+      begin
+        msgField := findOwnMember(r^.ownerClass, intern('fmessage'));
+        emitStringAssign(fieldAddress(obj, r^.ownerClass, msgField),
+                         msgField^.fieldType, PNode(listGet(args, 0)));
+        exit;
+      end;
     obFree:
       begin
         emitFree(obj);
@@ -1752,15 +1984,35 @@ begin
       end;
     obClassName:
       begin
-        vmt := irLoad(irPtrT, obj, 'vmt');
-        slot := irGEP1(irPtrT, vmt, i64c(1), true, '');
-        exit(irLoad(irPtrT, slot, 'classname'));
+        if selfIsClass then
+          vmt := obj
+        else
+          vmt := irLoad(irPtrT, obj, 'vmt');
+        exit(loadVMTSlot(vmt, 1, 'classname'));
       end;
     obDestroy:
       if inherited_ then { TObject's destructor does nothing }
         exit;
   else
     ;
+  end;
+  if r^.isClassMethod then { Self: the class }
+  begin
+    self_ := receiverClass(obj, selfIsClass, loc);
+    if not inherited_ and (r^.vmtIndex >= 0) then
+    begin
+      emitNilClassCheck(self_, loc);
+      fn := loadVMTSlot(self_, 4 + r^.vmtIndex, 'method');
+      res := emitCallToSelf(methodFnType(r), fn, irNull, true, self_, true, r^.params, args);
+    end
+    else
+    begin
+      f := fnOf(r);
+      res := emitCallToSelf(f^.ret, irFuncRef(f), irNull, true, self_, true, r^.params, args);
+    end;
+    if r^.isFunction then
+      emitMethodCallC := res;
+    exit;
   end;
   if not inherited_ and (r^.vmtIndex >= 0) then
   begin
@@ -1776,29 +2028,197 @@ begin
   if (r^.methodKind = mtDestructor) and not inherited_ then
     rtv1('__pas_dispose', obj);
   if r^.isFunction then
-    emitMethodCall := res;
+    emitMethodCallC := res;
 end;
 
-{ TFoo.Create(args): a new object of class c, initialized by ctor. }
+function emitMethodCall(r: PDecl; const obj: TV; const args: TPtrList;
+                        inherited_: boolean; loc: TLoc): TV;
+begin
+  emitMethodCall := emitMethodCallC(r, obj, args, inherited_, loc, false);
+end;
+
+{ --- Interfaces (objfpc, CORBA style) --- }
+
+function iidOf(i: PType): TV;
+begin
+  iidOf := PTVBox(mapGet(iids, i^.id))^;
+end;
+
+function makeInterface(const obj, table: TV): TV;
+var
+  v: TV;
+begin
+  v := irInsert(irUndef(routinePairT), obj, 0, '');
+  makeInterface := irInsert(v, table, 1, '');
+end;
+
+{ The interface i value of object obj: (obj, its class's table for i). }
+function toInterface(const obj: TV; i: PType): TV;
+var
+  f: PIRFunc;
+  table: TV;
+begin
+  f := classRuntime('__pas_intf_lookup', 'ptr', 'ptr,ptr');
+  table := call2(f, obj, iidOf(i), 'itable');
+  toInterface := makeInterface(obj, table);
+end;
+
+{ The object of an interface value (nil: itself). }
+function interfaceObject(const v: TV): TV;
+begin
+  if v.t^.kind = ikStruct then
+    interfaceObject := irExtract(v, 0, irPtrT, 'obj')
+  else
+    interfaceObject := v;
+end;
+
+{ Is w's object a class (Self in a class method)? }
+function withIsClass(w: PWithContext): boolean;
+begin
+  withIsClass := w^.rec^.typ^.kind = tyClassRef;
+end;
+
+{ TFoo.Create(args): a new object of class c, initialized by ctor. The
+  arguments are evaluated first. An exception leaving a constructor
+  written in Pascal destroys and releases the new object (as in Free
+  Pascal), so the call runs protected. }
 function emitConstruction(c: PType; ctor: PDecl; const args: TPtrList; loc: TLoc): TV;
 var
-  obj, ignored: TV;
+  obj, ignored, f: TV;
+  argBuf, buf: TBuf;
+  failed, done: PIRBlock;
 begin
+  if ctor^.objMethod <> obNone then
+  begin
+    obj := call1(rtFn('__pas_new'), i64c(instanceSize(c)), 'obj');
+    irStore(vmtOf(c), obj);
+    ignored := emitMethodCall(ctor, obj, args, true, loc);
+    exit(obj);
+  end;
+  bufInit(argBuf);
+  emitArgValues(ctor^.params, args, argBuf);
   obj := call1(rtFn('__pas_new'), i64c(instanceSize(c)), 'obj');
   irStore(vmtOf(c), obj);
-  ignored := emitMethodCall(ctor, obj, args, true, loc);
+  failed := irNewBlock('ctor.raise');
+  f := emitProtect(failed, 'ctor.call');
+  bufInit(buf);
+  irArgsAdd(buf, irNull);
+  irArgsAdd(buf, obj);
+  if argBuf.len > 0 then
+  begin
+    bufAdd(buf, ', ');
+    bufAddChars(buf, argBuf.data, 0, argBuf.len);
+  end;
+  ignored := irCall(fnOf(ctor), buf, '');
+  bufFree(buf);
+  bufFree(argBuf);
+  excCall1('__pas_exc_pop', f);
+  done := irNewBlock('ctor.done');
+  irBr(done);
+  irSetInsertPoint(failed);
+  excCall2('__pas_reraise_free', f, obj);
+  irUnreachable;
+  irSetInsertPoint(done);
   emitConstruction := obj;
+end;
+
+{ The new object of class vmt, of its size (the VMT's slot 2). }
+function allocateThrough(const vmt: TV): TV;
+var
+  size, obj: TV;
+begin
+  size := irCast('ptrtoint', loadVMTSlot(vmt, 2, 'size'), irI64, '');
+  obj := call1(rtFn('__pas_new'), size, 'obj');
+  irStore(vmt, obj);
+  allocateThrough := obj;
+end;
+
+{ c.Create(args) with c a class (a VMT; also Self in a class method): a new
+  object of the class c refers to, of its size, initialized by ctor
+  (virtual: c's). Protected like emitConstruction. }
+function emitConstructionThrough(const vmt: TV; ctor: PDecl; const args: TPtrList;
+                                 loc: TLoc): TV;
+var
+  obj, ignored, f, fn: TV;
+  argBuf, buf: TBuf;
+  failed, done: PIRBlock;
+  fun: PIRFunc;
+begin
+  emitNilClassCheck(vmt, loc);
+  if ctor^.objMethod <> obNone then
+  begin
+    obj := allocateThrough(vmt);
+    ignored := emitMethodCall(ctor, obj, args, true, loc);
+    exit(obj);
+  end;
+  bufInit(argBuf);
+  emitArgValues(ctor^.params, args, argBuf);
+  obj := allocateThrough(vmt);
+  failed := irNewBlock('ctor.raise');
+  f := emitProtect(failed, 'ctor.call');
+  bufInit(buf);
+  irArgsAdd(buf, irNull);
+  irArgsAdd(buf, obj);
+  if argBuf.len > 0 then
+  begin
+    bufAdd(buf, ', ');
+    bufAddChars(buf, argBuf.data, 0, argBuf.len);
+  end;
+  if ctor^.vmtIndex >= 0 then
+  begin
+    fn := loadVMTSlot(vmt, 4 + ctor^.vmtIndex, 'ctor');
+    ignored := irCallPtr(irVoidT, fn, buf, '');
+  end
+  else
+  begin
+    fun := fnOf(ctor);
+    ignored := irCall(fun, buf, '');
+  end;
+  bufFree(buf);
+  bufFree(argBuf);
+  excCall1('__pas_exc_pop', f);
+  done := irNewBlock('ctor.done');
+  irBr(done);
+  irSetInsertPoint(failed);
+  excCall2('__pas_reraise_free', f, obj);
+  irUnreachable;
+  irSetInsertPoint(done);
+  emitConstructionThrough := obj;
 end;
 
 { obj.M(args) or TFoo.Create(args) through e (an nkField). }
 function emitMemberCall(e: PNode; const args: TPtrList): TV;
 var
   r: PDecl;
-  obj: TV;
+  obj, v, table, slot, fn, res: TV;
 begin
   r := e^.fieldDecl;
+  if e^.base^.typ^.kind = tyInterface then { through the method table }
+  begin
+    v := visitExpr(e^.base);
+    obj := irExtract(v, 0, irPtrT, 'obj');
+    table := irExtract(v, 1, irPtrT, 'itable');
+    if rangeChecks(e^.fieldName.loc) then
+      emitRuntimeCheck(irICmp('eq', obj, irNull, ''), 'use of a nil interface reference',
+                       e^.fieldName.loc);
+    slot := irGEP1(irPtrT, table, i64c(r^.vmtIndex), true, '');
+    fn := irLoad(irPtrT, slot, 'method');
+    res := emitCallToSelf(methodFnType(r), fn, irNull, true, obj, true, r^.params, args);
+    if r^.isFunction then
+      exit(res);
+    exit(irNull);
+  end;
   if (e^.base^.kind = nkNameRef) and (e^.base^.refDecl^.kind = dkType) then
-    exit(emitConstruction(e^.base^.typ, r, args, e^.b));
+  begin
+    if r^.methodKind = mtConstructor then
+      exit(emitConstruction(e^.base^.typ, r, args, e^.b));
+    exit(emitMethodCallC(r, vmtOf(e^.base^.typ), args, false, e^.fieldName.loc, true));
+  end;
+  if e^.base^.typ^.kind = tyClassRef then { c.M, c: class of T }
+  begin
+    obj := visitExpr(e^.base);
+    exit(emitMethodCallC(r, obj, args, false, e^.fieldName.loc, true));
+  end;
   { not checked for nil: Free accepts nil, and a static method may be
     called on nil (as in Free Pascal); virtual calls are checked }
   obj := visitExpr(e^.base);
@@ -1814,18 +2234,38 @@ begin
     exit(irNull);
   self_ := irLoad(irPtrT, varAddress(e^.inhEnclosing^.selfVar), 'self');
   if not identValid(e^.inhName) and (args.count = 0) then
-    emitInheritedCall := emitMethodCall(e^.inhMethod, self_, e^.inhArgs, true, e^.b)
+    emitInheritedCall := emitMethodCallC(e^.inhMethod, self_, e^.inhArgs, true, e^.b,
+                                         e^.inhEnclosing^.isClassMethod)
   else
-    emitInheritedCall := emitMethodCall(e^.inhMethod, self_, args, true, e^.b);
+    emitInheritedCall := emitMethodCallC(e^.inhMethod, self_, args, true, e^.b,
+                                         e^.inhEnclosing^.isClassMethod);
 end;
 
 { The value of property p of object obj (static class c): an address for
   strings and records. }
-function emitPropertyRead(p: PDecl; const obj: TV; c: PType): TV;
+{ The arguments of a property's accessor method: the indexes of an array
+  property, the index constant, the value written (if any). }
+procedure accessorArgs(p: PDecl; const indexes: TPtrList; value: PNode;
+                       var args: TPtrList);
+var
+  i: longint;
+begin
+  listInit(args);
+  for i := 0 to indexes.count - 1 do
+    listAdd(args, listGet(indexes, i));
+  if p^.propIndex <> nil then
+    listAdd(args, p^.propIndex);
+  if value <> nil then
+    listAdd(args, value);
+end;
+
+{ indexes: an array property's }
+function emitPropertyReadArgs(p: PDecl; const obj: TV; c: PType;
+                              const indexes: TPtrList): TV;
 var
   t: PType;
   addr: TV;
-  noArgs: TPtrList;
+  args: TPtrList;
 begin
   t := p^.propType;
   if p^.readDecl^.kind = dkField then
@@ -1835,8 +2275,48 @@ begin
       exit(addr);
     exit(loadScalar(addr, t, nm(p^.ident.name)));
   end;
+  accessorArgs(p, indexes, nil, args);
+  emitPropertyReadArgs := emitMethodCall(p^.readDecl, obj, args, false, p^.loc);
+end;
+
+function emitPropertyRead(p: PDecl; const obj: TV; c: PType): TV;
+var
+  noArgs: TPtrList;
+begin
   listInit(noArgs);
-  emitPropertyRead := emitMethodCall(p^.readDecl, obj, noArgs, false, p^.loc);
+  emitPropertyRead := emitPropertyReadArgs(p, obj, c, noArgs);
+end;
+
+{ The object of an array property access e (obj.P[i], P[i], obj[i]), and
+  its static class c. }
+function propertyObject(e: PNode; var c: PType): TV;
+var
+  root: PNode;
+begin
+  root := e^.idxRoot;
+  if (root^.kind = nkField) and (root^.fieldDecl = e^.idxProp) then
+  begin
+    c := root^.base^.typ;
+    exit(emitObject(root^.base));
+  end;
+  if (root^.kind = nkNameRef) and (root^.refDecl = e^.idxProp) then
+  begin
+    c := root^.refWith^.rec^.typ;
+    exit(withBase(root^.refWith));
+  end;
+  c := root^.typ; { the default property }
+  propertyObject := emitObject(root);
+end;
+
+{ The value of array property access e (an address for strings and
+  records). }
+function emitArrayPropertyRead(e: PNode): TV;
+var
+  c: PType;
+  obj: TV;
+begin
+  obj := propertyObject(e, c);
+  emitArrayPropertyRead := emitPropertyReadArgs(e^.idxProp, obj, c, e^.idxArgs);
 end;
 
 { A member of a class used as a value through e (an nkField): a field, a
@@ -1853,6 +2333,12 @@ begin
   begin
     listInit(noArgs);
     exit(emitMemberCall(e, noArgs));
+  end;
+  if d^.kind = dkVar then { a class variable }
+  begin
+    if d^.varType^.kind = tyShortString then
+      exit(PTVBox(d^.cgValue)^);
+    exit(loadScalar(PTVBox(d^.cgValue)^, d^.varType, nm(d^.ident.name)));
   end;
   c := e^.base^.typ;
   obj := emitObject(e^.base);
@@ -1871,6 +2357,23 @@ var
   b: TBuf;
 begin
   obj := visitExpr(e^.lhs);
+  if e^.rhs^.typ^.kind = tyInterface then
+  begin
+    if e^.bop = boIs then
+    begin
+      r := call2(classRuntime('__pas_intf_lookup', 'ptr', 'ptr,ptr'), obj,
+                 iidOf(e^.rhs^.typ), '');
+      exit(irICmp('ne', r, irNull, 'is'));
+    end;
+    bufInit(b);
+    bufAdd(b, 'invalid interface typecast');
+    bufAddWhere(b, e^.opLoc);
+    msgG := globalString(b.data, 0, b.len, '.rterr');
+    bufFree(b);
+    r := call3(classRuntime('__pas_intf_as', 'ptr', 'ptr,ptr,ptr'), obj,
+               iidOf(e^.rhs^.typ), msgG, 'itable');
+    exit(makeInterface(obj, r));
+  end;
   vmt := vmtOf(e^.rhs^.typ);
   if e^.bop = boIs then
   begin
@@ -1941,7 +2444,7 @@ var
 begin
   isConst := irIsConstInt(r, c);
   if not isConst or (c = 0) then
-    emitRuntimeCheck(irICmp('eq', r, irConstInt(r.t, 0), ''), 'division by zero', loc);
+    emitDivZeroCheck(irICmp('eq', r, irConstInt(r.t, 0), ''), loc);
   if not signed then
     exit(irBin('udiv', l, r, 'div'));
   { the minimum div -1 overflows (and traps on x86) }
@@ -1975,7 +2478,7 @@ begin
   end;
   { Turbo/FPC: the sign follows the dividend (like C %) }
   if not isConst or (c = 0) then
-    emitRuntimeCheck(irICmp('eq', r, irConstInt(r.t, 0), ''), 'division by zero', loc);
+    emitDivZeroCheck(irICmp('eq', r, irConstInt(r.t, 0), ''), loc);
   if not signed then
     exit(irBin('urem', l, r, 'mod'));
   { x mod -1 = 0, but the minimum srem -1 traps on x86: divide by 1 }
@@ -2043,10 +2546,10 @@ begin
     cmp := call2(rtFn('__pas_str_compare'), l, r, '');
     exit(compareInts(op, cmp, i32c(0), true));
   end;
-  if (lt^.kind = tyPointer) or (lt^.kind = tyNil) or (lt^.kind = tyClass) then
-  begin
-    l := visitExpr(e^.lhs);
-    r := visitExpr(e^.rhs);
+  if lt^.kind in [tyPointer, tyNil, tyClass, tyClassRef, tyInterface] then
+  begin { interfaces: their objects }
+    l := interfaceObject(visitExpr(e^.lhs));
+    r := interfaceObject(visitExpr(e^.rhs));
     if op = boEq then
       exit(irICmp('eq', l, r, 'cmp'));
     exit(irICmp('ne', l, r, 'cmp'));
@@ -2116,6 +2619,8 @@ begin
   v := visitExpr(arg);
   if isOrdinal(e^.typ) then
     exit(convertOrdinal(v, arg^.typ, e^.typ));
+  if e^.typ^.kind = tyInterface then
+    exit(convertForAssign(v, arg^.typ, e^.typ, e^.b));
   emitTypecast := v;
 end;
 
@@ -2213,7 +2718,7 @@ begin
           p := irExtract(tmp, 0, irPtrT, '');
         end
         else
-          p := visitExpr(argE);
+          p := interfaceObject(visitExpr(argE));
         exit(irICmp('ne', p, irNull, 'assigned'));
       end;
     bkParamCount:
@@ -2333,8 +2838,11 @@ begin
   if (d^.kind = dkRoutine) and (d^.methodKind <> mtNone) then
   begin
     listInit(noArgs);
-    exit(emitMethodCall(d, withBase(e^.refWith), noArgs, false, e^.b));
+    exit(emitMethodCallC(d, withBase(e^.refWith), noArgs, false, e^.b,
+                         withIsClass(e^.refWith)));
   end;
+  if d^.kind = dkType then { a class as a value }
+    exit(vmtOf(d^.declType));
   if (e^.typ^.kind = tyShortString) and (d^.kind in [dkVar, dkField]) then
     exit(emitAddress(e));
   if (d^.kind = dkVar) and (d^.varType <> nil) and (d^.varType^.kind = tyRoutine) then
@@ -2489,7 +2997,8 @@ begin
     dkType: visitCall := emitTypecast(e);
     dkRoutine:
       if d^.methodKind <> mtNone then
-        visitCall := emitMethodCall(d, withBase(e^.callWith), e^.args, false, e^.b)
+        visitCall := emitMethodCallC(d, withBase(e^.callWith), e^.args, false, e^.b,
+                                     withIsClass(e^.callWith))
       else
         visitCall := emitCall(d, e^.args);
     dkVar: visitCall := emitIndirectCall(d, e^.args);
@@ -2533,7 +3042,9 @@ begin
     nkNil: visitExpr := irNull;
     nkSetCtor: visitExpr := emitSetCtor(e);
     nkDeref, nkIndex:
-      if e^.typ^.kind = tyShortString then
+      if (e^.kind = nkIndex) and (e^.idxProp <> nil) then
+        visitExpr := emitArrayPropertyRead(e)
+      else if e^.typ^.kind = tyShortString then
         visitExpr := emitAddress(e)
       else
         visitExpr := loadScalar(emitAddress(e), e^.typ, '');

@@ -1,0 +1,83 @@
+ProgramDecl 'interfaces' <1:1>
+  TypeDecl 'ia' <3:3>
+    InterfaceTypeSpec forward <3:8>
+  TypeDecl 'ia' <4:3>
+    InterfaceTypeSpec "{A-GUID}" <4:8>
+      ProcedureDecl 'p' <5:5>
+  TypeDecl 'ib' <7:3>
+    InterfaceTypeSpec 'ia' <7:8>
+      FunctionDecl 'f' overload <8:5>
+        ParamDecl 'x' <8:16>
+          NamedTypeSpec 'integer' <8:19>
+        Result <8:29>
+          NamedTypeSpec 'integer' <8:29>
+      FunctionDecl 'f' overload <9:5>
+        ParamDecl const 's' <9:22>
+          StringTypeSpec <9:25>
+        Result <9:34>
+          NamedTypeSpec 'integer' <9:34>
+  TypeDecl 'tc' <11:3>
+    ClassTypeSpec 'tobject', 'ib' <11:8>
+      ProcedureDecl 'p' <12:5>
+      FunctionDecl 'f' overload <13:5>
+        ParamDecl 'x' <13:16>
+          NamedTypeSpec 'integer' <13:19>
+        Result <13:29>
+          NamedTypeSpec 'integer' <13:29>
+      FunctionDecl 'f' overload <14:5>
+        ParamDecl const 's' <14:22>
+          StringTypeSpec <14:25>
+        Result <14:34>
+          NamedTypeSpec 'integer' <14:34>
+  ProcedureDecl 'tc.p' <16:1>
+    CompoundStmt <16:17>
+      EmptyStmt <16:23>
+  FunctionDecl 'tc.f' <17:1>
+    ParamDecl 'x' <17:15>
+      NamedTypeSpec 'integer' <17:18>
+    Result <17:28>
+      NamedTypeSpec 'integer' <17:28>
+    CompoundStmt <17:37>
+      AssignStmt <17:43>
+        NameRefExpr 'f' <17:43>
+        NameRefExpr 'x' <17:48>
+  FunctionDecl 'tc.f' <18:1>
+    ParamDecl const 's' <18:21>
+      StringTypeSpec <18:24>
+    Result <18:33>
+      NamedTypeSpec 'integer' <18:33>
+    CompoundStmt <18:42>
+      AssignStmt <18:48>
+        NameRefExpr 'f' <18:48>
+        CallExpr 'length' <18:53>
+          NameRefExpr 's' <18:60>
+  VarDecl 'b' <20:3>
+    NamedTypeSpec 'ib' <20:6>
+  VarDecl 'a' <21:3>
+    NamedTypeSpec 'ia' <21:6>
+  CompoundStmt <22:1>
+    AssignStmt <23:3>
+      NameRefExpr 'b' <23:3>
+      FieldExpr 'create' <23:8>
+        NameRefExpr 'tc' <23:8>
+    AssignStmt <24:3>
+      NameRefExpr 'a' <24:3>
+      NameRefExpr 'b' <24:8>
+    IndirectCallStmt <25:3>
+      IndirectCallExpr <25:3>
+        FieldExpr 'p' <25:3>
+          NameRefExpr 'a' <25:3>
+    ProcCallStmt 'writeln' () <26:3>
+      IndirectCallExpr <26:11>
+        FieldExpr 'f' <26:11>
+          NameRefExpr 'b' <26:11>
+        IntegerLiteralExpr 2 <26:15>
+      IndirectCallExpr <26:19>
+        FieldExpr 'f' <26:19>
+          NameRefExpr 'b' <26:19>
+        CharLiteralExpr "x" <26:23>
+      BinaryExpr 'is' <26:29>
+        CallExpr 'tobject' <26:29>
+          NilExpr <26:37>
+        NameRefExpr 'ia' <26:45>
+    EmptyStmt <27:1>

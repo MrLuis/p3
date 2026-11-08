@@ -329,6 +329,10 @@ void Driver::loadUnits(llvm::ArrayRef<Identifier> Uses, ASTContext &Ctx,
   std::function<void(const Identifier &)> Visit = [&](const Identifier &U) {
     if (Done.count(U.Name) || Diags.shouldStop())
       return;
+    // objfpc: what pcc has of Free Pascal's SysUtils (Exception) is
+    // predeclared, so `uses sysutils` needs no file.
+    if (LangOpts.ObjKeywords && U.Name == "sysutils")
+      return;
     if (!InProgress.insert(U.Name).second) {
       Diags.error(U.Loc, "circular unit reference to '" + U.Spelling + "'",
                   {U.getRange()});

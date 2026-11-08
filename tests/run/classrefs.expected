@@ -1,0 +1,32 @@
+build a TCircle (circle/shape)
+  TShape.Create s0! as TCircle
+  TCircle.Create
+  s0! is a circle/shape (TCircle, 0 sides)
+  TRUE TCircle TRUE FALSE FALSE
+  destroy s0! (TCircle)
+build a TSquare (square)
+  TShape.Create s1 as TSquare
+  s1 is a square (TSquare, 4 sides)
+  TRUE TSquare TRUE TRUE TRUE
+  destroy s1 (TSquare)
+build a TPolygon (shape)
+  TShape.Create s2 as TPolygon
+  s2 is a shape (TPolygon, 5 sides)
+  TRUE TPolygon TRUE TRUE TRUE
+  destroy s2 (TPolygon)
+TSquare: square, 4 sides
+TCircle: circle/shape, 0 sides
+  TShape.Create made as TSquare
+  made is a square (TSquare, 4 sides)
+counts 4 4 4, polygons asked 4 4
+made 40
+  destroy made (TSquare)
+TSquare < TPolygon < TShape < TObject
+TRUE TRUE square TRUE
+nil: TRUE
+TObject TRUE TRUE
+  TShape.Create broken as TBroken
+  destroy broken (TBroken)
+caught EShape: cannot make broken
+caught ESevere: severe
+count 5

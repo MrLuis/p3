@@ -1,0 +1,69 @@
+; Exceptions (--mode=objfpc): each try statement pushes a PasExcFrame
+; { prev, object, where, jmp_buf } (with the routine's frame, which keeps
+; its variables in memory) and calls _setjmp on it; a raise lands where
+; _setjmp returns nonzero. Exception's VMT is in the runtime.
+; RUN: %pcc --mode=objfpc --emit-llvm %S/Inputs/exceptions.pas -o %t.ll
+; RUN: FileCheck %s < %t.ll
+; RUN: FileCheck --check-prefix=MAIN %s < %t.ll
+; RUN: FileCheck --check-prefix=GLOBAL %s < %t.ll
+
+; CHECK-LABEL: define internal void @pas.p(
+; CHECK:      %excframe = alloca { ptr, ptr, ptr, [64 x i64] }, align 8
+; CHECK:      %frame = alloca %frame.p
+; CHECK:      call void @__pas_exc_push(ptr %excframe, ptr %frame)
+; CHECK-NEXT: %[[BUF:[0-9]+]] = getelementptr inbounds { ptr, ptr, ptr, [64 x i64] }, ptr %excframe, i32 0, i32 3
+; CHECK-NEXT: %jmp = call i32 @_setjmp(ptr %[[BUF]])
+; CHECK-NEXT: %[[CAUGHT:[0-9]+]] = icmp ne i32 %jmp, 0
+; CHECK-NEXT: br i1 %[[CAUGHT]], label %try.except, label %try.body
+; The handlers run under a frame of their own: an exception leaving them
+; releases the handled one.
+; CHECK:      try.except:
+; CHECK:      %exc = load ptr, ptr
+; CHECK:      call void @__pas_exc_push(ptr %[[HANDLER:excframe[0-9]+]], ptr %frame)
+; The finally part runs with a state: 1 after an exception, 2 + k for the
+; k-th jump (exit, break, continue) out of the protected statements.
+; CHECK:      finally:
+; CHECK:      %state = load i32, ptr %finally.state
+; CHECK-NEXT: switch i32 %state, label %try.end1 [
+; CHECK-NEXT:   i32 1, label %finally.reraise
+; CHECK-NEXT:   i32 2, label %finally.cont
+; exit: pop the inner frame, run the finally part, pop the outer frame.
+; CHECK:      if.then:
+; CHECK-NEXT: call void @__pas_exc_pop(ptr %excframe2)
+; CHECK-NEXT: store i32 2, ptr %finally.state
+; CHECK-NEXT: br label %finally
+; CHECK:      call void @__pas_raise(ptr %obj, ptr @.where)
+; CHECK:      finally.cont:
+; CHECK-NEXT: call void @__pas_exc_pop(ptr %excframe)
+; CHECK-NEXT: br label %exit
+; CHECK:      handler.raise:
+; CHECK-NEXT: call void @__pas_reraise_free(ptr %[[HANDLER]], ptr %exc)
+; CHECK:      %{{[0-9]+}} = call i32 @__pas_class_is(ptr %exc, ptr @__pas_exception_vmt)
+; A handler that ends releases the exception.
+; CHECK:      call void @__pas_free_object(ptr %exc)
+
+; A constructor written in Pascal runs protected: if it raises, the new
+; object is destroyed and released.
+; MAIN-LABEL: define i32 @main(
+; MAIN:      %obj = call ptr @__pas_new(
+; MAIN:      ctor.raise:
+; MAIN-NEXT: call void @__pas_reraise_free(ptr %{{.*}}, ptr %obj)
+; MAIN:      ctor.call:
+; MAIN-NEXT: call void @pas.tthing.make(ptr null, ptr %obj)
+; MAIN-NEXT: call void @__pas_exc_pop(
+
+; GLOBAL: @.where = private unnamed_addr constant [{{[0-9]+}} x i8] c"{{.*}}exceptions.pas:19:7\00"
+; GLOBAL: declare void @__pas_raise(ptr, ptr) #[[NORETURN:[0-9]+]]
+
+; Integer div and mod by zero: in objfpc an EDivByZero exception (raised by
+; the runtime), elsewhere a runtime error.
+; RUN: %pcc --mode=objfpc --emit-llvm %S/Inputs/divzero.pas -o - | FileCheck --check-prefix=DIV %s
+; DIV:      br i1 %{{[0-9]+}}, label %rt.error, label %rt.ok, !prof
+; DIV:      rt.error:
+; DIV-NEXT: call void @__pas_raise_divzero(ptr @.where)
+; DIV-NEXT: unreachable
+; DIV: declare void @__pas_raise_divzero(ptr) #[[COLD:[0-9]+]]
+; DIV: attributes #[[COLD]] = { cold noreturn nounwind }
+; RUN: %pcc --mode=tp --emit-llvm %S/Inputs/divzero.pas -o - | FileCheck --check-prefix=TPDIV %s
+; TPDIV-NOT: __pas_raise_divzero
+; TPDIV: call void @__pas_runtime_error(ptr @.rterr)

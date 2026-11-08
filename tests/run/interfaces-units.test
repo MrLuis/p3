@@ -1,0 +1,16 @@
+; Interfaces in units (--mode=objfpc), compiled whole and separately: a
+; separately compiled unit exports an interface's identity as
+; pas.<unit>$<name>$iid; classes of the program implement it and extend
+; the unit's class.
+; RUN: rm -rf %t && mkdir -p %t && cp -r %S/Inputs/interfaces/. %t/
+; RUN: %pcc --mode=objfpc -I %t/lib %t/draw.pas -o %t/whole
+; RUN: %t/whole | FileCheck %s
+; RUN: %pcc --mode=objfpc -c %t/lib/shapes.pas -o %t/lib/shapes.o
+; RUN: %pcc --mode=objfpc -I %t/lib -fseparate-units %t/draw.pas -o %t/separate
+; RUN: %t/separate | FileCheck %s
+; CHECK:      rect6 square9 dot1
+; CHECK-NEXT: square TRUE
+; RUN: %pcc --mode=objfpc --emit-llvm %t/lib/shapes.pas -o - | FileCheck --check-prefix=UNIT %s
+; UNIT: @"pas.shapes$ishape$iid" = constant [7 x i8] c"\06IShape"
+; RUN: %pcc --mode=objfpc -I %t/lib -fseparate-units --emit-llvm %t/draw.pas -o - | FileCheck --check-prefix=PROG %s
+; PROG: @"pas.shapes$ishape$iid" = external constant [7 x i8]

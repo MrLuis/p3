@@ -53,6 +53,8 @@ public:
     TK_Routine,  ///< a procedural/functional parameter's type   (M10)
     TK_ShortString, ///< Turbo/FPC string[N]: length byte + N chars (M12)
     TK_Class,    ///< class ... end (objfpc): a reference to an object
+    TK_ClassRef, ///< class of T (objfpc): a reference to a class (its VMT)
+    TK_Interface, ///< interface ... end (objfpc): {object, method table}
   };
 
 private:
@@ -81,6 +83,8 @@ public:
   bool isFile() const { return Kind == TK_File; }
   bool isShortString() const { return Kind == TK_ShortString; }
   bool isClass() const { return Kind == TK_Class; }
+  bool isClassRef() const { return Kind == TK_ClassRef; }
+  bool isInterface() const { return Kind == TK_Interface; }
   /// Anything that converts to a short string: short strings, string types,
   /// and chars (Turbo/FPC).
   bool isStringish() const;
@@ -93,7 +97,10 @@ public:
   }
   bool isSimple() const { return isOrdinal() || isReal(); }
   /// Types a function may return (ISO 6.6.2: simple or pointer; classes).
-  bool isValidResultType() const { return isSimple() || isPointer() || isClass(); }
+  bool isValidResultType() const {
+    return isSimple() || isPointer() || isClass() || isClassRef() ||
+           isInterface();
+  }
   bool isStructured() const { return isArray() || isRecord() || isShortString(); }
 
   /// Integer-like after stripping subranges (an integer type or a subrange
@@ -296,8 +303,18 @@ public:
 /// class's VMT (virtual method table), followed by the fields of its
 /// ancestors and its own. Forward declarations (`TFoo = class;`) create the
 /// type undefined; the full declaration fills it in.
+class InterfaceType;
+
+/// An interface a class supports (listed by it or an ancestor): the methods
+/// implementing the interface's methods, by slot.
+struct InterfaceImpl {
+  InterfaceType *Intf;
+  llvm::ArrayRef<RoutineDecl *> Methods;
+};
+
 class ClassType final : public Type {
   ClassType *Parent = nullptr;          ///< null only for TObject
+  llvm::ArrayRef<InterfaceImpl> Interfaces;
   llvm::ArrayRef<Decl *> Members;       ///< own members, in source order
   llvm::ArrayRef<FieldDecl *> AllFields; ///< ancestors' fields, then own
   llvm::ArrayRef<RoutineDecl *> VTable; ///< the virtual methods, by slot
@@ -312,6 +329,15 @@ public:
   llvm::ArrayRef<RoutineDecl *> getVTable() const { return VTable; }
   const void *getModule() const { return Module; }
   bool isDefined() const { return Defined; }
+  llvm::ArrayRef<InterfaceImpl> getInterfaces() const { return Interfaces; }
+  void setInterfaces(llvm::ArrayRef<InterfaceImpl> I) { Interfaces = I; }
+  /// Does the class list I (itself or through an ancestor)?
+  const InterfaceImpl *findInterface(const InterfaceType *I) const {
+    for (const InterfaceImpl &X : Interfaces)
+      if (X.Intf == I)
+        return &X;
+    return nullptr;
+  }
   void define(ClassType *P, llvm::ArrayRef<Decl *> M,
               llvm::ArrayRef<FieldDecl *> Fields,
               llvm::ArrayRef<RoutineDecl *> VT, const void *Mod) {
@@ -331,6 +357,50 @@ public:
   /// Is this class C or a descendant of C?
   bool inheritsFrom(const ClassType *C) const;
   static bool classof(const Type *T) { return T->getKind() == TK_Class; }
+};
+
+/// interface [(Parent)] ... end (objfpc): methods by slot, the parent's
+/// first. A value is {object, the object's class's method table for it}.
+class InterfaceType final : public Type {
+  InterfaceType *Parent = nullptr;
+  llvm::ArrayRef<RoutineDecl *> Methods;    ///< own, in source order
+  llvm::ArrayRef<RoutineDecl *> AllMethods; ///< by slot
+  const void *Module = nullptr;
+  bool Defined = false;
+
+public:
+  InterfaceType() : Type(TK_Interface) {}
+  InterfaceType *getParent() const { return Parent; }
+  llvm::ArrayRef<RoutineDecl *> getMethods() const { return Methods; }
+  llvm::ArrayRef<RoutineDecl *> getAllMethods() const { return AllMethods; }
+  const void *getModule() const { return Module; }
+  bool isDefined() const { return Defined; }
+  void define(InterfaceType *P, llvm::ArrayRef<RoutineDecl *> M,
+              llvm::ArrayRef<RoutineDecl *> All, const void *Mod) {
+    Parent = P;
+    Methods = M;
+    AllMethods = All;
+    Module = Mod;
+    Defined = true;
+  }
+  /// Is this interface I or a descendant of I?
+  bool inheritsFrom(const InterfaceType *I) const {
+    for (const InterfaceType *X = this; X; X = X->Parent)
+      if (X == I)
+        return true;
+    return false;
+  }
+  static bool classof(const Type *T) { return T->getKind() == TK_Interface; }
+};
+
+/// class of C (objfpc): its values are C and its descendants.
+class ClassRefType final : public Type {
+  ClassType *Of;
+
+public:
+  explicit ClassRefType(ClassType *Of) : Type(TK_ClassRef), Of(Of) {}
+  ClassType *getClass() const { return Of; }
+  static bool classof(const Type *T) { return T->getKind() == TK_ClassRef; }
 };
 
 /// Turbo/FPC: do L and R compare as short strings? (Two chars, or two ISO

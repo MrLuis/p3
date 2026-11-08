@@ -216,6 +216,10 @@ std::string Type::getName() const {
   }
   case TK_Class:
     return "class";
+  case TK_ClassRef:
+    return "class of " + llvm::cast<ClassRefType>(this)->getClass()->getName();
+  case TK_Interface:
+    return "interface";
   }
   return "?";
 }

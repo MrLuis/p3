@@ -1,0 +1,39 @@
+; Overloading (--mode=objfpc): overloads must differ in their parameters;
+; method implementations match one of them; calls with no best fit (none,
+; or a tie) and an overloaded @p without a target heading are errors.
+; RUN: not %pcc --mode=objfpc -ferror-limit=0 -c %S/Inputs/overloads/errors.pas -o %t.o 2>&1 | FileCheck %s
+; CHECK: errors.pas:6:15: error: redefinition of 'M' (overloads must differ in their parameters)
+; CHECK: errors.pas:4:5: note: previous definition is here
+; CHECK: errors.pas:8:14: error: redefinition of 'N' (overloads must differ in their parameters)
+; CHECK: errors.pas:7:5: note: previous definition is here
+; CHECK: errors.pas:21:11: error: redefinition of 'P2' (overloads must differ in their parameters)
+; CHECK: errors.pas:19:1: note: previous definition is here
+; CHECK: errors.pas:23:10: error: redefinition of 'F' (overloads must differ in their parameters)
+; CHECK: errors.pas:22:1: note: previous definition is here
+; CHECK: errors.pas:29:14: error: heading of 'TA.M' does not match any of its overloads
+; CHECK: errors.pas:4:5: note: candidate: M(integer)
+; CHECK: errors.pas:5:5: note: candidate: M(const string)
+; CHECK: errors.pas:33:3: error: ambiguous call to overloaded 'P1' with arguments (integer)
+; CHECK: errors.pas:17:1: note: candidate: P1(byte)
+; CHECK: errors.pas:18:1: note: candidate: P1(word)
+; CHECK: errors.pas:35:3: error: no overload of 'P2' takes arguments (char)
+; CHECK: errors.pas:19:1: note: candidate: P2(integer)
+; CHECK: errors.pas:20:1: note: candidate: P2(real)
+; CHECK: errors.pas:36:3: error: no overload of 'P2' takes arguments (integer, integer)
+; CHECK: errors.pas:19:1: note: candidate: P2(integer)
+; CHECK: errors.pas:20:1: note: candidate: P2(real)
+; CHECK: errors.pas:37:3: error: no overload of 'V' takes arguments (word)
+; CHECK: errors.pas:24:1: note: candidate: V(var integer)
+; CHECK: errors.pas:25:1: note: candidate: V(var real)
+; CHECK: errors.pas:38:3: error: no overload of 'V' takes arguments (integer)
+; CHECK: errors.pas:24:1: note: candidate: V(var integer)
+; CHECK: errors.pas:25:1: note: candidate: V(var real)
+; CHECK: errors.pas:39:5: error: no overload of 'M' takes arguments (boolean)
+; CHECK: errors.pas:4:5: note: candidate: M(integer)
+; CHECK: errors.pas:5:5: note: candidate: M(const string)
+; CHECK: errors.pas:40:9: error: '@P2': 'P2' is overloaded; assign it to a procedural variable of the heading wanted
+; CHECK-NOT: {{error|warning}}
+
+; Without --mode=objfpc there is no overloading.
+; RUN: not %pcc --mode=tp -c %S/Inputs/overloads/tp.pas -o %t.o 2>&1 | FileCheck --check-prefix=TP %s
+; TP: tp.pas:3:11: error: redefinition of 'P'

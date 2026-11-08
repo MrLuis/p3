@@ -1,0 +1,25 @@
+; Interfaces (--mode=objfpc): interface declarations, classes that list
+; them (each method must be implemented), assignments and is/as.
+; RUN: not %pcc --mode=objfpc -ferror-limit=0 -c %S/Inputs/interfaces/errors.pas -o %t.o 2>&1 | FileCheck %s
+; CHECK: errors.pas:8:15: error: 'P' is already declared in interface 'IA'
+; CHECK: errors.pas:4:5: note: 'P' declared here
+; CHECK: errors.pas:9:15: error: the methods of an interface cannot be 'virtual', 'override' or 'abstract'
+; CHECK: errors.pas:11:18: error: unknown interface name 'IMissing'
+; CHECK: errors.pas:14:23: error: class 'TX' does not implement 'IA.F'
+; CHECK: errors.pas:5:5: note: 'F' declared here
+; CHECK: errors.pas:18:27: error: interface 'IA' is listed twice
+; CHECK: errors.pas:18:31: error: 'TR' is not an interface type
+; CHECK: errors.pas:13:3: note: 'TR' declared here
+; CHECK: errors.pas:12:3: error: interface 'ID' is declared forward but never defined
+; CHECK: errors.pas:37:5: error: assigning to 'IA' from incompatible type 'TZ'
+; CHECK: errors.pas:38:5: error: assigning to 'IB' from incompatible type 'IA'
+; CHECK: errors.pas:41:5: error: assigning to 'integer' from incompatible type 'IA'
+; CHECK: errors.pas:42:5: error: no method named 'R' in interface 'IA'
+; CHECK: errors.pas:43:8: error: invalid operands to 'is' ('IA' and 'IB'): the left operand must be an object
+; CHECK: errors.pas:45:8: error: invalid typecast from 'IA' to 'TY' (only between ordinal types and between pointer types)
+; CHECK-NOT: {{error|warning}}
+
+; Only CORBA interfaces are supported.
+; RUN: not %pcc --mode=objfpc -c %S/Inputs/interfaces/com.pas -o %t.o 2>&1 | FileCheck --check-prefix=NOTCOM %s
+; NOTCOM: com.pas:1:1: error: only CORBA interfaces are supported; use {$interfaces corba}
+; RUN: %pcc --mode=objfpc -c %S/Inputs/interfaces/corba.pas -o %t.o 2>&1 | count 0

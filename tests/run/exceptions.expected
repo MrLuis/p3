@@ -1,0 +1,116 @@
+basics
+  caught Exception: boom
+  caught ETraced code 1
+  (ETraced 1 destroyed)
+  an ETraced, unnamed
+  (ENotFound 2 destroyed)
+  token 3
+  (token 3 destroyed)
+  bare except
+  else part
+  (token 4 destroyed)
+  nothing raised
+  message second
+propagation
+  unwinding 1
+  unwinding 2
+  unwinding 3
+  outer got deep 10
+  (ETraced 10 destroyed)
+reraise
+  inner 20
+  outer 20
+  (ETraced 20 destroyed)
+  replacing 21
+  (ETraced 21 destroyed)
+  got 22
+  (ETraced 22 destroyed)
+  else re-raises
+  token 23 again
+  (token 23 destroyed)
+finally
+  body
+  finally after normal end
+  body raises
+  finally after raise
+  handled 30
+  (ETraced 30 destroyed)
+  inner finally
+  outer finally
+  handled 31
+  (ETraced 31 destroyed)
+  finally raises
+  handled 33
+  (ETraced 33 destroyed)
+jumps
+  result   inner finally, n = 0
+  outer finally, n = 0
+  after the try statements
+0
+  result   inner finally, n = 1
+  outer finally, n = 1
+100
+  result   inner finally, n = 2
+  outer finally, n = 2
+  caught 40
+  (ETraced 40 destroyed)
+  result   handler exits
+  (ETraced 41 destroyed)
+41
+  loop 1
+  loop finally 1
+  loop finally 2
+  loop 3
+  loop finally 3
+  loop finally 4
+  handled token 1
+  (token 1 destroyed)
+  after handler 1
+  (token 2 destroyed)
+  (token 3 destroyed)
+  j = 3
+  finally after the loop
+  innermost finally 1
+  (token 51 destroyed)
+  outer finally 1
+  innermost finally 2
+  (token 52 destroyed)
+  outer finally 2
+  left the loop at 2
+variables
+  local 21 g 3 code 21
+  (ETraced 21 destroyed)
+  set in try: local 1 g 42
+  (token 60 destroyed)
+constructors
+  TBuffer.Create(-5)
+  TBuffer.Destroy (size 0)
+  failed: negative size -5
+  (ETraced -5 destroyed)
+  b assigned: FALSE
+  TBuffer.Create(7)
+  size 7
+  TBuffer.Destroy (size 7)
+methods
+  insufficient funds: 10
+  balance 5
+  balance 0
+stress
+  caught 3333, last 10000
+division by zero
+  EDivByZero: Division by zero TRUE TRUE TRUE
+  mod: EDivByZero
+  int64: Division by zero
+  cardinal: EDivByZero
+  inner
+  outer: Division by zero
+  a = 7
+  12 div -2 = -6
+  12 div -1 = -12
+  12 div 1 = 12
+  12 div 2 = 6
+  failures 1, b = 2
+objects
+  the same object
+  (token 70 destroyed)
+done

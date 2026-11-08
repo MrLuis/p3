@@ -20,10 +20,10 @@
 ; CHECK-NEXT: list freed
 ;
 ; RUN: %pcc --mode=objfpc --emit-llvm %t/lib/animals.pas -o - | FileCheck --check-prefix=UNIT %s
-; UNIT-DAG: @"pas.animals$tanimal$vmt" = constant [5 x ptr] [ptr @__pas_tobject_vmt, ptr @.str, ptr @__pas_tobject_destroy, ptr @"pas.animals$tanimal.sound", ptr @"pas.animals$tanimal.describe"]
+; UNIT-DAG: @"pas.animals$tanimal$vmt" = constant [7 x ptr] [ptr @__pas_tobject_vmt, ptr @.str, ptr inttoptr (i64 {{[0-9]+}} to ptr), ptr null, ptr @__pas_tobject_destroy, ptr @"pas.animals$tanimal.sound", ptr @"pas.animals$tanimal.describe"]
 ; UNIT-DAG: define void @"pas.animals$tanimal.create"(ptr %link, ptr %self, ptr %aname, i32 %alegs)
 ; UNIT-DAG: define void @"pas.animals$tanimal.speak"(ptr %link, ptr %self)
 ; RUN: %pcc --mode=objfpc -I %t/lib -fseparate-units --emit-llvm %t/zoo.pas -o - | FileCheck --check-prefix=PROG %s
-; PROG-DAG: @"pas.animals$tanimal$vmt" = external constant [5 x ptr]
-; PROG-DAG: @vmt.tdog = internal constant [5 x ptr] [ptr @"pas.animals$tanimal$vmt", ptr @.str, ptr @pas.tdog.destroy, ptr @pas.tdog.sound, ptr @pas.tdog.describe]
+; PROG-DAG: @"pas.animals$tanimal$vmt" = external constant [7 x ptr]
+; PROG-DAG: @vmt.tdog = internal constant [7 x ptr] [ptr @"pas.animals$tanimal$vmt", ptr @.str, ptr inttoptr (i64 {{[0-9]+}} to ptr), ptr null, ptr @pas.tdog.destroy, ptr @pas.tdog.sound, ptr @pas.tdog.describe]
 ; PROG-DAG: declare void @"pas.animals$tanimal.speak"(ptr, ptr)
