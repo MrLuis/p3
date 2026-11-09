@@ -430,6 +430,7 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
     case Type::TK_Class: // a reference to the object
       return B.getPtrTy();
     case Type::TK_Error:
+    case Type::TK_Untyped: // (untyped parameters are passed by reference)
       break;
     }
     llvm_unreachable("type has no storage representation");
@@ -903,7 +904,7 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
   /// Parameters passed as a pointer to the caller's variable: var
   /// parameters, and const parameters of string and structured types.
   static bool isByRef(VarDecl *V) {
-    return V->isVarParam() ||
+    return V->isVarParam() || V->getType()->isUntyped() ||
            (V->isConstParam() && V->getType()->isStructured());
   }
 
@@ -1089,6 +1090,9 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
     case Expr::EK_Paren:
       return emitAddress(llvm::cast<ParenExpr>(E)->getInner());
     case Expr::EK_Call:
+      if (auto *C = llvm::cast<CallExpr>(E); C->isVarCast())
+        return emitAddress(C->getArgs()[0]); // T(x) of an untyped x
+      [[fallthrough]];
     case Expr::EK_IndirectCall:
     case Expr::EK_Inherited:
       // A record (or string) function result: a temporary holding it.
@@ -1501,7 +1505,8 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
     if (HasSelf) // methods: Self after the static link
       ParamTys.push_back(B.getPtrTy());
     for (VarDecl *P : Params)
-      ParamTys.push_back(P->isVarParam() || P->getType()->isStructured()
+      ParamTys.push_back(P->isVarParam() || P->getType()->isStructured() ||
+                                 P->getType()->isUntyped()
                              ? B.getPtrTy()
                              : regType(P->getType()));
     llvm::Type *RetTy = Result ? regType(Result) : B.getVoidTy();
@@ -1519,7 +1524,7 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
   void declareExternal(RoutineDecl *R) {
     llvm::SmallVector<llvm::Type *, 8> ParamTys;
     for (VarDecl *P : R->getParams())
-      ParamTys.push_back(P->isVarParam() ||
+      ParamTys.push_back(P->isVarParam() || P->getType()->isUntyped() ||
                                  llvm::isa<RoutineType>(P->getType())
                              ? B.getPtrTy()
                              : regType(P->getType()));
@@ -1991,7 +1996,9 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
         continue;
       }
       VarDecl *P = Params[I];
-      if (llvm::Constant *CStr = cStringFor(P->getType(), Arg))
+      if (P->getType()->isUntyped()) // Turbo/FPC: a variable, by reference
+        Values.push_back(emitAddress(Arg));
+      else if (llvm::Constant *CStr = cStringFor(P->getType(), Arg))
         Values.push_back(CStr);
       else if (llvm::isa<RoutineType>(P->getType()) && ToC) {
         llvm::Value *Pair = emitRoutineValue(Arg);
@@ -4309,6 +4316,11 @@ public:
   }
 
   llvm::Value *visitCallExpr(CallExpr *E) {
+    if (E->isVarCast()) { // T(x) of an untyped parameter x
+      if (E->getType()->isShortString())
+        return emitAddress(E);
+      return loadScalar(emitAddress(E), E->getType());
+    }
     if (llvm::isa<TypeDecl>(E->getDecl()))
       return emitTypecast(E);
     if (auto *R = llvm::dyn_cast<RoutineDecl>(E->getDecl())) {

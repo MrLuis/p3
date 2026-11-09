@@ -64,7 +64,9 @@ type
   TTypeKind = (tyError, tyInteger, tyReal, tyBoolean, tyChar, tyEnum,
                tySubrange, tyStringLit, tyArray, tyRecord, tyPointer, tyNil,
                tySet, tyFile, tyRoutine, tyShortString, tyClass, tyClassRef,
-               tyInterface);
+               tyInterface,
+               { an untyped parameter's (Turbo/FPC  var x;  const x) }
+               tyUntyped);
 
   TType = record
     kind: TTypeKind;
@@ -139,7 +141,10 @@ type
         object of this with context (Self, or a with statement's) }
       nkCall, nkProcCall, nkIndirectCall, nkIndirectCallStmt:
         (callee: TIdent; args: TPtrList; hasParens: boolean;
-         calleeExpr: PNode; callDecl: PDecl; callWith: PWithContext);
+         calleeExpr: PNode; callDecl: PDecl; callWith: PWithContext;
+         { T(x) of an untyped parameter x (Sema): a variable of type T at
+           x's address }
+         isVarCast: boolean);
       nkFormatted: (fmtValue, fmtWidth, fmtPrecision: PNode);
       { index: base[index]; field: base.fieldName; fieldDecl is a field,
         or (objfpc) a method or property of a class }
@@ -231,7 +236,8 @@ type
 
   TTypeSpecKind = (tsNamed, tsEnum, tsSubrange, tsArray, tsRecord,
                    tsPointer, tsSet, tsFile, tsRoutine, tsString, tsClass,
-                   tsClassRef, tsInterface);
+                   tsClassRef, tsInterface,
+                   tsUntyped); { an untyped parameter's (absent) type }
 
   PVariantPart = ^TVariantPart;
 

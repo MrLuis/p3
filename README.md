@@ -260,6 +260,18 @@ and called through `cdecl` procedural variables; so can a `cdecl` external
 routine (not a `varargs` one, nor one taking callbacks). Not supported:
 records and strings by value, `index`, external variables (`cvar`).
 
+**Untyped parameters** (not in `--mode=iso`), as in Turbo and Free Pascal:
+`procedure Clear(var x; size: integer)`, `function Sum(const data; n:
+integer)`. Any variable is passed by reference. In the routine, the
+parameter is used through a typecast, which is a variable of that type at
+its address (`longint(x) := 0`, `TPoint(x).y`, `TBytes(x)[i]`; read-only
+for `const` ones), through its address (`@x`), or passed on to another
+untyped parameter or to `move` and `fillchar`; anything else is an error
+(also `sizeof(x)`, which Free Pascal makes 0). In overloads a typed
+parameter fits better. An external routine's untyped parameter is a C
+pointer (`function memcmp(const a; const b; n: int64): longint; cdecl;
+external 'c';`). Not supported: `out` parameters.
+
 **Initialized variables** (`--mode=objfpc`), as in Free Pascal:
 `var flag: boolean = false;`, one name per declaration, with a constant
 value of any type a typed constant accepts (ordinals, reals, chars,

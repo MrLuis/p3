@@ -199,6 +199,8 @@ std::string Type::getName() const {
   }
   case TK_Nil:
     return "nil";
+  case TK_Untyped:
+    return "untyped";
   case TK_ShortString: {
     unsigned N = llvm::cast<ShortStringType>(this)->getMaxLength();
     return N == 255 ? "string" : "string[" + std::to_string(N) + "]";

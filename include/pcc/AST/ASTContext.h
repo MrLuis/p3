@@ -38,6 +38,7 @@ class ASTContext {
   BuiltinType BooleanTy{Type::TK_Boolean};
   BuiltinType CharTy{Type::TK_Char};
   BuiltinType NilTy{Type::TK_Nil};
+  BuiltinType UntypedTy{Type::TK_Untyped};
   SetType EmptySetTy{nullptr};
   FileType TextTy{&CharTy, /*IsText=*/true};
   PointerType UntypedPointerTy{nullptr, /*Untyped=*/true};
@@ -64,6 +65,9 @@ public:
   Type *getBooleanType() { return &BooleanTy; }
   Type *getCharType() { return &CharTy; }
   Type *getNilType() { return &NilTy; }
+  /// The type of untyped parameters (var x; const x): usable only through
+  /// typecasts, @, and as arguments for untyped parameters.
+  Type *getUntypedType() { return &UntypedTy; }
   Type *getTextType() { return &TextTy; }
   Type *getUntypedPointerType() { return &UntypedPointerTy; }
   /// The type of a set constructor with elements of (host) type Element.

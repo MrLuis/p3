@@ -934,7 +934,7 @@ end;
 
 function isByRef(v: PDecl): boolean;
 begin
-  isByRef := (v^.varKind = vkVarParam) or
+  isByRef := (v^.varKind = vkVarParam) or (v^.varType^.kind = tyUntyped) or
              ((v^.varKind = vkConstParam) and isStructured(v^.varType));
 end;
 
@@ -1460,8 +1460,11 @@ begin
     nkStringLit: emitAddress := getNameConstant(e^.strValue);
     nkParen: emitAddress := emitAddress(e^.inner);
     nkCall, nkIndirectCall, nkInherited:
-      { a record or string function result: a temporary holding it }
-      emitAddress := visitExpr(e);
+      if (e^.kind = nkCall) and e^.isVarCast then
+        emitAddress := emitAddress(PNode(listGet(e^.args, 0))) { T(x) of an untyped x }
+      else
+        { a record or string function result: a temporary holding it }
+        emitAddress := visitExpr(e);
     nkIndex:
       if e^.idxProp <> nil then { a string or record value }
         emitAddress := emitArrayPropertyRead(e)
@@ -1839,7 +1842,9 @@ begin
     end;
     p := PDecl(listGet(params, i));
     pt := p^.varType;
-    if cStringFor(pt, arg, v) then
+    if pt^.kind = tyUntyped then { Turbo/FPC: a variable, by reference }
+      irArgsAdd(buf, emitAddress(arg))
+    else if cStringFor(pt, arg, v) then
       irArgsAdd(buf, v)
     else if (pt^.kind = tyRoutine) and toC then
       irArgsAdd(buf, irExtract(emitRoutineValue(arg), 0, irPtrT, ''))
@@ -3381,6 +3386,12 @@ function visitCall(e: PNode): TV;
 var
   d: PDecl;
 begin
+  if e^.isVarCast then { T(x) of an untyped parameter x }
+  begin
+    if e^.typ^.kind = tyShortString then
+      exit(emitAddress(e));
+    exit(loadScalar(emitAddress(e), e^.typ, ''));
+  end;
   d := e^.callDecl;
   case d^.kind of
     dkType: visitCall := emitTypecast(e);

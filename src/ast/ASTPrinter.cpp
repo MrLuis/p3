@@ -366,6 +366,10 @@ class ASTPrinter : public StmtVisitor<ASTPrinter>,
       line("NamedTypeSpec '") << llvm::cast<NamedTypeSpec>(TS)->getName().Name << '\'';
       loc(TS->getBeginLoc());
       return;
+    case TypeSpec::TS_Untyped:
+      line("UntypedTypeSpec");
+      loc(TS->getBeginLoc());
+      return;
     case TypeSpec::TS_Enum:
       line("EnumTypeSpec");
       loc(TS->getBeginLoc());

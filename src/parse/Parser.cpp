@@ -1414,12 +1414,21 @@ bool Parser::parseFormalParams(llvm::SmallVectorImpl<VarDecl *> &Params,
       IsConst = true;
     }
     llvm::SmallVector<Identifier, 4> Names;
-    if (!parseIdentList(Names, "parameter name") ||
-        !expect(tok::colon, "after parameter name")) {
+    if (!parseIdentList(Names, "parameter name")) {
       skipUntil({tok::semi, Close});
       continue;
     }
-    TypeSpec *TS = parseTypeIdentifier("parameter type");
+    TypeSpec *TS;
+    // Turbo/FPC untyped parameters:  var x;  const a, b
+    if ((IsVar || IsConst) && LangOpts.Mode != LangMode::ISO &&
+        Tok.isNot(tok::colon))
+      TS = Ctx.create<UntypedTypeSpec>(
+          SourceRange(Names.back().Loc, Names.back().getRange().getEnd()));
+    else if (!expect(tok::colon, "after parameter name")) {
+      skipUntil({tok::semi, Close});
+      continue;
+    } else
+      TS = parseTypeIdentifier("parameter type");
     if (!TS) {
       skipUntil({tok::semi, Close});
       continue;
@@ -2145,9 +2154,10 @@ Stmt *Parser::parseAssignmentOrCall() {
   if (HasParens)
     parseActualParams(Args, /*AllowFormat=*/true);
 
-  // objfpc: selectors after a call or typecast, TFoo(x).Show; f(1)^.n := 2;
-  if (HasParens && LangOpts.ObjKeywords &&
-      Tok.isOneOf(tok::l_square, tok::period, tok::caret)) {
+  // Turbo/FPC: a typecast assigned to, longint(x) := 1, or with selectors,
+  // TFoo(x).Show; f(1)^.n := 2;
+  if (HasParens && LangOpts.Mode != LangMode::ISO &&
+      Tok.isOneOf(tok::l_square, tok::period, tok::caret, tok::colon_equal)) {
     Expr *Call = Ctx.create<CallExpr>(SourceRange(Start, PrevTokEnd), Name,
                                       Ctx.copyArray<Expr *>(Args));
     Target = parseSelectors(Call);

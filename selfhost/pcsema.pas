@@ -62,6 +62,8 @@ var
   unitInterfaces: TIntMap;    { unit name id -> PScope }
   curUnitInterface: PScope;   { while checking a unit's implementation }
   curRoutine: PDecl;          { nil in the program block }
+  { check allows a value of an untyped parameter (checkAllowingUntyped) }
+  allowUntyped: boolean;
   activeFors: TPtrList;       { of PNode (nkFor), innermost last }
   loopDepth: longint;
   pendingPointers: TPtrList;  { of PPendingPointer }
@@ -922,14 +924,43 @@ end;
 function check(e: PNode): PType;
 var
   t: PType;
+  allow: boolean;
+  nameS: string;
 begin
+  allow := allowUntyped;
+  allowUntyped := false;
   if e^.typ <> nil then
     exit(e^.typ);
   t := visitExpr(e);
+  if (t^.kind = tyUntyped) and not allow then
+  begin
+    if e^.kind = nkNameRef then
+      nameS := nameStr(e^.ref.spelling)
+    else
+      nameS := '?';
+    ms('''' + nameS + ''' is an untyped parameter: use a typecast such as longint(');
+    if e^.kind = nkNameRef then
+      ma(nameS)
+    else
+      ma('x');
+    ma('), its address, or pass it to an untyped parameter');
+    errR(e^.b, nodeRange(e));
+    t := errorType;
+  end;
   e^.typ := t;
   if isManaged(t) then
     markUsesManaged;
   check := t;
+end;
+
+{ Untyped parameters (Turbo/FPC  var x;  const x) can only be typecast,
+  have their address taken, or be passed to untyped parameters (and to
+  move and fillchar): those operands are checked with this. }
+function checkAllowingUntyped(e: PNode): PType;
+begin
+  allowUntyped := true;
+  checkAllowingUntyped := check(e);
+  allowUntyped := false;
 end;
 
 { --- Type relations (ISO 7185 6.4.5 / 6.4.6) --- }
@@ -1058,6 +1089,8 @@ begin
       isVariableReference := (e^.idxProp = nil) and isVariableReference(e^.base);
     nkDeref:
       isVariableReference := true; { p^ is a variable even for a call's result }
+    nkCall:
+      isVariableReference := e^.isVarCast; { T(x) of an untyped parameter x }
   else
     isVariableReference := false;
   end;
@@ -1083,6 +1116,12 @@ begin
           e := e^.base;
         end;
       nkParen: e := e^.inner;
+      nkCall:
+        begin
+          if not e^.isVarCast then
+            exit(nil);
+          e := PNode(listGet(e^.args, 0)); { T(x): x }
+        end;
     else
       begin
         if (e^.kind = nkNameRef) and (e^.refDecl <> nil) and
@@ -1578,6 +1617,8 @@ var
 begin
   buildType := errorType;
   case ts^.kind of
+    tsUntyped:
+      buildType := tyUntypedT;
     tsNamed:
       begin
         d := lookup(ts^.tname.name);
@@ -4023,7 +4064,9 @@ begin
   for i := 0 to r^.params.count - 1 do
   begin
     p := PDecl(listGet(r^.params, i));
-    if (p^.varType = nil) or (p^.varKind = vkVarParam) then
+    { (an untyped parameter: a pointer, void * in C) }
+    if (p^.varType = nil) or (p^.varKind = vkVarParam) or
+       (p^.varType^.kind = tyUntyped) then
       continue;
     if p^.varType^.kind = tyRoutine then
     begin
@@ -4404,6 +4447,15 @@ begin
         exit;
       continue;
     end;
+    if pt^.kind = tyUntyped then { any variable, after the typed fits }
+    begin
+      if not isVariableReference(arg) then
+        exit;
+      cost := cost + 100;
+      continue;
+    end;
+    if at^.kind = tyUntyped then
+      exit;
     if p^.varKind = vkVarParam then
     begin
       if (at <> pt) or not isVariableReference(arg) then
@@ -4478,7 +4530,7 @@ begin
     if isRoutineName(a) then
       t := nil
     else
-      t := check(a);
+      t := checkAllowingUntyped(a);
     if (t <> nil) and isError(t) then
       exit;
     listAdd(argTys, t);
@@ -5182,6 +5234,22 @@ begin
     if (p^.varType <> nil) and (p^.varType^.kind = tyRoutine) then
     begin
       checkRoutineArg(arg, p, p^.varType);
+      continue;
+    end;
+    if (p^.varType <> nil) and (p^.varType^.kind = tyUntyped) then
+    begin
+      { Turbo/FPC: any variable, passed by reference }
+      if isError(checkAllowingUntyped(arg)) then
+        continue;
+      if not isVariableReference(arg) then
+      begin
+        ms('argument for untyped parameter ''');
+        maN(p^.ident.spelling);
+        ma(''' must be a variable');
+        errR(arg^.b, nodeRange(arg));
+      end
+      else if p^.varKind = vkVarParam then
+        checkModifiable(arg);
       continue;
     end;
     at := check(arg);

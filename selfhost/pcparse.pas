@@ -1648,6 +1648,7 @@ var
   resultSpec, ts: PTypeSpec;
   vk: TVarKind;
   i: longint;
+  lastName: PIdent;
 begin
   lparen := consumeToken; { '(' or '[' }
   repeat
@@ -1697,13 +1698,24 @@ begin
       isConst := true;
     end;
     listInit(names);
-    if not parseIdentList(names, 'parameter name') or
-       not expect(tkColon, 'after parameter name') then
+    if not parseIdentList(names, 'parameter name') then
     begin
       skipUntil([tkSemi, close]);
       continue;
     end;
-    ts := parseTypeIdentifier('parameter type');
+    { Turbo/FPC untyped parameters:  var x;  const a, b }
+    if (isVar or isConst) and (mode <> lmISO) and (tok.kind <> tkColon) then
+    begin
+      lastName := PIdent(listGet(names, names.count - 1));
+      ts := newTypeSpec(tsUntyped, lastName^.loc, identRange(lastName^).e);
+    end
+    else if not expect(tkColon, 'after parameter name') then
+    begin
+      skipUntil([tkSemi, close]);
+      continue;
+    end
+    else
+      ts := parseTypeIdentifier('parameter type');
     if ts = nil then
     begin
       skipUntil([tkSemi, close]);
@@ -2996,9 +3008,10 @@ begin
   if hasParens then
     parseActualParams(args, true);
 
-  { objfpc: selectors after a call or typecast, TFoo(x).Show; f(1)^.n := 2; }
-  if hasParens and (mode = lmObjFPC) and
-     (tok.kind in [tkLSquare, tkPeriod, tkCaret]) then
+  { Turbo/FPC: a typecast assigned to, longint(x) := 1, or with selectors,
+    TFoo(x).Show; f(1)^.n := 2; }
+  if hasParens and (mode <> lmISO) and
+     (tok.kind in [tkLSquare, tkPeriod, tkCaret, tkColonEqual]) then
   begin
     call := newNode(nkCall, start, prevTokEnd);
     call^.callee := name;

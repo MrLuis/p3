@@ -266,10 +266,15 @@ class CallExpr final : public Expr {
   /// Set by Sema for a method found through a class scope (objfpc): the
   /// object it is called on (Self, or the object of a `with`).
   WithContext *With = nullptr;
+  bool VarCast = false; ///< set by Sema: T(x) of an untyped parameter x
 
 public:
   CallExpr(SourceRange R, Identifier Callee, llvm::ArrayRef<Expr *> Args)
       : Expr(EK_Call, R), Callee(Callee), Args(Args) {}
+  /// A typecast of an untyped parameter (Turbo/FPC): a variable of the
+  /// type at the parameter's address.
+  bool isVarCast() const { return VarCast; }
+  void setVarCast() { VarCast = true; }
   const Identifier &getCallee() const { return Callee; }
   llvm::ArrayRef<Expr *> getArgs() const { return Args; }
   Decl *getDecl() const { return D; }
@@ -781,7 +786,8 @@ class TypeSpec {
 public:
   enum TypeSpecKind {
     TS_Named, TS_Enum, TS_Subrange, TS_Array, TS_Record, TS_Pointer, TS_Set,
-    TS_File, TS_Routine, TS_String, TS_Class, TS_ClassRef, TS_Interface
+    TS_File, TS_Routine, TS_String, TS_Class, TS_ClassRef, TS_Interface,
+    TS_Untyped
   };
 
 private:
@@ -935,6 +941,13 @@ public:
       : TypeSpec(TS_String, R), MaxLen(MaxLen) {}
   Expr *getMaxLength() const { return MaxLen; }
   static bool classof(const TypeSpec *T) { return T->getKind() == TS_String; }
+};
+
+/// The (absent) type of an untyped parameter:  var x;  const x  (Turbo/FPC)
+class UntypedTypeSpec final : public TypeSpec {
+public:
+  explicit UntypedTypeSpec(SourceRange R) : TypeSpec(TS_Untyped, R) {}
+  static bool classof(const TypeSpec *T) { return T->getKind() == TS_Untyped; }
 };
 
 /// [packed] file of Element

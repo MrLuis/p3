@@ -362,6 +362,11 @@ begin
         lineName('NamedTypeSpec ''', ts^.tname.name);
         loc(ts^.b);
       end;
+    tsUntyped:
+      begin
+        line('UntypedTypeSpec');
+        loc(ts^.b);
+      end;
     tsEnum:
       begin
         line('EnumTypeSpec');

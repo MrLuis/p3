@@ -552,12 +552,36 @@ class Checker : public StmtVisitor<Checker>,
 
   /// Type-checks E once (later calls return the cached type).
   Type *check(Expr *E) {
+    bool Allow = AllowUntyped;
+    AllowUntyped = false;
     if (Type *Cached = E->getType())
       return Cached;
     Type *T = visitExpr(E);
+    if (T->isUntyped() && !Allow) {
+      auto *N = llvm::dyn_cast<NameRefExpr>(E);
+      Diags.error(E->getBeginLoc(),
+                  "'" + (N ? N->getName().Spelling : llvm::StringRef("?")) +
+                      "' is an untyped parameter: use a typecast such as "
+                      "longint(" +
+                      (N ? N->getName().Spelling : llvm::StringRef("x")) +
+                      "), its address, or pass it to an untyped parameter",
+                  {E->getRange()});
+      T = errorType();
+    }
     E->setType(T);
     if (isManaged(T))
       markUsesManaged();
+    return T;
+  }
+
+  /// Untyped parameters (Turbo/FPC  var x;  const x) can only be typecast,
+  /// have their address taken, or be passed to untyped parameters (and to
+  /// move and fillchar): those operands are checked with this.
+  bool AllowUntyped = false;
+  Type *checkAllowingUntyped(Expr *E) {
+    AllowUntyped = true;
+    Type *T = check(E);
+    AllowUntyped = false;
     return T;
   }
 
@@ -687,6 +711,9 @@ class Checker : public StmtVisitor<Checker>,
         return llvm::isa_and_nonnull<FieldDecl>(F->getMember());
       return isVariableReference(F->getBase());
     }
+    // T(x) of an untyped parameter x (Turbo/FPC)
+    if (auto *C = llvm::dyn_cast<CallExpr>(E))
+      return C->isVarCast();
     // p^ is a variable even when p is a function result.
     return llvm::isa<DerefExpr>(E);
   }
@@ -711,6 +738,8 @@ class Checker : public StmtVisitor<Checker>,
         E = F->getBase();
       } else if (auto *P = llvm::dyn_cast<ParenExpr>(E)) {
         E = P->getInner();
+      } else if (auto *C = llvm::dyn_cast<CallExpr>(E); C && C->isVarCast()) {
+        E = C->getArgs()[0]; // T(x): x
       } else {
         auto *N = llvm::dyn_cast<NameRefExpr>(E);
         auto *V = N ? llvm::dyn_cast_or_null<VarDecl>(N->getDecl()) : nullptr;
@@ -995,6 +1024,8 @@ class Checker : public StmtVisitor<Checker>,
 
   Type *buildType(TypeSpec *TS) {
     switch (TS->getKind()) {
+    case TypeSpec::TS_Untyped:
+      return Ctx.getUntypedType();
     case TypeSpec::TS_Named: {
       const Identifier &Id = llvm::cast<NamedTypeSpec>(TS)->getName();
       Decl *D = Cur->lookup(Id.Name);
@@ -2916,6 +2947,14 @@ class Checker : public StmtVisitor<Checker>,
           return -1;
         continue;
       }
+      if (PT->isUntyped()) { // any variable, after the typed fits
+        if (!isVariableReference(Args[I]))
+          return -1;
+        Cost += 100;
+        continue;
+      }
+      if (AT->isUntyped())
+        return -1;
       if (Params[I]->isVarParam()) {
         if (AT != PT || !isVariableReference(Args[I]))
           return -1;
@@ -2944,7 +2983,7 @@ class Checker : public StmtVisitor<Checker>,
     for (Expr *A : Args) {
       if (llvm::isa<FormattedExpr>(A))
         return First; // reported with the call's arguments
-      Type *T = isRoutineName(A) ? nullptr : check(A);
+      Type *T = isRoutineName(A) ? nullptr : checkAllowingUntyped(A);
       if (T && T->isError())
         return nullptr;
       ArgTys.push_back(T);
@@ -3058,7 +3097,8 @@ class Checker : public StmtVisitor<Checker>,
                       "' must be 'cdecl'",
                   {R->getName().getRange()});
     for (VarDecl *P : R->getParams()) {
-      if (!P->getType() || P->isVarParam())
+      // (an untyped parameter: a pointer, `void *` in C)
+      if (!P->getType() || P->isVarParam() || P->getType()->isUntyped())
         continue;
       if (auto *RT = llvm::dyn_cast<RoutineType>(P->getType())) {
         if (!isCCallback(RT))
@@ -3580,6 +3620,19 @@ class Checker : public StmtVisitor<Checker>,
         checkRoutineArg(Arg, P, RT);
         continue;
       }
+      if (P->getType() && P->getType()->isUntyped()) {
+        // Turbo/FPC: any variable, passed by reference
+        if (checkAllowingUntyped(Arg)->isError())
+          continue;
+        if (!isVariableReference(Arg))
+          Diags.error(Arg->getBeginLoc(),
+                      "argument for untyped parameter '" +
+                          P->getName().Spelling + "' must be a variable",
+                      {Arg->getRange()});
+        else if (P->isVarParam())
+          checkModifiable(Arg);
+        continue;
+      }
       Type *AT = check(Arg);
       Type *PT = P->getType();
       if (AT->isError() || !PT || PT->isError())
@@ -4066,9 +4119,13 @@ class Checker : public StmtVisitor<Checker>,
         check(A);
       return errorType();
     }
-    Type *AT = check(Args[0]);
+    Type *AT = checkAllowingUntyped(Args[0]);
     if (T->isError() || AT->isError())
       return errorType();
+    if (AT->isUntyped()) { // Turbo/FPC: the untyped parameter seen as a T
+      E->setVarCast();
+      return T;
+    }
     if ((T->isOrdinal() && AT->isOrdinal()) ||
         (T->isPointer() && (AT->isPointer() || AT->isNil() || AT->isClass())) ||
         (T->isClass() && (AT->isClass() || AT->isPointer() || AT->isNil())) ||
@@ -4241,8 +4298,11 @@ class Checker : public StmtVisitor<Checker>,
                     {A->getRange()});
     };
     llvm::SmallVector<Type *, 3> T;
-    for (Expr *A : Args)
-      T.push_back(check(A));
+    for (size_t I = 0; I < Args.size(); ++I) // (variables: untyped ones too)
+      T.push_back((K == BuiltinKind::FillChar && I == 0) ||
+                          (K == BuiltinKind::Move && I < 2)
+                      ? checkAllowingUntyped(Args[I])
+                      : check(Args[I]));
     for (Type *X : T)
       if (X->isError())
         return;
@@ -4683,6 +4743,16 @@ public:
       }
     }
 
+    if (TargetTy->isUntyped()) {
+      Diags.error(Target->getBeginLoc(),
+                  "cannot assign to untyped parameter '" +
+                      llvm::cast<NameRefExpr>(Target)->getName().Spelling +
+                      "'; assign to a typecast such as longint(" +
+                      llvm::cast<NameRefExpr>(Target)->getName().Spelling + ")",
+                  {Target->getRange()});
+      check(S->getValue());
+      return;
+    }
     Type *ValueTy = checkValueFor(TargetTy, S->getValue());
     if (TargetTy->isError() || ValueTy->isError())
       return;
@@ -5594,7 +5664,7 @@ public:
         N->setType(T);
         return T;
       }
-    Type *T = check(E->getOperand());
+    Type *T = checkAllowingUntyped(E->getOperand()); // (@x of an untyped x too)
     if (T->isError())
       return errorType();
     if (!isVariableReference(E->getOperand())) {

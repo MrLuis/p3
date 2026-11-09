@@ -55,6 +55,7 @@ public:
     TK_Class,    ///< class ... end (objfpc): a reference to an object
     TK_ClassRef, ///< class of T (objfpc): a reference to a class (its VMT)
     TK_Interface, ///< interface ... end (objfpc): {object, method table}
+    TK_Untyped,  ///< an untyped parameter's (Turbo/FPC `var x`, `const x`)
   };
 
 private:
@@ -79,6 +80,7 @@ public:
   bool isRecord() const { return Kind == TK_Record; }
   bool isPointer() const { return Kind == TK_Pointer; }
   bool isNil() const { return Kind == TK_Nil; }
+  bool isUntyped() const { return Kind == TK_Untyped; }
   bool isSet() const { return Kind == TK_Set; }
   bool isFile() const { return Kind == TK_File; }
   bool isShortString() const { return Kind == TK_ShortString; }
@@ -138,7 +140,7 @@ public:
   static bool classof(const Type *T) {
     switch (T->getKind()) {
     case TK_Error: case TK_Integer: case TK_Real: case TK_Boolean: case TK_Char:
-    case TK_Nil:
+    case TK_Nil: case TK_Untyped:
       return true;
     default:
       return false;

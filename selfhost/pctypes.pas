@@ -17,6 +17,9 @@ var
   tyErrorT, tyIntegerT, tyInt64T, tyCardinalT, tyByteT, tyWordT,
   tyShortIntT, tySmallIntT, tyRealT, tyBooleanT, tyCharT, tyNilT,
   tyEmptySetT, tyTextT, tyUntypedPointerT: PType;
+  { the type of untyped parameters (var x; const x): usable only through
+    typecasts, @, and as arguments for untyped parameters }
+  tyUntypedT: PType;
 
 procedure initTypes;
 function newType(kind: TTypeKind): PType;
@@ -300,6 +303,7 @@ begin
   tyBooleanT := newType(tyBoolean);
   tyCharT := newType(tyChar);
   tyNilT := newType(tyNil);
+  tyUntypedT := newType(tyUntyped);
   tyEmptySetT := newSetType(nil);
   tyTextT := newFileType(tyCharT);
   tyTextT^.isText := true;
@@ -358,7 +362,8 @@ end;
 
 function isBuiltinType(t: PType): boolean;
 begin
-  isBuiltinType := t^.kind in [tyError, tyInteger, tyReal, tyBoolean, tyChar, tyNil];
+  isBuiltinType := t^.kind in [tyError, tyInteger, tyReal, tyBoolean, tyChar, tyNil,
+                               tyUntyped];
 end;
 
 function isOrdinal(t: PType): boolean;
@@ -722,6 +727,7 @@ begin
           bufAddChar(b, '?');
       end;
     tyNil: bufAdd(b, 'nil');
+    tyUntyped: bufAdd(b, 'untyped');
     tyClass: bufAdd(b, 'class');
     tyClassRef:
       begin

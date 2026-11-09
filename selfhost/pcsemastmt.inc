@@ -500,10 +500,13 @@ begin
       check(PNode(listGet(s^.args, i)));
     exit;
   end;
-  for i := 0 to want - 1 do
+  for i := 0 to want - 1 do { (variables: untyped ones too) }
   begin
     a[i] := PNode(listGet(s^.args, i));
-    t[i] := check(a[i]);
+    if ((k = bkFillChar) and (i = 0)) or ((k = bkMove) and (i < 2)) then
+      t[i] := checkAllowingUntyped(a[i])
+    else
+      t[i] := check(a[i]);
   end;
   for i := 0 to want - 1 do
     if isError(t[i]) then
@@ -760,9 +763,14 @@ begin
       check(argNode(e, i));
     exit;
   end;
-  at := check(argNode(e, 0));
+  at := checkAllowingUntyped(argNode(e, 0));
   if isError(t) or isError(at) then
     exit;
+  if at^.kind = tyUntyped then { Turbo/FPC: the untyped parameter seen as a t }
+  begin
+    e^.isVarCast := true;
+    exit(t);
+  end;
   if (isOrdinal(t) and isOrdinal(at)) or
      ((t^.kind = tyPointer) and (at^.kind in [tyPointer, tyNil, tyClass])) or
      ((t^.kind = tyClass) and (at^.kind in [tyClass, tyPointer, tyNil])) or
@@ -2010,6 +2018,17 @@ begin
       targetTy := errorType;
     end;
   end;
+  if targetTy^.kind = tyUntyped then
+  begin
+    ms('cannot assign to untyped parameter ''');
+    maN(target^.ref.spelling);
+    ma('''; assign to a typecast such as longint(');
+    maN(target^.ref.spelling);
+    ma(')');
+    errR(target^.b, nodeRange(target));
+    check(s^.value);
+    exit;
+  end;
   valueTy := checkValueFor(targetTy, s^.value);
   if isError(targetTy) or isError(valueTy) then
     exit;
@@ -2979,7 +2998,7 @@ begin
       exit(t);
     end;
   end;
-  t := check(op);
+  t := checkAllowingUntyped(op); { (@x of an untyped x too) }
   if isError(t) then
     exit;
   if not isVariableReference(op) then
