@@ -1,0 +1,16 @@
+TRUE 41 10000000000 2.50 q 1 7
+hello abc 5 12 origin 0
+42 bye
+  depth 0: 100 FALSE > 5local total 1 inner 6
+  depth 1: 100 FALSE > 5local total 2 inner 6
+  depth 2: 100 FALSE > 5local total 3 inner 6
+  back at 2: 101 TRUE >> 0changed
+  back at 1: 101 TRUE >> 0changed
+  back at 0: 101 TRUE >> 0changed
+  depth 0: 100 FALSE > 5local total 4 inner 6
+  depth 1: 100 FALSE > 5local total 5 inner 6
+  depth 2: 100 FALSE > 5local total 6 inner 6
+  back at 2: 101 TRUE >> 0changed
+  back at 1: 101 TRUE >> 0changed
+  back at 0: 101 TRUE >> 0changed
+11 11

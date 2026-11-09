@@ -76,6 +76,14 @@ end;
 procedure endExpr(e: PNode);
 begin
   typeSuffix(e^.typ);
+  if e^.convOp <> nil then { a record's := / Explicit }
+  begin
+    bufAdd(outBuf, ' converted by ''');
+    bufAddName(outBuf, e^.convOp^.ident.name);
+    bufAddChar(outBuf, '''');
+    if e^.convOp^.overloadIndex <> 0 then
+      bufAdd(outBuf, ' #' + intToStr(e^.convOp^.overloadIndex));
+  end;
   loc(e^.b);
 end;
 
@@ -101,6 +109,8 @@ begin
         declKindName := 'constructor'
       else if d^.methodKind = mtDestructor then
         declKindName := 'destructor'
+      else if d^.methodKind = mtOperator then
+        declKindName := 'operator'
       else if d^.isFunction then
         declKindName := 'function'
       else
@@ -213,8 +223,45 @@ begin
     bufAdd(outBuf, ' #' + intToStr(d^.overloadIndex));
 end;
 
+{ a record's class operator implementing an operation (Sema) }
+procedure operatorOf(op: PDecl; negated: boolean);
+begin
+  if op = nil then
+    exit;
+  if negated then
+    bufAdd(outBuf, ' not by ''')
+  else
+    bufAdd(outBuf, ' by ''');
+  bufAddName(outBuf, op^.ident.name);
+  bufAddChar(outBuf, '''');
+  overloadNumber(op);
+end;
+
+{ hint directives (deprecated 'message', experimental, ...) }
+procedure hintsSuffix(d: PDecl);
+begin
+  if (d^.hints and hintDeprecated) <> 0 then
+  begin
+    bufAdd(outBuf, ' deprecated');
+    if d^.hintMessage <> nil then
+    begin
+      bufAddChar(outBuf, ' ');
+      quoted(d^.hintMessage);
+    end;
+  end;
+  if (d^.hints and hintExperimental) <> 0 then
+    bufAdd(outBuf, ' experimental');
+  if (d^.hints and hintPlatform) <> 0 then
+    bufAdd(outBuf, ' platform');
+  if (d^.hints and hintLibrary) <> 0 then
+    bufAdd(outBuf, ' library');
+  if (d^.hints and hintUnimplemented) <> 0 then
+    bufAdd(outBuf, ' unimplemented');
+end;
+
 procedure visibilitySuffix(d: PDecl);
 begin
+  hintsSuffix(d);
   case d^.vis of
     vsPublished: bufAdd(outBuf, ' published');
     vsProtected: bufAdd(outBuf, ' protected');
@@ -260,6 +307,7 @@ begin
   begin
     f := PDecl(listGet(fl^.fixed, i));
     lineName('FieldDecl ''', f^.ident.name);
+    visibilitySuffix(f);
     loc(f^.loc);
     indent := indent + 2;
     printTypeSpec(f^.fieldSpec);
@@ -358,6 +406,8 @@ begin
         loc(ts^.b);
         indent := indent + 2;
         printFieldList(ts^.fields);
+        for i := 0 to ts^.recMembers.count - 1 do { an advanced record's }
+          printDecl(PDecl(listGet(ts^.recMembers, i)));
         indent := indent - 2;
       end;
     tsPointer:
@@ -382,6 +432,8 @@ begin
           line('RoutineTypeSpec function')
         else
           line('RoutineTypeSpec procedure');
+        if ts^.rtCallConv <> ccDefault then
+          bufAdd(outBuf, ' ' + callConvName(ts^.rtCallConv));
         loc(ts^.b);
         indent := indent + 2;
         for i := 0 to ts^.rtParams.count - 1 do
@@ -502,6 +554,7 @@ begin
         lineName('ConstDecl ''', d^.ident.name);
         typeSuffix(d^.constType);
         printConstValue(d^.constValue);
+        hintsSuffix(d);
         loc(d^.loc);
         { before Sema the constant has no value: show its expression }
         if (d^.constType = nil) and (d^.constInit <> nil) then
@@ -519,6 +572,7 @@ begin
           bufAdd(outBuf, ' = ');
           addDescribedType(d^.declType);
         end;
+        hintsSuffix(d);
         loc(d^.loc);
         if parseTree then
         begin
@@ -548,12 +602,16 @@ begin
           end;
           if d^.isClassVar then
             bufAdd(outBuf, ' class');
+          if d^.isInitVar then
+            bufAdd(outBuf, ' initialized');
           visibilitySuffix(d);
           loc(d^.loc);
           exit;
         end;
         if d^.isClassVar then
           bufAdd(outBuf, ' class');
+        if d^.isInitVar then
+          bufAdd(outBuf, ' initialized');
         visibilitySuffix(d);
         loc(d^.loc);
         indent := indent + 2;
@@ -574,6 +632,8 @@ begin
           kindPrefix := 'ConstructorDecl '''
         else if d^.methodKind = mtDestructor then
           kindPrefix := 'DestructorDecl '''
+        else if d^.methodKind = mtOperator then
+          kindPrefix := 'OperatorDecl '''
         else if d^.isFunction then
           kindPrefix := 'FunctionDecl '''
         else
@@ -598,17 +658,37 @@ begin
           bufAdd(outBuf, ' abstract');
         if d^.hasOverloadDirective then
           bufAdd(outBuf, ' overload');
+        if d^.isInline then
+          bufAdd(outBuf, ' inline');
+        if d^.callConv <> ccDefault then
+          bufAdd(outBuf, ' ' + callConvName(d^.callConv));
         overloadNumber(d);
         if d^.isForward then
           bufAdd(outBuf, ' forward');
         if d^.isExternal then
         begin
-          bufAdd(outBuf, ' external ''');
-          if (d^.externalName = nil) or (d^.externalName^.len = 0) then
-            bufAddName(outBuf, d^.ident.spelling)
-          else
+          bufAdd(outBuf, ' external');
+          { (a symbol name given as a constant: known after Sema) }
+          if (d^.externalName <> nil) and (d^.externalName^.len > 0) then
+          begin
+            bufAdd(outBuf, ' ''');
             bufAddName(outBuf, d^.externalName);
-          bufAddChar(outBuf, '''');
+            bufAddChar(outBuf, '''');
+          end
+          else if d^.nameExpr = nil then
+          begin
+            bufAdd(outBuf, ' ''');
+            bufAddName(outBuf, d^.ident.spelling);
+            bufAddChar(outBuf, '''');
+          end;
+          if (d^.libraryName <> nil) and (d^.libraryName^.len > 0) then
+          begin
+            bufAdd(outBuf, ' in ''');
+            bufAddName(outBuf, d^.libraryName);
+            bufAddChar(outBuf, '''');
+          end;
+          if d^.isVarArgs then
+            bufAdd(outBuf, ' varargs');
         end;
         if d^.canonical <> nil then
           bufAdd(outBuf, ' definition');
@@ -623,6 +703,25 @@ begin
           loc(d^.resultSpec^.b);
           indent := indent + 2;
           printTypeSpec(d^.resultSpec);
+          indent := indent - 2;
+        end;
+        { external library and name constants (not literals) }
+        if parseTree and (d^.libraryExpr <> nil) and
+           (d^.libraryExpr^.kind <> nkStringLit) then
+        begin
+          line('ExternalLibrary');
+          loc(d^.libraryExpr^.b);
+          indent := indent + 2;
+          visitExpr(d^.libraryExpr);
+          indent := indent - 2;
+        end;
+        if parseTree and (d^.nameExpr <> nil) and
+           (d^.nameExpr^.kind <> nkStringLit) then
+        begin
+          line('ExternalName');
+          loc(d^.nameExpr^.b);
+          indent := indent + 2;
+          visitExpr(d^.nameExpr);
           indent := indent - 2;
         end;
         if (d^.body <> nil) and not d^.isForward then
@@ -1070,6 +1169,7 @@ begin
     nkUnary:
       begin
         line('UnaryExpr ''' + unaryOpSpelling(e^.uop) + '''');
+        operatorOf(e^.uopDecl, false);
         endExpr(e);
         indent := indent + 2;
         visitExpr(e^.operand);
@@ -1078,6 +1178,7 @@ begin
     nkBinary:
       begin
         line('BinaryExpr ''' + binaryOpSpelling(e^.bop) + '''');
+        operatorOf(e^.opDecl, e^.opNegated);
         endExpr(e);
         indent := indent + 2;
         visitExpr(e^.lhs);

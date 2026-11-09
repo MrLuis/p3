@@ -28,7 +28,7 @@ types `longint int64 cardinal byte word shortint smallint` (FPC widening
 rules); typecasts `T(x)`; `pointer`, `pchar`, `@`, `getmem freemem
 reallocmem fillchar move sizeof low high assigned`; `const` parameters;
 procedural types; typed constants including arrays and records; external C
-functions (`cdecl; external 'c' name 'strlen'`); `{$I file}`; `paramcount
+functions (`cdecl; external 'c' name 'strlen'`, see below); `{$I file}`; `paramcount
 paramstr halt`. This is the dialect the self-hosted compiler is written in
 (see [SELFHOST.md](SELFHOST.md) and [selfhost/DIALECT.md](selfhost/DIALECT.md)).
 
@@ -127,6 +127,36 @@ as are a failed `as` and calling an abstract method.
   end; `QueryInterface`, `_AddRef` and `_Release` are not declared (the
   compiled code counts references itself).
 
+- **Advanced records** (`{$modeswitch advancedrecords}`, as in Free
+  Pascal): records with `private` / `public` / `strict private` sections,
+  methods (`Self` is the record, by reference), constructors with
+  parameters (`TR.Create(...)` gives a new record), static class methods
+  (`class function F: T; static;`), properties and overloaded methods.
+  Methods can be called on variables, fields, array elements, function
+  results and through `with`. Class operators: `class operator +(const a,
+  b: TR): TR;` for `+ - * / div mod and or xor shl shr = <> < > <= >= in`,
+  unary `- + not`, `:=` (implicit conversions, used in assignments,
+  arguments, results and other operators' operands) and `Explicit`
+  (casts `T(x)`). `<>` falls back to `not =`. A record with methods must
+  be a named type declared at program or unit level.
+  Not supported: class variables, nested types and constants, and default
+  properties in records; Free Pascal's global `operator` declarations.
+
+```pascal
+{$modeswitch advancedrecords}
+type
+  TVec = record
+    X, Y: integer;
+    constructor Create(ax, ay: integer);
+    function Len2: integer;
+    class operator +(const a, b: TVec): TVec;
+    class operator :=(k: integer): TVec;
+  end;
+...
+  v := TVec.Create(1, 2) + 3;    { 3 becomes TVec via := }
+  writeln(v.Len2);
+```
+
 Not supported (reported as such): class properties, class constructors
 and destructors, `stored`, `implements`, properties in interfaces.
 
@@ -181,6 +211,62 @@ pcc --mode=tp -I lib -fseparate-units main.pas -o main
 
 `-L dir` and `-l name` pass library options to the linker.
 
+**Inline routines**, as in Free Pascal: `function Sq(x: integer):
+integer; inline;` (also methods and record operators). The routine gets
+LLVM's `inlinehint`, so it is inlined from `-O1` up when LLVM can (not
+recursive calls); `-O0` keeps the calls, for debugging. `{$inline on}` is
+the default in `--mode=objfpc`; in tp mode the directive needs it, and
+`{$inline off}` makes it have no effect. `inline` cannot go with
+`forward`, `external` or `virtual`/`override`/`abstract`. Separately
+compiled units are not inlined into their users.
+
+**Hint directives** (not in `--mode=iso`), as in Free Pascal: `deprecated`
+(optionally with a message: `deprecated 'use Bar'`), `experimental`,
+`platform`, `library` and `unimplemented` after a constant, type, variable,
+field, property, routine or method declaration (`procedure Foo; deprecated;`,
+`TOld = record ... end deprecated;`, `x: integer platform;`). Each use of the
+entity, here or in a unit that uses it, gets a warning (`'Foo' is deprecated:
+use Bar`) and a note where it is declared. A directive only on a routine's
+implementation has no effect, as in FPC. `-Wno-deprecated` silences these
+warnings; `-Werror` makes them errors.
+
+**Calling conventions** (not in `--mode=iso`): `cdecl` and `stdcall` on
+routines (also `forward`, `external` and unit interface headings), methods,
+interface methods and procedural types (`TCb = function(x: integer):
+integer; stdcall;`). pcc calls every routine with the target's C
+convention; a `cdecl` routine's procedural values can also be called from C
+(see external routines). As in Free Pascal on 64-bit targets, `stdcall` is the default
+convention and `cdecl` a different one: a routine's heading and
+implementation, an override and the method it overrides (an override
+without a directive inherits it), an interface method and its
+implementation, and a procedural value and its type must agree on `cdecl`.
+Not supported: `stdcall`'s different code on 32-bit x86 targets (`register`,
+`pascal` and `safecall` are not recognized either).
+
+**External routines** (C functions; not in `--mode=iso`), as in Free
+Pascal: `function strlen(s: pchar): int64; cdecl; external 'c';` declares a
+C function (at program or unit level, in a unit's interface too). After
+`external`, an optional library and `name 'symbol'` (else the routine's
+name, as spelled) are string constants, literal or named (`external libc
+name 'abs'`). The library is linked with the program, also when it comes
+from a unit: `-lz` for `external 'z'`, `-l:libz.so.1` for a file name.
+Parameters and results have C types: integers, chars, reals, pointers,
+`var` parameters, and callbacks (a `cdecl` procedural type of such
+types). `varargs` (with `cdecl`) declares a variadic function such as
+`printf`: further arguments may be ordinals (passed as at least `int`),
+reals (`double`), pointers or string constants (C strings). A `cdecl`
+routine at program or unit level can be passed to C (`qsort(..., @Compare)`)
+and called through `cdecl` procedural variables; so can a `cdecl` external
+routine (not a `varargs` one, nor one taking callbacks). Not supported:
+records and strings by value, `index`, external variables (`cvar`).
+
+**Initialized variables** (`--mode=objfpc`), as in Free Pascal:
+`var flag: boolean = false;`, one name per declaration, with a constant
+value of any type a typed constant accepts (ordinals, reals, chars,
+strings, arrays, records). Program and unit variables start with their
+values; a routine's are set again whenever it is called (unlike typed
+constants, which keep their values between calls).
+
 **Conditional compilation** (every mode), as in Free Pascal:
 
 ```pascal
@@ -195,16 +281,29 @@ pcc --mode=tp -I lib -fseparate-units main.pas -o main
 {$ENDIF}                         { or $IFEND }
 ```
 
-`$DEFINE`, `$UNDEF`, `$IFDEF`, `$IFNDEF`, `$IF` / `$ELSEIF` (expressions of
-`defined(NAME)`, `true`, `false`, `not`, `and`, `or` and parentheses),
-`$ELSE`, `$ENDIF` and `$IFEND`; symbols are case-insensitive. `PCC` is
+`$DEFINE`, `$UNDEF`, `$IFDEF`, `$IFNDEF`, `$IF` / `$ELSEIF`, `$ELSE`,
+`$ENDIF` and `$IFEND`; symbols are case-insensitive. `$IF` expressions
+follow Pascal's precedence: integers (decimal, `$hex`), `'strings'`,
+`true`, `false`, `defined(NAME)`, macros, `not`, `* div mod and`,
+`+ - or`, and one comparison (`= <> < > <= >=`) or `in [a, b, lo..hi]`. `PCC` is
 predefined, and so is one of `PCC_ISO`, `PCC_TP` and `PCC_OBJFPC` (the
 mode). Each file (program or unit) starts with only these and the `-d`
 symbols; an include file shares its includer's symbols, and a conditional
 must end in the file that starts it. The text of a branch that is not
 compiled is only scanned for comments, strings and conditional
-directives. Macros (`{$DEFINE X := 1}`), `$IFOPT` and other `$IF`
-expressions are not supported.
+directives. `$IFOPT` is not supported.
+
+**Macros**, as in Free Pascal: after `{$macro on}`, `{$define NAME :=
+value}` makes each later use of `NAME` (case-insensitive) stand for the
+tokens of `value`, expanded when used (so a macro in another's value takes
+its value at that time); `{$undef NAME}` and `{$macro off}` end that. A
+macro is also defined for `$ifdef`. In `$IF`, a macro's value is an
+integer or a string if its text is such a literal, the value of the macro
+it names, or else its text as a string. Expanded tokens keep the locations
+of the macro's value (in its `$define`). Without `{$macro on}`, `{$define
+NAME := value}` warns and defines `NAME` without a value. Free Pascal
+compares strings in `$IF` by length only; pcc compares them as strings.
+Not supported: macro values on the command line (`-dNAME:=value`).
 
 **Self-hosting:** pcc is also written in Pascal ([selfhost/](selfhost/),
 [SELFHOST.md](SELFHOST.md)); `ninja -C build check-bootstrap` builds it with

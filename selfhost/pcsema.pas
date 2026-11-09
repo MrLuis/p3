@@ -90,6 +90,12 @@ var
   { COM interfaces (objfpc): IUnknown (= IInterface), their root, and
     TInterfacedObject, the root of the classes implementing them }
   iunknownType, interfacedType: PType;
+  { the advanced record being declared by a type declaration (records with
+    methods must be named, so others are rejected) }
+  namedAdvancedRecord: PTypeSpec;
+  { what a typed constant's or initialized variable's value is called in
+    diagnostics (... must be a constant) }
+  constInitWhat: string;
   { class of C for each class C (by type id): the type of C used as a
     value and of Self in class methods }
   classRefs: TIntMap;
@@ -228,6 +234,15 @@ begin
   bufAddChar(msg, '''');
 end;
 
+{ A routine's calling convention in a message (see ccDefault). }
+procedure maCC(isCDeclConv: boolean);
+begin
+  if isCDeclConv then
+    ma('''cdecl''')
+  else
+    ma('''stdcall'' (the default)');
+end;
+
 procedure maI(v: int64);
 begin
   bufAddInt(msg, v);
@@ -280,6 +295,8 @@ begin
         kindName := 'constructor'
       else if d^.methodKind = mtDestructor then
         kindName := 'destructor'
+      else if d^.methodKind = mtOperator then
+        kindName := 'operator'
       else if d^.isFunction then
         kindName := 'function'
       else
@@ -420,8 +437,33 @@ begin
   ma('''?');
 end;
 
+procedure noteDeclaredHere(d: PDecl); forward;
+
 procedure diagUndeclared(const id: TIdent);
+var
+  r, d: PDecl;
+  owner: PType;
 begin
+  { in a record's static method, the record's instance members }
+  r := curRoutine;
+  while r <> nil do
+  begin
+    if r^.isStatic then
+    begin
+      d := findMember(r^.ownerClass, id.name, owner);
+      if d <> nil then
+      begin
+        ms('instance member ''');
+        maN(id.spelling);
+        ma(''' cannot be used in a static class method');
+        errR(id.loc, identRange(id));
+        noteDeclaredHere(d);
+        exit;
+      end;
+      break;
+    end;
+    r := r^.parent;
+  end;
   ms('use of undeclared identifier ''');
   maN(id.spelling);
   ma('''');
@@ -438,6 +480,46 @@ begin
     ma(''' declared here');
     note(d^.loc);
   end;
+end;
+
+{ A use (named id) of d: warnings for its hint directives (deprecated,
+  experimental, platform, library, unimplemented), as in Free Pascal. }
+procedure warnHints(d: PDecl; const id: TIdent);
+var
+  h: longint;
+
+  procedure warn(const what: string);
+  begin
+    ms('''');
+    maN(d^.ident.spelling);
+    ma('''' + what);
+    if what = ' is deprecated' then
+      if d^.hintMessage <> nil then
+      begin
+        ma(': ');
+        maN(d^.hintMessage);
+      end;
+    ma(' [-Wdeprecated]');
+    diagReportBuf(sevWarning, id.loc, msg, identRange(id), noRange);
+  end;
+
+begin
+  if d = nil then
+    exit;
+  h := d^.hints;
+  if (h = 0) or not diagWarningEnabled('deprecated') then
+    exit;
+  if (h and hintDeprecated) <> 0 then
+    warn(' is deprecated');
+  if (h and hintExperimental) <> 0 then
+    warn(' is experimental');
+  if (h and hintPlatform) <> 0 then
+    warn(' is not portable (platform-specific)');
+  if (h and hintLibrary) <> 0 then
+    warn(' belongs to a library');
+  if (h and hintUnimplemented) <> 0 then
+    warn(' is not implemented');
+  noteDeclaredHere(d);
 end;
 
 procedure declare(d: PDecl);
@@ -934,6 +1016,7 @@ begin
     if value^.kind = tyNil then
       exit(true);
     exit((value^.kind = tyRoutine) and
+         (value^.routineCDecl = target^.routineCDecl) and
          congruent(target^.routineParams, target^.routineResult,
                    value^.routineParams, value^.routineResult));
   end;
@@ -1498,6 +1581,8 @@ begin
     tsNamed:
       begin
         d := lookup(ts^.tname.name);
+        if (d <> nil) and (d^.kind = dkType) then
+          warnHints(d, ts^.tname);
         if d = nil then
         begin
           ms('unknown type name ''');
@@ -1637,7 +1722,7 @@ begin
             res := errorType;
           end;
         end;
-        buildType := newRoutineType(ts^.rtParams, res);
+        buildType := newRoutineType(ts^.rtParams, res, ts^.rtCallConv = ccCDecl);
       end;
     tsString:
       begin
@@ -1698,6 +1783,12 @@ begin
       end;
     tsRecord:
       begin
+        if (ts^.recMembers.count > 0) and (ts <> namedAdvancedRecord) then
+        begin
+          ms('methods are not allowed in anonymous or local records; declare ' +
+             'the record type in a ''type'' section at program or unit level');
+          errR(ts^.b, specRange(ts));
+        end;
         listInit(all);
         mapInit(seen);
         if not resolveFieldList(ts^.fields, all, seen) then
@@ -1777,9 +1868,16 @@ end;
 
 procedure declareClass(td: PDecl); forward;
 procedure declareInterface(td: PDecl); forward;
+procedure declareAdvancedRecord(td: PDecl); forward;
 
 procedure declareType(td: PDecl);
 begin
+  if (td^.typeSpec^.kind = tsRecord) and (td^.typeSpec^.recMembers.count > 0) and
+     (curRoutine = nil) then
+  begin
+    declareAdvancedRecord(td);
+    exit;
+  end;
   if td^.typeSpec^.kind = tsClass then
   begin
     declareClass(td);
@@ -1948,8 +2046,14 @@ var
 begin
   self_ := newDecl(dkVar, memberIdent('Self'), noLoc);
   self_^.varKind := vkValueParam;
-  { in a class method, Self is the class (a class reference) }
-  if r^.isClassMethod then
+  { a record's method gets the record by reference; in a class method,
+    Self is the class (a class reference) }
+  if c^.classRecord <> nil then
+  begin
+    self_^.varKind := vkVarParam;
+    self_^.varType := c^.classRecord;
+  end
+  else if r^.isClassMethod then
     self_^.varType := classRefOf(c)
   else
     self_^.varType := c;
@@ -2030,6 +2134,25 @@ begin
       noteDeclaredHere(inh);
       exit;
     end;
+    if r^.callConv = ccDefault then
+    begin
+      if isCDecl(inh) then
+        r^.inheritedCDecl := true; { as in Free Pascal }
+    end
+    else if isCDecl(r) <> isCDecl(inh) then
+    begin
+      ms('calling convention of ''');
+      maN(r^.ident.spelling);
+      ma(''' is ');
+      maCC(isCDecl(r));
+      ma(' but the method it overrides in ');
+      maT(owner);
+      ma(' is ');
+      maCC(isCDecl(inh));
+      errR(r^.ident.loc, identRange(r^.ident));
+      noteDeclaredHere(inh);
+      exit;
+    end;
     r^.vmtIndex := inh^.vmtIndex;
     listSet(vtable, inh^.vmtIndex, r);
     exit;
@@ -2050,7 +2173,7 @@ var
   owner: PType;
 begin
   d := PDecl(mapGet(own, id.name^.id));
-  if d = nil then
+  if (d = nil) and (parentClass <> nil) then
     d := findMember(parentClass, id.name, owner);
   if d = nil then
   begin
@@ -2547,7 +2670,8 @@ begin
         if (r^.methodKind = mtMethod) and not r^.isClassMethod and
            (r^.objMethod = obNone) and (r^.isFunction = m^.isFunction) and
            sameSignature(r, m) and
-           (not m^.isFunction or (r^.resultType = m^.resultType)) then
+           (not m^.isFunction or (r^.resultType = m^.resultType)) and
+           (isCDecl(r) = isCDecl(m)) then
           found := r;
         r := r^.nextOverload;
       end;
@@ -2779,11 +2903,436 @@ end;
 { procedure TFoo.Bar ...; begin ... end;  -- the body of a method. }
 procedure maRoutineHeading(r: PDecl); forward;
 
+{ --- Advanced records (objfpc, $modeswitch advancedrecords) --- }
+
+{ A class operator's parameters: two (binary), one (unary - + not, and the
+  conversions := and Explicit); no var parameters; the record among the
+  parameter or result types. }
+procedure checkOperatorHeading(r: PDecl; rt: PType);
+var
+  sym: string;
+  n, i: longint;
+  unary, either, hasRecord: boolean;
+  p: PDecl;
+begin
+  sym := copy(nameStr(r^.ident.name), 9, 255);
+  n := r^.params.count;
+  unary := (sym = 'not') or (sym = ':=') or (sym = 'explicit');
+  either := (sym = '-') or (sym = '+');
+  if (unary and (n <> 1)) or (not unary and either and (n <> 1) and (n <> 2)) or
+     (not unary and not either and (n <> 2)) then
+  begin
+    ms('''');
+    maN(r^.ident.spelling);
+    if unary then
+      ma(''' takes one parameter')
+    else if either then
+      ma(''' takes one or two parameters')
+    else
+      ma(''' takes two parameters');
+    errR(r^.ident.loc, identRange(r^.ident));
+    exit;
+  end;
+  hasRecord := r^.resultType = rt;
+  for i := 0 to r^.params.count - 1 do
+  begin
+    p := PDecl(listGet(r^.params, i));
+    if p^.varKind = vkVarParam then
+    begin
+      ms('the parameters of an operator cannot be ''var''');
+      errR(p^.loc, identRange(p^.ident));
+    end;
+    if p^.varType = rt then
+      hasRecord := true;
+  end;
+  if not hasRecord then
+  begin
+    ms('an operator of ');
+    maT(rt);
+    ma(' needs a parameter or result of that type');
+    errR(r^.ident.loc, identRange(r^.ident));
+  end;
+end;
+
+{ A method, class method (static) or class operator of record rt. }
+procedure defineRecordMethodT(c, rt: PType; r: PDecl);
+begin
+  r^.ownerClass := c;
+  r^.parent := nil;
+  r^.level := 1;
+  resolveSignature(r);
+  if r^.isVirtual or r^.isOverride or r^.isAbstract then
+  begin
+    ms('the methods of a record cannot be ''virtual'', ''override'' or ' +
+       '''abstract''');
+    errR(r^.ident.loc, identRange(r^.ident));
+  end;
+  if r^.isClassMethod then
+    r^.isStatic := true { no Self }
+  else
+    makeSelf(r, c);
+  if (r^.methodKind = mtConstructor) and (r^.params.count = 0) then
+  begin
+    ms('a record''s constructor needs parameters');
+    errR(r^.ident.loc, identRange(r^.ident));
+  end;
+  if r^.methodKind = mtOperator then
+    checkOperatorHeading(r, rt);
+end;
+
+procedure defineRecordMembers(rt: PType; ts: PTypeSpec);
+var
+  c: PType;
+  members, noVTable: TPtrList;
+  own: TIntMap;
+  i: longint;
+  f, m, prev, overloadOf: PDecl;
+begin
+  c := newClassType;
+  setDeclName(c, rt^.declName);
+  c^.classRecord := rt;
+  rt^.memberTable := c;
+  listInit(members);
+  mapInit(own);
+  for i := 0 to rt^.allFields.count - 1 do
+  begin
+    f := PDecl(listGet(rt^.allFields, i));
+    listAdd(members, f);
+    if mapGet(own, f^.ident.name^.id) = nil then
+      mapPut(own, f^.ident.name^.id, f);
+  end;
+  for i := 0 to ts^.recMembers.count - 1 do
+  begin
+    m := PDecl(listGet(ts^.recMembers, i));
+    overloadOf := nil;
+    prev := PDecl(mapGet(own, m^.ident.name^.id));
+    if prev <> nil then
+    begin
+      if prev^.kind = dkRoutine then
+        overloadOf := prev;
+      if (overloadOf = nil) or (m^.kind <> dkRoutine) then
+      begin
+        ms('redefinition of ''');
+        maN(m^.ident.spelling);
+        ma('''');
+        errR(m^.ident.loc, identRange(m^.ident));
+        ms('previous definition is here');
+        note(prev^.loc);
+        continue;
+      end;
+    end
+    else
+      mapPut(own, m^.ident.name^.id, m);
+    listAdd(members, m);
+    if m^.kind = dkRoutine then
+    begin
+      defineRecordMethodT(c, rt, m);
+      if (overloadOf <> nil) and not addOverload(overloadOf, m) then
+      begin
+        m^.ownerClass := nil; { rejected: not a member }
+        listPop(members);
+      end;
+      continue;
+    end;
+    if m^.propIsDefault then
+    begin
+      ms('a record cannot have a default property');
+      errR(m^.loc, identRange(m^.ident));
+    end;
+    definePropertyAccessors(c, nil, m, own);
+  end;
+  listInit(noVTable);
+  defineClass(c, nil, members, rt^.allFields, noVTable, curModule);
+end;
+
+{ TR = record fields; methods; operators; properties end; -- the record type
+  (its fields), then its member table }
+procedure declareAdvancedRecord(td: PDecl);
+var
+  saved: PTypeSpec;
+  t: PType;
+begin
+  saved := namedAdvancedRecord;
+  namedAdvancedRecord := td^.typeSpec;
+  t := resolveType(td^.typeSpec, td^.ident.spelling);
+  namedAdvancedRecord := saved;
+  td^.declType := t;
+  declare(td); { its methods' headings may name it }
+  if t^.kind = tyRecord then
+    defineRecordMembers(t, td^.typeSpec);
+end;
+
+function memberTableOf(t: PType): PType;
+begin
+  if (t <> nil) and (t^.kind = tyRecord) then
+    memberTableOf := t^.memberTable
+  else
+    memberTableOf := nil;
+end;
+
+procedure setConversion(n: PNode; op: PDecl; t: PType);
+begin
+  n^.convOp := op;
+  n^.convFrom := n^.typ;
+  n^.typ := t;
+end;
+
+{ A user-defined conversion of a value of type from_ to to_: a := operator
+  (explicit_: an Explicit one first) of either record whose parameter takes
+  from_ (exactly, else by assignment) and whose result is to_; nil if none. }
+function findConversion(from_, to_: PType; explicit_: boolean): PDecl;
+var
+  pass, side: longint;
+  name: string;
+  best, r: PDecl;
+  bestExact, exact: boolean;
+  t, mt, pt: PType;
+begin
+  findConversion := nil;
+  if (mode <> lmObjFPC) or (from_ = nil) or (to_ = nil) then
+    exit;
+  for pass := 1 to 2 do
+  begin
+    if pass = 1 then
+      name := 'operatorexplicit'
+    else
+      name := 'operator:=';
+    if (pass = 1) and not explicit_ then
+      continue;
+    best := nil;
+    bestExact := false;
+    for side := 1 to 2 do
+    begin
+      if side = 1 then
+        t := from_
+      else
+        t := to_;
+      mt := memberTableOf(t);
+      if (mt = nil) or ((t = to_) and (to_ = from_)) then
+        continue;
+      r := findOwnMember(mt, intern(name));
+      while r <> nil do
+      begin
+        pt := nil;
+        if r^.params.count = 1 then
+          pt := PDecl(listGet(r^.params, 0))^.varType;
+        if (r^.methodKind = mtOperator) and (pt <> nil) and (r^.resultType = to_) then
+        begin
+          exact := pt = from_;
+          if exact or isAssignable(pt, from_) then
+            if (best = nil) or (exact and not bestExact) then
+            begin
+              best := r;
+              bestExact := exact;
+            end;
+        end;
+        r := r^.nextOverload;
+      end;
+    end;
+    if best <> nil then
+      exit(best);
+  end;
+end;
+
+{ Converts value to t by a user-defined := operator if there is one. }
+function convertImplicitly(value: PNode; t: PType): boolean;
+var
+  op: PDecl;
+begin
+  op := findConversion(value^.typ, t, false);
+  if op = nil then
+    exit(false);
+  setConversion(value, op, t);
+  convertImplicitly := true;
+end;
+
+{ The class operator name of the records among args' types that fits args
+  best (exact types, then assignable ones, then ones converted by a :=
+  operator), with the conversions it needs annotated; nil if none fits.
+  found: whether either record has an operator name of that arity. }
+function resolveOperator(const name: string; const args: TPtrList;
+                         var found: boolean): PDecl;
+var
+  tables: TPtrList;
+  i, j, cost, bestCost: longint;
+  mt, pt, at: PType;
+  best, r: PDecl;
+  ok, seen: boolean;
+begin
+  listInit(tables);
+  for i := 0 to args.count - 1 do
+  begin
+    mt := memberTableOf(PNode(listGet(args, i))^.typ);
+    if mt <> nil then
+    begin
+      seen := false;
+      for j := 0 to tables.count - 1 do
+        if listGet(tables, j) = pointer(mt) then
+          seen := true;
+      if not seen then
+        listAdd(tables, mt);
+    end;
+  end;
+  best := nil;
+  bestCost := 0;
+  for j := 0 to tables.count - 1 do
+  begin
+    r := findOwnMember(PType(listGet(tables, j)), intern(name));
+    while r <> nil do
+    begin
+      if (r^.methodKind = mtOperator) and (r^.params.count = args.count) then
+      begin
+        found := true;
+        cost := 0;
+        ok := true;
+        i := 0;
+        while (i < args.count) and ok do
+        begin
+          pt := PDecl(listGet(r^.params, i))^.varType;
+          at := PNode(listGet(args, i))^.typ;
+          if (pt = nil) or isError(pt) then
+            ok := false
+          else if pt = at then
+          else if isAssignable(pt, at) then
+            cost := cost + 1
+          else if findConversion(at, pt, false) <> nil then
+            cost := cost + 100
+          else
+            ok := false;
+          i := i + 1;
+        end;
+        if ok and ((best = nil) or (cost < bestCost)) then
+        begin
+          best := r;
+          bestCost := cost;
+        end;
+      end;
+      r := r^.nextOverload;
+    end;
+  end;
+  if best <> nil then
+    for i := 0 to args.count - 1 do
+    begin
+      pt := PDecl(listGet(best^.params, i))^.varType;
+      at := PNode(listGet(args, i))^.typ;
+      if (pt <> at) and not isAssignable(pt, at) then
+        convertImplicitly(PNode(listGet(args, i)), pt);
+    end;
+  listFree(tables);
+  resolveOperator := best;
+end;
+
+function operatorSymbol(op: TBinaryOp): string;
+begin
+  case op of
+    boAdd: operatorSymbol := '+';
+    boSub: operatorSymbol := '-';
+    boMul: operatorSymbol := '*';
+    boRealDiv: operatorSymbol := '/';
+    boIntDiv: operatorSymbol := 'div';
+    boMod: operatorSymbol := 'mod';
+    boAnd: operatorSymbol := 'and';
+    boOr: operatorSymbol := 'or';
+    boXor: operatorSymbol := 'xor';
+    boShl: operatorSymbol := 'shl';
+    boShr: operatorSymbol := 'shr';
+    boEq: operatorSymbol := '=';
+    boNe: operatorSymbol := '<>';
+    boLt: operatorSymbol := '<';
+    boGt: operatorSymbol := '>';
+    boLe: operatorSymbol := '<=';
+    boGe: operatorSymbol := '>=';
+    boIn: operatorSymbol := 'in';
+  else
+    operatorSymbol := '';
+  end;
+end;
+
+{ l op r where an operand is an advanced record: its class operator (<>
+  may use =, negated). }
+function checkRecordBinary(e: PNode): PType;
+var
+  sym: string;
+  args: TPtrList;
+  found, negate: boolean;
+  op: PDecl;
+begin
+  sym := operatorSymbol(e^.bop);
+  listInit(args);
+  listAdd(args, e^.lhs);
+  listAdd(args, e^.rhs);
+  found := false;
+  op := nil;
+  if sym <> '' then
+    op := resolveOperator('operator' + sym, args, found);
+  negate := false;
+  if (op = nil) and (e^.bop = boNe) then
+  begin
+    op := resolveOperator('operator=', args, found);
+    negate := op <> nil;
+  end;
+  listFree(args);
+  if op = nil then
+  begin
+    ms('operator ''' + binaryOpSpelling(e^.bop) + ''' is not overloaded for ');
+    maT(e^.lhs^.typ);
+    ma(' and ');
+    maT(e^.rhs^.typ);
+    errRR(e^.opLoc, nodeRange(e^.lhs), nodeRange(e^.rhs));
+    exit(errorType);
+  end;
+  e^.opDecl := op;
+  e^.opNegated := negate;
+  if negate then
+    exit(tyBooleanT);
+  checkRecordBinary := op^.resultType;
+end;
+
+{ op x where x is an advanced record: its class operator. }
+function checkRecordUnary(e: PNode): PType;
+var
+  sym: string;
+  args: TPtrList;
+  found: boolean;
+  op: PDecl;
+begin
+  if e^.uop = uoNot then
+    sym := 'not'
+  else if e^.uop = uoMinus then
+    sym := '-'
+  else
+    sym := '+';
+  listInit(args);
+  listAdd(args, e^.operand);
+  found := false;
+  op := resolveOperator('operator' + sym, args, found);
+  listFree(args);
+  if op = nil then
+  begin
+    ms('operator ''' + unaryOpSpelling(e^.uop) + ''' is not overloaded for ');
+    maT(e^.operand^.typ);
+    errR(e^.b, nodeRange(e^.operand));
+    exit(errorType);
+  end;
+  e^.uopDecl := op;
+  checkRecordUnary := op^.resultType;
+end;
+
+{ A record's := or Explicit operator: its overloads may differ in the result
+  type alone. }
+function isConversionOperator(r: PDecl): boolean;
+begin
+  isConversionOperator := (r^.methodKind = mtOperator) and
+    ((nameStr(r^.ident.name) = 'operator:=') or
+     (nameStr(r^.ident.name) = 'operatorexplicit'));
+end;
+
 procedure declareMethodBody(r: PDecl);
 var
-  c, rt: PType;
-  m, p, x, match: PDecl;
+  c, rt, convRT: PType;
+  m, p, x, match, td: PDecl;
   i: longint;
+  what: string;
 begin
   if curRoutine <> nil then
   begin
@@ -2795,17 +3344,29 @@ begin
     errR(r^.methodClassName.loc, identRange(r^.methodClassName));
     exit;
   end;
-  c := lookupClass(r^.methodClassName);
+  c := nil;
+  td := lookup(r^.methodClassName.name);
+  if (td <> nil) and (td^.kind = dkType) then
+    c := memberTableOf(td^.declType); { an advanced record }
+  if c = nil then
+    c := lookupClass(r^.methodClassName);
   if c = nil then
     exit;
+  if c^.classRecord <> nil then
+    what := 'record'
+  else
+    what := 'class';
   m := findOwnMember(c, r^.ident.name);
   if (m <> nil) and ((m^.kind <> dkRoutine) or (m^.objMethod <> obNone)) then
     m := nil;
   if m = nil then
   begin
-    ms('class ');
+    ms(what + ' ');
     maT(c);
-    ma(' has no method ''');
+    if r^.methodKind = mtOperator then
+      ma(' has no operator ''')
+    else
+      ma(' has no method ''');
     maN(r^.ident.spelling);
     ma('''');
     errR(r^.ident.loc, identRange(r^.ident));
@@ -2818,11 +3379,15 @@ begin
       p := PDecl(listGet(r^.params, i));
       p^.varType := resolveType(p^.varSpec, nil);
     end;
+    convRT := nil;
+    if isConversionOperator(m) and (r^.resultSpec <> nil) then
+      convRT := resolveType(r^.resultSpec, nil);
     match := nil;
     x := m;
     while x <> nil do
     begin
-      if sameSignature(x, r) and (x^.body = nil) then
+      if sameSignature(x, r) and (x^.body = nil) and
+         ((convRT = nil) or (convRT = x^.resultType)) then
         match := x;
       x := x^.nextOverload;
     end;
@@ -2848,7 +3413,7 @@ begin
   begin
     ms('method ''');
     maQualified(c, m^.ident);
-    ma(''' must be implemented where its class is declared');
+    ma(''' must be implemented where its ' + what + ' is declared');
     errR(r^.ident.loc, identRange(r^.ident));
     exit;
   end;
@@ -2901,9 +3466,22 @@ begin
       noteDeclaredHere(m);
     end;
   end;
+  if isCDecl(r) <> isCDecl(m) then
+  begin
+    ms('calling convention of ''');
+    maQualified(c, m^.ident);
+    ma(''' is ');
+    maCC(isCDecl(r));
+    ma(' but its declaration''s is ');
+    maCC(isCDecl(m));
+    errR(r^.ident.loc, identRange(r^.ident));
+    noteDeclaredHere(m);
+  end;
   m^.body := r^.body;
   m^.implDecl := r;
   r^.canonical := m;
+  if r^.isInline then
+    m^.isInline := true;
   checkRoutineBody(m);
 end;
 
@@ -2917,6 +3495,25 @@ begin
   for i := 0 to b^.decls.count - 1 do
   begin
     d := PDecl(listGet(b^.decls, i));
+    if d^.kind = dkType then
+    begin
+      c := memberTableOf(d^.declType);
+      if c <> nil then { an advanced record's }
+      begin
+        for j := 0 to c^.classMembers.count - 1 do
+        begin
+          r := PDecl(listGet(c^.classMembers, j));
+          if (r^.kind = dkRoutine) and (r^.body = nil) then
+          begin
+            ms('method ''');
+            maQualified(c, r^.ident);
+            ma(''' is declared but never implemented');
+            errR(r^.ident.loc, identRange(r^.ident));
+          end;
+        end;
+        continue;
+      end;
+    end;
     if (d^.kind <> dkType) or (d^.typeSpec^.kind <> tsClass) or
        d^.typeSpec^.isForwardClass then
       continue;
@@ -2963,6 +3560,14 @@ begin
     classOfWith := w^.rec^.typ
   else if w^.rec^.typ^.kind = tyClassRef then { Self in a class method }
     classOfWith := w^.rec^.typ^.refClass;
+end;
+
+{ Does with context w expose methods (an object's, a class's in a class
+  method, or an advanced record's)? }
+function hasMembers(w: PWithContext): boolean;
+begin
+  hasMembers := (w <> nil) and
+    ((classOfWith(w) <> nil) or (memberTableOf(w^.rec^.typ) <> nil));
 end;
 
 { Is d an instance member (a field, a property, a method that is not a
@@ -3161,7 +3766,7 @@ begin
     exit;
   end;
 
-  if not evaluateConstant(init, 'typed constant value', c) then
+  if not evaluateConstant(init, constInitWhat, c) then
     exit;
   charArray := (c.value.kind = ckString) and isCharArrayOfLength(t, c.value.strVal^.len);
   if not charArray and not (isSimple(t) or (t^.kind = tyShortString) or isStringType(t)) then
@@ -3206,12 +3811,21 @@ begin
   v^.owner := curRoutine;
   if v^.init <> nil then
   begin
-    { typed constants are static: they keep their value across calls }
-    v^.owner := nil;
-    v^.isUsed := true;
+    { typed constants are static: they keep their value across calls (an
+      initialized variable is set again whenever its routine runs) }
+    if not v^.isInitVar then
+    begin
+      v^.owner := nil;
+      v^.isUsed := true;
+    end;
     folded := constNone;
+    if v^.isInitVar then
+      constInitWhat := 'initial value'
+    else
+      constInitWhat := 'typed constant value';
     if not isError(v^.varType) and checkConstInit(v^.init, v^.varType, folded) then
       v^.initValue := folded;
+    constInitWhat := 'typed constant value';
   end;
   declare(v);
 end;
@@ -3295,17 +3909,96 @@ begin
 end;
 
 { External (C) routines: at the outermost level, with C-compatible types. }
-procedure checkExternal(r: PDecl);
-
-  function cType(t: PType): boolean;
-  begin
-    cType := isError(t) or (t^.kind = tyReal) or (t^.kind = tyPointer) or
+{ A type with a C equivalent, for external routines. }
+function isCType(t: PType): boolean;
+begin
+  isCType := isError(t) or (t^.kind = tyReal) or (t^.kind = tyPointer) or
              (isOrdinal(t) and (getBase(t)^.kind <> tyBoolean));
-  end;
+end;
 
+{ A procedural type C code can call: cdecl, with parameters and result of
+  C types. }
+function isCCallback(rt: PType): boolean;
 var
   i: longint;
   p: PDecl;
+begin
+  isCCallback := false;
+  if not rt^.routineCDecl or
+     ((rt^.routineResult <> nil) and not isCType(rt^.routineResult)) then
+    exit;
+  for i := 0 to rt^.routineParams.count - 1 do
+  begin
+    p := PDecl(listGet(rt^.routineParams, i));
+    if (p^.varType <> nil) and (p^.varKind <> vkVarParam) and
+       not isCType(p^.varType) then
+      exit;
+  end;
+  isCCallback := true;
+end;
+
+{ The string constant e, the library or symbol name (what) of an external
+  routine; false after a diagnostic. }
+function externalString(e: PNode; const what: string; var s: PName): boolean;
+var
+  t: PType;
+  c: TConstant;
+begin
+  externalString := false;
+  t := check(e);
+  if isError(t) then
+    exit;
+  if fold(e, c) then
+  begin
+    if c.value.kind = ckString then
+    begin
+      s := c.value.strVal;
+      exit(true);
+    end;
+    if (c.value.kind = ckOrdinal) and (getBase(t)^.kind = tyChar) then
+    begin
+      s := intern(chr(c.value.intVal));
+      exit(true);
+    end;
+  end;
+  ms('the ' + what + ' of an external routine must be a string constant');
+  errR(e^.b, nodeRange(e));
+end;
+
+{ Why routine r cannot be a procedural value ('': it can). Nested routines
+  can be passed to ISO procedural parameters (allowNested). }
+function notProceduralValue(r: PDecl; allowNested: boolean): string;
+var
+  i: longint;
+  p: PDecl;
+begin
+  notProceduralValue := '';
+  if (r^.parent <> nil) and not allowNested then
+    exit('only routines declared at program or unit level can be ' +
+         'procedural values');
+  if not r^.isExternal then
+    exit;
+  if not isCDecl(r) then
+    exit('an external routine must be ''cdecl'' to be a procedural value');
+  if r^.isVarArgs then
+    exit('a ''varargs'' routine cannot be a procedural value');
+  for i := 0 to r^.params.count - 1 do
+  begin
+    p := PDecl(listGet(r^.params, i));
+    if (p^.varType <> nil) and (p^.varType^.kind = tyRoutine) then
+      exit('an external routine with procedural parameters cannot be a ' +
+           'procedural value');
+  end;
+end;
+
+{ External (C) routines: declared at the outermost level, with parameters
+  and result of types that have a C equivalent; the library and symbol
+  names: string constants. }
+procedure checkExternal(r: PDecl);
+var
+  i: longint;
+  p: PDecl;
+  s: PName;
 begin
   if curRoutine <> nil then
   begin
@@ -3314,10 +4007,41 @@ begin
     ma(''' must be declared at program or unit level');
     errR(r^.ident.loc, identRange(r^.ident));
   end;
+  if r^.libraryExpr <> nil then
+    if externalString(r^.libraryExpr, 'library name', s) then
+      r^.libraryName := s;
+  if r^.nameExpr <> nil then
+    if externalString(r^.nameExpr, 'symbol name', s) then
+      r^.externalName := s;
+  if r^.isVarArgs and not isCDecl(r) then
+  begin
+    ms('''varargs'' routine ''');
+    maN(r^.ident.spelling);
+    ma(''' must be ''cdecl''');
+    errR(r^.ident.loc, identRange(r^.ident));
+  end;
   for i := 0 to r^.params.count - 1 do
   begin
     p := PDecl(listGet(r^.params, i));
-    if (p^.varType <> nil) and (p^.varKind <> vkVarParam) and not cType(p^.varType) then
+    if (p^.varType = nil) or (p^.varKind = vkVarParam) then
+      continue;
+    if p^.varType^.kind = tyRoutine then
+    begin
+      if not isCCallback(p^.varType) then
+      begin
+        ms('parameter ''');
+        maN(p^.ident.spelling);
+        ma(''' of external routine ''');
+        maN(r^.ident.spelling);
+        ma(''' has type ');
+        maT(p^.varType);
+        ma('; a callback needs a ''cdecl'' procedural type with integer, ' +
+           'real, char, pointer or var parameters');
+        errR(p^.loc, identRange(p^.ident));
+      end;
+      continue;
+    end;
+    if not isCType(p^.varType) then
     begin
       ms('parameter ''');
       maN(p^.ident.spelling);
@@ -3325,11 +4049,11 @@ begin
       maN(r^.ident.spelling);
       ma(''' has type ');
       maT(p^.varType);
-      ma('; use integer, real, char, pointer or var parameters');
+      ma('; use integer, real, char, pointer, procedural or var parameters');
       errR(p^.loc, identRange(p^.ident));
     end;
   end;
-  if r^.isFunction and not cType(r^.resultType) then
+  if r^.isFunction and not isCType(r^.resultType) then
   begin
     ms('external function ''');
     maN(r^.ident.spelling);
@@ -3349,7 +4073,8 @@ begin
   x := first;
   while x <> nil do
   begin
-    if sameSignature(x, r) then
+    if sameSignature(x, r) and
+       not (isConversionOperator(r) and (x^.resultType <> r^.resultType)) then
     begin
       ms('redefinition of ''');
       maN(r^.ident.spelling);
@@ -3484,8 +4209,22 @@ begin
         note(fwd^.loc);
       end;
     end;
+    if isCDecl(r) <> isCDecl(fwd) then
+    begin
+      ms('calling convention of ''');
+      maN(r^.ident.spelling);
+      ma(''' is ');
+      maCC(isCDecl(r));
+      ma(' but its forward declaration''s is ');
+      maCC(isCDecl(fwd));
+      errR(r^.ident.loc, identRange(r^.ident));
+      ms('forward declaration is here');
+      note(fwd^.loc);
+    end;
     fwd^.body := r^.body;
     r^.canonical := fwd;
+    if r^.isInline then
+      fwd^.isInline := true;
     checkRoutineBody(fwd);
     exit;
   end;
@@ -3672,7 +4411,12 @@ begin
       continue;
     end;
     if not isAssignable(pt, at) and not isPCharLiteral(pt, arg) then
-      exit;
+    begin
+      if findConversion(at, pt, false) = nil then
+        exit;
+      cost := cost + 1000; { a record's := operator }
+      continue;
+    end;
     cost := cost + conversionCost(pt, at);
   end;
   callCost := cost;
@@ -3948,7 +4692,9 @@ var
 begin
   savedScope := cur;
   savedRoutine := curRoutine;
-  if r^.methodKind <> mtNone then
+  if r^.isStatic then { a record's static method: its statics }
+    cur := newClassScope(cur, r^.ownerClass, nil)
+  else if r^.methodKind <> mtNone then
   begin
     { a method sees the members of its class through Self }
     selfRef := newNode(nkNameRef, noLoc, noLoc);
@@ -3962,7 +4708,7 @@ begin
   end;
   cur := newScope(cur);
   curRoutine := r;
-  if r^.methodKind <> mtNone then
+  if (r^.methodKind <> mtNone) and not r^.isStatic then
     scopeInsert(cur, r^.selfVar^.ident.name, r^.selfVar);
   for i := 0 to r^.params.count - 1 do
   begin
@@ -4231,7 +4977,8 @@ begin
     tb := pb^.varType;
     if (ta <> nil) and (tb <> nil) and (ta^.kind = tyRoutine) and (tb^.kind = tyRoutine) then
     begin
-      if not congruent(ta^.routineParams, ta^.routineResult, tb^.routineParams,
+      if (ta^.routineCDecl <> tb^.routineCDecl) or
+         not congruent(ta^.routineParams, ta^.routineResult, tb^.routineParams,
                        tb^.routineResult) then
         exit(false);
     end
@@ -4249,9 +4996,11 @@ var
   d, x: PDecl;
   params: TPtrList;
   res, xr: PType;
-  found: boolean;
+  found, cdeclConv: boolean;
   n: PNode;
+  why: string;
 begin
+  cdeclConv := false;
   if formal^.routineResult <> nil then
     kind := 'function'
   else
@@ -4278,7 +5027,8 @@ begin
       xr := nil;
       if x^.isFunction then
         xr := x^.resultType;
-      if congruent(formal^.routineParams, formal^.routineResult, x^.params, xr) then
+      if (isCDecl(x) = formal^.routineCDecl) and
+         congruent(formal^.routineParams, formal^.routineResult, x^.params, xr) then
       begin
         d := x;
         break;
@@ -4288,6 +5038,7 @@ begin
     params := d^.params;
     if d^.isFunction then
       res := d^.resultType;
+    cdeclConv := isCDecl(d);
     found := true;
   end
   else if (d <> nil) and (d^.kind = dkVar) and (d^.varType <> nil) and
@@ -4295,6 +5046,7 @@ begin
   begin
     params := d^.varType^.routineParams;
     res := d^.varType^.routineResult;
+    cdeclConv := d^.varType^.routineCDecl;
     found := true;
   end;
   if not found then
@@ -4309,7 +5061,20 @@ begin
   end;
   n^.refDecl := d;
   n^.typ := p^.varType;
-  if not congruent(formal^.routineParams, formal^.routineResult, params, res) then
+  if d^.kind = dkRoutine then
+  begin
+    why := notProceduralValue(d, not formal^.routineCDecl);
+    if why <> '' then
+    begin
+      ms('''');
+      maN(n^.ref.spelling);
+      ma(''': ' + why);
+      errR(arg^.b, nodeRange(arg));
+      exit;
+    end;
+  end;
+  if (cdeclConv <> formal^.routineCDecl) or
+     not congruent(formal^.routineParams, formal^.routineResult, params, res) then
   begin
     ms('''');
     maN(n^.ref.spelling);
@@ -4323,10 +5088,44 @@ begin
 end;
 
 { Checks the arguments of a call. }
+{ An argument (number i, from 0) beyond the parameters of a 'varargs'
+  external routine: a value C can take (ordinals are passed as int at least,
+  reals as double, string constants as C strings). }
+procedure checkVarArg(arg: PNode; i: longint; const callee: TIdent);
+var
+  t: PType;
+  stringConst: boolean;
+begin
+  if arg^.kind = nkFormatted then
+  begin
+    ms('field widths are only allowed in ''write'' and ''writeln''');
+    errR(arg^.fmtWidth^.b, nodeRange(arg^.fmtWidth));
+    exit;
+  end;
+  t := check(arg);
+  stringConst := (t^.kind = tyStringLit) and
+                 ((arg^.kind = nkStringLit) or
+                  ((arg^.kind = nkNameRef) and (arg^.refDecl <> nil) and
+                   (arg^.refDecl^.kind = dkConst)));
+  if isError(t) or isOrdinal(t) or (t^.kind = tyReal) or (t^.kind = tyPointer) or
+     (t^.kind = tyClass) or (t^.kind = tyNil) or stringConst then
+    exit;
+  ms('argument ');
+  maI(i + 1);
+  ma(' of ''');
+  maN(callee.spelling);
+  ma(''' has type ');
+  maT(t);
+  ma('; a ''varargs'' argument must be an integer, real, char, boolean, ' +
+     'pointer or string constant');
+  errR(arg^.b, nodeRange(arg));
+end;
+
 procedure checkCallArgs(const params: TPtrList; calleeDecl: PDecl;
                         const callee: TIdent; const args: TPtrList;
                         callRange: TRange);
 var
+  isVarArgsCall: boolean;
   i: longint;
   arg: PNode;
   p: PDecl;
@@ -4342,7 +5141,10 @@ begin
      (calleeDecl^.varType^.routineResult <> nil) and
      isManaged(calleeDecl^.varType^.routineResult) then
     markUsesManaged;
-  if args.count <> params.count then
+  isVarArgsCall := (calleeDecl <> nil) and (calleeDecl^.kind = dkRoutine) and
+                   calleeDecl^.isVarArgs;
+  if (args.count <> params.count) and
+     not (isVarArgsCall and (args.count > params.count)) then
   begin
     if args.count < params.count then
       ms('too few')
@@ -4365,6 +5167,11 @@ begin
   for i := 0 to args.count - 1 do
   begin
     arg := PNode(listGet(args, i));
+    if i >= params.count then { varargs }
+    begin
+      checkVarArg(arg, i, callee);
+      continue;
+    end;
     p := PDecl(listGet(params, i));
     if arg^.kind = nkFormatted then
     begin
@@ -4408,7 +5215,8 @@ begin
         checkNotForControlVar(arg);
       continue;
     end;
-    if not isAssignable(pt, at) and not isPCharLiteral(pt, arg) then
+    if not isAssignable(pt, at) and not isPCharLiteral(pt, arg) and
+       not convertImplicitly(arg, pt) then
     begin
       ms('cannot pass a value of type ');
       maT(at);
@@ -4517,6 +5325,8 @@ begin
   exceptionType := nil;
   iunknownType := nil;
   interfacedType := nil;
+  namedAdvancedRecord := nil;
+  constInitWhat := 'typed constant value';
   handlerDepth := 0;
   finallyLoopDepth := -1;
   listInit(pendingInterfaces);

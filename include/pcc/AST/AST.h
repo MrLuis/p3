@@ -70,6 +70,17 @@ struct ConstValue {
 
 enum class UnaryOp { Plus, Minus, Not };
 
+/// A calling convention directive (Turbo/FPC), as written. pcc calls every
+/// routine with the target's C convention (a cdecl routine's procedural
+/// values point to a C entry without the static link); as in Free Pascal on 64-bit
+/// targets, 'stdcall' is the default convention and 'cdecl' a different one,
+/// so headings, implementations, overrides, interface implementations and
+/// procedural values must agree on whether they are 'cdecl'.
+enum class CallConv : unsigned char { Default, CDecl, StdCall };
+inline const char *callConvName(CallConv CC) {
+  return CC == CallConv::CDecl ? "cdecl" : CC == CallConv::StdCall ? "stdcall" : "";
+}
+
 enum class BinaryOp {
   // adding operators (Xor: Turbo/FPC)
   Add, Sub, Or, Xor,
@@ -109,6 +120,32 @@ public:
 
   Type *getType() const { return Ty; }
   void setType(Type *T) { Ty = T; }
+
+  /// A user-defined conversion (objfpc advanced records): the `:=` or
+  /// `Explicit` operator Op converts this expression's value to To, which
+  /// becomes its type; getUnconvertedType() is the type it had.
+  void setConversion(RoutineDecl *Op, Type *To) {
+    Conversion = Op;
+    Unconverted = Ty;
+    Ty = To;
+  }
+  RoutineDecl *getConversion() const { return Suspended ? nullptr : Conversion; }
+  Type *getUnconvertedType() const { return Unconverted; }
+  /// While code generation computes the value to convert: no conversion,
+  /// the unconverted type.
+  void suspendConversion() {
+    std::swap(Ty, Unconverted);
+    Suspended = true;
+  }
+  void resumeConversion() {
+    std::swap(Ty, Unconverted);
+    Suspended = false;
+  }
+
+private:
+  RoutineDecl *Conversion = nullptr;
+  Type *Unconverted = nullptr;
+  bool Suspended = false;
 };
 
 /// 42
@@ -175,6 +212,7 @@ public:
 class UnaryExpr final : public Expr {
   UnaryOp Op;
   Expr *Operand;
+  RoutineDecl *Operator = nullptr; ///< a record's class operator (Sema)
 
 public:
   UnaryExpr(SourceRange R, UnaryOp Op, Expr *Operand)
@@ -182,6 +220,8 @@ public:
   UnaryOp getOp() const { return Op; }
   SourceLocation getOpLoc() const { return getBeginLoc(); }
   Expr *getOperand() const { return Operand; }
+  RoutineDecl *getOperator() const { return Operator; }
+  void setOperator(RoutineDecl *R) { Operator = R; }
   static bool classof(const Expr *E) { return E->getKind() == EK_Unary; }
 };
 
@@ -203,7 +243,19 @@ public:
   Expr *getRHS() const { return RHS; }
   Type *getOperandType() const { return OperandTy; }
   void setOperandType(Type *T) { OperandTy = T; }
+  /// A record's class operator implementing it (Sema); Negated: `<>`
+  /// through the `=` operator (its result negated).
+  RoutineDecl *getOperator() const { return Operator; }
+  bool isNegated() const { return Negated; }
+  void setOperator(RoutineDecl *R, bool Negate) {
+    Operator = R;
+    Negated = Negate;
+  }
   static bool classof(const Expr *E) { return E->getKind() == EK_Binary; }
+
+private:
+  RoutineDecl *Operator = nullptr;
+  bool Negated = false;
 };
 
 /// Function call: abs(x), f(1, 2).
@@ -826,12 +878,17 @@ struct VariantPart {
 class RecordTypeSpec final : public TypeSpec {
   FieldList *Fields;
   bool Packed;
+  /// Advanced records (objfpc, {$modeswitch advancedrecords}): methods,
+  /// class operators and properties, in source order.
+  llvm::ArrayRef<Decl *> Members;
 
 public:
   RecordTypeSpec(SourceRange R, FieldList *Fields, bool Packed)
       : TypeSpec(TS_Record, R), Fields(Fields), Packed(Packed) {}
   FieldList *getFields() const { return Fields; }
   bool isPacked() const { return Packed; }
+  llvm::ArrayRef<Decl *> getMembers() const { return Members; }
+  void setMembers(llvm::ArrayRef<Decl *> M) { Members = M; }
   static bool classof(const TypeSpec *T) { return T->getKind() == TS_Record; }
 };
 
@@ -854,12 +911,15 @@ class RoutineTypeSpec final : public TypeSpec {
   bool IsFunction;
   llvm::ArrayRef<VarDecl *> Params;
   TypeSpec *Result; ///< functions only
+  CallConv CC = CallConv::Default;
 
 public:
   RoutineTypeSpec(SourceRange R, bool IsFunction,
                   llvm::ArrayRef<VarDecl *> Params, TypeSpec *Result)
       : TypeSpec(TS_Routine, R), IsFunction(IsFunction), Params(Params),
         Result(Result) {}
+  CallConv getCallConv() const { return CC; }
+  void setCallConv(CallConv C) { CC = C; }
   bool isFunction() const { return IsFunction; }
   llvm::ArrayRef<VarDecl *> getParams() const { return Params; }
   TypeSpec *getResult() const { return Result; }
@@ -993,6 +1053,28 @@ public:
   void setVisibility(Visibility V) { Vis = V; }
   /// What this entity is, for diagnostics: "variable", "type", ...
   const char *getKindName() const;
+
+  /// Free Pascal's hint directives (deprecated ['message'], experimental,
+  /// platform, library, unimplemented): each use of the entity is warned
+  /// about.
+  enum HintFlag : unsigned char {
+    HintDeprecated = 1,
+    HintExperimental = 2,
+    HintPlatform = 4,
+    HintLibrary = 8,
+    HintUnimplemented = 16
+  };
+  unsigned char getHints() const { return Hints; }
+  llvm::StringRef getHintMessage() const { return HintMessage; }
+  void addHints(unsigned char Flags, llvm::StringRef Message) {
+    Hints |= Flags;
+    if (!Message.empty())
+      HintMessage = Message;
+  }
+
+private:
+  unsigned char Hints = 0;
+  llvm::StringRef HintMessage; ///< deprecated's message, if any
 };
 
 /// A variable, a formal parameter, or a function's result slot.
@@ -1010,6 +1092,7 @@ private:
   /// Turbo/FPC typed constant `const x: T = v;`: an initialized variable
   /// with static storage (even inside a routine).
   Expr *Init = nullptr;
+  bool InitializedVar = false;
   ConstValue InitValue;         ///< set by Sema
   /// objfpc `class var`: one static variable for the class and its
   /// descendants (VarClass: set by Sema).
@@ -1032,7 +1115,15 @@ public:
   void setOwner(RoutineDecl *R) { Owner = R; }
   Expr *getInit() const { return Init; }
   void setInit(Expr *E) { Init = E; }
-  bool isTypedConst() const { return Init != nullptr; }
+  /// A typed constant (static storage, initialized once), as opposed to an
+  /// initialized variable (`var x: T = v;`, objfpc), which is an ordinary
+  /// variable set to its initial value whenever its routine is entered.
+  bool isTypedConst() const { return Init != nullptr && !InitializedVar; }
+  bool isInitializedVar() const { return InitializedVar; }
+  void setInitializedVar(Expr *E) {
+    Init = E;
+    InitializedVar = true;
+  }
   bool isClassVar() const { return IsClassVar; }
   void setClassVar() { IsClassVar = true; }
   ClassType *getVarClass() const { return VarClass; }
@@ -1124,7 +1215,10 @@ class Block;
 
 /// A routine that is a method (objfpc): declared in a class, implemented as
 /// `procedure TFoo.Name ...` at program or unit level.
-enum class MethodKind : unsigned char { None, Method, Constructor, Destructor };
+/// Operator: a record's `class operator` (a static function).
+enum class MethodKind : unsigned char {
+  None, Method, Constructor, Destructor, Operator
+};
 
 /// The methods of the predeclared class TObject, which have no Pascal body.
 /// Predeclared methods without a Pascal body: TObject's, and
@@ -1148,6 +1242,10 @@ class RoutineDecl final : public Decl {
   Block *Body;                  ///< null for a forward declaration
   bool IsForward;
   bool UsesManaged = false;
+  bool Static = false;
+  bool Inline = false;
+  CallConv CC = CallConv::Default; ///< the directive written
+  bool InheritedCDecl = false;     ///< an override of a cdecl method
   RoutineDecl *Canonical = nullptr; ///< set on a definition of a forward decl
   RoutineDecl *Parent = nullptr;    ///< enclosing routine; null at program level
   unsigned Level = 1;               ///< 1 = declared in the program block
@@ -1155,6 +1253,11 @@ class RoutineDecl final : public Decl {
   /// Turbo/FPC `external ['lib'] [name 'sym']`: a C function, no body.
   bool IsExternal = false;
   llvm::StringRef ExternalName;     ///< the C symbol (empty: the Pascal name)
+  /// external [Library] [name Name]: the library to link with (empty:
+  /// none), resolved by Sema when written as a constant expression.
+  llvm::StringRef LibraryName;
+  Expr *LibraryExpr = nullptr, *NameExpr = nullptr;
+  bool VarArgs = false;             ///< `varargs`: C variadic (externals)
   // Methods (objfpc).
   MethodKind MK = MethodKind::None;
   Identifier ClassName;             ///< `TFoo` of an implementation `TFoo.Bar`
@@ -1212,6 +1315,18 @@ public:
   bool hasStaticLink() const { return Parent != nullptr; }
   bool isExternal() const { return IsExternal; }
   llvm::StringRef getExternalName() const { return ExternalName; }
+  void setExternalName(llvm::StringRef Sym) { ExternalName = Sym; }
+  llvm::StringRef getLibraryName() const { return LibraryName; }
+  void setLibraryName(llvm::StringRef L) { LibraryName = L; }
+  /// The library and symbol name expressions as written (null if absent).
+  Expr *getLibraryExpr() const { return LibraryExpr; }
+  Expr *getNameExpr() const { return NameExpr; }
+  void setExternalExprs(Expr *Lib, Expr *Name) {
+    LibraryExpr = Lib;
+    NameExpr = Name;
+  }
+  bool isVarArgs() const { return VarArgs; }
+  void setVarArgs() { VarArgs = true; }
   void setExternal(llvm::StringRef Sym) {
     IsExternal = true;
     ExternalName = Sym;
@@ -1219,6 +1334,21 @@ public:
 
   MethodKind getMethodKind() const { return MK; }
   void setMethodKind(MethodKind K) { MK = K; }
+  bool isOperator() const { return MK == MethodKind::Operator; }
+  /// Methods have the hidden parameter Self, except a record's class
+  /// methods and operators (static).
+  bool hasSelf() const { return isMethod() && !Static; }
+  bool isStatic() const { return Static; }
+  void setStatic() { Static = true; }
+  /// The `inline` directive (with {$inline on}): code generation asks
+  /// LLVM to inline the routine (inlinehint).
+  bool isInline() const { return Inline; }
+  void setInline() { Inline = true; }
+  CallConv getCallConv() const { return CC; }
+  void setCallConv(CallConv C) { CC = C; }
+  /// Whether it is called as 'cdecl' (written, or inherited by an override).
+  bool isCDecl() const { return CC == CallConv::CDecl || InheritedCDecl; }
+  void setInheritedCDecl() { InheritedCDecl = true; }
   bool isMethod() const { return MK != MethodKind::None; }
   bool isConstructor() const { return MK == MethodKind::Constructor; }
   bool isDestructor() const { return MK == MethodKind::Destructor; }

@@ -7,7 +7,7 @@
 ; CHECK: errors.pas:6:16: error: array index type 'int64' is too large; use a subrange such as 1..100
 ; CHECK: errors.pas:8:33: error: initializer for 'array [1..3] of integer' must list 3 elements, separated by ','
 ; CHECK: errors.pas:9:16: error: no field named 'b' in 'TRec'
-; CHECK: errors.pas:16:16: error: parameter 'r' of external routine 'c_bad' has type 'TRec'; use integer, real, char, pointer or var parameters
+; CHECK: errors.pas:16:16: error: parameter 'r' of external routine 'c_bad' has type 'TRec'; use integer, real, char, pointer, procedural or var parameters
 ; CHECK: errors.pas:19:3: error: cannot modify constant parameter 's'
 ; CHECK: errors.pas:20:3: error: cannot modify constant parameter 'r'
 ; CHECK: errors.pas:21:7: error: cannot modify constant parameter 'r'

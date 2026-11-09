@@ -1,0 +1,14 @@
+; The libraries named by external routines (external 'name') are linked
+; with the program, also those of its units (compiled with it or
+; separately): -lname, or -l:file for a file name. Missing libraries make
+; the linker name what it was given.
+; RUN: %pcc --mode=tp %S/Inputs/externals/ok.pas -o %t.ok
+; RUN: %t.ok | FileCheck --check-prefix=OK %s
+; OK: 7
+; RUN: not %pcc --mode=tp -I %S/Inputs/externals/lib %S/Inputs/externals/uses.pas -o %t 2>&1 | FileCheck %s
+; RUN: rm -rf %t.dir && mkdir -p %t.dir && cp %S/Inputs/externals/lib/clib.pas %t.dir/
+; RUN: %pcc --mode=tp -c %t.dir/clib.pas -o %t.dir/clib.o
+; RUN: not %pcc --mode=tp -fseparate-units -I %t.dir %S/Inputs/externals/uses.pas -o %t 2>&1 | FileCheck %s
+; CHECK-DAG: -lpcc_no_such_library
+; CHECK-DAG: -l:libpcc_no_such.so.1
+; CHECK: linker command failed

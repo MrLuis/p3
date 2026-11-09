@@ -232,6 +232,9 @@ function irPhi(t: PIRType; const name: string; var phi: PIRInst): TV;
 procedure irAddIncoming(phi: PIRInst; const v: TV; b: PIRBlock);
 procedure irRet(const v: TV);
 procedure irRetVoid;
+function irVarArgParams(const params: TPtrList): string;
+function irCallVarArg(f: PIRFunc; const callee: TV; const args: TBuf;
+                      const name: string): TV;
 procedure irUnreachable;
 
 { --- Metadata --- }
@@ -2407,6 +2410,34 @@ begin
   if args.len > 0 then
     bufAdd(args, ', ');
   bufAdd(args, v.t^.text + ' ' + attr + ' ' + v.v);
+end;
+
+{ The parameter list of a variadic function's type: 'ptr, i32, ...'. }
+function irVarArgParams(const params: TPtrList): string;
+var
+  s: string;
+  i: longint;
+begin
+  s := '';
+  for i := 0 to params.count - 1 do
+    s := s + PIRType(listGet(params, i))^.text + ', ';
+  irVarArgParams := s + '...';
+end;
+
+{ A call of variadic function f (declared with irVarArgParams), which LLVM
+  prints with the function's type: call i32 (ptr, ...) @printf(...). }
+function irCallVarArg(f: PIRFunc; const callee: TV; const args: TBuf;
+                      const name: string): TV;
+var
+  i: PIRInst;
+  res: string;
+begin
+  i := newInst(res, name, f^.ret^.kind <> ikVoid);
+  bufAdd(i^.text, 'call ' + f^.ret^.text + ' (' + f^.paramText + ') ' + callee.v + '(');
+  bufAddChars(i^.text, args.data, 0, args.len);
+  bufAddChar(i^.text, ')');
+  append(i);
+  irCallVarArg := irV(f^.ret, res);
 end;
 
 function irCallPtr(ret: PIRType; const callee: TV; const args: TBuf; const name: string): TV;

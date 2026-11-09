@@ -45,6 +45,24 @@ class Lexer {
   const char *Cur;
   CheckDirectives *Directives = nullptr;
   bool CorbaInterfaces = false; ///< {$interfaces corba} (default: com)
+  bool AdvancedRecords = false; ///< {$modeswitch advancedrecords}
+
+  // Macros ({$macro on}, {$define NAME := value}, as in Free Pascal): the
+  // values are ranges of the source (in the define directives), keyed by
+  // the upper-case name; a use of NAME lexes its value (MacroStack: the
+  // places to continue at, innermost last). Expanded tokens have the
+  // value's locations.
+  bool MacrosOn = false;
+  bool InlineOn; ///< {$inline on} (the default in objfpc mode)
+  struct MacroValue {
+    const char *Begin, *End;
+  };
+  llvm::StringMap<MacroValue> Macros;
+  struct MacroFrame {
+    const char *BufEnd, *Cur;
+  };
+  llvm::SmallVector<MacroFrame, 4> MacroStack;
+  bool expandMacro(const Token &T, const char *Start);
 
   // {$I file} (Turbo/FPC): the including buffers, innermost last.
   struct IncludeFrame {
@@ -109,6 +127,10 @@ public:
 
   /// Are interfaces declared here CORBA style ({$interfaces corba})?
   bool corbaInterfaces() const { return CorbaInterfaces; }
+  /// May records declared here have methods ({$modeswitch advancedrecords})?
+  bool advancedRecords() const { return AdvancedRecords; }
+  /// Does the `inline` directive inline ({$inline on})?
+  bool inlineOn() const { return InlineOn; }
 
   /// Defines symbols for conditional compilation (-d NAME).
   void setDefines(llvm::ArrayRef<std::string> Names);

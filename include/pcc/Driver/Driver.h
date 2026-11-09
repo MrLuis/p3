@@ -28,6 +28,7 @@ class ASTContext;
 class CheckDirectives;
 struct Identifier;
 class UnitDecl;
+class Block;
 
 class Driver {
   CompilerOptions Opts;
@@ -47,6 +48,12 @@ class Driver {
                  CheckDirectives &Directives,
                  llvm::SmallVectorImpl<UnitDecl *> &Ordered,
                  llvm::StringRef Self = "");
+
+  /// The libraries named by the external routines of the program and its
+  /// units (`external 'z'`), linked after the -l ones: -lz, or -l:name for
+  /// a file name ('libz.so.1').
+  std::vector<std::string> ExternalLibraries;
+  void collectExternalLibraries(Block *B);
 
   /// Verifies, optimizes and writes M (or links it with UnitObjects).
   bool finishModule(llvm::Module &M, llvm::TargetMachine &TM,

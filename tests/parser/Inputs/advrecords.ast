@@ -1,0 +1,70 @@
+ProgramDecl 'advrecords' <1:1>
+  TypeDecl 'tp' = record fx: integer; end <4:3>
+  ConstructorDecl 'tp.create' definition <16:1>
+    CompoundStmt <16:36>
+      AssignStmt <16:42>
+        NameRefExpr 'fx' field (self) : integer <16:42>
+        NameRefExpr 'x' parameter : integer <16:48>
+      EmptyStmt <16:51>
+  FunctionDecl 'tp.get' definition <17:1>
+    CompoundStmt <17:27>
+      AssignStmt <17:33>
+        NameRefExpr 'get' function result : integer <17:33>
+        NameRefExpr 'fx' field (self) : integer <17:40>
+      EmptyStmt <17:44>
+  FunctionDecl 'tp.one' class definition <18:7>
+    CompoundStmt <18:28>
+      AssignStmt <18:34>
+        FieldExpr 'fx' : integer <18:34>
+          NameRefExpr 'result' function result : TP <18:34>
+        IntegerLiteralExpr 1 : integer <18:47>
+      EmptyStmt <18:50>
+  OperatorDecl 'tp.operator+' class definition <19:7>
+    CompoundStmt <19:42>
+      AssignStmt <19:48>
+        FieldExpr 'fx' : integer <19:48>
+          NameRefExpr 'result' function result : TP <19:48>
+        BinaryExpr '+' : integer <19:61>
+          FieldExpr 'fx' : integer <19:61>
+            NameRefExpr 'a' parameter : TP <19:61>
+          FieldExpr 'fx' : integer <19:68>
+            NameRefExpr 'b' parameter : TP <19:68>
+      EmptyStmt <19:74>
+  OperatorDecl 'tp.operator=' class definition <20:7>
+    CompoundStmt <20:47>
+      AssignStmt <20:53>
+        NameRefExpr 'result' function result : boolean <20:53>
+        BinaryExpr '=' : boolean <20:63>
+          FieldExpr 'fx' : integer <20:63>
+            NameRefExpr 'a' parameter : TP <20:63>
+          FieldExpr 'fx' : integer <20:70>
+            NameRefExpr 'b' parameter : TP <20:70>
+      EmptyStmt <20:76>
+  OperatorDecl 'tp.operator:=' class definition <21:7>
+    CompoundStmt <21:39>
+      AssignStmt <21:45>
+        FieldExpr 'fx' : integer <21:45>
+          NameRefExpr 'result' function result : TP <21:45>
+        NameRefExpr 'x' parameter : integer <21:58>
+      EmptyStmt <21:61>
+  VarDecl 'p' : TP <23:3>
+  CompoundStmt <24:1>
+    AssignStmt <25:3>
+      NameRefExpr 'p' variable : TP <25:3>
+      BinaryExpr '+' by 'operator+' : TP <25:8>
+        IndirectCallExpr : TP <25:8>
+          FieldExpr 'create' : TP <25:8>
+            NameRefExpr 'tp' type : TP <25:8>
+          IntegerLiteralExpr 2 : integer <25:18>
+        IntegerLiteralExpr 3 : TP converted by 'operator:=' <25:23>
+    IfStmt <26:3>
+      BinaryExpr '<>' not by 'operator=' : boolean <26:6>
+        NameRefExpr 'p' variable : TP <26:6>
+        FieldExpr 'one' : TP <26:11>
+          NameRefExpr 'tp' type : TP <26:11>
+      ProcCallStmt 'writeln' <27:5>
+        FieldExpr 'get' : integer <27:13>
+          NameRefExpr 'p' variable : TP <27:13>
+        FieldExpr 'x' : integer <27:20>
+          NameRefExpr 'p' variable : TP <27:20>
+    EmptyStmt <28:1>

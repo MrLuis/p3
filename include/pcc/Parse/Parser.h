@@ -108,7 +108,31 @@ class Parser {
   void parseTypePart(llvm::SmallVectorImpl<Decl *> &Decls);
   void parseVarPart(llvm::SmallVectorImpl<Decl *> &Decls);
   RoutineDecl *parseRoutineDecl(bool HeadingOnly = false);
-  RoutineDecl *parseMethodHeading();
+  /// InRecord: in an advanced record (`static` allowed); RecordClassMethod:
+  /// a record's class method, which must be `static`.
+  RoutineDecl *parseMethodHeading(bool InRecord = false,
+                                  bool RecordClassMethod = false);
+  /// Advanced records (objfpc): `class operator +(...): T;` in a record, the
+  /// operator's name (`operator+`), and `class operator TR.+(...)` ... body.
+  RoutineDecl *parseOperatorHeading();
+  bool parseInlineDirective(SourceLocation Loc);
+  /// Free Pascal's hint directives (Decl::HintFlag): written after a
+  /// declaration's type or value (Separated: after a routine's or
+  /// property's `;`, each one followed by `;`).
+  struct Hints {
+    unsigned char Flags = 0;
+    llvm::StringRef Message;
+  };
+  unsigned char hintFlagOf(const Token &T) const;
+  Hints parseHints();
+  bool parseSeparatedHint(Hints &H);
+  /// A calling convention word (cdecl, stdcall) at Tok, or Default.
+  CallConv callConvOf(const Token &T) const;
+  /// Consumes the calling convention word at Tok into CC (warning if one
+  /// was already given).
+  void takeCallConv(CallConv &CC);
+  bool parseOperatorName(Identifier &Name);
+  RoutineDecl *parseOperatorDecl(bool HeadingOnly);
   PropertyDecl *parsePropertyDecl();
   /// Close: tok::r_paren, or tok::r_square for an array property's indexes.
   bool parseFormalParams(llvm::SmallVectorImpl<VarDecl *> &Params,
@@ -121,6 +145,10 @@ class Parser {
   TypeSpec *parseTypeIdentifier(llvm::StringRef Context);
   TypeSpec *parseArrayType(SourceLocation Start, bool Packed);
   TypeSpec *parseRecordType(SourceLocation Start, bool Packed);
+  TypeSpec *parseAdvancedRecord(SourceLocation Start, SourceLocation RecordLoc,
+                                bool Packed);
+  /// parseFieldList skipped to the record's `end` after an error.
+  bool RecordBodySkipped = false;
   TypeSpec *parseClassType(SourceLocation Start);
   TypeSpec *parseInterfaceType(SourceLocation Start);
   FieldList *parseFieldList(tok::TokenKind Close);

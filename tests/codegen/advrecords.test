@@ -1,0 +1,18 @@
+; Advanced records (--mode=objfpc): a method takes the record by reference
+; (Self), a static class method and a class operator take no Self, a
+; constructor fills a zeroed temporary, operators are calls, and `<>`
+; negates the `=` operator.
+; RUN: %pcc --mode=objfpc --emit-llvm %S/../parser/Inputs/advrecords.pas -o - | FileCheck %s
+; CHECK-LABEL: define i32 @main
+; CHECK:      %rec = alloca %record.TP, align 8
+; CHECK:      call void @llvm.memset.p0.i64(ptr align 4 %rec, i8 0, i64 4, i1 false)
+; CHECK-NEXT: call void @pas.tp.create(ptr null, ptr %rec, i32 2)
+; CHECK-NEXT: %[[C:[0-9]+]] = call %record.TP @"pas.tp.operator:="(ptr null, i32 3)
+; CHECK:      call %record.TP @"pas.tp.operator+"(ptr null, ptr %rec, ptr %result)
+; CHECK:      call %record.TP @pas.tp.one(ptr null)
+; CHECK:      %[[EQ:[0-9]+]] = call i1 @"pas.tp.operator="(ptr null, ptr @pas.p, ptr %result2)
+; CHECK-NEXT: %ne = xor i1 %[[EQ]], true
+; CHECK:      call i32 @pas.tp.get(ptr null, ptr @pas.p)
+; CHECK-LABEL: define internal void @pas.tp.create(ptr %link, ptr %self, i32 %x)
+; CHECK-LABEL: define internal %record.TP @pas.tp.one(ptr %link)
+; CHECK-LABEL: define internal %record.TP @"pas.tp.operator+"(ptr %link, ptr %a, ptr %b)

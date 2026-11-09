@@ -68,6 +68,8 @@ const char *Decl::getKindName() const {
       return "constructor";
     if (R->isDestructor())
       return "destructor";
+    if (R->isOperator())
+      return "operator";
     return R->isFunction() ? "function" : "procedure";
   }
   case DK_Builtin:

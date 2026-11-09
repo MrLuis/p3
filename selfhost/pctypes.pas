@@ -28,7 +28,8 @@ function newRecordType(fl: PFieldList; const all: TPtrList; packed_: boolean): P
 function newPointerType(pointee: PType): PType;
 function newSetType(element: PType): PType;
 function newFileType(element: PType): PType;
-function newRoutineType(const params: TPtrList; result_: PType): PType;
+function newRoutineType(const params: TPtrList; result_: PType;
+                        cdecl_: boolean): PType;
 { A class (objfpc), not defined yet: defineClass fills it in. }
 function newClassType: PType;
 function newClassRefType(c: PType): PType;
@@ -186,13 +187,15 @@ begin
   newFileType := t;
 end;
 
-function newRoutineType(const params: TPtrList; result_: PType): PType;
+function newRoutineType(const params: TPtrList; result_: PType;
+                        cdecl_: boolean): PType;
 var
   t: PType;
 begin
   t := newType(tyRoutine);
   t^.routineParams := params;
   t^.routineResult := result_;
+  t^.routineCDecl := cdecl_;
   newRoutineType := t;
 end;
 
@@ -757,6 +760,8 @@ begin
           bufAdd(b, ': ');
           bufAddTypeName(b, t^.routineResult);
         end;
+        if t^.routineCDecl then
+          bufAdd(b, '; cdecl');
       end;
     tyFile:
       if t^.isText then

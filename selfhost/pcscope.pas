@@ -105,6 +105,15 @@ var
 begin
   if s^.withRecord <> nil then
     exit(findField(s^.withRecord, name));
+  if (s^.withClass <> nil) and (s^.withCtx = nil) then
+  begin
+    { a record's static method: only its class methods and operators
+      (static) are usable without a record }
+    d := findMember(s^.withClass, name, owner);
+    if (d <> nil) and (d^.kind = dkRoutine) and d^.isStatic then
+      exit(d);
+    exit(nil);
+  end;
   if s^.withClass <> nil then
     exit(findMember(s^.withClass, name, owner));
   d := scopeLookupOwn(s, name);
@@ -161,7 +170,10 @@ begin
     while c <> nil do
     begin
       for i := 0 to c^.classMembers.count - 1 do
-        listAdd(names, PDecl(listGet(c^.classMembers, i))^.ident.name);
+        if (s^.withCtx <> nil) or
+           ((PDecl(listGet(c^.classMembers, i))^.kind = dkRoutine) and
+            PDecl(listGet(c^.classMembers, i))^.isStatic) then
+          listAdd(names, PDecl(listGet(c^.classMembers, i))^.ident.name);
       c := c^.classParent;
     end;
     exit;

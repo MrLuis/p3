@@ -33,7 +33,8 @@ public:
   /// A `with` scope exposing Record's fields.
   Scope(Scope *Parent, RecordType *Record, WithContext *W)
       : Parent(Parent), WithRecord(Record), With(W) {}
-  /// A scope exposing the members of class C (a method body, or `with`).
+  /// A scope exposing the members of class C (a method body, or `with`); for
+  /// an advanced record's static method (W null) its static members.
   Scope(Scope *Parent, ClassType *C, WithContext *W)
       : Parent(Parent), WithClass(C), With(W) {}
 
@@ -63,7 +64,9 @@ public:
     if (WithClass) {
       for (const ClassType *C = WithClass; C; C = C->getParent())
         for (Decl *D : C->getMembers())
-          Fn(D->getName().Name);
+          if (With || (llvm::isa<RoutineDecl>(D) &&
+                       llvm::cast<RoutineDecl>(D)->isStatic()))
+            Fn(D->getName().Name);
       return;
     }
     for (const auto &Entry : Symbols)
@@ -76,6 +79,12 @@ public:
   Decl *lookupLocal(llvm::StringRef Name) const {
     if (WithRecord)
       return WithRecord->findField(Name);
+    if (WithClass && !With) {
+      // A record's static method: only its class methods and operators
+      // (static) are usable without a record.
+      auto *R = llvm::dyn_cast_or_null<RoutineDecl>(WithClass->findMember(Name));
+      return R && R->isStatic() ? R : nullptr;
+    }
     if (WithClass)
       return WithClass->findMember(Name);
     if (Decl *D = lookupOwn(Name))

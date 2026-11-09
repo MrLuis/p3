@@ -1,0 +1,47 @@
+; External routines: library and symbol names must be string constants;
+; varargs (C variadic) needs cdecl and external; callbacks need cdecl
+; procedural types of C types; which routines can be procedural values.
+; RUN: not %pcc --mode=objfpc -ferror-limit=0 -c %S/Inputs/externals/syntax.pas -o %t.o 2>&1 | FileCheck --check-prefix=SYNTAX %s
+; SYNTAX: syntax.pas:2:34: error: 'varargs' is only allowed on external routines
+; SYNTAX: syntax.pas:4:58: error: expected the external symbol name
+; SYNTAX-NOT: error:
+
+; RUN: not %pcc --mode=objfpc -ferror-limit=0 -c %S/Inputs/externals/errors.pas -o %t.o 2>&1 | FileCheck %s
+; CHECK: errors.pas:12:39: error: the library name of an external routine must be a string constant
+; CHECK: errors.pas:13:48: error: the symbol name of an external routine must be a string constant
+; CHECK: errors.pas:14:10: error: 'varargs' routine 'f3' must be 'cdecl'
+; CHECK: errors.pas:15:14: error: parameter 'cb' of external routine 'p2' has type 'TPlain'; a callback needs a 'cdecl' procedural type with integer, real, char, pointer or var parameters
+; CHECK: errors.pas:16:14: error: parameter 'cb' of external routine 'p3' has type 'TBadCB'; a callback needs a 'cdecl' procedural type with integer, real, char, pointer or var parameters
+; CHECK: errors.pas:27:6: error: 'Inner': only routines declared at program or unit level can be procedural values
+; CHECK: errors.pas:35:16: error: argument 2 of 'printf' has type 'TRec'; a 'varargs' argument must be an integer, real, char, boolean, pointer or string constant
+; CHECK: errors.pas:36:16: error: argument 2 of 'printf' has type 'string'; a 'varargs' argument must be an integer, real, char, boolean, pointer or string constant
+; CHECK: errors.pas:38:6: error: 'Plain2' does not match the heading of parameter 'cb' ('TCB')
+; CHECK: errors.pas:39:9: error: '@plain': an external routine must be 'cdecl' to be a procedural value
+; CHECK: errors.pas:40:9: error: '@printf': a 'varargs' routine cannot be a procedural value
+; CHECK: errors.pas:42:6: error: 'printf': a 'varargs' routine cannot be a procedural value
+; CHECK: errors.pas:43:9: error: '@p4': an external routine with procedural parameters cannot be a procedural value
+; CHECK-NOT: error:
+
+; The dumps: names resolved after Sema; constants as written in the parse tree.
+; RUN: %pcc --mode=objfpc --emit-ast %S/../run/externals.pas | FileCheck --check-prefix=AST %s
+; AST: FunctionDecl 'strlen' : int64 cdecl external 'strlen' in 'c'
+; AST: FunctionDecl 'c_sin' : real cdecl external 'sin' in 'm'
+; AST: FunctionDecl 'printf' : integer cdecl external 'printf' in 'c' varargs
+; RUN: %pcc --mode=objfpc --emit-parse-tree %S/../run/externals.pas | FileCheck --check-prefix=TREE %s
+; TREE:      FunctionDecl 'c_sin' cdecl external <
+; TREE:        ExternalLibrary <
+; TREE-NEXT:     NameRefExpr 'libm' <
+; TREE-NEXT:   ExternalName <
+; TREE-NEXT:     NameRefExpr 'sinname' <
+
+; The C entries of cdecl routines (their procedural values), and variadic calls.
+; RUN: %pcc --mode=objfpc --emit-llvm %S/../run/externals.pas -o - | FileCheck --check-prefix=IR %s
+; IR: call i32 (ptr, ...) @printf(ptr @.cstr.11, i32 42, ptr @.cstr.12, double 2.500000e+00, i32 %{{[0-9]+}}, i64 1234567890123)
+; IR: call void @qsort(ptr @pas.a, i64 7, i64 4, ptr @cthunk.pas.compare)
+; IR: store { ptr, ptr } { ptr @cthunk.pas.descending, ptr null }, ptr @pas.cmp
+; IR: declare i32 @printf(ptr, ...)
+; IR: define internal i32 @pas.compare(ptr %link, ptr %a, ptr %b)
+; IR: define internal i32 @cthunk.pas.compare(ptr %a, ptr %b) {
+; IR-NEXT: entry:
+; IR-NEXT:   %0 = call i32 @pas.compare(ptr null, ptr %a, ptr %b)
+; IR-NEXT:   ret i32 %0

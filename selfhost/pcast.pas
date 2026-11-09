@@ -76,12 +76,16 @@ type
       tySubrange: (host: PType; lo, hi: int64);
       tyStringLit: (strLength: int64);
       tyArray: (indexType, elementType: PType; isPackedArray: boolean);
+      { memberTable: an advanced record's (objfpc): a class type that is
+        not a type of values, holding the fields, methods, operators and
+        properties (its classRecord is the record); nil for a plain record }
       tyRecord: (fieldList: PFieldList; allFields: TPtrList; { of PDecl }
-                 isPackedRecord: boolean);
+                 isPackedRecord: boolean; memberTable: PType);
       tyPointer: (pointee: PType; untyped: boolean);
       tySet: (setElement: PType); { nil: the empty set [] }
       tyFile: (fileElement: PType; isText: boolean);
-      tyRoutine: (routineParams: TPtrList; routineResult: PType);
+      tyRoutine: (routineParams: TPtrList; routineResult: PType;
+                  routineCDecl: boolean);
       tyShortString: (maxLength: longint);
       { a class (objfpc): its parent (nil only for TObject), own members in
         source order, all fields (the ancestors' first), the virtual methods
@@ -89,9 +93,13 @@ type
         is not defined yet }
       { classInterfaces: the interfaces the class implements (listed by
         it or an ancestor), of PInterfaceImpl (Sema) }
+      { classRecord: the advanced record whose member table this is (nil
+        for a class): no parent, VMT or instances; its methods' Self is the
+        record (by reference), its class methods and operators have none }
       tyClass: (classParent: PType; classMembers, classAllFields,
                 classVTable: TPtrList; classModule: pointer;
-                classDefined: boolean; classInterfaces: TPtrList);
+                classDefined: boolean; classInterfaces: TPtrList;
+                classRecord: PType);
       { class of C (objfpc): a reference to C or a descendant (its VMT) }
       tyClassRef: (refClass: PType);
       { interface (objfpc): its parent, own methods (source order) and all
@@ -107,6 +115,12 @@ type
     kind: TNodeKind;
     b, e: TLoc;      { source range [b, e) }
     typ: PType;      { expressions: the type (Sema) }
+    { a user-defined conversion (objfpc advanced records): the := or
+      Explicit operator convOp converts the value to typ; convFrom is the
+      type it had; convSuspended while code generation computes it }
+    convOp: PDecl;
+    convFrom: PType;
+    convSuspended: boolean;
     case TNodeKind of
       nkIntegerLit: (intValue: int64);
       nkRealLit: (realValue: double);
@@ -114,9 +128,11 @@ type
       nkNameRef: (ref: TIdent; refDecl: PDecl; refWith: PWithContext);
       { paren: the inner expression; deref: the pointer; addrof: the operand }
       nkParen, nkDeref, nkAddrOf: (inner: PNode);
-      nkUnary: (uop: TUnaryOp; operand: PNode);
+      { opDecl: an advanced record's class operator implementing it
+        (Sema); opNegated: <> through the = operator }
+      nkUnary: (uop: TUnaryOp; operand: PNode; uopDecl: PDecl);
       nkBinary: (bop: TBinaryOp; opLoc: TLoc; lhs, rhs: PNode;
-                 operandType: PType);
+                 operandType: PType; opDecl: PDecl; opNegated: boolean);
       { call / proccall: callee named; indirectcall: calleeExpr; the
         indirect call statement holds an nkIndirectCall in calleeExpr }
       { callWith: a method found through a class scope is called on the
@@ -230,9 +246,12 @@ type
       tsEnum: (enumNames: TPtrList); { of PIdent }
       tsSubrange: (lo, hi: PNode);
       tsArray: (indexes: TPtrList; element: PTypeSpec; arrPacked: boolean);
-      tsRecord: (fields: PFieldList; recPacked: boolean);
+      { recMembers: an advanced record's methods, class operators and
+        properties (objfpc), in source order }
+      tsRecord: (fields: PFieldList; recPacked: boolean; recMembers: TPtrList);
       tsSet, tsFile: (elemSpec: PTypeSpec);
-      tsRoutine: (rtIsFunction: boolean; rtParams: TPtrList; rtResult: PTypeSpec);
+      tsRoutine: (rtIsFunction: boolean; rtParams: TPtrList; rtResult: PTypeSpec;
+                  rtCallConv: longint);
       tsString: (maxLen: PNode); { nil for plain string }
       { class (objfpc): the parent's name (nil name: TObject), the members
         (fields, method headings, properties) in source order }
@@ -275,7 +294,8 @@ type
   TVarKind = (vkVariable, vkValueParam, vkVarParam, vkConstParam, vkResult);
   { objfpc: the kind of a method, the methods of TObject (no Pascal body),
     the visibility of a class member }
-  TMethodKind = (mtNone, mtMethod, mtConstructor, mtDestructor);
+  { mtOperator: an advanced record's class operator (a static function) }
+  TMethodKind = (mtNone, mtMethod, mtConstructor, mtDestructor, mtOperator);
   TObjMethod = (obNone, obCreate, obDestroy, obFree, obClassName,
                 obExceptionCreate, obClassType, obClassParent, obInheritsFrom,
                 obInstanceSize);
@@ -288,6 +308,10 @@ type
     kind: TDeclKind;
     ident: TIdent;
     loc: TLoc;          { noLoc for predeclared entities }
+    { Free Pascal's hint directives (hintDeprecated, ...): each use of the
+      entity is warned about; hintMessage: deprecated's, or nil }
+    hints: longint;
+    hintMessage: PName;
     { Sema: referenced anywhere; a function whose result is assigned; the
       number of labels in this routine targeted by non-local gotos }
     isUsed, resultAssigned: boolean;
@@ -296,6 +320,8 @@ type
       a routine's function, frame type and jmp_buf slot, the frame slot of
       a local, a field's byte offset, a label's basic block }
     cgValue, cgFunc, cgFrame, cgBlock, cgDbg: pointer;
+    { a cdecl routine's C entry (cthunk, a PIRFunc), or nil }
+    cgThunk: pointer;
     { separate units: the external symbol of an interface variable or
       routine (nil: none), and whether its unit was compiled separately }
     cgExport: PName;
@@ -308,9 +334,12 @@ type
         variables and typed constants (Sema) }
       { isClassVar (objfpc): a class var, static storage for the class
         varClass (Sema) and its descendants }
+      { isInitVar (objfpc): init belongs to an initialized variable
+        (var x: T = v;), an ordinary variable set to its initial value
+        whenever its routine is entered, not to a typed constant }
       dkVar: (varSpec: PTypeSpec; varType: PType; varKind: TVarKind;
               owner: PDecl; init: PNode; initValue: TConstValue;
-              isClassVar: boolean; varClass: PType);
+              isClassVar: boolean; varClass: PType; isInitVar: boolean);
       dkConst: (constInit: PNode; constType: PType; constValue: TConstValue);
       dkType: (typeSpec: PTypeSpec; declType: PType);
       dkField: (fieldSpec: PTypeSpec; fieldType: PType);
@@ -334,6 +363,21 @@ type
                   routineIntf: PType;
                   ownerClass: PType; selfVar, implDecl: PDecl;
                   vmtIndex: longint; objMethod: TObjMethod;
+                  { an advanced record's class method or operator: no Self }
+                  isStatic: boolean;
+                  { the inline directive (with $inline on): code generation
+                    asks LLVM to inline the routine (inlinehint) }
+                  isInline: boolean;
+                  { the calling convention written (ccDefault, ccCDecl,
+                    ccStdCall); inheritedCDecl: an override of a cdecl
+                    method (Sema). See isCDecl. }
+                  callConv: longint; inheritedCDecl: boolean;
+                  { external [library] [name symbol]: the library to link
+                    with (nil: none), resolved by Sema when written as a
+                    constant expression (libraryExpr, nameExpr: as
+                    written, nil if absent); isVarArgs: 'varargs' }
+                  libraryName: PName; libraryExpr, nameExpr: PNode;
+                  isVarArgs: boolean;
                   { the body computes values of managed types (COM
                     interfaces): code generation releases the references
                     it holds when an exception leaves the routine (Sema) }
@@ -355,6 +399,29 @@ type
                    propParams: TPtrList; propIndex, propDefaultValue: PNode;
                    propIsDefault, propNoDefault: boolean);
   end;
+
+const
+  hintDeprecated = 1;
+  hintExperimental = 2;
+  hintPlatform = 4;
+  hintLibrary = 8;
+  hintUnimplemented = 16;
+
+  { Calling convention directives (Turbo/FPC), as written. pcc calls every
+    routine with the target's C convention (a cdecl routine's procedural
+    values point to a C entry without the static link); as in Free Pascal on 64-bit
+    targets, 'stdcall' is the default convention and 'cdecl' a different
+    one, so headings, implementations, overrides, interface implementations
+    and procedural values must agree on whether they are 'cdecl'. }
+  ccDefault = 0;
+  ccCDecl = 1;
+  ccStdCall = 2;
+
+procedure addHints(d: PDecl; flags: longint; msg: PName);
+function callConvName(cc: longint): string;
+{ Whether routine d is called as 'cdecl' (written, or inherited by an
+  override). }
+function isCDecl(d: PDecl): boolean;
 
 function newNode(kind: TNodeKind; b, e: TLoc): PNode;
 function newDecl(kind: TDeclKind; const id: TIdent; loc: TLoc): PDecl;
@@ -380,6 +447,28 @@ begin
   n^.b := b;
   n^.e := e;
   newNode := n;
+end;
+
+function callConvName(cc: longint): string;
+begin
+  if cc = ccCDecl then
+    callConvName := 'cdecl'
+  else if cc = ccStdCall then
+    callConvName := 'stdcall'
+  else
+    callConvName := '';
+end;
+
+function isCDecl(d: PDecl): boolean;
+begin
+  isCDecl := (d^.callConv = ccCDecl) or d^.inheritedCDecl;
+end;
+
+procedure addHints(d: PDecl; flags: longint; msg: PName);
+begin
+  d^.hints := d^.hints or flags;
+  if msg <> nil then
+    d^.hintMessage := msg;
 end;
 
 function newDecl(kind: TDeclKind; const id: TIdent; loc: TLoc): PDecl;

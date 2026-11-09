@@ -16,7 +16,7 @@ var
   action: TAction;
   mode: TLangMode;
   errorLimit: longint;
-  werror, noUnusedVariable: boolean;
+  werror, noUnusedVariable, noDeprecated: boolean;
   rangeChecksOn, overflowChecksOn, debugInfo, separateUnits: boolean;
   optLevel: longint;
   outBuf: TBuf;
@@ -116,6 +116,7 @@ begin
   helpLine('      -S                         - Emit target assembly (.s)');
   helpLine('      -c                         - Emit an object file (.o)');
   helpLine('  --Werror                     - Treat warnings as errors');
+  helpLine('  --Wno-deprecated             - Do not warn about uses of deprecated (experimental, platform, library, unimplemented) declarations');
   helpLine('  --Wno-unused-variable        - Do not warn about unused variables');
   helpLine('  -d <name>                    - Define a symbol for conditional compilation ({$IFDEF})');
   helpLine('  --fdiagnostics-color=<value> - Colorize diagnostics:');
@@ -137,10 +138,11 @@ begin
 end;
 
 const
-  numFlags = 15;
+  numFlags = 16;
   flagNames: array[1..numFlags] of string[20] = (
     'help', 'help-list', 'version', 'emit-tokens', 'emit-ast', 'emit-parse-tree',
-    'emit-llvm', 'S', 'c', 'Werror', 'Wno-unused-variable', 'fno-overflow-checks',
+    'emit-llvm', 'S', 'c', 'Werror', 'Wno-unused-variable', 'Wno-deprecated',
+    'fno-overflow-checks',
     'fno-range-checks', 'fseparate-units', 'g');
   numValueOpts = 10;
   valueOptNames: array[1..numValueOpts] of string[20] = (
@@ -285,6 +287,7 @@ begin
   errorLimit := 20;
   werror := false;
   noUnusedVariable := false;
+  noDeprecated := false;
   optLevel := 0;
   rangeChecksOn := true;
   overflowChecksOn := true;
@@ -356,6 +359,8 @@ begin
       werror := true
     else if name = 'Wno-unused-variable' then
       noUnusedVariable := true
+    else if name = 'Wno-deprecated' then
+      noDeprecated := true
     else if name = 'fno-range-checks' then
       rangeChecksOn := false
     else if name = 'fno-overflow-checks' then
@@ -567,6 +572,40 @@ end;
 
 { The objects of separately compiled units, next to their sources; false
   (and an error) if one is missing. }
+{ The libraries named by the external routines of block b (external 'z'),
+  linked after the -l ones: -lz, or -l:name for a file name
+  ('libz.so.1'). }
+procedure collectExternalLibraries(b: PBlock; var seen: TPtrList);
+var
+  i, k: longint;
+  d: PDecl;
+  l: PName;
+  s: string;
+  dup: boolean;
+begin
+  if b = nil then
+    exit;
+  for i := 0 to b^.decls.count - 1 do
+  begin
+    d := PDecl(listGet(b^.decls, i));
+    if (d^.kind <> dkRoutine) or not d^.isExternal or (d^.libraryName = nil) or
+       (d^.libraryName^.len = 0) then
+      continue;
+    s := nameStr(d^.libraryName);
+    if (pos('.', s) > 0) or (pos('/', s) > 0) then
+      s := ':' + s;
+    l := intern('-l' + s);
+    dup := false;
+    for k := 0 to seen.count - 1 do
+      if PName(listGet(seen, k)) = l then
+        dup := true;
+    if dup then
+      continue;
+    listAdd(seen, l);
+    addLinkerArg(nameStr(l));
+  end;
+end;
+
 function findUnitObjects(var objects: TPtrList): boolean;
 var
   i, f, line, col: longint;
@@ -591,10 +630,9 @@ begin
 end;
 
 { A unit file as the input: its own module (S11). }
-function compileUnit(fid: longint): boolean;
+{ Compiles the unit u parsed from file fid. }
+function compileUnit(fid: longint; u: PDecl): boolean;
 var
-  u: PDecl;
-  isUnit: boolean;
   uses_: TPtrList;
   i: longint;
   layout: string;
@@ -602,7 +640,6 @@ var
   noObjects: TPtrList;
 begin
   compileUnit := false;
-  u := parseInput(fid, mode, true, isUnit);
   if (u = nil) or diagHasErrors then
     exit;
   listInit(uses_);
@@ -682,7 +719,8 @@ var
   kind: TOutputKind;
   modLayout: string;
   isUnit: boolean;
-  unitObjects: TPtrList;
+  unitObjects, extLibs: TPtrList;
+  i: longint;
 begin
   sysInit;
   diagInit;
@@ -694,6 +732,8 @@ begin
   diagSetWarningsAsErrors(werror);
   if noUnusedVariable then
     diagDisableWarning('unused-variable');
+  if noDeprecated then
+    diagDisableWarning('deprecated');
   if inputFile = '' then
     usageError('no input file');
   if optLevel > 3 then
@@ -728,8 +768,10 @@ begin
   isUnit := false;
   if action <> actTokens then
   begin
-    { a unit file? (Turbo/FPC) }
-    prog := parseInput(fid, mode, false, isUnit);
+    { a program or (Turbo/FPC) a unit, parsed once (a unit's body only
+      when it is to be compiled) }
+    prog := parseInput(fid, mode, (action <> actParseTree) and (action <> actAST),
+                       isUnit);
     if isUnit and ((action = actParseTree) or (action = actAST)) then
     begin
       diagError(noLoc, '''' + inputFile + ''' is a unit; --emit-parse-tree and ' +
@@ -738,7 +780,7 @@ begin
     end;
     if isUnit then
     begin
-      if compileUnit(fid) and not diagHasErrors then
+      if compileUnit(fid, prog) and not diagHasErrors then
         sysExit(0);
       sysExit(1);
     end;
@@ -778,6 +820,13 @@ begin
         listInit(unitObjects);
         if separateUnits and (action = actExe) and not findUnitObjects(unitObjects) then
           sysExit(1);
+        listInit(extLibs);
+        for i := 0 to units.count - 1 do
+        begin
+          collectExternalLibraries(PDecl(listGet(units, i))^.iface, extLibs);
+          collectExternalLibraries(PDecl(listGet(units, i))^.impl, extLibs);
+        end;
+        collectExternalLibraries(prog^.progBlock, extLibs);
         generateModule(prog, units, mode, rangeChecksOn, overflowChecksOn,
                        smFileName(fid), targetTriple, modLayout, debugInfo, optLevel > 0,
                        separateUnits, outBuf);

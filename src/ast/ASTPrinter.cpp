@@ -52,6 +52,10 @@ class ASTPrinter : public StmtVisitor<ASTPrinter>,
   }
   void end(Expr *E) {
     type(E->getType());
+    if (RoutineDecl *Op = E->getConversion()) { // a record's := / Explicit
+      OS << " converted by '" << Op->getName().Name << '\'';
+      overloadNumber(Op);
+    }
     loc(E->getBeginLoc());
   }
   void quoted(llvm::StringRef S) {
@@ -83,6 +87,7 @@ class ASTPrinter : public StmtVisitor<ASTPrinter>,
       line("ConstDecl '") << C->getName().Name << '\'';
       type(C->getType());
       printConstValue(C->getValue());
+      hints(C);
       loc(C->getLocation());
       if (!C->getType() && C->getInit()) {
         IndentScope I(Indent);
@@ -95,6 +100,7 @@ class ASTPrinter : public StmtVisitor<ASTPrinter>,
       line("TypeDecl '") << T->getName().Name << '\'';
       if (T->getType())
         OS << " = " << describeType(T->getType());
+      hints(T);
       loc(T->getLocation());
       if (ParseTree) {
         IndentScope I(Indent);
@@ -113,6 +119,8 @@ class ASTPrinter : public StmtVisitor<ASTPrinter>,
         typeSpec(V->getTypeSpec(), V->getType());
       if (V->isClassVar())
         OS << " class";
+      if (V->isInitializedVar())
+        OS << " initialized";
       visibility(V);
       loc(V->getLocation());
       if (ParseTree) {
@@ -131,6 +139,7 @@ class ASTPrinter : public StmtVisitor<ASTPrinter>,
       auto *R = llvm::cast<RoutineDecl>(D);
       line(R->isConstructor()  ? "ConstructorDecl '"
            : R->isDestructor() ? "DestructorDecl '"
+           : R->isOperator()   ? "OperatorDecl '"
            : R->isFunction()   ? "FunctionDecl '"
                                : "ProcedureDecl '");
       if (R->getClassName().isValid())
@@ -149,14 +158,26 @@ class ASTPrinter : public StmtVisitor<ASTPrinter>,
         OS << " abstract";
       if (R->hasOverloadDirective())
         OS << " overload";
+      if (R->isInline())
+        OS << " inline";
+      if (R->getCallConv() != CallConv::Default)
+        OS << ' ' << callConvName(R->getCallConv());
       overloadNumber(R);
       if (R->isForward())
         OS << " forward";
-      if (R->isExternal())
-        OS << " external '"
-           << (R->getExternalName().empty() ? R->getName().Spelling
-                                            : R->getExternalName())
-           << '\'';
+      if (R->isExternal()) {
+        OS << " external";
+        // (a symbol name given as a constant: known after Sema)
+        if (!R->getExternalName().empty() || !R->getNameExpr())
+          OS << " '"
+             << (R->getExternalName().empty() ? R->getName().Spelling
+                                              : R->getExternalName())
+             << '\'';
+        if (!R->getLibraryName().empty())
+          OS << " in '" << R->getLibraryName() << '\'';
+        if (R->isVarArgs())
+          OS << " varargs";
+      }
       if (R->isRedeclaration())
         OS << " definition";
       loc(R->getLocation());
@@ -170,6 +191,15 @@ class ASTPrinter : public StmtVisitor<ASTPrinter>,
         IndentScope J(Indent);
         printTypeSpec(R->getResultTypeSpec());
       }
+      // external library and name constants (not literals)
+      for (auto [What, E] : {std::pair{"ExternalLibrary", R->getLibraryExpr()},
+                             std::pair{"ExternalName", R->getNameExpr()}})
+        if (ParseTree && E && !llvm::isa<StringLiteralExpr>(E)) {
+          line(What);
+          loc(E->getBeginLoc());
+          IndentScope J(Indent);
+          visitExpr(E);
+        }
       if (Block *B = R->getBody(); B && !R->isForward())
         printBlock(*B);
       return;
@@ -233,12 +263,41 @@ class ASTPrinter : public StmtVisitor<ASTPrinter>,
   }
 
   /// " #N": which routine of an overloaded name (objfpc) is meant.
+  /// A record's class operator implementing an operation (Sema).
+  void operatorOf(RoutineDecl *Op, bool Negated) {
+    if (!Op)
+      return;
+    OS << (Negated ? " not " : " ") << "by '" << Op->getName().Name << '\'';
+    overloadNumber(Op);
+  }
+
   void overloadNumber(Decl *D) {
     if (auto *R = llvm::dyn_cast_or_null<RoutineDecl>(D); R && R->isOverloaded())
       OS << " #" << R->getOverloadIndex();
   }
 
+  /// Hint directives (deprecated 'message', experimental, ...).
+  void hints(Decl *D) {
+    unsigned char H = D->getHints();
+    if (H & Decl::HintDeprecated) {
+      OS << " deprecated";
+      if (!D->getHintMessage().empty()) {
+        OS << ' ';
+        quoted(D->getHintMessage());
+      }
+    }
+    if (H & Decl::HintExperimental)
+      OS << " experimental";
+    if (H & Decl::HintPlatform)
+      OS << " platform";
+    if (H & Decl::HintLibrary)
+      OS << " library";
+    if (H & Decl::HintUnimplemented)
+      OS << " unimplemented";
+  }
+
   void visibility(Decl *D) {
+    hints(D);
     switch (D->getVisibility()) {
     case Visibility::Public:    break;
     case Visibility::Published: OS << " published"; break;
@@ -343,6 +402,8 @@ class ASTPrinter : public StmtVisitor<ASTPrinter>,
       loc(TS->getBeginLoc());
       IndentScope I(Indent);
       printFieldList(R->getFields());
+      for (Decl *M : R->getMembers()) // an advanced record's
+        printDecl(M);
       return;
     }
     case TypeSpec::TS_Pointer:
@@ -363,6 +424,8 @@ class ASTPrinter : public StmtVisitor<ASTPrinter>,
     case TypeSpec::TS_Routine: {
       auto *R = llvm::cast<RoutineTypeSpec>(TS);
       line(R->isFunction() ? "RoutineTypeSpec function" : "RoutineTypeSpec procedure");
+      if (R->getCallConv() != CallConv::Default)
+        OS << ' ' << callConvName(R->getCallConv());
       loc(TS->getBeginLoc());
       IndentScope I(Indent);
       for (VarDecl *P : R->getParams())
@@ -426,6 +489,7 @@ class ASTPrinter : public StmtVisitor<ASTPrinter>,
   void printFieldList(FieldList *FL) {
     for (FieldDecl *F : FL->Fixed) {
       line("FieldDecl '") << F->getName().Name << '\'';
+      visibility(F);
       loc(F->getLocation());
       IndentScope I(Indent);
       printTypeSpec(F->getTypeSpec());
@@ -769,12 +833,14 @@ public:
   }
   void visitUnaryExpr(UnaryExpr *E) {
     line("UnaryExpr '") << getOpSpelling(E->getOp()) << '\'';
+    operatorOf(E->getOperator(), false);
     end(E);
     IndentScope I(Indent);
     visitExpr(E->getOperand());
   }
   void visitBinaryExpr(BinaryExpr *E) {
     line("BinaryExpr '") << getOpSpelling(E->getOp()) << '\'';
+    operatorOf(E->getOperator(), E->isNegated());
     end(E);
     IndentScope I(Indent);
     visitExpr(E->getLHS());

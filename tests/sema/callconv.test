@@ -1,0 +1,42 @@
+; Calling convention directives (cdecl, stdcall): as in Free Pascal on
+; 64-bit targets, stdcall is the default convention and cdecl a different
+; one. Headings and implementations, overrides, interface implementations
+; and procedural values must agree; a second directive warns.
+; RUN: not %pcc --mode=objfpc -ferror-limit=0 -c %S/Inputs/callconv/errors.pas -o %t.o 2>&1 | FileCheck %s
+; CHECK: errors.pas:5:46: warning: calling convention 'cdecl' is given twice
+; CHECK: errors.pas:22:35: warning: calling convention 'cdecl' replaces 'stdcall'
+; CHECK: errors.pas:10:33: error: class 'TK' does not implement 'IFoo.A'
+; CHECK: errors.pas:7:5: note: 'A' declared here
+; CHECK: errors.pas:10:33: error: class 'TK' does not implement 'IFoo.B'
+; CHECK: errors.pas:8:5: note: 'B' declared here
+; CHECK: errors.pas:17:15: error: calling convention of 'M' is 'cdecl' but the method it overrides in 'TK' is 'stdcall' (the default)
+; CHECK: errors.pas:13:5: note: 'M' declared here
+; CHECK: errors.pas:21:11: error: calling convention of 'X' is 'stdcall' (the default) but its forward declaration's is 'cdecl'
+; CHECK: errors.pas:20:1: note: forward declaration is here
+; CHECK: errors.pas:26:14: error: calling convention of 'TK.A' is 'stdcall' (the default) but its declaration's is 'cdecl'
+; CHECK: errors.pas:11:5: note: 'A' declared here
+; CHECK: errors.pas:31:14: error: calling convention of 'TL.N' is 'stdcall' (the default) but its declaration's is 'cdecl'
+; CHECK: errors.pas:18:5: note: 'N' declared here
+; CHECK: errors.pas:37:5: error: assigning to 'TStd' from incompatible type 'procedure(integer); cdecl'
+; CHECK: errors.pas:39:5: error: assigning to 'TC' from incompatible type 'procedure(integer)'
+; CHECK: errors.pas:40:5: error: assigning to 'TC' from incompatible type 'TStd'
+; CHECK: errors.pas:41:9: error: 'E' does not match the heading of parameter 'p' ('procedure(integer)')
+; CHECK-NOT: error:
+
+; The directives in the dumps: on routines (as written) and procedural types.
+; RUN: %pcc --mode=objfpc --emit-ast %S/../run/callconv.pas | FileCheck --check-prefix=AST %s
+; AST: FunctionDecl 'labs' : int64 cdecl external 'labs'
+; AST: FunctionDecl 'cabs' : integer stdcall external 'abs'
+; AST: FunctionDecl 'cube' : integer stdcall forward
+; AST: FunctionDecl 'tderived.twice' cdecl definition
+; AST: AddrOfExpr : function(integer): integer; cdecl
+; RUN: %pcc --mode=objfpc --emit-parse-tree %S/../run/callconv.pas | FileCheck --check-prefix=TREE %s
+; TREE: RoutineTypeSpec function stdcall <
+; TREE: RoutineTypeSpec function <
+; TREE: RoutineTypeSpec function cdecl <
+; TREE: RoutineTypeSpec procedure stdcall <
+
+; Not directives in ISO Pascal: plain identifiers there.
+; RUN: %pcc --mode=iso --emit-tokens %S/Inputs/callconv/iso.pas | FileCheck --check-prefix=ISO %s
+; RUN: %pcc --mode=iso -c %S/Inputs/callconv/iso.pas -o %t.iso.o
+; ISO: identifier 'stdcall'

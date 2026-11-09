@@ -83,6 +83,12 @@ class Checker : public StmtVisitor<Checker>,
   /// TInterfacedObject, the root of the classes implementing them.
   InterfaceType *IUnknownTy = nullptr;
   ClassType *TInterfacedObjectTy = nullptr;
+  /// The advanced record being declared by a type declaration (records
+  /// with methods must be named, so others are rejected).
+  RecordTypeSpec *NamedAdvancedRecord = nullptr;
+  /// What a typed constant's or initialized variable's value is called in
+  /// diagnostics ("... must be a constant").
+  const char *ConstInitWhat = "typed constant value";
   /// `class of C` for each class C: the type of C used as a value, and of
   /// Self in class methods (`TFooClass = class of TFoo` is a type of its own).
   llvm::DenseMap<ClassType *, ClassRefType *> ClassRefs;
@@ -439,10 +445,48 @@ class Checker : public StmtVisitor<Checker>,
   }
 
   void diagUndeclared(const Identifier &Id) {
+    // In a record's static method, the record's instance members.
+    for (RoutineDecl *R = CurRoutine; R; R = R->getParent())
+      if (R->isStatic()) {
+        if (Decl *D = R->getClass()->findMember(Id.Name)) {
+          Diags.error(Id.Loc,
+                      "instance member '" + Id.Spelling +
+                          "' cannot be used in a static class method",
+                      {Id.getRange()});
+          noteDeclaredHere(D);
+          return;
+        }
+        break;
+      }
     Diags.error(Id.Loc,
                 "use of undeclared identifier '" + Id.Spelling + "'" +
                     didYouMean(Id.Name),
                 {Id.getRange()});
+  }
+
+  /// A use (named Id) of D: warnings for its hint directives (deprecated,
+  /// experimental, platform, library, unimplemented), as in Free Pascal.
+  void warnHints(Decl *D, const Identifier &Id) {
+    unsigned char H = D ? D->getHints() : 0;
+    if (!H || !Diags.isWarningEnabled("deprecated"))
+      return;
+    std::string Name = "'" + D->getName().Spelling.str() + "'";
+    auto Warn = [&](const std::string &What) {
+      Diags.warning("deprecated", Id.Loc, Name + What, {Id.getRange()});
+    };
+    if (H & Decl::HintDeprecated)
+      Warn(" is deprecated" + (D->getHintMessage().empty()
+                                   ? std::string()
+                                   : ": " + D->getHintMessage().str()));
+    if (H & Decl::HintExperimental)
+      Warn(" is experimental");
+    if (H & Decl::HintPlatform)
+      Warn(" is not portable (platform-specific)");
+    if (H & Decl::HintLibrary)
+      Warn(" belongs to a library");
+    if (H & Decl::HintUnimplemented)
+      Warn(" is not implemented");
+    noteDeclaredHere(D);
   }
 
   void noteDeclaredHere(Decl *D) {
@@ -462,6 +506,11 @@ class Checker : public StmtVisitor<Checker>,
   }
 
   static std::string quoted(Type *T) { return "'" + T->getName() + "'"; }
+
+  /// A routine's calling convention in a message (see CallConv).
+  static const char *callConvDesc(bool CDecl) {
+    return CDecl ? "'cdecl'" : "'stdcall' (the default)";
+  }
 
   //===--------------------------------------------------------------------===//
   // Integer types (Turbo/FPC rules; ISO has only `integer`)
@@ -609,8 +658,9 @@ class Checker : public StmtVisitor<Checker>,
       if (Value->isNil())
         return true;
       auto *VR = llvm::dyn_cast<RoutineType>(Value);
-      return VR && congruent(TR->getParams(), TR->getResult(), VR->getParams(),
-                             VR->getResult());
+      return VR && VR->isCDecl() == TR->isCDecl() &&
+             congruent(TR->getParams(), TR->getResult(), VR->getParams(),
+                       VR->getResult());
     }
     if (Target->isOrdinal() && Value->isOrdinal())
       return haveSameOrdinalHost(Target, Value); // range-checked at runtime
@@ -948,6 +998,8 @@ class Checker : public StmtVisitor<Checker>,
     case TypeSpec::TS_Named: {
       const Identifier &Id = llvm::cast<NamedTypeSpec>(TS)->getName();
       Decl *D = Cur->lookup(Id.Name);
+      if (llvm::isa_and_nonnull<TypeDecl>(D))
+        warnHints(D, Id);
       if (!D) {
         if (isFutureBuiltin(Id.Name))
           Diags.error(Id.Loc, "type '" + Id.Spelling + "' is not supported yet",
@@ -1077,7 +1129,8 @@ class Checker : public StmtVisitor<Checker>,
           Result = errorType();
         }
       }
-      return Ctx.create<RoutineType>(RS->getParams(), Result);
+      return Ctx.create<RoutineType>(RS->getParams(), Result,
+                                     RS->getCallConv() == CallConv::CDecl);
     }
 
     case TypeSpec::TS_String: {
@@ -1176,6 +1229,12 @@ class Checker : public StmtVisitor<Checker>,
 
     case TypeSpec::TS_Record: {
       auto *RS = llvm::cast<RecordTypeSpec>(TS);
+      if (!RS->getMembers().empty() && RS != NamedAdvancedRecord)
+        Diags.error(RS->getBeginLoc(),
+                    "methods are not allowed in anonymous or local records; "
+                    "declare the record type in a 'type' section at program "
+                    "or unit level",
+                    {RS->getRange()});
       llvm::SmallVector<FieldDecl *, 16> All;
       llvm::StringMap<FieldDecl *> Seen;
       if (!resolveFieldList(RS->getFields(), All, Seen))
@@ -1263,8 +1322,300 @@ class Checker : public StmtVisitor<Checker>,
       return declareClass(TD, CS);
     if (auto *IS = llvm::dyn_cast<InterfaceTypeSpec>(TD->getTypeSpec()))
       return declareInterface(TD, IS);
+    auto *RS = llvm::dyn_cast<RecordTypeSpec>(TD->getTypeSpec());
+    if (RS && !RS->getMembers().empty() && !CurRoutine)
+      return declareAdvancedRecord(TD, RS);
     TD->setType(resolveType(TD->getTypeSpec(), TD->getName().Spelling));
     declare(TD);
+  }
+
+  //===--------------------------------------------------------------------===//
+  // Advanced records (objfpc, {$modeswitch advancedrecords})
+  //===--------------------------------------------------------------------===//
+
+  /// TR = record fields; methods; operators; properties end; -- the record
+  /// type (its fields), then its member table (see RecordType).
+  void declareAdvancedRecord(TypeDecl *TD, RecordTypeSpec *RS) {
+    RecordTypeSpec *Saved = NamedAdvancedRecord;
+    NamedAdvancedRecord = RS;
+    Type *T = resolveType(RS, TD->getName().Spelling);
+    NamedAdvancedRecord = Saved;
+    TD->setType(T);
+    declare(TD); // its methods' headings may name it
+    if (auto *RT = llvm::dyn_cast<RecordType>(T))
+      defineRecordMembers(RT, RS);
+  }
+
+  void defineRecordMembers(RecordType *RT, RecordTypeSpec *RS) {
+    auto *C = Ctx.create<ClassType>();
+    C->setDeclName(RT->getDeclName());
+    C->setRecord(RT);
+    RT->setMemberTable(C);
+    llvm::SmallVector<Decl *, 16> Members;
+    llvm::StringMap<Decl *> Own;
+    for (FieldDecl *F : RT->getAllFields()) {
+      Members.push_back(F);
+      Own.try_emplace(F->getName().Name, F);
+    }
+    for (Decl *M : RS->getMembers()) {
+      const Identifier &MN = M->getName();
+      RoutineDecl *OverloadOf = nullptr;
+      if (Decl *Prev = Own.lookup(MN.Name)) {
+        OverloadOf = llvm::dyn_cast<RoutineDecl>(Prev);
+        if (!OverloadOf || !llvm::isa<RoutineDecl>(M)) {
+          Diags.error(MN.Loc, "redefinition of '" + MN.Spelling + "'",
+                      {MN.getRange()});
+          Diags.note(Prev->getLocation(), "previous definition is here");
+          continue;
+        }
+      } else {
+        Own[MN.Name] = M;
+      }
+      Members.push_back(M);
+      if (auto *R = llvm::dyn_cast<RoutineDecl>(M)) {
+        defineRecordMethod(C, RT, R);
+        if (OverloadOf && !addOverload(OverloadOf, R)) {
+          R->setClass(nullptr); // rejected: not a member
+          Members.pop_back();
+        }
+        continue;
+      }
+      auto *P = llvm::cast<PropertyDecl>(M);
+      if (P->isDefault())
+        Diags.error(P->getLocation(),
+                    "a record cannot have a default property",
+                    {P->getName().getRange()});
+      definePropertyAccessors(C, P, Own, nullptr);
+    }
+    C->define(nullptr, Ctx.copyArray<Decl *>(Members), RT->getAllFields(), {},
+              CurModule);
+  }
+
+  /// A method, class method (static) or class operator of record RT.
+  void defineRecordMethod(ClassType *C, RecordType *RT, RoutineDecl *R) {
+    const Identifier &Id = R->getName();
+    R->setClass(C);
+    R->setParent(nullptr);
+    resolveSignature(R);
+    if (R->isVirtual() || R->isOverride() || R->isAbstract())
+      Diags.error(Id.Loc,
+                  "the methods of a record cannot be 'virtual', 'override' "
+                  "or 'abstract'",
+                  {Id.getRange()});
+    if (R->isClassMethod())
+      R->setStatic(); // no Self
+    else
+      makeSelf(R, C);
+    if (R->isConstructor() && R->getParams().empty())
+      Diags.error(Id.Loc, "a record's constructor needs parameters",
+                  {Id.getRange()});
+    if (R->isOperator())
+      checkOperatorHeading(R, RT);
+  }
+
+  /// A class operator's parameters: two (binary), one (unary - + not, and
+  /// the conversions := and Explicit); no var parameters; the record among
+  /// the parameter or result types.
+  void checkOperatorHeading(RoutineDecl *R, RecordType *RT) {
+    const Identifier &Id = R->getName();
+    llvm::StringRef Sym = Id.Name.drop_front(strlen("operator"));
+    size_t N = R->getParams().size();
+    bool Unary = Sym == "not" || Sym == ":=" || Sym == "explicit";
+    bool Either = Sym == "-" || Sym == "+";
+    if (Unary ? N != 1 : Either ? N != 1 && N != 2 : N != 2) {
+      Diags.error(Id.Loc,
+                  "'" + Id.Spelling + "' takes " +
+                      (Unary ? "one parameter"
+                       : Either ? "one or two parameters"
+                                : "two parameters"),
+                  {Id.getRange()});
+      return;
+    }
+    bool HasRecord = R->getResultType() == RT;
+    for (VarDecl *P : R->getParams()) {
+      if (P->isVarParam())
+        Diags.error(P->getLocation(),
+                    "the parameters of an operator cannot be 'var'",
+                    {P->getName().getRange()});
+      HasRecord |= P->getType() == RT;
+    }
+    if (!HasRecord)
+      Diags.error(Id.Loc,
+                  "an operator of " + quoted(RT) +
+                      " needs a parameter or result of that type",
+                  {Id.getRange()});
+  }
+
+  static ClassType *memberTableOf(Type *T) {
+    auto *RT = llvm::dyn_cast_or_null<RecordType>(T);
+    return RT ? RT->getMemberTable() : nullptr;
+  }
+
+  /// A user-defined conversion of a value of type From to To: a `:=`
+  /// operator (Explicit: an `Explicit` one first) of either record whose
+  /// parameter takes From (exactly, else by assignment) and whose result is
+  /// To. Null if there is none.
+  RoutineDecl *findConversion(Type *From, Type *To, bool Explicit) {
+    if (!LangOpts.ObjKeywords || !From || !To)
+      return nullptr;
+    for (llvm::StringRef Name :
+         {llvm::StringRef("operatorexplicit"), llvm::StringRef("operator:=")}) {
+      if (Name == "operatorexplicit" && !Explicit)
+        continue;
+      RoutineDecl *Best = nullptr;
+      bool BestExact = false;
+      for (Type *T : {From, To}) {
+        ClassType *MT = memberTableOf(T);
+        if (!MT || (T == To && To == From))
+          continue;
+        for (auto *R = llvm::dyn_cast_or_null<RoutineDecl>(MT->findOwnMember(Name));
+             R; R = R->getNextOverload()) {
+          Type *PT = R->getParams().size() == 1 ? R->getParams()[0]->getType()
+                                                : nullptr;
+          if (!R->isOperator() || !PT || R->getResultType() != To)
+            continue;
+          bool Exact = PT == From;
+          if (!Exact && !isAssignable(PT, From))
+            continue;
+          if (!Best || (Exact && !BestExact)) {
+            Best = R;
+            BestExact = Exact;
+          }
+        }
+      }
+      if (Best)
+        return Best;
+    }
+    return nullptr;
+  }
+
+  /// Converts Value to To by a user-defined `:=` operator if there is one.
+  bool convertImplicitly(Expr *Value, Type *To) {
+    RoutineDecl *Op = findConversion(Value->getType(), To, false);
+    if (!Op)
+      return false;
+    Value->setConversion(Op, To);
+    return true;
+  }
+
+  /// The class operator Name of the records among Args' types that fits
+  /// Args best (exact types, then assignable ones, then ones converted by a
+  /// `:=` operator), with the conversions it needs annotated; null if none
+  /// fits. Found: whether either record has an operator Name of that arity.
+  RoutineDecl *resolveOperator(llvm::StringRef Name, llvm::ArrayRef<Expr *> Args,
+                               bool &Found) {
+    llvm::SmallVector<ClassType *, 2> Tables;
+    for (Expr *A : Args)
+      if (ClassType *MT = memberTableOf(A->getType()))
+        if (!llvm::is_contained(Tables, MT))
+          Tables.push_back(MT);
+    RoutineDecl *Best = nullptr;
+    int BestCost = 0;
+    for (ClassType *MT : Tables)
+      for (auto *R = llvm::dyn_cast_or_null<RoutineDecl>(MT->findOwnMember(Name));
+           R; R = R->getNextOverload()) {
+        if (!R->isOperator() || R->getParams().size() != Args.size())
+          continue;
+        Found = true;
+        int Cost = 0;
+        bool OK = true;
+        for (size_t I = 0; I < Args.size() && OK; ++I) {
+          Type *PT = R->getParams()[I]->getType(), *AT = Args[I]->getType();
+          if (!PT || PT->isError())
+            OK = false;
+          else if (PT == AT)
+            continue;
+          else if (isAssignable(PT, AT))
+            Cost += 1;
+          else if (findConversion(AT, PT, false))
+            Cost += 100;
+          else
+            OK = false;
+        }
+        if (OK && (!Best || Cost < BestCost)) {
+          Best = R;
+          BestCost = Cost;
+        }
+      }
+    if (Best)
+      for (size_t I = 0; I < Args.size(); ++I) {
+        Type *PT = Best->getParams()[I]->getType(), *AT = Args[I]->getType();
+        if (PT != AT && !isAssignable(PT, AT))
+          convertImplicitly(Args[I], PT);
+      }
+    return Best;
+  }
+
+  static const char *operatorSymbol(BinaryOp Op) {
+    switch (Op) {
+    case BinaryOp::Add:     return "+";
+    case BinaryOp::Sub:     return "-";
+    case BinaryOp::Mul:     return "*";
+    case BinaryOp::RealDiv: return "/";
+    case BinaryOp::IntDiv:  return "div";
+    case BinaryOp::Mod:     return "mod";
+    case BinaryOp::And:     return "and";
+    case BinaryOp::Or:      return "or";
+    case BinaryOp::Xor:     return "xor";
+    case BinaryOp::Shl:     return "shl";
+    case BinaryOp::Shr:     return "shr";
+    case BinaryOp::Eq:      return "=";
+    case BinaryOp::Ne:      return "<>";
+    case BinaryOp::Lt:      return "<";
+    case BinaryOp::Gt:      return ">";
+    case BinaryOp::Le:      return "<=";
+    case BinaryOp::Ge:      return ">=";
+    case BinaryOp::In:      return "in";
+    default:                return nullptr;
+    }
+  }
+
+  /// L op R where an operand is an advanced record: its class operator
+  /// (`<>` may use `=`, negated).
+  Type *checkRecordOperator(BinaryExpr *E) {
+    const char *Sym = operatorSymbol(E->getOp());
+    Expr *Args[] = {E->getLHS(), E->getRHS()};
+    Type *L = Args[0]->getType(), *R = Args[1]->getType();
+    bool Found = false;
+    RoutineDecl *Op =
+        Sym ? resolveOperator(std::string("operator") + Sym, Args, Found)
+            : nullptr;
+    bool Negate = false;
+    if (!Op && E->getOp() == BinaryOp::Ne) {
+      Op = resolveOperator("operator=", Args, Found);
+      Negate = Op != nullptr;
+    }
+    if (!Op) {
+      Diags.error(E->getOpLoc(),
+                  llvm::Twine("operator '") + getOpSpelling(E->getOp()) +
+                      "' is not overloaded for " + quoted(L) + " and " +
+                      quoted(R),
+                  {Args[0]->getRange(), Args[1]->getRange()});
+      return errorType();
+    }
+    E->setOperator(Op, Negate);
+    if (Negate)
+      return Ctx.getBooleanType();
+    return Op->getResultType();
+  }
+
+  /// op X where X is an advanced record: its class operator.
+  Type *checkRecordOperator(UnaryExpr *E) {
+    const char *Sym = E->getOp() == UnaryOp::Not     ? "not"
+                      : E->getOp() == UnaryOp::Minus ? "-"
+                                                     : "+";
+    Expr *Args[] = {E->getOperand()};
+    bool Found = false;
+    RoutineDecl *Op = resolveOperator(std::string("operator") + Sym, Args, Found);
+    if (!Op) {
+      Diags.error(E->getOpLoc(),
+                  llvm::Twine("operator '") + getOpSpelling(E->getOp()) +
+                      "' is not overloaded for " + quoted(Args[0]->getType()),
+                  {Args[0]->getRange()});
+      return errorType();
+    }
+    E->setOperator(Op);
+    return Op->getResultType();
   }
 
   //===--------------------------------------------------------------------===//
@@ -1494,7 +1845,8 @@ class Checker : public StmtVisitor<Checker>,
           if (R->getMethodKind() == MethodKind::Method && !R->isClassMethod() &&
               R->getBuiltin() == TObjectMethod::None &&
               R->isFunction() == M->isFunction() && sameSignature(R, M) &&
-              (!M->isFunction() || R->getResultType() == M->getResultType()))
+              (!M->isFunction() || R->getResultType() == M->getResultType()) &&
+              R->isCDecl() == M->isCDecl())
             Found = R;
       if (!Found && Where) {
         Diags.error(Where->Loc,
@@ -1542,9 +1894,14 @@ class Checker : public StmtVisitor<Checker>,
   /// The hidden parameter Self of method R of class C.
   void makeSelf(RoutineDecl *R, ClassType *C) {
     Identifier Name = memberName("Self");
-    auto *Self = Ctx.create<VarDecl>(Name, nullptr, VarDecl::ValueParam);
+    // A record's method gets the record by reference.
+    RecordType *Rec = C->getRecord();
+    auto *Self = Ctx.create<VarDecl>(
+        Name, nullptr, Rec ? VarDecl::VarParam : VarDecl::ValueParam);
     // In a class method, Self is the class (a class reference).
-    Self->setType(R->isClassMethod() ? static_cast<Type *>(classRefOf(C)) : C);
+    Self->setType(Rec                    ? static_cast<Type *>(Rec)
+                  : R->isClassMethod() ? static_cast<Type *>(classRefOf(C))
+                                       : C);
     Self->setOwner(R);
     R->setSelfVar(Self);
   }
@@ -1740,6 +2097,20 @@ class Checker : public StmtVisitor<Checker>,
         noteDeclaredHere(Inherited);
         return;
       }
+      if (R->getCallConv() == CallConv::Default) {
+        if (Inherited->isCDecl())
+          R->setInheritedCDecl(); // as in Free Pascal
+      } else if (R->isCDecl() != Inherited->isCDecl()) {
+        Diags.error(Id.Loc,
+                    "calling convention of '" + Id.Spelling + "' is " +
+                        callConvDesc(R->isCDecl()) +
+                        " but the method it overrides in '" +
+                        Owner->getName() + "' is " +
+                        callConvDesc(Inherited->isCDecl()),
+                    {Id.getRange()});
+        noteDeclaredHere(Inherited);
+        return;
+      }
       R->setVMTIndex(Inherited->getVMTIndex());
       VTable[Inherited->getVMTIndex()] = R;
       return;
@@ -1804,7 +2175,7 @@ class Checker : public StmtVisitor<Checker>,
     auto Find = [&](const Identifier &Id) -> Decl * {
       if (Decl *D = Own.lookup(Id.Name))
         return D;
-      Decl *D = Parent->findMember(Id.Name);
+      Decl *D = Parent ? Parent->findMember(Id.Name) : nullptr;
       if (!D)
         Diags.error(Id.Loc,
                     "no field or method named '" + Id.Spelling + "' in '" +
@@ -1920,13 +2291,19 @@ class Checker : public StmtVisitor<Checker>,
                   {CN.getRange()});
       return;
     }
-    ClassType *C = lookupClass(CN);
+    ClassType *C = nullptr;
+    if (auto *TD = llvm::dyn_cast_or_null<TypeDecl>(Cur->lookup(CN.Name)))
+      C = memberTableOf(TD->getType()); // an advanced record
+    if (!C)
+      C = lookupClass(CN);
     if (!C)
       return;
+    const char *What = C->getRecord() ? "record" : "class";
     auto *M = llvm::dyn_cast_or_null<RoutineDecl>(C->findOwnMember(Id.Name));
     if (!M || M->getBuiltin() != TObjectMethod::None) {
       Diags.error(Id.Loc,
-                  "class '" + C->getName() + "' has no method '" +
+                  llvm::Twine(What) + " '" + C->getName() + "' has no " +
+                      (R->isOperator() ? "operator '" : "method '") +
                       Id.Spelling + "'",
                   {Id.getRange()});
       return;
@@ -1934,9 +2311,13 @@ class Checker : public StmtVisitor<Checker>,
     if (M->isOverloaded()) { // objfpc: the method with this heading
       for (VarDecl *P : R->getParams())
         P->setType(resolveType(P->getTypeSpec()));
+      Type *RT = isConversionOperator(M) && R->getResultTypeSpec()
+                     ? resolveType(R->getResultTypeSpec())
+                     : nullptr;
       RoutineDecl *Match = nullptr;
       for (RoutineDecl *X = M; X; X = X->getNextOverload())
-        if (sameSignature(X, R) && !X->getBody())
+        if (sameSignature(X, R) && !X->getBody() &&
+            (!RT || RT == X->getResultType()))
           Match = X;
       if (!Match) {
         Diags.error(Id.Loc,
@@ -1952,8 +2333,8 @@ class Checker : public StmtVisitor<Checker>,
     std::string QName = qualified(C, M->getName());
     if (C->getModule() != CurModule) {
       Diags.error(Id.Loc,
-                  "method '" + QName +
-                      "' must be implemented where its class is declared",
+                  "method '" + QName + "' must be implemented where its " +
+                      What + " is declared",
                   {Id.getRange()});
       return;
     }
@@ -1989,9 +2370,19 @@ class Checker : public StmtVisitor<Checker>,
         noteDeclaredHere(M);
       }
     }
+    if (R->isCDecl() != M->isCDecl()) {
+      Diags.error(Id.Loc,
+                  "calling convention of '" + QName + "' is " +
+                      callConvDesc(R->isCDecl()) + " but its declaration's is " +
+                      callConvDesc(M->isCDecl()),
+                  {Id.getRange()});
+      noteDeclaredHere(M);
+    }
     M->setBody(R->getBody());
     M->setImplementation(R);
     R->setCanonical(M);
+    if (R->isInline())
+      M->setInline();
     checkRoutineBody(M);
   }
 
@@ -1999,6 +2390,15 @@ class Checker : public StmtVisitor<Checker>,
   void checkMethodsImplemented(Block &B) {
     for (Decl *D : B.getDecls()) {
       auto *TD = llvm::dyn_cast<TypeDecl>(D);
+      if (ClassType *MT = TD ? memberTableOf(TD->getType()) : nullptr) {
+        for (Decl *M : MT->getMembers()) // an advanced record's
+          if (auto *R = llvm::dyn_cast<RoutineDecl>(M); R && !R->getBody())
+            Diags.error(R->getName().Loc,
+                        "method '" + qualified(MT, R->getName()) +
+                            "' is declared but never implemented",
+                        {R->getName().getRange()});
+        continue;
+      }
       auto *CS = TD ? llvm::dyn_cast_or_null<ClassTypeSpec>(TD->getTypeSpec())
                     : nullptr;
       if (!CS || CS->isForward())
@@ -2032,6 +2432,12 @@ class Checker : public StmtVisitor<Checker>,
     if (auto *R = llvm::dyn_cast_or_null<ClassRefType>(W->Record->getType()))
       return R->getClass();
     return llvm::dyn_cast_or_null<ClassType>(W->Record->getType());
+  }
+
+  /// Does with context W expose methods (an object's, a class's in a class
+  /// method, or an advanced record's)?
+  static bool hasMembers(WithContext *W) {
+    return W && (classOf(W) || memberTableOf(W->Record->getType()));
   }
 
   /// Is D an instance member (a field, a property, a method that is not a
@@ -2102,11 +2508,16 @@ class Checker : public StmtVisitor<Checker>,
     V->setOwner(CurRoutine);
     if (Expr *Init = V->getInit()) {
       // Typed constants are static: they keep their value across calls.
-      V->setOwner(nullptr);
-      Used.insert(V);
+      // (An initialized variable is set again whenever its routine runs.)
+      if (V->isTypedConst()) {
+        V->setOwner(nullptr);
+        Used.insert(V);
+      }
       ConstValue Folded;
+      ConstInitWhat = V->isTypedConst() ? "typed constant value" : "initial value";
       if (!V->getType()->isError() && checkConstInit(Init, V->getType(), Folded))
         V->setInitValue(Folded);
+      ConstInitWhat = "typed constant value";
     }
     declare(V);
   }
@@ -2190,7 +2601,7 @@ class Checker : public StmtVisitor<Checker>,
       return false;
     }
 
-    auto C = evaluateConstant(Init, "typed constant value");
+    auto C = evaluateConstant(Init, ConstInitWhat);
     if (!C)
       return false;
     bool CharArray = C->Value.K == ConstValue::String &&
@@ -2341,8 +2752,19 @@ class Checker : public StmtVisitor<Checker>,
           Diags.note(Fwd->getLocation(), "forward declaration is here");
         }
       }
+      if (R->isCDecl() != Fwd->isCDecl()) {
+        Diags.error(Id.Loc,
+                    "calling convention of '" + Id.Spelling + "' is " +
+                        callConvDesc(R->isCDecl()) +
+                        " but its forward declaration's is " +
+                        callConvDesc(Fwd->isCDecl()),
+                    {Id.getRange()});
+        Diags.note(Fwd->getLocation(), "forward declaration is here");
+      }
       Fwd->setBody(R->getBody());
       R->setCanonical(Fwd);
+      if (R->isInline())
+        Fwd->setInline();
       checkRoutineBody(Fwd);
       return;
     }
@@ -2378,7 +2800,8 @@ class Checker : public StmtVisitor<Checker>,
   /// R (resolved) joins the overloads First...: its parameters must differ.
   bool addOverload(RoutineDecl *First, RoutineDecl *R) {
     for (RoutineDecl *X = First; X; X = X->getNextOverload())
-      if (sameSignature(X, R)) {
+      if (sameSignature(X, R) &&
+          !(isConversionOperator(R) && X->getResultType() != R->getResultType())) {
         const Identifier &Id = R->getName();
         Diags.error(Id.Loc,
                     "redefinition of '" + Id.Spelling +
@@ -2389,6 +2812,13 @@ class Checker : public StmtVisitor<Checker>,
       }
     First->addOverload(R);
     return true;
+  }
+
+  /// A record's `:=` or `Explicit` operator: its overloads may differ in the
+  /// result type alone.
+  static bool isConversionOperator(RoutineDecl *R) {
+    return R->isOperator() && (R->getName().Name == "operator:=" ||
+                               R->getName().Name == "operatorexplicit");
   }
 
   //===--------------------------------------------------------------------===//
@@ -2491,8 +2921,12 @@ class Checker : public StmtVisitor<Checker>,
           return -1;
         continue;
       }
-      if (!isAssignable(PT, AT) && !isPCharLiteral(PT, Args[I]))
-        return -1;
+      if (!isAssignable(PT, AT) && !isPCharLiteral(PT, Args[I])) {
+        if (!findConversion(AT, PT, false))
+          return -1;
+        Cost += 1000; // a record's := operator
+        continue;
+      }
       Cost += static_cast<int>(conversionCost(PT, AT));
     }
     return Cost;
@@ -2566,27 +3000,87 @@ class Checker : public StmtVisitor<Checker>,
     return S;
   }
 
+  /// The string constant E, the library or symbol name (What) of an
+  /// external routine; nullopt after a diagnostic.
+  std::optional<llvm::StringRef> externalString(Expr *E, const char *What) {
+    Type *T = check(E);
+    if (T->isError())
+      return std::nullopt;
+    std::optional<Constant> C = fold(E);
+    if (C && C->Value.K == ConstValue::String)
+      return C->Value.Str;
+    if (C && C->Value.K == ConstValue::Ordinal && T->getBase()->isChar()) {
+      char Ch = static_cast<char>(C->Value.Int);
+      return llvm::StringRef(Ctx.copyArray<char>(llvm::ArrayRef<char>(&Ch, 1)).data(), 1);
+    }
+    Diags.error(E->getBeginLoc(),
+                llvm::Twine("the ") + What +
+                    " of an external routine must be a string constant",
+                {E->getRange()});
+    return std::nullopt;
+  }
+
+  /// A type with a C equivalent, for external routines.
+  static bool isCType(Type *T) {
+    return T->isError() || T->isReal() || T->isPointer() ||
+           (T->isOrdinal() && !T->getBase()->isBoolean());
+  }
+
+  /// A procedural type C code can call: cdecl, with parameters and result
+  /// of C types.
+  static bool isCCallback(RoutineType *RT) {
+    if (!RT->isCDecl() || (RT->getResult() && !isCType(RT->getResult())))
+      return false;
+    for (VarDecl *P : RT->getParams())
+      if (P->getType() && !P->isVarParam() && !isCType(P->getType()))
+        return false;
+    return true;
+  }
+
   /// External (C) routines: declared at the outermost level, with
-  /// parameters and result of types that have a C equivalent.
+  /// parameters and result of types that have a C equivalent; the library
+  /// and symbol names: string constants.
   void checkExternal(RoutineDecl *R) {
     if (CurRoutine)
       Diags.error(R->getName().Loc,
                   "external routine '" + R->getName().Spelling +
                       "' must be declared at program or unit level",
                   {R->getName().getRange()});
-    auto CType = [](Type *T) {
-      return T->isError() || T->isReal() || T->isPointer() ||
-             (T->isOrdinal() && !T->getBase()->isBoolean());
-    };
-    for (VarDecl *P : R->getParams())
-      if (P->getType() && !P->isVarParam() && !CType(P->getType()))
+    if (Expr *L = R->getLibraryExpr())
+      if (auto S = externalString(L, "library name"))
+        R->setLibraryName(*S);
+    if (Expr *N = R->getNameExpr())
+      if (auto S = externalString(N, "symbol name"))
+        R->setExternalName(*S);
+    if (R->isVarArgs() && !R->isCDecl())
+      Diags.error(R->getName().Loc,
+                  "'varargs' routine '" + R->getName().Spelling +
+                      "' must be 'cdecl'",
+                  {R->getName().getRange()});
+    for (VarDecl *P : R->getParams()) {
+      if (!P->getType() || P->isVarParam())
+        continue;
+      if (auto *RT = llvm::dyn_cast<RoutineType>(P->getType())) {
+        if (!isCCallback(RT))
+          Diags.error(P->getLocation(),
+                      "parameter '" + P->getName().Spelling +
+                          "' of external routine '" + R->getName().Spelling +
+                          "' has type " + quoted(P->getType()) +
+                          "; a callback needs a 'cdecl' procedural type with "
+                          "integer, real, char, pointer or var parameters",
+                      {P->getName().getRange()});
+        continue;
+      }
+      if (!isCType(P->getType()))
         Diags.error(P->getLocation(),
                     "parameter '" + P->getName().Spelling + "' of external routine '" +
                         R->getName().Spelling + "' has type " +
                         quoted(P->getType()) +
-                        "; use integer, real, char, pointer or var parameters",
+                        "; use integer, real, char, pointer, procedural or "
+                        "var parameters",
                     {P->getName().getRange()});
-    if (R->isFunction() && !CType(R->getResultType()))
+    }
+    if (R->isFunction() && !isCType(R->getResultType()))
       Diags.error(R->getName().Loc,
                   "external function '" + R->getName().Spelling +
                       "' cannot return " + quoted(R->getResultType()),
@@ -2611,12 +3105,14 @@ class Checker : public StmtVisitor<Checker>,
   void checkRoutineBody(RoutineDecl *R) {
     // A method sees the members of its class through Self.
     std::unique_ptr<Scope> ClassScope;
-    if (R->isMethod()) {
+    if (R->hasSelf()) {
       auto *SelfRef = Ctx.create<NameRefExpr>(R->getSelfVar()->getName());
       SelfRef->setDecl(R->getSelfVar());
       SelfRef->setType(R->getSelfVar()->getType());
       ClassScope = std::make_unique<Scope>(
           Cur, R->getClass(), Ctx.create<WithContext>(SelfRef, /*IsSelf=*/true));
+    } else if (R->isStatic()) { // a record's static method: its statics
+      ClassScope = std::make_unique<Scope>(Cur, R->getClass(), nullptr);
     }
     Scope RoutineScope(ClassScope ? ClassScope.get() : Cur);
     Scope *SavedScope = Cur;
@@ -2624,7 +3120,7 @@ class Checker : public StmtVisitor<Checker>,
     Cur = &RoutineScope;
     CurRoutine = R;
 
-    if (R->isMethod())
+    if (R->hasSelf())
       Cur->insert("self", R->getSelfVar());
     for (VarDecl *P : R->getParams())
       if (Decl *Prev = Cur->insert(P->getName().Name, P)) {
@@ -2907,7 +3403,8 @@ class Checker : public StmtVisitor<Checker>,
       auto *RA = llvm::dyn_cast_or_null<RoutineType>(TA);
       auto *RB = llvm::dyn_cast_or_null<RoutineType>(TB);
       if (RA && RB) {
-        if (!congruent(RA->getParams(), RA->getResult(), RB->getParams(),
+        if (RA->isCDecl() != RB->isCDecl() ||
+            !congruent(RA->getParams(), RA->getResult(), RB->getParams(),
                        RB->getResult()))
           return false;
       } else if (TA != TB) {
@@ -2929,22 +3426,25 @@ class Checker : public StmtVisitor<Checker>,
     Decl *D = N ? Cur->lookup(N->getName().Name) : nullptr;
     llvm::ArrayRef<VarDecl *> Params;
     Type *Result = nullptr;
-    bool Found = false;
+    bool Found = false, CDecl = false;
     if (auto *R = llvm::dyn_cast_or_null<RoutineDecl>(D); R && !R->isMethod()) {
       // objfpc: of overloaded routines, the one whose heading fits
       for (RoutineDecl *X = R; R->isOverloaded() && X; X = X->getNextOverload())
-        if (congruent(Formal->getParams(), Formal->getResult(), X->getParams(),
+        if (X->isCDecl() == Formal->isCDecl() &&
+            congruent(Formal->getParams(), Formal->getResult(), X->getParams(),
                       X->isFunction() ? X->getResultType() : nullptr)) {
           D = R = X;
           break;
         }
       Params = R->getParams();
       Result = R->isFunction() ? R->getResultType() : nullptr;
+      CDecl = R->isCDecl();
       Found = true;
     } else if (auto *V = llvm::dyn_cast_or_null<VarDecl>(D)) {
       if (auto *RT = llvm::dyn_cast_or_null<RoutineType>(V->getType())) {
         Params = RT->getParams();
         Result = RT->getResult();
+        CDecl = RT->isCDecl();
         Found = true;
       }
     }
@@ -2962,12 +3462,67 @@ class Checker : public StmtVisitor<Checker>,
     }
     N->setDecl(D);
     N->setType(P->getType());
-    if (!congruent(Formal->getParams(), Formal->getResult(), Params, Result))
+    if (auto *R = llvm::dyn_cast<RoutineDecl>(D)) {
+      std::string Why = notProceduralValue(R, !Formal->isCDecl());
+      if (!Why.empty()) {
+        Diags.error(Arg->getBeginLoc(),
+                    "'" + N->getName().Spelling + "': " + Why,
+                    {Arg->getRange()});
+        return;
+      }
+    }
+    if (CDecl != Formal->isCDecl() ||
+        !congruent(Formal->getParams(), Formal->getResult(), Params, Result))
       Diags.error(Arg->getBeginLoc(),
                   "'" + N->getName().Spelling +
                       "' does not match the heading of parameter '" +
                       P->getName().Spelling + "' (" + quoted(Formal) + ")",
                   {Arg->getRange()});
+  }
+
+  /// An argument (number I, from 0) beyond the parameters of a 'varargs'
+  /// external routine: a value C can take (ordinals are passed as int at
+  /// least, reals as double, string constants as C strings).
+  void checkVarArg(Expr *Arg, size_t I, const Identifier &Callee) {
+    if (auto *F = llvm::dyn_cast<FormattedExpr>(Arg)) {
+      Diags.error(F->getWidth()->getBeginLoc(),
+                  "field widths are only allowed in 'write' and 'writeln'",
+                  {F->getWidth()->getRange()});
+      return;
+    }
+    Type *T = check(Arg);
+    auto *N = llvm::dyn_cast<NameRefExpr>(Arg);
+    bool StringConst = T->isStringLiteral() &&
+                       (llvm::isa<StringLiteralExpr>(Arg) ||
+                        (N && llvm::isa_and_nonnull<ConstDecl>(N->getDecl())));
+    if (T->isError() || T->isOrdinal() || T->isReal() || T->isPointer() ||
+        T->isClass() || T->isNil() || StringConst)
+      return;
+    Diags.error(Arg->getBeginLoc(),
+                "argument " + llvm::Twine(I + 1) + " of '" + Callee.Spelling +
+                    "' has type " + quoted(T) +
+                    "; a 'varargs' argument must be an integer, real, char, "
+                    "boolean, pointer or string constant",
+                {Arg->getRange()});
+  }
+
+  /// Why routine R cannot be a procedural value (empty: it can). Nested
+  /// routines can be passed to ISO procedural parameters (AllowNested).
+  static std::string notProceduralValue(RoutineDecl *R, bool AllowNested) {
+    if (R->getParent() && !AllowNested)
+      return "only routines declared at program or unit level can be "
+             "procedural values";
+    if (!R->isExternal())
+      return "";
+    if (!R->isCDecl())
+      return "an external routine must be 'cdecl' to be a procedural value";
+    if (R->isVarArgs())
+      return "a 'varargs' routine cannot be a procedural value";
+    for (VarDecl *P : R->getParams())
+      if (llvm::isa_and_nonnull<RoutineType>(P->getType()))
+        return "an external routine with procedural parameters cannot be a "
+               "procedural value";
+    return "";
   }
 
   /// Checks the arguments of a call to a user routine.
@@ -2989,7 +3544,10 @@ class Checker : public StmtVisitor<Checker>,
       if (auto *RT = llvm::dyn_cast_or_null<RoutineType>(V->getType());
           RT && RT->getResult() && isManaged(RT->getResult()))
         markUsesManaged();
-    if (Args.size() != Params.size()) {
+    auto *RD = llvm::dyn_cast_or_null<RoutineDecl>(CalleeDecl);
+    bool VarArgs = RD && RD->isVarArgs();
+    if (Args.size() != Params.size() &&
+        !(VarArgs && Args.size() > Params.size())) {
       Diags.error(Callee.Loc,
                   llvm::Twine(Args.size() < Params.size() ? "too few"
                                                           : "too many") +
@@ -3007,6 +3565,10 @@ class Checker : public StmtVisitor<Checker>,
 
     for (size_t I = 0; I < Args.size(); ++I) {
       Expr *Arg = Args[I];
+      if (I >= Params.size()) { // varargs
+        checkVarArg(Arg, I, Callee);
+        continue;
+      }
       VarDecl *P = Params[I];
       if (auto *F = llvm::dyn_cast<FormattedExpr>(Arg)) {
         Diags.error(F->getWidth()->getBeginLoc(),
@@ -3046,7 +3608,8 @@ class Checker : public StmtVisitor<Checker>,
           checkNotForControlVar(Arg);
         continue;
       }
-      if (!isAssignable(PT, AT) && !isPCharLiteral(PT, Arg))
+      if (!isAssignable(PT, AT) && !isPCharLiteral(PT, Arg) &&
+          !convertImplicitly(Arg, PT))
         Diags.error(Arg->getBeginLoc(),
                     "cannot pass a value of type " + quoted(AT) +
                         " to parameter '" + PName.Spelling + "' of type " +
@@ -3515,6 +4078,10 @@ class Checker : public StmtVisitor<Checker>,
           (AT->isClass() &&
            llvm::cast<ClassType>(AT)->findInterface(llvm::cast<InterfaceType>(T))))))
       return T;
+    if (RoutineDecl *Op = findConversion(AT, T, /*Explicit=*/true)) {
+      Args[0]->setConversion(Op, T); // a record's Explicit or := operator
+      return T;
+    }
     Diags.error(E->getBeginLoc(),
                 "invalid typecast from " + quoted(AT) + " to " + quoted(T) +
                     " (only between ordinal types and between pointer types)",
@@ -3860,7 +4427,8 @@ public:
         return;
     }
     S->setDecl(D);
-    if (classOf(W)) {
+    warnHints(D, Callee);
+    if (hasMembers(W)) { // a method of an object or advanced record
       S->setWith(W);
       checkScopeAccess(D, W, Callee);
     }
@@ -3914,7 +4482,8 @@ public:
         Type *T = check(Args[0]);
         Type *RT = CurRoutine->getResultType();
         ResultAssigned.insert(CurRoutine);
-        if (!T->isError() && !RT->isError() && !isAssignable(RT, T))
+        if (!T->isError() && !RT->isError() && !isAssignable(RT, T) &&
+            !convertImplicitly(Args[0], RT))
           Diags.error(Args[0]->getBeginLoc(),
                       "cannot return a value of type " + quoted(T) +
                           " from a function of type " + quoted(RT),
@@ -3986,6 +4555,7 @@ public:
     Target->setDecl(D);
     Target->setWith(W);
     Used.insert(D);
+    warnHints(D, Id);
     if (auto *V = llvm::dyn_cast<VarDecl>(D)) {
       checkNotForControlVar(Target);
       if (V->getVarKind() == VarDecl::Result) // objfpc `Result`
@@ -4087,6 +4657,20 @@ public:
       CurAssignTarget = Target;
       TargetTy = check(Target);
       CurAssignTarget = SavedTarget;
+      // r.f := v / Result.f := v: assigns the result (a record) in part
+      Expr *Root = Target;
+      while (true) {
+        if (auto *FE = llvm::dyn_cast<FieldExpr>(Root))
+          Root = FE->getBase();
+        else if (auto *IE = llvm::dyn_cast<IndexExpr>(Root))
+          Root = IE->getBase();
+        else
+          break;
+      }
+      if (auto *RN = llvm::dyn_cast<NameRefExpr>(Root))
+        if (auto *V = llvm::dyn_cast_or_null<VarDecl>(RN->getDecl());
+            V && V->getVarKind() == VarDecl::Result)
+          ResultAssigned.insert(V->getOwner());
       if (auto *P = assignedProperty(Target); P && !TargetTy->isError()) {
         auto *I = llvm::dyn_cast<IndexExpr>(Target);
         TargetTy = checkPropertyWrite(
@@ -4109,7 +4693,8 @@ public:
                   {Target->getRange()});
       return;
     }
-    if (!isAssignable(TargetTy, ValueTy))
+    if (!isAssignable(TargetTy, ValueTy) &&
+        !convertImplicitly(S->getValue(), TargetTy))
       Diags.error(S->getAssignLoc(),
                   "assigning to " + quoted(TargetTy) +
                       " from incompatible type " + quoted(ValueTy),
@@ -4323,7 +4908,10 @@ public:
                     {W->Record->getRange()});
         continue;
       }
-      Scopes.push_back(std::make_unique<Scope>(Cur, RT, W));
+      if (ClassType *MT = RT->getMemberTable()) // its methods, properties too
+        Scopes.push_back(std::make_unique<Scope>(Cur, MT, W));
+      else
+        Scopes.push_back(std::make_unique<Scope>(Cur, RT, W));
       Cur = Scopes.back().get();
     }
     visitStmt(S->getBody());
@@ -4370,6 +4958,7 @@ public:
     E->setDecl(D);
     E->setWith(W);
     Used.insert(D);
+    warnHints(D, Id);
     checkScopeAccess(D, W, Id);
 
     switch (D->getKind()) {
@@ -4464,6 +5053,8 @@ public:
     Type *T = check(E->getOperand());
     if (T->isError())
       return errorType();
+    if (memberTableOf(T)) // an advanced record's operator
+      return checkRecordOperator(E);
     if (E->getOp() == UnaryOp::Not) {
       if (T->getBase()->isBoolean())
         return Ctx.getBooleanType();
@@ -4558,6 +5149,8 @@ public:
     Type *R = check(E->getRHS());
     if (L->isError() || R->isError())
       return errorType();
+    if (memberTableOf(L) || memberTableOf(R)) // an advanced record's operator
+      return checkRecordOperator(E);
 
     BinaryOp Op = E->getOp();
     // Turbo/FPC strings: + concatenates, comparisons work for any lengths.
@@ -4682,7 +5275,8 @@ public:
         return errorType();
     }
     E->setDecl(D);
-    if (classOf(W)) {
+    warnHints(D, Callee);
+    if (hasMembers(W)) { // a method of an object or advanced record
       E->setWith(W);
       checkScopeAccess(D, W, Callee);
     }
@@ -4965,9 +5559,10 @@ public:
         if (R->isOverloaded()) { // objfpc: the overload the target wants
           RoutineDecl *Pick = nullptr;
           for (RoutineDecl *X = R; AddrOfTarget && X; X = X->getNextOverload())
-            if (!Pick && congruent(AddrOfTarget->getParams(),
-                                   AddrOfTarget->getResult(), X->getParams(),
-                                   X->isFunction() ? X->getResultType() : nullptr))
+            if (!Pick && X->isCDecl() == AddrOfTarget->isCDecl() &&
+                congruent(AddrOfTarget->getParams(),
+                          AddrOfTarget->getResult(), X->getParams(),
+                          X->isFunction() ? X->getResultType() : nullptr))
               Pick = X;
           if (!Pick) {
             Diags.error(N->getBeginLoc(),
@@ -4988,15 +5583,14 @@ public:
                       {N->getRange()});
           return errorType();
         }
-        if (R->getParent() || R->isExternal()) {
-          Diags.error(N->getBeginLoc(),
-                      "'@" + N->getName().Spelling + "': only routines declared "
-                      "at program or unit level can be procedural values",
+        if (std::string Why = notProceduralValue(R, false); !Why.empty()) {
+          Diags.error(N->getBeginLoc(), "'@" + N->getName().Spelling + "': " + Why,
                       {N->getRange()});
           return errorType();
         }
         auto *T = Ctx.create<RoutineType>(
-            R->getParams(), R->isFunction() ? R->getResultType() : nullptr);
+            R->getParams(), R->isFunction() ? R->getResultType() : nullptr,
+            R->isCDecl());
         N->setType(T);
         return T;
       }
@@ -5077,15 +5671,19 @@ public:
   }
 
   /// TFoo in TFoo.Create (objfpc): a class named before '.'.
+  /// The class Base names (TFoo.Create), or for an advanced record name
+  /// (TR.Create) its member table (Base's type: the record).
   ClassType *classNamedBy(Expr *Base) {
     auto *N = llvm::dyn_cast<NameRefExpr>(Base);
     if (!N || !LangOpts.ObjKeywords)
       return nullptr;
     auto *TD = llvm::dyn_cast_or_null<TypeDecl>(Cur->lookup(N->getName().Name));
     auto *C = TD ? llvm::dyn_cast_or_null<ClassType>(TD->getType()) : nullptr;
+    if (!C && TD)
+      C = memberTableOf(TD->getType());
     if (C) {
       N->setDecl(TD);
-      N->setType(C);
+      N->setType(C->getRecord() ? static_cast<Type *>(C->getRecord()) : C);
     }
     return C;
   }
@@ -5094,9 +5692,14 @@ public:
   Decl *resolveMember(FieldExpr *E) {
     const Identifier &F = E->getField();
     ClassType *ViaClass = classNamedBy(E->getBase());
+    if (ViaClass) // TFoo.Create: a use of TFoo
+      warnHints(llvm::cast<NameRefExpr>(E->getBase())->getDecl(),
+                llvm::cast<NameRefExpr>(E->getBase())->getName());
     Type *BT = ViaClass ? ViaClass : check(E->getBase());
     if (BT->isError())
       return nullptr;
+    if (ClassType *MT = memberTableOf(BT)) // an advanced record's member
+      BT = MT;
     if (auto *RT = llvm::dyn_cast<RecordType>(BT)) {
       FieldDecl *FD = RT->findField(F.Name);
       if (!FD) {
@@ -5133,10 +5736,11 @@ public:
     }
     const ClassType *Owner = nullptr;
     Decl *D = C->findMember(F.Name, &Owner);
+    const char *What = C->getRecord() ? "record" : "class";
     if (!D) {
       Diags.error(F.Loc,
-                  "no member named '" + F.Spelling + "' in class " + quoted(C) +
-                      didYouMeanMember(C, F.Name),
+                  "no member named '" + F.Spelling + "' in " + What + " " +
+                      quoted(C) + didYouMeanMember(C, F.Name),
                   {F.getRange()});
       return nullptr;
     }
@@ -5145,12 +5749,13 @@ public:
       // Through a class: constructors, class methods, class variables.
       bool OK = llvm::isa<VarDecl>(D);
       if (auto *R = llvm::dyn_cast<RoutineDecl>(D))
-        OK = R->isConstructor() || R->isClassMethod();
+        OK = (R->isConstructor() || R->isClassMethod()) && !R->isOperator();
       if (!OK) {
         Diags.error(F.Loc,
                     "only constructors, class methods and class variables can "
                     "be used through " +
-                        (ViaClass ? "the class name '" + C->getName() + "'"
+                        (ViaClass ? std::string("the ") + What + " name '" +
+                                        C->getName() + "'"
                                   : std::string("a class reference")) +
                         "; '" + F.Spelling + "' is a " + D->getKindName(),
                     {F.getRange()});
@@ -5201,6 +5806,8 @@ public:
     if (!D)
       return errorType();
     const Identifier &F = E->getField();
+    if (!llvm::isa<RoutineDecl>(D)) // (a method: once its overload is known)
+      warnHints(D, F);
     if (auto *FD = llvm::dyn_cast<FieldDecl>(D))
       return FD->getType() ? FD->getType() : errorType();
     if (auto *P = llvm::dyn_cast<PropertyDecl>(D)) {
@@ -5215,6 +5822,7 @@ public:
     if (!R)
       return errorType();
     E->setMember(R);
+    warnHints(R, F);
     if (!R->getParams().empty()) {
       Diags.error(F.Loc, "missing arguments in call to '" + F.Spelling + "'",
                   {F.getRange()});
@@ -5260,6 +5868,8 @@ public:
     Type *BT = check(F->getBase());
     if (auto *I = llvm::dyn_cast<InterfaceType>(BT))
       return findInterfaceMethod(I, F->getField().Name) != nullptr;
+    if (ClassType *MT = memberTableOf(BT)) // an advanced record's method
+      BT = MT;
     auto *C = llvm::dyn_cast<ClassType>(BT);
     if (auto *CR = llvm::dyn_cast<ClassRefType>(BT))
       C = CR->getClass();
@@ -5279,6 +5889,7 @@ public:
       if (!R)
         return errorType();
       F->setMember(R);
+      warnHints(R, F->getField());
     }
     if (!R) {
       for (Expr *A : E->getArgs())

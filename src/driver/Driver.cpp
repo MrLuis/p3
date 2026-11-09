@@ -77,6 +77,8 @@ Driver::Driver(CompilerOptions O, llvm::raw_ostream &DiagOS)
   Diags.setWarningsAsErrors(Opts.WarningsAsErrors);
   if (!Opts.WarnUnusedVariables)
     Diags.disableWarning("unused-variable");
+  if (!Opts.WarnDeprecated)
+    Diags.disableWarning("deprecated");
   switch (Opts.Color) {
   case ColorMode::Always: Diags.setShowColors(true); break;
   case ColorMode::Never:  Diags.setShowColors(false); break;
@@ -232,9 +234,29 @@ bool Driver::runPipeline(FileID FID) {
       UnitObjects.push_back(std::string(Obj));
     }
 
+  for (UnitDecl *U : Units) {
+    collectExternalLibraries(U->getInterface());
+    collectExternalLibraries(U->getImplementation());
+  }
+  collectExternalLibraries(Program->getBlock());
+
   auto M = generateModule(*Program, Units, SM, LangOpts, CGOpts, LLVMCtx, *TM,
                           SM.getFilename(FID));
   return finishModule(*M, *TM, UnitObjects);
+}
+
+void Driver::collectExternalLibraries(Block *B) {
+  if (!B)
+    return;
+  for (Decl *D : B->getDecls()) {
+    auto *R = llvm::dyn_cast<RoutineDecl>(D);
+    if (!R || !R->isExternal() || R->getLibraryName().empty())
+      continue;
+    llvm::StringRef L = R->getLibraryName();
+    std::string Lib = L.contains('.') || L.contains('/') ? ":" + L.str() : L.str();
+    if (!llvm::is_contained(ExternalLibraries, Lib))
+      ExternalLibraries.push_back(Lib);
+  }
 }
 
 bool Driver::compileUnit(Parser &P, FileID FID, ASTContext &Ctx,
@@ -312,8 +334,11 @@ bool Driver::finishModule(llvm::Module &Mod, llvm::TargetMachine &TMRef,
   llvm::FileRemover RemoveObj(ObjPath);
   if (!emitOutput(*M, *TM, OutputKind::Object, ObjPath, Diags))
     return false;
+  std::vector<std::string> Libraries = Opts.Libraries;
+  Libraries.insert(Libraries.end(), ExternalLibraries.begin(),
+                   ExternalLibraries.end());
   return linkExecutable(ObjPath, UnitObjects, Opts.OutputFile, Opts.LibraryDirs,
-                        Opts.Libraries, Diags);
+                        Libraries, Diags);
 }
 
 /// Finds, parses and orders (dependencies first) the units named in Uses.

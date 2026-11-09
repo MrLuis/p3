@@ -94,6 +94,12 @@ static cl::opt<unsigned>
 static cl::opt<bool> Werror("Werror", cl::desc("Treat warnings as errors"),
                             cl::cat(PccCategory));
 
+static cl::opt<bool> NoDeprecated(
+    "Wno-deprecated",
+    cl::desc("Do not warn about uses of deprecated (experimental, platform, "
+             "library, unimplemented) declarations"),
+    cl::cat(PccCategory));
+
 static cl::opt<bool>
     NoUnusedVariable("Wno-unused-variable",
                      cl::desc("Do not warn about unused variables"),
@@ -141,6 +147,7 @@ int main(int argc, char **argv) {
   Opts.WarningsAsErrors = Werror;
   Opts.RangeChecks = !NoRangeChecks;
   Opts.WarnUnusedVariables = !NoUnusedVariable;
+  Opts.WarnDeprecated = !NoDeprecated;
   Opts.OverflowChecks = !NoOverflowChecks;
 
   Driver D(std::move(Opts), llvm::errs());

@@ -50,7 +50,7 @@
 ; CHECK-NEXT:             IntegerLiteralExpr 1 <13:35>
 ; CHECK-NEXT:           Field 'y' <13:38>
 ; CHECK-NEXT:             IntegerLiteralExpr 2 <13:41>
-; CHECK:        ProcedureDecl 'ext' external 'puts' <14:1>
+; CHECK:        ProcedureDecl 'ext' cdecl external 'puts' in 'c' <14:1>
 ; CHECK-NEXT:     ParamDecl 'p' <14:15>
 ; CHECK-NEXT:       NamedTypeSpec 'pchar' <14:18>
 ; CHECK:          IndirectCallStmt <17:3>

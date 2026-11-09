@@ -36,10 +36,10 @@
 ; ERR:      errors.pas:2:1: error: $ELSE without a matching $IF or $IFDEF
 ; ERR-NEXT: {$else}
 ; ERR-NEXT: ^
-; ERR-NEXT: errors.pas:3:1: error: unsupported $IF expression; expected defined(NAME), true, false, not, and, or and parentheses
-; ERR:      errors.pas:5:1: error: unsupported $IF expression
+; ERR-NEXT: errors.pas:3:1: error: 'foo' has no value in $IF (a macro needs {$macro on} and {$define foo := value})
+; ERR:      errors.pas:5:1: error: invalid $IF expression (expected values, macros, defined(NAME), comparisons, + - * div mod, not, and, or)
 ; ERR:      errors.pas:7:1: error: expected a symbol name after $DEFINE
-; ERR:      errors.pas:8:1: error: macros ({$DEFINE NAME := value}) are not supported
+; ERR:      errors.pas:8:1: warning: macro support is off: 'x' is defined without a value (use {$macro on})
 ; ERR:      errors.pas:9:1: error: $IFOPT is not supported
 ; ERR:      errors.pas:12:1: error: $ELSE after $ELSE
 ; ERR:      errors.pas:13:1: error: $ELSEIF after $ELSE

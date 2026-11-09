@@ -77,6 +77,9 @@ public:
       report(Severity::Warning, Loc, Msg + " [-W" + Group + "]", Ranges);
   }
   void disableWarning(llvm::StringRef Group) { DisabledWarnings.insert(Group); }
+  bool isWarningEnabled(llvm::StringRef Group) const {
+    return !DisabledWarnings.contains(Group);
+  }
 
   void note(SourceLocation Loc, const llvm::Twine &Msg,
             llvm::ArrayRef<SourceRange> Ranges = {}) {

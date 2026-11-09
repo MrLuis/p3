@@ -1,0 +1,34 @@
+; Advanced records (--mode=objfpc, {$modeswitch advancedrecords}): what is
+; rejected in their declarations, implementations and uses.
+; RUN: not %pcc --mode=objfpc -ferror-limit=0 -c %S/Inputs/advrecords/syntax.pas -o %t.o 2>&1 | FileCheck --check-prefix=SYNTAX %s
+; SYNTAX: syntax.pas:5:5: error: methods and properties in records need {$modeswitch advancedrecords}
+; SYNTAX: syntax.pas:9:20: error: the class methods of a record must be 'static'
+; SYNTAX: syntax.pas:10:15: error: only the class methods of a record can be 'static'
+; SYNTAX: syntax.pas:13:3: error: 'protected' sections are not allowed in records
+; SYNTAX: syntax.pas:18:5: error: fields cannot follow a method or property; start a new visibility section or 'var' first
+; SYNTAX: syntax.pas:21:5: error: a record cannot have a destructor
+; SYNTAX: syntax.pas:24:11: error: class operators can only be declared in records
+; SYNTAX-NOT: error:
+
+; RUN: not %pcc --mode=objfpc -ferror-limit=0 -c %S/Inputs/advrecords/errors.pas -o %t.o 2>&1 | FileCheck %s
+; CHECK: errors.pas:11:17: error: a record's constructor needs parameters
+; CHECK: errors.pas:12:15: error: the methods of a record cannot be 'virtual', 'override' or 'abstract'
+; CHECK: errors.pas:19:20: error: 'operator -' takes one or two parameters
+; CHECK: errors.pas:20:28: error: the parameters of an operator cannot be 'var'
+; CHECK: errors.pas:21:20: error: an operator of 'TR' needs a parameter or result of that type
+; CHECK: errors.pas:28:47: error: instance member 'V' cannot be used in a static class method
+; CHECK: errors.pas:10:5: note: 'V' declared here
+; CHECK: errors.pas:29:14: error: record 'TR' has no method 'Missing'
+; CHECK: errors.pas:35:8: error: methods are not allowed in anonymous or local records; declare the record type in a 'type' section at program or unit level
+; CHECK: errors.pas:44:9: error: methods are not allowed in anonymous or local records; declare the record type in a 'type' section at program or unit level
+; CHECK: errors.pas:14:15: error: method 'TR.NotImplemented' is declared but never implemented
+; CHECK: errors.pas:19:20: error: method 'TR.operator -' is declared but never implemented
+; CHECK: errors.pas:20:20: error: method 'TR.operator not' is declared but never implemented
+; CHECK: errors.pas:21:20: error: method 'TR.operator /' is declared but never implemented
+; CHECK: errors.pas:47:5: error: 'Secret' is a strict private member of 'TR'
+; CHECK: errors.pas:6:5: note: 'Secret' declared here
+; CHECK: errors.pas:49:6: error: only constructors, class methods and class variables can be used through the record name 'TR'; 'Q' is a procedure
+; CHECK: errors.pas:50:10: error: operator '*' is not overloaded for 'TR' and 'TR'
+; CHECK: errors.pas:51:8: error: operator '-' is not overloaded for 'TR'
+; CHECK: errors.pas:52:8: error: invalid typecast from 'TR' to 'integer' (only between ordinal types and between pointer types)
+; CHECK-NOT: error:

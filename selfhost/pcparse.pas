@@ -36,11 +36,14 @@ var
   tok, peekTok: TToken;
   hasPeek: boolean;
   prevTokEnd: TLoc;
+  { parseFieldList skipped to the record's end after an error }
+  recordBodySkipped: boolean;
 
 { --- Token helpers --- }
 
 procedure startParser(fid: longint; m: TLangMode);
 begin
+  recordBodySkipped := false;
   mode := m;
   lexInit(lx, fid, m);
   hasPeek := false;
@@ -231,6 +234,107 @@ end;
 function isIdentifierNamed(const s: string): boolean;
 begin
   isIdentifierNamed := (tok.kind = tkIdentifier) and nameEquals(tok.name, s);
+end;
+
+{ Free Pascal's hint directives: the flag of the word tok is, or 0. }
+{ The calling convention word (cdecl, stdcall) at tok, or ccDefault. }
+function callConvOfTok(const t: TToken): longint;
+var
+  w: string;
+begin
+  callConvOfTok := ccDefault;
+  if (mode = lmISO) or (t.kind <> tkIdentifier) then
+    exit;
+  w := nameStr(t.name);
+  if w = 'cdecl' then
+    callConvOfTok := ccCDecl
+  else if w = 'stdcall' then
+    callConvOfTok := ccStdCall;
+end;
+
+{ Consumes the calling convention word at tok into cc (warning if one was
+  already given). }
+procedure takeCallConv(var cc: longint);
+var
+  nw: longint;
+  loc: TLoc;
+  r: TRange;
+begin
+  nw := callConvOfTok(tok);
+  loc := tok.loc;
+  r := makeRange(loc, loc + length(callConvName(nw)));
+  consumeToken;
+  if cc = nw then
+    diagWarningR(loc, 'calling convention ''' + callConvName(nw) +
+                 ''' is given twice', r)
+  else if cc <> ccDefault then
+    diagWarningR(loc, 'calling convention ''' + callConvName(nw) +
+                 ''' replaces ''' + callConvName(cc) + '''', r);
+  cc := nw;
+end;
+
+function hintFlagOf: longint;
+var
+  w: string;
+begin
+  hintFlagOf := 0;
+  if (mode = lmISO) or (tok.kind <> tkIdentifier) then
+    exit;
+  w := nameStr(tok.name);
+  if w = 'deprecated' then
+    hintFlagOf := hintDeprecated
+  else if w = 'experimental' then
+    hintFlagOf := hintExperimental
+  else if w = 'platform' then
+    hintFlagOf := hintPlatform
+  else if w = 'library' then
+    hintFlagOf := hintLibrary
+  else if w = 'unimplemented' then
+    hintFlagOf := hintUnimplemented;
+end;
+
+{ hints = ( "deprecated" [ string ] | "experimental" | "platform"
+            | "library" | "unimplemented" ) ... (Turbo/FPC), after a
+  declaration's type or value }
+procedure parseHints(var flags: longint; var msg: PName);
+var
+  f: longint;
+begin
+  flags := 0;
+  msg := nil;
+  f := hintFlagOf;
+  while f <> 0 do
+  begin
+    consumeToken;
+    flags := flags or f;
+    if (f = hintDeprecated) and (tok.kind = tkStringLiteral) then
+    begin
+      msg := tok.strValue;
+      consumeToken;
+    end;
+    f := hintFlagOf;
+  end;
+end;
+
+{ A hint directive after a routine's or property's ";":  deprecated 'm'; }
+function parseSeparatedHint(var flags: longint; var msg: PName): boolean;
+var
+  f: longint;
+  w: string;
+begin
+  f := hintFlagOf;
+  if f = 0 then
+    exit(false);
+  w := nameStr(tok.name);
+  consumeToken;
+  flags := flags or f;
+  if (f = hintDeprecated) and (tok.kind = tkStringLiteral) then
+  begin
+    msg := tok.strValue;
+    consumeToken;
+  end;
+  expect(tkSemi, 'after ''' + w + '''');
+  parseSeparatedHint := true;
 end;
 
 function rawText(const t: TToken): string;
@@ -517,6 +621,8 @@ function parseTypedConstValue: PNode; forward;
 
 procedure parseConstPart(var decls: TPtrList);
 var
+  hf: longint;
+  hm: PName;
   name: TIdent;
   ts: PTypeSpec;
   init: PNode;
@@ -546,6 +652,8 @@ begin
         v^.varSpec := ts;
         v^.varKind := vkVariable;
         v^.init := init;
+        parseHints(hf, hm);
+        addHints(v, hf, hm);
         listAdd(decls, v);
       end
       else
@@ -568,10 +676,12 @@ begin
     init := nil;
     if expect(tkEqual, 'after constant name') then
       init := parseExpression;
+    parseHints(hf, hm);
     if init <> nil then
     begin
       c := newDecl(dkConst, name, name.loc);
       c^.constInit := init;
+      addHints(c, hf, hm);
       listAdd(decls, c);
     end
     else
@@ -586,6 +696,8 @@ end;
 
 procedure parseTypePart(var decls: TPtrList);
 var
+  hf: longint;
+  hm: PName;
   name: TIdent;
   ts: PTypeSpec;
   d: PDecl;
@@ -603,10 +715,12 @@ begin
     ts := nil;
     if expect(tkEqual, 'after type name') then
       ts := parseType;
+    parseHints(hf, hm);
     if ts <> nil then
     begin
       d := newDecl(dkType, name, name.loc);
       d^.typeSpec := ts;
+      addHints(d, hf, hm);
       listAdd(decls, d);
     end
     else
@@ -631,9 +745,14 @@ end;
 
 procedure parseVarPart(var decls: TPtrList);
 var
+  hf: longint;
+  hm: PName;
   names: TPtrList;
   ts: PTypeSpec;
   i: longint;
+  init: PNode;
+  eqLoc: TLoc;
+  v: PDecl;
 begin
   consumeToken; { 'var' }
   if tok.kind <> tkIdentifier then
@@ -648,11 +767,39 @@ begin
     if parseIdentList(names, 'variable name') and
        expect(tkColon, 'after variable name') then
       ts := parseType;
+    { objfpc: an initialized variable  x: T = value;  (one name only) }
+    init := nil;
+    if (ts <> nil) and (tok.kind = tkEqual) then
+    begin
+      eqLoc := consumeToken;
+      if mode <> lmObjFPC then
+        diagError(eqLoc, 'initialized variables are a Free Pascal extension; ' +
+                  'use --mode=objfpc')
+      else if names.count > 1 then
+        diagErrorR(eqLoc, 'only one variable can be initialized',
+                   makeRange(PIdent(listGet(names, 0))^.loc,
+                             identRange(PIdent(listGet(names, names.count - 1))^).e));
+      init := parseTypedConstValue;
+      if init = nil then
+        ts := nil
+      else if (mode <> lmObjFPC) or (names.count > 1) then
+        init := nil; { (reported) }
+    end;
+    parseHints(hf, hm);
     if ts = nil then
       skipUntil([tkSemi, tkKwBegin])
     else
       for i := 0 to names.count - 1 do
-        listAdd(decls, newVar(PIdent(listGet(names, i))^, ts, vkVariable));
+      begin
+        v := newVar(PIdent(listGet(names, i))^, ts, vkVariable);
+        if init <> nil then
+        begin
+          v^.init := init;
+          v^.isInitVar := true;
+        end;
+        addHints(v, hf, hm);
+        listAdd(decls, v);
+      end;
     if not expect(tkSemi, 'after variable declaration') then
     begin
       skipUntil([tkSemi, tkKwBegin]);
@@ -711,9 +858,30 @@ function parseTypeIdentifier(const context: string): PTypeSpec; forward;
                 [":" typeIdent]) ";" ( "forward" | block ) ";" .
   name = ident [ "." ident ]   (objfpc: a method implementation, TClass.M;
   constructors and destructors are always methods) }
+{ The inline directive (after the keyword at loc): whether the routine is to
+  be inlined. It needs $inline on, the default in objfpc mode (as in Free
+  Pascal); with $inline off there it is accepted and ignored. }
+function parseInlineDirective(loc: TLoc): boolean;
+begin
+  expect(tkSemi, 'after ''inline''');
+  if lx.inlineOn then
+    exit(true);
+  if mode <> lmObjFPC then
+    diagError(loc, 'the ''inline'' directive needs {$inline on}');
+  parseInlineDirective := false;
+end;
+
 function parseRoutineDecl(headingOnly: boolean): PDecl;
 var
-  isFunction, hasParamList, isExternal, overloadDir: boolean;
+  hf: longint;
+  hm: PName;
+  cc: longint;
+  ccw: string;
+  isFunction, hasParamList, isExternal, overloadDir, inlineDir: boolean;
+  isVarArgs: boolean;
+  inlineLoc, forwardLoc, varArgsLoc: TLoc;
+  libraryName: PName;
+  libraryExpr, nameExpr: PNode;
   kind: string;
   loc: TLoc;
   name, clsName: TIdent;
@@ -772,17 +940,44 @@ begin
     skipUntil([tkSemi, tkKwBegin, tkKwVar, tkKwConst, tkKwType]);
   tryConsume(tkSemi);
 
-  { Turbo/FPC directives:  cdecl;  external ['lib'] [name 'symbol'];
+  { Turbo/FPC directives:  cdecl;  stdcall;  varargs;
+    external [library] [name symbol];  (library, symbol: string constants)
     objfpc: overload; }
+  cc := ccDefault;
+  isVarArgs := false;
+  varArgsLoc := noLoc;
+  libraryName := nil;
+  libraryExpr := nil;
+  nameExpr := nil;
   isExternal := false;
   overloadDir := false;
+  inlineDir := false;
+  inlineLoc := noLoc;
   externalName := nil;
+  hf := 0;
+  hm := nil;
   while mode <> lmISO do
   begin
-    if isIdentifierNamed('cdecl') then { the only calling convention }
+    if parseSeparatedHint(hf, hm) then
+      continue;
+    if tok.kind = tkKwInline then
     begin
-      consumeToken;
-      expect(tkSemi, 'after ''cdecl''');
+      inlineLoc := consumeToken;
+      inlineDir := parseInlineDirective(inlineLoc);
+      continue;
+    end;
+    if callConvOfTok(tok) <> ccDefault then
+    begin
+      ccw := callConvName(callConvOfTok(tok));
+      takeCallConv(cc);
+      expect(tkSemi, 'after ''' + ccw + '''');
+      continue;
+    end;
+    if isIdentifierNamed('varargs') then
+    begin
+      varArgsLoc := consumeToken;
+      isVarArgs := true;
+      expect(tkSemi, 'after ''varargs''');
       continue;
     end;
     if (mode = lmObjFPC) and isIdentifierNamed('overload') then
@@ -796,30 +991,47 @@ begin
       break;
     consumeToken;
     isExternal := true;
-    if tok.kind = tkStringLiteral then { library name: linking is the user's job }
-      consumeToken;
+    { the library (linked with the program) and the symbol: string
+      constants (literals here; Sema evaluates the others) }
+    if (tok.kind <> tkSemi) and not isIdentifierNamed('name') then
+    begin
+      libraryExpr := parseExpression;
+      if (libraryExpr <> nil) and (libraryExpr^.kind = nkStringLit) then
+        libraryName := libraryExpr^.strValue;
+    end;
     if isIdentifierNamed('name') then
     begin
       consumeToken;
-      if tok.kind = tkStringLiteral then
-      begin
-        externalName := tok.strValue;
-        consumeToken;
-      end
+      if tok.kind = tkSemi then
+        diagError(tok.loc, 'expected the external symbol name')
       else
-        diagError(tok.loc, 'expected the external symbol name');
+      begin
+        nameExpr := parseExpression;
+        if (nameExpr <> nil) and (nameExpr^.kind = nkStringLit) then
+          externalName := nameExpr^.strValue;
+      end;
     end;
     expect(tkSemi, 'after ''external''');
   end;
+  if isVarArgs and not isExternal then
+    diagError(varArgsLoc, '''varargs'' is only allowed on external routines');
   if isExternal then
   begin
+    if inlineLoc <> noLoc then
+      diagError(inlineLoc, '''inline'' cannot be used with ''external''');
     if not identValid(name) then
       exit;
     r := newRoutine(loc, name, isFunction, params, hasParamList, resultSpec,
                     nil, false);
     r^.isExternal := true;
     r^.externalName := externalName;
+    r^.libraryName := libraryName;
+    r^.libraryExpr := libraryExpr;
+    r^.nameExpr := nameExpr;
+    r^.isVarArgs := isVarArgs;
     r^.hasOverloadDirective := overloadDir;
+    r^.callConv := cc;
+    addHints(r, hf, hm);
     exit(r);
   end;
 
@@ -837,6 +1049,9 @@ begin
       r := newRoutine(loc, name, isFunction, params, hasParamList, resultSpec,
                       nil, true);
       r^.hasOverloadDirective := overloadDir;
+      r^.isInline := inlineDir;
+      r^.callConv := cc;
+      addHints(r, hf, hm);
       parseRoutineDecl := r;
     end;
     exit;
@@ -844,13 +1059,18 @@ begin
 
   if isIdentifierNamed('forward') then
   begin
-    consumeToken;
+    forwardLoc := consumeToken;
+    if inlineLoc <> noLoc then
+      diagError(forwardLoc, '''forward'' cannot be used with ''inline''');
     expect(tkSemi, 'after ''forward''');
     if identValid(name) then
     begin
       r := newRoutine(loc, name, isFunction, params, hasParamList, resultSpec,
                       nil, true);
       r^.hasOverloadDirective := overloadDir;
+      r^.isInline := inlineDir;
+      r^.callConv := cc;
+      addHints(r, hf, hm);
       parseRoutineDecl := r;
     end;
     exit;
@@ -869,6 +1089,9 @@ begin
     r^.methodKind := mk;
     r^.methodClassName := clsName;
     r^.hasOverloadDirective := overloadDir;
+    r^.isInline := inlineDir;
+    r^.callConv := cc;
+    addHints(r, hf, hm);
     parseRoutineDecl := r;
   end;
 end;
@@ -877,18 +1100,25 @@ end;
 //                 ident [params] [":" typeIdent] ";" { directive ";" } .
 // directive     = "virtual" | "override" | "abstract" | "overload"
 //               | "reintroduce" .
-function parseMethodHeading: PDecl;
+{ inRecord: in an advanced record (static allowed); recordClassMethod: a
+  record's class method, which must be static }
+function parseMethodHeadingR(inRecord, recordClassMethod: boolean): PDecl;
 var
+  hf: longint;
+  hm: PName;
   isFunction, hasParamList, isVirtual, isOverride, isAbstract, overloadDir: boolean;
+  isStatic, inlineDir: boolean;
+  inlineLoc: TLoc;
   mk: TMethodKind;
   kind, wd: string;
+  cc: longint;
   loc: TLoc;
   name: TIdent;
   params: TPtrList;
   resultSpec: PTypeSpec;
   r: PDecl;
 begin
-  parseMethodHeading := nil;
+  parseMethodHeadingR := nil;
   isFunction := tok.kind = tkKwFunction;
   mk := methodKindOf(tok.kind);
   if mk = mtNone then
@@ -918,10 +1148,34 @@ begin
   isOverride := false;
   isAbstract := false;
   overloadDir := false;
-  while tok.kind = tkIdentifier do
+  isStatic := false;
+  inlineDir := false;
+  inlineLoc := noLoc;
+  cc := ccDefault;
+  hf := 0;
+  hm := nil;
+  while (tok.kind = tkIdentifier) or (tok.kind = tkKwInline) do
   begin
+    if parseSeparatedHint(hf, hm) then
+      continue;
+    if tok.kind = tkKwInline then
+    begin
+      inlineLoc := consumeToken;
+      inlineDir := parseInlineDirective(inlineLoc);
+      continue;
+    end;
+    if callConvOfTok(tok) <> ccDefault then
+    begin
+      wd := callConvName(callConvOfTok(tok));
+      takeCallConv(cc);
+      if not expect(tkSemi, 'after ''' + wd + '''') then
+        exit;
+      continue;
+    end;
     wd := nameStr(tok.name);
-    if wd = 'virtual' then
+    if (wd = 'static') and inRecord then
+      isStatic := true
+    else if wd = 'virtual' then
       isVirtual := true
     else if wd = 'override' then
       isOverride := true
@@ -932,8 +1186,7 @@ begin
     else if wd = 'reintroduce' then
       { (hides an inherited virtual method without a warning: no effect) }
     else if (wd = 'dynamic') or (wd = 'static') or (wd = 'message') or
-            (wd = 'final') or (wd = 'cdecl') or (wd = 'external') or
-            (wd = 'forward') then
+            (wd = 'final') or (wd = 'external') or (wd = 'forward') then
     begin
       unsupported('''' + wd + ''' on methods is');
       exit;
@@ -944,6 +1197,21 @@ begin
     if not expect(tkSemi, 'after ''' + wd + '''') then
       exit;
   end;
+  if (inlineLoc <> noLoc) and (isVirtual or isOverride or isAbstract) then
+  begin
+    if isVirtual then
+      diagError(inlineLoc, '''inline'' cannot be used with ''virtual''')
+    else if isOverride then
+      diagError(inlineLoc, '''inline'' cannot be used with ''override''')
+    else
+      diagError(inlineLoc, '''inline'' cannot be used with ''abstract''');
+  end;
+  if recordClassMethod and not isStatic then
+    diagErrorR(name.loc, 'the class methods of a record must be ''static''',
+               identRange(name))
+  else if isStatic and not recordClassMethod then
+    diagErrorR(name.loc, 'only the class methods of a record can be ''static''',
+               identRange(name));
   r := newRoutine(loc, name, isFunction, params, hasParamList, resultSpec,
                   nil, false);
   r^.methodKind := mk;
@@ -951,7 +1219,178 @@ begin
   r^.isOverride := isOverride;
   r^.isAbstract := isAbstract;
   r^.hasOverloadDirective := overloadDir;
-  parseMethodHeading := r;
+  r^.isInline := inlineDir and not isVirtual and not isOverride and not isAbstract;
+  r^.callConv := cc;
+  addHints(r, hf, hm);
+  parseMethodHeadingR := r;
+end;
+
+function parseMethodHeading: PDecl;
+begin
+  parseMethodHeading := parseMethodHeadingR(false, false);
+end;
+
+{ operatorName = "+" | "-" | "*" | "/" | "=" | "<>" | "<" | ">" | "<=" | ">="
+                 | ":=" | "div" | "mod" | "and" | "or" | "xor" | "shl" | "shr"
+                 | "in" | "not" | "explicit" .
+  The name of the operator's routine: "operator" followed by the symbol
+  (lower case), spelled "operator <symbol>". }
+function parseOperatorName(var name: TIdent): boolean;
+var
+  sym: string;
+begin
+  case tok.kind of
+    tkPlus: sym := '+';
+    tkMinus: sym := '-';
+    tkStar: sym := '*';
+    tkSlash: sym := '/';
+    tkEqual: sym := '=';
+    tkNotEqual: sym := '<>';
+    tkLess: sym := '<';
+    tkGreater: sym := '>';
+    tkLessEqual: sym := '<=';
+    tkGreaterEqual: sym := '>=';
+    tkColonEqual: sym := ':=';
+    tkKwDiv: sym := 'div';
+    tkKwMod: sym := 'mod';
+    tkKwAnd: sym := 'and';
+    tkKwOr: sym := 'or';
+    tkKwXor: sym := 'xor';
+    tkKwShl: sym := 'shl';
+    tkKwShr: sym := 'shr';
+    tkKwIn: sym := 'in';
+    tkKwNot: sym := 'not';
+  else
+    sym := '';
+  end;
+  if (sym = '') and isIdentifierNamed('explicit') then
+    sym := 'explicit';
+  if sym = '' then
+  begin
+    diagError(tok.loc, 'expected an operator (+, -, *, /, =, <>, <, >, <=, >=, :=, ' +
+              'div, mod, and, or, xor, shl, shr, in, not or Explicit)');
+    exit(false);
+  end;
+  name.name := intern('operator' + sym);
+  name.spelling := intern('operator ' + rawText(tok));
+  name.loc := tok.loc;
+  consumeToken;
+  parseOperatorName := true;
+end;
+
+{ operatorHeading = "operator" operatorName "(" params ")" ":" typeIdent ";"
+                    [ "overload" ";" ] .      (after "class", in a record) }
+function parseOperatorHeading: PDecl;
+var
+  loc: TLoc;
+  name: TIdent;
+  params: TPtrList;
+  resultSpec: PTypeSpec;
+  overloadDir, inlineDir: boolean;
+  r: PDecl;
+begin
+  parseOperatorHeading := nil;
+  loc := consumeToken; { 'operator' }
+  if not parseOperatorName(name) then
+    exit;
+  listInit(params);
+  if tok.kind <> tkLParen then
+  begin
+    diagError(tok.loc, 'expected ''('' after the operator');
+    exit;
+  end;
+  if not parseFormalParams(params) or
+     not expect(tkColon, 'after the operator''s parameters') then
+    exit;
+  resultSpec := parseTypeIdentifier('operator result type');
+  if (resultSpec = nil) or not expect(tkSemi, 'after operator heading') then
+    exit;
+  overloadDir := false;
+  inlineDir := false;
+  while true do
+  begin
+    if isIdentifierNamed('overload') then
+    begin
+      consumeToken;
+      overloadDir := true;
+      if not expect(tkSemi, 'after ''overload''') then
+        exit;
+      continue;
+    end;
+    if tok.kind = tkKwInline then
+    begin
+      inlineDir := parseInlineDirective(consumeToken);
+      continue;
+    end;
+    break;
+  end;
+  r := newRoutine(loc, name, true, params, true, resultSpec, nil, false);
+  r^.methodKind := mtOperator;
+  r^.isClassMethod := true;
+  r^.hasOverloadDirective := overloadDir;
+  r^.isInline := inlineDir;
+  parseOperatorHeading := r;
+end;
+
+{ operatorDecl = "operator" ident "." operatorName "(" params ")" ":"
+                 typeIdent ";" block ";" .        (after "class") }
+function parseOperatorDecl(headingOnly: boolean): PDecl;
+var
+  loc: TLoc;
+  clsName, name: TIdent;
+  params: TPtrList;
+  resultSpec: PTypeSpec;
+  body: PBlock;
+  ok: boolean;
+  r: PDecl;
+begin
+  parseOperatorDecl := nil;
+  loc := consumeToken; { 'operator' }
+  listInit(params);
+  resultSpec := nil;
+  ok := expectIdentifier(clsName, 'record name after ''operator''') and
+        expect(tkPeriod, 'after the record name') and parseOperatorName(name);
+  if ok then
+  begin
+    if tok.kind = tkLParen then
+      ok := parseFormalParams(params)
+    else
+    begin
+      diagError(tok.loc, 'expected ''('' after the operator');
+      ok := false;
+    end;
+  end;
+  ok := ok and expect(tkColon, 'after the operator''s parameters');
+  if ok then
+  begin
+    resultSpec := parseTypeIdentifier('operator result type');
+    ok := resultSpec <> nil;
+  end;
+  ok := ok and expect(tkSemi, 'after operator heading');
+  if not ok then
+  begin
+    skipUntil([tkSemi, tkKwBegin]);
+    tryConsume(tkSemi);
+    exit;
+  end;
+  if headingOnly then
+  begin
+    diagErrorR(clsName.loc,
+               'methods are implemented in the implementation part of a unit',
+               makeRange(clsName.loc, identRange(name).e));
+    exit;
+  end;
+  body := parseBlock;
+  if not expect(tkSemi, 'after operator body') then
+  begin
+    skipUntil([tkSemi, tkKwBegin, tkKwProcedure, tkKwFunction]);
+    tryConsume(tkSemi);
+  end;
+  r := newRoutine(loc, name, true, params, true, resultSpec, body, false);
+  r^.methodKind := mtOperator;
+  r^.methodClassName := clsName;
+  r^.isClassMethod := true;
+  parseOperatorDecl := r;
 end;
 
 // property = "property" ident ":" typeIdent [ "read" ident ] [ "write" ident ] ";" .
@@ -1094,7 +1533,13 @@ begin
       tkKwClass: { class procedure TFoo.P ... }
         begin
           consumeToken;
-          if (tok.kind <> tkKwProcedure) and (tok.kind <> tkKwFunction) then
+          if (mode = lmObjFPC) and isIdentifierNamed('operator') then
+          begin
+            r := parseOperatorDecl(inInterface);
+            if r <> nil then
+              listAdd(decls, r);
+          end
+          else if (tok.kind <> tkKwProcedure) and (tok.kind <> tkKwFunction) then
           begin
             diagError(tok.loc, 'expected ''procedure'' or ''function'' after ''class''');
             skipUntil([tkSemi, tkKwBegin]);
@@ -1319,6 +1764,8 @@ end;
 // On an error in the members, skips to the class's 'end'.
 function parseClassType(start: TLoc): PTypeSpec;
 var
+  hf: longint;
+  hm: PName;
   classLoc, lparen: TLoc;
   parentName: TIdent;
   members, names: TPtrList;
@@ -1423,6 +1870,7 @@ begin
         failed := true;
         break;
       end;
+      parseHints(hf, hm);
       for i := 0 to names.count - 1 do
       begin
         if classVars then
@@ -1437,6 +1885,7 @@ begin
           m^.fieldSpec := ts;
         end;
         m^.vis := vis;
+        addHints(m, hf, hm);
         listAdd(members, m);
       end;
       if not expect(tkSemi, 'after field declaration') then
@@ -1473,6 +1922,11 @@ begin
         failed := true;
         break;
       end;
+      hf := 0;
+      hm := nil;
+      while parseSeparatedHint(hf, hm) do
+        ;
+      addHints(m, hf, hm);
       m^.vis := vis;
       listAdd(members, m);
       classVars := false;
@@ -1502,6 +1956,8 @@ begin
       end;
       if tok.kind in [tkKwConstructor, tkKwDestructor, tkKwProperty] then
         unsupported('class ' + lowerStr(rawText(tok)) + 's are')
+      else if isIdentifierNamed('operator') then
+        diagError(tok.loc, 'class operators can only be declared in records')
       else
         diagError(tok.loc, 'expected ''var'', ''procedure'' or ''function'' after ''class''');
       failed := true;
@@ -1626,6 +2082,7 @@ var
   maxLen: PNode;
   params: TPtrList;
   target: TIdent;
+  cc: longint;
 begin
   parseTypeImpl := nil;
   start := tok.loc;
@@ -1702,6 +2159,25 @@ begin
         ts^.rtIsFunction := isFunction;
         ts^.rtParams := params;
         ts^.rtResult := resultSpec;
+        { A calling convention:  procedure(x: integer) cdecl  or, after a
+          semicolon,  procedure(x: integer); cdecl  (Turbo/FPC). }
+        cc := ccDefault;
+        while true do
+        begin
+          if callConvOfTok(tok) <> ccDefault then
+            takeCallConv(cc)
+          else if tok.kind = tkSemi then
+          begin
+            peekToken;
+            if callConvOfTok(peekTok) = ccDefault then
+              break;
+            consumeToken;
+            takeCallConv(cc);
+          end
+          else
+            break;
+        end;
+        ts^.rtCallConv := cc;
         exit(ts);
       end;
     tkCaret:
@@ -1865,6 +2341,229 @@ begin
 end;
 
 function parseFieldList(close: TTokenKind): PFieldList; forward;
+function parseVariantPart(close: TTokenKind): PVariantPart; forward;
+
+// advancedRecord = "record" { visibility | "var" | identList ":" type ";"
+//                   | methodHeading | "class" methodHeading
+//                   | "class" operatorHeading | property }
+//                  [ variantPart ] "end" .
+// (objfpc, $modeswitch advancedrecords). Visibility: private, public,
+// strict private. Fields cannot follow a method or property in the same
+// section (as in Free Pascal).
+function parseAdvancedRecord(start, recordLoc: TLoc; packed_: boolean): PTypeSpec;
+var
+  hf: longint;
+  hm: PName;
+  fixed, members, names: TPtrList;
+  vp: PVariantPart;
+  vis: TVisibility;
+  afterMethods, failed: boolean;
+  wd: string;
+  ts: PTypeSpec;
+  f, m: PDecl;
+  i: longint;
+  fl: PFieldList;
+
+  procedure addMember(d: PDecl);
+  begin
+    d^.vis := vis;
+    listAdd(members, d);
+    afterMethods := true;
+  end;
+
+begin
+  parseAdvancedRecord := nil;
+  listInit(fixed);
+  listInit(members);
+  vp := nil;
+  vis := vsPublic;
+  afterMethods := false;
+  failed := false;
+  while (tok.kind <> tkKwEnd) and (tok.kind <> tkEof) and not diagShouldStop do
+  begin
+    if tok.kind = tkIdentifier then
+    begin
+      wd := nameStr(tok.name);
+      if (wd = 'private') or (wd = 'public') then
+      begin
+        if wd = 'private' then
+          vis := vsPrivate
+        else
+          vis := vsPublic;
+        afterMethods := false;
+        consumeToken;
+        continue;
+      end;
+      if (wd = 'protected') or (wd = 'published') then
+      begin
+        diagError(tok.loc, '''' + wd + ''' sections are not allowed in records');
+        failed := true;
+        break;
+      end;
+      if wd = 'strict' then
+      begin
+        consumeToken;
+        if not isIdentifierNamed('private') then
+        begin
+          diagError(tok.loc, 'expected ''private'' after ''strict'' (records have ' +
+                    'no protected members)');
+          failed := true;
+          break;
+        end;
+        consumeToken;
+        vis := vsStrictPrivate;
+        afterMethods := false;
+        continue;
+      end;
+      if afterMethods then
+      begin
+        diagError(tok.loc, 'fields cannot follow a method or property; start a ' +
+                  'new visibility section or ''var'' first');
+        failed := true;
+        break;
+      end;
+      listInit(names);
+      if not parseIdentList(names, 'field name') or
+         not expect(tkColon, 'after field name') then
+      begin
+        failed := true;
+        break;
+      end;
+      ts := parseType;
+      if ts = nil then
+      begin
+        failed := true;
+        break;
+      end;
+      parseHints(hf, hm);
+      for i := 0 to names.count - 1 do
+      begin
+        f := newDecl(dkField, PIdent(listGet(names, i))^, PIdent(listGet(names, i))^.loc);
+        f^.fieldSpec := ts;
+        f^.vis := vis;
+        addHints(f, hf, hm);
+        listAdd(fixed, f);
+      end;
+      if not tryConsume(tkSemi) and (tok.kind <> tkKwEnd) then
+      begin
+        expect(tkSemi, 'after field declaration');
+        failed := true;
+        break;
+      end;
+      continue;
+    end;
+    if tryConsume(tkKwVar) then
+    begin
+      afterMethods := false;
+      continue;
+    end;
+    if tok.kind = tkKwCase then
+    begin
+      vp := parseVariantPart(tkKwEnd);
+      if vp = nil then
+        failed := true
+      else
+        tryConsume(tkSemi);
+      break; { the variant part is last }
+    end;
+    if tok.kind = tkKwDestructor then
+    begin
+      diagError(tok.loc, 'a record cannot have a destructor');
+      failed := true;
+      break;
+    end;
+    if tok.kind in [tkKwProcedure, tkKwFunction, tkKwConstructor] then
+    begin
+      m := parseMethodHeadingR(true, false);
+      if m = nil then
+      begin
+        failed := true;
+        break;
+      end;
+      addMember(m);
+      continue;
+    end;
+    if tok.kind = tkKwProperty then
+    begin
+      m := parsePropertyDecl;
+      if m = nil then
+      begin
+        failed := true;
+        break;
+      end;
+      hf := 0;
+      hm := nil;
+      while parseSeparatedHint(hf, hm) do
+        ;
+      addHints(m, hf, hm);
+      addMember(m);
+      continue;
+    end;
+    if tok.kind = tkKwClass then
+    begin
+      consumeToken;
+      if isIdentifierNamed('operator') then
+      begin
+        m := parseOperatorHeading;
+        if m = nil then
+        begin
+          failed := true;
+          break;
+        end;
+        addMember(m);
+        continue;
+      end;
+      if tok.kind in [tkKwProcedure, tkKwFunction] then
+      begin
+        m := parseMethodHeadingR(true, true);
+        if m = nil then
+        begin
+          failed := true;
+          break;
+        end;
+        m^.isClassMethod := true;
+        addMember(m);
+        continue;
+      end;
+      if tok.kind = tkKwVar then
+        unsupported('class variables in records are')
+      else
+        diagError(tok.loc, 'expected ''procedure'', ''function'' or ''operator'' ' +
+                  'after ''class''');
+      failed := true;
+      break;
+    end;
+    if tok.kind in [tkKwType, tkKwConst] then
+    begin
+      unsupported('nested types and constants in records are');
+      failed := true;
+      break;
+    end;
+    diagError(tok.loc,
+              'expected a field, method or property declaration, or ''end''');
+    failed := true;
+    break;
+  end;
+  if failed then
+  begin
+    skipUntil([tkKwEnd]);
+    tryConsume(tkKwEnd);
+    exit;
+  end;
+  if not expect(tkKwEnd, 'at end of record type') then
+  begin
+    diagNote(recordLoc, 'to match this ''record''');
+    exit;
+  end;
+  fl := PFieldList(arenaAlloc(sizeof(TFieldList)));
+  fl^.fixed := fixed;
+  fl^.variant := vp;
+  ts := newTypeSpec(tsRecord, start, prevTokEnd);
+  ts^.fields := fl;
+  ts^.recPacked := packed_;
+  ts^.recMembers := members;
+  parseAdvancedRecord := ts;
+end;
 
 { recordType = "record" fieldList "end" . }
 function parseRecordType(start: TLoc; packed_: boolean): PTypeSpec;
@@ -1875,9 +2574,16 @@ var
 begin
   parseRecordType := nil;
   recordLoc := consumeToken; { 'record' }
+  if (mode = lmObjFPC) and lx.advancedRecords then
+    exit(parseAdvancedRecord(start, recordLoc, packed_));
   fields := parseFieldList(tkKwEnd);
   if fields = nil then
+  begin
+    if recordBodySkipped then { (methods without the mode switch) }
+      tryConsume(tkKwEnd);
+    recordBodySkipped := false;
     exit;
+  end;
   if not expect(tkKwEnd, 'at end of record type') then
   begin
     diagNote(recordLoc, 'to match this ''record''');
@@ -1889,12 +2595,12 @@ begin
   parseRecordType := ts;
 end;
 
-function parseVariantPart(close: TTokenKind): PVariantPart; forward;
-
 // fieldList = [ identList ":" type { ";" identList ":" type } ]
 // [ ";" variantPart ] [ ";" ] .
 function parseFieldList(close: TTokenKind): PFieldList;
 var
+  hf: longint;
+  hm: PName;
   fixed, names: TPtrList;
   ts: PTypeSpec;
   vp: PVariantPart;
@@ -1913,10 +2619,12 @@ begin
     ts := parseType;
     if ts = nil then
       exit;
+    parseHints(hf, hm);
     for i := 0 to names.count - 1 do
     begin
       f := newDecl(dkField, PIdent(listGet(names, i))^, PIdent(listGet(names, i))^.loc);
       f^.fieldSpec := ts;
+      addHints(f, hf, hm);
       listAdd(fixed, f);
     end;
     if not tryConsume(tkSemi) then
@@ -1934,6 +2642,16 @@ begin
 
   if tok.kind <> close then
   begin
+    if (mode = lmObjFPC) and (close = tkKwEnd) and
+       (tok.kind in [tkKwProcedure, tkKwFunction, tkKwConstructor,
+                     tkKwDestructor, tkKwProperty, tkKwClass]) then
+    begin
+      diagError(tok.loc, 'methods and properties in records need ' +
+                '{$modeswitch advancedrecords}');
+      skipUntil([tkKwEnd]); { the record's end: continue after it }
+      recordBodySkipped := true;
+      exit;
+    end;
     diagError(tok.loc, 'expected field name, ''case'' or ' + describe(close) +
                        ' in record');
     exit;

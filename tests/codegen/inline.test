@@ -1,0 +1,25 @@
+; The inline directive: an inline routine gets LLVM's inlinehint (inlined
+; from -O1 up, as C's inline; -O0 keeps the calls for debugging), unless
+; {$inline off}; {$inline on} is the default in objfpc mode only (as in
+; Free Pascal). It cannot go with forward, external or virtual methods.
+; RUN: %pcc --mode=objfpc --emit-llvm %S/Inputs/inline/inline.pas -o - | FileCheck %s
+; CHECK:      ; Function Attrs: inlinehint
+; CHECK-NEXT: define internal i32 @pas.sq(ptr %link, i32 %x) #[[A:[0-9]+]] {
+; CHECK:      define internal i32 @pas.cube(ptr %link, i32 %x) {
+; CHECK:      attributes #[[A]] = { inlinehint }
+; RUN: %pcc --mode=objfpc -O2 --emit-llvm %S/Inputs/inline/inline.pas -o - | FileCheck --check-prefix=O2 %s
+; O2-NOT: call {{.*}}@pas.sq
+; RUN: %pcc --mode=objfpc --emit-ast %S/Inputs/inline/inline.pas | FileCheck --check-prefix=AST %s
+; AST: FunctionDecl 'sq' : integer inline <2:1>
+; AST: FunctionDecl 'cube' : integer <7:1>
+
+; RUN: not %pcc --mode=objfpc -ferror-limit=0 -c %S/Inputs/inline/errors.pas -o %t.o 2>&1 | FileCheck --check-prefix=ERR %s
+; ERR: errors.pas:4:27: error: 'inline' cannot be used with 'virtual'
+; ERR: errors.pas:5:18: error: 'inline' cannot be used with 'override'
+; ERR: errors.pas:7:34: error: 'forward' cannot be used with 'inline'
+; ERR: errors.pas:9:1: error: expected {$inline on} or {$inline off}
+; ERR: errors.pas:8:43: error: 'inline' cannot be used with 'external'
+; ERR-NOT: error:
+; RUN: not %pcc --mode=tp -c %S/Inputs/inline/tp.pas -o %t.o 2>&1 | FileCheck --check-prefix=TP %s
+; TP: tp.pas:2:35: error: the 'inline' directive needs {$inline on}
+; TP-NOT: error:

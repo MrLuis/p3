@@ -9,6 +9,7 @@
 #include "llvm/ADT/StringExtras.h"
 #include "llvm/Support/Error.h"
 #include "llvm/Support/FileSystem.h"
+#include "llvm/Support/MathExtras.h"
 #include "llvm/Support/Path.h"
 
 using namespace pcc;
@@ -18,7 +19,8 @@ static bool isIdentBody(char C) { return llvm::isAlnum(C) || C == '_'; }
 
 Lexer::Lexer(const SourceManager &SM, FileID FID, DiagnosticsEngine &Diags,
              StringPool &Strings, const LangOptions &LangOpts)
-    : Diags(Diags), Strings(Strings), LangOpts(LangOpts) {
+    : Diags(Diags), Strings(Strings), LangOpts(LangOpts),
+      InlineOn(LangOpts.Mode == LangMode::ObjFPC) {
   llvm::StringRef Buf = SM.getBufferData(FID);
   Cur = BufBegin = Buf.data();
   BufEnd = Buf.data() + Buf.size();
@@ -146,6 +148,42 @@ void Lexer::handleDirective(const char *Start, llvm::StringRef Text) {
     return;
   }
 
+  // {$inline on|off}: whether the `inline` directive inlines (default: on in
+  // objfpc mode, as in Free Pascal).
+  if (Word.equals_insensitive("inline")) {
+    if (Arg.equals_insensitive("on") || Arg == "+")
+      InlineOn = true;
+    else if (Arg.equals_insensitive("off") || Arg == "-")
+      InlineOn = false;
+    else
+      Diags.error(locOf(Start), "expected {$inline on} or {$inline off}");
+    return;
+  }
+
+  // {$macro on|off}: whether macros ({$define NAME := value}) are defined
+  // and expanded.
+  if (Word.equals_insensitive("macro")) {
+    if (Arg.equals_insensitive("on") || Arg == "+")
+      MacrosOn = true;
+    else if (Arg.equals_insensitive("off") || Arg == "-")
+      MacrosOn = false;
+    else
+      Diags.error(locOf(Start), "expected {$macro on} or {$macro off}");
+    return;
+  }
+
+  // {$modeswitch advancedrecords[+|-]}: methods in records (objfpc). Other
+  // mode switches are not supported (a warning below).
+  if (Word.equals_insensitive("modeswitch")) {
+    llvm::StringRef Name = Arg.take_while(isIdentBody);
+    llvm::StringRef Rest = Arg.drop_front(Name.size()).trim();
+    if (Name.equals_insensitive("advancedrecords") &&
+        (Rest.empty() || Rest == "+" || Rest == "-")) {
+      AdvancedRecords = Rest != "-";
+      return;
+    }
+  }
+
   // Switch list: letter followed by + or -, comma separated: $R-,Q+
   llvm::SmallVector<llvm::StringRef, 4> Parts;
   Text.split(Parts, ',');
@@ -175,12 +213,38 @@ void Lexer::handleDirective(const char *Start, llvm::StringRef Text) {
 //===----------------------------------------------------------------------===//
 
 namespace {
-/// Evaluates the expression of {$IF} / {$ELSEIF}: defined(NAME), true,
-/// false, not, and, or and parentheses.
+/// A value in a {$IF} expression.
+struct CondValue {
+  enum Kind { Bool, Int, Str } K = Bool;
+  bool B = false;
+  int64_t I = 0;
+  std::string S;
+  static CondValue boolean(bool V) {
+    CondValue C;
+    C.B = V;
+    return C;
+  }
+  static CondValue integer(int64_t V) {
+    CondValue C;
+    C.K = Int;
+    C.I = V;
+    return C;
+  }
+};
+
+/// Evaluates the expression of {$IF} / {$ELSEIF}, with Pascal's operator
+/// precedence: values (integers, 'strings', true, false, defined(NAME),
+/// macros), not, * div mod and, + - or, and one comparison = <> < > <= >=
+/// or `in [values]`. A macro's value is an integer if its text is an
+/// integer literal, a string if it is a string literal, the value of the
+/// macro it names if it is a macro's name, else its text (a string), as in
+/// Free Pascal. The first error is kept.
 class ConditionParser {
   llvm::StringRef S;
   size_t P = 0;
   const llvm::StringSet<> &Defines;
+  const llvm::StringMap<std::string> &Values; ///< macros (upper case)
+  unsigned Depth;
 
   llvm::StringRef peek() {
     while (P < S.size() && llvm::isSpace(S[P]))
@@ -188,11 +252,34 @@ class ConditionParser {
     if (P >= S.size())
       return {};
     size_t E = P;
-    if (isIdentStart(S[E]))
+    char C = S[E];
+    if (isIdentStart(C)) {
       while (E < S.size() && isIdentBody(S[E]))
         ++E;
-    else
+    } else if (llvm::isDigit(C)) {
+      while (E < S.size() && llvm::isDigit(S[E]))
+        ++E;
+    } else if (C == '$') {
       ++E;
+      while (E < S.size() && llvm::isHexDigit(S[E]))
+        ++E;
+    } else if (C == '\'') {
+      ++E;
+      while (E < S.size()) {
+        if (S[E++] != '\'')
+          continue;
+        if (E < S.size() && S[E] == '\'')
+          ++E; // '' stands for '
+        else
+          break;
+      }
+    } else if ((C == '<' && E + 1 < S.size() && (S[E + 1] == '=' || S[E + 1] == '>')) ||
+               (C == '>' && E + 1 < S.size() && S[E + 1] == '=') ||
+               (C == '.' && E + 1 < S.size() && S[E + 1] == '.')) {
+      E += 2;
+    } else {
+      ++E;
+    }
     return S.slice(P, E);
   }
   bool accept(llvm::StringRef W) {
@@ -201,79 +288,293 @@ class ConditionParser {
     P += W.size();
     return true;
   }
-  bool parseOr() {
-    bool V = parseAnd();
-    while (accept("or")) {
-      bool R = parseAnd();
-      V = V || R;
-    }
-    return V;
+  CondValue fail(const std::string &Msg) {
+    if (Error.empty())
+      Error = Msg;
+    return {};
   }
-  bool parseAnd() {
-    bool V = parseNot();
-    while (accept("and")) {
-      bool R = parseNot();
-      V = V && R;
-    }
-    return V;
+  CondValue invalid() {
+    return fail("invalid $IF expression (expected values, macros, "
+                "defined(NAME), comparisons, + - * div mod, not, and, or)");
   }
-  bool parseNot() {
-    if (accept("not"))
-      return !parseNot();
-    return parsePrimary();
-  }
-  bool parsePrimary() {
-    if (accept("(")) {
-      bool V = parseOr();
-      if (!accept(")"))
-        Bad = true;
-      return V;
-    }
-    if (accept("true"))
+  bool bothAre(const CondValue &L, const CondValue &R, CondValue::Kind K) {
+    if (L.K == K && R.K == K)
       return true;
-    if (accept("false"))
-      return false;
-    if (accept("defined")) {
-      if (!accept("(")) {
-        Bad = true;
-        return false;
-      }
-      llvm::StringRef Name = peek();
-      if (Name.empty() || !isIdentStart(Name[0])) {
-        Bad = true;
-        return false;
-      }
-      P += Name.size();
-      if (!accept(")"))
-        Bad = true;
-      return Defines.contains(Name.upper());
-    }
-    Bad = true;
+    fail("incompatible types in $IF expression");
     return false;
   }
 
-public:
-  bool Bad = false;
-  ConditionParser(llvm::StringRef S, const llvm::StringSet<> &Defines)
-      : S(S), Defines(Defines) {}
-  bool parse() {
-    bool V = parseOr();
-    if (!peek().empty())
-      Bad = true;
+  /// -1, 0, 1: L compared with R (of the same kind).
+  static int compare(const CondValue &L, const CondValue &R) {
+    if (L.K == CondValue::Str)
+      return L.S < R.S ? -1 : L.S > R.S ? 1 : 0;
+    if (L.K == CondValue::Int)
+      return L.I < R.I ? -1 : L.I > R.I ? 1 : 0;
+    return static_cast<int>(L.B) - static_cast<int>(R.B);
+  }
+
+  CondValue parseExpr() {
+    CondValue L = parseSimple();
+    if (!Error.empty())
+      return {};
+    llvm::StringRef Op = peek();
+    if (Op.equals_insensitive("in")) { // x in [a, b, lo..hi]
+      P += Op.size();
+      if (!accept("["))
+        return invalid();
+      bool In = false;
+      if (!accept("]")) {
+        do {
+          CondValue Lo = parseSimple(), Hi;
+          bool Range = Error.empty() && accept("..");
+          if (Range)
+            Hi = parseSimple();
+          if (!Error.empty())
+            return {};
+          if (Lo.K != L.K || (Range && Hi.K != L.K))
+            return fail("incompatible types in $IF expression");
+          if (Range ? compare(Lo, L) <= 0 && compare(L, Hi) <= 0
+                    : compare(Lo, L) == 0)
+            In = true;
+        } while (accept(","));
+        if (!accept("]"))
+          return invalid();
+      }
+      return CondValue::boolean(In);
+    }
+    if (Op != "=" && Op != "<>" && Op != "<" && Op != ">" && Op != "<=" &&
+        Op != ">=")
+      return L;
+    P += Op.size();
+    CondValue R = parseSimple();
+    if (!Error.empty())
+      return {};
+    if (L.K != R.K)
+      return fail("incompatible types in $IF expression");
+    int C = compare(L, R);
+    bool V = Op == "="    ? C == 0
+             : Op == "<>" ? C != 0
+             : Op == "<"  ? C < 0
+             : Op == ">"  ? C > 0
+             : Op == "<=" ? C <= 0
+                          : C >= 0;
+    return CondValue::boolean(V);
+  }
+
+  CondValue parseSimple() {
+    bool Neg = false;
+    if (accept("-"))
+      Neg = true;
+    else
+      accept("+");
+    CondValue V = parseTerm();
+    if (!Error.empty())
+      return {};
+    if (Neg) {
+      if (V.K != CondValue::Int)
+        return fail("incompatible types in $IF expression");
+      if (V.I == INT64_MIN)
+        return fail("integer overflow in $IF expression");
+      V.I = -V.I;
+    }
+    while (Error.empty()) {
+      llvm::StringRef Op = peek();
+      if (Op != "+" && Op != "-" && !Op.equals_insensitive("or"))
+        break;
+      P += Op.size();
+      CondValue R = parseTerm();
+      if (!Error.empty())
+        return {};
+      if (Op.equals_insensitive("or")) {
+        if (bothAre(V, R, CondValue::Bool))
+          V.B = V.B || R.B;
+      } else if (Op == "+" && V.K == CondValue::Str && R.K == CondValue::Str) {
+        V.S += R.S;
+      } else if (bothAre(V, R, CondValue::Int)) {
+        int64_t X;
+        if (Op == "+" ? llvm::AddOverflow(V.I, R.I, X)
+                      : llvm::SubOverflow(V.I, R.I, X))
+          return fail("integer overflow in $IF expression");
+        V.I = X;
+      }
+    }
+    return Error.empty() ? V : CondValue();
+  }
+
+  CondValue parseTerm() {
+    CondValue V = parseFactor();
+    while (Error.empty()) {
+      llvm::StringRef Op = peek();
+      if (Op != "*" && !Op.equals_insensitive("div") &&
+          !Op.equals_insensitive("mod") && !Op.equals_insensitive("and"))
+        break;
+      P += Op.size();
+      CondValue R = parseFactor();
+      if (!Error.empty())
+        return {};
+      if (Op.equals_insensitive("and")) {
+        if (bothAre(V, R, CondValue::Bool))
+          V.B = V.B && R.B;
+        continue;
+      }
+      if (!bothAre(V, R, CondValue::Int))
+        break;
+      if (Op == "*") {
+        int64_t X;
+        if (llvm::MulOverflow(V.I, R.I, X))
+          return fail("integer overflow in $IF expression");
+        V.I = X;
+        continue;
+      }
+      if (R.I == 0)
+        return fail("division by zero in $IF expression");
+      if (V.I == INT64_MIN && R.I == -1)
+        return fail("integer overflow in $IF expression");
+      V.I = Op.equals_insensitive("div") ? V.I / R.I : V.I % R.I;
+    }
+    return Error.empty() ? V : CondValue();
+  }
+
+  CondValue parseFactor() {
+    if (accept("not")) {
+      CondValue V = parseFactor();
+      if (!Error.empty())
+        return {};
+      if (V.K != CondValue::Bool)
+        return fail("incompatible types in $IF expression");
+      V.B = !V.B;
+      return V;
+    }
+    if (accept("(")) {
+      CondValue V = parseExpr();
+      if (Error.empty() && !accept(")"))
+        return invalid();
+      return V;
+    }
+    llvm::StringRef T = peek();
+    if (T.empty())
+      return invalid();
+    if (llvm::isDigit(T[0]) || T[0] == '$') {
+      P += T.size();
+      uint64_t U;
+      if (T[0] == '$' ? T.drop_front().getAsInteger(16, U)
+                      : T.getAsInteger(10, U))
+        return invalid();
+      if (U > static_cast<uint64_t>(INT64_MAX))
+        return fail("integer overflow in $IF expression");
+      return CondValue::integer(static_cast<int64_t>(U));
+    }
+    if (T[0] == '\'') {
+      P += T.size();
+      if (T.size() < 2 || T.back() != '\'')
+        return invalid();
+      CondValue V;
+      V.K = CondValue::Str;
+      for (size_t I = 1; I + 1 < T.size(); ++I) {
+        V.S += T[I];
+        if (T[I] == '\'')
+          ++I; // ''
+      }
+      return V;
+    }
+    if (accept("true"))
+      return CondValue::boolean(true);
+    if (accept("false"))
+      return CondValue::boolean(false);
+    if (accept("defined")) {
+      if (!accept("("))
+        return invalid();
+      llvm::StringRef Name = peek();
+      if (Name.empty() || !isIdentStart(Name[0]))
+        return invalid();
+      P += Name.size();
+      if (!accept(")"))
+        return invalid();
+      return CondValue::boolean(Defines.contains(Name.upper()));
+    }
+    if (!isIdentStart(T[0]))
+      return invalid();
+    P += T.size();
+    auto It = Values.find(T.upper());
+    if (It == Values.end())
+      return fail("'" + T.str() +
+                  "' has no value in $IF (a macro needs {$macro on} and "
+                  "{$define " + T.str() + " := value})");
+    return macroValue(It->second);
+  }
+
+  /// The value of a macro whose text is Text (see the class comment).
+  CondValue macroValue(llvm::StringRef Text) {
+    if (Depth >= 16)
+      return fail("macros in $IF expressions are nested too deeply");
+    ConditionParser Sub(Text, Defines, Values, Depth + 1);
+    llvm::StringRef T = Sub.peek();
+    bool Single = !T.empty() && Sub.P + T.size() == Text.size();
+    if (Single && (llvm::isDigit(T[0]) || T[0] == '$' || T[0] == '\'')) {
+      CondValue V = Sub.parseFactor(); // an integer or string literal
+      if (Sub.Error.empty())
+        return V;
+    } else if (Single && isIdentStart(T[0]) && Values.count(T.upper())) {
+      // another macro's value
+      CondValue V = Sub.macroValue(Values.find(T.upper())->second);
+      if (!Sub.Error.empty())
+        return fail(Sub.Error);
+      return V;
+    }
+    CondValue V; // its text
+    V.K = CondValue::Str;
+    V.S = Text.str();
     return V;
+  }
+
+public:
+  std::string Error;
+  ConditionParser(llvm::StringRef S, const llvm::StringSet<> &Defines,
+                  const llvm::StringMap<std::string> &Values, unsigned Depth = 0)
+      : S(S), Defines(Defines), Values(Values), Depth(Depth) {}
+  bool parse() {
+    CondValue V = parseExpr();
+    if (Error.empty() && !peek().empty())
+      invalid();
+    if (Error.empty() && V.K != CondValue::Bool)
+      fail("the $IF expression is not boolean");
+    return Error.empty() && V.B;
   }
 };
 } // namespace
 
 bool Lexer::evalCondition(const char *Start, llvm::StringRef Expr) {
-  ConditionParser CP(Expr, Defines);
+  llvm::StringMap<std::string> Values;
+  for (const auto &M : Macros)
+    Values[M.getKey()] = std::string(M.getValue().Begin, M.getValue().End);
+  ConditionParser CP(Expr, Defines, Values);
   bool V = CP.parse();
-  if (!CP.Bad)
+  if (CP.Error.empty())
     return V;
-  Diags.error(locOf(Start),
-              "unsupported $IF expression; expected defined(NAME), true, "
-              "false, not, and, or and parentheses");
+  Diags.error(locOf(Start), CP.Error);
   return false;
+}
+
+/// A use of macro NAME (the identifier token T, starting at Start): lexing
+/// continues in its value; false if NAME is not a macro.
+bool Lexer::expandMacro(const Token &T, const char *Start) {
+  auto It = Macros.find(llvm::StringRef(Start, T.Length).upper());
+  if (It == Macros.end())
+    return false;
+  // A macro used at the end of another: that one is done.
+  while (!MacroStack.empty() && Cur >= BufEnd) {
+    MacroFrame F = MacroStack.pop_back_val();
+    BufEnd = F.BufEnd;
+    Cur = F.Cur;
+  }
+  if (MacroStack.size() >= 16) {
+    Diags.warning(locOf(Start), "expanding macros exceeds a depth of 16");
+    return false;
+  }
+  MacroStack.push_back({BufEnd, Cur});
+  Cur = It->second.Begin;
+  BufEnd = It->second.End;
+  return true;
 }
 
 bool Lexer::handleConditional(const char *Start, llvm::StringRef Word,
@@ -316,15 +617,24 @@ bool Lexer::handleConditional(const char *Start, llvm::StringRef Word,
   case Undef:
     if (!Active || !NeedSymbol())
       return true;
-    if (Arg.drop_front(Sym.size()).ltrim().starts_with(":=")) {
-      Diags.error(locOf(Start), "macros ({$DEFINE NAME := value}) are not "
-                                "supported");
+    if (K == Undef) {
+      Defines.erase(Sym.upper());
+      Macros.erase(Sym.upper());
       return true;
     }
-    if (K == Define)
-      Defines.insert(Sym.upper());
-    else
-      Defines.erase(Sym.upper());
+    Defines.insert(Sym.upper());
+    Macros.erase(Sym.upper());
+    if (llvm::StringRef Rest = Arg.drop_front(Sym.size()).ltrim();
+        Rest.starts_with(":=")) { // a macro: {$define NAME := value}
+      if (!MacrosOn) {
+        Diags.warning(locOf(Start),
+                      "macro support is off: '" + Sym +
+                          "' is defined without a value (use {$macro on})");
+        return true;
+      }
+      llvm::StringRef Value = Rest.drop_front(2).trim();
+      Macros[Sym.upper()] = {Value.begin(), Value.end()};
+    }
     return true;
   case If:
   case IfDef:
@@ -631,6 +941,12 @@ void Lexer::lex(Token &T) {
     const char *Start = Cur;
 
     if (Cur >= BufEnd) {
+      if (!MacroStack.empty()) { // the end of a macro's value
+        MacroFrame F = MacroStack.pop_back_val();
+        BufEnd = F.BufEnd;
+        Cur = F.Cur;
+        continue;
+      }
       closeConditionals();
       if (!IncludeStack.empty()) { // back to the including file
         IncludeFrame F = IncludeStack.pop_back_val();
@@ -644,8 +960,12 @@ void Lexer::lex(Token &T) {
     }
 
     char C = *Cur;
-    if (isIdentStart(C))
-      return lexIdentifier(T);
+    if (isIdentStart(C)) {
+      lexIdentifier(T);
+      if (MacrosOn && T.is(tok::identifier) && expandMacro(T, Start))
+        continue; // the macro's value instead
+      return;
+    }
     if (llvm::isDigit(C))
       return lexNumber(T);
     bool TP = LangOpts.Mode != LangMode::ISO;

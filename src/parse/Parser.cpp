@@ -357,6 +357,11 @@ void Parser::parseDeclarations(llvm::SmallVectorImpl<Decl *> &Decls,
       break;
     case tok::kw_class: { // class procedure TFoo.P ...
       consumeToken();
+      if (LangOpts.ObjKeywords && isIdentifierNamed("operator")) {
+        if (RoutineDecl *R = parseOperatorDecl(InInterface))
+          Decls.push_back(R);
+        break;
+      }
       if (Tok.isNot(tok::kw_procedure) && Tok.isNot(tok::kw_function)) {
         Diags.error(Tok.getLocation(),
                     "expected 'procedure' or 'function' after 'class'");
@@ -442,6 +447,8 @@ void Parser::parseConstPart(llvm::SmallVectorImpl<Decl *> &Decls) {
           (Init = parseTypedConstValue())) {
         auto *V = Ctx.create<VarDecl>(Name, TS);
         V->setInit(Init);
+        Hints H = parseHints();
+        V->addHints(H.Flags, H.Message);
         Decls.push_back(V);
       } else {
         skipUntil({tok::semi, tok::kw_begin});
@@ -464,9 +471,12 @@ void Parser::parseConstPart(llvm::SmallVectorImpl<Decl *> &Decls) {
     Expr *Init = nullptr;
     if (expect(tok::equal, "after constant name"))
       Init = parseExpression();
-    if (Init)
-      Decls.push_back(Ctx.create<ConstDecl>(Name.Loc, Name, Init));
-    else
+    Hints H = parseHints();
+    if (Init) {
+      auto *C = Ctx.create<ConstDecl>(Name.Loc, Name, Init);
+      C->addHints(H.Flags, H.Message);
+      Decls.push_back(C);
+    } else
       skipUntil({tok::semi, tok::kw_begin});
     if (!expect(tok::semi, "after constant declaration")) {
       skipUntil({tok::semi, tok::kw_begin});
@@ -488,9 +498,12 @@ void Parser::parseTypePart(llvm::SmallVectorImpl<Decl *> &Decls) {
     TypeSpec *TS = nullptr;
     if (expect(tok::equal, "after type name"))
       TS = parseType();
-    if (TS)
-      Decls.push_back(Ctx.create<TypeDecl>(Name.Loc, Name, TS));
-    else
+    Hints H = parseHints();
+    if (TS) {
+      auto *TD = Ctx.create<TypeDecl>(Name.Loc, Name, TS);
+      TD->addHints(H.Flags, H.Message);
+      Decls.push_back(TD);
+    } else
       skipUntil({tok::semi, tok::kw_begin});
     if (!expect(tok::semi, "after type declaration")) {
       skipUntil({tok::semi, tok::kw_begin});
@@ -514,11 +527,34 @@ void Parser::parseVarPart(llvm::SmallVectorImpl<Decl *> &Decls) {
         expect(tok::colon, "after variable name"))
       TS = parseType();
 
+    // objfpc: an initialized variable  x: T = value;  (one name only)
+    Expr *Init = nullptr;
+    if (TS && Tok.is(tok::equal)) {
+      SourceLocation EqLoc = consumeToken();
+      if (!LangOpts.ObjKeywords)
+        Diags.error(EqLoc, "initialized variables are a Free Pascal extension; "
+                           "use --mode=objfpc");
+      else if (Names.size() > 1)
+        Diags.error(EqLoc, "only one variable can be initialized",
+                    {SourceRange(Names[0].Loc, Names.back().getRange().getEnd())});
+      Init = parseTypedConstValue();
+      if (!Init)
+        TS = nullptr;
+      else if (!LangOpts.ObjKeywords || Names.size() > 1)
+        Init = nullptr; // (reported)
+    }
+    Hints H = parseHints();
+
     if (!TS) {
       skipUntil({tok::semi, tok::kw_begin});
     } else {
-      for (const Identifier &N : Names)
-        Decls.push_back(Ctx.create<VarDecl>(N, TS));
+      for (const Identifier &N : Names) {
+        auto *V = Ctx.create<VarDecl>(N, TS);
+        if (Init)
+          V->setInitializedVar(Init);
+        V->addHints(H.Flags, H.Message);
+        Decls.push_back(V);
+      }
     }
 
     if (!expect(tok::semi, "after variable declaration")) {
@@ -595,14 +631,32 @@ RoutineDecl *Parser::parseRoutineDecl(bool HeadingOnly) {
                tok::kw_type});
   tryConsume(tok::semi);
 
-  // Turbo/FPC directives:  cdecl;  external ['lib'] [name 'symbol'];
+  // Turbo/FPC directives:  cdecl;  stdcall;  varargs;
+  // external [library] [name symbol];  (library, symbol: string constants)
   // objfpc: overload;
-  bool IsExternal = false, Overload = false;
-  llvm::StringRef ExternalName;
+  bool IsExternal = false, Overload = false, Inline = false, VarArgs = false;
+  CallConv CC = CallConv::Default;
+  SourceLocation InlineLoc, VarArgsLoc;
+  llvm::StringRef ExternalName, LibraryName;
+  Expr *LibraryExpr = nullptr, *NameExpr = nullptr;
+  Hints H;
   while (LangOpts.Mode != LangMode::ISO) {
-    if (isIdentifierNamed("cdecl")) { // the only calling convention
-      consumeToken();
-      expect(tok::semi, "after 'cdecl'");
+    if (parseSeparatedHint(H))
+      continue;
+    if (Tok.is(tok::kw_inline)) {
+      InlineLoc = consumeToken();
+      Inline = parseInlineDirective(InlineLoc);
+      continue;
+    }
+    if (CallConv C = callConvOf(Tok); C != CallConv::Default) {
+      takeCallConv(CC);
+      expect(tok::semi, std::string("after '") + callConvName(C) + "'");
+      continue;
+    }
+    if (isIdentifierNamed("varargs")) {
+      VarArgsLoc = consumeToken();
+      VarArgs = true;
+      expect(tok::semi, "after 'varargs'");
       continue;
     }
     if (LangOpts.ObjKeywords && isIdentifierNamed("overload")) {
@@ -615,28 +669,44 @@ RoutineDecl *Parser::parseRoutineDecl(bool HeadingOnly) {
       break;
     consumeToken();
     IsExternal = true;
-    if (Tok.is(tok::string_literal)) // library name: linking is the user's job
-      consumeToken();
+    // The library (linked with the program) and the symbol: string
+    // constants (literals here; Sema evaluates the others).
+    auto StringConst = [&](llvm::StringRef &Out) {
+      Expr *E = parseExpression();
+      if (auto *SL = llvm::dyn_cast_or_null<StringLiteralExpr>(E))
+        Out = SL->getValue();
+      return E;
+    };
+    if (Tok.isNot(tok::semi) && !isIdentifierNamed("name"))
+      LibraryExpr = StringConst(LibraryName);
     if (isIdentifierNamed("name")) {
       consumeToken();
-      if (Tok.is(tok::string_literal)) {
-        ExternalName = Tok.getStringValue();
-        consumeToken();
-      } else {
+      if (Tok.is(tok::semi))
         Diags.error(Tok.getLocation(), "expected the external symbol name");
-      }
+      else
+        NameExpr = StringConst(ExternalName);
     }
     expect(tok::semi, "after 'external'");
   }
+  if (VarArgs && !IsExternal)
+    Diags.error(VarArgsLoc, "'varargs' is only allowed on external routines");
   if (IsExternal) {
+    if (InlineLoc.isValid())
+      Diags.error(InlineLoc, "'inline' cannot be used with 'external'");
     if (!Name.isValid())
       return nullptr;
     auto *R = Ctx.create<RoutineDecl>(Loc, Name, IsFunction,
                                       Ctx.copyArray<VarDecl *>(Params),
                                       HasParamList, ResultTS, nullptr, false);
     R->setExternal(ExternalName);
+    R->setLibraryName(LibraryName);
+    R->setExternalExprs(LibraryExpr, NameExpr);
+    if (VarArgs)
+      R->setVarArgs();
     if (Overload)
       R->setOverloadDirective();
+    R->setCallConv(CC);
+    R->addHints(H.Flags, H.Message);
     return R;
   }
 
@@ -649,6 +719,12 @@ RoutineDecl *Parser::parseRoutineDecl(bool HeadingOnly) {
   auto WithDirectives = [&](RoutineDecl *R) {
     if (R && Overload)
       R->setOverloadDirective();
+    if (R && Inline)
+      R->setInline();
+    if (R) {
+      R->setCallConv(CC);
+      R->addHints(H.Flags, H.Message);
+    }
     return R;
   };
   if (HeadingOnly) // interface part of a unit: the body comes later
@@ -659,7 +735,9 @@ RoutineDecl *Parser::parseRoutineDecl(bool HeadingOnly) {
                : nullptr;
 
   if (isIdentifierNamed("forward")) {
-    consumeToken();
+    SourceLocation ForwardLoc = consumeToken();
+    if (InlineLoc.isValid())
+      Diags.error(ForwardLoc, "'forward' cannot be used with 'inline'");
     expect(tok::semi, "after 'forward'");
     if (!Name.isValid())
       return nullptr;
@@ -687,7 +765,7 @@ RoutineDecl *Parser::parseRoutineDecl(bool HeadingOnly) {
 //                 ident [params] [":" typeIdent] ";" { directive ";" } .
 // directive     = "virtual" | "override" | "abstract" | "overload"
 //               | "reintroduce" .
-RoutineDecl *Parser::parseMethodHeading() {
+RoutineDecl *Parser::parseMethodHeading(bool InRecord, bool RecordClassMethod) {
   bool IsFunction = Tok.is(tok::kw_function);
   MethodKind MK = methodKindOf(Tok.getKind());
   if (MK == MethodKind::None)
@@ -714,9 +792,28 @@ RoutineDecl *Parser::parseMethodHeading() {
     return nullptr;
 
   bool Virtual = false, Override = false, Abstract = false, Overload = false;
-  while (Tok.is(tok::identifier)) {
+  bool Static = false, Inline = false;
+  CallConv CC = CallConv::Default;
+  SourceLocation InlineLoc;
+  Hints H;
+  while (Tok.is(tok::identifier) || Tok.is(tok::kw_inline)) {
+    if (parseSeparatedHint(H))
+      continue;
+    if (Tok.is(tok::kw_inline)) {
+      InlineLoc = consumeToken();
+      Inline = parseInlineDirective(InlineLoc);
+      continue;
+    }
+    if (CallConv C = callConvOf(Tok); C != CallConv::Default) {
+      takeCallConv(CC);
+      if (!expect(tok::semi, std::string("after '") + callConvName(C) + "'"))
+        return nullptr;
+      continue;
+    }
     llvm::StringRef W = Tok.getIdentifier();
-    if (W == "virtual") {
+    if (W == "static" && InRecord) {
+      Static = true;
+    } else if (W == "virtual") {
       Virtual = true;
     } else if (W == "override") {
       Override = true;
@@ -728,7 +825,7 @@ RoutineDecl *Parser::parseMethodHeading() {
       // (hides an inherited virtual method without a warning: no effect)
     } else if (W == "dynamic" ||
                W == "static" || W == "message" || W == "final" ||
-               W == "cdecl" || W == "external" || W == "forward") {
+               W == "external" || W == "forward") {
       unsupported("'" + W.str() + "' on methods is");
       return nullptr;
     } else {
@@ -739,6 +836,19 @@ RoutineDecl *Parser::parseMethodHeading() {
     if (!expect(tok::semi, "after '" + Word + "'"))
       return nullptr;
   }
+  if (InlineLoc.isValid() && (Virtual || Override || Abstract))
+    Diags.error(InlineLoc, std::string("'inline' cannot be used with '") +
+                               (Virtual    ? "virtual"
+                                : Override ? "override"
+                                           : "abstract") +
+                               "'");
+  if (RecordClassMethod && !Static)
+    Diags.error(Name.Loc, "the class methods of a record must be 'static'",
+                {Name.getRange()});
+  else if (Static && !RecordClassMethod)
+    Diags.error(Name.Loc,
+                "only the class methods of a record can be 'static'",
+                {Name.getRange()});
   auto *R = Ctx.create<RoutineDecl>(Loc, Name, IsFunction,
                                     Ctx.copyArray<VarDecl *>(Params),
                                     HasParamList, ResultTS, nullptr, false);
@@ -746,6 +856,216 @@ RoutineDecl *Parser::parseMethodHeading() {
   R->setDirectives(Virtual, Override, Abstract);
   if (Overload)
     R->setOverloadDirective();
+  if (Inline && !Virtual && !Override && !Abstract)
+    R->setInline();
+  R->setCallConv(CC);
+  R->addHints(H.Flags, H.Message);
+  return R;
+}
+
+CallConv Parser::callConvOf(const Token &T) const {
+  if (LangOpts.Mode == LangMode::ISO || T.isNot(tok::identifier))
+    return CallConv::Default;
+  llvm::StringRef W = T.getIdentifier();
+  return W == "cdecl"     ? CallConv::CDecl
+         : W == "stdcall" ? CallConv::StdCall
+                          : CallConv::Default;
+}
+
+void Parser::takeCallConv(CallConv &CC) {
+  CallConv New = callConvOf(Tok);
+  SourceLocation Loc = Tok.getLocation();
+  SourceRange Range(Loc, Loc.getLocWithOffset(
+                             static_cast<int>(Tok.getIdentifier().size())));
+  consumeToken();
+  if (CC == New)
+    Diags.warning(Loc, llvm::Twine("calling convention '") +
+                           callConvName(New) + "' is given twice",
+                  {Range});
+  else if (CC != CallConv::Default)
+    Diags.warning(Loc, llvm::Twine("calling convention '") +
+                           callConvName(New) + "' replaces '" +
+                           callConvName(CC) + "'",
+                  {Range});
+  CC = New;
+}
+
+unsigned char Parser::hintFlagOf(const Token &T) const {
+  if (LangOpts.Mode == LangMode::ISO || T.isNot(tok::identifier))
+    return 0;
+  llvm::StringRef W = T.getIdentifier();
+  return W == "deprecated"      ? Decl::HintDeprecated
+         : W == "experimental"  ? Decl::HintExperimental
+         : W == "platform"      ? Decl::HintPlatform
+         : W == "library"       ? Decl::HintLibrary
+         : W == "unimplemented" ? Decl::HintUnimplemented
+                                : 0;
+}
+
+// hints = { "deprecated" [ string ] | "experimental" | "platform"
+//         | "library" | "unimplemented" } .   (Turbo/FPC)
+Parser::Hints Parser::parseHints() {
+  Hints H;
+  while (unsigned char F = hintFlagOf(Tok)) {
+    consumeToken();
+    H.Flags |= F;
+    if (F == Decl::HintDeprecated && Tok.is(tok::string_literal)) {
+      H.Message = Tok.getStringValue();
+      consumeToken();
+    }
+  }
+  return H;
+}
+
+// A hint directive after a routine's or property's `;`:  deprecated 'm';
+bool Parser::parseSeparatedHint(Hints &H) {
+  unsigned char F = hintFlagOf(Tok);
+  if (!F)
+    return false;
+  std::string Word = Tok.getIdentifier().str();
+  consumeToken();
+  H.Flags |= F;
+  if (F == Decl::HintDeprecated && Tok.is(tok::string_literal)) {
+    H.Message = Tok.getStringValue();
+    consumeToken();
+  }
+  expect(tok::semi, "after '" + Word + "'");
+  return true;
+}
+
+// The `inline` directive (after the keyword at Loc): whether the routine is
+// to be inlined. It needs {$inline on}, the default in objfpc mode (as in
+// Free Pascal); with {$inline off} there it is accepted and ignored.
+bool Parser::parseInlineDirective(SourceLocation Loc) {
+  expect(tok::semi, "after 'inline'");
+  if (Lex.inlineOn())
+    return true;
+  if (!LangOpts.ObjKeywords)
+    Diags.error(Loc, "the 'inline' directive needs {$inline on}");
+  return false;
+}
+
+// operatorName = "+" | "-" | "*" | "/" | "=" | "<>" | "<" | ">" | "<=" | ">="
+//              | ":=" | "div" | "mod" | "and" | "or" | "xor" | "shl" | "shr"
+//              | "in" | "not" | "explicit" .
+// The name of the operator's routine: "operator" followed by the symbol
+// (lower case), spelled "operator <symbol>".
+bool Parser::parseOperatorName(Identifier &Name) {
+  static const struct {
+    tok::TokenKind K;
+    const char *Sym;
+  } Ops[] = {{tok::plus, "+"},          {tok::minus, "-"},
+             {tok::star, "*"},          {tok::slash, "/"},
+             {tok::equal, "="},         {tok::not_equal, "<>"},
+             {tok::less, "<"},          {tok::greater, ">"},
+             {tok::less_equal, "<="},   {tok::greater_equal, ">="},
+             {tok::colon_equal, ":="},  {tok::kw_div, "div"},
+             {tok::kw_mod, "mod"},      {tok::kw_and, "and"},
+             {tok::kw_or, "or"},        {tok::kw_xor, "xor"},
+             {tok::kw_shl, "shl"},      {tok::kw_shr, "shr"},
+             {tok::kw_in, "in"},        {tok::kw_not, "not"}};
+  std::string Sym;
+  for (const auto &O : Ops)
+    if (Tok.is(O.K))
+      Sym = O.Sym;
+  if (Sym.empty() && isIdentifierNamed("explicit"))
+    Sym = "explicit";
+  if (Sym.empty()) {
+    Diags.error(Tok.getLocation(),
+                "expected an operator (+, -, *, /, =, <>, <, >, <=, >=, :=, "
+                "div, mod, and, or, xor, shl, shr, in, not or Explicit)");
+    return false;
+  }
+  StringPool &S = Ctx.getStrings();
+  Name = {S.intern("operator" + Sym),
+          S.intern("operator " + Tok.getRawText().str()), Tok.getLocation()};
+  consumeToken();
+  return true;
+}
+
+// operatorHeading = "operator" operatorName "(" params ")" ":" typeIdent ";"
+//                   [ "overload" ";" ] .      (after "class", in a record)
+RoutineDecl *Parser::parseOperatorHeading() {
+  SourceLocation Loc = consumeToken(); // 'operator'
+  Identifier Name;
+  if (!parseOperatorName(Name))
+    return nullptr;
+  llvm::SmallVector<VarDecl *, 2> Params;
+  if (Tok.isNot(tok::l_paren)) {
+    Diags.error(Tok.getLocation(), "expected '(' after the operator");
+    return nullptr;
+  }
+  if (!parseFormalParams(Params) ||
+      !expect(tok::colon, "after the operator's parameters"))
+    return nullptr;
+  TypeSpec *ResultTS = parseTypeIdentifier("operator result type");
+  if (!ResultTS || !expect(tok::semi, "after operator heading"))
+    return nullptr;
+  bool Overload = false, Inline = false;
+  while (true) {
+    if (isIdentifierNamed("overload")) {
+      consumeToken();
+      Overload = true;
+      if (!expect(tok::semi, "after 'overload'"))
+        return nullptr;
+      continue;
+    }
+    if (Tok.is(tok::kw_inline)) {
+      Inline = parseInlineDirective(consumeToken());
+      continue;
+    }
+    break;
+  }
+  auto *R = Ctx.create<RoutineDecl>(Loc, Name, /*IsFunction=*/true,
+                                    Ctx.copyArray<VarDecl *>(Params), true,
+                                    ResultTS, nullptr, false);
+  R->setMethodKind(MethodKind::Operator);
+  R->setClassMethod();
+  if (Overload)
+    R->setOverloadDirective();
+  if (Inline)
+    R->setInline();
+  return R;
+}
+
+// operatorDecl = "operator" ident "." operatorName "(" params ")" ":"
+//                typeIdent ";" block ";" .        (after "class")
+RoutineDecl *Parser::parseOperatorDecl(bool HeadingOnly) {
+  SourceLocation Loc = consumeToken(); // 'operator'
+  Identifier ClassName, Name;
+  llvm::SmallVector<VarDecl *, 2> Params;
+  TypeSpec *ResultTS = nullptr;
+  if (!expectIdentifier(ClassName, "record name after 'operator'") ||
+      !expect(tok::period, "after the record name") ||
+      !parseOperatorName(Name) ||
+      (Tok.is(tok::l_paren) ? !parseFormalParams(Params)
+                            : (Diags.error(Tok.getLocation(),
+                                           "expected '(' after the operator"),
+                               true)) ||
+      !expect(tok::colon, "after the operator's parameters") ||
+      !(ResultTS = parseTypeIdentifier("operator result type")) ||
+      !expect(tok::semi, "after operator heading")) {
+    skipUntil({tok::semi, tok::kw_begin});
+    tryConsume(tok::semi);
+    return nullptr;
+  }
+  if (HeadingOnly) {
+    Diags.error(ClassName.Loc,
+                "methods are implemented in the implementation part of a unit",
+                {SourceRange(ClassName.Loc, Name.getRange().getEnd())});
+    return nullptr;
+  }
+  Block *Body = parseBlock();
+  if (!expect(tok::semi, "after operator body")) {
+    skipUntil({tok::semi, tok::kw_begin, tok::kw_procedure, tok::kw_function});
+    tryConsume(tok::semi);
+  }
+  auto *R = Ctx.create<RoutineDecl>(Loc, Name, /*IsFunction=*/true,
+                                    Ctx.copyArray<VarDecl *>(Params), true,
+                                    ResultTS, Body, false);
+  R->setMethodKind(MethodKind::Operator);
+  R->setClassName(ClassName);
+  R->setClassMethod();
   return R;
 }
 
@@ -904,16 +1224,19 @@ TypeSpec *Parser::parseClassType(SourceLocation Start) {
       TypeSpec *TS = parseType();
       if (!TS)
         return Fail();
+      Hints H = parseHints();
       for (const Identifier &N : Names) {
         if (ClassVars) {
           auto *V = Ctx.create<VarDecl>(N, TS);
           V->setClassVar();
           V->setVisibility(Vis);
+          V->addHints(H.Flags, H.Message);
           Members.push_back(V);
           continue;
         }
         auto *F = Ctx.create<FieldDecl>(N, TS);
         F->setVisibility(Vis);
+        F->addHints(H.Flags, H.Message);
         Members.push_back(F);
       }
       if (!expect(tok::semi, "after field declaration"))
@@ -938,6 +1261,10 @@ TypeSpec *Parser::parseClassType(SourceLocation Start) {
       PropertyDecl *P = parsePropertyDecl();
       if (!P)
         return Fail();
+      Hints H;
+      while (parseSeparatedHint(H)) {
+      }
+      P->addHints(H.Flags, H.Message);
       P->setVisibility(Vis);
       Members.push_back(P);
       ClassVars = false;
@@ -961,6 +1288,11 @@ TypeSpec *Parser::parseClassType(SourceLocation Start) {
       }
       if (Tok.isOneOf(tok::kw_constructor, tok::kw_destructor, tok::kw_property)) {
         unsupported("class " + Tok.getRawText().lower() + "s are");
+        return Fail();
+      }
+      if (isIdentifierNamed("operator")) {
+        Diags.error(Tok.getLocation(),
+                    "class operators can only be declared in records");
         return Fail();
       }
       Diags.error(Tok.getLocation(),
@@ -1177,9 +1509,26 @@ TypeSpec *Parser::parseTypeImpl() {
     if (IsFunction && (!expect(tok::colon, "before the result type") ||
                        !(Result = parseTypeIdentifier("function result type"))))
       return nullptr;
-    return Ctx.create<RoutineTypeSpec>(SourceRange(Start, PrevTokEnd),
-                                       IsFunction,
-                                       Ctx.copyArray<VarDecl *>(Params), Result);
+    auto *RS = Ctx.create<RoutineTypeSpec>(SourceRange(Start, PrevTokEnd),
+                                           IsFunction,
+                                           Ctx.copyArray<VarDecl *>(Params),
+                                           Result);
+    // A calling convention:  procedure(x: integer) cdecl  or, after a
+    // semicolon,  procedure(x: integer); cdecl  (Turbo/FPC).
+    CallConv CC = CallConv::Default;
+    while (true) {
+      if (callConvOf(Tok) != CallConv::Default)
+        takeCallConv(CC);
+      else if (Tok.is(tok::semi) &&
+               callConvOf(peekToken()) != CallConv::Default) {
+        consumeToken();
+        takeCallConv(CC);
+      } else {
+        break;
+      }
+    }
+    RS->setCallConv(CC);
+    return RS;
   }
   case tok::caret: {
     if (Packed)
@@ -1315,15 +1664,179 @@ TypeSpec *Parser::parseArrayType(SourceLocation Start, bool Packed) {
 // recordType = "record" fieldList "end" .
 TypeSpec *Parser::parseRecordType(SourceLocation Start, bool Packed) {
   SourceLocation RecordLoc = consumeToken(); // 'record'
+  if (LangOpts.ObjKeywords && Lex.advancedRecords())
+    return parseAdvancedRecord(Start, RecordLoc, Packed);
   FieldList *Fields = parseFieldList(tok::kw_end);
-  if (!Fields)
+  if (!Fields) {
+    if (RecordBodySkipped) // (methods without the mode switch)
+      tryConsume(tok::kw_end);
+    RecordBodySkipped = false;
     return nullptr;
+  }
   if (!expect(tok::kw_end, "at end of record type")) {
     Diags.note(RecordLoc, "to match this 'record'");
     return nullptr;
   }
   return Ctx.create<RecordTypeSpec>(SourceRange(Start, PrevTokEnd), Fields,
                                     Packed);
+}
+
+// advancedRecord = "record" { visibility | "var" | identList ":" type ";"
+//                   | methodHeading | "class" methodHeading
+//                   | "class" operatorHeading | property }
+//                  [ variantPart ] "end" .
+// (objfpc, {$modeswitch advancedrecords}). Visibility: private, public,
+// strict private. Fields cannot follow a method or property in the same
+// section (as in Free Pascal).
+TypeSpec *Parser::parseAdvancedRecord(SourceLocation Start,
+                                      SourceLocation RecordLoc, bool Packed) {
+  llvm::SmallVector<FieldDecl *, 8> Fixed;
+  llvm::SmallVector<Decl *, 8> Members;
+  VariantPart *VP = nullptr;
+  Visibility Vis = Visibility::Public;
+  bool AfterMethods = false;
+  auto Fail = [&]() -> TypeSpec * {
+    skipUntil({tok::kw_end});
+    tryConsume(tok::kw_end);
+    return nullptr;
+  };
+  auto AddMember = [&](Decl *D) {
+    D->setVisibility(Vis);
+    Members.push_back(D);
+    AfterMethods = true;
+  };
+  while (Tok.isNot(tok::kw_end) && Tok.isNot(tok::eof) && !Diags.shouldStop()) {
+    if (Tok.is(tok::identifier)) {
+      llvm::StringRef W = Tok.getIdentifier();
+      if (W == "private" || W == "public") {
+        Vis = W == "private" ? Visibility::Private : Visibility::Public;
+        AfterMethods = false;
+        consumeToken();
+        continue;
+      }
+      if (W == "protected" || W == "published") {
+        Diags.error(Tok.getLocation(),
+                    "'" + W.str() + "' sections are not allowed in records");
+        return Fail();
+      }
+      if (W == "strict") {
+        consumeToken();
+        if (!isIdentifierNamed("private")) {
+          Diags.error(Tok.getLocation(),
+                      "expected 'private' after 'strict' (records have no "
+                      "protected members)");
+          return Fail();
+        }
+        consumeToken();
+        Vis = Visibility::StrictPrivate;
+        AfterMethods = false;
+        continue;
+      }
+      if (AfterMethods) {
+        Diags.error(Tok.getLocation(),
+                    "fields cannot follow a method or property; start a new "
+                    "visibility section or 'var' first");
+        return Fail();
+      }
+      llvm::SmallVector<Identifier, 4> Names;
+      if (!parseIdentList(Names, "field name") ||
+          !expect(tok::colon, "after field name"))
+        return Fail();
+      TypeSpec *TS = parseType();
+      if (!TS)
+        return Fail();
+      Hints H = parseHints();
+      for (const Identifier &N : Names) {
+        auto *F = Ctx.create<FieldDecl>(N, TS);
+        F->setVisibility(Vis);
+        F->addHints(H.Flags, H.Message);
+        Fixed.push_back(F);
+      }
+      if (!tryConsume(tok::semi) && Tok.isNot(tok::kw_end)) {
+        expect(tok::semi, "after field declaration");
+        return Fail();
+      }
+      continue;
+    }
+    if (tryConsume(tok::kw_var)) {
+      AfterMethods = false;
+      continue;
+    }
+    if (Tok.is(tok::kw_case)) {
+      VP = parseVariantPart(tok::kw_end);
+      if (!VP)
+        return Fail();
+      tryConsume(tok::semi);
+      break; // the variant part is last
+    }
+    if (Tok.is(tok::kw_destructor)) {
+      Diags.error(Tok.getLocation(), "a record cannot have a destructor");
+      return Fail();
+    }
+    if (Tok.isOneOf(tok::kw_procedure, tok::kw_function, tok::kw_constructor)) {
+      RoutineDecl *R = parseMethodHeading(/*InRecord=*/true);
+      if (!R)
+        return Fail();
+      AddMember(R);
+      continue;
+    }
+    if (Tok.is(tok::kw_property)) {
+      PropertyDecl *P = parsePropertyDecl();
+      if (!P)
+        return Fail();
+      Hints H;
+      while (parseSeparatedHint(H)) {
+      }
+      P->addHints(H.Flags, H.Message);
+      AddMember(P);
+      continue;
+    }
+    if (Tok.is(tok::kw_class)) {
+      consumeToken();
+      if (isIdentifierNamed("operator")) {
+        RoutineDecl *R = parseOperatorHeading();
+        if (!R)
+          return Fail();
+        AddMember(R);
+        continue;
+      }
+      if (Tok.isOneOf(tok::kw_procedure, tok::kw_function)) {
+        RoutineDecl *R = parseMethodHeading(/*InRecord=*/true,
+                                            /*RecordClassMethod=*/true);
+        if (!R)
+          return Fail();
+        R->setClassMethod();
+        AddMember(R);
+        continue;
+      }
+      if (Tok.is(tok::kw_var)) {
+        unsupported("class variables in records are");
+        return Fail();
+      }
+      Diags.error(Tok.getLocation(),
+                  "expected 'procedure', 'function' or 'operator' after "
+                  "'class'");
+      return Fail();
+    }
+    if (Tok.isOneOf(tok::kw_type, tok::kw_const)) {
+      unsupported("nested types and constants in records are");
+      return Fail();
+    }
+    Diags.error(Tok.getLocation(),
+                "expected a field, method or property declaration, or 'end'");
+    return Fail();
+  }
+  if (!expect(tok::kw_end, "at end of record type")) {
+    Diags.note(RecordLoc, "to match this 'record'");
+    return nullptr;
+  }
+  auto *FL = Ctx.create<FieldList>();
+  FL->Fixed = Ctx.copyArray<FieldDecl *>(Fixed);
+  FL->Variant = VP;
+  auto *RS = Ctx.create<RecordTypeSpec>(SourceRange(Start, PrevTokEnd), FL,
+                                        Packed);
+  RS->setMembers(Ctx.copyArray<Decl *>(Members));
+  return RS;
 }
 
 // fieldList = [ identList ":" type { ";" identList ":" type } ]
@@ -1338,8 +1851,12 @@ FieldList *Parser::parseFieldList(tok::TokenKind Close) {
     TypeSpec *TS = parseType();
     if (!TS)
       return nullptr;
-    for (const Identifier &N : Names)
-      Fixed.push_back(Ctx.create<FieldDecl>(N, TS));
+    Hints H = parseHints();
+    for (const Identifier &N : Names) {
+      auto *F = Ctx.create<FieldDecl>(N, TS);
+      F->addHints(H.Flags, H.Message);
+      Fixed.push_back(F);
+    }
     if (!tryConsume(tok::semi))
       break;
   }
@@ -1353,6 +1870,16 @@ FieldList *Parser::parseFieldList(tok::TokenKind Close) {
   }
 
   if (Tok.isNot(Close)) {
+    if (LangOpts.ObjKeywords && Close == tok::kw_end &&
+        Tok.isOneOf(tok::kw_procedure, tok::kw_function, tok::kw_constructor,
+                    tok::kw_destructor, tok::kw_property, tok::kw_class)) {
+      Diags.error(Tok.getLocation(),
+                  "methods and properties in records need "
+                  "{$modeswitch advancedrecords}");
+      skipUntil({tok::kw_end}); // the record's end: continue after it
+      RecordBodySkipped = true;
+      return nullptr;
+    }
     Diags.error(Tok.getLocation(),
                 "expected field name, 'case' or " + describe(Close) +
                     " in record");

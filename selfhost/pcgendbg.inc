@@ -429,8 +429,13 @@ begin
     listAdd(sig, debugType(result_))
   else
     listAdd(sig, nil);
-  if self_ <> nil then { methods: Self first }
-    listAdd(sig, debugType(self_^.varType));
+  if self_ <> nil then { methods: Self first (a record's by reference) }
+  begin
+    if isByRef(self_) then
+      listAdd(sig, pointerType(debugType(self_^.varType), 'DW_TAG_reference_type'))
+    else
+      listAdd(sig, debugType(self_^.varType));
+  end;
   for i := 0 to params.count - 1 do
   begin
     p := PDecl(listGet(params, i));
@@ -527,7 +532,7 @@ var
 begin
   frameT := frameType(r);
   argNo := 1;
-  if r^.methodKind <> mtNone then
+  if hasSelf(r) then
   begin
     declare(r^.selfVar, argNo);
     argNo := argNo + 1;
@@ -540,7 +545,7 @@ begin
   for i := 0 to r^.body^.decls.count - 1 do
   begin
     v := PDecl(listGet(r^.body^.decls, i));
-    if (v^.kind = dkVar) and (v^.init = nil) then
+    if (v^.kind = dkVar) and ((v^.init = nil) or v^.isInitVar) then
       declare(v, 0);
   end;
   if r^.isFunction then

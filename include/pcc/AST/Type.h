@@ -217,10 +217,16 @@ public:
 
 /// [packed] record ... end. The layout follows the FieldList tree (fixed
 /// part, then an optional variant part whose variants overlay each other).
+class ClassType;
+
 class RecordType final : public Type {
   FieldList *Fields;
   llvm::ArrayRef<FieldDecl *> AllFields; ///< flattened, incl. variant fields
   bool Packed;
+  /// An advanced record's (objfpc) member table: a ClassType that is not a
+  /// type of values, holding the fields, methods, operators and properties
+  /// (see ClassType::getRecord). Null for a plain record.
+  ClassType *Members = nullptr;
 
 public:
   RecordType(FieldList *Fields, llvm::ArrayRef<FieldDecl *> AllFields,
@@ -230,6 +236,8 @@ public:
   llvm::ArrayRef<FieldDecl *> getAllFields() const { return AllFields; }
   FieldDecl *findField(llvm::StringRef Name) const;
   bool isPacked() const { return Packed; }
+  ClassType *getMemberTable() const { return Members; }
+  void setMemberTable(ClassType *C) { Members = C; }
   static bool classof(const Type *T) { return T->getKind() == TK_Record; }
 };
 
@@ -288,12 +296,15 @@ public:
 class RoutineType final : public Type {
   llvm::ArrayRef<VarDecl *> Params;
   Type *Result;
+  bool CDecl; ///< 'cdecl' (see CallConv)
 
 public:
-  RoutineType(llvm::ArrayRef<VarDecl *> Params, Type *Result)
-      : Type(TK_Routine), Params(Params), Result(Result) {}
+  RoutineType(llvm::ArrayRef<VarDecl *> Params, Type *Result,
+              bool CDecl = false)
+      : Type(TK_Routine), Params(Params), Result(Result), CDecl(CDecl) {}
   llvm::ArrayRef<VarDecl *> getParams() const { return Params; }
   Type *getResult() const { return Result; }
+  bool isCDecl() const { return CDecl; }
   bool isFunction() const { return Result != nullptr; }
   static bool classof(const Type *T) { return T->getKind() == TK_Routine; }
 };
@@ -320,9 +331,16 @@ class ClassType final : public Type {
   llvm::ArrayRef<RoutineDecl *> VTable; ///< the virtual methods, by slot
   const void *Module = nullptr; ///< the program or unit declaring it
   bool Defined = false;
+  RecordType *Record = nullptr; ///< see getRecord
 
 public:
   ClassType() : Type(TK_Class) {}
+  /// The advanced record whose member table this is, or null for a class.
+  /// A member table has no parent, VMT or instances: its methods' Self is
+  /// the record (by reference), and its class methods and operators have
+  /// no Self.
+  RecordType *getRecord() const { return Record; }
+  void setRecord(RecordType *R) { Record = R; }
   ClassType *getParent() const { return Parent; }
   llvm::ArrayRef<Decl *> getMembers() const { return Members; }
   llvm::ArrayRef<FieldDecl *> getAllFields() const { return AllFields; }

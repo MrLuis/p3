@@ -1,0 +1,126 @@
+ProgramDecl 'advrecords' <1:1>
+  TypeDecl 'tp' <4:3>
+    RecordTypeSpec <4:8>
+      FieldDecl 'fx' strict private <6:5>
+        NamedTypeSpec 'integer' <6:9>
+      ConstructorDecl 'create' <8:5>
+        ParamDecl 'x' <8:24>
+          NamedTypeSpec 'integer' <8:27>
+      FunctionDecl 'get' <9:5>
+        Result <9:19>
+          NamedTypeSpec 'integer' <9:19>
+      FunctionDecl 'one' class <10:11>
+        Result <10:25>
+          NamedTypeSpec 'tp' <10:25>
+      OperatorDecl 'operator+' class <11:11>
+        ParamDecl const 'a' <11:28>
+          NamedTypeSpec 'tp' <11:34>
+        ParamDecl const 'b' <11:31>
+          NamedTypeSpec 'tp' <11:34>
+        Result <11:39>
+          NamedTypeSpec 'tp' <11:39>
+      OperatorDecl 'operator=' class <12:11>
+        ParamDecl const 'a' <12:28>
+          NamedTypeSpec 'tp' <12:34>
+        ParamDecl const 'b' <12:31>
+          NamedTypeSpec 'tp' <12:34>
+        Result <12:39>
+          NamedTypeSpec 'boolean' <12:39>
+      OperatorDecl 'operator:=' class <13:11>
+        ParamDecl 'x' <13:23>
+          NamedTypeSpec 'integer' <13:26>
+        Result <13:36>
+          NamedTypeSpec 'tp' <13:36>
+      PropertyDecl 'x' read 'fx' <14:14>
+        NamedTypeSpec 'integer' <14:17>
+  ConstructorDecl 'tp.create' <16:1>
+    ParamDecl 'x' <16:23>
+      NamedTypeSpec 'integer' <16:26>
+    CompoundStmt <16:36>
+      AssignStmt <16:42>
+        NameRefExpr 'fx' <16:42>
+        NameRefExpr 'x' <16:48>
+      EmptyStmt <16:51>
+  FunctionDecl 'tp.get' <17:1>
+    Result <17:18>
+      NamedTypeSpec 'integer' <17:18>
+    CompoundStmt <17:27>
+      AssignStmt <17:33>
+        NameRefExpr 'get' <17:33>
+        NameRefExpr 'fx' <17:40>
+      EmptyStmt <17:44>
+  FunctionDecl 'tp.one' class <18:7>
+    Result <18:24>
+      NamedTypeSpec 'tp' <18:24>
+    CompoundStmt <18:28>
+      AssignStmt <18:34>
+        FieldExpr 'fx' <18:34>
+          NameRefExpr 'result' <18:34>
+        IntegerLiteralExpr 1 <18:47>
+      EmptyStmt <18:50>
+  OperatorDecl 'tp.operator+' class <19:7>
+    ParamDecl const 'a' <19:27>
+      NamedTypeSpec 'tp' <19:33>
+    ParamDecl const 'b' <19:30>
+      NamedTypeSpec 'tp' <19:33>
+    Result <19:38>
+      NamedTypeSpec 'tp' <19:38>
+    CompoundStmt <19:42>
+      AssignStmt <19:48>
+        FieldExpr 'fx' <19:48>
+          NameRefExpr 'result' <19:48>
+        BinaryExpr '+' <19:61>
+          FieldExpr 'fx' <19:61>
+            NameRefExpr 'a' <19:61>
+          FieldExpr 'fx' <19:68>
+            NameRefExpr 'b' <19:68>
+      EmptyStmt <19:74>
+  OperatorDecl 'tp.operator=' class <20:7>
+    ParamDecl const 'a' <20:27>
+      NamedTypeSpec 'tp' <20:33>
+    ParamDecl const 'b' <20:30>
+      NamedTypeSpec 'tp' <20:33>
+    Result <20:38>
+      NamedTypeSpec 'boolean' <20:38>
+    CompoundStmt <20:47>
+      AssignStmt <20:53>
+        NameRefExpr 'result' <20:53>
+        BinaryExpr '=' <20:63>
+          FieldExpr 'fx' <20:63>
+            NameRefExpr 'a' <20:63>
+          FieldExpr 'fx' <20:70>
+            NameRefExpr 'b' <20:70>
+      EmptyStmt <20:76>
+  OperatorDecl 'tp.operator:=' class <21:7>
+    ParamDecl 'x' <21:22>
+      NamedTypeSpec 'integer' <21:25>
+    Result <21:35>
+      NamedTypeSpec 'tp' <21:35>
+    CompoundStmt <21:39>
+      AssignStmt <21:45>
+        FieldExpr 'fx' <21:45>
+          NameRefExpr 'result' <21:45>
+        NameRefExpr 'x' <21:58>
+      EmptyStmt <21:61>
+  VarDecl 'p' <23:3>
+    NamedTypeSpec 'tp' <23:6>
+  CompoundStmt <24:1>
+    AssignStmt <25:3>
+      NameRefExpr 'p' <25:3>
+      BinaryExpr '+' <25:8>
+        IndirectCallExpr <25:8>
+          FieldExpr 'create' <25:8>
+            NameRefExpr 'tp' <25:8>
+          IntegerLiteralExpr 2 <25:18>
+        IntegerLiteralExpr 3 <25:23>
+    IfStmt <26:3>
+      BinaryExpr '<>' <26:6>
+        NameRefExpr 'p' <26:6>
+        FieldExpr 'one' <26:11>
+          NameRefExpr 'tp' <26:11>
+      ProcCallStmt 'writeln' () <27:5>
+        FieldExpr 'get' <27:13>
+          NameRefExpr 'p' <27:13>
+        FieldExpr 'x' <27:20>
+          NameRefExpr 'p' <27:20>
+    EmptyStmt <28:1>

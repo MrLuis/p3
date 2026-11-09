@@ -1,0 +1,19 @@
+; Advanced records in units (--mode=objfpc): a record with methods,
+; operators and a property declared in a unit's interface and used by the
+; program, compiled whole and separately. A separately compiled unit
+; exports the record's methods as pas.<unit>$<record>.<method>.
+; RUN: rm -rf %t && mkdir -p %t && cp -r %S/Inputs/advrecords/. %t/
+; RUN: %pcc --mode=objfpc -I %t/lib %t/shop.pas -o %t/whole
+; RUN: %t/whole | FileCheck %s
+; RUN: %pcc --mode=objfpc -c %t/lib/money.pas -o %t/lib/money.o
+; RUN: %pcc --mode=objfpc -I %t/lib -fseparate-units %t/shop.pas -o %t/separate
+; RUN: %t/separate | FileCheck %s
+; CHECK: 1.55 0.75 2.30 155 FALSE TRUE 0.00
+;
+; RUN: %pcc --mode=objfpc --emit-llvm %t/lib/money.pas -o - | FileCheck --check-prefix=UNIT %s
+; UNIT-DAG: define void @"pas.money$tmoney.create"(ptr %link, ptr %self, i32 %units, i32 %cents)
+; UNIT-DAG: define %record.TMoney @"pas.money$tmoney.zero"(ptr %link)
+; UNIT-DAG: define %record.TMoney @"pas.money$tmoney.operator+"(ptr %link, ptr %a, ptr %b)
+; RUN: %pcc --mode=objfpc -I %t/lib -fseparate-units --emit-llvm %t/shop.pas -o - | FileCheck --check-prefix=PROG %s
+; PROG-DAG: declare void @"pas.money$tmoney.add"(ptr, ptr, i32)
+; PROG-DAG: declare %record.TMoney @"pas.money$tmoney.operator:="(ptr, i32)

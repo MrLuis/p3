@@ -1,0 +1,24 @@
+methods
+  (1,2) 1 2 5 c
+  (2,<)
+  SetY 1
+  (5,1) count 1
+  reset (0,0) z (5,1)
+  25 (3,3) (0,0)
+  with (:,2) 10 104
+arrays and fields
+  (1,2) (6,<) (3,6)
+  l (2,2) 13
+operators
+  (4,3) (-2,1) (-1,-2) (3,6) (3,6)
+  FALSE TRUE TRUE TRUE FALSE
+  TRUE FALSE (6,2)
+conversions
+  (7,7)
+  arg (3,3) c
+  (8,8) (9,9)
+  vec(7,7)
+  42 (9,9)
+flags
+  2 7 1 1 2
+made 26

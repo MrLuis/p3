@@ -389,7 +389,7 @@ begin
   end
   else
   begin
-    obj := emitObject(target^.base);
+    obj := memberObject(target^.base);
     c := target^.base^.typ;
   end;
   if p^.writeDecl^.kind = dkRoutine then
@@ -557,7 +557,9 @@ begin
   d := s^.callDecl;
   if d^.kind = dkRoutine then
   begin
-    if d^.methodKind <> mtNone then { through Self or a with statement's object }
+    if d^.isStatic then { a record's static method }
+      ignored := emitCall(d, s^.args)
+    else if d^.methodKind <> mtNone then { through Self or a with statement's object }
       ignored := emitMethodCallC(d, withBase(s^.callWith), s^.args, false, s^.b,
                                  withIsClass(s^.callWith))
     else
@@ -1366,15 +1368,18 @@ begin
     for i := 0 to r^.params.count - 1 do
     begin
       p := PDecl(listGet(r^.params, i));
-      if p^.varKind = vkVarParam then
-        listAdd(params, irPtrT)
+      if (p^.varKind = vkVarParam) or (p^.varType^.kind = tyRoutine) then
+        listAdd(params, irPtrT) { (a callback: a function pointer) }
       else
         listAdd(params, regType(p^.varType));
     end;
     ret := retTypeOf(nil);
     if r^.isFunction then
       ret := regType(r^.resultType);
-    f := irDeclareFunction(sym, ret, params, '', '');
+    if r^.isVarArgs then
+      f := irDeclareFunction(sym, ret, params, '', irVarArgParams(params))
+    else
+      f := irDeclareFunction(sym, ret, params, '', '');
     listFree(params);
   end;
   r^.cgFunc := f;
@@ -1389,6 +1394,14 @@ begin
      (d^.typeSpec^.kind = tsInterface) and not d^.typeSpec^.isForwardIntf and
      (d^.declType <> nil) and (d^.declType^.kind = tyInterface) then
     definedInterface := d^.declType;
+end;
+
+{ The member table of the advanced record d declares, or nil. }
+function advancedRecord(d: PDecl): PType;
+begin
+  advancedRecord := nil;
+  if (d^.kind = dkType) and (d^.declType <> nil) and (d^.declType^.kind = tyRecord) then
+    advancedRecord := d^.declType^.memberTable;
 end;
 
 function definedClass(d: PDecl): PType;
@@ -1407,7 +1420,7 @@ var
   j: longint;
 begin
   listAdd(params, irPtrT);
-  if r^.methodKind <> mtNone then
+  if hasSelf(r) then
     listAdd(params, irPtrT);
   for j := 0 to r^.params.count - 1 do
     listAdd(params, paramIRType(PDecl(listGet(r^.params, j))));
@@ -1594,10 +1607,69 @@ procedure declareRoutine(r: PDecl); forward;
 { Lays out the frames of the routines declared in blk (recursively),
   creates their functions and queues their bodies, and declares the
   classes' VMTs. A method is declared where its implementation is. }
-procedure declareRoutines(blk: PBlock);
+{ The C-callable entry of a cdecl routine r at program or unit level (its
+  procedural values point to it): cthunk.<sym>, which calls r with a null
+  static link; created right after r, its body emitted with the
+  routines'. }
+procedure declareCThunk(r: PDecl; const sym: string);
+var
+  params: TPtrList;
+  target, t: PIRFunc;
+  i: longint;
+begin
+  if not isCDecl(r) or (r^.methodKind <> mtNone) or (r^.parent <> nil) then
+    exit;
+  target := fnOf(r);
+  listInit(params);
+  for i := 1 to target^.params.count - 1 do
+    listAdd(params, listGet(target^.params, i));
+  t := irCreateFunction('cthunk.' + sym, 'internal', target^.ret, params);
+  listFree(params);
+  for i := 0 to r^.params.count - 1 do
+    irSetArgName(t, i, nm(PDecl(listGet(r^.params, i))^.ident.name));
+  r^.cgThunk := t;
+  listAdd(thunksToEmit, r);
+end;
+
+procedure emitCThunk(r: PDecl);
+var
+  t: PIRFunc;
+  buf: TBuf;
+  i: longint;
+  res: TV;
+begin
+  t := PIRFunc(r^.cgThunk);
+  curFn := t;
+  curRoutine := nil;
+  curSP := nil;
+  irBeginBody(t);
+  irSetDebugLoc(nil);
+  irSetInsertPoint(irNewBlock('entry'));
+  bufInit(buf);
+  irArgsAdd(buf, irNull);
+  for i := 0 to t^.params.count - 1 do
+    irArgsAdd(buf, irArg(t, i));
+  res := irCall(fnOf(r), buf, '');
+  bufFree(buf);
+  if t^.ret^.kind = ikVoid then
+    irRetVoid
+  else
+    irRet(res);
+end;
+
+procedure emitCThunks;
 var
   i: longint;
-  r: PDecl;
+begin
+  for i := 0 to thunksToEmit.count - 1 do
+    emitCThunk(PDecl(listGet(thunksToEmit, i)));
+  listClear(thunksToEmit);
+end;
+
+procedure declareRoutines(blk: PBlock);
+var
+  i, j: longint;
+  r, m: PDecl;
   c: PType;
   params: TPtrList;
 begin
@@ -1614,6 +1686,24 @@ begin
     if c <> nil then
     begin
       declareInterfaceCG(r, c);
+      continue;
+    end;
+    c := advancedRecord(r);
+    if c <> nil then
+    begin
+      { a record of a separately compiled unit: its methods, declared }
+      for j := 0 to c^.classMembers.count - 1 do
+      begin
+        m := PDecl(listGet(c^.classMembers, j));
+        if (m^.kind = dkRoutine) and m^.cgImported then
+        begin
+          listInit(params);
+          routineParamTypes(m, params);
+          m^.cgFunc := irDeclareFunction(nm(m^.cgExport), routineRetType(m), params,
+                                         '', '');
+          listFree(params);
+        end;
+      end;
       continue;
     end;
     if (r^.kind = dkRoutine) and (r^.canonical <> nil) and
@@ -1636,6 +1726,7 @@ begin
       routineParamTypes(r, params);
       r^.cgFunc := irDeclareFunction(nm(r^.cgExport), routineRetType(r), params, '', '');
       listFree(params);
+      declareCThunk(r, nm(r^.cgExport));
       continue;
     end;
     declareRoutine(r);
@@ -1670,7 +1761,7 @@ begin
     listInit(slots);
     if r^.parent <> nil then
       listAdd(slots, irPtrT);
-    if r^.methodKind <> mtNone then
+    if hasSelf(r) then
       addSlot(r^.selfVar);
     for j := 0 to r^.params.count - 1 do
       addSlot(PDecl(listGet(r^.params, j)));
@@ -1679,7 +1770,7 @@ begin
       v := PDecl(listGet(r^.body^.decls, j));
       if v^.kind <> dkVar then
         continue;
-      if v^.init <> nil then
+      if (v^.init <> nil) and not v^.isInitVar then
         emitStaticVar(v) { static storage, local scope }
       else
         addSlot(v);
@@ -1707,7 +1798,7 @@ begin
     listFree(params);
     irSetArgName(f, 0, 'link');
     argNo := 1;
-    if r^.methodKind <> mtNone then
+    if hasSelf(r) then
     begin
       irSetArgName(f, 1, 'self');
       argNo := 2;
@@ -1717,7 +1808,13 @@ begin
       p := PDecl(listGet(r^.params, j));
       irSetArgName(f, j + argNo, nm(p^.ident.name));
     end;
+    if r^.isInline then { the inline directive }
+      f^.attrs := 'inlinehint';
     r^.cgFunc := f;
+    if r^.cgExport <> nil then
+      declareCThunk(r, nm(r^.cgExport))
+    else
+      declareCThunk(r, name);
     if dbgOn then
     begin
       { file scope even for nested routines: lexical nesting would make
@@ -1816,7 +1913,7 @@ begin
   if r^.parent <> nil then
     irStore(irArg(f, 0), irStructGEP(frameT, curFrame, 0, ''));
   argNo := 1;
-  if r^.methodKind <> mtNone then
+  if hasSelf(r) then
   begin
     irStore(irArg(f, 1), irStructGEP(frameT, curFrame, r^.selfVar^.cgSlot, ''));
     argNo := 2;
@@ -1841,10 +1938,19 @@ begin
       listAdd(managedTypes, p^.varType);
     end;
   end;
+  { initialized variables (objfpc) get their initial values on each call }
   for i := 0 to r^.body^.decls.count - 1 do
   begin
     v := PDecl(listGet(r^.body^.decls, i));
-    if (v^.kind = dkVar) and (v^.init = nil) and isManaged(v^.varType) then
+    if (v^.kind = dkVar) and v^.isInitVar then
+      irStore(constantFor(v^.init, v^.initValue, v^.varType, memType(v^.varType)),
+              varAddress(v));
+  end;
+  for i := 0 to r^.body^.decls.count - 1 do
+  begin
+    v := PDecl(listGet(r^.body^.decls, i));
+    if (v^.kind = dkVar) and ((v^.init = nil) or v^.isInitVar) and
+       isManaged(v^.varType) then
     begin
       listAdd(managedAddrs, irBox(varAddress(v)));
       listAdd(managedTypes, v^.varType);
@@ -1926,6 +2032,21 @@ begin
         m := PDecl(listGet(c^.classMembers, j));
         if (m^.kind = dkVar) or ((m^.kind = dkRoutine) and not m^.isAbstract) then
         begin { a class variable or a method }
+          m^.cgExport := intern(prefix + '.' + nm(m^.ident.name) + overloadSuffix(m));
+          m^.cgImported := imported;
+        end;
+      end;
+      continue;
+    end;
+    c := advancedRecord(d);
+    if c <> nil then { an advanced record: its methods }
+    begin
+      prefix := 'pas.' + nm(u^.ident.name) + '$' + lowerStr(nm(c^.declName));
+      for j := 0 to c^.classMembers.count - 1 do
+      begin
+        m := PDecl(listGet(c^.classMembers, j));
+        if m^.kind = dkRoutine then
+        begin
           m^.cgExport := intern(prefix + '.' + nm(m^.ident.name) + overloadSuffix(m));
           m^.cgImported := imported;
         end;
@@ -2048,6 +2169,7 @@ begin
   listInit(cleanupClasses);
   listInit(cleanupFns);
   listInit(routinesToEmit);
+  listInit(thunksToEmit);
   listInit(loopBlocks);
   hasMainJmpBuf := false;
   irInit(sourceName, triple, dataLayout);
@@ -2115,6 +2237,7 @@ begin
   for i := 0 to routinesToEmit.count - 1 do
     emitRoutineBody(PDecl(listGet(routinesToEmit, i)));
   emitCleanups;
+  emitCThunks;
 
   { the initialization part: files, then the statements }
   curFn := initFn;
@@ -2194,6 +2317,7 @@ begin
   for i := 0 to routinesToEmit.count - 1 do
     emitRoutineBody(PDecl(listGet(routinesToEmit, i)));
   emitCleanups;
+  emitCThunks;
   emitMainBody(prog, units, mainFn);
   if dbgOn then
     finalizeDebugInfo;

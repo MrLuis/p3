@@ -1,0 +1,14 @@
+12 5
+0.4794 0.8776
+plain
+printf returned 6
+printf: 42 text 2.50 z 1234567890123
+-3 0 7 7 19 42 100 
+compare called: TRUE
+found 19: TRUE 19
+found 5: FALSE
+100 42 19 7 7 0 -3 
+97
+42
+8
+0.0 1.0

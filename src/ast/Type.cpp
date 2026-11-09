@@ -217,6 +217,8 @@ std::string Type::getName() const {
     S += ")";
     if (R->isFunction())
       S += ": " + R->getResult()->getName();
+    if (R->isCDecl())
+      S += "; cdecl";
     return S;
   }
   case TK_File: {

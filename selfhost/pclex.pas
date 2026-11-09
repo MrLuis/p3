@@ -39,6 +39,20 @@ type
     cur: int64;
   end;
 
+  { a macro's value: [b, e) of buffer fid (in the define directive) }
+  PMacro = ^TMacro;
+  TMacro = record
+    fid: longint;
+    b, e: int64;
+  end;
+
+  { where to continue after a macro's value: buffer, offset, end }
+  PMacroFrame = ^TMacroFrame;
+  TMacroFrame = record
+    fid: longint;
+    cur, len: int64;
+  end;
+
   TLexer = record
     mode: TLangMode;
     fid: longint;       { the buffer being read }
@@ -54,6 +68,15 @@ type
     defines: TIntMap;
     conds: TPtrList;
     corbaInterfaces: boolean; { $interfaces corba (default: com) }
+    advancedRecords: boolean; { $modeswitch advancedrecords }
+    { macros ($macro on, $define NAME := value, as in Free Pascal): upper-
+      case name id -> PMacro; a use of NAME lexes its value (macroStack:
+      the places to continue at, of PMacroFrame, innermost last); expanded
+      tokens have the value's locations }
+    macrosOn: boolean;
+    inlineOn: boolean; { $inline on (the default in objfpc mode) }
+    macros: TIntMap;
+    macroStack: TPtrList;
   end;
 
 var
@@ -170,6 +193,20 @@ begin
   end;
 end;
 
+{ The characters [b, e) of the current buffer (at most 255). }
+function copyChars(const lx: TLexer; b, e: int64): string;
+var
+  s: string;
+begin
+  s := '';
+  while (b < e) and (length(s) < 255) do
+  begin
+    s := s + at(lx, b);
+    b := b + 1;
+  end;
+  copyChars := s;
+end;
+
 function locOf(const lx: TLexer; offset: int64): TLoc;
 begin
   locOf := smFileStart(lx.fid) + TLoc(offset);
@@ -223,6 +260,11 @@ begin
   mapInit(lx.defines);
   listInit(lx.conds);
   lx.corbaInterfaces := false;
+  lx.advancedRecords := false;
+  lx.macrosOn := false;
+  lx.inlineOn := mode = lmObjFPC;
+  mapInit(lx.macros);
+  listInit(lx.macroStack);
   defineSymbol(lx, 'PCC', true);
   if mode = lmISO then
     defineSymbol(lx, 'PCC_ISO', true)
@@ -342,159 +384,631 @@ begin
     isActive := PConditional(listGet(lx.conds, lx.conds.count - 1))^.active;
 end;
 
-{ The expression of $IF / $ELSEIF in [b, e): defined(NAME), true, false,
-  not, and, or and parentheses. }
+{ --- $IF expressions --- }
+
+const
+  maxInt64: int64 = 9223372036854775807;
+  minInt64: int64 = -9223372036854775807 - 1;
+
+{ A value in a $IF expression. }
+type
+  TCondKind = (ckBool, ckInt, ckStr);
+  TCondValue = record
+    kind: TCondKind;
+    b: boolean;
+    i: int64;
+    s: string;
+  end;
+
+  { A text [p, e) of a buffer being evaluated; the first error is kept. }
+  TCondParser = record
+    data: PCharArray;
+    p, e: int64;
+    depth: longint;
+    hasError: boolean;
+    error: string;
+  end;
+
+function condBool(v: boolean): TCondValue;
+var
+  c: TCondValue;
+begin
+  c.kind := ckBool;
+  c.b := v;
+  c.i := 0;
+  c.s := '';
+  condBool := c;
+end;
+
+function condInt(v: int64): TCondValue;
+var
+  c: TCondValue;
+begin
+  c := condBool(false);
+  c.kind := ckInt;
+  c.i := v;
+  condInt := c;
+end;
+
+function cpAt(const cp: TCondParser; i: int64): char;
+begin
+  if i < cp.e then
+  begin
+    {$R-}
+    cpAt := cp.data^[i];
+    {$R+}
+  end
+  else
+    cpAt := #0;
+end;
+
+{ The next token [ts, te): an identifier, digits, $hex digits, a string
+  literal, <= >= <> .., or one character; ts = te at the end. }
+procedure cpPeek(var cp: TCondParser; var ts, te: int64);
+var
+  c: char;
+  done: boolean;
+begin
+  while (cp.p < cp.e) and isTrimSpace(cpAt(cp, cp.p)) do
+    cp.p := cp.p + 1;
+  ts := cp.p;
+  te := cp.p;
+  if cp.p >= cp.e then
+    exit;
+  c := cpAt(cp, te);
+  if isIdentStart(c) then
+  begin
+    while (te < cp.e) and isIdentBody(cpAt(cp, te)) do
+      te := te + 1;
+  end
+  else if isDigit(c) then
+  begin
+    while (te < cp.e) and isDigit(cpAt(cp, te)) do
+      te := te + 1;
+  end
+  else if c = '$' then
+  begin
+    te := te + 1;
+    while (te < cp.e) and isHexDigit(cpAt(cp, te)) do
+      te := te + 1;
+  end
+  else if c = '''' then
+  begin
+    te := te + 1;
+    done := false;
+    while (te < cp.e) and not done do
+    begin
+      te := te + 1;
+      if cpAt(cp, te - 1) = '''' then
+      begin
+        if (te < cp.e) and (cpAt(cp, te) = '''') then
+          te := te + 1 { '' stands for ' }
+        else
+          done := true;
+      end;
+    end;
+  end
+  else if ((c = '<') and (te + 1 < cp.e) and
+           ((cpAt(cp, te + 1) = '=') or (cpAt(cp, te + 1) = '>'))) or
+          ((c = '>') and (te + 1 < cp.e) and (cpAt(cp, te + 1) = '=')) or
+          ((c = '.') and (te + 1 < cp.e) and (cpAt(cp, te + 1) = '.')) then
+    te := te + 2
+  else
+    te := te + 1;
+end;
+
+function cpText(const cp: TCondParser; ts, te: int64): string;
+var
+  s: string;
+  i: int64;
+begin
+  s := '';
+  i := ts;
+  while (i < te) and (length(s) < 255) do
+  begin
+    s := s + cpAt(cp, i);
+    i := i + 1;
+  end;
+  cpText := s;
+end;
+
+{ The next token, lower case (for keywords and operators). }
+function cpPeekLower(var cp: TCondParser): string;
+var
+  ts, te: int64;
+begin
+  cpPeek(cp, ts, te);
+  cpPeekLower := lowerStr(cpText(cp, ts, te));
+end;
+
+function cpAccept(var cp: TCondParser; const w: string): boolean;
+var
+  ts, te: int64;
+begin
+  cpPeek(cp, ts, te);
+  if lowerStr(cpText(cp, ts, te)) <> w then
+    exit(false);
+  cp.p := te;
+  cpAccept := true;
+end;
+
+function cpFail(var cp: TCondParser; const msg: string): TCondValue;
+begin
+  if not cp.hasError then
+  begin
+    cp.hasError := true;
+    cp.error := msg;
+  end;
+  cpFail := condBool(false);
+end;
+
+function cpInvalid(var cp: TCondParser): TCondValue;
+begin
+  cpInvalid := cpFail(cp, 'invalid $IF expression (expected values, macros, ' +
+                      'defined(NAME), comparisons, + - * div mod, not, and, or)');
+end;
+
+function cpIncompatible(var cp: TCondParser): TCondValue;
+begin
+  cpIncompatible := cpFail(cp, 'incompatible types in $IF expression');
+end;
+
+function cpOverflow(var cp: TCondParser): TCondValue;
+begin
+  cpOverflow := cpFail(cp, 'integer overflow in $IF expression');
+end;
+
+function cpBothAre(var cp: TCondParser; const l, r: TCondValue; k: TCondKind): boolean;
+var
+  ignored: TCondValue;
+begin
+  if (l.kind = k) and (r.kind = k) then
+    exit(true);
+  ignored := cpIncompatible(cp);
+  cpBothAre := false;
+end;
+
+{ The macro named n (upper case), or nil. }
+function findMacro(const lx: TLexer; const n: string): PMacro;
+begin
+  findMacro := PMacro(mapGet(lx.macros, upperName(n)^.id));
+end;
+
+function cpParseExpr(var lx: TLexer; var cp: TCondParser): TCondValue; forward;
+function cpParseSimple(var lx: TLexer; var cp: TCondParser): TCondValue; forward;
+function cpParseFactor(var lx: TLexer; var cp: TCondParser): TCondValue; forward;
+
+{ Integer literal text (digits, or $ and hex digits) as int64: ok false for
+  an invalid literal (more than 64 bits, or no digits), overflow true for
+  one beyond int64 (getAsInteger into 64 unsigned bits). }
+procedure parseCondInt(const t: string; var v: int64; var ok, overflow: boolean);
+var
+  digits: string;
+  i, d, radix, maxLen: longint;
+  maxU, maxS: string;
+begin
+  ok := false;
+  overflow := false;
+  v := 0;
+  if t[1] = '$' then
+  begin
+    digits := copy(t, 2, 255);
+    radix := 16;
+  end
+  else
+  begin
+    digits := t;
+    radix := 10;
+  end;
+  if digits = '' then
+    exit;
+  while (length(digits) > 1) and (digits[1] = '0') do
+    digits := copy(digits, 2, 255);
+  digits := lowerStr(digits);
+  if radix = 10 then
+  begin
+    maxU := '18446744073709551615';
+    maxS := '9223372036854775807';
+  end
+  else
+  begin
+    maxU := 'ffffffffffffffff';
+    maxS := '7fffffffffffffff';
+  end;
+  maxLen := length(maxU);
+  if (length(digits) > maxLen) or ((length(digits) = maxLen) and (digits > maxU)) then
+    exit; { beyond 64 bits }
+  ok := true;
+  if (length(digits) > length(maxS)) or
+     ((length(digits) = length(maxS)) and (digits > maxS)) then
+  begin
+    overflow := true;
+    exit;
+  end;
+  for i := 1 to length(digits) do
+  begin
+    if isDigit(digits[i]) then
+      d := ord(digits[i]) - ord('0')
+    else
+      d := ord(digits[i]) - ord('a') + 10;
+    v := v * radix + d;
+  end;
+end;
+
+{ The value of macro m (see evalCondition). }
+function cpMacroValue(var lx: TLexer; var cp: TCondParser; m: PMacro): TCondValue;
+var
+  sub: TCondParser;
+  ts, te: int64;
+  single: boolean;
+  c: char;
+  v: TCondValue;
+  other: PMacro;
+begin
+  if cp.depth >= 16 then
+    exit(cpFail(cp, 'macros in $IF expressions are nested too deeply'));
+  sub.data := smFileData(m^.fid);
+  sub.p := m^.b;
+  sub.e := m^.e;
+  sub.depth := cp.depth + 1;
+  sub.hasError := false;
+  sub.error := '';
+  cpPeek(sub, ts, te);
+  single := (ts < te) and (te = sub.e);
+  other := nil;
+  if single then
+  begin
+    c := cpAt(sub, ts);
+    if isDigit(c) or (c = '$') or (c = '''') then
+    begin
+      v := cpParseFactor(lx, sub); { an integer or string literal }
+      if not sub.hasError then
+        exit(v);
+    end
+    else if isIdentStart(c) then
+    begin
+      other := findMacro(lx, cpText(sub, ts, te));
+      if other <> nil then
+      begin
+        v := cpMacroValue(lx, sub, other); { another macro's value }
+        if sub.hasError then
+          exit(cpFail(cp, sub.error));
+        exit(v);
+      end;
+    end;
+  end;
+  v := condBool(false); { its text }
+  v.kind := ckStr;
+  v.s := cpText(sub, m^.b, m^.e);
+  cpMacroValue := v;
+end;
+
+function cpParseFactor(var lx: TLexer; var cp: TCondParser): TCondValue;
+var
+  v: TCondValue;
+  ts, te, i: int64;
+  t, name: string;
+  ok, overflow: boolean;
+  n: int64;
+  m: PMacro;
+begin
+  if cpAccept(cp, 'not') then
+  begin
+    v := cpParseFactor(lx, cp);
+    if cp.hasError then
+      exit(condBool(false));
+    if v.kind <> ckBool then
+      exit(cpIncompatible(cp));
+    v.b := not v.b;
+    exit(v);
+  end;
+  if cpAccept(cp, '(') then
+  begin
+    v := cpParseExpr(lx, cp);
+    if not cp.hasError and not cpAccept(cp, ')') then
+      exit(cpInvalid(cp));
+    exit(v);
+  end;
+  cpPeek(cp, ts, te);
+  if ts = te then
+    exit(cpInvalid(cp));
+  t := cpText(cp, ts, te);
+  if isDigit(t[1]) or (t[1] = '$') then
+  begin
+    cp.p := te;
+    parseCondInt(t, n, ok, overflow);
+    if not ok then
+      exit(cpInvalid(cp));
+    if overflow then
+      exit(cpOverflow(cp));
+    exit(condInt(n));
+  end;
+  if t[1] = '''' then
+  begin
+    cp.p := te;
+    if (te - ts < 2) or (cpAt(cp, te - 1) <> '''') then
+      exit(cpInvalid(cp));
+    v := condBool(false);
+    v.kind := ckStr;
+    i := ts + 1;
+    while i + 1 < te do
+    begin
+      if length(v.s) < 255 then
+        v.s := v.s + cpAt(cp, i);
+      if cpAt(cp, i) = '''' then
+        i := i + 1; { '' }
+      i := i + 1;
+    end;
+    exit(v);
+  end;
+  if cpAccept(cp, 'true') then
+    exit(condBool(true));
+  if cpAccept(cp, 'false') then
+    exit(condBool(false));
+  if cpAccept(cp, 'defined') then
+  begin
+    if not cpAccept(cp, '(') then
+      exit(cpInvalid(cp));
+    cpPeek(cp, ts, te);
+    if (ts = te) or not isIdentStart(cpAt(cp, ts)) then
+      exit(cpInvalid(cp));
+    name := cpText(cp, ts, te);
+    cp.p := te;
+    if not cpAccept(cp, ')') then
+      exit(cpInvalid(cp));
+    exit(condBool(isDefined(lx, name)));
+  end;
+  if not isIdentStart(t[1]) then
+    exit(cpInvalid(cp));
+  cp.p := te;
+  m := findMacro(lx, t);
+  if m = nil then
+    exit(cpFail(cp, '''' + t + ''' has no value in $IF (a macro needs ' +
+                '{$macro on} and {$define ' + t + ' := value})'));
+  cpParseFactor := cpMacroValue(lx, cp, m);
+end;
+
+{$Q-}
+function cpParseTerm(var lx: TLexer; var cp: TCondParser): TCondValue;
+var
+  v, r: TCondValue;
+  op: string;
+  x: int64;
+begin
+  v := cpParseFactor(lx, cp);
+  while not cp.hasError do
+  begin
+    op := cpPeekLower(cp);
+    if (op <> '*') and (op <> 'div') and (op <> 'mod') and (op <> 'and') then
+      break;
+    cpAccept(cp, op);
+    r := cpParseFactor(lx, cp);
+    if cp.hasError then
+      exit(condBool(false));
+    if op = 'and' then
+    begin
+      if cpBothAre(cp, v, r, ckBool) then
+        v.b := v.b and r.b;
+      continue;
+    end;
+    if not cpBothAre(cp, v, r, ckInt) then
+      break;
+    if op = '*' then
+    begin
+      if (v.i <> 0) and (r.i <> 0) then
+      begin
+        if ((v.i = -1) and (r.i = minInt64)) or
+           ((r.i = -1) and (v.i = minInt64)) then
+          exit(cpOverflow(cp));
+        x := v.i * r.i;
+        if x div r.i <> v.i then
+          exit(cpOverflow(cp));
+        v.i := x;
+      end
+      else
+        v.i := 0;
+      continue;
+    end;
+    if r.i = 0 then
+      exit(cpFail(cp, 'division by zero in $IF expression'));
+    if (v.i = minInt64) and (r.i = -1) then
+      exit(cpOverflow(cp));
+    if op = 'div' then
+      v.i := v.i div r.i
+    else
+      v.i := v.i mod r.i;
+  end;
+  if cp.hasError then
+    exit(condBool(false));
+  cpParseTerm := v;
+end;
+{$Q+}
+
+function cpParseSimple(var lx: TLexer; var cp: TCondParser): TCondValue;
+var
+  v, r: TCondValue;
+  neg: boolean;
+  op: string;
+begin
+  neg := false;
+  if cpAccept(cp, '-') then
+    neg := true
+  else
+    cpAccept(cp, '+');
+  v := cpParseTerm(lx, cp);
+  if cp.hasError then
+    exit(condBool(false));
+  if neg then
+  begin
+    if v.kind <> ckInt then
+      exit(cpIncompatible(cp));
+    if v.i = minInt64 then
+      exit(cpOverflow(cp));
+    v.i := -v.i;
+  end;
+  while not cp.hasError do
+  begin
+    op := cpPeekLower(cp);
+    if (op <> '+') and (op <> '-') and (op <> 'or') then
+      break;
+    cpAccept(cp, op);
+    r := cpParseTerm(lx, cp);
+    if cp.hasError then
+      exit(condBool(false));
+    if op = 'or' then
+    begin
+      if cpBothAre(cp, v, r, ckBool) then
+        v.b := v.b or r.b;
+    end
+    else if (op = '+') and (v.kind = ckStr) and (r.kind = ckStr) then
+    begin
+      if length(v.s) + length(r.s) <= 255 then
+        v.s := v.s + r.s
+      else
+        v.s := copy(v.s + r.s, 1, 255);
+    end
+    else if cpBothAre(cp, v, r, ckInt) then
+    begin
+      if op = '+' then
+      begin
+        if ((r.i > 0) and (v.i > maxInt64 - r.i)) or
+           ((r.i < 0) and (v.i < minInt64 - r.i)) then
+          exit(cpOverflow(cp));
+        v.i := v.i + r.i;
+      end
+      else
+      begin
+        if ((r.i < 0) and (v.i > maxInt64 + r.i)) or
+           ((r.i > 0) and (v.i < minInt64 + r.i)) then
+          exit(cpOverflow(cp));
+        v.i := v.i - r.i;
+      end;
+    end;
+  end;
+  if cp.hasError then
+    exit(condBool(false));
+  cpParseSimple := v;
+end;
+
+{ -1, 0, 1: l compared with r (of the same kind) }
+function condCompare(const l, r: TCondValue): longint;
+begin
+  if l.kind = ckStr then
+  begin
+    if l.s < r.s then
+      exit(-1);
+    if l.s > r.s then
+      exit(1);
+    exit(0);
+  end;
+  if l.kind = ckInt then
+  begin
+    if l.i < r.i then
+      exit(-1);
+    if l.i > r.i then
+      exit(1);
+    exit(0);
+  end;
+  condCompare := ord(l.b) - ord(r.b);
+end;
+
+function cpParseExpr(var lx: TLexer; var cp: TCondParser): TCondValue;
+var
+  l, r, lo, hi: TCondValue;
+  op: string;
+  c: longint;
+  inSet, range_, hit: boolean;
+begin
+  l := cpParseSimple(lx, cp);
+  if cp.hasError then
+    exit(condBool(false));
+  op := cpPeekLower(cp);
+  if op = 'in' then { x in [a, b, lo..hi] }
+  begin
+    cpAccept(cp, 'in');
+    if not cpAccept(cp, '[') then
+      exit(cpInvalid(cp));
+    inSet := false;
+    if not cpAccept(cp, ']') then
+    begin
+      repeat
+        lo := cpParseSimple(lx, cp);
+        hi := lo;
+        range_ := not cp.hasError and cpAccept(cp, '..');
+        if range_ then
+          hi := cpParseSimple(lx, cp);
+        if cp.hasError then
+          exit(condBool(false));
+        if (lo.kind <> l.kind) or (range_ and (hi.kind <> l.kind)) then
+          exit(cpIncompatible(cp));
+        if range_ then
+          hit := (condCompare(lo, l) <= 0) and (condCompare(l, hi) <= 0)
+        else
+          hit := condCompare(lo, l) = 0;
+        if hit then
+          inSet := true;
+      until not cpAccept(cp, ',');
+      if not cpAccept(cp, ']') then
+        exit(cpInvalid(cp));
+    end;
+    exit(condBool(inSet));
+  end;
+  if (op <> '=') and (op <> '<>') and (op <> '<') and (op <> '>') and
+     (op <> '<=') and (op <> '>=') then
+    exit(l);
+  cpAccept(cp, op);
+  r := cpParseSimple(lx, cp);
+  if cp.hasError then
+    exit(condBool(false));
+  if l.kind <> r.kind then
+    exit(cpIncompatible(cp));
+  c := condCompare(l, r);
+  if op = '=' then
+    cpParseExpr := condBool(c = 0)
+  else if op = '<>' then
+    cpParseExpr := condBool(c <> 0)
+  else if op = '<' then
+    cpParseExpr := condBool(c < 0)
+  else if op = '>' then
+    cpParseExpr := condBool(c > 0)
+  else if op = '<=' then
+    cpParseExpr := condBool(c <= 0)
+  else
+    cpParseExpr := condBool(c >= 0);
+end;
+
+{ The expression of $IF / $ELSEIF in [b, e), with Pascal's operator
+  precedence: values (integers, 'strings', true, false, defined(NAME),
+  macros), not, * div mod and, + - or, and one comparison = <> < > <= >=
+  or in [values]. A macro's value is an integer if its text is an integer
+  literal, a string if it is a string literal, the value of the macro it
+  names if it is a macro's name, else its text (a string), as in Free
+  Pascal. }
 function evalCondition(var lx: TLexer; start, b, e: int64): boolean;
 var
-  p: int64;
-  bad: boolean;
-  v: boolean;
-
-  { The next word (an identifier or one other character), lower case. }
-  function peek: string;
-  var
-    q: int64;
-    s: string;
-  begin
-    while (p < e) and isTrimSpace(at(lx, p)) do
-      p := p + 1;
-    s := '';
-    if p >= e then
-      exit('');
-    q := p;
-    if isIdentStart(at(lx, q)) then
-      while (q < e) and isIdentBody(at(lx, q)) do
-      begin
-        if length(s) < 255 then
-          s := s + lowerChar(at(lx, q));
-        q := q + 1;
-      end
-    else
-      s := at(lx, q);
-    peek := s;
-  end;
-
-  { The length of the next word. }
-  function peekLen: int64;
-  var
-    q: int64;
-  begin
-    peek;
-    q := p;
-    if (q < e) and isIdentStart(at(lx, q)) then
-      while (q < e) and isIdentBody(at(lx, q)) do
-        q := q + 1
-    else if q < e then
-      q := q + 1;
-    peekLen := q - p;
-  end;
-
-  function accept(const w: string): boolean;
-  begin
-    if peek <> w then
-      exit(false);
-    p := p + peekLen;
-    accept := true;
-  end;
-
-  function parseOr: boolean; forward;
-
-  function parsePrimary: boolean;
-  var
-    name: string;
-    i: longint;
-    q: int64;
-  begin
-    parsePrimary := false;
-    if accept('(') then
-    begin
-      parsePrimary := parseOr;
-      if not accept(')') then
-        bad := true;
-      exit;
-    end;
-    if accept('true') then
-      exit(true);
-    if accept('false') then
-      exit(false);
-    if accept('defined') then
-    begin
-      if not accept('(') then
-      begin
-        bad := true;
-        exit(false);
-      end;
-      name := peek;
-      if (name = '') or not isIdentStart(name[1]) then
-      begin
-        bad := true;
-        exit(false);
-      end;
-      { the name as written (peek lower-cases it, upperName ignores case) }
-      name := '';
-      q := p;
-      for i := 1 to longint(peekLen) do
-      begin
-        if length(name) < 255 then
-          name := name + at(lx, q);
-        q := q + 1;
-      end;
-      p := q;
-      if not accept(')') then
-        bad := true;
-      exit(isDefined(lx, name));
-    end;
-    bad := true;
-  end;
-
-  { A loop, not recursion: in Free Pascal, a function's name without
-    arguments in its own body is its result, not a call. }
-  function parseNot: boolean;
-  var
-    negate: boolean;
-  begin
-    negate := false;
-    while accept('not') do
-      negate := not negate;
-    parseNot := parsePrimary <> negate;
-  end;
-
-  function parseAnd: boolean;
-  var
-    l, r: boolean;
-  begin
-    l := parseNot;
-    while accept('and') do
-    begin
-      r := parseNot;
-      l := l and r;
-    end;
-    parseAnd := l;
-  end;
-
-  function parseOr: boolean;
-  var
-    l, r: boolean;
-  begin
-    l := parseAnd;
-    while accept('or') do
-    begin
-      r := parseAnd;
-      l := l or r;
-    end;
-    parseOr := l;
-  end;
-
+  cp: TCondParser;
+  v: TCondValue;
+  ts, te: int64;
+  ignored: TCondValue;
 begin
-  p := b;
-  bad := false;
-  v := parseOr;
-  if peek <> '' then
-    bad := true;
-  if not bad then
-    exit(v);
-  diagError(locOf(lx, start), 'unsupported $IF expression; expected ' +
-            'defined(NAME), true, false, not, and, or and parentheses');
+  cp.data := lx.data;
+  cp.p := b;
+  cp.e := e;
+  cp.depth := 0;
+  cp.hasError := false;
+  cp.error := '';
+  v := cpParseExpr(lx, cp);
+  if not cp.hasError then
+  begin
+    cpPeek(cp, ts, te);
+    if ts < te then
+      ignored := cpInvalid(cp);
+  end;
+  if not cp.hasError and (v.kind <> ckBool) then
+    ignored := cpFail(cp, 'the $IF expression is not boolean');
+  if not cp.hasError then
+    exit(v.b);
+  diagError(locOf(lx, start), cp.error);
   evalCondition := false;
 end;
 
@@ -508,6 +1022,7 @@ var
   isActiveNow, c: boolean;
   depth: longint;
   cond: PConditional;
+  macro: PMacro;
 
   function needSymbol: boolean;
   begin
@@ -549,15 +1064,32 @@ begin
   begin
     if not isActiveNow or not needSymbol then
       exit;
+    mapPut(lx.macros, upperName(sym)^.id, nil);
+    if name = '$UNDEF' then
+    begin
+      defineSymbol(lx, sym, false);
+      exit;
+    end;
+    defineSymbol(lx, sym, true);
     while (q < e) and isTrimSpace(at(lx, q)) do
       q := q + 1;
     if (q + 1 < e) and (at(lx, q) = ':') and (at(lx, q + 1) = '=') then
-    begin
-      diagError(locOf(lx, start), 'macros ({$DEFINE NAME := value}) are ' +
-                'not supported');
-      exit;
+    begin { a macro: $define NAME := value }
+      if not lx.macrosOn then
+      begin
+        diagReport(sevWarning, locOf(lx, start), 'macro support is off: ''' + sym +
+                   ''' is defined without a value (use {$macro on})', noRange, noRange);
+        exit;
+      end;
+      q := q + 2;
+      while (q < e) and isTrimSpace(at(lx, q)) do
+        q := q + 1;
+      macro := PMacro(arenaAlloc(sizeof(TMacro)));
+      macro^.fid := lx.fid;
+      macro^.b := q;
+      macro^.e := e;
+      mapPut(lx.macros, upperName(sym)^.id, macro);
     end;
-    defineSymbol(lx, sym, name = '$DEFINE');
     exit;
   end;
 
@@ -646,7 +1178,7 @@ end;
   and span lines, so it is handled as offsets, not as a string. }
 procedure handleDirective(var lx: TLexer; start: int64; textStart, textEnd: int64);
 var
-  p, b, e, partEnd: int64;
+  p, b, e, partEnd, q: int64;
   word, arg: string;
   msg: TBuf;
   c: char;
@@ -701,6 +1233,53 @@ begin
       diagError(locOf(lx, start), 'expected {$interfaces com} or ' +
                 '{$interfaces corba}');
     exit;
+  end;
+  { $inline on / off: whether the inline directive inlines (default: on in
+    objfpc mode, as in Free Pascal) }
+  if word = 'inline' then
+  begin
+    arg := lowerStr(copyChars(lx, b, e));
+    if (arg = 'on') or (arg = '+') then
+      lx.inlineOn := true
+    else if (arg = 'off') or (arg = '-') then
+      lx.inlineOn := false
+    else
+      diagError(locOf(lx, start), 'expected {$inline on} or {$inline off}');
+    exit;
+  end;
+  { $macro on / off: whether macros ($define NAME := value) are defined and
+    expanded }
+  if word = 'macro' then
+  begin
+    arg := lowerStr(copyChars(lx, b, e));
+    if (arg = 'on') or (arg = '+') then
+      lx.macrosOn := true
+    else if (arg = 'off') or (arg = '-') then
+      lx.macrosOn := false
+    else
+      diagError(locOf(lx, start), 'expected {$macro on} or {$macro off}');
+    exit;
+  end;
+  { $modeswitch advancedrecords[+|-]: methods in records (objfpc); other
+    mode switches are not supported (a warning below) }
+  if word = 'modeswitch' then
+  begin
+    arg := '';
+    q := b;
+    while (q < e) and isIdentBody(at(lx, q)) do
+    begin
+      if length(arg) < 40 then
+        arg := arg + lowerChar(at(lx, q));
+      q := q + 1;
+    end;
+    while (q < e) and isTrimSpace(at(lx, q)) do
+      q := q + 1;
+    if (arg = 'advancedrecords') and
+       ((q >= e) or ((e - q = 1) and ((at(lx, q) = '+') or (at(lx, q) = '-')))) then
+    begin
+      lx.advancedRecords := not ((q < e) and (at(lx, q) = '-'));
+      exit;
+    end;
   end;
   { a switch list: R-,Q+ }
   p := textStart;
@@ -1284,6 +1863,45 @@ begin
     hexDigit := chr(ord('A') + v - 10);
 end;
 
+procedure popMacroFrame(var lx: TLexer);
+var
+  f: PMacroFrame;
+begin
+  f := PMacroFrame(listPop(lx.macroStack));
+  setBuffer(lx, f^.fid, f^.cur);
+  lx.len := f^.len;
+end;
+
+{ A use of the macro named by the identifier at [start, lx.cur): lexing
+  continues in its value; false if it is not a macro. }
+function expandMacro(var lx: TLexer; start: int64): boolean;
+var
+  m: PMacro;
+  f: PMacroFrame;
+begin
+  expandMacro := false;
+  m := PMacro(mapGet(lx.macros, upperName(copyChars(lx, start, lx.cur))^.id));
+  if m = nil then
+    exit;
+  { a macro used at the end of another: that one is done }
+  while (lx.macroStack.count > 0) and (lx.cur >= lx.len) do
+    popMacroFrame(lx);
+  if lx.macroStack.count >= 16 then
+  begin
+    diagReport(sevWarning, locOf(lx, start), 'expanding macros exceeds a depth of 16',
+               noRange, noRange);
+    exit;
+  end;
+  f := PMacroFrame(arenaAlloc(sizeof(TMacroFrame)));
+  f^.fid := lx.fid;
+  f^.cur := lx.cur;
+  f^.len := lx.len;
+  listAdd(lx.macroStack, f);
+  setBuffer(lx, m^.fid, m^.b);
+  lx.len := m^.e;
+  expandMacro := true;
+end;
+
 procedure lexNext(var lx: TLexer; var t: TToken);
 var
   start: int64;
@@ -1300,6 +1918,11 @@ begin
     start := lx.cur;
     if lx.cur >= lx.len then
     begin
+      if lx.macroStack.count > 0 then { the end of a macro's value }
+      begin
+        popMacroFrame(lx);
+        continue;
+      end;
       closeConditionals(lx);
       if lx.includes.count > 0 then
       begin
@@ -1316,6 +1939,8 @@ begin
     if isIdentStart(c) then
     begin
       lexIdentifier(lx, t);
+      if lx.macrosOn and (t.kind = tkIdentifier) and expandMacro(lx, start) then
+        continue; { the macro's value instead }
       exit;
     end;
     if isDigit(c) then

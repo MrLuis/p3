@@ -744,6 +744,7 @@ function checkTypecast(e: PNode; td: PDecl): PType;
 var
   t, at: PType;
   i: longint;
+  op: PDecl;
 begin
   checkTypecast := errorType;
   t := td^.declType;
@@ -770,6 +771,12 @@ begin
       ((at^.kind in [tyInterface, tyNil]) or
        ((at^.kind = tyClass) and (findInterface(at, t) <> nil)))) then
     exit(t);
+  op := findConversion(at, t, true);
+  if op <> nil then
+  begin
+    setConversion(argNode(e, 0), op, t); { a record's Explicit or := operator }
+    exit(t);
+  end;
   ms('invalid typecast from ');
   maT(at);
   ma(' to ');
@@ -1125,6 +1132,14 @@ begin
     base^.refDecl := d;
     base^.typ := d^.declType;
     classNamedBy := d^.declType;
+  end
+  else if (d <> nil) and (d^.kind = dkType) and (memberTableOf(d^.declType) <> nil) then
+  begin
+    { an advanced record's name (TR.Create): its member table; the base's
+      type is the record }
+    base^.refDecl := d;
+    base^.typ := d^.declType;
+    classNamedBy := memberTableOf(d^.declType);
   end;
 end;
 
@@ -1134,15 +1149,20 @@ var
   viaClass, bt, owner: PType;
   d: PDecl;
   viaRef, ok: boolean;
+  what: string;
 begin
   resolveMember := nil;
   viaClass := classNamedBy(e^.base);
+  if viaClass <> nil then { TFoo.Create: a use of TFoo }
+    warnHints(e^.base^.refDecl, e^.base^.ref);
   if viaClass <> nil then
     bt := viaClass
   else
     bt := check(e^.base);
   if isError(bt) then
     exit;
+  if memberTableOf(bt) <> nil then { an advanced record's member }
+    bt := memberTableOf(bt);
   if bt^.kind = tyRecord then
   begin
     d := findField(bt, e^.fieldName.name);
@@ -1186,11 +1206,15 @@ begin
   end;
   owner := nil;
   d := findMember(bt, e^.fieldName.name, owner);
+  if bt^.classRecord <> nil then
+    what := 'record'
+  else
+    what := 'class';
   if d = nil then
   begin
     ms('no member named ''');
     maN(e^.fieldName.spelling);
-    ma(''' in class ');
+    ma(''' in ' + what + ' ');
     maT(bt);
     maDidYouMeanMember(bt, e^.fieldName.name);
     errR(e^.fieldName.loc, identRange(e^.fieldName));
@@ -1202,13 +1226,14 @@ begin
     { through a class: constructors, class methods, class variables }
     ok := d^.kind = dkVar;
     if d^.kind = dkRoutine then
-      ok := (d^.methodKind = mtConstructor) or d^.isClassMethod;
+      ok := ((d^.methodKind = mtConstructor) or d^.isClassMethod) and
+            (d^.methodKind <> mtOperator);
     if not ok then
     begin
       ms('only constructors, class methods and class variables can be used through ');
       if viaClass <> nil then
       begin
-        ma('the class name ');
+        ma('the ' + what + ' name ');
         maT(bt);
       end
       else
@@ -1256,6 +1281,8 @@ begin
   bt := check(callee^.base);
   if bt^.kind = tyInterface then
     exit(findInterfaceMethod(bt, callee^.fieldName.name) <> nil);
+  if memberTableOf(bt) <> nil then { an advanced record's method }
+    bt := memberTableOf(bt);
   if bt^.kind = tyClassRef then
     bt := bt^.refClass;
   if bt^.kind <> tyClass then
@@ -1480,6 +1507,7 @@ begin
     if d = nil then
       exit(errorType);
     callee^.fieldDecl := d;
+    warnHints(d, callee^.fieldName);
   end;
   if (d = nil) or (d^.kind <> dkRoutine) then
   begin
@@ -1695,7 +1723,8 @@ begin
       exit;
   end;
   s^.callDecl := d;
-  if classOfWith(w) <> nil then
+  warnHints(d, s^.callee);
+  if hasMembers(w) then { a method of an object or advanced record }
   begin
     s^.callWith := w;
     checkScopeAccess(d, w, s^.callee);
@@ -1761,7 +1790,8 @@ begin
           t := check(a0);
           rt := curRoutine^.resultType;
           curRoutine^.resultAssigned := true;
-          if not isError(t) and not isError(rt) and not isAssignable(rt, t) then
+          if not isError(t) and not isError(rt) and not isAssignable(rt, t) and
+             not convertImplicitly(a0, rt) then
           begin
             ms('cannot return a value of type ');
             maT(t);
@@ -1851,6 +1881,7 @@ begin
   target^.refDecl := d;
   target^.refWith := w;
   d^.isUsed := true;
+  warnHints(d, target^.ref);
   if d^.kind = dkVar then
   begin
     checkNotForControlVar(target);
@@ -1940,7 +1971,7 @@ end;
 
 procedure visitAssign(s: PNode);
 var
-  target, savedTarget: PNode;
+  target, savedTarget, root: PNode;
   targetTy, valueTy: PType;
   p: PDecl;
 begin
@@ -1956,6 +1987,13 @@ begin
     curAssignTarget := target;
     targetTy := check(target);
     curAssignTarget := savedTarget;
+    { r.f := v / Result.f := v: assigns the result (a record) in part }
+    root := target;
+    while root^.kind in [nkField, nkIndex] do
+      root := root^.base;
+    if (root^.kind = nkNameRef) and (root^.refDecl <> nil) and
+       (root^.refDecl^.kind = dkVar) and (root^.refDecl^.varKind = vkResult) then
+      root^.refDecl^.owner^.resultAssigned := true;
     p := assignedProperty(target);
     if (p <> nil) and not isError(targetTy) then
     begin
@@ -1983,7 +2021,8 @@ begin
     errR(s^.assignLoc, nodeRange(target));
     exit;
   end;
-  if not isAssignable(targetTy, valueTy) then
+  if not isAssignable(targetTy, valueTy) and
+     not convertImplicitly(s^.value, targetTy) then
   begin
     ms('assigning to ');
     maT(targetTy);
@@ -2163,7 +2202,10 @@ begin
       errR(w^.rec^.b, nodeRange(w^.rec));
       continue;
     end;
-    cur := newWithScope(cur, t, w);
+    if memberTableOf(t) <> nil then { its methods, properties too }
+      cur := newClassScope(cur, memberTableOf(t), w)
+    else
+      cur := newWithScope(cur, t, w);
   end;
   visitStmt(s^.withBody);
   cur := saved;
@@ -2336,6 +2378,7 @@ begin
   e^.refDecl := d;
   e^.refWith := w;
   d^.isUsed := true;
+  warnHints(d, e^.ref);
   checkScopeAccess(d, w, e^.ref);
   case d^.kind of
     dkProperty:
@@ -2449,6 +2492,8 @@ begin
   t := check(e^.operand);
   if isError(t) then
     exit;
+  if memberTableOf(t) <> nil then
+    exit(checkRecordUnary(e)); { an advanced record's operator }
   if e^.uop = uoNot then
   begin
     if getBase(t)^.kind = tyBoolean then
@@ -2492,6 +2537,8 @@ begin
   r := check(e^.rhs);
   if isError(l) or isError(r) then
     exit;
+  if (memberTableOf(l) <> nil) or (memberTableOf(r) <> nil) then
+    exit(checkRecordBinary(e)); { an advanced record's operator }
   op := e^.bop;
   { Turbo/FPC strings: + concatenates, comparisons work for any lengths }
   if not isISO and isStringish(l) and isStringish(r) then
@@ -2625,7 +2672,8 @@ begin
       exit;
   end;
   e^.callDecl := d;
-  if classOfWith(w) <> nil then
+  warnHints(d, e^.callee);
+  if hasMembers(w) then { a method of an object or advanced record }
   begin
     e^.callWith := w;
     checkScopeAccess(d, w, e^.callee);
@@ -2867,6 +2915,7 @@ var
   r, x, pick: PDecl;
   t, xr: PType;
   op: PNode;
+  why: string;
 begin
   visitAddrOf := errorType;
   op := e^.inner;
@@ -2885,8 +2934,9 @@ begin
           xr := nil;
           if x^.isFunction then
             xr := x^.resultType;
-          if (pick = nil) and congruent(addrOfTarget^.routineParams,
-                                        addrOfTarget^.routineResult, x^.params, xr) then
+          if (pick = nil) and (isCDecl(x) = addrOfTarget^.routineCDecl) and
+             congruent(addrOfTarget^.routineParams,
+                       addrOfTarget^.routineResult, x^.params, xr) then
             pick := x;
           x := x^.nextOverload;
         end;
@@ -2912,19 +2962,19 @@ begin
         errR(op^.b, nodeRange(op));
         exit;
       end;
-      if (r^.parent <> nil) or r^.isExternal then
+      why := notProceduralValue(r, false);
+      if why <> '' then
       begin
         ms('''@');
         maN(op^.ref.spelling);
-        ma(''': only routines declared at program or unit level can be ' +
-           'procedural values');
+        ma(''': ' + why);
         errR(op^.b, nodeRange(op));
         exit;
       end;
       if r^.isFunction then
-        t := newRoutineType(r^.params, r^.resultType)
+        t := newRoutineType(r^.params, r^.resultType, isCDecl(r))
       else
-        t := newRoutineType(r^.params, nil);
+        t := newRoutineType(r^.params, nil, isCDecl(r));
       op^.typ := t;
       exit(t);
     end;
@@ -3043,6 +3093,8 @@ begin
   d := resolveMember(e);
   if d = nil then
     exit;
+  if d^.kind <> dkRoutine then { (a method: once its overload is known) }
+    warnHints(d, e^.fieldName);
   if d^.kind = dkField then
   begin
     if d^.fieldType <> nil then
@@ -3067,6 +3119,7 @@ begin
   if d = nil then
     exit;
   e^.fieldDecl := d;
+  warnHints(d, e^.fieldName);
   if d^.params.count > 0 then
   begin
     ms('missing arguments in call to ''');

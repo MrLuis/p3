@@ -1,0 +1,42 @@
+; Macros ({$macro on}, {$define NAME := value}): a use of NAME is replaced
+; by the tokens of its value, which keep their locations in the define
+; directive; {$macro off} stops expanding. In $IF, a macro's value is an
+; integer or string literal, the value of the macro it names, or its text
+; (a string); strings compare and concatenate (Free Pascal compares only
+; their lengths), and `in [...]` takes values and ranges.
+; RUN: %pcc --mode=tp --emit-tokens %S/Inputs/macros.pas | FileCheck %s
+; CHECK:      5:1 identifier 'a'
+; CHECK-NEXT: 2:18 integer_literal '1'
+; CHECK-NEXT: 2:19 comma ','
+; CHECK-NEXT: 2:21 integer_literal '2'
+; CHECK-NEXT: 5:8 identifier 'b'
+; CHECK-NEXT: 6:21 identifier 'quoted'
+; CHECK-NEXT: 7:22 identifier 'plain'
+; CHECK-NEXT: 8:21 identifier 'ordered'
+; CHECK-NEXT: 9:26 identifier 'concat'
+; CHECK-NEXT: 10:25 identifier 'range'
+; CHECK-NEXT: 12:1 identifier 'WORD'
+; CHECK-NEXT: eof
+
+; RUN: not %pcc --mode=tp -ferror-limit=0 --emit-tokens %S/Inputs/macro-errors.pas 2>&1 >/dev/null | FileCheck --check-prefix=ERR %s
+; ERR: macro-errors.pas:2:15: warning: expanding macros exceeds a depth of 16
+; ERR: macro-errors.pas:6:1: error: incompatible types in $IF expression
+; ERR: macro-errors.pas:7:1: error: division by zero in $IF expression
+; ERR: macro-errors.pas:8:1: error: integer overflow in $IF expression
+; ERR: macro-errors.pas:9:1: error: the $IF expression is not boolean
+; ERR: macro-errors.pas:10:1: error: invalid $IF expression (expected values, macros, defined(NAME), comparisons, + - * div mod, not, and, or)
+; ERR: macro-errors.pas:11:1: error: incompatible types in $IF expression
+; ERR: macro-errors.pas:12:1: error: expected {$macro on} or {$macro off}
+; ERR: macro-errors.pas:15:1: error: macros in $IF expressions are nested too deeply
+; ERR-NOT: error:
+
+; Macros cross include files: one defined in the including file is used in
+; the included one, and the other way round.
+; RUN: %pcc --mode=tp --emit-tokens %S/Inputs/macros-inc.pas | FileCheck --check-prefix=INC %s
+; INC:      2:19 integer_literal '1'
+; INC-NEXT: 2:21 plus '+'
+; INC-NEXT: 2:7 integer_literal '3'
+; INC-NEXT: 2:19 integer_literal '1'
+; INC-NEXT: 2:21 plus '+'
+; INC-NEXT: 1:19 integer_literal '2'
+; INC-NEXT: eof

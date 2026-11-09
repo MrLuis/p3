@@ -46,6 +46,7 @@ struct CompilerOptions {
   unsigned ErrorLimit = 20; ///< 0 = unlimited
   bool WarningsAsErrors = false;
   bool WarnUnusedVariables = true; ///< -Wno-unused-variable disables
+  bool WarnDeprecated = true;      ///< -Wno-deprecated disables
   bool RangeChecks = true;    ///< -fno-range-checks disables
   bool OverflowChecks = true; ///< -fno-overflow-checks disables
 };
