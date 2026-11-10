@@ -1,0 +1,17 @@
+; TMethod: the conversions and assignments that are rejected.
+; RUN: not %pcc --mode=objfpc -ferror-limit=0 --emit-ast %S/Inputs/tmethod/errors.pas 2>&1 | FileCheck %s
+; CHECK: errors.pas:16:33: error: cannot modify constant parameter 'e'
+; CHECK: errors.pas:24:5: error: assigning to 'TE' from incompatible type 'TMethod'
+; CHECK: errors.pas:25:5: error: assigning to 'TMethod' from incompatible type 'TE'
+; CHECK: errors.pas:26:16: error: procedure 'p' does not return a value
+; CHECK: errors.pas:27:8: error: invalid typecast from 'pointer' to 'TMethod' (only between ordinal types and between pointer types)
+; CHECK: errors.pas:28:8: error: invalid typecast from 'integer' to 'TMethod' (only between ordinal types and between pointer types)
+; CHECK: errors.pas:29:8: error: invalid operands to '=' ('TMethod' and 'TMethod')
+; CHECK: errors.pas:30:3: error: expression is not assignable
+; CHECK: errors.pas:31:3: error: expression is not assignable
+; CHECK: errors.pas:32:5: error: assigning to 'TE' from incompatible type 'pointer'
+; CHECK: errors.pas:33:5: error: assigning to 'pointer' from incompatible type 'procedure(integer) of object'
+; CHECK: errors.pas:34:12: error: '@H': abstract methods have no code
+; CHECK: errors.pas:35:12: error: '@Make': constructors and destructors have no code address here
+; CHECK: errors.pas:36:12: error: '@Free': the methods of TObject have no code address
+; CHECK-NOT: error:

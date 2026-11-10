@@ -193,6 +193,7 @@ class Checker : public StmtVisitor<Checker>,
       declareVarRec();
     if (LangOpts.ObjKeywords) {
       declareTObject();
+      declareTMethod();
       declareVarRec();
       declareException();
       declareInterfacedObject();
@@ -362,6 +363,25 @@ class Checker : public StmtVisitor<Checker>,
   }
 
   Type *ArrayOfConstTy = nullptr;
+  Type *TMethodTy = nullptr;
+  bool AddrOfWantsCode = false; ///< @TFoo.M for a pointer: its code address
+
+  /// TMethod = record Code, Data: pointer; end (objfpc).
+  void declareTMethod() {
+    llvm::SmallVector<FieldDecl *, 2> All;
+    for (llvm::StringRef Name : {"Code", "Data"}) {
+      auto *F = Ctx.create<FieldDecl>(memberName(Name), nullptr);
+      F->setType(Ctx.getUntypedPointerType());
+      All.push_back(F);
+    }
+    auto *FL = Ctx.create<FieldList>();
+    FL->Fixed = Ctx.copyArray<FieldDecl *>(All);
+    auto *Rec = Ctx.create<RecordType>(FL, FL->Fixed, false);
+    Rec->setDeclName("TMethod");
+    Standard.insert("tmethod", Ctx.create<TypeDecl>(SourceLocation(),
+                                                    memberName("TMethod"), Rec));
+    TMethodTy = Rec;
+  }
   Type *PCharTy = nullptr;
 
   /// class Exception (Free Pascal's SysUtils): private FMessage: string;
@@ -767,7 +787,7 @@ class Checker : public StmtVisitor<Checker>,
              (Value->isClassRef() &&
               llvm::cast<ClassRefType>(Value)->getClass()->inheritsFrom(
                   TR->getClass()));
-    if (Target->isPointer() && Value->isClass())
+    if (Target->isPointer() && (Value->isClass() || Value->isClassRef()))
       return llvm::cast<PointerType>(Target)->isUntyped();
     if (Target->isShortString() && Value->isStringish())
       return true; // truncated to the target's length at runtime
@@ -812,7 +832,7 @@ class Checker : public StmtVisitor<Checker>,
     }
     // T(x) of an untyped parameter x (Turbo/FPC)
     if (auto *C = llvm::dyn_cast<CallExpr>(E))
-      return C->isVarCast();
+      return C->isVarCast() || C->isMethodCastOfVariable();
     // p^ is a variable even when p is a function result.
     return llvm::isa<DerefExpr>(E);
   }
@@ -837,7 +857,8 @@ class Checker : public StmtVisitor<Checker>,
         E = F->getBase();
       } else if (auto *P = llvm::dyn_cast<ParenExpr>(E)) {
         E = P->getInner();
-      } else if (auto *C = llvm::dyn_cast<CallExpr>(E); C && C->isVarCast()) {
+      } else if (auto *C = llvm::dyn_cast<CallExpr>(E);
+                 C && (C->isVarCast() || C->isMethodCast())) {
         E = C->getArgs()[0]; // T(x): x
       } else {
         auto *N = llvm::dyn_cast<NameRefExpr>(E);
@@ -3976,8 +3997,8 @@ class Checker : public StmtVisitor<Checker>,
           checkModifiable(Arg);
         continue;
       }
-      Type *AT = check(Arg);
       Type *PT = P->getType();
+      Type *AT = PT && llvm::isa<AddrOfExpr>(Arg) ? checkValueFor(PT, Arg) : check(Arg);
       if (AT->isError() || !PT || PT->isError())
         continue;
       const Identifier &PName = P->getName();
@@ -4543,9 +4564,16 @@ class Checker : public StmtVisitor<Checker>,
         check(A);
       return errorType();
     }
-    Type *AT = checkAllowingUntyped(Args[0]);
+    Type *AT = T == TMethodTy ? checkComparand(Args[0])
+                              : checkAllowingUntyped(Args[0]);
     if (T->isError() || AT->isError())
       return errorType();
+    if (T == TMethodTy && isMethodPointer(AT)) { // its code and object
+      E->setMethodCast(isVariableReference(Args[0]));
+      return T;
+    }
+    if (isMethodPointer(T) && AT == TMethodTy) // TEv(m)
+      return T;
     if (AT->isUntyped()) { // Turbo/FPC: the untyped parameter seen as a T
       E->setVarCast();
       return T;
@@ -6066,6 +6094,13 @@ public:
   /// variable named as the value of a procedural target is copied, not
   /// called.
   Type *checkValueFor(Type *TargetTy, Expr *Value) {
+    if (auto *TP = llvm::dyn_cast<PointerType>(TargetTy);
+        TP && TP->isUntyped() && llvm::isa<AddrOfExpr>(Value)) {
+      AddrOfWantsCode = true;
+      Type *T = check(Value);
+      AddrOfWantsCode = false;
+      return T;
+    }
     if (auto *RT = llvm::dyn_cast<RoutineType>(TargetTy);
         RT && llvm::isa<AddrOfExpr>(Value)) { // @p picks an overload by RT
       RoutineType *Saved = AddrOfTarget;
@@ -6141,6 +6176,8 @@ public:
   /// @obj.M, @TFoo.M, or @M in a method: a method pointer. Null if the
   /// operand is not a method.
   Type *checkMethodAddr(AddrOfExpr *E) {
+    bool WantsCode = AddrOfWantsCode;
+    AddrOfWantsCode = false;
     if (!LangOpts.ObjKeywords)
       return nullptr;
     Expr *Op = E->getOperand();
@@ -6152,7 +6189,33 @@ public:
     if (F) {
       if (!isMethodCallee(F))
         return nullptr;
-      ViaClass = classNamedBy(F->getBase()) != nullptr;
+      ClassType *Named = classNamedBy(F->getBase());
+      ViaClass = Named != nullptr;
+      const ClassType *Owner = nullptr;
+      auto *M = Named ? llvm::dyn_cast_or_null<RoutineDecl>(
+                            Named->findMember(F->getField().Name, &Owner))
+                      : nullptr;
+      if (M && (!M->isClassMethod() || WantsCode)) { // @TFoo.M: its code
+        const Identifier &Field = F->getField();
+        const char *Why = nullptr;
+        if (M->isConstructor() || M->isDestructor())
+          Why = "constructors and destructors have no code address here";
+        else if (M->getBuiltin() != TObjectMethod::None)
+          Why = "the methods of TObject have no code address";
+        else if (M->isAbstract())
+          Why = "abstract methods have no code";
+        if (Why) {
+          Diags.error(Field.Loc, "'@" + Field.Spelling + "': " + Why,
+                      {Field.getRange()});
+          return errorType();
+        }
+        checkMemberAccess(M, Owner, Field);
+        F->setMember(M);
+        Used.insert(M);
+        warnHints(M, Field);
+        E->setCode(M);
+        return Ctx.getUntypedPointerType();
+      }
       Decl *D = resolveMember(F);
       if (!D)
         return errorType();
@@ -6201,8 +6264,6 @@ public:
       Why = "the methods of TObject cannot be method pointers";
     else if (R->isStatic())
       Why = "static methods cannot be method pointers";
-    else if (ViaClass && !R->isClassMethod())
-      Why = "a method pointer to an instance method needs an object";
     if (Why) {
       Diags.error(Name.Loc, "'@" + Name.Spelling + "': " + Why, {Name.getRange()});
       return errorType();

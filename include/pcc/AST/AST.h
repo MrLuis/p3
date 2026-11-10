@@ -268,6 +268,7 @@ class CallExpr final : public Expr {
   WithContext *With = nullptr;
   Expr *CalleeValue = nullptr; ///< set by Sema: a procedural field or property
   bool VarCast = false; ///< set by Sema: T(x) of an untyped parameter x
+  int MethodCast = 0;
 
 public:
   Expr *getCalleeValue() const { return CalleeValue; }
@@ -277,6 +278,10 @@ public:
   /// A typecast of an untyped parameter (Turbo/FPC): a variable of the
   /// type at the parameter's address.
   bool isVarCast() const { return VarCast; }
+  /// TMethod(m), m a method pointer: its address when m is a variable.
+  bool isMethodCast() const { return MethodCast != 0; }
+  bool isMethodCastOfVariable() const { return MethodCast == 2; }
+  void setMethodCast(bool OfVariable) { MethodCast = OfVariable ? 2 : 1; }
   void setVarCast() { VarCast = true; }
   const Identifier &getCallee() const { return Callee; }
   llvm::ArrayRef<Expr *> getArgs() const { return Args; }
@@ -386,12 +391,15 @@ public:
 class AddrOfExpr final : public Expr {
   Expr *Operand;
   RoutineDecl *Method = nullptr; ///< set by Sema: @obj.M, a method pointer
+  RoutineDecl *Code = nullptr;   ///< set by Sema: @TFoo.M, a code address
 
 public:
   AddrOfExpr(SourceRange R, Expr *Operand) : Expr(EK_AddrOf, R), Operand(Operand) {}
   Expr *getOperand() const { return Operand; }
   RoutineDecl *getMethod() const { return Method; }
   void setMethod(RoutineDecl *R) { Method = R; }
+  RoutineDecl *getCode() const { return Code; }
+  void setCode(RoutineDecl *R) { Code = R; }
   static bool classof(const Expr *E) { return E->getKind() == EK_AddrOf; }
 };
 

@@ -4,7 +4,7 @@
 ; CHECK: errors.pas:33:5: error: assigning to 'TP' from incompatible type 'procedure(integer) of object'
 ; CHECK: errors.pas:34:5: error: assigning to 'TL' from incompatible type 'procedure(integer) of object'
 ; CHECK: errors.pas:35:5: error: assigning to 'TF' from incompatible type 'procedure(integer) of object'
-; CHECK: errors.pas:36:12: error: only constructors, class methods and class variables can be used through the class name 'TA'; 'H' is a procedure
+; CHECK: errors.pas:36:5: error: assigning to 'TE' from incompatible type 'pointer'
 ; CHECK: errors.pas:37:11: error: '@Make': constructors and destructors cannot be method pointers
 ; CHECK: errors.pas:38:11: error: '@Free': the methods of TObject cannot be method pointers
 ; CHECK: errors.pas:39:5: error: assigning to 'TE' from incompatible type 'TA'

@@ -89,7 +89,8 @@ var
     and break/continue out of it, are not allowed there). objfpc has no
     gotos, so none can leave a try statement. }
   exceptionType: PType;
-  arrayOfConstT, pcharT: PType;
+  arrayOfConstT, pcharT, tmethodT: PType;
+  addrOfWantsCode: boolean; { @TFoo.M for a pointer: its code address }
   allowSlice: boolean;
   { COM interfaces (objfpc): IUnknown (= IInterface), their root, and
     TInterfacedObject, the root of the classes implementing them }
@@ -695,6 +696,35 @@ begin
   declareExceptionClass := c;
 end;
 
+{ TMethod = record Code, Data: pointer; end (objfpc). }
+procedure declareTMethod;
+var
+  all: TPtrList;
+  f, d: PDecl;
+  fl: PFieldList;
+  k: longint;
+begin
+  listInit(all);
+  fl := PFieldList(arenaAlloc(sizeof(TFieldList)));
+  listInit(fl^.fixed);
+  fl^.variant := nil;
+  for k := 1 to 2 do
+  begin
+    if k = 1 then
+      f := newDecl(dkField, memberIdent('Code'), noLoc)
+    else
+      f := newDecl(dkField, memberIdent('Data'), noLoc);
+    f^.fieldType := tyUntypedPointerT;
+    listAdd(all, f);
+    listAdd(fl^.fixed, f);
+  end;
+  tmethodT := newRecordType(fl, all, false);
+  setDeclName(tmethodT, intern('TMethod'));
+  d := newDecl(dkType, memberIdent('TMethod'), noLoc);
+  d^.declType := tmethodT;
+  scopeInsert(standard, d^.ident.name, d);
+end;
+
 { TVarRec, the elements of an array of const, and the vt* constants:
     record VType: int64; case of ... VInteger, VBoolean, VChar, ... end }
 procedure declareVarRec;
@@ -921,6 +951,7 @@ begin
   if mode = lmObjFPC then
   begin
     declareTObject;
+    declareTMethod;
     declareVarRec;
     declareException;
     declareInterfacedObject;
@@ -1141,7 +1172,7 @@ begin
   if target^.kind = tyClassRef then
     exit((value^.kind = tyNil) or
          ((value^.kind = tyClassRef) and inheritsFrom(value^.refClass, target^.refClass)));
-  if (target^.kind = tyPointer) and (value^.kind = tyClass) then
+  if (target^.kind = tyPointer) and (value^.kind in [tyClass, tyClassRef]) then
     exit(target^.untyped);
   if (target^.kind = tyShortString) and isStringish(value) then
     exit(true); { truncated to the target's length at run time }
@@ -1199,7 +1230,7 @@ begin
     nkDeref:
       isVariableReference := true; { p^ is a variable even for a call's result }
     nkCall:
-      isVariableReference := e^.isVarCast; { T(x) of an untyped parameter x }
+      isVariableReference := e^.isVarCast or (e^.methodCast = 2); { T(x) of an untyped parameter x }
   else
     isVariableReference := false;
   end;
@@ -1227,7 +1258,7 @@ begin
       nkParen: e := e^.inner;
       nkCall:
         begin
-          if not e^.isVarCast then
+          if not e^.isVarCast and (e^.methodCast = 0) then
             exit(nil);
           e := PNode(listGet(e^.args, 0)); { T(x): x }
         end;
@@ -5697,8 +5728,11 @@ begin
         checkModifiable(arg);
       continue;
     end;
-    at := check(arg);
     pt := p^.varType;
+    if (pt <> nil) and (arg^.kind = nkAddrOf) then
+      at := checkValueFor(pt, arg)
+    else
+      at := check(arg);
     if isError(at) or (pt = nil) or isError(pt) then
       continue;
     if p^.varKind = vkVarParam then

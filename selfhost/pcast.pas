@@ -131,7 +131,7 @@ type
       nkStringLit: (strValue: PName);
       nkNameRef: (ref: TIdent; refDecl: PDecl; refWith: PWithContext);
       { paren: the inner expression; deref: the pointer; addrof: the operand }
-      nkParen, nkDeref, nkAddrOf: (inner: PNode; addrMethod: PDecl);
+      nkParen, nkDeref, nkAddrOf: (inner: PNode; addrMethod, addrCode: PDecl);
       { opDecl: an advanced record's class operator implementing it
         (Sema); opNegated: <> through the = operator }
       nkUnary: (uop: TUnaryOp; operand: PNode; uopDecl: PDecl);
@@ -146,7 +146,9 @@ type
          calleeExpr: PNode; callDecl: PDecl; callWith: PWithContext;
          { T(x) of an untyped parameter x (Sema): a variable of type T at
            x's address }
-         isVarCast: boolean);
+         isVarCast: boolean;
+         { TMethod(m): 0 no, 1 of a value, 2 of a variable }
+         methodCast: longint);
       nkFormatted: (fmtValue, fmtWidth, fmtPrecision: PNode);
       { index: base[index]; field: base.fieldName; fieldDecl is a field,
         or (objfpc) a method or property of a class }

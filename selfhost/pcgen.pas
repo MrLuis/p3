@@ -1816,7 +1816,15 @@ begin
     nkStringLit: emitAddress := getNameConstant(e^.strValue);
     nkParen: emitAddress := emitAddress(e^.inner);
     nkCall, nkIndirectCall, nkInherited:
-      if (e^.kind = nkCall) and e^.isVarCast then
+      if (e^.kind = nkCall) and (e^.methodCast = 2) then
+        emitAddress := emitAddress(PNode(listGet(e^.args, 0)))
+      else if (e^.kind = nkCall) and (e^.methodCast = 1) then
+      begin
+        base := irCreateTemp(memType(e^.typ), 'method');
+        irStore(visitExpr(PNode(listGet(e^.args, 0))), base);
+        emitAddress := base;
+      end
+      else if (e^.kind = nkCall) and e^.isVarCast then
         emitAddress := emitAddress(PNode(listGet(e^.args, 0))) { T(x) of an untyped x }
       else
         { a record or string function result: a temporary holding it }
@@ -3510,6 +3518,8 @@ var
   v: TV;
 begin
   arg := PNode(listGet(e^.args, 0));
+  if isMethodPointer(e^.typ) and (arg^.typ^.kind = tyRecord) then { TEv(m) }
+    exit(irLoad(memType(e^.typ), emitAddress(arg), ''));
   if (e^.typ^.kind = tyAnsiString) and (arg^.typ^.kind = tyPointer) and arg^.typ^.untyped then
     exit(visitExpr(arg)); { the pointer is an ansistring: borrowed }
   if e^.typ^.kind = tyAnsiString then
@@ -3954,6 +3964,8 @@ function visitCall(e: PNode): TV;
 var
   d: PDecl;
 begin
+  if e^.methodCast <> 0 then
+    exit(emitAddress(e));
   if e^.callValue <> nil then { a procedural field or property }
     exit(emitCallThrough(visitExpr(e^.callValue), e^.callValue^.typ, e^.args, e^.b));
   if e^.isVarCast then { T(x) of an untyped parameter x }
@@ -4078,6 +4090,8 @@ begin
     nkAddrOf:
       if e^.addrMethod <> nil then
         visitExprKind := emitMethodPointer(e)
+      else if e^.addrCode <> nil then
+        visitExprKind := irFuncRef(fnOf(e^.addrCode))
       else
         visitExprKind := emitAddress(e^.inner);
     nkNil: visitExprKind := irNull;

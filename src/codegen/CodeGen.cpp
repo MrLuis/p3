@@ -1368,6 +1368,13 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
     case Expr::EK_Call:
       if (auto *C = llvm::cast<CallExpr>(E); C->isVarCast())
         return emitAddress(C->getArgs()[0]); // T(x) of an untyped x
+      if (auto *C = llvm::cast<CallExpr>(E); C->isMethodCast()) {
+        if (C->isMethodCastOfVariable()) // TMethod(m)
+          return emitAddress(C->getArgs()[0]);
+        llvm::Value *Tmp = createTemp(memType(E->getType()), "method");
+        B.CreateStore(visitExpr(C->getArgs()[0]), Tmp);
+        return Tmp;
+      }
       [[fallthrough]];
     case Expr::EK_IndirectCall:
     case Expr::EK_Inherited:
@@ -3574,6 +3581,8 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
   /// the source); pointer casts change only the type.
   llvm::Value *emitTypecast(CallExpr *E) {
     Expr *Arg = E->getArgs()[0];
+    if (isMethodPointerType(E->getType()) && Arg->getType()->isRecord()) // TEv(m)
+      return B.CreateLoad(memType(E->getType()), emitAddress(Arg));
     if (E->getType()->isAnsiString() && Arg->getType()->isPointer() &&
         llvm::cast<PointerType>(Arg->getType())->isUntyped())
       return visitExpr(Arg); // the pointer is an ansistring: borrowed
@@ -4887,6 +4896,8 @@ public:
   }
 
   llvm::Value *visitCallExpr(CallExpr *E) {
+    if (E->isMethodCast())
+      return emitAddress(E);
     if (Expr *V = E->getCalleeValue()) // a procedural field or property
       return emitCallThrough(visitExpr(V), llvm::cast<RoutineType>(V->getType()),
                              E->getArgs(), E->getBeginLoc());
@@ -4940,6 +4951,8 @@ public:
   llvm::Value *visitAddrOfExpr(AddrOfExpr *E) {
     if (E->getMethod())
       return emitMethodPointer(E);
+    if (E->getCode())
+      return Functions[E->getCode()];
     return emitAddress(E->getOperand());
   }
 

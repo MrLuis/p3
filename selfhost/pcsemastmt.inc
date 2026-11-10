@@ -841,6 +841,8 @@ end;
 
 { T(x) (Turbo/FPC): between ordinal types (integer types wrap, not
   range-checked) and between pointer types. }
+function checkComparand(e: PNode): PType; forward;
+
 function checkTypecast(e: PNode; td: PDecl): PType;
 var
   t, at: PType;
@@ -861,9 +863,22 @@ begin
       check(argNode(e, i));
     exit;
   end;
-  at := checkAllowingUntyped(argNode(e, 0));
+  if t = tmethodT then
+    at := checkComparand(argNode(e, 0))
+  else
+    at := checkAllowingUntyped(argNode(e, 0));
   if isError(t) or isError(at) then
     exit;
+  if (t = tmethodT) and isMethodPointer(at) then { its code and object }
+  begin
+    if isVariableReference(argNode(e, 0)) then
+      e^.methodCast := 2
+    else
+      e^.methodCast := 1;
+    exit(t);
+  end;
+  if isMethodPointer(t) and (at = tmethodT) then
+    exit(t);
   if at^.kind = tyUntyped then { Turbo/FPC: the untyped parameter seen as a t }
   begin
     e^.isVarCast := true;
@@ -2064,6 +2079,13 @@ var
   v: PDecl;
   saved: PType;
 begin
+  if (targetTy^.kind = tyPointer) and targetTy^.untyped and (value^.kind = nkAddrOf) then
+  begin
+    addrOfWantsCode := true;
+    checkValueFor := check(value);
+    addrOfWantsCode := false;
+    exit;
+  end;
   if (targetTy^.kind = tyRoutine) and (value^.kind = nkAddrOf) then
   begin { @p picks an overload by the target's heading }
     saved := addrOfTarget;
@@ -3162,11 +3184,13 @@ var
   r, d, x, pick: PDecl;
   w: PWithContext;
   name: TIdent;
-  viaClass: boolean;
-  xr, t, res: PType;
+  viaClass, wantsCode: boolean;
+  xr, t, res, named, owner: PType;
   why: string;
 begin
   checkMethodAddr := nil;
+  wantsCode := addrOfWantsCode;
+  addrOfWantsCode := false;
   if mode <> lmObjFPC then
     exit;
   op := e^.inner;
@@ -3176,7 +3200,37 @@ begin
   begin
     if not isMethodCallee(op) then
       exit;
-    viaClass := classNamedBy(op^.base) <> nil;
+    named := classNamedBy(op^.base);
+    viaClass := named <> nil;
+    d := nil;
+    owner := nil;
+    if named <> nil then
+      d := findMember(named, op^.fieldName.name, owner);
+    if (d <> nil) and (d^.kind = dkRoutine) and (not d^.isClassMethod or wantsCode) then
+    begin
+      { @TFoo.M: its code }
+      why := '';
+      if d^.methodKind in [mtConstructor, mtDestructor] then
+        why := 'constructors and destructors have no code address here'
+      else if d^.objMethod <> obNone then
+        why := 'the methods of TObject have no code address'
+      else if d^.isAbstract then
+        why := 'abstract methods have no code';
+      if why <> '' then
+      begin
+        ms('''@');
+        maN(op^.fieldName.spelling);
+        ma(''': ' + why);
+        errR(op^.fieldName.loc, identRange(op^.fieldName));
+        exit(errorType);
+      end;
+      checkMemberAccess(d, owner, op^.fieldName);
+      op^.fieldDecl := d;
+      d^.isUsed := true;
+      warnHints(d, op^.fieldName);
+      e^.addrCode := d;
+      exit(tyUntypedPointerT);
+    end;
     d := resolveMember(op);
     if d = nil then
       exit(errorType);
@@ -3238,9 +3292,7 @@ begin
   else if r^.objMethod <> obNone then
     why := 'the methods of TObject cannot be method pointers'
   else if r^.isStatic then
-    why := 'static methods cannot be method pointers'
-  else if viaClass and not r^.isClassMethod then
-    why := 'a method pointer to an instance method needs an object';
+    why := 'static methods cannot be method pointers';
   if why <> '' then
   begin
     ms('''@');
