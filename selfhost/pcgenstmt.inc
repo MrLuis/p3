@@ -1809,9 +1809,14 @@ var
   f: PIRFunc;
   ret: PIRType;
   loc: TLoc;
+  hasNested, pinAll: boolean;
 
   procedure addSlot(x: PDecl);
   begin
+    x^.cgLocal := nil;
+    x^.cgInFrame := inFrame(x, pinAll);
+    if not x^.cgInFrame then
+      exit;
     x^.cgSlot := slots.count;
     if isByRef(x) then
       listAdd(slots, irPtrT)
@@ -1821,9 +1826,21 @@ var
 
 begin
   begin
+    { frame record: [static link], then those of [Self], params, locals
+      and [result] that have to be in it (see inFrame); the link is there
+      for the routines nested in r, which follow it to r's parents }
     listInit(slots);
-    if r^.parent <> nil then
+    hasNested := false;
+    for j := 0 to r^.body^.decls.count - 1 do
+    begin
+      v := PDecl(listGet(r^.body^.decls, j));
+      if (v^.kind = dkRoutine) and not v^.isExternal then
+        hasNested := true;
+    end;
+    r^.cgLinkInFrame := (r^.parent <> nil) and hasNested;
+    if r^.cgLinkInFrame then
       listAdd(slots, irPtrT);
+    pinAll := r^.hasTry or hasNonLocalLabels(r^.body);
     if hasSelf(r) then
       addSlot(r^.selfVar);
     for j := 0 to r^.params.count - 1 do
@@ -1841,7 +1858,9 @@ begin
     if r^.isFunction then
       addSlot(r^.resultVar);
     name := mangle(r);
-    r^.cgFrame := irStructNamed('frame.' + copy(name, 5, 255), slots);
+    r^.cgFrame := nil;
+    if slots.count > 0 then
+      r^.cgFrame := irStructNamed('frame.' + copy(name, 5, 255), slots);
     r^.cgJmpSlot := -1;
     if hasNonLocalLabels(r^.body) then
     begin
@@ -1942,6 +1961,25 @@ var
   entry, raised, retB: PIRBlock;
   managedAddrs, managedTypes: TPtrList; { of PTVBox / PType }
   managedResult: boolean;
+  locals: TPtrList; { of PDecl: the local variables and the result }
+
+  { an alloca for x unless it is in the frame record }
+  procedure addLocal(x: PDecl; isParam: boolean);
+  var
+    t: PIRType;
+    name: string;
+  begin
+    if x^.cgInFrame then
+      exit;
+    if isByRef(x) then
+      t := irPtrT
+    else
+      t := memType(x^.varType);
+    name := nm(x^.ident.name);
+    if isParam then
+      name := name + '.addr';
+    x^.cgLocal := irBox(irAlloca(t, name));
+  end;
 
   { releases the value parameters', local variables' and temporaries'
     references }
@@ -1967,25 +2005,47 @@ begin
   entry := irNewBlock('entry');
   irSetInsertPoint(entry);
   setDebugLoc(bodyLoc(r));
+  { the frame record, if any, then an alloca for each other variable }
   frameT := frameType(r);
-  curFrame := irAlloca(frameT, 'frame');
-  { ISO leaves locals undefined; start from zero for determinism }
-  emitMemSet(curFrame, i8c(0), i64c(frameT^.size), frameT^.align);
+  if frameT <> nil then
+    curFrame := irAlloca(frameT, 'frame')
+  else
+    curFrame := irNull;
+  listInit(locals); { start from zero }
+  for i := 0 to r^.body^.decls.count - 1 do
+  begin
+    v := PDecl(listGet(r^.body^.decls, i));
+    if (v^.kind = dkVar) and ((v^.init = nil) or v^.isInitVar) then
+      listAdd(locals, v);
+  end;
+  if r^.isFunction then
+    listAdd(locals, r^.resultVar);
+  if hasSelf(r) then
+    addLocal(r^.selfVar, true);
+  for i := 0 to r^.params.count - 1 do
+    addLocal(PDecl(listGet(r^.params, i)), true);
+  for i := 0 to locals.count - 1 do
+    addLocal(PDecl(listGet(locals, i)), false);
   if dbgOn then
     declareFrameVariables(r);
-  if r^.parent <> nil then
+  for i := 0 to locals.count - 1 do
+  begin
+    v := PDecl(listGet(locals, i));
+    emitZeroInit(varSlot(v), v^.varType);
+  end;
+  if r^.cgLinkInFrame then
     irStore(irArg(f, 0), irStructGEP(frameT, curFrame, 0, ''));
   argNo := 1;
   if hasSelf(r) then
   begin
-    irStore(irArg(f, 1), irStructGEP(frameT, curFrame, r^.selfVar^.cgSlot, ''));
+    irStore(irArg(f, 1), varSlot(r^.selfVar));
     argNo := 2;
   end;
   for i := 0 to r^.params.count - 1 do
   begin
     p := PDecl(listGet(r^.params, i));
     arg := irArg(f, i + argNo);
-    slot := irStructGEP(frameT, curFrame, p^.cgSlot, '');
+    slot := varSlot(p);
     if isByRef(p) then
       irStore(arg, slot)
     else if isStructured(p^.varType) then
@@ -2064,7 +2124,7 @@ begin
   if r^.isFunction then
   begin
     res := r^.resultVar;
-    slot := irStructGEP(frameT, curFrame, res^.cgSlot, '');
+    slot := varSlot(res);
     ret := loadScalar(slot, res^.varType, 'result');
     irRet(ret);
   end
@@ -2272,7 +2332,8 @@ end;
 procedure generateUnitModule(u: PDecl; const deps: TPtrList; m: TLangMode;
                              rangeChecksOn, overflowChecksOn: boolean;
                              const sourceName, triple, dataLayout: string;
-                             debugInfo, optimized: boolean; var outText: TBuf);
+                             debugInfo, optimized, zeroInit: boolean;
+                             var outText: TBuf);
 var
   i: longint;
   d: PDecl;
@@ -2281,6 +2342,7 @@ var
   entry: PIRBlock;
 begin
   separate := true;
+  optZeroInit := zeroInit;
   progDecl := nil;
   startModule(m, rangeChecksOn, overflowChecksOn, sourceName, triple, dataLayout);
   listInit(noParams);
@@ -2335,7 +2397,8 @@ end;
 procedure generateModule(prog: PDecl; const units: TPtrList; m: TLangMode;
                          rangeChecksOn, overflowChecksOn: boolean;
                          const sourceName, triple, dataLayout: string;
-                         debugInfo, optimized, separateUnits: boolean; var outText: TBuf);
+                         debugInfo, optimized, separateUnits, zeroInit: boolean;
+                         var outText: TBuf);
 var
   i: longint;
   u: PDecl;
@@ -2343,6 +2406,7 @@ var
   mainFn: PIRFunc;
 begin
   separate := separateUnits;
+  optZeroInit := zeroInit;
   progDecl := prog;
   startModule(m, rangeChecksOn, overflowChecksOn, sourceName, triple, dataLayout);
   listInit(fields);

@@ -170,6 +170,12 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
   llvm::DenseMap<RoutineDecl *, llvm::FunctionCallee> ExternalFns;
   llvm::DenseMap<RoutineDecl *, llvm::StructType *> FrameTypes;
   llvm::DenseMap<VarDecl *, unsigned> FrameSlots;
+  /// The current routine's variables that are not in its frame record:
+  /// their allocas.
+  llvm::DenseMap<VarDecl *, llvm::Value *> LocalAddrs;
+  /// Routines whose frame record starts with their static link (the
+  /// others use their `link` argument).
+  llvm::DenseSet<RoutineDecl *> LinkInFrame;
   llvm::DenseMap<Type *, llvm::Type *> LoweredTypes;
   llvm::DenseMap<FieldDecl *, uint64_t> FieldOffsets;
   /// Classes (objfpc): instance layouts (used only for offsets and sizes)
@@ -1201,9 +1207,15 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
   /// Pointer to the frame of routine Target, reached from the current
   /// routine by following static links.
   llvm::Value *framePtrFor(RoutineDecl *Target) {
-    llvm::Value *Frame = CurFrame;
+    // A routine without a frame record: nothing reads the pointer.
+    llvm::Value *Frame =
+        CurFrame ? CurFrame : llvm::ConstantPointerNull::get(B.getPtrTy());
     for (RoutineDecl *R = CurRoutine; R != Target; R = R->getParent()) {
       assert(R && R->hasStaticLink() && "target is not an enclosing routine");
+      if (!LinkInFrame.count(R)) { // only the current routine: no nested ones
+        Frame = CurFn->getArg(0);
+        continue;
+      }
       llvm::Value *LinkSlot = B.CreateStructGEP(FrameTypes[R], Frame, 0);
       Frame = B.CreateLoad(B.getPtrTy(), LinkSlot, "link");
     }
@@ -1312,12 +1324,56 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
         return standardFile(V->getName().Name);
       return Globals.lookup(V);
     }
-    RoutineDecl *Owner = V->getOwner();
-    llvm::Value *Slot = B.CreateStructGEP(FrameTypes[Owner], framePtrFor(Owner),
-                                          FrameSlots[V], V->getName().Name);
+    llvm::Value *Slot = varSlot(V);
     if (isByRef(V))
       return B.CreateLoad(B.getPtrTy(), Slot, V->getName().Name + ".ref");
     return Slot;
+  }
+
+  /// Where a routine's variable V is kept (a by-reference parameter: the
+  /// pointer to it): a slot of its routine's frame record, or an alloca of
+  /// the current routine.
+  llvm::Value *varSlot(VarDecl *V) {
+    RoutineDecl *Owner = V->getOwner();
+    auto It = FrameSlots.find(V);
+    if (It != FrameSlots.end())
+      return B.CreateStructGEP(FrameTypes[Owner], framePtrFor(Owner),
+                               It->second, V->getName().Name);
+    llvm::Value *Slot = Owner == CurRoutine ? LocalAddrs.lookup(V) : nullptr;
+    if (!Slot) // Sema marks every variable a nested routine can name
+      llvm::report_fatal_error("internal compiler error: variable '" +
+                               llvm::Twine(V->getName().Spelling) +
+                               "' is not in the frame of its routine");
+    return Slot;
+  }
+
+  /// Is V kept in its routine's frame record? Variables that nested
+  /// routines use are, and those that must be in memory when an exception
+  /// arrives through _longjmp: all of them in a routine where execution
+  /// continues afterwards (try statements, non-local labels), else the
+  /// managed ones, which are released on the way out. The other variables
+  /// get an alloca each, which the optimizer turns into registers.
+  bool inFrame(VarDecl *V, bool PinAll) {
+    return PinAll || V->isCaptured() ||
+           (!isByRef(V) && isManaged(V->getType()));
+  }
+
+  /// The start value of a local variable or function result at Addr: zero.
+  /// ISO leaves them undefined; this makes programs deterministic. Without
+  /// zero initialization (-fno-zero-init, the default from -O1) arrays,
+  /// records and strings are only cleared when they hold managed values or
+  /// files; a string starts empty.
+  void emitZeroInit(llvm::Value *Addr, Type *T) {
+    llvm::Type *Ty = memType(T);
+    if (!T->isStructured()) {
+      B.CreateStore(llvm::Constant::getNullValue(Ty), Addr);
+      return;
+    }
+    if (CGOpts.ZeroInit || isManaged(T) || containsFile(T))
+      B.CreateMemSet(Addr, B.getInt8(0), DL.getTypeAllocSize(Ty),
+                     DL.getABITypeAlign(Ty));
+    else if (T->isShortString())
+      B.CreateStore(B.getInt8(0), Addr);
   }
 
   /// Address of field F of record type RT at RecordAddr. Field offsets are
@@ -1665,11 +1721,12 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
         llvm::DILocation::get(M.getContext(), P.Line, P.Column, Scope));
   }
 
-  /// Describes the frame slots of R (params, locals, result) to the
-  /// debugger as offsets into the frame alloca.
+  /// Describes the variables of R (params, locals, result) to the
+  /// debugger: offsets into the frame alloca, or their own allocas.
   void declareFrameVariables(RoutineDecl *R) {
-    llvm::StructType *FrameTy = FrameTypes[R];
-    const llvm::StructLayout *SL = DL.getStructLayout(FrameTy);
+    llvm::StructType *FrameTy = FrameTypes.lookup(R);
+    const llvm::StructLayout *SL =
+        FrameTy ? DL.getStructLayout(FrameTy) : nullptr;
     auto Declare = [&](VarDecl *V, unsigned ArgNo) {
       llvm::DIType *Ty = debugType(V->getType());
       // Self has no location of its own: the method's.
@@ -1679,11 +1736,16 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
                                                DIUnitFile, Line, Ty)
                 : DIB->createAutoVariable(CurSP, V->getName().Spelling,
                                           DIUnitFile, Line, Ty);
-      llvm::SmallVector<uint64_t, 4> Ops{llvm::dwarf::DW_OP_plus_uconst,
-                                         SL->getElementOffset(FrameSlots[V])};
+      llvm::SmallVector<uint64_t, 4> Ops;
+      auto Slot = FrameSlots.find(V);
+      if (Slot != FrameSlots.end()) {
+        Ops.push_back(llvm::dwarf::DW_OP_plus_uconst);
+        Ops.push_back(SL->getElementOffset(Slot->second));
+      }
       if (isByRef(V))
         Ops.push_back(llvm::dwarf::DW_OP_deref);
-      DIB->insertDeclare(CurFrame, DV, DIB->createExpression(Ops),
+      DIB->insertDeclare(Slot != FrameSlots.end() ? CurFrame : LocalAddrs[V],
+                         DV, DIB->createExpression(Ops),
                          llvm::DILocation::get(M.getContext(), Line, 0, CurSP),
                          B.GetInsertBlock());
     };
@@ -2089,11 +2151,22 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
   /// its canonical declaration), queues its body and declares the
   /// routines nested in it.
   void declareRoutine(RoutineDecl *R) {
-    // Frame: [static link], [Self], params, locals, [result].
+    // Frame record: [static link], then those of [Self], params, locals
+    // and [result] that have to be in it (see inFrame). The link is there
+    // for the routines nested in R, which follow it to R's parents.
     llvm::SmallVector<llvm::Type *, 8> Slots;
-    if (R->hasStaticLink())
+    bool HasNested = false;
+    for (Decl *Local : R->getBody()->getDecls())
+      if (auto *N = llvm::dyn_cast<RoutineDecl>(Local))
+        HasNested |= !N->isExternal();
+    if (R->hasStaticLink() && HasNested) {
+      LinkInFrame.insert(R);
       Slots.push_back(B.getPtrTy());
+    }
+    bool PinAll = R->hasTry() || hasNonLocalLabels(*R->getBody());
     auto AddSlot = [&](VarDecl *V) {
+      if (!inFrame(V, PinAll))
+        return;
       FrameSlots[V] = Slots.size();
       Slots.push_back(isByRef(V) ? B.getPtrTy() : memType(V->getType()));
     };
@@ -2111,8 +2184,9 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
     if (R->isFunction())
       AddSlot(R->getResultVar());
     std::string Name = mangle(R);
-    FrameTypes[R] = llvm::StructType::create(M.getContext(), Slots,
-                                             "frame." + Name.substr(4));
+    if (!Slots.empty())
+      FrameTypes[R] = llvm::StructType::create(M.getContext(), Slots,
+                                               "frame." + Name.substr(4));
 
     if (hasNonLocalLabels(*R->getBody())) {
       JmpBufSlots[R] = Slots.size();
@@ -2164,26 +2238,45 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
     B.SetInsertPoint(llvm::BasicBlock::Create(M.getContext(), "entry", F));
     setDebugLoc(R->getBodyLocation());
 
-    llvm::StructType *FrameTy = FrameTypes[R];
-    CurFrame = B.CreateAlloca(FrameTy, nullptr, "frame");
-    // ISO leaves locals undefined; start from zero for determinism.
-    B.CreateMemSet(CurFrame, B.getInt8(0), DL.getTypeAllocSize(FrameTy),
-                   DL.getABITypeAlign(FrameTy));
+    // The frame record, if any, then an alloca for each other variable.
+    llvm::StructType *FrameTy = FrameTypes.lookup(R);
+    CurFrame = FrameTy ? B.CreateAlloca(FrameTy, nullptr, "frame") : nullptr;
+    LocalAddrs.clear();
+    VarDecl *ResultVar = R->isFunction() ? R->getResultVar() : nullptr;
+    llvm::SmallVector<VarDecl *, 8> Locals; // start from zero
+    for (Decl *D : R->getBody()->getDecls())
+      if (auto *V = llvm::dyn_cast<VarDecl>(D); V && !V->isTypedConst())
+        Locals.push_back(V);
+    if (ResultVar)
+      Locals.push_back(ResultVar);
+    auto AddLocal = [&](VarDecl *V, bool Param) {
+      if (!FrameSlots.count(V))
+        LocalAddrs[V] = B.CreateAlloca(
+            isByRef(V) ? B.getPtrTy() : memType(V->getType()), nullptr,
+            Param ? V->getName().Name + ".addr" : V->getName().Name);
+    };
+    if (R->hasSelf())
+      AddLocal(R->getSelfVar(), true);
+    for (VarDecl *P : R->getParams())
+      AddLocal(P, true);
+    for (VarDecl *V : Locals)
+      AddLocal(V, false);
     if (DIB)
       declareFrameVariables(R);
+    for (VarDecl *V : Locals)
+      emitZeroInit(varSlot(V), V->getType());
 
     unsigned ArgNo = 1;
-    if (R->hasStaticLink())
+    if (LinkInFrame.count(R))
       B.CreateStore(F->getArg(0), B.CreateStructGEP(FrameTy, CurFrame, 0));
     if (R->hasSelf())
-      B.CreateStore(F->getArg(ArgNo++),
-                    B.CreateStructGEP(FrameTy, CurFrame, FrameSlots[R->getSelfVar()]));
+      B.CreateStore(F->getArg(ArgNo++), varSlot(R->getSelfVar()));
     // The variables holding COM interfaces: value parameters (one more
     // reference each), then local variables (nil at first).
     llvm::SmallVector<std::pair<llvm::Value *, Type *>, 4> Managed;
     for (VarDecl *P : R->getParams()) {
       llvm::Value *Arg = F->getArg(ArgNo++);
-      llvm::Value *Slot = B.CreateStructGEP(FrameTy, CurFrame, FrameSlots[P]);
+      llvm::Value *Slot = varSlot(P);
       if (isByRef(P))
         B.CreateStore(Arg, Slot);
       else if (P->getType()->isStructured())
@@ -2207,7 +2300,6 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
       if (auto *V = llvm::dyn_cast<VarDecl>(D);
           V && !V->isTypedConst() && isManaged(V->getType()))
         Managed.push_back({varAddress(V), V->getType()});
-    VarDecl *ResultVar = R->isFunction() ? R->getResultVar() : nullptr;
     bool ManagedResult = ResultVar && isManaged(ResultVar->getType());
 
     initFileVars(R->getBody()->getDecls(), nullptr);
@@ -2252,10 +2344,7 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
     RoutineTemps.clear();
 
     if (R->isFunction()) {
-      VarDecl *Result = R->getResultVar();
-      B.CreateRet(loadScalar(
-          B.CreateStructGEP(FrameTy, CurFrame, FrameSlots[Result]),
-          Result->getType(), "result"));
+      B.CreateRet(loadScalar(varSlot(ResultVar), ResultVar->getType(), "result"));
     } else {
       B.CreateRetVoid();
     }

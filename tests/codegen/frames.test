@@ -1,27 +1,68 @@
-; M6 lowering: each routine keeps params and locals in a frame struct; a
-; nested routine gets its parent's frame as a hidden first argument (static
-; link, frame field 0) and reaches the parent's variables through it.
+; M6 lowering: the params and locals that a nested routine uses are in a
+; frame struct, the others in allocas of their own; a nested routine gets
+; its parent's frame as a hidden first argument (the static link) and
+; reaches the parent's variables through it. A routine with nested routines
+; keeps its own link in its frame (field 0) for them to follow.
 ; RUN: %pcc --emit-llvm %S/Inputs/nested.pas -o - | FileCheck %s
 
 ; CHECK-DAG: %frame.outer = type { i32, i32 }
-; CHECK-DAG: %frame.outer.inner = type { ptr }
+; CHECK-DAG: %frame.outer.mid = type { ptr }
 ; CHECK-DAG: @pas.g = internal global i32 0
+; inner has no nested routines and no captured variables: no frame.
+; CHECK-NOT: %frame.outer.mid.inner = type
+; CHECK-NOT: %frame.plain = type
 
 ; Every routine takes a static link first (null at program level).
 ; CHECK: define internal void @pas.outer(ptr %link, i32 %p)
 ; CHECK:   %frame = alloca %frame.outer
+; Not captured: an alloca; locals start from zero.
+; CHECK:   %own = alloca i32
+; CHECK:   [[L:%.*]] = getelementptr inbounds %frame.outer, ptr %frame, i32 0, i32 1
+; CHECK:   store i32 0, ptr [[L]]
+; CHECK:   store i32 0, ptr %own
 ; CHECK:   [[P:%.*]] = getelementptr inbounds %frame.outer, ptr %frame, i32 0, i32 0
 ; CHECK:   store i32 %p, ptr [[P]]
-; CHECK:   call void @pas.outer.inner(ptr %frame)
+; CHECK:   call void @pas.outer.mid(ptr %frame)
 
-; CHECK: define internal void @pas.outer.inner(ptr %link)
-; CHECK:   %frame = alloca %frame.outer.inner
+; CHECK: define internal void @pas.outer.mid(ptr %link)
+; CHECK:   %frame = alloca %frame.outer.mid
 ; CHECK:   store ptr %link, ptr
-; Up-level access: load the static link, then index the parent's frame.
-; CHECK:   [[L1:%.*]] = load ptr, ptr {{%.*}}
+; CHECK:   call void @pas.outer.mid.inner(ptr %frame)
+
+; Up-level access: follow mid's link (in its frame) to outer's frame.
+; CHECK: define internal void @pas.outer.mid.inner(ptr %link)
+; CHECK-NOT: alloca
+; CHECK:   [[S:%.*]] = getelementptr inbounds %frame.outer.mid, ptr %link, i32 0, i32 0
+; CHECK:   [[L1:%.*]] = load ptr, ptr [[S]]
 ; CHECK:   getelementptr inbounds %frame.outer, ptr [[L1]], i32 0, i32 0
 ; CHECK:   load i32, ptr @pas.g
 ; CHECK:   getelementptr inbounds %frame.outer, ptr {{%.*}}, i32 0, i32 1
+
+; No nested routines: allocas only.
+; CHECK: define internal i32 @pas.plain(ptr %link, i32 %a)
+; CHECK-NOT: %frame
+; CHECK:   %a.addr = alloca i32
+; CHECK:   %plain = alloca i32
+; CHECK:   store i32 0, ptr %plain
+; CHECK:   store i32 %a, ptr %a.addr
+; CHECK: ret i32
+
+; Arrays, records and strings start zeroed at -O0, or with -fzero-init; a
+; string always starts empty.
+; RUN: %pcc --mode=tp --emit-llvm %S/Inputs/zeroinit.pas -o - | FileCheck --check-prefix=ZERO %s
+; RUN: %pcc --mode=tp --emit-llvm -fno-zero-init -fzero-init %S/Inputs/zeroinit.pas -o - | FileCheck --check-prefix=ZERO %s
+; ZERO: define internal void @pas.p(
+; ZERO-DAG: call void @llvm.memset.p0.i64(ptr align 4 %a, i8 0, i64 400, i1 false)
+; ZERO-DAG: call void @llvm.memset.p0.i64(ptr align 1 %s, i8 0, i64 256, i1 false)
+; ZERO-DAG: store i32 0, ptr %n
+; RUN: %pcc --mode=tp --emit-llvm -fno-zero-init %S/Inputs/zeroinit.pas -o - | FileCheck --check-prefix=NOZERO %s
+; RUN: %pcc --mode=tp --emit-llvm -O1 -fzero-init -fno-zero-init %S/Inputs/zeroinit.pas -o - | FileCheck --check-prefix=NOZERO-O1 %s
+; NOZERO: define internal void @pas.p(
+; NOZERO-NOT: llvm.memset
+; NOZERO-DAG: store i8 0, ptr %s
+; NOZERO-DAG: store i32 0, ptr %n
+; NOZERO: ret void
+; NOZERO-O1-NOT: llvm.memset
 
 ; At -O2 the frames disappear.
 ; RUN: %pcc --emit-llvm -O2 %S/Inputs/nested.pas -o - | FileCheck --check-prefix=O2 %s

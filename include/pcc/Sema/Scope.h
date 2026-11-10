@@ -27,6 +27,22 @@ class Scope {
   WithContext *With = nullptr;
   /// Interface scopes of used units (Turbo/FPC); later ones take precedence.
   llvm::SmallVector<const Scope *, 2> Imports;
+  /// The outermost scope of a routine: a name found beyond it belongs to
+  /// an enclosing routine (or to the program).
+  bool RoutineBoundary = false;
+
+  /// D was found in an enclosing routine's scope S: a variable of that
+  /// routine is captured, and so is the Self of the method whose members
+  /// S exposes.
+  static void noteCaptured(const Scope *S, Decl *D) {
+    if (auto *V = llvm::dyn_cast<VarDecl>(D); V && V->getOwner())
+      V->setCaptured();
+    if (S->With)
+      if (auto *N = llvm::dyn_cast<NameRefExpr>(S->With->Record))
+        if (auto *V = llvm::dyn_cast_or_null<VarDecl>(N->getDecl());
+            V && V->getOwner())
+          V->setCaptured();
+  }
 
 public:
   explicit Scope(Scope *Parent = nullptr) : Parent(Parent) {}
@@ -39,6 +55,7 @@ public:
       : Parent(Parent), WithClass(C), With(W) {}
 
   Scope *getParent() const { return Parent; }
+  void setRoutineBoundary() { RoutineBoundary = true; }
   void addImport(const Scope *S) { Imports.push_back(S); }
 
   /// Names declared directly in this scope (not imports).
@@ -96,14 +113,21 @@ public:
   }
 
   /// Innermost declaration of Name visible from this scope. If it is a field
-  /// found through a `with`, *W receives that with's context.
+  /// found through a `with`, *W receives that with's context. A variable
+  /// found in an enclosing routine is marked as captured (whatever the
+  /// caller then does with it: every use of such a variable starts here).
   Decl *lookup(llvm::StringRef Name, WithContext **W = nullptr) const {
-    for (const Scope *S = this; S; S = S->Parent)
+    bool Outside = false;
+    for (const Scope *S = this; S; S = S->Parent) {
       if (Decl *D = S->lookupLocal(Name)) {
         if (W)
           *W = S->With;
+        if (Outside)
+          noteCaptured(S, D);
         return D;
       }
+      Outside |= S->RoutineBoundary;
+    }
     return nullptr;
   }
 };

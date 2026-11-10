@@ -18,6 +18,12 @@ to native executables through LLVM. See [PLAN.md](PLAN.md) for the roadmap.
   in the source)
 - pointers, sets, files (text and typed; program parameters bind to
   command-line arguments), `goto`, procedural parameters, `pack`/`unpack`
+- local variables and function results start from zero (numbers 0,
+  pointers and objects `nil`, strings empty), which ISO leaves undefined.
+  The elements of local arrays, the fields of local records and the
+  characters of local strings are cleared too at `-O0`; from `-O1` they
+  are not, unless they hold ansistrings, interfaces or files
+  (`-fzero-init` / `-fno-zero-init` choose either way at any level)
 - `-g` debug info (gdb/lldb), "did you mean" diagnostics, cross-compiling
   objects with `--target`
 
@@ -411,6 +417,21 @@ the compiler's LLVM IR) to bootstrap it without this C++ compiler.
 **ISO 7185 conformance:** the Pascal-P5 test `iso7185pat.pas` passes all 793
 checks (`utils/iso7185pat.py build/bin/pcc`).
 
+## Benchmarks
+
+```sh
+utils/bench.py --pcc build/bin/pcc --fpc          # --base <older pcc> to compare two builds
+```
+
+compiles the programs of `bench/` (integer loops, nested routines, large
+locals, short strings, ansistrings, sets, classes, exceptions, text output,
+real arithmetic) at `-O0`, `-O2` and `-O2` without runtime checks, checks
+their output against `bench/<name>.expected`, and prints run time,
+executable size and compile time; `--fpc` adds Free Pascal's `-O2`. The
+last row is the self-hosted compiler, built at `-O2`, compiling itself.
+[optimization.md](optimization.md) lists the optimizations considered and
+what has been done.
+
 ## Fuzzing
 
 ```sh
@@ -527,6 +548,7 @@ integer from 0 to 3`); an unknown setting is a warning.
 | `runtime/` | `libpascalrt` C runtime (ABI in `runtime/include/pascalrt.h`) |
 | `rtl/` | the unit library (`sysutils`, `strutils`, `math`, `classes`) |
 | `tests/` | lit tests: `lexer/ parser/ sema/ codegen/ driver/`, `run/` (compile + execute + diff), C++ unit tests in `unit/` |
+| `bench/` | benchmark programs with their expected output (`utils/bench.py`) |
 
 ## Writing tests
 

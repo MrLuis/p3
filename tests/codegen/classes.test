@@ -2,10 +2,10 @@
 ; class's VMT, a constant array [parent VMT, name, instance size, interface
 ; table, virtual methods...];
 ; TObject's VMT and Destroy (slot 0) are in the runtime. Methods take Self
-; after the static link and keep it in their frame.
+; after the static link and keep it in an alloca (in their frame if a
+; nested routine uses it).
 ; RUN: %pcc --mode=objfpc --emit-llvm %S/Inputs/classes.pas -o - | FileCheck %s
 
-; CHECK: %frame.ta.v = type { ptr, i32 }
 ; CHECK: @vmt.ta = internal constant [6 x ptr] [ptr @__pas_tobject_vmt, ptr @.str, ptr inttoptr (i64 16 to ptr), ptr null, ptr @__pas_tobject_destroy, ptr @pas.ta.v]
 ; CHECK: @vmt.tb = internal constant [6 x ptr] [ptr @vmt.ta, ptr @.str.1, ptr inttoptr (i64 24 to ptr), ptr null, ptr @__pas_tobject_destroy, ptr @pas.tb.v]
 ; CHECK: @__pas_tobject_vmt = external constant [5 x ptr]
@@ -30,12 +30,13 @@
 ; CHECK:      call void @__pas_free_instance(ptr %a3)
 
 ; CHECK-LABEL: define internal void @pas.ta.v(ptr %link, ptr %self, i32 %n)
-; CHECK:      store ptr %self, ptr %0, align 8
-; CHECK:      %x = getelementptr inbounds i8, ptr %self4, i64 8
+; CHECK:      %self.addr = alloca ptr, align 8
+; CHECK:      store ptr %self, ptr %self.addr, align 8
+; CHECK:      %x = getelementptr inbounds i8, ptr %self2, i64 8
 
 ; inherited V(N + 1): a static call.
 ; CHECK-LABEL: define internal void @pas.tb.v(ptr %link, ptr %self, i32 %n)
-; CHECK:      call void @pas.ta.v(ptr null, ptr %self2, i32 %add)
+; CHECK:      call void @pas.ta.v(ptr null, ptr %self1, i32 %add)
 
 ; -g: a class is a pointer to a structure of its fields; methods are named
 ; Class.Method, at their implementation, with Self as first parameter.

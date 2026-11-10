@@ -9,6 +9,7 @@
 
 #include "pcc/Basic/LangOptions.h"
 
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -49,6 +50,9 @@ struct CompilerOptions {
   bool WarnDeprecated = true;      ///< -Wno-deprecated disables
   bool RangeChecks = true;    ///< -fno-range-checks disables
   bool OverflowChecks = true; ///< -fno-overflow-checks disables
+  /// Local arrays, records and strings start zeroed: -fzero-init /
+  /// -fno-zero-init; without either, at -O0 only.
+  std::optional<bool> ZeroInit;
 
   /// The project file (pcc.json, see Project.h): --project=<file> (empty:
   /// look for one), --no-project.

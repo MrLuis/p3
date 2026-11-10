@@ -24,12 +24,12 @@
 ; k-th jump (exit, break, continue) out of the protected statements.
 ; CHECK:      finally:
 ; CHECK:      %state = load i32, ptr %finally.state
-; CHECK-NEXT: switch i32 %state, label %try.end1 [
+; CHECK-NEXT: switch i32 %state, label %try.end{{[0-9]+}} [
 ; CHECK-NEXT:   i32 1, label %finally.reraise
 ; CHECK-NEXT:   i32 2, label %finally.cont
 ; exit: pop the inner frame, run the finally part, pop the outer frame.
 ; CHECK:      if.then:
-; CHECK-NEXT: call void @__pas_exc_pop(ptr %excframe2)
+; CHECK-NEXT: call void @__pas_exc_pop(ptr %excframe{{[0-9]+}})
 ; CHECK-NEXT: store i32 2, ptr %finally.state
 ; CHECK-NEXT: br label %finally
 ; CHECK:      call void @__pas_raise(ptr %obj, ptr @.where)

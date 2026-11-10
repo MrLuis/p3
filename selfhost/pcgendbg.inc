@@ -497,8 +497,8 @@ begin
   irSetDebugLoc(md(false, s + ', scope: ' + ref(scope) + ')', scope, nil, nil, nil));
 end;
 
-{ Describes the frame slots of r (parameters, locals, result) to the
-  debugger as offsets into the frame. }
+{ Describes the variables of r (parameters, locals, result) to the
+  debugger: offsets into the frame, or their own allocas. }
 procedure declareFrameVariables(r: PDecl);
 var
   frameT: PIRType;
@@ -524,13 +524,22 @@ var
          sizeField('line', line) + ', type: ' + ref(ty) + ')';
     dv := md(false, s, curSP^.sp, unitFile, ty, nil);
     curSP^.tracked := true;
-    expr := '!DIExpression(DW_OP_plus_uconst, ' + intToStr(irFieldOffset(frameT, x^.cgSlot));
-    if isByRef(x) then
-      expr := expr + ', DW_OP_deref';
+    expr := '!DIExpression(';
+    if x^.cgInFrame then
+    begin
+      expr := expr + 'DW_OP_plus_uconst, ' + intToStr(irFieldOffset(frameT, x^.cgSlot));
+      if isByRef(x) then
+        expr := expr + ', DW_OP_deref';
+    end
+    else if isByRef(x) then
+      expr := expr + 'DW_OP_deref';
     expr := expr + ')';
     s := '!DILocation(line: ' + intToStr(line) + ', scope: ' + ref(curSP^.sp) + ')';
     loc := md(false, s, curSP^.sp, nil, nil, nil);
-    irInsertDeclare(curFrame, dv, expr, loc);
+    if x^.cgInFrame then
+      irInsertDeclare(curFrame, dv, expr, loc)
+    else
+      irInsertDeclare(PTVBox(x^.cgLocal)^, dv, expr, loc);
   end;
 
 begin

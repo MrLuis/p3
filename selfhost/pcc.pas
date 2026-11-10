@@ -19,7 +19,16 @@ var
   werror, noUnusedVariable, noDeprecated: boolean;
   rangeChecksOn, overflowChecksOn, debugInfo, separateUnits: boolean;
   optLevel: longint;
+  { -fzero-init (1) / -fno-zero-init (-1), the last one given; 0: neither
+    (local arrays, records and strings start zeroed at -O0 only) }
+  zeroInitOpt: longint;
   outBuf: TBuf;
+
+{ Do local arrays, records and strings start zeroed? }
+function zeroInit: boolean;
+begin
+  zeroInit := (zeroInitOpt > 0) or ((zeroInitOpt = 0) and (optLevel = 0));
+end;
 
 procedure usageError(const msg: string);
 begin
@@ -126,7 +135,9 @@ begin
   helpLine('  --ferror-limit=<N>           - Stop after N errors (0 = no limit)');
   helpLine('  --fno-overflow-checks        - Disable runtime integer overflow checks');
   helpLine('  --fno-range-checks           - Disable runtime range checks (subranges, array indices, ...)');
+  helpLine('  --fno-zero-init              - Do not zero local arrays, records and strings (the default from -O1)');
   helpLine('  --fseparate-units            - Link separately compiled units (each compiled with -c to <unit>.o next to its source)');
+  helpLine('  --fzero-init                 - Local arrays, records and strings start zeroed (the default at -O0)');
   helpLine('  -g                           - Generate debug information');
   helpLine('  -l <name>                    - Link with library <name>');
   helpLine('  --mode=<value>               - Language dialect:');
@@ -140,12 +151,13 @@ begin
 end;
 
 const
-  numFlags = 17;
+  numFlags = 19;
   flagNames: array[1..numFlags] of string[20] = (
     'help', 'help-list', 'version', 'emit-tokens', 'emit-ast', 'emit-parse-tree',
     'emit-llvm', 'S', 'c', 'Werror', 'Wno-unused-variable', 'Wno-deprecated',
     'fno-overflow-checks',
-    'fno-range-checks', 'fseparate-units', 'g', 'no-project');
+    'fno-range-checks', 'fseparate-units', 'g', 'no-project', 'fzero-init',
+    'fno-zero-init');
   numValueOpts = 11;
   valueOptNames: array[1..numValueOpts] of string[20] = (
     'o', 'mode', 'fdiagnostics-color', 'ferror-limit', 'target', 'I', 'O', 'L', 'l',
@@ -362,6 +374,7 @@ begin
   noUnusedVariable := false;
   noDeprecated := false;
   optLevel := 0;
+  zeroInitOpt := 0;
   rangeChecksOn := true;
   overflowChecksOn := true;
   debugInfo := false;
@@ -445,6 +458,10 @@ begin
       rangeChecksOn := false
     else if name = 'fno-overflow-checks' then
       overflowChecksOn := false
+    else if name = 'fzero-init' then
+      zeroInitOpt := 1
+    else if name = 'fno-zero-init' then
+      zeroInitOpt := -1
     else if name = 'g' then
       debugInfo := true
     else if name = 'fseparate-units' then
@@ -805,7 +822,7 @@ begin
   if not moduleLayout(targetTriple, layout) then
     exit;
   generateUnitModule(u, units, mode, rangeChecksOn, overflowChecksOn, smFileName(fid),
-                     targetTriple, layout, debugInfo, optLevel > 0, outBuf);
+                     targetTriple, layout, debugInfo, optLevel > 0, zeroInit, outBuf);
   case action of
     actLLVM: kind := okLLVM;
     actAsm: kind := okAsm;
@@ -976,7 +993,7 @@ begin
         collectExternalLibraries(prog^.progBlock, extLibs);
         generateModule(prog, units, mode, rangeChecksOn, overflowChecksOn,
                        smFileName(fid), targetTriple, modLayout, debugInfo, optLevel > 0,
-                       separateUnits, outBuf);
+                       separateUnits, zeroInit, outBuf);
         case action of
           actLLVM: kind := okLLVM;
           actAsm: kind := okAsm;

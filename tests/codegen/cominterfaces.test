@@ -19,7 +19,7 @@
 ; CHECK-LABEL: define internal void @pas.use(ptr %link, { ptr, ptr } %a, { ptr, ptr } %b)
 ; CHECK:      %intf.tmp = alloca { ptr, ptr }, align 8
 ; CHECK-NEXT: store { ptr, ptr } zeroinitializer, ptr %intf.tmp, align 8
-; CHECK:      store { ptr, ptr } %a, ptr %[[A:[0-9]+]], align 8
+; CHECK:      store { ptr, ptr } %a, ptr %[[A:a[0-9]+]], align 8
 ; CHECK-NEXT: %obj = load ptr, ptr %[[A]], align 8
 ; CHECK-NEXT: call void @__pas_intf_addref(ptr %obj)
 ; CHECK-NOT:  __pas_intf_addref
@@ -27,11 +27,11 @@
 ; CHECK:      br i1 %{{[0-9]+}}, label %managed.raise, label %managed.body
 ; CHECK:      managed.raise:
 ; CHECK-NEXT: call void @__pas_intf_clear(ptr %[[A]])
-; CHECK-NEXT: call void @__pas_intf_clear(ptr %l)
+; CHECK-NEXT: call void @__pas_intf_clear(ptr %l{{[0-9]+}})
 ; CHECK-NEXT: call void @__pas_intf_clear(ptr %intf.tmp)
 ; CHECK-NEXT: call void @__pas_reraise(ptr %excframe)
 ; Assignment: references the new object, releases the old one.
-; CHECK:      call void @__pas_intf_assign(ptr %l3, ptr %obj4, ptr %itable)
+; CHECK:      call void @__pas_intf_assign(ptr %l{{[0-9]+}}, ptr %obj{{[0-9]+}}, ptr %itable)
 ; A function's result is held until the statement ends.
 ; CHECK:      %[[R:[0-9]+]] = call { ptr, ptr } @pas.make(ptr null)
 ; CHECK-NEXT: call void @__pas_intf_clear(ptr %intf.tmp)
@@ -39,7 +39,7 @@
 ; CHECK:      exit:
 ; CHECK-NEXT: call void @__pas_exc_pop(ptr %excframe)
 ; CHECK-NEXT: call void @__pas_intf_clear(ptr %[[A]])
-; CHECK-NEXT: call void @__pas_intf_clear(ptr %l)
+; CHECK-NEXT: call void @__pas_intf_clear(ptr %l{{[0-9]+}})
 ; CHECK-NEXT: call void @__pas_intf_clear(ptr %intf.tmp)
 ; CHECK:      call void @__pas_writeln(ptr %file)
 ; CHECK-NEXT: call void @__pas_intf_clear(ptr %intf.tmp)

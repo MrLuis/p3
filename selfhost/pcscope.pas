@@ -19,6 +19,9 @@ type
     withClass: PType;      { a class scope: the class, else nil }
     withCtx: PWithContext;
     imports: TPtrList;     { of PScope: used units' interfaces (later win) }
+    { the outermost scope of a routine: a name found beyond it belongs
+      to an enclosing routine (or to the program) }
+    routineBoundary: boolean;
   end;
 
 function newScope(parent: PScope): PScope;
@@ -32,7 +35,9 @@ function scopeLookupOwn(s: PScope; name: PName): PDecl;
 function scopeInsert(s: PScope; name: PName; d: PDecl): PDecl;
 function scopeLookupLocal(s: PScope; name: PName): PDecl;
 { the innermost declaration of name visible from s; w receives the with
-  context if it is a field found through a with }
+  context if it is a field found through a with. A variable found in an
+  enclosing routine is marked as captured (whatever the caller then does
+  with it: every use of such a variable starts here). }
 function scopeLookup(s: PScope; name: PName; var w: PWithContext): PDecl;
 function scopeFind(s: PScope; name: PName): PDecl;
 { appends (PName) the names declared directly in s, including imports }
@@ -52,6 +57,7 @@ begin
   s^.withClass := nil;
   s^.withCtx := nil;
   listInit(s^.imports);
+  s^.routineBoundary := false;
   newScope := s;
 end;
 
@@ -128,18 +134,40 @@ begin
   scopeLookupLocal := nil;
 end;
 
+{ d was found in an enclosing routine's scope s: a variable of that
+  routine is captured, and so is the Self of the method whose members s
+  exposes. }
+procedure noteCaptured(s: PScope; d: PDecl);
+var
+  v: PDecl;
+begin
+  if (d^.kind = dkVar) and (d^.owner <> nil) then
+    d^.captured := true;
+  if (s^.withCtx <> nil) and (s^.withCtx^.rec^.kind = nkNameRef) then
+  begin
+    v := s^.withCtx^.rec^.refDecl;
+    if (v <> nil) and (v^.kind = dkVar) and (v^.owner <> nil) then
+      v^.captured := true;
+  end;
+end;
+
 function scopeLookup(s: PScope; name: PName; var w: PWithContext): PDecl;
 var
   d: PDecl;
+  outside: boolean;
 begin
+  outside := false;
   while s <> nil do
   begin
     d := scopeLookupLocal(s, name);
     if d <> nil then
     begin
       w := s^.withCtx;
+      if outside then
+        noteCaptured(s, d);
       exit(d);
     end;
+    outside := outside or s^.routineBoundary;
     s := s^.parent;
   end;
   scopeLookup := nil;

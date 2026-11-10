@@ -34,6 +34,10 @@ struct CodeGenOptions {
   bool DebugInfo = false;
   /// For the debug info's "optimized" flag.
   unsigned OptLevel = 0;
+  /// Local arrays, records and strings start zeroed (-fzero-init; the
+  /// default at -O0). Scalars, and what holds managed values or files,
+  /// always do.
+  bool ZeroInit = true;
   /// The units were compiled separately (each to its own object): their
   /// interface variables and routines are external symbols
   /// (pas.<unit>$<name>), and main calls their initialization functions

@@ -30,13 +30,15 @@ uses pcsys, pcutil, pcdiag, pclex, pcast, pctypes, pcir;
 procedure generateModule(prog: PDecl; const units: TPtrList; m: TLangMode;
                          rangeChecksOn, overflowChecksOn: boolean;
                          const sourceName, triple, dataLayout: string;
-                         debugInfo, optimized, separateUnits: boolean; var outText: TBuf);
+                         debugInfo, optimized, separateUnits, zeroInit: boolean;
+                         var outText: TBuf);
 { The module for unit u, compiled on its own (CodeGen.cpp's
   generateUnitModule); deps: the units it uses, dependency order. }
 procedure generateUnitModule(u: PDecl; const deps: TPtrList; m: TLangMode;
                              rangeChecksOn, overflowChecksOn: boolean;
                              const sourceName, triple, dataLayout: string;
-                             debugInfo, optimized: boolean; var outText: TBuf);
+                             debugInfo, optimized, zeroInit: boolean;
+                             var outText: TBuf);
 
 implementation
 
@@ -67,6 +69,10 @@ type
 var
   mode: TLangMode;
   optRange, optOverflow: boolean;
+  { local arrays, records and strings start zeroed (-fzero-init; the
+    default at -O0); scalars, and what holds managed values or files,
+    always do }
+  optZeroInit: boolean;
   progDecl: PDecl;
   curRoutine: PDecl;         { nil while emitting main }
   curFn: PIRFunc;
@@ -990,12 +996,19 @@ var
   frame, slot: TV;
   r: PDecl;
 begin
+  { a routine without a frame record (curFrame is null): nothing reads
+    the pointer }
   frame := curFrame;
   r := curRoutine;
   while (r <> target) and (r <> nil) do
   begin
-    slot := irStructGEP(frameType(r), frame, 0, '');
-    frame := irLoad(irPtrT, slot, 'link');
+    if not r^.cgLinkInFrame then { only the current routine: no nested ones }
+      frame := irArg(curFn, 0)
+    else
+    begin
+      slot := irStructGEP(frameType(r), frame, 0, '');
+      frame := irLoad(irPtrT, slot, 'link');
+    end;
     r := r^.parent;
   end;
   framePtrFor := frame;
@@ -1027,10 +1040,64 @@ begin
   inputFile := loadFile(standardFile('input'));
 end;
 
+{ Where a routine's variable v is kept (a by-reference parameter: the
+  pointer to it): a slot of its routine's frame record, or an alloca of
+  the current routine. }
+function varSlot(v: PDecl): TV;
+var
+  frame: TV;
+begin
+  if v^.cgInFrame then
+  begin
+    frame := framePtrFor(v^.owner);
+    exit(irStructGEP(frameType(v^.owner), frame, v^.cgSlot, nm(v^.ident.name)));
+  end;
+  { Sema marks every variable a nested routine can name }
+  if (v^.owner <> curRoutine) or (v^.cgLocal = nil) then
+  begin
+    diagFatal(noLoc, 'internal compiler error: variable ''' + nm(v^.ident.spelling) +
+                     ''' is not in the frame of its routine');
+    sysExit(1);
+  end;
+  varSlot := PTVBox(v^.cgLocal)^;
+end;
+
+{ Is v kept in its routine's frame record? Variables that nested routines
+  use are, and those that must be in memory when an exception arrives
+  through _longjmp: all of them in a routine where execution continues
+  afterwards (try statements, non-local labels), else the managed ones,
+  which are released on the way out. The other variables get an alloca
+  each, which the optimizer turns into registers. }
+function inFrame(v: PDecl; pinAll: boolean): boolean;
+begin
+  inFrame := pinAll or v^.captured or (not isByRef(v) and isManaged(v^.varType));
+end;
+
+{ The start value of a local variable or function result at addr: zero.
+  ISO leaves them undefined; this makes programs deterministic. Without
+  zero initialization (-fno-zero-init, the default from -O1) arrays,
+  records and strings are only cleared when they hold managed values or
+  files; a string starts empty. }
+procedure emitZeroInit(const addr: TV; t: PType);
+var
+  ty: PIRType;
+begin
+  ty := memType(t);
+  if not isStructured(t) then
+  begin
+    irStore(irZero(ty), addr);
+    exit;
+  end;
+  if optZeroInit or isManaged(t) or containsFile(t) then
+    emitMemSet(addr, i8c(0), i64c(ty^.size), ty^.align)
+  else if t^.kind = tyShortString then
+    irStore(i8c(0), addr);
+end;
+
 function varAddress(v: PDecl): TV;
 var
   owner: PDecl;
-  slot, frame: TV;
+  slot: TV;
 begin
   owner := v^.owner;
   { on E: TFoo do: E's storage (a temporary) }
@@ -1042,8 +1109,7 @@ begin
       exit(standardFile(nm(v^.ident.name)));
     exit(PTVBox(v^.cgValue)^);
   end;
-  frame := framePtrFor(owner);
-  slot := irStructGEP(frameType(owner), frame, v^.cgSlot, nm(v^.ident.name));
+  slot := varSlot(v);
   if isByRef(v) then
     exit(irLoad(irPtrT, slot, nm(v^.ident.name) + '.ref'));
   varAddress := slot;

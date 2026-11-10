@@ -1426,6 +1426,7 @@ var
   parentClass, owner: PType;
   name: TIdent;
   l: TLoc;
+  i: longint;
 begin
   resolveInherited := nil;
   nothing := false;
@@ -1437,6 +1438,15 @@ begin
     exit;
   end;
   e^.inhEnclosing := encl;
+  if encl <> curRoutine then
+  begin
+    { from a routine nested in the method: the call takes the method's
+      Self, and a bare inherited its parameters }
+    if encl^.selfVar <> nil then
+      encl^.selfVar^.captured := true;
+    for i := 0 to encl^.params.count - 1 do
+      PDecl(listGet(encl^.params, i))^.captured := true;
+  end;
   parentClass := encl^.ownerClass^.classParent;
   if identValid(e^.inhName) then
     name := e^.inhName
@@ -2026,6 +2036,8 @@ begin
       begin
         if enc = x then
         begin
+          if x <> curRoutine then { from a nested routine }
+            x^.resultVar^.captured := true;
           target^.refDecl := x^.resultVar;
           x^.resultAssigned := true;
           exit(x^.resultType);
@@ -2424,6 +2436,7 @@ procedure visitTry(s: PNode);
 var
   i, saved: longint;
 begin
+  markHasTry;
   directSequence := nil;
   visitSequence(s, s^.tryBody);
   if s^.isFinally then

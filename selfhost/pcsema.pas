@@ -1040,6 +1040,16 @@ end;
 function visitExpr(e: PNode): PType; forward;
 
 { Type-checks e once (later calls return the cached type). }
+{ The current routine has a try statement (see hasTry). }
+procedure markHasTry;
+begin
+  if curRoutine = nil then
+    exit;
+  curRoutine^.hasTry := true;
+  if curRoutine^.canonical <> nil then
+    curRoutine^.canonical^.hasTry := true;
+end;
+
 { The current routine computes a managed value (see usesManaged). }
 procedure markUsesManaged;
 begin
@@ -5089,7 +5099,10 @@ begin
   savedScope := cur;
   savedRoutine := curRoutine;
   if r^.isStatic then { a record's static method: its statics }
-    cur := newClassScope(cur, r^.ownerClass, nil)
+  begin
+    cur := newClassScope(cur, r^.ownerClass, nil);
+    cur^.routineBoundary := true;
+  end
   else if r^.methodKind <> mtNone then
   begin
     { a method sees the members of its class through Self }
@@ -5101,8 +5114,11 @@ begin
     w^.rec := selfRef;
     w^.isSelf := true;
     cur := newClassScope(cur, r^.ownerClass, w);
+    cur^.routineBoundary := true;
   end;
   cur := newScope(cur);
+  if cur^.parent = savedScope then
+    cur^.routineBoundary := true;
   curRoutine := r;
   if (r^.methodKind <> mtNone) and not r^.isStatic then
     scopeInsert(cur, r^.selfVar^.ident.name, r^.selfVar);

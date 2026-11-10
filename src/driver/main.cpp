@@ -110,6 +110,18 @@ static cl::opt<bool> NoRangeChecks(
     cl::desc("Disable runtime range checks (subranges, array indices, ...)"),
     cl::cat(PccCategory));
 
+static cl::opt<bool> ZeroInitOn(
+    "fzero-init",
+    cl::desc("Local arrays, records and strings start zeroed (the default "
+             "at -O0)"),
+    cl::cat(PccCategory));
+
+static cl::opt<bool> ZeroInitOff(
+    "fno-zero-init",
+    cl::desc("Do not zero local arrays, records and strings (the default "
+             "from -O1)"),
+    cl::cat(PccCategory));
+
 static cl::opt<bool>
     NoOverflowChecks("fno-overflow-checks",
                      cl::desc("Disable runtime integer overflow checks"),
@@ -156,6 +168,9 @@ int main(int argc, char **argv) {
   Opts.ErrorLimit = ErrorLimit;
   Opts.WarningsAsErrors = Werror;
   Opts.RangeChecks = !NoRangeChecks;
+  if (ZeroInitOn || ZeroInitOff) // the last one given wins
+    Opts.ZeroInit = !ZeroInitOff || (ZeroInitOn && ZeroInitOn.getPosition() >
+                                                       ZeroInitOff.getPosition());
   Opts.WarnUnusedVariables = !NoUnusedVariable;
   Opts.WarnDeprecated = !NoDeprecated;
   Opts.OverflowChecks = !NoOverflowChecks;

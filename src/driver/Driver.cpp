@@ -247,6 +247,7 @@ bool Driver::runPipeline(FileID FID) {
   CGOpts.Directives = &Directives;
   CGOpts.DebugInfo = Opts.DebugInfo;
   CGOpts.OptLevel = Opts.OptLevel;
+  CGOpts.ZeroInit = Opts.ZeroInit.value_or(Opts.OptLevel == 0);
   CGOpts.SeparateUnits = Opts.SeparateUnits;
 
   // Separately compiled units: their objects, next to their sources.
@@ -322,6 +323,7 @@ bool Driver::compileUnit(Parser &P, FileID FID, ASTContext &Ctx,
   CGOpts.Directives = &Directives;
   CGOpts.DebugInfo = Opts.DebugInfo;
   CGOpts.OptLevel = Opts.OptLevel;
+  CGOpts.ZeroInit = Opts.ZeroInit.value_or(Opts.OptLevel == 0);
   CGOpts.SeparateUnits = true;
   auto M = generateUnitModule(*Unit, Deps, SM, LangOpts, CGOpts, LLVMCtx, *TM,
                               SM.getFilename(FID));

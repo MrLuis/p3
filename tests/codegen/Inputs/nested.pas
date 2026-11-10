@@ -1,14 +1,23 @@
 program n;
 var g: integer;
 procedure outer(p: integer);
-var local: integer;
-  procedure inner;
+var local, own: integer;
+  procedure mid;
+    procedure inner;
+    begin
+      local := p + g
+    end;
   begin
-    local := p + g
+    inner
   end;
 begin
-  inner
+  own := 1;
+  mid
+end;
+function plain(a: integer): integer;
+begin
+  plain := a
 end;
 begin
-  outer(1)
+  outer(plain(1))
 end.

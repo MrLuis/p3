@@ -328,10 +328,21 @@ type
       number of labels in this routine targeted by non-local gotos }
     isUsed, resultAssigned: boolean;
     nonLocalLabels: longint;
+    { Sema: a routine's variable that a routine nested in it may use (it
+      lives in the routine's frame record, which nested routines reach
+      through their static link); a routine with a try statement (an
+      exception continues in it after a _longjmp, so code generation
+      keeps all its variables in memory) }
+    captured, hasTry: boolean;
     { code generation (pcgen): a static variable's address (a boxed value),
       a routine's function, frame type and jmp_buf slot, the frame slot of
       a local, a field's byte offset, a label's basic block }
     cgValue, cgFunc, cgFrame, cgBlock, cgDbg: pointer;
+    { a routine's variable: in its frame record (slot cgSlot), else in
+      an alloca (cgLocal, a boxed value); a routine whose frame record
+      starts with its static link }
+    cgInFrame, cgLinkInFrame: boolean;
+    cgLocal: pointer;
     { a cdecl routine's C entry (cthunk, a PIRFunc), or nil }
     cgThunk: pointer;
     { separate units: the external symbol of an interface variable or

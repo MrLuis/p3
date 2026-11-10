@@ -694,6 +694,15 @@ class Checker : public StmtVisitor<Checker>,
     return T;
   }
 
+  /// The current routine has a try statement (see hasTry).
+  void markHasTry() {
+    if (!CurRoutine)
+      return;
+    CurRoutine->setHasTry();
+    if (RoutineDecl *C = CurRoutine->getCanonical())
+      C->setHasTry();
+  }
+
   /// The current routine computes a managed value (see usesManaged).
   void markUsesManaged() {
     if (!CurRoutine)
@@ -3482,6 +3491,7 @@ class Checker : public StmtVisitor<Checker>,
       ClassScope = std::make_unique<Scope>(Cur, R->getClass(), nullptr);
     }
     Scope RoutineScope(ClassScope ? ClassScope.get() : Cur);
+    (ClassScope ? ClassScope.get() : &RoutineScope)->setRoutineBoundary();
     Scope *SavedScope = Cur;
     RoutineDecl *SavedRoutine = CurRoutine;
     Cur = &RoutineScope;
@@ -5091,6 +5101,8 @@ public:
       for (RoutineDecl *Enc = CurRoutine; Enc; Enc = Enc->getParent())
         for (RoutineDecl *X = R; X; X = X->getNextOverload()) // (overloads)
           if (Enc == X) {
+            if (X != CurRoutine) // from a nested routine
+              X->getResultVar()->setCaptured();
             Target->setDecl(X->getResultVar());
             ResultAssigned.insert(X);
             return X->getResultType();
@@ -5262,6 +5274,7 @@ public:
   }
 
   void visitTryStmt(TryStmt *S) {
+    markHasTry();
     DirectSequence = nullptr;
     visitSequence(S, S->getBody());
     if (S->isFinally()) {
@@ -6656,6 +6669,14 @@ public:
       return nullptr;
     }
     I->setEnclosing(Encl);
+    if (Encl != CurRoutine) {
+      // From a routine nested in the method: the call takes the method's
+      // Self, and a bare `inherited` its parameters.
+      if (VarDecl *Self = Encl->getSelfVar())
+        Self->setCaptured();
+      for (VarDecl *P : Encl->getParams())
+        P->setCaptured();
+    }
     ClassType *Parent = Encl->getClass()->getParent();
     const Identifier &Name = I->isBare() ? Encl->getName() : I->getName();
     const ClassType *Owner = nullptr;

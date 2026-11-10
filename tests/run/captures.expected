@@ -1,0 +1,11 @@
+levels: 33 13 6 12 ababab 3
+33
+fib calls: 177
+55
+12345:15
+guarded: too much at 6 last=4 acc=4 p.x=10 s=xxxx
+finally: last=7
+after finally: last=8
+fresh: 0 0.0 FALSE [] [] TRUE
+total=8/d
+30

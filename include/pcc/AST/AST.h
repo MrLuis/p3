@@ -1153,6 +1153,7 @@ private:
   /// descendants (VarClass: set by Sema).
   bool IsClassVar = false;
   ClassType *VarClass = nullptr;
+  bool Captured = false;        ///< set by Sema
 
 public:
   VarDecl(Identifier Name, TypeSpec *TS, VarKind VK = Variable)
@@ -1168,6 +1169,11 @@ public:
   bool isConstParam() const { return VK == ConstParam; }
   RoutineDecl *getOwner() const { return Owner; }
   void setOwner(RoutineDecl *R) { Owner = R; }
+  /// A routine's variable that a routine nested in it may use: it lives in
+  /// the routine's frame record, which nested routines reach through
+  /// their static link.
+  bool isCaptured() const { return Captured; }
+  void setCaptured() { Captured = true; }
   Expr *getInit() const { return Init; }
   void setInit(Expr *E) { Init = E; }
   /// A typed constant (static storage, initialized once), as opposed to an
@@ -1297,6 +1303,7 @@ class RoutineDecl final : public Decl {
   Block *Body;                  ///< null for a forward declaration
   bool IsForward;
   bool UsesManaged = false;
+  bool HasTry = false;
   bool Static = false;
   bool Inline = false;
   CallConv CC = CallConv::Default; ///< the directive written
@@ -1366,6 +1373,11 @@ public:
   /// leaves the routine.
   bool usesManaged() const { return UsesManaged; }
   void setUsesManaged() { UsesManaged = true; }
+  /// Does the body have a try statement? Then an exception continues in
+  /// the routine after a _longjmp, so code generation keeps all its
+  /// variables in memory.
+  bool hasTry() const { return HasTry; }
+  void setHasTry() { HasTry = true; }
   /// Nested routines get a hidden pointer to the parent's frame.
   bool hasStaticLink() const { return Parent != nullptr; }
   bool isExternal() const { return IsExternal; }
