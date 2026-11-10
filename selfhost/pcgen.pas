@@ -77,6 +77,12 @@ var
   curRoutine: PDecl;         { nil while emitting main }
   curFn: PIRFunc;
   curFrame: TV;
+  pinFn: PIRFunc;            { the function pinSlot belongs to; see pinInMemory }
+  pinSlot: TV;
+  { Are temporaries holding managed values pinned when they are made (see
+    pinInMemory)? In a routine without try statements they are pinned
+    later, if its body turns out to need protection. }
+  pinTemps: boolean;
   lowered: TIntMap;          { type id -> PIRType }
   ansiConsts: TIntMap;       { name id of the characters -> PTVBox of the .astr }
   stringConsts: TIntMap;     { name id of the bytes -> PTVBox of the global }
@@ -218,6 +224,15 @@ begin
       part := part + params[i];
   ignored := irDeclareFunction(name, typeOfSpec(ret), list, attrs, '');
   listFree(list);
+  { Can a call of it raise an exception? Those that raise one, and those
+    that may run a destructor (which is Pascal code): releasing an object
+    or an interface reference. }
+  if (name <> '__pas_raise') and (name <> '__pas_raise_divzero') and
+     (name <> '__pas_reraise') and (name <> '__pas_reraise_free') and
+     (name <> '__pas_free_object') and (name <> '__pas_free_instance') and
+     (name <> '__pas_intf_assign') and (name <> '__pas_intf_clear') and
+     (name <> '__pas_format_pstr') then
+    irSetNoRaise(ignored);
 end;
 
 { The runtime and C library functions, in the order of the C++ Runtime. }
@@ -387,7 +402,8 @@ begin
 end;
 
 { IRBuilder::CreateMemCpy / CreateMemMove / CreateMemSet }
-procedure memTransfer(const fname, paramText: string; const dst, src, n: TV);
+procedure memTransfer(const fname, paramText: string; const dst, src, n: TV;
+                      align: int64);
 var
   f: PIRFunc;
   a: TBuf;
@@ -403,26 +419,31 @@ begin
     listAdd(f^.params, irI1);
   end;
   bufInit(a);
-  irArgsAddAttr(a, dst, 'align 1');
-  irArgsAddAttr(a, src, 'align 1');
+  irArgsAddAttr(a, dst, 'align ' + intToStr(align));
+  irArgsAddAttr(a, src, 'align ' + intToStr(align));
   irArgsAdd(a, n);
   irArgsAdd(a, irConstBool(false));
   ignored := irCall(f, a, '');
   bufFree(a);
 end;
 
-procedure emitMemCpy(const dst, src, n: TV);
+procedure emitMemCpyAligned(const dst, src, n: TV; align: int64);
 begin
   memTransfer('llvm.memcpy.p0.p0.i64',
               'ptr noalias nocapture writeonly, ptr noalias nocapture readonly, i64, i1 immarg',
-              dst, src, n);
+              dst, src, n, align);
+end;
+
+procedure emitMemCpy(const dst, src, n: TV);
+begin
+  emitMemCpyAligned(dst, src, n, 1);
 end;
 
 procedure emitMemMove(const dst, src, n: TV);
 begin
   memTransfer('llvm.memmove.p0.p0.i64',
               'ptr nocapture writeonly, ptr nocapture readonly, i64, i1 immarg',
-              dst, src, n);
+              dst, src, n, 1);
 end;
 
 procedure emitMemSet(const dst, v, n: TV; align: int64);
@@ -672,9 +693,10 @@ begin
   irStore(x, p);
 end;
 
+{ Copies the array, record or string t: both are aligned as t is. }
 procedure copyAggregate(const dst, src: TV; t: PType);
 begin
-  emitMemCpy(dst, src, i64c(sizeOf_(t)));
+  emitMemCpyAligned(dst, src, i64c(sizeOf_(t)), memType(t)^.align);
 end;
 
 { The address of a private constant holding the bytes (no NUL), shared by
@@ -940,11 +962,21 @@ end;
 
 { --- Variables and frames --- }
 
+{ Is a function result of type t written through a pointer the caller
+  passes (to a temporary of its own), instead of being returned? Short
+  strings are: as a value LLVM would move all their 256 bytes, one by
+  one. The function's result variable is then that temporary. }
+function returnsByPointer(t: PType): boolean;
+begin
+  returnsByPointer := (t <> nil) and (t^.kind = tyShortString);
+end;
+
 function isByRef(v: PDecl): boolean;
 begin
   isByRef := ((v^.varKind = vkVarParam) and not (v^.varType^.kind in [tyArrayOfConst, tyOpenArray])) or
              (v^.varType^.kind = tyUntyped) or
-             ((v^.varKind = vkConstParam) and isStructured(v^.varType));
+             ((v^.varKind = vkConstParam) and isStructured(v^.varType)) or
+             ((v^.varKind = vkResult) and returnsByPointer(v^.varType));
 end;
 
 function isParamDecl(v: PDecl): boolean;
@@ -1092,6 +1124,26 @@ begin
     emitMemSet(addr, i8c(0), i64c(ty^.size), ty^.align)
   else if t^.kind = tyShortString then
     irStore(i8c(0), addr);
+end;
+
+{ Keeps the alloca addr in memory: what is stored there before an
+  exception is raised must be there when the routine continues after the
+  _setjmp that catches it, where _longjmp has put the registers back. LLVM
+  does not know that control arrives there from the protected code, and
+  would read values it has in registers; once the address has been stored
+  somewhere (a volatile store is never removed), it assumes that any call,
+  _setjmp too, reads and writes the alloca. Used for the frame record of a
+  routine that protects code and for the temporaries that hold managed
+  values (read when an exception leaves the routine, or by a later
+  statement). }
+procedure pinInMemory(const addr: TV);
+begin
+  if pinFn <> curFn then
+  begin
+    pinSlot := irCreateTemp(irPtrT, 'pin');
+    pinFn := curFn;
+  end;
+  irStoreVolatile(addr, pinSlot);
 end;
 
 function varAddress(v: PDecl): TV;
@@ -2274,6 +2326,8 @@ begin
   else
     slot := irCreateTempInit(v.t, 'intf.tmp', irZero(v.t));
   clearTemp(slot); { a loop's previous }
+  if pinTemps then
+    pinInMemory(slot);
   irStore(v, slot);
   listAdd(liveTemps, irBox(slot));
   if curRoutine <> nil then
@@ -2289,6 +2343,8 @@ var
 begin
   slot := irCreateTempInit(v.t, 'rec.tmp', irZero(v.t));
   finalizeValue(slot, t); { a loop's previous }
+  if pinTemps then
+    pinInMemory(slot);
   irStore(v, slot);
   slot.agg := t;
   listAdd(liveTemps, irBox(slot));
@@ -2371,7 +2427,7 @@ var
   i: longint;
   p: PDecl;
   arg: PNode;
-  v, tmp: TV;
+  v: TV;
   pt: PType;
 begin
   for i := 0 to args.count - 1 do
@@ -2403,15 +2459,10 @@ begin
     end
     else if pt^.kind = tyRoutine then
       irArgsAdd(buf, emitRoutineValue(arg))
-    else if (p^.varKind = vkConstParam) and (pt^.kind = tyShortString) then
-      irArgsAdd(buf, emitPStr(arg)) { read-only: no copy }
     else if (pt^.kind = tyShortString) and (p^.varKind <> vkVarParam) then
-    begin
-      { the callee copies maxLength+1 bytes: pass a full-size temporary }
-      tmp := newStringTemp(pt^.maxLength);
-      emitStringAssign(tmp, pt, arg);
-      irArgsAdd(buf, tmp);
-    end
+      { any string: a const parameter reads it there, a value parameter
+        copies what fits into its own variable }
+      irArgsAdd(buf, emitPStr(arg))
     else if (p^.varKind = vkVarParam) or isStructured(pt) then
       irArgsAdd(buf, emitAddress(arg))
     else if pt^.kind = tyAnsiString then
@@ -2433,9 +2484,16 @@ begin
     irArgsAdd(buf, link);
   if hasSelf then { methods }
     irArgsAdd(buf, self_);
+  if returnsByPointer(resTy) then
+  begin
+    tmp := irCreateTemp(memType(resTy), 'result');
+    irArgsAdd(buf, tmp);
+  end;
   emitArgValues(params, args, buf, false);
   res := irCallPtr(ret, callee, buf, '');
   bufFree(buf);
+  if returnsByPointer(resTy) then { expressions use a string's address }
+    exit(tmp);
   { a string or record result comes back by value; expressions use its
     address (an interface, (ptr, ptr), is a value) }
   if (ret^.kind = ikArray) or ((ret^.kind = ikStruct) and not irSameType(ret, routinePairT)) then
@@ -2491,7 +2549,7 @@ end;
 
 function retTypeOf(result_: PType): PIRType;
 begin
-  if result_ = nil then
+  if (result_ = nil) or returnsByPointer(result_) then
     retTypeOf := irVoidT
   else
     retTypeOf := regType(result_);
@@ -2639,7 +2697,7 @@ end;
 
 function methodFnType(r: PDecl): PIRType;
 begin
-  if r^.isFunction then
+  if r^.isFunction and not returnsByPointer(r^.resultType) then
     methodFnType := regType(r^.resultType)
   else
     methodFnType := irVoidT;
@@ -2659,9 +2717,7 @@ begin
     ret := 'void';
     params := 'ptr';
     attrs := 'nounwind';
-    if name = '__pas_exc_push' then
-      params := 'ptr,ptr'
-    else if name = '__pas_raise_divzero' then
+    if name = '__pas_raise_divzero' then
       attrs := 'cold noreturn nounwind'
     else if (name = '__pas_raise') or (name = '__pas_reraise_free') then
     begin
@@ -2692,27 +2748,28 @@ begin
 end;
 
 { Pushes a new PasExcFrame and calls _setjmp on it: an exception raised to
-  the frame continues at landing, the protected code in a new block named
-  bodyName (the insertion point). Returns the frame. }
-function emitProtect(landing: PIRBlock; const bodyName: string): TV;
+  the frame continues at landing, the protected code in body (the
+  insertion point). Returns the frame. }
+function emitProtectIn(landing, body: PIRBlock; const bodyName: string): TV;
 var
-  f, frame, r: TV;
-  body: PIRBlock;
+  f, r: TV;
 begin
   f := irCreateTemp(excFrameT, 'excframe');
-  { the routine's frame goes along so that the optimizer keeps its
-    variables in memory, where _longjmp does not undo their changes }
-  if curRoutine <> nil then
-    frame := curFrame
-  else
-    frame := irNull;
-  excCall2('__pas_exc_push', f, frame);
+  excCall1('__pas_exc_push', f);
   r := call1(rtFn('_setjmp'), irStructGEP(excFrameT, f, 3, ''), 'jmp');
-  body := irNewBlock(bodyName);
+  if body = nil then
+    body := irNewBlock(bodyName);
   irCondBr(irICmp('ne', r, i32c(0), ''), landing, body, false);
   irSetInsertPoint(body);
-  emitProtect := f;
+  emitProtectIn := f;
 end;
+
+{ The same, the protected code in a new block named bodyName. }
+function emitProtect(landing: PIRBlock; const bodyName: string): TV;
+begin
+  emitProtect := emitProtectIn(landing, nil, bodyName);
+end;
+
 
 { "file:line:col" for the runtime's exception functions, or null. }
 function whereText(loc: TLoc): TV;
@@ -3017,6 +3074,23 @@ begin
   counted := isInterfacedClass(ctor^.ownerClass);
   if counted then
     intfCall1('__pas_interfaced_construct', obj);
+  if irNoRaise(fnOf(ctor)) then { nothing to protect against }
+  begin
+    bufInit(buf);
+    irArgsAdd(buf, irNull);
+    irArgsAdd(buf, obj);
+    if argBuf.len > 0 then
+    begin
+      bufAdd(buf, ', ');
+      bufAddChars(buf, argBuf.data, 0, argBuf.len);
+    end;
+    ignored := irCall(fnOf(ctor), buf, '');
+    bufFree(buf);
+    bufFree(argBuf);
+    if counted then
+      intfCall1('__pas_interfaced_constructed', obj);
+    exit(obj);
+  end;
   failed := irNewBlock('ctor.raise');
   f := emitProtect(failed, 'ctor.call');
   bufInit(buf);

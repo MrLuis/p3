@@ -24,6 +24,14 @@ std::unique_ptr<llvm::TargetMachine>
 createTargetMachine(llvm::StringRef Triple, unsigned OptLevel,
                     DiagnosticsEngine &Diags);
 
+/// Links the runtime's LLVM IR (libpascalrt.ll, at Path) into M, so that
+/// the optimizer can inline the runtime's functions; they stay
+/// available_externally, and calls that are not inlined go to the library.
+/// Without the file M stays as it is; a file that cannot be read is
+/// reported as a warning.
+void linkRuntimeIR(llvm::Module &M, llvm::StringRef Path,
+                   DiagnosticsEngine &Diags);
+
 /// Runs the standard LLVM -O0..-O3 module pipeline.
 void optimizeModule(llvm::Module &M, llvm::TargetMachine &TM, unsigned OptLevel);
 

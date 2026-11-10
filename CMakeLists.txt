@@ -37,7 +37,7 @@ if(PCC_LINK_LLVM_DYLIB AND TARGET LLVM)
   set(PCC_LLVM_LIBS LLVM)
 else()
   llvm_map_components_to_libnames(PCC_LLVM_LIBS
-    core support target targetparser passes mc native
+    core support target targetparser passes mc native irreader linker
     ${LLVM_TARGETS_TO_BUILD})
 endif()
 

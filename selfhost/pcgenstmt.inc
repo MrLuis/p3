@@ -441,8 +441,26 @@ begin
   storeValue(addr, v, t);
 end;
 
+{ If value is target + x, for a short string variable target named in both
+  places: x. }
+function appendedTo(target, value: PNode): PNode;
+var
+  l: PNode;
+begin
+  appendedTo := nil;
+  if (target^.kind <> nkNameRef) or (value^.kind <> nkBinary) or (value^.bop <> boAdd) or
+     (value^.opDecl <> nil) or (value^.typ^.kind <> tyShortString) then
+    exit;
+  l := value^.lhs;
+  if (l^.kind <> nkNameRef) or (target^.refDecl = nil) or (target^.refDecl^.kind <> dkVar) or
+     (l^.refDecl <> target^.refDecl) or (target^.refWith <> nil) or (l^.refWith <> nil) then
+    exit;
+  appendedTo := value^.rhs;
+end;
+
 procedure visitAssign(s: PNode);
 var
+  more: PNode;
   target, value: PNode;
   tt: PType;
   dst, src, pair, v: TV;
@@ -459,7 +477,16 @@ begin
   end;
   if tt^.kind = tyShortString then
   begin
-    emitStringAssign(emitAddress(target), tt, value);
+    dst := emitAddress(target);
+    more := appendedTo(target, value);
+    if more <> nil then
+    begin
+      { s := s + x: x goes to the end of s, without a temporary }
+      src := emitPStr(more);
+      astrV3('__pas_str_append', 'ptr,i32,ptr', dst, i32c(tt^.maxLength), src);
+      exit;
+    end;
+    emitStringAssign(dst, tt, value);
     exit;
   end;
   if tt^.kind = tyAnsiString then
@@ -1485,13 +1512,15 @@ begin
   listAdd(params, irPtrT);
   if hasSelf(r) then
     listAdd(params, irPtrT);
+  if r^.isFunction and returnsByPointer(r^.resultType) then
+    listAdd(params, irPtrT); { where the result goes }
   for j := 0 to r^.params.count - 1 do
     listAdd(params, paramIRType(PDecl(listGet(r^.params, j))));
 end;
 
 function routineRetType(r: PDecl): PIRType;
 begin
-  if r^.isFunction then
+  if r^.isFunction and not returnsByPointer(r^.resultType) then
     routineRetType := regType(r^.resultType)
   else
     routineRetType := irVoidT;
@@ -1678,7 +1707,7 @@ procedure declareCThunk(r: PDecl; const sym: string);
 var
   params: TPtrList;
   target, t: PIRFunc;
-  i: longint;
+  i, first: longint;
 begin
   if not isCDecl(r) or (r^.methodKind <> mtNone) or (r^.parent <> nil) then
     exit;
@@ -1688,8 +1717,11 @@ begin
     listAdd(params, listGet(target^.params, i));
   t := irCreateFunction('cthunk.' + sym, 'internal', target^.ret, params);
   listFree(params);
+  first := 0;
+  if r^.isFunction and returnsByPointer(r^.resultType) then
+    first := 1;
   for i := 0 to r^.params.count - 1 do
-    irSetArgName(t, i, nm(PDecl(listGet(r^.params, i))^.ident.name));
+    irSetArgName(t, i + first, nm(PDecl(listGet(r^.params, i))^.ident.name));
   r^.cgThunk := t;
   listAdd(thunksToEmit, r);
 end;
@@ -1885,6 +1917,11 @@ begin
       irSetArgName(f, 1, 'self');
       argNo := 2;
     end;
+    if r^.isFunction and returnsByPointer(r^.resultType) then
+    begin
+      irSetArgName(f, argNo, 'result.ptr');
+      argNo := argNo + 1;
+    end;
     for j := 0 to r^.params.count - 1 do
     begin
       p := PDecl(listGet(r^.params, j));
@@ -1958,9 +1995,10 @@ var
   p, v, res: PDecl;
   arg, slot, ret, excFrame: TV;
   f: PIRFunc;
-  entry, raised, retB: PIRBlock;
+  entry, raised, retB, beforeBody, bodyB: PIRBlock;
+  savedLoc: PMeta;
   managedAddrs, managedTypes: TPtrList; { of PTVBox / PType }
-  managedResult: boolean;
+  managedResult, resultByPointer: boolean;
   locals: TPtrList; { of PDecl: the local variables and the result }
 
   { an alloca for x unless it is in the frame record }
@@ -2011,6 +2049,10 @@ begin
     curFrame := irAlloca(frameT, 'frame')
   else
     curFrame := irNull;
+  { execution continues here after an exception (see inFrame) }
+  pinTemps := r^.hasTry or hasNonLocalLabels(r^.body);
+  if (frameT <> nil) and pinTemps then
+    pinInMemory(curFrame);
   listInit(locals); { start from zero }
   for i := 0 to r^.body^.decls.count - 1 do
   begin
@@ -2028,10 +2070,12 @@ begin
     addLocal(PDecl(listGet(locals, i)), false);
   if dbgOn then
     declareFrameVariables(r);
+  resultByPointer := r^.isFunction and isByRef(r^.resultVar);
   for i := 0 to locals.count - 1 do
   begin
     v := PDecl(listGet(locals, i));
-    emitZeroInit(varSlot(v), v^.varType);
+    if (v <> r^.resultVar) or not resultByPointer then
+      emitZeroInit(varSlot(v), v^.varType);
   end;
   if r^.cgLinkInFrame then
     irStore(irArg(f, 0), irStructGEP(frameT, curFrame, 0, ''));
@@ -2041,6 +2085,12 @@ begin
     irStore(irArg(f, 1), varSlot(r^.selfVar));
     argNo := 2;
   end;
+  if resultByPointer then { the caller's temporary }
+  begin
+    irStore(irArg(f, argNo), varSlot(r^.resultVar));
+    argNo := argNo + 1;
+    emitZeroInit(varAddress(r^.resultVar), r^.resultVar^.varType);
+  end;
   for i := 0 to r^.params.count - 1 do
   begin
     p := PDecl(listGet(r^.params, i));
@@ -2048,6 +2098,9 @@ begin
     slot := varSlot(p);
     if isByRef(p) then
       irStore(arg, slot)
+    else if p^.varType^.kind = tyShortString then
+      { value semantics: the characters in use, cut to fit }
+      rtv3('__pas_str_assign', slot, i32c(p^.varType^.maxLength), arg)
     else if isStructured(p^.varType) then
       copyAggregate(slot, arg, p^.varType) { value semantics }
     else
@@ -2088,17 +2141,43 @@ begin
   initFileVars(r^.body^.decls, false);
   if r^.cgJmpSlot >= 0 then
     emitSetJmpDispatch(r^.body, irStructGEP(frameT, curFrame, r^.cgJmpSlot, ''));
-  { an exception leaving the routine releases them too (and the result) }
+  { an exception leaving the routine releases them too (and the result):
+    the body runs protected, in a block of its own. Whether it needs to is
+    only known once it is emitted (can anything it calls raise?), so the
+    block before it is finished afterwards. }
   raised := nil;
+  beforeBody := nil;
   if (managedAddrs.count > 0) or managedResult or r^.usesManaged then
   begin
-    raised := irNewBlock('managed.raise');
-    excFrame := emitProtect(raised, 'managed.body');
+    beforeBody := irInsertBlock;
+    bodyB := irNewBlock('managed.body');
+    irSetInsertPoint(bodyB);
   end;
   listClear(routineTemps);
   exitBlock := irNewBlock('exit');
   visitStmt(r^.body^.body);
   irBr(exitBlock);
+  if beforeBody <> nil then
+  begin
+    savedLoc := irDebugLoc;
+    irSetInsertPoint(beforeBody);
+    setDebugLoc(bodyLoc(r));
+    if irMayRaise then
+    begin
+      if not pinTemps then { what the landing releases }
+      begin
+        if frameT <> nil then
+          pinInMemory(curFrame);
+        for i := 0 to routineTemps.count - 1 do
+          pinInMemory(PTVBox(listGet(routineTemps, i))^);
+      end;
+      raised := irNewBlock('managed.raise');
+      excFrame := emitProtectIn(raised, bodyB, '');
+    end
+    else
+      irBr(bodyB);
+    irSetDebugLoc(savedLoc);
+  end;
   irSetInsertPoint(exitBlock);
   if raised <> nil then
     excCall1('__pas_exc_pop', excFrame);
@@ -2121,7 +2200,7 @@ begin
     irSetInsertPoint(retB);
   end;
   listClear(routineTemps);
-  if r^.isFunction then
+  if r^.isFunction and not resultByPointer then
   begin
     res := r^.resultVar;
     slot := varSlot(res);
@@ -2130,6 +2209,9 @@ begin
   end
   else
     irRetVoid;
+  if not irMayRaise then
+    irSetNoRaise(f);
+  pinTemps := true;
 end;
 
 { --- Separate units (S11) --- }
@@ -2284,6 +2366,8 @@ begin
   optRange := rangeChecksOn;
   optOverflow := overflowChecksOn;
   curRoutine := nil;
+  pinFn := nil;
+  pinTemps := true;
   mapInit(lowered);
   mapInit(stringConsts);
   mapInit(ansiConsts);

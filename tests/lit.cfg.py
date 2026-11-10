@@ -57,6 +57,14 @@ config.substitutions.append(("%selfhost-flags", selfhost_flags))
 # to it (before %pcc, which is a prefix of it).
 config.substitutions.append(
     ("%pcc-runtime-lib", os.path.join(config.pcc_obj_root, "lib", "libpascalrt.a")))
+# %pcc-runtime-ir: this build's runtime as LLVM IR, which pcc inlines from
+# at -O1 and up (before %pcc-runtime-lib and %pcc, prefixes of it). CMake
+# builds it when this LLVM has clang and llvm-link; tests that need it say
+# REQUIRES: runtime-ir.
+runtime_ir = os.path.join(config.pcc_obj_root, "lib", "libpascalrt.ll")
+if os.path.exists(runtime_ir):
+    config.available_features.add("runtime-ir")
+config.substitutions.insert(0, ("%pcc-runtime-ir", runtime_ir))
 config.substitutions.append(("%pcc-unittests",
                              os.path.join(config.pcc_tools_dir, "pcc-unittests")))
 # Always disable colors so output is stable when run from a terminal.
@@ -69,7 +77,7 @@ pcc_under_test = os.environ.get("PCC_UNDER_TEST") or \
 config.substitutions.append(("%pcc-project", pcc_under_test + " -fdiagnostics-color=never"))
 config.substitutions.append(("%pcc", pcc_under_test + " -fdiagnostics-color=never --no-project"))
 # The tools and runtime pcc uses, if set.
-for var in ("PCC_RUNTIME_LIB", "PCC_CC", "PCC_UNIT_DIR"):
+for var in ("PCC_RUNTIME_LIB", "PCC_RUNTIME_IR", "PCC_CC", "PCC_UNIT_DIR"):
     if os.environ.get(var):
         config.environment[var] = os.environ[var]
 # This build's unit library, whichever compiler is under test (a self-hosted

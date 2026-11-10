@@ -21,6 +21,14 @@ std::string pcc::findRuntimeLibrary() {
   return std::string(Path);
 }
 
+std::string pcc::findRuntimeIR() {
+  if (auto Env = llvm::sys::Process::GetEnv("PCC_RUNTIME_IR"))
+    return *Env;
+  llvm::SmallString<256> Path(llvm::sys::path::parent_path(findRuntimeLibrary()));
+  llvm::sys::path::append(Path, "libpascalrt.ll");
+  return std::string(Path);
+}
+
 std::string pcc::findUnitLibrary() {
   if (auto Env = llvm::sys::Process::GetEnv("PCC_UNIT_DIR"))
     return *Env;

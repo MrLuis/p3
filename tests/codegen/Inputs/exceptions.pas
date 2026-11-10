@@ -26,7 +26,21 @@ begin
   end;
 end;
 
+type
+  TRisky = class
+    constructor Make(n: integer);
+  end;
+var
+  r: TRisky;
+
+constructor TRisky.Make(n: integer);
+begin
+  if n = 0 then
+    raise Exception.Create('no');
+end;
+
 begin
   P(1);
   t := TThing.Make;
+  r := TRisky.Make(1);
 end.

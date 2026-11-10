@@ -133,6 +133,7 @@ begin
   helpLine('    =always                    -   Always');
   helpLine('    =never                     -   Never');
   helpLine('  --ferror-limit=<N>           - Stop after N errors (0 = no limit)');
+  helpLine('  --fno-inline-runtime         - Do not inline the runtime''s functions (from -O1 they are, when compiling for the host)');
   helpLine('  --fno-overflow-checks        - Disable runtime integer overflow checks');
   helpLine('  --fno-range-checks           - Disable runtime range checks (subranges, array indices, ...)');
   helpLine('  --fno-zero-init              - Do not zero local arrays, records and strings (the default from -O1)');
@@ -151,13 +152,13 @@ begin
 end;
 
 const
-  numFlags = 19;
+  numFlags = 20;
   flagNames: array[1..numFlags] of string[20] = (
     'help', 'help-list', 'version', 'emit-tokens', 'emit-ast', 'emit-parse-tree',
     'emit-llvm', 'S', 'c', 'Werror', 'Wno-unused-variable', 'Wno-deprecated',
     'fno-overflow-checks',
     'fno-range-checks', 'fseparate-units', 'g', 'no-project', 'fzero-init',
-    'fno-zero-init');
+    'fno-zero-init', 'fno-inline-runtime');
   numValueOpts = 11;
   valueOptNames: array[1..numValueOpts] of string[20] = (
     'o', 'mode', 'fdiagnostics-color', 'ferror-limit', 'target', 'I', 'O', 'L', 'l',
@@ -458,6 +459,8 @@ begin
       rangeChecksOn := false
     else if name = 'fno-overflow-checks' then
       overflowChecksOn := false
+    else if name = 'fno-inline-runtime' then
+      disableRuntimeInlining
     else if name = 'fzero-init' then
       zeroInitOpt := 1
     else if name = 'fno-zero-init' then

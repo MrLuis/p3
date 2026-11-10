@@ -23,13 +23,11 @@
 ; CHECK-NEXT: %obj = load ptr, ptr %[[A]], align 8
 ; CHECK-NEXT: call void @__pas_intf_addref(ptr %obj)
 ; CHECK-NOT:  __pas_intf_addref
-; CHECK:      call void @__pas_exc_push(ptr %excframe, ptr %frame)
+; What the landing releases is pinned: the frame and the temporaries.
+; CHECK:      store volatile ptr %frame, ptr %pin, align 8
+; CHECK-NEXT: store volatile ptr %intf.tmp, ptr %pin, align 8
+; CHECK-NEXT: call void @__pas_exc_push(ptr %excframe)
 ; CHECK:      br i1 %{{[0-9]+}}, label %managed.raise, label %managed.body
-; CHECK:      managed.raise:
-; CHECK-NEXT: call void @__pas_intf_clear(ptr %[[A]])
-; CHECK-NEXT: call void @__pas_intf_clear(ptr %l{{[0-9]+}})
-; CHECK-NEXT: call void @__pas_intf_clear(ptr %intf.tmp)
-; CHECK-NEXT: call void @__pas_reraise(ptr %excframe)
 ; Assignment: references the new object, releases the old one.
 ; CHECK:      call void @__pas_intf_assign(ptr %l{{[0-9]+}}, ptr %obj{{[0-9]+}}, ptr %itable)
 ; A function's result is held until the statement ends.
@@ -43,6 +41,11 @@
 ; CHECK-NEXT: call void @__pas_intf_clear(ptr %intf.tmp)
 ; CHECK:      call void @__pas_writeln(ptr %file)
 ; CHECK-NEXT: call void @__pas_intf_clear(ptr %intf.tmp)
+; CHECK:      managed.raise:
+; CHECK-NEXT: call void @__pas_intf_clear(ptr %[[A]])
+; CHECK-NEXT: call void @__pas_intf_clear(ptr %l{{[0-9]+}})
+; CHECK-NEXT: call void @__pas_intf_clear(ptr %intf.tmp)
+; CHECK-NEXT: call void @__pas_reraise(ptr %excframe)
 
 ; The cleanup function releases the class's own interface fields.
 ; CHECK-LABEL: define internal void @cleanup.ta(ptr %self)

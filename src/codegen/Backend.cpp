@@ -4,9 +4,12 @@
 #include "llvm/IR/LegacyPassManager.h"
 #include "llvm/IR/Module.h"
 #include "llvm/IR/Verifier.h"
+#include "llvm/IRReader/IRReader.h"
+#include "llvm/Linker/Linker.h"
 #include "llvm/MC/TargetRegistry.h"
 #include "llvm/Passes/PassBuilder.h"
 #include "llvm/Support/FileSystem.h"
+#include "llvm/Support/SourceMgr.h"
 #include "llvm/Support/TargetSelect.h"
 #include "llvm/Support/raw_ostream.h"
 #include "llvm/Target/TargetMachine.h"
@@ -49,6 +52,25 @@ pcc::createTargetMachine(llvm::StringRef Triple, unsigned OptLevel,
   if (!TM)
     Diags.error("could not create target machine for '" + Triple + "'");
   return TM;
+}
+
+void pcc::linkRuntimeIR(llvm::Module &M, llvm::StringRef Path,
+                        DiagnosticsEngine &Diags) {
+  if (!llvm::sys::fs::exists(Path))
+    return;
+  llvm::SMDiagnostic Err;
+  std::unique_ptr<llvm::Module> RT = llvm::parseIRFile(Path, Err, M.getContext());
+  if (!RT) {
+    Diags.warning("cannot read the runtime's LLVM IR '" + Path + "' (" +
+                  Err.getMessage() + "); runtime functions are not inlined");
+    return;
+  }
+  // The file has no target of its own (utils/gen-runtime-ir.py).
+  RT->setTargetTriple(M.getTargetTriple());
+  RT->setDataLayout(M.getDataLayout());
+  if (llvm::Linker::linkModules(M, std::move(RT)))
+    Diags.warning("cannot link the runtime's LLVM IR '" + Path +
+                  "'; runtime functions are not inlined");
 }
 
 void pcc::optimizeModule(llvm::Module &M, llvm::TargetMachine &TM,

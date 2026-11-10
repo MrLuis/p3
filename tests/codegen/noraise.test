@@ -1,0 +1,34 @@
+; A routine with managed variables or temporaries (ansistrings, COM
+; interfaces) releases them when an exception leaves it, so its body runs
+; protected (__pas_exc_push, _setjmp) -- unless nothing it calls can raise:
+; the runtime's string functions cannot, and neither can a routine emitted
+; before that was found not to. Calls through procedural values and of
+; routines that raise can.
+; RUN: %pcc --mode=objfpc --emit-llvm %S/Inputs/noraise.pas -o - | FileCheck %s
+
+; CHECK-LABEL: define internal ptr @pas.join(
+; CHECK-NOT:   __pas_exc_push
+; CHECK-NOT:   store volatile
+; CHECK:       br label %managed.body
+; CHECK-NOT:   managed.raise
+
+; CHECK-LABEL: define internal ptr @pas.twice(
+; CHECK-NOT:   __pas_exc_push
+; CHECK:       call ptr @pas.join(
+; CHECK-NOT:   managed.raise
+
+; CHECK-LABEL: define internal ptr @pas.checked(
+; The frame and the temporaries are pinned, then the body is protected.
+; CHECK:       store volatile ptr %frame, ptr %pin
+; CHECK:       store volatile ptr %astr.tmp{{[0-9]*}}, ptr %pin
+; CHECK:       call void @__pas_exc_push(ptr %excframe)
+; CHECK:       br i1 %{{[0-9]+}}, label %managed.raise, label %managed.body
+; CHECK:       managed.raise:
+; CHECK:       call void @__pas_reraise(ptr %excframe)
+
+; CHECK-LABEL: define internal ptr @pas.outer(
+; CHECK:       call void @__pas_exc_push(ptr %excframe)
+; CHECK:       call ptr @pas.checked(
+
+; CHECK-LABEL: define internal ptr @pas.through(
+; CHECK:       call void @__pas_exc_push(ptr %excframe)

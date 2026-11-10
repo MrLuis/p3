@@ -340,8 +340,14 @@ bool Driver::finishModule(llvm::Module &Mod, llvm::TargetMachine &TMRef,
   // run target-registered passes (AArch64 adds a loop pass whose
   // LoopSimplify reshapes loops), making -O0 IR differ between targets
   // and from the self-hosted compiler's (SELFHOST.md S10).
-  if (Opts.OptLevel > 0)
+  if (Opts.OptLevel > 0) {
+    // The runtime's IR is built for the host.
+    if (Opts.InlineRuntime &&
+        llvm::Triple(Opts.TargetTriple) ==
+            llvm::Triple(llvm::sys::getDefaultTargetTriple()))
+      linkRuntimeIR(*M, findRuntimeIR(), Diags);
     optimizeModule(*M, *TM, Opts.OptLevel);
+  }
 
   switch (Opts.Act) {
   case Action::EmitLLVM:

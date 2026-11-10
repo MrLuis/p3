@@ -21,7 +21,7 @@
 ; CHECK-NEXT: }
 
 ; The optimizer keeps the observable runtime calls.
-; RUN: %pcc --emit-llvm -O2 %S/Inputs/write.pas -o - | FileCheck --check-prefix=O2 %s
+; RUN: %pcc --emit-llvm -O2 -fno-inline-runtime %S/Inputs/write.pas -o - | FileCheck --check-prefix=O2 %s
 ; O2: define {{.*}}i32 @main(
 ; O2: call void @__pas_write_char(ptr {{.*}}, i8 97, i32 0)
 ; O2: call void @__pas_writeln(ptr

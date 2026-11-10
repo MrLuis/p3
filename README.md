@@ -202,6 +202,11 @@ exception is a runtime error that names the class, where it was raised and
 the message (`Runtime error: unhandled exception EParse at p.pas:12:5: not
 a digit`); `finally` parts run first. Exceptions are `_setjmp`/`_longjmp`
 based: each `try` statement pushes a frame on a stack kept by the runtime.
+So does a routine with ansistring or interface variables or temporaries,
+which it releases when an exception leaves it, unless nothing it calls can
+raise one (the runtime's string functions cannot, nor can a routine
+compiled before it that was found not to; a call through a procedural
+value, of a virtual method or of an external routine can).
 
 Units are compiled into the program by default. They can also be compiled
 separately: `pcc --mode=tp -c unit.pas` writes `unit.o` (its interface
@@ -468,6 +473,16 @@ even? true
   override with `PCC_CC`. The runtime library is found at
   `<pcc dir>/../lib/libpascalrt.a` (override with `PCC_RUNTIME_LIB`), the
   unit library at `<pcc dir>/../lib/pascal` (override with `PCC_UNIT_DIR`).
+- Optional: LLVM's own `clang` and `llvm-link` (in the LLVM tools
+  directory). With them the build also writes the runtime as LLVM IR,
+  `lib/libpascalrt.ll`, next to the library (override with
+  `PCC_RUNTIME_IR`). From `-O1`, when compiling for the host, pcc links
+  that file into the program's module before optimizing it, so that the
+  runtime's small functions (reference counting, string assignment and
+  comparison, exception frames, type tests) are inlined; the program still
+  links the library, which the calls that are not inlined go to. Without
+  the file, or with `-fno-inline-runtime`, every runtime function is
+  called.
 
 ## Build & test
 

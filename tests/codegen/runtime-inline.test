@@ -1,0 +1,28 @@
+; From -O1, when compiling for the host, the runtime's LLVM IR
+; (libpascalrt.ll) is linked into the module before it is optimized, so
+; that small runtime functions are inlined: here the exception frame's push
+; and pop and a string assignment. -fno-inline-runtime, -O0 and a missing
+; file leave the calls.
+; REQUIRES: runtime-ir
+; RUN: env PCC_RUNTIME_IR=%pcc-runtime-ir %pcc --mode=objfpc -O2 --emit-llvm %S/Inputs/exceptions.pas -o - | FileCheck %s
+; CHECK-NOT: call void @__pas_exc_push
+; CHECK-NOT: call void @__pas_exc_pop
+; CHECK:     @__pas_exc_top
+; The runtime's functions are not defined in the module: the program links
+; the library's.
+; CHECK-NOT: define {{.*}}@__pas_
+; RUN: env PCC_RUNTIME_IR=%pcc-runtime-ir %pcc --mode=objfpc -O2 -fno-inline-runtime --emit-llvm %S/Inputs/exceptions.pas -o - | FileCheck --check-prefix=CALLS %s
+; RUN: env PCC_RUNTIME_IR=%t.missing.ll %pcc --mode=objfpc -O2 --emit-llvm %S/Inputs/exceptions.pas -o - | FileCheck --check-prefix=CALLS %s
+; RUN: env PCC_RUNTIME_IR=%pcc-runtime-ir %pcc --mode=objfpc --emit-llvm %S/Inputs/exceptions.pas -o - | FileCheck --check-prefix=CALLS %s
+; CALLS: call void @__pas_exc_push
+; A file that is not LLVM IR: a warning, and the calls stay.
+; RUN: echo nonsense > %t.bad.ll
+; RUN: env PCC_RUNTIME_IR=%t.bad.ll %pcc --mode=objfpc -O2 --emit-llvm %S/Inputs/exceptions.pas -o %t.out.ll 2> %t.err
+; RUN: FileCheck --check-prefix=WARN %s < %t.err
+; RUN: FileCheck --check-prefix=CALLS %s < %t.out.ll
+; (The self-hosted compiler cuts the message at 255 characters.)
+; WARN: warning: cannot read the runtime's LLVM IR '{{.*}}bad.ll' (
+; The program runs the same.
+; RUN: env PCC_RUNTIME_IR=%pcc-runtime-ir %pcc --mode=objfpc -O2 %S/../run/exceptions.pas -o %t.exe
+; RUN: %t.exe > %t.run.out
+; RUN: diff %S/../run/exceptions.expected %t.run.out

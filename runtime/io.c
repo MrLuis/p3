@@ -44,15 +44,18 @@ struct PasFile {
   struct PasFile *next;  /* all files, for flushing at exit */
 };
 
-static struct PasFile std_input, std_output;
-PasFile *__pas_input = &std_input;
-PasFile *__pas_output = &std_output;
-static struct PasFile *all_files;
+/* The runtime's variables are not static: its code is also linked into
+ * optimized programs as LLVM IR (libpascalrt.ll) and inlined there, and
+ * must then use the same variables as the library's copy. */
+struct PasFile __pas_std_input, __pas_std_output;
+PasFile *__pas_input = &__pas_std_input;
+PasFile *__pas_output = &__pas_std_output;
+struct PasFile *__pas_all_files;
 /* Set by main() in --mode=tp: field widths never truncate, and booleans
  * print as TRUE/FALSE (Turbo/FPC conventions). */
 int32_t __pas_tp_mode;
-static int prog_argc;
-static char **prog_argv;
+int __pas_prog_argc;
+char **__pas_prog_argv;
 
 void __pas_runtime_error(const char *msg) {
   fflush(stdout);
@@ -64,26 +67,26 @@ static void file_error(const PasFile *f, const char *what) {
   char msg[512];
   snprintf(msg, sizeof msg, "%s (file '%s')", what,
            f->name             ? f->name
-           : f == &std_input   ? "input"
-           : f == &std_output  ? "output"
+           : f == &__pas_std_input   ? "input"
+           : f == &__pas_std_output  ? "output"
                                : "<internal>");
   __pas_runtime_error(msg);
 }
 
-static unsigned char std_buf_in, std_buf_out;
+unsigned char __pas_std_buf_in, __pas_std_buf_out;
 
 void __pas_init(int32_t argc, char **argv) {
-  prog_argc = argc;
-  prog_argv = argv;
-  std_input = (struct PasFile){.fp = stdin, .mode = MODE_INSPECT, .is_text = 1,
-                               .is_std = 1, .elem_size = 1, .buf = &std_buf_in};
-  std_output = (struct PasFile){.fp = stdout, .mode = MODE_GENERATE,
+  __pas_prog_argc = argc;
+  __pas_prog_argv = argv;
+  __pas_std_input = (struct PasFile){.fp = stdin, .mode = MODE_INSPECT, .is_text = 1,
+                               .is_std = 1, .elem_size = 1, .buf = &__pas_std_buf_in};
+  __pas_std_output = (struct PasFile){.fp = stdout, .mode = MODE_GENERATE,
                                 .is_text = 1, .is_std = 1, .elem_size = 1,
-                                .buf = &std_buf_out};
+                                .buf = &__pas_std_buf_out};
 }
 
 void __pas_fini(void) {
-  for (struct PasFile *f = all_files; f; f = f->next)
+  for (struct PasFile *f = __pas_all_files; f; f = f->next)
     if (f->fp && f->mode == MODE_GENERATE)
       fflush(f->fp);
   if (fflush(stdout) != 0 || ferror(stdout)) {
@@ -102,15 +105,15 @@ PasFile *__pas_file_new(int64_t elem_size, int32_t is_text, const char *name) {
   f->is_text = is_text;
   f->name = name;
   f->buf = calloc(1, (size_t)f->elem_size);
-  f->next = all_files;
-  all_files = f;
+  f->next = __pas_all_files;
+  __pas_all_files = f;
   return f;
 }
 
 void __pas_file_free(PasFile *f) {
   if (!f || f->is_std)
     return;
-  for (struct PasFile **p = &all_files; *p; p = &(*p)->next)
+  for (struct PasFile **p = &__pas_all_files; *p; p = &(*p)->next)
     if (*p == f) {
       *p = f->next;
       break;
@@ -122,12 +125,12 @@ void __pas_file_free(PasFile *f) {
 }
 
 const char *__pas_program_param(int32_t index, const char *name) {
-  return index < prog_argc ? prog_argv[index] : name;
+  return index < __pas_prog_argc ? __pas_prog_argv[index] : name;
 }
 
 void __pas_reset(PasFile *f) {
   if (f->is_std) {
-    if (f != &std_input)
+    if (f != &__pas_std_input)
       file_error(f, "'reset' of the standard output file");
     return;
   }
@@ -149,7 +152,7 @@ void __pas_reset(PasFile *f) {
 
 void __pas_rewrite(PasFile *f) {
   if (f->is_std) {
-    if (f != &std_output)
+    if (f != &__pas_std_output)
       file_error(f, "'rewrite' of the standard input file");
     return;
   }
@@ -616,7 +619,7 @@ void __pas_abstract_error(void) {
  *
  * Every try statement (and every exception handler while it runs) has a
  * PasExcFrame in its routine's stack frame, linked into a stack whose top
- * is `exc_top`. The compiled code pushes the frame, calls _setjmp on its
+ * is `__pas_exc_top`. The compiled code pushes the frame, calls _setjmp on its
  * buffer and pops it when the protected statements end. A raise pops the
  * top frame, stores the exception in it and _longjmps there.
  */
@@ -626,7 +629,7 @@ _Static_assert(offsetof(PasExcFrame, buf) == 3 * sizeof(void *),
 _Static_assert(sizeof(jmp_buf) <= sizeof(((PasExcFrame *)0)->buf),
                "PasExcFrame.buf is too small for this C library's jmp_buf");
 
-static PasExcFrame *exc_top;
+PasExcFrame *__pas_exc_top;
 
 /* An Exception instance: the VMT pointer, then Message (a short string). */
 struct PasExceptionObject {
@@ -644,13 +647,12 @@ EXCEPTION_VMT(__pas_einterror_vmt, __pas_eexternal_vmt, "\011EIntError");
 EXCEPTION_VMT(__pas_edivbyzero_vmt, __pas_einterror_vmt, "\012EDivByZero");
 EXCEPTION_VMT(__pas_econverterror_vmt, __pas_exception_vmt, "\015EConvertError");
 
-void __pas_exc_push(PasExcFrame *f, void *frame) {
-  (void)frame;
-  f->prev = exc_top;
-  exc_top = f;
+void __pas_exc_push(PasExcFrame *f) {
+  f->prev = __pas_exc_top;
+  __pas_exc_top = f;
 }
 
-void __pas_exc_pop(PasExcFrame *f) { exc_top = f->prev; }
+void __pas_exc_pop(PasExcFrame *f) { __pas_exc_top = f->prev; }
 
 /* "Runtime error: unhandled exception <class> at <where>[: <message>]" */
 static void unhandled(void *obj, const char *where) {
@@ -675,10 +677,10 @@ void __pas_raise(void *obj, const char *where) {
              where && *where ? " at " : "", where ? where : "");
     __pas_runtime_error(msg);
   }
-  PasExcFrame *f = exc_top;
+  PasExcFrame *f = __pas_exc_top;
   if (!f)
     unhandled(obj, where);
-  exc_top = f->prev;
+  __pas_exc_top = f->prev;
   f->object = obj;
   f->where = where;
   _longjmp(*(jmp_buf *)(void *)f->buf, 1);
@@ -726,10 +728,10 @@ void __pas_halt(int32_t code) {
   exit(code);
 }
 
-int32_t __pas_paramcount(void) { return prog_argc > 0 ? prog_argc - 1 : 0; }
+int32_t __pas_paramcount(void) { return __pas_prog_argc > 0 ? __pas_prog_argc - 1 : 0; }
 
 void __pas_paramstr(unsigned char *dst, int32_t index) {
-  const char *s = index >= 0 && index < prog_argc ? prog_argv[index] : "";
+  const char *s = index >= 0 && index < __pas_prog_argc ? __pas_prog_argv[index] : "";
   size_t n = strlen(s);
   if (n > 255)
     n = 255;
@@ -784,6 +786,14 @@ int32_t __pas_str_pos(const unsigned char *sub, const unsigned char *s) {
     if (memcmp(s + i, sub + 1, sub[0]) == 0)
       return i;
   return 0;
+}
+
+void __pas_str_append(unsigned char *s, int32_t maxlen, const unsigned char *src) {
+  int32_t n = s[0], m = src[0];
+  if (m > maxlen - n)
+    m = maxlen > n ? maxlen - n : 0;
+  memmove(s + 1 + n, src + 1, (size_t)m); /* src may be s */
+  s[0] = (unsigned char)(n + m);
 }
 
 void __pas_str_delete(unsigned char *s, int32_t index, int32_t count) {

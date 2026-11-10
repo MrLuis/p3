@@ -56,7 +56,7 @@
 ; ZERO-DAG: call void @llvm.memset.p0.i64(ptr align 1 %s, i8 0, i64 256, i1 false)
 ; ZERO-DAG: store i32 0, ptr %n
 ; RUN: %pcc --mode=tp --emit-llvm -fno-zero-init %S/Inputs/zeroinit.pas -o - | FileCheck --check-prefix=NOZERO %s
-; RUN: %pcc --mode=tp --emit-llvm -O1 -fzero-init -fno-zero-init %S/Inputs/zeroinit.pas -o - | FileCheck --check-prefix=NOZERO-O1 %s
+; RUN: %pcc --mode=tp --emit-llvm -O1 -fno-inline-runtime -fzero-init -fno-zero-init %S/Inputs/zeroinit.pas -o - | FileCheck --check-prefix=NOZERO-O1 %s
 ; NOZERO: define internal void @pas.p(
 ; NOZERO-NOT: llvm.memset
 ; NOZERO-DAG: store i8 0, ptr %s

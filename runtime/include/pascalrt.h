@@ -98,6 +98,8 @@ int32_t __pas_str_compare(const unsigned char *a, const unsigned char *b);
 void __pas_str_copy(unsigned char *dst, const unsigned char *s, int32_t index, int32_t count);
 int32_t __pas_str_pos(const unsigned char *sub, const unsigned char *s);
 void __pas_str_delete(unsigned char *s, int32_t index, int32_t count);
+/* s := s + src, in place: what fits into s's maxlen characters. */
+void __pas_str_append(unsigned char *s, int32_t maxlen, const unsigned char *src);
 void __pas_str_insert(const unsigned char *src, unsigned char *s, int32_t maxlen, int32_t index);
 void __pas_write_pstr(PasFile *f, const unsigned char *s, int32_t width);
 /* Reads the rest of the current line (not the line end) into dst. */
@@ -241,9 +243,10 @@ extern void *const __pas_einterror_vmt[5];
 extern void *const __pas_edivbyzero_vmt[5];
 /* EConvertError = class(Exception) (SysUtils). */
 extern void *const __pas_econverterror_vmt[5];
-/* frame: the routine's frame (unused: passing it keeps the optimizer from
- * holding its variables in registers across _setjmp), or NULL. */
-void __pas_exc_push(PasExcFrame *f, void *frame);
+/* The compiled code keeps what it reads after an exception arrives in
+ * memory (see pinInMemory in the code generator): _longjmp does not undo
+ * changes there, as it does for registers. */
+void __pas_exc_push(PasExcFrame *f);
 void __pas_exc_pop(PasExcFrame *f);
 /* raise obj: to the innermost frame, else "unhandled exception". */
 void __pas_raise(void *obj, const char *where) __attribute__((noreturn));

@@ -110,6 +110,12 @@ static cl::opt<bool> NoRangeChecks(
     cl::desc("Disable runtime range checks (subranges, array indices, ...)"),
     cl::cat(PccCategory));
 
+static cl::opt<bool> NoInlineRuntime(
+    "fno-inline-runtime",
+    cl::desc("Do not inline the runtime's functions (from -O1 they are, "
+             "when compiling for the host)"),
+    cl::cat(PccCategory));
+
 static cl::opt<bool> ZeroInitOn(
     "fzero-init",
     cl::desc("Local arrays, records and strings start zeroed (the default "
@@ -168,6 +174,7 @@ int main(int argc, char **argv) {
   Opts.ErrorLimit = ErrorLimit;
   Opts.WarningsAsErrors = Werror;
   Opts.RangeChecks = !NoRangeChecks;
+  Opts.InlineRuntime = !NoInlineRuntime;
   if (ZeroInitOn || ZeroInitOff) // the last one given wins
     Opts.ZeroInit = !ZeroInitOff || (ZeroInitOn && ZeroInitOn.getPosition() >
                                                        ZeroInitOff.getPosition());

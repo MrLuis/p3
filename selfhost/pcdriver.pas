@@ -29,6 +29,10 @@ function emitOutput(const ir: TBuf; const name: string; kind: TOutputKind; opt: 
 function findUnitLibrary: string;
 { -l and -L options, passed to the linker. }
 procedure addLinkerArg(const arg: string);
+{ -fno-inline-runtime: from -O1 the runtime's small functions are inlined
+  when compiling for the host (the runtime's LLVM IR, libpascalrt.ll, is
+  linked into the module before it is optimized) unless this is called. }
+procedure disableRuntimeInlining;
 { --version }
 procedure printVersion;
 
@@ -38,6 +42,12 @@ implementation
 
 var
   libraryDirs, libraries: TPtrList; { of PName: -L, -l arguments }
+  noInlineRuntime: boolean;
+
+procedure disableRuntimeInlining;
+begin
+  noInlineRuntime := true;
+end;
 
 procedure addLinkerArg(const arg: string);
 begin
@@ -167,6 +177,18 @@ begin
   findRuntimeLibrary := removeDots(pathJoin(pathDirName(exe), '../lib/libpascalrt.a'));
 end;
 
+{ The runtime as LLVM IR, linked into optimized programs for inlining:
+  $PCC_RUNTIME_IR, else libpascalrt.ll next to the runtime library. It
+  need not exist. }
+function findRuntimeIR: string;
+var
+  value: string;
+begin
+  if sysGetEnv('PCC_RUNTIME_IR', value) then
+    exit(value);
+  findRuntimeIR := pathJoin(pathDirName(findRuntimeLibrary), 'libpascalrt.ll');
+end;
+
 function findUnitLibrary: string;
 var
   value, exe: string;
@@ -287,7 +309,7 @@ function emitOutput(const ir: TBuf; const name: string; kind: TOutputKind; opt: 
 var
   target, tm, m: pointer;
   err: TBuf;
-  e, obj: string;
+  e, obj, runtimeIR, rtProblem: string;
   ok: boolean;
   code: TBuf;
 begin
@@ -311,7 +333,18 @@ begin
     exit;
   end;
   bufInit(err);
-  m := llvmParseAndOptimize(ir, name, tm, opt, err);
+  { the runtime's IR is built for the host }
+  runtimeIR := '';
+  if (opt > 0) and not noInlineRuntime and (triple = llvmDefaultTriple) then
+  begin
+    runtimeIR := findRuntimeIR;
+    if not sysFileExists(runtimeIR) then
+      runtimeIR := '';
+  end;
+  m := llvmParseAndOptimize(ir, name, tm, opt, runtimeIR, rtProblem, err);
+  if rtProblem <> '' then
+    diagWarning(noLoc, 'cannot read the runtime''s LLVM IR ''' + runtimeIR + ''' (' +
+                       rtProblem + '); runtime functions are not inlined');
   if m = nil then
   begin
     reportLLVMError(sevFatal, 'internal compiler error: generated invalid LLVM IR:' + #10,

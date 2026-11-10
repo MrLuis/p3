@@ -29,8 +29,13 @@ function llvmTargetMachine(target: pointer; const triple: string; opt: longint):
 { The data layout string of a target machine. }
 function llvmDataLayout(tm: pointer): string;
 { Parses IR text into a module (named name), verifies it and, at opt > 0,
-  runs default<O[opt]>. Returns the module, or nil and the error. }
+  runs default<O[opt]>. Returns the module, or nil and the error.
+  runtimeIR: the runtime's LLVM IR (libpascalrt.ll) to link into the
+  module before it is optimized, so that the runtime's functions can be
+  inlined, or ''; if that file cannot be used, rtProblem says why (else
+  it is ''). }
 function llvmParseAndOptimize(const ir: TBuf; const name: string; tm: pointer; opt: longint;
+                              const runtimeIR: string; var rtProblem: string;
                               var err: TBuf): pointer;
 { Writes the module as IR text, assembly or an object file. }
 function llvmPrintModule(m: pointer; const path: string; var err: TBuf): boolean;
@@ -48,6 +53,15 @@ function LLVMParseIRInContext(ctx, buf: pointer; var m: pointer; var msg: pchar)
   cdecl; external name 'LLVMParseIRInContext';
 function LLVMVerifyModule(m: pointer; action: longint; var msg: pchar): longint;
   cdecl; external name 'LLVMVerifyModule';
+function LLVMCreateMemoryBufferWithContentsOfFile(path: pchar; var buf: pointer;
+  var msg: pchar): longint; cdecl; external name 'LLVMCreateMemoryBufferWithContentsOfFile';
+function LLVMGetTarget(m: pointer): pchar; cdecl; external name 'LLVMGetTarget';
+procedure LLVMSetTarget(m: pointer; triple: pchar); cdecl; external name 'LLVMSetTarget';
+function LLVMGetDataLayoutStr(m: pointer): pchar; cdecl; external name 'LLVMGetDataLayoutStr';
+procedure LLVMSetDataLayout(m: pointer; layout: pchar); cdecl;
+  external name 'LLVMSetDataLayout';
+function LLVMLinkModules2(dest, src: pointer): longint; cdecl;
+  external name 'LLVMLinkModules2';
 procedure LLVMDisposeMessage(msg: pchar); cdecl; external name 'LLVMDisposeMessage';
 function LLVMGetDefaultTargetTriple: pchar; cdecl; external name 'LLVMGetDefaultTargetTriple';
 function LLVMNormalizeTargetTriple(t: pchar): pchar; cdecl;
@@ -226,7 +240,41 @@ begin
   LLVMDisposeMessage(p);
 end;
 
+{ Links the runtime's LLVM IR at path into m (Backend.cpp's linkRuntimeIR):
+  its functions stay available_externally, and calls that are not inlined
+  go to the library. Returns '' or why the file cannot be used. }
+function linkRuntimeIR(ctx, m: pointer; const path: string): string;
+var
+  buf, rt: pointer;
+  msg: pchar;
+  pb: string;
+begin
+  linkRuntimeIR := '';
+  buf := nil;
+  msg := nil;
+  if LLVMCreateMemoryBufferWithContentsOfFile(cstr(path, pb), buf, msg) <> 0 then
+  begin
+    linkRuntimeIR := str(msg);
+    LLVMDisposeMessage(msg);
+    exit;
+  end;
+  rt := nil;
+  msg := nil;
+  if LLVMParseIRInContext(ctx, buf, rt, msg) <> 0 then
+  begin
+    linkRuntimeIR := str(msg);
+    LLVMDisposeMessage(msg);
+    exit;
+  end;
+  { the file has no target of its own (utils/gen-runtime-ir.py) }
+  LLVMSetTarget(rt, LLVMGetTarget(m));
+  LLVMSetDataLayout(rt, LLVMGetDataLayoutStr(m));
+  if LLVMLinkModules2(m, rt) <> 0 then
+    linkRuntimeIR := 'it cannot be linked';
+end;
+
 function llvmParseAndOptimize(const ir: TBuf; const name: string; tm: pointer; opt: longint;
+                              const runtimeIR: string; var rtProblem: string;
                               var err: TBuf): pointer;
 var
   ctx, buf, m, e, opts: pointer;
@@ -234,6 +282,7 @@ var
   nb, passes: string;
 begin
   llvmParseAndOptimize := nil;
+  rtProblem := '';
   ctx := LLVMContextCreate;
   { the buffer's name becomes the module identifier }
   buf := LLVMCreateMemoryBufferWithMemoryRangeCopy(ir.data, ir.len, cstr(name, nb));
@@ -254,6 +303,8 @@ begin
     LLVMDisposeMessage(msg);
   if opt > 0 then
   begin
+    if runtimeIR <> '' then
+      rtProblem := linkRuntimeIR(ctx, m, runtimeIR);
     { llvm::PipelineTuningOptions' defaults, as the C++ pcc's PassBuilder
       has them }
     opts := LLVMCreatePassBuilderOptions;

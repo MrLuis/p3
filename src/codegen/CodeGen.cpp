@@ -164,6 +164,14 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
   llvm::Function *CurFn = nullptr;
   RoutineDecl *CurRoutine = nullptr; ///< null while emitting main
   llvm::Value *CurFrame = nullptr;
+  llvm::Value *CurPin = nullptr; ///< see pinInMemory
+  /// The runtime's functions (declared here), and the functions that
+  /// cannot raise an exception: see mayRaise.
+  llvm::DenseSet<const llvm::Function *> RuntimeFns, NoRaiseFns;
+  /// Are temporaries holding managed values pinned when they are made
+  /// (see pinInMemory)? In a routine without try statements they are
+  /// pinned later, if its body turns out to need protection.
+  bool PinTemps = true;
 
   llvm::DenseMap<VarDecl *, llvm::GlobalVariable *> Globals;
   llvm::DenseMap<RoutineDecl *, llvm::Function *> Functions;
@@ -550,9 +558,10 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
     B.CreateStore(Val, Ptr);
   }
 
+  /// Copies the array, record or string T: both are aligned as T is.
   void copyAggregate(llvm::Value *Dst, llvm::Value *Src, Type *T) {
-    B.CreateMemCpy(Dst, llvm::MaybeAlign(1), Src, llvm::MaybeAlign(1),
-                   sizeOf(T));
+    llvm::Align A = DL.getABITypeAlign(memType(T));
+    B.CreateMemCpy(Dst, A, Src, A, sizeOf(T));
   }
 
   /// Address of a private constant holding S (without a terminating NUL).
@@ -1185,8 +1194,15 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
     return (V->isVarParam() && !V->getType()->isArrayOfConst() &&
             !V->getType()->isOpenArray()) ||
            V->getType()->isUntyped() ||
-           (V->isConstParam() && V->getType()->isStructured());
+           (V->isConstParam() && V->getType()->isStructured()) ||
+           (V->getVarKind() == VarDecl::Result && returnsByPointer(V->getType()));
   }
+
+  /// Is a function result of type T written through a pointer the caller
+  /// passes (to a temporary of its own), instead of being returned? Short
+  /// strings are: as a value LLVM would move all their 256 bytes, one by
+  /// one. The function's result variable is then that temporary.
+  static bool returnsByPointer(Type *T) { return T && T->isShortString(); }
 
   /// pas.<outer>.<name> for routines, pas.<class>.<name> for methods.
   static std::string mangle(RoutineDecl *R) {
@@ -1237,6 +1253,22 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
   }
   llvm::Value *outputFile() { return loadFile(standardFile("output")); }
   llvm::Value *inputFile() { return loadFile(standardFile("input")); }
+
+  /// Keeps the alloca Addr in memory: what is stored there before an
+  /// exception is raised must be there when the routine continues after
+  /// the _setjmp that catches it, where _longjmp has put the registers
+  /// back. LLVM does not know that control arrives there from the
+  /// protected code, and would read values it has in registers; once the
+  /// address has been stored somewhere (a volatile store is never
+  /// removed), it assumes that any call, _setjmp too, reads and writes
+  /// the alloca. Used for the frame record of a routine that protects code
+  /// and for the temporaries that hold managed values (read when an
+  /// exception leaves the routine, or by a later statement).
+  void pinInMemory(llvm::Value *Addr) {
+    if (!CurPin)
+      CurPin = createTemp(B.getPtrTy(), "pin");
+    B.CreateStore(Addr, CurPin, /*isVolatile=*/true);
+  }
 
   /// Allocates a temporary in the entry block of the current function.
   llvm::Value *createTemp(llvm::Type *Ty, const llvm::Twine &Name = "tmp") {
@@ -1893,6 +1925,10 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
       ParamTys.push_back(B.getPtrTy());
     if (HasSelf) // methods: Self after the static link
       ParamTys.push_back(B.getPtrTy());
+    if (returnsByPointer(Result)) { // where the result goes
+      ParamTys.push_back(B.getPtrTy());
+      Result = nullptr;
+    }
     for (VarDecl *P : Params)
       ParamTys.push_back(P->isVarParam() || P->getType()->isStructured() ||
                                  P->getType()->isUntyped()
@@ -1943,8 +1979,10 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
     llvm::IRBuilder<> TB(llvm::BasicBlock::Create(M.getContext(), "entry", T));
     llvm::SmallVector<llvm::Value *, 8> Args{
         llvm::ConstantPointerNull::get(B.getPtrTy())};
+    unsigned First = R->isFunction() && returnsByPointer(R->getResultType());
     for (unsigned I = 0; I < T->arg_size(); ++I) {
-      T->getArg(I)->setName(R->getParams()[I]->getName().Name);
+      if (I >= First)
+        T->getArg(I)->setName(R->getParams()[I - First]->getName().Name);
       Args.push_back(T->getArg(I));
     }
     llvm::Value *V = TB.CreateCall(Target, Args);
@@ -2100,7 +2138,43 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
     llvm::FunctionCallee F = M.getOrInsertFunction(
         Name, llvm::FunctionType::get(Ret, Params, /*isVarArg=*/false));
     llvm::cast<llvm::Function>(F.getCallee())->addFnAttr(llvm::Attribute::NoUnwind);
+    RuntimeFns.insert(llvm::cast<llvm::Function>(F.getCallee()));
     return F;
+  }
+
+  /// Can a call of the runtime function Name raise an exception? Those
+  /// that raise one, and those that may run a destructor (which is Pascal
+  /// code): releasing an object or an interface reference.
+  static bool runtimeMayRaise(llvm::StringRef Name) {
+    return Name == "__pas_raise" || Name == "__pas_raise_divzero" ||
+           Name == "__pas_reraise" || Name == "__pas_reraise_free" ||
+           Name == "__pas_free_object" || Name == "__pas_free_instance" ||
+           Name == "__pas_intf_assign" || Name == "__pas_intf_clear" ||
+           Name == "__pas_format_pstr";
+  }
+
+  /// Does the code emitted for the current function so far have a call
+  /// that may raise an exception? Any call does, except of an LLVM
+  /// intrinsic, of a runtime function that cannot (runtimeMayRaise), of
+  /// the function itself and of a routine emitted before that was found
+  /// not to (NoRaiseFns). So calls through procedural values and virtual
+  /// methods, of external routines and of routines emitted later count:
+  /// this errs on the side of protecting.
+  bool mayRaise() const {
+    for (const llvm::BasicBlock &BB : *CurFn)
+      for (const llvm::Instruction &I : BB) {
+        auto *Call = llvm::dyn_cast<llvm::CallBase>(&I);
+        if (!Call)
+          continue;
+        const llvm::Function *Callee = Call->getCalledFunction();
+        if (!Callee)
+          return true;
+        if (Callee->isIntrinsic() || Callee == CurFn || NoRaiseFns.count(Callee))
+          continue;
+        if (!RuntimeFns.count(Callee) || runtimeMayRaise(Callee->getName()))
+          return true;
+      }
+    return false;
   }
 
   /// The VMT of C; the predeclared classes' (TObject, Exception, EDivByZero
@@ -2205,6 +2279,8 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
     F->getArg(ArgNo++)->setName("link");
     if (R->hasSelf())
       F->getArg(ArgNo++)->setName("self");
+    if (R->isFunction() && returnsByPointer(R->getResultType()))
+      F->getArg(ArgNo++)->setName("result.ptr");
     for (VarDecl *P : R->getParams())
       F->getArg(ArgNo++)->setName(P->getName().Name);
     if (R->isInline()) // the `inline` directive
@@ -2241,6 +2317,11 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
     // The frame record, if any, then an alloca for each other variable.
     llvm::StructType *FrameTy = FrameTypes.lookup(R);
     CurFrame = FrameTy ? B.CreateAlloca(FrameTy, nullptr, "frame") : nullptr;
+    CurPin = nullptr;
+    // Execution continues here after an exception (see inFrame).
+    PinTemps = R->hasTry() || hasNonLocalLabels(*R->getBody());
+    if (CurFrame && PinTemps)
+      pinInMemory(CurFrame);
     LocalAddrs.clear();
     VarDecl *ResultVar = R->isFunction() ? R->getResultVar() : nullptr;
     llvm::SmallVector<VarDecl *, 8> Locals; // start from zero
@@ -2263,14 +2344,20 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
       AddLocal(V, false);
     if (DIB)
       declareFrameVariables(R);
+    bool ResultByPointer = ResultVar && isByRef(ResultVar);
     for (VarDecl *V : Locals)
-      emitZeroInit(varSlot(V), V->getType());
+      if (V != ResultVar || !ResultByPointer)
+        emitZeroInit(varSlot(V), V->getType());
 
     unsigned ArgNo = 1;
     if (LinkInFrame.count(R))
       B.CreateStore(F->getArg(0), B.CreateStructGEP(FrameTy, CurFrame, 0));
     if (R->hasSelf())
       B.CreateStore(F->getArg(ArgNo++), varSlot(R->getSelfVar()));
+    if (ResultByPointer) { // the caller's temporary
+      B.CreateStore(F->getArg(ArgNo++), varSlot(ResultVar));
+      emitZeroInit(varAddress(ResultVar), ResultVar->getType());
+    }
     // The variables holding COM interfaces: value parameters (one more
     // reference each), then local variables (nil at first).
     llvm::SmallVector<std::pair<llvm::Value *, Type *>, 4> Managed;
@@ -2279,6 +2366,9 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
       llvm::Value *Slot = varSlot(P);
       if (isByRef(P))
         B.CreateStore(Arg, Slot);
+      else if (auto *SS = llvm::dyn_cast<ShortStringType>(P->getType()))
+        // value semantics: the characters in use, cut to fit
+        B.CreateCall(RT.StrAssign, {Slot, B.getInt32(SS->getMaxLength()), Arg});
       else if (P->getType()->isStructured())
         copyAggregate(Slot, Arg, P->getType()); // value semantics
       else
@@ -2306,17 +2396,39 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
     if (JmpBufSlots.count(R))
       emitSetJmpDispatch(*R->getBody(),
                          B.CreateStructGEP(FrameTy, CurFrame, JmpBufSlots[R]));
-    // An exception leaving the routine releases them too (and the result).
+    // An exception leaving the routine releases them too (and the result):
+    // the body runs protected, in a block of its own. Whether it needs to
+    // is only known once it is emitted (can anything it calls raise?), so
+    // the block before it is finished afterwards.
     llvm::Value *ExcFrame = nullptr;
-    llvm::BasicBlock *Raised = nullptr;
+    llvm::BasicBlock *Raised = nullptr, *BeforeBody = nullptr, *Body = nullptr;
     if (!Managed.empty() || ManagedResult || R->usesManaged()) {
-      Raised = newBlock("managed.raise");
-      ExcFrame = emitProtect(Raised, "managed.body");
+      BeforeBody = B.GetInsertBlock();
+      Body = newBlock("managed.body");
+      B.SetInsertPoint(Body);
     }
     RoutineTemps.clear();
     ExitBlock = newBlock("exit");
     visitStmt(R->getBody()->getBody());
     B.CreateBr(ExitBlock);
+    if (BeforeBody) {
+      llvm::DebugLoc Loc = B.getCurrentDebugLocation();
+      B.SetInsertPoint(BeforeBody);
+      setDebugLoc(R->getBodyLocation());
+      if (mayRaise()) {
+        if (!PinTemps) { // what the landing releases
+          if (CurFrame)
+            pinInMemory(CurFrame);
+          for (llvm::Value *Slot : RoutineTemps)
+            pinInMemory(Slot);
+        }
+        Raised = newBlock("managed.raise");
+        ExcFrame = emitProtect(Raised, "", Body);
+      } else {
+        B.CreateBr(Body);
+      }
+      B.SetCurrentDebugLocation(Loc);
+    }
     B.SetInsertPoint(ExitBlock);
     auto Finalize = [&] {
       for (auto &[Addr, T] : Managed)
@@ -2343,11 +2455,13 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
     }
     RoutineTemps.clear();
 
-    if (R->isFunction()) {
+    if (R->isFunction() && !ResultByPointer) {
       B.CreateRet(loadScalar(varSlot(ResultVar), ResultVar->getType(), "result"));
     } else {
       B.CreateRetVoid();
     }
+    if (!mayRaise())
+      NoRaiseFns.insert(F);
   }
 
   //===--------------------------------------------------------------------===//
@@ -2382,8 +2496,15 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
       Values.push_back(Link);
     if (Self) // methods
       Values.push_back(Self);
+    llvm::Value *ResultTmp = nullptr;
+    if (returnsByPointer(ResultTy) && !ToC) {
+      ResultTmp = createTemp(memType(ResultTy), "result");
+      Values.push_back(ResultTmp);
+    }
     emitArgValues(Params, Args, Values, ToC);
     llvm::Value *Result = B.CreateCall(Callee, Values);
+    if (ResultTmp) // expressions use a string's address
+      return ResultTmp;
     // A string or record result comes back by value; expressions use its
     // address. (An interface, {ptr, ptr}, is a value.)
     if (Result->getType()->isArrayTy() ||
@@ -2434,15 +2555,11 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
         Values.push_back(P->isVarParam() ? emitAddress(Arg) : emitRoutinePair(Arg, RT));
       else if (llvm::isa<RoutineType>(P->getType()))
         Values.push_back(emitRoutineValue(Arg));
-      else if (P->isConstParam() && P->getType()->isShortString())
-        Values.push_back(emitPStr(Arg)); // read-only: no copy
-      else if (auto *SS = llvm::dyn_cast<ShortStringType>(P->getType());
-               SS && !P->isVarParam()) {
-        // The callee copies MaxLen+1 bytes: pass a full-size temporary.
-        llvm::Value *Tmp = newStringTemp(SS->getMaxLength());
-        emitStringAssign(Tmp, SS, Arg);
-        Values.push_back(Tmp);
-      } else if (P->isVarParam() || P->getType()->isStructured())
+      else if (P->getType()->isShortString() && !P->isVarParam())
+        // Any string: a const parameter reads it there, a value parameter
+        // copies what fits into its own variable.
+        Values.push_back(emitPStr(Arg));
+      else if (P->isVarParam() || P->getType()->isStructured())
         Values.push_back(emitAddress(Arg));
       else if (P->getType()->isAnsiString())
         Values.push_back(emitAnsi(Arg));
@@ -2715,6 +2832,8 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
         V->getType(), nullptr, V->getType()->isPointerTy() ? "astr.tmp" : "intf.tmp");
     Entry.CreateStore(llvm::Constant::getNullValue(V->getType()), Slot);
     clearTemp(Slot); // a loop's previous
+    if (PinTemps)
+      pinInMemory(Slot);
     B.CreateStore(V, Slot);
     LiveTemps.push_back(Slot);
     if (CurRoutine)
@@ -2730,6 +2849,8 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
     llvm::Value *Slot = Entry.CreateAlloca(V->getType(), nullptr, "rec.tmp");
     Entry.CreateStore(llvm::Constant::getNullValue(V->getType()), Slot);
     finalizeValue(Slot, T); // a loop's previous
+    if (PinTemps)
+      pinInMemory(Slot);
     B.CreateStore(V, Slot);
     RecordTemps[Slot] = T;
     LiveTemps.push_back(Slot);
@@ -2807,6 +2928,8 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
     CurFn = F;
     CurRoutine = nullptr;
     CurFrame = nullptr;
+    CurPin = nullptr;
+    PinTemps = true;
     CurSP = nullptr;
     B.SetCurrentDebugLocation(llvm::DebugLoc());
     B.SetInsertPoint(llvm::BasicBlock::Create(M.getContext(), "entry", F));
@@ -3071,6 +3194,12 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
     bool Counted = isInterfacedClass(Ctor->getClass());
     if (Counted)
       B.CreateCall(intfRuntime("__pas_interfaced_construct"), {Obj});
+    if (NoRaiseFns.count(Functions[Ctor])) { // nothing to protect against
+      B.CreateCall(Functions[Ctor], Values);
+      if (Counted)
+        B.CreateCall(intfRuntime("__pas_interfaced_constructed"), {Obj});
+      return Obj;
+    }
     auto *Failed = newBlock("ctor.raise");
     llvm::Value *F = emitProtect(Failed, "ctor.call");
     B.CreateCall(Functions[Ctor], Values);
@@ -3871,7 +4000,10 @@ public:
   CodeGenModule(llvm::Module &M, const SourceManager &SM,
                 const LangOptions &LangOpts, const CodeGenOptions &CGOpts)
       : M(M), DL(M.getDataLayout()), B(M.getContext()), RT(M), SM(SM),
-        LangOpts(LangOpts), CGOpts(CGOpts) {}
+        LangOpts(LangOpts), CGOpts(CGOpts) {
+    for (const llvm::Function &F : M) // RT's declarations
+      RuntimeFns.insert(&F);
+  }
 
   void emitProgram(ProgramDecl &P, llvm::ArrayRef<UnitDecl *> Units) {
     llvm::LLVMContext &C = M.getContext();
@@ -3916,6 +4048,8 @@ public:
     CurFn = Main;
     CurRoutine = nullptr;
     CurFrame = nullptr;
+    CurPin = nullptr;
+    PinTemps = true;
     CurSP = DIB ? createSubprogram(Main, "main", DIUnitFile,
                                    lineOf(P.getLocation()), nullptr, {})
                 : nullptr;
@@ -3988,6 +4122,8 @@ public:
     CurFn = Init;
     CurRoutine = nullptr;
     CurFrame = nullptr;
+    CurPin = nullptr;
+    PinTemps = true;
     CurSP = DIB ? createSubprogram(Init, U.getName().Spelling, DIUnitFile,
                                    lineOf(U.getLocation()), nullptr, {})
                 : nullptr;
@@ -4024,6 +4160,21 @@ public:
       visitStmt(Child);
   }
 
+  /// If Value is Target + x, for a short string variable Target named in
+  /// both places: x.
+  static Expr *appendedTo(Expr *Target, Expr *Value) {
+    auto *T = llvm::dyn_cast<NameRefExpr>(Target);
+    auto *Sum = llvm::dyn_cast<BinaryExpr>(Value);
+    if (!T || !Sum || Sum->getOp() != BinaryOp::Add || Sum->getOperator() ||
+        !Sum->getType()->isShortString())
+      return nullptr;
+    auto *L = llvm::dyn_cast<NameRefExpr>(Sum->getLHS());
+    if (!L || !llvm::isa_and_nonnull<VarDecl>(T->getDecl()) ||
+        L->getDecl() != T->getDecl() || T->getWith() || L->getWith())
+      return nullptr;
+    return Sum->getRHS();
+  }
+
   void visitAssignStmt(AssignStmt *S) {
     Expr *Target = S->getTarget(), *Value = S->getValue();
     Type *TT = Target->getType();
@@ -4032,7 +4183,16 @@ public:
       return;
     }
     if (auto *SS = llvm::dyn_cast<ShortStringType>(TT)) {
-      emitStringAssign(emitAddress(Target), SS, Value);
+      llvm::Value *Dst = emitAddress(Target);
+      if (Expr *More = appendedTo(Target, Value)) {
+        // s := s + x: x goes to the end of s, without a temporary.
+        llvm::Value *Src = emitPStr(More);
+        B.CreateCall(classRuntime("__pas_str_append", B.getVoidTy(),
+                                  {B.getPtrTy(), B.getInt32Ty(), B.getPtrTy()}),
+                     {Dst, B.getInt32(SS->getMaxLength()), Src});
+        return;
+      }
+      emitStringAssign(Dst, SS, Value);
       return;
     }
     if (TT->isAnsiString()) {
@@ -4569,9 +4729,7 @@ public:
     llvm::Type *Void = B.getVoidTy();
     bool NoReturn = false;
     llvm::FunctionCallee F;
-    if (Name == "__pas_exc_push")
-      F = classRuntime(Name, Void, {Ptr, Ptr});
-    else if (Name == "__pas_raise_divzero") {
+    if (Name == "__pas_raise_divzero") {
       F = classRuntime(Name, Void, {Ptr});
       llvm::cast<llvm::Function>(F.getCallee())->addFnAttr(llvm::Attribute::Cold);
       NoReturn = true;
@@ -4591,17 +4749,16 @@ public:
 
   /// Pushes a new PasExcFrame and calls _setjmp on it: an exception raised
   /// to the frame continues at Landing, the protected code in a new block
-  /// named BodyName (the insertion point). Returns the frame.
-  llvm::Value *emitProtect(llvm::BasicBlock *Landing, const llvm::Twine &BodyName) {
+  /// named BodyName, or in Body if given (the insertion point). Returns
+  /// the frame.
+  llvm::Value *emitProtect(llvm::BasicBlock *Landing, const llvm::Twine &BodyName,
+                           llvm::BasicBlock *Body = nullptr) {
     llvm::Value *F = createTemp(excFrameType(), "excframe");
-    // The routine's frame goes along so that the optimizer keeps its
-    // variables in memory, where _longjmp does not undo their changes.
-    llvm::Value *Frame =
-        CurFrame ? CurFrame : llvm::ConstantPointerNull::get(B.getPtrTy());
-    B.CreateCall(excRuntime("__pas_exc_push"), {F, Frame});
+    B.CreateCall(excRuntime("__pas_exc_push"), {F});
     llvm::Value *R = B.CreateCall(
         RT.SetJmp, {B.CreateStructGEP(excFrameType(), F, 3)}, "jmp");
-    auto *Body = newBlock(BodyName);
+    if (!Body)
+      Body = newBlock(BodyName);
     B.CreateCondBr(B.CreateICmpNE(R, B.getInt32(0)), Landing, Body);
     B.SetInsertPoint(Body);
     return F;

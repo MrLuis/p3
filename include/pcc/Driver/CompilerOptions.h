@@ -54,6 +54,11 @@ struct CompilerOptions {
   /// -fno-zero-init; without either, at -O0 only.
   std::optional<bool> ZeroInit;
 
+  /// From -O1, the runtime's small functions are inlined (the runtime's
+  /// LLVM IR, libpascalrt.ll, is linked into the module before it is
+  /// optimized); -fno-inline-runtime disables that.
+  bool InlineRuntime = true;
+
   /// The project file (pcc.json, see Project.h): --project=<file> (empty:
   /// look for one), --no-project.
   std::string ProjectFile;

@@ -29,6 +29,11 @@ std::string findRuntimeLibrary();
 /// $PCC_UNIT_DIR, else <dir of pcc>/../lib/pascal
 std::string findUnitLibrary();
 
+/// The runtime as LLVM IR, linked into optimized programs for inlining:
+/// $PCC_RUNTIME_IR, else libpascalrt.ll next to the runtime library. It
+/// need not exist.
+std::string findRuntimeIR();
+
 /// Returns false (after reporting) on failure.
 bool linkExecutable(llvm::StringRef ObjectFile,
                     llvm::ArrayRef<std::string> UnitObjects,

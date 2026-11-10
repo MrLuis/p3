@@ -1,0 +1,23 @@
+; Short strings (--mode=tp) in calls: a function writes its result through
+; a pointer to a temporary of the caller (its result variable is that
+; temporary); a value parameter gets the caller's string and copies the
+; characters in use into its own variable; a const parameter reads the
+; caller's. s := s + x appends in place.
+; RUN: %pcc --mode=tp --emit-llvm %S/Inputs/strpass.pas -o - | FileCheck %s
+
+; CHECK-LABEL: define i32 @main(
+; CHECK:      %result = alloca [256 x i8]
+; a := a + 'y'
+; CHECK:      call void @__pas_str_append(ptr @pas.a, i32 255, ptr @.str{{.*}})
+; CHECK:      call void @pas.shout(ptr null, ptr %result, ptr @pas.a, ptr @.str{{.*}})
+; CHECK-NEXT: call void @__pas_str_assign(ptr @pas.b, i32 8, ptr %result)
+
+; CHECK-LABEL: define internal void @pas.shout(ptr %link, ptr %result.ptr, ptr %s, ptr %t)
+; CHECK:      %s.addr = alloca [256 x i8]
+; CHECK:      store ptr %result.ptr, ptr %shout
+; The result starts empty.
+; CHECK:      %shout.ref = load ptr, ptr %shout
+; CHECK:      call void @__pas_str_assign(ptr %s.addr, i32 255, ptr %s)
+; CHECK:      store ptr %t, ptr %t.addr
+; CHECK:      call void @__pas_str_append(ptr %s.addr, i32 255, ptr
+; CHECK:      ret void

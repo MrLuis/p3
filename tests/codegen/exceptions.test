@@ -10,7 +10,11 @@
 ; CHECK-LABEL: define internal void @pas.p(
 ; CHECK:      %excframe = alloca { ptr, ptr, ptr, [64 x i64] }, align 8
 ; CHECK:      %frame = alloca %frame.p
-; CHECK:      call void @__pas_exc_push(ptr %excframe, ptr %frame)
+; A routine with a try statement continues after an exception: its frame
+; is pinned (its address stored, volatile), so that LLVM keeps its
+; variables in memory across _setjmp.
+; CHECK-NEXT: store volatile ptr %frame, ptr %pin, align 8
+; CHECK:      call void @__pas_exc_push(ptr %excframe)
 ; CHECK-NEXT: %[[BUF:[0-9]+]] = getelementptr inbounds { ptr, ptr, ptr, [64 x i64] }, ptr %excframe, i32 0, i32 3
 ; CHECK-NEXT: %jmp = call i32 @_setjmp(ptr %[[BUF]])
 ; CHECK-NEXT: %[[CAUGHT:[0-9]+]] = icmp ne i32 %jmp, 0
@@ -19,7 +23,7 @@
 ; releases the handled one.
 ; CHECK:      try.except:
 ; CHECK:      %exc = load ptr, ptr
-; CHECK:      call void @__pas_exc_push(ptr %[[HANDLER:excframe[0-9]+]], ptr %frame)
+; CHECK:      call void @__pas_exc_push(ptr %[[HANDLER:excframe[0-9]+]])
 ; The finally part runs with a state: 1 after an exception, 2 + k for the
 ; k-th jump (exit, break, continue) out of the protected statements.
 ; CHECK:      finally:
@@ -43,13 +47,18 @@
 ; CHECK:      call void @__pas_free_object(ptr %exc)
 
 ; A constructor written in Pascal runs protected: if it raises, the new
-; object is destroyed and released.
+; object is destroyed and released. One that cannot raise (nothing it calls
+; can) is just called.
 ; MAIN-LABEL: define i32 @main(
 ; MAIN:      %obj = call ptr @__pas_new(
-; MAIN:      ctor.raise:
-; MAIN-NEXT: call void @__pas_reraise_free(ptr %{{.*}}, ptr %obj)
-; MAIN:      ctor.call:
+; MAIN-NEXT: store ptr @vmt.tthing, ptr %obj
 ; MAIN-NEXT: call void @pas.tthing.make(ptr null, ptr %obj)
+; MAIN-NEXT: store ptr %obj, ptr @pas.t
+; MAIN:      %[[OBJ:obj[0-9]+]] = call ptr @__pas_new(
+; MAIN:      ctor.raise:
+; MAIN-NEXT: call void @__pas_reraise_free(ptr %{{.*}}, ptr %[[OBJ]])
+; MAIN:      ctor.call:
+; MAIN-NEXT: call void @pas.trisky.make(ptr null, ptr %[[OBJ]], i32 1)
 ; MAIN-NEXT: call void @__pas_exc_pop(
 
 ; GLOBAL: @.where = private unnamed_addr constant [{{[0-9]+}} x i8] c"{{.*}}exceptions.pas:19:7\00"

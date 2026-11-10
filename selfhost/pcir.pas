@@ -70,6 +70,7 @@ type
     limbs: TLimbs;   { vkInt }
     fp: double;      { vkFP }
     agg: pointer;    { vkAgg: a PPtrList of PTVBox, the elements }
+    fn: pointer;     { a reference to a function: the PIRFunc, else nil }
   end;
   PTVBox = ^TV;
 
@@ -125,6 +126,9 @@ type
     lastUnique: longint;
     nextDef: longint;
     dbg: PMeta;          { the function's !dbg (a DISubprogram), or nil }
+    { exceptions: a call of the function cannot raise one (irSetNoRaise);
+      its code so far has a call that may (irMayRaise) }
+    noRaise, raises: boolean;
   end;
 
 var
@@ -189,6 +193,15 @@ function irCreateFunction(const name, linkage: string; ret: PIRType;
 procedure irSetArgName(f: PIRFunc; i: longint; const name: string);
 function irArg(f: PIRFunc; i: longint): TV;
 function irFuncRef(f: PIRFunc): TV;
+{ Exceptions (CodeGen.cpp's mayRaise). A call of f cannot raise one: a
+  runtime function that neither raises nor runs Pascal code, or a routine
+  whose code was found not to. }
+procedure irSetNoRaise(f: PIRFunc);
+function irNoRaise(f: PIRFunc): boolean;
+{ Does the code of the current function so far have a call that may raise
+  an exception? Any call does, except of an LLVM intrinsic, of a function
+  that cannot (irSetNoRaise) and of the function itself. }
+function irMayRaise: boolean;
 
 { --- Function bodies --- }
 procedure irBeginBody(f: PIRFunc);
@@ -206,6 +219,7 @@ function irCast(const op: string; const v: TV; dst: PIRType; const name: string)
 function irSelect(const c, a, b: TV; const name: string): TV;
 function irLoad(t: PIRType; const p: TV; const name: string): TV;
 procedure irStore(const v, p: TV);
+procedure irStoreVolatile(const v, p: TV);
 { getelementptr [inbounds] src, p, idx (one or two i64/i32 indices) }
 function irGEP1(src: PIRType; const p, i0: TV; inbounds: boolean; const name: string): TV;
 function irGEP2(src: PIRType; const p, i0, i1: TV; const name: string): TV;
@@ -254,6 +268,7 @@ procedure irSetGlobalDbg(const g: TV; m: PMeta);
 procedure irSetFuncDbg(f: PIRFunc; m: PMeta);
 { the !dbg location of the instructions created from now on (nil: none) }
 procedure irSetDebugLoc(m: PMeta);
+function irDebugLoc: PMeta;
 { #dbg_declare(value, variable, expression, location) before the next
   instruction of the current block }
 procedure irInsertDeclare(const v: TV; variable: PMeta; const expr: string; loc: PMeta);
@@ -1152,6 +1167,7 @@ begin
   r.v := v;
   r.kind := vkInst;
   r.agg := nil;
+  r.fn := nil;
   r.fp := 0.0;
   limbsOfInt(0, r.limbs);
   irV := r;
@@ -1722,6 +1738,8 @@ begin
   f^.lastUnique := 0;
   f^.nextDef := 0;
   f^.dbg := nil;
+  f^.noRaise := false;
+  f^.raises := false;
   f^.attrs := '';
   f^.paramText := '';
   f^.linkage := '';
@@ -1775,7 +1793,35 @@ var
 begin
   r := irV(irPtrT, f^.name);
   r.kind := vkGlobal;
+  r.fn := f;
   irFuncRef := r;
+end;
+
+procedure irSetNoRaise(f: PIRFunc);
+begin
+  f^.noRaise := true;
+end;
+
+function irNoRaise(f: PIRFunc): boolean;
+begin
+  irNoRaise := f^.noRaise;
+end;
+
+function irMayRaise: boolean;
+begin
+  irMayRaise := cur^.raises;
+end;
+
+{ a call of callee is being added to the current function }
+procedure noteCall(const callee: TV);
+var
+  f: PIRFunc;
+begin
+  f := PIRFunc(callee.fn);
+  if f = nil then
+    cur^.raises := true { through a pointer }
+  else if (f <> cur) and not f^.noRaise and (copy(f^.name, 1, 6) <> '@llvm.') then
+    cur^.raises := true;
 end;
 
 { ===================================================================== }
@@ -2255,6 +2301,17 @@ begin
   append(i);
 end;
 
+procedure irStoreVolatile(const v, p: TV);
+var
+  i: PIRInst;
+  res: string;
+begin
+  i := newInst(res, '', false);
+  bufAdd(i^.text, 'store volatile ' + v.t^.text + ' ' + v.v + ', ptr ' + p.v +
+         ', align ' + intToStr(v.t^.align));
+  append(i);
+end;
+
 { a GEP with indices given as text ("i64 0, i64 3"); folds when the
   pointer and all indices are constants }
 function gep(src: PIRType; const p: TV; const idxText: string; allConst, allZero,
@@ -2445,6 +2502,7 @@ var
   i: PIRInst;
   res: string;
 begin
+  noteCall(callee);
   i := newInst(res, name, f^.ret^.kind <> ikVoid);
   bufAdd(i^.text, 'call ' + f^.ret^.text + ' (' + f^.paramText + ') ' + callee.v + '(');
   bufAddChars(i^.text, args.data, 0, args.len);
@@ -2458,6 +2516,7 @@ var
   i: PIRInst;
   res: string;
 begin
+  noteCall(callee);
   i := newInst(res, name, ret^.kind <> ikVoid);
   bufAdd(i^.text, 'call ' + ret^.text + ' ' + callee.v + '(');
   bufAddChars(i^.text, args.data, 0, args.len);
@@ -2691,6 +2750,11 @@ end;
 procedure irSetDebugLoc(m: PMeta);
 begin
   curLoc := m;
+end;
+
+function irDebugLoc: PMeta;
+begin
+  irDebugLoc := curLoc;
 end;
 
 procedure irInsertDeclare(const v: TV; variable: PMeta; const expr: string; loc: PMeta);

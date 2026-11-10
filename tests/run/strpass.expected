@@ -1,0 +1,22 @@
+in Change: global (changed)
+after Change: global changed
+Both: a=one b=b changed
+after Both: b changed
+Cut: [abcde] 5 [ijklmnop]
+Cut: [abcde] 5
+Cut: [abcde] 5 [abcdefgh]
+Cut: [abcde] 5
+olleh hello |
+***** 40
+abcde 2
+98765432 8
+<abcde> MIXED CASE (empty) [] big
+loud! tag:loud! !duol:gat
+xbxa
+abcdxabcdx 10
+abcdxabcdxxdcbaxdcba
+255 15
+255
+abcdefgh 8
+abcdabcd 8
+ab|
