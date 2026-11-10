@@ -32,3 +32,12 @@
 ; CONST: constants.pas:18:28: error: typed constants of type 'TE' can only be initialized with nil
 ; CONST: constants.pas:20:12: error: typed constants of type 'TE' can only be initialized with nil
 ; CONST-NOT: error:
+;
+; f(x)(y); as a statement.
+; RUN: not %pcc --mode=objfpc -ferror-limit=0 --emit-ast %S/Inputs/methodpointers/chains.pas 2>&1 | FileCheck --check-prefix=CHAIN %s
+; CHAIN: chains.pas:13:3: error: called value of type 'integer' is not a procedure or function
+; CHAIN: chains.pas:14:3: error: too few arguments in call to 'procedural value': expected 1, got 0
+; CHAIN: chains.pas:15:10: error: cannot pass a value of type 'char' to parameter 'x' of type 'integer'
+; CHAIN: chains.pas:16:3: error: procedure does not return a value
+; CHAIN: chains.pas:17:3: error: too many arguments in call to 'Get': expected 1, got 2
+; CHAIN-NOT: error:

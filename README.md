@@ -354,7 +354,8 @@ virtual method is bound when the pointer is made. Records' methods work too, on
 the record's address. Call one like a routine (`ev(1)`, `FOnEv(1)` from a method,
 `obj.OnEv(1)`, and `ev()`, since objfpc accepts empty parentheses), test it with
 `assigned` or `= nil`, compare with `=` and `<>` (the code only, as in Free
-Pascal), pass it, return it, keep it in fields and properties. Calling a nil one
+Pascal), pass it, return it (`GetEv(x)(1)` calls the result, also as a statement),
+keep it in fields and properties. Calling a nil one
 is a runtime error with range checks on. The predeclared record `TMethod`
 (`Code`, `Data: pointer`) opens one up: `TMethod(ev).Data` reads or, on a
 variable, writes the object, `TMethod(ev) := m` and `ev := TEv(m)` convert, and

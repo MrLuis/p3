@@ -2177,9 +2177,10 @@ Stmt *Parser::parseAssignmentOrCall() {
     parseActualParams(Args, /*AllowFormat=*/true);
 
   // Turbo/FPC: a typecast assigned to, longint(x) := 1, or with selectors,
-  // TFoo(x).Show; f(1)^.n := 2;
+  // TFoo(x).Show; f(1)^.n := 2; f(x)(y);
   if (HasParens && LangOpts.Mode != LangMode::ISO &&
-      Tok.isOneOf(tok::l_square, tok::period, tok::caret, tok::colon_equal)) {
+      Tok.isOneOf(tok::l_square, tok::period, tok::caret, tok::colon_equal,
+                  tok::l_paren)) {
     Expr *Call = Ctx.create<CallExpr>(SourceRange(Start, PrevTokEnd), Name,
                                       Ctx.copyArray<Expr *>(Args));
     Target = parseSelectors(Call);

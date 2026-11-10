@@ -3041,7 +3041,7 @@ begin
   { Turbo/FPC: a typecast assigned to, longint(x) := 1, or with selectors,
     TFoo(x).Show; f(1)^.n := 2; }
   if hasParens and (mode <> lmISO) and
-     (tok.kind in [tkLSquare, tkPeriod, tkCaret, tkColonEqual]) then
+     (tok.kind in [tkLSquare, tkPeriod, tkCaret, tkColonEqual, tkLParen]) then
   begin
     call := newNode(nkCall, start, prevTokEnd);
     call^.callee := name;
