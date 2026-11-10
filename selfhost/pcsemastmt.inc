@@ -682,6 +682,61 @@ begin
   end;
 end;
 
+{ slice(a, n), for an open array parameter only. }
+function checkSlice(e: PNode): PType;
+var
+  allowed: boolean;
+  t0, t1, elem: PType;
+  a0, a1: PNode;
+begin
+  checkSlice := errorType;
+  allowed := allowSlice;
+  allowSlice := false;
+  if e^.args.count <> 2 then
+  begin
+    ms('');
+    maCallee(e^.callee);
+    ma(' expects 2 arguments');
+    errR(e^.callee.loc, nodeRange(e));
+    exit;
+  end;
+  a0 := argNode(e, 0);
+  a1 := argNode(e, 1);
+  t0 := argType(e, 0);
+  t1 := argType(e, 1);
+  if isError(t0) or isError(t1) then
+    exit;
+  if not allowed then
+  begin
+    ms('');
+    maCallee(e^.callee);
+    ma(' can only be passed to an open array parameter');
+    errR(e^.callee.loc, nodeRange(e));
+    exit;
+  end;
+  elem := nil;
+  if t0^.kind = tyArray then
+    elem := t0^.elementType
+  else if t0^.kind = tyOpenArray then
+    elem := t0^.openElement;
+  if elem = nil then
+  begin
+    ms('');
+    maCallee(e^.callee);
+    ma(' expects an array, not ');
+    maT(t0);
+    errR(a0^.b, nodeRange(a0));
+    exit;
+  end;
+  if not isIntegerLike(t1) then
+  begin
+    ms('expected an integer');
+    errR(a1^.b, nodeRange(a1));
+    exit;
+  end;
+  checkSlice := openArrayType(elem);
+end;
+
 function checkBuiltinFunction(e: PNode; bk: TBuiltinKind): PType;
 var
   t: PType;
@@ -702,6 +757,8 @@ var
   end;
 
 begin
+  if bk = bkSlice then
+    exit(checkSlice(e));
   checkBuiltinFunction := errorType;
   if bk in [bkLength, bkCopy, bkPos, bkConcat, bkUpCase] then
     exit(checkStringFunction(e, bk));
@@ -1754,8 +1811,34 @@ begin
   listAdd(pendingGotos, g);
 end;
 
+{ The procedural type of the field or property d, or nil. }
+function proceduralMember(d: PDecl): PType;
+var
+  t: PType;
+begin
+  t := nil;
+  if d^.kind = dkField then
+    t := d^.fieldType
+  else if d^.kind = dkProperty then
+    t := d^.propType;
+  if (t <> nil) and (t^.kind <> tyRoutine) then
+    t := nil;
+  proceduralMember := t;
+end;
+
+{ A name used as an expression. }
+function nameRefNode(const id: TIdent): PNode;
+var
+  n: PNode;
+begin
+  n := newNode(nkNameRef, id.loc, id.loc + length(nameStr(id.spelling)));
+  n^.ref := id;
+  nameRefNode := n;
+end;
+
 procedure visitProcCall(s: PNode);
 var
+  ref: PNode;
   d: PDecl;
   t, rt: PType;
   a0: PNode;
@@ -1874,6 +1957,16 @@ begin
      (d^.varType^.routineResult = nil) then
   begin
     checkCallArgs(d^.varType^.routineParams, d, s^.callee, s^.args, nodeRange(s));
+    exit;
+  end;
+  if proceduralMember(d) <> nil then
+  begin
+    { FOnEvent(x) in a method or a with statement: through the member }
+    ref := nameRefNode(s^.callee);
+    if isError(check(ref)) then
+      exit;
+    s^.callValue := ref;
+    checkCallArgs(proceduralMember(d)^.routineParams, nil, s^.callee, s^.args, nodeRange(s));
     exit;
   end;
   if (d^.kind = dkBuiltin) or (d^.kind = dkRoutine) then
@@ -2457,6 +2550,8 @@ begin
           { a functional parameter without arguments is a call }
           if (t^.routineResult <> nil) and (t^.routineParams.count = 0) then
             exit(t^.routineResult);
+          if t^.routineOfObject then { nothing else it could be: the value }
+            exit(t);
           if t^.routineResult <> nil then
           begin
             ms('missing arguments in call to ''');
@@ -2582,6 +2677,25 @@ begin
   errR(e^.b, nodeRange(e^.operand));
 end;
 
+{ An operand of = or <>: a method pointer variable is compared, not called. }
+function checkComparand(e: PNode): PType;
+var
+  v: PDecl;
+begin
+  if e^.kind = nkNameRef then
+  begin
+    v := lookup(e^.ref.name);
+    if (v <> nil) and (v^.kind = dkVar) and (v^.varType <> nil) and isMethodPointer(v^.varType) then
+    begin
+      e^.refDecl := v;
+      e^.typ := v^.varType;
+      v^.isUsed := true;
+      exit(v^.varType);
+    end;
+  end;
+  checkComparand := check(e);
+end;
+
 function visitBinary(e: PNode): PType;
 var
   l, r: PType;
@@ -2598,10 +2712,21 @@ begin
   visitBinary := errorType;
   if e^.bop in [boIs, boAs] then
     exit(checkIsAs(e));
-  l := check(e^.lhs);
-  r := check(e^.rhs);
+  if e^.bop in [boEq, boNe] then
+  begin
+    l := checkComparand(e^.lhs);
+    r := checkComparand(e^.rhs);
+  end
+  else
+  begin
+    l := check(e^.lhs);
+    r := check(e^.rhs);
+  end;
   if isError(l) or isError(r) then
     exit;
+  if (e^.bop in [boEq, boNe]) and (isMethodPointer(l) or isMethodPointer(r)) and
+     ((l^.kind = tyNil) or (r^.kind = tyNil) or isAssignable(l, r)) then
+    exit(tyBooleanT);
   if (memberTableOf(l) <> nil) or (memberTableOf(r) <> nil) then
     exit(checkRecordBinary(e)); { an advanced record's operator }
   op := e^.bop;
@@ -2723,6 +2848,7 @@ var
   i: longint;
   res: PType;
   w: PWithContext;
+  ref: PNode;
 begin
   visitCall := errorType;
   w := nil;
@@ -2746,6 +2872,22 @@ begin
   begin
     e^.callWith := w;
     checkScopeAccess(d, w, e^.callee);
+  end;
+  if proceduralMember(d) <> nil then
+  begin
+    { FCalc(x) in a method or a with statement: through the member }
+    ref := nameRefNode(e^.callee);
+    if isError(check(ref)) then
+      exit;
+    e^.callValue := ref;
+    checkCallArgs(proceduralMember(d)^.routineParams, nil, e^.callee, e^.args, nodeRange(e));
+    if proceduralMember(d)^.routineResult <> nil then
+      exit(proceduralMember(d)^.routineResult);
+    ms('procedure ''');
+    maN(e^.callee.spelling);
+    ma(''' does not return a value');
+    errR(e^.callee.loc, identRange(e^.callee));
+    exit;
   end;
   if d^.kind = dkRoutine then
   begin
@@ -3012,6 +3154,116 @@ begin
   visitIndex := bt^.elementType;
 end;
 
+{ @obj.M, @TFoo.M, or @M in a method: a method pointer. nil if the operand
+  is not a method. }
+function checkMethodAddr(e: PNode): PType;
+var
+  op: PNode;
+  r, d, x, pick: PDecl;
+  w: PWithContext;
+  name: TIdent;
+  viaClass: boolean;
+  xr, t, res: PType;
+  why: string;
+begin
+  checkMethodAddr := nil;
+  if mode <> lmObjFPC then
+    exit;
+  op := e^.inner;
+  r := nil;
+  viaClass := false;
+  if op^.kind = nkField then
+  begin
+    if not isMethodCallee(op) then
+      exit;
+    viaClass := classNamedBy(op^.base) <> nil;
+    d := resolveMember(op);
+    if d = nil then
+      exit(errorType);
+    if d^.kind = dkRoutine then
+      r := d;
+    name := op^.fieldName;
+    if (r <> nil) and (op^.base^.typ <> nil) and (op^.base^.typ^.kind = tyInterface) then
+    begin
+      ms('''@');
+      maN(name.spelling);
+      ma(''': interface methods cannot be method pointers');
+      errR(name.loc, identRange(name));
+      exit(errorType);
+    end;
+  end
+  else if op^.kind = nkNameRef then
+  begin
+    w := nil;
+    d := scopeLookup(cur, op^.ref.name, w);
+    if (d <> nil) and (d^.kind = dkRoutine) and (d^.ownerClass <> nil) then
+    begin
+      r := d;
+      op^.refWith := w;
+      name := op^.ref;
+      checkScopeAccess(r, w, name);
+    end;
+  end;
+  if r = nil then
+    exit;
+  if r^.overloadIndex <> 0 then
+  begin
+    pick := nil;
+    x := r;
+    while (addrOfTarget <> nil) and (x <> nil) do
+    begin
+      xr := nil;
+      if x^.isFunction then
+        xr := x^.resultType;
+      if (pick = nil) and addrOfTarget^.routineOfObject and
+         congruent(addrOfTarget^.routineParams, addrOfTarget^.routineResult, x^.params, xr) then
+        pick := x;
+      x := x^.nextOverload;
+    end;
+    if pick = nil then
+    begin
+      ms('''@');
+      maN(name.spelling);
+      ma(''': ''');
+      maN(name.spelling);
+      ma(''' is overloaded; assign it to a method pointer of the heading wanted');
+      errR(name.loc, identRange(name));
+      exit(errorType);
+    end;
+    r := pick;
+  end;
+  why := '';
+  if r^.methodKind in [mtConstructor, mtDestructor] then
+    why := 'constructors and destructors cannot be method pointers'
+  else if r^.objMethod <> obNone then
+    why := 'the methods of TObject cannot be method pointers'
+  else if r^.isStatic then
+    why := 'static methods cannot be method pointers'
+  else if viaClass and not r^.isClassMethod then
+    why := 'a method pointer to an instance method needs an object';
+  if why <> '' then
+  begin
+    ms('''@');
+    maN(name.spelling);
+    ma(''': ' + why);
+    errR(name.loc, identRange(name));
+    exit(errorType);
+  end;
+  if op^.kind = nkField then
+    op^.fieldDecl := r
+  else
+    op^.refDecl := r;
+  r^.isUsed := true;
+  warnHints(r, name);
+  e^.addrMethod := r;
+  res := nil;
+  if r^.isFunction then
+    res := r^.resultType;
+  t := newRoutineType(r^.params, res, isCDecl(r));
+  t^.routineOfObject := true;
+  checkMethodAddr := t;
+end;
+
 function visitAddrOf(e: PNode): PType;
 var
   r, x, pick: PDecl;
@@ -3019,6 +3271,9 @@ var
   op: PNode;
   why: string;
 begin
+  t := checkMethodAddr(e);
+  if t <> nil then
+    exit(t);
   visitAddrOf := errorType;
   op := e^.inner;
   { @routine (Turbo/FPC): a procedural value }

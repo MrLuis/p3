@@ -1,0 +1,105 @@
+FALSEFALSE
+TRUETRUE
+add
+  changing 0
+  changed 1
+addobj
+  changing 1
+  changed 2
+  changing 2
+  changed 2
+insert
+  changing 2
+  changed 3
+insobj
+  changing 3
+  changed 4
+  changing 4
+  changed 4
+  changing 4
+  changed 3
+put
+  changing 3
+  changed 3
+putobj
+  changing 3
+  changed 3
+exchange
+  changing 3
+  changed 3
+move
+  changing 3
+  changed 3
+delete
+  changing 3
+  changed 2
+sort
+  changing 2
+  changed 3
+  changing 3
+  changed 3
+sorted
+  changing 3
+  changed 3
+addsorted
+  changing 3
+  changed 4
+dup
+casesens
+  changing 4
+  changed 4
+clear
+  changing 4
+  changed 0
+clear2
+text
+  changing 0
+  changed 3
+comma
+  changing 3
+  changed 2
+delim
+  changing 2
+  changed 2
+values
+  changing 2
+  changed 3
+values2
+  changing 3
+  changed 3
+vfi
+  changing 3
+  changed 3
+addpair
+  changing 3
+  changed 4
+  changing 4
+  changed 4
+append
+  changing 4
+  changed 5
+addstrings
+  changing 5
+  changed 7
+addarr
+  changing 7
+  changed 9
+assign
+  changing 9
+  changed 2
+update
+  changing 2
+ mid
+  changed 6
+update-empty
+  changing 6
+  changed 6
+extra-end
+  changed 6
+capacity
+nil
+FALSE
+load
+  changing 7
+  changed 7
+free

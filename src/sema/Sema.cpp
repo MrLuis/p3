@@ -475,7 +475,7 @@ class Checker : public StmtVisitor<Checker>,
     switch (K) {
     case BuiltinKind::Break: case BuiltinKind::Continue: case BuiltinKind::Exit:
     case BuiltinKind::Inc: case BuiltinKind::Dec: case BuiltinKind::Delete:
-    case BuiltinKind::Insert: case BuiltinKind::SetLength:
+    case BuiltinKind::Insert: case BuiltinKind::SetLength: case BuiltinKind::Slice:
     case BuiltinKind::Length: case BuiltinKind::Copy:
     case BuiltinKind::Pos: case BuiltinKind::Concat: case BuiltinKind::UpCase:
     case BuiltinKind::GetMem: case BuiltinKind::FreeMem:
@@ -781,6 +781,7 @@ class Checker : public StmtVisitor<Checker>,
         return true;
       auto *VR = llvm::dyn_cast<RoutineType>(Value);
       return VR && VR->isCDecl() == TR->isCDecl() &&
+             VR->isOfObject() == TR->isOfObject() &&
              congruent(TR->getParams(), TR->getResult(), VR->getParams(),
                        VR->getResult());
     }
@@ -1267,7 +1268,12 @@ class Checker : public StmtVisitor<Checker>,
       Type *Result = nullptr;
       if (RS->isFunction()) {
         Result = resolveType(RS->getResult());
-        if (!Result->isError() && !Result->isValidResultType()) {
+        bool MethodResult =
+            RS->isOfObject() && !Result->isError() &&
+            (Result->isShortString() || isMethodPointer(Result) ||
+             (Result->isRecord() && !containsFile(Result) &&
+              !containsInterface(Result)));
+        if (!Result->isError() && !Result->isValidResultType() && !MethodResult) {
           Diags.error(RS->getResult()->getBeginLoc(),
                       "function result type must be a simple or pointer "
                       "type, not " + quoted(Result),
@@ -1276,7 +1282,8 @@ class Checker : public StmtVisitor<Checker>,
         }
       }
       return Ctx.create<RoutineType>(RS->getParams(), Result,
-                                     RS->getCallConv() == CallConv::CDecl);
+                                     RS->getCallConv() == CallConv::CDecl,
+                                     RS->isOfObject());
     }
 
     case TypeSpec::TS_String: {
@@ -2809,7 +2816,7 @@ class Checker : public StmtVisitor<Checker>,
       // ISO 7185 6.6.2: the result type is a simple type (or a pointer).
       // Turbo/FPC also return strings and records (without files).
       if (!ResultTy->isError() && !ResultTy->isValidResultType() &&
-          !ResultTy->isShortString() &&
+          !ResultTy->isShortString() && !isMethodPointer(ResultTy) &&
           !(!isISO() && ResultTy->isRecord() && !containsFile(ResultTy))) {
         Diags.error(R->getResultTypeSpec()->getBeginLoc(),
                     "function result type must be a simple or pointer type, not " +
@@ -3206,7 +3213,10 @@ class Checker : public StmtVisitor<Checker>,
       SC->setType(OA);
       return;
     }
+    bool Slice = isSliceCall(Arg);
+    AllowSlice = Slice;
     Type *AT = check(Arg);
+    AllowSlice = false;
     if (AT->isError())
       return;
     if (!fitsOpenArray(Arg, AT, OA)) {
@@ -3217,13 +3227,14 @@ class Checker : public StmtVisitor<Checker>,
       return;
     }
     if (P->isVarParam()) {
-      if (!isVariableReference(Arg))
+      Expr *Target = Slice ? llvm::cast<CallExpr>(Arg)->getArgs()[0] : Arg;
+      if (!isVariableReference(Target))
         Diags.error(Arg->getBeginLoc(),
                     "argument for 'var' parameter '" + PName.Spelling +
                         "' must be a variable",
                     {Arg->getRange()});
       else
-        checkModifiable(Arg);
+        checkModifiable(Target);
     }
   }
 
@@ -3265,7 +3276,9 @@ class Checker : public StmtVisitor<Checker>,
         ArgTys.push_back(ArrayOfConstTy);
         continue;
       }
+      AllowSlice = isSliceCall(A);
       Type *T = isRoutineName(A) ? nullptr : checkAllowingUntyped(A);
+      AllowSlice = false;
       if (T && T->isError())
         return nullptr;
       ArgTys.push_back(T);
@@ -3726,6 +3739,7 @@ class Checker : public StmtVisitor<Checker>,
       auto *RB = llvm::dyn_cast_or_null<RoutineType>(TB);
       if (RA && RB) {
         if (RA->isCDecl() != RB->isCDecl() ||
+            RA->isOfObject() != RB->isOfObject() ||
             !congruent(RA->getParams(), RA->getResult(), RB->getParams(),
                        RB->getResult()))
           return false;
@@ -3739,6 +3753,24 @@ class Checker : public StmtVisitor<Checker>,
   /// An argument for a procedural/functional parameter: the name of a
   /// routine (or of another procedural parameter) with a congruent heading.
   void checkRoutineArg(Expr *Arg, VarDecl *P, RoutineType *Formal) {
+    if (Formal->isOfObject()) { // @obj.M, or a method pointer
+      Type *AT = checkValueFor(Formal, Arg);
+      if (AT->isError())
+        return;
+      if (!isAssignable(Formal, AT))
+        Diags.error(Arg->getBeginLoc(),
+                    "cannot pass a value of type " + quoted(AT) + " to parameter '" +
+                        P->getName().Spelling + "' of type " + quoted(Formal),
+                    {Arg->getRange()});
+      else if (P->isVarParam() && !isVariableReference(Arg))
+        Diags.error(Arg->getBeginLoc(),
+                    "argument for 'var' parameter '" + P->getName().Spelling +
+                        "' must be a variable",
+                    {Arg->getRange()});
+      else if (P->isVarParam())
+        checkModifiable(Arg);
+      return;
+    }
     const char *Kind = Formal->isFunction() ? "function" : "procedure";
     // Turbo/FPC: @f, as objfpc requires (the operand: a routine's name).
     auto *A = isISO() ? nullptr : llvm::dyn_cast<AddrOfExpr>(Arg);
@@ -4368,8 +4400,58 @@ class Checker : public StmtVisitor<Checker>,
     }
   }
 
+  /// slice(a, n), for an open array parameter only.
+  bool AllowSlice = false;
+
+  bool isSliceCall(Expr *E) {
+    auto *C = llvm::dyn_cast<CallExpr>(E);
+    return C && C->getCallee().Name == "slice" &&
+           llvm::isa_and_nonnull<BuiltinDecl>(Cur->lookup("slice"));
+  }
+
+  Type *checkSlice(CallExpr *E, llvm::ArrayRef<Type *> ArgTypes) {
+    auto Args = E->getArgs();
+    const Identifier &Callee = E->getCallee();
+    bool Allowed = AllowSlice;
+    AllowSlice = false;
+    if (Args.size() != 2) {
+      Diags.error(Callee.Loc, "'" + Callee.Spelling + "' expects 2 arguments",
+                  {E->getRange()});
+      return errorType();
+    }
+    if (ArgTypes[0]->isError() || ArgTypes[1]->isError())
+      return errorType();
+    if (!Allowed) {
+      Diags.error(Callee.Loc,
+                  "'" + Callee.Spelling +
+                      "' can only be passed to an open array parameter",
+                  {E->getRange()});
+      return errorType();
+    }
+    Type *Elem = nullptr;
+    if (auto *A = llvm::dyn_cast<ArrayType>(ArgTypes[0]))
+      Elem = A->getElementType();
+    else if (auto *O = llvm::dyn_cast<OpenArrayType>(ArgTypes[0]))
+      Elem = O->getElementType();
+    if (!Elem) {
+      Diags.error(Args[0]->getBeginLoc(),
+                  "'" + Callee.Spelling + "' expects an array, not " +
+                      quoted(ArgTypes[0]),
+                  {Args[0]->getRange()});
+      return errorType();
+    }
+    if (!ArgTypes[1]->isIntegerLike()) {
+      Diags.error(Args[1]->getBeginLoc(), "expected an integer",
+                  {Args[1]->getRange()});
+      return errorType();
+    }
+    return Ctx.getOpenArrayType(Elem);
+  }
+
   Type *checkBuiltinFunction(CallExpr *E, BuiltinDecl *BD,
                              llvm::ArrayRef<Type *> ArgTypes) {
+    if (BD->getBuiltinKind() == BuiltinKind::Slice)
+      return checkSlice(E, ArgTypes);
     const Identifier &Callee = E->getCallee();
     switch (BD->getBuiltinKind()) {
     case BuiltinKind::Length: case BuiltinKind::Copy: case BuiltinKind::Pos:
@@ -4821,6 +4903,16 @@ public:
     PendingGotos.push_back({S, Containers, CurRoutine});
   }
 
+  /// The procedural type of the field or property D, or null.
+  static RoutineType *proceduralMember(Decl *D) {
+    Type *T = nullptr;
+    if (auto *F = llvm::dyn_cast<FieldDecl>(D))
+      T = F->getType();
+    else if (auto *P = llvm::dyn_cast<PropertyDecl>(D))
+      T = P->getType();
+    return llvm::dyn_cast_or_null<RoutineType>(T);
+  }
+
   void visitProcCallStmt(ProcCallStmt *S) {
     const Identifier &Callee = S->getCallee();
     WithContext *W = nullptr;
@@ -4921,6 +5013,15 @@ public:
           RT && !RT->isFunction())
         return checkCallArgs(RT->getParams(), V, Callee, S->getArgs(),
                              S->getRange());
+    if (RoutineType *RT = proceduralMember(D)) {
+      // FOnEvent(x) in a method or a with statement: through the member
+      auto *Ref = Ctx.create<NameRefExpr>(Callee);
+      if (check(Ref)->isError())
+        return;
+      S->setCalleeValue(Ref);
+      return checkCallArgs(RT->getParams(), nullptr, Callee, S->getArgs(),
+                           S->getRange());
+    }
 
     if (llvm::isa<BuiltinDecl>(D) || llvm::isa<RoutineDecl>(D))
       Diags.error(Callee.Loc,
@@ -5388,6 +5489,8 @@ public:
         // A functional parameter without arguments is a call.
         if (RT->isFunction() && RT->getParams().empty())
           return RT->getResult();
+        if (RT->isOfObject()) // nothing else it could be: the value
+          return T;
         Diags.error(Id.Loc,
                     RT->isFunction()
                         ? "missing arguments in call to '" + Id.Spelling + "'"
@@ -5562,13 +5665,36 @@ public:
     return E->getOp() == BinaryOp::Is ? Ctx.getBooleanType() : C;
   }
 
+  static bool isMethodPointer(Type *T) {
+    auto *RT = llvm::dyn_cast<RoutineType>(T);
+    return RT && RT->isOfObject();
+  }
+
+  /// An operand of = or <>: a method pointer variable is compared, not called.
+  Type *checkComparand(Expr *E) {
+    if (auto *N = llvm::dyn_cast<NameRefExpr>(E)) {
+      auto *V = llvm::dyn_cast_or_null<VarDecl>(Cur->lookup(N->getName().Name));
+      if (V && V->getType() && isMethodPointer(V->getType())) {
+        N->setDecl(V);
+        N->setType(V->getType());
+        Used.insert(V);
+        return V->getType();
+      }
+    }
+    return check(E);
+  }
+
   Type *visitBinaryExpr(BinaryExpr *E) {
     if (E->getOp() == BinaryOp::Is || E->getOp() == BinaryOp::As)
       return checkIsAs(E);
-    Type *L = check(E->getLHS());
-    Type *R = check(E->getRHS());
+    bool Equality = E->getOp() == BinaryOp::Eq || E->getOp() == BinaryOp::Ne;
+    Type *L = Equality ? checkComparand(E->getLHS()) : check(E->getLHS());
+    Type *R = Equality ? checkComparand(E->getRHS()) : check(E->getRHS());
     if (L->isError() || R->isError())
       return errorType();
+    if (Equality && (isMethodPointer(L) || isMethodPointer(R)) &&
+        (L->isNil() || R->isNil() || isAssignable(L, R)))
+      return Ctx.getBooleanType();
     if (memberTableOf(L) || memberTableOf(R)) // an advanced record's operator
       return checkRecordOperator(E);
 
@@ -5700,6 +5826,21 @@ public:
     if (hasMembers(W)) { // a method of an object or advanced record
       E->setWith(W);
       checkScopeAccess(D, W, Callee);
+    }
+
+    if (RoutineType *RT = proceduralMember(D)) {
+      // FCalc(x) in a method or a with statement: through the member
+      auto *Ref = Ctx.create<NameRefExpr>(Callee);
+      if (check(Ref)->isError())
+        return errorType();
+      E->setCalleeValue(Ref);
+      checkCallArgs(RT->getParams(), nullptr, Callee, E->getArgs(), E->getRange());
+      if (RT->isFunction())
+        return RT->getResult();
+      Diags.error(Callee.Loc,
+                  "procedure '" + Callee.Spelling + "' does not return a value",
+                  {Callee.getRange()});
+      return errorType();
     }
 
     if (auto *R = llvm::dyn_cast<RoutineDecl>(D)) {
@@ -5997,7 +6138,90 @@ public:
     return errorType();
   }
 
+  /// @obj.M, @TFoo.M, or @M in a method: a method pointer. Null if the
+  /// operand is not a method.
+  Type *checkMethodAddr(AddrOfExpr *E) {
+    if (!LangOpts.ObjKeywords)
+      return nullptr;
+    Expr *Op = E->getOperand();
+    RoutineDecl *R = nullptr;
+    Identifier Name;
+    bool ViaClass = false;
+    auto *F = llvm::dyn_cast<FieldExpr>(Op);
+    auto *N = llvm::dyn_cast<NameRefExpr>(Op);
+    if (F) {
+      if (!isMethodCallee(F))
+        return nullptr;
+      ViaClass = classNamedBy(F->getBase()) != nullptr;
+      Decl *D = resolveMember(F);
+      if (!D)
+        return errorType();
+      R = llvm::dyn_cast<RoutineDecl>(D);
+      Name = F->getField();
+      if (R && F->getBase()->getType() && F->getBase()->getType()->isInterface()) {
+        Diags.error(Name.Loc, "'@" + Name.Spelling +
+                                  "': interface methods cannot be method pointers",
+                    {Name.getRange()});
+        return errorType();
+      }
+    } else if (N) {
+      WithContext *W = nullptr;
+      R = llvm::dyn_cast_or_null<RoutineDecl>(Cur->lookup(N->getName().Name, &W));
+      if (R && R->isMethod()) {
+        N->setWith(W);
+        Name = N->getName();
+        checkScopeAccess(R, W, Name);
+      } else {
+        R = nullptr;
+      }
+    }
+    if (!R)
+      return nullptr;
+    if (R->isOverloaded()) {
+      RoutineDecl *Pick = nullptr;
+      for (RoutineDecl *X = R; AddrOfTarget && X; X = X->getNextOverload())
+        if (!Pick && AddrOfTarget->isOfObject() &&
+            congruent(AddrOfTarget->getParams(), AddrOfTarget->getResult(),
+                      X->getParams(), X->isFunction() ? X->getResultType() : nullptr))
+          Pick = X;
+      if (!Pick) {
+        Diags.error(Name.Loc,
+                    "'@" + Name.Spelling + "': '" + Name.Spelling +
+                        "' is overloaded; assign it to a method pointer of the "
+                        "heading wanted",
+                    {Name.getRange()});
+        return errorType();
+      }
+      R = Pick;
+    }
+    const char *Why = nullptr;
+    if (R->isConstructor() || R->isDestructor())
+      Why = "constructors and destructors cannot be method pointers";
+    else if (R->getBuiltin() != TObjectMethod::None)
+      Why = "the methods of TObject cannot be method pointers";
+    else if (R->isStatic())
+      Why = "static methods cannot be method pointers";
+    else if (ViaClass && !R->isClassMethod())
+      Why = "a method pointer to an instance method needs an object";
+    if (Why) {
+      Diags.error(Name.Loc, "'@" + Name.Spelling + "': " + Why, {Name.getRange()});
+      return errorType();
+    }
+    if (F)
+      F->setMember(R);
+    else
+      N->setDecl(R);
+    Used.insert(R);
+    warnHints(R, Name);
+    E->setMethod(R);
+    return Ctx.create<RoutineType>(R->getParams(),
+                                   R->isFunction() ? R->getResultType() : nullptr,
+                                   R->isCDecl(), /*OfObject=*/true);
+  }
+
   Type *visitAddrOfExpr(AddrOfExpr *E) {
+    if (Type *T = checkMethodAddr(E))
+      return T;
     // @routine (Turbo/FPC): a procedural value.
     if (auto *N = llvm::dyn_cast<NameRefExpr>(E->getOperand()))
       if (auto *R = llvm::dyn_cast_or_null<RoutineDecl>(Cur->lookup(N->getName().Name))) {

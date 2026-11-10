@@ -51,6 +51,8 @@ function stringLiteralType(len: int64): PType;
 function shortStringType(maxLen: longint): PType;
 function ansiStringType: PType;
 function openArrayType(element: PType): PType;
+{ The type of a method pointer: procedure ... of object. }
+function newMethodPointerType(const params: TPtrList; result_: PType; cdecl_: boolean): PType;
 
 { The first name given to t in a type declaration. }
 procedure setDeclName(t: PType; name: PName);
@@ -74,6 +76,8 @@ function isUntypedPointer(t: PType): boolean;
 function containsFile(t: PType): boolean;
 { Is t, or does it contain, a COM interface (reference counted)? }
 function isManaged(t: PType): boolean;
+{ A procedure or function ... of object? }
+function isMethodPointer(t: PType): boolean;
 { Is t, or does it contain, a COM interface? }
 function containsInterface(t: PType): boolean;
 function findField(rec: PType; name: PName): PDecl;
@@ -205,6 +209,7 @@ begin
   t^.routineParams := params;
   t^.routineResult := result_;
   t^.routineCDecl := cdecl_;
+  t^.routineOfObject := false;
   newRoutineType := t;
 end;
 
@@ -362,6 +367,15 @@ begin
   shortStringType := t;
 end;
 
+function newMethodPointerType(const params: TPtrList; result_: PType; cdecl_: boolean): PType;
+var
+  t: PType;
+begin
+  t := newRoutineType(params, result_, cdecl_);
+  t^.routineOfObject := true;
+  newMethodPointerType := t;
+end;
+
 function ansiStringType: PType;
 begin
   ansiStringType := theAnsiString;
@@ -507,6 +521,11 @@ begin
   else
     containsFile := false;
   end;
+end;
+
+function isMethodPointer(t: PType): boolean;
+begin
+  isMethodPointer := (t^.kind = tyRoutine) and t^.routineOfObject;
 end;
 
 function containsInterface(t: PType): boolean;
@@ -828,6 +847,8 @@ begin
           bufAdd(b, ': ');
           bufAddTypeName(b, t^.routineResult);
         end;
+        if t^.routineOfObject then
+          bufAdd(b, ' of object');
         if t^.routineCDecl then
           bufAdd(b, '; cdecl');
       end;

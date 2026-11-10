@@ -769,6 +769,29 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
     return holdResult(astrCall("__pas_astr_from_pstr", Ptr, {emitPStr(E)}));
   }
 
+  static bool isMethodPointerType(Type *T) {
+    auto *RT = llvm::dyn_cast<RoutineType>(T);
+    return RT && RT->isOfObject();
+  }
+
+  /// slice(a, n): the first n elements of a, as an open array.
+  llvm::Value *emitSlice(CallExpr *C) {
+    Expr *A = C->getArgs()[0], *NE = C->getArgs()[1];
+    llvm::Value *Data = emitAddress(A);
+    llvm::Value *Count;
+    if (auto *AT = llvm::dyn_cast<ArrayType>(A->getType())) {
+      OrdinalBounds Bd = getOrdinalBounds(AT->getIndexType());
+      Count = B.getInt64(Bd.Hi - Bd.Lo + 1);
+    } else {
+      Count = openCount(openDescriptor(A));
+    }
+    llvm::Value *N = toI64(visitExpr(NE), NE->getType());
+    if (rangeChecks(NE->getBeginLoc()))
+      emitRuntimeCheck(B.CreateICmpUGT(N, Count), "slice length out of bounds",
+                       NE->getBeginLoc());
+    return newOpenDescriptor(Data, N);
+  }
+
   /// The descriptor {data, count} of the open array parameter E.
   llvm::Value *openDescriptor(Expr *E) {
     auto *V = llvm::cast<VarDecl>(llvm::cast<NameRefExpr>(E)->getDecl());
@@ -795,6 +818,8 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
     Type *T = Arg->getType();
     if (auto *S = llvm::dyn_cast<SetCtorExpr>(Arg)) // typed as the parameter
       return emitOpenArrayCtor(S, OA);
+    if (auto *C = llvm::dyn_cast<CallExpr>(Arg)) // no function returns one
+      return emitSlice(C);
     if (T == OA)
       return openDescriptor(Arg);
     if (auto *A = llvm::dyn_cast<ArrayType>(T)) {
@@ -2308,7 +2333,10 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
       else if (llvm::isa<RoutineType>(P->getType()) && ToC) {
         llvm::Value *Pair = emitRoutineValue(Arg);
         Values.push_back(B.CreateExtractValue(Pair, 0));
-      } else if (llvm::isa<RoutineType>(P->getType()))
+      } else if (auto *RT = llvm::dyn_cast<RoutineType>(P->getType());
+                 RT && RT->isOfObject())
+        Values.push_back(P->isVarParam() ? emitAddress(Arg) : emitRoutinePair(Arg, RT));
+      else if (llvm::isa<RoutineType>(P->getType()))
         Values.push_back(emitRoutineValue(Arg));
       else if (P->isConstParam() && P->getType()->isShortString())
         Values.push_back(emitPStr(Arg)); // read-only: no copy
@@ -2391,6 +2419,12 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
     if (NilCheckLoc.isValid() && rangeChecks(NilCheckLoc))
       emitRuntimeCheck(B.CreateIsNull(Fn), "call through a nil procedural value",
                        NilCheckLoc);
+    if (RT->isOfObject()) { // {code, data}: Self comes from the pair
+      llvm::Value *Self = B.CreateExtractValue(Pair, 1);
+      return emitCallTo({routineFnType(RT->getParams(), RT->getResult(), true), Fn},
+                        llvm::ConstantPointerNull::get(B.getPtrTy()), RT->getParams(),
+                        Args, Self, RT->getResult());
+    }
     if (RT->isCDecl()) { // a C entry (cthunk, external): no static link
       llvm::FunctionType *FTy =
           routineFnType(RT->getParams(), RT->getResult(), false, false);
@@ -2402,11 +2436,51 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
                       Args, nullptr, RT->getResult());
   }
 
+  /// @obj.M, @TFoo.M, @M: {method's code, object or class}.
+  llvm::Value *emitMethodPointer(AddrOfExpr *A) {
+    RoutineDecl *R = A->getMethod();
+    SourceLocation L = A->getBeginLoc();
+    llvm::Value *Obj;
+    bool SelfIsClass = false;
+    if (auto *F = llvm::dyn_cast<FieldExpr>(A->getOperand())) {
+      Expr *Base = F->getBase();
+      auto *N = llvm::dyn_cast<NameRefExpr>(Base);
+      if (Base->getType()->isRecord()) {
+        Obj = emitAddress(Base);
+      } else if (N && llvm::isa<TypeDecl>(N->getDecl())) {
+        Obj = vmtOf(llvm::cast<ClassType>(N->getType()));
+        SelfIsClass = true;
+      } else {
+        Obj = visitExpr(Base);
+        SelfIsClass = Base->getType()->isClassRef();
+      }
+    } else {
+      auto *N = llvm::cast<NameRefExpr>(A->getOperand());
+      Obj = withBase(N->getWith());
+      SelfIsClass = withIsClass(N->getWith());
+    }
+    llvm::Value *Code = Functions[R];
+    if (R->isClassMethod()) {
+      Obj = receiverClass(Obj, SelfIsClass, L);
+      if (R->isDispatched())
+        Code = loadVMTSlot(Obj, 4 + R->getVMTIndex(), "method");
+    } else if (R->isDispatched()) {
+      emitNilObjectCheck(Obj, L);
+      Code = loadVirtual(Obj, static_cast<unsigned>(R->getVMTIndex()));
+    }
+    llvm::Value *Pair =
+        llvm::UndefValue::get(llvm::StructType::get(B.getPtrTy(), B.getPtrTy()));
+    Pair = B.CreateInsertValue(Pair, Code, 0);
+    return B.CreateInsertValue(Pair, Obj, 1);
+  }
+
   /// A procedural value of type T (Turbo/FPC): @routine, nil, or a
   /// procedural variable / field / element.
   llvm::Value *emitRoutinePair(Expr *E, Type *T) {
     if (llvm::isa<NilExpr>(E))
       return llvm::Constant::getNullValue(memType(T));
+    if (llvm::cast<RoutineType>(T)->isOfObject())
+      return visitExpr(E);
     if (auto *A = llvm::dyn_cast<AddrOfExpr>(E)) {
       auto *R = llvm::cast<RoutineDecl>(
           llvm::cast<NameRefExpr>(A->getOperand())->getDecl());
@@ -3260,6 +3334,21 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
           RT.StrCompare, {emitPStr(E->getLHS()), emitPStr(E->getRHS())});
       return compareInts(Op, Cmp, B.getInt32(0), /*Signed=*/true);
     }
+    if (isMethodPointerType(LT) || isMethodPointerType(RTy)) {
+      auto Part = [&](Expr *X) -> llvm::Value * {
+        return llvm::isa<NilExpr>(X)
+                   ? llvm::Constant::getNullValue(
+                         llvm::StructType::get(B.getPtrTy(), B.getPtrTy()))
+                   : visitExpr(X);
+      };
+      llvm::Value *L = Part(E->getLHS());
+      llvm::Value *R = Part(E->getRHS());
+      // The code only, as in Free Pascal.
+      llvm::Value *LC = B.CreateExtractValue(L, 0);
+      llvm::Value *RC = B.CreateExtractValue(R, 0);
+      return Op == BinaryOp::Eq ? B.CreateICmpEQ(LC, RC, "cmp")
+                                : B.CreateICmpNE(LC, RC, "cmp");
+    }
     if (LT->isPointer() || LT->isNil() || LT->isClass() || LT->isClassRef() ||
         LT->isInterface()) { // interfaces: their objects
       llvm::Value *L = interfaceObject(visitExpr(E->getLHS()));
@@ -3544,7 +3633,9 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
     case BuiltinKind::Assigned: {
       Expr *Arg = E->getArgs()[0];
       llvm::Value *P;
-      if (llvm::isa<RoutineType>(Arg->getType()))
+      if (isMethodPointerType(Arg->getType()))
+        P = B.CreateExtractValue(visitExpr(Arg), 0);
+      else if (llvm::isa<RoutineType>(Arg->getType()))
         P = B.CreateExtractValue(
             B.CreateLoad(memType(Arg->getType()), emitAddress(Arg)), 0);
       else
@@ -3925,6 +4016,11 @@ public:
   }
 
   void visitProcCallStmt(ProcCallStmt *S) {
+    if (Expr *V = S->getCalleeValue()) { // a procedural field or property
+      emitCallThrough(visitExpr(V), llvm::cast<RoutineType>(V->getType()),
+                      S->getArgs(), S->getBeginLoc());
+      return;
+    }
     if (auto *R = llvm::dyn_cast<RoutineDecl>(S->getDecl())) {
       if (R->isStatic()) // a record's static method
         emitCall(R, S->getArgs());
@@ -3982,6 +4078,8 @@ public:
           emitStringAssign(Addr, SS, Value);
         else if (RT->isAnsiString())
           storeValue(Addr, emitAnsi(Value), RT);
+        else if (isMethodPointerType(RT))
+          B.CreateStore(emitRoutinePair(Value, RT), Addr);
         else if (RT->isStructured())
           copyValue(Addr, emitAddress(Value), RT);
         else
@@ -4789,6 +4887,9 @@ public:
   }
 
   llvm::Value *visitCallExpr(CallExpr *E) {
+    if (Expr *V = E->getCalleeValue()) // a procedural field or property
+      return emitCallThrough(visitExpr(V), llvm::cast<RoutineType>(V->getType()),
+                             E->getArgs(), E->getBeginLoc());
     if (E->isVarCast()) { // T(x) of an untyped parameter x
       if (E->getType()->isShortString())
         return emitAddress(E);
@@ -4822,7 +4923,9 @@ public:
         F && llvm::isa_and_nonnull<RoutineDecl>(F->getMember()))
       return emitMemberCall(F, E->getArgs());
     auto *RT = llvm::cast<RoutineType>(Callee->getType());
-    llvm::Value *Pair = B.CreateLoad(memType(RT), emitAddress(Callee));
+    llvm::Value *Pair = RT->isOfObject()
+                            ? visitExpr(Callee)
+                            : B.CreateLoad(memType(RT), emitAddress(Callee));
     return emitCallThrough(Pair, RT, E->getArgs(), Callee->getBeginLoc());
   }
 
@@ -4835,6 +4938,8 @@ public:
   }
 
   llvm::Value *visitAddrOfExpr(AddrOfExpr *E) {
+    if (E->getMethod())
+      return emitMethodPointer(E);
     return emitAddress(E->getOperand());
   }
 

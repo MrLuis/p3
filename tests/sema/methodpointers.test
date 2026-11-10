@@ -1,0 +1,24 @@
+; Method pointers and slice: what is rejected.
+; RUN: not %pcc --mode=objfpc -ferror-limit=0 --emit-ast %S/Inputs/methodpointers/errors.pas 2>&1 | FileCheck %s
+; CHECK: errors.pas:32:5: error: assigning to 'TE' from incompatible type 'procedure(integer)'
+; CHECK: errors.pas:33:5: error: assigning to 'TP' from incompatible type 'procedure(integer) of object'
+; CHECK: errors.pas:34:5: error: assigning to 'TL' from incompatible type 'procedure(integer) of object'
+; CHECK: errors.pas:35:5: error: assigning to 'TF' from incompatible type 'procedure(integer) of object'
+; CHECK: errors.pas:36:12: error: only constructors, class methods and class variables can be used through the class name 'TA'; 'H' is a procedure
+; CHECK: errors.pas:37:11: error: '@Make': constructors and destructors cannot be method pointers
+; CHECK: errors.pas:38:11: error: '@Free': the methods of TObject cannot be method pointers
+; CHECK: errors.pas:39:5: error: assigning to 'TE' from incompatible type 'TA'
+; CHECK: errors.pas:40:10: error: procedure 'p' does not return a value
+; CHECK: errors.pas:41:8: error: invalid operands to '=' ('TE' and 'integer')
+; CHECK: errors.pas:42:7: error: cannot pass a value of type 'procedure(integer)' to parameter 'e' of type 'TE'
+; CHECK: errors.pas:43:13: error: argument for 'var' parameter 'v' must be a variable
+; CHECK: errors.pas:44:11: error: '@O': 'O' is overloaded; assign it to a method pointer of the heading wanted
+; CHECK: errors.pas:45:8: error: cannot pass a value of type 'array of byte' to parameter 'a' of type 'array of integer'
+; CHECK: errors.pas:46:14: error: 'slice' expects an array, not 'integer'
+; CHECK: errors.pas:47:8: error: 'slice' expects 2 arguments
+; CHECK: errors.pas:48:19: error: expected an integer
+; CHECK: errors.pas:49:15: error: 'slice' can only be passed to an open array parameter
+; CHECK-NOT: error:
+;
+; RUN: not %pcc --mode=tp --emit-ast %S/Inputs/methodpointers/tp.pas 2>&1 | FileCheck --check-prefix=TP %s
+; TP: tp.pas:3:17: error: expected ';' after type declaration

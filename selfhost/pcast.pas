@@ -87,7 +87,7 @@ type
       tySet: (setElement: PType); { nil: the empty set [] }
       tyFile: (fileElement: PType; isText: boolean);
       tyRoutine: (routineParams: TPtrList; routineResult: PType;
-                  routineCDecl: boolean);
+                  routineCDecl, routineOfObject: boolean);
       tyShortString: (maxLength: longint);
       tyArrayOfConst: (aocElement: PType); { TVarRec }
       tyOpenArray: (openElement: PType);
@@ -131,7 +131,7 @@ type
       nkStringLit: (strValue: PName);
       nkNameRef: (ref: TIdent; refDecl: PDecl; refWith: PWithContext);
       { paren: the inner expression; deref: the pointer; addrof: the operand }
-      nkParen, nkDeref, nkAddrOf: (inner: PNode);
+      nkParen, nkDeref, nkAddrOf: (inner: PNode; addrMethod: PDecl);
       { opDecl: an advanced record's class operator implementing it
         (Sema); opNegated: <> through the = operator }
       nkUnary: (uop: TUnaryOp; operand: PNode; uopDecl: PDecl);
@@ -142,7 +142,7 @@ type
       { callWith: a method found through a class scope is called on the
         object of this with context (Self, or a with statement's) }
       nkCall, nkProcCall, nkIndirectCall, nkIndirectCallStmt:
-        (callee: TIdent; args: TPtrList; hasParens: boolean;
+        (callValue: PNode; callee: TIdent; args: TPtrList; hasParens: boolean;
          calleeExpr: PNode; callDecl: PDecl; callWith: PWithContext;
          { T(x) of an untyped parameter x (Sema): a variable of type T at
            x's address }
@@ -260,7 +260,7 @@ type
       tsRecord: (fields: PFieldList; recPacked: boolean; recMembers: TPtrList);
       tsSet, tsFile: (elemSpec: PTypeSpec);
       tsRoutine: (rtIsFunction: boolean; rtParams: TPtrList; rtResult: PTypeSpec;
-                  rtCallConv: longint);
+                  rtCallConv: longint; rtOfObject: boolean);
       tsOpenArray: (openSpec: PTypeSpec);
       tsString: (maxLen: PNode; isLong: boolean); { nil for plain string; isLong: under H+ }
       { class (objfpc): the parent's name (nil name: TObject), the members

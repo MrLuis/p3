@@ -224,15 +224,14 @@ with the same name wins. They live in `<pcc dir>/../lib/pascal` (override with
 |---|---|
 | `sysutils` | `Format`, `IntToStr`, `IntToHex`, `StrToInt[64][Def]`, `TryStrToInt[64]`, `FloatToStr`, `[Try]StrToFloat[Def]`, `BoolToStr`, `Trim[Left/Right]`, `Upper/LowerCase`, `CompareStr/Text`, `SameText`, `QuotedStr`, `StringReplace`, `IsDelimiter`, `LastDelimiter`, `StrPas`, `Extract*`, `ChangeFileExt`, path delimiter routines, `FileExists`, `DirectoryExists`, `DeleteFile`, `RenameFile`, `CreateDir`, `RemoveDir`, `ForceDirectories`, `Get/SetCurrentDir`, `GetEnvironmentVariable`, `Encode/DecodeDate/Time`, `IsLeapYear`, `DayOfWeek`, `Now`, `Date`, `Time`, `GetTickCount64`, `Sleep`, `EConvertError` |
 | `strutils` | `ReverseString`, `Left/Right/MidStr`, `DupeString`, `PadLeft/Right`, `AddChar[R]`, `Starts/Ends/ContainsStr/Text`, `AnsiStarts/Ends/ContainsStr`, `[Ansi]Index/MatchStr/Text`, `PosEx`, `ReplaceStr/Text`, `StuffString`, `Copy2Symb`, `Hex2Dec`, `Dec2Numb`, `IntToBin` |
-| `classes` | `TList` (`Add`, `Insert`, `Delete`, `Remove`, `Extract`, `Clear`, `IndexOf`, `First`, `Last`, `Exchange`, `Move`, `Pack`, `Sort`, `Expand`, `Notify`, `Items`, `Count`, `Capacity`, `List`), `TStrings` and `TStringList` (`Add`, `AddObject`, `AddPair`, `AddStrings`, `Append`, `Assign`, `Insert`, `InsertObject`, `Delete`, `Clear`, `Exchange`, `Move`, `IndexOf`, `IndexOfName`, `IndexOfObject`, `Find`, `Sort`, `CustomSort`, `Sorted`, `Duplicates`, `CaseSensitive`, `OwnsObjects`, `Strings`, `Objects`, `Names`, `Values`, `ValueFromIndex`, `Text`, `CommaText`, `DelimitedText`, `Delimiter`, `QuoteChar`, `NameValueSeparator`, `StrictDelimiter`, `LoadFromFile`, `SaveToFile`, `BeginUpdate`, `EndUpdate`), `TPersistent`, `EListError`, `EStringListError`, `EFOpenError`, `EFCreateError` |
+| `classes` | `TList` (`Add`, `Insert`, `Delete`, `Remove`, `Extract`, `Clear`, `IndexOf`, `First`, `Last`, `Exchange`, `Move`, `Pack`, `Sort`, `Expand`, `Notify`, `Items`, `Count`, `Capacity`, `List`), `TNotifyEvent`, `TStrings` and `TStringList` (`OnChange`, `OnChanging`, `Add`, `AddObject`, `AddPair`, `AddStrings`, `Append`, `Assign`, `Insert`, `InsertObject`, `Delete`, `Clear`, `Exchange`, `Move`, `IndexOf`, `IndexOfName`, `IndexOfObject`, `Find`, `Sort`, `CustomSort`, `Sorted`, `Duplicates`, `CaseSensitive`, `OwnsObjects`, `Strings`, `Objects`, `Names`, `Values`, `ValueFromIndex`, `Text`, `CommaText`, `DelimitedText`, `Delimiter`, `QuoteChar`, `NameValueSeparator`, `StrictDelimiter`, `LoadFromFile`, `SaveToFile`, `BeginUpdate`, `EndUpdate`), `TPersistent`, `EListError`, `EStringListError`, `EFOpenError`, `EFCreateError` |
 | `math` | `Sum`, `SumInt`, `Mean`, `MinValue`, `MaxValue`, `MinIntValue`, `MaxIntValue`, `Floor[64]`, `Ceil[64]`, `Power`, `IntPower`, `Log10/2/N`, `Hypot`, `FMod`, `Tan`, `Cotan`, `ArcSin/Cos/Tan2`, `Sinh/Cosh/Tanh`, `DegToRad`, `RadToDeg`, `IsNan`, `IsInfinite`, `Min`, `Max`, `Sign`, `InRange`, `EnsureRange` |
 
 `classes` needs `--mode=objfpc`; the others work in `--mode=tp` too. Overloads exist only in objfpc
 (the `double` forms of `Min`, `Max`, `Sign`, `InRange` and `EnsureRange`,
 `IntToHex(longint)`, two-parameter `BoolToStr` and `PosEx`); conversion
 failures raise `EConvertError` in objfpc and are runtime errors in tp.
-Differences from Free Pascal: `TStringList` has no `OnChange` events
-(no method pointers yet); `TryStrToInt` rejects values outside `longint`
+Differences from Free Pascal: `TryStrToInt` rejects values outside `longint`
 instead of wrapping them; `'.'` and `'e5'` are not valid floats; `math`
 domain errors give NaN or infinity instead of exceptions; `Format`, like the
 rest, uses 64-bit reals, so `%e` shows 15 digits. `Exception.CreateFmt` is
@@ -344,7 +343,20 @@ whose elements convert to `T`; string constants also fit `array of char`.
 Inside, it is indexed from 0 to `high(a)` (checked with range checks on), with
 `low(a)`, `high(a)`, `length(a)` and `sizeof(a)`. A value parameter gets its
 own copy, on the stack. An open array can only be indexed and passed on,
-not assigned. Not supported: `slice`, and open arrays on `cdecl` routines.
+not assigned. `slice(a, n)` passes the first `n` elements of an array or open
+array to an open array parameter (and is allowed nowhere else; `n` is checked
+with range checks on). Not supported: open arrays on `cdecl` routines.
+
+**Method pointers** (`--mode=objfpc`), as in Free Pascal: `TEv = procedure(x:
+integer) of object`, also as a function, hold a method and its object. `@obj.M`,
+`@M` inside a method (of `Self`), `@TFoo.M` for a class method, or `nil`; a
+virtual method is bound when the pointer is made. Records' methods work too, on
+the record's address. Call one like a routine (`ev(1)`, `FOnEv(1)` from a method,
+`obj.OnEv(1)`, and `ev()`, since objfpc accepts empty parentheses), test it with
+`assigned` or `= nil`, compare with `=` and `<>` (the code only, as in Free
+Pascal), pass it, return it, keep it in fields and properties. Calling a nil one
+is a runtime error with range checks on. Not supported: `TMethod`, and typed
+constants of these types.
 
 **Conditional compilation** (every mode), as in Free Pascal:
 

@@ -1451,6 +1451,9 @@ end;
 
 function cStringFor(paramTy: PType; arg: PNode; var v: TV): boolean; forward;
 
+{ slice(a, n): the first n elements of a, as an open array. }
+function emitSlice(c_: PNode): TV; forward;
+
 { The descriptor (data, count) of the open array parameter e. }
 function openDescriptor(e: PNode): TV;
 begin
@@ -1470,6 +1473,28 @@ begin
   irStore(data, desc);
   irStore(count, irGEP1(irI64, desc, i64c(1), true, ''));
   newOpenDescriptor := desc;
+end;
+
+function emitSlice(c_: PNode): TV;
+var
+  a, ne: PNode;
+  data, count, n: TV;
+  bd: TOrdinalBounds;
+begin
+  a := PNode(listGet(c_^.args, 0));
+  ne := PNode(listGet(c_^.args, 1));
+  data := emitAddress(a);
+  if a^.typ^.kind = tyArray then
+  begin
+    bd := getOrdinalBounds(a^.typ^.indexType);
+    count := i64c(bd.hi - bd.lo + 1);
+  end
+  else
+    count := openCount(openDescriptor(a));
+  n := toI64(visitExpr(ne), ne^.typ);
+  if rangeChecks(ne^.b) then
+    emitRuntimeCheck(irICmp('ugt', n, count, ''), 'slice length out of bounds', ne^.b);
+  emitSlice := newOpenDescriptor(data, n);
 end;
 
 function emitOpenArrayCtor(s: PNode; oa: PType): TV;
@@ -1515,6 +1540,8 @@ begin
   t := arg^.typ;
   if arg^.kind = nkSetCtor then { typed as the parameter }
     exit(emitOpenArrayCtor(arg, oa));
+  if arg^.kind = nkCall then { no function returns one }
+    exit(emitSlice(arg));
   if t = oa then
     exit(openDescriptor(arg));
   if t^.kind = tyArray then
@@ -1931,6 +1958,8 @@ begin
 end;
 
 { The routine value passed for a procedural parameter. }
+function emitRoutinePair(e: PNode; t: PType): TV; forward;
+
 function emitRoutineValue(arg: PNode): TV;
 var
   d: PDecl;
@@ -2291,6 +2320,13 @@ begin
       irArgsAdd(buf, v)
     else if (pt^.kind = tyRoutine) and toC then
       irArgsAdd(buf, irExtract(emitRoutineValue(arg), 0, irPtrT, ''))
+    else if (pt^.kind = tyRoutine) and pt^.routineOfObject then
+    begin
+      if p^.varKind = vkVarParam then
+        irArgsAdd(buf, emitAddress(arg))
+      else
+        irArgsAdd(buf, emitRoutinePair(arg, pt));
+    end
     else if pt^.kind = tyRoutine then
       irArgsAdd(buf, emitRoutineValue(arg))
     else if (p^.varKind = vkConstParam) and (pt^.kind = tyShortString) then
@@ -2397,6 +2433,12 @@ begin
   if (nilLoc <> noLoc) and rangeChecks(nilLoc) then
     emitRuntimeCheck(irICmp('eq', fn, irNull, ''), 'call through a nil procedural value',
                      nilLoc);
+  if rt^.routineOfObject then { (code, data): Self comes from the pair }
+  begin
+    link := irExtract(pair, 1, irPtrT, '');
+    exit(emitCallToSelf(retTypeOf(rt^.routineResult), fn, irNull, true, link, true,
+                        rt^.routineParams, args, rt^.routineResult));
+  end;
   if rt^.routineCDecl then { a C entry (cthunk, external): no static link }
     exit(emitCallTo(retTypeOf(rt^.routineResult), fn, irNull, false,
                     rt^.routineParams, args, rt^.routineResult));
@@ -2425,6 +2467,8 @@ function emitRoutinePair(e: PNode; t: PType): TV;
 begin
   if e^.kind = nkNil then
     exit(irZero(memType(t)));
+  if t^.routineOfObject then
+    exit(visitExpr(e));
   if e^.kind = nkAddrOf then
     exit(routinePairOf(e^.inner^.refDecl));
   emitRoutinePair := irLoad(memType(t), emitAddress(e), '');
@@ -3377,6 +3421,25 @@ begin
     cmp := call2(rtFn('__pas_str_compare'), l, r, '');
     exit(compareInts(op, cmp, i32c(0), true));
   end;
+  if isMethodPointer(lt) or isMethodPointer(rt) then
+  begin
+    { the code only, as in Free Pascal }
+    if e^.lhs^.kind <> nkNil then
+      l := visitExpr(e^.lhs);
+    if e^.rhs^.kind <> nkNil then
+      r := visitExpr(e^.rhs);
+    if e^.lhs^.kind = nkNil then
+      l := irNull
+    else
+      l := irExtract(l, 0, irPtrT, '');
+    if e^.rhs^.kind = nkNil then
+      r := irNull
+    else
+      r := irExtract(r, 0, irPtrT, '');
+    if op = boEq then
+      exit(irICmp('eq', l, r, 'cmp'));
+    exit(irICmp('ne', l, r, 'cmp'));
+  end;
   if lt^.kind in [tyPointer, tyNil, tyClass, tyClassRef, tyInterface] then
   begin { interfaces: their objects }
     l := interfaceObject(visitExpr(e^.lhs));
@@ -3576,7 +3639,9 @@ begin
     bkAssigned:
       begin
         argE := PNode(listGet(e^.args, 0));
-        if argE^.typ^.kind = tyRoutine then
+        if isMethodPointer(argE^.typ) then
+          p := irExtract(visitExpr(argE), 0, irPtrT, '')
+        else if argE^.typ^.kind = tyRoutine then
         begin
           tmp := irLoad(memType(argE^.typ), emitAddress(argE), '');
           p := irExtract(tmp, 0, irPtrT, '');
@@ -3889,6 +3954,8 @@ function visitCall(e: PNode): TV;
 var
   d: PDecl;
 begin
+  if e^.callValue <> nil then { a procedural field or property }
+    exit(emitCallThrough(visitExpr(e^.callValue), e^.callValue^.typ, e^.args, e^.b));
   if e^.isVarCast then { T(x) of an untyped parameter x }
   begin
     if e^.typ^.kind = tyShortString then
@@ -3923,7 +3990,10 @@ begin
   if (callee^.kind = nkField) and (callee^.fieldDecl <> nil) and
      (callee^.fieldDecl^.kind = dkRoutine) then
     exit(emitMemberCall(callee, e^.args));
-  pair := irLoad(memType(callee^.typ), emitAddress(callee), '');
+  if callee^.typ^.routineOfObject then
+    pair := visitExpr(callee)
+  else
+    pair := irLoad(memType(callee^.typ), emitAddress(callee), '');
   visitIndirectCall := emitCallThrough(pair, callee^.typ, e^.args, callee^.b);
 end;
 
@@ -3937,6 +4007,56 @@ begin
   emitAnsiIndexCheck(s, x, e^.index^.b);
   offset := irBin('sub', x, i64c(1), '');
   emitAnsiIndexRead := loadScalar(irGEP1(irI8, s, offset, true, ''), e^.typ, '');
+end;
+
+{ @obj.M, @TFoo.M, @M: (method's code, object or class). }
+function emitMethodPointer(a: PNode): TV;
+var
+  r: PDecl;
+  op, base: PNode;
+  obj, code, pair: TV;
+  selfIsClass: boolean;
+  loc: TLoc;
+begin
+  r := a^.addrMethod;
+  loc := a^.b;
+  op := a^.inner;
+  selfIsClass := false;
+  if op^.kind = nkField then
+  begin
+    base := op^.base;
+    if base^.typ^.kind = tyRecord then
+      obj := emitAddress(base)
+    else if (base^.kind = nkNameRef) and (base^.refDecl^.kind = dkType) then
+    begin
+      obj := vmtOf(base^.typ);
+      selfIsClass := true;
+    end
+    else
+    begin
+      obj := visitExpr(base);
+      selfIsClass := base^.typ^.kind = tyClassRef;
+    end;
+  end
+  else
+  begin
+    obj := withBase(op^.refWith);
+    selfIsClass := withIsClass(op^.refWith);
+  end;
+  code := irFuncRef(fnOf(r));
+  if r^.isClassMethod then
+  begin
+    obj := receiverClass(obj, selfIsClass, loc);
+    if r^.vmtIndex >= 0 then
+      code := loadVMTSlot(obj, 4 + r^.vmtIndex, 'method');
+  end
+  else if r^.vmtIndex >= 0 then
+  begin
+    emitNilObjectCheck(obj, loc);
+    code := loadVirtual(obj, r^.vmtIndex);
+  end;
+  pair := irInsert(irUndef(routinePairT), code, 0, '');
+  emitMethodPointer := irInsert(pair, obj, 1, '');
 end;
 
 function visitExprKind(e: PNode): TV;
@@ -3955,7 +4075,11 @@ begin
     nkBinary: visitExprKind := visitBinary(e);
     nkCall: visitExprKind := visitCall(e);
     nkIndirectCall: visitExprKind := visitIndirectCall(e);
-    nkAddrOf: visitExprKind := emitAddress(e^.inner);
+    nkAddrOf:
+      if e^.addrMethod <> nil then
+        visitExprKind := emitMethodPointer(e)
+      else
+        visitExprKind := emitAddress(e^.inner);
     nkNil: visitExprKind := irNull;
     nkSetCtor: visitExprKind := emitSetCtor(e);
     nkDeref, nkIndex:

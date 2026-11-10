@@ -58,7 +58,6 @@
 ; MORE: more.pas:33:3: error: cannot assign to procedure 'P'
 ; MORE: more.pas:4:5: note: 'P' declared here
 ; MORE: more.pas:34:3: error: use of undeclared identifier 'Q'; did you mean 'x'?
-; MORE: more.pas:34:9: error: '@V': methods cannot be procedural values
 ; MORE: more.pas:36:14: error: class 'TB' has no method 'P'
 ; MORE: more.pas:42:8: error: invalid operands to '=' ('TA' and 'integer')
 ; MORE: more.pas:45:8: error: invalid typecast from 'integer' to 'TA' (only between ordinal types and between pointer types)

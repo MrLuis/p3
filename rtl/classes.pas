@@ -1,5 +1,5 @@
 { pcc's Classes: TList and TStringList with Free Pascal's names and results.
-  Needs --mode=objfpc. No OnChange events: pcc has no method pointers yet. }
+  Needs --mode=objfpc. }
 unit classes;
 
 {$H+}
@@ -17,6 +17,7 @@ type
   TPointerList = array[0..MaxListSize - 1] of pointer;
   PPointerList = ^TPointerList;
   TListSortCompare = function(Item1, Item2: pointer): longint;
+  TNotifyEvent = procedure(Sender: TObject) of object;
   TListNotification = (lnAdded, lnExtracted, lnDeleted);
   TDuplicates = (dupIgnore, dupAccept, dupError);
 
@@ -105,6 +106,7 @@ type
     procedure PutObject(Index: longint; AObject: TObject); virtual;
     procedure SetCapacity(NewCapacity: longint); virtual;
     function DoCompareText(const s1, s2: string): longint; virtual;
+    procedure SetUpdateState(Updating: boolean); virtual;
     property UpdateCount: longint read FUpdateCount;
   public
     function Add(const S: string): longint; virtual;
@@ -160,6 +162,7 @@ type
     FCount, FCapacity: longint;
     FDuplicates: TDuplicates;
     FCaseSensitive, FSorted, FOwnsObjects: boolean;
+    FOnChange, FOnChanging: TNotifyEvent;
     procedure CheckIndex(Index: longint);
     procedure Grow;
     procedure ClearFrom(Index: longint);
@@ -177,6 +180,9 @@ type
     procedure PutObject(Index: longint; AObject: TObject); override;
     procedure SetCapacity(NewCapacity: longint); override;
     function DoCompareText(const s1, s2: string): longint; override;
+    procedure SetUpdateState(Updating: boolean); override;
+    procedure Changed; virtual;
+    procedure Changing; virtual;
   public
     destructor Destroy; override;
     function Add(const S: string): longint; override;
@@ -190,6 +196,8 @@ type
     procedure Sort; virtual;
     property CaseSensitive: boolean read FCaseSensitive write SetCaseSensitive;
     property Duplicates: TDuplicates read FDuplicates write FDuplicates;
+    property OnChange: TNotifyEvent read FOnChange write FOnChange;
+    property OnChanging: TNotifyEvent read FOnChanging write FOnChanging;
     property OwnsObjects: boolean read FOwnsObjects write FOwnsObjects;
     property Sorted: boolean read FSorted write SetSorted;
   end;
@@ -619,7 +627,7 @@ end;
 function TStrings.AddPair(const Name, Value: string): longint;
 begin
   CheckSpecialChars;
-  Result := Add(Name + FNameValueSeparator + Value);
+  Result := AddObject(Name + FNameValueSeparator + Value, nil);
 end;
 
 procedure TStrings.Append(const S: string);
@@ -631,16 +639,26 @@ procedure TStrings.AddStrings(TheStrings: TStrings);
 var
   i: longint;
 begin
-  for i := 0 to TheStrings.Count - 1 do
-    AddObject(TheStrings[i], TheStrings.Objects[i]);
+  BeginUpdate;
+  try
+    for i := 0 to TheStrings.Count - 1 do
+      AddObject(TheStrings[i], TheStrings.Objects[i]);
+  finally
+    EndUpdate;
+  end;
 end;
 
 procedure TStrings.AddStrings(const TheStrings: array of string);
 var
   i: longint;
 begin
-  for i := 0 to high(TheStrings) do
-    Add(TheStrings[i]);
+  BeginUpdate;
+  try
+    for i := 0 to high(TheStrings) do
+      Add(TheStrings[i]);
+  finally
+    EndUpdate;
+  end;
 end;
 
 procedure TStrings.Assign(Source: TPersistent);
@@ -650,8 +668,13 @@ begin
   if Source is TStrings then
   begin
     from := TStrings(Source);
-    Clear;
-    AddStrings(from);
+    BeginUpdate;
+    try
+      Clear;
+      AddStrings(from);
+    finally
+      EndUpdate;
+    end;
     from.CheckSpecialChars;
     FSpecialCharsInited := true;
     FQuoteChar := from.FQuoteChar;
@@ -663,8 +686,14 @@ begin
     inherited Assign(Source);
 end;
 
+procedure TStrings.SetUpdateState(Updating: boolean);
+begin
+end;
+
 procedure TStrings.BeginUpdate;
 begin
+  if FUpdateCount = 0 then
+    SetUpdateState(true);
   FUpdateCount := FUpdateCount + 1;
 end;
 
@@ -672,6 +701,8 @@ procedure TStrings.EndUpdate;
 begin
   if FUpdateCount > 0 then
     FUpdateCount := FUpdateCount - 1;
+  if FUpdateCount = 0 then
+    SetUpdateState(false);
 end;
 
 function TStrings.Equals(TheStrings: TStrings): boolean;
@@ -690,12 +721,17 @@ var
   obj: TObject;
   s: string;
 begin
-  obj := Objects[Index1];
-  s := Strings[Index1];
-  Objects[Index1] := Objects[Index2];
-  Strings[Index1] := Strings[Index2];
-  Objects[Index2] := obj;
-  Strings[Index2] := s;
+  BeginUpdate;
+  try
+    obj := Objects[Index1];
+    s := Strings[Index1];
+    Objects[Index1] := Objects[Index2];
+    Strings[Index1] := Strings[Index2];
+    Objects[Index2] := obj;
+    Strings[Index2] := s;
+  finally
+    EndUpdate;
+  end;
 end;
 
 function TStrings.IndexOf(const S: string): longint;
@@ -747,10 +783,15 @@ var
 begin
   if CurIndex <> NewIndex then
   begin
-    s := Strings[CurIndex];
-    obj := Objects[CurIndex];
-    Delete(CurIndex);
-    InsertObject(NewIndex, s, obj);
+    BeginUpdate;
+    try
+      s := Strings[CurIndex];
+      obj := Objects[CurIndex];
+      Delete(CurIndex);
+      InsertObject(NewIndex, s, obj);
+    finally
+      EndUpdate;
+    end;
   end;
 end;
 
@@ -832,19 +873,24 @@ procedure TStrings.SetTextStr(const Value: string);
 var
   i, start: longint;
 begin
-  Clear;
-  i := 1;
-  while i <= length(Value) do
-  begin
-    start := i;
-    while (i <= length(Value)) and (Value[i] <> #10) and (Value[i] <> #13) do
-      i := i + 1;
-    Add(copy(Value, start, i - start));
-    if (i <= length(Value)) and (Value[i] = #13) then
-      i := i + 1;
-    if (i <= length(Value)) and (Value[i] = #10) and
-       ((i = 1) or (Value[i - 1] <> #13) or (i - 1 >= start)) then
-      i := i + 1;
+  BeginUpdate;
+  try
+    Clear;
+    i := 1;
+    while i <= length(Value) do
+    begin
+      start := i;
+      while (i <= length(Value)) and (Value[i] <> #10) and (Value[i] <> #13) do
+        i := i + 1;
+      Add(copy(Value, start, i - start));
+      if (i <= length(Value)) and (Value[i] = #13) then
+        i := i + 1;
+      if (i <= length(Value)) and (Value[i] = #10) and
+         ((i = 1) or (Value[i - 1] <> #13) or (i - 1 >= start)) then
+        i := i + 1;
+    end;
+  finally
+    EndUpdate;
   end;
 end;
 
@@ -883,6 +929,8 @@ var
   i, j, n: longint;
   notFirst: boolean;
 begin
+  BeginUpdate;
+  try
   Clear;
   n := length(AValue);
   i := 1;
@@ -922,6 +970,9 @@ begin
       while (i <= n) and (AValue[i] <= ' ') do
         i := i + 1;
     notFirst := true;
+  end;
+  finally
+    EndUpdate;
   end;
 end;
 
@@ -964,6 +1015,7 @@ begin
   f := c_fopen(pchar(FileName), 'rb');
   if f = nil then
     raise EFOpenError.Create('Unable to open file "' + FileName + '": ' + StrPas(sys_strerror));
+  BeginUpdate;
   Clear;
   setlength(line, 256);
   n := 0;
@@ -994,6 +1046,7 @@ begin
   c_fclose(f);
   if pendingLine then
     takeLine;
+  EndUpdate;
 end;
 
 procedure TStrings.SaveToFile(const FileName: string);
@@ -1084,7 +1137,9 @@ begin
   if FSorted then
     raise EStringListError.Create(SSortedListError);
   CheckIndex(Index);
+  Changing;
   FList^[Index].FStr := S;
+  Changed;
 end;
 
 function TStringList.GetObject(Index: longint): TObject;
@@ -1096,7 +1151,9 @@ end;
 procedure TStringList.PutObject(Index: longint; AObject: TObject);
 begin
   CheckIndex(Index);
+  Changing;
   FList^[Index].FObject := AObject;
+  Changed;
 end;
 
 function TStringList.DoCompareText(const s1, s2: string): longint;
@@ -1107,8 +1164,29 @@ begin
     Result := CompareText(s1, s2);
 end;
 
+procedure TStringList.Changed;
+begin
+  if (FUpdateCount = 0) and Assigned(FOnChange) then
+    FOnChange(Self);
+end;
+
+procedure TStringList.Changing;
+begin
+  if (FUpdateCount = 0) and Assigned(FOnChanging) then
+    FOnChanging(Self);
+end;
+
+procedure TStringList.SetUpdateState(Updating: boolean);
+begin
+  if Updating then
+    Changing
+  else
+    Changed;
+end;
+
 procedure TStringList.InsertItem(Index: longint; const S: string; AObject: TObject);
 begin
+  Changing;
   if FCount = FCapacity then
     Grow;
   if Index < FCount then
@@ -1118,6 +1196,7 @@ begin
   FList^[Index].FStr := S;
   FList^[Index].FObject := AObject;
   FCount := FCount + 1;
+  Changed;
 end;
 
 function TStringList.Find(const S: string; var Index: longint): boolean;
@@ -1182,18 +1261,27 @@ end;
 procedure TStringList.Delete(Index: longint);
 begin
   CheckIndex(Index);
+  Changing;
   FList^[Index].FStr := '';
   if FOwnsObjects then
     FList^[Index].FObject.Free;
   FCount := FCount - 1;
   if Index < FCount then
     moveBytes(@FList^[Index + 1], @FList^[Index], int64(FCount - Index) * sizeof(TStringItem));
+  Changed;
 end;
 
 procedure TStringList.Clear;
 begin
+  if FCount = 0 then
+  begin
+    SetCapacity(0);
+    exit;
+  end;
+  Changing;
   ClearFrom(0);
   SetCapacity(0);
+  Changed;
 end;
 
 procedure TStringList.ExchangeItems(Index1, Index2: longint);
@@ -1209,7 +1297,9 @@ procedure TStringList.Exchange(Index1, Index2: longint);
 begin
   CheckIndex(Index1);
   CheckIndex(Index2);
+  Changing;
   ExchangeItems(Index1, Index2);
+  Changed;
 end;
 
 procedure TStringList.QuickSort(L, R: longint; Compare: TStringListSortCompare);
@@ -1246,7 +1336,11 @@ end;
 procedure TStringList.CustomSort(Compare: TStringListSortCompare);
 begin
   if (not FSorted) and (FCount > 1) then
+  begin
+    Changing;
     QuickSort(0, FCount - 1, Compare);
+    Changed;
+  end;
 end;
 
 function compareItems(List: TStringList; Index1, Index2: longint): longint;

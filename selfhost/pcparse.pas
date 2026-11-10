@@ -2172,6 +2172,14 @@ begin
         ts^.rtIsFunction := isFunction;
         ts^.rtParams := params;
         ts^.rtResult := resultSpec;
+        ts^.rtOfObject := false;
+        if (mode = lmObjFPC) and (tok.kind = tkKwOf) then { a method pointer }
+        begin
+          consumeToken;
+          if not expect(tkKwObject, 'after ''of''') then
+            exit;
+          ts^.rtOfObject := true;
+        end;
         { A calling convention:  procedure(x: integer) cdecl  or, after a
           semicolon,  procedure(x: integer); cdecl  (Turbo/FPC). }
         cc := ccDefault;
@@ -3130,6 +3138,11 @@ var
   ok: boolean;
 begin
   lparen := consumeToken; { '(' }
+  if (tok.kind = tkRParen) and (mode = lmObjFPC) then { objfpc: f() }
+  begin
+    consumeToken;
+    exit(true);
+  end;
   if tok.kind = tkRParen then
   begin
     diagErrorR(tok.loc, 'expected expression', makeRange(lparen, tokenEnd(tok)));

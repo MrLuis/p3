@@ -1523,6 +1523,12 @@ TypeSpec *Parser::parseTypeImpl() {
                                            IsFunction,
                                            Ctx.copyArray<VarDecl *>(Params),
                                            Result);
+    if (LangOpts.ObjKeywords && Tok.is(tok::kw_of)) { // a method pointer
+      consumeToken();
+      if (!expect(tok::kw_object, "after 'of'"))
+        return nullptr;
+      RS->setOfObject();
+    }
     // A calling convention:  procedure(x: integer) cdecl  or, after a
     // semicolon,  procedure(x: integer); cdecl  (Turbo/FPC).
     CallConv CC = CallConv::Default;
@@ -2236,6 +2242,10 @@ Expr *Parser::parseInherited() {
 bool Parser::parseActualParams(llvm::SmallVectorImpl<Expr *> &Args,
                                bool AllowFormat) {
   SourceLocation LParen = consumeToken(); // '('
+  if (Tok.is(tok::r_paren) && LangOpts.ObjKeywords) { // objfpc: f()
+    consumeToken();
+    return true;
+  }
   if (Tok.is(tok::r_paren)) {
     Diags.error(Tok.getLocation(), "expected expression",
                 {SourceRange(LParen, Tok.getEndLocation())});

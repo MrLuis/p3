@@ -52,6 +52,10 @@
 ; RUN: %t.recs > %t.recs.out && diff %S/../run/ansistring-records.expected %t.recs.out
 ; RUN: env PCC_RUNTIME_LIB=%pcc-runtime-lib %t.pcc --mode=objfpc %S/../run/openarrays.pas -o %t.open
 ; RUN: %t.open > %t.open.out && diff %S/../run/openarrays.expected %t.open.out
+; RUN: env PCC_RUNTIME_LIB=%pcc-runtime-lib %t.pcc --mode=objfpc %S/../run/methodpointers.pas -o %t.mp
+; RUN: %t.mp > %t.mp.out && diff %S/../run/methodpointers.expected %t.mp.out
+; RUN: env PCC_RUNTIME_LIB=%pcc-runtime-lib %t.pcc --mode=objfpc %S/../run/slice.pas -o %t.slice
+; RUN: %t.slice > %t.slice.out && diff %S/../run/slice.expected %t.slice.out
 ; RUN: %t.pcc --mode=tp --emit-llvm --target=x86_64-w64-mingw32 %S/../driver/Inputs/unit-library/target.pas -o - | FileCheck --check-prefix=TARGET %S/../driver/unit-library.test
 ;
 ; The driver: the runtime is looked for next to the executable.

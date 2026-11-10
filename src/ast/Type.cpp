@@ -242,6 +242,8 @@ std::string Type::getName() const {
     S += ")";
     if (R->isFunction())
       S += ": " + R->getResult()->getName();
+    if (R->isOfObject())
+      S += " of object";
     if (R->isCDecl())
       S += "; cdecl";
     return S;

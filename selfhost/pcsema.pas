@@ -90,6 +90,7 @@ var
     gotos, so none can leave a try statement. }
   exceptionType: PType;
   arrayOfConstT, pcharT: PType;
+  allowSlice: boolean;
   { COM interfaces (objfpc): IUnknown (= IInterface), their root, and
     TInterfacedObject, the root of the classes implementing them }
   iunknownType, interfacedType: PType;
@@ -549,7 +550,7 @@ end;
 function isTPOnly(k: TBuiltinKind): boolean;
 begin
   isTPOnly := k in [bkBreak, bkContinue, bkExit, bkInc, bkDec, bkDelete,
-                    bkInsert, bkSetLength, bkLength, bkCopy, bkPos, bkConcat, bkUpCase,
+                    bkInsert, bkSetLength, bkSlice, bkLength, bkCopy, bkPos, bkConcat, bkUpCase,
                     bkGetMem, bkFreeMem, bkReallocMem, bkFillChar, bkMove,
                     bkHalt, bkSizeOf, bkLow, bkHigh, bkAssigned, bkParamCount,
                     bkParamStr];
@@ -1155,6 +1156,7 @@ begin
       exit(true);
     exit((value^.kind = tyRoutine) and
          (value^.routineCDecl = target^.routineCDecl) and
+         (value^.routineOfObject = target^.routineOfObject) and
          congruent(target^.routineParams, target^.routineResult,
                    value^.routineParams, value^.routineResult));
   end;
@@ -1882,7 +1884,11 @@ begin
         if ts^.rtIsFunction then
         begin
           res := resolveType(ts^.rtResult, nil);
-          if not isError(res) and not isValidResultType(res) then
+          if not isError(res) and not isValidResultType(res) and
+             not (ts^.rtOfObject and
+                  ((res^.kind = tyShortString) or isMethodPointer(res) or
+                   ((res^.kind = tyRecord) and not containsFile(res) and
+                    not containsInterface(res)))) then
           begin
             ms('function result type must be a simple or pointer type, not ');
             maT(res);
@@ -1890,7 +1896,10 @@ begin
             res := errorType;
           end;
         end;
-        buildType := newRoutineType(ts^.rtParams, res, ts^.rtCallConv = ccCDecl);
+        if ts^.rtOfObject then
+          buildType := newMethodPointerType(ts^.rtParams, res, ts^.rtCallConv = ccCDecl)
+        else
+          buildType := newRoutineType(ts^.rtParams, res, ts^.rtCallConv = ccCDecl);
       end;
     tsString:
       begin
@@ -4042,7 +4051,7 @@ begin
     { ISO: a simple type or a pointer; Turbo/FPC also strings and records
       (without files) }
     if not isError(resultTy) and not isValidResultType(resultTy) and
-       (resultTy^.kind <> tyShortString) and
+       (resultTy^.kind <> tyShortString) and not isMethodPointer(resultTy) and
        not (not isISO and (resultTy^.kind = tyRecord) and not containsFile(resultTy)) then
     begin
       ms('function result type must be a simple or pointer type, not ');
@@ -4728,6 +4737,19 @@ end;
 
 { The routine of first's name that args fit best: first itself unless it
   is overloaded. nil after a diagnostic (no fit, or a tie). }
+{ slice(a, n), for an open array parameter only. }
+function isSliceCall(e: PNode): boolean;
+var
+  d: PDecl;
+begin
+  isSliceCall := false;
+  if (e^.kind = nkCall) and nameEquals(e^.callee.name, 'slice') then
+  begin
+    d := lookup(e^.callee.name);
+    isSliceCall := (d <> nil) and (d^.kind = dkBuiltin);
+  end;
+end;
+
 function hasConstArrayParam(const cands: TPtrList; i: longint): boolean;
 var
   k: longint;
@@ -4802,10 +4824,12 @@ begin
       listAdd(argTys, arrayOfConstT);
       continue;
     end;
+    allowSlice := isSliceCall(a);
     if isRoutineName(a) then
       t := nil
     else
       t := checkAllowingUntyped(a);
+    allowSlice := false;
     if (t <> nil) and isError(t) then
       exit;
     listAdd(argTys, t);
@@ -5305,6 +5329,7 @@ begin
     if (ta <> nil) and (tb <> nil) and (ta^.kind = tyRoutine) and (tb^.kind = tyRoutine) then
     begin
       if (ta^.routineCDecl <> tb^.routineCDecl) or
+         (ta^.routineOfObject <> tb^.routineOfObject) or
          not congruent(ta^.routineParams, ta^.routineResult, tb^.routineParams,
                        tb^.routineResult) then
         exit(false);
@@ -5317,6 +5342,8 @@ end;
 
 { An argument for a procedural parameter: the name of a routine (or of
   another procedural parameter) with a congruent heading. }
+function checkValueFor(targetTy: PType; value: PNode): PType; forward;
+
 procedure checkRoutineArg(arg: PNode; p: PDecl; formal: PType);
 var
   kind: string;
@@ -5326,7 +5353,34 @@ var
   found, cdeclConv: boolean;
   n: PNode;
   why: string;
+  ofT: PType;
 begin
+  if formal^.routineOfObject then { @obj.M, or a method pointer }
+  begin
+    ofT := checkValueFor(formal, arg);
+    if isError(ofT) then
+      exit;
+    if not isAssignable(formal, ofT) then
+    begin
+      ms('cannot pass a value of type ');
+      maT(ofT);
+      ma(' to parameter ''');
+      maN(p^.ident.spelling);
+      ma(''' of type ');
+      maT(formal);
+      errR(arg^.b, nodeRange(arg));
+    end
+    else if (p^.varKind = vkVarParam) and not isVariableReference(arg) then
+    begin
+      ms('argument for ''var'' parameter ''');
+      maN(p^.ident.spelling);
+      ma(''' must be a variable');
+      errR(arg^.b, nodeRange(arg));
+    end
+    else if p^.varKind = vkVarParam then
+      checkModifiable(arg);
+    exit;
+  end;
   cdeclConv := false;
   if formal^.routineResult <> nil then
     kind := 'function'
@@ -5453,6 +5507,8 @@ var
   i: longint;
   el: PSetElement;
   t, elemT, at: PType;
+  slice: boolean;
+  target: PNode;
 
   procedure mustBeVariable;
   begin
@@ -5496,7 +5552,10 @@ begin
     arg^.typ := oa;
     exit;
   end;
+  slice := isSliceCall(arg);
+  allowSlice := slice;
   at := check(arg);
+  allowSlice := false;
   if isError(at) then
     exit;
   if not fitsOpenArray(arg, at, oa) then
@@ -5512,10 +5571,13 @@ begin
   end;
   if p^.varKind = vkVarParam then
   begin
-    if not isVariableReference(arg) then
+    target := arg;
+    if slice then
+      target := PNode(listGet(arg^.args, 0));
+    if not isVariableReference(target) then
       mustBeVariable
     else
-      checkModifiable(arg);
+      checkModifiable(target);
   end;
 end;
 

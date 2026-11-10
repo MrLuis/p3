@@ -438,7 +438,8 @@ class ASTPrinter : public StmtVisitor<ASTPrinter>,
     }
     case TypeSpec::TS_Routine: {
       auto *R = llvm::cast<RoutineTypeSpec>(TS);
-      line(R->isFunction() ? "RoutineTypeSpec function" : "RoutineTypeSpec procedure");
+      line(std::string(R->isFunction() ? "RoutineTypeSpec function" : "RoutineTypeSpec procedure") +
+           (R->isOfObject() ? " of object" : ""));
       if (R->getCallConv() != CallConv::Default)
         OS << ' ' << callConvName(R->getCallConv());
       loc(TS->getBeginLoc());

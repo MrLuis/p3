@@ -266,9 +266,12 @@ class CallExpr final : public Expr {
   /// Set by Sema for a method found through a class scope (objfpc): the
   /// object it is called on (Self, or the object of a `with`).
   WithContext *With = nullptr;
+  Expr *CalleeValue = nullptr; ///< set by Sema: a procedural field or property
   bool VarCast = false; ///< set by Sema: T(x) of an untyped parameter x
 
 public:
+  Expr *getCalleeValue() const { return CalleeValue; }
+  void setCalleeValue(Expr *V) { CalleeValue = V; }
   CallExpr(SourceRange R, Identifier Callee, llvm::ArrayRef<Expr *> Args)
       : Expr(EK_Call, R), Callee(Callee), Args(Args) {}
   /// A typecast of an untyped parameter (Turbo/FPC): a variable of the
@@ -382,10 +385,13 @@ public:
 /// @x  (Turbo/FPC): an untyped pointer to a variable.
 class AddrOfExpr final : public Expr {
   Expr *Operand;
+  RoutineDecl *Method = nullptr; ///< set by Sema: @obj.M, a method pointer
 
 public:
   AddrOfExpr(SourceRange R, Expr *Operand) : Expr(EK_AddrOf, R), Operand(Operand) {}
   Expr *getOperand() const { return Operand; }
+  RoutineDecl *getMethod() const { return Method; }
+  void setMethod(RoutineDecl *R) { Method = R; }
   static bool classof(const Expr *E) { return E->getKind() == EK_AddrOf; }
 };
 
@@ -501,8 +507,11 @@ class ProcCallStmt final : public Stmt {
   bool HasParens;
   Decl *D = nullptr; ///< set by Sema: BuiltinDecl or RoutineDecl
   WithContext *With = nullptr; ///< set by Sema for methods (see CallExpr)
+  Expr *CalleeValue = nullptr; ///< set by Sema: a procedural field or property
 
 public:
+  Expr *getCalleeValue() const { return CalleeValue; }
+  void setCalleeValue(Expr *E) { CalleeValue = E; }
   ProcCallStmt(SourceRange R, Identifier Callee, llvm::ArrayRef<Expr *> Args,
                bool HasParens)
       : Stmt(SK_ProcCall, R), Callee(Callee), Args(Args), HasParens(HasParens) {}
@@ -916,12 +925,15 @@ class VarDecl;
 /// The heading of a procedural / functional parameter:
 /// `procedure p(x: integer)` or `function f(x: real): real`.
 class RoutineTypeSpec final : public TypeSpec {
+  bool OfObject = false; ///< `of object`
   bool IsFunction;
   llvm::ArrayRef<VarDecl *> Params;
   TypeSpec *Result; ///< functions only
   CallConv CC = CallConv::Default;
 
 public:
+  bool isOfObject() const { return OfObject; }
+  void setOfObject() { OfObject = true; }
   RoutineTypeSpec(SourceRange R, bool IsFunction,
                   llvm::ArrayRef<VarDecl *> Params, TypeSpec *Result)
       : TypeSpec(TS_Routine, R), IsFunction(IsFunction), Params(Params),

@@ -500,6 +500,8 @@ begin
     emitStringAssign(addr, rt, value)
   else if rt^.kind = tyAnsiString then
     storeValue(addr, emitAnsi(value), rt)
+  else if isMethodPointer(rt) then
+    irStore(emitRoutinePair(value, rt), addr)
   else if isStructured(rt) then
   begin
     src := emitAddress(value);
@@ -578,6 +580,11 @@ var
   isFill: boolean;
   pointee: PType;
 begin
+  if s^.callValue <> nil then { a procedural field or property }
+  begin
+    ignored := emitCallThrough(visitExpr(s^.callValue), s^.callValue^.typ, s^.args, s^.b);
+    exit;
+  end;
   d := s^.callDecl;
   if d^.kind = dkRoutine then
   begin

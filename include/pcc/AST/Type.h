@@ -333,11 +333,14 @@ class RoutineType final : public Type {
   llvm::ArrayRef<VarDecl *> Params;
   Type *Result;
   bool CDecl; ///< 'cdecl' (see CallConv)
+  bool OfObject; ///< `of object`: a method and its object
 
 public:
   RoutineType(llvm::ArrayRef<VarDecl *> Params, Type *Result,
-              bool CDecl = false)
-      : Type(TK_Routine), Params(Params), Result(Result), CDecl(CDecl) {}
+              bool CDecl = false, bool OfObject = false)
+      : Type(TK_Routine), Params(Params), Result(Result), CDecl(CDecl),
+        OfObject(OfObject) {}
+  bool isOfObject() const { return OfObject; }
   llvm::ArrayRef<VarDecl *> getParams() const { return Params; }
   Type *getResult() const { return Result; }
   bool isCDecl() const { return CDecl; }
