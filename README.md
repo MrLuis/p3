@@ -358,8 +358,9 @@ Pascal), pass it, return it, keep it in fields and properties. Calling a nil one
 is a runtime error with range checks on. The predeclared record `TMethod`
 (`Code`, `Data: pointer`) opens one up: `TMethod(ev).Data` reads or, on a
 variable, writes the object, `TMethod(ev) := m` and `ev := TEv(m)` convert, and
-`@TFoo.M` given to a pointer is the code of `TFoo`'s `M`. Not supported: typed
-constants of these types.
+`@TFoo.M` given to a pointer is the code of `TFoo`'s `M`. Typed constants and
+initialized variables of these types, alone or in records and arrays, can only
+be `nil`, as in Free Pascal.
 
 **Conditional compilation** (every mode), as in Free Pascal:
 

@@ -58,6 +58,8 @@
 ; RUN: %t.slice > %t.slice.out && diff %S/../run/slice.expected %t.slice.out
 ; RUN: env PCC_RUNTIME_LIB=%pcc-runtime-lib %t.pcc --mode=objfpc %S/../run/tmethod.pas -o %t.tmethod
 ; RUN: %t.tmethod > %t.tmethod.out && diff %S/../run/tmethod.expected %t.tmethod.out
+; RUN: env PCC_RUNTIME_LIB=%pcc-runtime-lib %t.pcc --mode=objfpc %S/../run/methodconstants.pas -o %t.mconst
+; RUN: %t.mconst > %t.mconst.out && diff %S/../run/methodconstants.expected %t.mconst.out
 ; RUN: %t.pcc --mode=tp --emit-llvm --target=x86_64-w64-mingw32 %S/../driver/Inputs/unit-library/target.pas -o - | FileCheck --check-prefix=TARGET %S/../driver/unit-library.test
 ;
 ; The driver: the runtime is looked for next to the executable.

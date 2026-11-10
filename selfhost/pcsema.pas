@@ -3884,6 +3884,7 @@ end;
   whose elements are checked recursively. }
 function checkConstInit(init: PNode; t: PType; var folded: TConstValue): boolean;
 var
+  ignoredT: PType;
   want: int64;
   ok, charArray: boolean;
   i: longint;
@@ -3981,6 +3982,19 @@ begin
     exit;
   end;
 
+  if isMethodPointer(t) then { only nil, as in Free Pascal }
+  begin
+    if init^.kind = nkNil then
+    begin
+      ignoredT := check(init);
+      exit(true);
+    end;
+    ms('typed constants of type ');
+    maT(t);
+    ma(' can only be initialized with nil');
+    errR(init^.b, nodeRange(init));
+    exit(false);
+  end;
   if not evaluateConstant(init, constInitWhat, c) then
     exit;
   charArray := (c.value.kind = ckString) and isCharArrayOfLength(t, c.value.strVal^.len);

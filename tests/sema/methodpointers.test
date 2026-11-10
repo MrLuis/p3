@@ -22,3 +22,13 @@
 ;
 ; RUN: not %pcc --mode=tp --emit-ast %S/Inputs/methodpointers/tp.pas 2>&1 | FileCheck --check-prefix=TP %s
 ; TP: tp.pas:3:17: error: expected ';' after type declaration
+;
+; Typed constants: only nil.
+; RUN: not %pcc --mode=objfpc -ferror-limit=0 --emit-ast %S/Inputs/methodpointers/constants.pas 2>&1 | FileCheck --check-prefix=CONST %s
+; CONST: constants.pas:14:12: error: typed constants of type 'TE' can only be initialized with nil
+; CONST: constants.pas:15:12: error: typed constants of type 'TE' can only be initialized with nil
+; CONST: constants.pas:16:12: error: typed constants of type 'TE' can only be initialized with nil
+; CONST: constants.pas:17:12: error: typed constants of type 'TE' can only be initialized with nil
+; CONST: constants.pas:18:28: error: typed constants of type 'TE' can only be initialized with nil
+; CONST: constants.pas:20:12: error: typed constants of type 'TE' can only be initialized with nil
+; CONST-NOT: error:

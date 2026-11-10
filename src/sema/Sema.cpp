@@ -2780,6 +2780,17 @@ class Checker : public StmtVisitor<Checker>,
       return false;
     }
 
+    if (isMethodPointer(T)) { // only nil, as in Free Pascal
+      if (llvm::isa<NilExpr>(Init)) {
+        check(Init);
+        return true;
+      }
+      Diags.error(Init->getBeginLoc(),
+                  "typed constants of type " + quoted(T) +
+                      " can only be initialized with nil",
+                  {Init->getRange()});
+      return false;
+    }
     auto C = evaluateConstant(Init, ConstInitWhat);
     if (!C)
       return false;
