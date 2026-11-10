@@ -7,6 +7,7 @@
 #include "llvm/ADT/APFloat.h"
 #include "llvm/ADT/SmallString.h"
 #include "llvm/ADT/StringExtras.h"
+#include "llvm/ADT/StringSwitch.h"
 #include "llvm/Support/Error.h"
 #include "llvm/Support/FileSystem.h"
 #include "llvm/Support/MathExtras.h"
@@ -241,9 +242,24 @@ struct CondValue {
   }
 };
 
+/// The size in bytes of the predefined type named Upper (upper case) in
+/// tp and objfpc modes, or -1. Must agree with sizeof in the generated code:
+/// $IF is evaluated while lexing, before any type is known.
+static int64_t predefinedSize(llvm::StringRef Upper) {
+  return llvm::StringSwitch<int64_t>(Upper)
+      .Cases("CHAR", "BOOLEAN", "BYTE", "SHORTINT", 1)
+      .Cases("WORD", "SMALLINT", 2)
+      .Cases("INTEGER", "LONGINT", "CARDINAL", "LONGWORD", 4)
+      .Cases("INT64", "REAL", "DOUBLE", "POINTER", 8)
+      .Cases("PCHAR", "ANSISTRING", "SIZEINT", "PTRINT", 8)
+      .Case("NATIVEINT", 8)
+      .Case("SHORTSTRING", 256)
+      .Default(-1);
+}
+
 /// Evaluates the expression of {$IF} / {$ELSEIF}, with Pascal's operator
 /// precedence: values (integers, 'strings', true, false, defined(NAME),
-/// macros), not, * div mod and, + - or, and one comparison = <> < > <= >=
+/// sizeof(predefined type), macros), not, * div mod and, + - or, and one comparison = <> < > <= >=
 /// or `in [values]`. A macro's value is an integer if its text is an
 /// integer literal, a string if it is a string literal, the value of the
 /// macro it names if it is a macro's name, else its text (a string), as in
@@ -253,6 +269,7 @@ class ConditionParser {
   size_t P = 0;
   const llvm::StringSet<> &Defines;
   const llvm::StringMap<std::string> &Values; ///< macros (upper case)
+  bool HasSizeOf; ///< sizeof exists in this mode (not in iso)
   unsigned Depth;
 
   llvm::StringRef peek() {
@@ -501,6 +518,21 @@ class ConditionParser {
         return invalid();
       return CondValue::boolean(Defines.contains(Name.upper()));
     }
+    if (HasSizeOf && !Values.count("SIZEOF") && accept("sizeof")) {
+      if (!accept("("))
+        return invalid();
+      llvm::StringRef Name = peek();
+      if (Name.empty() || !isIdentStart(Name[0]))
+        return invalid();
+      P += Name.size();
+      if (!accept(")"))
+        return invalid();
+      int64_t Size = predefinedSize(Name.upper());
+      if (Size < 0)
+        return fail("'sizeof' in $IF needs a predefined type, not '" +
+                    Name.str() + "'");
+      return CondValue::integer(Size);
+    }
     if (!isIdentStart(T[0]))
       return invalid();
     P += T.size();
@@ -516,7 +548,7 @@ class ConditionParser {
   CondValue macroValue(llvm::StringRef Text) {
     if (Depth >= 16)
       return fail("macros in $IF expressions are nested too deeply");
-    ConditionParser Sub(Text, Defines, Values, Depth + 1);
+    ConditionParser Sub(Text, Defines, Values, HasSizeOf, Depth + 1);
     llvm::StringRef T = Sub.peek();
     bool Single = !T.empty() && Sub.P + T.size() == Text.size();
     if (Single && (llvm::isDigit(T[0]) || T[0] == '$' || T[0] == '\'')) {
@@ -539,8 +571,10 @@ class ConditionParser {
 public:
   std::string Error;
   ConditionParser(llvm::StringRef S, const llvm::StringSet<> &Defines,
-                  const llvm::StringMap<std::string> &Values, unsigned Depth = 0)
-      : S(S), Defines(Defines), Values(Values), Depth(Depth) {}
+                  const llvm::StringMap<std::string> &Values, bool HasSizeOf,
+                  unsigned Depth = 0)
+      : S(S), Defines(Defines), Values(Values), HasSizeOf(HasSizeOf),
+        Depth(Depth) {}
   bool parse() {
     CondValue V = parseExpr();
     if (Error.empty() && !peek().empty())
@@ -556,7 +590,7 @@ bool Lexer::evalCondition(const char *Start, llvm::StringRef Expr) {
   llvm::StringMap<std::string> Values;
   for (const auto &M : Macros)
     Values[M.getKey()] = std::string(M.getValue().Begin, M.getValue().End);
-  ConditionParser CP(Expr, Defines, Values);
+  ConditionParser CP(Expr, Defines, Values, LangOpts.Mode != LangMode::ISO);
   bool V = CP.parse();
   if (CP.Error.empty())
     return V;

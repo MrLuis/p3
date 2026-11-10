@@ -931,6 +931,10 @@ begin
     { longint is integer (32-bit), and double is real }
     stdType('longint', tyIntegerT);
     stdType('int64', tyInt64T);
+    { FPC's pointer-sized signed integers (every target is 64-bit) }
+    stdType('sizeint', tyInt64T);
+    stdType('ptrint', tyInt64T);
+    stdType('nativeint', tyInt64T);
     stdType('cardinal', tyCardinalT);
     stdType('longword', tyCardinalT);
     stdType('byte', tyByteT);

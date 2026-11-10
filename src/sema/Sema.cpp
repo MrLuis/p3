@@ -174,6 +174,10 @@ class Checker : public StmtVisitor<Checker>,
       // real.
       Ty("longint", Ctx.getIntegerType());
       Ty("int64", Ctx.getInt64Type());
+      // FPC's pointer-sized signed integers (every target is 64-bit).
+      Ty("sizeint", Ctx.getInt64Type());
+      Ty("ptrint", Ctx.getInt64Type());
+      Ty("nativeint", Ctx.getInt64Type());
       Ty("cardinal", Ctx.getCardinalType());
       Ty("longword", Ctx.getCardinalType());
       Ty("byte", Ctx.getByteType());

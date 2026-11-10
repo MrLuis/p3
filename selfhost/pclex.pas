@@ -685,6 +685,33 @@ begin
   cpMacroValue := v;
 end;
 
+{ The size in bytes of the predefined type called name in tp and objfpc
+  modes, or -1. Must agree with sizeof in the generated code: $IF is
+  evaluated while lexing, before any type is known. }
+function predefinedSize(const name: string): int64;
+var
+  u: string;
+  i: longint;
+begin
+  u := name;
+  for i := 1 to length(u) do
+    u[i] := upperChar(u[i]);
+  predefinedSize := -1;
+  if (u = 'CHAR') or (u = 'BOOLEAN') or (u = 'BYTE') or (u = 'SHORTINT') then
+    predefinedSize := 1
+  else if (u = 'WORD') or (u = 'SMALLINT') then
+    predefinedSize := 2
+  else if (u = 'INTEGER') or (u = 'LONGINT') or (u = 'CARDINAL') or
+          (u = 'LONGWORD') then
+    predefinedSize := 4
+  else if (u = 'INT64') or (u = 'REAL') or (u = 'DOUBLE') or
+          (u = 'POINTER') or (u = 'PCHAR') or (u = 'ANSISTRING') or
+          (u = 'SIZEINT') or (u = 'PTRINT') or (u = 'NATIVEINT') then
+    predefinedSize := 8
+  else if u = 'SHORTSTRING' then
+    predefinedSize := 256;
+end;
+
 function cpParseFactor(var lx: TLexer; var cp: TCondParser): TCondValue;
 var
   v: TCondValue;
@@ -759,6 +786,24 @@ begin
     if not cpAccept(cp, ')') then
       exit(cpInvalid(cp));
     exit(condBool(isDefined(lx, name)));
+  end;
+  if (lx.mode <> lmISO) and (findMacro(lx, 'sizeof') = nil) and
+     cpAccept(cp, 'sizeof') then
+  begin
+    if not cpAccept(cp, '(') then
+      exit(cpInvalid(cp));
+    cpPeek(cp, ts, te);
+    if (ts = te) or not isIdentStart(cpAt(cp, ts)) then
+      exit(cpInvalid(cp));
+    name := cpText(cp, ts, te);
+    cp.p := te;
+    if not cpAccept(cp, ')') then
+      exit(cpInvalid(cp));
+    n := predefinedSize(name);
+    if n < 0 then
+      exit(cpFail(cp, '''sizeof'' in $IF needs a predefined type, not ''' +
+                  name + ''''));
+    exit(condInt(n));
   end;
   if not isIdentStart(t[1]) then
     exit(cpInvalid(cp));

@@ -1,0 +1,22 @@
+char 1
+boolean 1
+byte 1
+shortint 1
+word 2
+smallint 2
+integer 4
+longint 4
+cardinal 4
+longword 4
+int64 8
+real 8
+double 8
+pointer 8
+pchar 8
+ansistring 8
+shortstring 256
+sizeint 8
+ptrint 8
+nativeint 8
+sizeint is wider
+narrow char

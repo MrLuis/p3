@@ -446,8 +446,14 @@ be `nil`, as in Free Pascal.
 `$DEFINE`, `$UNDEF`, `$IFDEF`, `$IFNDEF`, `$IF` / `$ELSEIF`, `$ELSE`,
 `$ENDIF` and `$IFEND`; symbols are case-insensitive. `$IF` expressions
 follow Pascal's precedence: integers (decimal, `$hex`), `'strings'`,
-`true`, `false`, `defined(NAME)`, macros, `not`, `* div mod and`,
-`+ - or`, and one comparison (`= <> < > <= >=`) or `in [a, b, lo..hi]`. `PCC` is
+`true`, `false`, `defined(NAME)`, `sizeof(TYPE)` (not in `--mode=iso`), macros,
+`not`, `* div mod and`, `+ - or`, and one comparison (`= <> < > <= >=`) or
+`in [a, b, lo..hi]`. `sizeof` takes the name of a predefined type only
+(`SizeInt`, `PtrInt` and `NativeInt` are predeclared as `int64`; their
+unsigned forms are not, as there is no unsigned 64-bit type): `$IF` is
+evaluated while lexing, so unlike Free Pascal it cannot see declared types or
+variables, and a program's own redeclaration of a predefined name is not
+noticed. `PCC` is
 predefined, and so is one of `PCC_ISO`, `PCC_TP` and `PCC_OBJFPC` (the
 mode), along with Free Pascal's symbols for the target: `LINUX` and `UNIX`;
 `DARWIN`, `BSD` and `UNIX`; `WINDOWS`, `MSWINDOWS` and `WIN64`; `CPU64` with
