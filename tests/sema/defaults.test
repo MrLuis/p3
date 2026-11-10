@@ -1,0 +1,38 @@
+; Default parameter values (--mode=objfpc): trailing value and const
+; parameters, one name per default, a constant that fits. A routine's
+; implementation may leave them out or repeat them, not change them.
+; RUN: not %pcc --mode=objfpc -ferror-limit=0 -c %S/Inputs/defaults/errors.pas -o %t.o 2>&1 | FileCheck %s
+; CHECK: errors.pas:9:27: error: default parameter value must be a constant
+; CHECK: errors.pas:10:27: error: default parameter value must be a constant
+; CHECK: errors.pas:11:27: error: cannot pass a default value of type 'char' to parameter 'a' of type 'integer'
+; CHECK: errors.pas:12:24: error: value 300 is out of range for 'byte'
+; CHECK: errors.pas:13:27: error: use of undeclared identifier 'nope'
+; CHECK: errors.pas:14:24: error: cannot pass a default value of type 'integer' to parameter 'r' of type 'TRec'
+; CHECK: errors.pas:15:36: error: cannot pass a default value of type 'integer' to parameter 'a' of type 'array of integer'
+; CHECK: errors.pas:17:11: error: heading of 'C1' does not match its forward declaration
+; CHECK: errors.pas:19:11: error: heading of 'C2' does not match its forward declaration
+; The arguments without a default are still needed.
+; CHECK: errors.pas:25:3: error: too few arguments in call to 'D1': expected 2, got 0
+; CHECK: errors.pas:26:3: error: too many arguments in call to 'D1': expected 2, got 3
+; CHECK: errors.pas:27:8: error: missing arguments in call to 'D2'
+; CHECK: errors.pas:28:3: error: ambiguous call to overloaded 'E1' with arguments (integer)
+; CHECK-NOT: error:
+; RUN: not %pcc --mode=objfpc -ferror-limit=0 -c %S/Inputs/defaults/parse.pas -o %t.o 2>&1 | FileCheck --check-prefix=PARSE %s
+; PARSE: parse.pas:2:30: error: parameter 'b' needs a default value, as a parameter before it has one
+; PARSE: parse.pas:3:40: error: parameter 'b' needs a default value, as a parameter before it has one
+; PARSE: parse.pas:4:28: error: only one parameter can have a default value
+; PARSE: parse.pas:5:29: error: only value and const parameters can have a default value
+; PARSE: parse.pas:6:22: error: only value and const parameters can have a default value
+; RUN: not %pcc --mode=tp -c %S/Inputs/defaults/tp.pas -o %t.o 2>&1 | FileCheck --check-prefix=TP %s
+; TP: tp.pas:2:24: error: default parameter values are a Free Pascal extension; use --mode=objfpc
+; RUN: not %pcc --mode=objfpc -c %S/Inputs/defaults/methods.pas -o %t.o 2>&1 | FileCheck --check-prefix=INDEX %s
+; INDEX: methods.pas:6:26: error: expected ']' after parameters
+; RUN: not %pcc --mode=objfpc -ferror-limit=0 -c %S/Inputs/defaults/methods2.pas -o %t.o 2>&1 | FileCheck --check-prefix=METHODS %s
+; METHODS: methods2.pas:7:13: error: heading of 'T.A' does not match its declaration
+; METHODS: methods2.pas:8:13: error: heading of 'T.B' does not match its declaration
+; RUN: %pcc --mode=objfpc --emit-parse-tree %S/Inputs/defaults/tree.pas | FileCheck --check-prefix=TREE %s
+; TREE:      ParamDecl const 'b' default <2:31>
+; TREE:      Default <2:44>
+; TREE-NEXT:   IntegerLiteralExpr 2 <2:44>
+; RUN: %pcc --mode=objfpc --emit-ast %S/Inputs/defaults/tree.pas | FileCheck --check-prefix=AST %s
+; AST:       ParamDecl const 'b' : integer default <2:31>

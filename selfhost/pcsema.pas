@@ -993,7 +993,15 @@ begin
     promoteInteger := i;
 end;
 
+{ Can parameters params take n arguments (the rest from default values)? }
+function acceptsArgCount(const params: TPtrList; n: longint): boolean;
+begin
+  acceptsArgCount := (n = params.count) or
+    ((n < params.count) and (PDecl(listGet(params, n))^.paramDefault <> nil));
+end;
+
 function fold(e: PNode; var c: TConstant): boolean; forward;
+procedure checkParamDefault(p: PDecl); forward;
 
 function isCardinalConstant(e: PNode): boolean;
 var
@@ -1920,6 +1928,7 @@ begin
         begin
           p := PDecl(listGet(ts^.rtParams, i));
           p^.varType := resolveType(p^.varSpec, nil);
+          checkParamDefault(p);
         end;
         res := nil;
         if ts^.rtIsFunction then
@@ -2122,6 +2131,21 @@ end;
 procedure resolveSignature(r: PDecl); forward;
 procedure checkRoutineBody(r: PDecl); forward;
 function sameSignature(a, b: PDecl): boolean; forward;
+{ compareOut false: out and var parameters count as the same, as when
+  looking for routines that overloads cannot tell apart }
+function sameParamList(a, b: PDecl; compareOut: boolean): boolean; forward;
+
+{ The word for a by-reference parameter, for diagnostics. }
+function paramKeyword(p: PDecl): string;
+begin
+  if p^.isOut then
+    paramKeyword := 'out'
+  else
+    paramKeyword := 'var';
+end;
+
+function sameDefaults(heading, impl: PDecl): boolean; forward;
+function isPCharLiteral(target: PType; value: PNode): boolean; forward;
 function addOverload(first, r: PDecl): boolean; forward;
 
 { 'TFoo.Bar' (without quotes) }
@@ -3682,7 +3706,8 @@ begin
     rt := nil;
     if r^.resultSpec <> nil then
       rt := resolveType(r^.resultSpec, nil);
-    if not sameSignature(m, r) or ((rt <> nil) and (rt <> m^.resultType)) then
+    if not sameSignature(m, r) or ((rt <> nil) and (rt <> m^.resultType)) or
+       not sameDefaults(m, r) then
     begin
       ms('heading of ''');
       maQualified(c, m^.ident);
@@ -4149,6 +4174,81 @@ begin
 end;
 
 { Resolves a routine's parameter and result types. }
+{ Is e, a checked expression, a constant (nil, a set of constants, a
+  concatenation of string constants)? }
+function isConstantDefault(e: PNode): boolean;
+var
+  i: longint;
+  el: PSetElement;
+  c: TConstant;
+begin
+  if e^.kind = nkNil then
+    exit(true);
+  if (e^.kind = nkBinary) and (e^.bop = boAdd) and (e^.opDecl = nil) and
+     (e^.typ^.kind in [tyShortString, tyAnsiString]) then
+    exit(isConstantDefault(e^.lhs) and isConstantDefault(e^.rhs));
+  if e^.kind = nkSetCtor then
+  begin
+    for i := 0 to e^.setElems.count - 1 do
+    begin
+      el := PSetElement(listGet(e^.setElems, i));
+      if not fold(el^.lo, c) then
+        exit(false);
+      if (el^.hi <> nil) and not fold(el^.hi, c) then
+        exit(false);
+    end;
+    exit(true);
+  end;
+  isConstantDefault := fold(e, c);
+end;
+
+{ Checks the default value of parameter p, of a resolved type: a constant
+  that can be passed to it. }
+procedure checkParamDefault(p: PDecl);
+var
+  e: PNode;
+  t, at: PType;
+  c: TConstant;
+  bd: TOrdinalBounds;
+begin
+  e := p^.paramDefault;
+  if (e = nil) or isError(p^.varType) then
+    exit;
+  t := p^.varType;
+  at := check(e);
+  if isError(at) then
+    exit;
+  if not isConstantDefault(e) then
+  begin
+    ms('default parameter value must be a constant');
+    errR(e^.b, nodeRange(e));
+    exit;
+  end;
+  if not isAssignable(t, at) and not isPCharLiteral(t, e) then
+  begin
+    ms('cannot pass a default value of type ');
+    maT(at);
+    ma(' to parameter ''');
+    maN(p^.ident.spelling);
+    ma(''' of type ');
+    maT(t);
+    errR(e^.b, nodeRange(e));
+    exit;
+  end;
+  if fold(e, c) and (c.value.kind = ckOrdinal) and isOrdinal(t) then
+  begin
+    bd := getOrdinalBounds(t);
+    if (c.value.intVal < bd.lo) or (c.value.intVal > bd.hi) then
+    begin
+      ms('value ');
+      maV(c.ty, c.value.intVal);
+      ma(' is out of range for ');
+      maT(t);
+      errR(e^.b, nodeRange(e));
+    end;
+  end;
+end;
+
 procedure resolveSignature(r: PDecl);
 var
   i: longint;
@@ -4160,6 +4260,7 @@ begin
     p := PDecl(listGet(r^.params, i));
     p^.owner := r;
     p^.varType := resolveType(p^.varSpec, nil);
+    checkParamDefault(p);
     if (p^.varKind <> vkVarParam) and containsFile(p^.varType) then
     begin
       ms('file parameter ''');
@@ -4209,7 +4310,7 @@ begin
   r^.resultVar := res;
 end;
 
-function sameSignature(a, b: PDecl): boolean;
+function sameParamList(a, b: PDecl; compareOut: boolean): boolean;
 var
   i: longint;
   p, q: PDecl;
@@ -4220,10 +4321,16 @@ begin
   begin
     p := PDecl(listGet(a^.params, i));
     q := PDecl(listGet(b^.params, i));
-    if (p^.varKind <> q^.varKind) or (p^.varType <> q^.varType) then
+    if (p^.varKind <> q^.varKind) or (p^.varType <> q^.varType) or
+       (compareOut and (p^.isOut <> q^.isOut)) then
       exit(false);
   end;
-  sameSignature := true;
+  sameParamList := true;
+end;
+
+function sameSignature(a, b: PDecl): boolean;
+begin
+  sameSignature := sameParamList(a, b, true);
 end;
 
 { External (C) routines: at the outermost level, with C-compatible types. }
@@ -4385,6 +4492,104 @@ end;
 
 { r (resolved) joins the overloads first...: its parameters must differ.
   False after a diagnostic. }
+type
+  TSetBits = array[0..255] of boolean;
+
+{ The elements of the constant set s. }
+procedure constantSetBits(s: PNode; var bits: TSetBits);
+var
+  i: longint;
+  v, lo, hi: int64;
+  el: PSetElement;
+  c: TConstant;
+begin
+  for i := 0 to 255 do
+    bits[i] := false;
+  for i := 0 to s^.setElems.count - 1 do
+  begin
+    el := PSetElement(listGet(s^.setElems, i));
+    if not fold(el^.lo, c) then
+      exit;
+    lo := c.value.intVal;
+    hi := lo;
+    if el^.hi <> nil then
+    begin
+      if not fold(el^.hi, c) then
+        exit;
+      hi := c.value.intVal;
+    end;
+    if lo < 0 then
+      lo := 0;
+    if hi > 255 then
+      hi := 255;
+    v := lo;
+    while v <= hi do
+    begin
+      bits[v] := true;
+      v := v + 1;
+    end;
+  end;
+end;
+
+{ Are the constant default values a and b of a parameter equal? }
+function sameDefaultValue(a, b: PNode): boolean;
+var
+  ca, cb: TConstant;
+  ba, bb: TSetBits;
+  i: longint;
+begin
+  if (a^.kind = nkNil) or (b^.kind = nkNil) then
+    exit((a^.kind = nkNil) and (b^.kind = nkNil));
+  if (a^.kind = nkSetCtor) or (b^.kind = nkSetCtor) then
+  begin
+    if (a^.kind <> nkSetCtor) or (b^.kind <> nkSetCtor) then
+      exit(false);
+    constantSetBits(a, ba);
+    constantSetBits(b, bb);
+    for i := 0 to 255 do
+      if ba[i] <> bb[i] then
+        exit(false);
+    exit(true);
+  end;
+  if not fold(a, ca) or not fold(b, cb) then
+    exit(false);
+  if ca.value.kind <> cb.value.kind then
+    exit(false);
+  case ca.value.kind of
+    ckOrdinal: sameDefaultValue := ca.value.intVal = cb.value.intVal;
+    ckString: sameDefaultValue := ca.value.strVal = cb.value.strVal;
+  else
+    sameDefaultValue := ca.value.realVal = cb.value.realVal;
+  end;
+end;
+
+{ Do the default values of impl, the implementation of heading (with the
+  same signature), fit? It may leave them out, or repeat them. }
+function sameDefaults(heading, impl: PDecl): boolean;
+var
+  i, errors: longint;
+  p: PDecl;
+  hd: PNode;
+begin
+  sameDefaults := false;
+  for i := 0 to impl^.params.count - 1 do
+  begin
+    p := PDecl(listGet(impl^.params, i));
+    if p^.paramDefault = nil then
+      continue;
+    hd := PDecl(listGet(heading^.params, i))^.paramDefault;
+    if hd = nil then
+      exit;
+    errors := diagNumErrors;
+    checkParamDefault(p);
+    if diagNumErrors <> errors then { reported }
+      continue;
+    if not sameDefaultValue(hd, p^.paramDefault) then
+      exit;
+  end;
+  sameDefaults := true;
+end;
+
 function addOverload(first, r: PDecl): boolean;
 var
   x, last: PDecl;
@@ -4393,7 +4598,7 @@ begin
   x := first;
   while x <> nil do
   begin
-    if sameSignature(x, r) and
+    if sameParamList(x, r, false) and
        not (isConversionOperator(r) and (x^.resultType <> r^.resultType)) then
     begin
       ms('redefinition of ''');
@@ -4519,7 +4724,8 @@ begin
       rt := nil;
       if r^.resultSpec <> nil then
         rt := resolveType(r^.resultSpec, nil);
-      if not sameSignature(fwd, r) or ((rt <> nil) and (rt <> fwd^.resultType)) then
+      if not sameSignature(fwd, r) or ((rt <> nil) and (rt <> fwd^.resultType)) or
+         not sameDefaults(fwd, r) then
       begin
         ms('heading of ''');
         maN(r^.ident.spelling);
@@ -4778,7 +4984,7 @@ var
   arg: PNode;
 begin
   callCost := -1;
-  if r^.params.count <> args.count then
+  if not acceptsArgCount(r^.params, args.count) then
     exit;
   cost := 0;
   for i := 0 to args.count - 1 do
@@ -4851,7 +5057,9 @@ begin
     p := PDecl(listGet(r^.params, i));
     if i > 0 then
       ma('; ');
-    if p^.varKind = vkVarParam then
+    if p^.isOut then
+      ma('out ')
+    else if p^.varKind = vkVarParam then
       ma('var ')
     else if p^.varKind = vkConstParam then
       ma('const ');
@@ -5461,7 +5669,7 @@ begin
   begin
     pa := PDecl(listGet(a, i));
     pb := PDecl(listGet(b, i));
-    if pa^.varKind <> pb^.varKind then
+    if (pa^.varKind <> pb^.varKind) or (pa^.isOut <> pb^.isOut) then
       exit(false);
     ta := pa^.varType;
     tb := pb^.varType;
@@ -5511,7 +5719,7 @@ begin
     end
     else if (p^.varKind = vkVarParam) and not isVariableReference(arg) then
     begin
-      ms('argument for ''var'' parameter ''');
+      ms('argument for ''' + paramKeyword(p) + ''' parameter ''');
       maN(p^.ident.spelling);
       ma(''' must be a variable');
       errR(arg^.b, nodeRange(arg));
@@ -5651,7 +5859,7 @@ var
 
   procedure mustBeVariable;
   begin
-    ms('argument for ''var'' parameter ''');
+    ms('argument for ''' + paramKeyword(p) + ''' parameter ''');
     maN(p^.ident.spelling);
     ma(''' must be a variable');
     errR(arg^.b, nodeRange(arg));
@@ -5743,7 +5951,7 @@ begin
     markUsesManaged;
   isVarArgsCall := (calleeDecl <> nil) and (calleeDecl^.kind = dkRoutine) and
                    calleeDecl^.isVarArgs;
-  if (args.count <> params.count) and
+  if not acceptsArgCount(params, args.count) and
      not (isVarArgsCall and (args.count > params.count)) then
   begin
     if args.count < params.count then
@@ -5847,7 +6055,7 @@ begin
     begin
       if not isVariableReference(arg) then
       begin
-        ms('argument for ''var'' parameter ''');
+        ms('argument for ''' + paramKeyword(p) + ''' parameter ''');
         maN(p^.ident.spelling);
         ma(''' must be a variable');
         errR(arg^.b, nodeRange(arg));
@@ -5860,7 +6068,7 @@ begin
       begin
         ms('argument of type ');
         maT(at);
-        ma(' for ''var'' parameter ''');
+        ma(' for ''' + paramKeyword(p) + ''' parameter ''');
         maN(p^.ident.spelling);
         ma(''' must have exactly type ');
         maT(pt);

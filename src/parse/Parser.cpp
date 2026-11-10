@@ -1394,6 +1394,15 @@ TypeSpec *Parser::parseInterfaceType(SourceLocation Start) {
 bool Parser::parseFormalParams(llvm::SmallVectorImpl<VarDecl *> &Params,
                                tok::TokenKind Close) {
   SourceLocation LParen = consumeToken(); // '(' or '['
+  bool SeenDefault = false;
+  // Once a parameter has a default value, the following ones need one.
+  auto NeedsDefault = [&](const Identifier &N) {
+    if (SeenDefault)
+      Diags.error(N.Loc,
+                  "parameter '" + N.Spelling +
+                      "' needs a default value, as a parameter before it has one",
+                  {N.getRange()});
+  };
   do {
     if (Tok.isOneOf(tok::kw_procedure, tok::kw_function)) {
       // procedure p(params) / function f(params): T
@@ -1421,6 +1430,7 @@ bool Parser::parseFormalParams(llvm::SmallVectorImpl<VarDecl *> &Params,
                                              IsFunction,
                                              Ctx.copyArray<VarDecl *>(Inner),
                                              Result);
+      NeedsDefault(Name);
       Params.push_back(Ctx.create<VarDecl>(Name, TS, VarDecl::ValueParam));
       continue;
     }
@@ -1430,18 +1440,28 @@ bool Parser::parseFormalParams(llvm::SmallVectorImpl<VarDecl *> &Params,
       consumeToken();
       IsConst = true;
     }
+    // objfpc: `out`, not a reserved word, is a var parameter here.
+    bool IsOut = !IsVar && !IsConst && LangOpts.ObjKeywords &&
+                 Close == tok::r_paren && Tok.is(tok::identifier) &&
+                 Tok.getIdentifier() == "out";
+    if (IsOut) {
+      consumeToken();
+      IsVar = true;
+    }
     llvm::SmallVector<Identifier, 4> Names;
     if (!parseIdentList(Names, "parameter name")) {
       skipUntil({tok::semi, Close});
       continue;
     }
     TypeSpec *TS;
+    bool Untyped = false;
     // Turbo/FPC untyped parameters:  var x;  const a, b
     if ((IsVar || IsConst) && LangOpts.Mode != LangMode::ISO &&
-        Tok.isNot(tok::colon))
+        Tok.isNot(tok::colon)) {
+      Untyped = true;
       TS = Ctx.create<UntypedTypeSpec>(
           SourceRange(Names.back().Loc, Names.back().getRange().getEnd()));
-    else if (!expect(tok::colon, "after parameter name")) {
+    } else if (!expect(tok::colon, "after parameter name")) {
       skipUntil({tok::semi, Close});
       continue;
     } else
@@ -1450,11 +1470,41 @@ bool Parser::parseFormalParams(llvm::SmallVectorImpl<VarDecl *> &Params,
       skipUntil({tok::semi, Close});
       continue;
     }
-    for (const Identifier &N : Names)
-      Params.push_back(Ctx.create<VarDecl>(
+    // objfpc: a default value  b: T = value  (one name only)
+    Expr *Default = nullptr;
+    bool DefaultOK = false;
+    if (Tok.is(tok::equal) && Close == tok::r_paren) {
+      SourceLocation EqLoc = consumeToken();
+      if (!LangOpts.ObjKeywords)
+        Diags.error(EqLoc, "default parameter values are a Free Pascal "
+                           "extension; use --mode=objfpc");
+      else if (IsVar || Untyped)
+        Diags.error(EqLoc, "only value and const parameters can have a default value");
+      else if (Names.size() > 1)
+        Diags.error(EqLoc, "only one parameter can have a default value",
+                    {SourceRange(Names[0].Loc, Names.back().getRange().getEnd())});
+      else
+        DefaultOK = true;
+      Default = parseExpression();
+      if (!Default) {
+        skipUntil({tok::semi, Close});
+        continue;
+      }
+    }
+    for (const Identifier &N : Names) {
+      if (!Default)
+        NeedsDefault(N);
+      auto *V = Ctx.create<VarDecl>(
           N, TS,
           IsVar ? VarDecl::VarParam
-                : IsConst ? VarDecl::ConstParam : VarDecl::ValueParam));
+                : IsConst ? VarDecl::ConstParam : VarDecl::ValueParam);
+      if (DefaultOK)
+        V->setDefault(Default);
+      if (IsOut)
+        V->setOutParam();
+      Params.push_back(V);
+    }
+    SeenDefault |= DefaultOK;
   } while (tryConsume(tok::semi));
 
   if (!expect(Close, "after parameters")) {

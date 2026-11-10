@@ -1,0 +1,11 @@
+; An out parameter is a pointer, like var. The caller releases a managed
+; argument before it evaluates the others; other arguments are left alone.
+; RUN: %pcc --mode=objfpc --emit-llvm %S/Inputs/outparams.pas -o - | FileCheck %s
+; CHECK-LABEL: define i32 @main(
+; CHECK:      call void @__pas_astr_clear(ptr @pas.t)
+; CHECK-NEXT: %[[T:[a-z0-9.]+]] = load ptr, ptr @pas.t
+; CHECK-NEXT: %{{.*}} = call {{.*}}@__pas_astr_length(ptr %[[T]])
+; CHECK:      call void @pas.p(ptr null, i32 %{{.*}}, ptr @pas.t, ptr @pas.k)
+; CHECK-LABEL: define internal void @pas.p(ptr %link, i32 %n, ptr %s, ptr %i)
+; CHECK-NOT:  __pas_astr_clear
+; CHECK:      ret void

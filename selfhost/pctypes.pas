@@ -832,7 +832,9 @@ begin
           p := PDecl(listGet(t^.routineParams, i));
           if i > 0 then
             bufAdd(b, '; ');
-          if p^.varKind = vkVarParam then
+          if p^.isOut then
+            bufAdd(b, 'out ')
+          else if p^.varKind = vkVarParam then
             bufAdd(b, 'var ')
           else if p^.varKind = vkConstParam then
             bufAdd(b, 'const ');

@@ -1,0 +1,40 @@
+call
+destroy 1
+1 [] [] 9 TRUE
+2 new rs 5 2
+destroy 2
+plain 7
+8
+[]
+z
+[]
+z
+[]
+z
+0
+z
+[][]
+[][set]
+[] 2
+[n][]
+2 6
+4
+3
+var 0
+fwd
+var 0
+fwdinner
+[kept]
+set
+var 0
+1 fwd
+5
+base [] [qqq]
+base+derived
+base [] []
+base+derived
+plain 20
+21
+11
+12
+1

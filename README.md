@@ -310,7 +310,19 @@ untyped parameter or to `move` and `fillchar`; anything else is an error
 (also `sizeof(x)`, which Free Pascal makes 0). In overloads a typed
 parameter fits better. An external routine's untyped parameter is a C
 pointer (`function memcmp(const a; const b; n: int64): longint; cdecl;
-external 'c';`). Not supported: `out` parameters.
+external 'c';`).
+
+**Out parameters** (`--mode=objfpc`), as in Free Pascal: `procedure Get(out s:
+string; out n: integer)` passes variables by reference, like `var`, also
+untyped (`out x`) and open arrays. The difference is that an ansistring or
+interface in the argument, alone or in a record or array, is released before
+the call: first of all, so an argument evaluated in the same call
+(`Get(s, length(s))`) already sees it empty, and the routine starts with it
+empty. Other values are left as they are. `out` and `var` must agree between a
+heading and its implementation, an override and the method it overrides, an
+interface method and its implementation, and a procedural value and its type;
+overloads cannot differ only by them. `out` is not a reserved word, but in a
+parameter list in objfpc mode it is always the modifier, as in Free Pascal.
 
 **Initialized variables** (`--mode=objfpc`), as in Free Pascal:
 `var flag: boolean = false;`, one name per declaration, with a constant
@@ -318,6 +330,20 @@ value of any type a typed constant accepts (ordinals, reals, chars,
 strings, arrays, records). Program and unit variables start with their
 values; a routine's are set again whenever it is called (unlike typed
 constants, which keep their values between calls).
+
+**Default parameter values** (`--mode=objfpc`), as in Free Pascal:
+`procedure P(a: integer; b: integer = 1; const s: string = 'x');` can be called
+`P(0)` or `P(0, 2)`, and a function whose parameters all have defaults can be
+used without arguments or parentheses. Value and `const` parameters only, one
+name per default, and every parameter after one needs one too. The value is a
+constant that fits the parameter: ordinals, reals, strings, sets, `nil`. It is
+passed by the caller, as if written in the call, and comes from the heading the
+call sees: a routine's or method's implementation may leave defaults out or
+repeat them with the same values, and an override has its own. They also work
+on `forward` and interface headings, in units, on methods, constructors,
+interface methods and procedural types. Overloads count them when choosing,
+and a tie is an error. Unlike Free Pascal, a value that does not fit the
+parameter's range (`b: byte = 300`) is an error.
 
 **Absolute variables** (not in `--mode=iso`), as in Turbo and Free Pascal:
 `var bytes: array[0..3] of byte absolute n;` declares another view of `n`,

@@ -110,7 +110,8 @@ class ASTPrinter : public StmtVisitor<ASTPrinter>,
     }
     case Decl::DK_Var: {
       auto *V = llvm::cast<VarDecl>(D);
-      const char *Kind = V->getVarKind() == VarDecl::VarParam ? "ParamDecl var '"
+      const char *Kind = V->isOutParam() ? "ParamDecl out '"
+                         : V->getVarKind() == VarDecl::VarParam ? "ParamDecl var '"
                          : V->getVarKind() == VarDecl::ConstParam ? "ParamDecl const '"
                          : V->getVarKind() == VarDecl::ValueParam ? "ParamDecl '"
                                                                   : "VarDecl '";
@@ -123,11 +124,19 @@ class ASTPrinter : public StmtVisitor<ASTPrinter>,
         OS << " initialized";
       if (V->getAbsolute())
         OS << " absolute";
+      if (V->getDefault())
+        OS << " default";
       visibility(V);
       loc(V->getLocation());
       if (ParseTree) {
         IndentScope I(Indent);
         printTypeSpec(V->getTypeSpec());
+        if (V->getDefault()) {
+          line("Default");
+          loc(V->getDefault()->getBeginLoc());
+          IndentScope J(Indent);
+          visitExpr(V->getDefault());
+        }
         if (V->getAbsolute()) {
           line("Absolute");
           loc(V->getAbsolute()->getBeginLoc());

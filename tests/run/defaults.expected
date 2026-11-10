@@ -1,0 +1,33 @@
+1 4 x 1.5 TRUE q 1 TRUE
+1 2 x 1.5 TRUE q 1 TRUE
+1 2 y 2.5 FALSE r 0 TRUE
+4 4 8 5
+a b const const! A
+1 2 3 4 z
+TRUE FALSE TRUE FALSE
+FALSE TRUE TRUE FALSE
+1.0 6 200 65535
+TRUE TRUE FALSE TRUE FALSE
+fwd 1 2
+fwd 5 2
+same 3 1.5 TRUE
+3
+O string x 1
+O integer 1
+inner 4 5
+inner 4 6
+8
+3 3 1
+two 1 9
+two 1 2
+create 9
+derived 1
+10 10 2 7 7
+derived 2
+base 1
+base 7
+event 8
+event 1
+thing 4
+thing 5
+3 13 4

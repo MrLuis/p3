@@ -1667,8 +1667,23 @@ var
   vk: TVarKind;
   i: longint;
   lastName: PIdent;
+  seenDefault, untyped, defaultOK, isOut: boolean;
+  defValue: PNode;
+  eqLoc: TLoc;
+  v: PDecl;
+
+  { once a parameter has a default value, the following ones need one }
+  procedure needsDefault(const n: TIdent);
+  begin
+    if seenDefault then
+      diagErrorR(n.loc, 'parameter ''' + nameStr(n.spelling) +
+                 ''' needs a default value, as a parameter before it has one',
+                 identRange(n));
+  end;
+
 begin
   lparen := consumeToken; { '(' or '[' }
+  seenDefault := false;
   repeat
     if tok.kind in [tkKwProcedure, tkKwFunction] then
     begin
@@ -1705,6 +1720,7 @@ begin
       ts^.rtIsFunction := isFunction;
       ts^.rtParams := inner;
       ts^.rtResult := resultSpec;
+      needsDefault(name);
       listAdd(params, newVar(name, ts, vkValueParam));
       continue;
     end;
@@ -1715,6 +1731,14 @@ begin
       consumeToken;
       isConst := true;
     end;
+    { objfpc: out, not a reserved word, is a var parameter here }
+    isOut := not isVar and not isConst and (mode = lmObjFPC) and (close = tkRParen) and
+             (tok.kind = tkIdentifier) and (nameStr(tok.name) = 'out');
+    if isOut then
+    begin
+      consumeToken;
+      isVar := true;
+    end;
     listInit(names);
     if not parseIdentList(names, 'parameter name') then
     begin
@@ -1722,8 +1746,10 @@ begin
       continue;
     end;
     { Turbo/FPC untyped parameters:  var x;  const a, b }
+    untyped := false;
     if (isVar or isConst) and (mode <> lmISO) and (tok.kind <> tkColon) then
     begin
+      untyped := true;
       lastName := PIdent(listGet(names, names.count - 1));
       ts := newTypeSpec(tsUntyped, lastName^.loc, identRange(lastName^).e);
     end
@@ -1745,8 +1771,41 @@ begin
       vk := vkConstParam
     else
       vk := vkValueParam;
+    { objfpc: a default value  b: T = value  (one name only) }
+    defValue := nil;
+    defaultOK := false;
+    if (tok.kind = tkEqual) and (close = tkRParen) then
+    begin
+      eqLoc := consumeToken;
+      if mode <> lmObjFPC then
+        diagError(eqLoc, 'default parameter values are a Free Pascal ' +
+                  'extension; use --mode=objfpc')
+      else if isVar or untyped then
+        diagError(eqLoc, 'only value and const parameters can have a default value')
+      else if names.count > 1 then
+        diagErrorR(eqLoc, 'only one parameter can have a default value',
+                   makeRange(PIdent(listGet(names, 0))^.loc,
+                             identRange(PIdent(listGet(names, names.count - 1))^).e))
+      else
+        defaultOK := true;
+      defValue := parseExpression;
+      if defValue = nil then
+      begin
+        skipUntil([tkSemi, close]);
+        continue;
+      end;
+    end;
     for i := 0 to names.count - 1 do
-      listAdd(params, newVar(PIdent(listGet(names, i))^, ts, vk));
+    begin
+      if defValue = nil then
+        needsDefault(PIdent(listGet(names, i))^);
+      v := newVar(PIdent(listGet(names, i))^, ts, vk);
+      if defaultOK then
+        v^.paramDefault := defValue;
+      v^.isOut := isOut;
+      listAdd(params, v);
+    end;
+    seenDefault := seenDefault or defaultOK;
   until not tryConsume(tkSemi);
 
   if not expect(close, 'after parameters') then

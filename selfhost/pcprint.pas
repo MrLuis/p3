@@ -607,7 +607,11 @@ begin
     dkVar:
       begin
         case d^.varKind of
-          vkVarParam: lineName('ParamDecl var ''', d^.ident.name);
+          vkVarParam:
+            if d^.isOut then
+              lineName('ParamDecl out ''', d^.ident.name)
+            else
+              lineName('ParamDecl var ''', d^.ident.name);
           vkConstParam: lineName('ParamDecl const ''', d^.ident.name);
           vkValueParam: lineName('ParamDecl ''', d^.ident.name);
         else
@@ -629,6 +633,8 @@ begin
             bufAdd(outBuf, ' initialized');
           if d^.absTarget <> nil then
             bufAdd(outBuf, ' absolute');
+          if d^.paramDefault <> nil then
+            bufAdd(outBuf, ' default');
           visibilitySuffix(d);
           loc(d^.loc);
           exit;
@@ -639,10 +645,20 @@ begin
           bufAdd(outBuf, ' initialized');
         if d^.absTarget <> nil then
           bufAdd(outBuf, ' absolute');
+        if d^.paramDefault <> nil then
+          bufAdd(outBuf, ' default');
         visibilitySuffix(d);
         loc(d^.loc);
         indent := indent + 2;
         printTypeSpec(d^.varSpec);
+        if d^.paramDefault <> nil then
+        begin
+          line('Default');
+          loc(d^.paramDefault^.b);
+          indent := indent + 2;
+          visitExpr(d^.paramDefault);
+          indent := indent - 2;
+        end;
         if d^.absTarget <> nil then
         begin
           line('Absolute');

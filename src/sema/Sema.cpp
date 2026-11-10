@@ -23,6 +23,7 @@
 #include "llvm/ADT/StringMap.h"
 #include "llvm/ADT/StringSet.h"
 
+#include <bitset>
 #include <cmath>
 #include <memory>
 #include <optional>
@@ -1293,8 +1294,10 @@ class Checker : public StmtVisitor<Checker>,
 
     case TypeSpec::TS_Routine: {
       auto *RS = llvm::cast<RoutineTypeSpec>(TS);
-      for (VarDecl *P : RS->getParams())
+      for (VarDecl *P : RS->getParams()) {
         P->setType(resolveType(P->getTypeSpec()));
+        checkParamDefault(P);
+      }
       Type *Result = nullptr;
       if (RS->isFunction()) {
         Result = resolveType(RS->getResult());
@@ -2551,7 +2554,8 @@ class Checker : public StmtVisitor<Checker>,
         P->setType(resolveType(P->getTypeSpec()));
       Type *RT = R->getResultTypeSpec() ? resolveType(R->getResultTypeSpec())
                                         : nullptr;
-      if (!sameSignature(M, R) || (RT && RT != M->getResultType())) {
+      if (!sameSignature(M, R) || (RT && RT != M->getResultType()) ||
+          !sameDefaults(M, R)) {
         Diags.error(Id.Loc,
                     "heading of '" + QName + "' does not match its declaration",
                     {Id.getRange()});
@@ -2894,11 +2898,113 @@ class Checker : public StmtVisitor<Checker>,
     return true;
   }
 
+  /// Is E, a checked expression, a constant (nil, a set of constants, a
+  /// concatenation of string constants)?
+  bool isConstantDefault(Expr *E) {
+    if (llvm::isa<NilExpr>(E))
+      return true;
+    if (auto *Sum = llvm::dyn_cast<BinaryExpr>(E);
+        Sum && Sum->getOp() == BinaryOp::Add && !Sum->getOperator() &&
+        (E->getType()->isShortString() || E->getType()->isAnsiString()))
+      return isConstantDefault(Sum->getLHS()) && isConstantDefault(Sum->getRHS());
+    if (auto *S = llvm::dyn_cast<SetCtorExpr>(E)) {
+      for (const SetElement &El : S->getElements())
+        if (!fold(El.Lo) || (El.Hi && !fold(El.Hi)))
+          return false;
+      return true;
+    }
+    return fold(E).has_value();
+  }
+
+  /// Checks the default value of parameter P, of a resolved type: a
+  /// constant that can be passed to it.
+  void checkParamDefault(VarDecl *P) {
+    Expr *E = P->getDefault();
+    if (!E || P->getType()->isError())
+      return;
+    Type *T = P->getType(), *AT = check(E);
+    if (AT->isError())
+      return;
+    if (!isConstantDefault(E)) {
+      Diags.error(E->getBeginLoc(), "default parameter value must be a constant",
+                  {E->getRange()});
+      return;
+    }
+    if (!isAssignable(T, AT) && !isPCharLiteral(T, E)) {
+      Diags.error(E->getBeginLoc(),
+                  "cannot pass a default value of type " + quoted(AT) +
+                      " to parameter '" + P->getName().Spelling + "' of type " +
+                      quoted(T),
+                  {E->getRange()});
+      return;
+    }
+    if (auto C = fold(E); C && C->Value.K == ConstValue::Ordinal && T->isOrdinal()) {
+      OrdinalBounds Bd = getOrdinalBounds(T);
+      if (C->Value.Int < Bd.Lo || C->Value.Int > Bd.Hi)
+        Diags.error(E->getBeginLoc(),
+                    "value " + formatValue(C->Ty, C->Value.Int) +
+                        " is out of range for " + quoted(T),
+                    {E->getRange()});
+    }
+  }
+
+  /// The elements of the constant set S.
+  std::bitset<256> constantSetBits(SetCtorExpr *S) {
+    std::bitset<256> Bits;
+    for (const SetElement &El : S->getElements()) {
+      int64_t Lo = fold(El.Lo)->Value.Int;
+      int64_t Hi = El.Hi ? fold(El.Hi)->Value.Int : Lo;
+      for (int64_t V = std::max<int64_t>(Lo, 0); V <= std::min<int64_t>(Hi, 255); ++V)
+        Bits.set(static_cast<size_t>(V));
+    }
+    return Bits;
+  }
+
+  /// Are the constant default values A and B of a parameter equal?
+  bool sameDefaultValue(Expr *A, Expr *B) {
+    if (llvm::isa<NilExpr>(A) || llvm::isa<NilExpr>(B))
+      return llvm::isa<NilExpr>(A) && llvm::isa<NilExpr>(B);
+    auto *SA = llvm::dyn_cast<SetCtorExpr>(A);
+    auto *SB = llvm::dyn_cast<SetCtorExpr>(B);
+    if (SA || SB)
+      return SA && SB && constantSetBits(SA) == constantSetBits(SB);
+    auto CA = fold(A), CB = fold(B);
+    if (!CA || !CB)
+      return false;
+    const ConstValue &VA = CA->Value, &VB = CB->Value;
+    if (VA.K != VB.K)
+      return false;
+    return VA.K == ConstValue::Ordinal  ? VA.Int == VB.Int
+           : VA.K == ConstValue::String ? VA.Str == VB.Str
+                                        : VA.RealVal == VB.RealVal;
+  }
+
+  /// Do the default values of Impl, the implementation of Heading (with
+  /// the same signature), fit? It may leave them out, or repeat them.
+  bool sameDefaults(RoutineDecl *Heading, RoutineDecl *Impl) {
+    for (size_t I = 0; I < Impl->getParams().size(); ++I) {
+      VarDecl *P = Impl->getParams()[I];
+      if (!P->getDefault())
+        continue;
+      Expr *HD = Heading->getParams()[I]->getDefault();
+      if (!HD)
+        return false;
+      unsigned Errors = Diags.getNumErrors();
+      checkParamDefault(P);
+      if (Diags.getNumErrors() != Errors) // reported
+        continue;
+      if (!sameDefaultValue(HD, P->getDefault()))
+        return false;
+    }
+    return true;
+  }
+
   /// Resolves a routine's parameter and result types.
   void resolveSignature(RoutineDecl *R) {
     for (VarDecl *P : R->getParams()) {
       P->setOwner(R);
       P->setType(resolveType(P->getTypeSpec()));
+      checkParamDefault(P);
       if (!P->isVarParam() && containsFile(P->getType()))
         Diags.error(P->getLocation(),
                     "file parameter '" + P->getName().Spelling +
@@ -2941,15 +3047,23 @@ class Checker : public StmtVisitor<Checker>,
     R->setResultVar(Result);
   }
 
-  static bool sameSignature(RoutineDecl *A, RoutineDecl *B) {
+  /// CompareOut false: `out` and `var` parameters count as the same, as
+  /// when looking for routines that overloads cannot tell apart.
+  static bool sameSignature(RoutineDecl *A, RoutineDecl *B, bool CompareOut = true) {
     if (A->getParams().size() != B->getParams().size())
       return false;
     for (size_t I = 0; I < A->getParams().size(); ++I) {
       VarDecl *P = A->getParams()[I], *Q = B->getParams()[I];
-      if (P->getVarKind() != Q->getVarKind() || P->getType() != Q->getType())
+      if (P->getVarKind() != Q->getVarKind() || P->getType() != Q->getType() ||
+          (CompareOut && P->isOutParam() != Q->isOutParam()))
         return false;
     }
     return true;
+  }
+
+  /// The word for a by-reference parameter, for diagnostics.
+  static const char *paramKeyword(VarDecl *P) {
+    return P->isOutParam() ? "out" : "var";
   }
 
   void declareRoutine(RoutineDecl *R) {
@@ -3004,7 +3118,8 @@ class Checker : public StmtVisitor<Checker>,
           P->setType(resolveType(P->getTypeSpec()));
         Type *RT = R->getResultTypeSpec() ? resolveType(R->getResultTypeSpec())
                                           : nullptr;
-        if (!sameSignature(Fwd, R) || (RT && RT != Fwd->getResultType())) {
+        if (!sameSignature(Fwd, R) || (RT && RT != Fwd->getResultType()) ||
+            !sameDefaults(Fwd, R)) {
           Diags.error(Id.Loc,
                       "heading of '" + Id.Spelling +
                           "' does not match its forward declaration",
@@ -3060,7 +3175,7 @@ class Checker : public StmtVisitor<Checker>,
   /// R (resolved) joins the overloads First...: its parameters must differ.
   bool addOverload(RoutineDecl *First, RoutineDecl *R) {
     for (RoutineDecl *X = First; X; X = X->getNextOverload())
-      if (sameSignature(X, R) &&
+      if (sameSignature(X, R, /*CompareOut=*/false) &&
           !(isConversionOperator(R) && X->getResultType() != R->getResultType())) {
         const Identifier &Id = R->getName();
         Diags.error(Id.Loc,
@@ -3163,12 +3278,17 @@ class Checker : public StmtVisitor<Checker>,
     return N && llvm::isa_and_nonnull<RoutineDecl>(Cur->lookup(N->getName().Name));
   }
 
+  /// Can parameters Params take N arguments (the rest from default values)?
+  static bool acceptsArgCount(llvm::ArrayRef<VarDecl *> Params, size_t N) {
+    return N == Params.size() || (N < Params.size() && Params[N]->getDefault());
+  }
+
   /// The cost of calling R with Args (types ArgTys; null: a routine's
   /// name), or -1 if they do not fit.
   int callCost(RoutineDecl *R, llvm::ArrayRef<Expr *> Args,
                llvm::ArrayRef<Type *> ArgTys) {
     auto Params = R->getParams();
-    if (Params.size() != Args.size())
+    if (!acceptsArgCount(Params, Args.size()))
       return -1;
     int Cost = 0;
     for (size_t I = 0; I < Args.size(); ++I) {
@@ -3288,7 +3408,7 @@ class Checker : public StmtVisitor<Checker>,
     if (auto *SC = llvm::dyn_cast<SetCtorExpr>(Arg)) {
       if (P->isVarParam()) {
         Diags.error(Arg->getBeginLoc(),
-                    "argument for 'var' parameter '" + PName.Spelling +
+                    "argument for '" + llvm::Twine(paramKeyword(P)) + "' parameter '" + PName.Spelling +
                         "' must be a variable",
                     {Arg->getRange()});
         return;
@@ -3331,7 +3451,7 @@ class Checker : public StmtVisitor<Checker>,
       Expr *Target = Slice ? llvm::cast<CallExpr>(Arg)->getArgs()[0] : Arg;
       if (!isVariableReference(Target))
         Diags.error(Arg->getBeginLoc(),
-                    "argument for 'var' parameter '" + PName.Spelling +
+                    "argument for '" + llvm::Twine(paramKeyword(P)) + "' parameter '" + PName.Spelling +
                         "' must be a variable",
                     {Arg->getRange()});
       else
@@ -3424,7 +3544,8 @@ class Checker : public StmtVisitor<Checker>,
     auto Params = R->getParams();
     for (size_t I = 0; I < Params.size(); ++I)
       S += std::string(I ? "; " : "") +
-           (Params[I]->isVarParam()     ? "var "
+           (Params[I]->isOutParam()     ? "out "
+            : Params[I]->isVarParam()   ? "var "
             : Params[I]->isConstParam() ? "const "
                                         : "") +
            (Params[I]->getType() ? Params[I]->getType()->getName()
@@ -3834,7 +3955,8 @@ class Checker : public StmtVisitor<Checker>,
         (AResult && AResult != BResult))
       return false;
     for (size_t I = 0; I < A.size(); ++I) {
-      if (A[I]->getVarKind() != B[I]->getVarKind())
+      if (A[I]->getVarKind() != B[I]->getVarKind() ||
+          A[I]->isOutParam() != B[I]->isOutParam())
         return false;
       Type *TA = A[I]->getType(), *TB = B[I]->getType();
       auto *RA = llvm::dyn_cast_or_null<RoutineType>(TA);
@@ -3866,7 +3988,7 @@ class Checker : public StmtVisitor<Checker>,
                     {Arg->getRange()});
       else if (P->isVarParam() && !isVariableReference(Arg))
         Diags.error(Arg->getBeginLoc(),
-                    "argument for 'var' parameter '" + P->getName().Spelling +
+                    "argument for '" + llvm::Twine(paramKeyword(P)) + "' parameter '" + P->getName().Spelling +
                         "' must be a variable",
                     {Arg->getRange()});
       else if (P->isVarParam())
@@ -4002,7 +4124,7 @@ class Checker : public StmtVisitor<Checker>,
         markUsesManaged();
     auto *RD = llvm::dyn_cast_or_null<RoutineDecl>(CalleeDecl);
     bool VarArgs = RD && RD->isVarArgs();
-    if (Args.size() != Params.size() &&
+    if (!acceptsArgCount(Params, Args.size()) &&
         !(VarArgs && Args.size() > Params.size())) {
       Diags.error(Callee.Loc,
                   llvm::Twine(Args.size() < Params.size() ? "too few"
@@ -4087,7 +4209,7 @@ class Checker : public StmtVisitor<Checker>,
       if (P->isVarParam()) {
         if (!isVariableReference(Arg)) {
           Diags.error(Arg->getBeginLoc(),
-                      "argument for 'var' parameter '" + PName.Spelling +
+                      "argument for '" + llvm::Twine(paramKeyword(P)) + "' parameter '" + PName.Spelling +
                           "' must be a variable",
                       {Arg->getRange()});
           continue;
@@ -4098,8 +4220,9 @@ class Checker : public StmtVisitor<Checker>,
           continue;
         if (AT != PT)
           Diags.error(Arg->getBeginLoc(),
-                      "argument of type " + quoted(AT) + " for 'var' "
-                      "parameter '" + PName.Spelling + "' must have exactly "
+                      "argument of type " + quoted(AT) + " for '" +
+                          llvm::Twine(paramKeyword(P)) + "' parameter '" +
+                          PName.Spelling + "' must have exactly "
                       "type " + quoted(PT),
                       {Arg->getRange()});
         else
@@ -5599,7 +5722,7 @@ public:
       Type *T = llvm::cast<VarDecl>(D)->getType();
       if (auto *RT = llvm::dyn_cast_or_null<RoutineType>(T)) {
         // A functional parameter without arguments is a call.
-        if (RT->isFunction() && RT->getParams().empty())
+        if (RT->isFunction() && acceptsArgCount(RT->getParams(), 0))
           return RT->getResult();
         if (RT->isOfObject()) // nothing else it could be: the value
           return T;
@@ -5627,7 +5750,8 @@ public:
       return checkPropertyRead(llvm::cast<PropertyDecl>(D), E, Id);
     case Decl::DK_Routine: {
       auto *R = llvm::cast<RoutineDecl>(D);
-      if (ClassType *C = constructedThroughSelf(R, W); C && R->getParams().empty())
+      if (ClassType *C = constructedThroughSelf(R, W);
+          C && acceptsArgCount(R->getParams(), 0))
         return C;
       if (R->isProcedure()) {
         Diags.error(Id.Loc,
@@ -5635,7 +5759,7 @@ public:
                     {Id.getRange()});
         return errorType();
       }
-      if (!R->getParams().empty()) {
+      if (!acceptsArgCount(R->getParams(), 0)) {
         Diags.error(Id.Loc,
                     "missing arguments in call to '" + Id.Spelling + "'",
                     {Id.getRange()});
@@ -6637,7 +6761,7 @@ public:
       return errorType();
     E->setMember(R);
     warnHints(R, F);
-    if (!R->getParams().empty()) {
+    if (!acceptsArgCount(R->getParams(), 0)) {
       Diags.error(F.Loc, "missing arguments in call to '" + F.Spelling + "'",
                   {F.getRange()});
       noteDeclaredHere(R);
@@ -6841,7 +6965,7 @@ public:
     if (!R)
       return errorType();
     const Identifier &Id = E->getName();
-    if (!R->getParams().empty()) {
+    if (!acceptsArgCount(R->getParams(), 0)) {
       Diags.error(Id.Loc, "missing arguments in call to '" + Id.Spelling + "'",
                   {Id.getRange()});
       noteDeclaredHere(R);

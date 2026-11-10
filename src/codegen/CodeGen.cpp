@@ -2537,10 +2537,36 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
                      llvm::ArrayRef<Expr *> Args,
                      llvm::SmallVectorImpl<llvm::Value *> &Values,
                      bool ToC = false) {
-    for (size_t I = 0; I < Args.size(); ++I) {
-      Expr *Arg = Args[I];
+    // `out` arguments holding managed values are released first, before
+    // any other argument is evaluated (another may be the same variable).
+    llvm::SmallDenseMap<size_t, llvm::Value *, 2> Released;
+    for (size_t I = 0; I < std::min(Args.size(), Params.size()); ++I) {
+      VarDecl *P = Params[I];
+      if (!P->isOutParam() || !isManaged(P->getType()))
+        continue;
+      if (auto *OA = llvm::dyn_cast<OpenArrayType>(P->getType())) {
+        llvm::Value *Desc = emitOpenArrayArg(Args[I], OA);
+        llvm::Value *Slot = createTemp(B.getPtrTy(), "open.slot");
+        B.CreateStore(Desc, Slot); // what finalizeValue takes
+        finalizeValue(Slot, OA);
+        Released[I] = Desc;
+        continue;
+      }
+      llvm::Value *Addr = emitAddress(Args[I]);
+      finalizeValue(Addr, P->getType());
+      Released[I] = Addr;
+    }
+    for (size_t I = 0; I < std::max(Args.size(), Params.size()); ++I) {
+      // Arguments left out: the parameters' default values.
+      Expr *Arg = I < Args.size() ? Args[I] : Params[I]->getDefault();
+      if (!Arg)
+        break;
       if (I >= Params.size()) {
         Values.push_back(emitVarArg(Arg));
+        continue;
+      }
+      if (auto It = Released.find(I); It != Released.end()) {
+        Values.push_back(It->second);
         continue;
       }
       VarDecl *P = Params[I];
@@ -2552,6 +2578,9 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
         Values.push_back(emitConstArray(Arg));
       else if (llvm::Constant *CStr = cStringFor(P->getType(), Arg))
         Values.push_back(CStr);
+      else if (llvm::isa<RoutineType>(P->getType()) && llvm::isa<NilExpr>(Arg))
+        Values.push_back(ToC ? llvm::ConstantPointerNull::get(B.getPtrTy()) // a default
+                             : emitRoutinePair(Arg, P->getType()));
       else if (llvm::isa<RoutineType>(P->getType()) && ToC) {
         llvm::Value *Pair = emitRoutineValue(Arg);
         Values.push_back(B.CreateExtractValue(Pair, 0));

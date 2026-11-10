@@ -1603,7 +1603,7 @@ begin
   r := resolveInherited(e, nothing);
   if r = nil then
     exit;
-  if r^.params.count > 0 then
+  if not acceptsArgCount(r^.params, 0) then
   begin
     ms('missing arguments in call to ''');
     maN(e^.inhName.spelling);
@@ -2583,7 +2583,7 @@ begin
         if (t <> nil) and (t^.kind = tyRoutine) then
         begin
           { a functional parameter without arguments is a call }
-          if (t^.routineResult <> nil) and (t^.routineParams.count = 0) then
+          if (t^.routineResult <> nil) and acceptsArgCount(t^.routineParams, 0) then
             exit(t^.routineResult);
           if t^.routineOfObject then { nothing else it could be: the value }
             exit(t);
@@ -2613,7 +2613,7 @@ begin
         visitNameRef := d^.constType;
     dkRoutine:
       begin
-        if (constructedThroughSelf(d, w) <> nil) and (d^.params.count = 0) then
+        if (constructedThroughSelf(d, w) <> nil) and acceptsArgCount(d^.params, 0) then
           exit(constructedThroughSelf(d, w));
         if not d^.isFunction then
         begin
@@ -2623,7 +2623,7 @@ begin
           errR(e^.ref.loc, identRange(e^.ref));
           exit;
         end;
-        if d^.params.count > 0 then
+        if not acceptsArgCount(d^.params, 0) then
         begin
           ms('missing arguments in call to ''');
           maN(e^.ref.spelling);
@@ -3542,7 +3542,7 @@ begin
     exit;
   e^.fieldDecl := d;
   warnHints(d, e^.fieldName);
-  if d^.params.count > 0 then
+  if not acceptsArgCount(d^.params, 0) then
   begin
     ms('missing arguments in call to ''');
     maN(e^.fieldName.spelling);

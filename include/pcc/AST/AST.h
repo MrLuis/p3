@@ -1155,6 +1155,8 @@ private:
   ClassType *VarClass = nullptr;
   bool Captured = false;        ///< set by Sema
   Expr *Absolute = nullptr;     ///< Turbo/FPC `x: T absolute y`: y
+  Expr *Default = nullptr;      ///< objfpc: the parameter's default value
+  bool Out = false;             ///< objfpc: an `out` parameter
   VarDecl *AbsoluteRoot = nullptr; ///< set by Sema: the variable y is in
 
 public:
@@ -1169,6 +1171,10 @@ public:
   }
   bool isVarParam() const { return VK == VarParam; }
   bool isConstParam() const { return VK == ConstParam; }
+  /// An `out` parameter (objfpc) is a var parameter (isVarParam) whose
+  /// managed values the caller releases before the call.
+  bool isOutParam() const { return Out; }
+  void setOutParam() { Out = true; }
   RoutineDecl *getOwner() const { return Owner; }
   void setOwner(RoutineDecl *R) { Owner = R; }
   /// A routine's variable that a routine nested in it may use: it lives in
@@ -1181,6 +1187,10 @@ public:
   Expr *getAbsolute() const { return Absolute; }
   void setAbsolute(Expr *E) { Absolute = E; }
   VarDecl *getAbsoluteRoot() const { return AbsoluteRoot; }
+  /// A parameter's default value (`b: integer = 1`, objfpc), passed by the
+  /// calls that leave it out. Only trailing parameters have one.
+  Expr *getDefault() const { return Default; }
+  void setDefault(Expr *E) { Default = E; }
   void setAbsoluteRoot(VarDecl *V) { AbsoluteRoot = V; }
   Expr *getInit() const { return Init; }
   void setInit(Expr *E) { Init = E; }

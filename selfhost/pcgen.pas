@@ -2432,13 +2432,56 @@ var
   arg: PNode;
   v: TV;
   pt: PType;
+  released: TPtrList; { of PTVBox, by argument: its address if released }
+  slot: TV;
 begin
+  { out arguments holding managed values are released first, before any
+    other argument is evaluated (another may be the same variable) }
+  listInit(released);
   for i := 0 to args.count - 1 do
   begin
-    arg := PNode(listGet(args, i));
+    if i >= params.count then
+      break;
+    p := PDecl(listGet(params, i));
+    if p^.isOut and isManaged(p^.varType) then
+    begin
+      arg := PNode(listGet(args, i));
+      if p^.varType^.kind = tyOpenArray then
+      begin
+        v := emitOpenArrayArg(arg, p^.varType);
+        slot := irCreateTemp(irPtrT, 'open.slot');
+        irStore(v, slot); { what finalizeValue takes }
+        finalizeValue(slot, p^.varType);
+      end
+      else
+      begin
+        v := emitAddress(arg);
+        finalizeValue(v, p^.varType);
+      end;
+      listAdd(released, irBox(v));
+    end
+    else
+      listAdd(released, nil);
+  end;
+  i := -1;
+  while (i + 1 < args.count) or (i + 1 < params.count) do
+  begin
+    i := i + 1;
+    { arguments left out: the parameters' default values }
+    if i < args.count then
+      arg := PNode(listGet(args, i))
+    else
+      arg := PDecl(listGet(params, i))^.paramDefault;
+    if arg = nil then
+      break;
     if i >= params.count then
     begin
       irArgsAdd(buf, emitVarArg(arg));
+      continue;
+    end;
+    if (i < released.count) and (listGet(released, i) <> nil) then
+    begin
+      irArgsAdd(buf, PTVBox(listGet(released, i))^);
       continue;
     end;
     p := PDecl(listGet(params, i));
@@ -2451,6 +2494,13 @@ begin
       irArgsAdd(buf, emitConstArray(arg))
     else if cStringFor(pt, arg, v) then
       irArgsAdd(buf, v)
+    else if (pt^.kind = tyRoutine) and (arg^.kind = nkNil) then
+    begin
+      if toC then { a default value }
+        irArgsAdd(buf, irNull)
+      else
+        irArgsAdd(buf, emitRoutinePair(arg, pt));
+    end
     else if (pt^.kind = tyRoutine) and toC then
       irArgsAdd(buf, irExtract(emitRoutineValue(arg), 0, irPtrT, ''))
     else if (pt^.kind = tyRoutine) and pt^.routineOfObject then

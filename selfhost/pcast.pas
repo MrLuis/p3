@@ -366,7 +366,13 @@ type
       dkVar: (varSpec: PTypeSpec; varType: PType; varKind: TVarKind;
               owner: PDecl; init: PNode; initValue: TConstValue;
               isClassVar: boolean; varClass: PType; isInitVar: boolean;
-              absTarget: PNode; absRoot: PDecl);
+              absTarget: PNode; absRoot: PDecl;
+              { objfpc: a parameter's default value (b: integer = 1),
+                passed by the calls that leave it out }
+              paramDefault: PNode;
+              { objfpc: an out parameter, a var parameter (vkVarParam) whose
+                managed values the caller releases before the call }
+              isOut: boolean);
       dkConst: (constInit: PNode; constType: PType; constValue: TConstValue);
       dkType: (typeSpec: PTypeSpec; declType: PType);
       dkField: (fieldSpec: PTypeSpec; fieldType: PType);
