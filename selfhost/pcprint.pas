@@ -627,6 +627,8 @@ begin
             bufAdd(outBuf, ' class');
           if d^.isInitVar then
             bufAdd(outBuf, ' initialized');
+          if d^.absTarget <> nil then
+            bufAdd(outBuf, ' absolute');
           visibilitySuffix(d);
           loc(d^.loc);
           exit;
@@ -635,10 +637,20 @@ begin
           bufAdd(outBuf, ' class');
         if d^.isInitVar then
           bufAdd(outBuf, ' initialized');
+        if d^.absTarget <> nil then
+          bufAdd(outBuf, ' absolute');
         visibilitySuffix(d);
         loc(d^.loc);
         indent := indent + 2;
         printTypeSpec(d^.varSpec);
+        if d^.absTarget <> nil then
+        begin
+          line('Absolute');
+          loc(d^.absTarget^.b);
+          indent := indent + 2;
+          visitExpr(d^.absTarget);
+          indent := indent - 2;
+        end;
         if d^.init <> nil then
         begin
           line('Init');

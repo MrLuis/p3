@@ -558,7 +558,7 @@ begin
   for i := 0 to r^.body^.decls.count - 1 do
   begin
     v := PDecl(listGet(r^.body^.decls, i));
-    if (v^.kind = dkVar) and ((v^.init = nil) or v^.isInitVar) then
+    if (v^.kind = dkVar) and ((v^.init = nil) or v^.isInitVar) and (v^.absTarget = nil) then
       declare(v, 0);
   end;
   if r^.isFunction then

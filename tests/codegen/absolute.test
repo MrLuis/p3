@@ -1,0 +1,22 @@
+; An `absolute` variable has no storage: its uses are those of what it
+; overlays, which alone is created, released and finalized. A nested routine
+; using an overlay puts the overlaid variable in the frame record.
+; RUN: %pcc --mode=objfpc --emit-llvm %S/Inputs/absolute.pas -o %t.ll
+; RUN: FileCheck %s < %t.ll
+; RUN: FileCheck --check-prefix=LOCAL %s < %t.ll
+; CHECK-NOT: @pas.gv
+; CHECK-DAG: %frame.captures = type { i32 }
+; CHECK-DAG: @pas.g = internal global i32 0
+; CHECK-LABEL: define i32 @main(
+; CHECK:     store i32 1, ptr @pas.g
+
+; LOCAL-LABEL: define internal void @pas.local(
+; LOCAL:     __pas_file_new
+; LOCAL-NOT: __pas_file_new
+; LOCAL:     store i32 1, ptr %n
+; LOCAL:     exit:
+; LOCAL:     call void @__pas_astr_clear(
+; LOCAL-NOT: call void @__pas_astr_clear(
+; LOCAL:     __pas_file_free
+; LOCAL-NOT: __pas_file_free
+; LOCAL:     ret void

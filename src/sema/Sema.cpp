@@ -2691,9 +2691,69 @@ class Checker : public StmtVisitor<Checker>,
     }
   }
 
+  /// The variable that E, the target of an `absolute`, is in: E is a
+  /// variable, a field of a record in one or an element at a constant
+  /// index of an array in one. Null for anything else.
+  VarDecl *absoluteRootOf(Expr *E) {
+    if (auto *N = llvm::dyn_cast<NameRefExpr>(E)) {
+      auto *V = llvm::dyn_cast_or_null<VarDecl>(N->getDecl());
+      return V && !N->getWith() && !V->getType()->isArrayOfConst() ? V : nullptr;
+    }
+    if (auto *F = llvm::dyn_cast<FieldExpr>(E))
+      return F->getBase()->getType()->isRecord() &&
+                     llvm::isa_and_nonnull<FieldDecl>(F->getMember())
+                 ? absoluteRootOf(F->getBase())
+                 : nullptr;
+    if (auto *I = llvm::dyn_cast<IndexExpr>(E))
+      return !I->getProperty() && llvm::isa<ArrayType>(I->getBase()->getType()) &&
+                     fold(I->getIndex())
+                 ? absoluteRootOf(I->getBase())
+                 : nullptr;
+    return nullptr;
+  }
+
+  /// `V: T absolute Target`, as in Free Pascal. Checked before V is
+  /// declared, so that it cannot name itself.
+  void checkAbsolute(VarDecl *V, Expr *Target) {
+    // The name of an enclosing function is its result.
+    auto *N = llvm::dyn_cast<NameRefExpr>(Target);
+    auto *R = N ? llvm::dyn_cast_or_null<RoutineDecl>(Cur->lookup(N->getName().Name))
+                : nullptr;
+    if (R && R->isFunction())
+      for (RoutineDecl *Enc = CurRoutine; Enc; Enc = Enc->getParent())
+        for (RoutineDecl *X = R; X; X = X->getNextOverload())
+          if (Enc == X) {
+            if (X != CurRoutine)
+              X->getResultVar()->setCaptured();
+            N->setDecl(X->getResultVar());
+            N->setType(X->getResultType());
+            ResultAssigned.insert(X);
+            V->setAbsoluteRoot(X->getResultVar());
+            return;
+          }
+    if (checkAllowingUntyped(Target)->isError())
+      return;
+    VarDecl *Root = absoluteRootOf(Target);
+    if (!Root) {
+      bool IsConstant = llvm::isa<IntegerLiteralExpr>(Target) ||
+                        (N && llvm::isa_and_nonnull<ConstDecl>(N->getDecl()));
+      Diags.error(Target->getBeginLoc(),
+                  IsConstant ? "'absolute' with a memory address is not supported"
+                             : "'absolute' needs a variable, a field of a record "
+                               "variable or an element at a constant index",
+                  {Target->getRange()});
+      return;
+    }
+    V->setAbsoluteRoot(Root);
+    if (Root->getVarKind() == VarDecl::Result) // objfpc `Result`
+      ResultAssigned.insert(Root->getOwner());
+  }
+
   void declareVar(VarDecl *V) {
     V->setType(resolveType(V->getTypeSpec()));
     V->setOwner(CurRoutine);
+    if (Expr *Target = V->getAbsolute())
+      checkAbsolute(V, Target);
     if (Expr *Init = V->getInit()) {
       // Typed constants are static: they keep their value across calls.
       // (An initialized variable is set again whenever its routine runs.)

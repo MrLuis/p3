@@ -1334,7 +1334,7 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
                     const llvm::StringMap<unsigned> *ParamIndex) {
     for (Decl *D : Decls) {
       auto *V = llvm::dyn_cast<VarDecl>(D);
-      if (!V || !containsFile(V->getType()))
+      if (!V || V->getAbsolute() || !containsFile(V->getType()))
         continue;
       llvm::Value *Name = nullptr;
       if (ParamIndex) {
@@ -1349,6 +1349,8 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
   }
 
   llvm::Value *varAddress(VarDecl *V) {
+    if (Expr *Target = V->getAbsolute()) // an overlay has no storage
+      return emitAddress(Target);
     if (llvm::Value *H = HandlerVars.lookup(V))
       return H;
     if (!V->getOwner()) {
@@ -1787,7 +1789,8 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
     for (VarDecl *P : R->getParams())
       Declare(P, ArgNo++);
     for (Decl *D : R->getBody()->getDecls())
-      if (auto *V = llvm::dyn_cast<VarDecl>(D); V && !V->isTypedConst())
+      if (auto *V = llvm::dyn_cast<VarDecl>(D);
+          V && !V->isTypedConst() && !V->getAbsolute())
         Declare(V, 0);
     if (R->isFunction())
       Declare(R->getResultVar(), 0);
@@ -1898,7 +1901,7 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
         continue;
       }
       auto *V = llvm::dyn_cast<VarDecl>(D);
-      if (!V)
+      if (!V || V->getAbsolute())
         continue;
       if (V->isTypedConst() || V->isInitializedVar()) { // initialized once
         emitStaticVar(V);
@@ -2252,7 +2255,7 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
       if (auto *V = llvm::dyn_cast<VarDecl>(Local)) {
         if (V->isTypedConst())
           emitStaticVar(V); // static storage, local scope
-        else
+        else if (!V->getAbsolute())
           AddSlot(V);
       }
     if (R->isFunction())
@@ -2326,7 +2329,8 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
     VarDecl *ResultVar = R->isFunction() ? R->getResultVar() : nullptr;
     llvm::SmallVector<VarDecl *, 8> Locals; // start from zero
     for (Decl *D : R->getBody()->getDecls())
-      if (auto *V = llvm::dyn_cast<VarDecl>(D); V && !V->isTypedConst())
+      if (auto *V = llvm::dyn_cast<VarDecl>(D);
+          V && !V->isTypedConst() && !V->getAbsolute())
         Locals.push_back(V);
     if (ResultVar)
       Locals.push_back(ResultVar);
@@ -2388,7 +2392,8 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
         B.CreateStore(initializerFor(V, memType(V->getType())), varAddress(V));
     for (Decl *D : R->getBody()->getDecls())
       if (auto *V = llvm::dyn_cast<VarDecl>(D);
-          V && !V->isTypedConst() && isManaged(V->getType()))
+          V && !V->isTypedConst() && !V->getAbsolute() &&
+          isManaged(V->getType()))
         Managed.push_back({varAddress(V), V->getType()});
     bool ManagedResult = ResultVar && isManaged(ResultVar->getType());
 
@@ -2440,7 +2445,7 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
       B.CreateCall(excRuntime("__pas_exc_pop"), {ExcFrame});
     Finalize();
     for (Decl *D : R->getBody()->getDecls())
-      if (auto *V = llvm::dyn_cast<VarDecl>(D))
+      if (auto *V = llvm::dyn_cast<VarDecl>(D); V && !V->getAbsolute())
         emitFileLifetime(varAddress(V), V->getType(), /*Init=*/false);
 
     if (Raised) {

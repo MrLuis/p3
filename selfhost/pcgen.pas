@@ -1146,11 +1146,15 @@ begin
   irStoreVolatile(addr, pinSlot);
 end;
 
+function emitAddress(e: PNode): TV; forward;
+
 function varAddress(v: PDecl): TV;
 var
   owner: PDecl;
   slot: TV;
 begin
+  if v^.absTarget <> nil then { an overlay has no storage }
+    exit(emitAddress(v^.absTarget));
   owner := v^.owner;
   { on E: TFoo do: E's storage (a temporary) }
   if (owner <> nil) and (v^.cgValue <> nil) then
@@ -1288,7 +1292,7 @@ begin
   for i := 0 to decls.count - 1 do
   begin
     v := PDecl(listGet(decls, i));
-    if (v^.kind <> dkVar) or not containsFile(v^.varType) then
+    if (v^.kind <> dkVar) or (v^.absTarget <> nil) or not containsFile(v^.varType) then
       continue;
     name := irNull;
     if isProgram then
@@ -1318,7 +1322,6 @@ end;
 { --- Expressions: forward declarations --- }
 
 function visitExpr(e: PNode): TV; forward;
-function emitAddress(e: PNode): TV; forward;
 procedure visitStmt(s: PNode); forward;
 function withBase(w: PWithContext): TV; forward;
 function emitObject(e: PNode): TV; forward;

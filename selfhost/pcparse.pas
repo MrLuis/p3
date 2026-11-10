@@ -750,8 +750,8 @@ var
   names: TPtrList;
   ts: PTypeSpec;
   i: longint;
-  init: PNode;
-  eqLoc: TLoc;
+  init, absTarget: PNode;
+  eqLoc, absLoc: TLoc;
   v: PDecl;
 begin
   consumeToken; { 'var' }
@@ -767,6 +767,23 @@ begin
     if parseIdentList(names, 'variable name') and
        expect(tkColon, 'after variable name') then
       ts := parseType;
+    { Turbo/FPC: an overlay  x: T absolute y;  (one name only); absolute
+      is not a reserved word }
+    absTarget := nil;
+    if (ts <> nil) and (tok.kind = tkIdentifier) and (nameStr(tok.name) = 'absolute') then
+    begin
+      absLoc := consumeToken;
+      if mode = lmISO then
+        diagError(absLoc, '''absolute'' is a Turbo/Free Pascal extension; ' +
+                  'use --mode=tp')
+      else if names.count > 1 then
+        diagErrorR(absLoc, '''absolute'' can only be used with one variable',
+                   makeRange(PIdent(listGet(names, 0))^.loc,
+                             identRange(PIdent(listGet(names, names.count - 1))^).e));
+      absTarget := parseExpression;
+      if absTarget = nil then
+        ts := nil;
+    end;
     { objfpc: an initialized variable  x: T = value;  (one name only) }
     init := nil;
     if (ts <> nil) and (tok.kind = tkEqual) then
@@ -797,6 +814,7 @@ begin
           v^.init := init;
           v^.isInitVar := true;
         end;
+        v^.absTarget := absTarget;
         addHints(v, hf, hm);
         listAdd(decls, v);
       end;

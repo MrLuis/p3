@@ -142,7 +142,14 @@ var
   v: PDecl;
 begin
   if (d^.kind = dkVar) and (d^.owner <> nil) then
-    d^.captured := true;
+  begin
+    v := d;
+    while v <> nil do { an overlay: what it overlays }
+    begin
+      v^.captured := true;
+      v := v^.absRoot;
+    end;
+  end;
   if (s^.withCtx <> nil) and (s^.withCtx^.rec^.kind = nkNameRef) then
   begin
     v := s^.withCtx^.rec^.refDecl;

@@ -1422,7 +1422,7 @@ begin
       end;
       continue;
     end;
-    if d^.kind = dkVar then
+    if (d^.kind = dkVar) and (d^.absTarget = nil) then
       emitStaticVar(d);
   end;
 end;
@@ -1880,7 +1880,7 @@ begin
     for j := 0 to r^.body^.decls.count - 1 do
     begin
       v := PDecl(listGet(r^.body^.decls, j));
-      if v^.kind <> dkVar then
+      if (v^.kind <> dkVar) or (v^.absTarget <> nil) then
         continue;
       if (v^.init <> nil) and not v^.isInitVar then
         emitStaticVar(v) { static storage, local scope }
@@ -2057,7 +2057,7 @@ begin
   for i := 0 to r^.body^.decls.count - 1 do
   begin
     v := PDecl(listGet(r^.body^.decls, i));
-    if (v^.kind = dkVar) and ((v^.init = nil) or v^.isInitVar) then
+    if (v^.kind = dkVar) and ((v^.init = nil) or v^.isInitVar) and (v^.absTarget = nil) then
       listAdd(locals, v);
   end;
   if r^.isFunction then
@@ -2129,7 +2129,7 @@ begin
   begin
     v := PDecl(listGet(r^.body^.decls, i));
     if (v^.kind = dkVar) and ((v^.init = nil) or v^.isInitVar) and
-       isManaged(v^.varType) then
+       (v^.absTarget = nil) and isManaged(v^.varType) then
     begin
       listAdd(managedAddrs, irBox(varAddress(v)));
       listAdd(managedTypes, v^.varType);
@@ -2185,7 +2185,7 @@ begin
   for i := 0 to r^.body^.decls.count - 1 do
   begin
     v := PDecl(listGet(r^.body^.decls, i));
-    if v^.kind = dkVar then
+    if (v^.kind = dkVar) and (v^.absTarget = nil) then
       emitFileLifetime(varAddress(v), v^.varType, false, irNull);
   end;
   if raised <> nil then

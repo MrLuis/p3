@@ -527,6 +527,22 @@ void Parser::parseVarPart(llvm::SmallVectorImpl<Decl *> &Decls) {
         expect(tok::colon, "after variable name"))
       TS = parseType();
 
+    // Turbo/FPC: an overlay  x: T absolute y;  (one name only). `absolute`
+    // is not a reserved word.
+    Expr *Absolute = nullptr;
+    if (TS && Tok.is(tok::identifier) && Tok.getIdentifier() == "absolute") {
+      SourceLocation AbsLoc = consumeToken();
+      if (LangOpts.Mode == LangMode::ISO)
+        Diags.error(AbsLoc, "'absolute' is a Turbo/Free Pascal extension; "
+                            "use --mode=tp");
+      else if (Names.size() > 1)
+        Diags.error(AbsLoc, "'absolute' can only be used with one variable",
+                    {SourceRange(Names[0].Loc, Names.back().getRange().getEnd())});
+      Absolute = parseExpression();
+      if (!Absolute)
+        TS = nullptr;
+    }
+
     // objfpc: an initialized variable  x: T = value;  (one name only)
     Expr *Init = nullptr;
     if (TS && Tok.is(tok::equal)) {
@@ -552,6 +568,7 @@ void Parser::parseVarPart(llvm::SmallVectorImpl<Decl *> &Decls) {
         auto *V = Ctx.create<VarDecl>(N, TS);
         if (Init)
           V->setInitializedVar(Init);
+        V->setAbsolute(Absolute);
         V->addHints(H.Flags, H.Message);
         Decls.push_back(V);
       }

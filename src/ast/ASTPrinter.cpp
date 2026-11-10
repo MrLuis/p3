@@ -121,11 +121,19 @@ class ASTPrinter : public StmtVisitor<ASTPrinter>,
         OS << " class";
       if (V->isInitializedVar())
         OS << " initialized";
+      if (V->getAbsolute())
+        OS << " absolute";
       visibility(V);
       loc(V->getLocation());
       if (ParseTree) {
         IndentScope I(Indent);
         printTypeSpec(V->getTypeSpec());
+        if (V->getAbsolute()) {
+          line("Absolute");
+          loc(V->getAbsolute()->getBeginLoc());
+          IndentScope J(Indent);
+          visitExpr(V->getAbsolute());
+        }
         if (V->getInit()) {
           line("Init");
           loc(V->getInit()->getBeginLoc());

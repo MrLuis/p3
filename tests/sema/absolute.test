@@ -1,0 +1,34 @@
+; Variables declared `absolute` (not in --mode=iso): one name per declaration,
+; overlaying a variable, a field of a record or an element at a constant
+; index. Memory addresses are not supported. `absolute` is not reserved.
+; RUN: not %pcc --mode=objfpc -ferror-limit=0 -c %S/Inputs/absolute/errors.pas -o %t.o 2>&1 | FileCheck %s
+; CHECK: errors.pas:12:24: error: use of undeclared identifier 'nope'
+; CHECK: errors.pas:13:24: error: 'absolute' with a memory address is not supported
+; CHECK: errors.pas:14:24: error: 'absolute' with a memory address is not supported
+; Through a pointer, an object, a variable index, other expressions.
+; CHECK: errors.pas:15:24: error: 'absolute' needs a variable, a field of a record variable or an element at a constant index
+; CHECK: errors.pas:16:24: error: 'absolute' needs a variable
+; CHECK: errors.pas:17:24: error: 'absolute' needs a variable
+; CHECK: errors.pas:18:24: error: 'absolute' needs a variable
+; An initial value parses as part of the target.
+; CHECK: errors.pas:19:24: error: 'absolute' needs a variable
+; Itself: not declared yet.
+; CHECK: errors.pas:20:24: error: use of undeclared identifier 'e9'
+; CHECK: errors.pas:21:29: error: array index 9 is out of bounds 1..4
+; CHECK: errors.pas:22:25: error: 'absolute' needs a variable
+; CHECK: errors.pas:23:25: error: 'TRec' is a type, not a value
+; A field through Self, an array of const.
+; CHECK: errors.pas:25:25: error: 'absolute' needs a variable
+; CHECK: errors.pas:28:25: error: 'absolute' needs a variable
+; CHECK-NOT: error:
+; RUN: not %pcc --mode=objfpc -c %S/Inputs/absolute/names.pas -o %t.o 2>&1 | FileCheck --check-prefix=NAMES %s
+; NAMES: names.pas:3:17: error: 'absolute' can only be used with one variable
+; RUN: not %pcc -c %S/Inputs/absolute/iso.pas -o %t.o 2>&1 | FileCheck --check-prefix=ISO %s
+; ISO: iso.pas:3:14: error: 'absolute' is a Turbo/Free Pascal extension; use --mode=tp
+; RUN: %pcc --mode=tp --emit-parse-tree %S/Inputs/absolute/tree.pas | FileCheck --check-prefix=TREE %s
+; TREE:      VarDecl 'y' absolute <3:3>
+; TREE:      Absolute <3:23>
+; TREE-NEXT:   NameRefExpr 'x'
+; TREE:      VarDecl 'absolute' <4:3>
+; RUN: %pcc --mode=tp --emit-ast %S/Inputs/absolute/tree.pas | FileCheck --check-prefix=AST %s
+; AST:       VarDecl 'y' : integer absolute <3:3>

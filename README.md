@@ -319,6 +319,20 @@ strings, arrays, records). Program and unit variables start with their
 values; a routine's are set again whenever it is called (unlike typed
 constants, which keep their values between calls).
 
+**Absolute variables** (not in `--mode=iso`), as in Turbo and Free Pascal:
+`var bytes: array[0..3] of byte absolute n;` declares another view of `n`,
+with a type of its own and no storage of its own. The target is a variable
+(global, local, a parameter of any kind, including an untyped one, a typed
+constant, `Self`, the function's name or `Result`), another absolute
+variable, a field of a record variable (`absolute r.b`) or an element at a
+constant index (`absolute a[2]`). One name per declaration, and no initial
+value. Nothing is initialized or released through the view: an ansistring,
+interface or file is managed only as the variable it overlays. The sizes
+need not match; a view larger than its target reaches past it, as in Free
+Pascal. `absolute` is not a reserved word. Not supported: memory addresses
+(`absolute $B800`). An absolute variable does not appear in `-g` debug
+information.
+
 **Ansistrings** (not in `--mode=iso`), as in Free Pascal: `ansistring` is
 a reference-counted string of any length, copied only when written to, and
 `{$H+}` (or `{$longstrings on}`) makes plain `string` mean `ansistring` until

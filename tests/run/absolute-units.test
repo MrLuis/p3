@@ -1,0 +1,10 @@
+; `absolute` in units, compiled whole and separately: an overlay in a unit's
+; interface and implementation, and a program's overlay of a unit's variable.
+; RUN: rm -rf %t && mkdir -p %t && cp -r %S/Inputs/absolute/. %t/
+; RUN: %pcc --mode=tp -I %t/lib %t/main.pas -o %t/whole
+; RUN: %t/whole | FileCheck %s
+; RUN: %pcc --mode=tp -c %t/lib/shared.pas -o %t/lib/shared.o
+; RUN: %pcc --mode=tp -I %t/lib -fseparate-units %t/main.pas -o %t/separate
+; RUN: %t/separate | FileCheck %s
+; CHECK:      5 5
+; CHECK-NEXT: 261

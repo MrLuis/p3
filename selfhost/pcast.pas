@@ -357,12 +357,16 @@ type
         variables and typed constants (Sema) }
       { isClassVar (objfpc): a class var, static storage for the class
         varClass (Sema) and its descendants }
+      { absTarget (Turbo/FPC): x: T absolute y: the expression y (x has no
+        storage of its own, it is another view of y); absRoot: the variable
+        y is in (Sema) }
       { isInitVar (objfpc): init belongs to an initialized variable
         (var x: T = v;), an ordinary variable set to its initial value
         whenever its routine is entered, not to a typed constant }
       dkVar: (varSpec: PTypeSpec; varType: PType; varKind: TVarKind;
               owner: PDecl; init: PNode; initValue: TConstValue;
-              isClassVar: boolean; varClass: PType; isInitVar: boolean);
+              isClassVar: boolean; varClass: PType; isInitVar: boolean;
+              absTarget: PNode; absRoot: PDecl);
       dkConst: (constInit: PNode; constType: PType; constValue: TConstValue);
       dkType: (typeSpec: PTypeSpec; declType: PType);
       dkField: (fieldSpec: PTypeSpec; fieldType: PType);

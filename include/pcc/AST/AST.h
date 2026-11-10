@@ -1154,6 +1154,8 @@ private:
   bool IsClassVar = false;
   ClassType *VarClass = nullptr;
   bool Captured = false;        ///< set by Sema
+  Expr *Absolute = nullptr;     ///< Turbo/FPC `x: T absolute y`: y
+  VarDecl *AbsoluteRoot = nullptr; ///< set by Sema: the variable y is in
 
 public:
   VarDecl(Identifier Name, TypeSpec *TS, VarKind VK = Variable)
@@ -1174,6 +1176,12 @@ public:
   /// their static link.
   bool isCaptured() const { return Captured; }
   void setCaptured() { Captured = true; }
+  /// `x: T absolute y`: x has no storage of its own, it is another view of
+  /// the variable, field or element y. Null for other variables.
+  Expr *getAbsolute() const { return Absolute; }
+  void setAbsolute(Expr *E) { Absolute = E; }
+  VarDecl *getAbsoluteRoot() const { return AbsoluteRoot; }
+  void setAbsoluteRoot(VarDecl *V) { AbsoluteRoot = V; }
   Expr *getInit() const { return Init; }
   void setInit(Expr *E) { Init = E; }
   /// A typed constant (static storage, initialized once), as opposed to an

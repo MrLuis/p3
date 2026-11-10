@@ -4043,12 +4043,90 @@ begin
   checkConstInit := true;
 end;
 
+{ The variable that e, the target of an absolute, is in: e is a variable, a
+  field of a record in one or an element at a constant index of an array
+  in one. Nil for anything else. }
+function absoluteRootOf(e: PNode): PDecl;
+var
+  c: TConstant;
+begin
+  absoluteRootOf := nil;
+  case e^.kind of
+    nkNameRef:
+      if (e^.refDecl <> nil) and (e^.refDecl^.kind = dkVar) and (e^.refWith = nil) and
+         (e^.refDecl^.varType^.kind <> tyArrayOfConst) then
+        absoluteRootOf := e^.refDecl;
+    nkField:
+      if (e^.base^.typ^.kind = tyRecord) and (e^.fieldDecl <> nil) and
+         (e^.fieldDecl^.kind = dkField) then
+        absoluteRootOf := absoluteRootOf(e^.base);
+    nkIndex:
+      if (e^.idxProp = nil) and (e^.base^.typ^.kind = tyArray) and fold(e^.index, c) then
+        absoluteRootOf := absoluteRootOf(e^.base);
+  end;
+end;
+
+{ v: T absolute target, as in Free Pascal. Checked before v is declared, so
+  that it cannot name itself. }
+procedure checkAbsolute(v: PDecl; target: PNode);
+var
+  r, enc, x, root: PDecl;
+begin
+  { the name of an enclosing function is its result }
+  r := nil;
+  if target^.kind = nkNameRef then
+    r := scopeFind(cur, target^.ref.name);
+  if (r <> nil) and (r^.kind = dkRoutine) and r^.isFunction then
+  begin
+    enc := curRoutine;
+    while enc <> nil do
+    begin
+      x := r;
+      while x <> nil do
+      begin
+        if enc = x then
+        begin
+          if x <> curRoutine then
+            x^.resultVar^.captured := true;
+          target^.refDecl := x^.resultVar;
+          target^.typ := x^.resultType;
+          x^.resultAssigned := true;
+          v^.absRoot := x^.resultVar;
+          exit;
+        end;
+        x := x^.nextOverload;
+      end;
+      enc := enc^.parent;
+    end;
+  end;
+  if isError(checkAllowingUntyped(target)) then
+    exit;
+  root := absoluteRootOf(target);
+  if root = nil then
+  begin
+    if (target^.kind = nkIntegerLit) or
+       ((target^.kind = nkNameRef) and (target^.refDecl <> nil) and
+        (target^.refDecl^.kind = dkConst)) then
+      ms('''absolute'' with a memory address is not supported')
+    else
+      ms('''absolute'' needs a variable, a field of a record variable or an element ' +
+         'at a constant index');
+    errR(target^.b, nodeRange(target));
+    exit;
+  end;
+  v^.absRoot := root;
+  if root^.varKind = vkResult then { objfpc Result }
+    root^.owner^.resultAssigned := true;
+end;
+
 procedure declareVar(v: PDecl);
 var
   folded: TConstValue;
 begin
   v^.varType := resolveType(v^.varSpec, nil);
   v^.owner := curRoutine;
+  if v^.absTarget <> nil then
+    checkAbsolute(v, v^.absTarget);
   if v^.init <> nil then
   begin
     { typed constants are static: they keep their value across calls (an

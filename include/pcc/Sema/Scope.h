@@ -36,7 +36,8 @@ class Scope {
   /// S exposes.
   static void noteCaptured(const Scope *S, Decl *D) {
     if (auto *V = llvm::dyn_cast<VarDecl>(D); V && V->getOwner())
-      V->setCaptured();
+      for (; V; V = V->getAbsoluteRoot()) // an overlay: what it overlays
+        V->setCaptured();
     if (S->With)
       if (auto *N = llvm::dyn_cast<NameRefExpr>(S->With->Record))
         if (auto *V = llvm::dyn_cast_or_null<VarDecl>(N->getDecl());
