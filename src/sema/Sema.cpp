@@ -726,6 +726,8 @@ class Checker : public StmtVisitor<Checker>,
       return true;
     if ((A->isClass() && B->isNil()) || (A->isNil() && B->isClass()))
       return true;
+    if ((A->isDynArray() && B->isNil()) || (A->isNil() && B->isDynArray()))
+      return true;
     if ((A->isClassRef() && B->isNil()) || (A->isNil() && B->isClassRef()))
       return true;
     if (A->isClassRef() && B->isClassRef()) { // related classes (objfpc)
@@ -799,6 +801,8 @@ class Checker : public StmtVisitor<Checker>,
                   TR->getClass()));
     if (Target->isPointer() && (Value->isClass() || Value->isClassRef()))
       return llvm::cast<PointerType>(Target)->isUntyped();
+    if (Target->isDynArray())
+      return Value->isNil();
     if (Target->isShortString() && Value->isStringish())
       return true; // truncated to the target's length at runtime
     if (Target->isAnsiString())
@@ -830,8 +834,11 @@ class Checker : public StmtVisitor<Checker>,
       Decl *D = N->getDecl();
       return D && (llvm::isa<VarDecl>(D) || llvm::isa<FieldDecl>(D));
     }
-    if (auto *I = llvm::dyn_cast<IndexExpr>(E))
+    if (auto *I = llvm::dyn_cast<IndexExpr>(E)) {
+      if (I->getBase()->getType() && I->getBase()->getType()->isDynArray())
+        return !I->getProperty(); // on the heap, like p^
       return !I->getProperty() && isVariableReference(I->getBase());
+    }
     if (auto *F = llvm::dyn_cast<FieldExpr>(E)) {
       if (llvm::isa_and_nonnull<VarDecl>(F->getMember()))
         return true; // a class variable
@@ -857,8 +864,8 @@ class Checker : public StmtVisitor<Checker>,
   static VarDecl *constParamRoot(Expr *E) {
     while (true) {
       if (auto *I = llvm::dyn_cast<IndexExpr>(E)) {
-        if (I->getProperty())
-          return nullptr;
+        if (I->getProperty() || I->getBase()->getType()->isDynArray())
+          return nullptr; // (a dynamic array's elements are not the parameter)
         E = I->getBase();
       } else if (auto *F = llvm::dyn_cast<FieldExpr>(E)) {
         if (isObject(F->getBase()) ||
@@ -1029,8 +1036,8 @@ class Checker : public StmtVisitor<Checker>,
           BD->getBuiltinKind() == BuiltinKind::High) {
         bool IsHigh = BD->getBuiltinKind() == BuiltinKind::High;
         Type *AT = Call->getArgs()[0]->getType();
-        if (AT->isArrayOfConst() || AT->isOpenArray())
-          return std::nullopt; // known only when the routine runs
+        if (AT->isArrayOfConst() || AT->isOpenArray() || AT->isDynArray())
+          return std::nullopt; // known only when the program runs
         if (auto *SS = llvm::dyn_cast<ShortStringType>(AT))
           return Constant{T, ConstValue::ordinal(IsHigh ? SS->getMaxLength() : 0)};
         if (auto *A = llvm::dyn_cast<ArrayType>(AT))
@@ -1158,6 +1165,19 @@ class Checker : public StmtVisitor<Checker>,
     switch (TS->getKind()) {
     case TypeSpec::TS_ArrayOfConst:
       return ArrayOfConstTy;
+    case TypeSpec::TS_DynArray: {
+      auto *DS = llvm::cast<DynArrayTypeSpec>(TS);
+      Type *Elem = resolveType(DS->getElement());
+      if (Elem->isError())
+        return errorType();
+      if (containsFile(Elem)) {
+        Diags.error(DS->getElement()->getBeginLoc(),
+                    "the elements of a dynamic array cannot be files",
+                    {DS->getElement()->getRange()});
+        return errorType();
+      }
+      return Ctx.getDynArrayType(Elem);
+    }
     case TypeSpec::TS_OpenArray: {
       auto *OS = llvm::cast<OpenArrayTypeSpec>(TS);
       Type *Elem = resolveType(OS->getElement());
@@ -1349,8 +1369,9 @@ class Checker : public StmtVisitor<Checker>,
       }
       if (isManaged(Elem)) {
         Diags.error(FS->getElement()->getBeginLoc(),
-                    Elem->isAnsiString()
-                        ? "the components of a file cannot be ansistrings"
+                    Elem->isAnsiString() ? "the components of a file cannot be ansistrings"
+                    : Elem->isDynArray()
+                        ? "the components of a file cannot be dynamic arrays"
                         : "the components of a file cannot be COM interfaces",
                     {FS->getElement()->getRange()});
         return errorType();
@@ -1488,6 +1509,8 @@ class Checker : public StmtVisitor<Checker>,
           Diags.error(All[I]->getLocation(),
                       All[I]->getType()->isAnsiString()
                           ? "a variant part cannot contain ansistrings"
+                      : All[I]->getType()->isDynArray()
+                          ? "a variant part cannot contain dynamic arrays"
                           : "a variant part cannot contain COM interfaces",
                       {All[I]->getName().getRange()});
           OK = false;
@@ -2853,7 +2876,7 @@ class Checker : public StmtVisitor<Checker>,
       return false;
     }
 
-    if (isMethodPointer(T)) { // only nil, as in Free Pascal
+    if (isMethodPointer(T) || T->isDynArray()) { // only nil
       if (llvm::isa<NilExpr>(Init)) {
         check(Init);
         return true;
@@ -3359,6 +3382,8 @@ class Checker : public StmtVisitor<Checker>,
       return true;
     if (auto *AT = llvm::dyn_cast<ArrayType>(A))
       return AT->getElementType() == Elem;
+    if (auto *DA = llvm::dyn_cast<DynArrayType>(A))
+      return DA->getElementType() == Elem;
     return Elem->isChar() &&
            (A->isStringLiteral() || (A->getBase()->isChar() && fold(Arg)));
   }
@@ -4201,7 +4226,10 @@ class Checker : public StmtVisitor<Checker>,
         continue;
       }
       Type *PT = P->getType();
-      Type *AT = PT && llvm::isa<AddrOfExpr>(Arg) ? checkValueFor(PT, Arg) : check(Arg);
+      Type *AT = PT && (llvm::isa<AddrOfExpr>(Arg) ||
+                        (PT->isDynArray() && llvm::isa<SetCtorExpr>(Arg)))
+                     ? checkValueFor(PT, Arg)
+                     : check(Arg);
       if (AT->isError() || !PT || PT->isError())
         continue;
       const Identifier &PName = P->getName();
@@ -4481,9 +4509,42 @@ class Checker : public StmtVisitor<Checker>,
     }
   }
 
+  /// setlength(a, n, ...): a a dynamic array variable, one length for each
+  /// level of arrays of arrays that is set.
+  void checkDynSetLength(ProcCallStmt *S) {
+    auto Args = S->getArgs();
+    Type *T = Args[0]->getType();
+    if (!isVariableReference(Args[0]))
+      Diags.error(Args[0]->getBeginLoc(), "expected a dynamic array variable",
+                  {Args[0]->getRange()});
+    else
+      checkModifiable(Args[0]);
+    if (Args.size() < 2) {
+      Diags.error(S->getCallee().Loc,
+                  "'" + S->getCallee().Spelling + "' expects a length",
+                  {S->getRange()});
+      return;
+    }
+    for (size_t I = 1; I < Args.size(); ++I) {
+      Type *N = check(Args[I]);
+      if (!N->isError() && !N->isIntegerLike())
+        Diags.error(Args[I]->getBeginLoc(), "expected an integer",
+                    {Args[I]->getRange()});
+      if (!T->isDynArray()) {
+        Diags.error(Args[I]->getBeginLoc(),
+                    "more lengths than levels of dynamic arrays",
+                    {Args[I]->getRange()});
+        return;
+      }
+      T = llvm::cast<DynArrayType>(T)->getElementType();
+    }
+  }
+
   /// setlength(s, n): s a string variable, n an integer.
   void checkSetLength(ProcCallStmt *S) {
     auto Args = S->getArgs();
+    if (!Args.empty() && check(Args[0])->isDynArray())
+      return checkDynSetLength(S);
     if (Args.size() != 2) {
       Diags.error(S->getCallee().Loc,
                   "'" + S->getCallee().Spelling + "' expects 2 arguments",
@@ -4586,7 +4647,7 @@ class Checker : public StmtVisitor<Checker>,
       if (!Arity(1))
         return errorType();
       return ArgTypes[0]->isStringish() || ArgTypes[0]->isArrayOfConst() ||
-                     ArgTypes[0]->isOpenArray()
+                     ArgTypes[0]->isOpenArray() || ArgTypes[0]->isDynArray()
                  ? Ctx.getIntegerType()
                  : Bad(Args[0], "a string");
     case BuiltinKind::UpCase:
@@ -4602,6 +4663,17 @@ class Checker : public StmtVisitor<Checker>,
           return Bad(Args[I], "strings");
       return Ctx.getIntegerType();
     case BuiltinKind::Copy:
+      if (!ArgTypes.empty() && ArgTypes[0]->isDynArray()) {
+        // copy(a), copy(a, start), copy(a, start, count)
+        if (Args.size() > 3) {
+          Diags.error(Callee.Loc, "'copy' expects at most 3 arguments", {E->getRange()});
+          return errorType();
+        }
+        for (size_t I = 1; I < Args.size(); ++I)
+          if (!ArgTypes[I]->isIntegerLike())
+            return Bad(Args[I], "integer index and count");
+        return ArgTypes[0];
+      }
       if (!Arity(3))
         return errorType();
       if (!ArgTypes[0]->isStringish())
@@ -4789,7 +4861,8 @@ class Checker : public StmtVisitor<Checker>,
     if ((T->isOrdinal() && AT->isOrdinal()) ||
         (T->isPointer() &&
          (AT->isPointer() || AT->isNil() || AT->isClass() || AT->isAnsiString() ||
-          AT->isArrayOfConst())) ||
+          AT->isArrayOfConst() || AT->isDynArray())) ||
+        (T->isDynArray() && (AT->isDynArray() || AT->isPointer() || AT->isNil())) ||
         (T->isClass() && (AT->isClass() || AT->isPointer() || AT->isNil())) ||
         (T->isClassRef() && (AT->isClassRef() || AT->isNil())) ||
         (T->isInterface() &&
@@ -4861,6 +4934,16 @@ class Checker : public StmtVisitor<Checker>,
       Type *T = checkTypeOrValue(Args[0]);
       if (T->isError())
         return errorType();
+      if (T->isDynArray()) { // of a variable: its length is known at run time
+        auto *N = llvm::dyn_cast<NameRefExpr>(Args[0]);
+        if (N && llvm::isa_and_nonnull<TypeDecl>(Cur->lookup(N->getName().Name))) {
+          Diags.error(Args[0]->getBeginLoc(),
+                      "'" + Callee.Spelling + "' needs a dynamic array variable, not a type",
+                      {Args[0]->getRange()});
+          return errorType();
+        }
+        return Ctx.getIntegerType();
+      }
       if (T->isShortString() || T->isArrayOfConst() || T->isOpenArray())
         return Ctx.getIntegerType();
       if (auto *A = llvm::dyn_cast<ArrayType>(T))
@@ -4893,7 +4976,7 @@ class Checker : public StmtVisitor<Checker>,
       if (T->isError())
         return errorType();
       if (!T->isPointer() && !T->isClass() && !T->isInterface() &&
-          !llvm::isa<RoutineType>(T)) {
+          !T->isDynArray() && !llvm::isa<RoutineType>(T)) {
         Diags.error(Args[0]->getBeginLoc(),
                     "'assigned' expects a pointer or a procedural variable, not " +
                         quoted(T),
@@ -5965,7 +6048,7 @@ public:
       return Ctx.getBooleanType();
     if ((Op == BinaryOp::Eq || Op == BinaryOp::Ne) &&
         (L->isClass() || R->isClass() || L->isClassRef() || R->isClassRef() ||
-         L->isInterface() || R->isInterface()) &&
+         L->isInterface() || R->isInterface() || L->isDynArray() || R->isDynArray()) &&
         areCompatible(L, R))
       return Ctx.getBooleanType(); // objects and classes (objfpc)
 
@@ -6179,6 +6262,14 @@ public:
     Type *IT = check(E->getIndex());
     if (IT->isError())
       return errorType();
+    if (auto *DA = llvm::dyn_cast<DynArrayType>(BT)) { // a[0..high(a)]
+      if (!IT->isIntegerLike()) {
+        Diags.error(E->getIndex()->getBeginLoc(), "array index must be an integer",
+                    {E->getIndex()->getRange()});
+        return errorType();
+      }
+      return DA->getElementType();
+    }
     if (auto *OA = llvm::dyn_cast<OpenArrayType>(BT)) { // a[0..high(a)]
       if (!IT->isIntegerLike()) {
         Diags.error(E->getIndex()->getBeginLoc(), "array index must be an integer",
@@ -6301,7 +6392,34 @@ public:
   /// Checks a value assigned to a target of type TargetTy. A procedural
   /// variable named as the value of a procedural target is copied, not
   /// called.
+  /// [a, b, c] given to a dynamic array of type T.
+  Type *checkDynArrayCtor(SetCtorExpr *S, DynArrayType *T) {
+    Type *Elem = T->getElementType();
+    for (const SetElement &El : S->getElements()) {
+      if (El.Hi) {
+        Diags.error(El.Hi->getBeginLoc(),
+                    "a range cannot be an element of a dynamic array",
+                    {El.Hi->getRange()});
+        continue;
+      }
+      Type *AT = checkValueFor(Elem, El.Lo);
+      if (AT->isError())
+        continue;
+      if (!isAssignable(Elem, AT) && !isPCharLiteral(Elem, El.Lo) &&
+          !convertImplicitly(El.Lo, Elem))
+        Diags.error(El.Lo->getBeginLoc(),
+                    "a value of type " + quoted(AT) +
+                        " cannot be an element of a dynamic array of " + quoted(Elem),
+                    {El.Lo->getRange()});
+    }
+    S->setType(T);
+    return T;
+  }
+
   Type *checkValueFor(Type *TargetTy, Expr *Value) {
+    if (auto *DA = llvm::dyn_cast<DynArrayType>(TargetTy))
+      if (auto *S = llvm::dyn_cast<SetCtorExpr>(Value))
+        return checkDynArrayCtor(S, DA);
     if (auto *TP = llvm::dyn_cast<PointerType>(TargetTy);
         TP && TP->isUntyped() && llvm::isa<AddrOfExpr>(Value)) {
       AddrOfWantsCode = true;

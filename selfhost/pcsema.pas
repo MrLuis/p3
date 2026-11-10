@@ -1125,6 +1125,9 @@ begin
   if ((a^.kind = tyClass) and (b^.kind = tyNil)) or
      ((a^.kind = tyNil) and (b^.kind = tyClass)) then
     exit(true);
+  if ((a^.kind = tyDynArray) and (b^.kind = tyNil)) or
+     ((a^.kind = tyNil) and (b^.kind = tyDynArray)) then
+    exit(true);
   if ((a^.kind = tyClassRef) and (b^.kind = tyNil)) or
      ((a^.kind = tyNil) and (b^.kind = tyClassRef)) then
     exit(true);
@@ -1161,6 +1164,8 @@ function isAssignable(target, value: PType): boolean;
 begin
   if (target^.kind = tyOpenArray) or (value^.kind = tyOpenArray) then
     exit(false); { only passed along and indexed }
+  if (target^.kind = tyDynArray) and (target <> value) then
+    exit(value^.kind = tyNil);
   if containsFile(target) or containsFile(value) then
     exit(false); { files cannot be copied }
   if target = value then
@@ -1244,7 +1249,10 @@ begin
       else
         isVariableReference := isVariableReference(e^.base);
     nkIndex:
-      isVariableReference := (e^.idxProp = nil) and isVariableReference(e^.base);
+      if (e^.base^.typ <> nil) and (e^.base^.typ^.kind = tyDynArray) then
+        isVariableReference := e^.idxProp = nil { on the heap, like p^ }
+      else
+        isVariableReference := (e^.idxProp = nil) and isVariableReference(e^.base);
     nkDeref:
       isVariableReference := true; { p^ is a variable even for a call's result }
     nkCall:
@@ -1262,7 +1270,8 @@ begin
     case e^.kind of
       nkIndex:
         begin
-          if e^.idxProp <> nil then
+          { (a dynamic array's elements are not the parameter) }
+          if (e^.idxProp <> nil) or (e^.base^.typ^.kind = tyDynArray) then
             exit(nil);
           e := e^.base;
         end;
@@ -1574,8 +1583,8 @@ begin
         if (bk = bkLow) or (bk = bkHigh) then
         begin
           at := PNode(listGet(e^.args, 0))^.typ;
-          if at^.kind in [tyArrayOfConst, tyOpenArray] then
-            exit; { known only when the routine runs }
+          if at^.kind in [tyArrayOfConst, tyOpenArray, tyDynArray] then
+            exit; { known only when the program runs }
           if at^.kind = tyShortString then
           begin
             if bk = bkHigh then
@@ -1748,6 +1757,8 @@ begin
       begin
         if f^.fieldType^.kind = tyAnsiString then
           ms('a variant part cannot contain ansistrings')
+        else if f^.fieldType^.kind = tyDynArray then
+          ms('a variant part cannot contain dynamic arrays')
         else
           ms('a variant part cannot contain COM interfaces');
         errR(f^.loc, identRange(f^.ident));
@@ -1782,6 +1793,19 @@ begin
   case ts^.kind of
     tsArrayOfConst:
       buildType := arrayOfConstT;
+    tsDynArray:
+      begin
+        elem := resolveType(ts^.dynSpec, nil);
+        if isError(elem) then
+          exit;
+        if containsFile(elem) then
+        begin
+          ms('the elements of a dynamic array cannot be files');
+          errR(ts^.dynSpec^.b, specRange(ts^.dynSpec));
+          exit;
+        end;
+        buildType := dynArrayType(elem);
+      end;
     tsOpenArray:
       begin
         elem := resolveType(ts^.openSpec, nil);
@@ -1985,6 +2009,8 @@ begin
         begin
           if elem^.kind = tyAnsiString then
             ms('the components of a file cannot be ansistrings')
+          else if elem^.kind = tyDynArray then
+            ms('the components of a file cannot be dynamic arrays')
           else
             ms('the components of a file cannot be COM interfaces');
           errR(ts^.elemSpec^.b, specRange(ts^.elemSpec));
@@ -4017,7 +4043,7 @@ begin
     exit;
   end;
 
-  if isMethodPointer(t) then { only nil, as in Free Pascal }
+  if isMethodPointer(t) or (t^.kind = tyDynArray) then { only nil }
   begin
     if init^.kind = nkNil then
     begin
@@ -4920,6 +4946,8 @@ begin
     exit(true);
   if a^.kind = tyArray then
     exit(a^.elementType = oa^.openElement);
+  if a^.kind = tyDynArray then
+    exit(a^.dynElement = oa^.openElement);
   fitsOpenArray := (oa^.openElement^.kind = tyChar) and
                    ((a^.kind = tyStringLit) or ((getBase(a)^.kind = tyChar) and fold(arg, c)));
 end;
@@ -6045,7 +6073,8 @@ begin
       continue;
     end;
     pt := p^.varType;
-    if (pt <> nil) and (arg^.kind = nkAddrOf) then
+    if (pt <> nil) and ((arg^.kind = nkAddrOf) or
+                        ((pt^.kind = tyDynArray) and (arg^.kind = nkSetCtor))) then
       at := checkValueFor(pt, arg)
     else
       at := check(arg);

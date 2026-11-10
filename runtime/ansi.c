@@ -212,3 +212,133 @@ void __pas_str_setlength(unsigned char *s, int32_t maxlen, int32_t len) {
     memset(s + 1 + s[0], 0, (size_t)(len - s[0]));
   s[0] = (unsigned char)len;
 }
+
+/*===- Dynamic arrays -------------------------------------------------------===*/
+
+typedef struct DynHeader {
+  int64_t refs;
+  int64_t length;
+  const PasDynInfo *info;
+  int64_t pad; /* keeps the elements 16-byte aligned, as malloc's block */
+} DynHeader;
+
+#define DYN_HEADER(a) ((DynHeader *)(void *)((char *)(a) - sizeof(DynHeader)))
+
+static size_t dyn_size(const PasDynInfo *info, int64_t count) {
+  return sizeof(DynHeader) + (size_t)count * (size_t)info->elem_size;
+}
+
+void *__pas_dyn_new(const PasDynInfo *info, int64_t count) {
+  if (count == 0)
+    return NULL;
+  DynHeader *h = calloc(1, dyn_size(info, count));
+  if (!h)
+    __pas_runtime_error("out of memory in a dynamic array");
+  h->refs = 1;
+  h->length = count;
+  h->info = info;
+  return h + 1;
+}
+
+int64_t __pas_dyn_length(const void *a) {
+  return a ? DYN_HEADER(a)->length : 0;
+}
+
+void __pas_dyn_addref(void *a) {
+  if (a)
+    DYN_HEADER(a)->refs++;
+}
+
+static void dyn_fini(const PasDynInfo *info, char *elems, int64_t from, int64_t to) {
+  if (info->fini)
+    for (int64_t i = from; i < to; ++i)
+      info->fini(elems + i * info->elem_size);
+}
+
+static void dyn_release(void *a) {
+  if (!a)
+    return;
+  DynHeader *h = DYN_HEADER(a);
+  if (--h->refs != 0)
+    return;
+  dyn_fini(h->info, a, 0, h->length);
+  free(h);
+}
+
+void __pas_dyn_clear(void **a) {
+  void *old = *a;
+  *a = NULL;
+  dyn_release(old);
+}
+
+void __pas_dyn_assign(void **dst, void *src) {
+  __pas_dyn_addref(src);
+  void *old = *dst;
+  *dst = src;
+  dyn_release(old);
+}
+
+/* A new array with the first count elements of a (which has at least
+ * that many), each counted once more. */
+static void *dyn_duplicate(const void *a, int64_t from, int64_t count, int64_t size,
+                           const PasDynInfo *info) {
+  char *copy = __pas_dyn_new(info, size);
+  if (count > 0)
+    memcpy(copy, (const char *)a + from * info->elem_size,
+           (size_t)count * (size_t)info->elem_size);
+  if (info->addref)
+    for (int64_t i = 0; i < count; ++i)
+      info->addref(copy + i * info->elem_size);
+  return copy;
+}
+
+void __pas_dyn_setlength(void **a, const PasDynInfo *info, int64_t count) {
+  if (count < 0)
+    __pas_runtime_error("invalid length of a dynamic array");
+  void *old = *a;
+  if (count == 0) {
+    __pas_dyn_clear(a);
+    return;
+  }
+  if (!old) {
+    *a = __pas_dyn_new(info, count);
+    return;
+  }
+  DynHeader *h = DYN_HEADER(old);
+  if (h->refs > 1) { /* shared: this variable gets its own */
+    *a = dyn_duplicate(old, 0, count < h->length ? count : h->length, count, info);
+    h->refs--;
+    return;
+  }
+  int64_t length = h->length;
+  if (count == length)
+    return;
+  dyn_fini(info, old, count, length);
+  h = realloc(h, dyn_size(info, count));
+  if (!h)
+    __pas_runtime_error("out of memory in a dynamic array");
+  h->length = count;
+  if (count > length)
+    memset((char *)(h + 1) + length * info->elem_size, 0,
+           (size_t)(count - length) * (size_t)info->elem_size);
+  *a = h + 1;
+}
+
+void *__pas_dyn_copy(const void *a, int64_t start, int64_t count) {
+  if (!a)
+    return NULL;
+  const DynHeader *h = DYN_HEADER(a);
+  if (start < 0) { /* as in Free Pascal: the count starts at the given index */
+    count += start;
+    start = 0;
+  }
+  if (start >= h->length || count <= 0)
+    return NULL;
+  if (count > h->length - start)
+    count = h->length - start;
+  return dyn_duplicate(a, start, count, count, h->info);
+}
+
+int32_t __pas_dyn_bad_index(const void *a, int64_t index) {
+  return index < 0 || index >= __pas_dyn_length(a);
+}

@@ -106,6 +106,26 @@ void __pas_write_pstr(PasFile *f, const unsigned char *s, int32_t width);
 void __pas_read_str(PasFile *f, unsigned char *dst, int32_t maxlen);
 
 /*===- Ansistrings (ansi.c) -------------------------------------------------===*/
+/* Dynamic arrays: a value is NULL (empty) or a pointer to the elements,
+ * preceded by a header (reference count, length, element info). Elements
+ * start zeroed. The compiler emits one PasDynInfo per element type; fini and
+ * addref are NULL unless the elements hold managed values. */
+typedef struct PasDynInfo {
+  int64_t elem_size;
+  void (*fini)(void *elem);
+  void (*addref)(void *elem);
+} PasDynInfo;
+void *__pas_dyn_new(const PasDynInfo *info, int64_t count);
+int64_t __pas_dyn_length(const void *a);
+void __pas_dyn_addref(void *a);
+void __pas_dyn_clear(void **a);
+void __pas_dyn_assign(void **dst, void *src);
+void __pas_dyn_setlength(void **a, const PasDynInfo *info, int64_t count);
+/* A new array of up to count elements from index start (clamped). */
+void *__pas_dyn_copy(const void *a, int64_t start, int64_t count);
+/* Nonzero if index is outside the array. */
+int32_t __pas_dyn_bad_index(const void *a, int64_t index);
+
 void __pas_astr_addref(char *s);
 void __pas_astr_assign(char **dst, char *src);
 void __pas_astr_clear(char **p);

@@ -1735,6 +1735,13 @@ TypeSpec *Parser::parseSimpleType() {
 // arrayType = "array" "[" simpleType { "," simpleType } "]" "of" type .
 TypeSpec *Parser::parseArrayType(SourceLocation Start, bool Packed) {
   consumeToken(); // 'array'
+  if (Tok.is(tok::kw_of) && LangOpts.Mode != LangMode::ISO) { // Turbo/FPC
+    consumeToken();
+    TypeSpec *Elem = parseType();
+    if (!Elem)
+      return nullptr;
+    return Ctx.create<DynArrayTypeSpec>(SourceRange(Start, PrevTokEnd), Elem);
+  }
   SourceLocation LBrack = Tok.getLocation();
   if (!expect(tok::l_square, "after 'array'"))
     return nullptr;

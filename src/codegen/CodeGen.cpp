@@ -243,6 +243,15 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
   /// Classes whose cleanup functions (releasing their own fields' COM
   /// interfaces) are to be emitted.
   std::vector<std::pair<ClassType *, llvm::Function *>> CleanupsToEmit;
+  /// Dynamic arrays: the PasDynInfo of each array type, and the functions
+  /// that release or count an element, to be emitted.
+  llvm::DenseMap<Type *, llvm::GlobalVariable *> DynInfos;
+  struct DynOp {
+    Type *Elem;
+    llvm::Function *F;
+    bool IsFini;
+  };
+  std::vector<DynOp> DynOpsToEmit;
 
   // Debug information (-g).
   std::unique_ptr<llvm::DIBuilder> DIB;
@@ -442,6 +451,7 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
       return llvm::StructType::get(B.getPtrTy(), B.getPtrTy());
     case Type::TK_Interface: // {object, method table}
       return llvm::StructType::get(B.getPtrTy(), B.getPtrTy());
+    case Type::TK_DynArray: // its elements, or null when empty
     case Type::TK_OpenArray: // its {data, count} pair
     case Type::TK_ArrayOfConst: // its header slot
     case Type::TK_AnsiString: // its characters, or null when empty
@@ -842,6 +852,10 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
       llvm::Value *Data = emitAddress(Arg);
       return newOpenDescriptor(Data, B.getInt64(Bd.Hi - Bd.Lo + 1));
     }
+    if (T->isDynArray()) {
+      llvm::Value *Data = visitExpr(Arg);
+      return newOpenDescriptor(Data, dynLength(Data));
+    }
     if (T->isStringLiteral())
       return newOpenDescriptor(emitAddress(Arg), B.getInt64(T->getStringLength()));
     llvm::Value *C = createTemp(B.getInt8Ty(), "chr"); // a char constant
@@ -1017,6 +1031,8 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
       Type *T = Args[0]->getType();
       if (T->isOpenArray())
         return B.CreateTrunc(openCount(openDescriptor(Args[0])), B.getInt32Ty());
+      if (T->isDynArray())
+        return B.CreateTrunc(dynLength(visitExpr(Args[0])), B.getInt32Ty());
       if (T->isArrayOfConst())
         return B.CreateTrunc(B.CreateLoad(B.getInt64Ty(), visitExpr(Args[0])),
                              B.getInt32Ty());
@@ -1046,6 +1062,17 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
       }
       return B.CreateCall(RT.StrPos, {emitPStr(Args[0]), emitPStr(Args[1])});
     case BuiltinKind::Copy: {
+      if (Args[0]->getType()->isDynArray()) {
+        llvm::Value *A = visitExpr(Args[0]);
+        llvm::Value *Start = Args.size() > 1
+                                 ? toI64(visitExpr(Args[1]), Args[1]->getType())
+                                 : B.getInt64(0);
+        llvm::Value *Count = Args.size() > 2
+                                 ? toI64(visitExpr(Args[2]), Args[2]->getType())
+                                 : B.getInt64(INT64_MAX);
+        return holdResult(astrCall("__pas_dyn_copy", B.getPtrTy(), {A, Start, Count}),
+                          Args[0]->getType());
+      }
       if (Args[0]->getType()->isAnsiString()) {
         llvm::Value *S = visitExpr(Args[0]);
         llvm::Value *Index = emitI32(Args[1]);
@@ -1381,6 +1408,120 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
     return Slot;
   }
 
+  //===--------------------------------------------------------------------===//
+  // Dynamic arrays
+  //===--------------------------------------------------------------------===//
+
+  llvm::Value *dynLength(llvm::Value *A) {
+    return astrCall("__pas_dyn_length", B.getInt64Ty(), {A});
+  }
+
+  /// The constant PasDynInfo of arrays of type T (runtime/include/pascalrt.h);
+  /// for managed elements, with functions that release and count one.
+  llvm::Constant *dynInfoOf(DynArrayType *T) {
+    llvm::GlobalVariable *&G = DynInfos[T];
+    if (G)
+      return G;
+    Type *Elem = T->getElementType();
+    llvm::Constant *Fini = llvm::ConstantPointerNull::get(B.getPtrTy());
+    llvm::Constant *AddRef = Fini;
+    if (isManaged(Elem)) {
+      auto Op = [&](const char *Name, bool IsFini) {
+        auto *F = llvm::Function::Create(
+            llvm::FunctionType::get(B.getVoidTy(), {B.getPtrTy()}, false),
+            llvm::Function::InternalLinkage, Name, M);
+        F->getArg(0)->setName("elem");
+        DynOpsToEmit.push_back({Elem, F, IsFini});
+        return F;
+      };
+      Fini = Op("dyn.fini", true);
+      AddRef = Op("dyn.addref", false);
+    }
+    auto *Ty = llvm::StructType::get(B.getInt64Ty(), B.getPtrTy(), B.getPtrTy());
+    G = new llvm::GlobalVariable(
+        M, Ty, /*isConstant=*/true, llvm::GlobalValue::InternalLinkage,
+        llvm::ConstantStruct::get(Ty, {B.getInt64(sizeOf(Elem)), Fini, AddRef}),
+        "dyninfo");
+    return G;
+  }
+
+  void emitDynOp(Type *Elem, llvm::Function *F, bool IsFini) {
+    CurFn = F;
+    CurRoutine = nullptr;
+    CurFrame = nullptr;
+    CurPin = nullptr;
+    PinTemps = true;
+    CurSP = nullptr;
+    B.SetCurrentDebugLocation(llvm::DebugLoc());
+    B.SetInsertPoint(llvm::BasicBlock::Create(M.getContext(), "entry", F));
+    if (IsFini)
+      finalizeValue(F->getArg(0), Elem);
+    else
+      addRefValue(F->getArg(0), Elem);
+    B.CreateRetVoid();
+  }
+
+  /// The element functions of the array types used: last of all, as any
+  /// code, the main program's too, can be the first to use a type.
+  void emitDynOps() {
+    for (const DynOp &Op : DynOpsToEmit)
+      emitDynOp(Op.Elem, Op.F, Op.IsFini);
+    DynOpsToEmit.clear();
+  }
+
+  /// setlength of the array variable at Addr, of type T: Ns[0] elements,
+  /// each of them (arrays) set to the next lengths.
+  void emitDynSetLength(llvm::Value *Addr, DynArrayType *T,
+                        llvm::ArrayRef<llvm::Value *> Ns) {
+    llvm::Constant *Info = dynInfoOf(T);
+    astrCall("__pas_dyn_setlength", B.getVoidTy(), {Addr, Info, Ns[0]});
+    if (Ns.size() == 1)
+      return;
+    auto *Elem = llvm::cast<DynArrayType>(T->getElementType());
+    llvm::Value *Data = B.CreateLoad(B.getPtrTy(), Addr, "data");
+    llvm::BasicBlock *Pre = B.GetInsertBlock();
+    auto *Loop = newBlock("dim.loop");
+    auto *Done = newBlock("dim.done");
+    B.CreateCondBr(B.CreateICmpEQ(Ns[0], B.getInt64(0)), Done, Loop);
+    B.SetInsertPoint(Loop);
+    llvm::PHINode *I = B.CreatePHI(B.getInt64Ty(), 2, "i");
+    I->addIncoming(B.getInt64(0), Pre);
+    emitDynSetLength(B.CreateInBoundsGEP(B.getPtrTy(), Data, I), Elem,
+                     Ns.drop_front());
+    llvm::Value *Next = B.CreateAdd(I, B.getInt64(1));
+    I->addIncoming(Next, B.GetInsertBlock());
+    B.CreateCondBr(B.CreateICmpEQ(Next, Ns[0]), Done, Loop);
+    B.SetInsertPoint(Done);
+  }
+
+  /// [a, b, c] as a new dynamic array of type T.
+  llvm::Value *emitDynArrayCtor(SetCtorExpr *S, DynArrayType *T) {
+    auto Els = S->getElements();
+    if (Els.empty())
+      return llvm::ConstantPointerNull::get(B.getPtrTy());
+    Type *Elem = T->getElementType();
+    llvm::Constant *Info = dynInfoOf(T);
+    llvm::Value *Data = holdResult(
+        astrCall("__pas_dyn_new", B.getPtrTy(), {Info, B.getInt64(Els.size())}), T);
+    for (size_t I = 0; I < Els.size(); ++I) {
+      Expr *E = Els[I].Lo;
+      llvm::Value *Slot = B.CreateInBoundsGEP(memType(Elem), Data, B.getInt64(I));
+      if (auto *SS = llvm::dyn_cast<ShortStringType>(Elem))
+        emitStringAssign(Slot, SS, E);
+      else if (Elem->isAnsiString())
+        storeValue(Slot, emitAnsi(E), Elem);
+      else if (Elem->isStructured())
+        copyValue(Slot, emitAddress(E), Elem);
+      else if (llvm::Constant *C = cStringFor(Elem, E))
+        B.CreateStore(C, Slot);
+      else
+        storeValue(Slot,
+                   convertForAssign(visitExpr(E), E->getType(), Elem, E->getBeginLoc()),
+                   Elem);
+    }
+    return Data;
+  }
+
   /// Is V kept in its routine's frame record? Variables that nested
   /// routines use are, and those that must be in memory when an exception
   /// arrives through _longjmp: all of them in a routine where execution
@@ -1495,6 +1636,18 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
                            I->getIndex()->getBeginLoc());
         return B.CreateInBoundsGEP(memType(AC->getElementType()), A,
                                    B.CreateAdd(X, B.getInt64(1)));
+      }
+      if (I->getBase()->getType()->isDynArray()) {
+        Type *Elem = llvm::cast<DynArrayType>(I->getBase()->getType())->getElementType();
+        llvm::Value *Data = visitExpr(I->getBase());
+        llvm::Value *X = toI64(visitExpr(I->getIndex()), I->getIndex()->getType());
+        if (rangeChecks(I->getIndex()->getBeginLoc()))
+          emitRuntimeCheck(B.CreateICmpNE(astrCall("__pas_dyn_bad_index",
+                                                   B.getInt32Ty(), {Data, X}),
+                                          B.getInt32(0)),
+                           "array index out of bounds",
+                           I->getIndex()->getBeginLoc());
+        return B.CreateInBoundsGEP(memType(Elem), Data, X);
       }
       if (I->getBase()->getType()->isAnsiString()) {
         // An address may be written through: the string must be unshared,
@@ -1616,6 +1769,7 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
     case Type::TK_Char:    return DIB->createBasicType("char", 8, DW_ATE_unsigned_char);
     case Type::TK_Subrange:
       return debugType(llvm::cast<SubrangeType>(T)->getHost());
+    case Type::TK_DynArray:
     case Type::TK_OpenArray:
     case Type::TK_ArrayOfConst:
       return DIB->createPointerType(nullptr, 64);
@@ -2153,6 +2307,8 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
            Name == "__pas_reraise" || Name == "__pas_reraise_free" ||
            Name == "__pas_free_object" || Name == "__pas_free_instance" ||
            Name == "__pas_intf_assign" || Name == "__pas_intf_clear" ||
+           Name == "__pas_dyn_clear" || Name == "__pas_dyn_assign" ||
+           Name == "__pas_dyn_setlength" ||
            Name == "__pas_format_pstr";
   }
 
@@ -2522,7 +2678,7 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
       return Tmp;
     }
     if (ResultTy && isManaged(ResultTy))
-      return holdResult(Result);
+      return holdResult(Result, ResultTy);
     return Result;
   }
 
@@ -2772,6 +2928,10 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
       astrCall("__pas_astr_clear", B.getVoidTy(), {Addr});
       return;
     }
+    if (T->isDynArray()) {
+      astrCall("__pas_dyn_clear", B.getVoidTy(), {Addr});
+      return;
+    }
     if (T->isInterface()) {
       B.CreateCall(intfRuntime("__pas_intf_clear"), {Addr});
       return;
@@ -2802,6 +2962,11 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
     if (T->isAnsiString()) {
       astrCall("__pas_astr_addref", B.getVoidTy(),
                {B.CreateLoad(B.getPtrTy(), Addr, "s")});
+      return;
+    }
+    if (T->isDynArray()) {
+      astrCall("__pas_dyn_addref", B.getVoidTy(),
+               {B.CreateLoad(B.getPtrTy(), Addr, "a")});
       return;
     }
     if (T->isInterface()) {
@@ -2843,6 +3008,8 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
   void storeValue(llvm::Value *Addr, llvm::Value *V, Type *T) {
     if (T->isAnsiString())
       astrCall("__pas_astr_assign", B.getVoidTy(), {Addr, V});
+    else if (T->isDynArray())
+      astrCall("__pas_dyn_assign", B.getVoidTy(), {Addr, V});
     else if (isManaged(T))
       storeInterface(Addr, V);
     else
@@ -2858,13 +3025,18 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
   }
 
   /// A function's result V, a COM interface (a reference the caller now
-  /// holds): kept in a temporary until the statement ends.
-  llvm::Value *holdResult(llvm::Value *V) {
+  /// holds): kept in a temporary until the statement ends. T: its type, if
+  /// that may be a dynamic array.
+  llvm::Value *holdResult(llvm::Value *V, Type *T = nullptr) {
+    bool Dyn = T && T->isDynArray();
     llvm::IRBuilder<> Entry(&CurFn->getEntryBlock(),
                             CurFn->getEntryBlock().begin());
     llvm::Value *Slot = Entry.CreateAlloca(
-        V->getType(), nullptr, V->getType()->isPointerTy() ? "astr.tmp" : "intf.tmp");
+        V->getType(), nullptr,
+        Dyn ? "dyn.tmp" : V->getType()->isPointerTy() ? "astr.tmp" : "intf.tmp");
     Entry.CreateStore(llvm::Constant::getNullValue(V->getType()), Slot);
+    if (Dyn)
+      RecordTemps[Slot] = T;
     clearTemp(Slot); // a loop's previous
     if (PinTemps)
       pinInMemory(Slot);
@@ -3609,7 +3781,7 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
                                 : B.CreateICmpNE(LC, RC, "cmp");
     }
     if (LT->isPointer() || LT->isNil() || LT->isClass() || LT->isClassRef() ||
-        LT->isInterface()) { // interfaces: their objects
+        LT->isInterface() || LT->isDynArray()) { // interfaces: their objects
       llvm::Value *L = interfaceObject(visitExpr(E->getLHS()));
       llvm::Value *R = interfaceObject(visitExpr(E->getRHS()));
       return Op == BinaryOp::Eq ? B.CreateICmpEQ(L, R, "cmp")
@@ -3873,6 +4045,12 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
         llvm::Value *N = openCount(openDescriptor(E->getArgs()[0]));
         return B.CreateSub(B.CreateTrunc(N, B.getInt32Ty()), B.getInt32(1));
       }
+      if (AT->isDynArray()) {
+        if (!IsHigh)
+          return B.getInt32(0);
+        llvm::Value *N = dynLength(visitExpr(E->getArgs()[0]));
+        return B.CreateSub(B.CreateTrunc(N, B.getInt32Ty()), B.getInt32(1));
+      }
       if (AT->isArrayOfConst()) {
         if (!IsHigh)
           return B.getInt32(0);
@@ -4124,6 +4302,7 @@ public:
     B.SetInsertPoint(ExitBlock);
     B.CreateCall(RT.Fini);
     B.CreateRet(B.getInt32(0));
+    emitDynOps();
     if (DIB)
       DIB->finalize();
   }
@@ -4171,6 +4350,7 @@ public:
     B.CreateBr(ExitBlock);
     B.SetInsertPoint(ExitBlock);
     B.CreateRetVoid();
+    emitDynOps();
     if (DIB)
       DIB->finalize();
   }
@@ -4392,6 +4572,13 @@ public:
     case BuiltinKind::SetLength: {
       auto A = S->getArgs();
       llvm::Value *Addr = emitAddress(A[0]);
+      if (auto *DA = llvm::dyn_cast<DynArrayType>(A[0]->getType())) {
+        llvm::SmallVector<llvm::Value *, 2> Ns;
+        for (Expr *N : A.drop_front())
+          Ns.push_back(toI64(visitExpr(N), N->getType()));
+        emitDynSetLength(Addr, DA, Ns);
+        return;
+      }
       llvm::Value *N = emitI32(A[1]);
       if (A[0]->getType()->isAnsiString())
         astrCall("__pas_astr_setlength", B.getVoidTy(), {Addr, N});
@@ -5246,7 +5433,11 @@ public:
     return loadScalar(emitAddress(E), E->getType());
   }
 
-  llvm::Value *visitSetCtorExpr(SetCtorExpr *E) { return emitSetCtor(E); }
+  llvm::Value *visitSetCtorExpr(SetCtorExpr *E) {
+    if (auto *DA = llvm::dyn_cast_or_null<DynArrayType>(E->getType()))
+      return emitDynArrayCtor(E, DA);
+    return emitSetCtor(E);
+  }
 
   llvm::Value *visitIndexExpr(IndexExpr *E) {
     if (E->getProperty())

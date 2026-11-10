@@ -383,6 +383,13 @@ class ASTPrinter : public StmtVisitor<ASTPrinter>,
       line("NamedTypeSpec '") << llvm::cast<NamedTypeSpec>(TS)->getName().Name << '\'';
       loc(TS->getBeginLoc());
       return;
+    case TypeSpec::TS_DynArray: {
+      line("DynArrayTypeSpec");
+      loc(TS->getBeginLoc());
+      IndentScope I(Indent);
+      printTypeSpec(llvm::cast<DynArrayTypeSpec>(TS)->getElement());
+      return;
+    }
     case TypeSpec::TS_OpenArray: {
       line("OpenArrayTypeSpec");
       loc(TS->getBeginLoc());

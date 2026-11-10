@@ -55,6 +55,7 @@ public:
     TK_AnsiString, ///< ansistring: a reference-counted pointer to chars
     TK_ArrayOfConst, ///< a parameter's `array of const`: TVarRec elements
     TK_OpenArray, ///< a parameter's `array of T`
+    TK_DynArray, ///< a dynamic array (Turbo/FPC): a counted reference
     TK_Class,    ///< class ... end (objfpc): a reference to an object
     TK_ClassRef, ///< class of T (objfpc): a reference to a class (its VMT)
     TK_Interface, ///< interface ... end (objfpc): {object, method table}
@@ -90,6 +91,7 @@ public:
   bool isAnsiString() const { return Kind == TK_AnsiString; }
   bool isArrayOfConst() const { return Kind == TK_ArrayOfConst; }
   bool isOpenArray() const { return Kind == TK_OpenArray; }
+  bool isDynArray() const { return Kind == TK_DynArray; }
   bool isClass() const { return Kind == TK_Class; }
   bool isClassRef() const { return Kind == TK_ClassRef; }
   bool isInterface() const { return Kind == TK_Interface; }
@@ -107,7 +109,7 @@ public:
   /// Types a function may return (ISO 6.6.2: simple or pointer; classes).
   bool isValidResultType() const {
     return isSimple() || isPointer() || isClass() || isClassRef() ||
-           isInterface() || isAnsiString();
+           isInterface() || isAnsiString() || isDynArray();
   }
   bool isStructured() const { return isArray() || isRecord() || isShortString(); }
 
@@ -305,6 +307,17 @@ class AnsiStringType final : public Type {
 public:
   AnsiStringType() : Type(TK_AnsiString) {}
   static bool classof(const Type *T) { return T->getKind() == TK_AnsiString; }
+};
+
+/// `array of T` as a variable's type (Turbo/FPC): indexed from 0, its length
+/// set at run time; a variable holds a reference counted one.
+class DynArrayType final : public Type {
+  Type *Element;
+
+public:
+  explicit DynArrayType(Type *Element) : Type(TK_DynArray), Element(Element) {}
+  Type *getElementType() const { return Element; }
+  static bool classof(const Type *T) { return T->getKind() == TK_DynArray; }
 };
 
 /// A parameter's `array of T` (Turbo/FPC): passed as a {data, count} pair.

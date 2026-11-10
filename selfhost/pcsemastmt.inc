@@ -313,11 +313,60 @@ end;
 
 { delete(var s, index, count) / insert(source, var s, index) }
 { setlength(s, n): s a string variable, n an integer. }
+{ setlength(a, n, ...): a a dynamic array variable, one length for each
+  level of arrays of arrays that is set. }
+procedure checkDynSetLength(s: PNode);
+var
+  a0, ai: PNode;
+  t, n: PType;
+  i: longint;
+begin
+  a0 := PNode(listGet(s^.args, 0));
+  t := a0^.typ;
+  if not isVariableReference(a0) then
+  begin
+    ms('expected a dynamic array variable');
+    errR(a0^.b, nodeRange(a0));
+  end
+  else
+    checkModifiable(a0);
+  if s^.args.count < 2 then
+  begin
+    ms('');
+    maCallee(s^.callee);
+    ma(' expects a length');
+    errR(s^.callee.loc, nodeRange(s));
+    exit;
+  end;
+  for i := 1 to s^.args.count - 1 do
+  begin
+    ai := PNode(listGet(s^.args, i));
+    n := check(ai);
+    if not isError(n) and not isIntegerLike(n) then
+    begin
+      ms('expected an integer');
+      errR(ai^.b, nodeRange(ai));
+    end;
+    if t^.kind <> tyDynArray then
+    begin
+      ms('more lengths than levels of dynamic arrays');
+      errR(ai^.b, nodeRange(ai));
+      exit;
+    end;
+    t := t^.dynElement;
+  end;
+end;
+
 procedure checkSetLength(s: PNode);
 var
   a0, a1: PNode;
   t, n: PType;
 begin
+  if (s^.args.count > 0) and (check(PNode(listGet(s^.args, 0)))^.kind = tyDynArray) then
+  begin
+    checkDynSetLength(s);
+    exit;
+  end;
   if s^.args.count <> 2 then
   begin
     ms('');
@@ -627,7 +676,8 @@ begin
       begin
         if not arity(1) then
           exit;
-        if isStringish(argType(e, 0)) or (argType(e, 0)^.kind in [tyArrayOfConst, tyOpenArray]) then
+        if isStringish(argType(e, 0)) or
+           (argType(e, 0)^.kind in [tyArrayOfConst, tyOpenArray, tyDynArray]) then
           checkStringFunction := tyIntegerT
         else
           checkStringFunction := bad(argNode(e, 0), 'a string');
@@ -652,6 +702,20 @@ begin
       end;
     bkCopy:
       begin
+        if (e^.args.count > 0) and (argType(e, 0)^.kind = tyDynArray) then
+        begin
+          { copy(a), copy(a, start), copy(a, start, count) }
+          if e^.args.count > 3 then
+          begin
+            ms('''copy'' expects at most 3 arguments');
+            errR(e^.callee.loc, nodeRange(e));
+            exit;
+          end;
+          for i := 1 to e^.args.count - 1 do
+            if not isIntegerLike(argType(e, i)) then
+              exit(bad(argNode(e, i), 'integer index and count'));
+          exit(argType(e, 0));
+        end;
         if not arity(3) then
           exit;
         if not isStringish(argType(e, 0)) then
@@ -889,7 +953,9 @@ begin
   if (t^.kind = tyShortString) and isStringish(at) then
     exit(t);
   if (isOrdinal(t) and isOrdinal(at)) or
-     ((t^.kind = tyPointer) and (at^.kind in [tyPointer, tyNil, tyClass, tyAnsiString, tyArrayOfConst])) or
+     ((t^.kind = tyPointer) and (at^.kind in [tyPointer, tyNil, tyClass, tyAnsiString, tyArrayOfConst,
+                                              tyDynArray])) or
+     ((t^.kind = tyDynArray) and (at^.kind in [tyDynArray, tyPointer, tyNil])) or
      ((t^.kind = tyClass) and (at^.kind in [tyClass, tyPointer, tyNil])) or
      ((t^.kind = tyClassRef) and (at^.kind in [tyClassRef, tyNil])) or
      ((t^.kind = tyInterface) and
@@ -988,7 +1054,16 @@ begin
         t := checkTypeOrValue(a0);
         if isError(t) then
           exit;
-        if t^.kind in [tyShortString, tyArrayOfConst, tyOpenArray] then
+        if (t^.kind = tyDynArray) and (a0^.kind = nkNameRef) and (lookup(a0^.ref.name) <> nil) and
+           (lookup(a0^.ref.name)^.kind = dkType) then
+        begin
+          ms('');
+          maCallee(e^.callee);
+          ma(' needs a dynamic array variable, not a type');
+          errR(a0^.b, nodeRange(a0));
+          exit;
+        end;
+        if t^.kind in [tyShortString, tyArrayOfConst, tyOpenArray, tyDynArray] then
           res := tyIntegerT
         else if t^.kind = tyArray then
           res := t^.indexType
@@ -1029,7 +1104,8 @@ begin
         if isError(t) then
           exit;
         if (t^.kind <> tyPointer) and (t^.kind <> tyClass) and
-           (t^.kind <> tyInterface) and (t^.kind <> tyRoutine) then
+           (t^.kind <> tyInterface) and (t^.kind <> tyRoutine) and
+           (t^.kind <> tyDynArray) then
         begin
           ms('''assigned'' expects a pointer or a procedural variable, not ');
           maT(t);
@@ -2086,11 +2162,47 @@ end;
 
 { A procedural variable named as the value of a procedural target is
   copied, not called. }
+{ [a, b, c] given to a dynamic array of type t. }
+function checkDynArrayCtor(s: PNode; t: PType): PType;
+var
+  i: longint;
+  el: PSetElement;
+  elemT, at: PType;
+begin
+  elemT := t^.dynElement;
+  for i := 0 to s^.setElems.count - 1 do
+  begin
+    el := PSetElement(listGet(s^.setElems, i));
+    if el^.hi <> nil then
+    begin
+      ms('a range cannot be an element of a dynamic array');
+      errR(el^.hi^.b, nodeRange(el^.hi));
+      continue;
+    end;
+    at := checkValueFor(elemT, el^.lo);
+    if isError(at) then
+      continue;
+    if not isAssignable(elemT, at) and not isPCharLiteral(elemT, el^.lo) and
+       not convertImplicitly(el^.lo, elemT) then
+    begin
+      ms('a value of type ');
+      maT(at);
+      ma(' cannot be an element of a dynamic array of ');
+      maT(elemT);
+      errR(el^.lo^.b, nodeRange(el^.lo));
+    end;
+  end;
+  s^.typ := t;
+  checkDynArrayCtor := t;
+end;
+
 function checkValueFor(targetTy: PType; value: PNode): PType;
 var
   v: PDecl;
   saved: PType;
 begin
+  if (targetTy^.kind = tyDynArray) and (value^.kind = nkSetCtor) then
+    exit(checkDynArrayCtor(value, targetTy));
   if (targetTy^.kind = tyPointer) and targetTy^.untyped and (value^.kind = nkAddrOf) then
   begin
     addrOfWantsCode := true;
@@ -2805,8 +2917,8 @@ begin
      (areCompatible(l, r) or ((l^.kind = tyNil) and (r^.kind = tyNil))) then
     exit(tyBooleanT);
   if (op in [boEq, boNe]) and
-     ((l^.kind in [tyClass, tyClassRef, tyInterface]) or
-      (r^.kind in [tyClass, tyClassRef, tyInterface])) and
+     ((l^.kind in [tyClass, tyClassRef, tyInterface, tyDynArray]) or
+      (r^.kind in [tyClass, tyClassRef, tyInterface, tyDynArray])) and
      areCompatible(l, r) then
     exit(tyBooleanT); { objects and classes (objfpc) }
 
@@ -3082,6 +3194,17 @@ begin
   it := check(e^.index);
   if isError(it) then
     exit;
+  if bt^.kind = tyDynArray then
+  begin
+    { a[0..high(a)] }
+    if not isIntegerLike(it) then
+    begin
+      ms('array index must be an integer');
+      errR(e^.index^.b, nodeRange(e^.index));
+      exit;
+    end;
+    exit(bt^.dynElement);
+  end;
   if bt^.kind = tyOpenArray then
   begin
     { a[0..high(a)] }

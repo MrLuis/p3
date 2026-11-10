@@ -806,7 +806,8 @@ public:
     TS_File, TS_Routine, TS_String, TS_Class, TS_ClassRef, TS_Interface,
     TS_Untyped,
     TS_ArrayOfConst,
-    TS_OpenArray
+    TS_OpenArray,
+    TS_DynArray
   };
 
 private:
@@ -965,6 +966,17 @@ public:
   Expr *getMaxLength() const { return MaxLen; }
   bool isLong() const { return Long; }
   static bool classof(const TypeSpec *T) { return T->getKind() == TS_String; }
+};
+
+/// `array of T` outside a parameter list: a dynamic array (Turbo/FPC).
+class DynArrayTypeSpec final : public TypeSpec {
+  TypeSpec *Element;
+
+public:
+  DynArrayTypeSpec(SourceRange R, TypeSpec *Element)
+      : TypeSpec(TS_DynArray, R), Element(Element) {}
+  TypeSpec *getElement() const { return Element; }
+  static bool classof(const TypeSpec *T) { return T->getKind() == TS_DynArray; }
 };
 
 /// A parameter's `array of T`.

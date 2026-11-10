@@ -88,7 +88,7 @@ bool pcc::containsInterface(Type *T) {
 }
 
 bool pcc::isManaged(Type *T) {
-  if (T->isAnsiString())
+  if (T->isAnsiString() || T->isDynArray())
     return true;
   if (auto *O = llvm::dyn_cast<OpenArrayType>(T))
     return isManaged(O->getElementType());
@@ -218,6 +218,8 @@ std::string Type::getName() const {
     return "nil";
   case TK_Untyped:
     return "untyped";
+  case TK_DynArray:
+    return "array of " + llvm::cast<DynArrayType>(this)->getElementType()->getName();
   case TK_OpenArray:
     return "array of " + llvm::cast<OpenArrayType>(this)->getElementType()->getName();
   case TK_ArrayOfConst:

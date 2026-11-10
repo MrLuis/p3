@@ -63,7 +63,7 @@ type
 
   TTypeKind = (tyError, tyInteger, tyReal, tyBoolean, tyChar, tyEnum,
                tySubrange, tyStringLit, tyArray, tyRecord, tyPointer, tyNil,
-               tySet, tyFile, tyRoutine, tyShortString, tyAnsiString, tyArrayOfConst, tyOpenArray, tyClass, tyClassRef,
+               tySet, tyFile, tyRoutine, tyShortString, tyAnsiString, tyArrayOfConst, tyOpenArray, tyDynArray, tyClass, tyClassRef,
                tyInterface,
                { an untyped parameter's (Turbo/FPC  var x;  const x) }
                tyUntyped);
@@ -91,6 +91,7 @@ type
       tyShortString: (maxLength: longint);
       tyArrayOfConst: (aocElement: PType); { TVarRec }
       tyOpenArray: (openElement: PType);
+      tyDynArray: (dynElement: PType);
       { a class (objfpc): its parent (nil only for TObject), own members in
         source order, all fields (the ancestors' first), the virtual methods
         by slot, the program or unit declaring it; a forward declaration
@@ -242,7 +243,7 @@ type
                    tsPointer, tsSet, tsFile, tsRoutine, tsString, tsClass,
                    tsClassRef, tsInterface,
                    tsUntyped, { an untyped parameter's (absent) type }
-                   tsArrayOfConst, tsOpenArray);
+                   tsArrayOfConst, tsOpenArray, tsDynArray);
 
   PVariantPart = ^TVariantPart;
 
@@ -264,6 +265,7 @@ type
       tsRoutine: (rtIsFunction: boolean; rtParams: TPtrList; rtResult: PTypeSpec;
                   rtCallConv: longint; rtOfObject: boolean);
       tsOpenArray: (openSpec: PTypeSpec);
+      tsDynArray: (dynSpec: PTypeSpec);
       tsString: (maxLen: PNode; isLong: boolean); { nil for plain string; isLong: under H+ }
       { class (objfpc): the parent's name (nil name: TObject), the members
         (fields, method headings, properties) in source order }

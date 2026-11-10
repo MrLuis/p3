@@ -51,6 +51,7 @@ function stringLiteralType(len: int64): PType;
 function shortStringType(maxLen: longint): PType;
 function ansiStringType: PType;
 function openArrayType(element: PType): PType;
+function dynArrayType(element: PType): PType;
 { The type of a method pointer: procedure ... of object. }
 function newMethodPointerType(const params: TPtrList; result_: PType; cdecl_: boolean): PType;
 
@@ -104,7 +105,7 @@ var
   nextTypeId: longint;
   setTypes, stringLitTypes, shortStringTypes: TIntMap;
   theAnsiString: PType;
-  openArrayTypes: TPtrList; { one for each element type }
+  openArrayTypes, dynArrayTypes: TPtrList; { one for each element type }
 
 function newType(kind: TTypeKind): PType;
 var
@@ -304,6 +305,7 @@ begin
   mapInit(shortStringTypes);
   theAnsiString := newType(tyAnsiString);
   listInit(openArrayTypes);
+  listInit(dynArrayTypes);
   tyErrorT := newType(tyError);
   tyIntegerT := newIntegerType(32, true, 'integer');
   tyInt64T := newIntegerType(64, true, 'int64');
@@ -381,6 +383,23 @@ begin
   ansiStringType := theAnsiString;
 end;
 
+function dynArrayType(element: PType): PType;
+var
+  i: longint;
+  t: PType;
+begin
+  for i := 0 to dynArrayTypes.count - 1 do
+  begin
+    t := PType(listGet(dynArrayTypes, i));
+    if t^.dynElement = element then
+      exit(t);
+  end;
+  t := newType(tyDynArray);
+  t^.dynElement := element;
+  listAdd(dynArrayTypes, t);
+  dynArrayType := t;
+end;
+
 function openArrayType(element: PType): PType;
 var
   i: longint;
@@ -423,7 +442,8 @@ end;
 function isValidResultType(t: PType): boolean;
 begin
   isValidResultType := isSimple(t) or
-                       (t^.kind in [tyPointer, tyClass, tyClassRef, tyInterface, tyAnsiString]);
+                       (t^.kind in [tyPointer, tyClass, tyClassRef, tyInterface, tyAnsiString,
+                                    tyDynArray]);
 end;
 
 function isStructured(t: PType): boolean;
@@ -560,6 +580,7 @@ begin
     tyInterface: isManaged := t^.intfCOM;
     tyAnsiString: isManaged := true;
     tyOpenArray: isManaged := isManaged(t^.openElement);
+    tyDynArray: isManaged := true;
     tyArray: isManaged := isManaged(t^.elementType);
     tyRecord:
       begin
@@ -815,6 +836,11 @@ begin
       begin
         bufAdd(b, 'array of ');
         bufAddTypeName(b, t^.openElement);
+      end;
+    tyDynArray:
+      begin
+        bufAdd(b, 'array of ');
+        bufAddTypeName(b, t^.dynElement);
       end;
     tyShortString:
       if t^.maxLength = 255 then

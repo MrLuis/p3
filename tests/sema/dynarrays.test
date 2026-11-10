@@ -1,0 +1,33 @@
+; Dynamic arrays (not in --mode=iso): `array of T` outside a parameter list.
+; RUN: not %pcc --mode=objfpc -ferror-limit=0 -c %S/Inputs/dynarrays/errors.pas -o %t.o 2>&1 | FileCheck %s
+; CHECK: errors.pas:4:17: error: the elements of a dynamic array cannot be files
+; CHECK: errors.pas:5:19: error: the components of a file cannot be dynamic arrays
+; CHECK: errors.pas:8:14: error: a variant part cannot contain dynamic arrays
+; CHECK: errors.pas:12:12: error: a parenthesized list cannot initialize 'TI'
+; CHECK: errors.pas:18:3: error: 'setlength' expects a length
+; CHECK: errors.pas:19:16: error: expected an integer
+; CHECK: errors.pas:20:19: error: more lengths than levels of dynamic arrays
+; CHECK: errors.pas:21:22: error: more lengths than levels of dynamic arrays
+; CHECK: errors.pas:22:13: error: expected a dynamic array variable
+; CHECK: errors.pas:23:5: error: array index must be an integer
+; CHECK: errors.pas:24:5: error: assigning to 'TI' from incompatible type 'integer'
+; CHECK: errors.pas:25:5: error: assigning to 'TI' from incompatible type 'array of string'
+; CHECK: errors.pas:26:8: error: invalid operands to '<' ('TI' and 'TI')
+; CHECK: errors.pas:27:16: error: 'high' needs a dynamic array variable, not a type
+; CHECK: errors.pas:28:15: error: 'low' needs a dynamic array variable, not a type
+; CHECK: errors.pas:29:16: error: 'copy' expects integer index and count
+; CHECK: errors.pas:30:8: error: 'copy' expects at most 3 arguments
+; CHECK: errors.pas:31:12: error: a value of type 'char' cannot be an element of a dynamic array of 'integer'
+; CHECK: errors.pas:32:12: error: a range cannot be an element of a dynamic array
+; CHECK: errors.pas:33:9: error: a value of type 'integer' cannot be an element of a dynamic array of 'TI'
+; CHECK: errors.pas:34:11: error: cannot write a value of type 'TI'
+; CHECK-NOT: error:
+; RUN: not %pcc --mode=iso -c %S/Inputs/dynarrays/iso.pas -o %t.o 2>&1 | FileCheck --check-prefix=ISO %s
+; ISO: iso.pas:2:13: error: expected '[' after 'array'
+; RUN: %pcc --mode=tp --emit-parse-tree %S/Inputs/dynarrays/tree.pas | FileCheck --check-prefix=TREE %s
+; TREE:      DynArrayTypeSpec <3:8>
+; TREE-NEXT:   NamedTypeSpec 'longint' <3:17>
+; TREE:      DynArrayTypeSpec <6:6>
+; TREE-NEXT:   DynArrayTypeSpec <6:15>
+; RUN: %pcc --mode=tp --emit-ast %S/Inputs/dynarrays/tree.pas 2>/dev/null | FileCheck --check-prefix=AST %s
+; AST:       VarDecl 'm' : array of array of byte <6:3>

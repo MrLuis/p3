@@ -598,6 +598,34 @@ begin
   storeScalar(addr, irCast('trunc', wide, regType(t), ''), t);
 end;
 
+{ setlength of the array variable at addr, of type t: ns[idx] elements,
+  each of them (arrays) set to the next lengths. }
+procedure emitDynSetLength(const addr: TV; t: PType; const ns: TPtrList; idx: longint);
+var
+  info, n, data, i, next: TV;
+  pre, loopB, doneB: PIRBlock;
+  phi: PIRInst;
+begin
+  info := dynInfoOf(t);
+  n := PTVBox(listGet(ns, idx))^;
+  astrV3('__pas_dyn_setlength', 'ptr,ptr,i64', addr, info, n);
+  if idx = ns.count - 1 then
+    exit;
+  data := irLoad(irPtrT, addr, 'data');
+  pre := irInsertBlock;
+  loopB := irNewBlock('dim.loop');
+  doneB := irNewBlock('dim.done');
+  irCondBr(irICmp('eq', n, i64c(0), ''), doneB, loopB, false);
+  irSetInsertPoint(loopB);
+  i := irPhi(irI64, 'i', phi);
+  irAddIncoming(phi, i64c(0), pre);
+  emitDynSetLength(irGEP1(irPtrT, data, i, true, ''), t^.dynElement, ns, idx + 1);
+  next := irBin('add', i, i64c(1), '');
+  irAddIncoming(phi, next, irInsertBlock);
+  irCondBr(irICmp('eq', next, n, ''), doneB, loopB, false);
+  irSetInsertPoint(doneB);
+end;
+
 procedure visitProcCall(s: PNode);
 var
   d: PDecl;
@@ -606,6 +634,8 @@ var
   arg, countE: PNode;
   isFill: boolean;
   pointee: PType;
+  dims: TPtrList; { of PTVBox: setlength's lengths }
+  i: longint;
 begin
   if s^.callValue <> nil then { a procedural field or property }
   begin
@@ -667,6 +697,16 @@ begin
       begin
         arg := PNode(listGet(s^.args, 0));
         a0 := emitAddress(arg);
+        if arg^.typ^.kind = tyDynArray then
+        begin
+          listInit(dims);
+          for i := 1 to s^.args.count - 1 do
+            listAdd(dims, irBox(toI64(visitExpr(PNode(listGet(s^.args, i))),
+                                      PNode(listGet(s^.args, i))^.typ)));
+          emitDynSetLength(a0, arg^.typ, dims, 0);
+          listFree(dims);
+          exit;
+        end;
         a1 := emitI32(PNode(listGet(s^.args, 1)));
         if arg^.typ^.kind = tyAnsiString then
           astrV2('__pas_astr_setlength', 'ptr,i32', a0, a1)
@@ -1978,6 +2018,34 @@ begin
   irRetVoid;
 end;
 
+{ The element functions of the array types used: last of all, as any
+  code, the main program's too, can be the first to use a type. }
+procedure emitDynOps;
+var
+  k: longint;
+  f: PIRFunc;
+  elem: PType;
+begin
+  for k := 0 to dynOpFns.count - 1 do
+  begin
+    f := PIRFunc(listGet(dynOpFns, k));
+    elem := PType(listGet(dynOpElems, k));
+    curFn := f;
+    curRoutine := nil;
+    curSP := nil;
+    irBeginBody(f);
+    irSetDebugLoc(nil);
+    irSetInsertPoint(irNewBlock('entry'));
+    if k mod 2 = 0 then
+      finalizeValue(irArg(f, 0), elem)
+    else
+      addRefValue(irArg(f, 0), elem);
+    irRetVoid;
+  end;
+  listClear(dynOpFns);
+  listClear(dynOpElems);
+end;
+
 procedure emitCleanups;
 var
   k: longint;
@@ -2368,6 +2436,9 @@ begin
   curRoutine := nil;
   pinFn := nil;
   pinTemps := true;
+  mapInit(dynInfos);
+  listInit(dynOpElems);
+  listInit(dynOpFns);
   mapInit(lowered);
   mapInit(stringConsts);
   mapInit(ansiConsts);
@@ -2473,6 +2544,7 @@ begin
   irBr(exitBlock);
   irSetInsertPoint(exitBlock);
   irRetVoid;
+  emitDynOps;
   if dbgOn then
     finalizeDebugInfo;
   irWriteModule(outText);
@@ -2534,6 +2606,7 @@ begin
   emitCleanups;
   emitCThunks;
   emitMainBody(prog, units, mainFn);
+  emitDynOps;
   if dbgOn then
     finalizeDebugInfo;
   irWriteModule(outText);

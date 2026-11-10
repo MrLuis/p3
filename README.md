@@ -331,6 +331,21 @@ strings, arrays, records). Program and unit variables start with their
 values; a routine's are set again whenever it is called (unlike typed
 constants, which keep their values between calls).
 
+**Dynamic arrays** (not in `--mode=iso`), as in Free Pascal: `array of T` outside a
+parameter list, indexed from 0, with `length` set at run time (`setlength(a,
+n)`, or `setlength(m, 2, 3)` for arrays of arrays); elements start zeroed. A
+variable holds a reference counted array: `b := a` shares it, and `setlength`
+or `copy(a [, start [, count]])` give a variable its own. `length`, `high`,
+`low`, `a = nil`, `a = b` (the same array), `assigned`, `sizeof` (a pointer)
+and typecasts to and from pointers work. Elements can be of any type but
+files, and are released with the array; arrays can be in records, classes and
+other arrays, passed by value, `var`, `const` and `out`, to open array
+parameters, and returned. `a := [1, 2, 3]` and an argument `[...]` build a new
+array. Indexes are checked with range checks on. Two `array of T` of one
+element type are the same type. Not supported: `insert`, `delete` and `concat`
+on arrays, `TA.Create(...)`, typed constants other than `nil`, types that
+contain themselves directly (`T = array of T`).
+
 **Default parameter values** (`--mode=objfpc`), as in Free Pascal:
 `procedure P(a: integer; b: integer = 1; const s: string = 'x');` can be called
 `P(0)` or `P(0, 2)`, and a function whose parameters all have defaults can be

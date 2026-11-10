@@ -2432,6 +2432,16 @@ var
 begin
   parseArrayType := nil;
   consumeToken; { 'array' }
+  if (tok.kind = tkKwOf) and (mode <> lmISO) then { Turbo/FPC: a dynamic array }
+  begin
+    consumeToken;
+    elem := parseType;
+    if elem = nil then
+      exit;
+    ts := newTypeSpec(tsDynArray, start, prevTokEnd);
+    ts^.dynSpec := elem;
+    exit(ts);
+  end;
   lbrack := tok.loc;
   if not expect(tkLSquare, 'after ''array''') then
     exit;

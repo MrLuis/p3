@@ -268,7 +268,7 @@ begin
     tyBoolean: buildDebugType := basicType('boolean', 8, 'DW_ATE_boolean');
     tyChar: buildDebugType := basicType('char', 8, 'DW_ATE_unsigned_char');
     tySubrange: buildDebugType := debugType(t^.host);
-    tyOpenArray, tyArrayOfConst: buildDebugType := pointerType(nil, 'DW_TAG_pointer_type');
+    tyDynArray, tyOpenArray, tyArrayOfConst: buildDebugType := pointerType(nil, 'DW_TAG_pointer_type');
     tyAnsiString:
       buildDebugType := pointerType(basicType('char', 8, 'DW_ATE_unsigned_char'),
                                     'DW_TAG_pointer_type');

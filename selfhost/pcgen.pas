@@ -73,6 +73,11 @@ var
     default at -O0); scalars, and what holds managed values or files,
     always do }
   optZeroInit: boolean;
+  { dynamic arrays: the PasDynInfo of each array type (type id -> PTVBox),
+    and the element functions to emit: for each type used, the element
+    type twice and the fini and addref functions }
+  dynInfos: TIntMap;
+  dynOpElems, dynOpFns: TPtrList;
   progDecl: PDecl;
   curRoutine: PDecl;         { nil while emitting main }
   curFn: PIRFunc;
@@ -231,6 +236,8 @@ begin
      (name <> '__pas_reraise') and (name <> '__pas_reraise_free') and
      (name <> '__pas_free_object') and (name <> '__pas_free_instance') and
      (name <> '__pas_intf_assign') and (name <> '__pas_intf_clear') and
+     (name <> '__pas_dyn_clear') and (name <> '__pas_dyn_assign') and
+     (name <> '__pas_dyn_setlength') and
      (name <> '__pas_format_pstr') then
     irSetNoRaise(ignored);
 end;
@@ -597,7 +604,7 @@ begin
     tyPointer, tyNil, tyFile: lowerType := irPtrT;
     tySet: lowerType := irI256;
     tyShortString: lowerType := irArray(t^.maxLength + 1, irI8);
-    tyAnsiString, tyArrayOfConst, tyOpenArray: lowerType := irPtrT;
+    tyAnsiString, tyArrayOfConst, tyOpenArray, tyDynArray: lowerType := irPtrT;
     tyRoutine: lowerType := routinePairT;
     tyClass: lowerType := irPtrT; { a reference to the object }
     tyClassRef: lowerType := irPtrT; { a reference to the class's VMT }
@@ -1351,6 +1358,7 @@ end;
 
 function classRuntime(const name, ret, params: string): PIRFunc; forward;
 function holdResult(const v: TV): TV; forward;
+function holdDynResult(const v: TV; t: PType): TV; forward;
 
 procedure astrV1(const name: string; const x: TV);
 var
@@ -1371,6 +1379,64 @@ var
   ignored: TV;
 begin
   ignored := call3(classRuntime(name, 'void', params), x, y, z, '');
+end;
+
+{ --- Dynamic arrays --- }
+
+function dynLength(const a: TV): TV;
+begin
+  dynLength := call1(classRuntime('__pas_dyn_length', 'i64', 'ptr'), a, '');
+end;
+
+{ The constant PasDynInfo of arrays of type t (runtime/include/pascalrt.h);
+  for managed elements, with functions that release and count one. }
+function dynInfoOf(t: PType): TV;
+var
+  b: PTVBox;
+  elem: PType;
+  fini, addRef, g: TV;
+  fields, elems: TPtrList;
+  ty: PIRType;
+
+  function op(const name: string): TV;
+  var
+    params: TPtrList;
+    f: PIRFunc;
+  begin
+    listInit(params);
+    listAdd(params, irPtrT);
+    f := irCreateFunction(name, 'internal', irVoidT, params);
+    listFree(params);
+    irSetArgName(f, 0, 'elem');
+    listAdd(dynOpElems, elem);
+    listAdd(dynOpFns, f);
+    op := irFuncRef(f);
+  end;
+
+begin
+  b := PTVBox(mapGet(dynInfos, t^.id));
+  if b <> nil then
+    exit(b^);
+  elem := t^.dynElement;
+  fini := irNull;
+  addRef := irNull;
+  if isManaged(elem) then
+  begin
+    fini := op('dyn.fini');
+    addRef := op('dyn.addref');
+  end;
+  listInit(fields);
+  listAdd(fields, irI64);
+  listAdd(fields, irPtrT);
+  listAdd(fields, irPtrT);
+  ty := irStructLit(fields);
+  listInit(elems);
+  listAdd(elems, irBox(i64c(sizeOf_(elem))));
+  listAdd(elems, irBox(fini));
+  listAdd(elems, irBox(addRef));
+  g := irGlobal('dyninfo', 'internal', ty, irConstStruct(ty, elems), true, false, false, 0);
+  mapPut(dynInfos, t^.id, irBox(g));
+  dynInfoOf := g;
 end;
 
 { A string constant as an ansistring: static characters after a header
@@ -1671,6 +1737,11 @@ begin
     data := emitAddress(arg);
     exit(newOpenDescriptor(data, i64c(bd.hi - bd.lo + 1)));
   end;
+  if t^.kind = tyDynArray then
+  begin
+    data := visitExpr(arg);
+    exit(newOpenDescriptor(data, dynLength(data)));
+  end;
   if t^.kind = tyStringLit then
   begin
     data := emitAddress(arg);
@@ -1711,6 +1782,8 @@ begin
         t := a0^.typ;
         if t^.kind = tyOpenArray then
           exit(irCast('trunc', openCount(openDescriptor(a0)), irI32, ''));
+        if t^.kind = tyDynArray then
+          exit(irCast('trunc', dynLength(visitExpr(a0)), irI32, ''));
         if t^.kind = tyArrayOfConst then
           exit(irCast('trunc', irLoad(irI64, visitExpr(a0), ''), irI32, ''));
         if t^.kind = tyAnsiString then
@@ -1754,6 +1827,20 @@ begin
       end;
     bkCopy:
       begin
+        if a0^.typ^.kind = tyDynArray then
+        begin
+          s0 := visitExpr(a0);
+          if e^.args.count > 1 then
+            s1 := toI64(visitExpr(PNode(listGet(e^.args, 1))), PNode(listGet(e^.args, 1))^.typ)
+          else
+            s1 := i64c(0);
+          if e^.args.count > 2 then
+            tmp := toI64(visitExpr(PNode(listGet(e^.args, 2))), PNode(listGet(e^.args, 2))^.typ)
+          else
+            tmp := i64c($7FFFFFFFFFFFFFFF);
+          exit(holdDynResult(call3(classRuntime('__pas_dyn_copy', 'ptr', 'ptr,i64,i64'),
+                                   s0, s1, tmp, ''), a0^.typ));
+        end;
         if a0^.typ^.kind = tyAnsiString then
         begin
           s0 := visitExpr(a0);
@@ -1957,6 +2044,18 @@ begin
       begin
         bt := e^.base^.typ;
         idxTy := e^.index^.typ;
+        if bt^.kind = tyDynArray then
+        begin
+          base := visitExpr(e^.base);
+          x := toI64(visitExpr(e^.index), idxTy);
+          if rangeChecks(e^.index^.b) then
+          begin
+            bad := call2(classRuntime('__pas_dyn_bad_index', 'i32', 'ptr,i64'), base, x, '');
+            bad := irICmp('ne', bad, i32c(0), '');
+            emitRuntimeCheck(bad, 'array index out of bounds', e^.index^.b);
+          end;
+          exit(irGEP1(memType(bt^.dynElement), base, x, true, ''));
+        end;
         if bt^.kind = tyOpenArray then
         begin
           base := emitAddress(e^.base);
@@ -2214,6 +2313,14 @@ begin
       end
       else
         astrV1('__pas_astr_clear', addr);
+    tyDynArray:
+      if addRef then
+      begin
+        obj := irLoad(irPtrT, addr, 'a');
+        astrV1('__pas_dyn_addref', obj);
+      end
+      else
+        astrV1('__pas_dyn_clear', addr);
     tyInterface:
       if addRef then
       begin
@@ -2300,6 +2407,8 @@ procedure storeValue(const addr, v: TV; t: PType);
 begin
   if t^.kind = tyAnsiString then
     astrV2('__pas_astr_assign', 'ptr,ptr', addr, v)
+  else if t^.kind = tyDynArray then
+    astrV2('__pas_dyn_assign', 'ptr,ptr', addr, v)
   else if isManaged(t) then
     storeInterface(addr, v)
   else
@@ -2336,6 +2445,24 @@ begin
   if curRoutine <> nil then
     listAdd(routineTemps, irBox(slot));
   holdResult := v;
+end;
+
+{ A dynamic array result v of type t, a reference the caller now holds:
+  kept in a temporary until the statement ends. }
+function holdDynResult(const v: TV; t: PType): TV;
+var
+  slot: TV;
+begin
+  slot := irCreateTempInit(v.t, 'dyn.tmp', irZero(v.t));
+  slot.agg := t;
+  clearTemp(slot); { a loop's previous }
+  if pinTemps then
+    pinInMemory(slot);
+  irStore(v, slot);
+  listAdd(liveTemps, irBox(slot));
+  if curRoutine <> nil then
+    listAdd(routineTemps, irBox(slot));
+  holdDynResult := v;
 end;
 
 { A function's record result v, holding ansistrings the caller now owns:
@@ -2557,6 +2684,8 @@ begin
     irStore(res, tmp);
     exit(tmp);
   end;
+  if (resTy <> nil) and (resTy^.kind = tyDynArray) then
+    exit(holdDynResult(res, resTy));
   if (resTy <> nil) and isManaged(resTy) then
     exit(holdResult(res));
   emitCallToSelf := res;
@@ -3641,7 +3770,7 @@ begin
       exit(irICmp('eq', l, r, 'cmp'));
     exit(irICmp('ne', l, r, 'cmp'));
   end;
-  if lt^.kind in [tyPointer, tyNil, tyClass, tyClassRef, tyInterface] then
+  if lt^.kind in [tyPointer, tyNil, tyClass, tyClassRef, tyInterface, tyDynArray] then
   begin { interfaces: their objects }
     l := interfaceObject(visitExpr(e^.lhs));
     r := interfaceObject(visitExpr(e^.rhs));
@@ -3806,6 +3935,13 @@ begin
     bkLow, bkHigh:
       begin
         t := PNode(listGet(e^.args, 0))^.typ;
+        if t^.kind = tyDynArray then
+        begin
+          if k = bkLow then
+            exit(i32c(0));
+          exit(irBin('sub', irCast('trunc', dynLength(visitExpr(PNode(listGet(e^.args, 0)))),
+                                   irI32, ''), i32c(1), ''));
+        end;
         if t^.kind = tyOpenArray then
         begin
           if k = bkLow then
@@ -4264,6 +4400,38 @@ begin
   emitMethodPointer := irInsert(pair, obj, 1, '');
 end;
 
+{ [a, b, c] as a new dynamic array of type t. }
+function emitDynArrayCtor(s: PNode; t: PType): TV;
+var
+  i: longint;
+  elemT: PType;
+  info, data, slot, cs: TV;
+  e: PNode;
+begin
+  if s^.setElems.count = 0 then
+    exit(irNull);
+  elemT := t^.dynElement;
+  info := dynInfoOf(t);
+  data := holdDynResult(call2(classRuntime('__pas_dyn_new', 'ptr', 'ptr,i64'), info,
+                              i64c(s^.setElems.count), ''), t);
+  for i := 0 to s^.setElems.count - 1 do
+  begin
+    e := PSetElement(listGet(s^.setElems, i))^.lo;
+    slot := irGEP1(memType(elemT), data, i64c(i), true, '');
+    if elemT^.kind = tyShortString then
+      emitStringAssign(slot, elemT, e)
+    else if elemT^.kind = tyAnsiString then
+      storeValue(slot, emitAnsi(e), elemT)
+    else if isStructured(elemT) then
+      copyValue(slot, emitAddress(e), elemT)
+    else if cStringFor(elemT, e, cs) then
+      irStore(cs, slot)
+    else
+      storeValue(slot, convertForAssign(visitExpr(e), e^.typ, elemT, e^.b), elemT);
+  end;
+  emitDynArrayCtor := data;
+end;
+
 function visitExprKind(e: PNode): TV;
 var
   noArgs: TPtrList;
@@ -4288,7 +4456,11 @@ begin
       else
         visitExprKind := emitAddress(e^.inner);
     nkNil: visitExprKind := irNull;
-    nkSetCtor: visitExprKind := emitSetCtor(e);
+    nkSetCtor:
+      if (e^.typ <> nil) and (e^.typ^.kind = tyDynArray) then
+        visitExprKind := emitDynArrayCtor(e, e^.typ)
+      else
+        visitExprKind := emitSetCtor(e);
     nkDeref, nkIndex:
       if (e^.kind = nkIndex) and (e^.idxProp <> nil) then
         visitExprKind := emitArrayPropertyRead(e)

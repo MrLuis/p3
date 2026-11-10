@@ -362,6 +362,14 @@ begin
         lineName('NamedTypeSpec ''', ts^.tname.name);
         loc(ts^.b);
       end;
+    tsDynArray:
+      begin
+        line('DynArrayTypeSpec');
+        loc(ts^.b);
+        indent := indent + 2;
+        printTypeSpec(ts^.dynSpec);
+        indent := indent - 2;
+      end;
     tsOpenArray:
       begin
         line('OpenArrayTypeSpec');
