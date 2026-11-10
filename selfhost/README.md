@@ -45,7 +45,8 @@ in process, with a target machine set up like the C++ pcc's; the default
 triple, data layout, host CPU and target checks come from LLVM too. It
 links like the C++ pcc (`$PCC_CC`, else clang-19, clang, cc or gcc) with
 `$PCC_RUNTIME_LIB`, else `../lib/libpascalrt.a` next to its executable; `-L`
-and `-l` add libraries. Its `--emit-llvm` output at `-O0` is byte-identical
+and `-l` add libraries. The unit library is `$PCC_UNIT_DIR`, else
+`../lib/pascal` next to its executable. Its `--emit-llvm` output at `-O0` is byte-identical
 to the C++ pcc's (SELFHOST.md S10), and so are `-S` and `-c` at `-O0`. At
 `-O1`-`-O3` the code can differ slightly: the C++ pcc optimizes the module it
 built in memory, the Pascal compiler one parsed from text, whose use lists

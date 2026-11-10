@@ -1,0 +1,16 @@
+; Array of const: where it can be used and what it can hold.
+; RUN: not %pcc --mode=objfpc -ferror-limit=0 --emit-ast %S/Inputs/arrayofconst/errors.pas 2>&1 | FileCheck %s
+; CHECK: errors.pas:8:11: error: constant value must be a constant
+; CHECK: errors.pas:11:10: error: array index must be an integer
+; CHECK: errors.pas:12:5: error: assigning to 'integer' from incompatible type 'array of const'
+; CHECK: errors.pas:18:9: error: a range cannot be an element of an array of const
+; CHECK: errors.pas:19:6: error: a value of type 'TColor' cannot be an element of an array of const
+; CHECK: errors.pas:20:6: error: a value of type 'TRec' cannot be an element of an array of const
+; CHECK: errors.pas:21:5: error: cannot pass a value of type 'integer' to parameter 'a' of type 'array of const'
+; CHECK: errors.pas:22:5: error: cannot pass a value of type 'integer' to parameter 'a' of type 'array of const'
+; CHECK: errors.pas:23:5: error: an array of const cannot be passed to a 'cdecl' routine
+; CHECK: errors.pas:24:17: error: 'high' expects an ordinal type, an array or a string, not 'TRec'
+; CHECK-NOT: error:
+;
+; RUN: not %pcc --emit-ast %S/Inputs/arrayofconst/iso.pas 2>&1 | FileCheck --check-prefix=ISO %s
+; ISO: iso.pas:2:{{[0-9]+}}: error: conformant array parameters are not supported yet

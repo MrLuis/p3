@@ -52,7 +52,7 @@ uint64_t Type::getStringLength() const {
 }
 
 bool Type::isStringish() const {
-  return isShortString() || isStringType() ||
+  return isShortString() || isAnsiString() || isStringType() ||
          const_cast<Type *>(this)->getBase()->isChar();
 }
 
@@ -74,7 +74,24 @@ bool pcc::containsFile(Type *T) {
   return false;
 }
 
+bool pcc::containsInterface(Type *T) {
+  if (auto *I = llvm::dyn_cast<InterfaceType>(T))
+    return I->isCOM();
+  if (auto *A = llvm::dyn_cast<ArrayType>(T))
+    return containsInterface(A->getElementType());
+  if (auto *R = llvm::dyn_cast<RecordType>(T)) {
+    for (FieldDecl *F : R->getAllFields())
+      if (F->getType() && containsInterface(F->getType()))
+        return true;
+  }
+  return false;
+}
+
 bool pcc::isManaged(Type *T) {
+  if (T->isAnsiString())
+    return true;
+  if (auto *O = llvm::dyn_cast<OpenArrayType>(T))
+    return isManaged(O->getElementType());
   if (auto *I = llvm::dyn_cast<InterfaceType>(T))
     return I->isCOM();
   if (auto *A = llvm::dyn_cast<ArrayType>(T))
@@ -201,6 +218,12 @@ std::string Type::getName() const {
     return "nil";
   case TK_Untyped:
     return "untyped";
+  case TK_OpenArray:
+    return "array of " + llvm::cast<OpenArrayType>(this)->getElementType()->getName();
+  case TK_ArrayOfConst:
+    return "array of const";
+  case TK_AnsiString:
+    return "ansistring";
   case TK_ShortString: {
     unsigned N = llvm::cast<ShortStringType>(this)->getMaxLength();
     return N == 255 ? "string" : "string[" + std::to_string(N) + "]";

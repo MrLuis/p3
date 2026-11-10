@@ -1,0 +1,18 @@
+
+int:1,int:-1,int:5,int:65535,i64:7,flt:2.5,flt:1.5,str:shrt,ans:an,ans:lit,ans:,chr:c,chr:z,bool:True,bool:False,pch:b,ptr:True,ptr:True
+obj:TFoo,cls:TFoo,cls:TObject
+foo: int:1,ans:two
+3-x
+<a b>2
+<none>0
+3
+constint
+1:AN1
+2:AN2
+3:AN3
+anx Y
+EMine m 1
+ESub n s
+EConvertError Invalid argument index in format "%d"
+EConvertError Invalid argument index in format "%q %d"
+09

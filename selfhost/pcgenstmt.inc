@@ -65,6 +65,12 @@ begin
       prec := emitI32(arg^.fmtPrecision);
   end;
   t := value^.typ;
+  if t^.kind = tyAnsiString then
+  begin
+    s := visitExpr(value);
+    astrV3('__pas_write_astr', 'ptr,ptr,i32', f, s, width);
+    exit;
+  end;
   if t^.kind = tyShortString then
   begin
     s := emitPStr(value);
@@ -123,6 +129,11 @@ var
 begin
   t := arg^.typ;
   addr := emitAddress(arg);
+  if t^.kind = tyAnsiString then
+  begin
+    astrV2('__pas_read_astr', 'ptr,ptr', f, addr);
+    exit;
+  end;
   if t^.kind = tyShortString then
   begin
     rtv3('__pas_read_str', f, addr, i32c(t^.maxLength));
@@ -410,6 +421,11 @@ begin
     emitStringAssign(addr, t, value);
     exit;
   end;
+  if t^.kind = tyAnsiString then
+  begin
+    storeValue(addr, emitAnsi(value), t);
+    exit;
+  end;
   if isStructured(t) then
   begin
     copyValue(addr, emitAddress(value), t);
@@ -446,6 +462,12 @@ begin
     emitStringAssign(emitAddress(target), tt, value);
     exit;
   end;
+  if tt^.kind = tyAnsiString then
+  begin
+    v := emitAnsi(value);
+    storeValue(emitAddress(target), v, tt);
+    exit;
+  end;
   if isStructured(tt) then
   begin
     dst := emitAddress(target);
@@ -476,10 +498,12 @@ begin
   addr := varAddress(res);
   if rt^.kind = tyShortString then
     emitStringAssign(addr, rt, value)
+  else if rt^.kind = tyAnsiString then
+    storeValue(addr, emitAnsi(value), rt)
   else if isStructured(rt) then
   begin
     src := emitAddress(value);
-    copyAggregate(addr, src, rt);
+    copyValue(addr, src, rt);
   end
   else
   begin
@@ -605,16 +629,37 @@ begin
                    listGet(loopBlocks, loopBlocks.count - 1));
         irSetInsertPoint(irNewBlock('after.jump')); { unreachable code follows }
       end;
+    bkSetLength:
+      begin
+        arg := PNode(listGet(s^.args, 0));
+        a0 := emitAddress(arg);
+        a1 := emitI32(PNode(listGet(s^.args, 1)));
+        if arg^.typ^.kind = tyAnsiString then
+          astrV2('__pas_astr_setlength', 'ptr,i32', a0, a1)
+        else
+          astrV3('__pas_str_setlength', 'ptr,i32,i32', a0, i32c(arg^.typ^.maxLength), a1);
+      end;
     bkDelete:
       begin
         a0 := emitAddress(PNode(listGet(s^.args, 0)));
         a1 := emitI32(PNode(listGet(s^.args, 1)));
         a2 := emitI32(PNode(listGet(s^.args, 2)));
-        rtv3('__pas_str_delete', a0, a1, a2);
+        if PNode(listGet(s^.args, 0))^.typ^.kind = tyAnsiString then
+          astrV3('__pas_astr_delete', 'ptr,i32,i32', a0, a1, a2)
+        else
+          rtv3('__pas_str_delete', a0, a1, a2);
       end;
     bkInsert:
       begin
         arg := PNode(listGet(s^.args, 1));
+        if arg^.typ^.kind = tyAnsiString then
+        begin
+          a0 := emitAnsi(PNode(listGet(s^.args, 0)));
+          a1 := emitAddress(arg);
+          a2 := emitI32(PNode(listGet(s^.args, 2)));
+          astrV3('__pas_astr_insert', 'ptr,ptr,i32', a0, a1, a2);
+          exit;
+        end;
         a0 := emitPStr(PNode(listGet(s^.args, 0)));
         a1 := emitAddress(arg);
         a2 := emitI32(PNode(listGet(s^.args, 2)));
@@ -1206,6 +1251,11 @@ begin
         x := c.intVal;
         scalarConstant := irConstDouble(x);
       end
+      else if t^.kind = tyAnsiString then
+      begin
+        ch := chr(c.intVal and 255);
+        scalarConstant := getAnsiConstant(PCharArray(@ch), 0, 1);
+      end
       else if t^.kind = tyShortString then
       begin
         { a char }
@@ -1215,7 +1265,11 @@ begin
       else
         scalarConstant := irConstInt(ty, c.intVal);
     ckReal: scalarConstant := irConstDouble(c.realVal);
-    ckString: scalarConstant := stringInit(c.strVal^.chars, 0, c.strVal^.len, ty, t);
+    ckString:
+      if t^.kind = tyAnsiString then
+        scalarConstant := getAnsiConstant(c.strVal^.chars, 0, c.strVal^.len)
+      else
+        scalarConstant := stringInit(c.strVal^.chars, 0, c.strVal^.len, ty, t);
   else
     scalarConstant := irZero(ty);
   end;
@@ -1891,7 +1945,7 @@ var
     for k := 0 to managedAddrs.count - 1 do
       finalizeValue(PTVBox(listGet(managedAddrs, k))^, PType(listGet(managedTypes, k)));
     for k := 0 to routineTemps.count - 1 do
-      intfCall1('__pas_intf_clear', PTVBox(listGet(routineTemps, k))^);
+      clearTemp(PTVBox(listGet(routineTemps, k))^);
   end;
 
 begin
@@ -1931,9 +1985,12 @@ begin
       copyAggregate(slot, arg, p^.varType) { value semantics }
     else
       storeScalar(slot, arg, p^.varType);
+    if (p^.varType^.kind = tyOpenArray) and not (p^.varKind in [vkVarParam, vkConstParam]) then
+      copyOpenArray(slot, p^.varType);
     { the variables holding COM interfaces: value parameters (one more
       reference each), then local variables (nil at first) }
-    if not isByRef(p) and (p^.varKind <> vkConstParam) and isManaged(p^.varType) then
+    if not isByRef(p) and not (p^.varKind in [vkConstParam, vkVarParam]) and
+       isManaged(p^.varType) then
     begin
       addRefValue(slot, p^.varType);
       listAdd(managedAddrs, irBox(slot));
@@ -2162,6 +2219,7 @@ begin
   curRoutine := nil;
   mapInit(lowered);
   mapInit(stringConsts);
+  mapInit(ansiConsts);
   mapInit(classLayouts);
   mapInit(vmts);
   mapInit(iids);

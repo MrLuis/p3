@@ -21,7 +21,7 @@ pcc-seed-<version>-<triple>, holding
   utils/seed.py bootstrap --seed <dir or .tar.gz> [--from binary|ir]
       [--work build/seed-bootstrap] [--llvm-config llvm-config-19]
       Bootstraps from a seed: no C++ pcc and no CMake. The runtime is
-      compiled from runtime/io.c with cc, the LLVM-specific parts come from
+      compiled from runtime/*.c with cc, the LLVM-specific parts come from
       llvm-config. Stage 1 is the seed's binary (or built from its IR with
       clang); stage 2 and stage 3 are built from selfhost/; stage 2 and
       stage 3 must write the same IR, and if the sources are those of the
@@ -155,15 +155,18 @@ def llvm_settings(llvm_config, include_out):
 
 
 def build_runtime(work):
-    """libpascalrt.a from runtime/io.c with the C compiler."""
+    """libpascalrt.a from runtime/*.c with the C compiler."""
     cc = os.environ.get("CC") or shutil.which("cc") or shutil.which("clang") or "gcc"
-    obj = os.path.join(work, "io.o")
+    objs = []
+    for name in ("io", "sys", "ansi", "format"):
+        obj = os.path.join(work, name + ".o")
+        run([cc, "-std=c11", "-O2", "-fPIC", "-I", os.path.join("runtime", "include"),
+             "-c", os.path.join("runtime", name + ".c"), "-o", obj])
+        objs.append(obj)
     lib = os.path.join(work, "libpascalrt.a")
-    run([cc, "-std=c11", "-O2", "-fPIC", "-I", os.path.join("runtime", "include"),
-         "-c", os.path.join("runtime", "io.c"), "-o", obj])
     if os.path.exists(lib):
         os.remove(lib)
-    run([shutil.which("ar") or "ar", "rcs", lib, obj])
+    run([shutil.which("ar") or "ar", "rcs", lib] + objs)
     return lib
 
 

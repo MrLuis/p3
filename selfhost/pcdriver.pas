@@ -24,6 +24,9 @@ function moduleLayout(const triple: string; var layout: string): boolean;
   output) at optimization level opt for triple. }
 function emitOutput(const ir: TBuf; const name: string; kind: TOutputKind; opt: longint;
                     const triple, path: string; const unitObjects: TPtrList): boolean;
+{ The directory of pcc's unit library, searched after -I directories:
+  $PCC_UNIT_DIR, else ../lib/pascal next to the executable. }
+function findUnitLibrary: string;
 { -l and -L options, passed to the linker. }
 procedure addLinkerArg(const arg: string);
 { --version }
@@ -162,6 +165,16 @@ begin
     exit(value);
   exe := sysExecutablePath;
   findRuntimeLibrary := removeDots(pathJoin(pathDirName(exe), '../lib/libpascalrt.a'));
+end;
+
+function findUnitLibrary: string;
+var
+  value, exe: string;
+begin
+  if sysGetEnv('PCC_UNIT_DIR', value) then
+    exit(value);
+  exe := sysExecutablePath;
+  findUnitLibrary := removeDots(pathJoin(pathDirName(exe), '../lib/pascal'));
 end;
 
 function validateTarget(var triple: string): boolean;

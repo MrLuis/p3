@@ -1,0 +1,30 @@
+; Ansistrings: what they cannot be and do; {$H+} chooses what `string` means.
+; RUN: not %pcc --mode=objfpc -ferror-limit=0 --emit-ast %S/Inputs/ansistrings/errors.pas 2>&1 | FileCheck %s
+; CHECK: errors.pas:5:14: error: a variant part cannot contain ansistrings
+; CHECK: errors.pas:8:16: error: the components of a file cannot be ansistrings
+; CHECK: errors.pas:12:{{[0-9]+}}: error: {{.*}}
+; CHECK: errors.pas:19:6: error:
+; CHECK: errors.pas:20:{{[0-9]+}}: error:
+; CHECK: errors.pas:21:{{[0-9]+}}: error:
+; CHECK: errors.pas:22:{{[0-9]+}}: error:
+; CHECK: errors.pas:23:13: error: expected a string variable
+; CHECK: errors.pas:24:3: error: 'setlength' expects 2 arguments
+; CHECK: errors.pas:25:16: error: expected an integer
+; CHECK: errors.pas:26:5: error: string index must be an integer
+; CHECK: errors.pas:27:{{[0-9]+}}: error: 'high' expects
+; CHECK: errors.pas:28:{{[0-9]+}}: error: invalid typecast from 'ansistring' to
+;
+; RUN: %pcc --mode=tp --emit-ast %S/Inputs/ansistrings/directives.pas | FileCheck --check-prefix=H %s
+; H: VarDecl 's0'{{.*}}string
+; H-NOT: ansistring
+; H: VarDecl 's1'{{.*}}ansistring
+; H: VarDecl 's2'{{.*}}string[5]
+; H: VarDecl 's3'{{.*}}string
+; H-NOT: ansistring
+; H: VarDecl 's4'{{.*}}ansistring
+; H: VarDecl 's5'{{.*}}string
+; H-NOT: ansistring
+;
+; Not in ISO mode.
+; RUN: not %pcc --emit-ast %S/Inputs/ansistrings/iso.pas 2>&1 | FileCheck --check-prefix=ISO %s
+; ISO: iso.pas:2:8: error: unknown type name 'ansistring'

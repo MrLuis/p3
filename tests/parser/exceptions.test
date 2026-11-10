@@ -1,8 +1,9 @@
 ; Exceptions (--mode=objfpc): the parse tree and the checked tree of try
 ; and raise statements, and syntax errors.
-; RUN: %pcc --mode=objfpc --emit-parse-tree %S/Inputs/exceptions.pas -o %t.tree
+; `uses sysutils` without the library: the dumps show only this program.
+; RUN: env PCC_UNIT_DIR=%t.nolib %pcc --mode=objfpc --emit-parse-tree %S/Inputs/exceptions.pas -o %t.tree
 ; RUN: diff %S/Inputs/exceptions.tree %t.tree
-; RUN: %pcc --mode=objfpc --emit-ast %S/Inputs/exceptions.pas -o %t.ast
+; RUN: env PCC_UNIT_DIR=%t.nolib %pcc --mode=objfpc --emit-ast %S/Inputs/exceptions.pas -o %t.ast
 ; RUN: diff %S/Inputs/exceptions.ast %t.ast
 
 ; RUN: not %pcc --mode=objfpc -ferror-limit=0 --emit-parse-tree %S/Inputs/exception-syntax.pas 2>&1 >/dev/null | FileCheck --check-prefix=SYNTAX %s

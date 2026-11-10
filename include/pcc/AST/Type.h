@@ -52,6 +52,9 @@ public:
     TK_File,     ///< file of T, text                            (M10)
     TK_Routine,  ///< a procedural/functional parameter's type   (M10)
     TK_ShortString, ///< Turbo/FPC string[N]: length byte + N chars (M12)
+    TK_AnsiString, ///< ansistring: a reference-counted pointer to chars
+    TK_ArrayOfConst, ///< a parameter's `array of const`: TVarRec elements
+    TK_OpenArray, ///< a parameter's `array of T`
     TK_Class,    ///< class ... end (objfpc): a reference to an object
     TK_ClassRef, ///< class of T (objfpc): a reference to a class (its VMT)
     TK_Interface, ///< interface ... end (objfpc): {object, method table}
@@ -84,11 +87,14 @@ public:
   bool isSet() const { return Kind == TK_Set; }
   bool isFile() const { return Kind == TK_File; }
   bool isShortString() const { return Kind == TK_ShortString; }
+  bool isAnsiString() const { return Kind == TK_AnsiString; }
+  bool isArrayOfConst() const { return Kind == TK_ArrayOfConst; }
+  bool isOpenArray() const { return Kind == TK_OpenArray; }
   bool isClass() const { return Kind == TK_Class; }
   bool isClassRef() const { return Kind == TK_ClassRef; }
   bool isInterface() const { return Kind == TK_Interface; }
-  /// Anything that converts to a short string: short strings, string types,
-  /// and chars (Turbo/FPC).
+  /// Anything that converts to a short string: short strings, ansistrings,
+  /// string types, and chars (Turbo/FPC).
   bool isStringish() const;
   bool isTextFile() const;
 
@@ -101,7 +107,7 @@ public:
   /// Types a function may return (ISO 6.6.2: simple or pointer; classes).
   bool isValidResultType() const {
     return isSimple() || isPointer() || isClass() || isClassRef() ||
-           isInterface();
+           isInterface() || isAnsiString();
   }
   bool isStructured() const { return isArray() || isRecord() || isShortString(); }
 
@@ -294,6 +300,34 @@ public:
   static bool classof(const Type *T) { return T->getKind() == TK_ShortString; }
 };
 
+/// ansistring: reference counted, any length; `string` under {$H+}.
+class AnsiStringType final : public Type {
+public:
+  AnsiStringType() : Type(TK_AnsiString) {}
+  static bool classof(const Type *T) { return T->getKind() == TK_AnsiString; }
+};
+
+/// A parameter's `array of T` (Turbo/FPC): passed as a {data, count} pair.
+class OpenArrayType final : public Type {
+  Type *Element;
+
+public:
+  explicit OpenArrayType(Type *Element) : Type(TK_OpenArray), Element(Element) {}
+  Type *getElementType() const { return Element; }
+  static bool classof(const Type *T) { return T->getKind() == TK_OpenArray; }
+};
+
+/// A parameter's `array of const` (Turbo/FPC): a count and TVarRec elements.
+class ArrayOfConstType final : public Type {
+  Type *Element;
+
+public:
+  explicit ArrayOfConstType(Type *Element)
+      : Type(TK_ArrayOfConst), Element(Element) {}
+  Type *getElementType() const { return Element; }
+  static bool classof(const Type *T) { return T->getKind() == TK_ArrayOfConst; }
+};
+
 /// The type of a procedural (Result == null) or functional parameter.
 class RoutineType final : public Type {
   llvm::ArrayRef<VarDecl *> Params;
@@ -445,9 +479,13 @@ inline bool needsStringCompare(Type *L, Type *R) {
 /// True if T is, or contains, a file type (files cannot be copied).
 bool containsFile(Type *T);
 
-/// True if T is, or contains, a COM interface (a reference-counted value:
+/// True if T is, or contains, a COM interface or an ansistring (a
+/// reference-counted value:
 /// managed by the compiled code when assigned, copied and finalized).
 bool isManaged(Type *T);
+
+/// True if T is, or contains, a COM interface.
+bool containsInterface(Type *T);
 
 /// Bounds of an ordinal type: integer [-2^31, 2^31-1] (other integer types
 /// by width and signedness), char [0, 255], boolean [0, 1], enum [0, N-1],

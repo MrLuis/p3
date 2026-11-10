@@ -211,6 +211,36 @@ pcc --mode=tp -I lib -fseparate-units main.pas -o main
 
 `-L dir` and `-l name` pass library options to the linker.
 
+### Unit library
+
+pcc ships units named and behaving like Free Pascal's, for Linux, macOS and
+64-bit Windows: `sysutils`, `strutils`, `math` and `classes` so far. `uses` finds them
+after the program's directory and the `-I` directories, so a unit of your own
+with the same name wins. They live in `<pcc dir>/../lib/pascal` (override with
+`PCC_UNIT_DIR`), built from `rtl/`; what differs between systems is in
+`runtime/sys.c`. Their output is checked against Free Pascal 3.2.2's.
+
+| Unit | Contents |
+|---|---|
+| `sysutils` | `Format`, `IntToStr`, `IntToHex`, `StrToInt[64][Def]`, `TryStrToInt[64]`, `FloatToStr`, `[Try]StrToFloat[Def]`, `BoolToStr`, `Trim[Left/Right]`, `Upper/LowerCase`, `CompareStr/Text`, `SameText`, `QuotedStr`, `StringReplace`, `IsDelimiter`, `LastDelimiter`, `StrPas`, `Extract*`, `ChangeFileExt`, path delimiter routines, `FileExists`, `DirectoryExists`, `DeleteFile`, `RenameFile`, `CreateDir`, `RemoveDir`, `ForceDirectories`, `Get/SetCurrentDir`, `GetEnvironmentVariable`, `Encode/DecodeDate/Time`, `IsLeapYear`, `DayOfWeek`, `Now`, `Date`, `Time`, `GetTickCount64`, `Sleep`, `EConvertError` |
+| `strutils` | `ReverseString`, `Left/Right/MidStr`, `DupeString`, `PadLeft/Right`, `AddChar[R]`, `Starts/Ends/ContainsStr/Text`, `AnsiStarts/Ends/ContainsStr`, `[Ansi]Index/MatchStr/Text`, `PosEx`, `ReplaceStr/Text`, `StuffString`, `Copy2Symb`, `Hex2Dec`, `Dec2Numb`, `IntToBin` |
+| `classes` | `TList` (`Add`, `Insert`, `Delete`, `Remove`, `Extract`, `Clear`, `IndexOf`, `First`, `Last`, `Exchange`, `Move`, `Pack`, `Sort`, `Expand`, `Notify`, `Items`, `Count`, `Capacity`, `List`), `TStrings` and `TStringList` (`Add`, `AddObject`, `AddPair`, `AddStrings`, `Append`, `Assign`, `Insert`, `InsertObject`, `Delete`, `Clear`, `Exchange`, `Move`, `IndexOf`, `IndexOfName`, `IndexOfObject`, `Find`, `Sort`, `CustomSort`, `Sorted`, `Duplicates`, `CaseSensitive`, `OwnsObjects`, `Strings`, `Objects`, `Names`, `Values`, `ValueFromIndex`, `Text`, `CommaText`, `DelimitedText`, `Delimiter`, `QuoteChar`, `NameValueSeparator`, `StrictDelimiter`, `LoadFromFile`, `SaveToFile`, `BeginUpdate`, `EndUpdate`), `TPersistent`, `EListError`, `EStringListError`, `EFOpenError`, `EFCreateError` |
+| `math` | `Sum`, `SumInt`, `Mean`, `MinValue`, `MaxValue`, `MinIntValue`, `MaxIntValue`, `Floor[64]`, `Ceil[64]`, `Power`, `IntPower`, `Log10/2/N`, `Hypot`, `FMod`, `Tan`, `Cotan`, `ArcSin/Cos/Tan2`, `Sinh/Cosh/Tanh`, `DegToRad`, `RadToDeg`, `IsNan`, `IsInfinite`, `Min`, `Max`, `Sign`, `InRange`, `EnsureRange` |
+
+`classes` needs `--mode=objfpc`; the others work in `--mode=tp` too. Overloads exist only in objfpc
+(the `double` forms of `Min`, `Max`, `Sign`, `InRange` and `EnsureRange`,
+`IntToHex(longint)`, two-parameter `BoolToStr` and `PosEx`); conversion
+failures raise `EConvertError` in objfpc and are runtime errors in tp.
+Differences from Free Pascal: `TStringList` has no `OnChange` events
+(no method pointers yet); `TryStrToInt` rejects values outside `longint`
+instead of wrapping them; `'.'` and `'e5'` are not valid floats; `math`
+domain errors give NaN or infinity instead of exceptions; `Format`, like the
+rest, uses 64-bit reals, so `%e` shows 15 digits. `Exception.CreateFmt` is
+predeclared with `Exception`. `Sum`, `Mean` and the like take `double` arrays
+only, where Free Pascal also has `single` and `extended` forms. With `-fseparate-units`,
+programs link the library's objects, which are built for the host in objfpc
+mode.
+
 **Inline routines**, as in Free Pascal: `function Sq(x: integer):
 integer; inline;` (also methods and record operators). The routine gets
 LLVM's `inlinehint`, so it is inlined from `-O1` up when LLVM can (not
@@ -279,6 +309,43 @@ strings, arrays, records). Program and unit variables start with their
 values; a routine's are set again whenever it is called (unlike typed
 constants, which keep their values between calls).
 
+**Ansistrings** (not in `--mode=iso`), as in Free Pascal: `ansistring` is
+a reference-counted string of any length, copied only when written to, and
+`{$H+}` (or `{$longstrings on}`) makes plain `string` mean `ansistring` until
+`{$H-}`, in that file. `shortstring` is always the 255-character kind, and
+`string[N]` stays short. They mix freely with short strings, chars and string
+constants in assignments, parameters, `+`, comparisons, `copy`, `pos`,
+`concat`, `delete`, `insert`, `length` and `write`/`readln` (`readln` takes
+the whole line); assigning one to a short string cuts it to fit. `setlength`
+works on both kinds. A pchar assigns to an ansistring, and `pchar(s)` gives
+the NUL-terminated characters (never nil); `ansistring(x)` converts
+explicitly. `s[i]` is 1..`length(s)`, checked with range checks on. Records,
+arrays, class fields, heap records and typed constants can hold them, and they
+are released when they go out of scope, also when an exception passes.
+Functions can return records that hold them. Not supported: in variant parts
+or in `file of`; and an
+`Exception.Message` longer than 255 characters (it is cut).
+
+**Array of const** (not in `--mode=iso`), as in Free Pascal: a parameter
+`const a: array of const` takes `[1, 'two', 3.0, obj, s]`, a list of values
+of different types, or another array of const passed along. Inside, `a[i]` is
+a predeclared `TVarRec` (`VType`, compared with `vtInteger`, `vtInt64`,
+`vtBoolean`, `vtChar`, `vtExtended`, `vtString`, `vtAnsiString`, `vtPChar`,
+`vtPointer`, `vtObject` and `vtClass`, and the fields `VInteger`, `VBoolean`,
+`VChar`, `VExtended`, `VString`, `VAnsiString`, `VPChar`, `VPointer`, `VInt64`,
+`VObject`, `VClass`), with `low(a)`, `high(a)` and `length(a)`; `string(p)` or
+`ansistring(p)` reads a `VAnsiString`. Not on `cdecl` routines (they are C
+variadics there; `varargs` is pcc's form).
+
+**Open arrays** (not in `--mode=iso`), as in Free Pascal: a parameter `a:
+array of T` (value, `const` or `var`) takes any array whose elements are
+exactly `T`, whatever its bounds, an open array passed along, or `[x, y, z]`,
+whose elements convert to `T`; string constants also fit `array of char`.
+Inside, it is indexed from 0 to `high(a)` (checked with range checks on), with
+`low(a)`, `high(a)`, `length(a)` and `sizeof(a)`. A value parameter gets its
+own copy, on the stack. An open array can only be indexed and passed on,
+not assigned. Not supported: `slice`, and open arrays on `cdecl` routines.
+
 **Conditional compilation** (every mode), as in Free Pascal:
 
 ```pascal
@@ -299,8 +366,10 @@ follow Pascal's precedence: integers (decimal, `$hex`), `'strings'`,
 `true`, `false`, `defined(NAME)`, macros, `not`, `* div mod and`,
 `+ - or`, and one comparison (`= <> < > <= >=`) or `in [a, b, lo..hi]`. `PCC` is
 predefined, and so is one of `PCC_ISO`, `PCC_TP` and `PCC_OBJFPC` (the
-mode). Each file (program or unit) starts with only these and the `-d`
-symbols; an include file shares its includer's symbols, and a conditional
+mode), along with Free Pascal's symbols for the target: `LINUX` and `UNIX`;
+`DARWIN`, `BSD` and `UNIX`; `WINDOWS`, `MSWINDOWS` and `WIN64`; `CPU64` with
+`CPUX86_64` and `CPUAMD64`, or `CPUAARCH64`. Each file (program or unit)
+starts with only these and the `-d` symbols; an include file shares its includer's symbols, and a conditional
 must end in the file that starts it. The text of a branch that is not
 compiled is only scanned for comments, strings and conditional
 directives. `$IFOPT` is not supported.
@@ -359,7 +428,8 @@ even? true
 - `lit` (`pip install lit`)
 - At run time, a C compiler driver (`clang` or `cc`) is used as the linker;
   override with `PCC_CC`. The runtime library is found at
-  `<pcc dir>/../lib/libpascalrt.a` (override with `PCC_RUNTIME_LIB`).
+  `<pcc dir>/../lib/libpascalrt.a` (override with `PCC_RUNTIME_LIB`), the
+  unit library at `<pcc dir>/../lib/pascal` (override with `PCC_UNIT_DIR`).
 
 ## Build & test
 
@@ -381,6 +451,52 @@ pcc --emit-ast hello.pas      # AST dump
 pcc --help                    # all options (-O0..3, -g, --target, --mode=iso|tp|objfpc, ...)
 ```
 
+### Project files (pcc.json)
+
+A project can keep its options in a `pcc.json` file, so that `pcc` alone
+builds it:
+
+```json
+{
+  "name": "hello",
+  "version": "1.0.0",
+  "main": "src/hello.pas",
+  "output": "bin/hello",
+  "mode": "objfpc",
+  "unitPaths": ["src/lib"],
+  "defines": ["DEBUG"],
+  "optimize": 2,
+  "warnings": { "unusedVariable": false }
+}
+```
+
+pcc looks for `pcc.json` in the input file's directory (the current
+directory when there is no input file) and then in its parents;
+`--project=<file>` names one and `--no-project` ignores it. Its settings are
+defaults: options on the command line override them (lists, such as unit
+paths and defines, are added after the command line's). Paths in it are
+relative to its directory. Without an input file, pcc builds `main` (into
+`output`, creating its directory, when building an executable).
+
+| Setting | Value | Command line |
+|---|---|---|
+| `name`, `version`, `description` | strings (for people and tools) | |
+| `main` | the program built when no input file is given | |
+| `output` | the executable built from `main` | `-o` |
+| `mode` | `"iso"`, `"tp"` or `"objfpc"` | `--mode` |
+| `unitPaths`, `libraryPaths` | arrays of directories | `-I`, `-L` |
+| `defines`, `libraries` | arrays of names | `-d`, `-l` |
+| `optimize` | 0 to 3 | `-O` |
+| `debug`, `separateUnits` | `true` / `false` | `-g`, `-fseparate-units` |
+| `target` | a target triple | `--target` |
+| `errorLimit` | an integer (0: no limit) | `-ferror-limit` |
+| `warnings` | `{ "asErrors", "unusedVariable", "deprecated" }`: `true` / `false` | `-Werror`, `-Wno-...` |
+| `checks` | `{ "range", "overflow" }`: `true` / `false` | `-fno-...-checks` |
+
+The file is strict JSON (strings up to 255 characters). Mistakes are
+reported like source errors (`pcc.json:3:15: error: 'optimize' must be an
+integer from 0 to 3`); an unknown setting is a warning.
+
 ## Layout
 
 | Path | Contents |
@@ -392,6 +508,7 @@ pcc --help                    # all options (-O0..3, -g, --target, --mode=iso|tp
 | `src/codegen/` | AST → LLVM IR, optimization, object/asm emission |
 | `src/driver/` | command line, pipeline, linking |
 | `runtime/` | `libpascalrt` C runtime (ABI in `runtime/include/pascalrt.h`) |
+| `rtl/` | the unit library (`sysutils`, `strutils`, `math`, `classes`) |
 | `tests/` | lit tests: `lexer/ parser/ sema/ codegen/ driver/`, `run/` (compile + execute + diff), C++ unit tests in `unit/` |
 
 ## Writing tests

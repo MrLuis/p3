@@ -1,0 +1,12 @@
+{
+  "mode": "delphi",
+  "optimize": 5,
+  "debug": "yes",
+  "unitPaths": "lib",
+  "errorLimit": -1,
+  "warnings": [],
+  "checks": { "range": 1, "ranges": true },
+  "colour": "never",
+  "main": "a.pas",
+  "main": "b.pas"
+}

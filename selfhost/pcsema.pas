@@ -89,6 +89,7 @@ var
     and break/continue out of it, are not allowed there). objfpc has no
     gotos, so none can leave a try statement. }
   exceptionType: PType;
+  arrayOfConstT, pcharT: PType;
   { COM interfaces (objfpc): IUnknown (= IInterface), their root, and
     TInterfacedObject, the root of the classes implementing them }
   iunknownType, interfacedType: PType;
@@ -548,7 +549,7 @@ end;
 function isTPOnly(k: TBuiltinKind): boolean;
 begin
   isTPOnly := k in [bkBreak, bkContinue, bkExit, bkInc, bkDec, bkDelete,
-                    bkInsert, bkLength, bkCopy, bkPos, bkConcat, bkUpCase,
+                    bkInsert, bkSetLength, bkLength, bkCopy, bkPos, bkConcat, bkUpCase,
                     bkGetMem, bkFreeMem, bkReallocMem, bkFillChar, bkMove,
                     bkHalt, bkSizeOf, bkLow, bkHigh, bkAssigned, bkParamCount,
                     bkParamStr];
@@ -693,10 +694,87 @@ begin
   declareExceptionClass := c;
 end;
 
+{ TVarRec, the elements of an array of const, and the vt* constants:
+    record VType: int64; case of ... VInteger, VBoolean, VChar, ... end }
+procedure declareVarRec;
+var
+  all, vs: TPtrList;
+  vtype, f, d: PDecl;
+  fl: PFieldList;
+  v: PVariant;
+  vp: PVariantPart;
+  rec: PType;
+
+  procedure addVariant(const name: string; t: PType);
+  var
+    one: PFieldList;
+  begin
+    f := newDecl(dkField, memberIdent(name), noLoc);
+    f^.fieldType := t;
+    listAdd(all, f);
+    one := PFieldList(arenaAlloc(sizeof(TFieldList)));
+    listInit(one^.fixed);
+    listAdd(one^.fixed, f);
+    one^.variant := nil;
+    v := PVariant(arenaAlloc(sizeof(TVariant)));
+    listInit(v^.labels);
+    v^.fields := one;
+    listAdd(vs, v);
+  end;
+
+begin
+  listInit(all);
+  listInit(vs);
+  vtype := newDecl(dkField, memberIdent('VType'), noLoc);
+  vtype^.fieldType := tyInt64T;
+  listAdd(all, vtype);
+  addVariant('VInteger', tyIntegerT);
+  addVariant('VBoolean', tyBooleanT);
+  addVariant('VChar', tyCharT);
+  addVariant('VExtended', newPointerType(tyRealT));
+  addVariant('VString', newPointerType(shortStringType(255)));
+  addVariant('VPointer', tyUntypedPointerT);
+  addVariant('VPChar', pcharT);
+  addVariant('VAnsiString', tyUntypedPointerT);
+  addVariant('VInt64', newPointerType(tyInt64T));
+  if mode = lmObjFPC then { classes exist }
+  begin
+    addVariant('VObject', tobjectType);
+    addVariant('VClass', classRefOf(tobjectType));
+  end;
+  vp := PVariantPart(arenaAlloc(sizeof(TVariantPart)));
+  vp^.tag := nil;
+  vp^.tagSpec := nil;
+  vp^.tagType := nil;
+  vp^.variants := vs;
+  fl := PFieldList(arenaAlloc(sizeof(TFieldList)));
+  listInit(fl^.fixed);
+  listAdd(fl^.fixed, vtype);
+  fl^.variant := vp;
+  rec := newRecordType(fl, all, false);
+  setDeclName(rec, intern('TVarRec'));
+  d := newDecl(dkType, memberIdent('TVarRec'), noLoc);
+  d^.declType := rec;
+  scopeInsert(standard, d^.ident.name, d);
+  arrayOfConstT := newType(tyArrayOfConst);
+  arrayOfConstT^.aocElement := rec;
+  stdConst('vtinteger', tyIntegerT, 0);
+  stdConst('vtboolean', tyIntegerT, 1);
+  stdConst('vtchar', tyIntegerT, 2);
+  stdConst('vtextended', tyIntegerT, 3);
+  stdConst('vtstring', tyIntegerT, 4);
+  stdConst('vtpointer', tyIntegerT, 5);
+  stdConst('vtpchar', tyIntegerT, 6);
+  stdConst('vtobject', tyIntegerT, 7);
+  stdConst('vtclass', tyIntegerT, 8);
+  stdConst('vtansistring', tyIntegerT, 11);
+  stdConst('vtint64', tyIntegerT, 16);
+end;
+
 procedure declareException;
 var
   members, fields: TPtrList;
-  msgField, param, create, message, d: PDecl;
+  msgField, param, create, message, d, fmtMsg, fmtArgs, createFmt: PDecl;
   i: longint;
   external_, intError: PType;
 begin
@@ -712,6 +790,17 @@ begin
   create^.ownerClass := exceptionType;
   create^.hasParamList := true;
   listAdd(create^.params, param);
+  fmtMsg := newDecl(dkVar, memberIdent('msg'), noLoc);
+  fmtMsg^.varKind := vkConstParam;
+  fmtMsg^.varType := shortStringType(255);
+  fmtArgs := newDecl(dkVar, memberIdent('args'), noLoc);
+  fmtArgs^.varKind := vkConstParam;
+  fmtArgs^.varType := arrayOfConstT;
+  createFmt := newTObjectMethod('CreateFmt', mtConstructor, nil, obExceptionCreateFmt);
+  createFmt^.ownerClass := exceptionType;
+  createFmt^.hasParamList := true;
+  listAdd(createFmt^.params, fmtMsg);
+  listAdd(createFmt^.params, fmtArgs);
   message := newDecl(dkProperty, memberIdent('Message'), noLoc);
   message^.propType := shortStringType(255);
   message^.readName := memberIdent('FMessage');
@@ -721,6 +810,7 @@ begin
   listInit(members);
   listAdd(members, msgField);
   listAdd(members, create);
+  listAdd(members, createFmt);
   listAdd(members, message);
   listInit(fields);
   for i := 0 to tobjectType^.classAllFields.count - 1 do
@@ -735,6 +825,7 @@ begin
   external_ := declareExceptionClass('EExternal', exceptionType);
   intError := declareExceptionClass('EIntError', external_);
   external_ := declareExceptionClass('EDivByZero', intError);
+  external_ := declareExceptionClass('EConvertError', exceptionType);
 end;
 
 { IUnknown = interface end (COM; also named IInterface: Free Pascal's
@@ -820,10 +911,16 @@ begin
     pchar := newPointerType(tyCharT);
     setDeclName(pchar, intern('pchar'));
     stdType('pchar', pchar);
+    pcharT := pchar;
+    stdType('ansistring', ansiStringType);
+    stdType('shortstring', shortStringType(255));
   end;
+  if mode = lmTP then
+    declareVarRec;
   if mode = lmObjFPC then
   begin
     declareTObject;
+    declareVarRec;
     declareException;
     declareInterfacedObject;
   end;
@@ -1004,8 +1101,16 @@ begin
 end;
 
 { Can a value of type value be assigned to a variable of type target? }
+function isPChar(t: PType): boolean;
+begin
+  isPChar := (t^.kind = tyPointer) and not t^.untyped and (t^.pointee <> nil) and
+             (t^.pointee^.kind = tyChar);
+end;
+
 function isAssignable(target, value: PType): boolean;
 begin
+  if (target^.kind = tyOpenArray) or (value^.kind = tyOpenArray) then
+    exit(false); { only passed along and indexed }
   if containsFile(target) or containsFile(value) then
     exit(false); { files cannot be copied }
   if target = value then
@@ -1039,6 +1144,8 @@ begin
     exit(target^.untyped);
   if (target^.kind = tyShortString) and isStringish(value) then
     exit(true); { truncated to the target's length at run time }
+  if target^.kind = tyAnsiString then
+    exit(isStringish(value) or isPChar(value));
   if (target^.kind = tySet) and (value^.kind = tySet) then
     exit(areCompatible(target, value));
   { procedural values (Turbo/FPC): congruent headings, or nil }
@@ -1416,6 +1523,8 @@ begin
         if (bk = bkLow) or (bk = bkHigh) then
         begin
           at := PNode(listGet(e^.args, 0))^.typ;
+          if at^.kind in [tyArrayOfConst, tyOpenArray] then
+            exit; { known only when the routine runs }
           if at^.kind = tyShortString then
           begin
             if bk = bkHigh then
@@ -1586,7 +1695,10 @@ begin
       f := PDecl(listGet(all, j));
       if (f^.fieldType <> nil) and isManaged(f^.fieldType) then
       begin
-        ms('a variant part cannot contain COM interfaces');
+        if f^.fieldType^.kind = tyAnsiString then
+          ms('a variant part cannot contain ansistrings')
+        else
+          ms('a variant part cannot contain COM interfaces');
         errR(f^.loc, identRange(f^.ident));
         ok := false;
       end;
@@ -1617,6 +1729,21 @@ var
 begin
   buildType := errorType;
   case ts^.kind of
+    tsArrayOfConst:
+      buildType := arrayOfConstT;
+    tsOpenArray:
+      begin
+        elem := resolveType(ts^.openSpec, nil);
+        if isError(elem) then
+          exit;
+        if containsFile(elem) then
+        begin
+          ms('the elements of an open array cannot be files');
+          errR(ts^.openSpec^.b, specRange(ts^.openSpec));
+          exit;
+        end;
+        buildType := openArrayType(elem);
+      end;
     tsUntyped:
       buildType := tyUntypedT;
     tsNamed:
@@ -1768,7 +1895,11 @@ begin
     tsString:
       begin
         if ts^.maxLen = nil then
+        begin
+          if ts^.isLong then
+            exit(ansiStringType);
           exit(shortStringType(255));
+        end;
         if not evaluateConstant(ts^.maxLen, 'string length', mc) then
           exit;
         if not isIntegerLike(mc.ty) or (mc.value.intVal < 1) or
@@ -1793,7 +1924,10 @@ begin
         end;
         if isManaged(elem) then
         begin
-          ms('the components of a file cannot be COM interfaces');
+          if elem^.kind = tyAnsiString then
+            ms('the components of a file cannot be ansistrings')
+          else
+            ms('the components of a file cannot be COM interfaces');
           errR(ts^.elemSpec^.b, specRange(ts^.elemSpec));
           exit;
         end;
@@ -3810,7 +3944,8 @@ begin
   if not evaluateConstant(init, constInitWhat, c) then
     exit;
   charArray := (c.value.kind = ckString) and isCharArrayOfLength(t, c.value.strVal^.len);
-  if not charArray and not (isSimple(t) or (t^.kind = tyShortString) or isStringType(t)) then
+  if not charArray and not (isSimple(t) or (t^.kind in [tyShortString, tyAnsiString]) or
+                            isStringType(t)) then
   begin
     ms('typed constants of type ');
     maT(t);
@@ -3915,8 +4050,8 @@ begin
       errR(r^.resultSpec^.b, specRange(r^.resultSpec));
       resultTy := errorType;
     end
-    else if not isError(resultTy) and (resultTy^.kind <> tyInterface) and
-            isManaged(resultTy) then
+    else if not isError(resultTy) and (resultTy^.kind = tyRecord) and
+            containsInterface(resultTy) then
     begin
       ms('a function cannot return a record containing COM interfaces');
       errR(r^.resultSpec^.b, specRange(r^.resultSpec));
@@ -4382,10 +4517,14 @@ begin
   end;
   if (p^.kind = tyReal) and (ab^.kind = tyInteger) then
     exit(6);
-  if (p^.kind = tyShortString) and (a^.kind in [tyShortString, tyStringLit]) then
+  if (p^.kind = tyShortString) and (a^.kind in [tyShortString, tyStringLit, tyAnsiString]) then
     exit(1);
   if (p^.kind = tyShortString) and (ab^.kind = tyChar) then
     exit(2);
+  if (p^.kind = tyAnsiString) and (a^.kind in [tyShortString, tyStringLit]) then
+    exit(2);
+  if (p^.kind = tyAnsiString) and (ab^.kind = tyChar) then
+    exit(3);
   if ((p^.kind = tyClass) and (a^.kind = tyClass)) or
      ((p^.kind = tyClassRef) and (a^.kind = tyClassRef)) then
   begin
@@ -4422,9 +4561,76 @@ end;
 
 { The cost of calling r with args (types argTys; nil: a routine's name), or
   -1 if they do not fit. }
+{ Does an expression of type a fit an open array without being an array
+  constructor: the same open array, an array of exactly its element type,
+  or a string constant for chars? }
+function fitsOpenArray(arg: PNode; a, oa: PType): boolean;
+var
+  c: TConstant;
+begin
+  if a = oa then
+    exit(true);
+  if a^.kind = tyArray then
+    exit(a^.elementType = oa^.openElement);
+  fitsOpenArray := (oa^.openElement^.kind = tyChar) and
+                   ((a^.kind = tyStringLit) or ((getBase(a)^.kind = tyChar) and fold(arg, c)));
+end;
+
+{ The cost of passing [...] for parameter p (-1: it cannot be): as an array
+  of const first, then a set, then an open array, as in Free Pascal. }
+function setCtorCost(e: PNode; p: PDecl): longint;
+var
+  pt, t, elemT: PType;
+  i, k, cost: longint;
+  el: PSetElement;
+  x: PNode;
+begin
+  setCtorCost := -1;
+  pt := p^.varType;
+  if pt^.kind = tyArrayOfConst then
+    exit(0);
+  if pt^.kind = tyOpenArray then
+  begin
+    if p^.varKind = vkVarParam then
+      exit;
+    elemT := pt^.openElement;
+    cost := 2;
+    for i := 0 to e^.setElems.count - 1 do
+    begin
+      el := PSetElement(listGet(e^.setElems, i));
+      if el^.hi <> nil then
+        exit;
+      t := check(el^.lo);
+      if isError(t) or (not isAssignable(elemT, t) and not isPCharLiteral(elemT, el^.lo)) then
+        exit;
+      cost := cost + conversionCost(elemT, t);
+    end;
+    exit(cost);
+  end;
+  if (pt^.kind <> tySet) or (p^.varKind = vkVarParam) then
+    exit;
+  for i := 0 to e^.setElems.count - 1 do
+  begin
+    el := PSetElement(listGet(e^.setElems, i));
+    for k := 1 to 2 do
+    begin
+      if k = 1 then
+        x := el^.lo
+      else
+        x := el^.hi;
+      if x = nil then
+        continue;
+      t := check(x);
+      if isError(t) or not isOrdinal(t) or not haveSameOrdinalHost(pt^.setElement, t) then
+        exit;
+    end;
+  end;
+  setCtorCost := 1;
+end;
+
 function callCost(r: PDecl; const args, argTys: TPtrList): longint;
 var
-  i, cost: longint;
+  i, cost, c: longint;
   p: PDecl;
   pt, at: PType;
   arg: PNode;
@@ -4441,6 +4647,22 @@ begin
     arg := PNode(listGet(args, i));
     if (pt = nil) or isError(pt) then
       exit;
+    if (arg^.kind = nkSetCtor) and (at = arrayOfConstT) then
+    begin
+      c := setCtorCost(arg, p);
+      if c < 0 then
+        exit;
+      cost := cost + c;
+      continue;
+    end;
+    if pt^.kind = tyOpenArray then
+    begin
+      if (at = nil) or not fitsOpenArray(arg, at, pt) then
+        exit;
+      if at <> pt then
+        cost := cost + 1;
+      continue;
+    end;
     if at = nil then { a routine's name: for a procedural parameter }
     begin
       if pt^.kind <> tyRoutine then
@@ -4506,6 +4728,53 @@ end;
 
 { The routine of first's name that args fit best: first itself unless it
   is overloaded. nil after a diagnostic (no fit, or a tie). }
+function hasConstArrayParam(const cands: TPtrList; i: longint): boolean;
+var
+  k: longint;
+  r: PDecl;
+begin
+  hasConstArrayParam := false;
+  for k := 0 to cands.count - 1 do
+  begin
+    r := PDecl(listGet(cands, k));
+    if (i < r^.params.count) and (PDecl(listGet(r^.params, i))^.varType <> nil) and
+       (PDecl(listGet(r^.params, i))^.varType^.kind in [tyArrayOfConst, tyOpenArray]) then
+      exit(true);
+  end;
+end;
+
+{ [a, b, ...] passed for an array of const: any values it can hold. }
+procedure checkConstArray(e: PNode; pt: PType);
+var
+  i: longint;
+  el: PSetElement;
+  t: PType;
+begin
+  for i := 0 to e^.setElems.count - 1 do
+  begin
+    el := PSetElement(listGet(e^.setElems, i));
+    if el^.hi <> nil then
+    begin
+      ms('a range cannot be an element of an array of const');
+      errR(el^.hi^.b, nodeRange(el^.hi));
+      continue;
+    end;
+    t := check(el^.lo);
+    if isError(t) then
+      continue;
+    if not (isIntegerLike(t) or (t^.kind = tyReal) or (getBase(t)^.kind = tyChar) or
+            (getBase(t)^.kind = tyBoolean) or isStringish(t) or
+            (t^.kind in [tyPointer, tyNil, tyClass, tyClassRef])) then
+    begin
+      ms('a value of type ');
+      maT(t);
+      ma(' cannot be an element of an array of const');
+      errR(el^.lo^.b, nodeRange(el^.lo));
+    end;
+  end;
+  e^.typ := pt;
+end;
+
 function resolveOverload(first: PDecl; const args: TPtrList; const callee: TIdent;
                          rng: TRange): PDecl;
 var
@@ -4527,6 +4796,12 @@ begin
     a := PNode(listGet(args, i));
     if a^.kind = nkFormatted then
       exit(first); { reported with the call's arguments }
+    { [...] for an open array need not be a valid set }
+    if (a^.kind = nkSetCtor) and hasConstArrayParam(cands, i) then
+    begin
+      listAdd(argTys, arrayOfConstT);
+      continue;
+    end;
     if isRoutineName(a) then
       t := nil
     else
@@ -5173,10 +5448,82 @@ begin
   errR(arg^.b, nodeRange(arg));
 end;
 
+procedure checkOpenArrayArg(arg: PNode; p: PDecl; oa: PType);
+var
+  i: longint;
+  el: PSetElement;
+  t, elemT, at: PType;
+
+  procedure mustBeVariable;
+  begin
+    ms('argument for ''var'' parameter ''');
+    maN(p^.ident.spelling);
+    ma(''' must be a variable');
+    errR(arg^.b, nodeRange(arg));
+  end;
+
+begin
+  elemT := oa^.openElement;
+  if arg^.kind = nkSetCtor then
+  begin
+    if p^.varKind = vkVarParam then
+    begin
+      mustBeVariable;
+      exit;
+    end;
+    for i := 0 to arg^.setElems.count - 1 do
+    begin
+      el := PSetElement(listGet(arg^.setElems, i));
+      if el^.hi <> nil then
+      begin
+        ms('a range cannot be an element of an open array');
+        errR(el^.hi^.b, nodeRange(el^.hi));
+        continue;
+      end;
+      t := check(el^.lo);
+      if isError(t) then
+        continue;
+      if not isAssignable(elemT, t) and not isPCharLiteral(elemT, el^.lo) and
+         not convertImplicitly(el^.lo, elemT) then
+      begin
+        ms('a value of type ');
+        maT(t);
+        ma(' cannot be an element of an open array of ');
+        maT(elemT);
+        errR(el^.lo^.b, nodeRange(el^.lo));
+      end;
+    end;
+    arg^.typ := oa;
+    exit;
+  end;
+  at := check(arg);
+  if isError(at) then
+    exit;
+  if not fitsOpenArray(arg, at, oa) then
+  begin
+    ms('cannot pass a value of type ');
+    maT(at);
+    ma(' to parameter ''');
+    maN(p^.ident.spelling);
+    ma(''' of type ');
+    maT(oa);
+    errR(arg^.b, nodeRange(arg));
+    exit;
+  end;
+  if p^.varKind = vkVarParam then
+  begin
+    if not isVariableReference(arg) then
+      mustBeVariable
+    else
+      checkModifiable(arg);
+  end;
+end;
+
 procedure checkCallArgs(const params: TPtrList; calleeDecl: PDecl;
                         const callee: TIdent; const args: TPtrList;
                         callRange: TRange);
 var
+  aocT: PType;
   isVarArgsCall: boolean;
   i: longint;
   arg: PNode;
@@ -5234,6 +5581,42 @@ begin
     if (p^.varType <> nil) and (p^.varType^.kind = tyRoutine) then
     begin
       checkRoutineArg(arg, p, p^.varType);
+      continue;
+    end;
+    if (p^.varType <> nil) and (p^.varType^.kind = tyOpenArray) then
+    begin
+      if (calleeDecl <> nil) and (calleeDecl^.kind = dkRoutine) and isCDecl(calleeDecl) then
+      begin
+        ms('an open array cannot be passed to a ''cdecl'' routine');
+        errR(arg^.b, nodeRange(arg));
+      end
+      else
+        checkOpenArrayArg(arg, p, p^.varType);
+      continue;
+    end;
+    if (p^.varType <> nil) and (p^.varType^.kind = tyArrayOfConst) then
+    begin
+      if (calleeDecl <> nil) and (calleeDecl^.kind = dkRoutine) and isCDecl(calleeDecl) then
+      begin
+        ms('an array of const cannot be passed to a ''cdecl'' routine');
+        errR(arg^.b, nodeRange(arg));
+        continue;
+      end;
+      if arg^.kind = nkSetCtor then
+      begin
+        checkConstArray(arg, p^.varType);
+        continue;
+      end;
+      aocT := check(arg);
+      if not isError(aocT) and (aocT^.kind <> tyArrayOfConst) then
+      begin
+        ms('cannot pass a value of type ');
+        maT(aocT);
+        ma(' to parameter ''');
+        maN(p^.ident.spelling);
+        ma(''' of type ''array of const''');
+        errR(arg^.b, nodeRange(arg));
+      end;
       continue;
     end;
     if (p^.varType <> nil) and (p^.varType^.kind = tyUntyped) then

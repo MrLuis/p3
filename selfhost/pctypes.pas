@@ -49,6 +49,8 @@ procedure defineClass(t, parentClass: PType; const members, allFields,
 function setConstructorType(element: PType): PType;
 function stringLiteralType(len: int64): PType;
 function shortStringType(maxLen: longint): PType;
+function ansiStringType: PType;
+function openArrayType(element: PType): PType;
 
 { The first name given to t in a type declaration. }
 procedure setDeclName(t: PType; name: PName);
@@ -72,6 +74,8 @@ function isUntypedPointer(t: PType): boolean;
 function containsFile(t: PType): boolean;
 { Is t, or does it contain, a COM interface (reference counted)? }
 function isManaged(t: PType): boolean;
+{ Is t, or does it contain, a COM interface? }
+function containsInterface(t: PType): boolean;
 function findField(rec: PType; name: PName): PDecl;
 { Class members (objfpc): declared in class c itself; in c or its nearest
   ancestor declaring it (owner receives that class); is c a or a
@@ -95,6 +99,8 @@ implementation
 var
   nextTypeId: longint;
   setTypes, stringLitTypes, shortStringTypes: TIntMap;
+  theAnsiString: PType;
+  openArrayTypes: TPtrList; { one for each element type }
 
 function newType(kind: TTypeKind): PType;
 var
@@ -291,6 +297,8 @@ begin
   mapInit(setTypes);
   mapInit(stringLitTypes);
   mapInit(shortStringTypes);
+  theAnsiString := newType(tyAnsiString);
+  listInit(openArrayTypes);
   tyErrorT := newType(tyError);
   tyIntegerT := newIntegerType(32, true, 'integer');
   tyInt64T := newIntegerType(64, true, 'int64');
@@ -354,6 +362,28 @@ begin
   shortStringType := t;
 end;
 
+function ansiStringType: PType;
+begin
+  ansiStringType := theAnsiString;
+end;
+
+function openArrayType(element: PType): PType;
+var
+  i: longint;
+  t: PType;
+begin
+  for i := 0 to openArrayTypes.count - 1 do
+  begin
+    t := PType(listGet(openArrayTypes, i));
+    if t^.openElement = element then
+      exit(t);
+  end;
+  t := newType(tyOpenArray);
+  t^.openElement := element;
+  listAdd(openArrayTypes, t);
+  openArrayType := t;
+end;
+
 procedure setDeclName(t: PType; name: PName);
 begin
   if t^.declName = nil then
@@ -379,7 +409,7 @@ end;
 function isValidResultType(t: PType): boolean;
 begin
   isValidResultType := isSimple(t) or
-                       (t^.kind in [tyPointer, tyClass, tyClassRef, tyInterface]);
+                       (t^.kind in [tyPointer, tyClass, tyClassRef, tyInterface, tyAnsiString]);
 end;
 
 function isStructured(t: PType): boolean;
@@ -437,7 +467,7 @@ end;
 
 function isStringish(t: PType): boolean;
 begin
-  isStringish := (t^.kind = tyShortString) or isStringType(t) or
+  isStringish := (t^.kind in [tyShortString, tyAnsiString]) or isStringType(t) or
                  (getBase(t)^.kind = tyChar);
 end;
 
@@ -479,6 +509,29 @@ begin
   end;
 end;
 
+function containsInterface(t: PType): boolean;
+var
+  i: longint;
+  f: PDecl;
+begin
+  case t^.kind of
+    tyInterface: containsInterface := t^.intfCOM;
+    tyArray: containsInterface := containsInterface(t^.elementType);
+    tyRecord:
+      begin
+        for i := 0 to t^.allFields.count - 1 do
+        begin
+          f := PDecl(listGet(t^.allFields, i));
+          if (f^.fieldType <> nil) and containsInterface(f^.fieldType) then
+            exit(true);
+        end;
+        containsInterface := false;
+      end;
+  else
+    containsInterface := false;
+  end;
+end;
+
 function isManaged(t: PType): boolean;
 var
   i: longint;
@@ -486,6 +539,8 @@ var
 begin
   case t^.kind of
     tyInterface: isManaged := t^.intfCOM;
+    tyAnsiString: isManaged := true;
+    tyOpenArray: isManaged := isManaged(t^.openElement);
     tyArray: isManaged := isManaged(t^.elementType);
     tyRecord:
       begin
@@ -735,6 +790,13 @@ begin
         bufAddTypeName(b, t^.refClass);
       end;
     tyInterface: bufAdd(b, 'interface');
+    tyAnsiString: bufAdd(b, 'ansistring');
+    tyArrayOfConst: bufAdd(b, 'array of const');
+    tyOpenArray:
+      begin
+        bufAdd(b, 'array of ');
+        bufAddTypeName(b, t^.openElement);
+      end;
     tyShortString:
       if t^.maxLength = 255 then
         bufAdd(b, 'string')

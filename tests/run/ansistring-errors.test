@@ -1,0 +1,5 @@
+; Run-time checks on ansistrings: indexes outside 1..length(s).
+; RUN: %pcc --mode=objfpc %S/Inputs/ansistring-range.pas -o %t
+; RUN: not %t 2>&1 | FileCheck %s
+; CHECK: ok a
+; CHECK: Runtime error: string index out of bounds at {{.*}}ansistring-range.pas:9:13

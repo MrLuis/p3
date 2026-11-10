@@ -40,6 +40,7 @@ target_link_libraries(pccCodeGen PUBLIC pccAST)
 add_library(pccDriver STATIC
   driver/Driver.cpp
   driver/Linker.cpp
+  driver/Project.cpp
 )
 target_link_libraries(pccDriver PUBLIC pccParse pccSema pccCodeGen)
 

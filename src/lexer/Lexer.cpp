@@ -184,6 +184,13 @@ void Lexer::handleDirective(const char *Start, llvm::StringRef Text) {
     }
   }
 
+  // {$longstrings on|off}: the long form of {$H+|-}.
+  if (Word.equals_insensitive("longstrings") &&
+      (Arg.equals_insensitive("on") || Arg.equals_insensitive("off"))) {
+    LongStrings = Arg.equals_insensitive("on");
+    return;
+  }
+
   // Switch list: letter followed by + or -, comma separated: $R-,Q+
   llvm::SmallVector<llvm::StringRef, 4> Parts;
   Text.split(Parts, ',');
@@ -192,6 +199,8 @@ void Lexer::handleDirective(const char *Start, llvm::StringRef Text) {
     if (P.size() == 2 && llvm::isAlpha(P[0]) && (P[1] == '+' || P[1] == '-')) {
       char Letter = llvm::toUpper(P[0]);
       bool On = P[1] == '+';
+      if (Letter == 'H')
+        LongStrings = On;
       if (Directives && (Letter == 'R' || Letter == 'Q'))
         Directives->add(locOf(Start), BufBegin, BufEnd,
                         Letter == 'R' ? CheckDirectives::Range

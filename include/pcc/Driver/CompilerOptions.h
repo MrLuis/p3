@@ -49,6 +49,15 @@ struct CompilerOptions {
   bool WarnDeprecated = true;      ///< -Wno-deprecated disables
   bool RangeChecks = true;    ///< -fno-range-checks disables
   bool OverflowChecks = true; ///< -fno-overflow-checks disables
+
+  /// The project file (pcc.json, see Project.h): --project=<file> (empty:
+  /// look for one), --no-project.
+  std::string ProjectFile;
+  bool NoProject = false;
+  /// Options with a value given on the command line, which override the
+  /// project file's settings (flags only add to them).
+  bool GivenOutput = false, GivenMode = false, GivenOptLevel = false,
+       GivenTarget = false, GivenErrorLimit = false;
 };
 
 /// Default output path for an action, e.g. "dir/hello.pas" + EmitObj ->

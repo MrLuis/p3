@@ -115,6 +115,16 @@ static cl::opt<bool>
                      cl::desc("Disable runtime integer overflow checks"),
                      cl::cat(PccCategory));
 
+static cl::opt<std::string> ProjectFile(
+    "project",
+    cl::desc("Read project settings from <file> (default: the first pcc.json "
+             "in the input file's directory or its parents)"),
+    cl::value_desc("file"), cl::cat(PccCategory));
+
+static cl::opt<bool> NoProject("no-project",
+                               cl::desc("Do not read a project file (pcc.json)"),
+                               cl::cat(PccCategory));
+
 static void printVersion(llvm::raw_ostream &OS) {
   OS << "pcc version " PCC_VERSION_STRING " (LLVM " LLVM_VERSION_STRING ")\n"
      << "  Default target: " << llvm::sys::getDefaultTargetTriple() << '\n'
@@ -149,6 +159,13 @@ int main(int argc, char **argv) {
   Opts.WarnUnusedVariables = !NoUnusedVariable;
   Opts.WarnDeprecated = !NoDeprecated;
   Opts.OverflowChecks = !NoOverflowChecks;
+  Opts.ProjectFile = ProjectFile;
+  Opts.NoProject = NoProject;
+  Opts.GivenOutput = OutputFile.getNumOccurrences() > 0;
+  Opts.GivenMode = Mode.getNumOccurrences() > 0;
+  Opts.GivenOptLevel = OptLevel.getNumOccurrences() > 0;
+  Opts.GivenTarget = TargetTriple.getNumOccurrences() > 0;
+  Opts.GivenErrorLimit = ErrorLimit.getNumOccurrences() > 0;
 
   Driver D(std::move(Opts), llvm::errs());
   return D.run();

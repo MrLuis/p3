@@ -362,6 +362,19 @@ begin
         lineName('NamedTypeSpec ''', ts^.tname.name);
         loc(ts^.b);
       end;
+    tsOpenArray:
+      begin
+        line('OpenArrayTypeSpec');
+        loc(ts^.b);
+        indent := indent + 2;
+        printTypeSpec(ts^.openSpec);
+        indent := indent - 2;
+      end;
+    tsArrayOfConst:
+      begin
+        line('ArrayOfConstTypeSpec');
+        loc(ts^.b);
+      end;
     tsUntyped:
       begin
         line('UntypedTypeSpec');
@@ -460,7 +473,10 @@ begin
       end;
     tsString:
       begin
-        line('StringTypeSpec');
+        if ts^.isLong then
+          line('StringTypeSpec long')
+        else
+          line('StringTypeSpec');
         loc(ts^.b);
         if ts^.maxLen <> nil then
         begin

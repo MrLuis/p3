@@ -2147,6 +2147,7 @@ begin
         end;
         ts := newTypeSpec(tsString, start, prevTokEnd);
         ts^.maxLen := maxLen;
+        ts^.isLong := (maxLen = nil) and lx.longStrings;
         exit(ts);
       end;
     tkKwProcedure, tkKwFunction:
@@ -2236,6 +2237,7 @@ end;
 function parseTypeIdentifier(const context: string): PTypeSpec;
 var
   ts: PTypeSpec;
+  arr: TToken;
 begin
   parseTypeIdentifier := nil;
   if tok.kind = tkKwString then
@@ -2243,6 +2245,7 @@ begin
     { Turbo/FPC: string names a type here }
     ts := newTypeSpec(tsString, tok.loc, tokenEnd(tok));
     ts^.maxLen := nil;
+    ts^.isLong := lx.longStrings;
     consumeToken;
     exit(ts);
   end;
@@ -2250,6 +2253,25 @@ begin
   begin
     ts := namedSpec(makeIdentifier(tok));
     consumeToken;
+    exit(ts);
+  end;
+  if (tok.kind = tkKwArray) and (context = 'parameter type') and (mode <> lmISO) and
+     (peekKind = tkKwOf) then
+  begin
+    { Turbo/FPC: array of const, array of T }
+    arr := tok;
+    consumeToken;
+    consumeToken;
+    if tok.kind = tkKwConst then
+    begin
+      consumeToken;
+      exit(newTypeSpec(tsArrayOfConst, arr.loc, prevTokEnd));
+    end;
+    ts := newTypeSpec(tsOpenArray, arr.loc, arr.loc);
+    ts^.openSpec := parseTypeIdentifier('the elements of an open array');
+    if ts^.openSpec = nil then
+      exit;
+    ts^.e := prevTokEnd;
     exit(ts);
   end;
   if (tok.kind in [tkKwArray, tkKwPacked]) and (context = 'parameter type') then
@@ -3930,6 +3952,24 @@ var
   el: PSetElement;
 begin
   parseFactor := nil;
+  { string(x): a typecast to the type string now means }
+  if (tok.kind = tkKwString) and (mode <> lmISO) and (peekKind = tkLParen) then
+  begin
+    if lx.longStrings then
+      name.name := intern('ansistring')
+    else
+      name.name := intern('shortstring');
+    name.spelling := tokenSpelling(tok);
+    name.loc := tok.loc;
+    consumeToken;
+    listInit(args);
+    if not parseActualParams(args, false) and (args.count = 0) then
+      exit;
+    call := newNode(nkCall, name.loc, prevTokEnd);
+    call^.callee := name;
+    call^.args := args;
+    exit(parseSelectors(call));
+  end;
   case tok.kind of
     tkIntegerLiteral, tkRealLiteral, tkStringLiteral:
       begin

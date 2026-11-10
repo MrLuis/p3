@@ -16,6 +16,12 @@
 #include <inttypes.h>
 #include <math.h>
 #include <setjmp.h>
+#ifdef _WIN32
+/* Windows has no _longjmp, and its _setjmp takes a second argument and a
+ * 16-byte aligned buffer: the runtime has its own pair (sys.c), which
+ * compiled code links to under the usual names. */
+void _longjmp(jmp_buf env, int value) __attribute__((noreturn));
+#endif
 #include <stddef.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -636,6 +642,7 @@ EXCEPTION_VMT(__pas_exception_vmt, __pas_tobject_vmt, "\011Exception");
 EXCEPTION_VMT(__pas_eexternal_vmt, __pas_exception_vmt, "\011EExternal");
 EXCEPTION_VMT(__pas_einterror_vmt, __pas_eexternal_vmt, "\011EIntError");
 EXCEPTION_VMT(__pas_edivbyzero_vmt, __pas_einterror_vmt, "\012EDivByZero");
+EXCEPTION_VMT(__pas_econverterror_vmt, __pas_exception_vmt, "\015EConvertError");
 
 void __pas_exc_push(PasExcFrame *f, void *frame) {
   (void)frame;
@@ -686,6 +693,17 @@ void __pas_raise_divzero(const char *where) {
   e->message[0] = sizeof text - 1;
   memcpy(e->message + 1, text, sizeof text - 1);
   __pas_raise(e, where);
+}
+
+void __pas_raise_convert(char *msg, size_t n) {
+  struct PasExceptionObject *e = __pas_new(sizeof *e);
+  e->vmt = __pas_econverterror_vmt;
+  if (n > 255)
+    n = 255;
+  e->message[0] = (unsigned char)n;
+  memcpy(e->message + 1, msg, n);
+  free(msg);
+  __pas_raise(e, NULL);
 }
 
 void __pas_free_object(void *obj) {
@@ -753,7 +771,7 @@ void __pas_str_copy(unsigned char *dst, const unsigned char *s, int32_t index,
     index = 1;
   if (count < 0 || index > s[0])
     count = 0;
-  if (count > s[0] - index + 1)
+  else if (count > s[0] - index + 1)
     count = s[0] - index + 1;
   memmove(dst + 1, s + index, (size_t)count);
   dst[0] = (unsigned char)count;
@@ -797,6 +815,36 @@ void __pas_str_insert(const unsigned char *src, unsigned char *s, int32_t maxlen
 
 void __pas_write_pstr(PasFile *f, const unsigned char *s, int32_t width) {
   __pas_write_str(f, (const char *)s + 1, s[0], width);
+}
+
+void __pas_write_astr(PasFile *f, const char *s, int32_t width) {
+  __pas_write_str(f, s ? s : "", __pas_astr_length(s), width);
+}
+
+/* The rest of the line into *dst, an ansistring variable. */
+void __pas_read_astr(PasFile *f, char **dst) {
+  need_inspect(f);
+  size_t n = 0, cap = 256;
+  char *buf = malloc(cap + 1);
+  if (!buf)
+    __pas_runtime_error("out of memory in a string");
+  for (;;) {
+    int c = peek(f);
+    if (c < 0 || f->eoln)
+      break;
+    if (n == cap) {
+      char *bigger = realloc(buf, (cap *= 2) + 1);
+      if (!bigger)
+        __pas_runtime_error("out of memory in a string");
+      buf = bigger;
+    }
+    buf[n++] = (char)c;
+    advance(f);
+  }
+  buf[n] = '\0';
+  __pas_astr_clear(dst);
+  *dst = __pas_astr_from_cstr(buf);
+  free(buf);
 }
 
 void __pas_read_str(PasFile *f, unsigned char *dst, int32_t maxlen) {

@@ -366,6 +366,17 @@ class ASTPrinter : public StmtVisitor<ASTPrinter>,
       line("NamedTypeSpec '") << llvm::cast<NamedTypeSpec>(TS)->getName().Name << '\'';
       loc(TS->getBeginLoc());
       return;
+    case TypeSpec::TS_OpenArray: {
+      line("OpenArrayTypeSpec");
+      loc(TS->getBeginLoc());
+      IndentScope I(Indent);
+      printTypeSpec(llvm::cast<OpenArrayTypeSpec>(TS)->getElement());
+      return;
+    }
+    case TypeSpec::TS_ArrayOfConst:
+      line("ArrayOfConstTypeSpec");
+      loc(TS->getBeginLoc());
+      return;
     case TypeSpec::TS_Untyped:
       line("UntypedTypeSpec");
       loc(TS->getBeginLoc());
@@ -479,7 +490,7 @@ class ASTPrinter : public StmtVisitor<ASTPrinter>,
       return;
     case TypeSpec::TS_String: {
       auto *S = llvm::cast<StringTypeSpec>(TS);
-      line("StringTypeSpec");
+      line(S->isLong() ? "StringTypeSpec long" : "StringTypeSpec");
       loc(TS->getBeginLoc());
       if (S->getMaxLength()) {
         IndentScope I(Indent);

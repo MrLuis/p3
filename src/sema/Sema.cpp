@@ -184,10 +184,16 @@ class Checker : public StmtVisitor<Checker>,
       auto *PChar = Ctx.create<PointerType>(Ctx.getCharType());
       PChar->setDeclName("pchar");
       Ty("pchar", PChar);
+      PCharTy = PChar;
+      Ty("ansistring", Ctx.getAnsiStringType());
+      Ty("shortstring", Ctx.getShortStringType());
     }
 
+    if (LangOpts.Mode == LangMode::TP)
+      declareVarRec();
     if (LangOpts.ObjKeywords) {
       declareTObject();
+      declareVarRec();
       declareException();
       declareInterfacedObject();
     }
@@ -290,6 +296,74 @@ class Checker : public StmtVisitor<Checker>,
                                                    TClassNamed));
   }
 
+  /// TVarRec, the elements of an array of const, and the vt* constants:
+  ///   record VType: int64; case of ... VInteger, VBoolean, VChar, ... end
+  void declareVarRec() {
+    Type *Int64Ty = Ctx.getInt64Type();
+    auto Field = [&](llvm::StringRef Name, Type *T) {
+      auto *F = Ctx.create<FieldDecl>(memberName(Name), nullptr);
+      F->setType(T);
+      return F;
+    };
+    Type *Untyped = Ctx.getUntypedPointerType();
+    auto Ptr = [&](Type *T) { return Ctx.create<PointerType>(T); };
+    std::pair<llvm::StringRef, Type *> Variants[] = {
+        {"VInteger", Ctx.getIntegerType()},
+        {"VBoolean", Ctx.getBooleanType()},
+        {"VChar", Ctx.getCharType()},
+        {"VExtended", Ptr(Ctx.getRealType())},
+        {"VString", Ptr(Ctx.getShortStringType())},
+        {"VPointer", Untyped},
+        {"VPChar", PCharTy},
+        {"VAnsiString", Untyped},
+        {"VInt64", Ptr(Int64Ty)},
+    };
+    llvm::SmallVector<std::pair<llvm::StringRef, Type *>, 12> AllVariants(
+        std::begin(Variants), std::end(Variants));
+    if (LangOpts.ObjKeywords) { // classes exist
+      AllVariants.push_back({"VObject", TObjectTy});
+      AllVariants.push_back({"VClass", classRefOf(TObjectTy)});
+    }
+    llvm::SmallVector<FieldDecl *, 12> All;
+    FieldDecl *VType = Field("VType", Int64Ty);
+    All.push_back(VType);
+    llvm::SmallVector<Variant *, 12> Vs;
+    for (auto &[Name, T] : AllVariants) {
+      FieldDecl *F = Field(Name, T);
+      All.push_back(F);
+      FieldDecl *One[] = {F};
+      auto *FL = Ctx.create<FieldList>();
+      FL->Fixed = Ctx.copyArray<FieldDecl *>(One);
+      auto *V = Ctx.create<Variant>();
+      V->Fields = FL;
+      Vs.push_back(V);
+    }
+    auto *VP = Ctx.create<VariantPart>();
+    VP->Variants = Ctx.copyArray<Variant *>(Vs);
+    FieldDecl *Fixed[] = {VType};
+    auto *FL = Ctx.create<FieldList>();
+    FL->Fixed = Ctx.copyArray<FieldDecl *>(Fixed);
+    FL->Variant = VP;
+    auto *Rec = Ctx.create<RecordType>(FL, Ctx.copyArray<FieldDecl *>(All), false);
+    Rec->setDeclName("TVarRec");
+    Standard.insert("tvarrec", Ctx.create<TypeDecl>(SourceLocation(),
+                                                    memberName("TVarRec"), Rec));
+    ArrayOfConstTy = Ctx.create<ArrayOfConstType>(Rec);
+    std::pair<llvm::StringRef, int64_t> Kinds[] = {
+        {"vtinteger", 0}, {"vtboolean", 1}, {"vtchar", 2}, {"vtextended", 3},
+        {"vtstring", 4}, {"vtpointer", 5}, {"vtpchar", 6}, {"vtobject", 7},
+        {"vtclass", 8}, {"vtansistring", 11}, {"vtint64", 16},
+    };
+    for (auto &[Name, V] : Kinds)
+      Standard.insert(Name, Ctx.create<ConstDecl>(SourceLocation(),
+                                                  predeclaredName(Name),
+                                                  Ctx.getIntegerType(),
+                                                  ConstValue::ordinal(V)));
+  }
+
+  Type *ArrayOfConstTy = nullptr;
+  Type *PCharTy = nullptr;
+
   /// class Exception (Free Pascal's SysUtils): private FMessage: string;
   /// constructor Create(const msg: string); property Message: string read
   /// FMessage write FMessage. Its VMT is in the runtime, which prints the
@@ -315,7 +389,20 @@ class Checker : public StmtVisitor<Checker>,
                                              memberName("FMessage"));
     Message->setType(Ctx.getShortStringType());
     Message->setAccessors(Msg, Msg);
-    Decl *Members[] = {Msg, Create, Message};
+    auto *FmtMsg = Ctx.create<VarDecl>(memberName("msg"), nullptr,
+                                       VarDecl::ConstParam);
+    FmtMsg->setType(Ctx.getShortStringType());
+    auto *FmtArgs = Ctx.create<VarDecl>(memberName("args"), nullptr,
+                                        VarDecl::ConstParam);
+    FmtArgs->setType(ArrayOfConstTy);
+    VarDecl *FmtParams[] = {FmtMsg, FmtArgs};
+    auto *CreateFmt = Ctx.create<RoutineDecl>(
+        SourceLocation(), memberName("CreateFmt"), false,
+        Ctx.copyArray<VarDecl *>(FmtParams), true, nullptr, nullptr, false);
+    CreateFmt->setMethodKind(MethodKind::Constructor);
+    CreateFmt->setClass(ExceptionTy);
+    CreateFmt->setBuiltin(TObjectMethod::ExceptionCreateFmt);
+    Decl *Members[] = {Msg, Create, CreateFmt, Message};
     llvm::SmallVector<FieldDecl *, 2> Fields(TObjectTy->getAllFields());
     Fields.push_back(Msg);
     ExceptionTy->define(TObjectTy, Ctx.copyArray<Decl *>(Members),
@@ -328,6 +415,7 @@ class Checker : public StmtVisitor<Checker>,
     ClassType *External = declareExceptionClass("EExternal", ExceptionTy);
     ClassType *IntError = declareExceptionClass("EIntError", External);
     declareExceptionClass("EDivByZero", IntError);
+    declareExceptionClass("EConvertError", ExceptionTy);
   }
 
   /// IUnknown = interface end (COM; also named IInterface: Free Pascal's
@@ -387,7 +475,8 @@ class Checker : public StmtVisitor<Checker>,
     switch (K) {
     case BuiltinKind::Break: case BuiltinKind::Continue: case BuiltinKind::Exit:
     case BuiltinKind::Inc: case BuiltinKind::Dec: case BuiltinKind::Delete:
-    case BuiltinKind::Insert: case BuiltinKind::Length: case BuiltinKind::Copy:
+    case BuiltinKind::Insert: case BuiltinKind::SetLength:
+    case BuiltinKind::Length: case BuiltinKind::Copy:
     case BuiltinKind::Pos: case BuiltinKind::Concat: case BuiltinKind::UpCase:
     case BuiltinKind::GetMem: case BuiltinKind::FreeMem:
     case BuiltinKind::ReallocMem: case BuiltinKind::FillChar:
@@ -639,8 +728,15 @@ class Checker : public StmtVisitor<Checker>,
     return false;
   }
 
+  static bool isPChar(Type *T) {
+    auto *P = llvm::dyn_cast<PointerType>(T);
+    return P && !P->isUntyped() && P->getPointee() && P->getPointee()->isChar();
+  }
+
   /// Can a value of type Value be assigned to a variable of type Target?
   static bool isAssignable(Type *Target, Type *Value) {
+    if (Target->isOpenArray() || Value->isOpenArray())
+      return false; // only passed along and indexed
     if (containsFile(Target) || containsFile(Value))
       return false; // files cannot be copied
     if (Target == Value)
@@ -675,6 +771,8 @@ class Checker : public StmtVisitor<Checker>,
       return llvm::cast<PointerType>(Target)->isUntyped();
     if (Target->isShortString() && Value->isStringish())
       return true; // truncated to the target's length at runtime
+    if (Target->isAnsiString())
+      return Value->isStringish() || isPChar(Value);
     if (Target->isSet() && Value->isSet())
       return areCompatible(Target, Value); // range-checked at runtime
     // Procedural values (Turbo/FPC): congruent headings, or nil.
@@ -899,6 +997,8 @@ class Checker : public StmtVisitor<Checker>,
           BD->getBuiltinKind() == BuiltinKind::High) {
         bool IsHigh = BD->getBuiltinKind() == BuiltinKind::High;
         Type *AT = Call->getArgs()[0]->getType();
+        if (AT->isArrayOfConst() || AT->isOpenArray())
+          return std::nullopt; // known only when the routine runs
         if (auto *SS = llvm::dyn_cast<ShortStringType>(AT))
           return Constant{T, ConstValue::ordinal(IsHigh ? SS->getMaxLength() : 0)};
         if (auto *A = llvm::dyn_cast<ArrayType>(AT))
@@ -1024,6 +1124,21 @@ class Checker : public StmtVisitor<Checker>,
 
   Type *buildType(TypeSpec *TS) {
     switch (TS->getKind()) {
+    case TypeSpec::TS_ArrayOfConst:
+      return ArrayOfConstTy;
+    case TypeSpec::TS_OpenArray: {
+      auto *OS = llvm::cast<OpenArrayTypeSpec>(TS);
+      Type *Elem = resolveType(OS->getElement());
+      if (Elem->isError())
+        return errorType();
+      if (containsFile(Elem)) {
+        Diags.error(OS->getElement()->getBeginLoc(),
+                    "the elements of an open array cannot be files",
+                    {OS->getElement()->getRange()});
+        return errorType();
+      }
+      return Ctx.getOpenArrayType(Elem);
+    }
     case TypeSpec::TS_Untyped:
       return Ctx.getUntypedType();
     case TypeSpec::TS_Named: {
@@ -1167,7 +1282,8 @@ class Checker : public StmtVisitor<Checker>,
     case TypeSpec::TS_String: {
       auto *SS = llvm::cast<StringTypeSpec>(TS);
       if (!SS->getMaxLength())
-        return Ctx.getShortStringType(255);
+        return SS->isLong() ? Ctx.getAnsiStringType()
+                            : Ctx.getShortStringType(255);
       auto C = evaluateConstant(SS->getMaxLength(), "string length");
       if (!C)
         return errorType();
@@ -1193,7 +1309,9 @@ class Checker : public StmtVisitor<Checker>,
       }
       if (isManaged(Elem)) {
         Diags.error(FS->getElement()->getBeginLoc(),
-                    "the components of a file cannot be COM interfaces",
+                    Elem->isAnsiString()
+                        ? "the components of a file cannot be ansistrings"
+                        : "the components of a file cannot be COM interfaces",
                     {FS->getElement()->getRange()});
         return errorType();
       }
@@ -1328,7 +1446,9 @@ class Checker : public StmtVisitor<Checker>,
       for (size_t I = First; I < All.size(); ++I)
         if (All[I]->getType() && isManaged(All[I]->getType())) {
           Diags.error(All[I]->getLocation(),
-                      "a variant part cannot contain COM interfaces",
+                      All[I]->getType()->isAnsiString()
+                          ? "a variant part cannot contain ansistrings"
+                          : "a variant part cannot contain COM interfaces",
                       {All[I]->getName().getRange()});
           OK = false;
         }
@@ -2637,7 +2757,8 @@ class Checker : public StmtVisitor<Checker>,
       return false;
     bool CharArray = C->Value.K == ConstValue::String &&
                      isCharArrayOfLength(T, C->Value.Str.size());
-    if (!CharArray && !(T->isSimple() || T->isShortString() || T->isStringType())) {
+    if (!CharArray && !(T->isSimple() || T->isShortString() || T->isAnsiString() ||
+                        T->isStringType())) {
       Diags.error(Init->getBeginLoc(),
                   "typed constants of type " + quoted(T) +
                       " need a parenthesized initializer",
@@ -2695,8 +2816,8 @@ class Checker : public StmtVisitor<Checker>,
                         quoted(ResultTy),
                     {R->getResultTypeSpec()->getRange()});
         ResultTy = errorType();
-      } else if (!ResultTy->isError() && !ResultTy->isInterface() &&
-                 isManaged(ResultTy)) {
+      } else if (!ResultTy->isError() && ResultTy->isRecord() &&
+                 containsInterface(ResultTy)) {
         Diags.error(R->getResultTypeSpec()->getBeginLoc(),
                     "a function cannot return a record containing COM "
                     "interfaces",
@@ -2902,10 +3023,15 @@ class Checker : public StmtVisitor<Checker>,
     }
     if (P->isReal() && AB->isInteger())
       return 6;
-    if (P->isShortString() && (A->isShortString() || A->isStringLiteral()))
+    if (P->isShortString() &&
+        (A->isShortString() || A->isStringLiteral() || A->isAnsiString()))
       return 1;
     if (P->isShortString() && AB->isChar())
       return 2;
+    if (P->isAnsiString() && (A->isShortString() || A->isStringLiteral()))
+      return 2;
+    if (P->isAnsiString() && AB->isChar())
+      return 3;
     auto Distance = [](const ClassType *From, const ClassType *To) {
       unsigned D = 0;
       for (; From && From != To; From = From->getParent())
@@ -2942,6 +3068,20 @@ class Checker : public StmtVisitor<Checker>,
       Type *AT = ArgTys[I];
       if (!PT || PT->isError())
         return -1;
+      if (auto *SC = llvm::dyn_cast<SetCtorExpr>(Args[I]);
+          SC && AT == ArrayOfConstTy) {
+        int C = setCtorCost(SC, Params[I]);
+        if (C < 0)
+          return -1;
+        Cost += C;
+        continue;
+      }
+      if (auto *OA = llvm::dyn_cast<OpenArrayType>(PT)) {
+        if (!AT || !fitsOpenArray(Args[I], AT, OA))
+          return -1;
+        Cost += AT == OA ? 0 : 1;
+        continue;
+      }
       if (!AT) { // a routine's name: for a procedural parameter
         if (!llvm::isa<RoutineType>(PT))
           return -1;
@@ -2973,6 +3113,143 @@ class Checker : public StmtVisitor<Checker>,
 
   /// The routine of First's name that Args fit best: First itself unless
   /// it is overloaded. Null after a diagnostic (no fit, or a tie).
+  static bool hasConstArrayParam(llvm::ArrayRef<RoutineDecl *> Cands, size_t I) {
+    for (RoutineDecl *R : Cands)
+      if (I < R->getParams().size() && R->getParams()[I]->getType() &&
+          (R->getParams()[I]->getType()->isArrayOfConst() ||
+           R->getParams()[I]->getType()->isOpenArray()))
+        return true;
+    return false;
+  }
+
+  /// Does an expression of type A fit an open array of Elem without being
+  /// an array constructor: the same open array, an array of exactly Elem,
+  /// or a string constant for chars?
+  bool fitsOpenArray(Expr *Arg, Type *A, OpenArrayType *OA) {
+    Type *Elem = OA->getElementType();
+    if (A == OA)
+      return true;
+    if (auto *AT = llvm::dyn_cast<ArrayType>(A))
+      return AT->getElementType() == Elem;
+    return Elem->isChar() &&
+           (A->isStringLiteral() || (A->getBase()->isChar() && fold(Arg)));
+  }
+
+  /// The cost of passing [...] for a parameter of type PT (-1: it cannot
+  /// be): as an array of const first, then a set, then an open array, as in
+  /// Free Pascal.
+  int setCtorCost(SetCtorExpr *E, VarDecl *P) {
+    Type *PT = P->getType();
+    if (PT->isArrayOfConst())
+      return 0;
+    int Cost = 0;
+    if (auto *OA = llvm::dyn_cast<OpenArrayType>(PT)) {
+      if (P->isVarParam())
+        return -1;
+      Cost = 2;
+      for (const SetElement &El : E->getElements()) {
+        if (El.Hi)
+          return -1;
+        Type *T = check(El.Lo);
+        if (T->isError() ||
+            (!isAssignable(OA->getElementType(), T) &&
+             !isPCharLiteral(OA->getElementType(), El.Lo)))
+          return -1;
+        Cost += conversionCost(OA->getElementType(), T);
+      }
+      return Cost;
+    }
+    auto *ST = llvm::dyn_cast<SetType>(PT);
+    if (!ST || P->isVarParam())
+      return -1;
+    for (const SetElement &El : E->getElements())
+      for (Expr *X : {El.Lo, El.Hi}) {
+        if (!X)
+          continue;
+        Type *T = check(X);
+        if (T->isError() || !T->isOrdinal() ||
+            !haveSameOrdinalHost(ST->getElementType(), T))
+          return -1;
+      }
+    return 1;
+  }
+
+  void checkOpenArrayArg(Expr *Arg, VarDecl *P, OpenArrayType *OA) {
+    const Identifier &PName = P->getName();
+    Type *Elem = OA->getElementType();
+    if (auto *SC = llvm::dyn_cast<SetCtorExpr>(Arg)) {
+      if (P->isVarParam()) {
+        Diags.error(Arg->getBeginLoc(),
+                    "argument for 'var' parameter '" + PName.Spelling +
+                        "' must be a variable",
+                    {Arg->getRange()});
+        return;
+      }
+      for (const SetElement &El : SC->getElements()) {
+        if (El.Hi) {
+          Diags.error(El.Hi->getBeginLoc(),
+                      "a range cannot be an element of an open array",
+                      {El.Hi->getRange()});
+          continue;
+        }
+        Type *T = check(El.Lo);
+        if (T->isError())
+          continue;
+        if (!isAssignable(Elem, T) && !isPCharLiteral(Elem, El.Lo) &&
+            !convertImplicitly(El.Lo, Elem))
+          Diags.error(El.Lo->getBeginLoc(),
+                      "a value of type " + quoted(T) +
+                          " cannot be an element of an open array of " +
+                          quoted(Elem),
+                      {El.Lo->getRange()});
+      }
+      SC->setType(OA);
+      return;
+    }
+    Type *AT = check(Arg);
+    if (AT->isError())
+      return;
+    if (!fitsOpenArray(Arg, AT, OA)) {
+      Diags.error(Arg->getBeginLoc(),
+                  "cannot pass a value of type " + quoted(AT) + " to parameter '" +
+                      PName.Spelling + "' of type " + quoted(OA),
+                  {Arg->getRange()});
+      return;
+    }
+    if (P->isVarParam()) {
+      if (!isVariableReference(Arg))
+        Diags.error(Arg->getBeginLoc(),
+                    "argument for 'var' parameter '" + PName.Spelling +
+                        "' must be a variable",
+                    {Arg->getRange()});
+      else
+        checkModifiable(Arg);
+    }
+  }
+
+  /// [a, b, ...] passed for an array of const: any values it can hold.
+  void checkConstArray(SetCtorExpr *E, Type *PT) {
+    for (const SetElement &El : E->getElements()) {
+      if (El.Hi) {
+        Diags.error(El.Hi->getBeginLoc(),
+                    "a range cannot be an element of an array of const",
+                    {El.Hi->getRange()});
+        continue;
+      }
+      Type *T = check(El.Lo);
+      if (T->isError())
+        continue;
+      if (!(T->isIntegerLike() || T->isReal() || T->getBase()->isChar() ||
+            T->getBase()->isBoolean() || T->isStringish() || T->isPointer() ||
+            T->isNil() || T->isClass() || T->isClassRef()))
+        Diags.error(El.Lo->getBeginLoc(),
+                    "a value of type " + quoted(T) +
+                        " cannot be an element of an array of const",
+                    {El.Lo->getRange()});
+    }
+    E->setType(PT);
+  }
+
   RoutineDecl *resolveOverload(RoutineDecl *First, llvm::ArrayRef<Expr *> Args,
                                const Identifier &Callee, SourceRange Range) {
     llvm::SmallVector<RoutineDecl *, 4> Cands;
@@ -2983,6 +3260,11 @@ class Checker : public StmtVisitor<Checker>,
     for (Expr *A : Args) {
       if (llvm::isa<FormattedExpr>(A))
         return First; // reported with the call's arguments
+      // [...] for an open array need not be a valid set.
+      if (llvm::isa<SetCtorExpr>(A) && hasConstArrayParam(Cands, ArgTys.size())) {
+        ArgTys.push_back(ArrayOfConstTy);
+        continue;
+      }
       Type *T = isRoutineName(A) ? nullptr : checkAllowingUntyped(A);
       if (T && T->isError())
         return nullptr;
@@ -3620,6 +3902,35 @@ class Checker : public StmtVisitor<Checker>,
         checkRoutineArg(Arg, P, RT);
         continue;
       }
+      if (auto *OA = llvm::dyn_cast_or_null<OpenArrayType>(P->getType())) {
+        if (RD && RD->isCDecl())
+          Diags.error(Arg->getBeginLoc(),
+                      "an open array cannot be passed to a 'cdecl' routine",
+                      {Arg->getRange()});
+        else
+          checkOpenArrayArg(Arg, P, OA);
+        continue;
+      }
+      if (P->getType() && P->getType()->isArrayOfConst()) {
+        if (RD && RD->isCDecl()) {
+          Diags.error(Arg->getBeginLoc(),
+                      "an array of const cannot be passed to a 'cdecl' routine",
+                      {Arg->getRange()});
+          continue;
+        }
+        if (auto *SC = llvm::dyn_cast<SetCtorExpr>(Arg)) {
+          checkConstArray(SC, P->getType());
+          continue;
+        }
+        Type *AT = check(Arg);
+        if (!AT->isError() && !AT->isArrayOfConst())
+          Diags.error(Arg->getBeginLoc(),
+                      "cannot pass a value of type " + quoted(AT) +
+                          " to parameter '" + P->getName().Spelling +
+                          "' of type 'array of const'",
+                      {Arg->getRange()});
+        continue;
+      }
       if (P->getType() && P->getType()->isUntyped()) {
         // Turbo/FPC: any variable, passed by reference
         if (checkAllowingUntyped(Arg)->isError())
@@ -3677,7 +3988,8 @@ class Checker : public StmtVisitor<Checker>,
 
   static bool isWritable(Type *T) {
     return T->isIntegerLike() || T->isReal() || T->getBase()->isChar() ||
-           T->getBase()->isBoolean() || T->isStringType() || T->isShortString();
+           T->getBase()->isBoolean() || T->isStringType() || T->isShortString() ||
+           T->isAnsiString();
   }
 
   /// If the first argument of read/write/... is a file, checks and returns
@@ -3808,7 +4120,7 @@ class Checker : public StmtVisitor<Checker>,
         continue;
       }
       if (!T->isIntegerLike() && !T->getBase()->isChar() && !T->isReal() &&
-          !T->isShortString())
+          !T->isShortString() && !T->isAnsiString())
         Diags.error(Arg->getBeginLoc(),
                     "cannot read a value of type " + quoted(T) +
                         " (only integer, real and char)",
@@ -3898,7 +4210,7 @@ class Checker : public StmtVisitor<Checker>,
       if (T->isError())
         continue;
       if (A == Str) {
-        if (!T->isShortString() || !isVariableReference(A))
+        if (!(T->isShortString() || T->isAnsiString()) || !isVariableReference(A))
           Diags.error(A->getBeginLoc(), "expected a string variable",
                       {A->getRange()});
         else
@@ -3910,6 +4222,30 @@ class Checker : public StmtVisitor<Checker>,
         Diags.error(A->getBeginLoc(), "expected an integer", {A->getRange()});
       }
     }
+  }
+
+  /// setlength(s, n): s a string variable, n an integer.
+  void checkSetLength(ProcCallStmt *S) {
+    auto Args = S->getArgs();
+    if (Args.size() != 2) {
+      Diags.error(S->getCallee().Loc,
+                  "'" + S->getCallee().Spelling + "' expects 2 arguments",
+                  {S->getRange()});
+      return;
+    }
+    Type *T = check(Args[0]);
+    Type *N = check(Args[1]);
+    if (!T->isError()) {
+      if (!(T->isShortString() || T->isAnsiString()) ||
+          !isVariableReference(Args[0]))
+        Diags.error(Args[0]->getBeginLoc(), "expected a string variable",
+                    {Args[0]->getRange()});
+      else
+        checkModifiable(Args[0]);
+    }
+    if (!N->isError() && !N->isIntegerLike())
+      Diags.error(Args[1]->getBeginLoc(), "expected an integer",
+                  {Args[1]->getRange()});
   }
 
   /// inc(x [, n]) / dec(x [, n]): x an ordinal variable, n an integer.
@@ -3992,8 +4328,10 @@ class Checker : public StmtVisitor<Checker>,
     case BuiltinKind::Length:
       if (!Arity(1))
         return errorType();
-      return ArgTypes[0]->isStringish() ? Ctx.getIntegerType()
-                                        : Bad(Args[0], "a string");
+      return ArgTypes[0]->isStringish() || ArgTypes[0]->isArrayOfConst() ||
+                     ArgTypes[0]->isOpenArray()
+                 ? Ctx.getIntegerType()
+                 : Bad(Args[0], "a string");
     case BuiltinKind::UpCase:
       if (!Arity(1))
         return errorType();
@@ -4013,7 +4351,8 @@ class Checker : public StmtVisitor<Checker>,
         return Bad(Args[0], "a string");
       if (!ArgTypes[1]->isIntegerLike() || !ArgTypes[2]->isIntegerLike())
         return Bad(Args[1], "integer index and count");
-      return Ctx.getShortStringType();
+      return ArgTypes[0]->isAnsiString() ? Ctx.getAnsiStringType()
+                                         : Ctx.getShortStringType();
     default: // Concat
       if (Args.empty()) {
         Diags.error(Callee.Loc, "'concat' expects strings", {E->getRange()});
@@ -4022,6 +4361,9 @@ class Checker : public StmtVisitor<Checker>,
       for (size_t I = 0; I < Args.size(); ++I)
         if (!ArgTypes[I]->isStringish())
           return Bad(Args[I], "strings");
+      for (Type *T : ArgTypes)
+        if (T->isAnsiString())
+          return Ctx.getAnsiStringType();
       return Ctx.getShortStringType();
     }
   }
@@ -4126,8 +4468,14 @@ class Checker : public StmtVisitor<Checker>,
       E->setVarCast();
       return T;
     }
+    if (T->isAnsiString() && (AT->isStringish() || AT->isPointer()))
+      return T; // an untyped pointer is taken to be an ansistring
+    if (T->isShortString() && AT->isStringish())
+      return T;
     if ((T->isOrdinal() && AT->isOrdinal()) ||
-        (T->isPointer() && (AT->isPointer() || AT->isNil() || AT->isClass())) ||
+        (T->isPointer() &&
+         (AT->isPointer() || AT->isNil() || AT->isClass() || AT->isAnsiString() ||
+          AT->isArrayOfConst())) ||
         (T->isClass() && (AT->isClass() || AT->isPointer() || AT->isNil())) ||
         (T->isClassRef() && (AT->isClassRef() || AT->isNil())) ||
         (T->isInterface() &&
@@ -4199,7 +4547,7 @@ class Checker : public StmtVisitor<Checker>,
       Type *T = checkTypeOrValue(Args[0]);
       if (T->isError())
         return errorType();
-      if (T->isShortString())
+      if (T->isShortString() || T->isArrayOfConst() || T->isOpenArray())
         return Ctx.getIntegerType();
       if (auto *A = llvm::dyn_cast<ArrayType>(T))
         return A->getIndexType();
@@ -4554,6 +4902,8 @@ public:
         return checkIncDec(S);
       case BuiltinKind::Delete: case BuiltinKind::Insert:
         return checkDeleteInsert(S, BD->getBuiltinKind() == BuiltinKind::Insert);
+      case BuiltinKind::SetLength:
+        return checkSetLength(S);
       case BuiltinKind::Pack: case BuiltinKind::Unpack:
         return checkPackUnpack(S, BD->getBuiltinKind() == BuiltinKind::Pack);
       case BuiltinKind::GetMem: case BuiltinKind::FreeMem:
@@ -5226,7 +5576,8 @@ public:
     // Turbo/FPC strings: + concatenates, comparisons work for any lengths.
     if (!isISO() && L->isStringish() && R->isStringish()) {
       if (Op == BinaryOp::Add && !(L->isNumeric() || R->isNumeric()))
-        return Ctx.getShortStringType();
+        return L->isAnsiString() || R->isAnsiString() ? Ctx.getAnsiStringType()
+                                                      : Ctx.getShortStringType();
       if (isRelational(Op) && Op != BinaryOp::In && needsStringCompare(L, R))
         return Ctx.getBooleanType();
     }
@@ -5451,6 +5802,30 @@ public:
     Type *IT = check(E->getIndex());
     if (IT->isError())
       return errorType();
+    if (auto *OA = llvm::dyn_cast<OpenArrayType>(BT)) { // a[0..high(a)]
+      if (!IT->isIntegerLike()) {
+        Diags.error(E->getIndex()->getBeginLoc(), "array index must be an integer",
+                    {E->getIndex()->getRange()});
+        return errorType();
+      }
+      return OA->getElementType();
+    }
+    if (auto *AC = llvm::dyn_cast<ArrayOfConstType>(BT)) { // a[0..high(a)]
+      if (!IT->isIntegerLike()) {
+        Diags.error(E->getIndex()->getBeginLoc(), "array index must be an integer",
+                    {E->getIndex()->getRange()});
+        return errorType();
+      }
+      return AC->getElementType();
+    }
+    if (BT->isAnsiString()) { // s[1..length(s)]
+      if (!IT->isIntegerLike()) {
+        Diags.error(E->getIndex()->getBeginLoc(), "string index must be an integer",
+                    {E->getIndex()->getRange()});
+        return errorType();
+      }
+      return Ctx.getCharType();
+    }
     if (auto *SS = llvm::dyn_cast<ShortStringType>(BT)) {
       // s[0] is the length byte, s[1..N] the characters.
       if (!IT->isIntegerLike()) {

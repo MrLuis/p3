@@ -1,0 +1,49 @@
+ann! 30 ann1 ann2 inann 60
+ann! 30 ann1 ann2 inann 60
+Bnn! 30 other ann2 inann 60
+tmp! 1 tmp1 tmp2 intmp 2
+Xal! 2 chg val2 inval 4
+Xnn! 30 chg ann2 inann 60
+ann! 30 ann1 ann2 inann 60
+f!g2inh2
+j!
+byname 1 1 2 in 0
+local! 0 local1 local2 inlocal 0
+direct! 1 direct1 direct2 indirect 2
+local!-end 2 local1 local2 inlocal 4
+ann!+c 30 ann1 ann2 inann 60
+cc!+c+c 1 cc1 cc2 incc 2
+base1234 4 1 2 in 0
+/boom x
+fin
+fin! 1 fin1 fin2 infin 2
+e1! 1 e11 e12 ine1 2
+e2 1 e11 e12 ine1 2
+e3! 3 e31 e32 ine3 6
+heap! 1 heap1 heap2 inheap 2
+heap2! 2 heap21 heap22 inheap2 4
+basekidz! 9 basekidz1 basekidz2 inbasekidz 2
+clsm! 2 clsm1 clsm2 inclsm 4
+clsn! 2 clsn1 clsn2 inclsn 4
+prop!@ 8 prop1 prop2 inprop 16
+prop! 8 prop1 prop2 inprop 16
+raw! 9 raw1 raw2 inraw 18
+raw!@basekidy!
+loop1! 1 loop11 loop12 inloop1 2
+loop2! 2 loop21 loop22 inloop2 4
+loop3! 3 loop31 loop32 inloop3 6
+3
+0
+eq
+twice
+2
+400
+400
+122
+[x]
+[x][x]
+[x][x][x]
+[x][x]
+[x][x][x][x]
+fmt! 2
+done

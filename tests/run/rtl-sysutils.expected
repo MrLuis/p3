@@ -1,0 +1,125 @@
+0 -1 2147483647 -9223372036854775808 9223372036854775807
+FFFFFFFF FFFFFFFF 0000FFFFFFFF FFFFFFFFFFFFFFFF 00FFFFFFFFFFFFFFFF
+FF 0FF 00FF 0000000000001000 00000000000000000001
+[12] TRUE 12
+[ 12] TRUE 12
+[12 ] FALSE 0
+[+5] TRUE 5
+[-5] TRUE -5
+[$FF] TRUE 255
+[0xff] TRUE 255
+[0XFF] TRUE 255
+[&17] TRUE 15
+[%101] TRUE 5
+[] FALSE 0
+[ ] FALSE 0
+[-] FALSE 0
+[+] FALSE 0
+[$] FALSE 0
+[x] FALSE 0
+[2147483647] TRUE 2147483647
+[-2147483648] TRUE -2147483648
+[1a] FALSE 0
+[-$10] TRUE -16
+[9223372036854775807] TRUE 9223372036854775807
+[9223372036854775808] FALSE 0
+[-9223372036854775808] TRUE -9223372036854775808
+[-9223372036854775809] FALSE 0
+[$7FFFFFFFFFFFFFFF] TRUE 9223372036854775807
+42 7 43 99 -99
+0
+1
+-1
+3.5
+0.1
+100
+100000000000000
+1E15
+1E16
+123456789012345
+1.23456789012346E15
+1E20
+1.5E20
+0.001
+0.0001
+0.00001
+0.000012
+1E-6
+1.5E-7
+0.333333333333333
+0.666666666666667
+-1234.5678
+1E100
+1E-100
+999999999999999
+1E16
+[1.5] TRUE 1.5
+[ 1.5] TRUE 1.5
+[1.5 ] TRUE 1.5
+[.5] TRUE 0.5
+[5.] TRUE 5
+[1e3] TRUE 1000
+[1E-3] TRUE 0.001
+[-2.5] TRUE -2.5
+[+2.5] TRUE 2.5
+[] FALSE 0
+[x] FALSE 0
+[inf] TRUE +Inf
+[nan] TRUE Nan
+[0x10] FALSE 0
+[1e] FALSE 0
+[--1] FALSE 0
+[INF] TRUE +Inf
+[-inf] TRUE -Inf
+[NaN] TRUE Nan
+[infinity] FALSE 0
+[1.5e] FALSE 0
+[1.2.3] FALSE 0
+1.50 2.25
+-1 0 True False -1
+[a b][a ][ a][][]
+ABC1Z abc1z -110-1-1
+-101 TRUE FALSE
+'it''s' ''
+a--bXc a--b--c a-b-c abc aaaaaa
+TRUE FALSE FALSE 4 0
+[/a/b/c.txt] path=/a/b/ dir=/a/b name=c.txt ext=.txt chg=/a/b/c.x inc=/a/b/c.txt/ exc=/a/b/c.txt
+[c.tar.gz] path= dir= name=c.tar.gz ext=.gz chg=c.tar.x inc=c.tar.gz/ exc=c.tar.gz
+[/a/b/] path=/a/b/ dir=/a/b name= ext= chg=/a/b/.x inc=/a/b/ exc=/a/b
+[/] path=/ dir=/ name= ext= chg=/.x inc=/ exc=
+[] path= dir= name= ext= chg=.x inc=/ exc=
+[a/b] path=a/ dir=a name=b ext= chg=a/b.x inc=a/b/ exc=a/b
+[a\b.c] path=a\ dir=a name=b.c ext=.c chg=a\b.x inc=a\b.c/ exc=a\b.c
+[.bashrc] path= dir= name=.bashrc ext= chg=.bashrc.x inc=.bashrc/ exc=.bashrc
+[/x/.bashrc] path=/x/ dir=/x name=.bashrc ext= chg=/x/.bashrc.x inc=/x/.bashrc/ exc=/x/.bashrc
+[a.b/c] path=a.b/ dir=a.b name=c ext= chg=a.b/c.x inc=a.b/c/ exc=a.b/c
+[//a//b] path=//a// dir=//a// name=b ext= chg=//a//b.x inc=//a//b/ exc=//a//b
+[a.] path= dir= name=a. ext=. chg=a.x inc=a./ exc=a.
+[/a] path=/ dir=/ name=a ext= chg=/a.x inc=/a/ exc=/a
+46336.0
+2026-11-10 3
+45351.0
+2024-2-29 5
+2.0
+-693593.0
+1-1-1
+2958465.0
+9999-12-31
+0.573269676
+13:45:30.500
+23:59:59.999
+2000-3-1
+TRUEFALSETRUEFALSE
+EConvertError: "abc" is an invalid integer
+EConvertError: "9x" is an invalid integer
+"q" is an invalid float
+EConvertError
+EConvertError
+/ : /
+TRUETRUE
+FALSEFALSE
+TRUETRUEFALSE
+FALSETRUETRUETRUEFALSE
+FALSEFALSE
+TRUEval
+TRUETRUETRUETRUE

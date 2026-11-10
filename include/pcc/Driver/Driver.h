@@ -67,6 +67,8 @@ class Driver {
 
 public:
   Driver(CompilerOptions Opts, llvm::raw_ostream &DiagOS);
+  /// Applies Opts' language mode and diagnostic settings.
+  void configure();
 
   /// Runs the whole pipeline. Returns the process exit code.
   int run();

@@ -38,6 +38,9 @@ function sysFileExists(const path: string): boolean;
 { Does path name a file that is not a directory? }
 function sysIsRegularFile(const path: string): boolean;
 procedure sysRemoveFile(const path: string);
+{ Creates directory path and its missing parents (mkdir -p); errors are
+  ignored (they show when the directory is used). }
+procedure sysMakeDirs(const path: string);
 
 { The environment variable name, if set. }
 function sysGetEnv(const name: string; var value: string): boolean;
@@ -87,6 +90,7 @@ function c_close(fd: longint): longint; cdecl; external 'c' name 'close';
 function c_realpath(path: pchar; resolved: pchar): pchar; cdecl;
   external 'c' name 'realpath';
 procedure c_free(p: pointer); cdecl; external 'c' name 'free';
+function c_mkdir(path: pchar; mode: longint): longint; cdecl; external 'c' name 'mkdir';
 function c_setvbuf(f: pointer; buf: pointer; mode: longint; size: int64): longint; cdecl;
   external 'c' name 'setvbuf';
 
@@ -221,6 +225,19 @@ end;
 
 function c_opendir(path: pchar): pointer; cdecl; external 'c' name 'opendir';
 function c_closedir(d: pointer): longint; cdecl; external 'c' name 'closedir';
+
+procedure sysMakeDirs(const path: string);
+var
+  i: longint;
+  cpath: string;
+begin
+  for i := 2 to length(path) + 1 do
+    if (i = length(path) + 1) or (path[i] = '/') then
+    begin
+      toC(copy(path, 1, i - 1), cpath);
+      c_mkdir(@cpath[1], 511); { 0777 }
+    end;
+end;
 
 function sysIsRegularFile(const path: string): boolean;
 var

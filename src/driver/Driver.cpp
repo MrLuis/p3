@@ -5,6 +5,7 @@
 #include "pcc/CodeGen/Backend.h"
 #include "pcc/CodeGen/CodeGen.h"
 #include "pcc/Driver/Linker.h"
+#include "pcc/Driver/Project.h"
 #include "pcc/Lexer/Lexer.h"
 #include "pcc/Parse/Parser.h"
 #include "pcc/Sema/Sema.h"
@@ -73,19 +74,22 @@ std::string pcc::getDefaultOutputFile(const CompilerOptions &Opts) {
 Driver::Driver(CompilerOptions O, llvm::raw_ostream &DiagOS)
     : Opts(std::move(O)), LangOpts(LangOptions::forMode(Opts.Mode)),
       Diags(SM, DiagOS) {
+  switch (Opts.Color) {
+  case ColorMode::Always: Diags.setShowColors(true); break;
+  case ColorMode::Never:  Diags.setShowColors(false); break;
+  case ColorMode::Auto:   Diags.setShowColors(DiagOS.has_colors()); break;
+  }
+  configure();
+}
+
+void Driver::configure() {
+  LangOpts = LangOptions::forMode(Opts.Mode);
   Diags.setErrorLimit(Opts.ErrorLimit);
   Diags.setWarningsAsErrors(Opts.WarningsAsErrors);
   if (!Opts.WarnUnusedVariables)
     Diags.disableWarning("unused-variable");
   if (!Opts.WarnDeprecated)
     Diags.disableWarning("deprecated");
-  switch (Opts.Color) {
-  case ColorMode::Always: Diags.setShowColors(true); break;
-  case ColorMode::Never:  Diags.setShowColors(false); break;
-  case ColorMode::Auto:   Diags.setShowColors(DiagOS.has_colors()); break;
-  }
-  if (Opts.OutputFile.empty())
-    Opts.OutputFile = getDefaultOutputFile(Opts);
 }
 
 bool Driver::validateOptions() {
@@ -101,6 +105,25 @@ bool Driver::validateOptions() {
   return validateTarget();
 }
 
+/// The symbols Free Pascal predefines for the targets pcc's library supports
+/// (Linux, macOS and Windows; x86-64 and AArch64).
+static void addTargetDefines(const llvm::Triple &T,
+                             std::vector<std::string> &Defines) {
+  if (T.isOSLinux())
+    Defines.insert(Defines.end(), {"LINUX", "UNIX"});
+  else if (T.isMacOSX())
+    Defines.insert(Defines.end(), {"DARWIN", "BSD", "UNIX"});
+  else if (T.isOSWindows()) {
+    Defines.insert(Defines.end(), {"WINDOWS", "MSWINDOWS"});
+    if (T.isArch64Bit())
+      Defines.push_back("WIN64");
+  }
+  if (T.getArch() == llvm::Triple::x86_64)
+    Defines.insert(Defines.end(), {"CPUX86_64", "CPUAMD64", "CPU64"});
+  else if (T.getArch() == llvm::Triple::aarch64)
+    Defines.insert(Defines.end(), {"CPUAARCH64", "CPU64"});
+}
+
 bool Driver::validateTarget() {
   initializeAllLLVMTargets();
   std::string TripleStr = Opts.TargetTriple.empty()
@@ -112,10 +135,17 @@ bool Driver::validateTarget() {
     return false;
   }
   Opts.TargetTriple = TripleStr;
+  addTargetDefines(llvm::Triple(TripleStr), Opts.Defines);
   return true;
 }
 
 int Driver::run() {
+  // The project file's settings (pcc.json), under the command line's.
+  if (!applyProjectFile(Opts, SM, Diags))
+    return 1;
+  configure();
+  if (Opts.OutputFile.empty())
+    Opts.OutputFile = getDefaultOutputFile(Opts);
   if (!validateOptions())
     return 1;
 
@@ -355,19 +385,16 @@ void Driver::loadUnits(llvm::ArrayRef<Identifier> Uses, ASTContext &Ctx,
   std::function<void(const Identifier &)> Visit = [&](const Identifier &U) {
     if (Done.count(U.Name) || Diags.shouldStop())
       return;
-    // objfpc: what pcc has of Free Pascal's SysUtils (Exception) is
-    // predeclared, so `uses sysutils` needs no file.
-    if (LangOpts.ObjKeywords && U.Name == "sysutils")
-      return;
     if (!InProgress.insert(U.Name).second) {
       Diags.error(U.Loc, "circular unit reference to '" + U.Spelling + "'",
                   {U.getRange()});
       return;
     }
-    // Search the input's directory, then -I directories.
+    // Search the input's directory, -I directories, then the unit library.
     llvm::SmallVector<std::string, 4> Dirs{
         llvm::sys::path::parent_path(Opts.InputFile).str()};
     Dirs.append(Opts.IncludeDirs.begin(), Opts.IncludeDirs.end());
+    Dirs.push_back(findUnitLibrary());
     std::string Found;
     for (const std::string &Dir : Dirs) {
       for (std::string Base : {U.Name.str(), U.Spelling.str()})
@@ -380,9 +407,14 @@ void Driver::loadUnits(llvm::ArrayRef<Identifier> Uses, ASTContext &Ctx,
     }
     if (Found.empty()) {
       InProgress.erase(U.Name);
+      // objfpc: Exception and its kin are predeclared, so `uses sysutils`
+      // works without the library.
+      if (LangOpts.ObjKeywords && U.Name == "sysutils")
+        return;
       Diags.error(U.Loc,
                   "cannot find unit '" + U.Spelling + "' (looked for " +
-                      U.Name + ".pas next to the program and in -I directories)",
+                      U.Name + ".pas next to the program, in -I directories "
+                      "and in pcc's unit library)",
                   {U.getRange()});
       return;
     }

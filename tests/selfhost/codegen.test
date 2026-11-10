@@ -35,6 +35,25 @@
 ; RUN: not %t.rterr 2>&1 | FileCheck --check-prefix=RTERR %s
 ; RTERR: value out of range at {{.*}}rterr.pas:7:12
 ;
+; The unit library, compiled with the program.
+; RUN: env PCC_RUNTIME_LIB=%pcc-runtime-lib %t.pcc --mode=objfpc %S/../run/rtl-strutils.pas -o %t.rtlstr
+; RUN: %t.rtlstr > %t.rtlstr.out && diff %S/../run/rtl-strutils.expected %t.rtlstr.out
+; RUN: env PCC_RUNTIME_LIB=%pcc-runtime-lib %t.pcc --mode=objfpc %S/../run/rtl-math.pas -o %t.rtlmath
+; RUN: %t.rtlmath > %t.rtlmath.out && diff %S/../run/rtl-math.expected %t.rtlmath.out
+; RUN: env PCC_RUNTIME_LIB=%pcc-runtime-lib %t.pcc --mode=objfpc %S/../run/rtl/rtl-classes.pas -o %t.rtlclasses
+; RUN: rm -rf %t.d && mkdir -p %t.d && cd %t.d && %t.rtlclasses > out && diff %S/../run/rtl/rtl-classes.expected out
+; RUN: env PCC_RUNTIME_LIB=%pcc-runtime-lib %t.pcc --mode=objfpc %S/../run/ansistrings.pas -o %t.ansi
+; RUN: %t.ansi > %t.ansi.out && diff %S/../run/ansistrings.expected %t.ansi.out
+; RUN: env PCC_RUNTIME_LIB=%pcc-runtime-lib %t.pcc --mode=objfpc %S/../run/format.pas -o %t.format
+; RUN: %t.format > %t.format.out && diff %S/../run/format.expected %t.format.out
+; RUN: env PCC_RUNTIME_LIB=%pcc-runtime-lib %t.pcc --mode=objfpc %S/../run/arrayofconst.pas -o %t.aoc
+; RUN: %t.aoc > %t.aoc.out && diff %S/../run/arrayofconst.expected %t.aoc.out
+; RUN: env PCC_RUNTIME_LIB=%pcc-runtime-lib %t.pcc --mode=objfpc %S/../run/ansistring-records.pas -o %t.recs
+; RUN: %t.recs > %t.recs.out && diff %S/../run/ansistring-records.expected %t.recs.out
+; RUN: env PCC_RUNTIME_LIB=%pcc-runtime-lib %t.pcc --mode=objfpc %S/../run/openarrays.pas -o %t.open
+; RUN: %t.open > %t.open.out && diff %S/../run/openarrays.expected %t.open.out
+; RUN: %t.pcc --mode=tp --emit-llvm --target=x86_64-w64-mingw32 %S/../driver/Inputs/unit-library/target.pas -o - | FileCheck --check-prefix=TARGET %S/../driver/unit-library.test
+;
 ; The driver: the runtime is looked for next to the executable.
 ; RUN: env -u PCC_RUNTIME_LIB not %t.pcc %S/Inputs/rterr.pas -o %t.none 2>&1 | FileCheck --check-prefix=NORT %s
 ; NORT: error: cannot find the Pascal runtime library '{{.*}}lib{{/|\\}}libpascalrt.a'; set PCC_RUNTIME_LIB

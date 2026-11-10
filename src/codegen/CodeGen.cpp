@@ -179,6 +179,7 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
   std::vector<ClassType *> VMTsToDefine;
   llvm::DenseMap<WithContext *, llvm::Value *> WithAddrs;
   llvm::StringMap<llvm::GlobalVariable *> StringConstants;
+  llvm::StringMap<llvm::GlobalVariable *> AnsiConstants;
   std::vector<RoutineDecl *> RoutinesToEmit;
   llvm::DenseMap<LabelDecl *, llvm::BasicBlock *> LabelBlocks;
   /// Enclosing loops (Turbo/FPC): the targets of continue and break, and
@@ -224,6 +225,7 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
   /// (RoutineTemps) when it ends, also when an exception leaves it.
   llvm::SmallVector<llvm::Value *, 4> LiveTemps;
   llvm::SmallVector<llvm::Value *, 4> RoutineTemps;
+  llvm::DenseMap<llvm::Value *, Type *> RecordTemps; ///< record temporaries' types
   /// Classes whose cleanup functions (releasing their own fields' COM
   /// interfaces) are to be emitted.
   std::vector<std::pair<ClassType *, llvm::Function *>> CleanupsToEmit;
@@ -426,6 +428,9 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
       return llvm::StructType::get(B.getPtrTy(), B.getPtrTy());
     case Type::TK_Interface: // {object, method table}
       return llvm::StructType::get(B.getPtrTy(), B.getPtrTy());
+    case Type::TK_OpenArray: // its {data, count} pair
+    case Type::TK_ArrayOfConst: // its header slot
+    case Type::TK_AnsiString: // its characters, or null when empty
     case Type::TK_ClassRef: // a reference to the class's VMT
     case Type::TK_Class: // a reference to the object
       return B.getPtrTy();
@@ -711,6 +716,216 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
     return getStringConstant(Bytes);
   }
 
+  /// A string constant as an ansistring: static characters after a header
+  /// {count -1, length}; null when empty.
+  llvm::Constant *getAnsiConstant(llvm::StringRef S) {
+    if (S.empty())
+      return llvm::ConstantPointerNull::get(B.getPtrTy());
+    llvm::GlobalVariable *&G = AnsiConstants[S];
+    if (!G) {
+      std::string Bytes(8, '\xff');
+      uint64_t N = S.size();
+      for (int I = 0; I < 8; ++I)
+        Bytes.push_back(static_cast<char>(N >> (8 * I)));
+      Bytes += S.str();
+      Bytes.push_back('\0');
+      auto *Init = llvm::ConstantDataArray::getString(M.getContext(), Bytes,
+                                                      /*AddNull=*/false);
+      G = new llvm::GlobalVariable(M, Init->getType(), true,
+                                   llvm::GlobalValue::PrivateLinkage, Init,
+                                   ".astr");
+      G->setAlignment(llvm::Align(8));
+    }
+    return llvm::ConstantExpr::getInBoundsGetElementPtr(B.getInt8Ty(), G,
+                                                        B.getInt64(16));
+  }
+
+  /// A call of an ansistring routine of the runtime on Args.
+  llvm::Value *astrCall(llvm::StringRef Name, llvm::Type *Ret,
+                        llvm::ArrayRef<llvm::Value *> Args) {
+    llvm::SmallVector<llvm::Type *, 4> Params;
+    for (llvm::Value *A : Args)
+      Params.push_back(A->getType());
+    return B.CreateCall(classRuntime(Name, Ret, Params), Args);
+  }
+
+  /// Any string-like expression, or a pchar, as an ansistring (borrowed: a
+  /// new one is held until the statement ends).
+  llvm::Value *emitAnsi(Expr *E) {
+    Type *T = E->getType();
+    if (T->isAnsiString())
+      return visitExpr(E);
+    if (auto *SL = llvm::dyn_cast<StringLiteralExpr>(E))
+      return getAnsiConstant(SL->getValue());
+    if (auto *N = llvm::dyn_cast<NameRefExpr>(E))
+      if (auto *C = llvm::dyn_cast<ConstDecl>(N->getDecl());
+          C && C->getValue().K == ConstValue::String)
+        return getAnsiConstant(C->getValue().Str);
+    llvm::Type *Ptr = B.getPtrTy();
+    if (T->getBase()->isChar())
+      return holdResult(astrCall("__pas_astr_from_char", Ptr, {visitExpr(E)}));
+    if (T->isPointer())
+      return holdResult(astrCall("__pas_astr_from_cstr", Ptr, {visitExpr(E)}));
+    return holdResult(astrCall("__pas_astr_from_pstr", Ptr, {emitPStr(E)}));
+  }
+
+  /// The descriptor {data, count} of the open array parameter E.
+  llvm::Value *openDescriptor(Expr *E) {
+    auto *V = llvm::cast<VarDecl>(llvm::cast<NameRefExpr>(E)->getDecl());
+    return B.CreateLoad(B.getPtrTy(), varAddress(V), "open");
+  }
+
+  llvm::Value *openCount(llvm::Value *Desc) {
+    return B.CreateLoad(B.getInt64Ty(),
+                        B.CreateConstInBoundsGEP1_64(B.getInt64Ty(), Desc, 1),
+                        "count");
+  }
+
+  llvm::Value *newOpenDescriptor(llvm::Value *Data, llvm::Value *Count) {
+    llvm::Value *Desc =
+        createTemp(llvm::ArrayType::get(B.getInt64Ty(), 2), "open");
+    B.CreateStore(Data, Desc);
+    B.CreateStore(Count, B.CreateConstInBoundsGEP1_64(B.getInt64Ty(), Desc, 1));
+    return Desc;
+  }
+
+  /// The open array passed for Arg: another one, [...] built in a
+  /// temporary, an array, or a string constant.
+  llvm::Value *emitOpenArrayArg(Expr *Arg, OpenArrayType *OA) {
+    Type *T = Arg->getType();
+    if (auto *S = llvm::dyn_cast<SetCtorExpr>(Arg)) // typed as the parameter
+      return emitOpenArrayCtor(S, OA);
+    if (T == OA)
+      return openDescriptor(Arg);
+    if (auto *A = llvm::dyn_cast<ArrayType>(T)) {
+      OrdinalBounds Bd = getOrdinalBounds(A->getIndexType());
+      llvm::Value *Data = emitAddress(Arg);
+      return newOpenDescriptor(Data, B.getInt64(Bd.Hi - Bd.Lo + 1));
+    }
+    if (T->isStringLiteral())
+      return newOpenDescriptor(emitAddress(Arg), B.getInt64(T->getStringLength()));
+    llvm::Value *C = createTemp(B.getInt8Ty(), "chr"); // a char constant
+    B.CreateStore(visitExpr(Arg), C);
+    return newOpenDescriptor(C, B.getInt64(1));
+  }
+
+  llvm::Value *emitOpenArrayCtor(SetCtorExpr *S, OpenArrayType *OA) {
+    Type *Elem = OA->getElementType();
+    auto Els = S->getElements();
+    if (Els.empty())
+      return newOpenDescriptor(llvm::ConstantPointerNull::get(B.getPtrTy()),
+                               B.getInt64(0));
+    llvm::Type *ArrTy = llvm::ArrayType::get(memType(Elem), Els.size());
+    llvm::Value *Arr = createTemp(ArrTy, "elems");
+    for (size_t I = 0; I < Els.size(); ++I) {
+      Expr *E = Els[I].Lo;
+      llvm::Value *Slot =
+          B.CreateInBoundsGEP(ArrTy, Arr, {B.getInt64(0), B.getInt64(I)});
+      // Borrowed: the callee counts what it keeps.
+      if (auto *SS = llvm::dyn_cast<ShortStringType>(Elem))
+        emitStringAssign(Slot, SS, E);
+      else if (Elem->isAnsiString())
+        B.CreateStore(emitAnsi(E), Slot);
+      else if (Elem->isStructured())
+        copyAggregate(Slot, emitAddress(E), Elem);
+      else if (llvm::Constant *C = cStringFor(Elem, E))
+        B.CreateStore(C, Slot);
+      else
+        storeScalar(Slot, convertForAssign(visitExpr(E), E->getType(), Elem,
+                                           E->getBeginLoc()),
+                    Elem);
+    }
+    return newOpenDescriptor(Arr, B.getInt64(Els.size()));
+  }
+
+  /// A value parameter's own copy of the open array in frame slot Slot.
+  void copyOpenArray(llvm::Value *Slot, OpenArrayType *OA) {
+    llvm::Type *ET = memType(OA->getElementType());
+    llvm::Value *Desc = B.CreateLoad(B.getPtrTy(), Slot, "open");
+    llvm::Value *Data = B.CreateLoad(B.getPtrTy(), Desc, "data");
+    llvm::Value *N = openCount(Desc);
+    llvm::Value *Copy = B.CreateAlloca(ET, N, "copy");
+    B.CreateMemCpy(Copy, llvm::MaybeAlign(1), Data, llvm::MaybeAlign(1),
+                   B.CreateMul(N, B.getInt64(sizeOf(OA->getElementType()))));
+    B.CreateStore(newOpenDescriptor(Copy, N), Slot);
+  }
+
+  /// Runs Fn on the address of each element of the open array in slot Slot.
+  void forEachOpenElement(llvm::Value *Slot, OpenArrayType *OA,
+                          llvm::function_ref<void(llvm::Value *)> Fn,
+                          llvm::StringRef What) {
+    llvm::Value *Desc = B.CreateLoad(B.getPtrTy(), Slot, "open");
+    llvm::Value *Data = B.CreateLoad(B.getPtrTy(), Desc, "data");
+    llvm::Value *N = openCount(Desc);
+    llvm::BasicBlock *Pre = B.GetInsertBlock();
+    auto *Loop = newBlock(What + ".loop");
+    auto *Done = newBlock(What + ".done");
+    B.CreateCondBr(B.CreateICmpEQ(N, B.getInt64(0)), Done, Loop);
+    B.SetInsertPoint(Loop);
+    llvm::PHINode *I = B.CreatePHI(B.getInt64Ty(), 2, "i");
+    I->addIncoming(B.getInt64(0), Pre);
+    Fn(B.CreateInBoundsGEP(memType(OA->getElementType()), Data, I));
+    llvm::Value *Next = B.CreateAdd(I, B.getInt64(1));
+    I->addIncoming(Next, B.GetInsertBlock());
+    B.CreateCondBr(B.CreateICmpEQ(Next, N), Done, Loop);
+    B.SetInsertPoint(Done);
+  }
+
+  /// The array of const passed for Arg: another array of const, or [...]
+  /// built in a temporary: a header slot {count}, then {VType, value}.
+  llvm::Value *emitConstArray(Expr *Arg) {
+    auto *S = llvm::dyn_cast<SetCtorExpr>(Arg);
+    if (!S)
+      return visitExpr(Arg);
+    auto Els = S->getElements();
+    llvm::Value *Tmp = createTemp(
+        llvm::ArrayType::get(B.getInt64Ty(), 2 * (Els.size() + 1)), "args");
+    B.CreateStore(B.getInt64(Els.size()), Tmp);
+    uint64_t Slot = 2;
+    for (const SetElement &El : Els) {
+      int64_t Kind;
+      llvm::Value *V = emitConstArrayValue(El.Lo, Kind);
+      B.CreateStore(B.getInt64(Kind),
+                    B.CreateConstInBoundsGEP1_64(B.getInt64Ty(), Tmp, Slot));
+      B.CreateStore(V, B.CreateConstInBoundsGEP1_64(B.getInt64Ty(), Tmp, Slot + 1));
+      Slot += 2;
+    }
+    return Tmp;
+  }
+
+  /// An element's value as stored in its TVarRec (Kind: its VType).
+  llvm::Value *emitConstArrayValue(Expr *E, int64_t &Kind) {
+    Type *T = E->getType();
+    if (T->isStringLiteral() || T->isAnsiString()) {
+      Kind = 11; // vtAnsiString
+      return emitAnsi(E);
+    }
+    if (T->isShortString() || T->isStringType()) {
+      Kind = 4; // vtString
+      return emitPStr(E);
+    }
+    if (T->isReal() || T->isIntegerLike()) {
+      llvm::Value *V = visitExpr(E);
+      if (T->isIntegerLike() && intBits(T) != 64) {
+        Kind = 0; // vtInteger
+        return toI64(V, T);
+      }
+      Kind = T->isReal() ? 3 : 16; // vtExtended, vtInt64: by reference
+      llvm::Value *Tmp = createTemp(V->getType(), "arg");
+      B.CreateStore(V, Tmp);
+      return Tmp;
+    }
+    if (T->getBase()->isChar() || T->getBase()->isBoolean()) {
+      Kind = T->getBase()->isChar() ? 2 : 1; // vtChar, vtBoolean
+      return B.CreateZExt(visitExpr(E), B.getInt64Ty());
+    }
+    Kind = T->isClass() ? 7 : T->isClassRef() ? 8 : 5; // vtObject, vtClass, vtPointer
+    if (auto *P = llvm::dyn_cast<PointerType>(T);
+        P && !P->isUntyped() && P->getPointee() && P->getPointee()->isChar())
+      Kind = 6; // vtPChar
+    return visitExpr(E);
+  }
+
   llvm::Value *newStringTemp(unsigned MaxLen = 255) {
     return createTemp(llvm::ArrayType::get(B.getInt8Ty(), MaxLen + 1), "str");
   }
@@ -720,6 +935,12 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
     Type *T = E->getType();
     if (T->isShortString())
       return visitExpr(E); // designators yield their address, results a temp
+    if (T->isAnsiString()) {
+      llvm::Value *S = visitExpr(E);
+      llvm::Value *Tmp = newStringTemp();
+      astrCall("__pas_astr_to_pstr", B.getVoidTy(), {Tmp, B.getInt32(255), S});
+      return Tmp;
+    }
     if (auto *SL = llvm::dyn_cast<StringLiteralExpr>(E))
       return getPStrConstant(SL->getValue());
     if (auto *N = llvm::dyn_cast<NameRefExpr>(E))
@@ -754,6 +975,13 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
     switch (K) {
     case BuiltinKind::Length: {
       Type *T = Args[0]->getType();
+      if (T->isOpenArray())
+        return B.CreateTrunc(openCount(openDescriptor(Args[0])), B.getInt32Ty());
+      if (T->isArrayOfConst())
+        return B.CreateTrunc(B.CreateLoad(B.getInt64Ty(), visitExpr(Args[0])),
+                             B.getInt32Ty());
+      if (T->isAnsiString())
+        return astrCall("__pas_astr_length", B.getInt32Ty(), {visitExpr(Args[0])});
       if (T->isShortString())
         return B.CreateZExt(B.CreateLoad(B.getInt8Ty(), emitPStr(Args[0])),
                             B.getInt32Ty(), "length");
@@ -771,14 +999,33 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
       return B.CreateSelect(IsLower, B.CreateSub(C, B.getInt8(32)), C, "upcase");
     }
     case BuiltinKind::Pos:
+      if (Args[0]->getType()->isAnsiString() || Args[1]->getType()->isAnsiString()) {
+        llvm::Value *Sub = emitAnsi(Args[0]);
+        llvm::Value *S = emitAnsi(Args[1]);
+        return astrCall("__pas_astr_pos", B.getInt32Ty(), {Sub, S});
+      }
       return B.CreateCall(RT.StrPos, {emitPStr(Args[0]), emitPStr(Args[1])});
     case BuiltinKind::Copy: {
+      if (Args[0]->getType()->isAnsiString()) {
+        llvm::Value *S = visitExpr(Args[0]);
+        llvm::Value *Index = emitI32(Args[1]);
+        llvm::Value *Count = emitI32(Args[2]);
+        return holdResult(astrCall("__pas_astr_copy", B.getPtrTy(), {S, Index, Count}));
+      }
       llvm::Value *Tmp = newStringTemp();
       B.CreateCall(RT.StrCopy, {Tmp, emitPStr(Args[0]), emitI32(Args[1]),
                                 emitI32(Args[2])});
       return Tmp;
     }
     default: { // Concat
+      if (E->getType()->isAnsiString()) {
+        llvm::Value *R = emitAnsi(Args[0]);
+        for (Expr *A : Args.drop_front()) {
+          llvm::Value *S = emitAnsi(A);
+          R = holdResult(astrCall("__pas_astr_concat", B.getPtrTy(), {R, S}));
+        }
+        return R;
+      }
       llvm::Value *Tmp = newStringTemp();
       B.CreateCall(RT.StrAssign, {Tmp, B.getInt32(255), emitPStr(Args[0])});
       for (Expr *A : Args.drop_front())
@@ -904,7 +1151,9 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
   /// Parameters passed as a pointer to the caller's variable: var
   /// parameters, and const parameters of string and structured types.
   static bool isByRef(VarDecl *V) {
-    return V->isVarParam() || V->getType()->isUntyped() ||
+    return (V->isVarParam() && !V->getType()->isArrayOfConst() &&
+            !V->getType()->isOpenArray()) ||
+           V->getType()->isUntyped() ||
            (V->isConstParam() && V->getType()->isStructured());
   }
 
@@ -1064,6 +1313,8 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
   llvm::Value *emitAddress(Expr *E) {
     if (E->getConversion()) // converted to a record: a temporary
       return emitConversion(E);
+    if (E->getType() && E->getType()->isOpenArray()) // its elements
+      return B.CreateLoad(B.getPtrTy(), openDescriptor(E), "data");
     switch (E->getKind()) {
     case Expr::EK_Binary:
     case Expr::EK_Unary:
@@ -1102,6 +1353,40 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
       auto *I = llvm::cast<IndexExpr>(E);
       if (I->getProperty()) // a string or record value
         return emitArrayPropertyRead(I);
+      if (auto *OA = llvm::dyn_cast<OpenArrayType>(I->getBase()->getType())) {
+        llvm::Value *Data = emitAddress(I->getBase());
+        llvm::Value *X = toI64(visitExpr(I->getIndex()), I->getIndex()->getType());
+        if (rangeChecks(I->getIndex()->getBeginLoc()))
+          emitRuntimeCheck(B.CreateICmpUGE(X, openCount(openDescriptor(I->getBase()))),
+                           "array index out of bounds",
+                           I->getIndex()->getBeginLoc());
+        return B.CreateInBoundsGEP(memType(OA->getElementType()), Data, X);
+      }
+      if (auto *AC = llvm::dyn_cast<ArrayOfConstType>(I->getBase()->getType())) {
+        llvm::Value *A = visitExpr(I->getBase());
+        llvm::Value *X = toI64(visitExpr(I->getIndex()), I->getIndex()->getType());
+        if (rangeChecks(I->getIndex()->getBeginLoc()))
+          emitRuntimeCheck(B.CreateICmpNE(astrCall("__pas_aoc_bad_index",
+                                                   B.getInt32Ty(), {A, X}),
+                                          B.getInt32(0)),
+                           "array index out of bounds",
+                           I->getIndex()->getBeginLoc());
+        return B.CreateInBoundsGEP(memType(AC->getElementType()), A,
+                                   B.CreateAdd(X, B.getInt64(1)));
+      }
+      if (I->getBase()->getType()->isAnsiString()) {
+        // An address may be written through: the string must be unshared,
+        // but a const parameter's belongs to the caller.
+        llvm::Value *Base = emitAddress(I->getBase());
+        llvm::Value *X = toI64(visitExpr(I->getIndex()), I->getIndex()->getType());
+        llvm::Value *Data =
+            isConstParamRef(I->getBase())
+                ? B.CreateLoad(B.getPtrTy(), Base, "s")
+                : astrCall("__pas_astr_unique", B.getPtrTy(), {Base});
+        emitAnsiIndexCheck(Data, X, I->getIndex()->getBeginLoc());
+        return B.CreateInBoundsGEP(B.getInt8Ty(), Data,
+                                   B.CreateSub(X, B.getInt64(1)));
+      }
       if (auto *SS = llvm::dyn_cast<ShortStringType>(I->getBase()->getType())) {
         llvm::Value *Base = emitAddress(I->getBase());
         llvm::Value *Idx = visitExpr(I->getIndex());
@@ -1209,6 +1494,12 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
     case Type::TK_Char:    return DIB->createBasicType("char", 8, DW_ATE_unsigned_char);
     case Type::TK_Subrange:
       return debugType(llvm::cast<SubrangeType>(T)->getHost());
+    case Type::TK_OpenArray:
+    case Type::TK_ArrayOfConst:
+      return DIB->createPointerType(nullptr, 64);
+    case Type::TK_AnsiString:
+      return DIB->createPointerType(
+          DIB->createBasicType("char", 8, DW_ATE_unsigned_char), 64);
     case Type::TK_Enum: {
       llvm::SmallVector<llvm::Metadata *, 8> Enumerators;
       for (ConstDecl *C : llvm::cast<EnumType>(T)->getValues())
@@ -1434,12 +1725,16 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
     case ConstValue::Ordinal:
       if (T->isReal())
         return llvm::ConstantFP::get(Ty, static_cast<double>(C.Int));
+      if (T->isAnsiString()) // a char
+        return getAnsiConstant(std::string(1, static_cast<char>(C.Int)));
       if (T->isShortString()) // a char
         return initializerForString(std::string(1, static_cast<char>(C.Int)), Ty, T);
       return llvm::ConstantInt::get(Ty, static_cast<uint64_t>(C.Int), true);
     case ConstValue::Real:
       return llvm::ConstantFP::get(Ty, C.RealVal);
     case ConstValue::String:
+      if (T->isAnsiString())
+        return getAnsiConstant(C.Str);
       return initializerForString(C.Str.str(), Ty, T);
     case ConstValue::None:
       break;
@@ -1863,7 +2158,11 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
         copyAggregate(Slot, Arg, P->getType()); // value semantics
       else
         storeScalar(Slot, Arg, P->getType());
-      if (!isByRef(P) && !P->isConstParam() && isManaged(P->getType())) {
+      if (auto *OA = llvm::dyn_cast<OpenArrayType>(P->getType());
+          OA && !P->isVarParam() && !P->isConstParam())
+        copyOpenArray(Slot, OA);
+      if (!isByRef(P) && !P->isConstParam() && !P->isVarParam() &&
+          isManaged(P->getType())) {
         addRefValue(Slot, P->getType());
         Managed.push_back({Slot, P->getType()});
       }
@@ -1899,7 +2198,7 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
       for (auto &[Addr, T] : Managed)
         finalizeValue(Addr, T);
       for (llvm::Value *Slot : RoutineTemps)
-        B.CreateCall(intfRuntime("__pas_intf_clear"), {Slot});
+        clearTemp(Slot);
     };
     if (ExcFrame)
       B.CreateCall(excRuntime("__pas_exc_pop"), {ExcFrame});
@@ -1969,6 +2268,8 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
     if (Result->getType()->isArrayTy() ||
         (Result->getType()->isStructTy() &&
          Result->getType() != llvm::StructType::get(B.getPtrTy(), B.getPtrTy()))) {
+      if (ResultTy && ResultTy->isRecord() && isManaged(ResultTy))
+        return holdRecordResult(Result, ResultTy);
       llvm::Value *Tmp = createTemp(Result->getType(), "result");
       B.CreateStore(Result, Tmp);
       return Tmp;
@@ -1998,6 +2299,10 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
       VarDecl *P = Params[I];
       if (P->getType()->isUntyped()) // Turbo/FPC: a variable, by reference
         Values.push_back(emitAddress(Arg));
+      else if (auto *OA = llvm::dyn_cast<OpenArrayType>(P->getType()))
+        Values.push_back(emitOpenArrayArg(Arg, OA));
+      else if (P->getType()->isArrayOfConst())
+        Values.push_back(emitConstArray(Arg));
       else if (llvm::Constant *CStr = cStringFor(P->getType(), Arg))
         Values.push_back(CStr);
       else if (llvm::isa<RoutineType>(P->getType()) && ToC) {
@@ -2015,6 +2320,8 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
         Values.push_back(Tmp);
       } else if (P->isVarParam() || P->getType()->isStructured())
         Values.push_back(emitAddress(Arg));
+      else if (P->getType()->isAnsiString())
+        Values.push_back(emitAnsi(Arg));
       else
         Values.push_back(convertForAssign(visitExpr(Arg), Arg->getType(),
                                           P->getType(), Arg->getBeginLoc()));
@@ -2133,6 +2440,17 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
   /// Releases the COM interfaces in the object of managed type T at Addr
   /// and sets them to nil.
   void finalizeValue(llvm::Value *Addr, Type *T) {
+    if (auto *OA = llvm::dyn_cast<OpenArrayType>(T)) {
+      forEachOpenElement(
+          Addr, OA,
+          [&](llvm::Value *Elem) { finalizeValue(Elem, OA->getElementType()); },
+          "fini");
+      return;
+    }
+    if (T->isAnsiString()) {
+      astrCall("__pas_astr_clear", B.getVoidTy(), {Addr});
+      return;
+    }
     if (T->isInterface()) {
       B.CreateCall(intfRuntime("__pas_intf_clear"), {Addr});
       return;
@@ -2153,6 +2471,18 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
   /// One more reference to each COM interface in the object of managed type
   /// T at Addr (a copy was made).
   void addRefValue(llvm::Value *Addr, Type *T) {
+    if (auto *OA = llvm::dyn_cast<OpenArrayType>(T)) {
+      forEachOpenElement(
+          Addr, OA,
+          [&](llvm::Value *Elem) { addRefValue(Elem, OA->getElementType()); },
+          "addref");
+      return;
+    }
+    if (T->isAnsiString()) {
+      astrCall("__pas_astr_addref", B.getVoidTy(),
+               {B.CreateLoad(B.getPtrTy(), Addr, "s")});
+      return;
+    }
     if (T->isInterface()) {
       llvm::Value *Obj = B.CreateLoad(B.getPtrTy(), Addr, "obj");
       B.CreateCall(intfRuntime("__pas_intf_addref"), {Obj});
@@ -2174,8 +2504,11 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
   /// *Dst := *Src for a record or array T with COM interfaces.
   void copyManaged(llvm::Value *Dst, llvm::Value *Src, Type *T) {
     addRefValue(Src, T);
-    finalizeValue(Dst, T);
+    // The old value is released last: Src and Dst may be the same object.
+    llvm::Value *Old = createTemp(memType(T), "old");
+    copyAggregate(Old, Dst, T);
     copyAggregate(Dst, Src, T);
+    finalizeValue(Old, T);
   }
 
   /// Addr^ := V for a COM interface.
@@ -2187,7 +2520,9 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
 
   /// Stores V (scalar, of type T) at Addr: counted for COM interfaces.
   void storeValue(llvm::Value *Addr, llvm::Value *V, Type *T) {
-    if (isManaged(T))
+    if (T->isAnsiString())
+      astrCall("__pas_astr_assign", B.getVoidTy(), {Addr, V});
+    else if (isManaged(T))
       storeInterface(Addr, V);
     else
       storeScalar(Addr, V, T);
@@ -2206,9 +2541,10 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
   llvm::Value *holdResult(llvm::Value *V) {
     llvm::IRBuilder<> Entry(&CurFn->getEntryBlock(),
                             CurFn->getEntryBlock().begin());
-    llvm::Value *Slot = Entry.CreateAlloca(V->getType(), nullptr, "intf.tmp");
+    llvm::Value *Slot = Entry.CreateAlloca(
+        V->getType(), nullptr, V->getType()->isPointerTy() ? "astr.tmp" : "intf.tmp");
     Entry.CreateStore(llvm::Constant::getNullValue(V->getType()), Slot);
-    B.CreateCall(intfRuntime("__pas_intf_clear"), {Slot}); // a loop's previous
+    clearTemp(Slot); // a loop's previous
     B.CreateStore(V, Slot);
     LiveTemps.push_back(Slot);
     if (CurRoutine)
@@ -2216,11 +2552,53 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
     return V;
   }
 
+  /// A function's record result V, holding ansistrings the caller now owns:
+  /// kept in a temporary until the statement ends. Returns its address.
+  llvm::Value *holdRecordResult(llvm::Value *V, Type *T) {
+    llvm::IRBuilder<> Entry(&CurFn->getEntryBlock(),
+                            CurFn->getEntryBlock().begin());
+    llvm::Value *Slot = Entry.CreateAlloca(V->getType(), nullptr, "rec.tmp");
+    Entry.CreateStore(llvm::Constant::getNullValue(V->getType()), Slot);
+    finalizeValue(Slot, T); // a loop's previous
+    B.CreateStore(V, Slot);
+    RecordTemps[Slot] = T;
+    LiveTemps.push_back(Slot);
+    if (CurRoutine)
+      RoutineTemps.push_back(Slot);
+    return Slot;
+  }
+
   /// Releases the temporaries held since LiveTemps had Mark entries.
   void releaseTemps(size_t Mark) {
     for (size_t I = Mark; I < LiveTemps.size(); ++I)
-      B.CreateCall(intfRuntime("__pas_intf_clear"), {LiveTemps[I]});
+      clearTemp(LiveTemps[I]);
     LiveTemps.resize(Mark);
+  }
+
+  /// Releases the ansistring or COM interface held in the temporary Slot.
+  void clearTemp(llvm::Value *Slot) {
+    if (Type *T = RecordTemps.lookup(Slot))
+      finalizeValue(Slot, T);
+    else if (llvm::cast<llvm::AllocaInst>(Slot)->getAllocatedType()->isPointerTy())
+      astrCall("__pas_astr_clear", B.getVoidTy(), {Slot});
+    else
+      B.CreateCall(intfRuntime("__pas_intf_clear"), {Slot});
+  }
+
+  /// Is E a const parameter (whose value its caller owns)?
+  static bool isConstParamRef(Expr *E) {
+    if (auto *N = llvm::dyn_cast<NameRefExpr>(E))
+      if (auto *V = llvm::dyn_cast_or_null<VarDecl>(N->getDecl()))
+        return V->isConstParam();
+    return false;
+  }
+
+  void emitAnsiIndexCheck(llvm::Value *S, llvm::Value *X, SourceLocation L) {
+    if (rangeChecks(L))
+      emitRuntimeCheck(
+          B.CreateICmpNE(astrCall("__pas_astr_bad_index", B.getInt32Ty(), {S, X}),
+                         B.getInt32(0)),
+          "string index out of bounds", L);
   }
 
   /// Is C TInterfacedObject (the predeclared one) or a descendant?
@@ -2447,6 +2825,15 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
       auto *Msg = llvm::cast<FieldDecl>(C->findOwnMember("fmessage"));
       emitStringAssign(fieldAddress(Obj, C, Msg),
                        llvm::cast<ShortStringType>(Msg->getType()), Args[0]);
+      return nullptr;
+    }
+    case TObjectMethod::ExceptionCreateFmt: { // FMessage := Format(msg, args)
+      ClassType *C = R->getClass();
+      auto *Msg = llvm::cast<FieldDecl>(C->findOwnMember("fmessage"));
+      llvm::Value *Fmt = emitAnsi(Args[0]);
+      llvm::Value *A = emitConstArray(Args[1]);
+      astrCall("__pas_format_pstr", B.getVoidTy(),
+               {fieldAddress(Obj, C, Msg), Fmt, A});
       return nullptr;
     }
     case TObjectMethod::Free:
@@ -2861,6 +3248,13 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
         return B.CreateICmpEQ(B.CreateAnd(R, B.CreateNot(L)), Zero, "superset");
       }
     }
+    if (needsStringCompare(LT, RTy) &&
+        (LT->isAnsiString() || RTy->isAnsiString())) {
+      llvm::Value *L = emitAnsi(E->getLHS());
+      llvm::Value *R = emitAnsi(E->getRHS());
+      return compareInts(Op, astrCall("__pas_astr_compare", B.getInt32Ty(), {L, R}),
+                         B.getInt32(0), /*Signed=*/true);
+    }
     if (needsStringCompare(LT, RTy)) { // Turbo/FPC string comparison
       llvm::Value *Cmp = B.CreateCall(
           RT.StrCompare, {emitPStr(E->getLHS()), emitPStr(E->getRHS())});
@@ -2992,6 +3386,10 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
     }
 
     Type *T = Value->getType();
+    if (T->isAnsiString()) {
+      astrCall("__pas_write_astr", B.getVoidTy(), {File, visitExpr(Value), Width});
+      return;
+    }
     if (T->isShortString()) {
       B.CreateCall(RT.WritePStr, {File, emitPStr(Value), Width});
       return;
@@ -3015,6 +3413,10 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
   void emitReadArg(llvm::Value *File, Expr *Arg) {
     Type *T = Arg->getType();
     llvm::Value *Addr = emitAddress(Arg);
+    if (T->isAnsiString()) {
+      astrCall("__pas_read_astr", B.getVoidTy(), {File, Addr});
+      return;
+    }
     if (auto *SS = llvm::dyn_cast<ShortStringType>(T)) {
       B.CreateCall(RT.ReadStr, {File, Addr, B.getInt32(SS->getMaxLength())});
       return;
@@ -3083,7 +3485,20 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
   /// the source); pointer casts change only the type.
   llvm::Value *emitTypecast(CallExpr *E) {
     Expr *Arg = E->getArgs()[0];
+    if (E->getType()->isAnsiString() && Arg->getType()->isPointer() &&
+        llvm::cast<PointerType>(Arg->getType())->isUntyped())
+      return visitExpr(Arg); // the pointer is an ansistring: borrowed
+    if (E->getType()->isAnsiString())
+      return emitAnsi(Arg);
+    if (E->getType()->isShortString())
+      return emitPStr(Arg);
     llvm::Value *V = visitExpr(Arg);
+    if (Arg->getType()->isAnsiString()) { // pchar(s) is never nil
+      auto *P = llvm::cast<PointerType>(E->getType());
+      if (!P->isUntyped() && P->getPointee()->isChar())
+        return astrCall("__pas_astr_pchar", B.getPtrTy(), {V});
+      return V;
+    }
     if (E->getType()->isOrdinal())
       return convertOrdinal(V, Arg->getType(), E->getType());
     if (E->getType()->isInterface())
@@ -3094,11 +3509,26 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
   llvm::Value *emitBuiltinCall(CallExpr *E, BuiltinDecl *BD) {
     switch (BD->getBuiltinKind()) {
     case BuiltinKind::SizeOf: // the argument is not evaluated
+      if (auto *OA = llvm::dyn_cast<OpenArrayType>(E->getArgs()[0]->getType()))
+        return B.CreateMul(openCount(openDescriptor(E->getArgs()[0])),
+                           B.getInt64(sizeOf(OA->getElementType())));
       return B.getInt64(sizeOf(E->getArgs()[0]->getType()));
     case BuiltinKind::Low:
     case BuiltinKind::High: {
       bool IsHigh = BD->getBuiltinKind() == BuiltinKind::High;
       Type *AT = E->getArgs()[0]->getType();
+      if (AT->isOpenArray()) {
+        if (!IsHigh)
+          return B.getInt32(0);
+        llvm::Value *N = openCount(openDescriptor(E->getArgs()[0]));
+        return B.CreateSub(B.CreateTrunc(N, B.getInt32Ty()), B.getInt32(1));
+      }
+      if (AT->isArrayOfConst()) {
+        if (!IsHigh)
+          return B.getInt32(0);
+        llvm::Value *N = B.CreateLoad(B.getInt64Ty(), visitExpr(E->getArgs()[0]));
+        return B.CreateSub(B.CreateTrunc(N, B.getInt32Ty()), B.getInt32(1));
+      }
       int64_t V;
       if (auto *SS = llvm::dyn_cast<ShortStringType>(AT)) {
         V = IsHigh ? SS->getMaxLength() : 0;
@@ -3416,6 +3846,11 @@ public:
       emitStringAssign(emitAddress(Target), SS, Value);
       return;
     }
+    if (TT->isAnsiString()) {
+      llvm::Value *V = emitAnsi(Value);
+      storeValue(emitAddress(Target), V, TT);
+      return;
+    }
     if (TT->isStructured()) {
       llvm::Value *Dst = emitAddress(Target);
       copyValue(Dst, emitAddress(Value), TT);
@@ -3469,6 +3904,10 @@ public:
     llvm::Value *Addr = fieldAddress(Obj, C, llvm::cast<FieldDecl>(P->getWrite()));
     if (auto *SS = llvm::dyn_cast<ShortStringType>(T)) {
       emitStringAssign(Addr, SS, Value);
+      return;
+    }
+    if (T->isAnsiString()) {
+      storeValue(Addr, emitAnsi(Value), T);
       return;
     }
     if (T->isStructured()) {
@@ -3541,8 +3980,10 @@ public:
         llvm::Value *Addr = varAddress(Result);
         if (auto *SS = llvm::dyn_cast<ShortStringType>(RT))
           emitStringAssign(Addr, SS, Value);
+        else if (RT->isAnsiString())
+          storeValue(Addr, emitAnsi(Value), RT);
         else if (RT->isStructured())
-          copyAggregate(Addr, emitAddress(Value), RT);
+          copyValue(Addr, emitAddress(Value), RT);
         else
           storeValue(Addr,
                      convertForAssign(visitExpr(Value), Value->getType(), RT,
@@ -3558,13 +3999,40 @@ public:
       B.SetInsertPoint(newBlock("after.jump")); // unreachable code follows
       return;
     }
+    case BuiltinKind::SetLength: {
+      auto A = S->getArgs();
+      llvm::Value *Addr = emitAddress(A[0]);
+      llvm::Value *N = emitI32(A[1]);
+      if (A[0]->getType()->isAnsiString())
+        astrCall("__pas_astr_setlength", B.getVoidTy(), {Addr, N});
+      else
+        astrCall("__pas_str_setlength", B.getVoidTy(),
+                 {Addr,
+                  B.getInt32(llvm::cast<ShortStringType>(A[0]->getType())->getMaxLength()),
+                  N});
+      return;
+    }
     case BuiltinKind::Delete: {
       auto A = S->getArgs();
+      if (A[0]->getType()->isAnsiString()) {
+        llvm::Value *Addr = emitAddress(A[0]);
+        llvm::Value *Index = emitI32(A[1]);
+        llvm::Value *Count = emitI32(A[2]);
+        astrCall("__pas_astr_delete", B.getVoidTy(), {Addr, Index, Count});
+        return;
+      }
       B.CreateCall(RT.StrDelete, {emitAddress(A[0]), emitI32(A[1]), emitI32(A[2])});
       return;
     }
     case BuiltinKind::Insert: {
       auto A = S->getArgs();
+      if (A[1]->getType()->isAnsiString()) {
+        llvm::Value *Src = emitAnsi(A[0]);
+        llvm::Value *Addr = emitAddress(A[1]);
+        llvm::Value *Index = emitI32(A[2]);
+        astrCall("__pas_astr_insert", B.getVoidTy(), {Src, Addr, Index});
+        return;
+      }
       auto *SS = llvm::cast<ShortStringType>(A[1]->getType());
       B.CreateCall(RT.StrInsert, {emitPStr(A[0]), emitAddress(A[1]),
                                   B.getInt32(SS->getMaxLength()), emitI32(A[2])});
@@ -4245,6 +4713,11 @@ public:
       return emitIsAs(E);
     if ((Op == BinaryOp::And || Op == BinaryOp::Or) && E->getType()->isBoolean())
       return emitShortCircuit(E);
+    if (E->getType()->isAnsiString()) {
+      llvm::Value *L = emitAnsi(E->getLHS());
+      llvm::Value *R = emitAnsi(E->getRHS());
+      return holdResult(astrCall("__pas_astr_concat", B.getPtrTy(), {L, R}));
+    }
     if (E->getType()->isShortString()) { // Turbo/FPC concatenation
       llvm::Value *Tmp = newStringTemp();
       B.CreateCall(RT.StrConcat,
@@ -4382,6 +4855,14 @@ public:
       return emitArrayPropertyRead(E);
     if (E->getType()->isShortString())
       return emitAddress(E);
+    if (E->getBase()->getType()->isAnsiString()) { // reading: no copy
+      llvm::Value *S = visitExpr(E->getBase());
+      llvm::Value *X = toI64(visitExpr(E->getIndex()), E->getIndex()->getType());
+      emitAnsiIndexCheck(S, X, E->getIndex()->getBeginLoc());
+      return loadScalar(B.CreateInBoundsGEP(B.getInt8Ty(), S,
+                                            B.CreateSub(X, B.getInt64(1))),
+                        E->getType());
+    }
     return loadScalar(emitAddress(E), E->getType());
   }
 

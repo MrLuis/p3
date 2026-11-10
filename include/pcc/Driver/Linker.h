@@ -25,6 +25,10 @@ class DiagnosticsEngine;
 /// Default location: <dir of pcc>/../lib/libpascalrt.a
 std::string findRuntimeLibrary();
 
+/// The directory of pcc's unit library, searched after -I directories:
+/// $PCC_UNIT_DIR, else <dir of pcc>/../lib/pascal
+std::string findUnitLibrary();
+
 /// Returns false (after reporting) on failure.
 bool linkExecutable(llvm::StringRef ObjectFile,
                     llvm::ArrayRef<std::string> UnitObjects,

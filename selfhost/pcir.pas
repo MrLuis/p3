@@ -214,6 +214,8 @@ function irExtract(const agg: TV; idx: longint; t: PIRType; const name: string):
 function irInsert(const agg, v: TV; idx: longint; const name: string): TV;
 { alloca at the insertion point, or at the start of the entry block }
 function irAlloca(t: PIRType; const name: string): TV;
+{ alloca of n elements (an i64 known at run time), at the insertion point }
+function irDynAlloca(t: PIRType; const n: TV; const name: string): TV;
 function irCreateTemp(t: PIRType; const name: string): TV;
 { A temporary at the start of the entry block followed by a store of init
   into it (an IRBuilder there creating both). }
@@ -2346,6 +2348,17 @@ begin
          v.v + ', ' + intToStr(idx));
   append(i);
   irInsert := irV(agg.t, res);
+end;
+
+function irDynAlloca(t: PIRType; const n: TV; const name: string): TV;
+var
+  i: PIRInst;
+  res: string;
+begin
+  i := newInst(res, name, true);
+  bufAdd(i^.text, 'alloca ' + t^.text + ', i64 ' + n.v + ', align ' + intToStr(t^.prefAlign));
+  append(i);
+  irDynAlloca := irV(irPtrT, res);
 end;
 
 function irAlloca(t: PIRType; const name: string): TV;

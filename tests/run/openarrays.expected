@@ -1,0 +1,78 @@
+615011028
+0 2 3 12
+0 4 5 20
+0 -1 0 0
+0 1 2 8
+0 0 1 4
+4
+0 2 3 12
+9
+26
+210
+312 102
+2
+203 101
+empty
+12
+0 2 3 12
+4
+2
+0 2 3 12
+4
+11.75
+0.75
+<one>3<twovar>6
+<one!>4<twovar!>7
+<one>3<twovar>6
+<ONE0>4<TWOVAR1>7
+
+<a>1
+<var>3<lit>3<c>1<c>1<sh>2<varvar>6<ONE0>4<7>1
+<var!>4<varx!>5
+var
+noneONE0p
+a0|a1|512
+x|var|512
+c|longvar|512
+a0x
+a0
+2:xyz
+1:pq
+4:hello
+0:h
+-1:
+1:uc
+r11
+r2var2
+r1?99
+r2var2
+r11
+r2var2
+r1&1
+r2var2
+rc5
+r2var2
+rc?99
+rc5
+1 4 3
+TRUE5
+TBox TRUE
+31-1
+327
+12
+4
+20
+TRUEFALSE
+8
+8
+TRUEFALSE
+varx
+10
+201
+709
+constconstconstintsstrs
+setstrs
+intsdblsonedblsints
+<1>1<var1>4
+<2>1<var2>4
+<3>1<var3>4

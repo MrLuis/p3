@@ -7,7 +7,7 @@ function isWritable(t: PType): boolean;
 begin
   isWritable := isIntegerLike(t) or (t^.kind = tyReal) or
                 (getBase(t)^.kind = tyChar) or (getBase(t)^.kind = tyBoolean) or
-                isStringType(t) or (t^.kind = tyShortString);
+                isStringType(t) or (t^.kind in [tyShortString, tyAnsiString]);
 end;
 
 { If the first argument of read/write is a file, checks and returns its
@@ -206,7 +206,7 @@ begin
       continue;
     end;
     if not isIntegerLike(t) and (getBase(t)^.kind <> tyChar) and
-       (t^.kind <> tyReal) and (t^.kind <> tyShortString) then
+       (t^.kind <> tyReal) and not (t^.kind in [tyShortString, tyAnsiString]) then
     begin
       ms('cannot read a value of type ');
       maT(t);
@@ -312,6 +312,41 @@ begin
 end;
 
 { delete(var s, index, count) / insert(source, var s, index) }
+{ setlength(s, n): s a string variable, n an integer. }
+procedure checkSetLength(s: PNode);
+var
+  a0, a1: PNode;
+  t, n: PType;
+begin
+  if s^.args.count <> 2 then
+  begin
+    ms('');
+    maCallee(s^.callee);
+    ma(' expects 2 arguments');
+    errR(s^.callee.loc, nodeRange(s));
+    exit;
+  end;
+  a0 := PNode(listGet(s^.args, 0));
+  a1 := PNode(listGet(s^.args, 1));
+  t := check(a0);
+  n := check(a1);
+  if not isError(t) then
+  begin
+    if not (t^.kind in [tyShortString, tyAnsiString]) or not isVariableReference(a0) then
+    begin
+      ms('expected a string variable');
+      errR(a0^.b, nodeRange(a0));
+    end
+    else
+      checkModifiable(a0);
+  end;
+  if not isError(n) and not isIntegerLike(n) then
+  begin
+    ms('expected an integer');
+    errR(a1^.b, nodeRange(a1));
+  end;
+end;
+
 procedure checkDeleteInsert(s: PNode; isInsert: boolean);
 var
   str, a: PNode;
@@ -338,7 +373,7 @@ begin
       continue;
     if a = str then
     begin
-      if (t^.kind <> tyShortString) or not isVariableReference(a) then
+      if not (t^.kind in [tyShortString, tyAnsiString]) or not isVariableReference(a) then
       begin
         ms('expected a string variable');
         errR(a^.b, nodeRange(a));
@@ -592,7 +627,7 @@ begin
       begin
         if not arity(1) then
           exit;
-        if isStringish(argType(e, 0)) then
+        if isStringish(argType(e, 0)) or (argType(e, 0)^.kind in [tyArrayOfConst, tyOpenArray]) then
           checkStringFunction := tyIntegerT
         else
           checkStringFunction := bad(argNode(e, 0), 'a string');
@@ -623,7 +658,10 @@ begin
           exit(bad(argNode(e, 0), 'a string'));
         if not isIntegerLike(argType(e, 1)) or not isIntegerLike(argType(e, 2)) then
           exit(bad(argNode(e, 1), 'integer index and count'));
-        checkStringFunction := shortStringType(255);
+        if argType(e, 0)^.kind = tyAnsiString then
+          checkStringFunction := ansiStringType
+        else
+          checkStringFunction := shortStringType(255);
       end;
   else { concat }
     begin
@@ -636,6 +674,9 @@ begin
       for i := 0 to e^.args.count - 1 do
         if not isStringish(argType(e, i)) then
           exit(bad(argNode(e, i), 'strings'));
+      for i := 0 to e^.args.count - 1 do
+        if argType(e, i)^.kind = tyAnsiString then
+          exit(ansiStringType);
       checkStringFunction := shortStringType(255);
     end;
   end;
@@ -771,8 +812,12 @@ begin
     e^.isVarCast := true;
     exit(t);
   end;
+  if (t^.kind = tyAnsiString) and (isStringish(at) or (at^.kind = tyPointer)) then
+    exit(t); { an untyped pointer is taken to be an ansistring }
+  if (t^.kind = tyShortString) and isStringish(at) then
+    exit(t);
   if (isOrdinal(t) and isOrdinal(at)) or
-     ((t^.kind = tyPointer) and (at^.kind in [tyPointer, tyNil, tyClass])) or
+     ((t^.kind = tyPointer) and (at^.kind in [tyPointer, tyNil, tyClass, tyAnsiString, tyArrayOfConst])) or
      ((t^.kind = tyClass) and (at^.kind in [tyClass, tyPointer, tyNil])) or
      ((t^.kind = tyClassRef) and (at^.kind in [tyClassRef, tyNil])) or
      ((t^.kind = tyInterface) and
@@ -871,7 +916,7 @@ begin
         t := checkTypeOrValue(a0);
         if isError(t) then
           exit;
-        if t^.kind = tyShortString then
+        if t^.kind in [tyShortString, tyArrayOfConst, tyOpenArray] then
           res := tyIntegerT
         else if t^.kind = tyArray then
           res := t^.indexType
@@ -1810,6 +1855,7 @@ begin
         end;
       bkInc, bkDec: checkIncDec(s);
       bkDelete, bkInsert: checkDeleteInsert(s, d^.builtin = bkInsert);
+      bkSetLength: checkSetLength(s);
       bkPack, bkUnpack: checkPackUnpack(s, d^.builtin = bkPack);
       bkGetMem, bkFreeMem, bkReallocMem, bkFillChar, bkMove, bkHalt:
         checkMemoryProc(s, d^.builtin);
@@ -2563,7 +2609,11 @@ begin
   if not isISO and isStringish(l) and isStringish(r) then
   begin
     if (op = boAdd) and not (isNumeric(l) or isNumeric(r)) then
+    begin
+      if (l^.kind = tyAnsiString) or (r^.kind = tyAnsiString) then
+        exit(ansiStringType);
       exit(shortStringType(255));
+    end;
     if isRelational(op) and (op <> boIn) and needsStringCompare(l, r) then
       exit(tyBooleanT);
   end;
@@ -2855,6 +2905,39 @@ begin
   it := check(e^.index);
   if isError(it) then
     exit;
+  if bt^.kind = tyOpenArray then
+  begin
+    { a[0..high(a)] }
+    if not isIntegerLike(it) then
+    begin
+      ms('array index must be an integer');
+      errR(e^.index^.b, nodeRange(e^.index));
+      exit;
+    end;
+    exit(bt^.openElement);
+  end;
+  if bt^.kind = tyArrayOfConst then
+  begin
+    { a[0..high(a)] }
+    if not isIntegerLike(it) then
+    begin
+      ms('array index must be an integer');
+      errR(e^.index^.b, nodeRange(e^.index));
+      exit;
+    end;
+    exit(bt^.aocElement);
+  end;
+  if bt^.kind = tyAnsiString then
+  begin
+    { s[1..length(s)] }
+    if not isIntegerLike(it) then
+    begin
+      ms('string index must be an integer');
+      errR(e^.index^.b, nodeRange(e^.index));
+      exit;
+    end;
+    exit(tyCharT);
+  end;
   if bt^.kind = tyShortString then
   begin
     { s[0] is the length byte, s[1..N] the characters }

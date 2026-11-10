@@ -5,7 +5,7 @@ program pcc;
   here; the IR from pcgen goes to pcdriver, which runs clang and the
   linker for -S, -c, -O and executables. }
 
-uses pcsys, pcutil, pcdiag, pclex, pcast, pctypes, pcparse, pcprint, pcsema, pcgen,
+uses pcsys, pcutil, pcdiag, pclex, pcast, pctypes, pcparse, pcprint, pcsema, pcgen, pcproject,
      pcdriver;
 
 type
@@ -133,21 +133,23 @@ begin
   helpLine('    =iso                       -   ISO 7185 Pascal');
   helpLine('    =tp                        -   Turbo/Free Pascal extensions');
   helpLine('    =objfpc                    -   Turbo/Free Pascal extensions and classes');
+  helpLine('  --no-project                 - Do not read a project file (pcc.json)');
   helpLine('  -o <file>                    - Write output to <file>');
+  helpLine('  --project=<file>             - Read project settings from <file> (default: the first pcc.json in the input file''s directory or its parents)');
   helpLine('  --target=<triple>            - Target triple (default: host)');
 end;
 
 const
-  numFlags = 16;
+  numFlags = 17;
   flagNames: array[1..numFlags] of string[20] = (
     'help', 'help-list', 'version', 'emit-tokens', 'emit-ast', 'emit-parse-tree',
     'emit-llvm', 'S', 'c', 'Werror', 'Wno-unused-variable', 'Wno-deprecated',
     'fno-overflow-checks',
-    'fno-range-checks', 'fseparate-units', 'g');
-  numValueOpts = 10;
+    'fno-range-checks', 'fseparate-units', 'g', 'no-project');
+  numValueOpts = 11;
   valueOptNames: array[1..numValueOpts] of string[20] = (
     'o', 'mode', 'fdiagnostics-color', 'ferror-limit', 'target', 'I', 'O', 'L', 'l',
-    'd');
+    'd', 'project');
 
 function isFlag(const name: string): boolean;
 var
@@ -248,6 +250,77 @@ end;
 
 var
   targetTriple: string;
+  { the project file (pcc.json): --project, --no-project; options with a
+    value given on the command line, which override its settings }
+  projectFile: string;
+  noProject: boolean;
+  givenOutput, givenMode, givenOptLevel, givenTarget, givenErrorLimit: boolean;
+
+procedure parseArgs; forward;
+
+{ The project file's settings (pcc.json, see pcproject.pas), under the
+  command line's; its lists after the command line's. }
+procedure applyProject;
+var
+  s: TProjectSettings;
+  buildsMain: boolean;
+  i, slash: longint;
+begin
+  if noProject then
+    exit;
+  if not loadProject(projectFile, inputFile, s) then
+    sysExit(1);
+  if s.path = '' then
+    exit;
+  buildsMain := inputFile = '';
+  if buildsMain and s.hasMain then
+    inputFile := projectPath(s, s.main);
+  if buildsMain and s.hasOutput and not givenOutput and (action = actExe) then
+  begin
+    outputFile := projectPath(s, s.output);
+    slash := length(outputFile);
+    while (slash > 0) and (outputFile[slash] <> '/') do
+      slash := slash - 1;
+    if slash > 1 then
+      sysMakeDirs(copy(outputFile, 1, slash - 1));
+  end;
+  if s.hasMode and not givenMode then
+    mode := s.mode;
+  if s.hasOptLevel and not givenOptLevel then
+    optLevel := s.optLevel;
+  if s.hasTarget and not givenTarget then
+    targetTriple := s.target;
+  if s.hasErrorLimit and not givenErrorLimit then
+    errorLimit := s.errorLimit;
+  debugInfo := debugInfo or s.debug;
+  separateUnits := separateUnits or s.separateUnits;
+  werror := werror or s.warningsAsErrors;
+  noUnusedVariable := noUnusedVariable or not s.warnUnusedVariables;
+  noDeprecated := noDeprecated or not s.warnDeprecated;
+  rangeChecksOn := rangeChecksOn and s.rangeChecks;
+  overflowChecksOn := overflowChecksOn and s.overflowChecks;
+  for i := 0 to s.unitPaths.count - 1 do
+    listAdd(includeDirs, intern(projectPath(s, nameStr(PName(listGet(s.unitPaths, i))))));
+  for i := 0 to s.libraryPaths.count - 1 do
+    addLinkerArg('-L' + projectPath(s, nameStr(PName(listGet(s.libraryPaths, i)))));
+  for i := 0 to s.defines.count - 1 do
+    listAdd(commandLineDefines, listGet(s.defines, i));
+  for i := 0 to s.libraries.count - 1 do
+    addLinkerArg('-l' + nameStr(PName(listGet(s.libraries, i))));
+  { (the language mode and diagnostic settings, again) }
+  diagSetErrorLimit(errorLimit);
+  diagSetWarningsAsErrors(werror);
+  if noUnusedVariable then
+    diagDisableWarning('unused-variable');
+  if noDeprecated then
+    diagDisableWarning('deprecated');
+  if buildsMain and not s.hasMain then
+  begin
+    diagError(noLoc, 'no input file, and the project file ''' + s.path +
+                     ''' has no "main" program');
+    sysExit(1);
+  end;
+end;
 
 procedure parseArgs;
 var
@@ -293,6 +366,13 @@ begin
   overflowChecksOn := true;
   debugInfo := false;
   separateUnits := false;
+  projectFile := '';
+  noProject := false;
+  givenOutput := false;
+  givenMode := false;
+  givenOptLevel := false;
+  givenTarget := false;
+  givenErrorLimit := false;
   positionalOnly := false;
   i := 1;
   while i <= paramcount do
@@ -369,10 +449,18 @@ begin
       debugInfo := true
     else if name = 'fseparate-units' then
       separateUnits := true
+    else if name = 'no-project' then
+      noProject := true
+    else if name = 'project' then
+      projectFile := takeValue
     else if name = 'o' then
-      outputFile := takeValue
+    begin
+      outputFile := takeValue;
+      givenOutput := true;
+    end
     else if name = 'mode' then
     begin
+      givenMode := true;
       value := takeValue;
       if value = 'tp' then
         mode := lmTP
@@ -391,15 +479,24 @@ begin
       { colors are not supported yet }
     end
     else if name = 'ferror-limit' then
-      errorLimit := parseUInt(name, takeValue)
+    begin
+      errorLimit := parseUInt(name, takeValue);
+      givenErrorLimit := true;
+    end
     else if name = 'target' then
-      targetTriple := takeValue
+    begin
+      targetTriple := takeValue;
+      givenTarget := true;
+    end
     else if name = 'I' then
       listAdd(includeDirs, intern(takeValue))
     else if name = 'd' then
       listAdd(commandLineDefines, intern(takeValue))
     else if name = 'O' then
-      optLevel := parseUInt(name, takeValue)
+    begin
+      optLevel := parseUInt(name, takeValue);
+      givenOptLevel := true;
+    end
     else if name = 'l' then
       addLinkerArg('-l' + takeValue)
     else if name = 'L' then
@@ -461,6 +558,52 @@ var
 var
   selfUnit: PName;      { the unit being compiled, if any: using it is circular }
 
+{ The symbols Free Pascal predefines for the targets pcc's library supports
+  (Linux, macOS and Windows; x86-64 and AArch64). }
+procedure addTargetDefines(const triple: string);
+var
+  x86, arm: boolean;
+
+  procedure def(const name: string);
+  begin
+    listAdd(commandLineDefines, intern(name));
+  end;
+
+begin
+  x86 := (pos('x86_64', triple) = 1) or (pos('amd64', triple) = 1);
+  arm := (pos('aarch64', triple) = 1) or (pos('arm64', triple) = 1);
+  if pos('linux', triple) > 0 then
+  begin
+    def('LINUX');
+    def('UNIX');
+  end
+  else if (pos('darwin', triple) > 0) or (pos('macos', triple) > 0) then
+  begin
+    def('DARWIN');
+    def('BSD');
+    def('UNIX');
+  end
+  else if (pos('windows', triple) > 0) or (pos('mingw', triple) > 0) or
+          (pos('win32', triple) > 0) then
+  begin
+    def('WINDOWS');
+    def('MSWINDOWS');
+    if x86 or arm then
+      def('WIN64');
+  end;
+  if x86 then
+  begin
+    def('CPUX86_64');
+    def('CPUAMD64');
+    def('CPU64');
+  end
+  else if arm then
+  begin
+    def('CPUAARCH64');
+    def('CPU64');
+  end;
+end;
+
 procedure visitUnit(const u: TIdent);
 var
   dirs: TPtrList;
@@ -470,10 +613,6 @@ var
 begin
   if mapHas(unitsDone, u.name^.id) or diagShouldStop then
     exit;
-  { objfpc: what pcc has of Free Pascal's SysUtils (Exception) is
-    predeclared, so uses sysutils needs no file }
-  if (mode = lmObjFPC) and nameEquals(u.name, 'sysutils') then
-    exit;
   if (mapGet(inProgress, u.name^.id) <> nil) or (u.name = selfUnit) then
   begin
     diagErrorR(u.loc, 'circular unit reference to ''' + nameStr(u.spelling) + '''',
@@ -481,11 +620,12 @@ begin
     exit;
   end;
   mapPut(inProgress, u.name^.id, u.name);
-  { the input's directory, then -I directories }
+  { the input's directory, -I directories, then the unit library }
   listInit(dirs);
   listAdd(dirs, intern(pathDirName(inputFile)));
   for i := 0 to includeDirs.count - 1 do
     listAdd(dirs, listGet(includeDirs, i));
+  listAdd(dirs, intern(findUnitLibrary));
   found := '';
   for i := 0 to dirs.count - 1 do
     for b := 1 to 2 do
@@ -506,9 +646,14 @@ begin
   if found = '' then
   begin
     mapPut(inProgress, u.name^.id, nil);
+    { objfpc: Exception and its kin are predeclared, so uses sysutils works
+      without the library }
+    if (mode = lmObjFPC) and nameEquals(u.name, 'sysutils') then
+      exit;
     diagErrorR(u.loc, 'cannot find unit ''' + nameStr(u.spelling) +
                ''' (looked for ' + nameStr(u.name) +
-               '.pas next to the program and in -I directories)', identRange(u));
+               '.pas next to the program, in -I directories ' +
+               'and in pcc''s unit library)', identRange(u));
     exit;
   end;
   if not smLoadFile(found, fid) then
@@ -734,6 +879,7 @@ begin
     diagDisableWarning('unused-variable');
   if noDeprecated then
     diagDisableWarning('deprecated');
+  applyProject;
   if inputFile = '' then
     usageError('no input file');
   if optLevel > 3 then
@@ -741,6 +887,7 @@ begin
                ''' (expected 0-3)');
   if not validateTarget(targetTriple) then
     sysExit(1);
+  addTargetDefines(targetTriple);
   if outputFile = '' then
     case action of
       actLLVM: outputFile := inputStem + '.ll';

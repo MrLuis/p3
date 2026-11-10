@@ -1,0 +1,26 @@
+; Open arrays: what can be passed and what the callee can do.
+; RUN: not %pcc --mode=objfpc -ferror-limit=0 --emit-ast %S/Inputs/openarrays/errors.pas 2>&1 | FileCheck %s
+; CHECK: errors.pas:8:31: error: the elements of an open array cannot be files
+; CHECK: errors.pas:11:11: error: constant value must be a constant
+; CHECK: errors.pas:14:3: error: cannot modify constant parameter 'a'
+; CHECK: errors.pas:16:5: error: assigning to 'array of integer' from incompatible type 'array [0..1] of integer'
+; CHECK: errors.pas:17:5: error: assigning to 'array [0..1] of integer' from incompatible type 'array of integer'
+; CHECK: errors.pas:18:5: error: cannot modify constant parameter 'a'
+; CHECK: errors.pas:19:10: error: array index must be an integer
+; CHECK: errors.pas:20:5: error: assigning to 'integer' from incompatible type 'array of integer'
+; CHECK: errors.pas:28:5: error: cannot pass a value of type 'array [1..2] of byte' to parameter 'a' of type 'array of integer'
+; CHECK: errors.pas:29:5: error: cannot pass a value of type 'array [1..2] of S' to parameter 'a' of type 'array of integer'
+; CHECK: errors.pas:30:5: error: cannot pass a value of type 'integer' to parameter 'a' of type 'array of integer'
+; CHECK: errors.pas:31:5: error: cannot pass a value of type 'string' to parameter 'a' of type 'array of integer'
+; CHECK: errors.pas:32:5: error: argument for 'var' parameter 'a' must be a variable
+; CHECK: errors.pas:33:9: error: a range cannot be an element of an open array
+; CHECK: errors.pas:34:6: error: a value of type 'char' cannot be an element of an open array of 'integer'
+; CHECK: errors.pas:35:5: error: an open array cannot be passed to a 'cdecl' routine
+; CHECK: errors.pas:36:6: error: cannot pass a value of type 'string' to parameter 'a' of type 'array of char'
+; CHECK-NOT: error:
+;
+; RUN: not %pcc --mode=objfpc --emit-ast %S/Inputs/openarrays/syntax.pas 2>&1 | FileCheck --check-prefix=SYN %s
+; SYN: syntax.pas:2:25: error: expected type name for the elements of an open array (declare the type in a 'type' section)
+;
+; RUN: not %pcc --emit-ast %S/Inputs/openarrays/iso.pas 2>&1 | FileCheck --check-prefix=ISO %s
+; ISO: iso.pas:2:{{[0-9]+}}: error: conformant array parameters are not supported yet

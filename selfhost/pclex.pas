@@ -69,6 +69,7 @@ type
     conds: TPtrList;
     corbaInterfaces: boolean; { $interfaces corba (default: com) }
     advancedRecords: boolean; { $modeswitch advancedrecords }
+    longStrings: boolean; { H+: string is an ansistring }
     { macros ($macro on, $define NAME := value, as in Free Pascal): upper-
       case name id -> PMacro; a use of NAME lexes its value (macroStack:
       the places to continue at, of PMacroFrame, innermost last); expanded
@@ -261,6 +262,7 @@ begin
   listInit(lx.conds);
   lx.corbaInterfaces := false;
   lx.advancedRecords := false;
+  lx.longStrings := false;
   lx.macrosOn := false;
   lx.inlineOn := mode = lmObjFPC;
   mapInit(lx.macros);
@@ -1260,6 +1262,16 @@ begin
       diagError(locOf(lx, start), 'expected {$macro on} or {$macro off}');
     exit;
   end;
+  { $longstrings on / off: the long form of H+ and H- }
+  if word = 'longstrings' then
+  begin
+    arg := lowerStr(copyChars(lx, b, e));
+    if (arg = 'on') or (arg = 'off') then
+    begin
+      lx.longStrings := arg = 'on';
+      exit;
+    end;
+  end;
   { $modeswitch advancedrecords[+|-]: methods in records (objfpc); other
     mode switches are not supported (a warning below) }
   if word = 'modeswitch' then
@@ -1298,6 +1310,8 @@ begin
     if (e - b = 2) and isAlpha(at(lx, b)) and ((c = '+') or (c = '-')) then
     begin
       { other switches (listing, boolean evaluation, ...) are ignored }
+      if upperChar(at(lx, b)) = 'H' then
+        lx.longStrings := c = '+';
       if upperChar(at(lx, b)) = 'R' then
         addDirective(lx, locOf(lx, start), swRange, c = '+')
       else if upperChar(at(lx, b)) = 'Q' then

@@ -11,6 +11,7 @@
 #ifndef PASCALRT_H
 #define PASCALRT_H
 
+#include <stddef.h>
 #include <stdint.h>
 
 #ifdef __cplusplus
@@ -101,6 +102,49 @@ void __pas_str_insert(const unsigned char *src, unsigned char *s, int32_t maxlen
 void __pas_write_pstr(PasFile *f, const unsigned char *s, int32_t width);
 /* Reads the rest of the current line (not the line end) into dst. */
 void __pas_read_str(PasFile *f, unsigned char *dst, int32_t maxlen);
+
+/*===- Ansistrings (ansi.c) -------------------------------------------------===*/
+void __pas_astr_addref(char *s);
+void __pas_astr_assign(char **dst, char *src);
+void __pas_astr_clear(char **p);
+int32_t __pas_astr_length(const char *s);
+char *__pas_astr_from_chars(const char *p, int64_t len);
+char *__pas_astr_from_pstr(const unsigned char *p);
+char *__pas_astr_from_char(char c);
+char *__pas_astr_from_cstr(const char *p);
+void __pas_astr_to_pstr(unsigned char *dst, int32_t maxlen, const char *s);
+const char *__pas_astr_pchar(const char *s);
+char *__pas_astr_concat(char *a, char *b);
+int32_t __pas_astr_compare(const char *a, const char *b);
+int32_t __pas_astr_pos(const char *sub, const char *s);
+char *__pas_astr_copy(char *s, int32_t index, int32_t count);
+char *__pas_astr_unique(char **p);
+int32_t __pas_astr_bad_index(const char *s, int64_t index);
+void __pas_astr_setlength(char **p, int32_t len);
+void __pas_astr_delete(char **p, int32_t index, int32_t count);
+void __pas_astr_insert(char *src, char **p, int32_t index);
+void __pas_str_setlength(unsigned char *s, int32_t maxlen, int32_t len);
+void __pas_write_astr(PasFile *f, const char *s, int32_t width);
+void __pas_read_astr(PasFile *f, char **dst);
+
+/*===- Array of const and Format (format.c) ---------------------------------===
+ * An array of const is passed as a pointer to a header slot, whose first
+ * word is the element count, followed by the elements, TVarRec's layout. */
+typedef struct PasVarRec {
+  int64_t vtype; /* the element count in the header slot */
+  union {
+    int32_t integer; /* also vtBoolean and vtChar */
+    const double *real;
+    const int64_t *int64;
+    const char *pointer; /* vtString, vtPointer, vtPChar, vtAnsiString, ... */
+  } v;
+} PasVarRec;
+char *__pas_format(const char *fmt, const PasVarRec *args);
+void __pas_format_pstr(unsigned char *dst, const char *fmt, const PasVarRec *args);
+void __pas_format_to(char **dst, const char *fmt, const PasVarRec *args);
+int32_t __pas_aoc_bad_index(const PasVarRec *args, int64_t index);
+/* Raises EConvertError with the n characters of msg, and frees msg. */
+void __pas_raise_convert(char *msg, size_t n) __attribute__((noreturn));
 
 /*===- Heap -----------------------------------------------------------------===*/
 
@@ -195,6 +239,8 @@ extern void *const __pas_exception_vmt[5];
 extern void *const __pas_eexternal_vmt[5];
 extern void *const __pas_einterror_vmt[5];
 extern void *const __pas_edivbyzero_vmt[5];
+/* EConvertError = class(Exception) (SysUtils). */
+extern void *const __pas_econverterror_vmt[5];
 /* frame: the routine's frame (unused: passing it keeps the optimizer from
  * holding its variables in registers across _setjmp), or NULL. */
 void __pas_exc_push(PasExcFrame *f, void *frame);

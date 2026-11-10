@@ -45,6 +45,8 @@ class ASTContext {
   llvm::DenseMap<Type *, SetType *> SetTypes;
   llvm::DenseMap<uint64_t, StringLiteralType *> StringLiteralTypes;
   llvm::DenseMap<unsigned, ShortStringType *> ShortStringTypes;
+  Type *AnsiString = nullptr;
+  llvm::DenseMap<Type *, OpenArrayType *> OpenArrayTypes;
 
 public:
   explicit ASTContext(StringPool &Strings) : Strings(Strings) {}
@@ -88,6 +90,19 @@ public:
   }
 
   /// string[MaxLen]; all short string types are compatible (Turbo/FPC).
+  Type *getOpenArrayType(Type *Element) {
+    OpenArrayType *&T = OpenArrayTypes[Element];
+    if (!T)
+      T = create<OpenArrayType>(Element);
+    return T;
+  }
+
+  Type *getAnsiStringType() {
+    if (!AnsiString)
+      AnsiString = create<AnsiStringType>();
+    return AnsiString;
+  }
+
   Type *getShortStringType(unsigned MaxLen = 255) {
     ShortStringType *&T = ShortStringTypes[MaxLen];
     if (!T)

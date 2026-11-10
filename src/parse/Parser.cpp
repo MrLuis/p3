@@ -1493,7 +1493,8 @@ TypeSpec *Parser::parseTypeImpl() {
       if (!(MaxLen = parseExpression()) || !expect(tok::r_square, "after string length"))
         return nullptr;
     }
-    return Ctx.create<StringTypeSpec>(SourceRange(Start, PrevTokEnd), MaxLen);
+    return Ctx.create<StringTypeSpec>(SourceRange(Start, PrevTokEnd), MaxLen,
+                                      !MaxLen && Lex.longStrings());
   }
   case tok::kw_file: {
     consumeToken();
@@ -1575,7 +1576,8 @@ TypeSpec *Parser::parseTypeImpl() {
 // typeIdent (ISO requires these for parameters and function results)
 TypeSpec *Parser::parseTypeIdentifier(llvm::StringRef Context) {
   if (Tok.is(tok::kw_string)) { // Turbo/FPC: `string` names a type here
-    auto *TS = Ctx.create<StringTypeSpec>(Tok.getRange(), nullptr);
+    auto *TS = Ctx.create<StringTypeSpec>(Tok.getRange(), nullptr,
+                                          Lex.longStrings());
     consumeToken();
     return TS;
   }
@@ -1583,6 +1585,20 @@ TypeSpec *Parser::parseTypeIdentifier(llvm::StringRef Context) {
     auto *TS = Ctx.create<NamedTypeSpec>(makeIdentifier(Tok));
     consumeToken();
     return TS;
+  }
+  if (Tok.is(tok::kw_array) && Context == "parameter type" && LangOpts.Mode != LangMode::ISO &&
+      peekToken().is(tok::kw_of)) { // Turbo/FPC: array of const, array of T
+    SourceLocation Start = Tok.getLocation();
+    consumeToken(); // array
+    consumeToken(); // of
+    if (Tok.is(tok::kw_const)) {
+      consumeToken();
+      return Ctx.create<ArrayOfConstTypeSpec>(SourceRange(Start, PrevTokEnd));
+    }
+    TypeSpec *Element = parseTypeIdentifier("the elements of an open array");
+    if (!Element)
+      return nullptr;
+    return Ctx.create<OpenArrayTypeSpec>(SourceRange(Start, PrevTokEnd), Element);
   }
   if (Tok.isOneOf(tok::kw_array, tok::kw_packed) && Context == "parameter type")
     unsupported("conformant array parameters are");
@@ -2838,6 +2854,19 @@ Expr *Parser::parseSelectors(Expr *Base) {
 // factor = unsignedConst | designator | ident "(" args ")"
 //        | "(" expression ")" | "not" factor .
 Expr *Parser::parseFactor() {
+  // string(x): a typecast to the type `string` now means.
+  if (Tok.is(tok::kw_string) && LangOpts.Mode != LangMode::ISO &&
+      peekToken().is(tok::l_paren)) {
+    Identifier Name{Ctx.getStrings().intern(Lex.longStrings() ? "ansistring"
+                                                              : "shortstring"),
+                    Tok.getRawText(), Tok.getLocation()};
+    consumeToken();
+    llvm::SmallVector<Expr *, 4> Args;
+    if (!parseActualParams(Args, /*AllowFormat=*/false) && Args.empty())
+      return nullptr;
+    return parseSelectors(Ctx.create<CallExpr>(SourceRange(Name.Loc, PrevTokEnd),
+                                               Name, Ctx.copyArray<Expr *>(Args)));
+  }
   switch (Tok.getKind()) {
   case tok::integer_literal: {
     auto *E = Ctx.create<IntegerLiteralExpr>(Tok.getRange(),

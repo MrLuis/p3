@@ -787,7 +787,9 @@ public:
   enum TypeSpecKind {
     TS_Named, TS_Enum, TS_Subrange, TS_Array, TS_Record, TS_Pointer, TS_Set,
     TS_File, TS_Routine, TS_String, TS_Class, TS_ClassRef, TS_Interface,
-    TS_Untyped
+    TS_Untyped,
+    TS_ArrayOfConst,
+    TS_OpenArray
   };
 
 private:
@@ -934,13 +936,33 @@ public:
 
 /// string [ '[' MaxLen ']' ]  (Turbo/FPC)
 class StringTypeSpec final : public TypeSpec {
-  Expr *MaxLen; ///< null for plain `string` (255)
+  Expr *MaxLen; ///< null for plain `string`
+  bool Long;    ///< plain `string` under {$H+}: an ansistring
 
 public:
-  StringTypeSpec(SourceRange R, Expr *MaxLen)
-      : TypeSpec(TS_String, R), MaxLen(MaxLen) {}
+  StringTypeSpec(SourceRange R, Expr *MaxLen, bool Long = false)
+      : TypeSpec(TS_String, R), MaxLen(MaxLen), Long(Long) {}
   Expr *getMaxLength() const { return MaxLen; }
+  bool isLong() const { return Long; }
   static bool classof(const TypeSpec *T) { return T->getKind() == TS_String; }
+};
+
+/// A parameter's `array of T`.
+class OpenArrayTypeSpec final : public TypeSpec {
+  TypeSpec *Element;
+
+public:
+  OpenArrayTypeSpec(SourceRange R, TypeSpec *Element)
+      : TypeSpec(TS_OpenArray, R), Element(Element) {}
+  TypeSpec *getElement() const { return Element; }
+  static bool classof(const TypeSpec *T) { return T->getKind() == TS_OpenArray; }
+};
+
+/// A parameter's `array of const`.
+class ArrayOfConstTypeSpec final : public TypeSpec {
+public:
+  explicit ArrayOfConstTypeSpec(SourceRange R) : TypeSpec(TS_ArrayOfConst, R) {}
+  static bool classof(const TypeSpec *T) { return T->getKind() == TS_ArrayOfConst; }
 };
 
 /// The (absent) type of an untyped parameter:  var x;  const x  (Turbo/FPC)
@@ -1237,7 +1259,7 @@ enum class MethodKind : unsigned char {
 /// Predeclared methods without a Pascal body: TObject's, and
 /// Exception.Create (objfpc).
 enum class TObjectMethod : unsigned char {
-  None, Create, Destroy, Free, ClassName, ExceptionCreate,
+  None, Create, Destroy, Free, ClassName, ExceptionCreate, ExceptionCreateFmt,
   ClassType, ClassParent, InheritsFrom, InstanceSize
 };
 

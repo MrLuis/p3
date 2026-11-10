@@ -1,0 +1,4 @@
+program iso;
+procedure p(a: array of integer); begin end;
+begin
+end.

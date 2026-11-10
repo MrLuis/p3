@@ -21,7 +21,7 @@ configure_file(lit.site.cfg.py.in ${CMAKE_CURRENT_BINARY_DIR}/lit.site.cfg.py @O
 if(LIT_EXECUTABLE AND FILECHECK_EXECUTABLE)
   add_custom_target(check
     COMMAND ${LIT_EXECUTABLE} -sv ${CMAKE_CURRENT_BINARY_DIR}
-    DEPENDS pcc pcc-unittests pascalrt
+    DEPENDS pcc pcc-unittests pascalrt rtl
     COMMENT "Running pcc test suite"
     USES_TERMINAL)
   add_test(NAME lit COMMAND ${LIT_EXECUTABLE} -sv ${CMAKE_CURRENT_BINARY_DIR})

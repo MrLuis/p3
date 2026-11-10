@@ -72,6 +72,7 @@ var
   curFn: PIRFunc;
   curFrame: TV;
   lowered: TIntMap;          { type id -> PIRType }
+  ansiConsts: TIntMap;       { name id of the characters -> PTVBox of the .astr }
   stringConsts: TIntMap;     { name id of the bytes -> PTVBox of the global }
   routinesToEmit: TPtrList;  { of PDecl }
   thunksToEmit: TPtrList;    { of PDecl: cdecl routines with a cthunk }
@@ -569,6 +570,7 @@ begin
     tyPointer, tyNil, tyFile: lowerType := irPtrT;
     tySet: lowerType := irI256;
     tyShortString: lowerType := irArray(t^.maxLength + 1, irI8);
+    tyAnsiString, tyArrayOfConst, tyOpenArray: lowerType := irPtrT;
     tyRoutine: lowerType := routinePairT;
     tyClass: lowerType := irPtrT; { a reference to the object }
     tyClassRef: lowerType := irPtrT; { a reference to the class's VMT }
@@ -934,7 +936,8 @@ end;
 
 function isByRef(v: PDecl): boolean;
 begin
-  isByRef := (v^.varKind = vkVarParam) or (v^.varType^.kind = tyUntyped) or
+  isByRef := ((v^.varKind = vkVarParam) and not (v^.varType^.kind in [tyArrayOfConst, tyOpenArray])) or
+             (v^.varType^.kind = tyUntyped) or
              ((v^.varKind = vkConstParam) and isStructured(v^.varType));
 end;
 
@@ -1225,6 +1228,60 @@ begin
   bufFree(b);
 end;
 
+function classRuntime(const name, ret, params: string): PIRFunc; forward;
+function holdResult(const v: TV): TV; forward;
+
+procedure astrV1(const name: string; const x: TV);
+var
+  ignored: TV;
+begin
+  ignored := call1(classRuntime(name, 'void', 'ptr'), x, '');
+end;
+
+procedure astrV2(const name, params: string; const x, y: TV);
+var
+  ignored: TV;
+begin
+  ignored := call2(classRuntime(name, 'void', params), x, y, '');
+end;
+
+procedure astrV3(const name, params: string; const x, y, z: TV);
+var
+  ignored: TV;
+begin
+  ignored := call3(classRuntime(name, 'void', params), x, y, z, '');
+end;
+
+{ A string constant as an ansistring: static characters after a header
+  (count -1, length); null when empty. }
+function getAnsiConstant(p: PCharArray; start, count: int64): TV;
+var
+  key: PName;
+  g: PTVBox;
+  b: TBuf;
+  i: longint;
+begin
+  if count = 0 then
+    exit(irNull);
+  key := internChars(p, start, count);
+  g := PTVBox(mapGet(ansiConsts, key^.id));
+  if g = nil then
+  begin
+    bufInit(b);
+    for i := 1 to 8 do
+      bufAddChar(b, chr(255));
+    for i := 0 to 7 do
+      bufAddChar(b, chr((count shr (8 * i)) and 255));
+    bufAddChars(b, p, start, count);
+    bufAddChar(b, chr(0));
+    g := irBox(irGlobal('.astr', 'private', irArray(b.len, irI8),
+                        irConstBytes(b.data, 0, b.len), true, false, false, 8));
+    mapPut(ansiConsts, key^.id, g);
+    bufFree(b);
+  end;
+  getAnsiConstant := irGEP1(irI8, g^, i64c(16), true, '');
+end;
+
 function newStringTemp(maxLen: int64): TV;
 begin
   newStringTemp := irCreateTemp(irArray(maxLen + 1, irI8), 'str');
@@ -1241,6 +1298,13 @@ begin
   t := e^.typ;
   if t^.kind = tyShortString then
     exit(visitExpr(e)); { designators give their address, results a temp }
+  if t^.kind = tyAnsiString then
+  begin
+    c := visitExpr(e);
+    tmp := newStringTemp(255);
+    astrV3('__pas_astr_to_pstr', 'ptr,i32,ptr', tmp, i32c(255), c);
+    exit(tmp);
+  end;
   if e^.kind = nkStringLit then
     exit(getPStrConstant(e^.strValue^.chars, 0, e^.strValue^.len));
   if e^.kind = nkNameRef then
@@ -1268,12 +1332,221 @@ begin
   emitPStr := tmp;
 end;
 
+{ Any string-like expression, or a pchar, as an ansistring (borrowed: a
+  new one is held until the statement ends). }
+function emitAnsi(e: PNode): TV;
+var
+  t: PType;
+  d: PDecl;
+  s: TV;
+begin
+  t := e^.typ;
+  if t^.kind = tyAnsiString then
+    exit(visitExpr(e));
+  if e^.kind = nkStringLit then
+    exit(getAnsiConstant(e^.strValue^.chars, 0, e^.strValue^.len));
+  if e^.kind = nkNameRef then
+  begin
+    d := e^.refDecl;
+    if (d^.kind = dkConst) and (d^.constValue.kind = ckString) then
+      exit(getAnsiConstant(d^.constValue.strVal^.chars, 0, d^.constValue.strVal^.len));
+  end;
+  if isCharBase(t) then
+  begin
+    s := visitExpr(e);
+    exit(holdResult(call1(classRuntime('__pas_astr_from_char', 'ptr', 'i8'), s, '')));
+  end;
+  if t^.kind = tyPointer then
+  begin
+    s := visitExpr(e);
+    exit(holdResult(call1(classRuntime('__pas_astr_from_cstr', 'ptr', 'ptr'), s, '')));
+  end;
+  s := emitPStr(e);
+  emitAnsi := holdResult(call1(classRuntime('__pas_astr_from_pstr', 'ptr', 'ptr'), s, ''));
+end;
+
+{ An element's value as stored in its TVarRec (kind: its VType). }
+function emitConstArrayValue(e: PNode; var kind: longint): TV;
+var
+  t: PType;
+  v, tmp: TV;
+begin
+  t := e^.typ;
+  if (t^.kind = tyStringLit) or (t^.kind = tyAnsiString) then
+  begin
+    kind := 11; { vtAnsiString }
+    exit(emitAnsi(e));
+  end;
+  if (t^.kind = tyShortString) or isStringType(t) then
+  begin
+    kind := 4; { vtString }
+    exit(emitPStr(e));
+  end;
+  if (t^.kind = tyReal) or isIntegerLike(t) then
+  begin
+    v := visitExpr(e);
+    if isIntegerLike(t) and (intBits(t) <> 64) then
+    begin
+      kind := 0; { vtInteger }
+      exit(toI64(v, t));
+    end;
+    if t^.kind = tyReal then { vtExtended, vtInt64: by reference }
+      kind := 3
+    else
+      kind := 16;
+    tmp := irCreateTemp(v.t, 'arg');
+    irStore(v, tmp);
+    exit(tmp);
+  end;
+  if isCharBase(t) or (getBase(t)^.kind = tyBoolean) then
+  begin
+    if isCharBase(t) then { vtChar, vtBoolean }
+      kind := 2
+    else
+      kind := 1;
+    exit(irCast('zext', visitExpr(e), irI64, ''));
+  end;
+  if t^.kind = tyClass then { vtObject, vtClass, vtPointer }
+    kind := 7
+  else if t^.kind = tyClassRef then
+    kind := 8
+  else
+    kind := 5;
+  if (t^.kind = tyPointer) and not t^.untyped and (t^.pointee <> nil) and
+     (t^.pointee^.kind = tyChar) then
+    kind := 6; { vtPChar }
+  emitConstArrayValue := visitExpr(e);
+end;
+
+{ The array of const passed for arg: another array of const, or [...] built
+  in a temporary: a header slot (the count), then (VType, value) slots. }
+function emitConstArray(arg: PNode): TV;
+var
+  tmp, v: TV;
+  i, kind: longint;
+  slot: int64;
+begin
+  if arg^.kind <> nkSetCtor then
+    exit(visitExpr(arg));
+  tmp := irCreateTemp(irArray(2 * (arg^.setElems.count + 1), irI64), 'args');
+  irStore(i64c(arg^.setElems.count), tmp);
+  slot := 2;
+  for i := 0 to arg^.setElems.count - 1 do
+  begin
+    v := emitConstArrayValue(PSetElement(listGet(arg^.setElems, i))^.lo, kind);
+    irStore(i64c(kind), irGEP1(irI64, tmp, i64c(slot), true, ''));
+    irStore(v, irGEP1(irI64, tmp, i64c(slot + 1), true, ''));
+    slot := slot + 2;
+  end;
+  emitConstArray := tmp;
+end;
+
 procedure emitStringAssign(const dst: TV; t: PType; value: PNode);
 var
   src: TV;
 begin
   src := emitPStr(value);
   rtv3('__pas_str_assign', dst, i32c(t^.maxLength), src);
+end;
+
+function cStringFor(paramTy: PType; arg: PNode; var v: TV): boolean; forward;
+
+{ The descriptor (data, count) of the open array parameter e. }
+function openDescriptor(e: PNode): TV;
+begin
+  openDescriptor := irLoad(irPtrT, varAddress(e^.refDecl), 'open');
+end;
+
+function openCount(const desc: TV): TV;
+begin
+  openCount := irLoad(irI64, irGEP1(irI64, desc, i64c(1), true, ''), 'count');
+end;
+
+function newOpenDescriptor(const data, count: TV): TV;
+var
+  desc: TV;
+begin
+  desc := irCreateTemp(irArray(2, irI64), 'open');
+  irStore(data, desc);
+  irStore(count, irGEP1(irI64, desc, i64c(1), true, ''));
+  newOpenDescriptor := desc;
+end;
+
+function emitOpenArrayCtor(s: PNode; oa: PType): TV;
+var
+  elemT: PType;
+  arrT: PIRType;
+  arr, slot, v: TV;
+  i: longint;
+  e: PNode;
+begin
+  elemT := oa^.openElement;
+  if s^.setElems.count = 0 then
+    exit(newOpenDescriptor(irNull, i64c(0)));
+  arrT := irArray(s^.setElems.count, memType(elemT));
+  arr := irCreateTemp(arrT, 'elems');
+  for i := 0 to s^.setElems.count - 1 do
+  begin
+    e := PSetElement(listGet(s^.setElems, i))^.lo;
+    slot := irGEP2(arrT, arr, i64c(0), i64c(i), '');
+    { borrowed: the callee counts what it keeps }
+    if elemT^.kind = tyShortString then
+      emitStringAssign(slot, elemT, e)
+    else if elemT^.kind = tyAnsiString then
+      irStore(emitAnsi(e), slot)
+    else if isStructured(elemT) then
+      copyAggregate(slot, emitAddress(e), elemT)
+    else if cStringFor(elemT, e, v) then
+      irStore(v, slot)
+    else
+      storeScalar(slot, convertForAssign(visitExpr(e), e^.typ, elemT, e^.b), elemT);
+  end;
+  emitOpenArrayCtor := newOpenDescriptor(arr, i64c(s^.setElems.count));
+end;
+
+{ The open array passed for arg: another one, [...] built in a temporary,
+  an array, or a string constant. }
+function emitOpenArrayArg(arg: PNode; oa: PType): TV;
+var
+  t: PType;
+  bd: TOrdinalBounds;
+  data, c: TV;
+begin
+  t := arg^.typ;
+  if arg^.kind = nkSetCtor then { typed as the parameter }
+    exit(emitOpenArrayCtor(arg, oa));
+  if t = oa then
+    exit(openDescriptor(arg));
+  if t^.kind = tyArray then
+  begin
+    bd := getOrdinalBounds(t^.indexType);
+    data := emitAddress(arg);
+    exit(newOpenDescriptor(data, i64c(bd.hi - bd.lo + 1)));
+  end;
+  if t^.kind = tyStringLit then
+  begin
+    data := emitAddress(arg);
+    exit(newOpenDescriptor(data, i64c(getStringLength(t))));
+  end;
+  c := irCreateTemp(irI8, 'chr'); { a char constant }
+  irStore(visitExpr(arg), c);
+  emitOpenArrayArg := newOpenDescriptor(c, i64c(1));
+end;
+
+{ A value parameter's own copy of the open array in frame slot slot. }
+procedure copyOpenArray(const slot: TV; oa: PType);
+var
+  et: PIRType;
+  desc, data, n, copy_, size: TV;
+begin
+  et := memType(oa^.openElement);
+  desc := irLoad(irPtrT, slot, 'open');
+  data := irLoad(irPtrT, desc, 'data');
+  n := openCount(desc);
+  copy_ := irDynAlloca(et, n, 'copy');
+  size := irBin('mul', n, i64c(sizeOf_(oa^.openElement)), '');
+  emitMemCpy(copy_, data, size);
+  irStore(newOpenDescriptor(copy_, n), slot);
 end;
 
 function emitStringFunction(e: PNode; k: TBuiltinKind): TV;
@@ -1288,6 +1561,15 @@ begin
     bkLength:
       begin
         t := a0^.typ;
+        if t^.kind = tyOpenArray then
+          exit(irCast('trunc', openCount(openDescriptor(a0)), irI32, ''));
+        if t^.kind = tyArrayOfConst then
+          exit(irCast('trunc', irLoad(irI64, visitExpr(a0), ''), irI32, ''));
+        if t^.kind = tyAnsiString then
+        begin
+          s0 := visitExpr(a0);
+          exit(call1(classRuntime('__pas_astr_length', 'i32', 'ptr'), s0, ''));
+        end;
         if t^.kind = tyShortString then
         begin
           len := irLoad(irI8, emitPStr(a0), '');
@@ -1311,12 +1593,27 @@ begin
       end;
     bkPos:
       begin
+        if (a0^.typ^.kind = tyAnsiString) or
+           (PNode(listGet(e^.args, 1))^.typ^.kind = tyAnsiString) then
+        begin
+          s0 := emitAnsi(a0);
+          s1 := emitAnsi(PNode(listGet(e^.args, 1)));
+          exit(call2(classRuntime('__pas_astr_pos', 'i32', 'ptr,ptr'), s0, s1, ''));
+        end;
         s0 := emitPStr(a0);
         s1 := emitPStr(PNode(listGet(e^.args, 1)));
         exit(call2(rtFn('__pas_str_pos'), s0, s1, ''));
       end;
     bkCopy:
       begin
+        if a0^.typ^.kind = tyAnsiString then
+        begin
+          s0 := visitExpr(a0);
+          n1 := emitI32(PNode(listGet(e^.args, 1)));
+          n2 := emitI32(PNode(listGet(e^.args, 2)));
+          exit(holdResult(call3(classRuntime('__pas_astr_copy', 'ptr', 'ptr,i32,i32'),
+                                s0, n1, n2, '')));
+        end;
         tmp := newStringTemp(255);
         s0 := emitPStr(a0);
         n1 := emitI32(PNode(listGet(e^.args, 1)));
@@ -1327,6 +1624,17 @@ begin
   else
     begin
       { concat }
+      if e^.typ^.kind = tyAnsiString then
+      begin
+        tmp := emitAnsi(a0);
+        for i := 1 to e^.args.count - 1 do
+        begin
+          s1 := emitAnsi(PNode(listGet(e^.args, i)));
+          tmp := holdResult(call2(classRuntime('__pas_astr_concat', 'ptr', 'ptr,ptr'),
+                                  tmp, s1, ''));
+        end;
+        exit(tmp);
+      end;
       tmp := newStringTemp(255);
       s0 := emitPStr(a0);
       rtv3('__pas_str_assign', tmp, i32c(255), s0);
@@ -1423,6 +1731,25 @@ end;
 
 function emitConversion(e: PNode): TV; forward;
 
+{ Is e a const parameter (whose value its caller owns)? }
+function isConstParamRef(e: PNode): boolean;
+begin
+  isConstParamRef := (e^.kind = nkNameRef) and (e^.refDecl^.kind = dkVar) and
+                     (e^.refDecl^.varKind = vkConstParam);
+end;
+
+procedure emitAnsiIndexCheck(const s, x: TV; loc: TLoc);
+var
+  bad: TV;
+begin
+  if rangeChecks(loc) then
+  begin
+    bad := call2(classRuntime('__pas_astr_bad_index', 'i32', 'ptr,i64'), s, x, '');
+    bad := irICmp('ne', bad, i32c(0), '');
+    emitRuntimeCheck(bad, 'string index out of bounds', loc);
+  end;
+end;
+
 function emitAddress(e: PNode): TV;
 var
   d: PDecl;
@@ -1433,6 +1760,8 @@ var
 begin
   if (e^.convOp <> nil) and not e^.convSuspended then
     exit(emitConversion(e)); { converted to a record: a temporary }
+  if (e^.typ <> nil) and (e^.typ^.kind = tyOpenArray) then { its elements }
+    exit(irLoad(irPtrT, openDescriptor(e), 'data'));
   case e^.kind of
     nkBinary, nkUnary:
       { a record's operator returning a record: a temporary holding it }
@@ -1472,6 +1801,44 @@ begin
       begin
         bt := e^.base^.typ;
         idxTy := e^.index^.typ;
+        if bt^.kind = tyOpenArray then
+        begin
+          base := emitAddress(e^.base);
+          x := toI64(visitExpr(e^.index), idxTy);
+          if rangeChecks(e^.index^.b) then
+          begin
+            bad := irICmp('uge', x, openCount(openDescriptor(e^.base)), '');
+            emitRuntimeCheck(bad, 'array index out of bounds', e^.index^.b);
+          end;
+          exit(irGEP1(memType(bt^.openElement), base, x, true, ''));
+        end;
+        if bt^.kind = tyArrayOfConst then
+        begin
+          base := visitExpr(e^.base);
+          x := toI64(visitExpr(e^.index), idxTy);
+          if rangeChecks(e^.index^.b) then
+          begin
+            bad := call2(classRuntime('__pas_aoc_bad_index', 'i32', 'ptr,i64'), base, x, '');
+            bad := irICmp('ne', bad, i32c(0), '');
+            emitRuntimeCheck(bad, 'array index out of bounds', e^.index^.b);
+          end;
+          offset := irBin('add', x, i64c(1), '');
+          exit(irGEP1(memType(bt^.aocElement), base, offset, true, ''));
+        end;
+        if bt^.kind = tyAnsiString then
+        begin
+          { an address may be written through: the string must be unshared,
+            but a const parameter's belongs to the caller }
+          base := emitAddress(e^.base);
+          x := toI64(visitExpr(e^.index), idxTy);
+          if isConstParamRef(e^.base) then
+            base := irLoad(irPtrT, base, 's')
+          else
+            base := call1(classRuntime('__pas_astr_unique', 'ptr', 'ptr'), base, '');
+          emitAnsiIndexCheck(base, x, e^.index^.b);
+          offset := irBin('sub', x, i64c(1), '');
+          exit(irGEP1(irI8, base, offset, true, ''));
+        end;
         if bt^.kind = tyShortString then
         begin
           base := emitAddress(e^.base);
@@ -1648,7 +2015,7 @@ end;
   copy was made). }
 procedure manageValue(const addr: TV; t: PType; addRef: boolean);
 var
-  i, elem, next, done, obj: TV;
+  i, elem, next, done, obj, desc, data, n: TV;
   bd: TOrdinalBounds;
   pre, loopB, doneB: PIRBlock;
   phi: PIRInst;
@@ -1657,6 +2024,38 @@ var
   what: string;
 begin
   case t^.kind of
+    tyOpenArray:
+      begin
+        if addRef then
+          what := 'addref'
+        else
+          what := 'fini';
+        desc := irLoad(irPtrT, addr, 'open');
+        data := irLoad(irPtrT, desc, 'data');
+        n := openCount(desc);
+        pre := irInsertBlock;
+        loopB := irNewBlock(what + '.loop');
+        doneB := irNewBlock(what + '.done');
+        irCondBr(irICmp('eq', n, i64c(0), ''), doneB, loopB, false);
+        irSetInsertPoint(loopB);
+        i := irPhi(irI64, 'i', phi);
+        irAddIncoming(phi, i64c(0), pre);
+        elem := irGEP1(memType(t^.openElement), data, i, true, '');
+        manageValue(elem, t^.openElement, addRef);
+        next := irBin('add', i, i64c(1), '');
+        irAddIncoming(phi, next, irInsertBlock);
+        done := irICmp('eq', next, n, '');
+        irCondBr(done, doneB, loopB, false);
+        irSetInsertPoint(doneB);
+      end;
+    tyAnsiString:
+      if addRef then
+      begin
+        obj := irLoad(irPtrT, addr, 's');
+        astrV1('__pas_astr_addref', obj);
+      end
+      else
+        astrV1('__pas_astr_clear', addr);
     tyInterface:
       if addRef then
       begin
@@ -1712,13 +2111,20 @@ end;
 { dst^ := src^ for a record or array t: counted if it holds COM
   interfaces. }
 procedure copyValue(const dst, src: TV; t: PType);
+var
+  old: TV;
 begin
   if isManaged(t) then
   begin
     addRefValue(src, t);
-    finalizeValue(dst, t);
-  end;
-  copyAggregate(dst, src, t);
+    { the old value is released last: src and dst may be the same object }
+    old := irCreateTemp(memType(t), 'old');
+    copyAggregate(old, dst, t);
+    copyAggregate(dst, src, t);
+    finalizeValue(old, t);
+  end
+  else
+    copyAggregate(dst, src, t);
 end;
 
 { addr^ := v for a COM interface. }
@@ -1734,10 +2140,24 @@ end;
 { Stores v (scalar, of type t) at addr: counted for COM interfaces. }
 procedure storeValue(const addr, v: TV; t: PType);
 begin
-  if isManaged(t) then
+  if t^.kind = tyAnsiString then
+    astrV2('__pas_astr_assign', 'ptr,ptr', addr, v)
+  else if isManaged(t) then
     storeInterface(addr, v)
   else
     storeScalar(addr, v, t);
+end;
+
+{ Releases the ansistring or COM interface held in the temporary slot
+  (ansistring temporaries are named astr.tmp). }
+procedure clearTemp(const slot: TV);
+begin
+  if slot.agg <> nil then { a record temporary: agg is its type }
+    finalizeValue(slot, PType(slot.agg))
+  else if copy(slot.v, 1, 9) = '%astr.tmp' then
+    astrV1('__pas_astr_clear', slot)
+  else
+    intfCall1('__pas_intf_clear', slot);
 end;
 
 { A function's result v, a COM interface (a reference the caller now
@@ -1746,13 +2166,32 @@ function holdResult(const v: TV): TV;
 var
   slot: TV;
 begin
-  slot := irCreateTempInit(v.t, 'intf.tmp', irZero(v.t));
-  intfCall1('__pas_intf_clear', slot); { a loop's previous }
+  if irSameType(v.t, irPtrT) then
+    slot := irCreateTempInit(v.t, 'astr.tmp', irZero(v.t))
+  else
+    slot := irCreateTempInit(v.t, 'intf.tmp', irZero(v.t));
+  clearTemp(slot); { a loop's previous }
   irStore(v, slot);
   listAdd(liveTemps, irBox(slot));
   if curRoutine <> nil then
     listAdd(routineTemps, irBox(slot));
   holdResult := v;
+end;
+
+{ A function's record result v, holding ansistrings the caller now owns:
+  kept in a temporary until the statement ends. Returns its address. }
+function holdRecordResult(const v: TV; t: PType): TV;
+var
+  slot: TV;
+begin
+  slot := irCreateTempInit(v.t, 'rec.tmp', irZero(v.t));
+  finalizeValue(slot, t); { a loop's previous }
+  irStore(v, slot);
+  slot.agg := t;
+  listAdd(liveTemps, irBox(slot));
+  if curRoutine <> nil then
+    listAdd(routineTemps, irBox(slot));
+  holdRecordResult := slot;
 end;
 
 { Releases the temporaries held since liveTemps had mark entries. }
@@ -1761,7 +2200,7 @@ var
   k: longint;
 begin
   for k := mark to liveTemps.count - 1 do
-    intfCall1('__pas_intf_clear', PTVBox(listGet(liveTemps, k))^);
+    clearTemp(PTVBox(listGet(liveTemps, k))^);
   while liveTemps.count > mark do
     listPop(liveTemps);
 end;
@@ -1844,6 +2283,10 @@ begin
     pt := p^.varType;
     if pt^.kind = tyUntyped then { Turbo/FPC: a variable, by reference }
       irArgsAdd(buf, emitAddress(arg))
+    else if pt^.kind = tyOpenArray then
+      irArgsAdd(buf, emitOpenArrayArg(arg, pt))
+    else if pt^.kind = tyArrayOfConst then
+      irArgsAdd(buf, emitConstArray(arg))
     else if cStringFor(pt, arg, v) then
       irArgsAdd(buf, v)
     else if (pt^.kind = tyRoutine) and toC then
@@ -1861,6 +2304,8 @@ begin
     end
     else if (p^.varKind = vkVarParam) or isStructured(pt) then
       irArgsAdd(buf, emitAddress(arg))
+    else if pt^.kind = tyAnsiString then
+      irArgsAdd(buf, emitAnsi(arg))
     else
       irArgsAdd(buf, convertForAssign(visitExpr(arg), arg^.typ, pt, arg^.b));
   end;
@@ -1885,6 +2330,8 @@ begin
     address (an interface, (ptr, ptr), is a value) }
   if (ret^.kind = ikArray) or ((ret^.kind = ikStruct) and not irSameType(ret, routinePairT)) then
   begin
+    if (resTy <> nil) and (resTy^.kind = tyRecord) and isManaged(resTy) then
+      exit(holdRecordResult(res, resTy));
     tmp := irCreateTemp(ret, 'result');
     irStore(res, tmp);
     exit(tmp);
@@ -2299,6 +2746,15 @@ begin
         msgField := findOwnMember(r^.ownerClass, intern('fmessage'));
         emitStringAssign(fieldAddress(obj, r^.ownerClass, msgField),
                          msgField^.fieldType, PNode(listGet(args, 0)));
+        exit;
+      end;
+    obExceptionCreateFmt: { FMessage := Format(msg, args) }
+      begin
+        msgField := findOwnMember(r^.ownerClass, intern('fmessage'));
+        arg := emitAnsi(PNode(listGet(args, 0)));
+        inh := emitConstArray(PNode(listGet(args, 1)));
+        astrV3('__pas_format_pstr', 'ptr,ptr,ptr', fieldAddress(obj, r^.ownerClass, msgField),
+               arg, inh);
         exit;
       end;
     obFree:
@@ -2905,6 +3361,14 @@ begin
       end;
     end;
   end;
+  if needsStringCompare(lt, rt) and
+     ((lt^.kind = tyAnsiString) or (rt^.kind = tyAnsiString)) then
+  begin
+    l := emitAnsi(e^.lhs);
+    r := emitAnsi(e^.rhs);
+    cmp := call2(classRuntime('__pas_astr_compare', 'i32', 'ptr,ptr'), l, r, '');
+    exit(compareInts(op, cmp, i32c(0), true));
+  end;
   if needsStringCompare(lt, rt) then
   begin
     { Turbo/FPC string comparison }
@@ -2983,7 +3447,20 @@ var
   v: TV;
 begin
   arg := PNode(listGet(e^.args, 0));
+  if (e^.typ^.kind = tyAnsiString) and (arg^.typ^.kind = tyPointer) and arg^.typ^.untyped then
+    exit(visitExpr(arg)); { the pointer is an ansistring: borrowed }
+  if e^.typ^.kind = tyAnsiString then
+    exit(emitAnsi(arg));
+  if e^.typ^.kind = tyShortString then
+    exit(emitPStr(arg));
   v := visitExpr(arg);
+  if arg^.typ^.kind = tyAnsiString then
+  begin
+    { pchar(s) is never nil }
+    if not e^.typ^.untyped and (e^.typ^.pointee^.kind = tyChar) then
+      exit(call1(classRuntime('__pas_astr_pchar', 'ptr', 'ptr'), v, ''));
+    exit(v);
+  end;
   if isOrdinal(e^.typ) then
     exit(convertOrdinal(v, arg^.typ, e^.typ));
   if e^.typ^.kind = tyInterface then
@@ -3053,10 +3530,30 @@ var
 begin
   case k of
     bkSizeOf: { the argument is not evaluated }
-      exit(i64c(sizeOf_(PNode(listGet(e^.args, 0))^.typ)));
+      begin
+        t := PNode(listGet(e^.args, 0))^.typ;
+        if t^.kind = tyOpenArray then
+          exit(irBin('mul', openCount(openDescriptor(PNode(listGet(e^.args, 0)))),
+                     i64c(sizeOf_(t^.openElement)), ''));
+        exit(i64c(sizeOf_(t)));
+      end;
     bkLow, bkHigh:
       begin
         t := PNode(listGet(e^.args, 0))^.typ;
+        if t^.kind = tyOpenArray then
+        begin
+          if k = bkLow then
+            exit(i32c(0));
+          exit(irBin('sub', irCast('trunc', openCount(openDescriptor(PNode(listGet(e^.args, 0)))),
+                                   irI32, ''), i32c(1), ''));
+        end;
+        if t^.kind = tyArrayOfConst then
+        begin
+          if k = bkLow then
+            exit(i32c(0));
+          exit(irBin('sub', irCast('trunc', irLoad(irI64, visitExpr(PNode(listGet(e^.args, 0))), ''),
+                                   irI32, ''), i32c(1), ''));
+        end;
         if t^.kind = tyShortString then
         begin
           if k = bkHigh then
@@ -3299,6 +3796,12 @@ begin
     exit(emitIsAs(e));
   if (op in [boAnd, boOr]) and (e^.typ^.kind = tyBoolean) then
     exit(emitShortCircuit(e));
+  if e^.typ^.kind = tyAnsiString then
+  begin
+    l := emitAnsi(e^.lhs);
+    r := emitAnsi(e^.rhs);
+    exit(holdResult(call2(classRuntime('__pas_astr_concat', 'ptr', 'ptr,ptr'), l, r, '')));
+  end;
   if e^.typ^.kind = tyShortString then
   begin
     { Turbo/FPC concatenation }
@@ -3424,6 +3927,18 @@ begin
   visitIndirectCall := emitCallThrough(pair, callee^.typ, e^.args, callee^.b);
 end;
 
+{ s[i] of an ansistring, read: no copy }
+function emitAnsiIndexRead(e: PNode): TV;
+var
+  s, x, offset: TV;
+begin
+  s := visitExpr(e^.base);
+  x := toI64(visitExpr(e^.index), e^.index^.typ);
+  emitAnsiIndexCheck(s, x, e^.index^.b);
+  offset := irBin('sub', x, i64c(1), '');
+  emitAnsiIndexRead := loadScalar(irGEP1(irI8, s, offset, true, ''), e^.typ, '');
+end;
+
 function visitExprKind(e: PNode): TV;
 var
   noArgs: TPtrList;
@@ -3448,6 +3963,8 @@ begin
         visitExprKind := emitArrayPropertyRead(e)
       else if e^.typ^.kind = tyShortString then
         visitExprKind := emitAddress(e)
+      else if (e^.kind = nkIndex) and (e^.base^.typ^.kind = tyAnsiString) then
+        visitExprKind := emitAnsiIndexRead(e)
       else
         visitExprKind := loadScalar(emitAddress(e), e^.typ, '');
     nkField:

@@ -47,6 +47,7 @@ include_directories(${CMAKE_CURRENT_SOURCE_DIR}/include)
 
 add_subdirectory(src)
 add_subdirectory(runtime)
+add_subdirectory(rtl)
 
 # ---------------------------------------------------------------------------
 # The self-hosted compiler (SELFHOST.md S11) links with libLLVM through the

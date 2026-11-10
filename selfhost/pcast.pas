@@ -63,7 +63,7 @@ type
 
   TTypeKind = (tyError, tyInteger, tyReal, tyBoolean, tyChar, tyEnum,
                tySubrange, tyStringLit, tyArray, tyRecord, tyPointer, tyNil,
-               tySet, tyFile, tyRoutine, tyShortString, tyClass, tyClassRef,
+               tySet, tyFile, tyRoutine, tyShortString, tyAnsiString, tyArrayOfConst, tyOpenArray, tyClass, tyClassRef,
                tyInterface,
                { an untyped parameter's (Turbo/FPC  var x;  const x) }
                tyUntyped);
@@ -89,6 +89,8 @@ type
       tyRoutine: (routineParams: TPtrList; routineResult: PType;
                   routineCDecl: boolean);
       tyShortString: (maxLength: longint);
+      tyArrayOfConst: (aocElement: PType); { TVarRec }
+      tyOpenArray: (openElement: PType);
       { a class (objfpc): its parent (nil only for TObject), own members in
         source order, all fields (the ancestors' first), the virtual methods
         by slot, the program or unit declaring it; a forward declaration
@@ -237,7 +239,8 @@ type
   TTypeSpecKind = (tsNamed, tsEnum, tsSubrange, tsArray, tsRecord,
                    tsPointer, tsSet, tsFile, tsRoutine, tsString, tsClass,
                    tsClassRef, tsInterface,
-                   tsUntyped); { an untyped parameter's (absent) type }
+                   tsUntyped, { an untyped parameter's (absent) type }
+                   tsArrayOfConst, tsOpenArray);
 
   PVariantPart = ^TVariantPart;
 
@@ -258,7 +261,8 @@ type
       tsSet, tsFile: (elemSpec: PTypeSpec);
       tsRoutine: (rtIsFunction: boolean; rtParams: TPtrList; rtResult: PTypeSpec;
                   rtCallConv: longint);
-      tsString: (maxLen: PNode); { nil for plain string }
+      tsOpenArray: (openSpec: PTypeSpec);
+      tsString: (maxLen: PNode; isLong: boolean); { nil for plain string; isLong: under H+ }
       { class (objfpc): the parent's name (nil name: TObject), the members
         (fields, method headings, properties) in source order }
       { (interfaceNames: the rest of class(P, I1, I2), of PIdent) }
@@ -303,7 +307,7 @@ type
   { mtOperator: an advanced record's class operator (a static function) }
   TMethodKind = (mtNone, mtMethod, mtConstructor, mtDestructor, mtOperator);
   TObjMethod = (obNone, obCreate, obDestroy, obFree, obClassName,
-                obExceptionCreate, obClassType, obClassParent, obInheritsFrom,
+                obExceptionCreate, obExceptionCreateFmt, obClassType, obClassParent, obInheritsFrom,
                 obInstanceSize);
   { strict private: visible only in the class's methods; strict
     protected: also in its descendants' (not in the rest of the module) }

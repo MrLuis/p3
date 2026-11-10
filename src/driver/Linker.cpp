@@ -21,6 +21,16 @@ std::string pcc::findRuntimeLibrary() {
   return std::string(Path);
 }
 
+std::string pcc::findUnitLibrary() {
+  if (auto Env = llvm::sys::Process::GetEnv("PCC_UNIT_DIR"))
+    return *Env;
+  std::string Exe = llvm::sys::fs::getMainExecutable(nullptr, nullptr);
+  llvm::SmallString<256> Path(llvm::sys::path::parent_path(Exe));
+  llvm::sys::path::append(Path, "..", "lib", "pascal");
+  llvm::sys::path::remove_dots(Path, /*remove_dot_dot=*/true);
+  return std::string(Path);
+}
+
 static std::string findLinkerDriver(DiagnosticsEngine &Diags) {
   if (auto Env = llvm::sys::Process::GetEnv("PCC_CC")) {
     if (llvm::sys::path::has_parent_path(*Env))

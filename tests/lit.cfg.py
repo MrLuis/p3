@@ -2,7 +2,8 @@
 # lit configuration for the pcc test suite.
 #
 # Substitutions available in RUN lines:
-#   %pcc            the compiler under test
+#   %pcc            the compiler under test, ignoring project files (pcc.json)
+#   %pcc-project    the compiler under test, reading project files
 #   %pcc-unittests  the C++ unit test binary
 #   FileCheck, not  from the LLVM tools directory
 import os
@@ -63,11 +64,17 @@ config.substitutions.append(("%pcc-unittests",
 # the self-hosted one (SELFHOST.md): lit -sv build/tests/sema
 pcc_under_test = os.environ.get("PCC_UNDER_TEST") or \
     os.path.join(config.pcc_tools_dir, "pcc")
-config.substitutions.append(("%pcc", pcc_under_test + " -fdiagnostics-color=never"))
+# %pcc ignores project files, so a pcc.json in a directory above the tree
+# cannot change the tests; the project tests use %pcc-project.
+config.substitutions.append(("%pcc-project", pcc_under_test + " -fdiagnostics-color=never"))
+config.substitutions.append(("%pcc", pcc_under_test + " -fdiagnostics-color=never --no-project"))
 # The tools and runtime pcc uses, if set.
-for var in ("PCC_RUNTIME_LIB", "PCC_CC"):
+for var in ("PCC_RUNTIME_LIB", "PCC_CC", "PCC_UNIT_DIR"):
     if os.environ.get(var):
         config.environment[var] = os.environ[var]
+# This build's unit library, whichever compiler is under test (a self-hosted
+# one built by a test does not sit next to it).
+config.environment.setdefault("PCC_UNIT_DIR", os.path.join(config.pcc_obj_root, "lib", "pascal"))
 
 # On macOS the LLVM tools directory put on PATH above usually holds a
 # Homebrew clang-19, which pcc's driver tries first for linking. Its config
