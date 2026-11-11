@@ -29,6 +29,11 @@
 ; RUN: %pcc --mode=tp --emit-ast %S/Inputs/forin.pas -o %t.forin.ast
 ; RUN: diff %S/Inputs/forin.ast %t.forin.ast
 
+; Nested declarations (objfpc): a qualified type, a method of a nested
+; record (TOuter.TInner.Twice) and a qualified constant as a case label.
+; RUN: %pcc --mode=objfpc --emit-ast %S/Inputs/nested.pas -o %t.nested.ast
+; RUN: diff %S/Inputs/nested.ast %t.nested.ast
+
 ; Case label ranges and else/otherwise are Turbo/FPC extensions.
 ; RUN: not %pcc --emit-ast %S/Inputs/case-errors.pas 2>&1 >/dev/null | FileCheck --check-prefix=CASE %s
 ; CASE: case-errors.pas:5:6: error: case label ranges are a Turbo/Free Pascal extension; use --mode=tp

@@ -24,6 +24,9 @@ class Scope {
   llvm::StringMap<Decl *> Symbols; ///< keyed by canonical (lowercase) name
   RecordType *WithRecord = nullptr;
   ClassType *WithClass = nullptr;
+  /// The nested constants and types of a class (and its ancestors): in its
+  /// declaration, and in the methods of the classes and records it declares.
+  ClassType *NestedOf = nullptr;
   WithContext *With = nullptr;
   /// Interface scopes of used units (Turbo/FPC); later ones take precedence.
   llvm::SmallVector<const Scope *, 2> Imports;
@@ -55,6 +58,20 @@ public:
   Scope(Scope *Parent, ClassType *C, WithContext *W)
       : Parent(Parent), WithClass(C), With(W) {}
 
+  /// A scope exposing the nested constants and types of class C.
+  static Scope nestedIn(Scope *Parent, ClassType *C) {
+    Scope S(Parent);
+    S.NestedOf = C;
+    return S;
+  }
+  /// What a class declares for the classes it contains: constants, types
+  /// and class variables.
+  static bool isNestedDecl(const Decl *D) {
+    if (auto *V = llvm::dyn_cast_or_null<VarDecl>(D))
+      return V->isClassVar();
+    return D && (llvm::isa<TypeDecl>(D) || llvm::isa<ConstDecl>(D));
+  }
+
   Scope *getParent() const { return Parent; }
   void setRoutineBoundary() { RoutineBoundary = true; }
   void addImport(const Scope *S) { Imports.push_back(S); }
@@ -79,11 +96,13 @@ public:
         Fn(F->getName().Name);
       return;
     }
-    if (WithClass) {
-      for (const ClassType *C = WithClass; C; C = C->getParent())
+    if (WithClass || NestedOf) {
+      for (const ClassType *C = WithClass ? WithClass : NestedOf; C;
+           C = C->getParent())
         for (Decl *D : C->getMembers())
-          if (With || (llvm::isa<RoutineDecl>(D) &&
-                       llvm::cast<RoutineDecl>(D)->isStatic()))
+          if ((WithClass && With) || isNestedDecl(D) ||
+              (WithClass && llvm::isa<RoutineDecl>(D) &&
+               llvm::cast<RoutineDecl>(D)->isStatic()))
             Fn(D->getName().Name);
       return;
     }
@@ -97,11 +116,16 @@ public:
   Decl *lookupLocal(llvm::StringRef Name) const {
     if (WithRecord)
       return WithRecord->findField(Name);
+    if (NestedOf) {
+      Decl *D = NestedOf->findMember(Name);
+      return isNestedDecl(D) ? D : nullptr;
+    }
     if (WithClass && !With) {
       // A record's static method: only its class methods and operators
-      // (static) are usable without a record.
-      auto *R = llvm::dyn_cast_or_null<RoutineDecl>(WithClass->findMember(Name));
-      return R && R->isStatic() ? R : nullptr;
+      // (static), constants and types are usable without a record.
+      Decl *D = WithClass->findMember(Name);
+      auto *R = llvm::dyn_cast_or_null<RoutineDecl>(D);
+      return (R && R->isStatic()) || isNestedDecl(D) ? D : nullptr;
     }
     if (WithClass)
       return WithClass->findMember(Name);

@@ -104,8 +104,13 @@ class Parser {
   /// Declaration parts; InInterface: routine headings without bodies.
   void parseDeclarations(llvm::SmallVectorImpl<Decl *> &Decls, bool InInterface);
   bool parseUsesClause(llvm::SmallVectorImpl<Identifier> &Uses);
-  void parseConstPart(llvm::SmallVectorImpl<Decl *> &Decls);
-  void parseTypePart(llvm::SmallVectorImpl<Decl *> &Decls);
+  /// InMembers: a section of a class or advanced record, which ends at a
+  /// visibility word (private, public, ...).
+  void parseConstPart(llvm::SmallVectorImpl<Decl *> &Decls, bool InMembers = false);
+  void parseTypePart(llvm::SmallVectorImpl<Decl *> &Decls, bool InMembers = false);
+  bool isVisibilityWord() const;
+  /// A type name, qualified by enclosing classes (objfpc): TOuter.TInner.
+  TypeSpec *parseNamedType();
   void parseVarPart(llvm::SmallVectorImpl<Decl *> &Decls);
   RoutineDecl *parseRoutineDecl(bool HeadingOnly = false);
   /// InRecord: in an advanced record (`static` allowed); RecordClassMethod:

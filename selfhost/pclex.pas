@@ -697,7 +697,8 @@ begin
   for i := 1 to length(u) do
     u[i] := upperChar(u[i]);
   predefinedSize := -1;
-  if (u = 'CHAR') or (u = 'BOOLEAN') or (u = 'BYTE') or (u = 'SHORTINT') then
+  if (u = 'CHAR') or (u = 'ANSICHAR') or (u = 'BOOLEAN') or (u = 'BYTE') or
+     (u = 'SHORTINT') then
     predefinedSize := 1
   else if (u = 'WORD') or (u = 'SMALLINT') then
     predefinedSize := 2
@@ -706,7 +707,8 @@ begin
     predefinedSize := 4
   else if (u = 'INT64') or (u = 'REAL') or (u = 'DOUBLE') or
           (u = 'POINTER') or (u = 'PCHAR') or (u = 'ANSISTRING') or
-          (u = 'SIZEINT') or (u = 'PTRINT') or (u = 'NATIVEINT') then
+          (u = 'SIZEINT') or (u = 'PTRINT') or (u = 'NATIVEINT') or
+          (u = 'PANSICHAR') then
     predefinedSize := 8
   else if u = 'SHORTSTRING' then
     predefinedSize := 256;

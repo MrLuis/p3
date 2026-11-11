@@ -1155,6 +1155,24 @@ end;
 
 function emitAddress(e: PNode): TV; forward;
 
+{ A constant used as a member (TFoo.C, obj.C): its reference, which is
+  emitted instead; otherwise e. }
+function unwrapConst(e: PNode): PNode;
+begin
+  unwrapConst := e;
+  if (e^.kind = nkField) and (e^.constRef <> nil) then
+    unwrapConst := e^.constRef;
+end;
+
+{ Does e name a type (TFoo, TOuter.TInner)? }
+function namesType(e: PNode): boolean;
+begin
+  if e^.kind = nkNameRef then
+    exit((e^.refDecl <> nil) and (e^.refDecl^.kind = dkType));
+  namesType := (e^.kind = nkField) and (e^.fieldDecl <> nil) and
+               (e^.fieldDecl^.kind = dkType);
+end;
+
 function varAddress(v: PDecl): TV;
 var
   owner: PDecl;
@@ -1494,9 +1512,9 @@ begin
   end;
   if e^.kind = nkStringLit then
     exit(getPStrConstant(e^.strValue^.chars, 0, e^.strValue^.len));
-  if e^.kind = nkNameRef then
+  if unwrapConst(e)^.kind = nkNameRef then
   begin
-    d := e^.refDecl;
+    d := unwrapConst(e)^.refDecl;
     if (d^.kind = dkConst) and (d^.constValue.kind = ckString) then
       exit(getPStrConstant(d^.constValue.strVal^.chars, 0, d^.constValue.strVal^.len));
   end;
@@ -1532,9 +1550,9 @@ begin
     exit(visitExpr(e));
   if e^.kind = nkStringLit then
     exit(getAnsiConstant(e^.strValue^.chars, 0, e^.strValue^.len));
-  if e^.kind = nkNameRef then
+  if unwrapConst(e)^.kind = nkNameRef then
   begin
-    d := e^.refDecl;
+    d := unwrapConst(e)^.refDecl;
     if (d^.kind = dkConst) and (d^.constValue.kind = ckString) then
       exit(getAnsiConstant(d^.constValue.strVal^.chars, 0, d^.constValue.strVal^.len));
   end;
@@ -2129,6 +2147,8 @@ begin
       end;
     nkField:
       begin
+        if e^.constRef <> nil then { TFoo.C: a string constant }
+          exit(emitAddress(e^.constRef));
         if e^.fieldDecl^.kind = dkVar then { a class variable (not evaluating the object) }
           exit(PTVBox(e^.fieldDecl^.cgValue)^);
         if e^.base^.typ^.kind = tyClass then
@@ -2215,9 +2235,9 @@ begin
     v := globalString(arg^.strValue^.chars, 0, arg^.strValue^.len, '.cstr');
     exit(true);
   end;
-  if arg^.kind <> nkNameRef then
+  if unwrapConst(arg)^.kind <> nkNameRef then
     exit;
-  d := arg^.refDecl;
+  d := unwrapConst(arg)^.refDecl;
   if (d = nil) or (d^.kind <> dkConst) then
     exit;
   if d^.constValue.kind = ckString then
@@ -2535,7 +2555,7 @@ begin
   begin
     if arg^.kind = nkStringLit then
       exit(globalString(arg^.strValue^.chars, 0, arg^.strValue^.len, '.cstr'));
-    d := arg^.refDecl;
+    d := unwrapConst(arg)^.refDecl;
     exit(globalString(d^.constValue.strVal^.chars, 0, d^.constValue.strVal^.len,
                       '.cstr'));
   end;
@@ -3377,7 +3397,7 @@ begin
   r := e^.fieldDecl;
   if e^.base^.typ^.kind = tyRecord then
   begin
-    if (e^.base^.kind = nkNameRef) and (e^.base^.refDecl^.kind = dkType) then
+    if namesType(e^.base) then
     begin { TR.Create, TR.M }
       if r^.methodKind = mtConstructor then
         exit(emitRecordConstruction(e^.base^.typ, r, args));
@@ -3403,7 +3423,7 @@ begin
       exit(res);
     exit(irNull);
   end;
-  if (e^.base^.kind = nkNameRef) and (e^.base^.refDecl^.kind = dkType) then
+  if namesType(e^.base) then { TFoo.Create, TOuter.TInner.Create }
   begin
     if r^.methodKind = mtConstructor then
       exit(emitConstruction(e^.base^.typ, r, args, e^.b));
@@ -4368,7 +4388,7 @@ begin
     base := op^.base;
     if base^.typ^.kind = tyRecord then
       obj := emitAddress(base)
-    else if (base^.kind = nkNameRef) and (base^.refDecl^.kind = dkType) then
+    else if namesType(base) then
     begin
       obj := vmtOf(base^.typ);
       selfIsClass := true;
@@ -4471,7 +4491,9 @@ begin
       else
         visitExprKind := loadScalar(emitAddress(e), e^.typ, '');
     nkField:
-      if (e^.fieldDecl^.kind <> dkField) or (e^.base^.typ^.kind = tyClass) then
+      if e^.constRef <> nil then { TFoo.C }
+        visitExprKind := visitExpr(e^.constRef)
+      else if (e^.fieldDecl^.kind <> dkField) or (e^.base^.typ^.kind = tyClass) then
         visitExprKind := emitMemberValue(e) { objfpc: a member of an object }
       else if e^.typ^.kind = tyShortString then
         visitExprKind := emitAddress(e)

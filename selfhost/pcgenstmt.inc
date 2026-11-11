@@ -1706,15 +1706,51 @@ begin
     declareGlobalDebugInfo(v, PTVBox(v^.cgValue)^);
 end;
 
+function advancedRecord(d: PDecl): PType; forward;
+
+{ decls, each followed by the types declared in it when it is a class or an
+  advanced record (recursively). }
+procedure addWithNested(d: PDecl; var outList: TPtrList);
+var
+  c: PType;
+  j: longint;
+  m: PDecl;
+begin
+  listAdd(outList, d);
+  c := definedClass(d);
+  if c = nil then
+    c := advancedRecord(d);
+  if c <> nil then
+    for j := 0 to c^.classMembers.count - 1 do
+    begin
+      m := PDecl(listGet(c^.classMembers, j));
+      if m^.kind = dkType then
+        addWithNested(m, outList);
+    end;
+end;
+
+function withNested(const decls: TPtrList): TPtrList;
+var
+  outList: TPtrList;
+  i: longint;
+begin
+  listInit(outList);
+  for i := 0 to decls.count - 1 do
+    addWithNested(PDecl(listGet(decls, i)), outList);
+  withNested := outList;
+end;
+
 procedure emitGlobals(blk: PBlock);
 var
   i, j: longint;
   d, m: PDecl;
   c: PType;
+  decls: TPtrList;
 begin
-  for i := 0 to blk^.decls.count - 1 do
+  decls := withNested(blk^.decls);
+  for i := 0 to decls.count - 1 do
   begin
-    d := PDecl(listGet(blk^.decls, i));
+    d := PDecl(listGet(decls, i));
     c := definedClass(d);
     if c <> nil then { its class variables }
     begin
@@ -2070,11 +2106,12 @@ var
   i, j: longint;
   r, m: PDecl;
   c: PType;
-  params: TPtrList;
+  params, decls: TPtrList;
 begin
-  for i := 0 to blk^.decls.count - 1 do
+  decls := withNested(blk^.decls);
+  for i := 0 to decls.count - 1 do
   begin
-    r := PDecl(listGet(blk^.decls, i));
+    r := PDecl(listGet(decls, i));
     c := definedClass(r);
     if c <> nil then
     begin
@@ -2556,10 +2593,12 @@ var
   d, m: PDecl;
   c: PType;
   prefix: string;
+  decls: TPtrList;
 begin
-  for i := 0 to u^.iface^.decls.count - 1 do
+  decls := withNested(u^.iface^.decls);
+  for i := 0 to decls.count - 1 do
   begin
-    d := PDecl(listGet(u^.iface^.decls, i));
+    d := PDecl(listGet(decls, i));
     c := definedClass(d);
     if c <> nil then
     begin

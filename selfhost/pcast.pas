@@ -101,10 +101,13 @@ type
       { classRecord: the advanced record whose member table this is (nil
         for a class): no parent, VMT or instances; its methods' Self is the
         record (by reference), its class methods and operators have none }
+      { classOuter: the class (or advanced record's member table) whose type
+        section declares this one (objfpc nested types); nil at program or
+        unit level }
       tyClass: (classParent: PType; classMembers, classAllFields,
                 classVTable: TPtrList; classModule: pointer;
                 classDefined: boolean; classInterfaces: TPtrList;
-                classRecord: PType);
+                classRecord: PType; classOuter: PType);
       { class of C (objfpc): a reference to C or a descendant (its VMT) }
       tyClassRef: (refClass: PType);
       { interface (objfpc): its parent, own methods (source order) and all
@@ -157,9 +160,11 @@ type
         property) is the outermost nkIndex of the chain ((root[i])[j]);
         Sema sets the property (idxProp), the chain's root and the
         indexes }
+      { constRef (field, Sema): a constant member (TFoo.C, obj.C), a name
+        reference to it that code generation uses instead }
       nkIndex, nkField: (base, index: PNode; fieldName: TIdent;
                          fieldDecl: PDecl; idxProp: PDecl; idxRoot: PNode;
-                         idxArgs: TPtrList);
+                         idxArgs: TPtrList; constRef: PNode);
       { inherited [inhName] (objfpc): the method called and the method
         calling it (Sema); a bare inherited passes the calling method's
         parameters (inhArgs, Sema) }
@@ -263,7 +268,9 @@ type
     case TTypeSpecKind of
       { named: the type name; pointer: the pointee's name; class ref
         (objfpc): class of tname }
-      tsNamed, tsPointer, tsClassRef: (tname: TIdent);
+      { tquals (named, objfpc): the classes or records enclosing tname,
+        outermost first (TOuter.TInner), of PIdent }
+      tsNamed, tsPointer, tsClassRef: (tname: TIdent; tquals: TPtrList);
       tsEnum: (enumNames: TPtrList); { of PIdent }
       tsSubrange: (lo, hi: PNode);
       tsArray: (indexes: TPtrList; element: PTypeSpec; arrPacked: boolean);
@@ -396,6 +403,10 @@ type
                   body: PBlock; externalName: PName;
                   canonical, parent, resultVar: PDecl; level: longint;
                   methodKind: TMethodKind; methodClassName: TIdent;
+                  { TOuter of an implementation TOuter.TInner.Bar: the
+                    classes or records enclosing methodClassName, outermost
+                    first (of PIdent) }
+                  outerClassNames: TPtrList;
                   isVirtual, isOverride, isAbstract, isClassMethod: boolean;
                   { overloading (objfpc): the overload directive, the next
                     routine of the name in the same scope or class and this

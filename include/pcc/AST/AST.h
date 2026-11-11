@@ -341,6 +341,9 @@ class FieldExpr final : public Expr {
   Expr *Base;
   Identifier Field;
   Decl *Member = nullptr; ///< set by Sema: FieldDecl, RoutineDecl, PropertyDecl
+  /// A constant member (TFoo.C, obj.C): Sema's reference to it, which code
+  /// generation uses in place of this expression.
+  NameRefExpr *ConstRef = nullptr;
 
 public:
   FieldExpr(SourceRange R, Expr *Base, Identifier Field)
@@ -350,6 +353,8 @@ public:
   FieldDecl *getFieldDecl() const;
   Decl *getMember() const { return Member; }
   void setMember(Decl *D) { Member = D; }
+  NameRefExpr *getConstRef() const { return ConstRef; }
+  void setConstRef(NameRefExpr *N) { ConstRef = N; }
   static bool classof(const Expr *E) { return E->getKind() == EK_Field; }
 };
 
@@ -892,11 +897,18 @@ public:
 /// A type identifier: integer, char, MyType.
 class NamedTypeSpec final : public TypeSpec {
   Identifier Name;
+  /// TOuter.TInner (objfpc): the enclosing classes or records, outermost
+  /// first; Name is the last name.
+  llvm::ArrayRef<Identifier> Qualifiers;
 
 public:
   explicit NamedTypeSpec(Identifier Name)
       : TypeSpec(TS_Named, Name.getRange()), Name(Name) {}
+  NamedTypeSpec(SourceRange R, llvm::ArrayRef<Identifier> Qualifiers,
+                Identifier Name)
+      : TypeSpec(TS_Named, R), Name(Name), Qualifiers(Qualifiers) {}
   const Identifier &getName() const { return Name; }
+  llvm::ArrayRef<Identifier> getQualifiers() const { return Qualifiers; }
   static bool classof(const TypeSpec *T) { return T->getKind() == TS_Named; }
 };
 
@@ -1416,6 +1428,7 @@ class RoutineDecl final : public Decl {
   // Methods (objfpc).
   MethodKind MK = MethodKind::None;
   Identifier ClassName;             ///< `TFoo` of an implementation `TFoo.Bar`
+  llvm::ArrayRef<Identifier> OuterClassNames;
   bool Virtual = false, Override = false, Abstract = false;
   bool ClassMethod = false;
   /// Overloading (objfpc): the `overload` directive, the next routine of
@@ -1514,6 +1527,10 @@ public:
   bool isDestructor() const { return MK == MethodKind::Destructor; }
   const Identifier &getClassName() const { return ClassName; }
   void setClassName(Identifier N) { ClassName = N; }
+  /// TOuter of an implementation TOuter.TInner.Bar: the classes or records
+  /// enclosing ClassName, outermost first.
+  llvm::ArrayRef<Identifier> getOuterClassNames() const { return OuterClassNames; }
+  void setOuterClassNames(llvm::ArrayRef<Identifier> N) { OuterClassNames = N; }
   /// `class procedure` / `class function` (objfpc): Self is a class
   /// reference, not an object.
   bool isClassMethod() const { return ClassMethod; }

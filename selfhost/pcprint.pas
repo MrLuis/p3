@@ -698,6 +698,11 @@ begin
         else
           kindPrefix := 'ProcedureDecl ''';
         line(kindPrefix);
+        for i := 0 to d^.outerClassNames.count - 1 do
+        begin
+          bufAddName(outBuf, PIdent(listGet(d^.outerClassNames, i))^.name);
+          bufAddChar(outBuf, '.');
+        end;
         if identValid(d^.methodClassName) then
         begin
           bufAddName(outBuf, d^.methodClassName.name);

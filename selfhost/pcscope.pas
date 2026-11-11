@@ -17,6 +17,10 @@ type
     names: TPtrList;       { of PName, the names declared here }
     withRecord: PType;     { a with scope: the record type, else nil }
     withClass: PType;      { a class scope: the class, else nil }
+    { the nested constants, types and class variables of a class (and its
+      ancestors): in its declaration, and in the methods of the classes
+      and records it declares }
+    nestedOf: PType;
     withCtx: PWithContext;
     imports: TPtrList;     { of PScope: used units' interfaces (later win) }
     { the outermost scope of a routine: a name found beyond it belongs
@@ -27,6 +31,11 @@ type
 function newScope(parent: PScope): PScope;
 function newWithScope(parent: PScope; rec: PType; w: PWithContext): PScope;
 function newClassScope(parent: PScope; c: PType; w: PWithContext): PScope;
+{ a scope exposing the nested constants and types of class c }
+function newNestedScope(parent: PScope; c: PType): PScope;
+{ what a class declares for the classes it contains: constants, types and
+  class variables }
+function isNestedDecl(d: PDecl): boolean;
 procedure scopeAddImport(s, imported: PScope);
 { the declaration of name in s itself (not imports), or nil }
 function scopeLookupOwn(s: PScope; name: PName): PDecl;
@@ -55,6 +64,7 @@ begin
   listInit(s^.names);
   s^.withRecord := nil;
   s^.withClass := nil;
+  s^.nestedOf := nil;
   s^.withCtx := nil;
   listInit(s^.imports);
   s^.routineBoundary := false;
@@ -79,6 +89,24 @@ begin
   s^.withClass := c;
   s^.withCtx := w;
   newClassScope := s;
+end;
+
+function newNestedScope(parent: PScope; c: PType): PScope;
+var
+  s: PScope;
+begin
+  s := newScope(parent);
+  s^.nestedOf := c;
+  newNestedScope := s;
+end;
+
+function isNestedDecl(d: PDecl): boolean;
+begin
+  if d = nil then
+    exit(false);
+  if d^.kind = dkVar then
+    exit(d^.isClassVar);
+  isNestedDecl := (d^.kind = dkType) or (d^.kind = dkConst);
 end;
 
 procedure scopeAddImport(s, imported: PScope);
@@ -111,12 +139,19 @@ var
 begin
   if s^.withRecord <> nil then
     exit(findField(s^.withRecord, name));
+  if s^.nestedOf <> nil then
+  begin
+    d := findMember(s^.nestedOf, name, owner);
+    if isNestedDecl(d) then
+      exit(d);
+    exit(nil);
+  end;
   if (s^.withClass <> nil) and (s^.withCtx = nil) then
   begin
     { a record's static method: only its class methods and operators
-      (static) are usable without a record }
+      (static), constants and types are usable without a record }
     d := findMember(s^.withClass, name, owner);
-    if (d <> nil) and (d^.kind = dkRoutine) and d^.isStatic then
+    if ((d <> nil) and (d^.kind = dkRoutine) and d^.isStatic) or isNestedDecl(d) then
       exit(d);
     exit(nil);
   end;
@@ -192,6 +227,7 @@ var
   i, j: longint;
   imp: PScope;
   c: PType;
+  d: PDecl;
 begin
   if s^.withRecord <> nil then
   begin
@@ -199,16 +235,20 @@ begin
       listAdd(names, PDecl(listGet(s^.withRecord^.allFields, i))^.ident.name);
     exit;
   end;
-  if s^.withClass <> nil then
+  if (s^.withClass <> nil) or (s^.nestedOf <> nil) then
   begin
     c := s^.withClass;
+    if c = nil then
+      c := s^.nestedOf;
     while c <> nil do
     begin
       for i := 0 to c^.classMembers.count - 1 do
-        if (s^.withCtx <> nil) or
-           ((PDecl(listGet(c^.classMembers, i))^.kind = dkRoutine) and
-            PDecl(listGet(c^.classMembers, i))^.isStatic) then
-          listAdd(names, PDecl(listGet(c^.classMembers, i))^.ident.name);
+      begin
+        d := PDecl(listGet(c^.classMembers, i));
+        if ((s^.withClass <> nil) and (s^.withCtx <> nil)) or isNestedDecl(d) or
+           ((s^.withClass <> nil) and (d^.kind = dkRoutine) and d^.isStatic) then
+          listAdd(names, d^.ident.name);
+      end;
       c := c^.classParent;
     end;
     exit;

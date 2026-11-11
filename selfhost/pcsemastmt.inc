@@ -978,11 +978,25 @@ end;
 
 { A type name or an expression as the argument of sizeof/low/high: its
   type (also stored on the argument). }
+function typeNamedBy(base: PNode): PDecl; forward;
+
 function checkTypeOrValue(arg: PNode): PType;
 var
   d: PDecl;
   t: PType;
 begin
+  if arg^.kind = nkField then { TOuter.TInner }
+  begin
+    d := typeNamedBy(arg);
+    if d <> nil then
+    begin
+      t := d^.declType;
+      if t = nil then
+        t := errorType;
+      arg^.typ := t;
+      exit(t);
+    end;
+  end;
   if arg^.kind = nkNameRef then
   begin
     d := lookup(arg^.ref.name);
@@ -1324,13 +1338,14 @@ var
   d: PDecl;
 begin
   classNamedBy := nil;
-  if (base^.kind <> nkNameRef) or (mode <> lmObjFPC) then
+  if mode <> lmObjFPC then
     exit;
-  d := lookup(base^.ref.name);
+  d := typeNamedBy(base);
   if (d <> nil) and (d^.kind = dkType) and (d^.declType <> nil) and
      (d^.declType^.kind = tyClass) then
   begin
-    base^.refDecl := d;
+    if base^.kind = nkNameRef then
+      base^.refDecl := d;
     base^.typ := d^.declType;
     classNamedBy := d^.declType;
   end
@@ -1338,10 +1353,55 @@ begin
   begin
     { an advanced record's name (TR.Create): its member table; the base's
       type is the record }
-    base^.refDecl := d;
+    if base^.kind = nkNameRef then
+      base^.refDecl := d;
     base^.typ := d^.declType;
     classNamedBy := memberTableOf(d^.declType);
   end;
+end;
+
+{ The type that base names (TFoo, or a nested TOuter.TInner), or nil. }
+function typeNamedBy(base: PNode): PDecl;
+var
+  d: PDecl;
+  outer, owner: PType;
+begin
+  typeNamedBy := nil;
+  if base^.kind = nkNameRef then
+  begin
+    d := lookup(base^.ref.name);
+    if (d <> nil) and (d^.kind = dkType) then
+      typeNamedBy := d;
+    exit;
+  end;
+  if (base^.kind <> nkField) or (mode <> lmObjFPC) then
+    exit;
+  outer := classNamedBy(base^.base);
+  if outer = nil then
+    exit;
+  owner := nil;
+  d := findMember(outer, base^.fieldName.name, owner);
+  if (d = nil) or (d^.kind <> dkType) then
+    exit;
+  if base^.fieldDecl <> d then
+  begin
+    checkMemberAccess(d, owner, base^.fieldName);
+    base^.fieldDecl := d;
+    if d^.declType <> nil then
+      base^.typ := d^.declType
+    else
+      base^.typ := errorType;
+  end;
+  typeNamedBy := d;
+end;
+
+{ Does e name a type (TFoo, TOuter.TInner), as resolved? }
+function namesType(e: PNode): boolean;
+begin
+  if e^.kind = nkNameRef then
+    exit((e^.refDecl <> nil) and (e^.refDecl^.kind = dkType));
+  namesType := (e^.kind = nkField) and (e^.fieldDecl <> nil) and
+               (e^.fieldDecl^.kind = dkType);
 end;
 
 { Resolves r.f / obj.member / TFoo.Create; nil after a diagnostic. }
@@ -1354,7 +1414,7 @@ var
 begin
   resolveMember := nil;
   viaClass := classNamedBy(e^.base);
-  if viaClass <> nil then { TFoo.Create: a use of TFoo }
+  if (viaClass <> nil) and (e^.base^.kind = nkNameRef) then { TFoo.Create: a use of TFoo }
     warnHints(e^.base^.refDecl, e^.base^.ref);
   if viaClass <> nil then
     bt := viaClass
@@ -1425,7 +1485,7 @@ begin
   if (viaClass <> nil) or viaRef then
   begin
     { through a class: constructors, class methods, class variables }
-    ok := d^.kind = dkVar;
+    ok := (d^.kind = dkVar) or (d^.kind = dkConst) or (d^.kind = dkType);
     if d^.kind = dkRoutine then
       ok := ((d^.methodKind = mtConstructor) or d^.isClassMethod) and
             (d^.methodKind <> mtOperator);
@@ -1458,9 +1518,8 @@ begin
   methodResultType := nil;
   if r^.isFunction then
     methodResultType := r^.resultType
-  else if (r^.methodKind = mtConstructor) and (e^.base^.kind = nkNameRef) and
-          (e^.base^.refDecl <> nil) and (e^.base^.refDecl^.kind = dkType) then
-    methodResultType := e^.base^.typ
+  else if (r^.methodKind = mtConstructor) and namesType(e^.base) then
+    methodResultType := e^.base^.typ { TFoo.Create, TOuter.TInner.Create }
   else if (r^.methodKind = mtConstructor) and (e^.base^.typ <> nil) and
           (e^.base^.typ^.kind = tyClassRef) then
     methodResultType := e^.base^.typ^.refClass; { c.Create, c: class of T }
@@ -1722,6 +1781,21 @@ begin
   end;
   if (d = nil) or (d^.kind <> dkRoutine) then
   begin
+    if (d <> nil) and (d^.kind = dkType) then
+    begin
+      ms('typecasts through a qualified type name are not supported yet; ' +
+         'declare a type alias for ''');
+      maN(callee^.fieldName.spelling);
+      ma('''');
+      errR(callee^.fieldName.loc, identRange(callee^.fieldName));
+    end
+    else if d <> nil then
+    begin
+      ms('''');
+      maN(callee^.fieldName.spelling);
+      ma(''' is a ' + kindName(d) + ', not a method');
+      errR(callee^.fieldName.loc, identRange(callee^.fieldName));
+    end;
     for i := 0 to e^.args.count - 1 do
       check(PNode(listGet(e^.args, i)));
     exit(errorType);
@@ -1756,13 +1830,16 @@ begin
     d := lookup(rhs^.ref.name);
     if (d <> nil) and (d^.kind = dkType) then
       td := d;
-  end;
+  end
+  else if rhs^.kind = nkField then { TOuter.TInner }
+    td := typeNamedBy(rhs);
   if td <> nil then
   begin
     t := td^.declType;
     if t = nil then
       t := errorType;
-    rhs^.refDecl := td;
+    if rhs^.kind = nkNameRef then
+      rhs^.refDecl := td;
     rhs^.typ := t;
     if isError(t) then
       exit;
@@ -2608,8 +2685,10 @@ begin
   c := s^.inColl;
   cLoc := c^.b;
   ct := checkTypeOrValue(c);
-  isType := (c^.kind = nkNameRef) and (c^.refDecl <> nil) and
-            (c^.refDecl^.kind = dkType);
+  isType := ((c^.kind = nkNameRef) and (c^.refDecl <> nil) and
+             (c^.refDecl^.kind = dkType)) or
+            ((c^.kind = nkField) and (c^.fieldDecl <> nil) and
+             (c^.fieldDecl^.kind = dkType));
   kind := fikInvalid;
   elem := nil;
   if isError(ct) then
@@ -3921,11 +4000,37 @@ var
   d: PDecl;
   t: PType;
   noArgs: TPtrList;
+  id: TIdent;
+  ref: PNode;
 begin
   visitField := errorType;
   d := resolveMember(e);
   if d = nil then
     exit;
+  if d^.kind = dkConst then { TFoo.C, obj.C }
+  begin
+    warnHints(d, e^.fieldName);
+    id := d^.ident;
+    id.loc := e^.fieldName.loc;
+    ref := nameRefNode(id);
+    ref^.refDecl := d;
+    if d^.constType <> nil then
+      ref^.typ := d^.constType
+    else
+      ref^.typ := errorType;
+    d^.isUsed := true;
+    e^.constRef := ref;
+    exit(ref^.typ);
+  end;
+  if d^.kind = dkType then
+  begin
+    ms('''');
+    maN(e^.fieldName.spelling);
+    ma(''' is a type, not a value');
+    errR(e^.fieldName.loc, identRange(e^.fieldName));
+    noteDeclaredHere(d);
+    exit;
+  end;
   if d^.kind <> dkRoutine then { (a method: once its overload is known) }
     warnHints(d, e^.fieldName);
   if d^.kind = dkField then

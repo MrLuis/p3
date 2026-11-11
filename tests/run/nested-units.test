@@ -1,0 +1,11 @@
+; Nested classes, records, constants and class variables in a unit's
+; interface, compiled whole and separately.
+; RUN: rm -rf %t && mkdir -p %t && cp -r %S/Inputs/nested/. %t/
+; RUN: %pcc --mode=objfpc -I %t/lib %t/main.pas -o %t/whole
+; RUN: %t/whole | FileCheck %s
+; RUN: %pcc --mode=objfpc -c %t/lib/shapes.pas -o %t/lib/shapes.o
+; RUN: %pcc --mode=objfpc -I %t/lib -fseparate-units %t/main.pas -o %t/separate
+; RUN: %t/separate | FileCheck %s
+; CHECK:      triangle TShapes.TShape 4 1
+; CHECK-NEXT: square 2
+; CHECK-NEXT: 7

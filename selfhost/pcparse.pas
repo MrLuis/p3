@@ -356,6 +356,7 @@ function parseBlock: PBlock; forward;
 procedure parseDeclarations(var decls: TPtrList; inInterface: boolean); forward;
 function parseType: PTypeSpec; forward;
 function parseSimpleType: PTypeSpec; forward;
+function parseNamedType: PTypeSpec; forward;
 function parseStatement: PNode; forward;
 function parseCompoundStmt: PNode; forward;
 procedure parseStatementSequence(var body: TPtrList; terminator: TTokenKind;
@@ -619,7 +620,16 @@ end;
 
 function parseTypedConstValue: PNode; forward;
 
-procedure parseConstPart(var decls: TPtrList);
+function isVisibilityWord: boolean;
+begin
+  isVisibilityWord := isIdentifierNamed('private') or isIdentifierNamed('protected') or
+                      isIdentifierNamed('public') or isIdentifierNamed('published') or
+                      isIdentifierNamed('strict');
+end;
+
+{ inMembers: a section of a class or advanced record, which ends at a
+  visibility word (private, public, ...). }
+procedure parseConstPart(var decls: TPtrList; inMembers: boolean);
 var
   hf: longint;
   hm: PName;
@@ -629,12 +639,13 @@ var
   v, c: PDecl;
 begin
   consumeToken; { 'const' }
-  if tok.kind <> tkIdentifier then
+  if (tok.kind <> tkIdentifier) or (inMembers and isVisibilityWord) then
   begin
     diagError(tok.loc, 'expected constant name after ''const''');
     exit;
   end;
-  while (tok.kind = tkIdentifier) and not diagShouldStop do
+  while (tok.kind = tkIdentifier) and not (inMembers and isVisibilityWord) and
+        not diagShouldStop do
   begin
     name := makeIdentifier(tok);
     consumeToken;
@@ -694,7 +705,7 @@ begin
   end;
 end;
 
-procedure parseTypePart(var decls: TPtrList);
+procedure parseTypePart(var decls: TPtrList; inMembers: boolean);
 var
   hf: longint;
   hm: PName;
@@ -703,12 +714,13 @@ var
   d: PDecl;
 begin
   consumeToken; { 'type' }
-  if tok.kind <> tkIdentifier then
+  if (tok.kind <> tkIdentifier) or (inMembers and isVisibilityWord) then
   begin
     diagError(tok.loc, 'expected type name after ''type''');
     exit;
   end;
-  while (tok.kind = tkIdentifier) and not diagShouldStop do
+  while (tok.kind = tkIdentifier) and not (inMembers and isVisibilityWord) and
+        not diagShouldStop do
   begin
     name := makeIdentifier(tok);
     consumeToken;
@@ -903,7 +915,7 @@ var
   kind: string;
   loc: TLoc;
   name, clsName: TIdent;
-  params: TPtrList;
+  params, outerNames: TPtrList;
   resultSpec: PTypeSpec;
   externalName: PName;
   r: PDecl;
@@ -918,6 +930,7 @@ begin
 
   name := noIdent;
   clsName := noIdent;
+  listInit(outerNames);
   if not expectIdentifier(name, kind + ' name') then
   begin
     skipUntil([tkSemi, tkKwBegin]);
@@ -925,13 +938,20 @@ begin
   end
   else if (mode = lmObjFPC) and (tok.kind = tkPeriod) then
   begin
-    consumeToken;
-    clsName := name;
-    if not expectIdentifier(name, 'method name after ''.''') then
+    { TFoo.Bar, or TOuter.TInner.Bar (a nested class or record) }
+    while tok.kind = tkPeriod do
     begin
-      name := noIdent;
-      skipUntil([tkSemi, tkKwBegin]);
-      tryConsume(tkSemi);
+      consumeToken;
+      if identValid(clsName) then
+        listAdd(outerNames, newIdent(clsName));
+      clsName := name;
+      if not expectIdentifier(name, 'method name after ''.''') then
+      begin
+        name := noIdent;
+        skipUntil([tkSemi, tkKwBegin]);
+        tryConsume(tkSemi);
+        break;
+      end;
     end;
   end;
   if identValid(name) and (mk <> mtNone) and not identValid(clsName) then
@@ -1106,6 +1126,7 @@ begin
                     body, false);
     r^.methodKind := mk;
     r^.methodClassName := clsName;
+    r^.outerClassNames := outerNames;
     r^.hasOverloadDirective := overloadDir;
     r^.isInline := inlineDir;
     r^.callConv := cc;
@@ -1539,8 +1560,8 @@ begin
     end;
 
     case tok.kind of
-      tkKwConst: parseConstPart(decls);
-      tkKwType: parseTypePart(decls);
+      tkKwConst: parseConstPart(decls, false);
+      tkKwType: parseTypePart(decls, false);
       tkKwVar: parseVarPart(decls);
       tkKwProcedure, tkKwFunction, tkKwConstructor, tkKwDestructor:
         begin
@@ -1863,6 +1884,7 @@ var
   ts: PTypeSpec;
   m: PDecl;
   i: longint;
+  nested: TPtrList;
   failed, classVars: boolean;
   className, intfName: TIdent;
   intfNames: TPtrList;
@@ -2051,6 +2073,24 @@ begin
         diagError(tok.loc, 'expected ''var'', ''procedure'' or ''function'' after ''class''');
       failed := true;
       break;
+    end;
+    if tok.kind in [tkKwConst, tkKwType] then { nested declarations }
+    begin
+      listInit(nested);
+      if tok.kind = tkKwConst then
+        parseConstPart(nested, true)
+      else
+        parseTypePart(nested, true);
+      for i := 0 to nested.count - 1 do
+      begin
+        m := PDecl(listGet(nested, i));
+        m^.vis := vis;
+        if m^.kind = dkVar then { a typed constant }
+          m^.isClassVar := true;
+        listAdd(members, m);
+      end;
+      classVars := false;
+      continue;
     end;
     diagError(tok.loc,
               'expected a field, method or property declaration, or ''end''');
@@ -2335,11 +2375,7 @@ begin
     exit(ts);
   end;
   if tok.kind = tkIdentifier then
-  begin
-    ts := namedSpec(makeIdentifier(tok));
-    consumeToken;
-    exit(ts);
-  end;
+    exit(parseNamedType);
   if (tok.kind = tkKwArray) and (context = 'parameter type') and (mode <> lmISO) and
      (peekKind = tkKwOf) then
   begin
@@ -2367,6 +2403,37 @@ begin
 end;
 
 { Tokens that can continue a constant expression after an identifier. }
+function continuesConstExpr(k: TTokenKind): boolean; forward;
+
+{ A type name, qualified by enclosing classes (objfpc): TOuter.TInner. }
+function parseNamedType: PTypeSpec;
+var
+  name: TIdent;
+  start: TLoc;
+  quals: TPtrList;
+  ts: PTypeSpec;
+begin
+  name := makeIdentifier(tok);
+  start := consumeToken;
+  if (mode <> lmObjFPC) or (tok.kind <> tkPeriod) or (peekKind <> tkIdentifier) then
+    exit(namedSpec(name));
+  listInit(quals);
+  while (tok.kind = tkPeriod) and (peekKind = tkIdentifier) do
+  begin
+    consumeToken; { '.' }
+    listAdd(quals, newIdent(name));
+    name := makeIdentifier(tok);
+    consumeToken;
+  end;
+  if continuesConstExpr(tok.kind) then
+    diagError(tok.loc, 'a subrange bound cannot be a qualified constant yet; ' +
+                       'declare an unqualified constant for it');
+  ts := newTypeSpec(tsNamed, start, prevTokEnd);
+  ts^.tname := name;
+  ts^.tquals := quals;
+  parseNamedType := ts;
+end;
+
 function continuesConstExpr(k: TTokenKind): boolean;
 begin
   continuesConstExpr := k in [tkDotdot, tkPlus, tkMinus, tkStar, tkKwDiv,
@@ -2396,11 +2463,7 @@ begin
     exit(ts);
   end;
   if (tok.kind = tkIdentifier) and not continuesConstExpr(peekKind) then
-  begin
-    ts := namedSpec(makeIdentifier(tok));
-    consumeToken;
-    exit(ts);
-  end;
+    exit(parseNamedType);
   if not (tok.kind in [tkIdentifier, tkIntegerLiteral, tkStringLiteral,
                        tkPlus, tkMinus]) then
   begin
@@ -2662,11 +2725,25 @@ begin
       failed := true;
       break;
     end;
-    if tok.kind in [tkKwType, tkKwConst] then
+    if tok.kind in [tkKwType, tkKwConst] then { nested declarations }
     begin
-      unsupported('nested types and constants in records are');
-      failed := true;
-      break;
+      listInit(names);
+      if tok.kind = tkKwConst then
+        parseConstPart(names, true)
+      else
+        parseTypePart(names, true);
+      for i := 0 to names.count - 1 do
+      begin
+        m := PDecl(listGet(names, i));
+        if m^.kind = dkVar then
+        begin
+          diagErrorR(m^.loc, 'typed constants in records are not supported yet',
+                     identRange(m^.ident));
+          continue;
+        end;
+        addMember(m);
+      end;
+      continue;
     end;
     diagError(tok.loc,
               'expected a field, method or property declaration, or ''end''');
@@ -3610,7 +3687,8 @@ function parseConstant: PNode;
 var
   op: TUnaryOp;
   opLoc: TLoc;
-  operand, e: PNode;
+  operand, e, n: PNode;
+  isName: boolean;
 begin
   parseConstant := nil;
   if tok.kind in [tkPlus, tkMinus] then
@@ -3643,7 +3721,19 @@ begin
       exit;
     end;
   end;
+  isName := tok.kind = tkIdentifier;
   consumeToken;
+  { TOuter.C (objfpc): a constant declared in a class or record }
+  while isName and (mode = lmObjFPC) and (tok.kind = tkPeriod) and
+        (peekKind = tkIdentifier) do
+  begin
+    consumeToken; { '.' }
+    n := newNode(nkField, e^.b, tokenEnd(tok));
+    n^.base := e;
+    n^.fieldName := makeIdentifier(tok);
+    e := n;
+    consumeToken;
+  end;
   parseConstant := e;
 end;
 

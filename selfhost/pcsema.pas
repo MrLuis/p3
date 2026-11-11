@@ -101,6 +101,9 @@ var
   { what a typed constant's or initialized variable's value is called in
     diagnostics (... must be a constant) }
   constInitWhat: string;
+  { while the members of a class or advanced record are declared: its name,
+    which prefixes those of the types it declares (TOuter.TInner) }
+  nestPrefix: PName;
   { class of C for each class C (by type id): the type of C used as a
     value and of Self in class methods }
   classRefs: TIntMap;
@@ -947,6 +950,9 @@ begin
     setDeclName(pchar, intern('pchar'));
     stdType('pchar', pchar);
     pcharT := pchar;
+    { Free Pascal's names for the one-byte char (char is AnsiChar there) }
+    stdType('ansichar', tyCharT);
+    stdType('pansichar', pchar);
     stdType('ansistring', ansiStringType);
     stdType('shortstring', shortStringType(255));
   end;
@@ -1457,6 +1463,12 @@ begin
       end;
     nkParen:
       exit(fold(e^.inner, c));
+    nkField: { TFoo.C }
+      begin
+        if e^.constRef <> nil then
+          exit(fold(e^.constRef, c));
+        exit;
+      end;
     nkUnary:
       begin
         if not fold(e^.operand, v) then
@@ -1684,6 +1696,7 @@ end;
 
 function checkLabel(l: PCaseLabel; selTy: PType; const what: string): boolean; forward;
 function resolveType(ts: PTypeSpec; declName: PName): PType; forward;
+function lookupMemberPath(const quals: TPtrList; const name: TIdent): PDecl; forward;
 
 function addField(f: PDecl; var all: TPtrList; var seen: TIntMap): boolean;
 var
@@ -1827,6 +1840,25 @@ begin
       buildType := tyUntypedT;
     tsNamed:
       begin
+        if ts^.tquals.count > 0 then { TOuter.TInner }
+        begin
+          d := lookupMemberPath(ts^.tquals, ts^.tname);
+          if d = nil then
+            exit;
+          if d^.kind = dkType then
+          begin
+            warnHints(d, ts^.tname);
+            if d^.declType <> nil then
+              buildType := d^.declType;
+            exit;
+          end;
+          ms('''');
+          maN(ts^.tname.spelling);
+          ma(''' is a ' + kindName(d) + ', not a type');
+          errR(ts^.tname.loc, identRange(ts^.tname));
+          noteDeclaredHere(d);
+          exit;
+        end;
         d := lookup(ts^.tname.name);
         if (d <> nil) and (d^.kind = dkType) then
           warnHints(d, ts^.tname);
@@ -2113,6 +2145,15 @@ end;
 
 { --- Declarations --- }
 
+{ The name of the type declared as id: TOuter.TInner for a nested one. }
+function typeDeclName(const id: TIdent): PName;
+begin
+  if nestPrefix = nil then
+    typeDeclName := id.spelling
+  else
+    typeDeclName := intern(nameStr(nestPrefix) + '.' + nameStr(id.spelling));
+end;
+
 procedure declareConst(c: PDecl);
 var
   v: TConstant;
@@ -2152,8 +2193,182 @@ begin
     declareInterface(td);
     exit;
   end;
-  td^.declType := resolveType(td^.typeSpec, td^.ident.spelling);
+  td^.declType := resolveType(td^.typeSpec, typeDeclName(td^.ident));
   declare(td);
+end;
+
+function memberTableOf(t: PType): PType; forward;
+procedure checkMemberAccess(d: PDecl; owner: PType; const id: TIdent); forward;
+procedure maDidYouMeanMember(c: PType; name: PName); forward;
+
+{ A type declared in a class or advanced record (in cur, its member
+  scope). }
+procedure declareNestedType(td: PDecl);
+begin
+  if td^.typeSpec^.kind = tsInterface then
+  begin
+    ms('interfaces cannot be declared in a class or record yet');
+    errR(td^.ident.loc, identRange(td^.ident));
+    td^.declType := errorType;
+    declare(td);
+    exit;
+  end;
+  declareType(td);
+end;
+
+function isForwardClassDecl(d: PDecl): boolean;
+begin
+  isForwardClassDecl := (d <> nil) and (d^.kind = dkType) and
+                        (d^.typeSpec^.kind = tsClass) and d^.typeSpec^.isForwardClass;
+end;
+
+{ Members of outer declared with td: a nested class or record knows its
+  outer one; an enumeration's values are members too. }
+procedure addNestedMembers(outer, td: PDecl; var members: TPtrList; var own: TIntMap);
+var
+  t, mt: PType;
+  i: longint;
+  v: PDecl;
+begin
+  t := td^.declType;
+  if (t <> nil) and (t^.kind = tyClass) then
+    t^.classOuter := PType(outer)
+  else
+  begin
+    mt := memberTableOf(t);
+    if mt <> nil then
+      mt^.classOuter := PType(outer);
+  end;
+  if (t = nil) or (t^.kind <> tyEnum) or (td^.typeSpec^.kind <> tsEnum) then
+    exit;
+  for i := 0 to t^.enumValues.count - 1 do
+  begin
+    v := PDecl(listGet(t^.enumValues, i));
+    v^.vis := td^.vis;
+    if mapGet(own, v^.ident.name^.id) = nil then
+    begin
+      mapPut(own, v^.ident.name^.id, v);
+      listAdd(members, v);
+    end;
+  end;
+end;
+
+{ The member name of the class or advanced record that quals name (TOuter,
+  TOuter.TInner, ...); nil after a diagnostic. }
+function lookupMemberPath(const quals: TPtrList; const name: TIdent): PDecl;
+var
+  c, owner, t: PType;
+  d: PDecl;
+  i: longint;
+  id: TIdent;
+begin
+  lookupMemberPath := nil;
+  c := nil;
+  for i := 0 to quals.count do
+  begin
+    if i < quals.count then
+      id := PIdent(listGet(quals, i))^
+    else
+      id := name;
+    if c = nil then
+    begin
+      d := lookup(id.name);
+      if d = nil then
+      begin
+        diagUndeclared(id);
+        exit;
+      end;
+      d^.isUsed := true;
+    end
+    else
+    begin
+      owner := nil;
+      d := findMember(c, id.name, owner);
+      if d = nil then
+      begin
+        ms('no member named ''');
+        maN(id.spelling);
+        if c^.classRecord <> nil then
+          ma(''' in record ')
+        else
+          ma(''' in class ');
+        maT(c);
+        maDidYouMeanMember(c, id.name);
+        errR(id.loc, identRange(id));
+        exit;
+      end;
+      checkMemberAccess(d, owner, id);
+    end;
+    if i = quals.count then
+      exit(d);
+    t := nil;
+    if d^.kind = dkType then
+      t := d^.declType;
+    c := nil;
+    if (t <> nil) and (t^.kind = tyClass) then
+      c := t
+    else
+      c := memberTableOf(t);
+    if c = nil then
+    begin
+      if (t = nil) or not isError(t) then
+      begin
+        ms('''');
+        maN(id.spelling);
+        ma(''' is not a class or record with members');
+        errR(id.loc, identRange(id));
+      end;
+      exit;
+    end;
+  end;
+end;
+
+{ Resolves the pointer types since mark whose targets are visible now
+  (declared in a class); the others stay pending. }
+procedure resolvePendingPointersFrom(mark: longint);
+var
+  i, j: longint;
+  pp: PPendingPointer;
+  d: PDecl;
+begin
+  i := mark;
+  while i < pendingPointers.count do
+  begin
+    pp := PPendingPointer(listGet(pendingPointers, i));
+    d := lookup(pp^.spec^.tname.name);
+    if (d <> nil) and (d^.kind = dkType) and (d^.declType <> nil) then
+    begin
+      pp^.ptr^.pointee := d^.declType;
+      for j := i to pendingPointers.count - 2 do
+        listSet(pendingPointers, j, listGet(pendingPointers, j + 1));
+      listPop(pendingPointers);
+    end
+    else
+      i := i + 1;
+  end;
+end;
+
+{ ts in the heading of a method of c: the nested types of c and of the
+  classes around it are visible. }
+function resolveTypeIn(c: PType; ts: PTypeSpec): PType;
+var
+  saved: PScope;
+  chain: TPtrList;
+  o: PType;
+  i: longint;
+begin
+  listInit(chain);
+  o := c;
+  while o <> nil do
+  begin
+    listAdd(chain, o);
+    o := o^.classOuter;
+  end;
+  saved := cur;
+  for i := chain.count - 1 downto 0 do
+    cur := newNestedScope(cur, PType(listGet(chain, i)));
+  resolveTypeIn := resolveType(ts, nil);
+  cur := saved;
 end;
 
 { --- Classes (objfpc) --- }
@@ -2187,6 +2402,7 @@ begin
 end;
 
 procedure defineClassMembers(c: PType; ts: PTypeSpec); forward;
+function checkConstInit(init: PNode; t: PType; var folded: TConstValue): boolean; forward;
 
 { TFoo = class ... end;  /  TFoo = class; }
 procedure declareClass(td: PDecl);
@@ -2228,7 +2444,7 @@ begin
       end;
     end;
   c := newClassType;
-  setDeclName(c, td^.ident.spelling);
+  setDeclName(c, typeDeclName(td^.ident));
   c^.classModule := curModule;
   td^.declType := c;
   ts^.resolved := c;
@@ -2978,9 +3194,13 @@ var
   parentClass, owner, pc, it: PType;
   members, fields, vtable, listed, listedWhere, impls: TPtrList;
   own: TIntMap;
-  i, k: longint;
-  m, prev, inh, defaultProp, overloadOf, td: PDecl;
+  i, k, j: longint;
+  m, prev, inh, defaultProp, overloadOf, td, fwd: PDecl;
   pi: PInterfaceImpl;
+  savedScope: PScope;
+  savedPrefix: PName;
+  pendingClassMark, pendingPointerMark: longint;
+  folded: TConstValue;
 
   { the interfaces class(TParent, I1, I2) lists }
   procedure addListed(id: PIdent);
@@ -3057,9 +3277,27 @@ begin
   for i := 0 to parentClass^.classVTable.count - 1 do
     listAdd(vtable, listGet(parentClass^.classVTable, i));
   mapInit(own);
+  { nested constants and types are visible to the members after them, and
+    so are the ancestors' }
+  savedScope := cur;
+  savedPrefix := nestPrefix;
+  cur := newScope(newNestedScope(cur, parentClass));
+  nestPrefix := c^.declName;
+  pendingClassMark := pendingClasses.count;
+  pendingPointerMark := pendingPointers.count;
   for i := 0 to ts^.memberList.count - 1 do
   begin
     m := PDecl(listGet(ts^.memberList, i));
+    fwd := PDecl(mapGet(own, m^.ident.name^.id));
+    if isForwardClassDecl(fwd) and (m^.kind = dkType) then
+    begin
+      declareNestedType(m); { its definition }
+      mapPut(own, m^.ident.name^.id, m);
+      for j := 0 to members.count - 1 do
+        if listGet(members, j) = pointer(fwd) then
+          listSet(members, j, m);
+      continue;
+    end;
     prev := PDecl(mapGet(own, m^.ident.name^.id));
     overloadOf := nil; { objfpc: an overloaded method }
     if (prev <> nil) and (mode = lmObjFPC) and (prev^.kind = dkRoutine) and
@@ -3094,6 +3332,13 @@ begin
       mapPut(own, m^.ident.name^.id, m);
     listAdd(members, m);
     case m^.kind of
+      dkConst:
+        declareConst(m);
+      dkType:
+        begin
+          declareNestedType(m);
+          addNestedMembers(PDecl(c), m, members, own);
+        end;
       dkField:
         begin
           m^.fieldType := resolveType(m^.fieldSpec, nil);
@@ -3124,6 +3369,13 @@ begin
             ms('a class variable cannot be a file');
             errR(m^.ident.loc, identRange(m^.ident));
           end;
+          if m^.init <> nil then { a typed constant }
+          begin
+            m^.isUsed := true;
+            constInitWhat := 'typed constant value';
+            if not isError(m^.varType) and checkConstInit(m^.init, m^.varType, folded) then
+              m^.initValue := folded;
+          end;
         end;
     else
       begin
@@ -3143,6 +3395,25 @@ begin
       end;
     end;
   end;
+  { a forward class declared in the class must be defined in it; pointers
+    declared in it may point to its later types }
+  for i := pendingClassMark to pendingClasses.count - 1 do
+  begin
+    td := PDecl(listGet(pendingClasses, i));
+    ms('class ''');
+    maN(td^.ident.spelling);
+    ma(''' is declared forward but never defined');
+    errR(td^.ident.loc, identRange(td^.ident));
+    listInit(impls);
+    defineClass(td^.declType, tobjectType, impls,
+                tobjectType^.classAllFields, tobjectType^.classVTable,
+                curModule);
+  end;
+  while pendingClasses.count > pendingClassMark do
+    listPop(pendingClasses);
+  resolvePendingPointersFrom(pendingPointerMark);
+  cur := savedScope;
+  nestPrefix := savedPrefix;
   defineClass(c, parentClass, members, fields, vtable, curModule);
   { the interfaces: the parent's (with this class's overrides), then its own }
   listInit(impls);
@@ -3283,6 +3554,26 @@ begin
   for i := 0 to ts^.recMembers.count - 1 do
   begin
     m := PDecl(listGet(ts^.recMembers, i));
+    if (m^.kind = dkConst) or (m^.kind = dkType) then
+    begin
+      { (declared with the record: see declareAdvancedRecord) }
+      prev := PDecl(mapGet(own, m^.ident.name^.id));
+      if prev <> nil then
+      begin
+        ms('redefinition of ''');
+        maN(m^.ident.spelling);
+        ma('''');
+        errR(m^.ident.loc, identRange(m^.ident));
+        ms('previous definition is here');
+        note(prev^.loc);
+        continue;
+      end;
+      mapPut(own, m^.ident.name^.id, m);
+      listAdd(members, m);
+      if m^.kind = dkType then
+        addNestedMembers(PDecl(c), m, members, own);
+      continue;
+    end;
     overloadOf := nil;
     prev := PDecl(mapGet(own, m^.ident.name^.id));
     if prev <> nil then
@@ -3330,15 +3621,38 @@ procedure declareAdvancedRecord(td: PDecl);
 var
   saved: PTypeSpec;
   t: PType;
+  name, savedPrefix: PName;
+  memberScope, savedScope: PScope;
+  i: longint;
+  m: PDecl;
 begin
+  { its nested constants and types first: its fields may use them }
+  name := typeDeclName(td^.ident);
+  memberScope := newScope(cur);
+  savedScope := cur;
+  savedPrefix := nestPrefix;
+  cur := memberScope;
+  nestPrefix := name;
+  for i := 0 to td^.typeSpec^.recMembers.count - 1 do
+  begin
+    m := PDecl(listGet(td^.typeSpec^.recMembers, i));
+    if m^.kind = dkConst then
+      declareConst(m)
+    else if m^.kind = dkType then
+      declareNestedType(m);
+  end;
   saved := namedAdvancedRecord;
   namedAdvancedRecord := td^.typeSpec;
-  t := resolveType(td^.typeSpec, td^.ident.spelling);
+  t := resolveType(td^.typeSpec, name);
   namedAdvancedRecord := saved;
+  cur := savedScope;
   td^.declType := t;
   declare(td); { its methods' headings may name it }
+  cur := memberScope;
   if t^.kind = tyRecord then
     defineRecordMembers(t, td^.typeSpec);
+  cur := savedScope;
+  nestPrefix := savedPrefix;
 end;
 
 function memberTableOf(t: PType): PType;
@@ -3608,7 +3922,7 @@ end;
 
 procedure declareMethodBody(r: PDecl);
 var
-  c, rt, convRT: PType;
+  c, rt, convRT, t: PType;
   m, p, x, match, td: PDecl;
   i: longint;
   what: string;
@@ -3624,11 +3938,38 @@ begin
     exit;
   end;
   c := nil;
-  td := lookup(r^.methodClassName.name);
-  if (td <> nil) and (td^.kind = dkType) then
-    c := memberTableOf(td^.declType); { an advanced record }
-  if c = nil then
-    c := lookupClass(r^.methodClassName);
+  if r^.outerClassNames.count > 0 then { TOuter.TInner.Bar }
+  begin
+    td := lookupMemberPath(r^.outerClassNames, r^.methodClassName);
+    if (td <> nil) and (td^.kind <> dkType) then
+      td := nil;
+    t := nil;
+    if td <> nil then
+      t := td^.declType;
+    if (t <> nil) and (t^.kind = tyClass) then
+      c := t
+    else
+      c := memberTableOf(t);
+    if c = nil then
+    begin
+      if (td <> nil) and not isError(t) then
+      begin
+        ms('''');
+        maN(r^.methodClassName.spelling);
+        ma(''' is not a class or record with members');
+        errR(r^.methodClassName.loc, identRange(r^.methodClassName));
+      end;
+      exit;
+    end;
+  end
+  else
+  begin
+    td := lookup(r^.methodClassName.name);
+    if (td <> nil) and (td^.kind = dkType) then
+      c := memberTableOf(td^.declType); { an advanced record }
+    if c = nil then
+      c := lookupClass(r^.methodClassName);
+  end;
   if c = nil then
     exit;
   if c^.classRecord <> nil then
@@ -3656,11 +3997,11 @@ begin
     for i := 0 to r^.params.count - 1 do
     begin
       p := PDecl(listGet(r^.params, i));
-      p^.varType := resolveType(p^.varSpec, nil);
+      p^.varType := resolveTypeIn(c, p^.varSpec);
     end;
     convRT := nil;
     if isConversionOperator(m) and (r^.resultSpec <> nil) then
-      convRT := resolveType(r^.resultSpec, nil);
+      convRT := resolveTypeIn(c, r^.resultSpec);
     match := nil;
     x := m;
     while x <> nil do
@@ -3731,11 +4072,11 @@ begin
     for i := 0 to r^.params.count - 1 do
     begin
       p := PDecl(listGet(r^.params, i));
-      p^.varType := resolveType(p^.varSpec, nil);
+      p^.varType := resolveTypeIn(c, p^.varSpec);
     end;
     rt := nil;
     if r^.resultSpec <> nil then
-      rt := resolveType(r^.resultSpec, nil);
+      rt := resolveTypeIn(c, r^.resultSpec);
     if not sameSignature(m, r) or ((rt <> nil) and (rt <> m^.resultType)) or
        not sameDefaults(m, r) then
     begin
@@ -3765,53 +4106,64 @@ begin
   checkRoutineBody(m);
 end;
 
-{ Every method of the classes declared in b has a body. }
-procedure checkMethodsImplemented(b: PBlock);
+{ Every method of the class or advanced record d, and of those it
+  declares, has a body. }
+procedure checkTypeMethodsImplemented(d: PDecl);
 var
-  i, j: longint;
-  d, r: PDecl;
+  j: longint;
+  r: PDecl;
   c: PType;
 begin
-  for i := 0 to b^.decls.count - 1 do
+  c := memberTableOf(d^.declType);
+  if c <> nil then { an advanced record's }
   begin
-    d := PDecl(listGet(b^.decls, i));
-    if d^.kind = dkType then
+    for j := 0 to c^.classMembers.count - 1 do
     begin
-      c := memberTableOf(d^.declType);
-      if c <> nil then { an advanced record's }
-      begin
-        for j := 0 to c^.classMembers.count - 1 do
-        begin
-          r := PDecl(listGet(c^.classMembers, j));
-          if (r^.kind = dkRoutine) and (r^.body = nil) then
-          begin
-            ms('method ''');
-            maQualified(c, r^.ident);
-            ma(''' is declared but never implemented');
-            errR(r^.ident.loc, identRange(r^.ident));
-          end;
-        end;
-        continue;
-      end;
-    end;
-    if (d^.kind <> dkType) or (d^.typeSpec^.kind <> tsClass) or
-       d^.typeSpec^.isForwardClass then
-      continue;
-    c := d^.declType;
-    if (c = nil) or (c^.kind <> tyClass) then
-      continue;
-    for j := 0 to d^.typeSpec^.memberList.count - 1 do
-    begin
-      r := PDecl(listGet(d^.typeSpec^.memberList, j));
-      if (r^.kind = dkRoutine) and (r^.ownerClass = c) and not r^.isAbstract and
-         (r^.body = nil) then
+      r := PDecl(listGet(c^.classMembers, j));
+      if (r^.kind = dkRoutine) and (r^.body = nil) then
       begin
         ms('method ''');
         maQualified(c, r^.ident);
         ma(''' is declared but never implemented');
         errR(r^.ident.loc, identRange(r^.ident));
-      end;
+      end
+      else if r^.kind = dkType then
+        checkTypeMethodsImplemented(r);
     end;
+    exit;
+  end;
+  if (d^.typeSpec^.kind <> tsClass) or d^.typeSpec^.isForwardClass then
+    exit;
+  c := d^.declType;
+  if (c = nil) or (c^.kind <> tyClass) then
+    exit;
+  for j := 0 to d^.typeSpec^.memberList.count - 1 do
+  begin
+    r := PDecl(listGet(d^.typeSpec^.memberList, j));
+    if (r^.kind = dkRoutine) and (r^.ownerClass = c) and not r^.isAbstract and
+       (r^.body = nil) then
+    begin
+      ms('method ''');
+      maQualified(c, r^.ident);
+      ma(''' is declared but never implemented');
+      errR(r^.ident.loc, identRange(r^.ident));
+    end
+    else if r^.kind = dkType then
+      checkTypeMethodsImplemented(r);
+  end;
+end;
+
+{ Every method of the classes declared in b has a body. }
+procedure checkMethodsImplemented(b: PBlock);
+var
+  i: longint;
+  d: PDecl;
+begin
+  for i := 0 to b^.decls.count - 1 do
+  begin
+    d := PDecl(listGet(b^.decls, i));
+    if d^.kind = dkType then
+      checkTypeMethodsImplemented(d);
   end;
 end;
 
@@ -5408,7 +5760,9 @@ end;
 
 procedure checkRoutineBody(r: PDecl);
 var
-  savedScope: PScope;
+  savedScope, base: PScope;
+  outers: TPtrList;
+  o: PType;
   savedRoutine, p, prev: PDecl;
   i: longint;
   selfRef: PNode;
@@ -5416,6 +5770,21 @@ var
 begin
   savedScope := cur;
   savedRoutine := curRoutine;
+  { the method of a nested class or record also sees the constants and
+    types of the classes around it }
+  if r^.ownerClass <> nil then
+  begin
+    listInit(outers);
+    o := r^.ownerClass^.classOuter;
+    while o <> nil do
+    begin
+      listAdd(outers, o);
+      o := o^.classOuter;
+    end;
+    for i := outers.count - 1 downto 0 do
+      cur := newNestedScope(cur, PType(listGet(outers, i)));
+  end;
+  base := cur;
   if r^.isStatic then { a record's static method: its statics }
   begin
     cur := newClassScope(cur, r^.ownerClass, nil);
@@ -5435,7 +5804,7 @@ begin
     cur^.routineBoundary := true;
   end;
   cur := newScope(cur);
-  if cur^.parent = savedScope then
+  if cur^.parent = base then
     cur^.routineBoundary := true;
   curRoutine := r;
   if (r^.methodKind <> mtNone) and not r^.isStatic then
@@ -6228,6 +6597,7 @@ begin
   interfacedType := nil;
   namedAdvancedRecord := nil;
   constInitWhat := 'typed constant value';
+  nestPrefix := nil;
   handlerDepth := 0;
   finallyLoopDepth := -1;
   listInit(pendingInterfaces);

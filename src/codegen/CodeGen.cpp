@@ -283,7 +283,7 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
   llvm::DenseSet<Decl *> ImportedDecls;
 
   void collectExports(UnitDecl &U, bool Imported) {
-    for (Decl *D : U.getInterface()->getDecls()) {
+    for (Decl *D : withNested(U.getInterface()->getDecls())) {
       if (ClassType *C = definedClass(D)) {
         // A class: its VMT and its methods.
         std::string Prefix =
@@ -381,6 +381,33 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
     auto *TD = llvm::dyn_cast<TypeDecl>(D);
     auto *RT = TD ? llvm::dyn_cast_or_null<RecordType>(TD->getType()) : nullptr;
     return RT ? RT->getMemberTable() : nullptr;
+  }
+
+  /// Does E name a type (TFoo, TOuter.TInner)?
+  static bool namesType(Expr *E) {
+    if (auto *N = llvm::dyn_cast<NameRefExpr>(E))
+      return llvm::isa_and_nonnull<TypeDecl>(N->getDecl());
+    auto *F = llvm::dyn_cast<FieldExpr>(E);
+    return F && llvm::isa_and_nonnull<TypeDecl>(F->getMember());
+  }
+
+  /// Decls, each followed by the types declared in it when it is a class
+  /// or an advanced record (recursively).
+  static llvm::SmallVector<Decl *, 16> withNested(llvm::ArrayRef<Decl *> Decls) {
+    llvm::SmallVector<Decl *, 16> Out;
+    std::function<void(Decl *)> Add = [&](Decl *D) {
+      Out.push_back(D);
+      ClassType *C = definedClass(D);
+      if (!C)
+        C = advancedRecord(D);
+      if (C)
+        for (Decl *M : C->getMembers())
+          if (llvm::isa<TypeDecl>(M))
+            Add(M);
+    };
+    for (Decl *D : Decls)
+      Add(D);
+    return Out;
   }
 
   static ClassType *definedClass(Decl *D) {
@@ -782,7 +809,7 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
       return visitExpr(E);
     if (auto *SL = llvm::dyn_cast<StringLiteralExpr>(E))
       return getAnsiConstant(SL->getValue());
-    if (auto *N = llvm::dyn_cast<NameRefExpr>(E))
+    if (auto *N = llvm::dyn_cast<NameRefExpr>(unwrapConst(E)))
       if (auto *C = llvm::dyn_cast<ConstDecl>(N->getDecl());
           C && C->getValue().K == ConstValue::String)
         return getAnsiConstant(C->getValue().Str);
@@ -997,7 +1024,7 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
     }
     if (auto *SL = llvm::dyn_cast<StringLiteralExpr>(E))
       return getPStrConstant(SL->getValue());
-    if (auto *N = llvm::dyn_cast<NameRefExpr>(E))
+    if (auto *N = llvm::dyn_cast<NameRefExpr>(unwrapConst(E)))
       if (auto *C = llvm::dyn_cast<ConstDecl>(N->getDecl());
           C && C->getValue().K == ConstValue::String)
         return getPStrConstant(C->getValue().Str);
@@ -1696,6 +1723,8 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
     }
     case Expr::EK_Field: {
       auto *F = llvm::cast<FieldExpr>(E);
+      if (NameRefExpr *Ref = F->getConstRef()) // TFoo.C: a string constant
+        return emitAddress(Ref);
       if (auto *V = llvm::dyn_cast_or_null<VarDecl>(F->getMember()))
         return Globals[V]; // a class variable (the object is not evaluated)
       if (auto *C = llvm::dyn_cast<ClassType>(F->getBase()->getType())) {
@@ -2045,12 +2074,15 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
   }
 
   void emitGlobals(Block &Blk) {
-    for (Decl *D : Blk.getDecls()) {
+    for (Decl *D : withNested(Blk.getDecls())) {
       if (ClassType *C = definedClass(D)) { // class variables: no debug info
         for (Decl *M : C->getMembers())
           if (auto *V = llvm::dyn_cast<VarDecl>(M)) {
             llvm::Type *Ty = memType(V->getType());
-            Globals[V] = createGlobal(V, Ty, llvm::Constant::getNullValue(Ty));
+            Globals[V] = createGlobal(V, Ty,
+                                      V->isTypedConst()
+                                          ? initializerFor(V, Ty)
+                                          : llvm::Constant::getNullValue(Ty));
           }
         continue;
       }
@@ -2160,7 +2192,7 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
   }
 
   void declareRoutines(Block &Blk) {
-    for (Decl *D : Blk.getDecls()) {
+    for (Decl *D : withNested(Blk.getDecls())) {
       if (ClassType *C = definedClass(D)) {
         declareClass(D, C);
         continue;
@@ -2767,7 +2799,8 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
     if (T->isStringLiteral()) {
       if (auto *SL = llvm::dyn_cast<StringLiteralExpr>(Arg))
         return B.CreateGlobalString(SL->getValue(), ".cstr");
-      auto *C = llvm::cast<ConstDecl>(llvm::cast<NameRefExpr>(Arg)->getDecl());
+      auto *C = llvm::cast<ConstDecl>(
+          llvm::cast<NameRefExpr>(unwrapConst(Arg))->getDecl());
       return B.CreateGlobalString(C->getValue().Str, ".cstr");
     }
     llvm::Value *V = visitExpr(Arg);
@@ -2784,7 +2817,7 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
       return nullptr;
     if (auto *SL = llvm::dyn_cast<StringLiteralExpr>(Arg))
       return B.CreateGlobalString(SL->getValue(), ".cstr");
-    auto *N = llvm::dyn_cast<NameRefExpr>(Arg);
+    auto *N = llvm::dyn_cast<NameRefExpr>(unwrapConst(Arg));
     auto *C = N ? llvm::dyn_cast_or_null<ConstDecl>(N->getDecl()) : nullptr;
     if (!C)
       return nullptr;
@@ -2850,8 +2883,8 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
       auto *N = llvm::dyn_cast<NameRefExpr>(Base);
       if (Base->getType()->isRecord()) {
         Obj = emitAddress(Base);
-      } else if (N && llvm::isa<TypeDecl>(N->getDecl())) {
-        Obj = vmtOf(llvm::cast<ClassType>(N->getType()));
+      } else if (namesType(Base)) {
+        Obj = vmtOf(llvm::cast<ClassType>(Base->getType()));
         SelfIsClass = true;
       } else {
         Obj = visitExpr(Base);
@@ -3164,6 +3197,15 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
 
   /// The value of E, a user-defined conversion applied (its operator called
   /// with E's unconverted value); an address for a record.
+  /// A constant used as a member (TFoo.C, obj.C): its reference, which is
+  /// emitted instead; otherwise E.
+  static Expr *unwrapConst(Expr *E) {
+    if (auto *F = llvm::dyn_cast<FieldExpr>(E))
+      if (NameRefExpr *Ref = F->getConstRef())
+        return Ref;
+    return E;
+  }
+
   llvm::Value *visitExpr(Expr *E) {
     if (E->getConversion())
       return emitConversion(E);
@@ -3472,8 +3514,7 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
   llvm::Value *emitMemberCall(FieldExpr *F, llvm::ArrayRef<Expr *> Args) {
     auto *R = llvm::cast<RoutineDecl>(F->getMember());
     if (auto *RT = llvm::dyn_cast<RecordType>(F->getBase()->getType())) {
-      auto *N = llvm::dyn_cast<NameRefExpr>(F->getBase());
-      if (N && llvm::isa<TypeDecl>(N->getDecl())) { // TR.Create, TR.M
+      if (namesType(F->getBase())) { // TR.Create, TR.M
         if (R->isConstructor())
           return emitRecordConstruction(RT, R, Args);
         return emitCall(R, Args);
@@ -3498,9 +3539,8 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
                      R->getParams(), Args, Obj, resultOf(R));
       return R->isFunction() ? Result : nullptr;
     }
-    if (auto *N = llvm::dyn_cast<NameRefExpr>(F->getBase());
-        N && llvm::isa<TypeDecl>(N->getDecl())) {
-      auto *C = llvm::cast<ClassType>(N->getType());
+    if (namesType(F->getBase())) { // TFoo.Create, TOuter.TInner.Create
+      auto *C = llvm::cast<ClassType>(F->getBase()->getType());
       if (R->isConstructor())
         return emitConstruction(C, R, Args, F->getBeginLoc());
       return emitMethodCall(R, vmtOf(C), Args, /*Inherited=*/false,
@@ -5656,6 +5696,8 @@ public:
   }
 
   llvm::Value *visitFieldExpr(FieldExpr *E) {
+    if (NameRefExpr *Ref = E->getConstRef()) // TFoo.C
+      return visitExpr(Ref);
     if (E->getBase()->getType()->isRecord() &&
         !llvm::isa_and_nonnull<FieldDecl>(E->getMember())) {
       if (llvm::isa_and_nonnull<RoutineDecl>(E->getMember()))

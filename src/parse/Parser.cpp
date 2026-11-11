@@ -429,13 +429,21 @@ Expr *Parser::parseTypedConstValue() {
 }
 
 // constPart = "const" ident "=" constExpr ";" { ident "=" constExpr ";" } .
-void Parser::parseConstPart(llvm::SmallVectorImpl<Decl *> &Decls) {
+bool Parser::isVisibilityWord() const {
+  return isIdentifierNamed("private") || isIdentifierNamed("protected") ||
+         isIdentifierNamed("public") || isIdentifierNamed("published") ||
+         isIdentifierNamed("strict");
+}
+
+void Parser::parseConstPart(llvm::SmallVectorImpl<Decl *> &Decls,
+                            bool InMembers) {
   consumeToken(); // 'const'
-  if (Tok.isNot(tok::identifier)) {
+  if (Tok.isNot(tok::identifier) || (InMembers && isVisibilityWord())) {
     Diags.error(Tok.getLocation(), "expected constant name after 'const'");
     return;
   }
-  while (Tok.is(tok::identifier) && !Diags.shouldStop()) {
+  while (Tok.is(tok::identifier) && !(InMembers && isVisibilityWord()) &&
+         !Diags.shouldStop()) {
     Identifier Name = makeIdentifier(Tok);
     consumeToken();
     if (Tok.is(tok::colon) && LangOpts.Mode != LangMode::ISO) {
@@ -486,13 +494,15 @@ void Parser::parseConstPart(llvm::SmallVectorImpl<Decl *> &Decls) {
 }
 
 // typePart = "type" ident "=" type ";" { ident "=" type ";" } .
-void Parser::parseTypePart(llvm::SmallVectorImpl<Decl *> &Decls) {
+void Parser::parseTypePart(llvm::SmallVectorImpl<Decl *> &Decls,
+                           bool InMembers) {
   consumeToken(); // 'type'
-  if (Tok.isNot(tok::identifier)) {
+  if (Tok.isNot(tok::identifier) || (InMembers && isVisibilityWord())) {
     Diags.error(Tok.getLocation(), "expected type name after 'type'");
     return;
   }
-  while (Tok.is(tok::identifier) && !Diags.shouldStop()) {
+  while (Tok.is(tok::identifier) && !(InMembers && isVisibilityWord()) &&
+         !Diags.shouldStop()) {
     Identifier Name = makeIdentifier(Tok);
     consumeToken();
     TypeSpec *TS = nullptr;
@@ -609,17 +619,26 @@ RoutineDecl *Parser::parseRoutineDecl(bool HeadingOnly) {
   SourceLocation Loc = consumeToken();
 
   Identifier Name, ClassName;
+  llvm::ArrayRef<Identifier> OuterNames;
   if (!expectIdentifier(Name, std::string(Kind) + " name")) {
     skipUntil({tok::semi, tok::kw_begin});
     tryConsume(tok::semi);
   } else if (LangOpts.ObjKeywords && Tok.is(tok::period)) {
-    consumeToken();
-    ClassName = Name;
-    if (!expectIdentifier(Name, "method name after '.'")) {
-      Name = Identifier();
-      skipUntil({tok::semi, tok::kw_begin});
-      tryConsume(tok::semi);
+    // TFoo.Bar, or TOuter.TInner.Bar (a nested class or record)
+    llvm::SmallVector<Identifier, 2> Outer;
+    while (Tok.is(tok::period)) {
+      consumeToken();
+      if (ClassName.isValid())
+        Outer.push_back(ClassName);
+      ClassName = Name;
+      if (!expectIdentifier(Name, "method name after '.'")) {
+        Name = Identifier();
+        skipUntil({tok::semi, tok::kw_begin});
+        tryConsume(tok::semi);
+        break;
+      }
     }
+    OuterNames = Ctx.copyArray<Identifier>(Outer);
   }
   if (Name.isValid() && MK != MethodKind::None && !ClassName.isValid())
     Diags.error(Name.Loc,
@@ -775,6 +794,7 @@ RoutineDecl *Parser::parseRoutineDecl(bool HeadingOnly) {
                                     HasParamList, ResultTS, Body, false);
   R->setMethodKind(MK);
   R->setClassName(ClassName);
+  R->setOuterClassNames(OuterNames);
   return WithDirectives(R);
 }
 
@@ -1316,6 +1336,21 @@ TypeSpec *Parser::parseClassType(SourceLocation Start) {
                   "expected 'var', 'procedure' or 'function' after 'class'");
       return Fail();
     }
+    if (Tok.isOneOf(tok::kw_const, tok::kw_type)) { // nested declarations
+      llvm::SmallVector<Decl *, 4> Nested;
+      if (Tok.is(tok::kw_const))
+        parseConstPart(Nested, /*InMembers=*/true);
+      else
+        parseTypePart(Nested, /*InMembers=*/true);
+      for (Decl *D : Nested) {
+        D->setVisibility(Vis);
+        if (auto *V = llvm::dyn_cast<VarDecl>(D)) // a typed constant
+          V->setClassVar();
+        Members.push_back(D);
+      }
+      ClassVars = false;
+      continue;
+    }
     Diags.error(Tok.getLocation(),
                 "expected a field, method or property declaration, or 'end'");
     return Fail();
@@ -1654,11 +1689,8 @@ TypeSpec *Parser::parseTypeIdentifier(llvm::StringRef Context) {
     consumeToken();
     return TS;
   }
-  if (Tok.is(tok::identifier)) {
-    auto *TS = Ctx.create<NamedTypeSpec>(makeIdentifier(Tok));
-    consumeToken();
-    return TS;
-  }
+  if (Tok.is(tok::identifier))
+    return parseNamedType();
   if (Tok.is(tok::kw_array) && Context == "parameter type" && LangOpts.Mode != LangMode::ISO &&
       peekToken().is(tok::kw_of)) { // Turbo/FPC: array of const, array of T
     SourceLocation Start = Tok.getLocation();
@@ -1683,6 +1715,29 @@ TypeSpec *Parser::parseTypeIdentifier(llvm::StringRef Context) {
 }
 
 /// Tokens that can continue a constant expression after an identifier.
+static bool continuesConstExpr(tok::TokenKind K);
+
+TypeSpec *Parser::parseNamedType() {
+  Identifier Name = makeIdentifier(Tok);
+  SourceLocation Start = consumeToken();
+  if (!LangOpts.ObjKeywords || Tok.isNot(tok::period) ||
+      peekToken().isNot(tok::identifier))
+    return Ctx.create<NamedTypeSpec>(Name);
+  llvm::SmallVector<Identifier, 2> Qualifiers;
+  while (Tok.is(tok::period) && peekToken().is(tok::identifier)) {
+    consumeToken(); // '.'
+    Qualifiers.push_back(Name);
+    Name = makeIdentifier(Tok);
+    consumeToken();
+  }
+  if (continuesConstExpr(Tok.getKind()))
+    Diags.error(Tok.getLocation(),
+                "a subrange bound cannot be a qualified constant yet; declare "
+                "an unqualified constant for it");
+  return Ctx.create<NamedTypeSpec>(SourceRange(Start, PrevTokEnd),
+                                   Ctx.copyArray<Identifier>(Qualifiers), Name);
+}
+
 static bool continuesConstExpr(tok::TokenKind K) {
   switch (K) {
   case tok::dotdot: case tok::plus: case tok::minus: case tok::star:
@@ -1708,11 +1763,8 @@ TypeSpec *Parser::parseSimpleType() {
                                     Ctx.copyArray<Identifier>(Names));
   }
 
-  if (Tok.is(tok::identifier) && !continuesConstExpr(peekToken().getKind())) {
-    auto *TS = Ctx.create<NamedTypeSpec>(makeIdentifier(Tok));
-    consumeToken();
-    return TS;
-  }
+  if (Tok.is(tok::identifier) && !continuesConstExpr(peekToken().getKind()))
+    return parseNamedType();
 
   if (!Tok.isOneOf(tok::identifier, tok::integer_literal, tok::string_literal,
                    tok::plus, tok::minus)) {
@@ -1923,9 +1975,22 @@ TypeSpec *Parser::parseAdvancedRecord(SourceLocation Start,
                   "'class'");
       return Fail();
     }
-    if (Tok.isOneOf(tok::kw_type, tok::kw_const)) {
-      unsupported("nested types and constants in records are");
-      return Fail();
+    if (Tok.isOneOf(tok::kw_type, tok::kw_const)) { // nested declarations
+      llvm::SmallVector<Decl *, 4> Nested;
+      if (Tok.is(tok::kw_const))
+        parseConstPart(Nested, /*InMembers=*/true);
+      else
+        parseTypePart(Nested, /*InMembers=*/true);
+      for (Decl *D : Nested) {
+        if (llvm::isa<VarDecl>(D)) {
+          Diags.error(D->getLocation(),
+                      "typed constants in records are not supported yet",
+                      {D->getName().getRange()});
+          continue;
+        }
+        AddMember(D);
+      }
+      continue;
     }
     Diags.error(Tok.getLocation(),
                 "expected a field, method or property declaration, or 'end'");
@@ -2626,7 +2691,16 @@ Expr *Parser::parseConstant() {
     Diags.error(Tok.getLocation(), "expected constant");
     return nullptr;
   }
+  bool Name = Tok.is(tok::identifier);
   consumeToken();
+  // TOuter.C (objfpc): a constant declared in a class or record
+  while (Name && LangOpts.ObjKeywords && Tok.is(tok::period) &&
+         peekToken().is(tok::identifier)) {
+    consumeToken(); // '.'
+    E = Ctx.create<FieldExpr>(SourceRange(E->getBeginLoc(), Tok.getEndLocation()),
+                              E, makeIdentifier(Tok));
+    consumeToken();
+  }
   return E;
 }
 

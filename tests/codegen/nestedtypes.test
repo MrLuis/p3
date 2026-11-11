@@ -1,0 +1,11 @@
+; Nested declarations get qualified symbols: a nested record's methods
+; (pas.touter.tinner.twice), a nested class's VMT and methods and its
+; ClassName ('TOuter.TNode'); a typed constant in a class is a class
+; variable with its initial value.
+; RUN: %pcc --mode=objfpc --emit-llvm %S/Inputs/nestedtypes.pas -o - | FileCheck %s
+; CHECK-DAG: @pas.touter.limit = internal global i32 7
+; CHECK-DAG: @pas.touter.count = internal global i32 0
+; CHECK-DAG: @vmt.touter.tnode = internal constant [6 x ptr] [{{.*}}, ptr @pas.touter.tnode.name]
+; CHECK-DAG: c"\0CTOuter.TNode"
+; CHECK-DAG: define internal i32 @pas.touter.tinner.twice(ptr %link, ptr %self)
+; CHECK-DAG: define internal i32 @pas.touter.tnode.name(ptr %link, ptr %self)

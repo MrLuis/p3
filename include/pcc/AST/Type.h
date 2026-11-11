@@ -384,6 +384,9 @@ class ClassType final : public Type {
   const void *Module = nullptr; ///< the program or unit declaring it
   bool Defined = false;
   RecordType *Record = nullptr; ///< see getRecord
+  /// The class (or advanced record's member table) whose type section
+  /// declares this one (objfpc nested types); null at program or unit level.
+  ClassType *Outer = nullptr;
 
 public:
   ClassType() : Type(TK_Class) {}
@@ -393,6 +396,8 @@ public:
   /// no Self.
   RecordType *getRecord() const { return Record; }
   void setRecord(RecordType *R) { Record = R; }
+  ClassType *getOuter() const { return Outer; }
+  void setOuter(ClassType *C) { Outer = C; }
   ClassType *getParent() const { return Parent; }
   llvm::ArrayRef<Decl *> getMembers() const { return Members; }
   llvm::ArrayRef<FieldDecl *> getAllFields() const { return AllFields; }

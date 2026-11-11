@@ -1,0 +1,28 @@
+ProgramDecl 'nested' <1:1>
+  TypeDecl 'touter' = class(TObject) <4:3>
+  VarDecl 'x' : TOuter.TInner <16:3>
+  FunctionDecl 'touter.tinner.twice' definition <17:1>
+    CompoundStmt <17:40>
+      AssignStmt <17:46>
+        NameRefExpr 'result' function result : integer <17:46>
+        BinaryExpr '*' : integer <17:56>
+          NameRefExpr 'v' field (self) : integer <17:56>
+          IntegerLiteralExpr 2 : integer <17:60>
+  FunctionDecl 'touter.make' definition <18:1>
+    CompoundStmt <18:31>
+      AssignStmt <18:37>
+        FieldExpr 'v' : integer <18:37>
+          NameRefExpr 'result' function result : TOuter.TInner <18:37>
+        NameRefExpr 'cap' constant (self) : integer <18:49>
+  CompoundStmt <19:1>
+    CaseStmt <20:3>
+      IntegerLiteralExpr 4 : integer <20:8>
+      CaseArm <20:13>
+        CaseLabel <20:13>
+          FieldExpr 'cap' : integer <20:13>
+            NameRefExpr 'touter' type : TOuter <20:13>
+        AssignStmt <20:25>
+          FieldExpr 'v' : integer <20:25>
+            NameRefExpr 'x' variable : TOuter.TInner <20:25>
+          IntegerLiteralExpr 1 : integer <20:32>
+    EmptyStmt <21:1>

@@ -159,6 +159,8 @@ class ASTPrinter : public StmtVisitor<ASTPrinter>,
            : R->isOperator()   ? "OperatorDecl '"
            : R->isFunction()   ? "FunctionDecl '"
                                : "ProcedureDecl '");
+      for (const Identifier &Outer : R->getOuterClassNames())
+        OS << Outer.Name << '.';
       if (R->getClassName().isValid())
         OS << R->getClassName().Name << '.';
       OS << R->getName().Name << '\'';

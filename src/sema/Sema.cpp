@@ -90,6 +90,9 @@ class Checker : public StmtVisitor<Checker>,
   /// What a typed constant's or initialized variable's value is called in
   /// diagnostics ("... must be a constant").
   const char *ConstInitWhat = "typed constant value";
+  /// While the members of a class or advanced record are declared: its
+  /// name, which prefixes those of the types it declares (TOuter.TInner).
+  llvm::StringRef NestPrefix;
   /// `class of C` for each class C: the type of C used as a value, and of
   /// Self in class methods (`TFooClass = class of TFoo` is a type of its own).
   llvm::DenseMap<ClassType *, ClassRefType *> ClassRefs;
@@ -195,6 +198,9 @@ class Checker : public StmtVisitor<Checker>,
       PChar->setDeclName("pchar");
       Ty("pchar", PChar);
       PCharTy = PChar;
+      // Free Pascal's names for the one-byte char (char is AnsiChar there).
+      Ty("ansichar", Ctx.getCharType());
+      Ty("pansichar", PChar);
       Ty("ansistring", Ctx.getAnsiStringType());
       Ty("shortstring", Ctx.getShortStringType());
     }
@@ -956,6 +962,10 @@ class Checker : public StmtVisitor<Checker>,
     }
     case Expr::EK_Paren:
       return fold(llvm::cast<ParenExpr>(E)->getInner());
+    case Expr::EK_Field: // TFoo.C
+      if (NameRefExpr *Ref = llvm::cast<FieldExpr>(E)->getConstRef())
+        return fold(Ref);
+      return std::nullopt;
     case Expr::EK_Unary: {
       auto *U = llvm::cast<UnaryExpr>(E);
       auto V = fold(U->getOperand());
@@ -1204,6 +1214,22 @@ class Checker : public StmtVisitor<Checker>,
       return Ctx.getUntypedType();
     case TypeSpec::TS_Named: {
       const Identifier &Id = llvm::cast<NamedTypeSpec>(TS)->getName();
+      if (auto Quals = llvm::cast<NamedTypeSpec>(TS)->getQualifiers();
+          !Quals.empty()) { // TOuter.TInner
+        Decl *D = lookupMemberPath(Quals, Id);
+        if (!D)
+          return errorType();
+        if (auto *TD = llvm::dyn_cast<TypeDecl>(D)) {
+          warnHints(TD, Id);
+          return TD->getType() ? TD->getType() : errorType();
+        }
+        Diags.error(Id.Loc,
+                    "'" + Id.Spelling + "' is a " + D->getKindName() +
+                        ", not a type",
+                    {Id.getRange()});
+        noteDeclaredHere(D);
+        return errorType();
+      }
       Decl *D = Cur->lookup(Id.Name);
       if (llvm::isa_and_nonnull<TypeDecl>(D))
         warnHints(D, Id);
@@ -1548,8 +1574,15 @@ class Checker : public StmtVisitor<Checker>,
     auto *RS = llvm::dyn_cast<RecordTypeSpec>(TD->getTypeSpec());
     if (RS && !RS->getMembers().empty() && !CurRoutine)
       return declareAdvancedRecord(TD, RS);
-    TD->setType(resolveType(TD->getTypeSpec(), TD->getName().Spelling));
+    TD->setType(resolveType(TD->getTypeSpec(), typeDeclName(TD->getName())));
     declare(TD);
+  }
+
+  /// The name of the type declared as Id: TOuter.TInner for a nested one.
+  llvm::StringRef typeDeclName(const Identifier &Id) {
+    if (NestPrefix.empty())
+      return Id.Spelling;
+    return Ctx.getStrings().intern((NestPrefix + "." + Id.Spelling).str());
   }
 
   //===--------------------------------------------------------------------===//
@@ -1559,14 +1592,119 @@ class Checker : public StmtVisitor<Checker>,
   /// TR = record fields; methods; operators; properties end; -- the record
   /// type (its fields), then its member table (see RecordType).
   void declareAdvancedRecord(TypeDecl *TD, RecordTypeSpec *RS) {
+    // Its nested constants and types first: its fields may use them.
+    llvm::StringRef Name = typeDeclName(TD->getName());
+    Scope MemberScope(Cur);
+    Scope *SavedScope = Cur;
+    llvm::StringRef SavedPrefix = NestPrefix;
+    Cur = &MemberScope;
+    NestPrefix = Name;
+    for (Decl *M : RS->getMembers()) {
+      if (auto *CD = llvm::dyn_cast<ConstDecl>(M))
+        declareConst(CD);
+      else if (auto *NT = llvm::dyn_cast<TypeDecl>(M))
+        declareNestedType(NT);
+    }
     RecordTypeSpec *Saved = NamedAdvancedRecord;
     NamedAdvancedRecord = RS;
-    Type *T = resolveType(RS, TD->getName().Spelling);
+    Type *T = resolveType(RS, Name);
     NamedAdvancedRecord = Saved;
+    Cur = SavedScope;
     TD->setType(T);
     declare(TD); // its methods' headings may name it
+    Cur = &MemberScope;
     if (auto *RT = llvm::dyn_cast<RecordType>(T))
       defineRecordMembers(RT, RS);
+    Cur = SavedScope;
+    NestPrefix = SavedPrefix;
+  }
+
+  static bool isForwardClassDecl(Decl *D) {
+    auto *TD = llvm::dyn_cast_or_null<TypeDecl>(D);
+    auto *CS = TD ? llvm::dyn_cast_or_null<ClassTypeSpec>(TD->getTypeSpec())
+                  : nullptr;
+    return CS && CS->isForward();
+  }
+
+  /// A type declared in a class or advanced record (in Cur, its member
+  /// scope).
+  void declareNestedType(TypeDecl *TD) {
+    if (llvm::isa<InterfaceTypeSpec>(TD->getTypeSpec())) {
+      Diags.error(TD->getName().Loc,
+                  "interfaces cannot be declared in a class or record yet",
+                  {TD->getName().getRange()});
+      TD->setType(errorType());
+      declare(TD);
+      return;
+    }
+    declareType(TD);
+  }
+
+  /// Members of Outer declared with TD: a nested class or record knows its
+  /// outer one; an enumeration's values are members too.
+  void addNestedMembers(ClassType *Outer, TypeDecl *TD,
+                        llvm::SmallVectorImpl<Decl *> &Members,
+                        llvm::StringMap<Decl *> &Own) {
+    Type *T = TD->getType();
+    if (auto *NC = llvm::dyn_cast_or_null<ClassType>(T))
+      NC->setOuter(Outer);
+    else if (ClassType *MT = memberTableOf(T))
+      MT->setOuter(Outer);
+    auto *E = llvm::dyn_cast_or_null<EnumType>(T);
+    if (!E || !llvm::isa<EnumTypeSpec>(TD->getTypeSpec()))
+      return;
+    for (ConstDecl *V : E->getValues()) {
+      V->setVisibility(TD->getVisibility());
+      if (Own.try_emplace(V->getName().Name, V).second)
+        Members.push_back(V);
+    }
+  }
+
+  /// The member Name of the class or advanced record that Quals name
+  /// (TOuter, TOuter.TInner, ...); null after a diagnostic.
+  Decl *lookupMemberPath(llvm::ArrayRef<Identifier> Quals,
+                         const Identifier &Name) {
+    ClassType *C = nullptr;
+    for (size_t I = 0; I <= Quals.size(); ++I) {
+      const Identifier &Id = I < Quals.size() ? Quals[I] : Name;
+      Decl *D;
+      if (!C) {
+        D = Cur->lookup(Id.Name);
+        if (!D) {
+          diagUndeclared(Id);
+          return nullptr;
+        }
+        Used.insert(D);
+      } else {
+        const ClassType *Owner = nullptr;
+        D = C->findMember(Id.Name, &Owner);
+        if (!D) {
+          Diags.error(Id.Loc,
+                      "no member named '" + Id.Spelling + "' in " +
+                          (C->getRecord() ? "record " : "class ") +
+                          quoted(C) + didYouMeanMember(C, Id.Name),
+                      {Id.getRange()});
+          return nullptr;
+        }
+        checkMemberAccess(D, Owner, Id);
+      }
+      if (I == Quals.size())
+        return D;
+      auto *TD = llvm::dyn_cast<TypeDecl>(D);
+      Type *T = TD ? TD->getType() : nullptr;
+      C = llvm::dyn_cast_or_null<ClassType>(T);
+      if (!C)
+        C = memberTableOf(T);
+      if (!C) {
+        if (!T || !T->isError())
+          Diags.error(Id.Loc,
+                      "'" + Id.Spelling +
+                          "' is not a class or record with members",
+                      {Id.getRange()});
+        return nullptr;
+      }
+    }
+    return nullptr;
   }
 
   void defineRecordMembers(RecordType *RT, RecordTypeSpec *RS) {
@@ -1582,6 +1720,20 @@ class Checker : public StmtVisitor<Checker>,
     }
     for (Decl *M : RS->getMembers()) {
       const Identifier &MN = M->getName();
+      if (llvm::isa<ConstDecl>(M) || llvm::isa<TypeDecl>(M)) {
+        // (declared with the record: see declareAdvancedRecord)
+        if (Decl *Prev = Own.lookup(MN.Name)) {
+          Diags.error(MN.Loc, "redefinition of '" + MN.Spelling + "'",
+                      {MN.getRange()});
+          Diags.note(Prev->getLocation(), "previous definition is here");
+          continue;
+        }
+        Own[MN.Name] = M;
+        Members.push_back(M);
+        if (auto *NT = llvm::dyn_cast<TypeDecl>(M))
+          addNestedMembers(C, NT, Members, Own);
+        continue;
+      }
       RoutineDecl *OverloadOf = nullptr;
       if (Decl *Prev = Own.lookup(MN.Name)) {
         OverloadOf = llvm::dyn_cast<RoutineDecl>(Prev);
@@ -1875,7 +2027,7 @@ class Checker : public StmtVisitor<Checker>,
           return;
         }
     auto *C = Ctx.create<ClassType>();
-    C->setDeclName(Id.Spelling);
+    C->setDeclName(typeDeclName(Id));
     C->setModule(CurModule);
     TD->setType(C);
     CS->setResolved(C);
@@ -2188,9 +2340,26 @@ class Checker : public StmtVisitor<Checker>,
                                                Parent->getVTable().end());
     llvm::StringMap<Decl *> Own;
     PropertyDecl *DefaultProp = nullptr;
+    // Nested constants and types are visible to the members after them, and
+    // so are the ancestors'.
+    Scope Inherited = Scope::nestedIn(Cur, Parent);
+    Scope MemberScope(&Inherited);
+    Scope *SavedScope = Cur;
+    llvm::StringRef SavedPrefix = NestPrefix;
+    Cur = &MemberScope;
+    NestPrefix = C->getDeclName();
+    size_t PendingClassMark = PendingClasses.size();
+    size_t PendingPointerMark = PendingPointers.size();
     for (Decl *M : CS->getMembers()) {
       const Identifier &MN = M->getName();
       RoutineDecl *OverloadOf = nullptr; // objfpc: an overloaded method
+      if (Decl *Fwd = Own.lookup(MN.Name);
+          isForwardClassDecl(Fwd) && llvm::isa<TypeDecl>(M)) {
+        declareNestedType(llvm::cast<TypeDecl>(M)); // its definition
+        Own[MN.Name] = M;
+        std::replace(Members.begin(), Members.end(), Fwd, M);
+        continue;
+      }
       if (Decl *Prev = Own.lookup(MN.Name)) {
         OverloadOf = llvm::dyn_cast<RoutineDecl>(Prev);
         if (!LangOpts.ObjKeywords || !OverloadOf || !llvm::isa<RoutineDecl>(M)) {
@@ -2215,6 +2384,15 @@ class Checker : public StmtVisitor<Checker>,
         Own[MN.Name] = M;
       Members.push_back(M);
 
+      if (auto *CD = llvm::dyn_cast<ConstDecl>(M)) {
+        declareConst(CD);
+        continue;
+      }
+      if (auto *TD = llvm::dyn_cast<TypeDecl>(M)) {
+        declareNestedType(TD);
+        addNestedMembers(C, TD, Members, Own);
+        continue;
+      }
       if (auto *F = llvm::dyn_cast<FieldDecl>(M)) {
         F->setType(resolveType(F->getTypeSpec()));
         if (containsFile(F->getType()))
@@ -2229,6 +2407,14 @@ class Checker : public StmtVisitor<Checker>,
         if (containsFile(V->getType()))
           Diags.error(MN.Loc, "a class variable cannot be a file",
                       {MN.getRange()});
+        if (Expr *Init = V->getInit()) { // a typed constant
+          Used.insert(V);
+          ConstValue Folded;
+          ConstInitWhat = "typed constant value";
+          if (!V->getType()->isError() &&
+              checkConstInit(Init, V->getType(), Folded))
+            V->setInitValue(Folded);
+        }
         continue;
       }
       if (auto *R = llvm::dyn_cast<RoutineDecl>(M)) {
@@ -2254,6 +2440,21 @@ class Checker : public StmtVisitor<Checker>,
         DefaultProp = P;
       }
     }
+    // A forward class declared in the class must be defined in it; pointers
+    // declared in it may point to its later types.
+    for (size_t I = PendingClassMark; I < PendingClasses.size(); ++I) {
+      auto &[TD, NC] = PendingClasses[I];
+      Diags.error(TD->getName().Loc,
+                  "class '" + TD->getName().Spelling +
+                      "' is declared forward but never defined",
+                  {TD->getName().getRange()});
+      NC->define(TObjectTy, {}, TObjectTy->getAllFields(),
+                 TObjectTy->getVTable(), CurModule);
+    }
+    PendingClasses.resize(PendingClassMark);
+    resolvePendingPointersFrom(PendingPointerMark);
+    Cur = SavedScope;
+    NestPrefix = SavedPrefix;
     C->define(Parent, Ctx.copyArray<Decl *>(Members),
               Ctx.copyArray<FieldDecl *>(Fields),
               Ctx.copyArray<RoutineDecl *>(VTable), CurModule);
@@ -2504,6 +2705,23 @@ class Checker : public StmtVisitor<Checker>,
     return nullptr;
   }
 
+  /// TS in the heading of a method of C: the nested types of C and of the
+  /// classes around it are visible.
+  Type *resolveTypeIn(ClassType *C, TypeSpec *TS) {
+    llvm::SmallVector<ClassType *, 2> Chain;
+    for (ClassType *O = C; O; O = O->getOuter())
+      Chain.push_back(O);
+    llvm::SmallVector<std::unique_ptr<Scope>, 2> Scopes;
+    Scope *Saved = Cur;
+    for (ClassType *O : llvm::reverse(Chain)) {
+      Scopes.push_back(std::make_unique<Scope>(Scope::nestedIn(Cur, O)));
+      Cur = Scopes.back().get();
+    }
+    Type *T = resolveType(TS);
+    Cur = Saved;
+    return T;
+  }
+
   /// procedure TFoo.Bar ...; begin ... end;  -- the body of a method.
   void declareMethodBody(RoutineDecl *R) {
     const Identifier &CN = R->getClassName(), &Id = R->getName();
@@ -2515,10 +2733,26 @@ class Checker : public StmtVisitor<Checker>,
       return;
     }
     ClassType *C = nullptr;
-    if (auto *TD = llvm::dyn_cast_or_null<TypeDecl>(Cur->lookup(CN.Name)))
-      C = memberTableOf(TD->getType()); // an advanced record
-    if (!C)
-      C = lookupClass(CN);
+    if (!R->getOuterClassNames().empty()) { // TOuter.TInner.Bar
+      auto *TD = llvm::dyn_cast_or_null<TypeDecl>(
+          lookupMemberPath(R->getOuterClassNames(), CN));
+      Type *T = TD ? TD->getType() : nullptr;
+      C = llvm::dyn_cast_or_null<ClassType>(T);
+      if (!C)
+        C = memberTableOf(T);
+      if (!C) {
+        if (TD && !T->isError())
+          Diags.error(CN.Loc,
+                      "'" + CN.Spelling + "' is not a class or record with members",
+                      {CN.getRange()});
+        return;
+      }
+    } else {
+      if (auto *TD = llvm::dyn_cast_or_null<TypeDecl>(Cur->lookup(CN.Name)))
+        C = memberTableOf(TD->getType()); // an advanced record
+      if (!C)
+        C = lookupClass(CN);
+    }
     if (!C)
       return;
     const char *What = C->getRecord() ? "record" : "class";
@@ -2533,9 +2767,9 @@ class Checker : public StmtVisitor<Checker>,
     }
     if (M->isOverloaded()) { // objfpc: the method with this heading
       for (VarDecl *P : R->getParams())
-        P->setType(resolveType(P->getTypeSpec()));
+        P->setType(resolveTypeIn(C, P->getTypeSpec()));
       Type *RT = isConversionOperator(M) && R->getResultTypeSpec()
-                     ? resolveType(R->getResultTypeSpec())
+                     ? resolveTypeIn(C, R->getResultTypeSpec())
                      : nullptr;
       RoutineDecl *Match = nullptr;
       for (RoutineDecl *X = M; X; X = X->getNextOverload())
@@ -2583,8 +2817,8 @@ class Checker : public StmtVisitor<Checker>,
     }
     if (R->hasParamList() || R->getResultTypeSpec()) {
       for (VarDecl *P : R->getParams())
-        P->setType(resolveType(P->getTypeSpec()));
-      Type *RT = R->getResultTypeSpec() ? resolveType(R->getResultTypeSpec())
+        P->setType(resolveTypeIn(C, P->getTypeSpec()));
+      Type *RT = R->getResultTypeSpec() ? resolveTypeIn(C, R->getResultTypeSpec())
                                         : nullptr;
       if (!sameSignature(M, R) || (RT && RT != M->getResultType()) ||
           !sameDefaults(M, R)) {
@@ -2612,31 +2846,40 @@ class Checker : public StmtVisitor<Checker>,
 
   /// Every method of the classes declared in B has a body.
   void checkMethodsImplemented(Block &B) {
-    for (Decl *D : B.getDecls()) {
-      auto *TD = llvm::dyn_cast<TypeDecl>(D);
-      if (ClassType *MT = TD ? memberTableOf(TD->getType()) : nullptr) {
-        for (Decl *M : MT->getMembers()) // an advanced record's
-          if (auto *R = llvm::dyn_cast<RoutineDecl>(M); R && !R->getBody())
-            Diags.error(R->getName().Loc,
-                        "method '" + qualified(MT, R->getName()) +
-                            "' is declared but never implemented",
-                        {R->getName().getRange()});
-        continue;
-      }
-      auto *CS = TD ? llvm::dyn_cast_or_null<ClassTypeSpec>(TD->getTypeSpec())
-                    : nullptr;
-      if (!CS || CS->isForward())
-        continue;
-      auto *C = llvm::dyn_cast_or_null<ClassType>(TD->getType());
-      if (!C)
-        continue;
-      for (Decl *M : CS->getMembers())
-        if (auto *R = llvm::dyn_cast<RoutineDecl>(M);
-            R && R->getClass() == C && !R->isAbstract() && !R->getBody())
+    for (Decl *D : B.getDecls())
+      if (auto *TD = llvm::dyn_cast<TypeDecl>(D))
+        checkMethodsImplemented(TD);
+  }
+
+  /// ... of the class or advanced record TD, and of those it declares.
+  void checkMethodsImplemented(TypeDecl *TD) {
+    if (ClassType *MT = memberTableOf(TD->getType())) {
+      for (Decl *M : MT->getMembers()) { // an advanced record's
+        if (auto *R = llvm::dyn_cast<RoutineDecl>(M); R && !R->getBody())
           Diags.error(R->getName().Loc,
-                      "method '" + qualified(C, R->getName()) +
+                      "method '" + qualified(MT, R->getName()) +
                           "' is declared but never implemented",
                       {R->getName().getRange()});
+        else if (auto *NT = llvm::dyn_cast<TypeDecl>(M))
+          checkMethodsImplemented(NT);
+      }
+      return;
+    }
+    auto *CS = llvm::dyn_cast_or_null<ClassTypeSpec>(TD->getTypeSpec());
+    if (!CS || CS->isForward())
+      return;
+    auto *C = llvm::dyn_cast_or_null<ClassType>(TD->getType());
+    if (!C)
+      return;
+    for (Decl *M : CS->getMembers()) {
+      if (auto *R = llvm::dyn_cast<RoutineDecl>(M);
+          R && R->getClass() == C && !R->isAbstract() && !R->getBody())
+        Diags.error(R->getName().Loc,
+                    "method '" + qualified(C, R->getName()) +
+                        "' is declared but never implemented",
+                    {R->getName().getRange()});
+      else if (auto *NT = llvm::dyn_cast<TypeDecl>(M))
+        checkMethodsImplemented(NT);
     }
   }
 
@@ -3694,6 +3937,19 @@ class Checker : public StmtVisitor<Checker>,
   }
 
   void checkRoutineBody(RoutineDecl *R) {
+    // The method of a nested class or record also sees the constants and
+    // types of the classes around it.
+    llvm::SmallVector<std::unique_ptr<Scope>, 2> OuterScopes;
+    Scope *Base = Cur;
+    if (ClassType *RC = R->getClass()) {
+      llvm::SmallVector<ClassType *, 2> Outers;
+      for (ClassType *O = RC->getOuter(); O; O = O->getOuter())
+        Outers.push_back(O);
+      for (ClassType *O : llvm::reverse(Outers)) {
+        OuterScopes.push_back(std::make_unique<Scope>(Scope::nestedIn(Base, O)));
+        Base = OuterScopes.back().get();
+      }
+    }
     // A method sees the members of its class through Self.
     std::unique_ptr<Scope> ClassScope;
     if (R->hasSelf()) {
@@ -3701,11 +3957,11 @@ class Checker : public StmtVisitor<Checker>,
       SelfRef->setDecl(R->getSelfVar());
       SelfRef->setType(R->getSelfVar()->getType());
       ClassScope = std::make_unique<Scope>(
-          Cur, R->getClass(), Ctx.create<WithContext>(SelfRef, /*IsSelf=*/true));
+          Base, R->getClass(), Ctx.create<WithContext>(SelfRef, /*IsSelf=*/true));
     } else if (R->isStatic()) { // a record's static method: its statics
-      ClassScope = std::make_unique<Scope>(Cur, R->getClass(), nullptr);
+      ClassScope = std::make_unique<Scope>(Base, R->getClass(), nullptr);
     }
-    Scope RoutineScope(ClassScope ? ClassScope.get() : Cur);
+    Scope RoutineScope(ClassScope ? ClassScope.get() : Base);
     (ClassScope ? ClassScope.get() : &RoutineScope)->setRoutineBoundary();
     Scope *SavedScope = Cur;
     RoutineDecl *SavedRoutine = CurRoutine;
@@ -3740,6 +3996,21 @@ class Checker : public StmtVisitor<Checker>,
 
     Cur = SavedScope;
     CurRoutine = SavedRoutine;
+  }
+
+  /// Resolves the pointer types since Mark whose targets are visible now
+  /// (declared in a class); the others stay pending.
+  void resolvePendingPointersFrom(size_t Mark) {
+    for (size_t I = Mark; I < PendingPointers.size();) {
+      auto *TD = llvm::dyn_cast_or_null<TypeDecl>(
+          Cur->lookup(PendingPointers[I].first->getTarget().Name));
+      if (TD && TD->getType()) {
+        PendingPointers[I].second->setPointee(TD->getType());
+        PendingPointers.erase(PendingPointers.begin() + I);
+      } else {
+        ++I;
+      }
+    }
   }
 
   void resolvePendingPointers() {
@@ -4893,6 +5164,12 @@ class Checker : public StmtVisitor<Checker>,
   /// A type name or an expression as the argument of sizeof/low/high:
   /// returns its type (also stored on the argument).
   Type *checkTypeOrValue(Expr *Arg) {
+    if (llvm::isa<FieldExpr>(Arg)) // TOuter.TInner
+      if (TypeDecl *TD = typeNamedBy(Arg)) {
+        Type *T = TD->getType() ? TD->getType() : errorType();
+        Arg->setType(T);
+        return T;
+      }
     if (auto *N = llvm::dyn_cast<NameRefExpr>(Arg))
       if (auto *TD = llvm::dyn_cast_or_null<TypeDecl>(Cur->lookup(N->getName().Name))) {
         N->setDecl(TD);
@@ -5762,7 +6039,10 @@ public:
     SourceLocation CLoc = C->getBeginLoc();
     Type *CT = checkTypeOrValue(C);
     auto *TypeRef = llvm::dyn_cast<NameRefExpr>(C);
-    bool IsType = TypeRef && llvm::isa_and_nonnull<TypeDecl>(TypeRef->getDecl());
+    auto *TypeField = llvm::dyn_cast<FieldExpr>(C);
+    bool IsType =
+        (TypeRef && llvm::isa_and_nonnull<TypeDecl>(TypeRef->getDecl())) ||
+        (TypeField && llvm::isa_and_nonnull<TypeDecl>(TypeField->getMember()));
     ForInStmt::InKind Kind = ForInStmt::Invalid;
     Type *Elem = nullptr;
     if (CT->isError()) {
@@ -6148,12 +6428,15 @@ public:
     ClassType *C = nullptr;
     Expr *RHS = E->getRHS();
     auto *N = llvm::dyn_cast<NameRefExpr>(RHS);
-    auto *TD = N ? llvm::dyn_cast_or_null<TypeDecl>(Cur->lookup(N->getName().Name))
-                 : nullptr;
+    TypeDecl *TD =
+        N ? llvm::dyn_cast_or_null<TypeDecl>(Cur->lookup(N->getName().Name))
+          : llvm::isa<FieldExpr>(RHS) ? typeNamedBy(RHS) // TOuter.TInner
+                                      : nullptr;
     if (TD) {
       Type *T = TD->getType() ? TD->getType() : errorType();
-      N->setDecl(TD);
-      N->setType(T);
+      if (N)
+        N->setDecl(TD);
+      RHS->setType(T);
       if (T->isError())
         return errorType();
       C = llvm::dyn_cast<ClassType>(T);
@@ -6950,27 +7233,47 @@ public:
   /// The class Base names (TFoo.Create), or for an advanced record name
   /// (TR.Create) its member table (Base's type: the record).
   ClassType *classNamedBy(Expr *Base) {
-    auto *N = llvm::dyn_cast<NameRefExpr>(Base);
-    if (!N || !LangOpts.ObjKeywords)
+    if (!LangOpts.ObjKeywords)
       return nullptr;
-    auto *TD = llvm::dyn_cast_or_null<TypeDecl>(Cur->lookup(N->getName().Name));
+    TypeDecl *TD = typeNamedBy(Base);
     auto *C = TD ? llvm::dyn_cast_or_null<ClassType>(TD->getType()) : nullptr;
     if (!C && TD)
       C = memberTableOf(TD->getType());
     if (C) {
-      N->setDecl(TD);
-      N->setType(C->getRecord() ? static_cast<Type *>(C->getRecord()) : C);
+      if (auto *N = llvm::dyn_cast<NameRefExpr>(Base))
+        N->setDecl(TD);
+      Base->setType(C->getRecord() ? static_cast<Type *>(C->getRecord()) : C);
     }
     return C;
+  }
+
+  /// The type that Base names (TFoo, or a nested TOuter.TInner), or null.
+  TypeDecl *typeNamedBy(Expr *Base) {
+    if (auto *N = llvm::dyn_cast<NameRefExpr>(Base))
+      return llvm::dyn_cast_or_null<TypeDecl>(Cur->lookup(N->getName().Name));
+    auto *F = llvm::dyn_cast<FieldExpr>(Base);
+    if (!F || !LangOpts.ObjKeywords)
+      return nullptr;
+    ClassType *Outer = classNamedBy(F->getBase());
+    if (!Outer)
+      return nullptr;
+    const ClassType *Owner = nullptr;
+    auto *TD = llvm::dyn_cast_or_null<TypeDecl>(
+        Outer->findMember(F->getField().Name, &Owner));
+    if (TD && F->getMember() != TD) {
+      checkMemberAccess(TD, Owner, F->getField());
+      F->setMember(TD);
+      F->setType(TD->getType() ? TD->getType() : errorType());
+    }
+    return TD;
   }
 
   /// Resolves r.f / obj.member / TFoo.Create; null after a diagnostic.
   Decl *resolveMember(FieldExpr *E) {
     const Identifier &F = E->getField();
     ClassType *ViaClass = classNamedBy(E->getBase());
-    if (ViaClass) // TFoo.Create: a use of TFoo
-      warnHints(llvm::cast<NameRefExpr>(E->getBase())->getDecl(),
-                llvm::cast<NameRefExpr>(E->getBase())->getName());
+    if (auto *N = llvm::dyn_cast<NameRefExpr>(E->getBase()); ViaClass && N)
+      warnHints(N->getDecl(), N->getName()); // TFoo.Create: a use of TFoo
     Type *BT = ViaClass ? ViaClass : check(E->getBase());
     if (BT->isError())
       return nullptr;
@@ -7023,7 +7326,8 @@ public:
     checkMemberAccess(D, Owner, F);
     if (ViaClass || ViaRef) {
       // Through a class: constructors, class methods, class variables.
-      bool OK = llvm::isa<VarDecl>(D);
+      bool OK = llvm::isa<VarDecl>(D) || llvm::isa<ConstDecl>(D) ||
+                llvm::isa<TypeDecl>(D);
       if (auto *R = llvm::dyn_cast<RoutineDecl>(D))
         OK = (R->isConstructor() || R->isClassMethod()) && !R->isOperator();
       if (!OK) {
@@ -7082,6 +7386,23 @@ public:
     if (!D)
       return errorType();
     const Identifier &F = E->getField();
+    if (auto *CD = llvm::dyn_cast<ConstDecl>(D)) { // TFoo.C, obj.C
+      warnHints(CD, F);
+      Identifier Id = CD->getName();
+      Id.Loc = F.Loc;
+      auto *Ref = Ctx.create<NameRefExpr>(Id);
+      Ref->setDecl(CD);
+      Ref->setType(CD->getType() ? CD->getType() : errorType());
+      Used.insert(CD);
+      E->setConstRef(Ref);
+      return Ref->getType();
+    }
+    if (llvm::isa<TypeDecl>(D)) {
+      Diags.error(F.Loc, "'" + F.Spelling + "' is a type, not a value",
+                  {F.getRange()});
+      noteDeclaredHere(D);
+      return errorType();
+    }
     if (!llvm::isa<RoutineDecl>(D)) // (a method: once its overload is known)
       warnHints(D, F);
     if (auto *FD = llvm::dyn_cast<FieldDecl>(D))
@@ -7121,14 +7442,21 @@ public:
     if (R->isFunction())
       return R->getResultType();
     if (R->isConstructor()) {
-      if (auto *N = llvm::dyn_cast<NameRefExpr>(E->getBase());
-          N && llvm::isa_and_nonnull<TypeDecl>(N->getDecl()))
-        return N->getType();
+      if (namesType(E->getBase())) // TFoo.Create, TOuter.TInner.Create
+        return E->getBase()->getType();
       // c.Create, c: class of T: an object of class T (or a descendant)
       if (auto *CR = llvm::dyn_cast_or_null<ClassRefType>(E->getBase()->getType()))
         return CR->getClass();
     }
     return nullptr;
+  }
+
+  /// Does E name a type (TFoo, TOuter.TInner), as resolved?
+  static bool namesType(Expr *E) {
+    if (auto *N = llvm::dyn_cast<NameRefExpr>(E))
+      return llvm::isa_and_nonnull<TypeDecl>(N->getDecl());
+    auto *F = llvm::dyn_cast<FieldExpr>(E);
+    return F && llvm::isa_and_nonnull<TypeDecl>(F->getMember());
   }
 
   /// Is Callee obj.M / TFoo.Create / inherited M -- a method call rather
@@ -7168,6 +7496,17 @@ public:
       warnHints(R, F->getField());
     }
     if (!R) {
+      const Identifier &Id = F->getField();
+      if (llvm::isa_and_nonnull<TypeDecl>(D))
+        Diags.error(Id.Loc,
+                    "typecasts through a qualified type name are not supported "
+                    "yet; declare a type alias for '" + Id.Spelling + "'",
+                    {Id.getRange()});
+      else if (D)
+        Diags.error(Id.Loc,
+                    "'" + Id.Spelling + "' is a " + D->getKindName() +
+                        ", not a method",
+                    {Id.getRange()});
       for (Expr *A : E->getArgs())
         check(A);
       return errorType();

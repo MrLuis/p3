@@ -247,12 +247,12 @@ struct CondValue {
 /// $IF is evaluated while lexing, before any type is known.
 static int64_t predefinedSize(llvm::StringRef Upper) {
   return llvm::StringSwitch<int64_t>(Upper)
-      .Cases("CHAR", "BOOLEAN", "BYTE", "SHORTINT", 1)
+      .Cases("CHAR", "ANSICHAR", "BOOLEAN", "BYTE", "SHORTINT", 1)
       .Cases("WORD", "SMALLINT", 2)
       .Cases("INTEGER", "LONGINT", "CARDINAL", "LONGWORD", 4)
       .Cases("INT64", "REAL", "DOUBLE", "POINTER", 8)
       .Cases("PCHAR", "ANSISTRING", "SIZEINT", "PTRINT", 8)
-      .Case("NATIVEINT", 8)
+      .Cases("NATIVEINT", "PANSICHAR", 8)
       .Case("SHORTSTRING", 256)
       .Default(-1);
 }

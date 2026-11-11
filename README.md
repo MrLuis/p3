@@ -31,7 +31,8 @@ With `--mode=tp`, Turbo/Free Pascal extensions: units (`uses`, `-I`),
 `string`/`string[N]` and string routines, `break continue exit(value) inc
 dec`, `shl shr xor`, `$hex %bin #13` literals, `//` comments; the integer
 types `longint int64 cardinal byte word shortint smallint` (FPC widening
-rules); typecasts `T(x)`; `pointer`, `pchar`, `@`, `getmem freemem
+rules); typecasts `T(x)`; `pointer`, `pchar` (also `AnsiChar` and
+`PAnsiChar`), `@`, `getmem freemem
 reallocmem fillchar move sizeof low high assigned`; `const` parameters;
 procedural types; typed constants including arrays and records; external C
 functions (`cdecl; external 'c' name 'strlen'`, see below); `{$I file}`; `paramcount
@@ -96,6 +97,21 @@ as are a failed `as` and calling an abstract method.
   class; may be virtual; called through a class name, a class reference
   or an object), `class var` sections (one variable shared by the class
   and its descendants).
+- **Nested declarations:** `const` and `type` sections in a class or an
+  advanced record, in any visibility section, as in Free Pascal: constants
+  (typed ones in classes, which are class variables), enumerations,
+  records (with methods, implemented as `TOuter.TInner.M`), classes
+  (forward ones too) and other types. They are visible unqualified in the
+  later members, the methods, the descendants and the classes and records
+  declared inside, and elsewhere as `TOuter.Name` (`var x: TOuter.TInner`,
+  `TOuter.Cap`, `TOuter.TNode.Create`, `x is TOuter.TLeaf`, case labels,
+  `sizeof`, `for ... in`); private ones only in their unit, strict private
+  ones only in the class. A nested class's name is `TOuter.TInner` (as
+  `ClassName` returns). Not supported yet: nested interfaces, typed
+  constants in records, typecasts through a qualified name
+  (`TOuter.TKind(1)`) and qualified constants as subrange bounds. Unlike
+  Free Pascal, a nested enumeration's values are also members
+  (`TOuter.kA`).
 - **Overloading:** routines and methods of one name with different
   parameters (the `overload` directive is optional; on a method it also
   offers the ancestors' overloads). The best fit wins: exact types, then
@@ -145,8 +161,8 @@ as are a failed `as` and calling an abstract method.
   arguments, results and other operators' operands) and `Explicit`
   (casts `T(x)`). `<>` falls back to `not =`. A record with methods must
   be a named type declared at program or unit level.
-  Not supported: class variables, nested types and constants, and default
-  properties in records; Free Pascal's global `operator` declarations.
+  Not supported: class variables and default properties in records; Free
+  Pascal's global `operator` declarations.
 
 ```pascal
 {$modeswitch advancedrecords}
