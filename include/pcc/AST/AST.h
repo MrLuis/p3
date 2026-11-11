@@ -1146,16 +1146,20 @@ public:
 /// type helper [(Parent)] for Extended members end  (objfpc,
 /// {$modeswitch typehelpers}): methods (Self: the extended value, by
 /// reference), static class methods, properties and constants for a type.
+/// record helper [(Parent)] for Extended ... end  (objfpc, {$modeswitch
+/// advancedrecords}): the same, for a record type.
 class HelperTypeSpec final : public TypeSpec {
   Identifier Parent; ///< invalid: none
   TypeSpec *Extended;
   llvm::ArrayRef<Decl *> Members;
+  bool Record; ///< a record helper
 
 public:
   HelperTypeSpec(SourceRange R, Identifier Parent, TypeSpec *Extended,
-                 llvm::ArrayRef<Decl *> Members)
+                 llvm::ArrayRef<Decl *> Members, bool Record)
       : TypeSpec(TS_Helper, R), Parent(Parent), Extended(Extended),
-        Members(Members) {}
+        Members(Members), Record(Record) {}
+  bool isRecordHelper() const { return Record; }
   const Identifier &getParent() const { return Parent; }
   TypeSpec *getExtended() const { return Extended; }
   llvm::ArrayRef<Decl *> getMembers() const { return Members; }

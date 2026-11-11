@@ -218,6 +218,30 @@ type
   writeln(s.ToUpper, ' ', AnsiString.Join('a', 'b'), ' ', 'lit'.ToUpper);
 ```
 
+- **Record helpers** (`{$modeswitch advancedrecords}`, as in Free
+  Pascal): `TGuidHelper = record helper for TGUID` is a helper for a
+  record type, as above: methods, properties, constants and static class
+  methods (`TGUID.Empty`). A record helper's methods see the record's
+  fields, methods and properties; its members hide the record's own, also
+  in `with r do`. `record helper(TParent) for T` extends an earlier record
+  or type helper. A record helper for a type that is not a record is an
+  error (use a type helper). `TGUID` and `PGUID` are predeclared (tp and
+  objfpc), as in Free Pascal's system unit: a 16-byte packed record with
+  the variants `Data1..Data4`, `D1..D4` and RFC 4122's `time_low` ...
+  `node`.
+
+```pascal
+{$modeswitch advancedrecords}
+type
+  TGuidHelper = record helper for TGUID
+    class function Empty: TGUID; static;
+    function IsEmpty: boolean;
+    function ToString(SkipBrackets: boolean = false): string;
+  end;
+...
+  writeln(g.ToString, ' ', g.IsEmpty, ' ', TGUID.Empty.IsEmpty);
+```
+
 Not supported (reported as such): class properties, class constructors
 and destructors, `stored`, `implements`, properties in interfaces.
 

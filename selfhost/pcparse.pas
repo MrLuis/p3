@@ -867,7 +867,7 @@ begin
   end;
 end;
 
-function parseTypeHelper(start: TLoc): PTypeSpec; forward;
+function parseTypeHelper(start: TLoc; isRecord: boolean): PTypeSpec; forward;
 
 procedure parseTypePart(var decls: TPtrList; inMembers: boolean);
 var
@@ -900,7 +900,7 @@ begin
       begin
         typeLoc := consumeToken;
         if isIdentifierNamed('helper') and (peekKind in [tkKwFor, tkLParen]) then
-          ts := parseTypeHelper(typeLoc)
+          ts := parseTypeHelper(typeLoc, false)
         else
         begin
           if mode = lmISO then
@@ -2608,8 +2608,10 @@ end;
 
 { typeHelper = "helper" [ "(" ident ")" ] "for" typeIdent members "end" .
   members: visibility words, method headings, class method headings,
-  properties and constant parts (after `type`; objfpc) }
-function parseTypeHelper(start: TLoc): PTypeSpec;
+  properties and constant parts. After `type` (objfpc, $modeswitch
+  typehelpers), or after `record` for a record helper (objfpc, $modeswitch
+  advancedrecords) }
+function parseTypeHelper(start: TLoc; isRecord: boolean): PTypeSpec;
 var
   hf: longint;
   hm: PName;
@@ -2622,10 +2624,18 @@ var
   m: PDecl;
   i: longint;
   failed: boolean;
+  kindStr: string;
 begin
   parseTypeHelper := nil;
   helperLoc := consumeToken; { 'helper' }
-  if (mode <> lmObjFPC) or not lx.typeHelpers then
+  if isRecord then
+    kindStr := 'record helper'
+  else
+    kindStr := 'type helper';
+  if isRecord and ((mode <> lmObjFPC) or not lx.advancedRecords) then
+    diagError(helperLoc, 'record helpers need --mode=objfpc and ' +
+                         '{$modeswitch advancedrecords}')
+  else if not isRecord and ((mode <> lmObjFPC) or not lx.typeHelpers) then
     diagError(helperLoc, 'type helpers need --mode=objfpc and ' +
                          '{$modeswitch typehelpers}');
   parentName := noIdent;
@@ -2640,7 +2650,7 @@ begin
       exit;
     end;
   end;
-  if not expect(tkKwFor, 'in a type helper') then
+  if not expect(tkKwFor, 'in a ' + kindStr) then
     exit;
   extended := parseTypeIdentifier('the type a helper extends');
   if extended = nil then
@@ -2683,20 +2693,20 @@ begin
         consumeToken;
         continue;
       end;
-      diagError(tok.loc, 'a type helper cannot contain fields');
+      diagError(tok.loc, 'a ' + kindStr + ' cannot contain fields');
       failed := true;
       break;
     end;
     if tok.kind = tkKwVar then
     begin
-      diagError(tok.loc, 'a type helper cannot contain fields');
+      diagError(tok.loc, 'a ' + kindStr + ' cannot contain fields');
       failed := true;
       break;
     end;
     if tok.kind in [tkKwConstructor, tkKwDestructor] then
     begin
-      diagError(tok.loc, 'constructors and destructors in type helpers are not ' +
-                'supported yet');
+      diagError(tok.loc, 'constructors and destructors in ' + kindStr +
+                's are not supported yet');
       failed := true;
       break;
     end;
@@ -2758,7 +2768,8 @@ begin
         m := PDecl(listGet(consts, i));
         if m^.kind = dkVar then
         begin
-          diagErrorR(m^.loc, 'typed constants in type helpers are not supported yet',
+          diagErrorR(m^.loc, 'typed constants in ' + kindStr +
+                     's are not supported yet',
                      identRange(m^.ident));
           continue;
         end;
@@ -2777,7 +2788,7 @@ begin
     tryConsume(tkKwEnd);
     exit;
   end;
-  if not expect(tkKwEnd, 'at end of type helper') then
+  if not expect(tkKwEnd, 'at end of ' + kindStr) then
   begin
     diagNote(helperLoc, 'to match this ''helper''');
     exit;
@@ -2786,6 +2797,7 @@ begin
   ts^.helperParent := parentName;
   ts^.helperFor := extended;
   ts^.helperMembers := members;
+  ts^.helperIsRecord := isRecord;
   parseTypeHelper := ts;
 end;
 
@@ -2815,7 +2827,9 @@ begin
     if (ts <> nil) and (ts^.kind = tsArray) then
       ts^.arrBitPacked := true
     else if (ts <> nil) and (ts^.kind = tsRecord) then
-      ts^.recBitPacked := true;
+      ts^.recBitPacked := true
+    else if (ts <> nil) and (ts^.kind = tsHelper) then
+      diagError(start, 'a record helper cannot be packed');
     exit(ts);
   end;
   case tok.kind of
@@ -3387,6 +3401,14 @@ var
 begin
   parseRecordType := nil;
   recordLoc := consumeToken; { 'record' }
+  { record helper for T (objfpc): `helper` followed by `for` or `(` cannot
+    begin a field }
+  if isIdentifierNamed('helper') and (peekKind in [tkKwFor, tkLParen]) then
+  begin
+    if packed_ then
+      diagError(start, 'a record helper cannot be packed');
+    exit(parseTypeHelper(recordLoc, true));
+  end;
   if (mode = lmObjFPC) and lx.advancedRecords then
     exit(parseAdvancedRecord(start, recordLoc, packed_));
   fields := parseFieldList(tkKwEnd);

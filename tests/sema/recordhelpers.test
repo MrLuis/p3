@@ -1,0 +1,34 @@
+; Record helpers: a helper for a type that is not a record, a parent that
+; is not a helper or is one for another record, what a helper cannot be,
+; contain or where it cannot be declared, a helper's name used as a type or
+; for its members, instance methods through the record's name, missing
+; bodies, and writing a helper's property (not supported yet).
+; RUN: not %pcc --mode=objfpc -ferror-limit=0 -c %S/Inputs/recordhelpers/errors.pas -o %t.o 2>&1 | FileCheck %s
+; CHECK: errors.pas:8:28: error: a record helper can only extend a record type, not 'integer' (use a type helper)
+; CHECK: errors.pas:9:24: error: 'TC' is not a helper
+; CHECK: errors.pas:16:14: error: the methods of a record helper cannot be 'virtual', 'override' or 'abstract'
+; CHECK: errors.pas:18:25: error: 'TH' is a helper for 'TR', not for 'TS'
+; CHECK: errors.pas:21:5: error: record helpers cannot be declared in a class or record
+; CHECK: errors.pas:24:6: error: record helper 'TH' cannot be used as a type
+; CHECK: errors.pas:27:6: error: a record helper must be declared in a 'type' section
+; CHECK: errors.pas:30:3: error: record helper 'TL' must be declared at program or unit level
+; CHECK: errors.pas:12:15: error: method 'TH.NoBody' is declared but never implemented
+; CHECK: errors.pas:50:8: error: the members of record helper 'TH' are used through 'TR'
+; CHECK: errors.pas:51:11: error: only static class methods and constants of a record helper can be used through a type name; 'Twice' is a function
+; CHECK: errors.pas:52:11: error: no member named 'Nope' in record helper 'TH'
+; CHECK: errors.pas:53:5: error: writing a property of a record helper is not supported yet
+; CHECK: errors.pas:54:10: error: no field named 'Nope' in 'TR'
+; CHECK-NOT: error:
+
+; RUN: not %pcc --mode=objfpc -ferror-limit=0 -c %S/Inputs/recordhelpers/parse.pas -o %t.o 2>&1 | FileCheck --check-prefix=PARSE %s
+; PARSE: parse.pas:6:5: error: a record helper cannot contain fields
+; PARSE: parse.pas:9:5: error: constructors and destructors in record helpers are not supported yet
+; PARSE: parse.pas:12:11: error: typed constants in record helpers are not supported yet
+; PARSE: parse.pas:14:8: error: a record helper cannot be packed
+; PARSE: parse.pas:16:5: error: a record helper cannot contain fields
+; PARSE: parse.pas:19:15: error: record helpers need --mode=objfpc and {$modeswitch advancedrecords}
+; PARSE-NOT: error:
+
+; Not in tp mode:
+; RUN: not %pcc --mode=tp -c %S/Inputs/recordhelpers/parse.pas -o %t.o 2>&1 | FileCheck --check-prefix=TP %s
+; TP: parse.pas:5:15: error: record helpers need --mode=objfpc and {$modeswitch advancedrecords}

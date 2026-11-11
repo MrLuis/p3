@@ -555,7 +555,10 @@ begin
       end;
     tsHelper:
       begin
-        line('HelperTypeSpec');
+        if ts^.helperIsRecord then
+          line('RecordHelperTypeSpec')
+        else
+          line('HelperTypeSpec');
         if identValid(ts^.helperParent) then
         begin
           bufAdd(outBuf, ' ''');

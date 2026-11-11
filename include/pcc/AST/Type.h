@@ -407,6 +407,7 @@ class ClassType final : public Type {
   ClassType *Outer = nullptr;
   /// A type helper's member table: the type it extends (Self's type).
   Type *HelperFor = nullptr;
+  bool RecordHelper = false; ///< a record helper (not a type helper)
 
 public:
   ClassType() : Type(TK_Class) {}
@@ -420,6 +421,12 @@ public:
   bool isHelper() const { return HelperFor != nullptr; }
   Type *getHelperFor() const { return HelperFor; }
   void setHelperFor(Type *T) { HelperFor = T; }
+  bool isRecordHelper() const { return RecordHelper; }
+  void setRecordHelper() { RecordHelper = true; }
+  /// "record helper" or "type helper", for diagnostics.
+  llvm::StringRef helperKindName() const {
+    return RecordHelper ? "record helper" : "type helper";
+  }
   /// Is Self a reference to the value (an advanced record's, a helper's)?
   bool hasSelfByReference() const { return Record || HelperFor; }
   void setOuter(ClassType *C) { Outer = C; }

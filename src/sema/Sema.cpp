@@ -219,6 +219,7 @@ class Checker : public StmtVisitor<Checker>,
       Ty("pansichar", PChar);
       Ty("ansistring", Ctx.getAnsiStringType());
       Ty("shortstring", Ctx.getShortStringType());
+      declareTGUID();
     }
 
     if (LangOpts.Mode == LangMode::TP)
@@ -392,6 +393,65 @@ class Checker : public StmtVisitor<Checker>,
                                                   predeclaredName(Name),
                                                   Ctx.getIntegerType(),
                                                   ConstValue::ordinal(V)));
+  }
+
+  /// TGUID = packed record case integer of
+  ///   1: (Data1: longword; Data2, Data3: word; Data4: array[0..7] of byte);
+  ///   2: (D1: longword; D2, D3: word; D4: array[0..7] of byte);
+  ///   3: (time_low: longword; time_mid, time_hi_and_version: word;
+  ///       clock_seq_hi_and_reserved, clock_seq_low: byte;
+  ///       node: array[0..5] of byte);
+  /// end; and PGUID = ^TGUID, as in Free Pascal's system unit (tp, objfpc).
+  void declareTGUID() {
+    auto Bytes = [&](int64_t Hi) {
+      return Ctx.create<ArrayType>(
+          Ctx.create<SubrangeType>(Ctx.getIntegerType(), 0, Hi),
+          Ctx.getByteType(), false);
+    };
+    Type *LongWord = Ctx.getCardinalType(), *Word = Ctx.getWordType(),
+         *Byte = Ctx.getByteType();
+    std::pair<llvm::StringRef, Type *> V1[] = {
+        {"Data1", LongWord}, {"Data2", Word}, {"Data3", Word},
+        {"Data4", Bytes(7)}};
+    std::pair<llvm::StringRef, Type *> V2[] = {
+        {"D1", LongWord}, {"D2", Word}, {"D3", Word}, {"D4", Bytes(7)}};
+    std::pair<llvm::StringRef, Type *> V3[] = {
+        {"time_low", LongWord},
+        {"time_mid", Word},
+        {"time_hi_and_version", Word},
+        {"clock_seq_hi_and_reserved", Byte},
+        {"clock_seq_low", Byte},
+        {"node", Bytes(5)}};
+    llvm::SmallVector<FieldDecl *, 14> All;
+    llvm::SmallVector<Variant *, 3> Vs;
+    for (llvm::ArrayRef<std::pair<llvm::StringRef, Type *>> Fs :
+         {llvm::ArrayRef(V1), llvm::ArrayRef(V2), llvm::ArrayRef(V3)}) {
+      llvm::SmallVector<FieldDecl *, 6> Fixed;
+      for (auto &[Name, T] : Fs) {
+        auto *F = Ctx.create<FieldDecl>(memberName(Name), nullptr);
+        F->setType(T);
+        Fixed.push_back(F);
+        All.push_back(F);
+      }
+      auto *FL = Ctx.create<FieldList>();
+      FL->Fixed = Ctx.copyArray<FieldDecl *>(Fixed);
+      auto *V = Ctx.create<Variant>();
+      V->Fields = FL;
+      Vs.push_back(V);
+    }
+    auto *VP = Ctx.create<VariantPart>();
+    VP->Variants = Ctx.copyArray<Variant *>(Vs);
+    auto *FL = Ctx.create<FieldList>();
+    FL->Variant = VP;
+    auto *Rec = Ctx.create<RecordType>(FL, Ctx.copyArray<FieldDecl *>(All),
+                                       /*Packed=*/true);
+    Rec->setDeclName("TGUID");
+    Standard.insert("tguid", Ctx.create<TypeDecl>(SourceLocation(),
+                                                  memberName("TGUID"), Rec));
+    auto *PGuid = Ctx.create<PointerType>(Rec);
+    PGuid->setDeclName("PGUID");
+    Standard.insert("pguid", Ctx.create<TypeDecl>(SourceLocation(),
+                                                  memberName("PGUID"), PGuid));
   }
 
   Type *ArrayOfConstTy = nullptr;
@@ -1326,7 +1386,8 @@ class Checker : public StmtVisitor<Checker>,
         if (auto *C = llvm::dyn_cast_or_null<ClassType>(TD->getType());
             C && C->isHelper()) {
           Diags.error(Id.Loc,
-                      "type helper '" + Id.Spelling + "' cannot be used as a type",
+                      C->helperKindName() + " '" + Id.Spelling +
+                          "' cannot be used as a type",
                       {Id.getRange()});
           return errorType();
         }
@@ -1542,7 +1603,11 @@ class Checker : public StmtVisitor<Checker>,
 
     case TypeSpec::TS_Helper:
       Diags.error(TS->getBeginLoc(),
-                  "a type helper must be declared in a 'type' section",
+                  llvm::Twine("a ") +
+                      (llvm::cast<HelperTypeSpec>(TS)->isRecordHelper()
+                           ? "record helper"
+                           : "type helper") +
+                      " must be declared in a 'type' section",
                   {TS->getRange()});
       return errorType();
 
@@ -1734,22 +1799,28 @@ class Checker : public StmtVisitor<Checker>,
     return H;
   }
 
-  /// Is D a member of a type helper?
-  static bool isHelperMember(Decl *D) {
+  /// The type helper D is a member of (a property: by its getter), or null.
+  static ClassType *helperOfMember(Decl *D) {
     if (auto *P = llvm::dyn_cast_or_null<PropertyDecl>(D))
       D = P->getRead();
     auto *R = llvm::dyn_cast_or_null<RoutineDecl>(D);
-    return R && R->getClass() && R->getClass()->isHelper();
+    return R && R->getClass() && R->getClass()->isHelper() ? R->getClass()
+                                                           : nullptr;
   }
+  static bool isHelperMember(Decl *D) { return helperOfMember(D); }
 
   /// TH = type helper [(Parent)] for T ... end: a member table (a ClassType
   /// that is not a type of values) whose methods' Self is a T, by
-  /// reference; from here on the helper active for T.
+  /// reference; from here on the helper active for T. A record helper is
+  /// the same, for a record type T.
   void declareHelper(TypeDecl *TD, HelperTypeSpec *HS) {
     const Identifier &Id = TD->getName();
     auto *C = Ctx.create<ClassType>();
     C->setDeclName(typeDeclName(Id));
     C->setModule(CurModule);
+    if (HS->isRecordHelper())
+      C->setRecordHelper();
+    llvm::StringRef Kind = C->helperKindName();
     TD->setType(C);
     declare(TD);
     auto Empty = [&] { // (its methods' bodies are not checked)
@@ -1758,7 +1829,7 @@ class Checker : public StmtVisitor<Checker>,
     };
     if (CurRoutine) {
       Diags.error(Id.Loc,
-                  "type helper '" + Id.Spelling +
+                  Kind + " '" + Id.Spelling +
                       "' must be declared at program or unit level",
                   {Id.getRange()});
       return Empty();
@@ -1773,13 +1844,23 @@ class Checker : public StmtVisitor<Checker>,
                   {HS->getExtended()->getRange()});
       return Empty();
     }
+    if (HS->isRecordHelper() && !T->isRecord()) {
+      Diags.error(HS->getExtended()->getBeginLoc(),
+                  "a record helper can only extend a record type, not " +
+                      quoted(T) + " (use a type helper)",
+                  {HS->getExtended()->getRange()});
+      return Empty();
+    }
     C->setHelperFor(T);
     ClassType *Parent = nullptr;
     if (const Identifier &P = HS->getParent(); P.isValid()) {
       auto *PD = llvm::dyn_cast_or_null<TypeDecl>(Cur->lookup(P.Name));
       auto *PC = PD ? llvm::dyn_cast_or_null<ClassType>(PD->getType()) : nullptr;
-      if (!PC || !PC->isHelper())
-        Diags.error(P.Loc, "'" + P.Spelling + "' is not a type helper",
+      if (!PC || !PC->isHelper()) // (a record helper can extend a type
+                                  // helper, and the reverse)
+        Diags.error(P.Loc,
+                    "'" + P.Spelling + "' is not a " +
+                        (C->isRecordHelper() ? "helper" : "type helper"),
                     {P.getRange()});
       else if (PC->getHelperFor() != T)
         Diags.error(P.Loc,
@@ -1819,8 +1900,8 @@ class Checker : public StmtVisitor<Checker>,
         resolveSignature(R);
         if (R->isVirtual() || R->isOverride() || R->isAbstract())
           Diags.error(MN.Loc,
-                      "the methods of a type helper cannot be 'virtual', "
-                      "'override' or 'abstract'",
+                      "the methods of a " + Kind +
+                          " cannot be 'virtual', 'override' or 'abstract'",
                       {MN.getRange()});
         if (R->isClassMethod())
           R->setStatic(); // no Self
@@ -1835,7 +1916,7 @@ class Checker : public StmtVisitor<Checker>,
       auto *P = llvm::cast<PropertyDecl>(M);
       if (P->isDefault())
         Diags.error(P->getLocation(),
-                    "a type helper cannot have a default property",
+                    "a " + Kind + " cannot have a default property",
                     {P->getName().getRange()});
       definePropertyAccessors(C, P, Own, Parent);
     }
@@ -1888,9 +1969,10 @@ class Checker : public StmtVisitor<Checker>,
   /// A type declared in a class or advanced record (in Cur, its member
   /// scope).
   void declareNestedType(TypeDecl *TD) {
-    if (llvm::isa<HelperTypeSpec>(TD->getTypeSpec())) {
+    if (auto *HS = llvm::dyn_cast<HelperTypeSpec>(TD->getTypeSpec())) {
       Diags.error(TD->getName().Loc,
-                  "type helpers cannot be declared in a class or record",
+                  llvm::Twine(HS->isRecordHelper() ? "record" : "type") +
+                      " helpers cannot be declared in a class or record",
                   {TD->getName().getRange()});
       TD->setType(errorType());
       declare(TD);
@@ -4458,18 +4540,25 @@ class Checker : public StmtVisitor<Checker>,
       }
     }
     // A method sees the members of its class through Self.
-    std::unique_ptr<Scope> ClassScope, FieldsScope;
+    std::unique_ptr<Scope> RecordScope, ClassScope, FieldsScope;
     if (R->hasSelf()) {
       auto *SelfRef = Ctx.create<NameRefExpr>(R->getSelfVar()->getName());
       SelfRef->setDecl(R->getSelfVar());
       SelfRef->setType(R->getSelfVar()->getType());
       auto *W = Ctx.create<WithContext>(SelfRef, /*IsSelf=*/true);
+      auto *RT = llvm::dyn_cast_or_null<RecordType>(
+          R->getClass()->getHelperFor());
       if (R->getClass()->isHelper())
         W->Helper = R->getClass();
+      // A helper's method for an advanced record also sees the record's
+      // methods and properties (the helper's own members first).
+      if (ClassType *MT = memberTableOf(RT)) {
+        RecordScope = std::make_unique<Scope>(Base, MT, W);
+        Base = RecordScope.get();
+      }
       ClassScope = std::make_unique<Scope>(Base, R->getClass(), W);
       // A record helper's method also sees the record's fields.
-      if (auto *RT = llvm::dyn_cast_or_null<RecordType>(
-              R->getClass()->getHelperFor()))
+      if (RT)
         FieldsScope = std::make_unique<Scope>(ClassScope.get(), RT, W);
     } else if (R->isStatic()) { // a record's static method: its statics
       ClassScope = std::make_unique<Scope>(Base, R->getClass(), nullptr);
@@ -4477,7 +4566,10 @@ class Checker : public StmtVisitor<Checker>,
     Scope RoutineScope(FieldsScope  ? FieldsScope.get()
                        : ClassScope ? ClassScope.get()
                                     : Base);
-    (ClassScope ? ClassScope.get() : &RoutineScope)->setRoutineBoundary();
+    (RecordScope  ? RecordScope.get()
+     : ClassScope ? ClassScope.get()
+                  : &RoutineScope)
+        ->setRoutineBoundary();
     Scope *SavedScope = Cur;
     RoutineDecl *SavedRoutine = CurRoutine;
     Cur = &RoutineScope;
@@ -6285,9 +6377,11 @@ public:
 
   /// Type of a property assigned to; it needs a write accessor.
   Type *checkPropertyWrite(PropertyDecl *P, const Identifier &Id) {
-    if (isHelperMember(P->getWrite() ? P->getWrite() : P->getRead())) {
+    if (ClassType *H =
+            helperOfMember(P->getWrite() ? P->getWrite() : P->getRead())) {
       Diags.error(Id.Loc,
-                  "writing a property of a type helper is not supported yet",
+                  "writing a property of a " + H->helperKindName() +
+                      " is not supported yet",
                   {Id.getRange()});
       return errorType();
     }
@@ -6835,6 +6929,11 @@ public:
       else
         Scopes.push_back(std::make_unique<Scope>(Cur, RT, W));
       Cur = Scopes.back().get();
+      if (ClassType *H = helperFor(RT)) { // its helper's members (first)
+        W->Helper = H;
+        Scopes.push_back(std::make_unique<Scope>(Cur, H, W));
+        Cur = Scopes.back().get();
+      }
     }
     visitStmt(S->getBody());
     Cur = Saved;
@@ -7877,8 +7976,8 @@ public:
     Decl *D = H->findMember(F.Name, &Owner);
     if (!D) {
       Diags.error(F.Loc,
-                  "no member named '" + F.Spelling + "' in type helper " +
-                      quoted(H),
+                  "no member named '" + F.Spelling + "' in " +
+                      H->helperKindName() + " " + quoted(H),
                   {F.getRange()});
       return nullptr;
     }
@@ -7886,8 +7985,9 @@ public:
     auto *R = llvm::dyn_cast<RoutineDecl>(D);
     if (!llvm::isa<ConstDecl>(D) && !(R && R->isStatic())) {
       Diags.error(F.Loc,
-                  "only static class methods and constants of a type helper "
-                  "can be used through a type name; '" +
+                  "only static class methods and constants of a " +
+                      H->helperKindName() +
+                      " can be used through a type name; '" +
                       F.Spelling + "' is a " + D->getKindName(),
                   {F.getRange()});
       return nullptr;
@@ -7909,7 +8009,8 @@ public:
         if (auto *H = llvm::dyn_cast_or_null<ClassType>(TD->getType());
             H && H->isHelper()) {
           Diags.error(E->getBase()->getBeginLoc(),
-                      "the members of type helper " + quoted(H) +
+                      "the members of " + H->helperKindName() + " " +
+                          quoted(H) +
                           " are used through " + quoted(H->getHelperFor()),
                       {E->getBase()->getRange()});
           return nullptr;

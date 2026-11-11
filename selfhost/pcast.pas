@@ -110,11 +110,13 @@ type
         unit level }
       { classHelperFor: a type helper's (objfpc): the type it extends; a
         class type that is not a type of values, its methods' Self is a
-        value of that type (by reference) }
+        value of that type (by reference); classRecordHelper: a record
+        helper (not a type helper) }
       tyClass: (classParent: PType; classMembers, classAllFields,
                 classVTable: TPtrList; classModule: pointer;
                 classDefined: boolean; classInterfaces: TPtrList;
-                classRecord: PType; classOuter: PType; classHelperFor: PType);
+                classRecord: PType; classOuter: PType; classHelperFor: PType;
+                classRecordHelper: boolean);
       { class of C (objfpc): a reference to C or a descendant (its VMT) }
       tyClassRef: (refClass: PType);
       { interface (objfpc): its parent, own methods (source order) and all
@@ -310,9 +312,10 @@ type
       tsInterface: (intfParentName: TIdent; intfMemberList: TPtrList;
                     isForwardIntf: boolean; guid: PName; isCorba: boolean);
       { type helper [(helperParent)] for helperFor (objfpc): methods,
-        properties and constants }
+        properties and constants; helperIsRecord: a record helper (record
+        helper ... for a record type) }
       tsHelper: (helperParent: TIdent; helperFor: PTypeSpec;
-                 helperMembers: TPtrList);
+                 helperMembers: TPtrList; helperIsRecord: boolean);
   end;
 
   TFieldList = record

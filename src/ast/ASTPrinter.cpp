@@ -519,7 +519,7 @@ class ASTPrinter : public StmtVisitor<ASTPrinter>,
     }
     case TypeSpec::TS_Helper: {
       auto *H = llvm::cast<HelperTypeSpec>(TS);
-      line("HelperTypeSpec");
+      line(H->isRecordHelper() ? "RecordHelperTypeSpec" : "HelperTypeSpec");
       if (H->getParent().isValid())
         OS << " '" << H->getParent().Name << '\'';
       loc(TS->getBeginLoc());

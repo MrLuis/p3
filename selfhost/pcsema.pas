@@ -262,6 +262,15 @@ begin
   bufAddChar(msg, '''');
 end;
 
+{ 'record helper' or 'type helper' (helper c), for diagnostics }
+function helperKindName(c: PType): string;
+begin
+  if c^.classRecordHelper then
+    helperKindName := 'record helper'
+  else
+    helperKindName := 'type helper';
+end;
+
 { A routine's calling convention in a message (see ccDefault). }
 procedure maCC(isCDeclConv: boolean);
 begin
@@ -833,6 +842,88 @@ begin
   stdConst('vtint64', tyIntegerT, 16);
 end;
 
+{ TGUID = packed record case integer of
+    1: (Data1: longword; Data2, Data3: word; Data4: array[0..7] of byte);
+    2: (D1: longword; D2, D3: word; D4: array[0..7] of byte);
+    3: (time_low: longword; time_mid, time_hi_and_version: word;
+        clock_seq_hi_and_reserved, clock_seq_low: byte;
+        node: array[0..5] of byte);
+  end; and PGUID = ^TGUID, as in Free Pascal's system unit (tp, objfpc). }
+procedure declareTGUID;
+var
+  all, vs: TPtrList;
+  one, fl: PFieldList;
+  v: PVariant;
+  vp: PVariantPart;
+  rec, pguid: PType;
+  d: PDecl;
+
+  function bytes(hi: int64): PType;
+  begin
+    bytes := newArrayType(newSubrangeType(tyIntegerT, 0, hi), tyByteT, false);
+  end;
+
+  procedure startVariant;
+  begin
+    one := PFieldList(arenaAlloc(sizeof(TFieldList)));
+    listInit(one^.fixed);
+    one^.variant := nil;
+    v := PVariant(arenaAlloc(sizeof(TVariant)));
+    listInit(v^.labels);
+    v^.fields := one;
+    listAdd(vs, v);
+  end;
+
+  procedure field(const name: string; t: PType);
+  var
+    f: PDecl;
+  begin
+    f := newDecl(dkField, memberIdent(name), noLoc);
+    f^.fieldType := t;
+    listAdd(one^.fixed, f);
+    listAdd(all, f);
+  end;
+
+begin
+  listInit(all);
+  listInit(vs);
+  startVariant;
+  field('Data1', tyCardinalT);
+  field('Data2', tyWordT);
+  field('Data3', tyWordT);
+  field('Data4', bytes(7));
+  startVariant;
+  field('D1', tyCardinalT);
+  field('D2', tyWordT);
+  field('D3', tyWordT);
+  field('D4', bytes(7));
+  startVariant;
+  field('time_low', tyCardinalT);
+  field('time_mid', tyWordT);
+  field('time_hi_and_version', tyWordT);
+  field('clock_seq_hi_and_reserved', tyByteT);
+  field('clock_seq_low', tyByteT);
+  field('node', bytes(5));
+  vp := PVariantPart(arenaAlloc(sizeof(TVariantPart)));
+  vp^.tag := nil;
+  vp^.tagSpec := nil;
+  vp^.tagType := nil;
+  vp^.variants := vs;
+  fl := PFieldList(arenaAlloc(sizeof(TFieldList)));
+  listInit(fl^.fixed);
+  fl^.variant := vp;
+  rec := newRecordType(fl, all, true);
+  setDeclName(rec, intern('TGUID'));
+  d := newDecl(dkType, memberIdent('TGUID'), noLoc);
+  d^.declType := rec;
+  scopeInsert(standard, d^.ident.name, d);
+  pguid := newPointerType(rec);
+  setDeclName(pguid, intern('PGUID'));
+  d := newDecl(dkType, memberIdent('PGUID'), noLoc);
+  d^.declType := pguid;
+  scopeInsert(standard, d^.ident.name, d);
+end;
+
 procedure declareException;
 var
   members, fields: TPtrList;
@@ -983,6 +1074,7 @@ begin
     stdType('pansichar', pchar);
     stdType('ansistring', ansiStringType);
     stdType('shortstring', shortStringType(255));
+    declareTGUID;
   end;
   if mode = lmTP then
     declareVarRec;
@@ -1970,7 +2062,7 @@ begin
           if (d^.declType <> nil) and (d^.declType^.kind = tyClass) and
              (d^.declType^.classHelperFor <> nil) then
           begin
-            ms('type helper ''');
+            ms(helperKindName(d^.declType) + ' ''');
             maN(ts^.tname.spelling);
             ma(''' cannot be used as a type');
             errR(ts^.tname.loc, identRange(ts^.tname));
@@ -2226,7 +2318,10 @@ begin
       end;
     tsHelper:
       begin
-        ms('a type helper must be declared in a ''type'' section');
+        if ts^.helperIsRecord then
+          ms('a record helper must be declared in a ''type'' section')
+        else
+          ms('a type helper must be declared in a ''type'' section');
         errR(ts^.b, specRange(ts));
       end;
     tsClassRef: { class of TFoo (TFoo may be forward) }
@@ -2341,7 +2436,10 @@ procedure declareNestedType(td: PDecl);
 begin
   if td^.typeSpec^.kind = tsHelper then
   begin
-    ms('type helpers cannot be declared in a class or record');
+    if td^.typeSpec^.helperIsRecord then
+      ms('record helpers cannot be declared in a class or record')
+    else
+      ms('type helpers cannot be declared in a class or record');
     errR(td^.ident.loc, identRange(td^.ident));
     td^.declType := errorType;
     declare(td);
@@ -3838,8 +3936,8 @@ begin
   resolveSignature(r);
   if r^.isVirtual or r^.isOverride or r^.isAbstract then
   begin
-    ms('the methods of a type helper cannot be ''virtual'', ''override'' or ' +
-       '''abstract''');
+    ms('the methods of a ' + helperKindName(c) +
+       ' cannot be ''virtual'', ''override'' or ''abstract''');
     errR(r^.ident.loc, identRange(r^.ident));
   end;
   if r^.isClassMethod then
@@ -3850,7 +3948,8 @@ end;
 
 { TH = type helper [(Parent)] for T ... end: a member table (a class type
   that is not a type of values) whose methods' Self is a T, by reference;
-  from here on the helper active for T. }
+  from here on the helper active for T. A record helper is the same, for a
+  record type T. }
 procedure declareHelper(td: PDecl);
 var
   c, t, parentHelper: PType;
@@ -3873,11 +3972,12 @@ begin
   c := newClassType;
   setDeclName(c, typeDeclName(td^.ident));
   c^.classModule := curModule;
+  c^.classRecordHelper := ts^.helperIsRecord;
   td^.declType := c;
   declare(td);
   if curRoutine <> nil then
   begin
-    ms('type helper ''');
+    ms(helperKindName(c) + ' ''');
     maN(td^.ident.spelling);
     ma(''' must be declared at program or unit level');
     errR(td^.ident.loc, identRange(td^.ident));
@@ -3897,6 +3997,15 @@ begin
     empty;
     exit;
   end;
+  if ts^.helperIsRecord and (t^.kind <> tyRecord) then
+  begin
+    ms('a record helper can only extend a record type, not ');
+    maT(t);
+    ma(' (use a type helper)');
+    errR(ts^.helperFor^.b, specRange(ts^.helperFor));
+    empty;
+    exit;
+  end;
   c^.classHelperFor := t;
   parentHelper := nil;
   if identValid(ts^.helperParent) then
@@ -3907,7 +4016,11 @@ begin
     begin
       ms('''');
       maN(ts^.helperParent.spelling);
-      ma(''' is not a type helper');
+      { (a record helper can extend a type helper, and the reverse) }
+      if c^.classRecordHelper then
+        ma(''' is not a helper')
+      else
+        ma(''' is not a type helper');
       errR(ts^.helperParent.loc, identRange(ts^.helperParent));
     end
     else if pd^.declType^.classHelperFor <> t then
@@ -3968,7 +4081,7 @@ begin
     end;
     if m^.propIsDefault then
     begin
-      ms('a type helper cannot have a default property');
+      ms('a ' + helperKindName(c) + ' cannot have a default property');
       errR(m^.loc, identRange(m^.ident));
     end;
     definePropertyAccessors(c, parentHelper, m, own);
@@ -6470,8 +6583,16 @@ begin
     w^.isSelf := true;
     if r^.ownerClass^.classHelperFor <> nil then
       w^.helper := r^.ownerClass;
+    { a helper's method for an advanced record also sees the record's
+      methods and properties (the helper's own members first) }
+    if memberTableOf(r^.ownerClass^.classHelperFor) <> nil then
+    begin
+      cur := newClassScope(cur, memberTableOf(r^.ownerClass^.classHelperFor), w);
+      cur^.routineBoundary := true;
+    end;
     cur := newClassScope(cur, r^.ownerClass, w);
-    cur^.routineBoundary := true;
+    if cur^.parent = base then
+      cur^.routineBoundary := true;
     { a record helper's method also sees the record's fields }
     if (r^.ownerClass^.classHelperFor <> nil) and
        (r^.ownerClass^.classHelperFor^.kind = tyRecord) then

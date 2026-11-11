@@ -198,8 +198,8 @@ class Parser {
   bool RecordBodySkipped = false;
   TypeSpec *parseClassType(SourceLocation Start);
   TypeSpec *parseInterfaceType(SourceLocation Start);
-  /// After `type`, at `helper`: a type helper (objfpc).
-  TypeSpec *parseTypeHelper(SourceLocation Start);
+  /// After `type` (`record`), at `helper`: a type (record) helper (objfpc).
+  TypeSpec *parseTypeHelper(SourceLocation Start, bool Record = false);
   FieldList *parseFieldList(tok::TokenKind Close);
   VariantPart *parseVariantPart(tok::TokenKind Close);
 

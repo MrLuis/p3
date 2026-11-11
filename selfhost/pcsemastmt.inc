@@ -1304,13 +1304,21 @@ begin
   checkPropertyRead := errorType;
 end;
 
+{ The type helper d is a member of (a property: by its getter), or nil. }
+function helperOfMember(d: PDecl): PType;
+begin
+  helperOfMember := nil;
+  if (d <> nil) and (d^.kind = dkProperty) then
+    d := d^.readDecl;
+  if (d <> nil) and (d^.kind = dkRoutine) and
+     (d^.ownerClass <> nil) and (d^.ownerClass^.classHelperFor <> nil) then
+    helperOfMember := d^.ownerClass;
+end;
+
 { Is d a member of a type helper (a property: by its getter)? }
 function isHelperMember(d: PDecl): boolean;
 begin
-  if (d <> nil) and (d^.kind = dkProperty) then
-    d := d^.readDecl;
-  isHelperMember := (d <> nil) and (d^.kind = dkRoutine) and
-                    (d^.ownerClass <> nil) and (d^.ownerClass^.classHelperFor <> nil);
+  isHelperMember := helperOfMember(d) <> nil;
 end;
 
 { The type of a property assigned to; it needs a write accessor. }
@@ -1323,7 +1331,8 @@ begin
     acc := p^.readDecl;
   if isHelperMember(acc) then
   begin
-    ms('writing a property of a type helper is not supported yet');
+    ms('writing a property of a ' + helperKindName(helperOfMember(acc)) +
+       ' is not supported yet');
     errR(id.loc, identRange(id));
     exit(errorType);
   end;
@@ -1497,7 +1506,7 @@ begin
       begin
         ms('no member named ''');
         maN(e^.fieldName.spelling);
-        ma(''' in type helper ');
+        ma(''' in ' + helperKindName(h) + ' ');
         maT(h);
         errR(e^.fieldName.loc, identRange(e^.fieldName));
         exit;
@@ -1505,8 +1514,8 @@ begin
       checkMemberAccess(d, owner, e^.fieldName);
       if (d^.kind <> dkConst) and not ((d^.kind = dkRoutine) and d^.isStatic) then
       begin
-        ms('only static class methods and constants of a type helper can be ' +
-           'used through a type name; ''');
+        ms('only static class methods and constants of a ' + helperKindName(h) +
+           ' can be used through a type name; ''');
         maN(e^.fieldName.spelling);
         ma(''' is a ' + kindName(d));
         errR(e^.fieldName.loc, identRange(e^.fieldName));
@@ -1519,7 +1528,7 @@ begin
     if (td <> nil) and (td^.declType <> nil) and (td^.declType^.kind = tyClass) and
        (td^.declType^.classHelperFor <> nil) then
     begin
-      ms('the members of type helper ');
+      ms('the members of ' + helperKindName(td^.declType) + ' ');
       maT(td^.declType);
       ma(' are used through ');
       maT(td^.declType^.classHelperFor);
@@ -3033,6 +3042,11 @@ begin
       cur := newClassScope(cur, memberTableOf(t), w)
     else
       cur := newWithScope(cur, t, w);
+    if helperFor(t) <> nil then { its helper's members (first) }
+    begin
+      w^.helper := helperFor(t);
+      cur := newClassScope(cur, helperFor(t), w);
+    end;
   end;
   visitStmt(s^.withBody);
   cur := saved;

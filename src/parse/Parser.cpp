@@ -1655,10 +1655,16 @@ TypeSpec *Parser::parseInterfaceType(SourceLocation Start) {
 
 // typeHelper = "helper" [ "(" ident ")" ] "for" typeIdent
 //              { visibility | methodHeading | "class" methodHeading
-//              | property | constPart } "end" .   (after `type`; objfpc)
-TypeSpec *Parser::parseTypeHelper(SourceLocation Start) {
+//              | property | constPart } "end" .
+// After `type` (objfpc, {$modeswitch typehelpers}), or after `record` for a
+// record helper (objfpc, {$modeswitch advancedrecords}).
+TypeSpec *Parser::parseTypeHelper(SourceLocation Start, bool Record) {
   SourceLocation HelperLoc = consumeToken(); // 'helper'
-  if (!LangOpts.ObjKeywords || !typeHelpers())
+  const char *Kind = Record ? "record helper" : "type helper";
+  if (Record && (!LangOpts.ObjKeywords || !advancedRecords()))
+    Diags.error(HelperLoc, "record helpers need --mode=objfpc and "
+                           "{$modeswitch advancedrecords}");
+  else if (!Record && (!LangOpts.ObjKeywords || !typeHelpers()))
     Diags.error(HelperLoc, "type helpers need --mode=objfpc and "
                            "{$modeswitch typehelpers}");
   Identifier Parent;
@@ -1671,7 +1677,7 @@ TypeSpec *Parser::parseTypeHelper(SourceLocation Start) {
       return nullptr;
     }
   }
-  if (!expect(tok::kw_for, "in a type helper"))
+  if (!expect(tok::kw_for, Record ? "in a record helper" : "in a type helper"))
     return nullptr;
   TypeSpec *Extended = parseTypeIdentifier("the type a helper extends");
   if (!Extended)
@@ -1707,17 +1713,17 @@ TypeSpec *Parser::parseTypeHelper(SourceLocation Start) {
         consumeToken();
         continue;
       }
-      Diags.error(Tok.getLocation(), "a type helper cannot contain fields");
+      Diags.error(Tok.getLocation(), llvm::Twine("a ") + Kind + " cannot contain fields");
       return Fail();
     }
     if (Tok.is(tok::kw_var)) {
-      Diags.error(Tok.getLocation(), "a type helper cannot contain fields");
+      Diags.error(Tok.getLocation(), llvm::Twine("a ") + Kind + " cannot contain fields");
       return Fail();
     }
     if (Tok.isOneOf(tok::kw_constructor, tok::kw_destructor)) {
       Diags.error(Tok.getLocation(),
-                  "constructors and destructors in type helpers are not "
-                  "supported yet");
+                  llvm::Twine("constructors and destructors in ") + Kind +
+                      "s are not supported yet");
       return Fail();
     }
     if (Tok.isOneOf(tok::kw_procedure, tok::kw_function)) {
@@ -1762,7 +1768,8 @@ TypeSpec *Parser::parseTypeHelper(SourceLocation Start) {
       for (Decl *D : Consts) {
         if (llvm::isa<VarDecl>(D)) {
           Diags.error(D->getLocation(),
-                      "typed constants in type helpers are not supported yet",
+                      llvm::Twine("typed constants in ") + Kind +
+                          "s are not supported yet",
                       {D->getName().getRange()});
           continue;
         }
@@ -1775,12 +1782,13 @@ TypeSpec *Parser::parseTypeHelper(SourceLocation Start) {
                 "expected a method, property or constant declaration, or 'end'");
     return Fail();
   }
-  if (!expect(tok::kw_end, "at end of type helper")) {
+  if (!expect(tok::kw_end, Record ? "at end of record helper" : "at end of type helper")) {
     Diags.note(HelperLoc, "to match this 'helper'");
     return nullptr;
   }
   return Ctx.create<HelperTypeSpec>(SourceRange(Start, PrevTokEnd), Parent,
-                                    Extended, Ctx.copyArray<Decl *>(Members));
+                                    Extended, Ctx.copyArray<Decl *>(Members),
+                                    Record);
 }
 
 // params = "(" section { ";" section } ")" ;
@@ -1936,6 +1944,8 @@ TypeSpec *Parser::parseTypeImpl() {
       A->setBitPacked();
     else if (auto *R = llvm::dyn_cast_or_null<RecordTypeSpec>(TS))
       R->setBitPacked();
+    else if (llvm::isa_and_nonnull<HelperTypeSpec>(TS))
+      Diags.error(Start, "a record helper cannot be packed");
     return TS;
   }
   switch (Tok.getKind()) {
@@ -2196,6 +2206,14 @@ TypeSpec *Parser::parseArrayType(SourceLocation Start, bool Packed) {
 // recordType = "record" fieldList "end" .
 TypeSpec *Parser::parseRecordType(SourceLocation Start, bool Packed) {
   SourceLocation RecordLoc = consumeToken(); // 'record'
+  // record helper for T (objfpc): `helper` followed by `for` or `(` cannot
+  // begin a field.
+  if (isIdentifierNamed("helper") &&
+      peekToken().isOneOf(tok::kw_for, tok::l_paren)) {
+    if (Packed)
+      Diags.error(Start, "a record helper cannot be packed");
+    return parseTypeHelper(RecordLoc, /*Record=*/true);
+  }
   if (LangOpts.ObjKeywords && advancedRecords())
     return parseAdvancedRecord(Start, RecordLoc, Packed);
   FieldList *Fields = parseFieldList(tok::kw_end);
