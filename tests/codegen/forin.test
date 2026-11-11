@@ -1,0 +1,25 @@
+; for ... in: a dynamic array or ansistring is held (one more reference)
+; during an indexed loop that tests the index before stepping; a set is
+; scanned bit by bit; a class enumerator is protected by a finally part
+; that frees it.
+; RUN: %pcc --mode=objfpc --emit-llvm %S/Inputs/forin.pas -o - | FileCheck %s
+; CHECK-LABEL: define i32 @main(
+; CHECK:     call void @__pas_dyn_addref(ptr %[[A:.*]])
+; CHECK:     %[[N:.*]] = call i64 @__pas_dyn_length(ptr %[[A]])
+; CHECK:     %in.hi = sub i64 %[[N]], 1
+; CHECK:   forin.body:
+; CHECK:     %in.index = phi i64 [ 0, %entry ], [ %in.next, %forin.inc ]
+; CHECK:     %in.elem = getelementptr inbounds i32, ptr %[[A]], i64 %in.index
+; CHECK:   forin.latch:
+; CHECK:     %in.done = icmp eq i64 %in.index, %in.hi
+; CHECK:     call void @__pas_astr_addref(ptr
+; CHECK:     call i32 @__pas_astr_length(ptr
+; CHECK:     lshr i256
+; CHECK:     %in.member = trunc i256 %{{.*}} to i1
+; CHECK:     call ptr @pas.tbag.getenumerator(
+; CHECK:     call void @__pas_exc_push(
+; CHECK:   finally:
+; CHECK:     %enum = load ptr, ptr %in.enum
+; CHECK:   forin.cond:
+; CHECK:     call i1 @pas.tenum.movenext(
+; CHECK:     call void @__pas_free_instance(ptr %enum)

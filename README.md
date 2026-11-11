@@ -346,6 +346,20 @@ element type are the same type. Not supported: `insert`, `delete` and `concat`
 on arrays, `TA.Create(...)`, typed constants other than `nil`, types that
 contain themselves directly (`T = array of T`).
 
+**For-in loops** (not in `--mode=iso`), as in Free Pascal: `for x in c do`
+takes `x` through the elements of an array (static, open or dynamic) or a
+string, the members of a set in order, the values of an ordinal type (`for
+d in TDay`), or the values of an enumerator: `c.GetEnumerator` (a function
+without arguments, of a class, an advanced record or an interface) returns
+a class or advanced record with `function MoveNext: boolean` and `property
+Current`. `x` is a variable, set by an ordinary assignment (conversions and
+range checks apply) and not assignable in the loop. A dynamic array or
+ansistring is enumerated as it was when the loop started; a static array or
+short string is read in place. A class enumerator is freed when the loop
+ends, also by `break`, `exit` or an exception. Not supported: interface
+enumerators (interfaces have no properties yet), `array of const`, and
+Free Pascal's `enumerator` directives and `operator Enumerator`.
+
 **Default parameter values** (`--mode=objfpc`), as in Free Pascal:
 `procedure P(a: integer; b: integer = 1; const s: string = 'x');` can be called
 `P(0)` or `P(0, 2)`, and a function whose parameters all have defaults can be

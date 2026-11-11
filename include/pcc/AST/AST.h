@@ -610,6 +610,69 @@ public:
   static bool classof(const Stmt *S) { return S->getKind() == SK_For; }
 };
 
+/// for Var in Collection do Body (Turbo/FPC): Var takes each element of an
+/// array, string or set, each value of an ordinal type, or each value an
+/// enumerator gives (Collection.GetEnumerator, then MoveNext / Current).
+/// Sema classifies the collection and builds the loop out of ordinary
+/// nodes over hidden variables, which code generation binds: Step is
+/// `Var := <element>` (the element variable, or Enum.Current); for an
+/// enumerator, GetEnum is Coll.GetEnumerator and MoveNext Enum.MoveNext.
+class ForInStmt final : public Stmt {
+public:
+  enum InKind : unsigned char {
+    Invalid, Array, OpenArray, DynArray, AnsiString, ShortString,
+    StringConst, Set, Ordinals, Enumerator
+  };
+
+private:
+  NameRefExpr *Var;
+  Expr *Collection;
+  Stmt *Body;
+  SourceLocation InLoc;
+  InKind Kind = Invalid;
+  Type *ElemTy = nullptr;     ///< not for an enumerator; null: an empty set
+  VarDecl *ElemVar = nullptr; ///< the current element
+  VarDecl *CollVar = nullptr; ///< an enumerator's collection
+  VarDecl *EnumVar = nullptr; ///< the enumerator
+  AssignStmt *Step = nullptr;
+  Expr *GetEnum = nullptr;
+  Expr *MoveNext = nullptr;
+
+public:
+  ForInStmt(SourceRange R, NameRefExpr *Var, SourceLocation InLoc,
+            Expr *Collection, Stmt *Body)
+      : Stmt(SK_ForIn, R), Var(Var), Collection(Collection), Body(Body),
+        InLoc(InLoc) {}
+  NameRefExpr *getVar() const { return Var; }
+  Expr *getCollection() const { return Collection; }
+  Stmt *getBody() const { return Body; }
+  SourceLocation getInLoc() const { return InLoc; }
+  InKind getInKind() const { return Kind; }
+  Type *getElementType() const { return ElemTy; }
+  VarDecl *getElementVar() const { return ElemVar; }
+  VarDecl *getCollectionVar() const { return CollVar; }
+  VarDecl *getEnumeratorVar() const { return EnumVar; }
+  AssignStmt *getStep() const { return Step; }
+  Expr *getGetEnumerator() const { return GetEnum; }
+  Expr *getMoveNext() const { return MoveNext; }
+  void setLowering(InKind K, Type *Elem, VarDecl *ElemV, AssignStmt *S) {
+    Kind = K;
+    ElemTy = Elem;
+    ElemVar = ElemV;
+    Step = S;
+  }
+  void setEnumerator(VarDecl *Coll, VarDecl *Enum, Expr *Get, Expr *Next,
+                     AssignStmt *S) {
+    Kind = Enumerator;
+    CollVar = Coll;
+    EnumVar = Enum;
+    GetEnum = Get;
+    MoveNext = Next;
+    Step = S;
+  }
+  static bool classof(const Stmt *S) { return S->getKind() == SK_ForIn; }
+};
+
 /// One case label (also used for record variant labels): a constant, or
 /// (--mode=tp in case statements) a range `Lo..Hi`. Sema evaluates the
 /// constants into LoValue/HiValue.

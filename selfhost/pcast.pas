@@ -51,7 +51,7 @@ type
     { statements }
     nkEmpty, nkCompound, nkProcCall, nkAssign, nkIf, nkWhile, nkRepeat,
     nkFor, nkCase, nkWith, nkLabeled, nkGoto, nkIndirectCallStmt,
-    nkTry, nkRaise);
+    nkTry, nkRaise, nkForIn);
 
   PNode = ^TNode;
   PDecl = ^TDecl;
@@ -186,6 +186,15 @@ type
               handlers: TPtrList; tryElseLoc: TLoc; partBody: TPtrList);
       { raise raiseObj; nil: a re-raise }
       nkRaise: (raiseObj: PNode);
+      { for inVar in inColl do inBody (Turbo/FPC). Sema classifies the
+        collection (inKind, a fik* constant) and builds the loop out of
+        ordinary nodes over hidden variables, which code generation binds:
+        inStep is inVar := <element> (inElemVar, or inEnumVar.Current); for
+        an enumerator, inGetEnum is inCollVar.GetEnumerator and inMoveNext
+        inEnumVar.MoveNext. inElemType: not for an enumerator; nil: [] }
+      nkForIn: (inVar, inColl, inBody: PNode; inLoc: TLoc; inKind: longint;
+                inElemType: PType; inElemVar, inCollVar, inEnumVar: PDecl;
+                inStep, inGetEnum, inMoveNext: PNode);
   end;
 
   { on [hVarName:] hClassName do hBody (objfpc); hVar (a dkVar, if
@@ -436,6 +445,18 @@ type
   end;
 
 const
+  { what a for-in loop enumerates (nkForIn's inKind) }
+  fikInvalid = 0;
+  fikArray = 1;
+  fikOpenArray = 2;
+  fikDynArray = 3;
+  fikAnsiString = 4;
+  fikShortString = 5;
+  fikStringConst = 6;
+  fikSet = 7;
+  fikOrdinals = 8;
+  fikEnumerator = 9;
+
   hintDeprecated = 1;
   hintExperimental = 2;
   hintPlatform = 4;

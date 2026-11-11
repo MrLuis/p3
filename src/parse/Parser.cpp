@@ -2435,6 +2435,21 @@ Stmt *Parser::parseForStmt() {
   auto *Var = Ctx.create<NameRefExpr>(makeIdentifier(Tok));
   consumeToken();
 
+  if (Tok.is(tok::kw_in)) { // for x in collection do (Turbo/FPC)
+    SourceLocation InLoc = consumeToken();
+    if (LangOpts.Mode == LangMode::ISO)
+      Diags.error(InLoc, "'for ... in' is a Turbo/Free Pascal extension; use "
+                         "--mode=tp or --mode=objfpc");
+    Expr *Collection = parseExpression();
+    if (!Collection)
+      return Fail();
+    if (!expect(tok::kw_do, "in 'for' statement") && !startsStatement())
+      return Fail();
+    Stmt *Body = parseStatement();
+    return Ctx.create<ForInStmt>(SourceRange(ForLoc, PrevTokEnd), Var, InLoc,
+                                 Collection, Body);
+  }
+
   if (Tok.is(tok::equal)) {
     Diags.error(Tok.getLocation(), "expected ':=' in 'for' statement, found '='",
                 {Tok.getRange()});

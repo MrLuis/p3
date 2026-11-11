@@ -105,9 +105,14 @@ class Checker : public StmtVisitor<Checker>,
   /// `IFoo = interface;` not defined yet in the current type section.
   llvm::SmallVector<std::pair<TypeDecl *, InterfaceType *>, 2> PendingInterfaces;
 
-  /// Enclosing for statements, innermost last. Their control variables must
-  /// not be assigned in the loop body (ISO 7185 6.8.3.9 "threatened").
-  llvm::SmallVector<ForStmt *, 4> ActiveFors;
+  /// Enclosing for statements (also for-in), innermost last: the control
+  /// variable and the statement. Their control variables must not be
+  /// assigned in the loop body (ISO 7185 6.8.3.9 "threatened").
+  struct ActiveFor {
+    Decl *Var;
+    SourceLocation Loc;
+  };
+  llvm::SmallVector<ActiveFor, 4> ActiveFors;
 
   unsigned LoopDepth = 0; ///< for break / continue
 
@@ -3922,14 +3927,14 @@ class Checker : public StmtVisitor<Checker>,
     auto *N = llvm::dyn_cast<NameRefExpr>(Target);
     if (!N || !N->getDecl())
       return false;
-    for (ForStmt *F : ActiveFors) {
-      if (F->getVar()->getDecl() != N->getDecl())
+    for (const ActiveFor &F : ActiveFors) {
+      if (F.Var != N->getDecl())
         continue;
       Diags.error(N->getBeginLoc(),
                   "cannot assign to '" + N->getName().Spelling +
                       "' inside a 'for' loop that it controls",
                   {N->getRange()});
-      Diags.note(F->getBeginLoc(), "'for' loop is here");
+      Diags.note(F.Loc, "'for' loop is here");
       return true;
     }
     return false;
@@ -5678,12 +5683,223 @@ public:
     }
 
     if (Usable)
-      ActiveFors.push_back(S);
+      ActiveFors.push_back({VarRef->getDecl(), S->getBeginLoc()});
     ++LoopDepth;
     visitStmt(S->getBody());
     --LoopDepth;
     if (Usable)
       ActiveFors.pop_back();
+  }
+
+  /// A hidden variable of a for-in loop (code generation binds it), named
+  /// in Sc only: its name is no Pascal identifier.
+  VarDecl *forInVar(llvm::StringRef Name, Type *T, SourceLocation Loc,
+                    Scope &Sc) {
+    llvm::StringRef N = Ctx.getStrings().intern(Name);
+    auto *V = Ctx.create<VarDecl>(Identifier{N, N, Loc}, nullptr);
+    V->setType(T);
+    V->setOwner(CurRoutine);
+    Used.insert(V);
+    Sc.insert(N, V);
+    return V;
+  }
+
+  NameRefExpr *forInRef(VarDecl *V, SourceLocation Loc) {
+    Identifier Id = V->getName();
+    Id.Loc = Loc;
+    return Ctx.create<NameRefExpr>(Id);
+  }
+
+  /// Base.Name (Name as written in Free Pascal), at Loc.
+  FieldExpr *forInMember(Expr *Base, llvm::StringRef Spelling,
+                         SourceLocation Loc) {
+    Identifier Id{Ctx.getStrings().intern(llvm::StringRef(Spelling).lower()),
+                  Ctx.getStrings().intern(Spelling), Loc};
+    return Ctx.create<FieldExpr>(Id.getRange(), Base, Id);
+  }
+
+  /// The member Name of a class, advanced record or interface, or null.
+  static Decl *findEnumMember(Type *T, llvm::StringRef Name) {
+    if (ClassType *MT = memberTableOf(T))
+      T = MT;
+    if (auto *C = llvm::dyn_cast<ClassType>(T))
+      return C->findMember(Name);
+    if (auto *I = llvm::dyn_cast<InterfaceType>(T))
+      return findInterfaceMethod(I, Name);
+    return nullptr;
+  }
+
+  /// for Var in Collection do Body (Turbo/FPC), as in Free Pascal: Var
+  /// takes the elements of an array or string, the members of a set in
+  /// order, the values of an ordinal type, or the values of an enumerator.
+  /// Var := element is an ordinary assignment (Step).
+  void visitForInStmt(ForInStmt *S) {
+    DirectSequence = nullptr;
+    NameRefExpr *VarRef = S->getVar();
+    const Identifier &Id = VarRef->getName();
+    Type *VarTy = errorType();
+    bool Usable = false;
+    if (Decl *D = Cur->lookup(Id.Name)) {
+      VarRef->setDecl(D);
+      Used.insert(D);
+      auto *V = llvm::dyn_cast<VarDecl>(D);
+      if (!V) {
+        Diags.error(Id.Loc,
+                    "'for' loop control variable must be a variable, but '" +
+                        Id.Spelling + "' is a " + D->getKindName(),
+                    {Id.getRange()});
+        noteDeclaredHere(D);
+      } else if (V->getType() && !V->getType()->isError()) {
+        VarTy = V->getType();
+        Usable = !checkNotForControlVar(VarRef);
+      }
+    } else {
+      diagUndeclared(Id);
+    }
+    VarRef->setType(VarTy);
+
+    Expr *C = S->getCollection();
+    SourceLocation CLoc = C->getBeginLoc();
+    Type *CT = checkTypeOrValue(C);
+    auto *TypeRef = llvm::dyn_cast<NameRefExpr>(C);
+    bool IsType = TypeRef && llvm::isa_and_nonnull<TypeDecl>(TypeRef->getDecl());
+    ForInStmt::InKind Kind = ForInStmt::Invalid;
+    Type *Elem = nullptr;
+    if (CT->isError()) {
+    } else if (IsType) {
+      if (CT->isOrdinal()) {
+        Kind = ForInStmt::Ordinals;
+        Elem = CT;
+      } else {
+        Diags.error(CLoc,
+                    "'for ... in' over a type needs an ordinal type, not " +
+                        quoted(CT),
+                    {C->getRange()});
+      }
+    } else if (auto *A = llvm::dyn_cast<ArrayType>(CT)) {
+      Kind = ForInStmt::Array;
+      Elem = A->getElementType();
+    } else if (auto *OA = llvm::dyn_cast<OpenArrayType>(CT)) {
+      Kind = ForInStmt::OpenArray;
+      Elem = OA->getElementType();
+    } else if (auto *DA = llvm::dyn_cast<DynArrayType>(CT)) {
+      Kind = ForInStmt::DynArray;
+      Elem = DA->getElementType();
+      markUsesManaged(); // the array is held during the loop
+    } else if (CT->isAnsiString()) {
+      Kind = ForInStmt::AnsiString;
+      Elem = Ctx.getCharType();
+      markUsesManaged(); // the string is held during the loop
+    } else if (CT->isShortString()) {
+      Kind = ForInStmt::ShortString;
+      Elem = Ctx.getCharType();
+    } else if (CT->isStringLiteral()) {
+      Kind = ForInStmt::StringConst;
+      Elem = Ctx.getCharType();
+    } else if (auto *ST = llvm::dyn_cast<SetType>(CT)) {
+      Kind = ForInStmt::Set;
+      Elem = ST->getElementType(); // null for []: no elements
+    } else if (CT->isClass() || CT->isInterface() || memberTableOf(CT)) {
+      Kind = ForInStmt::Enumerator;
+    }
+    if (Kind == ForInStmt::Invalid && !CT->isError() && !IsType)
+      Diags.error(CLoc,
+                  "'for ... in' cannot enumerate a value of type " + quoted(CT) +
+                      " (an array, string, set, ordinal type, or an object or "
+                      "record with a GetEnumerator method)",
+                  {C->getRange()});
+
+    Scope InScope(Cur);
+    Scope *Saved = Cur;
+    auto MakeStep = [&](Expr *Value) {
+      auto *Target = Ctx.create<NameRefExpr>(Id);
+      auto *Step = Ctx.create<AssignStmt>(
+          SourceRange(Id.Loc, C->getRange().getEnd()), Target, S->getInLoc(),
+          Value);
+      Cur = &InScope;
+      visitAssignStmt(Step);
+      Cur = Saved;
+      return Step;
+    };
+    if (Kind == ForInStmt::Enumerator) {
+      if (!checkEnumerator(S, CT, Usable, InScope, MakeStep))
+        Kind = ForInStmt::Invalid;
+    } else if (Kind != ForInStmt::Invalid) {
+      VarDecl *ElemV =
+          Elem ? forInVar("in.elem", Elem, S->getInLoc(), InScope) : nullptr;
+      AssignStmt *Step =
+          Usable && Elem ? MakeStep(forInRef(ElemV, CLoc)) : nullptr;
+      S->setLowering(Kind, Elem, ElemV, Step);
+    }
+
+    if (Usable)
+      ActiveFors.push_back({VarRef->getDecl(), S->getBeginLoc()});
+    ++LoopDepth;
+    visitStmt(S->getBody());
+    --LoopDepth;
+    if (Usable)
+      ActiveFors.pop_back();
+  }
+
+  /// A for-in loop over CT through Collection.GetEnumerator: a function
+  /// without arguments whose result has a function MoveNext: boolean and a
+  /// property Current. False after an error.
+  template <typename StepFn>
+  bool checkEnumerator(ForInStmt *S, Type *CT, bool Usable, Scope &InScope,
+                       StepFn MakeStep) {
+    Expr *C = S->getCollection();
+    SourceLocation CLoc = C->getBeginLoc();
+    auto *Get = llvm::dyn_cast_or_null<RoutineDecl>(
+        findEnumMember(CT, "getenumerator"));
+    if (!Get || !Get->isFunction() || !acceptsArgCount(Get->getParams(), 0) ||
+        !Get->getResultType()) {
+      Diags.error(CLoc,
+                  "'for ... in' cannot enumerate a value of type " + quoted(CT) +
+                      ": it has no function GetEnumerator without arguments",
+                  {C->getRange()});
+      return false;
+    }
+    Type *ET = Get->getResultType();
+    if (ET->isError())
+      return false;
+    auto *Next =
+        llvm::dyn_cast_or_null<RoutineDecl>(findEnumMember(ET, "movenext"));
+    if (!Next || !Next->isFunction() || !Next->getResultType() ||
+        !Next->getResultType()->getBase()->isBoolean() ||
+        !acceptsArgCount(Next->getParams(), 0)) {
+      Diags.error(CLoc,
+                  "enumerator " + quoted(ET) +
+                      " has no function MoveNext: boolean without arguments",
+                  {C->getRange()});
+      noteDeclaredHere(Get);
+      return false;
+    }
+    auto *Current =
+        llvm::dyn_cast_or_null<PropertyDecl>(findEnumMember(ET, "current"));
+    if (!Current || Current->isArrayProperty()) {
+      Diags.error(CLoc, "enumerator " + quoted(ET) + " has no property Current",
+                  {C->getRange()});
+      noteDeclaredHere(Get);
+      return false;
+    }
+
+    VarDecl *CollV = forInVar("in.coll", CT, S->getInLoc(), InScope);
+    VarDecl *EnumV = forInVar("in.enum", ET, S->getInLoc(), InScope);
+    Scope *Saved = Cur;
+    Cur = &InScope;
+    Expr *GetE = forInMember(forInRef(CollV, CLoc), "GetEnumerator", CLoc);
+    Expr *NextE = forInMember(forInRef(EnumV, CLoc), "MoveNext", CLoc);
+    bool OK = !check(GetE)->isError() && !check(NextE)->isError();
+    Cur = Saved;
+    if (!OK)
+      return false;
+    AssignStmt *Step =
+        Usable ? MakeStep(forInMember(forInRef(EnumV, CLoc), "Current", CLoc))
+               : nullptr;
+    S->setEnumerator(CollV, EnumV, GetE, NextE, Step);
+    if (ET->isClass())
+      markHasTry(); // freed in a finally part
+    return true;
   }
 
   void visitCaseStmt(CaseStmt *S) {

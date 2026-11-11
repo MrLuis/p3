@@ -4851,6 +4851,195 @@ public:
     B.SetInsertPoint(EndBB);
   }
 
+  //   [hold the collection] lo, hi = its first and last index (i64)
+  //   if lo > hi goto end
+  // loop:
+  //   i = phi [lo, pre], [next, inc]
+  //   [bind the element variable to element i]; Var := element; Body
+  // latch:                                    (continue)
+  //   if i == hi goto end                     (test before stepping)
+  // inc:
+  //   next = i + 1; goto loop
+  // An enumerator: e := Coll.GetEnumerator; while e.MoveNext do begin
+  // Var := e.Current; Body end, a class's e freed in a finally part.
+  void visitForInStmt(ForInStmt *S) {
+    Expr *C = S->getCollection();
+    Type *Elem = S->getElementType();
+    auto Iteration = [&](llvm::Value *ElemAddr) {
+      if (VarDecl *EV = S->getElementVar())
+        HandlerVars[EV] = ElemAddr;
+      if (S->getStep())
+        visitStmt(S->getStep());
+      visitStmt(S->getBody());
+    };
+    auto Indexed = [&](llvm::Value *Lo, llvm::Value *Hi, llvm::Type *ElemTy,
+                       llvm::Value *Base) {
+      emitForInLoop(Lo, Hi, [&](llvm::Value *I, llvm::BasicBlock *) {
+        Iteration(B.CreateInBoundsGEP(ElemTy, Base, I, "in.elem"));
+      });
+    };
+    switch (S->getInKind()) {
+    case ForInStmt::Invalid:
+      return; // (errors were reported)
+    case ForInStmt::Enumerator:
+      emitForInEnumerator(S);
+      return;
+    case ForInStmt::Array: {
+      auto *AT = llvm::cast<ArrayType>(C->getType());
+      llvm::Value *Base = emitAddress(C);
+      OrdinalBounds Bd = getOrdinalBounds(AT->getIndexType());
+      emitForInLoop(B.getInt64(0), B.getInt64(Bd.Hi - Bd.Lo),
+                    [&](llvm::Value *I, llvm::BasicBlock *) {
+                      Iteration(B.CreateInBoundsGEP(memType(AT), Base,
+                                                    {B.getInt64(0), I}, "in.elem"));
+                    });
+      return;
+    }
+    case ForInStmt::OpenArray: {
+      llvm::Value *Desc = openDescriptor(C);
+      llvm::Value *Data = B.CreateLoad(B.getPtrTy(), Desc, "data");
+      llvm::Value *Hi = B.CreateSub(openCount(Desc), B.getInt64(1), "in.hi");
+      Indexed(B.getInt64(0), Hi, memType(Elem), Data);
+      return;
+    }
+    case ForInStmt::DynArray:
+    case ForInStmt::AnsiString: {
+      // A reference is held during the loop: changing the variable does
+      // not change the elements enumerated, as in Free Pascal.
+      bool Dyn = S->getInKind() == ForInStmt::DynArray;
+      llvm::Value *V = visitExpr(C);
+      astrCall(Dyn ? "__pas_dyn_addref" : "__pas_astr_addref", B.getVoidTy(), {V});
+      holdResult(V, C->getType());
+      llvm::Value *N =
+          Dyn ? dynLength(V)
+              : B.CreateZExt(astrCall("__pas_astr_length", B.getInt32Ty(), {V}),
+                             B.getInt64Ty());
+      Indexed(B.getInt64(0), B.CreateSub(N, B.getInt64(1), "in.hi"),
+              memType(Elem), V);
+      return;
+    }
+    case ForInStmt::ShortString: {
+      llvm::Value *Base = emitPStr(C); // its characters are 1..length
+      llvm::Value *N = B.CreateZExt(B.CreateLoad(B.getInt8Ty(), Base, "length"),
+                                    B.getInt64Ty());
+      Indexed(B.getInt64(1), N, B.getInt8Ty(), Base);
+      return;
+    }
+    case ForInStmt::StringConst:
+      Indexed(B.getInt64(0),
+              B.getInt64(static_cast<int64_t>(C->getType()->getStringLength()) - 1),
+              B.getInt8Ty(), emitAddress(C));
+      return;
+    case ForInStmt::Set: {
+      // The members in order: the set is evaluated once.
+      llvm::Value *V = visitExpr(C);
+      int64_t Lo = 0, Hi = -1; // [] has none
+      if (Elem) {
+        OrdinalBounds Bd = getOrdinalBounds(Elem);
+        Lo = std::max<int64_t>(Bd.Lo, 0);
+        Hi = std::min<int64_t>(Bd.Hi, 255);
+      }
+      llvm::Value *Slot = Elem ? createTemp(memType(Elem), "in.elem") : nullptr;
+      emitForInLoop(B.getInt64(Lo), B.getInt64(Hi),
+                    [&](llvm::Value *I, llvm::BasicBlock *Latch) {
+                      llvm::Value *Bit = B.CreateTrunc(
+                          B.CreateLShr(V, B.CreateZExt(I, setType())),
+                          B.getInt1Ty(), "in.member");
+                      auto *Member = newBlock("forin.member");
+                      B.CreateCondBr(Bit, Member, Latch);
+                      B.SetInsertPoint(Member);
+                      if (Slot)
+                        storeScalar(Slot, B.CreateTrunc(I, regType(Elem)), Elem);
+                      Iteration(Slot);
+                    });
+      return;
+    }
+    case ForInStmt::Ordinals: {
+      OrdinalBounds Bd = getOrdinalBounds(Elem);
+      llvm::Value *Slot = createTemp(memType(Elem), "in.elem");
+      emitForInLoop(B.getInt64(Bd.Lo), B.getInt64(Bd.Hi),
+                    [&](llvm::Value *I, llvm::BasicBlock *) {
+                      storeScalar(Slot, B.CreateTrunc(I, regType(Elem)), Elem);
+                      Iteration(Slot);
+                    });
+      return;
+    }
+    }
+  }
+
+  /// for I := Lo to Hi (i64, signed; nothing if Lo > Hi), with break and
+  /// continue: Fn(I, latch) emits an iteration, which may branch to the
+  /// latch to skip the rest of it.
+  void emitForInLoop(
+      llvm::Value *Lo, llvm::Value *Hi,
+      llvm::function_ref<void(llvm::Value *, llvm::BasicBlock *)> Fn) {
+    auto *LoopBB = newBlock("forin.body");
+    auto *LatchBB = newBlock("forin.latch");
+    auto *IncBB = newBlock("forin.inc");
+    auto *EndBB = newBlock("forin.end");
+    llvm::BasicBlock *PreBB = B.GetInsertBlock();
+    B.CreateCondBr(B.CreateICmpSLE(Lo, Hi), LoopBB, EndBB);
+    B.SetInsertPoint(LoopBB);
+    llvm::PHINode *I = B.CreatePHI(B.getInt64Ty(), 2, "in.index");
+    I->addIncoming(Lo, PreBB);
+    Loops.push_back({LatchBB, EndBB, Cleanups.size()});
+    Fn(I, LatchBB);
+    Loops.pop_back();
+    B.CreateBr(LatchBB);
+    B.SetInsertPoint(LatchBB);
+    B.CreateCondBr(B.CreateICmpEQ(I, Hi, "in.done"), EndBB, IncBB);
+    B.SetInsertPoint(IncBB);
+    I->addIncoming(B.CreateAdd(I, B.getInt64(1), "in.next"), IncBB);
+    B.CreateBr(LoopBB);
+    B.SetInsertPoint(EndBB);
+  }
+
+  void emitForInEnumerator(ForInStmt *S) {
+    Expr *C = S->getCollection();
+    Type *CT = C->getType();
+    if (CT->isClass() || CT->isInterface()) {
+      llvm::Value *Slot = createTemp(memType(CT), "in.coll");
+      B.CreateStore(visitExpr(C), Slot);
+      HandlerVars[S->getCollectionVar()] = Slot;
+    } else { // a record: its methods get its address
+      HandlerVars[S->getCollectionVar()] = emitAddress(C);
+    }
+    VarDecl *EnumV = S->getEnumeratorVar();
+    Type *ET = EnumV->getType();
+    if (!ET->isClass() && !ET->isInterface()) {
+      HandlerVars[EnumV] = emitAddress(S->getGetEnumerator());
+      emitEnumeratorLoop(S);
+      return;
+    }
+    llvm::Value *Slot = createTemp(memType(ET), "in.enum");
+    B.CreateStore(visitExpr(S->getGetEnumerator()), Slot);
+    HandlerVars[EnumV] = Slot;
+    if (!ET->isClass()) {
+      emitEnumeratorLoop(S);
+      return;
+    }
+    emitTryFinally([&] { emitEnumeratorLoop(S); },
+                   [&] { emitFree(B.CreateLoad(B.getPtrTy(), Slot, "enum")); });
+  }
+
+  //   while e.MoveNext do begin Var := e.Current; Body end
+  void emitEnumeratorLoop(ForInStmt *S) {
+    auto *CondBB = newBlock("forin.cond");
+    auto *BodyBB = newBlock("forin.body");
+    auto *EndBB = newBlock("forin.end");
+    B.CreateBr(CondBB);
+    B.SetInsertPoint(CondBB);
+    B.CreateCondBr(visitExpr(S->getMoveNext()), BodyBB, EndBB);
+    B.SetInsertPoint(BodyBB);
+    Loops.push_back({CondBB, EndBB, Cleanups.size()});
+    if (S->getStep())
+      visitStmt(S->getStep());
+    visitStmt(S->getBody());
+    Loops.pop_back();
+    B.CreateBr(CondBB);
+    B.SetInsertPoint(EndBB);
+  }
+
   void visitCaseStmt(CaseStmt *S) {
     llvm::Value *Sel = visitExpr(S->getSelector());
     auto *SelTy = llvm::cast<llvm::IntegerType>(Sel->getType());
@@ -5081,14 +5270,26 @@ public:
   //     continue out of the body) }
   // raised: state = 1; goto finally
   void emitTryFinally(TryStmt *S) {
+    emitTryFinally(
+        [&] {
+          for (Stmt *Child : S->getBody())
+            visitStmt(Child);
+        },
+        [&] {
+          for (Stmt *Child : S->getFinallyBody())
+            visitStmt(Child);
+        });
+  }
+
+  void emitTryFinally(llvm::function_ref<void()> Body,
+                      llvm::function_ref<void()> FinallyPart) {
     auto *Raised = newBlock("finally.raise");
     auto *Finally = newBlock("finally");
     auto *End = newBlock("try.end");
     llvm::Value *State = createTemp(B.getInt32Ty(), "finally.state");
     llvm::Value *F = emitProtect(Raised, "try.body");
     Cleanups.emplace_back(Cleanup::Finally, F, nullptr, State, Finally);
-    for (Stmt *Child : S->getBody())
-      visitStmt(Child);
+    Body();
     llvm::SmallVector<llvm::BasicBlock *, 2> Exits =
         std::move(Cleanups.back().Exits);
     Cleanups.pop_back();
@@ -5101,8 +5302,7 @@ public:
     B.CreateBr(Finally);
 
     B.SetInsertPoint(Finally);
-    for (Stmt *Child : S->getFinallyBody())
-      visitStmt(Child);
+    FinallyPart();
     auto *Reraise = newBlock("finally.reraise");
     llvm::SwitchInst *SW =
         B.CreateSwitch(B.CreateLoad(B.getInt32Ty(), State, "state"), End);

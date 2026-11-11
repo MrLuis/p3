@@ -1,0 +1,16 @@
+ProgramDecl 'forin' <1:1>
+  VarDecl 'c' : char <3:3>
+  VarDecl 's' : string <4:3>
+  CompoundStmt <5:1>
+    ForInStmt <6:3>
+      NameRefExpr 'c' variable : char <6:7>
+      NameRefExpr 's' variable : string <6:12>
+      ProcCallStmt 'write' <7:5>
+        NameRefExpr 'c' variable : char <7:11>
+    ForInStmt <8:3>
+      NameRefExpr 'c' variable : char <8:7>
+      BinaryExpr '+' : string <8:12>
+        StringLiteralExpr "ab" : string of length 2 <8:12>
+        NameRefExpr 's' variable : string <8:19>
+      EmptyStmt <9:5>
+    EmptyStmt <10:1>

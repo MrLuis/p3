@@ -1,0 +1,11 @@
+; for ... in across units (class and record enumerators, an open array in
+; a unit), compiled whole and separately.
+; RUN: rm -rf %t && mkdir -p %t && cp -r %S/Inputs/forin/. %t/
+; RUN: %pcc --mode=objfpc -I %t/lib %t/main.pas -o %t/whole
+; RUN: %t/whole | FileCheck %s
+; RUN: %pcc --mode=objfpc -c %t/lib/words.pas -o %t/lib/words.o
+; RUN: %pcc --mode=objfpc -I %t/lib -fseparate-units %t/main.pas -o %t/separate
+; RUN: %t/separate | FileCheck %s
+; CHECK:      unit enumerators
+; CHECK-NEXT: 4072
+; CHECK-NEXT: 6

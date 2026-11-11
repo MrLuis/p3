@@ -679,6 +679,14 @@ public:
     visitExpr(S->getFinal());
     visitStmt(S->getBody());
   }
+  void visitForInStmt(ForInStmt *S) {
+    line("ForInStmt");
+    loc(S->getBeginLoc());
+    IndentScope I(Indent);
+    visitExpr(S->getVar());
+    visitExpr(S->getCollection());
+    visitStmt(S->getBody());
+  }
   void visitCaseStmt(CaseStmt *S) {
     line("CaseStmt");
     loc(S->getBeginLoc());

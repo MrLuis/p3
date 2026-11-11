@@ -64,7 +64,7 @@ var
   curRoutine: PDecl;          { nil in the program block }
   { check allows a value of an untyped parameter (checkAllowingUntyped) }
   allowUntyped: boolean;
-  activeFors: TPtrList;       { of PNode (nkFor), innermost last }
+  activeFors: TPtrList;       { of PNode (nkFor, nkForIn), innermost last }
   loopDepth: longint;
   pendingPointers: TPtrList;  { of PPendingPointer }
   containers: TPtrList;       { statement sequences / labeled statements }
@@ -5610,7 +5610,12 @@ begin
   for i := 0 to activeFors.count - 1 do
   begin
     f := PNode(listGet(activeFors, i));
-    if f^.forVar^.refDecl <> target^.refDecl then
+    if f^.kind = nkForIn then
+    begin
+      if f^.inVar^.refDecl <> target^.refDecl then
+        continue;
+    end
+    else if f^.forVar^.refDecl <> target^.refDecl then
       continue;
     ms('cannot assign to ''');
     maN(target^.ref.spelling);

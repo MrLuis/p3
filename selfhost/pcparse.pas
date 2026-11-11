@@ -3360,7 +3360,7 @@ end;
 { for = "for" ident ":=" expression ("to"|"downto") expression "do" statement . }
 function parseForStmt: PNode;
 var
-  forLoc: TLoc;
+  forLoc, inLoc: TLoc;
   v, init, final, body, n: PNode;
   down: boolean;
 
@@ -3379,6 +3379,27 @@ begin
   end;
   v := nameRef(makeIdentifier(tok));
   consumeToken;
+
+  if tok.kind = tkKwIn then { for x in collection do (Turbo/FPC) }
+  begin
+    inLoc := consumeToken;
+    if mode = lmISO then
+      diagError(inLoc, '''for ... in'' is a Turbo/Free Pascal extension; use ' +
+                       '--mode=tp or --mode=objfpc');
+    init := parseExpression;
+    if init = nil then
+      exit(fail);
+    if not expect(tkKwDo, 'in ''for'' statement') and not startsStatement then
+      exit(fail);
+    body := parseStatement;
+    n := newNode(nkForIn, forLoc, prevTokEnd);
+    n^.inVar := v;
+    n^.inLoc := inLoc;
+    n^.inColl := init;
+    n^.inBody := body;
+    n^.inKind := fikInvalid;
+    exit(n);
+  end;
 
   if tok.kind = tkEqual then
   begin

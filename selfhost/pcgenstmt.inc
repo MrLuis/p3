@@ -965,6 +965,299 @@ begin
   irSetInsertPoint(endB);
 end;
 
+type
+  { a try-finally being emitted: tryFinallyBegin, the body, tryFinallyMiddle,
+    the finally part, tryFinallyEnd }
+  TTryFinally = record
+    raisedB, finallyB, endB: PIRBlock;
+    state, f: TV;
+    c: PCleanup;
+  end;
+
+procedure tryFinallyBegin(var t: TTryFinally);
+begin
+  t.raisedB := irNewBlock('finally.raise');
+  t.finallyB := irNewBlock('finally');
+  t.endB := irNewBlock('try.end');
+  t.state := irCreateTemp(irI32, 'finally.state');
+  t.f := emitProtect(t.raisedB, 'try.body');
+  t.c := newCleanup(clFinally, t.f);
+  t.c^.state := t.state;
+  t.c^.finallyB := t.finallyB;
+  listAdd(cleanups, t.c);
+end;
+
+procedure tryFinallyMiddle(var t: TTryFinally);
+var
+  ignored: pointer;
+begin
+  ignored := listPop(cleanups);
+  excCall1('__pas_exc_pop', t.f);
+  irStore(i32c(0), t.state);
+  irBr(t.finallyB);
+
+  irSetInsertPoint(t.raisedB);
+  irStore(i32c(1), t.state);
+  irBr(t.finallyB);
+
+  irSetInsertPoint(t.finallyB);
+end;
+
+procedure tryFinallyEnd(var t: TTryFinally);
+var
+  reraiseB: PIRBlock;
+  sw: PIRInst;
+  k: longint;
+begin
+  reraiseB := irNewBlock('finally.reraise');
+  sw := irSwitch(irLoad(irI32, t.state, 'state'), t.endB);
+  irAddCase(sw, i32c(1), reraiseB);
+  for k := 0 to t.c^.exits.count - 1 do
+    irAddCase(sw, i32c(2 + k), PIRBlock(listGet(t.c^.exits, k)));
+  irSetInsertPoint(reraiseB);
+  excCall1('__pas_reraise', t.f);
+  irUnreachable;
+  irSetInsertPoint(t.endB);
+end;
+
+type
+  { a for-in loop over i64 indexes being emitted (forInLoopBegin, an
+    iteration, forInLoopEnd) }
+  TForInLoop = record
+    loopB, latchB, incB, endB: PIRBlock;
+    phi: PIRInst;
+    i, hi: TV;
+  end;
+
+{ for i := lo to hi (signed; nothing if lo > hi), with break and continue:
+  the iteration may branch to latchB to skip the rest of it. }
+procedure forInLoopBegin(var l: TForInLoop; const lo, hi: TV);
+var
+  preB: PIRBlock;
+begin
+  l.loopB := irNewBlock('forin.body');
+  l.latchB := irNewBlock('forin.latch');
+  l.incB := irNewBlock('forin.inc');
+  l.endB := irNewBlock('forin.end');
+  l.hi := hi;
+  preB := irInsertBlock;
+  irCondBr(irICmp('sle', lo, hi, ''), l.loopB, l.endB, false);
+  irSetInsertPoint(l.loopB);
+  l.i := irPhi(irI64, 'in.index', l.phi);
+  irAddIncoming(l.phi, lo, preB);
+  pushLoop(l.latchB, l.endB);
+end;
+
+procedure forInLoopEnd(var l: TForInLoop);
+begin
+  popLoop;
+  irBr(l.latchB);
+  irSetInsertPoint(l.latchB);
+  irCondBr(irICmp('eq', l.i, l.hi, 'in.done'), l.endB, l.incB, false);
+  irSetInsertPoint(l.incB);
+  irAddIncoming(l.phi, irBin('add', l.i, i64c(1), 'in.next'), l.incB);
+  irBr(l.loopB);
+  irSetInsertPoint(l.endB);
+end;
+
+{ One iteration of for-in loop s: the element variable bound to elemAddr,
+  variable := element, the body. }
+procedure forInIteration(s: PNode; const elemAddr: TV);
+begin
+  if s^.inElemVar <> nil then
+    s^.inElemVar^.cgValue := irBox(elemAddr);
+  if s^.inStep <> nil then
+    visitStmt(s^.inStep);
+  visitStmt(s^.inBody);
+end;
+
+{ for-in over elements lo..hi of type elemTy at base. }
+procedure forInIndexed(s: PNode; const lo, hi: TV; elemTy: PIRType; const base: TV);
+var
+  l: TForInLoop;
+begin
+  forInLoopBegin(l, lo, hi);
+  forInIteration(s, irGEP1(elemTy, base, l.i, true, 'in.elem'));
+  forInLoopEnd(l);
+end;
+
+{   while e.MoveNext do begin variable := e.Current; Body end }
+procedure emitEnumeratorLoop(s: PNode);
+var
+  condB, bodyB, endB: PIRBlock;
+begin
+  condB := irNewBlock('forin.cond');
+  bodyB := irNewBlock('forin.body');
+  endB := irNewBlock('forin.end');
+  irBr(condB);
+  irSetInsertPoint(condB);
+  irCondBr(visitExpr(s^.inMoveNext), bodyB, endB, false);
+  irSetInsertPoint(bodyB);
+  pushLoop(condB, endB);
+  if s^.inStep <> nil then
+    visitStmt(s^.inStep);
+  visitStmt(s^.inBody);
+  popLoop;
+  irBr(condB);
+  irSetInsertPoint(endB);
+end;
+
+procedure emitForInEnumerator(s: PNode);
+var
+  c: PNode;
+  ct, et: PType;
+  slot: TV;
+  t: TTryFinally;
+begin
+  c := s^.inColl;
+  ct := c^.typ;
+  if (ct^.kind = tyClass) or (ct^.kind = tyInterface) then
+  begin
+    slot := irCreateTemp(memType(ct), 'in.coll');
+    irStore(visitExpr(c), slot);
+    s^.inCollVar^.cgValue := irBox(slot);
+  end
+  else { a record: its methods get its address }
+    s^.inCollVar^.cgValue := irBox(emitAddress(c));
+  et := s^.inEnumVar^.varType;
+  if (et^.kind <> tyClass) and (et^.kind <> tyInterface) then
+  begin
+    s^.inEnumVar^.cgValue := irBox(emitAddress(s^.inGetEnum));
+    emitEnumeratorLoop(s);
+    exit;
+  end;
+  slot := irCreateTemp(memType(et), 'in.enum');
+  irStore(visitExpr(s^.inGetEnum), slot);
+  s^.inEnumVar^.cgValue := irBox(slot);
+  if et^.kind <> tyClass then
+  begin
+    emitEnumeratorLoop(s);
+    exit;
+  end;
+  tryFinallyBegin(t);
+  emitEnumeratorLoop(s);
+  tryFinallyMiddle(t);
+  emitFree(irLoad(irPtrT, slot, 'enum'));
+  tryFinallyEnd(t);
+end;
+
+{   [hold the collection] lo, hi = its first and last index (i64)
+    if lo > hi goto end
+  loop:
+    i = phi [lo, pre], [next, inc]
+    [bind the element variable to element i]; variable := element; Body
+  latch:                                    (continue)
+    if i = hi goto end                      (test before stepping)
+  inc:
+    next = i + 1; goto loop
+  An enumerator: e := Coll.GetEnumerator; while e.MoveNext do begin
+  variable := e.Current; Body end, a class's e freed in a finally part. }
+procedure visitForIn(s: PNode);
+var
+  c: PNode;
+  elem: PType;
+  base, desc, data, hi, v, n, slot, bit: TV;
+  bd: TOrdinalBounds;
+  lo64, hi64: int64;
+  l: TForInLoop;
+  member: PIRBlock;
+  dyn: boolean;
+begin
+  c := s^.inColl;
+  elem := s^.inElemType;
+  case s^.inKind of
+    fikEnumerator:
+      emitForInEnumerator(s);
+    fikArray:
+      begin
+        base := emitAddress(c);
+        bd := getOrdinalBounds(c^.typ^.indexType);
+        forInLoopBegin(l, i64c(0), i64c(bd.hi - bd.lo));
+        forInIteration(s, irGEP2(memType(c^.typ), base, i64c(0), l.i, 'in.elem'));
+        forInLoopEnd(l);
+      end;
+    fikOpenArray:
+      begin
+        desc := openDescriptor(c);
+        data := irLoad(irPtrT, desc, 'data');
+        hi := irBin('sub', openCount(desc), i64c(1), 'in.hi');
+        forInIndexed(s, i64c(0), hi, memType(elem), data);
+      end;
+    fikDynArray, fikAnsiString:
+      begin
+        { a reference is held during the loop: changing the variable does
+          not change the elements enumerated, as in Free Pascal }
+        dyn := s^.inKind = fikDynArray;
+        v := visitExpr(c);
+        if dyn then
+        begin
+          astrV1('__pas_dyn_addref', v);
+          v := holdDynResult(v, c^.typ);
+          n := dynLength(v);
+        end
+        else
+        begin
+          astrV1('__pas_astr_addref', v);
+          v := holdResult(v);
+          n := irCast('zext', call1(classRuntime('__pas_astr_length', 'i32', 'ptr'), v, ''),
+                      irI64, '');
+        end;
+        forInIndexed(s, i64c(0), irBin('sub', n, i64c(1), 'in.hi'), memType(elem), v);
+      end;
+    fikShortString:
+      begin
+        base := emitPStr(c); { its characters are 1..length }
+        n := irCast('zext', irLoad(irI8, base, 'length'), irI64, '');
+        forInIndexed(s, i64c(1), n, irI8, base);
+      end;
+    fikStringConst:
+      begin
+        base := emitAddress(c);
+        forInIndexed(s, i64c(0), i64c(getStringLength(c^.typ) - 1), irI8, base);
+      end;
+    fikSet:
+      begin
+        { the members in order: the set is evaluated once }
+        v := visitExpr(c);
+        lo64 := 0;
+        hi64 := -1; { [] has none }
+        slot := irNull;
+        if elem <> nil then
+        begin
+          bd := getOrdinalBounds(elem);
+          lo64 := bd.lo;
+          if lo64 < 0 then
+            lo64 := 0;
+          hi64 := bd.hi;
+          if hi64 > 255 then
+            hi64 := 255;
+          slot := irCreateTemp(memType(elem), 'in.elem');
+        end;
+        forInLoopBegin(l, i64c(lo64), i64c(hi64));
+        bit := irCast('trunc', irBin('lshr', v, irCast('zext', l.i, irI256, ''), ''),
+                      irI1, 'in.member');
+        member := irNewBlock('forin.member');
+        irCondBr(bit, member, l.latchB, false);
+        irSetInsertPoint(member);
+        if elem <> nil then
+          storeScalar(slot, irCast('trunc', l.i, regType(elem), ''), elem);
+        forInIteration(s, slot);
+        forInLoopEnd(l);
+      end;
+    fikOrdinals:
+      begin
+        bd := getOrdinalBounds(elem);
+        slot := irCreateTemp(memType(elem), 'in.elem');
+        forInLoopBegin(l, i64c(bd.lo), i64c(bd.hi));
+        storeScalar(slot, irCast('trunc', l.i, regType(elem), ''), elem);
+        forInIteration(s, slot);
+        forInLoopEnd(l);
+      end;
+  else
+    ; { (errors were reported) }
+  end;
+end;
+
 procedure visitCase(s: PNode);
 const
   maxExpandedRange = 256;
@@ -1191,43 +1484,13 @@ end;
   raised: state = 1; goto finally }
 procedure emitTryFinally(s: PNode);
 var
-  raisedB, finallyB, endB, reraiseB: PIRBlock;
-  state, f: TV;
-  c: PCleanup;
-  ignored: pointer;
-  sw: PIRInst;
-  k: longint;
+  t: TTryFinally;
 begin
-  raisedB := irNewBlock('finally.raise');
-  finallyB := irNewBlock('finally');
-  endB := irNewBlock('try.end');
-  state := irCreateTemp(irI32, 'finally.state');
-  f := emitProtect(raisedB, 'try.body');
-  c := newCleanup(clFinally, f);
-  c^.state := state;
-  c^.finallyB := finallyB;
-  listAdd(cleanups, c);
+  tryFinallyBegin(t);
   visitStmtList(s^.tryBody);
-  ignored := listPop(cleanups);
-  excCall1('__pas_exc_pop', f);
-  irStore(i32c(0), state);
-  irBr(finallyB);
-
-  irSetInsertPoint(raisedB);
-  irStore(i32c(1), state);
-  irBr(finallyB);
-
-  irSetInsertPoint(finallyB);
+  tryFinallyMiddle(t);
   visitStmtList(s^.partBody);
-  reraiseB := irNewBlock('finally.reraise');
-  sw := irSwitch(irLoad(irI32, state, 'state'), endB);
-  irAddCase(sw, i32c(1), reraiseB);
-  for k := 0 to c^.exits.count - 1 do
-    irAddCase(sw, i32c(2 + k), PIRBlock(listGet(c^.exits, k)));
-  irSetInsertPoint(reraiseB);
-  excCall1('__pas_reraise', f);
-  irUnreachable;
-  irSetInsertPoint(endB);
+  tryFinallyEnd(t);
 end;
 
 procedure visitRaise(s: PNode);
@@ -1263,6 +1526,7 @@ begin
     nkProcCall: visitProcCall(s);
     nkIndirectCallStmt: ignored := visitExpr(s^.calleeExpr);
     nkIf: visitIf(s);
+    nkForIn: visitForIn(s);
     nkWhile: visitWhile(s);
     nkRepeat: visitRepeat(s);
     nkFor: visitFor(s);

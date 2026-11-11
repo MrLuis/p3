@@ -1116,6 +1116,16 @@ begin
         visitStmt(s^.forBody);
         indent := indent - 2;
       end;
+    nkForIn:
+      begin
+        line('ForInStmt');
+        loc(s^.b);
+        indent := indent + 2;
+        visitExpr(s^.inVar);
+        visitExpr(s^.inColl);
+        visitStmt(s^.inBody);
+        indent := indent - 2;
+      end;
     nkCase:
       visitCase(s);
     nkTry:

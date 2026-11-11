@@ -2415,6 +2415,293 @@ begin
     listPop(activeFors);
 end;
 
+{ A hidden variable of a for-in loop (code generation binds it), named in
+  scope sc only: its name is no Pascal identifier. }
+function forInVar(const name: string; t: PType; loc: TLoc; sc: PScope): PDecl;
+var
+  id: TIdent;
+  v: PDecl;
+begin
+  id.name := intern(name);
+  id.spelling := id.name;
+  id.loc := loc;
+  v := newDecl(dkVar, id, loc);
+  v^.varKind := vkVariable;
+  v^.varType := t;
+  v^.owner := curRoutine;
+  v^.isUsed := true;
+  scopeInsert(sc, id.name, v);
+  forInVar := v;
+end;
+
+function forInRef(v: PDecl; loc: TLoc): PNode;
+var
+  id: TIdent;
+begin
+  id := v^.ident;
+  id.loc := loc;
+  forInRef := nameRefNode(id);
+end;
+
+{ base.name (name as written in Free Pascal, lower: its canonical form),
+  at loc. }
+function forInMember(base: PNode; const spelling, lower: string; loc: TLoc): PNode;
+var
+  n: PNode;
+begin
+  n := newNode(nkField, loc, loc + length(spelling));
+  n^.base := base;
+  n^.fieldName.name := intern(lower);
+  n^.fieldName.spelling := intern(spelling);
+  n^.fieldName.loc := loc;
+  forInMember := n;
+end;
+
+{ The member name of a class, advanced record or interface, or nil. }
+function findEnumMember(t: PType; const name: string): PDecl;
+var
+  owner: PType;
+begin
+  findEnumMember := nil;
+  if memberTableOf(t) <> nil then
+    t := memberTableOf(t);
+  if t^.kind = tyClass then
+    findEnumMember := findMember(t, intern(name), owner)
+  else if t^.kind = tyInterface then
+    findEnumMember := findInterfaceMethod(t, intern(name));
+end;
+
+{ for inVar in inColl do inBody (Turbo/FPC), as in Free Pascal: the
+  variable takes the elements of an array or string, the members of a set
+  in order, the values of an ordinal type, or the values of an enumerator.
+  Variable := element is an ordinary assignment (inStep). }
+procedure visitForIn(s: PNode);
+var
+  varRef, c: PNode;
+  varTy, ct, elem: PType;
+  usable, isType: boolean;
+  d, elemV: PDecl;
+  cLoc: TLoc;
+  kind: longint;
+  inScope, saved: PScope;
+
+  function makeStep(value: PNode): PNode;
+  var
+    step: PNode;
+  begin
+    step := newNode(nkAssign, varRef^.ref.loc, c^.e);
+    step^.target := nameRefNode(varRef^.ref);
+    step^.assignLoc := s^.inLoc;
+    step^.value := value;
+    cur := inScope;
+    visitAssign(step);
+    cur := saved;
+    makeStep := step;
+  end;
+
+  { through inColl.GetEnumerator: a function without arguments whose result
+    has a function MoveNext: boolean and a property Current; false after
+    an error }
+  function checkEnumerator: boolean;
+  var
+    get, next, current, collV, enumV: PDecl;
+    et: PType;
+    getE, nextE, step: PNode;
+    ok: boolean;
+  begin
+    checkEnumerator := false;
+    get := findEnumMember(ct, 'getenumerator');
+    if (get <> nil) and (get^.kind <> dkRoutine) then
+      get := nil;
+    if (get = nil) or not get^.isFunction or not acceptsArgCount(get^.params, 0) or
+       (get^.resultType = nil) then
+    begin
+      ms('''for ... in'' cannot enumerate a value of type ');
+      maT(ct);
+      ma(': it has no function GetEnumerator without arguments');
+      errR(cLoc, nodeRange(c));
+      exit;
+    end;
+    et := get^.resultType;
+    if isError(et) then
+      exit;
+    next := findEnumMember(et, 'movenext');
+    if (next <> nil) and (next^.kind <> dkRoutine) then
+      next := nil;
+    if (next = nil) or not next^.isFunction or (next^.resultType = nil) or
+       (getBase(next^.resultType)^.kind <> tyBoolean) or
+       not acceptsArgCount(next^.params, 0) then
+    begin
+      ms('enumerator ');
+      maT(et);
+      ma(' has no function MoveNext: boolean without arguments');
+      errR(cLoc, nodeRange(c));
+      noteDeclaredHere(get);
+      exit;
+    end;
+    current := findEnumMember(et, 'current');
+    if (current <> nil) and (current^.kind <> dkProperty) then
+      current := nil;
+    if (current = nil) or (current^.propParams.count > 0) then
+    begin
+      ms('enumerator ');
+      maT(et);
+      ma(' has no property Current');
+      errR(cLoc, nodeRange(c));
+      noteDeclaredHere(get);
+      exit;
+    end;
+
+    collV := forInVar('in.coll', ct, s^.inLoc, inScope);
+    enumV := forInVar('in.enum', et, s^.inLoc, inScope);
+    cur := inScope;
+    getE := forInMember(forInRef(collV, cLoc), 'GetEnumerator', 'getenumerator', cLoc);
+    nextE := forInMember(forInRef(enumV, cLoc), 'MoveNext', 'movenext', cLoc);
+    ok := not isError(check(getE));
+    if ok then
+      ok := not isError(check(nextE));
+    cur := saved;
+    if not ok then
+      exit;
+    step := nil;
+    if usable then
+      step := makeStep(forInMember(forInRef(enumV, cLoc), 'Current', 'current', cLoc));
+    s^.inKind := fikEnumerator;
+    s^.inCollVar := collV;
+    s^.inEnumVar := enumV;
+    s^.inGetEnum := getE;
+    s^.inMoveNext := nextE;
+    s^.inStep := step;
+    if et^.kind = tyClass then
+      markHasTry; { freed in a finally part }
+    checkEnumerator := true;
+  end;
+
+begin
+  directSequence := nil;
+  varRef := s^.inVar;
+  varTy := errorType;
+  usable := false;
+  d := lookup(varRef^.ref.name);
+  if d <> nil then
+  begin
+    varRef^.refDecl := d;
+    d^.isUsed := true;
+    if d^.kind <> dkVar then
+    begin
+      ms('''for'' loop control variable must be a variable, but ''');
+      maN(varRef^.ref.spelling);
+      ma(''' is a ' + kindName(d));
+      errR(varRef^.ref.loc, identRange(varRef^.ref));
+      noteDeclaredHere(d);
+    end
+    else if (d^.varType <> nil) and not isError(d^.varType) then
+    begin
+      varTy := d^.varType;
+      usable := not checkNotForControlVar(varRef);
+    end;
+  end
+  else
+    diagUndeclared(varRef^.ref);
+  varRef^.typ := varTy;
+
+  c := s^.inColl;
+  cLoc := c^.b;
+  ct := checkTypeOrValue(c);
+  isType := (c^.kind = nkNameRef) and (c^.refDecl <> nil) and
+            (c^.refDecl^.kind = dkType);
+  kind := fikInvalid;
+  elem := nil;
+  if isError(ct) then
+  else if isType then
+  begin
+    if isOrdinal(ct) then
+    begin
+      kind := fikOrdinals;
+      elem := ct;
+    end
+    else
+    begin
+      ms('''for ... in'' over a type needs an ordinal type, not ');
+      maT(ct);
+      errR(cLoc, nodeRange(c));
+    end;
+  end
+  else if ct^.kind = tyArray then
+  begin
+    kind := fikArray;
+    elem := ct^.elementType;
+  end
+  else if ct^.kind = tyOpenArray then
+  begin
+    kind := fikOpenArray;
+    elem := ct^.openElement;
+  end
+  else if ct^.kind = tyDynArray then
+  begin
+    kind := fikDynArray;
+    elem := ct^.dynElement;
+    markUsesManaged; { the array is held during the loop }
+  end
+  else if ct^.kind = tyAnsiString then
+  begin
+    kind := fikAnsiString;
+    elem := tyCharT;
+    markUsesManaged; { the string is held during the loop }
+  end
+  else if ct^.kind = tyShortString then
+  begin
+    kind := fikShortString;
+    elem := tyCharT;
+  end
+  else if ct^.kind = tyStringLit then
+  begin
+    kind := fikStringConst;
+    elem := tyCharT;
+  end
+  else if ct^.kind = tySet then
+  begin
+    kind := fikSet;
+    elem := ct^.setElement; { nil for []: no elements }
+  end
+  else if (ct^.kind = tyClass) or (ct^.kind = tyInterface) or
+          (memberTableOf(ct) <> nil) then
+    kind := fikEnumerator;
+  if (kind = fikInvalid) and not isError(ct) and not isType then
+  begin
+    ms('''for ... in'' cannot enumerate a value of type ');
+    maT(ct);
+    ma(' (an array, string, set, ordinal type, or an object or record with ');
+    ma('a GetEnumerator method)');
+    errR(cLoc, nodeRange(c));
+  end;
+
+  saved := cur;
+  inScope := newScope(saved);
+  if kind = fikEnumerator then
+    checkEnumerator
+  else if kind <> fikInvalid then
+  begin
+    elemV := nil;
+    if elem <> nil then
+      elemV := forInVar('in.elem', elem, s^.inLoc, inScope);
+    s^.inKind := kind;
+    s^.inElemType := elem;
+    s^.inElemVar := elemV;
+    s^.inStep := nil;
+    if usable and (elem <> nil) then
+      s^.inStep := makeStep(forInRef(elemV, cLoc));
+  end;
+
+  if usable then
+    listAdd(activeFors, s);
+  loopDepth := loopDepth + 1;
+  visitStmt(s^.inBody);
+  loopDepth := loopDepth - 1;
+  if usable then
+    listPop(activeFors);
+end;
+
 procedure visitCase(s: PNode);
 var
   selTy, labelTy: PType;
@@ -2647,6 +2934,7 @@ begin
         checkCondition(s^.untilCond, 'until');
       end;
     nkFor: visitFor(s);
+    nkForIn: visitForIn(s);
     nkCase: visitCase(s);
     nkWith: visitWith(s);
     nkTry: visitTry(s);

@@ -1,0 +1,22 @@
+; for ... in: the control variable (a variable, not assigned in the loop),
+; what can be enumerated, and the enumerator protocol (GetEnumerator without
+; arguments, MoveNext: boolean, property Current).
+; RUN: not %pcc --mode=objfpc -ferror-limit=0 -c %S/Inputs/forin/errors.pas -o %t.o 2>&1 | FileCheck %s
+; CHECK: errors.pas:26:17: error: cannot assign to 'i' inside a 'for' loop that it controls
+; CHECK: errors.pas:26:3: note: 'for' loop is here
+; CHECK: errors.pas:27:9: error: assigning to 'string' from incompatible type 'integer'
+; CHECK: errors.pas:28:12: error: 'for ... in' cannot enumerate a value of type 'integer' (an array, string, set, ordinal type, or an object or record with a GetEnumerator method)
+; CHECK: errors.pas:29:12: error: 'for ... in' cannot enumerate a value of type 'TPlain'
+; CHECK: errors.pas:30:12: error: 'for ... in' cannot enumerate a value of type 'TNoEnum': it has no function GetEnumerator without arguments
+; CHECK: errors.pas:31:12: error: 'for ... in' cannot enumerate a value of type 'TBadGet': it has no function GetEnumerator without arguments
+; CHECK: errors.pas:32:12: error: enumerator 'TNoMove' has no function MoveNext: boolean without arguments
+; CHECK: errors.pas:9:22: note: 'GetEnumerator' declared here
+; CHECK: errors.pas:33:12: error: enumerator 'TNoCur' has no property Current
+; CHECK: errors.pas:34:7: error: 'for' loop control variable must be a variable, but 'red' is a constant
+; CHECK: errors.pas:35:12: error: 'for ... in' over a type needs an ordinal type, not 'TColors'
+; CHECK: errors.pas:36:7: error: use of undeclared identifier 'nosuch'
+; CHECK: errors.pas:37:21: error: cannot assign to 'i' inside a 'for' loop that it controls
+; CHECK-NOT: error:
+
+; RUN: not %pcc --mode=iso -c %S/Inputs/forin/iso.pas -o %t.o 2>&1 | FileCheck --check-prefix=ISO %s
+; ISO: iso.pas:3:13: error: 'for ... in' is a Turbo/Free Pascal extension; use --mode=tp or --mode=objfpc

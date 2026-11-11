@@ -1,0 +1,50 @@
+arrays
+1 2 3 
+7 8 9 
+1000000000 2000000000 3000000000 
+7.0 8.0 9.0 
+4 5 6 | 3
+| 0
+x/yy/zzz/
+ann bob cy 
+12 34 
+1:first 2:second 
+empty array
+strings
+x.y.z.
+short
+lit
+empty string
+sets and types
+02
+13
+0123
+2345
+2345
+1 5 200 
+FALSE TRUE 
+abcdx
+enumerators
+10 20 30   (enumerator freed)
+done
+10 30   (enumerator freed)
+done
+WORD
+  (enumerator freed)
+20
+10 20   (enumerator freed)
+done
+  (bag released)
+changes in the loop
+7 8 9 1
+abcz
+1 2 99 
+02
+break and exceptions
+10  (enumerator freed)
+
+abc
+  (enumerator freed)
+caught boom
+1a 1b 2a 2b 99a 99b 
+control variable after the loop: 99
