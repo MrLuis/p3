@@ -3297,6 +3297,14 @@ class Checker : public StmtVisitor<Checker>,
         noteDeclaredHere(M);
       }
     }
+    if (SourceLocation SL = R->getStaticDirectiveLoc(); SL.isValid()) {
+      if (!R->isClassMethod() || R->getMethodKind() != MethodKind::Method)
+        Diags.error(SL, "'static' is only allowed on class methods");
+      else if (!M->isStatic()) {
+        Diags.error(SL, "'" + QName + "' was not declared 'static'");
+        noteDeclaredHere(M);
+      }
+    }
     if (R->isCDecl() != M->isCDecl()) {
       Diags.error(Id.Loc,
                   "calling convention of '" + QName + "' is " +

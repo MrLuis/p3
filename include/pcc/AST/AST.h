@@ -1543,6 +1543,7 @@ class RoutineDecl final : public Decl {
   RoutineDecl *Impl = nullptr;      ///< set by Sema: a method's implementation
   int VMTIndex = -1;                ///< set by Sema: slot of a virtual method
   TObjectMethod Builtin = TObjectMethod::None;
+  SourceLocation StaticDirectiveLoc; ///< see getStaticDirectiveLoc
 
 public:
   RoutineDecl(SourceLocation Loc, Identifier Name, bool IsFunction,
@@ -1616,6 +1617,10 @@ public:
   /// LLVM to inline the routine (inlinehint).
   bool isInline() const { return Inline; }
   void setInline() { Inline = true; }
+  /// A routine or method implementation's `static` directive (Free Pascal:
+  /// repeats the declaration's; ignored on plain routines); invalid if none.
+  SourceLocation getStaticDirectiveLoc() const { return StaticDirectiveLoc; }
+  void setStaticDirectiveLoc(SourceLocation L) { StaticDirectiveLoc = L; }
   CallConv getCallConv() const { return CC; }
   void setCallConv(CallConv C) { CC = C; }
   /// Whether it is called as 'cdecl' (written, or inherited by an override).

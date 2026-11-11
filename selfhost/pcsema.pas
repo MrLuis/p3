@@ -4702,6 +4702,22 @@ begin
       noteDeclaredHere(m);
     end;
   end;
+  if r^.staticDirLoc <> noLoc then
+  begin
+    if not r^.isClassMethod or (r^.methodKind <> mtMethod) then
+    begin
+      ms('''static'' is only allowed on class methods');
+      err(r^.staticDirLoc);
+    end
+    else if not m^.isStatic then
+    begin
+      ms('''');
+      maQualified(c, m^.ident);
+      ma(''' was not declared ''static''');
+      err(r^.staticDirLoc);
+      noteDeclaredHere(m);
+    end;
+  end;
   if isCDecl(r) <> isCDecl(m) then
   begin
     ms('calling convention of ''');

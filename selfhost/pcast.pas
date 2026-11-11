@@ -471,6 +471,10 @@ type
                   vmtIndex: longint; objMethod: TObjMethod;
                   { an advanced record's class method or operator: no Self }
                   isStatic: boolean;
+                  { a routine or method implementation's static directive
+                    (Free Pascal: repeats the declaration's; ignored on
+                    plain routines); 0 if none }
+                  staticDirLoc: TLoc;
                   { the inline directive (with $inline on): code generation
                     asks LLVM to inline the routine (inlinehint) }
                   isInline: boolean;

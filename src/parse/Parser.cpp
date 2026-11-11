@@ -893,7 +893,7 @@ RoutineDecl *Parser::parseRoutineDecl(bool HeadingOnly) {
   // objfpc: overload;
   bool IsExternal = false, Overload = false, Inline = false, VarArgs = false;
   CallConv CC = CallConv::Default;
-  SourceLocation InlineLoc, VarArgsLoc;
+  SourceLocation InlineLoc, VarArgsLoc, StaticLoc;
   llvm::StringRef ExternalName, LibraryName;
   Expr *LibraryExpr = nullptr, *NameExpr = nullptr;
   Hints H;
@@ -913,6 +913,13 @@ RoutineDecl *Parser::parseRoutineDecl(bool HeadingOnly) {
     if (isIdentifierNamed("rtlproc")) { // Free Pascal's RTL marker: no effect
       consumeToken();
       expect(tok::semi, "after 'rtlproc'");
+      continue;
+    }
+    // static: a class method's implementation repeating its declaration's
+    // (Free Pascal; Sema checks it), or no effect on a plain routine
+    if (isIdentifierNamed("static") && peekToken().is(tok::semi)) {
+      StaticLoc = consumeToken();
+      expect(tok::semi, "after 'static'");
       continue;
     }
     if (isIdentifierNamed("varargs")) {
@@ -986,6 +993,7 @@ RoutineDecl *Parser::parseRoutineDecl(bool HeadingOnly) {
     if (R) {
       R->setCallConv(CC);
       R->addHints(H.Flags, H.Message);
+      R->setStaticDirectiveLoc(StaticLoc);
     }
     return R;
   };

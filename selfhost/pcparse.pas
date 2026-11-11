@@ -1154,7 +1154,7 @@ var
   ccw: string;
   isFunction, hasParamList, isExternal, overloadDir, inlineDir: boolean;
   isVarArgs: boolean;
-  inlineLoc, forwardLoc, varArgsLoc: TLoc;
+  inlineLoc, forwardLoc, varArgsLoc, staticLoc: TLoc;
   libraryName: PName;
   libraryExpr, nameExpr: PNode;
   kind: string;
@@ -1256,6 +1256,7 @@ begin
   overloadDir := false;
   inlineDir := false;
   inlineLoc := noLoc;
+  staticLoc := noLoc;
   externalName := nil;
   hf := 0;
   hm := nil;
@@ -1280,6 +1281,14 @@ begin
     begin
       consumeToken;
       expect(tkSemi, 'after ''rtlproc''');
+      continue;
+    end;
+    { static: a class method's implementation repeating its declaration's
+      (Free Pascal; Sema checks it), or no effect on a plain routine }
+    if isIdentifierNamed('static') and (peekKind = tkSemi) then
+    begin
+      staticLoc := consumeToken;
+      expect(tkSemi, 'after ''static''');
       continue;
     end;
     if isIdentifierNamed('varargs') then
@@ -1360,6 +1369,7 @@ begin
       r^.hasOverloadDirective := overloadDir;
       r^.isInline := inlineDir;
       r^.callConv := cc;
+      r^.staticDirLoc := staticLoc;
       addHints(r, hf, hm);
       parseRoutineDecl := r;
     end;
@@ -1379,6 +1389,7 @@ begin
       r^.hasOverloadDirective := overloadDir;
       r^.isInline := inlineDir;
       r^.callConv := cc;
+      r^.staticDirLoc := staticLoc;
       addHints(r, hf, hm);
       parseRoutineDecl := r;
     end;
@@ -1406,6 +1417,7 @@ begin
     r^.hasOverloadDirective := overloadDir;
     r^.isInline := inlineDir;
     r^.callConv := cc;
+    r^.staticDirLoc := staticLoc;
     addHints(r, hf, hm);
     parseRoutineDecl := r;
   end;

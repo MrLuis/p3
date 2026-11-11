@@ -113,7 +113,9 @@ as are a failed `as` and calling an abstract method.
   class; may be virtual; called through a class name, a class reference
   or an object), `static` class methods (no Self, not virtual: they use
   class variables and other static methods, and `@TFoo.M` is an ordinary
-  procedural value), `class var` sections (one variable shared by the
+  procedural value; the implementation may repeat `static`, as in
+  `class function TH.Parse(const s: string): T; inline; static;`),
+  `class var` sections (one variable shared by the
   class and its descendants).
 - **Nested declarations:** `const` and `type` sections in a class or an
   advanced record, in any visibility section, as in Free Pascal: constants
