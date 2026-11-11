@@ -327,7 +327,7 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
         continue;
       }
       auto *R = llvm::dyn_cast<RoutineDecl>(D);
-      if (!llvm::isa<VarDecl>(D) && !(R && !R->isExternal()))
+      if (!llvm::isa<VarDecl>(D) && !(R && !R->isExternal() && !R->isGeneric()))
         continue;
       ExportNames[D] = ("pas." + U.getName().Name + "$" + D->getName().Name).str() +
                        (R ? overloadSuffix(R) : std::string());
@@ -2215,8 +2215,9 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
         declareRoutine(R->getCanonical()); // a method's implementation
         continue;
       }
-      if (!R || R->isRedeclaration())
-        continue; // the forward declaration is the canonical node
+      if (!R || R->isRedeclaration() || R->isGeneric())
+        continue; // the forward declaration is the canonical node; a
+                  // generic is compiled as its specializations
       if (R->isExternal()) {
         declareExternal(R);
         continue;

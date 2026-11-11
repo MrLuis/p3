@@ -1,0 +1,29 @@
+ProgramDecl 'generics' <1:1>
+  FunctionDecl 'id' <2:9>
+    ParamDecl 'x' : 'T' <2:24>
+    CompoundStmt <3:1>
+      AssignStmt <4:3>
+        NameRefExpr 'result' <4:3>
+        NameRefExpr 'x' <4:13>
+      EmptyStmt <5:1>
+  FunctionDecl 'id<integer>' : integer <2:9>
+    ParamDecl 'x' : integer <2:24>
+    CompoundStmt <3:1>
+      AssignStmt <4:3>
+        NameRefExpr 'result' function result : integer <4:3>
+        NameRefExpr 'x' parameter : integer <4:13>
+      EmptyStmt <5:1>
+  FunctionDecl 'id<char>' : char <2:9>
+    ParamDecl 'x' : char <2:24>
+    CompoundStmt <3:1>
+      AssignStmt <4:3>
+        NameRefExpr 'result' function result : char <4:3>
+        NameRefExpr 'x' parameter : char <4:13>
+      EmptyStmt <5:1>
+  CompoundStmt <6:1>
+    ProcCallStmt 'writeln' <7:3>
+      CallExpr 'id' : integer <7:11>
+        IntegerLiteralExpr 1 : integer <7:34>
+    ProcCallStmt 'id' <8:3>
+      CharLiteralExpr "c" : char <8:23>
+    EmptyStmt <9:1>

@@ -24,6 +24,7 @@
 #include "llvm/ADT/StringSet.h"
 
 #include <bitset>
+#include <map>
 #include <cmath>
 #include <memory>
 #include <optional>
@@ -93,6 +94,21 @@ class Checker : public StmtVisitor<Checker>,
   /// While the members of a class or advanced record are declared: its
   /// name, which prefixes those of the types it declares (TOuter.TInner).
   llvm::StringRef NestPrefix;
+
+  /// Generic routines (objfpc): parses a generic's declaration again; the
+  /// specializations made (by generic and type arguments); those whose
+  /// bodies are to be checked (in their scope, for a use); those of the
+  /// module being checked, added to its block for code generation.
+  Sema::ReparseFn Reparse;
+  std::map<std::pair<RoutineDecl *, std::vector<Type *>>, RoutineDecl *> Instances;
+  struct PendingInstance {
+    RoutineDecl *R;
+    Scope *S;
+    SourceLocation Use;
+  };
+  std::vector<PendingInstance> PendingInstances;
+  std::vector<std::unique_ptr<Scope>> InstanceScopes;
+  llvm::SmallVector<Decl *, 4> ModuleInstances;
   /// `class of C` for each class C: the type of C used as a value, and of
   /// Self in class methods (`TFooClass = class of TFoo` is a type of its own).
   llvm::DenseMap<ClassType *, ClassRefType *> ClassRefs;
@@ -543,7 +559,9 @@ class Checker : public StmtVisitor<Checker>,
       unsigned ScopeBest = Best;
       std::string ScopeResult;
       S->forEachName([&](llvm::StringRef Candidate) {
-        if (Candidate.starts_with("#") || Candidate == Name)
+        // (labels; generic routines' keys, F<1>)
+        if (Candidate.starts_with("#") || Candidate.ends_with(">") ||
+            Candidate == Name)
           return;
         unsigned D = Name.edit_distance(Candidate, true, Best - 1);
         if (D < ScopeBest || (D == ScopeBest && D < Best && Candidate < ScopeResult)) {
@@ -3356,8 +3374,178 @@ class Checker : public StmtVisitor<Checker>,
     return P->isOutParam() ? "out" : "var";
   }
 
+  /// The scope key of a generic routine: its name and type parameter count
+  /// (F<1>), so it does not clash with routines named F.
+  llvm::StringRef genericKey(llvm::StringRef Name, size_t N) {
+    return Ctx.getStrings().intern((Name + "<" + llvm::Twine(N) + ">").str());
+  }
+
+  /// generic function F<T>...: declared (under its key), not checked.
+  void declareGeneric(RoutineDecl *R) {
+    const Identifier &Id = R->getName();
+    if (CurRoutine) {
+      Diags.error(Id.Loc,
+                  "generic routines must be declared at program or unit level",
+                  {Id.getRange()});
+      return;
+    }
+    auto Params = R->getTypeParams();
+    for (size_t I = 0; I < Params.size(); ++I)
+      for (size_t J = 0; J < I; ++J)
+        if (Params[I].Name == Params[J].Name)
+          Diags.error(Params[I].Loc,
+                      "duplicate type parameter '" + Params[I].Spelling + "'",
+                      {Params[I].getRange()});
+    llvm::StringRef Key = genericKey(Id.Name, Params.size());
+    auto *Prev = llvm::dyn_cast_or_null<RoutineDecl>(Cur->lookupOwn(Key));
+    if (!Prev && CurUnitInterface)
+      Prev = llvm::dyn_cast_or_null<RoutineDecl>(CurUnitInterface->lookupOwn(Key));
+    R->setGenericScope(Cur);
+    Used.insert(R);
+    if (Prev && !Prev->getBody() && Prev->getGenericDefinition() == Prev &&
+        R->getBody()) { // the definition of a forward or interface heading
+      Prev->setGenericDefinition(R);
+      Prev->setGenericScope(Cur);
+      return;
+    }
+    if (Prev) {
+      Diags.error(Id.Loc,
+                  "redefinition of generic " + llvm::Twine(R->getKindName()) +
+                      " '" + Id.Spelling + "'",
+                  {Id.getRange()});
+      Diags.note(Prev->getLocation(), "previous definition is here");
+      return;
+    }
+    Cur->insert(Key, R);
+  }
+
+  /// A forward or interface heading without its definition (yet).
+  static bool isUndefinedHeading(RoutineDecl *R) {
+    return !R->getBody() &&
+           !(R->isGeneric() && R->getGenericDefinition()->getBody());
+  }
+
+  /// specialize Name<Args>: the routine for those type arguments, made
+  /// from the generic's declaration on first use (its heading resolved now,
+  /// its body checked later); null after a diagnostic.
+  RoutineDecl *specialize(const Identifier &Name, llvm::ArrayRef<TypeSpec *> Args) {
+    llvm::SmallVector<Type *, 2> Types;
+    for (TypeSpec *TS : Args) {
+      Type *T = resolveType(TS);
+      if (T->isError())
+        return nullptr;
+      Types.push_back(T);
+    }
+    auto *G = llvm::dyn_cast_or_null<RoutineDecl>(
+        Cur->lookup(genericKey(Name.Name, Args.size())));
+    bool OtherGeneric = false; // F with another number of type parameters
+    for (size_t N = 1; N <= 16 && !G; ++N)
+      OtherGeneric |= Cur->lookup(genericKey(Name.Name, N)) != nullptr;
+    if (!G) {
+      if (Cur->lookup(Name.Name) || OtherGeneric)
+        Diags.error(Name.Loc,
+                    "'" + Name.Spelling + "' is not a generic routine with " +
+                        llvm::Twine(Args.size()) + " type parameter" +
+                        (Args.size() == 1 ? "" : "s"),
+                    {Name.getRange()});
+      else
+        diagUndeclared(Name);
+      return nullptr;
+    }
+    Used.insert(G);
+    RoutineDecl *Def = G->getGenericDefinition();
+    if (!Def->getBody()) {
+      Diags.error(Name.Loc,
+                  "generic " + llvm::Twine(G->getKindName()) + " '" +
+                      Name.Spelling + "' is used before its definition",
+                  {Name.getRange()});
+      Diags.note(G->getLocation(), "declared here");
+      return nullptr;
+    }
+    auto Key = std::make_pair(G, std::vector<Type *>(Types.begin(), Types.end()));
+    if (auto It = Instances.find(Key); It != Instances.end())
+      return It->second;
+    RoutineDecl *I = Reparse ? Reparse(Def) : nullptr;
+    if (!I) {
+      if (!Reparse)
+        Diags.error(Name.Loc, "generic routines cannot be specialized here",
+                    {Name.getRange()});
+      return nullptr;
+    }
+    // F<integer, string>
+    std::string N = (Def->getName().Name + "<").str();
+    std::string S = (Def->getName().Spelling + "<").str();
+    for (size_t K = 0; K < Types.size(); ++K) {
+      if (K) {
+        N += ",";
+        S += ", ";
+      }
+      N += llvm::StringRef(Types[K]->getName()).lower();
+      S += Types[K]->getName();
+    }
+    N += ">";
+    S += ">";
+    I->setName(Identifier{Ctx.getStrings().intern(N), Ctx.getStrings().intern(S),
+                          Def->getName().Loc});
+    Instances[Key] = I;
+    // Its scope: the generic's, where the type parameters name the types.
+    auto Sc = std::make_unique<Scope>(static_cast<Scope *>(Def->getGenericScope()));
+    for (size_t K = 0; K < Types.size(); ++K) {
+      const Identifier &P = Def->getTypeParams()[K];
+      auto *TD = Ctx.create<TypeDecl>(P.Loc, P, Types[K]);
+      Used.insert(TD);
+      Sc->insert(P.Name, TD);
+    }
+    Scope *InstScope = Sc.get();
+    InstanceScopes.push_back(std::move(Sc));
+    Scope *SavedScope = Cur;
+    RoutineDecl *SavedRoutine = CurRoutine;
+    llvm::StringRef SavedPrefix = NestPrefix;
+    Cur = InstScope;
+    CurRoutine = nullptr;
+    NestPrefix = {};
+    unsigned Errors = Diags.getNumErrors();
+    I->setParent(nullptr);
+    resolveSignature(I);
+    if (Diags.getNumErrors() > Errors)
+      Diags.note(Name.Loc, "in the specialization '" + S + "' requested here");
+    Cur = SavedScope;
+    CurRoutine = SavedRoutine;
+    NestPrefix = SavedPrefix;
+    Used.insert(I);
+    PendingInstances.push_back({I, InstScope, Name.Loc});
+    ModuleInstances.push_back(I);
+    return I;
+  }
+
+  /// Checks the bodies of the specializations made so far (and those they
+  /// make), then adds the module's to its block.
+  void checkInstances(Block &ModuleBlock) {
+    for (size_t K = 0; K < PendingInstances.size() && !Diags.shouldStop(); ++K) {
+      PendingInstance P = PendingInstances[K];
+      Scope *SavedScope = Cur;
+      Cur = P.S;
+      unsigned Errors = Diags.getNumErrors();
+      checkRoutineBody(P.R);
+      if (Diags.getNumErrors() > Errors)
+        Diags.note(P.Use, "in the specialization '" + P.R->getName().Spelling +
+                              "' requested here");
+      Cur = SavedScope;
+    }
+    PendingInstances.clear();
+    if (ModuleInstances.empty())
+      return;
+    llvm::SmallVector<Decl *, 16> All(ModuleBlock.getDecls().begin(),
+                                      ModuleBlock.getDecls().end());
+    All.append(ModuleInstances.begin(), ModuleInstances.end());
+    ModuleBlock.setDecls(Ctx.copyArray<Decl *>(All));
+    ModuleInstances.clear();
+  }
+
   void declareRoutine(RoutineDecl *R) {
     R->setParent(CurRoutine);
+    if (R->isGeneric())
+      return declareGeneric(R);
     if (R->getClassName().isValid())
       return declareMethodBody(R);
     const Identifier &Id = R->getName();
@@ -4092,7 +4280,7 @@ class Checker : public StmtVisitor<Checker>,
     // same block.
     for (Decl *D : B.getDecls())
       if (auto *R = llvm::dyn_cast<RoutineDecl>(D);
-          R && R->isForward() && !R->getBody())
+          R && R->isForward() && isUndefinedHeading(R))
         Diags.error(R->getName().Loc,
                     "'" + R->getName().Spelling +
                         "' is declared forward but never defined",
@@ -5414,8 +5602,9 @@ class Checker : public StmtVisitor<Checker>,
   }
 
 public:
-  Checker(ASTContext &Ctx, DiagnosticsEngine &Diags, const LangOptions &LO)
-      : Ctx(Ctx), Diags(Diags), LangOpts(LO) {
+  Checker(ASTContext &Ctx, DiagnosticsEngine &Diags, const LangOptions &LO,
+          Sema::ReparseFn Reparse = nullptr)
+      : Ctx(Ctx), Diags(Diags), LangOpts(LO), Reparse(std::move(Reparse)) {
     declareStandardScope();
   }
 
@@ -5439,8 +5628,19 @@ public:
     if (InterfaceOnly) {
       for (Decl *D : U.getInterface()->getDecls())
         Used.insert(D);
+      // The definitions of its generic routines, which the units and the
+      // program using it specialize; they see the unit's interface only.
+      auto Impl = std::make_unique<Scope>(Iface.get());
+      importUnits(*Impl, U.getImplementationUses());
+      Cur = Impl.get();
+      CurUnitInterface = Iface.get();
+      for (Decl *D : U.getImplementation()->getDecls())
+        if (auto *R = llvm::dyn_cast<RoutineDecl>(D); R && R->isGeneric())
+          declareRoutine(R);
+      CurUnitInterface = nullptr;
       UnitInterfaces[U.getName().Name] = Iface.get();
       UnitScopes.push_back(std::move(Iface));
+      UnitScopes.push_back(std::move(Impl));
       Cur = &Standard;
       return;
     }
@@ -5452,7 +5652,7 @@ public:
     declareAll(*U.getImplementation());
     for (Decl *D : U.getInterface()->getDecls())
       if (auto *R = llvm::dyn_cast<RoutineDecl>(D);
-          R && !R->getBody() && !R->isExternal())
+          R && isUndefinedHeading(R) && !R->isExternal())
         Diags.error(R->getName().Loc,
                     "'" + R->getName().Spelling +
                         "' is declared in the interface of unit '" +
@@ -5460,6 +5660,7 @@ public:
                     {R->getName().getRange()});
     checkMethodsImplemented(*U.getInterface());
     finishBlock(*U.getImplementation(), /*WarnUnused=*/true);
+    checkInstances(*U.getImplementation());
     CurUnitInterface = nullptr;
 
     // Interface variables may be used by other units: never "unused".
@@ -5481,6 +5682,7 @@ public:
     importUnits(ProgramScope, P.getUses());
     Cur = &ProgramScope;
     checkBlock(*P.getBlock());
+    checkInstances(*P.getBlock());
     checkProgramParamDecls(P);
     checkGotos();
     Cur = &Standard;
@@ -5561,9 +5763,15 @@ public:
   void visitProcCallStmt(ProcCallStmt *S) {
     const Identifier &Callee = S->getCallee();
     WithContext *W = nullptr;
-    Decl *D = Cur->lookup(Callee.Name, &W);
+    Decl *D = S->getTypeArgs().empty() ? Cur->lookup(Callee.Name, &W)
+                                       : specialize(Callee, S->getTypeArgs());
     if (!D) {
-      diagUndeclared(Callee);
+      if (S->getTypeArgs().empty()) {
+        diagUndeclared(Callee);
+        return;
+      }
+      for (Expr *Arg : S->getArgs())
+        check(Arg);
       return;
     }
     if (auto *R = llvm::dyn_cast<RoutineDecl>(D)) { // objfpc: overloads
@@ -6675,9 +6883,11 @@ public:
   Type *visitCallExpr(CallExpr *E) {
     const Identifier &Callee = E->getCallee();
     WithContext *W = nullptr;
-    Decl *D = Cur->lookup(Callee.Name, &W);
+    Decl *D = E->getTypeArgs().empty() ? Cur->lookup(Callee.Name, &W)
+                                       : specialize(Callee, E->getTypeArgs());
     if (!D) {
-      diagUndeclared(Callee);
+      if (E->getTypeArgs().empty())
+        diagUndeclared(Callee);
       for (Expr *Arg : E->getArgs())
         check(Arg);
       return errorType();
@@ -7718,13 +7928,13 @@ public:
 bool Sema::check(ProgramDecl &P, llvm::ArrayRef<UnitDecl *> Units,
                  bool SeparateUnits) {
   unsigned ErrorsBefore = Diags.getNumErrors();
-  Checker(Ctx, Diags, LangOpts).checkProgram(P, Units, SeparateUnits);
+  Checker(Ctx, Diags, LangOpts, Reparse).checkProgram(P, Units, SeparateUnits);
   return Diags.getNumErrors() == ErrorsBefore && !Diags.shouldStop();
 }
 
 bool Sema::checkUnit(UnitDecl &U, llvm::ArrayRef<UnitDecl *> Deps) {
   unsigned ErrorsBefore = Diags.getNumErrors();
-  Checker C(Ctx, Diags, LangOpts);
+  Checker C(Ctx, Diags, LangOpts, Reparse);
   C.checkSeparateUnit(U, Deps);
   return Diags.getNumErrors() == ErrorsBefore && !Diags.shouldStop();
 }

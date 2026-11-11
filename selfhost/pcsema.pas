@@ -8,7 +8,7 @@ unit pcsema;
 
 interface
 
-uses pcsys, pcutil, pcdiag, pclex, pcast, pctypes, pcscope;
+uses pcsys, pcutil, pcdiag, pclex, pcast, pctypes, pcscope, pcparse;
 
 { Checks the units (dependencies first) and the program. Returns true if
   they are valid. }
@@ -27,6 +27,16 @@ type
   TConstant = record
     ty: PType;
     value: TConstValue;
+  end;
+
+  { a specialization of generic g for types (of PType): r, checked in scope
+    for a use at use }
+  PInstance = ^TInstance;
+  TInstance = record
+    g, r: PDecl;
+    types: TPtrList;
+    scope: PScope;
+    use: TLoc;
   end;
 
   PPendingPointer = ^TPendingPointer;
@@ -104,6 +114,13 @@ var
   { while the members of a class or advanced record are declared: its name,
     which prefixes those of the types it declares (TOuter.TInner) }
   nestPrefix: PName;
+  { generic routines (objfpc): the specializations made (by generic and
+    type arguments); those whose bodies are to be checked (in their scope,
+    for a use); those of the module being checked, added to its block for
+    code generation }
+  instances: TPtrList;        { of PInstance }
+  pendingInstances: TPtrList; { of PInstance }
+  moduleInstances: TPtrList;  { of PDecl }
   { class of C for each class C (by type id): the type of C used as a
     value and of Self in class methods }
   classRefs: TIntMap;
@@ -407,7 +424,10 @@ begin
     for i := 0 to names.count - 1 do
     begin
       cand := PName(listGet(names, i));
-      if ((cand^.len > 0) and (cand^.chars^[0] = '#')) or (cand = name) then
+      { (labels; generic routines' keys, f<1>) }
+      if ((cand^.len > 0) and ((cand^.chars^[0] = '#') or
+                               (cand^.chars^[cand^.len - 1] = '>'))) or
+         (cand = name) then
         continue;
       d := editDistance(name, cand);
       if (d < scopeBest) or
@@ -5046,6 +5066,272 @@ begin
   declareRoutineName := true;
 end;
 
+{ The scope key of a generic routine: its name and type parameter count
+  (f<1>), so it does not clash with routines named f. }
+function genericKey(name: PName; n: longint): PName;
+begin
+  genericKey := intern(nameStr(name) + '<' + intToStr(n) + '>');
+end;
+
+{ generic function F<T>...: declared (under its key), not checked. }
+procedure declareGeneric(r: PDecl);
+var
+  i, j: longint;
+  pi, pj: PIdent;
+  key: PName;
+  prev: PDecl;
+begin
+  if curRoutine <> nil then
+  begin
+    ms('generic routines must be declared at program or unit level');
+    errR(r^.ident.loc, identRange(r^.ident));
+    exit;
+  end;
+  for i := 0 to r^.typeParams.count - 1 do
+    for j := 0 to i - 1 do
+    begin
+      pi := PIdent(listGet(r^.typeParams, i));
+      pj := PIdent(listGet(r^.typeParams, j));
+      if pi^.name = pj^.name then
+      begin
+        ms('duplicate type parameter ''');
+        maN(pi^.spelling);
+        ma('''');
+        errR(pi^.loc, identRange(pi^));
+      end;
+    end;
+  key := genericKey(r^.ident.name, r^.typeParams.count);
+  prev := scopeLookupOwn(cur, key);
+  if (prev = nil) and (curUnitInterface <> nil) then
+    prev := scopeLookupOwn(curUnitInterface, key);
+  if (prev <> nil) and (prev^.kind <> dkRoutine) then
+    prev := nil;
+  r^.genericScope := cur;
+  r^.isUsed := true;
+  if (prev <> nil) and (prev^.body = nil) and (prev^.genericDef = nil) and
+     (r^.body <> nil) then
+  begin
+    { the definition of a forward or interface heading }
+    prev^.genericDef := r;
+    prev^.genericScope := cur;
+    exit;
+  end;
+  if prev <> nil then
+  begin
+    ms('redefinition of generic ' + kindName(r) + ' ''');
+    maN(r^.ident.spelling);
+    ma('''');
+    errR(r^.ident.loc, identRange(r^.ident));
+    ms('previous definition is here');
+    note(prev^.loc);
+    exit;
+  end;
+  scopeInsert(cur, key, r);
+end;
+
+{ The generic declaration with the body: r, or the definition of a forward
+  or interface heading. }
+function genericDefinition(r: PDecl): PDecl;
+begin
+  if r^.genericDef <> nil then
+    genericDefinition := r^.genericDef
+  else
+    genericDefinition := r;
+end;
+
+{ A forward or interface heading without its definition (yet). }
+function isUndefinedHeading(r: PDecl): boolean;
+begin
+  isUndefinedHeading := (r^.body = nil) and
+                        not (r^.isGeneric and (genericDefinition(r)^.body <> nil));
+end;
+
+{ specialize name<args>: the routine for those type arguments, made from
+  the generic's declaration on first use (its heading resolved now, its
+  body checked later); nil after a diagnostic. }
+function specializeGeneric(const name: TIdent; const args: TPtrList): PDecl;
+var
+  types: TPtrList;
+  t: PType;
+  g, def, r, td: PDecl;
+  i, k, errors: longint;
+  inst: PInstance;
+  same, otherGeneric: boolean;
+  nb, sb, tb: TBuf;
+  sc, savedScope: PScope;
+  savedRoutine: PDecl;
+  savedPrefix: PName;
+  p: PIdent;
+  id: TIdent;
+begin
+  specializeGeneric := nil;
+  listInit(types);
+  for i := 0 to args.count - 1 do
+  begin
+    t := resolveType(PTypeSpec(listGet(args, i)), nil);
+    if isError(t) then
+      exit;
+    listAdd(types, t);
+  end;
+  g := lookup(genericKey(name.name, args.count));
+  if (g <> nil) and (g^.kind <> dkRoutine) then
+    g := nil;
+  otherGeneric := false; { f with another number of type parameters }
+  k := 1;
+  while (k <= 16) and (g = nil) do
+  begin
+    if lookup(genericKey(name.name, k)) <> nil then
+      otherGeneric := true;
+    k := k + 1;
+  end;
+  if g = nil then
+  begin
+    if (lookup(name.name) <> nil) or otherGeneric then
+    begin
+      ms('''');
+      maN(name.spelling);
+      ma(''' is not a generic routine with ' + intToStr(args.count) +
+         ' type parameter');
+      if args.count <> 1 then
+        ma('s');
+      errR(name.loc, identRange(name));
+    end
+    else
+      diagUndeclared(name);
+    exit;
+  end;
+  g^.isUsed := true;
+  def := genericDefinition(g);
+  if def^.body = nil then
+  begin
+    ms('generic ' + kindName(g) + ' ''');
+    maN(name.spelling);
+    ma(''' is used before its definition');
+    errR(name.loc, identRange(name));
+    ms('declared here');
+    note(g^.loc);
+    exit;
+  end;
+  for i := 0 to instances.count - 1 do
+  begin
+    inst := PInstance(listGet(instances, i));
+    if (inst^.g = g) and (inst^.types.count = types.count) then
+    begin
+      same := true;
+      for k := 0 to types.count - 1 do
+        if listGet(inst^.types, k) <> listGet(types, k) then
+          same := false;
+      if same then
+        exit(inst^.r);
+    end;
+  end;
+  r := reparseGeneric(def);
+  if r = nil then
+    exit;
+  { F<integer, string> }
+  bufInit(nb);
+  bufInit(sb);
+  bufAddName(nb, def^.ident.name);
+  bufAddChar(nb, '<');
+  bufAddName(sb, def^.ident.spelling);
+  bufAddChar(sb, '<');
+  for k := 0 to types.count - 1 do
+  begin
+    if k > 0 then
+    begin
+      bufAddChar(nb, ',');
+      bufAdd(sb, ', ');
+    end;
+    bufInit(tb);
+    bufAddTypeName(tb, PType(listGet(types, k)));
+    for i := 0 to tb.len - 1 do
+      bufAddChar(nb, lowerChar(bufCharAt(tb, i)));
+    bufAddChars(sb, tb.data, 0, tb.len);
+    bufFree(tb);
+  end;
+  bufAddChar(nb, '>');
+  bufAddChar(sb, '>');
+  id.name := internChars(nb.data, 0, nb.len);
+  id.spelling := internChars(sb.data, 0, sb.len);
+  id.loc := def^.ident.loc;
+  bufFree(nb);
+  bufFree(sb);
+  r^.ident := id;
+  inst := PInstance(arenaAlloc(sizeof(TInstance)));
+  inst^.g := g;
+  inst^.types := types;
+  inst^.r := r;
+  inst^.use := name.loc;
+  listAdd(instances, inst);
+  { its scope: the generic's, where the type parameters name the types }
+  sc := newScope(PScope(def^.genericScope));
+  for k := 0 to types.count - 1 do
+  begin
+    p := PIdent(listGet(def^.typeParams, k));
+    td := newDecl(dkType, p^, p^.loc);
+    td^.declType := PType(listGet(types, k));
+    td^.isUsed := true;
+    scopeInsert(sc, p^.name, td);
+  end;
+  inst^.scope := sc;
+  savedScope := cur;
+  savedRoutine := curRoutine;
+  savedPrefix := nestPrefix;
+  cur := sc;
+  curRoutine := nil;
+  nestPrefix := nil;
+  errors := diagNumErrors;
+  r^.parent := nil;
+  r^.level := 1;
+  resolveSignature(r);
+  if diagNumErrors > errors then
+  begin
+    ms('in the specialization ''');
+    maN(id.spelling);
+    ma(''' requested here');
+    note(name.loc);
+  end;
+  cur := savedScope;
+  curRoutine := savedRoutine;
+  nestPrefix := savedPrefix;
+  r^.isUsed := true;
+  listAdd(pendingInstances, inst);
+  listAdd(moduleInstances, r);
+  specializeGeneric := r;
+end;
+
+{ Checks the bodies of the specializations made so far (and those they
+  make), then adds the module's to its block. }
+procedure checkInstances(b: PBlock);
+var
+  k, errors: longint;
+  inst: PInstance;
+  savedScope: PScope;
+begin
+  k := 0;
+  while (k < pendingInstances.count) and not diagShouldStop do
+  begin
+    inst := PInstance(listGet(pendingInstances, k));
+    savedScope := cur;
+    cur := inst^.scope;
+    errors := diagNumErrors;
+    checkRoutineBody(inst^.r);
+    if diagNumErrors > errors then
+    begin
+      ms('in the specialization ''');
+      maN(inst^.r^.ident.spelling);
+      ma(''' requested here');
+      note(inst^.use);
+    end;
+    cur := savedScope;
+    k := k + 1;
+  end;
+  listClear(pendingInstances);
+  for k := 0 to moduleInstances.count - 1 do
+    listAdd(b^.decls, listGet(moduleInstances, k));
+  listClear(moduleInstances);
+end;
+
 procedure declareRoutine(r: PDecl);
 var
   fwd, p, x, match: PDecl;
@@ -5058,6 +5344,11 @@ begin
     r^.level := curRoutine^.level + 1
   else
     r^.level := 1;
+  if r^.isGeneric then
+  begin
+    declareGeneric(r);
+    exit;
+  end;
   if identValid(r^.methodClassName) then
   begin
     declareMethodBody(r);
@@ -5730,7 +6021,7 @@ begin
   for i := 0 to b^.decls.count - 1 do
   begin
     d := PDecl(listGet(b^.decls, i));
-    if (d^.kind = dkRoutine) and d^.isForward and (d^.body = nil) then
+    if (d^.kind = dkRoutine) and d^.isForward and isUndefinedHeading(d) then
     begin
       ms('''');
       maN(d^.ident.spelling);
@@ -6601,6 +6892,19 @@ begin
       r := PDecl(listGet(u^.iface^.decls, i));
       r^.isUsed := true;
     end;
+    { the definitions of its generic routines, which the units and the
+      program using it specialize; they see the unit's interface only }
+    impl := newScope(iface);
+    importUnits(impl, u^.implUses);
+    cur := impl;
+    curUnitInterface := iface;
+    for i := 0 to u^.impl^.decls.count - 1 do
+    begin
+      r := PDecl(listGet(u^.impl^.decls, i));
+      if (r^.kind = dkRoutine) and r^.isGeneric then
+        declareRoutine(r);
+    end;
+    curUnitInterface := nil;
     mapPut(unitInterfaces, u^.ident.name^.id, iface);
     cur := standard;
     exit;
@@ -6614,7 +6918,7 @@ begin
   for i := 0 to u^.iface^.decls.count - 1 do
   begin
     r := PDecl(listGet(u^.iface^.decls, i));
-    if (r^.kind = dkRoutine) and (r^.body = nil) and not r^.isExternal then
+    if (r^.kind = dkRoutine) and isUndefinedHeading(r) and not r^.isExternal then
     begin
       ms('''');
       maN(r^.ident.spelling);
@@ -6626,6 +6930,7 @@ begin
   end;
   checkMethodsImplemented(u^.iface);
   finishBlock(u^.impl, true);
+  checkInstances(u^.impl);
   curUnitInterface := nil;
   { interface variables may be used by other units: never unused }
   for i := 0 to u^.iface^.decls.count - 1 do
@@ -6661,6 +6966,9 @@ begin
   namedAdvancedRecord := nil;
   constInitWhat := 'typed constant value';
   nestPrefix := nil;
+  listInit(instances);
+  listInit(pendingInstances);
+  listInit(moduleInstances);
   handlerDepth := 0;
   finallyLoopDepth := -1;
   listInit(pendingInterfaces);
@@ -6690,6 +6998,7 @@ begin
   importUnits(programScope, prog^.progUses);
   cur := programScope;
   checkBlock(prog^.progBlock);
+  checkInstances(prog^.progBlock);
   checkProgramParamDecls(prog);
   checkGotos;
   cur := standard;

@@ -2148,8 +2148,9 @@ begin
       declareRoutine(r^.canonical); { a method's implementation }
       continue;
     end;
-    if (r^.kind <> dkRoutine) or (r^.canonical <> nil) then
-      continue; { the forward declaration is the canonical node }
+    if (r^.kind <> dkRoutine) or (r^.canonical <> nil) or r^.isGeneric then
+      continue; { the forward declaration is the canonical node; a generic is
+                  compiled as its specializations }
     if r^.isExternal then
     begin
       declareExternal(r);
@@ -2638,7 +2639,8 @@ begin
       d^.cgImported := imported;
       continue;
     end;
-    if (d^.kind = dkVar) or ((d^.kind = dkRoutine) and not d^.isExternal) then
+    if (d^.kind = dkVar) or ((d^.kind = dkRoutine) and not d^.isExternal and
+                             not d^.isGeneric) then
     begin
       d^.cgExport := intern('pas.' + nm(u^.ident.name) + '$' + nm(d^.ident.name) +
                             overloadSuffix(d));

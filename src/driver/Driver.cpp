@@ -209,9 +209,12 @@ bool Driver::runPipeline(FileID FID) {
 
   // --- M4: semantic analysis (skipped after syntax errors) ---------------
   bool SyntaxOK = !Diags.hasErrors();
+  auto Reparse = [&](const RoutineDecl *G) {
+    return Parser(Lex, Diags, Ctx).reparseGeneric(G);
+  };
   bool SemaOK = SyntaxOK && !Diags.hasErrors() &&
-                Sema(Ctx, Diags, LangOpts).check(*Program, Units,
-                                                 Opts.SeparateUnits);
+                Sema(Ctx, Diags, LangOpts, Reparse)
+                    .check(*Program, Units, Opts.SeparateUnits);
 
   if (Opts.Act == Action::EmitAST) {
     // Dump even after errors: a partial tree helps debugging. Types are
@@ -305,7 +308,11 @@ bool Driver::compileUnit(Parser &P, FileID FID, ASTContext &Ctx,
               Unit->getImplementationUses().end());
   llvm::SmallVector<UnitDecl *, 4> Deps;
   loadUnits(Uses, Ctx, Directives, Deps, Unit->getName().Name);
-  if (Diags.hasErrors() || !Sema(Ctx, Diags, LangOpts).checkUnit(*Unit, Deps))
+  auto Reparse = [&](const RoutineDecl *G) {
+    return Parser(P.getLexer(), Diags, Ctx).reparseGeneric(G);
+  };
+  if (Diags.hasErrors() ||
+      !Sema(Ctx, Diags, LangOpts, Reparse).checkUnit(*Unit, Deps))
     return false;
   if (Opts.Act == Action::EmitExe) {
     Diags.error("'" + llvm::Twine(Opts.InputFile) +

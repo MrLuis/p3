@@ -147,6 +147,9 @@ type
         object of this with context (Self, or a with statement's) }
       nkCall, nkProcCall, nkIndirectCall, nkIndirectCallStmt:
         (callValue: PNode; callee: TIdent; args: TPtrList; hasParens: boolean;
+         { specialize F<T1, T2>(args) (objfpc): the type arguments, of
+           PTypeSpec }
+         typeArgs: TPtrList;
          calleeExpr: PNode; callDecl: PDecl; callWith: PWithContext;
          { T(x) of an untyped parameter x (Sema): a variable of type T at
            x's address }
@@ -407,6 +410,13 @@ type
                     classes or records enclosing methodClassName, outermost
                     first (of PIdent) }
                   outerClassNames: TPtrList;
+                  { objfpc: generic function F<T, U>..., a template: its type
+                    parameters (of PIdent) and its tokens (the parser's
+                    PGenericTokens), parsed again for each specialization;
+                    not checked or compiled itself (Sema: the scope it is
+                    declared in, and the declaration with its body) }
+                  isGeneric: boolean; typeParams: TPtrList;
+                  genericTokens, genericScope: pointer; genericDef: PDecl;
                   isVirtual, isOverride, isAbstract, isClassMethod: boolean;
                   { overloading (objfpc): the overload directive, the next
                     routine of the name in the same scope or class and this

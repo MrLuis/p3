@@ -18,6 +18,9 @@ function parseUnit(fid: longint; mode: TLangMode): PDecl;
   set, and the unit is parsed only if parseUnits), else a program. }
 function parseInput(fid: longint; mode: TLangMode; parseUnits: boolean;
                     var isUnit: boolean): PDecl;
+{ A specialization of generic routine g: its declaration parsed again from
+  its tokens (an ordinary routine, named as g). }
+function reparseGeneric(g: PDecl): PDecl;
 
 implementation
 
@@ -26,6 +29,17 @@ type
 
 const
   maxNesting = 256;
+
+type
+  PPtrList = ^TPtrList;
+  PToken = ^TToken;
+  { The tokens of a generic routine (objfpc), parsed again for each
+    specialization, and the lexer switches in effect where it was declared. }
+  PGenericTokens = ^TGenericTokens;
+  TGenericTokens = record
+    toks: TPtrList; { of PToken }
+    longStrings, advancedRecords, corbaInterfaces, inlineOn: boolean;
+  end;
 
 var
   lx: TLexer;
@@ -38,12 +52,47 @@ var
   prevTokEnd: TLoc;
   { parseFieldList skipped to the record's end after an error }
   recordBodySkipped: boolean;
+  { generic routines: the tokens consumed are recorded (recording, of
+    PToken); or tokens are replayed from a generic's instead of being
+    lexed }
+  recording: PPtrList;
+  replay: pointer; { PGenericTokens }
+  replayPos: longint;
+  { parsing a generic routine: type parameters may follow its name
+    (genericTypeParams receives them) }
+  parsingGeneric: boolean;
+  genericTypeParams: TPtrList;
 
 { --- Token helpers --- }
+
+procedure nextToken(var t: TToken);
+var
+  g: PGenericTokens;
+begin
+  if replay = nil then
+  begin
+    lexNext(lx, t);
+    exit;
+  end;
+  g := PGenericTokens(replay);
+  if replayPos < g^.toks.count then
+  begin
+    t := PToken(listGet(g^.toks, replayPos))^;
+    replayPos := replayPos + 1;
+  end
+  else
+  begin
+    fillchar(t, sizeof(TToken), 0);
+    t.kind := tkEOF;
+  end;
+end;
 
 procedure startParser(fid: longint; m: TLangMode);
 begin
   recordBodySkipped := false;
+  recording := nil;
+  replay := nil;
+  parsingGeneric := false;
   mode := m;
   lexInit(lx, fid, m);
   hasPeek := false;
@@ -53,7 +102,15 @@ begin
 end;
 
 function consumeToken: TLoc;
+var
+  p: PToken;
 begin
+  if recording <> nil then
+  begin
+    p := PToken(arenaAlloc(sizeof(TToken)));
+    p^ := tok;
+    listAdd(recording^, p);
+  end;
   consumeToken := tok.loc;
   prevTokEnd := tokenEnd(tok);
   if hasPeek then
@@ -62,14 +119,14 @@ begin
     hasPeek := false;
   end
   else
-    lexNext(lx, tok);
+    nextToken(tok);
 end;
 
 procedure peekToken;
 begin
   if not hasPeek then
   begin
-    lexNext(lx, peekTok);
+    nextToken(peekTok);
     hasPeek := true;
   end;
 end;
@@ -234,6 +291,19 @@ end;
 function isIdentifierNamed(const s: string): boolean;
 begin
   isIdentifierNamed := (tok.kind = tkIdentifier) and nameEquals(tok.name, s);
+end;
+
+{ objfpc: generic function F<T, U>(...): ...; (a template) }
+function startsGeneric: boolean;
+begin
+  startsGeneric := (mode = lmObjFPC) and isIdentifierNamed('generic') and
+                   (peekKind in [tkKwFunction, tkKwProcedure]);
+end;
+
+function startsSpecialize: boolean;
+begin
+  startsSpecialize := (mode = lmObjFPC) and isIdentifierNamed('specialize') and
+                      (peekKind = tkIdentifier);
 end;
 
 { Free Pascal's hint directives: the flag of the word tok is, or 0. }
@@ -645,7 +715,7 @@ begin
     exit;
   end;
   while (tok.kind = tkIdentifier) and not (inMembers and isVisibilityWord) and
-        not diagShouldStop do
+        not startsGeneric and not diagShouldStop do
   begin
     name := makeIdentifier(tok);
     consumeToken;
@@ -721,7 +791,7 @@ begin
     exit;
   end;
   while (tok.kind = tkIdentifier) and not (inMembers and isVisibilityWord) and
-        not diagShouldStop do
+        not startsGeneric and not diagShouldStop do
   begin
     name := makeIdentifier(tok);
     consumeToken;
@@ -783,7 +853,7 @@ begin
     diagError(tok.loc, 'expected variable name after ''var''');
     exit;
   end;
-  while (tok.kind = tkIdentifier) and not diagShouldStop do
+  while (tok.kind = tkIdentifier) and not startsGeneric and not diagShouldStop do
   begin
     listInit(names);
     ts := nil;
@@ -925,8 +995,8 @@ var
   libraryExpr, nameExpr: PNode;
   kind: string;
   loc: TLoc;
-  name, clsName: TIdent;
-  params, outerNames: TPtrList;
+  name, clsName, typeParam: TIdent;
+  params, outerNames, typeParams: TPtrList;
   resultSpec: PTypeSpec;
   externalName: PName;
   r: PDecl;
@@ -964,6 +1034,23 @@ begin
         break;
       end;
     end;
+  end;
+  if parsingGeneric and identValid(name) and (tok.kind = tkLess) then { <T, U> }
+  begin
+    consumeToken;
+    listInit(typeParams);
+    repeat
+      if not expectIdentifier(typeParam, 'type parameter name') then
+        break;
+      listAdd(typeParams, newIdent(typeParam));
+      if tok.kind = tkColon then
+      begin
+        diagError(tok.loc, 'constraints on type parameters are not supported yet');
+        skipUntil([tkGreater, tkSemi]);
+      end;
+    until not (tryConsume(tkComma) or tryConsume(tkSemi));
+    expect(tkGreater, 'after the type parameters');
+    genericTypeParams := typeParams;
   end;
   if identValid(name) and (mk <> mtNone) and not identValid(clsName) then
     diagErrorR(name.loc, 'a ' + kind + ' must be declared in a class; ' +
@@ -1543,6 +1630,120 @@ begin
   parsePropertyDecl := p;
 end;
 
+function parseGenericRoutine(headingOnly: boolean): PDecl;
+var
+  genericLoc: TLoc;
+  toks: PGenericTokens;
+  rec: TPtrList;
+  savedRec: PPtrList;
+  r: PDecl;
+  kind: string;
+begin
+  parseGenericRoutine := nil;
+  genericLoc := consumeToken; { 'generic' }
+  toks := PGenericTokens(arenaAlloc(sizeof(TGenericTokens)));
+  toks^.longStrings := lx.longStrings;
+  toks^.advancedRecords := lx.advancedRecords;
+  toks^.corbaInterfaces := lx.corbaInterfaces;
+  toks^.inlineOn := lx.inlineOn;
+  listInit(rec);
+  savedRec := recording;
+  recording := @rec;
+  parsingGeneric := true;
+  listInit(genericTypeParams);
+  r := parseRoutineDecl(headingOnly);
+  parsingGeneric := false;
+  recording := savedRec;
+  if r = nil then
+    exit;
+  if identValid(r^.methodClassName) then
+  begin
+    diagError(genericLoc, 'generic methods are not supported yet');
+    exit;
+  end;
+  if genericTypeParams.count = 0 then
+  begin
+    if r^.isFunction then
+      kind := 'function'
+    else
+      kind := 'procedure';
+    diagErrorR(r^.ident.loc, 'expected ''<'' and type parameters after the name ' +
+               'of generic ' + kind + ' ''' + nameStr(r^.ident.spelling) +
+               '''', identRange(r^.ident));
+    exit;
+  end;
+  toks^.toks := rec;
+  r^.isGeneric := true;
+  r^.typeParams := genericTypeParams;
+  r^.genericTokens := toks;
+  parseGenericRoutine := r;
+end;
+
+{ specialize Name<T1, ...>, after which a call's arguments may follow. }
+function parseSpecialization(var name: TIdent; var typeArgs: TPtrList): boolean;
+var
+  t: PTypeSpec;
+begin
+  parseSpecialization := false;
+  consumeToken; { 'specialize' }
+  if not expectIdentifier(name, 'generic routine name after ''specialize''') or
+     not expect(tkLess, 'after the name of a generic routine') then
+    exit;
+  repeat
+    t := parseTypeIdentifier('type argument');
+    if t = nil then
+      exit;
+    listAdd(typeArgs, t);
+  until not tryConsume(tkComma);
+  parseSpecialization := expect(tkGreater, 'after the type arguments');
+end;
+
+function reparseGeneric(g: PDecl): PDecl;
+var
+  savedLx: TLexer;
+  savedTok, savedPeek: TToken;
+  savedHasPeek, savedGeneric: boolean;
+  savedPrev: TLoc;
+  savedReplay: pointer;
+  savedPos, savedNesting: longint;
+  savedRec: PPtrList;
+  toks: PGenericTokens;
+begin
+  savedLx := lx;
+  savedTok := tok;
+  savedPeek := peekTok;
+  savedHasPeek := hasPeek;
+  savedPrev := prevTokEnd;
+  savedReplay := replay;
+  savedPos := replayPos;
+  savedNesting := nesting;
+  savedRec := recording;
+  savedGeneric := parsingGeneric;
+  toks := PGenericTokens(g^.genericTokens);
+  lx.longStrings := toks^.longStrings;
+  lx.advancedRecords := toks^.advancedRecords;
+  lx.corbaInterfaces := toks^.corbaInterfaces;
+  lx.inlineOn := toks^.inlineOn;
+  recording := nil;
+  replay := toks;
+  replayPos := 0;
+  hasPeek := false;
+  nesting := 0;
+  nextToken(tok);
+  parsingGeneric := true;
+  reparseGeneric := parseRoutineDecl(false);
+  lx := savedLx;
+  tok := savedTok;
+  peekTok := savedPeek;
+  hasPeek := savedHasPeek;
+  prevTokEnd := savedPrev;
+  replay := savedReplay;
+  replayPos := savedPos;
+  nesting := savedNesting;
+  recording := savedRec;
+  parsingGeneric := savedGeneric;
+end;
+
 procedure parseDeclarations(var decls: TPtrList; inInterface: boolean);
 var
   lastRank, rank: longint;
@@ -1552,8 +1753,15 @@ var
 begin
   lastRank := -1;
   lastWord := '';
-  while startsDeclarationPart and not diagShouldStop do
+  while (startsDeclarationPart or startsGeneric) and not diagShouldStop do
   begin
+    if tok.kind = tkIdentifier then { generic function F<T>... }
+    begin
+      r := parseGenericRoutine(inInterface);
+      if r <> nil then
+        listAdd(decls, r);
+      continue;
+    end;
     rank := sectionRank(tok.kind);
     word := lowerStr(rawText(tok));
     if mode = lmISO then
@@ -3172,8 +3380,32 @@ var
   start, assignLoc: TLoc;
   target, value, call, n: PNode;
   hasParens: boolean;
-  args: TPtrList;
+  args, typeArgs: TPtrList;
 begin
+  if startsSpecialize then { specialize P<T>(args); }
+  begin
+    start := tok.loc;
+    listInit(typeArgs);
+    listInit(args);
+    hasParens := false;
+    if parseSpecialization(name, typeArgs) then
+    begin
+      hasParens := tok.kind = tkLParen;
+      if hasParens then
+        parseActualParams(args, false);
+    end
+    else
+    begin
+      skipUntil([tkSemi, tkKwEnd]);
+      exit(emptyStmt(start));
+    end;
+    n := newNode(nkProcCall, start, prevTokEnd);
+    n^.callee := name;
+    n^.args := args;
+    n^.hasParens := hasParens;
+    n^.typeArgs := typeArgs;
+    exit(n);
+  end;
   name := makeIdentifier(tok);
   start := consumeToken;
 
@@ -4203,6 +4435,22 @@ begin
       end;
     tkIdentifier:
       begin
+        if startsSpecialize then { specialize F<T>(args) }
+        begin
+          lparen := tok.loc;
+          listInit(elems);
+          if not parseSpecialization(name, elems) then
+            exit;
+          listInit(args);
+          if (tok.kind = tkLParen) and not parseActualParams(args, false) and
+             (args.count = 0) then
+            exit;
+          call := newNode(nkCall, lparen, prevTokEnd);
+          call^.callee := name;
+          call^.args := args;
+          call^.typeArgs := elems;
+          exit(parseSelectors(call));
+        end;
         name := makeIdentifier(tok);
         consumeToken;
         if tok.kind = tkLParen then

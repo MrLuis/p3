@@ -16,12 +16,14 @@
 #include "llvm/ADT/ArrayRef.h"
 
 #include <cstdint>
+#include <functional>
 
 namespace pcc {
 
 class ASTContext;
 class DiagnosticsEngine;
 class ProgramDecl;
+class RoutineDecl;
 class UnitDecl;
 struct LangOptions;
 
@@ -29,13 +31,20 @@ struct LangOptions;
 constexpr int64_t PascalMaxInt = 2147483647;
 
 class Sema {
+public:
+  /// Parses a generic routine's declaration again, for a specialization.
+  using ReparseFn = std::function<RoutineDecl *(const RoutineDecl *Generic)>;
+
+private:
   ASTContext &Ctx;
   DiagnosticsEngine &Diags;
   const LangOptions &LangOpts;
+  ReparseFn Reparse;
 
 public:
-  Sema(ASTContext &Ctx, DiagnosticsEngine &Diags, const LangOptions &LangOpts)
-      : Ctx(Ctx), Diags(Diags), LangOpts(LangOpts) {}
+  Sema(ASTContext &Ctx, DiagnosticsEngine &Diags, const LangOptions &LangOpts,
+       ReparseFn Reparse = nullptr)
+      : Ctx(Ctx), Diags(Diags), LangOpts(LangOpts), Reparse(std::move(Reparse)) {}
 
   /// Returns true if the program is valid. Units must be in dependency
   /// order (a unit before the units and program that use it).

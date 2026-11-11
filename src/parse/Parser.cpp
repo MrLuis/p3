@@ -14,24 +14,119 @@ Parser::Parser(Lexer &Lex, DiagnosticsEngine &Diags, ASTContext &Ctx)
 // Token helpers
 //===----------------------------------------------------------------------===//
 
+void Parser::nextToken(Token &T) {
+  if (!Replay) {
+    Lex.lex(T);
+    return;
+  }
+  T = ReplayPos < Replay->Tokens.size() ? Replay->Tokens[ReplayPos++] : Token();
+}
+
+bool Parser::longStrings() const {
+  return Replay ? Replay->LongStrings : Lex.longStrings();
+}
+bool Parser::advancedRecords() const {
+  return Replay ? Replay->AdvancedRecords : Lex.advancedRecords();
+}
+bool Parser::corbaInterfaces() const {
+  return Replay ? Replay->CorbaInterfaces : Lex.corbaInterfaces();
+}
+bool Parser::inlineOn() const {
+  return Replay ? Replay->InlineOn : Lex.inlineOn();
+}
+
 SourceLocation Parser::consumeToken() {
+  if (Recording)
+    Recording->push_back(Tok);
   SourceLocation L = Tok.getLocation();
   PrevTokEnd = Tok.getEndLocation();
   if (HasPeek) {
     Tok = PeekTok;
     HasPeek = false;
   } else {
-    Lex.lex(Tok);
+    nextToken(Tok);
   }
   return L;
 }
 
 const Token &Parser::peekToken() {
   if (!HasPeek) {
-    Lex.lex(PeekTok);
+    nextToken(PeekTok);
     HasPeek = true;
   }
   return PeekTok;
+}
+
+// objfpc: generic function F<T, U>(...): ...; (a template)
+bool Parser::startsGeneric() {
+  return LangOpts.ObjKeywords && isIdentifierNamed("generic") &&
+         peekToken().isOneOf(tok::kw_function, tok::kw_procedure);
+}
+
+bool Parser::startsSpecialize() {
+  return LangOpts.ObjKeywords && isIdentifierNamed("specialize") &&
+         peekToken().is(tok::identifier);
+}
+
+RoutineDecl *Parser::parseGenericRoutine(bool HeadingOnly) {
+  SourceLocation GenericLoc = consumeToken(); // 'generic'
+  auto *Toks = Ctx.create<GenericTokens>();
+  Toks->LongStrings = longStrings();
+  Toks->AdvancedRecords = advancedRecords();
+  Toks->CorbaInterfaces = corbaInterfaces();
+  Toks->InlineOn = inlineOn();
+  llvm::SmallVector<Token, 64> Rec;
+  auto *SavedRec = Recording;
+  Recording = &Rec;
+  ParsingGeneric = true;
+  GenericTypeParams = {};
+  RoutineDecl *R = parseRoutineDecl(HeadingOnly);
+  ParsingGeneric = false;
+  Recording = SavedRec;
+  if (!R)
+    return nullptr;
+  if (R->getClassName().isValid()) {
+    Diags.error(GenericLoc, "generic methods are not supported yet");
+    return nullptr;
+  }
+  if (GenericTypeParams.empty()) {
+    Diags.error(R->getName().Loc,
+                "expected '<' and type parameters after the name of generic " +
+                    llvm::Twine(R->getKindName()) + " '" +
+                    R->getName().Spelling + "'",
+                {R->getName().getRange()});
+    return nullptr;
+  }
+  Toks->Tokens = Ctx.copyArray<Token>(Rec);
+  R->setGeneric(GenericTypeParams, Toks);
+  return R;
+}
+
+RoutineDecl *Parser::reparseGeneric(const RoutineDecl *G) {
+  Replay = static_cast<const GenericTokens *>(G->getGenericTokens());
+  ReplayPos = 0;
+  HasPeek = false;
+  nextToken(Tok);
+  ParsingGeneric = true;
+  RoutineDecl *R = parseRoutineDecl(/*HeadingOnly=*/false);
+  ParsingGeneric = false;
+  Replay = nullptr;
+  return R;
+}
+
+bool Parser::parseSpecialization(Identifier &Name,
+                                 llvm::SmallVectorImpl<TypeSpec *> &TypeArgs) {
+  consumeToken(); // 'specialize'
+  if (!expectIdentifier(Name, "generic routine name after 'specialize'") ||
+      !expect(tok::less, "after the name of a generic routine"))
+    return false;
+  do {
+    TypeSpec *T = parseTypeIdentifier("type argument");
+    if (!T)
+      return false;
+    TypeArgs.push_back(T);
+  } while (tryConsume(tok::comma));
+  return expect(tok::greater, "after the type arguments");
 }
 
 bool Parser::tryConsume(tok::TokenKind K) {
@@ -317,7 +412,12 @@ void Parser::parseDeclarations(llvm::SmallVectorImpl<Decl *> &Decls,
   int LastRank = -1;
   llvm::StringRef LastWord;
 
-  while (startsDeclarationPart() && !Diags.shouldStop()) {
+  while ((startsDeclarationPart() || startsGeneric()) && !Diags.shouldStop()) {
+    if (Tok.is(tok::identifier)) { // generic function F<T>...
+      if (RoutineDecl *R = parseGenericRoutine(InInterface))
+        Decls.push_back(R);
+      continue;
+    }
     int Rank = sectionRank(Tok.getKind());
     std::string Word = Tok.getRawText().lower();
     if (LangOpts.Mode == LangMode::ISO) {
@@ -443,7 +543,7 @@ void Parser::parseConstPart(llvm::SmallVectorImpl<Decl *> &Decls,
     return;
   }
   while (Tok.is(tok::identifier) && !(InMembers && isVisibilityWord()) &&
-         !Diags.shouldStop()) {
+         !startsGeneric() && !Diags.shouldStop()) {
     Identifier Name = makeIdentifier(Tok);
     consumeToken();
     if (Tok.is(tok::colon) && LangOpts.Mode != LangMode::ISO) {
@@ -502,7 +602,7 @@ void Parser::parseTypePart(llvm::SmallVectorImpl<Decl *> &Decls,
     return;
   }
   while (Tok.is(tok::identifier) && !(InMembers && isVisibilityWord()) &&
-         !Diags.shouldStop()) {
+         !startsGeneric() && !Diags.shouldStop()) {
     Identifier Name = makeIdentifier(Tok);
     consumeToken();
     TypeSpec *TS = nullptr;
@@ -538,7 +638,7 @@ void Parser::parseVarPart(llvm::SmallVectorImpl<Decl *> &Decls) {
     return;
   }
 
-  while (Tok.is(tok::identifier) && !Diags.shouldStop()) {
+  while (Tok.is(tok::identifier) && !startsGeneric() && !Diags.shouldStop()) {
     llvm::SmallVector<Identifier, 4> Names;
     TypeSpec *TS = nullptr;
     if (parseIdentList(Names, "variable name") &&
@@ -647,6 +747,23 @@ RoutineDecl *Parser::parseRoutineDecl(bool HeadingOnly) {
       }
     }
     OuterNames = Ctx.copyArray<Identifier>(Outer);
+  }
+  if (ParsingGeneric && Name.isValid() && Tok.is(tok::less)) { // <T, U>
+    consumeToken();
+    llvm::SmallVector<Identifier, 2> TypeParams;
+    do {
+      Identifier P;
+      if (!expectIdentifier(P, "type parameter name"))
+        break;
+      TypeParams.push_back(P);
+      if (Tok.is(tok::colon)) {
+        Diags.error(Tok.getLocation(),
+                    "constraints on type parameters are not supported yet");
+        skipUntil({tok::greater, tok::semi});
+      }
+    } while (tryConsume(tok::comma) || tryConsume(tok::semi));
+    expect(tok::greater, "after the type parameters");
+    GenericTypeParams = Ctx.copyArray<Identifier>(TypeParams);
   }
   if (Name.isValid() && MK != MethodKind::None && !ClassName.isValid())
     Diags.error(Name.Loc,
@@ -984,7 +1101,7 @@ bool Parser::parseSeparatedHint(Hints &H) {
 // Free Pascal); with {$inline off} there it is accepted and ignored.
 bool Parser::parseInlineDirective(SourceLocation Loc) {
   expect(tok::semi, "after 'inline'");
-  if (Lex.inlineOn())
+  if (inlineOn())
     return true;
   if (!LangOpts.ObjKeywords)
     Diags.error(Loc, "the 'inline' directive needs {$inline on}");
@@ -1376,7 +1493,7 @@ TypeSpec *Parser::parseClassType(SourceLocation Start) {
 //                 { methodHeading } "end" .               (objfpc)
 // COM or CORBA as set by the last {$interfaces ...} before it.
 TypeSpec *Parser::parseInterfaceType(SourceLocation Start) {
-  bool Corba = Lex.corbaInterfaces();
+  bool Corba = corbaInterfaces();
   SourceLocation IntfLoc = consumeToken(); // 'interface'
   if (Tok.is(tok::semi)) // IFoo = interface;
     return Ctx.create<InterfaceTypeSpec>(SourceRange(Start, PrevTokEnd),
@@ -1605,7 +1722,7 @@ TypeSpec *Parser::parseTypeImpl() {
         return nullptr;
     }
     return Ctx.create<StringTypeSpec>(SourceRange(Start, PrevTokEnd), MaxLen,
-                                      !MaxLen && Lex.longStrings());
+                                      !MaxLen && longStrings());
   }
   case tok::kw_file: {
     consumeToken();
@@ -1694,7 +1811,7 @@ TypeSpec *Parser::parseTypeImpl() {
 TypeSpec *Parser::parseTypeIdentifier(llvm::StringRef Context) {
   if (Tok.is(tok::kw_string)) { // Turbo/FPC: `string` names a type here
     auto *TS = Ctx.create<StringTypeSpec>(Tok.getRange(), nullptr,
-                                          Lex.longStrings());
+                                          longStrings());
     consumeToken();
     return TS;
   }
@@ -1830,7 +1947,7 @@ TypeSpec *Parser::parseArrayType(SourceLocation Start, bool Packed) {
 // recordType = "record" fieldList "end" .
 TypeSpec *Parser::parseRecordType(SourceLocation Start, bool Packed) {
   SourceLocation RecordLoc = consumeToken(); // 'record'
-  if (LangOpts.ObjKeywords && Lex.advancedRecords())
+  if (LangOpts.ObjKeywords && advancedRecords())
     return parseAdvancedRecord(Start, RecordLoc, Packed);
   FieldList *Fields = parseFieldList(tok::kw_end);
   if (!Fields) {
@@ -2288,6 +2405,25 @@ Stmt *Parser::parseStatementImpl() {
 // assignment = designator ":=" expression .
 // procCall   = ident [ "(" actualParam { "," actualParam } ")" ] .
 Stmt *Parser::parseAssignmentOrCall() {
+  if (startsSpecialize()) { // specialize P<T>(args);
+    SourceLocation Start = Tok.getLocation();
+    Identifier Name;
+    llvm::SmallVector<TypeSpec *, 2> TypeArgs;
+    llvm::SmallVector<Expr *, 4> Args;
+    bool HasParens = false;
+    if (parseSpecialization(Name, TypeArgs)) {
+      HasParens = Tok.is(tok::l_paren);
+      if (HasParens)
+        parseActualParams(Args, /*AllowFormat=*/false);
+    } else {
+      skipUntil({tok::semi, tok::kw_end});
+      return Ctx.create<EmptyStmt>(Start);
+    }
+    auto *S = Ctx.create<ProcCallStmt>(SourceRange(Start, PrevTokEnd), Name,
+                                       Ctx.copyArray<Expr *>(Args), HasParens);
+    S->setTypeArgs(Ctx.copyArray<TypeSpec *>(TypeArgs));
+    return S;
+  }
   Identifier Name = makeIdentifier(Tok);
   SourceLocation Start = consumeToken();
 
@@ -3040,7 +3176,7 @@ Expr *Parser::parseFactor() {
   // string(x): a typecast to the type `string` now means.
   if (Tok.is(tok::kw_string) && LangOpts.Mode != LangMode::ISO &&
       peekToken().is(tok::l_paren)) {
-    Identifier Name{Ctx.getStrings().intern(Lex.longStrings() ? "ansistring"
+    Identifier Name{Ctx.getStrings().intern(longStrings() ? "ansistring"
                                                               : "shortstring"),
                     Tok.getRawText(), Tok.getLocation()};
     consumeToken();
@@ -3069,6 +3205,21 @@ Expr *Parser::parseFactor() {
     return E;
   }
   case tok::identifier: {
+    if (startsSpecialize()) { // specialize F<T>(args)
+      SourceLocation Start = Tok.getLocation();
+      Identifier Name;
+      llvm::SmallVector<TypeSpec *, 2> TypeArgs;
+      if (!parseSpecialization(Name, TypeArgs))
+        return nullptr;
+      llvm::SmallVector<Expr *, 4> Args;
+      if (Tok.is(tok::l_paren) &&
+          !parseActualParams(Args, /*AllowFormat=*/false) && Args.empty())
+        return nullptr;
+      auto *Call = Ctx.create<CallExpr>(SourceRange(Start, PrevTokEnd), Name,
+                                        Ctx.copyArray<Expr *>(Args));
+      Call->setTypeArgs(Ctx.copyArray<TypeSpec *>(TypeArgs));
+      return parseSelectors(Call);
+    }
     Identifier Name = makeIdentifier(Tok);
     consumeToken();
     if (Tok.is(tok::l_paren)) {

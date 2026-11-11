@@ -267,12 +267,16 @@ class CallExpr final : public Expr {
   /// object it is called on (Self, or the object of a `with`).
   WithContext *With = nullptr;
   Expr *CalleeValue = nullptr; ///< set by Sema: a procedural field or property
+  /// specialize F<T1, T2>(args) (objfpc): the type arguments
+  llvm::ArrayRef<TypeSpec *> TypeArgs;
   bool VarCast = false; ///< set by Sema: T(x) of an untyped parameter x
   int MethodCast = 0;
 
 public:
   Expr *getCalleeValue() const { return CalleeValue; }
   void setCalleeValue(Expr *V) { CalleeValue = V; }
+  llvm::ArrayRef<TypeSpec *> getTypeArgs() const { return TypeArgs; }
+  void setTypeArgs(llvm::ArrayRef<TypeSpec *> T) { TypeArgs = T; }
   CallExpr(SourceRange R, Identifier Callee, llvm::ArrayRef<Expr *> Args)
       : Expr(EK_Call, R), Callee(Callee), Args(Args) {}
   /// A typecast of an untyped parameter (Turbo/FPC): a variable of the
@@ -521,10 +525,13 @@ class ProcCallStmt final : public Stmt {
   Decl *D = nullptr; ///< set by Sema: BuiltinDecl or RoutineDecl
   WithContext *With = nullptr; ///< set by Sema for methods (see CallExpr)
   Expr *CalleeValue = nullptr; ///< set by Sema: a procedural field or property
+  llvm::ArrayRef<TypeSpec *> TypeArgs; ///< specialize P<T>(args) (objfpc)
 
 public:
   Expr *getCalleeValue() const { return CalleeValue; }
   void setCalleeValue(Expr *E) { CalleeValue = E; }
+  llvm::ArrayRef<TypeSpec *> getTypeArgs() const { return TypeArgs; }
+  void setTypeArgs(llvm::ArrayRef<TypeSpec *> T) { TypeArgs = T; }
   ProcCallStmt(SourceRange R, Identifier Callee, llvm::ArrayRef<Expr *> Args,
                bool HasParens)
       : Stmt(SK_ProcCall, R), Callee(Callee), Args(Args), HasParens(HasParens) {}
@@ -1193,6 +1200,8 @@ public:
   bool isPredeclared() const { return !Loc.isValid(); }
   Visibility getVisibility() const { return Vis; }
   void setVisibility(Visibility V) { Vis = V; }
+  /// A specialization of a generic routine is renamed (F<integer>).
+  void setName(Identifier N) { Name = N; }
   /// What this entity is, for diagnostics: "variable", "type", ...
   const char *getKindName() const;
 
@@ -1414,6 +1423,15 @@ class RoutineDecl final : public Decl {
   CallConv CC = CallConv::Default; ///< the directive written
   bool InheritedCDecl = false;     ///< an override of a cdecl method
   RoutineDecl *Canonical = nullptr; ///< set on a definition of a forward decl
+  /// objfpc: `generic function F<T, U>...`, a template: its type parameters
+  /// and its tokens (the parser's GenericTokens), parsed again for each
+  /// specialization; not checked or compiled itself (Sema: the scope it is
+  /// declared in, and the declaration with its body).
+  llvm::ArrayRef<Identifier> TypeParams;
+  bool Generic = false;
+  const void *GenericTokens = nullptr;
+  void *GenericScope = nullptr;
+  RoutineDecl *GenericDef = nullptr;
   RoutineDecl *Parent = nullptr;    ///< enclosing routine; null at program level
   unsigned Level = 1;               ///< 1 = declared in the program block
   VarDecl *ResultVar = nullptr;     ///< functions: storage for the result
@@ -1531,6 +1549,22 @@ public:
   /// enclosing ClassName, outermost first.
   llvm::ArrayRef<Identifier> getOuterClassNames() const { return OuterClassNames; }
   void setOuterClassNames(llvm::ArrayRef<Identifier> N) { OuterClassNames = N; }
+  bool isGeneric() const { return Generic; }
+  void setGeneric(llvm::ArrayRef<Identifier> Params, const void *Tokens) {
+    Generic = true;
+    TypeParams = Params;
+    GenericTokens = Tokens;
+  }
+  /// A specialization: an ordinary routine from now on.
+  void clearGeneric() { Generic = false; }
+  llvm::ArrayRef<Identifier> getTypeParams() const { return TypeParams; }
+  const void *getGenericTokens() const { return GenericTokens; }
+  void *getGenericScope() const { return GenericScope; }
+  void setGenericScope(void *S) { GenericScope = S; }
+  /// The generic declaration with the body (itself, or the definition of a
+  /// forward or interface heading).
+  RoutineDecl *getGenericDefinition() { return GenericDef ? GenericDef : this; }
+  void setGenericDefinition(RoutineDecl *R) { GenericDef = R; }
   /// `class procedure` / `class function` (objfpc): Self is a class
   /// reference, not an object.
   bool isClassMethod() const { return ClassMethod; }
@@ -1656,6 +1690,8 @@ public:
   Block(llvm::ArrayRef<Decl *> Decls, CompoundStmt *Body)
       : Decls(Decls), Body(Body) {}
   llvm::ArrayRef<Decl *> getDecls() const { return Decls; }
+  /// Sema adds the specializations of generic routines a module uses.
+  void setDecls(llvm::ArrayRef<Decl *> D) { Decls = D; }
   CompoundStmt *getBody() const { return Body; }
 };
 

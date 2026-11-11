@@ -57,6 +57,14 @@ class ASTContext;
 class DiagnosticsEngine;
 class Lexer;
 
+/// The tokens of a generic routine (objfpc), parsed again for each
+/// specialization, and the lexer switches in effect where it was declared.
+struct GenericTokens {
+  llvm::ArrayRef<Token> Tokens;
+  bool LongStrings = false, AdvancedRecords = false, CorbaInterfaces = false,
+       InlineOn = false;
+};
+
 class Parser {
   Lexer &Lex;
   DiagnosticsEngine &Diags;
@@ -72,6 +80,27 @@ class Parser {
 
   Token Tok;                  ///< current lookahead token
   Token PeekTok;              ///< the token after Tok, if HasPeek
+  /// Generic routines: the tokens consumed are recorded here; or tokens are
+  /// replayed from a generic's instead of being lexed.
+  llvm::SmallVectorImpl<Token> *Recording = nullptr;
+  const GenericTokens *Replay = nullptr;
+  size_t ReplayPos = 0;
+  /// Parsing a generic routine: type parameters may follow its name
+  /// (GenericTypeParams receives them).
+  bool ParsingGeneric = false;
+  llvm::ArrayRef<Identifier> GenericTypeParams;
+  void nextToken(Token &T);
+  // The lexer's switches (a replayed generic's: as where it was declared).
+  bool longStrings() const;
+  bool advancedRecords() const;
+  bool corbaInterfaces() const;
+  bool inlineOn() const;
+  bool startsGeneric();
+  bool startsSpecialize();
+  RoutineDecl *parseGenericRoutine(bool HeadingOnly);
+  /// specialize Name<T1, ...>, after which a call's arguments may follow.
+  bool parseSpecialization(Identifier &Name,
+                           llvm::SmallVectorImpl<TypeSpec *> &TypeArgs);
   bool HasPeek = false;
   SourceLocation PrevTokEnd;  ///< end of the last consumed token
 
@@ -206,6 +235,11 @@ class Parser {
 
 public:
   Parser(Lexer &Lex, DiagnosticsEngine &Diags, ASTContext &Ctx);
+
+  /// A specialization of generic routine G: its declaration parsed again
+  /// from its tokens (an ordinary routine, named as G).
+  RoutineDecl *reparseGeneric(const RoutineDecl *G);
+  Lexer &getLexer() { return Lex; }
 
   /// Parses a whole program. Always returns a (possibly partial) AST;
   /// check the DiagnosticsEngine for errors.

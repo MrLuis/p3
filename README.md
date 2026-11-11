@@ -365,6 +365,21 @@ element type are the same type. Not supported: `insert`, `delete` and `concat`
 on arrays, `TA.Create(...)`, typed constants other than `nil`, types that
 contain themselves directly (`T = array of T`).
 
+**Generic routines** (`--mode=objfpc`), as in Free Pascal 3.2.2:
+`generic function IfThen<T>(val: boolean; const iftrue, iffalse: T): T;`
+declares a template, and `specialize IfThen<integer>(true, 1, 2)` calls the
+routine made for those type arguments (`generic procedure` too; several
+type parameters, `<A, B>`). Generics are declared at program or unit level
+(also in a unit's interface, defined in its implementation, or `forward`)
+and coexist with non-generic routines of their name. A specialization is
+made once per program or unit: its declaration is parsed again with the
+type parameters naming the type arguments and checked like any routine,
+so errors in it point into the generic, with a note at the use; it is
+compiled as `F<integer>`. Not supported: generic types, methods and
+constraints, implicit specialization (`F(1)`, not in FPC 3.2.2 either),
+`@specialize F<T>`, and, for a unit compiled separately, generics that use
+what the unit does not export (whole-program compilation allows it).
+
 **For-in loops** (not in `--mode=iso`), as in Free Pascal: `for x in c do`
 takes `x` through the elements of an array (static, open or dynamic) or a
 string, the members of a set in order, the values of an ordinal type (`for

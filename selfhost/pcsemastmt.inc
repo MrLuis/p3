@@ -2024,10 +2024,19 @@ var
   w: PWithContext;
 begin
   w := nil;
-  d := scopeLookup(cur, s^.callee.name, w);
+  if s^.typeArgs.count = 0 then
+    d := scopeLookup(cur, s^.callee.name, w)
+  else
+    d := specializeGeneric(s^.callee, s^.typeArgs);
   if d = nil then
   begin
-    diagUndeclared(s^.callee);
+    if s^.typeArgs.count = 0 then
+    begin
+      diagUndeclared(s^.callee);
+      exit;
+    end;
+    for i := 0 to s^.args.count - 1 do
+      check(PNode(listGet(s^.args, i)));
     exit;
   end;
   if d^.kind = dkRoutine then { objfpc: overloads }
@@ -3366,10 +3375,14 @@ var
 begin
   visitCall := errorType;
   w := nil;
-  d := scopeLookup(cur, e^.callee.name, w);
+  if e^.typeArgs.count = 0 then
+    d := scopeLookup(cur, e^.callee.name, w)
+  else
+    d := specializeGeneric(e^.callee, e^.typeArgs);
   if d = nil then
   begin
-    diagUndeclared(e^.callee);
+    if e^.typeArgs.count = 0 then
+      diagUndeclared(e^.callee);
     for i := 0 to e^.args.count - 1 do
       check(argNode(e, i));
     exit;
