@@ -709,6 +709,7 @@ procedure parseTypePart(var decls: TPtrList; inMembers: boolean);
 var
   hf: longint;
   hm: PName;
+  typeLoc: TLoc;
   name: TIdent;
   ts: PTypeSpec;
   d: PDecl;
@@ -726,7 +727,17 @@ begin
     consumeToken;
     ts := nil;
     if expect(tkEqual, 'after type name') then
+    begin
+      { T = type X (Free Pascal): a distinct type, here an alias of X }
+      if tok.kind = tkKwType then
+      begin
+        typeLoc := consumeToken;
+        if mode = lmISO then
+          diagError(typeLoc, '''type'' before a type (a distinct type) is a ' +
+                             'Free Pascal extension; use --mode=tp');
+      end;
       ts := parseType;
+    end;
     parseHints(hf, hm);
     if ts <> nil then
     begin

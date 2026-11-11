@@ -31,7 +31,8 @@ With `--mode=tp`, Turbo/Free Pascal extensions: units (`uses`, `-I`),
 `string`/`string[N]` and string routines, `break continue exit(value) inc
 dec`, `shl shr xor`, `$hex %bin #13` literals, `//` comments; the integer
 types `longint int64 cardinal byte word shortint smallint` (FPC widening
-rules); typecasts `T(x)`; `pointer`, `pchar` (also `AnsiChar` and
+rules); typecasts `T(x)`; distinct types `T = type X` (as an alias of `X`:
+Free Pascal also tells them apart in overloads); `pointer`, `pchar` (also `AnsiChar` and
 `PAnsiChar`), `@`, `getmem freemem
 reallocmem fillchar move sizeof low high assigned`; `const` parameters;
 procedural types; typed constants including arrays and records; external C

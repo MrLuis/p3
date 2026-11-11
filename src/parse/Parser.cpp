@@ -506,8 +506,16 @@ void Parser::parseTypePart(llvm::SmallVectorImpl<Decl *> &Decls,
     Identifier Name = makeIdentifier(Tok);
     consumeToken();
     TypeSpec *TS = nullptr;
-    if (expect(tok::equal, "after type name"))
+    if (expect(tok::equal, "after type name")) {
+      // T = type X (Free Pascal): a distinct type, here an alias of X
+      if (Tok.is(tok::kw_type)) {
+        SourceLocation TypeLoc = consumeToken();
+        if (LangOpts.Mode == LangMode::ISO)
+          Diags.error(TypeLoc, "'type' before a type (a distinct type) is a "
+                               "Free Pascal extension; use --mode=tp");
+      }
       TS = parseType();
+    }
     Hints H = parseHints();
     if (TS) {
       auto *TD = Ctx.create<TypeDecl>(Name.Loc, Name, TS);
