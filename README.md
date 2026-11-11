@@ -319,6 +319,16 @@ and called through `cdecl` procedural variables; so can a `cdecl` external
 routine (not a `varargs` one, nor one taking callbacks). Not supported:
 records and strings by value, `index`, external variables (`cvar`).
 
+**External variables** (not in `--mode=iso`), as in Free Pascal: `errno:
+cint; external 'c' name 'errno';` or `optind: cint; cvar; external;`
+declares a C variable (the symbol is the name as written unless `name`
+gives it; the library, a string constant, is linked as for routines). They
+are declared at program or unit level, without an initial value. `errno`
+is the C library's per-thread variable, reached through its accessor
+(`__errno_location`, `__error` or `_errno`; Free Pascal cannot link it),
+and the library `StdCLib` (classic Mac OS) means the C library. Not
+supported: `cvar` without `external` (variables for C code to use).
+
 **Untyped parameters** (not in `--mode=iso`), as in Turbo and Free Pascal:
 `procedure Clear(var x; size: integer)`, `function Sum(const data; n:
 integer)`. Any variable is passed by reference. In the routine, the

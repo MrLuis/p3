@@ -733,6 +733,40 @@ void Parser::parseVarPart(llvm::SmallVectorImpl<Decl *> &Decls) {
     if (!expect(tok::semi, "after variable declaration")) {
       skipUntil({tok::semi, tok::kw_begin});
       tryConsume(tok::semi);
+      continue;
+    }
+
+    // Turbo/FPC: a C variable  x: T; [cvar;] external ['lib'] [name 'sym'];
+    // (neither word is reserved: `external: T` declares a variable)
+    size_t Count = TS ? Names.size() : 0;
+    while (LangOpts.Mode != LangMode::ISO &&
+           (isIdentifierNamed("cvar") || isIdentifierNamed("external")) &&
+           !peekToken().isOneOf(tok::colon, tok::comma)) {
+      bool IsCVar = isIdentifierNamed("cvar");
+      SourceLocation DirLoc = consumeToken();
+      Expr *LibraryExpr = nullptr, *NameExpr = nullptr;
+      if (!IsCVar) {
+        if (Tok.isNot(tok::semi) && !isIdentifierNamed("name"))
+          LibraryExpr = parseExpression();
+        if (isIdentifierNamed("name")) {
+          consumeToken();
+          if (Tok.is(tok::semi))
+            Diags.error(Tok.getLocation(), "expected the external symbol name");
+          else
+            NameExpr = parseExpression();
+        }
+        if (NameExpr && Count > 1)
+          Diags.error(DirLoc, "'name' can only be given for one variable",
+                      {SourceRange(Names[0].Loc, Names.back().getRange().getEnd())});
+      }
+      expect(tok::semi, IsCVar ? "after 'cvar'" : "after 'external'");
+      for (size_t I = Decls.size() - Count; I < Decls.size(); ++I) {
+        auto *V = llvm::cast<VarDecl>(Decls[I]);
+        if (IsCVar)
+          V->setCVar();
+        else
+          V->setExternal(LibraryExpr, NameExpr);
+      }
     }
   }
 }

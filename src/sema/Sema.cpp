@@ -3061,9 +3061,41 @@ class Checker : public StmtVisitor<Checker>,
       ResultAssigned.insert(Root->getOwner());
   }
 
+  /// x: T; [cvar;] external ['lib'] [name 'sym'];  -- a C variable, at
+  /// program or unit level; the library and symbol: string constants.
+  void checkExternalVar(VarDecl *V) {
+    const Identifier &Id = V->getName();
+    Used.insert(V);
+    if (!V->isExternal()) {
+      Diags.error(Id.Loc,
+                  "'cvar' without 'external' (a variable for C code to use) "
+                  "is not supported yet",
+                  {Id.getRange()});
+      return;
+    }
+    if (CurRoutine)
+      Diags.error(Id.Loc,
+                  "external variable '" + Id.Spelling +
+                      "' must be declared at program or unit level",
+                  {Id.getRange()});
+    else if (V->getAbsolute() || V->getInit())
+      Diags.error(Id.Loc,
+                  "external variable '" + Id.Spelling + "' cannot be " +
+                      (V->getAbsolute() ? "'absolute'" : "initialized"),
+                  {Id.getRange()});
+    if (Expr *L = V->getLibraryExpr())
+      if (auto S = externalString(L, "library name", "variable"))
+        V->setLibraryName(*S);
+    if (Expr *N = V->getNameExpr())
+      if (auto S = externalString(N, "symbol name", "variable"))
+        V->setExternalName(*S);
+  }
+
   void declareVar(VarDecl *V) {
     V->setType(resolveType(V->getTypeSpec()));
     V->setOwner(CurRoutine);
+    if (V->isExternal() || V->isCVar())
+      checkExternalVar(V);
     if (Expr *Target = V->getAbsolute())
       checkAbsolute(V, Target);
     if (Expr *Init = V->getInit()) {
@@ -4038,7 +4070,8 @@ class Checker : public StmtVisitor<Checker>,
 
   /// The string constant E, the library or symbol name (What) of an
   /// external routine; nullopt after a diagnostic.
-  std::optional<llvm::StringRef> externalString(Expr *E, const char *What) {
+  std::optional<llvm::StringRef> externalString(Expr *E, const char *What,
+                                                const char *Of = "routine") {
     Type *T = check(E);
     if (T->isError())
       return std::nullopt;
@@ -4050,8 +4083,8 @@ class Checker : public StmtVisitor<Checker>,
       return llvm::StringRef(Ctx.copyArray<char>(llvm::ArrayRef<char>(&Ch, 1)).data(), 1);
     }
     Diags.error(E->getBeginLoc(),
-                llvm::Twine("the ") + What +
-                    " of an external routine must be a string constant",
+                llvm::Twine("the ") + What + " of an external " + Of +
+                    " must be a string constant",
                 {E->getRange()});
     return std::nullopt;
   }

@@ -1,0 +1,9 @@
+; External variables in a unit's interface, compiled whole and separately.
+; RUN: rm -rf %t && mkdir -p %t && cp -r %S/Inputs/external-vars/. %t/
+; RUN: %pcc --mode=tp -I %t/lib %t/main.pas -o %t/whole
+; RUN: %t/whole | FileCheck %s
+; RUN: %pcc --mode=tp -c %t/lib/cvars.pas -o %t/lib/cvars.o
+; RUN: %pcc --mode=tp -I %t/lib -fseparate-units %t/main.pas -o %t/separate
+; RUN: %t/separate | FileCheck %s
+; CHECK:      2 2
+; CHECK-NEXT: -1 9

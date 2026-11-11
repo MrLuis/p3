@@ -1254,6 +1254,12 @@ private:
   Expr *Default = nullptr;      ///< objfpc: the parameter's default value
   bool Out = false;             ///< objfpc: an `out` parameter
   VarDecl *AbsoluteRoot = nullptr; ///< set by Sema: the variable y is in
+  /// Turbo/FPC `x: T; [cvar;] external ['lib'] [name 'sym'];`: a C variable
+  /// (the library and symbol: string constants, evaluated by Sema; the
+  /// symbol defaults to the name as written).
+  bool External = false, CVar = false;
+  llvm::StringRef ExternalName, LibraryName;
+  Expr *LibraryExpr = nullptr, *NameExpr = nullptr;
 
 public:
   VarDecl(Identifier Name, TypeSpec *TS, VarKind VK = Variable)
@@ -1300,6 +1306,23 @@ public:
     InitializedVar = true;
   }
   bool isClassVar() const { return IsClassVar; }
+  bool isExternal() const { return External; }
+  bool isCVar() const { return CVar; }
+  void setCVar() { CVar = true; }
+  void setExternal(Expr *Lib, Expr *Name) {
+    External = true;
+    LibraryExpr = Lib;
+    NameExpr = Name;
+  }
+  Expr *getLibraryExpr() const { return LibraryExpr; }
+  Expr *getNameExpr() const { return NameExpr; }
+  llvm::StringRef getLibraryName() const { return LibraryName; }
+  void setLibraryName(llvm::StringRef L) { LibraryName = L; }
+  /// The C symbol (the name as written unless `name 'sym'`).
+  llvm::StringRef getExternalName() const {
+    return ExternalName.empty() ? getName().Spelling : ExternalName;
+  }
+  void setExternalName(llvm::StringRef S) { ExternalName = S; }
   void setClassVar() { IsClassVar = true; }
   ClassType *getVarClass() const { return VarClass; }
   void setVarClass(ClassType *C) { VarClass = C; }

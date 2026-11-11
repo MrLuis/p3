@@ -106,6 +106,7 @@ var
   exitBlock: PIRBlock;
   mainJmpBuf: TV;
   hasMainJmpBuf: boolean;
+  cgTriple: string; { the target (the C library's errno accessor) }
   routinePairT, jmpBufT: PIRType;
   separate: boolean;         { units compiled separately (S11) }
   { classes (objfpc): instance layouts (for offsets and sizes only) and
@@ -1173,6 +1174,39 @@ begin
                (e^.fieldDecl^.kind = dkType);
 end;
 
+{ The symbol of C variable v: the name as written unless given. }
+function externalVarName(v: PDecl): string;
+begin
+  if v^.varExtName <> nil then
+    externalVarName := nameStr(v^.varExtName)
+  else
+    externalVarName := nameStr(v^.ident.spelling);
+end;
+
+{ The C library's errno is per thread, not a variable: reached through the
+  library's accessor (__errno_location, __error, _errno). }
+function isErrno(v: PDecl): boolean;
+begin
+  isErrno := externalVarName(v) = 'errno';
+end;
+
+function classRuntime(const name, ret, params: string): PIRFunc; forward;
+
+function errnoAddress: TV;
+var
+  name: string;
+begin
+  if (pos('darwin', cgTriple) > 0) or (pos('macos', cgTriple) > 0) or
+     (pos('apple', cgTriple) > 0) then
+    name := '__error'
+  else if (pos('windows', cgTriple) > 0) or (pos('mingw', cgTriple) > 0) or
+          (pos('win32', cgTriple) > 0) then
+    name := '_errno'
+  else
+    name := '__errno_location';
+  errnoAddress := call0(classRuntime(name, 'ptr', ''), 'errno');
+end;
+
 function varAddress(v: PDecl): TV;
 var
   owner: PDecl;
@@ -1180,6 +1214,8 @@ var
 begin
   if v^.absTarget <> nil then { an overlay has no storage }
     exit(emitAddress(v^.absTarget));
+  if v^.varExternal and isErrno(v) then
+    exit(errnoAddress);
   owner := v^.owner;
   { on E: TFoo do: E's storage (a temporary) }
   if (owner <> nil) and (v^.cgValue <> nil) then
@@ -1374,7 +1410,6 @@ begin
   bufFree(b);
 end;
 
-function classRuntime(const name, ret, params: string): PIRFunc; forward;
 function holdResult(const v: TV): TV; forward;
 function holdDynResult(const v: TV; t: PType): TV; forward;
 

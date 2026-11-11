@@ -780,6 +780,7 @@ end;
   ('libz.so.1'). }
 procedure collectExternalLibraries(b: PBlock; var seen: TPtrList);
 var
+  lib: PName;
   i, k: longint;
   d: PDecl;
   l: PName;
@@ -791,10 +792,16 @@ begin
   for i := 0 to b^.decls.count - 1 do
   begin
     d := PDecl(listGet(b^.decls, i));
-    if (d^.kind <> dkRoutine) or not d^.isExternal or (d^.libraryName = nil) or
-       (d^.libraryName^.len = 0) then
+    lib := nil;
+    if (d^.kind = dkRoutine) and d^.isExternal then
+      lib := d^.libraryName
+    else if (d^.kind = dkVar) and d^.varExternal then
+      lib := d^.varLibName;
+    { StdCLib (classic Mac OS's C library, named by Free Pascal's sources):
+      the C library, linked anyway }
+    if (lib = nil) or (lib^.len = 0) or (lowerStr(nameStr(lib)) = 'stdclib') then
       continue;
-    s := nameStr(d^.libraryName);
+    s := nameStr(lib);
     if (pos('.', s) > 0) or (pos('/', s) > 0) then
       s := ':' + s;
     l := intern('-l' + s);

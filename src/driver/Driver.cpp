@@ -284,10 +284,15 @@ void Driver::collectExternalLibraries(Block *B) {
   if (!B)
     return;
   for (Decl *D : B->getDecls()) {
-    auto *R = llvm::dyn_cast<RoutineDecl>(D);
-    if (!R || !R->isExternal() || R->getLibraryName().empty())
+    llvm::StringRef L;
+    if (auto *R = llvm::dyn_cast<RoutineDecl>(D); R && R->isExternal())
+      L = R->getLibraryName();
+    else if (auto *V = llvm::dyn_cast<VarDecl>(D); V && V->isExternal())
+      L = V->getLibraryName();
+    // StdCLib (classic Mac OS's C library, named by Free Pascal's sources):
+    // the C library, linked anyway.
+    if (L.empty() || L.equals_insensitive("stdclib"))
       continue;
-    llvm::StringRef L = R->getLibraryName();
     std::string Lib = L.contains('.') || L.contains('/') ? ":" + L.str() : L.str();
     if (!llvm::is_contained(ExternalLibraries, Lib))
       ExternalLibraries.push_back(Lib);

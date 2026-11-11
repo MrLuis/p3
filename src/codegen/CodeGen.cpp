@@ -54,6 +54,7 @@
 #include "llvm/Support/FileSystem.h"
 #include "llvm/Support/Path.h"
 #include "llvm/Target/TargetMachine.h"
+#include "llvm/TargetParser/Triple.h"
 
 using namespace pcc;
 
@@ -329,6 +330,8 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
       auto *R = llvm::dyn_cast<RoutineDecl>(D);
       if (!llvm::isa<VarDecl>(D) && !(R && !R->isExternal() && !R->isGeneric()))
         continue;
+      if (auto *V = llvm::dyn_cast<VarDecl>(D); V && V->isExternal())
+        continue; // a C variable keeps its symbol
       ExportNames[D] = ("pas." + U.getName().Name + "$" + D->getName().Name).str() +
                        (R ? overloadSuffix(R) : std::string());
       if (Imported)
@@ -1402,6 +1405,18 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
     }
   }
 
+  /// The C library's errno is per thread, not a variable: reached through
+  /// the library's accessor (__errno_location, __error, _errno).
+  static bool isErrno(VarDecl *V) { return V->getExternalName() == "errno"; }
+
+  llvm::Value *errnoAddress() {
+    llvm::Triple T(M.getTargetTriple());
+    const char *Name = T.isOSDarwin()    ? "__error"
+                       : T.isOSWindows() ? "_errno"
+                                         : "__errno_location";
+    return B.CreateCall(classRuntime(Name, B.getPtrTy(), {}), {}, "errno");
+  }
+
   llvm::Value *varAddress(VarDecl *V) {
     if (Expr *Target = V->getAbsolute()) // an overlay has no storage
       return emitAddress(Target);
@@ -1410,6 +1425,8 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
     if (!V->getOwner()) {
       if (V->isPredeclared())
         return standardFile(V->getName().Name);
+      if (V->isExternal() && isErrno(V))
+        return errnoAddress();
       return Globals.lookup(V);
     }
     llvm::Value *Slot = varSlot(V);
@@ -2089,6 +2106,18 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
       auto *V = llvm::dyn_cast<VarDecl>(D);
       if (!V || V->getAbsolute())
         continue;
+      if (V->isExternal()) { // a C variable: its symbol, defined elsewhere
+        if (!isErrno(V)) {
+          llvm::GlobalVariable *G = M.getNamedGlobal(V->getExternalName());
+          if (!G)
+            G = new llvm::GlobalVariable(M, memType(V->getType()),
+                                         /*isConstant=*/false,
+                                         llvm::GlobalValue::ExternalLinkage,
+                                         nullptr, V->getExternalName());
+          Globals[V] = G;
+        }
+        continue;
+      }
       if (V->isTypedConst() || V->isInitializedVar()) { // initialized once
         emitStaticVar(V);
         continue;

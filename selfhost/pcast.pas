@@ -393,7 +393,13 @@ type
               paramDefault: PNode;
               { objfpc: an out parameter, a var parameter (vkVarParam) whose
                 managed values the caller releases before the call }
-              isOut: boolean);
+              isOut: boolean;
+              { Turbo/FPC  x: T; [cvar;] external ['lib'] [name 'sym'];  a C
+                variable (the library and symbol: string constants,
+                evaluated by Sema; the symbol: the name as written unless
+                given) }
+              varExternal, varCVar: boolean; varLibName, varExtName: PName;
+              varLibExpr, varNameExpr: PNode);
       dkConst: (constInit: PNode; constType: PType; constValue: TConstValue);
       dkType: (typeSpec: PTypeSpec; declType: PType);
       dkField: (fieldSpec: PTypeSpec; fieldType: PType);

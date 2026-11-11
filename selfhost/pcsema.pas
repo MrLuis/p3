@@ -4575,12 +4575,55 @@ begin
     root^.owner^.resultAssigned := true;
 end;
 
+function externalString(e: PNode; const what, ofWhat: string; var s: PName): boolean; forward;
+
+{ x: T; [cvar;] external ['lib'] [name 'sym'];  -- a C variable, at program
+  or unit level; the library and symbol: string constants. }
+procedure checkExternalVar(v: PDecl);
+var
+  s: PName;
+begin
+  v^.isUsed := true;
+  if not v^.varExternal then
+  begin
+    ms('''cvar'' without ''external'' (a variable for C code to use) is not ' +
+       'supported yet');
+    errR(v^.ident.loc, identRange(v^.ident));
+    exit;
+  end;
+  if curRoutine <> nil then
+  begin
+    ms('external variable ''');
+    maN(v^.ident.spelling);
+    ma(''' must be declared at program or unit level');
+    errR(v^.ident.loc, identRange(v^.ident));
+  end
+  else if (v^.absTarget <> nil) or (v^.init <> nil) then
+  begin
+    ms('external variable ''');
+    maN(v^.ident.spelling);
+    if v^.absTarget <> nil then
+      ma(''' cannot be ''absolute''')
+    else
+      ma(''' cannot be initialized');
+    errR(v^.ident.loc, identRange(v^.ident));
+  end;
+  if v^.varLibExpr <> nil then
+    if externalString(v^.varLibExpr, 'library name', 'variable', s) then
+      v^.varLibName := s;
+  if v^.varNameExpr <> nil then
+    if externalString(v^.varNameExpr, 'symbol name', 'variable', s) then
+      v^.varExtName := s;
+end;
+
 procedure declareVar(v: PDecl);
 var
   folded: TConstValue;
 begin
   v^.varType := resolveType(v^.varSpec, nil);
   v^.owner := curRoutine;
+  if v^.varExternal or v^.varCVar then
+    checkExternalVar(v);
   if v^.absTarget <> nil then
     checkAbsolute(v, v^.absTarget);
   if v^.init <> nil then
@@ -4795,7 +4838,7 @@ end;
 
 { The string constant e, the library or symbol name (what) of an external
   routine; false after a diagnostic. }
-function externalString(e: PNode; const what: string; var s: PName): boolean;
+function externalString(e: PNode; const what, ofWhat: string; var s: PName): boolean;
 var
   t: PType;
   c: TConstant;
@@ -4817,7 +4860,7 @@ begin
       exit(true);
     end;
   end;
-  ms('the ' + what + ' of an external routine must be a string constant');
+  ms('the ' + what + ' of an external ' + ofWhat + ' must be a string constant');
   errR(e^.b, nodeRange(e));
 end;
 
@@ -4864,10 +4907,10 @@ begin
     errR(r^.ident.loc, identRange(r^.ident));
   end;
   if r^.libraryExpr <> nil then
-    if externalString(r^.libraryExpr, 'library name', s) then
+    if externalString(r^.libraryExpr, 'library name', 'routine', s) then
       r^.libraryName := s;
   if r^.nameExpr <> nil then
-    if externalString(r^.nameExpr, 'symbol name', s) then
+    if externalString(r^.nameExpr, 'symbol name', 'routine', s) then
       r^.externalName := s;
   if r^.isVarArgs and not isCDecl(r) then
   begin

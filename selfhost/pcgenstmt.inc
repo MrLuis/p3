@@ -1742,6 +1742,7 @@ end;
 
 procedure emitGlobals(blk: PBlock);
 var
+  g: TV;
   i, j: longint;
   d, m: PDecl;
   c: PType;
@@ -1759,6 +1760,18 @@ begin
         m := PDecl(listGet(c^.classMembers, j));
         if m^.kind = dkVar then
           emitStaticVar(m);
+      end;
+      continue;
+    end;
+    if (d^.kind = dkVar) and (d^.absTarget = nil) and d^.varExternal then
+    begin
+      { a C variable: its symbol, defined elsewhere }
+      if not isErrno(d) then
+      begin
+        if not irFindGlobal(externalVarName(d), g) then
+          g := irGlobal(externalVarName(d), 'external', memType(d^.varType), irNull,
+                        false, false, true, 0);
+        d^.cgValue := irBox(g);
       end;
       continue;
     end;
@@ -2639,8 +2652,8 @@ begin
       d^.cgImported := imported;
       continue;
     end;
-    if (d^.kind = dkVar) or ((d^.kind = dkRoutine) and not d^.isExternal and
-                             not d^.isGeneric) then
+    if ((d^.kind = dkVar) and not d^.varExternal) or
+       ((d^.kind = dkRoutine) and not d^.isExternal and not d^.isGeneric) then
     begin
       d^.cgExport := intern('pas.' + nm(u^.ident.name) + '$' + nm(d^.ident.name) +
                             overloadSuffix(d));
@@ -2759,6 +2772,7 @@ begin
   listInit(thunksToEmit);
   listInit(loopBlocks);
   hasMainJmpBuf := false;
+  cgTriple := triple;
   irInit(sourceName, triple, dataLayout);
   listInit(fields);
   listAdd(fields, irPtrT);

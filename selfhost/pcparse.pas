@@ -931,6 +931,10 @@ end;
 
 procedure parseVarPart(var decls: TPtrList);
 var
+  count: longint;
+  isCVar: boolean;
+  dirLoc: TLoc;
+  libExpr, nameExpr: PNode;
   listed: boolean;
   hf: longint;
   hm: PName;
@@ -1011,6 +1015,55 @@ begin
     begin
       skipUntil([tkSemi, tkKwBegin]);
       tryConsume(tkSemi);
+      continue;
+    end;
+
+    { Turbo/FPC: a C variable  x: T; [cvar;] external ['lib'] [name 'sym'];
+      (neither word is reserved: external: T declares a variable) }
+    count := 0;
+    if ts <> nil then
+      count := names.count;
+    while (mode <> lmISO) and
+          (isIdentifierNamed('cvar') or isIdentifierNamed('external')) and
+          not (peekKind in [tkColon, tkComma]) do
+    begin
+      isCVar := isIdentifierNamed('cvar');
+      dirLoc := consumeToken;
+      libExpr := nil;
+      nameExpr := nil;
+      if not isCVar then
+      begin
+        if (tok.kind <> tkSemi) and not isIdentifierNamed('name') then
+          libExpr := parseExpression;
+        if isIdentifierNamed('name') then
+        begin
+          consumeToken;
+          if tok.kind = tkSemi then
+            diagError(tok.loc, 'expected the external symbol name')
+          else
+            nameExpr := parseExpression;
+        end;
+        if (nameExpr <> nil) and (count > 1) then
+          diagErrorR(dirLoc, '''name'' can only be given for one variable',
+                     makeRange(PIdent(listGet(names, 0))^.loc,
+                               identRange(PIdent(listGet(names, names.count - 1))^).e));
+      end;
+      if isCVar then
+        expect(tkSemi, 'after ''cvar''')
+      else
+        expect(tkSemi, 'after ''external''');
+      for i := decls.count - count to decls.count - 1 do
+      begin
+        v := PDecl(listGet(decls, i));
+        if isCVar then
+          v^.varCVar := true
+        else
+        begin
+          v^.varExternal := true;
+          v^.varLibExpr := libExpr;
+          v^.varNameExpr := nameExpr;
+        end;
+      end;
     end;
   end;
 end;
