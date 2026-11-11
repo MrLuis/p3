@@ -1304,9 +1304,29 @@ begin
   checkPropertyRead := errorType;
 end;
 
+{ Is d a member of a type helper (a property: by its getter)? }
+function isHelperMember(d: PDecl): boolean;
+begin
+  if (d <> nil) and (d^.kind = dkProperty) then
+    d := d^.readDecl;
+  isHelperMember := (d <> nil) and (d^.kind = dkRoutine) and
+                    (d^.ownerClass <> nil) and (d^.ownerClass^.classHelperFor <> nil);
+end;
+
 { The type of a property assigned to; it needs a write accessor. }
 function checkPropertyWrite(p: PDecl; const id: TIdent): PType;
+var
+  acc: PDecl;
 begin
+  acc := p^.writeDecl;
+  if acc = nil then
+    acc := p^.readDecl;
+  if isHelperMember(acc) then
+  begin
+    ms('writing a property of a type helper is not supported yet');
+    errR(id.loc, identRange(id));
+    exit(errorType);
+  end;
   if (p^.writeDecl <> nil) or isError(p^.propType) or
      ((p^.readDecl = nil) and identValid(p^.writeName)) then
     exit(p^.propType);
@@ -1341,6 +1361,9 @@ begin
   if mode <> lmObjFPC then
     exit;
   d := typeNamedBy(base);
+  if (d <> nil) and (d^.kind = dkType) and (d^.declType <> nil) and
+     (d^.declType^.kind = tyClass) and (d^.declType^.classHelperFor <> nil) then
+    exit; { (not a type: its methods are used on values) }
   if (d <> nil) and (d^.kind = dkType) and (d^.declType <> nil) and
      (d^.declType^.kind = tyClass) then
   begin
@@ -1404,11 +1427,58 @@ begin
                (e^.fieldDecl^.kind = dkType);
 end;
 
+{ The type helper active for values of type t (the last declared in
+  scope; a string constant: the ansistring or shortstring one), or nil. }
+function helperFor(t: PType): PType;
+var
+  d: PDecl;
+  h: PType;
+begin
+  helperFor := nil;
+  if (t = nil) or isError(t) or (mode <> lmObjFPC) then
+    exit;
+  if t^.kind = tyStringLit then
+  begin
+    h := helperFor(ansiStringType);
+    if h = nil then
+      h := helperFor(shortStringType(255));
+    exit(h);
+  end;
+  d := lookup(helperKey(t));
+  if (d <> nil) and (d^.kind = dkType) and (d^.declType <> nil) and
+     (d^.declType^.kind = tyClass) then
+    helperFor := d^.declType;
+end;
+
+{ The helper of the type base names (AnsiString.Join), or nil. }
+function helperNamedBy(base: PNode): PType;
+var
+  d: PDecl;
+  t, h: PType;
+begin
+  helperNamedBy := nil;
+  if mode <> lmObjFPC then
+    exit;
+  d := typeNamedBy(base);
+  if d = nil then
+    exit;
+  t := d^.declType;
+  if (t = nil) or (t^.kind = tyClass) or (memberTableOf(t) <> nil) then
+    exit;
+  h := helperFor(t);
+  if h = nil then
+    exit;
+  if base^.kind = nkNameRef then
+    base^.refDecl := d;
+  base^.typ := t;
+  helperNamedBy := h;
+end;
+
 { Resolves r.f / obj.member / TFoo.Create; nil after a diagnostic. }
 function resolveMember(e: PNode): PDecl;
 var
-  viaClass, bt, owner: PType;
-  d: PDecl;
+  viaClass, bt, owner, h: PType;
+  d, td: PDecl;
   viaRef, ok: boolean;
   what: string;
 begin
@@ -1416,12 +1486,71 @@ begin
   viaClass := classNamedBy(e^.base);
   if (viaClass <> nil) and (e^.base^.kind = nkNameRef) then { TFoo.Create: a use of TFoo }
     warnHints(e^.base^.refDecl, e^.base^.ref);
+  if viaClass = nil then
+  begin
+    h := helperNamedBy(e^.base);
+    if h <> nil then { AnsiString.Join }
+    begin
+      owner := nil;
+      d := findMember(h, e^.fieldName.name, owner);
+      if d = nil then
+      begin
+        ms('no member named ''');
+        maN(e^.fieldName.spelling);
+        ma(''' in type helper ');
+        maT(h);
+        errR(e^.fieldName.loc, identRange(e^.fieldName));
+        exit;
+      end;
+      checkMemberAccess(d, owner, e^.fieldName);
+      if (d^.kind <> dkConst) and not ((d^.kind = dkRoutine) and d^.isStatic) then
+      begin
+        ms('only static class methods and constants of a type helper can be ' +
+           'used through a type name; ''');
+        maN(e^.fieldName.spelling);
+        ma(''' is a ' + kindName(d));
+        errR(e^.fieldName.loc, identRange(e^.fieldName));
+        exit;
+      end;
+      e^.fieldDecl := d;
+      exit(d);
+    end;
+    td := typeNamedBy(e^.base); { TH.Join }
+    if (td <> nil) and (td^.declType <> nil) and (td^.declType^.kind = tyClass) and
+       (td^.declType^.classHelperFor <> nil) then
+    begin
+      ms('the members of type helper ');
+      maT(td^.declType);
+      ma(' are used through ');
+      maT(td^.declType^.classHelperFor);
+      errR(e^.base^.b, nodeRange(e^.base));
+      exit;
+    end;
+  end;
   if viaClass <> nil then
     bt := viaClass
   else
     bt := check(e^.base);
   if isError(bt) then
     exit;
+  if (viaClass = nil) and not (bt^.kind in [tyClass, tyClassRef, tyInterface]) then
+  begin
+    h := helperFor(bt);
+    if h <> nil then { a type helper's member }
+    begin
+      owner := nil;
+      d := findMember(h, e^.fieldName.name, owner);
+      if d <> nil then
+      begin
+        checkMemberAccess(d, owner, e^.fieldName);
+        e^.fieldDecl := d;
+        { Self is by reference: a temporary for a value }
+        e^.helperValue := not isHelperVariable(e^.base) or
+                          (constParamRoot(e^.base) <> nil);
+        exit(d);
+      end;
+    end;
+  end;
   if memberTableOf(bt) <> nil then { an advanced record's member }
     bt := memberTableOf(bt);
   if bt^.kind = tyRecord then
@@ -1529,7 +1658,7 @@ end;
   a call through a procedural value? }
 function isMethodCallee(callee: PNode): boolean;
 var
-  bt, owner: PType;
+  bt, owner, h: PType;
   d: PDecl;
 begin
   if callee^.kind = nkInherited then
@@ -1538,7 +1667,25 @@ begin
     exit(false);
   if classNamedBy(callee^.base) <> nil then
     exit(true);
+  h := helperNamedBy(callee^.base);
+  if h <> nil then
+  begin
+    owner := nil;
+    d := findMember(h, callee^.fieldName.name, owner);
+    exit((d <> nil) and (d^.kind = dkRoutine));
+  end;
   bt := check(callee^.base);
+  if not (bt^.kind in [tyClass, tyClassRef, tyInterface]) then
+  begin
+    h := helperFor(bt);
+    if h <> nil then
+    begin
+      owner := nil;
+      d := findMember(h, callee^.fieldName.name, owner);
+      if (d <> nil) and (d^.kind = dkRoutine) then
+        exit(true);
+    end;
+  end;
   if bt^.kind = tyInterface then
     exit(findInterfaceMethod(bt, callee^.fieldName.name) <> nil);
   if memberTableOf(bt) <> nil then { an advanced record's method }

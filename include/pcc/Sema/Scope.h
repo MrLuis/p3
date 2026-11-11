@@ -89,6 +89,9 @@ public:
     return Inserted ? nullptr : It->second;
   }
 
+  /// Declares (or redeclares) Name as D in this scope.
+  void set(llvm::StringRef Name, Decl *D) { Symbols[Name] = D; }
+
   /// Calls Fn(name) for each name declared directly in this scope.
   template <typename FnT> void forEachName(FnT Fn) const {
     if (WithRecord) {

@@ -1300,6 +1300,24 @@ begin
   end;
 end;
 
+{ Is e a variable a type helper's method can change (not a method's
+  result: r.M, r.M.f)? }
+function isHelperVariable(e: PNode): boolean;
+begin
+  if e^.kind = nkField then
+  begin
+    if (e^.fieldDecl <> nil) and (e^.fieldDecl^.kind = dkVar) then
+      exit(true);
+    if (e^.fieldDecl = nil) or (e^.fieldDecl^.kind <> dkField) then
+      exit(false);
+    exit(isObject(e^.base) or isHelperVariable(e^.base));
+  end;
+  if (e^.kind = nkIndex) and (e^.idxProp = nil) and (e^.base^.typ <> nil) and
+     (e^.base^.typ^.kind <> tyDynArray) then
+    exit(isHelperVariable(e^.base));
+  isHelperVariable := isVariableReference(e);
+end;
+
 { The const parameter a designator is part of (x, x[i], x.f; not x^ or
   obj.f). }
 function constParamRoot(e: PNode): PDecl;
@@ -1901,6 +1919,15 @@ begin
         end;
         if d^.kind = dkType then
         begin
+          if (d^.declType <> nil) and (d^.declType^.kind = tyClass) and
+             (d^.declType^.classHelperFor <> nil) then
+          begin
+            ms('type helper ''');
+            maN(ts^.tname.spelling);
+            ma(''' cannot be used as a type');
+            errR(ts^.tname.loc, identRange(ts^.tname));
+            exit;
+          end;
           if d^.declType <> nil then
             buildType := d^.declType;
           exit;
@@ -2129,6 +2156,11 @@ begin
         ms('an interface type must be declared in a ''type'' section');
         errR(ts^.b, specRange(ts));
       end;
+    tsHelper:
+      begin
+        ms('a type helper must be declared in a ''type'' section');
+        errR(ts^.b, specRange(ts));
+      end;
     tsClassRef: { class of TFoo (TFoo may be forward) }
       begin
         d := lookup(ts^.tname.name);
@@ -2202,6 +2234,7 @@ end;
 procedure declareClass(td: PDecl); forward;
 procedure declareInterface(td: PDecl); forward;
 procedure declareAdvancedRecord(td: PDecl); forward;
+procedure declareHelper(td: PDecl); forward;
 
 procedure declareType(td: PDecl);
 begin
@@ -2214,6 +2247,11 @@ begin
   if td^.typeSpec^.kind = tsClass then
   begin
     declareClass(td);
+    exit;
+  end;
+  if td^.typeSpec^.kind = tsHelper then
+  begin
+    declareHelper(td);
     exit;
   end;
   if td^.typeSpec^.kind = tsInterface then
@@ -2233,6 +2271,14 @@ procedure maDidYouMeanMember(c: PType; name: PName); forward;
   scope). }
 procedure declareNestedType(td: PDecl);
 begin
+  if td^.typeSpec^.kind = tsHelper then
+  begin
+    ms('type helpers cannot be declared in a class or record');
+    errR(td^.ident.loc, identRange(td^.ident));
+    td^.declType := errorType;
+    declare(td);
+    exit;
+  end;
   if td^.typeSpec^.kind = tsInterface then
   begin
     ms('interfaces cannot be declared in a class or record yet');
@@ -2569,12 +2615,18 @@ var
 begin
   self_ := newDecl(dkVar, memberIdent('Self'), noLoc);
   self_^.varKind := vkValueParam;
-  { a record's method gets the record by reference; in a class method,
-    Self is the class (a class reference) }
+  { a record's method gets the record by reference, a type helper's the
+    value it extends; in a class method, Self is the class (a class
+    reference) }
   if c^.classRecord <> nil then
   begin
     self_^.varKind := vkVarParam;
     self_^.varType := c^.classRecord;
+  end
+  else if c^.classHelperFor <> nil then
+  begin
+    self_^.varKind := vkVarParam;
+    self_^.varType := c^.classHelperFor;
   end
   else if r^.isClassMethod then
     self_^.varType := classRefOf(c)
@@ -3704,6 +3756,161 @@ begin
   nestPrefix := savedPrefix;
 end;
 
+{ The scope key of the helper active for t (hidden: not a listed name). }
+function helperKey(t: PType): PName;
+begin
+  helperKey := intern('#helper:' + intToStr(t^.id));
+end;
+
+procedure defineHelperMethod(c: PType; r: PDecl);
+begin
+  r^.ownerClass := c;
+  r^.parent := nil;
+  r^.level := 1;
+  resolveSignature(r);
+  if r^.isVirtual or r^.isOverride or r^.isAbstract then
+  begin
+    ms('the methods of a type helper cannot be ''virtual'', ''override'' or ' +
+       '''abstract''');
+    errR(r^.ident.loc, identRange(r^.ident));
+  end;
+  if r^.isClassMethod then
+    r^.isStatic := true { no Self }
+  else
+    makeSelf(r, c);
+end;
+
+{ TH = type helper [(Parent)] for T ... end: a member table (a class type
+  that is not a type of values) whose methods' Self is a T, by reference;
+  from here on the helper active for T. }
+procedure declareHelper(td: PDecl);
+var
+  c, t, parentHelper: PType;
+  ts: PTypeSpec;
+  members, noList: TPtrList;
+  own: TIntMap;
+  memberScope, savedScope: PScope;
+  i: longint;
+  m, prev, overloadOf, pd: PDecl;
+
+  procedure empty; { (its methods' bodies are not checked) }
+  begin
+    listInit(noList);
+    defineClass(c, nil, noList, noList, noList, curModule);
+    td^.declType := errorType;
+  end;
+
+begin
+  ts := td^.typeSpec;
+  c := newClassType;
+  setDeclName(c, typeDeclName(td^.ident));
+  c^.classModule := curModule;
+  td^.declType := c;
+  declare(td);
+  if curRoutine <> nil then
+  begin
+    ms('type helper ''');
+    maN(td^.ident.spelling);
+    ma(''' must be declared at program or unit level');
+    errR(td^.ident.loc, identRange(td^.ident));
+    empty;
+    exit;
+  end;
+  t := resolveType(ts^.helperFor, nil);
+  if isError(t) then
+  begin
+    empty;
+    exit;
+  end;
+  if t^.kind in [tyClass, tyClassRef, tyInterface] then
+  begin
+    ms('type helpers for classes and interfaces are not supported yet');
+    errR(ts^.helperFor^.b, specRange(ts^.helperFor));
+    empty;
+    exit;
+  end;
+  c^.classHelperFor := t;
+  parentHelper := nil;
+  if identValid(ts^.helperParent) then
+  begin
+    pd := lookup(ts^.helperParent.name);
+    if (pd = nil) or (pd^.kind <> dkType) or (pd^.declType = nil) or
+       (pd^.declType^.kind <> tyClass) or (pd^.declType^.classHelperFor = nil) then
+    begin
+      ms('''');
+      maN(ts^.helperParent.spelling);
+      ma(''' is not a type helper');
+      errR(ts^.helperParent.loc, identRange(ts^.helperParent));
+    end
+    else if pd^.declType^.classHelperFor <> t then
+    begin
+      ms('''');
+      maN(ts^.helperParent.spelling);
+      ma(''' is a helper for ');
+      maT(pd^.declType^.classHelperFor);
+      ma(', not for ');
+      maT(t);
+      errR(ts^.helperParent.loc, identRange(ts^.helperParent));
+    end
+    else
+      parentHelper := pd^.declType;
+  end;
+  memberScope := newScope(cur);
+  savedScope := cur;
+  cur := memberScope;
+  listInit(members);
+  mapInit(own);
+  for i := 0 to ts^.helperMembers.count - 1 do
+  begin
+    m := PDecl(listGet(ts^.helperMembers, i));
+    overloadOf := nil;
+    prev := PDecl(mapGet(own, m^.ident.name^.id));
+    if prev <> nil then
+    begin
+      if prev^.kind = dkRoutine then
+        overloadOf := prev;
+      if (overloadOf = nil) or (m^.kind <> dkRoutine) then
+      begin
+        ms('redefinition of ''');
+        maN(m^.ident.spelling);
+        ma('''');
+        errR(m^.ident.loc, identRange(m^.ident));
+        ms('previous definition is here');
+        note(prev^.loc);
+        continue;
+      end;
+    end
+    else
+      mapPut(own, m^.ident.name^.id, m);
+    listAdd(members, m);
+    if m^.kind = dkConst then
+    begin
+      declareConst(m);
+      continue;
+    end;
+    if m^.kind = dkRoutine then
+    begin
+      defineHelperMethod(c, m);
+      if (overloadOf <> nil) and not addOverload(overloadOf, m) then
+      begin
+        m^.ownerClass := nil; { rejected: not a member }
+        listPop(members);
+      end;
+      continue;
+    end;
+    if m^.propIsDefault then
+    begin
+      ms('a type helper cannot have a default property');
+      errR(m^.loc, identRange(m^.ident));
+    end;
+    definePropertyAccessors(c, parentHelper, m, own);
+  end;
+  cur := savedScope;
+  listInit(noList);
+  defineClass(c, parentHelper, members, noList, noList, curModule);
+  scopeSet(cur, helperKey(t), td);
+end;
+
 function memberTableOf(t: PType): PType;
 begin
   if (t <> nil) and (t^.kind = tyRecord) then
@@ -4163,6 +4370,24 @@ var
   r: PDecl;
   c: PType;
 begin
+  if d^.typeSpec^.kind = tsHelper then
+  begin
+    c := d^.declType;
+    if (c = nil) or (c^.kind <> tyClass) then
+      exit;
+    for j := 0 to c^.classMembers.count - 1 do
+    begin
+      r := PDecl(listGet(c^.classMembers, j));
+      if (r^.kind = dkRoutine) and (r^.body = nil) then
+      begin
+        ms('method ''');
+        maQualified(c, r^.ident);
+        ma(''' is declared but never implemented');
+        errR(r^.ident.loc, identRange(r^.ident));
+      end;
+    end;
+    exit;
+  end;
   c := memberTableOf(d^.declType);
   if c <> nil then { an advanced record's }
   begin
@@ -4248,7 +4473,8 @@ end;
 function hasMembers(w: PWithContext): boolean;
 begin
   hasMembers := (w <> nil) and
-    ((classOfWith(w) <> nil) or (memberTableOf(w^.rec^.typ) <> nil));
+    ((w^.helper <> nil) or (classOfWith(w) <> nil) or
+     (memberTableOf(w^.rec^.typ) <> nil));
 end;
 
 { Is d an instance member (a field, a property, a method that is not a
@@ -6163,8 +6389,14 @@ begin
     w := PWithContext(arenaAlloc(sizeof(TWithContext)));
     w^.rec := selfRef;
     w^.isSelf := true;
+    if r^.ownerClass^.classHelperFor <> nil then
+      w^.helper := r^.ownerClass;
     cur := newClassScope(cur, r^.ownerClass, w);
     cur^.routineBoundary := true;
+    { a record helper's method also sees the record's fields }
+    if (r^.ownerClass^.classHelperFor <> nil) and
+       (r^.ownerClass^.classHelperFor^.kind = tyRecord) then
+      cur := newWithScope(cur, r^.ownerClass^.classHelperFor, w);
   end;
   cur := newScope(cur);
   if cur^.parent = base then

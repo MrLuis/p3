@@ -379,9 +379,12 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
 
   /// The class D defines (a type declaration `TFoo = class ... end`, not a
   /// forward one), or null.
-  /// The member table of the advanced record D declares, or null.
+  /// The member table of the advanced record D declares (or the type
+  /// helper D declares), or null.
   static ClassType *advancedRecord(Decl *D) {
     auto *TD = llvm::dyn_cast<TypeDecl>(D);
+    if (TD && llvm::isa_and_nonnull<HelperTypeSpec>(TD->getTypeSpec()))
+      return llvm::dyn_cast_or_null<ClassType>(TD->getType());
     auto *RT = TD ? llvm::dyn_cast_or_null<RecordType>(TD->getType()) : nullptr;
     return RT ? RT->getMemberTable() : nullptr;
   }
@@ -3099,6 +3102,12 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
   /// holds): kept in a temporary until the statement ends. T: its type, if
   /// that may be a dynamic array.
   llvm::Value *holdResult(llvm::Value *V, Type *T = nullptr) {
+    heldTemp(V, T);
+    return V;
+  }
+
+  /// holdResult's temporary: its address.
+  llvm::Value *heldTemp(llvm::Value *V, Type *T = nullptr) {
     bool Dyn = T && T->isDynArray();
     llvm::IRBuilder<> Entry(&CurFn->getEntryBlock(),
                             CurFn->getEntryBlock().begin());
@@ -3115,7 +3124,7 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
     LiveTemps.push_back(Slot);
     if (CurRoutine)
       RoutineTemps.push_back(Slot);
-    return V;
+    return Slot;
   }
 
   /// A function's record result V, holding ansistrings the caller now owns:
@@ -3223,9 +3232,10 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
   }
 
   llvm::Value *withBase(WithContext *W) {
-    if (W->IsSelf) // load Self; a record's Self is its address
-      return W->Record->getType()->isRecord() ? emitAddress(W->Record)
-                                              : visitExpr(W->Record);
+    if (W->IsSelf) // load Self; a record's (a type helper's) Self is its address
+      return W->Record->getType()->isRecord() || isVarParamRef(W->Record)
+                 ? emitAddress(W->Record)
+                 : visitExpr(W->Record);
     return WithAddrs.lookup(W);
   }
 
@@ -3256,6 +3266,50 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
     llvm::Value *V = emitCall(Op, {E});
     E->resumeConversion();
     return V;
+  }
+
+  static bool isVarParamRef(Expr *E) {
+    auto *N = llvm::dyn_cast<NameRefExpr>(E);
+    auto *V = N ? llvm::dyn_cast_or_null<VarDecl>(N->getDecl()) : nullptr;
+    return V && V->isVarParam();
+  }
+
+  /// The method of type helper member D (a property: its getter), or null.
+  static RoutineDecl *helperRoutine(Decl *D) {
+    if (auto *P = llvm::dyn_cast<PropertyDecl>(D))
+      D = P->getRead();
+    auto *R = llvm::dyn_cast_or_null<RoutineDecl>(D);
+    return R && R->getClass() && R->getClass()->isHelper() ? R : nullptr;
+  }
+
+  /// The Self of a type helper's member used through F: the address of
+  /// its base, or of a temporary holding the base's value.
+  llvm::Value *helperSelf(FieldExpr *F) {
+    Expr *Base = F->getBase();
+    if (!F->isHelperValue())
+      return emitAddress(Base);
+    Type *T = helperRoutine(F->getMember())->getClass()->getHelperFor();
+    if (T->isAnsiString()) {
+      llvm::Value *V = emitAnsi(Base);
+      astrCall("__pas_astr_addref", B.getVoidTy(), {V});
+      return heldTemp(V);
+    }
+    if (T->isDynArray()) {
+      llvm::Value *V = visitExpr(Base);
+      astrCall("__pas_dyn_addref", B.getVoidTy(), {V});
+      return heldTemp(V, T);
+    }
+    if (auto *S = llvm::dyn_cast<ShortStringType>(T)) {
+      llvm::Value *Tmp = newStringTemp(S->getMaxLength());
+      emitStringAssign(Tmp, S, Base);
+      return Tmp;
+    }
+    llvm::Value *Tmp = createTemp(memType(T), "self.tmp");
+    if (T->isStructured())
+      copyAggregate(Tmp, visitExpr(Base), T);
+    else
+      storeScalar(Tmp, visitExpr(Base), T);
+    return Tmp;
   }
 
   /// R(Args) on record Obj (its address): a method, or a class method or
@@ -3376,7 +3430,7 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
   llvm::Value *emitMethodCall(RoutineDecl *R, llvm::Value *Obj,
                               llvm::ArrayRef<Expr *> Args, bool Inherited,
                               SourceLocation L, bool SelfIsClass = false) {
-    if (R->getClass() && R->getClass()->getRecord())
+    if (R->getClass() && R->getClass()->hasSelfByReference())
       return emitRecordMethodCall(R, Obj, Args);
     if (R->isConstructor() && SelfIsClass && !Inherited)
       return emitConstructionThrough(Obj, R, Args, L);
@@ -3551,6 +3605,9 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
   /// obj.M(args) or TFoo.Create(args) through FieldExpr F.
   llvm::Value *emitMemberCall(FieldExpr *F, llvm::ArrayRef<Expr *> Args) {
     auto *R = llvm::cast<RoutineDecl>(F->getMember());
+    if (R->getClass() && R->getClass()->isHelper()) // a type helper's
+      return R->hasSelf() ? emitRecordMethodCall(R, helperSelf(F), Args)
+                          : emitCall(R, Args);
     if (R->isStatic() && !F->getBase()->getType()->isRecord())
       return emitCall(R, Args); // a class's static method: no Self
     if (auto *RT = llvm::dyn_cast<RecordType>(F->getBase()->getType())) {
@@ -3684,6 +3741,9 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
       return loadScalar(Globals[V], V->getType(), V->getName().Name);
     }
     Type *C = F->getBase()->getType();
+    if (auto *P = llvm::dyn_cast<PropertyDecl>(D);
+        P && helperRoutine(P)) // a type helper's
+      return emitPropertyRead(P, helperSelf(F), C);
     llvm::Value *Obj = memberObject(F->getBase());
     if (auto *P = llvm::dyn_cast<PropertyDecl>(D))
       return emitPropertyRead(P, Obj, C);

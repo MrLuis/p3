@@ -544,6 +544,25 @@ begin
           printDecl(PDecl(listGet(ts^.intfMemberList, i)));
         indent := indent - 2;
       end;
+    tsHelper:
+      begin
+        line('HelperTypeSpec');
+        if identValid(ts^.helperParent) then
+        begin
+          bufAdd(outBuf, ' ''');
+          bufAddName(outBuf, ts^.helperParent.name);
+          bufAddChar(outBuf, '''');
+        end;
+        loc(ts^.b);
+        indent := indent + 2;
+        line('For');
+        indent := indent + 2;
+        printTypeSpec(ts^.helperFor);
+        indent := indent - 2;
+        for i := 0 to ts^.helperMembers.count - 1 do
+          printDecl(PDecl(listGet(ts^.helperMembers, i)));
+        indent := indent - 2;
+      end;
   end;
 end;
 

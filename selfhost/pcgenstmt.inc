@@ -1843,6 +1843,12 @@ end;
 function advancedRecord(d: PDecl): PType;
 begin
   advancedRecord := nil;
+  if (d^.kind = dkType) and (d^.typeSpec <> nil) and (d^.typeSpec^.kind = tsHelper) then
+  begin
+    if (d^.declType <> nil) and (d^.declType^.kind = tyClass) then
+      advancedRecord := d^.declType;
+    exit;
+  end;
   if (d^.kind = dkType) and (d^.declType <> nil) and (d^.declType^.kind = tyRecord) then
     advancedRecord := d^.declType^.memberTable;
 end;

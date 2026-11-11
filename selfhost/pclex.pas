@@ -69,6 +69,7 @@ type
     conds: TPtrList;
     corbaInterfaces: boolean; { $interfaces corba (default: com) }
     advancedRecords: boolean; { $modeswitch advancedrecords }
+    typeHelpers: boolean; { $modeswitch typehelpers }
     longStrings: boolean; { H+: string is an ansistring }
     { macros ($macro on, $define NAME := value, as in Free Pascal): upper-
       case name id -> PMacro; a use of NAME lexes its value (macroStack:
@@ -334,6 +335,7 @@ begin
   listInit(lx.conds);
   lx.corbaInterfaces := false;
   lx.advancedRecords := false;
+  lx.typeHelpers := false;
   lx.longStrings := false;
   lx.macrosOn := false;
   lx.inlineOn := mode = lmObjFPC;
@@ -1422,6 +1424,13 @@ begin
        ((q >= e) or ((e - q = 1) and ((at(lx, q) = '+') or (at(lx, q) = '-')))) then
     begin
       lx.advancedRecords := not ((q < e) and (at(lx, q) = '-'));
+      exit;
+    end;
+    { $modeswitch typehelpers[+|-]: type helpers }
+    if (arg = 'typehelpers') and
+       ((q >= e) or ((e - q = 1) and ((at(lx, q) = '+') or (at(lx, q) = '-')))) then
+    begin
+      lx.typeHelpers := not ((q < e) and (at(lx, q) = '-'));
       exit;
     end;
   end;

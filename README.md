@@ -182,6 +182,35 @@ type
   writeln(v.Len2);
 ```
 
+- **Type helpers** (`{$modeswitch typehelpers}`, as in Free Pascal):
+  `TAnsiStringHelper = type helper for AnsiString` adds methods,
+  properties (read through a method), constants and static class methods
+  to the values of a type: strings, ordinals, enumerations, reals,
+  records and dynamic arrays. `Self` is the value, by reference, so
+  `s.Append('x')` can change `s`; on a value (`'abc'.ToUpper`, a
+  function's result, a constant) the method works on a temporary. Static
+  methods and constants are used through the extended type
+  (`AnsiString.Join(a, b)`), not the helper's name. The helper declared
+  last for a type is the one used; `type helper(TParent) for T` extends
+  an earlier helper. A record helper's methods see the record's fields.
+  Helpers are declared at program or unit level. Not supported: helpers
+  for classes and interfaces, constructors, typed constants and fields
+  in helpers, writing a helper's property, and a statement that begins
+  with a string literal (`'abc'.Clear;`).
+
+```pascal
+{$modeswitch typehelpers}
+type
+  TAnsiStringHelper = type helper for AnsiString
+    function ToUpper: AnsiString;
+    procedure Append(const Value: AnsiString);
+    class function Join(const a, b: AnsiString): AnsiString; static;
+  end;
+...
+  s.Append(' world');
+  writeln(s.ToUpper, ' ', AnsiString.Join('a', 'b'), ' ', 'lit'.ToUpper);
+```
+
 Not supported (reported as such): class properties, class constructors
 and destructors, `stored`, `implements`, properties in interfaces.
 

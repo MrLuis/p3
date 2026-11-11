@@ -2486,7 +2486,18 @@ end;
 
 { A function's result v, a COM interface (a reference the caller now
   holds): kept in a temporary until the statement ends. }
+function heldTemp(const v: TV): TV; forward;
+
 function holdResult(const v: TV): TV;
+var
+  ignored: TV;
+begin
+  ignored := heldTemp(v);
+  holdResult := v;
+end;
+
+{ holdResult's temporary: its address. }
+function heldTemp(const v: TV): TV;
 var
   slot: TV;
 begin
@@ -2501,12 +2512,23 @@ begin
   listAdd(liveTemps, irBox(slot));
   if curRoutine <> nil then
     listAdd(routineTemps, irBox(slot));
-  holdResult := v;
+  heldTemp := slot;
 end;
 
 { A dynamic array result v of type t, a reference the caller now holds:
   kept in a temporary until the statement ends. }
+function heldDynTemp(const v: TV; t: PType): TV; forward;
+
 function holdDynResult(const v: TV; t: PType): TV;
+var
+  ignored: TV;
+begin
+  ignored := heldDynTemp(v, t);
+  holdDynResult := v;
+end;
+
+{ holdDynResult's temporary: its address. }
+function heldDynTemp(const v: TV; t: PType): TV;
 var
   slot: TV;
 begin
@@ -2519,7 +2541,7 @@ begin
   listAdd(liveTemps, irBox(slot));
   if curRoutine <> nil then
     listAdd(routineTemps, irBox(slot));
-  holdDynResult := v;
+  heldDynTemp := slot;
 end;
 
 { A function's record result v, holding ansistrings the caller now owns:
@@ -2853,9 +2875,11 @@ end;
   address of a with statement's record. }
 function withBase(w: PWithContext): TV;
 begin
-  if w^.isSelf then { load Self; a record's Self is its address }
+  if w^.isSelf then { load Self; a record's (a type helper's) Self is its address }
   begin
-    if w^.rec^.typ^.kind = tyRecord then
+    if (w^.rec^.typ^.kind = tyRecord) or
+       ((w^.rec^.kind = nkNameRef) and (w^.rec^.refDecl <> nil) and
+        (w^.rec^.refDecl^.kind = dkVar) and (w^.rec^.refDecl^.varKind = vkVarParam)) then
       withBase := emitAddress(w^.rec)
     else
       withBase := visitExpr(w^.rec);
@@ -3103,6 +3127,55 @@ begin
     emitRecordMethodCall := irNull;
 end;
 
+{ The method of type helper member d (a property: its getter), or nil. }
+function helperRoutine(d: PDecl): PDecl;
+begin
+  helperRoutine := nil;
+  if d^.kind = dkProperty then
+    d := d^.readDecl;
+  if (d <> nil) and (d^.kind = dkRoutine) and (d^.ownerClass <> nil) and
+     (d^.ownerClass^.classHelperFor <> nil) then
+    helperRoutine := d;
+end;
+
+{ The Self of a type helper's member used through e: the address of its
+  base, or of a temporary holding the base's value. }
+function helperSelf(e: PNode): TV;
+var
+  base: PNode;
+  t: PType;
+  v, tmp: TV;
+begin
+  base := e^.base;
+  if not e^.helperValue then
+    exit(emitAddress(base));
+  t := helperRoutine(e^.fieldDecl)^.ownerClass^.classHelperFor;
+  if t^.kind = tyAnsiString then
+  begin
+    v := emitAnsi(base);
+    astrV1('__pas_astr_addref', v);
+    exit(heldTemp(v));
+  end;
+  if t^.kind = tyDynArray then
+  begin
+    v := visitExpr(base);
+    astrV1('__pas_dyn_addref', v);
+    exit(heldDynTemp(v, t));
+  end;
+  if t^.kind = tyShortString then
+  begin
+    tmp := newStringTemp(t^.maxLength);
+    emitStringAssign(tmp, t, base);
+    exit(tmp);
+  end;
+  tmp := irCreateTemp(memType(t), 'self.tmp');
+  if isStructured(t) then
+    copyAggregate(tmp, visitExpr(base), t)
+  else
+    storeScalar(tmp, visitExpr(base), t);
+  helperSelf := tmp;
+end;
+
 { TR.Create(args): a new record (zeroed, in a temporary) initialized by the
   constructor ctor. }
 function emitRecordConstruction(rt: PType; ctor: PDecl; const args: TPtrList): TV;
@@ -3138,7 +3211,8 @@ var
   msgField: PDecl;
 begin
   emitMethodCallC := irNull;
-  if (r^.ownerClass <> nil) and (r^.ownerClass^.classRecord <> nil) then
+  if (r^.ownerClass <> nil) and ((r^.ownerClass^.classRecord <> nil) or
+                                 (r^.ownerClass^.classHelperFor <> nil)) then
     exit(emitRecordMethodCall(r, obj, args));
   if (r^.methodKind = mtConstructor) and selfIsClass and not inherited_ then
     exit(emitConstructionThrough(obj, r, args, loc));
@@ -3434,6 +3508,12 @@ var
   obj, v, table, slot, fn, res: TV;
 begin
   r := e^.fieldDecl;
+  if (r^.ownerClass <> nil) and (r^.ownerClass^.classHelperFor <> nil) then
+  begin { a type helper's }
+    if hasSelf(r) then
+      exit(emitRecordMethodCall(r, helperSelf(e), args));
+    exit(emitCall(r, args));
+  end;
   if r^.isStatic and (e^.base^.typ^.kind <> tyRecord) then
     exit(emitCall(r, args)); { a class's static method: no Self }
   if e^.base^.typ^.kind = tyRecord then
@@ -3597,6 +3677,8 @@ begin
     exit(loadScalar(PTVBox(d^.cgValue)^, d^.varType, nm(d^.ident.name)));
   end;
   c := e^.base^.typ;
+  if (d^.kind = dkProperty) and (helperRoutine(d) <> nil) then { a type helper's }
+    exit(emitPropertyRead(d, helperSelf(e), c));
   obj := memberObject(e^.base);
   if d^.kind = dkProperty then
     exit(emitPropertyRead(d, obj, c));

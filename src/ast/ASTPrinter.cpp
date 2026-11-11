@@ -510,6 +510,22 @@ class ASTPrinter : public StmtVisitor<ASTPrinter>,
         printDecl(M);
       return;
     }
+    case TypeSpec::TS_Helper: {
+      auto *H = llvm::cast<HelperTypeSpec>(TS);
+      line("HelperTypeSpec");
+      if (H->getParent().isValid())
+        OS << " '" << H->getParent().Name << '\'';
+      loc(TS->getBeginLoc());
+      IndentScope J(Indent);
+      line("For");
+      {
+        IndentScope K(Indent);
+        printTypeSpec(H->getExtended());
+      }
+      for (Decl *M : H->getMembers())
+        printDecl(M);
+      return;
+    }
     case TypeSpec::TS_ClassRef:
       line("ClassRefTypeSpec '")
           << llvm::cast<ClassRefTypeSpec>(TS)->getClassName().Name << '\'';

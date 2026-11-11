@@ -348,6 +348,9 @@ class FieldExpr final : public Expr {
   /// A constant member (TFoo.C, obj.C): Sema's reference to it, which code
   /// generation uses in place of this expression.
   NameRefExpr *ConstRef = nullptr;
+  /// A type helper's member used on a value that is not a variable: code
+  /// generation passes Self a temporary holding it (set by Sema).
+  bool HelperValue = false;
 
 public:
   FieldExpr(SourceRange R, Expr *Base, Identifier Field)
@@ -358,6 +361,8 @@ public:
   Decl *getMember() const { return Member; }
   void setMember(Decl *D) { Member = D; }
   NameRefExpr *getConstRef() const { return ConstRef; }
+  bool isHelperValue() const { return HelperValue; }
+  void setHelperValue(bool V) { HelperValue = V; }
   void setConstRef(NameRefExpr *N) { ConstRef = N; }
   static bool classof(const Expr *E) { return E->getKind() == EK_Field; }
 };
@@ -743,6 +748,7 @@ public:
 struct WithContext {
   Expr *Record;
   bool IsSelf = false;
+  ClassType *Helper = nullptr; ///< Self in a method of this type helper
   explicit WithContext(Expr *Record, bool IsSelf = false)
       : Record(Record), IsSelf(IsSelf) {}
 };
@@ -879,6 +885,7 @@ public:
   enum TypeSpecKind {
     TS_Named, TS_Enum, TS_Subrange, TS_Array, TS_Record, TS_Pointer, TS_Set,
     TS_File, TS_Routine, TS_String, TS_Class, TS_ClassRef, TS_Interface,
+    TS_Helper,
     TS_Untyped,
     TS_ArrayOfConst,
     TS_OpenArray,
@@ -1128,6 +1135,25 @@ public:
   llvm::ArrayRef<Decl *> getMembers() const { return Members; }
   bool isForward() const { return Forward; }
   static bool classof(const TypeSpec *T) { return T->getKind() == TS_Class; }
+};
+
+/// type helper [(Parent)] for Extended members end  (objfpc,
+/// {$modeswitch typehelpers}): methods (Self: the extended value, by
+/// reference), static class methods, properties and constants for a type.
+class HelperTypeSpec final : public TypeSpec {
+  Identifier Parent; ///< invalid: none
+  TypeSpec *Extended;
+  llvm::ArrayRef<Decl *> Members;
+
+public:
+  HelperTypeSpec(SourceRange R, Identifier Parent, TypeSpec *Extended,
+                 llvm::ArrayRef<Decl *> Members)
+      : TypeSpec(TS_Helper, R), Parent(Parent), Extended(Extended),
+        Members(Members) {}
+  const Identifier &getParent() const { return Parent; }
+  TypeSpec *getExtended() const { return Extended; }
+  llvm::ArrayRef<Decl *> getMembers() const { return Members; }
+  static bool classof(const TypeSpec *T) { return T->getKind() == TS_Helper; }
 };
 
 /// interface [(Parent)] ['GUID'] method headings end  (objfpc, CORBA

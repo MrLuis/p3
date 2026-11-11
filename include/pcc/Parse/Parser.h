@@ -63,7 +63,7 @@ class Lexer;
 struct GenericTokens {
   llvm::ArrayRef<Token> Tokens;
   bool LongStrings = false, AdvancedRecords = false, CorbaInterfaces = false,
-       InlineOn = false;
+       InlineOn = false, TypeHelpers = false;
 };
 
 class Parser {
@@ -105,6 +105,7 @@ class Parser {
   // The lexer's switches (a replayed generic's: as where it was declared).
   bool longStrings() const;
   bool advancedRecords() const;
+  bool typeHelpers() const;
   bool corbaInterfaces() const;
   bool inlineOn() const;
   bool startsGeneric();
@@ -197,6 +198,8 @@ class Parser {
   bool RecordBodySkipped = false;
   TypeSpec *parseClassType(SourceLocation Start);
   TypeSpec *parseInterfaceType(SourceLocation Start);
+  /// After `type`, at `helper`: a type helper (objfpc).
+  TypeSpec *parseTypeHelper(SourceLocation Start);
   FieldList *parseFieldList(tok::TokenKind Close);
   VariantPart *parseVariantPart(tok::TokenKind Close);
 

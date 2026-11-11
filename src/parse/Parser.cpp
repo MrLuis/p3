@@ -55,6 +55,9 @@ bool Parser::longStrings() const {
 bool Parser::advancedRecords() const {
   return Replay ? Replay->AdvancedRecords : Lex.advancedRecords();
 }
+bool Parser::typeHelpers() const {
+  return Replay ? Replay->TypeHelpers : Lex.typeHelpers();
+}
 bool Parser::corbaInterfaces() const {
   return Replay ? Replay->CorbaInterfaces : Lex.corbaInterfaces();
 }
@@ -102,6 +105,7 @@ RoutineDecl *Parser::parseGenericRoutine(bool HeadingOnly) {
   Toks->AdvancedRecords = advancedRecords();
   Toks->CorbaInterfaces = corbaInterfaces();
   Toks->InlineOn = inlineOn();
+  Toks->TypeHelpers = typeHelpers();
   llvm::SmallVector<Token, 64> Rec;
   auto *SavedRec = Recording;
   Recording = &Rec;
@@ -642,14 +646,22 @@ void Parser::parseTypePart(llvm::SmallVectorImpl<Decl *> &Decls,
     consumeToken();
     TypeSpec *TS = nullptr;
     if (expect(tok::equal, "after type name")) {
-      // T = type X (Free Pascal): a distinct type, here an alias of X
+      // T = type X (Free Pascal): a distinct type, here an alias of X; or
+      // T = type helper for X (objfpc)
       if (Tok.is(tok::kw_type)) {
         SourceLocation TypeLoc = consumeToken();
-        if (LangOpts.Mode == LangMode::ISO)
-          Diags.error(TypeLoc, "'type' before a type (a distinct type) is a "
-                               "Free Pascal extension; use --mode=tp");
+        if (isIdentifierNamed("helper") &&
+            peekToken().isOneOf(tok::kw_for, tok::l_paren)) {
+          TS = parseTypeHelper(TypeLoc);
+        } else {
+          if (LangOpts.Mode == LangMode::ISO)
+            Diags.error(TypeLoc, "'type' before a type (a distinct type) is a "
+                                 "Free Pascal extension; use --mode=tp");
+          TS = parseType();
+        }
+      } else {
+        TS = parseType();
       }
-      TS = parseType();
     }
     Hints H = parseHints();
     if (TS) {
@@ -1639,6 +1651,136 @@ TypeSpec *Parser::parseInterfaceType(SourceLocation Start) {
   return Ctx.create<InterfaceTypeSpec>(SourceRange(Start, PrevTokEnd), Parent,
                                        Ctx.copyArray<Decl *>(Members), false,
                                        Corba, GUID);
+}
+
+// typeHelper = "helper" [ "(" ident ")" ] "for" typeIdent
+//              { visibility | methodHeading | "class" methodHeading
+//              | property | constPart } "end" .   (after `type`; objfpc)
+TypeSpec *Parser::parseTypeHelper(SourceLocation Start) {
+  SourceLocation HelperLoc = consumeToken(); // 'helper'
+  if (!LangOpts.ObjKeywords || !typeHelpers())
+    Diags.error(HelperLoc, "type helpers need --mode=objfpc and "
+                           "{$modeswitch typehelpers}");
+  Identifier Parent;
+  if (Tok.is(tok::l_paren)) {
+    SourceLocation LParen = consumeToken();
+    if (!expectIdentifier(Parent, "parent helper name"))
+      return nullptr;
+    if (!expect(tok::r_paren, "after parent helper name")) {
+      Diags.note(LParen, "to match this '('");
+      return nullptr;
+    }
+  }
+  if (!expect(tok::kw_for, "in a type helper"))
+    return nullptr;
+  TypeSpec *Extended = parseTypeIdentifier("the type a helper extends");
+  if (!Extended)
+    return nullptr;
+  llvm::SmallVector<Decl *, 8> Members;
+  Visibility Vis = Visibility::Public;
+  auto Fail = [&]() -> TypeSpec * {
+    skipUntil({tok::kw_end});
+    tryConsume(tok::kw_end);
+    return nullptr;
+  };
+  while (Tok.isNot(tok::kw_end) && Tok.isNot(tok::eof) && !Diags.shouldStop()) {
+    if (Tok.is(tok::identifier)) {
+      llvm::StringRef W = Tok.getIdentifier();
+      if (W == "private" || W == "protected" || W == "public" ||
+          W == "published") {
+        Vis = W == "private"     ? Visibility::Private
+              : W == "protected" ? Visibility::Protected
+              : W == "public"    ? Visibility::Public
+                                 : Visibility::Published;
+        consumeToken();
+        continue;
+      }
+      if (W == "strict") {
+        consumeToken();
+        if (!isIdentifierNamed("private") && !isIdentifierNamed("protected")) {
+          Diags.error(Tok.getLocation(),
+                      "expected 'private' or 'protected' after 'strict'");
+          return Fail();
+        }
+        Vis = isIdentifierNamed("private") ? Visibility::StrictPrivate
+                                           : Visibility::StrictProtected;
+        consumeToken();
+        continue;
+      }
+      Diags.error(Tok.getLocation(), "a type helper cannot contain fields");
+      return Fail();
+    }
+    if (Tok.is(tok::kw_var)) {
+      Diags.error(Tok.getLocation(), "a type helper cannot contain fields");
+      return Fail();
+    }
+    if (Tok.isOneOf(tok::kw_constructor, tok::kw_destructor)) {
+      Diags.error(Tok.getLocation(),
+                  "constructors and destructors in type helpers are not "
+                  "supported yet");
+      return Fail();
+    }
+    if (Tok.isOneOf(tok::kw_procedure, tok::kw_function)) {
+      RoutineDecl *R = parseMethodHeading(/*InRecord=*/true);
+      if (!R)
+        return Fail();
+      R->setVisibility(Vis);
+      Members.push_back(R);
+      continue;
+    }
+    if (Tok.is(tok::kw_class)) {
+      consumeToken();
+      if (Tok.isNot(tok::kw_procedure) && Tok.isNot(tok::kw_function)) {
+        Diags.error(Tok.getLocation(),
+                    "expected 'procedure' or 'function' after 'class'");
+        return Fail();
+      }
+      RoutineDecl *R = parseMethodHeading(/*InRecord=*/true,
+                                          /*RecordClassMethod=*/true);
+      if (!R)
+        return Fail();
+      R->setClassMethod();
+      R->setVisibility(Vis);
+      Members.push_back(R);
+      continue;
+    }
+    if (Tok.is(tok::kw_property)) {
+      PropertyDecl *P = parsePropertyDecl();
+      if (!P)
+        return Fail();
+      Hints H;
+      while (parseSeparatedHint(H)) {
+      }
+      P->addHints(H.Flags, H.Message);
+      P->setVisibility(Vis);
+      Members.push_back(P);
+      continue;
+    }
+    if (Tok.is(tok::kw_const)) {
+      llvm::SmallVector<Decl *, 4> Consts;
+      parseConstPart(Consts, /*InMembers=*/true);
+      for (Decl *D : Consts) {
+        if (llvm::isa<VarDecl>(D)) {
+          Diags.error(D->getLocation(),
+                      "typed constants in type helpers are not supported yet",
+                      {D->getName().getRange()});
+          continue;
+        }
+        D->setVisibility(Vis);
+        Members.push_back(D);
+      }
+      continue;
+    }
+    Diags.error(Tok.getLocation(),
+                "expected a method, property or constant declaration, or 'end'");
+    return Fail();
+  }
+  if (!expect(tok::kw_end, "at end of type helper")) {
+    Diags.note(HelperLoc, "to match this 'helper'");
+    return nullptr;
+  }
+  return Ctx.create<HelperTypeSpec>(SourceRange(Start, PrevTokEnd), Parent,
+                                    Extended, Ctx.copyArray<Decl *>(Members));
 }
 
 // params = "(" section { ";" section } ")" ;
@@ -3296,6 +3438,8 @@ Expr *Parser::parseFactor() {
     auto *E = Ctx.create<StringLiteralExpr>(Tok.getRange(),
                                             Tok.getStringValue());
     consumeToken();
+    if (typeHelpers() && Tok.is(tok::period)) // 'abc'.ToUpper
+      return parseSelectors(E);
     return E;
   }
   case tok::identifier: {

@@ -104,10 +104,13 @@ type
       { classOuter: the class (or advanced record's member table) whose type
         section declares this one (objfpc nested types); nil at program or
         unit level }
+      { classHelperFor: a type helper's (objfpc): the type it extends; a
+        class type that is not a type of values, its methods' Self is a
+        value of that type (by reference) }
       tyClass: (classParent: PType; classMembers, classAllFields,
                 classVTable: TPtrList; classModule: pointer;
                 classDefined: boolean; classInterfaces: TPtrList;
-                classRecord: PType; classOuter: PType);
+                classRecord: PType; classOuter: PType; classHelperFor: PType);
       { class of C (objfpc): a reference to C or a descendant (its VMT) }
       tyClassRef: (refClass: PType);
       { interface (objfpc): its parent, own methods (source order) and all
@@ -165,9 +168,12 @@ type
         indexes }
       { constRef (field, Sema): a constant member (TFoo.C, obj.C), a name
         reference to it that code generation uses instead }
+      { helperValue (field, Sema): a type helper's member used on a value
+        (not a variable): Self is a temporary }
       nkIndex, nkField: (base, index: PNode; fieldName: TIdent;
                          fieldDecl: PDecl; idxProp: PDecl; idxRoot: PNode;
-                         idxArgs: TPtrList; constRef: PNode);
+                         idxArgs: TPtrList; constRef: PNode;
+                         helperValue: boolean);
       { inherited [inhName] (objfpc): the method called and the method
         calling it (Sema); a bare inherited passes the calling method's
         parameters (inhArgs, Sema) }
@@ -253,12 +259,13 @@ type
   TWithContext = record
     rec: PNode;
     isSelf: boolean;
+    helper: PType; { Self in a method of this type helper }
     cgAddr: pointer; { code generation: the record's address (a boxed value) }
   end;
 
   TTypeSpecKind = (tsNamed, tsEnum, tsSubrange, tsArray, tsRecord,
                    tsPointer, tsSet, tsFile, tsRoutine, tsString, tsClass,
-                   tsClassRef, tsInterface,
+                   tsClassRef, tsInterface, tsHelper,
                    tsUntyped, { an untyped parameter's (absent) type }
                    tsArrayOfConst, tsOpenArray, tsDynArray);
 
@@ -296,6 +303,10 @@ type
         $interfaces corba (else COM) }
       tsInterface: (intfParentName: TIdent; intfMemberList: TPtrList;
                     isForwardIntf: boolean; guid: PName; isCorba: boolean);
+      { type helper [(helperParent)] for helperFor (objfpc): methods,
+        properties and constants }
+      tsHelper: (helperParent: TIdent; helperFor: PTypeSpec;
+                 helperMembers: TPtrList);
   end;
 
   TFieldList = record

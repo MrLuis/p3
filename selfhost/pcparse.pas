@@ -49,6 +49,7 @@ type
   TGenericTokens = record
     toks: TPtrList; { of PToken }
     longStrings, advancedRecords, corbaInterfaces, inlineOn: boolean;
+    typeHelpers: boolean;
   end;
 
 var
@@ -866,6 +867,8 @@ begin
   end;
 end;
 
+function parseTypeHelper(start: TLoc): PTypeSpec; forward;
+
 procedure parseTypePart(var decls: TPtrList; inMembers: boolean);
 var
   hf: longint;
@@ -891,15 +894,23 @@ begin
     ts := nil;
     if expect(tkEqual, 'after type name') then
     begin
-      { T = type X (Free Pascal): a distinct type, here an alias of X }
+      { T = type X (Free Pascal): a distinct type, here an alias of X; or
+        T = type helper for X (objfpc) }
       if tok.kind = tkKwType then
       begin
         typeLoc := consumeToken;
-        if mode = lmISO then
-          diagError(typeLoc, '''type'' before a type (a distinct type) is a ' +
-                             'Free Pascal extension; use --mode=tp');
-      end;
-      ts := parseType;
+        if isIdentifierNamed('helper') and (peekKind in [tkKwFor, tkLParen]) then
+          ts := parseTypeHelper(typeLoc)
+        else
+        begin
+          if mode = lmISO then
+            diagError(typeLoc, '''type'' before a type (a distinct type) is a ' +
+                               'Free Pascal extension; use --mode=tp');
+          ts := parseType;
+        end;
+      end
+      else
+        ts := parseType;
     end;
     parseHints(hf, hm);
     if ts <> nil then
@@ -1816,6 +1827,7 @@ begin
   toks^.advancedRecords := lx.advancedRecords;
   toks^.corbaInterfaces := lx.corbaInterfaces;
   toks^.inlineOn := lx.inlineOn;
+  toks^.typeHelpers := lx.typeHelpers;
   listInit(rec);
   savedRec := recording;
   recording := @rec;
@@ -1894,6 +1906,7 @@ begin
   lx.advancedRecords := toks^.advancedRecords;
   lx.corbaInterfaces := toks^.corbaInterfaces;
   lx.inlineOn := toks^.inlineOn;
+  lx.typeHelpers := toks^.typeHelpers;
   recording := nil;
   replay := toks;
   replayPos := 0;
@@ -2591,6 +2604,189 @@ begin
   ts^.guid := guid;
   ts^.isCorba := corba;
   parseInterfaceType := ts;
+end;
+
+{ typeHelper = "helper" [ "(" ident ")" ] "for" typeIdent members "end" .
+  members: visibility words, method headings, class method headings,
+  properties and constant parts (after `type`; objfpc) }
+function parseTypeHelper(start: TLoc): PTypeSpec;
+var
+  hf: longint;
+  hm: PName;
+  helperLoc, lparen: TLoc;
+  parentName: TIdent;
+  extended, ts: PTypeSpec;
+  members, consts: TPtrList;
+  vis: TVisibility;
+  wd: string;
+  m: PDecl;
+  i: longint;
+  failed: boolean;
+begin
+  parseTypeHelper := nil;
+  helperLoc := consumeToken; { 'helper' }
+  if (mode <> lmObjFPC) or not lx.typeHelpers then
+    diagError(helperLoc, 'type helpers need --mode=objfpc and ' +
+                         '{$modeswitch typehelpers}');
+  parentName := noIdent;
+  if tok.kind = tkLParen then
+  begin
+    lparen := consumeToken;
+    if not expectIdentifier(parentName, 'parent helper name') then
+      exit;
+    if not expect(tkRParen, 'after parent helper name') then
+    begin
+      diagNote(lparen, 'to match this ''(''');
+      exit;
+    end;
+  end;
+  if not expect(tkKwFor, 'in a type helper') then
+    exit;
+  extended := parseTypeIdentifier('the type a helper extends');
+  if extended = nil then
+    exit;
+  listInit(members);
+  vis := vsPublic;
+  failed := false;
+  while (tok.kind <> tkKwEnd) and (tok.kind <> tkEof) and not diagShouldStop do
+  begin
+    if tok.kind = tkIdentifier then
+    begin
+      wd := nameStr(tok.name);
+      if (wd = 'private') or (wd = 'protected') or (wd = 'public') or
+         (wd = 'published') then
+      begin
+        if wd = 'private' then
+          vis := vsPrivate
+        else if wd = 'protected' then
+          vis := vsProtected
+        else if wd = 'public' then
+          vis := vsPublic
+        else
+          vis := vsPublished;
+        consumeToken;
+        continue;
+      end;
+      if wd = 'strict' then
+      begin
+        consumeToken;
+        if not isIdentifierNamed('private') and not isIdentifierNamed('protected') then
+        begin
+          diagError(tok.loc, 'expected ''private'' or ''protected'' after ''strict''');
+          failed := true;
+          break;
+        end;
+        if isIdentifierNamed('private') then
+          vis := vsStrictPrivate
+        else
+          vis := vsStrictProtected;
+        consumeToken;
+        continue;
+      end;
+      diagError(tok.loc, 'a type helper cannot contain fields');
+      failed := true;
+      break;
+    end;
+    if tok.kind = tkKwVar then
+    begin
+      diagError(tok.loc, 'a type helper cannot contain fields');
+      failed := true;
+      break;
+    end;
+    if tok.kind in [tkKwConstructor, tkKwDestructor] then
+    begin
+      diagError(tok.loc, 'constructors and destructors in type helpers are not ' +
+                'supported yet');
+      failed := true;
+      break;
+    end;
+    if tok.kind in [tkKwProcedure, tkKwFunction] then
+    begin
+      m := parseMethodHeadingR(true, false);
+      if m = nil then
+      begin
+        failed := true;
+        break;
+      end;
+      m^.vis := vis;
+      listAdd(members, m);
+      continue;
+    end;
+    if tok.kind = tkKwClass then
+    begin
+      consumeToken;
+      if not (tok.kind in [tkKwProcedure, tkKwFunction]) then
+      begin
+        diagError(tok.loc, 'expected ''procedure'' or ''function'' after ''class''');
+        failed := true;
+        break;
+      end;
+      m := parseMethodHeadingR(true, true);
+      if m = nil then
+      begin
+        failed := true;
+        break;
+      end;
+      m^.isClassMethod := true;
+      m^.vis := vis;
+      listAdd(members, m);
+      continue;
+    end;
+    if tok.kind = tkKwProperty then
+    begin
+      m := parsePropertyDecl;
+      if m = nil then
+      begin
+        failed := true;
+        break;
+      end;
+      hf := 0;
+      hm := nil;
+      while parseSeparatedHint(hf, hm) do
+        ;
+      addHints(m, hf, hm);
+      m^.vis := vis;
+      listAdd(members, m);
+      continue;
+    end;
+    if tok.kind = tkKwConst then
+    begin
+      listInit(consts);
+      parseConstPart(consts, true);
+      for i := 0 to consts.count - 1 do
+      begin
+        m := PDecl(listGet(consts, i));
+        if m^.kind = dkVar then
+        begin
+          diagErrorR(m^.loc, 'typed constants in type helpers are not supported yet',
+                     identRange(m^.ident));
+          continue;
+        end;
+        m^.vis := vis;
+        listAdd(members, m);
+      end;
+      continue;
+    end;
+    diagError(tok.loc, 'expected a method, property or constant declaration, or ''end''');
+    failed := true;
+    break;
+  end;
+  if failed then
+  begin
+    skipUntil([tkKwEnd]);
+    tryConsume(tkKwEnd);
+    exit;
+  end;
+  if not expect(tkKwEnd, 'at end of type helper') then
+  begin
+    diagNote(helperLoc, 'to match this ''helper''');
+    exit;
+  end;
+  ts := newTypeSpec(tsHelper, start, prevTokEnd);
+  ts^.helperParent := parentName;
+  ts^.helperFor := extended;
+  ts^.helperMembers := members;
+  parseTypeHelper := ts;
 end;
 
 { type = simpleType | ["packed"] (arrayType | recordType) . }
@@ -4606,6 +4802,8 @@ begin
       begin
         n := literalNode(tok);
         consumeToken;
+        if (n^.kind = nkStringLit) and lx.typeHelpers and (tok.kind = tkPeriod) then
+          exit(parseSelectors(n)); { 'abc'.ToUpper }
         exit(n);
       end;
     tkIdentifier:

@@ -1,0 +1,25 @@
+strings
+HELLO TRUE 5
+hello world
+TRUE 11
+c,d []
+LIT 3
+MADE HI
+[] 0
+bbc 3
+CONST 5 8
+5
+integers
+20 40 400
+21
+126 43
+504
+enums, records, arrays, reals
+green blue red
+3 (1,2)
+(11,22)
+(12,23) (11,22)
+2 7
+abab
+2.50
+yes no

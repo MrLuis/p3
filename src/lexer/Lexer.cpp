@@ -174,14 +174,20 @@ void Lexer::handleDirective(const char *Start, llvm::StringRef Text) {
     return;
   }
 
-  // {$modeswitch advancedrecords[+|-]}: methods in records (objfpc). Other
-  // mode switches are not supported (a warning below).
+  // {$modeswitch advancedrecords[+|-]}: methods in records (objfpc);
+  // {$modeswitch typehelpers[+|-]}: type helpers. Other mode switches are
+  // not supported (a warning below).
   if (Word.equals_insensitive("modeswitch")) {
     llvm::StringRef Name = Arg.take_while(isIdentBody);
     llvm::StringRef Rest = Arg.drop_front(Name.size()).trim();
     if (Name.equals_insensitive("advancedrecords") &&
         (Rest.empty() || Rest == "+" || Rest == "-")) {
       AdvancedRecords = Rest != "-";
+      return;
+    }
+    if (Name.equals_insensitive("typehelpers") &&
+        (Rest.empty() || Rest == "+" || Rest == "-")) {
+      TypeHelpers = Rest != "-";
       return;
     }
   }

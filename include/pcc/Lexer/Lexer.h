@@ -47,6 +47,7 @@ class Lexer {
   CheckDirectives *Directives = nullptr;
   bool CorbaInterfaces = false; ///< {$interfaces corba} (default: com)
   bool AdvancedRecords = false; ///< {$modeswitch advancedrecords}
+  bool TypeHelpers = false;     ///< {$modeswitch typehelpers}
   bool LongStrings = false;     ///< {$H+}: `string` is an ansistring
 
   // Macros ({$macro on}, {$define NAME := value}, as in Free Pascal): the
@@ -137,6 +138,8 @@ public:
   bool corbaInterfaces() const { return CorbaInterfaces; }
   /// May records declared here have methods ({$modeswitch advancedrecords})?
   bool advancedRecords() const { return AdvancedRecords; }
+  /// May type helpers be declared here ({$modeswitch typehelpers})?
+  bool typeHelpers() const { return TypeHelpers; }
   bool longStrings() const { return LongStrings; }
   /// Does the `inline` directive inline ({$inline on})?
   bool inlineOn() const { return InlineOn; }

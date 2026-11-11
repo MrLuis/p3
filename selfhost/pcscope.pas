@@ -37,6 +37,8 @@ function newNestedScope(parent: PScope; c: PType): PScope;
   class variables }
 function isNestedDecl(d: PDecl): boolean;
 procedure scopeAddImport(s, imported: PScope);
+{ sets name (a hidden one: not listed) to d in s }
+procedure scopeSet(s: PScope; name: PName; d: PDecl);
 { the declaration of name in s itself (not imports), or nil }
 function scopeLookupOwn(s: PScope; name: PName): PDecl;
 { declares name; returns the existing declaration (and does not insert)
@@ -112,6 +114,11 @@ end;
 procedure scopeAddImport(s, imported: PScope);
 begin
   listAdd(s^.imports, imported);
+end;
+
+procedure scopeSet(s: PScope; name: PName; d: PDecl);
+begin
+  mapPut(s^.symbols, name^.id, d);
 end;
 
 function scopeLookupOwn(s: PScope; name: PName): PDecl;

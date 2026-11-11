@@ -387,6 +387,8 @@ class ClassType final : public Type {
   /// The class (or advanced record's member table) whose type section
   /// declares this one (objfpc nested types); null at program or unit level.
   ClassType *Outer = nullptr;
+  /// A type helper's member table: the type it extends (Self's type).
+  Type *HelperFor = nullptr;
 
 public:
   ClassType() : Type(TK_Class) {}
@@ -397,6 +399,11 @@ public:
   RecordType *getRecord() const { return Record; }
   void setRecord(RecordType *R) { Record = R; }
   ClassType *getOuter() const { return Outer; }
+  bool isHelper() const { return HelperFor != nullptr; }
+  Type *getHelperFor() const { return HelperFor; }
+  void setHelperFor(Type *T) { HelperFor = T; }
+  /// Is Self a reference to the value (an advanced record's, a helper's)?
+  bool hasSelfByReference() const { return Record || HelperFor; }
   void setOuter(ClassType *C) { Outer = C; }
   ClassType *getParent() const { return Parent; }
   llvm::ArrayRef<Decl *> getMembers() const { return Members; }

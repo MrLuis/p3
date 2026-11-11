@@ -889,6 +889,23 @@ class Checker : public StmtVisitor<Checker>,
     return llvm::isa<DerefExpr>(E);
   }
 
+  /// Is E a variable a type helper's method can change (not a method's
+  /// result: r.M, r.M.f)?
+  static bool isHelperVariable(Expr *E) {
+    if (auto *F = llvm::dyn_cast<FieldExpr>(E)) {
+      if (llvm::isa_and_nonnull<VarDecl>(F->getMember()))
+        return true;
+      if (!llvm::isa_and_nonnull<FieldDecl>(F->getMember()))
+        return false;
+      return isObject(F->getBase()) || isHelperVariable(F->getBase());
+    }
+    if (auto *I = llvm::dyn_cast<IndexExpr>(E);
+        I && !I->getProperty() && I->getBase()->getType() &&
+        !I->getBase()->getType()->isDynArray())
+      return isHelperVariable(I->getBase());
+    return isVariableReference(E);
+  }
+
   /// Is E (already checked) a value of a class type?
   static bool isObject(Expr *E) {
     return E->getType() && E->getType()->isClass();
@@ -1263,8 +1280,16 @@ class Checker : public StmtVisitor<Checker>,
                       {Id.getRange()});
         return errorType();
       }
-      if (auto *TD = llvm::dyn_cast<TypeDecl>(D))
+      if (auto *TD = llvm::dyn_cast<TypeDecl>(D)) {
+        if (auto *C = llvm::dyn_cast_or_null<ClassType>(TD->getType());
+            C && C->isHelper()) {
+          Diags.error(Id.Loc,
+                      "type helper '" + Id.Spelling + "' cannot be used as a type",
+                      {Id.getRange()});
+          return errorType();
+        }
         return TD->getType() ? TD->getType() : errorType();
+      }
       Diags.error(Id.Loc,
                   "'" + Id.Spelling + "' is a " + D->getKindName() +
                       ", not a type",
@@ -1469,6 +1494,12 @@ class Checker : public StmtVisitor<Checker>,
                   {TS->getRange()});
       return errorType();
 
+    case TypeSpec::TS_Helper:
+      Diags.error(TS->getBeginLoc(),
+                  "a type helper must be declared in a 'type' section",
+                  {TS->getRange()});
+      return errorType();
+
     case TypeSpec::TS_ClassRef: { // class of TFoo (TFoo may be forward)
       const Identifier &Id = llvm::cast<ClassRefTypeSpec>(TS)->getClassName();
       Decl *D = Cur->lookup(Id.Name);
@@ -1589,6 +1620,8 @@ class Checker : public StmtVisitor<Checker>,
   void declareType(TypeDecl *TD) {
     if (auto *CS = llvm::dyn_cast<ClassTypeSpec>(TD->getTypeSpec()))
       return declareClass(TD, CS);
+    if (auto *HS = llvm::dyn_cast<HelperTypeSpec>(TD->getTypeSpec()))
+      return declareHelper(TD, HS);
     if (auto *IS = llvm::dyn_cast<InterfaceTypeSpec>(TD->getTypeSpec()))
       return declareInterface(TD, IS);
     auto *RS = llvm::dyn_cast<RecordTypeSpec>(TD->getTypeSpec());
@@ -1603,6 +1636,155 @@ class Checker : public StmtVisitor<Checker>,
     if (NestPrefix.empty())
       return Id.Spelling;
     return Ctx.getStrings().intern((NestPrefix + "." + Id.Spelling).str());
+  }
+
+  //===--------------------------------------------------------------------===//
+  // Type helpers (objfpc, {$modeswitch typehelpers})
+  //===--------------------------------------------------------------------===//
+
+  /// The scope key of the helper active for T.
+  llvm::StringRef helperKey(Type *T) {
+    return Ctx.getStrings().intern(
+        "#helper:" + llvm::utohexstr(reinterpret_cast<uintptr_t>(T)));
+  }
+
+  /// The type helper active for values of type T (the last declared in
+  /// scope; a string constant: the ansistring or shortstring one), or null.
+  ClassType *helperFor(Type *T) {
+    if (!T || T->isError() || !LangOpts.ObjKeywords)
+      return nullptr;
+    if (T->isStringLiteral()) {
+      if (ClassType *H = helperFor(Ctx.getAnsiStringType()))
+        return H;
+      return helperFor(Ctx.getShortStringType());
+    }
+    auto *TD = llvm::dyn_cast_or_null<TypeDecl>(Cur->lookup(helperKey(T)));
+    return TD ? llvm::dyn_cast_or_null<ClassType>(TD->getType()) : nullptr;
+  }
+
+  /// The helper of the type Base names (AnsiString.Join), or null.
+  ClassType *helperNamedBy(Expr *Base) {
+    TypeDecl *TD = LangOpts.ObjKeywords ? typeNamedBy(Base) : nullptr;
+    Type *T = TD ? TD->getType() : nullptr;
+    if (!T || T->isClass() || memberTableOf(T))
+      return nullptr;
+    ClassType *H = helperFor(T);
+    if (!H)
+      return nullptr;
+    if (auto *N = llvm::dyn_cast<NameRefExpr>(Base))
+      N->setDecl(TD);
+    Base->setType(T);
+    return H;
+  }
+
+  /// Is D a member of a type helper?
+  static bool isHelperMember(Decl *D) {
+    if (auto *P = llvm::dyn_cast_or_null<PropertyDecl>(D))
+      D = P->getRead();
+    auto *R = llvm::dyn_cast_or_null<RoutineDecl>(D);
+    return R && R->getClass() && R->getClass()->isHelper();
+  }
+
+  /// TH = type helper [(Parent)] for T ... end: a member table (a ClassType
+  /// that is not a type of values) whose methods' Self is a T, by
+  /// reference; from here on the helper active for T.
+  void declareHelper(TypeDecl *TD, HelperTypeSpec *HS) {
+    const Identifier &Id = TD->getName();
+    auto *C = Ctx.create<ClassType>();
+    C->setDeclName(typeDeclName(Id));
+    C->setModule(CurModule);
+    TD->setType(C);
+    declare(TD);
+    auto Empty = [&] { // (its methods' bodies are not checked)
+      C->define(nullptr, {}, {}, {}, CurModule);
+      TD->setType(errorType());
+    };
+    if (CurRoutine) {
+      Diags.error(Id.Loc,
+                  "type helper '" + Id.Spelling +
+                      "' must be declared at program or unit level",
+                  {Id.getRange()});
+      return Empty();
+    }
+    Type *T = resolveType(HS->getExtended());
+    if (T->isError())
+      return Empty();
+    if (T->isClass() || T->isClassRef() || T->isInterface()) {
+      Diags.error(HS->getExtended()->getBeginLoc(),
+                  "type helpers for classes and interfaces are not supported "
+                  "yet",
+                  {HS->getExtended()->getRange()});
+      return Empty();
+    }
+    C->setHelperFor(T);
+    ClassType *Parent = nullptr;
+    if (const Identifier &P = HS->getParent(); P.isValid()) {
+      auto *PD = llvm::dyn_cast_or_null<TypeDecl>(Cur->lookup(P.Name));
+      auto *PC = PD ? llvm::dyn_cast_or_null<ClassType>(PD->getType()) : nullptr;
+      if (!PC || !PC->isHelper())
+        Diags.error(P.Loc, "'" + P.Spelling + "' is not a type helper",
+                    {P.getRange()});
+      else if (PC->getHelperFor() != T)
+        Diags.error(P.Loc,
+                    "'" + P.Spelling + "' is a helper for " +
+                        quoted(PC->getHelperFor()) + ", not for " + quoted(T),
+                    {P.getRange()});
+      else
+        Parent = PC;
+    }
+    Scope MemberScope(Cur);
+    Scope *SavedScope = Cur;
+    Cur = &MemberScope;
+    llvm::SmallVector<Decl *, 16> Members;
+    llvm::StringMap<Decl *> Own;
+    for (Decl *M : HS->getMembers()) {
+      const Identifier &MN = M->getName();
+      RoutineDecl *OverloadOf = nullptr;
+      if (Decl *Prev = Own.lookup(MN.Name)) {
+        OverloadOf = llvm::dyn_cast<RoutineDecl>(Prev);
+        if (!OverloadOf || !llvm::isa<RoutineDecl>(M)) {
+          Diags.error(MN.Loc, "redefinition of '" + MN.Spelling + "'",
+                      {MN.getRange()});
+          Diags.note(Prev->getLocation(), "previous definition is here");
+          continue;
+        }
+      } else {
+        Own[MN.Name] = M;
+      }
+      Members.push_back(M);
+      if (auto *CD = llvm::dyn_cast<ConstDecl>(M)) {
+        declareConst(CD);
+        continue;
+      }
+      if (auto *R = llvm::dyn_cast<RoutineDecl>(M)) {
+        R->setClass(C);
+        R->setParent(nullptr);
+        resolveSignature(R);
+        if (R->isVirtual() || R->isOverride() || R->isAbstract())
+          Diags.error(MN.Loc,
+                      "the methods of a type helper cannot be 'virtual', "
+                      "'override' or 'abstract'",
+                      {MN.getRange()});
+        if (R->isClassMethod())
+          R->setStatic(); // no Self
+        else
+          makeSelf(R, C);
+        if (OverloadOf && !addOverload(OverloadOf, R)) {
+          R->setClass(nullptr); // rejected: not a member
+          Members.pop_back();
+        }
+        continue;
+      }
+      auto *P = llvm::cast<PropertyDecl>(M);
+      if (P->isDefault())
+        Diags.error(P->getLocation(),
+                    "a type helper cannot have a default property",
+                    {P->getName().getRange()});
+      definePropertyAccessors(C, P, Own, Parent);
+    }
+    Cur = SavedScope;
+    C->define(Parent, Ctx.copyArray<Decl *>(Members), {}, {}, CurModule);
+    Cur->set(helperKey(T), TD);
   }
 
   //===--------------------------------------------------------------------===//
@@ -1649,6 +1831,14 @@ class Checker : public StmtVisitor<Checker>,
   /// A type declared in a class or advanced record (in Cur, its member
   /// scope).
   void declareNestedType(TypeDecl *TD) {
+    if (llvm::isa<HelperTypeSpec>(TD->getTypeSpec())) {
+      Diags.error(TD->getName().Loc,
+                  "type helpers cannot be declared in a class or record",
+                  {TD->getName().getRange()});
+      TD->setType(errorType());
+      declare(TD);
+      return;
+    }
     if (llvm::isa<InterfaceTypeSpec>(TD->getTypeSpec())) {
       Diags.error(TD->getName().Loc,
                   "interfaces cannot be declared in a class or record yet",
@@ -2289,12 +2479,15 @@ class Checker : public StmtVisitor<Checker>,
   /// The hidden parameter Self of method R of class C.
   void makeSelf(RoutineDecl *R, ClassType *C) {
     Identifier Name = memberName("Self");
-    // A record's method gets the record by reference.
+    // A record's method gets the record by reference, a type helper's the
+    // value it extends.
     RecordType *Rec = C->getRecord();
     auto *Self = Ctx.create<VarDecl>(
-        Name, nullptr, Rec ? VarDecl::VarParam : VarDecl::ValueParam);
+        Name, nullptr,
+        C->hasSelfByReference() ? VarDecl::VarParam : VarDecl::ValueParam);
     // In a class method, Self is the class (a class reference).
     Self->setType(Rec                    ? static_cast<Type *>(Rec)
+                  : C->isHelper()        ? C->getHelperFor()
                   : R->isClassMethod() ? static_cast<Type *>(classRefOf(C))
                                        : C);
     Self->setOwner(R);
@@ -2886,6 +3079,16 @@ class Checker : public StmtVisitor<Checker>,
 
   /// ... of the class or advanced record TD, and of those it declares.
   void checkMethodsImplemented(TypeDecl *TD) {
+    if (llvm::isa_and_nonnull<HelperTypeSpec>(TD->getTypeSpec())) {
+      if (auto *C = llvm::dyn_cast_or_null<ClassType>(TD->getType()))
+        for (Decl *M : C->getMembers())
+          if (auto *R = llvm::dyn_cast<RoutineDecl>(M); R && !R->getBody())
+            Diags.error(R->getName().Loc,
+                        "method '" + qualified(C, R->getName()) +
+                            "' is declared but never implemented",
+                        {R->getName().getRange()});
+      return;
+    }
     if (ClassType *MT = memberTableOf(TD->getType())) {
       for (Decl *M : MT->getMembers()) { // an advanced record's
         if (auto *R = llvm::dyn_cast<RoutineDecl>(M); R && !R->getBody())
@@ -2937,7 +3140,7 @@ class Checker : public StmtVisitor<Checker>,
   /// Does with context W expose methods (an object's, a class's in a class
   /// method, or an advanced record's)?
   static bool hasMembers(WithContext *W) {
-    return W && (classOf(W) || memberTableOf(W->Record->getType()));
+    return W && (W->Helper || classOf(W) || memberTableOf(W->Record->getType()));
   }
 
   /// Is D an instance member (a field, a property, a method that is not a
@@ -4187,17 +4390,25 @@ class Checker : public StmtVisitor<Checker>,
       }
     }
     // A method sees the members of its class through Self.
-    std::unique_ptr<Scope> ClassScope;
+    std::unique_ptr<Scope> ClassScope, FieldsScope;
     if (R->hasSelf()) {
       auto *SelfRef = Ctx.create<NameRefExpr>(R->getSelfVar()->getName());
       SelfRef->setDecl(R->getSelfVar());
       SelfRef->setType(R->getSelfVar()->getType());
-      ClassScope = std::make_unique<Scope>(
-          Base, R->getClass(), Ctx.create<WithContext>(SelfRef, /*IsSelf=*/true));
+      auto *W = Ctx.create<WithContext>(SelfRef, /*IsSelf=*/true);
+      if (R->getClass()->isHelper())
+        W->Helper = R->getClass();
+      ClassScope = std::make_unique<Scope>(Base, R->getClass(), W);
+      // A record helper's method also sees the record's fields.
+      if (auto *RT = llvm::dyn_cast_or_null<RecordType>(
+              R->getClass()->getHelperFor()))
+        FieldsScope = std::make_unique<Scope>(ClassScope.get(), RT, W);
     } else if (R->isStatic()) { // a record's static method: its statics
       ClassScope = std::make_unique<Scope>(Base, R->getClass(), nullptr);
     }
-    Scope RoutineScope(ClassScope ? ClassScope.get() : Base);
+    Scope RoutineScope(FieldsScope  ? FieldsScope.get()
+                       : ClassScope ? ClassScope.get()
+                                    : Base);
     (ClassScope ? ClassScope.get() : &RoutineScope)->setRoutineBoundary();
     Scope *SavedScope = Cur;
     RoutineDecl *SavedRoutine = CurRoutine;
@@ -6000,6 +6211,12 @@ public:
 
   /// Type of a property assigned to; it needs a write accessor.
   Type *checkPropertyWrite(PropertyDecl *P, const Identifier &Id) {
+    if (isHelperMember(P->getWrite() ? P->getWrite() : P->getRead())) {
+      Diags.error(Id.Loc,
+                  "writing a property of a type helper is not supported yet",
+                  {Id.getRange()});
+      return errorType();
+    }
     if (P->getWrite() || P->getType()->isError() ||
         (!P->getRead() && P->getWriteName().isValid()))
       return P->getType();
@@ -7540,6 +7757,8 @@ public:
       return nullptr;
     TypeDecl *TD = typeNamedBy(Base);
     auto *C = TD ? llvm::dyn_cast_or_null<ClassType>(TD->getType()) : nullptr;
+    if (C && C->isHelper()) // (not a type: its methods are used on values)
+      return nullptr;
     if (!C && TD)
       C = memberTableOf(TD->getType());
     if (C) {
@@ -7571,15 +7790,67 @@ public:
     return TD;
   }
 
+  /// AnsiString.Join: a static method or constant of the helper H of the
+  /// type E's base names.
+  Decl *resolveHelperStatic(FieldExpr *E, ClassType *H) {
+    const Identifier &F = E->getField();
+    const ClassType *Owner = nullptr;
+    Decl *D = H->findMember(F.Name, &Owner);
+    if (!D) {
+      Diags.error(F.Loc,
+                  "no member named '" + F.Spelling + "' in type helper " +
+                      quoted(H),
+                  {F.getRange()});
+      return nullptr;
+    }
+    checkMemberAccess(D, Owner, F);
+    auto *R = llvm::dyn_cast<RoutineDecl>(D);
+    if (!llvm::isa<ConstDecl>(D) && !(R && R->isStatic())) {
+      Diags.error(F.Loc,
+                  "only static class methods and constants of a type helper "
+                  "can be used through a type name; '" +
+                      F.Spelling + "' is a " + D->getKindName(),
+                  {F.getRange()});
+      return nullptr;
+    }
+    E->setMember(D);
+    return D;
+  }
+
   /// Resolves r.f / obj.member / TFoo.Create; null after a diagnostic.
   Decl *resolveMember(FieldExpr *E) {
     const Identifier &F = E->getField();
     ClassType *ViaClass = classNamedBy(E->getBase());
     if (auto *N = llvm::dyn_cast<NameRefExpr>(E->getBase()); ViaClass && N)
       warnHints(N->getDecl(), N->getName()); // TFoo.Create: a use of TFoo
+    if (!ViaClass) {
+      if (ClassType *H = helperNamedBy(E->getBase())) // AnsiString.Join
+        return resolveHelperStatic(E, H);
+      if (TypeDecl *TD = typeNamedBy(E->getBase())) // TH.Join
+        if (auto *H = llvm::dyn_cast_or_null<ClassType>(TD->getType());
+            H && H->isHelper()) {
+          Diags.error(E->getBase()->getBeginLoc(),
+                      "the members of type helper " + quoted(H) +
+                          " are used through " + quoted(H->getHelperFor()),
+                      {E->getBase()->getRange()});
+          return nullptr;
+        }
+    }
     Type *BT = ViaClass ? ViaClass : check(E->getBase());
     if (BT->isError())
       return nullptr;
+    if (!ViaClass && !BT->isClass() && !BT->isClassRef() && !BT->isInterface())
+      if (ClassType *H = helperFor(BT)) { // a type helper's member
+        const ClassType *Owner = nullptr;
+        if (Decl *D = H->findMember(F.Name, &Owner)) {
+          checkMemberAccess(D, Owner, F);
+          E->setMember(D);
+          // Self is by reference: a temporary for a value
+          E->setHelperValue(!isHelperVariable(E->getBase()) ||
+                            constParamRoot(E->getBase()));
+          return D;
+        }
+      }
     if (ClassType *MT = memberTableOf(BT)) // an advanced record's member
       BT = MT;
     if (auto *RT = llvm::dyn_cast<RecordType>(BT)) {
@@ -7772,7 +8043,13 @@ public:
       return false;
     if (classNamedBy(F->getBase()))
       return true;
+    if (ClassType *H = helperNamedBy(F->getBase()))
+      return llvm::isa_and_nonnull<RoutineDecl>(H->findMember(F->getField().Name));
     Type *BT = check(F->getBase());
+    if (!BT->isClass() && !BT->isClassRef() && !BT->isInterface())
+      if (ClassType *H = helperFor(BT);
+          H && llvm::isa_and_nonnull<RoutineDecl>(H->findMember(F->getField().Name)))
+        return true;
     if (auto *I = llvm::dyn_cast<InterfaceType>(BT))
       return findInterfaceMethod(I, F->getField().Name) != nullptr;
     if (ClassType *MT = memberTableOf(BT)) // an advanced record's method
