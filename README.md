@@ -319,6 +319,11 @@ and called through `cdecl` procedural variables; so can a `cdecl` external
 routine (not a `varargs` one, nor one taking callbacks). Not supported:
 records and strings by value, `index`, external variables (`cvar`).
 
+**`rtlproc`** (not in `--mode=iso`), as in Free Pascal: the directive that
+marks routines of Free Pascal's run-time library (`procedure
+DoDirSeparators(var FileName: PathStr); rtlproc;`) is accepted on routines,
+`forward` and interface headings and methods, and has no effect.
+
 **External variables** (not in `--mode=iso`), as in Free Pascal: `errno:
 cint; external 'c' name 'errno';` or `optind: cint; cvar; external;`
 declares a C variable (the symbol is the name as written unless `name`

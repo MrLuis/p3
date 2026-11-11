@@ -888,6 +888,11 @@ RoutineDecl *Parser::parseRoutineDecl(bool HeadingOnly) {
       expect(tok::semi, std::string("after '") + callConvName(C) + "'");
       continue;
     }
+    if (isIdentifierNamed("rtlproc")) { // Free Pascal's RTL marker: no effect
+      consumeToken();
+      expect(tok::semi, "after 'rtlproc'");
+      continue;
+    }
     if (isIdentifierNamed("varargs")) {
       VarArgsLoc = consumeToken();
       VarArgs = true;
@@ -1062,7 +1067,10 @@ RoutineDecl *Parser::parseMethodHeading(bool InRecord, bool RecordClassMethod) {
       Abstract = true;
     } else if (W == "overload") {
       Overload = true;
-    } else if (W == "reintroduce") {
+    } else if (W == "reintroduce" ||
+               (W == "rtlproc" && !peekToken().isOneOf(tok::colon, tok::comma))) {
+      // reintroduce: hides an inherited virtual method without a warning;
+      // rtlproc: Free Pascal's RTL marker (a field if followed by ':' or ',')
       // (hides an inherited virtual method without a warning: no effect)
     } else if (W == "dynamic" || W == "message" || W == "final" ||
                W == "external" || W == "forward") {

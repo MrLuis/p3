@@ -1261,6 +1261,12 @@ begin
       expect(tkSemi, 'after ''' + ccw + '''');
       continue;
     end;
+    if isIdentifierNamed('rtlproc') then { Free Pascal's RTL marker: no effect }
+    begin
+      consumeToken;
+      expect(tkSemi, 'after ''rtlproc''');
+      continue;
+    end;
     if isIdentifierNamed('varargs') then
     begin
       varArgsLoc := consumeToken;
@@ -1477,8 +1483,10 @@ begin
       isAbstract := true
     else if wd = 'overload' then
       overloadDir := true
-    else if wd = 'reintroduce' then
-      { (hides an inherited virtual method without a warning: no effect) }
+    else if (wd = 'reintroduce') or
+            ((wd = 'rtlproc') and not (peekKind in [tkColon, tkComma])) then
+      { reintroduce: hides an inherited virtual method without a warning;
+        rtlproc: Free Pascal's RTL marker (a field if followed by : or ,) }
     else if (wd = 'dynamic') or (wd = 'message') or
             (wd = 'final') or (wd = 'external') or (wd = 'forward') then
     begin
