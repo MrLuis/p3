@@ -19,6 +19,7 @@ type
       end;
     class var Count: longint;
     function Make(k: TKind): TShape;
+    class function Total: longint; static;
   end;
 implementation
 function TShapes.TPoint.Dist: longint;
@@ -36,6 +37,10 @@ begin
     result := 'square'
   else
     result := 'triangle';
+end;
+class function TShapes.Total: longint;
+begin
+  result := Count * 10;
 end;
 function TShapes.Make(k: TKind): TShape;
 begin

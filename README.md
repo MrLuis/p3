@@ -96,8 +96,10 @@ as are a failed `as` and calling an abstract method.
   holds, through a virtual constructor if the constructor is virtual.
 - **Class methods and variables:** `class procedure/function` (Self is the
   class; may be virtual; called through a class name, a class reference
-  or an object), `class var` sections (one variable shared by the class
-  and its descendants).
+  or an object), `static` class methods (no Self, not virtual: they use
+  class variables and other static methods, and `@TFoo.M` is an ordinary
+  procedural value), `class var` sections (one variable shared by the
+  class and its descendants).
 - **Nested declarations:** `const` and `type` sections in a class or an
   advanced record, in any visibility section, as in Free Pascal: constants
   (typed ones in classes, which are class variables), enumerations,

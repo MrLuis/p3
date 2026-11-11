@@ -3793,9 +3793,7 @@ begin
   if r^.methodKind in [mtConstructor, mtDestructor] then
     why := 'constructors and destructors cannot be method pointers'
   else if r^.objMethod <> obNone then
-    why := 'the methods of TObject cannot be method pointers'
-  else if r^.isStatic then
-    why := 'static methods cannot be method pointers';
+    why := 'the methods of TObject cannot be method pointers';
   if why <> '' then
   begin
     ms('''@');
@@ -3803,6 +3801,20 @@ begin
     ma(''': ' + why);
     errR(name.loc, identRange(name));
     exit(errorType);
+  end;
+  if r^.isStatic then { a routine without Self: a procedural value }
+  begin
+    if op^.kind = nkField then
+      op^.fieldDecl := r
+    else
+      op^.refDecl := r;
+    r^.isUsed := true;
+    warnHints(r, name);
+    e^.addrCode := r;
+    res := nil;
+    if r^.isFunction then
+      res := r^.resultType;
+    exit(newRoutineType(r^.params, res, isCDecl(r)));
   end;
   if op^.kind = nkField then
     op^.fieldDecl := r

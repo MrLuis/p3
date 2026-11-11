@@ -1,5 +1,5 @@
-; Nested classes, records, constants and class variables in a unit's
-; interface, compiled whole and separately.
+; Nested classes, records, constants and class variables, and a static
+; class method, in a unit's interface, compiled whole and separately.
 ; RUN: rm -rf %t && mkdir -p %t && cp -r %S/Inputs/nested/. %t/
 ; RUN: %pcc --mode=objfpc -I %t/lib %t/main.pas -o %t/whole
 ; RUN: %t/whole | FileCheck %s
@@ -8,4 +8,4 @@
 ; RUN: %t/separate | FileCheck %s
 ; CHECK:      triangle TShapes.TShape 4 1
 ; CHECK-NEXT: square 2
-; CHECK-NEXT: 7
+; CHECK-NEXT: 7 20

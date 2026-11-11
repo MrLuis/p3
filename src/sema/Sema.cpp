@@ -575,7 +575,9 @@ class Checker : public StmtVisitor<Checker>,
       if (R->isStatic()) {
         if (Decl *D = R->getClass()->findMember(Id.Name)) {
           Diags.error(Id.Loc,
-                      "instance member '" + Id.Spelling +
+                      (isInstanceMember(D) ? "instance member '"
+                                           : "class method '") +
+                          Id.Spelling +
                           "' cannot be used in a static class method",
                       {Id.getRange()});
           noteDeclaredHere(D);
@@ -2476,7 +2478,20 @@ class Checker : public StmtVisitor<Checker>,
     R->setClass(C);
     R->setParent(nullptr);
     resolveSignature(R);
-    makeSelf(R, C);
+    // A static class method has no Self: it is called like a routine.
+    if (R->isStatic()) {
+      const char *Bad = !R->isClassMethod() ? "only class methods can be 'static'"
+                        : R->isVirtual()    ? "'static' cannot be used with 'virtual'"
+                        : R->isOverride()   ? "'static' cannot be used with 'override'"
+                        : R->isAbstract()   ? "'static' cannot be used with 'abstract'"
+                                            : nullptr;
+      if (Bad) {
+        Diags.error(Id.Loc, Bad, {Id.getRange()});
+        R->setStatic(false);
+      }
+    }
+    if (!R->isStatic())
+      makeSelf(R, C);
     bool Virtual = R->isVirtual(), Override = R->isOverride();
     // Of overloaded inherited methods, the one with this heading.
     if (Inherited && Inherited->isOverloaded()) {
@@ -4305,6 +4320,35 @@ class Checker : public StmtVisitor<Checker>,
     auto *A = isISO() ? nullptr : llvm::dyn_cast<AddrOfExpr>(Arg);
     if (A)
       A->setType(P->getType());
+    if (A && llvm::isa<FieldExpr>(A->getOperand())) { // @TFoo.M (static)
+      const Identifier &Name = llvm::cast<FieldExpr>(A->getOperand())->getField();
+      RoutineType *SavedTarget = AddrOfTarget;
+      AddrOfTarget = Formal;
+      A->setType(nullptr);
+      Type *T = check(A);
+      AddrOfTarget = SavedTarget;
+      A->setType(P->getType());
+      if (T->isError())
+        return;
+      RoutineDecl *R = A->getCode();
+      if (!R) {
+        Diags.error(Arg->getBeginLoc(),
+                    llvm::Twine("argument for ") + Kind + " parameter '" +
+                        P->getName().Spelling + "' must be a " + Kind +
+                        " or a static class method",
+                    {Arg->getRange()});
+        return;
+      }
+      if (R->isCDecl() != Formal->isCDecl() ||
+          !congruent(Formal->getParams(), Formal->getResult(), R->getParams(),
+                     R->isFunction() ? R->getResultType() : nullptr))
+        Diags.error(Arg->getBeginLoc(),
+                    "'" + Name.Spelling +
+                        "' does not match the heading of parameter '" +
+                        P->getName().Spelling + "' (" + quoted(Formal) + ")",
+                    {Arg->getRange()});
+      return;
+    }
     auto *N = llvm::dyn_cast<NameRefExpr>(A ? A->getOperand() : Arg);
     Decl *D = N ? Cur->lookup(N->getName().Name) : nullptr;
     llvm::ArrayRef<VarDecl *> Params;
@@ -7091,11 +7135,21 @@ public:
       Why = "constructors and destructors cannot be method pointers";
     else if (R->getBuiltin() != TObjectMethod::None)
       Why = "the methods of TObject cannot be method pointers";
-    else if (R->isStatic())
-      Why = "static methods cannot be method pointers";
     if (Why) {
       Diags.error(Name.Loc, "'@" + Name.Spelling + "': " + Why, {Name.getRange()});
       return errorType();
+    }
+    if (R->isStatic()) { // a routine without Self: a procedural value
+      if (F)
+        F->setMember(R);
+      else
+        N->setDecl(R);
+      Used.insert(R);
+      warnHints(R, Name);
+      E->setCode(R);
+      return Ctx.create<RoutineType>(R->getParams(),
+                                     R->isFunction() ? R->getResultType() : nullptr,
+                                     R->isCDecl());
     }
     if (F)
       F->setMember(R);

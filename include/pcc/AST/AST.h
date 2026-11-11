@@ -1512,7 +1512,7 @@ public:
   /// methods and operators (static).
   bool hasSelf() const { return isMethod() && !Static; }
   bool isStatic() const { return Static; }
-  void setStatic() { Static = true; }
+  void setStatic(bool S = true) { Static = S; }
   /// The `inline` directive (with {$inline on}): code generation asks
   /// LLVM to inline the routine (inlinehint).
   bool isInline() const { return Inline; }

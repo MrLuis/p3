@@ -447,6 +447,8 @@ end;
 
 procedure noteDeclaredHere(d: PDecl); forward;
 
+function isInstanceMember(d: PDecl): boolean; forward;
+
 procedure diagUndeclared(const id: TIdent);
 var
   r, d: PDecl;
@@ -461,7 +463,10 @@ begin
       d := findMember(r^.ownerClass, id.name, owner);
       if d <> nil then
       begin
-        ms('instance member ''');
+        if isInstanceMember(d) then
+          ms('instance member ''')
+        else
+          ms('class method ''');
         maN(id.spelling);
         ma(''' cannot be used in a static class method');
         errR(id.loc, identRange(id));
@@ -2568,12 +2573,33 @@ procedure defineMethod(c, parentClass: PType; r, inh: PDecl; owner: PType;
                        var vtable: TPtrList);
 var
   x, match: PDecl;
+  bad: string;
 begin
   r^.ownerClass := c;
   r^.parent := nil;
   r^.level := 1;
   resolveSignature(r);
-  makeSelf(r, c);
+  { a static class method has no Self: it is called like a routine }
+  if r^.isStatic then
+  begin
+    bad := '';
+    if not r^.isClassMethod then
+      bad := 'only class methods can be ''static'''
+    else if r^.isVirtual then
+      bad := '''static'' cannot be used with ''virtual'''
+    else if r^.isOverride then
+      bad := '''static'' cannot be used with ''override'''
+    else if r^.isAbstract then
+      bad := '''static'' cannot be used with ''abstract''';
+    if bad <> '' then
+    begin
+      ms(bad);
+      errR(r^.ident.loc, identRange(r^.ident));
+      r^.isStatic := false;
+    end;
+  end;
+  if not r^.isStatic then
+    makeSelf(r, c);
   { of overloaded inherited methods, the one with this heading }
   if (inh <> nil) and (inh^.overloadIndex <> 0) then
   begin
@@ -6106,7 +6132,7 @@ var
   found, cdeclConv: boolean;
   n: PNode;
   why: string;
-  ofT: PType;
+  ofT, savedTarget: PType;
 begin
   if formal^.routineOfObject then { @obj.M, or a method pointer }
   begin
@@ -6145,6 +6171,43 @@ begin
   begin
     arg^.typ := p^.varType;
     n := arg^.inner;
+  end;
+  if not isISO and (arg^.kind = nkAddrOf) and (arg^.inner^.kind = nkField) then
+  begin
+    { @TFoo.M (static) }
+    savedTarget := addrOfTarget;
+    addrOfTarget := formal;
+    arg^.typ := nil;
+    ofT := check(arg);
+    addrOfTarget := savedTarget;
+    arg^.typ := p^.varType;
+    if isError(ofT) then
+      exit;
+    x := arg^.addrCode;
+    if x = nil then
+    begin
+      ms('argument for ' + kind + ' parameter ''');
+      maN(p^.ident.spelling);
+      ma(''' must be a ' + kind + ' or a static class method');
+      errR(arg^.b, nodeRange(arg));
+      exit;
+    end;
+    xr := nil;
+    if x^.isFunction then
+      xr := x^.resultType;
+    if (isCDecl(x) <> formal^.routineCDecl) or
+       not congruent(formal^.routineParams, formal^.routineResult, x^.params, xr) then
+    begin
+      ms('''');
+      maN(arg^.inner^.fieldName.spelling);
+      ma(''' does not match the heading of parameter ''');
+      maN(p^.ident.spelling);
+      ma(''' (');
+      maT(formal);
+      ma(')');
+      errR(arg^.b, nodeRange(arg));
+    end;
+    exit;
   end;
   d := nil;
   if n^.kind = nkNameRef then

@@ -2212,6 +2212,8 @@ function emitRoutineValue(arg: PNode): TV;
 var
   d: PDecl;
 begin
+  if (arg^.kind = nkAddrOf) and (arg^.addrCode <> nil) then { @TFoo.M of a static method }
+    exit(routinePairOf(arg^.addrCode));
   if arg^.kind = nkAddrOf then { @f (Turbo/FPC) }
     arg := arg^.inner;
   d := arg^.refDecl;
@@ -2803,6 +2805,8 @@ begin
     exit(irZero(memType(t)));
   if t^.routineOfObject then
     exit(visitExpr(e));
+  if (e^.kind = nkAddrOf) and (e^.addrCode <> nil) then { @TFoo.M of a static method }
+    exit(routinePairOf(e^.addrCode));
   if e^.kind = nkAddrOf then
     exit(routinePairOf(e^.inner^.refDecl));
   emitRoutinePair := irLoad(memType(t), emitAddress(e), '');
@@ -3395,6 +3399,8 @@ var
   obj, v, table, slot, fn, res: TV;
 begin
   r := e^.fieldDecl;
+  if r^.isStatic and (e^.base^.typ^.kind <> tyRecord) then
+    exit(emitCall(r, args)); { a class's static method: no Self }
   if e^.base^.typ^.kind = tyRecord then
   begin
     if namesType(e^.base) then

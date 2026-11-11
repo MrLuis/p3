@@ -1223,7 +1223,7 @@ begin
       continue;
     end;
     wd := nameStr(tok.name);
-    if (wd = 'static') and inRecord then
+    if wd = 'static' then { a record's class method, or (objfpc) a class's }
       isStatic := true
     else if wd = 'virtual' then
       isVirtual := true
@@ -1235,7 +1235,7 @@ begin
       overloadDir := true
     else if wd = 'reintroduce' then
       { (hides an inherited virtual method without a warning: no effect) }
-    else if (wd = 'dynamic') or (wd = 'static') or (wd = 'message') or
+    else if (wd = 'dynamic') or (wd = 'message') or
             (wd = 'final') or (wd = 'external') or (wd = 'forward') then
     begin
       unsupported('''' + wd + ''' on methods is');
@@ -1259,7 +1259,7 @@ begin
   if recordClassMethod and not isStatic then
     diagErrorR(name.loc, 'the class methods of a record must be ''static''',
                identRange(name))
-  else if isStatic and not recordClassMethod then
+  else if inRecord and isStatic and not recordClassMethod then
     diagErrorR(name.loc, 'only the class methods of a record can be ''static''',
                identRange(name));
   r := newRoutine(loc, name, isFunction, params, hasParamList, resultSpec,
@@ -1272,6 +1272,8 @@ begin
   r^.isInline := inlineDir and not isVirtual and not isOverride and not isAbstract;
   r^.callConv := cc;
   addHints(r, hf, hm);
+  if isStatic and not inRecord then { a class's (Sema checks it is a class method) }
+    r^.isStatic := true;
   parseMethodHeadingR := r;
 end;
 

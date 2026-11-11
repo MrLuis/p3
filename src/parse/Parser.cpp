@@ -856,7 +856,7 @@ RoutineDecl *Parser::parseMethodHeading(bool InRecord, bool RecordClassMethod) {
       continue;
     }
     llvm::StringRef W = Tok.getIdentifier();
-    if (W == "static" && InRecord) {
+    if (W == "static") { // a record's class method, or (objfpc) a class's
       Static = true;
     } else if (W == "virtual") {
       Virtual = true;
@@ -868,8 +868,7 @@ RoutineDecl *Parser::parseMethodHeading(bool InRecord, bool RecordClassMethod) {
       Overload = true;
     } else if (W == "reintroduce") {
       // (hides an inherited virtual method without a warning: no effect)
-    } else if (W == "dynamic" ||
-               W == "static" || W == "message" || W == "final" ||
+    } else if (W == "dynamic" || W == "message" || W == "final" ||
                W == "external" || W == "forward") {
       unsupported("'" + W.str() + "' on methods is");
       return nullptr;
@@ -890,7 +889,7 @@ RoutineDecl *Parser::parseMethodHeading(bool InRecord, bool RecordClassMethod) {
   if (RecordClassMethod && !Static)
     Diags.error(Name.Loc, "the class methods of a record must be 'static'",
                 {Name.getRange()});
-  else if (Static && !RecordClassMethod)
+  else if (InRecord && Static && !RecordClassMethod)
     Diags.error(Name.Loc,
                 "only the class methods of a record can be 'static'",
                 {Name.getRange()});
@@ -905,6 +904,8 @@ RoutineDecl *Parser::parseMethodHeading(bool InRecord, bool RecordClassMethod) {
     R->setInline();
   R->setCallConv(CC);
   R->addHints(H.Flags, H.Message);
+  if (Static && !InRecord) // a class's (Sema checks it is a class method)
+    R->setStatic();
   return R;
 }
 

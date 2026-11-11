@@ -2668,6 +2668,12 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
 
   /// {function, static link} for a routine passed as a procedural argument.
   llvm::Value *emitRoutineValue(Expr *Arg) {
+    if (auto *A = llvm::dyn_cast<AddrOfExpr>(Arg); A && A->getCode()) {
+      // @TFoo.M of a static method
+      llvm::Value *Pair = llvm::UndefValue::get(memType(A->getType()));
+      Pair = B.CreateInsertValue(Pair, routineFunction(A->getCode()), 0);
+      return B.CreateInsertValue(Pair, staticLinkFor(A->getCode()), 1);
+    }
     if (auto *A = llvm::dyn_cast<AddrOfExpr>(Arg)) // @f (Turbo/FPC)
       Arg = A->getOperand();
     Decl *D = llvm::cast<NameRefExpr>(Arg)->getDecl();
@@ -2918,8 +2924,10 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
     if (llvm::cast<RoutineType>(T)->isOfObject())
       return visitExpr(E);
     if (auto *A = llvm::dyn_cast<AddrOfExpr>(E)) {
-      auto *R = llvm::cast<RoutineDecl>(
-          llvm::cast<NameRefExpr>(A->getOperand())->getDecl());
+      RoutineDecl *R = A->getCode(); // @TFoo.M of a static method
+      if (!R)
+        R = llvm::cast<RoutineDecl>(
+            llvm::cast<NameRefExpr>(A->getOperand())->getDecl());
       llvm::Value *Pair = llvm::UndefValue::get(memType(T));
       Pair = B.CreateInsertValue(Pair, routineFunction(R), 0);
       return B.CreateInsertValue(Pair, staticLinkFor(R), 1);
@@ -3513,6 +3521,8 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
   /// obj.M(args) or TFoo.Create(args) through FieldExpr F.
   llvm::Value *emitMemberCall(FieldExpr *F, llvm::ArrayRef<Expr *> Args) {
     auto *R = llvm::cast<RoutineDecl>(F->getMember());
+    if (R->isStatic() && !F->getBase()->getType()->isRecord())
+      return emitCall(R, Args); // a class's static method: no Self
     if (auto *RT = llvm::dyn_cast<RecordType>(F->getBase()->getType())) {
       if (namesType(F->getBase())) { // TR.Create, TR.M
         if (R->isConstructor())

@@ -15,6 +15,6 @@ begin
   sh.Free;
   p.x := -3;
   p.y := 4;
-  writeln(p.Dist);
+  writeln(p.Dist, ' ', TShapes.Total);
   s.Free;
 end.
