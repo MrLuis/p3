@@ -17,6 +17,10 @@ var
   tyErrorT, tyIntegerT, tyInt64T, tyCardinalT, tyByteT, tyWordT,
   tyShortIntT, tySmallIntT, tyRealT, tyBooleanT, tyCharT, tyNilT,
   tyEmptySetT, tyTextT, tyUntypedPointerT: PType;
+  { unsigned 64-bit (FPC's qword): values are kept as their 64 bits (in
+    an int64), so code that compares or prints them reads them unsigned
+    (see isQWord) }
+  tyQWordT: PType;
   { the type of untyped parameters (var x; const x): usable only through
     typecasts, @, and as arguments for untyped parameters }
   tyUntypedT: PType;
@@ -102,6 +106,9 @@ function findOwnMember(c: PType; name: PName): PDecl;
 function findMember(c: PType; name: PName; var owner: PType): PDecl;
 function inheritsFrom(c, a: PType): boolean;
 function getOrdinalBounds(t: PType): TOrdinalBounds;
+{ Is t qword (unsigned 64-bit), not a subrange of it? getOrdinalBounds
+  gives it 0..high(int64): callers that need its whole range test this. }
+function isQWord(t: PType): boolean;
 { All integer types count as one host (Turbo/FPC). }
 function haveSameOrdinalHost(a, b: PType): boolean;
 { Do L and R compare as short strings (Turbo/FPC)? }
@@ -327,6 +334,7 @@ begin
   tyWordT := newIntegerType(16, false, 'word');
   tyShortIntT := newIntegerType(8, true, 'shortint');
   tySmallIntT := newIntegerType(16, true, 'smallint');
+  tyQWordT := newIntegerType(64, false, 'qword');
   tyRealT := newType(tyReal);
   tyBooleanT := newType(tyBoolean);
   tyCharT := newType(tyChar);
@@ -763,6 +771,12 @@ begin
   inheritsFrom := false;
 end;
 
+function isQWord(t: PType): boolean;
+begin
+  isQWord := (t <> nil) and (t^.kind = tyInteger) and (t^.bits = 64) and
+             not t^.isSigned;
+end;
+
 function getOrdinalBounds(t: PType): TOrdinalBounds;
 var
   b: TOrdinalBounds;
@@ -781,6 +795,11 @@ begin
           b.lo := -(int64(1) shl (t^.bits - 1));
           b.hi := (int64(1) shl (t^.bits - 1)) - 1;
         end;
+      end
+      else if t^.bits = 64 then { qword: its whole range does not fit }
+      begin
+        b.lo := 0;
+        b.hi := high(int64);
       end
       else
       begin
@@ -869,7 +888,10 @@ begin
     bufAddName(b, PDecl(listGet(base^.enumValues, longint(v)))^.ident.spelling);
     exit;
   end;
-  bufAddInt(b, v);
+  if isQWord(base) then
+    bufAdd(b, uintToStr(v))
+  else
+    bufAddInt(b, v);
 end;
 
 procedure bufAddTypeName(var b: TBuf; t: PType);

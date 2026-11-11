@@ -28,6 +28,7 @@ type
     name: PName;       { identifiers: the lower-case name }
     strValue: PName;   { string literals: the value, quotes removed }
     intValue: int64;   { integer literals: 64 bits, read as unsigned }
+    based: boolean;    { integer literals written $FF, %1010 or &17 }
     realValue: double; { real literals }
   end;
 
@@ -360,6 +361,7 @@ begin
   t.name := nil;
   t.strValue := nil;
   t.intValue := 0;
+  t.based := false;
   t.realValue := 0;
 end;
 
@@ -777,13 +779,17 @@ begin
   else if (u = 'WORD') or (u = 'SMALLINT') then
     predefinedSize := 2
   else if (u = 'INTEGER') or (u = 'LONGINT') or (u = 'CARDINAL') or
-          (u = 'LONGWORD') then
+          (u = 'LONGWORD') or (u = 'DWORD') then
     predefinedSize := 4
   else if (u = 'INT64') or (u = 'REAL') or (u = 'DOUBLE') or
           (u = 'POINTER') or (u = 'PCHAR') or (u = 'ANSISTRING') or
           (u = 'SIZEINT') or (u = 'PTRINT') or (u = 'NATIVEINT') or
-          (u = 'PANSICHAR') then
+          (u = 'PANSICHAR') or (u = 'PGUID') or (u = 'QWORD') or
+          (u = 'UINT64') or (u = 'NATIVEUINT') or (u = 'PTRUINT') or
+          (u = 'SIZEUINT') then
     predefinedSize := 8
+  else if u = 'TGUID' then
+    predefinedSize := 16
   else if u = 'SHORTSTRING' then
     predefinedSize := 256;
 end;
@@ -1925,6 +1931,7 @@ begin
     diagErrorR(locOf(lx, start),
                'invalid base-' + intToStr(radix) + ' number', tokenRange(t));
   t.intValue := v;
+  t.based := true;
 end;
 
 { --- Strings: 'text' with '' for a quote; no line breaks. --mode=tp also

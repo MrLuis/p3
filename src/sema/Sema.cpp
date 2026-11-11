@@ -205,6 +205,12 @@ class Checker : public StmtVisitor<Checker>,
       Ty("cardinal", Ctx.getCardinalType());
       Ty("longword", Ctx.getCardinalType());
       Ty("dword", Ctx.getCardinalType());
+      // Unsigned 64-bit, and FPC's pointer-sized unsigned integers.
+      Ty("qword", Ctx.getQWordType());
+      Ty("uint64", Ctx.getQWordType());
+      Ty("nativeuint", Ctx.getQWordType());
+      Ty("ptruint", Ctx.getQWordType());
+      Ty("sizeuint", Ctx.getQWordType());
       Ty("byte", Ctx.getByteType());
       Ty("word", Ctx.getWordType());
       Ty("shortint", Ctx.getShortIntType());
@@ -737,15 +743,29 @@ class Checker : public StmtVisitor<Checker>,
            C->Value.Int <= UINT32_MAX;
   }
 
+  /// Is E a constant of zero or more (that a qword can hold)?
+  bool isNonNegativeConstant(Expr *E) {
+    auto C = fold(E);
+    return C && C->Value.K == ConstValue::Ordinal && C->Value.Int >= 0;
+  }
+
   /// The type integer operands LE and RE are converted to for an operator:
-  /// int64 if either is int64; cardinal if both are unsigned (or the other
-  /// is a constant that fits); int64 when cardinal meets a signed value
-  /// (so no value is lost, as in FPC); integer otherwise.
+  /// qword if one is qword and the other an int64 constant of zero or more;
+  /// int64 if either is int64; qword if either is qword (the other, of 32
+  /// bits or less, is converted to qword, as in FPC); cardinal if both are
+  /// unsigned (or the other is a constant that fits); int64 when cardinal
+  /// meets a signed value (so no value is lost, as in FPC); integer
+  /// otherwise.
   Type *integerOperandType(Expr *LE, Type *L, Expr *RE, Type *R) {
     Type *PL = promoteInteger(L), *PR = promoteInteger(R);
     Type *I64 = Ctx.getInt64Type(), *Card = Ctx.getCardinalType();
+    if ((isQWord(PL) && PR == I64 && isNonNegativeConstant(RE)) ||
+        (isQWord(PR) && PL == I64 && isNonNegativeConstant(LE)))
+      return Ctx.getQWordType();
     if (PL == I64 || PR == I64)
       return I64;
+    if (isQWord(PL) || isQWord(PR))
+      return Ctx.getQWordType();
     if (PL == Card && PR == Card)
       return Card;
     if (PL == Card || PR == Card) {
@@ -1073,8 +1093,26 @@ class Checker : public StmtVisitor<Checker>,
   }
 
   static double asReal(const Constant &C) {
-    return C.Value.K == ConstValue::Real ? C.Value.RealVal
-                                         : static_cast<double>(C.Value.Int);
+    if (C.Value.K == ConstValue::Real)
+      return C.Value.RealVal;
+    if (C.Ty && isQWord(C.Ty->getBase()))
+      return static_cast<double>(static_cast<uint64_t>(C.Value.Int));
+    return static_cast<double>(C.Value.Int);
+  }
+
+  /// Is a value of type T kept as the 64 bits of a qword (read unsigned)?
+  static bool isQWordValue(Type *T) { return T && isQWord(T->getBase()); }
+
+  /// Does constant V of type VTy lie within T's values? (qword values are
+  /// unsigned.)
+  static bool constantInRange(int64_t V, Type *VTy, Type *T) {
+    bool Unsigned = isQWordValue(VTy);
+    if (isQWord(T))
+      return Unsigned || V >= 0;
+    if (Unsigned && V < 0) // 2^63 or more
+      return false;
+    OrdinalBounds Bd = getOrdinalBounds(T);
+    return V >= Bd.Lo && V <= Bd.Hi;
   }
 
   /// Folds an already type-checked expression. Returns nullopt if it is not
@@ -1144,6 +1182,8 @@ class Checker : public StmtVisitor<Checker>,
       auto UA = static_cast<uint64_t>(A), UC = static_cast<uint64_t>(C);
       bool Wide = T->isIntegerLike() &&
                   llvm::cast<IntegerType>(T->getBase())->getBits() == 64;
+      // qword operands: div, mod and comparisons are unsigned.
+      bool U64 = !IsReal && B->getOperandType() && isQWord(B->getOperandType());
       switch (B->getOp()) {
       case BinaryOp::Add: return IsReal ? Real(X + Y) : Ord(static_cast<int64_t>(UA + UC));
       case BinaryOp::Sub: return IsReal ? Real(X - Y) : Ord(static_cast<int64_t>(UA - UC));
@@ -1153,10 +1193,16 @@ class Checker : public StmtVisitor<Checker>,
           return std::nullopt;
         return Real(X / Y);
       case BinaryOp::IntDiv:
+        if (U64)
+          return UC == 0 ? std::nullopt
+                         : std::optional(Ord(static_cast<int64_t>(UA / UC)));
         if (C == 0 || (A == INT64_MIN && C == -1))
           return std::nullopt;
         return Ord(A / C);
       case BinaryOp::Mod:
+        if (U64)
+          return UC == 0 ? std::nullopt
+                         : std::optional(Ord(static_cast<int64_t>(UA % UC)));
         if (C <= 0)
           return std::nullopt;
         return Ord(((A % C) + C) % C);
@@ -1173,10 +1219,10 @@ class Checker : public StmtVisitor<Checker>,
         return Ord(static_cast<int32_t>(static_cast<uint32_t>(A) >> (C & 31)));
       case BinaryOp::Eq:  return Ord(IsReal ? X == Y : A == C);
       case BinaryOp::Ne:  return Ord(IsReal ? X != Y : A != C);
-      case BinaryOp::Lt:  return Ord(IsReal ? X < Y : A < C);
-      case BinaryOp::Le:  return Ord(IsReal ? X <= Y : A <= C);
-      case BinaryOp::Gt:  return Ord(IsReal ? X > Y : A > C);
-      case BinaryOp::Ge:  return Ord(IsReal ? X >= Y : A >= C);
+      case BinaryOp::Lt:  return Ord(IsReal ? X < Y : U64 ? UA < UC : A < C);
+      case BinaryOp::Le:  return Ord(IsReal ? X <= Y : U64 ? UA <= UC : A <= C);
+      case BinaryOp::Gt:  return Ord(IsReal ? X > Y : U64 ? UA > UC : A > C);
+      case BinaryOp::Ge:  return Ord(IsReal ? X >= Y : U64 ? UA >= UC : A >= C);
       case BinaryOp::In: case BinaryOp::Is: case BinaryOp::As:
         return std::nullopt;
       }
@@ -1204,6 +1250,8 @@ class Checker : public StmtVisitor<Checker>,
         if (auto *A = llvm::dyn_cast<ArrayType>(AT))
           AT = A->getIndexType();
         OrdinalBounds Bd = getOrdinalBounds(AT);
+        if (IsHigh && isQWord(AT)) // 2^64-1: its 64 bits
+          return Constant{T, ConstValue::ordinal(-1)};
         return Constant{T, ConstValue::ordinal(IsHigh ? Bd.Hi : Bd.Lo)};
       }
       auto V = fold(Call->getArgs()[0]);
@@ -1220,6 +1268,8 @@ class Checker : public StmtVisitor<Checker>,
       case BuiltinKind::Abs:
         if (V->Value.K == ConstValue::Real)
           return Constant{T, ConstValue::real(std::fabs(V->Value.RealVal))};
+        if (isQWordValue(V->Ty)) // already non-negative
+          return Ord(V->Value.Int);
         return Ord(V->Value.Int < 0 ? static_cast<int64_t>(0 - U) : V->Value.Int);
       case BuiltinKind::Sqr:
         if (V->Value.K == ConstValue::Real)
@@ -1263,7 +1313,8 @@ class Checker : public StmtVisitor<Checker>,
                   "constant expressions are a Turbo/Free Pascal extension; "
                   "use --mode=tp",
                   {E->getRange()});
-    if (C->Value.K == ConstValue::Ordinal && C->Ty->isIntegerLike()) {
+    if (C->Value.K == ConstValue::Ordinal && C->Ty->isIntegerLike() &&
+        !isQWordValue(C->Ty)) { // (any 64 bits are a qword)
       OrdinalBounds Bd = getOrdinalBounds(C->Ty->getBase());
       if (C->Value.Int < Bd.Lo || C->Value.Int > Bd.Hi) {
         // Turbo/FPC: integer constant expressions widen to int64.
@@ -1305,6 +1356,8 @@ class Checker : public StmtVisitor<Checker>,
     if (auto *E = llvm::dyn_cast<EnumType>(B))
       if (V >= 0 && static_cast<size_t>(V) < E->getValues().size())
         return E->getValues()[V]->getName().Spelling.str();
+    if (isQWord(B))
+      return std::to_string(static_cast<uint64_t>(V));
     return std::to_string(V);
   }
 
@@ -3581,8 +3634,7 @@ class Checker : public StmtVisitor<Checker>,
       return false;
     }
     if (C->Value.K == ConstValue::Ordinal && T->isOrdinal()) {
-      OrdinalBounds Bd = getOrdinalBounds(T);
-      if (C->Value.Int < Bd.Lo || C->Value.Int > Bd.Hi) {
+      if (!constantInRange(C->Value.Int, C->Ty, T)) {
         Diags.error(Init->getBeginLoc(),
                     "value " + formatValue(C->Ty, C->Value.Int) +
                         " is out of range for " + quoted(T),
@@ -3700,8 +3752,7 @@ class Checker : public StmtVisitor<Checker>,
       return;
     }
     if (auto C = fold(E); C && C->Value.K == ConstValue::Ordinal && T->isOrdinal()) {
-      OrdinalBounds Bd = getOrdinalBounds(T);
-      if (C->Value.Int < Bd.Lo || C->Value.Int > Bd.Hi)
+      if (!constantInRange(C->Value.Int, C->Ty, T))
         Diags.error(E->getBeginLoc(),
                     "value " + formatValue(C->Ty, C->Value.Int) +
                         " is out of range for " + quoted(T),
@@ -4203,6 +4254,18 @@ class Checker : public StmtVisitor<Checker>,
     return 7;
   }
 
+  /// Breaks ties between costs: widening an integer to 64 bits of the
+  /// other signedness (byte to int64 rather than qword, longint to qword
+  /// rather than int64), as Free Pascal prefers the same signedness.
+  static unsigned signPenalty(Type *P, Type *A) {
+    auto *PI = llvm::dyn_cast<IntegerType>(P->getBase());
+    auto *AI = llvm::dyn_cast<IntegerType>(A->getBase());
+    return PI && AI && PI->getBits() == 64 && AI->getBits() < 64 &&
+                   PI->isSigned() != AI->isSigned()
+               ? 1
+               : 0;
+  }
+
   /// Is Arg the name of a routine (passed for a procedural parameter)?
   bool isRoutineName(Expr *Arg) {
     auto *N = llvm::dyn_cast<NameRefExpr>(Arg);
@@ -4215,9 +4278,11 @@ class Checker : public StmtVisitor<Checker>,
   }
 
   /// The cost of calling R with Args (types ArgTys; null: a routine's
-  /// name), or -1 if they do not fit.
+  /// name), or -1 if they do not fit. Penalty receives the sign penalties
+  /// (which break ties).
   int callCost(RoutineDecl *R, llvm::ArrayRef<Expr *> Args,
-               llvm::ArrayRef<Type *> ArgTys) {
+               llvm::ArrayRef<Type *> ArgTys, unsigned &Penalty) {
+    Penalty = 0;
     auto Params = R->getParams();
     if (!acceptsArgCount(Params, Args.size()))
       return -1;
@@ -4266,6 +4331,7 @@ class Checker : public StmtVisitor<Checker>,
         continue;
       }
       Cost += static_cast<int>(conversionCost(PT, AT));
+      Penalty += signPenalty(PT, AT);
     }
     return Cost;
   }
@@ -4277,6 +4343,14 @@ class Checker : public StmtVisitor<Checker>,
       if (I < R->getParams().size() && R->getParams()[I]->getType() &&
           (R->getParams()[I]->getType()->isArrayOfConst() ||
            R->getParams()[I]->getType()->isOpenArray()))
+        return true;
+    return false;
+  }
+
+  static bool hasProceduralParam(llvm::ArrayRef<RoutineDecl *> Cands, size_t I) {
+    for (RoutineDecl *R : Cands)
+      if (I < R->getParams().size() && R->getParams()[I]->getType() &&
+          llvm::isa<RoutineType>(R->getParams()[I]->getType()))
         return true;
     return false;
   }
@@ -4433,7 +4507,11 @@ class Checker : public StmtVisitor<Checker>,
         continue;
       }
       AllowSlice = isSliceCall(A);
-      Type *T = isRoutineName(A) ? nullptr : checkAllowingUntyped(A);
+      // A routine's name: for a procedural parameter if a candidate has
+      // one here, else a call (a function without parameters).
+      Type *T = isRoutineName(A) && hasProceduralParam(Cands, ArgTys.size())
+                    ? nullptr
+                    : checkAllowingUntyped(A);
       AllowSlice = false;
       if (T && T->isError())
         return nullptr;
@@ -4441,16 +4519,20 @@ class Checker : public StmtVisitor<Checker>,
     }
     RoutineDecl *Best = nullptr;
     int BestCost = -1;
+    unsigned BestPenalty = 0;
     bool Tie = false;
     for (RoutineDecl *R : Cands) {
-      int Cost = callCost(R, Args, ArgTys);
+      unsigned Penalty;
+      int Cost = callCost(R, Args, ArgTys, Penalty);
       if (Cost < 0)
         continue;
-      if (!Best || Cost < BestCost) {
+      if (!Best || Cost < BestCost ||
+          (Cost == BestCost && Penalty < BestPenalty)) {
         Best = R;
         BestCost = Cost;
+        BestPenalty = Penalty;
         Tie = false;
-      } else if (Cost == BestCost) {
+      } else if (Cost == BestCost && Penalty == BestPenalty) {
         Tie = true;
       }
     }
@@ -4467,9 +4549,12 @@ class Checker : public StmtVisitor<Checker>,
                     (Best ? "' with arguments (" : "' takes arguments (") +
                     Types + ")",
                 {Range});
-    for (RoutineDecl *R : Cands)
-      if (!Best || callCost(R, Args, ArgTys) == BestCost)
+    for (RoutineDecl *R : Cands) {
+      unsigned Penalty;
+      if (!Best || (callCost(R, Args, ArgTys, Penalty) == BestCost &&
+                    Penalty == BestPenalty))
         Diags.note(R->getLocation(), "candidate: " + routineHeading(R));
+    }
     return nullptr;
   }
 
@@ -4888,9 +4973,16 @@ class Checker : public StmtVisitor<Checker>,
     return false;
   }
 
+  /// The order of label value V of a selector of type SelTy: qword's
+  /// values compare unsigned.
+  static int64_t labelKey(int64_t V, Type *SelTy) {
+    return isQWordValue(SelTy) ? V ^ INT64_MIN : V;
+  }
+
   /// Checks one case or variant label against the selector/tag type.
   bool checkLabel(CaseLabel *L, Type *SelTy, llvm::StringRef What) {
     bool OK = true;
+    Type *LoTy = nullptr, *HiTy = nullptr;
     for (Expr *E : {L->Lo, L->Hi}) {
       if (!E)
         continue;
@@ -4909,17 +5001,20 @@ class Checker : public StmtVisitor<Checker>,
         continue;
       }
       (E == L->Lo ? L->LoValue : L->HiValue) = C->Value.Int;
+      (E == L->Lo ? LoTy : HiTy) = C->Ty;
     }
-    if (!L->Hi)
+    if (!L->Hi) {
       L->HiValue = L->LoValue;
-    if (OK && L->LoValue > L->HiValue) {
+      HiTy = LoTy;
+    }
+    if (OK && labelKey(L->LoValue, SelTy) > labelKey(L->HiValue, SelTy)) {
       Diags.error(L->Lo->getBeginLoc(), "case label range is empty",
                   {L->getRange()});
       OK = false;
     }
     if (OK && !SelTy->isError()) {
-      OrdinalBounds B = getOrdinalBounds(SelTy);
-      if (L->LoValue < B.Lo || L->HiValue > B.Hi) {
+      if (!constantInRange(L->LoValue, LoTy, SelTy) ||
+          !constantInRange(L->HiValue, HiTy, SelTy)) {
         Diags.error(L->Lo->getBeginLoc(),
                     What + " is outside the range of type " + quoted(SelTy),
                     {L->getRange()});
@@ -6950,9 +7045,11 @@ public:
         if (!checkLabel(L, LabelTy, "case label") || SelTy->isError())
           continue;
         for (CaseLabel *Prev : Seen) {
-          if (L->LoValue > Prev->HiValue || L->HiValue < Prev->LoValue)
+          auto K = [&](int64_t V) { return labelKey(V, LabelTy); };
+          if (K(L->LoValue) > K(Prev->HiValue) || K(L->HiValue) < K(Prev->LoValue))
             continue;
-          int64_t Dup = std::max(L->LoValue, Prev->LoValue);
+          int64_t Dup = K(L->LoValue) > K(Prev->LoValue) ? L->LoValue
+                                                          : Prev->LoValue;
           Diags.error(L->Lo->getBeginLoc(),
                       "duplicate case label value " + formatValue(SelTy, Dup),
                       {L->getRange()});
@@ -7016,12 +7113,14 @@ public:
   Type *visitIntegerLiteralExpr(IntegerLiteralExpr *E) {
     if (E->getValue() <= static_cast<uint64_t>(PascalMaxInt))
       return Ctx.getIntegerType();
-    // Turbo/FPC: larger literals are int64 constants.
-    if (!isISO() && E->getValue() <= static_cast<uint64_t>(INT64_MAX))
+    // Turbo/FPC: larger literals are int64 constants; beyond int64, qword
+    // ($FFFFFFFFFFFFFFFF and the like: the bits of an int64, as in FPC).
+    if (!isISO() && (E->getValue() <= static_cast<uint64_t>(INT64_MAX) ||
+                     E->isBased()))
       return Ctx.getInt64Type();
-    Diags.error(E->getBeginLoc(),
-                isISO() ? "integer literal exceeds maxint (2147483647)"
-                        : "integer literal exceeds the range of int64",
+    if (!isISO())
+      return Ctx.getQWordType();
+    Diags.error(E->getBeginLoc(), "integer literal exceeds maxint (2147483647)",
                 {E->getRange()});
     return Ctx.getIntegerType();
   }
@@ -7158,8 +7257,9 @@ public:
       if (T->isReal())
         return Ctx.getRealType();
       Type *P = promoteInteger(T);
-      // -cardinal can be negative (FPC: int64).
-      return E->getOp() == UnaryOp::Minus && P == Ctx.getCardinalType()
+      // -cardinal and -qword can be negative (FPC: int64).
+      return E->getOp() == UnaryOp::Minus &&
+                     (P == Ctx.getCardinalType() || isQWord(P))
                  ? Ctx.getInt64Type()
                  : P;
     }

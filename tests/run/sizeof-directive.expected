@@ -18,5 +18,13 @@ shortstring 256
 sizeint 8
 ptrint 8
 nativeint 8
+dword 4
+qword 8
+uint64 8
+nativeuint 8
+ptruint 8
+sizeuint 8
+pguid 8
+tguid 16
 sizeint is wider
 narrow char

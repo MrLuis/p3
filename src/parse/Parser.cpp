@@ -3071,7 +3071,8 @@ Expr *Parser::parseConstant() {
     Expr *Operand = nullptr;
     if (Tok.is(tok::integer_literal)) {
       Operand = Ctx.create<IntegerLiteralExpr>(Tok.getRange(),
-                                               Tok.getIntegerValue());
+                                               Tok.getIntegerValue(),
+                                             Tok.isBasedInteger());
     } else if (Tok.is(tok::real_literal)) {
       Operand = Ctx.create<RealLiteralExpr>(Tok.getRange(), Tok.getRealValue());
     } else if (Tok.is(tok::identifier)) {
@@ -3088,7 +3089,8 @@ Expr *Parser::parseConstant() {
   Expr *E = nullptr;
   switch (Tok.getKind()) {
   case tok::integer_literal:
-    E = Ctx.create<IntegerLiteralExpr>(Tok.getRange(), Tok.getIntegerValue());
+    E = Ctx.create<IntegerLiteralExpr>(Tok.getRange(), Tok.getIntegerValue(),
+                                             Tok.isBasedInteger());
     break;
   case tok::real_literal:
     E = Ctx.create<RealLiteralExpr>(Tok.getRange(), Tok.getRealValue());
@@ -3456,7 +3458,8 @@ Expr *Parser::parseFactor() {
   switch (Tok.getKind()) {
   case tok::integer_literal: {
     auto *E = Ctx.create<IntegerLiteralExpr>(Tok.getRange(),
-                                             Tok.getIntegerValue());
+                                             Tok.getIntegerValue(),
+                                             Tok.isBasedInteger());
     consumeToken();
     return E;
   }

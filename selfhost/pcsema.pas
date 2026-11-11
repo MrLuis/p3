@@ -1062,6 +1062,12 @@ begin
     stdType('cardinal', tyCardinalT);
     stdType('longword', tyCardinalT);
     stdType('dword', tyCardinalT);
+    { unsigned 64-bit, and FPC's pointer-sized unsigned integers }
+    stdType('qword', tyQWordT);
+    stdType('uint64', tyQWordT);
+    stdType('nativeuint', tyQWordT);
+    stdType('ptruint', tyQWordT);
+    stdType('sizeuint', tyQWordT);
     stdType('byte', tyByteT);
     stdType('word', tyWordT);
     stdType('shortint', tyShortIntT);
@@ -1144,10 +1150,22 @@ begin
                         (c.value.intVal >= 0) and (c.value.intVal <= 4294967295);
 end;
 
-{ The type integer operands are converted to for an operator: int64 if
-  either is int64; cardinal if both are unsigned (or the other is a
-  constant that fits); int64 when cardinal meets a signed value; integer
-  otherwise. }
+{ Is e a constant of zero or more (that a qword can hold)? }
+function isNonNegativeConstant(e: PNode): boolean;
+var
+  c: TConstant;
+begin
+  isNonNegativeConstant := fold(e, c) and (c.value.kind = ckOrdinal) and
+                           (c.value.intVal >= 0);
+end;
+
+{ The type integer operands are converted to for an operator: qword if one
+  is qword and the other an int64 constant of zero or more; int64 if
+  either is int64; qword if either is qword (the other, of 32 bits or
+  less, is converted to qword, as in FPC); cardinal if both are unsigned
+  (or the other is a constant that fits); int64 when cardinal meets a
+  signed value; integer otherwise. }
+
 function integerOperandType(le: PNode; l: PType; re: PNode; r: PType): PType;
 var
   pl, pr, otherTy: PType;
@@ -1155,8 +1173,14 @@ var
 begin
   pl := promoteInteger(l);
   pr := promoteInteger(r);
+  { qword with an int64 constant of zero or more: qword }
+  if (isQWord(pl) and (pr = tyInt64T) and isNonNegativeConstant(re)) or
+     (isQWord(pr) and (pl = tyInt64T) and isNonNegativeConstant(le)) then
+    exit(tyQWordT);
   if (pl = tyInt64T) or (pr = tyInt64T) then
     exit(tyInt64T);
+  if isQWord(pl) or isQWord(pr) then
+    exit(tyQWordT);
   if (pl = tyCardinalT) and (pr = tyCardinalT) then
     exit(tyCardinalT);
   if (pl = tyCardinalT) or (pr = tyCardinalT) then
@@ -1529,12 +1553,46 @@ begin
   isISOConstantForm := e^.kind in [nkIntegerLit, nkRealLit, nkStringLit, nkNameRef];
 end;
 
+{ Is a value of type t kept as the 64 bits of a qword (read unsigned)? }
+function isQWordValue(t: PType): boolean;
+begin
+  isQWordValue := (t <> nil) and isQWord(getBase(t));
+end;
+
 function asReal(const c: TConstant): double;
 begin
   if c.value.kind = ckReal then
     asReal := c.value.realVal
+  else if isQWordValue(c.ty) then
+    asReal := uToReal(c.value.intVal)
   else
     asReal := c.value.intVal;
+end;
+
+{ Does constant v of type vt lie within t's values? (qword values are
+  unsigned.) }
+function constantInRange(v: int64; vt, t: PType): boolean;
+var
+  bd: TOrdinalBounds;
+begin
+  if isQWord(t) then
+    exit(isQWordValue(vt) or (v >= 0));
+  if isQWordValue(vt) and (v < 0) then { 2^63 or more }
+    exit(false);
+  bd := getOrdinalBounds(t);
+  constantInRange := (v >= bd.lo) and (v <= bd.hi);
+end;
+
+{ The order of label value v of a selector of type selTy: qword's values
+  compare unsigned. }
+function caseKey(v: int64; selTy: PType): int64;
+begin
+  {$Q-}{$R-}
+  if isQWordValue(selTy) then
+    caseKey := v xor (-9223372036854775807 - 1)
+  else
+    caseKey := v;
+  {$Q+}{$R+}
 end;
 
 { T(v): integer types wrap to their width (byte(300) = 44); other ordinal
@@ -1626,7 +1684,7 @@ var
   at: PType;
   bd: TOrdinalBounds;
   iv: int64;
-  cmp: boolean;
+  cmp, u64: boolean;
 begin
   fold := false;
   t := e^.typ;
@@ -1694,6 +1752,8 @@ begin
         { wrap around in 64 bits; results that do not fit their type are
           reported by evaluateConstant }
         wide := isIntegerLike(t) and (getBase(t)^.bits = 64);
+        { qword operands: div, mod and comparisons are unsigned }
+        u64 := not isReal and (e^.operandType <> nil) and isQWord(e^.operandType);
         {$Q-}{$R-}
         case e^.bop of
           boAdd:
@@ -1719,12 +1779,24 @@ begin
             end;
           boIntDiv:
             begin
+              if u64 then
+              begin
+                if b = 0 then
+                  exit;
+                exit(mkConst(t, constOrdinal(uDiv(a, b)), c));
+              end;
               if (b = 0) or ((a = low(int64)) and (b = -1)) then
                 exit;
               exit(mkConst(t, constOrdinal(a div b), c));
             end;
           boMod:
             begin
+              if u64 then
+              begin
+                if b = 0 then
+                  exit;
+                exit(mkConst(t, constOrdinal(uMod(a, b)), c));
+              end;
               if b <= 0 then
                 exit;
               exit(mkConst(t, constOrdinal(((a mod b) + b) mod b), c));
@@ -1755,6 +1827,16 @@ begin
             begin
               if isReal then
                 cmp := realCompare(e^.bop, x, y)
+              else if u64 then
+                case e^.bop of
+                  boEq: cmp := a = b;
+                  boNe: cmp := a <> b;
+                  boLt: cmp := uCompare(a, b) < 0;
+                  boLe: cmp := uCompare(a, b) <= 0;
+                  boGt: cmp := uCompare(a, b) > 0;
+                else
+                  cmp := uCompare(a, b) >= 0;
+                end
               else
                 case e^.bop of
                   boEq: cmp := a = b;
@@ -1799,6 +1881,8 @@ begin
           if at^.kind = tyArray then
             at := at^.indexType;
           bd := getOrdinalBounds(at);
+          if (bk = bkHigh) and isQWord(at) then { 2^64-1: its 64 bits }
+            exit(mkConst(t, constOrdinal(-1), c));
           if bk = bkHigh then
             exit(mkConst(t, constOrdinal(bd.hi), c));
           exit(mkConst(t, constOrdinal(bd.lo), c));
@@ -1814,6 +1898,8 @@ begin
           bkAbs:
             if v.value.kind = ckReal then
               exit(mkConst(t, constReal(abs(v.value.realVal)), c))
+            else if isQWordValue(v.ty) then { already non-negative }
+              exit(mkConst(t, constOrdinal(v.value.intVal), c))
             else if v.value.intVal < 0 then
               exit(mkConst(t, constOrdinal(0 - v.value.intVal), c))
             else
@@ -1861,7 +1947,8 @@ begin
     ms('constant expressions are a Turbo/Free Pascal extension; use --mode=tp');
     errR(e^.b, nodeRange(e));
   end;
-  if (c.value.kind = ckOrdinal) and isIntegerLike(c.ty) then
+  if (c.value.kind = ckOrdinal) and isIntegerLike(c.ty) and
+     not isQWordValue(c.ty) then { (any 64 bits are a qword) }
   begin
     bd := getOrdinalBounds(getBase(c.ty));
     if (c.value.intVal < bd.lo) or (c.value.intVal > bd.hi) then
@@ -4980,8 +5067,7 @@ begin
   end;
   if (c.value.kind = ckOrdinal) and isOrdinal(t) then
   begin
-    bd := getOrdinalBounds(t);
-    if (c.value.intVal < bd.lo) or (c.value.intVal > bd.hi) then
+    if not constantInRange(c.value.intVal, c.ty, t) then
     begin
       ms('value ');
       maV(c.ty, c.value.intVal);
@@ -5190,7 +5276,6 @@ var
   e: PNode;
   t, at: PType;
   c: TConstant;
-  bd: TOrdinalBounds;
 begin
   e := p^.paramDefault;
   if (e = nil) or isError(p^.varType) then
@@ -5218,8 +5303,7 @@ begin
   end;
   if fold(e, c) and (c.value.kind = ckOrdinal) and isOrdinal(t) then
   begin
-    bd := getOrdinalBounds(t);
-    if (c.value.intVal < bd.lo) or (c.value.intVal > bd.hi) then
+    if not constantInRange(c.value.intVal, c.ty, t) then
     begin
       ms('value ');
       maV(c.ty, c.value.intVal);
@@ -6147,6 +6231,21 @@ begin
   conversionCost := 7;
 end;
 
+{ Breaks ties between costs: widening an integer to 64 bits of the other
+  signedness (byte to int64 rather than qword, longint to qword rather
+  than int64), as Free Pascal prefers the same signedness. }
+function signPenalty(p, a: PType): longint;
+var
+  pb, ab: PType;
+begin
+  signPenalty := 0;
+  pb := getBase(p);
+  ab := getBase(a);
+  if (pb^.kind = tyInteger) and (ab^.kind = tyInteger) and (pb^.bits = 64) and
+     (ab^.bits < 64) and (pb^.isSigned <> ab^.isSigned) then
+    signPenalty := 1;
+end;
+
 { Is arg the name of a routine (passed for a procedural parameter)? }
 function isRoutineName(arg: PNode): boolean;
 var
@@ -6230,13 +6329,14 @@ begin
   setCtorCost := 1;
 end;
 
-function callCost(r: PDecl; const args, argTys: TPtrList): longint;
+function callCost(r: PDecl; const args, argTys: TPtrList; var penalty: longint): longint;
 var
   i, cost, c: longint;
   p: PDecl;
   pt, at: PType;
   arg: PNode;
 begin
+  penalty := 0;
   callCost := -1;
   if not acceptsArgCount(r^.params, args.count) then
     exit;
@@ -6294,6 +6394,7 @@ begin
       continue;
     end;
     cost := cost + conversionCost(pt, at);
+    penalty := penalty + signPenalty(pt, at);
   end;
   callCost := cost;
 end;
@@ -6342,6 +6443,21 @@ begin
   begin
     d := lookup(e^.callee.name);
     isSliceCall := (d <> nil) and (d^.kind = dkBuiltin);
+  end;
+end;
+
+function hasProceduralParam(const cands: TPtrList; i: longint): boolean;
+var
+  k: longint;
+  r: PDecl;
+begin
+  hasProceduralParam := false;
+  for k := 0 to cands.count - 1 do
+  begin
+    r := PDecl(listGet(cands, k));
+    if (i < r^.params.count) and (PDecl(listGet(r^.params, i))^.varType <> nil) and
+       (PDecl(listGet(r^.params, i))^.varType^.kind = tyRoutine) then
+      exit(true);
   end;
 end;
 
@@ -6396,7 +6512,7 @@ function resolveOverload(first: PDecl; const args: TPtrList; const callee: TIden
                          rng: TRange): PDecl;
 var
   cands, argTys: TPtrList;
-  i, cost, bestCost: longint;
+  i, cost, bestCost, penalty, bestPenalty: longint;
   r, best: PDecl;
   t: PType;
   a: PNode;
@@ -6420,7 +6536,9 @@ begin
       continue;
     end;
     allowSlice := isSliceCall(a);
-    if isRoutineName(a) then
+    { a routine's name: for a procedural parameter if a candidate has one
+      here, else a call (a function without parameters) }
+    if isRoutineName(a) and hasProceduralParam(cands, i) then
       t := nil
     else
       t := checkAllowingUntyped(a);
@@ -6431,20 +6549,23 @@ begin
   end;
   best := nil;
   bestCost := -1;
+  bestPenalty := 0;
   tie := false;
   for i := 0 to cands.count - 1 do
   begin
     r := PDecl(listGet(cands, i));
-    cost := callCost(r, args, argTys);
+    cost := callCost(r, args, argTys, penalty);
     if cost < 0 then
       continue;
-    if (best = nil) or (cost < bestCost) then
+    if (best = nil) or (cost < bestCost) or
+       ((cost = bestCost) and (penalty < bestPenalty)) then
     begin
       best := r;
       bestCost := cost;
+      bestPenalty := penalty;
       tie := false;
     end
-    else if cost = bestCost then
+    else if (cost = bestCost) and (penalty = bestPenalty) then
       tie := true;
   end;
   if (best <> nil) and not tie then
@@ -6473,7 +6594,8 @@ begin
   for i := 0 to cands.count - 1 do
   begin
     r := PDecl(listGet(cands, i));
-    if (best = nil) or (callCost(r, args, argTys) = bestCost) then
+    cost := callCost(r, args, argTys, penalty);
+    if (best = nil) or ((cost = bestCost) and (penalty = bestPenalty)) then
     begin
       ms('candidate: ');
       maRoutineHeading(r);
@@ -6888,9 +7010,11 @@ var
   k: longint;
   e: PNode;
   c: TConstant;
-  bd: TOrdinalBounds;
+  loTy, hiTy: PType;
 begin
   ok := true;
+  loTy := nil;
+  hiTy := nil;
   for k := 1 to 2 do
   begin
     if k = 1 then
@@ -6918,13 +7042,22 @@ begin
       continue;
     end;
     if k = 1 then
-      l^.loValue := c.value.intVal
+    begin
+      l^.loValue := c.value.intVal;
+      loTy := c.ty;
+    end
     else
+    begin
       l^.hiValue := c.value.intVal;
+      hiTy := c.ty;
+    end;
   end;
   if l^.hi = nil then
+  begin
     l^.hiValue := l^.loValue;
-  if ok and (l^.loValue > l^.hiValue) then
+    hiTy := loTy;
+  end;
+  if ok and (caseKey(l^.loValue, selTy) > caseKey(l^.hiValue, selTy)) then
   begin
     ms('case label range is empty');
     errR(l^.lo^.b, caseLabelRange(l));
@@ -6932,8 +7065,8 @@ begin
   end;
   if ok and not isError(selTy) then
   begin
-    bd := getOrdinalBounds(selTy);
-    if (l^.loValue < bd.lo) or (l^.hiValue > bd.hi) then
+    if not constantInRange(l^.loValue, loTy, selTy) or
+       not constantInRange(l^.hiValue, hiTy, selTy) then
     begin
       ms(what + ' is outside the range of type ');
       maT(selTy);

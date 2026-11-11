@@ -151,11 +151,15 @@ private:
 /// 42
 class IntegerLiteralExpr final : public Expr {
   uint64_t Value;
+  bool Based; ///< written $FF, %1010 or &17
 
 public:
-  IntegerLiteralExpr(SourceRange R, uint64_t V)
-      : Expr(EK_IntegerLiteral, R), Value(V) {}
+  IntegerLiteralExpr(SourceRange R, uint64_t V, bool Based = false)
+      : Expr(EK_IntegerLiteral, R), Value(V), Based(Based) {}
   uint64_t getValue() const { return Value; }
+  /// Written $FF, %1010 or &17 (Turbo/FPC): beyond int64, the bits of an
+  /// int64 (as in Free Pascal), not a qword.
+  bool isBased() const { return Based; }
   static bool classof(const Expr *E) { return E->getKind() == EK_IntegerLiteral; }
 };
 

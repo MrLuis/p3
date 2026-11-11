@@ -45,6 +45,7 @@ void Lexer::formToken(Token &T, tok::TokenKind K, const char *Start) {
   T.Length = static_cast<unsigned>(Cur - Start);
   T.Data = {};
   T.IntValue = 0;
+  T.Based = false;
 }
 
 //===----------------------------------------------------------------------===//
@@ -256,10 +257,12 @@ static int64_t predefinedSize(llvm::StringRef Upper) {
   return llvm::StringSwitch<int64_t>(Upper)
       .Cases("CHAR", "ANSICHAR", "BOOLEAN", "BYTE", "SHORTINT", 1)
       .Cases("WORD", "SMALLINT", 2)
-      .Cases("INTEGER", "LONGINT", "CARDINAL", "LONGWORD", 4)
+      .Cases("INTEGER", "LONGINT", "CARDINAL", "LONGWORD", "DWORD", 4)
       .Cases("INT64", "REAL", "DOUBLE", "POINTER", 8)
       .Cases("PCHAR", "ANSISTRING", "SIZEINT", "PTRINT", 8)
-      .Cases("NATIVEINT", "PANSICHAR", 8)
+      .Cases("NATIVEINT", "PANSICHAR", "PGUID", 8)
+      .Cases("QWORD", "UINT64", "NATIVEUINT", "PTRUINT", "SIZEUINT", 8)
+      .Case("TGUID", 16)
       .Case("SHORTSTRING", 256)
       .Default(-1);
 }
@@ -935,6 +938,7 @@ void Lexer::lexBasedNumber(Token &T, const char *Start, unsigned Radix) {
     V = 0;
   }
   T.IntValue = V;
+  T.Based = true;
 }
 
 //===----------------------------------------------------------------------===//

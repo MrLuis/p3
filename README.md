@@ -31,7 +31,8 @@ With `--mode=tp`, Turbo/Free Pascal extensions: units (`uses`, `-I`),
 `string`/`string[N]` and string routines, `break continue exit(value) inc
 dec`, `shl shr xor`, `$hex %bin #13` literals, `//` comments; the integer
 types `longint int64 cardinal byte word shortint smallint` (FPC widening
-rules); typecasts `T(x)`; distinct types `T = type X` (as an alias of `X`:
+rules) and `qword` (unsigned 64-bit, also named `UInt64`, `NativeUInt`,
+`PtrUInt` and `SizeUInt`; see below); typecasts `T(x)`; distinct types `T = type X` (as an alias of `X`:
 Free Pascal also tells them apart in overloads); `bitpacked record` and
 `bitpacked array` (Free Pascal's layout: ordinal fields and elements take
 the bits their values need, least significant first, so `bitpacked array
@@ -218,6 +219,22 @@ type
   writeln(s.ToUpper, ' ', AnsiString.Join('a', 'b'), ' ', 'lit'.ToUpper);
 ```
 
+- **QWord** (`--mode=tp` and objfpc, as in Free Pascal on 64-bit targets):
+  the unsigned 64-bit integer, also named `UInt64`, `NativeUInt`, `PtrUInt`
+  and `SizeUInt`, with values up to `High(QWord)` = 18446744073709551615.
+  Decimal literals beyond `int64` are qword constants (`$FFFFFFFFFFFFFFFF`
+  is the `int64` -1, as in FPC). `div`, `mod`, `shr`, comparisons and
+  conversions to `real` are unsigned. With a type of 32 bits or less (or
+  an `int64` constant of zero or more) an operand is converted to qword;
+  with `int64` the result is `int64`; `-q` is `int64`. Range and overflow
+  checks treat it as unsigned (converting a negative value to qword, or a
+  qword above `High(int64)` to `int64`, is a range error); `write` and
+  `read` handle the whole range. In overloads, unsigned arguments prefer
+  `qword` and signed ones `int64`, as in FPC. Differences: a constant
+  expression is typed as for variables (`High(int64) + 1` is not promoted
+  to qword, and `High(QWord) > High(Int64)` compares as `int64`), and
+  subranges cannot reach beyond `High(int64)`.
+
 - **Record helpers** (`{$modeswitch advancedrecords}`, as in Free
   Pascal): `TGuidHelper = record helper for TGUID` is a helper for a
   record type, as above: methods, properties, constants and static class
@@ -315,14 +332,14 @@ with the same name wins. They live in `<pcc dir>/../lib/pascal` (override with
 
 | Unit | Contents |
 |---|---|
-| `sysutils` | `Format`, `IntToStr`, `IntToHex`, `StrToInt[64][Def]`, `TryStrToInt[64]`, `FloatToStr`, `[Try]StrToFloat[Def]`, `BoolToStr`, `Trim[Left/Right]`, `Upper/LowerCase`, `CompareStr/Text`, `SameText`, `QuotedStr`, `StringReplace`, `IsDelimiter`, `LastDelimiter`, `StrPas`, `Extract*`, `ChangeFileExt`, path delimiter routines, `FileExists`, `DirectoryExists`, `DeleteFile`, `RenameFile`, `CreateDir`, `RemoveDir`, `ForceDirectories`, `Get/SetCurrentDir`, `GetEnvironmentVariable`, `Encode/DecodeDate/Time`, `IsLeapYear`, `DayOfWeek`, `Now`, `Date`, `Time`, `GetTickCount64`, `Sleep`, `EConvertError` |
+| `sysutils` | `Format`, `IntToStr`, `UIntToStr`, `IntToHex`, `StrToInt[64][Def]`, `TryStrToInt[64]`, `StrToQWord[Def]`, `TryStrToQWord`, `FloatToStr`, `[Try]StrToFloat[Def]`, `BoolToStr`, `Trim[Left/Right]`, `Upper/LowerCase`, `CompareStr/Text`, `SameText`, `QuotedStr`, `StringReplace`, `IsDelimiter`, `LastDelimiter`, `StrPas`, `Extract*`, `ChangeFileExt`, path delimiter routines, `FileExists`, `DirectoryExists`, `DeleteFile`, `RenameFile`, `CreateDir`, `RemoveDir`, `ForceDirectories`, `Get/SetCurrentDir`, `GetEnvironmentVariable`, `Encode/DecodeDate/Time`, `IsLeapYear`, `DayOfWeek`, `Now`, `Date`, `Time`, `GetTickCount64`, `Sleep`, `EConvertError` |
 | `strutils` | `ReverseString`, `Left/Right/MidStr`, `DupeString`, `PadLeft/Right`, `AddChar[R]`, `Starts/Ends/ContainsStr/Text`, `AnsiStarts/Ends/ContainsStr`, `[Ansi]Index/MatchStr/Text`, `PosEx`, `ReplaceStr/Text`, `StuffString`, `Copy2Symb`, `Hex2Dec`, `Dec2Numb`, `IntToBin` |
 | `classes` | `TList` (`Add`, `Insert`, `Delete`, `Remove`, `Extract`, `Clear`, `IndexOf`, `First`, `Last`, `Exchange`, `Move`, `Pack`, `Sort`, `Expand`, `Notify`, `Items`, `Count`, `Capacity`, `List`), `TNotifyEvent`, `TStrings` and `TStringList` (`OnChange`, `OnChanging`, `Add`, `AddObject`, `AddPair`, `AddStrings`, `Append`, `Assign`, `Insert`, `InsertObject`, `Delete`, `Clear`, `Exchange`, `Move`, `IndexOf`, `IndexOfName`, `IndexOfObject`, `Find`, `Sort`, `CustomSort`, `Sorted`, `Duplicates`, `CaseSensitive`, `OwnsObjects`, `Strings`, `Objects`, `Names`, `Values`, `ValueFromIndex`, `Text`, `CommaText`, `DelimitedText`, `Delimiter`, `QuoteChar`, `NameValueSeparator`, `StrictDelimiter`, `LoadFromFile`, `SaveToFile`, `BeginUpdate`, `EndUpdate`), `TPersistent`, `EListError`, `EStringListError`, `EFOpenError`, `EFCreateError` |
 | `math` | `Sum`, `SumInt`, `Mean`, `MinValue`, `MaxValue`, `MinIntValue`, `MaxIntValue`, `Floor[64]`, `Ceil[64]`, `Power`, `IntPower`, `Log10/2/N`, `Hypot`, `FMod`, `Tan`, `Cotan`, `ArcSin/Cos/Tan2`, `Sinh/Cosh/Tanh`, `DegToRad`, `RadToDeg`, `IsNan`, `IsInfinite`, `Min`, `Max`, `Sign`, `InRange`, `EnsureRange` |
 
 `classes` needs `--mode=objfpc`; the others work in `--mode=tp` too. Overloads exist only in objfpc
 (the `double` forms of `Min`, `Max`, `Sign`, `InRange` and `EnsureRange`,
-`IntToHex(longint)`, two-parameter `BoolToStr` and `PosEx`); conversion
+`IntToHex(longint)`, `IntToStr(qword)`, two-parameter `BoolToStr` and `PosEx`); conversion
 failures raise `EConvertError` in objfpc and are runtime errors in tp.
 Differences from Free Pascal: `TryStrToInt` rejects values outside `longint`
 instead of wrapping them; `'.'` and `'e5'` are not valid floats; `math`
@@ -580,8 +597,8 @@ point, as in Free Pascal: earlier in the file (a routine's own names only
 inside it), predeclared, or in a used unit (its name, and the declarations
 of its interface; using `declared` loads the units of the uses clauses
 read so far). `sizeof` takes the name of a predefined type only
-(`SizeInt`, `PtrInt` and `NativeInt` are predeclared as `int64`; their
-unsigned forms are not, as there is no unsigned 64-bit type): `$IF` is
+(`SizeInt`, `PtrInt` and `NativeInt` are predeclared as `int64`, and
+`NativeUInt`, `PtrUInt` and `SizeUInt` as `qword`): `$IF` is
 evaluated while lexing, so unlike Free Pascal it cannot see declared types or
 variables, and a program's own redeclaration of a predefined name is not
 noticed. `PCC` is

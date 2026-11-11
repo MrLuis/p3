@@ -74,6 +74,7 @@ void __pas_write_elem(PasFile *f, const void *src);
 void __pas_write_str(PasFile *f, const char *s, int64_t len, int32_t width);
 void __pas_write_char(PasFile *f, char c, int32_t width);
 void __pas_write_int(PasFile *f, int64_t v, int32_t width); /* any integer type */
+void __pas_write_uint(PasFile *f, uint64_t v, int32_t width); /* qword */
 void __pas_write_bool(PasFile *f, int32_t b, int32_t width); /* true/false */
 /* frac < 0: floating-point form " d.dddE+ddd" (default width 22); frac >= 0:
  * fixed-point form with that many fraction digits (ISO 6.9.3.4). */
@@ -85,6 +86,7 @@ void __pas_writeln(PasFile *f);
  * ' ' (eoln is then true). Reading past the end is a runtime error. */
 int32_t __pas_read_int(PasFile *f);
 int64_t __pas_read_int64(PasFile *f); /* int64 and unsigned targets */
+uint64_t __pas_read_uint64(PasFile *f); /* qword: 0 .. 2^64-1 */
 double __pas_read_real(PasFile *f);
 char __pas_read_char(PasFile *f);
 void __pas_readln(PasFile *f);

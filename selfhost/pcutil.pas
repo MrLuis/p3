@@ -92,6 +92,13 @@ procedure bufWrite(const b: TBuf; f: pointer);
 function intToStr(v: int64): string;
 { v's 64 bits read as an unsigned number (literals up to 2^64-1). }
 function uintToStr(v: int64): string;
+{ Unsigned 64-bit arithmetic on the bits of int64s (qword values):
+  uCompare is -1, 0 or 1; uDiv and uMod require b <> 0; uToReal rounds as
+  a C uint64_t to double conversion. }
+function uCompare(a, b: int64): longint;
+function uDiv(a, b: int64): int64;
+function uMod(a, b: int64): int64;
+function uToReal(a: int64): double;
 { C printf "%.<prec>g" of x, exactly (correctly rounded, as glibc). }
 function formatG(x: double; prec: longint): string;
 { Appends p[start..start+count) escaped like llvm::raw_ostream::
@@ -588,6 +595,73 @@ begin
   r := v - q * 10;
   {$Q+}{$R+}
   uintToStr := intToStr(q) + chr(ord('0') + longint(r));
+end;
+
+function uCompare(a, b: int64): longint;
+var
+  x, y: int64;
+begin
+  { flipping the sign bit maps unsigned order onto signed order }
+  {$Q-}{$R-}
+  x := a xor (-9223372036854775807 - 1);
+  y := b xor (-9223372036854775807 - 1);
+  {$Q+}{$R+}
+  if x < y then
+    uCompare := -1
+  else if x > y then
+    uCompare := 1
+  else
+    uCompare := 0;
+end;
+
+function uDiv(a, b: int64): int64;
+var
+  q, r: int64;
+begin
+  if b < 0 then { b >= 2^63: the quotient is 0 or 1 }
+  begin
+    if uCompare(a, b) >= 0 then
+      exit(1);
+    exit(0);
+  end;
+  if a >= 0 then
+    exit(a div b);
+  { a >= 2^63: halve it (exactly, as a natural number), divide, then
+    correct the quotient by at most one }
+  {$Q-}{$R-}
+  q := ((a shr 1) div b) shl 1;
+  r := a - q * b;
+  {$Q+}{$R+}
+  if uCompare(r, b) >= 0 then
+    q := q + 1;
+  uDiv := q;
+end;
+
+function uMod(a, b: int64): int64;
+var
+  q: int64;
+begin
+  q := uDiv(a, b);
+  {$Q-}{$R-}
+  uMod := a - q * b;
+  {$Q+}{$R+}
+end;
+
+function uToReal(a: int64): double;
+var
+  h: int64;
+  x: double;
+begin
+  if a >= 0 then
+  begin
+    x := a;
+    exit(x);
+  end;
+  { halve it, keeping the lowest bit as a sticky bit, so that the one
+    rounding to 53 bits is the same as the whole number's }
+  h := (a shr 1) or (a and 1);
+  x := h;
+  uToReal := x * 2;
 end;
 
 type

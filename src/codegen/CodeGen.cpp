@@ -766,6 +766,20 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
       return;
     OrdinalBounds TB = getOrdinalBounds(Target);
     OrdinalBounds FB = getOrdinalBounds(From);
+    bool FromQWord = isQWord(From->getBase()), ToQWord = isQWord(Target);
+    if (FromQWord) { // its values, unsigned: those above Target's
+      if (ToQWord)
+        return;
+      llvm::Value *X = toI64(V, From);
+      llvm::Value *Above = B.CreateICmpUGT(X, B.getInt64(TB.Hi));
+      if (TB.Lo > 0) {
+        llvm::Value *Below = B.CreateICmpULT(X, B.getInt64(TB.Lo));
+        Above = B.CreateOr(Below, Above);
+      }
+      emitRuntimeCheck(Above, Msg, L);
+      return;
+    }
+    // (to qword, TB is 0..INT64_MAX: the negative values are caught)
     if (FB.Lo >= TB.Lo && FB.Hi <= TB.Hi)
       return; // every value of From fits
     llvm::Value *X = toI64(V, From);
@@ -4282,6 +4296,10 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
       B.CreateCall(RT.WriteChar, {File, V, Width});
     else if (T->getBase()->isBoolean())
       B.CreateCall(RT.WriteBool, {File, B.CreateZExt(V, B.getInt32Ty()), Width});
+    else if (isQWord(T->getBase()))
+      B.CreateCall(classRuntime("__pas_write_uint", B.getVoidTy(),
+                                {B.getPtrTy(), B.getInt64Ty(), B.getInt32Ty()}),
+                   {File, V, Width});
     else
       B.CreateCall(RT.WriteInt, {File, toI64(V, T), Width});
   }
@@ -4304,6 +4322,13 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
     if (T->getBase()->isChar()) {
       llvm::Value *V = B.CreateCall(RT.ReadChar, {File});
       emitRangeCheck(V, T->getBase(), T, Arg->getBeginLoc());
+      B.CreateStore(V, Addr);
+      return;
+    }
+    if (isQWord(T)) { // all of 0 .. 2^64-1
+      llvm::Value *V = B.CreateCall(
+          classRuntime("__pas_read_uint64", B.getInt64Ty(), {B.getPtrTy()}),
+          {File});
       B.CreateStore(V, Addr);
       return;
     }
@@ -4420,7 +4445,7 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
         if (auto *A = llvm::dyn_cast<ArrayType>(AT))
           AT = A->getIndexType();
         OrdinalBounds Bd = getOrdinalBounds(AT);
-        V = IsHigh ? Bd.Hi : Bd.Lo;
+        V = IsHigh ? (isQWord(AT) ? -1 : Bd.Hi) : Bd.Lo; // (qword: 2^64-1)
       }
       return llvm::ConstantInt::get(regType(E->getType()),
                                     static_cast<uint64_t>(V), true);
@@ -4495,6 +4520,8 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
       bool IsSucc = BD->getBuiltinKind() == BuiltinKind::Succ;
       Type *Base = AT->getBase();
       OrdinalBounds Bd = getOrdinalBounds(Base);
+      if (isQWord(Base))
+        Bd.Hi = -1; // 2^64-1
       if (rangeChecks(Loc))
         emitRuntimeCheck(
             B.CreateICmpEQ(toI64(Arg, Base), B.getInt64(IsSucc ? Bd.Hi : Bd.Lo)),
@@ -4988,8 +5015,9 @@ public:
       bool IsInc = BD->getBuiltinKind() == BuiltinKind::Inc;
       SourceLocation L = S->getBeginLoc();
       if (T->isIntegerLike() && intBits(T) == 64) { // no wider type to check in
+        // (qword: unsigned)
         llvm::Value *New = emitCheckedArith(IsInc ? BinaryOp::Add : BinaryOp::Sub,
-                                            /*Signed=*/true, Old, Step, L,
+                                            isSignedOrdinal(T), Old, Step, L,
                                             S->getCallee().Name);
         emitRangeCheck(New, T->getBase(), T, L);
         storeScalar(Addr, New, T);
@@ -5168,8 +5196,13 @@ public:
     // them as i64, check them, then convert them to the variable's type.
     llvm::Value *Start64 = toI64(Start, S->getInit()->getType());
     llvm::Value *Final64 = toI64(Final, S->getFinal()->getType());
-    llvm::Value *Enter = Down ? B.CreateICmpSGE(Start64, Final64)
-                              : B.CreateICmpSLE(Start64, Final64);
+    // (a qword variable: its bounds compare unsigned)
+    llvm::Value *Enter =
+        isQWord(VarTy)
+            ? (Down ? B.CreateICmpUGE(Start64, Final64)
+                    : B.CreateICmpULE(Start64, Final64))
+            : (Down ? B.CreateICmpSGE(Start64, Final64)
+                    : B.CreateICmpSLE(Start64, Final64));
     (void)Signed;
     auto *CheckBB = newBlock("for.check");
     auto *LoopBB = newBlock("for.body");
@@ -5433,12 +5466,17 @@ public:
     for (CaseArm *Arm : S->getArms()) {
       auto *ArmBB = newBlock("case.arm");
       for (CaseLabel *L : Arm->getLabels()) {
-        if (L->HiValue - L->LoValue >= MaxExpandedRange) {
+        // (the number of values less one; unsigned for qword's labels)
+        uint64_t Span = static_cast<uint64_t>(L->HiValue) -
+                        static_cast<uint64_t>(L->LoValue);
+        if (Span >= static_cast<uint64_t>(MaxExpandedRange)) {
           LargeRanges.push_back({L->LoValue, L->HiValue, ArmBB});
           continue;
         }
-        for (int64_t V = L->LoValue; V <= L->HiValue; ++V)
-          Switch->addCase(Const(V), ArmBB);
+        for (uint64_t K = 0; K <= Span; ++K)
+          Switch->addCase(
+              Const(static_cast<int64_t>(static_cast<uint64_t>(L->LoValue) + K)),
+              ArmBB);
       }
       B.SetInsertPoint(ArmBB);
       visitStmt(Arm->getBody());

@@ -307,6 +307,14 @@ void __pas_write_int(PasFile *f, int64_t v, int32_t width) {
   fwrite(buf, 1, (size_t)n, f->fp);
 }
 
+void __pas_write_uint(PasFile *f, uint64_t v, int32_t width) {
+  need_generate(f);
+  char buf[24];
+  int n = snprintf(buf, sizeof buf, "%" PRIu64, v);
+  pad(f, width - n);
+  fwrite(buf, 1, (size_t)n, f->fp);
+}
+
 void __pas_write_bool(PasFile *f, int32_t b, int32_t width) {
   if (b)
     __pas_write_str(f, __pas_tp_mode ? "TRUE" : "true", 4, width);
@@ -412,6 +420,29 @@ int32_t __pas_read_int(PasFile *f) {
 
 int64_t __pas_read_int64(PasFile *f) {
   return read_integer(f, INT64_MAX);
+}
+
+uint64_t __pas_read_uint64(PasFile *f) {
+  need_inspect(f);
+  skip_blanks(f, "an integer");
+  int c = peek(f);
+  if (c == '+') {
+    advance(f);
+    c = peek(f);
+  }
+  if (c < '0' || c > '9' || f->eoln)
+    file_error(f, c == '-' ? "integer in input is out of range"
+                           : "invalid integer in input");
+  uint64_t value = 0;
+  while (c >= '0' && c <= '9' && !f->eoln) {
+    unsigned d = (unsigned)(c - '0');
+    if (value > (UINT64_MAX - d) / 10)
+      file_error(f, "integer in input is out of range");
+    value = value * 10 + d;
+    advance(f);
+    c = peek(f);
+  }
+  return value;
 }
 
 double __pas_read_real(PasFile *f) {

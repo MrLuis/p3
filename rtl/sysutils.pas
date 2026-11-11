@@ -39,6 +39,10 @@ type
 
 { integers }
 function IntToStr(value: int64): string;
+{$IFDEF PCC_OBJFPC}
+function IntToStr(value: qword): string;
+{$ENDIF}
+function UIntToStr(value: qword): string;
 function IntToHex(value: int64; digits: longint): string;
 {$IFDEF PCC_OBJFPC}
 function IntToHex(value: longint; digits: longint): string;
@@ -49,6 +53,9 @@ function StrToIntDef(const s: string; def: longint): longint;
 function StrToInt64Def(const s: string; def: int64): int64;
 function TryStrToInt(const s: string; var value: longint): boolean;
 function TryStrToInt64(const s: string; var value: int64): boolean;
+function StrToQWord(const s: string): qword;
+function StrToQWordDef(const s: string; def: qword): qword;
+function TryStrToQWord(const s: string; var value: qword): boolean;
 
 { floating point }
 function FloatToStr(value: double): string;
@@ -165,6 +172,25 @@ begin
   IntToStr := r;
 end;
 
+function UIntToStr(value: qword): string;
+var
+  r: string;
+begin
+  r := '';
+  repeat
+    r := chr(ord('0') + value mod 10) + r;
+    value := value div 10;
+  until value = 0;
+  UIntToStr := r;
+end;
+
+{$IFDEF PCC_OBJFPC}
+function IntToStr(value: qword): string;
+begin
+  IntToStr := UIntToStr(value);
+end;
+{$ENDIF}
+
 { digits is a minimum: the value's own digits are never cut }
 function IntToHex(value: int64; digits: longint): string;
 const
@@ -279,6 +305,84 @@ function TryStrToInt64(const s: string; var value: int64): boolean;
 begin
   value := 0;
   TryStrToInt64 := parseInt(s, value);
+end;
+
+{ 0 .. 2^64-1, with the prefixes of parseInt and no '-' }
+function parseUInt(const s: string; var value: qword): boolean;
+var
+  i, base, d: longint;
+  v: qword;
+begin
+  parseUInt := false;
+  i := 1;
+  while (i <= length(s)) and (s[i] = ' ') do
+    i := i + 1;
+  if (i <= length(s)) and (s[i] = '+') then
+    i := i + 1;
+  base := 10;
+  if i <= length(s) then
+    if s[i] = '$' then
+    begin
+      base := 16;
+      i := i + 1;
+    end
+    else if s[i] = '&' then
+    begin
+      base := 8;
+      i := i + 1;
+    end
+    else if s[i] = '%' then
+    begin
+      base := 2;
+      i := i + 1;
+    end
+    else if (s[i] = '0') and (i < length(s)) and ((s[i + 1] = 'x') or (s[i + 1] = 'X')) then
+    begin
+      base := 16;
+      i := i + 2;
+    end;
+  if i > length(s) then
+    exit;
+  v := 0;
+  while i <= length(s) do
+  begin
+    d := digitValue(s[i]);
+    if d >= base then
+      exit;
+    if v > (High(qword) - d) div base then
+      exit;
+    v := v * base + d;
+    i := i + 1;
+  end;
+  value := v;
+  parseUInt := true;
+end;
+
+function TryStrToQWord(const s: string; var value: qword): boolean;
+begin
+  value := 0;
+  TryStrToQWord := parseUInt(s, value);
+end;
+
+function StrToQWord(const s: string): qword;
+var
+  v: qword;
+begin
+  v := 0;
+  if not TryStrToQWord(s, v) then
+    convertError('"' + s + '" is an invalid integer');
+  StrToQWord := v;
+end;
+
+function StrToQWordDef(const s: string; def: qword): qword;
+var
+  v: qword;
+begin
+  v := 0;
+  if TryStrToQWord(s, v) then
+    StrToQWordDef := v
+  else
+    StrToQWordDef := def;
 end;
 
 function TryStrToInt(const s: string; var value: longint): boolean;

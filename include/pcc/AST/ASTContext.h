@@ -30,6 +30,7 @@ class ASTContext {
   // Turbo/FPC integer types.
   IntegerType Int64Ty{64, true, "int64"};
   IntegerType CardinalTy{32, false, "cardinal"};
+  IntegerType QWordTy{64, false, "qword"};
   IntegerType ByteTy{8, false, "byte"};
   IntegerType WordTy{16, false, "word"};
   IntegerType ShortIntTy{8, true, "shortint"};
@@ -60,6 +61,10 @@ public:
   Type *getIntegerType() { return &IntegerTy; }
   Type *getInt64Type() { return &Int64Ty; }
   Type *getCardinalType() { return &CardinalTy; }
+  /// Unsigned 64-bit (FPC's qword). Values are kept as their 64 bits (in
+  /// int64_t), so code that compares or prints them must read them as
+  /// unsigned (see isQWord).
+  Type *getQWordType() { return &QWordTy; }
   Type *getByteType() { return &ByteTy; }
   Type *getWordType() { return &WordTy; }
   Type *getShortIntType() { return &ShortIntTy; }

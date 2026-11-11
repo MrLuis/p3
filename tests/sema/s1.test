@@ -18,7 +18,6 @@
 ; CHECK: errors.pas:35:15: error: 'sizeof' cannot be applied to 'text'
 ; CHECK: errors.pas:36:12: error: 'low' expects an ordinal type, an array or a string, not 'real'
 ; CHECK: errors.pas:37:20: error: 'assigned' expects a pointer or a procedural variable, not 'integer'
-; CHECK: errors.pas:38:8: error: integer literal exceeds the range of int64
 ; CHECK: errors.pas:39:8: error: 'p' is a variable, not a function
 ; CHECK-NOT: error:
 

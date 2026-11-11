@@ -51,7 +51,7 @@ end;
 procedure emitWriteArg(const f: TV; arg: PNode);
 var
   value: PNode;
-  width, prec, v, s, b: TV;
+  width, prec, v, s, b, ignored: TV;
   t: PType;
 begin
   value := arg;
@@ -93,6 +93,9 @@ begin
     b := irCast('zext', v, irI32, '');
     rtv3('__pas_write_bool', f, b, width);
   end
+  else if isQWord(getBase(t)) then
+    ignored := call3(classRuntime('__pas_write_uint', 'void', 'ptr,i64,i32'),
+                     f, v, width, '')
   else
     rtv3('__pas_write_int', f, toI64(v, t), width);
 end;
@@ -148,6 +151,12 @@ begin
   begin
     v := call1(rtFn('__pas_read_char'), f, '');
     emitRangeCheck(v, getBase(t), t, arg^.b);
+    irStore(v, addr);
+    exit;
+  end;
+  if isQWord(t) then { all of 0 .. 2^64-1 }
+  begin
+    v := call1(classRuntime('__pas_read_uint64', 'i64', 'ptr'), f, '');
     irStore(v, addr);
     exit;
   end;
@@ -569,11 +578,13 @@ begin
   loc := s^.b;
   if isIntegerLike(t) and (intBits(t) = 64) then
   begin
-    { no wider type to check in }
+    { no wider type to check in (qword: unsigned) }
     if isInc then
-      nv := emitCheckedArith('add', true, old, step, loc, nm(s^.callee.name))
+      nv := emitCheckedArith('add', isSignedOrdinal(t), old, step, loc,
+                             nm(s^.callee.name))
     else
-      nv := emitCheckedArith('sub', true, old, step, loc, nm(s^.callee.name));
+      nv := emitCheckedArith('sub', isSignedOrdinal(t), old, step, loc,
+                             nm(s^.callee.name));
     emitRangeCheck(nv, getBase(t), t, loc);
     storeScalar(addr, nv, t);
     exit;
@@ -925,7 +936,15 @@ begin
     them as i64, check them, then convert them to the variable's type }
   start64 := toI64(start, s^.forInit^.typ);
   final64 := toI64(final, s^.forFinal^.typ);
-  if down then
+  { (a qword variable: its bounds compare unsigned) }
+  if isQWord(varTy) then
+  begin
+    if down then
+      enter := irICmp('uge', start64, final64, '')
+    else
+      enter := irICmp('ule', start64, final64, '');
+  end
+  else if down then
     enter := irICmp('sge', start64, final64, '')
   else
     enter := irICmp('sle', start64, final64, '');
@@ -1292,7 +1311,7 @@ var
   i, j: longint;
   arm: PCaseArm;
   cl: PCaseLabel;
-  v: int64;
+  v, span, k: int64;
   lr: PLargeRange;
 begin
   sel := visitExpr(s^.selector);
@@ -1310,7 +1329,11 @@ begin
     for j := 0 to arm^.labels.count - 1 do
     begin
       cl := PCaseLabel(listGet(arm^.labels, j));
-      if cl^.hiValue - cl^.loValue >= maxExpandedRange then
+      { the number of values less one, unsigned (for qword's labels) }
+      {$Q-}{$R-}
+      span := cl^.hiValue - cl^.loValue;
+      {$Q+}{$R+}
+      if (span < 0) or (span >= maxExpandedRange) then
       begin
         lr := PLargeRange(arenaAlloc(sizeof(TLargeRange)));
         lr^.lo := cl^.loValue;
@@ -1319,11 +1342,12 @@ begin
         listAdd(largeRanges, lr);
         continue;
       end;
-      v := cl^.loValue;
-      while v <= cl^.hiValue do
+      for k := 0 to span do
       begin
+        {$Q-}{$R-}
+        v := cl^.loValue + k;
+        {$Q+}{$R+}
         irAddCase(sw, irConstInt(sel.t, v), armB);
-        v := v + 1;
       end;
     end;
     irSetInsertPoint(armB);

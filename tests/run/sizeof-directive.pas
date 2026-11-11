@@ -44,6 +44,14 @@ begin
   {$if sizeof(sizeint) = 8} check('sizeint', sizeof(sizeint), 8); {$else} wrong('sizeint'); {$endif}
   {$if sizeof(ptrint) = 8} check('ptrint', sizeof(ptrint), 8); {$else} wrong('ptrint'); {$endif}
   {$if sizeof(nativeint) = 8} check('nativeint', sizeof(nativeint), 8); {$else} wrong('nativeint'); {$endif}
+  {$if sizeof(dword) = 4} check('dword', sizeof(dword), 4); {$else} wrong('dword'); {$endif}
+  {$if sizeof(qword) = 8} check('qword', sizeof(qword), 8); {$else} wrong('qword'); {$endif}
+  {$if sizeof(uint64) = 8} check('uint64', sizeof(uint64), 8); {$else} wrong('uint64'); {$endif}
+  {$if sizeof(nativeuint) = 8} check('nativeuint', sizeof(nativeuint), 8); {$else} wrong('nativeuint'); {$endif}
+  {$if sizeof(ptruint) = 8} check('ptruint', sizeof(ptruint), 8); {$else} wrong('ptruint'); {$endif}
+  {$if sizeof(sizeuint) = 8} check('sizeuint', sizeof(sizeuint), 8); {$else} wrong('sizeuint'); {$endif}
+  {$if sizeof(pguid) = 8} check('pguid', sizeof(pguid), 8); {$else} wrong('pguid'); {$endif}
+  {$if sizeof(tguid) = 16} check('tguid', sizeof(tguid), 16); {$else} wrong('tguid'); {$endif}
   {$if sizeof(SizeInt)>sizeof(Integer)} writeln('sizeint is wider'); {$endif}
   {$IF SIZEOF(CHAR)=2} writeln('wide char'); {$ELSE} writeln('narrow char'); {$ENDIF}
 end.

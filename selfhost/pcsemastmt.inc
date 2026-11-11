@@ -2983,9 +2983,10 @@ begin
       for k := 0 to seen.count - 1 do
       begin
         prev := PCaseLabel(listGet(seen, k));
-        if (l^.loValue > prev^.hiValue) or (l^.hiValue < prev^.loValue) then
+        if (caseKey(l^.loValue, labelTy) > caseKey(prev^.hiValue, labelTy)) or
+           (caseKey(l^.hiValue, labelTy) < caseKey(prev^.loValue, labelTy)) then
           continue;
-        if l^.loValue > prev^.loValue then
+        if caseKey(l^.loValue, labelTy) > caseKey(prev^.loValue, labelTy) then
           dup := l^.loValue
         else
           dup := prev^.loValue;
@@ -3351,8 +3352,8 @@ begin
     if t^.kind = tyReal then
       exit(tyRealT);
     p := promoteInteger(t);
-    { -cardinal can be negative (FPC: int64) }
-    if (e^.uop = uoMinus) and (p = tyCardinalT) then
+    { -cardinal and -qword can be negative (FPC: int64) }
+    if (e^.uop = uoMinus) and ((p = tyCardinalT) or isQWord(p)) then
       exit(tyInt64T);
     exit(p);
   end;
@@ -4282,11 +4283,16 @@ begin
           { Turbo/FPC: larger literals are int64 constants }
           if not isISO then
             exit(tyInt64T);
+        end
+        else if not isISO then
+        begin
+          { beyond int64: qword ($FFFFFFFFFFFFFFFF and the like: the bits
+            of an int64, as in FPC) }
+          if e^.intBased then
+            exit(tyInt64T);
+          exit(tyQWordT);
         end;
-        if isISO then
-          ms('integer literal exceeds maxint (2147483647)')
-        else
-          ms('integer literal exceeds the range of int64');
+        ms('integer literal exceeds maxint (2147483647)');
         errR(e^.b, nodeRange(e));
         visitExpr := tyIntegerT;
       end;

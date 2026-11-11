@@ -20,6 +20,11 @@ bool Type::isSignedIntegerLike() const {
   return I && I->isSigned();
 }
 
+bool pcc::isQWord(const Type *T) {
+  auto *I = llvm::dyn_cast<IntegerType>(T);
+  return I && I->getBits() == 64 && !I->isSigned();
+}
+
 bool pcc::haveSameOrdinalHost(Type *A, Type *B) {
   Type *X = A->getBase(), *Y = B->getBase();
   return X == Y || (X->isInteger() && Y->isInteger());
@@ -187,7 +192,8 @@ OrdinalBounds pcc::getOrdinalBounds(Type *T) {
     if (I->isSigned())
       return {Bits == 64 ? INT64_MIN : -(int64_t(1) << (Bits - 1)),
               Bits == 64 ? INT64_MAX : (int64_t(1) << (Bits - 1)) - 1};
-    // Unsigned 64-bit (qword) is not supported: bounds must fit int64.
+    if (Bits == 64) // qword: its whole range does not fit (see isQWord)
+      return {0, INT64_MAX};
     return {0, (int64_t(1) << Bits) - 1};
   }
   case Type::TK_Char:    return {0, 255};

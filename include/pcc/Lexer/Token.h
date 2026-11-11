@@ -13,6 +13,7 @@ class Token {
   tok::TokenKind Kind = tok::eof;
   SourceLocation Loc;
   unsigned Length = 0;
+  bool Based = false; ///< integer_literal written $hex, %binary or &octal
 
   /// identifier:     canonical lowercase name (interned)
   /// string_literal: value with '' unescaped (interned)
@@ -50,6 +51,8 @@ public:
   /// Cooked string value. Only for tok::string_literal.
   llvm::StringRef getStringValue() const { return Data; }
   uint64_t getIntegerValue() const { return IntValue; }
+  /// An integer literal written $FF, %1010 or &17 (Turbo/FPC)?
+  bool isBasedInteger() const { return Based; }
   double getRealValue() const { return RealValue; }
 
   bool isKeyword() const { return tok::isKeyword(Kind); }

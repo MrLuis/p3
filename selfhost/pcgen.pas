@@ -930,11 +930,27 @@ procedure emitRangeCheckMsg(const v: TV; src, target: PType; loc: TLoc;
                             const msg: string);
 var
   tb, fb: TOrdinalBounds;
+  x, above, below: TV;
 begin
   if not rangeChecks(loc) or not isOrdinal(target) then
     exit;
   tb := getOrdinalBounds(target);
   fb := getOrdinalBounds(src);
+  if isQWord(getBase(src)) then { its values, unsigned: those above target's }
+  begin
+    if isQWord(target) then
+      exit;
+    x := toI64(v, src);
+    above := irICmp('ugt', x, i64c(tb.hi), '');
+    if tb.lo > 0 then
+    begin
+      below := irICmp('ult', x, i64c(tb.lo), '');
+      above := irBin('or', below, above, '');
+    end;
+    emitRuntimeCheck(above, msg, loc);
+    exit;
+  end;
+  { (to qword, tb is 0..high(int64): the negative values are caught) }
   if (fb.lo >= tb.lo) and (fb.hi <= tb.hi) then
     exit; { every value of src fits }
   emitRuntimeCheck(outsideRange(toI64(v, src), tb.lo, tb.hi), msg, loc);
@@ -4346,7 +4362,9 @@ begin
           if t^.kind = tyArray then
             t := t^.indexType;
           bd := getOrdinalBounds(t);
-          if k = bkHigh then
+          if (k = bkHigh) and isQWord(t) then
+            v := -1 { 2^64-1 }
+          else if k = bkHigh then
             v := bd.hi
           else
             v := bd.lo;
@@ -4425,6 +4443,8 @@ begin
         isSucc := k = bkSucc;
         t := getBase(at);
         bd := getOrdinalBounds(t);
+        if isQWord(t) then
+          bd.hi := -1; { 2^64-1 }
         if rangeChecks(loc) then
         begin
           x := toI64(arg, t);

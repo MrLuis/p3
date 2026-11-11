@@ -139,7 +139,9 @@ type
     convFrom: PType;
     convSuspended: boolean;
     case TNodeKind of
-      nkIntegerLit: (intValue: int64);
+      { intBased: written $FF, %1010 or &17 (beyond int64: the bits of an
+        int64, as in Free Pascal, not a qword) }
+      nkIntegerLit: (intValue: int64; intBased: boolean);
       nkRealLit: (realValue: double);
       nkStringLit: (strValue: PName);
       nkNameRef: (ref: TIdent; refDecl: PDecl; refWith: PWithContext);

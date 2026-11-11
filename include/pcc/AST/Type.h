@@ -546,7 +546,12 @@ bool containsInterface(Type *T);
 struct OrdinalBounds {
   int64_t Lo, Hi;
 };
+/// Lo..Hi of ordinal type T. For qword (whose values do not fit int64_t)
+/// 0..INT64_MAX: callers that need its whole range test isQWord.
 OrdinalBounds getOrdinalBounds(Type *T);
+/// Is T qword (unsigned 64-bit), not a subrange of it? Its values are kept
+/// as their 64 bits in int64_t.
+bool isQWord(const Type *T);
 
 /// Are A and B ordinal types with the same host? All integer types count as
 /// one host (Turbo/FPC): they are compatible, and assignment between them is

@@ -4310,6 +4310,7 @@ begin
       begin
         n := newNode(nkIntegerLit, t.loc, tokenEnd(t));
         n^.intValue := t.intValue;
+        n^.intBased := t.based;
       end;
     tkRealLiteral:
       begin
