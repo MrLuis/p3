@@ -295,6 +295,11 @@ begin
       end;
     tyStringLit, tyArray:
       begin
+        if hasBitElements(t) then { (its bytes) }
+        begin
+          elemDI := basicType('byte', 8, 'DW_ATE_unsigned');
+          exit(arrayType(sizeOf_(t) * 8, elemDI, subrange(0, sizeOf_(t))));
+        end;
         if t^.kind = tyStringLit then
         begin
           elemDI := basicType('char', 8, 'DW_ATE_unsigned_char');
@@ -324,8 +329,15 @@ begin
                ', scope: ' + ref(def) + ', file: ' + ref(unitFile) +
                sizeField('line', lineOf(f^.loc));
           member := debugType(f^.fieldType);
-          s := s + ', baseType: ' + ref(member) + sizeField('size', sizeOf_(f^.fieldType) * 8) +
-               sizeField('offset', f^.cgOffset * 8) + ')';
+          if t^.isBitPackedRecord and isOrdinal(f^.fieldType) then { a bit field }
+            s := s + ', baseType: ' + ref(member) +
+                 sizeField('size', bitPackedWidth(f^.fieldType)) +
+                 sizeField('offset', f^.cgBitOffset) +
+                 ', flags: DIFlagBitField, extraData: i64 0)'
+          else
+            s := s + ', baseType: ' + ref(member) +
+                 sizeField('size', sizeOf_(f^.fieldType) * 8) +
+                 sizeField('offset', f^.cgOffset * 8) + ')';
           listAdd(elems, md(false, s, unitFile, def, member, nil));
         end;
         tup := mdTuple(elems);

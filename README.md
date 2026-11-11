@@ -32,7 +32,14 @@ With `--mode=tp`, Turbo/Free Pascal extensions: units (`uses`, `-I`),
 dec`, `shl shr xor`, `$hex %bin #13` literals, `//` comments; the integer
 types `longint int64 cardinal byte word shortint smallint` (FPC widening
 rules); typecasts `T(x)`; distinct types `T = type X` (as an alias of `X`:
-Free Pascal also tells them apart in overloads); `pointer`, `pchar` (also `AnsiChar` and
+Free Pascal also tells them apart in overloads); `bitpacked record` and
+`bitpacked array` (Free Pascal's layout: ordinal fields and elements take
+the bits their values need, least significant first, so `bitpacked array
+[0..7] of boolean` is one byte; other fields start at a byte; ordinal
+fields and elements have no address, so they cannot be `var` arguments or
+used with `@`; fields of types that need alignment, such as `real`,
+pointers or plain records, and typed constants of bitpacked types are not
+supported yet); `pointer`, `pchar` (also `AnsiChar` and
 `PAnsiChar`), `@`, `getmem freemem
 reallocmem fillchar move sizeof low high assigned`; `const` parameters;
 procedural types; typed constants including arrays and records; external C

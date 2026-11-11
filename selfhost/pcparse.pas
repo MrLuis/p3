@@ -2803,6 +2803,21 @@ begin
   parseTypeImpl := nil;
   start := tok.loc;
   isPacked := tryConsume(tkKwPacked);
+  { bitpacked array / record (Free Pascal; not reserved) }
+  if not isPacked and (mode <> lmISO) and isIdentifierNamed('bitpacked') and
+     (peekKind in [tkKwArray, tkKwRecord]) then
+  begin
+    consumeToken;
+    if tok.kind = tkKwArray then
+      ts := parseArrayType(start, false)
+    else
+      ts := parseRecordType(start, false);
+    if (ts <> nil) and (ts^.kind = tsArray) then
+      ts^.arrBitPacked := true
+    else if (ts <> nil) and (ts^.kind = tsRecord) then
+      ts^.recBitPacked := true;
+    exit(ts);
+  end;
   case tok.kind of
     tkKwArray:
       exit(parseArrayType(start, isPacked));

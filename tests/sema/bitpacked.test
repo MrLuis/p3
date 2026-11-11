@@ -1,0 +1,18 @@
+; bitpacked records and arrays: fields that would need alignment (not
+; supported yet), and the elements and fields without an address (var
+; arguments, '@', absolute, inc, read, untyped parameters, open arrays),
+; and initialized variables (not supported yet).
+; RUN: not %pcc --mode=objfpc -ferror-limit=0 -c %S/Inputs/bitpacked/errors.pas -o %t.o 2>&1 | FileCheck %s
+; CHECK: errors.pas:8:5: error: a field of type 'real' in a bitpacked record is not supported yet
+; CHECK: errors.pas:9:5: error: a field of type 'pointer' in a bitpacked record is not supported yet
+; CHECK: errors.pas:10:5: error: a field of type 'record' in a bitpacked record is not supported yet
+; CHECK: errors.pas:20:20: error: 'absolute' needs a variable, a field of a record variable or an element at a constant index
+; CHECK: errors.pas:21:14: error: initialized variables of bitpacked types are not supported yet
+; CHECK: errors.pas:26:8: error: the elements and fields of bitpacked arrays and records have no address (they cannot be passed as 'var' parameters or used with '@')
+; CHECK: errors.pas:27:9: error: the elements and fields of bitpacked arrays and records have no address (they cannot be passed as 'var' parameters or used with '@')
+; CHECK: errors.pas:28:10: error: the elements and fields of bitpacked arrays and records have no address (they cannot be passed as 'var' parameters or used with '@')
+; CHECK: errors.pas:29:7: error: 'inc' expects an ordinal variable
+; CHECK: errors.pas:30:8: error: cannot pass a value of type 'TBits' to parameter 'a' of type 'array of boolean'
+; CHECK: errors.pas:31:11: error: argument for untyped parameter 'u' must be a variable
+; CHECK: errors.pas:32:8: error: argument to 'read' must be a variable
+; CHECK-NOT: error:

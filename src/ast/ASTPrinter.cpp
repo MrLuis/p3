@@ -336,12 +336,15 @@ class ASTPrinter : public StmtVisitor<ASTPrinter>,
     switch (T->getKind()) {
     case Type::TK_Array: {
       auto *A = llvm::cast<ArrayType>(T);
-      return std::string(A->isPacked() ? "packed " : "") + "array [" +
-             A->getIndexType()->getName() + "] of " +
+      return std::string(A->isBitPacked() ? "bitpacked "
+                         : A->isPacked()  ? "packed "
+                                          : "") +
+             "array [" + A->getIndexType()->getName() + "] of " +
              A->getElementType()->getName();
     }
     case Type::TK_Record: {
-      std::string S = "record";
+      std::string S =
+          llvm::cast<RecordType>(T)->isBitPacked() ? "bitpacked record" : "record";
       for (FieldDecl *F : llvm::cast<RecordType>(T)->getAllFields())
         S += " " + F->getName().Name.str() + ": " +
              (F->getType() ? F->getType()->getName() : "?") + ";";
@@ -429,7 +432,9 @@ class ASTPrinter : public StmtVisitor<ASTPrinter>,
     }
     case TypeSpec::TS_Array: {
       auto *A = llvm::cast<ArrayTypeSpec>(TS);
-      line(A->isPacked() ? "ArrayTypeSpec packed" : "ArrayTypeSpec");
+      line(A->isBitPacked() ? "ArrayTypeSpec bitpacked"
+           : A->isPacked()  ? "ArrayTypeSpec packed"
+                            : "ArrayTypeSpec");
       loc(TS->getBeginLoc());
       IndentScope I(Indent);
       for (TypeSpec *Idx : A->getIndexes())
@@ -439,7 +444,9 @@ class ASTPrinter : public StmtVisitor<ASTPrinter>,
     }
     case TypeSpec::TS_Record: {
       auto *R = llvm::cast<RecordTypeSpec>(TS);
-      line(R->isPacked() ? "RecordTypeSpec packed" : "RecordTypeSpec");
+      line(R->isBitPacked() ? "RecordTypeSpec bitpacked"
+           : R->isPacked()  ? "RecordTypeSpec packed"
+                            : "RecordTypeSpec");
       loc(TS->getBeginLoc());
       IndentScope I(Indent);
       printFieldList(R->getFields());

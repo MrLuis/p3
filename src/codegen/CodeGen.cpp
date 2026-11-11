@@ -187,6 +187,8 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
   llvm::DenseSet<RoutineDecl *> LinkInFrame;
   llvm::DenseMap<Type *, llvm::Type *> LoweredTypes;
   llvm::DenseMap<FieldDecl *, uint64_t> FieldOffsets;
+  /// The bit offsets of the ordinal fields of bitpacked records.
+  llvm::DenseMap<FieldDecl *, uint64_t> FieldBitOffsets;
   /// Classes (objfpc): instance layouts (used only for offsets and sizes)
   /// and VMTs, in the order the classes were declared.
   llvm::DenseMap<ClassType *, llvm::StructType *> ClassLayouts;
@@ -461,14 +463,23 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
     case Type::TK_Array: {
       auto *A = llvm::cast<ArrayType>(T);
       OrdinalBounds Bd = getOrdinalBounds(A->getIndexType());
-      return llvm::ArrayType::get(memType(A->getElementType()),
-                                  static_cast<uint64_t>(Bd.Hi - Bd.Lo + 1));
+      uint64_t N = static_cast<uint64_t>(Bd.Hi - Bd.Lo + 1);
+      if (A->hasBitElements()) // the elements' bits, in whole bytes
+        return llvm::ArrayType::get(
+            B.getInt8Ty(), (N * bitPackedWidth(A->getElementType()) + 7) / 8);
+      return llvm::ArrayType::get(memType(A->getElementType()), N);
     }
     case Type::TK_Record: {
       auto *R = llvm::cast<RecordType>(T);
       std::string Name = T->getDeclName().empty()
                              ? std::string("record")
                              : ("record." + T->getDeclName()).str();
+      if (R->isBitPacked()) {
+        uint64_t Bits = layoutBitPacked(R->getFieldList(), 0);
+        return llvm::StructType::create(
+            M.getContext(), {llvm::ArrayType::get(B.getInt8Ty(), (Bits + 7) / 8)},
+            Name);
+      }
       return layoutFieldList(R->getFieldList(), Name, /*BaseOffset=*/0);
     }
     case Type::TK_Pointer:
@@ -549,6 +560,35 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
         shiftFieldOffsets(V->Fields, BufferOffset);
     }
     return ST;
+  }
+
+  /// Lays out the fields of a bitpacked record from bit Start, as Free
+  /// Pascal does: ordinals take their bitPackedWidth bits, one after
+  /// another; other fields and the variant part start at a byte. Returns
+  /// the bit after the last field.
+  uint64_t layoutBitPacked(FieldList *FL, uint64_t Start) {
+    uint64_t Bit = Start;
+    auto Place = [&](FieldDecl *F) {
+      if (F->getType()->isOrdinal()) {
+        FieldBitOffsets[F] = Bit;
+        Bit += bitPackedWidth(F->getType());
+        return;
+      }
+      Bit = (Bit + 7) / 8 * 8;
+      FieldOffsets[F] = Bit / 8;
+      Bit += sizeOf(F->getType()) * 8;
+    };
+    for (FieldDecl *F : FL->Fixed)
+      Place(F);
+    if (VariantPart *VP = FL->Variant) {
+      if (VP->Tag)
+        Place(VP->Tag);
+      uint64_t VarStart = (Bit + 7) / 8 * 8, End = VarStart;
+      for (Variant *V : VP->Variants)
+        End = std::max(End, (layoutBitPacked(V->Fields, VarStart) + 7) / 8 * 8);
+      Bit = End;
+    }
+    return Bit;
   }
 
   void shiftFieldOffsets(FieldList *FL, uint64_t Delta) {
@@ -1611,11 +1651,140 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
                                         FieldOffsets[F], F->getName().Name);
   }
 
+  //===--------------------------------------------------------------------===//
+  // Bitpacked records and arrays (Free Pascal)
+  //===--------------------------------------------------------------------===//
+
+  /// Where a bitpacked component's bits are: from bit Bit (an i64, for an
+  /// array's element) or ConstBit (a record's field) of the Size bytes at
+  /// Base; T is its type.
+  struct BitRef {
+    llvm::Value *Base;
+    llvm::Value *Bit;
+    uint64_t ConstBit;
+    uint64_t Size;
+    Type *T;
+  };
+
+  BitRef bitRef(Expr *E) {
+    if (auto *I = llvm::dyn_cast<IndexExpr>(E)) {
+      auto *AT = llvm::cast<ArrayType>(I->getBase()->getType());
+      llvm::Value *Base = emitAddress(I->getBase());
+      llvm::Value *Idx = visitExpr(I->getIndex());
+      Type *IdxTy = I->getIndex()->getType();
+      emitRangeCheck(Idx, IdxTy, AT->getIndexType(),
+                     I->getIndex()->getBeginLoc(), "array index out of bounds");
+      OrdinalBounds Bd = getOrdinalBounds(AT->getIndexType());
+      llvm::Value *Offset =
+          B.CreateSub(toI64(Idx, IdxTy), B.getInt64(Bd.Lo), "idx");
+      Type *Elem = AT->getElementType();
+      return {Base, B.CreateMul(Offset, B.getInt64(bitPackedWidth(Elem)), "bit"),
+              0, sizeOf(AT), Elem};
+    }
+    FieldDecl *F;
+    Type *RT;
+    llvm::Value *Base;
+    if (auto *FE = llvm::dyn_cast<FieldExpr>(E)) {
+      F = FE->getFieldDecl();
+      RT = FE->getBase()->getType();
+      Base = emitAddress(FE->getBase());
+    } else {
+      auto *N = llvm::cast<NameRefExpr>(E);
+      F = llvm::cast<FieldDecl>(N->getDecl());
+      RT = N->getWith()->Record->getType();
+      Base = withBase(N->getWith());
+    }
+    memType(RT); // computes the bit offsets
+    return {Base, nullptr, FieldBitOffsets[F], sizeOf(RT), F->getType()};
+  }
+
+  /// The bytes holding R's bits, loaded and stored as one integer (Ty, at
+  /// Ptr), and where the bits start in it (Shift, of type Ty). An array's
+  /// window never reaches past the array.
+  struct BitWindow {
+    llvm::Value *Ptr;
+    llvm::IntegerType *Ty;
+    llvm::Value *Shift;
+  };
+
+  BitWindow bitWindow(const BitRef &R) {
+    uint64_t W = bitPackedWidth(R.T), K;
+    llvm::Value *Byte, *Shift;
+    if (!R.Bit) {
+      K = (R.ConstBit % 8 + W + 7) / 8;
+      Byte = B.getInt64(R.ConstBit / 8);
+      Shift = B.getInt64(R.ConstBit % 8);
+    } else if (W % 8 == 0) { // whole bytes
+      K = W / 8;
+      Byte = B.CreateLShr(R.Bit, B.getInt64(3));
+      Shift = B.getInt64(0);
+    } else if (8 % W == 0) { // never across bytes
+      K = 1;
+      Byte = B.CreateLShr(R.Bit, B.getInt64(3));
+      Shift = B.CreateAnd(R.Bit, B.getInt64(7));
+    } else {
+      K = std::min<uint64_t>((W + 14) / 8, R.Size);
+      if (K == R.Size) {
+        Byte = B.getInt64(0);
+        Shift = R.Bit;
+      } else {
+        Byte = B.CreateLShr(R.Bit, B.getInt64(3));
+        llvm::Value *Last = B.getInt64(R.Size - K);
+        Byte = B.CreateSelect(B.CreateICmpUGT(Byte, Last), Last, Byte);
+        Shift = B.CreateSub(R.Bit, B.CreateShl(Byte, B.getInt64(3)));
+      }
+    }
+    llvm::IntegerType *Ty = B.getIntNTy(static_cast<unsigned>(K * 8));
+    if (K * 8 < 64)
+      Shift = B.CreateTrunc(Shift, Ty);
+    else if (K * 8 > 64)
+      Shift = B.CreateZExt(Shift, Ty);
+    return {B.CreateInBoundsGEP(B.getInt8Ty(), R.Base, Byte), Ty, Shift};
+  }
+
+  /// The value (register type) of bitpacked component E.
+  llvm::Value *bitLoad(Expr *E) { return bitLoad(bitRef(E)); }
+
+  llvm::Value *bitLoad(const BitRef &R) {
+    BitWindow Wd = bitWindow(R);
+    unsigned W = bitPackedWidth(R.T);
+    llvm::Value *V = B.CreateAlignedLoad(Wd.Ty, Wd.Ptr, llvm::Align(1), "bits");
+    V = B.CreateLShr(V, Wd.Shift);
+    if (Wd.Ty->getBitWidth() > W)
+      V = B.CreateTrunc(V, B.getIntNTy(W));
+    auto *Dst = llvm::cast<llvm::IntegerType>(regType(R.T));
+    if (Dst->getBitWidth() > W)
+      V = bitPackedSigned(R.T) ? B.CreateSExt(V, Dst) : B.CreateZExt(V, Dst);
+    return V;
+  }
+
+  /// Target := V for bitpacked component Target: its bits replaced.
+  void bitStore(Expr *Target, llvm::Value *V) {
+    BitRef R = bitRef(Target);
+    BitWindow Wd = bitWindow(R);
+    unsigned W = bitPackedWidth(R.T), N = Wd.Ty->getBitWidth();
+    if (V->getType()->getIntegerBitWidth() > W)
+      V = B.CreateTrunc(V, B.getIntNTy(W));
+    if (N > W)
+      V = B.CreateZExt(V, Wd.Ty);
+    V = B.CreateShl(V, Wd.Shift);
+    llvm::Value *Mask = B.CreateShl(
+        llvm::ConstantInt::get(Wd.Ty, llvm::APInt::getLowBitsSet(N, W)), Wd.Shift);
+    llvm::Value *Old = B.CreateAlignedLoad(Wd.Ty, Wd.Ptr, llvm::Align(1), "bits");
+    llvm::Value *New = B.CreateOr(B.CreateAnd(Old, B.CreateNot(Mask)), V);
+    B.CreateAlignedStore(New, Wd.Ptr, llvm::Align(1));
+  }
+
   /// Address of a designator (variable, a[i], r.f, with-field) or of an
   /// aggregate constant (string literal / string constant).
   llvm::Value *emitAddress(Expr *E) {
     if (E->getConversion()) // converted to a record: a temporary
       return emitConversion(E);
+    if (isBitPackedComponent(E)) { // (no address) a copy of its value
+      llvm::Value *Tmp = createTemp(memType(E->getType()), "bits.tmp");
+      storeScalar(Tmp, bitLoad(E), E->getType());
+      return Tmp;
+    }
     if (E->getType() && E->getType()->isOpenArray()) // its elements
       return B.CreateLoad(B.getPtrTy(), openDescriptor(E), "data");
     switch (E->getKind()) {
@@ -1837,6 +2006,11 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
     }
     case Type::TK_String:
     case Type::TK_Array: {
+      if (auto *A = llvm::dyn_cast<ArrayType>(T); A && A->hasBitElements())
+        return DIB->createArrayType( // (its bytes)
+            sizeOf(T) * 8, 0, DIB->createBasicType("byte", 8, DW_ATE_unsigned),
+            DIB->getOrCreateArray(
+                {DIB->getOrCreateSubrange(0, static_cast<int64_t>(sizeOf(T)))}));
       Type *Elem = T->isStringLiteral() ? static_cast<Type *>(nullptr)
                                         : llvm::cast<ArrayType>(T)->getElementType();
       llvm::DIType *ElemDI =
@@ -1861,11 +2035,19 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
           DW_TAG_structure_type, T->getDeclName(), CU, DIUnitFile, 0);
       DITypes[T] = Fwd;
       llvm::SmallVector<llvm::Metadata *, 8> Members;
-      for (FieldDecl *F : R->getAllFields())
+      for (FieldDecl *F : R->getAllFields()) {
+        if (R->isBitPacked() && F->getType()->isOrdinal()) { // a bit field
+          Members.push_back(DIB->createBitFieldMemberType(
+              Fwd, F->getName().Spelling, DIUnitFile, lineOf(F->getLocation()),
+              bitPackedWidth(F->getType()), FieldBitOffsets[F], 0,
+              llvm::DINode::FlagZero, debugType(F->getType())));
+          continue;
+        }
         Members.push_back(DIB->createMemberType(
             Fwd, F->getName().Spelling, DIUnitFile, lineOf(F->getLocation()),
             sizeOf(F->getType()) * 8, 0, FieldOffsets[F] * 8,
             llvm::DINode::FlagZero, debugType(F->getType())));
+      }
       llvm::DICompositeType *Def = DIB->createStructType(
           CU, T->getDeclName(), DIUnitFile, 0, sizeOf(T) * 8, 0,
           llvm::DINode::FlagZero, nullptr, DIB->getOrCreateArray(Members));
@@ -4566,6 +4748,10 @@ public:
     }
     llvm::Value *V = convertForAssign(visitExpr(Value), Value->getType(), TT,
                                       Value->getBeginLoc());
+    if (isBitPackedComponent(Target)) {
+      bitStore(Target, V);
+      return;
+    }
     storeValue(emitAddress(Target), V, TT);
   }
 
@@ -5028,6 +5214,18 @@ public:
       auto *AT = llvm::cast<ArrayType>(C->getType());
       llvm::Value *Base = emitAddress(C);
       OrdinalBounds Bd = getOrdinalBounds(AT->getIndexType());
+      if (AT->hasBitElements()) { // each element's bits, copied
+        Type *ET = AT->getElementType();
+        llvm::Value *Tmp = createTemp(memType(ET), "in.bits");
+        emitForInLoop(B.getInt64(0), B.getInt64(Bd.Hi - Bd.Lo),
+                      [&](llvm::Value *I, llvm::BasicBlock *) {
+                        llvm::Value *Bit = B.CreateMul(
+                            I, B.getInt64(bitPackedWidth(ET)), "bit");
+                        storeScalar(Tmp, bitLoad({Base, Bit, 0, sizeOf(AT), ET}), ET);
+                        Iteration(Tmp);
+                      });
+        return;
+      }
       emitForInLoop(B.getInt64(0), B.getInt64(Bd.Hi - Bd.Lo),
                     [&](llvm::Value *I, llvm::BasicBlock *) {
                       Iteration(B.CreateInBoundsGEP(memType(AT), Base,
@@ -5542,6 +5740,8 @@ public:
         return B.CreateLoad(memType(V->getType()), varAddress(V));
       return emitIndirectCall(V, {}); // parameterless functional parameter
     }
+    if (isBitPackedComponent(E))
+      return bitLoad(E);
     if (llvm::isa<VarDecl>(D) || llvm::isa<FieldDecl>(D))
       return loadScalar(emitAddress(E), E->getType(), E->getName().Name);
     if (auto *R = llvm::dyn_cast<RoutineDecl>(D))
@@ -5782,6 +5982,8 @@ public:
   llvm::Value *visitIndexExpr(IndexExpr *E) {
     if (E->getProperty())
       return emitArrayPropertyRead(E);
+    if (isBitPackedComponent(E))
+      return bitLoad(E);
     if (E->getType()->isShortString())
       return emitAddress(E);
     if (E->getBase()->getType()->isAnsiString()) { // reading: no copy
@@ -5798,6 +6000,8 @@ public:
   llvm::Value *visitFieldExpr(FieldExpr *E) {
     if (NameRefExpr *Ref = E->getConstRef()) // TFoo.C
       return visitExpr(Ref);
+    if (isBitPackedComponent(E))
+      return bitLoad(E);
     if (E->getBase()->getType()->isRecord() &&
         !llvm::isa_and_nonnull<FieldDecl>(E->getMember())) {
       if (llvm::isa_and_nonnull<RoutineDecl>(E->getMember()))

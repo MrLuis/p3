@@ -577,10 +577,58 @@ begin
   layoutFieldList := st;
 end;
 
+{ Lays out the fields of a bitpacked record from bit start, as Free
+  Pascal does: ordinals take their bitPackedWidth bits, one after another;
+  other fields and the variant part start at a byte. Returns the bit after
+  the last field. }
+function layoutBitPacked(fl: PFieldList; start: int64): int64;
+var
+  bit, varStart, e, en: int64;
+  i: longint;
+  vp: PVariantPart;
+
+  procedure place(f: PDecl);
+  begin
+    if isOrdinal(f^.fieldType) then
+    begin
+      f^.cgBitOffset := bit;
+      bit := bit + bitPackedWidth(f^.fieldType);
+      exit;
+    end;
+    bit := (bit + 7) div 8 * 8;
+    f^.cgOffset := bit div 8;
+    bit := bit + memType(f^.fieldType)^.size * 8;
+  end;
+
+begin
+  bit := start;
+  for i := 0 to fl^.fixed.count - 1 do
+    place(PDecl(listGet(fl^.fixed, i)));
+  vp := fl^.variant;
+  if vp <> nil then
+  begin
+    if vp^.tag <> nil then
+      place(vp^.tag);
+    varStart := (bit + 7) div 8 * 8;
+    en := varStart;
+    for i := 0 to vp^.variants.count - 1 do
+    begin
+      e := (layoutBitPacked(PVariant(listGet(vp^.variants, i))^.fields, varStart) + 7)
+           div 8 * 8;
+      if e > en then
+        en := e;
+    end;
+    bit := en;
+  end;
+  layoutBitPacked := bit;
+end;
+
 function lowerType(t: PType): PIRType;
 var
   bd: TOrdinalBounds;
   name: string;
+  bits: int64;
+  elems: TPtrList;
 begin
   case t^.kind of
     tyInteger: lowerType := irInt(t^.bits);
@@ -592,7 +640,11 @@ begin
     tyArray:
       begin
         bd := getOrdinalBounds(t^.indexType);
-        lowerType := irArray(bd.hi - bd.lo + 1, memType(t^.elementType));
+        if hasBitElements(t) then { the elements' bits, in whole bytes }
+          lowerType := irArray(((bd.hi - bd.lo + 1) * bitPackedWidth(t^.elementType) + 7)
+                               div 8, irI8)
+        else
+          lowerType := irArray(bd.hi - bd.lo + 1, memType(t^.elementType));
       end;
     tyRecord:
       begin
@@ -600,7 +652,16 @@ begin
           name := 'record'
         else
           name := 'record.' + nm(t^.declName);
-        lowerType := layoutFieldList(t^.fieldList, name, 0);
+        if t^.isBitPackedRecord then
+        begin
+          bits := layoutBitPacked(t^.fieldList, 0);
+          listInit(elems);
+          listAdd(elems, irArray((bits + 7) div 8, irI8));
+          lowerType := irStructNamed(name, elems);
+          listFree(elems);
+        end
+        else
+          lowerType := layoutFieldList(t^.fieldList, name, 0);
       end;
     tyPointer, tyNil, tyFile: lowerType := irPtrT;
     tySet: lowerType := irI256;
@@ -2038,16 +2099,190 @@ begin
   end;
 end;
 
+{ --- Bitpacked records and arrays (Free Pascal) --- }
+
+type
+  { where a bitpacked component's bits are: from bit bit (an i64, for an
+    array's element: hasBit) or constBit (a record's field) of the size
+    bytes at base; t is its type }
+  TBitRef = record
+    base, bit: TV;
+    hasBit: boolean;
+    constBit, size: int64;
+    t: PType;
+  end;
+  { the bytes holding a component's bits, loaded and stored as one integer
+    (ty, at ptr), and where the bits start in it (shift, of type ty) }
+  TBitWindow = record
+    ptr, shift: TV;
+    ty: PIRType;
+  end;
+
+procedure bitRef(e: PNode; var r: TBitRef);
+var
+  idx, offset: TV;
+  idxTy, at, rt: PType;
+  bd: TOrdinalBounds;
+  f: PDecl;
+  ignored: PIRType;
+begin
+  if e^.kind = nkIndex then
+  begin
+    at := e^.base^.typ;
+    r.base := emitAddress(e^.base);
+    idx := visitExpr(e^.index);
+    idxTy := e^.index^.typ;
+    emitRangeCheckMsg(idx, idxTy, at^.indexType, e^.index^.b, 'array index out of bounds');
+    bd := getOrdinalBounds(at^.indexType);
+    offset := irBin('sub', toI64(idx, idxTy), i64c(bd.lo), 'idx');
+    r.bit := irBin('mul', offset, i64c(bitPackedWidth(at^.elementType)), 'bit');
+    r.hasBit := true;
+    r.constBit := 0;
+    r.size := sizeOf_(at);
+    r.t := at^.elementType;
+    exit;
+  end;
+  if e^.kind = nkField then
+  begin
+    f := e^.fieldDecl;
+    rt := e^.base^.typ;
+    r.base := emitAddress(e^.base);
+  end
+  else
+  begin
+    f := e^.refDecl;
+    rt := e^.refWith^.rec^.typ;
+    r.base := withBase(e^.refWith);
+  end;
+  ignored := memType(rt); { computes the bit offsets }
+  r.hasBit := false;
+  r.constBit := f^.cgBitOffset;
+  r.size := sizeOf_(rt);
+  r.t := f^.fieldType;
+end;
+
+procedure bitWindow(const r: TBitRef; var wd: TBitWindow);
+var
+  w, k: int64;
+  byte_, shift, last: TV;
+begin
+  w := bitPackedWidth(r.t);
+  if not r.hasBit then
+  begin
+    k := (r.constBit mod 8 + w + 7) div 8;
+    byte_ := i64c(r.constBit div 8);
+    shift := i64c(r.constBit mod 8);
+  end
+  else if w mod 8 = 0 then { whole bytes }
+  begin
+    k := w div 8;
+    byte_ := irBin('lshr', r.bit, i64c(3), '');
+    shift := i64c(0);
+  end
+  else if 8 mod w = 0 then { never across bytes }
+  begin
+    k := 1;
+    byte_ := irBin('lshr', r.bit, i64c(3), '');
+    shift := irBin('and', r.bit, i64c(7), '');
+  end
+  else
+  begin
+    k := imin((w + 14) div 8, r.size);
+    if k = r.size then
+    begin
+      byte_ := i64c(0);
+      shift := r.bit;
+    end
+    else
+    begin
+      byte_ := irBin('lshr', r.bit, i64c(3), '');
+      last := i64c(r.size - k);
+      byte_ := irSelect(irICmp('ugt', byte_, last, ''), last, byte_, '');
+      shift := irBin('sub', r.bit, irBin('shl', byte_, i64c(3), ''), '');
+    end;
+  end;
+  wd.ty := irInt(longint(k * 8));
+  if k * 8 < 64 then
+    shift := irCast('trunc', shift, wd.ty, '')
+  else if k * 8 > 64 then
+    shift := irCast('zext', shift, wd.ty, '');
+  wd.shift := shift;
+  wd.ptr := irGEP1(irI8, r.base, byte_, true, '');
+end;
+
+{ The value (register type) of the component r. }
+function bitLoadRef(const r: TBitRef): TV;
+var
+  wd: TBitWindow;
+  w: longint;
+  v: TV;
+  dst: PIRType;
+begin
+  bitWindow(r, wd);
+  w := bitPackedWidth(r.t);
+  v := irLoadAlign(wd.ty, wd.ptr, 1, 'bits');
+  v := irBin('lshr', v, wd.shift, '');
+  if wd.ty^.bits > w then
+    v := irCast('trunc', v, irInt(w), '');
+  dst := regType(r.t);
+  if dst^.bits > w then
+  begin
+    if bitPackedSigned(r.t) then
+      v := irCast('sext', v, dst, '')
+    else
+      v := irCast('zext', v, dst, '');
+  end;
+  bitLoadRef := v;
+end;
+
+{ The value (register type) of bitpacked component e. }
+function bitLoad(e: PNode): TV;
+var
+  r: TBitRef;
+begin
+  bitRef(e, r);
+  bitLoad := bitLoadRef(r);
+end;
+
+{ target := v for bitpacked component target: its bits replaced. }
+procedure bitStore(target: PNode; v: TV);
+var
+  r: TBitRef;
+  wd: TBitWindow;
+  w, n: longint;
+  mask, old, new_: TV;
+begin
+  bitRef(target, r);
+  bitWindow(r, wd);
+  w := bitPackedWidth(r.t);
+  n := wd.ty^.bits;
+  if v.t^.bits > w then
+    v := irCast('trunc', v, irInt(w), '');
+  if n > w then
+    v := irCast('zext', v, wd.ty, '');
+  v := irBin('shl', v, wd.shift, '');
+  mask := irBin('shl', irLowBits(wd.ty, w), wd.shift, '');
+  old := irLoadAlign(wd.ty, wd.ptr, 1, 'bits');
+  new_ := irBin('or', irBin('and', old, irBin('xor', mask, irLowBits(wd.ty, n), ''), ''), v, '');
+  irStoreAlign(new_, wd.ptr, 1);
+end;
+
 function emitAddress(e: PNode): TV;
 var
   d: PDecl;
-  base, idx, x, bad, offset: TV;
+  base, idx, x, bad, offset, tmp: TV;
   bt, idxTy: PType;
   bd: TOrdinalBounds;
   w: PWithContext;
 begin
   if (e^.convOp <> nil) and not e^.convSuspended then
     exit(emitConversion(e)); { converted to a record: a temporary }
+  if isBitPackedComponent(e) then { (no address) a copy of its value }
+  begin
+    tmp := irCreateTemp(memType(e^.typ), 'bits.tmp');
+    storeScalar(tmp, bitLoad(e), e^.typ);
+    exit(tmp);
+  end;
   if (e^.typ <> nil) and (e^.typ^.kind = tyOpenArray) then { its elements }
     exit(irLoad(irPtrT, openDescriptor(e), 'data'));
   case e^.kind of
@@ -4268,6 +4503,8 @@ begin
     listInit(noArgs);
     exit(emitIndirectCall(d, noArgs)); { a parameterless functional parameter }
   end;
+  if isBitPackedComponent(e) then
+    exit(bitLoad(e));
   if d^.kind in [dkVar, dkField] then
     exit(loadScalar(emitAddress(e), e^.typ, nm(e^.ref.name)));
   if d^.kind = dkRoutine then
@@ -4607,6 +4844,8 @@ begin
     nkDeref, nkIndex:
       if (e^.kind = nkIndex) and (e^.idxProp <> nil) then
         visitExprKind := emitArrayPropertyRead(e)
+      else if (e^.kind = nkIndex) and isBitPackedComponent(e) then
+        visitExprKind := bitLoad(e)
       else if e^.typ^.kind = tyShortString then
         visitExprKind := emitAddress(e)
       else if (e^.kind = nkIndex) and (e^.base^.typ^.kind = tyAnsiString) then
@@ -4616,6 +4855,8 @@ begin
     nkField:
       if e^.constRef <> nil then { TFoo.C }
         visitExprKind := visitExpr(e^.constRef)
+      else if isBitPackedComponent(e) then
+        visitExprKind := bitLoad(e)
       else if (e^.fieldDecl^.kind <> dkField) or (e^.base^.typ^.kind = tyClass) then
         visitExprKind := emitMemberValue(e) { objfpc: a member of an object }
       else if e^.typ^.kind = tyShortString then

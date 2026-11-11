@@ -865,6 +865,8 @@ class Checker : public StmtVisitor<Checker>,
   /// Can E be used where a variable is required (assignment target, `var`
   /// argument, with record)?
   static bool isVariableReference(Expr *E) {
+    if (isBitField(E)) // assignable, but without an address
+      return false;
     if (auto *N = llvm::dyn_cast<NameRefExpr>(E)) {
       Decl *D = N->getDecl();
       return D && (llvm::isa<VarDecl>(D) || llvm::isa<FieldDecl>(D));
@@ -887,6 +889,46 @@ class Checker : public StmtVisitor<Checker>,
       return C->isVarCast() || C->isMethodCastOfVariable();
     // p^ is a variable even when p is a function result.
     return llvm::isa<DerefExpr>(E);
+  }
+
+  static bool isBitField(Expr *E) { return isBitPackedComponent(E); }
+
+  /// E (a bit field) where an address is needed.
+  void diagBitFieldAddress(Expr *E) {
+    Diags.error(E->getBeginLoc(),
+                "the elements and fields of bitpacked arrays and records have "
+                "no address (they cannot be passed as 'var' parameters or used "
+                "with '@')",
+                {E->getRange()});
+  }
+
+  /// Does T have a bitpacked part (itself, an element, a field)?
+  static bool containsBitPacked(Type *T) {
+    if (auto *A = llvm::dyn_cast<ArrayType>(T))
+      return A->isBitPacked() || containsBitPacked(A->getElementType());
+    if (auto *R = llvm::dyn_cast<RecordType>(T)) {
+      if (R->isBitPacked())
+        return true;
+      for (FieldDecl *F : R->getAllFields())
+        if (F->getType() && containsBitPacked(F->getType()))
+          return true;
+    }
+    return false;
+  }
+
+  /// Does a value of the non-ordinal type T need no alignment (it can sit
+  /// at any byte of a bitpacked record)?
+  static bool isByteAligned(Type *T) {
+    if (T->isOrdinal()) // as an array's element: stored in a byte?
+      return T->getBase()->isBoolean() || T->getBase()->isChar() ||
+             (T->isInteger() && llvm::cast<IntegerType>(T)->getBits() == 8);
+    if (T->isShortString())
+      return true;
+    if (auto *R = llvm::dyn_cast<RecordType>(T))
+      return R->isBitPacked();
+    if (auto *A = llvm::dyn_cast<ArrayType>(T))
+      return A->hasBitElements() || isByteAligned(A->getElementType());
+    return false;
   }
 
   /// Is E a variable a type helper's method can change (not a method's
@@ -1379,8 +1421,12 @@ class Checker : public StmtVisitor<Checker>,
         return errorType();
       // array [A, B] of E == array [A] of array [B] of E
       Type *T = Elem;
-      for (auto It = Indexes.rbegin(); It != Indexes.rend(); ++It)
-        T = Ctx.create<ArrayType>(*It, T, AS->isPacked());
+      for (auto It = Indexes.rbegin(); It != Indexes.rend(); ++It) {
+        auto *A = Ctx.create<ArrayType>(*It, T, AS->isPacked());
+        if (AS->isBitPacked())
+          A->setBitPacked();
+        T = A;
+      }
       return T;
     }
 
@@ -1535,9 +1581,20 @@ class Checker : public StmtVisitor<Checker>,
       llvm::StringMap<FieldDecl *> Seen;
       if (!resolveFieldList(RS->getFields(), All, Seen))
         return errorType();
-      return Ctx.create<RecordType>(RS->getFields(),
-                                    Ctx.copyArray<FieldDecl *>(All),
-                                    RS->isPacked());
+      auto *R = Ctx.create<RecordType>(RS->getFields(),
+                                       Ctx.copyArray<FieldDecl *>(All),
+                                       RS->isPacked());
+      if (RS->isBitPacked()) {
+        R->setBitPacked();
+        for (FieldDecl *F : All) // ordinals, and what needs no alignment
+          if (Type *FT = F->getType();
+              FT && !FT->isError() && !FT->isOrdinal() && !isByteAligned(FT))
+            Diags.error(F->getLocation(),
+                        "a field of type " + quoted(FT) +
+                            " in a bitpacked record is not supported yet",
+                        {F->getName().getRange()});
+      }
+      return R;
     }
     }
     return errorType();
@@ -3210,6 +3267,8 @@ class Checker : public StmtVisitor<Checker>,
   /// variable, a field of a record in one or an element at a constant
   /// index of an array in one. Null for anything else.
   VarDecl *absoluteRootOf(Expr *E) {
+    if (isBitField(E))
+      return nullptr;
     if (auto *N = llvm::dyn_cast<NameRefExpr>(E)) {
       auto *V = llvm::dyn_cast_or_null<VarDecl>(N->getDecl());
       return V && !N->getWith() && !V->getType()->isArrayOfConst() ? V : nullptr;
@@ -3310,7 +3369,14 @@ class Checker : public StmtVisitor<Checker>,
       }
       ConstValue Folded;
       ConstInitWhat = V->isTypedConst() ? "typed constant value" : "initial value";
-      if (!V->getType()->isError() && checkConstInit(Init, V->getType(), Folded))
+      if (containsBitPacked(V->getType()))
+        Diags.error(Init->getBeginLoc(),
+                    std::string(V->isTypedConst() ? "typed constants"
+                                                  : "initialized variables") +
+                        " of bitpacked types are not supported yet",
+                    {Init->getRange()});
+      else if (!V->getType()->isError() &&
+               checkConstInit(Init, V->getType(), Folded))
         V->setInitValue(Folded);
       ConstInitWhat = "typed constant value";
     }
@@ -4070,8 +4136,8 @@ class Checker : public StmtVisitor<Checker>,
     Type *Elem = OA->getElementType();
     if (A == OA)
       return true;
-    if (auto *AT = llvm::dyn_cast<ArrayType>(A))
-      return AT->getElementType() == Elem;
+    if (auto *AT = llvm::dyn_cast<ArrayType>(A)) // (not a bitpacked layout)
+      return AT->getElementType() == Elem && !AT->hasBitElements();
     if (auto *DA = llvm::dyn_cast<DynArrayType>(A))
       return DA->getElementType() == Elem;
     return Elem->isChar() &&
@@ -4164,7 +4230,9 @@ class Checker : public StmtVisitor<Checker>,
     }
     if (P->isVarParam()) {
       Expr *Target = Slice ? llvm::cast<CallExpr>(Arg)->getArgs()[0] : Arg;
-      if (!isVariableReference(Target))
+      if (isBitField(Target))
+        diagBitFieldAddress(Target);
+      else if (!isVariableReference(Target))
         Diags.error(Arg->getBeginLoc(),
                     "argument for '" + llvm::Twine(paramKeyword(P)) + "' parameter '" + PName.Spelling +
                         "' must be a variable",
@@ -4738,6 +4806,8 @@ class Checker : public StmtVisitor<Checker>,
                     "cannot pass a value of type " + quoted(AT) + " to parameter '" +
                         P->getName().Spelling + "' of type " + quoted(Formal),
                     {Arg->getRange()});
+      else if (P->isVarParam() && isBitField(Arg))
+        diagBitFieldAddress(Arg);
       else if (P->isVarParam() && !isVariableReference(Arg))
         Diags.error(Arg->getBeginLoc(),
                     "argument for '" + llvm::Twine(paramKeyword(P)) + "' parameter '" + P->getName().Spelling +
@@ -4991,6 +5061,10 @@ class Checker : public StmtVisitor<Checker>,
       const Identifier &PName = P->getName();
 
       if (P->isVarParam()) {
+        if (isBitField(Arg)) {
+          diagBitFieldAddress(Arg);
+          continue;
+        }
         if (!isVariableReference(Arg)) {
           Diags.error(Arg->getBeginLoc(),
                       "argument for '" + llvm::Twine(paramKeyword(P)) + "' parameter '" + PName.Spelling +
@@ -6298,7 +6372,8 @@ public:
         TargetTy = checkPropertyWrite(
             P, I ? propertyName(I) : llvm::cast<FieldExpr>(Target)->getField());
         Target->setType(TargetTy);
-      } else if (!TargetTy->isError() && !isVariableReference(Target)) {
+      } else if (!TargetTy->isError() && !isVariableReference(Target) &&
+                 !isBitField(Target)) {
         Diags.error(Target->getBeginLoc(), "expression is not assignable",
                     {Target->getRange()});
         TargetTy = errorType();
@@ -7676,6 +7751,10 @@ public:
     Type *T = checkAllowingUntyped(E->getOperand()); // (@x of an untyped x too)
     if (T->isError())
       return errorType();
+    if (isBitField(E->getOperand())) {
+      diagBitFieldAddress(E->getOperand());
+      return errorType();
+    }
     if (!isVariableReference(E->getOperand())) {
       Diags.error(E->getOperand()->getBeginLoc(),
                   "'@' requires a variable", {E->getOperand()->getRange()});

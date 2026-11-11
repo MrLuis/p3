@@ -219,6 +219,11 @@ function irCast(const op: string; const v: TV; dst: PIRType; const name: string)
 function irSelect(const c, a, b: TV; const name: string): TV;
 function irLoad(t: PIRType; const p: TV; const name: string): TV;
 procedure irStore(const v, p: TV);
+{ load / store with the given alignment (not the type's) }
+function irLoadAlign(t: PIRType; const p: TV; align: longint; const name: string): TV;
+procedure irStoreAlign(const v, p: TV; align: longint);
+{ the n-bit integer whose low w bits are set }
+function irLowBits(t: PIRType; w: longint): TV;
 procedure irStoreVolatile(const v, p: TV);
 { getelementptr [inbounds] src, p, idx (one or two i64/i32 indices) }
 function irGEP1(src: PIRType; const p, i0: TV; inbounds: boolean; const name: string): TV;
@@ -2299,6 +2304,43 @@ begin
   bufAdd(i^.text, 'store ' + v.t^.text + ' ' + v.v + ', ptr ' + p.v + ', align ' +
          intToStr(v.t^.align));
   append(i);
+end;
+
+function irLoadAlign(t: PIRType; const p: TV; align: longint; const name: string): TV;
+var
+  i: PIRInst;
+  res: string;
+begin
+  i := newInst(res, name, true);
+  bufAdd(i^.text, 'load ' + t^.text + ', ptr ' + p.v + ', align ' + intToStr(align));
+  append(i);
+  irLoadAlign := irV(t, res);
+end;
+
+procedure irStoreAlign(const v, p: TV; align: longint);
+var
+  i: PIRInst;
+  res: string;
+begin
+  i := newInst(res, '', false);
+  bufAdd(i^.text, 'store ' + v.t^.text + ' ' + v.v + ', ptr ' + p.v + ', align ' +
+         intToStr(align));
+  append(i);
+end;
+
+function irLowBits(t: PIRType; w: longint): TV;
+var
+  l: TLimbs;
+  j: longint;
+begin
+  for j := 0 to 7 do
+    if w >= 32 * (j + 1) then
+      l[j] := limbMask
+    else if w > 32 * j then
+      l[j] := (int64(1) shl (w - 32 * j)) - 1
+    else
+      l[j] := 0;
+  irLowBits := irConstLimbs(t, l);
 end;
 
 procedure irStoreVolatile(const v, p: TV);

@@ -2529,7 +2529,8 @@ begin
         targetTy := checkPropertyWrite(p, target^.fieldName);
       target^.typ := targetTy;
     end
-    else if not isError(targetTy) and not isVariableReference(target) then
+    else if not isError(targetTy) and not isVariableReference(target) and
+            not isBitPackedComponent(target) then
     begin
       ms('expression is not assignable');
       errR(target^.b, nodeRange(target));
@@ -4066,6 +4067,11 @@ begin
   t := checkAllowingUntyped(op); { (@x of an untyped x too) }
   if isError(t) then
     exit;
+  if isBitPackedComponent(op) then
+  begin
+    diagBitFieldAddress(op);
+    exit;
+  end;
   if not isVariableReference(op) then
   begin
     ms('''@'' requires a variable');

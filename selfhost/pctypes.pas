@@ -61,6 +61,19 @@ procedure setDeclName(t: PType; name: PName);
 function isBuiltinType(t: PType): boolean;
 
 function isOrdinal(t: PType): boolean;
+{ The bits an ordinal type t takes in a bitpacked record or array, as in
+  Free Pascal: an integer type's size, 1 for boolean, 8 for char, enough for
+  the largest value of an enumeration or a subrange (two's complement for a
+  subrange with negative values). }
+function bitPackedWidth(t: PType): longint;
+{ Are values of ordinal type t sign-extended from bitPackedWidth bits? }
+function bitPackedSigned(t: PType): boolean;
+{ a bitpacked array of ordinals: its elements take bitPackedWidth bits
+  each, without addresses }
+function hasBitElements(t: PType): boolean;
+{ Is e (checked) an ordinal field or element of a bitpacked record or array
+  (Free Pascal): a part of a byte, assignable but without an address? }
+function isBitPackedComponent(e: PNode): boolean;
 function isSimple(t: PType): boolean;
 function isValidResultType(t: PType): boolean;
 function isStructured(t: PType): boolean;
@@ -434,6 +447,103 @@ begin
   isOrdinal := t^.kind in [tyInteger, tyBoolean, tyChar, tyEnum, tySubrange];
 end;
 
+function bitLength(v: int64): longint;
+var
+  n: longint;
+begin
+  n := 0;
+  while v <> 0 do
+  begin
+    n := n + 1;
+    v := v shr 1;
+  end;
+  bitLength := n;
+end;
+
+function maxOf(a, b: longint): longint;
+begin
+  if a > b then
+    maxOf := a
+  else
+    maxOf := b;
+end;
+
+function bitPackedWidth(t: PType): longint;
+var
+  n, neg, pos: longint;
+begin
+  case t^.kind of
+    tyInteger: bitPackedWidth := t^.bits;
+    tyBoolean: bitPackedWidth := 1;
+    tyChar: bitPackedWidth := 8;
+    tyEnum:
+      begin
+        n := t^.enumValues.count;
+        if n > 0 then
+          n := n - 1;
+        bitPackedWidth := maxOf(1, bitLength(n));
+      end;
+    tySubrange:
+      if t^.lo >= 0 then
+        bitPackedWidth := maxOf(1, bitLength(t^.hi))
+      else
+      begin
+        neg := bitLength(-(t^.lo + 1));
+        pos := 0;
+        if t^.hi > 0 then
+          pos := bitLength(t^.hi);
+        begin
+          pos := maxOf(neg, pos) + 1;
+          if pos > 64 then
+            pos := 64;
+          bitPackedWidth := pos;
+        end;
+      end;
+  else
+    bitPackedWidth := 0;
+  end;
+end;
+
+function bitPackedSigned(t: PType): boolean;
+begin
+  if t^.kind = tyInteger then
+    bitPackedSigned := t^.isSigned
+  else if t^.kind = tySubrange then
+    bitPackedSigned := t^.lo < 0
+  else
+    bitPackedSigned := false;
+end;
+
+function hasBitElements(t: PType): boolean;
+begin
+  hasBitElements := (t <> nil) and (t^.kind = tyArray) and t^.isBitPackedArray and
+                    isOrdinal(t^.elementType);
+end;
+
+function isBitPackedComponent(e: PNode): boolean;
+var
+  f: PDecl;
+  rt: PType;
+begin
+  if e^.kind = nkIndex then
+    exit((e^.idxProp = nil) and (e^.base^.typ <> nil) and hasBitElements(e^.base^.typ));
+  f := nil;
+  rt := nil;
+  if e^.kind = nkField then
+  begin
+    f := e^.fieldDecl;
+    rt := e^.base^.typ;
+  end
+  else if (e^.kind = nkNameRef) and (e^.refWith <> nil) then
+  begin
+    f := e^.refDecl;
+    rt := e^.refWith^.rec^.typ;
+  end;
+  isBitPackedComponent := (f <> nil) and (f^.kind = dkField) and (rt <> nil) and
+                          (rt^.kind = tyRecord) and rt^.isBitPackedRecord and
+                          (f^.fieldType <> nil) and isOrdinal(f^.fieldType);
+end;
+
 function isSimple(t: PType): boolean;
 begin
   isSimple := isOrdinal(t) or (t^.kind = tyReal);
@@ -798,7 +908,9 @@ begin
       end;
     tyArray:
       begin
-        if t^.isPackedArray then
+        if t^.isBitPackedArray then
+          bufAdd(b, 'bitpacked ')
+        else if t^.isPackedArray then
           bufAdd(b, 'packed ');
         bufAdd(b, 'array [');
         bufAddTypeName(b, t^.indexType);
@@ -806,7 +918,9 @@ begin
         bufAddTypeName(b, t^.elementType);
       end;
     tyRecord:
-      if t^.isPackedRecord then
+      if t^.isBitPackedRecord then
+        bufAdd(b, 'bitpacked record')
+      else if t^.isPackedRecord then
         bufAdd(b, 'packed record')
       else
         bufAdd(b, 'record');

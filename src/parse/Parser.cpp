@@ -1925,6 +1925,19 @@ TypeSpec *Parser::parseType() {
 TypeSpec *Parser::parseTypeImpl() {
   SourceLocation Start = Tok.getLocation();
   bool Packed = tryConsume(tok::kw_packed);
+  // bitpacked array / record (Free Pascal; not reserved)
+  if (!Packed && LangOpts.Mode != LangMode::ISO &&
+      isIdentifierNamed("bitpacked") &&
+      peekToken().isOneOf(tok::kw_array, tok::kw_record)) {
+    consumeToken();
+    TypeSpec *TS = Tok.is(tok::kw_array) ? parseArrayType(Start, false)
+                                         : parseRecordType(Start, false);
+    if (auto *A = llvm::dyn_cast_or_null<ArrayTypeSpec>(TS))
+      A->setBitPacked();
+    else if (auto *R = llvm::dyn_cast_or_null<RecordTypeSpec>(TS))
+      R->setBitPacked();
+    return TS;
+  }
   switch (Tok.getKind()) {
   case tok::kw_array:
     return parseArrayType(Start, Packed);

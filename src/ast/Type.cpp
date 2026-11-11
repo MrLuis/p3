@@ -32,6 +32,49 @@ Type *Type::getBase() {
   return T;
 }
 
+static unsigned bitLength(uint64_t V) {
+  unsigned N = 0;
+  while (V) {
+    ++N;
+    V >>= 1;
+  }
+  return N;
+}
+
+unsigned pcc::bitPackedWidth(Type *T) {
+  switch (T->getKind()) {
+  case Type::TK_Integer:
+    return llvm::cast<IntegerType>(T)->getBits();
+  case Type::TK_Boolean:
+    return 1;
+  case Type::TK_Char:
+    return 8;
+  case Type::TK_Enum: {
+    size_t N = llvm::cast<EnumType>(T)->getValues().size();
+    return std::max(1u, bitLength(N ? N - 1 : 0));
+  }
+  case Type::TK_Subrange: {
+    auto *S = llvm::cast<SubrangeType>(T);
+    int64_t Lo = S->getLo(), Hi = S->getHi();
+    if (Lo >= 0)
+      return std::max(1u, bitLength(static_cast<uint64_t>(Hi)));
+    unsigned Neg = bitLength(static_cast<uint64_t>(-(Lo + 1)));
+    unsigned Pos = Hi > 0 ? bitLength(static_cast<uint64_t>(Hi)) : 0;
+    return std::min(64u, std::max(Neg, Pos) + 1);
+  }
+  default:
+    return 0;
+  }
+}
+
+bool pcc::bitPackedSigned(Type *T) {
+  if (auto *I = llvm::dyn_cast<IntegerType>(T))
+    return I->isSigned();
+  if (auto *S = llvm::dyn_cast<SubrangeType>(T))
+    return S->getLo() < 0;
+  return false;
+}
+
 bool Type::isStringType() const {
   if (isStringLiteral())
     return true;
@@ -201,13 +244,16 @@ std::string Type::getName() const {
   }
   case TK_Array: {
     auto *A = llvm::cast<ArrayType>(this);
-    return std::string(A->isPacked() ? "packed " : "") + "array [" +
-           A->getIndexType()->getName() + "] of " +
+    return std::string(A->isBitPacked() ? "bitpacked "
+                       : A->isPacked() ? "packed "
+                                       : "") +
+           "array [" + A->getIndexType()->getName() + "] of " +
            A->getElementType()->getName();
   }
   case TK_Record:
-    return llvm::cast<RecordType>(this)->isPacked() ? "packed record"
-                                                    : "record";
+    return llvm::cast<RecordType>(this)->isBitPacked() ? "bitpacked record"
+           : llvm::cast<RecordType>(this)->isPacked()  ? "packed record"
+                                                       : "record";
   case TK_Pointer: {
     if (llvm::cast<PointerType>(this)->isUntyped())
       return "pointer";

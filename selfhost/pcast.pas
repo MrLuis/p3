@@ -77,12 +77,16 @@ type
       tyEnum: (enumValues: TPtrList); { of PDecl (dkConst) }
       tySubrange: (host: PType; lo, hi: int64);
       tyStringLit: (strLength: int64);
-      tyArray: (indexType, elementType: PType; isPackedArray: boolean);
+      { isBitPacked...: bitpacked (Free Pascal): ordinal fields and
+        elements take bitPackedWidth bits each, without addresses }
+      tyArray: (indexType, elementType: PType; isPackedArray: boolean;
+                isBitPackedArray: boolean);
       { memberTable: an advanced record's (objfpc): a class type that is
         not a type of values, holding the fields, methods, operators and
         properties (its classRecord is the record); nil for a plain record }
       tyRecord: (fieldList: PFieldList; allFields: TPtrList; { of PDecl }
-                 isPackedRecord: boolean; memberTable: PType);
+                 isPackedRecord: boolean; memberTable: PType;
+                 isBitPackedRecord: boolean);
       tyPointer: (pointee: PType; untyped: boolean);
       tySet: (setElement: PType); { nil: the empty set [] }
       tyFile: (fileElement: PType; isText: boolean);
@@ -283,10 +287,12 @@ type
       tsNamed, tsPointer, tsClassRef: (tname: TIdent; tquals: TPtrList);
       tsEnum: (enumNames: TPtrList); { of PIdent }
       tsSubrange: (lo, hi: PNode);
-      tsArray: (indexes: TPtrList; element: PTypeSpec; arrPacked: boolean);
+      tsArray: (indexes: TPtrList; element: PTypeSpec; arrPacked: boolean;
+                arrBitPacked: boolean);
       { recMembers: an advanced record's methods, class operators and
         properties (objfpc), in source order }
-      tsRecord: (fields: PFieldList; recPacked: boolean; recMembers: TPtrList);
+      tsRecord: (fields: PFieldList; recPacked: boolean; recMembers: TPtrList;
+                 recBitPacked: boolean);
       tsSet, tsFile: (elemSpec: PTypeSpec);
       tsRoutine: (rtIsFunction: boolean; rtParams: TPtrList; rtResult: PTypeSpec;
                   rtCallConv: longint; rtOfObject: boolean);
@@ -383,6 +389,7 @@ type
     cgImported: boolean;
     cgSlot, cgJmpSlot: longint;
     cgOffset: int64;
+    cgBitOffset: int64; { an ordinal field of a bitpacked record: its bit }
     vis: TVisibility; { class members }
     case TDeclKind of
       { owner: the routine whose frame holds it; nil for program-level

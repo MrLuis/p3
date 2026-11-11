@@ -1,4 +1,5 @@
 #include "pcc/AST/AST.h"
+#include "pcc/AST/Type.h"
 
 using namespace pcc;
 
@@ -77,4 +78,24 @@ const char *Decl::getKindName() const {
                                                         : "function";
   }
   return "declaration";
+}
+
+bool pcc::isBitPackedComponent(Expr *E) {
+  if (auto *I = llvm::dyn_cast<IndexExpr>(E)) {
+    auto *A = I->getProperty() || !I->getBase()->getType()
+                  ? nullptr
+                  : llvm::dyn_cast<ArrayType>(I->getBase()->getType());
+    return A && A->hasBitElements();
+  }
+  FieldDecl *F = nullptr;
+  Type *RT = nullptr;
+  if (auto *FE = llvm::dyn_cast<FieldExpr>(E)) {
+    F = llvm::dyn_cast_or_null<FieldDecl>(FE->getMember());
+    RT = FE->getBase()->getType();
+  } else if (auto *N = llvm::dyn_cast<NameRefExpr>(E); N && N->getWith()) {
+    F = llvm::dyn_cast_or_null<FieldDecl>(N->getDecl());
+    RT = N->getWith()->Record->getType();
+  }
+  auto *R = llvm::dyn_cast_or_null<RecordType>(RT);
+  return F && R && R->isBitPacked() && F->getType() && F->getType()->isOrdinal();
 }

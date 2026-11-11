@@ -215,6 +215,7 @@ class ArrayType final : public Type {
   Type *Index;
   Type *Element;
   bool Packed;
+  bool BitPacked = false; ///< bitpacked (Free Pascal)
 
 public:
   ArrayType(Type *Index, Type *Element, bool Packed)
@@ -222,6 +223,11 @@ public:
   Type *getIndexType() const { return Index; }
   Type *getElementType() const { return Element; }
   bool isPacked() const { return Packed; }
+  bool isBitPacked() const { return BitPacked; }
+  void setBitPacked() { BitPacked = true; }
+  /// A bitpacked array of ordinals: its elements take bitPackedWidth bits
+  /// each, without addresses.
+  bool hasBitElements() const { return BitPacked && Element->isOrdinal(); }
   static bool classof(const Type *T) { return T->getKind() == TK_Array; }
 };
 
@@ -233,6 +239,8 @@ class RecordType final : public Type {
   FieldList *Fields;
   llvm::ArrayRef<FieldDecl *> AllFields; ///< flattened, incl. variant fields
   bool Packed;
+  bool BitPacked = false; ///< bitpacked (Free Pascal): ordinal fields take
+                          ///< bitPackedWidth bits, without addresses
   /// An advanced record's (objfpc) member table: a ClassType that is not a
   /// type of values, holding the fields, methods, operators and properties
   /// (see ClassType::getRecord). Null for a plain record.
@@ -246,10 +254,20 @@ public:
   llvm::ArrayRef<FieldDecl *> getAllFields() const { return AllFields; }
   FieldDecl *findField(llvm::StringRef Name) const;
   bool isPacked() const { return Packed; }
+  bool isBitPacked() const { return BitPacked; }
+  void setBitPacked() { BitPacked = true; }
   ClassType *getMemberTable() const { return Members; }
   void setMemberTable(ClassType *C) { Members = C; }
   static bool classof(const Type *T) { return T->getKind() == TK_Record; }
 };
+
+/// The bits an ordinal type T takes in a bitpacked record or array, as in
+/// Free Pascal: an integer type's size, 1 for boolean, 8 for char, enough
+/// for the largest value of an enumeration or a subrange (two's complement
+/// for a subrange with negative values).
+unsigned bitPackedWidth(Type *T);
+/// Are values of ordinal type T sign-extended from bitPackedWidth bits?
+bool bitPackedSigned(Type *T);
 
 /// ^T. The pointee may be declared later in the same type section, so it is
 /// filled in once known.

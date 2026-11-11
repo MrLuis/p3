@@ -138,7 +138,9 @@ begin
   case t^.kind of
     tyArray:
       begin
-        if t^.isPackedArray then
+        if t^.isBitPackedArray then
+          bufAdd(outBuf, 'bitpacked ')
+        else if t^.isPackedArray then
           bufAdd(outBuf, 'packed ');
         bufAdd(outBuf, 'array [');
         bufAddTypeName(outBuf, t^.indexType);
@@ -147,7 +149,10 @@ begin
       end;
     tyRecord:
       begin
-        bufAdd(outBuf, 'record');
+        if t^.isBitPackedRecord then
+          bufAdd(outBuf, 'bitpacked record')
+        else
+          bufAdd(outBuf, 'record');
         for i := 0 to t^.allFields.count - 1 do
         begin
           f := PDecl(listGet(t^.allFields, i));
@@ -412,7 +417,9 @@ begin
       end;
     tsArray:
       begin
-        if ts^.arrPacked then
+        if ts^.arrBitPacked then
+          line('ArrayTypeSpec bitpacked')
+        else if ts^.arrPacked then
           line('ArrayTypeSpec packed')
         else
           line('ArrayTypeSpec');
@@ -425,7 +432,9 @@ begin
       end;
     tsRecord:
       begin
-        if ts^.recPacked then
+        if ts^.recBitPacked then
+          line('RecordTypeSpec bitpacked')
+        else if ts^.recPacked then
           line('RecordTypeSpec packed')
         else
           line('RecordTypeSpec');

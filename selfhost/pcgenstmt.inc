@@ -510,6 +510,11 @@ begin
     exit;
   end;
   v := convertForAssign(visitExpr(value), value^.typ, tt, value^.b);
+  if isBitPackedComponent(target) then
+  begin
+    bitStore(target, v);
+    exit;
+  end;
   storeValue(emitAddress(target), v, tt);
 end;
 
@@ -1162,6 +1167,8 @@ var
   l: TForInLoop;
   member: PIRBlock;
   dyn: boolean;
+  tmp: TV;
+  br: TBitRef;
 begin
   c := s^.inColl;
   elem := s^.inElemType;
@@ -1172,6 +1179,21 @@ begin
       begin
         base := emitAddress(c);
         bd := getOrdinalBounds(c^.typ^.indexType);
+        if hasBitElements(c^.typ) then { each element's bits, copied }
+        begin
+          tmp := irCreateTemp(memType(c^.typ^.elementType), 'in.bits');
+          forInLoopBegin(l, i64c(0), i64c(bd.hi - bd.lo));
+          br.base := base;
+          br.bit := irBin('mul', l.i, i64c(bitPackedWidth(c^.typ^.elementType)), 'bit');
+          br.hasBit := true;
+          br.constBit := 0;
+          br.size := sizeOf_(c^.typ);
+          br.t := c^.typ^.elementType;
+          storeScalar(tmp, bitLoadRef(br), br.t);
+          forInIteration(s, tmp);
+          forInLoopEnd(l);
+          exit;
+        end;
         forInLoopBegin(l, i64c(0), i64c(bd.hi - bd.lo));
         forInIteration(s, irGEP2(memType(c^.typ), base, i64c(0), l.i, 'in.elem'));
         forInLoopEnd(l);

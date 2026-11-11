@@ -1271,6 +1271,8 @@ function isVariableReference(e: PNode): boolean;
 var
   d: PDecl;
 begin
+  if isBitPackedComponent(e) then { assignable, but without an address }
+    exit(false);
   case e^.kind of
     nkNameRef:
       begin
@@ -1298,6 +1300,52 @@ begin
   else
     isVariableReference := false;
   end;
+end;
+
+{ e (a bit field) where an address is needed }
+procedure diagBitFieldAddress(e: PNode);
+begin
+  ms('the elements and fields of bitpacked arrays and records have no address ' +
+     '(they cannot be passed as ''var'' parameters or used with ''@'')');
+  errR(e^.b, nodeRange(e));
+end;
+
+{ Does t have a bitpacked part (itself, an element, a field)? }
+function containsBitPacked(t: PType): boolean;
+var
+  i: longint;
+  f: PDecl;
+begin
+  if t^.kind = tyArray then
+    exit(t^.isBitPackedArray or containsBitPacked(t^.elementType));
+  if t^.kind = tyRecord then
+  begin
+    if t^.isBitPackedRecord then
+      exit(true);
+    for i := 0 to t^.allFields.count - 1 do
+    begin
+      f := PDecl(listGet(t^.allFields, i));
+      if (f^.fieldType <> nil) and containsBitPacked(f^.fieldType) then
+        exit(true);
+    end;
+  end;
+  containsBitPacked := false;
+end;
+
+{ Does a value of the non-ordinal type t need no alignment (it can sit at
+  any byte of a bitpacked record)? }
+function isByteAligned(t: PType): boolean;
+begin
+  if isOrdinal(t) then { as an array's element: stored in a byte? }
+    exit((getBase(t)^.kind in [tyBoolean, tyChar]) or
+         ((t^.kind = tyInteger) and (t^.bits = 8)));
+  if t^.kind = tyShortString then
+    exit(true);
+  if t^.kind = tyRecord then
+    exit(t^.isBitPackedRecord);
+  if t^.kind = tyArray then
+    exit(hasBitElements(t) or isByteAligned(t^.elementType));
+  isByteAligned := false;
 end;
 
 { Is e a variable a type helper's method can change (not a method's
@@ -2023,7 +2071,10 @@ begin
         { array [A, B] of E = array [A] of array [B] of E }
         t := elem;
         for i := indexes.count - 1 downto 0 do
+        begin
           t := newArrayType(PType(listGet(indexes, i)), t, ts^.arrPacked);
+          t^.isBitPackedArray := ts^.arrBitPacked;
+        end;
         buildType := t;
       end;
     tsPointer:
@@ -2144,7 +2195,24 @@ begin
         mapInit(seen);
         if not resolveFieldList(ts^.fields, all, seen) then
           exit;
-        buildType := newRecordType(ts^.fields, all, ts^.recPacked);
+        t := newRecordType(ts^.fields, all, ts^.recPacked);
+        if ts^.recBitPacked then
+        begin
+          t^.isBitPackedRecord := true;
+          for i := 0 to all.count - 1 do { ordinals, and what needs no alignment }
+          begin
+            cd := PDecl(listGet(all, i));
+            if (cd^.fieldType <> nil) and not isError(cd^.fieldType) and
+               not isOrdinal(cd^.fieldType) and not isByteAligned(cd^.fieldType) then
+            begin
+              ms('a field of type ');
+              maT(cd^.fieldType);
+              ma(' in a bitpacked record is not supported yet');
+              errR(cd^.loc, identRange(cd^.ident));
+            end;
+          end;
+        end;
+        buildType := t;
       end;
     tsClass:
       begin
@@ -4733,6 +4801,8 @@ var
   c: TConstant;
 begin
   absoluteRootOf := nil;
+  if isBitPackedComponent(e) then
+    exit;
   case e^.kind of
     nkNameRef:
       if (e^.refDecl <> nil) and (e^.refDecl^.kind = dkVar) and (e^.refWith = nil) and
@@ -4866,7 +4936,16 @@ begin
       constInitWhat := 'initial value'
     else
       constInitWhat := 'typed constant value';
-    if not isError(v^.varType) and checkConstInit(v^.init, v^.varType, folded) then
+    if containsBitPacked(v^.varType) then
+    begin
+      if v^.isInitVar then
+        ms('initialized variables')
+      else
+        ms('typed constants');
+      ma(' of bitpacked types are not supported yet');
+      errR(v^.init^.b, nodeRange(v^.init));
+    end
+    else if not isError(v^.varType) and checkConstInit(v^.init, v^.varType, folded) then
       v^.initValue := folded;
     constInitWhat := 'typed constant value';
   end;
@@ -5889,8 +5968,8 @@ var
 begin
   if a = oa then
     exit(true);
-  if a^.kind = tyArray then
-    exit(a^.elementType = oa^.openElement);
+  if a^.kind = tyArray then { (not a bitpacked layout) }
+    exit((a^.elementType = oa^.openElement) and not hasBitElements(a));
   if a^.kind = tyDynArray then
     exit(a^.dynElement = oa^.openElement);
   fitsOpenArray := (oa^.openElement^.kind = tyChar) and
@@ -6718,6 +6797,8 @@ begin
       maT(formal);
       errR(arg^.b, nodeRange(arg));
     end
+    else if (p^.varKind = vkVarParam) and isBitPackedComponent(arg) then
+      diagBitFieldAddress(arg)
     else if (p^.varKind = vkVarParam) and not isVariableReference(arg) then
     begin
       ms('argument for ''' + paramKeyword(p) + ''' parameter ''');
@@ -6959,7 +7040,9 @@ begin
     target := arg;
     if slice then
       target := PNode(listGet(arg^.args, 0));
-    if not isVariableReference(target) then
+    if isBitPackedComponent(target) then
+      diagBitFieldAddress(target)
+    else if not isVariableReference(target) then
       mustBeVariable
     else
       checkModifiable(target);
@@ -7092,6 +7175,11 @@ begin
       continue;
     if p^.varKind = vkVarParam then
     begin
+      if isBitPackedComponent(arg) then
+      begin
+        diagBitFieldAddress(arg);
+        continue;
+      end;
       if not isVariableReference(arg) then
       begin
         ms('argument for ''' + paramKeyword(p) + ''' parameter ''');

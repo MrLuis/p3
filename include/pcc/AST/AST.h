@@ -954,6 +954,7 @@ class ArrayTypeSpec final : public TypeSpec {
   llvm::ArrayRef<TypeSpec *> Indexes;
   TypeSpec *Element;
   bool Packed;
+  bool BitPacked = false; ///< bitpacked (Free Pascal)
 
 public:
   ArrayTypeSpec(SourceRange R, llvm::ArrayRef<TypeSpec *> Indexes,
@@ -963,6 +964,8 @@ public:
   llvm::ArrayRef<TypeSpec *> getIndexes() const { return Indexes; }
   TypeSpec *getElement() const { return Element; }
   bool isPacked() const { return Packed; }
+  bool isBitPacked() const { return BitPacked; }
+  void setBitPacked() { BitPacked = true; }
   static bool classof(const TypeSpec *T) { return T->getKind() == TS_Array; }
 };
 
@@ -993,6 +996,7 @@ struct VariantPart {
 class RecordTypeSpec final : public TypeSpec {
   FieldList *Fields;
   bool Packed;
+  bool BitPacked = false; ///< bitpacked (Free Pascal)
   /// Advanced records (objfpc, {$modeswitch advancedrecords}): methods,
   /// class operators and properties, in source order.
   llvm::ArrayRef<Decl *> Members;
@@ -1002,6 +1006,8 @@ public:
       : TypeSpec(TS_Record, R), Fields(Fields), Packed(Packed) {}
   FieldList *getFields() const { return Fields; }
   bool isPacked() const { return Packed; }
+  bool isBitPacked() const { return BitPacked; }
+  void setBitPacked() { BitPacked = true; }
   llvm::ArrayRef<Decl *> getMembers() const { return Members; }
   void setMembers(llvm::ArrayRef<Decl *> M) { Members = M; }
   static bool classof(const TypeSpec *T) { return T->getKind() == TS_Record; }
@@ -1789,6 +1795,10 @@ public:
 inline FieldDecl *FieldExpr::getFieldDecl() const {
   return llvm::dyn_cast_or_null<FieldDecl>(Member);
 }
+
+/// Is E (checked) an ordinal field or element of a bitpacked record or array
+/// (Free Pascal): a part of a byte, assignable but without an address?
+bool isBitPackedComponent(Expr *E);
 
 } // namespace pcc
 
