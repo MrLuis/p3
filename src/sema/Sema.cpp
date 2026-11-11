@@ -204,6 +204,7 @@ class Checker : public StmtVisitor<Checker>,
       Ty("nativeint", Ctx.getInt64Type());
       Ty("cardinal", Ctx.getCardinalType());
       Ty("longword", Ctx.getCardinalType());
+      Ty("dword", Ctx.getCardinalType());
       Ty("byte", Ctx.getByteType());
       Ty("word", Ctx.getWordType());
       Ty("shortint", Ctx.getShortIntType());
@@ -446,6 +447,7 @@ class Checker : public StmtVisitor<Checker>,
     auto *Rec = Ctx.create<RecordType>(FL, Ctx.copyArray<FieldDecl *>(All),
                                        /*Packed=*/true);
     Rec->setDeclName("TGUID");
+    TGuidTy = Rec;
     Standard.insert("tguid", Ctx.create<TypeDecl>(SourceLocation(),
                                                   memberName("TGUID"), Rec));
     auto *PGuid = Ctx.create<PointerType>(Rec);
@@ -456,6 +458,7 @@ class Checker : public StmtVisitor<Checker>,
 
   Type *ArrayOfConstTy = nullptr;
   Type *TMethodTy = nullptr;
+  RecordType *TGuidTy = nullptr; ///< the predeclared TGUID
   bool AddrOfWantsCode = false; ///< @TFoo.M for a pointer: its code address
 
   /// TMethod = record Code, Data: pointer; end (objfpc).
@@ -3544,6 +3547,8 @@ class Checker : public StmtVisitor<Checker>,
       return false;
     }
 
+    if (T == TGuidTy) // '{01234567-89AB-CDEF-0123-456789ABCDEF}'
+      return checkGuidInit(Init, Folded);
     if (isMethodPointer(T) || T->isDynArray()) { // only nil
       if (llvm::isa<NilExpr>(Init)) {
         check(Init);
@@ -3586,6 +3591,71 @@ class Checker : public StmtVisitor<Checker>,
       }
     }
     Folded = C->Value;
+    return true;
+  }
+
+  /// A TGUID typed constant (or initialized variable) from a string
+  /// constant, as in Free Pascal: '{XXXXXXXX-XXXX-XXXX-XXXX-XXXXXXXXXXXX}'
+  /// (hexadecimal digits) or '' (all zeros). Folded receives its 16 bytes
+  /// (Data1, Data2 and Data3 little-endian, then Data4).
+  bool checkGuidInit(Expr *Init, ConstValue &Folded) {
+    auto C = evaluateConstant(Init, ConstInitWhat);
+    if (!C)
+      return false;
+    bool IsString = C->Value.K == ConstValue::String;
+    bool IsChar = C->Value.K == ConstValue::Ordinal && C->Ty->getBase()->isChar();
+    if (!IsString && !IsChar) {
+      Diags.error(Init->getBeginLoc(),
+                  "cannot initialize " + quoted(TGuidTy) +
+                      " with a value of type " + quoted(C->Ty),
+                  {Init->getRange()});
+      return false;
+    }
+    std::string Bytes(16, '\0');
+    if (IsString && !C->Value.Str.empty()) {
+      llvm::StringRef S = C->Value.Str;
+      auto Hex = [&](size_t Pos, size_t Digits, uint64_t &V) {
+        V = 0;
+        for (size_t I = Pos; I < Pos + Digits; ++I) {
+          if (!llvm::isHexDigit(S[I]))
+            return false;
+          V = V << 4 | llvm::hexDigitValue(S[I]);
+        }
+        return true;
+      };
+      // Groups: position, digits, first byte, bytes, little-endian
+      struct Group { size_t Pos, Digits, Byte; bool LE; };
+      static const Group Groups[] = {{1, 8, 0, true},   {10, 4, 4, true},
+                                     {15, 4, 6, true},  {20, 4, 8, false},
+                                     {25, 12, 10, false}};
+      bool OK = S.size() == 38 && S[0] == '{' && S[37] == '}' &&
+                S[9] == '-' && S[14] == '-' && S[19] == '-' && S[24] == '-';
+      for (const Group &G : Groups) {
+        uint64_t V;
+        if (!OK || !(OK = Hex(G.Pos, G.Digits, V)))
+          break;
+        size_t N = G.Digits / 2;
+        for (size_t I = 0; I < N; ++I)
+          Bytes[G.Byte + (G.LE ? I : N - 1 - I)] =
+              static_cast<char>((V >> (8 * I)) & 0xff);
+      }
+      if (!OK) {
+        Diags.error(Init->getBeginLoc(),
+                    "improper GUID syntax: expected "
+                    "'{XXXXXXXX-XXXX-XXXX-XXXX-XXXXXXXXXXXX}' (hexadecimal "
+                    "digits) or ''",
+                    {Init->getRange()});
+        return false;
+      }
+    } else if (IsChar) {
+      Diags.error(Init->getBeginLoc(),
+                  "improper GUID syntax: expected "
+                  "'{XXXXXXXX-XXXX-XXXX-XXXX-XXXXXXXXXXXX}' (hexadecimal "
+                  "digits) or ''",
+                  {Init->getRange()});
+      return false;
+    }
+    Folded = ConstValue::string(Ctx.getStrings().intern(Bytes));
     return true;
   }
 

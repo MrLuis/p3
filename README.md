@@ -228,7 +228,10 @@ type
   error (use a type helper). `TGUID` and `PGUID` are predeclared (tp and
   objfpc), as in Free Pascal's system unit: a 16-byte packed record with
   the variants `Data1..Data4`, `D1..D4` and RFC 4122's `time_low` ...
-  `node`.
+  `node`. A `TGUID` typed constant or initialized variable takes a GUID
+  string, as in Free Pascal: `const IID: TGUID =
+  '{01234567-89AB-CDEF-0123-456789ABCDEF}';` (or `''`, all zeros), also
+  inside arrays and records. `DWord` is `longword`.
 
 ```pascal
 {$modeswitch advancedrecords}

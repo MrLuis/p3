@@ -1599,6 +1599,50 @@ begin
   bufFree(bytes);
 end;
 
+{ The constant of memory type ty whose bytes are those of s from offset
+  (integers little-endian; bytes past the end are 0). }
+function bytesConstant(s: PName; offset: int64; ty: PIRType): TV;
+var
+  v, i: int64;
+  b: longint;
+  elems: TPtrList;
+begin
+  case ty^.kind of
+    ikInt:
+      begin
+        v := 0;
+        for i := ty^.bits div 8 - 1 downto 0 do
+        begin
+          if offset + i < s^.len then
+            b := ord(s^.chars^[offset + i])
+          else
+            b := 0;
+          v := (v shl 8) or b;
+        end;
+        bytesConstant := irConstInt(ty, v);
+      end;
+    ikArray:
+      begin
+        listInit(elems);
+        for i := 0 to ty^.count - 1 do
+          listAdd(elems, irBox(bytesConstant(s, offset + i * ty^.elem^.size, ty^.elem)));
+        bytesConstant := irConstArray(ty, elems);
+        listFree(elems);
+      end;
+    ikStruct:
+      begin
+        listInit(elems);
+        for i := 0 to ty^.fields.count - 1 do
+          listAdd(elems, irBox(bytesConstant(s, offset + ty^.offsets^[i],
+                                             PIRType(listGet(ty^.fields, i)))));
+        bytesConstant := irConstStruct(ty, elems);
+        listFree(elems);
+      end;
+  else
+    bytesConstant := irZero(ty);
+  end;
+end;
+
 function scalarConstant(const c: TConstValue; t: PType; ty: PIRType): TV;
 var
   x: double;
@@ -1628,6 +1672,8 @@ begin
     ckString:
       if t^.kind = tyAnsiString then
         scalarConstant := getAnsiConstant(c.strVal^.chars, 0, c.strVal^.len)
+      else if t^.kind = tyRecord then { a TGUID from its string: its bytes }
+        scalarConstant := bytesConstant(c.strVal, 0, ty)
       else
         scalarConstant := stringInit(c.strVal^.chars, 0, c.strVal^.len, ty, t);
   else

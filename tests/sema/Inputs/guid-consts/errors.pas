@@ -1,0 +1,14 @@
+program errors;
+const
+  Good: TGUID = '{01234567-89ab-CDEF-0123-456789ABCDEF}';
+  Short: TGUID = '{0123456-89AB-CDEF-0123-456789ABCDEF}';
+  NoBraces: TGUID = '01234567-89AB-CDEF-0123-456789ABCDEF';
+  NotHex: TGUID = '{01234567-89AB-CDEF-0123-456789ABCDEG}';
+  Spaces: TGUID = ' {01234567-89AB-CDEF-0123-456789ABCDEF}';
+  OneChar: TGUID = 'x';
+  Number: TGUID = 42;
+  W: DWord = 4294967295;
+  TooBig: DWord = -1;
+begin
+  writeln(Good.D1, W);
+end.

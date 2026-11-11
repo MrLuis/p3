@@ -103,6 +103,7 @@ var
     gotos, so none can leave a try statement. }
   exceptionType: PType;
   arrayOfConstT, pcharT, tmethodT: PType;
+  tguidT: PType; { the predeclared TGUID }
   addrOfWantsCode: boolean; { @TFoo.M for a pointer: its code address }
   allowSlice: boolean;
   { COM interfaces (objfpc): IUnknown (= IInterface), their root, and
@@ -914,6 +915,7 @@ begin
   fl^.variant := vp;
   rec := newRecordType(fl, all, true);
   setDeclName(rec, intern('TGUID'));
+  tguidT := rec;
   d := newDecl(dkType, memberIdent('TGUID'), noLoc);
   d^.declType := rec;
   scopeInsert(standard, d^.ident.name, d);
@@ -1059,6 +1061,7 @@ begin
     stdType('nativeint', tyInt64T);
     stdType('cardinal', tyCardinalT);
     stdType('longword', tyCardinalT);
+    stdType('dword', tyCardinalT);
     stdType('byte', tyByteT);
     stdType('word', tyWordT);
     stdType('shortint', tyShortIntT);
@@ -4755,6 +4758,90 @@ end;
 { Checks the initial value of a typed constant of type t: a constant
   expression (folded into folded) or, for arrays and records, an aggregate
   whose elements are checked recursively. }
+{ A TGUID typed constant (or initialized variable) from a string constant,
+  as in Free Pascal: a GUID in braces, XXXXXXXX-XXXX-XXXX-XXXX-XXXXXXXXXXXX
+  (hexadecimal digits), or '' (all zeros). folded receives its 16 bytes
+  (Data1, Data2 and Data3 little-endian, then Data4). }
+function checkGuidInit(init: PNode; var folded: TConstValue): boolean;
+const
+  groupPos: array[0..4] of longint = (1, 10, 15, 20, 25);
+  groupDigits: array[0..4] of longint = (8, 4, 4, 4, 12);
+  groupByte: array[0..4] of longint = (0, 4, 6, 8, 10);
+  groupLE: array[0..4] of boolean = (true, true, true, false, false);
+var
+  c: TConstant;
+  isStr, isCh, ok: boolean;
+  bytes: array[0..15] of char;
+  s: PCharArray;
+  g, i, n, h: longint;
+  v: int64;
+  ch: char;
+begin
+  checkGuidInit := false;
+  if not evaluateConstant(init, constInitWhat, c) then
+    exit;
+  isStr := c.value.kind = ckString;
+  isCh := (c.value.kind = ckOrdinal) and (getBase(c.ty)^.kind = tyChar);
+  if not isStr and not isCh then
+  begin
+    ms('cannot initialize ');
+    maT(tguidT);
+    ma(' with a value of type ');
+    maT(c.ty);
+    errR(init^.b, nodeRange(init));
+    exit;
+  end;
+  for i := 0 to 15 do
+    bytes[i] := #0;
+  ok := isStr;
+  if isStr and (c.value.strVal^.len > 0) then
+  begin
+    s := c.value.strVal^.chars;
+    ok := (c.value.strVal^.len = 38) and (s^[0] = '{') and (s^[37] = '}') and
+          (s^[9] = '-') and (s^[14] = '-') and (s^[19] = '-') and (s^[24] = '-');
+    g := 0;
+    while ok and (g <= 4) do
+    begin
+      v := 0;
+      for i := groupPos[g] to groupPos[g] + groupDigits[g] - 1 do
+      begin
+        ch := s^[i];
+        if (ch >= '0') and (ch <= '9') then
+          h := ord(ch) - ord('0')
+        else if (ch >= 'a') and (ch <= 'f') then
+          h := ord(ch) - ord('a') + 10
+        else if (ch >= 'A') and (ch <= 'F') then
+          h := ord(ch) - ord('A') + 10
+        else
+        begin
+          ok := false;
+          break;
+        end;
+        v := (v shl 4) or h;
+      end;
+      if ok then
+      begin
+        n := groupDigits[g] div 2;
+        for i := 0 to n - 1 do
+          if groupLE[g] then
+            bytes[groupByte[g] + i] := chr((v shr (8 * i)) and 255)
+          else
+            bytes[groupByte[g] + n - 1 - i] := chr((v shr (8 * i)) and 255);
+      end;
+      g := g + 1;
+    end;
+  end;
+  if not ok then
+  begin
+    ms('improper GUID syntax: expected ' +
+       '''{XXXXXXXX-XXXX-XXXX-XXXX-XXXXXXXXXXXX}'' (hexadecimal digits) or ''''');
+    errR(init^.b, nodeRange(init));
+    exit;
+  end;
+  folded := constString(internChars(PCharArray(@bytes), 0, 16));
+  checkGuidInit := true;
+end;
+
 function checkConstInit(init: PNode; t: PType; var folded: TConstValue): boolean;
 var
   ignoredT: PType;
@@ -4855,6 +4942,8 @@ begin
     exit;
   end;
 
+  if t = tguidT then { a GUID string }
+    exit(checkGuidInit(init, folded));
   if isMethodPointer(t) or (t^.kind = tyDynArray) then { only nil }
   begin
     if init^.kind = nkNil then

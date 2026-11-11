@@ -2249,9 +2249,43 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
     case ConstValue::String:
       if (T->isAnsiString())
         return getAnsiConstant(C.Str);
+      if (T->isRecord()) // a TGUID from its string: its bytes
+        return bytesConstant(C.Str, 0, Ty);
       return initializerForString(C.Str.str(), Ty, T);
     case ConstValue::None:
       break;
+    }
+    return llvm::Constant::getNullValue(Ty);
+  }
+
+  /// The constant of memory type Ty whose bytes are Bytes from Offset
+  /// (integers little-endian; bytes past the end are 0).
+  llvm::Constant *bytesConstant(llvm::StringRef Bytes, uint64_t Offset,
+                                llvm::Type *Ty) {
+    const llvm::DataLayout &DL = M.getDataLayout();
+    if (auto *IT = llvm::dyn_cast<llvm::IntegerType>(Ty)) {
+      uint64_t V = 0;
+      for (uint64_t I = IT->getBitWidth() / 8; I-- > 0;)
+        V = V << 8 | (Offset + I < Bytes.size()
+                          ? static_cast<uint8_t>(Bytes[Offset + I])
+                          : 0);
+      return llvm::ConstantInt::get(IT, V);
+    }
+    if (auto *AT = llvm::dyn_cast<llvm::ArrayType>(Ty)) {
+      uint64_t Size = DL.getTypeAllocSize(AT->getElementType());
+      llvm::SmallVector<llvm::Constant *, 16> Values;
+      for (uint64_t I = 0; I < AT->getNumElements(); ++I)
+        Values.push_back(
+            bytesConstant(Bytes, Offset + I * Size, AT->getElementType()));
+      return llvm::ConstantArray::get(AT, Values);
+    }
+    if (auto *ST = llvm::dyn_cast<llvm::StructType>(Ty)) {
+      const llvm::StructLayout *SL = DL.getStructLayout(ST);
+      llvm::SmallVector<llvm::Constant *, 16> Values;
+      for (unsigned I = 0; I < ST->getNumElements(); ++I)
+        Values.push_back(bytesConstant(Bytes, Offset + SL->getElementOffset(I),
+                                       ST->getElementType(I)));
+      return llvm::ConstantStruct::get(ST, Values);
     }
     return llvm::Constant::getNullValue(Ty);
   }
