@@ -22,6 +22,16 @@ function parseInput(fid: longint; mode: TLangMode; parseUnits: boolean;
   its tokens (an ordinary routine, named as g). }
 function reparseGeneric(g: PDecl): PDecl;
 
+type
+  { declared(NAME) in $IF: the used units' names (their own, and those of
+    their interfaces) are added to names, given the units of the uses
+    clauses read since the last call and the unit being parsed (if any) }
+  TUsedUnitNames = procedure(const usesList: TPtrList; selfName: PName;
+                             var names: TPtrList);
+
+var
+  usedUnitNames: TUsedUnitNames; { set by the driver }
+
 implementation
 
 type
@@ -62,6 +72,10 @@ var
     (genericTypeParams receives them) }
   parsingGeneric: boolean;
   genericTypeParams: TPtrList;
+  { declared(NAME): the units of the uses clauses read (of PIdent), not yet
+    given to usedUnitNames; the unit being parsed }
+  pendingUses: TPtrList;
+  unitName: PName;
 
 { --- Token helpers --- }
 
@@ -87,12 +101,37 @@ begin
   end;
 end;
 
+procedure declareName(const name: TIdent);
+begin
+  if identValid(name) then
+    lexDeclareName(lx, name.name, false);
+end;
+
+{ before declared(NAME): the names of the units used so far }
+procedure loadPendingUses(var l: TLexer);
+var
+  usesList, names: TPtrList;
+  i: longint;
+begin
+  if (pendingUses.count = 0) or not assigned(usedUnitNames) then
+    exit;
+  usesList := pendingUses;
+  listInit(pendingUses);
+  listInit(names);
+  usedUnitNames(usesList, unitName, names);
+  for i := 0 to names.count - 1 do
+    lexDeclareName(l, PName(listGet(names, i)), true);
+end;
+
 procedure startParser(fid: longint; m: TLangMode);
 begin
   recordBodySkipped := false;
   recording := nil;
   replay := nil;
   parsingGeneric := false;
+  listInit(pendingUses);
+  unitName := nil;
+  beforeDeclared := @loadPendingUses;
   mode := m;
   lexInit(lx, fid, m);
   hasPeek := false;
@@ -442,10 +481,16 @@ function parseActualParams(var args: TPtrList; allowFormat: boolean): boolean; f
 { --- Program and units --- }
 
 function parseUsesClause(var usesList: TPtrList): boolean;
+var
+  listed: boolean;
+  i: longint;
 begin
   consumeToken; { 'uses' }
-  if not parseIdentList(usesList, 'unit name') or
-     not expect(tkSemi, 'after uses clause') then
+  listed := parseIdentList(usesList, 'unit name');
+  { declared(NAME) right after the clause sees the units' names }
+  for i := 0 to usesList.count - 1 do
+    listAdd(pendingUses, listGet(usesList, i));
+  if not listed or not expect(tkSemi, 'after uses clause') then
   begin
     skipUntil([tkSemi, tkKwBegin, tkKwVar, tkKwConst, tkKwType,
                tkKwProcedure, tkKwFunction]);
@@ -579,6 +624,7 @@ begin
   if not expectIdentifier(name, 'unit name') or
      not expect(tkSemi, 'after unit name') then
     exit;
+  unitName := name.name;
   if not expect(tkKwInterface, 'after unit heading') then
     exit;
   listInit(ifaceUses);
@@ -622,9 +668,52 @@ begin
 end;
 
 function parseUnit(fid: longint; mode: TLangMode): PDecl;
+var
+  savedLx: TLexer;
+  savedMode: TLangMode;
+  savedTok, savedPeek: TToken;
+  savedHasPeek, savedSkipped, savedGeneric: boolean;
+  savedPrev: TLoc;
+  savedNesting, savedPos: longint;
+  savedRec: PPtrList;
+  savedReplay: pointer;
+  savedTypeParams, savedUses: TPtrList;
+  savedUnit: PName;
 begin
+  { a used unit may be loaded while another file is parsed (declared(NAME)
+    in $IF): the parser's state is kept }
+  savedLx := lx;
+  savedMode := mode;
+  savedTok := tok;
+  savedPeek := peekTok;
+  savedHasPeek := hasPeek;
+  savedSkipped := recordBodySkipped;
+  savedGeneric := parsingGeneric;
+  savedPrev := prevTokEnd;
+  savedNesting := nesting;
+  savedPos := replayPos;
+  savedRec := recording;
+  savedReplay := replay;
+  savedTypeParams := genericTypeParams;
+  savedUses := pendingUses;
+  savedUnit := unitName;
   startParser(fid, mode);
   parseUnit := parseUnitHere;
+  lx := savedLx;
+  mode := savedMode;
+  tok := savedTok;
+  peekTok := savedPeek;
+  hasPeek := savedHasPeek;
+  recordBodySkipped := savedSkipped;
+  parsingGeneric := savedGeneric;
+  prevTokEnd := savedPrev;
+  nesting := savedNesting;
+  replayPos := savedPos;
+  recording := savedRec;
+  replay := savedReplay;
+  genericTypeParams := savedTypeParams;
+  pendingUses := savedUses;
+  unitName := savedUnit;
 end;
 
 function parseInput(fid: longint; mode: TLangMode; parseUnits: boolean;
@@ -718,6 +807,8 @@ begin
         not startsGeneric and not diagShouldStop do
   begin
     name := makeIdentifier(tok);
+    if not inMembers then
+      declareName(name);
     consumeToken;
     if (tok.kind = tkColon) and (mode <> lmISO) then
     begin
@@ -794,6 +885,8 @@ begin
         not startsGeneric and not diagShouldStop do
   begin
     name := makeIdentifier(tok);
+    if not inMembers then
+      declareName(name);
     consumeToken;
     ts := nil;
     if expect(tkEqual, 'after type name') then
@@ -838,6 +931,7 @@ end;
 
 procedure parseVarPart(var decls: TPtrList);
 var
+  listed: boolean;
   hf: longint;
   hm: PName;
   names: TPtrList;
@@ -857,8 +951,10 @@ begin
   begin
     listInit(names);
     ts := nil;
-    if parseIdentList(names, 'variable name') and
-       expect(tkColon, 'after variable name') then
+    listed := parseIdentList(names, 'variable name');
+    for i := 0 to names.count - 1 do
+      declareName(PIdent(listGet(names, i))^);
+    if listed and expect(tkColon, 'after variable name') then
       ts := parseType;
     { Turbo/FPC: an overlay  x: T absolute y;  (one name only); absolute
       is not a reserved word }
@@ -996,6 +1092,7 @@ var
   kind: string;
   loc: TLoc;
   name, clsName, typeParam: TIdent;
+  i: longint;
   params, outerNames, typeParams: TPtrList;
   resultSpec: PTypeSpec;
   externalName: PName;
@@ -1035,6 +1132,8 @@ begin
       end;
     end;
   end;
+  if identValid(name) and not identValid(clsName) then
+    declareName(name); { (declared(NAME); a method's is its class's) }
   if parsingGeneric and identValid(name) and (tok.kind = tkLess) then { <T, U> }
   begin
     consumeToken;
@@ -1212,7 +1311,12 @@ begin
     exit;
   end;
 
+  { declared(NAME): its parameters and declarations in a scope of its own }
+  lexPushNames(lx);
+  for i := 0 to params.count - 1 do
+    declareName(PDecl(listGet(params, i))^.ident);
   body := parseBlock;
+  lexPopNames(lx);
   if not expect(tkSemi, 'after ' + kind + ' body') then
   begin
     skipUntil([tkSemi, tkKwBegin, tkKwProcedure, tkKwFunction]);
@@ -1475,6 +1579,7 @@ end;
                  typeIdent ";" block ";" .        (after "class") }
 function parseOperatorDecl(headingOnly: boolean): PDecl;
 var
+  i: longint;
   loc: TLoc;
   clsName, name: TIdent;
   params: TPtrList;
@@ -1519,7 +1624,11 @@ begin
                makeRange(clsName.loc, identRange(name).e));
     exit;
   end;
+  lexPushNames(lx);
+  for i := 0 to params.count - 1 do
+    declareName(PDecl(listGet(params, i))^.ident);
   body := parseBlock;
+  lexPopNames(lx);
   if not expect(tkSemi, 'after operator body') then
   begin
     skipUntil([tkSemi, tkKwBegin, tkKwProcedure, tkKwFunction]);
@@ -2668,6 +2777,8 @@ var
   names: TPtrList;
   ts: PTypeSpec;
   lo, hi: PNode;
+  listed: boolean;
+  i: longint;
 begin
   parseSimpleType := nil;
   start := tok.loc;
@@ -2675,7 +2786,10 @@ begin
   begin
     consumeToken;
     listInit(names);
-    if not parseIdentList(names, 'enumeration value name') then
+    listed := parseIdentList(names, 'enumeration value name');
+    for i := 0 to names.count - 1 do
+      declareName(PIdent(listGet(names, i))^);
+    if not listed then
       exit;
     if not expect(tkRParen, 'after enumeration values') then
       exit;

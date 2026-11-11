@@ -574,6 +574,10 @@ var
   units: TPtrList;      { of PDecl, dependencies first }
   unitsDone: TIntMap;   { name id -> PDecl }
   inProgress: TIntMap;  { name id -> non-nil while being loaded }
+  { uses that failed to load, by the location of the name: not tried again
+    when the units are loaded once more, after an early load for
+    declared(NAME) }
+  failedUses: TIntMap;
 
 var
   selfUnit: PName;      { the unit being compiled, if any: using it is circular }
@@ -631,7 +635,8 @@ var
   i, b, x, fid: longint;
   unitDecl: PDecl;
 begin
-  if mapHas(unitsDone, u.name^.id) or diagShouldStop then
+  if mapHas(unitsDone, u.name^.id) or (mapGet(failedUses, u.loc) <> nil) or
+     diagShouldStop then
     exit;
   if (mapGet(inProgress, u.name^.id) <> nil) or (u.name = selfUnit) then
   begin
@@ -666,6 +671,7 @@ begin
   if found = '' then
   begin
     mapPut(inProgress, u.name^.id, nil);
+    mapPut(failedUses, u.loc, u.name);
     { objfpc: Exception and its kin are predeclared, so uses sysutils works
       without the library }
     if (mode = lmObjFPC) and nameEquals(u.name, 'sysutils') then
@@ -678,6 +684,7 @@ begin
   end;
   if not smLoadFile(found, fid) then
   begin
+    mapPut(failedUses, u.loc, u.name);
     diagError(u.loc, 'cannot open unit file ''' + found + '''');
     exit;
   end;
@@ -685,6 +692,7 @@ begin
   if unitDecl = nil then
   begin
     mapPut(inProgress, u.name^.id, nil);
+    mapPut(failedUses, u.loc, u.name);
     exit;
   end;
   if unitDecl^.ident.name <> u.name then
@@ -713,6 +721,36 @@ begin
   end;
   for i := 0 to usesList.count - 1 do
     visitUnit(PIdent(listGet(usesList, i))^);
+end;
+
+{ declared(NAME) after a uses clause: the units' names and those of their
+  interfaces (an enumeration's values too). }
+procedure declaredUnitNames(const usesList: TPtrList; selfName: PName;
+                            var names: TPtrList);
+var
+  i, j, k: longint;
+  u: PIdent;
+  unitDecl, d: PDecl;
+begin
+  if selfName <> nil then
+    mapPut(inProgress, selfName^.id, selfName);
+  loadUnits(usesList);
+  for i := 0 to usesList.count - 1 do
+  begin
+    u := PIdent(listGet(usesList, i));
+    listAdd(names, u^.name);
+    unitDecl := PDecl(mapGet(unitsDone, u^.name^.id));
+    if unitDecl = nil then
+      continue;
+    for j := 0 to unitDecl^.iface^.decls.count - 1 do
+    begin
+      d := PDecl(listGet(unitDecl^.iface^.decls, j));
+      listAdd(names, d^.ident.name);
+      if (d^.kind = dkType) and (d^.typeSpec <> nil) and (d^.typeSpec^.kind = tsEnum) then
+        for k := 0 to d^.typeSpec^.enumNames.count - 1 do
+          listAdd(names, PIdent(listGet(d^.typeSpec^.enumNames, k))^.name);
+    end;
+  end;
 end;
 
 { llvm::sys::path::replace_extension(path, 'o') }
@@ -930,11 +968,14 @@ begin
   listInit(units);
   mapInit(unitsDone);
   mapInit(inProgress);
+  mapInit(failedUses);
   selfUnit := nil;
   initTypes;
   isUnit := false;
   if action <> actTokens then
   begin
+    lexSetPredeclared(standardNames(mode));
+    usedUnitNames := @declaredUnitNames;
     { a program or (Turbo/FPC) a unit, parsed once (a unit's body only
       when it is to be compiled) }
     prog := parseInput(fid, mode, (action <> actParseTree) and (action <> actAST),

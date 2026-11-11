@@ -48,6 +48,7 @@
 
 #include "llvm/ADT/SmallVector.h"
 
+#include <functional>
 #include <initializer_list>
 #include <optional>
 
@@ -89,6 +90,17 @@ class Parser {
   /// (GenericTypeParams receives them).
   bool ParsingGeneric = false;
   llvm::ArrayRef<Identifier> GenericTypeParams;
+  /// declared(NAME) in $IF: the used units' names (their own, and those of
+  /// their interfaces), given the units of the uses clauses read since the
+  /// last call and the unit being parsed (if any); set by the driver.
+  std::function<std::vector<std::string>(llvm::ArrayRef<Identifier>,
+                                         llvm::StringRef)>
+      UsedUnitNames;
+  llvm::SmallVector<Identifier, 4> PendingUses;
+  llvm::StringRef UnitName;
+  void loadPendingUses();
+  /// declared(NAME): Name is declared from here on.
+  void declareName(const Identifier &Name);
   void nextToken(Token &T);
   // The lexer's switches (a replayed generic's: as where it was declared).
   bool longStrings() const;
@@ -240,6 +252,13 @@ public:
   /// from its tokens (an ordinary routine, named as G).
   RoutineDecl *reparseGeneric(const RoutineDecl *G);
   Lexer &getLexer() { return Lex; }
+  ~Parser();
+  /// Makes declared(NAME) in $IF see the used units' declarations (F
+  /// loads the units named and returns their names).
+  void enableDeclared(
+      std::function<std::vector<std::string>(llvm::ArrayRef<Identifier>,
+                                             llvm::StringRef)>
+          F);
 
   /// Parses a whole program. Always returns a (possibly partial) AST;
   /// check the DiagnosticsEngine for errors.

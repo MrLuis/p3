@@ -78,9 +78,19 @@ type
     inlineOn: boolean; { $inline on (the default in objfpc mode) }
     macros: TIntMap;
     macroStack: TPtrList;
+    { declared(NAME) in $IF (Free Pascal): the names declared so far (name
+      id -> non-nil), which the parser adds, innermost scope last (a
+      routine's own); of PIntMap }
+    nameScopes: TPtrList;
   end;
 
+  PIntMap = ^TIntMap;
+  { called before declared(NAME) is evaluated: the parser declares the used
+    units' names (loading them when first needed) }
+  TBeforeDeclared = procedure(var lx: TLexer);
+
 var
+  beforeDeclared: TBeforeDeclared;
   { -I directories, searched for included files after the including
     file's directory. }
   includeDirs: TPtrList; { of PName }
@@ -89,6 +99,15 @@ var
 
 procedure lexInit(var lx: TLexer; fid: longint; mode: TLangMode);
 procedure lexNext(var lx: TLexer; var t: TToken);
+
+{ declared(NAME): name is declared from here on, in the current scope or
+  (global) the outermost one; a routine's in a scope of its own. }
+procedure lexDeclareName(var lx: TLexer; name: PName; global: boolean);
+procedure lexPushNames(var lx: TLexer);
+procedure lexPopNames(var lx: TLexer);
+{ the predeclared names (of PName, lower case), which declared(NAME) sees }
+procedure lexSetPredeclared(const names: TPtrList);
+function lexIsDeclared(var lx: TLexer; name: PName): boolean;
 
 { The text of t as written. }
 function tokenText(const t: TToken): string;
@@ -246,10 +265,63 @@ begin
   isDefined := mapGet(lx.defines, upperName(s)^.id) <> nil;
 end;
 
+var
+  predeclared: TIntMap;
+  hasPredeclared: boolean;
+
+procedure lexPushNames(var lx: TLexer);
+var
+  m: PIntMap;
+begin
+  m := PIntMap(arenaAlloc(sizeof(TIntMap)));
+  mapInit(m^);
+  listAdd(lx.nameScopes, m);
+end;
+
+procedure lexPopNames(var lx: TLexer);
+var
+  ignored: pointer;
+begin
+  if lx.nameScopes.count > 1 then
+    ignored := listPop(lx.nameScopes);
+end;
+
+procedure lexDeclareName(var lx: TLexer; name: PName; global: boolean);
+begin
+  if global then
+    mapPut(PIntMap(listGet(lx.nameScopes, 0))^, name^.id, name)
+  else
+    mapPut(PIntMap(listGet(lx.nameScopes, lx.nameScopes.count - 1))^, name^.id, name);
+end;
+
+procedure lexSetPredeclared(const names: TPtrList);
+var
+  i: longint;
+begin
+  mapInit(predeclared);
+  for i := 0 to names.count - 1 do
+    mapPut(predeclared, PName(listGet(names, i))^.id, listGet(names, i));
+  hasPredeclared := true;
+end;
+
+function lexIsDeclared(var lx: TLexer; name: PName): boolean;
+var
+  i: longint;
+begin
+  if assigned(beforeDeclared) then
+    beforeDeclared(lx);
+  for i := 0 to lx.nameScopes.count - 1 do
+    if mapGet(PIntMap(listGet(lx.nameScopes, i))^, name^.id) <> nil then
+      exit(true);
+  lexIsDeclared := hasPredeclared and (mapGet(predeclared, name^.id) <> nil);
+end;
+
 procedure lexInit(var lx: TLexer; fid: longint; mode: TLangMode);
 var
   i: longint;
 begin
+  listInit(lx.nameScopes);
+  lexPushNames(lx); { the file's own declarations (declared()) }
   if not keywordsReady then
     initKeywords;
   lx.mode := mode;
@@ -788,6 +860,19 @@ begin
     if not cpAccept(cp, ')') then
       exit(cpInvalid(cp));
     exit(condBool(isDefined(lx, name)));
+  end;
+  if cpAccept(cp, 'declared') then { declared(NAME): an identifier declared so far }
+  begin
+    if not cpAccept(cp, '(') then
+      exit(cpInvalid(cp));
+    cpPeek(cp, ts, te);
+    if (ts = te) or not isIdentStart(cpAt(cp, ts)) then
+      exit(cpInvalid(cp));
+    name := cpText(cp, ts, te);
+    cp.p := te;
+    if not cpAccept(cp, ')') then
+      exit(cpInvalid(cp));
+    exit(condBool(lexIsDeclared(lx, intern(lowerStr(name)))));
   end;
   if (lx.mode <> lmISO) and (findMacro(lx, 'sizeof') = nil) and
      cpAccept(cp, 'sizeof') then

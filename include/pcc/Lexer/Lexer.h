@@ -25,6 +25,7 @@
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/StringSet.h"
 
+#include <functional>
 #include <string>
 #include <vector>
 
@@ -92,6 +93,12 @@ class Lexer {
     unsigned Depth;     ///< include depth of the opening directive
   };
   llvm::SmallVector<Conditional, 8> Conditionals;
+  // declared(NAME) in $IF (Free Pascal): the names declared so far, which
+  // the parser adds (innermost scope last: a routine's own), the predeclared
+  // ones, and the used units' (BeforeDeclared loads them when first needed).
+  llvm::SmallVector<llvm::StringSet<>, 4> NameScopes;
+  const llvm::StringSet<> *Predeclared = nullptr;
+  std::function<void()> BeforeDeclared;
   bool isActive() const {
     return Conditionals.empty() || Conditionals.back().Active;
   }
@@ -136,6 +143,20 @@ public:
 
   /// Defines symbols for conditional compilation (-d NAME).
   void setDefines(llvm::ArrayRef<std::string> Names);
+
+  /// declared(NAME): names (lower case) declared so far, in the current
+  /// scope or (Global) the outermost one; a routine's in a scope of its own.
+  void declareName(llvm::StringRef Name, bool Global = false) {
+    (Global ? NameScopes.front() : NameScopes.back()).insert(Name);
+  }
+  void pushNameScope() { NameScopes.emplace_back(); }
+  void popNameScope() {
+    if (NameScopes.size() > 1)
+      NameScopes.pop_back();
+  }
+  void setPredeclared(const llvm::StringSet<> *Names) { Predeclared = Names; }
+  void setBeforeDeclared(std::function<void()> F) { BeforeDeclared = std::move(F); }
+  bool isDeclared(llvm::StringRef Name);
 
   /// Where to record {$R±} / {$Q±} switches (null: ignore directives).
   void setDirectives(CheckDirectives *D) { Directives = D; }

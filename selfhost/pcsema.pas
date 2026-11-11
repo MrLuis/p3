@@ -17,6 +17,9 @@ function semaCheck(prog: PDecl; const units: TPtrList; m: TLangMode;
 { Checks unit u, compiled on its own; deps (dependency order) are the
   units it uses, directly or not, of which only the interfaces matter. }
 function semaCheckUnit(u: PDecl; const deps: TPtrList; m: TLangMode): boolean;
+{ The predeclared names (of PName, lower case) of mode m, which
+  declared(NAME) in $IF sees. }
+function standardNames(m: TLangMode): TPtrList;
 
 implementation
 
@@ -6980,6 +6983,16 @@ begin
   standard := newScope(nil);
   cur := standard;
   declareStandardScope;
+end;
+
+function standardNames(m: TLangMode): TPtrList;
+var
+  names: TPtrList;
+begin
+  semaInit(m);
+  listInit(names);
+  scopeNames(standard, names);
+  standardNames := names;
 end;
 
 function semaCheck(prog: PDecl; const units: TPtrList; m: TLangMode;

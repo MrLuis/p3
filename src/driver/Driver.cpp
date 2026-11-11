@@ -187,11 +187,12 @@ bool Driver::runPipeline(FileID FID) {
   // --- M2: parsing --------------------------------------------------------
   ASTContext Ctx(Strings);
   CheckDirectives Directives;
+  for (const std::string &N : Sema(Ctx, Diags, LangOpts).standardNames())
+    PredeclaredNames.insert(N);
   Lexer Lex(SM, FID, Diags, Strings, LangOpts);
-  Lex.setDirectives(&Directives);
-  Lex.setIncludeSupport(SM, Opts.IncludeDirs);
-  Lex.setDefines(Opts.Defines);
+  prepareLexer(Lex, Directives);
   Parser P(Lex, Diags, Ctx);
+  prepareParser(P, Ctx, Directives);
   if (P.startsWithUnit())
     return compileUnit(P, FID, Ctx, Directives);
   ProgramDecl *Program = P.parseProgram();
@@ -386,87 +387,129 @@ bool Driver::finishModule(llvm::Module &Mod, llvm::TargetMachine &TMRef,
                         Libraries, Diags);
 }
 
+Driver::~Driver() = default;
+
+void Driver::prepareLexer(Lexer &L, CheckDirectives &Directives) {
+  L.setDirectives(&Directives);
+  L.setIncludeSupport(SM, Opts.IncludeDirs);
+  L.setDefines(Opts.Defines);
+  L.setPredeclared(&PredeclaredNames);
+}
+
+void Driver::prepareParser(Parser &P, ASTContext &Ctx,
+                           CheckDirectives &Directives) {
+  // declared(NAME) after a uses clause: the units' names and those of their
+  // interfaces (an enumeration's values too).
+  P.enableDeclared([this, &Ctx, &Directives](llvm::ArrayRef<Identifier> Uses,
+                                             llvm::StringRef Self) {
+    llvm::SmallVector<UnitDecl *, 4> Loaded;
+    loadUnits(Uses, Ctx, Directives, Loaded, Self);
+    std::vector<std::string> Names;
+    for (const Identifier &U : Uses) {
+      Names.push_back(U.Name.str());
+      UnitDecl *Unit = UnitsDone.lookup(U.Name);
+      if (!Unit)
+        continue;
+      for (Decl *D : Unit->getInterface()->getDecls()) {
+        Names.push_back(D->getName().Name.str());
+        if (auto *TD = llvm::dyn_cast<TypeDecl>(D))
+          if (auto *ES = llvm::dyn_cast_or_null<EnumTypeSpec>(TD->getTypeSpec()))
+            for (const Identifier &V : ES->getNames())
+              Names.push_back(V.Name.str());
+      }
+    }
+    return Names;
+  });
+}
+
 /// Finds, parses and orders (dependencies first) the units named in Uses.
 void Driver::loadUnits(llvm::ArrayRef<Identifier> Uses, ASTContext &Ctx,
                        CheckDirectives &Directives,
                        llvm::SmallVectorImpl<UnitDecl *> &Ordered,
                        llvm::StringRef Self) {
-  llvm::StringMap<UnitDecl *> Done;
-  llvm::StringSet<> InProgress;
   if (!Self.empty())
-    InProgress.insert(Self);
-  std::vector<std::unique_ptr<Lexer>> Lexers;
-
-  std::function<void(const Identifier &)> Visit = [&](const Identifier &U) {
-    if (Done.count(U.Name) || Diags.shouldStop())
-      return;
-    if (!InProgress.insert(U.Name).second) {
-      Diags.error(U.Loc, "circular unit reference to '" + U.Spelling + "'",
-                  {U.getRange()});
-      return;
-    }
-    // Search the input's directory, -I directories, then the unit library.
-    llvm::SmallVector<std::string, 4> Dirs{
-        llvm::sys::path::parent_path(Opts.InputFile).str()};
-    Dirs.append(Opts.IncludeDirs.begin(), Opts.IncludeDirs.end());
-    Dirs.push_back(findUnitLibrary());
-    std::string Found;
-    for (const std::string &Dir : Dirs) {
-      for (std::string Base : {U.Name.str(), U.Spelling.str()})
-        for (const char *Ext : {".pas", ".pp"}) {
-          llvm::SmallString<256> Path(Dir);
-          llvm::sys::path::append(Path, Base + Ext);
-          if (Found.empty() && llvm::sys::fs::exists(Path))
-            Found = std::string(Path);
-        }
-    }
-    if (Found.empty()) {
-      InProgress.erase(U.Name);
-      // objfpc: Exception and its kin are predeclared, so `uses sysutils`
-      // works without the library.
-      if (LangOpts.ObjKeywords && U.Name == "sysutils")
-        return;
-      Diags.error(U.Loc,
-                  "cannot find unit '" + U.Spelling + "' (looked for " +
-                      U.Name + ".pas next to the program, in -I directories "
-                      "and in pcc's unit library)",
-                  {U.getRange()});
-      return;
-    }
-    auto FIDOrErr = SM.loadFile(Found);
-    if (!FIDOrErr) {
-      Diags.error(U.Loc, "cannot open unit file '" + llvm::Twine(Found) + "'");
-      return;
-    }
-    Lexers.push_back(std::make_unique<Lexer>(SM, *FIDOrErr, Diags, Strings, LangOpts));
-    Lexers.back()->setDirectives(&Directives);
-    Lexers.back()->setIncludeSupport(SM, Opts.IncludeDirs);
-    Lexers.back()->setDefines(Opts.Defines);
-    UnitDecl *Unit = Parser(*Lexers.back(), Diags, Ctx).parseUnit();
-    if (!Unit) {
-      InProgress.erase(U.Name);
-      return;
-    }
-    if (Unit->getName().Name != U.Name)
-      Diags.error(Unit->getName().Loc,
-                  "file '" + llvm::Twine(Found) + "' declares unit '" +
-                      Unit->getName().Spelling + "', expected '" + U.Spelling +
-                      "'");
-    for (const Identifier &Dep : Unit->getInterfaceUses())
-      Visit(Dep);
-    for (const Identifier &Dep : Unit->getImplementationUses())
-      Visit(Dep);
-    InProgress.erase(U.Name);
-    Done[U.Name] = Unit;
-    Ordered.push_back(Unit);
-  };
-
+    UnitsInProgress.insert(Self);
   if (!Uses.empty() && LangOpts.Mode == LangMode::ISO) {
     Diags.error(Uses[0].Loc, "units are a Turbo/Free Pascal extension; use --mode=tp");
     return;
   }
   for (const Identifier &U : Uses)
-    Visit(U);
+    visitUnit(U, Ctx, Directives);
+  Ordered.assign(UnitsOrdered.begin(), UnitsOrdered.end());
+}
+
+void Driver::visitUnit(const Identifier &U, ASTContext &Ctx,
+                       CheckDirectives &Directives) {
+  // (a use that failed to load is not tried again when the units are
+  // loaded once more, after an early load for declared(NAME))
+  if (UnitsDone.count(U.Name) || FailedUses.count(U.Loc.getPointer()) ||
+      Diags.shouldStop())
+    return;
+  if (!UnitsInProgress.insert(U.Name).second) {
+    Diags.error(U.Loc, "circular unit reference to '" + U.Spelling + "'",
+                {U.getRange()});
+    return;
+  }
+  // Search the input's directory, -I directories, then the unit library.
+  llvm::SmallVector<std::string, 4> Dirs{
+      llvm::sys::path::parent_path(Opts.InputFile).str()};
+  Dirs.append(Opts.IncludeDirs.begin(), Opts.IncludeDirs.end());
+  Dirs.push_back(findUnitLibrary());
+  std::string Found;
+  for (const std::string &Dir : Dirs) {
+    for (std::string Base : {U.Name.str(), U.Spelling.str()})
+      for (const char *Ext : {".pas", ".pp"}) {
+        llvm::SmallString<256> Path(Dir);
+        llvm::sys::path::append(Path, Base + Ext);
+        if (Found.empty() && llvm::sys::fs::exists(Path))
+          Found = std::string(Path);
+      }
+  }
+  if (Found.empty()) {
+    UnitsInProgress.erase(U.Name);
+    FailedUses.insert(U.Loc.getPointer());
+    // objfpc: Exception and its kin are predeclared, so `uses sysutils`
+    // works without the library.
+    if (LangOpts.ObjKeywords && U.Name == "sysutils")
+      return;
+    Diags.error(U.Loc,
+                "cannot find unit '" + U.Spelling + "' (looked for " +
+                    U.Name + ".pas next to the program, in -I directories "
+                    "and in pcc's unit library)",
+                {U.getRange()});
+    return;
+  }
+  auto FIDOrErr = SM.loadFile(Found);
+  if (!FIDOrErr) {
+    FailedUses.insert(U.Loc.getPointer());
+    Diags.error(U.Loc, "cannot open unit file '" + llvm::Twine(Found) + "'");
+    return;
+  }
+  UnitLexers.push_back(std::make_unique<Lexer>(SM, *FIDOrErr, Diags, Strings, LangOpts));
+  prepareLexer(*UnitLexers.back(), Directives);
+  UnitDecl *Unit;
+  {
+    Parser P(*UnitLexers.back(), Diags, Ctx);
+    prepareParser(P, Ctx, Directives);
+    Unit = P.parseUnit();
+  }
+  if (!Unit) {
+    UnitsInProgress.erase(U.Name);
+    FailedUses.insert(U.Loc.getPointer());
+    return;
+  }
+  if (Unit->getName().Name != U.Name)
+    Diags.error(Unit->getName().Loc,
+                "file '" + llvm::Twine(Found) + "' declares unit '" +
+                    Unit->getName().Spelling + "', expected '" + U.Spelling +
+                    "'");
+  for (const Identifier &Dep : Unit->getInterfaceUses())
+    visitUnit(Dep, Ctx, Directives);
+  for (const Identifier &Dep : Unit->getImplementationUses())
+    visitUnit(Dep, Ctx, Directives);
+  UnitsInProgress.erase(U.Name);
+  UnitsDone[U.Name] = Unit;
+  UnitsOrdered.push_back(Unit);
 }
 
 void Driver::dumpTokens(FileID FID, llvm::raw_ostream &OS) {

@@ -9,7 +9,14 @@
 #include "pcc/Driver/CompilerOptions.h"
 
 #include "llvm/ADT/ArrayRef.h"
+#include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/SmallVector.h"
+#include "llvm/ADT/StringMap.h"
+#include "llvm/ADT/StringSet.h"
+
+#include <memory>
+#include <string>
+#include <vector>
 
 namespace llvm {
 class raw_ostream;
@@ -22,6 +29,7 @@ class TargetMachine;
 
 namespace pcc {
 
+class Lexer;
 class Parser;
 
 class ASTContext;
@@ -43,11 +51,26 @@ class Driver {
   /// lex -> parse -> sema -> codegen -> emit/link, stopping at Opts.Act.
   bool runPipeline(FileID FID);
 
-  /// Self: the unit being compiled, if any (using it is circular).
+  /// Self: the unit being compiled, if any (using it is circular). Units
+  /// are loaded once: early for declared(NAME) in $IF, then again for Sema
+  /// (all of those loaded, dependencies first, in Ordered).
   void loadUnits(llvm::ArrayRef<Identifier> Uses, ASTContext &Ctx,
                  CheckDirectives &Directives,
                  llvm::SmallVectorImpl<UnitDecl *> &Ordered,
                  llvm::StringRef Self = "");
+  void visitUnit(const Identifier &U, ASTContext &Ctx,
+                 CheckDirectives &Directives);
+  llvm::StringMap<UnitDecl *> UnitsDone;
+  llvm::StringSet<> UnitsInProgress;
+  llvm::DenseSet<const char *> FailedUses; ///< by the location of the name
+  std::vector<std::unique_ptr<Lexer>> UnitLexers;
+  std::vector<UnitDecl *> UnitsOrdered;
+
+  /// declared(NAME): the predeclared names, and the lexer and parser of a
+  /// file set up for it (the used units' names come from loading them).
+  llvm::StringSet<> PredeclaredNames;
+  void prepareLexer(Lexer &L, CheckDirectives &Directives);
+  void prepareParser(Parser &P, ASTContext &Ctx, CheckDirectives &Directives);
 
   /// The libraries named by the external routines of the program and its
   /// units (`external 'z'`), linked after the -l ones: -lz, or -l:name for
@@ -67,6 +90,7 @@ class Driver {
 
 public:
   Driver(CompilerOptions Opts, llvm::raw_ostream &DiagOS);
+  ~Driver();
   /// Applies Opts' language mode and diagnostic settings.
   void configure();
 

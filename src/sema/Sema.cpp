@@ -5608,6 +5608,12 @@ public:
     declareStandardScope();
   }
 
+  std::vector<std::string> standardNames() const {
+    std::vector<std::string> Names;
+    Standard.forEachName([&](llvm::StringRef N) { Names.push_back(N.str()); });
+    return Names;
+  }
+
   /// Makes the interfaces of the units in Uses visible in S.
   void importUnits(Scope &S, llvm::ArrayRef<Identifier> Uses) {
     for (const Identifier &U : Uses) {
@@ -7930,6 +7936,10 @@ bool Sema::check(ProgramDecl &P, llvm::ArrayRef<UnitDecl *> Units,
   unsigned ErrorsBefore = Diags.getNumErrors();
   Checker(Ctx, Diags, LangOpts, Reparse).checkProgram(P, Units, SeparateUnits);
   return Diags.getNumErrors() == ErrorsBefore && !Diags.shouldStop();
+}
+
+std::vector<std::string> Sema::standardNames() {
+  return Checker(Ctx, Diags, LangOpts).standardNames();
 }
 
 bool Sema::checkUnit(UnitDecl &U, llvm::ArrayRef<UnitDecl *> Deps) {

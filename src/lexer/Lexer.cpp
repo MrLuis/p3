@@ -27,6 +27,7 @@ Lexer::Lexer(const SourceManager &SM, FileID FID, DiagnosticsEngine &Diags,
   BufEnd = Buf.data() + Buf.size();
   // MemoryBuffers are NUL-terminated, so peeking one char past a token
   // (e.g. Cur[1]) is always safe, even at BufEnd.
+  NameScopes.emplace_back(); // the file's own declarations (declared())
   Defines.insert("PCC");
   Defines.insert(LangOpts.Mode == LangMode::ISO  ? "PCC_ISO"
                  : LangOpts.Mode == LangMode::TP ? "PCC_TP"
@@ -270,6 +271,7 @@ class ConditionParser {
   const llvm::StringSet<> &Defines;
   const llvm::StringMap<std::string> &Values; ///< macros (upper case)
   bool HasSizeOf; ///< sizeof exists in this mode (not in iso)
+  Lexer *Lex;     ///< for declared(NAME); may be null
   unsigned Depth;
 
   llvm::StringRef peek() {
@@ -518,6 +520,17 @@ class ConditionParser {
         return invalid();
       return CondValue::boolean(Defines.contains(Name.upper()));
     }
+    if (accept("declared")) { // declared(NAME): an identifier declared so far
+      if (!accept("("))
+        return invalid();
+      llvm::StringRef Name = peek();
+      if (Name.empty() || !isIdentStart(Name[0]))
+        return invalid();
+      P += Name.size();
+      if (!accept(")"))
+        return invalid();
+      return CondValue::boolean(Lex && Lex->isDeclared(Name.lower()));
+    }
     if (HasSizeOf && !Values.count("SIZEOF") && accept("sizeof")) {
       if (!accept("("))
         return invalid();
@@ -548,7 +561,7 @@ class ConditionParser {
   CondValue macroValue(llvm::StringRef Text) {
     if (Depth >= 16)
       return fail("macros in $IF expressions are nested too deeply");
-    ConditionParser Sub(Text, Defines, Values, HasSizeOf, Depth + 1);
+    ConditionParser Sub(Text, Defines, Values, HasSizeOf, Lex, Depth + 1);
     llvm::StringRef T = Sub.peek();
     bool Single = !T.empty() && Sub.P + T.size() == Text.size();
     if (Single && (llvm::isDigit(T[0]) || T[0] == '$' || T[0] == '\'')) {
@@ -572,8 +585,8 @@ public:
   std::string Error;
   ConditionParser(llvm::StringRef S, const llvm::StringSet<> &Defines,
                   const llvm::StringMap<std::string> &Values, bool HasSizeOf,
-                  unsigned Depth = 0)
-      : S(S), Defines(Defines), Values(Values), HasSizeOf(HasSizeOf),
+                  Lexer *Lex, unsigned Depth = 0)
+      : S(S), Defines(Defines), Values(Values), HasSizeOf(HasSizeOf), Lex(Lex),
         Depth(Depth) {}
   bool parse() {
     CondValue V = parseExpr();
@@ -586,11 +599,20 @@ public:
 };
 } // namespace
 
+bool Lexer::isDeclared(llvm::StringRef Name) {
+  if (BeforeDeclared)
+    BeforeDeclared();
+  for (const llvm::StringSet<> &S : NameScopes)
+    if (S.contains(Name))
+      return true;
+  return Predeclared && Predeclared->contains(Name);
+}
+
 bool Lexer::evalCondition(const char *Start, llvm::StringRef Expr) {
   llvm::StringMap<std::string> Values;
   for (const auto &M : Macros)
     Values[M.getKey()] = std::string(M.getValue().Begin, M.getValue().End);
-  ConditionParser CP(Expr, Defines, Values, LangOpts.Mode != LangMode::ISO);
+  ConditionParser CP(Expr, Defines, Values, LangOpts.Mode != LangMode::ISO, this);
   bool V = CP.parse();
   if (CP.Error.empty())
     return V;

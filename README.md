@@ -494,9 +494,14 @@ be `nil`, as in Free Pascal.
 `$DEFINE`, `$UNDEF`, `$IFDEF`, `$IFNDEF`, `$IF` / `$ELSEIF`, `$ELSE`,
 `$ENDIF` and `$IFEND`; symbols are case-insensitive. `$IF` expressions
 follow Pascal's precedence: integers (decimal, `$hex`), `'strings'`,
-`true`, `false`, `defined(NAME)`, `sizeof(TYPE)` (not in `--mode=iso`), macros,
+`true`, `false`, `defined(NAME)`, `declared(NAME)`, `sizeof(TYPE)` (not in
+`--mode=iso`), macros,
 `not`, `* div mod and`, `+ - or`, and one comparison (`= <> < > <= >=`) or
-`in [a, b, lo..hi]`. `sizeof` takes the name of a predefined type only
+`in [a, b, lo..hi]`. `declared(NAME)` is true if NAME is declared at that
+point, as in Free Pascal: earlier in the file (a routine's own names only
+inside it), predeclared, or in a used unit (its name, and the declarations
+of its interface; using `declared` loads the units of the uses clauses
+read so far). `sizeof` takes the name of a predefined type only
 (`SizeInt`, `PtrInt` and `NativeInt` are predeclared as `int64`; their
 unsigned forms are not, as there is no unsigned 64-bit type): `$IF` is
 evaluated while lexing, so unlike Free Pascal it cannot see declared types or

@@ -17,6 +17,8 @@
 
 #include <cstdint>
 #include <functional>
+#include <vector>
+#include <string>
 
 namespace pcc {
 
@@ -55,6 +57,10 @@ public:
   /// Checks unit U, compiled on its own; Deps (dependency order) are the
   /// units it uses, directly or not, of which only the interfaces matter.
   bool checkUnit(UnitDecl &U, llvm::ArrayRef<UnitDecl *> Deps);
+
+  /// The predeclared names (lower case) of the language mode, which
+  /// declared(NAME) in $IF sees.
+  std::vector<std::string> standardNames();
 };
 
 } // namespace pcc

@@ -14,6 +14,33 @@ Parser::Parser(Lexer &Lex, DiagnosticsEngine &Diags, ASTContext &Ctx)
 // Token helpers
 //===----------------------------------------------------------------------===//
 
+Parser::~Parser() {
+  if (UsedUnitNames)
+    Lex.setBeforeDeclared(nullptr);
+}
+
+void Parser::enableDeclared(
+    std::function<std::vector<std::string>(llvm::ArrayRef<Identifier>,
+                                           llvm::StringRef)>
+        F) {
+  UsedUnitNames = std::move(F);
+  Lex.setBeforeDeclared([this] { loadPendingUses(); });
+}
+
+void Parser::declareName(const Identifier &Name) {
+  if (Name.isValid())
+    Lex.declareName(Name.Name);
+}
+
+void Parser::loadPendingUses() {
+  if (PendingUses.empty() || !UsedUnitNames)
+    return;
+  llvm::SmallVector<Identifier, 4> Uses = std::move(PendingUses);
+  PendingUses.clear();
+  for (const std::string &N : UsedUnitNames(Uses, UnitName))
+    Lex.declareName(N, /*Global=*/true);
+}
+
 void Parser::nextToken(Token &T) {
   if (!Replay) {
     Lex.lex(T);
@@ -316,7 +343,10 @@ ProgramDecl *Parser::parseProgram() {
 // uses = "uses" ident { "," ident } ";" .
 bool Parser::parseUsesClause(llvm::SmallVectorImpl<Identifier> &Uses) {
   consumeToken(); // 'uses'
-  if (!parseIdentList(Uses, "unit name") || !expect(tok::semi, "after uses clause")) {
+  bool Listed = parseIdentList(Uses, "unit name");
+  // declared(NAME) right after the clause sees the units' names.
+  PendingUses.append(Uses.begin(), Uses.end());
+  if (!Listed || !expect(tok::semi, "after uses clause")) {
     skipUntil({tok::semi, tok::kw_begin, tok::kw_var, tok::kw_const,
                tok::kw_type, tok::kw_procedure, tok::kw_function});
     tryConsume(tok::semi);
@@ -336,6 +366,7 @@ UnitDecl *Parser::parseUnit() {
   Identifier Name;
   if (!expectIdentifier(Name, "unit name") || !expect(tok::semi, "after unit name"))
     return nullptr;
+  UnitName = Name.Name;
 
   if (!expect(tok::kw_interface, "after unit heading"))
     return nullptr;
@@ -545,6 +576,8 @@ void Parser::parseConstPart(llvm::SmallVectorImpl<Decl *> &Decls,
   while (Tok.is(tok::identifier) && !(InMembers && isVisibilityWord()) &&
          !startsGeneric() && !Diags.shouldStop()) {
     Identifier Name = makeIdentifier(Tok);
+    if (!InMembers)
+      declareName(Name);
     consumeToken();
     if (Tok.is(tok::colon) && LangOpts.Mode != LangMode::ISO) {
       // Typed constant: const x: T = value;
@@ -604,6 +637,8 @@ void Parser::parseTypePart(llvm::SmallVectorImpl<Decl *> &Decls,
   while (Tok.is(tok::identifier) && !(InMembers && isVisibilityWord()) &&
          !startsGeneric() && !Diags.shouldStop()) {
     Identifier Name = makeIdentifier(Tok);
+    if (!InMembers)
+      declareName(Name);
     consumeToken();
     TypeSpec *TS = nullptr;
     if (expect(tok::equal, "after type name")) {
@@ -641,7 +676,10 @@ void Parser::parseVarPart(llvm::SmallVectorImpl<Decl *> &Decls) {
   while (Tok.is(tok::identifier) && !startsGeneric() && !Diags.shouldStop()) {
     llvm::SmallVector<Identifier, 4> Names;
     TypeSpec *TS = nullptr;
-    if (parseIdentList(Names, "variable name") &&
+    bool Listed = parseIdentList(Names, "variable name");
+    for (const Identifier &N : Names)
+      declareName(N);
+    if (Listed &&
         expect(tok::colon, "after variable name"))
       TS = parseType();
 
@@ -748,6 +786,8 @@ RoutineDecl *Parser::parseRoutineDecl(bool HeadingOnly) {
     }
     OuterNames = Ctx.copyArray<Identifier>(Outer);
   }
+  if (Name.isValid() && !ClassName.isValid())
+    declareName(Name); // (declared(NAME); a method's is its class's)
   if (ParsingGeneric && Name.isValid() && Tok.is(tok::less)) { // <T, U>
     consumeToken();
     llvm::SmallVector<Identifier, 2> TypeParams;
@@ -907,7 +947,12 @@ RoutineDecl *Parser::parseRoutineDecl(bool HeadingOnly) {
         ResultTS, nullptr, true));
   }
 
+  // declared(NAME): its parameters and declarations in a scope of its own
+  Lex.pushNameScope();
+  for (VarDecl *P : Params)
+    declareName(P->getName());
   Block *Body = parseBlock();
+  Lex.popNameScope();
   if (!expect(tok::semi, std::string("after ") + Kind + " body")) {
     skipUntil({tok::semi, tok::kw_begin, tok::kw_procedure, tok::kw_function});
     tryConsume(tok::semi);
@@ -1218,7 +1263,11 @@ RoutineDecl *Parser::parseOperatorDecl(bool HeadingOnly) {
                 {SourceRange(ClassName.Loc, Name.getRange().getEnd())});
     return nullptr;
   }
+  Lex.pushNameScope();
+  for (VarDecl *P : Params)
+    declareName(P->getName());
   Block *Body = parseBlock();
+  Lex.popNameScope();
   if (!expect(tok::semi, "after operator body")) {
     skipUntil({tok::semi, tok::kw_begin, tok::kw_procedure, tok::kw_function});
     tryConsume(tok::semi);
@@ -1881,7 +1930,10 @@ TypeSpec *Parser::parseSimpleType() {
   if (Tok.is(tok::l_paren)) {
     consumeToken();
     llvm::SmallVector<Identifier, 8> Names;
-    if (!parseIdentList(Names, "enumeration value name"))
+    bool Listed = parseIdentList(Names, "enumeration value name");
+    for (const Identifier &N : Names)
+      declareName(N);
+    if (!Listed)
       return nullptr;
     if (!expect(tok::r_paren, "after enumeration values"))
       return nullptr;
