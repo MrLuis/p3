@@ -315,6 +315,14 @@ void __pas_write_uint(PasFile *f, uint64_t v, int32_t width) {
   fwrite(buf, 1, (size_t)n, f->fp);
 }
 
+void __pas_write_enum(PasFile *f, const unsigned char *const *names, int64_t v,
+                      int32_t width) {
+  need_generate(f);
+  const unsigned char *s = names[v];
+  fwrite(s + 1, 1, s[0], f->fp);
+  pad(f, width - s[0]);
+}
+
 void __pas_write_bool(PasFile *f, int32_t b, int32_t width) {
   if (b)
     __pas_write_str(f, __pas_tp_mode ? "TRUE" : "true", 4, width);

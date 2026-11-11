@@ -100,7 +100,9 @@ begin
     t := check(value);
     if arg^.kind = nkFormatted then
       arg^.typ := t;
-    if not isError(t) and not isWritable(t) then
+    { Turbo/FPC: an enumeration's value is written as its name }
+    if not isError(t) and not isWritable(t) and
+       (isISO or (getBase(t)^.kind <> tyEnum)) then
     begin
       ms('cannot write a value of type ');
       maT(t);

@@ -29,7 +29,9 @@ to native executables through LLVM. See [PLAN.md](PLAN.md) for the roadmap.
 
 With `--mode=tp`, Turbo/Free Pascal extensions: units (`uses`, `-I`),
 `string`/`string[N]` and string routines, `break continue exit(value) inc
-dec`, `shl shr xor`, `$hex %bin #13` literals, `//` comments; the integer
+dec`, `shl shr xor`, `write` of enumeration values (the name as declared,
+padded on the right to a field width, as in Free Pascal; a value outside
+its type is a runtime error), `$hex %bin #13` literals, `//` comments; the integer
 types `longint int64 cardinal byte word shortint smallint` (FPC widening
 rules) and `qword` (unsigned 64-bit, also named `UInt64`, `NativeUInt`,
 `PtrUInt` and `SizeUInt`; see below); typecasts `T(x)`; distinct types `T = type X` (as an alias of `X`:

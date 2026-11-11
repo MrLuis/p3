@@ -196,6 +196,8 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
   std::vector<ClassType *> VMTsToDefine;
   llvm::DenseMap<WithContext *, llvm::Value *> WithAddrs;
   llvm::StringMap<llvm::GlobalVariable *> StringConstants;
+  /// The names of an enumeration's values (for write), by type.
+  llvm::DenseMap<EnumType *, llvm::GlobalVariable *> EnumNameTables;
   llvm::StringMap<llvm::GlobalVariable *> AnsiConstants;
   std::vector<RoutineDecl *> RoutinesToEmit;
   llvm::DenseMap<LabelDecl *, llvm::BasicBlock *> LabelBlocks;
@@ -4296,12 +4298,47 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
       B.CreateCall(RT.WriteChar, {File, V, Width});
     else if (T->getBase()->isBoolean())
       B.CreateCall(RT.WriteBool, {File, B.CreateZExt(V, B.getInt32Ty()), Width});
+    else if (auto *ET = llvm::dyn_cast<EnumType>(T->getBase()))
+      emitWriteEnum(File, V, T, ET, Width, Value->getBeginLoc());
     else if (isQWord(T->getBase()))
       B.CreateCall(classRuntime("__pas_write_uint", B.getVoidTy(),
                                 {B.getPtrTy(), B.getInt64Ty(), B.getInt32Ty()}),
                    {File, V, Width});
     else
       B.CreateCall(RT.WriteInt, {File, toI64(V, T), Width});
+  }
+
+  /// The names of E's values as length-prefixed strings: a private
+  /// constant [N x ptr], one per enumeration type.
+  llvm::GlobalVariable *enumNameTable(EnumType *E) {
+    llvm::GlobalVariable *&G = EnumNameTables[E];
+    if (G)
+      return G;
+    llvm::SmallVector<llvm::Constant *, 16> Names;
+    for (ConstDecl *V : E->getValues())
+      Names.push_back(getPStrConstant(V->getName().Spelling));
+    auto *Ty = llvm::ArrayType::get(B.getPtrTy(), Names.size());
+    G = new llvm::GlobalVariable(M, Ty, true, llvm::GlobalValue::PrivateLinkage,
+                                 llvm::ConstantArray::get(Ty, Names),
+                                 ".enumnames");
+    G->setUnnamedAddr(llvm::GlobalValue::UnnamedAddr::Global);
+    return G;
+  }
+
+  /// write(e) of an enumeration's value (Turbo/FPC): its name, as declared,
+  /// padded on the right to the field width. A value outside the type is a
+  /// runtime error (always, as in Free Pascal).
+  void emitWriteEnum(llvm::Value *File, llvm::Value *V, Type *T, EnumType *E,
+                     llvm::Value *Width, SourceLocation L) {
+    llvm::Value *X = toI64(V, T);
+    uint64_t N = E->getValues().size();
+    emitRuntimeCheck(B.CreateICmpUGE(X, B.getInt64(N)),
+                     "invalid enumeration value", L);
+    llvm::GlobalVariable *Table = enumNameTable(E);
+    B.CreateCall(classRuntime("__pas_write_enum", B.getVoidTy(),
+                              {B.getPtrTy(), B.getPtrTy(), B.getInt64Ty(),
+                               B.getInt32Ty()}),
+                 {File, Table, X, Width});
   }
 
   void emitReadArg(llvm::Value *File, Expr *Arg) {

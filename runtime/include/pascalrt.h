@@ -75,6 +75,10 @@ void __pas_write_str(PasFile *f, const char *s, int64_t len, int32_t width);
 void __pas_write_char(PasFile *f, char c, int32_t width);
 void __pas_write_int(PasFile *f, int64_t v, int32_t width); /* any integer type */
 void __pas_write_uint(PasFile *f, uint64_t v, int32_t width); /* qword */
+/* An enumeration's value v (checked by the caller): names[v], a
+ * length-prefixed string, padded on the right (as Free Pascal). */
+void __pas_write_enum(PasFile *f, const unsigned char *const *names, int64_t v,
+                      int32_t width);
 void __pas_write_bool(PasFile *f, int32_t b, int32_t width); /* true/false */
 /* frac < 0: floating-point form " d.dddE+ddd" (default width 22); frac >= 0:
  * fixed-point form with that many fraction digits (ISO 6.9.3.4). */

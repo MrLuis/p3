@@ -91,6 +91,7 @@ var
   lowered: TIntMap;          { type id -> PIRType }
   ansiConsts: TIntMap;       { name id of the characters -> PTVBox of the .astr }
   stringConsts: TIntMap;     { name id of the bytes -> PTVBox of the global }
+  enumNameTables: TIntMap;   { type id -> PTVBox: an enumeration's names }
   routinesToEmit: TPtrList;  { of PDecl }
   thunksToEmit: TPtrList;    { of PDecl: cdecl routines with a cthunk }
   { continue and break targets and the innermost cleanup around the loop

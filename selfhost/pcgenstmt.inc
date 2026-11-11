@@ -48,6 +48,48 @@ begin
   addressForValue := tmp;
 end;
 
+{ The names of enumeration e's values as length-prefixed strings: a private
+  constant [N x ptr], one per enumeration type. }
+function enumNameTable(e: PType): TV;
+var
+  g: PTVBox;
+  names: TPtrList;
+  i: longint;
+  n: PName;
+begin
+  g := PTVBox(mapGet(enumNameTables, e^.id));
+  if g = nil then
+  begin
+    listInit(names);
+    for i := 0 to e^.enumValues.count - 1 do
+    begin
+      n := PDecl(listGet(e^.enumValues, i))^.ident.spelling;
+      listAdd(names, irBox(getPStrConstant(n^.chars, 0, n^.len)));
+    end;
+    g := irBox(irGlobal('.enumnames', 'private', irArray(names.count, irPtrT),
+                        irConstArray(irArray(names.count, irPtrT), names),
+                        true, true, false, 0));
+    listFree(names);
+    mapPut(enumNameTables, e^.id, g);
+  end;
+  enumNameTable := g^;
+end;
+
+{ write(e) of an enumeration's value (Turbo/FPC): its name, as declared,
+  padded on the right to the field width. A value outside the type is a
+  runtime error (always, as in Free Pascal). }
+procedure emitWriteEnum(const f, v: TV; t, e: PType; const width: TV; loc: TLoc);
+var
+  x, bad, table, ignored: TV;
+begin
+  x := toI64(v, t);
+  bad := irICmp('uge', x, i64c(e^.enumValues.count), '');
+  emitRuntimeCheck(bad, 'invalid enumeration value', loc);
+  table := enumNameTable(e);
+  ignored := call4(classRuntime('__pas_write_enum', 'void', 'ptr,ptr,i64,i32'),
+                   f, table, x, width, '');
+end;
+
 procedure emitWriteArg(const f: TV; arg: PNode);
 var
   value: PNode;
@@ -93,6 +135,8 @@ begin
     b := irCast('zext', v, irI32, '');
     rtv3('__pas_write_bool', f, b, width);
   end
+  else if getBase(t)^.kind = tyEnum then
+    emitWriteEnum(f, v, t, getBase(t), width, value^.b)
   else if isQWord(getBase(t)) then
     ignored := call3(classRuntime('__pas_write_uint', 'void', 'ptr,i64,i32'),
                      f, v, width, '')
@@ -2857,6 +2901,7 @@ begin
   listInit(dynOpFns);
   mapInit(lowered);
   mapInit(stringConsts);
+  mapInit(enumNameTables);
   mapInit(ansiConsts);
   mapInit(classLayouts);
   mapInit(vmts);
