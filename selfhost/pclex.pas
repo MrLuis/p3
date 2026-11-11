@@ -81,6 +81,10 @@ type
     { $scopedenums on: the values of the enumerations declared after it are
       reached only through their type (TColor.Red) }
     scopedEnums: boolean;
+    { $packrecords N / $align N / $aN: the largest alignment of the fields
+      of the records declared after it (1, 2, 4, 8, 16 or 32); 0: the
+      natural (C) layout }
+    packRecords: longint;
     macros: TIntMap;
     macroStack: TPtrList;
     { declared(NAME) in $IF (Free Pascal): the names declared so far (name
@@ -344,6 +348,7 @@ begin
   lx.macrosOn := false;
   lx.inlineOn := mode = lmObjFPC;
   lx.scopedEnums := false;
+  lx.packRecords := 0;
   mapInit(lx.macros);
   listInit(lx.macroStack);
   defineSymbol(lx, 'PCC', true);
@@ -1322,6 +1327,27 @@ end;
 { Directive text [textStart, textEnd) (after the '$', up to the comment
   closer); start is the offset of the comment opener. The text can be long
   and span lines, so it is handled as offsets, not as a string. }
+{ A record alignment in $packrecords, $align and $aN: 1, 2, 4, 8, 16 or 32
+  (decimal digits), else -1. }
+function packValue(const s: string): longint;
+var
+  i: longint;
+  v: int64;
+begin
+  packValue := -1;
+  if (length(s) = 0) or (length(s) > 18) then
+    exit;
+  v := 0;
+  for i := 1 to length(s) do
+  begin
+    if (s[i] < '0') or (s[i] > '9') then
+      exit;
+    v := v * 10 + (ord(s[i]) - ord('0'));
+  end;
+  if (v = 1) or (v = 2) or (v = 4) or (v = 8) or (v = 16) or (v = 32) then
+    packValue := longint(v);
+end;
+
 procedure handleDirective(var lx: TLexer; start: int64; textStart, textEnd: int64);
 var
   p, b, e, partEnd, q: int64;
@@ -1382,6 +1408,41 @@ begin
   end;
   { $inline on / off: whether the inline directive inlines (default: on in
     objfpc mode, as in Free Pascal) }
+  { $packrecords N|C|DEFAULT|NORMAL, $align N|ON|OFF, $aN, $a+|-: how the
+    fields of the records declared after it are aligned (as in FPC, where
+    ON and + mean 4, OFF and - mean 1) }
+  if word = 'packrecords' then
+  begin
+    arg := lowerStr(copyChars(lx, b, e));
+    if (arg = 'c') or (arg = 'default') or (arg = 'normal') then
+      lx.packRecords := 0
+    else if packValue(arg) > 0 then
+      lx.packRecords := packValue(arg)
+    else
+      diagError(locOf(lx, start), 'illegal record alignment ''' +
+                copyChars(lx, b, e) + ''': use 1, 2, 4, 8, 16, 32, C, ' +
+                'DEFAULT or NORMAL');
+    exit;
+  end;
+  if word = 'align' then
+  begin
+    arg := lowerStr(copyChars(lx, b, e));
+    if (arg = 'on') or (arg = '+') then
+      lx.packRecords := 4
+    else if (arg = 'off') or (arg = '-') then
+      lx.packRecords := 1
+    else if packValue(arg) > 0 then
+      lx.packRecords := packValue(arg)
+    else
+      diagError(locOf(lx, start), 'illegal record alignment ''' +
+                copyChars(lx, b, e) + ''': use 1, 2, 4, 8, 16, 32, ON or OFF');
+    exit;
+  end;
+  if (word = 'a') and (packValue(copyChars(lx, b, e)) > 0) then { $A4 }
+  begin
+    lx.packRecords := packValue(copyChars(lx, b, e));
+    exit;
+  end;
   if word = 'scopedenums' then
   begin
     arg := lowerStr(copyChars(lx, b, e));
@@ -1475,6 +1536,13 @@ begin
       { other switches (listing, boolean evaluation, ...) are ignored }
       if upperChar(at(lx, b)) = 'H' then
         lx.longStrings := c = '+';
+      if upperChar(at(lx, b)) = 'A' then { $A+: as $A4 (FPC); $A-: none }
+      begin
+        if c = '+' then
+          lx.packRecords := 4
+        else
+          lx.packRecords := 1;
+      end;
       if upperChar(at(lx, b)) = 'R' then
         addDirective(lx, locOf(lx, start), swRange, c = '+')
       else if upperChar(at(lx, b)) = 'Q' then

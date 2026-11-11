@@ -449,6 +449,8 @@ class ASTPrinter : public StmtVisitor<ASTPrinter>,
       line(R->isBitPacked() ? "RecordTypeSpec bitpacked"
            : R->isPacked()  ? "RecordTypeSpec packed"
                             : "RecordTypeSpec");
+      if (R->getPackRecords())
+        OS << " packrecords " << R->getPackRecords();
       loc(TS->getBeginLoc());
       IndentScope I(Indent);
       printFieldList(R->getFields());

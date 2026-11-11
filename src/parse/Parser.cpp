@@ -61,6 +61,10 @@ bool Parser::typeHelpers() const {
 bool Parser::corbaInterfaces() const {
   return Replay ? Replay->CorbaInterfaces : Lex.corbaInterfaces();
 }
+unsigned Parser::packRecords() const {
+  return Replay ? Replay->PackRecords : Lex.packRecords();
+}
+
 bool Parser::scopedEnums() const {
   return Replay ? Replay->ScopedEnums : Lex.scopedEnums();
 }
@@ -111,6 +115,7 @@ RoutineDecl *Parser::parseGenericRoutine(bool HeadingOnly) {
   Toks->InlineOn = inlineOn();
   Toks->TypeHelpers = typeHelpers();
   Toks->ScopedEnums = scopedEnums();
+  Toks->PackRecords = packRecords();
   llvm::SmallVector<Token, 64> Rec;
   auto *SavedRec = Recording;
   Recording = &Rec;
@@ -2232,6 +2237,14 @@ TypeSpec *Parser::parseArrayType(SourceLocation Start, bool Packed) {
 
 // recordType = "record" fieldList "end" .
 TypeSpec *Parser::parseRecordType(SourceLocation Start, bool Packed) {
+  unsigned Pack = packRecords(); // {$packrecords N} here
+  TypeSpec *TS = parseRecordTypeBody(Start, Packed);
+  if (auto *RS = llvm::dyn_cast_or_null<RecordTypeSpec>(TS))
+    RS->setPackRecords(Pack);
+  return TS;
+}
+
+TypeSpec *Parser::parseRecordTypeBody(SourceLocation Start, bool Packed) {
   SourceLocation RecordLoc = consumeToken(); // 'record'
   // record helper for T (objfpc): `helper` followed by `for` or `(` cannot
   // begin a field.

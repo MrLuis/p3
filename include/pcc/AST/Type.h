@@ -241,6 +241,7 @@ class RecordType final : public Type {
   bool Packed;
   bool BitPacked = false; ///< bitpacked (Free Pascal): ordinal fields take
                           ///< bitPackedWidth bits, without addresses
+  unsigned PackRecords = 0; ///< {$packrecords N} where declared
   /// An advanced record's (objfpc) member table: a ClassType that is not a
   /// type of values, holding the fields, methods, operators and properties
   /// (see ClassType::getRecord). Null for a plain record.
@@ -256,6 +257,10 @@ public:
   bool isPacked() const { return Packed; }
   bool isBitPacked() const { return BitPacked; }
   void setBitPacked() { BitPacked = true; }
+  /// The largest alignment of its fields: 1 for a packed record, N under
+  /// {$packrecords N} (as in Free Pascal); 0: the natural (C) layout.
+  unsigned getFieldAlignment() const { return Packed ? 1 : PackRecords; }
+  void setPackRecords(unsigned N) { PackRecords = N; }
   ClassType *getMemberTable() const { return Members; }
   void setMemberTable(ClassType *C) { Members = C; }
   static bool classof(const Type *T) { return T->getKind() == TK_Record; }

@@ -84,9 +84,11 @@ type
       { memberTable: an advanced record's (objfpc): a class type that is
         not a type of values, holding the fields, methods, operators and
         properties (its classRecord is the record); nil for a plain record }
+      { recordPackRecords: $packrecords N where declared (0: natural; see
+        fieldAlignment) }
       tyRecord: (fieldList: PFieldList; allFields: TPtrList; { of PDecl }
                  isPackedRecord: boolean; memberTable: PType;
-                 isBitPackedRecord: boolean);
+                 isBitPackedRecord: boolean; recordPackRecords: longint);
       tyPointer: (pointee: PType; untyped: boolean);
       tySet: (setElement: PType); { nil: the empty set [] }
       tyFile: (fileElement: PType; isText: boolean);
@@ -300,8 +302,9 @@ type
                 arrBitPacked: boolean);
       { recMembers: an advanced record's methods, class operators and
         properties (objfpc), in source order }
+      { recPackRecords: $packrecords N where declared (0: natural) }
       tsRecord: (fields: PFieldList; recPacked: boolean; recMembers: TPtrList;
-                 recBitPacked: boolean);
+                 recBitPacked: boolean; recPackRecords: longint);
       tsSet, tsFile: (elemSpec: PTypeSpec);
       tsRoutine: (rtIsFunction: boolean; rtParams: TPtrList; rtResult: PTypeSpec;
                   rtCallConv: longint; rtOfObject: boolean);

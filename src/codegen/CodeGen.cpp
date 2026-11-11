@@ -482,6 +482,19 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
             M.getContext(), {llvm::ArrayType::get(B.getInt8Ty(), (Bits + 7) / 8)},
             Name);
       }
+      if (unsigned N = R->getFieldAlignment()) {
+        // Free Pascal's layout under {$packrecords N} (packed: 1), as the
+        // record's bytes in units of its alignment (which LLVM then gives
+        // it as a field or an element).
+        uint64_t End = 0, Align = 1;
+        layoutAligned(R->getFieldList(), N, End, Align);
+        uint64_t Size = (End + Align - 1) / Align * Align;
+        return llvm::StructType::create(
+            M.getContext(),
+            {llvm::ArrayType::get(B.getIntNTy(static_cast<unsigned>(Align * 8)),
+                                  Size / Align)},
+            Name);
+      }
       return layoutFieldList(R->getFieldList(), Name, /*BaseOffset=*/0);
     }
     case Type::TK_Pointer:
@@ -564,6 +577,40 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
     return ST;
   }
 
+  /// The alignment of a value of type T (a field's natural alignment).
+  uint64_t alignOf(Type *T) { return DL.getABITypeAlign(memType(T)).value(); }
+
+  /// Lays out the fields of FL from byte End as Free Pascal does under
+  /// {$packrecords N}: each field at a multiple of the smaller of its
+  /// alignment and N; a variant part (each variant from the same offset) at
+  /// a multiple of the smaller of N and 16. End becomes the end of the
+  /// last field; Align the largest alignment used.
+  void layoutAligned(FieldList *FL, uint64_t N, uint64_t &End,
+                     uint64_t &Align) {
+    auto Place = [&](FieldDecl *F) {
+      uint64_t A = std::min(alignOf(F->getType()), N);
+      End = (End + A - 1) / A * A;
+      FieldOffsets[F] = End;
+      End += sizeOf(F->getType());
+      Align = std::max(Align, A);
+    };
+    for (FieldDecl *F : FL->Fixed)
+      Place(F);
+    VariantPart *VP = FL->Variant;
+    if (!VP)
+      return;
+    if (VP->Tag)
+      Place(VP->Tag);
+    uint64_t VA = std::min<uint64_t>(N, 16);
+    uint64_t Start = (End + VA - 1) / VA * VA, Max = Start;
+    for (Variant *V : VP->Variants) {
+      uint64_t E = Start;
+      layoutAligned(V->Fields, N, E, Align);
+      Max = std::max(Max, E);
+    }
+    End = Max;
+  }
+
   /// Lays out the fields of a bitpacked record from bit Start, as Free
   /// Pascal does: ordinals take their bitPackedWidth bits, one after
   /// another; other fields and the variant part start at a byte. Returns
@@ -632,21 +679,48 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
   // Scalars in memory
   //===--------------------------------------------------------------------===//
 
+  /// The addresses (in the current function) of fields and elements that
+  /// a field alignment ({$packrecords}, packed) leaves less aligned than
+  /// their types: the alignment they have. Loads, stores and copies
+  /// through them say so.
+  llvm::DenseMap<llvm::Value *, uint64_t> AddrAligns;
+
+  /// The alignment of the value of type T at address P.
+  uint64_t addrAlign(llvm::Value *P, Type *T) {
+    auto It = AddrAligns.find(P);
+    return It != AddrAligns.end() ? It->second : alignOf(T);
+  }
+
+  /// Notes that the component of type T at Addr, Offset bytes into a value
+  /// aligned to BaseAlign, may be less aligned than T.
+  void noteComponentAlign(llvm::Value *Addr, uint64_t BaseAlign,
+                          uint64_t Offset, Type *T) {
+    uint64_t A = Offset ? std::min(BaseAlign, Offset & (~Offset + 1))
+                        : BaseAlign;
+    if (A < alignOf(T))
+      AddrAligns[Addr] = A;
+  }
+
   llvm::Value *loadScalar(llvm::Value *Ptr, Type *T, const llvm::Twine &Name = "") {
-    llvm::Value *Raw = B.CreateLoad(memType(T), Ptr, Name);
+    llvm::LoadInst *Raw = B.CreateLoad(memType(T), Ptr, Name);
+    if (auto It = AddrAligns.find(Ptr); It != AddrAligns.end())
+      Raw->setAlignment(llvm::Align(It->second));
     return T->getBase()->isBoolean() ? B.CreateTrunc(Raw, B.getInt1Ty()) : Raw;
   }
 
   void storeScalar(llvm::Value *Ptr, llvm::Value *Val, Type *T) {
     if (T->getBase()->isBoolean())
       Val = B.CreateZExt(Val, B.getInt8Ty());
-    B.CreateStore(Val, Ptr);
+    llvm::StoreInst *S = B.CreateStore(Val, Ptr);
+    if (auto It = AddrAligns.find(Ptr); It != AddrAligns.end())
+      S->setAlignment(llvm::Align(It->second));
   }
 
-  /// Copies the array, record or string T: both are aligned as T is.
+  /// Copies the array, record or string T: both are aligned as T is (or as
+  /// AddrAligns says).
   void copyAggregate(llvm::Value *Dst, llvm::Value *Src, Type *T) {
-    llvm::Align A = DL.getABITypeAlign(memType(T));
-    B.CreateMemCpy(Dst, A, Src, A, sizeOf(T));
+    B.CreateMemCpy(Dst, llvm::Align(addrAlign(Dst, T)), Src,
+                   llvm::Align(addrAlign(Src, T)), sizeOf(T));
   }
 
   /// Address of a private constant holding S (without a terminating NUL).
@@ -1562,6 +1636,7 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
 
   void emitDynOp(Type *Elem, llvm::Function *F, bool IsFini) {
     CurFn = F;
+    AddrAligns.clear();
     CurRoutine = nullptr;
     CurFrame = nullptr;
     CurPin = nullptr;
@@ -1675,8 +1750,11 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
     else
       memType(RT);
     assert(FieldOffsets.count(F) && "field of another record type");
-    return B.CreateConstInBoundsGEP1_64(B.getInt8Ty(), RecordAddr,
-                                        FieldOffsets[F], F->getName().Name);
+    uint64_t BaseAlign = addrAlign(RecordAddr, RT);
+    llvm::Value *Addr = B.CreateConstInBoundsGEP1_64(
+        B.getInt8Ty(), RecordAddr, FieldOffsets[F], F->getName().Name);
+    noteComponentAlign(Addr, BaseAlign, FieldOffsets[F], F->getType());
+    return Addr;
   }
 
   //===--------------------------------------------------------------------===//
@@ -1936,7 +2014,13 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
       OrdinalBounds Bd = getOrdinalBounds(AT->getIndexType());
       llvm::Value *Offset =
           B.CreateSub(toI64(Idx, IdxTy), B.getInt64(Bd.Lo), "idx");
-      return B.CreateInBoundsGEP(memType(AT), Base, {B.getInt64(0), Offset});
+      uint64_t BaseAlign = addrAlign(Base, AT);
+      llvm::Value *Elem =
+          B.CreateInBoundsGEP(memType(AT), Base, {B.getInt64(0), Offset});
+      // (elements are a multiple of their alignment apart)
+      if (BaseAlign < alignOf(AT->getElementType()))
+        AddrAligns[Elem] = BaseAlign;
+      return Elem;
     }
     case Expr::EK_Field: {
       auto *F = llvm::cast<FieldExpr>(E);
@@ -2233,6 +2317,11 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
   llvm::Constant *constantFor(Expr *Init, const ConstValue &Folded, Type *T,
                               llvm::Type *Ty) {
     auto *Agg = llvm::dyn_cast<AggregateExpr>(Init);
+    if (containsAlignedRecord(T)) { // its bytes (Sema checked their types)
+      std::string Bytes(sizeOf(T), '\0');
+      writeConstantBytes(Init, Folded, T, Bytes, 0);
+      return bytesConstant(Bytes, 0, Ty);
+    }
     if (!Agg)
       return scalarConstant(Folded, T, Ty);
     auto Elems = Agg->getElements();
@@ -2260,6 +2349,91 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
       return llvm::ConstantStruct::get(ST, Values);
     }
     return constantFor(Elems[0]->Value, Folded, T, Ty); // (scalar)
+  }
+
+  /// Does T have a record laid out with a field alignment?
+  static bool containsAlignedRecord(Type *T) {
+    if (auto *A = llvm::dyn_cast<ArrayType>(T))
+      return containsAlignedRecord(A->getElementType());
+    if (auto *R = llvm::dyn_cast<RecordType>(T)) {
+      if (R->getFieldAlignment())
+        return true;
+      for (FieldDecl *F : R->getAllFields())
+        if (F->getType() && containsAlignedRecord(F->getType()))
+          return true;
+    }
+    return false;
+  }
+
+  /// Writes the bytes of a typed constant's value (Init, or Folded for a
+  /// scalar) of type T into Bytes from Offset (little-endian): ordinals,
+  /// reals, short strings and char arrays, and arrays and records of them.
+  void writeConstantBytes(Expr *Init, const ConstValue &Folded, Type *T,
+                          std::string &Bytes, uint64_t Offset) {
+    auto *Agg = llvm::dyn_cast<AggregateExpr>(Init);
+    if (Agg && llvm::isa<ArrayType>(T)) {
+      Type *Elem = llvm::cast<ArrayType>(T)->getElementType();
+      uint64_t Stride = sizeOf(Elem), I = 0;
+      for (AggregateElement *El : Agg->getElements())
+        writeConstantBytes(El->Value, El->Folded, Elem, Bytes,
+                           Offset + Stride * I++);
+      return;
+    }
+    if (Agg && llvm::isa<RecordType>(T)) {
+      auto *R = llvm::cast<RecordType>(T);
+      memType(R); // (its field offsets)
+      for (AggregateElement *El : Agg->getElements())
+        if (FieldDecl *F = R->findField(El->Field.Name))
+          writeConstantBytes(El->Value, El->Folded, F->getType(), Bytes,
+                             Offset + FieldOffsets[F]);
+      return;
+    }
+    if (Agg) { // (a scalar in parentheses)
+      writeConstantBytes(Agg->getElements()[0]->Value, Folded, T, Bytes, Offset);
+      return;
+    }
+    uint64_t Size = sizeOf(T);
+    auto PutInt = [&](uint64_t V) {
+      for (uint64_t I = 0; I < Size; ++I)
+        Bytes[Offset + I] = static_cast<char>((V >> (8 * I)) & 0xff);
+    };
+    auto PutChars = [&](llvm::StringRef S) { // a short string or char array
+      if (auto *SS = llvm::dyn_cast<ShortStringType>(T)) {
+        S = S.take_front(SS->getMaxLength());
+        Bytes[Offset] = static_cast<char>(S.size());
+        for (size_t I = 0; I < S.size(); ++I)
+          Bytes[Offset + 1 + I] = S[I];
+        return;
+      }
+      for (size_t I = 0; I < S.size() && I < Size; ++I)
+        Bytes[Offset + I] = S[I];
+    };
+    switch (Folded.K) {
+    case ConstValue::Ordinal:
+      if (T->isReal()) {
+        double D = static_cast<double>(Folded.Int);
+        uint64_t U;
+        std::memcpy(&U, &D, 8);
+        PutInt(U);
+      } else if (T->isShortString() || T->isStringType()) {
+        char C = static_cast<char>(Folded.Int);
+        PutChars(llvm::StringRef(&C, 1));
+      } else {
+        PutInt(static_cast<uint64_t>(Folded.Int));
+      }
+      return;
+    case ConstValue::Real: {
+      uint64_t U;
+      std::memcpy(&U, &Folded.RealVal, 8);
+      PutInt(U);
+      return;
+    }
+    case ConstValue::String:
+      PutChars(Folded.Str);
+      return;
+    case ConstValue::None:
+      return;
+    }
   }
 
   llvm::Constant *scalarConstant(const ConstValue &C, Type *T, llvm::Type *Ty) {
@@ -2777,6 +2951,7 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
   void emitRoutineBody(RoutineDecl *R) {
     llvm::Function *F = Functions[R];
     CurFn = F;
+    AddrAligns.clear();
     CurRoutine = R;
     CurSP = DIB ? Subprograms[R] : nullptr;
     B.SetCurrentDebugLocation(llvm::DebugLoc());
@@ -3467,6 +3642,7 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
   /// interfaces (the runtime calls it for each class of a freed object).
   void emitCleanup(ClassType *C, llvm::Function *F) {
     CurFn = F;
+    AddrAligns.clear();
     CurRoutine = nullptr;
     CurFrame = nullptr;
     CurPin = nullptr;
@@ -4701,6 +4877,8 @@ public:
     emitCleanups();
 
     CurFn = Main;
+
+    AddrAligns.clear();
     CurRoutine = nullptr;
     CurFrame = nullptr;
     CurPin = nullptr;
@@ -4776,6 +4954,8 @@ public:
     emitCleanups();
 
     CurFn = Init;
+
+    AddrAligns.clear();
     CurRoutine = nullptr;
     CurFrame = nullptr;
     CurPin = nullptr;

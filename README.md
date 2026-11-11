@@ -366,6 +366,18 @@ the default in `--mode=objfpc`; in tp mode the directive needs it, and
 `forward`, `external` or `virtual`/`override`/`abstract`. Separately
 compiled units are not inlined into their users.
 
+**Record layout** (`{$packrecords N}`, as in Free Pascal; also `{$align N}`,
+`{$aN}`, `{$a+}`/`{$align on}` = 4, `{$a-}`/`{$align off}` = 1): the records
+declared after it place each field at a multiple of the smaller of its
+alignment and N (1, 2, 4, 8, 16 or 32), a variant part at a multiple of the
+smaller of N and 16, and round their size to the largest alignment used;
+`C`, `DEFAULT` and `NORMAL` are the natural (C) layout. `packed record` is
+`{$packrecords 1}`. Accesses to fields that end up less aligned than their
+types say so in the generated code; passing one as a `var` parameter or
+through `@` gives a pointer that is not (it works on x86-64 and AArch64, as
+in Free Pascal). Typed constants of such records cannot hold ansistrings,
+pointers and the like yet. Classes keep their natural layout.
+
 **Scoped enumerations** (`{$scopedenums on}`, also `+`; `off`/`-` ends
 them), as in Free Pascal: the values of an enumeration declared while it is
 on are not in scope, only reached through their type (`TColor.Red`), so

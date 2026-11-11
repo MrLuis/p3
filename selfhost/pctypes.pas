@@ -106,6 +106,9 @@ function findOwnMember(c: PType; name: PName): PDecl;
 function findMember(c: PType; name: PName; var owner: PType): PDecl;
 function inheritsFrom(c, a: PType): boolean;
 function getOrdinalBounds(t: PType): TOrdinalBounds;
+{ The largest alignment of record t's fields: 1 for a packed record, N
+  under $packrecords N (as in Free Pascal); 0: the natural (C) layout. }
+function fieldAlignment(t: PType): longint;
 { Is t qword (unsigned 64-bit), not a subrange of it? getOrdinalBounds
   gives it 0..high(int64): callers that need its whole range test this. }
 function isQWord(t: PType): boolean;
@@ -769,6 +772,14 @@ begin
     c := c^.classParent;
   end;
   inheritsFrom := false;
+end;
+
+function fieldAlignment(t: PType): longint;
+begin
+  if t^.isPackedRecord then
+    fieldAlignment := 1
+  else
+    fieldAlignment := t^.recordPackRecords;
 end;
 
 function isQWord(t: PType): boolean;

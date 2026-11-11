@@ -1751,6 +1751,137 @@ end;
 
 { The constant for a typed-constant initializer init of type t (memory
   type ty); folded is Sema's value for non-aggregates. }
+{ Does t have a record laid out with a field alignment? }
+function containsAlignedRecord(t: PType): boolean;
+var
+  i: longint;
+  f: PDecl;
+begin
+  if t^.kind = tyArray then
+    exit(containsAlignedRecord(t^.elementType));
+  if t^.kind = tyRecord then
+  begin
+    if fieldAlignment(t) <> 0 then
+      exit(true);
+    for i := 0 to t^.allFields.count - 1 do
+    begin
+      f := PDecl(listGet(t^.allFields, i));
+      if (f^.fieldType <> nil) and containsAlignedRecord(f^.fieldType) then
+        exit(true);
+    end;
+  end;
+  containsAlignedRecord := false;
+end;
+
+{ Writes the bytes of a typed constant's value (init, or folded for a
+  scalar) of type t into bytes from offset (little-endian): ordinals,
+  reals, short strings and char arrays, and arrays and records of them. }
+procedure writeConstantBytes(init: PNode; const folded: TConstValue; t: PType;
+                             bytes: PCharArray; offset: int64);
+type
+  TRealBits = record
+    case boolean of
+      true: (d: double);
+      false: (bits: int64);
+  end;
+var
+  i: longint;
+  el: PAggElement;
+  elem: PType;
+  stride, size: int64;
+  f: PDecl;
+  ignored: PIRType;
+  rb: TRealBits;
+  ch: char;
+
+  procedure putInt(v: int64);
+  var
+    b: int64;
+  begin
+    for b := 0 to size - 1 do
+      bytes^[offset + b] := chr(longint((v shr (8 * b)) and 255));
+  end;
+
+  procedure putChars(p: PCharArray; n: int64);
+  var
+    b: int64;
+  begin
+    if t^.kind = tyShortString then
+    begin
+      if n > t^.maxLength then
+        n := t^.maxLength;
+      bytes^[offset] := chr(longint(n));
+      for b := 0 to n - 1 do
+        bytes^[offset + 1 + b] := p^[b];
+      exit;
+    end;
+    b := 0;
+    while (b < n) and (b < size) do
+    begin
+      bytes^[offset + b] := p^[b];
+      b := b + 1;
+    end;
+  end;
+
+begin
+  if (init^.kind = nkAggregate) and (t^.kind = tyArray) then
+  begin
+    elem := t^.elementType;
+    stride := sizeOf_(elem);
+    for i := 0 to init^.aggElems.count - 1 do
+    begin
+      el := PAggElement(listGet(init^.aggElems, i));
+      writeConstantBytes(el^.value, el^.folded, elem, bytes, offset + stride * i);
+    end;
+    exit;
+  end;
+  if (init^.kind = nkAggregate) and (t^.kind = tyRecord) then
+  begin
+    ignored := memType(t); { (its field offsets) }
+    for i := 0 to init^.aggElems.count - 1 do
+    begin
+      el := PAggElement(listGet(init^.aggElems, i));
+      f := findField(t, el^.field.name);
+      if f <> nil then
+        writeConstantBytes(el^.value, el^.folded, f^.fieldType, bytes,
+                           offset + f^.cgOffset);
+    end;
+    exit;
+  end;
+  if init^.kind = nkAggregate then { (a scalar in parentheses) }
+  begin
+    el := PAggElement(listGet(init^.aggElems, 0));
+    writeConstantBytes(el^.value, folded, t, bytes, offset);
+    exit;
+  end;
+  size := sizeOf_(t);
+  case folded.kind of
+    ckOrdinal:
+      if t^.kind = tyReal then
+      begin
+        rb.d := folded.intVal;
+        putInt(rb.bits);
+      end
+      else if (t^.kind = tyShortString) or isStringType(t) then
+      begin
+        ch := chr(longint(folded.intVal and 255));
+        putChars(PCharArray(@ch), 1);
+      end
+      else
+        putInt(folded.intVal);
+    ckReal:
+      begin
+        rb.d := folded.realVal;
+        putInt(rb.bits);
+      end;
+    ckString:
+      putChars(folded.strVal^.chars, folded.strVal^.len);
+  else
+    begin
+    end; { none }
+  end;
+end;
+
 function constantFor(init: PNode; const folded: TConstValue; t: PType; ty: PIRType): TV;
 var
   i, j: longint;
@@ -1758,7 +1889,20 @@ var
   f: PDecl;
   fty: PIRType;
   elems: TPtrList;
+  img: TBuf;
+  n: int64;
 begin
+  if containsAlignedRecord(t) then { its bytes (Sema checked their types) }
+  begin
+    bufInit(img);
+    n := sizeOf_(t);
+    for i := 1 to n do
+      bufAddChar(img, #0);
+    writeConstantBytes(init, folded, t, img.data, 0);
+    constantFor := bytesConstant(internChars(img.data, 0, n), 0, ty);
+    bufFree(img);
+    exit;
+  end;
   if init^.kind <> nkAggregate then
     exit(scalarConstant(folded, t, ty));
   listInit(elems);
@@ -2461,6 +2605,7 @@ var
   d: PDecl;
 begin
   curFn := f;
+  resetAddrAligns;
   curRoutine := nil;
   curSP := nil;
   irBeginBody(f);
@@ -2488,6 +2633,7 @@ begin
     f := PIRFunc(listGet(dynOpFns, k));
     elem := PType(listGet(dynOpElems, k));
     curFn := f;
+    resetAddrAligns;
     curRoutine := nil;
     curSP := nil;
     irBeginBody(f);
@@ -2561,6 +2707,7 @@ begin
   listInit(managedTypes);
   f := fnOf(r);
   curFn := f;
+  resetAddrAligns;
   curRoutine := r;
   curSP := PSPInfo(r^.cgDbg);
   irBeginBody(f);
@@ -2823,6 +2970,7 @@ var
 begin
   blk := prog^.progBlock;
   curFn := mainFn;
+  resetAddrAligns;
   curRoutine := nil;
   curFrame := irNull;
   curSP := nil;
@@ -2902,6 +3050,8 @@ begin
   mapInit(lowered);
   mapInit(stringConsts);
   mapInit(enumNameTables);
+  mapInit(addrAligns);
+  addrAlignGen := 0;
   mapInit(ansiConsts);
   mapInit(classLayouts);
   mapInit(vmts);
@@ -2987,6 +3137,7 @@ begin
 
   { the initialization part: files, then the statements }
   curFn := initFn;
+  resetAddrAligns;
   curRoutine := nil;
   curFrame := irNull;
   curSP := nil;

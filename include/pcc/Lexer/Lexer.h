@@ -49,6 +49,10 @@ class Lexer {
   bool AdvancedRecords = false; ///< {$modeswitch advancedrecords}
   bool TypeHelpers = false;     ///< {$modeswitch typehelpers}
   bool ScopedEnums = false;     ///< {$scopedenums on}
+  /// {$packrecords N} / {$align N} / {$aN}: the largest alignment of the
+  /// fields of the records declared after it (1, 2, 4, 8, 16 or 32); 0: the
+  /// natural (C) layout.
+  unsigned PackRecords = 0;
   bool LongStrings = false;     ///< {$H+}: `string` is an ansistring
 
   // Macros ({$macro on}, {$define NAME := value}, as in Free Pascal): the
@@ -144,6 +148,7 @@ public:
   /// Are the values of enumerations declared here reached only through
   /// their type ({$scopedenums on})?
   bool scopedEnums() const { return ScopedEnums; }
+  unsigned packRecords() const { return PackRecords; }
   bool longStrings() const { return LongStrings; }
   /// Does the `inline` directive inline ({$inline on})?
   bool inlineOn() const { return InlineOn; }

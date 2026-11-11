@@ -441,6 +441,8 @@ begin
           line('RecordTypeSpec packed')
         else
           line('RecordTypeSpec');
+        if ts^.recPackRecords <> 0 then
+          bufAdd(outBuf, ' packrecords ' + intToStr(ts^.recPackRecords));
         loc(ts^.b);
         indent := indent + 2;
         printFieldList(ts^.fields);

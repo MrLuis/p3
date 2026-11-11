@@ -64,6 +64,7 @@ struct GenericTokens {
   llvm::ArrayRef<Token> Tokens;
   bool LongStrings = false, AdvancedRecords = false, CorbaInterfaces = false,
        InlineOn = false, TypeHelpers = false, ScopedEnums = false;
+  unsigned PackRecords = 0;
 };
 
 class Parser {
@@ -107,6 +108,7 @@ class Parser {
   bool advancedRecords() const;
   bool typeHelpers() const;
   bool scopedEnums() const;
+  unsigned packRecords() const;
   bool corbaInterfaces() const;
   bool inlineOn() const;
   bool startsGeneric();
@@ -193,6 +195,7 @@ class Parser {
   TypeSpec *parseTypeIdentifier(llvm::StringRef Context);
   TypeSpec *parseArrayType(SourceLocation Start, bool Packed);
   TypeSpec *parseRecordType(SourceLocation Start, bool Packed);
+  TypeSpec *parseRecordTypeBody(SourceLocation Start, bool Packed);
   TypeSpec *parseAdvancedRecord(SourceLocation Start, SourceLocation RecordLoc,
                                 bool Packed);
   /// parseFieldList skipped to the record's `end` after an error.

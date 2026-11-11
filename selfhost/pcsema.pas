@@ -913,7 +913,7 @@ begin
   fl := PFieldList(arenaAlloc(sizeof(TFieldList)));
   listInit(fl^.fixed);
   fl^.variant := vp;
-  rec := newRecordType(fl, all, true);
+  rec := newRecordType(fl, all, false);
   setDeclName(rec, intern('TGUID'));
   tguidT := rec;
   d := newDecl(dkType, memberIdent('TGUID'), noLoc);
@@ -1442,6 +1442,61 @@ begin
 end;
 
 { Does t have a bitpacked part (itself, an element, a field)? }
+{ Does t have a record laid out with a field alignment (packed, or
+  $packrecords N): itself, an element, a field? }
+function containsAlignedRecord(t: PType): boolean;
+var
+  i: longint;
+  f: PDecl;
+begin
+  if t^.kind = tyArray then
+    exit(containsAlignedRecord(t^.elementType));
+  if t^.kind = tyRecord then
+  begin
+    if fieldAlignment(t) <> 0 then
+      exit(true);
+    for i := 0 to t^.allFields.count - 1 do
+    begin
+      f := PDecl(listGet(t^.allFields, i));
+      if (f^.fieldType <> nil) and containsAlignedRecord(f^.fieldType) then
+        exit(true);
+    end;
+  end;
+  containsAlignedRecord := false;
+end;
+
+{ A type in t whose values a constant's byte image cannot hold (one that is
+  not an ordinal, real or short string, or an array or record of those),
+  or nil. (The constants of records laid out with a field alignment are
+  their bytes.) }
+function notByteImage(t: PType): PType;
+var
+  i: longint;
+  f: PDecl;
+  bad: PType;
+begin
+  notByteImage := nil;
+  if t^.kind = tyArray then
+    exit(notByteImage(t^.elementType));
+  if t^.kind = tyRecord then
+  begin
+    for i := 0 to t^.allFields.count - 1 do
+    begin
+      f := PDecl(listGet(t^.allFields, i));
+      if f^.fieldType <> nil then
+      begin
+        bad := notByteImage(f^.fieldType);
+        if bad <> nil then
+          exit(bad);
+      end;
+    end;
+    exit;
+  end;
+  if isOrdinal(t) or (t^.kind in [tyReal, tyShortString, tyError]) then
+    exit;
+  notByteImage := t;
+end;
+
 function containsBitPacked(t: PType): boolean;
 var
   i: longint;
@@ -2406,6 +2461,7 @@ begin
         if not resolveFieldList(ts^.fields, all, seen) then
           exit;
         t := newRecordType(ts^.fields, all, ts^.recPacked);
+        t^.recordPackRecords := ts^.recPackRecords;
         if ts^.recBitPacked then
         begin
           t^.isBitPackedRecord := true;
@@ -5235,6 +5291,7 @@ end;
 procedure declareVar(v: PDecl);
 var
   folded: TConstValue;
+  unimaged: PType;
 begin
   v^.varType := resolveType(v^.varSpec, nil);
   v^.owner := curRoutine;
@@ -5256,6 +5313,9 @@ begin
       constInitWhat := 'initial value'
     else
       constInitWhat := 'typed constant value';
+    unimaged := nil;
+    if containsAlignedRecord(v^.varType) then
+      unimaged := notByteImage(v^.varType);
     if containsBitPacked(v^.varType) then
     begin
       if v^.isInitVar then
@@ -5263,6 +5323,18 @@ begin
       else
         ms('typed constants');
       ma(' of bitpacked types are not supported yet');
+      errR(v^.init^.b, nodeRange(v^.init));
+    end
+    else if unimaged <> nil then
+    begin
+      if v^.isInitVar then
+        ms('initialized variables')
+      else
+        ms('typed constants');
+      ma(' of packed records or records under {$packrecords} with values ' +
+         'of type ');
+      maT(unimaged);
+      ma(' are not supported yet');
       errR(v^.init^.b, nodeRange(v^.init));
     end
     else if not isError(v^.varType) and checkConstInit(v^.init, v^.varType, folded) then

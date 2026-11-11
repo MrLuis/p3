@@ -1010,6 +1010,7 @@ class RecordTypeSpec final : public TypeSpec {
   FieldList *Fields;
   bool Packed;
   bool BitPacked = false; ///< bitpacked (Free Pascal)
+  unsigned PackRecords = 0;
   /// Advanced records (objfpc, {$modeswitch advancedrecords}): methods,
   /// class operators and properties, in source order.
   llvm::ArrayRef<Decl *> Members;
@@ -1021,6 +1022,9 @@ public:
   bool isPacked() const { return Packed; }
   bool isBitPacked() const { return BitPacked; }
   void setBitPacked() { BitPacked = true; }
+  /// {$packrecords N} where it was declared (0: the natural layout).
+  unsigned getPackRecords() const { return PackRecords; }
+  void setPackRecords(unsigned N) { PackRecords = N; }
   llvm::ArrayRef<Decl *> getMembers() const { return Members; }
   void setMembers(llvm::ArrayRef<Decl *> M) { Members = M; }
   static bool classof(const TypeSpec *T) { return T->getKind() == TS_Record; }

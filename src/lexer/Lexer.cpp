@@ -151,6 +151,46 @@ void Lexer::handleDirective(const char *Start, llvm::StringRef Text) {
     return;
   }
 
+  // {$packrecords N|C|DEFAULT|NORMAL}, {$align N|ON|OFF}, {$aN}, {$a+|-}:
+  // how the fields of the records declared after it are aligned (as in
+  // FPC, where ON and + mean 4, OFF and - mean 1).
+  auto PackValue = [](llvm::StringRef A) -> int {
+    unsigned N;
+    if (A.getAsInteger(10, N))
+      return -1;
+    return N == 1 || N == 2 || N == 4 || N == 8 || N == 16 || N == 32
+               ? static_cast<int>(N)
+               : -1;
+  };
+  if (Word.equals_insensitive("packrecords")) {
+    if (Arg.equals_insensitive("c") || Arg.equals_insensitive("default") ||
+        Arg.equals_insensitive("normal"))
+      PackRecords = 0;
+    else if (int N = PackValue(Arg); N > 0)
+      PackRecords = static_cast<unsigned>(N);
+    else
+      Diags.error(locOf(Start), "illegal record alignment '" + Arg +
+                                    "': use 1, 2, 4, 8, 16, 32, C, DEFAULT "
+                                    "or NORMAL");
+    return;
+  }
+  if (Word.equals_insensitive("align")) {
+    if (Arg.equals_insensitive("on") || Arg == "+")
+      PackRecords = 4;
+    else if (Arg.equals_insensitive("off") || Arg == "-")
+      PackRecords = 1;
+    else if (int N = PackValue(Arg); N > 0)
+      PackRecords = static_cast<unsigned>(N);
+    else
+      Diags.error(locOf(Start), "illegal record alignment '" + Arg +
+                                    "': use 1, 2, 4, 8, 16, 32, ON or OFF");
+    return;
+  }
+  if (Word.equals_insensitive("a") && PackValue(Arg) > 0) { // {$A4}
+    PackRecords = static_cast<unsigned>(PackValue(Arg));
+    return;
+  }
+
   // {$scopedenums on|off}: whether the values of the enumerations declared
   // after it are reached only through their type (TColor.Red), as in FPC.
   if (Word.equals_insensitive("scopedenums")) {
@@ -223,6 +263,8 @@ void Lexer::handleDirective(const char *Start, llvm::StringRef Text) {
       bool On = P[1] == '+';
       if (Letter == 'H')
         LongStrings = On;
+      if (Letter == 'A') // {$A+}: as {$A4} (FPC); {$A-}: no alignment
+        PackRecords = On ? 4 : 1;
       if (Directives && (Letter == 'R' || Letter == 'Q'))
         Directives->add(locOf(Start), BufBegin, BufEnd,
                         Letter == 'R' ? CheckDirectives::Range

@@ -50,6 +50,7 @@ type
     toks: TPtrList; { of PToken }
     longStrings, advancedRecords, corbaInterfaces, inlineOn: boolean;
     typeHelpers, scopedEnums: boolean;
+    packRecords: longint;
   end;
 
 var
@@ -1832,6 +1833,7 @@ begin
   toks^.inlineOn := lx.inlineOn;
   toks^.typeHelpers := lx.typeHelpers;
   toks^.scopedEnums := lx.scopedEnums;
+  toks^.packRecords := lx.packRecords;
   listInit(rec);
   savedRec := recording;
   recording := @rec;
@@ -1912,6 +1914,7 @@ begin
   lx.inlineOn := toks^.inlineOn;
   lx.typeHelpers := toks^.typeHelpers;
   lx.scopedEnums := toks^.scopedEnums;
+  lx.packRecords := toks^.packRecords;
   recording := nil;
   replay := toks;
   replayPos := 0;
@@ -3432,13 +3435,13 @@ begin
 end;
 
 { recordType = "record" fieldList "end" . }
-function parseRecordType(start: TLoc; packed_: boolean): PTypeSpec;
+function parseRecordTypeBody(start: TLoc; packed_: boolean): PTypeSpec;
 var
   recordLoc: TLoc;
   fields: PFieldList;
   ts: PTypeSpec;
 begin
-  parseRecordType := nil;
+  parseRecordTypeBody := nil;
   recordLoc := consumeToken; { 'record' }
   { record helper for T (objfpc): `helper` followed by `for` or `(` cannot
     begin a field }
@@ -3466,6 +3469,18 @@ begin
   ts := newTypeSpec(tsRecord, start, prevTokEnd);
   ts^.fields := fields;
   ts^.recPacked := packed_;
+  parseRecordTypeBody := ts;
+end;
+
+function parseRecordType(start: TLoc; packed_: boolean): PTypeSpec;
+var
+  pack: longint;
+  ts: PTypeSpec;
+begin
+  pack := lx.packRecords; { $packrecords N here }
+  ts := parseRecordTypeBody(start, packed_);
+  if (ts <> nil) and (ts^.kind = tsRecord) then
+    ts^.recPackRecords := pack;
   parseRecordType := ts;
 end;
 

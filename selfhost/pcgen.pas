@@ -411,8 +411,8 @@ begin
 end;
 
 { IRBuilder::CreateMemCpy / CreateMemMove / CreateMemSet }
-procedure memTransfer(const fname, paramText: string; const dst, src, n: TV;
-                      align: int64);
+procedure memTransfer2(const fname, paramText: string; const dst, src, n: TV;
+                       dstAlign, srcAlign: int64);
 var
   f: PIRFunc;
   a: TBuf;
@@ -428,12 +428,18 @@ begin
     listAdd(f^.params, irI1);
   end;
   bufInit(a);
-  irArgsAddAttr(a, dst, 'align ' + intToStr(align));
-  irArgsAddAttr(a, src, 'align ' + intToStr(align));
+  irArgsAddAttr(a, dst, 'align ' + intToStr(dstAlign));
+  irArgsAddAttr(a, src, 'align ' + intToStr(srcAlign));
   irArgsAdd(a, n);
   irArgsAdd(a, irConstBool(false));
   ignored := irCall(f, a, '');
   bufFree(a);
+end;
+
+procedure memTransfer(const fname, paramText: string; const dst, src, n: TV;
+                      align: int64);
+begin
+  memTransfer2(fname, paramText, dst, src, n, align, align);
 end;
 
 procedure emitMemCpyAligned(const dst, src, n: TV; align: int64);
@@ -578,6 +584,66 @@ begin
   layoutFieldList := st;
 end;
 
+{ The alignment of a value of type t (a field's natural alignment). }
+function alignOf(t: PType): int64;
+begin
+  alignOf := memType(t)^.align;
+end;
+
+{ Lays out the fields of fl from byte en as Free Pascal does under
+  $packrecords n: each field at a multiple of the smaller of its alignment
+  and n; a variant part (each variant from the same offset) at a multiple
+  of the smaller of n and 16. en becomes the end of the last field; align
+  the largest alignment used. }
+procedure layoutAligned(fl: PFieldList; n: int64; var en, align: int64);
+var
+  vp: PVariantPart;
+  i: longint;
+  va, start, mx, e: int64;
+  tagType: PType;
+
+  procedure place(f: PDecl; t: PType);
+  var
+    a: int64;
+  begin
+    a := alignOf(t);
+    if n < a then
+      a := n;
+    en := (en + a - 1) div a * a;
+    f^.cgOffset := en;
+    en := en + memType(t)^.size;
+    if a > align then
+      align := a;
+  end;
+
+begin
+  for i := 0 to fl^.fixed.count - 1 do
+    place(PDecl(listGet(fl^.fixed, i)), PDecl(listGet(fl^.fixed, i))^.fieldType);
+  vp := fl^.variant;
+  if vp = nil then
+    exit;
+  if vp^.tag <> nil then
+  begin
+    tagType := vp^.tag^.fieldType;
+    if tagType = nil then
+      tagType := vp^.tagType;
+    place(vp^.tag, tagType);
+  end;
+  va := n;
+  if va > 16 then
+    va := 16;
+  start := (en + va - 1) div va * va;
+  mx := start;
+  for i := 0 to vp^.variants.count - 1 do
+  begin
+    e := start;
+    layoutAligned(PVariant(listGet(vp^.variants, i))^.fields, n, e, align);
+    if e > mx then
+      mx := e;
+  end;
+  en := mx;
+end;
+
 { Lays out the fields of a bitpacked record from bit start, as Free
   Pascal does: ordinals take their bitPackedWidth bits, one after another;
   other fields and the variant part start at a byte. Returns the bit after
@@ -628,7 +694,7 @@ function lowerType(t: PType): PIRType;
 var
   bd: TOrdinalBounds;
   name: string;
-  bits: int64;
+  bits, en, al, size: int64;
   elems: TPtrList;
 begin
   case t^.kind of
@@ -658,6 +724,20 @@ begin
           bits := layoutBitPacked(t^.fieldList, 0);
           listInit(elems);
           listAdd(elems, irArray((bits + 7) div 8, irI8));
+          lowerType := irStructNamed(name, elems);
+          listFree(elems);
+        end
+        else if fieldAlignment(t) <> 0 then
+        begin
+          { Free Pascal's layout under $packrecords N (packed: 1), as the
+            record's bytes in units of its alignment (which LLVM then gives
+            it as a field or an element) }
+          en := 0;
+          al := 1;
+          layoutAligned(t^.fieldList, fieldAlignment(t), en, al);
+          size := (en + al - 1) div al * al;
+          listInit(elems);
+          listAdd(elems, irArray(size div al, irInt(longint(al * 8))));
           lowerType := irStructNamed(name, elems);
           listFree(elems);
         end
@@ -742,11 +822,92 @@ end;
 
 { --- Scalars in memory --- }
 
+{ The addresses (in the current function) of fields and elements that a
+  field alignment ($packrecords, packed) leaves less aligned than their
+  types: the alignment they have, by the address's operand text (entries
+  of other functions are stale: their generation differs). Loads, stores
+  and copies through them say so. }
+type
+  PAddrAlign = ^TAddrAlign;
+  TAddrAlign = record
+    gen: longint;
+    align: int64;
+  end;
+
+var
+  addrAligns: TIntMap;
+  addrAlignGen: longint;
+
+{ Forgets the addresses of the previous function. }
+procedure resetAddrAligns;
+begin
+  addrAlignGen := addrAlignGen + 1;
+end;
+
+function knownAddrAlign(const p: TV; var align: int64): boolean;
+var
+  e: PAddrAlign;
+begin
+  knownAddrAlign := false;
+  e := PAddrAlign(mapGet(addrAligns, intern(p.v)^.id));
+  if (e = nil) or (e^.gen <> addrAlignGen) then
+    exit;
+  align := e^.align;
+  knownAddrAlign := true;
+end;
+
+procedure setAddrAlign(const p: TV; align: int64);
+var
+  e: PAddrAlign;
+begin
+  e := PAddrAlign(mapGet(addrAligns, intern(p.v)^.id));
+  if e = nil then
+  begin
+    e := PAddrAlign(arenaAlloc(sizeof(TAddrAlign)));
+    mapPut(addrAligns, intern(p.v)^.id, e);
+  end;
+  e^.gen := addrAlignGen;
+  e^.align := align;
+end;
+
+{ The alignment of the value of type t at address p. }
+function addrAlign(const p: TV; t: PType): int64;
+var
+  a: int64;
+begin
+  if knownAddrAlign(p, a) then
+    exit(a);
+  addrAlign := alignOf(t);
+end;
+
+{ Notes that the component of type t at addr, offset bytes into a value
+  aligned to baseAlign, may be less aligned than t. }
+procedure noteComponentAlign(const addr: TV; baseAlign, offset: int64; t: PType);
+var
+  a: int64;
+begin
+  a := baseAlign;
+  if offset <> 0 then
+  begin
+    {$Q-}{$R-}
+    a := offset and (not offset + 1);
+    {$Q+}{$R+}
+    if baseAlign < a then
+      a := baseAlign;
+  end;
+  if a < alignOf(t) then
+    setAddrAlign(addr, a);
+end;
+
 function loadScalar(const p: TV; t: PType; const name: string): TV;
 var
   raw: TV;
+  a: int64;
 begin
-  raw := irLoad(memType(t), p, name);
+  if knownAddrAlign(p, a) then
+    raw := irLoadAlign(memType(t), p, longint(a), name)
+  else
+    raw := irLoad(memType(t), p, name);
   if isBoolBase(t) then
     loadScalar := irCast('trunc', raw, irI1, '')
   else
@@ -756,17 +917,23 @@ end;
 procedure storeScalar(const p, v: TV; t: PType);
 var
   x: TV;
+  a: int64;
 begin
   x := v;
   if isBoolBase(t) then
     x := irCast('zext', v, irI8, '');
-  irStore(x, p);
+  if knownAddrAlign(p, a) then
+    irStoreAlign(x, p, longint(a))
+  else
+    irStore(x, p);
 end;
 
 { Copies the array, record or string t: both are aligned as t is. }
 procedure copyAggregate(const dst, src: TV; t: PType);
 begin
-  emitMemCpyAligned(dst, src, i64c(sizeOf_(t)), memType(t)^.align);
+  memTransfer2('llvm.memcpy.p0.p0.i64',
+               'ptr noalias nocapture writeonly, ptr noalias nocapture readonly, i64, i1 immarg',
+               dst, src, i64c(sizeOf_(t)), addrAlign(dst, t), addrAlign(src, t));
 end;
 
 { The address of a private constant holding the bytes (no NUL), shared by
@@ -1329,12 +1496,17 @@ end;
 function fieldAddress(const recAddr: TV; rt: PType; f: PDecl): TV;
 var
   ignored: PIRType;
+  baseAlign: int64;
+  addr: TV;
 begin
   if rt^.kind = tyClass then
     ignored := classLayout(rt) { recAddr is the object }
   else
     ignored := memType(rt);
-  fieldAddress := irGEP1(irI8, recAddr, i64c(f^.cgOffset), true, nm(f^.ident.name));
+  baseAlign := addrAlign(recAddr, rt);
+  addr := irGEP1(irI8, recAddr, i64c(f^.cgOffset), true, nm(f^.ident.name));
+  noteComponentAlign(addr, baseAlign, f^.cgOffset, f^.fieldType);
+  fieldAddress := addr;
 end;
 
 { Creates (init) or releases the PasFile objects of all files in an object
@@ -2300,6 +2472,8 @@ end;
 
 function emitAddress(e: PNode): TV;
 var
+  baseAlign: int64;
+  elemAddr: TV;
   d: PDecl;
   base, idx, x, bad, offset, tmp: TV;
   bt, idxTy: PType;
@@ -2444,7 +2618,12 @@ begin
                           'array index out of bounds');
         bd := getOrdinalBounds(bt^.indexType);
         offset := irBin('sub', toI64(idx, idxTy), i64c(bd.lo), 'idx');
-        emitAddress := irGEP2(memType(bt), base, i64c(0), offset, '');
+        baseAlign := addrAlign(base, bt);
+        elemAddr := irGEP2(memType(bt), base, i64c(0), offset, '');
+        { (elements are a multiple of their alignment apart) }
+        if baseAlign < alignOf(bt^.elementType) then
+          setAddrAlign(elemAddr, baseAlign);
+        emitAddress := elemAddr;
       end;
     nkField:
       begin

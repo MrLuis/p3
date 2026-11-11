@@ -451,7 +451,7 @@ class Checker : public StmtVisitor<Checker>,
     auto *FL = Ctx.create<FieldList>();
     FL->Variant = VP;
     auto *Rec = Ctx.create<RecordType>(FL, Ctx.copyArray<FieldDecl *>(All),
-                                       /*Packed=*/true);
+                                       /*Packed=*/false);
     Rec->setDeclName("TGUID");
     TGuidTy = Rec;
     Standard.insert("tguid", Ctx.create<TypeDecl>(SourceLocation(),
@@ -983,6 +983,39 @@ class Checker : public StmtVisitor<Checker>,
                 "no address (they cannot be passed as 'var' parameters or used "
                 "with '@')",
                 {E->getRange()});
+  }
+
+  /// Does T have a record laid out with a field alignment (packed, or
+  /// {$packrecords N}): itself, an element, a field?
+  static bool containsAlignedRecord(Type *T) {
+    if (auto *A = llvm::dyn_cast<ArrayType>(T))
+      return containsAlignedRecord(A->getElementType());
+    if (auto *R = llvm::dyn_cast<RecordType>(T)) {
+      if (R->getFieldAlignment())
+        return true;
+      for (FieldDecl *F : R->getAllFields())
+        if (F->getType() && containsAlignedRecord(F->getType()))
+          return true;
+    }
+    return false;
+  }
+
+  /// A type in T whose values a constant's byte image cannot hold (one that
+  /// is not an ordinal, real or short string, or an array or record of
+  /// those), or null. (The constants of records laid out with a field
+  /// alignment are their bytes.)
+  static Type *notByteImage(Type *T) {
+    if (auto *A = llvm::dyn_cast<ArrayType>(T))
+      return notByteImage(A->getElementType());
+    if (auto *R = llvm::dyn_cast<RecordType>(T)) {
+      for (FieldDecl *F : R->getAllFields())
+        if (Type *Bad = F->getType() ? notByteImage(F->getType()) : nullptr)
+          return Bad;
+      return nullptr;
+    }
+    if (T->isOrdinal() || T->isReal() || T->isShortString() || T->isError())
+      return nullptr;
+    return T;
   }
 
   /// Does T have a bitpacked part (itself, an element, a field)?
@@ -1715,6 +1748,7 @@ class Checker : public StmtVisitor<Checker>,
       auto *R = Ctx.create<RecordType>(RS->getFields(),
                                        Ctx.copyArray<FieldDecl *>(All),
                                        RS->isPacked());
+      R->setPackRecords(RS->getPackRecords());
       if (RS->isBitPacked()) {
         R->setBitPacked();
         for (FieldDecl *F : All) // ordinals, and what needs no alignment
@@ -3521,11 +3555,22 @@ class Checker : public StmtVisitor<Checker>,
       }
       ConstValue Folded;
       ConstInitWhat = V->isTypedConst() ? "typed constant value" : "initial value";
+      Type *Unimaged = containsAlignedRecord(V->getType())
+                           ? notByteImage(V->getType())
+                           : nullptr;
       if (containsBitPacked(V->getType()))
         Diags.error(Init->getBeginLoc(),
                     std::string(V->isTypedConst() ? "typed constants"
                                                   : "initialized variables") +
                         " of bitpacked types are not supported yet",
+                    {Init->getRange()});
+      else if (Unimaged)
+        Diags.error(Init->getBeginLoc(),
+                    std::string(V->isTypedConst() ? "typed constants"
+                                                  : "initialized variables") +
+                        " of packed records or records under {$packrecords} "
+                        "with values of type " +
+                        quoted(Unimaged) + " are not supported yet",
                     {Init->getRange()});
       else if (!V->getType()->isError() &&
                checkConstInit(Init, V->getType(), Folded))
