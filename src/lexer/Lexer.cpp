@@ -151,6 +151,43 @@ void Lexer::handleDirective(const char *Start, llvm::StringRef Text) {
     return;
   }
 
+  // {$push} / {$pop}: save and restore the local switches (at most 21
+  // levels, as in FPC).
+  if (Word.equals_insensitive("push") && Arg.empty()) {
+    if (SwitchStack.size() >= 21) {
+      Diags.error(locOf(Start), "too many levels of {$push} (at most 21)");
+      return;
+    }
+    SavedSwitches S{LongStrings, CorbaInterfaces, InlineOn, ScopedEnums,
+                    PackRecords, CheckDirectives::Default,
+                    CheckDirectives::Default};
+    if (Directives) {
+      S.Range = Directives->stateAt(CheckDirectives::Range, locOf(Start));
+      S.Overflow = Directives->stateAt(CheckDirectives::Overflow, locOf(Start));
+    }
+    SwitchStack.push_back(S);
+    return;
+  }
+  if (Word.equals_insensitive("pop") && Arg.empty()) {
+    if (SwitchStack.empty()) {
+      Diags.error(locOf(Start), "{$pop} without a preceding {$push}");
+      return;
+    }
+    SavedSwitches S = SwitchStack.pop_back_val();
+    LongStrings = S.LongStrings;
+    CorbaInterfaces = S.CorbaInterfaces;
+    InlineOn = S.InlineOn;
+    ScopedEnums = S.ScopedEnums;
+    PackRecords = S.PackRecords;
+    if (Directives) {
+      Directives->addState(locOf(Start), BufBegin, BufEnd,
+                           CheckDirectives::Range, S.Range);
+      Directives->addState(locOf(Start), BufBegin, BufEnd,
+                           CheckDirectives::Overflow, S.Overflow);
+    }
+    return;
+  }
+
   // {$packrecords N|C|DEFAULT|NORMAL}, {$align N|ON|OFF}, {$aN}, {$a+|-}:
   // how the fields of the records declared after it are aligned (as in
   // FPC, where ON and + mean 4, OFF and - mean 1).

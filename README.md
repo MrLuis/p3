@@ -366,6 +366,14 @@ the default in `--mode=objfpc`; in tp mode the directive needs it, and
 `forward`, `external` or `virtual`/`override`/`abstract`. Separately
 compiled units are not inlined into their users.
 
+**`{$push}` / `{$pop}`**, as in Free Pascal: `{$pop}` restores the local
+switches the matching `{$push}` saved (nested, at most 21 levels): `{$H}`,
+`{$R}`, `{$Q}` (also back to the command line's default when no switch
+preceded the `{$push}`), the record alignment (`{$packrecords}`, `{$align}`,
+`{$A}`), `{$scopedenums}`, `{$inline}` and `{$interfaces}`. Mode switches
+and `{$macro}` are not local, as in FPC. A `{$pop}` without a `{$push}` is
+an error.
+
 **Record layout** (`{$packrecords N}`, as in Free Pascal; also `{$align N}`,
 `{$aN}`, `{$a+}`/`{$align on}` = 4, `{$a-}`/`{$align off}` = 1): the records
 declared after it place each field at a multiple of the smaller of its

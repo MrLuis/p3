@@ -18,6 +18,7 @@
 #ifndef PCC_LEXER_LEXER_H
 #define PCC_LEXER_LEXER_H
 
+#include "pcc/Basic/Directives.h"
 #include "pcc/Basic/LangOptions.h"
 #include "pcc/Basic/SourceLocation.h"
 #include "pcc/Lexer/Token.h"
@@ -31,7 +32,6 @@
 
 namespace pcc {
 
-class CheckDirectives;
 class DiagnosticsEngine;
 class SourceManager;
 class StringPool;
@@ -53,6 +53,14 @@ class Lexer {
   /// fields of the records declared after it (1, 2, 4, 8, 16 or 32); 0: the
   /// natural (C) layout.
   unsigned PackRecords = 0;
+  /// {$push}: the local switches saved, innermost last ({$pop} restores
+  /// them), as in Free Pascal (mode switches and {$macro} are not local).
+  struct SavedSwitches {
+    bool LongStrings, CorbaInterfaces, InlineOn, ScopedEnums;
+    unsigned PackRecords;
+    CheckDirectives::State Range, Overflow;
+  };
+  llvm::SmallVector<SavedSwitches, 4> SwitchStack;
   bool LongStrings = false;     ///< {$H+}: `string` is an ansistring
 
   // Macros ({$macro on}, {$define NAME := value}, as in Free Pascal): the

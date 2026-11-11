@@ -85,6 +85,10 @@ type
       of the records declared after it (1, 2, 4, 8, 16 or 32); 0: the
       natural (C) layout }
     packRecords: longint;
+    { $push: the local switches saved, of PSavedSwitches, innermost last
+      ($pop restores them), as in Free Pascal (mode switches and $macro
+      are not local) }
+    switchStack: TPtrList;
     macros: TIntMap;
     macroStack: TPtrList;
     { declared(NAME) in $IF (Free Pascal): the names declared so far (name
@@ -134,11 +138,20 @@ type
   PKeyword = ^TKeywordInfo;
 
   PDirective = ^TDirective;
+  { state: 0 off, 1 on, -1 the default (the command line's; $pop of a
+    $push before any switch) }
   TDirective = record
     loc: TLoc;
     fid: longint;
     sw: TCheckSwitch;
-    isOn: boolean;
+    state: longint;
+  end;
+
+  PSavedSwitches = ^TSavedSwitches;
+  TSavedSwitches = record
+    longStrings, corbaInterfaces, inlineOn, scopedEnums: boolean;
+    packRecords: longint;
+    range, overflow: longint; { as TDirective.state }
   end;
 
 var
@@ -349,6 +362,7 @@ begin
   lx.inlineOn := mode = lmObjFPC;
   lx.scopedEnums := false;
   lx.packRecords := 0;
+  listInit(lx.switchStack);
   mapInit(lx.macros);
   listInit(lx.macroStack);
   defineSymbol(lx, 'PCC', true);
@@ -418,7 +432,8 @@ end;
 
 { --- Directives --- }
 
-procedure addDirective(const lx: TLexer; loc: TLoc; sw: TCheckSwitch; isOn: boolean);
+procedure addDirectiveState(const lx: TLexer; loc: TLoc; sw: TCheckSwitch;
+                            state: longint);
 var
   d: PDirective;
 begin
@@ -426,25 +441,41 @@ begin
   d^.loc := loc;
   d^.fid := lx.fid;
   d^.sw := sw;
-  d^.isOn := isOn;
+  d^.state := state;
   listAdd(directives, d);
 end;
 
-function checkEnabled(sw: TCheckSwitch; loc: TLoc; default: boolean): boolean;
+procedure addDirective(const lx: TLexer; loc: TLoc; sw: TCheckSwitch; isOn: boolean);
+begin
+  addDirectiveState(lx, loc, sw, ord(isOn));
+end;
+
+{ The state of switch sw at loc as the switches so far set it (in loc's
+  file): -1 (the default) if none did. }
+function directiveStateAt(sw: TCheckSwitch; loc: TLoc): longint;
 var
   i, fid: longint;
   d: PDirective;
-  isOn: boolean;
 begin
-  isOn := default;
+  directiveStateAt := -1;
   fid := smFileOf(loc);
   for i := 0 to directives.count - 1 do
   begin
     d := PDirective(listGet(directives, i));
     if (d^.sw = sw) and (fid <> 0) and (d^.fid = fid) and (d^.loc <= loc) then
-      isOn := d^.isOn;
+      directiveStateAt := d^.state;
   end;
-  checkEnabled := isOn;
+end;
+
+function checkEnabled(sw: TCheckSwitch; loc: TLoc; default: boolean): boolean;
+var
+  state: longint;
+begin
+  state := directiveStateAt(sw, loc);
+  if state = -1 then
+    checkEnabled := default
+  else
+    checkEnabled := state = 1;
 end;
 
 function upperChar(c: char): char;
@@ -1354,6 +1385,7 @@ var
   word, arg: string;
   msg: TBuf;
   c: char;
+  saved: PSavedSwitches;
 begin
   p := textStart;
   word := '';
@@ -1408,6 +1440,43 @@ begin
   end;
   { $inline on / off: whether the inline directive inlines (default: on in
     objfpc mode, as in Free Pascal) }
+  { $push / $pop: save and restore the local switches (at most 21 levels,
+    as in FPC) }
+  if (word = 'push') and (e = b) then
+  begin
+    if lx.switchStack.count >= 21 then
+    begin
+      diagError(locOf(lx, start), 'too many levels of {$push} (at most 21)');
+      exit;
+    end;
+    saved := PSavedSwitches(arenaAlloc(sizeof(TSavedSwitches)));
+    saved^.longStrings := lx.longStrings;
+    saved^.corbaInterfaces := lx.corbaInterfaces;
+    saved^.inlineOn := lx.inlineOn;
+    saved^.scopedEnums := lx.scopedEnums;
+    saved^.packRecords := lx.packRecords;
+    saved^.range := directiveStateAt(swRange, locOf(lx, start));
+    saved^.overflow := directiveStateAt(swOverflow, locOf(lx, start));
+    listAdd(lx.switchStack, saved);
+    exit;
+  end;
+  if (word = 'pop') and (e = b) then
+  begin
+    if lx.switchStack.count = 0 then
+    begin
+      diagError(locOf(lx, start), '{$pop} without a preceding {$push}');
+      exit;
+    end;
+    saved := PSavedSwitches(listPop(lx.switchStack));
+    lx.longStrings := saved^.longStrings;
+    lx.corbaInterfaces := saved^.corbaInterfaces;
+    lx.inlineOn := saved^.inlineOn;
+    lx.scopedEnums := saved^.scopedEnums;
+    lx.packRecords := saved^.packRecords;
+    addDirectiveState(lx, locOf(lx, start), swRange, saved^.range);
+    addDirectiveState(lx, locOf(lx, start), swOverflow, saved^.overflow);
+    exit;
+  end;
   { $packrecords N|C|DEFAULT|NORMAL, $align N|ON|OFF, $aN, $a+|-: how the
     fields of the records declared after it are aligned (as in FPC, where
     ON and + mean 4, OFF and - mean 1) }
