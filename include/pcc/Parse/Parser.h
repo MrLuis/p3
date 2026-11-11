@@ -204,6 +204,8 @@ class Parser {
   TypeSpec *parseInterfaceType(SourceLocation Start);
   /// After `type` (`record`), at `helper`: a type (record) helper (objfpc).
   TypeSpec *parseTypeHelper(SourceLocation Start, bool Record = false);
+  bool parseClassVarNames(llvm::SmallVectorImpl<Decl *> &Members,
+                          Visibility Vis);
   FieldList *parseFieldList(tok::TokenKind Close);
   VariantPart *parseVariantPart(tok::TokenKind Close);
 

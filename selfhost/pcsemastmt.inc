@@ -1561,10 +1561,11 @@ begin
         exit;
       end;
       checkMemberAccess(d, owner, e^.fieldName);
-      if (d^.kind <> dkConst) and not ((d^.kind = dkRoutine) and d^.isStatic) then
+      if (d^.kind <> dkConst) and not ((d^.kind = dkRoutine) and d^.isStatic) and
+         (d^.kind <> dkVar) then
       begin
-        ms('only static class methods and constants of a ' + helperKindName(h) +
-           ' can be used through a type name; ''');
+        ms('only static class methods, class variables and constants of a ' +
+           helperKindName(h) + ' can be used through a type name; ''');
         maN(e^.fieldName.spelling);
         ma(''' is a ' + kindName(d));
         errR(e^.fieldName.loc, identRange(e^.fieldName));

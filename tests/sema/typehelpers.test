@@ -13,7 +13,7 @@
 ; CHECK: errors.pas:26:3: error: type helper 'TL' must be declared at program or unit level
 ; CHECK: errors.pas:9:15: error: method 'TH.NoBody' is declared but never implemented
 ; CHECK: errors.pas:46:8: error: the members of type helper 'TH' are used through 'integer'
-; CHECK: errors.pas:47:16: error: only static class methods and constants of a type helper can be used through a type name; 'Twice' is a function
+; CHECK: errors.pas:47:16: error: only static class methods, class variables and constants of a type helper can be used through a type name; 'Twice' is a function
 ; CHECK: errors.pas:48:16: error: no member named 'Nope' in type helper 'TH'
 ; CHECK: errors.pas:49:5: error: writing a property of a type helper is not supported yet
 ; CHECK: errors.pas:50:10: error: '.' applied to a value of type 'integer', which is not a record

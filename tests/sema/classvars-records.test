@@ -1,0 +1,10 @@
+; class var in advanced records and helpers: not a file, no repeated name;
+; a class var section ends at a method, after which a helper still cannot
+; have fields.
+; RUN: not %pcc --mode=objfpc -ferror-limit=0 -c %S/Inputs/classvars-records/errors.pas -o %t.o 2>&1 | FileCheck %s
+; CHECK: errors.pas:5:15: error: a class variable cannot be a file
+; CHECK: errors.pas:7:15: error: redefinition of 'A'
+; CHECK: errors.pas:6:15: note: previous definition is here
+; CHECK-NOT: error:
+; RUN: not %pcc --mode=objfpc -c %S/Inputs/classvars-records/parse.pas -o %t.o 2>&1 | FileCheck --check-prefix=PARSE %s
+; PARSE: parse.pas:7:5: error: a type helper cannot contain fields

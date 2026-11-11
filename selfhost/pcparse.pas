@@ -2643,6 +2643,42 @@ end;
   properties and constant parts. After `type` (objfpc, $modeswitch
   typehelpers), or after `record` for a record helper (objfpc, $modeswitch
   advancedrecords) }
+{ In a class var section: identList ":" type ";" (with hints), as class
+  variables of visibility vis added to members. }
+function parseClassVarNames(var members: TPtrList; vis: TVisibility): boolean;
+var
+  names: TPtrList;
+  ts: PTypeSpec;
+  hf: longint;
+  hm: PName;
+  i: longint;
+  m: PDecl;
+begin
+  parseClassVarNames := false;
+  listInit(names);
+  if not parseIdentList(names, 'class variable name') or
+     not expect(tkColon, 'after class variable name') then
+    exit;
+  ts := parseType;
+  if ts = nil then
+    exit;
+  parseHints(hf, hm);
+  for i := 0 to names.count - 1 do
+  begin
+    m := newVar(PIdent(listGet(names, i))^, ts, vkVariable);
+    m^.isClassVar := true;
+    m^.vis := vis;
+    addHints(m, hf, hm);
+    listAdd(members, m);
+  end;
+  if not tryConsume(tkSemi) and (tok.kind <> tkKwEnd) then
+  begin
+    expect(tkSemi, 'after class variable declaration');
+    exit;
+  end;
+  parseClassVarNames := true;
+end;
+
 function parseTypeHelper(start: TLoc; isRecord: boolean): PTypeSpec;
 var
   hf: longint;
@@ -2655,7 +2691,7 @@ var
   wd: string;
   m: PDecl;
   i: longint;
-  failed: boolean;
+  failed, classVars: boolean;
   kindStr: string;
 begin
   parseTypeHelper := nil;
@@ -2690,6 +2726,7 @@ begin
   listInit(members);
   vis := vsPublic;
   failed := false;
+  classVars := false;
   while (tok.kind <> tkKwEnd) and (tok.kind <> tkEof) and not diagShouldStop do
   begin
     if tok.kind = tkIdentifier then
@@ -2706,6 +2743,7 @@ begin
           vis := vsPublic
         else
           vis := vsPublished;
+        classVars := false;
         consumeToken;
         continue;
       end;
@@ -2722,13 +2760,24 @@ begin
           vis := vsStrictPrivate
         else
           vis := vsStrictProtected;
+        classVars := false;
         consumeToken;
+        continue;
+      end;
+      if classVars then { class var: static storage, not a field }
+      begin
+        if not parseClassVarNames(members, vis) then
+        begin
+          failed := true;
+          break;
+        end;
         continue;
       end;
       diagError(tok.loc, 'a ' + kindStr + ' cannot contain fields');
       failed := true;
       break;
     end;
+    classVars := false; { (anything else ends a class var section) }
     if tok.kind = tkKwVar then
     begin
       diagError(tok.loc, 'a ' + kindStr + ' cannot contain fields');
@@ -2757,9 +2806,14 @@ begin
     if tok.kind = tkKwClass then
     begin
       consumeToken;
+      if tryConsume(tkKwVar) then { class variables follow }
+      begin
+        classVars := true;
+        continue;
+      end;
       if not (tok.kind in [tkKwProcedure, tkKwFunction]) then
       begin
-        diagError(tok.loc, 'expected ''procedure'' or ''function'' after ''class''');
+        diagError(tok.loc, 'expected ''procedure'', ''function'' or ''var'' after ''class''');
         failed := true;
         break;
       end;
@@ -3224,7 +3278,7 @@ var
   fixed, members, names: TPtrList;
   vp: PVariantPart;
   vis: TVisibility;
-  afterMethods, failed: boolean;
+  afterMethods, failed, classVars: boolean;
   wd: string;
   ts: PTypeSpec;
   f, m: PDecl;
@@ -3236,6 +3290,7 @@ var
     d^.vis := vis;
     listAdd(members, d);
     afterMethods := true;
+    classVars := false;
   end;
 
 begin
@@ -3245,6 +3300,7 @@ begin
   vp := nil;
   vis := vsPublic;
   afterMethods := false;
+  classVars := false;
   failed := false;
   while (tok.kind <> tkKwEnd) and (tok.kind <> tkEof) and not diagShouldStop do
   begin
@@ -3258,6 +3314,7 @@ begin
         else
           vis := vsPublic;
         afterMethods := false;
+        classVars := false;
         consumeToken;
         continue;
       end;
@@ -3280,6 +3337,16 @@ begin
         consumeToken;
         vis := vsStrictPrivate;
         afterMethods := false;
+        classVars := false;
+        continue;
+      end;
+      if classVars then { class var: static storage, not a field }
+      begin
+        if not parseClassVarNames(members, vis) then
+        begin
+          failed := true;
+          break;
+        end;
         continue;
       end;
       if afterMethods then
@@ -3319,6 +3386,7 @@ begin
       end;
       continue;
     end;
+    classVars := false; { (anything else ends a class var section) }
     if tryConsume(tkKwVar) then
     begin
       afterMethods := false;
@@ -3392,11 +3460,14 @@ begin
         addMember(m);
         continue;
       end;
-      if tok.kind = tkKwVar then
-        unsupported('class variables in records are')
-      else
-        diagError(tok.loc, 'expected ''procedure'', ''function'' or ''operator'' ' +
-                  'after ''class''');
+      if tryConsume(tkKwVar) then { class variables follow }
+      begin
+        classVars := true;
+        afterMethods := false;
+        continue;
+      end;
+      diagError(tok.loc, 'expected ''procedure'', ''function'', ''operator'' or ' +
+                '''var'' after ''class''');
       failed := true;
       break;
     end;

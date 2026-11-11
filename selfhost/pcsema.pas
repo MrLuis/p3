@@ -2569,6 +2569,7 @@ begin
 end;
 
 procedure declareClass(td: PDecl); forward;
+procedure declareClassVar(c: PType; v: PDecl); forward;
 procedure declareInterface(td: PDecl); forward;
 procedure declareAdvancedRecord(td: PDecl); forward;
 procedure declareHelper(td: PDecl); forward;
@@ -3645,7 +3646,6 @@ var
   savedScope: PScope;
   savedPrefix: PName;
   pendingClassMark, pendingPointerMark: longint;
-  folded: TConstValue;
 
   { the interfaces class(TParent, I1, I2) lists }
   procedure addListed(id: PIdent);
@@ -3806,22 +3806,7 @@ begin
           end;
         end;
       dkVar: { class var: static storage }
-        begin
-          m^.varType := resolveType(m^.varSpec, nil);
-          m^.varClass := c;
-          if containsFile(m^.varType) then
-          begin
-            ms('a class variable cannot be a file');
-            errR(m^.ident.loc, identRange(m^.ident));
-          end;
-          if m^.init <> nil then { a typed constant }
-          begin
-            m^.isUsed := true;
-            constInitWhat := 'typed constant value';
-            if not isError(m^.varType) and checkConstInit(m^.init, m^.varType, folded) then
-              m^.initValue := folded;
-          end;
-        end;
+        declareClassVar(c, m);
     else
       begin
         definePropertyAccessors(c, parentClass, m, own);
@@ -3975,6 +3960,28 @@ begin
     checkOperatorHeading(r, rt);
 end;
 
+{ A class variable of class, advanced record or helper c (class var):
+  static storage, one for c and its descendants. }
+procedure declareClassVar(c: PType; v: PDecl);
+var
+  folded: TConstValue;
+begin
+  v^.varType := resolveType(v^.varSpec, nil);
+  v^.varClass := c;
+  if containsFile(v^.varType) then
+  begin
+    ms('a class variable cannot be a file');
+    errR(v^.ident.loc, identRange(v^.ident));
+  end;
+  if v^.init <> nil then { a typed constant }
+  begin
+    v^.isUsed := true;
+    constInitWhat := 'typed constant value';
+    if not isError(v^.varType) and checkConstInit(v^.init, v^.varType, folded) then
+      v^.initValue := folded;
+  end;
+end;
+
 procedure defineRecordMembers(rt: PType; ts: PTypeSpec);
 var
   c: PType;
@@ -4039,6 +4046,11 @@ begin
     else
       mapPut(own, m^.ident.name^.id, m);
     listAdd(members, m);
+    if m^.kind = dkVar then { class var }
+    begin
+      declareClassVar(c, m);
+      continue;
+    end;
     if m^.kind = dkRoutine then
     begin
       defineRecordMethodT(c, rt, m);
@@ -4245,6 +4257,11 @@ begin
     if m^.kind = dkConst then
     begin
       declareConst(m);
+      continue;
+    end;
+    if m^.kind = dkVar then { class var }
+    begin
+      declareClassVar(c, m);
       continue;
     end;
     if m^.kind = dkRoutine then

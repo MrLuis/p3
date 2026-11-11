@@ -315,13 +315,20 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
       if (ClassType *MT = advancedRecord(D)) { // an advanced record: methods
         std::string Prefix =
             ("pas." + U.getName().Name + "$" + MT->getDeclName().lower()).str();
-        for (Decl *M : MT->getMembers())
+        for (Decl *M : MT->getMembers()) {
+          if (auto *V = llvm::dyn_cast<VarDecl>(M)) { // a class variable
+            ExportNames[V] = Prefix + "." + V->getName().Name.str();
+            if (Imported)
+              ImportedDecls.insert(V);
+            continue;
+          }
           if (auto *R = llvm::dyn_cast<RoutineDecl>(M)) {
             ExportNames[R] = Prefix + "." + R->getName().Name.str() +
                              overloadSuffix(R);
             if (Imported)
               ImportedDecls.insert(R);
           }
+        }
         continue;
       }
       if (definedInterface(D)) { // an interface: its iid
@@ -2513,7 +2520,10 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
 
   void emitGlobals(Block &Blk) {
     for (Decl *D : withNested(Blk.getDecls())) {
-      if (ClassType *C = definedClass(D)) { // class variables: no debug info
+      ClassType *C = definedClass(D);
+      if (!C)
+        C = advancedRecord(D); // (an advanced record's, a helper's)
+      if (C) { // class variables: no debug info
         for (Decl *M : C->getMembers())
           if (auto *V = llvm::dyn_cast<VarDecl>(M)) {
             llvm::Type *Ty = memType(V->getType());

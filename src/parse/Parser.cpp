@@ -1671,6 +1671,32 @@ TypeSpec *Parser::parseInterfaceType(SourceLocation Start) {
                                        Corba, GUID);
 }
 
+/// In a `class var` section: identList ":" type ";" (with hints), as
+/// class variables of visibility Vis appended to Members.
+bool Parser::parseClassVarNames(llvm::SmallVectorImpl<Decl *> &Members,
+                                Visibility Vis) {
+  llvm::SmallVector<Identifier, 4> Names;
+  if (!parseIdentList(Names, "class variable name") ||
+      !expect(tok::colon, "after class variable name"))
+    return false;
+  TypeSpec *TS = parseType();
+  if (!TS)
+    return false;
+  Hints H = parseHints();
+  for (const Identifier &N : Names) {
+    auto *V = Ctx.create<VarDecl>(N, TS);
+    V->setClassVar();
+    V->setVisibility(Vis);
+    V->addHints(H.Flags, H.Message);
+    Members.push_back(V);
+  }
+  if (!tryConsume(tok::semi) && Tok.isNot(tok::kw_end)) {
+    expect(tok::semi, "after class variable declaration");
+    return false;
+  }
+  return true;
+}
+
 // typeHelper = "helper" [ "(" ident ")" ] "for" typeIdent
 //              { visibility | methodHeading | "class" methodHeading
 //              | property | constPart } "end" .
@@ -1702,6 +1728,7 @@ TypeSpec *Parser::parseTypeHelper(SourceLocation Start, bool Record) {
     return nullptr;
   llvm::SmallVector<Decl *, 8> Members;
   Visibility Vis = Visibility::Public;
+  bool ClassVars = false; // in a `class var` section
   auto Fail = [&]() -> TypeSpec * {
     skipUntil({tok::kw_end});
     tryConsume(tok::kw_end);
@@ -1716,6 +1743,7 @@ TypeSpec *Parser::parseTypeHelper(SourceLocation Start, bool Record) {
               : W == "protected" ? Visibility::Protected
               : W == "public"    ? Visibility::Public
                                  : Visibility::Published;
+        ClassVars = false;
         consumeToken();
         continue;
       }
@@ -1728,12 +1756,19 @@ TypeSpec *Parser::parseTypeHelper(SourceLocation Start, bool Record) {
         }
         Vis = isIdentifierNamed("private") ? Visibility::StrictPrivate
                                            : Visibility::StrictProtected;
+        ClassVars = false;
         consumeToken();
+        continue;
+      }
+      if (ClassVars) { // class var: static storage, not a field
+        if (!parseClassVarNames(Members, Vis))
+          return Fail();
         continue;
       }
       Diags.error(Tok.getLocation(), llvm::Twine("a ") + Kind + " cannot contain fields");
       return Fail();
     }
+    ClassVars = false; // (anything else ends a class var section)
     if (Tok.is(tok::kw_var)) {
       Diags.error(Tok.getLocation(), llvm::Twine("a ") + Kind + " cannot contain fields");
       return Fail();
@@ -1754,9 +1789,13 @@ TypeSpec *Parser::parseTypeHelper(SourceLocation Start, bool Record) {
     }
     if (Tok.is(tok::kw_class)) {
       consumeToken();
+      if (tryConsume(tok::kw_var)) { // class variables follow
+        ClassVars = true;
+        continue;
+      }
       if (Tok.isNot(tok::kw_procedure) && Tok.isNot(tok::kw_function)) {
         Diags.error(Tok.getLocation(),
-                    "expected 'procedure' or 'function' after 'class'");
+                    "expected 'procedure', 'function' or 'var' after 'class'");
         return Fail();
       }
       RoutineDecl *R = parseMethodHeading(/*InRecord=*/true,
@@ -2293,6 +2332,7 @@ TypeSpec *Parser::parseAdvancedRecord(SourceLocation Start,
   VariantPart *VP = nullptr;
   Visibility Vis = Visibility::Public;
   bool AfterMethods = false;
+  bool ClassVars = false; // in a `class var` section
   auto Fail = [&]() -> TypeSpec * {
     skipUntil({tok::kw_end});
     tryConsume(tok::kw_end);
@@ -2302,6 +2342,7 @@ TypeSpec *Parser::parseAdvancedRecord(SourceLocation Start,
     D->setVisibility(Vis);
     Members.push_back(D);
     AfterMethods = true;
+    ClassVars = false;
   };
   while (Tok.isNot(tok::kw_end) && Tok.isNot(tok::eof) && !Diags.shouldStop()) {
     if (Tok.is(tok::identifier)) {
@@ -2309,6 +2350,7 @@ TypeSpec *Parser::parseAdvancedRecord(SourceLocation Start,
       if (W == "private" || W == "public") {
         Vis = W == "private" ? Visibility::Private : Visibility::Public;
         AfterMethods = false;
+        ClassVars = false;
         consumeToken();
         continue;
       }
@@ -2328,6 +2370,12 @@ TypeSpec *Parser::parseAdvancedRecord(SourceLocation Start,
         consumeToken();
         Vis = Visibility::StrictPrivate;
         AfterMethods = false;
+        ClassVars = false;
+        continue;
+      }
+      if (ClassVars) { // class var: static storage, not a field
+        if (!parseClassVarNames(Members, Vis))
+          return Fail();
         continue;
       }
       if (AfterMethods) {
@@ -2356,6 +2404,7 @@ TypeSpec *Parser::parseAdvancedRecord(SourceLocation Start,
       }
       continue;
     }
+    ClassVars = false; // (anything else ends a class var section)
     if (tryConsume(tok::kw_var)) {
       AfterMethods = false;
       continue;
@@ -2407,13 +2456,14 @@ TypeSpec *Parser::parseAdvancedRecord(SourceLocation Start,
         AddMember(R);
         continue;
       }
-      if (Tok.is(tok::kw_var)) {
-        unsupported("class variables in records are");
-        return Fail();
+      if (tryConsume(tok::kw_var)) { // class variables follow
+        ClassVars = true;
+        AfterMethods = false;
+        continue;
       }
       Diags.error(Tok.getLocation(),
-                  "expected 'procedure', 'function' or 'operator' after "
-                  "'class'");
+                  "expected 'procedure', 'function', 'operator' or 'var' "
+                  "after 'class'");
       return Fail();
     }
     if (Tok.isOneOf(tok::kw_type, tok::kw_const)) { // nested declarations

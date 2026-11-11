@@ -14,7 +14,7 @@
 ; CHECK: errors.pas:30:3: error: record helper 'TL' must be declared at program or unit level
 ; CHECK: errors.pas:12:15: error: method 'TH.NoBody' is declared but never implemented
 ; CHECK: errors.pas:50:8: error: the members of record helper 'TH' are used through 'TR'
-; CHECK: errors.pas:51:11: error: only static class methods and constants of a record helper can be used through a type name; 'Twice' is a function
+; CHECK: errors.pas:51:11: error: only static class methods, class variables and constants of a record helper can be used through a type name; 'Twice' is a function
 ; CHECK: errors.pas:52:11: error: no member named 'Nope' in record helper 'TH'
 ; CHECK: errors.pas:53:5: error: writing a property of a record helper is not supported yet
 ; CHECK: errors.pas:54:10: error: no field named 'Nope' in 'TR'

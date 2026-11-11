@@ -173,7 +173,8 @@ as are a failed `as` and calling an abstract method.
   Pascal): records with `private` / `public` / `strict private` sections,
   methods (`Self` is the record, by reference), constructors with
   parameters (`TR.Create(...)` gives a new record), static class methods
-  (`class function F: T; static;`), properties and overloaded methods.
+  (`class function F: T; static;`), `class var` sections (static storage,
+  not part of the record), properties and overloaded methods.
   Methods can be called on variables, fields, array elements, function
   results and through `with`. Class operators: `class operator +(const a,
   b: TR): TR;` for `+ - * / div mod and or xor shl shr = <> < > <= >= in`,

@@ -1994,6 +1994,10 @@ class Checker : public StmtVisitor<Checker>,
         declareConst(CD);
         continue;
       }
+      if (auto *V = llvm::dyn_cast<VarDecl>(M)) { // class var
+        declareClassVar(C, V);
+        continue;
+      }
       if (auto *R = llvm::dyn_cast<RoutineDecl>(M)) {
         R->setClass(C);
         R->setParent(nullptr);
@@ -2197,6 +2201,10 @@ class Checker : public StmtVisitor<Checker>,
         Own[MN.Name] = M;
       }
       Members.push_back(M);
+      if (auto *V = llvm::dyn_cast<VarDecl>(M)) { // class var
+        declareClassVar(C, V);
+        continue;
+      }
       if (auto *R = llvm::dyn_cast<RoutineDecl>(M)) {
         defineRecordMethod(C, RT, R);
         if (OverloadOf && !addOverload(OverloadOf, R)) {
@@ -2214,6 +2222,24 @@ class Checker : public StmtVisitor<Checker>,
     }
     C->define(nullptr, Ctx.copyArray<Decl *>(Members), RT->getAllFields(), {},
               CurModule);
+  }
+
+  /// A class variable of class, advanced record or helper C (class var):
+  /// static storage, one for C and its descendants.
+  void declareClassVar(ClassType *C, VarDecl *V) {
+    const Identifier &MN = V->getName();
+    V->setType(resolveType(V->getTypeSpec()));
+    V->setVarClass(C);
+    if (containsFile(V->getType()))
+      Diags.error(MN.Loc, "a class variable cannot be a file", {MN.getRange()});
+    if (Expr *Init = V->getInit()) { // a typed constant
+      Used.insert(V);
+      ConstValue Folded;
+      ConstInitWhat = "typed constant value";
+      if (!V->getType()->isError() &&
+          checkConstInit(Init, V->getType(), Folded))
+        V->setInitValue(Folded);
+    }
   }
 
   /// A method, class method (static) or class operator of record RT.
@@ -2855,19 +2881,7 @@ class Checker : public StmtVisitor<Checker>,
         continue;
       }
       if (auto *V = llvm::dyn_cast<VarDecl>(M)) { // class var: static storage
-        V->setType(resolveType(V->getTypeSpec()));
-        V->setVarClass(C);
-        if (containsFile(V->getType()))
-          Diags.error(MN.Loc, "a class variable cannot be a file",
-                      {MN.getRange()});
-        if (Expr *Init = V->getInit()) { // a typed constant
-          Used.insert(V);
-          ConstValue Folded;
-          ConstInitWhat = "typed constant value";
-          if (!V->getType()->isError() &&
-              checkConstInit(Init, V->getType(), Folded))
-            V->setInitValue(Folded);
-        }
+        declareClassVar(C, V);
         continue;
       }
       if (auto *R = llvm::dyn_cast<RoutineDecl>(M)) {
@@ -8269,9 +8283,11 @@ public:
     }
     checkMemberAccess(D, Owner, F);
     auto *R = llvm::dyn_cast<RoutineDecl>(D);
-    if (!llvm::isa<ConstDecl>(D) && !(R && R->isStatic())) {
+    if (!llvm::isa<ConstDecl>(D) && !(R && R->isStatic()) &&
+        !llvm::isa<VarDecl>(D)) {
       Diags.error(F.Loc,
-                  "only static class methods and constants of a " +
+                  "only static class methods, class variables and constants "
+                  "of a " +
                       H->helperKindName() +
                       " can be used through a type name; '" +
                       F.Spelling + "' is a " + D->getKindName(),

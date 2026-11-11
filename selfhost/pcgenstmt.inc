@@ -2033,6 +2033,8 @@ begin
   begin
     d := PDecl(listGet(decls, i));
     c := definedClass(d);
+    if c = nil then
+      c := advancedRecord(d); { (an advanced record's, a helper's) }
     if c <> nil then { its class variables }
     begin
       for j := 0 to c^.classMembers.count - 1 do
@@ -2921,13 +2923,13 @@ begin
       continue;
     end;
     c := advancedRecord(d);
-    if c <> nil then { an advanced record: its methods }
+    if c <> nil then { an advanced record: its class variables and methods }
     begin
       prefix := 'pas.' + nm(u^.ident.name) + '$' + lowerStr(nm(c^.declName));
       for j := 0 to c^.classMembers.count - 1 do
       begin
         m := PDecl(listGet(c^.classMembers, j));
-        if m^.kind = dkRoutine then
+        if (m^.kind = dkRoutine) or (m^.kind = dkVar) then
         begin
           m^.cgExport := intern(prefix + '.' + nm(m^.ident.name) + overloadSuffix(m));
           m^.cgImported := imported;
