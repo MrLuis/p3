@@ -109,6 +109,7 @@ private:
   const ExprKind Kind;
   SourceRange Range;
   Type *Ty = nullptr; ///< set by Sema
+  bool ConstRefAddress = false; ///< set by Sema
 
 protected:
   Expr(ExprKind K, SourceRange R) : Kind(K), Range(R) {}
@@ -120,6 +121,11 @@ public:
 
   Type *getType() const { return Ty; }
   void setType(Type *T) { Ty = T; }
+
+  /// An argument for a `constref` parameter that is a variable of the
+  /// parameter's type: its address is passed (else a temporary's).
+  bool isConstRefAddress() const { return ConstRefAddress; }
+  void setConstRefAddress() { ConstRefAddress = true; }
 
   /// A user-defined conversion (objfpc advanced records): the `:=` or
   /// `Explicit` operator Op converts this expression's value to To, which
@@ -1296,6 +1302,7 @@ private:
   Expr *Absolute = nullptr;     ///< Turbo/FPC `x: T absolute y`: y
   Expr *Default = nullptr;      ///< objfpc: the parameter's default value
   bool Out = false;             ///< objfpc: an `out` parameter
+  bool ConstRef = false;        ///< Turbo/FPC: a `constref` parameter
   VarDecl *AbsoluteRoot = nullptr; ///< set by Sema: the variable y is in
   /// Turbo/FPC `x: T; [cvar;] external ['lib'] [name 'sym'];`: a C variable
   /// (the library and symbol: string constants, evaluated by Sema; the
@@ -1320,6 +1327,10 @@ public:
   /// managed values the caller releases before the call.
   bool isOutParam() const { return Out; }
   void setOutParam() { Out = true; }
+  /// A `constref` parameter (Turbo/FPC) is a const parameter (isConstParam)
+  /// always passed by reference: the caller's variable, or a temporary.
+  bool isConstRefParam() const { return ConstRef; }
+  void setConstRefParam() { ConstRef = true; }
   RoutineDecl *getOwner() const { return Owner; }
   void setOwner(RoutineDecl *R) { Owner = R; }
   /// A routine's variable that a routine nested in it may use: it lives in

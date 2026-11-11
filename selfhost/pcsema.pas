@@ -1386,6 +1386,18 @@ begin
 end;
 
 { Can e be used where a variable is required? }
+function isVariableReference(e: PNode): boolean; forward;
+
+{ Can e's address be passed for a constref parameter: a variable (not a
+  bit field or a property)? }
+function isConstRefAddressable(e: PNode): boolean;
+begin
+  if (e^.kind = nkField) and
+     ((e^.fieldDecl = nil) or not (e^.fieldDecl^.kind in [dkField, dkVar])) then
+    exit(false);
+  isConstRefAddressable := isVariableReference(e);
+end;
+
 function isVariableReference(e: PNode): boolean;
 var
   d: PDecl;
@@ -3073,7 +3085,8 @@ begin
   begin
     a := PDecl(listGet(r^.params, i));
     b := PDecl(listGet(p^.propParams, i));
-    if (a^.varType <> b^.varType) or (a^.varKind <> b^.varKind) then
+    if (a^.varType <> b^.varType) or (a^.varKind <> b^.varKind) or
+       (a^.isConstRef <> b^.isConstRef) then
       exit;
   end;
   if p^.propIndex <> nil then
@@ -3104,7 +3117,9 @@ begin
     if not first then
       ma('; ');
     first := false;
-    if q^.varKind = vkConstParam then
+    if q^.isConstRef then
+      ma('constref ')
+    else if q^.varKind = vkConstParam then
       ma('const ');
     maN(q^.ident.spelling);
     ma(': ');
@@ -5404,7 +5419,8 @@ begin
     p := PDecl(listGet(a^.params, i));
     q := PDecl(listGet(b^.params, i));
     if (p^.varKind <> q^.varKind) or (p^.varType <> q^.varType) or
-       (compareOut and (p^.isOut <> q^.isOut)) then
+       (compareOut and ((p^.isOut <> q^.isOut) or
+                        (p^.isConstRef <> q^.isConstRef))) then
       exit(false);
   end;
   sameParamList := true;
@@ -6433,6 +6449,8 @@ begin
       ma('out ')
     else if p^.varKind = vkVarParam then
       ma('var ')
+    else if p^.isConstRef then
+      ma('constref ')
     else if p^.varKind = vkConstParam then
       ma('const ');
     if p^.varType <> nil then
@@ -7109,7 +7127,8 @@ begin
   begin
     pa := PDecl(listGet(a, i));
     pb := PDecl(listGet(b, i));
-    if (pa^.varKind <> pb^.varKind) or (pa^.isOut <> pb^.isOut) then
+    if (pa^.varKind <> pb^.varKind) or (pa^.isOut <> pb^.isOut) or
+       (pa^.isConstRef <> pb^.isConstRef) then
       exit(false);
     ta := pa^.varType;
     tb := pb^.varType;
@@ -7575,7 +7594,11 @@ begin
       ma(''' of type ');
       maT(pt);
       errR(arg^.b, nodeRange(arg));
-    end;
+    end
+    else if p^.isConstRef and (at = pt) and
+            ((arg^.convOp = nil) or arg^.convSuspended) and
+            isConstRefAddressable(arg) then
+      arg^.constRefAddr := true; { its address (else a temporary's) }
   end;
 end;
 

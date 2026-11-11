@@ -112,6 +112,7 @@ class ASTPrinter : public StmtVisitor<ASTPrinter>,
       auto *V = llvm::cast<VarDecl>(D);
       const char *Kind = V->isOutParam() ? "ParamDecl out '"
                          : V->getVarKind() == VarDecl::VarParam ? "ParamDecl var '"
+                         : V->isConstRefParam() ? "ParamDecl constref '"
                          : V->getVarKind() == VarDecl::ConstParam ? "ParamDecl const '"
                          : V->getVarKind() == VarDecl::ValueParam ? "ParamDecl '"
                                                                   : "VarDecl '";

@@ -1305,13 +1305,25 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
   //===--------------------------------------------------------------------===//
 
   /// Parameters passed as a pointer to the caller's variable: var
-  /// parameters, and const parameters of string and structured types.
+  /// parameters, const parameters of string and structured types, and
+  /// constref parameters (to the caller's variable, or a temporary).
   static bool isByRef(VarDecl *V) {
     return (V->isVarParam() && !V->getType()->isArrayOfConst() &&
             !V->getType()->isOpenArray()) ||
+           isConstRefPtr(V) ||
            V->getType()->isUntyped() ||
            (V->isConstParam() && V->getType()->isStructured()) ||
            (V->getVarKind() == VarDecl::Result && returnsByPointer(V->getType()));
+  }
+
+  /// A constref parameter passed as a pointer where a const one is not:
+  /// of a type other than structured, short string, open array, array of
+  /// const or procedural (those are passed as for const).
+  static bool isConstRefPtr(VarDecl *P) {
+    Type *T = P->getType();
+    return P->isConstRefParam() && !T->isStructured() && !T->isShortString() &&
+           !T->isOpenArray() && !T->isArrayOfConst() && !T->isUntyped() &&
+           !llvm::isa<RoutineType>(T);
   }
 
   /// Is a function result of type T written through a pointer the caller
@@ -2384,7 +2396,7 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
     }
     for (VarDecl *P : Params)
       ParamTys.push_back(P->isVarParam() || P->getType()->isStructured() ||
-                                 P->getType()->isUntyped()
+                                 P->getType()->isUntyped() || isConstRefPtr(P)
                              ? B.getPtrTy()
                              : regType(P->getType()));
     llvm::Type *RetTy = Result ? regType(Result) : B.getVoidTy();
@@ -2403,6 +2415,7 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
     llvm::SmallVector<llvm::Type *, 8> ParamTys;
     for (VarDecl *P : R->getParams())
       ParamTys.push_back(P->isVarParam() || P->getType()->isUntyped() ||
+                                 isConstRefPtr(P) ||
                                  llvm::isa<RoutineType>(P->getType())
                              ? B.getPtrTy()
                              : regType(P->getType()));
@@ -3029,6 +3042,10 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
         continue;
       }
       VarDecl *P = Params[I];
+      if (isConstRefPtr(P) && Arg->isConstRefAddress()) { // the variable
+        Values.push_back(emitAddress(Arg));
+        continue;
+      }
       if (P->getType()->isUntyped()) // Turbo/FPC: a variable, by reference
         Values.push_back(emitAddress(Arg));
       else if (auto *OA = llvm::dyn_cast<OpenArrayType>(P->getType()))
@@ -3059,6 +3076,12 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
       else
         Values.push_back(convertForAssign(visitExpr(Arg), Arg->getType(),
                                           P->getType(), Arg->getBeginLoc()));
+      if (isConstRefPtr(P)) { // a value: passed in a temporary
+        llvm::Value *V = Values.pop_back_val();
+        llvm::Value *Tmp = createTemp(memType(P->getType()));
+        storeScalar(Tmp, V, P->getType());
+        Values.push_back(Tmp);
+      }
     }
   }
 

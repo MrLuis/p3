@@ -3048,7 +3048,8 @@ class Checker : public StmtVisitor<Checker>,
         return false;
       for (size_t I = 0; I < N; ++I)
         if (Params[I]->getType() != P->getParams()[I]->getType() ||
-            Params[I]->getVarKind() != P->getParams()[I]->getVarKind())
+            Params[I]->getVarKind() != P->getParams()[I]->getVarKind() ||
+            Params[I]->isConstRefParam() != P->getParams()[I]->isConstRefParam())
           return false;
       if (P->getIndexSpec())
         return !Params[N]->isVarParam() && Params[N]->getType() &&
@@ -3060,7 +3061,9 @@ class Checker : public StmtVisitor<Checker>,
       std::string S;
       for (VarDecl *Param : P->getParams())
         S += std::string(S.empty() ? "" : "; ") +
-             (Param->isConstParam() ? "const " : "") +
+             (Param->isConstRefParam() ? "constref "
+              : Param->isConstParam() ? "const "
+                                      : "") +
              Param->getName().Spelling.str() + ": " +
              Param->getType()->getName();
       if (P->getIndexSpec())
@@ -3870,7 +3873,8 @@ class Checker : public StmtVisitor<Checker>,
     R->setResultVar(Result);
   }
 
-  /// CompareOut false: `out` and `var` parameters count as the same, as
+  /// CompareOut false: `out` and `var` parameters count as the same, and
+  /// `constref` and `const` ones, as
   /// when looking for routines that overloads cannot tell apart.
   static bool sameSignature(RoutineDecl *A, RoutineDecl *B, bool CompareOut = true) {
     if (A->getParams().size() != B->getParams().size())
@@ -3878,7 +3882,8 @@ class Checker : public StmtVisitor<Checker>,
     for (size_t I = 0; I < A->getParams().size(); ++I) {
       VarDecl *P = A->getParams()[I], *Q = B->getParams()[I];
       if (P->getVarKind() != Q->getVarKind() || P->getType() != Q->getType() ||
-          (CompareOut && P->isOutParam() != Q->isOutParam()))
+          (CompareOut && (P->isOutParam() != Q->isOutParam() ||
+                          P->isConstRefParam() != Q->isConstRefParam())))
         return false;
     }
     return true;
@@ -4577,6 +4582,7 @@ class Checker : public StmtVisitor<Checker>,
       S += std::string(I ? "; " : "") +
            (Params[I]->isOutParam()     ? "out "
             : Params[I]->isVarParam()   ? "var "
+            : Params[I]->isConstRefParam() ? "constref "
             : Params[I]->isConstParam() ? "const "
                                         : "") +
            (Params[I]->getType() ? Params[I]->getType()->getName()
@@ -5044,7 +5050,8 @@ class Checker : public StmtVisitor<Checker>,
       return false;
     for (size_t I = 0; I < A.size(); ++I) {
       if (A[I]->getVarKind() != B[I]->getVarKind() ||
-          A[I]->isOutParam() != B[I]->isOutParam())
+          A[I]->isOutParam() != B[I]->isOutParam() ||
+          A[I]->isConstRefParam() != B[I]->isConstRefParam())
         return false;
       Type *TA = A[I]->getType(), *TB = B[I]->getType();
       auto *RA = llvm::dyn_cast_or_null<RoutineType>(TA);
@@ -5362,7 +5369,20 @@ class Checker : public StmtVisitor<Checker>,
                         " to parameter '" + PName.Spelling + "' of type " +
                         quoted(PT),
                     {Arg->getRange()});
+      else if (P->isConstRefParam() && AT == PT && !Arg->getConversion() &&
+               isConstRefAddressable(Arg))
+        Arg->setConstRefAddress(); // its address (else a temporary's)
     }
+  }
+
+  /// Can E's address be passed for a `constref` parameter: a variable (not
+  /// a bit field or a property)?
+  static bool isConstRefAddressable(Expr *E) {
+    if (auto *F = llvm::dyn_cast<FieldExpr>(E);
+        F && !llvm::isa_and_nonnull<FieldDecl>(F->getMember()) &&
+        !llvm::isa_and_nonnull<VarDecl>(F->getMember()))
+      return false;
+    return isVariableReference(E);
   }
 
   //===--------------------------------------------------------------------===//

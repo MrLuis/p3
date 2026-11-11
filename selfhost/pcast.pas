@@ -138,6 +138,9 @@ type
     convOp: PDecl;
     convFrom: PType;
     convSuspended: boolean;
+    { an argument for a constref parameter that is a variable of the
+      parameter's type: its address is passed (else a temporary's) (Sema) }
+    constRefAddr: boolean;
     case TNodeKind of
       { intBased: written $FF, %1010 or &17 (beyond int64: the bits of an
         int64, as in Free Pascal, not a qword) }
@@ -419,6 +422,10 @@ type
               { objfpc: an out parameter, a var parameter (vkVarParam) whose
                 managed values the caller releases before the call }
               isOut: boolean;
+              { Turbo/FPC: a constref parameter, a const one (vkConstParam)
+                always passed by reference: the caller's variable, or a
+                temporary }
+              isConstRef: boolean;
               { Turbo/FPC  x: T; [cvar;] external ['lib'] [name 'sym'];  a C
                 variable (the library and symbol: string constants,
                 evaluated by Sema; the symbol: the name as written unless

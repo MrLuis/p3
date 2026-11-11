@@ -290,6 +290,7 @@ std::string Type::getName() const {
       S += (I ? "; " : "") +
            std::string(P->isOutParam()     ? "out "
                        : P->isVarParam()   ? "var "
+                       : P->isConstRefParam() ? "constref "
                        : P->isConstParam() ? "const "
                                            : "") +
            (P->getType() ? P->getType()->getName() : "?");

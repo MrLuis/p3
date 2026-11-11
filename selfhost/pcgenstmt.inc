@@ -1919,7 +1919,7 @@ end;
 function paramIRType(p: PDecl): PIRType;
 begin
   if (p^.varKind = vkVarParam) or isStructured(p^.varType) or
-     (p^.varType^.kind = tyUntyped) then
+     (p^.varType^.kind = tyUntyped) or isConstRefPtr(p) then
     paramIRType := irPtrT
   else
     paramIRType := regType(p^.varType);
@@ -1947,7 +1947,7 @@ begin
     begin
       p := PDecl(listGet(r^.params, i));
       if (p^.varKind = vkVarParam) or (p^.varType^.kind = tyRoutine) or
-         (p^.varType^.kind = tyUntyped) then
+         (p^.varType^.kind = tyUntyped) or isConstRefPtr(p) then
         listAdd(params, irPtrT) { (a callback: a function pointer) }
       else
         listAdd(params, regType(p^.varType));

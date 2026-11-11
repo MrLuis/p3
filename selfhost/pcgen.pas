@@ -1057,9 +1057,23 @@ begin
   returnsByPointer := (t <> nil) and (t^.kind = tyShortString);
 end;
 
+{ A constref parameter passed as a pointer where a const one is not: of a
+  type other than structured, short string, open array, array of const or
+  procedural (those are passed as for const). }
+function isConstRefPtr(p: PDecl): boolean;
+var
+  t: PType;
+begin
+  t := p^.varType;
+  isConstRefPtr := p^.isConstRef and not isStructured(t) and
+                   not (t^.kind in [tyShortString, tyOpenArray, tyArrayOfConst,
+                                    tyUntyped, tyRoutine]);
+end;
+
 function isByRef(v: PDecl): boolean;
 begin
   isByRef := ((v^.varKind = vkVarParam) and not (v^.varType^.kind in [tyArrayOfConst, tyOpenArray])) or
+             isConstRefPtr(v) or
              (v^.varType^.kind = tyUntyped) or
              ((v^.varKind = vkConstParam) and isStructured(v^.varType)) or
              ((v^.varKind = vkResult) and returnsByPointer(v^.varType));
@@ -2891,7 +2905,7 @@ var
   v: TV;
   pt: PType;
   released: TPtrList; { of PTVBox, by argument: its address if released }
-  slot: TV;
+  slot, tmp: TV;
 begin
   { out arguments holding managed values are released first, before any
     other argument is evaluated (another may be the same variable) }
@@ -2944,6 +2958,26 @@ begin
     end;
     p := PDecl(listGet(params, i));
     pt := p^.varType;
+    if isConstRefPtr(p) then
+    begin
+      if arg^.constRefAddr then { the variable }
+        irArgsAdd(buf, emitAddress(arg))
+      else
+      begin
+        { a value (as for const): passed in a temporary }
+        if not cStringFor(pt, arg, v) then
+        begin
+          if pt^.kind = tyAnsiString then
+            v := emitAnsi(arg)
+          else
+            v := convertForAssign(visitExpr(arg), arg^.typ, pt, arg^.b);
+        end;
+        tmp := irCreateTemp(memType(pt), 'tmp');
+        storeScalar(tmp, v, pt);
+        irArgsAdd(buf, tmp);
+      end;
+      continue;
+    end;
     if pt^.kind = tyUntyped then { Turbo/FPC: a variable, by reference }
       irArgsAdd(buf, emitAddress(arg))
     else if pt^.kind = tyOpenArray then

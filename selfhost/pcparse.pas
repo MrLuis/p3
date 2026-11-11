@@ -2097,7 +2097,7 @@ var
   vk: TVarKind;
   i: longint;
   lastName: PIdent;
-  seenDefault, untyped, defaultOK, isOut: boolean;
+  seenDefault, untyped, defaultOK, isOut, isConstRef: boolean;
   defValue: PNode;
   eqLoc: TLoc;
   v: PDecl;
@@ -2156,10 +2156,21 @@ begin
     end;
     isVar := tryConsume(tkKwVar);
     isConst := false;
+    isConstRef := false;
     if not isVar and (tok.kind = tkKwConst) and (mode <> lmISO) then
     begin
       consumeToken;
       isConst := true;
+    end;
+    { Turbo/FPC: constref (not a reserved word), a const parameter always
+      passed by reference }
+    if not isVar and not isConst and (mode <> lmISO) and
+       (tok.kind = tkIdentifier) and (nameStr(tok.name) = 'constref') and
+       (peekKind = tkIdentifier) then
+    begin
+      consumeToken;
+      isConst := true;
+      isConstRef := true;
     end;
     { objfpc: out, not a reserved word, is a var parameter here }
     isOut := not isVar and not isConst and (mode = lmObjFPC) and (close = tkRParen) and
@@ -2233,6 +2244,7 @@ begin
       if defaultOK then
         v^.paramDefault := defValue;
       v^.isOut := isOut;
+      v^.isConstRef := isConstRef;
       listAdd(params, v);
     end;
     seenDefault := seenDefault or defaultOK;

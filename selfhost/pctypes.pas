@@ -998,6 +998,8 @@ begin
             bufAdd(b, 'out ')
           else if p^.varKind = vkVarParam then
             bufAdd(b, 'var ')
+          else if p^.isConstRef then
+            bufAdd(b, 'constref ')
           else if p^.varKind = vkConstParam then
             bufAdd(b, 'const ');
           if p^.varType <> nil then

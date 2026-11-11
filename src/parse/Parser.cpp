@@ -1842,10 +1842,18 @@ bool Parser::parseFormalParams(llvm::SmallVectorImpl<VarDecl *> &Params,
       continue;
     }
     bool IsVar = tryConsume(tok::kw_var);
-    bool IsConst = false;
+    bool IsConst = false, IsConstRef = false;
     if (!IsVar && Tok.is(tok::kw_const) && LangOpts.Mode != LangMode::ISO) {
       consumeToken();
       IsConst = true;
+    }
+    // Turbo/FPC: `constref` (not a reserved word), a const parameter always
+    // passed by reference.
+    if (!IsVar && !IsConst && LangOpts.Mode != LangMode::ISO &&
+        Tok.is(tok::identifier) && Tok.getIdentifier() == "constref" &&
+        peekToken().is(tok::identifier)) {
+      consumeToken();
+      IsConst = IsConstRef = true;
     }
     // objfpc: `out`, not a reserved word, is a var parameter here.
     bool IsOut = !IsVar && !IsConst && LangOpts.ObjKeywords &&
@@ -1909,6 +1917,8 @@ bool Parser::parseFormalParams(llvm::SmallVectorImpl<VarDecl *> &Params,
         V->setDefault(Default);
       if (IsOut)
         V->setOutParam();
+      if (IsConstRef)
+        V->setConstRefParam();
       Params.push_back(V);
     }
     SeenDefault |= DefaultOK;

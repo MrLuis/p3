@@ -1,0 +1,24 @@
+-- integers
+  5 same=TRUE
+  7 same=FALSE
+  6 same=FALSE
+  300 same=FALSE
+  42 10
+  alias 99
+-- other types
+  2.50 z 2 TRUE TRUE
+  1.00 a 0 FALSE FALSE
+  3 40 TRUE
+  abc 3 short 5 TRUE
+  litabc 6 x 1 FALSE
+  42 TRUE
+-- calls
+  7 TRUE FALSE
+  8 same=TRUE
+  9 same=FALSE
+  constref longint 3
+  const ansistring three
+-- fields and elements
+ TRUE TRUE TRUE TRUE TRUE
+-- cdecl
+  1

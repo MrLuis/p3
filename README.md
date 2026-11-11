@@ -44,7 +44,12 @@ used with `@`; fields of types that need alignment, such as `real`,
 pointers or plain records, and typed constants of bitpacked types are not
 supported yet); `pointer`, `pchar` (also `AnsiChar` and
 `PAnsiChar`), `@`, `getmem freemem
-reallocmem fillchar move sizeof low high assigned`; `const` parameters;
+reallocmem fillchar move sizeof low high assigned`; `const` parameters and
+`constref` ones (read-only like `const`, always passed by reference, as in
+Free Pascal: a variable of the parameter's type itself, so its address is
+the parameter's; any other argument through a temporary; also to `cdecl`
+routines, which get the pointer; overloads cannot tell `const` and
+`constref` apart);
 procedural types; typed constants including arrays and records; external C
 functions (`cdecl; external 'c' name 'strlen'`, see below); `{$I file}`; `paramcount
 paramstr halt`. This is the dialect the self-hosted compiler is written in

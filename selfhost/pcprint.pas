@@ -654,7 +654,11 @@ begin
               lineName('ParamDecl out ''', d^.ident.name)
             else
               lineName('ParamDecl var ''', d^.ident.name);
-          vkConstParam: lineName('ParamDecl const ''', d^.ident.name);
+          vkConstParam:
+            if d^.isConstRef then
+              lineName('ParamDecl constref ''', d^.ident.name)
+            else
+              lineName('ParamDecl const ''', d^.ident.name);
           vkValueParam: lineName('ParamDecl ''', d^.ident.name);
         else
           lineName('VarDecl ''', d^.ident.name);
