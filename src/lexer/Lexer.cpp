@@ -151,6 +151,19 @@ void Lexer::handleDirective(const char *Start, llvm::StringRef Text) {
     return;
   }
 
+  // {$scopedenums on|off}: whether the values of the enumerations declared
+  // after it are reached only through their type (TColor.Red), as in FPC.
+  if (Word.equals_insensitive("scopedenums")) {
+    if (Arg.equals_insensitive("on") || Arg == "+")
+      ScopedEnums = true;
+    else if (Arg.equals_insensitive("off") || Arg == "-")
+      ScopedEnums = false;
+    else
+      Diags.error(locOf(Start),
+                  "expected {$scopedenums on} or {$scopedenums off}");
+    return;
+  }
+
   // {$inline on|off}: whether the `inline` directive inlines (default: on in
   // objfpc mode, as in Free Pascal).
   if (Word.equals_insensitive("inline")) {

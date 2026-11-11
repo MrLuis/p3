@@ -63,7 +63,7 @@ class Lexer;
 struct GenericTokens {
   llvm::ArrayRef<Token> Tokens;
   bool LongStrings = false, AdvancedRecords = false, CorbaInterfaces = false,
-       InlineOn = false, TypeHelpers = false;
+       InlineOn = false, TypeHelpers = false, ScopedEnums = false;
 };
 
 class Parser {
@@ -106,6 +106,7 @@ class Parser {
   bool longStrings() const;
   bool advancedRecords() const;
   bool typeHelpers() const;
+  bool scopedEnums() const;
   bool corbaInterfaces() const;
   bool inlineOn() const;
   bool startsGeneric();
@@ -237,8 +238,9 @@ class Parser {
   // Expressions
   Expr *parseExpression();
   Expr *parseExpressionImpl();
-  Expr *parseSimpleExpression();
-  Expr *parseTerm();
+  /// First: the expression's first factor, already parsed (no sign).
+  Expr *parseSimpleExpression(Expr *First = nullptr);
+  Expr *parseTerm(Expr *First = nullptr);
   Expr *parseFactor();
   /// Applies `[...]` and `.field` selectors to Base.
   Expr *parseSelectors(Expr *Base);

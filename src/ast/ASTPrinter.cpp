@@ -411,7 +411,8 @@ class ASTPrinter : public StmtVisitor<ASTPrinter>,
       loc(TS->getBeginLoc());
       return;
     case TypeSpec::TS_Enum:
-      line("EnumTypeSpec");
+      line(llvm::cast<EnumTypeSpec>(TS)->isScoped() ? "EnumTypeSpec scoped"
+                                                     : "EnumTypeSpec");
       loc(TS->getBeginLoc());
       {
         IndentScope I(Indent);

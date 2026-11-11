@@ -48,6 +48,7 @@ class Lexer {
   bool CorbaInterfaces = false; ///< {$interfaces corba} (default: com)
   bool AdvancedRecords = false; ///< {$modeswitch advancedrecords}
   bool TypeHelpers = false;     ///< {$modeswitch typehelpers}
+  bool ScopedEnums = false;     ///< {$scopedenums on}
   bool LongStrings = false;     ///< {$H+}: `string` is an ansistring
 
   // Macros ({$macro on}, {$define NAME := value}, as in Free Pascal): the
@@ -140,6 +141,9 @@ public:
   bool advancedRecords() const { return AdvancedRecords; }
   /// May type helpers be declared here ({$modeswitch typehelpers})?
   bool typeHelpers() const { return TypeHelpers; }
+  /// Are the values of enumerations declared here reached only through
+  /// their type ({$scopedenums on})?
+  bool scopedEnums() const { return ScopedEnums; }
   bool longStrings() const { return LongStrings; }
   /// Does the `inline` directive inline ({$inline on})?
   bool inlineOn() const { return InlineOn; }

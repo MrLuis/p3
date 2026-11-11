@@ -78,6 +78,9 @@ type
       tokens have the value's locations }
     macrosOn: boolean;
     inlineOn: boolean; { $inline on (the default in objfpc mode) }
+    { $scopedenums on: the values of the enumerations declared after it are
+      reached only through their type (TColor.Red) }
+    scopedEnums: boolean;
     macros: TIntMap;
     macroStack: TPtrList;
     { declared(NAME) in $IF (Free Pascal): the names declared so far (name
@@ -340,6 +343,7 @@ begin
   lx.longStrings := false;
   lx.macrosOn := false;
   lx.inlineOn := mode = lmObjFPC;
+  lx.scopedEnums := false;
   mapInit(lx.macros);
   listInit(lx.macroStack);
   defineSymbol(lx, 'PCC', true);
@@ -1378,6 +1382,18 @@ begin
   end;
   { $inline on / off: whether the inline directive inlines (default: on in
     objfpc mode, as in Free Pascal) }
+  if word = 'scopedenums' then
+  begin
+    arg := lowerStr(copyChars(lx, b, e));
+    if (arg = 'on') or (arg = '+') then
+      lx.scopedEnums := true
+    else if (arg = 'off') or (arg = '-') then
+      lx.scopedEnums := false
+    else
+      diagError(locOf(lx, start),
+                'expected {$scopedenums on} or {$scopedenums off}');
+    exit;
+  end;
   if word = 'inline' then
   begin
     arg := lowerStr(copyChars(lx, b, e));

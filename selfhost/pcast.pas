@@ -289,7 +289,9 @@ type
       { tquals (named, objfpc): the classes or records enclosing tname,
         outermost first (TOuter.TInner), of PIdent }
       tsNamed, tsPointer, tsClassRef: (tname: TIdent; tquals: TPtrList);
-      tsEnum: (enumNames: TPtrList); { of PIdent }
+      { enumScoped: declared under $scopedenums on (the values only as
+        TColor.Red) }
+      tsEnum: (enumNames: TPtrList; enumScoped: boolean); { of PIdent }
       tsSubrange: (lo, hi: PNode);
       tsArray: (indexes: TPtrList; element: PTypeSpec; arrPacked: boolean;
                 arrBitPacked: boolean);

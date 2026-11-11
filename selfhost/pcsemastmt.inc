@@ -1483,12 +1483,53 @@ begin
   helperNamedBy := h;
 end;
 
+{ TColor.Red: the value of the enumeration type e's base names (any
+  enumeration's; the only way to a scoped one's, $scopedenums on). nil if
+  the base does not name an enumeration type (or names one with a helper,
+  and not one of its values), or after a diagnostic (reported). }
+function enumValueNamedBy(e: PNode; var reported: boolean): PDecl;
+var
+  td, v: PDecl;
+  et: PType;
+  i: longint;
+begin
+  enumValueNamedBy := nil;
+  td := typeNamedBy(e^.base);
+  if td = nil then
+    exit;
+  et := td^.declType;
+  if (et = nil) or (et^.kind <> tyEnum) then
+    exit;
+  for i := 0 to et^.enumValues.count - 1 do
+  begin
+    v := PDecl(listGet(et^.enumValues, i));
+    if v^.ident.name = e^.fieldName.name then
+    begin
+      if e^.base^.kind = nkNameRef then
+      begin
+        e^.base^.refDecl := td;
+        warnHints(td, e^.base^.ref);
+      end;
+      e^.base^.typ := et;
+      exit(v);
+    end;
+  end;
+  if helperFor(et) <> nil then
+    exit; { a member of its helper }
+  ms('no value named ''');
+  maN(e^.fieldName.spelling);
+  ma(''' in enumeration ');
+  maT(et);
+  errR(e^.fieldName.loc, identRange(e^.fieldName));
+  reported := true;
+end;
+
 { Resolves r.f / obj.member / TFoo.Create; nil after a diagnostic. }
 function resolveMember(e: PNode): PDecl;
 var
   viaClass, bt, owner, h: PType;
   d, td: PDecl;
-  viaRef, ok: boolean;
+  viaRef, ok, reported: boolean;
   what: string;
 begin
   resolveMember := nil;
@@ -1497,6 +1538,12 @@ begin
     warnHints(e^.base^.refDecl, e^.base^.ref);
   if viaClass = nil then
   begin
+    reported := false;
+    d := enumValueNamedBy(e, reported); { TColor.Red }
+    if d <> nil then
+      exit(d);
+    if reported then
+      exit;
     h := helperNamedBy(e^.base);
     if h <> nil then { AnsiString.Join }
     begin

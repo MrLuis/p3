@@ -933,11 +933,14 @@ public:
 /// (red, green, blue)
 class EnumTypeSpec final : public TypeSpec {
   llvm::ArrayRef<Identifier> Names;
+  bool Scoped; ///< {$scopedenums on}: the values only as TColor.Red
 
 public:
-  EnumTypeSpec(SourceRange R, llvm::ArrayRef<Identifier> Names)
-      : TypeSpec(TS_Enum, R), Names(Names) {}
+  EnumTypeSpec(SourceRange R, llvm::ArrayRef<Identifier> Names,
+               bool Scoped = false)
+      : TypeSpec(TS_Enum, R), Names(Names), Scoped(Scoped) {}
   llvm::ArrayRef<Identifier> getNames() const { return Names; }
+  bool isScoped() const { return Scoped; }
   static bool classof(const TypeSpec *T) { return T->getKind() == TS_Enum; }
 };
 

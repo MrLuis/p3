@@ -61,6 +61,10 @@ bool Parser::typeHelpers() const {
 bool Parser::corbaInterfaces() const {
   return Replay ? Replay->CorbaInterfaces : Lex.corbaInterfaces();
 }
+bool Parser::scopedEnums() const {
+  return Replay ? Replay->ScopedEnums : Lex.scopedEnums();
+}
+
 bool Parser::inlineOn() const {
   return Replay ? Replay->InlineOn : Lex.inlineOn();
 }
@@ -106,6 +110,7 @@ RoutineDecl *Parser::parseGenericRoutine(bool HeadingOnly) {
   Toks->CorbaInterfaces = corbaInterfaces();
   Toks->InlineOn = inlineOn();
   Toks->TypeHelpers = typeHelpers();
+  Toks->ScopedEnums = scopedEnums();
   llvm::SmallVector<Token, 64> Rec;
   auto *SavedRec = Recording;
   Recording = &Rec;
@@ -2102,20 +2107,30 @@ static bool continuesConstExpr(tok::TokenKind K);
 TypeSpec *Parser::parseNamedType() {
   Identifier Name = makeIdentifier(Tok);
   SourceLocation Start = consumeToken();
-  if (!LangOpts.ObjKeywords || Tok.isNot(tok::period) ||
+  if (LangOpts.Mode == LangMode::ISO || Tok.isNot(tok::period) ||
       peekToken().isNot(tok::identifier))
     return Ctx.create<NamedTypeSpec>(Name);
+  // TOuter.TInner (objfpc), or a subrange whose first bound is a qualified
+  // constant (TColor.Green..TColor.Blue, TFoo.C + 1..9).
+  Expr *First = Ctx.create<NameRefExpr>(Name);
   llvm::SmallVector<Identifier, 2> Qualifiers;
   while (Tok.is(tok::period) && peekToken().is(tok::identifier)) {
     consumeToken(); // '.'
     Qualifiers.push_back(Name);
     Name = makeIdentifier(Tok);
+    First = Ctx.create<FieldExpr>(SourceRange(Start, Tok.getEndLocation()),
+                                  First, Name);
     consumeToken();
   }
-  if (continuesConstExpr(Tok.getKind()))
-    Diags.error(Tok.getLocation(),
-                "a subrange bound cannot be a qualified constant yet; declare "
-                "an unqualified constant for it");
+  if (continuesConstExpr(Tok.getKind())) {
+    Expr *Lo = parseSimpleExpression(First);
+    if (!Lo || !expect(tok::dotdot, "in subrange type"))
+      return nullptr;
+    Expr *Hi = parseSimpleExpression();
+    if (!Hi)
+      return nullptr;
+    return Ctx.create<SubrangeTypeSpec>(SourceRange(Start, PrevTokEnd), Lo, Hi);
+  }
   return Ctx.create<NamedTypeSpec>(SourceRange(Start, PrevTokEnd),
                                    Ctx.copyArray<Identifier>(Qualifiers), Name);
 }
@@ -2135,17 +2150,19 @@ TypeSpec *Parser::parseSimpleType() {
   SourceLocation Start = Tok.getLocation();
 
   if (Tok.is(tok::l_paren)) {
+    bool Scoped = scopedEnums(); // {$scopedenums on}: TColor.Red only
     consumeToken();
     llvm::SmallVector<Identifier, 8> Names;
     bool Listed = parseIdentList(Names, "enumeration value name");
-    for (const Identifier &N : Names)
-      declareName(N);
+    if (!Scoped)
+      for (const Identifier &N : Names)
+        declareName(N);
     if (!Listed)
       return nullptr;
     if (!expect(tok::r_paren, "after enumeration values"))
       return nullptr;
     return Ctx.create<EnumTypeSpec>(SourceRange(Start, PrevTokEnd),
-                                    Ctx.copyArray<Identifier>(Names));
+                                    Ctx.copyArray<Identifier>(Names), Scoped);
   }
 
   if (Tok.is(tok::identifier) && !continuesConstExpr(peekToken().getKind()))
@@ -3107,8 +3124,8 @@ Expr *Parser::parseConstant() {
   }
   bool Name = Tok.is(tok::identifier);
   consumeToken();
-  // TOuter.C (objfpc): a constant declared in a class or record
-  while (Name && LangOpts.ObjKeywords && Tok.is(tok::period) &&
+  // TOuter.C (objfpc): a constant declared in a class or record; TColor.Red
+  while (Name && LangOpts.Mode != LangMode::ISO && Tok.is(tok::period) &&
          peekToken().is(tok::identifier)) {
     consumeToken(); // '.'
     E = Ctx.create<FieldExpr>(SourceRange(E->getBeginLoc(), Tok.getEndLocation()),
@@ -3340,9 +3357,11 @@ Expr *Parser::parseExpressionImpl() {
 }
 
 // simpleExpr = [ "+" | "-" ] term { addOp term } .
-Expr *Parser::parseSimpleExpression() {
+Expr *Parser::parseSimpleExpression(Expr *First) {
   Expr *LHS;
-  if (Tok.isOneOf(tok::plus, tok::minus)) {
+  if (First) {
+    LHS = parseTerm(First);
+  } else if (Tok.isOneOf(tok::plus, tok::minus)) {
     // ISO: the sign applies to the whole first term: -a*b == -(a*b).
     UnaryOp Op = Tok.is(tok::plus) ? UnaryOp::Plus : UnaryOp::Minus;
     SourceLocation OpLoc = consumeToken();
@@ -3368,8 +3387,8 @@ Expr *Parser::parseSimpleExpression() {
 }
 
 // term = factor { mulOp factor } .
-Expr *Parser::parseTerm() {
-  Expr *LHS = parseFactor();
+Expr *Parser::parseTerm(Expr *First) {
+  Expr *LHS = First ? First : parseFactor();
   if (!LHS)
     return nullptr;
   while (auto Op = peekMulOp()) {

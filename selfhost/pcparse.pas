@@ -49,7 +49,7 @@ type
   TGenericTokens = record
     toks: TPtrList; { of PToken }
     longStrings, advancedRecords, corbaInterfaces, inlineOn: boolean;
-    typeHelpers: boolean;
+    typeHelpers, scopedEnums: boolean;
   end;
 
 var
@@ -473,6 +473,9 @@ procedure parseStatementSequence(var body: TPtrList; terminator: TTokenKind;
                                  openLoc: TLoc; const openWord: string); forward;
 function parseExpression: PNode; forward;
 function parseSimpleExpression: PNode; forward;
+{ first: the expression's first factor, already parsed (no sign) }
+function parseSimpleExpressionFrom(first: PNode): PNode; forward;
+function nameRef(const id: TIdent): PNode; forward;
 function parseSelectors(base: PNode): PNode; forward;
 function parseFormalParams(var params: TPtrList): boolean; forward;
 function parseFormalParamsClose(var params: TPtrList; close: TTokenKind): boolean; forward;
@@ -1828,6 +1831,7 @@ begin
   toks^.corbaInterfaces := lx.corbaInterfaces;
   toks^.inlineOn := lx.inlineOn;
   toks^.typeHelpers := lx.typeHelpers;
+  toks^.scopedEnums := lx.scopedEnums;
   listInit(rec);
   savedRec := recording;
   recording := @rec;
@@ -1907,6 +1911,7 @@ begin
   lx.corbaInterfaces := toks^.corbaInterfaces;
   lx.inlineOn := toks^.inlineOn;
   lx.typeHelpers := toks^.typeHelpers;
+  lx.scopedEnums := toks^.scopedEnums;
   recording := nil;
   replay := toks;
   replayPos := 0;
@@ -3028,22 +3033,41 @@ var
   start: TLoc;
   quals: TPtrList;
   ts: PTypeSpec;
+  first, n, lo, hi: PNode;
 begin
+  parseNamedType := nil;
   name := makeIdentifier(tok);
   start := consumeToken;
-  if (mode <> lmObjFPC) or (tok.kind <> tkPeriod) or (peekKind <> tkIdentifier) then
+  if (mode = lmISO) or (tok.kind <> tkPeriod) or (peekKind <> tkIdentifier) then
     exit(namedSpec(name));
+  { TOuter.TInner (objfpc), or a subrange whose first bound is a qualified
+    constant (TColor.Green..TColor.Blue, TFoo.C + 1..9) }
+  first := nameRef(name);
   listInit(quals);
   while (tok.kind = tkPeriod) and (peekKind = tkIdentifier) do
   begin
     consumeToken; { '.' }
     listAdd(quals, newIdent(name));
     name := makeIdentifier(tok);
+    n := newNode(nkField, start, tokenEnd(tok));
+    n^.base := first;
+    n^.fieldName := name;
+    first := n;
     consumeToken;
   end;
   if continuesConstExpr(tok.kind) then
-    diagError(tok.loc, 'a subrange bound cannot be a qualified constant yet; ' +
-                       'declare an unqualified constant for it');
+  begin
+    lo := parseSimpleExpressionFrom(first);
+    if (lo = nil) or not expect(tkDotdot, 'in subrange type') then
+      exit;
+    hi := parseSimpleExpression;
+    if hi = nil then
+      exit;
+    ts := newTypeSpec(tsSubrange, start, prevTokEnd);
+    ts^.lo := lo;
+    ts^.hi := hi;
+    exit(ts);
+  end;
   ts := newTypeSpec(tsNamed, start, prevTokEnd);
   ts^.tname := name;
   ts^.tquals := quals;
@@ -3063,24 +3087,27 @@ var
   names: TPtrList;
   ts: PTypeSpec;
   lo, hi: PNode;
-  listed: boolean;
+  listed, scoped: boolean;
   i: longint;
 begin
   parseSimpleType := nil;
   start := tok.loc;
   if tok.kind = tkLParen then
   begin
+    scoped := lx.scopedEnums; { $scopedenums on: TColor.Red only }
     consumeToken;
     listInit(names);
     listed := parseIdentList(names, 'enumeration value name');
-    for i := 0 to names.count - 1 do
-      declareName(PIdent(listGet(names, i))^);
+    if not scoped then
+      for i := 0 to names.count - 1 do
+        declareName(PIdent(listGet(names, i))^);
     if not listed then
       exit;
     if not expect(tkRParen, 'after enumeration values') then
       exit;
     ts := newTypeSpec(tsEnum, start, prevTokEnd);
     ts^.enumNames := names;
+    ts^.enumScoped := scoped;
     exit(ts);
   end;
   if (tok.kind = tkIdentifier) and not continuesConstExpr(peekKind) then
@@ -4377,8 +4404,8 @@ begin
   end;
   isName := tok.kind = tkIdentifier;
   consumeToken;
-  { TOuter.C (objfpc): a constant declared in a class or record }
-  while isName and (mode = lmObjFPC) and (tok.kind = tkPeriod) and
+  { TOuter.C (objfpc): a constant declared in a class or record; TColor.Red }
+  while isName and (mode <> lmISO) and (tok.kind = tkPeriod) and
         (peekKind = tkIdentifier) do
   begin
     consumeToken; { '.' }
@@ -4672,18 +4699,25 @@ begin
   nesting := nesting - 1;
 end;
 
-function parseTerm: PNode; forward;
+function parseTermFrom(first: PNode): PNode; forward;
+
+function parseTerm: PNode;
+begin
+  parseTerm := parseTermFrom(nil);
+end;
 
 // simpleExpr = [ "+" | "-" ] term { addOp term } .
-function parseSimpleExpression: PNode;
+function parseSimpleExpressionFrom(first: PNode): PNode;
 var
   lhs, rhs, operand: PNode;
   uop: TUnaryOp;
   op: TBinaryOp;
   opLoc: TLoc;
 begin
-  parseSimpleExpression := nil;
-  if tok.kind in [tkPlus, tkMinus] then
+  parseSimpleExpressionFrom := nil;
+  if first <> nil then
+    lhs := parseTermFrom(first)
+  else if tok.kind in [tkPlus, tkMinus] then
   begin
     { ISO: the sign applies to the whole first term: -a*b = -(a*b) }
     if tok.kind = tkPlus then
@@ -4708,18 +4742,26 @@ begin
       exit;
     lhs := makeBinary(op, opLoc, lhs, rhs);
   end;
-  parseSimpleExpression := lhs;
+  parseSimpleExpressionFrom := lhs;
+end;
+
+function parseSimpleExpression: PNode;
+begin
+  parseSimpleExpression := parseSimpleExpressionFrom(nil);
 end;
 
 // term = factor { mulOp factor } .
-function parseTerm: PNode;
+function parseTermFrom(first: PNode): PNode;
 var
   lhs, rhs: PNode;
   op: TBinaryOp;
   opLoc: TLoc;
 begin
-  parseTerm := nil;
-  lhs := parseFactor;
+  parseTermFrom := nil;
+  if first <> nil then
+    lhs := first
+  else
+    lhs := parseFactor;
   if lhs = nil then
     exit;
   while peekMulOp(op) do
@@ -4730,7 +4772,7 @@ begin
       exit;
     lhs := makeBinary(op, opLoc, lhs, rhs);
   end;
-  parseTerm := lhs;
+  parseTermFrom := lhs;
 end;
 
 // designator = ident { "[" expression { "," expression } "]" | "." ident } .

@@ -2069,9 +2069,9 @@ end;
 
 function buildType(ts: PTypeSpec): PType;
 var
-  d, cd: PDecl;
+  d, cd, prev: PDecl;
   t, elem, idx, res: PType;
-  i: longint;
+  i, j: longint;
   id: PIdent;
   lo, hi, mc: TConstant;
   host: PType;
@@ -2177,8 +2177,24 @@ begin
           cd := newDecl(dkConst, id^, id^.loc);
           cd^.constType := t;
           cd^.constValue := constOrdinal(t^.enumValues.count);
+          if not ts^.enumScoped then
+            declare(cd)
+          else { reached only as TColor.Red: not in the scope }
+            for j := 0 to t^.enumValues.count - 1 do
+            begin
+              prev := PDecl(listGet(t^.enumValues, j));
+              if prev^.ident.name = id^.name then
+              begin
+                ms('redefinition of ''');
+                maN(id^.spelling);
+                ma('''');
+                errR(id^.loc, identRange(id^));
+                ms('previous definition is here');
+                note(prev^.loc);
+                break;
+              end;
+            end;
           listAdd(t^.enumValues, cd);
-          declare(cd);
         end;
         buildType := t;
       end;
@@ -2569,7 +2585,8 @@ begin
     if mt <> nil then
       mt^.classOuter := PType(outer);
   end;
-  if (t = nil) or (t^.kind <> tyEnum) or (td^.typeSpec^.kind <> tsEnum) then
+  if (t = nil) or (t^.kind <> tyEnum) or (td^.typeSpec^.kind <> tsEnum) or
+     td^.typeSpec^.enumScoped then { (a scoped one's: TOuter.TEnum.V) }
     exit;
   for i := 0 to t^.enumValues.count - 1 do
   begin

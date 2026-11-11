@@ -395,7 +395,10 @@ begin
       end;
     tsEnum:
       begin
-        line('EnumTypeSpec');
+        if ts^.enumScoped then
+          line('EnumTypeSpec scoped')
+        else
+          line('EnumTypeSpec');
         loc(ts^.b);
         indent := indent + 2;
         for i := 0 to ts^.enumNames.count - 1 do

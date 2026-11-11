@@ -1464,8 +1464,18 @@ class Checker : public StmtVisitor<Checker>,
       for (const Identifier &Id : ES->getNames()) {
         auto *C = Ctx.create<ConstDecl>(
             Id.Loc, Id, E, ConstValue::ordinal(static_cast<int64_t>(Values.size())));
+        if (!ES->isScoped()) {
+          declare(C);
+        } else { // reached only as TColor.Red: not in the scope
+          for (ConstDecl *Prev : Values)
+            if (Prev->getName().Name == Id.Name) {
+              Diags.error(Id.Loc, "redefinition of '" + Id.Spelling + "'",
+                          {Id.getRange()});
+              Diags.note(Prev->getLocation(), "previous definition is here");
+              break;
+            }
+        }
         Values.push_back(C);
-        declare(C);
       }
       E->setValues(Ctx.copyArray<ConstDecl *>(Values));
       return E;
@@ -2056,7 +2066,8 @@ class Checker : public StmtVisitor<Checker>,
     else if (ClassType *MT = memberTableOf(T))
       MT->setOuter(Outer);
     auto *E = llvm::dyn_cast_or_null<EnumType>(T);
-    if (!E || !llvm::isa<EnumTypeSpec>(TD->getTypeSpec()))
+    auto *ES = llvm::dyn_cast<EnumTypeSpec>(TD->getTypeSpec());
+    if (!E || !ES || ES->isScoped()) // (a scoped one's: TOuter.TEnum.V)
       return;
     for (ConstDecl *V : E->getValues()) {
       V->setVisibility(TD->getVisibility());
@@ -8138,6 +8149,36 @@ public:
     return TD;
   }
 
+  /// TColor.Red: the value of the enumeration type E's base names (any
+  /// enumeration's; the only way to a scoped one's, {$scopedenums on}).
+  /// Null if the base does not name an enumeration type (or names one with
+  /// a helper, and not one of its values: TColor.Helped), or after a
+  /// diagnostic (Reported).
+  Decl *enumValueNamedBy(FieldExpr *E, bool &Reported) {
+    TypeDecl *TD = typeNamedBy(E->getBase());
+    auto *ET = TD ? llvm::dyn_cast_or_null<EnumType>(TD->getType()) : nullptr;
+    if (!ET)
+      return nullptr;
+    const Identifier &F = E->getField();
+    for (ConstDecl *V : ET->getValues())
+      if (V->getName().Name == F.Name) {
+        if (auto *N = llvm::dyn_cast<NameRefExpr>(E->getBase())) {
+          N->setDecl(TD);
+          warnHints(TD, N->getName());
+        }
+        E->getBase()->setType(ET);
+        return V;
+      }
+    if (helperFor(ET))
+      return nullptr; // a member of its helper
+    Diags.error(F.Loc,
+                "no value named '" + F.Spelling + "' in enumeration " +
+                    quoted(ET),
+                {F.getRange()});
+    Reported = true;
+    return nullptr;
+  }
+
   /// AnsiString.Join: a static method or constant of the helper H of the
   /// type E's base names.
   Decl *resolveHelperStatic(FieldExpr *E, ClassType *H) {
@@ -8173,6 +8214,11 @@ public:
     if (auto *N = llvm::dyn_cast<NameRefExpr>(E->getBase()); ViaClass && N)
       warnHints(N->getDecl(), N->getName()); // TFoo.Create: a use of TFoo
     if (!ViaClass) {
+      bool Reported = false;
+      if (Decl *V = enumValueNamedBy(E, Reported)) // TColor.Red
+        return V;
+      if (Reported)
+        return nullptr;
       if (ClassType *H = helperNamedBy(E->getBase())) // AnsiString.Join
         return resolveHelperStatic(E, H);
       if (TypeDecl *TD = typeNamedBy(E->getBase())) // TH.Join

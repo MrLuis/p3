@@ -359,6 +359,25 @@ the default in `--mode=objfpc`; in tp mode the directive needs it, and
 `forward`, `external` or `virtual`/`override`/`abstract`. Separately
 compiled units are not inlined into their users.
 
+**Scoped enumerations** (`{$scopedenums on}`, also `+`; `off`/`-` ends
+them), as in Free Pascal: the values of an enumeration declared while it is
+on are not in scope, only reached through their type (`TColor.Red`), so
+`TShade = (Light, Dark, Red)` and a constant `Red` can coexist. Any
+enumeration's values can be qualified (`TPlain.pb`, also without the
+switch), wherever a constant can be used: subrange bounds
+(`TColor.Green..TColor.Blue`), case and variant labels, sets, array indexes,
+typed constants and default parameters. A scoped enumeration declared in a
+class does not add its values to the class (`TOuter.TKind.One`).
+
+```pascal
+{$scopedenums on}
+type
+  TColor = (Red, Green, Blue);
+  TWarm = TColor.Green..TColor.Blue;
+...
+  c := TColor.Green;
+```
+
 **Hint directives** (not in `--mode=iso`), as in Free Pascal: `deprecated`
 (optionally with a message: `deprecated 'use Bar'`), `experimental`,
 `platform`, `library` and `unimplemented` after a constant, type, variable,
