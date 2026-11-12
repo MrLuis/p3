@@ -369,6 +369,17 @@ the default in `--mode=objfpc`; in tp mode the directive needs it, and
 `forward`, `external` or `virtual`/`override`/`abstract`. Separately
 compiled units are not inlined into their users.
 
+**`{$modeswitch NAME}`** (also `NAME+`, `NAME-`, `NAME on`, `NAME off`), with
+Free Pascal 3.2.2's names: `advancedrecords` and `typehelpers` (objfpc),
+and `result`, `out` and `defaultparameters`, which work in tp mode too
+(and can be turned off in objfpc mode). pcc's mode decides `class`,
+`objpas`, `properties` and `exceptions`, and always has `cvar`,
+`initfinal`, `hintdirective` and `allowinline`: asking for the other state
+is a warning. Switches for features pcc lacks (`nestedcomments`,
+`objectivec1`, ...) can be turned off but not on (a warning); unknown names
+are warnings too. Unlike Free Pascal, pcc also takes them after the start
+of a file.
+
 **`{$push}` / `{$pop}`**, as in Free Pascal: `{$pop}` restores the local
 switches the matching `{$push}` saved (nested, at most 21 levels): `{$H}`,
 `{$R}`, `{$Q}` (also back to the command line's default when no switch

@@ -51,6 +51,7 @@ type
     longStrings, advancedRecords, corbaInterfaces, inlineOn: boolean;
     typeHelpers, scopedEnums: boolean;
     packRecords: longint;
+    resultSwitch, outSwitch, defaultParamsSwitch: boolean;
   end;
 
 var
@@ -1153,7 +1154,7 @@ var
   cc: longint;
   ccw: string;
   isFunction, hasParamList, isExternal, overloadDir, inlineDir: boolean;
-  isVarArgs: boolean;
+  isVarArgs, resultName: boolean;
   inlineLoc, forwardLoc, varArgsLoc, staticLoc: TLoc;
   libraryName: PName;
   libraryExpr, nameExpr: PNode;
@@ -1170,6 +1171,7 @@ var
 begin
   parseRoutineDecl := nil;
   isFunction := tok.kind = tkKwFunction;
+  resultName := lx.resultSwitch; { $modeswitch result here }
   mk := methodKindOf(tok.kind);
   kind := routineKindWord(tok.kind);
   loc := consumeToken;
@@ -1370,6 +1372,7 @@ begin
       r^.isInline := inlineDir;
       r^.callConv := cc;
       r^.staticDirLoc := staticLoc;
+      r^.resultName := resultName;
       addHints(r, hf, hm);
       parseRoutineDecl := r;
     end;
@@ -1390,6 +1393,7 @@ begin
       r^.isInline := inlineDir;
       r^.callConv := cc;
       r^.staticDirLoc := staticLoc;
+      r^.resultName := resultName;
       addHints(r, hf, hm);
       parseRoutineDecl := r;
     end;
@@ -1418,6 +1422,7 @@ begin
     r^.isInline := inlineDir;
     r^.callConv := cc;
     r^.staticDirLoc := staticLoc;
+    r^.resultName := resultName;
     addHints(r, hf, hm);
     parseRoutineDecl := r;
   end;
@@ -1673,10 +1678,11 @@ var
   params: TPtrList;
   resultSpec: PTypeSpec;
   body: PBlock;
-  ok: boolean;
+  ok, resultName: boolean;
   r: PDecl;
 begin
   parseOperatorDecl := nil;
+  resultName := lx.resultSwitch; { $modeswitch result here }
   loc := consumeToken; { 'operator' }
   listInit(params);
   resultSpec := nil;
@@ -1726,6 +1732,7 @@ begin
   r^.methodKind := mtOperator;
   r^.methodClassName := clsName;
   r^.isClassMethod := true;
+  r^.resultName := resultName;
   parseOperatorDecl := r;
 end;
 
@@ -1846,6 +1853,9 @@ begin
   toks^.typeHelpers := lx.typeHelpers;
   toks^.scopedEnums := lx.scopedEnums;
   toks^.packRecords := lx.packRecords;
+  toks^.resultSwitch := lx.resultSwitch;
+  toks^.outSwitch := lx.outSwitch;
+  toks^.defaultParamsSwitch := lx.defaultParamsSwitch;
   listInit(rec);
   savedRec := recording;
   recording := @rec;
@@ -1927,6 +1937,9 @@ begin
   lx.typeHelpers := toks^.typeHelpers;
   lx.scopedEnums := toks^.scopedEnums;
   lx.packRecords := toks^.packRecords;
+  lx.resultSwitch := toks^.resultSwitch;
+  lx.outSwitch := toks^.outSwitch;
+  lx.defaultParamsSwitch := toks^.defaultParamsSwitch;
   recording := nil;
   replay := toks;
   replayPos := 0;
@@ -2188,7 +2201,7 @@ begin
       isConstRef := true;
     end;
     { objfpc: out, not a reserved word, is a var parameter here }
-    isOut := not isVar and not isConst and (mode = lmObjFPC) and (close = tkRParen) and
+    isOut := not isVar and not isConst and lx.outSwitch and (close = tkRParen) and
              (tok.kind = tkIdentifier) and (nameStr(tok.name) = 'out');
     if isOut then
     begin
@@ -2233,9 +2246,9 @@ begin
     if (tok.kind = tkEqual) and (close = tkRParen) then
     begin
       eqLoc := consumeToken;
-      if mode <> lmObjFPC then
-        diagError(eqLoc, 'default parameter values are a Free Pascal ' +
-                  'extension; use --mode=objfpc')
+      if not lx.defaultParamsSwitch then
+        diagError(eqLoc, 'default parameter values need --mode=objfpc or ' +
+                  '{$modeswitch defaultparameters}')
       else if isVar or untyped then
         diagError(eqLoc, 'only value and const parameters can have a default value')
       else if names.count > 1 then

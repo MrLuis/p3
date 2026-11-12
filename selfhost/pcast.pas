@@ -475,6 +475,10 @@ type
                     (Free Pascal: repeats the declaration's; ignored on
                     plain routines); 0 if none }
                   staticDirLoc: TLoc;
+                  { Result names the function's result in its body
+                    ($modeswitch result, on in objfpc mode, where the body
+                    is) }
+                  resultName: boolean;
                   { the inline directive (with $inline on): code generation
                     asks LLVM to inline the routine (inlinehint) }
                   isInline: boolean;

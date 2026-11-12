@@ -24,7 +24,7 @@
 ; PARSE: parse.pas:5:29: error: only value and const parameters can have a default value
 ; PARSE: parse.pas:6:22: error: only value and const parameters can have a default value
 ; RUN: not %pcc --mode=tp -c %S/Inputs/defaults/tp.pas -o %t.o 2>&1 | FileCheck --check-prefix=TP %s
-; TP: tp.pas:2:24: error: default parameter values are a Free Pascal extension; use --mode=objfpc
+; TP: tp.pas:2:24: error: default parameter values need --mode=objfpc or {$modeswitch defaultparameters}
 ; RUN: not %pcc --mode=objfpc -c %S/Inputs/defaults/methods.pas -o %t.o 2>&1 | FileCheck --check-prefix=INDEX %s
 ; INDEX: methods.pas:6:26: error: expected ']' after parameters
 ; RUN: not %pcc --mode=objfpc -ferror-limit=0 -c %S/Inputs/defaults/methods2.pas -o %t.o 2>&1 | FileCheck --check-prefix=METHODS %s

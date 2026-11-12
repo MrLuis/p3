@@ -70,6 +70,10 @@ class Lexer {
   // value's locations.
   bool MacrosOn = false;
   bool InlineOn; ///< {$inline on} (the default in objfpc mode)
+  /// Mode switches that pcc lets a program turn on or off in any mode
+  /// ({$modeswitch result|out|defaultparameters}); on in objfpc mode.
+  bool ResultSwitch, OutSwitch, DefaultParamsSwitch;
+  void handleModeSwitch(const char *Start, llvm::StringRef Arg);
   struct MacroValue {
     const char *Begin, *End;
   };
@@ -160,6 +164,12 @@ public:
   bool longStrings() const { return LongStrings; }
   /// Does the `inline` directive inline ({$inline on})?
   bool inlineOn() const { return InlineOn; }
+  /// {$modeswitch result}: `Result` names a function's result.
+  bool resultSwitch() const { return ResultSwitch; }
+  /// {$modeswitch out}: `out` parameters.
+  bool outSwitch() const { return OutSwitch; }
+  /// {$modeswitch defaultparameters}: parameters' default values.
+  bool defaultParamsSwitch() const { return DefaultParamsSwitch; }
 
   /// Defines symbols for conditional compilation (-d NAME).
   void setDefines(llvm::ArrayRef<std::string> Names);

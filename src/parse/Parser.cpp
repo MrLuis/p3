@@ -61,6 +61,18 @@ bool Parser::typeHelpers() const {
 bool Parser::corbaInterfaces() const {
   return Replay ? Replay->CorbaInterfaces : Lex.corbaInterfaces();
 }
+bool Parser::resultSwitch() const {
+  return Replay ? Replay->ResultSwitch : Lex.resultSwitch();
+}
+
+bool Parser::outSwitch() const {
+  return Replay ? Replay->OutSwitch : Lex.outSwitch();
+}
+
+bool Parser::defaultParamsSwitch() const {
+  return Replay ? Replay->DefaultParamsSwitch : Lex.defaultParamsSwitch();
+}
+
 unsigned Parser::packRecords() const {
   return Replay ? Replay->PackRecords : Lex.packRecords();
 }
@@ -116,6 +128,9 @@ RoutineDecl *Parser::parseGenericRoutine(bool HeadingOnly) {
   Toks->TypeHelpers = typeHelpers();
   Toks->ScopedEnums = scopedEnums();
   Toks->PackRecords = packRecords();
+  Toks->ResultSwitch = resultSwitch();
+  Toks->OutSwitch = outSwitch();
+  Toks->DefaultParamsSwitch = defaultParamsSwitch();
   llvm::SmallVector<Token, 64> Rec;
   auto *SavedRec = Recording;
   Recording = &Rec;
@@ -818,6 +833,7 @@ RoutineDecl *Parser::parseRoutineDecl(bool HeadingOnly) {
   bool IsFunction = Tok.is(tok::kw_function);
   MethodKind MK = methodKindOf(Tok.getKind());
   const char *Kind = routineKindWord(Tok.getKind());
+  bool ResultName = resultSwitch(); // {$modeswitch result} here
   SourceLocation Loc = consumeToken();
 
   Identifier Name, ClassName;
@@ -994,6 +1010,7 @@ RoutineDecl *Parser::parseRoutineDecl(bool HeadingOnly) {
       R->setCallConv(CC);
       R->addHints(H.Flags, H.Message);
       R->setStaticDirectiveLoc(StaticLoc);
+      R->setResultName(ResultName);
     }
     return R;
   };
@@ -1311,6 +1328,7 @@ RoutineDecl *Parser::parseOperatorHeading() {
 // operatorDecl = "operator" ident "." operatorName "(" params ")" ":"
 //                typeIdent ";" block ";" .        (after "class")
 RoutineDecl *Parser::parseOperatorDecl(bool HeadingOnly) {
+  bool ResultName = resultSwitch(); // {$modeswitch result} here
   SourceLocation Loc = consumeToken(); // 'operator'
   Identifier ClassName, Name;
   llvm::SmallVector<VarDecl *, 2> Params;
@@ -1350,6 +1368,7 @@ RoutineDecl *Parser::parseOperatorDecl(bool HeadingOnly) {
   R->setMethodKind(MethodKind::Operator);
   R->setClassName(ClassName);
   R->setClassMethod();
+  R->setResultName(ResultName);
   return R;
 }
 
@@ -1908,7 +1927,7 @@ bool Parser::parseFormalParams(llvm::SmallVectorImpl<VarDecl *> &Params,
       IsConst = IsConstRef = true;
     }
     // objfpc: `out`, not a reserved word, is a var parameter here.
-    bool IsOut = !IsVar && !IsConst && LangOpts.ObjKeywords &&
+    bool IsOut = !IsVar && !IsConst && outSwitch() &&
                  Close == tok::r_paren && Tok.is(tok::identifier) &&
                  Tok.getIdentifier() == "out";
     if (IsOut) {
@@ -1942,9 +1961,9 @@ bool Parser::parseFormalParams(llvm::SmallVectorImpl<VarDecl *> &Params,
     bool DefaultOK = false;
     if (Tok.is(tok::equal) && Close == tok::r_paren) {
       SourceLocation EqLoc = consumeToken();
-      if (!LangOpts.ObjKeywords)
-        Diags.error(EqLoc, "default parameter values are a Free Pascal "
-                           "extension; use --mode=objfpc");
+      if (!defaultParamsSwitch())
+        Diags.error(EqLoc, "default parameter values need --mode=objfpc or "
+                           "{$modeswitch defaultparameters}");
       else if (IsVar || Untyped)
         Diags.error(EqLoc, "only value and const parameters can have a default value");
       else if (Names.size() > 1)

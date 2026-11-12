@@ -78,6 +78,9 @@ type
       tokens have the value's locations }
     macrosOn: boolean;
     inlineOn: boolean; { $inline on (the default in objfpc mode) }
+    { mode switches that pcc lets a program turn on or off in any mode
+      ($modeswitch result|out|defaultparameters); on in objfpc mode }
+    resultSwitch, outSwitch, defaultParamsSwitch: boolean;
     { $scopedenums on: the values of the enumerations declared after it are
       reached only through their type (TColor.Red) }
     scopedEnums: boolean;
@@ -360,6 +363,9 @@ begin
   lx.longStrings := false;
   lx.macrosOn := false;
   lx.inlineOn := mode = lmObjFPC;
+  lx.resultSwitch := mode = lmObjFPC;
+  lx.outSwitch := mode = lmObjFPC;
+  lx.defaultParamsSwitch := mode = lmObjFPC;
   lx.scopedEnums := false;
   lx.packRecords := 0;
   listInit(lx.switchStack);
@@ -1379,9 +1385,109 @@ begin
     packValue := longint(v);
 end;
 
+{ $modeswitch NAME[+|-| ON| OFF] with Free Pascal 3.2.2's names (text
+  [b, e) after the word): advancedrecords and typehelpers (objfpc),
+  result, out and defaultparameters (any mode) turn their features on or
+  off; the others pcc's mode decides (class, objpas, properties,
+  exceptions: objfpc; cvar, initfinal, hintdirective, allowinline: always)
+  or pcc lacks: a request for what pcc does is accepted, any other is
+  reported and ignored. }
+procedure handleModeSwitch(var lx: TLexer; start, b, e: int64);
+var
+  q: int64;
+  n, rest, kind: string;
+  isOn, objfpc: boolean;
+begin
+  q := b;
+  while (q < e) and isIdentBody(at(lx, q)) do
+    q := q + 1;
+  n := lowerStr(copyChars(lx, b, q));
+  rest := lowerStr(copyChars(lx, q, e));
+  while (length(rest) > 0) and isTrimSpace(rest[1]) do
+    rest := copy(rest, 2, length(rest) - 1);
+  if (rest = '') or (rest = '+') or (rest = 'on') then
+    isOn := true
+  else if (rest = '-') or (rest = 'off') then
+    isOn := false
+  else
+  begin
+    diagReport(sevWarning, locOf(lx, start),
+               'expected {$modeswitch NAME} (with +, -, ON or OFF); ignored',
+               noRange, noRange);
+    exit;
+  end;
+  objfpc := lx.mode = lmObjFPC;
+  if n = 'advancedrecords' then
+  begin
+    lx.advancedRecords := isOn;
+    exit;
+  end;
+  if n = 'typehelpers' then
+  begin
+    lx.typeHelpers := isOn;
+    exit;
+  end;
+  if n = 'result' then
+  begin
+    lx.resultSwitch := isOn;
+    exit;
+  end;
+  if n = 'out' then
+  begin
+    lx.outSwitch := isOn;
+    exit;
+  end;
+  if n = 'defaultparameters' then
+  begin
+    lx.defaultParamsSwitch := isOn;
+    exit;
+  end;
+  { the others: what pcc's mode decides, what it always does, or a feature
+    it lacks }
+  if (n = 'class') or (n = 'objpas') or (n = 'properties') or (n = 'exceptions') then
+    kind := 'mode'
+  else if (n = 'cvar') or (n = 'initfinal') or (n = 'hintdirective') or
+          (n = 'allowinline') then
+    kind := 'always'
+  else if (n = 'pchartostring') or (n = 'nestedcomments') or
+          (n = 'classicprocvars') or (n = 'macprocvars') or
+          (n = 'repeatforward') or (n = 'pointertoprocvar') or
+          (n = 'autoderef') or (n = 'ansistrings') or (n = 'duplicatelocals') or
+          (n = 'objectivec1') or (n = 'objectivec2') or (n = 'nestedprocvars') or
+          (n = 'nonlocalgoto') or (n = 'isounaryminus') or
+          (n = 'systemcodepage') or (n = 'finalfields') or
+          (n = 'unicodestrings') or (n = 'cblocks') or (n = 'isoio') or
+          (n = 'isoprogramparas') or (n = 'isomod') or (n = 'arrayoperators') then
+    kind := 'lacking'
+  else
+  begin
+    diagReport(sevWarning, locOf(lx, start),
+               'unknown mode switch ''' + copyChars(lx, b, q) + '''; ignored',
+               noRange, noRange);
+    exit;
+  end;
+  if (kind = 'mode') and (isOn <> objfpc) then
+  begin
+    if isOn then
+      diagReport(sevWarning, locOf(lx, start), 'mode switch ''' + n +
+                 ''' cannot be turned on in --mode=tp; use --mode=objfpc (ignored)',
+                 noRange, noRange)
+    else
+      diagReport(sevWarning, locOf(lx, start), 'mode switch ''' + n +
+                 ''' cannot be turned off in --mode=objfpc; use --mode=tp (ignored)',
+                 noRange, noRange);
+  end
+  else if (kind = 'always') and not isOn then
+    diagReport(sevWarning, locOf(lx, start), 'mode switch ''' + n +
+               ''' cannot be turned off; ignored', noRange, noRange)
+  else if (kind = 'lacking') and isOn then
+    diagReport(sevWarning, locOf(lx, start), 'mode switch ''' + n +
+               ''' is not supported; ignored', noRange, noRange);
+end;
+
 procedure handleDirective(var lx: TLexer; start: int64; textStart, textEnd: int64);
 var
-  p, b, e, partEnd, q: int64;
+  p, b, e, partEnd: int64;
   word, arg: string;
   msg: TBuf;
   c: char;
@@ -1558,33 +1664,10 @@ begin
       exit;
     end;
   end;
-  { $modeswitch advancedrecords[+|-]: methods in records (objfpc); other
-    mode switches are not supported (a warning below) }
   if word = 'modeswitch' then
   begin
-    arg := '';
-    q := b;
-    while (q < e) and isIdentBody(at(lx, q)) do
-    begin
-      if length(arg) < 40 then
-        arg := arg + lowerChar(at(lx, q));
-      q := q + 1;
-    end;
-    while (q < e) and isTrimSpace(at(lx, q)) do
-      q := q + 1;
-    if (arg = 'advancedrecords') and
-       ((q >= e) or ((e - q = 1) and ((at(lx, q) = '+') or (at(lx, q) = '-')))) then
-    begin
-      lx.advancedRecords := not ((q < e) and (at(lx, q) = '-'));
-      exit;
-    end;
-    { $modeswitch typehelpers[+|-]: type helpers }
-    if (arg = 'typehelpers') and
-       ((q >= e) or ((e - q = 1) and ((at(lx, q) = '+') or (at(lx, q) = '-')))) then
-    begin
-      lx.typeHelpers := not ((q < e) and (at(lx, q) = '-'));
-      exit;
-    end;
+    handleModeSwitch(lx, start, b, e);
+    exit;
   end;
   { a switch list: R-,Q+ }
   p := textStart;

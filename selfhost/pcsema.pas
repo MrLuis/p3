@@ -4747,6 +4747,7 @@ begin
     noteDeclaredHere(m);
   end;
   m^.body := r^.body;
+  m^.resultName := r^.resultName; { (as where its body is) }
   m^.implDecl := r;
   r^.canonical := m;
   if r^.isInline then
@@ -6222,6 +6223,7 @@ begin
       note(fwd^.loc);
     end;
     fwd^.body := r^.body;
+    fwd^.resultName := r^.resultName; { (as where its body is) }
     r^.canonical := fwd;
     if r^.isInline then
       fwd^.isInline := true;
@@ -6977,8 +6979,8 @@ begin
       end;
     end;
   end;
-  { objfpc: Result names the function result }
-  if (mode = lmObjFPC) and r^.isFunction and (r^.resultVar <> nil) then
+  { $modeswitch result (objfpc): Result names the function result }
+  if r^.resultName and r^.isFunction and (r^.resultVar <> nil) then
     scopeInsert(cur, intern('result'), r^.resultVar);
   checkBlock(r^.body);
   if r^.isFunction and not r^.resultAssigned and not isError(r^.resultType) then

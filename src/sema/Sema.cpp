@@ -3328,6 +3328,7 @@ class Checker : public StmtVisitor<Checker>,
       noteDeclaredHere(M);
     }
     M->setBody(R->getBody());
+    M->setResultName(R->hasResultName()); // (as where its body is)
     M->setImplementation(R);
     R->setCanonical(M);
     if (R->isInline())
@@ -4202,6 +4203,7 @@ class Checker : public StmtVisitor<Checker>,
         Diags.note(Fwd->getLocation(), "forward declaration is here");
       }
       Fwd->setBody(R->getBody());
+      Fwd->setResultName(R->hasResultName()); // (as where its body is)
       R->setCanonical(Fwd);
       if (R->isInline())
         Fwd->setInline();
@@ -4828,7 +4830,7 @@ class Checker : public StmtVisitor<Checker>,
           Diags.note(Prev->getLocation(), "previous parameter is here");
       }
     // objfpc: `Result` names the function result.
-    if (LangOpts.ObjKeywords && R->isFunction() && R->getResultVar())
+    if (R->hasResultName() && R->isFunction() && R->getResultVar())
       Cur->insert("result", R->getResultVar());
 
     checkBlock(*R->getBody());

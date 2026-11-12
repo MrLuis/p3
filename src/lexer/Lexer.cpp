@@ -21,7 +21,10 @@ static bool isIdentBody(char C) { return llvm::isAlnum(C) || C == '_'; }
 Lexer::Lexer(const SourceManager &SM, FileID FID, DiagnosticsEngine &Diags,
              StringPool &Strings, const LangOptions &LangOpts)
     : Diags(Diags), Strings(Strings), LangOpts(LangOpts),
-      InlineOn(LangOpts.Mode == LangMode::ObjFPC) {
+      InlineOn(LangOpts.Mode == LangMode::ObjFPC),
+      ResultSwitch(LangOpts.Mode == LangMode::ObjFPC),
+      OutSwitch(LangOpts.Mode == LangMode::ObjFPC),
+      DefaultParamsSwitch(LangOpts.Mode == LangMode::ObjFPC) {
   llvm::StringRef Buf = SM.getBufferData(FID);
   Cur = BufBegin = Buf.data();
   BufEnd = Buf.data() + Buf.size();
@@ -117,6 +120,83 @@ void Lexer::enterPendingInclude() {
   llvm::StringRef Buf = IncludeSM->getBufferData(*IncOrErr);
   Cur = BufBegin = Buf.data();
   BufEnd = Buf.data() + Buf.size();
+}
+
+/// {$modeswitch NAME[+|-| ON| OFF]} with Free Pascal 3.2.2's names:
+/// advancedrecords and typehelpers (objfpc), result, out and
+/// defaultparameters (any mode) turn their features on or off; the others
+/// pcc's mode decides (class, objpas, properties, exceptions: objfpc; cvar,
+/// initfinal, hintdirective, allowinline: always) or pcc lacks: a request
+/// for what pcc does is accepted, any other is reported and ignored.
+void Lexer::handleModeSwitch(const char *Start, llvm::StringRef Arg) {
+  llvm::StringRef Name = Arg.take_while(isIdentBody);
+  llvm::StringRef Rest = Arg.drop_front(Name.size()).trim();
+  bool On;
+  if (Rest.empty() || Rest == "+" || Rest.equals_insensitive("on"))
+    On = true;
+  else if (Rest == "-" || Rest.equals_insensitive("off"))
+    On = false;
+  else {
+    Diags.warning(locOf(Start), "expected {$modeswitch NAME} (with +, -, ON "
+                                "or OFF); ignored");
+    return;
+  }
+  std::string N = Name.lower();
+  bool ObjFPC = LangOpts.Mode == LangMode::ObjFPC;
+  if (N == "advancedrecords") {
+    AdvancedRecords = On;
+    return;
+  }
+  if (N == "typehelpers") {
+    TypeHelpers = On;
+    return;
+  }
+  if (N == "result") {
+    ResultSwitch = On;
+    return;
+  }
+  if (N == "out") {
+    OutSwitch = On;
+    return;
+  }
+  if (N == "defaultparameters") {
+    DefaultParamsSwitch = On;
+    return;
+  }
+  // The others: what pcc's mode decides, what it always does, or a
+  // feature it lacks.
+  enum { ByMode, Always, Lacking } Kind;
+  if (N == "class" || N == "objpas" || N == "properties" || N == "exceptions")
+    Kind = ByMode;
+  else if (N == "cvar" || N == "initfinal" || N == "hintdirective" ||
+           N == "allowinline")
+    Kind = Always;
+  else if (N == "pchartostring" || N == "nestedcomments" ||
+           N == "classicprocvars" || N == "macprocvars" ||
+           N == "repeatforward" || N == "pointertoprocvar" ||
+           N == "autoderef" || N == "ansistrings" || N == "duplicatelocals" ||
+           N == "objectivec1" || N == "objectivec2" || N == "nestedprocvars" ||
+           N == "nonlocalgoto" || N == "isounaryminus" ||
+           N == "systemcodepage" || N == "finalfields" ||
+           N == "unicodestrings" || N == "cblocks" || N == "isoio" ||
+           N == "isoprogramparas" || N == "isomod" || N == "arrayoperators")
+    Kind = Lacking;
+  else {
+    Diags.warning(locOf(Start), "unknown mode switch '" + Name + "'; ignored");
+    return;
+  }
+  if (Kind == ByMode && On != ObjFPC)
+    Diags.warning(locOf(Start),
+                  "mode switch '" + N + "' cannot be turned " +
+                      (On ? "on in --mode=tp; use --mode=objfpc"
+                          : "off in --mode=objfpc; use --mode=tp") +
+                      " (ignored)");
+  else if (Kind == Always && !On)
+    Diags.warning(locOf(Start),
+                  "mode switch '" + N + "' cannot be turned off; ignored");
+  else if (Kind == Lacking && On)
+    Diags.warning(locOf(Start),
+                  "mode switch '" + N + "' is not supported; ignored");
 }
 
 void Lexer::handleDirective(const char *Start, llvm::StringRef Text) {
@@ -265,22 +345,9 @@ void Lexer::handleDirective(const char *Start, llvm::StringRef Text) {
     return;
   }
 
-  // {$modeswitch advancedrecords[+|-]}: methods in records (objfpc);
-  // {$modeswitch typehelpers[+|-]}: type helpers. Other mode switches are
-  // not supported (a warning below).
   if (Word.equals_insensitive("modeswitch")) {
-    llvm::StringRef Name = Arg.take_while(isIdentBody);
-    llvm::StringRef Rest = Arg.drop_front(Name.size()).trim();
-    if (Name.equals_insensitive("advancedrecords") &&
-        (Rest.empty() || Rest == "+" || Rest == "-")) {
-      AdvancedRecords = Rest != "-";
-      return;
-    }
-    if (Name.equals_insensitive("typehelpers") &&
-        (Rest.empty() || Rest == "+" || Rest == "-")) {
-      TypeHelpers = Rest != "-";
-      return;
-    }
+    handleModeSwitch(Start, Arg);
+    return;
   }
 
   // {$longstrings on|off}: the long form of {$H+|-}.
