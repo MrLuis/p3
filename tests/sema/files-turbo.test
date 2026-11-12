@@ -1,0 +1,26 @@
+; Untyped files and the Turbo/FPC file routines: what untyped files cannot
+; do (read, write, a buffer variable, get), record sizes only for them,
+; blockread/blockwrite on them only and with a variable buffer and
+; integers, seek/filepos not on text files, the name a string, and the
+; arguments of the others. AssignFile is objfpc only; ISO Pascal has no
+; untyped files.
+; RUN: not %pcc --mode=tp -ferror-limit=0 -c %S/Inputs/files-turbo/errors.pas -o %t.o 2>&1 | FileCheck %s
+; CHECK: errors.pas:9:3: error: 'write' cannot be used on an untyped file; use 'blockwrite'
+; CHECK: errors.pas:10:3: error: 'read' cannot be used on an untyped file; use 'blockread'
+; CHECK: errors.pas:11:8: error: an untyped file has no buffer variable
+; CHECK: errors.pas:12:7: error: 'get' cannot be used on an untyped file
+; CHECK: errors.pas:13:12: error: only an untyped file has a record size
+; CHECK: errors.pas:14:13: error: 'blockread' expects an untyped file, not 'file of integer'
+; CHECK: errors.pas:15:17: error: the buffer of 'blockwrite' must be a variable
+; CHECK: errors.pas:16:8: error: 'seek' expects a typed or untyped file, not 'text'
+; CHECK: errors.pas:17:16: error: 'filepos' expects a typed or untyped file, not 'text'
+; CHECK: errors.pas:18:13: error: the file name of 'assign' must be a string, not 'integer'
+; CHECK: errors.pas:19:19: error: the count of 'blockread' must be an integer, not 'char'
+; CHECK: errors.pas:20:22: error: the count done by 'blockread' goes in a variable
+; CHECK: errors.pas:21:12: error: the record size of 'reset' must be an integer, not 'char'
+; CHECK: errors.pas:22:9: error: 'close' expects a file variable, not a value of type 'integer'
+; CHECK-NOT: error:
+; RUN: not %pcc --mode=tp -c %S/Inputs/files-turbo/tp.pas -o %t.o 2>&1 | FileCheck --check-prefix=TP %s
+; TP: tp.pas:3:7: error: use of undeclared identifier 'AssignFile'
+; RUN: not %pcc -c %S/Inputs/files-turbo/iso.pas -o %t.o 2>&1 | FileCheck --check-prefix=ISO %s
+; ISO: iso.pas:2:12: error: expected 'of' after 'file'

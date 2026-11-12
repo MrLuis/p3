@@ -595,7 +595,14 @@ begin
                     bkInsert, bkSetLength, bkSlice, bkLength, bkCopy, bkPos, bkConcat, bkUpCase,
                     bkGetMem, bkFreeMem, bkReallocMem, bkFillChar, bkMove,
                     bkHalt, bkSizeOf, bkLow, bkHigh, bkAssigned, bkParamCount,
-                    bkParamStr];
+                    bkParamStr, bkAssign, bkClose, bkBlockRead, bkBlockWrite,
+                    bkSeek, bkFilePos, bkFileSize, bkAssignFile, bkCloseFile];
+end;
+
+{ Free Pascal's objpas built-ins, predeclared only with --mode=objfpc. }
+function isObjFPCOnly(k: TBuiltinKind): boolean;
+begin
+  isObjFPCOnly := k in [bkAssignFile, bkCloseFile];
 end;
 
 procedure stdType(const n: string; t: PType);
@@ -1110,7 +1117,8 @@ begin
   stdConst('true', tyBooleanT, 1);
   stdConst('maxint', tyIntegerT, pascalMaxInt);
   for k := low(TBuiltinKind) to high(TBuiltinKind) do
-    if not isTPOnly(k) or not isISO then
+    if (not isTPOnly(k) or not isISO) and
+       (not isObjFPCOnly(k) or (mode = lmObjFPC)) then
     begin
       d := newDecl(dkBuiltin, predeclaredIdent(builtinNames[k]), noLoc);
       d^.builtin := k;
@@ -2403,6 +2411,8 @@ begin
       end;
     tsFile:
       begin
+        if ts^.elemSpec = nil then { file (Turbo/FPC): untyped }
+          exit(newFileType(nil));
         elem := resolveType(ts^.elemSpec, nil);
         if isError(elem) then
           exit;

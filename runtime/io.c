@@ -9,6 +9,12 @@
  * Text files: a line end is presented as f^ = ' ' with eoln(f) = true. A
  * final line without a terminating newline gets an implicit one.
  *
+ * Turbo/Free Pascal files: a typed file named with assign, and every
+ * untyped file (`file`), are random access instead: no buffer variable,
+ * read and write (and blockread, blockwrite, seek) at the current position
+ * whether opened with reset or rewrite, eof when the position reaches the
+ * size. Text files keep the model above, named or not.
+ *
  *===------------------------------------------------------------------------===*/
 
 #include "pascalrt.h"
@@ -41,6 +47,12 @@ struct PasFile {
   int at_eof;
   int eoln;              /* text: buf is a line end */
   int line_has_chars;    /* text: chars read since the last line end */
+  int turbo;             /* random access (see above) */
+  int untyped;           /* `file`: elem_size is the record size */
+  int name_owned;        /* name: a copy (assign) to free */
+  int std_stream;        /* assign(f, ''): stdin / stdout, never closed */
+  int last_io;           /* turbo: 1 read, 2 write (stdio needs a seek
+                            between the two) */
   struct PasFile *next;  /* all files, for flushing at exit */
 };
 
@@ -101,8 +113,12 @@ PasFile *__pas_file_new(int64_t elem_size, int32_t is_text, const char *name) {
   struct PasFile *f = calloc(1, sizeof *f);
   if (!f)
     __pas_runtime_error("out of memory creating a file variable");
+  f->untyped = is_text == 2; /* `file`: 128-byte records until reset/rewrite */
+  f->turbo = f->untyped;
+  if (f->untyped)
+    elem_size = 128;
   f->elem_size = elem_size > 0 ? elem_size : 1;
-  f->is_text = is_text;
+  f->is_text = is_text == 1;
   f->name = name;
   f->buf = calloc(1, (size_t)f->elem_size);
   f->next = __pas_all_files;
@@ -118,8 +134,10 @@ void __pas_file_free(PasFile *f) {
       *p = f->next;
       break;
     }
-  if (f->fp)
+  if (f->fp && !f->std_stream)
     fclose(f->fp);
+  if (f->name_owned)
+    free((char *)f->name);
   free(f->buf);
   free(f);
 }
@@ -135,9 +153,17 @@ void __pas_reset(PasFile *f) {
     return;
   }
   if (f->name) {
-    if (f->fp)
+    if (f->fp && !f->std_stream)
       fclose(f->fp);
-    f->fp = fopen(f->name, "rb");
+    f->std_stream = !f->name[0]; /* assign(f, ''): standard input */
+    if (f->std_stream)
+      f->fp = stdin;
+    else if (f->turbo) { /* reading and writing (FPC's FileMode 2) */
+      f->fp = fopen(f->name, "r+b");
+      if (!f->fp)
+        f->fp = fopen(f->name, "rb");
+    } else
+      f->fp = fopen(f->name, "rb");
     if (!f->fp)
       file_error(f, "cannot open file for reading");
   } else {
@@ -148,6 +174,7 @@ void __pas_reset(PasFile *f) {
   }
   f->mode = MODE_INSPECT;
   f->buf_full = f->at_eof = f->eoln = f->line_has_chars = 0;
+  f->last_io = 0;
 }
 
 void __pas_rewrite(PasFile *f) {
@@ -156,14 +183,147 @@ void __pas_rewrite(PasFile *f) {
       file_error(f, "'rewrite' of the standard input file");
     return;
   }
-  if (f->fp)
+  if (f->fp && !f->std_stream)
     fclose(f->fp);
-  f->fp = f->name ? fopen(f->name, "wb") : tmpfile();
+  f->std_stream = f->name && !f->name[0]; /* assign(f, ''): standard output */
+  f->fp = f->std_stream ? stdout
+          : f->name    ? fopen(f->name, f->turbo ? "w+b" : "wb")
+                       : tmpfile();
   if (!f->fp)
     file_error(f, "cannot open file for writing");
+  f->last_io = 0;
   f->mode = MODE_GENERATE;
   f->at_eof = 1; /* ISO: eof is true while generating */
   f->buf_full = f->eoln = f->line_has_chars = 0;
+}
+
+/*===- Turbo/Free Pascal file routines --------------------------------------===*/
+
+void __pas_assign(PasFile *f, const char *name) {
+  if (f->is_std)
+    file_error(f, "'assign' of a standard file");
+  if (f->fp && !f->std_stream)
+    fclose(f->fp);
+  f->fp = NULL;
+  f->mode = MODE_UNDEFINED;
+  if (f->name_owned)
+    free((char *)f->name);
+  int32_t n = name ? __pas_astr_length(name) : 0;
+  char *copy = malloc((size_t)n + 1);
+  if (!copy)
+    __pas_runtime_error("out of memory assigning a file name");
+  if (n)
+    memcpy(copy, name, (size_t)n);
+  copy[n] = '\0';
+  f->name = copy;
+  f->name_owned = 1;
+  f->std_stream = 0;
+  if (!f->is_text)
+    f->turbo = 1;
+}
+
+void __pas_close(PasFile *f) {
+  if (f->is_std) { /* close(output) flushes it */
+    fflush(f->fp ? f->fp : stdout);
+    return;
+  }
+  if (f->mode == MODE_UNDEFINED || !f->fp)
+    file_error(f, "'close' of a file that is not open");
+  if (f->std_stream)
+    fflush(f->fp);
+  else
+    fclose(f->fp);
+  f->fp = NULL;
+  f->mode = MODE_UNDEFINED;
+}
+
+void __pas_reset_size(PasFile *f, int64_t recsize) {
+  if (recsize <= 0)
+    file_error(f, "the record size of 'reset' must be positive");
+  f->elem_size = recsize;
+  __pas_reset(f);
+}
+
+void __pas_rewrite_size(PasFile *f, int64_t recsize) {
+  if (recsize <= 0)
+    file_error(f, "the record size of 'rewrite' must be positive");
+  f->elem_size = recsize;
+  __pas_rewrite(f);
+}
+
+static void need_open(PasFile *f, const char *what) {
+  if (f->mode == MODE_UNDEFINED || !f->fp) {
+    char msg[96];
+    snprintf(msg, sizeof msg, "'%s' of a file that is not open", what);
+    file_error(f, msg);
+  }
+}
+
+/* stdio needs a positioning call between reading and writing. */
+static void turbo_switch(PasFile *f, int io) {
+  if (f->last_io && f->last_io != io && !f->std_stream)
+    fseek(f->fp, 0, SEEK_CUR);
+  f->last_io = io;
+}
+
+static int64_t turbo_size(PasFile *f) { /* in bytes */
+  if (f->std_stream)
+    return 0;
+  long cur = ftell(f->fp);
+  fseek(f->fp, 0, SEEK_END);
+  long end = ftell(f->fp);
+  fseek(f->fp, cur, SEEK_SET);
+  f->last_io = 0;
+  return end;
+}
+
+int64_t __pas_blockread(PasFile *f, void *buf, int64_t count, int32_t checked) {
+  need_open(f, "blockread");
+  turbo_switch(f, 1);
+  int64_t n = count > 0 ? (int64_t)fread(buf, (size_t)f->elem_size,
+                                         (size_t)count, f->fp)
+                        : 0;
+  if (checked && n < count)
+    file_error(f, "'blockread' read fewer records than asked (give it a "
+                  "variable for the count read)");
+  return n;
+}
+
+int64_t __pas_blockwrite(PasFile *f, const void *buf, int64_t count,
+                         int32_t checked) {
+  need_open(f, "blockwrite");
+  turbo_switch(f, 2);
+  int64_t n = count > 0 ? (int64_t)fwrite(buf, (size_t)f->elem_size,
+                                          (size_t)count, f->fp)
+                        : 0;
+  if (checked && n < count)
+    file_error(f, "error writing file");
+  return n;
+}
+
+void __pas_seek(PasFile *f, int64_t n) {
+  need_open(f, "seek");
+  if (!f->turbo)
+    file_error(f, "'seek' of a file not named with 'assign'");
+  if (n < 0 || fseek(f->fp, (long)(n * f->elem_size), SEEK_SET) != 0)
+    file_error(f, "'seek' to a position outside the file");
+  f->last_io = 0;
+}
+
+int64_t __pas_filepos(PasFile *f) {
+  need_open(f, "filepos");
+  if (!f->turbo)
+    file_error(f, "'filepos' of a file not named with 'assign'");
+  if (f->std_stream)
+    return 0;
+  return (int64_t)ftell(f->fp) / f->elem_size;
+}
+
+int64_t __pas_filesize(PasFile *f) {
+  need_open(f, "filesize");
+  if (!f->turbo)
+    file_error(f, "'filesize' of a file not named with 'assign'");
+  return turbo_size(f) / f->elem_size;
 }
 
 static void need_inspect(PasFile *f) {
@@ -216,12 +376,20 @@ static void fill(PasFile *f) {
 }
 
 void *__pas_buffer(PasFile *f) {
+  if (f->turbo)
+    file_error(f, "the buffer variable of a file named with 'assign'");
   if (f->mode == MODE_INSPECT)
     fill(f);
   return f->buf;
 }
 
 int32_t __pas_eof(PasFile *f) {
+  if (f->turbo) { /* the position at the size */
+    need_open(f, "eof");
+    if (f->std_stream)
+      return feof(f->fp) != 0;
+    return ftell(f->fp) >= turbo_size(f);
+  }
   if (f->mode == MODE_GENERATE)
     return 1;
   need_inspect(f);
@@ -240,6 +408,8 @@ int32_t __pas_eoln(PasFile *f) {
 }
 
 void __pas_get(PasFile *f) {
+  if (f->turbo)
+    file_error(f, "'get' of a file named with 'assign' (use 'read')");
   need_inspect(f);
   fill(f);
   if (f->at_eof)
@@ -248,6 +418,8 @@ void __pas_get(PasFile *f) {
 }
 
 void __pas_put(PasFile *f) {
+  if (f->turbo)
+    file_error(f, "'put' of a file named with 'assign' (use 'write')");
   need_generate(f);
   if (fwrite(f->buf, (size_t)f->elem_size, 1, f->fp) != 1)
     file_error(f, "error writing file");
@@ -259,6 +431,13 @@ void __pas_page(PasFile *f) {
 }
 
 void __pas_read_elem(PasFile *f, void *dst) {
+  if (f->turbo) {
+    need_open(f, "read");
+    turbo_switch(f, 1);
+    if (fread(dst, (size_t)f->elem_size, 1, f->fp) != 1)
+      file_error(f, "'read' past the end of the file");
+    return;
+  }
   need_inspect(f);
   fill(f);
   if (f->at_eof)
@@ -268,6 +447,13 @@ void __pas_read_elem(PasFile *f, void *dst) {
 }
 
 void __pas_write_elem(PasFile *f, const void *src) {
+  if (f->turbo) {
+    need_open(f, "write");
+    turbo_switch(f, 2);
+    if (fwrite(src, (size_t)f->elem_size, 1, f->fp) != 1)
+      file_error(f, "error writing file");
+    return;
+  }
   need_generate(f);
   memcpy(f->buf, src, (size_t)f->elem_size);
   __pas_put(f);

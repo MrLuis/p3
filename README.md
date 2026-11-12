@@ -16,8 +16,10 @@ to native executables through LLVM. See [PLAN.md](PLAN.md) for the roadmap.
 - runtime checks for ranges, array bounds and integer overflow (on by
   default; `-fno-range-checks`, `-fno-overflow-checks`, or `{$R-}` / `{$Q-}`
   in the source)
-- pointers, sets, files (text and typed; program parameters bind to
-  command-line arguments), `goto`, procedural parameters, `pack`/`unpack`
+- pointers, sets, files (text, typed and, outside ISO mode, untyped `file`;
+  program parameters bind to command-line arguments; Turbo/FPC `Assign`,
+  `Close`, `BlockRead`/`BlockWrite`, `Seek`, `FilePos` and `FileSize`, see
+  below), `goto`, procedural parameters, `pack`/`unpack`
 - local variables and function results start from zero (numbers 0,
   pointers and objects `nil`, strings empty), which ISO leaves undefined.
   The elements of local arrays, the fields of local records and the
@@ -379,6 +381,18 @@ is a warning. Switches for features pcc lacks (`nestedcomments`,
 `objectivec1`, ...) can be turned off but not on (a warning); unknown names
 are warnings too. Unlike Free Pascal, pcc also takes them after the start
 of a file.
+
+**Files named with `Assign`** (tp and objfpc, as in Free Pascal; also
+`AssignFile` and `CloseFile` in objfpc): `Assign(f, name)` names a text, typed
+or untyped (`file`) file, and `Close` closes it. A typed or untyped file
+named this way works as in Turbo Pascal: `Reset` opens it for reading and
+writing, `Rewrite` creates it, and `Seek`, `FilePos`, `FileSize` and `Eof`
+work in records. `Reset(f, n)` / `Rewrite(f, n)` give an untyped file
+records of n bytes (128 if not given); `BlockRead(f, buf, count[, done])`
+and `BlockWrite` move whole records, and without `done` reading fewer is a
+runtime error. An empty name is standard input or output. I/O errors are
+runtime errors (no `{$I-}` or `IOResult` yet). Program-parameter and
+internal typed files keep ISO's buffer variable (`f^`, `get`, `put`).
 
 **`{$push}` / `{$pop}`**, as in Free Pascal: `{$pop}` restores the local
 switches the matching `{$push}` saved (nested, at most 21 levels): `{$H}`,

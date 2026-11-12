@@ -64,6 +64,23 @@ void __pas_page(PasFile *f);
 /* Address of the buffer variable f^. */
 void *__pas_buffer(PasFile *f);
 
+/* Turbo/Free Pascal: assign(f, name) (an ansistring; '' is standard
+ * input/output), close(f); reset/rewrite with a record size (untyped files);
+ * blockread/blockwrite (count records; checked: an error when fewer are
+ * done), seek/filepos/filesize in records. A typed file named with assign,
+ * and an untyped file, are random access. is_text of __pas_file_new: 2 for
+ * an untyped file. */
+void __pas_assign(PasFile *f, const char *name);
+void __pas_close(PasFile *f);
+void __pas_reset_size(PasFile *f, int64_t recsize);
+void __pas_rewrite_size(PasFile *f, int64_t recsize);
+int64_t __pas_blockread(PasFile *f, void *buf, int64_t count, int32_t checked);
+int64_t __pas_blockwrite(PasFile *f, const void *buf, int64_t count,
+                         int32_t checked);
+void __pas_seek(PasFile *f, int64_t n);
+int64_t __pas_filepos(PasFile *f);
+int64_t __pas_filesize(PasFile *f);
+
 /* Typed files: read(f, x) == x := f^; get(f).  write(f, x) == f^ := x; put(f) */
 void __pas_read_elem(PasFile *f, void *dst);
 void __pas_write_elem(PasFile *f, const void *src);

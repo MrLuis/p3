@@ -1045,6 +1045,13 @@ begin
   overflowChecks := checkEnabled(swOverflow, loc, optOverflow);
 end;
 
+{ Whether t is an untyped file type (file, with no element). }
+function isUntypedFileType(t: PType): boolean;
+begin
+  isUntypedFileType := (t <> nil) and (t^.kind = tyFile) and not t^.isText and
+                       (t^.fileElement = nil);
+end;
+
 { An ordinal register value of type src as the register type of dst
   (extended by src's signedness, or truncated). No range check. }
 function convertOrdinal(const v: TV; src, dst: PType): TV;
@@ -1533,10 +1540,17 @@ begin
           rtv1('__pas_file_free', loadFile(addr));
           exit;
         end;
+        { (an untyped file: kind 2, records of 128 bytes until reset or
+          rewrite) }
         if t^.isText then
         begin
           size := 1;
           textFlag := 1;
+        end
+        else if t^.fileElement = nil then
+        begin
+          size := 1;
+          textFlag := 2;
         end
         else
         begin
@@ -4612,6 +4626,12 @@ begin
       exit(emitStringFunction(e, k));
     bkEof, bkEoln:
       exit(emitFileQuery(k, PNode(listGet(e^.args, 0))));
+    bkFilePos:
+        exit(call1(classRuntime('__pas_filepos', 'i64', 'ptr'),
+                   loadFile(emitAddress(PNode(listGet(e^.args, 0)))), 'filepos'));
+    bkFileSize:
+        exit(call1(classRuntime('__pas_filesize', 'i64', 'ptr'),
+                   loadFile(emitAddress(PNode(listGet(e^.args, 0)))), 'filesize'));
   else
     ;
   end;

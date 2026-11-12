@@ -256,11 +256,13 @@ class Checker : public StmtVisitor<Checker>,
     Const("maxint", Ctx.getIntegerType(), PascalMaxInt);
 
 #define BUILTIN_PROC(ID, NAME)                                                 \
-  if (!isTPOnly(BuiltinKind::ID) || !isISO())                                  \
+  if ((!isTPOnly(BuiltinKind::ID) || !isISO()) &&                              \
+      (!isObjFPCOnly(BuiltinKind::ID) || LangOpts.ObjKeywords))                \
     Standard.insert(NAME, Ctx.create<BuiltinDecl>(predeclaredName(NAME),       \
                                                   BuiltinKind::ID, true));
 #define BUILTIN_FUNC(ID, NAME)                                                 \
-  if (!isTPOnly(BuiltinKind::ID) || !isISO())                                  \
+  if ((!isTPOnly(BuiltinKind::ID) || !isISO()) &&                              \
+      (!isObjFPCOnly(BuiltinKind::ID) || LangOpts.ObjKeywords))                \
     Standard.insert(NAME, Ctx.create<BuiltinDecl>(predeclaredName(NAME),       \
                                                   BuiltinKind::ID, false));
 #include "pcc/AST/Builtins.def"
@@ -604,10 +606,21 @@ class Checker : public StmtVisitor<Checker>,
     case BuiltinKind::Move: case BuiltinKind::Halt: case BuiltinKind::SizeOf:
     case BuiltinKind::Low: case BuiltinKind::High: case BuiltinKind::Assigned:
     case BuiltinKind::ParamCount: case BuiltinKind::ParamStr:
+    case BuiltinKind::Assign: case BuiltinKind::Close:
+    case BuiltinKind::BlockRead: case BuiltinKind::BlockWrite:
+    case BuiltinKind::Seek: case BuiltinKind::FilePos:
+    case BuiltinKind::FileSize:
       return true;
+    case BuiltinKind::AssignFile: case BuiltinKind::CloseFile:
+      return true; // (and objfpc only: see isObjFPCOnly)
     default:
       return false;
     }
+  }
+
+  /// Free Pascal's objpas built-ins, predeclared only with --mode=objfpc.
+  static bool isObjFPCOnly(BuiltinKind K) {
+    return K == BuiltinKind::AssignFile || K == BuiltinKind::CloseFile;
   }
 
   //===--------------------------------------------------------------------===//
@@ -1644,6 +1657,8 @@ class Checker : public StmtVisitor<Checker>,
 
     case TypeSpec::TS_File: {
       auto *FS = llvm::cast<FileTypeSpec>(TS);
+      if (!FS->getElement()) // file (Turbo/FPC): untyped
+        return Ctx.create<FileType>(nullptr, false);
       Type *Elem = resolveType(FS->getElement());
       if (Elem->isError())
         return errorType();
@@ -5480,9 +5495,23 @@ class Checker : public StmtVisitor<Checker>,
     return F;
   }
 
+  /// write/read of an untyped file: an error (they use blockwrite and
+  /// blockread). True if reported.
+  bool untypedFileIO(ProcCallStmt *S, FileType *File, bool Write) {
+    if (!File || !File->isUntyped())
+      return false;
+    Diags.error(S->getCallee().Loc,
+                "'" + S->getCallee().Spelling + "' cannot be used on an untyped " +
+                    "file; use '" + (Write ? "blockwrite" : "blockread") + "'",
+                {S->getCallee().getRange()});
+    return true;
+  }
+
   void checkWrite(ProcCallStmt *S, bool IsWriteln) {
     const Identifier &Callee = S->getCallee();
     FileType *File = checkFileArg(S);
+    if (untypedFileIO(S, File, /*Write=*/true))
+      return;
     auto Args = S->getArgs().drop_front(File ? 1 : 0);
     if (!IsWriteln && Args.empty())
       Diags.error(Callee.Loc,
@@ -5549,6 +5578,8 @@ class Checker : public StmtVisitor<Checker>,
   void checkRead(ProcCallStmt *S, bool IsReadln) {
     const Identifier &Callee = S->getCallee();
     FileType *File = checkFileArg(S);
+    if (untypedFileIO(S, File, /*Write=*/false))
+      return;
     auto Args = S->getArgs().drop_front(File ? 1 : 0);
     if (!IsReadln && Args.empty())
       Diags.error(Callee.Loc,
@@ -5605,12 +5636,16 @@ class Checker : public StmtVisitor<Checker>,
   }
 
   /// reset/rewrite/get/put(f) and page[(f)].
-  void checkFileProc(ProcCallStmt *S, bool IsPage) {
+  /// reset, rewrite (an untyped file's: with an optional record size),
+  /// get, put, page, close, closefile.
+  void checkFileProc(ProcCallStmt *S, BuiltinKind K) {
     const Identifier &Callee = S->getCallee();
     auto Args = S->getArgs();
+    bool IsPage = K == BuiltinKind::Page;
     if (IsPage && Args.empty())
       return; // page(output)
-    if (Args.size() != 1) {
+    bool Sized = K == BuiltinKind::Reset || K == BuiltinKind::Rewrite;
+    if (Args.size() != 1 && !(Sized && Args.size() == 2)) {
       Diags.error(Callee.Loc, "'" + Callee.Spelling + "' expects 1 file argument",
                   {S->getRange()});
       return;
@@ -5618,7 +5653,8 @@ class Checker : public StmtVisitor<Checker>,
     Type *T = check(Args[0]);
     if (T->isError())
       return;
-    if (!T->isFile() || !isVariableReference(Args[0]))
+    auto *F = llvm::dyn_cast<FileType>(T);
+    if (!F || !isVariableReference(Args[0]))
       Diags.error(Args[0]->getBeginLoc(),
                   "'" + Callee.Spelling + "' expects a file variable, not a " +
                       "value of type " + quoted(T),
@@ -5626,6 +5662,129 @@ class Checker : public StmtVisitor<Checker>,
     else if (IsPage && !T->isTextFile())
       Diags.error(Args[0]->getBeginLoc(), "'page' requires a text file",
                   {Args[0]->getRange()});
+    else if ((K == BuiltinKind::Get || K == BuiltinKind::Put) && F->isUntyped())
+      Diags.error(Args[0]->getBeginLoc(),
+                  "'" + Callee.Spelling + "' cannot be used on an untyped file",
+                  {Args[0]->getRange()});
+    else if (Args.size() == 2 && !F->isUntyped())
+      Diags.error(Args[1]->getBeginLoc(),
+                  "only an untyped file has a record size",
+                  {Args[1]->getRange()});
+    else if (Args.size() == 2)
+      checkIntegerArg(Args[1], Callee, "record size");
+  }
+
+  /// An integer argument of built-in Callee (What: its role).
+  void checkIntegerArg(Expr *E, const Identifier &Callee, llvm::StringRef What) {
+    Type *T = check(E);
+    if (!T->isError() && !T->isIntegerLike())
+      Diags.error(E->getBeginLoc(),
+                  "the " + What + " of '" + Callee.Spelling +
+                      "' must be an integer, not " + quoted(T),
+                  {E->getRange()});
+  }
+
+  /// A file variable argument of Callee: the file type, or null after a
+  /// diagnostic. NotText: text files are not allowed.
+  FileType *checkFileVarArg(Expr *E, const Identifier &Callee,
+                            bool NotText = false, bool Untyped = false) {
+    Type *T = check(E);
+    if (T->isError())
+      return nullptr;
+    auto *F = llvm::dyn_cast<FileType>(T);
+    if (!F || !isVariableReference(E)) {
+      Diags.error(E->getBeginLoc(),
+                  "'" + Callee.Spelling + "' expects " +
+                      (Untyped ? "an untyped " : "a ") + "file variable, not a " +
+                      "value of type " + quoted(T),
+                  {E->getRange()});
+      return nullptr;
+    }
+    if ((Untyped && !F->isUntyped()) || (NotText && F->isText())) {
+      Diags.error(E->getBeginLoc(),
+                  "'" + Callee.Spelling + "' expects " +
+                      (Untyped ? "an untyped file" : "a typed or untyped file") +
+                      ", not " + quoted(T),
+                  {E->getRange()});
+      return nullptr;
+    }
+    return F;
+  }
+
+  /// assign(f, name) / assignfile: f any file variable, name a string, a
+  /// char or a pchar.
+  void checkAssignFile(ProcCallStmt *S) {
+    const Identifier &Callee = S->getCallee();
+    auto Args = S->getArgs();
+    if (Args.size() != 2) {
+      Diags.error(Callee.Loc,
+                  "'" + Callee.Spelling + "' expects a file variable and a name",
+                  {S->getRange()});
+      return;
+    }
+    checkFileVarArg(Args[0], Callee);
+    Type *T = check(Args[1]);
+    if (!T->isError() && !T->isStringish() && T != PCharTy)
+      Diags.error(Args[1]->getBeginLoc(),
+                  "the file name of '" + Callee.Spelling +
+                      "' must be a string, not " + quoted(T),
+                  {Args[1]->getRange()});
+  }
+
+  /// blockread(f, buf, count [, done]) / blockwrite: f an untyped file, buf
+  /// any variable, count an integer, done an integer variable.
+  void checkBlockIO(ProcCallStmt *S) {
+    const Identifier &Callee = S->getCallee();
+    auto Args = S->getArgs();
+    if (Args.size() != 3 && Args.size() != 4) {
+      Diags.error(Callee.Loc,
+                  "'" + Callee.Spelling + "' expects 3 or 4 arguments (file, "
+                  "buffer, count [, count done])",
+                  {S->getRange()});
+      return;
+    }
+    checkFileVarArg(Args[0], Callee, /*NotText=*/true, /*Untyped=*/true);
+    if (!checkAllowingUntyped(Args[1])->isError() &&
+        !isVariableReference(Args[1]))
+      Diags.error(Args[1]->getBeginLoc(),
+                  "the buffer of '" + Callee.Spelling + "' must be a variable",
+                  {Args[1]->getRange()});
+    else if (isBitField(Args[1]))
+      diagBitFieldAddress(Args[1]);
+    else if (S->getCallee().Name == "blockread")
+      checkModifiable(Args[1]);
+    checkIntegerArg(Args[2], Callee, "count");
+    if (Args.size() == 4) {
+      Type *T = check(Args[3]);
+      if (T->isError())
+        return;
+      if (!isVariableReference(Args[3]))
+        Diags.error(Args[3]->getBeginLoc(),
+                    "the count done by '" + Callee.Spelling +
+                        "' goes in a variable",
+                    {Args[3]->getRange()});
+      else if (!T->isIntegerLike())
+        Diags.error(Args[3]->getBeginLoc(),
+                    "the count done by '" + Callee.Spelling +
+                        "' goes in an integer variable, not " + quoted(T),
+                    {Args[3]->getRange()});
+      else
+        checkModifiable(Args[3]);
+    }
+  }
+
+  /// seek(f, n): f a typed or untyped file, n an integer.
+  void checkSeek(ProcCallStmt *S) {
+    const Identifier &Callee = S->getCallee();
+    auto Args = S->getArgs();
+    if (Args.size() != 2) {
+      Diags.error(Callee.Loc,
+                  "'seek' expects a file variable and a record number",
+                  {S->getRange()});
+      return;
+    }
+    checkFileVarArg(Args[0], Callee, /*NotText=*/true);
+    checkIntegerArg(Args[1], Callee, "record number");
   }
 
   /// pack(a, i, z): z := a[i..]   unpack(z, a, i): a[i..] := z
@@ -5958,6 +6117,12 @@ class Checker : public StmtVisitor<Checker>,
       return errorType();
     Expr *Arg = E->getArgs()[0];
 
+    if (BD->getBuiltinKind() == BuiltinKind::FilePos ||
+        BD->getBuiltinKind() == BuiltinKind::FileSize) {
+      if (!checkFileVarArg(Arg, Callee, /*NotText=*/true))
+        return errorType();
+      return Ctx.getInt64Type(); // (in records)
+    }
     if (BD->getBuiltinKind() == BuiltinKind::Eof ||
         BD->getBuiltinKind() == BuiltinKind::Eoln) {
       bool IsEoln = BD->getBuiltinKind() == BuiltinKind::Eoln;
@@ -6479,7 +6644,14 @@ public:
       case BuiltinKind::Dispose: return checkNewDispose(S, /*IsNew=*/false);
       case BuiltinKind::Reset: case BuiltinKind::Rewrite:
       case BuiltinKind::Get: case BuiltinKind::Put: case BuiltinKind::Page:
-        return checkFileProc(S, BD->getBuiltinKind() == BuiltinKind::Page);
+      case BuiltinKind::Close: case BuiltinKind::CloseFile:
+        return checkFileProc(S, BD->getBuiltinKind());
+      case BuiltinKind::Assign: case BuiltinKind::AssignFile:
+        return checkAssignFile(S);
+      case BuiltinKind::BlockRead: case BuiltinKind::BlockWrite:
+        return checkBlockIO(S);
+      case BuiltinKind::Seek:
+        return checkSeek(S);
       case BuiltinKind::Break: case BuiltinKind::Continue:
         if (!S->getArgs().empty())
           Diags.error(Callee.Loc, "'" + Callee.Spelling + "' takes no arguments",
@@ -8147,8 +8319,14 @@ public:
       }
       return P->getPointee() ? P->getPointee() : errorType();
     }
-    if (auto *F = llvm::dyn_cast<FileType>(T))
+    if (auto *F = llvm::dyn_cast<FileType>(T); F && !F->isUntyped())
       return F->getElementType(); // the buffer variable f^
+    if (T->isFile()) {
+      Diags.error(E->getBase()->getBeginLoc(),
+                  "an untyped file has no buffer variable",
+                  {E->getBase()->getRange()});
+      return errorType();
+    }
     Diags.error(E->getBase()->getBeginLoc(),
                 "'^' applied to a value of type " + quoted(T) +
                     ", which is not a pointer",

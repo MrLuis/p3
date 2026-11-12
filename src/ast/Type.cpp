@@ -306,7 +306,9 @@ std::string Type::getName() const {
   }
   case TK_File: {
     auto *F = llvm::cast<FileType>(this);
-    return F->isText() ? "text" : "file of " + F->getElementType()->getName();
+    return F->isText()      ? "text"
+           : F->isUntyped() ? "file"
+                            : "file of " + F->getElementType()->getName();
   }
   case TK_Set: {
     Type *E = llvm::cast<SetType>(this)->getElementType();

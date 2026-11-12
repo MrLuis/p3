@@ -466,11 +466,13 @@ class ASTPrinter : public StmtVisitor<ASTPrinter>,
     case TypeSpec::TS_Set:
     case TypeSpec::TS_File: {
       bool IsSet = TS->getKind() == TypeSpec::TS_Set;
-      line(IsSet ? "SetTypeSpec" : "FileTypeSpec");
+      TypeSpec *Elem = IsSet ? llvm::cast<SetTypeSpec>(TS)->getElement()
+                             : llvm::cast<FileTypeSpec>(TS)->getElement();
+      line(IsSet ? "SetTypeSpec" : Elem ? "FileTypeSpec" : "FileTypeSpec untyped");
       loc(TS->getBeginLoc());
       IndentScope I(Indent);
-      printTypeSpec(IsSet ? llvm::cast<SetTypeSpec>(TS)->getElement()
-                          : llvm::cast<FileTypeSpec>(TS)->getElement());
+      if (Elem)
+        printTypeSpec(Elem);
       return;
     }
     case TypeSpec::TS_Routine: {

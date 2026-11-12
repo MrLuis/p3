@@ -307,10 +307,13 @@ class FileType final : public Type {
   bool IsText;
 
 public:
+  /// Element null (not text): an untyped `file` (Turbo/FPC), whose records
+  /// are bytes of the size reset/rewrite give.
   FileType(Type *Element, bool IsText)
       : Type(TK_File), Element(Element), IsText(IsText) {}
   Type *getElementType() const { return Element; }
   bool isText() const { return IsText; }
+  bool isUntyped() const { return !IsText && !Element; }
   static bool classof(const Type *T) { return T->getKind() == TK_File; }
 };
 

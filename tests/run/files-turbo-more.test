@@ -1,0 +1,17 @@
+; Turbo/FPC file routines: AssignFile and CloseFile (objfpc), assign(f, '')
+; for the standard output, and the runtime errors: reset of a missing file,
+; close of a file not open, blockread of fewer records without a count
+; variable, read past the end.
+; RUN: rm -rf %t && mkdir -p %t
+; RUN: %pcc --mode=objfpc %S/Inputs/files-turbo/objfpc.pas -o %t/objfpc
+; RUN: %t/objfpc %t/objfpc.txt | FileCheck --check-prefix=OBJFPC %s
+; OBJFPC:      via AssignFile
+; OBJFPC-NEXT: to output
+; RUN: %pcc --mode=tp %S/Inputs/files-turbo/missing.pas -o %t/missing && not %t/missing %t/m 2>&1 | FileCheck --check-prefix=MISSING %s
+; MISSING: Runtime error: cannot open file for reading (file '{{.*}}m.none')
+; RUN: %pcc --mode=tp %S/Inputs/files-turbo/notopen.pas -o %t/notopen && not %t/notopen 2>&1 | FileCheck --check-prefix=NOTOPEN %s
+; NOTOPEN: Runtime error: 'close' of a file that is not open (file 'x')
+; RUN: %pcc --mode=tp %S/Inputs/files-turbo/short.pas -o %t/short && not %t/short %t/short.dat 2>&1 | FileCheck --check-prefix=SHORT %s
+; SHORT: Runtime error: 'blockread' read fewer records than asked (give it a variable for the count read)
+; RUN: %pcc --mode=tp %S/Inputs/files-turbo/pastend.pas -o %t/pastend && not %t/pastend %t/pastend.dat 2>&1 | FileCheck --check-prefix=PASTEND %s
+; PASTEND: Runtime error: 'read' past the end of the file

@@ -2068,6 +2068,9 @@ TypeSpec *Parser::parseTypeImpl() {
   }
   case tok::kw_file: {
     consumeToken();
+    // Turbo/FPC: `file` alone, an untyped file
+    if (Tok.isNot(tok::kw_of) && LangOpts.Mode != LangMode::ISO)
+      return Ctx.create<FileTypeSpec>(SourceRange(Start, PrevTokEnd), nullptr);
     if (!expect(tok::kw_of, "after 'file'"))
       return nullptr;
     TypeSpec *Elem = parseType();

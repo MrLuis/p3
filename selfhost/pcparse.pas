@@ -2946,6 +2946,13 @@ begin
       begin
         isSet := tok.kind = tkKwSet;
         consumeToken;
+        { Turbo/FPC: file alone, an untyped file }
+        if not isSet and (tok.kind <> tkKwOf) and (mode <> lmISO) then
+        begin
+          ts := newTypeSpec(tsFile, start, prevTokEnd);
+          ts^.elemSpec := nil;
+          exit(ts);
+        end;
         if isSet then
         begin
           if not expect(tkKwOf, 'after ''set''') then

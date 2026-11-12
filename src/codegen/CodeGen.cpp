@@ -1520,9 +1520,13 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
       }
       if (!Name)
         Name = llvm::ConstantPointerNull::get(B.getPtrTy());
+      // (an untyped file: kind 2, records of 128 bytes until reset/rewrite)
       llvm::Value *F = B.CreateCall(
-          RT.FileNew, {B.getInt64(FT->isText() ? 1 : sizeOf(FT->getElementType())),
-                       B.getInt32(FT->isText()), Name});
+          RT.FileNew,
+          {B.getInt64(FT->isText() || FT->isUntyped()
+                          ? 1
+                          : sizeOf(FT->getElementType())),
+           B.getInt32(FT->isUntyped() ? 2 : FT->isText()), Name});
       B.CreateStore(F, Addr);
       return;
     }
@@ -4655,8 +4659,23 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
     return V;
   }
 
+  /// A runtime file routine (declared when first used).
+  llvm::FunctionCallee fileRuntime(llvm::StringRef Name, llvm::Type *Ret,
+                                   llvm::ArrayRef<llvm::Type *> Params) {
+    return classRuntime(Name, Ret, Params);
+  }
+
   llvm::Value *emitBuiltinCall(CallExpr *E, BuiltinDecl *BD) {
     switch (BD->getBuiltinKind()) {
+    case BuiltinKind::FilePos:
+    case BuiltinKind::FileSize:
+      return B.CreateCall(
+          fileRuntime(BD->getBuiltinKind() == BuiltinKind::FilePos
+                          ? "__pas_filepos"
+                          : "__pas_filesize",
+                      B.getInt64Ty(), {B.getPtrTy()}),
+          {loadFile(emitAddress(E->getArgs()[0]))},
+          BD->getBuiltinKind() == BuiltinKind::FilePos ? "filepos" : "filesize");
     case BuiltinKind::SizeOf: // the argument is not evaluated
       if (auto *OA = llvm::dyn_cast<OpenArrayType>(E->getArgs()[0]->getType()))
         return B.CreateMul(openCount(openDescriptor(E->getArgs()[0])),
@@ -5155,8 +5174,63 @@ public:
     case BuiltinKind::Readln:
       emitRead(S, BD->getBuiltinKind() == BuiltinKind::Readln);
       return;
-    case BuiltinKind::Reset: case BuiltinKind::Rewrite: case BuiltinKind::Get:
-    case BuiltinKind::Put: case BuiltinKind::Page: {
+    case BuiltinKind::Reset: case BuiltinKind::Rewrite: {
+      // An untyped file's: with its record size (128 if not given).
+      auto *FT = llvm::cast<FileType>(S->getArgs()[0]->getType());
+      if (!FT->isUntyped())
+        goto plain_file_proc;
+      llvm::Value *File = loadFile(emitAddress(S->getArgs()[0]));
+      llvm::Value *Size = S->getArgs().size() == 2
+                              ? toI64(visitExpr(S->getArgs()[1]),
+                                      S->getArgs()[1]->getType())
+                              : B.getInt64(128);
+      B.CreateCall(fileRuntime(BD->getBuiltinKind() == BuiltinKind::Reset
+                                   ? "__pas_reset_size"
+                                   : "__pas_rewrite_size",
+                               B.getVoidTy(), {B.getPtrTy(), B.getInt64Ty()}),
+                   {File, Size});
+      return;
+    }
+    case BuiltinKind::Close: case BuiltinKind::CloseFile:
+      B.CreateCall(fileRuntime("__pas_close", B.getVoidTy(), {B.getPtrTy()}),
+                   {loadFile(emitAddress(S->getArgs()[0]))});
+      return;
+    case BuiltinKind::Assign: case BuiltinKind::AssignFile: {
+      llvm::Value *File = loadFile(emitAddress(S->getArgs()[0]));
+      llvm::Value *Name = emitAnsi(S->getArgs()[1]);
+      B.CreateCall(fileRuntime("__pas_assign", B.getVoidTy(),
+                               {B.getPtrTy(), B.getPtrTy()}),
+                   {File, Name});
+      return;
+    }
+    case BuiltinKind::BlockRead: case BuiltinKind::BlockWrite: {
+      auto Args = S->getArgs();
+      bool Read = BD->getBuiltinKind() == BuiltinKind::BlockRead;
+      llvm::Value *File = loadFile(emitAddress(Args[0]));
+      llvm::Value *Buf = emitAddress(Args[1]);
+      llvm::Value *Count = toI64(visitExpr(Args[2]), Args[2]->getType());
+      llvm::Value *Done = B.CreateCall(
+          fileRuntime(Read ? "__pas_blockread" : "__pas_blockwrite",
+                      B.getInt64Ty(),
+                      {B.getPtrTy(), B.getPtrTy(), B.getInt64Ty(),
+                       B.getInt32Ty()}),
+          {File, Buf, Count, B.getInt32(Args.size() == 3)});
+      if (Args.size() == 4) // the records done
+        storeScalar(emitAddress(Args[3]),
+                    B.CreateSExtOrTrunc(Done, regType(Args[3]->getType())),
+                    Args[3]->getType());
+      return;
+    }
+    case BuiltinKind::Seek: {
+      llvm::Value *File = loadFile(emitAddress(S->getArgs()[0]));
+      llvm::Value *N = toI64(visitExpr(S->getArgs()[1]), S->getArgs()[1]->getType());
+      B.CreateCall(fileRuntime("__pas_seek", B.getVoidTy(),
+                               {B.getPtrTy(), B.getInt64Ty()}),
+                   {File, N});
+      return;
+    }
+    case BuiltinKind::Get: case BuiltinKind::Put: case BuiltinKind::Page:
+    plain_file_proc: {
       llvm::FunctionCallee Fn;
       switch (BD->getBuiltinKind()) {
       case BuiltinKind::Reset:   Fn = RT.Reset; break;

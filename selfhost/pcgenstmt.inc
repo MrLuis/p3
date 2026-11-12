@@ -691,6 +691,7 @@ var
   d: PDecl;
   k: TBuiltinKind;
   ignored, f, a0, a1, a2, mem, sz, old, dst, cnt, neg, v, code, p, src: TV;
+  done: TV;
   arg, countE: PNode;
   isFill: boolean;
   pointee: PType;
@@ -724,6 +725,24 @@ begin
     bkWrite, bkWriteln: emitWrite(s, k = bkWriteln);
     bkRead, bkReadln: emitRead(s, k = bkReadln);
     bkReset, bkRewrite, bkGet, bkPut, bkPage:
+      if ((k = bkReset) or (k = bkRewrite)) and
+         isUntypedFileType(PNode(listGet(s^.args, 0))^.typ) then
+      begin
+        { an untyped file's: with its record size (128 if not given) }
+        f := loadFile(emitAddress(PNode(listGet(s^.args, 0))));
+        if s^.args.count = 2 then
+        begin
+          arg := PNode(listGet(s^.args, 1));
+          sz := toI64(visitExpr(arg), arg^.typ);
+        end
+        else
+          sz := i64c(128);
+        if k = bkReset then
+          ignored := call2(classRuntime('__pas_reset_size', 'void', 'ptr,i64'), f, sz, '')
+        else
+          ignored := call2(classRuntime('__pas_rewrite_size', 'void', 'ptr,i64'), f, sz, '');
+      end
+      else
       begin
         if s^.args.count = 0 then
           f := outputFile
@@ -737,6 +756,44 @@ begin
         else
           rtv1('__pas_page', f);
         end;
+      end;
+    bkClose, bkCloseFile:
+      begin
+        f := loadFile(emitAddress(PNode(listGet(s^.args, 0))));
+        ignored := call1(classRuntime('__pas_close', 'void', 'ptr'), f, '');
+      end;
+    bkAssign, bkAssignFile:
+      begin
+        f := loadFile(emitAddress(PNode(listGet(s^.args, 0))));
+        a1 := emitAnsi(PNode(listGet(s^.args, 1)));
+        ignored := call2(classRuntime('__pas_assign', 'void', 'ptr,ptr'), f, a1, '');
+      end;
+    bkBlockRead, bkBlockWrite:
+      begin
+        f := loadFile(emitAddress(PNode(listGet(s^.args, 0))));
+        a1 := emitAddress(PNode(listGet(s^.args, 1)));
+        arg := PNode(listGet(s^.args, 2));
+        cnt := toI64(visitExpr(arg), arg^.typ);
+        if k = bkBlockRead then
+          done := call4(classRuntime('__pas_blockread', 'i64', 'ptr,ptr,i64,i32'),
+                        f, a1, cnt, i32c(ord(s^.args.count = 3)), '')
+        else
+          done := call4(classRuntime('__pas_blockwrite', 'i64', 'ptr,ptr,i64,i32'),
+                        f, a1, cnt, i32c(ord(s^.args.count = 3)), '');
+        if s^.args.count = 4 then { the records done }
+        begin
+          arg := PNode(listGet(s^.args, 3));
+          if not irSameType(done.t, regType(arg^.typ)) then
+            done := irCast('trunc', done, regType(arg^.typ), '');
+          storeScalar(emitAddress(arg), done, arg^.typ);
+        end;
+      end;
+    bkSeek:
+      begin
+        f := loadFile(emitAddress(PNode(listGet(s^.args, 0))));
+        arg := PNode(listGet(s^.args, 1));
+        a1 := toI64(visitExpr(arg), arg^.typ);
+        ignored := call2(classRuntime('__pas_seek', 'void', 'ptr,i64'), f, a1, '');
       end;
     bkPack, bkUnpack: emitPackUnpack(s, k = bkPack);
     bkBreak, bkContinue, bkExit:

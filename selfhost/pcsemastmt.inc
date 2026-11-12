@@ -40,6 +40,30 @@ begin
   ma('''');
 end;
 
+{ Is t an untyped file (Turbo/FPC file)? }
+function isUntypedFile(t: PType): boolean;
+begin
+  isUntypedFile := (t <> nil) and (t^.kind = tyFile) and not t^.isText and
+                   (t^.fileElement = nil);
+end;
+
+{ write/read of an untyped file: an error (they use blockwrite and
+  blockread). True if reported. }
+function untypedFileIO(s: PNode; fileTy: PType; isWrite: boolean): boolean;
+begin
+  untypedFileIO := false;
+  if not isUntypedFile(fileTy) then
+    exit;
+  ms('');
+  maCallee(s^.callee);
+  if isWrite then
+    ma(' cannot be used on an untyped file; use ''blockwrite''')
+  else
+    ma(' cannot be used on an untyped file; use ''blockread''');
+  errR(s^.callee.loc, identRange(s^.callee));
+  untypedFileIO := true;
+end;
+
 procedure checkWrite(s: PNode; isWriteln: boolean);
 var
   fileTy, t, wt: PType;
@@ -47,6 +71,8 @@ var
   arg, value, width, precision, w: PNode;
 begin
   fileTy := checkFileArg(s);
+  if untypedFileIO(s, fileTy, true) then
+    exit;
   first := 0;
   if fileTy <> nil then
     first := 1;
@@ -144,6 +170,8 @@ var
   arg: PNode;
 begin
   fileTy := checkFileArg(s);
+  if untypedFileIO(s, fileTy, false) then
+    exit;
   first := 0;
   if fileTy <> nil then
     first := 1;
@@ -221,14 +249,72 @@ begin
 end;
 
 { reset/rewrite/get/put(f) and page[(f)] }
-procedure checkFileProc(s: PNode; isPage: boolean);
+{ An integer argument of built-in callee (what: its role). }
+procedure checkIntegerArg(e: PNode; const callee: TIdent; const what: string);
+var
+  t: PType;
+begin
+  t := check(e);
+  if not isError(t) and not isIntegerLike(t) then
+  begin
+    ms('the ' + what + ' of ');
+    maCallee(callee);
+    ma(' must be an integer, not ');
+    maT(t);
+    errR(e^.b, nodeRange(e));
+  end;
+end;
+
+{ A file variable argument of callee: the file type, or nil after a
+  diagnostic. notText: text files are not allowed. }
+function checkFileVarArg(e: PNode; const callee: TIdent; notText, untyped: boolean): PType;
+var
+  t: PType;
+begin
+  checkFileVarArg := nil;
+  t := check(e);
+  if isError(t) then
+    exit;
+  if (t^.kind <> tyFile) or not isVariableReference(e) then
+  begin
+    ms('');
+    maCallee(callee);
+    if untyped then
+      ma(' expects an untyped file variable, not a value of type ')
+    else
+      ma(' expects a file variable, not a value of type ');
+    maT(t);
+    errR(e^.b, nodeRange(e));
+    exit;
+  end;
+  if (untyped and not isUntypedFile(t)) or (notText and t^.isText) then
+  begin
+    ms('');
+    maCallee(callee);
+    if untyped then
+      ma(' expects an untyped file, not ')
+    else
+      ma(' expects a typed or untyped file, not ');
+    maT(t);
+    errR(e^.b, nodeRange(e));
+    exit;
+  end;
+  checkFileVarArg := t;
+end;
+
+{ reset, rewrite (an untyped file's: with an optional record size), get,
+  put, page, close, closefile. }
+procedure checkFileProc(s: PNode; k: TBuiltinKind);
 var
   t: PType;
   a: PNode;
+  isPage, sized: boolean;
 begin
+  isPage := k = bkPage;
   if isPage and (s^.args.count = 0) then
     exit; { page(output) }
-  if s^.args.count <> 1 then
+  sized := (k = bkReset) or (k = bkRewrite);
+  if (s^.args.count <> 1) and not (sized and (s^.args.count = 2)) then
   begin
     ms('');
     maCallee(s^.callee);
@@ -252,7 +338,121 @@ begin
   begin
     ms('''page'' requires a text file');
     errR(a^.b, nodeRange(a));
+  end
+  else if ((k = bkGet) or (k = bkPut)) and isUntypedFile(t) then
+  begin
+    ms('');
+    maCallee(s^.callee);
+    ma(' cannot be used on an untyped file');
+    errR(a^.b, nodeRange(a));
+  end
+  else if (s^.args.count = 2) and not isUntypedFile(t) then
+  begin
+    a := PNode(listGet(s^.args, 1));
+    ms('only an untyped file has a record size');
+    errR(a^.b, nodeRange(a));
+  end
+  else if s^.args.count = 2 then
+    checkIntegerArg(PNode(listGet(s^.args, 1)), s^.callee, 'record size');
+end;
+
+{ assign(f, name) / assignfile: f any file variable, name a string, a char
+  or a pchar. }
+procedure checkAssignFile(s: PNode);
+var
+  t: PType;
+  a: PNode;
+begin
+  if s^.args.count <> 2 then
+  begin
+    ms('');
+    maCallee(s^.callee);
+    ma(' expects a file variable and a name');
+    errR(s^.callee.loc, nodeRange(s));
+    exit;
   end;
+  t := checkFileVarArg(PNode(listGet(s^.args, 0)), s^.callee, false, false);
+  a := PNode(listGet(s^.args, 1));
+  t := check(a);
+  if not isError(t) and not isStringish(t) and (t <> pcharT) then
+  begin
+    ms('the file name of ');
+    maCallee(s^.callee);
+    ma(' must be a string, not ');
+    maT(t);
+    errR(a^.b, nodeRange(a));
+  end;
+end;
+
+{ blockread(f, buf, count [, done]) / blockwrite: f an untyped file, buf any
+  variable, count an integer, done an integer variable. }
+procedure checkBlockIO(s: PNode);
+var
+  t: PType;
+  a: PNode;
+  ok: boolean;
+begin
+  if (s^.args.count <> 3) and (s^.args.count <> 4) then
+  begin
+    ms('');
+    maCallee(s^.callee);
+    ma(' expects 3 or 4 arguments (file, buffer, count [, count done])');
+    errR(s^.callee.loc, nodeRange(s));
+    exit;
+  end;
+  t := checkFileVarArg(PNode(listGet(s^.args, 0)), s^.callee, true, true);
+  a := PNode(listGet(s^.args, 1));
+  if not isError(checkAllowingUntyped(a)) and not isVariableReference(a) then
+  begin
+    ms('the buffer of ');
+    maCallee(s^.callee);
+    ma(' must be a variable');
+    errR(a^.b, nodeRange(a));
+  end
+  else if isBitPackedComponent(a) then
+    diagBitFieldAddress(a)
+  else if nameEquals(s^.callee.name, 'blockread') then
+    ok := checkModifiable(a);
+  checkIntegerArg(PNode(listGet(s^.args, 2)), s^.callee, 'count');
+  if s^.args.count = 4 then
+  begin
+    a := PNode(listGet(s^.args, 3));
+    t := check(a);
+    if isError(t) then
+      exit;
+    if not isVariableReference(a) then
+    begin
+      ms('the count done by ');
+      maCallee(s^.callee);
+      ma(' goes in a variable');
+      errR(a^.b, nodeRange(a));
+    end
+    else if not isIntegerLike(t) then
+    begin
+      ms('the count done by ');
+      maCallee(s^.callee);
+      ma(' goes in an integer variable, not ');
+      maT(t);
+      errR(a^.b, nodeRange(a));
+    end
+    else
+      ok := checkModifiable(a);
+  end;
+end;
+
+{ seek(f, n): f a typed or untyped file, n an integer. }
+procedure checkSeek(s: PNode);
+var
+  t: PType;
+begin
+  if s^.args.count <> 2 then
+  begin
+    ms('''seek'' expects a file variable and a record number');
+    errR(s^.callee.loc, nodeRange(s));
+    exit;
+  end;
+  t := checkFileVarArg(PNode(listGet(s^.args, 0)), s^.callee, true, false);
+  checkIntegerArg(PNode(listGet(s^.args, 1)), s^.callee, 'record number');
 end;
 
 { pack(a, i, z): z := a[i..]   unpack(z, a, i): a[i..] := z }
@@ -841,6 +1041,12 @@ begin
   if isError(t) then
     exit;
   arg := argNode(e, 0);
+  if (bk = bkFilePos) or (bk = bkFileSize) then
+  begin
+    if checkFileVarArg(arg, e^.callee, true, false) = nil then
+      exit;
+    exit(tyInt64T); { (in records) }
+  end;
   if (bk = bkEof) or (bk = bkEoln) then
   begin
     isEoln := bk = bkEoln;
@@ -2268,8 +2474,11 @@ begin
       bkReadln: checkRead(s, true);
       bkNew: checkNewDispose(s, true);
       bkDispose: checkNewDispose(s, false);
-      bkReset, bkRewrite, bkGet, bkPut, bkPage:
-        checkFileProc(s, d^.builtin = bkPage);
+      bkReset, bkRewrite, bkGet, bkPut, bkPage, bkClose, bkCloseFile:
+        checkFileProc(s, d^.builtin);
+      bkAssign, bkAssignFile: checkAssignFile(s);
+      bkBlockRead, bkBlockWrite: checkBlockIO(s);
+      bkSeek: checkSeek(s);
       bkBreak, bkContinue:
         if s^.args.count > 0 then
         begin
@@ -4166,8 +4375,14 @@ begin
       visitDeref := t^.pointee;
     exit;
   end;
-  if t^.kind = tyFile then
+  if (t^.kind = tyFile) and (t^.isText or (t^.fileElement <> nil)) then
     exit(t^.fileElement); { the buffer variable f^ }
+  if t^.kind = tyFile then
+  begin
+    ms('an untyped file has no buffer variable');
+    errR(e^.inner^.b, nodeRange(e^.inner));
+    exit;
+  end;
   ms('''^'' applied to a value of type ');
   maT(t);
   ma(', which is not a pointer');

@@ -459,11 +459,14 @@ begin
       begin
         if ts^.kind = tsSet then
           line('SetTypeSpec')
+        else if ts^.elemSpec = nil then
+          line('FileTypeSpec untyped')
         else
           line('FileTypeSpec');
         loc(ts^.b);
         indent := indent + 2;
-        printTypeSpec(ts^.elemSpec);
+        if ts^.elemSpec <> nil then
+          printTypeSpec(ts^.elemSpec);
         indent := indent - 2;
       end;
     tsRoutine:

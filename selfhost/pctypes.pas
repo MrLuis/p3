@@ -1032,6 +1032,8 @@ begin
     tyFile:
       if t^.isText then
         bufAdd(b, 'text')
+      else if t^.fileElement = nil then
+        bufAdd(b, 'file') { untyped }
       else
       begin
         bufAdd(b, 'file of ');
