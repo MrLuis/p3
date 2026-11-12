@@ -49,6 +49,7 @@ void Lexer::formToken(Token &T, tok::TokenKind K, const char *Start) {
   T.Data = {};
   T.IntValue = 0;
   T.Based = false;
+  T.WideChar = 0;
 }
 
 //===----------------------------------------------------------------------===//
@@ -1111,9 +1112,11 @@ void Lexer::lexString(Token &T) {
   llvm::SmallString<64> Value;
   bool Terminated = true;
   bool TP = LangOpts.Mode != LangMode::ISO;
+  unsigned Parts = 0, WideCode = 0;
 
   while (Terminated) {
     if (*Cur == '\'') {
+      ++Parts;
       ++Cur;
       Terminated = false;
       while (Cur < BufEnd && *Cur != '\n' && *Cur != '\r') {
@@ -1131,6 +1134,7 @@ void Lexer::lexString(Token &T) {
       }
     } else if (TP && *Cur == '#') {
       const char *CodeStart = Cur++;
+      ++Parts;
       unsigned Radix = 10;
       if (*Cur == '$') {
         Radix = 16;
@@ -1141,12 +1145,16 @@ void Lexer::lexString(Token &T) {
         ++Cur;
       unsigned Code;
       if (llvm::StringRef(Digits, Cur - Digits).getAsInteger(Radix, Code) ||
-          Code > 255) {
+          Code > 65535) {
         Diags.error(locOf(CodeStart), "invalid character code",
                     {SourceRange(locOf(CodeStart), locOf(Cur))});
         Code = 0;
       }
-      Value.push_back(static_cast<char>(Code));
+      // A code above 255 (a widechar, Free Pascal): '?' in a string, as
+      // FPC's conversion to its one-byte strings gives.
+      if (Code > 255)
+        WideCode = Parts == 1 ? Code : 0;
+      Value.push_back(Code > 255 ? '?' : static_cast<char>(Code));
     } else {
       break;
     }
@@ -1156,6 +1164,7 @@ void Lexer::lexString(Token &T) {
 
   formToken(T, tok::string_literal, Start);
   T.Data = Strings.intern(Value);
+  T.WideChar = Parts == 1 ? WideCode : 0; // a lone #code above 255
 
   if (!Terminated)
     Diags.error(locOf(Start), "unterminated string literal");

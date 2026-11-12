@@ -60,6 +60,7 @@ public:
     TK_ClassRef, ///< class of T (objfpc): a reference to a class (its VMT)
     TK_Interface, ///< interface ... end (objfpc): {object, method table}
     TK_Untyped,  ///< an untyped parameter's (Turbo/FPC `var x`, `const x`)
+    TK_WideChar, ///< widechar (Turbo/FPC): a 16-bit character code
   };
 
 private:
@@ -77,6 +78,9 @@ public:
   bool isReal() const { return Kind == TK_Real; }
   bool isBoolean() const { return Kind == TK_Boolean; }
   bool isChar() const { return Kind == TK_Char; }
+  bool isWideChar() const { return Kind == TK_WideChar; }
+  /// char or widechar after stripping subranges.
+  bool isCharLike() const;
   bool isEnum() const { return Kind == TK_Enum; }
   bool isSubrange() const { return Kind == TK_Subrange; }
   bool isStringLiteral() const { return Kind == TK_String; }
@@ -103,6 +107,7 @@ public:
   /// ISO 7185 6.4.2.1: integer, boolean, char, enumerations and subranges.
   bool isOrdinal() const {
     return Kind == TK_Integer || Kind == TK_Boolean || Kind == TK_Char ||
+           Kind == TK_WideChar ||
            Kind == TK_Enum || Kind == TK_Subrange;
   }
   bool isSimple() const { return isOrdinal() || isReal(); }
@@ -148,6 +153,7 @@ public:
   static bool classof(const Type *T) {
     switch (T->getKind()) {
     case TK_Error: case TK_Integer: case TK_Real: case TK_Boolean: case TK_Char:
+    case TK_WideChar:
     case TK_Nil: case TK_Untyped:
       return true;
     default:
@@ -529,8 +535,8 @@ public:
 inline bool needsStringCompare(Type *L, Type *R) {
   if (!L->isStringish() || !R->isStringish())
     return false;
-  if (L->getBase()->isChar() && R->getBase()->isChar())
-    return false;
+  if (L->isCharLike() && R->isCharLike())
+    return false; // compared as ordinals
   if (L->isStringType() && R->isStringType() &&
       L->getStringLength() == R->getStringLength())
     return false;

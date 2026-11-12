@@ -24,6 +24,8 @@ var
   { the type of untyped parameters (var x; const x): usable only through
     typecasts, @, and as arguments for untyped parameters }
   tyUntypedT: PType;
+  { widechar (and unicodechar): a 16-bit character code }
+  tyWideCharT: PType;
 
 procedure initTypes;
 function newType(kind: TTypeKind): PType;
@@ -85,6 +87,8 @@ function getBase(t: PType): PType;
 function isIntegerLike(t: PType): boolean;
 function isSignedIntegerLike(t: PType): boolean;
 function isNumeric(t: PType): boolean;
+{ char or widechar, after stripping subranges }
+function isCharLike(t: PType): boolean;
 function isStringType(t: PType): boolean;
 function getStringLength(t: PType): int64;
 function isStringish(t: PType): boolean;
@@ -341,6 +345,7 @@ begin
   tyRealT := newType(tyReal);
   tyBooleanT := newType(tyBoolean);
   tyCharT := newType(tyChar);
+  tyWideCharT := newType(tyWideChar);
   tyNilT := newType(tyNil);
   tyUntypedT := newType(tyUntyped);
   tyEmptySetT := newSetType(nil);
@@ -450,12 +455,13 @@ end;
 function isBuiltinType(t: PType): boolean;
 begin
   isBuiltinType := t^.kind in [tyError, tyInteger, tyReal, tyBoolean, tyChar, tyNil,
-                               tyUntyped];
+                               tyUntyped, tyWideChar];
 end;
 
 function isOrdinal(t: PType): boolean;
 begin
-  isOrdinal := t^.kind in [tyInteger, tyBoolean, tyChar, tyEnum, tySubrange];
+  isOrdinal := t^.kind in [tyInteger, tyBoolean, tyChar, tyEnum, tySubrange,
+                           tyWideChar];
 end;
 
 function bitLength(v: int64): longint;
@@ -487,6 +493,7 @@ begin
     tyInteger: bitPackedWidth := t^.bits;
     tyBoolean: bitPackedWidth := 1;
     tyChar: bitPackedWidth := 8;
+    tyWideChar: bitPackedWidth := 16;
     tyEnum:
       begin
         n := t^.enumValues.count;
@@ -597,6 +604,11 @@ begin
   isNumeric := isIntegerLike(t) or (t^.kind = tyReal);
 end;
 
+function isCharLike(t: PType): boolean;
+begin
+  isCharLike := getBase(t)^.kind in [tyChar, tyWideChar];
+end;
+
 { a string literal, or packed array [1..n] of char }
 function isStringType(t: PType): boolean;
 var
@@ -623,7 +635,7 @@ end;
 function isStringish(t: PType): boolean;
 begin
   isStringish := (t^.kind in [tyShortString, tyAnsiString]) or isStringType(t) or
-                 (getBase(t)^.kind = tyChar);
+                 isCharLike(t);
 end;
 
 function isTextFile(t: PType): boolean;
@@ -822,6 +834,11 @@ begin
         b.lo := 0;
         b.hi := 255;
       end;
+    tyWideChar:
+      begin
+        b.lo := 0;
+        b.hi := 65535;
+      end;
     tyBoolean:
       begin
         b.lo := 0;
@@ -852,15 +869,16 @@ var
 begin
   x := getBase(a);
   y := getBase(b);
-  haveSameOrdinalHost := (x = y) or ((x^.kind = tyInteger) and (y^.kind = tyInteger));
+  haveSameOrdinalHost := (x = y) or ((x^.kind = tyInteger) and (y^.kind = tyInteger)) or
+                         (isCharLike(a) and isCharLike(b)); { char and widechar }
 end;
 
 function needsStringCompare(l, r: PType): boolean;
 begin
   if not isStringish(l) or not isStringish(r) then
     exit(false);
-  if (getBase(l)^.kind = tyChar) and (getBase(r)^.kind = tyChar) then
-    exit(false);
+  if isCharLike(l) and isCharLike(r) then
+    exit(false); { compared as ordinals }
   if isStringType(l) and isStringType(r) and
      (getStringLength(l) = getStringLength(r)) then
     exit(false);
@@ -873,7 +891,12 @@ var
   c: char;
 begin
   base := getBase(t);
-  if base^.kind = tyChar then
+  if (base^.kind = tyWideChar) and ((v > 126) or (v < 32)) then
+  begin
+    bufAdd(b, '#' + intToStr(v));
+    exit;
+  end;
+  if base^.kind in [tyChar, tyWideChar] then
   begin
     c := chr(longint(v and 255));
     if (c >= ' ') and (c <= '~') then
@@ -921,6 +944,7 @@ begin
     tyReal: bufAdd(b, 'real');
     tyBoolean: bufAdd(b, 'boolean');
     tyChar: bufAdd(b, 'char');
+    tyWideChar: bufAdd(b, 'widechar');
     tyStringLit: bufAdd(b, 'string of length ' + intToStr(t^.strLength));
     tyEnum:
       begin

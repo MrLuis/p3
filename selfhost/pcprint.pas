@@ -1241,6 +1241,12 @@ begin
         endExpr(e);
       end;
     nkStringLit:
+      if e^.strWide <> 0 then
+      begin
+        line('WideCharLiteralExpr #' + intToStr(e^.strWide));
+        endExpr(e);
+      end
+      else
       begin
         if e^.strValue^.len = 1 then
           line('CharLiteralExpr ')

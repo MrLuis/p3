@@ -1087,6 +1087,9 @@ begin
     pcharT := pchar;
     { Free Pascal's names for the one-byte char (char is AnsiChar there) }
     stdType('ansichar', tyCharT);
+    { a 16-bit character code (FPC's widechar; unicodechar is the same) }
+    stdType('widechar', tyWideCharT);
+    stdType('unicodechar', tyWideCharT);
     stdType('pansichar', pchar);
     stdType('ansistring', ansiStringType);
     stdType('shortstring', shortStringType(255));
@@ -1644,12 +1647,43 @@ begin
     asReal := c.value.intVal;
 end;
 
+{ A widechar's code as a char: '?' above 255 (Free Pascal's conversion). }
+function wideToChar(v: int64): int64;
+begin
+  if v > 255 then
+    wideToChar := ord('?')
+  else
+    wideToChar := v;
+end;
+
+{ A widechar constant above 255 that becomes a char or a string: a warning,
+  as Free Pascal gives ('?' in its place). }
+procedure checkWideToChar(target: PType; e: PNode);
+var
+  c: TConstant;
+begin
+  if (e^.typ = nil) or (getBase(e^.typ)^.kind <> tyWideChar) or
+     not ((getBase(target)^.kind = tyChar) or
+          (isStringish(target) and not isCharLike(target))) then
+    exit;
+  if fold(e, c) and (c.value.kind = ckOrdinal) and (c.value.intVal > 255) then
+  begin
+    ms('the widechar #');
+    maI(c.value.intVal);
+    ma(' becomes ''?'' in ');
+    maT(target);
+    diagReportBuf(sevWarning, e^.b, msg, nodeRange(e), noRange);
+  end;
+end;
+
 { Does constant v of type vt lie within t's values? (qword values are
   unsigned.) }
 function constantInRange(v: int64; vt, t: PType): boolean;
 var
   bd: TOrdinalBounds;
 begin
+  if (getBase(vt)^.kind = tyWideChar) and (getBase(t)^.kind = tyChar) then
+    v := wideToChar(v);
   if isQWord(t) then
     exit(isQWordValue(vt) or (v >= 0));
   if isQWordValue(vt) and (v < 0) then { 2^63 or more }
@@ -1670,13 +1704,18 @@ begin
   {$Q+}{$R+}
 end;
 
-{ T(v): integer types wrap to their width (byte(300) = 44); other ordinal
-  types keep the value. }
-function castOrdinalValue(v: int64; t: PType): int64;
+{ T(v) of a value of type from: integer types wrap to their width
+  (byte(300) = 44), and widechar to 16 bits; a widechar above 255 is '?' as
+  a char (as Free Pascal converts it); other ordinal types keep the value. }
+function castOrdinalValue(v: int64; from, t: PType): int64;
 var
   i: PType;
   mask, u: int64;
 begin
+  if getBase(t)^.kind = tyWideChar then
+    exit(v and 65535);
+  if (getBase(t)^.kind = tyChar) and (getBase(from)^.kind = tyWideChar) then
+    exit(wideToChar(v));
   i := getBase(t);
   if (i^.kind <> tyInteger) or (i^.bits = 64) then
     exit(v);
@@ -1772,6 +1811,8 @@ begin
       exit(mkConst(t, constReal(e^.realValue), c));
     nkStringLit:
       begin
+        if e^.strWide <> 0 then
+          exit(mkConst(t, constOrdinal(e^.strWide), c));
         if e^.strValue^.len = 1 then
           exit(mkConst(t, constOrdinal(ord(e^.strValue^.chars^[0])), c));
         exit(mkConst(t, constString(e^.strValue), c));
@@ -1810,7 +1851,7 @@ begin
           begin
             if getBase(t)^.kind = tyBoolean then
               exit(mkConst(t, constOrdinal(ord(v.value.intVal = 0)), c));
-            exit(mkConst(t, constOrdinal(castOrdinalValue(not v.value.intVal, t)), c));
+            exit(mkConst(t, constOrdinal(castOrdinalValue(not v.value.intVal, t, t)), c));
           end;
         end;
       end;
@@ -1819,6 +1860,8 @@ begin
         if not fold(e^.lhs, l) or not fold(e^.rhs, r) or
            (l.value.kind = ckString) or (r.value.kind = ckString) then
           exit;
+        if not isOrdinal(t) and (t^.kind <> tyReal) then
+          exit; { 'a' + 'b': a string (not folded) }
         isReal := (l.value.kind = ckReal) or (r.value.kind = ckReal);
         a := l.value.intVal;
         b := r.value.intVal;
@@ -1937,7 +1980,7 @@ begin
           if not fold(PNode(listGet(e^.args, 0)), v) or
              (v.value.kind <> ckOrdinal) or not isOrdinal(t) then
             exit;
-          exit(mkConst(t, constOrdinal(castOrdinalValue(v.value.intVal, t)), c));
+          exit(mkConst(t, constOrdinal(castOrdinalValue(v.value.intVal, v.ty, t)), c));
         end;
         if (d = nil) or (d^.kind <> dkBuiltin) or (e^.args.count <> 1) then
           exit;
@@ -2307,6 +2350,8 @@ begin
         { integer bounds of different types: the wider host }
         host := getBase(lo.ty);
         if (host^.kind = tyInteger) and (getBase(hi.ty)^.bits > host^.bits) then
+          host := getBase(hi.ty);
+        if getBase(hi.ty)^.kind = tyWideChar then { 'a'..#$100: of widechar }
           host := getBase(hi.ty);
         buildType := newSubrangeType(host, lo.value.intVal, hi.value.intVal);
       end;
@@ -5209,7 +5254,11 @@ begin
       exit;
     end;
   end;
+  checkWideToChar(t, init);
   folded := c.value;
+  if (c.value.kind = ckOrdinal) and (getBase(c.ty)^.kind = tyWideChar) and
+     (getBase(t)^.kind = tyChar) then
+    folded.intVal := wideToChar(folded.intVal);
   checkConstInit := true;
 end;
 
@@ -6647,7 +6696,8 @@ begin
     t := check(el^.lo);
     if isError(t) then
       continue;
-    if not (isIntegerLike(t) or (t^.kind = tyReal) or (getBase(t)^.kind = tyChar) or
+    if (getBase(t)^.kind = tyWideChar) or
+       not (isIntegerLike(t) or (t^.kind = tyReal) or (getBase(t)^.kind = tyChar) or
             (getBase(t)^.kind = tyBoolean) or isStringish(t) or
             (t^.kind in [tyPointer, tyNil, tyClass, tyClassRef])) then
     begin
@@ -7701,6 +7751,7 @@ begin
         checkNotForControlVar(arg);
       continue;
     end;
+    checkWideToChar(pt, arg);
     if not isAssignable(pt, at) and not isPCharLiteral(pt, arg) and
        not convertImplicitly(arg, pt) then
     begin

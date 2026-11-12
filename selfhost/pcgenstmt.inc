@@ -130,6 +130,8 @@ begin
     rtv4('__pas_write_real', f, v, width, prec)
   else if isCharBase(t) then
     rtv3('__pas_write_char', f, v, width)
+  else if getBase(t)^.kind = tyWideChar then
+    rtv3('__pas_write_char', f, wideToChar(v), width)
   else if isBoolBase(t) then
   begin
     b := irCast('zext', v, irI32, '');

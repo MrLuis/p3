@@ -38,6 +38,7 @@ class ASTContext {
   BuiltinType RealTy{Type::TK_Real};
   BuiltinType BooleanTy{Type::TK_Boolean};
   BuiltinType CharTy{Type::TK_Char};
+  BuiltinType WideCharTy{Type::TK_WideChar};
   BuiltinType NilTy{Type::TK_Nil};
   BuiltinType UntypedTy{Type::TK_Untyped};
   SetType EmptySetTy{nullptr};
@@ -72,6 +73,7 @@ public:
   Type *getRealType() { return &RealTy; }
   Type *getBooleanType() { return &BooleanTy; }
   Type *getCharType() { return &CharTy; }
+  Type *getWideCharType() { return &WideCharTy; }
   Type *getNilType() { return &NilTy; }
   /// The type of untyped parameters (var x; const x): usable only through
   /// typecasts, @, and as arguments for untyped parameters.

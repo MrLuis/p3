@@ -66,7 +66,9 @@ type
                tySet, tyFile, tyRoutine, tyShortString, tyAnsiString, tyArrayOfConst, tyOpenArray, tyDynArray, tyClass, tyClassRef,
                tyInterface,
                { an untyped parameter's (Turbo/FPC  var x;  const x) }
-               tyUntyped);
+               tyUntyped,
+               { widechar (Turbo/FPC): a 16-bit character code }
+               tyWideChar);
 
   TType = record
     kind: TTypeKind;
@@ -148,7 +150,9 @@ type
         int64, as in Free Pascal, not a qword) }
       nkIntegerLit: (intValue: int64; intBased: boolean);
       nkRealLit: (realValue: double);
-      nkStringLit: (strValue: PName);
+      { strWide: a lone character code above 255 (#$D800), a widechar
+        value (strValue is then '?', the char it converts to); else 0 }
+      nkStringLit: (strValue: PName; strWide: longint);
       nkNameRef: (ref: TIdent; refDecl: PDecl; refWith: PWithContext);
       { paren: the inner expression; deref: the pointer; addrof: the operand }
       nkParen, nkDeref, nkAddrOf: (inner: PNode; addrMethod, addrCode: PDecl);

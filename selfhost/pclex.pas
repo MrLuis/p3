@@ -29,6 +29,7 @@ type
     strValue: PName;   { string literals: the value, quotes removed }
     intValue: int64;   { integer literals: 64 bits, read as unsigned }
     based: boolean;    { integer literals written $FF, %1010 or &17 }
+    wideChar: longint; { string literals: a lone code above 255, or 0 }
     realValue: double; { real literals }
   end;
 
@@ -391,6 +392,7 @@ begin
   t.strValue := nil;
   t.intValue := 0;
   t.based := false;
+  t.wideChar := 0;
   t.realValue := 0;
 end;
 
@@ -2178,11 +2180,13 @@ var
   start, codeStart, digits: int64;
   value: TBuf;
   terminated, tp, ok: boolean;
-  radix: longint;
+  radix, parts, wideCode: longint;
   code: int64;
   c: char;
 begin
   start := lx.cur;
+  parts := 0;
+  wideCode := 0;
   bufInit(value);
   terminated := true;
   tp := lx.mode <> lmISO;
@@ -2190,6 +2194,7 @@ begin
   begin
     if at(lx, lx.cur) = '''' then
     begin
+      parts := parts + 1;
       lx.cur := lx.cur + 1;
       terminated := false;
       while lx.cur < lx.len do
@@ -2217,6 +2222,7 @@ begin
     begin
       codeStart := lx.cur;
       lx.cur := lx.cur + 1;
+      parts := parts + 1;
       radix := 10;
       if at(lx, lx.cur) = '$' then
       begin
@@ -2227,13 +2233,24 @@ begin
       while isAlnum(at(lx, lx.cur)) do
         lx.cur := lx.cur + 1;
       code := parseUnsigned(lx, digits, lx.cur, radix, ok);
-      if not ok or (code > 255) or (code < 0) then
+      if not ok or (code > 65535) or (code < 0) then
       begin
         diagErrorR(locOf(lx, codeStart), 'invalid character code',
                    makeRange(locOf(lx, codeStart), locOf(lx, lx.cur)));
         code := 0;
       end;
-      bufAddChar(value, chr(longint(code)));
+      { A code above 255 (a widechar, Free Pascal): '?' in a string, as
+        FPC's conversion to its one-byte strings gives. }
+      if code > 255 then
+      begin
+        if parts = 1 then
+          wideCode := longint(code)
+        else
+          wideCode := 0;
+        bufAddChar(value, '?');
+      end
+      else
+        bufAddChar(value, chr(longint(code)));
     end
     else
       break;
@@ -2243,6 +2260,8 @@ begin
 
   formToken(lx, t, tkStringLiteral, start);
   t.strValue := internChars(value.data, 0, value.len);
+  if parts = 1 then { a lone #code above 255 }
+    t.wideChar := wideCode;
   if not terminated then
     diagError(locOf(lx, start), 'unterminated string literal')
   else if (value.len = 0) and (lx.mode = lmISO) then

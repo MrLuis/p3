@@ -14,6 +14,9 @@ class Token {
   SourceLocation Loc;
   unsigned Length = 0;
   bool Based = false; ///< integer_literal written $hex, %binary or &octal
+  /// string_literal: a lone character code above 255 (#$D800), a widechar
+  /// constant; its value is then "?".
+  unsigned WideChar = 0;
 
   /// identifier:     canonical lowercase name (interned)
   /// string_literal: value with '' unescaped (interned)
@@ -53,6 +56,8 @@ public:
   uint64_t getIntegerValue() const { return IntValue; }
   /// An integer literal written $FF, %1010 or &17 (Turbo/FPC)?
   bool isBasedInteger() const { return Based; }
+  /// A string literal that is one character code above 255: the code.
+  unsigned getWideCharCode() const { return WideChar; }
   double getRealValue() const { return RealValue; }
 
   bool isKeyword() const { return tok::isKeyword(Kind); }

@@ -463,6 +463,7 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
     case Type::TK_Real:    return B.getDoubleTy();
     case Type::TK_Boolean: return B.getInt8Ty();
     case Type::TK_Char:    return B.getInt8Ty();
+    case Type::TK_WideChar: return B.getInt16Ty();
     case Type::TK_Enum:    return B.getInt32Ty();
     case Type::TK_Subrange:
       return memType(llvm::cast<SubrangeType>(T)->getHost());
@@ -807,10 +808,26 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
     llvm::Type *Dst = regType(To);
     if (V->getType() == Dst)
       return V;
+    if (From->getBase()->isWideChar() && To->getBase()->isChar())
+      return wideToChar(V);
     if (Dst->isIntegerTy(1))
       return B.CreateICmpNE(V, llvm::ConstantInt::get(V->getType(), 0));
     return isSignedOrdinal(From) ? B.CreateSExtOrTrunc(V, Dst)
                                  : B.CreateZExtOrTrunc(V, Dst);
+  }
+
+  /// A widechar's code as a char, as Free Pascal converts it: '?' above
+  /// 255.
+  llvm::Value *wideToChar(llvm::Value *V) {
+    llvm::Value *Fits = B.CreateICmpULE(V, B.getInt16(255));
+    return B.CreateSelect(Fits, B.CreateTrunc(V, B.getInt8Ty()), B.getInt8('?'),
+                          "tochar");
+  }
+
+  /// A char or widechar expression's value as a char.
+  llvm::Value *emitCharValue(Expr *E) {
+    llvm::Value *V = visitExpr(E);
+    return E->getType()->getBase()->isWideChar() ? wideToChar(V) : V;
   }
 
   /// An integer expression as i32 (field widths, string positions).
@@ -883,6 +900,10 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
     if (To->isReal() && !From->isReal())
       return toDouble(V, From);
     if (To->isOrdinal() && From->isOrdinal()) {
+      if (From->getBase()->isWideChar() && To->getBase()->isChar()) {
+        V = wideToChar(V); // then checked as a char
+        From = To->getBase();
+      }
       emitRangeCheck(V, From, To, L);
       return convertOrdinal(V, From, To);
     }
@@ -957,8 +978,8 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
           C && C->getValue().K == ConstValue::String)
         return getAnsiConstant(C->getValue().Str);
     llvm::Type *Ptr = B.getPtrTy();
-    if (T->getBase()->isChar())
-      return holdResult(astrCall("__pas_astr_from_char", Ptr, {visitExpr(E)}));
+    if (T->isCharLike())
+      return holdResult(astrCall("__pas_astr_from_char", Ptr, {emitCharValue(E)}));
     if (T->isPointer())
       return holdResult(astrCall("__pas_astr_from_cstr", Ptr, {visitExpr(E)}));
     return holdResult(astrCall("__pas_astr_from_pstr", Ptr, {emitPStr(E)}));
@@ -1171,10 +1192,10 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
       if (auto *C = llvm::dyn_cast<ConstDecl>(N->getDecl());
           C && C->getValue().K == ConstValue::String)
         return getPStrConstant(C->getValue().Str);
-    if (T->getBase()->isChar()) {
+    if (T->isCharLike()) {
       llvm::Value *Tmp = newStringTemp(1);
       B.CreateStore(B.getInt8(1), Tmp);
-      llvm::Value *C = visitExpr(E);
+      llvm::Value *C = emitCharValue(E);
       B.CreateStore(C, B.CreateConstGEP1_64(B.getInt8Ty(), Tmp, 1));
       return Tmp;
     }
@@ -1211,18 +1232,19 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
       if (T->isShortString())
         return B.CreateZExt(B.CreateLoad(B.getInt8Ty(), emitPStr(Args[0])),
                             B.getInt32Ty(), "length");
-      if (T->getBase()->isChar()) {
+      if (T->isCharLike()) {
         visitExpr(Args[0]);
         return B.getInt32(1);
       }
       return B.getInt32(static_cast<uint32_t>(T->getStringLength()));
     }
     case BuiltinKind::UpCase: {
-      llvm::Value *C = visitExpr(Args[0]);
-      llvm::Value *GeA = B.CreateICmpUGE(C, B.getInt8('a'));
-      llvm::Value *LeZ = B.CreateICmpULE(C, B.getInt8('z'));
+      llvm::Value *C = visitExpr(Args[0]); // a char or a widechar
+      auto Ch = [&](uint64_t X) { return llvm::ConstantInt::get(C->getType(), X); };
+      llvm::Value *GeA = B.CreateICmpUGE(C, Ch('a'));
+      llvm::Value *LeZ = B.CreateICmpULE(C, Ch('z'));
       llvm::Value *IsLower = B.CreateAnd(GeA, LeZ);
-      return B.CreateSelect(IsLower, B.CreateSub(C, B.getInt8(32)), C, "upcase");
+      return B.CreateSelect(IsLower, B.CreateSub(C, Ch(32)), C, "upcase");
     }
     case BuiltinKind::Pos:
       if (Args[0]->getType()->isAnsiString() || Args[1]->getType()->isAnsiString()) {
@@ -2108,6 +2130,8 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
     case Type::TK_Real:    return DIB->createBasicType("real", 64, DW_ATE_float);
     case Type::TK_Boolean: return DIB->createBasicType("boolean", 8, DW_ATE_boolean);
     case Type::TK_Char:    return DIB->createBasicType("char", 8, DW_ATE_unsigned_char);
+    case Type::TK_WideChar:
+      return DIB->createBasicType("widechar", 16, DW_ATE_unsigned_char);
     case Type::TK_Subrange:
       return debugType(llvm::cast<SubrangeType>(T)->getHost());
     case Type::TK_DynArray:
@@ -4509,6 +4533,8 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
       B.CreateCall(RT.WriteReal, {File, V, Width, Precision});
     else if (T->getBase()->isChar())
       B.CreateCall(RT.WriteChar, {File, V, Width});
+    else if (T->getBase()->isWideChar())
+      B.CreateCall(RT.WriteChar, {File, wideToChar(V), Width});
     else if (T->getBase()->isBoolean())
       B.CreateCall(RT.WriteBool, {File, B.CreateZExt(V, B.getInt32Ty()), Width});
     else if (auto *ET = llvm::dyn_cast<EnumType>(T->getBase()))
@@ -6110,6 +6136,8 @@ public:
 
   llvm::Value *visitStringLiteralExpr(StringLiteralExpr *E) {
     // Longer strings are aggregates and go through emitAddress.
+    if (E->isWideCharLiteral())
+      return B.getInt16(static_cast<uint16_t>(E->getWideCode()));
     assert(E->isCharLiteral() && "string values are handled by address");
     return B.getInt8(static_cast<uint8_t>(E->getValue()[0]));
   }

@@ -6,7 +6,7 @@
 function isWritable(t: PType): boolean;
 begin
   isWritable := isIntegerLike(t) or (t^.kind = tyReal) or
-                (getBase(t)^.kind = tyChar) or (getBase(t)^.kind = tyBoolean) or
+                isCharLike(t) or (getBase(t)^.kind = tyBoolean) or
                 isStringType(t) or (t^.kind in [tyShortString, tyAnsiString]);
 end;
 
@@ -888,7 +888,9 @@ begin
       begin
         if not arity(1) then
           exit;
-        if getBase(argType(e, 0))^.kind = tyChar then
+        if getBase(argType(e, 0))^.kind = tyWideChar then
+          checkStringFunction := tyWideCharT { only 'a'..'z' change }
+        else if getBase(argType(e, 0))^.kind = tyChar then
           checkStringFunction := tyCharT
         else
           checkStringFunction := bad(argNode(e, 0), 'a char');
@@ -2827,6 +2829,7 @@ begin
     errR(s^.assignLoc, nodeRange(target));
     exit;
   end;
+  checkWideToChar(targetTy, s^.value);
   if not isAssignable(targetTy, valueTy) and
      not convertImplicitly(s^.value, targetTy) then
   begin
@@ -3760,7 +3763,11 @@ begin
         if isNumeric(l) and isNumeric(r) then
           exit(tyBooleanT);
         if isOrdinal(l) and isOrdinal(r) and areCompatible(l, r) then
+        begin
+          if (getBase(l) <> getBase(r)) and isCharLike(l) then { char, widechar }
+            e^.operandType := tyWideCharT;
           exit(tyBooleanT);
+        end;
         if isStringType(l) and isStringType(r) then
         begin
           if areCompatible(l, r) then
@@ -4563,7 +4570,9 @@ begin
       end;
     nkRealLit: visitExpr := tyRealT;
     nkStringLit:
-      if e^.strValue^.len = 1 then
+      if e^.strWide <> 0 then
+        visitExpr := tyWideCharT
+      else if e^.strValue^.len = 1 then
         visitExpr := tyCharT
       else
         visitExpr := stringLiteralType(e^.strValue^.len);

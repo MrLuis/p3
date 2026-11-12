@@ -3216,7 +3216,8 @@ Expr *Parser::parseConstant() {
     E = Ctx.create<RealLiteralExpr>(Tok.getRange(), Tok.getRealValue());
     break;
   case tok::string_literal:
-    E = Ctx.create<StringLiteralExpr>(Tok.getRange(), Tok.getStringValue());
+    E = Ctx.create<StringLiteralExpr>(Tok.getRange(), Tok.getStringValue(),
+                                      Tok.getWideCharCode());
     break;
   case tok::identifier:
     E = Ctx.create<NameRefExpr>(makeIdentifier(Tok));
@@ -3591,8 +3592,8 @@ Expr *Parser::parseFactor() {
     return E;
   }
   case tok::string_literal: {
-    auto *E = Ctx.create<StringLiteralExpr>(Tok.getRange(),
-                                            Tok.getStringValue());
+    auto *E = Ctx.create<StringLiteralExpr>(
+        Tok.getRange(), Tok.getStringValue(), Tok.getWideCharCode());
     consumeToken();
     if (typeHelpers() && Tok.is(tok::period)) // 'abc'.ToUpper
       return parseSelectors(E);

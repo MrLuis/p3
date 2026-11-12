@@ -1,0 +1,22 @@
+; widechar: what it cannot do (be a set's element type, be read, go in an
+; array of const, be chr's argument), a string literal is not one, and a
+; constant code above 255 becoming a char or a string is a warning ('?' in
+; its place, as Free Pascal warns). Codes go up to 65535. ISO Pascal has
+; no widechar.
+; RUN: not %pcc --mode=objfpc -ferror-limit=0 -c %S/Inputs/widechar/errors.pas -o %t.o 2>&1 | FileCheck %s
+; CHECK: errors.pas:3:17: error: set element type 'widechar' has values outside 0..255; use a subrange
+; CHECK: errors.pas:6:13: error: value #256 is out of range for 'TLow'
+; CHECK: errors.pas:7:14: warning: the widechar #8364 becomes '?' in 'char'
+; CHECK: errors.pas:15:8: error: cannot read a value of type 'widechar' (only integer, real and char)
+; CHECK: errors.pas:16:6: error: a value of type 'widechar' cannot be an element of an array of const
+; CHECK: errors.pas:17:12: error: 'chr' expects an integer argument, not 'widechar'
+; CHECK: errors.pas:18:5: error: assigning to 'widechar' from incompatible type 'string of length 2'
+; CHECK: errors.pas:19:8: warning: the widechar #55296 becomes '?' in 'char'
+; CHECK: errors.pas:20:8: warning: the widechar #55296 becomes '?' in 'string'
+; CHECK: errors.pas:21:5: warning: the widechar #8364 becomes '?' in 'char'
+; CHECK-NOT: errors.pas:22
+; RUN: not %pcc --mode=tp -c %S/Inputs/widechar/codes.pas -o %t.o 2>&1 | FileCheck --check-prefix=CODES %s
+; CODES: codes.pas:3:12: error: invalid character code
+; CODES-NOT: error
+; RUN: not %pcc --mode=iso -c %S/Inputs/widechar/iso.pas -o %t.o 2>&1 | FileCheck --check-prefix=ISO %s
+; ISO: iso.pas:3:6: error: unknown type name 'widechar'

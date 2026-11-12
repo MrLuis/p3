@@ -4478,6 +4478,7 @@ begin
     begin
       n := newNode(nkStringLit, t.loc, tokenEnd(t));
       n^.strValue := t.strValue;
+      n^.strWide := t.wideChar;
     end;
   end;
   literalNode := n;

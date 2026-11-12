@@ -179,15 +179,20 @@ public:
   static bool classof(const Expr *E) { return E->getKind() == EK_RealLiteral; }
 };
 
-/// 'text'. A literal of exactly one character denotes a char value.
+/// 'text'. A literal of exactly one character denotes a char value; a lone
+/// character code above 255 (#$D800, Turbo/FPC) a widechar value (its
+/// Value is then "?", the char it converts to).
 class StringLiteralExpr final : public Expr {
   llvm::StringRef Value; ///< '' already unescaped
+  unsigned WideCode;     ///< the widechar's code, or 0
 
 public:
-  StringLiteralExpr(SourceRange R, llvm::StringRef V)
-      : Expr(EK_StringLiteral, R), Value(V) {}
+  StringLiteralExpr(SourceRange R, llvm::StringRef V, unsigned WideCode = 0)
+      : Expr(EK_StringLiteral, R), Value(V), WideCode(WideCode) {}
   llvm::StringRef getValue() const { return Value; }
-  bool isCharLiteral() const { return Value.size() == 1; }
+  bool isCharLiteral() const { return Value.size() == 1 && !WideCode; }
+  bool isWideCharLiteral() const { return WideCode != 0; }
+  unsigned getWideCode() const { return WideCode; }
   static bool classof(const Expr *E) { return E->getKind() == EK_StringLiteral; }
 };
 

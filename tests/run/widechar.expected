@@ -1,0 +1,38 @@
+-- constants
+55296 8364 8364 65
+97 233 65535
+a?b 3 ?? 2
+55296 56319
+0 65535 2
+55297 TRUE 8365
+65 8364 255
+-- to char and strings
+1 233
+128
+63 63 63 63
+? 1
+az zb
+q   q ?
+-- with chars
+120 120
+TRUE TRUE TRUE FALSE TRUE
+TRUE FALSE
+TRUE FALSE
+FALSE
+-- calls
+  show 65
+  show 66
+  show 55296
+  show 120
+66 4464
+-- storage
+6 3 6
+937 z
+43981 TRUE
+4661
+7
+-- control
+3
+65534 65535 
+symbols
+surrogate

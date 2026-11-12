@@ -36,7 +36,12 @@ padded on the right to a field width, as in Free Pascal; a value outside
 its type is a runtime error), `$hex %bin #13` literals, `//` comments; the integer
 types `longint int64 cardinal byte word shortint smallint` (FPC widening
 rules) and `qword` (unsigned 64-bit, also named `UInt64`, `NativeUInt`,
-`PtrUInt` and `SizeUInt`; see below); typecasts `T(x)`; distinct types `T = type X` (as an alias of `X`:
+`PtrUInt` and `SizeUInt`; see below); `widechar` (also `unicodechar`: a
+16-bit character code; a lone code above 255, such as `#$D800`, is a
+widechar constant, and a widechar becomes a char or a string as Free Pascal
+converts it without a unicode string manager: codes up to 255 as that char,
+others as `'?'`, also inside a string literal such as `'a'#$20AC'b'`; no
+`widestring`/`unicodestring` yet); typecasts `T(x)`; distinct types `T = type X` (as an alias of `X`:
 Free Pascal also tells them apart in overloads); `bitpacked record` and
 `bitpacked array` (Free Pascal's layout: ordinal fields and elements take
 the bits their values need, least significant first, so `bitpacked array

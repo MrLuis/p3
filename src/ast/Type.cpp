@@ -27,7 +27,13 @@ bool pcc::isQWord(const Type *T) {
 
 bool pcc::haveSameOrdinalHost(Type *A, Type *B) {
   Type *X = A->getBase(), *Y = B->getBase();
-  return X == Y || (X->isInteger() && Y->isInteger());
+  return X == Y || (X->isInteger() && Y->isInteger()) ||
+         (A->isCharLike() && B->isCharLike()); // char and widechar
+}
+
+bool Type::isCharLike() const {
+  Type *B = const_cast<Type *>(this)->getBase();
+  return B->isChar() || B->isWideChar();
 }
 
 Type *Type::getBase() {
@@ -54,6 +60,8 @@ unsigned pcc::bitPackedWidth(Type *T) {
     return 1;
   case Type::TK_Char:
     return 8;
+  case Type::TK_WideChar:
+    return 16;
   case Type::TK_Enum: {
     size_t N = llvm::cast<EnumType>(T)->getValues().size();
     return std::max(1u, bitLength(N ? N - 1 : 0));
@@ -100,8 +108,7 @@ uint64_t Type::getStringLength() const {
 }
 
 bool Type::isStringish() const {
-  return isShortString() || isAnsiString() || isStringType() ||
-         const_cast<Type *>(this)->getBase()->isChar();
+  return isShortString() || isAnsiString() || isStringType() || isCharLike();
 }
 
 bool Type::isTextFile() const {
@@ -197,6 +204,7 @@ OrdinalBounds pcc::getOrdinalBounds(Type *T) {
     return {0, (int64_t(1) << Bits) - 1};
   }
   case Type::TK_Char:    return {0, 255};
+  case Type::TK_WideChar: return {0, 65535};
   case Type::TK_Boolean: return {0, 1};
   case Type::TK_Enum:
     return {0, static_cast<int64_t>(llvm::cast<EnumType>(T)->getValues().size()) - 1};
@@ -211,7 +219,9 @@ OrdinalBounds pcc::getOrdinalBounds(Type *T) {
 
 static std::string formatOrdinal(Type *T, int64_t V) {
   Type *B = T->getBase();
-  if (B->isChar())
+  if (B->isWideChar() && (V > 127 || !llvm::isPrint(static_cast<char>(V))))
+    return "#" + std::to_string(V);
+  if (B->isChar() || B->isWideChar())
     return llvm::isPrint(static_cast<char>(V))
                ? "'" + std::string(1, static_cast<char>(V)) + "'"
                : "chr(" + std::to_string(V) + ")";
@@ -233,6 +243,7 @@ std::string Type::getName() const {
   case TK_Real:    return "real";
   case TK_Boolean: return "boolean";
   case TK_Char:    return "char";
+  case TK_WideChar: return "widechar";
   case TK_String:
     return "string of length " +
            std::to_string(llvm::cast<StringLiteralType>(this)->getLength());

@@ -701,6 +701,7 @@ begin
     tyInteger: lowerType := irInt(t^.bits);
     tyReal: lowerType := irDoubleT;
     tyBoolean, tyChar: lowerType := irI8;
+    tyWideChar: lowerType := irI16;
     tyEnum: lowerType := irI32;
     tySubrange: lowerType := memType(t^.host);
     tyStringLit: lowerType := irArray(t^.strLength, irI8);
@@ -1052,6 +1053,16 @@ begin
                        (t^.fileElement = nil);
 end;
 
+{ A widechar's code as a char, as Free Pascal converts it: '?' above 255. }
+function wideToChar(const v: TV): TV;
+var
+  fits, ch: TV;
+begin
+  fits := irICmp('ule', v, irConstInt(irI16, 255), '');
+  ch := irCast('trunc', v, irI8, '');
+  wideToChar := irSelect(fits, ch, i8c(ord('?')), 'tochar');
+end;
+
 { An ordinal register value of type src as the register type of dst
   (extended by src's signedness, or truncated). No range check. }
 function convertOrdinal(const v: TV; src, dst: PType): TV;
@@ -1061,6 +1072,8 @@ begin
   d := regType(dst);
   if irSameType(v.t, d) then
     exit(v);
+  if (getBase(src)^.kind = tyWideChar) and (getBase(dst)^.kind = tyChar) then
+    exit(wideToChar(v));
   if d^.bits = 1 then
     exit(irICmp('ne', v, irConstInt(v.t, 0), ''));
   if d^.bits < v.t^.bits then
@@ -1160,7 +1173,7 @@ function toInterface(const obj: TV; i: PType): TV; forward;
 function convertForAssign(const v: TV; src, dst: PType; loc: TLoc): TV;
 var
   tb, fb: TOrdinalBounds;
-  outside: TV;
+  outside, w: TV;
 begin
   if dst^.kind = tyInterface then
   begin
@@ -1174,6 +1187,12 @@ begin
     exit(toDouble(v, src));
   if isOrdinal(dst) and isOrdinal(src) then
   begin
+    if (getBase(src)^.kind = tyWideChar) and (getBase(dst)^.kind = tyChar) then
+    begin { then checked as a char }
+      w := wideToChar(v);
+      emitRangeCheck(w, getBase(dst), dst, loc);
+      exit(convertOrdinal(w, getBase(dst), dst));
+    end;
     emitRangeCheck(v, src, dst, loc);
     exit(convertOrdinal(v, src, dst));
   end;
@@ -1805,6 +1824,18 @@ begin
   newStringTemp := irCreateTemp(irArray(maxLen + 1, irI8), 'str');
 end;
 
+{ A char or widechar expression's value as a char. }
+function emitCharValue(e: PNode): TV;
+var
+  v: TV;
+begin
+  v := visitExpr(e);
+  if getBase(e^.typ)^.kind = tyWideChar then
+    v := wideToChar(v);
+  emitCharValue := v;
+end;
+
+
 { Any string-like expression as a pointer to a length-prefixed string. }
 function emitPStr(e: PNode): TV;
 var
@@ -1831,11 +1862,11 @@ begin
     if (d^.kind = dkConst) and (d^.constValue.kind = ckString) then
       exit(getPStrConstant(d^.constValue.strVal^.chars, 0, d^.constValue.strVal^.len));
   end;
-  if isCharBase(t) then
+  if isCharLike(t) then
   begin
     tmp := newStringTemp(1);
     irStore(i8c(1), tmp);
-    c := visitExpr(e);
+    c := emitCharValue(e);
     dst := irGEP1(irI8, tmp, i64c(1), false, '');
     irStore(c, dst);
     exit(tmp);
@@ -1869,9 +1900,9 @@ begin
     if (d^.kind = dkConst) and (d^.constValue.kind = ckString) then
       exit(getAnsiConstant(d^.constValue.strVal^.chars, 0, d^.constValue.strVal^.len));
   end;
-  if isCharBase(t) then
+  if isCharLike(t) then
   begin
-    s := visitExpr(e);
+    s := emitCharValue(e);
     exit(holdResult(call1(classRuntime('__pas_astr_from_char', 'ptr', 'i8'), s, '')));
   end;
   if t^.kind = tyPointer then
@@ -2127,7 +2158,7 @@ begin
           len := irLoad(irI8, emitPStr(a0), '');
           exit(irCast('zext', len, irI32, 'length'));
         end;
-        if isCharBase(t) then
+        if isCharLike(t) then
         begin
           ignored := visitExpr(a0);
           exit(i32c(1));
@@ -2136,11 +2167,11 @@ begin
       end;
     bkUpCase:
       begin
-        c := visitExpr(a0);
-        lo := irICmp('uge', c, i8c(ord('a')), '');
-        hi := irICmp('ule', c, i8c(ord('z')), '');
+        c := visitExpr(a0); { a char or a widechar }
+        lo := irICmp('uge', c, irConstInt(c.t, ord('a')), '');
+        hi := irICmp('ule', c, irConstInt(c.t, ord('z')), '');
         isLower := irBin('and', lo, hi, '');
-        dec := irBin('sub', c, i8c(32), '');
+        dec := irBin('sub', c, irConstInt(c.t, 32), '');
         exit(irSelect(isLower, dec, c, 'upcase'));
       end;
     bkPos:
@@ -5075,7 +5106,10 @@ begin
     nkRealLit: visitExprKind := irConstDouble(e^.realValue);
     nkStringLit:
       { a character; longer strings are handled by address }
-      visitExprKind := i8c(ord(e^.strValue^.chars^[0]));
+      if e^.strWide <> 0 then
+        visitExprKind := irConstInt(irI16, e^.strWide)
+      else
+        visitExprKind := i8c(ord(e^.strValue^.chars^[0]));
     nkNameRef: visitExprKind := visitNameRef(e);
     nkParen: visitExprKind := visitExpr(e^.inner);
     nkUnary: visitExprKind := visitUnary(e);

@@ -1,0 +1,11 @@
+; widechar beyond what Free Pascal 3.2.2 can show without a unicode string
+; manager: upcase of a widechar changes only 'a'..'z'; a subrange from a
+; char to a widechar ('a'..#$100) is of widechar, range-checked; the AST
+; and parse tree show a lone code above 255 as a widechar literal.
+; RUN: %pcc --mode=objfpc %S/Inputs/widechar/more.pas -o %t
+; RUN: not %t 2>&1 | FileCheck %s
+; CHECK: Q TRUE 0
+; CHECK-NEXT: 256 97 256
+; CHECK-NEXT: Runtime error: value out of range at {{.*}}more.pas:13:8
+; RUN: %pcc --mode=objfpc --emit-parse-tree -o - %S/Inputs/widechar/more.pas | FileCheck --check-prefix=TREE %s
+; TREE: WideCharLiteralExpr #256

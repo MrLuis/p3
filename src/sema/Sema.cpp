@@ -223,6 +223,9 @@ class Checker : public StmtVisitor<Checker>,
       PCharTy = PChar;
       // Free Pascal's names for the one-byte char (char is AnsiChar there).
       Ty("ansichar", Ctx.getCharType());
+      // A 16-bit character code (FPC's widechar; unicodechar is the same).
+      Ty("widechar", Ctx.getWideCharType());
+      Ty("unicodechar", Ctx.getWideCharType());
       Ty("pansichar", PChar);
       Ty("ansistring", Ctx.getAnsiStringType());
       Ty("shortstring", Ctx.getShortStringType());
@@ -1152,6 +1155,8 @@ class Checker : public StmtVisitor<Checker>,
   /// Does constant V of type VTy lie within T's values? (qword values are
   /// unsigned.)
   static bool constantInRange(int64_t V, Type *VTy, Type *T) {
+    if (VTy->getBase()->isWideChar() && T->getBase()->isChar())
+      V = wideToChar(V);
     bool Unsigned = isQWordValue(VTy);
     if (isQWord(T))
       return Unsigned || V >= 0;
@@ -1174,7 +1179,10 @@ class Checker : public StmtVisitor<Checker>,
     case Expr::EK_RealLiteral:
       return Constant{T, ConstValue::real(llvm::cast<RealLiteralExpr>(E)->getValue())};
     case Expr::EK_StringLiteral: {
-      llvm::StringRef S = llvm::cast<StringLiteralExpr>(E)->getValue();
+      auto *SL = llvm::cast<StringLiteralExpr>(E);
+      if (SL->isWideCharLiteral())
+        return Constant{T, ConstValue::ordinal(SL->getWideCode())};
+      llvm::StringRef S = SL->getValue();
       if (S.size() == 1)
         return Constant{T, ConstValue::ordinal(static_cast<uint8_t>(S[0]))};
       return Constant{T, ConstValue::string(S)};
@@ -1208,7 +1216,7 @@ class Checker : public StmtVisitor<Checker>,
       case UnaryOp::Not: // boolean not, or bitwise in the operand's type
         if (T->getBase()->isBoolean())
           return Constant{T, ConstValue::ordinal(!V->Value.Int)};
-        return Constant{T, ConstValue::ordinal(castOrdinalValue(~V->Value.Int, T))};
+        return Constant{T, ConstValue::ordinal(castOrdinalValue(~V->Value.Int, T, T))};
       }
       return std::nullopt;
     }
@@ -1218,6 +1226,8 @@ class Checker : public StmtVisitor<Checker>,
       if (!L || !R || L->Value.K == ConstValue::String ||
           R->Value.K == ConstValue::String)
         return std::nullopt;
+      if (!T->isOrdinal() && !T->isReal())
+        return std::nullopt; // 'a' + 'b': a string (not folded)
       bool IsReal = L->Value.K == ConstValue::Real || R->Value.K == ConstValue::Real;
       int64_t A = L->Value.Int, C = R->Value.Int;
       double X = asReal(*L), Y = asReal(*R);
@@ -1280,7 +1290,8 @@ class Checker : public StmtVisitor<Checker>,
         auto V = fold(Call->getArgs()[0]);
         if (!V || V->Value.K != ConstValue::Ordinal || !T->isOrdinal())
           return std::nullopt;
-        return Constant{T, ConstValue::ordinal(castOrdinalValue(V->Value.Int, T))};
+        return Constant{T, ConstValue::ordinal(
+                               castOrdinalValue(V->Value.Int, V->Ty, T))};
       }
       auto *BD = llvm::dyn_cast_or_null<BuiltinDecl>(Call->getDecl());
       if (!BD || Call->getArgs().size() != 1)
@@ -1378,9 +1389,15 @@ class Checker : public StmtVisitor<Checker>,
     return C;
   }
 
-  /// The value of a typecast T(V): integer types wrap to their width
-  /// (byte(300) = 44); other ordinal types keep the value.
-  static int64_t castOrdinalValue(int64_t V, Type *T) {
+  /// The value of a typecast T(V) of a value of type From: integer types
+  /// wrap to their width (byte(300) = 44), and widechar to 16 bits; a
+  /// widechar above 255 is '?' as a char (as Free Pascal converts it);
+  /// other ordinal types keep the value.
+  static int64_t castOrdinalValue(int64_t V, Type *From, Type *T) {
+    if (T->getBase()->isWideChar())
+      return V & 0xFFFF;
+    if (T->getBase()->isChar() && From->getBase()->isWideChar())
+      return wideToChar(V);
     auto *I = llvm::dyn_cast<IntegerType>(T->getBase());
     if (!I || I->getBits() == 64)
       return V;
@@ -1391,9 +1408,30 @@ class Checker : public StmtVisitor<Checker>,
     return static_cast<int64_t>(U);
   }
 
+  /// A widechar's code as a char: '?' above 255 (Free Pascal's
+  /// conversion).
+  static int64_t wideToChar(int64_t V) { return V > 255 ? '?' : V; }
+
+  /// A widechar constant above 255 that becomes a char or a string: a
+  /// warning, as Free Pascal gives ('?' in its place).
+  void checkWideToChar(Type *Target, Expr *E) {
+    if (!E->getType() || !E->getType()->getBase()->isWideChar() ||
+        !(Target->getBase()->isChar() ||
+          (Target->isStringish() && !Target->isCharLike())))
+      return;
+    auto C = fold(E);
+    if (C && C->Value.K == ConstValue::Ordinal && C->Value.Int > 255)
+      Diags.warning(E->getBeginLoc(),
+                    "the widechar #" + std::to_string(C->Value.Int) +
+                        " becomes '?' in " + quoted(Target),
+                    {E->getRange()});
+  }
+
   static std::string formatValue(Type *T, int64_t V) {
     Type *B = T->getBase();
-    if (B->isChar())
+    if (B->isWideChar() && (V > 127 || !llvm::isPrint(static_cast<char>(V))))
+      return "#" + std::to_string(V);
+    if (B->isChar() || B->isWideChar())
       return llvm::isPrint(static_cast<char>(V))
                  ? "'" + std::string(1, static_cast<char>(V)) + "'"
                  : "chr(" + std::to_string(V) + ")";
@@ -1561,6 +1599,8 @@ class Checker : public StmtVisitor<Checker>,
       if (Host->isInteger() &&
           llvm::cast<IntegerType>(Hi->Ty->getBase())->getBits() >
               llvm::cast<IntegerType>(Host)->getBits())
+        Host = Hi->Ty->getBase();
+      if (Hi->Ty->getBase()->isWideChar()) // 'a'..#$100: of widechar
         Host = Hi->Ty->getBase();
       return Ctx.create<SubrangeType>(Host, Lo->Value.Int, Hi->Value.Int);
     }
@@ -3739,7 +3779,11 @@ class Checker : public StmtVisitor<Checker>,
         return false;
       }
     }
+    checkWideToChar(T, Init);
     Folded = C->Value;
+    if (C->Value.K == ConstValue::Ordinal && C->Ty->getBase()->isWideChar() &&
+        T->getBase()->isChar())
+      Folded.Int = wideToChar(Folded.Int);
     return true;
   }
 
@@ -4580,7 +4624,8 @@ class Checker : public StmtVisitor<Checker>,
       Type *T = check(El.Lo);
       if (T->isError())
         continue;
-      if (!(T->isIntegerLike() || T->isReal() || T->getBase()->isChar() ||
+      if (T->getBase()->isWideChar() ||
+          !(T->isIntegerLike() || T->isReal() || T->getBase()->isChar() ||
             T->getBase()->isBoolean() || T->isStringish() || T->isPointer() ||
             T->isNil() || T->isClass() || T->isClassRef()))
         Diags.error(El.Lo->getBeginLoc(),
@@ -5446,6 +5491,7 @@ class Checker : public StmtVisitor<Checker>,
           checkNotForControlVar(Arg);
         continue;
       }
+      checkWideToChar(PT, Arg);
       if (!isAssignable(PT, AT) && !isPCharLiteral(PT, Arg) &&
           !convertImplicitly(Arg, PT))
         Diags.error(Arg->getBeginLoc(),
@@ -5474,7 +5520,7 @@ class Checker : public StmtVisitor<Checker>,
   //===--------------------------------------------------------------------===//
 
   static bool isWritable(Type *T) {
-    return T->isIntegerLike() || T->isReal() || T->getBase()->isChar() ||
+    return T->isIntegerLike() || T->isReal() || T->isCharLike() ||
            T->getBase()->isBoolean() || T->isStringType() || T->isShortString() ||
            T->isAnsiString();
   }
@@ -6001,6 +6047,8 @@ class Checker : public StmtVisitor<Checker>,
     case BuiltinKind::UpCase:
       if (!Arity(1))
         return errorType();
+      if (ArgTypes[0]->getBase()->isWideChar())
+        return Ctx.getWideCharType(); // only 'a'..'z' change
       return ArgTypes[0]->getBase()->isChar() ? Ctx.getCharType()
                                               : Bad(Args[0], "a char");
     case BuiltinKind::Pos:
@@ -6933,6 +6981,7 @@ public:
                   {Target->getRange()});
       return;
     }
+    checkWideToChar(TargetTy, S->getValue());
     if (!isAssignable(TargetTy, ValueTy) &&
         !convertImplicitly(S->getValue(), TargetTy))
       Diags.error(S->getAssignLoc(),
@@ -7402,6 +7451,8 @@ public:
   Type *visitRealLiteralExpr(RealLiteralExpr *) { return Ctx.getRealType(); }
 
   Type *visitStringLiteralExpr(StringLiteralExpr *E) {
+    if (E->isWideCharLiteral())
+      return Ctx.getWideCharType();
     return E->isCharLiteral() ? Ctx.getCharType()
                               : Ctx.getStringLiteralType(E->getValue().size());
   }
@@ -7724,8 +7775,11 @@ public:
       }
       if (L->isNumeric() && R->isNumeric())
         return Ctx.getBooleanType();
-      if (L->isOrdinal() && R->isOrdinal() && areCompatible(L, R))
+      if (L->isOrdinal() && R->isOrdinal() && areCompatible(L, R)) {
+        if (L->getBase() != R->getBase() && L->isCharLike()) // char, widechar
+          E->setOperandType(Ctx.getWideCharType());
         return Ctx.getBooleanType();
+      }
       if (L->isStringType() && R->isStringType()) {
         if (areCompatible(L, R))
           return Ctx.getBooleanType();

@@ -885,6 +885,11 @@ public:
     end(E);
   }
   void visitStringLiteralExpr(StringLiteralExpr *E) {
+    if (E->isWideCharLiteral()) {
+      line("WideCharLiteralExpr #") << E->getWideCode();
+      end(E);
+      return;
+    }
     line(E->isCharLiteral() ? "CharLiteralExpr " : "StringLiteralExpr ");
     quoted(E->getValue());
     end(E);
