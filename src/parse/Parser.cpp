@@ -88,6 +88,8 @@ bool Parser::inlineOn() const {
 SourceLocation Parser::consumeToken() {
   if (Recording)
     Recording->push_back(Tok);
+  if (StmtTokens)
+    StmtTokens->push_back(Tok);
   SourceLocation L = Tok.getLocation();
   PrevTokEnd = Tok.getEndLocation();
   if (HasPeek) {
@@ -2707,7 +2709,7 @@ Stmt *Parser::parseStatement() {
 Stmt *Parser::parseStatementImpl() {
   switch (Tok.getKind()) {
   case tok::identifier:
-    return parseAssignmentOrCall();
+    return recordingDesignator([&] { return parseAssignmentOrCall(); });
   case tok::kw_begin:
     return parseCompoundStmt();
   case tok::kw_if:
@@ -2731,23 +2733,26 @@ Stmt *Parser::parseStatementImpl() {
       Diags.error(Tok.getLocation(), "expected statement");
       break;
     }
-    SourceLocation Start = Tok.getLocation();
-    Expr *Target = parseFactor();
-    if (!Target) {
-      skipUntil({tok::semi, tok::kw_end});
-      return Ctx.create<EmptyStmt>(Start);
-    }
-    return finishDesignatorStmt(Start, Target);
+    return recordingDesignator([&]() -> Stmt * {
+      SourceLocation Start = Tok.getLocation();
+      Expr *Target = parseFactor();
+      if (!Target) {
+        skipUntil({tok::semi, tok::kw_end});
+        return Ctx.create<EmptyStmt>(Start);
+      }
+      return finishDesignatorStmt(Start, Target);
+    });
   }
-  case tok::kw_inherited: {
-    SourceLocation Start = Tok.getLocation();
-    Expr *Target = parseInherited();
-    if (!Target) {
-      skipUntil({tok::semi, tok::kw_end});
-      return Ctx.create<EmptyStmt>(Start);
-    }
-    return finishDesignatorStmt(Start, Target);
-  }
+  case tok::kw_inherited:
+    return recordingDesignator([&]() -> Stmt * {
+      SourceLocation Start = Tok.getLocation();
+      Expr *Target = parseInherited();
+      if (!Target) {
+        skipUntil({tok::semi, tok::kw_end});
+        return Ctx.create<EmptyStmt>(Start);
+      }
+      return finishDesignatorStmt(Start, Target);
+    });
 
   // The empty statement: nothing before a separator or terminator.
   case tok::semi:
@@ -2831,16 +2836,8 @@ Stmt *Parser::parseAssignmentOrCall() {
     Diags.error(Tok.getLocation(), "expected ':=' in assignment, found '='",
                 {Tok.getRange()});
 
-  if (Tok.isOneOf(tok::colon_equal, tok::equal)) {
-    SourceLocation AssignLoc = consumeToken();
-    Expr *Value = parseExpression();
-    if (!Value) {
-      skipUntil({tok::semi, tok::kw_end});
-      return Ctx.create<EmptyStmt>(Start);
-    }
-    return Ctx.create<AssignStmt>(SourceRange(Start, PrevTokEnd), Target,
-                                  AssignLoc, Value);
-  }
+  if (isAssignOp())
+    return parseAssignment(Start, Target);
 
   llvm::SmallVector<Expr *, 4> Args;
   bool HasParens = Tok.is(tok::l_paren);
@@ -2850,8 +2847,9 @@ Stmt *Parser::parseAssignmentOrCall() {
   // Turbo/FPC: a typecast assigned to, longint(x) := 1, or with selectors,
   // TFoo(x).Show; f(1)^.n := 2; f(x)(y);
   if (HasParens && LangOpts.Mode != LangMode::ISO &&
-      Tok.isOneOf(tok::l_square, tok::period, tok::caret, tok::colon_equal,
-                  tok::l_paren)) {
+      (Tok.isOneOf(tok::l_square, tok::period, tok::caret, tok::colon_equal,
+                   tok::l_paren) ||
+       (isAssignOp() && Tok.isNot(tok::equal)))) {
     Expr *Call = Ctx.create<CallExpr>(SourceRange(Start, PrevTokEnd), Name,
                                       Ctx.copyArray<Expr *>(Args));
     Target = parseSelectors(Call);
@@ -2866,6 +2864,89 @@ Stmt *Parser::parseAssignmentOrCall() {
                                   Ctx.copyArray<Expr *>(Args), HasParens);
 }
 
+template <typename ParseFn> Stmt *Parser::recordingDesignator(ParseFn Parse) {
+  llvm::SmallVector<Token, 16> Toks;
+  auto *Saved = StmtTokens;
+  StmtTokens = &Toks;
+  Stmt *S = Parse();
+  StmtTokens = Saved;
+  return S;
+}
+
+bool Parser::isAssignOp() const {
+  return Tok.isOneOf(tok::colon_equal, tok::equal, tok::plus_equal,
+                     tok::minus_equal, tok::star_equal, tok::slash_equal);
+}
+
+Stmt *Parser::parseAssignment(SourceLocation Start, Expr *Target) {
+  // The designator's tokens (recorded up to the operator).
+  llvm::SmallVector<Token, 16> TargetToks;
+  if (StmtTokens)
+    TargetToks.assign(StmtTokens->begin(), StmtTokens->end());
+  StmtTokens = nullptr; // the rest is not needed
+  tok::TokenKind K = Tok.getKind();
+  bool Compound = K != tok::colon_equal && K != tok::equal;
+  SourceLocation AssignLoc = consumeToken();
+  Expr *Value = parseExpression();
+  if (!Value) {
+    skipUntil({tok::semi, tok::kw_end});
+    return Ctx.create<EmptyStmt>(Start);
+  }
+  if (Compound) {
+    // x += e is x := x + (e), x read again (as in Free Pascal, whose copy
+    // of x evaluates its indexes and calls again).
+    Expr *Copy = reparseDesignator(TargetToks);
+    if (!Copy)
+      return Ctx.create<EmptyStmt>(Start);
+    BinaryOp Op = K == tok::plus_equal    ? BinaryOp::Add
+                  : K == tok::minus_equal ? BinaryOp::Sub
+                  : K == tok::star_equal  ? BinaryOp::Mul
+                                          : BinaryOp::RealDiv;
+    Value = Ctx.create<BinaryExpr>(
+        SourceRange(Copy->getBeginLoc(), Value->getRange().getEnd()), Op,
+        AssignLoc, Copy, Value);
+  }
+  auto *S = Ctx.create<AssignStmt>(SourceRange(Start, PrevTokEnd), Target,
+                                   AssignLoc, Value);
+  S->setCompound(Compound);
+  return S;
+}
+
+Expr *Parser::reparseDesignator(llvm::ArrayRef<Token> Toks) {
+  GenericTokens G;
+  G.Tokens = Toks;
+  G.LongStrings = longStrings();
+  G.AdvancedRecords = advancedRecords();
+  G.CorbaInterfaces = corbaInterfaces();
+  G.InlineOn = inlineOn();
+  G.TypeHelpers = typeHelpers();
+  G.ScopedEnums = scopedEnums();
+  G.PackRecords = packRecords();
+  G.ResultSwitch = resultSwitch();
+  G.OutSwitch = outSwitch();
+  G.DefaultParamsSwitch = defaultParamsSwitch();
+  Token SavedTok = Tok, SavedPeek = PeekTok;
+  bool SavedHasPeek = HasPeek;
+  SourceLocation SavedPrev = PrevTokEnd;
+  const GenericTokens *SavedReplay = Replay;
+  size_t SavedPos = ReplayPos;
+  auto *SavedRecording = Recording;
+  Recording = nullptr; // recorded already
+  Replay = &G;
+  ReplayPos = 0;
+  HasPeek = false;
+  nextToken(Tok);
+  Expr *E = parseFactor();
+  Tok = SavedTok;
+  PeekTok = SavedPeek;
+  HasPeek = SavedHasPeek;
+  PrevTokEnd = SavedPrev;
+  Replay = SavedReplay;
+  ReplayPos = SavedPos;
+  Recording = SavedRecording;
+  return E;
+}
+
 // The rest of a statement that starts with a designator with selectors:
 // an assignment, or (Turbo/FPC) a call through a procedural value or a
 // method call: r.p(x); a[i]; obj.Show; inherited Create(x);
@@ -2874,16 +2955,8 @@ Stmt *Parser::finishDesignatorStmt(SourceLocation Start, Expr *Target) {
     Diags.error(Tok.getLocation(), "expected ':=' in assignment, found '='",
                 {Tok.getRange()});
 
-  if (Tok.isOneOf(tok::colon_equal, tok::equal)) {
-    SourceLocation AssignLoc = consumeToken();
-    Expr *Value = parseExpression();
-    if (!Value) {
-      skipUntil({tok::semi, tok::kw_end});
-      return Ctx.create<EmptyStmt>(Start);
-    }
-    return Ctx.create<AssignStmt>(SourceRange(Start, PrevTokEnd), Target,
-                                  AssignLoc, Value);
-  }
+  if (isAssignOp())
+    return parseAssignment(Start, Target);
 
   if (LangOpts.Mode != LangMode::ISO &&
       Tok.isOneOf(tok::semi, tok::kw_end, tok::kw_else, tok::kw_until, tok::eof)) {

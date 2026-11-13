@@ -61,6 +61,10 @@ PUNCT(l_square,      "[")   // also "(."
 PUNCT(r_square,      "]")   // also ".)"
 PUNCT(caret,         "^")   // also "@" in ISO mode
 PUNCT(at,            "@")   // address-of, --mode=tp only
+PUNCT(plus_equal,    "+=")  // {$coperators on} (Free Pascal)
+PUNCT(minus_equal,   "-=")
+PUNCT(star_equal,    "*=")
+PUNCT(slash_equal,   "/=")
 
 //===--- ISO 7185 reserved words (35) (PLAN §4.2) -------------------------===//
 KEYWORD(kw_and,       "and",       KEYISO)

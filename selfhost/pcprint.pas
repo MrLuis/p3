@@ -1111,7 +1111,10 @@ begin
       end;
     nkAssign:
       begin
-        line('AssignStmt');
+        if s^.assignCompound then
+          line('AssignStmt compound')
+        else
+          line('AssignStmt');
         loc(s^.b);
         indent := indent + 2;
         visitExpr(s^.target);

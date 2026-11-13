@@ -577,7 +577,14 @@ public:
   Expr *getTarget() const { return Target; }
   Expr *getValue() const { return Value; }
   SourceLocation getAssignLoc() const { return AssignLoc; }
+  /// Written x += e (-=, *=, /=; Free Pascal's C operators): Value is the
+  /// BinaryExpr x + (e), x parsed again.
+  bool isCompound() const { return Compound; }
+  void setCompound(bool C) { Compound = C; }
   static bool classof(const Stmt *S) { return S->getKind() == SK_Assign; }
+
+private:
+  bool Compound = false;
 };
 
 /// if Cond then Then [else Else]

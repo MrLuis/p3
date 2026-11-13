@@ -65,6 +65,10 @@ class Checker : public StmtVisitor<Checker>,
   /// The target of the assignment being checked: a property there is
   /// written, not read.
   Expr *CurAssignTarget = nullptr;
+  /// f += e in function f: the f read again, which is f's result too (as in
+  /// Free Pascal), not a call.
+  NameRefExpr *CompoundResultRef = nullptr;
+  VarDecl *CompoundResultVar = nullptr;
   /// The procedural type an `@routine` is assigned to (picks an overload).
   RoutineType *AddrOfTarget = nullptr;
   /// The base of the IndexExpr being checked: an array property may appear
@@ -6961,6 +6965,20 @@ public:
       }
     }
 
+    // x += e (Free Pascal's C operators): Value is x + (e), x read again.
+    auto *Sum = S->isCompound() ? llvm::cast<BinaryExpr>(S->getValue())
+                                : nullptr;
+    if (Sum && !TargetTy->isError() && assignedProperty(Target)) {
+      Diags.error(S->getAssignLoc(),
+                  "'" + llvm::Twine(getOpSpelling(Sum->getOp())) +
+                      "=' cannot assign to a property; use ':='",
+                  {Target->getRange()});
+      TargetTy = errorType();
+    }
+    if (Sum && TargetTy->isError()) { // reported once: x is not read again
+      check(Sum->getRHS());
+      return;
+    }
     if (TargetTy->isUntyped()) {
       Diags.error(Target->getBeginLoc(),
                   "cannot assign to untyped parameter '" +
@@ -6968,10 +6986,19 @@ public:
                       "'; assign to a typecast such as longint(" +
                       llvm::cast<NameRefExpr>(Target)->getName().Spelling + ")",
                   {Target->getRange()});
-      check(S->getValue());
+      check(Sum ? Sum->getRHS() : S->getValue());
       return;
     }
+    if (Sum)
+      if (auto *N = llvm::dyn_cast<NameRefExpr>(Target))
+        if (auto *V = llvm::dyn_cast_or_null<VarDecl>(N->getDecl());
+            V && V->getVarKind() == VarDecl::Result &&
+            llvm::isa_and_nonnull<RoutineDecl>(Cur->lookup(N->getName().Name))) {
+          CompoundResultRef = llvm::dyn_cast<NameRefExpr>(Sum->getLHS());
+          CompoundResultVar = V;
+        }
     Type *ValueTy = checkValueFor(TargetTy, S->getValue());
+    CompoundResultRef = nullptr;
     if (TargetTy->isError() || ValueTy->isError())
       return;
     if (!checkModifiable(Target))
@@ -7458,6 +7485,10 @@ public:
   }
 
   Type *visitNameRefExpr(NameRefExpr *E) {
+    if (E == CompoundResultRef) {
+      E->setDecl(CompoundResultVar);
+      return CompoundResultVar->getType();
+    }
     const Identifier &Id = E->getName();
     WithContext *W = nullptr;
     Decl *D = Cur->lookup(Id.Name, &W);

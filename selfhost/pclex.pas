@@ -79,6 +79,9 @@ type
       tokens have the value's locations }
     macrosOn: boolean;
     inlineOn: boolean; { $inline on (the default in objfpc mode) }
+    { $coperators on: += -= *= /= are tokens (the default except in ISO
+      mode, as in Free Pascal, where it is on in every mode) }
+    cOperators: boolean;
     { mode switches that pcc lets a program turn on or off in any mode
       ($modeswitch result|out|defaultparameters); on in objfpc mode }
     resultSwitch, outSwitch, defaultParamsSwitch: boolean;
@@ -364,6 +367,7 @@ begin
   lx.longStrings := false;
   lx.macrosOn := false;
   lx.inlineOn := mode = lmObjFPC;
+  lx.cOperators := mode <> lmISO;
   lx.resultSwitch := mode = lmObjFPC;
   lx.outSwitch := mode = lmObjFPC;
   lx.defaultParamsSwitch := mode = lmObjFPC;
@@ -1643,6 +1647,20 @@ begin
       diagError(locOf(lx, start), 'expected {$inline on} or {$inline off}');
     exit;
   end;
+  { $coperators on / off: whether += -= *= /= are assignments (default: on
+    except in ISO mode; as in Free Pascal 3.2, $pop does not restore it) }
+  if word = 'coperators' then
+  begin
+    arg := lowerStr(copyChars(lx, b, e));
+    if (arg = 'on') or (arg = '+') then
+      lx.cOperators := true
+    else if (arg = 'off') or (arg = '-') then
+      lx.cOperators := false
+    else
+      diagError(locOf(lx, start),
+                'expected {$coperators on} or {$coperators off}');
+    exit;
+  end;
   { $macro on / off: whether macros ($define NAME := value) are defined and
     expanded }
   if word = 'macro' then
@@ -2461,6 +2479,20 @@ begin
         end;
     else
       ;
+    end;
+
+    { $coperators on: += -= *= /= (Free Pascal's C-style assignments) }
+    if lx.cOperators and (at(lx, lx.cur) = '=') and
+       (k in [tkPlus, tkMinus, tkStar, tkSlash]) then
+    begin
+      lx.cur := lx.cur + 1;
+      case k of
+        tkPlus: k := tkPlusEqual;
+        tkMinus: k := tkMinusEqual;
+        tkStar: k := tkStarEqual;
+      else
+        k := tkSlashEqual;
+      end;
     end;
 
     if k <> tkUnknown then

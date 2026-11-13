@@ -22,6 +22,7 @@ Lexer::Lexer(const SourceManager &SM, FileID FID, DiagnosticsEngine &Diags,
              StringPool &Strings, const LangOptions &LangOpts)
     : Diags(Diags), Strings(Strings), LangOpts(LangOpts),
       InlineOn(LangOpts.Mode == LangMode::ObjFPC),
+      COperators(LangOpts.Mode != LangMode::ISO),
       ResultSwitch(LangOpts.Mode == LangMode::ObjFPC),
       OutSwitch(LangOpts.Mode == LangMode::ObjFPC),
       DefaultParamsSwitch(LangOpts.Mode == LangMode::ObjFPC) {
@@ -331,6 +332,19 @@ void Lexer::handleDirective(const char *Start, llvm::StringRef Text) {
       InlineOn = false;
     else
       Diags.error(locOf(Start), "expected {$inline on} or {$inline off}");
+    return;
+  }
+
+  // {$coperators on|off}: whether += -= *= /= are assignments (default: on
+  // except in ISO mode; as in Free Pascal 3.2, {$pop} does not restore it).
+  if (Word.equals_insensitive("coperators")) {
+    if (Arg.equals_insensitive("on") || Arg == "+")
+      COperators = true;
+    else if (Arg.equals_insensitive("off") || Arg == "-")
+      COperators = false;
+    else
+      Diags.error(locOf(Start),
+                  "expected {$coperators on} or {$coperators off}");
     return;
   }
 
@@ -1263,6 +1277,17 @@ void Lexer::lex(Token &T) {
       break;
     default:
       break;
+    }
+
+    // {$coperators on}: += -= *= /= (Free Pascal's C-style assignments)
+    if (COperators && *Cur == '=' &&
+        (K == tok::plus || K == tok::minus || K == tok::star ||
+         K == tok::slash)) {
+      ++Cur;
+      K = K == tok::plus    ? tok::plus_equal
+          : K == tok::minus ? tok::minus_equal
+          : K == tok::star  ? tok::star_equal
+                            : tok::slash_equal;
     }
 
     if (K != tok::unknown) {

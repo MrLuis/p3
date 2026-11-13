@@ -70,6 +70,10 @@ var
     lexed }
   recording: PPtrList;
   replay: pointer; { PGenericTokens }
+  { the statement starting with a designator being parsed: its tokens so
+    far (of PToken; for += -= *= /=, which read the designator again), or
+    nil }
+  stmtTokens: PPtrList;
   replayPos: longint;
   { parsing a generic routine: type parameters may follow its name
     (genericTypeParams receives them) }
@@ -131,6 +135,7 @@ begin
   recordBodySkipped := false;
   recording := nil;
   replay := nil;
+  stmtTokens := nil;
   parsingGeneric := false;
   listInit(pendingUses);
   unitName := nil;
@@ -152,6 +157,12 @@ begin
     p := PToken(arenaAlloc(sizeof(TToken)));
     p^ := tok;
     listAdd(recording^, p);
+  end;
+  if stmtTokens <> nil then
+  begin
+    p := PToken(arenaAlloc(sizeof(TToken)));
+    p^ := tok;
+    listAdd(stmtTokens^, p);
   end;
   consumeToken := tok.loc;
   prevTokEnd := tokenEnd(tok);
@@ -681,7 +692,7 @@ var
   savedHasPeek, savedSkipped, savedGeneric: boolean;
   savedPrev: TLoc;
   savedNesting, savedPos: longint;
-  savedRec: PPtrList;
+  savedRec, savedStmtToks: PPtrList;
   savedReplay: pointer;
   savedTypeParams, savedUses: TPtrList;
   savedUnit: PName;
@@ -700,6 +711,7 @@ begin
   savedPos := replayPos;
   savedRec := recording;
   savedReplay := replay;
+  savedStmtToks := stmtTokens;
   savedTypeParams := genericTypeParams;
   savedUses := pendingUses;
   savedUnit := unitName;
@@ -717,6 +729,7 @@ begin
   replayPos := savedPos;
   recording := savedRec;
   replay := savedReplay;
+  stmtTokens := savedStmtToks;
   genericTypeParams := savedTypeParams;
   pendingUses := savedUses;
   unitName := savedUnit;
@@ -1916,7 +1929,7 @@ var
   savedPrev: TLoc;
   savedReplay: pointer;
   savedPos, savedNesting: longint;
-  savedRec: PPtrList;
+  savedRec, savedStmtToks: PPtrList;
   toks: PGenericTokens;
 begin
   savedLx := lx;
@@ -1928,6 +1941,7 @@ begin
   savedPos := replayPos;
   savedNesting := nesting;
   savedRec := recording;
+  savedStmtToks := stmtTokens;
   savedGeneric := parsingGeneric;
   toks := PGenericTokens(g^.genericTokens);
   lx.longStrings := toks^.longStrings;
@@ -1941,6 +1955,7 @@ begin
   lx.outSwitch := toks^.outSwitch;
   lx.defaultParamsSwitch := toks^.defaultParamsSwitch;
   recording := nil;
+  stmtTokens := nil;
   replay := toks;
   replayPos := 0;
   hasPeek := false;
@@ -1957,6 +1972,7 @@ begin
   replayPos := savedPos;
   nesting := savedNesting;
   recording := savedRec;
+  stmtTokens := savedStmtToks;
   parsingGeneric := savedGeneric;
 end;
 
@@ -3813,6 +3829,7 @@ begin
 end;
 
 function parseAssignmentOrCall: PNode; forward;
+function makeBinary(op: TBinaryOp; opLoc: TLoc; l, r: PNode): PNode; forward;
 function finishDesignatorStmt(start: TLoc; target: PNode): PNode; forward;
 function parseInherited: PNode; forward;
 function parseFactor: PNode; forward;
@@ -3830,9 +3847,48 @@ var
   gotoLoc, start, l: TLoc;
   lbl: TIdent;
   n, body: PNode;
+  savedStmtToks: PPtrList;
+  toks: TPtrList;
 begin
+  { a statement starting with a designator: its tokens are recorded }
+  savedStmtToks := stmtTokens;
+  listInit(toks);
+  stmtTokens := @toks;
+  n := nil;
   case tok.kind of
-    tkIdentifier: exit(parseAssignmentOrCall);
+    tkIdentifier: n := parseAssignmentOrCall;
+    tkLParen: { objfpc: (obj as TFoo).Show; }
+      if mode = lmObjFPC then
+      begin
+        start := tok.loc;
+        n := parseFactor;
+        if n = nil then
+        begin
+          skipUntil([tkSemi, tkKwEnd]);
+          n := emptyStmt(start);
+        end
+        else
+          n := finishDesignatorStmt(start, n);
+      end;
+    tkKwInherited:
+      begin
+        start := tok.loc;
+        n := parseInherited;
+        if n = nil then
+        begin
+          skipUntil([tkSemi, tkKwEnd]);
+          n := emptyStmt(start);
+        end
+        else
+          n := finishDesignatorStmt(start, n);
+      end;
+  else
+    ;
+  end;
+  stmtTokens := savedStmtToks;
+  if n <> nil then
+    exit(n);
+  case tok.kind of
     tkKwBegin: exit(parseCompoundStmt);
     tkKwIf: exit(parseIfStmt);
     tkKwWhile: exit(parseWhileStmt);
@@ -3842,31 +3898,8 @@ begin
     tkKwWith: exit(parseWithStmt);
     tkKwTry: exit(parseTryStmt);
     tkKwRaise: exit(parseRaiseStmt);
-    tkLParen: { objfpc: (obj as TFoo).Show; }
-      if mode <> lmObjFPC then
-        diagError(tok.loc, 'expected statement')
-      else
-      begin
-        start := tok.loc;
-        n := parseFactor;
-        if n = nil then
-        begin
-          skipUntil([tkSemi, tkKwEnd]);
-          exit(emptyStmt(start));
-        end;
-        exit(finishDesignatorStmt(start, n));
-      end;
-    tkKwInherited:
-      begin
-        start := tok.loc;
-        n := parseInherited;
-        if n = nil then
-        begin
-          skipUntil([tkSemi, tkKwEnd]);
-          exit(emptyStmt(start));
-        end;
-        exit(finishDesignatorStmt(start, n));
-      end;
+    tkLParen: { not objfpc }
+      diagError(tok.loc, 'expected statement');
     { the empty statement: nothing before a separator or terminator }
     tkSemi, tkKwEnd, tkKwElse, tkKwUntil, tkKwExcept, tkKwFinally, tkEof:
       exit(emptyStmt(tok.loc));
@@ -3937,6 +3970,96 @@ begin
   indirectCall := n;
 end;
 
+function isAssignOp: boolean;
+begin
+  isAssignOp := tok.kind in [tkColonEqual, tkEqual, tkPlusEqual, tkMinusEqual,
+                             tkStarEqual, tkSlashEqual];
+end;
+
+{ The designator of toks (of PToken) parsed again (as a factor). }
+function reparseDesignator(const toks: TPtrList): PNode;
+var
+  g: TGenericTokens;
+  savedTok, savedPeek: TToken;
+  savedHasPeek: boolean;
+  savedPrev: TLoc;
+  savedReplay: pointer;
+  savedPos: longint;
+  savedRec: PPtrList;
+begin
+  fillchar(g, sizeof(g), 0);
+  g.toks := toks;
+  savedTok := tok;
+  savedPeek := peekTok;
+  savedHasPeek := hasPeek;
+  savedPrev := prevTokEnd;
+  savedReplay := replay;
+  savedPos := replayPos;
+  savedRec := recording;
+  recording := nil; { recorded already }
+  replay := @g;
+  replayPos := 0;
+  hasPeek := false;
+  nextToken(tok);
+  reparseDesignator := parseFactor;
+  tok := savedTok;
+  peekTok := savedPeek;
+  hasPeek := savedHasPeek;
+  prevTokEnd := savedPrev;
+  replay := savedReplay;
+  replayPos := savedPos;
+  recording := savedRec;
+end;
+
+{ target := value, or target op= value (Free Pascal's C operators: target
+  := target op (value), target parsed again from stmtTokens) }
+function parseAssignment(start: TLoc; target: PNode): PNode;
+var
+  targetToks: TPtrList;
+  k: TTokenKind;
+  compound: boolean;
+  assignLoc: TLoc;
+  value, copy, n: PNode;
+  op: TBinaryOp;
+begin
+  { the designator's tokens (recorded up to the operator) }
+  listInit(targetToks);
+  if stmtTokens <> nil then
+    targetToks := stmtTokens^;
+  stmtTokens := nil; { the rest is not needed }
+  k := tok.kind;
+  compound := (k <> tkColonEqual) and (k <> tkEqual);
+  assignLoc := consumeToken;
+  value := parseExpression;
+  if value = nil then
+  begin
+    skipUntil([tkSemi, tkKwEnd]);
+    exit(emptyStmt(start));
+  end;
+  if compound then
+  begin
+    { x += e is x := x + (e), x read again (as in Free Pascal, whose copy
+      of x evaluates its indexes and calls again) }
+    copy := reparseDesignator(targetToks);
+    if copy = nil then
+      exit(emptyStmt(start));
+    case k of
+      tkPlusEqual: op := boAdd;
+      tkMinusEqual: op := boSub;
+      tkStarEqual: op := boMul;
+    else
+      op := boRealDiv;
+    end;
+    value := makeBinary(op, assignLoc, copy, value);
+  end;
+  n := newNode(nkAssign, start, prevTokEnd);
+  n^.target := target;
+  n^.value := value;
+  n^.assignLoc := assignLoc;
+  n^.assignCompound := compound;
+  parseAssignment := n;
+end;
+
 // assignment = designator ":=" expression .
 // procCall   = ident [ "(" actualParam { "," actualParam } ")" ] .
 function parseAssignmentOrCall: PNode;
@@ -3991,21 +4114,8 @@ begin
     diagErrorR(tok.loc, 'expected '':='' in assignment, found ''=''',
                tokenRange(tok));
 
-  if tok.kind in [tkColonEqual, tkEqual] then
-  begin
-    assignLoc := consumeToken;
-    value := parseExpression;
-    if value = nil then
-    begin
-      skipUntil([tkSemi, tkKwEnd]);
-      exit(emptyStmt(start));
-    end;
-    n := newNode(nkAssign, start, prevTokEnd);
-    n^.target := target;
-    n^.value := value;
-    n^.assignLoc := assignLoc;
-    exit(n);
-  end;
+  if isAssignOp then
+    exit(parseAssignment(start, target));
 
   listInit(args);
   hasParens := tok.kind = tkLParen;
@@ -4015,7 +4125,8 @@ begin
   { Turbo/FPC: a typecast assigned to, longint(x) := 1, or with selectors,
     TFoo(x).Show; f(1)^.n := 2; }
   if hasParens and (mode <> lmISO) and
-     (tok.kind in [tkLSquare, tkPeriod, tkCaret, tkColonEqual, tkLParen]) then
+     (tok.kind in [tkLSquare, tkPeriod, tkCaret, tkColonEqual, tkLParen,
+                   tkPlusEqual, tkMinusEqual, tkStarEqual, tkSlashEqual]) then
   begin
     call := newNode(nkCall, start, prevTokEnd);
     call^.callee := name;
@@ -4049,21 +4160,8 @@ begin
     diagErrorR(tok.loc, 'expected '':='' in assignment, found ''=''',
                tokenRange(tok));
 
-  if tok.kind in [tkColonEqual, tkEqual] then
-  begin
-    assignLoc := consumeToken;
-    value := parseExpression;
-    if value = nil then
-    begin
-      skipUntil([tkSemi, tkKwEnd]);
-      exit(emptyStmt(start));
-    end;
-    n := newNode(nkAssign, start, prevTokEnd);
-    n^.target := target;
-    n^.value := value;
-    n^.assignLoc := assignLoc;
-    exit(n);
-  end;
+  if isAssignOp then
+    exit(parseAssignment(start, target));
 
   if (mode <> lmISO) and
      (tok.kind in [tkSemi, tkKwEnd, tkKwElse, tkKwUntil, tkEof]) then

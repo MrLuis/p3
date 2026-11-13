@@ -227,6 +227,17 @@ class Parser {
   Stmt *parseStatementImpl();
   Stmt *parseAssignmentOrCall();
   Stmt *finishDesignatorStmt(SourceLocation Start, Expr *Target);
+  /// The statement starting with a designator being parsed: its tokens so
+  /// far (for += -= *= /=, which read the designator again), or null.
+  llvm::SmallVectorImpl<Token> *StmtTokens = nullptr;
+  /// A designator statement, with StmtTokens recording its tokens.
+  template <typename ParseFn> Stmt *recordingDesignator(ParseFn Parse);
+  bool isAssignOp() const;
+  /// Target := Value, or Target op= Value (Free Pascal's C operators:
+  /// Target := Target op (Value), Target parsed again from StmtTokens).
+  Stmt *parseAssignment(SourceLocation Start, Expr *Target);
+  /// The designator of Toks parsed again (as a factor).
+  Expr *reparseDesignator(llvm::ArrayRef<Token> Toks);
   Expr *parseInherited();
   Stmt *parseIfStmt();
   Stmt *parseWhileStmt();

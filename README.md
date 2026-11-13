@@ -407,6 +407,15 @@ preceded the `{$push}`), the record alignment (`{$packrecords}`, `{$align}`,
 and `{$macro}` are not local, as in FPC. A `{$pop}` without a `{$push}` is
 an error.
 
+**C operators** (`+=`, `-=`, `*=`, `/=`), as in Free Pascal: `x += e` is
+`x := x + (e)` (likewise `-`, `*`, `/`), for any type the operator works
+on (numbers, strings, sets). As in FPC, `x` is read a second time, so a
+call in an index such as `a[f()] += 1` runs twice; inside function `f`,
+`f += e` adds to the result (it does not call `f`); a property cannot be
+the target. They are on by default in `--mode=tp` and `--mode=objfpc` (as
+in FPC, in every mode) and off in `--mode=iso`; `{$coperators on|off}`
+(also `+`/`-`) switches them, and like FPC, `{$pop}` does not restore it.
+
 **Record layout** (`{$packrecords N}`, as in Free Pascal; also `{$align N}`,
 `{$aN}`, `{$a+}`/`{$align on}` = 4, `{$a-}`/`{$align off}` = 1): the records
 declared after it place each field at a multiple of the smaller of its

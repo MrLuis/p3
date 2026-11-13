@@ -200,7 +200,10 @@ type
       nkAggregate: (aggElems: TPtrList);    { of PAggElement }
       { compound: stmts; repeat: stmts until untilCond }
       nkCompound, nkRepeat: (stmts: TPtrList; untilCond: PNode);
-      nkAssign: (target, value: PNode; assignLoc: TLoc);
+      { assignCompound: written x += e (-=, *=, /=; Free Pascal's C
+        operators): value is the binary x + (e), x parsed again }
+      nkAssign: (target, value: PNode; assignLoc: TLoc;
+                 assignCompound: boolean);
       { if: cond then thenStmt else elseStmt; while: cond do thenStmt }
       nkIf, nkWhile: (cond, thenStmt, elseStmt: PNode);
       nkFor: (forVar, forInit, forFinal, forBody: PNode; isDownto: boolean);

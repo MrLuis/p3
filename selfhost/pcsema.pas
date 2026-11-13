@@ -93,6 +93,10 @@ var
     in the current type section }
   curModule: pointer;
   curAssignTarget: PNode;
+  { f += e in function f: the f read again, which is f's result too (as in
+    Free Pascal), not a call }
+  compoundResultRef: PNode;
+  compoundResultVar: PDecl;
   tobjectType: PType;
   pendingClasses: TPtrList;
   pendingInterfaces: TPtrList; { interfaces declared forward (type decls) }
@@ -7876,6 +7880,8 @@ begin
   programLabelCount := 0;
   curModule := nil;
   curAssignTarget := nil;
+  compoundResultRef := nil;
+  compoundResultVar := nil;
   tobjectType := nil;
   exceptionType := nil;
   iunknownType := nil;

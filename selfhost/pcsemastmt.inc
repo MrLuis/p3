@@ -2767,9 +2767,9 @@ end;
 
 procedure visitAssign(s: PNode);
 var
-  target, savedTarget, root: PNode;
+  target, savedTarget, root, sum: PNode;
   targetTy, valueTy: PType;
-  p: PDecl;
+  p, d: PDecl;
 begin
   target := s^.target;
   if target^.kind = nkNameRef then
@@ -2807,6 +2807,23 @@ begin
       targetTy := errorType;
     end;
   end;
+  { x += e (Free Pascal's C operators): value is x + (e), x read again }
+  sum := nil;
+  if s^.assignCompound then
+    sum := s^.value;
+  if (sum <> nil) and not isError(targetTy) and
+     (assignedProperty(target) <> nil) then
+  begin
+    ms('''' + binaryOpSpelling(sum^.bop) +
+       '='' cannot assign to a property; use '':=''');
+    errR(s^.assignLoc, nodeRange(target));
+    targetTy := errorType;
+  end;
+  if (sum <> nil) and isError(targetTy) then { reported once: x is not read again }
+  begin
+    check(sum^.rhs);
+    exit;
+  end;
   if targetTy^.kind = tyUntyped then
   begin
     ms('cannot assign to untyped parameter ''');
@@ -2815,10 +2832,28 @@ begin
     maN(target^.ref.spelling);
     ma(')');
     errR(target^.b, nodeRange(target));
-    check(s^.value);
+    if sum <> nil then
+      check(sum^.rhs)
+    else
+      check(s^.value);
     exit;
   end;
+  if (sum <> nil) and (target^.kind = nkNameRef) then
+  begin
+    p := target^.refDecl;
+    if (p <> nil) and (p^.kind = dkVar) and (p^.varKind = vkResult) and
+       (sum^.lhs^.kind = nkNameRef) then
+    begin
+      d := lookup(target^.ref.name);
+      if (d <> nil) and (d^.kind = dkRoutine) then
+      begin
+        compoundResultRef := sum^.lhs;
+        compoundResultVar := p;
+      end;
+    end;
+  end;
   valueTy := checkValueFor(targetTy, s^.value);
+  compoundResultRef := nil;
   if isError(targetTy) or isError(valueTy) then
     exit;
   if not checkModifiable(target) then
@@ -3466,6 +3501,11 @@ var
   t: PType;
   noArgs: TPtrList;
 begin
+  if e = compoundResultRef then
+  begin
+    e^.refDecl := compoundResultVar;
+    exit(compoundResultVar^.varType);
+  end;
   visitNameRef := errorType;
   w := nil;
   d := scopeLookup(cur, e^.ref.name, w);

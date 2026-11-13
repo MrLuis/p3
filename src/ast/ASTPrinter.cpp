@@ -670,7 +670,7 @@ public:
     visitExpr(S->getCall());
   }
   void visitAssignStmt(AssignStmt *S) {
-    line("AssignStmt");
+    line(S->isCompound() ? "AssignStmt compound" : "AssignStmt");
     loc(S->getBeginLoc());
     IndentScope I(Indent);
     visitExpr(S->getTarget());

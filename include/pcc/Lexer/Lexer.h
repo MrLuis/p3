@@ -70,6 +70,9 @@ class Lexer {
   // value's locations.
   bool MacrosOn = false;
   bool InlineOn; ///< {$inline on} (the default in objfpc mode)
+  /// {$coperators on}: += -= *= /= are tokens (the default except in ISO
+  /// mode, as in Free Pascal, where it is on in every mode).
+  bool COperators;
   /// Mode switches that pcc lets a program turn on or off in any mode
   /// ({$modeswitch result|out|defaultparameters}); on in objfpc mode.
   bool ResultSwitch, OutSwitch, DefaultParamsSwitch;
