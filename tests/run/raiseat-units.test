@@ -1,0 +1,16 @@
+; raise ... at in a unit (--mode=objfpc): a helper raising at the address
+; its caller gives, handled in the unit and in the program (ExceptAddr),
+; and unhandled; compiled whole and separately.
+; RUN: rm -rf %t && mkdir -p %t && cp -r %S/Inputs/raiseat/. %t/
+; RUN: %pcc --mode=objfpc -I %t/lib %t/main.pas -o %t/whole
+; RUN: not %t/whole > %t/whole.out 2> %t/whole.err
+; RUN: FileCheck %s < %t/whole.out
+; RUN: FileCheck --check-prefix=ERR %s < %t/whole.err
+; RUN: %pcc --mode=objfpc -c %t/lib/errs.pas -o %t/lib/errs.o
+; RUN: %pcc --mode=objfpc -I %t/lib -fseparate-units %t/main.pas -o %t/separate
+; RUN: not %t/separate > %t/separate.out 2> %t/separate.err
+; RUN: FileCheck %s < %t/separate.out
+; RUN: FileCheck --check-prefix=ERR %s < %t/separate.err
+; CHECK:      in unit at 3
+; CHECK-NEXT: in program at 2
+; ERR: Runtime error: unhandled exception Exception at $0000000000000000: unhandled

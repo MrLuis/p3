@@ -8,14 +8,14 @@
 ; RUN: FileCheck --check-prefix=GLOBAL %s < %t.ll
 
 ; CHECK-LABEL: define internal void @pas.p(
-; CHECK:      %excframe = alloca { ptr, ptr, ptr, [64 x i64] }, align 8
+; CHECK:      %excframe = alloca { ptr, ptr, ptr, ptr, [64 x i64] }, align 8
 ; CHECK:      %frame = alloca %frame.p
 ; A routine with a try statement continues after an exception: its frame
 ; is pinned (its address stored, volatile), so that LLVM keeps its
 ; variables in memory across _setjmp.
 ; CHECK-NEXT: store volatile ptr %frame, ptr %pin, align 8
 ; CHECK:      call void @__pas_exc_push(ptr %excframe)
-; CHECK-NEXT: %[[BUF:[0-9]+]] = getelementptr inbounds { ptr, ptr, ptr, [64 x i64] }, ptr %excframe, i32 0, i32 3
+; CHECK-NEXT: %[[BUF:[0-9]+]] = getelementptr inbounds { ptr, ptr, ptr, ptr, [64 x i64] }, ptr %excframe, i32 0, i32 4
 ; CHECK-NEXT: %jmp = call i32 @_setjmp(ptr %[[BUF]])
 ; CHECK-NEXT: %[[CAUGHT:[0-9]+]] = icmp ne i32 %jmp, 0
 ; CHECK-NEXT: br i1 %[[CAUGHT]], label %try.except, label %try.body

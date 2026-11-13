@@ -77,6 +77,7 @@ BUILTIN_FUNC(High,       "high")
 BUILTIN_FUNC(Assigned,   "assigned")
 BUILTIN_FUNC(ParamCount, "paramcount")
 BUILTIN_FUNC(ParamStr,   "paramstr")
+BUILTIN_FUNC(ExceptAddr, "exceptaddr") // objfpc: the handled exception's address
 
 // Dynamic allocation (M9).
 BUILTIN_PROC(New,     "new")

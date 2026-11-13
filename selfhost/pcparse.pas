@@ -4875,18 +4875,36 @@ begin
   parseTryStmt := n;
 end;
 
-{ raiseStmt = "raise" [ expression ] .                        (objfpc) }
+{ raiseStmt = "raise" [ expression [ "at" expression [ "," expression ] ] ] .
+                                                              (objfpc)
+  (at, the exception's address and frame, is not a reserved word.) }
 function parseRaiseStmt: PNode;
 var
   raiseLoc: TLoc;
-  obj, n: PNode;
+  obj, addr, frame, n: PNode;
 begin
   raiseLoc := consumeToken;
   obj := nil;
+  addr := nil;
+  frame := nil;
   if not (tok.kind in [tkSemi, tkKwEnd, tkKwElse, tkKwUntil, tkKwExcept,
                        tkKwFinally, tkEof]) then
   begin
     obj := parseExpression;
+    if (obj <> nil) and isIdentifierNamed('at') then
+    begin
+      consumeToken;
+      addr := parseExpression;
+      if (addr <> nil) and (tok.kind = tkComma) then
+      begin
+        consumeToken;
+        frame := parseExpression;
+        if frame = nil then
+          addr := nil;
+      end;
+      if addr = nil then
+        obj := nil;
+    end;
     if obj = nil then
     begin
       skipUntil([tkSemi, tkKwEnd]);
@@ -4895,6 +4913,8 @@ begin
   end;
   n := newNode(nkRaise, raiseLoc, prevTokEnd);
   n^.raiseObj := obj;
+  n^.raiseAddr := addr;
+  n^.raiseFrame := frame;
   parseRaiseStmt := n;
 end;
 

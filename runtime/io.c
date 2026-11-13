@@ -880,7 +880,7 @@ void __pas_abstract_error(void) {
  * top frame, stores the exception in it and _longjmps there.
  */
 
-_Static_assert(offsetof(PasExcFrame, buf) == 3 * sizeof(void *),
+_Static_assert(offsetof(PasExcFrame, buf) == 4 * sizeof(void *),
                "the compiler addresses the jmp_buf at this offset");
 _Static_assert(sizeof(jmp_buf) <= sizeof(((PasExcFrame *)0)->buf),
                "PasExcFrame.buf is too small for this C library's jmp_buf");
@@ -910,14 +910,18 @@ void __pas_exc_push(PasExcFrame *f) {
 
 void __pas_exc_pop(PasExcFrame *f) { __pas_exc_top = f->prev; }
 
-/* "Runtime error: unhandled exception <class> at <where>[: <message>]" */
-static void unhandled(void *obj, const char *where) {
+/* "Runtime error: unhandled exception <class> at <where>[: <message>]";
+ * at $<address> (16 hexadecimal digits, as Free Pascal) for raise ... at. */
+static void unhandled(void *obj, const char *where, void *address) {
   const unsigned char *name = (*(const unsigned char *const *const *)obj)[1];
   char msg[700];
   int n = snprintf(msg, sizeof msg, "unhandled exception %.*s", name[0],
                    (const char *)name + 1);
   if (where && *where)
     n += snprintf(msg + n, sizeof msg - (size_t)n, " at %s", where);
+  else if (!where)
+    n += snprintf(msg + n, sizeof msg - (size_t)n, " at $%016llX",
+                  (unsigned long long)(uintptr_t)address);
   if (__pas_class_is(obj, __pas_exception_vmt)) {
     const unsigned char *text = (const unsigned char *)obj + sizeof(void *);
     snprintf(msg + n, sizeof msg - (size_t)n, ": %.*s", text[0],
@@ -926,7 +930,20 @@ static void unhandled(void *obj, const char *where) {
   __pas_runtime_error(msg);
 }
 
+static void raise_to_frame(void *obj, const char *where, void *address)
+    __attribute__((noreturn));
+
 void __pas_raise(void *obj, const char *where) {
+  raise_to_frame(obj, where, __builtin_return_address(0));
+}
+
+void __pas_raise_at(void *obj, const char *where, void *address) {
+  if (!obj)
+    raise_to_frame(obj, where, address); /* reported at the raise */
+  raise_to_frame(obj, NULL, address);
+}
+
+static void raise_to_frame(void *obj, const char *where, void *address) {
   if (!obj) {
     char msg[300];
     snprintf(msg, sizeof msg, "'raise' of a nil object%s%s",
@@ -935,14 +952,17 @@ void __pas_raise(void *obj, const char *where) {
   }
   PasExcFrame *f = __pas_exc_top;
   if (!f)
-    unhandled(obj, where);
+    unhandled(obj, where, address);
   __pas_exc_top = f->prev;
   f->object = obj;
   f->where = where;
+  f->address = address;
   _longjmp(*(jmp_buf *)(void *)f->buf, 1);
 }
 
-void __pas_reraise(PasExcFrame *f) { __pas_raise(f->object, f->where); }
+void __pas_reraise(PasExcFrame *f) {
+  raise_to_frame(f->object, f->where, f->address);
+}
 
 void __pas_raise_divzero(const char *where) {
   static const char text[] = "Division by zero";
@@ -950,7 +970,7 @@ void __pas_raise_divzero(const char *where) {
   e->vmt = __pas_edivbyzero_vmt;
   e->message[0] = sizeof text - 1;
   memcpy(e->message + 1, text, sizeof text - 1);
-  __pas_raise(e, where);
+  raise_to_frame(e, where, __builtin_return_address(0));
 }
 
 void __pas_raise_convert(char *msg, size_t n) {
@@ -961,7 +981,7 @@ void __pas_raise_convert(char *msg, size_t n) {
   e->message[0] = (unsigned char)n;
   memcpy(e->message + 1, msg, n);
   free(msg);
-  __pas_raise(e, NULL);
+  raise_to_frame(e, "", __builtin_return_address(0));
 }
 
 void __pas_free_object(void *obj) {

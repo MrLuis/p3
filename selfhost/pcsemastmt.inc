@@ -1348,6 +1348,9 @@ begin
     bkParamCount:
       if arity(0) then
         res := tyIntegerT;
+    bkExceptAddr: { FPC's CodePointer }
+      if arity(0) then
+        res := tyUntypedPointerT;
     bkParamStr:
       begin
         if not arity(1) then
@@ -3419,6 +3422,8 @@ end;
 procedure visitRaise(s: PNode);
 var
   t: PType;
+  p: PNode;
+  i: longint;
 begin
   directSequence := nil;
   if s^.raiseObj = nil then
@@ -3437,6 +3442,27 @@ begin
     ms('''raise'' needs an object of a class type, not ');
     maT(t);
     errR(s^.raiseObj^.b, nodeRange(s^.raiseObj));
+  end;
+  { raise ... at address, frame: pointers (FPC's CodePointer and Pointer) }
+  for i := 0 to 1 do
+  begin
+    if i = 0 then
+      p := s^.raiseAddr
+    else
+      p := s^.raiseFrame;
+    if p = nil then
+      continue;
+    t := checkValueFor(tyUntypedPointerT, p);
+    if not isError(t) and not isAssignable(tyUntypedPointerT, t) then
+    begin
+      if i = 0 then
+        ms('the address')
+      else
+        ms('the frame');
+      ma(' of a raised exception must be a pointer, not ');
+      maT(t);
+      errR(p^.b, nodeRange(p));
+    end;
   end;
 end;
 
@@ -3605,6 +3631,8 @@ begin
           exit(tyBooleanT);
         if d^.builtin = bkParamCount then
           exit(tyIntegerT);
+        if d^.builtin = bkExceptAddr then
+          exit(tyUntypedPointerT);
         if not d^.isProcedure then
         begin
           ms('missing argument in call to ''');

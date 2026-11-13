@@ -601,13 +601,13 @@ begin
                     bkHalt, bkSizeOf, bkLow, bkHigh, bkAssigned, bkParamCount,
                     bkParamStr, bkAssign, bkClose, bkBlockRead, bkBlockWrite,
                     bkSeek, bkFilePos, bkFileSize, bkGetFileHandle,
-                    bkAssignFile, bkCloseFile];
+                    bkAssignFile, bkCloseFile, bkExceptAddr];
 end;
 
 { Free Pascal's objpas built-ins, predeclared only with --mode=objfpc. }
 function isObjFPCOnly(k: TBuiltinKind): boolean;
 begin
-  isObjFPCOnly := k in [bkAssignFile, bkCloseFile];
+  isObjFPCOnly := k in [bkAssignFile, bkCloseFile, bkExceptAddr];
 end;
 
 procedure stdType(const n: string; t: PType);

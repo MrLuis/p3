@@ -887,13 +887,20 @@ public:
   static bool classof(const Stmt *S) { return S->getKind() == SK_Try; }
 };
 
-/// raise Object, or a bare `raise` (re-raise, in an exception handler)
+/// raise Object [at Address [, Frame]], or a bare `raise` (re-raise, in an
+/// exception handler)
 class RaiseStmt final : public Stmt {
-  Expr *Object; ///< null for a re-raise
+  Expr *Object;  ///< null for a re-raise
+  Expr *Address; ///< `at` Address (a pointer), or null
+  Expr *Frame;   ///< `at` Address, Frame, or null
 
 public:
-  RaiseStmt(SourceRange R, Expr *Object) : Stmt(SK_Raise, R), Object(Object) {}
+  RaiseStmt(SourceRange R, Expr *Object, Expr *Address = nullptr,
+            Expr *Frame = nullptr)
+      : Stmt(SK_Raise, R), Object(Object), Address(Address), Frame(Frame) {}
   Expr *getObject() const { return Object; }
+  Expr *getAddress() const { return Address; }
+  Expr *getFrame() const { return Frame; }
   bool isReraise() const { return Object == nullptr; }
   static bool classof(const Stmt *S) { return S->getKind() == SK_Raise; }
 };

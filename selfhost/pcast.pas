@@ -221,8 +221,9 @@ type
         valid) or the finally part (isFinally, partBody) }
       nkTry: (tryBody: TPtrList; isFinally: boolean; partLoc: TLoc;
               handlers: TPtrList; tryElseLoc: TLoc; partBody: TPtrList);
-      { raise raiseObj; nil: a re-raise }
-      nkRaise: (raiseObj: PNode);
+      { raise raiseObj [at raiseAddr [, raiseFrame]]; raiseObj nil: a
+        re-raise }
+      nkRaise: (raiseObj, raiseAddr, raiseFrame: PNode);
       { for inVar in inColl do inBody (Turbo/FPC). Sema classifies the
         collection (inKind, a fik* constant) and builds the loop out of
         ordinary nodes over hidden variables, which code generation binds:

@@ -3479,19 +3479,34 @@ bool Parser::isOnHandler() const {
   return Tok.is(tok::identifier) && Tok.getIdentifier() == "on";
 }
 
-// raiseStmt = "raise" [ expression ] .                          (objfpc)
+// raiseStmt = "raise" [ expression [ "at" expression [ "," expression ] ] ] .
+//                                                                (objfpc)
+// (`at`, the exception's address and frame, is not a reserved word.)
 Stmt *Parser::parseRaiseStmt() {
   SourceLocation RaiseLoc = consumeToken();
-  Expr *Object = nullptr;
+  Expr *Object = nullptr, *Address = nullptr, *Frame = nullptr;
   if (!Tok.isOneOf(tok::semi, tok::kw_end, tok::kw_else, tok::kw_until,
                    tok::kw_except, tok::kw_finally, tok::eof)) {
     Object = parseExpression();
+    if (Object && Tok.is(tok::identifier) && Tok.getIdentifier() == "at") {
+      consumeToken();
+      Address = parseExpression();
+      if (Address && Tok.is(tok::comma)) {
+        consumeToken();
+        Frame = parseExpression();
+        if (!Frame)
+          Address = nullptr;
+      }
+      if (!Address)
+        Object = nullptr;
+    }
     if (!Object) {
       skipUntil({tok::semi, tok::kw_end});
       return Ctx.create<EmptyStmt>(RaiseLoc);
     }
   }
-  return Ctx.create<RaiseStmt>(SourceRange(RaiseLoc, PrevTokEnd), Object);
+  return Ctx.create<RaiseStmt>(SourceRange(RaiseLoc, PrevTokEnd), Object,
+                               Address, Frame);
 }
 
 Stmt *Parser::parseWithStmt() {

@@ -1,0 +1,28 @@
+; raise ... at Address[, Frame]: both must be pointers (as in Free Pascal);
+; ExceptAddr takes no arguments and is a pointer.
+; RUN: not %pcc --mode=objfpc -ferror-limit=0 -c %S/Inputs/raiseat/errors.pas -o %t.o 2>&1 | FileCheck %s
+; CHECK: errors.pas:8:34: error: the address of a raised exception must be a pointer, not 'integer'
+; CHECK: errors.pas:9:39: error: the frame of a raised exception must be a pointer, not 'real'
+; CHECK: errors.pas:10:34: error: the address of a raised exception must be a pointer, not 'string'
+; CHECK: errors.pas:10:37: error: the frame of a raised exception must be a pointer, not 'string of length 3'
+; CHECK: errors.pas:12:5: error: assigning to 'integer' from incompatible type 'pointer'
+; CHECK: errors.pas:13:8: error: 'ExceptAddr' expects 0 arguments
+; CHECK-NOT: error:
+;
+; An address and a frame must follow `at` and its comma.
+; RUN: not %pcc --mode=objfpc -ferror-limit=0 -c %S/Inputs/raiseat/syntax.pas -o %t.o 2>&1 | FileCheck --check-prefix=SYNTAX %s
+; SYNTAX: syntax.pas:3:33: error: expected expression
+; SYNTAX: syntax.pas:4:38: error: expected expression
+; SYNTAX-NOT: error:
+;
+; ExceptAddr is predeclared only with --mode=objfpc; `at` is not reserved.
+; RUN: %pcc -c %S/Inputs/raiseat/iso.pas -o %t.o
+; RUN: %pcc --mode=tp -c %S/Inputs/raiseat/iso.pas -o %t.o
+; RUN: %pcc --mode=objfpc -c %S/Inputs/raiseat/iso.pas -o %t.o
+;
+; The AST shows the address and the frame after the object.
+; RUN: %pcc --mode=objfpc --emit-ast -o - %S/../run/raiseat.pas | FileCheck --check-prefix=AST %s
+; AST:      RaiseStmt at <41:3>
+; AST-NEXT:   NameRefExpr 'e' parameter : TObject <41:9>
+; AST-NEXT:   NameRefExpr 'addr' parameter : pointer <41:14>
+; AST-NEXT:   NameRefExpr 'frame' parameter : pointer <41:20>

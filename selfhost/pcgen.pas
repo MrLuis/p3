@@ -234,7 +234,8 @@ begin
   { Can a call of it raise an exception? Those that raise one, and those
     that may run a destructor (which is Pascal code): releasing an object
     or an interface reference. }
-  if (name <> '__pas_raise') and (name <> '__pas_raise_divzero') and
+  if (name <> '__pas_raise') and (name <> '__pas_raise_at') and
+     (name <> '__pas_raise_divzero') and
      (name <> '__pas_reraise') and (name <> '__pas_reraise_free') and
      (name <> '__pas_free_object') and (name <> '__pas_free_instance') and
      (name <> '__pas_intf_assign') and (name <> '__pas_intf_clear') and
@@ -3507,6 +3508,11 @@ begin
       params := 'ptr,ptr';
       attrs := 'noreturn nounwind';
     end
+    else if name = '__pas_raise_at' then
+    begin
+      params := 'ptr,ptr,ptr';
+      attrs := 'noreturn nounwind';
+    end
     else if name = '__pas_reraise' then
       attrs := 'noreturn nounwind';
     { otherwise __pas_exc_pop, __pas_free_object }
@@ -3530,6 +3536,17 @@ begin
   ignored := call2(excRuntime(name), x, y, '');
 end;
 
+{ ExceptAddr: the address of the exception the innermost enclosing handler
+  handles (the frame it was raised to), nil outside handlers. }
+function exceptAddr: TV;
+begin
+  if handledFrames.count = 0 then
+    exit(irNull);
+  exceptAddr := irLoad(irPtrT,
+    irStructGEP(excFrameT, PTVBox(listGet(handledFrames, handledFrames.count - 1))^,
+                3, ''), 'exceptaddr');
+end;
+
 { Pushes a new PasExcFrame and calls _setjmp on it: an exception raised to
   the frame continues at landing, the protected code in body (the
   insertion point). Returns the frame. }
@@ -3539,7 +3556,7 @@ var
 begin
   f := irCreateTemp(excFrameT, 'excframe');
   excCall1('__pas_exc_push', f);
-  r := call1(rtFn('_setjmp'), irStructGEP(excFrameT, f, 3, ''), 'jmp');
+  r := call1(rtFn('_setjmp'), irStructGEP(excFrameT, f, 4, ''), 'jmp');
   if body = nil then
     body := irNewBlock(bodyName);
   irCondBr(irICmp('ne', r, i32c(0), ''), landing, body, false);
@@ -4670,6 +4687,8 @@ begin
       end;
     bkParamCount:
       exit(call0(rtFn('__pas_paramcount'), 'paramcount'));
+    bkExceptAddr:
+      exit(exceptAddr);
     bkParamStr:
       begin
         tmp := newStringTemp(255);
@@ -4830,6 +4849,8 @@ begin
   begin
     if d^.builtin = bkParamCount then
       exit(call0(rtFn('__pas_paramcount'), 'paramcount'));
+    if d^.builtin = bkExceptAddr then
+      exit(exceptAddr);
     exit(emitFileQuery(d^.builtin, nil)); { eof / eoln }
   end;
   if d^.constValue.kind = ckReal then

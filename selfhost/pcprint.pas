@@ -1189,12 +1189,19 @@ begin
       visitTry(s);
     nkRaise:
       begin
-        line('RaiseStmt');
+        if s^.raiseAddr <> nil then
+          line('RaiseStmt at')
+        else
+          line('RaiseStmt');
         loc(s^.b);
         if s^.raiseObj <> nil then
         begin
           indent := indent + 2;
           visitExpr(s^.raiseObj);
+          if s^.raiseAddr <> nil then
+            visitExpr(s^.raiseAddr);
+          if s^.raiseFrame <> nil then
+            visitExpr(s^.raiseFrame);
           indent := indent - 2;
         end;
       end;

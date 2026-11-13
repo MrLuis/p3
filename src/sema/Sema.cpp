@@ -621,6 +621,7 @@ class Checker : public StmtVisitor<Checker>,
     case BuiltinKind::FileSize: case BuiltinKind::GetFileHandle:
       return true;
     case BuiltinKind::AssignFile: case BuiltinKind::CloseFile:
+    case BuiltinKind::ExceptAddr:
       return true; // (and objfpc only: see isObjFPCOnly)
     default:
       return false;
@@ -629,7 +630,8 @@ class Checker : public StmtVisitor<Checker>,
 
   /// Free Pascal's objpas built-ins, predeclared only with --mode=objfpc.
   static bool isObjFPCOnly(BuiltinKind K) {
-    return K == BuiltinKind::AssignFile || K == BuiltinKind::CloseFile;
+    return K == BuiltinKind::AssignFile || K == BuiltinKind::CloseFile ||
+           K == BuiltinKind::ExceptAddr;
   }
 
   //===--------------------------------------------------------------------===//
@@ -6542,6 +6544,10 @@ class Checker : public StmtVisitor<Checker>,
       if (!Arity(0))
         return errorType();
       return Ctx.getIntegerType();
+    case BuiltinKind::ExceptAddr: // FPC's CodePointer
+      if (!Arity(0))
+        return errorType();
+      return Ctx.getUntypedPointerType();
     case BuiltinKind::ParamStr: {
       if (!Arity(1))
         return errorType();
@@ -7214,6 +7220,21 @@ public:
       Diags.error(S->getObject()->getBeginLoc(),
                   "'raise' needs an object of a class type, not " + quoted(T),
                   {S->getObject()->getRange()});
+    // raise ... at Address, Frame: pointers (FPC's CodePointer and Pointer)
+    for (Expr *P : {S->getAddress(), S->getFrame()}) {
+      if (!P)
+        continue;
+      Type *Ptr = Ctx.getUntypedPointerType();
+      Type *PT = checkValueFor(Ptr, P);
+      if (!PT->isError() && !isAssignable(Ptr, PT))
+        Diags.error(P->getBeginLoc(),
+                    "the " +
+                        llvm::Twine(P == S->getAddress() ? "address"
+                                                         : "frame") +
+                        " of a raised exception must be a pointer, not " +
+                        quoted(PT),
+                    {P->getRange()});
+    }
   }
 
   void visitIfStmt(IfStmt *S) {
@@ -7718,6 +7739,8 @@ public:
         return Ctx.getBooleanType();
       if (llvm::cast<BuiltinDecl>(D)->getBuiltinKind() == BuiltinKind::ParamCount)
         return Ctx.getIntegerType();
+      if (llvm::cast<BuiltinDecl>(D)->getBuiltinKind() == BuiltinKind::ExceptAddr)
+        return Ctx.getUntypedPointerType();
       if (llvm::cast<BuiltinDecl>(D)->isFunction()) {
         Diags.error(Id.Loc, "missing argument in call to '" + Id.Spelling + "'",
                     {Id.getRange()});

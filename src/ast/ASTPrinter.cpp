@@ -806,10 +806,16 @@ public:
   }
   void visitRaiseStmt(RaiseStmt *S) {
     line("RaiseStmt");
+    if (S->getAddress())
+      OS << " at";
     loc(S->getBeginLoc());
     if (S->getObject()) {
       IndentScope I(Indent);
       visitExpr(S->getObject());
+      if (S->getAddress())
+        visitExpr(S->getAddress());
+      if (S->getFrame())
+        visitExpr(S->getFrame());
     }
   }
 

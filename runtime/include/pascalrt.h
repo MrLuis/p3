@@ -274,11 +274,15 @@ void __pas_abstract_error(void) __attribute__((noreturn));
  * statement (the compiler's type is { ptr, ptr, ptr, [64 x i64] }). The
  * compiled code calls __pas_exc_push, then _setjmp(&f->buf): 0 runs the
  * protected statements, which end with __pas_exc_pop; nonzero means an
- * exception landed, f->object (already popped). Errors exit with status 2. */
+ * exception landed, f->object (already popped). Errors exit with status 2.
+ * (The compiler's type is { ptr, ptr, ptr, ptr, [64 x i64] }.) */
 typedef struct PasExcFrame {
   struct PasExcFrame *prev;
   void *object;      /* the exception, once raised to this frame */
-  const char *where; /* "file:line:col" of its raise statement */
+  const char *where; /* "file:line:col" of its raise statement; NULL for
+                        `raise ... at`, "" when raised by the runtime */
+  void *address;     /* its address (ExceptAddr): the `at` address, else
+                        where the raise statement's code calls the runtime */
   int64_t buf[64];   /* a jmp_buf */
 } PasExcFrame;
 
@@ -300,6 +304,10 @@ void __pas_exc_push(PasExcFrame *f);
 void __pas_exc_pop(PasExcFrame *f);
 /* raise obj: to the innermost frame, else "unhandled exception". */
 void __pas_raise(void *obj, const char *where) __attribute__((noreturn));
+/* raise obj at address[, frame]: as __pas_raise, with the given address;
+ * unhandled, it is reported at that address, as by Free Pascal. */
+void __pas_raise_at(void *obj, const char *where, void *address)
+    __attribute__((noreturn));
 /* Integer div or mod by zero (objfpc): raises a new EDivByZero, with the
  * message 'Division by zero'. */
 void __pas_raise_divzero(const char *where) __attribute__((noreturn));

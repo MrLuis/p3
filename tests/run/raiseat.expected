@@ -1,0 +1,23 @@
+address f
+address a
+object 1
+1 at 3
+object 2
+2 at 5
+object 3
+3 at 7
+object 4
+object 5
+inner at 2
+outer at 1
+failed at 9
+object 6
+6 at nil TRUE
+object 7
+7 at m TRUE
+object 8
+8 has an address TRUE
+div has an address TRUE
+outside TRUE
+object 9
+wrapped 9 at 6

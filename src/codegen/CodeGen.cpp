@@ -2832,7 +2832,8 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
   /// that raise one, and those that may run a destructor (which is Pascal
   /// code): releasing an object or an interface reference.
   static bool runtimeMayRaise(llvm::StringRef Name) {
-    return Name == "__pas_raise" || Name == "__pas_raise_divzero" ||
+    return Name == "__pas_raise" || Name == "__pas_raise_at" ||
+           Name == "__pas_raise_divzero" ||
            Name == "__pas_reraise" || Name == "__pas_reraise_free" ||
            Name == "__pas_free_object" || Name == "__pas_free_instance" ||
            Name == "__pas_intf_assign" || Name == "__pas_intf_clear" ||
@@ -4778,6 +4779,8 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
     }
     case BuiltinKind::ParamCount:
       return B.CreateCall(RT.ParamCount, {}, "paramcount");
+    case BuiltinKind::ExceptAddr:
+      return exceptAddr();
     case BuiltinKind::ParamStr: {
       llvm::Value *Tmp = newStringTemp();
       B.CreateCall(RT.ParamStr, {Tmp, emitI32(E->getArgs()[0])});
@@ -5961,10 +5964,11 @@ public:
   // Exceptions (objfpc)
   //===--------------------------------------------------------------------===//
 
-  /// PasExcFrame (runtime/include/pascalrt.h): prev, object, where, jmp_buf.
+  /// PasExcFrame (runtime/include/pascalrt.h): prev, object, where,
+  /// address, jmp_buf.
   llvm::StructType *excFrameType() {
     return llvm::StructType::get(B.getPtrTy(), B.getPtrTy(), B.getPtrTy(),
-                                 jmpBufType());
+                                 B.getPtrTy(), jmpBufType());
   }
 
   /// The runtime's exception entry points, declared when first used.
@@ -5979,6 +5983,9 @@ public:
       NoReturn = true;
     } else if (Name == "__pas_raise" || Name == "__pas_reraise_free") {
       F = classRuntime(Name, Void, {Ptr, Ptr});
+      NoReturn = true;
+    } else if (Name == "__pas_raise_at") {
+      F = classRuntime(Name, Void, {Ptr, Ptr, Ptr});
       NoReturn = true;
     } else {
       // __pas_exc_pop, __pas_free_object, __pas_reraise
@@ -6000,7 +6007,7 @@ public:
     llvm::Value *F = createTemp(excFrameType(), "excframe");
     B.CreateCall(excRuntime("__pas_exc_push"), {F});
     llvm::Value *R = B.CreateCall(
-        RT.SetJmp, {B.CreateStructGEP(excFrameType(), F, 3)}, "jmp");
+        RT.SetJmp, {B.CreateStructGEP(excFrameType(), F, 4)}, "jmp");
     if (!Body)
       Body = newBlock(BodyName);
     B.CreateCondBr(B.CreateICmpNE(R, B.getInt32(0)), Landing, Body);
@@ -6176,9 +6183,29 @@ public:
     B.SetInsertPoint(ContBB);
   }
 
+  /// ExceptAddr: the address of the exception the innermost enclosing
+  /// handler handles (the frame it was raised to), nil outside handlers.
+  llvm::Value *exceptAddr() {
+    if (HandledFrames.empty())
+      return llvm::ConstantPointerNull::get(B.getPtrTy());
+    return B.CreateLoad(
+        B.getPtrTy(),
+        B.CreateStructGEP(excFrameType(), HandledFrames.back(), 3),
+        "exceptaddr");
+  }
+
   void visitRaiseStmt(RaiseStmt *S) {
     if (S->isReraise()) {
       B.CreateCall(excRuntime("__pas_reraise"), {HandledFrames.back()});
+    } else if (S->getAddress()) {
+      // Free Pascal's order: the frame (only evaluated), the address, the
+      // object.
+      if (S->getFrame())
+        visitExpr(S->getFrame());
+      llvm::Value *Addr = visitExpr(S->getAddress());
+      llvm::Value *Obj = visitExpr(S->getObject());
+      B.CreateCall(excRuntime("__pas_raise_at"),
+                   {Obj, whereText(S->getBeginLoc()), Addr});
     } else {
       llvm::Value *Obj = visitExpr(S->getObject());
       B.CreateCall(excRuntime("__pas_raise"), {Obj, whereText(S->getBeginLoc())});
@@ -6249,6 +6276,8 @@ public:
     if (auto *BD = llvm::dyn_cast<BuiltinDecl>(D)) {
       if (BD->getBuiltinKind() == BuiltinKind::ParamCount)
         return B.CreateCall(RT.ParamCount, {}, "paramcount");
+      if (BD->getBuiltinKind() == BuiltinKind::ExceptAddr)
+        return exceptAddr();
       return emitFileQuery(BD->getBuiltinKind(), nullptr); // eof / eoln
     }
     auto *C = llvm::cast<ConstDecl>(D);

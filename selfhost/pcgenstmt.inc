@@ -1661,10 +1661,20 @@ end;
 
 procedure visitRaise(s: PNode);
 var
-  obj: TV;
+  obj, addr, ignored: TV;
 begin
   if s^.raiseObj = nil then
     excCall1('__pas_reraise', PTVBox(listGet(handledFrames, handledFrames.count - 1))^)
+  else if s^.raiseAddr <> nil then
+  begin
+    { Free Pascal's order: the frame (only evaluated), the address, the
+      object }
+    if s^.raiseFrame <> nil then
+      ignored := visitExpr(s^.raiseFrame);
+    addr := visitExpr(s^.raiseAddr);
+    obj := visitExpr(s^.raiseObj);
+    ignored := call3(excRuntime('__pas_raise_at'), obj, whereText(s^.b), addr, '');
+  end
   else
   begin
     obj := visitExpr(s^.raiseObj);
@@ -3197,8 +3207,10 @@ begin
   listFree(fields);
   { generous for every supported libc (glibc: 200-312 bytes, macOS: 192) }
   jmpBufT := irArray(64, irI64);
-  { PasExcFrame (runtime/include/pascalrt.h): prev, object, where, jmp_buf }
+  { PasExcFrame (runtime/include/pascalrt.h): prev, object, where, address,
+    jmp_buf }
   listInit(fields);
+  listAdd(fields, irPtrT);
   listAdd(fields, irPtrT);
   listAdd(fields, irPtrT);
   listAdd(fields, irPtrT);

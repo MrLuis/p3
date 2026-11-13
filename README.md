@@ -313,6 +313,8 @@ try
   end;
 except
   on E: EParse do writeln(E.ClassName, ': ', E.Message);
+  on E: EConvertError do         { a new exception at the same address }
+    raise EParse.Create(E.Message) at ExceptAddr;
   on E: Exception do raise;      { re-raise }
 else
   writeln('anything else');
@@ -333,7 +335,15 @@ zero, ...) are not exceptions. Following Free Pascal, `exit`, and
 and `goto` in `--mode=objfpc` (Free Pascal without `-Sg`). An unhandled
 exception is a runtime error that names the class, where it was raised and
 the message (`Runtime error: unhandled exception EParse at p.pas:12:5: not
-a digit`); `finally` parts run first. Exceptions are `_setjmp`/`_longjmp`
+a digit`); `finally` parts run first. `raise E at Address[, Frame]` gives
+the exception an address (pointers, as FPC's `CodePointer` and `Pointer`;
+the frame is only evaluated), which an unhandled one is reported at
+(`... EParse at $0000000000401A2C: ...`), as in Free Pascal; `ExceptAddr`,
+in a handler, is the address of the exception it handles (nil outside
+handlers; a re-raise keeps it). FPC's `get_frame`, `get_caller_addr` and
+`get_caller_frame` are not supported, nor are casts between integers and
+pointers, so the address is a variable's (`@x`), an object, a parameter
+passed along, or `ExceptAddr`. Exceptions are `_setjmp`/`_longjmp`
 based: each `try` statement pushes a frame on a stack kept by the runtime.
 So does a routine with ansistring or interface variables or temporaries,
 which it releases when an exception leaves it, unless nothing it calls can

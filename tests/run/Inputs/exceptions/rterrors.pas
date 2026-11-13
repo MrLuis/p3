@@ -44,5 +44,13 @@ begin
     end;
   if W = 'divzero' then
     writeln(length(W) div (length(W) - 7));
+  if W = 'at' then
+    raise EParse.Create('somewhere') at nil;
+  if W = 'reraiseat' then
+    try
+      raise TPlain.Create at nil, nil;
+    except
+      raise;
+    end;
   writeln('no error');
 end.
