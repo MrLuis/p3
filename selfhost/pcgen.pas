@@ -1301,6 +1301,11 @@ begin
   if p^.methodKind <> mtNone then
     { s starts with the method's name }
     s := lowerStr(nm(p^.ownerClass^.declName)) + '.' + s;
+  { a class constructor or destructor (beside a method of the same name) }
+  if r^.classInit = ciConstructor then
+    s := s + '$cctor'
+  else if r^.classInit = ciDestructor then
+    s := s + '$cdtor';
   mangle := 'pas.' + s;
 end;
 

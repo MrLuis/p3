@@ -120,7 +120,10 @@ type
                 classVTable: TPtrList; classModule: pointer;
                 classDefined: boolean; classInterfaces: TPtrList;
                 classRecord: PType; classOuter: PType; classHelperFor: PType;
-                classRecordHelper: boolean);
+                classRecordHelper: boolean;
+                { its class constructor and class destructor (not members),
+                  or nil }
+                classCtor, classDtor: PDecl);
       { class of C (objfpc): a reference to C or a descendant (its VMT) }
       tyClassRef: (refClass: PType);
       { interface (objfpc): its parent, own methods (source order) and all
@@ -502,7 +505,14 @@ type
                   { the body computes values of managed types (COM
                     interfaces): code generation releases the references
                     it holds when an exception leaves the routine (Sema) }
-                  usesManaged: boolean);
+                  usesManaged: boolean;
+                  { a class constructor or destructor (objfpc, classes and
+                    advanced records; ciNone, ciConstructor, ciDestructor):
+                    a static class procedure without parameters that the
+                    program or unit declaring the type runs at its start
+                    (before its initialization part) or end; not a member
+                    (it cannot be called) }
+                  classInit: longint);
       dkBuiltin: (builtin: TBuiltinKind; isProcedure: boolean);
       { labels (Sema): the statement labeled, the statement sequence that
         directly contains it, whether that is the block's outermost one,
@@ -549,6 +559,10 @@ const
   ccDefault = 0;
   ccCDecl = 1;
   ccStdCall = 2;
+  { a routine's classInit }
+  ciNone = 0;
+  ciConstructor = 1;
+  ciDestructor = 2;
 
 procedure addHints(d: PDecl; flags: longint; msg: PName);
 function callConvName(cc: longint): string;

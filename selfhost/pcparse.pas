@@ -74,6 +74,9 @@ var
     far (of PToken; for += -= *= /=, which read the designator again), or
     nil }
   stmtTokens: PPtrList;
+  { in parseRoutineDecl: a class constructor or destructor's
+    implementation }
+  parsingClassInit: boolean;
   replayPos: longint;
   { parsing a generic routine: type parameters may follow its name
     (genericTypeParams receives them) }
@@ -136,6 +139,7 @@ begin
   recording := nil;
   replay := nil;
   stmtTokens := nil;
+  parsingClassInit := false;
   parsingGeneric := false;
   listInit(pendingUses);
   unitName := nil;
@@ -1235,9 +1239,13 @@ begin
     genericTypeParams := typeParams;
   end;
   if identValid(name) and (mk <> mtNone) and not identValid(clsName) then
+  begin
+    if parsingClassInit then
+      kind := 'class ' + kind;
     diagErrorR(name.loc, 'a ' + kind + ' must be declared in a class; ' +
                'implement it as ''' + kind + ' TClass.' + nameStr(name.spelling) +
                '''', identRange(name));
+  end;
   if identValid(clsName) and (mk = mtNone) then
     mk := mtMethod;
 
@@ -1572,6 +1580,32 @@ begin
   if isStatic and not inRecord then { a class's (Sema checks it is a class method) }
     r^.isStatic := true;
   parseMethodHeadingR := r;
+end;
+
+{ Makes r a class constructor or destructor (a static class procedure). }
+procedure markClassInit(r: PDecl; ci: longint);
+begin
+  r^.methodKind := mtMethod;
+  r^.isClassMethod := true;
+  r^.isStatic := true;
+  r^.classInit := ci;
+end;
+
+{ classInit = ("class constructor" | "class destructor") name ";"
+              ( directive ";" )      (in a class or an advanced record) }
+function parseClassInitHeading: PDecl;
+var
+  ci: longint;
+  r: PDecl;
+begin
+  if tok.kind = tkKwConstructor then
+    ci := ciConstructor
+  else
+    ci := ciDestructor;
+  r := parseMethodHeadingR(false, false);
+  if r <> nil then
+    markClassInit(r, ci);
+  parseClassInitHeading := r;
 end;
 
 function parseMethodHeading: PDecl;
@@ -1981,6 +2015,7 @@ var
   lastRank, rank: longint;
   lastWord, word: string;
   r: PDecl;
+  ci: longint;
   ok: boolean;
 begin
   lastRank := -1;
@@ -2031,9 +2066,26 @@ begin
             if r <> nil then
               listAdd(decls, r);
           end
+          else if tok.kind in [tkKwConstructor, tkKwDestructor] then
+          begin
+            { class constructor TFoo.Create; ... (a static class procedure) }
+            if tok.kind = tkKwConstructor then
+              ci := ciConstructor
+            else
+              ci := ciDestructor;
+            parsingClassInit := true;
+            r := parseRoutineDecl(inInterface);
+            parsingClassInit := false;
+            if r <> nil then
+            begin
+              markClassInit(r, ci);
+              listAdd(decls, r);
+            end;
+          end
           else if (tok.kind <> tkKwProcedure) and (tok.kind <> tkKwFunction) then
           begin
-            diagError(tok.loc, 'expected ''procedure'' or ''function'' after ''class''');
+            diagError(tok.loc, 'expected ''procedure'', ''function'', ' +
+                      '''constructor'' or ''destructor'' after ''class''');
             skipUntil([tkSemi, tkKwBegin]);
             tryConsume(tkSemi);
           end
@@ -2530,12 +2582,26 @@ begin
         classVars := false;
         continue;
       end;
-      if tok.kind in [tkKwConstructor, tkKwDestructor, tkKwProperty] then
-        unsupported('class ' + lowerStr(rawText(tok)) + 's are')
+      if tok.kind in [tkKwConstructor, tkKwDestructor] then
+      begin
+        m := parseClassInitHeading;
+        if m = nil then
+        begin
+          failed := true;
+          break;
+        end;
+        m^.vis := vis;
+        listAdd(members, m);
+        classVars := false;
+        continue;
+      end;
+      if tok.kind = tkKwProperty then
+        unsupported('class properties are')
       else if isIdentifierNamed('operator') then
         diagError(tok.loc, 'class operators can only be declared in records')
       else
-        diagError(tok.loc, 'expected ''var'', ''procedure'' or ''function'' after ''class''');
+        diagError(tok.loc, 'expected ''var'', ''procedure'', ''function'', ' +
+                  '''constructor'' or ''destructor'' after ''class''');
       failed := true;
       break;
     end;
@@ -3496,14 +3562,25 @@ begin
         addMember(m);
         continue;
       end;
+      if tok.kind in [tkKwConstructor, tkKwDestructor] then
+      begin
+        m := parseClassInitHeading;
+        if m = nil then
+        begin
+          failed := true;
+          break;
+        end;
+        addMember(m);
+        continue;
+      end;
       if tryConsume(tkKwVar) then { class variables follow }
       begin
         classVars := true;
         afterMethods := false;
         continue;
       end;
-      diagError(tok.loc, 'expected ''procedure'', ''function'', ''operator'' or ' +
-                '''var'' after ''class''');
+      diagError(tok.loc, 'expected ''procedure'', ''function'', ''constructor'', ' +
+                '''destructor'', ''operator'' or ''var'' after ''class''');
       failed := true;
       break;
     end;
@@ -4065,8 +4142,8 @@ end;
 function parseAssignmentOrCall: PNode;
 var
   name: TIdent;
-  start, assignLoc: TLoc;
-  target, value, call, n: PNode;
+  start: TLoc;
+  target, call, n: PNode;
   hasParens: boolean;
   args, typeArgs: TPtrList;
 begin
@@ -4152,8 +4229,7 @@ end;
   call: r.p(x); a[i]; obj.Show; inherited Create(x); }
 function finishDesignatorStmt(start: TLoc; target: PNode): PNode;
 var
-  assignLoc: TLoc;
-  value, call, n: PNode;
+  call, n: PNode;
   none: TPtrList;
 begin
   if tok.kind = tkEqual then

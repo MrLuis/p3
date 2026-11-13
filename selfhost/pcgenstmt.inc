@@ -3017,6 +3017,48 @@ begin
   initName := 'pas.' + nm(u^.ident.name) + '$$init';
 end;
 
+{ The start of a program or unit (decls, then more: its declarations): the
+  class constructors of the classes and advanced records it declares
+  (nested ones too), in declaration order; then its class destructors are
+  registered with the runtime, which runs them at exit (last registered
+  first: the program's, then the units' in reverse order, each one's in
+  declaration order, as in Free Pascal). }
+procedure emitClassInits(const decls, more: TPtrList);
+var
+  dtors, all: TPtrList;
+  i, k: longint;
+  d, r: PDecl;
+  c: PType;
+  ignored: TV;
+begin
+  listInit(dtors);
+  for k := 0 to 1 do
+  begin
+    if k = 0 then
+      all := withNested(decls)
+    else
+      all := withNested(more);
+    for i := 0 to all.count - 1 do
+    begin
+      d := PDecl(listGet(all, i));
+      c := definedClass(d);
+      if c = nil then
+        c := advancedRecord(d);
+      if (c = nil) or d^.cgImported then
+        continue;
+      r := c^.classCtor;
+      if (r <> nil) and (r^.cgFunc <> nil) then
+        ignored := call1(fnOf(r), irNull, '');
+      r := c^.classDtor;
+      if (r <> nil) and (r^.cgFunc <> nil) then
+        listAdd(dtors, r);
+    end;
+  end;
+  for i := dtors.count - 1 downto 0 do
+    ignored := call1(classRuntime('__pas_at_exit', 'void', 'ptr'),
+                     irFuncRef(fnOf(PDecl(listGet(dtors, i)))), '');
+end;
+
 { --- The program --- }
 
 procedure emitMainBody(prog: PDecl; const units: TPtrList; mainFn: PIRFunc);
@@ -3026,7 +3068,7 @@ var
   u: PDecl;
   ignored, tp: TV;
   entry: PIRBlock;
-  noParams: TPtrList;
+  noParams, noDecls: TPtrList;
   initFn: PIRFunc;
 begin
   blk := prog^.progBlock;
@@ -3079,6 +3121,7 @@ begin
     for i := 0 to units.count - 1 do
     begin
       u := PDecl(listGet(units, i));
+      emitClassInits(u^.iface^.decls, u^.impl^.decls);
       if u^.impl^.body <> nil then
         visitStmt(u^.impl^.body);
     end;
@@ -3086,6 +3129,8 @@ begin
   initFileVars(blk^.decls, true);
   if hasMainJmpBuf then
     emitSetJmpDispatch(blk, mainJmpBuf);
+  listInit(noDecls);
+  emitClassInits(blk^.decls, noDecls);
   exitBlock := irNewBlock('exit');
   visitStmt(blk^.body);
   irBr(exitBlock);
@@ -3212,6 +3257,7 @@ begin
   setDebugLoc(u^.loc);
   initFileVars(u^.iface^.decls, false);
   initFileVars(u^.impl^.decls, false);
+  emitClassInits(u^.iface^.decls, u^.impl^.decls);
   exitBlock := irNewBlock('exit');
   if u^.impl^.body <> nil then
     visitStmt(u^.impl^.body);

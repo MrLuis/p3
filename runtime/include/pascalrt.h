@@ -207,6 +207,10 @@ void *__pas_realloc(void *p, int64_t size);
 
 /* halt(code): flushes files like __pas_fini, then exits with code. */
 void __pas_halt(int32_t code) __attribute__((noreturn));
+/* Registers a class destructor (a Pascal routine, called with a null static
+ * link) to run at exit (__pas_fini, also from halt), last registered
+ * first. */
+void __pas_at_exit(void (*fn)(void *));
 int32_t __pas_paramcount(void);
 /* paramstr(index) into a short string (index 0 is the program name). */
 void __pas_paramstr(unsigned char *dst, int32_t index);

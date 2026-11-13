@@ -1437,6 +1437,11 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
 
   /// pas.<outer>.<name> for routines, pas.<class>.<name> for methods.
   static std::string mangle(RoutineDecl *R) {
+    if (R->isClassInit()) // (beside a method of the same name)
+      return "pas." + R->getClass()->getDeclName().lower() + "." +
+             R->getName().Name.str() +
+             (R->getClassInit() == ClassInitKind::Constructor ? "$cctor"
+                                                              : "$cdtor");
     if (R->isMethod())
       return "pas." + R->getClass()->getDeclName().lower() + "." +
              R->getName().Name.str() + overloadSuffix(R);
@@ -4970,12 +4975,16 @@ public:
         initFileVars(U->getInterface()->getDecls(), nullptr);
         initFileVars(U->getImplementation()->getDecls(), nullptr);
       }
-      for (UnitDecl *U : Units)
+      for (UnitDecl *U : Units) {
+        emitClassInits(U->getInterface()->getDecls(),
+                       U->getImplementation()->getDecls());
         visitStmt(U->getImplementation()->getBody());
+      }
     }
     initFileVars(Blk.getDecls(), &ParamIndex);
     if (MainJmpBuf)
       emitSetJmpDispatch(Blk, MainJmpBuf);
+    emitClassInits(Blk.getDecls(), {});
     ExitBlock = newBlock("exit");
     visitStmt(Blk.getBody());
     B.CreateBr(ExitBlock);
@@ -4985,6 +4994,35 @@ public:
     emitDynOps();
     if (DIB)
       DIB->finalize();
+  }
+
+  /// The start of a program or unit (Decls, then More: its declarations):
+  /// the class constructors of the classes and advanced records it
+  /// declares (nested ones too), in declaration order; then its class
+  /// destructors are registered with the runtime, which runs them at exit
+  /// (last registered first: the program's, then the units' in reverse
+  /// order, each one's in declaration order, as in Free Pascal).
+  void emitClassInits(llvm::ArrayRef<Decl *> Decls, llvm::ArrayRef<Decl *> More) {
+    llvm::SmallVector<RoutineDecl *, 4> Dtors;
+    auto Visit = [&](llvm::ArrayRef<Decl *> Ds) {
+      for (Decl *D : withNested(Ds)) {
+        ClassType *C = definedClass(D);
+        if (!C)
+          C = advancedRecord(D);
+        if (!C || ImportedDecls.count(D))
+          continue;
+        if (RoutineDecl *R = C->getClassConstructor(); R && Functions.count(R))
+          B.CreateCall(Functions[R],
+                       {llvm::ConstantPointerNull::get(B.getPtrTy())});
+        if (RoutineDecl *R = C->getClassDestructor(); R && Functions.count(R))
+          Dtors.push_back(R);
+      }
+    };
+    Visit(Decls);
+    Visit(More);
+    for (RoutineDecl *R : llvm::reverse(Dtors))
+      B.CreateCall(classRuntime("__pas_at_exit", B.getVoidTy(), {B.getPtrTy()}),
+                   {Functions[R]});
   }
 
   /// A unit compiled on its own: its variables and routines, and its
@@ -5027,6 +5065,8 @@ public:
     setDebugLoc(U.getLocation());
     initFileVars(U.getInterface()->getDecls(), nullptr);
     initFileVars(U.getImplementation()->getDecls(), nullptr);
+    emitClassInits(U.getInterface()->getDecls(),
+                   U.getImplementation()->getDecls());
     ExitBlock = newBlock("exit");
     visitStmt(U.getImplementation()->getBody());
     B.CreateBr(ExitBlock);

@@ -730,7 +730,11 @@ begin
       end;
     dkRoutine:
       begin
-        if d^.methodKind = mtConstructor then
+        if d^.classInit = ciConstructor then
+          kindPrefix := 'ClassConstructorDecl '''
+        else if d^.classInit = ciDestructor then
+          kindPrefix := 'ClassDestructorDecl '''
+        else if d^.methodKind = mtConstructor then
           kindPrefix := 'ConstructorDecl '''
         else if d^.methodKind = mtDestructor then
           kindPrefix := 'DestructorDecl '''
@@ -754,7 +758,7 @@ begin
         bufAddName(outBuf, d^.ident.name);
         bufAddChar(outBuf, '''');
         typeSuffix(d^.resultType);
-        if d^.isClassMethod then
+        if d^.isClassMethod and (d^.classInit = ciNone) then
           bufAdd(outBuf, ' class');
         visibilitySuffix(d);
         if d^.isVirtual then

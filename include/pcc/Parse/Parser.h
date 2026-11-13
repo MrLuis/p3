@@ -169,6 +169,12 @@ class Parser {
   /// Advanced records (objfpc): `class operator +(...): T;` in a record, the
   /// operator's name (`operator+`), and `class operator TR.+(...)` ... body.
   RoutineDecl *parseOperatorHeading();
+  /// `class constructor Name;` / `class destructor Name;` in a class or an
+  /// advanced record (after `class`).
+  RoutineDecl *parseClassInitHeading();
+  bool ParsingClassInit = false; ///< in parseRoutineDecl: `class constructor`
+  /// Makes R a class constructor or destructor (a static class procedure).
+  void markClassInit(RoutineDecl *R, ClassInitKind K);
   bool parseInlineDirective(SourceLocation Loc);
   /// Free Pascal's hint directives (Decl::HintFlag): written after a
   /// declaration's type or value (Separated: after a routine's or

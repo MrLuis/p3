@@ -2235,6 +2235,10 @@ class Checker : public StmtVisitor<Checker>,
     }
     for (Decl *M : RS->getMembers()) {
       const Identifier &MN = M->getName();
+      if (auto *R = llvm::dyn_cast<RoutineDecl>(M); R && R->isClassInit()) {
+        defineClassInit(C, R); // not a member
+        continue;
+      }
       if (llvm::isa<ConstDecl>(M) || llvm::isa<TypeDecl>(M)) {
         // (declared with the record: see declareAdvancedRecord)
         if (Decl *Prev = Own.lookup(MN.Name)) {
@@ -2892,6 +2896,10 @@ class Checker : public StmtVisitor<Checker>,
     size_t PendingPointerMark = PendingPointers.size();
     for (Decl *M : CS->getMembers()) {
       const Identifier &MN = M->getName();
+      if (auto *R = llvm::dyn_cast<RoutineDecl>(M); R && R->isClassInit()) {
+        defineClassInit(C, R); // not a member
+        continue;
+      }
       RoutineDecl *OverloadOf = nullptr; // objfpc: an overloaded method
       if (Decl *Fwd = Own.lookup(MN.Name);
           isForwardClassDecl(Fwd) && llvm::isa<TypeDecl>(M)) {
@@ -2994,6 +3002,55 @@ class Checker : public StmtVisitor<Checker>,
       if (!Parent->findInterface(I))
         Impls.push_back({I, implementInterface(C, I, Where)});
     C->setInterfaces(Ctx.copyArray<InterfaceImpl>(Impls));
+  }
+
+  /// The class constructor or destructor R of class or advanced record C:
+  /// one of each, without parameters or directives, in a type declared at
+  /// program or unit level (as in Free Pascal); static, so without Self.
+  void defineClassInit(ClassType *C, RoutineDecl *R) {
+    const Identifier &Id = R->getName();
+    bool Ctor = R->getClassInit() == ClassInitKind::Constructor;
+    const char *Kind = Ctor ? "class constructor" : "class destructor";
+    const char *What = C->getRecord() ? "record" : "class";
+    R->setClass(C);
+    R->setParent(nullptr);
+    resolveSignature(R);
+    if (CurRoutine) {
+      Diags.error(Id.Loc,
+                  llvm::Twine("a ") + Kind + " needs a " + What +
+                      " declared at program or unit level",
+                  {Id.getRange()});
+      return;
+    }
+    if (RoutineDecl *Prev =
+            Ctor ? C->getClassConstructor() : C->getClassDestructor()) {
+      Diags.error(Id.Loc,
+                  llvm::Twine("only one ") + Kind + " can be declared in " +
+                      What + " '" + C->getName() + "'",
+                  {Id.getRange()});
+      noteDeclaredHere(Prev);
+      return;
+    }
+    if (!R->getParams().empty())
+      Diags.error(Id.Loc, llvm::Twine("a ") + Kind + " cannot have parameters",
+                  {Id.getRange()});
+    const char *Directive = R->isVirtual()               ? "virtual"
+                            : R->isOverride()            ? "override"
+                            : R->isAbstract()            ? "abstract"
+                            : R->hasOverloadDirective()  ? "overload"
+                            : R->isInline()              ? "inline"
+                            : R->getCallConv() != CallConv::Default
+                                ? callConvName(R->getCallConv())
+                                : nullptr;
+    if (Directive)
+      Diags.error(Id.Loc,
+                  llvm::Twine("'") + Directive + "' cannot be used with a " +
+                      Kind,
+                  {Id.getRange()});
+    if (Ctor)
+      C->setClassConstructor(R);
+    else
+      C->setClassDestructor(R);
   }
 
   void defineMethod(ClassType *C, ClassType *Parent, RoutineDecl *R,
@@ -3300,6 +3357,45 @@ class Checker : public StmtVisitor<Checker>,
     if (!C)
       return;
     const char *What = C->getRecord() ? "record" : "class";
+    if (R->isClassInit()) { // class constructor TFoo.Create
+      bool Ctor = R->getClassInit() == ClassInitKind::Constructor;
+      RoutineDecl *M = Ctor ? C->getClassConstructor() : C->getClassDestructor();
+      if (!M || M->getName().Name != Id.Name) {
+        Diags.error(Id.Loc,
+                    llvm::Twine(What) + " '" + C->getName() + "' has no " +
+                        (Ctor ? "class constructor '" : "class destructor '") +
+                        Id.Spelling + "'",
+                    {Id.getRange()});
+        if (M)
+          noteDeclaredHere(M);
+        return;
+      }
+      if (C->getModule() != CurModule) {
+        Diags.error(Id.Loc,
+                    "'" + qualified(C, M->getName()) +
+                        "' must be implemented where its " + What +
+                        " is declared",
+                    {Id.getRange()});
+        return;
+      }
+      if (M->getBody()) {
+        Diags.error(Id.Loc, "redefinition of '" + qualified(C, M->getName()) + "'",
+                    {Id.getRange()});
+        return;
+      }
+      if (!R->getParams().empty())
+        Diags.error(Id.Loc,
+                    llvm::Twine("a ") +
+                        (Ctor ? "class constructor" : "class destructor") +
+                        " cannot have parameters",
+                    {Id.getRange()});
+      M->setBody(R->getBody());
+      M->setResultName(R->hasResultName());
+      M->setImplementation(R);
+      R->setCanonical(M);
+      checkRoutineBody(M);
+      return;
+    }
     auto *M = llvm::dyn_cast_or_null<RoutineDecl>(C->findOwnMember(Id.Name));
     if (!M || M->getBuiltin() != TObjectMethod::None) {
       Diags.error(Id.Loc,
@@ -3397,6 +3493,19 @@ class Checker : public StmtVisitor<Checker>,
     checkRoutineBody(M);
   }
 
+  /// C's class constructor and destructor have bodies.
+  void checkClassInitImplemented(ClassType *C) {
+    for (RoutineDecl *R : {C->getClassConstructor(), C->getClassDestructor()})
+      if (R && !R->getBody())
+        Diags.error(R->getName().Loc,
+                    llvm::Twine(R->getClassInit() == ClassInitKind::Constructor
+                                    ? "class constructor '"
+                                    : "class destructor '") +
+                        qualified(C, R->getName()) +
+                        "' is declared but never implemented",
+                    {R->getName().getRange()});
+  }
+
   /// Every method of the classes declared in B has a body.
   void checkMethodsImplemented(Block &B) {
     for (Decl *D : B.getDecls())
@@ -3417,6 +3526,7 @@ class Checker : public StmtVisitor<Checker>,
       return;
     }
     if (ClassType *MT = memberTableOf(TD->getType())) {
+      checkClassInitImplemented(MT);
       for (Decl *M : MT->getMembers()) { // an advanced record's
         if (auto *R = llvm::dyn_cast<RoutineDecl>(M); R && !R->getBody())
           Diags.error(R->getName().Loc,
@@ -3434,9 +3544,11 @@ class Checker : public StmtVisitor<Checker>,
     auto *C = llvm::dyn_cast_or_null<ClassType>(TD->getType());
     if (!C)
       return;
+    checkClassInitImplemented(C);
     for (Decl *M : CS->getMembers()) {
       if (auto *R = llvm::dyn_cast<RoutineDecl>(M);
-          R && R->getClass() == C && !R->isAbstract() && !R->getBody())
+          R && R->getClass() == C && !R->isAbstract() && !R->getBody() &&
+          !R->isClassInit())
         Diags.error(R->getName().Loc,
                     "method '" + qualified(C, R->getName()) +
                         "' is declared but never implemented",

@@ -97,7 +97,30 @@ void __pas_init(int32_t argc, char **argv) {
                                 .buf = &__pas_std_buf_out};
 }
 
+/* Class destructors to run at exit (__pas_at_exit), last registered
+ * first. */
+struct PasExitFn {
+  void (*fn)(void *);
+  struct PasExitFn *next;
+};
+struct PasExitFn *__pas_exit_fns;
+
+void __pas_at_exit(void (*fn)(void *)) {
+  struct PasExitFn *e = malloc(sizeof *e);
+  if (!e)
+    __pas_runtime_error("out of memory");
+  e->fn = fn;
+  e->next = __pas_exit_fns;
+  __pas_exit_fns = e;
+}
+
 void __pas_fini(void) {
+  while (__pas_exit_fns) { /* (one may halt: each runs once) */
+    struct PasExitFn *e = __pas_exit_fns;
+    __pas_exit_fns = e->next;
+    e->fn(NULL); /* a Pascal routine: its static link */
+    free(e);
+  }
   for (struct PasFile *f = __pas_all_files; f; f = f->next)
     if (f->fp && f->mode == MODE_GENERATE)
       fflush(f->fp);

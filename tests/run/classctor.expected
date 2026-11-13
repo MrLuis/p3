@@ -1,0 +1,12 @@
+TCounter class constructor
+TDerived class constructor, Count = 10
+TPoint class constructor
+TOuter class constructor
+TInner class constructor
+main: 10 CD
+TCounter.Create (an instance): 11
+TCounter.Create (an instance): 12
+103
+TCounter class destructor: 12 CD
+TPoint class destructor: 7
+TInner class destructor

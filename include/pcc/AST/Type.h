@@ -422,9 +422,15 @@ class ClassType final : public Type {
   /// A type helper's member table: the type it extends (Self's type).
   Type *HelperFor = nullptr;
   bool RecordHelper = false; ///< a record helper (not a type helper)
+  /// Its class constructor and class destructor (not members), or null.
+  RoutineDecl *ClassCtor = nullptr, *ClassDtor = nullptr;
 
 public:
   ClassType() : Type(TK_Class) {}
+  RoutineDecl *getClassConstructor() const { return ClassCtor; }
+  RoutineDecl *getClassDestructor() const { return ClassDtor; }
+  void setClassConstructor(RoutineDecl *R) { ClassCtor = R; }
+  void setClassDestructor(RoutineDecl *R) { ClassDtor = R; }
   /// The advanced record whose member table this is, or null for a class.
   /// A member table has no parent, VMT or instances: its methods' Self is
   /// the record (by reference), and its class methods and operators have

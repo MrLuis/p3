@@ -3048,6 +3048,73 @@ begin
                  (not a^.isFunction or (a^.resultType = b^.resultType));
 end;
 
+{ The class constructor or destructor r of class or advanced record c: one
+  of each, without parameters or directives, in a type declared at program
+  or unit level (as in Free Pascal); static, so without Self. }
+procedure defineClassInit(c: PType; r: PDecl);
+var
+  kind, what, directive: string;
+  prev: PDecl;
+begin
+  if r^.classInit = ciConstructor then
+    kind := 'class constructor'
+  else
+    kind := 'class destructor';
+  if c^.classRecord <> nil then
+    what := 'record'
+  else
+    what := 'class';
+  r^.ownerClass := c;
+  r^.parent := nil;
+  r^.level := 1;
+  resolveSignature(r);
+  if curRoutine <> nil then
+  begin
+    ms('a ' + kind + ' needs a ' + what + ' declared at program or unit level');
+    errR(r^.ident.loc, identRange(r^.ident));
+    exit;
+  end;
+  if r^.classInit = ciConstructor then
+    prev := c^.classCtor
+  else
+    prev := c^.classDtor;
+  if prev <> nil then
+  begin
+    ms('only one ' + kind + ' can be declared in ' + what + ' ');
+    maT(c);
+    errR(r^.ident.loc, identRange(r^.ident));
+    noteDeclaredHere(prev);
+    exit;
+  end;
+  if r^.params.count > 0 then
+  begin
+    ms('a ' + kind + ' cannot have parameters');
+    errR(r^.ident.loc, identRange(r^.ident));
+  end;
+  directive := '';
+  if r^.isVirtual then
+    directive := 'virtual'
+  else if r^.isOverride then
+    directive := 'override'
+  else if r^.isAbstract then
+    directive := 'abstract'
+  else if r^.hasOverloadDirective then
+    directive := 'overload'
+  else if r^.isInline then
+    directive := 'inline'
+  else if r^.callConv <> ccDefault then
+    directive := callConvName(r^.callConv);
+  if directive <> '' then
+  begin
+    ms('''' + directive + ''' cannot be used with a ' + kind);
+    errR(r^.ident.loc, identRange(r^.ident));
+  end;
+  if r^.classInit = ciConstructor then
+    c^.classCtor := r
+  else
+    c^.classDtor := r;
+end;
+
 procedure defineMethod(c, parentClass: PType; r, inh: PDecl; owner: PType;
                        var vtable: TPtrList);
 var
@@ -3795,6 +3862,11 @@ begin
   for i := 0 to ts^.memberList.count - 1 do
   begin
     m := PDecl(listGet(ts^.memberList, i));
+    if (m^.kind = dkRoutine) and (m^.classInit <> ciNone) then
+    begin
+      defineClassInit(c, m); { not a member }
+      continue;
+    end;
     fwd := PDecl(mapGet(own, m^.ident.name^.id));
     if isForwardClassDecl(fwd) and (m^.kind = dkType) then
     begin
@@ -4068,6 +4140,11 @@ begin
   for i := 0 to ts^.recMembers.count - 1 do
   begin
     m := PDecl(listGet(ts^.recMembers, i));
+    if (m^.kind = dkRoutine) and (m^.classInit <> ciNone) then
+    begin
+      defineClassInit(c, m); { not a member }
+      continue;
+    end;
     if (m^.kind = dkConst) or (m^.kind = dkType) then
     begin
       { (declared with the record: see declareAdvancedRecord) }
@@ -4619,7 +4696,7 @@ var
   c, rt, convRT, t: PType;
   m, p, x, match, td: PDecl;
   i: longint;
-  what: string;
+  what, kind: string;
 begin
   if curRoutine <> nil then
   begin
@@ -4670,6 +4747,58 @@ begin
     what := 'record'
   else
     what := 'class';
+  if r^.classInit <> ciNone then { class constructor TFoo.Create }
+  begin
+    if r^.classInit = ciConstructor then
+    begin
+      m := c^.classCtor;
+      kind := 'class constructor';
+    end
+    else
+    begin
+      m := c^.classDtor;
+      kind := 'class destructor';
+    end;
+    if (m = nil) or (m^.ident.name <> r^.ident.name) then
+    begin
+      ms(what + ' ');
+      maT(c);
+      ma(' has no ' + kind + ' ''');
+      maN(r^.ident.spelling);
+      ma('''');
+      errR(r^.ident.loc, identRange(r^.ident));
+      if m <> nil then
+        noteDeclaredHere(m);
+      exit;
+    end;
+    if c^.classModule <> curModule then
+    begin
+      ms('''');
+      maQualified(c, m^.ident);
+      ma(''' must be implemented where its ' + what + ' is declared');
+      errR(r^.ident.loc, identRange(r^.ident));
+      exit;
+    end;
+    if m^.body <> nil then
+    begin
+      ms('redefinition of ''');
+      maQualified(c, m^.ident);
+      ma('''');
+      errR(r^.ident.loc, identRange(r^.ident));
+      exit;
+    end;
+    if r^.params.count > 0 then
+    begin
+      ms('a ' + kind + ' cannot have parameters');
+      errR(r^.ident.loc, identRange(r^.ident));
+    end;
+    m^.body := r^.body;
+    m^.resultName := r^.resultName;
+    m^.implDecl := r;
+    r^.canonical := m;
+    checkRoutineBody(m);
+    exit;
+  end;
   m := findOwnMember(c, r^.ident.name);
   if (m <> nil) and ((m^.kind <> dkRoutine) or (m^.objMethod <> obNone)) then
     m := nil;
@@ -4817,6 +4946,27 @@ begin
   checkRoutineBody(m);
 end;
 
+{ c's class constructor and destructor have bodies. }
+procedure checkClassInitImplemented(c: PType);
+
+  procedure check1(r: PDecl);
+  begin
+    if (r = nil) or (r^.body <> nil) then
+      exit;
+    if r^.classInit = ciConstructor then
+      ms('class constructor ''')
+    else
+      ms('class destructor ''');
+    maQualified(c, r^.ident);
+    ma(''' is declared but never implemented');
+    errR(r^.ident.loc, identRange(r^.ident));
+  end;
+
+begin
+  check1(c^.classCtor);
+  check1(c^.classDtor);
+end;
+
 { Every method of the class or advanced record d, and of those it
   declares, has a body. }
 procedure checkTypeMethodsImplemented(d: PDecl);
@@ -4846,6 +4996,7 @@ begin
   c := memberTableOf(d^.declType);
   if c <> nil then { an advanced record's }
   begin
+    checkClassInitImplemented(c);
     for j := 0 to c^.classMembers.count - 1 do
     begin
       r := PDecl(listGet(c^.classMembers, j));
@@ -4866,11 +5017,12 @@ begin
   c := d^.declType;
   if (c = nil) or (c^.kind <> tyClass) then
     exit;
+  checkClassInitImplemented(c);
   for j := 0 to d^.typeSpec^.memberList.count - 1 do
   begin
     r := PDecl(listGet(d^.typeSpec^.memberList, j));
     if (r^.kind = dkRoutine) and (r^.ownerClass = c) and not r^.isAbstract and
-       (r^.body = nil) then
+       (r^.body = nil) and (r^.classInit = ciNone) then
     begin
       ms('method ''');
       maQualified(c, r^.ident);

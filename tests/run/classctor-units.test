@@ -1,0 +1,36 @@
+; Class constructors and destructors in units, compiled whole and
+; separately: each unit runs its types' class constructors (interface,
+; then implementation, in declaration order) just before its
+; initialization part, in uses order, and the program its own before its
+; body, as in Free Pascal. At exit the class destructors run: the
+; program's, then the units' in reverse order, each unit's in declaration
+; order (Free Pascal's order, written to a file there).
+; RUN: rm -rf %t && mkdir -p %t && cp -r %S/Inputs/classctor/. %t/
+; RUN: %pcc --mode=objfpc -I %t/lib %t/main.pas -o %t/whole
+; RUN: %t/whole | FileCheck %s
+; RUN: %pcc --mode=objfpc -c %t/lib/ubase.pas -o %t/lib/ubase.o
+; RUN: %pcc --mode=objfpc -I %t/lib -c %t/lib/utwo.pas -o %t/lib/utwo.o
+; RUN: %pcc --mode=objfpc -I %t/lib -fseparate-units %t/main.pas -o %t/separate
+; RUN: %t/separate | FileCheck %s
+; CHECK: TBase class constructor
+; CHECK-NEXT: ubase initialization TRUE
+; CHECK-NEXT: T1 class constructor TRUE
+; CHECK-NEXT: T2 class constructor
+; CHECK-NEXT: utwo initialization
+; CHECK-NEXT: TMain class constructor
+; CHECK-NEXT: main
+; CHECK-NEXT: TMain class destructor
+; CHECK-NEXT: T1 class destructor
+; CHECK-NEXT: T2 class destructor
+; CHECK-NEXT: TBase class destructor
+; CHECK-NOT: {{.}}
+;
+; A class constructor's symbol is apart from a method of the same name, and
+; is not exported; the unit's initialization function calls it and
+; registers the class destructor.
+; RUN: %pcc --mode=objfpc -c --emit-llvm %t/lib/ubase.pas -o - | FileCheck --check-prefix=IR %s
+; IR: define void @"pas.ubase$$init"()
+; IR: call void @"pas.tbase.create$cctor"(ptr null)
+; IR-NEXT: call void @__pas_at_exit(ptr @"pas.tbase.destroy$cdtor")
+; IR-DAG: define internal void @"pas.tbase.create$cctor"(ptr %link)
+; IR-DAG: define internal void @"pas.tbase.destroy$cdtor"(ptr %link)

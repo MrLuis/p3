@@ -155,8 +155,12 @@ class ASTPrinter : public StmtVisitor<ASTPrinter>,
     }
     case Decl::DK_Routine: {
       auto *R = llvm::cast<RoutineDecl>(D);
-      line(R->isConstructor()  ? "ConstructorDecl '"
-           : R->isDestructor() ? "DestructorDecl '"
+      line(R->getClassInit() == ClassInitKind::Constructor
+               ? "ClassConstructorDecl '"
+           : R->getClassInit() == ClassInitKind::Destructor
+               ? "ClassDestructorDecl '"
+           : R->isConstructor() ? "ConstructorDecl '"
+           : R->isDestructor()  ? "DestructorDecl '"
            : R->isOperator()   ? "OperatorDecl '"
            : R->isFunction()   ? "FunctionDecl '"
                                : "ProcedureDecl '");
@@ -167,7 +171,7 @@ class ASTPrinter : public StmtVisitor<ASTPrinter>,
       OS << R->getName().Name << '\'';
       if (R->getResultType())
         type(R->getResultType());
-      if (R->isClassMethod())
+      if (R->isClassMethod() && !R->isClassInit())
         OS << " class";
       visibility(R);
       if (R->isVirtual())

@@ -524,9 +524,24 @@ void Parser::parseDeclarations(llvm::SmallVectorImpl<Decl *> &Decls,
           Decls.push_back(R);
         break;
       }
+      if (Tok.isOneOf(tok::kw_constructor, tok::kw_destructor)) {
+        // class constructor TFoo.Create; ... (a static class procedure)
+        ClassInitKind K = Tok.is(tok::kw_constructor)
+                              ? ClassInitKind::Constructor
+                              : ClassInitKind::Destructor;
+        ParsingClassInit = true;
+        RoutineDecl *R = parseRoutineDecl(InInterface);
+        ParsingClassInit = false;
+        if (R) {
+          markClassInit(R, K);
+          Decls.push_back(R);
+        }
+        break;
+      }
       if (Tok.isNot(tok::kw_procedure) && Tok.isNot(tok::kw_function)) {
         Diags.error(Tok.getLocation(),
-                    "expected 'procedure' or 'function' after 'class'");
+                    "expected 'procedure', 'function', 'constructor' or "
+                    "'destructor' after 'class'");
         skipUntil({tok::semi, tok::kw_begin});
         tryConsume(tok::semi);
         break;
@@ -879,12 +894,13 @@ RoutineDecl *Parser::parseRoutineDecl(bool HeadingOnly) {
     expect(tok::greater, "after the type parameters");
     GenericTypeParams = Ctx.copyArray<Identifier>(TypeParams);
   }
-  if (Name.isValid() && MK != MethodKind::None && !ClassName.isValid())
+  if (Name.isValid() && MK != MethodKind::None && !ClassName.isValid()) {
+    std::string K = (ParsingClassInit ? "class " : "") + std::string(Kind);
     Diags.error(Name.Loc,
-                std::string("a ") + Kind +
-                    " must be declared in a class; implement it as '" + Kind +
-                    " TClass." + Name.Spelling.str() + "'",
+                "a " + K + " must be declared in a class; implement it as '" +
+                    K + " TClass." + Name.Spelling.str() + "'",
                 {Name.getRange()});
+  }
   if (ClassName.isValid() && MK == MethodKind::None)
     MK = MethodKind::Method;
 
@@ -1160,6 +1176,24 @@ RoutineDecl *Parser::parseMethodHeading(bool InRecord, bool RecordClassMethod) {
   if (Static && !InRecord) // a class's (Sema checks it is a class method)
     R->setStatic();
   return R;
+}
+
+// classInit = ("class constructor" | "class destructor") name ";"
+//             { directive ";" }      (in a class or an advanced record)
+RoutineDecl *Parser::parseClassInitHeading() {
+  ClassInitKind K = Tok.is(tok::kw_constructor) ? ClassInitKind::Constructor
+                                                : ClassInitKind::Destructor;
+  RoutineDecl *R = parseMethodHeading();
+  if (R)
+    markClassInit(R, K);
+  return R;
+}
+
+void Parser::markClassInit(RoutineDecl *R, ClassInitKind K) {
+  R->setMethodKind(MethodKind::Method);
+  R->setClassMethod();
+  R->setStatic();
+  R->setClassInit(K);
 }
 
 CallConv Parser::callConvOf(const Token &T) const {
@@ -1591,8 +1625,17 @@ TypeSpec *Parser::parseClassType(SourceLocation Start) {
         ClassVars = false;
         continue;
       }
-      if (Tok.isOneOf(tok::kw_constructor, tok::kw_destructor, tok::kw_property)) {
-        unsupported("class " + Tok.getRawText().lower() + "s are");
+      if (Tok.isOneOf(tok::kw_constructor, tok::kw_destructor)) {
+        RoutineDecl *R = parseClassInitHeading();
+        if (!R)
+          return Fail();
+        R->setVisibility(Vis);
+        Members.push_back(R);
+        ClassVars = false;
+        continue;
+      }
+      if (Tok.is(tok::kw_property)) {
+        unsupported("class properties are");
         return Fail();
       }
       if (isIdentifierNamed("operator")) {
@@ -1601,7 +1644,8 @@ TypeSpec *Parser::parseClassType(SourceLocation Start) {
         return Fail();
       }
       Diags.error(Tok.getLocation(),
-                  "expected 'var', 'procedure' or 'function' after 'class'");
+                  "expected 'var', 'procedure', 'function', 'constructor' or "
+                  "'destructor' after 'class'");
       return Fail();
     }
     if (Tok.isOneOf(tok::kw_const, tok::kw_type)) { // nested declarations
@@ -2480,14 +2524,21 @@ TypeSpec *Parser::parseAdvancedRecord(SourceLocation Start,
         AddMember(R);
         continue;
       }
+      if (Tok.isOneOf(tok::kw_constructor, tok::kw_destructor)) {
+        RoutineDecl *R = parseClassInitHeading();
+        if (!R)
+          return Fail();
+        AddMember(R);
+        continue;
+      }
       if (tryConsume(tok::kw_var)) { // class variables follow
         ClassVars = true;
         AfterMethods = false;
         continue;
       }
       Diags.error(Tok.getLocation(),
-                  "expected 'procedure', 'function', 'operator' or 'var' "
-                  "after 'class'");
+                  "expected 'procedure', 'function', 'constructor', "
+                  "'destructor', 'operator' or 'var' after 'class'");
       return Fail();
     }
     if (Tok.isOneOf(tok::kw_type, tok::kw_const)) { // nested declarations

@@ -124,6 +124,16 @@ as are a failed `as` and calling an abstract method.
   `class function TH.Parse(const s: string): T; inline; static;`),
   `class var` sections (one variable shared by the
   class and its descendants).
+- **Class constructors and destructors** (`class constructor Create;`,
+  `class destructor Destroy;`, also in advanced records), as in Free
+  Pascal: at most one of each per type, static class procedures without
+  parameters or directives that cannot be called (a constructor or method
+  may have the same name). A program or unit runs the class constructors of
+  the types it declares (nested ones too), in declaration order, just
+  before its initialization part or body; at exit (also after `halt`) the
+  class destructors run: the program's, then the units' in reverse order,
+  each one's in declaration order. Free Pascal has already closed `Output`
+  then; pcc has not, so they can still write.
 - **Nested declarations:** `const` and `type` sections in a class or an
   advanced record, in any visibility section, as in Free Pascal: constants
   (typed ones in classes, which are class variables), enumerations,
@@ -181,7 +191,8 @@ as are a failed `as` and calling an abstract method.
   methods (`Self` is the record, by reference), constructors with
   parameters (`TR.Create(...)` gives a new record), static class methods
   (`class function F: T; static;`), `class var` sections (static storage,
-  not part of the record), properties and overloaded methods.
+  not part of the record), a class constructor and destructor, properties
+  and overloaded methods.
   Methods can be called on variables, fields, array elements, function
   results and through `with`. Class operators: `class operator +(const a,
   b: TR): TR;` for `+ - * / div mod and or xor shl shr = <> < > <= >= in`,

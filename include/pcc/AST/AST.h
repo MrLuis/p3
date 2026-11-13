@@ -1488,6 +1488,12 @@ enum class MethodKind : unsigned char {
   None, Method, Constructor, Destructor, Operator
 };
 
+/// A class constructor or destructor (objfpc, classes and advanced
+/// records): a static class procedure without parameters that the program
+/// or unit declaring the type runs at its start (before its initialization
+/// part) or end; not a member (it cannot be called).
+enum class ClassInitKind : unsigned char { None, Constructor, Destructor };
+
 /// The methods of the predeclared class TObject, which have no Pascal body.
 /// Predeclared methods without a Pascal body: TObject's, and
 /// Exception.Create (objfpc).
@@ -1542,6 +1548,7 @@ class RoutineDecl final : public Decl {
   llvm::ArrayRef<Identifier> OuterClassNames;
   bool Virtual = false, Override = false, Abstract = false;
   bool ClassMethod = false;
+  ClassInitKind ClassInit = ClassInitKind::None;
   /// Overloading (objfpc): the `overload` directive, the next routine of
   /// the same name in the same scope or class (set by Sema), and this
   /// one's number among them (1, 2, ...; 0 if not overloaded), which goes
@@ -1672,6 +1679,10 @@ public:
   /// reference, not an object.
   bool isClassMethod() const { return ClassMethod; }
   void setClassMethod() { ClassMethod = true; }
+  /// `class constructor` / `class destructor` (see ClassInitKind).
+  ClassInitKind getClassInit() const { return ClassInit; }
+  bool isClassInit() const { return ClassInit != ClassInitKind::None; }
+  void setClassInit(ClassInitKind K) { ClassInit = K; }
   bool hasOverloadDirective() const { return OverloadDirective; }
   void setOverloadDirective() { OverloadDirective = true; }
   RoutineDecl *getNextOverload() const { return NextOverload; }
