@@ -4702,6 +4702,10 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
                       B.getInt64Ty(), {B.getPtrTy()}),
           {loadFile(emitAddress(E->getArgs()[0]))},
           BD->getBuiltinKind() == BuiltinKind::FilePos ? "filepos" : "filesize");
+    case BuiltinKind::GetFileHandle:
+      return B.CreateCall(fileRuntime("__pas_file_handle", B.getInt32Ty(),
+                                      {B.getPtrTy()}),
+                          {loadFile(emitAddress(E->getArgs()[0]))}, "handle");
     case BuiltinKind::SizeOf: // the argument is not evaluated
       if (auto *OA = llvm::dyn_cast<OpenArrayType>(E->getArgs()[0]->getType()))
         return B.CreateMul(openCount(openDescriptor(E->getArgs()[0])),

@@ -831,7 +831,7 @@ begin
   else if (u = 'WORD') or (u = 'SMALLINT') then
     predefinedSize := 2
   else if (u = 'INTEGER') or (u = 'LONGINT') or (u = 'CARDINAL') or
-          (u = 'LONGWORD') or (u = 'DWORD') then
+          (u = 'LONGWORD') or (u = 'DWORD') or (u = 'THANDLE') then
     predefinedSize := 4
   else if (u = 'INT64') or (u = 'REAL') or (u = 'DOUBLE') or
           (u = 'POINTER') or (u = 'PCHAR') or (u = 'ANSISTRING') or

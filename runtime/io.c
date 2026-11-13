@@ -326,6 +326,14 @@ int64_t __pas_filesize(PasFile *f) {
   return turbo_size(f) / f->elem_size;
 }
 
+int32_t __pas_file_handle(PasFile *f) {
+  if (f->is_std)
+    return f->fp ? fileno(f->fp) : f == &__pas_std_input ? 0 : 1;
+  if (f->mode == MODE_UNDEFINED || !f->fp)
+    return -1;
+  return fileno(f->fp);
+}
+
 static void need_inspect(PasFile *f) {
   if (f->mode != MODE_INSPECT)
     file_error(f, "file is not open for reading (use 'reset')");

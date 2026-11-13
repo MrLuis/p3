@@ -80,6 +80,9 @@ int64_t __pas_blockwrite(PasFile *f, const void *buf, int64_t count,
 void __pas_seek(PasFile *f, int64_t n);
 int64_t __pas_filepos(PasFile *f);
 int64_t __pas_filesize(PasFile *f);
+/* GetFileHandle(f): the file descriptor of an open file (input 0, output
+ * 1), -1 if it is not open (FPC's UnusedHandle). */
+int32_t __pas_file_handle(PasFile *f);
 
 /* Typed files: read(f, x) == x := f^; get(f).  write(f, x) == f^ := x; put(f) */
 void __pas_read_elem(PasFile *f, void *dst);

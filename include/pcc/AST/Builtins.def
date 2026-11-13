@@ -62,6 +62,7 @@ BUILTIN_PROC(BlockWrite, "blockwrite")
 BUILTIN_PROC(Seek,       "seek")
 BUILTIN_FUNC(FilePos,    "filepos")
 BUILTIN_FUNC(FileSize,   "filesize")
+BUILTIN_FUNC(GetFileHandle, "getfilehandle") // the OS handle (THandle)
 
 // Turbo/FPC memory, type and program built-ins (S1).
 BUILTIN_PROC(GetMem,     "getmem")

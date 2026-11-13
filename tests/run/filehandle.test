@@ -1,0 +1,25 @@
+; GetFileHandle(f): the operating system's handle (a file descriptor) of
+; any file variable (untyped, typed or text), as a THandle (longint, as in
+; Free Pascal on Unix; also in {$if sizeof(THandle)}); -1 when the file is
+; not open, before reset/rewrite or after close (Free Pascal's
+; FileRec(f).Handle keeps the closed descriptor). input and output are 0
+; and 1. The handle works with the C library (read).
+; RUN: rm -rf %t && mkdir -p %t
+; RUN: %pcc --mode=tp %S/Inputs/filehandle/handle.pas -o %t/handle
+; RUN: %t/handle | FileCheck %s
+; CHECK: -1
+; CHECK-NEXT: TRUE 4
+; CHECK-NEXT: 7 program
+; CHECK-NEXT: -1
+; CHECK-NEXT: 0 1
+; CHECK-NEXT: TRUE
+; CHECK-NEXT: TRUE
+; RUN: %pcc --mode=objfpc %S/Inputs/filehandle/handle.pas -o %t/handle2
+; RUN: %t/handle2 | FileCheck --check-prefix=OBJFPC %s
+; OBJFPC: -1
+; OBJFPC-NEXT: TRUE 4
+; RUN: not %pcc --mode=tp -c %S/Inputs/filehandle/errors.pas -o %t/e.o 2>&1 | FileCheck --check-prefix=ERR %s
+; ERR: errors.pas:5:22: error: 'GetFileHandle' expects a file variable, not a value of type 'integer'
+; ERR: errors.pas:6:8: error: missing argument in call to 'GetFileHandle'
+; RUN: not %pcc --mode=iso -c %S/Inputs/filehandle/iso.pas -o %t/i.o 2>&1 | FileCheck --check-prefix=ISO %s
+; ISO: iso.pas:4:5: error: use of undeclared identifier 'getfilehandle'

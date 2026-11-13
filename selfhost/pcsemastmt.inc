@@ -1049,6 +1049,13 @@ begin
       exit;
     exit(tyInt64T); { (in records) }
   end;
+  if bk = bkGetFileHandle then
+  begin
+    { any file variable, text too; a THandle (longint, as in FPC on Unix) }
+    if checkFileVarArg(arg, e^.callee, false, false) = nil then
+      exit;
+    exit(tyIntegerT);
+  end;
   if (bk = bkEof) or (bk = bkEoln) then
   begin
     isEoln := bk = bkEoln;

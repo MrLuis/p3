@@ -4663,6 +4663,9 @@ begin
     bkFileSize:
         exit(call1(classRuntime('__pas_filesize', 'i64', 'ptr'),
                    loadFile(emitAddress(PNode(listGet(e^.args, 0)))), 'filesize'));
+    bkGetFileHandle:
+        exit(call1(classRuntime('__pas_file_handle', 'i32', 'ptr'),
+                   loadFile(emitAddress(PNode(listGet(e^.args, 0)))), 'handle'));
   else
     ;
   end;

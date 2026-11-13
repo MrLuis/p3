@@ -432,6 +432,7 @@ static int64_t predefinedSize(llvm::StringRef Upper) {
       .Cases("CHAR", "ANSICHAR", "BOOLEAN", "BYTE", "SHORTINT", 1)
       .Cases("WORD", "SMALLINT", 2)
       .Cases("INTEGER", "LONGINT", "CARDINAL", "LONGWORD", "DWORD", 4)
+      .Case("THANDLE", 4)
       .Cases("INT64", "REAL", "DOUBLE", "POINTER", 8)
       .Cases("PCHAR", "ANSISTRING", "SIZEINT", "PTRINT", 8)
       .Cases("NATIVEINT", "PANSICHAR", "PGUID", 8)

@@ -600,7 +600,8 @@ begin
                     bkGetMem, bkFreeMem, bkReallocMem, bkFillChar, bkMove,
                     bkHalt, bkSizeOf, bkLow, bkHigh, bkAssigned, bkParamCount,
                     bkParamStr, bkAssign, bkClose, bkBlockRead, bkBlockWrite,
-                    bkSeek, bkFilePos, bkFileSize, bkAssignFile, bkCloseFile];
+                    bkSeek, bkFilePos, bkFileSize, bkGetFileHandle,
+                    bkAssignFile, bkCloseFile];
 end;
 
 { Free Pascal's objpas built-ins, predeclared only with --mode=objfpc. }
@@ -1079,6 +1080,8 @@ begin
     stdType('nativeuint', tyQWordT);
     stdType('ptruint', tyQWordT);
     stdType('sizeuint', tyQWordT);
+    { FPC's THandle (a file descriptor on Unix): longint }
+    stdType('thandle', tyIntegerT);
     stdType('byte', tyByteT);
     stdType('word', tyWordT);
     stdType('shortint', tyShortIntT);

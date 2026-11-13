@@ -215,6 +215,8 @@ class Checker : public StmtVisitor<Checker>,
       Ty("nativeuint", Ctx.getQWordType());
       Ty("ptruint", Ctx.getQWordType());
       Ty("sizeuint", Ctx.getQWordType());
+      // FPC's THandle (a file descriptor on Unix): longint.
+      Ty("thandle", Ctx.getIntegerType());
       Ty("byte", Ctx.getByteType());
       Ty("word", Ctx.getWordType());
       Ty("shortint", Ctx.getShortIntType());
@@ -616,7 +618,7 @@ class Checker : public StmtVisitor<Checker>,
     case BuiltinKind::Assign: case BuiltinKind::Close:
     case BuiltinKind::BlockRead: case BuiltinKind::BlockWrite:
     case BuiltinKind::Seek: case BuiltinKind::FilePos:
-    case BuiltinKind::FileSize:
+    case BuiltinKind::FileSize: case BuiltinKind::GetFileHandle:
       return true;
     case BuiltinKind::AssignFile: case BuiltinKind::CloseFile:
       return true; // (and objfpc only: see isObjFPCOnly)
@@ -6174,6 +6176,12 @@ class Checker : public StmtVisitor<Checker>,
       if (!checkFileVarArg(Arg, Callee, /*NotText=*/true))
         return errorType();
       return Ctx.getInt64Type(); // (in records)
+    }
+    if (BD->getBuiltinKind() == BuiltinKind::GetFileHandle) {
+      // any file variable, text too; a THandle (longint, as in FPC on Unix)
+      if (!checkFileVarArg(Arg, Callee))
+        return errorType();
+      return Ctx.getIntegerType();
     }
     if (BD->getBuiltinKind() == BuiltinKind::Eof ||
         BD->getBuiltinKind() == BuiltinKind::Eoln) {

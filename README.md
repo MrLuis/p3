@@ -18,8 +18,8 @@ to native executables through LLVM. See [PLAN.md](PLAN.md) for the roadmap.
   in the source)
 - pointers, sets, files (text, typed and, outside ISO mode, untyped `file`;
   program parameters bind to command-line arguments; Turbo/FPC `Assign`,
-  `Close`, `BlockRead`/`BlockWrite`, `Seek`, `FilePos` and `FileSize`, see
-  below), `goto`, procedural parameters, `pack`/`unpack`
+  `Close`, `BlockRead`/`BlockWrite`, `Seek`, `FilePos`, `FileSize` and
+  `GetFileHandle`, see below), `goto`, procedural parameters, `pack`/`unpack`
 - local variables and function results start from zero (numbers 0,
   pointers and objects `nil`, strings empty), which ISO leaves undefined.
   The elements of local arrays, the fields of local records and the
@@ -398,6 +398,11 @@ and `BlockWrite` move whole records, and without `done` reading fewer is a
 runtime error. An empty name is standard input or output. I/O errors are
 runtime errors (no `{$I-}` or `IOResult` yet). Program-parameter and
 internal typed files keep ISO's buffer variable (`f^`, `get`, `put`).
+`GetFileHandle(f)` gives the operating system's handle of any file variable
+(text, typed or untyped), the file descriptor, as a `THandle` (`longint`,
+as in Free Pascal on Unix): `input` is 0, `output` 1, and a file that is
+not open -1 (Free Pascal 3.2.2 has no `GetFileHandle`; its
+`FileRec(f).Handle` keeps a closed file's descriptor).
 
 **`{$push}` / `{$pop}`**, as in Free Pascal: `{$pop}` restores the local
 switches the matching `{$push}` saved (nested, at most 21 levels): `{$H}`,
