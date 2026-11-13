@@ -2595,13 +2595,30 @@ begin
         classVars := false;
         continue;
       end;
-      if tok.kind = tkKwProperty then
-        unsupported('class properties are')
-      else if isIdentifierNamed('operator') then
+      if tok.kind = tkKwProperty then { class property P: T read ... }
+      begin
+        m := parsePropertyDecl;
+        if m = nil then
+        begin
+          failed := true;
+          break;
+        end;
+        hf := 0;
+        hm := nil;
+        while parseSeparatedHint(hf, hm) do
+          ;
+        addHints(m, hf, hm);
+        m^.propIsClass := true;
+        m^.vis := vis;
+        listAdd(members, m);
+        classVars := false;
+        continue;
+      end;
+      if isIdentifierNamed('operator') then
         diagError(tok.loc, 'class operators can only be declared in records')
       else
         diagError(tok.loc, 'expected ''var'', ''procedure'', ''function'', ' +
-                  '''constructor'' or ''destructor'' after ''class''');
+                  '''constructor'', ''destructor'' or ''property'' after ''class''');
       failed := true;
       break;
     end;
@@ -3573,6 +3590,23 @@ begin
         addMember(m);
         continue;
       end;
+      if tok.kind = tkKwProperty then { class property P: T read ... }
+      begin
+        m := parsePropertyDecl;
+        if m = nil then
+        begin
+          failed := true;
+          break;
+        end;
+        hf := 0;
+        hm := nil;
+        while parseSeparatedHint(hf, hm) do
+          ;
+        addHints(m, hf, hm);
+        m^.propIsClass := true;
+        addMember(m);
+        continue;
+      end;
       if tryConsume(tkKwVar) then { class variables follow }
       begin
         classVars := true;
@@ -3580,7 +3614,7 @@ begin
         continue;
       end;
       diagError(tok.loc, 'expected ''procedure'', ''function'', ''constructor'', ' +
-                '''destructor'', ''operator'' or ''var'' after ''class''');
+                '''destructor'', ''property'', ''operator'' or ''var'' after ''class''');
       failed := true;
       break;
     end;

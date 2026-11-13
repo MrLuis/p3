@@ -111,6 +111,17 @@ begin
   isNestedDecl := (d^.kind = dkType) or (d^.kind = dkConst);
 end;
 
+{ usable in a static method (no Self): static methods and class
+  properties }
+function isStaticMember(d: PDecl): boolean;
+begin
+  if d = nil then
+    exit(false);
+  if d^.kind = dkRoutine then
+    exit(d^.isStatic);
+  isStaticMember := (d^.kind = dkProperty) and d^.propIsClass;
+end;
+
 procedure scopeAddImport(s, imported: PScope);
 begin
   listAdd(s^.imports, imported);
@@ -155,10 +166,11 @@ begin
   end;
   if (s^.withClass <> nil) and (s^.withCtx = nil) then
   begin
-    { a record's static method: only its class methods and operators
-      (static), constants and types are usable without a record }
+    { a static method: only static methods and operators, class
+      properties, constants, types and class variables are usable without
+      an object }
     d := findMember(s^.withClass, name, owner);
-    if ((d <> nil) and (d^.kind = dkRoutine) and d^.isStatic) or isNestedDecl(d) then
+    if isStaticMember(d) or isNestedDecl(d) then
       exit(d);
     exit(nil);
   end;
@@ -253,7 +265,7 @@ begin
       begin
         d := PDecl(listGet(c^.classMembers, i));
         if ((s^.withClass <> nil) and (s^.withCtx <> nil)) or isNestedDecl(d) or
-           ((s^.withClass <> nil) and (d^.kind = dkRoutine) and d^.isStatic) then
+           ((s^.withClass <> nil) and isStaticMember(d)) then
           listAdd(names, d^.ident.name);
       end;
       c := c^.classParent;

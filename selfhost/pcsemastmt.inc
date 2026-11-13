@@ -1887,14 +1887,18 @@ begin
   checkMemberAccess(d, owner, e^.fieldName);
   if (viaClass <> nil) or viaRef then
   begin
-    { through a class: constructors, class methods, class variables }
+    { through a class: constructors, class methods, class variables and
+      class properties }
     ok := (d^.kind = dkVar) or (d^.kind = dkConst) or (d^.kind = dkType);
     if d^.kind = dkRoutine then
       ok := ((d^.methodKind = mtConstructor) or d^.isClassMethod) and
             (d^.methodKind <> mtOperator);
+    if d^.kind = dkProperty then
+      ok := d^.propIsClass;
     if not ok then
     begin
-      ms('only constructors, class methods and class variables can be used through ');
+      ms('only constructors, class methods, class variables and class ' +
+         'properties can be used through ');
       if viaClass <> nil then
       begin
         ma('the ' + what + ' name ');

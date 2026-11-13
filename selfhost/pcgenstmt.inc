@@ -446,31 +446,48 @@ var
   c, t: PType;
   args, noIndexes: TPtrList;
 begin
-  if target^.kind = nkIndex then
-    obj := propertyObject(target, c)
-  else if target^.kind = nkNameRef then
+  if p^.propIsClass then { a class variable or a static method }
   begin
-    obj := withBase(target^.refWith);
-    c := target^.refWith^.rec^.typ;
+    if p^.writeDecl^.kind = dkRoutine then
+    begin
+      listInit(noIndexes);
+      if target^.kind = nkIndex then
+        accessorArgs(p, target^.idxArgs, value, args)
+      else
+        accessorArgs(p, noIndexes, value, args);
+      ignored := emitCall(p^.writeDecl, args);
+      exit;
+    end;
+    addr := PTVBox(p^.writeDecl^.cgValue)^;
   end
   else
   begin
-    obj := memberObject(target^.base);
-    c := target^.base^.typ;
-  end;
-  if p^.writeDecl^.kind = dkRoutine then
-  begin
-    listInit(noIndexes);
     if target^.kind = nkIndex then
-      accessorArgs(p, target^.idxArgs, value, args)
+      obj := propertyObject(target, c)
+    else if target^.kind = nkNameRef then
+    begin
+      obj := withBase(target^.refWith);
+      c := target^.refWith^.rec^.typ;
+    end
     else
-      accessorArgs(p, noIndexes, value, args);
-    ignored := emitMethodCall(p^.writeDecl, obj, args, false, target^.b);
-    listFree(args);
-    exit;
+    begin
+      obj := memberObject(target^.base);
+      c := target^.base^.typ;
+    end;
+    if p^.writeDecl^.kind = dkRoutine then
+    begin
+      listInit(noIndexes);
+      if target^.kind = nkIndex then
+        accessorArgs(p, target^.idxArgs, value, args)
+      else
+        accessorArgs(p, noIndexes, value, args);
+      ignored := emitMethodCall(p^.writeDecl, obj, args, false, target^.b);
+      listFree(args);
+      exit;
+    end;
+    addr := fieldAddress(obj, c, p^.writeDecl);
   end;
   t := p^.propType;
-  addr := fieldAddress(obj, c, p^.writeDecl);
   if t^.kind = tyShortString then
   begin
     emitStringAssign(addr, t, value);

@@ -37,7 +37,7 @@
 ; CHECK: errors.pas:48:11: error: the right operand of 'is' must be the name of a class or interface type
 ; CHECK: errors.pas:49:8: error: invalid operands to 'is' ('integer' and 'TA')
 ; CHECK: errors.pas:51:8: error: invalid operands to 'is' ('record' and 'TA')
-; CHECK: errors.pas:52:11: error: only constructors, class methods and class variables can be used through the class name 'TA'; 'P' is a procedure
+; CHECK: errors.pas:52:11: error: only constructors, class methods, class variables and class properties can be used through the class name 'TA'; 'P' is a procedure
 ; CHECK: errors.pas:53:3: error: 'inherited' is only allowed in a method
 ; CHECK: errors.pas:55:11: error: cannot write a value of type 'TA'
 ; CHECK: errors.pas:56:10: error: no member named 'Prop' in class 'TA'

@@ -71,6 +71,14 @@ public:
       return V->isClassVar();
     return D && (llvm::isa<TypeDecl>(D) || llvm::isa<ConstDecl>(D));
   }
+  /// Usable in a static method (no Self): static methods and class
+  /// properties.
+  static bool isStaticMember(const Decl *D) {
+    if (auto *R = llvm::dyn_cast_or_null<RoutineDecl>(D))
+      return R->isStatic();
+    auto *P = llvm::dyn_cast_or_null<PropertyDecl>(D);
+    return P && P->isClassProperty();
+  }
 
   Scope *getParent() const { return Parent; }
   void setRoutineBoundary() { RoutineBoundary = true; }
@@ -104,8 +112,7 @@ public:
            C = C->getParent())
         for (Decl *D : C->getMembers())
           if ((WithClass && With) || isNestedDecl(D) ||
-              (WithClass && llvm::isa<RoutineDecl>(D) &&
-               llvm::cast<RoutineDecl>(D)->isStatic()))
+              (WithClass && isStaticMember(D)))
             Fn(D->getName().Name);
       return;
     }
@@ -124,11 +131,11 @@ public:
       return isNestedDecl(D) ? D : nullptr;
     }
     if (WithClass && !With) {
-      // A record's static method: only its class methods and operators
-      // (static), constants and types are usable without a record.
+      // A static method: only static methods and operators, class
+      // properties, constants, types and class variables are usable
+      // without an object.
       Decl *D = WithClass->findMember(Name);
-      auto *R = llvm::dyn_cast_or_null<RoutineDecl>(D);
-      return (R && R->isStatic()) || isNestedDecl(D) ? D : nullptr;
+      return isStaticMember(D) || isNestedDecl(D) ? D : nullptr;
     }
     if (WithClass)
       return WithClass->findMember(Name);

@@ -1946,6 +1946,8 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
         return fieldAddress(withBase(N->getWith()),
                             N->getWith()->Record->getType(), F);
       if (auto *P = llvm::dyn_cast<PropertyDecl>(N->getDecl())) {
+        if (P->isClassProperty())
+          return emitPropertyRead(P, nullptr, nullptr);
         WithContext *W = N->getWith();
         return emitPropertyRead(P, withBase(W), W->Record->getType());
       }
@@ -4145,6 +4147,13 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
   llvm::Value *emitPropertyRead(PropertyDecl *P, llvm::Value *Obj, Type *C,
                                 llvm::ArrayRef<Expr *> Indexes = {}) {
     Type *T = P->getType();
+    if (P->isClassProperty()) { // a class variable or a static method
+      if (auto *V = llvm::dyn_cast<VarDecl>(P->getRead()))
+        return T->isStructured() ? Globals[V]
+                                 : loadScalar(Globals[V], T, P->getName().Name);
+      return emitCall(llvm::cast<RoutineDecl>(P->getRead()),
+                      accessorArgs(P, Indexes, nullptr));
+    }
     if (auto *F = llvm::dyn_cast<FieldDecl>(P->getRead())) {
       llvm::Value *Addr = fieldAddress(Obj, C, F);
       if (T->isStructured())
@@ -4198,6 +4207,9 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
   /// The value of array property access E (an address for strings and
   /// records).
   llvm::Value *emitArrayPropertyRead(IndexExpr *E) {
+    if (E->getProperty()->isClassProperty())
+      return emitPropertyRead(E->getProperty(), nullptr, nullptr,
+                              E->getPropertyArgs());
     Type *C;
     llvm::Value *Obj = propertyObject(E, C);
     return emitPropertyRead(E->getProperty(), Obj, C, E->getPropertyArgs());
@@ -4215,6 +4227,8 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
       return loadScalar(Globals[V], V->getType(), V->getName().Name);
     }
     Type *C = F->getBase()->getType();
+    if (auto *P = llvm::dyn_cast<PropertyDecl>(D); P && P->isClassProperty())
+      return emitPropertyRead(P, nullptr, nullptr); // (no object)
     if (auto *P = llvm::dyn_cast<PropertyDecl>(D);
         P && helperRoutine(P)) // a type helper's
       return emitPropertyRead(P, helperSelf(F), C);
@@ -5168,8 +5182,19 @@ public:
   /// Target := Value for a property Target: stores into its field or
   /// calls its write procedure.
   void emitPropertyWrite(PropertyDecl *P, Expr *Target, Expr *Value) {
-    llvm::Value *Obj;
-    Type *C;
+    llvm::Value *Obj = nullptr;
+    Type *C = nullptr;
+    if (P->isClassProperty()) { // a class variable or a static method
+      if (auto *R = llvm::dyn_cast<RoutineDecl>(P->getWrite())) {
+        auto *I = llvm::dyn_cast<IndexExpr>(Target);
+        emitCall(R, accessorArgs(P, I ? I->getPropertyArgs()
+                                      : llvm::ArrayRef<Expr *>(),
+                                 Value));
+        return;
+      }
+      storeProperty(P, Globals[llvm::cast<VarDecl>(P->getWrite())], Value);
+      return;
+    }
     if (auto *I = llvm::dyn_cast<IndexExpr>(Target)) {
       Obj = propertyObject(I, C);
     } else if (auto *N = llvm::dyn_cast<NameRefExpr>(Target)) {
@@ -5189,8 +5214,13 @@ public:
                      /*Inherited=*/false, Target->getBeginLoc());
       return;
     }
+    storeProperty(P, fieldAddress(Obj, C, llvm::cast<FieldDecl>(P->getWrite())),
+                  Value);
+  }
+
+  /// Value stored at Addr, property P's field or class variable.
+  void storeProperty(PropertyDecl *P, llvm::Value *Addr, Expr *Value) {
     Type *T = P->getType();
-    llvm::Value *Addr = fieldAddress(Obj, C, llvm::cast<FieldDecl>(P->getWrite()));
     if (auto *SS = llvm::dyn_cast<ShortStringType>(T)) {
       emitStringAssign(Addr, SS, Value);
       return;
@@ -6189,6 +6219,8 @@ public:
   llvm::Value *visitNameRefExpr(NameRefExpr *E) {
     Decl *D = E->getDecl();
     if (auto *P = llvm::dyn_cast<PropertyDecl>(D)) {
+      if (P->isClassProperty())
+        return emitPropertyRead(P, nullptr, nullptr);
       WithContext *W = E->getWith();
       return emitPropertyRead(P, withBase(W), W->Record->getType());
     }

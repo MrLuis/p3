@@ -880,6 +880,8 @@ begin
           bufAdd(outBuf, ' default');
         if d^.propNoDefault then
           bufAdd(outBuf, ' nodefault');
+        if d^.propIsClass then
+          bufAdd(outBuf, ' class');
         visibilitySuffix(d);
         loc(d^.loc);
         indent := indent + 2;

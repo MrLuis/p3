@@ -2556,6 +2556,9 @@ begin
               emitAddress := fieldAddress(withBase(w), w^.rec^.typ, d);
             end;
           dkProperty:
+            if d^.propIsClass then
+              emitAddress := emitPropertyRead(d, irNull, nil)
+            else
             begin
               w := e^.refWith;
               emitAddress := emitPropertyRead(d, withBase(w), w^.rec^.typ);
@@ -4119,6 +4122,18 @@ var
   args: TPtrList;
 begin
   t := p^.propType;
+  if p^.propIsClass then { a class variable or a static method }
+  begin
+    if p^.readDecl^.kind = dkVar then
+    begin
+      addr := PTVBox(p^.readDecl^.cgValue)^;
+      if isStructured(t) then
+        exit(addr);
+      exit(loadScalar(addr, t, nm(p^.ident.name)));
+    end;
+    accessorArgs(p, indexes, nil, args);
+    exit(emitCall(p^.readDecl, args));
+  end;
   if p^.readDecl^.kind = dkField then
   begin
     addr := fieldAddress(obj, c, p^.readDecl);
@@ -4166,6 +4181,8 @@ var
   c: PType;
   obj: TV;
 begin
+  if e^.idxProp^.propIsClass then
+    exit(emitPropertyReadArgs(e^.idxProp, irNull, nil, e^.idxArgs));
   obj := propertyObject(e, c);
   emitArrayPropertyRead := emitPropertyReadArgs(e^.idxProp, obj, c, e^.idxArgs);
 end;
@@ -4192,6 +4209,8 @@ begin
     exit(loadScalar(PTVBox(d^.cgValue)^, d^.varType, nm(d^.ident.name)));
   end;
   c := e^.base^.typ;
+  if (d^.kind = dkProperty) and d^.propIsClass then
+    exit(emitPropertyRead(d, irNull, nil)); { (no object) }
   if (d^.kind = dkProperty) and (helperRoutine(d) <> nil) then { a type helper's }
     exit(emitPropertyRead(d, helperSelf(e), c));
   obj := memberObject(e^.base);
@@ -4772,6 +4791,8 @@ var
   noArgs: TPtrList;
 begin
   d := e^.refDecl;
+  if (d^.kind = dkProperty) and d^.propIsClass then
+    exit(emitPropertyRead(d, irNull, nil));
   if d^.kind = dkProperty then
     exit(emitPropertyRead(d, withBase(e^.refWith), e^.refWith^.rec^.typ));
   if (d^.kind = dkRoutine) and d^.isStatic then

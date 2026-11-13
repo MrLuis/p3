@@ -3236,31 +3236,49 @@ class Checker : public StmtVisitor<Checker>,
         S += std::string(S.empty() ? "" : "; ") + "index: integer";
       if (!IsRead)
         S += std::string(S.empty() ? "" : "; ") + "value: " + T->getName();
-      return IsRead ? "a function (" + S + "): " + T->getName()
-                    : "a procedure (" + S + ")";
+      std::string Kind = P->isClassProperty() ? "a static class " : "a ";
+      return IsRead ? Kind + "function (" + S + "): " + T->getName()
+                    : Kind + "procedure (" + S + ")";
     };
+    // A class property's accessors: class variables or static class
+    // methods (as in Free Pascal); an instance property's: fields or
+    // methods.
+    bool ClassProp = P->isClassProperty();
+    const char *PropWord = ClassProp ? "class property '" : "property '";
+    auto Storage = [&](Decl *D) -> Type * {
+      if (ClassProp) {
+        auto *V = llvm::dyn_cast<VarDecl>(D);
+        return V && V->isClassVar() ? V->getType() : nullptr;
+      }
+      auto *F = llvm::dyn_cast<FieldDecl>(D);
+      return F ? F->getType() : nullptr;
+    };
+    const char *StorageWord = ClassProp ? "a class variable" : "a field";
+    const char *FnWord = ClassProp ? "a static class function" : "a function";
+    const char *ProcWord = ClassProp ? "a static class procedure" : "a procedure";
     Decl *Read = nullptr, *Write = nullptr;
     if (P->getReadName().isValid() && (Read = Find(P->getReadName()))) {
       const Identifier &Id = P->getReadName();
-      auto *F = llvm::dyn_cast<FieldDecl>(Read);
+      Type *FT = Storage(Read);
       auto *R = llvm::dyn_cast<RoutineDecl>(Read);
       auto Fits = [&](RoutineDecl *X) {
         return X->isFunction() && X->getParams().size() == Leading &&
-               IndexParamsMatch(X) && X->getResultType() == T;
+               IndexParamsMatch(X) && X->getResultType() == T &&
+               (!ClassProp || X->isStatic());
       };
       for (RoutineDecl *X = R; R && R->isOverloaded() && X; X = X->getNextOverload())
         if (Fits(X)) { // of overloaded methods, the one that fits
           Read = R = X;
           break;
         }
-      bool OK = (Plain && F && F->getType() == T) || (R && Fits(R));
+      bool OK = (Plain && FT == T) || (R && Fits(R));
       if (!OK && !T->isError() && ParamsOK) {
         Diags.error(Id.Loc,
-                    "'" + Id.Spelling + "' cannot be read as property '" +
+                    "'" + Id.Spelling + "' cannot be read as " + PropWord +
                         P->getName().Spelling + "' of type " + quoted(T) +
-                        (Plain ? std::string(" (use a field of that type or a "
-                                             "function without parameters "
-                                             "returning it)")
+                        (Plain ? " (use " + std::string(StorageWord) +
+                                     " of that type or " + FnWord +
+                                     " without parameters returning it)"
                                : " (use " + Wanted(true) + ")"),
                     {Id.getRange()});
         Read = nullptr;
@@ -3268,27 +3286,28 @@ class Checker : public StmtVisitor<Checker>,
     }
     if (P->getWriteName().isValid() && (Write = Find(P->getWriteName()))) {
       const Identifier &Id = P->getWriteName();
-      auto *F = llvm::dyn_cast<FieldDecl>(Write);
+      Type *FT = Storage(Write);
       auto *R = llvm::dyn_cast<RoutineDecl>(Write);
       auto Fits = [&](RoutineDecl *X) {
         return X->getMethodKind() == MethodKind::Method && X->isProcedure() &&
                X->getParams().size() == Leading + 1 && IndexParamsMatch(X) &&
                !X->getParams()[Leading]->isVarParam() &&
-               X->getParams()[Leading]->getType() == T;
+               X->getParams()[Leading]->getType() == T &&
+               (!ClassProp || X->isStatic());
       };
       for (RoutineDecl *X = R; R && R->isOverloaded() && X; X = X->getNextOverload())
         if (Fits(X)) { // of overloaded methods, the one that fits
           Write = R = X;
           break;
         }
-      bool OK = (Plain && F && F->getType() == T) || (R && Fits(R));
+      bool OK = (Plain && FT == T) || (R && Fits(R));
       if (!OK && !T->isError() && ParamsOK) {
         Diags.error(Id.Loc,
-                    "'" + Id.Spelling + "' cannot be written as property '" +
+                    "'" + Id.Spelling + "' cannot be written as " + PropWord +
                         P->getName().Spelling + "' of type " + quoted(T) +
-                        (Plain ? std::string(" (use a field of that type or a "
-                                             "procedure with one parameter of "
-                                             "it)")
+                        (Plain ? " (use " + std::string(StorageWord) +
+                                     " of that type or " + ProcWord +
+                                     " with one parameter of it)"
                                : " (use " + Wanted(false) + ")"),
                     {Id.getRange()});
         Write = nullptr;
@@ -3585,7 +3604,9 @@ class Checker : public StmtVisitor<Checker>,
   /// Is D an instance member (a field, a property, a method that is not a
   /// class method or constructor)? Class methods cannot use them.
   static bool isInstanceMember(Decl *D) {
-    if (llvm::isa<FieldDecl>(D) || llvm::isa<PropertyDecl>(D))
+    if (auto *P = llvm::dyn_cast<PropertyDecl>(D))
+      return !P->isClassProperty();
+    if (llvm::isa<FieldDecl>(D))
       return true;
     auto *R = llvm::dyn_cast<RoutineDecl>(D);
     return R && R->isMethod() && !R->isClassMethod() && !R->isConstructor();
@@ -8771,15 +8792,18 @@ public:
     }
     checkMemberAccess(D, Owner, F);
     if (ViaClass || ViaRef) {
-      // Through a class: constructors, class methods, class variables.
+      // Through a class: constructors, class methods, class variables and
+      // class properties.
       bool OK = llvm::isa<VarDecl>(D) || llvm::isa<ConstDecl>(D) ||
                 llvm::isa<TypeDecl>(D);
       if (auto *R = llvm::dyn_cast<RoutineDecl>(D))
         OK = (R->isConstructor() || R->isClassMethod()) && !R->isOperator();
+      if (auto *P = llvm::dyn_cast<PropertyDecl>(D))
+        OK = P->isClassProperty();
       if (!OK) {
         Diags.error(F.Loc,
-                    "only constructors, class methods and class variables can "
-                    "be used through " +
+                    "only constructors, class methods, class variables and "
+                    "class properties can be used through " +
                         (ViaClass ? std::string("the ") + What + " name '" +
                                         C->getName() + "'"
                                   : std::string("a class reference")) +

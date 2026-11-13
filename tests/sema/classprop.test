@@ -1,0 +1,19 @@
+; Class properties: their accessors must be class variables or static
+; class methods (as in Free Pascal); an instance property's cannot be a
+; class variable. Read-only and write-only class properties, and an
+; instance property used through the class name.
+; RUN: not %pcc --mode=objfpc -ferror-limit=0 -c %S/Inputs/classprop/errors.pas -o %t.o 2>&1 | FileCheck %s
+; CHECK: errors.pas:13:36: error: 'FI' cannot be read as class property 'A' of type 'integer' (use a class variable of that type or a static class function without parameters returning it)
+; CHECK: errors.pas:14:36: error: 'GetI' cannot be read as class property 'B' of type 'integer'
+; CHECK: errors.pas:15:36: error: 'GetC' cannot be read as class property 'C' of type 'integer'
+; CHECK: errors.pas:16:45: error: 'GetS' cannot be written as class property 'D' of type 'integer' (use a class variable of that type or a static class procedure with one parameter of it)
+; CHECK: errors.pas:19:30: error: 'FV' cannot be read as property 'X' of type 'integer' (use a field of that type or a function without parameters returning it)
+; CHECK: errors.pas:20:48: error: 'GetS' cannot be read as class property 'Q' of type 'integer' (use a static class function (i: integer): integer)
+; CHECK: errors.pas:27:5: error: property 'E' is read-only
+; CHECK: errors.pas:28:13: error: property 'W' is write-only
+; CHECK: errors.pas:29:5: error: only constructors, class methods, class variables and class properties can be used through the class name 'T'; 'X' is a property
+; CHECK-NOT: error:
+;
+; The parse tree marks a class property.
+; RUN: %pcc --mode=objfpc --emit-parse-tree -o - %S/../run/classprop.pas | FileCheck --check-prefix=TREE %s
+; TREE: PropertyDecl 'build' read 'fbuild' write 'setbuild' class

@@ -18,10 +18,10 @@
 ; CHECK: errors.pas:48:5: error: assigning to 'TAClass' from incompatible type 'class of TOther'
 ; CHECK: errors.pas:49:5: error: assigning to 'TOtherClass' from incompatible type 'TAClass'
 ; CHECK: errors.pas:50:5: error: assigning to 'TAClass' from incompatible type 'TA'
-; CHECK: errors.pas:51:11: error: only constructors, class methods and class variables can be used through the class name 'TA'; 'F' is a field
-; CHECK: errors.pas:52:6: error: only constructors, class methods and class variables can be used through the class name 'TA'; 'M' is a procedure
-; CHECK: errors.pas:53:5: error: only constructors, class methods and class variables can be used through a class reference; 'M' is a procedure
-; CHECK: errors.pas:54:10: error: only constructors, class methods and class variables can be used through a class reference; 'F' is a field
+; CHECK: errors.pas:51:11: error: only constructors, class methods, class variables and class properties can be used through the class name 'TA'; 'F' is a field
+; CHECK: errors.pas:52:6: error: only constructors, class methods, class variables and class properties can be used through the class name 'TA'; 'M' is a procedure
+; CHECK: errors.pas:53:5: error: only constructors, class methods, class variables and class properties can be used through a class reference; 'M' is a procedure
+; CHECK: errors.pas:54:10: error: only constructors, class methods, class variables and class properties can be used through a class reference; 'F' is a field
 ; CHECK: errors.pas:57:8: error: invalid operands to '=' ('TAClass' and 'TOtherClass')
 ; CHECK: errors.pas:58:8: error: invalid operands to '=' ('TAClass' and 'class of TOther')
 ; CHECK-NOT: error

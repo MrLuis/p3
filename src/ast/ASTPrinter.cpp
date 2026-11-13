@@ -258,6 +258,8 @@ class ASTPrinter : public StmtVisitor<ASTPrinter>,
         OS << " default";
       if (P->isNoDefault())
         OS << " nodefault";
+      if (P->isClassProperty())
+        OS << " class";
       visibility(P);
       loc(P->getLocation());
       IndentScope I(Indent);

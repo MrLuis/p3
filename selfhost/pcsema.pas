@@ -3292,10 +3292,14 @@ var
   q: PDecl;
   first: boolean;
 begin
-  if isRead then
-    ma(' (use a function (')
+  if p^.propIsClass then
+    ma(' (use a static class ')
   else
-    ma(' (use a procedure (');
+    ma(' (use a ');
+  if isRead then
+    ma('function (')
+  else
+    ma('procedure (');
   first := true;
   for i := 0 to p^.propParams.count - 1 do
   begin
@@ -3336,10 +3340,25 @@ end;
 
 { Does routine x fit as property p's read accessor (leading: its index
   parameters and N) / write accessor? }
+{ The type of accessor d of property p when it is storage: a class
+  property's class variable, an instance property's field; else nil. }
+function storageType(p, d: PDecl): PType;
+begin
+  storageType := nil;
+  if p^.propIsClass then
+  begin
+    if (d^.kind = dkVar) and d^.isClassVar then
+      storageType := d^.varType;
+  end
+  else if d^.kind = dkField then
+    storageType := d^.fieldType;
+end;
+
 function readFits(p, x: PDecl; t: PType; leading: longint): boolean;
 begin
   readFits := x^.isFunction and (x^.params.count = leading) and
-              indexParamsMatch(p, x) and (x^.resultType = t);
+              indexParamsMatch(p, x) and (x^.resultType = t) and
+              (not p^.propIsClass or x^.isStatic);
 end;
 
 function writeFits(p, x: PDecl; t: PType; leading: longint): boolean;
@@ -3348,7 +3367,8 @@ var
 begin
   writeFits := false;
   if (x^.methodKind = mtMethod) and not x^.isFunction and
-     (x^.params.count = leading + 1) and indexParamsMatch(p, x) then
+     (x^.params.count = leading + 1) and indexParamsMatch(p, x) and
+     (not p^.propIsClass or x^.isStatic) then
   begin
     prm := PDecl(listGet(x^.params, leading));
     writeFits := (prm^.varKind <> vkVarParam) and (prm^.varType = t);
@@ -3444,17 +3464,23 @@ begin
   end;
   if rd <> nil then
   begin
-    ok := (plain and (rd^.kind = dkField) and (rd^.fieldType = t)) or
+    ok := (plain and (storageType(p, rd) = t)) or
           ((rd^.kind = dkRoutine) and readFits(p, rd, t, leading));
     if not ok and not isError(t) and paramsOK then
     begin
       ms('''');
       maN(p^.readName.spelling);
-      ma(''' cannot be read as property ''');
+      if p^.propIsClass then
+        ma(''' cannot be read as class property ''')
+      else
+        ma(''' cannot be read as property ''');
       maN(p^.ident.spelling);
       ma(''' of type ');
       maT(t);
-      if plain then
+      if plain and p^.propIsClass then
+        ma(' (use a class variable of that type or a static class function ' +
+           'without parameters returning it)')
+      else if plain then
         ma(' (use a field of that type or a function without parameters ' +
            'returning it)')
       else
@@ -3480,17 +3506,23 @@ begin
   end;
   if wr <> nil then
   begin
-    ok := (plain and (wr^.kind = dkField) and (wr^.fieldType = t)) or
+    ok := (plain and (storageType(p, wr) = t)) or
           ((wr^.kind = dkRoutine) and writeFits(p, wr, t, leading));
     if not ok and not isError(t) and paramsOK then
     begin
       ms('''');
       maN(p^.writeName.spelling);
-      ma(''' cannot be written as property ''');
+      if p^.propIsClass then
+        ma(''' cannot be written as class property ''')
+      else
+        ma(''' cannot be written as property ''');
       maN(p^.ident.spelling);
       ma(''' of type ');
       maT(t);
-      if plain then
+      if plain and p^.propIsClass then
+        ma(' (use a class variable of that type or a static class procedure ' +
+           'with one parameter of it)')
+      else if plain then
         ma(' (use a field of that type or a procedure with one parameter ' +
            'of it)')
       else
@@ -5088,7 +5120,8 @@ end;
   class method or constructor)? Class methods cannot use them. }
 function isInstanceMember(d: PDecl): boolean;
 begin
-  isInstanceMember := (d^.kind in [dkField, dkProperty]) or
+  isInstanceMember := (d^.kind = dkField) or
+                      ((d^.kind = dkProperty) and not d^.propIsClass) or
                       ((d^.kind = dkRoutine) and (d^.methodKind <> mtNone) and
                        not d^.isClassMethod and (d^.methodKind <> mtConstructor));
 end;

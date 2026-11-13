@@ -1741,6 +1741,10 @@ class PropertyDecl final : public Decl {
   Expr *DefaultValue = nullptr; ///< `default V` (for streaming; no effect)
   bool IsDefault = false;       ///< `...; default;`: obj[i] means obj.P[i]
   bool NoDefault = false;       ///< `nodefault` (no effect)
+  /// `class property` (objfpc, classes and advanced records): its accessors
+  /// are class variables or static class methods, so it is used without
+  /// an object (through the type, a class reference, an object or Self).
+  bool ClassProperty = false;
 
 public:
   PropertyDecl(Identifier Name, TypeSpec *TS, Identifier ReadName,
@@ -1769,6 +1773,8 @@ public:
   void setDefault() { IsDefault = true; }
   bool isNoDefault() const { return NoDefault; }
   void setNoDefault() { NoDefault = true; }
+  bool isClassProperty() const { return ClassProperty; }
+  void setClassProperty() { ClassProperty = true; }
   static bool classof(const Decl *D) { return D->getKind() == DK_Property; }
 };
 

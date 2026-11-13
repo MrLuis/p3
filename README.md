@@ -124,6 +124,12 @@ as are a failed `as` and calling an abstract method.
   `class function TH.Parse(const s: string): T; inline; static;`),
   `class var` sections (one variable shared by the
   class and its descendants).
+- **Class properties** (`class property Build: Integer read FBuild write
+  SetBuild;`, also in advanced records), as in Free Pascal: the accessors
+  are class variables or static class methods (array properties and
+  `index` too), and the property is used without an object: through the
+  type name (`TApp.Build := 5`), a class reference, an object, a
+  descendant, Self, or unqualified in static, class and instance methods.
 - **Class constructors and destructors** (`class constructor Create;`,
   `class destructor Destroy;`, also in advanced records), as in Free
   Pascal: at most one of each per type, static class procedures without
@@ -290,8 +296,8 @@ type
   writeln(g.ToString, ' ', g.IsEmpty, ' ', TGUID.Empty.IsEmpty);
 ```
 
-Not supported (reported as such): class properties, class constructors
-and destructors, `stored`, `implements`, properties in interfaces.
+Not supported (reported as such): `stored`, `implements`, properties in
+interfaces.
 
 Exceptions (`--mode=objfpc`), as in Free Pascal:
 

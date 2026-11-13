@@ -1634,9 +1634,19 @@ TypeSpec *Parser::parseClassType(SourceLocation Start) {
         ClassVars = false;
         continue;
       }
-      if (Tok.is(tok::kw_property)) {
-        unsupported("class properties are");
-        return Fail();
+      if (Tok.is(tok::kw_property)) { // class property P: T read ...
+        PropertyDecl *P = parsePropertyDecl();
+        if (!P)
+          return Fail();
+        Hints H;
+        while (parseSeparatedHint(H)) {
+        }
+        P->addHints(H.Flags, H.Message);
+        P->setClassProperty();
+        P->setVisibility(Vis);
+        Members.push_back(P);
+        ClassVars = false;
+        continue;
       }
       if (isIdentifierNamed("operator")) {
         Diags.error(Tok.getLocation(),
@@ -1644,8 +1654,8 @@ TypeSpec *Parser::parseClassType(SourceLocation Start) {
         return Fail();
       }
       Diags.error(Tok.getLocation(),
-                  "expected 'var', 'procedure', 'function', 'constructor' or "
-                  "'destructor' after 'class'");
+                  "expected 'var', 'procedure', 'function', 'constructor', "
+                  "'destructor' or 'property' after 'class'");
       return Fail();
     }
     if (Tok.isOneOf(tok::kw_const, tok::kw_type)) { // nested declarations
@@ -2531,6 +2541,18 @@ TypeSpec *Parser::parseAdvancedRecord(SourceLocation Start,
         AddMember(R);
         continue;
       }
+      if (Tok.is(tok::kw_property)) { // class property P: T read ...
+        PropertyDecl *P = parsePropertyDecl();
+        if (!P)
+          return Fail();
+        Hints H;
+        while (parseSeparatedHint(H)) {
+        }
+        P->addHints(H.Flags, H.Message);
+        P->setClassProperty();
+        AddMember(P);
+        continue;
+      }
       if (tryConsume(tok::kw_var)) { // class variables follow
         ClassVars = true;
         AfterMethods = false;
@@ -2538,7 +2560,7 @@ TypeSpec *Parser::parseAdvancedRecord(SourceLocation Start,
       }
       Diags.error(Tok.getLocation(),
                   "expected 'procedure', 'function', 'constructor', "
-                  "'destructor', 'operator' or 'var' after 'class'");
+                  "'destructor', 'property', 'operator' or 'var' after 'class'");
       return Fail();
     }
     if (Tok.isOneOf(tok::kw_type, tok::kw_const)) { // nested declarations

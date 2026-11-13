@@ -528,7 +528,11 @@ type
       dkProperty: (propSpec: PTypeSpec; propType: PType;
                    readName, writeName: TIdent; readDecl, writeDecl: PDecl;
                    propParams: TPtrList; propIndex, propDefaultValue: PNode;
-                   propIsDefault, propNoDefault: boolean);
+                   propIsDefault, propNoDefault: boolean;
+                   { class property (objfpc, classes and advanced records):
+                     its accessors are class variables or static class
+                     methods, so it is used without an object }
+                   propIsClass: boolean);
   end;
 
 const

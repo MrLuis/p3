@@ -27,7 +27,7 @@
 ; CHECK: errors.pas:21:20: error: method 'TR.operator /' is declared but never implemented
 ; CHECK: errors.pas:47:5: error: 'Secret' is a strict private member of 'TR'
 ; CHECK: errors.pas:6:5: note: 'Secret' declared here
-; CHECK: errors.pas:49:6: error: only constructors, class methods and class variables can be used through the record name 'TR'; 'Q' is a procedure
+; CHECK: errors.pas:49:6: error: only constructors, class methods, class variables and class properties can be used through the record name 'TR'; 'Q' is a procedure
 ; CHECK: errors.pas:50:10: error: operator '*' is not overloaded for 'TR' and 'TR'
 ; CHECK: errors.pas:51:8: error: operator '-' is not overloaded for 'TR'
 ; CHECK: errors.pas:52:8: error: invalid typecast from 'TR' to 'integer' (only between ordinal types and between pointer types)
