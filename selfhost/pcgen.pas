@@ -748,7 +748,7 @@ begin
           lowerType := layoutFieldList(t^.fieldList, name, 0);
       end;
     tyPointer, tyNil, tyFile: lowerType := irPtrT;
-    tySet: lowerType := irI256;
+    tySet: lowerType := irInt(setStorageBits(t));
     tyShortString: lowerType := irArray(t^.maxLength + 1, irI8);
     tyAnsiString, tyArrayOfConst, tyOpenArray, tyDynArray: lowerType := irPtrT;
     tyRoutine: lowerType := routinePairT;
@@ -1151,21 +1151,40 @@ begin
   emitRangeCheckMsg(v, src, target, loc, 'value out of range');
 end;
 
-{ The i256 with bits lo..hi set, or all the other bits. }
-function setMaskConst(lo, hi: int64; invert: boolean): TV;
+{ The set value of bits bits with the members lo..hi, or with all the
+  others. }
+function setMaskConst(lo, hi: int64; invert: boolean; bits: longint): TV;
 var
   l: TLimbs;
   k: longint;
   inside: boolean;
 begin
   limbsOfInt(0, l);
-  for k := 0 to 255 do
+  for k := 0 to bits - 1 do
   begin
     inside := (k >= lo) and (k <= hi);
     if inside <> invert then
       l[k div 32] := l[k div 32] or (int64(1) shl (k mod 32));
   end;
-  setMaskConst := irConstLimbs(irI256, l);
+  setMaskConst := irConstLimbs(irInt(bits), l);
+end;
+
+{ A set value of fromBits bits (or an i64 bit index) as one of toBits bits. }
+function setCast(const v: TV; fromBits, toBits: longint): TV;
+begin
+  if fromBits = toBits then
+    setCast := v
+  else if fromBits < toBits then
+    setCast := irCast('zext', v, irInt(toBits), '')
+  else
+    setCast := irCast('trunc', v, irInt(toBits), '');
+end;
+
+{ The set value v of type src as a value of the set type dst (the members
+  that do not fit are dropped). }
+function convertSet(const v: TV; src, dst: PType): TV;
+begin
+  convertSet := setCast(v, setStorageBits(src), setStorageBits(dst));
 end;
 
 { Converts a value for assignment or parameter passing: integer to real,
@@ -1176,6 +1195,7 @@ function convertForAssign(const v: TV; src, dst: PType; loc: TLoc): TV;
 var
   tb, fb: TOrdinalBounds;
   outside, w: TV;
+  bits: longint;
 begin
   if dst^.kind = tyInterface then
   begin
@@ -1202,14 +1222,18 @@ begin
   begin
     tb := getOrdinalBounds(dst^.setElement);
     if isEmptySet(src) then
-      exit(v);
+      exit(convertSet(v, src, dst));
     fb := getOrdinalBounds(getBase(src^.setElement));
     if (fb.lo >= tb.lo) and (fb.hi <= tb.hi) then
-      exit(v);
-    outside := irBin('and', v, setMaskConst(tb.lo, tb.hi, true), '');
-    emitRuntimeCheck(irICmp('ne', outside, irZero(irI256), ''),
+      exit(convertSet(v, src, dst));
+    { (in src's representation: a member beyond it cannot be there) }
+    bits := setStorageBits(src);
+    outside := irBin('and', v, setMaskConst(tb.lo, tb.hi, true, bits), '');
+    emitRuntimeCheck(irICmp('ne', outside, irZero(irInt(bits)), ''),
                      'set member out of range', loc);
   end;
+  if dst^.kind = tySet then
+    exit(convertSet(v, src, dst));
   convertForAssign := v;
 end;
 
@@ -2254,8 +2278,10 @@ end;
 
 { --- Sets --- }
 
-{ An ordinal value as a bit index (i256), checked to be in 0..255. }
-function setIndex(const v: TV; t: PType; loc: TLoc): TV;
+{ An ordinal value as a bit index of a set of bits bits, checked to be in
+  0..255. (A set constructor's representation holds every value of its
+  elements' type that is in 0..255.) }
+function setIndex(const v: TV; t: PType; loc: TLoc; bits: longint): TV;
 var
   x, masked: TV;
   bd: TOrdinalBounds;
@@ -2265,21 +2291,24 @@ begin
   if rangeChecks(loc) and ((bd.lo < 0) or (bd.hi > 255)) then
     emitRuntimeCheck(irICmp('ugt', x, i64c(255), ''), 'set element out of range 0..255',
                      loc);
-  masked := irBin('and', x, i64c(255), '');
-  setIndex := irCast('zext', masked, irI256, '');
+  masked := irBin('and', x, i64c(bits - 1), '');
+  setIndex := setCast(masked, 64, bits);
 end;
 
 function emitSetCtor(e: PNode): TV;
 var
   res, one, allOnes, lo, hi, empty, loI, hiI, isTop, shifted, below, hiMask, loBits,
   loMask, both, range_: TV;
-  i: longint;
+  i, bits: longint;
   el: PSetElement;
   lt, ht: PType;
+  ty: PIRType;
 begin
-  res := irZero(irI256);
-  one := irConstInt(irI256, 1);
-  allOnes := irConstInt(irI256, -1);
+  bits := setStorageBits(e^.typ);
+  ty := irInt(bits);
+  res := irZero(ty);
+  one := irConstInt(ty, 1);
+  allOnes := irConstInt(ty, -1);
   for i := 0 to e^.setElems.count - 1 do
   begin
     el := PSetElement(listGet(e^.setElems, i));
@@ -2287,7 +2316,7 @@ begin
     lo := visitExpr(el^.lo);
     if el^.hi = nil then
     begin
-      loI := setIndex(lo, lt, el^.lo^.b);
+      loI := setIndex(lo, lt, el^.lo^.b, bits);
       shifted := irBin('shl', one, loI, '');
       res := irBin('or', res, shifted, '');
       continue;
@@ -2299,9 +2328,9 @@ begin
       empty := irICmp('sgt', lo, hi, '')
     else
       empty := irICmp('ugt', lo, hi, '');
-    loI := setIndex(lo, lt, el^.lo^.b);
-    hiI := setIndex(hi, ht, el^.hi^.b);
-    isTop := irICmp('eq', hiI, irConstInt(irI256, 255), '');
+    loI := setIndex(lo, lt, el^.lo^.b, bits);
+    hiI := setIndex(hi, ht, el^.hi^.b, bits);
+    isTop := irICmp('eq', hiI, irConstInt(ty, bits - 1), '');
     shifted := irBin('add', hiI, one, '');
     shifted := irBin('shl', one, shifted, '');
     below := irBin('sub', shifted, one, '');
@@ -2310,22 +2339,172 @@ begin
     loBits := irBin('sub', loBits, one, '');
     loMask := irBin('xor', loBits, allOnes, '');
     both := irBin('and', hiMask, loMask, '');
-    range_ := irSelect(empty, irZero(irI256), both, '');
+    range_ := irSelect(empty, irZero(ty), both, '');
     res := irBin('or', res, range_, '');
   end;
   emitSetCtor := res;
 end;
 
-{ x in s:  0 <= x <= 255 and bit x of s is set }
+{ x in [a, b..c, ...] without building the set (optimization.md, item 6).
+  The members given by constants are tested together: one value or one
+  range by comparisons; values at most 63 apart by a bit of a 64-bit mask;
+  up to four ranges by comparisons; else the bit of the 256-bit set. Each
+  other element is a comparison (a range: two). All elements are
+  evaluated, in order, after x. }
+procedure inOr(var res: TV; var has: boolean; const v: TV);
+begin
+  if has then
+    res := irBin('or', res, v, 'in')
+  else
+    res := v;
+  has := true;
+end;
+
+{ An element as an i64, checked like a set member (0..255). }
+function inElement(el: PNode): TV;
+var
+  v: TV;
+  bd: TOrdinalBounds;
+begin
+  v := toI64(visitExpr(el), el^.typ);
+  bd := getOrdinalBounds(el^.typ);
+  if not irIsConst(v) and rangeChecks(el^.b) and ((bd.lo < 0) or (bd.hi > 255)) then
+    emitRuntimeCheck(irICmp('ugt', v, i64c(255), ''), 'set element out of range 0..255',
+                     el^.b);
+  inElement := v;
+end;
+
+function inRangeTest(const x: TV; l, h: int64): TV;
+var
+  atLeast, atMost: TV;
+begin
+  if l = h then
+    exit(irICmp('eq', x, i64c(l), 'in'));
+  atLeast := irICmp('sge', x, i64c(l), '');
+  atMost := irICmp('sle', x, i64c(h), '');
+  inRangeTest := irBin('and', atLeast, atMost, 'in');
+end;
+
+function emitInCtor(const x: TV; s: PNode): TV;
+var
+  members: array[0..255] of boolean;
+  rangeLo, rangeHi: array[0..127] of longint;
+  nRanges, i, j, k: longint;
+  any: boolean;
+  el: PSetElement;
+  lo, hi, atLeast, atMost, idx, inside, masked, shifted, bit: TV;
+  cl, ch, lmin, lmax, mask: int64;
+  limbs: TLimbs;
+  res: TV;
+  has: boolean;
+begin
+  has := false;
+  any := false;
+  for k := 0 to 255 do
+    members[k] := false;
+  for i := 0 to s^.setElems.count - 1 do
+  begin
+    el := PSetElement(listGet(s^.setElems, i));
+    lo := inElement(el^.lo);
+    if el^.hi <> nil then
+      hi := inElement(el^.hi)
+    else
+      hi := lo;
+    if irIsConstInt(lo, cl) and irIsConstInt(hi, ch) then
+    begin
+      if cl < 0 then
+        cl := 0;
+      if ch > 255 then
+        ch := 255;
+      for k := cl to ch do
+      begin
+        members[k] := true;
+        any := true;
+      end;
+      continue;
+    end;
+    if el^.hi = nil then
+    begin
+      inOr(res, has, irICmp('eq', x, lo, 'in'));
+      continue;
+    end;
+    atLeast := irICmp('sge', x, lo, '');
+    atMost := irICmp('sle', x, hi, '');
+    inOr(res, has, irBin('and', atLeast, atMost, 'in'));
+  end;
+  if any then
+  begin
+    { the constant members: their ranges, lowest first }
+    nRanges := 0;
+    i := 0;
+    while i < 256 do
+    begin
+      if members[i] then
+      begin
+        j := i;
+        while (j + 1 < 256) and members[j + 1] do
+          j := j + 1;
+        rangeLo[nRanges] := i;
+        rangeHi[nRanges] := j;
+        nRanges := nRanges + 1;
+        i := j;
+      end;
+      i := i + 1;
+    end;
+    lmin := rangeLo[0];
+    lmax := rangeHi[nRanges - 1];
+    if nRanges = 1 then
+      inOr(res, has, inRangeTest(x, lmin, lmax))
+    else if lmax - lmin < 64 then
+    begin
+      idx := irBin('sub', x, i64c(lmin), '');
+      inside := irICmp('ule', idx, i64c(lmax - lmin), '');
+      mask := 0;
+      for k := lmin to lmax do
+        if members[k] then
+          mask := mask or (int64(1) shl (k - lmin));
+      masked := irBin('and', idx, i64c(63), '');
+      shifted := irBin('lshr', i64c(mask), masked, '');
+      bit := irCast('trunc', shifted, irI1, '');
+      inOr(res, has, irBin('and', inside, bit, 'in'));
+    end
+    else if nRanges <= 4 then
+      for i := 0 to nRanges - 1 do
+        inOr(res, has, inRangeTest(x, rangeLo[i], rangeHi[i]))
+    else
+    begin
+      inside := irICmp('ule', x, i64c(255), '');
+      idx := irBin('and', x, i64c(255), '');
+      idx := irCast('zext', idx, irI256, '');
+      limbsOfInt(0, limbs);
+      for k := 0 to 255 do
+        if members[k] then
+          limbs[k div 32] := limbs[k div 32] or (int64(1) shl (k mod 32));
+      shifted := irBin('lshr', irConstLimbs(irI256, limbs), idx, '');
+      bit := irCast('trunc', shifted, irI1, '');
+      inOr(res, has, irBin('and', inside, bit, 'in'));
+    end;
+  end;
+  if has then
+    emitInCtor := res
+  else
+    emitInCtor := irConstBool(false); { x in [] }
+end;
+
+{ x in s:  x is within s's representation and bit x of s is set }
 function emitIn(e: PNode): TV;
 var
   x, s, inRange, idx, shifted, bit: TV;
+  bits: longint;
 begin
   x := toI64(visitExpr(e^.lhs), e^.lhs^.typ);
+  if e^.rhs^.kind = nkSetCtor then
+    exit(emitInCtor(x, e^.rhs));
   s := visitExpr(e^.rhs);
-  inRange := irICmp('ule', x, i64c(255), '');
-  idx := irBin('and', x, i64c(255), '');
-  idx := irCast('zext', idx, irI256, '');
+  bits := setStorageBits(e^.rhs^.typ);
+  inRange := irICmp('ule', x, i64c(bits - 1), '');
+  idx := irBin('and', x, i64c(bits - 1), '');
+  idx := setCast(idx, 64, bits);
   shifted := irBin('lshr', s, idx, '');
   bit := irCast('trunc', shifted, irI1, '');
   emitIn := irBin('and', inRange, bit, 'in');
@@ -4400,6 +4579,8 @@ var
   op: TBinaryOp;
   lt, rt: PType;
   l, r, cmp, notX, masked: TV;
+  wide: PType;
+  setTy: PIRType;
   p: string;
 begin
   op := e^.bop;
@@ -4409,24 +4590,32 @@ begin
     exit(emitIn(e));
   if lt^.kind = tySet then
   begin
+    { compared in the larger of the two representations }
+    if setStorageBits(rt) > setStorageBits(lt) then
+      wide := rt
+    else
+      wide := lt;
+    setTy := irInt(setStorageBits(wide));
     l := visitExpr(e^.lhs);
+    l := convertSet(l, lt, wide);
     r := visitExpr(e^.rhs);
+    r := convertSet(r, rt, wide);
     case op of
       boEq: exit(irICmp('eq', l, r, 'cmp'));
       boNe: exit(irICmp('ne', l, r, 'cmp'));
       boLe:
         begin
           { l is a subset of r }
-          notX := irBin('xor', r, irConstInt(irI256, -1), '');
+          notX := irBin('xor', r, irConstInt(setTy, -1), '');
           masked := irBin('and', l, notX, '');
-          exit(irICmp('eq', masked, irZero(irI256), 'subset'));
+          exit(irICmp('eq', masked, irZero(setTy), 'subset'));
         end;
     else
       begin
         { l is a superset of r }
-        notX := irBin('xor', l, irConstInt(irI256, -1), '');
+        notX := irBin('xor', l, irConstInt(setTy, -1), '');
         masked := irBin('and', r, notX, '');
-        exit(irICmp('eq', masked, irZero(irI256), 'superset'));
+        exit(irICmp('eq', masked, irZero(setTy), 'superset'));
       end;
     end;
   end;
@@ -4941,12 +5130,15 @@ begin
 
   if e^.typ^.kind = tySet then
   begin
+    { (the result has the larger of the two representations) }
+    l := convertSet(l, lt, e^.typ);
+    r := convertSet(r, rt, e^.typ);
     case op of
       boAdd: exit(irBin('or', l, r, 'union'));
       boMul: exit(irBin('and', l, r, 'intersection'));
     else
       begin
-        notR := irBin('xor', r, irConstInt(irI256, -1), '');
+        notR := irBin('xor', r, irConstInt(irInt(setStorageBits(e^.typ)), -1), '');
         exit(irBin('and', l, notR, 'difference'));
       end;
     end;

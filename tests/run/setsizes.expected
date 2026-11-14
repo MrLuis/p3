@@ -1,0 +1,47 @@
+small: 0 5 31
+mid: 0 31 32 63
+wide: 0 31 32 63 64 200 255
+TRUE FALSE TRUE FALSE TRUE FALSE FALSE FALSE
+TRUE FALSE TRUE FALSE
+range: 28 29 30 31
+empty:
+midrange: 0 1 2 60 61 62 63
+widerange: 28 29 30 250 251 252 253 254 255
+union: 1 2 3 4
+inter: 3
+diff: 1 2
+FALSE TRUE TRUE TRUE FALSE TRUE
+small+mid: 1 2 31 40
+mid+small: 1 2 31 40
+small+wide: 1 3 31 200
+wide+mid: 2 3 40 200
+mid-small+wide: 2 3 40 200
+mid*small:
+wide-small: 3 200
+TRUE FALSE FALSE TRUE TRUE TRUE TRUE TRUE TRUE
+TRUE TRUE TRUE TRUE
+narrowed: 1 2 30
+from mid: 5 6
+low: 5 6
+Union: 1 2 5 6
+Widen: 7 31
+odd: 1 3 5 7 9 11 13 15 17 19 21 23 25 27 29 31
+thirds: 30 33 36 39 42 45 48 51 54 57 60 63
+colors: 1 5
+primary: 1 2
+warm+: 0 2 3
+TRUE FALSE TRUE FALSE
+313239
+49
+TRUE FALSE TRUE
+270
+4063
+0 1 2 
+8
+arr2: 1 2 31
+arr3: 2
+r.small: 1 31
+r.mid: 33
+r.wide: 100 255
+r.colors: 4
+7

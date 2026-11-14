@@ -191,6 +191,13 @@ FieldDecl *RecordType::findField(llvm::StringRef Name) const {
   return nullptr;
 }
 
+unsigned SetType::getStorageBits() const {
+  if (!Element)
+    return 32;
+  int64_t Hi = getOrdinalBounds(Element).Hi;
+  return Hi <= 31 ? 32 : Hi <= 63 ? 64 : 256;
+}
+
 OrdinalBounds pcc::getOrdinalBounds(Type *T) {
   switch (T->getKind()) {
   case Type::TK_Integer: {

@@ -1,0 +1,45 @@
+; Assigning or passing a set to a set type with a smaller representation
+; (or a smaller range) is range-checked: a member that does not fit is a
+; runtime error; without range checks it is dropped. A constructor's
+; element must be in 0..255.
+; RUN: %pcc --mode=tp %S/Inputs/setsizes/narrowing.pas -o %t
+; RUN: not %t wide-small 2>&1 | FileCheck --check-prefix=WS %s
+; WS: Runtime error: set member out of range at {{.*}}narrowing.pas:19:37
+; RUN: not %t mid-small 2>&1 | FileCheck --check-prefix=MS %s
+; MS: Runtime error: set member out of range at {{.*}}narrowing.pas:20:36
+; RUN: not %t wide-mid 2>&1 | FileCheck --check-prefix=WM %s
+; WM: Runtime error: set member out of range at {{.*}}narrowing.pas:21:33
+; RUN: not %t small-low 2>&1 | FileCheck --check-prefix=SL %s
+; SL: Runtime error: set member out of range at {{.*}}narrowing.pas:22:34
+; RUN: not %t ctor 2>&1 | FileCheck --check-prefix=CTOR %s
+; CTOR: Runtime error: set element out of range 0..255 at {{.*}}narrowing.pas:23:32
+; RUN: not %t ctor-small 2>&1 | FileCheck --check-prefix=CS %s
+; CS: Runtime error: set member out of range at {{.*}}narrowing.pas:24:37
+; RUN: not %t arg 2>&1 | FileCheck --check-prefix=ARG %s
+; ARG: Runtime error: set member out of range at {{.*}}narrowing.pas:25:26
+; RUN: %t fits | FileCheck --check-prefix=FITS %s
+; FITS: taken
+; FITS-NEXT: TRUE FALSE FALSE FALSE FALSE
+; RUN: %t none | FileCheck --check-prefix=NONE %s
+; NONE: TRUE TRUE TRUE TRUE FALSE
+;
+; Without range checks, the members that do not fit are dropped.
+; RUN: %pcc --mode=tp -O2 -fno-range-checks %S/Inputs/setsizes/narrowing.pas -o %t.u
+; RUN: %t.u wide-small | FileCheck --check-prefix=UWS %s
+; UWS: TRUE FALSE TRUE TRUE FALSE
+; RUN: %t.u wide-mid | FileCheck --check-prefix=UWM %s
+; UWM: TRUE TRUE FALSE FALSE FALSE
+;
+; x in [...] is tested without building the set: by comparisons, a 64-bit
+; mask or (many scattered members) the 256-bit constant; every element is
+; evaluated once (1530 calls of F), at any level and without checks.
+; RUN: %pcc --mode=tp %S/Inputs/setsizes/membership.pas -o %t.m
+; RUN: %t.m | FileCheck --check-prefix=IN %s
+; RUN: %pcc --mode=tp -O2 %S/Inputs/setsizes/membership.pas -o %t.m2
+; RUN: %t.m2 | FileCheck --check-prefix=IN %s
+; RUN: %pcc --mode=tp -fno-range-checks %S/Inputs/setsizes/membership.pas -o %t.m3
+; RUN: %t.m3 | FileCheck --check-prefix=IN %s
+; IN:      948571 1530
+; IN-NEXT: 422053
+; IN-NEXT: 164
+; IN-NEXT: FALSETRUETRUE

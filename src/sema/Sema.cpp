@@ -7910,7 +7910,16 @@ public:
       }
       switch (Op) {
       case BinaryOp::Add: case BinaryOp::Sub: case BinaryOp::Mul:
-        return llvm::cast<SetType>(L)->isEmptySet() ? R : L;
+        // The operand with the larger representation (its values hold the
+        // other's); the left one of equals, the other one of [].
+        if (llvm::cast<SetType>(L)->isEmptySet())
+          return R;
+        if (llvm::cast<SetType>(R)->isEmptySet())
+          return L;
+        return llvm::cast<SetType>(R)->getStorageBits() >
+                       llvm::cast<SetType>(L)->getStorageBits()
+                   ? R
+                   : L;
       case BinaryOp::Eq: case BinaryOp::Ne: case BinaryOp::Le: case BinaryOp::Ge:
         return Ctx.getBooleanType(); // <= is "subset of", >= "superset of"
       default:

@@ -26,6 +26,10 @@ to native executables through LLVM. See [PLAN.md](PLAN.md) for the roadmap.
   characters of local strings are cleared too at `-O0`; from `-O1` they
   are not, unless they hold ansistrings, interfaces or files
   (`-fzero-init` / `-fno-zero-init` choose either way at any level)
+- a set takes 4 bytes when its element type's highest value is at most 31
+  (as in Free Pascal), 8 bytes when it is at most 63 (Free Pascal: 32) and
+  32 bytes otherwise; `x in [...]` is compiled to comparisons or a mask
+  test, without building a set
 - only what the program reaches is compiled to machine code: routines,
   constants and variables that nothing reachable from the main block
   refers to (the unused routines of a used unit, the methods of a class

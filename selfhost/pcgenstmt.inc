@@ -1390,12 +1390,13 @@ begin
           if lo64 < 0 then
             lo64 := 0;
           hi64 := bd.hi;
-          if hi64 > 255 then
-            hi64 := 255;
+          if hi64 > setStorageBits(c^.typ) - 1 then
+            hi64 := setStorageBits(c^.typ) - 1;
           slot := irCreateTemp(memType(elem), 'in.elem');
         end;
         forInLoopBegin(l, i64c(lo64), i64c(hi64));
-        bit := irCast('trunc', irBin('lshr', v, irCast('zext', l.i, irI256, ''), ''),
+        bit := irCast('trunc',
+                      irBin('lshr', v, setCast(l.i, 64, setStorageBits(c^.typ)), ''),
                       irI1, 'in.member');
         member := irNewBlock('forin.member');
         irCondBr(bit, member, l.latchB, false);

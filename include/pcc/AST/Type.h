@@ -304,6 +304,10 @@ public:
   explicit SetType(Type *Element) : Type(TK_Set), Element(Element) {}
   Type *getElementType() const { return Element; }
   bool isEmptySet() const { return Element == nullptr; }
+  /// The bits a value of the set takes: bit i is member i. 32 when the
+  /// element type's values are at most 31 (as in Free Pascal, and for the
+  /// empty set), 64 when at most 63, else 256.
+  unsigned getStorageBits() const;
   static bool classof(const Type *T) { return T->getKind() == TK_Set; }
 };
 

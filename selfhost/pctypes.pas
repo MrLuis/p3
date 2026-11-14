@@ -94,6 +94,10 @@ function getStringLength(t: PType): int64;
 function isStringish(t: PType): boolean;
 function isTextFile(t: PType): boolean;
 function isEmptySet(t: PType): boolean;
+{ The bits a value of set type t takes (bit i is member i): 32 when the
+  element type's values are at most 31 (as in Free Pascal, and for the
+  empty set), 64 when at most 63, else 256. }
+function setStorageBits(t: PType): longint;
 function isUntypedPointer(t: PType): boolean;
 function containsFile(t: PType): boolean;
 { Is t, or does it contain, a COM interface (reference counted)? }
@@ -646,6 +650,21 @@ end;
 function isEmptySet(t: PType): boolean;
 begin
   isEmptySet := (t^.kind = tySet) and (t^.setElement = nil);
+end;
+
+function setStorageBits(t: PType): longint;
+var
+  hi: int64;
+begin
+  if t^.setElement = nil then
+    exit(32);
+  hi := getOrdinalBounds(t^.setElement).hi;
+  if hi <= 31 then
+    setStorageBits := 32
+  else if hi <= 63 then
+    setStorageBits := 64
+  else
+    setStorageBits := 256;
 end;
 
 function isUntypedPointer(t: PType): boolean;

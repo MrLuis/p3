@@ -510,7 +510,7 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
     case Type::TK_File: // a PasFile* owned by the runtime
       return B.getPtrTy();
     case Type::TK_Set:
-      return setType();
+      return setType(T);
     case Type::TK_ShortString: // length byte + chars
       return llvm::ArrayType::get(
           B.getInt8Ty(), llvm::cast<ShortStringType>(T)->getMaxLength() + 1);
@@ -532,8 +532,19 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
     llvm_unreachable("type has no storage representation");
   }
 
-  /// Sets are 256-bit masks: bit i is set iff ord(i) is a member.
-  llvm::IntegerType *setType() { return B.getIntNTy(256); }
+  /// Sets are bit masks: bit i is set iff ord(i) is a member. 32, 64 or
+  /// 256 bits, by the element type's highest value (SetType::
+  /// getStorageBits; optimization.md, item 6).
+  static unsigned setBits(Type *T) {
+    return llvm::cast<SetType>(T)->getStorageBits();
+  }
+  llvm::IntegerType *setType(Type *T) { return B.getIntNTy(setBits(T)); }
+  /// The set value V of type From as a value of the set type To (the
+  /// members that do not fit are dropped).
+  llvm::Value *convertSet(llvm::Value *V, Type *From, Type *To) {
+    (void)From;
+    return B.CreateZExtOrTrunc(V, setType(To));
+  }
 
   /// Register representation: like memType, but booleans are i1.
   llvm::Type *regType(Type *T) {
@@ -914,11 +925,17 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
                              ? TB
                              : getOrdinalBounds(FS->getElementType()->getBase());
       if (FS->isEmptySet() || (FB.Lo >= TB.Lo && FB.Hi <= TB.Hi))
-        return V;
-      llvm::Value *Outside = B.CreateAnd(V, B.CreateNot(constRangeMask(TB.Lo, TB.Hi)));
-      emitRuntimeCheck(B.CreateICmpNE(Outside, llvm::ConstantInt::get(setType(), 0)),
-                       "set member out of range", L);
+        return convertSet(V, From, To);
+      // (in From's representation: a member beyond it cannot be there)
+      unsigned Bits = setBits(From);
+      llvm::Value *Outside =
+          B.CreateAnd(V, B.CreateNot(constRangeMask(TB.Lo, TB.Hi, Bits)));
+      emitRuntimeCheck(
+          B.CreateICmpNE(Outside, llvm::ConstantInt::get(B.getIntNTy(Bits), 0)),
+          "set member out of range", L);
     }
+    if (To->isSet())
+      return convertSet(V, From, To);
     return V;
   }
 
@@ -1298,31 +1315,39 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
   // Sets
   //===--------------------------------------------------------------------===//
 
-  llvm::Constant *constRangeMask(int64_t Lo, int64_t Hi) {
+  /// The members Lo..Hi (within 0..255) as a set value of Bits bits.
+  llvm::Constant *constRangeMask(int64_t Lo, int64_t Hi, unsigned Bits) {
     llvm::APInt M = llvm::APInt::getBitsSet(256, static_cast<unsigned>(Lo),
                                             static_cast<unsigned>(Hi) + 1);
-    return llvm::ConstantInt::get(setType(), M);
+    return llvm::ConstantInt::get(B.getIntNTy(Bits), M.trunc(Bits));
   }
 
-  /// Ordinal value -> bit index (i256), checking 0..255 under range checks.
-  llvm::Value *setIndex(llvm::Value *V, Type *T, SourceLocation L) {
+  /// Ordinal value -> bit index of a set of Bits bits, checking 0..255
+  /// under range checks. (A set constructor's representation holds every
+  /// value of its elements' type that is in 0..255.)
+  llvm::Value *setIndex(llvm::Value *V, Type *T, SourceLocation L,
+                        unsigned Bits) {
     llvm::Value *X = toI64(V, T);
     OrdinalBounds Bd = getOrdinalBounds(T);
     if (rangeChecks(L) && (Bd.Lo < 0 || Bd.Hi > 255))
       emitRuntimeCheck(B.CreateICmpUGT(X, B.getInt64(255)),
                        "set element out of range 0..255", L);
-    return B.CreateZExt(B.CreateAnd(X, B.getInt64(255)), setType());
+    llvm::Value *Masked = B.CreateAnd(X, B.getInt64(Bits - 1));
+    return B.CreateZExtOrTrunc(Masked, B.getIntNTy(Bits));
   }
 
   llvm::Value *emitSetCtor(SetCtorExpr *E) {
-    llvm::Value *Result = llvm::ConstantInt::get(setType(), 0);
-    llvm::Value *One = llvm::ConstantInt::get(setType(), 1);
-    llvm::Value *AllOnes = llvm::ConstantInt::getAllOnesValue(setType());
+    unsigned Bits = setBits(E->getType());
+    llvm::IntegerType *Ty = B.getIntNTy(Bits);
+    llvm::Value *Result = llvm::ConstantInt::get(Ty, 0);
+    llvm::Value *One = llvm::ConstantInt::get(Ty, 1);
+    llvm::Value *AllOnes = llvm::ConstantInt::getAllOnesValue(Ty);
     for (const SetElement &El : E->getElements()) {
       Type *LT = El.Lo->getType();
       llvm::Value *Lo = visitExpr(El.Lo);
       if (!El.Hi) {
-        Result = B.CreateOr(Result, B.CreateShl(One, setIndex(Lo, LT, El.Lo->getBeginLoc())));
+        Result = B.CreateOr(
+            Result, B.CreateShl(One, setIndex(Lo, LT, El.Lo->getBeginLoc(), Bits)));
         continue;
       }
       llvm::Value *Hi = visitExpr(El.Hi);
@@ -1330,27 +1355,123 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
       // Bits Lo..Hi, or nothing if Lo > Hi.
       llvm::Value *Empty = isSignedOrdinal(LT) ? B.CreateICmpSGT(Lo, Hi)
                                                : B.CreateICmpUGT(Lo, Hi);
-      llvm::Value *LoI = setIndex(Lo, LT, El.Lo->getBeginLoc());
-      llvm::Value *HiI = setIndex(Hi, HT, El.Hi->getBeginLoc());
+      llvm::Value *LoI = setIndex(Lo, LT, El.Lo->getBeginLoc(), Bits);
+      llvm::Value *HiI = setIndex(Hi, HT, El.Hi->getBeginLoc(), Bits);
       llvm::Value *IsTop =
-          B.CreateICmpEQ(HiI, llvm::ConstantInt::get(setType(), 255));
+          B.CreateICmpEQ(HiI, llvm::ConstantInt::get(Ty, Bits - 1));
       llvm::Value *Below = B.CreateSub(B.CreateShl(One, B.CreateAdd(HiI, One)), One);
       llvm::Value *HiMask = B.CreateSelect(IsTop, AllOnes, Below);
       llvm::Value *LoMask = B.CreateNot(B.CreateSub(B.CreateShl(One, LoI), One));
       llvm::Value *Range = B.CreateSelect(
-          Empty, llvm::ConstantInt::get(setType(), 0), B.CreateAnd(HiMask, LoMask));
+          Empty, llvm::ConstantInt::get(Ty, 0), B.CreateAnd(HiMask, LoMask));
       Result = B.CreateOr(Result, Range);
     }
     return Result;
   }
 
-  /// x in s  ==  0 <= x <= 255 and bit x of s is set
+  /// x in [a, b..c, ...] without building the set (optimization.md, item
+  /// 6). The members given by constants are tested together: one value or
+  /// one range by comparisons; values at most 63 apart by a bit of a
+  /// 64-bit mask; up to four ranges by comparisons; else the bit of the
+  /// 256-bit set. Each other element is a comparison (a range: two). All
+  /// elements are evaluated, in order, after x.
+  llvm::Value *emitInCtor(llvm::Value *X, SetCtorExpr *S) {
+    llvm::APInt Members(256, 0);
+    llvm::Value *Result = nullptr;
+    auto Or = [&](llvm::Value *V) {
+      Result = Result ? B.CreateOr(Result, V, "in") : V;
+    };
+    // An element as an i64, checked like a set member (0..255).
+    auto Element = [&](Expr *El) {
+      Type *T = El->getType();
+      llvm::Value *V = toI64(visitExpr(El), T);
+      OrdinalBounds Bd = getOrdinalBounds(T);
+      if (!llvm::isa<llvm::ConstantInt>(V) && rangeChecks(El->getBeginLoc()) &&
+          (Bd.Lo < 0 || Bd.Hi > 255))
+        emitRuntimeCheck(B.CreateICmpUGT(V, B.getInt64(255)),
+                         "set element out of range 0..255", El->getBeginLoc());
+      return V;
+    };
+    for (const SetElement &El : S->getElements()) {
+      llvm::Value *Lo = Element(El.Lo);
+      llvm::Value *Hi = El.Hi ? Element(El.Hi) : Lo;
+      auto *CLo = llvm::dyn_cast<llvm::ConstantInt>(Lo);
+      auto *CHi = llvm::dyn_cast<llvm::ConstantInt>(Hi);
+      if (CLo && CHi) {
+        int64_t L = std::max<int64_t>(CLo->getSExtValue(), 0);
+        int64_t H = std::min<int64_t>(CHi->getSExtValue(), 255);
+        if (L <= H)
+          Members.setBits(static_cast<unsigned>(L), static_cast<unsigned>(H) + 1);
+        continue;
+      }
+      if (!El.Hi) {
+        Or(B.CreateICmpEQ(X, Lo, "in"));
+        continue;
+      }
+      llvm::Value *AtLeast = B.CreateICmpSGE(X, Lo);
+      llvm::Value *AtMost = B.CreateICmpSLE(X, Hi);
+      Or(B.CreateAnd(AtLeast, AtMost, "in"));
+    }
+    if (!Members.isZero()) {
+      // The constant members: their ranges, lowest first.
+      llvm::SmallVector<std::pair<int64_t, int64_t>, 8> Ranges;
+      for (unsigned I = 0; I < 256; ++I) {
+        if (!Members[I])
+          continue;
+        unsigned J = I;
+        while (J + 1 < 256 && Members[J + 1])
+          ++J;
+        Ranges.push_back({I, J});
+        I = J;
+      }
+      int64_t Min = Ranges.front().first, Max = Ranges.back().second;
+      auto InRange = [&](int64_t L, int64_t H) -> llvm::Value * {
+        if (L == H)
+          return B.CreateICmpEQ(X, B.getInt64(L), "in");
+        llvm::Value *AtLeast = B.CreateICmpSGE(X, B.getInt64(L));
+        llvm::Value *AtMost = B.CreateICmpSLE(X, B.getInt64(H));
+        return B.CreateAnd(AtLeast, AtMost, "in");
+      };
+      if (Ranges.size() == 1) {
+        Or(InRange(Min, Max));
+      } else if (Max - Min < 64) {
+        llvm::Value *Idx = B.CreateSub(X, B.getInt64(Min));
+        llvm::Value *Inside = B.CreateICmpULE(Idx, B.getInt64(Max - Min));
+        uint64_t Mask = Members.lshr(static_cast<unsigned>(Min)).getLoBits(64)
+                            .getZExtValue();
+        llvm::Value *Bit = B.CreateTrunc(
+            B.CreateLShr(B.getInt64(Mask), B.CreateAnd(Idx, B.getInt64(63))),
+            B.getInt1Ty());
+        Or(B.CreateAnd(Inside, Bit, "in"));
+      } else if (Ranges.size() <= 4) {
+        for (auto [L, H] : Ranges)
+          Or(InRange(L, H));
+      } else {
+        llvm::Value *Inside = B.CreateICmpULE(X, B.getInt64(255));
+        llvm::Value *Idx =
+            B.CreateZExt(B.CreateAnd(X, B.getInt64(255)), B.getIntNTy(256));
+        llvm::Value *Bit = B.CreateTrunc(
+            B.CreateLShr(llvm::ConstantInt::get(B.getIntNTy(256), Members), Idx),
+            B.getInt1Ty());
+        Or(B.CreateAnd(Inside, Bit, "in"));
+      }
+    }
+    if (!Result)
+      return B.getFalse(); // x in []
+    return Result;
+  }
+
+  /// x in s  ==  x is within s's representation and bit x of s is set
   llvm::Value *emitIn(BinaryExpr *E) {
     Type *XT = E->getLHS()->getType();
     llvm::Value *X = toI64(visitExpr(E->getLHS()), XT);
+    if (auto *S = llvm::dyn_cast<SetCtorExpr>(E->getRHS()))
+      return emitInCtor(X, S);
     llvm::Value *S = visitExpr(E->getRHS());
-    llvm::Value *InRange = B.CreateICmpULE(X, B.getInt64(255));
-    llvm::Value *Idx = B.CreateZExt(B.CreateAnd(X, B.getInt64(255)), setType());
+    unsigned Bits = setBits(E->getRHS()->getType());
+    llvm::Value *InRange = B.CreateICmpULE(X, B.getInt64(Bits - 1));
+    llvm::Value *Masked = B.CreateAnd(X, B.getInt64(Bits - 1));
+    llvm::Value *Idx = B.CreateZExtOrTrunc(Masked, S->getType());
     llvm::Value *Bit = B.CreateTrunc(B.CreateLShr(S, Idx), B.getInt1Ty());
     return B.CreateAnd(InRange, Bit, "in");
   }
@@ -2213,10 +2334,11 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
       // `pointer` (untyped) is a void pointer.
       return DIB->createPointerType(P ? debugType(P) : nullptr, 64);
     }
-    case Type::TK_Set: {
-      llvm::Metadata *Sub = DIB->getOrCreateSubrange(0, 32);
+    case Type::TK_Set: { // its bytes
+      unsigned Bits = setBits(T);
+      llvm::Metadata *Sub = DIB->getOrCreateSubrange(0, Bits / 8);
       return DIB->createArrayType(
-          256, 0, DIB->createBasicType("byte", 8, DW_ATE_unsigned),
+          Bits, 0, DIB->createBasicType("byte", 8, DW_ATE_unsigned),
           DIB->getOrCreateArray({Sub}));
     }
     case Type::TK_File:
@@ -4371,8 +4493,13 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
     if (Op == BinaryOp::In)
       return emitIn(E);
     if (LT->isSet()) {
-      llvm::Value *L = visitExpr(E->getLHS()), *R = visitExpr(E->getRHS());
-      llvm::Value *Zero = llvm::ConstantInt::get(setType(), 0);
+      // Compared in the larger of the two representations.
+      Type *Wide = setBits(RTy) > setBits(LT) ? RTy : LT;
+      llvm::Value *L = visitExpr(E->getLHS());
+      L = convertSet(L, LT, Wide);
+      llvm::Value *R = visitExpr(E->getRHS());
+      R = convertSet(R, RTy, Wide);
+      llvm::Value *Zero = llvm::ConstantInt::get(setType(Wide), 0);
       switch (Op) {
       case BinaryOp::Eq: return B.CreateICmpEQ(L, R, "cmp");
       case BinaryOp::Ne: return B.CreateICmpNE(L, R, "cmp");
@@ -5847,13 +5974,13 @@ public:
       if (Elem) {
         OrdinalBounds Bd = getOrdinalBounds(Elem);
         Lo = std::max<int64_t>(Bd.Lo, 0);
-        Hi = std::min<int64_t>(Bd.Hi, 255);
+        Hi = std::min<int64_t>(Bd.Hi, setBits(C->getType()) - 1);
       }
       llvm::Value *Slot = Elem ? createTemp(memType(Elem), "in.elem") : nullptr;
       emitForInLoop(B.getInt64(Lo), B.getInt64(Hi),
                     [&](llvm::Value *I, llvm::BasicBlock *Latch) {
                       llvm::Value *Bit = B.CreateTrunc(
-                          B.CreateLShr(V, B.CreateZExt(I, setType())),
+                          B.CreateLShr(V, B.CreateZExtOrTrunc(I, V->getType())),
                           B.getInt1Ty(), "in.member");
                       auto *Member = newBlock("forin.member");
                       B.CreateCondBr(Bit, Member, Latch);
@@ -6453,6 +6580,9 @@ public:
     llvm::Value *R = visitExpr(E->getRHS());
 
     if (E->getType()->isSet()) {
+      // (the result has the larger of the two representations)
+      L = convertSet(L, LT, E->getType());
+      R = convertSet(R, RTy, E->getType());
       switch (Op) {
       case BinaryOp::Add: return B.CreateOr(L, R, "union");
       case BinaryOp::Mul: return B.CreateAnd(L, R, "intersection");

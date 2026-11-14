@@ -360,9 +360,10 @@ begin
         buildDebugType := pointerType(debugType(t^.pointee), 'DW_TAG_pointer_type')
       else
         buildDebugType := pointerType(nil, 'DW_TAG_pointer_type');
-    tySet:
-      buildDebugType := arrayType(256, basicType('byte', 8, 'DW_ATE_unsigned'),
-                                  subrange(0, 32));
+    tySet: { its bytes }
+      buildDebugType := arrayType(setStorageBits(t),
+                                  basicType('byte', 8, 'DW_ATE_unsigned'),
+                                  subrange(0, setStorageBits(t) div 8));
     tyFile:
       buildDebugType := pointerType(unspecifiedType('PasFile'), 'DW_TAG_pointer_type');
     tyClass:

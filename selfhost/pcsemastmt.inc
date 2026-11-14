@@ -3782,7 +3782,13 @@ begin
     end;
     case op of
       boAdd, boSub, boMul:
+        { the operand with the larger representation (its values hold the
+          other's); the left one of equals, the other one of [] }
         if isEmptySet(l) then
+          exit(r)
+        else if isEmptySet(r) then
+          exit(l)
+        else if setStorageBits(r) > setStorageBits(l) then
           exit(r)
         else
           exit(l);
