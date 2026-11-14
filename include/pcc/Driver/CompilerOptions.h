@@ -54,6 +54,11 @@ struct CompilerOptions {
   /// -fno-zero-init; without either, at -O0 only.
   std::optional<bool> ZeroInit;
 
+  /// -fkeep-unused: keep the routines, constants and variables that
+  /// nothing reachable from the program refers to (by default they are not
+  /// compiled to machine code, at any optimization level).
+  bool KeepUnused = false;
+
   /// From -O1, the runtime's small functions are inlined (the runtime's
   /// LLVM IR, libpascalrt.ll, is linked into the module before it is
   /// optimized); -fno-inline-runtime disables that.

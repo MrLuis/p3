@@ -1,0 +1,76 @@
+; Only what is reachable is compiled (optimization.md, item 21): the
+; internal routines, constants and variables that nothing reachable from
+; main refers to are removed from the module, at every optimization level.
+; Reachable: what main's code refers to, and so on; a routine whose address
+; is taken; the methods in the VMT of a class that is referred to.
+; -fkeep-unused keeps everything.
+; RUN: rm -rf %t && mkdir -p %t && cp -r %S/Inputs/unused/. %t/
+; RUN: %pcc --mode=objfpc --emit-llvm -I %t/lib %t/main.pas -o %t/main.ll
+; RUN: FileCheck %s < %t/main.ll
+; RUN: FileCheck --check-prefix=GONE %s < %t/main.ll
+; RUN: opt -passes=verify -disable-output %t/main.ll
+;
+; Called from main, directly and through Twice:
+; CHECK-DAG: define internal i32 @pas.twice(
+; CHECK-DAG: define internal i32 @pas.scale(
+; CHECK-DAG: @pas.factors = internal
+; Its address is taken:
+; CHECK-DAG: define internal i32 @pas.negate(
+; In the VMTs of TSquare and of its ancestor TShape:
+; CHECK-DAG: define internal i32 @pas.tsquare.area(
+; CHECK-DAG: define internal i32 @pas.tshape.area(
+; CHECK-DAG: define internal void @pas.tshape.name(
+; CHECK-DAG: define i32 @main(
+;
+; Not called, called only by a routine that is not called, the methods of
+; a class nothing refers to (and its VMT), and what only they refer to
+; (their string constants and runtime error messages):
+; GONE-NOT: @pas.unused
+; GONE-NOT: @pas.thrice
+; GONE-NOT: @pas.hidden
+; GONE-NOT: @pas.orphan
+; GONE-NOT: @pas.describe
+; GONE-NOT: tunusedshape
+; GONE-NOT: never called
+; GONE-NOT: a unit of tools
+;
+; The program runs the same either way.
+; RUN: %pcc --mode=objfpc -I %t/lib %t/main.pas -o %t/main
+; RUN: %t/main | FileCheck --check-prefix=OUT %s
+; RUN: %pcc --mode=objfpc -O2 -I %t/lib %t/main.pas -o %t/main2
+; RUN: %t/main2 | FileCheck --check-prefix=OUT %s
+; RUN: %pcc --mode=objfpc --fkeep-unused -I %t/lib %t/main.pas -o %t/mainkeep
+; RUN: %t/mainkeep | FileCheck --check-prefix=OUT %s
+; OUT: 8 -5 9 shape
+;
+; -fkeep-unused: everything is there.
+; RUN: %pcc --mode=objfpc --emit-llvm --fkeep-unused -I %t/lib %t/main.pas -o - | FileCheck --check-prefix=KEEP %s
+; KEEP-DAG: define internal i32 @pas.unused(
+; KEEP-DAG: define internal void @pas.unusedhelper(
+; KEEP-DAG: define internal void @pas.unused2(
+; KEEP-DAG: define internal i32 @pas.thrice(
+; KEEP-DAG: define internal i32 @pas.hidden(
+; KEEP-DAG: define internal i32 @pas.orphan(
+; KEEP-DAG: define internal void @pas.describe(
+; KEEP-DAG: define internal i32 @pas.tunusedshape.area(
+; KEEP-DAG: c"never called"
+;
+; A unit compiled on its own keeps its interface (external symbols, which
+; other modules may use) and what that refers to: Hidden, called by Thrice.
+; Orphan, in the implementation only and not called, is removed.
+; RUN: %pcc --mode=objfpc -c --emit-llvm %t/lib/tools.pas -o %t/tools.ll
+; RUN: FileCheck --check-prefix=UNIT %s < %t/tools.ll
+; RUN: FileCheck --check-prefix=UNITGONE %s < %t/tools.ll
+; UNIT-DAG: define i32 @"pas.tools$twice"(
+; UNIT-DAG: define i32 @"pas.tools$thrice"(
+; UNIT-DAG: define void @"pas.tools$describe"(
+; UNIT-DAG: define i32 @"pas.tools$tunusedshape.area"(
+; UNIT-DAG: define internal i32 @pas.hidden(
+; UNIT-DAG: define internal i32 @pas.scale(
+; UNITGONE-NOT: @pas.orphan
+; UNITGONE-NOT: an orphan
+;
+; Separately compiled units and the program linking them.
+; RUN: %pcc --mode=objfpc -c %t/lib/tools.pas -o %t/lib/tools.o
+; RUN: %pcc --mode=objfpc -I %t/lib -fseparate-units %t/main.pas -o %t/separate
+; RUN: %t/separate | FileCheck --check-prefix=OUT %s

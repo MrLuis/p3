@@ -5011,6 +5011,82 @@ public:
     emitDynOps();
     if (DIB)
       DIB->finalize();
+    if (!CGOpts.KeepUnused)
+      removeUnreachable();
+  }
+
+  /// Removes the definitions with internal linkage (routines, constants,
+  /// variables) that nothing reachable refers to. Reachable: the
+  /// definitions with external linkage (main, a unit's initialization and
+  /// interface), and what the code of a reachable function or the
+  /// initializer of a reachable variable refers to. So the routines of a
+  /// used unit that the program does not call are not compiled to machine
+  /// code, nor are the methods of a class whose VMT nothing refers to. All
+  /// routines are still generated, in declaration order: what is known
+  /// about a routine emitted earlier (can it raise?) stays the same, and so
+  /// does the code of the routines that remain.
+  void removeUnreachable() {
+    llvm::SmallPtrSet<const llvm::GlobalValue *, 32> Live;
+    llvm::SmallPtrSet<const llvm::Constant *, 32> Seen;
+    llvm::SmallVector<const llvm::GlobalValue *, 64> Work;
+    llvm::SmallVector<const llvm::Value *, 16> Pending;
+    auto Refer = [&](const llvm::Value *Root) {
+      Pending.push_back(Root);
+      while (!Pending.empty()) {
+        const llvm::Value *V = Pending.pop_back_val();
+        if (auto *G = llvm::dyn_cast<llvm::GlobalValue>(V)) {
+          if (Live.insert(G).second)
+            Work.push_back(G);
+        } else if (auto *K = llvm::dyn_cast<llvm::Constant>(V);
+                   K && !llvm::isa<llvm::ConstantData>(K) &&
+                   Seen.insert(K).second) {
+          for (const llvm::Use &U : K->operands())
+            Pending.push_back(U.get());
+        }
+      }
+    };
+    auto Removable = [](const llvm::GlobalValue &G) {
+      return G.hasLocalLinkage() && !G.isDeclaration();
+    };
+    for (const llvm::Function &F : M)
+      if (!F.isDeclaration() && !Removable(F))
+        Refer(&F);
+    for (const llvm::GlobalVariable &G : M.globals())
+      if (!G.isDeclaration() && !Removable(G))
+        Refer(&G);
+    while (!Work.empty()) {
+      const llvm::GlobalValue *G = Work.pop_back_val();
+      if (auto *F = llvm::dyn_cast<llvm::Function>(G)) {
+        for (const llvm::BasicBlock &BB : *F)
+          for (const llvm::Instruction &I : BB)
+            for (const llvm::Use &U : I.operands())
+              Refer(U.get());
+      } else if (auto *GV = llvm::dyn_cast<llvm::GlobalVariable>(G)) {
+        if (GV->hasInitializer())
+          Refer(GV->getInitializer());
+      }
+    }
+    llvm::SmallVector<llvm::Function *, 64> DeadFns;
+    llvm::SmallVector<llvm::GlobalVariable *, 64> DeadVars;
+    for (llvm::Function &F : M)
+      if (Removable(F) && !Live.count(&F))
+        DeadFns.push_back(&F);
+    for (llvm::GlobalVariable &G : M.globals())
+      if (Removable(G) && !Live.count(&G))
+        DeadVars.push_back(&G);
+    // They may refer to each other: drop the references first.
+    for (llvm::Function *F : DeadFns)
+      F->deleteBody();
+    for (llvm::GlobalVariable *G : DeadVars)
+      G->setInitializer(nullptr);
+    for (llvm::Function *F : DeadFns) {
+      F->removeDeadConstantUsers();
+      F->eraseFromParent();
+    }
+    for (llvm::GlobalVariable *G : DeadVars) {
+      G->removeDeadConstantUsers();
+      G->eraseFromParent();
+    }
   }
 
   /// The start of a program or unit (Decls, then More: its declarations):
@@ -5092,6 +5168,8 @@ public:
     emitDynOps();
     if (DIB)
       DIB->finalize();
+    if (!CGOpts.KeepUnused)
+      removeUnreachable();
   }
 
   /// Statements carry their source position into the debug info.

@@ -30,14 +30,15 @@ uses pcsys, pcutil, pcdiag, pclex, pcast, pctypes, pcir;
 procedure generateModule(prog: PDecl; const units: TPtrList; m: TLangMode;
                          rangeChecksOn, overflowChecksOn: boolean;
                          const sourceName, triple, dataLayout: string;
-                         debugInfo, optimized, separateUnits, zeroInit: boolean;
+                         debugInfo, optimized, separateUnits, zeroInit,
+                         keepUnused: boolean;
                          var outText: TBuf);
 { The module for unit u, compiled on its own (CodeGen.cpp's
   generateUnitModule); deps: the units it uses, dependency order. }
 procedure generateUnitModule(u: PDecl; const deps: TPtrList; m: TLangMode;
                              rangeChecksOn, overflowChecksOn: boolean;
                              const sourceName, triple, dataLayout: string;
-                             debugInfo, optimized, zeroInit: boolean;
+                             debugInfo, optimized, zeroInit, keepUnused: boolean;
                              var outText: TBuf);
 
 implementation

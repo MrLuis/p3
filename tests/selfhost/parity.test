@@ -21,4 +21,7 @@
 ; Separate units (S11): the unit modules and the program importing them.
 ; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-llvm --extra="-I %S/../run/Inputs/units/lib -o -" --modes=tp --ref pcc --new %t.pcc %S/../run/Inputs/units | FileCheck %s
 ; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-llvm --extra="-I %S/../run/Inputs/units/lib -fseparate-units -g -o -" --modes=tp --ref pcc --new %t.pcc %S/../run/Inputs/units | FileCheck %s
+; Unreachable routines removed (optimization.md, item 21), and kept.
+; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-llvm --extra="-I %S/../codegen/Inputs/unused/lib -g -o -" --modes=objfpc --ref pcc --new %t.pcc %S/../codegen/Inputs/unused | FileCheck %s
+; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-llvm --extra="-I %S/../codegen/Inputs/unused/lib -fkeep-unused -o -" --modes=objfpc --ref pcc --new %t.pcc %S/../codegen/Inputs/unused | FileCheck %s
 ; CHECK: runs, 0 differ

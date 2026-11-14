@@ -129,6 +129,7 @@ type
     { exceptions: a call of the function cannot raise one (irSetNoRaise);
       its code so far has a call that may (irMayRaise) }
     noRaise, raises: boolean;
+    live: boolean;       { irRemoveUnreachable: reachable }
   end;
 
 var
@@ -278,6 +279,12 @@ function irDebugLoc: PMeta;
   instruction of the current block }
 procedure irInsertDeclare(const v: TV; variable: PMeta; const expr: string; loc: PMeta);
 
+{ Removes the definitions with internal linkage (functions, constants,
+  variables) that nothing reachable refers to; reachable: the definitions
+  with external linkage, and what the code of a reachable function or the
+  initializer of a reachable variable refers to. Before irWriteModule. }
+procedure irRemoveUnreachable;
+
 { The finished module. }
 procedure irWriteModule(var outText: TBuf);
 
@@ -290,6 +297,9 @@ type
     text: TBuf;          { the line after '@name = ' }
     id: longint;
     dbg: PMeta;
+    { irRemoveUnreachable: internal or private linkage; without an
+      initializer; reachable }
+    isLocal, isDecl, live: boolean;
   end;
   PBufBox = ^TBuf;
   PIntBox = ^longint;
@@ -1104,6 +1114,14 @@ begin
     hexDigit := chr(ord('A') + v - 10);
 end;
 
+function hexValue(c: char): longint;
+begin
+  if c <= '9' then
+    hexValue := ord(c) - ord('0')
+  else
+    hexValue := ord(c) - ord('A') + 10;
+end;
+
 function fpBits(x: double): int64;
 var
   o: TDoubleOverlay;
@@ -1669,6 +1687,9 @@ begin
     g^.name := uniqueGlobalName(name);
   g^.id := globals.count + 1;
   g^.dbg := nil;
+  g^.isLocal := (linkage = 'internal') or (linkage = 'private');
+  g^.isDecl := isDecl;
+  g^.live := false;
   bufInit(g^.text);
   if linkage <> '' then
     bufAdd(g^.text, linkage + ' ');
@@ -1713,6 +1734,7 @@ begin
     p := PGlobal(listGet(globals, i));
     if globalValue(p).v = g.v then
     begin
+      p^.isDecl := false;
       bufAddChar(p^.text, ' ');
       bufAdd(p^.text, init.v);
       exit;
@@ -1745,6 +1767,7 @@ begin
   f^.dbg := nil;
   f^.noRaise := false;
   f^.raises := false;
+  f^.live := false;
   f^.attrs := '';
   f^.paramText := '';
   f^.linkage := '';
@@ -3166,6 +3189,229 @@ begin
       bufAddChar(ob, hexDigit(ord(c) and 15));
     end;
   end;
+end;
+
+{ --- Unreachable definitions (CodeGen.cpp's removeUnreachable) --- }
+
+var
+  liveFuncs, liveGlobals: TPtrList; { reachable, their references not seen yet }
+  atomsSeen: TIntMap;               { atom number -> non-nil: scanned }
+
+function removableFunc(f: PIRFunc): boolean;
+begin
+  removableFunc := not f^.isDecl and
+                   ((f^.linkage = 'internal') or (f^.linkage = 'private'));
+end;
+
+function removableGlobal(g: PGlobal): boolean;
+begin
+  removableGlobal := not g^.isDecl and g^.isLocal;
+end;
+
+procedure referGlobal(g: PGlobal);
+begin
+  if not g^.live then
+  begin
+    g^.live := true;
+    listAdd(liveGlobals, g);
+  end;
+end;
+
+{ A reference to the function or variable named n. }
+procedure referName(n: PName);
+var
+  f: PIRFunc;
+  g: PGlobal;
+begin
+  f := PIRFunc(mapGet(funcByName, n^.id));
+  if f <> nil then
+  begin
+    if not f^.live then
+    begin
+      f^.live := true;
+      listAdd(liveFuncs, f);
+    end;
+    exit;
+  end;
+  g := PGlobal(mapGet(globalByName, n^.id));
+  if g <> nil then
+    referGlobal(g);
+end;
+
+{ Notes the functions and variables that the IR text p[0..len) refers to:
+  @name, @"quoted name" and the marker of an unnamed variable, also in the
+  atoms it includes. Other quoted text (strings, local names) is skipped. }
+procedure scanRefs(p: PCharArray; len: int64);
+var
+  i, j, start: int64;
+  c: char;
+  id: longint;
+  box: PBufBox;
+  s: string;
+begin
+  i := 0;
+  {$R-}
+  while i < len do
+  begin
+    c := p^[i];
+    if (c >= #1) and (c <= #5) then
+    begin
+      j := i + 1;
+      id := 0;
+      while p^[j] <> c do
+      begin
+        id := id * 10 + ord(p^[j]) - ord('0');
+        j := j + 1;
+      end;
+      i := j + 1;
+      if (c = #2) and not mapHas(atomsSeen, id) then
+      begin
+        mapPut(atomsSeen, id, p);
+        box := PBufBox(listGet(atoms, id - 1));
+        scanRefs(box^.data, box^.len);
+      end;
+      continue;
+    end;
+    if c = '"' then
+    begin
+      i := i + 1;
+      while (i < len) and (p^[i] <> '"') do
+        i := i + 1;
+      i := i + 1;
+      continue;
+    end;
+    if c <> '@' then
+    begin
+      i := i + 1;
+      continue;
+    end;
+    i := i + 1;
+    if i >= len then
+      break;
+    c := p^[i];
+    if c = #3 then
+    begin
+      j := i + 1;
+      id := 0;
+      while p^[j] <> #3 do
+      begin
+        id := id * 10 + ord(p^[j]) - ord('0');
+        j := j + 1;
+      end;
+      i := j + 1;
+      referGlobal(PGlobal(listGet(globals, id - 1)));
+    end
+    else if c = '"' then
+    begin
+      { quotedName's escapes: \\ and \XX }
+      s := '';
+      i := i + 1;
+      while (i < len) and (p^[i] <> '"') do
+      begin
+        c := p^[i];
+        if c <> '\' then
+          s := s + c
+        else if p^[i + 1] = '\' then
+        begin
+          s := s + '\';
+          i := i + 1;
+        end
+        else
+        begin
+          s := s + chr(hexValue(p^[i + 1]) * 16 + hexValue(p^[i + 2]));
+          i := i + 2;
+        end;
+        i := i + 1;
+      end;
+      i := i + 1;
+      referName(intern(s));
+    end
+    else
+    begin
+      start := i;
+      while (i < len) and
+            (((p^[i] >= 'a') and (p^[i] <= 'z')) or ((p^[i] >= 'A') and (p^[i] <= 'Z')) or
+             ((p^[i] >= '0') and (p^[i] <= '9')) or (p^[i] = '.') or (p^[i] = '_') or
+             (p^[i] = '-')) do
+        i := i + 1;
+      if i > start then
+        referName(internChars(p, start, i - start));
+    end;
+  end;
+  {$R+}
+end;
+
+procedure scanInst(i: PIRInst);
+begin
+  scanRefs(i^.text.data, i^.text.len);
+end;
+
+procedure irRemoveUnreachable;
+var
+  i, k, j: longint;
+  f: PIRFunc;
+  g: PGlobal;
+  b: PIRBlock;
+  kept: TPtrList;
+begin
+  listInit(liveFuncs);
+  listInit(liveGlobals);
+  mapInit(atomsSeen);
+  { the roots: the definitions with external linkage }
+  for i := 0 to funcs.count - 1 do
+  begin
+    f := PIRFunc(listGet(funcs, i));
+    if not f^.isDecl and not removableFunc(f) then
+    begin
+      f^.live := true;
+      listAdd(liveFuncs, f);
+    end;
+  end;
+  for i := 0 to globals.count - 1 do
+  begin
+    g := PGlobal(listGet(globals, i));
+    if not g^.isDecl and not removableGlobal(g) then
+      referGlobal(g);
+  end;
+  while (liveFuncs.count > 0) or (liveGlobals.count > 0) do
+    if liveFuncs.count > 0 then
+    begin
+      f := PIRFunc(listPop(liveFuncs));
+      for k := 0 to f^.blocks.count - 1 do
+      begin
+        b := PIRBlock(listGet(f^.blocks, k));
+        if k = 0 then
+          for j := 0 to f^.entryTemps.count - 1 do
+            scanInst(PIRInst(listGet(f^.entryTemps, j)));
+        for j := 0 to b^.insts.count - 1 do
+          scanInst(PIRInst(listGet(b^.insts, j)));
+      end;
+    end
+    else
+    begin
+      g := PGlobal(listPop(liveGlobals));
+      scanRefs(g^.text.data, g^.text.len);
+    end;
+  listInit(kept);
+  for i := 0 to funcs.count - 1 do
+  begin
+    f := PIRFunc(listGet(funcs, i));
+    if f^.live or not removableFunc(f) then
+      listAdd(kept, f);
+  end;
+  listFree(funcs);
+  funcs := kept;
+  listInit(kept);
+  for i := 0 to globals.count - 1 do
+  begin
+    g := PGlobal(listGet(globals, i));
+    if g^.live or not removableGlobal(g) then
+      listAdd(kept, g);
+  end;
+  { (not freed: an unnamed variable's marker is its index in the full list) }
+  globals := kept;
+  listFree(liveFuncs);
+  listFree(liveGlobals);
 end;
 
 procedure irWriteModule(var outText: TBuf);

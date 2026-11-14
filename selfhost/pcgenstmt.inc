@@ -3234,7 +3234,7 @@ end;
 procedure generateUnitModule(u: PDecl; const deps: TPtrList; m: TLangMode;
                              rangeChecksOn, overflowChecksOn: boolean;
                              const sourceName, triple, dataLayout: string;
-                             debugInfo, optimized, zeroInit: boolean;
+                             debugInfo, optimized, zeroInit, keepUnused: boolean;
                              var outText: TBuf);
 var
   i: longint;
@@ -3296,13 +3296,16 @@ begin
   emitDynOps;
   if dbgOn then
     finalizeDebugInfo;
+  if not keepUnused then
+    irRemoveUnreachable;
   irWriteModule(outText);
 end;
 
 procedure generateModule(prog: PDecl; const units: TPtrList; m: TLangMode;
                          rangeChecksOn, overflowChecksOn: boolean;
                          const sourceName, triple, dataLayout: string;
-                         debugInfo, optimized, separateUnits, zeroInit: boolean;
+                         debugInfo, optimized, separateUnits, zeroInit,
+                         keepUnused: boolean;
                          var outText: TBuf);
 var
   i: longint;
@@ -3358,5 +3361,7 @@ begin
   emitDynOps;
   if dbgOn then
     finalizeDebugInfo;
+  if not keepUnused then
+    irRemoveUnreachable;
   irWriteModule(outText);
 end;

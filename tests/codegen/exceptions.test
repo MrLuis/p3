@@ -1,5 +1,5 @@
 ; Exceptions (--mode=objfpc): each try statement pushes a PasExcFrame
-; { prev, object, where, jmp_buf } (with the routine's frame, which keeps
+; { prev, object, where, address, jmp_buf } (with the routine's frame, which keeps
 ; its variables in memory) and calls _setjmp on it; a raise lands where
 ; _setjmp returns nonzero. Exception's VMT is in the runtime.
 ; RUN: %pcc --mode=objfpc --emit-llvm %S/Inputs/exceptions.pas -o %t.ll

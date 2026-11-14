@@ -26,6 +26,11 @@ to native executables through LLVM. See [PLAN.md](PLAN.md) for the roadmap.
   characters of local strings are cleared too at `-O0`; from `-O1` they
   are not, unless they hold ansistrings, interfaces or files
   (`-fzero-init` / `-fno-zero-init` choose either way at any level)
+- only what the program reaches is compiled to machine code: routines,
+  constants and variables that nothing reachable from the main block
+  refers to (the unused routines of a used unit, the methods of a class
+  that is never mentioned) are left out, also at `-O0`; a unit compiled
+  with `-c` keeps its whole interface. `-fkeep-unused` keeps everything
 - `-g` debug info (gdb/lldb), "did you mean" diagnostics, cross-compiling
   objects with `--target`
 

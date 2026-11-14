@@ -38,6 +38,10 @@ struct CodeGenOptions {
   /// default at -O0). Scalars, and what holds managed values or files,
   /// always do.
   bool ZeroInit = true;
+  /// Keep the internal routines and data that nothing reachable refers to
+  /// (-fkeep-unused); otherwise they are generated and then removed from
+  /// the module (see removeUnreachable in CodeGen.cpp).
+  bool KeepUnused = false;
   /// The units were compiled separately (each to its own object): their
   /// interface variables and routines are external symbols
   /// (pas.<unit>$<name>), and main calls their initialization functions

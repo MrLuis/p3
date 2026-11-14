@@ -116,6 +116,12 @@ static cl::opt<bool> NoInlineRuntime(
              "when compiling for the host)"),
     cl::cat(PccCategory));
 
+static cl::opt<bool> KeepUnused(
+    "fkeep-unused",
+    cl::desc("Keep the routines and data that nothing reachable from the "
+             "program refers to"),
+    cl::cat(PccCategory));
+
 static cl::opt<bool> ZeroInitOn(
     "fzero-init",
     cl::desc("Local arrays, records and strings start zeroed (the default "
@@ -175,6 +181,7 @@ int main(int argc, char **argv) {
   Opts.WarningsAsErrors = Werror;
   Opts.RangeChecks = !NoRangeChecks;
   Opts.InlineRuntime = !NoInlineRuntime;
+  Opts.KeepUnused = KeepUnused;
   if (ZeroInitOn || ZeroInitOff) // the last one given wins
     Opts.ZeroInit = !ZeroInitOff || (ZeroInitOn && ZeroInitOn.getPosition() >
                                                        ZeroInitOff.getPosition());

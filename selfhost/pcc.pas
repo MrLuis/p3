@@ -18,6 +18,8 @@ var
   errorLimit: longint;
   werror, noUnusedVariable, noDeprecated: boolean;
   rangeChecksOn, overflowChecksOn, debugInfo, separateUnits: boolean;
+  { -fkeep-unused: keep the routines and data nothing reachable refers to }
+  keepUnused: boolean;
   optLevel: longint;
   { -fzero-init (1) / -fno-zero-init (-1), the last one given; 0: neither
     (local arrays, records and strings start zeroed at -O0 only) }
@@ -133,6 +135,7 @@ begin
   helpLine('    =always                    -   Always');
   helpLine('    =never                     -   Never');
   helpLine('  --ferror-limit=<N>           - Stop after N errors (0 = no limit)');
+  helpLine('  --fkeep-unused               - Keep the routines and data that nothing reachable from the program refers to');
   helpLine('  --fno-inline-runtime         - Do not inline the runtime''s functions (from -O1 they are, when compiling for the host)');
   helpLine('  --fno-overflow-checks        - Disable runtime integer overflow checks');
   helpLine('  --fno-range-checks           - Disable runtime range checks (subranges, array indices, ...)');
@@ -152,13 +155,13 @@ begin
 end;
 
 const
-  numFlags = 20;
+  numFlags = 21;
   flagNames: array[1..numFlags] of string[20] = (
     'help', 'help-list', 'version', 'emit-tokens', 'emit-ast', 'emit-parse-tree',
     'emit-llvm', 'S', 'c', 'Werror', 'Wno-unused-variable', 'Wno-deprecated',
     'fno-overflow-checks',
     'fno-range-checks', 'fseparate-units', 'g', 'no-project', 'fzero-init',
-    'fno-zero-init', 'fno-inline-runtime');
+    'fno-zero-init', 'fno-inline-runtime', 'fkeep-unused');
   numValueOpts = 11;
   valueOptNames: array[1..numValueOpts] of string[20] = (
     'o', 'mode', 'fdiagnostics-color', 'ferror-limit', 'target', 'I', 'O', 'L', 'l',
@@ -379,6 +382,7 @@ begin
   rangeChecksOn := true;
   overflowChecksOn := true;
   debugInfo := false;
+  keepUnused := false;
   separateUnits := false;
   projectFile := '';
   noProject := false;
@@ -461,6 +465,8 @@ begin
       overflowChecksOn := false
     else if name = 'fno-inline-runtime' then
       disableRuntimeInlining
+    else if name = 'fkeep-unused' then
+      keepUnused := true
     else if name = 'fzero-init' then
       zeroInitOpt := 1
     else if name = 'fno-zero-init' then
@@ -870,7 +876,8 @@ begin
   if not moduleLayout(targetTriple, layout) then
     exit;
   generateUnitModule(u, units, mode, rangeChecksOn, overflowChecksOn, smFileName(fid),
-                     targetTriple, layout, debugInfo, optLevel > 0, zeroInit, outBuf);
+                     targetTriple, layout, debugInfo, optLevel > 0, zeroInit, keepUnused,
+                     outBuf);
   case action of
     actLLVM: kind := okLLVM;
     actAsm: kind := okAsm;
@@ -1044,7 +1051,7 @@ begin
         collectExternalLibraries(prog^.progBlock, extLibs);
         generateModule(prog, units, mode, rangeChecksOn, overflowChecksOn,
                        smFileName(fid), targetTriple, modLayout, debugInfo, optLevel > 0,
-                       separateUnits, zeroInit, outBuf);
+                       separateUnits, zeroInit, keepUnused, outBuf);
         case action of
           actLLVM: kind := okLLVM;
           actAsm: kind := okAsm;
