@@ -1623,6 +1623,9 @@ end;
 const
   maxOwned = 32;
   noLoop = 255;
+  { set in valid of every state that is reached (a routine may have no
+    owned variable yet: they can be declared among the statements) }
+  liveBit = 4294967296; { 1 shl maxOwned }
 
 type
   TOwnedState = record
@@ -1657,9 +1660,17 @@ type
     tryPart: POwnedTry;
   end;
 
+  PPScope = ^PScope;
+  PPtrList = ^TPtrList;
+
 var
-  flow: POwnedFlow;   { of the routine being checked, if it has any }
+  flow: POwnedFlow;   { of the block whose statements are checked }
   ownedTarget: PNode; { the assignment target being checked }
+  { the variables the statements of that block declare (nkVarDecl) }
+  inlineVars: PPtrList;
+  { the scope of the variables declared in the statement sequence being
+    checked, made when the first one is (see directSequence) }
+  seqScope: PPScope;
 
 procedure ownedClear(var st: TOwnedState);
 var
@@ -1828,6 +1839,26 @@ begin
   flow^.s.moved := flow^.s.moved or bit;
   flow^.moveLoc[i] := loc;
   ownedChanged(i);
+end;
+
+{ v, an owned variable of the block being checked, is declared. }
+procedure ownedDeclare(v: PDecl);
+begin
+  if flow = nil then
+    exit;
+  if flow^.n = maxOwned then
+  begin
+    ms('too many owned variables in one routine (at most ');
+    maI(maxOwned);
+    ma(')');
+    errR(v^.loc, identRange(v^.ident));
+    exit;
+  end;
+  flow^.vars[flow^.n] := v;
+  flow^.moveLoc[flow^.n] := 0;
+  flow^.changed[flow^.n] := 0;
+  flow^.n := flow^.n + 1;
+  ownedAssign(v); { nil: nothing to free, not moved }
 end;
 
 procedure ownedLoopBegin(var l: TOwnedLoop);
@@ -5899,18 +5930,16 @@ begin
       v^.varExtName := s;
 end;
 
-procedure declareVar(v: PDecl);
+{ x: T owned: a variable of a routine (or one declared among the
+  statements), of a class type. }
+procedure checkOwnedDecl(v: PDecl);
 var
-  folded: TConstValue;
-  unimaged: PType;
   ok: boolean;
 begin
-  v^.varType := resolveType(v^.varSpec, nil);
-  v^.owner := curRoutine;
   if v^.isOwned then
   begin
     ok := false;
-    if curRoutine = nil then
+    if (curRoutine = nil) and not v^.isInlineVar then
     begin
       ms('''owned'' is only allowed on the local variables of a routine');
       errR(v^.ident.loc, identRange(v^.ident));
@@ -5939,6 +5968,16 @@ begin
     if ok then
       markHasTry; { freed in a finally part around the routine's body }
   end;
+end;
+
+procedure declareVar(v: PDecl);
+var
+  folded: TConstValue;
+  unimaged: PType;
+begin
+  v^.varType := resolveType(v^.varSpec, nil);
+  v^.owner := curRoutine;
+  checkOwnedDecl(v);
   if v^.varExternal or v^.varCVar then
     checkExternalVar(v);
   if v^.absTarget <> nil then
@@ -7445,6 +7484,8 @@ var
   savedBody: PNode;
   savedFlow: POwnedFlow;
   blockFlow: TOwnedFlow;
+  savedInline: PPtrList;
+  blockInline: TPtrList;
 begin
   { ISO 7185 6.1.4: every forward declaration needs a definition in the
     same block }
@@ -7473,32 +7514,24 @@ begin
   blockFlow.depth := 0;
   blockFlow.tryPart := nil;
   ownedClear(blockFlow.s);
+  blockFlow.s.valid := liveBit;
+  flow := @blockFlow;
   for i := 0 to b^.decls.count - 1 do
   begin
     d := PDecl(listGet(b^.decls, i));
     if (d^.kind = dkVar) and d^.isOwned then
-    begin
-      if blockFlow.n = maxOwned then
-      begin
-        ms('too many owned variables in one routine (at most ');
-        maI(maxOwned);
-        ma(')');
-        errR(d^.loc, identRange(d^.ident));
-        break;
-      end;
-      blockFlow.s.valid := blockFlow.s.valid or (int64(1) shl blockFlow.n);
-      blockFlow.vars[blockFlow.n] := d;
-      blockFlow.moveLoc[blockFlow.n] := 0;
-      blockFlow.changed[blockFlow.n] := 0;
-      blockFlow.n := blockFlow.n + 1;
-    end;
+      ownedDeclare(d);
   end;
-  if blockFlow.n > 0 then
-    flow := @blockFlow
-  else
-    flow := nil;
+  savedInline := inlineVars;
+  listInit(blockInline);
+  inlineVars := @blockInline;
   visitStmt(b^.body);
+  inlineVars := savedInline;
   flow := savedFlow;
+  { they are the block's too, after the others }
+  for i := 0 to blockInline.count - 1 do
+    listAdd(b^.decls, listGet(blockInline, i));
+  listFree(blockInline);
   handlerDepth := savedHandlers;
   finallyLoopDepth := savedFinally;
   routineBody := savedBody;

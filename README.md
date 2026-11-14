@@ -423,11 +423,37 @@ is a warning. Switches for features pcc lacks (`nestedcomments`,
 are warnings too. Unlike Free Pascal, pcc also takes them after the start
 of a file.
 
+**Variables declared among the statements** (`--mode=objfpc`; as in
+Delphi, not Free Pascal): `var x: T;`, `var x, y: T;`, `var x: T := e;`
+and `var x := e;`, which gives `x` the type of `e` (a string constant
+gives a `string`). The variable is visible from the next statement to the
+end of the statement sequence the declaration is in (`begin ... end`, a
+`repeat`, a part of a `try`, the `else` of a `case`), where it may hide an
+outer variable of the same name; its value cannot use it. Each time the
+declaration runs the variable is set, to its value or to zero. A loop can
+declare its variable, visible in the loop only: `for var i := 1 to n do`,
+`for var i: byte := ...`, `for var x in list do` (the type of the
+elements) and `for var x: T in list do`.
+
+```pascal
+for var i := 1 to count do
+begin
+  var line := ReadLine(input);
+  if line = '' then
+    continue;
+  var words := Split(line);
+  total := total + length(words);
+end;
+```
+
 **Owned variables** (`--mode=objfpc`; pcc's own, not Free Pascal's): a
-routine's local variable declared `x: TFoo owned` owns its object. The
-object is freed when the routine ends, however it ends (its end, `exit`,
-an exception), the last declared variable first, and when the variable is
-given another object (`x := nil` frees it now). `move x` gives the object
+local variable declared `x: TFoo owned` owns its object. The object is
+freed when the variable's scope is left, however it is left: for a
+variable of a routine's `var` section when the routine ends (its end,
+`exit`, an exception), for one declared among the statements when its
+statement sequence is left (also by `break` and `continue`); the last
+declared variable first, and when the variable is given another object
+(`x := nil` frees it now). `move x` gives the object
 up, to a function result, an argument or another variable: `x` is nil
 afterwards, and using it before it is assigned again is a compile-time
 error, also when only some path moved it (one branch of an `if`, an
@@ -435,14 +461,11 @@ earlier iteration of a loop, the protected part of a `try`).
 
 ```pascal
 function Load(const Path: string): TDocument;
-var
-  f: TFileReader owned;
-  doc: TDocument owned;
 begin
-  f := TFileReader.Create(Path);
-  doc := TDocument.Create;
+  var f: TFileReader owned := TFileReader.Create(Path);
+  var doc: TDocument owned := TDocument.Create;
   doc.ReadFrom(f);        { an exception here frees doc, then f }
-  Load := move doc;       { the caller owns the document; f is freed }
+  Result := move doc;     { the caller owns the document; f is freed }
 end;
 ```
 
@@ -456,8 +479,7 @@ can use `x` and assign to it (but not move it) unchecked. If a destructor
 raises while the variables are freed, the others are freed all the same
 and its exception is raised afterwards, unless an exception is already
 leaving the routine, which goes on. `owned` and `move` are not reserved
-words. Not supported yet: owned fields, parameters and global variables,
-and declaring a variable where it is first used.
+words. Not supported yet: owned fields, parameters and global variables.
 
 **Pointer arithmetic** (tp and objfpc, as in Free Pascal): `p + n`, `n + p`
 and `p - n` move a pointer by n of what it points to (by n bytes for an

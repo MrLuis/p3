@@ -245,6 +245,7 @@ class Parser {
   /// The designator of Toks parsed again (as a factor).
   Expr *reparseDesignator(llvm::ArrayRef<Token> Toks);
   Expr *parseInherited();
+  Stmt *parseVarDeclStmt();
   Stmt *parseIfStmt();
   Stmt *parseWhileStmt();
   Stmt *parseRepeatStmt();

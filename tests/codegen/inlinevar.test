@@ -1,0 +1,27 @@
+; Variables declared among the statements (objfpc) are variables of their
+; routine: zero when it starts, released when it ends. The declaration
+; stores the value, or zero after releasing what the variable held. After
+; the declaration of an owned variable, the rest of its statement sequence
+; is the protected part of a try-finally that frees it.
+; RUN: %pcc --mode=objfpc --emit-llvm %S/Inputs/inlinevar.pas -o %t.ll
+; RUN: FileCheck %s < %t.ll
+; RUN: opt -passes=verify -disable-output %t.ll
+
+; CHECK-LABEL: define internal void @pas.run(
+; CHECK: managed.body:
+; var count := n
+; CHECK: [[N:%n[0-9]*]] = load i32
+; CHECK: store i32 [[N]], ptr %count
+; var name: string
+; CHECK: call void @__pas_astr_clear(ptr [[NAME:%name[0-9]*]])
+; CHECK-NEXT: store ptr null, ptr [[NAME]]
+; var zero: int64
+; CHECK: store i64 0, ptr %zero
+; CHECK: exit:
+; CHECK: call void @__pas_astr_clear(
+; CHECK: while.body:
+; CHECK: call void @__pas_owned_set(ptr [[NODE:%node[0-9]*]], ptr %obj)
+; CHECK: call i32 @_setjmp(
+; CHECK: finally:
+; CHECK: call void @__pas_owned_free(ptr {{%node[0-9]*}}, ptr %owned.exc)
+; CHECK: call void @__pas_owned_done(

@@ -3241,7 +3241,8 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
     // last declared first: the body is the protected part of a try-finally.
     llvm::SmallVector<VarDecl *, 4> Owned;
     for (Decl *D : R->getBody()->getDecls())
-      if (auto *V = llvm::dyn_cast<VarDecl>(D); V && V->isOwned())
+      if (auto *V = llvm::dyn_cast<VarDecl>(D);
+          V && V->isOwned() && !V->isInline()) // (those: with their sequence)
         Owned.push_back(V);
     if (Owned.empty())
       visitStmt(R->getBody()->getBody());
@@ -5348,9 +5349,51 @@ public:
 
   void visitEmptyStmt(EmptyStmt *) {}
 
-  void visitCompoundStmt(CompoundStmt *S) {
-    for (Stmt *Child : S->getBody())
-      visitStmt(Child);
+  void visitCompoundStmt(CompoundStmt *S) { emitSequence(S->getBody()); }
+
+  /// The statements of a sequence. After one that declares owned
+  /// variables, the rest is the protected part of a try-finally that frees
+  /// them: their scope ends with the sequence, however it is left.
+  void emitSequence(llvm::ArrayRef<Stmt *> Body) {
+    for (size_t I = 0; I < Body.size(); ++I) {
+      visitStmt(Body[I]);
+      auto *D = llvm::dyn_cast<VarDeclStmt>(Body[I]);
+      if (!D)
+        continue;
+      llvm::SmallVector<VarDecl *, 2> Owned;
+      for (VarDecl *V : D->getVars())
+        if (V->isOwned())
+          Owned.push_back(V);
+      if (Owned.empty())
+        continue;
+      emitTryFinally([&] { emitSequence(Body.drop_front(I + 1)); },
+                     [&](llvm::Value *State) { emitFreeOwned(Owned, State); });
+      return;
+    }
+  }
+
+  /// var x: T [:= e]: x is set each time the statement runs, to e or to
+  /// zero (what it held, in an earlier iteration, is released).
+  void visitVarDeclStmt(VarDeclStmt *S) {
+    if (AssignStmt *A = S->getInitAssign()) {
+      visitStmt(A);
+      return;
+    }
+    for (VarDecl *V : S->getVars()) {
+      Type *T = V->getType();
+      llvm::Value *Addr = varAddress(V);
+      if (V->isOwned()) {
+        B.CreateCall(classRuntime("__pas_owned_set", B.getVoidTy(),
+                                  {B.getPtrTy(), B.getPtrTy()}),
+                     {Addr, llvm::ConstantPointerNull::get(B.getPtrTy())});
+        continue;
+      }
+      if (containsFile(T))
+        continue; // (opened when its routine starts)
+      if (isManaged(T))
+        finalizeValue(Addr, T);
+      emitZeroInit(Addr, T);
+    }
   }
 
   /// If Value is Target + x, for a short string variable Target named in
@@ -5855,8 +5898,7 @@ public:
 
     B.SetInsertPoint(BodyBB);
     Loops.push_back({CondBB, EndBB, Cleanups.size()});
-    for (Stmt *Child : S->getBody())
-      visitStmt(Child);
+    emitSequence(S->getBody());
     Loops.pop_back();
     B.CreateBr(CondBB);
     B.SetInsertPoint(CondBB);
@@ -6186,8 +6228,7 @@ public:
       B.SetInsertPoint(NextBB);
     }
     if (S->hasElse()) {
-      for (Stmt *Child : S->getElseBody())
-        visitStmt(Child);
+      emitSequence(S->getElseBody());
       B.CreateBr(EndBB);
     } else if (LangOpts.Mode == LangMode::ISO) {
       // ISO 7185 6.8.3.5: it is an error if no label equals the selector.
@@ -6314,8 +6355,7 @@ public:
     auto *End = newBlock("try.end");
     llvm::Value *F = emitProtect(Except, "try.body");
     Cleanups.emplace_back(Cleanup::TryBody, F);
-    for (Stmt *Child : S->getBody())
-      visitStmt(Child);
+    emitSequence(S->getBody());
     Cleanups.pop_back();
     B.CreateCall(excRuntime("__pas_exc_pop"), {F});
     B.CreateBr(End);
@@ -6351,8 +6391,7 @@ public:
       B.SetInsertPoint(Next);
     }
     if (S->catchesAll()) {
-      for (Stmt *Child : S->getExceptBody())
-        visitStmt(Child);
+      emitSequence(S->getExceptBody());
       Done();
     } else { // no handler matches: on to the next try statement
       B.CreateCall(excRuntime("__pas_exc_pop"), {H});
@@ -6376,14 +6415,8 @@ public:
   // raised: state = 1; goto finally
   void emitTryFinally(TryStmt *S) {
     emitTryFinally(
-        [&] {
-          for (Stmt *Child : S->getBody())
-            visitStmt(Child);
-        },
-        [&](llvm::Value *) {
-          for (Stmt *Child : S->getFinallyBody())
-            visitStmt(Child);
-        });
+        [&] { emitSequence(S->getBody()); },
+        [&](llvm::Value *) { emitSequence(S->getFinallyBody()); });
   }
 
   /// The finally part of a routine with owned variables: frees their

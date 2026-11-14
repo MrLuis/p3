@@ -51,7 +51,7 @@ type
     { statements }
     nkEmpty, nkCompound, nkProcCall, nkAssign, nkIf, nkWhile, nkRepeat,
     nkFor, nkCase, nkWith, nkLabeled, nkGoto, nkIndirectCallStmt,
-    nkTry, nkRaise, nkForIn);
+    nkTry, nkRaise, nkForIn, nkVarDecl);
 
   PNode = ^TNode;
   PDecl = ^TDecl;
@@ -210,7 +210,10 @@ type
                  assignCompound: boolean);
       { if: cond then thenStmt else elseStmt; while: cond do thenStmt }
       nkIf, nkWhile: (cond, thenStmt, elseStmt: PNode);
-      nkFor: (forVar, forInit, forFinal, forBody: PNode; isDownto: boolean);
+      { forInline (objfpc): for var x ..., the variable the statement
+        declares, visible in the loop only }
+      nkFor: (forVar, forInit, forFinal, forBody: PNode; isDownto: boolean;
+              forInline: PDecl);
       nkCase: (selector: PNode; arms: TPtrList; elseLoc: TLoc;
                elseBody: TPtrList);
       nkWith: (withRecords: TPtrList; withBody: PNode); { of PWithContext }
@@ -233,7 +236,15 @@ type
         inEnumVar.MoveNext. inElemType: not for an enumerator; nil: [] }
       nkForIn: (inVar, inColl, inBody: PNode; inLoc: TLoc; inKind: longint;
                 inElemType: PType; inElemVar, inCollVar, inEnumVar: PDecl;
-                inStep, inGetEnum, inMoveNext: PNode);
+                inStep, inGetEnum, inMoveNext: PNode;
+                inInline: PDecl); { for var x in ... (objfpc) }
+      { A variable declared among the statements (objfpc, as in Delphi):
+        var x: T;  var x, y: T;  var x: T := e;  var x := e;  visible to
+        the end of the statement sequence it is in. vdVars: of PDecl;
+        vdInit: e, or nil; vdLong: H+ there (a string constant gives an
+        ansistring); vdAssign: x := e (Sema) }
+      nkVarDecl: (vdVars: TPtrList; vdInit: PNode; vdAssignLoc: TLoc;
+                  vdLong: boolean; vdAssign: PNode);
   end;
 
   { on [hVarName:] hClassName do hBody (objfpc); hVar (a dkVar, if
@@ -435,6 +446,11 @@ type
                 object, which is freed when the variable gets another one
                 and when the routine ends; move x gives the object up }
               isOwned: boolean;
+              { objfpc: declared by a var statement (nkVarDecl) or by
+                for var: its scope is the rest of the statement sequence,
+                or the loop. Sema adds it to its block's declarations,
+                after the others }
+              isInlineVar: boolean;
               { objfpc: a parameter's default value (b: integer = 1),
                 passed by the calls that leave it out }
               paramDefault: PNode;

@@ -2369,16 +2369,23 @@ end;
 procedure visitSequence(seq: pointer; const body: TPtrList);
 var
   i: longint;
+  declared, savedScope: PScope; { declared: of the variables declared in it }
 begin
   listAdd(containers, seq);
+  declared := nil;
+  savedScope := cur;
   for i := 0 to body.count - 1 do
   begin
     if diagShouldStop then
       break;
     directSequence := seq;
+    seqScope := @declared;
     visitStmt(PNode(listGet(body, i)));
   end;
   directSequence := nil;
+  seqScope := nil;
+  if declared <> nil then
+    cur := savedScope;
   listPop(containers);
 end;
 
@@ -2818,12 +2825,13 @@ begin
   checkIndirectCallee := t;
 end;
 
+procedure finishAssign(s: PNode; targetTy, valueTy: PType); forward;
+
 procedure visitAssign(s: PNode);
 var
-  target, savedTarget, root, sum, savedOwnedTarget: PNode;
+  target, savedTarget, root, sum: PNode;
   targetTy, valueTy: PType;
-  p, d, ownedV, ov, tv: PDecl;
-  local, modifiable: boolean;
+  p, d: PDecl;
 begin
   target := s^.target;
   if target^.kind = nkNameRef then
@@ -2908,6 +2916,17 @@ begin
   end;
   valueTy := checkValueFor(targetTy, s^.value);
   compoundResultRef := nil;
+  finishAssign(s, targetTy, valueTy);
+end;
+
+{ The rest of the checks of target := value, both already checked. }
+procedure finishAssign(s: PNode; targetTy, valueTy: PType);
+var
+  target, savedOwnedTarget: PNode;
+  ownedV, ov, tv: PDecl;
+  local, modifiable: boolean;
+begin
+  target := s^.target;
   { An owned variable's object stays its own unless moved: only a local
     variable can refer to it too. Assigning to the variable gives it an
     object again. }
@@ -2954,6 +2973,123 @@ begin
   end;
 end;
 
+{ The type of a variable declared without one, from its value's type t. }
+function inferVarType(s: PNode; v: PDecl; t: PType): PType;
+begin
+  if isError(t) then
+    exit(t);
+  if t^.kind = tyStringLit then
+  begin
+    if s^.vdLong then
+      exit(ansiStringType);
+    exit(shortStringType(255));
+  end;
+  if (t^.kind in [tyNil, tyUntyped, tyOpenArray, tyArrayOfConst, tyFile]) or
+     ((t^.kind = tySet) and isEmptySet(t)) then
+  begin
+    ms('cannot tell the type of ''');
+    maN(v^.ident.spelling);
+    ma(''' from ');
+    if t^.kind = tyNil then
+      ma('nil')
+    else if t^.kind = tySet then
+      ma('an empty set')
+    else
+    begin
+      ma('a value of type ');
+      maT(t);
+    end;
+    ma('; give the variable a type');
+    errR(s^.vdInit^.b, nodeRange(s^.vdInit));
+    exit(errorType);
+  end;
+  inferVarType := t;
+end;
+
+{ var x: T;  var x: T := e;  var x := e;  -- among the statements of a
+  sequence, to whose end the variables are visible. }
+procedure visitVarDecl(s: PNode);
+var
+  seq: pointer;
+  declared: PPScope;
+  init, target, assign: PNode;
+  first, v: PDecl;
+  t, valueTy: PType;
+  i: longint;
+begin
+  seq := directSequence;
+  declared := seqScope;
+  directSequence := nil;
+  init := s^.vdInit;
+  first := PDecl(listGet(s^.vdVars, 0));
+  if (seq = nil) or (declared = nil) then
+  begin
+    ms('a variable can only be declared in a statement sequence (between ' +
+       '''begin'' and ''end'')');
+    errR(s^.b, nodeRange(s));
+    if init <> nil then
+      check(init);
+    exit;
+  end;
+  { the value is checked first: it cannot use the variable }
+  valueTy := nil;
+  if first^.varSpec <> nil then
+  begin
+    t := resolveType(first^.varSpec, nil);
+    if init <> nil then
+      valueTy := checkValueFor(t, init);
+  end
+  else
+  begin
+    valueTy := check(init);
+    t := inferVarType(s, first, valueTy);
+  end;
+  if declared^ = nil then
+  begin
+    declared^ := newScope(cur);
+    cur := declared^;
+  end;
+  for i := 0 to s^.vdVars.count - 1 do
+  begin
+    v := PDecl(listGet(s^.vdVars, i));
+    v^.varType := t;
+    v^.owner := curRoutine;
+    checkOwnedDecl(v);
+    declare(v);
+    if inlineVars <> nil then
+      listAdd(inlineVars^, v);
+    if v^.isOwned then
+      ownedDeclare(v);
+  end;
+  if init = nil then
+    exit;
+  target := nameRefNode(first^.ident);
+  target^.refDecl := first;
+  target^.typ := t;
+  first^.isUsed := true; { (as an assignment does) }
+  assign := newNode(nkAssign, first^.ident.loc, init^.e);
+  assign^.target := target;
+  assign^.assignLoc := s^.vdAssignLoc;
+  assign^.value := init;
+  s^.vdAssign := assign;
+  finishAssign(assign, t, valueTy);
+end;
+
+{ for var x [: T] ...: declares x in a scope of the loop, which becomes
+  the current one. t is its type if it has none written (nil: not known
+  yet). }
+procedure declareLoopVar(v: PDecl; t: PType);
+begin
+  if v^.varSpec <> nil then
+    t := resolveType(v^.varSpec, nil);
+  v^.varType := t;
+  v^.owner := curRoutine;
+  cur := newScope(cur);
+  declare(v);
+  if inlineVars <> nil then
+    listAdd(inlineVars^, v);
+end;
+
 procedure visitFor(s: PNode);
 var
   varRef, bound: PNode;
@@ -2963,11 +3099,20 @@ var
   k: longint;
   before: TOwnedState;
   loop: TOwnedLoop;
+  outerScope: PScope;
 begin
   directSequence := nil;
   varRef := s^.forVar;
   varTy := errorType;
   usable := false;
+  outerScope := cur;
+  if s^.forInline <> nil then { (its values cannot use it) }
+  begin
+    if s^.forInline^.varSpec <> nil then
+      declareLoopVar(s^.forInline, nil)
+    else
+      declareLoopVar(s^.forInline, check(s^.forInit));
+  end;
   d := lookup(varRef^.ref.name);
   if d <> nil then
   begin
@@ -3036,6 +3181,7 @@ begin
   ownedLoopEnd(loop, before);
   if usable then
     listPop(activeFors);
+  cur := outerScope;
 end;
 
 { A hidden variable of a for-in loop (code generation binds it), named in
@@ -3106,14 +3252,24 @@ var
   d, elemV: PDecl;
   cLoc: TLoc;
   kind: longint;
-  inScope, saved: PScope;
+  inScope, saved, outerScope: PScope;
   before: TOwnedState;
   loop: TOwnedLoop;
+  untyped: PDecl;
 
   function makeStep(value: PNode): PNode;
   var
     step: PNode;
+    et: PType;
   begin
+    if (untyped <> nil) and (untyped^.varType = nil) then
+    begin
+      cur := inScope;
+      et := check(value);
+      cur := saved;
+      untyped^.varType := et;
+      varRef^.typ := et;
+    end;
     step := newNode(nkAssign, varRef^.ref.loc, c^.e);
     step^.target := nameRefNode(varRef^.ref);
     step^.assignLoc := s^.inLoc;
@@ -3207,8 +3363,27 @@ begin
   varRef := s^.inVar;
   varTy := errorType;
   usable := false;
-  d := lookup(varRef^.ref.name);
-  if d <> nil then
+  outerScope := cur;
+  { for var x in ...: without a type, x has the type of the elements, known
+    when the first one is assigned to it (makeStep) }
+  untyped := nil;
+  if s^.inInline <> nil then
+  begin
+    if s^.inInline^.varSpec = nil then
+      untyped := s^.inInline;
+    checkTypeOrValue(s^.inColl); { (it cannot use x) }
+    declareLoopVar(s^.inInline, nil);
+  end;
+  d := nil;
+  if untyped = nil then
+    d := lookup(varRef^.ref.name);
+  if untyped <> nil then
+  begin
+    varRef^.refDecl := untyped;
+    untyped^.isUsed := true;
+    usable := true;
+  end
+  else if d <> nil then
   begin
     varRef^.refDecl := d;
     d^.isUsed := true;
@@ -3319,6 +3494,18 @@ begin
     if usable and (elem <> nil) then
       s^.inStep := makeStep(forInRef(elemV, cLoc));
   end;
+  if (untyped <> nil) and (untyped^.varType = nil) then
+  begin
+    if kind <> fikInvalid then
+    begin
+      ms('cannot tell the type of ''');
+      maN(varRef^.ref.spelling);
+      ma(''' from an empty set; give the variable a type');
+      errR(varRef^.ref.loc, identRange(varRef^.ref));
+    end;
+    untyped^.varType := errorType;
+    usable := false;
+  end;
 
   if usable then
     listAdd(activeFors, s);
@@ -3330,6 +3517,7 @@ begin
   ownedLoopEnd(loop, before);
   if usable then
     listPop(activeFors);
+  cur := outerScope;
 end;
 
 procedure visitCase(s: PNode);
@@ -3681,6 +3869,7 @@ begin
     nkWith: visitWith(s);
     nkTry: visitTry(s);
     nkRaise: visitRaise(s);
+    nkVarDecl: visitVarDecl(s);
   else
     ;
   end;

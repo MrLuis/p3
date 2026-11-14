@@ -1,0 +1,65 @@
+inferred
+  create inferred
+  42 5000000000 2.50 x hello, world TRUE blue 7 FALSE TRUE inferred 7 4 8 12
+  destroy inferred
+typed
+  0 10 65535 2.0 c abc 1
+scopes
+  inner 2
+  inner 2!
+  inner 2
+  1
+  22
+  0
+  6
+each time
+  1 x 11
+  2 x 22
+  3 x 33
+loops
+  10321
+  a1 bb2 ccc3 120 121 122 red green blue 3000000000000 5000000000000 0 2
+  11 12 22
+owned
+  create a
+  create b
+  create c
+  in block
+  destroy c
+  destroy b
+  after block
+  create later
+  create loop
+  destroy loop
+  create loop
+  destroy loop
+  after loop
+  end
+  destroy later
+  destroy a
+  create a
+  create b
+  create c
+  in block
+  destroy c
+  destroy b
+  after block
+  create later
+  create loop
+  destroy loop
+  create loop
+  destroy loop
+  after loop
+  destroy later
+  destroy a
+  caught failed
+make
+  create made
+  create 
+  destroy 
+  made TRUE
+  destroy made
+  create main
+  1  2
+done
+  destroy main

@@ -643,6 +643,7 @@ public:
 /// for Var := Init to|downto Final do Body
 class ForStmt final : public Stmt {
   NameRefExpr *Var;
+  VarDecl *InlineVar = nullptr;
   Expr *Init;
   Expr *Final;
   bool Downto;
@@ -654,6 +655,10 @@ public:
       : Stmt(SK_For, R), Var(Var), Init(Init), Final(Final), Downto(Downto),
         Body(Body) {}
   NameRefExpr *getVar() const { return Var; }
+  /// `for var x ...` (objfpc): the variable the statement declares, visible
+  /// in the loop only; without a type it has the type of what it takes.
+  VarDecl *getInlineVar() const { return InlineVar; }
+  void setInlineVar(VarDecl *V) { InlineVar = V; }
   Expr *getInit() const { return Init; }
   Expr *getFinal() const { return Final; }
   bool isDownto() const { return Downto; }
@@ -677,6 +682,7 @@ public:
 
 private:
   NameRefExpr *Var;
+  VarDecl *InlineVar = nullptr;
   Expr *Collection;
   Stmt *Body;
   SourceLocation InLoc;
@@ -695,6 +701,10 @@ public:
       : Stmt(SK_ForIn, R), Var(Var), Collection(Collection), Body(Body),
         InLoc(InLoc) {}
   NameRefExpr *getVar() const { return Var; }
+  /// `for var x ...` (objfpc): the variable the statement declares, visible
+  /// in the loop only; without a type it has the type of what it takes.
+  VarDecl *getInlineVar() const { return InlineVar; }
+  void setInlineVar(VarDecl *V) { InlineVar = V; }
   Expr *getCollection() const { return Collection; }
   Stmt *getBody() const { return Body; }
   SourceLocation getInLoc() const { return InLoc; }
@@ -915,6 +925,34 @@ public:
   Expr *getFrame() const { return Frame; }
   bool isReraise() const { return Object == nullptr; }
   static bool classof(const Stmt *S) { return S->getKind() == SK_Raise; }
+};
+
+class VarDecl;
+
+/// A variable declared among the statements (objfpc, as in Delphi):
+///   var x: T;   var x, y: T;   var x: T := e;   var x := e;
+/// visible to the end of the statement sequence it is in. Without a type,
+/// the variable has the type of e. It is set (to e, or to zero) each time
+/// the statement runs.
+class VarDeclStmt final : public Stmt {
+  llvm::ArrayRef<VarDecl *> Vars;
+  Expr *Init;              ///< null: none
+  SourceLocation AssignLoc;
+  bool LongStrings;        ///< {$H+} here: a string constant gives an ansistring
+  AssignStmt *InitAssign = nullptr; ///< set by Sema: x := e
+
+public:
+  VarDeclStmt(SourceRange R, llvm::ArrayRef<VarDecl *> Vars, Expr *Init,
+              SourceLocation AssignLoc, bool LongStrings)
+      : Stmt(SK_VarDecl, R), Vars(Vars), Init(Init), AssignLoc(AssignLoc),
+        LongStrings(LongStrings) {}
+  llvm::ArrayRef<VarDecl *> getVars() const { return Vars; }
+  Expr *getInit() const { return Init; }
+  SourceLocation getAssignLoc() const { return AssignLoc; }
+  bool hasLongStrings() const { return LongStrings; }
+  AssignStmt *getInitAssign() const { return InitAssign; }
+  void setInitAssign(AssignStmt *A) { InitAssign = A; }
+  static bool classof(const Stmt *S) { return S->getKind() == SK_VarDecl; }
 };
 
 //===----------------------------------------------------------------------===//
@@ -1335,6 +1373,7 @@ private:
   ClassType *VarClass = nullptr;
   bool Captured = false;        ///< set by Sema
   bool Owned = false;           ///< objfpc `x: TFoo owned`
+  bool Inline = false;          ///< objfpc: declared by a `var` statement
   Expr *Absolute = nullptr;     ///< Turbo/FPC `x: T absolute y`: y
   Expr *Default = nullptr;      ///< objfpc: the parameter's default value
   bool Out = false;             ///< objfpc: an `out` parameter
@@ -1379,6 +1418,11 @@ public:
   /// routine ends, however it ends; `move x` gives the object up.
   bool isOwned() const { return Owned; }
   void setOwned(bool O = true) { Owned = O; }
+  /// Declared among the statements (a VarDeclStmt's): its scope is the
+  /// rest of the statement sequence. Sema adds it to its block's
+  /// declarations, after the others.
+  bool isInline() const { return Inline; }
+  void setInline() { Inline = true; }
   /// `x: T absolute y`: x has no storage of its own, it is another view of
   /// the variable, field or element y. Null for other variables.
   Expr *getAbsolute() const { return Absolute; }

@@ -3962,6 +3962,82 @@ function parseWithStmt: PNode; forward;
 function parseTryStmt: PNode; forward;
 function parseRaiseStmt: PNode; forward;
 
+{ varStatement = "var" identList ( ":" type [ "owned" ] [ ":=" expression ]
+                                 | ":=" expression ) . }
+function parseVarDeclStmt: PNode;
+var
+  varLoc, assignLoc: TLoc;
+  names, vars: TPtrList;
+  ts: PTypeSpec;
+  owned: boolean;
+  init, n: PNode;
+  i: longint;
+  v: PDecl;
+
+  function fail: PNode;
+  begin
+    skipUntil([tkSemi, tkKwEnd]);
+    fail := emptyStmt(varLoc);
+  end;
+
+begin
+  varLoc := consumeToken; { 'var' }
+  listInit(names);
+  if not parseIdentList(names, 'variable name') then
+    exit(fail);
+  for i := 0 to names.count - 1 do
+    declareName(PIdent(listGet(names, i))^);
+  ts := nil;
+  owned := false;
+  if tryConsume(tkColon) then
+  begin
+    ts := parseType;
+    if ts = nil then
+      exit(fail);
+    if isIdentifierNamed('owned') then
+    begin
+      consumeToken;
+      owned := true;
+    end;
+  end;
+  init := nil;
+  assignLoc := noLoc;
+  if tok.kind = tkColonEqual then
+  begin
+    assignLoc := consumeToken;
+    if names.count > 1 then
+      diagErrorR(assignLoc, 'only one variable can be initialized',
+                 makeRange(PIdent(listGet(names, 0))^.loc,
+                           identRange(PIdent(listGet(names, names.count - 1))^).e));
+    init := parseExpression;
+    if init = nil then
+      exit(fail);
+  end
+  else if ts = nil then
+  begin
+    diagError(tok.loc, 'expected '':'' and a type, or '':='' and a value, ' +
+              'after variable name');
+    exit(fail);
+  end;
+  listInit(vars);
+  for i := 0 to names.count - 1 do
+  begin
+    v := newVar(PIdent(listGet(names, i))^, ts, vkVariable);
+    v^.isInlineVar := true;
+    v^.isOwned := owned;
+    listAdd(vars, v);
+  end;
+  if (init <> nil) and (vars.count > 1) then
+    init := nil; { (reported) }
+  n := newNode(nkVarDecl, varLoc, prevTokEnd);
+  n^.vdVars := vars;
+  n^.vdInit := init;
+  n^.vdAssignLoc := assignLoc;
+  n^.vdLong := lx.longStrings;
+  n^.vdAssign := nil;
+  parseVarDeclStmt := n;
+end;
+
 function parseStatementImpl: PNode;
 var
   gotoLoc, start, l: TLoc;
@@ -4018,6 +4094,12 @@ begin
     tkKwWith: exit(parseWithStmt);
     tkKwTry: exit(parseTryStmt);
     tkKwRaise: exit(parseRaiseStmt);
+    tkKwVar:
+      if mode = lmObjFPC then
+        exit(parseVarDeclStmt)
+      else
+        diagError(tok.loc, 'variables declared among the statements need ' +
+                  '--mode=objfpc');
     tkLParen: { not objfpc }
       diagError(tok.loc, 'expected statement');
     { the empty statement: nothing before a separator or terminator }
@@ -4466,7 +4548,9 @@ function parseForStmt: PNode;
 var
   forLoc, inLoc: TLoc;
   v, init, final, body, n: PNode;
-  down: boolean;
+  down, declares: boolean;
+  declared: PDecl;
+  ts: PTypeSpec;
 
   function fail: PNode;
   begin
@@ -4476,6 +4560,10 @@ var
 
 begin
   forLoc := consumeToken;
+  { objfpc: for var x [: T] ..., a variable of the loop }
+  declares := (mode = lmObjFPC) and (tok.kind = tkKwVar);
+  if declares then
+    consumeToken;
   if tok.kind <> tkIdentifier then
   begin
     diagError(tok.loc, 'expected control variable after ''for''');
@@ -4483,6 +4571,20 @@ begin
   end;
   v := nameRef(makeIdentifier(tok));
   consumeToken;
+  declared := nil;
+  if declares then
+  begin
+    declareName(v^.ref);
+    ts := nil;
+    if tryConsume(tkColon) then
+    begin
+      ts := parseType;
+      if ts = nil then
+        exit(fail);
+    end;
+    declared := newVar(v^.ref, ts, vkVariable);
+    declared^.isInlineVar := true;
+  end;
 
   if tok.kind = tkKwIn then { for x in collection do (Turbo/FPC) }
   begin
@@ -4502,6 +4604,7 @@ begin
     n^.inColl := init;
     n^.inBody := body;
     n^.inKind := fikInvalid;
+    n^.inInline := declared;
     exit(n);
   end;
 
@@ -4538,6 +4641,7 @@ begin
   n^.forInit := init;
   n^.forFinal := final;
   n^.isDownto := down;
+  n^.forInline := declared;
   n^.forBody := body;
   parseForStmt := n;
 end;

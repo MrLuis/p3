@@ -2788,6 +2788,60 @@ Stmt *Parser::parseStatement() {
   return S;
 }
 
+// varStatement = "var" identList ( ":" type [ "owned" ] [ ":=" expression ]
+//                                | ":=" expression ) .
+Stmt *Parser::parseVarDeclStmt() {
+  SourceLocation VarLoc = consumeToken(); // 'var'
+  auto Fail = [&]() -> Stmt * {
+    skipUntil({tok::semi, tok::kw_end});
+    return Ctx.create<EmptyStmt>(VarLoc);
+  };
+  llvm::SmallVector<Identifier, 2> Names;
+  if (!parseIdentList(Names, "variable name"))
+    return Fail();
+  for (const Identifier &N : Names)
+    declareName(N);
+  TypeSpec *TS = nullptr;
+  bool Owned = false;
+  if (tryConsume(tok::colon)) {
+    TS = parseType();
+    if (!TS)
+      return Fail();
+    if (isIdentifierNamed("owned")) {
+      consumeToken();
+      Owned = true;
+    }
+  }
+  Expr *Init = nullptr;
+  SourceLocation AssignLoc;
+  if (Tok.is(tok::colon_equal)) {
+    AssignLoc = consumeToken();
+    if (Names.size() > 1)
+      Diags.error(AssignLoc, "only one variable can be initialized",
+                  {SourceRange(Names[0].Loc, Names.back().getRange().getEnd())});
+    Init = parseExpression();
+    if (!Init)
+      return Fail();
+  } else if (!TS) {
+    Diags.error(Tok.getLocation(),
+                "expected ':' and a type, or ':=' and a value, after "
+                "variable name");
+    return Fail();
+  }
+  llvm::SmallVector<VarDecl *, 2> Vars;
+  for (const Identifier &N : Names) {
+    auto *V = Ctx.create<VarDecl>(N, TS);
+    V->setInline();
+    V->setOwned(Owned);
+    Vars.push_back(V);
+  }
+  if (Init && Vars.size() > 1)
+    Init = nullptr; // (reported)
+  return Ctx.create<VarDeclStmt>(SourceRange(VarLoc, PrevTokEnd),
+                                 Ctx.copyArray<VarDecl *>(Vars), Init,
+                                 AssignLoc, Lex.longStrings());
+}
+
 Stmt *Parser::parseStatementImpl() {
   switch (Tok.getKind()) {
   case tok::identifier:
@@ -2810,6 +2864,14 @@ Stmt *Parser::parseStatementImpl() {
     return parseTryStmt();
   case tok::kw_raise:
     return parseRaiseStmt();
+  case tok::kw_var:
+    if (!LangOpts.ObjKeywords) {
+      Diags.error(Tok.getLocation(),
+                  "variables declared among the statements need "
+                  "--mode=objfpc");
+      break;
+    }
+    return parseVarDeclStmt();
   case tok::l_paren: { // Turbo/FPC: (p + 1)^ := x; (obj as TFoo).Show;
     if (LangOpts.Mode == LangMode::ISO) {
       Diags.error(Tok.getLocation(), "expected statement");
@@ -3180,12 +3242,28 @@ Stmt *Parser::parseForStmt() {
     return Ctx.create<EmptyStmt>(ForLoc);
   };
 
+  // objfpc: for var x [: T] ..., a variable of the loop
+  bool Declares = LangOpts.ObjKeywords && Tok.is(tok::kw_var);
+  if (Declares)
+    consumeToken();
   if (Tok.isNot(tok::identifier)) {
     Diags.error(Tok.getLocation(), "expected control variable after 'for'");
     return Fail();
   }
   auto *Var = Ctx.create<NameRefExpr>(makeIdentifier(Tok));
   consumeToken();
+  VarDecl *Declared = nullptr;
+  if (Declares) {
+    declareName(Var->getName());
+    TypeSpec *TS = nullptr;
+    if (tryConsume(tok::colon)) {
+      TS = parseType();
+      if (!TS)
+        return Fail();
+    }
+    Declared = Ctx.create<VarDecl>(Var->getName(), TS);
+    Declared->setInline();
+  }
 
   if (Tok.is(tok::kw_in)) { // for x in collection do (Turbo/FPC)
     SourceLocation InLoc = consumeToken();
@@ -3198,8 +3276,10 @@ Stmt *Parser::parseForStmt() {
     if (!expect(tok::kw_do, "in 'for' statement") && !startsStatement())
       return Fail();
     Stmt *Body = parseStatement();
-    return Ctx.create<ForInStmt>(SourceRange(ForLoc, PrevTokEnd), Var, InLoc,
-                                 Collection, Body);
+    auto *In = Ctx.create<ForInStmt>(SourceRange(ForLoc, PrevTokEnd), Var,
+                                     InLoc, Collection, Body);
+    In->setInlineVar(Declared);
+    return In;
   }
 
   if (Tok.is(tok::equal)) {
@@ -3228,8 +3308,10 @@ Stmt *Parser::parseForStmt() {
     return Fail();
 
   Stmt *Body = parseStatement();
-  return Ctx.create<ForStmt>(SourceRange(ForLoc, PrevTokEnd), Var, Init, Final,
-                             Downto, Body);
+  auto *For = Ctx.create<ForStmt>(SourceRange(ForLoc, PrevTokEnd), Var, Init,
+                                  Final, Downto, Body);
+  For->setInlineVar(Declared);
+  return For;
 }
 
 bool Parser::isCaseElse() const {

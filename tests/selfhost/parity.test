@@ -22,6 +22,11 @@
 ; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-llvm --extra="-o -" --modes=objfpc --ref pcc --new %t.pcc %S/../run/owned.pas %S/../codegen/Inputs/owned.pas %S/../sema/Inputs/owned | FileCheck %s
 ; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-llvm --extra="-g -o -" --modes=objfpc --ref pcc --new %t.pcc %S/../run/owned.pas %S/../codegen/Inputs/owned.pas | FileCheck %s
 ; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-llvm --extra="-I %S/../run/Inputs/owned/lib -fseparate-units -g -o -" --modes=objfpc --ref pcc --new %t.pcc %S/../run/Inputs/owned | FileCheck %s
+; Variables declared among the statements (--mode=objfpc).
+; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-llvm --extra="-o -" --modes=objfpc --ref pcc --new %t.pcc %S/../run/inlinevar.pas %S/../codegen/Inputs/inlinevar.pas %S/../sema/Inputs/inlinevar | FileCheck %s
+; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-llvm --extra="-g -o -" --modes=objfpc --ref pcc --new %t.pcc %S/../run/inlinevar.pas %S/../codegen/Inputs/inlinevar.pas | FileCheck %s
+; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-ast --extra="-o -" --modes=objfpc --ref pcc --new %t.pcc %S/../run/inlinevar.pas %S/../run/owned.pas | FileCheck %s
+; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-parse-tree --extra="-o -" --modes=objfpc --ref pcc --new %t.pcc %S/../run/inlinevar.pas %S/../run/owned.pas | FileCheck %s
 ; Separate units (S11): the unit modules and the program importing them.
 ; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-llvm --extra="-I %S/../run/Inputs/units/lib -o -" --modes=tp --ref pcc --new %t.pcc %S/../run/Inputs/units | FileCheck %s
 ; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-llvm --extra="-I %S/../run/Inputs/units/lib -fseparate-units -g -o -" --modes=tp --ref pcc --new %t.pcc %S/../run/Inputs/units | FileCheck %s

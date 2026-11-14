@@ -1036,10 +1036,11 @@ begin
   irSetInsertPoint(endB);
 end;
 
+procedure visitStmtList(const l: TPtrList); forward;
+
 procedure visitRepeat(s: PNode);
 var
   bodyB, condB, endB: PIRBlock;
-  i: longint;
 begin
   bodyB := irNewBlock('repeat.body');
   condB := irNewBlock('repeat.cond');
@@ -1047,8 +1048,7 @@ begin
   irBr(bodyB);
   irSetInsertPoint(bodyB);
   pushLoop(condB, endB);
-  for i := 0 to s^.stmts.count - 1 do
-    visitStmt(PNode(listGet(s^.stmts, i)));
+  visitStmtList(s^.stmts);
   popLoop;
   irBr(condB);
   irSetInsertPoint(condB);
@@ -1524,8 +1524,7 @@ begin
   end;
   if s^.elseLoc <> noLoc then
   begin
-    for i := 0 to s^.elseBody.count - 1 do
-      visitStmt(PNode(listGet(s^.elseBody, i)));
+    visitStmtList(s^.elseBody);
     irBr(endB);
   end
   else if mode = lmISO then
@@ -1582,13 +1581,6 @@ end;
 
 { --- Exceptions (objfpc) --- }
 
-procedure visitStmtList(const l: TPtrList);
-var
-  i: longint;
-begin
-  for i := 0 to l.count - 1 do
-    visitStmt(PNode(listGet(l, i)));
-end;
 
 {   push F; if (_setjmp(F)) goto except;  body; pop F; goto end
   except:
@@ -1696,6 +1688,84 @@ begin
                    raised, '');
 end;
 
+{ The statements of sequence l from the one at index from. After one that
+  declares owned variables, the rest is the protected part of a
+  try-finally that frees them: their scope ends with the sequence, however
+  it is left. }
+procedure emitSequenceFrom(const l: TPtrList; from: longint);
+var
+  i, j: longint;
+  d: PNode;
+  v: PDecl;
+  owned: TPtrList;
+  t: TTryFinally;
+begin
+  for i := from to l.count - 1 do
+  begin
+    d := PNode(listGet(l, i));
+    visitStmt(d);
+    if d^.kind <> nkVarDecl then
+      continue;
+    listInit(owned);
+    for j := 0 to d^.vdVars.count - 1 do
+    begin
+      v := PDecl(listGet(d^.vdVars, j));
+      if v^.isOwned then
+        listAdd(owned, v);
+    end;
+    if owned.count = 0 then
+    begin
+      listFree(owned);
+      continue;
+    end;
+    tryFinallyBegin(t);
+    emitSequenceFrom(l, i + 1);
+    tryFinallyMiddle(t);
+    emitFreeOwned(owned, t.state);
+    tryFinallyEnd(t);
+    listFree(owned);
+    exit;
+  end;
+end;
+
+procedure visitStmtList(const l: TPtrList);
+begin
+  emitSequenceFrom(l, 0);
+end;
+
+{ var x: T [:= e]: x is set each time the statement runs, to e or to zero
+  (what it held, in an earlier iteration, is released). }
+procedure visitVarDeclStmt(s: PNode);
+var
+  i: longint;
+  v: PDecl;
+  t: PType;
+  addr, ignored: TV;
+begin
+  if s^.vdAssign <> nil then
+  begin
+    visitStmt(s^.vdAssign);
+    exit;
+  end;
+  for i := 0 to s^.vdVars.count - 1 do
+  begin
+    v := PDecl(listGet(s^.vdVars, i));
+    t := v^.varType;
+    addr := varAddress(v);
+    if v^.isOwned then
+    begin
+      ignored := call2(classRuntime('__pas_owned_set', 'void', 'ptr,ptr'), addr,
+                       irNull, '');
+      continue;
+    end;
+    if containsFile(t) then
+      continue; { (opened when its routine starts) }
+    if isManaged(t) then
+      finalizeValue(addr, t);
+    emitZeroInit(addr, t);
+  end;
+end;
+
 procedure emitTryFinally(s: PNode);
 var
   t: TTryFinally;
@@ -1734,7 +1804,7 @@ end;
 
 procedure visitStmt(s: PNode);
 var
-  i, mark: longint;
+  mark: longint;
   ignored: TV;
   b: PIRBlock;
 begin
@@ -1743,9 +1813,7 @@ begin
   mark := liveTemps.count;
   case s^.kind of
     nkEmpty: ;
-    nkCompound:
-      for i := 0 to s^.stmts.count - 1 do
-        visitStmt(PNode(listGet(s^.stmts, i)));
+    nkCompound: visitStmtList(s^.stmts);
     nkAssign: visitAssign(s);
     nkProcCall: visitProcCall(s);
     nkIndirectCallStmt: ignored := visitExpr(s^.calleeExpr);
@@ -1770,6 +1838,7 @@ begin
       else
         emitTryExcept(s);
     nkRaise: visitRaise(s);
+    nkVarDecl: visitVarDeclStmt(s);
   else
     ;
   end;
@@ -2971,7 +3040,8 @@ begin
   for i := 0 to r^.body^.decls.count - 1 do
   begin
     v := PDecl(listGet(r^.body^.decls, i));
-    if (v^.kind = dkVar) and v^.isOwned then
+    { (those declared among the statements: with their sequence) }
+    if (v^.kind = dkVar) and v^.isOwned and not v^.isInlineVar then
       listAdd(owned, v);
   end;
   if owned.count = 0 then

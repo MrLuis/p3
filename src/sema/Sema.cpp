@@ -162,8 +162,11 @@ class Checker : public StmtVisitor<Checker>,
   // as it is, or NoLoop: a use of the variable then is recorded in those
   // loops, and reported when the loop turns out to end with it moved.
   enum { MaxOwned = 32, NoLoop = 255 };
+  /// Set in Valid of every state that is reached (a routine may have no
+  /// owned variable yet: they can be declared among the statements).
+  static constexpr uint64_t LiveBit = uint64_t(1) << MaxOwned;
   struct OwnedState {
-    uint32_t Valid = 0, Moved = 0;
+    uint64_t Valid = 0, Moved = 0;
     uint8_t Entry[MaxOwned];
     OwnedState() { std::fill(Entry, Entry + MaxOwned, uint8_t(NoLoop)); }
     bool isLive() const { return (Valid | Moved) != 0; }
@@ -176,7 +179,7 @@ class Checker : public StmtVisitor<Checker>,
   };
   struct OwnedLoop {
     OwnedState Breaks, Continues;
-    uint32_t Used = 0; ///< variables used as the loop found them
+    uint64_t Used = 0; ///< variables used as the loop found them
     SourceLocation EntryUse[MaxOwned];
     OwnedLoop *Prev = nullptr;
   };
@@ -197,7 +200,12 @@ class Checker : public StmtVisitor<Checker>,
     unsigned Depth = 0;
     OwnedTry *Try = nullptr;
   };
-  OwnedFlow *Flow = nullptr; ///< of the routine being checked, if it has any
+  OwnedFlow *Flow = nullptr; ///< of the block whose statements are checked
+  /// The variables the statements of that block declare (VarDeclStmt).
+  std::vector<Decl *> *InlineVars = nullptr;
+  /// The scope of the variables declared in the statement sequence being
+  /// checked, made when the first one is (see DirectSequence).
+  std::unique_ptr<Scope> *SeqScope = nullptr;
   Expr *OwnedTarget = nullptr; ///< the assignment target being checked
 
   /// E, if it is an owned variable (in parentheses or not).
@@ -238,7 +246,7 @@ class Checker : public StmtVisitor<Checker>,
     int I = ownedIndex(V);
     if (I < 0 || !Flow->S.isLive())
       return;
-    uint32_t Bit = uint32_t(1) << I;
+    uint64_t Bit = uint64_t(1) << I;
     OwnedState &S = Flow->S;
     if (S.Moved & Bit) {
       Diags.error(R.getBegin(),
@@ -271,8 +279,8 @@ class Checker : public StmtVisitor<Checker>,
     int I = ownedIndex(V);
     if (I < 0 || !Flow->S.isLive())
       return;
-    Flow->S.Valid |= uint32_t(1) << I;
-    Flow->S.Moved &= ~(uint32_t(1) << I);
+    Flow->S.Valid |= uint64_t(1) << I;
+    Flow->S.Moved &= ~(uint64_t(1) << I);
     ownedChanged(I);
   }
 
@@ -281,10 +289,25 @@ class Checker : public StmtVisitor<Checker>,
     int I = ownedIndex(V);
     if (I < 0 || !Flow->S.isLive())
       return;
-    Flow->S.Valid &= ~(uint32_t(1) << I);
-    Flow->S.Moved |= uint32_t(1) << I;
+    Flow->S.Valid &= ~(uint64_t(1) << I);
+    Flow->S.Moved |= uint64_t(1) << I;
     Flow->MoveLoc[I] = Loc;
     ownedChanged(I);
+  }
+
+  /// V, an owned variable of the block being checked, is declared.
+  void ownedDeclare(VarDecl *V) {
+    if (!Flow)
+      return;
+    if (Flow->N == MaxOwned) {
+      Diags.error(V->getLocation(),
+                  "too many owned variables in one routine (at most " +
+                      std::to_string(unsigned(MaxOwned)) + ")",
+                  {V->getName().getRange()});
+      return;
+    }
+    Flow->Vars[Flow->N++] = V;
+    ownedAssign(V); // nil: nothing to free, not moved
   }
 
   void ownedLoopBegin(OwnedLoop &L) {
@@ -308,7 +331,7 @@ class Checker : public StmtVisitor<Checker>,
     OwnedState Back = Flow->S;
     Back.join(L.Continues);
     for (unsigned I = 0; I < Flow->N; ++I)
-      if ((Back.Moved & L.Used) & (uint32_t(1) << I)) {
+      if ((Back.Moved & L.Used) & (uint64_t(1) << I)) {
         Diags.error(L.EntryUse[I],
                     "owned variable '" + Flow->Vars[I]->getName().Spelling +
                         "' may have been moved by an earlier iteration of "
@@ -3969,10 +3992,21 @@ class Checker : public StmtVisitor<Checker>,
   void declareVar(VarDecl *V) {
     V->setType(resolveType(V->getTypeSpec()));
     V->setOwner(CurRoutine);
+    checkOwnedDecl(V);
+    if (V->isExternal() || V->isCVar())
+      checkExternalVar(V);
+    if (Expr *Target = V->getAbsolute())
+      checkAbsolute(V, Target);
+    declareVarInit(V);
+  }
+
+  /// `x: T owned`: a variable of a routine (or one declared among the
+  /// statements), of a class type.
+  void checkOwnedDecl(VarDecl *V) {
     if (V->isOwned()) {
       const Identifier &Id = V->getName();
       bool OK = false;
-      if (!CurRoutine)
+      if (!CurRoutine && !V->isInline())
         Diags.error(Id.Loc,
                     "'owned' is only allowed on the local variables of a "
                     "routine",
@@ -3994,10 +4028,9 @@ class Checker : public StmtVisitor<Checker>,
       if (OK)
         markHasTry(); // freed in a finally part around the routine's body
     }
-    if (V->isExternal() || V->isCVar())
-      checkExternalVar(V);
-    if (Expr *Target = V->getAbsolute())
-      checkAbsolute(V, Target);
+  }
+
+  void declareVarInit(VarDecl *V) {
     if (Expr *Init = V->getInit()) {
       // Typed constants are static: they keep their value across calls.
       // (An initialized variable is set again whenever its routine runs.)
@@ -5373,21 +5406,22 @@ class Checker : public StmtVisitor<Checker>,
     FinallyLoopDepth = -1;
     OwnedFlow *SavedFlow = Flow;
     OwnedFlow BlockFlow;
+    BlockFlow.S.Valid = LiveBit;
+    Flow = &BlockFlow;
     for (Decl *D : B.getDecls())
-      if (auto *V = llvm::dyn_cast<VarDecl>(D); V && V->isOwned()) {
-        if (BlockFlow.N == MaxOwned) {
-          Diags.error(V->getLocation(),
-                      "too many owned variables in one routine (at most " +
-                          std::to_string(unsigned(MaxOwned)) + ")",
-                      {V->getName().getRange()});
-          break;
-        }
-        BlockFlow.S.Valid |= uint32_t(1) << BlockFlow.N;
-        BlockFlow.Vars[BlockFlow.N++] = V;
-      }
-    Flow = BlockFlow.N ? &BlockFlow : nullptr;
+      if (auto *V = llvm::dyn_cast<VarDecl>(D); V && V->isOwned())
+        ownedDeclare(V);
+    std::vector<Decl *> *SavedInline = InlineVars;
+    std::vector<Decl *> BlockInline;
+    InlineVars = &BlockInline;
     visitStmt(B.getBody());
+    InlineVars = SavedInline;
     Flow = SavedFlow;
+    if (!BlockInline.empty()) { // they are the block's too, after the others
+      BlockInline.insert(BlockInline.begin(), B.getDecls().begin(),
+                         B.getDecls().end());
+      B.setDecls(Ctx.copyArray<Decl *>(BlockInline));
+    }
     HandlerDepth = SavedHandlers;
     FinallyLoopDepth = SavedFinally;
     RoutineBody = SavedBody;
@@ -7004,14 +7038,99 @@ public:
 
   void visitSequence(const void *Seq, llvm::ArrayRef<Stmt *> Body) {
     Containers.push_back(Seq);
+    std::unique_ptr<Scope> Declared; // of the variables declared in it
+    Scope *SavedScope = Cur;
     for (Stmt *Child : Body) {
       if (Diags.shouldStop())
         break;
       DirectSequence = Seq;
+      SeqScope = &Declared;
       visitStmt(Child);
     }
     DirectSequence = nullptr;
+    SeqScope = nullptr;
+    if (Declared)
+      Cur = SavedScope;
     Containers.pop_back();
+  }
+
+  /// The type of a variable declared without one, from its value's type T.
+  Type *inferVarType(VarDeclStmt *S, VarDecl *V, Type *T) {
+    if (T->isError())
+      return T;
+    if (T->isStringLiteral())
+      return S->hasLongStrings() ? Ctx.getAnsiStringType()
+                                 : Ctx.getShortStringType(255);
+    auto *ST = llvm::dyn_cast<SetType>(T);
+    if (T->isNil() || T->isUntyped() || T->isOpenArray() ||
+        T->isArrayOfConst() || T->isFile() || (ST && ST->isEmptySet())) {
+      Diags.error(S->getInit()->getBeginLoc(),
+                  "cannot tell the type of '" + V->getName().Spelling +
+                      "' from " +
+                      (T->isNil() ? std::string("nil")
+                       : ST       ? std::string("an empty set")
+                                  : "a value of type " + quoted(T)) +
+                      "; give the variable a type",
+                  {S->getInit()->getRange()});
+      return errorType();
+    }
+    return T;
+  }
+
+  /// var x: T;  var x: T := e;  var x := e;  -- among the statements of a
+  /// sequence, to whose end the variables are visible.
+  void visitVarDeclStmt(VarDeclStmt *S) {
+    const void *Seq = DirectSequence;
+    std::unique_ptr<Scope> *Declared = SeqScope;
+    DirectSequence = nullptr;
+    Expr *Init = S->getInit();
+    VarDecl *First = S->getVars()[0];
+    if (!Seq || !Declared) {
+      Diags.error(S->getBeginLoc(),
+                  "a variable can only be declared in a statement sequence "
+                  "(between 'begin' and 'end')",
+                  {S->getRange()});
+      if (Init)
+        check(Init);
+      return;
+    }
+    // The value is checked first: it cannot use the variable.
+    Type *T;
+    Type *ValueTy = nullptr;
+    if (First->getTypeSpec()) {
+      T = resolveType(First->getTypeSpec());
+      if (Init)
+        ValueTy = checkValueFor(T, Init);
+    } else {
+      ValueTy = check(Init);
+      T = inferVarType(S, First, ValueTy);
+    }
+    if (!*Declared) {
+      *Declared = std::make_unique<Scope>(Cur);
+      Cur = Declared->get();
+    }
+    for (VarDecl *V : S->getVars()) {
+      V->setType(T);
+      V->setOwner(CurRoutine);
+      checkOwnedDecl(V);
+      declare(V);
+      if (InlineVars)
+        InlineVars->push_back(V);
+      if (V->isOwned())
+        ownedDeclare(V);
+    }
+    if (!Init)
+      return;
+    Identifier Id = First->getName();
+    auto *Target = Ctx.create<NameRefExpr>(Id);
+    Target->setDecl(First);
+    Target->setType(T);
+    Used.insert(First); // (as an assignment does)
+    auto *Assign = Ctx.create<AssignStmt>(
+        SourceRange(Id.Loc, Init->getRange().getEnd()), Target,
+        S->getAssignLoc(), Init);
+    S->setInitAssign(Assign);
+    finishAssign(Assign, T, ValueTy);
   }
 
   void visitCompoundStmt(CompoundStmt *S) { visitSequence(S, S->getBody()); }
@@ -7408,6 +7527,12 @@ public:
         }
     Type *ValueTy = checkValueFor(TargetTy, S->getValue());
     CompoundResultRef = nullptr;
+    finishAssign(S, TargetTy, ValueTy);
+  }
+
+  /// The rest of the checks of Target := Value, both already checked.
+  void finishAssign(AssignStmt *S, Type *TargetTy, Type *ValueTy) {
+    Expr *Target = S->getTarget();
     // An owned variable's object stays its own unless moved: only a local
     // variable can refer to it too. Assigning to the variable gives it an
     // object again.
@@ -7472,7 +7597,7 @@ public:
         } else {
           for (unsigned I = 0; I < Flow->N; ++I)
             if (Flow->Changed[I] > Tick) {
-              uint32_t Bit = uint32_t(1) << I;
+              uint64_t Bit = uint64_t(1) << I;
               BodyEnd.Valid = (BodyEnd.Valid & ~Bit) | (Out.Valid & Bit);
               BodyEnd.Moved = (BodyEnd.Moved & ~Bit) | (Out.Moved & Bit);
               BodyEnd.Entry[I] = Out.Entry[I];
@@ -7598,12 +7723,30 @@ public:
     ownedLoopEnd(Loop, OwnedState());
   }
 
+  /// `for var x [: T] ...`: declares x in Loop, the scope of the loop. T is
+  /// its type if it has none written (null: not known yet).
+  void declareLoopVar(VarDecl *V, Type *T, Scope &Loop) {
+    if (V->getTypeSpec())
+      T = resolveType(V->getTypeSpec());
+    V->setType(T);
+    V->setOwner(CurRoutine);
+    Cur = &Loop;
+    declare(V);
+    if (InlineVars)
+      InlineVars->push_back(V);
+  }
+
   void visitForStmt(ForStmt *S) {
     DirectSequence = nullptr;
     NameRefExpr *VarRef = S->getVar();
     const Identifier &Id = VarRef->getName();
     Type *VarTy = errorType();
     bool Usable = false;
+    Scope LoopVars(Cur);
+    Scope *OuterScope = Cur;
+    if (VarDecl *IV = S->getInlineVar()) // (its values cannot use it)
+      declareLoopVar(IV, IV->getTypeSpec() ? nullptr : check(S->getInit()),
+                     LoopVars);
 
     if (Decl *D = Cur->lookup(Id.Name)) {
       VarRef->setDecl(D);
@@ -7662,6 +7805,7 @@ public:
     ownedLoopEnd(Loop, Before);
     if (Usable)
       ActiveFors.pop_back();
+    Cur = OuterScope;
   }
 
   /// A hidden variable of a for-in loop (code generation binds it), named
@@ -7712,7 +7856,21 @@ public:
     const Identifier &Id = VarRef->getName();
     Type *VarTy = errorType();
     bool Usable = false;
-    if (Decl *D = Cur->lookup(Id.Name)) {
+    Scope LoopVars(Cur);
+    Scope *OuterScope = Cur;
+    // for var x in ...: without a type, x has the type of the elements,
+    // known when the first one is assigned to it (MakeStep).
+    VarDecl *IV = S->getInlineVar();
+    VarDecl *Untyped = IV && !IV->getTypeSpec() ? IV : nullptr;
+    if (IV) {
+      checkTypeOrValue(S->getCollection()); // (it cannot use x)
+      declareLoopVar(IV, nullptr, LoopVars);
+    }
+    if (Untyped) {
+      VarRef->setDecl(Untyped);
+      Used.insert(Untyped);
+      Usable = true;
+    } else if (Decl *D = Cur->lookup(Id.Name)) {
       VarRef->setDecl(D);
       Used.insert(D);
       auto *V = llvm::dyn_cast<VarDecl>(D);
@@ -7788,6 +7946,13 @@ public:
     Scope InScope(Cur);
     Scope *Saved = Cur;
     auto MakeStep = [&](Expr *Value) {
+      if (Untyped && !Untyped->getType()) {
+        Cur = &InScope;
+        Type *ET = check(Value);
+        Cur = Saved;
+        Untyped->setType(ET);
+        VarRef->setType(ET);
+      }
       auto *Target = Ctx.create<NameRefExpr>(Id);
       auto *Step = Ctx.create<AssignStmt>(
           SourceRange(Id.Loc, C->getRange().getEnd()), Target, S->getInLoc(),
@@ -7807,6 +7972,15 @@ public:
           Usable && Elem ? MakeStep(forInRef(ElemV, CLoc)) : nullptr;
       S->setLowering(Kind, Elem, ElemV, Step);
     }
+    if (Untyped && !Untyped->getType()) {
+      if (Kind != ForInStmt::Invalid)
+        Diags.error(Id.Loc,
+                    "cannot tell the type of '" + Id.Spelling +
+                        "' from an empty set; give the variable a type",
+                    {Id.getRange()});
+      Untyped->setType(errorType());
+      Usable = false;
+    }
 
     if (Usable)
       ActiveFors.push_back({VarRef->getDecl(), S->getBeginLoc()});
@@ -7819,6 +7993,7 @@ public:
     ownedLoopEnd(Loop, Before);
     if (Usable)
       ActiveFors.pop_back();
+    Cur = OuterScope;
   }
 
   /// A for-in loop over CT through Collection.GetEnumerator: a function

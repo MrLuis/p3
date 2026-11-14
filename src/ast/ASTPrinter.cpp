@@ -606,8 +606,11 @@ class ASTPrinter : public StmtVisitor<ASTPrinter>,
   }
 
   void printBlock(Block &B) {
-    for (Decl *D : B.getDecls())
-      printDecl(D);
+    for (Decl *D : B.getDecls()) {
+      auto *V = llvm::dyn_cast<VarDecl>(D);
+      if (!V || !V->isInline()) // (printed where it is declared)
+        printDecl(D);
+    }
     if (B.getBody())
       visitStmt(B.getBody());
   }
@@ -713,6 +716,8 @@ public:
     line(S->isDownto() ? "ForStmt downto" : "ForStmt to");
     loc(S->getBeginLoc());
     IndentScope I(Indent);
+    if (S->getInlineVar())
+      printDecl(S->getInlineVar());
     visitExpr(S->getVar());
     visitExpr(S->getInit());
     visitExpr(S->getFinal());
@@ -722,6 +727,8 @@ public:
     line("ForInStmt");
     loc(S->getBeginLoc());
     IndentScope I(Indent);
+    if (S->getInlineVar())
+      printDecl(S->getInlineVar());
     visitExpr(S->getVar());
     visitExpr(S->getCollection());
     visitStmt(S->getBody());
@@ -806,6 +813,16 @@ public:
     for (Stmt *Child : S->getExceptBody())
       visitStmt(Child);
   }
+  void visitVarDeclStmt(VarDeclStmt *S) {
+    line("VarDeclStmt");
+    loc(S->getBeginLoc());
+    IndentScope I(Indent);
+    for (VarDecl *V : S->getVars())
+      printDecl(V);
+    if (S->getInit())
+      visitExpr(S->getInit());
+  }
+
   void visitRaiseStmt(RaiseStmt *S) {
     line("RaiseStmt");
     if (S->getAddress())

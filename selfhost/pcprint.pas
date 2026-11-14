@@ -922,9 +922,14 @@ end;
 procedure printBlock(b: PBlock);
 var
   i: longint;
+  d: PDecl;
 begin
   for i := 0 to b^.decls.count - 1 do
-    printDecl(PDecl(listGet(b^.decls, i)));
+  begin
+    d := PDecl(listGet(b^.decls, i));
+    if (d^.kind <> dkVar) or not d^.isInlineVar then { (printed where it is declared) }
+      printDecl(d);
+  end;
   if b^.body <> nil then
     visitStmt(b^.body);
 end;
@@ -1171,6 +1176,8 @@ begin
           line('ForStmt to');
         loc(s^.b);
         indent := indent + 2;
+        if s^.forInline <> nil then
+          printDecl(s^.forInline);
         visitExpr(s^.forVar);
         visitExpr(s^.forInit);
         visitExpr(s^.forFinal);
@@ -1182,6 +1189,8 @@ begin
         line('ForInStmt');
         loc(s^.b);
         indent := indent + 2;
+        if s^.inInline <> nil then
+          printDecl(s^.inInline);
         visitExpr(s^.inVar);
         visitExpr(s^.inColl);
         visitStmt(s^.inBody);
@@ -1191,6 +1200,17 @@ begin
       visitCase(s);
     nkTry:
       visitTry(s);
+    nkVarDecl:
+      begin
+        line('VarDeclStmt');
+        loc(s^.b);
+        indent := indent + 2;
+        for i := 0 to s^.vdVars.count - 1 do
+          printDecl(PDecl(listGet(s^.vdVars, i)));
+        if s^.vdInit <> nil then
+          visitExpr(s^.vdInit);
+        indent := indent - 2;
+      end;
     nkRaise:
       begin
         if s^.raiseAddr <> nil then

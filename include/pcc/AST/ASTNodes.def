@@ -53,6 +53,7 @@ STMT(Goto)            // goto 10                               (M10)
 STMT(IndirectCall)    // r.p(x); a[i];  (procedural values, S1, TP)
 STMT(Try)             // try ... except / finally ... end      (objfpc)
 STMT(Raise)           // raise [obj]                           (objfpc)
+STMT(VarDecl)         // var x: T := e                         (objfpc)
 
 #undef STMT
 #undef EXPR
