@@ -175,6 +175,9 @@ void __pas_astr_delete(char **p, int32_t index, int32_t count);
 void __pas_astr_insert(char *src, char **p, int32_t index);
 void __pas_str_setlength(unsigned char *s, int32_t maxlen, int32_t len);
 void __pas_write_astr(PasFile *f, const char *s, int32_t width);
+/* write(f, p) of a pchar: the C string p points to (nothing for nil, not
+ * even padding). */
+void __pas_write_cstr(PasFile *f, const char *s, int32_t width);
 void __pas_read_astr(PasFile *f, char **dst);
 
 /*===- Array of const and Format (format.c) ---------------------------------===

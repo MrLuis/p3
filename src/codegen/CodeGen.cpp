@@ -4686,6 +4686,10 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
       astrCall("__pas_write_astr", B.getVoidTy(), {File, visitExpr(Value), Width});
       return;
     }
+    if (T->isPointer()) { // a pchar: the C string it points to
+      astrCall("__pas_write_cstr", B.getVoidTy(), {File, visitExpr(Value), Width});
+      return;
+    }
     if (T->isShortString()) {
       B.CreateCall(RT.WritePStr, {File, emitPStr(Value), Width});
       return;

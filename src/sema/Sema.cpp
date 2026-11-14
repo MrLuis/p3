@@ -5740,9 +5740,10 @@ class Checker : public StmtVisitor<Checker>,
       Type *T = check(Value);
       if (F)
         F->setType(T);
-      // Turbo/FPC: an enumeration's value is written as its name.
+      // Turbo/FPC: an enumeration's value is written as its name, a pchar
+      // as the C string it points to.
       if (!T->isError() && !isWritable(T) &&
-          (isISO() || !T->getBase()->isEnum()))
+          (isISO() || !(T->getBase()->isEnum() || isPChar(T))))
         Diags.error(Value->getBeginLoc(),
                     "cannot write a value of type " + quoted(T),
                     {Value->getRange()});

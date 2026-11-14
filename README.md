@@ -431,6 +431,8 @@ number of them between two pointers of the same type (an `int64`);
 `(p + i)^`, a variable, for any typed pointer; `<`, `<=`, `>` and `>=`
 order pointers by address. A parenthesized expression takes `^`, `[i]` and
 `.field` (`(p + 1)^ := 0`). Nothing is checked: there are no bounds.
+`write` and `writeln` take a `pchar` (any pointer to `char`): the
+characters up to the NUL, nothing for `nil`.
 
 ```pascal
 function CLength(s: pchar): longint;

@@ -32,3 +32,13 @@
 ; ISO: iso.pas:11:8: error: invalid operands to '<' ('PInt' and 'PInt')
 ; ISO: iso.pas:12:5: error: use of undeclared identifier 'flush'
 ; ISO-NOT: error:
+;
+; write and writeln take a pchar (any pointer to char) outside ISO mode;
+; other pointers cannot be written.
+; RUN: not %pcc --mode=tp -ferror-limit=0 -c %S/Inputs/ptrarith/write.pas -o %t.o 2>&1 | FileCheck --check-prefix=WR %s
+; WR: write.pas:13:11: error: cannot write a value of type 'PInt'
+; WR-NOT: error:
+; RUN: not %pcc -ferror-limit=0 -c %S/Inputs/ptrarith/write.pas -o %t.o 2>&1 | FileCheck --check-prefix=WRISO %s
+; WRISO: write.pas:12:11: error: cannot write a value of type 'PCh'
+; WRISO: write.pas:13:11: error: cannot write a value of type 'PInt'
+; WRISO-NOT: error:

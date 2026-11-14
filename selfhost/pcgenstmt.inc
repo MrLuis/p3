@@ -113,6 +113,12 @@ begin
     astrV3('__pas_write_astr', 'ptr,ptr,i32', f, s, width);
     exit;
   end;
+  if t^.kind = tyPointer then { a pchar: the C string it points to }
+  begin
+    s := visitExpr(value);
+    astrV3('__pas_write_cstr', 'ptr,ptr,i32', f, s, width);
+    exit;
+  end;
   if t^.kind = tyShortString then
   begin
     s := emitPStr(value);

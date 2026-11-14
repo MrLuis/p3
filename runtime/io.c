@@ -1112,6 +1112,13 @@ void __pas_write_pstr(PasFile *f, const unsigned char *s, int32_t width) {
   __pas_write_str(f, (const char *)s + 1, s[0], width);
 }
 
+/* write(f, p) of a pchar: the characters up to the NUL; nothing for nil,
+ * not even the padding of a field width (as in Free Pascal). */
+void __pas_write_cstr(PasFile *f, const char *s, int32_t width) {
+  if (s)
+    __pas_write_str(f, s, (int64_t)strlen(s), width);
+}
+
 void __pas_write_astr(PasFile *f, const char *s, int32_t width) {
   __pas_write_str(f, s ? s : "", __pas_astr_length(s), width);
 }
