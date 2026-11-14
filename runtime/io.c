@@ -260,6 +260,15 @@ void __pas_close(PasFile *f) {
   f->mode = MODE_UNDEFINED;
 }
 
+void __pas_flush(PasFile *f) {
+  if (f->mode != MODE_GENERATE)
+    file_error(f, f->mode == MODE_UNDEFINED
+                      ? "'flush' of a file that is not open"
+                      : "'flush' of a file that is not open for writing");
+  if (fflush(f->fp ? f->fp : stdout) != 0)
+    file_error(f, "error writing file");
+}
+
 void __pas_reset_size(PasFile *f, int64_t recsize) {
   if (recsize <= 0)
     file_error(f, "the record size of 'reset' must be positive");

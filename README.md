@@ -59,7 +59,7 @@ fields and elements have no address, so they cannot be `var` arguments or
 used with `@`; fields of types that need alignment, such as `real`,
 pointers or plain records, and typed constants of bitpacked types are not
 supported yet); `pointer`, `pchar` (also `AnsiChar` and
-`PAnsiChar`), `@`, `getmem freemem
+`PAnsiChar`), `@`, pointer arithmetic (see below), `getmem freemem
 reallocmem fillchar move sizeof low high assigned`; `const` parameters and
 `constref` ones (read-only like `const`, always passed by reference, as in
 Free Pascal: a variable of the parameter's type itself, so its address is
@@ -423,6 +423,27 @@ is a warning. Switches for features pcc lacks (`nestedcomments`,
 are warnings too. Unlike Free Pascal, pcc also takes them after the start
 of a file.
 
+**Pointer arithmetic** (tp and objfpc, as in Free Pascal): `p + n`, `n + p`
+and `p - n` move a pointer by n of what it points to (by n bytes for an
+untyped `pointer`, and so for `@x`, which is untyped); `p - q` is the
+number of them between two pointers of the same type (an `int64`);
+`inc(p[, n])` and `dec(p[, n])` move a pointer variable; `p[i]` is
+`(p + i)^`, a variable, for any typed pointer; `<`, `<=`, `>` and `>=`
+order pointers by address. A parenthesized expression takes `^`, `[i]` and
+`.field` (`(p + 1)^ := 0`). Nothing is checked: there are no bounds.
+
+```pascal
+function CLength(s: pchar): longint;
+var
+  e: pchar;
+begin
+  e := s;
+  while e^ <> #0 do
+    inc(e);
+  CLength := e - s;
+end;
+```
+
 **Files named with `Assign`** (tp and objfpc, as in Free Pascal; also
 `AssignFile` and `CloseFile` in objfpc): `Assign(f, name)` names a text, typed
 or untyped (`file`) file, and `Close` closes it. A typed or untyped file
@@ -431,7 +452,10 @@ writing, `Rewrite` creates it, and `Seek`, `FilePos`, `FileSize` and `Eof`
 work in records. `Reset(f, n)` / `Rewrite(f, n)` give an untyped file
 records of n bytes (128 if not given); `BlockRead(f, buf, count[, done])`
 and `BlockWrite` move whole records, and without `done` reading fewer is a
-runtime error. An empty name is standard input or output. I/O errors are
+runtime error. An empty name is standard input or output. `Flush(f)`
+writes out what a text file open for writing has buffered (`Flush(output)`
+before output that another reader must see now: `output` is buffered when
+it is not a terminal). I/O errors are
 runtime errors (no `{$I-}` or `IOResult` yet). Program-parameter and
 internal typed files keep ISO's buffer variable (`f^`, `get`, `put`).
 `GetFileHandle(f)` gives the operating system's handle of any file variable

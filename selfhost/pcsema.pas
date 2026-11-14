@@ -599,7 +599,7 @@ begin
                     bkInsert, bkSetLength, bkSlice, bkLength, bkCopy, bkPos, bkConcat, bkUpCase,
                     bkGetMem, bkFreeMem, bkReallocMem, bkFillChar, bkMove,
                     bkHalt, bkSizeOf, bkLow, bkHigh, bkAssigned, bkParamCount,
-                    bkParamStr, bkAssign, bkClose, bkBlockRead, bkBlockWrite,
+                    bkParamStr, bkAssign, bkClose, bkFlush, bkBlockRead, bkBlockWrite,
                     bkSeek, bkFilePos, bkFileSize, bkGetFileHandle,
                     bkAssignFile, bkCloseFile, bkExceptAddr];
 end;
@@ -1438,8 +1438,8 @@ begin
       else
         isVariableReference := isVariableReference(e^.base);
     nkIndex:
-      if (e^.base^.typ <> nil) and (e^.base^.typ^.kind = tyDynArray) then
-        isVariableReference := e^.idxProp = nil { on the heap, like p^ }
+      if (e^.base^.typ <> nil) and (e^.base^.typ^.kind in [tyDynArray, tyPointer]) then
+        isVariableReference := e^.idxProp = nil { on the heap, like p^; p[i] }
       else
         isVariableReference := (e^.idxProp = nil) and isVariableReference(e^.base);
     nkDeref:
@@ -1565,7 +1565,7 @@ begin
     exit(isObject(e^.base) or isHelperVariable(e^.base));
   end;
   if (e^.kind = nkIndex) and (e^.idxProp = nil) and (e^.base^.typ <> nil) and
-     (e^.base^.typ^.kind <> tyDynArray) then
+     not (e^.base^.typ^.kind in [tyDynArray, tyPointer]) then
     exit(isHelperVariable(e^.base));
   isHelperVariable := isVariableReference(e);
 end;
@@ -1579,7 +1579,7 @@ begin
       nkIndex:
         begin
           { (a dynamic array's elements are not the parameter) }
-          if (e^.idxProp <> nil) or (e^.base^.typ^.kind = tyDynArray) then
+          if (e^.idxProp <> nil) or (e^.base^.typ^.kind in [tyDynArray, tyPointer]) then
             exit(nil);
           e := e^.base;
         end;

@@ -773,6 +773,16 @@ begin
   memType := l;
 end;
 
+{ What pointer arithmetic on a pt counts in: its pointee (bytes, for an
+  untyped pointer). }
+function pointeeMemType(pt: PType): PIRType;
+begin
+  if pt^.untyped or (pt^.pointee = nil) then
+    pointeeMemType := irI8
+  else
+    pointeeMemType := memType(pt^.pointee);
+end;
+
 { The register representation: booleans are i1. }
 function regType(t: PType): PIRType;
 begin
@@ -2771,6 +2781,13 @@ begin
       begin
         bt := e^.base^.typ;
         idxTy := e^.index^.typ;
+        if bt^.kind = tyPointer then
+        begin
+          { p[i]: (p + i)^, unchecked as in Free Pascal }
+          base := visitExpr(e^.base);
+          x := toI64(visitExpr(e^.index), idxTy);
+          exit(irGEP1(pointeeMemType(bt), base, x, false, ''));
+        end;
         if bt^.kind = tyDynArray then
         begin
           base := visitExpr(e^.base);
@@ -4658,9 +4675,16 @@ begin
   begin { interfaces: their objects }
     l := interfaceObject(visitExpr(e^.lhs));
     r := interfaceObject(visitExpr(e^.rhs));
-    if op = boEq then
-      exit(irICmp('eq', l, r, 'cmp'));
-    exit(irICmp('ne', l, r, 'cmp'));
+    case op of
+      boEq: exit(irICmp('eq', l, r, 'cmp'));
+      boNe: exit(irICmp('ne', l, r, 'cmp'));
+      { pointers, by address (Turbo/FPC) }
+      boLt: exit(irICmp('ult', l, r, 'cmp'));
+      boLe: exit(irICmp('ule', l, r, 'cmp'));
+      boGt: exit(irICmp('ugt', l, r, 'cmp'));
+    else
+      exit(irICmp('uge', l, r, 'cmp'));
+    end;
   end;
   if isStringType(lt) then
   begin
@@ -5127,6 +5151,29 @@ begin
   rt := e^.rhs^.typ;
   l := visitExpr(e^.lhs);
   r := visitExpr(e^.rhs);
+
+  { Turbo/FPC pointer arithmetic, in units of what is pointed to }
+  if e^.typ^.kind = tyPointer then
+  begin
+    if lt^.kind <> tyPointer then { n + p }
+    begin
+      tmp := toI64(l, lt);
+      exit(irGEP1(pointeeMemType(e^.typ), r, tmp, false, 'ptr.add'));
+    end;
+    tmp := toI64(r, rt);
+    if op = boSub then
+      tmp := irBin('sub', i64c(0), tmp, '');
+    exit(irGEP1(pointeeMemType(e^.typ), l, tmp, false, 'ptr.add'));
+  end;
+  if lt^.kind = tyPointer then { p - q }
+  begin
+    l := irCast('ptrtoint', l, irI64, '');
+    r := irCast('ptrtoint', r, irI64, '');
+    v := irBin('sub', l, r, 'ptr.diff');
+    if pointeeMemType(lt)^.size > 1 then
+      v := irBin('sdiv', v, i64c(pointeeMemType(lt)^.size), 'ptr.count');
+    exit(v);
+  end;
 
   if e^.typ^.kind = tySet then
   begin

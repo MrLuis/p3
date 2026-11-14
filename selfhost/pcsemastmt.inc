@@ -303,7 +303,7 @@ begin
 end;
 
 { reset, rewrite (an untyped file's: with an optional record size), get,
-  put, page, close, closefile. }
+  put, page, close, closefile, flush. }
 procedure checkFileProc(s: PNode; k: TBuiltinKind);
 var
   t: PType;
@@ -334,9 +334,11 @@ begin
     maT(t);
     errR(a^.b, nodeRange(a));
   end
-  else if isPage and not isTextFile(t) then
+  else if (isPage or (k = bkFlush)) and not isTextFile(t) then
   begin
-    ms('''page'' requires a text file');
+    ms('');
+    maCallee(s^.callee);
+    ma(' requires a text file');
     errR(a^.b, nodeRange(a));
   end
   else if ((k = bkGet) or (k = bkPut)) and isUntypedFile(t) then
@@ -648,7 +650,8 @@ begin
   end;
 end;
 
-{ inc(x [, n]) / dec(x [, n]) }
+{ inc(x [, n]) / dec(x [, n]): x an ordinal variable (Turbo/FPC: or a
+  pointer, moved by n of what it points to), n an integer. }
 procedure checkIncDec(s: PNode);
 var
   t, n: PType;
@@ -664,11 +667,12 @@ begin
   end;
   a0 := PNode(listGet(s^.args, 0));
   t := check(a0);
-  if not isError(t) and (not isOrdinal(t) or not isVariableReference(a0)) then
+  if not isError(t) and
+     (not (isOrdinal(t) or (t^.kind = tyPointer)) or not isVariableReference(a0)) then
   begin
     ms('');
     maCallee(s^.callee);
-    ma(' expects an ordinal variable');
+    ma(' expects an ordinal or pointer variable');
     errR(a0^.b, nodeRange(a0));
   end
   else if not isError(t) and checkModifiable(a0) then
@@ -2490,7 +2494,7 @@ begin
       bkReadln: checkRead(s, true);
       bkNew: checkNewDispose(s, true);
       bkDispose: checkNewDispose(s, false);
-      bkReset, bkRewrite, bkGet, bkPut, bkPage, bkClose, bkCloseFile:
+      bkReset, bkRewrite, bkGet, bkPut, bkPage, bkClose, bkCloseFile, bkFlush:
         checkFileProc(s, d^.builtin);
       bkAssign, bkAssignFile: checkAssignFile(s);
       bkBlockRead, bkBlockWrite: checkBlockIO(s);
@@ -3808,6 +3812,24 @@ begin
      areCompatible(l, r) then
     exit(tyBooleanT); { objects and classes (objfpc) }
 
+  if not isISO and ((l^.kind = tyPointer) or (r^.kind = tyPointer)) then
+  begin
+    { Turbo/FPC pointer arithmetic: p + n, n + p and p - n move p by n of
+      what it points to (bytes, for an untyped pointer); p - q counts them;
+      pointers are ordered by address }
+    if (op in [boAdd, boSub]) and (l^.kind = tyPointer) and isIntegerLike(r) then
+      exit(l);
+    if (op = boAdd) and isIntegerLike(l) and (r^.kind = tyPointer) then
+      exit(r);
+    if (l^.kind = tyPointer) and (r^.kind = tyPointer) and areCompatible(l, r) then
+    begin
+      if op = boSub then
+        exit(tyInt64T);
+      if op in [boLt, boLe, boGt, boGe] then
+        exit(tyBooleanT);
+    end;
+  end;
+
   bothIntegers := isIntegerLike(l) and isIntegerLike(r);
   case op of
     boAdd, boSub, boMul:
@@ -4169,6 +4191,17 @@ begin
       errR(e^.index^.b, nodeRange(e^.index));
     end;
     exit(tyCharT);
+  end;
+  if (bt^.kind = tyPointer) and not isISO and not bt^.untyped and (bt^.pointee <> nil) then
+  begin
+    { Turbo/FPC: p[i] is (p + i)^ }
+    if not isIntegerLike(it) then
+    begin
+      ms('pointer index must be an integer');
+      errR(e^.index^.b, nodeRange(e^.index));
+      exit;
+    end;
+    exit(bt^.pointee);
   end;
   if bt^.kind <> tyArray then
   begin

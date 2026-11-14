@@ -1,0 +1,11 @@
+; flush of a file that is not open for writing is a runtime error (Free
+; Pascal's errors 103 and 105).
+; RUN: %pcc --mode=tp %S/Inputs/flush/errors.pas -o %t
+; RUN: not %t closed %t.tmp 2>&1 | FileCheck --check-prefix=CLOSED %s
+; CLOSED: Runtime error: 'flush' of a file that is not open (file '{{.*}}.tmp')
+; RUN: not %t reading %t.tmp 2>&1 | FileCheck --check-prefix=READING %s
+; READING: Runtime error: 'flush' of a file that is not open for writing (file '{{.*}}.tmp')
+; RUN: not %t input %t.tmp 2>&1 | FileCheck --check-prefix=INPUT %s
+; INPUT: Runtime error: 'flush' of a file that is not open for writing (file 'input')
+; RUN: %t ok %t.tmp | FileCheck --check-prefix=OK %s
+; OK: fine

@@ -4,7 +4,7 @@
 ; CHECK: m12.pas:2:20: error: string length must be an integer in 1..255
 ; CHECK: m12.pas:5:3: error: 'break' is only allowed inside a loop
 ; CHECK: m12.pas:6:8: error: cannot dereference an untyped pointer
-; CHECK: m12.pas:7:7: error: 'inc' expects an ordinal variable
+; CHECK: m12.pas:7:7: error: 'inc' expects an ordinal or pointer variable
 ; CHECK: m12.pas:8:5: error: assigning to 'string[5]' from incompatible type 'integer'
 ; CHECK: m12.pas:9:15: error: 'length' expects a string
 ; CHECK: m12.pas:10:13: error: expected an integer

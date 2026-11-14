@@ -672,6 +672,13 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
 
   uint64_t sizeOf(Type *T) { return DL.getTypeAllocSize(memType(T)); }
 
+  /// What pointer arithmetic on a PT counts in: its pointee (bytes, for an
+  /// untyped pointer).
+  llvm::Type *pointeeMemType(PointerType *PT) {
+    return PT->isUntyped() || !PT->getPointee() ? B.getInt8Ty()
+                                                : memType(PT->getPointee());
+  }
+
   /// The layout of an object of class C: VMT pointer, then all fields.
   /// Records each field's offset; a prefix of fields has the same offsets
   /// in every descendant.
@@ -2119,6 +2126,12 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
                            I->getIndex()->getBeginLoc());
         return B.CreateInBoundsGEP(memType(AC->getElementType()), A,
                                    B.CreateAdd(X, B.getInt64(1)));
+      }
+      if (auto *PT = llvm::dyn_cast<PointerType>(I->getBase()->getType())) {
+        // p[i]: (p + i)^, unchecked as in Free Pascal.
+        llvm::Value *P = visitExpr(I->getBase());
+        llvm::Value *X = toI64(visitExpr(I->getIndex()), I->getIndex()->getType());
+        return B.CreateGEP(pointeeMemType(PT), P, X);
       }
       if (I->getBase()->getType()->isDynArray()) {
         Type *Elem = llvm::cast<DynArrayType>(I->getBase()->getType())->getElementType();
@@ -4540,8 +4553,15 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
         LT->isInterface() || LT->isDynArray()) { // interfaces: their objects
       llvm::Value *L = interfaceObject(visitExpr(E->getLHS()));
       llvm::Value *R = interfaceObject(visitExpr(E->getRHS()));
-      return Op == BinaryOp::Eq ? B.CreateICmpEQ(L, R, "cmp")
-                                : B.CreateICmpNE(L, R, "cmp");
+      switch (Op) {
+      case BinaryOp::Eq: return B.CreateICmpEQ(L, R, "cmp");
+      case BinaryOp::Ne: return B.CreateICmpNE(L, R, "cmp");
+      // Pointers, by address (Turbo/FPC).
+      case BinaryOp::Lt: return B.CreateICmpULT(L, R, "cmp");
+      case BinaryOp::Le: return B.CreateICmpULE(L, R, "cmp");
+      case BinaryOp::Gt: return B.CreateICmpUGT(L, R, "cmp");
+      default:           return B.CreateICmpUGE(L, R, "cmp");
+      }
     }
 
     if (LT->isStringType()) {
@@ -5503,6 +5523,10 @@ public:
       B.CreateCall(fileRuntime("__pas_close", B.getVoidTy(), {B.getPtrTy()}),
                    {loadFile(emitAddress(S->getArgs()[0]))});
       return;
+    case BuiltinKind::Flush:
+      B.CreateCall(fileRuntime("__pas_flush", B.getVoidTy(), {B.getPtrTy()}),
+                   {loadFile(emitAddress(S->getArgs()[0]))});
+      return;
     case BuiltinKind::Assign: case BuiltinKind::AssignFile: {
       llvm::Value *File = loadFile(emitAddress(S->getArgs()[0]));
       llvm::Value *Name = emitAnsi(S->getArgs()[1]);
@@ -5646,6 +5670,11 @@ public:
               : B.getInt64(1);
       bool IsInc = BD->getBuiltinKind() == BuiltinKind::Inc;
       SourceLocation L = S->getBeginLoc();
+      if (auto *PT = llvm::dyn_cast<PointerType>(T)) { // by n of its pointee
+        llvm::Value *Delta = IsInc ? Step : B.CreateNeg(Step);
+        B.CreateStore(B.CreateGEP(pointeeMemType(PT), Old, Delta), Addr);
+        return;
+      }
       if (T->isIntegerLike() && intBits(T) == 64) { // no wider type to check in
         // (qword: unsigned)
         llvm::Value *New = emitCheckedArith(IsInc ? BinaryOp::Add : BinaryOp::Sub,
@@ -6578,6 +6607,27 @@ public:
     Type *LT = E->getLHS()->getType(), *RTy = E->getRHS()->getType();
     llvm::Value *L = visitExpr(E->getLHS());
     llvm::Value *R = visitExpr(E->getRHS());
+
+    // Turbo/FPC pointer arithmetic, in units of what is pointed to.
+    if (auto *PT = llvm::dyn_cast<PointerType>(E->getType())) {
+      if (!LT->isPointer()) // n + p
+        return B.CreateGEP(pointeeMemType(PT), R, toI64(L, LT), "ptr.add");
+      llvm::Value *N = toI64(R, RTy);
+      if (Op == BinaryOp::Sub)
+        N = B.CreateNeg(N);
+      return B.CreateGEP(pointeeMemType(PT), L, N, "ptr.add");
+    }
+    if (auto *PT = llvm::dyn_cast<PointerType>(LT)) { // p - q
+      // (instructions even for constant addresses: the self-hosted compiler
+      // writes the same)
+      llvm::Value *LI = B.Insert(llvm::CastInst::Create(
+          llvm::Instruction::PtrToInt, L, B.getInt64Ty()));
+      llvm::Value *RI = B.Insert(llvm::CastInst::Create(
+          llvm::Instruction::PtrToInt, R, B.getInt64Ty()));
+      llvm::Value *Diff = B.CreateSub(LI, RI, "ptr.diff");
+      uint64_t Size = DL.getTypeAllocSize(pointeeMemType(PT));
+      return Size > 1 ? B.CreateSDiv(Diff, B.getInt64(Size), "ptr.count") : Diff;
+    }
 
     if (E->getType()->isSet()) {
       // (the result has the larger of the two representations)

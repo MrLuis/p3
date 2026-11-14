@@ -11,7 +11,7 @@
 ; CHECK: errors.pas:26:8: error: the elements and fields of bitpacked arrays and records have no address (they cannot be passed as 'var' parameters or used with '@')
 ; CHECK: errors.pas:27:9: error: the elements and fields of bitpacked arrays and records have no address (they cannot be passed as 'var' parameters or used with '@')
 ; CHECK: errors.pas:28:10: error: the elements and fields of bitpacked arrays and records have no address (they cannot be passed as 'var' parameters or used with '@')
-; CHECK: errors.pas:29:7: error: 'inc' expects an ordinal variable
+; CHECK: errors.pas:29:7: error: 'inc' expects an ordinal or pointer variable
 ; CHECK: errors.pas:30:8: error: cannot pass a value of type 'TBits' to parameter 'a' of type 'array of boolean'
 ; CHECK: errors.pas:31:11: error: argument for untyped parameter 'u' must be a variable
 ; CHECK: errors.pas:32:8: error: argument to 'read' must be a variable

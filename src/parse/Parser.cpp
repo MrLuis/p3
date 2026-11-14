@@ -2801,8 +2801,8 @@ Stmt *Parser::parseStatementImpl() {
     return parseTryStmt();
   case tok::kw_raise:
     return parseRaiseStmt();
-  case tok::l_paren: { // objfpc: (obj as TFoo).Show;
-    if (!LangOpts.ObjKeywords) {
+  case tok::l_paren: { // Turbo/FPC: (p + 1)^ := x; (obj as TFoo).Show;
+    if (LangOpts.Mode == LangMode::ISO) {
       Diags.error(Tok.getLocation(), "expected statement");
       break;
     }
@@ -3802,8 +3802,9 @@ Expr *Parser::parseFactor() {
       return nullptr;
     }
     Expr *Paren = Ctx.create<ParenExpr>(SourceRange(LParen, PrevTokEnd), Inner);
-    // objfpc: (obj as TFoo).Show
-    if (LangOpts.ObjKeywords && Tok.isOneOf(tok::period, tok::caret, tok::l_square))
+    // Turbo/FPC: (p + 1)^, (obj as TFoo).Show
+    if (LangOpts.Mode != LangMode::ISO &&
+        Tok.isOneOf(tok::period, tok::caret, tok::l_square))
       return parseSelectors(Paren);
     return Paren;
   }

@@ -1,0 +1,34 @@
+; Pointer arithmetic (Turbo/FPC): a pointer and an integer are added and
+; subtracted, compatible pointers are subtracted and ordered, typed
+; pointers are indexed by integers, inc and dec take a pointer variable.
+; flush takes one text file variable.
+; RUN: not %pcc --mode=tp -ferror-limit=0 -c %S/Inputs/ptrarith/errors.pas -o %t.o 2>&1 | FileCheck %s
+; RUN: not %pcc --mode=objfpc -ferror-limit=0 -c %S/Inputs/ptrarith/errors.pas -o %t.o 2>&1 | FileCheck %s
+; CHECK: errors.pas:14:10: error: invalid operands to '+' ('PInt' and 'PInt')
+; CHECK: errors.pas:15:10: error: invalid operands to '*' ('PInt' and 'integer')
+; CHECK: errors.pas:16:10: error: invalid operands to '+' ('PInt' and 'real')
+; CHECK: errors.pas:17:10: error: invalid operands to '-' ('integer' and 'PInt')
+; CHECK: errors.pas:18:10: error: invalid operands to '-' ('PInt' and 'PReal')
+; CHECK: errors.pas:19:12: error: invalid operands to '+' ('nil' and 'integer')
+; CHECK: errors.pas:20:10: error: invalid operands to 'div' ('PInt' and 'integer')
+; CHECK: errors.pas:21:8: error: invalid operands to '<' ('PInt' and 'PReal')
+; CHECK: errors.pas:22:8: error: invalid operands to '<' ('PInt' and 'nil')
+; CHECK: errors.pas:23:10: error: subscripted value is not an array (type 'pointer')
+; CHECK: errors.pas:24:10: error: pointer index must be an integer
+; CHECK: errors.pas:25:5: error: assigning to 'integer' from incompatible type 'PInt'
+; CHECK: errors.pas:26:5: error: assigning to 'PInt' from incompatible type 'int64'
+; CHECK: errors.pas:27:10: error: step must be an integer
+; CHECK: errors.pas:28:7: error: 'inc' expects an ordinal or pointer variable
+; CHECK: errors.pas:29:3: error: 'flush' expects 1 file argument
+; CHECK: errors.pas:30:9: error: 'flush' requires a text file
+; CHECK: errors.pas:31:9: error: 'flush' expects a file variable, not a value of type 'integer'
+; CHECK: errors.pas:32:3: error: 'flush' expects 1 file argument
+; CHECK-NOT: error:
+;
+; Neither is part of ISO 7185.
+; RUN: not %pcc -ferror-limit=0 -c %S/Inputs/ptrarith/iso.pas -o %t.o 2>&1 | FileCheck --check-prefix=ISO %s
+; ISO: iso.pas:9:10: error: invalid operands to '+' ('PInt' and 'integer')
+; ISO: iso.pas:10:10: error: subscripted value is not an array (type 'PInt')
+; ISO: iso.pas:11:8: error: invalid operands to '<' ('PInt' and 'PInt')
+; ISO: iso.pas:12:5: error: use of undeclared identifier 'flush'
+; ISO-NOT: error:

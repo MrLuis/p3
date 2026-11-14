@@ -57,6 +57,7 @@ BUILTIN_PROC(Assign,     "assign")
 BUILTIN_PROC(AssignFile, "assignfile")
 BUILTIN_PROC(Close,      "close")
 BUILTIN_PROC(CloseFile,  "closefile")
+BUILTIN_PROC(Flush,      "flush") // a text file's buffered output
 BUILTIN_PROC(BlockRead,  "blockread")
 BUILTIN_PROC(BlockWrite, "blockwrite")
 BUILTIN_PROC(Seek,       "seek")

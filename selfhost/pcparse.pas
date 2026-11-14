@@ -3968,8 +3968,8 @@ begin
   n := nil;
   case tok.kind of
     tkIdentifier: n := parseAssignmentOrCall;
-    tkLParen: { objfpc: (obj as TFoo).Show; }
-      if mode = lmObjFPC then
+    tkLParen: { Turbo/FPC: (p + 1)^ := x; (obj as TFoo).Show; }
+      if mode <> lmISO then
       begin
         start := tok.loc;
         n := parseFactor;
@@ -5294,8 +5294,8 @@ begin
         end;
         n := newNode(nkParen, lparen, prevTokEnd);
         n^.inner := inner;
-        { objfpc: (obj as TFoo).Show }
-        if (mode = lmObjFPC) and (tok.kind in [tkPeriod, tkCaret, tkLSquare]) then
+        { Turbo/FPC: (p + 1)^, (obj as TFoo).Show }
+        if (mode <> lmISO) and (tok.kind in [tkPeriod, tkCaret, tkLSquare]) then
           exit(parseSelectors(n));
         exit(n);
       end;

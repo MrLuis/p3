@@ -639,6 +639,14 @@ begin
   else
     step := i64c(1);
   loc := s^.b;
+  if t^.kind = tyPointer then { by n of its pointee }
+  begin
+    if not isInc then
+      step := irBin('sub', i64c(0), step, '');
+    nv := irGEP1(pointeeMemType(t), old, step, false, '');
+    irStore(nv, addr);
+    exit;
+  end;
   if isIntegerLike(t) and (intBits(t) = 64) then
   begin
     { no wider type to check in (qword: unsigned) }
@@ -780,6 +788,11 @@ begin
       begin
         f := loadFile(emitAddress(PNode(listGet(s^.args, 0))));
         ignored := call1(classRuntime('__pas_close', 'void', 'ptr'), f, '');
+      end;
+    bkFlush:
+      begin
+        f := loadFile(emitAddress(PNode(listGet(s^.args, 0))));
+        ignored := call1(classRuntime('__pas_flush', 'void', 'ptr'), f, '');
       end;
     bkAssign, bkAssignFile:
       begin

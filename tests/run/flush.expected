@@ -1,0 +1,5 @@
+before flush: TRUE
+after flush: first
+again: first second
+pascal, then C
+done

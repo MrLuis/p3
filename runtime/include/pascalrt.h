@@ -72,6 +72,8 @@ void *__pas_buffer(PasFile *f);
  * an untyped file. */
 void __pas_assign(PasFile *f, const char *name);
 void __pas_close(PasFile *f);
+/* flush(f): writes out a text file's buffered output. */
+void __pas_flush(PasFile *f);
 void __pas_reset_size(PasFile *f, int64_t recsize);
 void __pas_rewrite_size(PasFile *f, int64_t recsize);
 int64_t __pas_blockread(PasFile *f, void *buf, int64_t count, int32_t checked);

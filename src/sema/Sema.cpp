@@ -615,7 +615,7 @@ class Checker : public StmtVisitor<Checker>,
     case BuiltinKind::Move: case BuiltinKind::Halt: case BuiltinKind::SizeOf:
     case BuiltinKind::Low: case BuiltinKind::High: case BuiltinKind::Assigned:
     case BuiltinKind::ParamCount: case BuiltinKind::ParamStr:
-    case BuiltinKind::Assign: case BuiltinKind::Close:
+    case BuiltinKind::Assign: case BuiltinKind::Close: case BuiltinKind::Flush:
     case BuiltinKind::BlockRead: case BuiltinKind::BlockWrite:
     case BuiltinKind::Seek: case BuiltinKind::FilePos:
     case BuiltinKind::FileSize: case BuiltinKind::GetFileHandle:
@@ -979,8 +979,9 @@ class Checker : public StmtVisitor<Checker>,
       return D && (llvm::isa<VarDecl>(D) || llvm::isa<FieldDecl>(D));
     }
     if (auto *I = llvm::dyn_cast<IndexExpr>(E)) {
-      if (I->getBase()->getType() && I->getBase()->getType()->isDynArray())
-        return !I->getProperty(); // on the heap, like p^
+      if (I->getBase()->getType() && (I->getBase()->getType()->isDynArray() ||
+                                      I->getBase()->getType()->isPointer()))
+        return !I->getProperty(); // on the heap, like p^; p[i]
       return !I->getProperty() && isVariableReference(I->getBase());
     }
     if (auto *F = llvm::dyn_cast<FieldExpr>(E)) {
@@ -1083,7 +1084,8 @@ class Checker : public StmtVisitor<Checker>,
     }
     if (auto *I = llvm::dyn_cast<IndexExpr>(E);
         I && !I->getProperty() && I->getBase()->getType() &&
-        !I->getBase()->getType()->isDynArray())
+        !I->getBase()->getType()->isDynArray() &&
+        !I->getBase()->getType()->isPointer())
       return isHelperVariable(I->getBase());
     return isVariableReference(E);
   }
@@ -1098,7 +1100,8 @@ class Checker : public StmtVisitor<Checker>,
   static VarDecl *constParamRoot(Expr *E) {
     while (true) {
       if (auto *I = llvm::dyn_cast<IndexExpr>(E)) {
-        if (I->getProperty() || I->getBase()->getType()->isDynArray())
+        if (I->getProperty() || I->getBase()->getType()->isDynArray() ||
+            I->getBase()->getType()->isPointer())
           return nullptr; // (a dynamic array's elements are not the parameter)
         E = I->getBase();
       } else if (auto *F = llvm::dyn_cast<FieldExpr>(E)) {
@@ -5824,7 +5827,7 @@ class Checker : public StmtVisitor<Checker>,
 
   /// reset/rewrite/get/put(f) and page[(f)].
   /// reset, rewrite (an untyped file's: with an optional record size),
-  /// get, put, page, close, closefile.
+  /// get, put, page, close, closefile, flush.
   void checkFileProc(ProcCallStmt *S, BuiltinKind K) {
     const Identifier &Callee = S->getCallee();
     auto Args = S->getArgs();
@@ -5846,8 +5849,9 @@ class Checker : public StmtVisitor<Checker>,
                   "'" + Callee.Spelling + "' expects a file variable, not a " +
                       "value of type " + quoted(T),
                   {Args[0]->getRange()});
-    else if (IsPage && !T->isTextFile())
-      Diags.error(Args[0]->getBeginLoc(), "'page' requires a text file",
+    else if ((IsPage || K == BuiltinKind::Flush) && !T->isTextFile())
+      Diags.error(Args[0]->getBeginLoc(),
+                  "'" + Callee.Spelling + "' requires a text file",
                   {Args[0]->getRange()});
     else if ((K == BuiltinKind::Get || K == BuiltinKind::Put) && F->isUntyped())
       Diags.error(Args[0]->getBeginLoc(),
@@ -6101,7 +6105,8 @@ class Checker : public StmtVisitor<Checker>,
                   {Args[1]->getRange()});
   }
 
-  /// inc(x [, n]) / dec(x [, n]): x an ordinal variable, n an integer.
+  /// inc(x [, n]) / dec(x [, n]): x an ordinal variable (Turbo/FPC: or a
+  /// pointer, moved by n of what it points to), n an integer.
   void checkIncDec(ProcCallStmt *S) {
     const Identifier &Callee = S->getCallee();
     auto Args = S->getArgs();
@@ -6111,9 +6116,10 @@ class Checker : public StmtVisitor<Checker>,
       return;
     }
     Type *T = check(Args[0]);
-    if (!T->isError() && (!T->isOrdinal() || !isVariableReference(Args[0])))
+    if (!T->isError() &&
+        (!(T->isOrdinal() || T->isPointer()) || !isVariableReference(Args[0])))
       Diags.error(Args[0]->getBeginLoc(),
-                  "'" + Callee.Spelling + "' expects an ordinal variable",
+                  "'" + Callee.Spelling + "' expects an ordinal or pointer variable",
                   {Args[0]->getRange()});
     else if (!T->isError() && checkModifiable(Args[0]))
       checkNotForControlVar(Args[0]);
@@ -6844,6 +6850,7 @@ public:
       case BuiltinKind::Reset: case BuiltinKind::Rewrite:
       case BuiltinKind::Get: case BuiltinKind::Put: case BuiltinKind::Page:
       case BuiltinKind::Close: case BuiltinKind::CloseFile:
+      case BuiltinKind::Flush:
         return checkFileProc(S, BD->getBuiltinKind());
       case BuiltinKind::Assign: case BuiltinKind::AssignFile:
         return checkAssignFile(S);
@@ -7936,6 +7943,24 @@ public:
         areCompatible(L, R))
       return Ctx.getBooleanType(); // objects and classes (objfpc)
 
+    if (!isISO() && (L->isPointer() || R->isPointer())) {
+      // Turbo/FPC pointer arithmetic: p + n, n + p and p - n move p by n of
+      // what it points to (bytes, for an untyped pointer); p - q counts
+      // them; pointers are ordered by address.
+      if ((Op == BinaryOp::Add || Op == BinaryOp::Sub) && L->isPointer() &&
+          R->isIntegerLike())
+        return L;
+      if (Op == BinaryOp::Add && L->isIntegerLike() && R->isPointer())
+        return R;
+      if (L->isPointer() && R->isPointer() && areCompatible(L, R)) {
+        if (Op == BinaryOp::Sub)
+          return Ctx.getInt64Type();
+        if (Op == BinaryOp::Lt || Op == BinaryOp::Le || Op == BinaryOp::Gt ||
+            Op == BinaryOp::Ge)
+          return Ctx.getBooleanType();
+      }
+    }
+
     bool BothIntegers = L->isIntegerLike() && R->isIntegerLike();
     auto IntegerOp = [&]() {
       Type *T = integerOperandType(E->getLHS(), L, E->getRHS(), R);
@@ -8214,6 +8239,17 @@ public:
                         " is out of bounds 1.." + std::to_string(SL->getLength()),
                     {E->getIndex()->getRange()});
       return Ctx.getCharType();
+    }
+    if (auto *PT = llvm::dyn_cast<PointerType>(BT);
+        PT && !isISO() && !PT->isUntyped() && PT->getPointee()) {
+      // Turbo/FPC: p[i] is (p + i)^.
+      if (!IT->isIntegerLike()) {
+        Diags.error(E->getIndex()->getBeginLoc(),
+                    "pointer index must be an integer",
+                    {E->getIndex()->getRange()});
+        return errorType();
+      }
+      return PT->getPointee();
     }
     auto *AT = llvm::dyn_cast<ArrayType>(BT);
     if (!AT) {

@@ -1,0 +1,25 @@
+; Pointer arithmetic is a getelementptr over what is pointed to (i8 for an
+; untyped pointer), without `inbounds`: a pointer may be moved anywhere. A
+; difference is divided by the pointee's size; pointers are ordered
+; unsigned. flush calls the runtime.
+; RUN: %pcc --mode=tp --emit-llvm %S/Inputs/ptrarith.pas -o %t.ll
+; RUN: FileCheck %s < %t.ll
+; RUN: opt -passes=verify -disable-output %t.ll
+
+; CHECK: %ptr.add = getelementptr i32, ptr %p, i64 %0
+; CHECK: [[NEG:%.*]] = sub i64 0,
+; CHECK: getelementptr i32, ptr {{.*}}, i64 [[NEG]]
+; CHECK: %ptr.diff = sub i64
+; CHECK: %ptr.count = sdiv i64 %ptr.diff, 4
+; CHECK: getelementptr %record.TRec, ptr %r, i64 1
+; CHECK: sdiv i64 {{.*}}, 16
+; CHECK: getelementptr i8, ptr %u, i64
+; an untyped pointer's difference is in bytes
+; CHECK: %ptr.diff{{[0-9]+}} = sub i64
+; CHECK-NOT: sdiv
+; inc(p), dec(r, n), p[n]
+; CHECK: getelementptr i32, ptr {{.*}}, i64 1
+; CHECK: getelementptr %record.TRec, ptr {{.*}}, i64 %
+; CHECK: getelementptr i32, ptr %p{{[0-9]+}}, i64 %
+; CHECK: icmp ult ptr
+; CHECK: call void @__pas_flush(ptr

@@ -23,13 +23,12 @@ var
 function c_fopen(name, mode: pchar): pointer; cdecl; external 'c' name 'fopen';
 function c_fread(var buf; size, count: int64; f: pointer): int64; cdecl; external 'c' name 'fread';
 function c_fclose(f: pointer): longint; cdecl; external 'c' name 'fclose';
-function c_fflush(f: pointer): longint; cdecl; external 'c' name 'fflush';
 
 { Writes a line of the log now, also when output is a file or a pipe. }
 procedure Log(const line: string);
 begin
   writeln(line);
-  c_fflush(nil);
+  flush(output);
 end;
 
 procedure Usage;
