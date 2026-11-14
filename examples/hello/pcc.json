@@ -1,0 +1,11 @@
+{
+  "name": "hello",
+  "version": "0.1.0",
+  "description": "A program and a unit, built with the self-hosted compiler",
+  "main": "src/hello.pas",
+  "output": "bin/hello",
+  "mode": "objfpc",
+  "unitPaths": ["src/lib"],
+  "optimize": 0,
+  "debug": true
+}

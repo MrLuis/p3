@@ -1,0 +1,59 @@
+#!/bin/sh
+# Creates a new project in examples/<name>:
+#
+#   examples/new <name> [iso|tp|objfpc]      (default: objfpc)
+#
+#   <name>/pcc.json          the project's settings
+#   <name>/src/<name>.pas    the program
+#   <name>/src/lib/          its units
+#
+# Build and run it with:  cd examples/<name> && ../pcc && bin/<name>
+set -e
+here=$(cd "$(dirname "$0")" && pwd)
+name=$1
+mode=${2:-objfpc}
+case $name in
+  ''|*[!a-z0-9_]*|[0-9]*)
+    echo "usage: examples/new <name> [iso|tp|objfpc]" >&2
+    echo "  <name>: lowercase letters, digits and _, not starting with a digit" >&2
+    exit 1 ;;
+esac
+case $mode in
+  iso|tp|objfpc) ;;
+  *) echo "examples/new: unknown mode '$mode' (iso, tp or objfpc)" >&2; exit 1 ;;
+esac
+dir=$here/$name
+if [ -e "$dir" ]; then
+  echo "examples/new: $dir already exists" >&2
+  exit 1
+fi
+mkdir -p "$dir/src/lib"
+cat > "$dir/pcc.json" <<JSON
+{
+  "name": "$name",
+  "version": "0.1.0",
+  "main": "src/$name.pas",
+  "output": "bin/$name",
+  "mode": "$mode",
+  "unitPaths": ["src/lib"],
+  "optimize": 0,
+  "debug": true
+}
+JSON
+if [ "$mode" = iso ]; then
+  cat > "$dir/src/$name.pas" <<PAS
+program $name(output);
+begin
+  writeln('Hello from $name')
+end.
+PAS
+else
+  cat > "$dir/src/$name.pas" <<PAS
+program $name;
+begin
+  writeln('Hello from $name');
+end.
+PAS
+fi
+echo "created examples/$name; build and run it with:"
+echo "  cd examples/$name && ../pcc && bin/$name"

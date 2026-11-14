@@ -902,6 +902,7 @@ integer from 0 to 3`); an unknown setting is a warning.
 | `rtl/` | the unit library (`sysutils`, `strutils`, `math`, `classes`) |
 | `tests/` | lit tests: `lexer/ parser/ sema/ codegen/ driver/`, `run/` (compile + execute + diff), C++ unit tests in `unit/` |
 | `bench/` | benchmark programs with their expected output (`utils/bench.py`) |
+| `examples/` | projects built with the self-hosted compiler (`examples/pcc`, `examples/new <name>`); see [examples/README.md](examples/README.md) |
 
 ## Writing tests
 

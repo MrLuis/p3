@@ -1,0 +1,11 @@
+; The projects of examples/ build from their pcc.json and run.
+; RUN: rm -rf %t && mkdir -p %t && cp -R %S/../../examples/hello %t/
+; RUN: rm -rf %t/hello/bin
+; RUN: cd %t/hello && %pcc-project 2>&1 | count 0
+; RUN: %t/hello/bin/hello | FileCheck %s
+; CHECK:      Hello, world!
+; CHECK-NEXT: 1 greeting(s)
+; RUN: %t/hello/bin/hello Ada Niklaus | FileCheck --check-prefix=ARGS %s
+; ARGS:      Hello, Ada!
+; ARGS-NEXT: Hello, Niklaus!
+; ARGS-NEXT: 2 greeting(s)

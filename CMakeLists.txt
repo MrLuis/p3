@@ -104,6 +104,24 @@ else()
   message(STATUS "Self-hosted compiler build flags: ${PCC_SELFHOST_FLAGS}")
 endif()
 
+# `ninja pcc-self`: the self-hosted compiler, built by pcc at -O2 as
+# <build>/bin/pcc-self, next to pcc, so that it finds the same runtime and
+# unit library (<bindir>/../lib). examples/ builds its projects with it.
+if(PCC_SELFHOST_FLAGS)
+  file(GLOB PCC_SELFHOST_SOURCES CONFIGURE_DEPENDS
+       ${PROJECT_SOURCE_DIR}/selfhost/*.pas ${PROJECT_SOURCE_DIR}/selfhost/*.inc)
+  separate_arguments(PCC_SELFHOST_FLAG_LIST NATIVE_COMMAND "${PCC_SELFHOST_FLAGS}")
+  add_custom_command(
+    OUTPUT ${PROJECT_BINARY_DIR}/bin/pcc-self
+    COMMAND $<TARGET_FILE:pcc> --no-project --mode=tp -O2 ${PCC_SELFHOST_FLAG_LIST}
+            -I ${PROJECT_SOURCE_DIR}/selfhost ${PROJECT_SOURCE_DIR}/selfhost/pcc.pas
+            -o ${PROJECT_BINARY_DIR}/bin/pcc-self
+    DEPENDS pcc pascalrt rtl ${PCC_SELFHOST_SOURCES}
+    COMMENT "Building the self-hosted compiler (bin/pcc-self)"
+    VERBATIM)
+  add_custom_target(pcc-self DEPENDS ${PROJECT_BINARY_DIR}/bin/pcc-self)
+endif()
+
 # ---------------------------------------------------------------------------
 # Tests
 # ---------------------------------------------------------------------------
