@@ -44,3 +44,4 @@ that. Executables go to the project's `bin/`, which git ignores.
 | Project | Shows |
 |---|---|
 | `hello` | a program with a class in a unit of its own and a unit of pcc's library (`sysutils`) |
+| `httpserver` | a basic HTTP server: C library sockets through `external` routines, ansistrings, units; see its [README](httpserver/README.md) |
