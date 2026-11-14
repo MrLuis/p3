@@ -147,6 +147,203 @@ class Checker : public StmtVisitor<Checker>,
   unsigned HandlerDepth = 0;
   int FinallyLoopDepth = -1;
 
+  //===--------------------------------------------------------------------===//
+  // Owned variables (objfpc): which may have been moved
+  //===--------------------------------------------------------------------===//
+  //
+  // The statements of a routine with owned variables are followed in the
+  // order they run, with the state of each owned variable: it may hold its
+  // object (Valid), it may have been moved (Moved), or both, after paths
+  // that differ. A use of a variable that may have been moved is an error.
+  // Unreachable code has neither bit of any variable.
+  //
+  // A loop is followed once. Entry[i] is the outermost enclosing loop
+  // (counted from 1) whose every earlier iteration may have left variable i
+  // as it is, or NoLoop: a use of the variable then is recorded in those
+  // loops, and reported when the loop turns out to end with it moved.
+  enum { MaxOwned = 32, NoLoop = 255 };
+  struct OwnedState {
+    uint32_t Valid = 0, Moved = 0;
+    uint8_t Entry[MaxOwned];
+    OwnedState() { std::fill(Entry, Entry + MaxOwned, uint8_t(NoLoop)); }
+    bool isLive() const { return (Valid | Moved) != 0; }
+    void join(const OwnedState &O) {
+      Valid |= O.Valid;
+      Moved |= O.Moved;
+      for (unsigned I = 0; I < MaxOwned; ++I)
+        Entry[I] = std::min(Entry[I], O.Entry[I]);
+    }
+  };
+  struct OwnedLoop {
+    OwnedState Breaks, Continues;
+    uint32_t Used = 0; ///< variables used as the loop found them
+    SourceLocation EntryUse[MaxOwned];
+    OwnedLoop *Prev = nullptr;
+  };
+  /// A try statement's protected part: every state in it, joined (an
+  /// exception may leave it anywhere).
+  struct OwnedTry {
+    OwnedState Seen;
+    OwnedTry *Prev = nullptr;
+  };
+  struct OwnedFlow {
+    VarDecl *Vars[MaxOwned];
+    unsigned N = 0;
+    OwnedState S;
+    SourceLocation MoveLoc[MaxOwned];
+    unsigned Changed[MaxOwned] = {}; ///< Tick of the last move or assignment
+    unsigned Tick = 0;
+    OwnedLoop *Loop = nullptr;
+    unsigned Depth = 0;
+    OwnedTry *Try = nullptr;
+  };
+  OwnedFlow *Flow = nullptr; ///< of the routine being checked, if it has any
+  Expr *OwnedTarget = nullptr; ///< the assignment target being checked
+
+  /// E, if it is an owned variable (in parentheses or not).
+  static VarDecl *ownedVarOf(Expr *E) {
+    while (auto *P = llvm::dyn_cast<ParenExpr>(E))
+      E = P->getInner();
+    auto *N = llvm::dyn_cast<NameRefExpr>(E);
+    auto *V = N ? llvm::dyn_cast_or_null<VarDecl>(N->getDecl()) : nullptr;
+    return V && V->isOwned() ? V : nullptr;
+  }
+
+  int ownedIndex(VarDecl *V) {
+    if (!Flow || !V->isOwned())
+      return -1;
+    for (unsigned I = 0; I < Flow->N; ++I)
+      if (Flow->Vars[I] == V)
+        return static_cast<int>(I);
+    return -1; // an enclosing routine's: not followed
+  }
+
+  OwnedState ownedGet() { return Flow ? Flow->S : OwnedState(); }
+  void ownedSet(const OwnedState &S) {
+    if (Flow)
+      Flow->S = S;
+  }
+  void ownedJoin(const OwnedState &S) {
+    if (Flow)
+      Flow->S.join(S);
+  }
+  /// What follows is not reached (after exit, break, continue, raise).
+  void ownedDead() {
+    if (Flow)
+      Flow->S = OwnedState();
+  }
+
+  /// A use of the owned variable V: an error if it may have been moved.
+  void ownedUse(VarDecl *V, SourceRange R) {
+    int I = ownedIndex(V);
+    if (I < 0 || !Flow->S.isLive())
+      return;
+    uint32_t Bit = uint32_t(1) << I;
+    OwnedState &S = Flow->S;
+    if (S.Moved & Bit) {
+      Diags.error(R.getBegin(),
+                  "owned variable '" + V->getName().Spelling +
+                      ((S.Valid & Bit) ? "' may have been moved"
+                                       : "' was moved"),
+                  {R});
+      Diags.note(Flow->MoveLoc[I], "moved here");
+      S.Moved &= ~Bit; // reported once
+      S.Valid |= Bit;
+      return;
+    }
+    unsigned D = Flow->Depth;
+    for (OwnedLoop *L = Flow->Loop; L && D >= S.Entry[I]; L = L->Prev, --D)
+      if (!(L->Used & Bit)) {
+        L->Used |= Bit;
+        L->EntryUse[I] = R.getBegin();
+      }
+  }
+
+  void ownedChanged(int I) {
+    Flow->S.Entry[I] = NoLoop;
+    Flow->Changed[I] = ++Flow->Tick;
+    for (OwnedTry *T = Flow->Try; T; T = T->Prev)
+      T->Seen.join(Flow->S);
+  }
+
+  /// V := object.
+  void ownedAssign(VarDecl *V) {
+    int I = ownedIndex(V);
+    if (I < 0 || !Flow->S.isLive())
+      return;
+    Flow->S.Valid |= uint32_t(1) << I;
+    Flow->S.Moved &= ~(uint32_t(1) << I);
+    ownedChanged(I);
+  }
+
+  /// move V.
+  void ownedMove(VarDecl *V, SourceLocation Loc) {
+    int I = ownedIndex(V);
+    if (I < 0 || !Flow->S.isLive())
+      return;
+    Flow->S.Valid &= ~(uint32_t(1) << I);
+    Flow->S.Moved |= uint32_t(1) << I;
+    Flow->MoveLoc[I] = Loc;
+    ownedChanged(I);
+  }
+
+  void ownedLoopBegin(OwnedLoop &L) {
+    if (!Flow)
+      return;
+    L.Prev = Flow->Loop;
+    Flow->Loop = &L;
+    ++Flow->Depth;
+    if (Flow->S.isLive())
+      for (unsigned I = 0; I < Flow->N; ++I)
+        if (Flow->S.Entry[I] > Flow->Depth)
+          Flow->S.Entry[I] = static_cast<uint8_t>(Flow->Depth);
+  }
+
+  /// The loop L ends: Before is the state in which it runs no (more)
+  /// iterations. A variable that an iteration may leave moved, and that an
+  /// iteration uses as it finds it, is used after a move.
+  void ownedLoopEnd(OwnedLoop &L, const OwnedState &Before) {
+    if (!Flow)
+      return;
+    OwnedState Back = Flow->S;
+    Back.join(L.Continues);
+    for (unsigned I = 0; I < Flow->N; ++I)
+      if ((Back.Moved & L.Used) & (uint32_t(1) << I)) {
+        Diags.error(L.EntryUse[I],
+                    "owned variable '" + Flow->Vars[I]->getName().Spelling +
+                        "' may have been moved by an earlier iteration of "
+                        "the loop");
+        Diags.note(Flow->MoveLoc[I], "moved here");
+      }
+    Back.join(Before);
+    Back.join(L.Breaks);
+    for (unsigned I = 0; I < Flow->N; ++I)
+      if (Back.Entry[I] != NoLoop && Back.Entry[I] >= Flow->Depth)
+        Back.Entry[I] = NoLoop;
+    Flow->Loop = L.Prev;
+    --Flow->Depth;
+    Flow->S = Back;
+  }
+
+  void ownedBreak(bool IsContinue) {
+    if (!Flow || !Flow->Loop)
+      return;
+    (IsContinue ? Flow->Loop->Continues : Flow->Loop->Breaks).join(Flow->S);
+    ownedDead();
+  }
+
+  void ownedTryBegin(OwnedTry &T) {
+    if (!Flow)
+      return;
+    T.Seen = Flow->S;
+    T.Prev = Flow->Try;
+    Flow->Try = &T;
+  }
+  void ownedTryEnd(OwnedTry &T) {
+    if (Flow)
+      Flow->Try = T.Prev;
+  }
+
   /// Functions whose result has been assigned somewhere in their body.
   llvm::DenseSet<RoutineDecl *> ResultAssigned;
 
@@ -1124,6 +1321,14 @@ class Checker : public StmtVisitor<Checker>,
 
   /// Reports a change to a `const` parameter. Returns false if reported.
   bool checkModifiable(Expr *E) {
+    if (VarDecl *OV = ownedVarOf(E); OV && E != OwnedTarget) {
+      // (the callee could replace the object without freeing it)
+      Diags.error(E->getBeginLoc(),
+                  "owned variable '" + OV->getName().Spelling +
+                      "' cannot be passed as a variable parameter",
+                  {E->getRange()});
+      return false;
+    }
     VarDecl *V = constParamRoot(E);
     if (!V)
       return true;
@@ -3764,6 +3969,31 @@ class Checker : public StmtVisitor<Checker>,
   void declareVar(VarDecl *V) {
     V->setType(resolveType(V->getTypeSpec()));
     V->setOwner(CurRoutine);
+    if (V->isOwned()) {
+      const Identifier &Id = V->getName();
+      bool OK = false;
+      if (!CurRoutine)
+        Diags.error(Id.Loc,
+                    "'owned' is only allowed on the local variables of a "
+                    "routine",
+                    {Id.getRange()});
+      else if (!V->getType()->isError() && !V->getType()->isClass())
+        Diags.error(Id.Loc,
+                    "owned variable '" + Id.Spelling +
+                        "' must be of a class type, not " +
+                        quoted(V->getType()),
+                    {Id.getRange()});
+      else if (V->getAbsolute() || V->getInit())
+        Diags.error(Id.Loc,
+                    "owned variable '" + Id.Spelling + "' cannot be " +
+                        (V->getAbsolute() ? "'absolute'" : "initialized"),
+                    {Id.getRange()});
+      else
+        OK = !V->getType()->isError();
+      V->setOwned(OK);
+      if (OK)
+        markHasTry(); // freed in a finally part around the routine's body
+    }
     if (V->isExternal() || V->isCVar())
       checkExternalVar(V);
     if (Expr *Target = V->getAbsolute())
@@ -5141,7 +5371,23 @@ class Checker : public StmtVisitor<Checker>,
     int SavedFinally = FinallyLoopDepth;
     HandlerDepth = 0;
     FinallyLoopDepth = -1;
+    OwnedFlow *SavedFlow = Flow;
+    OwnedFlow BlockFlow;
+    for (Decl *D : B.getDecls())
+      if (auto *V = llvm::dyn_cast<VarDecl>(D); V && V->isOwned()) {
+        if (BlockFlow.N == MaxOwned) {
+          Diags.error(V->getLocation(),
+                      "too many owned variables in one routine (at most " +
+                          std::to_string(unsigned(MaxOwned)) + ")",
+                      {V->getName().getRange()});
+          break;
+        }
+        BlockFlow.S.Valid |= uint32_t(1) << BlockFlow.N;
+        BlockFlow.Vars[BlockFlow.N++] = V;
+      }
+    Flow = BlockFlow.N ? &BlockFlow : nullptr;
     visitStmt(B.getBody());
+    Flow = SavedFlow;
     HandlerDepth = SavedHandlers;
     FinallyLoopDepth = SavedFinally;
     RoutineBody = SavedBody;
@@ -6873,6 +7119,8 @@ public:
                       "'" + Callee.Spelling +
                           "' cannot leave a 'finally' part",
                       {Callee.getRange()});
+        else
+          ownedBreak(BD->getBuiltinKind() == BuiltinKind::Continue);
         return;
       case BuiltinKind::Exit: {
         auto Args = S->getArgs();
@@ -6881,8 +7129,10 @@ public:
                       "'" + Callee.Spelling +
                           "' is not allowed in a 'finally' part",
                       {Callee.getRange()});
-        if (Args.empty())
+        if (Args.empty()) {
+          ownedDead();
           return;
+        }
         // exit(value) (Turbo/FPC): sets the function result, then exits.
         if (Args.size() > 1 || !CurRoutine || !CurRoutine->isFunction()) {
           Diags.error(Callee.Loc,
@@ -6892,9 +7142,13 @@ public:
                       {S->getRange()});
           for (Expr *A : Args)
             check(A);
+          ownedDead();
           return;
         }
         Type *T = check(Args[0]);
+        if (VarDecl *OV = ownedVarOf(Args[0]))
+          diagOwnedEscape(OV, Args[0], /*Returned=*/true);
+        ownedDead();
         Type *RT = CurRoutine->getResultType();
         ResultAssigned.insert(CurRoutine);
         if (!T->isError() && !RT->isError() && !isAssignable(RT, T) &&
@@ -7154,9 +7408,31 @@ public:
         }
     Type *ValueTy = checkValueFor(TargetTy, S->getValue());
     CompoundResultRef = nullptr;
+    // An owned variable's object stays its own unless moved: only a local
+    // variable can refer to it too. Assigning to the variable gives it an
+    // object again.
+    VarDecl *OwnedV = ownedVarOf(Target);
+    if (VarDecl *OV = ownedVarOf(S->getValue()); OV && !ValueTy->isError()) {
+      auto *TN = llvm::dyn_cast<NameRefExpr>(Target);
+      auto *TV = TN ? llvm::dyn_cast_or_null<VarDecl>(TN->getDecl()) : nullptr;
+      bool Local = TV && !TN->getWith() && !TV->isOwned() && CurRoutine &&
+                   TV->getOwner() == CurRoutine &&
+                   (TV->getVarKind() == VarDecl::Variable ||
+                    TV->getVarKind() == VarDecl::ValueParam) &&
+                   !TV->isTypedConst() && !TV->isClassVar();
+      if (!Local)
+        diagOwnedEscape(OV, S->getValue(),
+                        TV && TV->getVarKind() == VarDecl::Result);
+    }
+    if (OwnedV)
+      ownedAssign(OwnedV);
     if (TargetTy->isError() || ValueTy->isError())
       return;
-    if (!checkModifiable(Target))
+    Expr *SavedOwnedTarget = OwnedTarget;
+    OwnedTarget = Target;
+    bool Modifiable = checkModifiable(Target);
+    OwnedTarget = SavedOwnedTarget;
+    if (!Modifiable)
       return;
     if (containsFile(TargetTy)) {
       Diags.error(S->getAssignLoc(), "files cannot be assigned",
@@ -7175,22 +7451,61 @@ public:
   void visitTryStmt(TryStmt *S) {
     markHasTry();
     DirectSequence = nullptr;
+    OwnedTry Protected;
+    ownedTryBegin(Protected);
     visitSequence(S, S->getBody());
+    ownedTryEnd(Protected);
+    OwnedState BodyEnd = ownedGet();
     if (S->isFinally()) {
+      // The finally part runs after any of the body's states; what it
+      // leaves alone is as the body left it.
+      ownedSet(Protected.Seen);
+      unsigned Tick = Flow ? Flow->Tick : 0;
       int Saved = FinallyLoopDepth;
       FinallyLoopDepth = static_cast<int>(LoopDepth);
       visitSequence(S, S->getFinallyBody());
       FinallyLoopDepth = Saved;
+      if (Flow) {
+        OwnedState Out = Flow->S;
+        if (!BodyEnd.isLive() || !Out.isLive()) {
+          ownedDead();
+        } else {
+          for (unsigned I = 0; I < Flow->N; ++I)
+            if (Flow->Changed[I] > Tick) {
+              uint32_t Bit = uint32_t(1) << I;
+              BodyEnd.Valid = (BodyEnd.Valid & ~Bit) | (Out.Valid & Bit);
+              BodyEnd.Moved = (BodyEnd.Moved & ~Bit) | (Out.Moved & Bit);
+              BodyEnd.Entry[I] = Out.Entry[I];
+            }
+          Flow->S = BodyEnd;
+        }
+      }
       return;
     }
     ++HandlerDepth;
     for (ExceptHandler *H : S->getHandlers()) {
       if (Diags.shouldStop())
         break;
+      ownedSet(Protected.Seen);
       checkHandler(H);
+      BodyEnd.join(ownedGet());
     }
+    ownedSet(Protected.Seen);
     visitSequence(S, S->getExceptBody());
+    if (S->catchesAll())
+      BodyEnd.join(ownedGet());
+    ownedSet(BodyEnd);
     --HandlerDepth;
+  }
+
+  /// The object of the owned variable OV would be kept (or returned)
+  /// through E without `move`.
+  void diagOwnedEscape(VarDecl *OV, Expr *E, bool Returned) {
+    Diags.error(E->getBeginLoc(),
+                "the object of owned variable '" + OV->getName().Spelling +
+                    "' can only be " + (Returned ? "returned" : "stored") +
+                    " with 'move " + OV->getName().Spelling + "'",
+                {E->getRange()});
   }
 
   /// on [E:] TFoo do Body: E is a variable of type TFoo visible in Body.
@@ -7221,6 +7536,7 @@ public:
                     "'raise' without an object (a re-raise) is only allowed "
                     "in an exception handler",
                     {S->getRange()});
+      ownedDead();
       return;
     }
     Type *T = check(S->getObject());
@@ -7243,29 +7559,43 @@ public:
                         quoted(PT),
                     {P->getRange()});
     }
+    ownedDead();
   }
 
   void visitIfStmt(IfStmt *S) {
     DirectSequence = nullptr;
     checkCondition(S->getCond(), "if");
+    OwnedState Before = ownedGet();
     visitStmt(S->getThen());
+    OwnedState Then = ownedGet();
+    ownedSet(Before);
     if (S->getElse())
       visitStmt(S->getElse());
+    ownedJoin(Then);
   }
 
   void visitWhileStmt(WhileStmt *S) {
     DirectSequence = nullptr;
+    OwnedLoop Loop;
+    ownedLoopBegin(Loop);
     checkCondition(S->getCond(), "while");
+    OwnedState Before = ownedGet();
     ++LoopDepth;
     visitStmt(S->getBody());
     --LoopDepth;
+    ownedLoopEnd(Loop, Before);
   }
 
   void visitRepeatStmt(RepeatStmt *S) {
+    OwnedLoop Loop;
+    ownedLoopBegin(Loop);
     ++LoopDepth;
     visitSequence(S, S->getBody());
     --LoopDepth;
+    ownedJoin(Loop.Continues); // continue goes to the condition
+    Loop.Continues = OwnedState();
     checkCondition(S->getCond(), "until");
+    ownedLoopEnd(Loop, OwnedState());
   }
 
   void visitForStmt(ForStmt *S) {
@@ -7323,9 +7653,13 @@ public:
 
     if (Usable)
       ActiveFors.push_back({VarRef->getDecl(), S->getBeginLoc()});
+    OwnedState Before = ownedGet();
+    OwnedLoop Loop;
+    ownedLoopBegin(Loop);
     ++LoopDepth;
     visitStmt(S->getBody());
     --LoopDepth;
+    ownedLoopEnd(Loop, Before);
     if (Usable)
       ActiveFors.pop_back();
   }
@@ -7476,9 +7810,13 @@ public:
 
     if (Usable)
       ActiveFors.push_back({VarRef->getDecl(), S->getBeginLoc()});
+    OwnedState Before = ownedGet();
+    OwnedLoop Loop;
+    ownedLoopBegin(Loop);
     ++LoopDepth;
     visitStmt(S->getBody());
     --LoopDepth;
+    ownedLoopEnd(Loop, Before);
     if (Usable)
       ActiveFors.pop_back();
   }
@@ -7560,6 +7898,7 @@ public:
 
     // ISO 7185 6.8.3.5: no value may appear in more than one label.
     llvm::SmallVector<CaseLabel *, 16> Seen;
+    OwnedState Before = ownedGet(), After;
     for (CaseArm *Arm : S->getArms()) {
       for (CaseLabel *L : Arm->getLabels()) {
         if (!checkLabel(L, LabelTy, "case label") || SelTy->isError())
@@ -7578,9 +7917,13 @@ public:
         }
         Seen.push_back(L);
       }
+      ownedSet(Before);
       visitStmt(Arm->getBody());
+      After.join(ownedGet());
     }
+    ownedSet(Before); // (no else part: no arm may run)
     visitSequence(S->getElseBody().data(), S->getElseBody());
+    ownedJoin(After);
   }
 
   void visitWithStmt(WithStmt *S) {
@@ -7680,6 +8023,8 @@ public:
     switch (D->getKind()) {
     case Decl::DK_Var: {
       Type *T = llvm::cast<VarDecl>(D)->getType();
+      if (llvm::cast<VarDecl>(D)->isOwned())
+        ownedUse(llvm::cast<VarDecl>(D), Id.getRange());
       if (auto *RT = llvm::dyn_cast_or_null<RoutineType>(T)) {
         // A functional parameter without arguments is a call.
         if (RT->isFunction() && acceptsArgCount(RT->getParams(), 0))
@@ -7769,6 +8114,42 @@ public:
   }
 
   Type *visitParenExpr(ParenExpr *E) { return check(E->getInner()); }
+
+  /// move p: the object of the owned variable p of this routine, which
+  /// gives it up.
+  Type *visitMoveExpr(MoveExpr *E) {
+    NameRefExpr *N = E->getOperand();
+    const Identifier &Id = N->getName();
+    WithContext *W = nullptr;
+    Decl *D = Cur->lookup(Id.Name, &W);
+    if (!D) {
+      diagUndeclared(Id);
+      return errorType();
+    }
+    auto *V = llvm::dyn_cast<VarDecl>(D);
+    if (!V || !V->isOwned() || W) {
+      Diags.error(Id.Loc,
+                  "'move' needs an owned variable, and '" + Id.Spelling +
+                      "' is not one",
+                  {Id.getRange()});
+      noteDeclaredHere(D);
+      return errorType();
+    }
+    N->setDecl(V);
+    N->setType(V->getType());
+    Used.insert(V);
+    if (V->getOwner() != CurRoutine) {
+      Diags.error(Id.Loc,
+                  "owned variable '" + Id.Spelling +
+                      "' can only be moved by the routine it belongs to",
+                  {Id.getRange()});
+      noteDeclaredHere(V);
+      return errorType();
+    }
+    ownedUse(V, Id.getRange());
+    ownedMove(V, E->getBeginLoc());
+    return V->getType();
+  }
 
   Type *visitUnaryExpr(UnaryExpr *E) {
     Type *T = check(E->getOperand());
@@ -8598,6 +8979,13 @@ public:
                   "'@' requires a variable", {E->getOperand()->getRange()});
       return errorType();
     }
+    if (VarDecl *OV = ownedVarOf(E->getOperand())) {
+      Diags.error(E->getOperand()->getBeginLoc(),
+                  "cannot take the address of owned variable '" +
+                      OV->getName().Spelling + "'",
+                  {E->getOperand()->getRange()});
+      return errorType();
+    }
     return Ctx.getUntypedPointerType();
   }
 
@@ -8920,11 +9308,29 @@ public:
     return errorType();
   }
 
+  /// p.Free or p.Destroy of an owned variable p (already resolved): an
+  /// error, since its object is freed again when the routine ends.
+  bool diagOwnedFree(FieldExpr *E) {
+    const Identifier &F = E->getField();
+    VarDecl *OV = ownedVarOf(E->getBase());
+    if (!OV || (F.Name != "free" && F.Name != "destroy"))
+      return false;
+    Diags.error(F.Loc,
+                "'" + F.Spelling + "' cannot be called on owned variable '" +
+                    OV->getName().Spelling +
+                    "', which is freed when its routine ends; assign nil to "
+                    "free its object now",
+                {E->getRange()});
+    return true;
+  }
+
   Type *visitFieldExpr(FieldExpr *E) {
     Decl *D = resolveMember(E);
     if (!D)
       return errorType();
     const Identifier &F = E->getField();
+    if (diagOwnedFree(E))
+      return errorType();
     if (auto *CD = llvm::dyn_cast<ConstDecl>(D)) { // TFoo.C, obj.C
       warnHints(CD, F);
       Identifier Id = CD->getName();
@@ -9032,6 +9438,8 @@ public:
       return checkInheritedCall(I, E->getArgs(), E->getRange());
     auto *F = llvm::cast<FieldExpr>(E->getCallee());
     Decl *D = resolveMember(F);
+    if (D && diagOwnedFree(F))
+      return errorType();
     auto *R = llvm::dyn_cast_or_null<RoutineDecl>(D);
     if (R) { // objfpc: overloads
       R = resolveOverload(R, E->getArgs(), F->getField(), E->getRange());

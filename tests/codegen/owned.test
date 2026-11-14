@@ -1,0 +1,27 @@
+; Owned variables (objfpc). The body of a routine with owned variables is
+; the protected part of a try-finally whose finally part frees them, the
+; last declared first, through the runtime: __pas_owned_free keeps a
+; destructor's exception aside, __pas_owned_done raises it unless one is
+; already leaving the routine (state 1). Assigning to an owned variable
+; frees the object it had (__pas_owned_set); move loads it and stores nil.
+; RUN: %pcc --mode=objfpc --emit-llvm %S/Inputs/owned.pas -o %t.ll
+; RUN: FileCheck %s < %t.ll
+; RUN: opt -passes=verify -disable-output %t.ll
+
+; CHECK-LABEL: define internal ptr @pas.make(
+; CHECK: %owned.exc = alloca { ptr, ptr, ptr }
+; CHECK: call i32 @_setjmp(
+; CHECK: finally:
+; CHECK: store { ptr, ptr, ptr } zeroinitializer, ptr %owned.exc
+; CHECK: [[SECOND:%second[0-9]*]] = getelementptr
+; CHECK-NEXT: call void @__pas_owned_free(ptr [[SECOND]], ptr %owned.exc)
+; CHECK: [[FIRST:%first[0-9]*]] = getelementptr
+; CHECK-NEXT: call void @__pas_owned_free(ptr [[FIRST]], ptr %owned.exc)
+; CHECK: %raised = icmp eq i32 %state, 1
+; CHECK: call void @__pas_owned_done(ptr %owned.exc, i32
+; CHECK: switch i32
+; CHECK: try.body:
+; CHECK: call void @__pas_owned_set(ptr {{%first[0-9]*}}, ptr %obj)
+; CHECK: %moved = load ptr, ptr [[SLOT:%second[0-9]*]]
+; CHECK-NEXT: store ptr null, ptr [[SLOT]]
+; CHECK: store ptr %moved, ptr

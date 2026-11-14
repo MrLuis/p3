@@ -1006,6 +1006,45 @@ void __pas_reraise_free(PasExcFrame *f, void *obj) {
   __pas_reraise(f);
 }
 
+void __pas_owned_set(void **slot, void *obj) {
+  void *old = *slot;
+  *slot = obj;
+  if (old && old != obj)
+    __pas_free_object(old);
+}
+
+void __pas_owned_free(void **slot, PasOwnedExc *exc) {
+  void *volatile obj = *slot;
+  *slot = NULL;
+  if (!obj)
+    return;
+  PasExcFrame f;
+  __pas_exc_push(&f);
+  if (_setjmp(*(jmp_buf *)(void *)f.buf) == 0) {
+    __pas_free_object(obj);
+    __pas_exc_pop(&f);
+    return;
+  }
+  /* the destructor raised (which popped the frame) */
+  if (exc->object) {
+    __pas_free_object(f.object);
+    return;
+  }
+  exc->object = f.object;
+  exc->where = f.where;
+  exc->address = f.address;
+}
+
+void __pas_owned_done(PasOwnedExc *exc, int32_t raised) {
+  if (!exc->object)
+    return;
+  if (raised) {
+    __pas_free_object(exc->object);
+    return;
+  }
+  raise_to_frame(exc->object, exc->where, exc->address);
+}
+
 /*===- Program (Turbo/FPC) --------------------------------------------------===*/
 
 void __pas_halt(int32_t code) {

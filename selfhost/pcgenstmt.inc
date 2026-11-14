@@ -588,6 +588,14 @@ begin
     exit;
   end;
   v := convertForAssign(visitExpr(value), value^.typ, tt, value^.b);
+  if (target^.kind = nkNameRef) and (target^.refDecl <> nil) and
+     (target^.refDecl^.kind = dkVar) and target^.refDecl^.isOwned then
+  begin
+    { an owned variable: frees the object it had }
+    dst := emitAddress(target);
+    pair := call2(classRuntime('__pas_owned_set', 'void', 'ptr,ptr'), dst, v, '');
+    exit;
+  end;
   if isBitPackedComponent(target) then
   begin
     bitStore(target, v);
@@ -1668,6 +1676,26 @@ end;
     switch (state) [0: end; 1: reraise F; 2 + k: exit k (exit, break or
       continue out of the body)]
   raised: state = 1; goto finally }
+{ The finally part of a routine with owned variables (owned, of PDecl):
+  frees their objects, the last declared first. A destructor's exception
+  does not stop the others; the first one is raised afterwards, unless an
+  exception is already leaving the routine (state 1), which goes on. }
+procedure emitFreeOwned(const owned: TPtrList; const state: TV);
+var
+  i: longint;
+  pending, raised, ignored: TV;
+begin
+  pending := irCreateTemp(ownedExcT, 'owned.exc');
+  irStore(irZero(ownedExcT), pending);
+  for i := owned.count - 1 downto 0 do
+    ignored := call2(classRuntime('__pas_owned_free', 'void', 'ptr,ptr'),
+                     varAddress(PDecl(listGet(owned, i))), pending, '');
+  raised := irICmp('eq', irLoad(irI32, state, 'state'), i32c(1), 'raised');
+  raised := irCast('zext', raised, irI32, '');
+  ignored := call2(classRuntime('__pas_owned_done', 'void', 'ptr,i32'), pending,
+                   raised, '');
+end;
+
 procedure emitTryFinally(s: PNode);
 var
   t: TTryFinally;
@@ -2779,6 +2807,8 @@ var
   managedAddrs, managedTypes: TPtrList; { of PTVBox / PType }
   managedResult, resultByPointer: boolean;
   locals: TPtrList; { of PDecl: the local variables and the result }
+  owned: TPtrList;  { of PDecl: the owned variables }
+  ownedTry: TTryFinally;
 
   { an alloca for x unless it is in the frame record }
   procedure addLocal(x: PDecl; isParam: boolean);
@@ -2935,7 +2965,26 @@ begin
   end;
   listClear(routineTemps);
   exitBlock := irNewBlock('exit');
-  visitStmt(r^.body^.body);
+  { the owned variables' objects are freed however the body ends, the last
+    declared first: the body is the protected part of a try-finally }
+  listInit(owned);
+  for i := 0 to r^.body^.decls.count - 1 do
+  begin
+    v := PDecl(listGet(r^.body^.decls, i));
+    if (v^.kind = dkVar) and v^.isOwned then
+      listAdd(owned, v);
+  end;
+  if owned.count = 0 then
+    visitStmt(r^.body^.body)
+  else
+  begin
+    tryFinallyBegin(ownedTry);
+    visitStmt(r^.body^.body);
+    tryFinallyMiddle(ownedTry);
+    emitFreeOwned(owned, ownedTry.state);
+    tryFinallyEnd(ownedTry);
+  end;
+  listFree(owned);
   irBr(exitBlock);
   if beforeBody <> nil then
   begin
@@ -3236,6 +3285,12 @@ begin
   listAdd(fields, irPtrT);
   listAdd(fields, jmpBufT);
   excFrameT := irStructLit(fields);
+  listFree(fields);
+  listInit(fields);
+  listAdd(fields, irPtrT);
+  listAdd(fields, irPtrT);
+  listAdd(fields, irPtrT);
+  ownedExcT := irStructLit(fields);
   listFree(fields);
   listInit(cleanups);
   listInit(handledFrames);

@@ -105,6 +105,8 @@ var
   cleanups: TPtrList;
   handledFrames: TPtrList;
   excFrameT: PIRType;
+  { PasOwnedExc (runtime/include/pascalrt.h): object, where, address }
+  ownedExcT: PIRType;
   exitBlock: PIRBlock;
   mainJmpBuf: TV;
   hasMainJmpBuf: boolean;
@@ -242,7 +244,8 @@ begin
      (name <> '__pas_intf_assign') and (name <> '__pas_intf_clear') and
      (name <> '__pas_dyn_clear') and (name <> '__pas_dyn_assign') and
      (name <> '__pas_dyn_setlength') and
-     (name <> '__pas_format_pstr') then
+     (name <> '__pas_format_pstr') and
+     (name <> '__pas_owned_set') and (name <> '__pas_owned_done') then
     irSetNoRaise(ignored);
 end;
 
@@ -5387,6 +5390,17 @@ begin
   emitDynArrayCtor := data;
 end;
 
+{ move p: p's object; p is nil afterwards. }
+function emitMove(e: PNode): TV;
+var
+  slot, obj: TV;
+begin
+  slot := emitAddress(e^.inner);
+  obj := irLoad(irPtrT, slot, 'moved');
+  irStore(irNull, slot);
+  emitMove := obj;
+end;
+
 function visitExprKind(e: PNode): TV;
 var
   noArgs: TPtrList;
@@ -5402,6 +5416,7 @@ begin
         visitExprKind := i8c(ord(e^.strValue^.chars^[0]));
     nkNameRef: visitExprKind := visitNameRef(e);
     nkParen: visitExprKind := visitExpr(e^.inner);
+    nkMove: visitExprKind := emitMove(e);
     nkUnary: visitExprKind := visitUnary(e);
     nkBinary: visitExprKind := visitBinary(e);
     nkCall: visitExprKind := visitCall(e);

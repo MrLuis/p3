@@ -968,7 +968,7 @@ var
   isCVar: boolean;
   dirLoc: TLoc;
   libExpr, nameExpr: PNode;
-  listed: boolean;
+  listed, owned: boolean;
   hf: longint;
   hm: PName;
   names: TPtrList;
@@ -993,6 +993,14 @@ begin
       declareName(PIdent(listGet(names, i))^);
     if listed and expect(tkColon, 'after variable name') then
       ts := parseType;
+    { objfpc: a variable that owns its object,  x: TFoo owned;  (owned is
+      not a reserved word) }
+    owned := false;
+    if (ts <> nil) and (mode = lmObjFPC) and isIdentifierNamed('owned') then
+    begin
+      consumeToken;
+      owned := true;
+    end;
     { Turbo/FPC: an overlay  x: T absolute y;  (one name only); absolute
       is not a reserved word }
     absTarget := nil;
@@ -1041,6 +1049,7 @@ begin
           v^.isInitVar := true;
         end;
         v^.absTarget := absTarget;
+        v^.isOwned := owned;
         addHints(v, hf, hm);
         listAdd(decls, v);
       end;
@@ -5262,6 +5271,18 @@ begin
           call^.args := args;
           call^.typeArgs := elems;
           exit(parseSelectors(call));
+        end;
+        { objfpc: move p, the object of the owned variable p (move is not a
+          reserved word: only a name can follow it here) }
+        if (mode = lmObjFPC) and isIdentifierNamed('move') and
+           (peekKind = tkIdentifier) then
+        begin
+          lparen := consumeToken;
+          name := makeIdentifier(tok);
+          consumeToken;
+          n := newNode(nkMove, lparen, prevTokEnd);
+          n^.inner := nameRef(name);
+          exit(n);
         end;
         name := makeIdentifier(tok);
         consumeToken;

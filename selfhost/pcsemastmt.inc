@@ -2193,6 +2193,29 @@ end;
 
 { obj.M(args), TFoo.Create(args), inherited M(args) (an nkIndirectCall):
   the result type, nil for a call without a value, or the error type. }
+{ p.Free or p.Destroy of an owned variable p (already resolved): an error,
+  since its object is freed again when the routine ends. }
+function diagOwnedFree(e: PNode): boolean;
+var
+  ov: PDecl;
+begin
+  diagOwnedFree := false;
+  ov := ownedVarOf(e^.base);
+  if ov = nil then
+    exit;
+  if not nameEquals(e^.fieldName.name, 'free') and
+     not nameEquals(e^.fieldName.name, 'destroy') then
+    exit;
+  ms('''');
+  maN(e^.fieldName.spelling);
+  ma(''' cannot be called on owned variable ''');
+  maN(ov^.ident.spelling);
+  ma(''', which is freed when its routine ends; assign nil to free its ' +
+     'object now');
+  errR(e^.fieldName.loc, nodeRange(e));
+  diagOwnedFree := true;
+end;
+
 function checkMethodCall(e: PNode): PType;
 var
   f, d: PDecl;
@@ -2204,6 +2227,8 @@ begin
   if callee^.kind = nkInherited then
     exit(checkInheritedCall(callee, e^.args, nodeRange(e)));
   d := resolveMember(callee);
+  if (d <> nil) and diagOwnedFree(callee) then
+    exit(errorType);
   if (d <> nil) and (d^.kind = dkRoutine) then { objfpc: overloads }
   begin
     d := resolveOverload(d, e^.args, callee^.fieldName, nodeRange(e));
@@ -2521,7 +2546,9 @@ begin
           maCallee(s^.callee);
           ma(' cannot leave a ''finally'' part');
           errR(s^.callee.loc, identRange(s^.callee));
-        end;
+        end
+        else
+          ownedBreak(d^.builtin = bkContinue);
       bkExit:
         begin
           if finallyLoopDepth >= 0 then
@@ -2532,7 +2559,10 @@ begin
             errR(s^.callee.loc, identRange(s^.callee));
           end;
           if s^.args.count = 0 then
+          begin
+            ownedDead;
             exit;
+          end;
           { exit(value) (Turbo/FPC): sets the function result, then exits }
           if (s^.args.count > 1) or (curRoutine = nil) or not curRoutine^.isFunction then
           begin
@@ -2543,10 +2573,14 @@ begin
             errR(s^.callee.loc, nodeRange(s));
             for i := 0 to s^.args.count - 1 do
               check(PNode(listGet(s^.args, i)));
+            ownedDead;
             exit;
           end;
           a0 := PNode(listGet(s^.args, 0));
           t := check(a0);
+          if ownedVarOf(a0) <> nil then
+            diagOwnedEscape(ownedVarOf(a0), a0, true);
+          ownedDead;
           rt := curRoutine^.resultType;
           curRoutine^.resultAssigned := true;
           if not isError(t) and not isError(rt) and not isAssignable(rt, t) and
@@ -2786,9 +2820,10 @@ end;
 
 procedure visitAssign(s: PNode);
 var
-  target, savedTarget, root, sum: PNode;
+  target, savedTarget, root, sum, savedOwnedTarget: PNode;
   targetTy, valueTy: PType;
-  p, d: PDecl;
+  p, d, ownedV, ov, tv: PDecl;
+  local, modifiable: boolean;
 begin
   target := s^.target;
   if target^.kind = nkNameRef then
@@ -2873,9 +2908,33 @@ begin
   end;
   valueTy := checkValueFor(targetTy, s^.value);
   compoundResultRef := nil;
+  { An owned variable's object stays its own unless moved: only a local
+    variable can refer to it too. Assigning to the variable gives it an
+    object again. }
+  ownedV := ownedVarOf(target);
+  ov := ownedVarOf(s^.value);
+  if (ov <> nil) and not isError(valueTy) then
+  begin
+    tv := nil;
+    if (target^.kind = nkNameRef) and (target^.refDecl <> nil) and
+       (target^.refDecl^.kind = dkVar) then
+      tv := target^.refDecl;
+    local := (tv <> nil) and (target^.refWith = nil) and not tv^.isOwned and
+             (curRoutine <> nil) and (tv^.owner = curRoutine) and
+             ((tv^.varKind = vkVariable) or (tv^.varKind = vkValueParam)) and
+             ((tv^.init = nil) or tv^.isInitVar) and not tv^.isClassVar;
+    if not local then
+      diagOwnedEscape(ov, s^.value, (tv <> nil) and (tv^.varKind = vkResult));
+  end;
+  if ownedV <> nil then
+    ownedAssign(ownedV);
   if isError(targetTy) or isError(valueTy) then
     exit;
-  if not checkModifiable(target) then
+  savedOwnedTarget := ownedTarget;
+  ownedTarget := target;
+  modifiable := checkModifiable(target);
+  ownedTarget := savedOwnedTarget;
+  if not modifiable then
     exit;
   if containsFile(targetTy) then
   begin
@@ -2902,6 +2961,8 @@ var
   usable: boolean;
   d: PDecl;
   k: longint;
+  before: TOwnedState;
+  loop: TOwnedLoop;
 begin
   directSequence := nil;
   varRef := s^.forVar;
@@ -2967,9 +3028,12 @@ begin
   end;
   if usable then
     listAdd(activeFors, s);
+  ownedGet(before);
+  ownedLoopBegin(loop);
   loopDepth := loopDepth + 1;
   visitStmt(s^.forBody);
   loopDepth := loopDepth - 1;
+  ownedLoopEnd(loop, before);
   if usable then
     listPop(activeFors);
 end;
@@ -3043,6 +3107,8 @@ var
   cLoc: TLoc;
   kind: longint;
   inScope, saved: PScope;
+  before: TOwnedState;
+  loop: TOwnedLoop;
 
   function makeStep(value: PNode): PNode;
   var
@@ -3256,9 +3322,12 @@ begin
 
   if usable then
     listAdd(activeFors, s);
+  ownedGet(before);
+  ownedLoopBegin(loop);
   loopDepth := loopDepth + 1;
   visitStmt(s^.inBody);
   loopDepth := loopDepth - 1;
+  ownedLoopEnd(loop, before);
   if usable then
     listPop(activeFors);
 end;
@@ -3271,6 +3340,7 @@ var
   arm: PCaseArm;
   l, prev: PCaseLabel;
   dup: int64;
+  before, after, st: TOwnedState;
 begin
   directSequence := nil;
   selTy := check(s^.selector);
@@ -3288,6 +3358,8 @@ begin
     labelTy := getBase(selTy);
   { ISO 7185 6.8.3.5: no value in more than one label }
   listInit(seen);
+  ownedGet(before);
+  ownedClear(after);
   for i := 0 to s^.arms.count - 1 do
   begin
     arm := PCaseArm(listGet(s^.arms, i));
@@ -3315,10 +3387,15 @@ begin
       end;
       listAdd(seen, l);
     end;
+    ownedSet(before);
     visitStmt(arm^.body);
+    ownedGet(st);
+    ownedJoinInto(after, st);
   end;
   listFree(seen);
+  ownedSet(before); { (no else part: no arm may run) }
   visitSequence(@s^.elseBody, s^.elseBody);
+  ownedJoin(after);
 end;
 
 procedure visitWith(s: PNode);
@@ -3400,17 +3477,49 @@ end;
 
 procedure visitTry(s: PNode);
 var
-  i, saved: longint;
+  i, saved, tick: longint;
+  bit: int64;
+  protected_: TOwnedTry;
+  bodyEnd, st: TOwnedState;
 begin
   markHasTry;
   directSequence := nil;
+  ownedTryBegin(protected_);
   visitSequence(s, s^.tryBody);
+  ownedTryEnd(protected_);
+  ownedGet(bodyEnd);
   if s^.isFinally then
   begin
+    { the finally part runs after any of the body's states; what it leaves
+      alone is as the body left it }
+    tick := 0;
+    if flow <> nil then
+    begin
+      flow^.s := protected_.seen;
+      tick := flow^.tick;
+    end;
     saved := finallyLoopDepth;
     finallyLoopDepth := loopDepth;
     visitSequence(s, s^.partBody);
     finallyLoopDepth := saved;
+    if flow <> nil then
+    begin
+      st := flow^.s;
+      if not ownedLive(bodyEnd) or not ownedLive(st) then
+        ownedDead
+      else
+      begin
+        for i := 0 to flow^.n - 1 do
+          if flow^.changed[i] > tick then
+          begin
+            bit := int64(1) shl i;
+            bodyEnd.valid := (bodyEnd.valid and not bit) or (st.valid and bit);
+            bodyEnd.moved := (bodyEnd.moved and not bit) or (st.moved and bit);
+            bodyEnd.entry[i] := st.entry[i];
+          end;
+        flow^.s := bodyEnd;
+      end;
+    end;
     exit;
   end;
   handlerDepth := handlerDepth + 1;
@@ -3418,9 +3527,21 @@ begin
   begin
     if diagShouldStop then
       break;
+    if flow <> nil then
+      flow^.s := protected_.seen;
     checkHandler(PExceptHandler(listGet(s^.handlers, i)));
+    ownedGet(st);
+    ownedJoinInto(bodyEnd, st);
   end;
+  if flow <> nil then
+    flow^.s := protected_.seen;
   visitSequence(s, s^.partBody);
+  if (s^.handlers.count = 0) or (s^.tryElseLoc <> noLoc) then
+  begin
+    ownedGet(st);
+    ownedJoinInto(bodyEnd, st);
+  end;
+  ownedSet(bodyEnd);
   handlerDepth := handlerDepth - 1;
 end;
 
@@ -3439,6 +3560,7 @@ begin
          'exception handler');
       errR(s^.b, nodeRange(s));
     end;
+    ownedDead;
     exit;
   end;
   t := check(s^.raiseObj);
@@ -3469,6 +3591,56 @@ begin
       errR(p^.b, nodeRange(p));
     end;
   end;
+  ownedDead;
+end;
+
+procedure visitIf(s: PNode);
+var
+  before, thenEnd: TOwnedState;
+begin
+  directSequence := nil;
+  checkCondition(s^.cond, 'if');
+  ownedGet(before);
+  visitStmt(s^.thenStmt);
+  ownedGet(thenEnd);
+  ownedSet(before);
+  if s^.elseStmt <> nil then
+    visitStmt(s^.elseStmt);
+  ownedJoin(thenEnd);
+end;
+
+procedure visitWhile(s: PNode);
+var
+  before: TOwnedState;
+  loop: TOwnedLoop;
+begin
+  directSequence := nil;
+  ownedLoopBegin(loop);
+  checkCondition(s^.cond, 'while');
+  ownedGet(before);
+  loopDepth := loopDepth + 1;
+  visitStmt(s^.thenStmt);
+  loopDepth := loopDepth - 1;
+  ownedLoopEnd(loop, before);
+end;
+
+procedure visitRepeat(s: PNode);
+var
+  before: TOwnedState;
+  loop: TOwnedLoop;
+begin
+  ownedLoopBegin(loop);
+  loopDepth := loopDepth + 1;
+  visitSequence(s, s^.stmts);
+  loopDepth := loopDepth - 1;
+  if flow <> nil then { continue goes to the condition }
+  begin
+    ownedJoinInto(flow^.s, loop.continues);
+    ownedClear(loop.continues);
+  end;
+  checkCondition(s^.untilCond, 'until');
+  ownedClear(before);
+  ownedLoopEnd(loop, before);
 end;
 
 procedure visitStmt(s: PNode);
@@ -3500,29 +3672,9 @@ begin
           s^.calleeExpr^.typ := rt;
       end;
     nkAssign: visitAssign(s);
-    nkIf:
-      begin
-        directSequence := nil;
-        checkCondition(s^.cond, 'if');
-        visitStmt(s^.thenStmt);
-        if s^.elseStmt <> nil then
-          visitStmt(s^.elseStmt);
-      end;
-    nkWhile:
-      begin
-        directSequence := nil;
-        checkCondition(s^.cond, 'while');
-        loopDepth := loopDepth + 1;
-        visitStmt(s^.thenStmt);
-        loopDepth := loopDepth - 1;
-      end;
-    nkRepeat:
-      begin
-        loopDepth := loopDepth + 1;
-        visitSequence(s, s^.stmts);
-        loopDepth := loopDepth - 1;
-        checkCondition(s^.untilCond, 'until');
-      end;
+    nkIf: visitIf(s);
+    nkWhile: visitWhile(s);
+    nkRepeat: visitRepeat(s);
     nkFor: visitFor(s);
     nkForIn: visitForIn(s);
     nkCase: visitCase(s);
@@ -3575,6 +3727,8 @@ begin
     dkVar:
       begin
         t := d^.varType;
+        if d^.isOwned then
+          ownedUse(d, identRange(e^.ref));
         if (t <> nil) and (t^.kind = tyRoutine) then
         begin
           { a functional parameter without arguments is a call }
@@ -4392,6 +4546,49 @@ begin
   checkMethodAddr := t;
 end;
 
+{ move p: the object of the owned variable p of this routine, which gives
+  it up. }
+function visitMove(e: PNode): PType;
+var
+  n: PNode;
+  w: PWithContext;
+  d: PDecl;
+begin
+  visitMove := errorType;
+  n := e^.inner;
+  w := nil;
+  d := scopeLookup(cur, n^.ref.name, w);
+  if d = nil then
+  begin
+    diagUndeclared(n^.ref);
+    exit;
+  end;
+  if (d^.kind <> dkVar) or not d^.isOwned or (w <> nil) then
+  begin
+    ms('''move'' needs an owned variable, and ''');
+    maN(n^.ref.spelling);
+    ma(''' is not one');
+    errR(n^.ref.loc, identRange(n^.ref));
+    noteDeclaredHere(d);
+    exit;
+  end;
+  n^.refDecl := d;
+  n^.typ := d^.varType;
+  d^.isUsed := true;
+  if d^.owner <> curRoutine then
+  begin
+    ms('owned variable ''');
+    maN(n^.ref.spelling);
+    ma(''' can only be moved by the routine it belongs to');
+    errR(n^.ref.loc, identRange(n^.ref));
+    noteDeclaredHere(d);
+    exit;
+  end;
+  ownedUse(d, identRange(n^.ref));
+  ownedMove(d, e^.b);
+  visitMove := d^.varType;
+end;
+
 function visitAddrOf(e: PNode): PType;
 var
   r, x, pick: PDecl;
@@ -4475,6 +4672,14 @@ begin
   if not isVariableReference(op) then
   begin
     ms('''@'' requires a variable');
+    errR(op^.b, nodeRange(op));
+    exit;
+  end;
+  if ownedVarOf(op) <> nil then
+  begin
+    ms('cannot take the address of owned variable ''');
+    maN(ownedVarOf(op)^.ident.spelling);
+    ma('''');
     errR(op^.b, nodeRange(op));
     exit;
   end;
@@ -4591,6 +4796,8 @@ begin
   d := resolveMember(e);
   if d = nil then
     exit;
+  if diagOwnedFree(e) then
+    exit;
   if d^.kind = dkConst then { TFoo.C, obj.C }
   begin
     warnHints(d, e^.fieldName);
@@ -4697,6 +4904,7 @@ begin
         visitExpr := stringLiteralType(e^.strValue^.len);
     nkNameRef: visitExpr := visitNameRef(e);
     nkParen: visitExpr := check(e^.inner);
+    nkMove: visitExpr := visitMove(e);
     nkUnary: visitExpr := visitUnary(e);
     nkBinary: visitExpr := visitBinary(e);
     nkCall: visitExpr := visitCall(e);

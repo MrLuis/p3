@@ -2974,7 +2974,8 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
            Name == "__pas_intf_assign" || Name == "__pas_intf_clear" ||
            Name == "__pas_dyn_clear" || Name == "__pas_dyn_assign" ||
            Name == "__pas_dyn_setlength" ||
-           Name == "__pas_format_pstr";
+           Name == "__pas_format_pstr" ||
+           Name == "__pas_owned_set" || Name == "__pas_owned_done";
   }
 
   /// Does the code emitted for the current function so far have a call
@@ -3236,7 +3237,17 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
     }
     RoutineTemps.clear();
     ExitBlock = newBlock("exit");
-    visitStmt(R->getBody()->getBody());
+    // The owned variables' objects are freed however the body ends, the
+    // last declared first: the body is the protected part of a try-finally.
+    llvm::SmallVector<VarDecl *, 4> Owned;
+    for (Decl *D : R->getBody()->getDecls())
+      if (auto *V = llvm::dyn_cast<VarDecl>(D); V && V->isOwned())
+        Owned.push_back(V);
+    if (Owned.empty())
+      visitStmt(R->getBody()->getBody());
+    else
+      emitTryFinally([&] { visitStmt(R->getBody()->getBody()); },
+                     [&](llvm::Value *State) { emitFreeOwned(Owned, State); });
     B.CreateBr(ExitBlock);
     if (BeforeBody) {
       llvm::DebugLoc Loc = B.getCurrentDebugLocation();
@@ -5394,11 +5405,25 @@ public:
     }
     llvm::Value *V = convertForAssign(visitExpr(Value), Value->getType(), TT,
                                       Value->getBeginLoc());
+    if (isOwnedVar(Target)) { // frees the object it had
+      llvm::Value *Slot = emitAddress(Target);
+      B.CreateCall(classRuntime("__pas_owned_set", B.getVoidTy(),
+                                {B.getPtrTy(), B.getPtrTy()}),
+                   {Slot, V});
+      return;
+    }
     if (isBitPackedComponent(Target)) {
       bitStore(Target, V);
       return;
     }
     storeValue(emitAddress(Target), V, TT);
+  }
+
+  /// Is E an owned variable (`x: TFoo owned`)?
+  static bool isOwnedVar(Expr *E) {
+    auto *N = llvm::dyn_cast<NameRefExpr>(E);
+    auto *V = N ? llvm::dyn_cast_or_null<VarDecl>(N->getDecl()) : nullptr;
+    return V && V->isOwned();
   }
 
   static PropertyDecl *assignedProperty(Expr *Target) {
@@ -6088,8 +6113,9 @@ public:
       emitEnumeratorLoop(S);
       return;
     }
-    emitTryFinally([&] { emitEnumeratorLoop(S); },
-                   [&] { emitFree(B.CreateLoad(B.getPtrTy(), Slot, "enum")); });
+    emitTryFinally([&] { emitEnumeratorLoop(S); }, [&](llvm::Value *) {
+      emitFree(B.CreateLoad(B.getPtrTy(), Slot, "enum"));
+    });
   }
 
   //   while e.MoveNext do begin Var := e.Current; Body end
@@ -6354,14 +6380,35 @@ public:
           for (Stmt *Child : S->getBody())
             visitStmt(Child);
         },
-        [&] {
+        [&](llvm::Value *) {
           for (Stmt *Child : S->getFinallyBody())
             visitStmt(Child);
         });
   }
 
+  /// The finally part of a routine with owned variables: frees their
+  /// objects, the last declared first. A destructor's exception does not
+  /// stop the others; the first one is raised afterwards, unless an
+  /// exception is already leaving the routine (State 1), which goes on.
+  void emitFreeOwned(llvm::ArrayRef<VarDecl *> Owned, llvm::Value *State) {
+    llvm::Type *Ptr = B.getPtrTy();
+    llvm::StructType *PendingTy = llvm::StructType::get(Ptr, Ptr, Ptr);
+    llvm::Value *Pending = createTemp(PendingTy, "owned.exc");
+    B.CreateStore(llvm::Constant::getNullValue(PendingTy), Pending);
+    for (VarDecl *V : llvm::reverse(Owned))
+      B.CreateCall(classRuntime("__pas_owned_free", B.getVoidTy(), {Ptr, Ptr}),
+                   {varAddress(V), Pending});
+    llvm::Value *Raised = B.CreateICmpEQ(
+        B.CreateLoad(B.getInt32Ty(), State, "state"), B.getInt32(1), "raised");
+    B.CreateCall(classRuntime("__pas_owned_done", B.getVoidTy(),
+                              {Ptr, B.getInt32Ty()}),
+                 {Pending, B.CreateZExt(Raised, B.getInt32Ty())});
+  }
+
+  /// FinallyPart is given the state's variable: 0 after the body's normal
+  /// end, 1 after an exception, 2 + k after an exit, break or continue.
   void emitTryFinally(llvm::function_ref<void()> Body,
-                      llvm::function_ref<void()> FinallyPart) {
+                      llvm::function_ref<void(llvm::Value *)> FinallyPart) {
     auto *Raised = newBlock("finally.raise");
     auto *Finally = newBlock("finally");
     auto *End = newBlock("try.end");
@@ -6381,7 +6428,7 @@ public:
     B.CreateBr(Finally);
 
     B.SetInsertPoint(Finally);
-    FinallyPart();
+    FinallyPart(State);
     auto *Reraise = newBlock("finally.reraise");
     llvm::SwitchInst *SW =
         B.CreateSwitch(B.CreateLoad(B.getInt32Ty(), State, "state"), End);
@@ -6527,6 +6574,14 @@ public:
   }
 
   llvm::Value *visitParenExpr(ParenExpr *E) { return visitExpr(E->getInner()); }
+
+  /// move p: p's object; p is nil afterwards.
+  llvm::Value *visitMoveExpr(MoveExpr *E) {
+    llvm::Value *Slot = emitAddress(E->getOperand());
+    llvm::Value *Obj = B.CreateLoad(B.getPtrTy(), Slot, "moved");
+    B.CreateStore(llvm::ConstantPointerNull::get(B.getPtrTy()), Slot);
+    return Obj;
+  }
 
   llvm::Value *visitUnaryExpr(UnaryExpr *E) {
     if (RoutineDecl *Op = E->getOperator()) // a record's class operator

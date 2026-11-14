@@ -1,0 +1,22 @@
+; Owned variables in a unit and in the program using it (--mode=objfpc):
+; objects made by a unit's function (move) and freed by its callers, also
+; when an exception leaves; compiled whole and separately.
+; RUN: rm -rf %t && mkdir -p %t && cp -r %S/Inputs/owned/. %t/
+; RUN: %pcc --mode=objfpc -I %t/lib %t/main.pas -o %t/whole
+; RUN: %t/whole | FileCheck %s
+; RUN: %pcc --mode=objfpc -c %t/lib/shapes.pas -o %t/lib/shapes.o
+; RUN: %pcc --mode=objfpc -I %t/lib -fseparate-units %t/main.pas -o %t/separate
+; RUN: %t/separate | FileCheck %s
+; CHECK:      create triangle
+; CHECK-NEXT: create circle
+; CHECK-NEXT: create square
+; CHECK-NEXT: used
+; CHECK-NEXT: destroy square
+; CHECK-NEXT: destroy circle
+; CHECK-NEXT: create circle
+; CHECK-NEXT: create square
+; CHECK-NEXT: destroy square
+; CHECK-NEXT: destroy circle
+; CHECK-NEXT: caught failed
+; CHECK-NEXT: destroy triangle
+; CHECK-NEXT: done

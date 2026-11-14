@@ -224,6 +224,18 @@ public:
   static bool classof(const Expr *E) { return E->getKind() == EK_Paren; }
 };
 
+/// `move p` (objfpc): the object of the owned variable p, which gives it
+/// up (it is nil afterwards, and cannot be used until assigned again).
+class MoveExpr final : public Expr {
+  NameRefExpr *Operand;
+
+public:
+  MoveExpr(SourceRange R, NameRefExpr *Operand)
+      : Expr(EK_Move, R), Operand(Operand) {}
+  NameRefExpr *getOperand() const { return Operand; }
+  static bool classof(const Expr *E) { return E->getKind() == EK_Move; }
+};
+
 class UnaryExpr final : public Expr {
   UnaryOp Op;
   Expr *Operand;
@@ -1322,6 +1334,7 @@ private:
   bool IsClassVar = false;
   ClassType *VarClass = nullptr;
   bool Captured = false;        ///< set by Sema
+  bool Owned = false;           ///< objfpc `x: TFoo owned`
   Expr *Absolute = nullptr;     ///< Turbo/FPC `x: T absolute y`: y
   Expr *Default = nullptr;      ///< objfpc: the parameter's default value
   bool Out = false;             ///< objfpc: an `out` parameter
@@ -1361,6 +1374,11 @@ public:
   /// their static link.
   bool isCaptured() const { return Captured; }
   void setCaptured() { Captured = true; }
+  /// `x: TFoo owned` (objfpc): a routine's variable that owns its object,
+  /// which is freed when the variable gets another one and when the
+  /// routine ends, however it ends; `move x` gives the object up.
+  bool isOwned() const { return Owned; }
+  void setOwned(bool O = true) { Owned = O; }
   /// `x: T absolute y`: x has no storage of its own, it is another view of
   /// the variable, field or element y. Null for other variables.
   Expr *getAbsolute() const { return Absolute; }

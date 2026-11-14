@@ -737,6 +737,14 @@ void Parser::parseVarPart(llvm::SmallVectorImpl<Decl *> &Decls) {
         expect(tok::colon, "after variable name"))
       TS = parseType();
 
+    // objfpc: a variable that owns its object,  x: TFoo owned;  (`owned` is
+    // not a reserved word)
+    bool Owned = false;
+    if (TS && LangOpts.ObjKeywords && isIdentifierNamed("owned")) {
+      consumeToken();
+      Owned = true;
+    }
+
     // Turbo/FPC: an overlay  x: T absolute y;  (one name only). `absolute`
     // is not a reserved word.
     Expr *Absolute = nullptr;
@@ -779,6 +787,7 @@ void Parser::parseVarPart(llvm::SmallVectorImpl<Decl *> &Decls) {
         if (Init)
           V->setInitializedVar(Init);
         V->setAbsolute(Absolute);
+        V->setOwned(Owned);
         V->addHints(H.Flags, H.Message);
         Decls.push_back(V);
       }
@@ -3775,6 +3784,16 @@ Expr *Parser::parseFactor() {
                                         Ctx.copyArray<Expr *>(Args));
       Call->setTypeArgs(Ctx.copyArray<TypeSpec *>(TypeArgs));
       return parseSelectors(Call);
+    }
+    // objfpc: move p, the object of the owned variable p (`move` is not a
+    // reserved word: only a name can follow it here)
+    if (LangOpts.ObjKeywords && isIdentifierNamed("move") &&
+        peekToken().is(tok::identifier)) {
+      SourceLocation Start = consumeToken();
+      Identifier Var = makeIdentifier(Tok);
+      consumeToken();
+      return Ctx.create<MoveExpr>(SourceRange(Start, PrevTokEnd),
+                                  Ctx.create<NameRefExpr>(Var));
     }
     Identifier Name = makeIdentifier(Tok);
     consumeToken();

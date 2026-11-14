@@ -18,6 +18,10 @@
 ; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-llvm --extra="-I %S/../run/Inputs/classes/lib -o -" --modes=objfpc --ref pcc --new %t.pcc %S/../run/classes.pas %S/../run/classes2.pas %S/../run/Inputs/classes %S/../codegen/Inputs/classes.pas | FileCheck %s
 ; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-llvm --extra="-I %S/../run/Inputs/classes/lib -g -o -" --modes=objfpc --ref pcc --new %t.pcc %S/../run/classes.pas %S/../run/classes2.pas %S/../run/Inputs/classes %S/../codegen/Inputs/classes.pas | FileCheck %s
 ; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-llvm --extra="-I %S/../run/Inputs/classes/lib -fseparate-units -g -o -" --modes=objfpc --ref pcc --new %t.pcc %S/../run/Inputs/classes | FileCheck %s
+; Owned variables (--mode=objfpc), with and without -g, whole and separate.
+; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-llvm --extra="-o -" --modes=objfpc --ref pcc --new %t.pcc %S/../run/owned.pas %S/../codegen/Inputs/owned.pas %S/../sema/Inputs/owned | FileCheck %s
+; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-llvm --extra="-g -o -" --modes=objfpc --ref pcc --new %t.pcc %S/../run/owned.pas %S/../codegen/Inputs/owned.pas | FileCheck %s
+; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-llvm --extra="-I %S/../run/Inputs/owned/lib -fseparate-units -g -o -" --modes=objfpc --ref pcc --new %t.pcc %S/../run/Inputs/owned | FileCheck %s
 ; Separate units (S11): the unit modules and the program importing them.
 ; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-llvm --extra="-I %S/../run/Inputs/units/lib -o -" --modes=tp --ref pcc --new %t.pcc %S/../run/Inputs/units | FileCheck %s
 ; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-llvm --extra="-I %S/../run/Inputs/units/lib -fseparate-units -g -o -" --modes=tp --ref pcc --new %t.pcc %S/../run/Inputs/units | FileCheck %s

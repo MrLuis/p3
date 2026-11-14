@@ -684,6 +684,8 @@ begin
             bufAdd(outBuf, ' initialized');
           if d^.absTarget <> nil then
             bufAdd(outBuf, ' absolute');
+          if d^.isOwned then
+            bufAdd(outBuf, ' owned');
           if d^.paramDefault <> nil then
             bufAdd(outBuf, ' default');
           visibilitySuffix(d);
@@ -696,6 +698,8 @@ begin
           bufAdd(outBuf, ' initialized');
         if d^.absTarget <> nil then
           bufAdd(outBuf, ' absolute');
+        if d^.isOwned then
+          bufAdd(outBuf, ' owned');
         if d^.paramDefault <> nil then
           bufAdd(outBuf, ' default');
         visibilitySuffix(d);
@@ -1296,6 +1300,14 @@ begin
           bufAddChar(outBuf, '''');
         end;
         endExpr(e);
+      end;
+    nkMove:
+      begin
+        line('MoveExpr');
+        endExpr(e);
+        indent := indent + 2;
+        visitExpr(e^.inner);
+        indent := indent - 2;
       end;
     nkParen:
       begin

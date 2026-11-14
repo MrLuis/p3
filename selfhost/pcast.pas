@@ -47,7 +47,7 @@ type
     { expressions }
     nkIntegerLit, nkRealLit, nkStringLit, nkNameRef, nkParen, nkUnary,
     nkBinary, nkCall, nkFormatted, nkIndex, nkField, nkNil, nkDeref,
-    nkSetCtor, nkAddrOf, nkAggregate, nkIndirectCall, nkInherited,
+    nkSetCtor, nkAddrOf, nkAggregate, nkIndirectCall, nkInherited, nkMove,
     { statements }
     nkEmpty, nkCompound, nkProcCall, nkAssign, nkIf, nkWhile, nkRepeat,
     nkFor, nkCase, nkWith, nkLabeled, nkGoto, nkIndirectCallStmt,
@@ -157,8 +157,9 @@ type
         value (strValue is then '?', the char it converts to); else 0 }
       nkStringLit: (strValue: PName; strWide: longint);
       nkNameRef: (ref: TIdent; refDecl: PDecl; refWith: PWithContext);
-      { paren: the inner expression; deref: the pointer; addrof: the operand }
-      nkParen, nkDeref, nkAddrOf: (inner: PNode; addrMethod, addrCode: PDecl);
+      { paren: the inner expression; deref: the pointer; addrof: the operand;
+        move (objfpc): move p, the owned variable p (a name) }
+      nkParen, nkDeref, nkAddrOf, nkMove: (inner: PNode; addrMethod, addrCode: PDecl);
       { opDecl: an advanced record's class operator implementing it
         (Sema); opNegated: <> through the = operator }
       nkUnary: (uop: TUnaryOp; operand: PNode; uopDecl: PDecl);
@@ -430,6 +431,10 @@ type
               owner: PDecl; init: PNode; initValue: TConstValue;
               isClassVar: boolean; varClass: PType; isInitVar: boolean;
               absTarget: PNode; absRoot: PDecl;
+              { objfpc: x: TFoo owned, a routine's variable that owns its
+                object, which is freed when the variable gets another one
+                and when the routine ends; move x gives the object up }
+              isOwned: boolean;
               { objfpc: a parameter's default value (b: integer = 1),
                 passed by the calls that leave it out }
               paramDefault: PNode;

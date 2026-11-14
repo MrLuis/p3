@@ -1,0 +1,73 @@
+; Owned variables (objfpc): `x: TFoo owned` is a local variable of a class
+; type; `move x` needs one, of the routine itself. Its object can only be
+; stored or returned with move, cannot be freed by hand, and the variable
+; cannot be a variable parameter or have its address taken. A use after a
+; move (or a possible one) is an error.
+; RUN: not %pcc --mode=objfpc -ferror-limit=0 -c %S/Inputs/owned/errors.pas -o %t.o 2>&1 | FileCheck %s
+; CHECK: errors.pas:11:3: error: 'owned' is only allowed on the local variables of a routine
+; CHECK: errors.pas:32:3: error: owned variable 'p' was moved
+; CHECK: errors.pas:31:16: note: moved here
+; CHECK: errors.pas:47:3: error: owned variable 'p' may have been moved
+; CHECK: errors.pas:46:10: note: moved here
+; CHECK: errors.pas:52:8: error: owned variable 'q' may have been moved
+; CHECK: errors.pas:49:13: note: moved here
+; CHECK: errors.pas:57:3: error: owned variable 'r' was moved
+; CHECK: errors.pas:56:10: note: moved here
+; CHECK: errors.pas:67:15: error: owned variable 'p' may have been moved by an earlier iteration of the loop
+; CHECK: errors.pas:67:10: note: moved here
+; CHECK: errors.pas:74:3: error: owned variable 'q' may have been moved
+; CHECK: errors.pas:71:10: note: moved here
+; CHECK: errors.pas:77:5: error: owned variable 'r' may have been moved by an earlier iteration of the loop
+; CHECK: errors.pas:79:12: note: moved here
+; CHECK: errors.pas:94:5: error: owned variable 'p' may have been moved
+; CHECK: errors.pas:91:10: note: moved here
+; CHECK: errors.pas:100:5: error: owned variable 'q' may have been moved
+; CHECK: errors.pas:98:10: note: moved here
+; CHECK: errors.pas:108:3: error: owned variable 'i' must be of a class type, not 'integer'
+; CHECK: errors.pas:109:3: error: owned variable 'a' cannot be initialized
+; CHECK: errors.pas:109:20: error: initial value must be a constant
+; CHECK: errors.pas:113:13: error: the object of owned variable 'p' can only be stored with 'move p'
+; CHECK: errors.pas:114:11: error: the object of owned variable 'p' can only be stored with 'move p'
+; CHECK: errors.pas:115:14: error: the object of owned variable 'p' can only be returned with 'move p'
+; CHECK: errors.pas:116:8: error: the object of owned variable 'p' can only be returned with 'move p'
+; CHECK: errors.pas:117:10: error: owned variable 'p' cannot be passed as a variable parameter
+; CHECK: errors.pas:118:5: error: 'Free' cannot be called on owned variable 'p', which is freed when its routine ends; assign nil to free its object now
+; CHECK: errors.pas:119:5: error: 'Destroy' cannot be called on owned variable 'p', which is freed when its routine ends; assign nil to free its object now
+; CHECK: errors.pas:120:9: error: cannot take the address of owned variable 'p'
+; CHECK: errors.pas:121:13: error: 'move' needs an owned variable, and 'b' is not one
+; CHECK: errors.pas:107:3: note: 'b' declared here
+; CHECK: errors.pas:122:13: error: 'move' needs an owned variable, and 'keep' is not one
+; CHECK: errors.pas:12:3: note: 'keep' declared here
+; CHECK: errors.pas:131:15: error: owned variable 'p' can only be moved by the routine it belongs to
+; CHECK: errors.pas:127:3: note: 'p' declared here
+; CHECK-NOT: error:
+;
+; Followed through branches, loops, case and try statements: no error when
+; the variable has an object again; a loop that may leave it moved for its
+; next iteration is reported at the use.
+; RUN: not %pcc --mode=objfpc -ferror-limit=0 -c %S/Inputs/owned/flow.pas -o %t.o 2>&1 | FileCheck --check-prefix=FLOW %s
+; FLOW: flow.pas:82:7: error: owned variable 'p' may have been moved by an earlier iteration of the loop
+; FLOW: flow.pas:83:10: note: moved here
+; FLOW: flow.pas:89:15: error: owned variable 'q' may have been moved by an earlier iteration of the loop
+; FLOW: flow.pas:93:12: note: moved here
+; FLOW: flow.pas:101:7: error: owned variable 'r' may have been moved
+; FLOW: flow.pas:99:12: note: moved here
+; FLOW: flow.pas:106:7: error: owned variable 'r' may have been moved
+; FLOW: flow.pas:99:12: note: moved here
+; FLOW: flow.pas:109:13: error: owned variable 's' was moved
+; FLOW: flow.pas:108:8: note: moved here
+; FLOW: flow.pas:110:9: error: owned variable 's' was moved
+; FLOW: flow.pas:109:8: note: moved here
+; FLOW-NOT: error:
+;
+; `owned` and `move` are not reserved, and mean nothing special outside
+; objfpc.
+; RUN: %pcc -c %S/Inputs/owned/tp.pas -o %t.o
+; RUN: %pcc --mode=tp -c %S/Inputs/owned/tp.pas -o %t.o
+; RUN: %pcc --mode=objfpc -c %S/Inputs/owned/tp.pas -o %t.o
+;
+; The AST shows both.
+; RUN: %pcc --mode=objfpc --emit-ast -o - %S/../run/owned.pas | FileCheck --check-prefix=AST %s
+; AST: VarDecl 'a' : TNode owned <69:3>
+; AST: MoveExpr : TNode <87:11>
+; AST-NEXT: NameRefExpr 'p' variable : TNode <87:16>

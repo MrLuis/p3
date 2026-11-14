@@ -1,0 +1,100 @@
+simple
+  create a
+  create b
+  show a
+  never is nil
+  destroy b
+  destroy a
+make
+  create made
+  show made
+  show made
+  destroy made
+reassign
+  create r1
+  create r2
+  destroy r1
+  show r2
+  destroy r2
+  after nil
+  create r3
+  show r3
+  destroy r3
+raises
+  create x1
+  create x2
+  destroy x2
+  destroy x1
+  caught boom
+leaves 1
+  create loop
+  create loop
+  destroy loop
+  create in try
+  destroy loop
+  finally
+  destroy in try
+  = 100
+leaves 2
+  create loop
+  create loop
+  destroy loop
+  create loop
+  destroy loop
+  create in try
+  destroy loop
+  finally
+  destroy in try
+  = 11
+leaves 3
+  create loop
+  create loop
+  destroy loop
+  create loop
+  destroy loop
+  destroy loop
+  = 2
+moves
+  create item
+  create item
+  create last
+  3 kept
+  destroy item
+  destroy item
+  destroy last
+  create item
+  create item
+  create last
+  2 kept
+  destroy last
+  destroy item
+  destroy item
+nested
+  create outer
+  show outer
+  create inner
+  destroy outer
+  show inner
+  destroy inner
+bad destructor
+  create d1
+  create d2
+  create d3
+  destroy d3
+  destroy d2
+  destroy d1
+  caught destroying d3
+  create e1
+  create e2
+  destroy e2
+  destroy e1
+  caught the first
+  create f1
+  create f2
+  destroy f1
+  destroy f2
+  caught destroying f1
+method
+  create in method
+  destroy in method
+done

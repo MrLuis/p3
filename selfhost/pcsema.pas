@@ -1607,11 +1607,337 @@ begin
     end;
 end;
 
+{ --- Owned variables (objfpc): which may have been moved ---
+
+  The statements of a routine with owned variables are followed in the
+  order they run, with the state of each owned variable: it may hold its
+  object (valid), it may have been moved (moved), or both, after paths
+  that differ. A use of a variable that may have been moved is an error.
+  Unreachable code has neither bit of any variable.
+
+  A loop is followed once. entry[i] is the outermost enclosing loop
+  (counted from 1) whose every earlier iteration may have left variable i
+  as it is, or noLoop: a use of the variable then is recorded in those
+  loops, and reported when the loop turns out to end with it moved. }
+
+const
+  maxOwned = 32;
+  noLoop = 255;
+
+type
+  TOwnedState = record
+    valid, moved: int64; { bit i: variable i }
+    entry: array[0..maxOwned - 1] of byte;
+  end;
+  POwnedLoop = ^TOwnedLoop;
+  TOwnedLoop = record
+    breaks, continues: TOwnedState;
+    used: int64; { variables used as the loop found them }
+    entryUse: array[0..maxOwned - 1] of TLoc;
+    prev: POwnedLoop;
+  end;
+  { a try statement's protected part: every state in it, joined (an
+    exception may leave it anywhere) }
+  POwnedTry = ^TOwnedTry;
+  TOwnedTry = record
+    seen: TOwnedState;
+    prev: POwnedTry;
+  end;
+  POwnedFlow = ^TOwnedFlow;
+  TOwnedFlow = record
+    vars: array[0..maxOwned - 1] of PDecl;
+    n: longint;
+    s: TOwnedState;
+    moveLoc: array[0..maxOwned - 1] of TLoc;
+    { tick of the last move or assignment }
+    changed: array[0..maxOwned - 1] of longint;
+    tick: longint;
+    loop: POwnedLoop;
+    depth: longint;
+    tryPart: POwnedTry;
+  end;
+
+var
+  flow: POwnedFlow;   { of the routine being checked, if it has any }
+  ownedTarget: PNode; { the assignment target being checked }
+
+procedure ownedClear(var st: TOwnedState);
+var
+  i: longint;
+begin
+  st.valid := 0;
+  st.moved := 0;
+  for i := 0 to maxOwned - 1 do
+    st.entry[i] := noLoop;
+end;
+
+function ownedLive(const st: TOwnedState): boolean;
+begin
+  ownedLive := (st.valid <> 0) or (st.moved <> 0);
+end;
+
+procedure ownedJoinInto(var a: TOwnedState; const b: TOwnedState);
+var
+  i: longint;
+begin
+  a.valid := a.valid or b.valid;
+  a.moved := a.moved or b.moved;
+  for i := 0 to maxOwned - 1 do
+    if b.entry[i] < a.entry[i] then
+      a.entry[i] := b.entry[i];
+end;
+
+{ e, if it is an owned variable (in parentheses or not). }
+function ownedVarOf(e: PNode): PDecl;
+begin
+  while e^.kind = nkParen do
+    e := e^.inner;
+  if (e^.kind = nkNameRef) and (e^.refDecl <> nil) and (e^.refDecl^.kind = dkVar) and
+     e^.refDecl^.isOwned then
+    ownedVarOf := e^.refDecl
+  else
+    ownedVarOf := nil;
+end;
+
+function ownedIndex(v: PDecl): longint;
+var
+  i: longint;
+begin
+  ownedIndex := -1; { an enclosing routine's: not followed }
+  if (flow = nil) or not v^.isOwned then
+    exit;
+  for i := 0 to flow^.n - 1 do
+    if flow^.vars[i] = v then
+      exit(i);
+end;
+
+procedure ownedGet(var st: TOwnedState);
+begin
+  if flow <> nil then
+    st := flow^.s
+  else
+    ownedClear(st);
+end;
+
+procedure ownedSet(const st: TOwnedState);
+begin
+  if flow <> nil then
+    flow^.s := st;
+end;
+
+procedure ownedJoin(const st: TOwnedState);
+begin
+  if flow <> nil then
+    ownedJoinInto(flow^.s, st);
+end;
+
+{ What follows is not reached (after exit, break, continue, raise). }
+procedure ownedDead;
+begin
+  if flow <> nil then
+    ownedClear(flow^.s);
+end;
+
+{ A use of the owned variable v: an error if it may have been moved. }
+procedure ownedUse(v: PDecl; r: TRange);
+var
+  i, d: longint;
+  bit: int64;
+  l: POwnedLoop;
+begin
+  i := ownedIndex(v);
+  if i < 0 then
+    exit;
+  if not ownedLive(flow^.s) then
+    exit;
+  bit := int64(1) shl i;
+  if (flow^.s.moved and bit) <> 0 then
+  begin
+    ms('owned variable ''');
+    maN(v^.ident.spelling);
+    if (flow^.s.valid and bit) <> 0 then
+      ma(''' may have been moved')
+    else
+      ma(''' was moved');
+    errR(r.b, r);
+    ms('moved here');
+    note(flow^.moveLoc[i]);
+    flow^.s.moved := flow^.s.moved and not bit; { reported once }
+    flow^.s.valid := flow^.s.valid or bit;
+    exit;
+  end;
+  d := flow^.depth;
+  l := flow^.loop;
+  while (l <> nil) and (d >= flow^.s.entry[i]) do
+  begin
+    if (l^.used and bit) = 0 then
+    begin
+      l^.used := l^.used or bit;
+      l^.entryUse[i] := r.b;
+    end;
+    l := l^.prev;
+    d := d - 1;
+  end;
+end;
+
+procedure ownedChanged(i: longint);
+var
+  t: POwnedTry;
+begin
+  flow^.s.entry[i] := noLoop;
+  flow^.tick := flow^.tick + 1;
+  flow^.changed[i] := flow^.tick;
+  t := flow^.tryPart;
+  while t <> nil do
+  begin
+    ownedJoinInto(t^.seen, flow^.s);
+    t := t^.prev;
+  end;
+end;
+
+{ v := object }
+procedure ownedAssign(v: PDecl);
+var
+  i: longint;
+  bit: int64;
+begin
+  i := ownedIndex(v);
+  if i < 0 then
+    exit;
+  if not ownedLive(flow^.s) then
+    exit;
+  bit := int64(1) shl i;
+  flow^.s.valid := flow^.s.valid or bit;
+  flow^.s.moved := flow^.s.moved and not bit;
+  ownedChanged(i);
+end;
+
+{ move v }
+procedure ownedMove(v: PDecl; loc: TLoc);
+var
+  i: longint;
+  bit: int64;
+begin
+  i := ownedIndex(v);
+  if i < 0 then
+    exit;
+  if not ownedLive(flow^.s) then
+    exit;
+  bit := int64(1) shl i;
+  flow^.s.valid := flow^.s.valid and not bit;
+  flow^.s.moved := flow^.s.moved or bit;
+  flow^.moveLoc[i] := loc;
+  ownedChanged(i);
+end;
+
+procedure ownedLoopBegin(var l: TOwnedLoop);
+var
+  i: longint;
+begin
+  if flow = nil then
+    exit;
+  ownedClear(l.breaks);
+  ownedClear(l.continues);
+  l.used := 0;
+  l.prev := flow^.loop;
+  flow^.loop := @l;
+  flow^.depth := flow^.depth + 1;
+  if ownedLive(flow^.s) then
+    for i := 0 to flow^.n - 1 do
+      if flow^.s.entry[i] > flow^.depth then
+        flow^.s.entry[i] := flow^.depth;
+end;
+
+{ The loop l ends: before is the state in which it runs no (more)
+  iterations. A variable that an iteration may leave moved, and that an
+  iteration uses as it finds it, is used after a move. }
+procedure ownedLoopEnd(var l: TOwnedLoop; const before: TOwnedState);
+var
+  i: longint;
+  back: TOwnedState;
+begin
+  if flow = nil then
+    exit;
+  back := flow^.s;
+  ownedJoinInto(back, l.continues);
+  for i := 0 to flow^.n - 1 do
+    if ((back.moved and l.used) and (int64(1) shl i)) <> 0 then
+    begin
+      ms('owned variable ''');
+      maN(flow^.vars[i]^.ident.spelling);
+      ma(''' may have been moved by an earlier iteration of the loop');
+      err(l.entryUse[i]);
+      ms('moved here');
+      note(flow^.moveLoc[i]);
+    end;
+  ownedJoinInto(back, before);
+  ownedJoinInto(back, l.breaks);
+  for i := 0 to flow^.n - 1 do
+    if (back.entry[i] <> noLoop) and (back.entry[i] >= flow^.depth) then
+      back.entry[i] := noLoop;
+  flow^.loop := l.prev;
+  flow^.depth := flow^.depth - 1;
+  flow^.s := back;
+end;
+
+procedure ownedBreak(isContinue: boolean);
+begin
+  if flow = nil then
+    exit;
+  if flow^.loop = nil then
+    exit;
+  if isContinue then
+    ownedJoinInto(flow^.loop^.continues, flow^.s)
+  else
+    ownedJoinInto(flow^.loop^.breaks, flow^.s);
+  ownedDead;
+end;
+
+procedure ownedTryBegin(var t: TOwnedTry);
+begin
+  if flow = nil then
+    exit;
+  t.seen := flow^.s;
+  t.prev := flow^.tryPart;
+  flow^.tryPart := @t;
+end;
+
+procedure ownedTryEnd(var t: TOwnedTry);
+begin
+  if flow <> nil then
+    flow^.tryPart := t.prev;
+end;
+
+{ The object of the owned variable ov would be kept (or returned)
+  through e without move. }
+procedure diagOwnedEscape(ov: PDecl; e: PNode; returned: boolean);
+begin
+  ms('the object of owned variable ''');
+  maN(ov^.ident.spelling);
+  if returned then
+    ma(''' can only be returned with ''move ')
+  else
+    ma(''' can only be stored with ''move ');
+  maN(ov^.ident.spelling);
+  ma('''');
+  errR(e^.b, nodeRange(e));
+end;
+
 { Reports a change to a const parameter; false if reported. }
 function checkModifiable(e: PNode): boolean;
 var
   v: PDecl;
 begin
+  v := ownedVarOf(e);
+  if (v <> nil) and (e <> ownedTarget) then
+  begin
+    { (the callee could replace the object without freeing it) }
+    ms('owned variable ''');
+    maN(v^.ident.spelling);
+    ma(''' cannot be passed as a variable parameter');
+    errR(e^.b, nodeRange(e));
+    exit(false);
+  end;
   v := constParamRoot(e);
   if v = nil then
     exit(true);
@@ -5577,9 +5903,42 @@ procedure declareVar(v: PDecl);
 var
   folded: TConstValue;
   unimaged: PType;
+  ok: boolean;
 begin
   v^.varType := resolveType(v^.varSpec, nil);
   v^.owner := curRoutine;
+  if v^.isOwned then
+  begin
+    ok := false;
+    if curRoutine = nil then
+    begin
+      ms('''owned'' is only allowed on the local variables of a routine');
+      errR(v^.ident.loc, identRange(v^.ident));
+    end
+    else if not isError(v^.varType) and (v^.varType^.kind <> tyClass) then
+    begin
+      ms('owned variable ''');
+      maN(v^.ident.spelling);
+      ma(''' must be of a class type, not ');
+      maT(v^.varType);
+      errR(v^.ident.loc, identRange(v^.ident));
+    end
+    else if (v^.absTarget <> nil) or (v^.init <> nil) then
+    begin
+      ms('owned variable ''');
+      maN(v^.ident.spelling);
+      if v^.absTarget <> nil then
+        ma(''' cannot be ''absolute''')
+      else
+        ma(''' cannot be initialized');
+      errR(v^.ident.loc, identRange(v^.ident));
+    end
+    else
+      ok := not isError(v^.varType);
+    v^.isOwned := ok;
+    if ok then
+      markHasTry; { freed in a finally part around the routine's body }
+  end;
   if v^.varExternal or v^.varCVar then
     checkExternalVar(v);
   if v^.absTarget <> nil then
@@ -7084,6 +7443,8 @@ var
   i, savedHandlers, savedFinally: longint;
   d: PDecl;
   savedBody: PNode;
+  savedFlow: POwnedFlow;
+  blockFlow: TOwnedFlow;
 begin
   { ISO 7185 6.1.4: every forward declaration needs a definition in the
     same block }
@@ -7105,7 +7466,39 @@ begin
   savedFinally := finallyLoopDepth;
   handlerDepth := 0;
   finallyLoopDepth := -1;
+  savedFlow := flow;
+  blockFlow.n := 0;
+  blockFlow.tick := 0;
+  blockFlow.loop := nil;
+  blockFlow.depth := 0;
+  blockFlow.tryPart := nil;
+  ownedClear(blockFlow.s);
+  for i := 0 to b^.decls.count - 1 do
+  begin
+    d := PDecl(listGet(b^.decls, i));
+    if (d^.kind = dkVar) and d^.isOwned then
+    begin
+      if blockFlow.n = maxOwned then
+      begin
+        ms('too many owned variables in one routine (at most ');
+        maI(maxOwned);
+        ma(')');
+        errR(d^.loc, identRange(d^.ident));
+        break;
+      end;
+      blockFlow.s.valid := blockFlow.s.valid or (int64(1) shl blockFlow.n);
+      blockFlow.vars[blockFlow.n] := d;
+      blockFlow.moveLoc[blockFlow.n] := 0;
+      blockFlow.changed[blockFlow.n] := 0;
+      blockFlow.n := blockFlow.n + 1;
+    end;
+  end;
+  if blockFlow.n > 0 then
+    flow := @blockFlow
+  else
+    flow := nil;
   visitStmt(b^.body);
+  flow := savedFlow;
   handlerDepth := savedHandlers;
   finallyLoopDepth := savedFinally;
   routineBody := savedBody;

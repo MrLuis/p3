@@ -423,6 +423,42 @@ is a warning. Switches for features pcc lacks (`nestedcomments`,
 are warnings too. Unlike Free Pascal, pcc also takes them after the start
 of a file.
 
+**Owned variables** (`--mode=objfpc`; pcc's own, not Free Pascal's): a
+routine's local variable declared `x: TFoo owned` owns its object. The
+object is freed when the routine ends, however it ends (its end, `exit`,
+an exception), the last declared variable first, and when the variable is
+given another object (`x := nil` frees it now). `move x` gives the object
+up, to a function result, an argument or another variable: `x` is nil
+afterwards, and using it before it is assigned again is a compile-time
+error, also when only some path moved it (one branch of an `if`, an
+earlier iteration of a loop, the protected part of a `try`).
+
+```pascal
+function Load(const Path: string): TDocument;
+var
+  f: TFileReader owned;
+  doc: TDocument owned;
+begin
+  f := TFileReader.Create(Path);
+  doc := TDocument.Create;
+  doc.ReadFrom(f);        { an exception here frees doc, then f }
+  Load := move doc;       { the caller owns the document; f is freed }
+end;
+```
+
+A plain class variable given `x`'s value borrows the object; so does a
+value parameter. The object cannot be stored anywhere else (a field, a
+global, another owned variable) or returned without `move`, `x` cannot be
+passed as a `var` parameter or have its address taken, and `x.Free` is an
+error (the object would be freed twice). Only the variable is followed: a
+borrowed reference can outlive the object, and a routine nested in `x`'s
+can use `x` and assign to it (but not move it) unchecked. If a destructor
+raises while the variables are freed, the others are freed all the same
+and its exception is raised afterwards, unless an exception is already
+leaving the routine, which goes on. `owned` and `move` are not reserved
+words. Not supported yet: owned fields, parameters and global variables,
+and declaring a variable where it is first used.
+
 **Pointer arithmetic** (tp and objfpc, as in Free Pascal): `p + n`, `n + p`
 and `p - n` move a pointer by n of what it points to (by n bytes for an
 untyped `pointer`, and so for `@x`, which is untyped); `p - q` is the

@@ -325,6 +325,22 @@ void __pas_free_object(void *obj);
  * object). */
 void __pas_reraise_free(PasExcFrame *f, void *obj) __attribute__((noreturn));
 
+/* Owned variables (`x: TFoo owned`).
+ * __pas_owned_set: x := obj, freeing the object x had (unless it is obj).
+ * When x's routine ends, in its finally part: __pas_owned_free(&x, &exc)
+ * for each owned variable, the last declared first, frees its object and
+ * makes it nil; a destructor's exception is kept in exc if it is the first
+ * and dropped otherwise. Then __pas_owned_done(&exc, raised) raises the one
+ * kept, or drops it too if an exception is already leaving the routine. */
+typedef struct PasOwnedExc {
+  void *object;
+  const char *where;
+  void *address;
+} PasOwnedExc;
+void __pas_owned_set(void **slot, void *obj);
+void __pas_owned_free(void **slot, PasOwnedExc *exc);
+void __pas_owned_done(PasOwnedExc *exc, int32_t raised);
+
 #ifdef __cplusplus
 }
 #endif

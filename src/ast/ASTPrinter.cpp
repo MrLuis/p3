@@ -125,6 +125,8 @@ class ASTPrinter : public StmtVisitor<ASTPrinter>,
         OS << " initialized";
       if (V->getAbsolute())
         OS << " absolute";
+      if (V->isOwned())
+        OS << " owned";
       if (V->getDefault())
         OS << " default";
       visibility(V);
@@ -926,6 +928,12 @@ public:
     end(E);
     IndentScope I(Indent);
     visitExpr(E->getInner());
+  }
+  void visitMoveExpr(MoveExpr *E) {
+    line("MoveExpr");
+    end(E);
+    IndentScope I(Indent);
+    visitExpr(E->getOperand());
   }
   void visitUnaryExpr(UnaryExpr *E) {
     line("UnaryExpr '") << getOpSpelling(E->getOp()) << '\'';
