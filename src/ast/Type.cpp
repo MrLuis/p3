@@ -275,6 +275,18 @@ std::string Type::getName() const {
            A->getElementType()->getName();
   }
   case TK_Record:
+    if (llvm::cast<RecordType>(this)->isTuple()) { // (integer, Max: real)
+      std::string S = "(";
+      unsigned I = 0;
+      for (FieldDecl *F : llvm::cast<RecordType>(this)->getAllFields()) {
+        if (I++)
+          S += ", ";
+        if (F->getName().Name != "item" + std::to_string(I))
+          S += F->getName().Spelling.str() + ": ";
+        S += F->getType() ? F->getType()->getName() : std::string("?");
+      }
+      return S + ")";
+    }
     return llvm::cast<RecordType>(this)->isBitPacked() ? "bitpacked record"
            : llvm::cast<RecordType>(this)->isPacked()  ? "packed record"
                                                        : "record";

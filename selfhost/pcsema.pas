@@ -1335,6 +1335,29 @@ begin
              (t^.pointee^.kind = tyChar);
 end;
 
+{ Are a and b tuple types with the same element types, in turn (the names
+  may differ)? Such tuples have one layout. }
+function sameTupleShape(a, b: PType): boolean;
+var
+  i: longint;
+  ta, tb: PType;
+begin
+  sameTupleShape := false;
+  if (a^.kind <> tyRecord) or (b^.kind <> tyRecord) then
+    exit;
+  if not a^.isTupleRecord or not b^.isTupleRecord or
+     (a^.allFields.count <> b^.allFields.count) then
+    exit;
+  for i := 0 to a^.allFields.count - 1 do
+  begin
+    ta := PDecl(listGet(a^.allFields, i))^.fieldType;
+    tb := PDecl(listGet(b^.allFields, i))^.fieldType;
+    if (ta <> tb) and not sameTupleShape(ta, tb) then
+      exit;
+  end;
+  sameTupleShape := true;
+end;
+
 function isAssignable(target, value: PType): boolean;
 begin
   if (target^.kind = tyOpenArray) or (value^.kind = tyOpenArray) then
@@ -1344,6 +1367,8 @@ begin
   if containsFile(target) or containsFile(value) then
     exit(false); { files cannot be copied }
   if target = value then
+    exit(true);
+  if sameTupleShape(target, value) then
     exit(true);
   if (target^.kind = tyReal) and isIntegerLike(value) then
     exit(true);
@@ -2456,6 +2481,104 @@ function checkLabel(l: PCaseLabel; selTy: PType; const what: string): boolean; f
 function resolveType(ts: PTypeSpec; declName: PName): PType; forward;
 function lookupMemberPath(const quals: TPtrList; const name: TIdent): PDecl; forward;
 
+var
+  tupleTypes: TPtrList; { see getTupleType }
+  tupleTypesInit: boolean;
+  hiddenVars: longint;  { see makeHiddenVar }
+
+{ The name of a tuple's n-th element that has none: ItemN. }
+function tupleItemName(n: longint; loc: TLoc): TIdent;
+var
+  id: TIdent;
+begin
+  id.name := intern('item' + intToStr(n));
+  id.spelling := intern('Item' + intToStr(n));
+  id.loc := loc;
+  tupleItemName := id;
+end;
+
+{ The tuple type with these element types (of PType) and names (of PIdent;
+  none: Item1, Item2, ...). There is one for each such list, so that tuple
+  types written alike are the same type. }
+function getTupleType(const types, names: TPtrList): PType;
+var
+  own, all: TPtrList;
+  i, k: longint;
+  r: PType;
+  same: boolean;
+  f: PDecl;
+  fl: PFieldList;
+  id: PIdent;
+begin
+  if not tupleTypesInit then
+  begin
+    listInit(tupleTypes);
+    tupleTypesInit := true;
+  end;
+  listInit(own);
+  for i := 0 to types.count - 1 do
+    if names.count = 0 then
+      listAdd(own, newIdent(tupleItemName(i + 1, noLoc)))
+    else
+      listAdd(own, listGet(names, i));
+  for k := 0 to tupleTypes.count - 1 do
+  begin
+    r := PType(listGet(tupleTypes, k));
+    same := r^.allFields.count = types.count;
+    i := 0;
+    while same and (i < types.count) do
+    begin
+      f := PDecl(listGet(r^.allFields, i));
+      same := (f^.fieldType = PType(listGet(types, i))) and
+              (f^.ident.name = PIdent(listGet(own, i))^.name);
+      i := i + 1;
+    end;
+    if same then
+      exit(r);
+  end;
+  listInit(all);
+  fl := PFieldList(arenaAlloc(sizeof(TFieldList)));
+  listInit(fl^.fixed);
+  fl^.variant := nil;
+  for i := 0 to types.count - 1 do
+  begin
+    id := PIdent(listGet(own, i));
+    f := newDecl(dkField, id^, id^.loc);
+    f^.fieldSpec := nil;
+    f^.fieldType := PType(listGet(types, i));
+    listAdd(all, f);
+    listAdd(fl^.fixed, f);
+  end;
+  r := newRecordType(fl, all, false);
+  r^.isTupleRecord := true;
+  listAdd(tupleTypes, r);
+  getTupleType := r;
+end;
+
+{ A hidden variable of type t of the block being checked (a tuple is built
+  in one); nil outside the statements of a block. }
+function makeHiddenVar(t: PType; loc: TLoc): PDecl;
+var
+  id: TIdent;
+  v: PDecl;
+begin
+  if inlineVars = nil then
+    exit(nil);
+  hiddenVars := hiddenVars + 1;
+  id.name := intern('$tuple' + intToStr(hiddenVars));
+  id.spelling := id.name;
+  id.loc := loc;
+  v := newDecl(dkVar, id, loc);
+  v^.varSpec := nil;
+  v^.varKind := vkVariable;
+  v^.isInlineVar := true;
+  v^.varType := t;
+  v^.owner := curRoutine;
+  v^.isUsed := true;
+  listAdd(inlineVars^, v);
+  makeHiddenVar := v;
+end;
+
 function addField(f: PDecl; var all: TPtrList; var seen: TIntMap): boolean;
 var
   prev: PDecl;
@@ -2551,6 +2674,9 @@ end;
 
 function buildType(ts: PTypeSpec): PType;
 var
+  tupTypes, tupIds: TPtrList;
+  es: PTypeSpec;
+  named: boolean;
   d, cd, prev: PDecl;
   t, elem, idx, res: PType;
   i, j: longint;
@@ -2650,8 +2776,61 @@ begin
         errR(ts^.tname.loc, identRange(ts^.tname));
         noteDeclaredHere(d);
       end;
+    tsTuple:
+      begin
+        listInit(tupTypes);
+        listInit(tupIds);
+        ok := true;
+        for i := 0 to ts^.tupSpecs.count - 1 do
+        begin
+          es := PTypeSpec(listGet(ts^.tupSpecs, i));
+          t := resolveType(es, nil);
+          if isError(t) then
+            ok := false
+          else if containsFile(t) then
+          begin
+            ms('the elements of a tuple cannot be files');
+            errR(es^.b, specRange(es));
+            ok := false;
+          end;
+          id := PIdent(listGet(ts^.tupNames, i));
+          named := id^.name <> nil;
+          if not named then
+            id := newIdent(tupleItemName(tupIds.count + 1, es^.b));
+          for j := 0 to tupIds.count - 1 do
+            if PIdent(listGet(tupIds, j))^.name = id^.name then
+            begin
+              ms('duplicate element name ''');
+              maN(id^.spelling);
+              ma('''');
+              if named then
+                errR(id^.loc, specRange(es))
+              else
+                errR(es^.b, specRange(es));
+              ok := false;
+              break;
+            end;
+          listAdd(tupTypes, t);
+          listAdd(tupIds, id);
+        end;
+        if ok then
+          buildType := getTupleType(tupTypes, tupIds);
+      end;
     tsEnum:
       begin
+        { (integer, string): every name is a type's, so it is a tuple type }
+        if ts^.enumTuple <> nil then
+        begin
+          ok := true;
+          for i := 0 to ts^.enumNames.count - 1 do
+          begin
+            d := lookup(PIdent(listGet(ts^.enumNames, i))^.name);
+            if (d = nil) or (d^.kind <> dkType) then
+              ok := false;
+          end;
+          if ok then
+            exit(resolveType(ts^.enumTuple, nil));
+        end;
         t := newEnumType;
         for i := 0 to ts^.enumNames.count - 1 do
         begin
@@ -2953,7 +3132,8 @@ begin
   if ts^.resolved <> nil then
     exit(ts^.resolved);
   t := buildType(ts);
-  if (declName <> nil) and not isError(t) and not isBuiltinType(t) then
+  if (declName <> nil) and not isError(t) and not isBuiltinType(t) and
+     not ((t^.kind = tyRecord) and t^.isTupleRecord) then { (a tuple type is shared by its uses) }
     setDeclName(t, declName);
   ts^.resolved := t;
   resolveType := t;
@@ -5708,6 +5888,27 @@ begin
         errR(init^.b, nodeRange(init));
         exit;
       end;
+      { (1, 'a') for a tuple: its elements in turn, each then named }
+      if t^.isTupleRecord and not recordForm then
+      begin
+        if init^.aggElems.count <> t^.allFields.count then
+        begin
+          ms('initializer for ');
+          maT(t);
+          ma(' must list ');
+          maI(t^.allFields.count);
+          ma(' elements, separated by '',''');
+          errR(init^.b, nodeRange(init));
+          exit;
+        end;
+        for i := 0 to init^.aggElems.count - 1 do
+        begin
+          el := PAggElement(listGet(init^.aggElems, i));
+          el^.field := PDecl(listGet(t^.allFields, i))^.ident;
+          el^.field.loc := el^.value^.b;
+        end;
+        recordForm := true;
+      end;
       if not recordForm then
       begin
         ms('initializer for record ');
@@ -8330,7 +8531,7 @@ begin
       continue;
     end;
     pt := p^.varType;
-    if (pt <> nil) and ((arg^.kind = nkAddrOf) or
+    if (pt <> nil) and ((arg^.kind = nkAddrOf) or (arg^.kind = nkTuple) or
                         ((pt^.kind = tyDynArray) and (arg^.kind = nkSetCtor))) then
       at := checkValueFor(pt, arg)
     else

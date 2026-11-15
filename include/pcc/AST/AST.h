@@ -443,6 +443,22 @@ public:
   static bool classof(const Expr *E) { return E->getKind() == EK_SetCtor; }
 };
 
+/// (a, b + 1) (objfpc): a tuple value, or the targets of (a, b) := e.
+class TupleExpr final : public Expr {
+  llvm::ArrayRef<Expr *> Elements;
+  bool LongStrings;        ///< {$H+} here: a string constant is an ansistring
+  VarDecl *Temp = nullptr; ///< set by Sema: the hidden variable it is built in
+
+public:
+  TupleExpr(SourceRange R, llvm::ArrayRef<Expr *> Elements, bool LongStrings)
+      : Expr(EK_Tuple, R), Elements(Elements), LongStrings(LongStrings) {}
+  llvm::ArrayRef<Expr *> getElements() const { return Elements; }
+  bool hasLongStrings() const { return LongStrings; }
+  VarDecl *getTemp() const { return Temp; }
+  void setTemp(VarDecl *V) { Temp = V; }
+  static bool classof(const Expr *E) { return E->getKind() == EK_Tuple; }
+};
+
 /// @x  (Turbo/FPC): an untyped pointer to a variable.
 class AddrOfExpr final : public Expr {
   Expr *Operand;
@@ -970,6 +986,38 @@ public:
   static bool classof(const Stmt *S) { return S->getKind() == SK_VarDecl; }
 };
 
+/// (a, b) := e;  var (a, b) := e;  (objfpc): the elements of a tuple
+/// assigned to variables, or to new ones.
+class DestructureStmt final : public Stmt {
+  llvm::ArrayRef<Expr *> Targets; ///< (a, b) := e; set by Sema for var (a, b)
+  llvm::ArrayRef<VarDecl *> Vars; ///< var (a, b) := e; else empty
+  Expr *Value;
+  SourceLocation AssignLoc;
+  bool LongStrings; ///< {$H+} here
+  /// Set by Sema: the value kept in a hidden variable (null: Value is a
+  /// tuple written out, built in its own), then each target assigned.
+  AssignStmt *Init = nullptr;
+  llvm::ArrayRef<AssignStmt *> Assigns;
+
+public:
+  DestructureStmt(SourceRange R, llvm::ArrayRef<Expr *> Targets,
+                  llvm::ArrayRef<VarDecl *> Vars, Expr *Value,
+                  SourceLocation AssignLoc, bool LongStrings)
+      : Stmt(SK_Destructure, R), Targets(Targets), Vars(Vars), Value(Value),
+        AssignLoc(AssignLoc), LongStrings(LongStrings) {}
+  llvm::ArrayRef<Expr *> getTargets() const { return Targets; }
+  void setTargets(llvm::ArrayRef<Expr *> T) { Targets = T; }
+  llvm::ArrayRef<VarDecl *> getVars() const { return Vars; }
+  Expr *getValue() const { return Value; }
+  SourceLocation getAssignLoc() const { return AssignLoc; }
+  bool hasLongStrings() const { return LongStrings; }
+  AssignStmt *getInit() const { return Init; }
+  void setInit(AssignStmt *A) { Init = A; }
+  llvm::ArrayRef<AssignStmt *> getAssigns() const { return Assigns; }
+  void setAssigns(llvm::ArrayRef<AssignStmt *> A) { Assigns = A; }
+  static bool classof(const Stmt *S) { return S->getKind() == SK_Destructure; }
+};
+
 //===----------------------------------------------------------------------===//
 // Written types
 //===----------------------------------------------------------------------===//
@@ -983,7 +1031,8 @@ public:
     TS_Untyped,
     TS_ArrayOfConst,
     TS_OpenArray,
-    TS_DynArray
+    TS_DynArray,
+    TS_Tuple
   };
 
 private:
@@ -1020,10 +1069,30 @@ public:
   static bool classof(const TypeSpec *T) { return T->getKind() == TS_Named; }
 };
 
+/// One element of a tuple type: [Name:] Type.
+struct TupleElementSpec {
+  Identifier Name; ///< invalid: none (it is Item1, Item2, ...)
+  TypeSpec *Type;
+};
+
+/// (integer, string) / (Min: integer, Max: integer)  (objfpc)
+class TupleTypeSpec final : public TypeSpec {
+  llvm::ArrayRef<TupleElementSpec> Elements;
+
+public:
+  TupleTypeSpec(SourceRange R, llvm::ArrayRef<TupleElementSpec> Elements)
+      : TypeSpec(TS_Tuple, R), Elements(Elements) {}
+  llvm::ArrayRef<TupleElementSpec> getElements() const { return Elements; }
+  static bool classof(const TypeSpec *T) { return T->getKind() == TS_Tuple; }
+};
+
 /// (red, green, blue)
 class EnumTypeSpec final : public TypeSpec {
   llvm::ArrayRef<Identifier> Names;
   bool Scoped; ///< {$scopedenums on}: the values only as TColor.Red
+  /// objfpc, two names or more: the tuple type this is if every name is
+  /// the name of a type (Sema decides); not printed.
+  TupleTypeSpec *Tuple = nullptr;
 
 public:
   EnumTypeSpec(SourceRange R, llvm::ArrayRef<Identifier> Names,
@@ -1031,6 +1100,8 @@ public:
       : TypeSpec(TS_Enum, R), Names(Names), Scoped(Scoped) {}
   llvm::ArrayRef<Identifier> getNames() const { return Names; }
   bool isScoped() const { return Scoped; }
+  TupleTypeSpec *getTuple() const { return Tuple; }
+  void setTuple(TupleTypeSpec *T) { Tuple = T; }
   static bool classof(const TypeSpec *T) { return T->getKind() == TS_Enum; }
 };
 

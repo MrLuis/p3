@@ -1,0 +1,34 @@
+; Tuples (objfpc): a tuple written out is built in a hidden variable of its
+; routine, each element stored as by an assignment; (a, b) := e reads the
+; elements from that variable (any other value is kept in one first), so
+; every value is computed before a target changes. The hidden variables are
+; released with the routine's others.
+; RUN: %pcc --mode=objfpc --emit-llvm %S/Inputs/tuple.pas -o %t.ll
+; RUN: FileCheck %s < %t.ll
+; RUN: opt -passes=verify -disable-output %t.ll
+
+; Pair := (a + 1, s): the tuple is built, then copied to the result.
+; CHECK-LABEL: @pas.pair(
+; CHECK: call void @__pas_astr_assign(ptr %item2{{[0-9]*}},
+; CHECK: call void @llvm.memcpy
+
+; CHECK-LABEL: define internal void @pas.run(
+; CHECK: %"$tuple{{[0-9]+}}" = alloca %record
+; (x, y) := (y, x)
+; CHECK: managed.body:
+; CHECK: store i32 %y{{[0-9]*}}, ptr %item1
+; CHECK: store i32 %x{{[0-9]*}}, ptr %item2
+; CHECK: store i32 %item1{{[0-9]*}}, ptr %x.addr
+; CHECK: store i32 %item2{{[0-9]*}}, ptr %y.addr
+; (r, s) := Pair(x, 'one'): the result is kept, then each element assigned,
+; converted as an assignment converts it.
+; CHECK: call %record @pas.pair(
+; CHECK: call void @llvm.memcpy
+; CHECK: sitofp i32 %item1{{[0-9]*}} to double
+; CHECK: call void @__pas_astr_assign(ptr %s{{[0-9]*}}, ptr %item2{{[0-9]*}})
+; var (n, t) := Pair(y, s)
+; CHECK: call %record @pas.pair(
+; CHECK: store i32 %item1{{[0-9]*}}, ptr %n
+; CHECK: call void @__pas_astr_assign(ptr %t{{[0-9]*}}, ptr %item2{{[0-9]*}})
+; CHECK: exit:
+; CHECK: call void @__pas_astr_clear(ptr %item2

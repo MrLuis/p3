@@ -246,6 +246,9 @@ class Parser {
   Expr *reparseDesignator(llvm::ArrayRef<Token> Toks);
   Expr *parseInherited();
   Stmt *parseVarDeclStmt();
+  Stmt *parseDestructure(SourceLocation Start, llvm::ArrayRef<Expr *> Targets,
+                         llvm::ArrayRef<VarDecl *> Vars);
+  TypeSpec *parseTupleType(bool Always);
   Stmt *parseIfStmt();
   Stmt *parseWhileStmt();
   Stmt *parseRepeatStmt();

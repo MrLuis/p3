@@ -200,6 +200,7 @@ begin
   t^.fieldList := fl;
   t^.allFields := all;
   t^.isPackedRecord := packed_;
+  t^.isTupleRecord := false;
   newRecordType := t;
 end;
 
@@ -994,7 +995,27 @@ begin
         bufAddTypeName(b, t^.elementType);
       end;
     tyRecord:
-      if t^.isBitPackedRecord then
+      if t^.isTupleRecord then { (integer, Max: real) }
+      begin
+        bufAddChar(b, '(');
+        for i := 0 to t^.allFields.count - 1 do
+        begin
+          if i > 0 then
+            bufAdd(b, ', ');
+          if nameStr(PDecl(listGet(t^.allFields, i))^.ident.name) <>
+             'item' + intToStr(i + 1) then
+          begin
+            bufAddName(b, PDecl(listGet(t^.allFields, i))^.ident.spelling);
+            bufAdd(b, ': ');
+          end;
+          if PDecl(listGet(t^.allFields, i))^.fieldType <> nil then
+            bufAddTypeName(b, PDecl(listGet(t^.allFields, i))^.fieldType)
+          else
+            bufAddChar(b, '?');
+        end;
+        bufAddChar(b, ')');
+      end
+      else if t^.isBitPackedRecord then
         bufAdd(b, 'bitpacked record')
       else if t^.isPackedRecord then
         bufAdd(b, 'packed record')

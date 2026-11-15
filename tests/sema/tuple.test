@@ -1,0 +1,96 @@
+; Tuples (objfpc): the types (T1, T2) and (Name: T1, ...), which are the
+; same type wherever they are written alike; the values (a, b), whose
+; elements take the types of the tuple wanted; and (a, b) := e and
+; var (a, b) := e, each element assigned as by an assignment.
+; RUN: not %pcc --mode=objfpc -ferror-limit=0 -c %S/Inputs/tuple/errors.pas -o %t.o 2>&1 | FileCheck %s
+; CHECK: errors.pas:5:22: error: the elements of a tuple cannot be files
+; CHECK: errors.pas:6:23: error: duplicate element name 'a'
+; CHECK: errors.pas:7:21: error: duplicate element name 'Item1'
+; CHECK: errors.pas:27:7: error: a tuple can only be written in the statements of a routine or program
+; CHECK: errors.pas:39:5: error: assigning to '(integer, integer)' from incompatible type '(integer, char)'
+; CHECK: errors.pas:40:5: error: assigning to '(integer, integer)' from incompatible type '(integer, integer, integer)'
+; CHECK: errors.pas:41:5: error: assigning to '(integer, ansistring)' from incompatible type '(integer, integer)'
+; CHECK: errors.pas:42:5: error: assigning to '(integer, integer)' from incompatible type '(integer, integer, integer)'
+; CHECK: errors.pas:43:7: error: assigning to 'TRec' from incompatible type '(integer, integer)'
+; CHECK: errors.pas:44:5: error: assigning to '(integer, integer)' from incompatible type 'TRec'
+; CHECK: errors.pas:45:5: error: assigning to 'integer' from incompatible type '(integer, integer)'
+; CHECK: errors.pas:46:13: error: 2 variables cannot take the elements of the tuple '(integer, integer, integer)'
+; CHECK: errors.pas:47:13: error: 2 variables cannot take the elements of a value of type 'integer'
+; CHECK: errors.pas:48:10: error: assigning to 'ansistring' from incompatible type 'integer'
+; CHECK: errors.pas:49:7: error: expression is not assignable
+; CHECK: errors.pas:50:14: error: cannot tell the type of element 1 of the tuple from nil; assign the tuple to a variable of a tuple type
+; CHECK: errors.pas:51:20: error: 3 variables cannot take the elements of the tuple '(integer, integer)'
+; CHECK: errors.pas:52:18: error: 2 variables cannot take the elements of a value of type 'integer'
+; CHECK: errors.pas:53:13: error: cannot tell the type of element 1 of the tuple from nil; assign the tuple to a variable of a tuple type
+; CHECK: errors.pas:54:13: error: cannot tell the type of element 1 of the tuple from an empty set; assign the tuple to a variable of a tuple type
+; CHECK: errors.pas:55:8: error: cannot pass a value of type '(integer, real)' to parameter 'p' of type '(integer, integer)'
+; CHECK: errors.pas:56:11: error: argument for 'var' parameter 'p' must be a variable
+; CHECK: errors.pas:57:9: error: use of undeclared identifier 'nope'; did you mean 'copy'?
+; CHECK: errors.pas:58:10: error: no field named 'Item3' in '(integer, integer)'
+; CHECK: errors.pas:60:5: error: assigning to 'TEnum' from incompatible type '(integer, integer)'
+; CHECK: errors.pas:61:16: error: a variable can only be declared in a statement sequence (between 'begin' and 'end')
+; CHECK: errors.pas:62:8: error: invalid operands to '=' ('(integer, integer)' and '(integer, integer)')
+; CHECK: errors.pas:63:11: error: cannot write a value of type '(integer, integer)'
+; Good assignments, calls and conversions between tuples with the same
+; element types are not reported.
+; CHECK-NOT: errors.pas:59
+;
+; RUN: not %pcc --mode=objfpc -ferror-limit=0 -c %S/Inputs/tuple/more.pas -o %t.o 2>&1 | FileCheck --check-prefix=MORE %s
+; MORE: more.pas:14:8: error: cannot return a value of type '(integer, char)' from a function of type '(integer, integer)'
+; MORE: more.pas:25:30: error: a tuple can only be written in the statements of a routine or program
+; MORE: more.pas:34:17: error: initializer for '(integer, integer)' must list 2 elements, separated by ','
+; MORE: more.pas:39:8: error: cannot pass a value of type '(integer, real)' to parameter 'p' of type '(integer, integer)'
+; MORE: more.pas:40:11: error: argument for 'var' parameter 'p' must be a variable
+; MORE: more.pas:41:11: error: argument of type '(A: integer, B: integer)' for 'var' parameter 'p' must have exactly type '(integer, integer)'
+; MORE: more.pas:42:9: error: use of undeclared identifier 'nope'; did you mean 'copy'?
+; MORE: more.pas:43:10: error: no field named 'Item3' in '(integer, integer)'
+; MORE: more.pas:44:14: error: no field named 'Item1' in '(A: integer, B: integer)'
+; MORE: more.pas:46:5: error: assigning to 'TEnum' from incompatible type '(integer, integer)'
+; MORE: more.pas:47:16: error: a variable can only be declared in a statement sequence (between 'begin' and 'end')
+; MORE: more.pas:48:8: error: invalid operands to '=' ('(integer, integer)' and '(integer, integer)')
+; MORE: more.pas:49:11: error: cannot write a value of type '(integer, integer)'
+; MORE: more.pas:55:4: error: expression is not assignable
+; MORE-NOT: more.pas:5{{[0-4]}}:
+;
+; RUN: not %pcc --mode=objfpc -ferror-limit=0 -c %S/Inputs/tuple/syntax.pas -o %t.o 2>&1 | FileCheck --check-prefix=SYNTAX %s
+; SYNTAX: syntax.pas:3:10: error: a tuple type has two elements or more
+; SYNTAX: syntax.pas:4:34: error: expected ')' after the elements of a tuple type
+; SYNTAX: syntax.pas:8:10: error: expected ':=' and a tuple after these variables
+; SYNTAX: syntax.pas:9:9: error: expected ':=' and a tuple after these variables
+; SYNTAX: syntax.pas:10:11: error: expected variable name
+; SYNTAX: syntax.pas:11:13: error: expected ':=' and a tuple after these variables
+; SYNTAX: syntax.pas:12:13: error: expected ')' after the elements of a tuple
+; SYNTAX: syntax.pas:12:8: note: to match this '('
+;
+; Not in the other modes: there (a, b) is a list of enumeration values.
+; RUN: not %pcc --mode=tp -c %S/Inputs/tuple/tp.pas -o %t.o 2>&1 | FileCheck --check-prefix=TP %s
+; TP: tp.pas:7:5: error: tuples need --mode=objfpc
+; TP: tp.pas:7:3: note: to match this '('
+; TP-NOT: tp.pas:3
+;
+; The tree: a list of type names is a tuple type, of other names an
+; enumeration; a tuple value has the type it is given.
+; RUN: %pcc --mode=objfpc --emit-ast %S/Inputs/tuple/ast.pas -o - | FileCheck --check-prefix=AST %s
+; AST: TypeDecl 'tpair' = (integer, integer) <3:3>
+; AST: TypeDecl 'tnamed' = (Name: string, Age: integer) <4:3>
+; AST: TypeDecl 'tcolor' = (red, green) <5:3>
+; AST: FunctionDecl 'f' : (integer, ^integer) <6:1>
+; AST: TupleExpr : (integer, ^integer) <8:8>
+; AST-NEXT: IntegerLiteralExpr 1 : integer <8:9>
+; AST-NEXT: NilExpr : nil <8:12>
+; AST: DestructureStmt <15:3>
+; AST-NEXT: NameRefExpr 'x' variable : integer <15:4>
+; AST-NEXT: NameRefExpr 'y' variable : integer <15:7>
+; AST-NEXT: NameRefExpr 'p' variable : (integer, integer) <15:13>
+; AST: DestructureStmt var <16:3>
+; AST-NEXT: VarDecl 'a' : integer <16:8>
+; AST-NEXT: VarDecl 'b' : string <16:11>
+; AST-NEXT: TupleExpr : (integer, string) <16:17>
+; AST: FieldExpr 'item1' : integer <17:8>
+; AST-NEXT: TupleExpr : (integer, string) <17:8>
+;
+; RUN: %pcc --mode=objfpc --emit-parse-tree %S/Inputs/tuple/ast.pas -o - | FileCheck --check-prefix=TREE %s
+; TREE: TupleTypeSpec
+; TREE-NEXT: TupleElement 'name'
+; TREE: EnumTypeSpec
+; TREE-NEXT: EnumValue 'red'

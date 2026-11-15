@@ -1484,6 +1484,7 @@ begin
 end;
 
 function emitAddress(e: PNode): TV; forward;
+function emitTuple(e: PNode): TV; forward;
 
 { A constant used as a member (TFoo.C, obj.C): its reference, which is
   emitted instead; otherwise e. }
@@ -2736,6 +2737,7 @@ begin
   if (e^.typ <> nil) and (e^.typ^.kind = tyOpenArray) then { its elements }
     exit(irLoad(irPtrT, openDescriptor(e), 'data'));
   case e^.kind of
+    nkTuple: emitAddress := emitTuple(e);
     nkBinary, nkUnary:
       { a record's operator returning a record: a temporary holding it }
       emitAddress := visitExpr(e);
@@ -5412,6 +5414,55 @@ begin
     templateText := getAnsiConstant(p^.strValue^.chars, 0, p^.strValue^.len);
 end;
 
+{ value, assignable to type t, stored at addr (a variable of type t). }
+procedure storeExpr(const addr: TV; t: PType; value: PNode);
+var
+  pair, v: TV;
+begin
+  if t^.kind = tyShortString then
+  begin
+    emitStringAssign(addr, t, value);
+    exit;
+  end;
+  if t^.kind = tyAnsiString then
+  begin
+    storeValue(addr, emitAnsi(value), t);
+    exit;
+  end;
+  if isStructured(t) then
+  begin
+    copyValue(addr, emitAddress(value), t);
+    exit;
+  end;
+  if t^.kind = tyRoutine then
+  begin
+    pair := emitRoutinePair(value, t);
+    irStore(pair, addr);
+    exit;
+  end;
+  v := convertForAssign(visitExpr(value), value^.typ, t, value^.b);
+  storeValue(addr, v, t);
+end;
+
+{ (a, b): its hidden variable, each element assigned its value. }
+function emitTuple(e: PNode): TV;
+var
+  addr, fa: TV;
+  r: PType;
+  f: PDecl;
+  i: longint;
+begin
+  r := e^.typ;
+  addr := varAddress(e^.tupTemp);
+  for i := 0 to e^.tupElems.count - 1 do
+  begin
+    f := PDecl(listGet(r^.allFields, i));
+    fa := fieldAddress(addr, r, f);
+    storeExpr(fa, f^.fieldType, PNode(listGet(e^.tupElems, i)));
+  end;
+  emitTuple := addr;
+end;
+
 { A template string: each value is written, as write writes it, to the
   runtime's text file that collects characters (__pas_tmpl_sink);
   __pas_tmpl_add then makes the string so far, what was collected and the
@@ -5452,6 +5503,7 @@ begin
     nkParen: visitExprKind := visitExpr(e^.inner);
     nkMove: visitExprKind := emitMove(e);
     nkTemplate: visitExprKind := emitTemplate(e);
+    nkTuple: visitExprKind := emitTuple(e);
     nkUnary: visitExprKind := visitUnary(e);
     nkBinary: visitExprKind := visitBinary(e);
     nkCall: visitExprKind := visitCall(e);

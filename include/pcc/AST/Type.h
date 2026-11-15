@@ -252,8 +252,11 @@ class RecordType final : public Type {
   /// type of values, holding the fields, methods, operators and properties
   /// (see ClassType::getRecord). Null for a plain record.
   ClassType *Members = nullptr;
+  bool Tuple = false; ///< a tuple type: (integer, string)
 
 public:
+  bool isTuple() const { return Tuple; }
+  void setTuple() { Tuple = true; }
   RecordType(FieldList *Fields, llvm::ArrayRef<FieldDecl *> AllFields,
              bool Packed)
       : Type(TK_Record), Fields(Fields), AllFields(AllFields), Packed(Packed) {}

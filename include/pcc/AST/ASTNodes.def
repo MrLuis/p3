@@ -36,6 +36,7 @@ EXPR(IndirectCall)    // r.f(x), a[i](x): call through a procedural value
 EXPR(Inherited)       // inherited [m]                         (objfpc)
 EXPR(Move)            // move p: an owned variable's object    (objfpc)
 EXPR(Template)        // `a ${x} b`: a template string         (TP)
+EXPR(Tuple)           // (a, b): a tuple value                 (objfpc)
 
 // Statements
 STMT(Empty)
@@ -55,6 +56,7 @@ STMT(IndirectCall)    // r.p(x); a[i];  (procedural values, S1, TP)
 STMT(Try)             // try ... except / finally ... end      (objfpc)
 STMT(Raise)           // raise [obj]                           (objfpc)
 STMT(VarDecl)         // var x: T := e                         (objfpc)
+STMT(Destructure)     // (a, b) := e; var (a, b) := e          (objfpc)
 
 #undef STMT
 #undef EXPR

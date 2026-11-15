@@ -419,6 +419,20 @@ class ASTPrinter : public StmtVisitor<ASTPrinter>,
       line("UntypedTypeSpec");
       loc(TS->getBeginLoc());
       return;
+    case TypeSpec::TS_Tuple:
+      line("TupleTypeSpec");
+      loc(TS->getBeginLoc());
+      {
+        IndentScope I(Indent);
+        for (const TupleElementSpec &El :
+             llvm::cast<TupleTypeSpec>(TS)->getElements()) {
+          line("TupleElement '") << El.Name.Name << '\'';
+          loc(El.Name.isValid() ? El.Name.Loc : El.Type->getBeginLoc());
+          IndentScope J(Indent);
+          printTypeSpec(El.Type);
+        }
+      }
+      return;
     case TypeSpec::TS_Enum:
       line(llvm::cast<EnumTypeSpec>(TS)->isScoped() ? "EnumTypeSpec scoped"
                                                      : "EnumTypeSpec");
@@ -823,6 +837,18 @@ public:
       visitExpr(S->getInit());
   }
 
+  void visitDestructureStmt(DestructureStmt *S) {
+    line(S->getVars().empty() ? "DestructureStmt" : "DestructureStmt var");
+    loc(S->getBeginLoc());
+    IndentScope I(Indent);
+    for (VarDecl *V : S->getVars())
+      printDecl(V);
+    if (S->getVars().empty())
+      for (Expr *T : S->getTargets())
+        visitExpr(T);
+    visitExpr(S->getValue());
+  }
+
   void visitRaiseStmt(RaiseStmt *S) {
     line("RaiseStmt");
     if (S->getAddress())
@@ -989,6 +1015,13 @@ public:
     IndentScope I(Indent);
     for (Expr *P : E->getParts())
       visitExpr(P);
+  }
+  void visitTupleExpr(TupleExpr *E) {
+    line("TupleExpr");
+    end(E);
+    IndentScope I(Indent);
+    for (Expr *X : E->getElements())
+      visitExpr(X);
   }
   void visitFormattedExpr(FormattedExpr *E) {
     line("FormattedExpr");

@@ -203,6 +203,8 @@ class Checker : public StmtVisitor<Checker>,
   OwnedFlow *Flow = nullptr; ///< of the block whose statements are checked
   /// The variables the statements of that block declare (VarDeclStmt).
   std::vector<Decl *> *InlineVars = nullptr;
+  std::vector<RecordType *> TupleTypes; ///< see getTupleType
+  unsigned HiddenVars = 0;              ///< see makeHiddenVar
   /// The scope of the variables declared in the statement sequence being
   /// checked, made when the first one is (see DirectSequence).
   std::unique_ptr<Scope> *SeqScope = nullptr;
@@ -1127,6 +1129,23 @@ class Checker : public StmtVisitor<Checker>,
     return P && !P->isUntyped() && P->getPointee() && P->getPointee()->isChar();
   }
 
+  /// Are A and B tuple types with the same element types, in turn (the
+  /// names may differ)? Such tuples have one layout.
+  static bool sameTupleShape(Type *A, Type *B) {
+    auto *RA = llvm::dyn_cast<RecordType>(A);
+    auto *RB = llvm::dyn_cast<RecordType>(B);
+    if (!RA || !RB || !RA->isTuple() || !RB->isTuple() ||
+        RA->getAllFields().size() != RB->getAllFields().size())
+      return false;
+    for (size_t I = 0; I < RA->getAllFields().size(); ++I) {
+      Type *TA = RA->getAllFields()[I]->getType();
+      Type *TB = RB->getAllFields()[I]->getType();
+      if (TA != TB && !sameTupleShape(TA, TB))
+        return false;
+    }
+    return true;
+  }
+
   /// Can a value of type Value be assigned to a variable of type Target?
   static bool isAssignable(Type *Target, Type *Value) {
     if (Target->isOpenArray() || Value->isOpenArray())
@@ -1134,6 +1153,8 @@ class Checker : public StmtVisitor<Checker>,
     if (containsFile(Target) || containsFile(Value))
       return false; // files cannot be copied
     if (Target == Value)
+      return true;
+    if (sameTupleShape(Target, Value))
       return true;
     if (Target->isReal() && Value->isIntegerLike())
       return true;
@@ -1692,7 +1713,9 @@ class Checker : public StmtVisitor<Checker>,
     if (Type *T = TS->getResolved())
       return T;
     Type *T = buildType(TS);
-    if (!DeclName.empty() && !T->isError() && !llvm::isa<BuiltinType>(T))
+    auto *Rec = llvm::dyn_cast<RecordType>(T);
+    if (!DeclName.empty() && !T->isError() && !llvm::isa<BuiltinType>(T) &&
+        !(Rec && Rec->isTuple())) // (a tuple type is shared by its uses)
       T->setDeclName(DeclName);
     TS->setResolved(T);
     return T;
@@ -1780,8 +1803,51 @@ class Checker : public StmtVisitor<Checker>,
       return errorType();
     }
 
+    case TypeSpec::TS_Tuple: {
+      auto *TS2 = llvm::cast<TupleTypeSpec>(TS);
+      llvm::SmallVector<Type *, 4> Types;
+      llvm::SmallVector<Identifier, 4> Names;
+      bool OK = true;
+      for (const TupleElementSpec &El : TS2->getElements()) {
+        Type *T = resolveType(El.Type);
+        if (T->isError()) {
+          OK = false;
+        } else if (containsFile(T)) {
+          Diags.error(El.Type->getBeginLoc(),
+                      "the elements of a tuple cannot be files",
+                      {El.Type->getRange()});
+          OK = false;
+        }
+        Identifier Name = El.Name;
+        if (!Name.isValid())
+          Name = tupleItemName(Names.size() + 1, El.Type->getBeginLoc());
+        for (const Identifier &Prev : Names)
+          if (Prev.Name == Name.Name) {
+            Diags.error(El.Name.isValid() ? El.Name.Loc
+                                          : El.Type->getBeginLoc(),
+                        "duplicate element name '" + Name.Spelling + "'",
+                        {El.Type->getRange()});
+            OK = false;
+            break;
+          }
+        Types.push_back(T);
+        Names.push_back(Name);
+      }
+      if (!OK)
+        return errorType();
+      return getTupleType(Types, Names);
+    }
+
     case TypeSpec::TS_Enum: {
       auto *ES = llvm::cast<EnumTypeSpec>(TS);
+      // (integer, string): every name is a type's, so it is a tuple type.
+      if (TupleTypeSpec *TT = ES->getTuple()) {
+        bool AllTypes = true;
+        for (const Identifier &Id : ES->getNames())
+          AllTypes &= llvm::isa_and_nonnull<TypeDecl>(Cur->lookup(Id.Name));
+        if (AllTypes)
+          return resolveType(TT);
+      }
       auto *E = Ctx.create<EnumType>();
       llvm::SmallVector<ConstDecl *, 8> Values;
       for (const Identifier &Id : ES->getNames()) {
@@ -2057,6 +2123,63 @@ class Checker : public StmtVisitor<Checker>,
     }
     }
     return errorType();
+  }
+
+  /// The name of a tuple's N-th element that has none: ItemN.
+  Identifier tupleItemName(size_t N, SourceLocation Loc) {
+    std::string S = "Item" + std::to_string(N);
+    return {Ctx.getStrings().intern(llvm::StringRef(S).lower()),
+            Ctx.getStrings().intern(S), Loc};
+  }
+
+  /// The tuple type with these element types and names (Names empty:
+  /// Item1, Item2, ...). There is one for each such list, so that tuple
+  /// types written alike are the same type.
+  RecordType *getTupleType(llvm::ArrayRef<Type *> Types,
+                           llvm::ArrayRef<Identifier> Names) {
+    llvm::SmallVector<Identifier, 4> Own;
+    if (Names.empty()) {
+      for (size_t I = 0; I < Types.size(); ++I)
+        Own.push_back(tupleItemName(I + 1, SourceLocation()));
+      Names = Own;
+    }
+    for (RecordType *R : TupleTypes) {
+      auto Fields = R->getAllFields();
+      bool Same = Fields.size() == Types.size();
+      for (size_t I = 0; Same && I < Fields.size(); ++I)
+        Same = Fields[I]->getType() == Types[I] &&
+               Fields[I]->getName().Name == Names[I].Name;
+      if (Same)
+        return R;
+    }
+    llvm::SmallVector<FieldDecl *, 4> Fields;
+    for (size_t I = 0; I < Types.size(); ++I) {
+      auto *F = Ctx.create<FieldDecl>(Names[I], nullptr);
+      F->setType(Types[I]);
+      Fields.push_back(F);
+    }
+    auto *FL = Ctx.create<FieldList>();
+    FL->Fixed = Ctx.copyArray<FieldDecl *>(Fields);
+    auto *R = Ctx.create<RecordType>(FL, FL->Fixed, /*Packed=*/false);
+    R->setTuple();
+    TupleTypes.push_back(R);
+    return R;
+  }
+
+  /// A hidden variable of type T of the block being checked (a tuple is
+  /// built in one); null outside the statements of a block.
+  VarDecl *makeHiddenVar(Type *T, SourceLocation Loc) {
+    if (!InlineVars)
+      return nullptr;
+    std::string S = "$tuple" + std::to_string(++HiddenVars);
+    llvm::StringRef N = Ctx.getStrings().intern(S);
+    auto *V = Ctx.create<VarDecl>(Identifier{N, N, Loc}, nullptr);
+    V->setInline();
+    V->setType(T);
+    V->setOwner(CurRoutine);
+    Used.insert(V);
+    InlineVars->push_back(V);
+    return V;
   }
 
   bool addField(FieldDecl *F, llvm::SmallVectorImpl<FieldDecl *> &All,
@@ -4106,6 +4229,22 @@ class Checker : public StmtVisitor<Checker>,
                       {Init->getRange()});
           return false;
         }
+        // (1, 'a') for a tuple: its elements in turn, each then named.
+        if (R->isTuple() && !Agg->isRecordForm()) {
+          auto Fields = R->getAllFields();
+          if (Elems.size() != Fields.size()) {
+            Diags.error(Init->getBeginLoc(),
+                        "initializer for " + quoted(T) + " must list " +
+                            std::to_string(Fields.size()) +
+                            " elements, separated by ','",
+                        {Init->getRange()});
+            return false;
+          }
+          for (size_t I = 0; I < Elems.size(); ++I) {
+            Elems[I]->Field = Fields[I]->getName();
+            Elems[I]->Field.Loc = Elems[I]->Value->getBeginLoc();
+          }
+        }
         if (!Agg->isRecordForm()) {
           Diags.error(Init->getBeginLoc(),
                       "initializer for record " + quoted(T) +
@@ -5881,6 +6020,7 @@ class Checker : public StmtVisitor<Checker>,
       }
       Type *PT = P->getType();
       Type *AT = PT && (llvm::isa<AddrOfExpr>(Arg) ||
+                        llvm::isa<TupleExpr>(Arg) ||
                         (PT->isDynArray() && llvm::isa<SetCtorExpr>(Arg)))
                      ? checkValueFor(PT, Arg)
                      : check(Arg);
@@ -7145,6 +7285,99 @@ public:
     finishAssign(Assign, T, ValueTy);
   }
 
+  /// (a, b) := e;  var (a, b) := e;  -- e, a tuple, is kept in a hidden
+  /// variable (a tuple written out is built in one), then each target is
+  /// assigned its element, with the checks of an assignment.
+  void visitDestructureStmt(DestructureStmt *S) {
+    const void *Seq = DirectSequence;
+    std::unique_ptr<Scope> *Declared = SeqScope;
+    DirectSequence = nullptr;
+    Expr *Value = S->getValue();
+    bool IsVar = !S->getVars().empty();
+    size_t N = IsVar ? S->getVars().size() : S->getTargets().size();
+    auto Fail = [&] {
+      if (IsVar)
+        return;
+      for (Expr *T : S->getTargets())
+        check(T);
+    };
+    if (IsVar && (!Seq || !Declared)) {
+      Diags.error(S->getBeginLoc(),
+                  "a variable can only be declared in a statement sequence "
+                  "(between 'begin' and 'end')",
+                  {S->getRange()});
+      check(Value);
+      return;
+    }
+    Type *VT = check(Value);
+    auto *RT = llvm::dyn_cast<RecordType>(VT);
+    if (!VT->isError() &&
+        (!RT || !RT->isTuple() || RT->getAllFields().size() != N)) {
+      Diags.error(Value->getBeginLoc(),
+                  std::to_string(N) + " variables cannot take the elements of " +
+                      (RT && RT->isTuple() ? "the tuple " : "a value of type ") +
+                      quoted(VT),
+                  {Value->getRange()});
+      VT = errorType();
+    }
+    if (IsVar) { // declared also after an error, with the error type
+      if (!*Declared) {
+        *Declared = std::make_unique<Scope>(Cur);
+        Cur = Declared->get();
+      }
+      llvm::SmallVector<Expr *, 4> Targets;
+      for (size_t I = 0; I < N; ++I) {
+        VarDecl *V = S->getVars()[I];
+        Type *T = VT->isError() ? VT : RT->getAllFields()[I]->getType();
+        V->setType(T);
+        V->setOwner(CurRoutine);
+        declare(V);
+        if (InlineVars)
+          InlineVars->push_back(V);
+        auto *Ref = Ctx.create<NameRefExpr>(V->getName());
+        Targets.push_back(Ref);
+      }
+      S->setTargets(Ctx.copyArray<Expr *>(Targets));
+    }
+    if (VT->isError())
+      return Fail();
+    // The variable the elements are read from.
+    VarDecl *Temp;
+    if (auto *TE = llvm::dyn_cast<TupleExpr>(Value)) {
+      Temp = TE->getTemp();
+    } else {
+      Temp = makeHiddenVar(VT, Value->getBeginLoc());
+      if (!Temp) // (not among the statements of a block: unreachable)
+        return Fail();
+      auto *Ref = Ctx.create<NameRefExpr>(Temp->getName());
+      Ref->setDecl(Temp);
+      Ref->setType(VT);
+      S->setInit(Ctx.create<AssignStmt>(Value->getRange(), Ref,
+                                        S->getAssignLoc(), Value));
+    }
+    llvm::SmallVector<AssignStmt *, 4> Assigns;
+    for (size_t I = 0; I < N; ++I) {
+      FieldDecl *F = RT->getAllFields()[I];
+      Expr *Target = S->getTargets()[I];
+      Identifier TempId = Temp->getName();
+      TempId.Loc = Value->getBeginLoc();
+      auto *Ref = Ctx.create<NameRefExpr>(TempId);
+      Ref->setDecl(Temp);
+      Ref->setType(VT);
+      Identifier FieldId = F->getName();
+      FieldId.Loc = Value->getBeginLoc();
+      auto *Elem = Ctx.create<FieldExpr>(Value->getRange(), Ref, FieldId);
+      Elem->setMember(F);
+      Elem->setType(F->getType());
+      auto *A = Ctx.create<AssignStmt>(
+          SourceRange(Target->getBeginLoc(), Value->getRange().getEnd()),
+          Target, S->getAssignLoc(), Elem);
+      visitAssignStmt(A);
+      Assigns.push_back(A);
+    }
+    S->setAssigns(Ctx.copyArray<AssignStmt *>(Assigns));
+  }
+
   void visitCompoundStmt(CompoundStmt *S) { visitSequence(S, S->getBody()); }
 
   void visitLabeledStmt(LabeledStmt *S) {
@@ -7276,7 +7509,9 @@ public:
           ownedDead();
           return;
         }
-        Type *T = check(Args[0]);
+        Type *T = llvm::isa<TupleExpr>(Args[0])
+                      ? checkValueFor(CurRoutine->getResultType(), Args[0])
+                      : check(Args[0]);
         if (VarDecl *OV = ownedVarOf(Args[0]))
           diagOwnedEscape(OV, Args[0], /*Returned=*/true);
         ownedDead();
@@ -8924,6 +9159,18 @@ public:
   }
 
   Type *checkValueFor(Type *TargetTy, Expr *Value) {
+    // A tuple written out takes the element types of the tuple wanted.
+    if (auto *TE = llvm::dyn_cast<TupleExpr>(Value)) {
+      auto *Want = llvm::dyn_cast<RecordType>(TargetTy);
+      if (Want && Want->isTuple() &&
+          Want->getAllFields().size() == TE->getElements().size()) {
+        Type *T = checkTuple(TE, Want);
+        TE->setType(T);
+        if (isManaged(T))
+          markUsesManaged();
+        return T;
+      }
+    }
     if (auto *DA = llvm::dyn_cast<DynArrayType>(TargetTy))
       if (auto *S = llvm::dyn_cast<SetCtorExpr>(Value))
         return checkDynArrayCtor(S, DA);
@@ -8996,6 +9243,72 @@ public:
       return errorType();
     }
     return RT->getResult();
+  }
+
+  Type *visitTupleExpr(TupleExpr *E) { return checkTuple(E, nullptr); }
+
+  /// (a, b): a tuple value. Want: the tuple type it is a value for (with
+  /// as many elements), whose element types its elements then take; where
+  /// they cannot, and without Want, each element has the type a variable
+  /// declared with its value would have.
+  Type *checkTuple(TupleExpr *E, RecordType *Want) {
+    llvm::SmallVector<Type *, 4> Types;
+    bool OK = true;
+    for (size_t I = 0; I < E->getElements().size(); ++I) {
+      Expr *X = E->getElements()[I];
+      Type *T = Want ? checkValueFor(Want->getAllFields()[I]->getType(), X)
+                     : check(X);
+      OK &= !T->isError();
+      Types.push_back(T);
+    }
+    if (!OK)
+      return errorType();
+    Type *Result = Want;
+    for (size_t I = 0; Result && I < Types.size(); ++I) {
+      Type *FT = Want->getAllFields()[I]->getType();
+      Expr *X = E->getElements()[I];
+      if (isAssignable(FT, Types[I]) || convertImplicitly(X, FT))
+        checkWideToChar(FT, X);
+      else
+        Result = nullptr;
+    }
+    if (!Result) {
+      for (size_t I = 0; I < Types.size(); ++I) {
+        Type *T = Types[I];
+        Expr *X = E->getElements()[I];
+        auto *ST = llvm::dyn_cast<SetType>(T);
+        if (T->isStringLiteral()) {
+          T = E->hasLongStrings() ? Ctx.getAnsiStringType()
+                                  : Ctx.getShortStringType(255);
+        } else if (T->isNil() || T->isUntyped() || T->isOpenArray() ||
+                   T->isArrayOfConst() || containsFile(T) ||
+                   (ST && ST->isEmptySet())) {
+          Diags.error(X->getBeginLoc(),
+                      "cannot tell the type of element " +
+                          std::to_string(I + 1) + " of the tuple from " +
+                          (T->isNil() ? std::string("nil")
+                           : ST       ? std::string("an empty set")
+                                      : "a value of type " + quoted(T)) +
+                          "; assign the tuple to a variable of a tuple type",
+                      {X->getRange()});
+          return errorType();
+        }
+        Types[I] = T;
+      }
+      Result = getTupleType(Types, {});
+    }
+    if (VarDecl *V = E->getTemp()) {
+      V->setType(Result);
+    } else if (VarDecl *New = makeHiddenVar(Result, E->getBeginLoc())) {
+      E->setTemp(New);
+    } else {
+      Diags.error(E->getBeginLoc(),
+                  "a tuple can only be written in the statements of a "
+                  "routine or program",
+                  {E->getRange()});
+      return errorType();
+    }
+    return Result;
   }
 
   Type *visitAggregateExpr(AggregateExpr *E) {

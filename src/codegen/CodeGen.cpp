@@ -2060,6 +2060,8 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
     if (E->getType() && E->getType()->isOpenArray()) // its elements
       return B.CreateLoad(B.getPtrTy(), openDescriptor(E), "data");
     switch (E->getKind()) {
+    case Expr::EK_Tuple:
+      return emitTuple(llvm::cast<TupleExpr>(E));
     case Expr::EK_Binary:
     case Expr::EK_Unary:
       // A record's operator returning a record: a temporary holding it.
@@ -5520,7 +5522,31 @@ public:
 
   /// Value stored at Addr, property P's field or class variable.
   void storeProperty(PropertyDecl *P, llvm::Value *Addr, Expr *Value) {
-    Type *T = P->getType();
+    storeExpr(Addr, P->getType(), Value);
+  }
+
+  /// (a, b): its hidden variable, each element assigned its value.
+  llvm::Value *emitTuple(TupleExpr *E) {
+    auto *R = llvm::cast<RecordType>(E->getType());
+    llvm::Value *Addr = varAddress(E->getTemp());
+    for (size_t I = 0; I < E->getElements().size(); ++I) {
+      FieldDecl *F = R->getAllFields()[I];
+      storeExpr(fieldAddress(Addr, R, F), F->getType(), E->getElements()[I]);
+    }
+    return Addr;
+  }
+
+  void visitDestructureStmt(DestructureStmt *S) {
+    if (S->getInit())
+      visitStmt(S->getInit());
+    else if (!S->getAssigns().empty())
+      emitAddress(S->getValue());
+    for (AssignStmt *A : S->getAssigns())
+      visitStmt(A);
+  }
+
+  /// Value, assignable to type T, stored at Addr (a variable of type T).
+  void storeExpr(llvm::Value *Addr, Type *T, Expr *Value) {
     if (auto *SS = llvm::dyn_cast<ShortStringType>(T)) {
       emitStringAssign(Addr, SS, Value);
       return;
@@ -6852,6 +6878,8 @@ public:
   llvm::Value *visitInheritedExpr(InheritedExpr *E) {
     return emitInheritedCall(E, {});
   }
+
+  llvm::Value *visitTupleExpr(TupleExpr *E) { return emitTuple(E); }
 
   llvm::Value *visitAggregateExpr(AggregateExpr *) {
     llvm_unreachable("aggregates only initialize typed constants");

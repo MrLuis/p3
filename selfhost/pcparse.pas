@@ -483,6 +483,7 @@ function parseBlock: PBlock; forward;
 procedure parseDeclarations(var decls: TPtrList; inInterface: boolean); forward;
 function parseType: PTypeSpec; forward;
 function parseSimpleType: PTypeSpec; forward;
+function parseTupleType(always: boolean): PTypeSpec; forward;
 function parseNamedType: PTypeSpec; forward;
 function parseStatement: PNode; forward;
 function parseCompoundStmt: PNode; forward;
@@ -3206,6 +3207,11 @@ begin
   end;
   if tok.kind = tkIdentifier then
     exit(parseNamedType);
+  { (integer, string): a tuple type (objfpc) }
+  if (tok.kind = tkLParen) and (mode = lmObjFPC) and
+     (context <> 'variant tag type') and
+     (context <> 'the type a helper extends') then
+    exit(parseTupleType(true));
   if (tok.kind = tkKwArray) and (context = 'parameter type') and (mode <> lmISO) and
      (peekKind = tkKwOf) then
   begin
@@ -3289,6 +3295,97 @@ begin
                               tkKwMod];
 end;
 
+{ tupleType = "(" element ( "," element )* ")" .  (objfpc)
+  element = [ ident ":" ] type .
+  A list of names only is an enumeration, unless always (where a type must
+  be named: a result or parameter type); with two names or more it carries
+  the tuple type it is if Sema finds that all of them name types. }
+function parseTupleType(always: boolean): PTypeSpec;
+var
+  start: TLoc;
+  scoped, bare: boolean;
+  names, elNames, elSpecs: TPtrList;
+  name: TIdent;
+  spec, tt, es: PTypeSpec;
+  i: longint;
+begin
+  parseTupleType := nil;
+  start := tok.loc;
+  scoped := lx.scopedEnums;
+  consumeToken; { '(' }
+  listInit(names);
+  listInit(elNames);
+  listInit(elSpecs);
+  bare := true;
+  repeat
+    name := noIdent;
+    if (tok.kind = tkIdentifier) and (peekKind = tkColon) then
+    begin
+      name := makeIdentifier(tok);
+      consumeToken;
+      consumeToken;
+      bare := false;
+      spec := parseType;
+    end
+    else if (tok.kind = tkIdentifier) and (peekKind in [tkComma, tkRParen]) then
+    begin
+      name := makeIdentifier(tok);
+      consumeToken;
+      listAdd(names, newIdent(name));
+      spec := namedSpec(name);
+      name := noIdent;
+    end
+    else if bare and not always and
+            not (tok.kind in [tkIdentifier, tkCaret, tkLParen, tkKwArray,
+                              tkKwString, tkKwSet, tkKwRecord, tkKwPacked,
+                              tkKwProcedure, tkKwFunction, tkKwFile]) then
+    begin
+      diagError(tok.loc, 'expected enumeration value name');
+      exit;
+    end
+    else
+    begin
+      bare := false;
+      spec := parseType;
+    end;
+    if spec = nil then
+      exit;
+    listAdd(elNames, newIdent(name));
+    listAdd(elSpecs, spec);
+  until not tryConsume(tkComma);
+  bare := bare and not always;
+  if bare and not scoped then
+    for i := 0 to names.count - 1 do
+      declareName(PIdent(listGet(names, i))^);
+  if bare then
+  begin
+    if not expect(tkRParen, 'after enumeration values') then
+      exit;
+  end
+  else if not expect(tkRParen, 'after the elements of a tuple type') then
+    exit;
+  if not bare and (elSpecs.count < 2) then
+  begin
+    diagErrorR(start, 'a tuple type has two elements or more',
+               makeRange(start, prevTokEnd));
+    exit;
+  end;
+  tt := nil;
+  if elSpecs.count >= 2 then
+  begin
+    tt := newTypeSpec(tsTuple, start, prevTokEnd);
+    tt^.tupNames := elNames;
+    tt^.tupSpecs := elSpecs;
+  end;
+  if not bare then
+    exit(tt);
+  es := newTypeSpec(tsEnum, start, prevTokEnd);
+  es^.enumNames := names;
+  es^.enumScoped := scoped;
+  es^.enumTuple := tt;
+  parseTupleType := es;
+end;
+
 { simpleType = typeIdent | "(" identList ")" | constExpr ".." constExpr . }
 function parseSimpleType: PTypeSpec;
 var
@@ -3301,6 +3398,8 @@ var
 begin
   parseSimpleType := nil;
   start := tok.loc;
+  if (tok.kind = tkLParen) and (mode = lmObjFPC) then
+    exit(parseTupleType(false));
   if tok.kind = tkLParen then
   begin
     scoped := lx.scopedEnums; { $scopedenums on: TColor.Red only }
@@ -3317,6 +3416,7 @@ begin
     ts := newTypeSpec(tsEnum, start, prevTokEnd);
     ts^.enumNames := names;
     ts^.enumScoped := scoped;
+    ts^.enumTuple := nil;
     exit(ts);
   end;
   if (tok.kind = tkIdentifier) and not continuesConstExpr(peekKind) then
@@ -3967,6 +4067,38 @@ function parseRaiseStmt: PNode; forward;
 
 { varStatement = "var" identList ( ":" type [ "owned" ] [ ":=" expression ]
                                  | ":=" expression ) . }
+{ destructuring = ( "(" designator ( "," designator )* ")"
+                  | "var" "(" identList ")" ) ":=" expression .
+  The targets are parsed; the token is the ":=". }
+function parseDestructure(start: TLoc; const targets, vars: TPtrList): PNode;
+var
+  assignLoc: TLoc;
+  value, n: PNode;
+begin
+  if tok.kind <> tkColonEqual then
+  begin
+    diagError(tok.loc, 'expected '':='' and a tuple after these variables');
+    skipUntil([tkSemi, tkKwEnd]);
+    exit(emptyStmt(start));
+  end;
+  assignLoc := consumeToken;
+  value := parseExpression;
+  if value = nil then
+  begin
+    skipUntil([tkSemi, tkKwEnd]);
+    exit(emptyStmt(start));
+  end;
+  n := newNode(nkDestructure, start, prevTokEnd);
+  n^.dsTargets := targets;
+  n^.dsVars := vars;
+  n^.dsValue := value;
+  n^.dsAssignLoc := assignLoc;
+  n^.dsLong := lx.longStrings;
+  n^.dsInit := nil;
+  listInit(n^.dsAssigns);
+  parseDestructure := n;
+end;
+
 function parseVarDeclStmt: PNode;
 var
   varLoc, assignLoc: TLoc;
@@ -3986,6 +4118,24 @@ var
 begin
   varLoc := consumeToken; { 'var' }
   listInit(names);
+  if tok.kind = tkLParen then { var (a, b) := e }
+  begin
+    consumeToken;
+    if not parseIdentList(names, 'variable name') then
+      exit(fail);
+    if not expect(tkRParen, 'after the variables of a tuple') then
+      exit(fail);
+    listInit(vars);
+    for i := 0 to names.count - 1 do
+    begin
+      declareName(PIdent(listGet(names, i))^);
+      v := newVar(PIdent(listGet(names, i))^, nil, vkVariable);
+      v^.isInlineVar := true;
+      listAdd(vars, v);
+    end;
+    listInit(names);
+    exit(parseDestructure(varLoc, names, vars));
+  end;
   if not parseIdentList(names, 'variable name') then
     exit(fail);
   for i := 0 to names.count - 1 do
@@ -4047,7 +4197,7 @@ var
   lbl: TIdent;
   n, body: PNode;
   savedStmtToks: PPtrList;
-  toks: TPtrList;
+  toks, noVars: TPtrList;
 begin
   { a statement starting with a designator: its tokens are recorded }
   savedStmtToks := stmtTokens;
@@ -4065,6 +4215,11 @@ begin
         begin
           skipUntil([tkSemi, tkKwEnd]);
           n := emptyStmt(start);
+        end
+        else if n^.kind = nkTuple then { (a, b) := e }
+        begin
+          listInit(noVars);
+          n := parseDestructure(start, n^.tupElems, noVars);
         end
         else
           n := finishDesignatorStmt(start, n);
@@ -5613,6 +5768,36 @@ begin
         inner := parseExpression;
         if inner = nil then
           exit;
+        if (tok.kind = tkComma) and (mode = lmObjFPC) then { (a, b): a tuple }
+        begin
+          listInit(elems);
+          listAdd(elems, inner);
+          while tryConsume(tkComma) do
+          begin
+            inner := parseExpression;
+            if inner = nil then
+              exit;
+            listAdd(elems, inner);
+          end;
+          if not expect(tkRParen, 'after the elements of a tuple') then
+          begin
+            diagNote(lparen, 'to match this ''(''');
+            exit;
+          end;
+          n := newNode(nkTuple, lparen, prevTokEnd);
+          n^.tupElems := elems;
+          n^.tupLong := lx.longStrings;
+          n^.tupTemp := nil;
+          if tok.kind = tkPeriod then
+            exit(parseSelectors(n));
+          exit(n);
+        end;
+        if (tok.kind = tkComma) and (mode = lmTP) then
+        begin
+          diagError(tok.loc, 'tuples need --mode=objfpc');
+          diagNote(lparen, 'to match this ''(''');
+          exit;
+        end;
         if not expect(tkRParen, 'after expression') then
         begin
           diagNote(lparen, 'to match this ''(''');

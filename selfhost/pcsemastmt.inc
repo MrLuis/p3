@@ -2601,7 +2601,10 @@ begin
             exit;
           end;
           a0 := PNode(listGet(s^.args, 0));
-          t := check(a0);
+          if a0^.kind = nkTuple then
+            t := checkValueFor(curRoutine^.resultType, a0)
+          else
+            t := check(a0);
           if ownedVarOf(a0) <> nil then
             diagOwnedEscape(ownedVarOf(a0), a0, true);
           ownedDead;
@@ -2776,11 +2779,25 @@ begin
   checkDynArrayCtor := t;
 end;
 
+function checkTuple(e: PNode; want: PType): PType; forward;
+
 function checkValueFor(targetTy: PType; value: PNode): PType;
 var
   v: PDecl;
   saved: PType;
+  t: PType;
 begin
+  { a tuple written out takes the element types of the tuple wanted }
+  if (value^.kind = nkTuple) and (targetTy^.kind = tyRecord) then
+    if targetTy^.isTupleRecord and
+       (targetTy^.allFields.count = value^.tupElems.count) then
+    begin
+      t := checkTuple(value, targetTy);
+      value^.typ := t;
+      if isManaged(t) then
+        markUsesManaged;
+      exit(t);
+    end;
   if (targetTy^.kind = tyDynArray) and (value^.kind = nkSetCtor) then
     exit(checkDynArrayCtor(value, targetTy));
   if (targetTy^.kind = tyPointer) and targetTy^.untyped and (value^.kind = nkAddrOf) then
@@ -2840,6 +2857,98 @@ begin
   name.loc := e^.b;
   checkCallArgs(t^.routineParams, nil, name, e^.args, nodeRange(e));
   checkIndirectCallee := t;
+end;
+
+{ (a, b): a tuple value. want: the tuple type it is a value for (with as
+  many elements), whose element types its elements then take; where they
+  cannot, and without want, each element has the type a variable declared
+  with its value would have. }
+function checkTuple(e: PNode; want: PType): PType;
+var
+  types, noNames: TPtrList;
+  i: longint;
+  ok: boolean;
+  x: PNode;
+  t, ft, res: PType;
+  v: PDecl;
+begin
+  listInit(types);
+  ok := true;
+  for i := 0 to e^.tupElems.count - 1 do
+  begin
+    x := PNode(listGet(e^.tupElems, i));
+    if want <> nil then
+      t := checkValueFor(PDecl(listGet(want^.allFields, i))^.fieldType, x)
+    else
+      t := check(x);
+    if isError(t) then
+      ok := false;
+    listAdd(types, t);
+  end;
+  if not ok then
+    exit(errorType);
+  res := want;
+  i := 0;
+  while (res <> nil) and (i < types.count) do
+  begin
+    ft := PDecl(listGet(want^.allFields, i))^.fieldType;
+    x := PNode(listGet(e^.tupElems, i));
+    if isAssignable(ft, PType(listGet(types, i))) or convertImplicitly(x, ft) then
+      checkWideToChar(ft, x)
+    else
+      res := nil;
+    i := i + 1;
+  end;
+  if res = nil then
+  begin
+    for i := 0 to types.count - 1 do
+    begin
+      t := PType(listGet(types, i));
+      x := PNode(listGet(e^.tupElems, i));
+      if t^.kind = tyStringLit then
+      begin
+        if e^.tupLong then
+          t := ansiStringType
+        else
+          t := shortStringType(255);
+      end
+      else if (t^.kind in [tyNil, tyUntyped, tyOpenArray, tyArrayOfConst]) or
+              containsFile(t) or ((t^.kind = tySet) and isEmptySet(t)) then
+      begin
+        ms('cannot tell the type of element ' + intToStr(i + 1) +
+           ' of the tuple from ');
+        if t^.kind = tyNil then
+          ma('nil')
+        else if t^.kind = tySet then
+          ma('an empty set')
+        else
+        begin
+          ma('a value of type ');
+          maT(t);
+        end;
+        ma('; assign the tuple to a variable of a tuple type');
+        errR(x^.b, nodeRange(x));
+        exit(errorType);
+      end;
+      listSet(types, i, t);
+    end;
+    listInit(noNames);
+    res := getTupleType(types, noNames);
+  end;
+  if e^.tupTemp <> nil then
+    e^.tupTemp^.varType := res
+  else
+  begin
+    v := makeHiddenVar(res, e^.b);
+    if v = nil then
+    begin
+      ms('a tuple can only be written in the statements of a routine or program');
+      errR(e^.b, nodeRange(e));
+      exit(errorType);
+    end;
+    e^.tupTemp := v;
+  end;
+  checkTuple := res;
 end;
 
 procedure finishAssign(s: PNode; targetTy, valueTy: PType); forward;
@@ -3090,6 +3199,141 @@ begin
   assign^.value := init;
   s^.vdAssign := assign;
   finishAssign(assign, t, valueTy);
+end;
+
+{ (a, b) := e;  var (a, b) := e;  -- e, a tuple, is kept in a hidden
+  variable (a tuple written out is built in one), then each target is
+  assigned its element, with the checks of an assignment. }
+procedure visitDestructure(s: PNode);
+var
+  seq: pointer;
+  declared: PPScope;
+  value, target, ref, elem, a: PNode;
+  isVar, isTuple: boolean;
+  n, i: longint;
+  vt, t: PType;
+  v, temp, f: PDecl;
+  tempId, fieldId: TIdent;
+
+  procedure fail;
+  var
+    k: longint;
+  begin
+    if isVar then
+      exit;
+    for k := 0 to s^.dsTargets.count - 1 do
+      check(PNode(listGet(s^.dsTargets, k)));
+  end;
+
+begin
+  seq := directSequence;
+  declared := seqScope;
+  directSequence := nil;
+  value := s^.dsValue;
+  isVar := s^.dsVars.count > 0;
+  if isVar then
+    n := s^.dsVars.count
+  else
+    n := s^.dsTargets.count;
+  if isVar and ((seq = nil) or (declared = nil)) then
+  begin
+    ms('a variable can only be declared in a statement sequence (between ' +
+       '''begin'' and ''end'')');
+    errR(s^.b, nodeRange(s));
+    check(value);
+    exit;
+  end;
+  vt := check(value);
+  isTuple := (vt^.kind = tyRecord) and vt^.isTupleRecord;
+  if not isError(vt) and (not isTuple or (vt^.allFields.count <> n)) then
+  begin
+    ms(intToStr(n) + ' variables cannot take the elements of ');
+    if isTuple then
+      ma('the tuple ')
+    else
+      ma('a value of type ');
+    maT(vt);
+    errR(value^.b, nodeRange(value));
+    vt := errorType;
+  end;
+  if isVar then { declared also after an error, with the error type }
+  begin
+    if declared^ = nil then
+    begin
+      declared^ := newScope(cur);
+      cur := declared^;
+    end;
+    listInit(s^.dsTargets);
+    for i := 0 to n - 1 do
+    begin
+      v := PDecl(listGet(s^.dsVars, i));
+      if isError(vt) then
+        t := vt
+      else
+        t := PDecl(listGet(vt^.allFields, i))^.fieldType;
+      v^.varType := t;
+      v^.owner := curRoutine;
+      declare(v);
+      if inlineVars <> nil then
+        listAdd(inlineVars^, v);
+      listAdd(s^.dsTargets, nameRefNode(v^.ident));
+    end;
+  end;
+  if isError(vt) then
+  begin
+    fail;
+    exit;
+  end;
+  { the variable the elements are read from }
+  if value^.kind = nkTuple then
+    temp := value^.tupTemp
+  else
+  begin
+    temp := makeHiddenVar(vt, value^.b);
+    if temp = nil then { (not among the statements of a block: unreachable) }
+    begin
+      fail;
+      exit;
+    end;
+    ref := nameRefNode(temp^.ident);
+    ref^.refDecl := temp;
+    ref^.typ := vt;
+    a := newNode(nkAssign, value^.b, value^.e);
+    a^.target := ref;
+    a^.assignLoc := s^.dsAssignLoc;
+    a^.value := value;
+    a^.assignCompound := false;
+    s^.dsInit := a;
+  end;
+  for i := 0 to n - 1 do
+  begin
+    f := PDecl(listGet(vt^.allFields, i));
+    target := PNode(listGet(s^.dsTargets, i));
+    tempId := temp^.ident;
+    tempId.loc := value^.b;
+    ref := nameRefNode(tempId);
+    ref^.refDecl := temp;
+    ref^.typ := vt;
+    fieldId := f^.ident;
+    fieldId.loc := value^.b;
+    elem := newNode(nkField, value^.b, value^.e);
+    elem^.base := ref;
+    elem^.index := nil;
+    elem^.fieldName := fieldId;
+    elem^.fieldDecl := f;
+    elem^.idxProp := nil;
+    elem^.idxRoot := nil;
+    elem^.constRef := nil;
+    elem^.helperValue := false;
+    elem^.typ := f^.fieldType;
+    a := newNode(nkAssign, target^.b, value^.e);
+    a^.target := target;
+    a^.assignLoc := s^.dsAssignLoc;
+    a^.value := elem;
+    a^.assignCompound := false;
+    visitAssign(a);
+    listAdd(s^.dsAssigns, a);
+  end;
 end;
 
 { for var x [: T] ...: declares x in a scope of the loop, which becomes
@@ -3887,6 +4131,7 @@ begin
     nkTry: visitTry(s);
     nkRaise: visitRaise(s);
     nkVarDecl: visitVarDecl(s);
+    nkDestructure: visitDestructure(s);
   else
     ;
   end;
@@ -5115,6 +5360,7 @@ begin
     nkUnary: visitExpr := visitUnary(e);
     nkBinary: visitExpr := visitBinary(e);
     nkCall: visitExpr := visitCall(e);
+    nkTuple: visitExpr := checkTuple(e, nil);
     nkTemplate:
       begin
         { an ansistring; each value is one write can write, with the field

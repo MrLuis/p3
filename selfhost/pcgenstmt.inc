@@ -448,8 +448,8 @@ end;
   its write procedure. }
 procedure emitPropertyWrite(p: PDecl; target, value: PNode);
 var
-  obj, addr, ignored, pair, v: TV;
-  c, t: PType;
+  obj, addr, ignored: TV;
+  c: PType;
   args, noIndexes: TPtrList;
 begin
   if p^.propIsClass then { a class variable or a static method }
@@ -493,30 +493,7 @@ begin
     end;
     addr := fieldAddress(obj, c, p^.writeDecl);
   end;
-  t := p^.propType;
-  if t^.kind = tyShortString then
-  begin
-    emitStringAssign(addr, t, value);
-    exit;
-  end;
-  if t^.kind = tyAnsiString then
-  begin
-    storeValue(addr, emitAnsi(value), t);
-    exit;
-  end;
-  if isStructured(t) then
-  begin
-    copyValue(addr, emitAddress(value), t);
-    exit;
-  end;
-  if t^.kind = tyRoutine then
-  begin
-    pair := emitRoutinePair(value, t);
-    irStore(pair, addr);
-    exit;
-  end;
-  v := convertForAssign(visitExpr(value), value^.typ, t, value^.b);
-  storeValue(addr, v, t);
+  storeExpr(addr, p^.propType, value);
 end;
 
 { If value is target + x, for a short string variable target named in both
@@ -1733,6 +1710,21 @@ begin
   emitSequenceFrom(l, 0);
 end;
 
+{ (a, b) := e;  var (a, b) := e;  -- the value kept in its hidden variable
+  (a tuple written out: built in its own), then the assignments Sema made. }
+procedure visitDestructureStmt(s: PNode);
+var
+  i: longint;
+  ignored: TV;
+begin
+  if s^.dsInit <> nil then
+    visitStmt(s^.dsInit)
+  else if s^.dsAssigns.count > 0 then
+    ignored := emitAddress(s^.dsValue);
+  for i := 0 to s^.dsAssigns.count - 1 do
+    visitStmt(PNode(listGet(s^.dsAssigns, i)));
+end;
+
 { var x: T [:= e]: x is set each time the statement runs, to e or to zero
   (what it held, in an earlier iteration, is released). }
 procedure visitVarDeclStmt(s: PNode);
@@ -1839,6 +1831,7 @@ begin
         emitTryExcept(s);
     nkRaise: visitRaise(s);
     nkVarDecl: visitVarDeclStmt(s);
+    nkDestructure: visitDestructureStmt(s);
   else
     ;
   end;

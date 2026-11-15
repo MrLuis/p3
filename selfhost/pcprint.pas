@@ -393,6 +393,25 @@ begin
         line('UntypedTypeSpec');
         loc(ts^.b);
       end;
+    tsTuple:
+      begin
+        line('TupleTypeSpec');
+        loc(ts^.b);
+        indent := indent + 2;
+        for i := 0 to ts^.tupSpecs.count - 1 do
+        begin
+          id := PIdent(listGet(ts^.tupNames, i));
+          lineName('TupleElement ''', id^.name);
+          if id^.name <> nil then
+            loc(id^.loc)
+          else
+            loc(PTypeSpec(listGet(ts^.tupSpecs, i))^.b);
+          indent := indent + 2;
+          printTypeSpec(PTypeSpec(listGet(ts^.tupSpecs, i)));
+          indent := indent - 2;
+        end;
+        indent := indent - 2;
+      end;
     tsEnum:
       begin
         if ts^.enumScoped then
@@ -1211,6 +1230,22 @@ begin
           visitExpr(s^.vdInit);
         indent := indent - 2;
       end;
+    nkDestructure:
+      begin
+        if s^.dsVars.count = 0 then
+          line('DestructureStmt')
+        else
+          line('DestructureStmt var');
+        loc(s^.b);
+        indent := indent + 2;
+        for i := 0 to s^.dsVars.count - 1 do
+          printDecl(PDecl(listGet(s^.dsVars, i)));
+        if s^.dsVars.count = 0 then
+          for i := 0 to s^.dsTargets.count - 1 do
+            visitExpr(PNode(listGet(s^.dsTargets, i)));
+        visitExpr(s^.dsValue);
+        indent := indent - 2;
+      end;
     nkRaise:
       begin
         if s^.raiseAddr <> nil then
@@ -1383,6 +1418,15 @@ begin
         indent := indent + 2;
         for i := 0 to e^.tmplParts.count - 1 do
           visitExpr(PNode(listGet(e^.tmplParts, i)));
+        indent := indent - 2;
+      end;
+    nkTuple:
+      begin
+        line('TupleExpr');
+        endExpr(e);
+        indent := indent + 2;
+        for i := 0 to e^.tupElems.count - 1 do
+          visitExpr(PNode(listGet(e^.tupElems, i)));
         indent := indent - 2;
       end;
     nkFormatted:

@@ -549,6 +549,55 @@ call. Its values take no field width. Not supported: formats other than
 `write` cannot write (records, sets, objects): convert them in the
 expression. A name `r` used as a tag needs a blank before the backtick.
 
+**Tuples** (objfpc; pcc's own, not Free Pascal's): several values as one,
+without declaring a record. A tuple type lists its element types between
+parentheses, `(Integer, string)`, and can name them, `(Min: Integer, Max:
+Integer)`; a tuple value lists expressions, `(lo, hi)`. A function can
+return one, and its elements can be given to variables in one statement:
+
+```pascal
+function MinMax(const A: array of Integer): (Min: Integer, Max: Integer);
+begin
+  Result := (A[0], A[0]);
+  ...
+end;
+
+var (lo, hi) := MinMax(values);     { two new variables }
+var r := MinMax(values);
+Writeln(r.Min, ' to ', r.Max);
+(a, b) := (b, a + b);               { both values first, then both stores }
+(q, rem) := DivMod(17, 5);          { existing variables, fields, a[i] ... }
+```
+
+- **Types.** A tuple type is written wherever a type is, also as a
+  function's result or a parameter's type. Two tuple types written alike
+  (the same element types and names, in order) are the same type; tuples
+  whose element types match are assigned to each other whatever the names.
+  Elements without a name are `Item1`, `Item2`, ...; a tuple is otherwise
+  a record (`t.Min := 0`, `with t do`, elements of any type but files,
+  reference-counted ones included).
+- **Values.** Written for a tuple type (an assignment, an argument, a
+  result, `exit((a, b))`), each element is converted as an assignment to
+  that element would (`(1, 2)` fits `(Real, Byte)`). With no type to go
+  by (`var t := (1, 'a')`), each element has the type a variable declared
+  with it would have, and that is also what chooses among overloaded
+  routines. A tuple variable's initial value is `(1, 'a')`, or
+  with names `(Min: 1; Max: 2)` as for a record.
+- **Destructuring.** `(a, b) := e` assigns the elements of the tuple `e` to
+  the targets, each checked and converted like an assignment (anything
+  assignable: variables, fields, array elements, properties). `e` is
+  evaluated once, before any target changes, so `(a, b) := (b, a)` swaps.
+  `var (a, b) := e` declares the variables, with the element types.
+- **Enumerations.** `(A, B)` is also how an enumeration is written. In a
+  type declaration a list of plain names is a tuple type only when every
+  name is the name of a type; `(Red, Green)` stays an enumeration.
+
+Not supported: comparing tuples with `=`, writing one with `write`,
+nested patterns (`((a, b), c) := e`), `_` to skip an element, tuples in
+constant expressions, and `for var (k, v) in`. Tuples are meant for small,
+local uses: a value that is part of a public interface reads better as a
+named record.
+
 **Pointer arithmetic** (tp and objfpc, as in Free Pascal): `p + n`, `n + p`
 and `p - n` move a pointer by n of what it points to (by n bytes for an
 untyped `pointer`, and so for `@x`, which is untyped); `p - q` is the

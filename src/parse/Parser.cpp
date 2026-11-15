@@ -2227,6 +2227,10 @@ TypeSpec *Parser::parseTypeIdentifier(llvm::StringRef Context) {
   }
   if (Tok.is(tok::identifier))
     return parseNamedType();
+  // (integer, string): a tuple type (objfpc)
+  if (Tok.is(tok::l_paren) && LangOpts.ObjKeywords &&
+      Context != "variant tag type" && Context != "the type a helper extends")
+    return parseTupleType(/*Always=*/true);
   if (Tok.is(tok::kw_array) && Context == "parameter type" && LangOpts.Mode != LangMode::ISO &&
       peekToken().is(tok::kw_of)) { // Turbo/FPC: array of const, array of T
     SourceLocation Start = Tok.getLocation();
@@ -2298,6 +2302,9 @@ static bool continuesConstExpr(tok::TokenKind K) {
 TypeSpec *Parser::parseSimpleType() {
   SourceLocation Start = Tok.getLocation();
 
+  if (Tok.is(tok::l_paren) && LangOpts.ObjKeywords)
+    return parseTupleType(/*Always=*/false);
+
   if (Tok.is(tok::l_paren)) {
     bool Scoped = scopedEnums(); // {$scopedenums on}: TColor.Red only
     consumeToken();
@@ -2333,6 +2340,70 @@ TypeSpec *Parser::parseSimpleType() {
   if (!Hi)
     return nullptr;
   return Ctx.create<SubrangeTypeSpec>(SourceRange(Start, PrevTokEnd), Lo, Hi);
+}
+
+// tupleType = "(" [ ident ":" ] type { "," [ ident ":" ] type } ")" .  (objfpc)
+// A list of names only is an enumeration, unless Always (where a type
+// must be named: a result or parameter type); with two names or more it
+// carries the tuple type it is if Sema finds that all of them name types.
+TypeSpec *Parser::parseTupleType(bool Always) {
+  SourceLocation Start = Tok.getLocation();
+  bool Scoped = scopedEnums();
+  consumeToken(); // '('
+  llvm::SmallVector<TupleElementSpec, 4> Elems;
+  llvm::SmallVector<Identifier, 8> Names;
+  bool Bare = true;
+  do {
+    TupleElementSpec El;
+    if (Tok.is(tok::identifier) && peekToken().is(tok::colon)) {
+      El.Name = makeIdentifier(Tok);
+      consumeToken();
+      consumeToken();
+      Bare = false;
+      El.Type = parseType();
+    } else if (Tok.is(tok::identifier) &&
+               peekToken().isOneOf(tok::comma, tok::r_paren)) {
+      Identifier N = makeIdentifier(Tok);
+      consumeToken();
+      Names.push_back(N);
+      El.Type = Ctx.create<NamedTypeSpec>(N);
+    } else if (Bare && !Always && !Tok.isOneOf(tok::identifier, tok::caret,
+                                               tok::l_paren, tok::kw_array,
+                                               tok::kw_string, tok::kw_set,
+                                               tok::kw_record, tok::kw_packed,
+                                               tok::kw_procedure,
+                                               tok::kw_function, tok::kw_file)) {
+      Diags.error(Tok.getLocation(), "expected enumeration value name");
+      return nullptr;
+    } else {
+      Bare = false;
+      El.Type = parseType();
+    }
+    if (!El.Type)
+      return nullptr;
+    Elems.push_back(El);
+  } while (tryConsume(tok::comma));
+  Bare = Bare && !Always;
+  if (Bare && !Scoped)
+    for (const Identifier &N : Names)
+      declareName(N);
+  if (!expect(tok::r_paren, Bare ? "after enumeration values"
+                                 : "after the elements of a tuple type"))
+    return nullptr;
+  SourceRange R(Start, PrevTokEnd);
+  if (!Bare && Elems.size() < 2) {
+    Diags.error(Start, "a tuple type has two elements or more", {R});
+    return nullptr;
+  }
+  auto *TT = Elems.size() < 2 ? nullptr
+                              : Ctx.create<TupleTypeSpec>(
+                                    R, Ctx.copyArray<TupleElementSpec>(Elems));
+  if (!Bare)
+    return TT;
+  auto *ES =
+      Ctx.create<EnumTypeSpec>(R, Ctx.copyArray<Identifier>(Names), Scoped);
+  ES->setTuple(TT);
+  return ES;
 }
 
 // arrayType = "array" "[" simpleType { "," simpleType } "]" "of" type .
@@ -2797,6 +2868,20 @@ Stmt *Parser::parseVarDeclStmt() {
     return Ctx.create<EmptyStmt>(VarLoc);
   };
   llvm::SmallVector<Identifier, 2> Names;
+  if (Tok.is(tok::l_paren)) { // var (a, b) := e
+    consumeToken();
+    if (!parseIdentList(Names, "variable name") ||
+        !expect(tok::r_paren, "after the variables of a tuple"))
+      return Fail();
+    llvm::SmallVector<VarDecl *, 2> Vars;
+    for (const Identifier &N : Names) {
+      declareName(N);
+      auto *V = Ctx.create<VarDecl>(N, nullptr);
+      V->setInline();
+      Vars.push_back(V);
+    }
+    return parseDestructure(VarLoc, {}, Ctx.copyArray<VarDecl *>(Vars));
+  }
   if (!parseIdentList(Names, "variable name"))
     return Fail();
   for (const Identifier &N : Names)
@@ -2842,6 +2927,29 @@ Stmt *Parser::parseVarDeclStmt() {
                                  AssignLoc, Lex.longStrings());
 }
 
+// destructuring = ( "(" designator { "," designator } ")"
+//                 | "var" "(" identList ")" ) ":=" expression .
+// The targets are parsed; the token is the ":=".
+Stmt *Parser::parseDestructure(SourceLocation Start,
+                               llvm::ArrayRef<Expr *> Targets,
+                               llvm::ArrayRef<VarDecl *> Vars) {
+  if (Tok.isNot(tok::colon_equal)) {
+    Diags.error(Tok.getLocation(),
+                "expected ':=' and a tuple after these variables");
+    skipUntil({tok::semi, tok::kw_end});
+    return Ctx.create<EmptyStmt>(Start);
+  }
+  SourceLocation AssignLoc = consumeToken();
+  Expr *Value = parseExpression();
+  if (!Value) {
+    skipUntil({tok::semi, tok::kw_end});
+    return Ctx.create<EmptyStmt>(Start);
+  }
+  return Ctx.create<DestructureStmt>(SourceRange(Start, PrevTokEnd), Targets,
+                                     Vars, Value, AssignLoc,
+                                     Lex.longStrings());
+}
+
 Stmt *Parser::parseStatementImpl() {
   switch (Tok.getKind()) {
   case tok::identifier:
@@ -2884,6 +2992,8 @@ Stmt *Parser::parseStatementImpl() {
         skipUntil({tok::semi, tok::kw_end});
         return Ctx.create<EmptyStmt>(Start);
       }
+      if (auto *T = llvm::dyn_cast<TupleExpr>(Target)) // (a, b) := e
+        return parseDestructure(Start, T->getElements(), {});
       return finishDesignatorStmt(Start, Target);
     });
   }
@@ -4038,6 +4148,32 @@ Expr *Parser::parseFactor() {
     Expr *Inner = parseExpression();
     if (!Inner)
       return nullptr;
+    if (Tok.is(tok::comma) && LangOpts.ObjKeywords) { // (a, b): a tuple
+      llvm::SmallVector<Expr *, 4> Elems;
+      Elems.push_back(Inner);
+      while (tryConsume(tok::comma)) {
+        Expr *E = parseExpression();
+        if (!E)
+          return nullptr;
+        Elems.push_back(E);
+      }
+      if (!expect(tok::r_paren, "after the elements of a tuple")) {
+        Diags.note(LParen, "to match this '('");
+        return nullptr;
+      }
+      Expr *Tuple = Ctx.create<TupleExpr>(SourceRange(LParen, PrevTokEnd),
+                                          Ctx.copyArray<Expr *>(Elems),
+                                          Lex.longStrings());
+      if (Tok.is(tok::period))
+        return parseSelectors(Tuple);
+      return Tuple;
+    }
+    if (Tok.is(tok::comma) && LangOpts.Mode == LangMode::TP &&
+        !LangOpts.ObjKeywords) {
+      Diags.error(Tok.getLocation(), "tuples need --mode=objfpc");
+      Diags.note(LParen, "to match this '('");
+      return nullptr;
+    }
     if (!expect(tok::r_paren, "after expression")) {
       Diags.note(LParen, "to match this '('");
       return nullptr;

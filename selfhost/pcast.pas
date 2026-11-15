@@ -48,11 +48,11 @@ type
     nkIntegerLit, nkRealLit, nkStringLit, nkNameRef, nkParen, nkUnary,
     nkBinary, nkCall, nkFormatted, nkIndex, nkField, nkNil, nkDeref,
     nkSetCtor, nkAddrOf, nkAggregate, nkIndirectCall, nkInherited, nkMove,
-    nkTemplate,
+    nkTemplate, nkTuple,
     { statements }
     nkEmpty, nkCompound, nkProcCall, nkAssign, nkIf, nkWhile, nkRepeat,
     nkFor, nkCase, nkWith, nkLabeled, nkGoto, nkIndirectCallStmt,
-    nkTry, nkRaise, nkForIn, nkVarDecl);
+    nkTry, nkRaise, nkForIn, nkVarDecl, nkDestructure);
 
   PNode = ^TNode;
   PDecl = ^TDecl;
@@ -91,7 +91,9 @@ type
         fieldAlignment) }
       tyRecord: (fieldList: PFieldList; allFields: TPtrList; { of PDecl }
                  isPackedRecord: boolean; memberTable: PType;
-                 isBitPackedRecord: boolean; recordPackRecords: longint);
+                 isBitPackedRecord: boolean; recordPackRecords: longint;
+                 { a tuple type: (integer, string) }
+                 isTupleRecord: boolean);
       tyPointer: (pointee: PType; untyped: boolean);
       tySet: (setElement: PType); { nil: the empty set [] }
       tyFile: (fileElement: PType; isText: boolean);
@@ -188,6 +190,10 @@ type
         literals, which may be empty; a value with a field width is an
         nkFormatted), of PNode }
       nkTemplate: (tmplParts: TPtrList);
+      { (a, b + 1) (objfpc): a tuple value, or the targets of (a, b) := e.
+        tupElems: of PNode; tupLong: H+ there (a string constant is an
+        ansistring); tupTemp: the hidden variable it is built in (Sema) }
+      nkTuple: (tupElems: TPtrList; tupLong: boolean; tupTemp: PDecl);
       { index: base[index]; field: base.fieldName; fieldDecl is a field,
         or (objfpc) a method or property of a class }
       { objfpc: an array property (obj.P[i, j], P[i] or obj[i], the default
@@ -252,6 +258,15 @@ type
         ansistring); vdAssign: x := e (Sema) }
       nkVarDecl: (vdVars: TPtrList; vdInit: PNode; vdAssignLoc: TLoc;
                   vdLong: boolean; vdAssign: PNode);
+      { (a, b) := e;  var (a, b) := e;  (objfpc): the elements of a tuple
+        assigned to variables, or to new ones. dsTargets: of PNode (Sema
+        makes them for var (a, b)); dsVars: of PDecl, empty unless var.
+        Sema: dsInit, the value kept in a hidden variable (nil: dsValue is
+        a tuple written out, built in its own), and dsAssigns, each target
+        assigned (of PNode) }
+      nkDestructure: (dsTargets, dsVars: TPtrList; dsValue: PNode;
+                      dsAssignLoc: TLoc; dsLong: boolean; dsInit: PNode;
+                      dsAssigns: TPtrList);
   end;
 
   { on [hVarName:] hClassName do hBody (objfpc); hVar (a dkVar, if
@@ -310,7 +325,7 @@ type
                    tsPointer, tsSet, tsFile, tsRoutine, tsString, tsClass,
                    tsClassRef, tsInterface, tsHelper,
                    tsUntyped, { an untyped parameter's (absent) type }
-                   tsArrayOfConst, tsOpenArray, tsDynArray);
+                   tsArrayOfConst, tsOpenArray, tsDynArray, tsTuple);
 
   PVariantPart = ^TVariantPart;
 
@@ -326,7 +341,14 @@ type
       tsNamed, tsPointer, tsClassRef: (tname: TIdent; tquals: TPtrList);
       { enumScoped: declared under $scopedenums on (the values only as
         TColor.Red) }
-      tsEnum: (enumNames: TPtrList; enumScoped: boolean); { of PIdent }
+      { enumTuple (objfpc, two names or more): the tuple type this is if
+        every name is the name of a type (Sema decides); not printed }
+      tsEnum: (enumNames: TPtrList; enumScoped: boolean; { of PIdent }
+               enumTuple: PTypeSpec);
+      { a tuple type (objfpc): (integer, string), (Min: integer, Max:
+        integer). tupNames: of PIdent (name = nil: none, the element is
+        Item1, Item2, ...); tupSpecs: of PTypeSpec }
+      tsTuple: (tupNames, tupSpecs: TPtrList);
       tsSubrange: (lo, hi: PNode);
       tsArray: (indexes: TPtrList; element: PTypeSpec; arrPacked: boolean;
                 arrBitPacked: boolean);
