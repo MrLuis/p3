@@ -1,0 +1,12 @@
+; Named arguments (objfpc): the call is one by position once checked. The
+; arguments are evaluated in the order of the parameters, and a parameter
+; left out takes its default value.
+; RUN: %pcc --mode=objfpc --emit-llvm %S/Inputs/namedargs.pas -o %t.ll
+; RUN: FileCheck %s < %t.ll
+; RUN: opt -passes=verify -disable-output %t.ll
+
+; n := Area(Scale := Second, Width := First)
+; CHECK-LABEL: define i32 @main(
+; CHECK: [[W:%[0-9]+]] = call i32 @pas.first(
+; CHECK-NEXT: [[S:%[0-9]+]] = call i32 @pas.second(
+; CHECK-NEXT: call i32 @pas.area(ptr null, i32 [[W]], i32 2, i32 [[S]])

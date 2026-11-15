@@ -1152,9 +1152,201 @@ end;
 
 { Can parameters params take n arguments (the rest from default values)? }
 function acceptsArgCount(const params: TPtrList; n: longint): boolean;
+var
+  i: longint;
 begin
-  acceptsArgCount := (n = params.count) or
-    ((n < params.count) and (PDecl(listGet(params, n))^.paramDefault <> nil));
+  acceptsArgCount := false;
+  if n > params.count then
+    exit;
+  for i := n to params.count - 1 do
+    if PDecl(listGet(params, i))^.paramDefault = nil then
+      exit;
+  acceptsArgCount := true;
+end;
+
+{ The value of an argument: of Name := value, the value. }
+function argValue(a: PNode): PNode;
+begin
+  if a^.kind = nkNamedArg then
+    exit(a^.naValue);
+  argValue := a;
+end;
+
+function hasNamedArgs(const args: TPtrList): boolean;
+var
+  i: longint;
+begin
+  hasNamedArgs := false;
+  for i := 0 to args.count - 1 do
+    if PNode(listGet(args, i))^.kind = nkNamedArg then
+      exit(true);
+end;
+
+{ The parameter of params that argument i of args is for (by its position,
+  or by its name), or nil. }
+function paramOfArg(const params, args: TPtrList; i: longint): PDecl;
+var
+  a: PNode;
+  k: longint;
+begin
+  paramOfArg := nil;
+  a := PNode(listGet(args, i));
+  if a^.kind = nkNamedArg then
+  begin
+    for k := 0 to params.count - 1 do
+      if PDecl(listGet(params, k))^.ident.name = a^.naName.name then
+        exit(PDecl(listGet(params, k)));
+    exit;
+  end;
+  if i < params.count then
+    paramOfArg := PDecl(listGet(params, i));
+end;
+
+{ Where the arguments of a call with named ones go: map holds, for each
+  argument, its parameter (of PDecl). Arguments by position come first and
+  are for the first parameters; each parameter is given once; one that is
+  not given has a default value. False if args do not fit, reported if
+  report. }
+function mapArgs(const params, args: TPtrList; var map: TPtrList;
+                 report: boolean; const callee: TIdent): boolean;
+var
+  given: TPtrList;
+  named: boolean;
+  i, at: longint;
+  a: PNode;
+begin
+  mapArgs := false;
+  listInit(map);
+  listInit(given);
+  for i := 0 to params.count - 1 do
+    listAdd(given, nil);
+  named := false;
+  for i := 0 to args.count - 1 do
+  begin
+    a := PNode(listGet(args, i));
+    at := i;
+    if a^.kind = nkNamedArg then
+    begin
+      named := true;
+      at := 0;
+      while at < params.count do
+      begin
+        if PDecl(listGet(params, at))^.ident.name = a^.naName.name then
+          break;
+        at := at + 1;
+      end;
+      if at = params.count then
+      begin
+        if report then
+        begin
+          ms('''');
+          maN(callee.spelling);
+          ma(''' has no parameter named ''');
+          maN(a^.naName.spelling);
+          ma('''');
+          errR(a^.naName.loc, identRange(a^.naName));
+        end;
+        exit;
+      end;
+    end
+    else if named then
+    begin
+      if report then
+      begin
+        ms('an argument without a name cannot follow a named one');
+        errR(a^.b, nodeRange(a));
+      end;
+      exit;
+    end
+    else if at >= params.count then
+    begin
+      if report then
+      begin
+        ms('too many arguments in call to ''');
+        maN(callee.spelling);
+        ma(''': it has ');
+        maI(params.count);
+        if params.count = 1 then
+          ma(' parameter')
+        else
+          ma(' parameters');
+        errR(a^.b, nodeRange(a));
+      end;
+      exit;
+    end;
+    if listGet(given, at) <> nil then
+    begin
+      if report then
+      begin
+        ms('parameter ''');
+        maN(PDecl(listGet(params, at))^.ident.spelling);
+        ma(''' is given twice');
+        errR(a^.b, nodeRange(a));
+        ms('its other argument is here');
+        note(PNode(listGet(given, at))^.b);
+      end;
+      exit;
+    end;
+    listSet(given, at, a);
+    listAdd(map, listGet(params, at));
+  end;
+  for i := 0 to params.count - 1 do
+    if (listGet(given, i) = nil) and
+       (PDecl(listGet(params, i))^.paramDefault = nil) then
+    begin
+      if report then
+      begin
+        ms('no argument for parameter ''');
+        maN(PDecl(listGet(params, i))^.ident.spelling);
+        ma(''' in call to ''');
+        maN(callee.spelling);
+        ma('''');
+        errR(callee.loc, identRange(callee));
+      end;
+      exit;
+    end;
+  mapArgs := true;
+end;
+
+var
+  argsFailed: boolean; { see orderArgs }
+
+{ The arguments args of a call to a routine with params, put in the order
+  of the parameters: a call with named arguments (Name := value) is
+  rewritten to one by position, where a parameter left out before the last
+  one given takes its default value. After an error argsFailed is set, for
+  checkCallArgs. }
+procedure orderArgs(const params: TPtrList; var args: TPtrList;
+                    const callee: TIdent);
+var
+  map, ordered: TPtrList;
+  i, j, count: longint;
+  found: PNode;
+begin
+  if not hasNamedArgs(args) then
+    exit;
+  if not mapArgs(params, args, map, true, callee) then
+  begin
+    argsFailed := true;
+    exit;
+  end;
+  count := 0;
+  for j := 0 to params.count - 1 do
+    for i := 0 to map.count - 1 do
+      if listGet(map, i) = listGet(params, j) then
+        count := j + 1;
+  listInit(ordered);
+  for j := 0 to count - 1 do
+  begin
+    found := nil;
+    for i := 0 to map.count - 1 do
+      if listGet(map, i) = listGet(params, j) then
+        found := argValue(PNode(listGet(args, i)));
+    if found = nil then
+      found := PDecl(listGet(params, j))^.paramDefault;
+    listAdd(ordered, found);
+  end;
+  args := ordered;
 end;
 
 function fold(e: PNode; var c: TConstant): boolean; forward;
@@ -7321,6 +7513,8 @@ end;
 
 function callCost(r: PDecl; const args, argTys: TPtrList; var penalty: longint): longint;
 var
+  map: TPtrList;
+  named: boolean;
   i, cost, c: longint;
   p: PDecl;
   pt, at: PType;
@@ -7328,15 +7522,24 @@ var
 begin
   penalty := 0;
   callCost := -1;
-  if not acceptsArgCount(r^.params, args.count) then
+  named := hasNamedArgs(args);
+  if named then
+  begin
+    if not mapArgs(r^.params, args, map, false, r^.ident) then
+      exit;
+  end
+  else if not acceptsArgCount(r^.params, args.count) then
     exit;
   cost := 0;
   for i := 0 to args.count - 1 do
   begin
-    p := PDecl(listGet(r^.params, i));
+    if named then
+      p := PDecl(listGet(map, i))
+    else
+      p := PDecl(listGet(r^.params, i));
     pt := p^.varType;
     at := PType(listGet(argTys, i));
-    arg := PNode(listGet(args, i));
+    arg := argValue(PNode(listGet(args, i)));
     if (pt = nil) or isError(pt) then
       exit;
     if (arg^.kind = nkSetCtor) and (at = arrayOfConstT) then
@@ -7438,34 +7641,43 @@ begin
   end;
 end;
 
-function hasProceduralParam(const cands: TPtrList; i: longint): boolean;
+function hasProceduralParam(const cands, args: TPtrList; i: longint): boolean;
 var
   k: longint;
-  r: PDecl;
+  p: PDecl;
 begin
   hasProceduralParam := false;
   for k := 0 to cands.count - 1 do
   begin
-    r := PDecl(listGet(cands, k));
-    if (i < r^.params.count) and (PDecl(listGet(r^.params, i))^.varType <> nil) and
-       (PDecl(listGet(r^.params, i))^.varType^.kind = tyRoutine) then
+    p := paramOfArg(PDecl(listGet(cands, k))^.params, args, i);
+    if (p <> nil) and (p^.varType <> nil) and (p^.varType^.kind = tyRoutine) then
       exit(true);
   end;
 end;
 
-function hasConstArrayParam(const cands: TPtrList; i: longint): boolean;
+function hasConstArrayParam(const cands, args: TPtrList; i: longint): boolean;
 var
   k: longint;
-  r: PDecl;
+  p: PDecl;
 begin
   hasConstArrayParam := false;
   for k := 0 to cands.count - 1 do
   begin
-    r := PDecl(listGet(cands, k));
-    if (i < r^.params.count) and (PDecl(listGet(r^.params, i))^.varType <> nil) and
-       (PDecl(listGet(r^.params, i))^.varType^.kind in [tyArrayOfConst, tyOpenArray]) then
+    p := paramOfArg(PDecl(listGet(cands, k))^.params, args, i);
+    if (p <> nil) and (p^.varType <> nil) and
+       (p^.varType^.kind in [tyArrayOfConst, tyOpenArray]) then
       exit(true);
   end;
+end;
+
+{ The parameters of r that a call with n arguments leaves to their default
+  values. }
+function defaultsUsed(r: PDecl; n: longint): longint;
+begin
+  if r^.params.count > n then
+    defaultsUsed := r^.params.count - n
+  else
+    defaultsUsed := 0;
 end;
 
 { [a, b, ...] passed for an array of const: any values it can hold. }
@@ -7505,7 +7717,7 @@ function resolveOverload(first: PDecl; const args: TPtrList; const callee: TIden
                          rng: TRange): PDecl;
 var
   cands, argTys: TPtrList;
-  i, cost, bestCost, penalty, bestPenalty: longint;
+  i, cost, bestCost, penalty, bestPenalty, defaults, bestDefaults: longint;
   r, best: PDecl;
   t: PType;
   a: PNode;
@@ -7519,11 +7731,11 @@ begin
   listInit(argTys);
   for i := 0 to args.count - 1 do
   begin
-    a := PNode(listGet(args, i));
+    a := argValue(PNode(listGet(args, i)));
     if a^.kind = nkFormatted then
       exit(first); { reported with the call's arguments }
     { [...] for an open array need not be a valid set }
-    if (a^.kind = nkSetCtor) and hasConstArrayParam(cands, i) then
+    if (a^.kind = nkSetCtor) and hasConstArrayParam(cands, args, i) then
     begin
       listAdd(argTys, arrayOfConstT);
       continue;
@@ -7531,7 +7743,7 @@ begin
     allowSlice := isSliceCall(a);
     { a routine's name: for a procedural parameter if a candidate has one
       here, else a call (a function without parameters) }
-    if isRoutineName(a) and hasProceduralParam(cands, i) then
+    if isRoutineName(a) and hasProceduralParam(cands, args, i) then
       t := nil
     else
       t := checkAllowingUntyped(a);
@@ -7540,9 +7752,13 @@ begin
       exit;
     listAdd(argTys, t);
   end;
+  { the best conversions of the arguments written decide; then the fewest
+    parameters left to their default values (a routine that takes just
+    these arguments is preferred); a tie is an error }
   best := nil;
   bestCost := -1;
   bestPenalty := 0;
+  bestDefaults := 0;
   tie := false;
   for i := 0 to cands.count - 1 do
   begin
@@ -7550,15 +7766,20 @@ begin
     cost := callCost(r, args, argTys, penalty);
     if cost < 0 then
       continue;
+    defaults := defaultsUsed(r, args.count);
     if (best = nil) or (cost < bestCost) or
-       ((cost = bestCost) and (penalty < bestPenalty)) then
+       ((cost = bestCost) and (penalty < bestPenalty)) or
+       ((cost = bestCost) and (penalty = bestPenalty) and
+        (defaults < bestDefaults)) then
     begin
       best := r;
       bestCost := cost;
       bestPenalty := penalty;
+      bestDefaults := defaults;
       tie := false;
     end
-    else if (cost = bestCost) and (penalty = bestPenalty) then
+    else if (cost = bestCost) and (penalty = bestPenalty) and
+            (defaults = bestDefaults) then
       tie := true;
   end;
   if (best <> nil) and not tie then
@@ -7576,6 +7797,11 @@ begin
   begin
     if i > 0 then
       ma(', ');
+    if PNode(listGet(args, i))^.kind = nkNamedArg then
+    begin
+      maN(PNode(listGet(args, i))^.naName.spelling);
+      ma(' := ');
+    end;
     t := PType(listGet(argTys, i));
     if t <> nil then
       bufAddTypeName(msg, t)
@@ -7588,7 +7814,8 @@ begin
   begin
     r := PDecl(listGet(cands, i));
     cost := callCost(r, args, argTys, penalty);
-    if (best = nil) or ((cost = bestCost) and (penalty = bestPenalty)) then
+    if (best = nil) or ((cost = bestCost) and (penalty = bestPenalty) and
+                        (defaultsUsed(r, args.count) = bestDefaults)) then
     begin
       ms('candidate: ');
       maRoutineHeading(r);
@@ -8425,6 +8652,14 @@ var
   p: PDecl;
   at, pt: PType;
 begin
+  if argsFailed then { named arguments that do not fit: reported }
+  begin
+    argsFailed := false;
+    for i := 0 to args.count - 1 do
+      if argValue(PNode(listGet(args, i)))^.kind <> nkFormatted then
+        check(argValue(PNode(listGet(args, i))));
+    exit;
+  end;
   { a call whose result is discarded still holds it for a while }
   if (calleeDecl <> nil) and (calleeDecl^.kind = dkRoutine) and
      calleeDecl^.isFunction and (calleeDecl^.resultType <> nil) and

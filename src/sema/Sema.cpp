@@ -203,6 +203,7 @@ class Checker : public StmtVisitor<Checker>,
   OwnedFlow *Flow = nullptr; ///< of the block whose statements are checked
   /// The variables the statements of that block declare (VarDeclStmt).
   std::vector<Decl *> *InlineVars = nullptr;
+  bool ArgsFailed = false; ///< see orderedArgs
   std::vector<RecordType *> TupleTypes; ///< see getTupleType
   unsigned HiddenVars = 0;              ///< see makeHiddenVar
   /// The scope of the variables declared in the statement sequence being
@@ -4964,7 +4965,136 @@ class Checker : public StmtVisitor<Checker>,
 
   /// Can parameters Params take N arguments (the rest from default values)?
   static bool acceptsArgCount(llvm::ArrayRef<VarDecl *> Params, size_t N) {
-    return N == Params.size() || (N < Params.size() && Params[N]->getDefault());
+    if (N > Params.size())
+      return false;
+    for (size_t I = N; I < Params.size(); ++I)
+      if (!Params[I]->getDefault())
+        return false;
+    return true;
+  }
+
+  /// The value of an argument: of Name := value, the value.
+  static Expr *argValue(Expr *Arg) {
+    if (auto *NA = llvm::dyn_cast<NamedArgExpr>(Arg))
+      return NA->getValue();
+    return Arg;
+  }
+
+  static bool hasNamedArgs(llvm::ArrayRef<Expr *> Args) {
+    for (Expr *A : Args)
+      if (llvm::isa<NamedArgExpr>(A))
+        return true;
+    return false;
+  }
+
+  /// The parameter of Params that argument I of Args is for (by its
+  /// position, or by its name), or null.
+  static VarDecl *paramOfArg(llvm::ArrayRef<VarDecl *> Params,
+                             llvm::ArrayRef<Expr *> Args, size_t I) {
+    if (auto *NA = llvm::dyn_cast<NamedArgExpr>(Args[I])) {
+      for (VarDecl *P : Params)
+        if (P->getName().Name == NA->getName().Name)
+          return P;
+      return nullptr;
+    }
+    return I < Params.size() ? Params[I] : nullptr;
+  }
+
+  /// Where the arguments of a call with named ones go: Map[I] is the index
+  /// in Params of the parameter of argument I. Arguments by position come
+  /// first and are for the first parameters; each parameter is given once;
+  /// one that is not given has a default value. False if Args do not fit,
+  /// reported if Callee is given.
+  bool mapArgs(llvm::ArrayRef<VarDecl *> Params, llvm::ArrayRef<Expr *> Args,
+               llvm::SmallVectorImpl<unsigned> &Map,
+               const Identifier *Callee) {
+    llvm::SmallVector<Expr *, 8> Given(Params.size(), nullptr);
+    bool Named = false;
+    for (size_t I = 0; I < Args.size(); ++I) {
+      Expr *A = Args[I];
+      auto *NA = llvm::dyn_cast<NamedArgExpr>(A);
+      size_t At = I;
+      if (NA) {
+        Named = true;
+        for (At = 0; At < Params.size(); ++At)
+          if (Params[At]->getName().Name == NA->getName().Name)
+            break;
+        if (At == Params.size()) {
+          if (Callee)
+            Diags.error(NA->getName().Loc,
+                        "'" + Callee->Spelling + "' has no parameter named '" +
+                            NA->getName().Spelling + "'",
+                        {NA->getName().getRange()});
+          return false;
+        }
+      } else if (Named) {
+        if (Callee)
+          Diags.error(A->getBeginLoc(),
+                      "an argument without a name cannot follow a named one",
+                      {A->getRange()});
+        return false;
+      } else if (At >= Params.size()) {
+        if (Callee)
+          Diags.error(A->getBeginLoc(),
+                      "too many arguments in call to '" + Callee->Spelling +
+                          "': it has " + llvm::Twine(Params.size()) +
+                          (Params.size() == 1 ? " parameter" : " parameters"),
+                      {A->getRange()});
+        return false;
+      }
+      if (Given[At]) {
+        if (Callee) {
+          Diags.error(A->getBeginLoc(),
+                      "parameter '" + Params[At]->getName().Spelling +
+                          "' is given twice",
+                      {A->getRange()});
+          Diags.note(Given[At]->getBeginLoc(), "its other argument is here");
+        }
+        return false;
+      }
+      Given[At] = A;
+      Map.push_back(static_cast<unsigned>(At));
+    }
+    for (size_t I = 0; I < Params.size(); ++I)
+      if (!Given[I] && !Params[I]->getDefault()) {
+        if (Callee)
+          Diags.error(Callee->Loc,
+                      "no argument for parameter '" +
+                          Params[I]->getName().Spelling + "' in call to '" +
+                          Callee->Spelling + "'",
+                      {Callee->getRange()});
+        return false;
+      }
+    return true;
+  }
+
+  /// The arguments of the call N to a routine with Params, in the order of
+  /// the parameters: a call with named arguments (Name := value) is
+  /// rewritten to one by position, where a parameter left out before the
+  /// last one given takes its default value. After an error ArgsFailed is
+  /// set, for checkCallArgs.
+  template <class NodeT>
+  llvm::ArrayRef<Expr *> orderedArgs(NodeT *N, llvm::ArrayRef<VarDecl *> Params,
+                                     const Identifier &Callee) {
+    llvm::ArrayRef<Expr *> Args = N->getArgs();
+    if (!hasNamedArgs(Args))
+      return Args;
+    llvm::SmallVector<unsigned, 8> Map;
+    if (!mapArgs(Params, Args, Map, &Callee)) {
+      ArgsFailed = true;
+      return Args;
+    }
+    unsigned Count = 0;
+    for (unsigned At : Map)
+      Count = std::max(Count, At + 1);
+    llvm::SmallVector<Expr *, 8> Ordered(Count, nullptr);
+    for (size_t I = 0; I < Args.size(); ++I)
+      Ordered[Map[I]] = argValue(Args[I]);
+    for (unsigned I = 0; I < Count; ++I)
+      if (!Ordered[I])
+        Ordered[I] = Params[I]->getDefault();
+    N->setArgs(Ctx.copyArray<Expr *>(Ordered));
+    return N->getArgs();
   }
 
   /// The cost of calling R with Args (types ArgTys; null: a routine's
@@ -4974,24 +5104,31 @@ class Checker : public StmtVisitor<Checker>,
                llvm::ArrayRef<Type *> ArgTys, unsigned &Penalty) {
     Penalty = 0;
     auto Params = R->getParams();
-    if (!acceptsArgCount(Params, Args.size()))
+    llvm::SmallVector<unsigned, 8> Map;
+    if (hasNamedArgs(Args)) {
+      if (!mapArgs(Params, Args, Map, nullptr))
+        return -1;
+    } else if (!acceptsArgCount(Params, Args.size())) {
       return -1;
+    }
     int Cost = 0;
     for (size_t I = 0; I < Args.size(); ++I) {
-      Type *PT = Params[I]->getType();
+      VarDecl *P = Params[Map.empty() ? I : Map[I]];
+      Expr *Arg = argValue(Args[I]);
+      Type *PT = P->getType();
       Type *AT = ArgTys[I];
       if (!PT || PT->isError())
         return -1;
-      if (auto *SC = llvm::dyn_cast<SetCtorExpr>(Args[I]);
+      if (auto *SC = llvm::dyn_cast<SetCtorExpr>(Arg);
           SC && AT == ArrayOfConstTy) {
-        int C = setCtorCost(SC, Params[I]);
+        int C = setCtorCost(SC, P);
         if (C < 0)
           return -1;
         Cost += C;
         continue;
       }
       if (auto *OA = llvm::dyn_cast<OpenArrayType>(PT)) {
-        if (!AT || !fitsOpenArray(Args[I], AT, OA))
+        if (!AT || !fitsOpenArray(Arg, AT, OA))
           return -1;
         Cost += AT == OA ? 0 : 1;
         continue;
@@ -5002,19 +5139,19 @@ class Checker : public StmtVisitor<Checker>,
         continue;
       }
       if (PT->isUntyped()) { // any variable, after the typed fits
-        if (!isVariableReference(Args[I]))
+        if (!isVariableReference(Arg))
           return -1;
         Cost += 100;
         continue;
       }
       if (AT->isUntyped())
         return -1;
-      if (Params[I]->isVarParam()) {
-        if (AT != PT || !isVariableReference(Args[I]))
+      if (P->isVarParam()) {
+        if (AT != PT || !isVariableReference(Arg))
           return -1;
         continue;
       }
-      if (!isAssignable(PT, AT) && !isPCharLiteral(PT, Args[I])) {
+      if (!isAssignable(PT, AT) && !isPCharLiteral(PT, Arg)) {
         if (!findConversion(AT, PT, false))
           return -1;
         Cost += 1000; // a record's := operator
@@ -5028,21 +5165,30 @@ class Checker : public StmtVisitor<Checker>,
 
   /// The routine of First's name that Args fit best: First itself unless
   /// it is overloaded. Null after a diagnostic (no fit, or a tie).
-  static bool hasConstArrayParam(llvm::ArrayRef<RoutineDecl *> Cands, size_t I) {
+  static bool hasConstArrayParam(llvm::ArrayRef<RoutineDecl *> Cands,
+                                 llvm::ArrayRef<Expr *> Args, size_t I) {
     for (RoutineDecl *R : Cands)
-      if (I < R->getParams().size() && R->getParams()[I]->getType() &&
-          (R->getParams()[I]->getType()->isArrayOfConst() ||
-           R->getParams()[I]->getType()->isOpenArray()))
+      if (VarDecl *P = paramOfArg(R->getParams(), Args, I);
+          P && P->getType() &&
+          (P->getType()->isArrayOfConst() || P->getType()->isOpenArray()))
         return true;
     return false;
   }
 
-  static bool hasProceduralParam(llvm::ArrayRef<RoutineDecl *> Cands, size_t I) {
+  static bool hasProceduralParam(llvm::ArrayRef<RoutineDecl *> Cands,
+                                 llvm::ArrayRef<Expr *> Args, size_t I) {
     for (RoutineDecl *R : Cands)
-      if (I < R->getParams().size() && R->getParams()[I]->getType() &&
-          llvm::isa<RoutineType>(R->getParams()[I]->getType()))
+      if (VarDecl *P = paramOfArg(R->getParams(), Args, I);
+          P && P->getType() && llvm::isa<RoutineType>(P->getType()))
         return true;
     return false;
+  }
+
+  /// The parameters of R that a call with N arguments leaves to their
+  /// default values.
+  static unsigned defaultsUsed(RoutineDecl *R, size_t N) {
+    size_t Count = R->getParams().size();
+    return Count > N ? static_cast<unsigned>(Count - N) : 0;
   }
 
   /// Does an expression of type A fit an open array of Elem without being
@@ -5189,18 +5335,21 @@ class Checker : public StmtVisitor<Checker>,
     if (Cands.size() < 2)
       return First;
     llvm::SmallVector<Type *, 4> ArgTys;
-    for (Expr *A : Args) {
+    for (Expr *Written : Args) {
+      Expr *A = argValue(Written);
       if (llvm::isa<FormattedExpr>(A))
         return First; // reported with the call's arguments
       // [...] for an open array need not be a valid set.
-      if (llvm::isa<SetCtorExpr>(A) && hasConstArrayParam(Cands, ArgTys.size())) {
+      if (llvm::isa<SetCtorExpr>(A) &&
+          hasConstArrayParam(Cands, Args, ArgTys.size())) {
         ArgTys.push_back(ArrayOfConstTy);
         continue;
       }
       AllowSlice = isSliceCall(A);
       // A routine's name: for a procedural parameter if a candidate has
       // one here, else a call (a function without parameters).
-      Type *T = isRoutineName(A) && hasProceduralParam(Cands, ArgTys.size())
+      Type *T = isRoutineName(A) &&
+                        hasProceduralParam(Cands, Args, ArgTys.size())
                     ? nullptr
                     : checkAllowingUntyped(A);
       AllowSlice = false;
@@ -5208,31 +5357,42 @@ class Checker : public StmtVisitor<Checker>,
         return nullptr;
       ArgTys.push_back(T);
     }
+    // The best conversions of the arguments written decide; then the
+    // fewest parameters left to their default values (a routine that takes
+    // just these arguments is preferred); a tie is an error.
     RoutineDecl *Best = nullptr;
     int BestCost = -1;
-    unsigned BestPenalty = 0;
+    unsigned BestPenalty = 0, BestDefaults = 0;
     bool Tie = false;
     for (RoutineDecl *R : Cands) {
       unsigned Penalty;
       int Cost = callCost(R, Args, ArgTys, Penalty);
       if (Cost < 0)
         continue;
+      unsigned Defaults = defaultsUsed(R, Args.size());
       if (!Best || Cost < BestCost ||
-          (Cost == BestCost && Penalty < BestPenalty)) {
+          (Cost == BestCost && Penalty < BestPenalty) ||
+          (Cost == BestCost && Penalty == BestPenalty &&
+           Defaults < BestDefaults)) {
         Best = R;
         BestCost = Cost;
         BestPenalty = Penalty;
+        BestDefaults = Defaults;
         Tie = false;
-      } else if (Cost == BestCost && Penalty == BestPenalty) {
+      } else if (Cost == BestCost && Penalty == BestPenalty &&
+                 Defaults == BestDefaults) {
         Tie = true;
       }
     }
     if (Best && !Tie)
       return Best;
     std::string Types;
-    for (size_t I = 0; I < ArgTys.size(); ++I)
-      Types += (I ? ", " : "") +
-               (ArgTys[I] ? ArgTys[I]->getName() : std::string("routine"));
+    for (size_t I = 0; I < ArgTys.size(); ++I) {
+      Types += I ? ", " : "";
+      if (auto *NA = llvm::dyn_cast<NamedArgExpr>(Args[I]))
+        Types += NA->getName().Spelling.str() + " := ";
+      Types += ArgTys[I] ? ArgTys[I]->getName() : std::string("routine");
+    }
     Diags.error(Callee.Loc,
                 (Best ? "ambiguous call to overloaded '"
                       : "no overload of '") +
@@ -5243,7 +5403,8 @@ class Checker : public StmtVisitor<Checker>,
     for (RoutineDecl *R : Cands) {
       unsigned Penalty;
       if (!Best || (callCost(R, Args, ArgTys, Penalty) == BestCost &&
-                    Penalty == BestPenalty))
+                    Penalty == BestPenalty &&
+                    defaultsUsed(R, Args.size()) == BestDefaults))
         Diags.note(R->getLocation(), "candidate: " + routineHeading(R));
     }
     return nullptr;
@@ -5931,6 +6092,13 @@ class Checker : public StmtVisitor<Checker>,
                      const Identifier &Callee, llvm::ArrayRef<Expr *> Args,
                      SourceRange CallRange) {
     Decl *R = CalleeDecl;
+    if (ArgsFailed) { // named arguments that do not fit: reported
+      ArgsFailed = false;
+      for (Expr *A : Args)
+        if (!llvm::isa<FormattedExpr>(argValue(A)))
+          check(argValue(A));
+      return;
+    }
     // A call whose result is discarded still holds it for a while.
     if (auto *RD = llvm::dyn_cast_or_null<RoutineDecl>(CalleeDecl);
         RD && RD->isFunction() && RD->getResultType() &&
@@ -7542,11 +7710,13 @@ public:
     }
     if (auto *R = llvm::dyn_cast<RoutineDecl>(D);
         R && (R->isProcedure() || !isISO())) // TP: discard a function result
-      return checkCallArgs(R, Callee, S->getArgs(), S->getRange());
+      return checkCallArgs(R, Callee, orderedArgs(S, R->getParams(), Callee),
+                           S->getRange());
     if (auto *V = llvm::dyn_cast<VarDecl>(D))
       if (auto *RT = llvm::dyn_cast_or_null<RoutineType>(V->getType());
           RT && !RT->isFunction())
-        return checkCallArgs(RT->getParams(), V, Callee, S->getArgs(),
+        return checkCallArgs(RT->getParams(), V, Callee,
+                             orderedArgs(S, RT->getParams(), Callee),
                              S->getRange());
     if (RoutineType *RT = proceduralMember(D)) {
       // FOnEvent(x) in a method or a with statement: through the member
@@ -7554,7 +7724,8 @@ public:
       if (check(Ref)->isError())
         return;
       S->setCalleeValue(Ref);
-      return checkCallArgs(RT->getParams(), nullptr, Callee, S->getArgs(),
+      return checkCallArgs(RT->getParams(), nullptr, Callee,
+                           orderedArgs(S, RT->getParams(), Callee),
                            S->getRange());
     }
 
@@ -8871,7 +9042,8 @@ public:
       if (check(Ref)->isError())
         return errorType();
       E->setCalleeValue(Ref);
-      checkCallArgs(RT->getParams(), nullptr, Callee, E->getArgs(), E->getRange());
+      checkCallArgs(RT->getParams(), nullptr, Callee,
+                    orderedArgs(E, RT->getParams(), Callee), E->getRange());
       if (RT->isFunction())
         return RT->getResult();
       Diags.error(Callee.Loc,
@@ -8882,15 +9054,17 @@ public:
 
     if (auto *R = llvm::dyn_cast<RoutineDecl>(D)) {
       if (R->isFunction()) {
-        checkCallArgs(R, Callee, E->getArgs(), E->getRange());
+        checkCallArgs(R, Callee, orderedArgs(E, R->getParams(), Callee),
+                      E->getRange());
         return R->getResultType();
       }
       if (ClassType *C = constructedThroughSelf(R, W)) {
-        checkCallArgs(R, Callee, E->getArgs(), E->getRange());
+        checkCallArgs(R, Callee, orderedArgs(E, R->getParams(), Callee),
+                      E->getRange());
         return C;
       }
       for (Expr *Arg : E->getArgs())
-        check(Arg);
+        check(argValue(Arg));
       Diags.error(Callee.Loc,
                   "procedure '" + Callee.Spelling + "' does not return a value",
                   {Callee.getRange()});
@@ -8900,7 +9074,8 @@ public:
     if (auto *V = llvm::dyn_cast<VarDecl>(D))
       if (auto *RT = llvm::dyn_cast_or_null<RoutineType>(V->getType());
           RT && RT->isFunction()) {
-        checkCallArgs(RT->getParams(), V, Callee, E->getArgs(), E->getRange());
+        checkCallArgs(RT->getParams(), V, Callee,
+                      orderedArgs(E, RT->getParams(), Callee), E->getRange());
         return RT->getResult();
       }
 
@@ -8949,6 +9124,17 @@ public:
         checkWritten(Parts[I], /*Template=*/true);
     }
     return Ctx.getAnsiStringType();
+  }
+
+  /// Name := value where the parameters have no names to give (a standard
+  /// routine, a typecast).
+  Type *visitNamedArgExpr(NamedArgExpr *E) {
+    check(E->getValue());
+    Diags.error(E->getName().Loc,
+                "a named argument is only allowed in a call to a declared "
+                "routine",
+                {E->getName().getRange()});
+    return errorType();
   }
 
   Type *visitFormattedExpr(FormattedExpr *E) {
@@ -9221,7 +9407,8 @@ public:
     Identifier Name;
     Name.Spelling = "procedural value";
     Name.Loc = E->getBeginLoc();
-    checkCallArgs(RT->getParams(), nullptr, Name, E->getArgs(), E->getRange());
+    checkCallArgs(RT->getParams(), nullptr, Name,
+                  orderedArgs(E, RT->getParams(), Name), E->getRange());
     return RT;
   }
 
@@ -9948,7 +10135,7 @@ public:
   /// null for a call without a value, or the error type.
   Type *checkMethodCall(IndirectCallExpr *E) {
     if (auto *I = llvm::dyn_cast<InheritedExpr>(E->getCallee()))
-      return checkInheritedCall(I, E->getArgs(), E->getRange());
+      return checkInheritedCall(I, E, E->getRange());
     auto *F = llvm::cast<FieldExpr>(E->getCallee());
     Decl *D = resolveMember(F);
     if (D && diagOwnedFree(F))
@@ -9977,7 +10164,8 @@ public:
         check(A);
       return errorType();
     }
-    checkCallArgs(R, F->getField(), E->getArgs(), E->getRange());
+    checkCallArgs(R, F->getField(),
+                  orderedArgs(E, R->getParams(), F->getField()), E->getRange());
     Type *T = methodResultType(R, F);
     if (T)
       F->setType(T);
@@ -10043,8 +10231,9 @@ public:
   }
 
   /// inherited [Name] [(Args)] called: the result type or null.
-  Type *checkInheritedCall(InheritedExpr *I, llvm::ArrayRef<Expr *> Args,
+  Type *checkInheritedCall(InheritedExpr *I, IndirectCallExpr *Call,
                            SourceRange Range) {
+    llvm::ArrayRef<Expr *> Args = Call->getArgs();
     bool Nothing;
     RoutineDecl *R = resolveInherited(I, Nothing);
     if (R) { // objfpc: overloads; a bare inherited means the same heading
@@ -10067,7 +10256,7 @@ public:
     }
     if (!R) {
       for (Expr *A : Args)
-        check(A);
+        check(argValue(A));
       return Nothing ? nullptr : errorType();
     }
     Identifier Name = I->isBare() ? R->getName() : I->getName();
@@ -10087,7 +10276,7 @@ public:
       Name.Loc = I->getBeginLoc();
       checkCallArgs(R, Name, I->getImplicitArgs(), Range);
     } else {
-      checkCallArgs(R, Name, Args, Range);
+      checkCallArgs(R, Name, orderedArgs(Call, R->getParams(), Name), Range);
     }
     Type *T = R->isFunction() ? R->getResultType() : nullptr;
     if (T)

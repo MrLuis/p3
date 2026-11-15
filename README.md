@@ -823,15 +823,54 @@ Free Pascal's `enumerator` directives and `operator Enumerator`.
 `procedure P(a: integer; b: integer = 1; const s: string = 'x');` can be called
 `P(0)` or `P(0, 2)`, and a function whose parameters all have defaults can be
 used without arguments or parentheses. Value and `const` parameters only, one
-name per default, and every parameter after one needs one too. The value is a
+name per default. A parameter after one with a default need not have one
+(unlike Free Pascal): it is then given by name, or by position with all those
+before it. The value is a
 constant that fits the parameter: ordinals, reals, strings, sets, `nil`. It is
 passed by the caller, as if written in the call, and comes from the heading the
 call sees: a routine's or method's implementation may leave defaults out or
 repeat them with the same values, and an override has its own. They also work
 on `forward` and interface headings, in units, on methods, constructors,
-interface methods and procedural types. Overloads count them when choosing,
-and a tie is an error. Unlike Free Pascal, a value that does not fit the
-parameter's range (`b: byte = 300`) is an error.
+interface methods and procedural types. Unlike Free Pascal, a value that does
+not fit the parameter's range (`b: byte = 300`) is an error.
+
+**Named arguments** (objfpc; pcc's own, not Free Pascal's): `Name := value`
+among the arguments of a call is the argument for the parameter `Name`, so
+defaults in the middle of a list can be skipped and a call says what its
+values mean.
+
+```pascal
+procedure Connect(Host: string; Port: Integer = 5432;
+                  Timeout: Integer = 30; UseTls: Boolean = True);
+
+Connect('db.local');
+Connect('db.local', Timeout := 5);              { skips Port }
+Connect(Host := 'db.local', UseTls := False);
+```
+
+- Arguments by position come first and are for the first parameters; named
+  ones follow, in any order. Each parameter is given once, and one that is
+  not given must have a default value.
+- They work wherever the parameters have names: routines, methods,
+  constructors, `inherited` calls, interface methods (the names and
+  defaults of the interface's heading) and procedural variables (those of
+  the procedural type). Not the standard routines (`writeln`, `length`,
+  ...) nor typecasts. `var` and `out` parameters can be named too.
+- The arguments are evaluated in the order of the parameters, not in the
+  order written.
+- Renaming a parameter breaks the callers that name it: parameter names
+  are part of a routine's interface.
+
+**Overloads with defaults**: the arguments written decide first, by their
+conversions, as before. Among the routines that fit equally well, the one
+that leaves the fewest parameters to their default values is called, so a
+routine that takes exactly the arguments written beats one that needs
+defaults (`P(1)` calls `P(a: Integer)`, not `P(a: Integer; b: Integer = 0)`;
+Free Pascal 3.2.2 rejects that call as ambiguous, as pcc did). A tie that
+remains is
+an error that lists the candidates, never a silent choice. A named argument
+only fits the routines that have a parameter of that name, which can tell
+overloads apart: `Show(3, Text := 'x')`.
 
 **Absolute variables** (not in `--mode=iso`), as in Turbo and Free Pascal:
 `var bytes: array[0..3] of byte absolute n;` declares another view of `n`,

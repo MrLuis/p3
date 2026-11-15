@@ -48,7 +48,7 @@ type
     nkIntegerLit, nkRealLit, nkStringLit, nkNameRef, nkParen, nkUnary,
     nkBinary, nkCall, nkFormatted, nkIndex, nkField, nkNil, nkDeref,
     nkSetCtor, nkAddrOf, nkAggregate, nkIndirectCall, nkInherited, nkMove,
-    nkTemplate, nkTuple,
+    nkTemplate, nkTuple, nkNamedArg,
     { statements }
     nkEmpty, nkCompound, nkProcCall, nkAssign, nkIf, nkWhile, nkRepeat,
     nkFor, nkCase, nkWith, nkLabeled, nkGoto, nkIndirectCallStmt,
@@ -194,6 +194,10 @@ type
         tupElems: of PNode; tupLong: H+ there (a string constant is an
         ansistring); tupTemp: the hidden variable it is built in (Sema) }
       nkTuple: (tupElems: TPtrList; tupLong: boolean; tupTemp: PDecl);
+      { naName := naValue among the arguments of a call (objfpc): the
+        argument for the parameter naName. Sema puts the arguments of such
+        a call in the order of the parameters, without these nodes }
+      nkNamedArg: (naName: TIdent; naValue: PNode);
       { index: base[index]; field: base.fieldName; fieldDecl is a field,
         or (objfpc) a method or property of a class }
       { objfpc: an array property (obj.P[i, j], P[i] or obj[i], the default

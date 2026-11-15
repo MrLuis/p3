@@ -316,6 +316,7 @@ public:
   void setVarCast() { VarCast = true; }
   const Identifier &getCallee() const { return Callee; }
   llvm::ArrayRef<Expr *> getArgs() const { return Args; }
+  void setArgs(llvm::ArrayRef<Expr *> A) { Args = A; }
   Decl *getDecl() const { return D; }
   void setDecl(Decl *NewD) { D = NewD; }
   WithContext *getWith() const { return With; }
@@ -336,6 +337,21 @@ public:
       : Expr(EK_Template, R), Parts(Parts) {}
   llvm::ArrayRef<Expr *> getParts() const { return Parts; }
   static bool classof(const Expr *E) { return E->getKind() == EK_Template; }
+};
+
+/// Name := Value among the arguments of a call (objfpc): the argument for
+/// the parameter Name. Sema puts the arguments of such a call in the order
+/// of the parameters, without these nodes.
+class NamedArgExpr final : public Expr {
+  Identifier Name;
+  Expr *Value;
+
+public:
+  NamedArgExpr(SourceRange R, Identifier Name, Expr *Value)
+      : Expr(EK_NamedArg, R), Name(Name), Value(Value) {}
+  const Identifier &getName() const { return Name; }
+  Expr *getValue() const { return Value; }
+  static bool classof(const Expr *E) { return E->getKind() == EK_NamedArg; }
 };
 
 /// A write parameter with field width: `e:w` or `e:w:p` (ISO 6.9.3).
@@ -535,6 +551,7 @@ public:
       : Expr(EK_IndirectCall, R), Callee(Callee), Args(Args) {}
   Expr *getCallee() const { return Callee; }
   llvm::ArrayRef<Expr *> getArgs() const { return Args; }
+  void setArgs(llvm::ArrayRef<Expr *> A) { Args = A; }
   static bool classof(const Expr *E) { return E->getKind() == EK_IndirectCall; }
 };
 
@@ -600,6 +617,7 @@ public:
       : Stmt(SK_ProcCall, R), Callee(Callee), Args(Args), HasParens(HasParens) {}
   const Identifier &getCallee() const { return Callee; }
   llvm::ArrayRef<Expr *> getArgs() const { return Args; }
+  void setArgs(llvm::ArrayRef<Expr *> A) { Args = A; }
   bool hasParens() const { return HasParens; }
   Decl *getDecl() const { return D; }
   void setDecl(Decl *NewD) { D = NewD; }

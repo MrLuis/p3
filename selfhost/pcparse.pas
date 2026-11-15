@@ -2203,23 +2203,13 @@ var
   vk: TVarKind;
   i: longint;
   lastName: PIdent;
-  seenDefault, untyped, defaultOK, isOut, isConstRef: boolean;
+  untyped, defaultOK, isOut, isConstRef: boolean;
   defValue: PNode;
   eqLoc: TLoc;
   v: PDecl;
 
-  { once a parameter has a default value, the following ones need one }
-  procedure needsDefault(const n: TIdent);
-  begin
-    if seenDefault then
-      diagErrorR(n.loc, 'parameter ''' + nameStr(n.spelling) +
-                 ''' needs a default value, as a parameter before it has one',
-                 identRange(n));
-  end;
-
 begin
   lparen := consumeToken; { '(' or '[' }
-  seenDefault := false;
   repeat
     if tok.kind in [tkKwProcedure, tkKwFunction] then
     begin
@@ -2256,7 +2246,6 @@ begin
       ts^.rtIsFunction := isFunction;
       ts^.rtParams := inner;
       ts^.rtResult := resultSpec;
-      needsDefault(name);
       listAdd(params, newVar(name, ts, vkValueParam));
       continue;
     end;
@@ -2344,8 +2333,6 @@ begin
     end;
     for i := 0 to names.count - 1 do
     begin
-      if defValue = nil then
-        needsDefault(PIdent(listGet(names, i))^);
       v := newVar(PIdent(listGet(names, i))^, ts, vk);
       if defaultOK then
         v^.paramDefault := defValue;
@@ -2353,7 +2340,6 @@ begin
       v^.isConstRef := isConstRef;
       listAdd(params, v);
     end;
-    seenDefault := seenDefault or defaultOK;
   until not tryConsume(tkSemi);
 
   if not expect(close, 'after parameters') then
@@ -4573,6 +4559,7 @@ end;
 
 function parseActualParams(var args: TPtrList; allowFormat: boolean): boolean;
 var
+  name: TIdent;
   lparen: TLoc;
   e, width, precision, f: PNode;
   ok: boolean;
@@ -4592,6 +4579,28 @@ begin
     exit(false);
   end;
   repeat
+    { Name := value: the argument for the parameter Name (objfpc) }
+    if (tok.kind = tkIdentifier) and (peekKind = tkColonEqual) and
+       (mode <> lmISO) then
+    begin
+      name := makeIdentifier(tok);
+      consumeToken;
+      consumeToken;
+      if mode <> lmObjFPC then
+        diagErrorR(name.loc, 'named arguments need --mode=objfpc',
+                   identRange(name));
+      e := parseExpression;
+      if e = nil then
+      begin
+        skipUntil([tkComma, tkRParen, tkSemi, tkKwEnd]);
+        continue;
+      end;
+      f := newNode(nkNamedArg, name.loc, prevTokEnd);
+      f^.naName := name;
+      f^.naValue := e;
+      listAdd(args, f);
+      continue;
+    end;
     e := parseExpression;
     if e = nil then
     begin

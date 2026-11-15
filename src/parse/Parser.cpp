@@ -1937,15 +1937,6 @@ TypeSpec *Parser::parseTypeHelper(SourceLocation Start, bool Record) {
 bool Parser::parseFormalParams(llvm::SmallVectorImpl<VarDecl *> &Params,
                                tok::TokenKind Close) {
   SourceLocation LParen = consumeToken(); // '(' or '['
-  bool SeenDefault = false;
-  // Once a parameter has a default value, the following ones need one.
-  auto NeedsDefault = [&](const Identifier &N) {
-    if (SeenDefault)
-      Diags.error(N.Loc,
-                  "parameter '" + N.Spelling +
-                      "' needs a default value, as a parameter before it has one",
-                  {N.getRange()});
-  };
   do {
     if (Tok.isOneOf(tok::kw_procedure, tok::kw_function)) {
       // procedure p(params) / function f(params): T
@@ -1973,7 +1964,6 @@ bool Parser::parseFormalParams(llvm::SmallVectorImpl<VarDecl *> &Params,
                                              IsFunction,
                                              Ctx.copyArray<VarDecl *>(Inner),
                                              Result);
-      NeedsDefault(Name);
       Params.push_back(Ctx.create<VarDecl>(Name, TS, VarDecl::ValueParam));
       continue;
     }
@@ -2043,8 +2033,6 @@ bool Parser::parseFormalParams(llvm::SmallVectorImpl<VarDecl *> &Params,
       }
     }
     for (const Identifier &N : Names) {
-      if (!Default)
-        NeedsDefault(N);
       auto *V = Ctx.create<VarDecl>(
           N, TS,
           IsVar ? VarDecl::VarParam
@@ -2057,7 +2045,6 @@ bool Parser::parseFormalParams(llvm::SmallVectorImpl<VarDecl *> &Params,
         V->setConstRefParam();
       Params.push_back(V);
     }
-    SeenDefault |= DefaultOK;
   } while (tryConsume(tok::semi));
 
   if (!expect(Close, "after parameters")) {
@@ -3262,6 +3249,24 @@ bool Parser::parseActualParams(llvm::SmallVectorImpl<Expr *> &Args,
   }
 
   do {
+    // Name := value: the argument for the parameter Name (objfpc)
+    if (Tok.is(tok::identifier) && peekToken().is(tok::colon_equal) &&
+        LangOpts.Mode != LangMode::ISO) {
+      Identifier Name = makeIdentifier(Tok);
+      consumeToken();
+      consumeToken();
+      if (!LangOpts.ObjKeywords)
+        Diags.error(Name.Loc, "named arguments need --mode=objfpc",
+                    {Name.getRange()});
+      Expr *V = parseExpression();
+      if (!V) {
+        skipUntil({tok::comma, tok::r_paren, tok::semi, tok::kw_end});
+        continue;
+      }
+      Args.push_back(Ctx.create<NamedArgExpr>(SourceRange(Name.Loc, PrevTokEnd),
+                                              Name, V));
+      continue;
+    }
     Expr *E = parseExpression();
     if (!E) {
       skipUntil({tok::comma, tok::r_paren, tok::semi, tok::kw_end});

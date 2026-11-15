@@ -1,0 +1,64 @@
+; Named arguments (objfpc): Name := value is the argument for the parameter
+; Name. Arguments by position come first, a parameter is given once, and
+; one that is not given needs a default value (which it may have anywhere
+; in the list). Overloads: the arguments written decide, then the fewest
+; parameters left to their default values; a tie is an error.
+; RUN: not %pcc --mode=objfpc -ferror-limit=0 -c %S/Inputs/namedargs/errors.pas -o %t.o 2>&1 | FileCheck %s
+; CHECK: errors.pas:55:11: error: 'Connect' has no parameter named 'Hots'
+; CHECK: errors.pas:56:16: error: parameter 'Host' is given twice
+; CHECK: errors.pas:56:11: note: its other argument is here
+; CHECK: errors.pas:57:22: error: parameter 'Port' is given twice
+; CHECK: errors.pas:57:11: note: its other argument is here
+; CHECK: errors.pas:58:24: error: an argument without a name cannot follow a named one
+; CHECK: errors.pas:59:3: error: no argument for parameter 'Host' in call to 'Connect'
+; CHECK: errors.pas:60:22: error: parameter 'Timeout' is given twice
+; CHECK: errors.pas:60:19: note: its other argument is here
+; CHECK: errors.pas:61:24: error: cannot pass a value of type 'char' to parameter 'Port' of type 'integer'
+; CHECK: errors.pas:62:19: error: cannot pass a value of type 'integer' to parameter 'Host' of type 'ansistring'
+; CHECK: errors.pas:63:3: error: too few arguments in call to 'Mid': expected 3, got 1
+; CHECK: errors.pas:13:1: note: 'Mid' declared here
+; CHECK: errors.pas:64:3: error: too few arguments in call to 'Mid': expected 3, got 2
+; CHECK: errors.pas:13:1: note: 'Mid' declared here
+; CHECK: errors.pas:65:3: error: no argument for parameter 'A' in call to 'Mid'
+; CHECK: errors.pas:70:13: error: 'F' has no parameter named 'D'
+; CHECK: errors.pas:73:8: error: no overload of 'G' takes arguments (B := integer)
+; CHECK: errors.pas:22:1: note: candidate: G(integer): integer
+; CHECK: errors.pas:27:1: note: candidate: G(integer; integer): integer
+; CHECK: errors.pas:74:8: error: no overload of 'G' takes arguments (integer, B := string of length 3)
+; CHECK: errors.pas:22:1: note: candidate: G(integer): integer
+; CHECK: errors.pas:27:1: note: candidate: G(integer; integer): integer
+; CHECK: errors.pas:75:3: error: ambiguous call to overloaded 'H' with arguments (integer)
+; CHECK: errors.pas:32:1: note: candidate: H(integer; integer)
+; CHECK: errors.pas:36:1: note: candidate: H(integer; real)
+; CHECK: errors.pas:78:18: error: argument for 'var' parameter 'X' must be a variable
+; CHECK: errors.pas:80:11: error: a named argument is only allowed in a call to a declared routine
+; CHECK: errors.pas:81:12: error: a named argument is only allowed in a call to a declared routine
+; CHECK: errors.pas:82:16: error: a named argument is only allowed in a call to a declared routine
+; CHECK: errors.pas:83:3: error: no argument for parameter 'A' in call to 'p'
+; CHECK: errors.pas:84:13: error: 'p' has no parameter named 'Z'
+; CHECK: errors.pas:85:5: error: no argument for parameter 'A' in call to 'M'
+; CHECK: errors.pas:87:15: error: a named argument is only allowed in a call to a declared routine
+; CHECK: errors.pas:88:35: error: use of undeclared identifier 'nope'; did you mean 'copy'?
+; CHECK-NOT: error:
+;
+; RUN: not %pcc --mode=tp -c %S/Inputs/namedargs/tp.pas -o %t.o 2>&1 | FileCheck --check-prefix=TP %s
+; TP: tp.pas:6:8: error: named arguments need --mode=objfpc
+;
+; Sema puts the arguments in the order of the parameters; one left out
+; before the last one given is its default value.
+; RUN: %pcc --mode=objfpc --emit-ast %S/Inputs/namedargs/ast.pas -o - | FileCheck --check-prefix=AST %s
+; AST: ProcCallStmt 'connect' <7:3>
+; AST-NEXT: CharLiteralExpr "a" : char <7:11>
+; AST-NEXT: IntegerLiteralExpr 5432 : integer <2:49>
+; AST-NEXT: IntegerLiteralExpr 5 : integer <7:27>
+; AST-NEXT: ProcCallStmt 'connect' <8:3>
+; AST-NEXT: CharLiteralExpr "b" : char <8:36>
+; AST-NEXT: IntegerLiteralExpr 5432 : integer <2:49>
+; AST-NEXT: IntegerLiteralExpr 30 : integer <2:74>
+; AST-NEXT: NameRefExpr 'false' constant : boolean <8:21>
+;
+; RUN: %pcc --mode=objfpc --emit-parse-tree %S/Inputs/namedargs/ast.pas -o - | FileCheck --check-prefix=TREE %s
+; TREE: NamedArgExpr 'timeout' <7:16>
+; TREE-NEXT: IntegerLiteralExpr 5 <7:27>
+; TREE: NamedArgExpr 'usetls' <8:11>
+; TREE: NamedArgExpr 'host' <8:28>

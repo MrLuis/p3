@@ -6861,6 +6861,10 @@ public:
     llvm_unreachable("formatted expressions are handled by emitWriteArg");
   }
 
+  llvm::Value *visitNamedArgExpr(NamedArgExpr *) {
+    llvm_unreachable("Sema puts named arguments in the parameters' order");
+  }
+
   llvm::Value *visitIndirectCallExpr(IndirectCallExpr *E) {
     Expr *Callee = E->getCallee();
     if (auto *I = llvm::dyn_cast<InheritedExpr>(Callee))

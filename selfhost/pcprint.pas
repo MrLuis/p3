@@ -1429,6 +1429,14 @@ begin
           visitExpr(PNode(listGet(e^.tupElems, i)));
         indent := indent - 2;
       end;
+    nkNamedArg:
+      begin
+        lineName('NamedArgExpr ''', e^.naName.name);
+        endExpr(e);
+        indent := indent + 2;
+        visitExpr(e^.naValue);
+        indent := indent - 2;
+      end;
     nkFormatted:
       begin
         line('FormattedExpr');

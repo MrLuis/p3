@@ -38,6 +38,11 @@
 ; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-llvm --extra="-g -o -" --modes=objfpc --ref pcc --new %t.pcc %S/../run/tuple.pas %S/../run/tuple-more.pas %S/../run/tuple-targets.pas %S/../codegen/Inputs/tuple.pas | FileCheck %s
 ; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-ast --extra="-o -" --modes=tp,objfpc --ref pcc --new %t.pcc %S/../run/tuple.pas %S/../run/tuple-more.pas %S/../run/tuple-targets.pas %S/../sema/Inputs/tuple | FileCheck %s
 ; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-parse-tree --extra="-o -" --modes=tp,objfpc --ref pcc --new %t.pcc %S/../run/tuple.pas %S/../run/tuple-more.pas %S/../run/tuple-targets.pas %S/../sema/Inputs/tuple | FileCheck %s
+; Named arguments (objfpc).
+; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-llvm --extra="-o -" --modes=tp,objfpc --ref pcc --new %t.pcc %S/../run/namedargs.pas %S/../codegen/Inputs/namedargs.pas %S/../sema/Inputs/namedargs %S/../sema/Inputs/defaults | FileCheck %s
+; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-llvm --extra="-g -o -" --modes=objfpc --ref pcc --new %t.pcc %S/../run/namedargs.pas %S/../codegen/Inputs/namedargs.pas | FileCheck %s
+; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-ast --extra="-o -" --modes=tp,objfpc --ref pcc --new %t.pcc %S/../run/namedargs.pas %S/../sema/Inputs/namedargs | FileCheck %s
+; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-parse-tree --extra="-o -" --modes=tp,objfpc --ref pcc --new %t.pcc %S/../run/namedargs.pas %S/../sema/Inputs/namedargs | FileCheck %s
 ; Separate units (S11): the unit modules and the program importing them.
 ; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-llvm --extra="-I %S/../run/Inputs/units/lib -o -" --modes=tp --ref pcc --new %t.pcc %S/../run/Inputs/units | FileCheck %s
 ; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-llvm --extra="-I %S/../run/Inputs/units/lib -fseparate-units -g -o -" --modes=tp --ref pcc --new %t.pcc %S/../run/Inputs/units | FileCheck %s

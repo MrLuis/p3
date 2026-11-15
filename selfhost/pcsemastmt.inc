@@ -2090,7 +2090,7 @@ begin
 end;
 
 { inherited [name] [(args)] called: the result type or nil. }
-function checkInheritedCall(e: PNode; const args: TPtrList; callRange: TRange): PType;
+function checkInheritedCall(e: PNode; var args: TPtrList; callRange: TRange): PType;
 var
   r, p, same: PDecl;
   cands: TPtrList;
@@ -2130,7 +2130,7 @@ begin
   if r = nil then
   begin
     for i := 0 to args.count - 1 do
-      check(PNode(listGet(args, i)));
+      check(argValue(PNode(listGet(args, i))));
     if not nothing then
       checkInheritedCall := errorType;
     exit;
@@ -2164,7 +2164,10 @@ begin
     checkCallArgs(r^.params, r, name, e^.inhArgs, callRange);
   end
   else
+  begin
+    orderArgs(r^.params, args, name);
     checkCallArgs(r^.params, r, name, args, callRange);
+  end;
   if r^.isFunction then
   begin
     e^.typ := r^.resultType;
@@ -2276,6 +2279,7 @@ begin
     exit(errorType);
   end;
   f := d;
+  orderArgs(f^.params, e^.args, callee^.fieldName);
   checkCallArgs(f^.params, f, callee^.fieldName, e^.args, nodeRange(e));
   t := methodResultType(f, callee);
   if t <> nil then
@@ -2634,12 +2638,14 @@ begin
   if (d^.kind = dkRoutine) and (not d^.isFunction or not isISO) then
   begin
     { Turbo/FPC: a function result may be discarded }
+    orderArgs(d^.params, s^.args, s^.callee);
     checkCallArgs(d^.params, d, s^.callee, s^.args, nodeRange(s));
     exit;
   end;
   if (d^.kind = dkVar) and (d^.varType <> nil) and (d^.varType^.kind = tyRoutine) and
      (d^.varType^.routineResult = nil) then
   begin
+    orderArgs(d^.varType^.routineParams, s^.args, s^.callee);
     checkCallArgs(d^.varType^.routineParams, d, s^.callee, s^.args, nodeRange(s));
     exit;
   end;
@@ -2650,6 +2656,7 @@ begin
     if isError(check(ref)) then
       exit;
     s^.callValue := ref;
+    orderArgs(proceduralMember(d)^.routineParams, s^.args, s^.callee);
     checkCallArgs(proceduralMember(d)^.routineParams, nil, s^.callee, s^.args, nodeRange(s));
     exit;
   end;
@@ -2855,6 +2862,7 @@ begin
   name.name := nil;
   name.spelling := intern('procedural value');
   name.loc := e^.b;
+  orderArgs(t^.routineParams, e^.args, name);
   checkCallArgs(t^.routineParams, nil, name, e^.args, nodeRange(e));
   checkIndirectCallee := t;
 end;
@@ -4549,6 +4557,7 @@ begin
     if isError(check(ref)) then
       exit;
     e^.callValue := ref;
+    orderArgs(proceduralMember(d)^.routineParams, e^.args, e^.callee);
     checkCallArgs(proceduralMember(d)^.routineParams, nil, e^.callee, e^.args, nodeRange(e));
     if proceduralMember(d)^.routineResult <> nil then
       exit(proceduralMember(d)^.routineResult);
@@ -4562,16 +4571,18 @@ begin
   begin
     if d^.isFunction then
     begin
+      orderArgs(d^.params, e^.args, e^.callee);
       checkCallArgs(d^.params, d, e^.callee, e^.args, nodeRange(e));
       exit(d^.resultType);
     end;
     if constructedThroughSelf(d, w) <> nil then
     begin
+      orderArgs(d^.params, e^.args, e^.callee);
       checkCallArgs(d^.params, d, e^.callee, e^.args, nodeRange(e));
       exit(constructedThroughSelf(d, w));
     end;
     for i := 0 to e^.args.count - 1 do
-      check(argNode(e, i));
+      check(argValue(argNode(e, i)));
     ms('procedure ');
     maCallee(e^.callee);
     ma(' does not return a value');
@@ -4581,6 +4592,7 @@ begin
   if (d^.kind = dkVar) and (d^.varType <> nil) and (d^.varType^.kind = tyRoutine) and
      (d^.varType^.routineResult <> nil) then
   begin
+    orderArgs(d^.varType^.routineParams, e^.args, e^.callee);
     checkCallArgs(d^.varType^.routineParams, d, e^.callee, e^.args, nodeRange(e));
     exit(d^.varType^.routineResult);
   end;
@@ -5371,6 +5383,15 @@ begin
           else
             checkWritten(PNode(listGet(e^.tmplParts, i)), true);
         visitExpr := ansiStringType;
+      end;
+    nkNamedArg:
+      begin
+        { where the parameters have no names to give (a standard routine,
+          a typecast) }
+        check(e^.naValue);
+        ms('a named argument is only allowed in a call to a declared routine');
+        errR(e^.naName.loc, identRange(e^.naName));
+        visitExpr := errorType;
       end;
     nkFormatted:
       begin

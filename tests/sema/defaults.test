@@ -1,5 +1,5 @@
-; Default parameter values (--mode=objfpc): trailing value and const
-; parameters, one name per default, a constant that fits. A routine's
+; Default parameter values (--mode=objfpc): value and const parameters,
+; one name per default, a constant that fits. A routine's
 ; implementation may leave them out or repeat them, not change them.
 ; RUN: not %pcc --mode=objfpc -ferror-limit=0 -c %S/Inputs/defaults/errors.pas -o %t.o 2>&1 | FileCheck %s
 ; CHECK: errors.pas:9:27: error: default parameter value must be a constant
@@ -15,11 +15,8 @@
 ; CHECK: errors.pas:25:3: error: too few arguments in call to 'D1': expected 2, got 0
 ; CHECK: errors.pas:26:3: error: too many arguments in call to 'D1': expected 2, got 3
 ; CHECK: errors.pas:27:8: error: missing arguments in call to 'D2'
-; CHECK: errors.pas:28:3: error: ambiguous call to overloaded 'E1' with arguments (integer)
 ; CHECK-NOT: error:
 ; RUN: not %pcc --mode=objfpc -ferror-limit=0 -c %S/Inputs/defaults/parse.pas -o %t.o 2>&1 | FileCheck --check-prefix=PARSE %s
-; PARSE: parse.pas:2:30: error: parameter 'b' needs a default value, as a parameter before it has one
-; PARSE: parse.pas:3:40: error: parameter 'b' needs a default value, as a parameter before it has one
 ; PARSE: parse.pas:4:28: error: only one parameter can have a default value
 ; PARSE: parse.pas:5:29: error: only value and const parameters can have a default value
 ; PARSE: parse.pas:6:22: error: only value and const parameters can have a default value
