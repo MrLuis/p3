@@ -9,6 +9,9 @@ type
     tkRealLiteral,
     tkStringLiteral,
     tkDirective,
+    tkTemplateHead,
+    tkTemplateMiddle,
+    tkTemplateTail,
     tkPlus,
     tkMinus,
     tkStar,
@@ -110,6 +113,9 @@ const
     'real_literal',
     'string_literal',
     'directive',
+    'template_head',
+    'template_middle',
+    'template_tail',
     'plus',
     'minus',
     'star',
@@ -197,6 +203,9 @@ const
     'kw_raise');
   { spellings of punctuation and keywords ('' for the others) }
   tokenSpellings: array[TTokenKind] of string[15] = (
+    '',
+    '',
+    '',
     '',
     '',
     '',

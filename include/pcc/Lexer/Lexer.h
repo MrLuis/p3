@@ -139,6 +139,10 @@ class Lexer {
   void lexNumber(Token &T);
   void lexString(Token &T);
   void lexBasedNumber(Token &T, const char *Start, unsigned Radix);
+  void lexTemplate(Token &T, const char *Start, bool Raw, bool Opening);
+  /// Template strings whose interpolation `${ ... }` is being lexed: a '}'
+  /// continues the innermost one.
+  unsigned TemplateDepth = 0;
 
   void formToken(Token &T, tok::TokenKind K, const char *Start);
   SourceLocation locOf(const char *P) const {
@@ -153,6 +157,15 @@ public:
   void lex(Token &T);
 
   const LangOptions &getLangOpts() const { return LangOpts; }
+
+  /// Removes what a template string's layout adds to its text. Chunks: the
+  /// text between its interpolations, in order (line ends are '\n'). A line
+  /// break right after the opening backtick goes, and so does a last line
+  /// of only blanks, with its line break. Then the lines lose the
+  /// indentation they all share (blanks and tabs count alike; that last
+  /// line's counts too, lines of only blanks do not and are emptied). Text
+  /// on the opening backtick's line is left as it is.
+  static void dedentTemplate(llvm::MutableArrayRef<std::string> Chunks);
 
   /// Are interfaces declared here CORBA style ({$interfaces corba})?
   bool corbaInterfaces() const { return CorbaInterfaces; }

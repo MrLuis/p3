@@ -271,6 +271,15 @@ class Parser {
   Expr *parseFactor();
   /// Applies `[...]` and `.field` selectors to Base.
   Expr *parseSelectors(Expr *Base);
+  /// Is the token the start of a template string?
+  bool atTemplate() const {
+    return Tok.is(tok::template_head) ||
+           (Tok.is(tok::string_literal) && Tok.isTemplate());
+  }
+  bool parseTemplateParts(llvm::SmallVectorImpl<Expr *> &Texts,
+                          llvm::SmallVectorImpl<Expr *> &Values);
+  Expr *parseTemplate();
+  bool parseTemplateArgs(llvm::SmallVectorImpl<Expr *> &Args);
   /// ident { selector }
   Expr *parseDesignator();
   std::optional<BinaryOp> peekRelOp() const;

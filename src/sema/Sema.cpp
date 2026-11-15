@@ -6008,42 +6008,54 @@ class Checker : public StmtVisitor<Checker>,
       return;
     }
 
-    for (Expr *Arg : Args) {
-      Expr *Value = Arg, *Width = nullptr, *Precision = nullptr;
-      auto *F = llvm::dyn_cast<FormattedExpr>(Arg);
-      if (F) {
-        Value = F->getValue();
-        Width = F->getWidth();
-        Precision = F->getPrecision();
-      }
+    for (Expr *Arg : Args)
+      checkWritten(Arg, /*Template=*/false);
+  }
 
-      Type *T = check(Value);
-      if (F)
-        F->setType(T);
-      // Turbo/FPC: an enumeration's value is written as its name, a pchar
-      // as the C string it points to.
-      if (!T->isError() && !isWritable(T) &&
-          (isISO() || !(T->getBase()->isEnum() || isPChar(T))))
+  /// A value written to a text file, or put in a template string, with its
+  /// field width and precision if it has them (a FormattedExpr).
+  void checkWritten(Expr *Arg, bool Template) {
+    Expr *Value = Arg, *Width = nullptr, *Precision = nullptr;
+    auto *F = llvm::dyn_cast<FormattedExpr>(Arg);
+    if (F) {
+      Value = F->getValue();
+      Width = F->getWidth();
+      Precision = F->getPrecision();
+    }
+
+    Type *T = check(Value);
+    if (F)
+      F->setType(T);
+    // Turbo/FPC: an enumeration's value is written as its name, a pchar
+    // as the C string it points to.
+    if (!T->isError() && !isWritable(T) &&
+        (isISO() || !(T->getBase()->isEnum() || isPChar(T)))) {
+      if (Template)
+        Diags.error(Value->getBeginLoc(),
+                    "a value of type " + quoted(T) +
+                        " cannot be put in a template string",
+                    {Value->getRange()});
+      else
         Diags.error(Value->getBeginLoc(),
                     "cannot write a value of type " + quoted(T),
                     {Value->getRange()});
-
-      for (Expr *W : {Width, Precision}) {
-        if (!W)
-          continue;
-        Type *WT = check(W);
-        if (!WT->isError() && !WT->isIntegerLike())
-          Diags.error(W->getBeginLoc(),
-                      llvm::Twine(W == Width ? "field width" : "precision") +
-                          " must be an integer, not " + quoted(WT),
-                      {W->getRange()});
-      }
-      // ISO 6.9.3.4: only real values take a fraction-digits argument.
-      if (Precision && !T->isError() && !T->isReal())
-        Diags.error(Precision->getBeginLoc(),
-                    "a precision (':n') is only allowed for real values",
-                    {Precision->getRange()});
     }
+
+    for (Expr *W : {Width, Precision}) {
+      if (!W)
+        continue;
+      Type *WT = check(W);
+      if (!WT->isError() && !WT->isIntegerLike())
+        Diags.error(W->getBeginLoc(),
+                    llvm::Twine(W == Width ? "field width" : "precision") +
+                        " must be an integer, not " + quoted(WT),
+                    {W->getRange()});
+    }
+    // ISO 6.9.3.4: only real values take a fraction-digits argument.
+    if (Precision && !T->isError() && !T->isReal())
+      Diags.error(Precision->getBeginLoc(),
+                  "a precision (':n') is only allowed for real values",
+                  {Precision->getRange()});
   }
 
   void checkRead(ProcCallStmt *S, bool IsReadln) {
@@ -8689,6 +8701,19 @@ public:
                   {Callee.getRange()});
     noteDeclaredHere(D);
     return errorType();
+  }
+
+  /// `a ${x} b`: an ansistring; each value is one `write` can write, with
+  /// the field width and precision it takes there.
+  Type *visitTemplateExpr(TemplateExpr *E) {
+    llvm::ArrayRef<Expr *> Parts = E->getParts();
+    for (size_t I = 0; I < Parts.size(); ++I) {
+      if (I % 2 == 0)
+        check(Parts[I]);
+      else
+        checkWritten(Parts[I], /*Template=*/true);
+    }
+    return Ctx.getAnsiStringType();
   }
 
   Type *visitFormattedExpr(FormattedExpr *E) {

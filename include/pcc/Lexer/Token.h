@@ -17,6 +17,7 @@ class Token {
   /// string_literal: a lone character code above 255 (#$D800), a widechar
   /// constant; its value is then "?".
   unsigned WideChar = 0;
+  bool Template = false; ///< string_literal written between backticks
 
   /// identifier:     canonical lowercase name (interned)
   /// string_literal: value with '' unescaped (interned)
@@ -58,6 +59,8 @@ public:
   bool isBasedInteger() const { return Based; }
   /// A string literal that is one character code above 255: the code.
   unsigned getWideCharCode() const { return WideChar; }
+  /// A string literal written as a template string, `text` or r`text`.
+  bool isTemplate() const { return Template; }
   double getRealValue() const { return RealValue; }
 
   bool isKeyword() const { return tok::isKeyword(Kind); }

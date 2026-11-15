@@ -165,6 +165,8 @@ char *__pas_astr_from_cstr(const char *p);
 void __pas_astr_to_pstr(unsigned char *dst, int32_t maxlen, const char *s);
 const char *__pas_astr_pchar(const char *s);
 char *__pas_astr_concat(char *a, char *b);
+/* A new string: a, the n characters at p, then b (a and b may be null). */
+char *__pas_astr_join(const char *a, const char *p, int64_t n, const char *b);
 int32_t __pas_astr_compare(const char *a, const char *b);
 int32_t __pas_astr_pos(const char *sub, const char *s);
 char *__pas_astr_copy(char *s, int32_t index, int32_t count);
@@ -179,6 +181,14 @@ void __pas_write_astr(PasFile *f, const char *s, int32_t width);
  * even padding). */
 void __pas_write_cstr(PasFile *f, const char *s, int32_t width);
 void __pas_read_astr(PasFile *f, char **dst);
+
+/* Template strings, `a ${x} b`: each value is written, with write's
+ * routines, to the text file __pas_tmpl_sink() returns, which collects the
+ * characters. __pas_tmpl_add(s, t) returns a new ansistring (one reference,
+ * the caller's): s, the characters collected, then t; nothing is collected
+ * afterwards. s and t may be null. */
+PasFile *__pas_tmpl_sink(void);
+char *__pas_tmpl_add(const char *s, const char *t);
 
 /*===- Array of const and Format (format.c) ---------------------------------===
  * An array of const is passed as a pointer to a header slot, whose first

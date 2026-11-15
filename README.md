@@ -481,6 +481,74 @@ and its exception is raised afterwards, unless an exception is already
 leaving the routine, which goes on. `owned` and `move` are not reserved
 words. Not supported yet: owned fields, parameters and global variables.
 
+**Template strings** (tp and objfpc; pcc's own, not Free Pascal's): a
+string between backticks can span lines and take values. `${expr}` puts
+the value of an expression in the text, written as `write` writes it, so a
+value can be anything `write` takes (integers, reals, characters, booleans,
+enumeration values by name, strings, a pchar) and `${expr:width}` and
+`${expr:width:digits}` are `write`'s field width and number of decimals.
+The values are type-checked like any expression, and the result is an
+ansistring.
+
+```pascal
+writeln(`Hello ${Name}, you have ${Count} items totalling ${Total:0:2}.`);
+
+var Banner := `
+  Report for ${Customer.Name}
+    Rows: ${Rows:6}
+  `;                              { 'Report for Ann'#10'  Rows:     12' }
+```
+
+- Line breaks in the text are kept, each as one line feed (`#10`) whatever
+  line ends the source file has.
+- The layout is not part of the text: a line break right after the opening
+  backtick is dropped, and so is a last line holding only blanks before the
+  closing backtick, with its line break. The lines then lose the
+  indentation they all share. The closing backtick's line counts for that,
+  so moving it to the left keeps some indentation; lines of only blanks do
+  not count, and become empty. Text on the opening backtick's line is left
+  alone. Blanks and tabs count alike.
+- A backtick in the text is written twice, as Pascal doubles a quote, and
+  the characters `${` are written `$${`. A `$` before anything else is just
+  a `$`.
+- An `r` right before the opening backtick makes the string raw: `${` is
+  text, so a shell script, JavaScript or a regular expression can be pasted
+  as it is (``r`^\d{3}-${1}$` ``). The layout rules still apply.
+- A value can be any expression, also one with strings, comments and
+  templates of its own: `` `total: ${ `${a} + ${b}` }` ``.
+- A template without values, and a raw one, is a string constant like a
+  quoted one: it can be a `const` or a typed constant's value, and one
+  character long it is a `char`.
+
+**Tagged templates**: a routine's name right before the opening backtick
+is called with the text parts and the values, two open arrays, instead of
+their being joined. ``Sql`... ${Region} ...` `` is the call
+`Sql(['... ', ' ...'], [Region])`: there is always one more text part than
+values, and the tag returns whatever it likes. A library can turn the
+values into parameters instead of pasting them into the text (no SQL
+injection), escape them for HTML, or look a message up by its text.
+
+```pascal
+function Sql(const Parts: array of string;
+             const Values: array of const): TQuery;
+
+var q := db.Sql`
+  SELECT id, name
+  FROM customers
+  WHERE region = ${Region}
+  ORDER BY name
+  `;
+{ Parts = ['SELECT id, name'#10'FROM customers'#10'WHERE region = ',
+           #10'ORDER BY name'],  Values = [Region] }
+```
+
+The tag is a function, a procedure (``Log`loaded ${Path}`;`` is a
+statement) or a method (`db.Sql`), and overloads are chosen as for any
+call. Its values take no field width. Not supported: formats other than
+`write`'s (a picture such as `0.00` or `yyyy-mm-dd`), and values of types
+`write` cannot write (records, sets, objects): convert them in the
+expression. A name `r` used as a tag needs a blank before the backtick.
+
 **Pointer arithmetic** (tp and objfpc, as in Free Pascal): `p + n`, `n + p`
 and `p - n` move a pointer by n of what it points to (by n bytes for an
 untyped `pointer`, and so for `@x`, which is untyped); `p - q` is the

@@ -37,6 +37,12 @@ TOK(integer_literal)  // 42                                         (M1)
 TOK(real_literal)     // 3.14, 1E10, 2.5e-3                         (M1)
 TOK(string_literal)   // 'text', 'It''s', 'c' (a char when length 1) (M1)
 TOK(directive)        // {$R+}  -- reserved, emitted from M11
+// A template string with interpolations, `a ${x} b ${y} c` (tp, objfpc):
+// head `a ${, middle } b ${ and tail } c`, around the tokens of x and y.
+// (One without interpolations, or a raw one, is a string_literal.)
+TOK(template_head)
+TOK(template_middle)
+TOK(template_tail)
 
 //===--- Operators and punctuation (PLAN §4.4) ----------------------------===//
 PUNCT(plus,          "+")

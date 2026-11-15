@@ -1,0 +1,66 @@
+ 1 [Hello World, you have 3 items totalling 12.50.]
+ 2 [3|-9000000000|18446744073709551615|q|TRUE|Green|short|pchar]
+ 3 [ 1.25000000000000E+001|    12.500|12|   -12.5]
+ 4 [    3|    -9000000000|  q|  TRUE|Green  |   World|  short]
+ 5 [literal|c|1.5|42|TRUE|Blue]
+ 6 [   3| 12.50]
+ 7 [4 12 TRUE World! -28]
+ 8 [(4, -7) is 7 long]
+ 9 [4]
+10 [} { it's `]
+11 [nested in 4 ner deep World out]
+12 [3 2 1 liftoff]
+13 [a ` backtick, a ${brace}, a $ dollar, $5, $$, {braces}, 'quotes']
+14 [33]
+15 [3]
+16 []
+17 [Hello World!]
+18 [raw: ${name} \n $${x} ` done]
+19 [C:\dir\file]
+20 [^\d{3}-${4}$]
+21 [x]
+22 [Hello]
+23 [SELECT id, name
+  FROM customers
+WHERE region = :region]
+24 [Report for World
+  Color: Green
+
+Total: 12.50]
+25 [first line
+second line
+  third line]
+26 [    deeper
+  closing backtick to the left of the text: its indentation is kept]
+27 [World starts a line
+and 3 is inside one
+3]
+28 [no last line to remove]
+29 [
+blank lines around
+]
+30 [one]
+31 []
+32 [tab
+  tab and blanks]
+33 [3 values
+on 2 lines]
+34 [count = 3 and name = World]
+35 [short 3]
+36 [01234567890123456789]
+37 [equal]
+38 [10]
+     World|3|
+39 [count = 3, 1, 2, 3]
+40 [200 characters ending in 0]
+41 [select <1> from <2> end (3 parts, 2 values)]
+42 [no values (1 parts, 0 values)]
+43 [<1> (2 parts, 1 values)]
+44 [<1><2> (3 parts, 2 values)]
+45 [SELECT id FROM customers
+WHERE region = 'World' AND rank > 3]
+46 [tagged inside: a <1> b (2 parts, 1 values)]
+47 [template inside: <1> (2 parts, 1 values)]
+log 1: 2 parts, 1 values, first [starting ]
+log 2: 1 parts, 0 values, first [plain]
+log 3: 2 parts, 1 values, first [lines ]

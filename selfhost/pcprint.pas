@@ -1376,6 +1376,15 @@ begin
           visitExpr(PNode(listGet(e^.args, i)));
         indent := indent - 2;
       end;
+    nkTemplate:
+      begin
+        line('TemplateExpr');
+        endExpr(e);
+        indent := indent + 2;
+        for i := 0 to e^.tmplParts.count - 1 do
+          visitExpr(PNode(listGet(e^.tmplParts, i)));
+        indent := indent - 2;
+      end;
     nkFormatted:
       begin
         line('FormattedExpr');

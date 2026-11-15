@@ -6808,6 +6808,29 @@ public:
     return emitBuiltinCall(E, llvm::cast<BuiltinDecl>(E->getDecl()));
   }
 
+  /// `a ${x} b`: each value is written, as `write` writes it, to the
+  /// runtime's text file that collects characters (__pas_tmpl_sink);
+  /// __pas_tmpl_add then makes the string so far, what was collected and
+  /// the text that follows into one string. (Nothing but the write itself
+  /// runs between the two, so a template inside a value is done by then.)
+  llvm::Value *visitTemplateExpr(TemplateExpr *E) {
+    llvm::ArrayRef<Expr *> Parts = E->getParts();
+    llvm::Type *Ptr = B.getPtrTy();
+    auto Text = [&](Expr *P) -> llvm::Value * {
+      auto *SL = llvm::cast<StringLiteralExpr>(P);
+      if (SL->getValue().empty())
+        return llvm::ConstantPointerNull::get(B.getPtrTy());
+      return getAnsiConstant(SL->getValue());
+    };
+    llvm::Value *R = Text(Parts[0]);
+    for (size_t I = 1; I < Parts.size(); I += 2) {
+      llvm::Value *File = astrCall("__pas_tmpl_sink", Ptr, {});
+      emitWriteArg(File, Parts[I]);
+      R = holdResult(astrCall("__pas_tmpl_add", Ptr, {R, Text(Parts[I + 1])}));
+    }
+    return R;
+  }
+
   llvm::Value *visitFormattedExpr(FormattedExpr *) {
     llvm_unreachable("formatted expressions are handled by emitWriteArg");
   }

@@ -130,6 +130,56 @@ void __pas_fini(void) {
   }
 }
 
+/*===- Template strings -----------------------------------------------------===
+ * The values of a template string are written to a text file that keeps
+ * its characters in memory; __pas_tmpl_add takes them out. */
+
+struct PasFile __pas_tmpl_file;
+unsigned char __pas_tmpl_chr;
+char *__pas_tmpl_buf;
+size_t __pas_tmpl_size;
+
+PasFile *__pas_tmpl_sink(void) {
+  struct PasFile *f = &__pas_tmpl_file;
+  if (!f->fp) {
+#ifdef _WIN32
+    f->fp = tmpfile(); /* no open_memstream there */
+#else
+    f->fp = open_memstream(&__pas_tmpl_buf, &__pas_tmpl_size);
+#endif
+    if (!f->fp)
+      __pas_runtime_error("out of memory in a template string");
+    f->mode = MODE_GENERATE;
+    f->is_text = 1;
+    f->is_std = 1;
+    f->elem_size = 1;
+    f->buf = &__pas_tmpl_chr;
+  }
+  return f;
+}
+
+char *__pas_tmpl_add(const char *s, const char *t) {
+  struct PasFile *f = __pas_tmpl_sink();
+  long n = fflush(f->fp) == 0 ? ftell(f->fp) : -1;
+  if (n < 0)
+    __pas_runtime_error("out of memory in a template string");
+#ifdef _WIN32
+  if ((size_t)n > __pas_tmpl_size) {
+    char *b = realloc(__pas_tmpl_buf, (size_t)n);
+    if (!b)
+      __pas_runtime_error("out of memory in a template string");
+    __pas_tmpl_buf = b;
+    __pas_tmpl_size = (size_t)n;
+  }
+  rewind(f->fp);
+  if (n > 0 && fread(__pas_tmpl_buf, 1, (size_t)n, f->fp) != (size_t)n)
+    __pas_runtime_error("out of memory in a template string");
+#endif
+  char *r = __pas_astr_join(s, __pas_tmpl_buf, n, t);
+  rewind(f->fp);
+  return r;
+}
+
 /*===- File variables -------------------------------------------------------===*/
 
 PasFile *__pas_file_new(int64_t elem_size, int32_t is_text, const char *name) {

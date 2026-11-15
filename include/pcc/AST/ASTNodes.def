@@ -35,6 +35,7 @@ EXPR(Aggregate)       // (1, 2) / (x: 1; y: 2) typed constants (S1, TP)
 EXPR(IndirectCall)    // r.f(x), a[i](x): call through a procedural value
 EXPR(Inherited)       // inherited [m]                         (objfpc)
 EXPR(Move)            // move p: an owned variable's object    (objfpc)
+EXPR(Template)        // `a ${x} b`: a template string         (TP)
 
 // Statements
 STMT(Empty)

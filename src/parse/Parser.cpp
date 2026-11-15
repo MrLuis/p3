@@ -2985,8 +2985,15 @@ Stmt *Parser::parseAssignmentOrCall() {
 
   llvm::SmallVector<Expr *, 4> Args;
   bool HasParens = Tok.is(tok::l_paren);
-  if (HasParens)
+  if (HasParens) {
     parseActualParams(Args, /*AllowFormat=*/true);
+  } else if (atTemplate()) { // Log`...`; a tagged template string
+    HasParens = true;
+    if (!parseTemplateArgs(Args)) {
+      skipUntil({tok::semi, tok::kw_end});
+      return Ctx.create<EmptyStmt>(Start);
+    }
+  }
 
   // Turbo/FPC: a typecast assigned to, longint(x) := 1, or with selectors,
   // TFoo(x).Show; f(1)^.n := 2; f(x)(y);
@@ -3798,6 +3805,16 @@ Expr *Parser::parseSelectors(Expr *Base) {
                                    Base);
       continue;
     }
+    // A tagged template string: obj.Sql`...` is obj.Sql([texts], [values]).
+    if (atTemplate() && !llvm::isa<NameRefExpr>(Base)) {
+      llvm::SmallVector<Expr *, 2> Args;
+      if (!parseTemplateArgs(Args))
+        return nullptr;
+      Base = Ctx.create<IndirectCallExpr>(
+          SourceRange(Base->getBeginLoc(), PrevTokEnd), Base,
+          Ctx.copyArray<Expr *>(Args));
+      continue;
+    }
     // Turbo/FPC: a call through a procedural value, passes[i].run(v).
     // (A plain name followed by '(' is a CallExpr / ProcCallStmt.)
     if (Tok.is(tok::l_paren) && LangOpts.Mode != LangMode::ISO &&
@@ -3812,6 +3829,119 @@ Expr *Parser::parseSelectors(Expr *Base) {
     }
     return Base;
   }
+}
+
+//===----------------------------------------------------------------------===//
+// Template strings:  `text ${ expression [ ":" width [ ":" digits ] ] } text`
+//===----------------------------------------------------------------------===//
+
+/// The parts of the template string at the token: its text (2 * n + 1
+/// StringLiteralExprs, without the layout's indentation) and its n values.
+bool Parser::parseTemplateParts(llvm::SmallVectorImpl<Expr *> &Texts,
+                                llvm::SmallVectorImpl<Expr *> &Values) {
+  llvm::SmallVector<std::string, 4> Chunks;
+  llvm::SmallVector<SourceRange, 4> Ranges;
+  bool OK = true;
+  auto Text = [&] {
+    Chunks.push_back(Tok.getStringValue().str());
+    Ranges.push_back(Tok.getRange());
+    consumeToken();
+  };
+  bool More = Tok.is(tok::template_head);
+  Text();
+  while (More) {
+    Expr *E = parseExpression();
+    if (E && Tok.is(tok::colon)) {
+      consumeToken();
+      Expr *Width = parseExpression();
+      Expr *Precision = nullptr;
+      bool Bad = !Width;
+      if (!Bad && tryConsume(tok::colon))
+        Bad = !(Precision = parseExpression());
+      if (Bad)
+        E = nullptr;
+      else
+        E = Ctx.create<FormattedExpr>(
+            SourceRange(E->getBeginLoc(), PrevTokEnd), E, Width, Precision);
+    }
+    if (E && !Tok.isOneOf(tok::template_middle, tok::template_tail)) {
+      Diags.error(Tok.getLocation(),
+                  "expected '}' after the value in a template string");
+      E = nullptr;
+    }
+    if (!E) {
+      // Recover at this template's next text, past the templates inside.
+      OK = false;
+      unsigned Depth = 0;
+      while (Tok.isNot(tok::eof)) {
+        if (Tok.is(tok::template_head))
+          ++Depth;
+        else if (Depth == 0 &&
+                 Tok.isOneOf(tok::template_middle, tok::template_tail))
+          break;
+        else if (Tok.is(tok::template_tail))
+          --Depth;
+        consumeToken();
+      }
+      if (Tok.is(tok::eof))
+        return false;
+    } else {
+      Values.push_back(E);
+    }
+    More = Tok.is(tok::template_middle);
+    Text();
+  }
+  if (!OK)
+    return false;
+  Lexer::dedentTemplate(Chunks);
+  for (size_t I = 0; I < Chunks.size(); ++I)
+    Texts.push_back(Ctx.create<StringLiteralExpr>(
+        Ranges[I], Ctx.getStrings().intern(Chunks[I])));
+  return true;
+}
+
+/// A template string with interpolations: a TemplateExpr.
+Expr *Parser::parseTemplate() {
+  SourceLocation Start = Tok.getLocation();
+  llvm::SmallVector<Expr *, 4> Texts, Values, Parts;
+  if (!parseTemplateParts(Texts, Values))
+    return nullptr;
+  for (size_t I = 0; I < Texts.size(); ++I) {
+    Parts.push_back(Texts[I]);
+    if (I < Values.size())
+      Parts.push_back(Values[I]);
+  }
+  return Ctx.create<TemplateExpr>(SourceRange(Start, PrevTokEnd),
+                                  Ctx.copyArray<Expr *>(Parts));
+}
+
+/// A tagged template string, Tag`a ${x} b`: the arguments of the call
+/// Tag(['a ', ' b'], [x]), the text parts and the values.
+bool Parser::parseTemplateArgs(llvm::SmallVectorImpl<Expr *> &Args) {
+  SourceLocation Start = Tok.getLocation();
+  llvm::SmallVector<Expr *, 4> Texts, Values;
+  if (!parseTemplateParts(Texts, Values))
+    return false;
+  SourceRange R(Start, PrevTokEnd);
+  llvm::SmallVector<SetElement, 4> Elems;
+  for (Expr *T : Texts)
+    Elems.push_back({T, nullptr});
+  Args.push_back(
+      Ctx.create<SetCtorExpr>(R, Ctx.copyArray<SetElement>(Elems)));
+  Elems.clear();
+  for (Expr *V : Values) {
+    if (auto *F = llvm::dyn_cast<FormattedExpr>(V)) {
+      Diags.error(F->getWidth()->getBeginLoc(),
+                  "a value of a tagged template string cannot have a field "
+                  "width",
+                  {F->getWidth()->getRange()});
+      V = F->getValue();
+    }
+    Elems.push_back({V, nullptr});
+  }
+  Args.push_back(
+      Ctx.create<SetCtorExpr>(R, Ctx.copyArray<SetElement>(Elems)));
+  return true;
 }
 
 // factor = unsignedConst | designator | ident "(" args ")"
@@ -3851,6 +3981,8 @@ Expr *Parser::parseFactor() {
       return parseSelectors(E);
     return E;
   }
+  case tok::template_head:
+    return parseTemplate();
   case tok::identifier: {
     if (startsSpecialize()) { // specialize F<T>(args)
       SourceLocation Start = Tok.getLocation();
@@ -3879,6 +4011,14 @@ Expr *Parser::parseFactor() {
     }
     Identifier Name = makeIdentifier(Tok);
     consumeToken();
+    if (atTemplate()) { // a tagged template string: Tag`...`
+      llvm::SmallVector<Expr *, 2> Args;
+      if (!parseTemplateArgs(Args))
+        return nullptr;
+      return parseSelectors(
+          Ctx.create<CallExpr>(SourceRange(Name.Loc, PrevTokEnd), Name,
+                               Ctx.copyArray<Expr *>(Args)));
+    }
     if (Tok.is(tok::l_paren)) {
       llvm::SmallVector<Expr *, 4> Args;
       if (!parseActualParams(Args, /*AllowFormat=*/false) && Args.empty())

@@ -541,6 +541,9 @@ void Driver::dumpTokens(FileID FID, llvm::raw_ostream &OS) {
       OS << " value=" << llvm::format("%g", T.getRealValue());
       break;
     case tok::string_literal:
+    case tok::template_head:
+    case tok::template_middle:
+    case tok::template_tail:
       OS << " value=\"";
       OS.write_escaped(T.getStringValue());
       OS << '"';

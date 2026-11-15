@@ -561,7 +561,7 @@ begin
         bufAdd(outBuf, ' value=' + uintToStr(t.intValue));
       tkRealLiteral:
         bufAdd(outBuf, ' value=' + formatG(t.realValue, 6));
-      tkStringLiteral:
+      tkStringLiteral, tkTemplateHead, tkTemplateMiddle, tkTemplateTail:
         begin
           bufAdd(outBuf, ' value="');
           bufAddEscaped(outBuf, t.strValue^.chars, 0, t.strValue^.len);

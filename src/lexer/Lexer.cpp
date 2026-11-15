@@ -51,6 +51,7 @@ void Lexer::formToken(Token &T, tok::TokenKind K, const char *Start) {
   T.IntValue = 0;
   T.Based = false;
   T.WideChar = 0;
+  T.Template = false;
 }
 
 //===----------------------------------------------------------------------===//
@@ -958,6 +959,14 @@ void Lexer::skipInactive() {
         ++Cur;
       if (Cur < BufEnd && *Cur == '\'')
         ++Cur;
+    } else if (C == '`' && LangOpts.Mode != LangMode::ISO) {
+      // a template string's text, to its next backtick (which need not be
+      // its last: what matters is that braces in it open no comment)
+      ++Cur;
+      while (Cur < BufEnd && *Cur != '`')
+        ++Cur;
+      if (Cur < BufEnd)
+        ++Cur;
     } else {
       ++Cur;
     }
@@ -1190,6 +1199,140 @@ void Lexer::lexString(Token &T) {
 }
 
 //===----------------------------------------------------------------------===//
+// Template strings (tp, objfpc):  `text ${expr} text`
+//
+// The text may span lines; a line end is one '\n' whatever the source has.
+// `` is a backtick and $${ the two characters ${. ${ starts an
+// interpolation: the tokens up to the '}' that closes it are lexed as
+// usual, between template_head, template_middle and template_tail tokens
+// holding the text around them. A template without interpolations is a
+// string_literal, and so is a raw one, r`text`, where ${ is just text.
+//===----------------------------------------------------------------------===//
+
+void Lexer::dedentTemplate(llvm::MutableArrayRef<std::string> Chunks) {
+  auto IsBlank = [](char C) { return C == ' ' || C == '\t'; };
+  const size_t None = std::string::npos;
+  size_t Min = None;
+
+  // The line of the closing backtick, when only blanks precede it.
+  std::string &Last = Chunks.back();
+  size_t NL = Last.rfind('\n');
+  if (NL != None) {
+    size_t I = NL + 1;
+    while (I < Last.size() && IsBlank(Last[I]))
+      ++I;
+    if (I == Last.size()) {
+      Min = Last.size() - NL - 1;
+      Last.resize(NL);
+    }
+  }
+  // The line break after the opening backtick: the text starts a line.
+  bool First = !Chunks[0].empty() && Chunks[0][0] == '\n';
+  if (First)
+    Chunks[0].erase(0, 1);
+
+  // Pass 0 finds the shared indentation, pass 1 removes it.
+  for (int Pass = 0; Pass < 2; ++Pass) {
+    for (size_t I = 0; I < Chunks.size(); ++I) {
+      std::string &C = Chunks[I];
+      std::string Out;
+      bool AtStart = I == 0 && First;
+      size_t P = 0;
+      while (true) {
+        if (AtStart) {
+          size_t K = P;
+          while (K < C.size() && IsBlank(C[K]))
+            ++K;
+          // (At a chunk's end an interpolation follows: not a blank line.)
+          bool Blank = K == C.size() ? I + 1 == Chunks.size() : C[K] == '\n';
+          if (Pass == 0) {
+            if (!Blank && K - P < Min)
+              Min = K - P;
+          } else {
+            P = Blank ? K : P + Min;
+          }
+        }
+        size_t E = C.find('\n', P);
+        if (E == None) {
+          if (Pass == 1)
+            Out.append(C, P, None);
+          break;
+        }
+        if (Pass == 1)
+          Out.append(C, P, E - P + 1);
+        P = E + 1;
+        AtStart = true;
+      }
+      if (Pass == 1)
+        C = std::move(Out);
+    }
+    if (Min == None)
+      Min = 0;
+  }
+}
+
+/// The text of a template string from Cur, which is after its opening
+/// backtick (Opening) or after the '}' that ends an interpolation, up to
+/// the next interpolation or the closing backtick.
+void Lexer::lexTemplate(Token &T, const char *Start, bool Raw, bool Opening) {
+  std::string Value;
+  bool More = false; // stopped at an interpolation
+  while (true) {
+    if (Cur >= BufEnd) {
+      Diags.error(locOf(Start), "unterminated template string");
+      break;
+    }
+    char C = *Cur;
+    if (C == '`') {
+      if (Cur[1] == '`') {
+        Value.push_back('`');
+        Cur += 2;
+        continue;
+      }
+      ++Cur;
+      break;
+    }
+    if (C == '\r') { // CR LF and CR: one line end
+      Value.push_back('\n');
+      ++Cur;
+      if (Cur < BufEnd && *Cur == '\n')
+        ++Cur;
+      continue;
+    }
+    if (C == '$' && !Raw) {
+      if (Cur[1] == '{') {
+        Cur += 2;
+        More = true;
+        break;
+      }
+      if (Cur[1] == '$' && Cur[2] == '{') {
+        Value += "${";
+        Cur += 3;
+        continue;
+      }
+    }
+    Value.push_back(C);
+    ++Cur;
+  }
+
+  if (Opening && !More) { // the whole of it: a string
+    dedentTemplate(Value);
+    formToken(T, tok::string_literal, Start);
+    T.Template = true;
+  } else {
+    formToken(T, Opening ? tok::template_head
+                 : More  ? tok::template_middle
+                         : tok::template_tail,
+              Start);
+    if (Opening)
+      ++TemplateDepth;
+    else if (!More)
+      --TemplateDepth;
+  }
+  T.Data = Strings.intern(Value);
+}
+
+//===----------------------------------------------------------------------===//
 // Main entry point
 //===----------------------------------------------------------------------===//
 
@@ -1218,6 +1361,21 @@ void Lexer::lex(Token &T) {
     }
 
     char C = *Cur;
+    bool TP = LangOpts.Mode != LangMode::ISO;
+    // Template strings: `text`, raw r`text`, and the text after an
+    // interpolation's '}'.
+    if (TP && C == '`') {
+      ++Cur;
+      return lexTemplate(T, Start, /*Raw=*/false, /*Opening=*/true);
+    }
+    if (TP && (C == 'r' || C == 'R') && Cur[1] == '`') {
+      Cur += 2;
+      return lexTemplate(T, Start, /*Raw=*/true, /*Opening=*/true);
+    }
+    if (C == '}' && TemplateDepth) {
+      ++Cur;
+      return lexTemplate(T, Start, /*Raw=*/false, /*Opening=*/false);
+    }
     if (isIdentStart(C)) {
       lexIdentifier(T);
       if (MacrosOn && T.is(tok::identifier) && expandMacro(T, Start))
@@ -1226,7 +1384,6 @@ void Lexer::lex(Token &T) {
     }
     if (llvm::isDigit(C))
       return lexNumber(T);
-    bool TP = LangOpts.Mode != LangMode::ISO;
     if (C == '\'' || (TP && C == '#'))
       return lexString(T);
     if (TP && ((C == '$' && llvm::isHexDigit(Cur[1])) ||

@@ -1,0 +1,20 @@
+text = "SELECT id, name
+FROM customers
+WHERE region = :p1 AND rank > :p2", p1 = north, p2 = 6
+text = "SELECT 1"
+main ran 2 queries
+<loud >< and clear> (1)
+before 1 [1] after
+caught "broken at 2" in round 2
+caught "broken at 3" in round 3
+still fine
+inline 5 and inner north
+row 1
+  of 2
+row 2
+  of 2
+value     42
+  shown
+value   TRUE
+  shown
+inline 5 and 6

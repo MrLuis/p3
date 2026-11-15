@@ -323,6 +323,21 @@ public:
   static bool classof(const Expr *E) { return E->getKind() == EK_Call; }
 };
 
+/// A template string with interpolations, `a ${x} b ${y:8:2} c` (tp and
+/// objfpc): an ansistring made of its text and of its values, each as
+/// `write` writes it. Parts: text and values in turn, from the first text
+/// to the last (StringLiteralExprs, which may be empty); a value with a
+/// field width is a FormattedExpr.
+class TemplateExpr final : public Expr {
+  llvm::ArrayRef<Expr *> Parts;
+
+public:
+  TemplateExpr(SourceRange R, llvm::ArrayRef<Expr *> Parts)
+      : Expr(EK_Template, R), Parts(Parts) {}
+  llvm::ArrayRef<Expr *> getParts() const { return Parts; }
+  static bool classof(const Expr *E) { return E->getKind() == EK_Template; }
+};
+
 /// A write parameter with field width: `e:w` or `e:w:p` (ISO 6.9.3).
 class FormattedExpr final : public Expr {
   Expr *Value;

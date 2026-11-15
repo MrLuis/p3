@@ -1,0 +1,59 @@
+; Template strings (tp, objfpc): a value is one `write` can write, with the
+; field width and precision it takes there; the template is an ansistring;
+; a tagged one is a call with the text parts and the values.
+; RUN: not %pcc --mode=objfpc -ferror-limit=0 -c %S/Inputs/template/errors.pas -o %t.o 2>&1 | FileCheck %s
+; RUN: not %pcc --mode=tp -ferror-limit=0 -c %S/Inputs/template/errors.pas -o %t.o 2>&1 | FileCheck %s
+; CHECK: errors.pas:29:7: error: constant value must be a constant
+; CHECK: errors.pas:32:13: error: a value of type 'TRec' cannot be put in a template string
+; CHECK: errors.pas:32:20: error: a value of type '^integer' cannot be put in a template string
+; CHECK: errors.pas:32:27: error: a value of type 'array [1..3] of integer' cannot be put in a template string
+; CHECK: errors.pas:32:34: error: a value of type 'set of TColor' cannot be put in a template string
+; CHECK: errors.pas:33:19: error: field width must be an integer, not 'real'
+; CHECK: errors.pas:33:35: error: precision must be an integer, not 'real'
+; CHECK: errors.pas:33:55: error: a precision (':n') is only allowed for real values
+; CHECK: errors.pas:34:19: error: use of undeclared identifier 'nope'
+; CHECK: errors.pas:34:33: error: invalid operands to '+' ('integer' and 'ansistring')
+; CHECK: errors.pas:35:5: error: assigning to 'integer' from incompatible type 'ansistring'
+; A tag must be a routine that takes the two arrays.
+; CHECK: errors.pas:38:8: error: 'x' is a variable, not a function
+; CHECK: errors.pas:39:24: error: a value of type 'TRec' cannot be an element of an array of const
+; CHECK: errors.pas:40:3: error: too many arguments in call to 'NoTag': expected 1, got 2
+; CHECK: errors.pas:41:29: error: a value of type 'TRec' cannot be an element of an array of const
+; CHECK-NOT: errors.pas:36
+; CHECK-NOT: errors.pas:37
+;
+; Syntax: each value is an expression, closed by '}'.
+; RUN: not %pcc --mode=objfpc -ferror-limit=0 -c %S/Inputs/template/syntax.pas -o %t.o 2>&1 | FileCheck --check-prefix=SYNTAX %s
+; SYNTAX: syntax.pas:6:17: error: expected expression
+; SYNTAX: syntax.pas:7:17: error: expected '}' after the value in a template string
+; SYNTAX: syntax.pas:8:19: error: expected expression
+; SYNTAX: syntax.pas:9:27: error: expected expression
+; SYNTAX: syntax.pas:10:22: error: a value of a tagged template string cannot have a field width
+; SYNTAX: syntax.pas:11:19: error: expected '}' after the value in a template string
+;
+; The parts of a template: text and values in turn, the text without the
+; layout's indentation; a tagged template is a call.
+; RUN: %pcc --mode=objfpc --emit-ast %S/Inputs/template/ast.pas | FileCheck --check-prefix=AST %s
+; AST:      AssignStmt <10:3>
+; AST-NEXT:   NameRefExpr 's' variable : ansistring <10:3>
+; AST-NEXT:   TemplateExpr : ansistring <10:8>
+; AST-NEXT:     StringLiteralExpr "Total:\n" : string of length 7 <10:8>
+; AST-NEXT:     FormattedExpr : real <11:11>
+; AST-NEXT:       NameRefExpr 'total' variable : real <11:11>
+; AST-NEXT:       IntegerLiteralExpr 0 : integer <11:17>
+; AST-NEXT:       IntegerLiteralExpr 2 : integer <11:19>
+; AST-NEXT:     StringLiteralExpr " for\n" : string of length 5 <11:20>
+; AST-NEXT:     NameRefExpr 'n' variable : integer <12:11>
+; AST-NEXT:     StringLiteralExpr " items" : string of length 6 <12:12>
+; AST:          StringLiteralExpr "" : string of length 0 <13:27>
+; AST-NEXT: AssignStmt <14:3>
+; AST-NEXT:   NameRefExpr 's' variable : ansistring <14:3>
+; AST-NEXT:   CallExpr 'tag' : ansistring <14:8>
+; AST-NEXT:     SetCtorExpr : array of ansistring <14:11>
+; AST-NEXT:       StringLiteralExpr "a " : string of length 2 <14:11>
+; AST-NEXT:       StringLiteralExpr " b" : string of length 2 <14:17>
+; AST-NEXT:     SetCtorExpr : array of const <14:11>
+; AST-NEXT:       NameRefExpr 'n' variable : integer <14:16>
+; AST-NEXT: AssignStmt <15:3>
+; AST-NEXT:   NameRefExpr 's' variable : ansistring <15:3>
+; AST-NEXT:   StringLiteralExpr "plain\ntext" : string of length 10 <15:8>

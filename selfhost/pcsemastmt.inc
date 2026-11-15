@@ -64,11 +64,77 @@ begin
   untypedFileIO := true;
 end;
 
+{ A value written to a text file, or put in a template string, with its
+  field width and precision if it has them (an nkFormatted). }
+procedure checkWritten(arg: PNode; template: boolean);
+var
+  t, wt: PType;
+  k: longint;
+  value, width, precision, w: PNode;
+begin
+  value := arg;
+  width := nil;
+  precision := nil;
+  if arg^.kind = nkFormatted then
+  begin
+    value := arg^.fmtValue;
+    width := arg^.fmtWidth;
+    precision := arg^.fmtPrecision;
+  end;
+  t := check(value);
+  if arg^.kind = nkFormatted then
+    arg^.typ := t;
+  { Turbo/FPC: an enumeration's value is written as its name, a pchar as
+    the C string it points to }
+  if not isError(t) and not isWritable(t) and
+     (isISO or not ((getBase(t)^.kind = tyEnum) or isPChar(t))) then
+  begin
+    if template then
+    begin
+      ms('a value of type ');
+      maT(t);
+      ma(' cannot be put in a template string');
+    end
+    else
+    begin
+      ms('cannot write a value of type ');
+      maT(t);
+    end;
+    errR(value^.b, nodeRange(value));
+  end;
+  for k := 1 to 2 do
+  begin
+    if k = 1 then
+      w := width
+    else
+      w := precision;
+    if w = nil then
+      continue;
+    wt := check(w);
+    if not isError(wt) and not isIntegerLike(wt) then
+    begin
+      if k = 1 then
+        ms('field width')
+      else
+        ms('precision');
+      ma(' must be an integer, not ');
+      maT(wt);
+      errR(w^.b, nodeRange(w));
+    end;
+  end;
+  { ISO 6.9.3.4: only real values take a fraction-digits argument }
+  if (precision <> nil) and not isError(t) and (t^.kind <> tyReal) then
+  begin
+    ms('a precision ('':n'') is only allowed for real values');
+    errR(precision^.b, nodeRange(precision));
+  end;
+end;
+
 procedure checkWrite(s: PNode; isWriteln: boolean);
 var
-  fileTy, t, wt: PType;
-  i, first, k: longint;
-  arg, value, width, precision, w: PNode;
+  fileTy, t: PType;
+  i, first: longint;
+  arg: PNode;
 begin
   fileTy := checkFileArg(s);
   if untypedFileIO(s, fileTy, true) then
@@ -112,56 +178,7 @@ begin
     exit;
   end;
   for i := first to s^.args.count - 1 do
-  begin
-    arg := PNode(listGet(s^.args, i));
-    value := arg;
-    width := nil;
-    precision := nil;
-    if arg^.kind = nkFormatted then
-    begin
-      value := arg^.fmtValue;
-      width := arg^.fmtWidth;
-      precision := arg^.fmtPrecision;
-    end;
-    t := check(value);
-    if arg^.kind = nkFormatted then
-      arg^.typ := t;
-    { Turbo/FPC: an enumeration's value is written as its name, a pchar as
-      the C string it points to }
-    if not isError(t) and not isWritable(t) and
-       (isISO or not ((getBase(t)^.kind = tyEnum) or isPChar(t))) then
-    begin
-      ms('cannot write a value of type ');
-      maT(t);
-      errR(value^.b, nodeRange(value));
-    end;
-    for k := 1 to 2 do
-    begin
-      if k = 1 then
-        w := width
-      else
-        w := precision;
-      if w = nil then
-        continue;
-      wt := check(w);
-      if not isError(wt) and not isIntegerLike(wt) then
-      begin
-        if k = 1 then
-          ms('field width')
-        else
-          ms('precision');
-        ma(' must be an integer, not ');
-        maT(wt);
-        errR(w^.b, nodeRange(w));
-      end;
-    end;
-    { ISO 6.9.3.4: only real values take a fraction-digits argument }
-    if (precision <> nil) and not isError(t) and (t^.kind <> tyReal) then
-    begin
-      ms('a precision ('':n'') is only allowed for real values');
-      errR(precision^.b, nodeRange(precision));
-    end;
-  end;
+    checkWritten(PNode(listGet(s^.args, i)), false);
 end;
 
 procedure checkRead(s: PNode; isReadln: boolean);
@@ -5059,6 +5076,7 @@ end;
 function visitExpr(e: PNode): PType;
 var
   t: PType;
+  i: longint;
 begin
   case e^.kind of
     nkIntegerLit:
@@ -5097,6 +5115,17 @@ begin
     nkUnary: visitExpr := visitUnary(e);
     nkBinary: visitExpr := visitBinary(e);
     nkCall: visitExpr := visitCall(e);
+    nkTemplate:
+      begin
+        { an ansistring; each value is one write can write, with the field
+          width and precision it takes there }
+        for i := 0 to e^.tmplParts.count - 1 do
+          if i mod 2 = 0 then
+            check(PNode(listGet(e^.tmplParts, i)))
+          else
+            checkWritten(PNode(listGet(e^.tmplParts, i)), true);
+        visitExpr := ansiStringType;
+      end;
     nkFormatted:
       begin
         check(e^.fmtValue);

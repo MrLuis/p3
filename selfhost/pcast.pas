@@ -48,6 +48,7 @@ type
     nkIntegerLit, nkRealLit, nkStringLit, nkNameRef, nkParen, nkUnary,
     nkBinary, nkCall, nkFormatted, nkIndex, nkField, nkNil, nkDeref,
     nkSetCtor, nkAddrOf, nkAggregate, nkIndirectCall, nkInherited, nkMove,
+    nkTemplate,
     { statements }
     nkEmpty, nkCompound, nkProcCall, nkAssign, nkIf, nkWhile, nkRepeat,
     nkFor, nkCase, nkWith, nkLabeled, nkGoto, nkIndirectCallStmt,
@@ -181,6 +182,12 @@ type
          { TMethod(m): 0 no, 1 of a value, 2 of a variable }
          methodCast: longint);
       nkFormatted: (fmtValue, fmtWidth, fmtPrecision: PNode);
+      { a template string with interpolations (tp, objfpc), an ansistring
+        made of its text and of its values, each as write writes it:
+        text and values in turn, from the first text to the last (string
+        literals, which may be empty; a value with a field width is an
+        nkFormatted), of PNode }
+      nkTemplate: (tmplParts: TPtrList);
       { index: base[index]; field: base.fieldName; fieldDecl is a field,
         or (objfpc) a method or property of a class }
       { objfpc: an array property (obj.P[i, j], P[i] or obj[i], the default

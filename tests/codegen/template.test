@@ -1,0 +1,32 @@
+; Template strings: each value is written, by the routine `write` uses for
+; its type, to the runtime's text file that collects characters
+; (__pas_tmpl_sink); __pas_tmpl_add then joins the string so far, what was
+; collected and the text that follows (null when there is none) into a new
+; string, held in a temporary like any string result. A template without
+; values is a string constant, and a tagged one a call with two open
+; arrays.
+; RUN: %pcc --mode=objfpc --emit-llvm %S/Inputs/template.pas -o %t.ll
+; RUN: FileCheck %s < %t.ll
+; RUN: opt -passes=verify -disable-output %t.ll
+
+; CHECK-LABEL: define internal void @pas.run(
+; `n = ${n}, x = ${x:8:2}`
+; CHECK: [[F1:%[0-9]+]] = call ptr @__pas_tmpl_sink()
+; CHECK: call void @__pas_write_int(ptr [[F1]], i64 %{{[0-9]+}}, i32 0)
+; CHECK-NEXT: [[S1:%[0-9]+]] = call ptr @__pas_tmpl_add(ptr getelementptr inbounds (i8, ptr @.astr, i64 16), ptr getelementptr inbounds (i8, ptr @.astr.1, i64 16))
+; CHECK-NEXT: call void @__pas_astr_clear(ptr %astr.tmp)
+; CHECK-NEXT: store ptr [[S1]], ptr %astr.tmp
+; CHECK-NEXT: [[F2:%[0-9]+]] = call ptr @__pas_tmpl_sink()
+; CHECK: call void @__pas_write_real(ptr [[F2]], double %{{x[0-9]*}}, i32 8, i32 2)
+; CHECK-NEXT: [[S2:%[0-9]+]] = call ptr @__pas_tmpl_add(ptr [[S1]], ptr null)
+; CHECK: call void @__pas_astr_assign(ptr %{{s[0-9]*}}, ptr [[S2]])
+; `${name} is ${c}!`
+; CHECK: call void @__pas_write_astr(ptr %{{[0-9]+}}, ptr %{{name[0-9]*}}, i32 0)
+; CHECK-NEXT: [[S3:%[0-9]+]] = call ptr @__pas_tmpl_add(ptr null, ptr getelementptr inbounds (i8, ptr @.astr.2, i64 16))
+; CHECK: call void @__pas_write_enum(
+; CHECK-NEXT: call ptr @__pas_tmpl_add(ptr [[S3]], ptr getelementptr inbounds
+; `plain text`
+; CHECK: call void @__pas_astr_assign(ptr %{{s[0-9]*}}, ptr getelementptr inbounds (i8, ptr @.astr.6, i64 16))
+; Tag`a ${n} b`
+; CHECK: store i64 2, ptr
+; CHECK: call ptr @pas.tag(

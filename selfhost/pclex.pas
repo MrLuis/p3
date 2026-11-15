@@ -30,6 +30,7 @@ type
     intValue: int64;   { integer literals: 64 bits, read as unsigned }
     based: boolean;    { integer literals written $FF, %1010 or &17 }
     wideChar: longint; { string literals: a lone code above 255, or 0 }
+    template: boolean; { string literals written between backticks }
     realValue: double; { real literals }
   end;
 
@@ -102,6 +103,9 @@ type
       id -> non-nil), which the parser adds, innermost scope last (a
       routine's own); of PIntMap }
     nameScopes: TPtrList;
+    { template strings whose interpolation is being lexed: a closing brace
+      continues the innermost one }
+    templateDepth: longint;
   end;
 
   PIntMap = ^TIntMap;
@@ -119,6 +123,14 @@ var
 
 procedure lexInit(var lx: TLexer; fid: longint; mode: TLangMode);
 procedure lexNext(var lx: TLexer; var t: TToken);
+{ Removes what a template string's layout adds to its text. chunks (of
+  PName, replaced): the text between its interpolations, in order (line
+  ends are #10). A line break right after the opening backtick goes, and
+  so does a last line of only blanks, with its line break. Then the lines
+  lose the indentation they all share (blanks and tabs count alike; that
+  last line's counts too, lines of only blanks do not and are emptied).
+  Text on the opening backtick's line is left as it is. }
+procedure dedentTemplate(var chunks: TPtrList);
 
 { declared(NAME): name is declared from here on, in the current scope or
   (global) the outermost one; a routine's in a scope of its own. }
@@ -368,6 +380,7 @@ begin
   lx.macrosOn := false;
   lx.inlineOn := mode = lmObjFPC;
   lx.cOperators := mode <> lmISO;
+  lx.templateDepth := 0;
   lx.resultSwitch := mode = lmObjFPC;
   lx.outSwitch := mode = lmObjFPC;
   lx.defaultParamsSwitch := mode = lmObjFPC;
@@ -397,6 +410,7 @@ begin
   t.intValue := 0;
   t.based := false;
   t.wideChar := 0;
+  t.template := false;
   t.realValue := 0;
 end;
 
@@ -1885,6 +1899,16 @@ begin
       if (lx.cur < lx.len) and (at(lx, lx.cur) = '''') then
         lx.cur := lx.cur + 1;
     end
+    else if (c = '`') and (lx.mode <> lmISO) then
+    begin
+      { a template string's text, to its next backtick (which need not be
+        its last: what matters is that braces in it open no comment) }
+      lx.cur := lx.cur + 1;
+      while (lx.cur < lx.len) and (at(lx, lx.cur) <> '`') do
+        lx.cur := lx.cur + 1;
+      if lx.cur < lx.len then
+        lx.cur := lx.cur + 1;
+    end
     else
       lx.cur := lx.cur + 1;
   end;
@@ -2288,6 +2312,212 @@ begin
   bufFree(value);
 end;
 
+{ --- Template strings (tp, objfpc) ---
+
+  The text between backticks may span lines; a line end is one #10
+  whatever the source has. Two backticks are one, and two dollars before
+  an opening brace give a dollar and the brace. A dollar and an opening
+  brace start an interpolation: the tokens up to the closing brace are
+  lexed as usual, between tkTemplateHead, tkTemplateMiddle and
+  tkTemplateTail tokens holding the text around them. A template without
+  interpolations is a tkStringLiteral, and so is a raw one (an r before the
+  backtick), where nothing starts an interpolation. }
+
+function isBlankChar(c: char): boolean;
+begin
+  isBlankChar := (c = ' ') or (c = #9);
+end;
+
+procedure dedentTemplate(var chunks: TPtrList);
+var
+  minIndent, nl, i, k, p, e, n, lastLen, len0: int64;
+  ci, pass, last: longint;
+  first, atStart, blank: boolean;
+  c: PName;
+  data: PCharArray;
+  res: TBuf;
+begin
+  {$R-}
+  minIndent := -1;
+  { the line of the closing backtick, when only blanks precede it }
+  last := chunks.count - 1;
+  c := PName(listGet(chunks, last));
+  lastLen := c^.len;
+  nl := c^.len - 1;
+  while (nl >= 0) and (c^.chars^[nl] <> #10) do
+    nl := nl - 1;
+  if nl >= 0 then
+  begin
+    i := nl + 1;
+    while (i < c^.len) and isBlankChar(c^.chars^[i]) do
+      i := i + 1;
+    if i = c^.len then
+    begin
+      minIndent := c^.len - nl - 1;
+      lastLen := nl;
+    end;
+  end;
+  { the line break after the opening backtick: the text starts a line }
+  c := PName(listGet(chunks, 0));
+  if last = 0 then
+    len0 := lastLen
+  else
+    len0 := c^.len;
+  first := (len0 > 0) and (c^.chars^[0] = #10);
+
+  { pass 0 finds the shared indentation, pass 1 removes it }
+  for pass := 0 to 1 do
+  begin
+    for ci := 0 to last do
+    begin
+      c := PName(listGet(chunks, ci));
+      data := c^.chars;
+      if ci = last then
+        n := lastLen
+      else
+        n := c^.len;
+      atStart := (ci = 0) and first;
+      p := 0;
+      if atStart then
+        p := 1;
+      if pass = 1 then
+        bufInit(res);
+      while true do
+      begin
+        if atStart then
+        begin
+          k := p;
+          while (k < n) and isBlankChar(data^[k]) do
+            k := k + 1;
+          { (at a chunk's end an interpolation follows: not a blank line) }
+          if k = n then
+            blank := ci = last
+          else
+            blank := data^[k] = #10;
+          if pass = 0 then
+          begin
+            if not blank and ((minIndent < 0) or (k - p < minIndent)) then
+              minIndent := k - p;
+          end
+          else if blank then
+            p := k
+          else
+            p := p + minIndent;
+        end;
+        e := p;
+        while (e < n) and (data^[e] <> #10) do
+          e := e + 1;
+        if e >= n then
+        begin
+          if pass = 1 then
+            bufAddChars(res, data, p, n - p);
+          break;
+        end;
+        if pass = 1 then
+          bufAddChars(res, data, p, e - p + 1);
+        p := e + 1;
+        atStart := true;
+      end;
+      if pass = 1 then
+      begin
+        listSet(chunks, ci, internChars(res.data, 0, res.len));
+        bufFree(res);
+      end;
+    end;
+    if minIndent < 0 then
+      minIndent := 0;
+  end;
+  {$R+}
+end;
+
+{ The text of a template string from lx.cur, which is after its opening
+  backtick (opening) or after the closing brace of an interpolation, up
+  to the next interpolation or the closing backtick. }
+procedure lexTemplate(var lx: TLexer; var t: TToken; start: int64;
+                      raw, opening: boolean);
+var
+  value: TBuf;
+  more: boolean; { stopped at an interpolation }
+  c: char;
+  chunks: TPtrList;
+begin
+  bufInit(value);
+  more := false;
+  while true do
+  begin
+    if lx.cur >= lx.len then
+    begin
+      diagError(locOf(lx, start), 'unterminated template string');
+      break;
+    end;
+    c := at(lx, lx.cur);
+    if c = '`' then
+    begin
+      if at(lx, lx.cur + 1) = '`' then
+      begin
+        bufAddChar(value, '`');
+        lx.cur := lx.cur + 2;
+        continue;
+      end;
+      lx.cur := lx.cur + 1;
+      break;
+    end;
+    if c = #13 then { CR LF and CR: one line end }
+    begin
+      bufAddChar(value, #10);
+      lx.cur := lx.cur + 1;
+      if (lx.cur < lx.len) and (at(lx, lx.cur) = #10) then
+        lx.cur := lx.cur + 1;
+      continue;
+    end;
+    if (c = '$') and not raw then
+    begin
+      if at(lx, lx.cur + 1) = '{' then
+      begin
+        lx.cur := lx.cur + 2;
+        more := true;
+        break;
+      end;
+      if (at(lx, lx.cur + 1) = '$') and (at(lx, lx.cur + 2) = '{') then
+      begin
+        bufAdd(value, '${');
+        lx.cur := lx.cur + 3;
+        continue;
+      end;
+    end;
+    bufAddChar(value, c);
+    lx.cur := lx.cur + 1;
+  end;
+
+  if opening and not more then { the whole of it: a string }
+  begin
+    listInit(chunks);
+    listAdd(chunks, internChars(value.data, 0, value.len));
+    dedentTemplate(chunks);
+    formToken(lx, t, tkStringLiteral, start);
+    t.template := true;
+    t.strValue := PName(listGet(chunks, 0));
+    listFree(chunks);
+  end
+  else
+  begin
+    if opening then
+    begin
+      formToken(lx, t, tkTemplateHead, start);
+      lx.templateDepth := lx.templateDepth + 1;
+    end
+    else if more then
+      formToken(lx, t, tkTemplateMiddle, start)
+    else
+    begin
+      formToken(lx, t, tkTemplateTail, start);
+      lx.templateDepth := lx.templateDepth - 1;
+    end;
+    t.strValue := internChars(value.data, 0, value.len);
+  end;
+  bufFree(value);
+end;
+
 { --- Main entry point --- }
 
 function hexDigit(v: longint): char;
@@ -2371,6 +2601,26 @@ begin
     end;
 
     c := at(lx, lx.cur);
+    { template strings: the text between backticks, raw after an r, and the
+      text after an interpolation's closing brace }
+    if tp and (c = '`') then
+    begin
+      lx.cur := lx.cur + 1;
+      lexTemplate(lx, t, start, false, true);
+      exit;
+    end;
+    if tp and ((c = 'r') or (c = 'R')) and (at(lx, lx.cur + 1) = '`') then
+    begin
+      lx.cur := lx.cur + 2;
+      lexTemplate(lx, t, start, true, true);
+      exit;
+    end;
+    if (c = '}') and (lx.templateDepth > 0) then
+    begin
+      lx.cur := lx.cur + 1;
+      lexTemplate(lx, t, start, false, false);
+      exit;
+    end;
     if isIdentStart(c) then
     begin
       lexIdentifier(lx, t);

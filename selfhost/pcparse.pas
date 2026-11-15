@@ -3953,6 +3953,9 @@ function makeBinary(op: TBinaryOp; opLoc: TLoc; l, r: PNode): PNode; forward;
 function finishDesignatorStmt(start: TLoc; target: PNode): PNode; forward;
 function parseInherited: PNode; forward;
 function parseFactor: PNode; forward;
+function atTemplate: boolean; forward;
+function parseTemplate: PNode; forward;
+function parseTemplateArgs(var args: TPtrList): boolean; forward;
 function parseIfStmt: PNode; forward;
 function parseWhileStmt: PNode; forward;
 function parseRepeatStmt: PNode; forward;
@@ -4322,7 +4325,16 @@ begin
   listInit(args);
   hasParens := tok.kind = tkLParen;
   if hasParens then
-    parseActualParams(args, true);
+    parseActualParams(args, true)
+  else if atTemplate then { a tagged template string as a statement }
+  begin
+    hasParens := true;
+    if not parseTemplateArgs(args) then
+    begin
+      skipUntil([tkSemi, tkKwEnd]);
+      exit(emptyStmt(start));
+    end;
+  end;
 
   { Turbo/FPC: a typecast assigned to, longint(x) := 1, or with selectors,
     TFoo(x).Show; f(1)^.n := 2; }
@@ -4803,6 +4815,173 @@ begin
     end;
   end;
   literalNode := n;
+end;
+
+{ --- Template strings --- }
+// `text ${ expression [ ":" width [ ":" digits ] ] } text`
+
+{ Is the token the start of a template string? }
+function atTemplate: boolean;
+begin
+  atTemplate := (tok.kind = tkTemplateHead) or
+                ((tok.kind = tkStringLiteral) and tok.template);
+end;
+
+{ The parts of the template string at the token: its text (2 * n + 1
+  string literals, without the layout's indentation) and its n values. }
+function parseTemplateParts(var texts, values: TPtrList): boolean;
+var
+  chunks: TPtrList;
+  e, width, precision, f: PNode;
+  ok, more, bad: boolean;
+  depth, i: longint;
+begin
+  parseTemplateParts := false;
+  ok := true;
+  more := tok.kind = tkTemplateHead;
+  listAdd(texts, literalNode(tok));
+  consumeToken;
+  while more do
+  begin
+    e := parseExpression;
+    if (e <> nil) and (tok.kind = tkColon) then
+    begin
+      consumeToken;
+      width := parseExpression;
+      precision := nil;
+      bad := width = nil;
+      if not bad and tryConsume(tkColon) then
+      begin
+        precision := parseExpression;
+        bad := precision = nil;
+      end;
+      if bad then
+        e := nil
+      else
+      begin
+        f := newNode(nkFormatted, e^.b, prevTokEnd);
+        f^.fmtValue := e;
+        f^.fmtWidth := width;
+        f^.fmtPrecision := precision;
+        e := f;
+      end;
+    end;
+    if (e <> nil) and not (tok.kind in [tkTemplateMiddle, tkTemplateTail]) then
+    begin
+      diagError(tok.loc, 'expected ''}'' after the value in a template string');
+      e := nil;
+    end;
+    if e = nil then
+    begin
+      { recover at this template's next text, past the templates inside }
+      ok := false;
+      depth := 0;
+      while tok.kind <> tkEof do
+      begin
+        if tok.kind = tkTemplateHead then
+          depth := depth + 1
+        else if (depth = 0) and
+                (tok.kind in [tkTemplateMiddle, tkTemplateTail]) then
+          break
+        else if tok.kind = tkTemplateTail then
+          depth := depth - 1;
+        consumeToken;
+      end;
+      if tok.kind = tkEof then
+        exit;
+    end
+    else
+      listAdd(values, e);
+    more := tok.kind = tkTemplateMiddle;
+    listAdd(texts, literalNode(tok));
+    consumeToken;
+  end;
+  if not ok then
+    exit;
+  listInit(chunks);
+  for i := 0 to texts.count - 1 do
+    listAdd(chunks, PNode(listGet(texts, i))^.strValue);
+  dedentTemplate(chunks);
+  for i := 0 to texts.count - 1 do
+    PNode(listGet(texts, i))^.strValue := PName(listGet(chunks, i));
+  listFree(chunks);
+  parseTemplateParts := true;
+end;
+
+{ A template string with interpolations: an nkTemplate. }
+function parseTemplate: PNode;
+var
+  start: TLoc;
+  texts, values, parts: TPtrList;
+  i: longint;
+  n: PNode;
+begin
+  parseTemplate := nil;
+  start := tok.loc;
+  listInit(texts);
+  listInit(values);
+  if not parseTemplateParts(texts, values) then
+    exit;
+  listInit(parts);
+  for i := 0 to texts.count - 1 do
+  begin
+    listAdd(parts, listGet(texts, i));
+    if i < values.count then
+      listAdd(parts, listGet(values, i));
+  end;
+  n := newNode(nkTemplate, start, prevTokEnd);
+  n^.tmplParts := parts;
+  parseTemplate := n;
+end;
+
+{ A tagged template string, a name before the opening backtick: the
+  arguments of the call it is, the text parts and the values, each list
+  written like a set constructor. }
+function parseTemplateArgs(var args: TPtrList): boolean;
+var
+  start: TLoc;
+  texts, values, elems: TPtrList;
+  i: longint;
+  el: PSetElement;
+  n, v: PNode;
+begin
+  parseTemplateArgs := false;
+  start := tok.loc;
+  listInit(texts);
+  listInit(values);
+  if not parseTemplateParts(texts, values) then
+    exit;
+  listInit(elems);
+  for i := 0 to texts.count - 1 do
+  begin
+    el := PSetElement(arenaAlloc(sizeof(TSetElement)));
+    el^.lo := PNode(listGet(texts, i));
+    el^.hi := nil;
+    listAdd(elems, el);
+  end;
+  n := newNode(nkSetCtor, start, prevTokEnd);
+  n^.setElems := elems;
+  listAdd(args, n);
+  listInit(elems);
+  for i := 0 to values.count - 1 do
+  begin
+    v := PNode(listGet(values, i));
+    if v^.kind = nkFormatted then
+    begin
+      diagErrorR(v^.fmtWidth^.b,
+                 'a value of a tagged template string cannot have a field width',
+                 makeRange(v^.fmtWidth^.b, v^.fmtWidth^.e));
+      v := v^.fmtValue;
+    end;
+    el := PSetElement(arenaAlloc(sizeof(TSetElement)));
+    el^.lo := v;
+    el^.hi := nil;
+    listAdd(elems, el);
+  end;
+  n := newNode(nkSetCtor, start, prevTokEnd);
+  n^.setElems := elems;
+  listAdd(args, n);
+  parseTemplateArgs := true;
 end;
 
 function unaryNode(op: TUnaryOp; opLoc: TLoc; operand: PNode): PNode;
@@ -5305,6 +5484,16 @@ begin
       base := n;
       continue;
     end;
+    { a tagged template string: a member before the opening backtick is
+      called with the text parts and the values }
+    if atTemplate and (base^.kind <> nkNameRef) then
+    begin
+      listInit(args);
+      if not parseTemplateArgs(args) then
+        exit;
+      base := indirectCall(base^.b, prevTokEnd, base, args);
+      continue;
+    end;
     { Turbo/FPC: a call through a procedural value, passes[i].run(v).
       (A plain name followed by '(' is a call.) }
     if (tok.kind = tkLParen) and (mode <> lmISO) and (base^.kind <> nkNameRef) then
@@ -5358,6 +5547,8 @@ begin
           exit(parseSelectors(n)); { 'abc'.ToUpper }
         exit(n);
       end;
+    tkTemplateHead:
+      exit(parseTemplate);
     tkIdentifier:
       begin
         if startsSpecialize then { specialize F<T>(args) }
@@ -5390,6 +5581,16 @@ begin
         end;
         name := makeIdentifier(tok);
         consumeToken;
+        if atTemplate then { a tagged template string }
+        begin
+          listInit(args);
+          if not parseTemplateArgs(args) then
+            exit;
+          call := newNode(nkCall, name.loc, prevTokEnd);
+          call^.callee := name;
+          call^.args := args;
+          exit(parseSelectors(call));
+        end;
         if tok.kind = tkLParen then
         begin
           listInit(args);

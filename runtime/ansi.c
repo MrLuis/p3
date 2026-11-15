@@ -98,6 +98,20 @@ char *__pas_astr_concat(char *a, char *b) {
   return s;
 }
 
+char *__pas_astr_join(const char *a, const char *p, int64_t n, const char *b) {
+  int64_t la = LEN(a), lb = LEN(b);
+  if (la + n + lb <= 0)
+    return NULL;
+  char *s = alloc_str(la + n + lb);
+  if (la > 0)
+    memcpy(s, a, (size_t)la);
+  if (n > 0)
+    memcpy(s + la, p, (size_t)n);
+  if (lb > 0)
+    memcpy(s + la + n, b, (size_t)lb);
+  return s;
+}
+
 int32_t __pas_astr_compare(const char *a, const char *b) {
   int64_t la = LEN(a), lb = LEN(b), n = la < lb ? la : lb;
   int c = n > 0 ? memcmp(a, b, (size_t)n) : 0;

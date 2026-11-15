@@ -1752,6 +1752,7 @@ begin
 end;
 
 function holdResult(const v: TV): TV; forward;
+procedure emitWriteArg(const f: TV; arg: PNode); forward;
 function holdDynResult(const v: TV; t: PType): TV; forward;
 
 procedure astrV1(const name: string; const x: TV);
@@ -5401,6 +5402,39 @@ begin
   emitMove := obj;
 end;
 
+{ The text part p of a template string as an ansistring constant; null
+  when it is empty. }
+function templateText(p: PNode): TV;
+begin
+  if p^.strValue^.len = 0 then
+    templateText := irNull
+  else
+    templateText := getAnsiConstant(p^.strValue^.chars, 0, p^.strValue^.len);
+end;
+
+{ A template string: each value is written, as write writes it, to the
+  runtime's text file that collects characters (__pas_tmpl_sink);
+  __pas_tmpl_add then makes the string so far, what was collected and the
+  text that follows into one string. (Nothing but the write itself runs
+  between the two, so a template inside a value is done by then.) }
+function emitTemplate(e: PNode): TV;
+var
+  r, f, t: TV;
+  i: longint;
+begin
+  r := templateText(PNode(listGet(e^.tmplParts, 0)));
+  i := 1;
+  while i < e^.tmplParts.count do
+  begin
+    f := call0(classRuntime('__pas_tmpl_sink', 'ptr', ''), '');
+    emitWriteArg(f, PNode(listGet(e^.tmplParts, i)));
+    t := templateText(PNode(listGet(e^.tmplParts, i + 1)));
+    r := holdResult(call2(classRuntime('__pas_tmpl_add', 'ptr', 'ptr,ptr'), r, t, ''));
+    i := i + 2;
+  end;
+  emitTemplate := r;
+end;
+
 function visitExprKind(e: PNode): TV;
 var
   noArgs: TPtrList;
@@ -5417,6 +5451,7 @@ begin
     nkNameRef: visitExprKind := visitNameRef(e);
     nkParen: visitExprKind := visitExpr(e^.inner);
     nkMove: visitExprKind := emitMove(e);
+    nkTemplate: visitExprKind := emitTemplate(e);
     nkUnary: visitExprKind := visitUnary(e);
     nkBinary: visitExprKind := visitBinary(e);
     nkCall: visitExprKind := visitCall(e);

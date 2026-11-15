@@ -983,6 +983,13 @@ public:
     for (Expr *Arg : E->getArgs())
       visitExpr(Arg);
   }
+  void visitTemplateExpr(TemplateExpr *E) {
+    line("TemplateExpr");
+    end(E);
+    IndentScope I(Indent);
+    for (Expr *P : E->getParts())
+      visitExpr(P);
+  }
   void visitFormattedExpr(FormattedExpr *E) {
     line("FormattedExpr");
     end(E);
