@@ -5461,6 +5461,13 @@ class Checker : public StmtVisitor<Checker>,
         Cost += AT == OA ? 0 : 1;
         continue;
       }
+      if (RoutineDecl *L = pendingLambda(Arg)) { // its shape
+        int C = lambdaCost(L, PT);
+        if (C < 0)
+          return -1;
+        Cost += C;
+        continue;
+      }
       if (!AT) { // a routine's name: for a procedural parameter
         if (!llvm::isa<RoutineType>(PT))
           return -1;
@@ -5656,6 +5663,65 @@ class Checker : public StmtVisitor<Checker>,
     E->setType(PT);
   }
 
+  /// E is a lambda not completed yet: its routine.
+  static RoutineDecl *pendingLambda(Expr *E) {
+    auto *A = llvm::dyn_cast<AddrOfExpr>(E);
+    RoutineDecl *L = A ? A->getLambda() : nullptr;
+    return L && !L->isLambdaDone() ? L : nullptr;
+  }
+
+  /// The types written in lambda L (of its parameters and result), resolved
+  /// once while overloads are chosen (kept as their types until
+  /// completeLambda sets them). False after a diagnostic.
+  bool resolveLambdaSpecs(RoutineDecl *L) {
+    for (VarDecl *P : L->getParams())
+      if (P->getTypeSpec() && !P->getType()) {
+        Type *T = resolveType(P->getTypeSpec());
+        if (T->isError())
+          return false;
+        P->setType(T);
+      }
+    if (L->isFunction() && L->getResultTypeSpec() && !L->getResultType()) {
+      Type *T = resolveType(L->getResultTypeSpec());
+      if (T->isError())
+        return false;
+      L->setResultType(T);
+    }
+    return true;
+  }
+
+  /// The cost of passing lambda L for a parameter of type PT, by its
+  /// shape (-1: it does not fit): a procedural type of the same kind
+  /// (function or procedure), with as many parameters, of the types and
+  /// kinds L writes, and the result type it writes. A parameter written
+  /// with a type but without a kind takes the kind wanted, but fits a value
+  /// parameter best (cost 1 for each other); one without either fits any
+  /// parameter alike (so overloads that differ there are ambiguous).
+  int lambdaCost(RoutineDecl *L, Type *PT) {
+    auto *RT = llvm::dyn_cast<RoutineType>(PT);
+    if (!RT || RT->isFunction() != L->isFunction() ||
+        RT->getParams().size() != L->getParams().size())
+      return -1;
+    int Cost = 0;
+    for (size_t I = 0; I < RT->getParams().size(); ++I) {
+      VarDecl *P = L->getParams()[I], *WP = RT->getParams()[I];
+      if (P->getTypeSpec() && P->getType() != WP->getType())
+        return -1;
+      bool WantsValue = WP->getVarKind() == VarDecl::ValueParam &&
+                        !WP->isOutParam() && !WP->isConstRefParam();
+      if (P->getVarKind() == VarDecl::ValueParam)
+        Cost += WantsValue || !P->getTypeSpec() ? 0 : 1;
+      else if (P->getVarKind() != WP->getVarKind() ||
+               P->isOutParam() != WP->isOutParam() ||
+               P->isConstRefParam() != WP->isConstRefParam())
+        return -1;
+    }
+    if (L->isFunction() && L->getResultTypeSpec() &&
+        L->getResultType() != RT->getResult())
+      return -1;
+    return Cost;
+  }
+
   RoutineDecl *resolveOverload(RoutineDecl *First, llvm::ArrayRef<Expr *> Args,
                                const Identifier &Callee, SourceRange Range) {
     llvm::SmallVector<RoutineDecl *, 4> Cands;
@@ -5667,6 +5733,14 @@ class Checker : public StmtVisitor<Checker>,
       Expr *A = argValue(Written);
       if (llvm::isa<FormattedExpr>(A))
         return First; // reported with the call's arguments
+      // A lambda: chosen by its shape (lambdaFits), completed afterwards
+      // with the parameter's type.
+      if (RoutineDecl *L = pendingLambda(A)) {
+        if (!resolveLambdaSpecs(L))
+          return nullptr;
+        ArgTys.push_back(nullptr);
+        continue;
+      }
       // [...] for an open array need not be a valid set.
       if (llvm::isa<SetCtorExpr>(A) &&
           hasConstArrayParam(Cands, Args, ArgTys.size())) {
@@ -5719,7 +5793,10 @@ class Checker : public StmtVisitor<Checker>,
       Types += I ? ", " : "";
       if (auto *NA = llvm::dyn_cast<NamedArgExpr>(Args[I]))
         Types += NA->getName().Spelling.str() + " := ";
-      Types += ArgTys[I] ? ArgTys[I]->getName() : std::string("routine");
+      Types += ArgTys[I]                        ? ArgTys[I]->getName()
+               : pendingLambda(argValue(Args[I])) ? lambdaShape(
+                                                        pendingLambda(argValue(Args[I])))
+                                                  : std::string("routine");
     }
     Diags.error(Callee.Loc,
                 (Best ? "ambiguous call to overloaded '"
@@ -5736,6 +5813,29 @@ class Checker : public StmtVisitor<Checker>,
         Diags.note(R->getLocation(), "candidate: " + routineHeading(R));
     }
     return nullptr;
+  }
+
+  /// A lambda's shape for diagnostics: "function(integer; ?): ?" (? for
+  /// types left out).
+  std::string lambdaShape(RoutineDecl *L) {
+    std::string S = L->isFunction() ? "lambda function(" : "lambda procedure(";
+    auto Params = L->getParams();
+    for (size_t I = 0; I < Params.size(); ++I) {
+      Type *T = Params[I]->getTypeSpec() ? Params[I]->getType() : nullptr;
+      S += std::string(I ? "; " : "") +
+           (Params[I]->isOutParam()        ? "out "
+            : Params[I]->isVarParam()      ? "var "
+            : Params[I]->isConstRefParam() ? "constref "
+            : Params[I]->isConstParam()    ? "const "
+                                           : "") +
+           (T ? T->getName() : std::string("?"));
+    }
+    S += ")";
+    if (L->isFunction()) {
+      Type *T = L->getResultTypeSpec() ? L->getResultType() : nullptr;
+      S += ": " + (T ? T->getName() : std::string("?"));
+    }
+    return S;
   }
 
   /// "f(integer; var string): real" for diagnostics.

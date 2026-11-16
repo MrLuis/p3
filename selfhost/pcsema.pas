@@ -7886,6 +7886,129 @@ begin
   setCtorCost := 1;
 end;
 
+{ e is a lambda not completed yet: its routine, else nil. }
+function pendingLambda(e: PNode): PDecl;
+begin
+  pendingLambda := nil;
+  if (e^.kind = nkAddrOf) and (e^.addrLambda <> nil) then
+    if not e^.addrLambda^.lambdaDone then
+      pendingLambda := e^.addrLambda;
+end;
+
+{ The types written in lambda l (of its parameters and result), resolved
+  once while overloads are chosen (kept in varType and resultType until
+  completeLambda sets them). False after a diagnostic. }
+function resolveLambdaSpecs(l: PDecl): boolean;
+var
+  i: longint;
+  p: PDecl;
+  t: PType;
+begin
+  resolveLambdaSpecs := false;
+  for i := 0 to l^.params.count - 1 do
+  begin
+    p := PDecl(listGet(l^.params, i));
+    if (p^.varSpec <> nil) and (p^.varType = nil) then
+    begin
+      t := resolveType(p^.varSpec, nil);
+      if isError(t) then
+        exit;
+      p^.varType := t;
+    end;
+  end;
+  if l^.isFunction and (l^.resultSpec <> nil) and (l^.resultType = nil) then
+  begin
+    t := resolveType(l^.resultSpec, nil);
+    if isError(t) then
+      exit;
+    l^.resultType := t;
+  end;
+  resolveLambdaSpecs := true;
+end;
+
+{ The cost of passing lambda l for a parameter of type pt, by its shape
+  (-1: it does not fit): a procedural type of the same kind (function or
+  procedure), with as many parameters, of the types and kinds l writes,
+  and the result type it writes. A parameter written with a type but
+  without a kind takes the kind wanted, but fits a value parameter best
+  (cost 1 for each other); one without either fits any parameter alike
+  (so overloads that differ there are ambiguous). }
+function lambdaCost(l: PDecl; pt: PType): longint;
+var
+  i, cost: longint;
+  p, wp: PDecl;
+  wantsValue: boolean;
+begin
+  lambdaCost := -1;
+  if pt^.kind <> tyRoutine then
+    exit;
+  if ((pt^.routineResult <> nil) <> l^.isFunction) or
+     (pt^.routineParams.count <> l^.params.count) then
+    exit;
+  cost := 0;
+  for i := 0 to pt^.routineParams.count - 1 do
+  begin
+    p := PDecl(listGet(l^.params, i));
+    wp := PDecl(listGet(pt^.routineParams, i));
+    if p^.varSpec <> nil then
+      if p^.varType <> wp^.varType then
+        exit;
+    wantsValue := (wp^.varKind = vkValueParam) and not wp^.isOut and not wp^.isConstRef;
+    if p^.varKind = vkValueParam then
+    begin
+      if not wantsValue and (p^.varSpec <> nil) then
+        cost := cost + 1;
+    end
+    else if (p^.varKind <> wp^.varKind) or (p^.isOut <> wp^.isOut) or
+            (p^.isConstRef <> wp^.isConstRef) then
+      exit;
+  end;
+  if l^.isFunction and (l^.resultSpec <> nil) then
+    if l^.resultType <> pt^.routineResult then
+      exit;
+  lambdaCost := cost;
+end;
+
+{ A lambda's shape for diagnostics: lambda function(integer; ?): ? (? for
+  types left out). }
+procedure maLambdaShape(l: PDecl);
+var
+  i: longint;
+  p: PDecl;
+begin
+  if l^.isFunction then
+    ma('lambda function(')
+  else
+    ma('lambda procedure(');
+  for i := 0 to l^.params.count - 1 do
+  begin
+    p := PDecl(listGet(l^.params, i));
+    if i > 0 then
+      ma('; ');
+    if p^.isOut then
+      ma('out ')
+    else if p^.varKind = vkVarParam then
+      ma('var ')
+    else if p^.isConstRef then
+      ma('constref ')
+    else if p^.varKind = vkConstParam then
+      ma('const ');
+    if (p^.varSpec <> nil) and (p^.varType <> nil) then
+      bufAddTypeName(msg, p^.varType)
+    else
+      ma('?');
+  end;
+  ma(')');
+  if l^.isFunction then
+  begin
+    ma(': ');
+    if (l^.resultSpec <> nil) and (l^.resultType <> nil) then
+      bufAddTypeName(msg, l^.resultType)
+    else
+      ma('?');
+  end;
+end;
+
 function callCost(r: PDecl; const args, argTys: TPtrList; var penalty: longint): longint;
 var
   map: TPtrList;
@@ -7931,6 +8054,14 @@ begin
         exit;
       if at <> pt then
         cost := cost + 1;
+      continue;
+    end;
+    if pendingLambda(arg) <> nil then { its shape }
+    begin
+      c := lambdaCost(pendingLambda(arg), pt);
+      if c < 0 then
+        exit;
+      cost := cost + c;
       continue;
     end;
     if at = nil then { a routine's name: for a procedural parameter }
@@ -8293,6 +8424,15 @@ begin
     a := argValue(PNode(listGet(args, i)));
     if a^.kind = nkFormatted then
       exit(first); { reported with the call's arguments }
+    { a lambda: chosen by its shape (lambdaCost), completed afterwards
+      with the parameter's type }
+    if pendingLambda(a) <> nil then
+    begin
+      if not resolveLambdaSpecs(pendingLambda(a)) then
+        exit;
+      listAdd(argTys, nil);
+      continue;
+    end;
     { [...] for an open array need not be a valid set }
     if (a^.kind = nkSetCtor) and hasConstArrayParam(cands, args, i) then
     begin
@@ -8364,6 +8504,8 @@ begin
     t := PType(listGet(argTys, i));
     if t <> nil then
       bufAddTypeName(msg, t)
+    else if pendingLambda(argValue(PNode(listGet(args, i)))) <> nil then
+      maLambdaShape(pendingLambda(argValue(PNode(listGet(args, i)))))
     else
       ma('routine');
   end;

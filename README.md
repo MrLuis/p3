@@ -657,9 +657,32 @@ end;
   methods, where `T` is the type argument), and conditional expressions.
 
 A lambda cannot use a field through a `with` statement outside it (name
-the record instead). Not supported: lambdas in constant expressions;
-overloads chosen by a lambda's shape (an overloaded routine's lambda
-argument must have its parameter types written).
+the record instead). Not supported: lambdas in constant expressions.
+
+**Overloads and lambdas**: a lambda passed to an overloaded routine
+chooses the overload by its shape, then takes its types from it. It fits
+a procedural parameter of the same kind (`function` or `procedure`) with
+as many parameters, of the types and kinds (`var`, `const`) it writes,
+and of the result type it writes; its body is not used to choose.
+
+```pascal
+function Apply(f: TUnary; v: Integer): Integer; overload;   { 1 parameter }
+function Apply(f: TBinary; v: Integer): Integer; overload;  { 2 parameters }
+function Calc(f: TIntFn): Integer; overload;     { function(x: Integer): Integer }
+function Calc(f: TRealFn): Integer; overload;    { function(x: Real): Real }
+
+Apply(function(x) => x * 2, 5);            { TUnary }
+Apply(function(a, b) => a * b, 5);         { TBinary }
+Calc(function(x: Real) => x / 2);          { TRealFn: the type written }
+Calc(function(x) => x);                    { error: ambiguous, write the type }
+```
+
+A parameter without a type fits any type, so overloads that differ only
+there are ambiguous: write the type. A parameter with a type but no kind
+takes the kind wanted, but fits a value parameter best (`procedure(a, b:
+Integer)` chooses `procedure(a, b: Integer)` over `procedure(var a, b:
+Integer)`). The errors name the lambda's shape: "ambiguous call to
+overloaded 'Calc' with arguments (lambda function(?): ?)".
 
 **Method-pointer lambdas**: a lambda wanted as an `of object` type is
 called on an object, like `@Self.M`. In a method of a class its object is

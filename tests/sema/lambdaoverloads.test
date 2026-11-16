@@ -1,0 +1,19 @@
+; Overloads chosen by a lambda's shape (objfpc): its kind (function or
+; procedure), its number of parameters, and the types and kinds it writes.
+; Parameters without a type fit any type, so overloads that differ only
+; there are ambiguous; a written type without a kind fits a value
+; parameter best.
+; RUN: not %pcc --mode=objfpc -ferror-limit=0 -c %S/Inputs/lambdaoverloads/errors.pas -o %t.o 2>&1 | FileCheck %s
+; CHECK: errors.pas:49:3: error: ambiguous call to overloaded 'Calc' with arguments (lambda function(?): ?)
+; CHECK: errors.pas:11:1: note: candidate: Calc(TUnary): integer
+; CHECK: errors.pas:16:1: note: candidate: Calc(TRealFn): integer
+; CHECK: errors.pas:21:1: note: candidate: Calc(TStrFn): integer
+; CHECK: errors.pas:50:3: error: no overload of 'Calc' takes arguments (lambda function(boolean): ?)
+; CHECK: errors.pas:51:3: error: no overload of 'Calc' takes arguments (lambda function(?; ?): ?)
+; CHECK: errors.pas:52:3: error: no overload of 'Run' takes arguments (lambda procedure(var ?))
+; CHECK: errors.pas:53:20: error: unknown type name 'Nope'
+; CHECK: errors.pas:54:3: error: no overload of 'Calc' takes arguments (lambda function(integer): ansistring)
+; CHECK: errors.pas:55:3: error: ambiguous call to overloaded 'Swap2' with arguments (lambda procedure(?; ?))
+; CHECK: errors.pas:36:1: note: candidate: Swap2(TSwap)
+; CHECK: errors.pas:43:1: note: candidate: Swap2(TPair)
+; CHECK-NOT: error:
