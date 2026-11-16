@@ -661,7 +661,8 @@ begin
     wide := irBin('add', old64, neg, '');
   end;
   if isIntegerLike(t) then
-    check := overflowChecks(loc) or rangeChecks(loc)
+    check := overflowChecks(loc) or
+             (rangeChecks(loc) and not (wraps(loc) and (t^.kind = tyInteger)))
   else
     check := rangeChecks(loc);
   if check then
@@ -669,7 +670,7 @@ begin
     bd := getOrdinalBounds(t);
     bad := outsideRange(wide, bd.lo, bd.hi);
     if isIntegerLike(t) then
-      emitRuntimeCheck(bad, 'integer overflow in ''' + nm(s^.callee.name) + '''', loc)
+      emitOverflowCheck(bad, 'integer overflow in ''' + nm(s^.callee.name) + '''', loc)
     else
       emitRuntimeCheck(bad, 'value out of range', loc);
   end;

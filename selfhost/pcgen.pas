@@ -241,7 +241,7 @@ begin
     that may run a destructor (which is Pascal code): releasing an object
     or an interface reference. }
   if (name <> '__pas_raise') and (name <> '__pas_raise_at') and
-     (name <> '__pas_raise_divzero') and
+     (name <> '__pas_raise_divzero') and (name <> '__pas_raise_overflow') and
      (name <> '__pas_reraise') and (name <> '__pas_reraise_free') and
      (name <> '__pas_free_object') and (name <> '__pas_free_instance') and
      (name <> '__pas_intf_assign') and (name <> '__pas_intf_clear') and
@@ -1066,6 +1066,13 @@ begin
   overflowChecks := checkEnabled(swOverflow, loc, optOverflow);
 end;
 
+{ In an unchecked block at loc: integer values converted to a narrower
+  integer type wrap instead of being range-checked. }
+function wraps(loc: TLoc): boolean;
+begin
+  wraps := checkEnabled(swWrap, loc, false);
+end;
+
 { Whether t is an untyped file type (file, with no element). }
 function isUntypedFileType(t: PType): boolean;
 begin
@@ -1141,6 +1148,9 @@ var
   x, above, below: TV;
 begin
   if not rangeChecks(loc) or not isOrdinal(target) then
+    exit;
+  { unchecked: an integer converted to an integer type (not a subrange) }
+  if wraps(loc) and (target^.kind = tyInteger) and isIntegerLike(src) then
     exit;
   tb := getOrdinalBounds(target);
   fb := getOrdinalBounds(src);
@@ -1255,6 +1265,29 @@ begin
   convertForAssign := v;
 end;
 
+procedure excCall1(const name: string; const x: TV); forward;
+function whereText(loc: TLoc): TV; forward;
+
+{ if cond: integer overflow (what): a runtime error, or (objfpc) an
+  EIntOverflow exception, as in Free Pascal with SysUtils. }
+procedure emitOverflowCheck(const cond: TV; const what: string; loc: TLoc);
+var
+  errB, okB: PIRBlock;
+begin
+  if mode <> lmObjFPC then
+  begin
+    emitRuntimeCheck(cond, what, loc);
+    exit;
+  end;
+  errB := irNewBlock('rt.error');
+  okB := irNewBlock('rt.ok');
+  irCondBr(cond, errB, okB, true);
+  irSetInsertPoint(errB);
+  excCall1('__pas_raise_overflow', whereText(loc));
+  irUnreachable;
+  irSetInsertPoint(okB);
+end;
+
 { l op r ('add', 'sub' or 'mul') with an overflow check if enabled }
 function emitCheckedArith(const op: string; signed: boolean; const l, r: TV;
                           loc: TLoc; const name: string): TV;
@@ -1279,7 +1312,7 @@ begin
   f := intrinsic(fname, pairT, l.t, l.t, speculatable, '');
   res := call2(f, l, r, '');
   ovf := irExtract(res, 1, irI1, '');
-  emitRuntimeCheck(ovf, 'integer overflow', loc);
+  emitOverflowCheck(ovf, 'integer overflow', loc);
   emitCheckedArith := irExtract(res, 0, l.t, name);
 end;
 
@@ -3740,7 +3773,7 @@ begin
     ret := 'void';
     params := 'ptr';
     attrs := 'nounwind';
-    if name = '__pas_raise_divzero' then
+    if (name = '__pas_raise_divzero') or (name = '__pas_raise_overflow') then
       attrs := 'cold noreturn nounwind'
     else if (name = '__pas_raise') or (name = '__pas_reraise_free') then
     begin
@@ -4582,7 +4615,7 @@ begin
   begin
     a := irICmp('eq', l, signedMin(l.t), '');
     b := irICmp('eq', r, irConstInt(r.t, -1), '');
-    emitRuntimeCheck(irBin('and', a, b, ''), 'integer overflow in ''div''', loc);
+    emitOverflowCheck(irBin('and', a, b, ''), 'integer overflow in ''div''', loc);
   end;
   emitDiv := irBin('sdiv', l, r, 'div');
 end;
@@ -4863,6 +4896,8 @@ end;
 
 function emitBuiltinCall(e: PNode; k: TBuiltinKind): TV;
 var
+  opName: string;
+  pairFields: TPtrList;
   argE: PNode;
   at, t: PType;
   arg, tmp, p, x, one, bad: TV;
@@ -4874,6 +4909,38 @@ var
   f: PIRFunc;
 begin
   case k of
+    bkAddChecked, bkSubChecked, bkMulChecked: { the tuple (a op b, no overflow) }
+      begin
+        r := memType(e^.typ);
+        t := PDecl(listGet(e^.typ^.allFields, 0))^.fieldType;
+        argE := PNode(listGet(e^.args, 0));
+        arg := convertOrdinal(visitExpr(argE), argE^.typ, t);
+        argE := PNode(listGet(e^.args, 1));
+        x := convertOrdinal(visitExpr(argE), argE^.typ, t);
+        if k = bkAddChecked then
+          opName := 'add'
+        else if k = bkSubChecked then
+          opName := 'sub'
+        else
+          opName := 'mul';
+        if isSignedOrdinal(t) then
+          opName := 'llvm.s' + opName + '.with.overflow.' + arg.t^.text
+        else
+          opName := 'llvm.u' + opName + '.with.overflow.' + arg.t^.text;
+        listInit(pairFields);
+        listAdd(pairFields, arg.t);
+        listAdd(pairFields, irI1);
+        f := intrinsic(opName, irStructLit(pairFields), arg.t, arg.t, speculatable, '');
+        listFree(pairFields);
+        tmp := call2(f, arg, x, '');
+        p := irCreateTemp(r, 'checked');
+        storeScalar(fieldAddress(p, e^.typ, PDecl(listGet(e^.typ^.allFields, 0))),
+                    irExtract(tmp, 0, arg.t, 'value'), t);
+        storeScalar(fieldAddress(p, e^.typ, PDecl(listGet(e^.typ^.allFields, 1))),
+                    irBin('xor', irExtract(tmp, 1, irI1, ''), irConstBool(true), 'ok'),
+                    PDecl(listGet(e^.typ^.allFields, 1))^.fieldType);
+        exit(p);
+      end;
     bkSizeOf: { the argument is not evaluated }
       begin
         t := PNode(listGet(e^.args, 0))^.typ;
@@ -4982,8 +5049,8 @@ begin
         if not isSignedOrdinal(e^.typ) then
           exit(arg);
         if overflowChecks(loc) then
-          emitRuntimeCheck(irICmp('eq', arg, signedMin(arg.t), ''),
-                           'integer overflow in ''abs''', loc);
+          emitOverflowCheck(irICmp('eq', arg, signedMin(arg.t), ''),
+                            'integer overflow in ''abs''', loc);
         r := arg.t;
         f := intrinsic('llvm.abs.' + r^.text, r, r, irI1, speculatable,
                        r^.text + ', i1 immarg');

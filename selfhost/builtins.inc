@@ -69,7 +69,10 @@ type
     bkSqrt,
     bkArctan,
     bkTrunc,
-    bkRound);
+    bkRound,
+    bkAddChecked,
+    bkSubChecked,
+    bkMulChecked);
 
 const
   builtinNames: array[TBuiltinKind] of string[15] = (
@@ -140,7 +143,10 @@ const
     'sqrt',
     'arctan',
     'trunc',
-    'round');
+    'round',
+    'addchecked',
+    'subchecked',
+    'mulchecked');
   builtinIsProcedure: array[TBuiltinKind] of boolean = (
     true,
     true,
@@ -195,6 +201,9 @@ const
     false,
     true,
     true,
+    false,
+    false,
+    false,
     false,
     false,
     false,

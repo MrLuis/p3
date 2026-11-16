@@ -36,7 +36,7 @@
 
 ; The C entries of cdecl routines (their procedural values), and variadic calls.
 ; RUN: %pcc --mode=objfpc --emit-llvm %S/../run/externals.pas -o - | FileCheck --check-prefix=IR %s
-; IR: call i32 (ptr, ...) @printf(ptr @.cstr.11, i32 42, ptr @.cstr.12, double 2.500000e+00, i32 %{{[0-9]+}}, i64 1234567890123)
+; IR: call i32 (ptr, ...) @printf(ptr @.cstr.{{[0-9]+}}, i32 42, ptr @.cstr.{{[0-9]+}}, double 2.500000e+00, i32 %{{[0-9]+}}, i64 1234567890123)
 ; IR: call void @qsort(ptr @pas.a, i64 7, i64 4, ptr @cthunk.pas.compare)
 ; IR: store { ptr, ptr } { ptr @cthunk.pas.descending, ptr null }, ptr @pas.cmp
 ; IR: declare i32 @printf(ptr, ...)

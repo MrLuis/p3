@@ -253,6 +253,8 @@ class Parser {
                               tok::TokenKind Alt = tok::eof);
   Stmt *parseStatement();
   Stmt *parseStatementImpl();
+  bool startsCheckedBlock();
+  Stmt *parseCheckedBlock();
   Stmt *parseAssignmentOrCall();
   Stmt *finishDesignatorStmt(SourceLocation Start, Expr *Target);
   /// The statement starting with a designator being parsed: its tokens so

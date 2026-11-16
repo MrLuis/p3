@@ -621,7 +621,8 @@ end;
 { Free Pascal's objpas built-ins, predeclared only with --mode=objfpc. }
 function isObjFPCOnly(k: TBuiltinKind): boolean;
 begin
-  isObjFPCOnly := k in [bkAssignFile, bkCloseFile, bkExceptAddr];
+  isObjFPCOnly := k in [bkAssignFile, bkCloseFile, bkExceptAddr, bkAddChecked,
+                        bkSubChecked, bkMulChecked];
 end;
 
 procedure stdType(const n: string; t: PType);
@@ -1006,6 +1007,7 @@ begin
   external_ := declareExceptionClass('EExternal', exceptionType);
   intError := declareExceptionClass('EIntError', external_);
   external_ := declareExceptionClass('EDivByZero', intError);
+  external_ := declareExceptionClass('EIntOverflow', intError); { (objfpc overflow) }
   external_ := declareExceptionClass('EConvertError', exceptionType);
 end;
 

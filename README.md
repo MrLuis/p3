@@ -338,8 +338,9 @@ leaves the handler; a constructor that raises destroys its new object.
 `Exception` has `Create(msg)` and the property `Message`. Integer `div` and
 `mod` by zero raise `EDivByZero` (message `Division by zero`; its ancestors
 `EIntError` and `EExternal` are predeclared too), as in Free Pascal with
-SysUtils; other runtime errors (range and overflow checks, real division by
-zero, ...) are not exceptions. Following Free Pascal, `exit`, and
+SysUtils, and integer overflow (`{$Q+}`, and `checked` blocks below)
+raises `EIntOverflow` (message `Arithmetic overflow`); other runtime errors
+(range checks, real division by zero, ...) are not exceptions. Following Free Pascal, `exit`, and
 `break`/`continue` out of a `finally` part, are errors, and so are labels
 and `goto` in `--mode=objfpc` (Free Pascal without `-Sg`). An unhandled
 exception is a runtime error that names the class, where it was raised and
@@ -787,6 +788,46 @@ Writeln(add5(10));                      { 15 }
   closure uses 'v', a 'var' parameter of 'ByVar', which may not exist when
   the closure runs; copy it to a local variable first"); a copy (below)
   is the way to use their values.
+
+**Checked and unchecked arithmetic** (objfpc; item 9 of the proposals):
+`checked ... end` checks the integer arithmetic of its statements for
+overflow (`+ - *`, unary minus, `abs`, `div`, `inc`/`dec`), raising
+`EIntOverflow`, whatever `{$Q}` says around it; `unchecked ... end` does
+not check it: it wraps (two's complement), and so does an integer value
+converted to a narrower integer type there (`b := b + 10` for a byte
+`b`). A subrange, an enumeration or an array index is still range-checked
+(`{$R}`) inside `unchecked`.
+
+```pascal
+function TotalSize(const Sizes: array of Cardinal): QWord;
+begin
+  checked
+    Result := 0;
+    for var s in Sizes do
+      Result := Result + s;   { raises EIntOverflow if it wraps }
+  end;
+end;
+
+unchecked
+  hash := (hash xor Ord(c)) * 16777619;   { wrapping is intended here }
+end;
+```
+
+The blocks nest, and a `{$Q±}` inside one switches again up to its `end`,
+where the state before the block comes back. The default for a unit stays
+`{$Q±}` and `-fno-overflow-checks` (on by default). `checked` and
+`unchecked` are not reserved: a block starts where one of them begins a
+statement and is followed by a statement (not by `:=`, `(` or `;`).
+
+`AddChecked(a, b)`, `SubChecked(a, b)` and `MulChecked(a, b)` give the
+tuple `(a op b, ok)`, never raising: the value wrapped and `ok = False` on
+overflow, in the type `a op b` would have (`Int64`, `Cardinal`, ...).
+
+```pascal
+var (sum, ok) := AddChecked(total, n);
+if not ok then
+  Writeln('too large');
+```
 
 **Capture by copy** (pcc's own): `function[k, s](x) => e` is a closure
 with its own copies of `k` and `s`, taken when it is made. Inside it they

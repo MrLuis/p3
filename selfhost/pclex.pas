@@ -34,7 +34,9 @@ type
     realValue: double; { real literals }
   end;
 
-  TCheckSwitch = (swRange, swOverflow);
+  { swWrap: no directive; unchecked blocks: integer values converted to a
+    narrower integer type wrap instead of being range-checked }
+  TCheckSwitch = (swRange, swOverflow, swWrap);
 
   PIncludeFrame = ^TIncludeFrame;
   TIncludeFrame = record
@@ -150,6 +152,10 @@ function tokenRange(const t: TToken): TRange;
 { Is switch sw on at loc? Directives seen so far in loc's file before loc
   decide; otherwise the default from the command line. }
 function checkEnabled(sw: TCheckSwitch; loc: TLoc; default: boolean): boolean;
+{ A switch state the parser sets at loc (checked / unchecked blocks), and
+  the state at loc (-1: the default). }
+procedure addCheckState(loc: TLoc; sw: TCheckSwitch; state: longint);
+function checkStateAt(sw: TCheckSwitch; loc: TLoc): longint;
 
 implementation
 
@@ -477,20 +483,49 @@ begin
 end;
 
 { The state of switch sw at loc as the switches so far set it (in loc's
-  file): -1 (the default) if none did. }
+  file): that of the last event at or before loc (of those at the same
+  place, the last recorded); -1 (the default) if none. }
 function directiveStateAt(sw: TCheckSwitch; loc: TLoc): longint;
 var
   i, fid: longint;
   d: PDirective;
+  found: boolean;
+  at: TLoc;
 begin
   directiveStateAt := -1;
   fid := smFileOf(loc);
+  found := false;
+  at := 0;
   for i := 0 to directives.count - 1 do
   begin
     d := PDirective(listGet(directives, i));
     if (d^.sw = sw) and (fid <> 0) and (d^.fid = fid) and (d^.loc <= loc) then
-      directiveStateAt := d^.state;
+      if not found or (d^.loc >= at) then
+      begin
+        directiveStateAt := d^.state;
+        at := d^.loc;
+        found := true;
+      end;
   end;
+end;
+
+procedure addCheckState(loc: TLoc; sw: TCheckSwitch; state: longint);
+var
+  d: PDirective;
+begin
+  if smFileOf(loc) = 0 then
+    exit;
+  d := PDirective(arenaAlloc(sizeof(TDirective)));
+  d^.loc := loc;
+  d^.fid := smFileOf(loc);
+  d^.sw := sw;
+  d^.state := state;
+  listAdd(directives, d);
+end;
+
+function checkStateAt(sw: TCheckSwitch; loc: TLoc): longint;
+begin
+  checkStateAt := directiveStateAt(sw, loc);
 end;
 
 function checkEnabled(sw: TCheckSwitch; loc: TLoc; default: boolean): boolean;

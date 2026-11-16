@@ -344,6 +344,9 @@ void __pas_raise_at(void *obj, const char *where, void *address)
 /* Integer div or mod by zero (objfpc): raises a new EDivByZero, with the
  * message 'Division by zero'. */
 void __pas_raise_divzero(const char *where) __attribute__((noreturn));
+/* Integer overflow (objfpc): raises a new EIntOverflow, with the message
+ * 'Arithmetic overflow'. */
+void __pas_raise_overflow(const char *where) __attribute__((noreturn));
 /* Raises f's exception again (after a finally part, or with no match). */
 void __pas_reraise(PasExcFrame *f) __attribute__((noreturn));
 /* obj.Destroy (virtual) and releases it: a handled exception. */

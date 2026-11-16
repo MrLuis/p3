@@ -809,6 +809,12 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
                : CGOpts.Directives->isEnabled(CheckDirectives::Range, L,
                                               CGOpts.RangeChecks);
   }
+  /// In an unchecked block at L: integer values converted to a narrower
+  /// integer type wrap instead of being range-checked.
+  bool wraps(SourceLocation L) const {
+    return CGOpts.Directives &&
+           CGOpts.Directives->isEnabled(CheckDirectives::Wrap, L, false);
+  }
   bool overflowChecks(SourceLocation L) const {
     return !CGOpts.Directives
                ? CGOpts.OverflowChecks
@@ -881,6 +887,9 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
                       SourceLocation L,
                       llvm::StringRef Msg = "value out of range") {
     if (!rangeChecks(L) || !Target->isOrdinal())
+      return;
+    // unchecked: an integer converted to an integer type (not a subrange)
+    if (wraps(L) && llvm::isa<IntegerType>(Target) && From->isIntegerLike())
       return;
     OrdinalBounds TB = getOrdinalBounds(Target);
     OrdinalBounds FB = getOrdinalBounds(From);
@@ -1527,8 +1536,26 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
       }
     }
     llvm::Value *Res = B.CreateBinaryIntrinsic(ID, L, R);
-    emitRuntimeCheck(B.CreateExtractValue(Res, 1), "integer overflow", Loc);
+    emitOverflowCheck(B.CreateExtractValue(Res, 1), "integer overflow", Loc);
     return B.CreateExtractValue(Res, 0, Name);
+  }
+
+  /// if (Cond) integer overflow (What): a runtime error, or (objfpc) an
+  /// EIntOverflow exception, as in Free Pascal with SysUtils.
+  void emitOverflowCheck(llvm::Value *Cond, const std::string &What,
+                         SourceLocation L) {
+    if (!LangOpts.ObjKeywords) {
+      emitRuntimeCheck(Cond, What, L);
+      return;
+    }
+    auto *ErrBB = newBlock("rt.error");
+    auto *ContBB = newBlock("rt.ok");
+    llvm::MDBuilder MDB(M.getContext());
+    B.CreateCondBr(Cond, ErrBB, ContBB, MDB.createUnlikelyBranchWeights());
+    B.SetInsertPoint(ErrBB);
+    B.CreateCall(excRuntime("__pas_raise_overflow"), {whereText(L)});
+    B.CreateUnreachable();
+    B.SetInsertPoint(ContBB);
   }
 
   //===--------------------------------------------------------------------===//
@@ -3012,7 +3039,7 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
   /// code): releasing an object or an interface reference.
   static bool runtimeMayRaise(llvm::StringRef Name) {
     return Name == "__pas_raise" || Name == "__pas_raise_at" ||
-           Name == "__pas_raise_divzero" ||
+           Name == "__pas_raise_divzero" || Name == "__pas_raise_overflow" ||
            Name == "__pas_reraise" || Name == "__pas_reraise_free" ||
            Name == "__pas_free_object" || Name == "__pas_free_instance" ||
            Name == "__pas_intf_assign" || Name == "__pas_intf_clear" ||
@@ -4614,7 +4641,7 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
       llvm::Value *IsMin = B.CreateICmpEQ(L, Min);
       llvm::Value *IsMinusOne = B.CreateICmpEQ(R, intConst(R, -1));
       llvm::Value *Overflow = B.CreateAnd(IsMin, IsMinusOne);
-      emitRuntimeCheck(Overflow, "integer overflow in 'div'", Loc);
+      emitOverflowCheck(Overflow, "integer overflow in 'div'", Loc);
     }
     return B.CreateSDiv(L, R, "div");
   }
@@ -5023,6 +5050,34 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
 
   llvm::Value *emitBuiltinCall(CallExpr *E, BuiltinDecl *BD) {
     switch (BD->getBuiltinKind()) {
+    case BuiltinKind::AddChecked:
+    case BuiltinKind::SubChecked:
+    case BuiltinKind::MulChecked: { // the tuple (a op b, no overflow)
+      auto *TT = llvm::cast<RecordType>(E->getType());
+      Type *T = TT->getAllFields()[0]->getType();
+      Expr *A = E->getArgs()[0], *C = E->getArgs()[1];
+      llvm::Value *L = convertOrdinal(visitExpr(A), A->getType(), T);
+      llvm::Value *R = convertOrdinal(visitExpr(C), C->getType(), T);
+      bool Signed = isSignedOrdinal(T);
+      BuiltinKind K = BD->getBuiltinKind();
+      llvm::Intrinsic::ID ID =
+          K == BuiltinKind::AddChecked
+              ? (Signed ? llvm::Intrinsic::sadd_with_overflow
+                        : llvm::Intrinsic::uadd_with_overflow)
+          : K == BuiltinKind::SubChecked
+              ? (Signed ? llvm::Intrinsic::ssub_with_overflow
+                        : llvm::Intrinsic::usub_with_overflow)
+              : (Signed ? llvm::Intrinsic::smul_with_overflow
+                        : llvm::Intrinsic::umul_with_overflow);
+      llvm::Value *Res = B.CreateBinaryIntrinsic(ID, L, R);
+      llvm::Value *Tmp = createTemp(memType(TT), "checked");
+      storeScalar(fieldAddress(Tmp, TT, TT->getAllFields()[0]),
+                  B.CreateExtractValue(Res, 0, "value"), T);
+      storeScalar(fieldAddress(Tmp, TT, TT->getAllFields()[1]),
+                  B.CreateNot(B.CreateExtractValue(Res, 1), "ok"),
+                  TT->getAllFields()[1]->getType());
+      return Tmp;
+    }
     case BuiltinKind::FilePos:
     case BuiltinKind::FileSize:
       return B.CreateCall(
@@ -5125,7 +5180,7 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
           Arg->getType(),
           llvm::APInt::getSignedMinValue(Arg->getType()->getIntegerBitWidth()));
       if (overflowChecks(Loc))
-        emitRuntimeCheck(B.CreateICmpEQ(Arg, Min), "integer overflow in 'abs'", Loc);
+        emitOverflowCheck(B.CreateICmpEQ(Arg, Min), "integer overflow in 'abs'", Loc);
       return B.CreateBinaryIntrinsic(llvm::Intrinsic::abs, Arg, B.getFalse(),
                                      nullptr, "abs");
     }
@@ -5933,13 +5988,17 @@ public:
       llvm::Value *Old64 = toI64(Old, T);
       llvm::Value *Delta = IsInc ? Step : B.CreateNeg(Step);
       llvm::Value *Wide = B.CreateAdd(Old64, Delta);
-      if (T->isIntegerLike() ? overflowChecks(L) || rangeChecks(L) : rangeChecks(L)) {
+      if (T->isIntegerLike()
+              ? overflowChecks(L) ||
+                    (rangeChecks(L) && !(wraps(L) && llvm::isa<IntegerType>(T)))
+              : rangeChecks(L)) {
         OrdinalBounds Bd = getOrdinalBounds(T);
-        emitRuntimeCheck(outsideRange(Wide, Bd.Lo, Bd.Hi),
-                         T->isIntegerLike() ? "integer overflow in '" +
-                                                  S->getCallee().Name.str() + "'"
-                                            : "value out of range",
-                         L);
+        if (T->isIntegerLike())
+          emitOverflowCheck(outsideRange(Wide, Bd.Lo, Bd.Hi),
+                            "integer overflow in '" + S->getCallee().Name.str() + "'",
+                            L);
+        else
+          emitRuntimeCheck(outsideRange(Wide, Bd.Lo, Bd.Hi), "value out of range", L);
       }
       storeScalar(Addr, B.CreateTrunc(Wide, regType(T)), T);
       return;
@@ -6455,7 +6514,7 @@ public:
     llvm::Type *Void = B.getVoidTy();
     bool NoReturn = false;
     llvm::FunctionCallee F;
-    if (Name == "__pas_raise_divzero") {
+    if (Name == "__pas_raise_divzero" || Name == "__pas_raise_overflow") {
       F = classRuntime(Name, Void, {Ptr});
       llvm::cast<llvm::Function>(F.getCallee())->addFnAttr(llvm::Attribute::Cold);
       NoReturn = true;

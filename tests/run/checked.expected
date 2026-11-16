@@ -1,0 +1,13 @@
+6
+-2147483648
+440920331
+checked: EIntOverflow: Arithmetic overflow
+nested checked: Arithmetic overflow
+$Q+ inside: Arithmetic overflow
+2147483647 -2147483648 4
+outside: EIntOverflow
+-2147483648 FALSE
+1000000 TRUE
+4294967295 FALSE
+-9223372036854775808 FALSE
+5 TRUE

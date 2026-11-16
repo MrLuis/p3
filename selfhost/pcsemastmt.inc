@@ -1256,7 +1256,8 @@ end;
   procedural variables) or that take none. false for the others. }
 function checkSpecialBuiltin(e: PNode; bk: TBuiltinKind; var res: PType): boolean;
 var
-  t: PType;
+  t, lt, rt: PType;
+  tys, noNames: TPtrList;
   a0: PNode;
   v: PDecl;
 
@@ -1281,6 +1282,33 @@ begin
   checkSpecialBuiltin := true;
   res := errorType;
   case bk of
+    bkAddChecked, bkSubChecked, bkMulChecked: { (a op b, ok) in the type of a op b }
+      begin
+        if not arity(2) then
+          exit;
+        lt := check(argNode(e, 0));
+        rt := check(argNode(e, 1));
+        if isError(lt) or isError(rt) then
+          exit;
+        if not isIntegerLike(lt) or not isIntegerLike(rt) then
+        begin
+          ms('');
+          maCallee(e^.callee);
+          ma(' expects integer arguments, not ');
+          maT(lt);
+          ma(' and ');
+          maT(rt);
+          errR(e^.callee.loc, nodeRange(e));
+          exit;
+        end;
+        t := integerOperandType(argNode(e, 0), lt, argNode(e, 1), rt);
+        listInit(tys);
+        listAdd(tys, t);
+        listAdd(tys, tyBooleanT);
+        listInit(noNames);
+        res := getTupleType(tys, noNames);
+        exit;
+      end;
     bkSizeOf:
       begin
         if not arity(1) then

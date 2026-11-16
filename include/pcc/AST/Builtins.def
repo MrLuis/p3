@@ -103,5 +103,11 @@ BUILTIN_FUNC(Arctan, "arctan")
 BUILTIN_FUNC(Trunc,  "trunc")
 BUILTIN_FUNC(Round,  "round")
 
+// Overflow-checked arithmetic (objfpc): the tuple (a op b, no overflow),
+// whatever {$Q} says, instead of an exception.
+BUILTIN_FUNC(AddChecked, "addchecked")
+BUILTIN_FUNC(SubChecked, "subchecked")
+BUILTIN_FUNC(MulChecked, "mulchecked")
+
 #undef BUILTIN_FUNC
 #undef BUILTIN_PROC

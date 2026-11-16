@@ -206,6 +206,18 @@ public:
 
   /// Where to record {$R±} / {$Q±} switches (null: ignore directives).
   void setDirectives(CheckDirectives *D) { Directives = D; }
+  /// A switch state the parser sets at L, in the buffer being lexed
+  /// (checked / unchecked blocks), and the state at L.
+  void addCheckState(SourceLocation L, CheckDirectives::Switch S,
+                     CheckDirectives::State St) {
+    if (Directives && L.isValid() && BufBegin <= L.getPointer() &&
+        L.getPointer() <= BufEnd)
+      Directives->addState(L, BufBegin, BufEnd, S, St);
+  }
+  CheckDirectives::State checkStateAt(CheckDirectives::Switch S,
+                                      SourceLocation L) const {
+    return Directives ? Directives->stateAt(S, L) : CheckDirectives::Default;
+  }
 
   /// Enables {$I file}: files are searched next to the including file,
   /// then in Dirs, and loaded into SM.

@@ -3251,9 +3251,52 @@ Stmt *Parser::parseDestructure(SourceLocation Start,
                                      Lex.longStrings());
 }
 
+// checked statements end / unchecked statements end (objfpc; the words
+// are not reserved): a block whose integer arithmetic is checked for
+// overflow (an EIntOverflow exception) or not (it wraps, and so do integer
+// values converted to narrower integer types), whatever {$Q} says around
+// it; {$Q} inside switches again. The block is a compound statement; the
+// switches are recorded with the {$Q} directives.
+bool Parser::startsCheckedBlock() {
+  if (!LangOpts.ObjKeywords ||
+      !(isIdentifierNamed("checked") || isIdentifierNamed("unchecked")))
+    return false;
+  // (checked := ..., checked(...), checked; are a variable's or a call's)
+  return peekToken().isOneOf(tok::identifier, tok::kw_begin, tok::kw_if,
+                             tok::kw_while, tok::kw_repeat, tok::kw_for,
+                             tok::kw_case, tok::kw_with, tok::kw_try,
+                             tok::kw_raise, tok::kw_var, tok::kw_const,
+                             tok::kw_goto, tok::kw_inherited, tok::kw_end);
+}
+
+Stmt *Parser::parseCheckedBlock() {
+  bool Checked = isIdentifierNamed("checked");
+  SourceLocation Loc = Tok.getLocation();
+  CheckDirectives::State Before =
+      Lex.checkStateAt(CheckDirectives::Overflow, Loc);
+  CheckDirectives::State WrapBefore =
+      Lex.checkStateAt(CheckDirectives::Wrap, Loc);
+  Lex.addCheckState(Loc, CheckDirectives::Overflow,
+                    Checked ? CheckDirectives::On : CheckDirectives::Off);
+  Lex.addCheckState(Loc, CheckDirectives::Wrap,
+                    Checked ? CheckDirectives::Off : CheckDirectives::On);
+  consumeToken();
+  llvm::SmallVector<Stmt *, 8> Body;
+  parseStatementSequence(Body, tok::kw_end, Loc,
+                         Checked ? "checked" : "unchecked");
+  Lex.addCheckState(Tok.getLocation(), CheckDirectives::Overflow, Before);
+  Lex.addCheckState(Tok.getLocation(), CheckDirectives::Wrap, WrapBefore);
+  SourceLocation EndLoc = Tok.getEndLocation();
+  tryConsume(tok::kw_end);
+  return Ctx.create<CompoundStmt>(SourceRange(Loc, EndLoc),
+                                  Ctx.copyArray<Stmt *>(Body));
+}
+
 Stmt *Parser::parseStatementImpl() {
   switch (Tok.getKind()) {
   case tok::identifier:
+    if (startsCheckedBlock())
+      return parseCheckedBlock();
     return recordingDesignator([&] { return parseAssignmentOrCall(); });
   case tok::kw_begin:
     return parseCompoundStmt();

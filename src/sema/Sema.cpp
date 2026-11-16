@@ -781,6 +781,7 @@ class Checker : public StmtVisitor<Checker>,
     ClassType *External = declareExceptionClass("EExternal", ExceptionTy);
     ClassType *IntError = declareExceptionClass("EIntError", External);
     declareExceptionClass("EDivByZero", IntError);
+    declareExceptionClass("EIntOverflow", IntError); // (objfpc overflow)
     declareExceptionClass("EConvertError", ExceptionTy);
   }
 
@@ -865,7 +866,8 @@ class Checker : public StmtVisitor<Checker>,
   /// Free Pascal's objpas built-ins, predeclared only with --mode=objfpc.
   static bool isObjFPCOnly(BuiltinKind K) {
     return K == BuiltinKind::AssignFile || K == BuiltinKind::CloseFile ||
-           K == BuiltinKind::ExceptAddr;
+           K == BuiltinKind::ExceptAddr || K == BuiltinKind::AddChecked ||
+           K == BuiltinKind::SubChecked || K == BuiltinKind::MulChecked;
   }
 
   //===--------------------------------------------------------------------===//
@@ -7576,6 +7578,24 @@ class Checker : public StmtVisitor<Checker>,
       return false;
     };
     switch (BD->getBuiltinKind()) {
+    case BuiltinKind::AddChecked:
+    case BuiltinKind::SubChecked:
+    case BuiltinKind::MulChecked: { // (a op b, ok) in the type of a op b
+      if (!Arity(2))
+        return errorType();
+      Type *L = check(Args[0]), *R = check(Args[1]);
+      if (L->isError() || R->isError())
+        return errorType();
+      if (!L->isIntegerLike() || !R->isIntegerLike()) {
+        Diags.error(Callee.Loc,
+                    "'" + Callee.Spelling + "' expects integer arguments, not " +
+                        quoted(L) + " and " + quoted(R),
+                    {E->getRange()});
+        return errorType();
+      }
+      Type *T = integerOperandType(Args[0], L, Args[1], R);
+      return getTupleType({T, Ctx.getBooleanType()}, {});
+    }
     case BuiltinKind::SizeOf: {
       if (!Arity(1))
         return errorType();

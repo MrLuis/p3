@@ -4520,6 +4520,56 @@ begin
   parseVarDeclStmt := n;
 end;
 
+{ checked statements end / unchecked statements end (objfpc; the words are
+  not reserved): a block whose integer arithmetic is checked for overflow
+  (an EIntOverflow exception) or not (it wraps, and so do integer values
+  converted to narrower integer types), whatever $Q says around it; $Q
+  inside switches again. The block is a compound statement; the switches
+  are recorded with the $Q directives. }
+function startsCheckedBlock: boolean;
+begin
+  startsCheckedBlock := false;
+  if (mode <> lmObjFPC) or
+     not (isIdentifierNamed('checked') or isIdentifierNamed('unchecked')) then
+    exit;
+  { (checked := ..., checked(...), checked; are a variable's or a call's) }
+  startsCheckedBlock := peekKind in [tkIdentifier, tkKwBegin, tkKwIf, tkKwWhile,
+                                     tkKwRepeat, tkKwFor, tkKwCase, tkKwWith,
+                                     tkKwTry, tkKwRaise, tkKwVar, tkKwConst,
+                                     tkKwGoto, tkKwInherited, tkKwEnd];
+end;
+
+function parseCheckedBlock: PNode;
+var
+  isChecked: boolean;
+  loc, endLoc: TLoc;
+  before, wrapBefore: longint;
+  body: TPtrList;
+  n: PNode;
+  word: string;
+begin
+  isChecked := isIdentifierNamed('checked');
+  loc := tok.loc;
+  before := checkStateAt(swOverflow, loc);
+  wrapBefore := checkStateAt(swWrap, loc);
+  addCheckState(loc, swOverflow, ord(isChecked));
+  addCheckState(loc, swWrap, ord(not isChecked));
+  consumeToken;
+  listInit(body);
+  if isChecked then
+    word := 'checked'
+  else
+    word := 'unchecked';
+  parseStatementSequence(body, tkKwEnd, loc, word);
+  addCheckState(tok.loc, swOverflow, before);
+  addCheckState(tok.loc, swWrap, wrapBefore);
+  endLoc := tokenEnd(tok);
+  tryConsume(tkKwEnd);
+  n := newNode(nkCompound, loc, endLoc);
+  n^.stmts := body;
+  parseCheckedBlock := n;
+end;
+
 function parseStatementImpl: PNode;
 var
   gotoLoc, start, l: TLoc;
@@ -4534,7 +4584,14 @@ begin
   stmtTokens := @toks;
   n := nil;
   case tok.kind of
-    tkIdentifier: n := parseAssignmentOrCall;
+    tkIdentifier:
+      if startsCheckedBlock then
+      begin
+        stmtTokens := savedStmtToks; { (not a designator's) }
+        n := parseCheckedBlock;
+      end
+      else
+        n := parseAssignmentOrCall;
     tkLParen: { Turbo/FPC: (p + 1)^ := x; (obj as TFoo).Show; }
       if mode <> lmISO then
       begin

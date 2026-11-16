@@ -1008,6 +1008,7 @@ EXCEPTION_VMT(__pas_exception_vmt, __pas_tobject_vmt, "\011Exception");
 EXCEPTION_VMT(__pas_eexternal_vmt, __pas_exception_vmt, "\011EExternal");
 EXCEPTION_VMT(__pas_einterror_vmt, __pas_eexternal_vmt, "\011EIntError");
 EXCEPTION_VMT(__pas_edivbyzero_vmt, __pas_einterror_vmt, "\012EDivByZero");
+EXCEPTION_VMT(__pas_eintoverflow_vmt, __pas_einterror_vmt, "\014EIntOverflow");
 EXCEPTION_VMT(__pas_econverterror_vmt, __pas_exception_vmt, "\015EConvertError");
 
 void __pas_exc_push(PasExcFrame *f) {
@@ -1075,6 +1076,15 @@ void __pas_raise_divzero(const char *where) {
   static const char text[] = "Division by zero";
   struct PasExceptionObject *e = __pas_new(sizeof *e);
   e->vmt = __pas_edivbyzero_vmt;
+  e->message[0] = sizeof text - 1;
+  memcpy(e->message + 1, text, sizeof text - 1);
+  raise_to_frame(e, where, __builtin_return_address(0));
+}
+
+void __pas_raise_overflow(const char *where) {
+  static const char text[] = "Arithmetic overflow";
+  struct PasExceptionObject *e = __pas_new(sizeof *e);
+  e->vmt = __pas_eintoverflow_vmt;
   e->message[0] = sizeof text - 1;
   memcpy(e->message + 1, text, sizeof text - 1);
   raise_to_frame(e, where, __builtin_return_address(0));
