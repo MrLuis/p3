@@ -120,8 +120,8 @@ bool Parser::startsSpecialize() {
          peekToken().is(tok::identifier);
 }
 
-RoutineDecl *Parser::parseGenericRoutine(bool HeadingOnly) {
-  SourceLocation GenericLoc = consumeToken(); // 'generic'
+/// The lexer switches in effect here, for tokens recorded from here on.
+GenericTokens *Parser::captureSwitches() {
   auto *Toks = Ctx.create<GenericTokens>();
   Toks->LongStrings = longStrings();
   Toks->AdvancedRecords = advancedRecords();
@@ -133,6 +133,42 @@ RoutineDecl *Parser::parseGenericRoutine(bool HeadingOnly) {
   Toks->ResultSwitch = resultSwitch();
   Toks->OutSwitch = outSwitch();
   Toks->DefaultParamsSwitch = defaultParamsSwitch();
+  return Toks;
+}
+
+TypeDecl *Parser::reparseGenericType(const TypeDecl *G,
+                                     llvm::SmallVectorImpl<Decl *> &Methods) {
+  auto *Toks = static_cast<const GenericTokens *>(G->getGenericTokens());
+  Replay = Toks;
+  ReplayPos = 0;
+  HasPeek = false;
+  nextToken(Tok);
+  TypeDecl *TD = parseTypeDecl(/*InMembers=*/false, /*Generic=*/true);
+  for (const GenericTokens *M = Toks->NextMethod; M && TD; M = M->NextMethod) {
+    Replay = M;
+    ReplayPos = 0;
+    HasPeek = false;
+    nextToken(Tok);
+    parseDeclarations(Methods, /*InInterface=*/false);
+  }
+  Replay = nullptr;
+  return TD;
+}
+
+// specialize TList<integer>, a type (objfpc)
+TypeSpec *Parser::parseSpecializeType() {
+  SourceLocation Start = Tok.getLocation();
+  Identifier Name;
+  llvm::SmallVector<TypeSpec *, 2> TypeArgs;
+  if (!parseSpecialization(Name, TypeArgs))
+    return nullptr;
+  return Ctx.create<SpecializeTypeSpec>(SourceRange(Start, PrevTokEnd), Name,
+                                        Ctx.copyArray<TypeSpec *>(TypeArgs));
+}
+
+RoutineDecl *Parser::parseGenericRoutine(bool HeadingOnly) {
+  SourceLocation GenericLoc = consumeToken(); // 'generic'
+  GenericTokens *Toks = captureSwitches();
   llvm::SmallVector<Token, 64> Rec;
   auto *SavedRec = Recording;
   Recording = &Rec;
@@ -175,8 +211,8 @@ RoutineDecl *Parser::reparseGeneric(const RoutineDecl *G) {
 bool Parser::parseSpecialization(Identifier &Name,
                                  llvm::SmallVectorImpl<TypeSpec *> &TypeArgs) {
   consumeToken(); // 'specialize'
-  if (!expectIdentifier(Name, "generic routine name after 'specialize'") ||
-      !expect(tok::less, "after the name of a generic routine"))
+  if (!expectIdentifier(Name, "generic name after 'specialize'") ||
+      !expect(tok::less, "after the name of a generic"))
     return false;
   do {
     TypeSpec *T = parseTypeIdentifier("type argument");
@@ -425,6 +461,9 @@ UnitDecl *Parser::parseUnit() {
   if (!expect(tok::kw_end, "at end of unit") || !expect(tok::period, "after 'end'"))
     return nullptr;
 
+  // The types the initialization statements specialized by the way.
+  ImplDecls.append(HiddenTypeDecls.begin(), HiddenTypeDecls.end());
+  HiddenTypeDecls.clear();
   auto *Empty = Ctx.create<CompoundStmt>(SourceRange(InitLoc), llvm::ArrayRef<Stmt *>());
   auto *Body = Ctx.create<CompoundStmt>(SourceRange(InitLoc, EndLoc),
                                         Ctx.copyArray<Stmt *>(Init));
@@ -452,6 +491,7 @@ static int sectionRank(tok::TokenKind K) {
 
 Block *Parser::parseBlock() {
   llvm::SmallVector<Decl *, 16> Decls;
+  size_t HiddenMark = HiddenTypeDecls.size();
   parseDeclarations(Decls, /*InInterface=*/false);
 
   CompoundStmt *Body = nullptr;
@@ -466,6 +506,9 @@ Block *Parser::parseBlock() {
   if (!Body)
     Body = Ctx.create<CompoundStmt>(SourceRange(Tok.getLocation()),
                                     llvm::ArrayRef<Stmt *>());
+  // The types its statements specialized by the way.
+  Decls.append(HiddenTypeDecls.begin() + HiddenMark, HiddenTypeDecls.end());
+  HiddenTypeDecls.resize(HiddenMark);
   return Ctx.create<Block>(Ctx.copyArray<Decl *>(Decls), Body);
 }
 
@@ -500,6 +543,17 @@ void Parser::parseDeclarations(llvm::SmallVectorImpl<Decl *> &Decls,
       LastWord = tok::getSpelling(Tok.getKind());
     }
 
+    // A routine, while generic types are known: its tokens are kept, for
+    // it may be the implementation of a generic type's method.
+    llvm::SmallVector<Token, 64> MethodToks;
+    GenericTokens *MethodSwitches = nullptr;
+    size_t FirstDecl = Decls.size();
+    if (!GenericTypes.empty() && !Replay && !Recording &&
+        Tok.isOneOf(tok::kw_procedure, tok::kw_function, tok::kw_constructor,
+                    tok::kw_destructor, tok::kw_class)) {
+      MethodSwitches = captureSwitches();
+      Recording = &MethodToks;
+    }
     switch (Tok.getKind()) {
     case tok::kw_const:
       parseConstPart(Decls);
@@ -571,6 +625,26 @@ void Parser::parseDeclarations(llvm::SmallVectorImpl<Decl *> &Decls,
       }
       break;
     }
+    }
+    if (MethodSwitches) {
+      Recording = nullptr;
+      auto *R = Decls.size() == FirstDecl + 1
+                    ? llvm::dyn_cast<RoutineDecl>(Decls.back())
+                    : nullptr;
+      auto It = R && R->getClassName().isValid() &&
+                        R->getOuterClassNames().empty()
+                    ? GenericTypes.find(R->getClassName().Name)
+                    : GenericTypes.end();
+      if (It != GenericTypes.end()) { // TList.Add: a template
+        TypeDecl *G = It->second;
+        MethodSwitches->Tokens = Ctx.copyArray<Token>(MethodToks);
+        auto *Last = static_cast<GenericTokens *>(G->getGenericTokens());
+        while (Last->NextMethod)
+          Last = Last->NextMethod;
+        Last->NextMethod = MethodSwitches;
+        R->setGeneric(G->getTypeParams(), MethodSwitches);
+        R->setTemplateMember();
+      }
     }
   }
 }
@@ -682,12 +756,64 @@ void Parser::parseTypePart(llvm::SmallVectorImpl<Decl *> &Decls,
   }
   while (Tok.is(tok::identifier) && !(InMembers && isVisibilityWord()) &&
          !startsGeneric() && !Diags.shouldStop()) {
+    // generic TList<T> = ...: a template, kept as its tokens
+    if (LangOpts.ObjKeywords && !InMembers && isIdentifierNamed("generic") &&
+        peekToken().is(tok::identifier)) {
+      consumeToken();
+      GenericTokens *Toks = captureSwitches();
+      llvm::SmallVector<Token, 64> Rec;
+      auto *SavedRec = Recording;
+      Recording = &Rec;
+      TypeDecl *TD = parseTypeDecl(InMembers, /*Generic=*/true);
+      Recording = SavedRec;
+      if (TD) {
+        Toks->Tokens = Ctx.copyArray<Token>(Rec);
+        TD->setGeneric(GenericTypeParams, Toks);
+        GenericTypes[TD->getName().Name] = TD;
+        Decls.push_back(TD);
+      }
+      continue;
+    }
+    if (TypeDecl *TD = parseTypeDecl(InMembers, /*Generic=*/false))
+      Decls.push_back(TD);
+  }
+}
+
+// typeDecl = ident [ "<" ident { "," ident } ">" ] "=" type hints ";" .
+// (the type parameters: of a generic type, Generic; GenericTypeParams
+// receives them). Null after an error; the ";" is consumed either way.
+TypeDecl *Parser::parseTypeDecl(bool InMembers, bool Generic) {
+  TypeDecl *TD = nullptr;
+  {
     Identifier Name = makeIdentifier(Tok);
     if (!InMembers)
       declareName(Name);
     consumeToken();
+    bool ParamsOK = true;
+    if (Generic) {
+      llvm::SmallVector<Identifier, 2> TypeParams;
+      if (expect(tok::less, "and type parameters after the name of a "
+                            "generic type")) {
+        do {
+          Identifier P;
+          if (!expectIdentifier(P, "type parameter name"))
+            break;
+          TypeParams.push_back(P);
+          if (Tok.is(tok::colon)) {
+            Diags.error(Tok.getLocation(),
+                        "constraints on type parameters are not supported yet");
+            skipUntil({tok::greater, tok::semi});
+          }
+        } while (tryConsume(tok::comma));
+        ParamsOK = expect(tok::greater, "after the type parameters") &&
+                   !TypeParams.empty();
+      } else {
+        ParamsOK = false;
+      }
+      GenericTypeParams = Ctx.copyArray<Identifier>(TypeParams);
+    }
     TypeSpec *TS = nullptr;
-    if (expect(tok::equal, "after type name")) {
+    if (ParamsOK && expect(tok::equal, "after type name")) {
       // T = type X (Free Pascal): a distinct type, here an alias of X; or
       // T = type helper for X (objfpc)
       if (Tok.is(tok::kw_type)) {
@@ -707,9 +833,8 @@ void Parser::parseTypePart(llvm::SmallVectorImpl<Decl *> &Decls,
     }
     Hints H = parseHints();
     if (TS) {
-      auto *TD = Ctx.create<TypeDecl>(Name.Loc, Name, TS);
+      TD = Ctx.create<TypeDecl>(Name.Loc, Name, TS);
       TD->addHints(H.Flags, H.Message);
-      Decls.push_back(TD);
     } else
       skipUntil({tok::semi, tok::kw_begin});
     if (!expect(tok::semi, "after type declaration")) {
@@ -717,6 +842,7 @@ void Parser::parseTypePart(llvm::SmallVectorImpl<Decl *> &Decls,
       tryConsume(tok::semi);
     }
   }
+  return TD;
 }
 
 // varPart = "var" identList ":" type ";" { identList ":" type ";" } .
@@ -2070,6 +2196,8 @@ TypeSpec *Parser::parseType() {
 // type = simpleType | ["packed"] (arrayType | recordType) .
 TypeSpec *Parser::parseTypeImpl() {
   SourceLocation Start = Tok.getLocation();
+  if (startsSpecialize()) // specialize TList<integer>
+    return parseSpecializeType();
   bool Packed = tryConsume(tok::kw_packed);
   // bitpacked array / record (Free Pascal; not reserved)
   if (!Packed && LangOpts.Mode != LangMode::ISO &&
@@ -2212,6 +2340,8 @@ TypeSpec *Parser::parseTypeIdentifier(llvm::StringRef Context) {
     consumeToken();
     return TS;
   }
+  if (startsSpecialize()) // specialize TList<integer>
+    return parseSpecializeType();
   if (Tok.is(tok::identifier))
     return parseNamedType();
   // (integer, string): a tuple type (objfpc)
@@ -4124,6 +4254,16 @@ Expr *Parser::parseFactor() {
       llvm::SmallVector<TypeSpec *, 2> TypeArgs;
       if (!parseSpecialization(Name, TypeArgs))
         return nullptr;
+      if (Tok.is(tok::period)) { // specialize TList<integer>.Create
+        std::string HN = "$spec" + std::to_string(++HiddenTypes);
+        llvm::StringRef N = Ctx.getStrings().intern(HN);
+        Identifier Id{N, N, Start};
+        auto *TS = Ctx.create<SpecializeTypeSpec>(
+            SourceRange(Start, PrevTokEnd), Name,
+            Ctx.copyArray<TypeSpec *>(TypeArgs));
+        HiddenTypeDecls.push_back(Ctx.create<TypeDecl>(Start, Id, TS));
+        return parseSelectors(Ctx.create<NameRefExpr>(Id));
+      }
       llvm::SmallVector<Expr *, 4> Args;
       if (Tok.is(tok::l_paren) &&
           !parseActualParams(Args, /*AllowFormat=*/false) && Args.empty())

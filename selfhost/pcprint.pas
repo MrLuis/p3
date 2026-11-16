@@ -367,6 +367,15 @@ begin
         lineName('NamedTypeSpec ''', ts^.tname.name);
         loc(ts^.b);
       end;
+    tsSpecialize:
+      begin
+        lineName('SpecializeTypeSpec ''', ts^.spName.name);
+        loc(ts^.b);
+        indent := indent + 2;
+        for i := 0 to ts^.spArgs.count - 1 do
+          printTypeSpec(PTypeSpec(listGet(ts^.spArgs, i)));
+        indent := indent - 2;
+      end;
     tsDynArray:
       begin
         line('DynArrayTypeSpec');
@@ -654,6 +663,24 @@ begin
         end;
       end;
     dkType:
+      if d^.tgGeneric then { a template: not checked }
+      begin
+        lineName('GenericTypeDecl ''', d^.ident.name);
+        for i := 0 to d^.tgParams.count - 1 do
+        begin
+          bufAdd(outBuf, ' <');
+          bufAddName(outBuf, PIdent(listGet(d^.tgParams, i))^.name);
+          bufAddChar(outBuf, '>');
+        end;
+        loc(d^.loc);
+        if parseTree then
+        begin
+          indent := indent + 2;
+          printTypeSpec(d^.typeSpec);
+          indent := indent - 2;
+        end;
+      end
+      else
       begin
         lineName('TypeDecl ''', d^.ident.name);
         if d^.declType <> nil then

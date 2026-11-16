@@ -213,8 +213,12 @@ bool Driver::runPipeline(FileID FID) {
   auto Reparse = [&](const RoutineDecl *G) {
     return Parser(Lex, Diags, Ctx).reparseGeneric(G);
   };
+  auto ReparseType = [&](const TypeDecl *G,
+                         llvm::SmallVectorImpl<Decl *> &Methods) {
+    return Parser(Lex, Diags, Ctx).reparseGenericType(G, Methods);
+  };
   bool SemaOK = SyntaxOK && !Diags.hasErrors() &&
-                Sema(Ctx, Diags, LangOpts, Reparse)
+                Sema(Ctx, Diags, LangOpts, Reparse, ReparseType)
                     .check(*Program, Units, Opts.SeparateUnits);
 
   if (Opts.Act == Action::EmitAST) {
@@ -318,8 +322,12 @@ bool Driver::compileUnit(Parser &P, FileID FID, ASTContext &Ctx,
   auto Reparse = [&](const RoutineDecl *G) {
     return Parser(P.getLexer(), Diags, Ctx).reparseGeneric(G);
   };
+  auto ReparseType = [&](const TypeDecl *G,
+                         llvm::SmallVectorImpl<Decl *> &Methods) {
+    return Parser(P.getLexer(), Diags, Ctx).reparseGenericType(G, Methods);
+  };
   if (Diags.hasErrors() ||
-      !Sema(Ctx, Diags, LangOpts, Reparse).checkUnit(*Unit, Deps))
+      !Sema(Ctx, Diags, LangOpts, Reparse, ReparseType).checkUnit(*Unit, Deps))
     return false;
   if (Opts.Act == Action::EmitExe) {
     Diags.error("'" + llvm::Twine(Opts.InputFile) +

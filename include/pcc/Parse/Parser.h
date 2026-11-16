@@ -47,6 +47,7 @@
 #include "pcc/Lexer/Token.h"
 
 #include "llvm/ADT/SmallVector.h"
+#include "llvm/ADT/StringMap.h"
 
 #include <functional>
 #include <initializer_list>
@@ -66,6 +67,9 @@ struct GenericTokens {
        InlineOn = false, TypeHelpers = false, ScopedEnums = false,
        ResultSwitch = false, OutSwitch = false, DefaultParamsSwitch = false;
   unsigned PackRecords = 0;
+  /// A generic type's: the next of its method implementations (a list
+  /// that starts at the type's tokens), or null.
+  GenericTokens *NextMethod = nullptr;
 };
 
 class Parser {
@@ -91,6 +95,17 @@ class Parser {
   /// Parsing a generic routine: type parameters may follow its name
   /// (GenericTypeParams receives them).
   bool ParsingGeneric = false;
+  /// The generic types declared so far, by name: a method implementation
+  /// for one of them (TList.Add) is a template.
+  llvm::StringMap<TypeDecl *> GenericTypes;
+  /// specialize TList<integer>.Create in an expression: the type is given
+  /// a hidden name ($spec1 = specialize TList<integer>), declared in the
+  /// block being parsed, which gets these declarations when it ends.
+  llvm::SmallVector<Decl *, 4> HiddenTypeDecls;
+  unsigned HiddenTypes = 0;
+  GenericTokens *captureSwitches();
+  TypeDecl *parseTypeDecl(bool InMembers, bool Generic);
+  TypeSpec *parseSpecializeType();
   llvm::ArrayRef<Identifier> GenericTypeParams;
   /// declared(NAME) in $IF: the used units' names (their own, and those of
   /// their interfaces), given the units of the uses clauses read since the
@@ -295,6 +310,11 @@ public:
   /// A specialization of generic routine G: its declaration parsed again
   /// from its tokens (an ordinary routine, named as G).
   RoutineDecl *reparseGeneric(const RoutineDecl *G);
+  /// A specialization of generic type G: its declaration parsed again (an
+  /// ordinary type declaration, named as G), and in Methods the
+  /// implementations of its methods.
+  TypeDecl *reparseGenericType(const TypeDecl *G,
+                               llvm::SmallVectorImpl<Decl *> &Methods);
   Lexer &getLexer() { return Lex; }
   ~Parser();
   /// Makes declared(NAME) in $IF see the used units' declarations (F

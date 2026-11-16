@@ -1082,7 +1082,8 @@ public:
     TS_ArrayOfConst,
     TS_OpenArray,
     TS_DynArray,
-    TS_Tuple
+    TS_Tuple,
+    TS_Specialize
   };
 
 private:
@@ -1294,6 +1295,23 @@ public:
       : TypeSpec(TS_DynArray, R), Element(Element) {}
   TypeSpec *getElement() const { return Element; }
   static bool classof(const TypeSpec *T) { return T->getKind() == TS_DynArray; }
+};
+
+/// specialize TList<integer> (objfpc): the type made of the generic type
+/// TList for these type arguments.
+class SpecializeTypeSpec final : public TypeSpec {
+  Identifier Name;
+  llvm::ArrayRef<TypeSpec *> Args;
+
+public:
+  SpecializeTypeSpec(SourceRange R, Identifier Name,
+                     llvm::ArrayRef<TypeSpec *> Args)
+      : TypeSpec(TS_Specialize, R), Name(Name), Args(Args) {}
+  const Identifier &getName() const { return Name; }
+  llvm::ArrayRef<TypeSpec *> getArgs() const { return Args; }
+  static bool classof(const TypeSpec *T) {
+    return T->getKind() == TS_Specialize;
+  }
 };
 
 /// A parameter's `array of T`.
@@ -1642,7 +1660,26 @@ public:
   TypeSpec *getTypeSpec() const { return TS; }
   Type *getType() const { return Ty; }
   void setType(Type *T) { Ty = T; }
+  /// generic TList<T> = ... (objfpc): a template. Its tokens, and those of
+  /// each method implementation (TList.Add), are kept by the parser, which
+  /// parses them again for every specialization (specialize TList<integer>).
+  bool isGeneric() const { return Generic; }
+  void setGeneric(llvm::ArrayRef<Identifier> Params, void *Tokens) {
+    Generic = true;
+    TypeParams = Params;
+    GenericTokens = Tokens;
+  }
+  llvm::ArrayRef<Identifier> getTypeParams() const { return TypeParams; }
+  void *getGenericTokens() const { return GenericTokens; }
+  void *getGenericScope() const { return GenericScope; }
+  void setGenericScope(void *S) { GenericScope = S; }
   static bool classof(const Decl *D) { return D->getKind() == DK_Type; }
+
+private:
+  bool Generic = false;
+  llvm::ArrayRef<Identifier> TypeParams;
+  void *GenericTokens = nullptr; ///< the parser's GenericTokens
+  void *GenericScope = nullptr;  ///< Sema: the scope it is declared in
 };
 
 /// A record field.
@@ -1740,6 +1777,7 @@ class RoutineDecl final : public Decl {
   bool Generic = false;
   const void *GenericTokens = nullptr;
   void *GenericScope = nullptr;
+  bool TemplateMember = false;
   RoutineDecl *GenericDef = nullptr;
   RoutineDecl *Parent = nullptr;    ///< enclosing routine; null at program level
   unsigned Level = 1;               ///< 1 = declared in the program block
@@ -1877,6 +1915,10 @@ public:
   }
   /// A specialization: an ordinary routine from now on.
   void clearGeneric() { Generic = false; }
+  /// The implementation of a generic type's method (TList.Add): a
+  /// template too, parsed again for each specialization of the type.
+  bool isTemplateMember() const { return TemplateMember; }
+  void setTemplateMember() { TemplateMember = true; }
   llvm::ArrayRef<Identifier> getTypeParams() const { return TypeParams; }
   const void *getGenericTokens() const { return GenericTokens; }
   void *getGenericScope() const { return GenericScope; }

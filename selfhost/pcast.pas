@@ -337,7 +337,8 @@ type
                    tsPointer, tsSet, tsFile, tsRoutine, tsString, tsClass,
                    tsClassRef, tsInterface, tsHelper,
                    tsUntyped, { an untyped parameter's (absent) type }
-                   tsArrayOfConst, tsOpenArray, tsDynArray, tsTuple);
+                   tsArrayOfConst, tsOpenArray, tsDynArray, tsTuple,
+                   tsSpecialize);
 
   PVariantPart = ^TVariantPart;
 
@@ -361,6 +362,9 @@ type
         integer). tupNames: of PIdent (name = nil: none, the element is
         Item1, Item2, ...); tupSpecs: of PTypeSpec }
       tsTuple: (tupNames, tupSpecs: TPtrList);
+      { specialize spName<spArgs> (objfpc): the type made of the generic
+        type spName for these type arguments (of PTypeSpec) }
+      tsSpecialize: (spName: TIdent; spArgs: TPtrList);
       tsSubrange: (lo, hi: PNode);
       tsArray: (indexes: TPtrList; element: PTypeSpec; arrPacked: boolean;
                 arrBitPacked: boolean);
@@ -512,7 +516,13 @@ type
               varExternal, varCVar: boolean; varLibName, varExtName: PName;
               varLibExpr, varNameExpr: PNode);
       dkConst: (constInit: PNode; constType: PType; constValue: TConstValue);
-      dkType: (typeSpec: PTypeSpec; declType: PType);
+      { tgGeneric: generic TList<T> = ... (objfpc), a template. Its tokens
+        (tgTokens, the parser's PGenericTokens), and those of each method
+        implementation (TList.Add), are parsed again for every
+        specialization (specialize TList<integer>). tgParams: the type
+        parameters, of PIdent; tgScope: the scope it is declared in (Sema) }
+      dkType: (typeSpec: PTypeSpec; declType: PType; tgGeneric: boolean;
+               tgParams: TPtrList; tgTokens, tgScope: pointer);
       dkField: (fieldSpec: PTypeSpec; fieldType: PType);
       { methods (objfpc): methodClassName: TFoo of an implementation
         TFoo.Bar; ownerClass, selfVar (the hidden parameter), vmtIndex (a
@@ -534,6 +544,10 @@ type
                     declared in, and the declaration with its body) }
                   isGeneric: boolean; typeParams: TPtrList;
                   genericTokens, genericScope: pointer; genericDef: PDecl;
+                  { the implementation of a generic type's method
+                    (TList.Add): a template too, parsed again for each
+                    specialization of the type }
+                  isTemplateMember: boolean;
                   isVirtual, isOverride, isAbstract, isClassMethod: boolean;
                   { overloading (objfpc): the overload directive, the next
                     routine of the name in the same scope or class and this

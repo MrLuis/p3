@@ -1,0 +1,17 @@
+3 6 9 12 100 total 130
+fig pear banana 3
+0=fig 1=pear 2=banana 
+a list, 4 bytes an item; a list, 8 bytes an item
+1 1
+100
+adding 7
+adding 8
+2 2
+3.14 pi
+2..9 TRUE FALSE
+az
+2 bc
+3 2 1 
+list of 5 freed
+list of 3 freed
+list of 2 freed

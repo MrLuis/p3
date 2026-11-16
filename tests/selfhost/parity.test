@@ -53,6 +53,13 @@
 ; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-llvm --extra="-g -o -" --modes=objfpc --ref pcc --new %t.pcc %S/../run/condexpr.pas | FileCheck %s
 ; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-ast --extra="-o -" --modes=tp,objfpc --ref pcc --new %t.pcc %S/../run/condexpr.pas %S/../sema/Inputs/condexpr | FileCheck %s
 ; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-parse-tree --extra="-o -" --modes=tp,objfpc --ref pcc --new %t.pcc %S/../run/condexpr.pas %S/../sema/Inputs/condexpr | FileCheck %s
+; Generic types (objfpc).
+; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-llvm --extra="-o -" --modes=tp,objfpc --ref pcc --new %t.pcc %S/../run/generictypes.pas %S/../sema/Inputs/generictypes | FileCheck %s
+; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-llvm --extra="-g -o -" --modes=objfpc --ref pcc --new %t.pcc %S/../run/generictypes.pas | FileCheck %s
+; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-ast --extra="-o -" --modes=tp,objfpc --ref pcc --new %t.pcc %S/../run/generictypes.pas %S/../sema/Inputs/generictypes | FileCheck %s
+; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-parse-tree --extra="-o -" --modes=tp,objfpc --ref pcc --new %t.pcc %S/../run/generictypes.pas %S/../sema/Inputs/generictypes | FileCheck %s
+; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-llvm --extra="-I %S/../run/Inputs/generictypes/lib -g -o -" --modes=objfpc --ref pcc --new %t.pcc %S/../run/Inputs/generictypes | FileCheck %s
+; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-llvm --extra="-I %S/../run/Inputs/generictypes-private/lib -o -" --modes=objfpc --ref pcc --new %t.pcc %S/../run/Inputs/generictypes-private | FileCheck %s
 ; Separate units (S11): the unit modules and the program importing them.
 ; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-llvm --extra="-I %S/../run/Inputs/units/lib -o -" --modes=tp --ref pcc --new %t.pcc %S/../run/Inputs/units | FileCheck %s
 ; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-llvm --extra="-I %S/../run/Inputs/units/lib -fseparate-units -g -o -" --modes=tp --ref pcc --new %t.pcc %S/../run/Inputs/units | FileCheck %s

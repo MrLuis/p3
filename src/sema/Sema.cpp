@@ -104,6 +104,14 @@ class Checker : public StmtVisitor<Checker>,
   /// bodies are to be checked (in their scope, for a use); those of the
   /// module being checked, added to its block for code generation.
   Sema::ReparseFn Reparse;
+  Sema::ReparseTypeFn ReparseType;
+  /// The specializations of generic types, by generic and type arguments.
+  std::map<std::pair<TypeDecl *, std::vector<Type *>>, TypeDecl *> TypeInstances;
+  /// While a generic type's specialization is declared: its methods'
+  /// implementations, whose bodies are checked later (checkInstances).
+  std::vector<RoutineDecl *> *DeferredBodies = nullptr;
+  /// The scopes of a generic type's specializations (see declareRoutine).
+  std::map<TypeDecl *, std::vector<Scope *>> InstanceScopesOf;
   std::map<std::pair<RoutineDecl *, std::vector<Type *>>, RoutineDecl *> Instances;
   struct PendingInstance {
     RoutineDecl *R;
@@ -922,6 +930,13 @@ class Checker : public StmtVisitor<Checker>,
         }
         break;
       }
+    if (isGenericName(Id.Name)) {
+      Diags.error(Id.Loc,
+                  "'" + Id.Spelling + "' is a generic; give its type "
+                  "arguments: specialize " + Id.Spelling + "<...>",
+                  {Id.getRange()});
+      return;
+    }
     Diags.error(Id.Loc,
                 "use of undeclared identifier '" + Id.Spelling + "'" +
                     didYouMean(Id.Name),
@@ -1720,6 +1735,7 @@ class Checker : public StmtVisitor<Checker>,
     Type *T = buildType(TS);
     auto *Rec = llvm::dyn_cast<RecordType>(T);
     if (!DeclName.empty() && !T->isError() && !llvm::isa<BuiltinType>(T) &&
+        !llvm::isa<SpecializeTypeSpec>(TS) && // (so is a specialization)
         !(Rec && Rec->isTuple())) // (a tuple type is shared by its uses)
       T->setDeclName(DeclName);
     TS->setResolved(T);
@@ -1783,6 +1799,11 @@ class Checker : public StmtVisitor<Checker>,
         if (isFutureBuiltin(Id.Name))
           Diags.error(Id.Loc, "type '" + Id.Spelling + "' is not supported yet",
                       {Id.getRange()});
+        else if (isGenericName(Id.Name))
+          Diags.error(Id.Loc,
+                      "'" + Id.Spelling + "' is a generic; give its type "
+                      "arguments: specialize " + Id.Spelling + "<...>",
+                      {Id.getRange()});
         else
           Diags.error(Id.Loc, "unknown type name '" + Id.Spelling + "'" +
                         didYouMean(Id.Name),
@@ -1806,6 +1827,19 @@ class Checker : public StmtVisitor<Checker>,
                   {Id.getRange()});
       noteDeclaredHere(D);
       return errorType();
+    }
+
+    case TypeSpec::TS_Specialize: {
+      auto *SS = llvm::cast<SpecializeTypeSpec>(TS);
+      TypeDecl *I = specializeType(SS->getName(), SS->getArgs());
+      if (!I)
+        return errorType();
+      if (I->getType())
+        return I->getType();
+      // The specialization being declared, inside itself: as its name.
+      Identifier Id = I->getName();
+      Id.Loc = SS->getName().Loc;
+      return resolveType(Ctx.create<NamedTypeSpec>(Id));
     }
 
     case TypeSpec::TS_Tuple: {
@@ -2262,6 +2296,8 @@ class Checker : public StmtVisitor<Checker>,
   }
 
   void declareType(TypeDecl *TD) {
+    if (TD->isGeneric())
+      return declareGenericType(TD);
     if (auto *CS = llvm::dyn_cast<ClassTypeSpec>(TD->getTypeSpec()))
       return declareClass(TD, CS);
     if (auto *HS = llvm::dyn_cast<HelperTypeSpec>(TD->getTypeSpec()))
@@ -3995,9 +4031,10 @@ class Checker : public StmtVisitor<Checker>,
     if (!Strict && Owner->getModule() == CurModule)
       return;
     RoutineDecl *M = enclosingMethod();
-    if (M && (V == Visibility::StrictPrivate ? M->getClass() == Owner
-              : V != Visibility::Private  ? M->getClass()->inheritsFrom(Owner)
-                                          : false))
+    // (private, from another module: a specialization's own methods)
+    if (M && (V == Visibility::StrictPrivate || V == Visibility::Private
+                  ? M->getClass() == Owner
+                  : M->getClass()->inheritsFrom(Owner)))
       return;
     const char *What = V == Visibility::Private           ? "private"
                        : V == Visibility::Protected       ? "protected"
@@ -4617,6 +4654,132 @@ class Checker : public StmtVisitor<Checker>,
     Cur->insert(Key, R);
   }
 
+  /// Is Name the name of a generic (type or routine), with any number of
+  /// type parameters?
+  bool isGenericName(llvm::StringRef Name) {
+    for (size_t N = 1; N <= 16; ++N)
+      if (Cur->lookup(genericKey(Name, N)))
+        return true;
+    return false;
+  }
+
+  /// generic TList<T> = ...: declared (under its key), not checked.
+  void declareGenericType(TypeDecl *TD) {
+    const Identifier &Id = TD->getName();
+    TD->setType(errorType());
+    if (CurRoutine) {
+      Diags.error(Id.Loc,
+                  "generic types must be declared at program or unit level",
+                  {Id.getRange()});
+      return;
+    }
+    auto Params = TD->getTypeParams();
+    for (size_t I = 0; I < Params.size(); ++I)
+      for (size_t J = 0; J < I; ++J)
+        if (Params[I].Name == Params[J].Name)
+          Diags.error(Params[I].Loc,
+                      "duplicate type parameter '" + Params[I].Spelling + "'",
+                      {Params[I].getRange()});
+    llvm::StringRef Key = genericKey(Id.Name, Params.size());
+    if (Decl *Prev = Cur->lookupOwn(Key)) {
+      Diags.error(Id.Loc, "redefinition of generic '" + Id.Spelling + "'",
+                  {Id.getRange()});
+      Diags.note(Prev->getLocation(), "previous definition is here");
+      return;
+    }
+    TD->setGenericScope(Cur);
+    Used.insert(TD);
+    Cur->insert(Key, TD);
+  }
+
+  /// specialize Name<Args>, a type: the declaration of the type made of
+  /// the generic type Name for those type arguments, parsed again from the
+  /// generic's tokens on first use and declared like any type (named
+  /// Name<integer>), in the generic's scope plus the type parameters as
+  /// type aliases; its methods' implementations are parsed again too, and
+  /// their bodies checked later. Null after a diagnostic.
+  TypeDecl *specializeType(const Identifier &Name,
+                           llvm::ArrayRef<TypeSpec *> Args) {
+    llvm::SmallVector<Type *, 2> Types;
+    for (TypeSpec *TS : Args) {
+      Type *T = resolveType(TS);
+      if (T->isError())
+        return nullptr;
+      Types.push_back(T);
+    }
+    auto *G = llvm::dyn_cast_or_null<TypeDecl>(
+        Cur->lookup(genericKey(Name.Name, Args.size())));
+    if (!G || !G->isGeneric()) {
+      Diags.error(Name.Loc,
+                  "'" + Name.Spelling + "' is not a generic type with " +
+                      llvm::Twine(Args.size()) + " type parameter" +
+                      (Args.size() == 1 ? "" : "s"),
+                  {Name.getRange()});
+      return nullptr;
+    }
+    Used.insert(G);
+    auto Key = std::make_pair(G, std::vector<Type *>(Types.begin(), Types.end()));
+    if (auto It = TypeInstances.find(Key); It != TypeInstances.end())
+      return It->second;
+    llvm::SmallVector<Decl *, 8> Methods;
+    TypeDecl *I = ReparseType ? ReparseType(G, Methods) : nullptr;
+    if (!I) {
+      if (!ReparseType)
+        Diags.error(Name.Loc, "generic types cannot be specialized here",
+                    {Name.getRange()});
+      return nullptr;
+    }
+    // TList<integer, string>; it is still found as TList, in its scope.
+    std::string S = (G->getName().Spelling + "<").str();
+    for (size_t K = 0; K < Types.size(); ++K)
+      S += (K ? ", " : "") + Types[K]->getName();
+    S += ">";
+    I->setName(Identifier{G->getName().Name, Ctx.getStrings().intern(S),
+                          G->getName().Loc});
+    TypeInstances[Key] = I;
+    auto Sc = std::make_unique<Scope>(static_cast<Scope *>(G->getGenericScope()));
+    for (size_t K = 0; K < Types.size(); ++K) {
+      const Identifier &P = G->getTypeParams()[K];
+      auto *TD = Ctx.create<TypeDecl>(P.Loc, P, Types[K]);
+      Used.insert(TD);
+      Sc->insert(P.Name, TD);
+    }
+    Scope *InstScope = Sc.get();
+    InstanceScopes.push_back(std::move(Sc));
+    InstanceScopesOf[G].push_back(InstScope);
+    Scope *SavedScope = Cur;
+    RoutineDecl *SavedRoutine = CurRoutine;
+    llvm::StringRef SavedPrefix = NestPrefix;
+    std::vector<RoutineDecl *> *SavedDeferred = DeferredBodies;
+    std::vector<RoutineDecl *> Bodies;
+    Cur = InstScope;
+    CurRoutine = nullptr;
+    NestPrefix = {};
+    DeferredBodies = &Bodies;
+    unsigned Errors = Diags.getNumErrors();
+    size_t PointerMark = PendingPointers.size();
+    declareType(I);
+    resolvePendingPointersFrom(PointerMark);
+    for (Decl *M : Methods)
+      if (auto *R = llvm::dyn_cast<RoutineDecl>(M))
+        declareRoutine(R);
+    checkMethodsImplemented(I);
+    if (Diags.getNumErrors() > Errors)
+      Diags.note(Name.Loc, "in the specialization '" + S + "' requested here");
+    Cur = SavedScope;
+    CurRoutine = SavedRoutine;
+    NestPrefix = SavedPrefix;
+    DeferredBodies = SavedDeferred;
+    Used.insert(I);
+    for (RoutineDecl *R : Bodies)
+      PendingInstances.push_back({R, InstScope, Name.Loc});
+    // The type and its methods' implementations are the module's.
+    ModuleInstances.push_back(I);
+    for (Decl *M : Methods)
+      ModuleInstances.push_back(M);
+    return I;
+  }
+
   /// A forward or interface heading without its definition (yet).
   static bool isUndefinedHeading(RoutineDecl *R) {
     return !R->getBody() &&
@@ -4868,8 +5031,12 @@ class Checker : public StmtVisitor<Checker>,
       unsigned Errors = Diags.getNumErrors();
       checkRoutineBody(P.R);
       if (Diags.getNumErrors() > Errors)
-        Diags.note(P.Use, "in the specialization '" + P.R->getName().Spelling +
-                              "' requested here");
+        Diags.note(P.Use,
+                   "in the specialization '" +
+                       (P.R->getClass()
+                            ? qualified(P.R->getClass(), P.R->getName())
+                            : P.R->getName().Spelling.str()) +
+                       "' requested here");
       Cur = SavedScope;
     }
     PendingInstances.clear();
@@ -4883,6 +5050,18 @@ class Checker : public StmtVisitor<Checker>,
   }
 
   void declareRoutine(RoutineDecl *R) {
+    if (R->isTemplateMember()) { // of a generic type: see specializeType
+      // Its specializations see what is declared up to here (the unit's
+      // implementation, for a generic type of its interface).
+      auto *G = llvm::dyn_cast_or_null<TypeDecl>(Cur->lookup(
+          genericKey(R->getClassName().Name, R->getTypeParams().size())));
+      if (G && G->isGeneric() && !CurRoutine && G->getGenericScope() != Cur) {
+        G->setGenericScope(Cur);
+        for (Scope *S : InstanceScopesOf[G])
+          S->setParent(Cur);
+      }
+      return;
+    }
     R->setParent(CurRoutine);
     if (R->isGeneric())
       return declareGeneric(R);
@@ -5680,6 +5859,10 @@ class Checker : public StmtVisitor<Checker>,
   }
 
   void checkRoutineBody(RoutineDecl *R) {
+    if (DeferredBodies) { // of a specialization being declared: later
+      DeferredBodies->push_back(R);
+      return;
+    }
     // The method of a nested class or record also sees the constants and
     // types of the classes around it.
     llvm::SmallVector<std::unique_ptr<Scope>, 2> OuterScopes;
@@ -7397,8 +7580,10 @@ class Checker : public StmtVisitor<Checker>,
 
 public:
   Checker(ASTContext &Ctx, DiagnosticsEngine &Diags, const LangOptions &LO,
-          Sema::ReparseFn Reparse = nullptr)
-      : Ctx(Ctx), Diags(Diags), LangOpts(LO), Reparse(std::move(Reparse)) {
+          Sema::ReparseFn Reparse = nullptr,
+          Sema::ReparseTypeFn ReparseType = nullptr)
+      : Ctx(Ctx), Diags(Diags), LangOpts(LO), Reparse(std::move(Reparse)),
+        ReparseType(std::move(ReparseType)) {
     declareStandardScope();
   }
 
@@ -10658,7 +10843,8 @@ public:
 bool Sema::check(ProgramDecl &P, llvm::ArrayRef<UnitDecl *> Units,
                  bool SeparateUnits) {
   unsigned ErrorsBefore = Diags.getNumErrors();
-  Checker(Ctx, Diags, LangOpts, Reparse).checkProgram(P, Units, SeparateUnits);
+  Checker(Ctx, Diags, LangOpts, Reparse, ReparseType)
+      .checkProgram(P, Units, SeparateUnits);
   return Diags.getNumErrors() == ErrorsBefore && !Diags.shouldStop();
 }
 
@@ -10668,7 +10854,7 @@ std::vector<std::string> Sema::standardNames() {
 
 bool Sema::checkUnit(UnitDecl &U, llvm::ArrayRef<UnitDecl *> Deps) {
   unsigned ErrorsBefore = Diags.getNumErrors();
-  Checker C(Ctx, Diags, LangOpts, Reparse);
+  Checker C(Ctx, Diags, LangOpts, Reparse, ReparseType);
   C.checkSeparateUnit(U, Deps);
   return Diags.getNumErrors() == ErrorsBefore && !Diags.shouldStop();
 }

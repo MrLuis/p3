@@ -1,0 +1,21 @@
+; Generic types of a unit's interface, specialized by the unit and by the
+; program, compiled whole and separately.
+; RUN: rm -rf %t && mkdir -p %t && cp -r %S/Inputs/generictypes/. %t/
+; RUN: %pcc --mode=objfpc -I %t/lib %t/main.pas -o %t/whole
+; RUN: %t/whole | FileCheck %s
+; RUN: %pcc --mode=objfpc -c %t/lib/gtypes.pas -o %t/lib/gtypes.o
+; RUN: %pcc --mode=objfpc -I %t/lib -fseparate-units %t/main.pas -o %t/separate
+; RUN: %t/separate | FileCheck %s
+; CHECK: 42 cy 3 2
+
+; The methods of a generic type of a unit's interface use what the unit
+; keeps private: fine compiled whole, but a separately compiled unit's
+; specializations see only its interface.
+; RUN: rm -rf %t.p && mkdir -p %t.p && cp -r %S/Inputs/generictypes-private/. %t.p/
+; RUN: %pcc --mode=objfpc -I %t.p/lib %t.p/main.pas -o %t.p/whole
+; RUN: %t.p/whole | FileCheck --check-prefix=PRIV %s
+; PRIV: 42 2
+; RUN: %pcc --mode=objfpc -c %t.p/lib/gpriv.pas -o %t.p/lib/gpriv.o
+; RUN: not %pcc --mode=objfpc -I %t.p/lib -fseparate-units %t.p/main.pas -o %t.p/separate 2>&1 | FileCheck --check-prefix=SEP %s
+; SEP: gpriv.pas:14:3: error: use of undeclared identifier 'count'
+; SEP: main.pas:4:17: note: in the specialization 'TCell<integer>.Put' requested here

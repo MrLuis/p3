@@ -600,11 +600,29 @@ var names := ['ann', 'bo'];          { array of string }
 - A variable's type is fixed where it is declared: after `var x := 3`,
   `x := 3.5` is an error. `var x := nil` is an error too.
 
-Not inferred, because pcc does not have them: the parameter and result
-types of lambdas (there are no anonymous functions), the type arguments of
-generic types and constructors (generic routines only), and conditional
-expressions. The types of parameters, fields and function results are
-always written.
+Not inferred: the parameter and result types of lambdas (pcc has no
+anonymous functions), and the type arguments of a generic type from the
+declared type of a variable (`specialize TList<T>` is always written). The
+types of parameters, fields and function results are always written.
+
+**Conditional expressions** (objfpc; pcc's own): `if c then a else b` is a
+value, `a` where `c` holds and `b` otherwise. Only the branch chosen is
+evaluated, so `if n = 0 then 0 else total div n` is safe. Both branches
+are needed; they nest (`if x < 0 then -1 else if x > 0 then 1 else 0`).
+
+```pascal
+sign  := if n < 0 then -1 else 1;
+label := if count = 1 then 'item' else 'items';
+Writeln(if ok then 'yes' else 'no');
+```
+
+Its type is the type wanted of it (in an assignment, a typed declaration,
+`exit`), which both branches must fit; elsewhere it is the common type of
+the branches, as for the elements of `[a, b]`: `if c then 1 else 2.5` is a
+`Real`, an `Integer` and a `string` are an error. It is a value, not a
+variable: it cannot be assigned to or passed to a `var` parameter. It can
+only be written among the statements of a routine or program, not in a
+constant.
 
 **Tuples** (objfpc; pcc's own, not Free Pascal's): several values as one,
 without declaring a record. A tuple type lists its element types between
@@ -859,9 +877,70 @@ made once per program or unit: its declaration is parsed again with the
 type parameters naming the type arguments and checked like any routine,
 so errors in it point into the generic, with a note at the use; it is
 compiled as `F<integer>`. A call without `specialize` infers the type
-arguments (see "Inferred types"). Not supported: generic types, methods and
+arguments (see "Inferred types"). Not supported: generic methods,
 constraints, `@specialize F<T>`, and, for a unit compiled separately, generics that use
 what the unit does not export (whole-program compilation allows it).
+
+**Generic types** (`--mode=objfpc`), as in Free Pascal: `generic TName<T>
+= ...` declares a template for a class, a record (with or without
+methods), an interface, an array or a procedural type, and `specialize
+TName<Integer>` is the type made of it for those type arguments.
+
+```pascal
+type
+  generic TList<T> = class
+  private
+    FItems: array of T;
+  public
+    procedure Add(const Item: T);
+    function Count: Integer;
+    property Items[i: Integer]: T read GetItem; default;
+  end;
+  generic TPair<K, V> = record
+    Key: K;
+    Value: V;
+  end;
+
+procedure TList.Add(const Item: T);      { a template too }
+begin
+  ...
+end;
+
+type
+  TIntList = specialize TList<Integer>;
+var
+  names: specialize TList<string>;
+  p: specialize TPair<string, Real>;
+begin
+  names := specialize TList<string>.Create;
+```
+
+- A specialization is the same type wherever it is written with the same
+  type arguments, and a different type for other arguments. It is named
+  `TList<integer>` in messages.
+- `specialize TName<...>` is written wherever a type is, also as a
+  parameter or result type, inside other generics (`specialize TPair<Integer,
+  T>`), as a class's ancestor through a name (`TLoud = class(TIntList)`),
+  and in an expression before a member (`specialize TList<string>.Create`).
+- The implementations of a generic class's or record's methods are written
+  with the generic's name, without type parameters (`TList.Add`). Inside
+  the generic its own name means the specialization being made (`Next:
+  TNode`).
+- Everything classes can do works in a generic one: constructors, virtual
+  methods and overriding, properties, class methods and class variables
+  (each specialization has its own), interfaces.
+- A specialization is made once per program or unit: the generic's tokens,
+  and its methods', are parsed again with the type parameters naming the
+  type arguments and checked like any declaration. An error in it points
+  into the generic, with a note where the specialization was asked for.
+
+Generics are declared at program or unit level, also in a unit's interface
+with the methods in its implementation. Not supported: constraints
+(`<T: TObject>`), generic methods of ordinary classes, nested generic
+types, Delphi's `TList<Integer>` without `specialize`, and for a unit
+compiled separately (`-fseparate-units`) generics whose methods use what
+the unit does not export; each separately compiled module that uses a
+specialization also has its own copy of it.
 
 **For-in loops** (not in `--mode=iso`), as in Free Pascal: `for x in c do`
 takes `x` through the elements of an array (static, open or dynamic) or a

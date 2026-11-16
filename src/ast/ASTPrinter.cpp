@@ -97,6 +97,17 @@ class ASTPrinter : public StmtVisitor<ASTPrinter>,
     }
     case Decl::DK_Type: {
       auto *T = llvm::cast<TypeDecl>(D);
+      if (T->isGeneric()) { // a template: not checked
+        line("GenericTypeDecl '") << T->getName().Name << '\'';
+        for (const Identifier &P : T->getTypeParams())
+          OS << " <" << P.Name << '>';
+        loc(T->getLocation());
+        if (ParseTree) {
+          IndentScope I(Indent);
+          printTypeSpec(T->getTypeSpec());
+        }
+        return;
+      }
       line("TypeDecl '") << T->getName().Name << '\'';
       if (T->getType())
         OS << " = " << describeType(T->getType());
@@ -397,6 +408,15 @@ class ASTPrinter : public StmtVisitor<ASTPrinter>,
       line("NamedTypeSpec '") << llvm::cast<NamedTypeSpec>(TS)->getName().Name << '\'';
       loc(TS->getBeginLoc());
       return;
+    case TypeSpec::TS_Specialize: {
+      auto *SS = llvm::cast<SpecializeTypeSpec>(TS);
+      line("SpecializeTypeSpec '") << SS->getName().Name << '\'';
+      loc(TS->getBeginLoc());
+      IndentScope I(Indent);
+      for (TypeSpec *A : SS->getArgs())
+        printTypeSpec(A);
+      return;
+    }
     case TypeSpec::TS_DynArray: {
       line("DynArrayTypeSpec");
       loc(TS->getBeginLoc());

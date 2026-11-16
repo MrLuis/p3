@@ -483,6 +483,10 @@ begin
 end;
 
 procedure noteDeclaredHere(d: PDecl); forward;
+function genericKey(name: PName; n: longint): PName; forward;
+function isGenericName(name: PName): boolean; forward;
+procedure declareGenericType(td: PDecl); forward;
+function specializeType(const name: TIdent; const args: TPtrList): PDecl; forward;
 
 function isInstanceMember(d: PDecl): boolean; forward;
 
@@ -513,6 +517,16 @@ begin
       break;
     end;
     r := r^.parent;
+  end;
+  if isGenericName(id.name) then
+  begin
+    ms('''');
+    maN(id.spelling);
+    ma(''' is a generic; give its type arguments: specialize ');
+    maN(id.spelling);
+    ma('<...>');
+    errR(id.loc, identRange(id));
+    exit;
   end;
   ms('use of undeclared identifier ''');
   maN(id.spelling);
@@ -3000,6 +3014,16 @@ begin
           warnHints(d, ts^.tname);
         if d = nil then
         begin
+          if isGenericName(ts^.tname.name) then
+          begin
+            ms('''');
+            maN(ts^.tname.spelling);
+            ma(''' is a generic; give its type arguments: specialize ');
+            maN(ts^.tname.spelling);
+            ma('<...>');
+            errR(ts^.tname.loc, identRange(ts^.tname));
+            exit;
+          end;
           ms('unknown type name ''');
           maN(ts^.tname.spelling);
           ma('''');
@@ -3027,6 +3051,20 @@ begin
         ma(''' is a ' + kindName(d) + ', not a type');
         errR(ts^.tname.loc, identRange(ts^.tname));
         noteDeclaredHere(d);
+      end;
+    tsSpecialize:
+      begin
+        d := specializeType(ts^.spName, ts^.spArgs);
+        if d = nil then
+          exit;
+        if d^.declType <> nil then
+          exit(d^.declType);
+        { the specialization being declared, inside itself: as its name }
+        es := newTypeSpec(tsNamed, ts^.spName.loc, ts^.spName.loc);
+        es^.tname := d^.ident;
+        es^.tname.loc := ts^.spName.loc;
+        listInit(es^.tquals);
+        buildType := resolveType(es, nil);
       end;
     tsTuple:
       begin
@@ -3385,6 +3423,7 @@ begin
     exit(ts^.resolved);
   t := buildType(ts);
   if (declName <> nil) and not isError(t) and not isBuiltinType(t) and
+     (ts^.kind <> tsSpecialize) and { (so is a specialization) }
      not ((t^.kind = tyRecord) and t^.isTupleRecord) then { (a tuple type is shared by its uses) }
     setDeclName(t, declName);
   ts^.resolved := t;
@@ -3427,6 +3466,11 @@ procedure declareHelper(td: PDecl); forward;
 
 procedure declareType(td: PDecl);
 begin
+  if td^.tgGeneric then
+  begin
+    declareGenericType(td);
+    exit;
+  end;
   if (td^.typeSpec^.kind = tsRecord) and (td^.typeSpec^.recMembers.count > 0) and
      (curRoutine = nil) then
   begin
@@ -5944,14 +5988,14 @@ begin
   m := enclosingMethod;
   if m <> nil then
   begin
-    if d^.vis = vsStrictPrivate then
+    { (private, from another module: a specialization's own methods) }
+    if (d^.vis = vsStrictPrivate) or (d^.vis = vsPrivate) then
     begin
       if m^.ownerClass = owner then
         exit;
     end
-    else if d^.vis <> vsPrivate then
-      if inheritsFrom(m^.ownerClass, owner) then
-        exit;
+    else if inheritsFrom(m^.ownerClass, owner) then
+      exit;
   end;
   ms('''');
   maN(id.spelling);
@@ -7194,6 +7238,236 @@ end;
 
 { Checks the bodies of the specializations made so far (and those they
   make), then adds the module's to its block. }
+type
+  { a specialization of generic type g for types (of PType): the type
+    declaration td, declared in scope }
+  PTypeInstance = ^TTypeInstance;
+  TTypeInstance = record
+    g, td: PDecl;
+    types: TPtrList;
+    scope: PScope;
+  end;
+
+var
+  typeInstances: TPtrList; { of PTypeInstance }
+  typeInstancesInit: boolean;
+  { while a generic type's specialization is declared: its methods'
+    implementations (of PDecl), whose bodies are checked later
+    (checkInstances) }
+  deferredBodies: PPtrList;
+
+{ Is name the name of a generic (type or routine), with any number of type
+  parameters? }
+function isGenericName(name: PName): boolean;
+var
+  n: longint;
+begin
+  isGenericName := false;
+  for n := 1 to 16 do
+    if lookup(genericKey(name, n)) <> nil then
+      exit(true);
+end;
+
+{ generic TList<T> = ...: declared (under its key), not checked. }
+procedure declareGenericType(td: PDecl);
+var
+  i, j: longint;
+  pi, pj: PIdent;
+  key: PName;
+  prev: PDecl;
+begin
+  td^.declType := errorType;
+  if curRoutine <> nil then
+  begin
+    ms('generic types must be declared at program or unit level');
+    errR(td^.ident.loc, identRange(td^.ident));
+    exit;
+  end;
+  for i := 0 to td^.tgParams.count - 1 do
+    for j := 0 to i - 1 do
+    begin
+      pi := PIdent(listGet(td^.tgParams, i));
+      pj := PIdent(listGet(td^.tgParams, j));
+      if pi^.name = pj^.name then
+      begin
+        ms('duplicate type parameter ''');
+        maN(pi^.spelling);
+        ma('''');
+        errR(pi^.loc, identRange(pi^));
+      end;
+    end;
+  key := genericKey(td^.ident.name, td^.tgParams.count);
+  prev := scopeLookupOwn(cur, key);
+  if prev <> nil then
+  begin
+    ms('redefinition of generic ''');
+    maN(td^.ident.spelling);
+    ma('''');
+    errR(td^.ident.loc, identRange(td^.ident));
+    ms('previous definition is here');
+    note(prev^.loc);
+    exit;
+  end;
+  td^.tgScope := cur;
+  td^.isUsed := true;
+  scopeInsert(cur, key, td);
+end;
+
+procedure declareRoutine(r: PDecl); forward;
+
+{ specialize name<args>, a type: the declaration of the type made of the
+  generic type name for those type arguments, parsed again from the
+  generic's tokens on first use and declared like any type (named
+  Name<integer>), in the generic's scope plus the type parameters as type
+  aliases; its methods' implementations are parsed again too, and their
+  bodies checked later. Nil after a diagnostic. }
+function specializeType(const name: TIdent; const args: TPtrList): PDecl;
+var
+  types, methods, bodies: TPtrList;
+  t: PType;
+  g, inst, td, m: PDecl;
+  i, k, errors, pointerMark: longint;
+  ti: PTypeInstance;
+  same: boolean;
+  sb, tb: TBuf;
+  sc, savedScope: PScope;
+  savedRoutine: PDecl;
+  savedPrefix: PName;
+  savedDeferred: PPtrList;
+  p: PIdent;
+  id: TIdent;
+  pending: PInstance;
+begin
+  specializeType := nil;
+  if not typeInstancesInit then
+  begin
+    listInit(typeInstances);
+    typeInstancesInit := true;
+  end;
+  listInit(types);
+  for i := 0 to args.count - 1 do
+  begin
+    t := resolveType(PTypeSpec(listGet(args, i)), nil);
+    if isError(t) then
+      exit;
+    listAdd(types, t);
+  end;
+  g := lookup(genericKey(name.name, args.count));
+  if g <> nil then
+    if (g^.kind <> dkType) or not g^.tgGeneric then
+      g := nil;
+  if g = nil then
+  begin
+    ms('''');
+    maN(name.spelling);
+    ma(''' is not a generic type with ' + intToStr(args.count) +
+       ' type parameter');
+    if args.count <> 1 then
+      ma('s');
+    errR(name.loc, identRange(name));
+    exit;
+  end;
+  g^.isUsed := true;
+  for i := 0 to typeInstances.count - 1 do
+  begin
+    ti := PTypeInstance(listGet(typeInstances, i));
+    if (ti^.g = g) and (ti^.types.count = types.count) then
+    begin
+      same := true;
+      for k := 0 to types.count - 1 do
+        if listGet(ti^.types, k) <> listGet(types, k) then
+          same := false;
+      if same then
+        exit(ti^.td);
+    end;
+  end;
+  listInit(methods);
+  inst := reparseGenericType(g, methods);
+  if inst = nil then
+    exit;
+  { TList<integer, string>; it is still found as TList, in its scope }
+  bufInit(sb);
+  bufAddName(sb, g^.ident.spelling);
+  bufAddChar(sb, '<');
+  for k := 0 to types.count - 1 do
+  begin
+    if k > 0 then
+      bufAdd(sb, ', ');
+    bufInit(tb);
+    bufAddTypeName(tb, PType(listGet(types, k)));
+    bufAddChars(sb, tb.data, 0, tb.len);
+    bufFree(tb);
+  end;
+  bufAddChar(sb, '>');
+  id.name := g^.ident.name;
+  id.spelling := internChars(sb.data, 0, sb.len);
+  id.loc := g^.ident.loc;
+  bufFree(sb);
+  inst^.ident := id;
+  ti := PTypeInstance(arenaAlloc(sizeof(TTypeInstance)));
+  ti^.g := g;
+  ti^.td := inst;
+  ti^.types := types;
+  listAdd(typeInstances, ti);
+  sc := newScope(PScope(g^.tgScope));
+  for k := 0 to types.count - 1 do
+  begin
+    p := PIdent(listGet(g^.tgParams, k));
+    td := newDecl(dkType, p^, p^.loc);
+    td^.declType := PType(listGet(types, k));
+    td^.isUsed := true;
+    scopeInsert(sc, p^.name, td);
+  end;
+  ti^.scope := sc;
+  savedScope := cur;
+  savedRoutine := curRoutine;
+  savedPrefix := nestPrefix;
+  savedDeferred := deferredBodies;
+  listInit(bodies);
+  cur := sc;
+  curRoutine := nil;
+  nestPrefix := nil;
+  deferredBodies := @bodies;
+  errors := diagNumErrors;
+  pointerMark := pendingPointers.count;
+  declareType(inst);
+  resolvePendingPointersFrom(pointerMark);
+  for i := 0 to methods.count - 1 do
+  begin
+    m := PDecl(listGet(methods, i));
+    if m^.kind = dkRoutine then
+      declareRoutine(m);
+  end;
+  checkTypeMethodsImplemented(inst);
+  if diagNumErrors > errors then
+  begin
+    ms('in the specialization ''');
+    maN(id.spelling);
+    ma(''' requested here');
+    note(name.loc);
+  end;
+  cur := savedScope;
+  curRoutine := savedRoutine;
+  nestPrefix := savedPrefix;
+  deferredBodies := savedDeferred;
+  inst^.isUsed := true;
+  for i := 0 to bodies.count - 1 do
+  begin
+    pending := PInstance(arenaAlloc(sizeof(TInstance)));
+    pending^.g := g;
+    pending^.r := PDecl(listGet(bodies, i));
+    pending^.types := types;
+    pending^.scope := sc;
+    pending^.use := name.loc;
+    listAdd(pendingInstances, pending);
+  end;
+  { the type and its methods' implementations are the module's }
+  listAdd(moduleInstances, inst);
+  for i := 0 to methods.count - 1 do
+    listAdd(moduleInstances, listGet(methods, i));
+  specializeType := inst;
+end;
+
 procedure checkInstances(b: PBlock);
 var
   k, errors: longint;
@@ -7211,7 +7485,10 @@ begin
     if diagNumErrors > errors then
     begin
       ms('in the specialization ''');
-      maN(inst^.r^.ident.spelling);
+      if inst^.r^.ownerClass <> nil then
+        maQualified(inst^.r^.ownerClass, inst^.r^.ident)
+      else
+        maN(inst^.r^.ident.spelling);
       ma(''' requested here');
       note(inst^.use);
     end;
@@ -7231,6 +7508,23 @@ var
   rt: PType;
   inInterface: boolean;
 begin
+  if r^.isTemplateMember then { of a generic type: see specializeType }
+  begin
+    { its specializations see what is declared up to here (the unit's
+      implementation, for a generic type of its interface) }
+    fwd := lookup(genericKey(r^.methodClassName.name, r^.typeParams.count));
+    if fwd <> nil then
+      if (fwd^.kind = dkType) and fwd^.tgGeneric and (curRoutine = nil) and
+         (PScope(fwd^.tgScope) <> cur) then
+      begin
+        fwd^.tgScope := cur;
+        if typeInstancesInit then
+          for i := 0 to typeInstances.count - 1 do
+            if PTypeInstance(listGet(typeInstances, i))^.g = fwd then
+              PTypeInstance(listGet(typeInstances, i))^.scope^.parent := cur;
+      end;
+    exit;
+  end;
   r^.parent := curRoutine;
   if curRoutine <> nil then
     r^.level := curRoutine^.level + 1
@@ -8266,6 +8560,11 @@ var
   selfRef: PNode;
   w: PWithContext;
 begin
+  if deferredBodies <> nil then { of a specialization being declared: later }
+  begin
+    listAdd(deferredBodies^, r);
+    exit;
+  end;
   savedScope := cur;
   savedRoutine := curRoutine;
   { the method of a nested class or record also sees the constants and

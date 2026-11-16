@@ -14,6 +14,7 @@
 #define PCC_SEMA_SEMA_H
 
 #include "llvm/ADT/ArrayRef.h"
+#include "llvm/ADT/SmallVector.h"
 
 #include <cstdint>
 #include <functional>
@@ -26,6 +27,8 @@ class ASTContext;
 class DiagnosticsEngine;
 class ProgramDecl;
 class RoutineDecl;
+class TypeDecl;
+class Decl;
 class UnitDecl;
 struct LangOptions;
 
@@ -36,17 +39,23 @@ class Sema {
 public:
   /// Parses a generic routine's declaration again, for a specialization.
   using ReparseFn = std::function<RoutineDecl *(const RoutineDecl *Generic)>;
+  /// Parses a generic type's declaration again, and the implementations of
+  /// its methods (into Methods), for a specialization.
+  using ReparseTypeFn = std::function<TypeDecl *(
+      const TypeDecl *Generic, llvm::SmallVectorImpl<Decl *> &Methods)>;
 
 private:
   ASTContext &Ctx;
   DiagnosticsEngine &Diags;
   const LangOptions &LangOpts;
   ReparseFn Reparse;
+  ReparseTypeFn ReparseType;
 
 public:
   Sema(ASTContext &Ctx, DiagnosticsEngine &Diags, const LangOptions &LangOpts,
-       ReparseFn Reparse = nullptr)
-      : Ctx(Ctx), Diags(Diags), LangOpts(LangOpts), Reparse(std::move(Reparse)) {}
+       ReparseFn Reparse = nullptr, ReparseTypeFn ReparseType = nullptr)
+      : Ctx(Ctx), Diags(Diags), LangOpts(LangOpts), Reparse(std::move(Reparse)),
+        ReparseType(std::move(ReparseType)) {}
 
   /// Returns true if the program is valid. Units must be in dependency
   /// order (a unit before the units and program that use it).

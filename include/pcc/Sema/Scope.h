@@ -81,6 +81,7 @@ public:
   }
 
   Scope *getParent() const { return Parent; }
+  void setParent(Scope *P) { Parent = P; }
   void setRoutineBoundary() { RoutineBoundary = true; }
   void addImport(const Scope *S) { Imports.push_back(S); }
 
