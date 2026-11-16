@@ -1621,6 +1621,7 @@ begin
     exit((value^.kind = tyRoutine) and
          (value^.routineCDecl = target^.routineCDecl) and
          (value^.routineOfObject = target^.routineOfObject) and
+         (value^.routineReference = target^.routineReference) and
          congruent(target^.routineParams, target^.routineResult,
                    value^.routineParams, value^.routineResult));
   end;
@@ -3266,7 +3267,11 @@ begin
         if ts^.rtOfObject then
           buildType := newMethodPointerType(ts^.rtParams, res, ts^.rtCallConv = ccCDecl)
         else
-          buildType := newRoutineType(ts^.rtParams, res, ts^.rtCallConv = ccCDecl);
+        begin
+          res := newRoutineType(ts^.rtParams, res, ts^.rtCallConv = ccCDecl);
+          res^.routineReference := ts^.rtReference;
+          buildType := res;
+        end;
       end;
     tsString:
       begin
@@ -8599,6 +8604,7 @@ begin
     w := PWithContext(arenaAlloc(sizeof(TWithContext)));
     w^.rec := selfRef;
     w^.isSelf := true;
+    w^.routine := r;
     if r^.ownerClass^.classHelperFor <> nil then
       w^.helper := r^.ownerClass;
     { a helper's method for an advanced record also sees the record's
@@ -8909,6 +8915,7 @@ begin
     begin
       if (ta^.routineCDecl <> tb^.routineCDecl) or
          (ta^.routineOfObject <> tb^.routineOfObject) or
+         (ta^.routineReference <> tb^.routineReference) or
          not congruent(ta^.routineParams, ta^.routineResult, tb^.routineParams,
                        tb^.routineResult) then
         exit(false);
@@ -8939,11 +8946,15 @@ var
   savedAssign, savedOwned, savedIndex, savedWanted: PNode;
   savedAddr: PType;
   savedKeep: boolean;
+  savedCur: PScope;
 begin
   r := a^.addrLambda;
   if (r = nil) or r^.lambdaDone then
     exit;
   r^.lambdaDone := true;
+  if want <> nil then
+    if want^.routineReference then
+      r^.isClosure := true;
   if want <> nil then
     if want^.routineParams.count <> r^.params.count then
     begin
@@ -9016,7 +9027,14 @@ begin
   else
     r^.level := 1;
   r^.isUsed := true;
+  { in the innermost scope of declarations (not that of a with statement
+    or of a class's members, where it would not be found) }
+  savedCur := cur;
+  while ((cur^.withRecord <> nil) or (cur^.withClass <> nil) or
+         (cur^.nestedOf <> nil)) and (cur^.parent <> nil) do
+    cur := cur^.parent;
   declare(r);
+  cur := savedCur;
   { its body is checked now, in the middle of a statement }
   savedLoop := loopDepth;
   savedSeq := directSequence;
@@ -9057,33 +9075,137 @@ end;
   routine around the lambda (a variable, a member through Self or a with
   statement, a nested routine), the lambdas up to that routine must not
   outlive it (lambdaCapture). }
+{ Why a closure cannot use v, a variable of a routine around it ('': it
+  can): it is not kept in that routine's frame, or is not counted there. }
+function closureCannotUse(v: PDecl): string;
+var
+  ofS: string;
+  t: PType;
+begin
+  closureCannotUse := '';
+  if v^.owner^.isLambda then
+    ofS := 'the lambda around it'
+  else
+    ofS := '''' + nameStr(v^.owner^.ident.spelling) + '''';
+  if v^.varKind = vkResult then
+    exit('the result of ' + ofS);
+  t := v^.varType;
+  if v = v^.owner^.selfVar then
+  begin
+    if (t <> nil) and (t^.kind in [tyClass, tyClassRef]) then
+      exit('');
+    exit('through the Self of ' + ofS + ' (a record, passed by reference)');
+  end;
+  if (v^.varKind = vkVariable) or (t = nil) then
+    exit('');
+  if t^.kind in [tyOpenArray, tyArrayOfConst, tyUntyped] then
+    exit('an open or untyped parameter of ' + ofS);
+  if v^.isOut then
+    exit('an ''out'' parameter of ' + ofS);
+  if v^.varKind = vkVarParam then
+    exit('a ''var'' parameter of ' + ofS);
+  if ((v^.varKind = vkConstParam) or v^.isConstRef) and
+     (isStructured(t) or isManaged(t) or v^.isConstRef) then
+  begin
+    if v^.isConstRef then
+      exit('a ''constref'' parameter of ' + ofS);
+    exit('a ''const'' parameter of ' + ofS);
+  end;
+end;
+
+{ ...
+
+  A closure (a lambda made a reference to value) may outlive them: their
+  frames it uses are then kept on the heap (heapFrame), and it must not use
+  what does not live in a frame (closureCannotUse). }
 procedure noteLambdaUse(d: PDecl; w: PWithContext; const id: TIdent);
 var
-  owner, l: PDecl;
+  owner, l, f, v, nested: PDecl;
+  why: string;
 begin
   if (curRoutine = nil) or not curRoutine^.isLambda or (d = nil) then
     exit;
   owner := nil;
-  if (d^.kind = dkVar) and (w = nil) then
+  v := nil;
+  nested := nil;
+  if w <> nil then
+  begin
+    if w^.routine = curRoutine then
+      exit;
+    if not w^.isSelf then
+    begin
+      { its address is the enclosing routine's to compute, not the
+        lambda's }
+      ms('this lambda uses ''');
+      maN(id.spelling);
+      ma(''' through a ''with'' statement outside it; name the record instead');
+      errR(id.loc, identRange(id));
+      exit;
+    end;
+    owner := w^.routine;
+    if owner <> nil then
+      v := owner^.selfVar;
+  end
+  else if d^.kind = dkVar then
   begin
     if (d^.owner = nil) or (d^.owner = curRoutine) or
        ((d^.init <> nil) and not d^.isInitVar) or d^.isClassVar then
       exit;
     owner := d^.owner;
+    v := d;
   end
-  else if (d^.kind = dkRoutine) and (w = nil) then
+  else if d^.kind = dkRoutine then
   begin
     if (d^.parent = nil) or (d = curRoutine) then
       exit;
     owner := d^.parent;
+    nested := d;
   end
-  else if w = nil then
+  else
     exit;
   l := curRoutine;
   while (l <> nil) and (l <> owner) do
   begin
-    if l^.isLambda and not identValid(l^.lambdaCapture) then
-      l^.lambdaCapture := id;
+    if l^.isLambda then
+    begin
+      if not identValid(l^.lambdaCapture) then
+        l^.lambdaCapture := id;
+      if l^.isClosure then
+      begin
+        if nested <> nil then
+          if not nested^.isLambda then
+          begin
+            ms('this closure uses ''');
+            maN(id.spelling);
+            ma(''', a routine nested in ''');
+            maN(owner^.ident.spelling);
+            ma('''; a closure can only use routines declared at program or ' +
+               'unit level');
+            errR(id.loc, identRange(id));
+            exit;
+          end;
+        why := '';
+        if v <> nil then
+          why := closureCannotUse(v);
+        if why <> '' then
+        begin
+          ms('this closure uses ''');
+          maN(id.spelling);
+          ma(''', ' + why + ', which may not exist when the closure runs; ' +
+             'copy it to a local variable first');
+          errR(id.loc, identRange(id));
+          exit;
+        end;
+        f := l^.parent;
+        while f <> nil do
+        begin
+          f^.heapFrame := true;
+          if f = owner then
+            break;
+          f := f^.parent;
+        end;
+      end;
+    end;
     l := l^.parent;
   end;
 end;
@@ -9099,6 +9221,8 @@ begin
     exit;
   r := value^.addrLambda;
   if (r = nil) or local then
+    exit;
+  if r^.isClosure then
     exit;
   if not identValid(r^.lambdaCapture) then
     exit;
@@ -9131,7 +9255,8 @@ begin
       if la^.lambdaBad then
         exit;
   end;
-  if formal^.routineOfObject then { @obj.M, or a method pointer }
+  { @obj.M, or a method pointer; a closure (any value of the type) }
+  if formal^.routineOfObject or formal^.routineReference then
   begin
     ofT := checkValueFor(formal, arg);
     if isError(ofT) then

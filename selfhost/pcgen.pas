@@ -242,6 +242,8 @@ begin
      (name <> '__pas_reraise') and (name <> '__pas_reraise_free') and
      (name <> '__pas_free_object') and (name <> '__pas_free_instance') and
      (name <> '__pas_intf_assign') and (name <> '__pas_intf_clear') and
+     (name <> '__pas_frame_release') and (name <> '__pas_closure_assign') and
+     (name <> '__pas_closure_clear') and
      (name <> '__pas_dyn_clear') and (name <> '__pas_dyn_assign') and
      (name <> '__pas_dyn_setlength') and
      (name <> '__pas_format_pstr') and
@@ -2925,6 +2927,8 @@ end;
 
 function staticLinkFor(r: PDecl): TV;
 begin
+  if r^.isClosure and not identValid(r^.lambdaCapture) then { uses no frame }
+    exit(irNull);
   if r^.parent <> nil then
     staticLinkFor := framePtrFor(r^.parent)
   else
@@ -3037,7 +3041,7 @@ end;
   copy was made). }
 procedure manageValue(const addr: TV; t: PType; addRef: boolean);
 var
-  i, elem, next, done, obj, desc, data, n: TV;
+  i, elem, next, done, obj, desc, data, n, ignored: TV;
   bd: TOrdinalBounds;
   pre, loopB, doneB: PIRBlock;
   phi: PIRInst;
@@ -3094,6 +3098,17 @@ begin
       end
       else
         intfCall1('__pas_intf_clear', addr);
+    tyRoutine: { a closure: its frame }
+      if t^.routineReference then
+      begin
+        if addRef then
+        begin
+          obj := irLoad(irPtrT, irStructGEP(memType(t), addr, 1, ''), 'frame');
+          ignored := call1(classRuntime('__pas_frame_addref', 'void', 'ptr'), obj, '');
+        end
+        else
+          ignored := call1(classRuntime('__pas_closure_clear', 'void', 'ptr'), addr, '');
+      end;
     tyArray:
       begin
         if addRef then
@@ -3169,11 +3184,20 @@ end;
 
 { Stores v (scalar, of type t) at addr: counted for COM interfaces. }
 procedure storeValue(const addr, v: TV; t: PType);
+var
+  fn, frame, ignored: TV;
 begin
   if t^.kind = tyAnsiString then
     astrV2('__pas_astr_assign', 'ptr,ptr', addr, v)
   else if t^.kind = tyDynArray then
     astrV2('__pas_dyn_assign', 'ptr,ptr', addr, v)
+  else if isClosureType(t) then
+  begin
+    fn := irExtract(v, 0, irPtrT, 'fn');
+    frame := irExtract(v, 1, irPtrT, 'frame');
+    ignored := call3(classRuntime('__pas_closure_assign', 'void', 'ptr,ptr,ptr'),
+                     addr, fn, frame, '');
+  end
   else if isManaged(t) then
     storeInterface(addr, v)
   else
@@ -3437,7 +3461,7 @@ begin
     end
     else if (pt^.kind = tyRoutine) and toC then
       irArgsAdd(buf, irExtract(emitRoutineValue(arg), 0, irPtrT, ''))
-    else if (pt^.kind = tyRoutine) and pt^.routineOfObject then
+    else if (pt^.kind = tyRoutine) and (pt^.routineOfObject or pt^.routineReference) then
     begin
       if p^.varKind = vkVarParam then
         irArgsAdd(buf, emitAddress(arg))
@@ -3491,7 +3515,8 @@ begin
     irStore(res, tmp);
     exit(tmp);
   end;
-  if (resTy <> nil) and (resTy^.kind = tyDynArray) then
+  { (released by finalizeValue: also a closure's) }
+  if (resTy <> nil) and ((resTy^.kind = tyDynArray) or isClosureType(resTy)) then
     exit(holdDynResult(res, resTy));
   if (resTy <> nil) and isManaged(resTy) then
     exit(holdResult(res));
@@ -3594,6 +3619,8 @@ begin
     exit(routinePairOf(e^.addrCode));
   if e^.kind = nkAddrOf then
     exit(routinePairOf(e^.inner^.refDecl));
+  if t^.routineReference then { (also a call's result) }
+    exit(visitExpr(e));
   emitRoutinePair := irLoad(memType(t), emitAddress(e), '');
 end;
 
@@ -4900,7 +4927,7 @@ begin
     bkAssigned:
       begin
         argE := PNode(listGet(e^.args, 0));
-        if isMethodPointer(argE^.typ) then
+        if isMethodPointer(argE^.typ) or isClosureType(argE^.typ) then
           p := irExtract(visitExpr(argE), 0, irPtrT, '')
         else if argE^.typ^.kind = tyRoutine then
         begin
@@ -5298,8 +5325,8 @@ begin
   if (callee^.kind = nkField) and (callee^.fieldDecl <> nil) and
      (callee^.fieldDecl^.kind = dkRoutine) then
     exit(emitMemberCall(callee, e^.args));
-  if callee^.typ^.routineOfObject then
-    pair := visitExpr(callee)
+  if callee^.typ^.routineOfObject or callee^.typ^.routineReference then
+    pair := visitExpr(callee) { (a closure: also a call's result) }
   else
     pair := irLoad(memType(callee^.typ), emitAddress(callee), '');
   visitIndirectCall := emitCallThrough(pair, callee^.typ, e^.args, callee^.b);
@@ -5443,7 +5470,7 @@ begin
   if t^.kind = tyRoutine then
   begin
     pair := emitRoutinePair(value, t);
-    irStore(pair, addr);
+    storeValue(addr, pair, t); { (a closure: counted) }
     exit;
   end;
   v := convertForAssign(visitExpr(value), value^.typ, t, value^.b);

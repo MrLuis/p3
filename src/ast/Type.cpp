@@ -142,9 +142,16 @@ bool pcc::containsInterface(Type *T) {
   return false;
 }
 
+bool Type::isClosureType() const {
+  auto *R = llvm::dyn_cast<RoutineType>(this);
+  return R && R->isReference();
+}
+
 bool pcc::isManaged(Type *T) {
   if (T->isAnsiString() || T->isDynArray())
     return true;
+  if (auto *R = llvm::dyn_cast<RoutineType>(T))
+    return R->isReference();
   if (auto *O = llvm::dyn_cast<OpenArrayType>(T))
     return isManaged(O->getElementType());
   if (auto *I = llvm::dyn_cast<InterfaceType>(T))
@@ -314,7 +321,8 @@ std::string Type::getName() const {
   }
   case TK_Routine: {
     auto *R = llvm::cast<RoutineType>(this);
-    std::string S = R->isFunction() ? "function(" : "procedure(";
+    std::string S = R->isReference() ? "reference to " : "";
+    S += R->isFunction() ? "function(" : "procedure(";
     for (size_t I = 0; I < R->getParams().size(); ++I) {
       VarDecl *P = R->getParams()[I];
       S += (I ? "; " : "") +

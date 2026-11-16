@@ -2295,6 +2295,20 @@ TypeSpec *Parser::parseTypeImpl() {
       Diags.error(Start, "a record helper cannot be packed");
     return TS;
   }
+  // reference to procedure / function (objfpc; `reference` is not
+  // reserved): a closure, which may outlive the routine it is made in.
+  bool Reference = false;
+  if (!Packed && LangOpts.ObjKeywords && isIdentifierNamed("reference") &&
+      peekToken().is(tok::kw_to)) {
+    consumeToken();
+    consumeToken();
+    if (Tok.isNot(tok::kw_procedure) && Tok.isNot(tok::kw_function)) {
+      Diags.error(Tok.getLocation(),
+                  "expected 'procedure' or 'function' after 'reference to'");
+      return nullptr;
+    }
+    Reference = true;
+  }
   switch (Tok.getKind()) {
   case tok::kw_array:
     return parseArrayType(Start, Packed);
@@ -2357,11 +2371,17 @@ TypeSpec *Parser::parseTypeImpl() {
                                            IsFunction,
                                            Ctx.copyArray<VarDecl *>(Params),
                                            Result);
+    if (Reference)
+      RS->setReference();
     if (LangOpts.ObjKeywords && Tok.is(tok::kw_of)) { // a method pointer
+      if (Reference)
+        Diags.error(Tok.getLocation(),
+                    "a 'reference to' type cannot be 'of object'");
       consumeToken();
       if (!expect(tok::kw_object, "after 'of'"))
         return nullptr;
-      RS->setOfObject();
+      if (!Reference)
+        RS->setOfObject();
     }
     // A calling convention:  procedure(x: integer) cdecl  or, after a
     // semicolon,  procedure(x: integer); cdecl  (Turbo/FPC).
@@ -2376,6 +2396,11 @@ TypeSpec *Parser::parseTypeImpl() {
       } else {
         break;
       }
+    }
+    if (Reference && CC != CallConv::Default) {
+      Diags.error(Start, "a 'reference to' type cannot have a calling "
+                         "convention");
+      CC = CallConv::Default;
     }
     RS->setCallConv(CC);
     return RS;

@@ -2979,6 +2979,8 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
            Name == "__pas_reraise" || Name == "__pas_reraise_free" ||
            Name == "__pas_free_object" || Name == "__pas_free_instance" ||
            Name == "__pas_intf_assign" || Name == "__pas_intf_clear" ||
+           Name == "__pas_frame_release" || Name == "__pas_closure_assign" ||
+           Name == "__pas_closure_clear" ||
            Name == "__pas_dyn_clear" || Name == "__pas_dyn_assign" ||
            Name == "__pas_dyn_setlength" ||
            Name == "__pas_format_pstr" ||
@@ -3137,7 +3139,66 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
     declareRoutines(*R->getBody());
   }
 
+  /// The variables of R's frame that hold managed values R releases when
+  /// it returns: its value parameters (one more reference each) and local
+  /// variables.
+  llvm::SmallVector<VarDecl *, 8> managedFrameVars(RoutineDecl *R) {
+    llvm::SmallVector<VarDecl *, 8> Vars;
+    for (VarDecl *P : R->getParams())
+      if (!isByRef(P) && !P->isConstParam() && !P->isVarParam() &&
+          isManaged(P->getType()))
+        Vars.push_back(P);
+    for (Decl *D : R->getBody()->getDecls())
+      if (auto *V = llvm::dyn_cast<VarDecl>(D);
+          V && !V->isTypedConst() && !V->getAbsolute() &&
+          isManaged(V->getType()))
+        Vars.push_back(V);
+    return Vars;
+  }
+
+  /// R's frame is on the heap (a closure made in it uses it): the function
+  /// that finalizes it when its last reference goes, frame.fini.<R>. It
+  /// releases the managed variables (as R does on its way out when its
+  /// frame is not on the heap) and the frame of R's parent, if that is on
+  /// the heap too (R's frame holds a reference to it, its static link).
+  llvm::Function *emitFrameFini(RoutineDecl *R) {
+    llvm::StructType *FrameTy = FrameTypes.lookup(R);
+    auto *Fn = llvm::Function::Create(
+        llvm::FunctionType::get(B.getVoidTy(), {B.getPtrTy()}, false),
+        llvm::Function::InternalLinkage, "frame.fini." + mangle(R).substr(4), M);
+    Fn->getArg(0)->setName("frame");
+    CurFn = Fn;
+    B.SetCurrentDebugLocation(llvm::DebugLoc());
+    B.SetInsertPoint(llvm::BasicBlock::Create(M.getContext(), "entry", Fn));
+    llvm::Value *Frame = Fn->getArg(0);
+    for (VarDecl *V : managedFrameVars(R))
+      finalizeValue(B.CreateStructGEP(FrameTy, Frame, FrameSlots[V]),
+                    V->getType());
+    if (parentFrameOnHeap(R))
+      B.CreateCall(frameRuntime("__pas_frame_release"),
+                   {B.CreateLoad(B.getPtrTy(), B.CreateStructGEP(FrameTy, Frame, 0),
+                                 "link")});
+    B.CreateRetVoid();
+    return Fn;
+  }
+
+  /// Does R's frame hold its static link, to a frame on the heap?
+  bool parentFrameOnHeap(RoutineDecl *R) {
+    return LinkInFrame.count(R) && R->getParent() &&
+           R->getParent()->hasHeapFrame() && FrameTypes.lookup(R->getParent());
+  }
+
+  /// __pas_frame_new, __pas_frame_addref / release (runtime/io.c).
+  llvm::FunctionCallee frameRuntime(llvm::StringRef Name) {
+    if (Name == "__pas_frame_new")
+      return classRuntime(Name, B.getPtrTy(), {B.getInt64Ty(), B.getPtrTy()});
+    return classRuntime(Name, B.getVoidTy(), {B.getPtrTy()});
+  }
+
   void emitRoutineBody(RoutineDecl *R) {
+    // A frame on the heap: the function that finalizes it, first.
+    llvm::Function *FrameFini =
+        FrameTypes.lookup(R) && R->hasHeapFrame() ? emitFrameFini(R) : nullptr;
     llvm::Function *F = Functions[R];
     CurFn = F;
     AddrAligns.clear();
@@ -3148,8 +3209,15 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
     setDebugLoc(R->getBodyLocation());
 
     // The frame record, if any, then an alloca for each other variable.
+    // On the heap if a closure made here uses it (counted: see
+    // emitFrameFini), zeroed.
     llvm::StructType *FrameTy = FrameTypes.lookup(R);
-    CurFrame = FrameTy ? B.CreateAlloca(FrameTy, nullptr, "frame") : nullptr;
+    if (FrameFini)
+      CurFrame = B.CreateCall(
+          frameRuntime("__pas_frame_new"),
+          {B.getInt64(DL.getTypeAllocSize(FrameTy)), FrameFini}, "frame");
+    else
+      CurFrame = FrameTy ? B.CreateAlloca(FrameTy, nullptr, "frame") : nullptr;
     CurPin = nullptr;
     // Execution continues here after an exception (see inFrame).
     PinTemps = R->hasTry() || hasNonLocalLabels(*R->getBody());
@@ -3186,6 +3254,8 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
     unsigned ArgNo = 1;
     if (LinkInFrame.count(R))
       B.CreateStore(F->getArg(0), B.CreateStructGEP(FrameTy, CurFrame, 0));
+    if (FrameFini && parentFrameOnHeap(R)) // the frame holds its parent's
+      B.CreateCall(frameRuntime("__pas_frame_addref"), {F->getArg(0)});
     if (R->hasSelf())
       B.CreateStore(F->getArg(ArgNo++), varSlot(R->getSelfVar()));
     if (ResultByPointer) { // the caller's temporary
@@ -3237,7 +3307,7 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
     // the block before it is finished afterwards.
     llvm::Value *ExcFrame = nullptr;
     llvm::BasicBlock *Raised = nullptr, *BeforeBody = nullptr, *Body = nullptr;
-    if (!Managed.empty() || ManagedResult || R->usesManaged()) {
+    if (!Managed.empty() || ManagedResult || R->usesManaged() || FrameFini) {
       BeforeBody = B.GetInsertBlock();
       Body = newBlock("managed.body");
       B.SetInsertPoint(Body);
@@ -3276,11 +3346,17 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
       B.SetCurrentDebugLocation(Loc);
     }
     B.SetInsertPoint(ExitBlock);
+    // (A frame on the heap: its variables when its last reference goes.)
     auto Finalize = [&] {
-      for (auto &[Addr, T] : Managed)
-        finalizeValue(Addr, T);
+      if (!FrameFini)
+        for (auto &[Addr, T] : Managed)
+          finalizeValue(Addr, T);
       for (llvm::Value *Slot : RoutineTemps)
         clearTemp(Slot);
+    };
+    auto ReleaseFrame = [&] {
+      if (FrameFini)
+        B.CreateCall(frameRuntime("__pas_frame_release"), {CurFrame});
     };
     if (ExcFrame)
       B.CreateCall(excRuntime("__pas_exc_pop"), {ExcFrame});
@@ -3295,6 +3371,7 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
       Finalize();
       if (ManagedResult)
         finalizeValue(varAddress(ResultVar), ResultVar->getType());
+      ReleaseFrame();
       B.CreateCall(excRuntime("__pas_reraise"), {ExcFrame});
       B.CreateUnreachable();
       B.SetInsertPoint(Ret);
@@ -3302,8 +3379,12 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
     RoutineTemps.clear();
 
     if (R->isFunction() && !ResultByPointer) {
-      B.CreateRet(loadScalar(varSlot(ResultVar), ResultVar->getType(), "result"));
+      llvm::Value *Result =
+          loadScalar(varSlot(ResultVar), ResultVar->getType(), "result");
+      ReleaseFrame();
+      B.CreateRet(Result);
     } else {
+      ReleaseFrame();
       B.CreateRetVoid();
     }
     if (!mayRaise())
@@ -3315,6 +3396,8 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
   //===--------------------------------------------------------------------===//
 
   llvm::Value *staticLinkFor(RoutineDecl *R) {
+    if (R->isClosure() && !R->getCapture().isValid()) // uses no frame
+      return llvm::ConstantPointerNull::get(B.getPtrTy());
     return R->hasStaticLink() ? framePtrFor(R->getParent())
                               : llvm::ConstantPointerNull::get(B.getPtrTy());
   }
@@ -3436,7 +3519,7 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
         llvm::Value *Pair = emitRoutineValue(Arg);
         Values.push_back(B.CreateExtractValue(Pair, 0));
       } else if (auto *RT = llvm::dyn_cast<RoutineType>(P->getType());
-                 RT && RT->isOfObject())
+                 RT && (RT->isOfObject() || RT->isReference()))
         Values.push_back(P->isVarParam() ? emitAddress(Arg) : emitRoutinePair(Arg, RT));
       else if (llvm::isa<RoutineType>(P->getType()))
         Values.push_back(emitRoutineValue(Arg));
@@ -3595,6 +3678,8 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
       Pair = B.CreateInsertValue(Pair, routineFunction(R), 0);
       return B.CreateInsertValue(Pair, staticLinkFor(R), 1);
     }
+    if (llvm::cast<RoutineType>(T)->isReference()) // (also a call's result)
+      return visitExpr(E);
     return B.CreateLoad(memType(T), emitAddress(E));
   }
 
@@ -3640,6 +3725,12 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
       B.CreateCall(intfRuntime("__pas_intf_clear"), {Addr});
       return;
     }
+    if (T->isClosureType()) {
+      B.CreateCall(classRuntime("__pas_closure_clear", B.getVoidTy(),
+                                {B.getPtrTy()}),
+                   {Addr});
+      return;
+    }
     if (auto *A = llvm::dyn_cast<ArrayType>(T)) {
       forEachElement(
           Addr, A,
@@ -3678,6 +3769,12 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
       B.CreateCall(intfRuntime("__pas_intf_addref"), {Obj});
       return;
     }
+    if (T->isClosureType()) { // its frame
+      llvm::Value *Frame = B.CreateLoad(
+          B.getPtrTy(), B.CreateStructGEP(memType(T), Addr, 1), "frame");
+      B.CreateCall(frameRuntime("__pas_frame_addref"), {Frame});
+      return;
+    }
     if (auto *A = llvm::dyn_cast<ArrayType>(T)) {
       forEachElement(
           Addr, A,
@@ -3714,6 +3811,11 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
       astrCall("__pas_astr_assign", B.getVoidTy(), {Addr, V});
     else if (T->isDynArray())
       astrCall("__pas_dyn_assign", B.getVoidTy(), {Addr, V});
+    else if (T->isClosureType())
+      B.CreateCall(classRuntime("__pas_closure_assign", B.getVoidTy(),
+                                {B.getPtrTy(), B.getPtrTy(), B.getPtrTy()}),
+                   {Addr, B.CreateExtractValue(V, 0, "fn"),
+                    B.CreateExtractValue(V, 1, "frame")});
     else if (isManaged(T))
       storeInterface(Addr, V);
     else
@@ -3738,7 +3840,8 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
 
   /// holdResult's temporary: its address.
   llvm::Value *heldTemp(llvm::Value *V, Type *T = nullptr) {
-    bool Dyn = T && T->isDynArray();
+    // (released by finalizeValue: also a closure's)
+    bool Dyn = T && (T->isDynArray() || T->isClosureType());
     llvm::IRBuilder<> Entry(&CurFn->getEntryBlock(),
                             CurFn->getEntryBlock().begin());
     llvm::Value *Slot = Entry.CreateAlloca(
@@ -4938,7 +5041,7 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
     case BuiltinKind::Assigned: {
       Expr *Arg = E->getArgs()[0];
       llvm::Value *P;
-      if (isMethodPointerType(Arg->getType()))
+      if (isMethodPointerType(Arg->getType()) || Arg->getType()->isClosureType())
         P = B.CreateExtractValue(visitExpr(Arg), 0);
       else if (llvm::isa<RoutineType>(Arg->getType()))
         P = B.CreateExtractValue(
@@ -5450,7 +5553,7 @@ public:
     }
     if (llvm::isa<RoutineType>(TT)) { // procedural variable (Turbo/FPC)
       llvm::Value *Pair = emitRoutinePair(Value, TT);
-      B.CreateStore(Pair, emitAddress(Target));
+      storeValue(emitAddress(Target), Pair, TT); // (a closure: counted)
       return;
     }
     llvm::Value *V = convertForAssign(visitExpr(Value), Value->getType(), TT,
@@ -5565,7 +5668,7 @@ public:
       return;
     }
     if (llvm::isa<RoutineType>(T)) {
-      B.CreateStore(emitRoutinePair(Value, T), Addr);
+      storeValue(Addr, emitRoutinePair(Value, T), T); // (a closure: counted)
       return;
     }
     storeValue(Addr,
@@ -5696,8 +5799,8 @@ public:
           emitStringAssign(Addr, SS, Value);
         else if (RT->isAnsiString())
           storeValue(Addr, emitAnsi(Value), RT);
-        else if (isMethodPointerType(RT))
-          B.CreateStore(emitRoutinePair(Value, RT), Addr);
+        else if (isMethodPointerType(RT) || RT->isClosureType())
+          storeValue(Addr, emitRoutinePair(Value, RT), RT);
         else if (RT->isStructured())
           copyValue(Addr, emitAddress(Value), RT);
         else
@@ -6878,8 +6981,8 @@ public:
         F && llvm::isa_and_nonnull<RoutineDecl>(F->getMember()))
       return emitMemberCall(F, E->getArgs());
     auto *RT = llvm::cast<RoutineType>(Callee->getType());
-    llvm::Value *Pair = RT->isOfObject()
-                            ? visitExpr(Callee)
+    llvm::Value *Pair = RT->isOfObject() || RT->isReference()
+                            ? visitExpr(Callee) // (a closure: also a call's result)
                             : B.CreateLoad(memType(RT), emitAddress(Callee));
     return emitCallThrough(Pair, RT, E->getArgs(), Callee->getBeginLoc());
   }

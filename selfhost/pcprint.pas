@@ -505,6 +505,8 @@ begin
           line('RoutineTypeSpec procedure');
         if ts^.rtOfObject then
           bufAdd(outBuf, ' of object');
+        if ts^.rtReference then
+          bufAdd(outBuf, ' reference');
         if ts^.rtCallConv <> ccDefault then
           bufAdd(outBuf, ' ' + callConvName(ts^.rtCallConv));
         loc(ts^.b);

@@ -876,6 +876,8 @@ public:
 struct WithContext {
   Expr *Record;
   bool IsSelf = false;
+  /// The routine whose `with` statement (or whose Self) this is (Sema).
+  RoutineDecl *Routine = nullptr;
   ClassType *Helper = nullptr; ///< Self in a method of this type helper
   explicit WithContext(Expr *Record, bool IsSelf = false)
       : Record(Record), IsSelf(IsSelf) {}
@@ -1259,6 +1261,7 @@ class VarDecl;
 /// `procedure p(x: integer)` or `function f(x: real): real`.
 class RoutineTypeSpec final : public TypeSpec {
   bool OfObject = false; ///< `of object`
+  bool Reference = false; ///< `reference to` (objfpc): a closure
   bool IsFunction;
   llvm::ArrayRef<VarDecl *> Params;
   TypeSpec *Result; ///< functions only
@@ -1267,6 +1270,8 @@ class RoutineTypeSpec final : public TypeSpec {
 public:
   bool isOfObject() const { return OfObject; }
   void setOfObject() { OfObject = true; }
+  bool isReference() const { return Reference; }
+  void setReference() { Reference = true; }
   RoutineTypeSpec(SourceRange R, bool IsFunction,
                   llvm::ArrayRef<VarDecl *> Params, TypeSpec *Result)
       : TypeSpec(TS_Routine, R), IsFunction(IsFunction), Params(Params),
@@ -1787,6 +1792,7 @@ class RoutineDecl final : public Decl {
   void *GenericScope = nullptr;
   bool TemplateMember = false;
   bool Lambda = false, LambdaDone = false, LambdaBad = false;
+  bool Closure = false, HeapFrame = false;
   Identifier Capture;
   RoutineDecl *GenericDef = nullptr;
   RoutineDecl *Parent = nullptr;    ///< enclosing routine; null at program level
@@ -1943,6 +1949,15 @@ public:
   void setLambdaBad() { LambdaBad = true; }
   const Identifier &getCapture() const { return Capture; }
   void setCapture(Identifier Id) { Capture = Id; }
+  /// A lambda made a `reference to` value (a closure): it may outlive the
+  /// routines around it, whose frames it uses are then on the heap.
+  bool isClosure() const { return Closure; }
+  void setClosure() { Closure = true; }
+  /// Its frame record is on the heap, reference counted (a closure made in
+  /// it uses it): freed when the routine has returned and no closure
+  /// holds it any more.
+  bool hasHeapFrame() const { return HeapFrame; }
+  void setHeapFrame() { HeapFrame = true; }
   llvm::ArrayRef<Identifier> getTypeParams() const { return TypeParams; }
   const void *getGenericTokens() const { return GenericTokens; }
   void *getGenericScope() const { return GenericScope; }

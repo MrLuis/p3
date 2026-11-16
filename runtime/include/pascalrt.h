@@ -260,6 +260,24 @@ void __pas_intf_release(void *obj);
 void __pas_intf_assign(PasIntf *dst, void *obj, void *methods);
 /* Releases *p's object and sets *p to nil. */
 void __pas_intf_clear(PasIntf *p);
+/* Closures (objfpc `reference to` types): a value is {function, frame},
+ * like a procedural value's {function, static link}; the frame is NULL or
+ * the frame record of a routine on the heap, preceded by a header (a
+ * reference count and the function that finalizes the record). */
+typedef struct PasClosure {
+  void *fn;
+  void *frame;
+} PasClosure;
+/* A zeroed frame record of size bytes, referenced once (by its routine). */
+void *__pas_frame_new(int64_t size, void (*fini)(void *frame));
+/* One more / one fewer reference to frame (NULL: nothing); the last one
+ * finalizes and frees it. */
+void __pas_frame_addref(void *frame);
+void __pas_frame_release(void *frame);
+/* *dst := {fn, frame}: references the new frame, then releases the old. */
+void __pas_closure_assign(PasClosure *dst, void *fn, void *frame);
+/* Releases *p's frame and sets *p to nil. */
+void __pas_closure_clear(PasClosure *p);
 /* While a TInterfacedObject's constructor runs its count is 1, so that
  * references taken and dropped there do not free it. */
 void __pas_interfaced_construct(void *obj);

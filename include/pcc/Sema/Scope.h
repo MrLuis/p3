@@ -81,6 +81,8 @@ public:
   }
 
   Scope *getParent() const { return Parent; }
+  /// A scope of a with statement or of a class's members (lookups only).
+  bool isMemberScope() const { return WithRecord || WithClass || NestedOf; }
   void setParent(Scope *P) { Parent = P; }
   void setRoutineBoundary() { RoutineBoundary = true; }
   void addImport(const Scope *S) { Imports.push_back(S); }

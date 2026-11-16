@@ -1218,6 +1218,7 @@ class Checker : public StmtVisitor<Checker>,
       auto *VR = llvm::dyn_cast<RoutineType>(Value);
       return VR && VR->isCDecl() == TR->isCDecl() &&
              VR->isOfObject() == TR->isOfObject() &&
+             VR->isReference() == TR->isReference() &&
              congruent(TR->getParams(), TR->getResult(), VR->getParams(),
                        VR->getResult());
     }
@@ -2019,7 +2020,7 @@ class Checker : public StmtVisitor<Checker>,
       }
       return Ctx.create<RoutineType>(RS->getParams(), Result,
                                      RS->getCallConv() == CallConv::CDecl,
-                                     RS->isOfObject());
+                                     RS->isOfObject(), RS->isReference());
     }
 
     case TypeSpec::TS_String: {
@@ -5885,6 +5886,7 @@ class Checker : public StmtVisitor<Checker>,
       SelfRef->setDecl(R->getSelfVar());
       SelfRef->setType(R->getSelfVar()->getType());
       auto *W = Ctx.create<WithContext>(SelfRef, /*IsSelf=*/true);
+      W->Routine = R;
       auto *RT = llvm::dyn_cast_or_null<RecordType>(
           R->getClass()->getHelperFor());
       if (R->getClass()->isHelper())
@@ -6243,6 +6245,7 @@ class Checker : public StmtVisitor<Checker>,
       if (RA && RB) {
         if (RA->isCDecl() != RB->isCDecl() ||
             RA->isOfObject() != RB->isOfObject() ||
+            RA->isReference() != RB->isReference() ||
             !congruent(RA->getParams(), RA->getResult(), RB->getParams(),
                        RB->getResult()))
           return false;
@@ -6262,7 +6265,8 @@ class Checker : public StmtVisitor<Checker>,
       if (LA->getLambda() && LA->getLambda()->isLambdaBad())
         return;
     }
-    if (Formal->isOfObject()) { // @obj.M, or a method pointer
+    // @obj.M, or a method pointer; a closure (any value of the type)
+    if (Formal->isOfObject() || Formal->isReference()) {
       Type *AT = checkValueFor(Formal, Arg);
       if (AT->isError())
         return;
@@ -8201,7 +8205,10 @@ public:
     const Identifier &Id = Target->getName();
     WithContext *W = nullptr;
     Decl *D = Cur->lookup(Id.Name, &W);
-    noteLambdaUse(D, W, Id);
+    // (a function's name: its result, noted below)
+    auto *FR = llvm::dyn_cast_or_null<RoutineDecl>(D);
+    if (!FR || !FR->isFunction())
+      noteLambdaUse(D, W, Id);
     if (!D) {
       diagUndeclared(Id);
       return errorType();
@@ -8214,6 +8221,7 @@ public:
           if (Enc == X) {
             if (X != CurRoutine) // from a nested routine
               X->getResultVar()->setCaptured();
+            noteLambdaUse(X->getResultVar(), nullptr, Id);
             Target->setDecl(X->getResultVar());
             ResultAssigned.insert(X);
             return X->getResultType();
@@ -9009,6 +9017,7 @@ public:
     llvm::SmallVector<std::unique_ptr<Scope>, 2> Scopes;
     Scope *Saved = Cur;
     for (WithContext *W : S->getRecords()) {
+      W->Routine = CurRoutine;
       Type *T = check(W->Record);
       if (T->isError())
         continue;
@@ -10179,7 +10188,8 @@ public:
       E->setCode(R);
       return Ctx.create<RoutineType>(R->getParams(),
                                      R->isFunction() ? R->getResultType() : nullptr,
-                                     R->isCDecl());
+                                     R->isCDecl(), false,
+                                     AddrOfTarget && AddrOfTarget->isReference());
     }
     if (F)
       F->setMember(R);
@@ -10203,6 +10213,8 @@ public:
     if (!R || R->isLambdaDone())
       return;
     R->setLambdaDone();
+    if (Want && Want->isReference())
+      R->setClosure();
     auto Params = R->getParams();
     if (Want && Want->getParams().size() != Params.size()) {
       Diags.error(A->getBeginLoc(),
@@ -10258,7 +10270,13 @@ public:
     }
     R->setParent(CurRoutine);
     Used.insert(R);
+    // In the innermost scope of declarations (not that of a with statement
+    // or of a class's members, where it would not be found).
+    Scope *Saved = Cur;
+    while (Cur->isMemberScope() && Cur->getParent())
+      Cur = Cur->getParent();
     declare(R);
+    Cur = Saved;
     // Its body is checked now, in the middle of a statement.
     unsigned SavedLoop = LoopDepth;
     const void *SavedSeq = DirectSequence;
@@ -10293,25 +10311,104 @@ public:
   /// a routine around the lambda (a variable, a member through Self or a
   /// with statement, a nested routine), the lambdas up to that routine
   /// must not outlive it (RoutineDecl::getCapture).
+  ///
+  /// A closure (a lambda made a `reference to` value) may outlive them:
+  /// their frames it uses are then kept on the heap (setHeapFrame), and
+  /// it must not use what does not live in a frame (closureCannotUse).
   void noteLambdaUse(Decl *D, WithContext *W, const Identifier &Id) {
     if (!CurRoutine || !CurRoutine->isLambda() || !D)
       return;
-    RoutineDecl *Owner = nullptr;
-    if (auto *V = llvm::dyn_cast<VarDecl>(D); V && !W) {
+    RoutineDecl *Owner = nullptr, *Nested = nullptr;
+    VarDecl *Var = nullptr;
+    if (W) {
+      if (W->Routine == CurRoutine)
+        return;
+      if (!W->IsSelf) {
+        // Its address is the enclosing routine's to compute, not the
+        // lambda's.
+        Diags.error(Id.Loc,
+                    "this lambda uses '" + Id.Spelling +
+                        "' through a 'with' statement outside it; name the "
+                        "record instead",
+                    {Id.getRange()});
+        return;
+      }
+      Owner = W->Routine;
+      Var = Owner ? Owner->getSelfVar() : nullptr;
+    } else if (auto *V = llvm::dyn_cast<VarDecl>(D)) {
       if (!V->getOwner() || V->getOwner() == CurRoutine || V->isTypedConst() ||
           V->isClassVar())
         return;
       Owner = V->getOwner();
-    } else if (auto *R = llvm::dyn_cast<RoutineDecl>(D); R && !W) {
+      Var = V;
+    } else if (auto *R = llvm::dyn_cast<RoutineDecl>(D)) {
       if (!R->getParent() || R == CurRoutine)
         return;
       Owner = R->getParent();
-    } else if (!W) {
+      Nested = R;
+    } else {
       return;
     }
-    for (RoutineDecl *L = CurRoutine; L && L != Owner; L = L->getParent())
-      if (L->isLambda() && !L->getCapture().isValid())
+    for (RoutineDecl *L = CurRoutine; L && L != Owner; L = L->getParent()) {
+      if (!L->isLambda())
+        continue;
+      if (!L->getCapture().isValid())
         L->setCapture(Id);
+      if (!L->isClosure())
+        continue;
+      if (Nested && !Nested->isLambda()) {
+        Diags.error(Id.Loc,
+                    "this closure uses '" + Id.Spelling +
+                        "', a routine nested in '" + Owner->getName().Spelling +
+                        "'; a closure can only use routines declared at "
+                        "program or unit level",
+                    {Id.getRange()});
+        return;
+      }
+      if (std::string Why = Var ? closureCannotUse(Var) : ""; !Why.empty()) {
+        Diags.error(Id.Loc,
+                    "this closure uses '" + Id.Spelling + "', " + Why +
+                        ", which may not exist when the closure runs; copy it "
+                        "to a local variable first",
+                    {Id.getRange()});
+        return;
+      }
+      for (RoutineDecl *F = L->getParent(); F; F = F->getParent()) {
+        F->setHeapFrame();
+        if (F == Owner)
+          break;
+      }
+    }
+  }
+
+  /// Why a closure cannot use V, a variable of a routine around it (empty:
+  /// it can): it is not kept in that routine's frame, or is not counted
+  /// there.
+  static std::string closureCannotUse(VarDecl *V) {
+    std::string Of = V->getOwner()->isLambda()
+                         ? std::string("the lambda around it")
+                         : "'" + V->getOwner()->getName().Spelling.str() + "'";
+    if (V->getVarKind() == VarDecl::Result)
+      return "the result of " + Of;
+    Type *T = V->getType();
+    if (V == V->getOwner()->getSelfVar())
+      return T && (T->isClass() || T->isClassRef())
+                 ? ""
+                 : "through the Self of " + Of + " (a record, passed by reference)";
+    bool Param = V->getVarKind() != VarDecl::Variable;
+    if (!Param || !T)
+      return "";
+    if (T->isOpenArray() || T->isArrayOfConst() || T->isUntyped())
+      return "an open or untyped parameter of " + Of;
+    if (V->isOutParam())
+      return "an 'out' parameter of " + Of;
+    if (V->isVarParam())
+      return "a 'var' parameter of " + Of;
+    if ((V->isConstParam() || V->isConstRefParam()) &&
+        (T->isStructured() || isManaged(T) || V->isConstRefParam()))
+      return std::string("a '") + (V->isConstRefParam() ? "constref" : "const") +
+             "' parameter of " + Of;
+    return "";
   }
 
   /// A lambda that uses what belongs to the routines around it must not
@@ -10320,7 +10417,7 @@ public:
   void checkLambdaEscape(Expr *Value, bool Local) {
     auto *A = llvm::dyn_cast<AddrOfExpr>(Value);
     RoutineDecl *R = A ? A->getLambda() : nullptr;
-    if (!R || !R->getCapture().isValid() || Local)
+    if (!R || !R->getCapture().isValid() || Local || R->isClosure())
       return;
     Diags.error(Value->getBeginLoc(),
                 "this lambda uses '" + R->getCapture().Spelling +
@@ -10371,9 +10468,12 @@ public:
                       {N->getRange()});
           return errorType();
         }
+        // A closure wanted: a lambda (made one by completeLambda) or a
+        // routine declared at program or unit level (no frame to keep).
+        bool Reference = AddrOfTarget && AddrOfTarget->isReference();
         auto *T = Ctx.create<RoutineType>(
             R->getParams(), R->isFunction() ? R->getResultType() : nullptr,
-            R->isCDecl());
+            R->isCDecl(), false, Reference);
         N->setType(T);
         return T;
       }

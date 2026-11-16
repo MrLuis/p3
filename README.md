@@ -656,11 +656,66 @@ end;
   assignments, typed declarations, arguments (also of generic types'
   methods, where `T` is the type argument), and conditional expressions.
 
-Not supported: lambdas as method pointers (`of object` types), in constant
-expressions, or that outlive the routine whose variables they use (that
-would need captured variables to be copied to the heap); overloads chosen
-by a lambda's shape (an overloaded routine's lambda argument must have its
-parameter types written).
+A lambda cannot use a field through a `with` statement outside it (name
+the record instead). Not supported: lambdas as method pointers (`of object`
+types), in constant expressions; overloads chosen by a lambda's shape (an
+overloaded routine's lambda argument must have its parameter types
+written). A lambda that must outlive its routine is a closure:
+
+**Closures** (objfpc, Free Pascal's and Delphi's syntax): a `reference to`
+procedural type holds a lambda that may outlive the routine it is made in.
+
+```pascal
+type
+  TIntFn = reference to function(x: Integer): Integer;
+  TProc = reference to procedure;
+  TCounter = reference to function: Integer;
+
+function MakeAdder(n: Integer): TIntFn;
+begin
+  Result := function(x) => x + n;       { n lives on after MakeAdder returns }
+end;
+
+procedure MakeCounter(out step: TProc; out get: TCounter);
+var
+  count: Integer;
+begin
+  count := 0;
+  step := procedure => count := count + 1;   { both share count }
+  get := function: Integer => count;
+end;
+
+add5 := MakeAdder(5);
+Writeln(add5(10));                      { 15 }
+```
+
+- **Values**: a lambda (a closure where a `reference to` type is wanted),
+  `@F` of a routine declared at program or unit level or of a static
+  method, `nil`, or another value of the type. A value of a plain
+  procedural type and one of a `reference to` type do not convert into each
+  other (the plain one may be a nested routine's, on the stack).
+- **Sharing**: the variables of the routines around it that a closure uses
+  are shared, not copied: the routine and its closures see the same
+  variables, and changes after the closure is made are seen by it. Such a
+  routine's frame is on the heap, reference counted, and freed (releasing
+  its strings and other counted values) when the routine has returned and
+  no closure holds it. Routines whose closures use nothing of theirs keep
+  their frames on the stack.
+- **Counted**: values of a `reference to` type are counted like
+  ansistrings: in variables, fields of records and classes, arrays,
+  dynamic arrays, parameters and function results. A closure kept in a
+  variable of the frame it uses (`fact := function(k) => ... fact(k -
+  1)`) holds that frame from inside: set the variable to `nil` to free it.
+- **What a closure cannot use** of the routines around it, as they are not
+  in the frame or not owned by it: `var`, `out` and `constref` parameters,
+  `const` parameters of structured or counted types, open-array and untyped
+  parameters, a function's result, the Self of a record method (a class's
+  Self is fine), and routines nested in them. Each is an error ("this
+  closure uses 'v', a 'var' parameter of 'ByVar', which may not exist when
+  the closure runs; copy it to a local variable first").
+
+Not supported: `reference to ... of object` and calling conventions,
+closures in typed constants, comparing values with `=` (use `Assigned`).
 
 **Conditional expressions** (objfpc; pcc's own): `if c then a else b` is a
 value, `a` where `c` holds and `b` otherwise. Only the branch chosen is

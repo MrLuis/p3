@@ -2692,7 +2692,11 @@ begin
   checkNameTarget := errorType;
   w := nil;
   d := scopeLookup(cur, target^.ref.name, w);
-  noteLambdaUse(d, w, target^.ref);
+  { (a function's name: its result, noted below) }
+  if d = nil then
+    noteLambdaUse(d, w, target^.ref)
+  else if (d^.kind <> dkRoutine) or not d^.isFunction then
+    noteLambdaUse(d, w, target^.ref);
   if d = nil then
   begin
     diagUndeclared(target^.ref);
@@ -2711,6 +2715,7 @@ begin
         begin
           if x <> curRoutine then { from a nested routine }
             x^.resultVar^.captured := true;
+          noteLambdaUse(x^.resultVar, nil, target^.ref);
           target^.refDecl := x^.resultVar;
           x^.resultAssigned := true;
           exit(x^.resultType);
@@ -4130,6 +4135,7 @@ begin
   for i := 0 to s^.withRecords.count - 1 do
   begin
     w := PWithContext(listGet(s^.withRecords, i));
+    w^.routine := curRoutine;
     t := check(w^.rec);
     if isError(t) then
       continue;
@@ -5265,7 +5271,10 @@ begin
     res := nil;
     if r^.isFunction then
       res := r^.resultType;
-    exit(newRoutineType(r^.params, res, isCDecl(r)));
+    t := newRoutineType(r^.params, res, isCDecl(r));
+    if addrOfTarget <> nil then
+      t^.routineReference := addrOfTarget^.routineReference;
+    exit(t);
   end;
   if op^.kind = nkField then
     op^.fieldDecl := r
@@ -5394,10 +5403,14 @@ begin
         errR(op^.b, nodeRange(op));
         exit;
       end;
+      { a closure wanted: a lambda (made one by completeLambda) or a
+        routine declared at program or unit level (no frame to keep) }
       if r^.isFunction then
         t := newRoutineType(r^.params, r^.resultType, isCDecl(r))
       else
         t := newRoutineType(r^.params, nil, isCDecl(r));
+      if addrOfTarget <> nil then
+        t^.routineReference := addrOfTarget^.routineReference;
       op^.typ := t;
       exit(t);
     end;

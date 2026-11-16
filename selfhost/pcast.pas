@@ -97,8 +97,12 @@ type
       tyPointer: (pointee: PType; untyped: boolean);
       tySet: (setElement: PType); { nil: the empty set [] }
       tyFile: (fileElement: PType; isText: boolean);
+      { routineReference: reference to (objfpc), a closure: its value is
+        the same pair as a procedural value's, (function, static link),
+        but the link is nil or a frame on the heap, reference counted: the
+        type is managed }
       tyRoutine: (routineParams: TPtrList; routineResult: PType;
-                  routineCDecl, routineOfObject: boolean);
+                  routineCDecl, routineOfObject, routineReference: boolean);
       tyShortString: (maxLength: longint);
       tyArrayOfConst: (aocElement: PType); { TVarRec }
       tyOpenArray: (openElement: PType);
@@ -334,6 +338,8 @@ type
     rec: PNode;
     isSelf: boolean;
     helper: PType; { Self in a method of this type helper }
+    { the routine whose with statement (or whose Self) this is (Sema) }
+    routine: PDecl;
     cgAddr: pointer; { code generation: the record's address (a boxed value) }
   end;
 
@@ -379,7 +385,8 @@ type
                  recBitPacked: boolean; recPackRecords: longint);
       tsSet, tsFile: (elemSpec: PTypeSpec);
       tsRoutine: (rtIsFunction: boolean; rtParams: TPtrList; rtResult: PTypeSpec;
-                  rtCallConv: longint; rtOfObject: boolean);
+                  rtCallConv: longint; rtOfObject: boolean;
+                  rtReference: boolean); { reference to (objfpc): a closure }
       tsOpenArray: (openSpec: PTypeSpec);
       tsDynArray: (dynSpec: PTypeSpec);
       tsString: (maxLen: PNode; isLong: boolean); { nil for plain string; isLong: under H+ }
@@ -561,6 +568,10 @@ type
                     outlive them) }
                   isLambda, lambdaDone, lambdaBad: boolean;
                   lambdaCapture: TIdent;
+                  { isClosure: a lambda made a reference to value; it may
+                    outlive the routines around it, whose frames it uses
+                    are then on the heap (heapFrame), reference counted }
+                  isClosure, heapFrame: boolean;
                   isVirtual, isOverride, isAbstract, isClassMethod: boolean;
                   { overloading (objfpc): the overload directive, the next
                     routine of the name in the same scope or class and this

@@ -875,6 +875,54 @@ void __pas_intf_clear(PasIntf *p) {
   __pas_intf_release(old);
 }
 
+typedef struct PasFrameHeader {
+  int64_t refcount;
+  void (*fini)(void *frame);
+} PasFrameHeader;
+
+static PasFrameHeader *frame_header(void *frame) {
+  return (PasFrameHeader *)frame - 1;
+}
+
+void *__pas_frame_new(int64_t size, void (*fini)(void *frame)) {
+  PasFrameHeader *h = calloc(1, sizeof(PasFrameHeader) + (size_t)size);
+  if (!h)
+    __pas_runtime_error("out of memory");
+  h->refcount = 1;
+  h->fini = fini;
+  return h + 1;
+}
+
+void __pas_frame_addref(void *frame) {
+  if (frame)
+    ++frame_header(frame)->refcount;
+}
+
+void __pas_frame_release(void *frame) {
+  if (!frame)
+    return;
+  PasFrameHeader *h = frame_header(frame);
+  if (--h->refcount == 0) {
+    h->fini(frame);
+    free(h);
+  }
+}
+
+void __pas_closure_assign(PasClosure *dst, void *fn, void *frame) {
+  __pas_frame_addref(frame);
+  void *old = dst->frame;
+  dst->fn = fn;
+  dst->frame = frame;
+  __pas_frame_release(old);
+}
+
+void __pas_closure_clear(PasClosure *p) {
+  void *old = p->frame;
+  p->fn = NULL;
+  p->frame = NULL;
+  __pas_frame_release(old);
+}
+
 void __pas_interfaced_construct(void *obj) { *refcount_of(obj) = 1; }
 
 void __pas_interfaced_constructed(void *obj) { --*refcount_of(obj); }

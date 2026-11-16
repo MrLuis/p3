@@ -82,6 +82,8 @@ function hasBitElements(t: PType): boolean;
 function isBitPackedComponent(e: PNode): boolean;
 function isSimple(t: PType): boolean;
 function isValidResultType(t: PType): boolean;
+{ A reference to procedural type (objfpc)? }
+function isClosureType(t: PType): boolean;
 function isStructured(t: PType): boolean;
 function getBase(t: PType): PType;
 function isIntegerLike(t: PType): boolean;
@@ -243,6 +245,7 @@ begin
   t^.routineResult := result_;
   t^.routineCDecl := cdecl_;
   t^.routineOfObject := false;
+  t^.routineReference := false;
   newRoutineType := t;
 end;
 
@@ -576,7 +579,12 @@ function isValidResultType(t: PType): boolean;
 begin
   isValidResultType := isSimple(t) or
                        (t^.kind in [tyPointer, tyClass, tyClassRef, tyInterface, tyAnsiString,
-                                    tyDynArray]);
+                                    tyDynArray]) or isClosureType(t);
+end;
+
+function isClosureType(t: PType): boolean;
+begin
+  isClosureType := (t^.kind = tyRoutine) and t^.routineReference;
 end;
 
 function isStructured(t: PType): boolean;
@@ -734,6 +742,7 @@ begin
     tyAnsiString: isManaged := true;
     tyOpenArray: isManaged := isManaged(t^.openElement);
     tyDynArray: isManaged := true;
+    tyRoutine: isManaged := t^.routineReference;
     tyArray: isManaged := isManaged(t^.elementType);
     tyRecord:
       begin
@@ -1060,6 +1069,8 @@ begin
         bufAdd(b, 'string[' + intToStr(t^.maxLength) + ']');
     tyRoutine:
       begin
+        if t^.routineReference then
+          bufAdd(b, 'reference to ');
         if t^.routineResult <> nil then
           bufAdd(b, 'function(')
         else

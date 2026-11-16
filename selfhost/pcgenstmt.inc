@@ -561,7 +561,7 @@ begin
   begin
     { a procedural variable (Turbo/FPC) }
     pair := emitRoutinePair(value, tt);
-    irStore(pair, emitAddress(target));
+    storeValue(emitAddress(target), pair, tt); { (a closure: counted) }
     exit;
   end;
   v := convertForAssign(visitExpr(value), value^.typ, tt, value^.b);
@@ -595,8 +595,8 @@ begin
     emitStringAssign(addr, rt, value)
   else if rt^.kind = tyAnsiString then
     storeValue(addr, emitAnsi(value), rt)
-  else if isMethodPointer(rt) then
-    irStore(emitRoutinePair(value, rt), addr)
+  else if isMethodPointer(rt) or isClosureType(rt) then
+    storeValue(addr, emitRoutinePair(value, rt), rt)
   else if isStructured(rt) then
   begin
     src := emitAddress(value);
@@ -2857,12 +2857,96 @@ begin
   listClear(cleanupFns);
 end;
 
+{ The variables of r's frame that hold managed values r releases when it
+  returns: its value parameters (one more reference each) and local
+  variables. }
+procedure managedFrameVars(r: PDecl; var vars: TPtrList);
+var
+  i: longint;
+  v: PDecl;
+begin
+  for i := 0 to r^.params.count - 1 do
+  begin
+    v := PDecl(listGet(r^.params, i));
+    if not isByRef(v) and not (v^.varKind in [vkConstParam, vkVarParam]) and
+       isManaged(v^.varType) then
+      listAdd(vars, v);
+  end;
+  for i := 0 to r^.body^.decls.count - 1 do
+  begin
+    v := PDecl(listGet(r^.body^.decls, i));
+    if (v^.kind = dkVar) and ((v^.init = nil) or v^.isInitVar) and
+       (v^.absTarget = nil) and isManaged(v^.varType) then
+      listAdd(vars, v);
+  end;
+end;
+
+{ Does r's frame hold its static link, to a frame on the heap? }
+function parentFrameOnHeap(r: PDecl): boolean;
+begin
+  parentFrameOnHeap := r^.cgLinkInFrame and (r^.parent <> nil) and
+                       r^.parent^.heapFrame and (frameType(r^.parent) <> nil);
+end;
+
+{ __pas_frame_new, __pas_frame_addref / release (runtime/io.c). }
+function frameRuntime(const name: string): PIRFunc;
+begin
+  if name = '__pas_frame_new' then
+    frameRuntime := classRuntime(name, 'ptr', 'i64,ptr')
+  else
+    frameRuntime := classRuntime(name, 'void', 'ptr');
+end;
+
+{ r's frame is on the heap (a closure made in it uses it): the function
+  that finalizes it when its last reference goes, frame.fini.<r>. It
+  releases the managed variables (as r does on its way out when its frame
+  is not on the heap) and the frame of r's parent, if that is on the heap
+  too (r's frame holds a reference to it, its static link). }
+function emitFrameFini(r: PDecl): PIRFunc;
+var
+  frameT: PIRType;
+  f: PIRFunc;
+  params, vars: TPtrList;
+  frame, ignored: TV;
+  i: longint;
+  v: PDecl;
+begin
+  frameT := frameType(r);
+  listInit(params);
+  listAdd(params, irPtrT);
+  f := irCreateFunction('frame.fini.' + copy(mangle(r), 5, 255), 'internal', irVoidT,
+                        params);
+  listFree(params);
+  irSetArgName(f, 0, 'frame');
+  curFn := f;
+  resetAddrAligns;
+  curSP := nil;
+  irBeginBody(f);
+  irSetDebugLoc(nil);
+  irSetInsertPoint(irNewBlock('entry'));
+  frame := irArg(f, 0);
+  listInit(vars);
+  managedFrameVars(r, vars);
+  for i := 0 to vars.count - 1 do
+  begin
+    v := PDecl(listGet(vars, i));
+    finalizeValue(irStructGEP(frameT, frame, v^.cgSlot, ''), v^.varType);
+  end;
+  listFree(vars);
+  if parentFrameOnHeap(r) then
+    ignored := call1(frameRuntime('__pas_frame_release'),
+                     irLoad(irPtrT, irStructGEP(frameT, frame, 0, ''), 'link'), '');
+  irRetVoid;
+  emitFrameFini := f;
+end;
+
 procedure emitRoutineBody(r: PDecl);
 var
   frameT: PIRType;
+  frameFini: PIRFunc;
   i, argNo: longint;
   p, v, res: PDecl;
-  arg, slot, ret, excFrame: TV;
+  arg, slot, ret, excFrame, ignoredV: TV;
   f: PIRFunc;
   entry, raised, retB, beforeBody, bodyB: PIRBlock;
   savedLoc: PMeta;
@@ -2891,18 +2975,32 @@ var
   end;
 
   { releases the value parameters', local variables' and temporaries'
-    references }
+    references (a frame on the heap: its variables when its last reference
+    goes) }
   procedure finalizeAll;
   var
     k: longint;
   begin
-    for k := 0 to managedAddrs.count - 1 do
-      finalizeValue(PTVBox(listGet(managedAddrs, k))^, PType(listGet(managedTypes, k)));
+    if frameFini = nil then
+      for k := 0 to managedAddrs.count - 1 do
+        finalizeValue(PTVBox(listGet(managedAddrs, k))^, PType(listGet(managedTypes, k)));
     for k := 0 to routineTemps.count - 1 do
       clearTemp(PTVBox(listGet(routineTemps, k))^);
   end;
 
+  procedure releaseFrame;
+  var
+    ignored: TV;
+  begin
+    if frameFini <> nil then
+      ignored := call1(frameRuntime('__pas_frame_release'), curFrame, '');
+  end;
+
 begin
+  { a frame on the heap: the function that finalizes it, first }
+  frameFini := nil;
+  if (frameType(r) <> nil) and r^.heapFrame then
+    frameFini := emitFrameFini(r);
   listInit(managedAddrs);
   listInit(managedTypes);
   f := fnOf(r);
@@ -2916,8 +3014,13 @@ begin
   irSetInsertPoint(entry);
   setDebugLoc(bodyLoc(r));
   { the frame record, if any, then an alloca for each other variable }
+  { on the heap if a closure made here uses it (counted: see
+    emitFrameFini), zeroed }
   frameT := frameType(r);
-  if frameT <> nil then
+  if frameFini <> nil then
+    curFrame := call2(frameRuntime('__pas_frame_new'), i64c(frameT^.size),
+                      irFuncRef(frameFini), 'frame')
+  else if frameT <> nil then
     curFrame := irAlloca(frameT, 'frame')
   else
     curFrame := irNull;
@@ -2951,6 +3054,8 @@ begin
   end;
   if r^.cgLinkInFrame then
     irStore(irArg(f, 0), irStructGEP(frameT, curFrame, 0, ''));
+  if (frameFini <> nil) and parentFrameOnHeap(r) then { the frame holds its parent's }
+    ignoredV := call1(frameRuntime('__pas_frame_addref'), irArg(f, 0), '');
   argNo := 1;
   if hasSelf(r) then
   begin
@@ -3019,7 +3124,8 @@ begin
     block before it is finished afterwards. }
   raised := nil;
   beforeBody := nil;
-  if (managedAddrs.count > 0) or managedResult or r^.usesManaged then
+  if (managedAddrs.count > 0) or managedResult or r^.usesManaged or
+     (frameFini <> nil) then
   begin
     beforeBody := irInsertBlock;
     bodyB := irNewBlock('managed.body');
@@ -3087,6 +3193,7 @@ begin
     finalizeAll;
     if managedResult then
       finalizeValue(varAddress(r^.resultVar), r^.resultVar^.varType);
+    releaseFrame;
     excCall1('__pas_reraise', excFrame);
     irUnreachable;
     irSetInsertPoint(retB);
@@ -3097,10 +3204,14 @@ begin
     res := r^.resultVar;
     slot := varSlot(res);
     ret := loadScalar(slot, res^.varType, 'result');
+    releaseFrame;
     irRet(ret);
   end
   else
+  begin
+    releaseFrame;
     irRetVoid;
+  end;
   if not irMayRaise then
     irSetNoRaise(f);
   pinTemps := true;

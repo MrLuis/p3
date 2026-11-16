@@ -114,8 +114,10 @@ public:
   /// Types a function may return (ISO 6.6.2: simple or pointer; classes).
   bool isValidResultType() const {
     return isSimple() || isPointer() || isClass() || isClassRef() ||
-           isInterface() || isAnsiString() || isDynArray();
+           isInterface() || isAnsiString() || isDynArray() || isClosureType();
   }
+  /// A `reference to` procedural type (objfpc).
+  bool isClosureType() const;
   bool isStructured() const { return isArray() || isRecord() || isShortString(); }
 
   /// Integer-like after stripping subranges (an integer type or a subrange
@@ -386,13 +388,19 @@ class RoutineType final : public Type {
   Type *Result;
   bool CDecl; ///< 'cdecl' (see CallConv)
   bool OfObject; ///< `of object`: a method and its object
+  /// `reference to` (objfpc): a closure. Its value is the same pair as a
+  /// procedural value's, {function, static link}, but the link is null or
+  /// a frame on the heap, reference counted: the type is managed.
+  bool Reference;
 
 public:
   RoutineType(llvm::ArrayRef<VarDecl *> Params, Type *Result,
-              bool CDecl = false, bool OfObject = false)
+              bool CDecl = false, bool OfObject = false,
+              bool Reference = false)
       : Type(TK_Routine), Params(Params), Result(Result), CDecl(CDecl),
-        OfObject(OfObject) {}
+        OfObject(OfObject), Reference(Reference) {}
   bool isOfObject() const { return OfObject; }
+  bool isReference() const { return Reference; }
   llvm::ArrayRef<VarDecl *> getParams() const { return Params; }
   Type *getResult() const { return Result; }
   bool isCDecl() const { return CDecl; }

@@ -3281,7 +3281,7 @@ end;
 function parseTypeImpl: PTypeSpec;
 var
   start: TLoc;
-  isPacked, isFunction, isSet: boolean;
+  isPacked, isFunction, isSet, isReference: boolean;
   elem, resultSpec, ts: PTypeSpec;
   maxLen: PNode;
   params: TPtrList;
@@ -3309,6 +3309,21 @@ begin
     else if (ts <> nil) and (ts^.kind = tsHelper) then
       diagError(start, 'a record helper cannot be packed');
     exit(ts);
+  end;
+  { reference to procedure / function (objfpc; `reference` is not
+    reserved): a closure, which may outlive the routine it is made in }
+  isReference := false;
+  if not isPacked and (mode = lmObjFPC) and isIdentifierNamed('reference') and
+     (peekKind = tkKwTo) then
+  begin
+    consumeToken;
+    consumeToken;
+    if (tok.kind <> tkKwProcedure) and (tok.kind <> tkKwFunction) then
+    begin
+      diagError(tok.loc, 'expected ''procedure'' or ''function'' after ''reference to''');
+      exit;
+    end;
+    isReference := true;
   end;
   case tok.kind of
     tkKwArray:
@@ -3391,12 +3406,16 @@ begin
         ts^.rtParams := params;
         ts^.rtResult := resultSpec;
         ts^.rtOfObject := false;
+        ts^.rtReference := isReference;
         if (mode = lmObjFPC) and (tok.kind = tkKwOf) then { a method pointer }
         begin
+          if isReference then
+            diagError(tok.loc, 'a ''reference to'' type cannot be ''of object''');
           consumeToken;
           if not expect(tkKwObject, 'after ''of''') then
             exit;
-          ts^.rtOfObject := true;
+          if not isReference then
+            ts^.rtOfObject := true;
         end;
         { A calling convention:  procedure(x: integer) cdecl  or, after a
           semicolon,  procedure(x: integer); cdecl  (Turbo/FPC). }
@@ -3415,6 +3434,11 @@ begin
           end
           else
             break;
+        end;
+        if isReference and (cc <> ccDefault) then
+        begin
+          diagError(start, 'a ''reference to'' type cannot have a calling convention');
+          cc := ccDefault;
         end;
         ts^.rtCallConv := cc;
         exit(ts);
