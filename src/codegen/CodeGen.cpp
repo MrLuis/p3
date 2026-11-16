@@ -7008,6 +7008,18 @@ public:
   llvm::Value *visitAddrOfExpr(AddrOfExpr *E) {
     if (E->getMethod())
       return emitMethodPointer(E);
+    if (RoutineDecl *L = E->getLambda(); L && L->isMethodLambda()) {
+      // {code, object}: the object is the Self where it is made
+      VarDecl *Obj = L->getLambdaSelf();
+      llvm::Value *Pair = llvm::UndefValue::get(
+          llvm::StructType::get(B.getPtrTy(), B.getPtrTy()));
+      Pair = B.CreateInsertValue(Pair, Functions[L], 0);
+      return B.CreateInsertValue(
+          Pair,
+          Obj ? loadScalar(varAddress(Obj), Obj->getType(), "obj")
+              : llvm::ConstantPointerNull::get(B.getPtrTy()),
+          1);
+    }
     if (E->getCode())
       return Functions[E->getCode()];
     return emitAddress(E->getOperand());

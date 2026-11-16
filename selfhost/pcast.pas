@@ -572,6 +572,14 @@ type
                     outlive the routines around it, whose frames it uses
                     are then on the heap (heapFrame), reference counted }
                   isClosure, heapFrame: boolean;
+                  { isMethodLambda: a lambda made a method pointer (of
+                    object): a routine with a Self of its own, of the class
+                    of the method it is written in, and that method's Self
+                    (lambdaSelf; nil outside methods) as its object. It is
+                    not a method of the class (methodKind mtNone) but has a
+                    Self }
+                  isMethodLambda: boolean;
+                  lambdaSelf: PDecl;
                   isVirtual, isOverride, isAbstract, isClassMethod: boolean;
                   { overloading (objfpc): the overload directive, the next
                     routine of the name in the same scope or class and this

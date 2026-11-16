@@ -1792,7 +1792,8 @@ class RoutineDecl final : public Decl {
   void *GenericScope = nullptr;
   bool TemplateMember = false;
   bool Lambda = false, LambdaDone = false, LambdaBad = false;
-  bool Closure = false, HeapFrame = false;
+  bool Closure = false, HeapFrame = false, MethodLambda = false;
+  VarDecl *LambdaSelf = nullptr;
   Identifier Capture;
   RoutineDecl *GenericDef = nullptr;
   RoutineDecl *Parent = nullptr;    ///< enclosing routine; null at program level
@@ -1894,7 +1895,7 @@ public:
   bool isOperator() const { return MK == MethodKind::Operator; }
   /// Methods have the hidden parameter Self, except a record's class
   /// methods and operators (static).
-  bool hasSelf() const { return isMethod() && !Static; }
+  bool hasSelf() const { return (isMethod() && !Static) || MethodLambda; }
   bool isStatic() const { return Static; }
   void setStatic(bool S = true) { Static = S; }
   /// The `inline` directive (with {$inline on}): code generation asks
@@ -1958,6 +1959,16 @@ public:
   /// holds it any more.
   bool hasHeapFrame() const { return HeapFrame; }
   void setHeapFrame() { HeapFrame = true; }
+  /// A lambda made a method pointer (`of object`): a routine with a Self
+  /// of its own, of the class of the method it is written in, and that
+  /// method's Self (getLambdaSelf) as its object. It is not a method of
+  /// the class (isMethod is false) but has a Self (hasSelf).
+  bool isMethodLambda() const { return MethodLambda; }
+  VarDecl *getLambdaSelf() const { return LambdaSelf; }
+  void setMethodLambda(VarDecl *OuterSelf) {
+    MethodLambda = true;
+    LambdaSelf = OuterSelf;
+  }
   llvm::ArrayRef<Identifier> getTypeParams() const { return TypeParams; }
   const void *getGenericTokens() const { return GenericTokens; }
   void *getGenericScope() const { return GenericScope; }

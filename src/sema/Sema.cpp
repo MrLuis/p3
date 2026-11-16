@@ -2006,7 +2006,7 @@ class Checker : public StmtVisitor<Checker>,
       if (RS->isFunction()) {
         Result = resolveType(RS->getResult());
         bool MethodResult =
-            RS->isOfObject() && !Result->isError() &&
+            (RS->isOfObject() || RS->isReference()) && !Result->isError() &&
             (Result->isShortString() || isMethodPointer(Result) ||
              (Result->isRecord() && !containsFile(Result) &&
               !containsInterface(Result)));
@@ -5881,7 +5881,9 @@ class Checker : public StmtVisitor<Checker>,
     }
     // A method sees the members of its class through Self.
     std::unique_ptr<Scope> RecordScope, ClassScope, FieldsScope;
-    if (R->hasSelf()) {
+    // (a method-pointer lambda outside methods: a Self no one sees)
+    bool SelfSeen = R->hasSelf() && R->getClass();
+    if (SelfSeen) {
       auto *SelfRef = Ctx.create<NameRefExpr>(R->getSelfVar()->getName());
       SelfRef->setDecl(R->getSelfVar());
       SelfRef->setType(R->getSelfVar()->getType());
@@ -5916,7 +5918,7 @@ class Checker : public StmtVisitor<Checker>,
     Cur = &RoutineScope;
     CurRoutine = R;
 
-    if (R->hasSelf())
+    if (SelfSeen)
       Cur->insert("self", R->getSelfVar());
     for (VarDecl *P : R->getParams())
       if (Decl *Prev = Cur->insert(P->getName().Name, P)) {
@@ -10215,6 +10217,8 @@ public:
     R->setLambdaDone();
     if (Want && Want->isReference())
       R->setClosure();
+    if (Want && Want->isOfObject() && !makeMethodLambda(R, A))
+      return;
     auto Params = R->getParams();
     if (Want && Want->getParams().size() != Params.size()) {
       Diags.error(A->getBeginLoc(),
@@ -10307,6 +10311,47 @@ public:
     }
   }
 
+  /// Lambda R (at A) wanted as a method pointer: it gets a Self of its own,
+  /// of the class of the method it is written in (the nearest routine
+  /// around it with a Self, which must be an object), and that method's
+  /// Self is its object. Reported (and R bad) if there is none.
+  bool makeMethodLambda(RoutineDecl *R, AddrOfExpr *A) {
+    RoutineDecl *M = CurRoutine;
+    while (M && !M->hasSelf())
+      M = M->getParent();
+    VarDecl *OuterSelf = M ? M->getSelfVar() : nullptr;
+    if (!M) { // outside methods: no object (nil), no members
+      auto *Self = Ctx.create<VarDecl>(memberName("Self"), nullptr,
+                                       VarDecl::ValueParam);
+      Self->setType(Ctx.getUntypedPointerType());
+      Self->setOwner(R);
+      R->setSelfVar(Self);
+      R->setMethodLambda(nullptr);
+      return true;
+    }
+    if (!OuterSelf || !OuterSelf->getType() || !OuterSelf->getType()->isClass()) {
+      Diags.error(A->getBeginLoc(),
+                  "a lambda can be a method pointer ('of object') only in "
+                  "an object's method, whose Self is its object, or outside "
+                  "methods (its object is nil)",
+                  {A->getRange()});
+      R->setLambdaBad();
+      return false;
+    }
+    auto *C = llvm::cast<ClassType>(OuterSelf->getType());
+    R->setClass(C);
+    makeSelf(R, C);
+    R->setMethodLambda(OuterSelf);
+    // Its object: M's Self, where the lambda is made.
+    if (M != CurRoutine) {
+      OuterSelf->setCaptured();
+      Identifier Id = memberName("Self");
+      Id.Loc = A->getBeginLoc();
+      noteLambdaUse(OuterSelf, nullptr, Id);
+    }
+    return true;
+  }
+
   /// A use, in a lambda, of D (named Id, found through W): if D belongs to
   /// a routine around the lambda (a variable, a member through Self or a
   /// with statement, a nested routine), the lambdas up to that routine
@@ -10352,6 +10397,15 @@ public:
     for (RoutineDecl *L = CurRoutine; L && L != Owner; L = L->getParent()) {
       if (!L->isLambda())
         continue;
+      if (L->isMethodLambda()) { // called on its object, without a frame
+        Diags.error(Id.Loc,
+                    "this method-pointer lambda uses '" + Id.Spelling +
+                        "' of the routine around it; it can use only its "
+                        "object's members, its parameters and what is "
+                        "declared at program or unit level",
+                    {Id.getRange()});
+        return;
+      }
       if (!L->getCapture().isValid())
         L->setCapture(Id);
       if (!L->isClosure())
@@ -10470,10 +10524,11 @@ public:
         }
         // A closure wanted: a lambda (made one by completeLambda) or a
         // routine declared at program or unit level (no frame to keep).
+        // A method pointer: a lambda made one by completeLambda.
         bool Reference = AddrOfTarget && AddrOfTarget->isReference();
         auto *T = Ctx.create<RoutineType>(
             R->getParams(), R->isFunction() ? R->getResultType() : nullptr,
-            R->isCDecl(), false, Reference);
+            R->isCDecl(), R->isMethodLambda(), Reference);
         N->setType(T);
         return T;
       }

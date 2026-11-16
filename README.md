@@ -657,10 +657,34 @@ end;
   methods, where `T` is the type argument), and conditional expressions.
 
 A lambda cannot use a field through a `with` statement outside it (name
-the record instead). Not supported: lambdas as method pointers (`of object`
-types), in constant expressions; overloads chosen by a lambda's shape (an
-overloaded routine's lambda argument must have its parameter types
-written). A lambda that must outlive its routine is a closure:
+the record instead). Not supported: lambdas in constant expressions;
+overloads chosen by a lambda's shape (an overloaded routine's lambda
+argument must have its parameter types written).
+
+**Method-pointer lambdas**: a lambda wanted as an `of object` type is
+called on an object, like `@Self.M`. In a method of a class its object is
+that method's Self, and it sees the object's members as the method does;
+outside methods its object is nil. It can use its object's members, its
+parameters and what is declared at program or unit level, but nothing of
+the routines around it, and so can be stored anywhere: event handlers.
+
+```pascal
+constructor TForm.Create;
+begin
+  Ok := TButton.Create;
+  Ok.OnClick := procedure(Sender) =>      { TNotifyEvent: of object }
+    begin
+      Clicks := Clicks + 1;               { the form's field }
+      Writeln((Sender as TButton).Caption, ' clicked');
+    end;
+end;
+```
+
+Using a variable or parameter of the routine around it is an error ("this
+method-pointer lambda uses 'k' of the routine around it; ..."), as is one
+in a record's method or a class method (their Self is not an object).
+
+A lambda that must outlive its routine and use its variables is a closure:
 
 **Closures** (objfpc, Free Pascal's and Delphi's syntax): a `reference to`
 procedural type holds a lambda that may outlive the routine it is made in.
@@ -714,7 +738,9 @@ Writeln(add5(10));                      { 15 }
   closure uses 'v', a 'var' parameter of 'ByVar', which may not exist when
   the closure runs; copy it to a local variable first").
 
-Not supported: `reference to ... of object` and calling conventions,
+A `reference to` type's result may be a method pointer, a short string or
+a record, as an `of object` type's. Not supported: `reference to ... of
+object` (a method-pointer lambda is one already) and calling conventions,
 closures in typed constants, comparing values with `=` (use `Assigned`).
 
 **Conditional expressions** (objfpc; pcc's own): `if c then a else b` is a

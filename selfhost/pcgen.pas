@@ -179,7 +179,7 @@ end;
   and operators (static). }
 function hasSelf(r: PDecl): boolean;
 begin
-  hasSelf := (r^.methodKind <> mtNone) and not r^.isStatic;
+  hasSelf := ((r^.methodKind <> mtNone) and not r^.isStatic) or r^.isMethodLambda;
 end;
 
 function canon(r: PDecl): PDecl;
@@ -5344,6 +5344,20 @@ begin
   emitAnsiIndexRead := loadScalar(irGEP1(irI8, s, offset, true, ''), e^.typ, '');
 end;
 
+{ A method-pointer lambda's value: (code, object), the object the Self
+  where it is made. }
+function emitMethodLambda(l: PDecl): TV;
+var
+  pair, obj: TV;
+begin
+  pair := irInsert(irUndef(routinePairT), irFuncRef(fnOf(l)), 0, '');
+  if l^.lambdaSelf <> nil then
+    obj := loadScalar(varAddress(l^.lambdaSelf), l^.lambdaSelf^.varType, 'obj')
+  else
+    obj := irNull;
+  emitMethodLambda := irInsert(pair, obj, 1, '');
+end;
+
 { @obj.M, @TFoo.M, @M: (method's code, object or class). }
 function emitMethodPointer(a: PNode): TV;
 var
@@ -5554,6 +5568,8 @@ begin
     nkAddrOf:
       if e^.addrMethod <> nil then
         visitExprKind := emitMethodPointer(e)
+      else if (e^.addrLambda <> nil) and e^.addrLambda^.isMethodLambda then
+        visitExprKind := emitMethodLambda(e^.addrLambda)
       else if e^.addrCode <> nil then
         visitExprKind := irFuncRef(fnOf(e^.addrCode))
       else

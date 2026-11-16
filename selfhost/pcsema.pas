@@ -3253,7 +3253,7 @@ begin
         begin
           res := resolveType(ts^.rtResult, nil);
           if not isError(res) and not isValidResultType(res) and
-             not (ts^.rtOfObject and
+             not ((ts^.rtOfObject or ts^.rtReference) and
                   ((res^.kind = tyShortString) or isMethodPointer(res) or
                    ((res^.kind = tyRecord) and not containsFile(res) and
                     not containsInterface(res)))) then
@@ -8594,9 +8594,11 @@ begin
     cur := newClassScope(cur, r^.ownerClass, nil);
     cur^.routineBoundary := true;
   end
-  else if r^.methodKind <> mtNone then
+  else if (r^.methodKind <> mtNone) or
+          (r^.isMethodLambda and (r^.ownerClass <> nil)) then
   begin
-    { a method sees the members of its class through Self }
+    { a method sees the members of its class through Self (a method-pointer
+      lambda outside methods: a Self no one sees) }
     selfRef := newNode(nkNameRef, noLoc, noLoc);
     selfRef^.ref := r^.selfVar^.ident;
     selfRef^.refDecl := r^.selfVar;
@@ -8626,7 +8628,8 @@ begin
   if cur^.parent = base then
     cur^.routineBoundary := true;
   curRoutine := r;
-  if (r^.methodKind <> mtNone) and not r^.isStatic then
+  if ((r^.methodKind <> mtNone) and not r^.isStatic) or
+     (r^.isMethodLambda and (r^.ownerClass <> nil)) then
     scopeInsert(cur, r^.selfVar^.ident.name, r^.selfVar);
   for i := 0 to r^.params.count - 1 do
   begin
@@ -8935,6 +8938,62 @@ function checkValueFor(targetTy: PType; value: PNode): PType; forward;
   current routine and in the current scope. Parameter types left out are
   want's; the result type left out is want's, or else the type of the body
   (set by visitAssign). Then a is @routine. }
+procedure noteLambdaUse(d: PDecl; w: PWithContext; const id: TIdent); forward;
+
+{ Lambda r (at a) wanted as a method pointer: it gets a Self of its own, of
+  the class of the method it is written in (the nearest routine around it
+  with a Self, which must be an object), and that method's Self is its
+  object. Reported (and r bad) if there is none. }
+function makeMethodLambda(r: PDecl; a: PNode): boolean;
+var
+  m, outerSelf, self_: PDecl;
+  id: TIdent;
+begin
+  m := curRoutine;
+  while m <> nil do
+  begin
+    if ((m^.methodKind <> mtNone) and not m^.isStatic) or m^.isMethodLambda then
+      break;
+    m := m^.parent;
+  end;
+  outerSelf := nil;
+  if m <> nil then
+    outerSelf := m^.selfVar;
+  if m = nil then { outside methods: no object (nil), no members }
+  begin
+    self_ := newDecl(dkVar, memberIdent('Self'), noLoc);
+    self_^.varKind := vkValueParam;
+    self_^.varType := tyUntypedPointerT;
+    self_^.owner := r;
+    r^.selfVar := self_;
+    r^.isMethodLambda := true;
+    r^.lambdaSelf := nil;
+    exit(true);
+  end;
+  if (outerSelf = nil) or (outerSelf^.varType = nil) or
+     (outerSelf^.varType^.kind <> tyClass) then
+  begin
+    ms('a lambda can be a method pointer (''of object'') only in an object''s ' +
+       'method, whose Self is its object, or outside methods (its object is nil)');
+    errR(a^.b, nodeRange(a));
+    r^.lambdaBad := true;
+    exit(false);
+  end;
+  r^.ownerClass := outerSelf^.varType;
+  makeSelf(r, outerSelf^.varType);
+  r^.isMethodLambda := true;
+  r^.lambdaSelf := outerSelf;
+  { its object: m's Self, where the lambda is made }
+  if m <> curRoutine then
+  begin
+    outerSelf^.captured := true;
+    id := memberIdent('Self');
+    id.loc := a^.b;
+    noteLambdaUse(outerSelf, nil, id);
+  end;
+  makeMethodLambda := true;
+end;
+
 procedure completeLambda(a: PNode; want: PType);
 var
   r, p, wp, res: PDecl;
@@ -8955,6 +9014,10 @@ begin
   if want <> nil then
     if want^.routineReference then
       r^.isClosure := true;
+  if want <> nil then
+    if want^.routineOfObject then
+      if not makeMethodLambda(r, a) then
+        exit;
   if want <> nil then
     if want^.routineParams.count <> r^.params.count then
     begin
@@ -9166,6 +9229,15 @@ begin
   l := curRoutine;
   while (l <> nil) and (l <> owner) do
   begin
+    if l^.isMethodLambda then { called on its object, without a frame }
+    begin
+      ms('this method-pointer lambda uses ''');
+      maN(id.spelling);
+      ma(''' of the routine around it; it can use only its object''s members, ' +
+         'its parameters and what is declared at program or unit level');
+      errR(id.loc, identRange(id));
+      exit;
+    end;
     if l^.isLambda then
     begin
       if not identValid(l^.lambdaCapture) then

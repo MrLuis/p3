@@ -5210,7 +5210,8 @@ begin
   begin
     w := nil;
     d := scopeLookup(cur, op^.ref.name, w);
-    if (d <> nil) and (d^.kind = dkRoutine) and (d^.ownerClass <> nil) then
+    if (d <> nil) and (d^.kind = dkRoutine) and (d^.ownerClass <> nil) and
+       not d^.isMethodLambda then
     begin
       r := d;
       op^.refWith := w;
@@ -5411,6 +5412,8 @@ begin
         t := newRoutineType(r^.params, nil, isCDecl(r));
       if addrOfTarget <> nil then
         t^.routineReference := addrOfTarget^.routineReference;
+      { a method pointer: a lambda made one by completeLambda }
+      t^.routineOfObject := r^.isMethodLambda;
       op^.typ := t;
       exit(t);
     end;
