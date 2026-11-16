@@ -25,12 +25,12 @@
 ;
 ; Typed constants: only nil.
 ; RUN: not %pcc --mode=objfpc -ferror-limit=0 --emit-ast %S/Inputs/methodpointers/constants.pas 2>&1 | FileCheck --check-prefix=CONST %s
-; CONST: constants.pas:14:12: error: typed constants of type 'TE' can only be initialized with nil
-; CONST: constants.pas:15:12: error: typed constants of type 'TE' can only be initialized with nil
-; CONST: constants.pas:16:12: error: typed constants of type 'TE' can only be initialized with nil
-; CONST: constants.pas:17:12: error: typed constants of type 'TE' can only be initialized with nil
-; CONST: constants.pas:18:28: error: typed constants of type 'TE' can only be initialized with nil
-; CONST: constants.pas:20:12: error: typed constants of type 'TE' can only be initialized with nil
+; CONST: constants.pas:14:12: error: typed constants of type 'TE' can only be initialized with nil, a routine or a lambda
+; CONST: constants.pas:15:12: error: typed constant value must be a constant: the object of a method pointer is not
+; CONST: constants.pas:16:12: error: typed constant value must be a constant: the object of a method pointer is not
+; CONST: constants.pas:17:12: error: cannot initialize 'TE' with a value of type 'procedure(integer)'
+; CONST: constants.pas:18:28: error: typed constants of type 'TE' can only be initialized with nil, a routine or a lambda
+; CONST: constants.pas:20:12: error: initial value must be a constant: the object of a method pointer is not
 ; CONST-NOT: error:
 ;
 ; f(x)(y); as a statement.

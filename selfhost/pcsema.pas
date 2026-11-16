@@ -6136,6 +6136,74 @@ begin
   checkGuidInit := true;
 end;
 
+function checkValueFor(targetTy: PType; value: PNode): PType; forward;
+
+{ A typed constant (or initialized variable) of procedural type rt: nil, a
+  routine (@F) declared at program or unit level or a static method, or a
+  lambda that uses nothing of the routines around it and has no object. }
+function checkRoutineConstInit(init: PNode; rt: PType): boolean;
+var
+  vt, ignoredT: PType;
+  l: PDecl;
+
+  procedure bad(const why: string);
+  begin
+    ms(constInitWhat + ' must be a constant: ' + why);
+    errR(init^.b, nodeRange(init));
+  end;
+
+begin
+  checkRoutineConstInit := false;
+  if init^.kind = nkNil then
+  begin
+    ignoredT := check(init);
+    exit(true);
+  end;
+  if init^.kind <> nkAddrOf then
+  begin
+    ms('typed constants of type ');
+    maT(rt);
+    ma(' can only be initialized with nil, a routine or a lambda');
+    errR(init^.b, nodeRange(init));
+    exit;
+  end;
+  vt := checkValueFor(rt, init);
+  if isError(vt) then
+    exit;
+  if not isAssignable(rt, vt) then
+  begin
+    ms('cannot initialize ');
+    maT(rt);
+    ma(' with a value of type ');
+    maT(vt);
+    errR(init^.b, nodeRange(init));
+    exit;
+  end;
+  if init^.addrMethod <> nil then
+  begin
+    bad('the object of a method pointer is not');
+    exit;
+  end;
+  l := init^.addrLambda;
+  if l <> nil then
+  begin
+    if identValid(l^.lambdaCapture) then
+    begin
+      ms(constInitWhat + ' must be a constant: this lambda uses ''');
+      maN(l^.lambdaCapture.spelling);
+      ma(''' of the routine around it');
+      errR(init^.b, nodeRange(init));
+      exit;
+    end;
+    if l^.isMethodLambda and (l^.lambdaSelf <> nil) then
+    begin
+      bad('this lambda''s object is Self');
+      exit;
+    end;
+  end;
+  checkRoutineConstInit := true;
+end;
+
 function checkConstInit(init: PNode; t: PType; var folded: TConstValue): boolean;
 var
   ignoredT: PType;
@@ -6259,7 +6327,9 @@ begin
 
   if t = tguidT then { a GUID string }
     exit(checkGuidInit(init, folded));
-  if isMethodPointer(t) or (t^.kind = tyDynArray) then { only nil }
+  if t^.kind = tyRoutine then
+    exit(checkRoutineConstInit(init, t));
+  if t^.kind = tyDynArray then { only nil }
   begin
     if init^.kind = nkNil then
     begin
@@ -9073,7 +9143,6 @@ end;
 
 { An argument for a procedural parameter: the name of a routine (or of
   another procedural parameter) with a congruent heading. }
-function checkValueFor(targetTy: PType; value: PNode): PType; forward;
 
 { The lambda a (function(x) => e), used where a value of type want is
   wanted (nil: none): its hidden routine is declared here, nested in the

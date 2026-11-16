@@ -657,7 +657,33 @@ end;
   methods, where `T` is the type argument), and conditional expressions.
 
 A lambda cannot use a field through a `with` statement outside it (name
-the record instead). Not supported: lambdas in constant expressions.
+the record instead).
+
+**Lambdas and routines in typed constants**: a typed constant (or an
+initialized variable) of a procedural type, plain, `reference to` or `of
+object`, can hold `nil`, `@F` of a routine declared at program or unit
+level or of a static method, or a lambda, also as elements of arrays and
+fields of records: dispatch tables.
+
+```pascal
+type
+  TOp = record
+    Name: string;
+    Fn: TFn;                    { function(x: Integer): Integer }
+  end;
+const
+  Twice: TFn = function(x) => 2 * x;
+  Ops: array[0..2] of TOp = (
+    (Name: 'inc'; Fn: function(x) => x + 1),
+    (Name: 'dec'; Fn: function(x) => x - 1),
+    (Name: 'id'; Fn: @Id));
+```
+
+The value must be a constant: a lambda there may not use the variables of
+the routine around it ("typed constant value must be a constant: this
+lambda uses 'k' of the routine around it"), nor have an object (an `of
+object` lambda in a method), and `@obj.M` is not a constant. A routine's
+name without `@` is not a value there (as in assignments).
 
 **Overloads and lambdas**: a lambda passed to an overloaded routine
 chooses the overload by its shape, then takes its types from it. It fits
@@ -764,7 +790,7 @@ Writeln(add5(10));                      { 15 }
 A `reference to` type's result may be a method pointer, a short string or
 a record, as an `of object` type's. Not supported: `reference to ... of
 object` (a method-pointer lambda is one already) and calling conventions,
-closures in typed constants, comparing values with `=` (use `Assigned`).
+comparing values with `=` (use `Assigned`).
 
 **Conditional expressions** (objfpc; pcc's own): `if c then a else b` is a
 value, `a` where `c` holds and `b` otherwise. Only the branch chosen is

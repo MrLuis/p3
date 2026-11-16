@@ -2496,10 +2496,47 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
     return llvm::Constant::getNullValue(Ty);
   }
 
+  /// The initial value of static variable V (memory type Ty) when it is
+  /// created: one holding procedural values gets its value once the
+  /// routines are declared (finishStaticInits).
+  llvm::Constant *staticInitializer(VarDecl *V, llvm::Type *Ty) {
+    if (V->getInit() && containsRoutineType(V->getType())) {
+      DeferredInits.push_back(V);
+      return llvm::Constant::getNullValue(Ty);
+    }
+    return initializerFor(V, Ty);
+  }
+  std::vector<VarDecl *> DeferredInits;
+
+  void finishStaticInits() {
+    for (VarDecl *V : DeferredInits)
+      Globals[V]->setInitializer(initializerFor(V, memType(V->getType())));
+    DeferredInits.clear();
+  }
+
+  /// A procedural constant: nil, a routine, or a lambda (with no frame and
+  /// no object), as {function, nil}.
+  llvm::Constant *routineConstant(Expr *Init, llvm::Type *Ty) {
+    RoutineDecl *R = nullptr;
+    if (auto *A = llvm::dyn_cast<AddrOfExpr>(Init))
+      R = A->getLambda() ? A->getLambda()
+          : A->getCode() ? A->getCode()
+                         : llvm::dyn_cast_or_null<RoutineDecl>(
+                               llvm::cast<NameRefExpr>(A->getOperand())->getDecl());
+    if (!R) // nil
+      return llvm::Constant::getNullValue(Ty);
+    return llvm::ConstantStruct::get(
+        llvm::cast<llvm::StructType>(Ty),
+        {llvm::cast<llvm::Constant>(routineFunction(R)),
+         llvm::ConstantPointerNull::get(B.getPtrTy())});
+  }
+
   /// The constant for a typed-constant initializer Init of type T (memory
   /// type Ty); Folded is Sema's value for non-aggregates.
   llvm::Constant *constantFor(Expr *Init, const ConstValue &Folded, Type *T,
                               llvm::Type *Ty) {
+    if (llvm::isa<RoutineType>(T))
+      return routineConstant(Init, Ty);
     auto *Agg = llvm::dyn_cast<AggregateExpr>(Init);
     if (containsAlignedRecord(T)) { // its bytes (Sema checked their types)
       std::string Bytes(sizeOf(T), '\0');
@@ -2690,7 +2727,7 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
     llvm::Type *Ty = memType(V->getType());
     bool Imported = ImportedDecls.count(V);
     Globals[V] =
-        createGlobal(V, Ty, Imported ? nullptr : initializerFor(V, Ty));
+        createGlobal(V, Ty, Imported ? nullptr : staticInitializer(V, Ty));
     if (DIB && !Imported)
       declareGlobalDebugInfo(V, Globals[V]);
   }
@@ -2706,7 +2743,7 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
             llvm::Type *Ty = memType(V->getType());
             Globals[V] = createGlobal(V, Ty,
                                       V->isTypedConst()
-                                          ? initializerFor(V, Ty)
+                                          ? staticInitializer(V, Ty)
                                           : llvm::Constant::getNullValue(Ty));
           }
         continue;
@@ -5225,6 +5262,7 @@ public:
         declareRoutines(*U->getImplementation());
     }
     declareRoutines(Blk);
+    finishStaticInits();
     defineVMTs();
     for (RoutineDecl *R : RoutinesToEmit)
       emitRoutineBody(R);
@@ -5411,6 +5449,7 @@ public:
       declareRoutines(*D->getInterface());
     declareRoutines(*U.getInterface());
     declareRoutines(*U.getImplementation());
+    finishStaticInits();
     defineVMTs();
     for (RoutineDecl *R : RoutinesToEmit)
       emitRoutineBody(R);

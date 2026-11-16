@@ -2078,6 +2078,36 @@ begin
   end;
 end;
 
+{ A procedural constant: nil, a routine, or a lambda (with no frame and no
+  object), as (function, nil). }
+function routineConstant(init: PNode; ty: PIRType): TV;
+var
+  r: PDecl;
+  elems: TPtrList;
+begin
+  r := nil;
+  if init^.kind = nkAddrOf then
+  begin
+    if init^.addrLambda <> nil then
+      r := init^.addrLambda
+    else if init^.addrCode <> nil then
+      r := init^.addrCode
+    else if (init^.inner^.refDecl <> nil) and (init^.inner^.refDecl^.kind = dkRoutine) then
+      r := init^.inner^.refDecl;
+  end;
+  if r = nil then { nil }
+    exit(irZero(ty));
+  r := canon(r);
+  listInit(elems);
+  if r^.cgThunk <> nil then
+    listAdd(elems, irBox(irFuncRef(PIRFunc(r^.cgThunk))))
+  else
+    listAdd(elems, irBox(irFuncRef(fnOf(r))));
+  listAdd(elems, irBox(irNull));
+  routineConstant := irConstStruct(ty, elems);
+  listFree(elems);
+end;
+
 function constantFor(init: PNode; const folded: TConstValue; t: PType; ty: PIRType): TV;
 var
   i, j: longint;
@@ -2088,6 +2118,8 @@ var
   img: TBuf;
   n: int64;
 begin
+  if t^.kind = tyRoutine then
+    exit(routineConstant(init, ty));
   if containsAlignedRecord(t) then { its bytes (Sema checked their types) }
   begin
     bufInit(img);
@@ -2154,6 +2186,7 @@ var
   ty: PIRType;
   init: TV;
   name: string;
+  deferred: boolean;
 begin
   ty := memType(v^.varType);
   if v^.cgImported then
@@ -2162,19 +2195,27 @@ begin
                                  true, 0))
   else
   begin
-    if v^.init <> nil then
+    { one holding procedural values gets its value once the routines are
+      declared (finishStaticInits) }
+    deferred := (v^.init <> nil) and containsRoutineType(v^.varType);
+    if deferred then
+    begin
+      init := irZero(ty); { (none yet: irSetGlobalInit) }
+      listAdd(deferredInits, v);
+    end
+    else if v^.init <> nil then
       init := constantFor(v^.init, v^.initValue, v^.varType, ty)
     else
       init := irZero(ty);
     if v^.cgExport <> nil then
-      v^.cgValue := irBox(irGlobal(nm(v^.cgExport), '', ty, init, false, false, false, 0))
+      v^.cgValue := irBox(irGlobal(nm(v^.cgExport), '', ty, init, false, false, deferred, 0))
     else
     begin
       if v^.isClassVar then
         name := 'pas.' + lowerStr(nm(v^.varClass^.declName)) + '.' + nm(v^.ident.name)
       else
         name := 'pas.' + nm(v^.ident.name);
-      v^.cgValue := irBox(irGlobal(name, 'internal', ty, init, false, false, false, 0));
+      v^.cgValue := irBox(irGlobal(name, 'internal', ty, init, false, false, deferred, 0));
     end;
   end;
   { class variables have no debug information }
@@ -2497,6 +2538,22 @@ begin
 end;
 
 { Fills in the VMTs: parent VMT, class name, virtual methods. }
+{ The static variables holding procedural values: their initial values,
+  now that the routines are declared. }
+procedure finishStaticInits;
+var
+  i: longint;
+  v: PDecl;
+begin
+  for i := 0 to deferredInits.count - 1 do
+  begin
+    v := PDecl(listGet(deferredInits, i));
+    irSetGlobalInit(PTVBox(v^.cgValue)^,
+                    constantFor(v^.init, v^.initValue, v^.varType, memType(v^.varType)));
+  end;
+  listClear(deferredInits);
+end;
+
 procedure defineVMTs;
 var
   i, j: longint;
@@ -3435,6 +3492,7 @@ begin
   listInit(vmtsToDefine);
   listInit(liveTemps);
   listInit(routineTemps);
+  listInit(deferredInits);
   listInit(cleanupClasses);
   listInit(cleanupFns);
   listInit(routinesToEmit);
@@ -3513,6 +3571,7 @@ begin
   end;
   declareRoutines(u^.iface);
   declareRoutines(u^.impl);
+  finishStaticInits;
   defineVMTs;
   for i := 0 to routinesToEmit.count - 1 do
     emitRoutineBody(PDecl(listGet(routinesToEmit, i)));
@@ -3601,6 +3660,7 @@ begin
       declareRoutines(u^.impl);
   end;
   declareRoutines(prog^.progBlock);
+  finishStaticInits;
   defineVMTs;
   for i := 0 to routinesToEmit.count - 1 do
     emitRoutineBody(PDecl(listGet(routinesToEmit, i)));

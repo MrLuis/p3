@@ -102,6 +102,8 @@ function isEmptySet(t: PType): boolean;
 function setStorageBits(t: PType): longint;
 function isUntypedPointer(t: PType): boolean;
 function containsFile(t: PType): boolean;
+{ Is t, or does it contain, a procedural type? }
+function containsRoutineType(t: PType): boolean;
 { Is t, or does it contain, a COM interface (reference counted)? }
 function isManaged(t: PType): boolean;
 { A procedure or function ... of object? }
@@ -679,6 +681,29 @@ end;
 function isUntypedPointer(t: PType): boolean;
 begin
   isUntypedPointer := (t^.kind = tyPointer) and t^.untyped;
+end;
+
+function containsRoutineType(t: PType): boolean;
+var
+  i: longint;
+  f: PDecl;
+begin
+  case t^.kind of
+    tyRoutine: containsRoutineType := true;
+    tyArray: containsRoutineType := containsRoutineType(t^.elementType);
+    tyRecord:
+      begin
+        for i := 0 to t^.allFields.count - 1 do
+        begin
+          f := PDecl(listGet(t^.allFields, i));
+          if (f^.fieldType <> nil) and containsRoutineType(f^.fieldType) then
+            exit(true);
+        end;
+        containsRoutineType := false;
+      end;
+  else
+    containsRoutineType := false;
+  end;
 end;
 
 function containsFile(t: PType): boolean;

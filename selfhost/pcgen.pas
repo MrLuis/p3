@@ -128,6 +128,9 @@ var
     classes whose cleanup functions are to be emitted (of PType) and the
     functions (of PIRFunc). }
   liveTemps, routineTemps: TPtrList;
+  { static variables whose initial values hold procedural values: set once
+    the routines are declared (finishStaticInits) }
+  deferredInits: TPtrList;
   cleanupClasses, cleanupFns: TPtrList;
 
 { --- Small helpers --- }

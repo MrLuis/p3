@@ -129,6 +129,19 @@ bool pcc::containsFile(Type *T) {
   return false;
 }
 
+bool pcc::containsRoutineType(Type *T) {
+  if (llvm::isa<RoutineType>(T))
+    return true;
+  if (auto *A = llvm::dyn_cast<ArrayType>(T))
+    return containsRoutineType(A->getElementType());
+  if (auto *R = llvm::dyn_cast<RecordType>(T)) {
+    for (FieldDecl *F : R->getAllFields())
+      if (F->getType() && containsRoutineType(F->getType()))
+        return true;
+  }
+  return false;
+}
+
 bool pcc::containsInterface(Type *T) {
   if (auto *I = llvm::dyn_cast<InterfaceType>(T))
     return I->isCOM();

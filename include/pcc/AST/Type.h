@@ -567,6 +567,9 @@ inline bool needsStringCompare(Type *L, Type *R) {
 /// True if T is, or contains, a file type (files cannot be copied).
 bool containsFile(Type *T);
 
+/// True if T is, or contains, a procedural type.
+bool containsRoutineType(Type *T);
+
 /// True if T is, or contains, a COM interface or an ansistring (a
 /// reference-counted value:
 /// managed by the compiled code when assigned, copied and finalized).

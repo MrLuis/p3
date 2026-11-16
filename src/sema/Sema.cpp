@@ -4328,7 +4328,9 @@ class Checker : public StmtVisitor<Checker>,
 
     if (T == TGuidTy) // '{01234567-89AB-CDEF-0123-456789ABCDEF}'
       return checkGuidInit(Init, Folded);
-    if (isMethodPointer(T) || T->isDynArray()) { // only nil
+    if (auto *RT = llvm::dyn_cast<RoutineType>(T))
+      return checkRoutineConstInit(Init, RT);
+    if (T->isDynArray()) { // only nil
       if (llvm::isa<NilExpr>(Init)) {
         check(Init);
         return true;
@@ -4373,6 +4375,52 @@ class Checker : public StmtVisitor<Checker>,
     if (C->Value.K == ConstValue::Ordinal && C->Ty->getBase()->isWideChar() &&
         T->getBase()->isChar())
       Folded.Int = wideToChar(Folded.Int);
+    return true;
+  }
+
+  /// A typed constant (or initialized variable) of procedural type RT: nil,
+  /// a routine (@F) declared at program or unit level or a static method,
+  /// or a lambda that uses nothing of the routines around it and has no
+  /// object.
+  bool checkRoutineConstInit(Expr *Init, RoutineType *RT) {
+    auto Bad = [&](const llvm::Twine &Why) {
+      Diags.error(Init->getBeginLoc(),
+                  llvm::Twine(ConstInitWhat) + " must be a constant: " + Why,
+                  {Init->getRange()});
+      return false;
+    };
+    if (llvm::isa<NilExpr>(Init)) {
+      check(Init);
+      return true;
+    }
+    auto *A = llvm::dyn_cast<AddrOfExpr>(Init);
+    if (!A) {
+      Diags.error(Init->getBeginLoc(),
+                  "typed constants of type " + quoted(RT) +
+                      " can only be initialized with nil, a routine or a "
+                      "lambda",
+                  {Init->getRange()});
+      return false;
+    }
+    Type *VT = checkValueFor(RT, Init);
+    if (VT->isError())
+      return false;
+    if (!isAssignable(RT, VT)) {
+      Diags.error(Init->getBeginLoc(),
+                  "cannot initialize " + quoted(RT) + " with a value of type " +
+                      quoted(VT),
+                  {Init->getRange()});
+      return false;
+    }
+    if (A->getMethod())
+      return Bad("the object of a method pointer is not");
+    if (RoutineDecl *L = A->getLambda()) {
+      if (L->getCapture().isValid())
+        return Bad("this lambda uses '" + L->getCapture().Spelling +
+                   "' of the routine around it");
+      if (L->isMethodLambda() && L->getLambdaSelf())
+        return Bad("this lambda's object is Self");
+    }
     return true;
   }
 
@@ -8273,10 +8321,12 @@ public:
                            S->getRange());
     if (auto *V = llvm::dyn_cast<VarDecl>(D))
       if (auto *RT = llvm::dyn_cast_or_null<RoutineType>(V->getType());
-          RT && !RT->isFunction())
+          RT && !RT->isFunction()) {
+        Used.insert(V); // (called: used)
         return checkCallArgs(RT->getParams(), V, Callee,
                              orderedArgs(S, RT->getParams(), Callee),
                              S->getRange());
+      }
     if (RoutineType *RT = proceduralMember(D)) {
       // FOnEvent(x) in a method or a with statement: through the member
       auto *Ref = Ctx.create<NameRefExpr>(Callee);
@@ -9676,6 +9726,7 @@ public:
     if (auto *V = llvm::dyn_cast<VarDecl>(D))
       if (auto *RT = llvm::dyn_cast_or_null<RoutineType>(V->getType());
           RT && RT->isFunction()) {
+        Used.insert(V); // (called: used)
         checkCallArgs(RT->getParams(), V, Callee,
                       orderedArgs(E, RT->getParams(), Callee), E->getRange());
         return RT->getResult();

@@ -2651,6 +2651,7 @@ begin
   if (d^.kind = dkVar) and (d^.varType <> nil) and (d^.varType^.kind = tyRoutine) and
      (d^.varType^.routineResult = nil) then
   begin
+    d^.isUsed := true; { (called: used) }
     orderArgs(d^.varType^.routineParams, s^.args, s^.callee);
     checkCallArgs(d^.varType^.routineParams, d, s^.callee, s^.args, nodeRange(s));
     exit;
@@ -4871,6 +4872,7 @@ begin
   if (d^.kind = dkVar) and (d^.varType <> nil) and (d^.varType^.kind = tyRoutine) and
      (d^.varType^.routineResult <> nil) then
   begin
+    d^.isUsed := true; { (called: used) }
     orderArgs(d^.varType^.routineParams, e^.args, e^.callee);
     checkCallArgs(d^.varType^.routineParams, d, e^.callee, e^.args, nodeRange(e));
     exit(d^.varType^.routineResult);
