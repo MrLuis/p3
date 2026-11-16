@@ -43,6 +43,7 @@
 #define PCC_PARSE_PARSER_H
 
 #include "pcc/AST/AST.h"
+#include "pcc/Basic/Directives.h"
 #include "pcc/Basic/LangOptions.h"
 #include "pcc/Lexer/Token.h"
 
@@ -255,6 +256,11 @@ class Parser {
   Stmt *parseStatementImpl();
   bool startsCheckedBlock();
   Stmt *parseCheckedBlock();
+  bool startsCheckedExpr();
+  Expr *parseCheckedExpr();
+  void setCheckedSwitches(SourceLocation L, bool Checked,
+                          CheckDirectives::State &Before,
+                          CheckDirectives::State &WrapBefore);
   Stmt *parseAssignmentOrCall();
   Stmt *finishDesignatorStmt(SourceLocation Start, Expr *Target);
   /// The statement starting with a designator being parsed: its tokens so

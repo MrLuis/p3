@@ -3,6 +3,7 @@
   `unchecked ... end` wraps, also when an integer value is converted to a
   narrower integer type (two's complement: the low bits). AddChecked,
   SubChecked and MulChecked give (value, ok) instead of raising.
+  checked(e) and unchecked(e) do the same for one expression.
   RUN: %pcc --mode=objfpc %s -o %t
   RUN: %t | diff - %S/checked.expected
   RUN: %pcc --mode=objfpc -O2 %s -o %t.fast
@@ -34,7 +35,13 @@ begin
     Result := a + b;
   end;
 end;
+
+function CheckedMul(a, b: Integer): Integer;
+begin
+  CheckedMul := checked(a * b);
+end;
 {$Q+}
+
 
 { FNV-1a: the wrapping is intended }
 function Hash(const s: string): Cardinal;
@@ -48,13 +55,40 @@ begin
   end;
 end;
 
+procedure Exprs;
+var
+  x: Integer;
+  b: Byte;
+  h: Cardinal;
+begin
+  try
+    Writeln(CheckedMul(3, 4));
+    Writeln(CheckedMul(MaxInt, 2));
+  except
+    on E: EIntOverflow do
+      Writeln('checked(): ', E.Message);
+  end;
+  x := MaxInt;
+  x := checked(x - 1) - 1;
+  b := 250;
+  b := unchecked(b + 10);
+  h := 4000000000;
+  h := unchecked(h * 3);
+  Writeln(x, ' ', b, ' ', h, ' ', checked(High(Integer) - 1));
+end;
+
+{ a declaration of that name: unchecked(x) calls it }
+function unchecked(x: Integer): Integer;
+begin
+  unchecked := x + 1000;
+end;
+
 var
   x, y: Integer;
   b: Byte;
   i64: Int64;
   r: (Integer, Boolean);
   checked: Integer;   { the word is not reserved }
-  unchecked: Boolean;
 begin
   Writeln(TotalSize([1, 2, 3]));
   Writeln(Wrapping(MaxInt, 1));
@@ -111,7 +145,9 @@ begin
   var (w, wok) := AddChecked(i64, 1);
   Writeln(w, ' ', wok);
 
+  Exprs;
+  Writeln(unchecked(1));
+
   checked := 5;
-  unchecked := checked > 1;
-  Writeln(checked, ' ', unchecked);
+  Writeln(checked);
 end.

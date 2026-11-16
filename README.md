@@ -819,6 +819,11 @@ where the state before the block comes back. The default for a unit stays
 `unchecked` are not reserved: a block starts where one of them begins a
 statement and is followed by a statement (not by `:=`, `(` or `;`).
 
+`checked(e)` and `unchecked(e)` do the same for one expression, a value
+(in parentheses): `Result := checked(a * b);`, `h := unchecked(h *
+16777619);`. Where a declaration named `checked` or `unchecked` is visible
+(a variable, a function), the name is that declaration's instead.
+
 `AddChecked(a, b)`, `SubChecked(a, b)` and `MulChecked(a, b)` give the
 tuple `(a op b, ok)`, never raising: the value wrapped and `ok = False` on
 overflow, in the type `a op b` would have (`Int64`, `Cardinal`, ...).

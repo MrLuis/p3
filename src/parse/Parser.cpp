@@ -3269,17 +3269,55 @@ bool Parser::startsCheckedBlock() {
                              tok::kw_goto, tok::kw_inherited, tok::kw_end);
 }
 
+/// The switches of a checked (or unchecked) block or expression from L on;
+/// Before / WrapBefore receive the states they replace.
+void Parser::setCheckedSwitches(SourceLocation L, bool Checked,
+                                CheckDirectives::State &Before,
+                                CheckDirectives::State &WrapBefore) {
+  Before = Lex.checkStateAt(CheckDirectives::Overflow, L);
+  WrapBefore = Lex.checkStateAt(CheckDirectives::Wrap, L);
+  Lex.addCheckState(L, CheckDirectives::Overflow,
+                    Checked ? CheckDirectives::On : CheckDirectives::Off);
+  Lex.addCheckState(L, CheckDirectives::Wrap,
+                    Checked ? CheckDirectives::Off : CheckDirectives::On);
+}
+
+// checked(expression) / unchecked(expression) (objfpc): the expression's
+// integer arithmetic checked for overflow or wrapping, as in a block; a
+// value (in parentheses). A routine of that name (declared by the program)
+// makes it a call.
+bool Parser::startsCheckedExpr() {
+  if (!LangOpts.ObjKeywords || !peekToken().is(tok::l_paren))
+    return false;
+  if (isIdentifierNamed("checked"))
+    return !Lex.isDeclared("checked");
+  if (isIdentifierNamed("unchecked"))
+    return !Lex.isDeclared("unchecked");
+  return false;
+}
+
+Expr *Parser::parseCheckedExpr() {
+  bool Checked = isIdentifierNamed("checked");
+  SourceLocation Loc = Tok.getLocation();
+  CheckDirectives::State Before, WrapBefore;
+  setCheckedSwitches(Loc, Checked, Before, WrapBefore);
+  consumeToken();
+  consumeToken(); // '('
+  Expr *Inner = parseExpression();
+  Lex.addCheckState(Tok.getLocation(), CheckDirectives::Overflow, Before);
+  Lex.addCheckState(Tok.getLocation(), CheckDirectives::Wrap, WrapBefore);
+  if (!Inner ||
+      !expect(tok::r_paren, Checked ? "after the expression of 'checked'"
+                                    : "after the expression of 'unchecked'"))
+    return nullptr;
+  return Ctx.create<ParenExpr>(SourceRange(Loc, PrevTokEnd), Inner);
+}
+
 Stmt *Parser::parseCheckedBlock() {
   bool Checked = isIdentifierNamed("checked");
   SourceLocation Loc = Tok.getLocation();
-  CheckDirectives::State Before =
-      Lex.checkStateAt(CheckDirectives::Overflow, Loc);
-  CheckDirectives::State WrapBefore =
-      Lex.checkStateAt(CheckDirectives::Wrap, Loc);
-  Lex.addCheckState(Loc, CheckDirectives::Overflow,
-                    Checked ? CheckDirectives::On : CheckDirectives::Off);
-  Lex.addCheckState(Loc, CheckDirectives::Wrap,
-                    Checked ? CheckDirectives::Off : CheckDirectives::On);
+  CheckDirectives::State Before, WrapBefore;
+  setCheckedSwitches(Loc, Checked, Before, WrapBefore);
   consumeToken();
   llvm::SmallVector<Stmt *, 8> Body;
   parseStatementSequence(Body, tok::kw_end, Loc,
@@ -4464,6 +4502,8 @@ Expr *Parser::parseFactor() {
   case tok::template_head:
     return parseTemplate();
   case tok::identifier: {
+    if (startsCheckedExpr())
+      return parseCheckedExpr();
     if (startsSpecialize()) { // specialize F<T>(args)
       SourceLocation Start = Tok.getLocation();
       Identifier Name;

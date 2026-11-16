@@ -4539,6 +4539,54 @@ begin
                                      tkKwGoto, tkKwInherited, tkKwEnd];
 end;
 
+{ checked(expression) / unchecked(expression) (objfpc): the expression's
+  integer arithmetic checked for overflow or wrapping, as in a block; a
+  value (in parentheses). A routine of that name (declared by the program)
+  makes it a call. }
+function startsCheckedExpr: boolean;
+begin
+  startsCheckedExpr := false;
+  if (mode <> lmObjFPC) or (peekKind <> tkLParen) then
+    exit;
+  if isIdentifierNamed('checked') then
+    startsCheckedExpr := not lexIsDeclared(lx, intern('checked'))
+  else if isIdentifierNamed('unchecked') then
+    startsCheckedExpr := not lexIsDeclared(lx, intern('unchecked'));
+end;
+
+function parseCheckedExpr: PNode;
+var
+  isChecked: boolean;
+  loc: TLoc;
+  before, wrapBefore: longint;
+  inner, n: PNode;
+  what: string;
+begin
+  parseCheckedExpr := nil;
+  isChecked := isIdentifierNamed('checked');
+  loc := tok.loc;
+  before := checkStateAt(swOverflow, loc);
+  wrapBefore := checkStateAt(swWrap, loc);
+  addCheckState(loc, swOverflow, ord(isChecked));
+  addCheckState(loc, swWrap, ord(not isChecked));
+  consumeToken;
+  consumeToken; { '(' }
+  inner := parseExpression;
+  addCheckState(tok.loc, swOverflow, before);
+  addCheckState(tok.loc, swWrap, wrapBefore);
+  if isChecked then
+    what := 'after the expression of ''checked'''
+  else
+    what := 'after the expression of ''unchecked''';
+  if inner = nil then
+    exit;
+  if not expect(tkRParen, what) then
+    exit;
+  n := newNode(nkParen, loc, prevTokEnd);
+  n^.inner := inner;
+  parseCheckedExpr := n;
+end;
+
 function parseCheckedBlock: PNode;
 var
   isChecked: boolean;
@@ -6124,6 +6172,8 @@ begin
       exit(parseTemplate);
     tkIdentifier:
       begin
+        if startsCheckedExpr then
+          exit(parseCheckedExpr);
         if startsSpecialize then { specialize F<T>(args) }
         begin
           lparen := tok.loc;

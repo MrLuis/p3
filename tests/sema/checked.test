@@ -34,3 +34,7 @@
 ; IR: call void @__pas_raise_overflow(ptr
 ; IR: declare void @__pas_raise_overflow(ptr) #[[ATTR:[0-9]+]]
 ; IR: attributes #[[ATTR]] = { cold noreturn nounwind }
+;
+; checked(expression): its parenthesis is closed.
+; RUN: not %pcc --mode=objfpc -c %S/Inputs/checked/syntax2.pas -o %t.o 2>&1 | FileCheck --check-prefix=SYNTAX2 %s
+; SYNTAX2: syntax2.pas:5:21: error: expected ')' after the expression of 'checked'
