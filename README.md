@@ -785,7 +785,32 @@ Writeln(add5(10));                      { 15 }
   parameters, a function's result, the Self of a record method (a class's
   Self is fine), and routines nested in them. Each is an error ("this
   closure uses 'v', a 'var' parameter of 'ByVar', which may not exist when
-  the closure runs; copy it to a local variable first").
+  the closure runs; copy it to a local variable first"); a copy (below)
+  is the way to use their values.
+
+**Capture by copy** (pcc's own): `function[k, s](x) => e` is a closure
+with its own copies of `k` and `s`, taken when it is made. Inside it they
+are read-only ("cannot modify 'k', a copy made by this lambda"); what it
+uses without listing it, it shares as closures do. Each time the lambda is
+evaluated it copies anew, so closures made in a loop keep the values of
+their own iteration:
+
+```pascal
+for i := 0 to n - 1 do
+  fs[i] := function[i]: Integer => i * 10;   { 0, 10, 20, ... }
+
+function Snapshot(var total: Integer): TFn;
+begin
+  Snapshot := function[total]: Integer => total;   { the value now }
+end;
+```
+
+What it copies is a variable, a parameter (also `var` and `const` ones,
+whose values are copied) or a field of the object (`[Name]` in a method:
+its value now, which outlives the object). Not open-array, untyped or file
+values. A lambda that copies must be a closure: a `reference to` type is
+wanted where it is written, also when it chooses an overload. Copying
+everything a lambda uses (C++'s `[=]`) is not supported: list the names.
 
 A `reference to` type's result may be a method pointer, a short string or
 a record, as an `of object` type's. Not supported: `reference to ... of

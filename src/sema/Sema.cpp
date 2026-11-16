@@ -1396,11 +1396,17 @@ class Checker : public StmtVisitor<Checker>,
     VarDecl *V = constParamRoot(E);
     if (!V)
       return true;
-    Diags.error(E->getBeginLoc(),
-                llvm::Twine(V->isReadOnly() ? "cannot modify constant '"
-                                            : "cannot modify constant parameter '") +
-                    V->getName().Spelling + "'",
-                {E->getRange()});
+    if (V->getOwner() && V->getOwner()->isCopyFactory())
+      Diags.error(E->getBeginLoc(),
+                  "cannot modify '" + V->getName().Spelling +
+                      "', a copy made by this lambda (copies are read-only)",
+                  {E->getRange()});
+    else
+      Diags.error(E->getBeginLoc(),
+                  llvm::Twine(V->isReadOnly() ? "cannot modify constant '"
+                                              : "cannot modify constant parameter '") +
+                      V->getName().Spelling + "'",
+                  {E->getRange()});
     noteDeclaredHere(V);
     return false;
   }
@@ -5715,6 +5721,8 @@ class Checker : public StmtVisitor<Checker>,
   static RoutineDecl *pendingLambda(Expr *E) {
     auto *A = llvm::dyn_cast<AddrOfExpr>(E);
     RoutineDecl *L = A ? A->getLambda() : nullptr;
+    if (auto *C = llvm::dyn_cast<CallExpr>(E)) // one that copies
+      L = C->getCopyLambda();
     return L && !L->isLambdaDone() ? L : nullptr;
   }
 
@@ -5748,7 +5756,8 @@ class Checker : public StmtVisitor<Checker>,
   int lambdaCost(RoutineDecl *L, Type *PT) {
     auto *RT = llvm::dyn_cast<RoutineType>(PT);
     if (!RT || RT->isFunction() != L->isFunction() ||
-        RT->getParams().size() != L->getParams().size())
+        RT->getParams().size() != L->getParams().size() ||
+        (L->isCopied() && !RT->isReference())) // (copies: a closure)
       return -1;
     int Cost = 0;
     for (size_t I = 0; I < RT->getParams().size(); ++I) {
@@ -9660,6 +9669,15 @@ public:
   }
 
   Type *visitCallExpr(CallExpr *E) {
+    // A lambda that copies what it uses: its factory, declared now.
+    if (auto *F = llvm::dyn_cast_or_null<RoutineDecl>(E->getDecl());
+        F && F->isCopyFactory()) {
+      if (!F->isLambdaDone() &&
+          !completeCopyFactory(F, E, WantedCall == E ? WantedType : nullptr))
+        return errorType();
+      if (F->isLambdaBad())
+        return errorType();
+    }
     const Identifier &Callee = E->getCallee();
     WithContext *W = nullptr;
     Decl *D = E->getTypeArgs().empty() ? Cur->lookup(Callee.Name, &W)
@@ -10423,6 +10441,17 @@ public:
       Result->setOwner(R);
       R->setResultVar(Result);
     }
+    declareAndCheckLambda(R);
+    if (R->isFunction() && !R->getResultType()) {
+      R->setResultType(errorType());
+      R->getResultVar()->setType(errorType());
+    }
+  }
+
+  /// Lambda R (or a copy factory), its types known: declared here, nested
+  /// in the current routine, and its body checked now, in the middle of a
+  /// statement.
+  void declareAndCheckLambda(RoutineDecl *R) {
     R->setParent(CurRoutine);
     Used.insert(R);
     // In the innermost scope of declarations (not that of a with statement
@@ -10432,7 +10461,6 @@ public:
       Cur = Cur->getParent();
     declare(R);
     Cur = Saved;
-    // Its body is checked now, in the middle of a statement.
     unsigned SavedLoop = LoopDepth;
     const void *SavedSeq = DirectSequence;
     std::unique_ptr<Scope> *SavedSeqScope = SeqScope;
@@ -10456,10 +10484,63 @@ public:
     WantedCall = SavedWanted;
     AddrOfTarget = SavedAddr;
     KeepCharLiterals = SavedKeep;
-    if (R->isFunction() && !R->getResultType()) {
-      R->setResultType(errorType());
-      R->getResultVar()->setType(errorType());
+  }
+
+  /// The copy factory F of a lambda that copies what it uses, called by E
+  /// where Want is wanted: a closure must be. Its parameters, the copies,
+  /// take the types of the variables they copy (read-only); its result is
+  /// Want, its body makes the lambda (completed for Want). False after a
+  /// diagnostic.
+  bool completeCopyFactory(RoutineDecl *F, CallExpr *E, Type *Want) {
+    F->setLambdaDone();
+    auto *RT = llvm::dyn_cast_or_null<RoutineType>(Want);
+    if (!RT || !RT->isReference()) {
+      Diags.error(E->getBeginLoc(),
+                  "a lambda that copies what it uses must be a closure: a "
+                  "'reference to' type must be wanted here",
+                  {E->getRange()});
+      F->setLambdaBad();
+      return false;
     }
+    bool OK = true;
+    for (VarDecl *P : F->getParams()) {
+      const Identifier &Id = P->getName();
+      Decl *D = Cur->lookup(Id.Name);
+      Type *T = nullptr;
+      if (auto *V = llvm::dyn_cast_or_null<VarDecl>(D))
+        T = V->getType();
+      else if (auto *Fd = llvm::dyn_cast_or_null<FieldDecl>(D))
+        T = Fd->getType(); // (an object's field, through Self or a with)
+      const char *Why = nullptr;
+      if (!T)
+        Why = "a variable, a parameter or a field";
+      else if (T->isOpenArray() || T->isArrayOfConst() || T->isUntyped())
+        Why = "of a type that can be copied, not an open or untyped parameter";
+      else if (containsFile(T))
+        Why = "of a type that can be copied, not a file";
+      if (Why) {
+        Diags.error(Id.Loc,
+                    "'" + Id.Spelling + "' in the list of what a lambda copies "
+                    "must be " + Why,
+                    {Id.getRange()});
+        OK = false;
+        T = errorType();
+      }
+      P->setType(T);
+      P->setOwner(F);
+      P->setReadOnly();
+    }
+    if (!OK) {
+      F->setLambdaBad();
+      return false;
+    }
+    F->setResultType(RT);
+    auto *Result = Ctx.create<VarDecl>(F->getName(), nullptr, VarDecl::Result);
+    Result->setType(RT);
+    Result->setOwner(F);
+    F->setResultVar(Result);
+    declareAndCheckLambda(F);
+    return true;
   }
 
   /// Lambda R (at A) wanted as a method pointer: it gets a Self of its own,

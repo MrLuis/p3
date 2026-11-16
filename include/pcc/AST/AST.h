@@ -298,8 +298,13 @@ class CallExpr final : public Expr {
   llvm::ArrayRef<TypeSpec *> TypeArgs;
   bool VarCast = false; ///< set by Sema: T(x) of an untyped parameter x
   int MethodCast = 0;
+  /// The call of a lambda's copy factory, $copyN(k, s): that lambda (see
+  /// RoutineDecl::isCopyFactory).
+  RoutineDecl *CopyLambda = nullptr;
 
 public:
+  RoutineDecl *getCopyLambda() const { return CopyLambda; }
+  void setCopyLambda(RoutineDecl *L) { CopyLambda = L; }
   Expr *getCalleeValue() const { return CalleeValue; }
   void setCalleeValue(Expr *V) { CalleeValue = V; }
   llvm::ArrayRef<TypeSpec *> getTypeArgs() const { return TypeArgs; }
@@ -1793,6 +1798,7 @@ class RoutineDecl final : public Decl {
   bool TemplateMember = false;
   bool Lambda = false, LambdaDone = false, LambdaBad = false;
   bool Closure = false, HeapFrame = false, MethodLambda = false;
+  bool CopyFactory = false, Copied = false;
   VarDecl *LambdaSelf = nullptr;
   Identifier Capture;
   RoutineDecl *GenericDef = nullptr;
@@ -1964,6 +1970,15 @@ public:
   /// method's Self (getLambdaSelf) as its object. It is not a method of
   /// the class (isMethod is false) but has a Self (hasSelf).
   bool isMethodLambda() const { return MethodLambda; }
+  /// A lambda that copies what it uses, function[k, s](x) => e: the
+  /// lambda (isCopied) is made by a hidden function (isCopyFactory,
+  /// $copyN), nested where it is written, whose value parameters k and s
+  /// are the copies (read-only) and whose result is the lambda; the
+  /// expression is the call $copyN(k, s). Each call makes the copies anew.
+  bool isCopyFactory() const { return CopyFactory; }
+  void setCopyFactory() { CopyFactory = true; }
+  bool isCopied() const { return Copied; }
+  void setCopied() { Copied = true; }
   VarDecl *getLambdaSelf() const { return LambdaSelf; }
   void setMethodLambda(VarDecl *OuterSelf) {
     MethodLambda = true;

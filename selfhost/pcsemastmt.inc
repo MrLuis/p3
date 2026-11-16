@@ -4792,9 +4792,25 @@ var
   res: PType;
   w: PWithContext;
   ref: PNode;
-  inferred: boolean;
+  inferred, ok: boolean;
 begin
   visitCall := errorType;
+  { a lambda that copies what it uses: its factory, declared now }
+  if (e^.callDecl <> nil) and (e^.callDecl^.kind = dkRoutine) then
+    if e^.callDecl^.isCopyFactory then
+    begin
+      if not e^.callDecl^.lambdaDone then
+      begin
+        if wantedCall = e then
+          ok := completeCopyFactory(e^.callDecl, e, wantedType)
+        else
+          ok := completeCopyFactory(e^.callDecl, e, nil);
+        if not ok then
+          exit;
+      end;
+      if e^.callDecl^.lambdaBad then
+        exit;
+    end;
   w := nil;
   if e^.typeArgs.count = 0 then
     d := scopeLookup(cur, e^.callee.name, w)

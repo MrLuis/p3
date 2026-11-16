@@ -2261,12 +2261,21 @@ begin
   v := constParamRoot(e);
   if v = nil then
     exit(true);
-  if v^.isReadOnly then
-    ms('cannot modify constant ''')
+  if (v^.owner <> nil) and v^.owner^.isCopyFactory then
+  begin
+    ms('cannot modify ''');
+    maN(v^.ident.spelling);
+    ma(''', a copy made by this lambda (copies are read-only)');
+  end
   else
-    ms('cannot modify constant parameter ''');
-  maN(v^.ident.spelling);
-  ma('''');
+  begin
+    if v^.isReadOnly then
+      ms('cannot modify constant ''')
+    else
+      ms('cannot modify constant parameter ''');
+    maN(v^.ident.spelling);
+    ma('''');
+  end;
   errR(e^.b, nodeRange(e));
   noteDeclaredHere(v);
   checkModifiable := false;
@@ -7963,6 +7972,9 @@ begin
   if (e^.kind = nkAddrOf) and (e^.addrLambda <> nil) then
     if not e^.addrLambda^.lambdaDone then
       pendingLambda := e^.addrLambda;
+  if (e^.kind = nkCall) and (e^.copyLambda <> nil) then { one that copies }
+    if not e^.copyLambda^.lambdaDone then
+      pendingLambda := e^.copyLambda;
 end;
 
 { The types written in lambda l (of its parameters and result), resolved
@@ -8014,6 +8026,8 @@ begin
     exit;
   if ((pt^.routineResult <> nil) <> l^.isFunction) or
      (pt^.routineParams.count <> l^.params.count) then
+    exit;
+  if l^.isCopied and not pt^.routineReference then { (copies: a closure) }
     exit;
   cost := 0;
   for i := 0 to pt^.routineParams.count - 1 do
@@ -9205,18 +9219,13 @@ begin
   makeMethodLambda := true;
 end;
 
+procedure declareAndCheckLambda(r: PDecl); forward;
+
 procedure completeLambda(a: PNode; want: PType);
 var
   r, p, wp, res: PDecl;
   i: longint;
   t: PType;
-  savedLoop: longint;
-  savedSeq: pointer;
-  savedSeqScope: PPScope;
-  savedAssign, savedOwned, savedIndex, savedWanted: PNode;
-  savedAddr: PType;
-  savedKeep: boolean;
-  savedCur: PScope;
 begin
   r := a^.addrLambda;
   if (r = nil) or r^.lambdaDone then
@@ -9295,6 +9304,27 @@ begin
     res^.owner := r;
     r^.resultVar := res;
   end;
+  declareAndCheckLambda(r);
+  if r^.isFunction and (r^.resultType = nil) then
+  begin
+    r^.resultType := errorType;
+    r^.resultVar^.varType := errorType;
+  end;
+end;
+
+{ Lambda r (or a copy factory), its types known: declared here, nested in
+  the current routine, and its body checked now, in the middle of a
+  statement. }
+procedure declareAndCheckLambda(r: PDecl);
+var
+  savedLoop: longint;
+  savedSeq: pointer;
+  savedSeqScope: PPScope;
+  savedAssign, savedOwned, savedIndex, savedWanted: PNode;
+  savedAddr: PType;
+  savedKeep: boolean;
+  savedCur: PScope;
+begin
   r^.parent := curRoutine;
   if curRoutine <> nil then
     r^.level := curRoutine^.level + 1
@@ -9338,11 +9368,80 @@ begin
   wantedCall := savedWanted;
   addrOfTarget := savedAddr;
   keepCharLiterals := savedKeep;
-  if r^.isFunction and (r^.resultType = nil) then
+end;
+
+{ The copy factory f of a lambda that copies what it uses, called by e
+  where want is wanted: a closure must be. Its parameters, the copies, take
+  the types of the variables they copy (read-only); its result is want, its
+  body makes the lambda (completed for want). False after a diagnostic. }
+function completeCopyFactory(f: PDecl; e: PNode; want: PType): boolean;
+var
+  i: longint;
+  p, d, res: PDecl;
+  t: PType;
+  why: string;
+  ok: boolean;
+begin
+  completeCopyFactory := false;
+  f^.lambdaDone := true;
+  ok := want <> nil;
+  if ok then
+    ok := (want^.kind = tyRoutine) and want^.routineReference;
+  if not ok then
   begin
-    r^.resultType := errorType;
-    r^.resultVar^.varType := errorType;
+    ms('a lambda that copies what it uses must be a closure: a ''reference to'' ' +
+       'type must be wanted here');
+    errR(e^.b, nodeRange(e));
+    f^.lambdaBad := true;
+    exit;
   end;
+  ok := true;
+  for i := 0 to f^.params.count - 1 do
+  begin
+    p := PDecl(listGet(f^.params, i));
+    d := lookup(p^.ident.name);
+    t := nil;
+    if d <> nil then
+    begin
+      if d^.kind = dkVar then
+        t := d^.varType
+      else if d^.kind = dkField then
+        t := d^.fieldType; { (an object's field, through Self or a with) }
+    end;
+    why := '';
+    if t = nil then
+      why := 'a variable, a parameter or a field'
+    else if t^.kind in [tyOpenArray, tyArrayOfConst, tyUntyped] then
+      why := 'of a type that can be copied, not an open or untyped parameter'
+    else if containsFile(t) then
+      why := 'of a type that can be copied, not a file';
+    if why <> '' then
+    begin
+      ms('''');
+      maN(p^.ident.spelling);
+      ma(''' in the list of what a lambda copies must be ' + why);
+      errR(p^.ident.loc, identRange(p^.ident));
+      ok := false;
+      t := errorType;
+    end;
+    p^.varType := t;
+    p^.owner := f;
+    p^.isReadOnly := true;
+  end;
+  if not ok then
+  begin
+    f^.lambdaBad := true;
+    exit;
+  end;
+  f^.resultType := want;
+  res := newDecl(dkVar, f^.ident, f^.ident.loc);
+  res^.varSpec := nil;
+  res^.varKind := vkResult;
+  res^.varType := want;
+  res^.owner := f;
+  f^.resultVar := res;
+  declareAndCheckLambda(f);
+  completeCopyFactory := true;
 end;
 
 { A use, in a lambda, of d (named id, found through w): if d belongs to a

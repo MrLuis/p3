@@ -166,6 +166,14 @@ TypeDecl *Parser::reparseGenericType(const TypeDecl *G,
 Expr *Parser::parseLambda() {
   bool IsFunction = Tok.is(tok::kw_function);
   SourceLocation Loc = consumeToken();
+  // [k, s]: what it copies when it is made
+  llvm::SmallVector<Identifier, 4> Copies;
+  if (Tok.is(tok::l_square)) {
+    consumeToken();
+    if (!parseIdentList(Copies, "name of a variable to copy") ||
+        !expect(tok::r_square, "after the variables a lambda copies"))
+      return nullptr;
+  }
   llvm::SmallVector<VarDecl *, 4> Params;
   bool HasParamList = Tok.is(tok::l_paren);
   if (HasParamList) {
@@ -233,7 +241,36 @@ Expr *Parser::parseLambda() {
   auto *A = Ctx.create<AddrOfExpr>(SourceRange(Loc, PrevTokEnd),
                                    Ctx.create<NameRefExpr>(Name));
   A->setLambda(R);
-  return A;
+  if (Copies.empty())
+    return A;
+  // The copies: function $copyN(k, s) (its types Sema's) with the body
+  // $copyN := @$lambdaN, the lambda its own; the expression $copyN(k, s).
+  HiddenTypeDecls.pop_back();
+  R->setCopied();
+  std::string FN = "$copy" + std::to_string(++HiddenLambdas);
+  llvm::StringRef FNI = Ctx.getStrings().intern(FN);
+  Identifier FName{FNI, FNI, Loc};
+  llvm::SmallVector<VarDecl *, 4> FParams;
+  llvm::SmallVector<Expr *, 4> Args;
+  for (const Identifier &Id : Copies) {
+    FParams.push_back(Ctx.create<VarDecl>(Id, nullptr, VarDecl::ValueParam));
+    Args.push_back(Ctx.create<NameRefExpr>(Id));
+  }
+  Stmt *Set = Ctx.create<AssignStmt>(A->getRange(), Ctx.create<NameRefExpr>(FName),
+                                     A->getBeginLoc(), A);
+  auto *FBody = Ctx.create<CompoundStmt>(Set->getRange(),
+                                         Ctx.copyArray<Stmt *>({Set}));
+  auto *F = Ctx.create<RoutineDecl>(
+      Loc, FName, /*IsFunction=*/true, Ctx.copyArray<VarDecl *>(FParams), true,
+      nullptr, Ctx.create<Block>(Ctx.copyArray<Decl *>({R}), FBody), false);
+  F->setLambda();
+  F->setCopyFactory();
+  HiddenTypeDecls.push_back(F);
+  auto *C = Ctx.create<CallExpr>(SourceRange(Loc, PrevTokEnd), FName,
+                                 Ctx.copyArray<Expr *>(Args));
+  C->setCopyLambda(R);
+  C->setDecl(F); // (declared by Sema when it completes it)
+  return C;
 }
 
 // specialize TList<integer>, a type (objfpc)

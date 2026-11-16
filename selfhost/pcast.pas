@@ -190,7 +190,10 @@ type
            x's address }
          isVarCast: boolean;
          { TMethod(m): 0 no, 1 of a value, 2 of a variable }
-         methodCast: longint);
+         methodCast: longint;
+         { the call of a lambda's copy factory, $copyN(k, s): that lambda
+           (see isCopyFactory) }
+         copyLambda: PDecl);
       nkFormatted: (fmtValue, fmtWidth, fmtPrecision: PNode);
       { a template string with interpolations (tp, objfpc), an ansistring
         made of its text and of its values, each as write writes it:
@@ -580,6 +583,14 @@ type
                     Self }
                   isMethodLambda: boolean;
                   lambdaSelf: PDecl;
+                  { a lambda that copies what it uses, function[k, s](x) =>
+                    e: the lambda (isCopied) is made by a hidden function
+                    (isCopyFactory, $copyN), nested where it is written,
+                    whose value parameters k and s are the copies
+                    (read-only) and whose result is the lambda; the
+                    expression is the call $copyN(k, s), whose callDecl the
+                    parser sets. Each call makes the copies anew }
+                  isCopyFactory, isCopied: boolean;
                   isVirtual, isOverride, isAbstract, isClassMethod: boolean;
                   { overloading (objfpc): the overload directive, the next
                     routine of the name in the same scope or class and this

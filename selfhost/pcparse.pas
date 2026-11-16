@@ -6310,17 +6310,28 @@ function parseLambda: PNode;
 var
   isFunction, hasParamList, ok: boolean;
   loc: TLoc;
-  params, names, decls, stmts: TPtrList;
+  params, names, decls, stmts, copies, fParams, args, fDecls, fStmts: TPtrList;
   vk: TVarKind;
   ts, resultSpec: PTypeSpec;
   i, hiddenMark: longint;
-  name: TIdent;
-  e, bodyStmt, body, a: PNode;
-  r: PDecl;
+  name, fName: TIdent;
+  e, bodyStmt, body, a, setStmt, fBody, call: PNode;
+  r, f: PDecl;
+  id: PIdent;
 begin
   parseLambda := nil;
   isFunction := tok.kind = tkKwFunction;
   loc := consumeToken;
+  { [k, s]: what it copies when it is made }
+  listInit(copies);
+  if tok.kind = tkLSquare then
+  begin
+    consumeToken;
+    if not parseIdentList(copies, 'name of a variable to copy') then
+      exit;
+    if not expect(tkRSquare, 'after the variables a lambda copies') then
+      exit;
+  end;
   listInit(params);
   hasParamList := tok.kind = tkLParen;
   if hasParamList then
@@ -6399,6 +6410,45 @@ begin
   a^.inner := nameRef(name);
   a^.addrLambda := r;
   parseLambda := a;
+  if copies.count = 0 then
+    exit;
+  { the copies: function $copyN(k, s) (its types Sema's) with the body
+    $copyN := @$lambdaN, the lambda its own; the expression $copyN(k, s) }
+  hiddenTypeDecls.count := hiddenTypeDecls.count - 1;
+  r^.isCopied := true;
+  hiddenLambdas := hiddenLambdas + 1;
+  fName.name := intern('$copy' + intToStr(hiddenLambdas));
+  fName.spelling := fName.name;
+  fName.loc := loc;
+  listInit(fParams);
+  listInit(args);
+  for i := 0 to copies.count - 1 do
+  begin
+    id := PIdent(listGet(copies, i));
+    listAdd(fParams, newVar(id^, nil, vkValueParam));
+    listAdd(args, nameRef(id^));
+  end;
+  setStmt := newNode(nkAssign, a^.b, a^.e);
+  setStmt^.target := nameRef(fName);
+  setStmt^.assignLoc := a^.b;
+  setStmt^.value := a;
+  setStmt^.assignCompound := false;
+  listInit(fStmts);
+  listAdd(fStmts, setStmt);
+  fBody := newNode(nkCompound, setStmt^.b, setStmt^.e);
+  fBody^.stmts := fStmts;
+  listInit(fDecls);
+  listAdd(fDecls, r);
+  f := newRoutine(loc, fName, true, fParams, true, nil, newBlock(fDecls, fBody), false);
+  f^.isLambda := true;
+  f^.isCopyFactory := true;
+  listAdd(hiddenTypeDecls, f);
+  call := newNode(nkCall, loc, prevTokEnd);
+  call^.callee := fName;
+  call^.args := args;
+  call^.copyLambda := r;
+  call^.callDecl := f; { (declared by Sema when it completes it) }
+  parseLambda := call;
 end;
 
 function nestedStatement: PNode;

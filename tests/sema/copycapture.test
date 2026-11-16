@@ -1,0 +1,35 @@
+; Capture by copy (objfpc): function[k, s](x) => e copies k and s when the
+; closure is made. It must be a closure (a `reference to` type wanted);
+; what it copies must be a variable, a parameter or a field of a type that
+; can be copied; the copies are read-only.
+; RUN: not %pcc --mode=objfpc -ferror-limit=0 -c %S/Inputs/copycapture/errors.pas -o %t.o 2>&1 | FileCheck %s
+; CHECK: errors.pas:26:8: error: a lambda that copies what it uses must be a closure: a 'reference to' type must be wanted here
+; CHECK: errors.pas:27:17: error: 'items' in the list of what a lambda copies must be of a type that can be copied, not an open or untyped parameter
+; CHECK: errors.pas:28:24: error: cannot modify 'n', a copy made by this lambda (copies are read-only)
+; CHECK: errors.pas:29:17: error: 'nope' in the list of what a lambda copies must be a variable, a parameter or a field
+; CHECK: errors.pas:30:17: error: 'Run' in the list of what a lambda copies must be a variable, a parameter or a field
+; CHECK: errors.pas:31:8: error: this lambda has 1 parameter, but 'TFn' is wanted here
+; CHECK-NOT: error:
+;
+; RUN: not %pcc --mode=objfpc -ferror-limit=0 -c %S/Inputs/copycapture/syntax.pas -o %t.o 2>&1 | FileCheck --check-prefix=SYNTAX %s
+; SYNTAX: syntax.pas:8:18: error: expected ']' after the variables a lambda copies
+; SYNTAX: syntax.pas:9:17: error: expected name of a variable to copy
+;
+; The tree: a hidden function $copyN, whose value parameters are the copies
+; and whose result is the lambda; the expression calls it.
+; RUN: %pcc --mode=objfpc --emit-ast %S/Inputs/copycapture/ast.pas -o - | FileCheck --check-prefix=AST %s
+; AST: FunctionDecl '$copy2' : TFn <8:8>
+; AST-NEXT: ParamDecl 'k' : integer <8:17>
+; AST-NEXT: FunctionDecl '$lambda1' : integer <8:8>
+; AST: NameRefExpr 'k' parameter : integer <8:32>
+; AST: NameRefExpr '$copy2' function result : TFn <8:8>
+; AST: CallExpr '$copy2' : TFn <8:8>
+; AST-NEXT: NameRefExpr 'k' variable : integer <8:17>
+;
+; The code: the factory's frame, on the heap, holds the copies.
+; RUN: %pcc --mode=objfpc --emit-llvm %S/Inputs/copycapture/ast.pas -o %t.ll
+; RUN: FileCheck --check-prefix=IR %s < %t.ll
+; RUN: opt -passes=verify -disable-output %t.ll
+; IR: call { ptr, ptr } @"pas.$copy2"(ptr null, i32
+; IR-LABEL: define internal { ptr, ptr } @"pas.$copy2"(ptr %link, i32 %k)
+; IR: call ptr @__pas_frame_new(
