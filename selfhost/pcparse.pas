@@ -5841,6 +5841,41 @@ begin
           exit(parseSelectors(n));
         exit(n);
       end;
+    tkKwIf: { if c then a else b, a value (objfpc) }
+      if mode = lmObjFPC then
+      begin
+        lparen := consumeToken;
+        inner := parseExpression;
+        if inner = nil then
+          exit;
+        if not expect(tkKwThen, 'after the condition of a conditional ' +
+                      'expression') then
+          exit;
+        lo := parseExpression;
+        if lo = nil then
+          exit;
+        if tok.kind <> tkKwElse then
+        begin
+          diagError(tok.loc, 'expected ''else'': a conditional expression ' +
+                    'has a value either way');
+          diagNote(lparen, 'the conditional expression starts here');
+          exit;
+        end;
+        consumeToken;
+        hi := parseExpression;
+        if hi = nil then
+          exit;
+        n := newNode(nkCondExpr, lparen, prevTokEnd);
+        n^.ceCond := inner;
+        n^.ceThen := lo;
+        n^.ceElse := hi;
+        n^.ceLong := lx.longStrings;
+        n^.ceLowered := nil;
+        n^.ceResult := nil;
+        exit(n);
+      end
+      else
+        diagError(tok.loc, 'expected expression');
     tkKwInherited:
       exit(parseInherited);
     tkKwNot:

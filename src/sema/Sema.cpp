@@ -9611,6 +9611,14 @@ public:
       WantedCall = Value;
       WantedType = TargetTy;
     }
+    // if c then a else b: both branches are values for the type wanted.
+    if (auto *CE = llvm::dyn_cast<CondExpr>(Value); CE && !CE->getType()) {
+      Type *T = checkCond(CE, TargetTy);
+      CE->setType(T);
+      if (isManaged(T))
+        markUsesManaged();
+      return T;
+    }
     // A tuple written out takes the element types of the tuple wanted.
     if (auto *TE = llvm::dyn_cast<TupleExpr>(Value)) {
       auto *Want = llvm::dyn_cast<RecordType>(TargetTy);
@@ -9699,6 +9707,71 @@ public:
   }
 
   Type *visitTupleExpr(TupleExpr *E) { return checkTuple(E, nullptr); }
+
+  Type *visitCondExpr(CondExpr *E) { return checkCond(E, nullptr); }
+
+  /// if c then a else b, a value. Want: the type it is a value for, which
+  /// both branches then take; where they cannot, and without Want, its
+  /// type is the common type of the branches. It becomes an if statement
+  /// that assigns the branch chosen to a hidden variable.
+  Type *checkCond(CondExpr *E, Type *Want) {
+    checkCondition(E->getCond(), "if");
+    Type *A = Want ? checkValueFor(Want, E->getThen()) : check(E->getThen());
+    Type *B = Want ? checkValueFor(Want, E->getElse()) : check(E->getElse());
+    if (A->isError() || B->isError())
+      return errorType();
+    Type *R = nullptr;
+    if (Want && !Want->isError() && isAssignable(Want, A) &&
+        isAssignable(Want, B))
+      R = Want;
+    if (!R) {
+      Type *Str = E->hasLongStrings()
+                      ? static_cast<Type *>(Ctx.getAnsiStringType())
+                      : Ctx.getShortStringType(255);
+      Type *TA = A->isStringLiteral() ? Str : A;
+      Type *TB = B->isStringLiteral() ? Str : B;
+      if (isInferable(TA) && isInferable(TB))
+        R = commonType(TA, TB, Str);
+      else if (isInferable(TA) && isAssignable(TA, TB))
+        R = TA; // (nil, [] in the other branch)
+      else if (isInferable(TB) && isAssignable(TB, TA))
+        R = TB;
+      if (!R) {
+        Diags.error(E->getBeginLoc(),
+                    "the branches of this conditional expression have no "
+                    "type in common: " + quoted(A) + " and " + quoted(B),
+                    {E->getThen()->getRange(), E->getElse()->getRange()});
+        return errorType();
+      }
+    }
+    VarDecl *Tmp = makeHiddenVar(R, E->getBeginLoc());
+    if (!Tmp) {
+      Diags.error(E->getBeginLoc(),
+                  "a conditional expression can only be written in the "
+                  "statements of a routine or program",
+                  {E->getRange()});
+      return errorType();
+    }
+    auto Ref = [&](SourceLocation Loc) {
+      Identifier Id = Tmp->getName();
+      Id.Loc = Loc;
+      auto *N = Ctx.create<NameRefExpr>(Id);
+      N->setDecl(Tmp);
+      N->setType(R);
+      return N;
+    };
+    auto Assign = [&](Expr *V, Type *VT) {
+      auto *S = Ctx.create<AssignStmt>(V->getRange(), Ref(V->getBeginLoc()),
+                                       V->getBeginLoc(), V);
+      finishAssign(S, R, VT);
+      return S;
+    };
+    AssignStmt *Then = Assign(E->getThen(), A);
+    AssignStmt *Else = Assign(E->getElse(), B);
+    E->setLowered(Ctx.create<IfStmt>(E->getRange(), E->getCond(), Then, Else),
+                  Ref(E->getBeginLoc()));
+    return R;
+  }
 
   /// (a, b): a tuple value. Want: the tuple type it is a value for (with
   /// as many elements), whose element types its elements then take; where

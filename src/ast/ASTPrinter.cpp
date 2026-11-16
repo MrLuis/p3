@@ -1023,6 +1023,14 @@ public:
     for (Expr *X : E->getElements())
       visitExpr(X);
   }
+  void visitCondExpr(CondExpr *E) {
+    line("CondExpr");
+    end(E);
+    IndentScope I(Indent);
+    visitExpr(E->getCond());
+    visitExpr(E->getThen());
+    visitExpr(E->getElse());
+  }
   void visitNamedArgExpr(NamedArgExpr *E) {
     line("NamedArgExpr '") << E->getName().Name << '\'';
     end(E);

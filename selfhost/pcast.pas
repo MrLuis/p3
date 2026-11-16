@@ -48,7 +48,7 @@ type
     nkIntegerLit, nkRealLit, nkStringLit, nkNameRef, nkParen, nkUnary,
     nkBinary, nkCall, nkFormatted, nkIndex, nkField, nkNil, nkDeref,
     nkSetCtor, nkAddrOf, nkAggregate, nkIndirectCall, nkInherited, nkMove,
-    nkTemplate, nkTuple, nkNamedArg,
+    nkTemplate, nkTuple, nkNamedArg, nkCondExpr,
     { statements }
     nkEmpty, nkCompound, nkProcCall, nkAssign, nkIf, nkWhile, nkRepeat,
     nkFor, nkCase, nkWith, nkLabeled, nkGoto, nkIndirectCallStmt,
@@ -198,6 +198,13 @@ type
         argument for the parameter naName. Sema puts the arguments of such
         a call in the order of the parameters, without these nodes }
       nkNamedArg: (naName: TIdent; naValue: PNode);
+      { if ceCond then ceThen else ceElse, as an expression (objfpc); only
+        the branch chosen is evaluated. ceLong: H+ there. Sema: ceLowered,
+        the statement if ceCond then tmp := ceThen else tmp := ceElse for
+        a hidden variable tmp, which code generation runs, and ceResult,
+        tmp, the value }
+      nkCondExpr: (ceCond, ceThen, ceElse: PNode; ceLong: boolean;
+                   ceLowered, ceResult: PNode);
       { index: base[index]; field: base.fieldName; fieldDecl is a field,
         or (objfpc) a method or property of a class }
       { objfpc: an array property (obj.P[i, j], P[i] or obj[i], the default

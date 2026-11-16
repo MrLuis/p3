@@ -2738,6 +2738,7 @@ begin
     exit(irLoad(irPtrT, openDescriptor(e), 'data'));
   case e^.kind of
     nkTuple: emitAddress := emitTuple(e);
+    nkCondExpr: emitAddress := visitExpr(e);
     nkBinary, nkUnary:
       { a record's operator returning a record: a temporary holding it }
       emitAddress := visitExpr(e);
@@ -5504,6 +5505,16 @@ begin
     nkMove: visitExprKind := emitMove(e);
     nkTemplate: visitExprKind := emitTemplate(e);
     nkTuple: visitExprKind := emitTuple(e);
+    nkCondExpr:
+      begin
+        { the if statement Sema made of it sets a hidden variable, which
+          is the value }
+        visitStmt(e^.ceLowered);
+        if isStructured(e^.typ) then
+          visitExprKind := emitAddress(e^.ceResult)
+        else
+          visitExprKind := visitExpr(e^.ceResult);
+      end;
     nkUnary: visitExprKind := visitUnary(e);
     nkBinary: visitExprKind := visitBinary(e);
     nkCall: visitExprKind := visitCall(e);

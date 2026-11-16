@@ -475,6 +475,35 @@ public:
   static bool classof(const Expr *E) { return E->getKind() == EK_Tuple; }
 };
 
+class IfStmt;
+
+/// if c then a else b, as an expression (objfpc): a where c holds, else b;
+/// only the one chosen is evaluated.
+class CondExpr final : public Expr {
+  Expr *Cond, *Then, *Else;
+  bool LongStrings; ///< {$H+} here: string constants give an ansistring
+  /// Set by Sema: `if Cond then tmp := Then else tmp := Else` for a hidden
+  /// variable tmp, which code generation runs, and tmp, the value.
+  IfStmt *Lowered = nullptr;
+  NameRefExpr *Result = nullptr;
+
+public:
+  CondExpr(SourceRange R, Expr *Cond, Expr *Then, Expr *Else, bool LongStrings)
+      : Expr(EK_Cond, R), Cond(Cond), Then(Then), Else(Else),
+        LongStrings(LongStrings) {}
+  Expr *getCond() const { return Cond; }
+  Expr *getThen() const { return Then; }
+  Expr *getElse() const { return Else; }
+  bool hasLongStrings() const { return LongStrings; }
+  IfStmt *getLowered() const { return Lowered; }
+  NameRefExpr *getResult() const { return Result; }
+  void setLowered(IfStmt *S, NameRefExpr *R) {
+    Lowered = S;
+    Result = R;
+  }
+  static bool classof(const Expr *E) { return E->getKind() == EK_Cond; }
+};
+
 /// @x  (Turbo/FPC): an untyped pointer to a variable.
 class AddrOfExpr final : public Expr {
   Expr *Operand;

@@ -38,6 +38,7 @@ EXPR(Move)            // move p: an owned variable's object    (objfpc)
 EXPR(Template)        // `a ${x} b`: a template string         (TP)
 EXPR(Tuple)           // (a, b): a tuple value                 (objfpc)
 EXPR(NamedArg)        // Name := e: a named argument           (objfpc)
+EXPR(Cond)            // if c then a else b                    (objfpc)
 
 // Statements
 STMT(Empty)

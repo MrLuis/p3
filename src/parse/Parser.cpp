@@ -4209,6 +4209,33 @@ Expr *Parser::parseFactor() {
       return parseSelectors(Paren);
     return Paren;
   }
+  case tok::kw_if: { // if c then a else b, a value (objfpc)
+    if (!LangOpts.ObjKeywords) {
+      Diags.error(Tok.getLocation(), "expected expression");
+      return nullptr;
+    }
+    SourceLocation IfLoc = consumeToken();
+    Expr *Cond = parseExpression();
+    if (!Cond || !expect(tok::kw_then, "after the condition of a conditional "
+                                       "expression"))
+      return nullptr;
+    Expr *Then = parseExpression();
+    if (!Then)
+      return nullptr;
+    if (Tok.isNot(tok::kw_else)) {
+      Diags.error(Tok.getLocation(),
+                  "expected 'else': a conditional expression has a value "
+                  "either way");
+      Diags.note(IfLoc, "the conditional expression starts here");
+      return nullptr;
+    }
+    consumeToken();
+    Expr *Else = parseExpression();
+    if (!Else)
+      return nullptr;
+    return Ctx.create<CondExpr>(SourceRange(IfLoc, PrevTokEnd), Cond, Then,
+                                Else, Lex.longStrings());
+  }
   case tok::kw_inherited:
     return parseInherited();
   case tok::kw_not: {

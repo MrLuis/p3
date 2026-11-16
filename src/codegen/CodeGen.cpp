@@ -2062,6 +2062,8 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
     switch (E->getKind()) {
     case Expr::EK_Tuple:
       return emitTuple(llvm::cast<TupleExpr>(E));
+    case Expr::EK_Cond:
+      return visitExpr(E);
     case Expr::EK_Binary:
     case Expr::EK_Unary:
       // A record's operator returning a record: a temporary holding it.
@@ -6884,6 +6886,14 @@ public:
   }
 
   llvm::Value *visitTupleExpr(TupleExpr *E) { return emitTuple(E); }
+
+  /// if c then a else b: the if statement Sema made of it sets a hidden
+  /// variable, which is the value.
+  llvm::Value *visitCondExpr(CondExpr *E) {
+    visitStmt(E->getLowered());
+    return E->getType()->isStructured() ? emitAddress(E->getResult())
+                                        : visitExpr(E->getResult());
+  }
 
   llvm::Value *visitAggregateExpr(AggregateExpr *) {
     llvm_unreachable("aggregates only initialize typed constants");

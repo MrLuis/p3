@@ -2791,6 +2791,7 @@ begin
 end;
 
 function checkTuple(e: PNode; want: PType): PType; forward;
+function checkCond(e: PNode; want: PType): PType; forward;
 
 function checkValueFor(targetTy: PType; value: PNode): PType;
 var
@@ -2804,6 +2805,15 @@ begin
   begin
     wantedCall := value;
     wantedType := targetTy;
+  end;
+  { if c then a else b: both branches are values for the type wanted }
+  if (value^.kind = nkCondExpr) and (value^.typ = nil) then
+  begin
+    t := checkCond(value, targetTy);
+    value^.typ := t;
+    if isManaged(t) then
+      markUsesManaged;
+    exit(t);
   end;
   { a tuple written out takes the element types of the tuple wanted }
   if (value^.kind = nkTuple) and (targetTy^.kind = tyRecord) then
@@ -2971,6 +2981,108 @@ begin
 end;
 
 procedure finishAssign(s: PNode; targetTy, valueTy: PType); forward;
+
+{ if c then a else b, a value. want: the type it is a value for, which both
+  branches then take; where they cannot, and without want, its type is the
+  common type of the branches. It becomes an if statement that assigns the
+  branch chosen to a hidden variable. }
+function checkCond(e: PNode; want: PType): PType;
+var
+  a, b, r, str, ta, tb: PType;
+  tmp: PDecl;
+  thenS, elseS, low: PNode;
+
+  function ref(loc: TLoc): PNode;
+  var
+    id: TIdent;
+    n: PNode;
+  begin
+    id := tmp^.ident;
+    id.loc := loc;
+    n := nameRefNode(id);
+    n^.refDecl := tmp;
+    n^.typ := r;
+    ref := n;
+  end;
+
+  function assign(v: PNode; vt: PType): PNode;
+  var
+    s: PNode;
+  begin
+    s := newNode(nkAssign, v^.b, v^.e);
+    s^.target := ref(v^.b);
+    s^.assignLoc := v^.b;
+    s^.value := v;
+    s^.assignCompound := false;
+    finishAssign(s, r, vt);
+    assign := s;
+  end;
+
+begin
+  checkCond := errorType;
+  checkCondition(e^.ceCond, 'if');
+  if want <> nil then
+  begin
+    a := checkValueFor(want, e^.ceThen);
+    b := checkValueFor(want, e^.ceElse);
+  end
+  else
+  begin
+    a := check(e^.ceThen);
+    b := check(e^.ceElse);
+  end;
+  if isError(a) or isError(b) then
+    exit;
+  r := nil;
+  if want <> nil then
+    if not isError(want) and isAssignable(want, a) and isAssignable(want, b) then
+      r := want;
+  if r = nil then
+  begin
+    if e^.ceLong then
+      str := ansiStringType
+    else
+      str := shortStringType(255);
+    ta := a;
+    if a^.kind = tyStringLit then
+      ta := str;
+    tb := b;
+    if b^.kind = tyStringLit then
+      tb := str;
+    if isInferable(ta) and isInferable(tb) then
+      r := commonType(ta, tb, str)
+    else if isInferable(ta) and isAssignable(ta, tb) then
+      r := ta { (nil, [] in the other branch) }
+    else if isInferable(tb) and isAssignable(tb, ta) then
+      r := tb;
+    if r = nil then
+    begin
+      ms('the branches of this conditional expression have no type in common: ');
+      maT(a);
+      ma(' and ');
+      maT(b);
+      errRR(e^.b, nodeRange(e^.ceThen), nodeRange(e^.ceElse));
+      exit;
+    end;
+  end;
+  tmp := makeHiddenVar(r, e^.b);
+  if tmp = nil then
+  begin
+    ms('a conditional expression can only be written in the statements of ' +
+       'a routine or program');
+    errR(e^.b, nodeRange(e));
+    exit;
+  end;
+  thenS := assign(e^.ceThen, a);
+  elseS := assign(e^.ceElse, b);
+  low := newNode(nkIf, e^.b, e^.e);
+  low^.cond := e^.ceCond;
+  low^.thenStmt := thenS;
+  low^.elseStmt := elseS;
+  e^.ceLowered := low;
+  e^.ceResult := ref(e^.b);
+  checkCond := r;
+end;
 
 procedure visitAssign(s: PNode);
 var
@@ -5490,6 +5602,7 @@ begin
     nkBinary: visitExpr := visitBinary(e);
     nkCall: visitExpr := visitCall(e);
     nkTuple: visitExpr := checkTuple(e, nil);
+    nkCondExpr: visitExpr := checkCond(e, nil);
     nkTemplate:
       begin
         { an ansistring; each value is one write can write, with the field

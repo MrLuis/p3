@@ -1423,6 +1423,16 @@ begin
           visitExpr(PNode(listGet(e^.tmplParts, i)));
         indent := indent - 2;
       end;
+    nkCondExpr:
+      begin
+        line('CondExpr');
+        endExpr(e);
+        indent := indent + 2;
+        visitExpr(e^.ceCond);
+        visitExpr(e^.ceThen);
+        visitExpr(e^.ceElse);
+        indent := indent - 2;
+      end;
     nkTuple:
       begin
         line('TupleExpr');

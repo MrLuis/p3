@@ -1,0 +1,37 @@
+; Conditional expressions (objfpc): if c then a else b. The condition is a
+; boolean; the branches take the type wanted, or have a common type; the
+; expression is not a variable.
+; RUN: not %pcc --mode=objfpc -ferror-limit=0 -c %S/Inputs/condexpr/errors.pas -o %t.o 2>&1 | FileCheck %s
+; CHECK: errors.pas:8:7: error: a conditional expression can only be written in the statements of a routine or program
+; CHECK: errors.pas:15:11: error: condition of 'if' must be of type 'boolean', not 'integer'
+; CHECK: errors.pas:16:8: error: the branches of this conditional expression have no type in common: 'integer' and 'char'
+; CHECK: errors.pas:17:5: error: assigning to 'integer' from incompatible type 'real'
+; CHECK: errors.pas:18:5: error: assigning to 'ansistring' from incompatible type 'integer'
+; CHECK: errors.pas:19:12: error: the branches of this conditional expression have no type in common: 'integer' and 'ansistring'
+; CHECK: errors.pas:20:12: error: the branches of this conditional expression have no type in common: 'TRec' and 'integer'
+; CHECK: errors.pas:21:12: error: the branches of this conditional expression have no type in common: 'nil' and 'nil'
+; CHECK: errors.pas:22:18: error: use of undeclared identifier 'nope'; did you mean 'copy'?
+; CHECK: errors.pas:23:3: error: expression is not assignable
+; CHECK-NOT: error:
+;
+; RUN: not %pcc --mode=objfpc -c %S/Inputs/condexpr/syntax.pas -o %t.o 2>&1 | FileCheck --check-prefix=SYNTAX %s
+; SYNTAX: syntax.pas:6:19: error: expected 'else': a conditional expression has a value either way
+; SYNTAX: syntax.pas:6:8: note: the conditional expression starts here
+; SYNTAX: syntax.pas:7:12: error: expected 'then' after the condition of a conditional expression
+; SYNTAX: syntax.pas:8:18: error: expected expression
+;
+; RUN: not %pcc --mode=tp -c %S/Inputs/condexpr/tp.pas -o %t.o 2>&1 | FileCheck --check-prefix=TP %s
+; TP: tp.pas:5:8: error: expected expression
+;
+; The code: an if statement that sets a hidden variable.
+; RUN: %pcc --mode=objfpc --emit-llvm %S/Inputs/condexpr/code.pas -o %t.ll
+; RUN: FileCheck --check-prefix=IR %s < %t.ll
+; RUN: opt -passes=verify -disable-output %t.ll
+; IR-LABEL: define internal i32 @pas.pick(
+; IR: br i1 %{{.*}}, label %if.then, label %if.else
+; IR: if.then:
+; IR: store i32 %a{{[0-9]*}}, ptr %"$tuple1"
+; IR: if.end:
+; IR: load i32, ptr %"$tuple1"
+; IR: if.else:
+; IR: store i32 %b{{[0-9]*}}, ptr %"$tuple1"
