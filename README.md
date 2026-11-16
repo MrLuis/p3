@@ -809,8 +809,17 @@ What it copies is a variable, a parameter (also `var` and `const` ones,
 whose values are copied) or a field of the object (`[Name]` in a method:
 its value now, which outlives the object). Not open-array, untyped or file
 values. A lambda that copies must be a closure: a `reference to` type is
-wanted where it is written, also when it chooses an overload. Copying
-everything a lambda uses (C++'s `[=]`) is not supported: list the names.
+wanted where it is written, also when it chooses an overload.
+
+`[=]` copies everything the lambda uses: every variable and parameter of
+the routines around it that its body names (also in lambdas inside it).
+Globals and the object's members (through Self) are shared, as without
+copies; names the lambda declares itself (its parameters) are its own.
+
+```pascal
+for i := 0 to n - 1 do
+  fs[i] := function[=]: Integer => i * scale + global;  { i, scale copied }
+```
 
 A `reference to` type's result may be a method pointer, a short string or
 a record, as an `of object` type's. Not supported: `reference to ... of

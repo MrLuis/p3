@@ -10502,6 +10502,24 @@ public:
       F->setLambdaBad();
       return false;
     }
+    if (F->isCopyAll()) { // the names that are variables of routines
+      llvm::SmallVector<VarDecl *, 4> Kept;
+      llvm::SmallVector<Expr *, 4> KeptArgs;
+      for (size_t I = 0; I < F->getParams().size(); ++I) {
+        WithContext *W = nullptr;
+        auto *V = llvm::dyn_cast_or_null<VarDecl>(
+            Cur->lookup(F->getParams()[I]->getName().Name, &W));
+        Type *T = V ? V->getType() : nullptr;
+        if (V && !W && V->getOwner() && !V->isTypedConst() &&
+            !V->isClassVar() && T && !T->isOpenArray() &&
+            !T->isArrayOfConst() && !T->isUntyped() && !containsFile(T)) {
+          Kept.push_back(F->getParams()[I]);
+          KeptArgs.push_back(E->getArgs()[I]);
+        }
+      }
+      F->setParams(Ctx.copyArray<VarDecl *>(Kept));
+      E->setArgs(Ctx.copyArray<Expr *>(KeptArgs));
+    }
     bool OK = true;
     for (VarDecl *P : F->getParams()) {
       const Identifier &Id = P->getName();

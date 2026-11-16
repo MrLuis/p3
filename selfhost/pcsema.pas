@@ -9380,7 +9380,9 @@ var
   p, d, res: PDecl;
   t: PType;
   why: string;
-  ok: boolean;
+  ok, keep: boolean;
+  kept, keptArgs: TPtrList;
+  w: PWithContext;
 begin
   completeCopyFactory := false;
   f^.lambdaDone := true;
@@ -9394,6 +9396,30 @@ begin
     errR(e^.b, nodeRange(e));
     f^.lambdaBad := true;
     exit;
+  end;
+  if f^.isCopyAll then { the names that are variables of routines }
+  begin
+    listInit(kept);
+    listInit(keptArgs);
+    for i := 0 to f^.params.count - 1 do
+    begin
+      w := nil;
+      d := scopeLookup(cur, PDecl(listGet(f^.params, i))^.ident.name, w);
+      keep := false;
+      if (d <> nil) and (w = nil) then
+        if (d^.kind = dkVar) and (d^.owner <> nil) and
+           ((d^.init = nil) or d^.isInitVar) and not d^.isClassVar and
+           (d^.varType <> nil) then
+          keep := not (d^.varType^.kind in [tyOpenArray, tyArrayOfConst, tyUntyped]) and
+                  not containsFile(d^.varType);
+      if keep then
+      begin
+        listAdd(kept, listGet(f^.params, i));
+        listAdd(keptArgs, listGet(e^.args, i));
+      end;
+    end;
+    f^.params := kept;
+    e^.args := keptArgs;
   end;
   ok := true;
   for i := 0 to f^.params.count - 1 do

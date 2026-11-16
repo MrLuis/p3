@@ -86,6 +86,9 @@ bool Parser::inlineOn() const {
 }
 
 SourceLocation Parser::consumeToken() {
+  if (LambdaNames && Tok.is(tok::identifier) && LastKind != tok::period)
+    LambdaNames->push_back(makeIdentifier(Tok));
+  LastKind = Tok.getKind();
   if (Recording)
     Recording->push_back(Tok);
   if (StmtTokens)
@@ -166,13 +169,19 @@ TypeDecl *Parser::reparseGenericType(const TypeDecl *G,
 Expr *Parser::parseLambda() {
   bool IsFunction = Tok.is(tok::kw_function);
   SourceLocation Loc = consumeToken();
-  // [k, s]: what it copies when it is made
+  // [k, s]: what it copies when it is made; [=]: everything it uses
   llvm::SmallVector<Identifier, 4> Copies;
+  bool CopyAll = false;
   if (Tok.is(tok::l_square)) {
     consumeToken();
-    if (!parseIdentList(Copies, "name of a variable to copy") ||
-        !expect(tok::r_square, "after the variables a lambda copies"))
+    if (Tok.is(tok::equal) && peekToken().is(tok::r_square)) {
+      consumeToken();
+      consumeToken();
+      CopyAll = true;
+    } else if (!parseIdentList(Copies, "name of a variable to copy") ||
+               !expect(tok::r_square, "after the variables a lambda copies")) {
       return nullptr;
+    }
   }
   llvm::SmallVector<VarDecl *, 4> Params;
   bool HasParamList = Tok.is(tok::l_paren);
@@ -217,16 +226,35 @@ Expr *Parser::parseLambda() {
   Identifier Name{N, N, Loc};
   // What its body declares by the way (lambdas in it) is its own.
   size_t HiddenMark = HiddenTypeDecls.size();
+  // [=]: the names its body uses (a lambda's in it too)
+  std::vector<Identifier> Used;
+  std::vector<Identifier> *SavedNames = LambdaNames;
+  if (CopyAll)
+    LambdaNames = &Used;
   Stmt *BodyStmt;
   if (IsFunction) {
     Expr *E = parseExpression();
-    if (!E)
+    if (!E) {
+      LambdaNames = SavedNames;
       return nullptr;
+    }
     BodyStmt = Ctx.create<AssignStmt>(E->getRange(),
                                       Ctx.create<NameRefExpr>(Name),
                                       E->getBeginLoc(), E);
   } else {
     BodyStmt = parseStatement();
+  }
+  if (CopyAll) {
+    LambdaNames = SavedNames;
+    if (SavedNames)
+      SavedNames->insert(SavedNames->end(), Used.begin(), Used.end());
+    // Each name once, in order; not its parameters, Result or Self.
+    llvm::StringSet<> Seen{"result", "self"};
+    for (VarDecl *P : Params)
+      Seen.insert(P->getName().Name);
+    for (const Identifier &Id : Used)
+      if (Seen.insert(Id.Name).second)
+        Copies.push_back(Id);
   }
   auto *Body = Ctx.create<CompoundStmt>(BodyStmt->getRange(),
                                         Ctx.copyArray<Stmt *>({BodyStmt}));
@@ -241,7 +269,7 @@ Expr *Parser::parseLambda() {
   auto *A = Ctx.create<AddrOfExpr>(SourceRange(Loc, PrevTokEnd),
                                    Ctx.create<NameRefExpr>(Name));
   A->setLambda(R);
-  if (Copies.empty())
+  if (Copies.empty() && !CopyAll)
     return A;
   // The copies: function $copyN(k, s) (its types Sema's) with the body
   // $copyN := @$lambdaN, the lambda its own; the expression $copyN(k, s).
@@ -265,6 +293,8 @@ Expr *Parser::parseLambda() {
       nullptr, Ctx.create<Block>(Ctx.copyArray<Decl *>({R}), FBody), false);
   F->setLambda();
   F->setCopyFactory();
+  if (CopyAll)
+    F->setCopyAll();
   HiddenTypeDecls.push_back(F);
   auto *C = Ctx.create<CallExpr>(SourceRange(Loc, PrevTokEnd), FName,
                                  Ctx.copyArray<Expr *>(Args));

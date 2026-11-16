@@ -1798,7 +1798,7 @@ class RoutineDecl final : public Decl {
   bool TemplateMember = false;
   bool Lambda = false, LambdaDone = false, LambdaBad = false;
   bool Closure = false, HeapFrame = false, MethodLambda = false;
-  bool CopyFactory = false, Copied = false;
+  bool CopyFactory = false, Copied = false, CopyAll = false;
   VarDecl *LambdaSelf = nullptr;
   Identifier Capture;
   RoutineDecl *GenericDef = nullptr;
@@ -1847,6 +1847,7 @@ public:
   bool isFunction() const { return IsFunction; }
   bool isProcedure() const { return !IsFunction; }
   llvm::ArrayRef<VarDecl *> getParams() const { return Params; }
+  void setParams(llvm::ArrayRef<VarDecl *> P) { Params = P; }
   bool hasParamList() const { return HasParamList; }
   TypeSpec *getResultTypeSpec() const { return ResultTS; }
   Type *getResultType() const { return ResultTy; }
@@ -1979,6 +1980,11 @@ public:
   void setCopyFactory() { CopyFactory = true; }
   bool isCopied() const { return Copied; }
   void setCopied() { Copied = true; }
+  /// function[=](x) => e: the factory's parameters are the names its body
+  /// uses (as the parser saw them); Sema keeps those that are variables or
+  /// parameters of the routines around it.
+  bool isCopyAll() const { return CopyAll; }
+  void setCopyAll() { CopyAll = true; }
   VarDecl *getLambdaSelf() const { return LambdaSelf; }
   void setMethodLambda(VarDecl *OuterSelf) {
     MethodLambda = true;

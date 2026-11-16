@@ -591,6 +591,11 @@ type
                     expression is the call $copyN(k, s), whose callDecl the
                     parser sets. Each call makes the copies anew }
                   isCopyFactory, isCopied: boolean;
+                  { function[=](x) => e: the factory's parameters are the
+                    names its body uses (as the parser saw them); Sema
+                    keeps those that are variables or parameters of the
+                    routines around it }
+                  isCopyAll: boolean;
                   isVirtual, isOverride, isAbstract, isClassMethod: boolean;
                   { overloading (objfpc): the overload directive, the next
                     routine of the name in the same scope or class and this

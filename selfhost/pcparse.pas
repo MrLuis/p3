@@ -81,6 +81,11 @@ var
     far (of PToken; for += -= *= /=, which read the designator again), or
     nil }
   stmtTokens: PPtrList;
+  { the body of a lambda that copies everything it uses ([=]): the names
+    consumed (of PIdent; not after a '.'), or nil. lastKind: the last token
+    consumed }
+  lambdaNames: PPtrList;
+  lastKind: TTokenKind;
   { in parseRoutineDecl: a class constructor or destructor's
     implementation }
   parsingClassInit: boolean;
@@ -154,6 +159,8 @@ procedure startParser(fid: longint; m: TLangMode);
 begin
   recordBodySkipped := false;
   recording := nil;
+  lambdaNames := nil;
+  lastKind := tkEOF;
   replay := nil;
   stmtTokens := nil;
   parsingClassInit := false;
@@ -173,10 +180,20 @@ begin
   lexNext(lx, tok);
 end;
 
+function makeIdentifier(const t: TToken): TIdent; forward;
+
 function consumeToken: TLoc;
 var
   p: PToken;
+  id: PIdent;
 begin
+  if (lambdaNames <> nil) and (tok.kind = tkIdentifier) and (lastKind <> tkPeriod) then
+  begin
+    id := PIdent(arenaAlloc(sizeof(TIdent)));
+    id^ := makeIdentifier(tok);
+    listAdd(lambdaNames^, id);
+  end;
+  lastKind := tok.kind;
   if recording <> nil then
   begin
     p := PToken(arenaAlloc(sizeof(TToken)));
@@ -6310,10 +6327,12 @@ function parseLambda: PNode;
 var
   isFunction, hasParamList, ok: boolean;
   loc: TLoc;
-  params, names, decls, stmts, copies, fParams, args, fDecls, fStmts: TPtrList;
+  params, names, decls, stmts, copies, fParams, args, fDecls, fStmts, used: TPtrList;
+  savedNames: PPtrList;
+  copyAll, dup: boolean;
   vk: TVarKind;
   ts, resultSpec: PTypeSpec;
-  i, hiddenMark: longint;
+  i, j, hiddenMark: longint;
   name, fName: TIdent;
   e, bodyStmt, body, a, setStmt, fBody, call: PNode;
   r, f: PDecl;
@@ -6322,15 +6341,25 @@ begin
   parseLambda := nil;
   isFunction := tok.kind = tkKwFunction;
   loc := consumeToken;
-  { [k, s]: what it copies when it is made }
+  { [k, s]: what it copies when it is made; [=]: everything it uses }
   listInit(copies);
+  copyAll := false;
   if tok.kind = tkLSquare then
   begin
     consumeToken;
-    if not parseIdentList(copies, 'name of a variable to copy') then
-      exit;
-    if not expect(tkRSquare, 'after the variables a lambda copies') then
-      exit;
+    if (tok.kind = tkEqual) and (peekKind = tkRSquare) then
+    begin
+      consumeToken;
+      consumeToken;
+      copyAll := true;
+    end
+    else
+    begin
+      if not parseIdentList(copies, 'name of a variable to copy') then
+        exit;
+      if not expect(tkRSquare, 'after the variables a lambda copies') then
+        exit;
+    end;
   end;
   listInit(params);
   hasParamList := tok.kind = tkLParen;
@@ -6381,11 +6410,19 @@ begin
   name.loc := loc;
   { what its body declares by the way (lambdas in it) is its own }
   hiddenMark := hiddenTypeDecls.count;
+  { [=]: the names its body uses (a lambda's in it too) }
+  listInit(used);
+  savedNames := lambdaNames;
+  if copyAll then
+    lambdaNames := @used;
   if isFunction then
   begin
     e := parseExpression;
     if e = nil then
+    begin
+      lambdaNames := savedNames;
       exit;
+    end;
     bodyStmt := newNode(nkAssign, e^.b, e^.e);
     bodyStmt^.target := nameRef(name);
     bodyStmt^.assignLoc := e^.b;
@@ -6394,6 +6431,27 @@ begin
   end
   else
     bodyStmt := nestedStatement;
+  if copyAll then
+  begin
+    lambdaNames := savedNames;
+    if savedNames <> nil then
+      for i := 0 to used.count - 1 do
+        listAdd(savedNames^, listGet(used, i));
+    { each name once, in order; not its parameters, Result or Self }
+    for i := 0 to used.count - 1 do
+    begin
+      id := PIdent(listGet(used, i));
+      dup := (id^.name = intern('result')) or (id^.name = intern('self'));
+      for j := 0 to params.count - 1 do
+        if PDecl(listGet(params, j))^.ident.name = id^.name then
+          dup := true;
+      for j := 0 to copies.count - 1 do
+        if PIdent(listGet(copies, j))^.name = id^.name then
+          dup := true;
+      if not dup then
+        listAdd(copies, id);
+    end;
+  end;
   listInit(stmts);
   listAdd(stmts, bodyStmt);
   body := newNode(nkCompound, bodyStmt^.b, bodyStmt^.e);
@@ -6410,7 +6468,7 @@ begin
   a^.inner := nameRef(name);
   a^.addrLambda := r;
   parseLambda := a;
-  if copies.count = 0 then
+  if (copies.count = 0) and not copyAll then
     exit;
   { the copies: function $copyN(k, s) (its types Sema's) with the body
     $copyN := @$lambdaN, the lambda its own; the expression $copyN(k, s) }
@@ -6442,6 +6500,7 @@ begin
   f := newRoutine(loc, fName, true, fParams, true, nil, newBlock(fDecls, fBody), false);
   f^.isLambda := true;
   f^.isCopyFactory := true;
+  f^.isCopyAll := copyAll;
   listAdd(hiddenTypeDecls, f);
   call := newNode(nkCall, loc, prevTokEnd);
   call^.callee := fName;

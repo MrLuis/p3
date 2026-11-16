@@ -1,0 +1,23 @@
+; Copying everything used (objfpc): function[=](x) => e. Its copies are the
+; variables and parameters of the routines around it that its body names
+; (not globals, nor what it does not use); it must be a closure, and the
+; copies are read-only.
+; RUN: not %pcc --mode=objfpc -ferror-limit=0 -c %S/Inputs/copyall/errors.pas -o %t.o 2>&1 | FileCheck %s
+; CHECK: errors.pas:13:8: error: a lambda that copies what it uses must be a closure: a 'reference to' type must be wanted here
+; CHECK: errors.pas:14:24: error: cannot modify 'k', a copy made by this lambda (copies are read-only)
+; CHECK-NOT: error:
+;
+; RUN: not %pcc --mode=objfpc -c %S/Inputs/copyall/syntax.pas -o %t.o 2>&1 | FileCheck --check-prefix=SYNTAX %s
+; SYNTAX: syntax.pas:8:17: error: expected name of a variable to copy
+;
+; The factory copies k and s, not g (a global), x (its parameter) or
+; unused.
+; RUN: %pcc --mode=objfpc --emit-ast %S/Inputs/copyall/ast.pas -o - | FileCheck --check-prefix=AST %s
+; AST: FunctionDecl '$copy2' : TFn <11:11>
+; AST-NEXT: ParamDecl 'k' : integer <11:33>
+; AST-NEXT: ParamDecl 's' : string <11:48>
+; AST-NEXT: FunctionDecl '$lambda1' : integer <11:11>
+; AST: CallExpr '$copy2' : TFn <11:11>
+; AST-NEXT: NameRefExpr 'k' parameter : integer <11:33>
+; AST-NEXT: NameRefExpr 's' parameter : string <11:48>
+; AST-NEXT: EmptyStmt <12:1>

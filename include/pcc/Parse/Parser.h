@@ -141,6 +141,10 @@ class Parser {
                            llvm::SmallVectorImpl<TypeSpec *> &TypeArgs);
   bool HasPeek = false;
   SourceLocation PrevTokEnd;  ///< end of the last consumed token
+  /// The body of a lambda that copies everything it uses ([=]): the names
+  /// consumed (not after a '.'), or null. LastKind: the last token consumed.
+  std::vector<Identifier> *LambdaNames = nullptr;
+  tok::TokenKind LastKind = tok::unknown;
 
   // Token helpers
   SourceLocation consumeToken();
