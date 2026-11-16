@@ -32,6 +32,35 @@ void _longjmp(jmp_buf env, int value) __attribute__((noreturn));
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#ifndef _WIN32
+#include <pthread.h>
+#endif
+
+/* Files are shared between threads: each operation on one (and on the list
+ * of open files) holds this recursive lock, released however it returns. */
+#ifndef _WIN32
+pthread_mutex_t __pas_io_mutex; /* (external: see gen-runtime-ir.py) */
+pthread_once_t __pas_io_once = PTHREAD_ONCE_INIT;
+static void io_init(void) {
+  pthread_mutexattr_t a;
+  pthread_mutexattr_init(&a);
+  pthread_mutexattr_settype(&a, PTHREAD_MUTEX_RECURSIVE);
+  pthread_mutex_init(&__pas_io_mutex, &a);
+  pthread_mutexattr_destroy(&a);
+}
+static int io_lock(void) {
+  pthread_once(&__pas_io_once, io_init);
+  pthread_mutex_lock(&__pas_io_mutex);
+  return 0;
+}
+static void io_unlock(int *unused) {
+  (void)unused;
+  pthread_mutex_unlock(&__pas_io_mutex);
+}
+#define IO_GUARD() int io_guard_ __attribute__((cleanup(io_unlock), unused)) = io_lock()
+#else
+#define IO_GUARD() (void)0
+#endif
 
 enum { MODE_UNDEFINED, MODE_INSPECT, MODE_GENERATE };
 
@@ -115,6 +144,7 @@ void __pas_at_exit(void (*fn)(void *)) {
 }
 
 void __pas_fini(void) {
+  IO_GUARD();
   while (__pas_exit_fns) { /* (one may halt: each runs once) */
     struct PasExitFn *e = __pas_exit_fns;
     __pas_exit_fns = e->next;
@@ -134,12 +164,14 @@ void __pas_fini(void) {
  * The values of a template string are written to a text file that keeps
  * its characters in memory; __pas_tmpl_add takes them out. */
 
-struct PasFile __pas_tmpl_file;
-unsigned char __pas_tmpl_chr;
-char *__pas_tmpl_buf;
-size_t __pas_tmpl_size;
+/* (one per thread) */
+_Thread_local struct PasFile __pas_tmpl_file;
+_Thread_local unsigned char __pas_tmpl_chr;
+_Thread_local char *__pas_tmpl_buf;
+_Thread_local size_t __pas_tmpl_size;
 
 PasFile *__pas_tmpl_sink(void) {
+  IO_GUARD();
   struct PasFile *f = &__pas_tmpl_file;
   if (!f->fp) {
 #ifdef _WIN32
@@ -159,6 +191,7 @@ PasFile *__pas_tmpl_sink(void) {
 }
 
 char *__pas_tmpl_add(const char *s, const char *t) {
+  IO_GUARD();
   struct PasFile *f = __pas_tmpl_sink();
   long n = fflush(f->fp) == 0 ? ftell(f->fp) : -1;
   if (n < 0)
@@ -180,9 +213,11 @@ char *__pas_tmpl_add(const char *s, const char *t) {
   return r;
 }
 
+
 /*===- File variables -------------------------------------------------------===*/
 
 PasFile *__pas_file_new(int64_t elem_size, int32_t is_text, const char *name) {
+  IO_GUARD();
   struct PasFile *f = calloc(1, sizeof *f);
   if (!f)
     __pas_runtime_error("out of memory creating a file variable");
@@ -200,6 +235,7 @@ PasFile *__pas_file_new(int64_t elem_size, int32_t is_text, const char *name) {
 }
 
 void __pas_file_free(PasFile *f) {
+  IO_GUARD();
   if (!f || f->is_std)
     return;
   for (struct PasFile **p = &__pas_all_files; *p; p = &(*p)->next)
@@ -220,6 +256,7 @@ const char *__pas_program_param(int32_t index, const char *name) {
 }
 
 void __pas_reset(PasFile *f) {
+  IO_GUARD();
   if (f->is_std) {
     if (f != &__pas_std_input)
       file_error(f, "'reset' of the standard output file");
@@ -251,6 +288,7 @@ void __pas_reset(PasFile *f) {
 }
 
 void __pas_rewrite(PasFile *f) {
+  IO_GUARD();
   if (f->is_std) {
     if (f != &__pas_std_output)
       file_error(f, "'rewrite' of the standard input file");
@@ -273,6 +311,7 @@ void __pas_rewrite(PasFile *f) {
 /*===- Turbo/Free Pascal file routines --------------------------------------===*/
 
 void __pas_assign(PasFile *f, const char *name) {
+  IO_GUARD();
   if (f->is_std)
     file_error(f, "'assign' of a standard file");
   if (f->fp && !f->std_stream)
@@ -296,6 +335,7 @@ void __pas_assign(PasFile *f, const char *name) {
 }
 
 void __pas_close(PasFile *f) {
+  IO_GUARD();
   if (f->is_std) { /* close(output) flushes it */
     fflush(f->fp ? f->fp : stdout);
     return;
@@ -311,6 +351,7 @@ void __pas_close(PasFile *f) {
 }
 
 void __pas_flush(PasFile *f) {
+  IO_GUARD();
   if (f->mode != MODE_GENERATE)
     file_error(f, f->mode == MODE_UNDEFINED
                       ? "'flush' of a file that is not open"
@@ -320,6 +361,7 @@ void __pas_flush(PasFile *f) {
 }
 
 void __pas_reset_size(PasFile *f, int64_t recsize) {
+  IO_GUARD();
   if (recsize <= 0)
     file_error(f, "the record size of 'reset' must be positive");
   f->elem_size = recsize;
@@ -327,6 +369,7 @@ void __pas_reset_size(PasFile *f, int64_t recsize) {
 }
 
 void __pas_rewrite_size(PasFile *f, int64_t recsize) {
+  IO_GUARD();
   if (recsize <= 0)
     file_error(f, "the record size of 'rewrite' must be positive");
   f->elem_size = recsize;
@@ -360,6 +403,7 @@ static int64_t turbo_size(PasFile *f) { /* in bytes */
 }
 
 int64_t __pas_blockread(PasFile *f, void *buf, int64_t count, int32_t checked) {
+  IO_GUARD();
   need_open(f, "blockread");
   turbo_switch(f, 1);
   int64_t n = count > 0 ? (int64_t)fread(buf, (size_t)f->elem_size,
@@ -373,6 +417,7 @@ int64_t __pas_blockread(PasFile *f, void *buf, int64_t count, int32_t checked) {
 
 int64_t __pas_blockwrite(PasFile *f, const void *buf, int64_t count,
                          int32_t checked) {
+  IO_GUARD();
   need_open(f, "blockwrite");
   turbo_switch(f, 2);
   int64_t n = count > 0 ? (int64_t)fwrite(buf, (size_t)f->elem_size,
@@ -384,6 +429,7 @@ int64_t __pas_blockwrite(PasFile *f, const void *buf, int64_t count,
 }
 
 void __pas_seek(PasFile *f, int64_t n) {
+  IO_GUARD();
   need_open(f, "seek");
   if (!f->turbo)
     file_error(f, "'seek' of a file not named with 'assign'");
@@ -393,6 +439,7 @@ void __pas_seek(PasFile *f, int64_t n) {
 }
 
 int64_t __pas_filepos(PasFile *f) {
+  IO_GUARD();
   need_open(f, "filepos");
   if (!f->turbo)
     file_error(f, "'filepos' of a file not named with 'assign'");
@@ -402,6 +449,7 @@ int64_t __pas_filepos(PasFile *f) {
 }
 
 int64_t __pas_filesize(PasFile *f) {
+  IO_GUARD();
   need_open(f, "filesize");
   if (!f->turbo)
     file_error(f, "'filesize' of a file not named with 'assign'");
@@ -409,6 +457,7 @@ int64_t __pas_filesize(PasFile *f) {
 }
 
 int32_t __pas_file_handle(PasFile *f) {
+  IO_GUARD();
   if (f->is_std)
     return f->fp ? fileno(f->fp) : f == &__pas_std_input ? 0 : 1;
   if (f->mode == MODE_UNDEFINED || !f->fp)
@@ -466,6 +515,7 @@ static void fill(PasFile *f) {
 }
 
 void *__pas_buffer(PasFile *f) {
+  IO_GUARD();
   if (f->turbo)
     file_error(f, "the buffer variable of a file named with 'assign'");
   if (f->mode == MODE_INSPECT)
@@ -474,6 +524,7 @@ void *__pas_buffer(PasFile *f) {
 }
 
 int32_t __pas_eof(PasFile *f) {
+  IO_GUARD();
   if (f->turbo) { /* the position at the size */
     need_open(f, "eof");
     if (f->std_stream)
@@ -488,6 +539,7 @@ int32_t __pas_eof(PasFile *f) {
 }
 
 int32_t __pas_eoln(PasFile *f) {
+  IO_GUARD();
   need_inspect(f);
   if (!f->is_text)
     file_error(f, "'eoln' of a non-text file");
@@ -498,6 +550,7 @@ int32_t __pas_eoln(PasFile *f) {
 }
 
 void __pas_get(PasFile *f) {
+  IO_GUARD();
   if (f->turbo)
     file_error(f, "'get' of a file named with 'assign' (use 'read')");
   need_inspect(f);
@@ -508,6 +561,7 @@ void __pas_get(PasFile *f) {
 }
 
 void __pas_put(PasFile *f) {
+  IO_GUARD();
   if (f->turbo)
     file_error(f, "'put' of a file named with 'assign' (use 'write')");
   need_generate(f);
@@ -516,11 +570,13 @@ void __pas_put(PasFile *f) {
 }
 
 void __pas_page(PasFile *f) {
+  IO_GUARD();
   need_generate(f);
   putc('\f', f->fp);
 }
 
 void __pas_read_elem(PasFile *f, void *dst) {
+  IO_GUARD();
   if (f->turbo) {
     need_open(f, "read");
     turbo_switch(f, 1);
@@ -537,6 +593,7 @@ void __pas_read_elem(PasFile *f, void *dst) {
 }
 
 void __pas_write_elem(PasFile *f, const void *src) {
+  IO_GUARD();
   if (f->turbo) {
     need_open(f, "write");
     turbo_switch(f, 2);
@@ -557,6 +614,7 @@ static void pad(PasFile *f, int32_t n) {
 }
 
 void __pas_write_str(PasFile *f, const char *s, int64_t len, int32_t width) {
+  IO_GUARD();
   need_generate(f);
   if (width > 0) {
     if (len > width) {
@@ -570,12 +628,14 @@ void __pas_write_str(PasFile *f, const char *s, int64_t len, int32_t width) {
 }
 
 void __pas_write_char(PasFile *f, char c, int32_t width) {
+  IO_GUARD();
   need_generate(f);
   pad(f, width - 1);
   putc((unsigned char)c, f->fp);
 }
 
 void __pas_write_int(PasFile *f, int64_t v, int32_t width) {
+  IO_GUARD();
   need_generate(f);
   char buf[24];
   int n = snprintf(buf, sizeof buf, "%" PRId64, v);
@@ -584,6 +644,7 @@ void __pas_write_int(PasFile *f, int64_t v, int32_t width) {
 }
 
 void __pas_write_uint(PasFile *f, uint64_t v, int32_t width) {
+  IO_GUARD();
   need_generate(f);
   char buf[24];
   int n = snprintf(buf, sizeof buf, "%" PRIu64, v);
@@ -593,6 +654,7 @@ void __pas_write_uint(PasFile *f, uint64_t v, int32_t width) {
 
 void __pas_write_enum(PasFile *f, const unsigned char *const *names, int64_t v,
                       int32_t width) {
+  IO_GUARD();
   need_generate(f);
   const unsigned char *s = names[v];
   fwrite(s + 1, 1, s[0], f->fp);
@@ -600,6 +662,7 @@ void __pas_write_enum(PasFile *f, const unsigned char *const *names, int64_t v,
 }
 
 void __pas_write_bool(PasFile *f, int32_t b, int32_t width) {
+  IO_GUARD();
   if (b)
     __pas_write_str(f, __pas_tp_mode ? "TRUE" : "true", 4, width);
   else
@@ -607,6 +670,7 @@ void __pas_write_bool(PasFile *f, int32_t b, int32_t width) {
 }
 
 void __pas_write_real(PasFile *f, double x, int32_t width, int32_t frac) {
+  IO_GUARD();
   need_generate(f);
   char buf[512];
   int n;
@@ -645,6 +709,7 @@ void __pas_write_real(PasFile *f, double x, int32_t width, int32_t frac) {
 }
 
 void __pas_writeln(PasFile *f) {
+  IO_GUARD();
   need_generate(f);
   putc('\n', f->fp);
 }
@@ -699,6 +764,7 @@ static int64_t read_integer(PasFile *f, uint64_t limit) {
 }
 
 int32_t __pas_read_int(PasFile *f) {
+  IO_GUARD();
   return (int32_t)read_integer(f, INT32_MAX);
 }
 
@@ -730,6 +796,7 @@ uint64_t __pas_read_uint64(PasFile *f) {
 }
 
 double __pas_read_real(PasFile *f) {
+  IO_GUARD();
   need_inspect(f);
   skip_blanks(f, "a real");
   char buf[128];
@@ -773,6 +840,7 @@ double __pas_read_real(PasFile *f) {
 }
 
 char __pas_read_char(PasFile *f) {
+  IO_GUARD();
   need_inspect(f);
   int c = peek(f);
   if (c < 0)
@@ -782,6 +850,7 @@ char __pas_read_char(PasFile *f) {
 }
 
 void __pas_readln(PasFile *f) {
+  IO_GUARD();
   need_inspect(f);
   for (;;) {
     int c = peek(f);
@@ -852,11 +921,11 @@ static int32_t *refcount_of(void *obj) {
 
 void __pas_intf_addref(void *obj) {
   if (obj)
-    ++*refcount_of(obj);
+    __atomic_fetch_add(refcount_of(obj), 1, __ATOMIC_RELAXED);
 }
 
 void __pas_intf_release(void *obj) {
-  if (obj && --*refcount_of(obj) == 0)
+  if (obj && __atomic_sub_fetch(refcount_of(obj), 1, __ATOMIC_ACQ_REL) == 0)
     __pas_free_object(obj);
 }
 
@@ -895,14 +964,14 @@ void *__pas_frame_new(int64_t size, void (*fini)(void *frame)) {
 
 void __pas_frame_addref(void *frame) {
   if (frame)
-    ++frame_header(frame)->refcount;
+    __atomic_fetch_add(&frame_header(frame)->refcount, 1, __ATOMIC_RELAXED);
 }
 
 void __pas_frame_release(void *frame) {
   if (!frame)
     return;
   PasFrameHeader *h = frame_header(frame);
-  if (--h->refcount == 0) {
+  if (__atomic_sub_fetch(&h->refcount, 1, __ATOMIC_ACQ_REL) == 0) {
     h->fini(frame);
     free(h);
   }
@@ -925,7 +994,9 @@ void __pas_closure_clear(PasClosure *p) {
 
 void __pas_interfaced_construct(void *obj) { *refcount_of(obj) = 1; }
 
-void __pas_interfaced_constructed(void *obj) { --*refcount_of(obj); }
+void __pas_interfaced_constructed(void *obj) {
+  __atomic_fetch_sub(refcount_of(obj), 1, __ATOMIC_ACQ_REL);
+}
 
 void __pas_free_instance(void *obj) {
   for (void *const *vmt = *(void *const *const *)obj; vmt;
@@ -992,7 +1063,8 @@ _Static_assert(offsetof(PasExcFrame, buf) == 4 * sizeof(void *),
 _Static_assert(sizeof(jmp_buf) <= sizeof(((PasExcFrame *)0)->buf),
                "PasExcFrame.buf is too small for this C library's jmp_buf");
 
-PasExcFrame *__pas_exc_top;
+/* Each thread (and each task, which saves and restores it) has its own. */
+_Thread_local PasExcFrame *__pas_exc_top;
 
 /* An Exception instance: the VMT pointer, then Message (a short string). */
 struct PasExceptionObject {
@@ -1010,6 +1082,8 @@ EXCEPTION_VMT(__pas_einterror_vmt, __pas_eexternal_vmt, "\011EIntError");
 EXCEPTION_VMT(__pas_edivbyzero_vmt, __pas_einterror_vmt, "\012EDivByZero");
 EXCEPTION_VMT(__pas_eintoverflow_vmt, __pas_einterror_vmt, "\014EIntOverflow");
 EXCEPTION_VMT(__pas_econverterror_vmt, __pas_exception_vmt, "\015EConvertError");
+EXCEPTION_VMT(__pas_eoperationcancelled_vmt, __pas_exception_vmt,
+              "\023EOperationCancelled");
 
 void __pas_exc_push(PasExcFrame *f) {
   f->prev = __pas_exc_top;
@@ -1079,6 +1153,19 @@ void __pas_raise_divzero(const char *where) {
   e->message[0] = sizeof text - 1;
   memcpy(e->message + 1, text, sizeof text - 1);
   raise_to_frame(e, where, __builtin_return_address(0));
+}
+
+/* A new exception of class vmt (Exception's layout) with message text,
+ * raised by the runtime. */
+void __pas_raise_message(void *const *vmt, const char *text) {
+  struct PasExceptionObject *e = __pas_new(sizeof *e);
+  size_t n = strlen(text);
+  if (n > 255)
+    n = 255;
+  e->vmt = vmt;
+  e->message[0] = (unsigned char)n;
+  memcpy(e->message + 1, text, n);
+  raise_to_frame(e, "", __builtin_return_address(0));
 }
 
 void __pas_raise_overflow(const char *where) {
@@ -1156,6 +1243,7 @@ void __pas_owned_done(PasOwnedExc *exc, int32_t raised) {
 /*===- Program (Turbo/FPC) --------------------------------------------------===*/
 
 void __pas_halt(int32_t code) {
+  IO_GUARD();
   __pas_fini();
   exit(code);
 }
@@ -1256,22 +1344,26 @@ void __pas_str_insert(const unsigned char *src, unsigned char *s, int32_t maxlen
 }
 
 void __pas_write_pstr(PasFile *f, const unsigned char *s, int32_t width) {
+  IO_GUARD();
   __pas_write_str(f, (const char *)s + 1, s[0], width);
 }
 
 /* write(f, p) of a pchar: the characters up to the NUL; nothing for nil,
  * not even the padding of a field width (as in Free Pascal). */
 void __pas_write_cstr(PasFile *f, const char *s, int32_t width) {
+  IO_GUARD();
   if (s)
     __pas_write_str(f, s, (int64_t)strlen(s), width);
 }
 
 void __pas_write_astr(PasFile *f, const char *s, int32_t width) {
+  IO_GUARD();
   __pas_write_str(f, s ? s : "", __pas_astr_length(s), width);
 }
 
 /* The rest of the line into *dst, an ansistring variable. */
 void __pas_read_astr(PasFile *f, char **dst) {
+  IO_GUARD();
   need_inspect(f);
   size_t n = 0, cap = 256;
   char *buf = malloc(cap + 1);
@@ -1297,6 +1389,7 @@ void __pas_read_astr(PasFile *f, char **dst) {
 }
 
 void __pas_read_str(PasFile *f, unsigned char *dst, int32_t maxlen) {
+  IO_GUARD();
   need_inspect(f);
   int32_t n = 0;
   for (;;) {

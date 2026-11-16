@@ -20,7 +20,8 @@ foreach(unit ${PCC_RTL_UNITS})
     OUTPUT ${PCC_RTL_DIR}/${unit}.o
     COMMAND $<TARGET_FILE:pcc> --no-project --mode=objfpc -O2 -c
             ${PCC_RTL_DIR}/${unit}.pas -o ${PCC_RTL_DIR}/${unit}.o
-    DEPENDS pcc ${PCC_RTL_SOURCES})
+    DEPENDS pcc ${PCC_RTL_SOURCES}
+            $<$<TARGET_EXISTS:pascalrt-ir>:${PROJECT_BINARY_DIR}/lib/libpascalrt.ll>)
   list(APPEND PCC_RTL_OBJECTS ${PCC_RTL_DIR}/${unit}.o)
 endforeach()
 

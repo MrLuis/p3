@@ -376,4 +376,60 @@ void __pas_owned_done(PasOwnedExc *exc, int32_t raised);
 }
 #endif
 
+
+/*===- Tasks (async.c) ------------------------------------------------------===*/
+/* An async routine's call is a task: made by __pas_task_new (result: of
+ * type info, or none; args_size bytes of arguments, which args_fini
+ * finalizes when it ends; entry runs it), counted, and started here
+ * (__pas_task_start), on the pool (__pas_task_run_pool), or as a child of
+ * the innermost scope (__pas_task_spawn). __pas_task_await waits for it
+ * (in a task: suspended; outside: running this thread's tasks meanwhile)
+ * and raises its exception if it failed; then its result is at
+ * __pas_task_result. */
+typedef struct PasTask PasTask;
+typedef struct PasToken PasToken;
+PasTask *__pas_task_new(const PasDynInfo *info, int64_t args_size,
+                        void (*entry)(PasTask *), void (*args_fini)(void *));
+void *__pas_task_result(PasTask *t);
+void *__pas_task_args(PasTask *t);
+void __pas_task_addref(PasTask *t);
+void __pas_task_release(PasTask *t);
+void __pas_task_assign(PasTask **dst, PasTask *src);
+void __pas_task_clear(PasTask **p);
+void __pas_task_start(PasTask *t);
+void __pas_task_spawn(PasTask *t);
+void __pas_task_run_pool(PasTask *t);
+void __pas_task_await(PasTask *t);
+int32_t __pas_task_done(PasTask *t);
+void __pas_task_detach(PasTask *t, void *handler_fn, void *handler_link);
+void __pas_task_sleep(int32_t ms);
+PasTask *__pas_when_all(PasTask *const *tasks, int64_t n, const PasDynInfo *result_info,
+                        const PasDynInfo *elem);
+PasTask *__pas_when_any(PasTask *const *tasks, int64_t n, const PasDynInfo *int_info);
+/* scope [token] ... end */
+void *__pas_scope_enter(PasToken *given);
+void __pas_scope_leave(void *scope, int32_t raised);
+/* Cancellation tokens (counted). */
+PasToken *__pas_token_new(PasToken *parent);
+PasToken *__pas_token_with_timeout(PasToken *parent, int32_t ms);
+void __pas_token_addref(PasToken *k);
+void __pas_token_release(PasToken *k);
+void __pas_token_cancel(PasToken *k);
+int32_t __pas_token_cancelled(PasToken *k);
+void __pas_token_check(PasToken *k);
+/* Mutexes and wait queues (condition variables that tasks can wait on). */
+void *__pas_mutex_new(void);
+void __pas_mutex_free(void *m);
+void __pas_mutex_lock(void *m);
+void __pas_mutex_unlock(void *m);
+void *__pas_waitq_new(void);
+void __pas_waitq_free(void *q);
+void __pas_waitq_wait(void *q, void *m);
+void __pas_waitq_signal(void *q);
+void __pas_waitq_broadcast(void *q);
+/* EOperationCancelled = class(Exception): a cancelled task's wait. */
+extern void *const __pas_eoperationcancelled_vmt[5];
+/* Raises a new exception of class vmt (Exception's layout) with text. */
+void __pas_raise_message(void *const *vmt, const char *text) __attribute__((noreturn));
+
 #endif /* PASCALRT_H */

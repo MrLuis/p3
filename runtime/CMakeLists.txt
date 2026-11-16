@@ -1,6 +1,6 @@
 # libpascalrt: the C runtime linked into every Pascal executable.
 # Lands in <build>/lib so the compiler finds it at <bindir>/../lib.
-add_library(pascalrt STATIC io.c sys.c ansi.c format.c)
+add_library(pascalrt STATIC io.c sys.c ansi.c format.c async.c)
 target_include_directories(pascalrt PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
 # DWARF 4 like pcc's own output: GNU ld mis-merges mixed DWARF 4/5 objects.
 target_compile_options(pascalrt PRIVATE $<$<CONFIG:Debug>:-gdwarf-4>)
