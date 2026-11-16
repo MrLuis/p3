@@ -1141,16 +1141,40 @@ begin
 end;
 
 { Checks that ordinal value v (of type src) lies within target's bounds. }
+procedure emitOverflowCheck(const cond: TV; const what: string; loc: TLoc); forward;
+
+{ In a checked block or expression at loc (Wrap explicitly off): integer
+  values converted to a narrower integer type are checked, whatever $R
+  says. }
+function checksConversions(loc: TLoc): boolean;
+begin
+  checksConversions := checkStateAt(swWrap, loc) = 0;
+end;
+
 procedure emitRangeCheckMsg(const v: TV; src, target: PType; loc: TLoc;
                             const msg: string);
 var
   tb, fb: TOrdinalBounds;
   x, above, below: TV;
+  intConv, checked: boolean;
+
+  procedure fail(const cond: TV);
+  begin
+    if checked then
+      emitOverflowCheck(cond, 'integer overflow', loc)
+    else
+      emitRuntimeCheck(cond, msg, loc);
+  end;
+
 begin
-  if not rangeChecks(loc) or not isOrdinal(target) then
+  { an integer converted to an integer type (not a subrange): wraps in an
+    unchecked block, is checked (EIntOverflow) in a checked one whatever $R
+    says }
+  intConv := (target^.kind = tyInteger) and isIntegerLike(src);
+  checked := intConv and checksConversions(loc);
+  if (not rangeChecks(loc) and not checked) or not isOrdinal(target) then
     exit;
-  { unchecked: an integer converted to an integer type (not a subrange) }
-  if wraps(loc) and (target^.kind = tyInteger) and isIntegerLike(src) then
+  if intConv and wraps(loc) then
     exit;
   tb := getOrdinalBounds(target);
   fb := getOrdinalBounds(src);
@@ -1165,13 +1189,13 @@ begin
       below := irICmp('ult', x, i64c(tb.lo), '');
       above := irBin('or', below, above, '');
     end;
-    emitRuntimeCheck(above, msg, loc);
+    fail(above);
     exit;
   end;
   { (to qword, tb is 0..high(int64): the negative values are caught) }
   if (fb.lo >= tb.lo) and (fb.hi <= tb.hi) then
     exit; { every value of src fits }
-  emitRuntimeCheck(outsideRange(toI64(v, src), tb.lo, tb.hi), msg, loc);
+  fail(outsideRange(toI64(v, src), tb.lo, tb.hi));
 end;
 
 procedure emitRangeCheck(const v: TV; src, target: PType; loc: TLoc);

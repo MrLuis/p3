@@ -815,6 +815,13 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
     return CGOpts.Directives &&
            CGOpts.Directives->isEnabled(CheckDirectives::Wrap, L, false);
   }
+  /// In a checked block or expression at L (Wrap explicitly off): integer
+  /// values converted to a narrower integer type are checked, whatever
+  /// {$R} says.
+  bool checksConversions(SourceLocation L) const {
+    return CGOpts.Directives && CGOpts.Directives->stateAt(
+                                    CheckDirectives::Wrap, L) == CheckDirectives::Off;
+  }
   bool overflowChecks(SourceLocation L) const {
     return !CGOpts.Directives
                ? CGOpts.OverflowChecks
@@ -886,11 +893,21 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
   void emitRangeCheck(llvm::Value *V, Type *From, Type *Target,
                       SourceLocation L,
                       llvm::StringRef Msg = "value out of range") {
-    if (!rangeChecks(L) || !Target->isOrdinal())
+    // An integer converted to an integer type (not a subrange): wraps in an
+    // unchecked block, is checked (EIntOverflow) in a checked one whatever
+    // {$R} says.
+    bool IntConv = llvm::isa<IntegerType>(Target) && From->isIntegerLike();
+    bool Checked = IntConv && checksConversions(L);
+    if ((!rangeChecks(L) && !Checked) || !Target->isOrdinal())
       return;
-    // unchecked: an integer converted to an integer type (not a subrange)
-    if (wraps(L) && llvm::isa<IntegerType>(Target) && From->isIntegerLike())
+    if (IntConv && wraps(L))
       return;
+    auto Fail = [&](llvm::Value *Cond) {
+      if (Checked)
+        emitOverflowCheck(Cond, "integer overflow", L);
+      else
+        emitRuntimeCheck(Cond, Msg, L);
+    };
     OrdinalBounds TB = getOrdinalBounds(Target);
     OrdinalBounds FB = getOrdinalBounds(From);
     bool FromQWord = isQWord(From->getBase()), ToQWord = isQWord(Target);
@@ -903,14 +920,14 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
         llvm::Value *Below = B.CreateICmpULT(X, B.getInt64(TB.Lo));
         Above = B.CreateOr(Below, Above);
       }
-      emitRuntimeCheck(Above, Msg, L);
+      Fail(Above);
       return;
     }
     // (to qword, TB is 0..INT64_MAX: the negative values are caught)
     if (FB.Lo >= TB.Lo && FB.Hi <= TB.Hi)
       return; // every value of From fits
     llvm::Value *X = toI64(V, From);
-    emitRuntimeCheck(outsideRange(X, TB.Lo, TB.Hi), Msg, L);
+    Fail(outsideRange(X, TB.Lo, TB.Hi));
   }
 
   /// Converts a value for assignment / parameter passing: integer -> real,

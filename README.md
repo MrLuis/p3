@@ -796,7 +796,10 @@ overflow (`+ - *`, unary minus, `abs`, `div`, `inc`/`dec`), raising
 not check it: it wraps (two's complement), and so does an integer value
 converted to a narrower integer type there (`b := b + 10` for a byte
 `b`). A subrange, an enumeration or an array index is still range-checked
-(`{$R}`) inside `unchecked`.
+(`{$R}`) inside `unchecked`. Conversely, inside `checked` an integer value
+converted to a narrower integer type (an assignment, an argument) is
+checked whatever `{$R}` says, raising `EIntOverflow` when it does not fit;
+a typecast (`Byte(i)`) still truncates.
 
 ```pascal
 function TotalSize(const Sizes: array of Cardinal): QWord;
