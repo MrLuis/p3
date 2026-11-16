@@ -204,6 +204,9 @@ class Checker : public StmtVisitor<Checker>,
   /// The variables the statements of that block declare (VarDeclStmt).
   std::vector<Decl *> *InlineVars = nullptr;
   bool ArgsFailed = false; ///< see orderedArgs
+  bool KeepCharLiterals = false; ///< see visitDestructureStmt
+  Expr *WantedCall = nullptr; ///< the call checked for a value of
+  Type *WantedType = nullptr; ///< WantedType (checkValueFor)
   std::vector<RecordType *> TupleTypes; ///< see getTupleType
   unsigned HiddenVars = 0;              ///< see makeHiddenVar
   /// The scope of the variables declared in the statement sequence being
@@ -1359,7 +1362,7 @@ class Checker : public StmtVisitor<Checker>,
       } else {
         auto *N = llvm::dyn_cast<NameRefExpr>(E);
         auto *V = N ? llvm::dyn_cast_or_null<VarDecl>(N->getDecl()) : nullptr;
-        return V && V->isConstParam() ? V : nullptr;
+        return V && (V->isConstParam() || V->isReadOnly()) ? V : nullptr;
       }
     }
   }
@@ -1378,8 +1381,9 @@ class Checker : public StmtVisitor<Checker>,
     if (!V)
       return true;
     Diags.error(E->getBeginLoc(),
-                "cannot modify constant parameter '" + V->getName().Spelling +
-                    "'",
+                llvm::Twine(V->isReadOnly() ? "cannot modify constant '"
+                                            : "cannot modify constant parameter '") +
+                    V->getName().Spelling + "'",
                 {E->getRange()});
     noteDeclaredHere(V);
     return false;
@@ -4646,6 +4650,13 @@ class Checker : public StmtVisitor<Checker>,
         diagUndeclared(Name);
       return nullptr;
     }
+    return instantiate(Name, G, Types);
+  }
+
+  /// The specialization of the generic routine G for type arguments Types
+  /// (see specialize).
+  RoutineDecl *instantiate(const Identifier &Name, RoutineDecl *G,
+                           llvm::ArrayRef<Type *> Types) {
     Used.insert(G);
     RoutineDecl *Def = G->getGenericDefinition();
     if (!Def->getBody()) {
@@ -4710,6 +4721,141 @@ class Checker : public StmtVisitor<Checker>,
     PendingInstances.push_back({I, InstScope, Name.Loc});
     ModuleInstances.push_back(I);
     return I;
+  }
+
+  /// The index of the type parameter of Def that TS names, or -1.
+  static int typeParamNamed(RoutineDecl *Def, TypeSpec *TS) {
+    auto *N = llvm::dyn_cast_or_null<NamedTypeSpec>(TS);
+    if (!N || !N->getQualifiers().empty())
+      return -1;
+    auto Params = Def->getTypeParams();
+    for (size_t K = 0; K < Params.size(); ++K)
+      if (Params[K].Name == N->getName().Name)
+        return static_cast<int>(K);
+    return -1;
+  }
+
+  /// Name(args), where Name is not declared but generic routines Name<...>
+  /// are: the specialization for the type arguments that the arguments
+  /// give (a parameter of type T or array of T gives T the type of its
+  /// argument; several arguments for one T, their common type), and for
+  /// those still unknown the type Want wanted of the result, if the result
+  /// is a T. Found: there is such a generic. Null without one, and after a
+  /// diagnostic.
+  RoutineDecl *inferSpecialization(const Identifier &Name,
+                                   llvm::ArrayRef<Expr *> Args, Type *Want,
+                                   bool &Found) {
+    Found = false;
+    llvm::SmallVector<RoutineDecl *, 2> Generics;
+    for (size_t N = 1; N <= 16; ++N)
+      if (auto *G = llvm::dyn_cast_or_null<RoutineDecl>(
+              Cur->lookup(genericKey(Name.Name, N))))
+        Generics.push_back(G);
+    if (Generics.empty())
+      return nullptr;
+    Found = true;
+    if (Generics.size() > 1) { // those that take these arguments
+      llvm::SmallVector<RoutineDecl *, 2> Fit;
+      for (RoutineDecl *G : Generics) {
+        auto Params = G->getGenericDefinition()->getParams();
+        llvm::SmallVector<unsigned, 8> Map;
+        if (hasNamedArgs(Args) ? mapArgs(Params, Args, Map, nullptr)
+                               : acceptsArgCount(Params, Args.size()))
+          Fit.push_back(G);
+      }
+      if (Fit.size() != 1) {
+        Diags.error(Name.Loc,
+                    "cannot tell which generic '" + Name.Spelling +
+                        "' is called; give the types: specialize " +
+                        Name.Spelling + "<...>",
+                    {Name.getRange()});
+        return nullptr;
+      }
+      Generics = Fit;
+    }
+    RoutineDecl *G = Generics[0];
+    RoutineDecl *Def = G->getGenericDefinition();
+    auto TypeParams = Def->getTypeParams();
+    llvm::SmallVector<Type *, 2> Bound(TypeParams.size(), nullptr);
+    Type *Str = Ctx.getAnsiStringType();
+    bool OK = true;
+    // T (number K) is also the type Ty of the value A.
+    auto Give = [&](int K, Type *Ty, Expr *A) {
+      if (Ty->isError()) {
+        OK = false;
+        return;
+      }
+      if (Ty->isStringLiteral() || isCharLiteral(A))
+        Ty = Str;
+      if (!isInferable(Ty))
+        return; // (nil, []: says nothing)
+      Type *Joined = Bound[K] ? commonType(Bound[K], Ty, Str) : Ty;
+      if (!Joined) {
+        Diags.error(A->getBeginLoc(),
+                    "cannot infer the type parameter '" +
+                        TypeParams[K].Spelling + "' of '" + Name.Spelling +
+                        "': the arguments give both " + quoted(Bound[K]) +
+                        " and " + quoted(Ty) + "; give the type: specialize " +
+                        Name.Spelling + "<...>",
+                    {A->getRange()});
+        OK = false;
+        return;
+      }
+      Bound[K] = Joined;
+    };
+    for (size_t I = 0; I < Args.size() && OK; ++I) {
+      VarDecl *P = paramOfArg(Def->getParams(), Args, I);
+      Expr *A = argValue(Args[I]);
+      if (!P || llvm::isa<FormattedExpr>(A))
+        continue;
+      TypeSpec *TS = P->getTypeSpec();
+      if (int K = typeParamNamed(Def, TS); K >= 0) {
+        if (!isRoutineName(A))
+          Give(K, check(A), A);
+        continue;
+      }
+      TypeSpec *Elem = nullptr;
+      if (auto *OS = llvm::dyn_cast_or_null<OpenArrayTypeSpec>(TS))
+        Elem = OS->getElement();
+      else if (auto *DS = llvm::dyn_cast_or_null<DynArrayTypeSpec>(TS))
+        Elem = DS->getElement();
+      if (int K = typeParamNamed(Def, Elem); K >= 0) {
+        if (auto *SC = llvm::dyn_cast<SetCtorExpr>(A)) { // [a, b, c]
+          for (const SetElement &El : SC->getElements())
+            if (!El.Hi && OK)
+              Give(K, check(El.Lo), El.Lo);
+          continue;
+        }
+        Type *AT = check(A);
+        if (AT->isError())
+          OK = false;
+        else if (auto *AA = llvm::dyn_cast<ArrayType>(AT))
+          Give(K, AA->getElementType(), A);
+        else if (auto *DA = llvm::dyn_cast<DynArrayType>(AT))
+          Give(K, DA->getElementType(), A);
+        else if (auto *OA = llvm::dyn_cast<OpenArrayType>(AT))
+          Give(K, OA->getElementType(), A);
+        continue;
+      }
+    }
+    if (!OK)
+      return nullptr;
+    // The type wanted of the result, for a result of type T.
+    if (int K = typeParamNamed(Def, Def->getResultTypeSpec());
+        K >= 0 && !Bound[K] && Want && !Want->isError() && isInferable(Want))
+      Bound[K] = Want;
+    for (size_t K = 0; K < Bound.size(); ++K)
+      if (!Bound[K]) {
+        Diags.error(Name.Loc,
+                    "cannot infer the type parameter '" +
+                        TypeParams[K].Spelling + "' of '" + Name.Spelling +
+                        "' in this call: no argument gives it; give the "
+                        "type: specialize " + Name.Spelling + "<...>",
+                    {Name.getRange()});
+        noteDeclaredHere(G);
+        return nullptr;
+      }
+    return instantiate(Name, G, Bound);
   }
 
   /// Checks the bodies of the specializations made so far (and those they
@@ -7375,10 +7521,107 @@ public:
   }
 
   /// The type of a variable declared without one, from its value's type T.
+  /// Is E a quoted character ('a')? Where a type is inferred it is a
+  /// string, like any quoted text.
+  static bool isCharLiteral(Expr *E) {
+    while (auto *P = llvm::dyn_cast<ParenExpr>(E))
+      E = P->getInner();
+    auto *L = llvm::dyn_cast<StringLiteralExpr>(E);
+    return L && L->isCharLiteral();
+  }
+
+  /// The type that values of types A and B have in common where one type
+  /// is inferred for both (the elements of [a, b], the arguments for one
+  /// type parameter), or null: the same type; the wider integer type; real
+  /// for a real and an integer (nothing is lost); Str for strings and
+  /// characters; else the one the other can be assigned to.
+  Type *commonType(Type *A, Type *B, Type *Str) {
+    if (A == B)
+      return A;
+    bool IA = llvm::isa<IntegerType>(A->getBase());
+    bool IB = llvm::isa<IntegerType>(B->getBase());
+    if (IA && IB) {
+      Type *PA = promoteInteger(A), *PB = promoteInteger(B);
+      return PA == PB ? PA : Ctx.getInt64Type();
+    }
+    if ((A->isReal() && (IB || B->isReal())) || (B->isReal() && IA))
+      return Ctx.getRealType();
+    if (A->isStringish() && B->isStringish())
+      return Str;
+    if (isAssignable(A, B))
+      return A;
+    if (isAssignable(B, A))
+      return B;
+    return nullptr;
+  }
+
+  /// Can a variable (an element, a type argument) have the type T of a
+  /// value, when it is given no type of its own?
+  static bool isInferable(Type *T) {
+    auto *ST = llvm::dyn_cast<SetType>(T);
+    return !(T->isNil() || T->isUntyped() || T->isOpenArray() ||
+             T->isArrayOfConst() || containsFile(T) ||
+             (ST && ST->isEmptySet()));
+  }
+
+  /// var x := [a, b, c]: the dynamic array type of the value, an array
+  /// written out. Null if Init is not one: [], a list with a range, or one
+  /// whose elements are all enumeration values, characters or booleans (a
+  /// set, as ever). The error type after a diagnostic.
+  Type *inferArrayLiteral(Expr *Init, bool LongStr, const Identifier &Name) {
+    auto *SC = llvm::dyn_cast<SetCtorExpr>(Init);
+    if (!SC || SC->getElements().empty())
+      return nullptr;
+    for (const SetElement &El : SC->getElements())
+      if (El.Hi)
+        return nullptr;
+    Type *Str = LongStr ? static_cast<Type *>(Ctx.getAnsiStringType())
+                        : Ctx.getShortStringType(255);
+    Type *Elem = nullptr;
+    bool OK = true, SetLike = true;
+    for (const SetElement &El : SC->getElements()) {
+      Type *T = check(El.Lo);
+      if (T->isError()) {
+        OK = false;
+        continue;
+      }
+      SetLike &= T->isOrdinal() && !llvm::isa<IntegerType>(T->getBase());
+      if (T->isStringLiteral())
+        T = Str;
+      if (!isInferable(T)) {
+        Diags.error(El.Lo->getBeginLoc(),
+                    "cannot tell the element type of the array '" +
+                        Name.Spelling + "' from " +
+                        (T->isNil() ? std::string("nil")
+                                    : "a value of type " + quoted(T)) +
+                        "; give the variable a type",
+                    {El.Lo->getRange()});
+        OK = false;
+        continue;
+      }
+      Type *Joined = Elem ? commonType(Elem, T, Str) : T;
+      if (!Joined) {
+        Diags.error(El.Lo->getBeginLoc(),
+                    "the elements of the array '" + Name.Spelling +
+                        "' have no type in common: " + quoted(Elem) + " and " +
+                        quoted(T) + "; give the variable a type",
+                    {El.Lo->getRange()});
+        OK = false;
+        continue;
+      }
+      Elem = Joined;
+    }
+    if (!OK)
+      return errorType();
+    if (SetLike)
+      return nullptr;
+    return Ctx.getDynArrayType(Elem);
+  }
+
   Type *inferVarType(VarDeclStmt *S, VarDecl *V, Type *T) {
     if (T->isError())
       return T;
-    if (T->isStringLiteral())
+    if (T->isStringLiteral() || isCharLiteral(S->getInit()))
       return S->hasLongStrings() ? Ctx.getAnsiStringType()
                                  : Ctx.getShortStringType(255);
     auto *ST = llvm::dyn_cast<SetType>(T);
@@ -7421,6 +7664,10 @@ public:
       T = resolveType(First->getTypeSpec());
       if (Init)
         ValueTy = checkValueFor(T, Init);
+    } else if (Type *AT = inferArrayLiteral(Init, S->hasLongStrings(),
+                                            First->getName())) {
+      T = AT; // var a := [1, 2, 3]: a dynamic array
+      ValueTy = AT->isError() ? AT : checkValueFor(AT, Init);
     } else {
       ValueTy = check(Init);
       T = inferVarType(S, First, ValueTy);
@@ -7451,6 +7698,8 @@ public:
         S->getAssignLoc(), Init);
     S->setInitAssign(Assign);
     finishAssign(Assign, T, ValueTy);
+    if (S->isConst()) // from here on
+      First->setReadOnly();
   }
 
   /// (a, b) := e;  var (a, b) := e;  -- e, a tuple, is kept in a hidden
@@ -7477,7 +7726,11 @@ public:
       check(Value);
       return;
     }
+    // (a, b) := ('x', 1): the targets have types, so 'x' stays a char,
+    // which a char and a string can take.
+    KeepCharLiterals = !IsVar;
     Type *VT = check(Value);
+    KeepCharLiterals = false;
     auto *RT = llvm::dyn_cast<RecordType>(VT);
     if (!VT->isError() &&
         (!RT || !RT->isTuple() || RT->getAllFields().size() != N)) {
@@ -7597,13 +7850,16 @@ public:
     WithContext *W = nullptr;
     Decl *D = S->getTypeArgs().empty() ? Cur->lookup(Callee.Name, &W)
                                        : specialize(Callee, S->getTypeArgs());
+    bool Generic = false; // F(args) for a generic F: its types inferred
+    if (!D && S->getTypeArgs().empty())
+      D = inferSpecialization(Callee, S->getArgs(), nullptr, Generic);
     if (!D) {
-      if (S->getTypeArgs().empty()) {
+      if (S->getTypeArgs().empty() && !Generic) {
         diagUndeclared(Callee);
         return;
       }
       for (Expr *Arg : S->getArgs())
-        check(Arg);
+        check(argValue(Arg));
       return;
     }
     if (auto *R = llvm::dyn_cast<RoutineDecl>(D)) { // objfpc: overloads
@@ -7677,7 +7933,7 @@ public:
           ownedDead();
           return;
         }
-        Type *T = llvm::isa<TupleExpr>(Args[0])
+        Type *T = llvm::isa<TupleExpr>(Args[0]) || llvm::isa<CallExpr>(Args[0])
                       ? checkValueFor(CurRoutine->getResultType(), Args[0])
                       : check(Args[0]);
         if (VarDecl *OV = ownedVarOf(Args[0]))
@@ -9017,11 +9273,15 @@ public:
     WithContext *W = nullptr;
     Decl *D = E->getTypeArgs().empty() ? Cur->lookup(Callee.Name, &W)
                                        : specialize(Callee, E->getTypeArgs());
+    bool Generic = false; // F(args) for a generic F: its types inferred
+    if (!D && E->getTypeArgs().empty())
+      D = inferSpecialization(Callee, E->getArgs(),
+                              WantedCall == E ? WantedType : nullptr, Generic);
     if (!D) {
-      if (E->getTypeArgs().empty())
+      if (E->getTypeArgs().empty() && !Generic)
         diagUndeclared(Callee);
       for (Expr *Arg : E->getArgs())
-        check(Arg);
+        check(argValue(Arg));
       return errorType();
     }
     if (auto *R = llvm::dyn_cast<RoutineDecl>(D)) { // objfpc: overloads
@@ -9345,6 +9605,12 @@ public:
   }
 
   Type *checkValueFor(Type *TargetTy, Expr *Value) {
+    // A call: the type wanted of its result can give a generic routine a
+    // type argument (inferSpecialization).
+    if (llvm::isa<CallExpr>(Value)) {
+      WantedCall = Value;
+      WantedType = TargetTy;
+    }
     // A tuple written out takes the element types of the tuple wanted.
     if (auto *TE = llvm::dyn_cast<TupleExpr>(Value)) {
       auto *Want = llvm::dyn_cast<RecordType>(TargetTy);
@@ -9464,7 +9730,7 @@ public:
         Type *T = Types[I];
         Expr *X = E->getElements()[I];
         auto *ST = llvm::dyn_cast<SetType>(T);
-        if (T->isStringLiteral()) {
+        if (T->isStringLiteral() || (isCharLiteral(X) && !KeepCharLiterals)) {
           T = E->hasLongStrings() ? Ctx.getAnsiStringType()
                                   : Ctx.getShortStringType(255);
         } else if (T->isNil() || T->isUntyped() || T->isOpenArray() ||

@@ -1310,6 +1310,10 @@ end;
 
 var
   argsFailed: boolean; { see orderArgs }
+  { the call checked for a value of type wantedType (checkValueFor) }
+  wantedCall: PNode;
+  wantedType: PType;
+  keepCharLiterals: boolean; { see visitDestructure }
 
 { The arguments args of a call to a routine with params, put in the order
   of the parameters: a call with named arguments (Name := value) is
@@ -1614,6 +1618,58 @@ begin
   isAssignable := false;
 end;
 
+{ Is e a quoted character ('a')? Where a type is inferred it is a string,
+  like any quoted text. }
+function isCharLiteral(e: PNode): boolean;
+begin
+  while e^.kind = nkParen do
+    e := e^.inner;
+  isCharLiteral := (e^.kind = nkStringLit) and (e^.strValue^.len = 1) and
+                   (e^.strWide = 0);
+end;
+
+{ The type that values of types a and b have in common where one type is
+  inferred for both (the elements of [a, b], the arguments for one type
+  parameter), or nil: the same type; the wider integer type; real for a
+  real and an integer (nothing is lost); str for strings and characters;
+  else the one the other can be assigned to. }
+function commonType(a, b, str: PType): PType;
+var
+  ia, ib: boolean;
+  pa, pb: PType;
+begin
+  if a = b then
+    exit(a);
+  ia := getBase(a)^.kind = tyInteger;
+  ib := getBase(b)^.kind = tyInteger;
+  if ia and ib then
+  begin
+    pa := promoteInteger(a);
+    pb := promoteInteger(b);
+    if pa = pb then
+      exit(pa);
+    exit(tyInt64T);
+  end;
+  if ((a^.kind = tyReal) and (ib or (b^.kind = tyReal))) or
+     ((b^.kind = tyReal) and ia) then
+    exit(tyRealT);
+  if isStringish(a) and isStringish(b) then
+    exit(str);
+  if isAssignable(a, b) then
+    exit(a);
+  if isAssignable(b, a) then
+    exit(b);
+  commonType := nil;
+end;
+
+{ Can a variable (an element, a type argument) have the type t of a value,
+  when it is given no type of its own? }
+function isInferable(t: PType): boolean;
+begin
+  isInferable := not ((t^.kind in [tyNil, tyUntyped, tyOpenArray, tyArrayOfConst]) or
+                      containsFile(t) or ((t^.kind = tySet) and isEmptySet(t)));
+end;
+
 { Is e (already checked) a value of a class type? }
 function isObject(e: PNode): boolean;
 begin
@@ -1817,7 +1873,8 @@ begin
     else
       begin
         if (e^.kind = nkNameRef) and (e^.refDecl <> nil) and
-           (e^.refDecl^.kind = dkVar) and (e^.refDecl^.varKind = vkConstParam) then
+           (e^.refDecl^.kind = dkVar) and
+           ((e^.refDecl^.varKind = vkConstParam) or e^.refDecl^.isReadOnly) then
           exit(e^.refDecl);
         exit(nil);
       end;
@@ -2189,7 +2246,10 @@ begin
   v := constParamRoot(e);
   if v = nil then
     exit(true);
-  ms('cannot modify constant parameter ''');
+  if v^.isReadOnly then
+    ms('cannot modify constant ''')
+  else
+    ms('cannot modify constant parameter ''');
   maN(v^.ident.spelling);
   ma('''');
   errR(e^.b, nodeRange(e));
@@ -6967,20 +7027,15 @@ end;
 { specialize name<args>: the routine for those type arguments, made from
   the generic's declaration on first use (its heading resolved now, its
   body checked later); nil after a diagnostic. }
+function instantiateGeneric(const name: TIdent; g: PDecl; const types: TPtrList): PDecl; forward;
+
 function specializeGeneric(const name: TIdent; const args: TPtrList): PDecl;
 var
   types: TPtrList;
   t: PType;
-  g, def, r, td: PDecl;
-  i, k, errors: longint;
-  inst: PInstance;
-  same, otherGeneric: boolean;
-  nb, sb, tb: TBuf;
-  sc, savedScope: PScope;
-  savedRoutine: PDecl;
-  savedPrefix: PName;
-  p: PIdent;
-  id: TIdent;
+  g: PDecl;
+  i, k: longint;
+  otherGeneric: boolean;
 begin
   specializeGeneric := nil;
   listInit(types);
@@ -7018,6 +7073,25 @@ begin
       diagUndeclared(name);
     exit;
   end;
+  specializeGeneric := instantiateGeneric(name, g, types);
+end;
+
+{ The specialization of the generic routine g for the type arguments types
+  (see specializeGeneric). }
+function instantiateGeneric(const name: TIdent; g: PDecl; const types: TPtrList): PDecl;
+var
+  def, r, td: PDecl;
+  i, k, errors: longint;
+  inst: PInstance;
+  same: boolean;
+  nb, sb, tb: TBuf;
+  sc, savedScope: PScope;
+  savedRoutine: PDecl;
+  savedPrefix: PName;
+  p: PIdent;
+  id: TIdent;
+begin
+  instantiateGeneric := nil;
   g^.isUsed := true;
   def := genericDefinition(g);
   if def^.body = nil then
@@ -7115,7 +7189,7 @@ begin
   r^.isUsed := true;
   listAdd(pendingInstances, inst);
   listAdd(moduleInstances, r);
-  specializeGeneric := r;
+  instantiateGeneric := r;
 end;
 
 { Checks the bodies of the specializations made so far (and those they
@@ -7711,6 +7785,190 @@ begin
     end;
   end;
   e^.typ := pt;
+end;
+
+{ The index of the type parameter of def that ts names, or -1. }
+function typeParamNamed(def: PDecl; ts: PTypeSpec): longint;
+var
+  k: longint;
+begin
+  typeParamNamed := -1;
+  if (ts = nil) or (ts^.kind <> tsNamed) or (ts^.tquals.count > 0) then
+    exit;
+  for k := 0 to def^.typeParams.count - 1 do
+    if PIdent(listGet(def^.typeParams, k))^.name = ts^.tname.name then
+      exit(k);
+end;
+
+{ name(args), where name is not declared but generic routines name<...>
+  are: the specialization for the type arguments that the arguments give (a
+  parameter of type T or array of T gives T the type of its argument;
+  several arguments for one T, their common type), and for those still
+  unknown the type want wanted of the result, if the result is a T. found:
+  there is such a generic. Nil without one, and after a diagnostic. }
+function inferSpecialization(const name: TIdent; const args: TPtrList;
+                             want: PType; var found: boolean): PDecl;
+var
+  generics, fit, map, bound: TPtrList;
+  n, i, k, j: longint;
+  g, def, p: PDecl;
+  ok: boolean;
+  a: PNode;
+  ts, elem: PTypeSpec;
+  at, str: PType;
+  el: PSetElement;
+
+  { T (number k) is also the type ty of the value v }
+  procedure give(k: longint; ty: PType; v: PNode);
+  var
+    joined, old: PType;
+  begin
+    if isError(ty) then
+    begin
+      ok := false;
+      exit;
+    end;
+    if (ty^.kind = tyStringLit) or isCharLiteral(v) then
+      ty := str;
+    if not isInferable(ty) then
+      exit; { (nil, []: says nothing) }
+    old := PType(listGet(bound, k));
+    if old <> nil then
+      joined := commonType(old, ty, str)
+    else
+      joined := ty;
+    if joined = nil then
+    begin
+      ms('cannot infer the type parameter ''');
+      maN(PIdent(listGet(def^.typeParams, k))^.spelling);
+      ma(''' of ''');
+      maN(name.spelling);
+      ma(''': the arguments give both ');
+      maT(old);
+      ma(' and ');
+      maT(ty);
+      ma('; give the type: specialize ');
+      maN(name.spelling);
+      ma('<...>');
+      errR(v^.b, nodeRange(v));
+      ok := false;
+      exit;
+    end;
+    listSet(bound, k, joined);
+  end;
+
+begin
+  inferSpecialization := nil;
+  found := false;
+  listInit(generics);
+  for n := 1 to 16 do
+  begin
+    g := lookup(genericKey(name.name, n));
+    if (g <> nil) and (g^.kind = dkRoutine) then
+      listAdd(generics, g);
+  end;
+  if generics.count = 0 then
+    exit;
+  found := true;
+  if generics.count > 1 then { those that take these arguments }
+  begin
+    listInit(fit);
+    for i := 0 to generics.count - 1 do
+    begin
+      g := PDecl(listGet(generics, i));
+      if hasNamedArgs(args) then
+        ok := mapArgs(genericDefinition(g)^.params, args, map, false, name)
+      else
+        ok := acceptsArgCount(genericDefinition(g)^.params, args.count);
+      if ok then
+        listAdd(fit, g);
+    end;
+    if fit.count <> 1 then
+    begin
+      ms('cannot tell which generic ''');
+      maN(name.spelling);
+      ma(''' is called; give the types: specialize ');
+      maN(name.spelling);
+      ma('<...>');
+      errR(name.loc, identRange(name));
+      exit;
+    end;
+    generics := fit;
+  end;
+  g := PDecl(listGet(generics, 0));
+  def := genericDefinition(g);
+  listInit(bound);
+  for k := 0 to def^.typeParams.count - 1 do
+    listAdd(bound, nil);
+  str := ansiStringType;
+  ok := true;
+  i := 0;
+  while (i < args.count) and ok do
+  begin
+    p := paramOfArg(def^.params, args, i);
+    a := argValue(PNode(listGet(args, i)));
+    i := i + 1;
+    if (p = nil) or (a^.kind = nkFormatted) then
+      continue;
+    ts := p^.varSpec;
+    k := typeParamNamed(def, ts);
+    if k >= 0 then
+    begin
+      if not isRoutineName(a) then
+        give(k, check(a), a);
+      continue;
+    end;
+    elem := nil;
+    if (ts <> nil) and (ts^.kind = tsOpenArray) then
+      elem := ts^.openSpec
+    else if (ts <> nil) and (ts^.kind = tsDynArray) then
+      elem := ts^.dynSpec;
+    k := typeParamNamed(def, elem);
+    if k >= 0 then
+    begin
+      if a^.kind = nkSetCtor then { [a, b, c] }
+      begin
+        for j := 0 to a^.setElems.count - 1 do
+        begin
+          el := PSetElement(listGet(a^.setElems, j));
+          if (el^.hi = nil) and ok then
+            give(k, check(el^.lo), el^.lo);
+        end;
+        continue;
+      end;
+      at := check(a);
+      if isError(at) then
+        ok := false
+      else if at^.kind = tyArray then
+        give(k, at^.elementType, a)
+      else if at^.kind = tyDynArray then
+        give(k, at^.dynElement, a)
+      else if at^.kind = tyOpenArray then
+        give(k, at^.openElement, a);
+    end;
+  end;
+  if not ok then
+    exit;
+  { the type wanted of the result, for a result of type T }
+  k := typeParamNamed(def, def^.resultSpec);
+  if (k >= 0) and (listGet(bound, k) = nil) and (want <> nil) then
+    if not isError(want) and isInferable(want) then
+      listSet(bound, k, want);
+  for k := 0 to bound.count - 1 do
+    if listGet(bound, k) = nil then
+    begin
+      ms('cannot infer the type parameter ''');
+      maN(PIdent(listGet(def^.typeParams, k))^.spelling);
+      ma(''' of ''');
+      maN(name.spelling);
+      ma(''' in this call: no argument gives it; give the type: specialize ');
+      maN(name.spelling);
+      ma('<...>');
+      errR(name.loc, identRange(name));
+      noteDeclaredHere(g);
+      exit;
+    end;
+  inferSpecialization := instantiateGeneric(name, g, bound);
 end;
 
 function resolveOverload(first: PDecl; const args: TPtrList; const callee: TIdent;

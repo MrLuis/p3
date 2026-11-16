@@ -828,7 +828,7 @@ public:
       visitStmt(Child);
   }
   void visitVarDeclStmt(VarDeclStmt *S) {
-    line("VarDeclStmt");
+    line(S->isConst() ? "VarDeclStmt const" : "VarDeclStmt");
     loc(S->getBeginLoc());
     IndentScope I(Indent);
     for (VarDecl *V : S->getVars())

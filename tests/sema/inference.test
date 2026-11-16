@@ -1,0 +1,60 @@
+; Inferred types (objfpc). A generic routine called without specialize
+; takes its type arguments from the call's arguments (several arguments for
+; one type parameter: their common type) and from the type wanted of its
+; result; what cannot be told is reported with what to add. const x := e
+; cannot be changed. Quoted text is a string, [a, b] an array.
+; RUN: not %pcc --mode=objfpc -ferror-limit=0 -c %S/Inputs/inference/errors.pas -o %t.o 2>&1 | FileCheck %s
+; CHECK: errors.pas:52:19: error: cannot infer the type parameter 'T' of 'Largest': the arguments give both 'integer' and 'ansistring'; give the type: specialize Largest<...>
+; CHECK: errors.pas:53:21: error: cannot infer the type parameter 'T' of 'Largest': the arguments give both 'TColor' and 'integer'; give the type: specialize Largest<...>
+; CHECK: errors.pas:55:3: error: cannot infer the type parameter 'T' of 'Make' in this call: no argument gives it; give the type: specialize Make<...>
+; CHECK: errors.pas:11:9: note: 'Make' declared here
+; CHECK: errors.pas:56:12: error: cannot infer the type parameter 'T' of 'Make' in this call: no argument gives it; give the type: specialize Make<...>
+; CHECK: errors.pas:11:9: note: 'Make' declared here
+; CHECK: errors.pas:61:8: error: cannot tell which generic 'Clash' is called; give the types: specialize Clash<...>
+; CHECK: errors.pas:62:8: error: too few arguments in call to 'Largest': expected 2, got 1
+; CHECK: errors.pas:6:9: note: 'Largest<integer>' declared here
+; CHECK: errors.pas:63:8: error: too many arguments in call to 'Largest': expected 2, got 3
+; CHECK: errors.pas:6:9: note: 'Largest<integer>' declared here
+; CHECK: errors.pas:64:16: error: cannot pass a value of type 'nil' to parameter 'a' of type 'integer'
+; CHECK: errors.pas:64:21: error: cannot pass a value of type 'nil' to parameter 'b' of type 'integer'
+; CHECK: errors.pas:65:12: error: argument of type 'byte' for 'var' parameter 'b' must have exactly type 'integer'
+; CHECK: errors.pas:66:8: error: use of undeclared identifier 'Nope'; did you mean 'copy'?
+; CHECK: errors.pas:68:3: error: cannot modify constant 'k'
+; CHECK: errors.pas:67:9: note: 'k' declared here
+; CHECK: errors.pas:69:7: error: cannot modify constant 'k'
+; CHECK: errors.pas:67:9: note: 'k' declared here
+; CHECK: errors.pas:70:9: error: cannot modify constant 'k'
+; CHECK: errors.pas:67:9: note: 'k' declared here
+; CHECK: errors.pas:72:3: error: cannot modify constant 'lst'
+; CHECK: errors.pas:71:9: note: 'lst' declared here
+; CHECK: errors.pas:73:12: error: cannot tell the type of 'n' from nil; give the variable a type
+; CHECK: errors.pas:74:18: error: the elements of the array 'arr' have no type in common: 'integer' and 'char'; give the variable a type
+; CHECK: errors.pas:75:16: error: cannot tell the element type of the array 'arr2' from nil; give the variable a type
+; CHECK: errors.pas:76:13: error: cannot tell the type of 'st' from an empty set; give the variable a type
+; CHECK: errors.pas:78:6: error: assigning to 'ansistring' from incompatible type 'integer'
+; CHECK: errors.pas:79:5: error: assigning to 'integer' from incompatible type 'real'
+; CHECK: errors.pas:19:10: error: assigning to 'ansistring' from incompatible type 'integer'
+; CHECK: errors.pas:58:8: note: in the specialization 'Conv<integer, ansistring>' requested here
+;
+; RUN: not %pcc --mode=objfpc -c %S/Inputs/inference/syntax.pas -o %t.o 2>&1 | FileCheck --check-prefix=SYNTAX %s
+; SYNTAX: syntax.pas:3:19: error: expected ':=' and a value after constant name
+; SYNTAX: syntax.pas:4:14: error: only one constant can be declared at a time
+; SYNTAX: syntax.pas:5:9: error: expected constant name
+; SYNTAX: syntax.pas:6:9: error: expected constant name
+;
+; RUN: not %pcc --mode=tp -c %S/Inputs/inference/tp.pas -o %t.o 2>&1 | FileCheck --check-prefix=TP %s
+; TP: tp.pas:4:3: error: constants declared among the statements need --mode=objfpc
+;
+; RUN: %pcc --mode=objfpc --emit-ast %S/Inputs/inference/ast.pas -o - | FileCheck --check-prefix=AST %s
+; (the specializations follow the generics, before the statements)
+; AST: FunctionDecl 'largest<real>' : real <3:9>
+; AST: FunctionDecl 'make<real>' : real <7:9>
+; AST: FunctionDecl 'largest<ansistring>' : ansistring <3:9>
+; AST: CallExpr 'largest' : real <15:8>
+; AST: CallExpr 'make' : real <16:8>
+; AST: VarDeclStmt const <17:3>
+; AST-NEXT: VarDecl 'k' : ansistring <17:9>
+; AST-NEXT: CallExpr 'largest' : ansistring <17:14>
+; AST: VarDecl 'xs' : array of integer <18:7>
+; AST-NEXT: SetCtorExpr : array of integer <18:13>
+; AST: VarDecl 'c' : ansistring <19:7>

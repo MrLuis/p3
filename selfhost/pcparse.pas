@@ -4090,7 +4090,7 @@ var
   varLoc, assignLoc: TLoc;
   names, vars: TPtrList;
   ts: PTypeSpec;
-  owned: boolean;
+  owned, isConst: boolean;
   init, n: PNode;
   i: longint;
   v: PDecl;
@@ -4102,9 +4102,10 @@ var
   end;
 
 begin
-  varLoc := consumeToken; { 'var' }
+  isConst := tok.kind = tkKwConst;
+  varLoc := consumeToken; { 'var' or 'const' }
   listInit(names);
-  if tok.kind = tkLParen then { var (a, b) := e }
+  if (tok.kind = tkLParen) and not isConst then { var (a, b) := e }
   begin
     consumeToken;
     if not parseIdentList(names, 'variable name') then
@@ -4122,7 +4123,12 @@ begin
     listInit(names);
     exit(parseDestructure(varLoc, names, vars));
   end;
-  if not parseIdentList(names, 'variable name') then
+  if isConst then
+  begin
+    if not parseIdentList(names, 'constant name') then
+      exit(fail);
+  end
+  else if not parseIdentList(names, 'variable name') then
     exit(fail);
   for i := 0 to names.count - 1 do
     declareName(PIdent(listGet(names, i))^);
@@ -4133,7 +4139,7 @@ begin
     ts := parseType;
     if ts = nil then
       exit(fail);
-    if isIdentifierNamed('owned') then
+    if isIdentifierNamed('owned') and not isConst then
     begin
       consumeToken;
       owned := true;
@@ -4141,16 +4147,25 @@ begin
   end;
   init := nil;
   assignLoc := noLoc;
-  if tok.kind = tkColonEqual then
+  if (tok.kind = tkColonEqual) or (isConst and (tok.kind = tkEqual)) then
   begin
     assignLoc := consumeToken;
-    if names.count > 1 then
+    if (names.count > 1) and isConst then
+      diagErrorR(assignLoc, 'only one constant can be declared at a time',
+                 makeRange(PIdent(listGet(names, 0))^.loc,
+                           identRange(PIdent(listGet(names, names.count - 1))^).e))
+    else if names.count > 1 then
       diagErrorR(assignLoc, 'only one variable can be initialized',
                  makeRange(PIdent(listGet(names, 0))^.loc,
                            identRange(PIdent(listGet(names, names.count - 1))^).e));
     init := parseExpression;
     if init = nil then
       exit(fail);
+  end
+  else if isConst then
+  begin
+    diagError(tok.loc, 'expected '':='' and a value after constant name');
+    exit(fail);
   end
   else if ts = nil then
   begin
@@ -4174,6 +4189,7 @@ begin
   n^.vdAssignLoc := assignLoc;
   n^.vdLong := lx.longStrings;
   n^.vdAssign := nil;
+  n^.vdConst := isConst;
   parseVarDeclStmt := n;
 end;
 
@@ -4243,6 +4259,12 @@ begin
         exit(parseVarDeclStmt)
       else
         diagError(tok.loc, 'variables declared among the statements need ' +
+                  '--mode=objfpc');
+    tkKwConst:
+      if mode = lmObjFPC then
+        exit(parseVarDeclStmt)
+      else
+        diagError(tok.loc, 'constants declared among the statements need ' +
                   '--mode=objfpc');
     tkLParen: { not objfpc }
       diagError(tok.loc, 'expected statement');

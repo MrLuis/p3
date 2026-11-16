@@ -2508,21 +2508,25 @@ var
   a0: PNode;
   i: longint;
   w: PWithContext;
+  inferred: boolean;
 begin
   w := nil;
   if s^.typeArgs.count = 0 then
     d := scopeLookup(cur, s^.callee.name, w)
   else
     d := specializeGeneric(s^.callee, s^.typeArgs);
+  inferred := false; { f(args) for a generic f: its types inferred }
+  if (d = nil) and (s^.typeArgs.count = 0) then
+    d := inferSpecialization(s^.callee, s^.args, nil, inferred);
   if d = nil then
   begin
-    if s^.typeArgs.count = 0 then
+    if (s^.typeArgs.count = 0) and not inferred then
     begin
       diagUndeclared(s^.callee);
       exit;
     end;
     for i := 0 to s^.args.count - 1 do
-      check(PNode(listGet(s^.args, i)));
+      check(argValue(PNode(listGet(s^.args, i))));
     exit;
   end;
   if d^.kind = dkRoutine then { objfpc: overloads }
@@ -2605,7 +2609,7 @@ begin
             exit;
           end;
           a0 := PNode(listGet(s^.args, 0));
-          if a0^.kind = nkTuple then
+          if (a0^.kind = nkTuple) or (a0^.kind = nkCall) then
             t := checkValueFor(curRoutine^.resultType, a0)
           else
             t := check(a0);
@@ -2794,6 +2798,13 @@ var
   saved: PType;
   t: PType;
 begin
+  { a call: the type wanted of its result can give a generic routine a
+    type argument (inferSpecialization) }
+  if value^.kind = nkCall then
+  begin
+    wantedCall := value;
+    wantedType := targetTy;
+  end;
   { a tuple written out takes the element types of the tuple wanted }
   if (value^.kind = nkTuple) and (targetTy^.kind = tyRecord) then
     if targetTy^.isTupleRecord and
@@ -2913,7 +2924,7 @@ begin
     begin
       t := PType(listGet(types, i));
       x := PNode(listGet(e^.tupElems, i));
-      if t^.kind = tyStringLit then
+      if (t^.kind = tyStringLit) or (isCharLiteral(x) and not keepCharLiterals) then
       begin
         if e^.tupLong then
           t := ansiStringType
@@ -3108,11 +3119,91 @@ begin
 end;
 
 { The type of a variable declared without one, from its value's type t. }
+{ var x := [a, b, c]: the dynamic array type of the value, an array written
+  out. Nil if init is not one: [], a list with a range, or one whose
+  elements are all enumeration values, characters or booleans (a set, as
+  ever). The error type after a diagnostic. }
+function inferArrayLiteral(init: PNode; longStr: boolean; const name: TIdent): PType;
+var
+  i: longint;
+  el: PSetElement;
+  str, elem, t, joined: PType;
+  ok, setLike: boolean;
+begin
+  inferArrayLiteral := nil;
+  if (init^.kind <> nkSetCtor) or (init^.setElems.count = 0) then
+    exit;
+  for i := 0 to init^.setElems.count - 1 do
+    if PSetElement(listGet(init^.setElems, i))^.hi <> nil then
+      exit;
+  if longStr then
+    str := ansiStringType
+  else
+    str := shortStringType(255);
+  elem := nil;
+  ok := true;
+  setLike := true;
+  for i := 0 to init^.setElems.count - 1 do
+  begin
+    el := PSetElement(listGet(init^.setElems, i));
+    t := check(el^.lo);
+    if isError(t) then
+    begin
+      ok := false;
+      continue;
+    end;
+    if not (isOrdinal(t) and (getBase(t)^.kind <> tyInteger)) then
+      setLike := false;
+    if t^.kind = tyStringLit then
+      t := str;
+    if not isInferable(t) then
+    begin
+      ms('cannot tell the element type of the array ''');
+      maN(name.spelling);
+      ma(''' from ');
+      if t^.kind = tyNil then
+        ma('nil')
+      else
+      begin
+        ma('a value of type ');
+        maT(t);
+      end;
+      ma('; give the variable a type');
+      errR(el^.lo^.b, nodeRange(el^.lo));
+      ok := false;
+      continue;
+    end;
+    if elem <> nil then
+      joined := commonType(elem, t, str)
+    else
+      joined := t;
+    if joined = nil then
+    begin
+      ms('the elements of the array ''');
+      maN(name.spelling);
+      ma(''' have no type in common: ');
+      maT(elem);
+      ma(' and ');
+      maT(t);
+      ma('; give the variable a type');
+      errR(el^.lo^.b, nodeRange(el^.lo));
+      ok := false;
+      continue;
+    end;
+    elem := joined;
+  end;
+  if not ok then
+    exit(errorType);
+  if setLike then
+    exit;
+  inferArrayLiteral := dynArrayType(elem);
+end;
+
 function inferVarType(s: PNode; v: PDecl; t: PType): PType;
 begin
   if isError(t) then
     exit(t);
-  if t^.kind = tyStringLit then
+  if (t^.kind = tyStringLit) or isCharLiteral(s^.vdInit) then
   begin
     if s^.vdLong then
       exit(ansiStringType);
@@ -3175,8 +3266,19 @@ begin
   end
   else
   begin
-    valueTy := check(init);
-    t := inferVarType(s, first, valueTy);
+    t := inferArrayLiteral(init, s^.vdLong, first^.ident);
+    if t <> nil then { var a := [1, 2, 3]: a dynamic array }
+    begin
+      if isError(t) then
+        valueTy := t
+      else
+        valueTy := checkValueFor(t, init);
+    end
+    else
+    begin
+      valueTy := check(init);
+      t := inferVarType(s, first, valueTy);
+    end;
   end;
   if declared^ = nil then
   begin
@@ -3207,6 +3309,8 @@ begin
   assign^.value := init;
   s^.vdAssign := assign;
   finishAssign(assign, t, valueTy);
+  if s^.vdConst then { from here on }
+    first^.isReadOnly := true;
 end;
 
 { (a, b) := e;  var (a, b) := e;  -- e, a tuple, is kept in a hidden
@@ -3251,7 +3355,11 @@ begin
     check(value);
     exit;
   end;
+  { (a, b) := ('x', 1): the targets have types, so 'x' stays a char, which
+    a char and a string can take }
+  keepCharLiterals := not isVar;
   vt := check(value);
+  keepCharLiterals := false;
   isTuple := (vt^.kind = tyRecord) and vt^.isTupleRecord;
   if not isError(vt) and (not isTuple or (vt^.allFields.count <> n)) then
   begin
@@ -4522,6 +4630,7 @@ var
   res: PType;
   w: PWithContext;
   ref: PNode;
+  inferred: boolean;
 begin
   visitCall := errorType;
   w := nil;
@@ -4529,12 +4638,20 @@ begin
     d := scopeLookup(cur, e^.callee.name, w)
   else
     d := specializeGeneric(e^.callee, e^.typeArgs);
+  inferred := false; { f(args) for a generic f: its types inferred }
+  if (d = nil) and (e^.typeArgs.count = 0) then
+  begin
+    if wantedCall = e then
+      d := inferSpecialization(e^.callee, e^.args, wantedType, inferred)
+    else
+      d := inferSpecialization(e^.callee, e^.args, nil, inferred);
+  end;
   if d = nil then
   begin
-    if e^.typeArgs.count = 0 then
+    if (e^.typeArgs.count = 0) and not inferred then
       diagUndeclared(e^.callee);
     for i := 0 to e^.args.count - 1 do
-      check(argNode(e, i));
+      check(argValue(argNode(e, i)));
     exit;
   end;
   if d^.kind = dkRoutine then { objfpc: overloads }

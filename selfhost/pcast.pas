@@ -260,8 +260,9 @@ type
         the end of the statement sequence it is in. vdVars: of PDecl;
         vdInit: e, or nil; vdLong: H+ there (a string constant gives an
         ansistring); vdAssign: x := e (Sema) }
+      { vdConst: const x := e, x cannot be changed afterwards }
       nkVarDecl: (vdVars: TPtrList; vdInit: PNode; vdAssignLoc: TLoc;
-                  vdLong: boolean; vdAssign: PNode);
+                  vdLong: boolean; vdAssign: PNode; vdConst: boolean);
       { (a, b) := e;  var (a, b) := e;  (objfpc): the elements of a tuple
         assigned to variables, or to new ones. dsTargets: of PNode (Sema
         makes them for var (a, b)); dsVars: of PDecl, empty unless var.
@@ -484,6 +485,9 @@ type
                 or the loop. Sema adds it to its block's declarations,
                 after the others }
               isInlineVar: boolean;
+              { const x := e among the statements (objfpc): set once,
+                where it is declared, and not changed afterwards (Sema) }
+              isReadOnly: boolean;
               { objfpc: a parameter's default value (b: integer = 1),
                 passed by the calls that leave it out }
               paramDefault: PNode;

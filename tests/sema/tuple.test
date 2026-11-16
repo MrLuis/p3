@@ -7,7 +7,7 @@
 ; CHECK: errors.pas:6:23: error: duplicate element name 'a'
 ; CHECK: errors.pas:7:21: error: duplicate element name 'Item1'
 ; CHECK: errors.pas:27:7: error: a tuple can only be written in the statements of a routine or program
-; CHECK: errors.pas:39:5: error: assigning to '(integer, integer)' from incompatible type '(integer, char)'
+; CHECK: errors.pas:39:5: error: assigning to '(integer, integer)' from incompatible type '(integer, ansistring)'
 ; CHECK: errors.pas:40:5: error: assigning to '(integer, integer)' from incompatible type '(integer, integer, integer)'
 ; CHECK: errors.pas:41:5: error: assigning to '(integer, ansistring)' from incompatible type '(integer, integer)'
 ; CHECK: errors.pas:42:5: error: assigning to '(integer, integer)' from incompatible type '(integer, integer, integer)'
@@ -36,7 +36,7 @@
 ; CHECK-NOT: errors.pas:59
 ;
 ; RUN: not %pcc --mode=objfpc -ferror-limit=0 -c %S/Inputs/tuple/more.pas -o %t.o 2>&1 | FileCheck --check-prefix=MORE %s
-; MORE: more.pas:14:8: error: cannot return a value of type '(integer, char)' from a function of type '(integer, integer)'
+; MORE: more.pas:14:8: error: cannot return a value of type '(integer, ansistring)' from a function of type '(integer, integer)'
 ; MORE: more.pas:25:30: error: a tuple can only be written in the statements of a routine or program
 ; MORE: more.pas:34:17: error: initializer for '(integer, integer)' must list 2 elements, separated by ','
 ; MORE: more.pas:39:8: error: cannot pass a value of type '(integer, real)' to parameter 'p' of type '(integer, integer)'

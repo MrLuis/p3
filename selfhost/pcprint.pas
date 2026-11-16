@@ -1221,7 +1221,10 @@ begin
       visitTry(s);
     nkVarDecl:
       begin
-        line('VarDeclStmt');
+        if s^.vdConst then
+          line('VarDeclStmt const')
+        else
+          line('VarDeclStmt');
         loc(s^.b);
         indent := indent + 2;
         for i := 0 to s^.vdVars.count - 1 do

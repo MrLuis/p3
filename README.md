@@ -425,8 +425,8 @@ of a file.
 
 **Variables declared among the statements** (`--mode=objfpc`; as in
 Delphi, not Free Pascal): `var x: T;`, `var x, y: T;`, `var x: T := e;`
-and `var x := e;`, which gives `x` the type of `e` (a string constant
-gives a `string`). The variable is visible from the next statement to the
+and `var x := e;`, which gives `x` the type of `e` (see "Inferred types"
+below for constants and `[a, b]`). The variable is visible from the next statement to the
 end of the statement sequence the declaration is in (`begin ... end`, a
 `repeat`, a part of a `try`, the `else` of a `case`), where it may hide an
 outer variable of the same name; its value cannot use it. Each time the
@@ -549,6 +549,63 @@ call. Its values take no field width. Not supported: formats other than
 `write` cannot write (records, sets, objects): convert them in the
 expression. A name `r` used as a tag needs a blank before the backtick.
 
+**Inferred types** (objfpc; pcc's own): types the compiler works out from
+what is written next to them. Inference is local: from the value on the
+right, or from the type the place expects, in reading order.
+
+```pascal
+generic function Largest<T>(a, b: T): T;
+generic function Total<T>(const Items: array of T; Start: T): T;
+generic function Make<T>: T;
+
+n := Largest(3, 7);              { T = Integer, from the arguments }
+x := Largest(1, 2.5);            { Integer and Real: T = Real }
+t := Total([1, 2, 3], 10);       { T from the elements and from Start }
+r := Make();                     { T = the type of r }
+
+const limit := Largest(n, 10) * 2;   { set once; the type of its value }
+var names := ['ann', 'bo'];          { array of string }
+```
+
+- **Generic calls.** `F(args)` for a generic routine `F` takes each type
+  argument from the arguments: a parameter of type `T` gives `T` the type
+  of its argument, a parameter `array of T` the type of the elements.
+  Several arguments for one `T` must have a common type (see below). A
+  type parameter no argument gives is the type wanted of the result, when
+  the result is a `T` and the call is the value of an assignment, a typed
+  declaration or `exit`. If that is not enough, the error names the type
+  parameter and says what to write: `specialize F<...>(...)`, which is
+  still accepted everywhere. Named arguments and default values work as
+  for other routines. A routine that is not generic and has the same name
+  is called instead.
+- **`const x := e`** (also `const x = e` and `const x: T := e`) among the
+  statements declares a variable that is set there and cannot be changed
+  afterwards: assigning to it, passing it as a `var` parameter, `inc`. Its
+  value need not be a compile-time constant, and it follows the scope
+  rules of `var x := e`.
+- **Constants.** Where a type is inferred, a whole number is an `Integer`
+  (an `Int64` if it does not fit), a number with a fraction a `Real`
+  (pcc's `Double`), and quoted text a `string`, also one character:
+  `var c := 'a'` is a string; write `var c: Char := 'a'` for a character.
+  The value of an expression keeps its type (`var c := s[1]` is a `Char`).
+- **`[a, b, c]`** in `var x := [...]` is a dynamic array (`array of T`) of
+  the common type of its elements. It stays a set, as ever, when its
+  elements are enumeration values, characters or booleans, or when it has
+  a range: `[Red, Blue]`, `['a', 'e']`, `[1..9]`. `[]` needs a type.
+- **A common type** of two types is that type if they are the same; the
+  wider integer type; `Real` for a real and an integer (nothing is lost);
+  `string` for strings and characters; else the one the other can be
+  assigned to (a class and its descendant: the ancestor). Otherwise it is
+  an error: an `Integer` and a `string` have none.
+- A variable's type is fixed where it is declared: after `var x := 3`,
+  `x := 3.5` is an error. `var x := nil` is an error too.
+
+Not inferred, because pcc does not have them: the parameter and result
+types of lambdas (there are no anonymous functions), the type arguments of
+generic types and constructors (generic routines only), and conditional
+expressions. The types of parameters, fields and function results are
+always written.
+
 **Tuples** (objfpc; pcc's own, not Free Pascal's): several values as one,
 without declaring a record. A tuple type lists its element types between
 parentheses, `(Integer, string)`, and can name them, `(Min: Integer, Max:
@@ -580,7 +637,8 @@ Writeln(r.Min, ' to ', r.Max);
   result, `exit((a, b))`), each element is converted as an assignment to
   that element would (`(1, 2)` fits `(Real, Byte)`). With no type to go
   by (`var t := (1, 'a')`), each element has the type a variable declared
-  with it would have, and that is also what chooses among overloaded
+  with it would have (`'a'` there is a string; in `(c, n) := ('a', 1)` the
+  targets have types and it stays a character), and that is also what chooses among overloaded
   routines. A tuple variable's initial value is `(1, 'a')`, or
   with names `(Min: 1; Max: 2)` as for a record.
 - **Destructuring.** `(a, b) := e` assigns the elements of the tuple `e` to
@@ -800,9 +858,9 @@ and coexist with non-generic routines of their name. A specialization is
 made once per program or unit: its declaration is parsed again with the
 type parameters naming the type arguments and checked like any routine,
 so errors in it point into the generic, with a note at the use; it is
-compiled as `F<integer>`. Not supported: generic types, methods and
-constraints, implicit specialization (`F(1)`, not in FPC 3.2.2 either),
-`@specialize F<T>`, and, for a unit compiled separately, generics that use
+compiled as `F<integer>`. A call without `specialize` infers the type
+arguments (see "Inferred types"). Not supported: generic types, methods and
+constraints, `@specialize F<T>`, and, for a unit compiled separately, generics that use
 what the unit does not export (whole-program compilation allows it).
 
 **For-in loops** (not in `--mode=iso`), as in Free Pascal: `for x in c do`

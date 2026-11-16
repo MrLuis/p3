@@ -2847,15 +2847,17 @@ Stmt *Parser::parseStatement() {
 }
 
 // varStatement = "var" identList ( ":" type [ "owned" ] [ ":=" expression ]
-//                                | ":=" expression ) .
+//                                | ":=" expression )
+//              | "const" ident [ ":" type ] ( ":=" | "=" ) expression .
 Stmt *Parser::parseVarDeclStmt() {
-  SourceLocation VarLoc = consumeToken(); // 'var'
+  bool IsConst = Tok.is(tok::kw_const);
+  SourceLocation VarLoc = consumeToken(); // 'var' or 'const'
   auto Fail = [&]() -> Stmt * {
     skipUntil({tok::semi, tok::kw_end});
     return Ctx.create<EmptyStmt>(VarLoc);
   };
   llvm::SmallVector<Identifier, 2> Names;
-  if (Tok.is(tok::l_paren)) { // var (a, b) := e
+  if (Tok.is(tok::l_paren) && !IsConst) { // var (a, b) := e
     consumeToken();
     if (!parseIdentList(Names, "variable name") ||
         !expect(tok::r_paren, "after the variables of a tuple"))
@@ -2869,7 +2871,7 @@ Stmt *Parser::parseVarDeclStmt() {
     }
     return parseDestructure(VarLoc, {}, Ctx.copyArray<VarDecl *>(Vars));
   }
-  if (!parseIdentList(Names, "variable name"))
+  if (!parseIdentList(Names, IsConst ? "constant name" : "variable name"))
     return Fail();
   for (const Identifier &N : Names)
     declareName(N);
@@ -2879,21 +2881,27 @@ Stmt *Parser::parseVarDeclStmt() {
     TS = parseType();
     if (!TS)
       return Fail();
-    if (isIdentifierNamed("owned")) {
+    if (isIdentifierNamed("owned") && !IsConst) {
       consumeToken();
       Owned = true;
     }
   }
   Expr *Init = nullptr;
   SourceLocation AssignLoc;
-  if (Tok.is(tok::colon_equal)) {
+  if (Tok.is(tok::colon_equal) || (IsConst && Tok.is(tok::equal))) {
     AssignLoc = consumeToken();
     if (Names.size() > 1)
-      Diags.error(AssignLoc, "only one variable can be initialized",
+      Diags.error(AssignLoc,
+                  IsConst ? "only one constant can be declared at a time"
+                          : "only one variable can be initialized",
                   {SourceRange(Names[0].Loc, Names.back().getRange().getEnd())});
     Init = parseExpression();
     if (!Init)
       return Fail();
+  } else if (IsConst) {
+    Diags.error(Tok.getLocation(),
+                "expected ':=' and a value after constant name");
+    return Fail();
   } else if (!TS) {
     Diags.error(Tok.getLocation(),
                 "expected ':' and a type, or ':=' and a value, after "
@@ -2909,9 +2917,12 @@ Stmt *Parser::parseVarDeclStmt() {
   }
   if (Init && Vars.size() > 1)
     Init = nullptr; // (reported)
-  return Ctx.create<VarDeclStmt>(SourceRange(VarLoc, PrevTokEnd),
-                                 Ctx.copyArray<VarDecl *>(Vars), Init,
-                                 AssignLoc, Lex.longStrings());
+  auto *VS = Ctx.create<VarDeclStmt>(SourceRange(VarLoc, PrevTokEnd),
+                                     Ctx.copyArray<VarDecl *>(Vars), Init,
+                                     AssignLoc, Lex.longStrings());
+  if (IsConst)
+    VS->setConst();
+  return VS;
 }
 
 // destructuring = ( "(" designator { "," designator } ")"
@@ -2963,6 +2974,14 @@ Stmt *Parser::parseStatementImpl() {
     if (!LangOpts.ObjKeywords) {
       Diags.error(Tok.getLocation(),
                   "variables declared among the statements need "
+                  "--mode=objfpc");
+      break;
+    }
+    return parseVarDeclStmt();
+  case tok::kw_const:
+    if (!LangOpts.ObjKeywords) {
+      Diags.error(Tok.getLocation(),
+                  "constants declared among the statements need "
                   "--mode=objfpc");
       break;
     }

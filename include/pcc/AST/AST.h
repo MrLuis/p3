@@ -989,6 +989,7 @@ class VarDeclStmt final : public Stmt {
   SourceLocation AssignLoc;
   bool LongStrings;        ///< {$H+} here: a string constant gives an ansistring
   AssignStmt *InitAssign = nullptr; ///< set by Sema: x := e
+  bool Const = false;      ///< const x := e: x cannot be changed afterwards
 
 public:
   VarDeclStmt(SourceRange R, llvm::ArrayRef<VarDecl *> Vars, Expr *Init,
@@ -1001,6 +1002,8 @@ public:
   bool hasLongStrings() const { return LongStrings; }
   AssignStmt *getInitAssign() const { return InitAssign; }
   void setInitAssign(AssignStmt *A) { InitAssign = A; }
+  bool isConst() const { return Const; }
+  void setConst() { Const = true; }
   static bool classof(const Stmt *S) { return S->getKind() == SK_VarDecl; }
 };
 
@@ -1478,6 +1481,7 @@ private:
   bool Captured = false;        ///< set by Sema
   bool Owned = false;           ///< objfpc `x: TFoo owned`
   bool Inline = false;          ///< objfpc: declared by a `var` statement
+  bool ReadOnly = false;      ///< see isReadOnly
   Expr *Absolute = nullptr;     ///< Turbo/FPC `x: T absolute y`: y
   Expr *Default = nullptr;      ///< objfpc: the parameter's default value
   bool Out = false;             ///< objfpc: an `out` parameter
@@ -1527,6 +1531,10 @@ public:
   /// declarations, after the others.
   bool isInline() const { return Inline; }
   void setInline() { Inline = true; }
+  /// `const x := e` among the statements (objfpc): set once, where it is
+  /// declared, and not changed afterwards (Sema).
+  bool isReadOnly() const { return ReadOnly; }
+  void setReadOnly() { ReadOnly = true; }
   /// `x: T absolute y`: x has no storage of its own, it is another view of
   /// the variable, field or element y. Null for other variables.
   Expr *getAbsolute() const { return Absolute; }
