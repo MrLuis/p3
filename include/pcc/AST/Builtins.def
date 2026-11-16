@@ -109,5 +109,11 @@ BUILTIN_FUNC(AddChecked, "addchecked")
 BUILTIN_FUNC(SubChecked, "subchecked")
 BUILTIN_FUNC(MulChecked, "mulchecked")
 
+// Tasks (objfpc): Wait(t) waits for a task anywhere (await: in async
+// routines); WhenAll(tasks) / WhenAny(tasks) are tasks of their own.
+BUILTIN_FUNC(Wait,    "wait")
+BUILTIN_FUNC(WhenAll, "whenall")
+BUILTIN_FUNC(WhenAny, "whenany")
+
 #undef BUILTIN_FUNC
 #undef BUILTIN_PROC

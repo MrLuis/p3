@@ -1194,10 +1194,15 @@ RoutineDecl *Parser::parseRoutineDecl(bool HeadingOnly) {
 
   TypeSpec *ResultTS = nullptr;
   if (tryConsume(tok::colon)) {
-    if (!IsFunction)
+    // procedure P: async (objfpc): an async procedure (a task, no value)
+    bool AsyncProc = !IsFunction && isAsyncWord("async") &&
+                     !peekToken().isOneOf(tok::identifier, tok::kw_string);
+    if (!IsFunction && !AsyncProc)
       Diags.error(PrevTokEnd, std::string("a ") + Kind +
                                   " cannot have a result type");
     ResultTS = parseTypeIdentifier("function result type");
+    if (AsyncProc)
+      IsFunction = true; // (Sema: its body is a procedure's)
   }
 
   if (!expect(tok::semi, std::string("after ") + Kind + " heading"))
@@ -1376,11 +1381,16 @@ RoutineDecl *Parser::parseMethodHeading(bool InRecord, bool RecordClassMethod) {
     return nullptr;
   TypeSpec *ResultTS = nullptr;
   if (tryConsume(tok::colon)) {
-    if (!IsFunction)
+    // procedure P: async (objfpc): an async procedure (a task, no value)
+    bool AsyncProc = !IsFunction && isAsyncWord("async") &&
+                     !peekToken().isOneOf(tok::identifier, tok::kw_string);
+    if (!IsFunction && !AsyncProc)
       Diags.error(PrevTokEnd, std::string("a ") + Kind +
                                   " cannot have a result type");
     if (!(ResultTS = parseTypeIdentifier("function result type")))
       return nullptr;
+    if (AsyncProc)
+      IsFunction = true; // (Sema: its body is a procedure's)
   }
   if (!expect(tok::semi, std::string("after ") + Kind + " heading"))
     return nullptr;
@@ -2362,6 +2372,8 @@ TypeSpec *Parser::parseTypeImpl() {
       Diags.error(Start, "a record helper cannot be packed");
     return TS;
   }
+  if (!Packed && isAsyncWord("async"))
+    return parseAsyncType();
   // reference to procedure / function (objfpc; `reference` is not
   // reserved): a closure, which may outlive the routine it is made in.
   bool Reference = false;
@@ -2506,7 +2518,23 @@ TypeSpec *Parser::parseTypeImpl() {
 }
 
 // typeIdent (ISO requires these for parameters and function results)
+// async [type] (objfpc; `async` is not reserved): a task type.
+TypeSpec *Parser::parseAsyncType() {
+  SourceLocation Start = consumeToken(); // async
+  TypeSpec *Inner = nullptr;
+  if ((Tok.isOneOf(tok::identifier, tok::kw_string) ||
+       (Tok.is(tok::l_paren) && LangOpts.ObjKeywords)) && // (a tuple type)
+      !(Tok.is(tok::identifier) && isIdentifierNamed("async"))) {
+    Inner = parseTypeIdentifier("the result type of a task");
+    if (!Inner)
+      return nullptr;
+  }
+  return Ctx.create<AsyncTypeSpec>(SourceRange(Start, PrevTokEnd), Inner);
+}
+
 TypeSpec *Parser::parseTypeIdentifier(llvm::StringRef Context) {
+  if (isAsyncWord("async"))
+    return parseAsyncType();
   if (Tok.is(tok::kw_string)) { // Turbo/FPC: `string` names a type here
     auto *TS = Ctx.create<StringTypeSpec>(Tok.getRange(), nullptr,
                                           longStrings());
@@ -3251,6 +3279,204 @@ Stmt *Parser::parseDestructure(SourceLocation Start,
                                      Lex.longStrings());
 }
 
+//===- async (objfpc) --------------------------------------------------------===//
+// await, spawn, scope, detached and async are not reserved: each is that
+// word where it starts its construct and no declaration of it is visible.
+
+bool Parser::isAsyncWord(llvm::StringRef W) {
+  return LangOpts.ObjKeywords && isIdentifierNamed(W) && !Lex.isDeclared(W);
+}
+
+bool Parser::startsAwaitExpr() {
+  return isAsyncWord("await") &&
+         peekToken().isOneOf(tok::identifier, tok::l_paren, tok::kw_inherited);
+}
+
+bool Parser::startsSpawnExpr() {
+  return isAsyncWord("spawn") &&
+         peekToken().isOneOf(tok::identifier, tok::kw_begin, tok::l_paren);
+}
+
+// await e: e a factor (await F(x) + 1 is (await F(x)) + 1).
+Expr *Parser::parseAwaitExpr() {
+  SourceLocation Start = consumeToken(); // await
+  Expr *Op = parseFactor();
+  if (!Op)
+    return nullptr;
+  return Ctx.create<AwaitExpr>(SourceRange(Start, PrevTokEnd), Op);
+}
+
+// spawn F(args) | spawn begin ... end: the block becomes a hidden async
+// procedure ($spawnN, nested here: it uses this routine's variables, which
+// the scope it is spawned in keeps alive), and the expression its call.
+Expr *Parser::parseSpawnExpr() {
+  SourceLocation Start = consumeToken(); // spawn
+  if (Tok.isNot(tok::kw_begin)) {
+    Expr *Call = parseFactor();
+    if (!Call)
+      return nullptr;
+    return Ctx.create<SpawnExpr>(SourceRange(Start, PrevTokEnd), Call);
+  }
+  std::string HN = "$spawn" + std::to_string(++HiddenLambdas);
+  llvm::StringRef N = Ctx.getStrings().intern(HN);
+  Identifier Name{N, N, Start};
+  size_t HiddenMark = HiddenTypeDecls.size();
+  CompoundStmt *Body = parseCompoundStmt();
+  llvm::SmallVector<Decl *, 2> Decls(HiddenTypeDecls.begin() + HiddenMark,
+                                     HiddenTypeDecls.end());
+  HiddenTypeDecls.resize(HiddenMark);
+  auto *R = Ctx.create<RoutineDecl>(
+      Start, Name, /*IsFunction=*/true, llvm::ArrayRef<VarDecl *>(), false,
+      Ctx.create<AsyncTypeSpec>(SourceRange(Start), nullptr),
+      Ctx.create<Block>(Ctx.copyArray<Decl *>(Decls), Body), false);
+  R->setSpawnBlock();
+  HiddenTypeDecls.push_back(R);
+  auto *Call = Ctx.create<CallExpr>(SourceRange(Start, PrevTokEnd), Name,
+                                    llvm::ArrayRef<Expr *>());
+  Call->setDecl(R); // (declared by Sema when it completes it)
+  return Ctx.create<SpawnExpr>(SourceRange(Start, PrevTokEnd), Call);
+}
+
+// scope [token] statements end. A token is an expression; without one the
+// first statement starts with a keyword (or the block is empty).
+Stmt *Parser::parseScopeStmt() {
+  SourceLocation Loc = consumeToken(); // scope
+  Expr *Token = nullptr;
+  bool StatementWord =
+      Tok.is(tok::identifier) &&
+      (isAsyncWord("await") || isAsyncWord("spawn") || isAsyncWord("scope") ||
+       isAsyncWord("detached") || isIdentifierNamed("checked") ||
+       isIdentifierNamed("unchecked"));
+  if ((Tok.is(tok::identifier) && !StatementWord) || Tok.is(tok::kw_nil)) {
+    Token = parseExpression();
+    if (!Token) {
+      skipUntil({tok::kw_end});
+      tryConsume(tok::kw_end);
+      return Ctx.create<EmptyStmt>(Loc);
+    }
+  }
+  llvm::SmallVector<Stmt *, 8> Body;
+  parseStatementSequence(Body, tok::kw_end, Loc, "scope");
+  SourceLocation EndLoc = Tok.getEndLocation();
+  tryConsume(tok::kw_end);
+  return Ctx.create<ScopeStmt>(SourceRange(Loc, EndLoc), Token,
+                               Ctx.copyArray<Stmt *>(Body));
+}
+
+// detached [(handler)] call
+Stmt *Parser::parseDetachedStmt() {
+  SourceLocation Loc = consumeToken(); // detached
+  Expr *Handler = nullptr;
+  if (tryConsume(tok::l_paren)) {
+    Handler = parseExpression();
+    if (!Handler || !expect(tok::r_paren, "after the handler of 'detached'")) {
+      skipUntil({tok::semi, tok::kw_end});
+      return Ctx.create<EmptyStmt>(Loc);
+    }
+  }
+  Expr *Call = parseFactor();
+  if (!Call) {
+    skipUntil({tok::semi, tok::kw_end});
+    return Ctx.create<EmptyStmt>(Loc);
+  }
+  return Ctx.create<DetachedStmt>(SourceRange(Loc, PrevTokEnd), Handler, Call);
+}
+
+// A statement of the async words, or null if the identifier starts none.
+Stmt *Parser::parseAsyncStatement() {
+  if (!LangOpts.ObjKeywords)
+    return nullptr;
+  SourceLocation Start = Tok.getLocation();
+  if (startsAwaitExpr() || startsSpawnExpr()) {
+    Expr *E = isIdentifierNamed("await") ? parseAwaitExpr() : parseSpawnExpr();
+    if (!E) {
+      skipUntil({tok::semi, tok::kw_end});
+      return Ctx.create<EmptyStmt>(Start);
+    }
+    return Ctx.create<ExprStmt>(SourceRange(Start, PrevTokEnd), E);
+  }
+  if (isAsyncWord("scope") &&
+      peekToken().isOneOf(tok::identifier, tok::kw_nil, tok::kw_begin,
+                          tok::kw_var, tok::kw_const, tok::kw_for,
+                          tok::kw_while, tok::kw_repeat, tok::kw_if,
+                          tok::kw_case, tok::kw_with, tok::kw_try,
+                          tok::kw_raise, tok::kw_end))
+    return parseScopeStmt();
+  if (isAsyncWord("detached") && peekToken().isOneOf(tok::identifier, tok::l_paren))
+    return parseDetachedStmt();
+  return nullptr;
+}
+
+// for await [var] x in e do s: reads channel e until it is closed:
+//   begin
+//     var $chN := e;
+//     while true do begin
+//       var ($vN, $okN) := await $chN.TryReceive;
+//       if not $okN then break;
+//       [var] x := $vN;
+//       s
+//     end
+//   end
+Stmt *Parser::parseForAwait(SourceLocation ForLoc) {
+  consumeToken(); // await
+  auto Fail = [&] {
+    skipUntil({tok::semi, tok::kw_end});
+    return Ctx.create<EmptyStmt>(ForLoc);
+  };
+  bool Declares = tryConsume(tok::kw_var);
+  Identifier X;
+  if (!expectIdentifier(X, "control variable after 'for await'"))
+    return Fail();
+  if (Declares)
+    declareName(X);
+  if (!expect(tok::kw_in, "after the variable of 'for await'"))
+    return Fail();
+  Expr *Source = parseExpression();
+  if (!Source)
+    return Fail();
+  if (!expect(tok::kw_do, "after the channel of 'for await'"))
+    return Fail();
+  Stmt *Body = parseStatement();
+  SourceRange R(ForLoc, PrevTokEnd);
+  unsigned K = ++HiddenLambdas;
+  auto Hidden = [&](const char *Base) {
+    llvm::StringRef N = Ctx.getStrings().intern(Base + std::to_string(K));
+    return Identifier{N, N, ForLoc};
+  };
+  Identifier Ch = Hidden("$ch"), V = Hidden("$v"), Ok = Hidden("$ok");
+  auto Inline = [&](const Identifier &N) {
+    auto *D = Ctx.create<VarDecl>(N, nullptr);
+    D->setInline();
+    return D;
+  };
+  auto *ChDecl = Ctx.create<VarDeclStmt>(R, Ctx.copyArray<VarDecl *>({Inline(Ch)}),
+                                         Source, ForLoc, Lex.longStrings());
+  Expr *Receive = Ctx.create<AwaitExpr>(
+      R, Ctx.create<FieldExpr>(R, Ctx.create<NameRefExpr>(Ch),
+                               Identifier{Ctx.getStrings().intern("tryreceive"),
+                                          Ctx.getStrings().intern("TryReceive"),
+                                          ForLoc}));
+  Stmt *Take = Ctx.create<DestructureStmt>(
+      R, llvm::ArrayRef<Expr *>(), Ctx.copyArray<VarDecl *>({Inline(V), Inline(Ok)}),
+      Receive, ForLoc, Lex.longStrings());
+  Identifier BreakId{Ctx.getStrings().intern("break"),
+                     Ctx.getStrings().intern("break"), ForLoc};
+  Stmt *Stop = Ctx.create<IfStmt>(
+      R, Ctx.create<UnaryExpr>(R, UnaryOp::Not, Ctx.create<NameRefExpr>(Ok)),
+      Ctx.create<ProcCallStmt>(R, BreakId, llvm::ArrayRef<Expr *>(), false), nullptr);
+  Stmt *SetX = Declares
+                   ? static_cast<Stmt *>(Ctx.create<VarDeclStmt>(
+                         R, Ctx.copyArray<VarDecl *>({Inline(X)}),
+                         Ctx.create<NameRefExpr>(V), ForLoc, Lex.longStrings()))
+                   : Ctx.create<AssignStmt>(R, Ctx.create<NameRefExpr>(X), ForLoc,
+                                            Ctx.create<NameRefExpr>(V));
+  auto *Loop = Ctx.create<CompoundStmt>(R, Ctx.copyArray<Stmt *>({Take, Stop, SetX, Body}));
+  Identifier TrueId{Ctx.getStrings().intern("true"), Ctx.getStrings().intern("true"),
+                    ForLoc};
+  Stmt *While = Ctx.create<WhileStmt>(R, Ctx.create<NameRefExpr>(TrueId), Loop);
+  return Ctx.create<CompoundStmt>(R, Ctx.copyArray<Stmt *>({ChDecl, While}));
+}
+
 // checked statements end / unchecked statements end (objfpc; the words
 // are not reserved): a block whose integer arithmetic is checked for
 // overflow (an EIntOverflow exception) or not (it wraps, and so do integer
@@ -3333,6 +3559,8 @@ Stmt *Parser::parseCheckedBlock() {
 Stmt *Parser::parseStatementImpl() {
   switch (Tok.getKind()) {
   case tok::identifier:
+    if (Stmt *S = parseAsyncStatement())
+      return S;
     if (startsCheckedBlock())
       return parseCheckedBlock();
     return recordingDesignator([&] { return parseAssignmentOrCall(); });
@@ -3762,6 +3990,8 @@ Stmt *Parser::parseRepeatStmt() {
 // for = "for" ident ":=" expression ("to"|"downto") expression "do" statement .
 Stmt *Parser::parseForStmt() {
   SourceLocation ForLoc = consumeToken();
+  if (isAsyncWord("await") && peekToken().isOneOf(tok::kw_var, tok::identifier))
+    return parseForAwait(ForLoc);
   auto Fail = [&] {
     skipUntil({tok::semi, tok::kw_end});
     return Ctx.create<EmptyStmt>(ForLoc);
@@ -4504,6 +4734,30 @@ Expr *Parser::parseFactor() {
   case tok::identifier: {
     if (startsCheckedExpr())
       return parseCheckedExpr();
+    if (startsAwaitExpr())
+      return parseAwaitExpr();
+    if (startsSpawnExpr())
+      return parseSpawnExpr();
+    // Pool.Run(F(args)) (objfpc; Pool not declared): F's task on the pool
+    if (isAsyncWord("pool") && peekToken().is(tok::period)) {
+      SourceLocation Start = Tok.getLocation();
+      Identifier PoolId = makeIdentifier(Tok);
+      consumeToken();
+      consumeToken(); // '.'
+      Identifier Member;
+      if (!expectIdentifier(Member, "member name after '.'"))
+        return nullptr;
+      if (Member.Name == "run" && Tok.is(tok::l_paren)) {
+        consumeToken();
+        Expr *Call = parseExpression();
+        if (!Call || !expect(tok::r_paren, "after the call Pool.Run runs"))
+          return nullptr;
+        return Ctx.create<SpawnExpr>(SourceRange(Start, PrevTokEnd), Call,
+                                     /*OnPool=*/true);
+      }
+      return parseSelectors(Ctx.create<FieldExpr>(
+          SourceRange(Start, PrevTokEnd), Ctx.create<NameRefExpr>(PoolId), Member));
+    }
     if (startsSpecialize()) { // specialize F<T>(args)
       SourceLocation Start = Tok.getLocation();
       Identifier Name;

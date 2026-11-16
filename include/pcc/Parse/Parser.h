@@ -258,6 +258,16 @@ class Parser {
   Stmt *parseCheckedBlock();
   bool startsCheckedExpr();
   Expr *parseCheckedExpr();
+  bool isAsyncWord(llvm::StringRef W);
+  Stmt *parseAsyncStatement();
+  bool startsAwaitExpr();
+  bool startsSpawnExpr();
+  Expr *parseAwaitExpr();
+  Expr *parseSpawnExpr();
+  Stmt *parseScopeStmt();
+  Stmt *parseDetachedStmt();
+  Stmt *parseForAwait(SourceLocation ForLoc);
+  TypeSpec *parseAsyncType();
   void setCheckedSwitches(SourceLocation L, bool Checked,
                           CheckDirectives::State &Before,
                           CheckDirectives::State &WrapBefore);

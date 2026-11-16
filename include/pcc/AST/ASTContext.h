@@ -50,6 +50,8 @@ class ASTContext {
   Type *AnsiString = nullptr;
   llvm::DenseMap<Type *, OpenArrayType *> OpenArrayTypes;
   llvm::DenseMap<Type *, DynArrayType *> DynArrayTypes;
+  llvm::DenseMap<Type *, TaskType *> TaskTypes;
+  TokenType *TokenTy = nullptr;
 
 public:
   explicit ASTContext(StringPool &Strings) : Strings(Strings) {}
@@ -103,6 +105,18 @@ public:
     if (!T)
       T = create<DynArrayType>(Element);
     return T;
+  }
+  /// async T (Result null: async).
+  Type *getTaskType(Type *Result) {
+    TaskType *&T = TaskTypes[Result];
+    if (!T)
+      T = create<TaskType>(Result);
+    return T;
+  }
+  Type *getTokenType() {
+    if (!TokenTy)
+      TokenTy = create<TokenType>();
+    return TokenTy;
   }
   Type *getOpenArrayType(Type *Element) {
     OpenArrayType *&T = OpenArrayTypes[Element];

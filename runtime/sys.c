@@ -215,13 +215,12 @@ int64_t __pas_sys_tick_ms(void) {
 #endif
 }
 
+/* SysUtils.Sleep: in a task it waits (cancellable) without holding its
+ * thread; elsewhere the thread runs its tasks meanwhile (async.c). */
 void __pas_sys_sleep(int32_t ms) {
 #ifdef _WIN32
   Sleep((DWORD)ms);
 #else
-  struct timespec ts;
-  ts.tv_sec = ms / 1000;
-  ts.tv_nsec = (long)(ms % 1000) * 1000000;
-  nanosleep(&ts, NULL);
+  __pas_task_sleep(ms);
 #endif
 }

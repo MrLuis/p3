@@ -524,6 +524,8 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
     case Type::TK_AnsiString: // its characters, or null when empty
     case Type::TK_ClassRef: // a reference to the class's VMT
     case Type::TK_Class: // a reference to the object
+    case Type::TK_Task:  // a counted reference to the task
+    case Type::TK_Token: // a counted reference to the token
       return B.getPtrTy();
     case Type::TK_Error:
     case Type::TK_Untyped: // (untyped parameters are passed by reference)
@@ -1844,6 +1846,35 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
     return G;
   }
 
+  /// The constant PasDynInfo of values of type T (size, fini and addref,
+  /// as for a dynamic array's elements): a task's result.
+  llvm::Constant *typeInfoOf(Type *T) {
+    llvm::GlobalVariable *&G = TypeInfos[T];
+    if (G)
+      return G;
+    llvm::Constant *Fini = llvm::ConstantPointerNull::get(B.getPtrTy());
+    llvm::Constant *AddRef = Fini;
+    if (isManaged(T)) {
+      auto Op = [&](const char *Name, bool IsFini) {
+        auto *F = llvm::Function::Create(
+            llvm::FunctionType::get(B.getVoidTy(), {B.getPtrTy()}, false),
+            llvm::Function::InternalLinkage, Name, M);
+        F->getArg(0)->setName("elem");
+        DynOpsToEmit.push_back({T, F, IsFini});
+        return F;
+      };
+      Fini = Op("type.fini", true);
+      AddRef = Op("type.addref", false);
+    }
+    auto *Ty = llvm::StructType::get(B.getInt64Ty(), B.getPtrTy(), B.getPtrTy());
+    G = new llvm::GlobalVariable(
+        M, Ty, /*isConstant=*/true, llvm::GlobalValue::InternalLinkage,
+        llvm::ConstantStruct::get(Ty, {B.getInt64(sizeOf(T)), Fini, AddRef}),
+        "typeinfo");
+    return G;
+  }
+  llvm::DenseMap<Type *, llvm::GlobalVariable *> TypeInfos;
+
   void emitDynOp(Type *Elem, llvm::Function *F, bool IsFini) {
     CurFn = F;
     AddrAligns.clear();
@@ -2106,6 +2137,9 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
     switch (E->getKind()) {
     case Expr::EK_Tuple:
       return emitTuple(llvm::cast<TupleExpr>(E));
+    case Expr::EK_Await: // a structured result: in the task
+    case Expr::EK_Spawn:
+      return visitExpr(E);
     case Expr::EK_Cond: { // the hidden variable, once set
       auto *CE = llvm::cast<CondExpr>(E);
       visitStmt(CE->getLowered());
@@ -2329,6 +2363,8 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
     case Type::TK_DynArray:
     case Type::TK_OpenArray:
     case Type::TK_ArrayOfConst:
+    case Type::TK_Task:
+    case Type::TK_Token:
       return DIB->createPointerType(nullptr, 64);
     case Type::TK_AnsiString:
       return DIB->createPointerType(
@@ -3061,6 +3097,8 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
            Name == "__pas_free_object" || Name == "__pas_free_instance" ||
            Name == "__pas_intf_assign" || Name == "__pas_intf_clear" ||
            Name == "__pas_frame_release" || Name == "__pas_closure_assign" ||
+           Name == "__pas_task_await" || Name == "__pas_scope_leave" ||
+           Name == "__pas_task_assign" || Name == "__pas_task_clear" ||
            Name == "__pas_closure_clear" ||
            Name == "__pas_dyn_clear" || Name == "__pas_dyn_assign" ||
            Name == "__pas_dyn_setlength" ||
@@ -3202,6 +3240,8 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
       F->addFnAttr(llvm::Attribute::InlineHint);
     Functions[R] = F;
     declareCThunk(R);
+    if (R->isAsync())
+      declareAsync(R, Name);
     RoutinesToEmit.push_back(R);
     if (DIB)
       // File scope even for nested routines: lexical nesting would make
@@ -3276,7 +3316,256 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
     return classRuntime(Name, B.getVoidTy(), {B.getPtrTy()});
   }
 
+  /// An async routine's task: its arguments' record [link, Self, params]
+  /// (copies), its entry R.task(task) (calls R with them, stores the
+  /// result in the task) and R.taskfini(args) (finalizes them).
+  struct AsyncParts {
+    llvm::StructType *ArgsTy;
+    llvm::Function *Entry, *Fini; ///< Fini: null when nothing is counted
+  };
+  llvm::DenseMap<RoutineDecl *, AsyncParts> Asyncs;
+  std::vector<RoutineDecl *> AsyncsToEmit;
+
+  void declareAsync(RoutineDecl *R, const std::string &Name) {
+    llvm::SmallVector<llvm::Type *, 8> Slots{B.getPtrTy()}; // the link
+    if (R->hasSelf())
+      Slots.push_back(B.getPtrTy());
+    bool Counted = false;
+    for (VarDecl *P : R->getParams()) {
+      Slots.push_back(memType(P->getType()));
+      Counted |= isManaged(P->getType());
+    }
+    AsyncParts A;
+    A.ArgsTy = llvm::StructType::create(M.getContext(), Slots,
+                                        "args." + Name.substr(4));
+    A.Entry = llvm::Function::Create(
+        llvm::FunctionType::get(B.getVoidTy(), {B.getPtrTy()}, false),
+        llvm::Function::InternalLinkage, Name + ".task", M);
+    A.Entry->getArg(0)->setName("task");
+    A.Fini = nullptr;
+    if (Counted) {
+      A.Fini = llvm::Function::Create(
+          llvm::FunctionType::get(B.getVoidTy(), {B.getPtrTy()}, false),
+          llvm::Function::InternalLinkage, Name + ".taskfini", M);
+      A.Fini->getArg(0)->setName("args");
+    }
+    Asyncs[R] = A;
+  }
+
+  /// The parameters of R from its task's arguments: their slot index.
+  unsigned firstParamSlot(RoutineDecl *R) { return R->hasSelf() ? 2 : 1; }
+
+  void emitAsyncParts(RoutineDecl *R) {
+    AsyncParts &A = Asyncs[R];
+    llvm::PointerType *Ptr = B.getPtrTy();
+    // R.task(task): R(args...), its result into the task's
+    CurFn = A.Entry;
+    AddrAligns.clear();
+    CurRoutine = nullptr;
+    CurFrame = nullptr;
+    CurPin = nullptr;
+    PinTemps = true;
+    CurSP = nullptr;
+    B.SetCurrentDebugLocation(llvm::DebugLoc());
+    B.SetInsertPoint(llvm::BasicBlock::Create(M.getContext(), "entry", A.Entry));
+    llvm::Value *Task = A.Entry->getArg(0);
+    llvm::Value *Args = B.CreateCall(classRuntime("__pas_task_args", Ptr, {Ptr}),
+                                     {Task}, "args");
+    llvm::SmallVector<llvm::Value *, 8> Values;
+    Values.push_back(B.CreateLoad(Ptr, B.CreateStructGEP(A.ArgsTy, Args, 0), "link"));
+    if (R->hasSelf())
+      Values.push_back(B.CreateLoad(Ptr, B.CreateStructGEP(A.ArgsTy, Args, 1), "self"));
+    llvm::Value *ResultSlot = nullptr;
+    if (R->isFunction())
+      ResultSlot = B.CreateCall(classRuntime("__pas_task_result", Ptr, {Ptr}),
+                                {Task}, "result");
+    bool ByPointer = R->isFunction() && returnsByPointer(R->getResultType());
+    if (ByPointer)
+      Values.push_back(ResultSlot);
+    unsigned Slot = firstParamSlot(R);
+    for (VarDecl *P : R->getParams()) {
+      llvm::Value *Addr = B.CreateStructGEP(A.ArgsTy, Args, Slot++);
+      Type *T = P->getType();
+      if (T->isStructured()) // (the callee copies a value parameter)
+        Values.push_back(Addr);
+      else
+        Values.push_back(loadScalar(Addr, T, P->getName().Name));
+    }
+    llvm::Value *Result = B.CreateCall(Functions[R], Values);
+    if (R->isFunction() && !ByPointer) {
+      Type *T = R->getResultType();
+      if (T->isBoolean() || T->isOrdinal() || T->isReal())
+        storeScalar(ResultSlot, Result, T);
+      else // (a counted value moves into the task)
+        B.CreateStore(Result, ResultSlot);
+    }
+    B.CreateRetVoid();
+    if (!A.Fini)
+      return;
+    // R.taskfini(args): the counted arguments released
+    CurFn = A.Fini;
+    AddrAligns.clear();
+    B.SetInsertPoint(llvm::BasicBlock::Create(M.getContext(), "entry", A.Fini));
+    Slot = firstParamSlot(R);
+    for (VarDecl *P : R->getParams()) {
+      llvm::Value *Addr = B.CreateStructGEP(A.ArgsTy, A.Fini->getArg(0), Slot++);
+      if (isManaged(P->getType()))
+        finalizeValue(Addr, P->getType());
+    }
+    B.CreateRetVoid();
+  }
+
+  /// How the next async call starts its task (set by spawn and Pool.Run,
+  /// taken by the call).
+  enum class StartMode { Here, Spawn, Pool };
+  StartMode NextStart = StartMode::Here;
+
+  /// A call of async routine R (link, Self: Self's value or null): its
+  /// task, made with copies of the arguments and started (here: it runs
+  /// until it waits or ends).
+  llvm::Value *emitAsyncCall(RoutineDecl *R, llvm::Value *Link, llvm::Value *Self,
+                             llvm::ArrayRef<Expr *> Args) {
+    StartMode Mode = NextStart;
+    NextStart = StartMode::Here;
+    AsyncParts &A = Asyncs[R];
+    llvm::PointerType *Ptr = B.getPtrTy();
+    llvm::Constant *Info = R->isFunction()
+                               ? typeInfoOf(R->getResultType())
+                               : llvm::ConstantPointerNull::get(Ptr);
+    llvm::Constant *Fini = A.Fini ? static_cast<llvm::Constant *>(A.Fini)
+                                  : llvm::ConstantPointerNull::get(Ptr);
+    llvm::Value *Task = B.CreateCall(
+        classRuntime("__pas_task_new", Ptr, {Ptr, B.getInt64Ty(), Ptr, Ptr}),
+        {Info, B.getInt64(DL.getTypeAllocSize(A.ArgsTy)), A.Entry, Fini}, "task");
+    llvm::Value *ArgsAddr =
+        B.CreateCall(classRuntime("__pas_task_args", Ptr, {Ptr}), {Task}, "args");
+    B.CreateStore(Link ? Link : llvm::ConstantPointerNull::get(Ptr),
+                  B.CreateStructGEP(A.ArgsTy, ArgsAddr, 0));
+    if (R->hasSelf())
+      B.CreateStore(Self, B.CreateStructGEP(A.ArgsTy, ArgsAddr, 1));
+    unsigned Slot = firstParamSlot(R);
+    auto Params = R->getParams();
+    for (size_t I = 0; I < Params.size(); ++I) {
+      Expr *Arg = I < Args.size() ? Args[I] : Params[I]->getDefault();
+      storeExpr(B.CreateStructGEP(A.ArgsTy, ArgsAddr, Slot++), Params[I]->getType(),
+                Arg);
+    }
+    const char *Start = Mode == StartMode::Spawn  ? "__pas_task_spawn"
+                        : Mode == StartMode::Pool ? "__pas_task_run_pool"
+                                                  : "__pas_task_start";
+    B.CreateCall(classRuntime(Start, B.getVoidTy(), {Ptr}), {Task});
+    return holdResult(Task, R->getAsyncType());
+  }
+
+  /// await / Wait: waits for task T (of type TT); its result (an address
+  /// for a structured type), or null without one.
+  llvm::Value *emitAwait(llvm::Value *T, TaskType *TT) {
+    llvm::PointerType *Ptr = B.getPtrTy();
+    B.CreateCall(classRuntime("__pas_task_await", B.getVoidTy(), {Ptr}), {T});
+    Type *RT = TT->getResult();
+    if (!RT)
+      return nullptr;
+    llvm::Value *Res =
+        B.CreateCall(classRuntime("__pas_task_result", Ptr, {Ptr}), {T}, "result");
+    if (RT->isStructured())
+      return Res;
+    return loadScalar(Res, RT, "awaited");
+  }
+
+public:
+  llvm::Value *visitAwaitExpr(AwaitExpr *E) {
+    llvm::Value *T = visitExpr(E->getOperand());
+    return emitAwait(T, llvm::cast<TaskType>(E->getOperand()->getType()));
+  }
+
+  llvm::Value *visitSpawnExpr(SpawnExpr *E) {
+    NextStart = E->isPoolRun() ? StartMode::Pool : StartMode::Spawn;
+    llvm::Value *T = visitExpr(E->getCall());
+    NextStart = StartMode::Here;
+    return T;
+  }
+
+  void visitExprStmt(ExprStmt *S) { visitExpr(S->getExpr()); }
+
+  void visitScopeStmt(ScopeStmt *S) {
+    llvm::PointerType *Ptr = B.getPtrTy();
+    llvm::Value *Token = S->getToken() && !S->getToken()->getType()->isNil()
+                             ? visitExpr(S->getToken())
+                             : llvm::ConstantPointerNull::get(Ptr);
+    llvm::Value *Scope = B.CreateCall(
+        classRuntime("__pas_scope_enter", Ptr, {Ptr}), {Token}, "scope");
+    llvm::Value *Slot = createTemp(Ptr, "scope.slot");
+    B.CreateStore(Scope, Slot);
+    pinInMemory(Slot);
+    emitTryFinally([&] { emitSequence(S->getBody()); },
+                   [&](llvm::Value *State) {
+                     llvm::Value *Raised = B.CreateICmpEQ(
+                         B.CreateLoad(B.getInt32Ty(), State, "state"),
+                         B.getInt32(1), "raised");
+                     B.CreateCall(classRuntime("__pas_scope_leave", B.getVoidTy(),
+                                               {Ptr, B.getInt32Ty()}),
+                                  {B.CreateLoad(Ptr, Slot, "scope"),
+                                   B.CreateZExt(Raised, B.getInt32Ty())});
+                   });
+  }
+
+  void visitDetachedStmt(DetachedStmt *S) {
+    llvm::PointerType *Ptr = B.getPtrTy();
+    llvm::Value *T = visitExpr(S->getCall());
+    llvm::Value *Fn = llvm::ConstantPointerNull::get(Ptr), *Link = Fn;
+    if (Expr *H = S->getHandler()) {
+      llvm::Value *Pair = emitRoutineValue(H);
+      Fn = B.CreateExtractValue(Pair, 0, "handler");
+      Link = B.CreateExtractValue(Pair, 1, "link");
+    }
+    B.CreateCall(classRuntime("__pas_task_detach", B.getVoidTy(), {Ptr, Ptr, Ptr}),
+                 {T, Fn, Link});
+  }
+
+  /// WhenAll(tasks) / WhenAny(tasks): the tasks' data and count.
+  llvm::Value *emitWhen(CallExpr *E, bool All) {
+    llvm::PointerType *Ptr = B.getPtrTy();
+    Expr *A = E->getArgs()[0];
+    Type *AT = A->getType();
+    llvm::Value *Data, *N;
+    TaskType *TT;
+    if (auto *ST = llvm::dyn_cast<ArrayType>(AT)) {
+      Data = emitAddress(A);
+      OrdinalBounds Bd = getOrdinalBounds(ST->getIndexType());
+      N = B.getInt64(Bd.Hi - Bd.Lo + 1);
+      TT = llvm::cast<TaskType>(ST->getElementType());
+    } else if (auto *DT = llvm::dyn_cast<DynArrayType>(AT)) {
+      Data = visitExpr(A);
+      N = dynLength(Data);
+      TT = llvm::cast<TaskType>(DT->getElementType());
+    } else {
+      llvm::Value *Desc = openDescriptor(A);
+      Data = B.CreateLoad(Ptr, Desc, "data");
+      N = openCount(Desc);
+      TT = llvm::cast<TaskType>(llvm::cast<OpenArrayType>(AT)->getElementType());
+    }
+    auto *RT = llvm::cast<TaskType>(E->getType());
+    llvm::Value *Task;
+    if (All) {
+      llvm::Constant *ResInfo = RT->getResult()
+                                    ? typeInfoOf(RT->getResult())
+                                    : llvm::ConstantPointerNull::get(Ptr);
+      llvm::Constant *Elem = TT->getResult() ? typeInfoOf(TT->getResult())
+                                             : llvm::ConstantPointerNull::get(Ptr);
+      Task = B.CreateCall(
+          classRuntime("__pas_when_all", Ptr, {Ptr, B.getInt64Ty(), Ptr, Ptr}),
+          {Data, N, ResInfo, Elem}, "whenall");
+    } else {
+      Task = B.CreateCall(
+          classRuntime("__pas_when_any", Ptr, {Ptr, B.getInt64Ty(), Ptr}),
+          {Data, N, typeInfoOf(RT->getResult())}, "whenany");
+    }
+    return holdResult(Task, RT);
+  }
+
   void emitRoutineBody(RoutineDecl *R) {
+    if (R->isAsync()) // (its task's parts, after it)
+      AsyncsToEmit.push_back(R);
     // A frame on the heap: the function that finalizes it, first.
     llvm::Function *FrameFini =
         FrameTypes.lookup(R) && R->hasHeapFrame() ? emitFrameFini(R) : nullptr;
@@ -3663,6 +3952,8 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
   }
 
   llvm::Value *emitCall(RoutineDecl *R, llvm::ArrayRef<Expr *> Args) {
+    if (R->isAsync())
+      return emitAsyncCall(R, staticLinkFor(R), nullptr, Args);
     if (R->isExternal())
       return emitCallTo(ExternalFns[R], nullptr, R->getParams(), Args, nullptr,
                         nullptr, /*ToC=*/true);
@@ -3812,6 +4103,12 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
                    {Addr});
       return;
     }
+    if (T->isTask() || T->isToken()) {
+      B.CreateCall(classRuntime(T->isTask() ? "__pas_task_clear" : "__pas_token_clear",
+                                B.getVoidTy(), {B.getPtrTy()}),
+                   {Addr});
+      return;
+    }
     if (auto *A = llvm::dyn_cast<ArrayType>(T)) {
       forEachElement(
           Addr, A,
@@ -3856,6 +4153,13 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
       B.CreateCall(frameRuntime("__pas_frame_addref"), {Frame});
       return;
     }
+    if (T->isTask() || T->isToken()) {
+      llvm::Value *H = B.CreateLoad(B.getPtrTy(), Addr, T->isTask() ? "task" : "token");
+      B.CreateCall(classRuntime(T->isTask() ? "__pas_task_addref" : "__pas_token_addref",
+                                B.getVoidTy(), {B.getPtrTy()}),
+                   {H});
+      return;
+    }
     if (auto *A = llvm::dyn_cast<ArrayType>(T)) {
       forEachElement(
           Addr, A,
@@ -3897,6 +4201,10 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
                                 {B.getPtrTy(), B.getPtrTy(), B.getPtrTy()}),
                    {Addr, B.CreateExtractValue(V, 0, "fn"),
                     B.CreateExtractValue(V, 1, "frame")});
+    else if (T->isTask() || T->isToken())
+      B.CreateCall(classRuntime(T->isTask() ? "__pas_task_assign" : "__pas_token_assign",
+                                B.getVoidTy(), {B.getPtrTy(), B.getPtrTy()}),
+                   {Addr, V});
     else if (isManaged(T))
       storeInterface(Addr, V);
     else
@@ -3922,7 +4230,8 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
   /// holdResult's temporary: its address.
   llvm::Value *heldTemp(llvm::Value *V, Type *T = nullptr) {
     // (released by finalizeValue: also a closure's)
-    bool Dyn = T && (T->isDynArray() || T->isClosureType());
+    bool Dyn = T && (T->isDynArray() || T->isClosureType() || T->isTask() ||
+                     T->isToken());
     llvm::IRBuilder<> Entry(&CurFn->getEntryBlock(),
                             CurFn->getEntryBlock().begin());
     llvm::Value *Slot = Entry.CreateAlloca(
@@ -4245,6 +4554,11 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
   llvm::Value *emitMethodCall(RoutineDecl *R, llvm::Value *Obj,
                               llvm::ArrayRef<Expr *> Args, bool Inherited,
                               SourceLocation L, bool SelfIsClass = false) {
+    if (R->isAsync())
+      return emitAsyncCall(R, nullptr,
+                           R->isClassMethod() ? receiverClass(Obj, SelfIsClass, L)
+                                              : Obj,
+                           Args);
     if (R->getClass() && R->getClass()->hasSelfByReference())
       return emitRecordMethodCall(R, Obj, Args);
     if (R->isConstructor() && SelfIsClass && !Inherited)
@@ -5067,6 +5381,12 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
 
   llvm::Value *emitBuiltinCall(CallExpr *E, BuiltinDecl *BD) {
     switch (BD->getBuiltinKind()) {
+    case BuiltinKind::Wait:
+      return emitAwait(visitExpr(E->getArgs()[0]),
+                       llvm::cast<TaskType>(E->getArgs()[0]->getType()));
+    case BuiltinKind::WhenAll:
+    case BuiltinKind::WhenAny:
+      return emitWhen(E, BD->getBuiltinKind() == BuiltinKind::WhenAll);
     case BuiltinKind::AddChecked:
     case BuiltinKind::SubChecked:
     case BuiltinKind::MulChecked: { // the tuple (a op b, no overflow)
@@ -5338,6 +5658,9 @@ public:
     defineVMTs();
     for (RoutineDecl *R : RoutinesToEmit)
       emitRoutineBody(R);
+    for (RoutineDecl *R : AsyncsToEmit)
+      emitAsyncParts(R);
+    AsyncsToEmit.clear();
     emitCleanups();
 
     CurFn = Main;
@@ -5525,6 +5848,9 @@ public:
     defineVMTs();
     for (RoutineDecl *R : RoutinesToEmit)
       emitRoutineBody(R);
+    for (RoutineDecl *R : AsyncsToEmit)
+      emitAsyncParts(R);
+    AsyncsToEmit.clear();
     emitCleanups();
 
     CurFn = Init;
@@ -5810,6 +6136,11 @@ public:
       return;
     }
     auto *BD = llvm::cast<BuiltinDecl>(S->getDecl());
+    if (BD->getBuiltinKind() == BuiltinKind::Wait) { // Wait(t);
+      emitAwait(visitExpr(S->getArgs()[0]),
+                llvm::cast<TaskType>(S->getArgs()[0]->getType()));
+      return;
+    }
     switch (BD->getBuiltinKind()) {
     case BuiltinKind::Write:
     case BuiltinKind::Writeln:

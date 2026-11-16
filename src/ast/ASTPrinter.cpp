@@ -408,6 +408,16 @@ class ASTPrinter : public StmtVisitor<ASTPrinter>,
       line("NamedTypeSpec '") << llvm::cast<NamedTypeSpec>(TS)->getName().Name << '\'';
       loc(TS->getBeginLoc());
       return;
+    case TypeSpec::TS_Async: {
+      auto *AS = llvm::cast<AsyncTypeSpec>(TS);
+      line("AsyncTypeSpec");
+      loc(TS->getBeginLoc());
+      if (AS->getInner()) {
+        IndentScope I(Indent);
+        printTypeSpec(AS->getInner());
+      }
+      return;
+    }
     case TypeSpec::TS_Specialize: {
       auto *SS = llvm::cast<SpecializeTypeSpec>(TS);
       line("SpecializeTypeSpec '") << SS->getName().Name << '\'';
@@ -858,6 +868,32 @@ public:
       visitExpr(S->getInit());
   }
 
+  void visitExprStmt(ExprStmt *S) {
+    line("ExprStmt");
+    loc(S->getBeginLoc());
+    IndentScope I(Indent);
+    visitExpr(S->getExpr());
+  }
+
+  void visitScopeStmt(ScopeStmt *S) {
+    line("ScopeStmt");
+    loc(S->getBeginLoc());
+    IndentScope I(Indent);
+    if (S->getToken())
+      visitExpr(S->getToken());
+    for (Stmt *X : S->getBody())
+      visitStmt(X);
+  }
+
+  void visitDetachedStmt(DetachedStmt *S) {
+    line("DetachedStmt");
+    loc(S->getBeginLoc());
+    IndentScope I(Indent);
+    if (S->getHandler())
+      visitExpr(S->getHandler());
+    visitExpr(S->getCall());
+  }
+
   void visitDestructureStmt(DestructureStmt *S) {
     line(S->getVars().empty() ? "DestructureStmt" : "DestructureStmt var");
     loc(S->getBeginLoc());
@@ -1043,6 +1079,18 @@ public:
     IndentScope I(Indent);
     for (Expr *X : E->getElements())
       visitExpr(X);
+  }
+  void visitAwaitExpr(AwaitExpr *E) {
+    line("AwaitExpr");
+    end(E);
+    IndentScope I(Indent);
+    visitExpr(E->getOperand());
+  }
+  void visitSpawnExpr(SpawnExpr *E) {
+    line(E->isPoolRun() ? "SpawnExpr pool" : "SpawnExpr");
+    end(E);
+    IndentScope I(Indent);
+    visitExpr(E->getCall());
   }
   void visitCondExpr(CondExpr *E) {
     line("CondExpr");

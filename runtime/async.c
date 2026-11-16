@@ -225,6 +225,19 @@ void __pas_token_release(PasToken *k) {
   }
 }
 
+void __pas_token_assign(PasToken **dst, PasToken *src) {
+  __pas_token_addref(src);
+  PasToken *old = *dst;
+  *dst = src;
+  __pas_token_release(old);
+}
+
+void __pas_token_clear(PasToken **p) {
+  PasToken *old = *p;
+  *p = NULL;
+  __pas_token_release(old);
+}
+
 static int cancelled_locked(PasToken *k) {
   return k && (k->cancelled || cancelled_locked(k->parent) ||
                cancelled_locked(k->parent2));
@@ -958,6 +971,15 @@ void __pas_task_sleep(int32_t ms) {
   UNLOCK();
   if (cancelled)
     raise_cancelled();
+}
+
+/* *dst := a new token, with parent (and cancelled after ms if ms >= 0);
+ * the reference moves into *dst (for unit threading). */
+void __pas_token_make(PasToken *parent, int32_t ms, PasToken **dst) {
+  PasToken *k = ms >= 0 ? __pas_token_with_timeout(parent, ms) : __pas_token_new(parent);
+  PasToken *old = *dst;
+  *dst = k;
+  __pas_token_release(old);
 }
 
 /* Cancellation checked by hand (TCancelToken.ThrowIfCancelled). */

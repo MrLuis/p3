@@ -61,6 +61,8 @@ public:
     TK_Interface, ///< interface ... end (objfpc): {object, method table}
     TK_Untyped,  ///< an untyped parameter's (Turbo/FPC `var x`, `const x`)
     TK_WideChar, ///< widechar (Turbo/FPC): a 16-bit character code
+    TK_Task,     ///< async T (objfpc): a counted reference to a task
+    TK_Token,    ///< TCancelToken (objfpc): a counted cancellation token
   };
 
 private:
@@ -114,8 +116,11 @@ public:
   /// Types a function may return (ISO 6.6.2: simple or pointer; classes).
   bool isValidResultType() const {
     return isSimple() || isPointer() || isClass() || isClassRef() ||
-           isInterface() || isAnsiString() || isDynArray() || isClosureType();
+           isInterface() || isAnsiString() || isDynArray() || isClosureType() ||
+           Kind == TK_Task || Kind == TK_Token;
   }
+  bool isTask() const { return Kind == TK_Task; }
+  bool isToken() const { return Kind == TK_Token; }
   /// A `reference to` procedural type (objfpc).
   bool isClosureType() const;
   bool isStructured() const { return isArray() || isRecord() || isShortString(); }
@@ -359,6 +364,26 @@ public:
   explicit DynArrayType(Type *Element) : Type(TK_DynArray), Element(Element) {}
   Type *getElementType() const { return Element; }
   static bool classof(const Type *T) { return T->getKind() == TK_DynArray; }
+};
+
+/// async T / async (objfpc): a task, the call of an async routine, whose
+/// result (when it ends) is a T, or nothing. A value is a counted reference
+/// to the runtime's task (a pointer, nil for none).
+class TaskType final : public Type {
+  Type *Result; ///< null: async (no value)
+
+public:
+  explicit TaskType(Type *Result) : Type(TK_Task), Result(Result) {}
+  Type *getResult() const { return Result; }
+  static bool classof(const Type *T) { return T->getKind() == TK_Task; }
+};
+
+/// TCancelToken (objfpc): a counted reference to a cancellation token (a
+/// pointer; nil: a token never cancelled).
+class TokenType final : public Type {
+public:
+  TokenType() : Type(TK_Token) {}
+  static bool classof(const Type *T) { return T->getKind() == TK_Token; }
 };
 
 /// A parameter's `array of T` (Turbo/FPC): passed as a {data, count} pair.

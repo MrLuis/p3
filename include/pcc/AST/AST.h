@@ -33,6 +33,7 @@ class FieldDecl;
 class LabelDecl;
 class RoutineDecl;
 class Type;
+class TaskType;
 class TypeSpec;
 class PropertyDecl;
 class VarDecl;
@@ -481,6 +482,33 @@ public:
 };
 
 class IfStmt;
+
+/// await e (objfpc): waits for task e (in an async routine: suspended);
+/// its value is the task's result (raising its exception if it failed).
+class AwaitExpr final : public Expr {
+  Expr *Operand;
+
+public:
+  AwaitExpr(SourceRange R, Expr *Operand) : Expr(EK_Await, R), Operand(Operand) {}
+  Expr *getOperand() const { return Operand; }
+  static bool classof(const Expr *E) { return E->getKind() == EK_Await; }
+};
+
+/// spawn F(args) / spawn begin ... end (objfpc): a child task of the
+/// innermost scope, run on the pool; Call is a call of an async routine (a
+/// block: of a hidden async procedure the parser made of it). Also
+/// Pool.Run(F(args)) (OnPool: on the pool, not a child of a scope).
+class SpawnExpr final : public Expr {
+  Expr *Call;
+  bool OnPool;
+
+public:
+  SpawnExpr(SourceRange R, Expr *Call, bool OnPool = false)
+      : Expr(EK_Spawn, R), Call(Call), OnPool(OnPool) {}
+  Expr *getCall() const { return Call; }
+  bool isPoolRun() const { return OnPool; }
+  static bool classof(const Expr *E) { return E->getKind() == EK_Spawn; }
+};
 
 /// if c then a else b, as an expression (objfpc): a where c holds, else b;
 /// only the one chosen is evaluated.
@@ -1049,6 +1077,45 @@ public:
   static bool classof(const Stmt *S) { return S->getKind() == SK_VarDecl; }
 };
 
+/// An expression used for its effect (objfpc): `await e;`, `spawn ...;`.
+class ExprStmt final : public Stmt {
+  Expr *E;
+
+public:
+  ExprStmt(SourceRange R, Expr *E) : Stmt(SK_Expr, R), E(E) {}
+  Expr *getExpr() const { return E; }
+  static bool classof(const Stmt *S) { return S->getKind() == SK_Expr; }
+};
+
+/// scope [token] statements end (objfpc): the spawned tasks are its
+/// children; it ends when they all have, cancelling the others if one
+/// fails (then raising its exception), or when the token is cancelled.
+class ScopeStmt final : public Stmt {
+  Expr *Token; ///< null: none
+  llvm::ArrayRef<Stmt *> Body;
+
+public:
+  ScopeStmt(SourceRange R, Expr *Token, llvm::ArrayRef<Stmt *> Body)
+      : Stmt(SK_Scope, R), Token(Token), Body(Body) {}
+  Expr *getToken() const { return Token; }
+  llvm::ArrayRef<Stmt *> getBody() const { return Body; }
+  static bool classof(const Stmt *S) { return S->getKind() == SK_Scope; }
+};
+
+/// detached [(handler)] call (objfpc): an async call left to run on its
+/// own; its exception, if any, goes to handler (procedure(E: Exception)).
+class DetachedStmt final : public Stmt {
+  Expr *Handler; ///< null: none
+  Expr *Call;
+
+public:
+  DetachedStmt(SourceRange R, Expr *Handler, Expr *Call)
+      : Stmt(SK_Detached, R), Handler(Handler), Call(Call) {}
+  Expr *getHandler() const { return Handler; }
+  Expr *getCall() const { return Call; }
+  static bool classof(const Stmt *S) { return S->getKind() == SK_Detached; }
+};
+
 /// (a, b) := e;  var (a, b) := e;  (objfpc): the elements of a tuple
 /// assigned to variables, or to new ones.
 class DestructureStmt final : public Stmt {
@@ -1096,7 +1163,8 @@ public:
     TS_OpenArray,
     TS_DynArray,
     TS_Tuple,
-    TS_Specialize
+    TS_Specialize,
+    TS_Async
   };
 
 private:
@@ -1328,6 +1396,17 @@ public:
   static bool classof(const TypeSpec *T) {
     return T->getKind() == TS_Specialize;
   }
+};
+
+/// async T / async (objfpc): a task type; Inner null for async.
+class AsyncTypeSpec final : public TypeSpec {
+  TypeSpec *Inner;
+
+public:
+  AsyncTypeSpec(SourceRange R, TypeSpec *Inner)
+      : TypeSpec(TS_Async, R), Inner(Inner) {}
+  TypeSpec *getInner() const { return Inner; }
+  static bool classof(const TypeSpec *T) { return T->getKind() == TS_Async; }
 };
 
 /// A parameter's `array of T`.
@@ -1799,6 +1878,8 @@ class RoutineDecl final : public Decl {
   bool Lambda = false, LambdaDone = false, LambdaBad = false;
   bool Closure = false, HeapFrame = false, MethodLambda = false;
   bool CopyFactory = false, Copied = false, CopyAll = false;
+  bool SpawnBlock = false;
+  TaskType *Async = nullptr;
   VarDecl *LambdaSelf = nullptr;
   Identifier Capture;
   RoutineDecl *GenericDef = nullptr;
@@ -1845,7 +1926,7 @@ public:
         IsForward(IsForward) {}
 
   bool isFunction() const { return IsFunction; }
-  bool isProcedure() const { return !IsFunction; }
+  bool isProcedure() const { return !IsFunction && !Async; }
   llvm::ArrayRef<VarDecl *> getParams() const { return Params; }
   void setParams(llvm::ArrayRef<VarDecl *> P) { Params = P; }
   bool hasParamList() const { return HasParamList; }
@@ -1985,6 +2066,16 @@ public:
   /// parameters of the routines around it.
   bool isCopyAll() const { return CopyAll; }
   void setCopyAll() { CopyAll = true; }
+  /// An async routine (result `async T` / `async`): its calls are tasks,
+  /// of type getAsyncType(); its body is that of a function returning T
+  /// (getResultType) or of a procedure.
+  bool isAsync() const { return Async != nullptr; }
+  TaskType *getAsyncType() const { return Async; }
+  void setAsync(TaskType *T) { Async = T; }
+  void setFunction(bool F) { IsFunction = F; }
+  /// The hidden async procedure of `spawn begin ... end`.
+  bool isSpawnBlock() const { return SpawnBlock; }
+  void setSpawnBlock() { SpawnBlock = true; }
   VarDecl *getLambdaSelf() const { return LambdaSelf; }
   void setMethodLambda(VarDecl *OuterSelf) {
     MethodLambda = true;

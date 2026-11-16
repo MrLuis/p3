@@ -1,7 +1,7 @@
 # pcc's unit library: copied to <build>/lib/pascal, where the compiler finds
 # it at <bindir>/../lib/pascal, with each unit's object next to its source
 # for -fseparate-units (compiled in objfpc mode, for the host).
-set(PCC_RTL_UNITS sysutils strutils math classes)
+set(PCC_RTL_UNITS sysutils strutils math classes threading)
 set(PCC_RTL_DIR ${PROJECT_BINARY_DIR}/lib/pascal)
 
 set(PCC_RTL_SOURCES)

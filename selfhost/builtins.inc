@@ -72,7 +72,10 @@ type
     bkRound,
     bkAddChecked,
     bkSubChecked,
-    bkMulChecked);
+    bkMulChecked,
+    bkWait,
+    bkWhenAll,
+    bkWhenAny);
 
 const
   builtinNames: array[TBuiltinKind] of string[15] = (
@@ -146,7 +149,10 @@ const
     'round',
     'addchecked',
     'subchecked',
-    'mulchecked');
+    'mulchecked',
+    'wait',
+    'whenall',
+    'whenany');
   builtinIsProcedure: array[TBuiltinKind] of boolean = (
     true,
     true,
@@ -201,6 +207,9 @@ const
     false,
     true,
     true,
+    false,
+    false,
+    false,
     false,
     false,
     false,

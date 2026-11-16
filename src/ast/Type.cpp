@@ -161,7 +161,7 @@ bool Type::isClosureType() const {
 }
 
 bool pcc::isManaged(Type *T) {
-  if (T->isAnsiString() || T->isDynArray())
+  if (T->isAnsiString() || T->isDynArray() || T->isTask() || T->isToken())
     return true;
   if (auto *R = llvm::dyn_cast<RoutineType>(T))
     return R->isReference();
@@ -271,6 +271,11 @@ std::string Type::getName() const {
   case TK_Boolean: return "boolean";
   case TK_Char:    return "char";
   case TK_WideChar: return "widechar";
+  case TK_Task: {
+    Type *R = llvm::cast<TaskType>(this)->getResult();
+    return R ? "async " + R->getName() : std::string("async");
+  }
+  case TK_Token: return "TCancelToken";
   case TK_String:
     return "string of length " +
            std::to_string(llvm::cast<StringLiteralType>(this)->getLength());

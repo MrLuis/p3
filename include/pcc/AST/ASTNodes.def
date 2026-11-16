@@ -39,6 +39,8 @@ EXPR(Template)        // `a ${x} b`: a template string         (TP)
 EXPR(Tuple)           // (a, b): a tuple value                 (objfpc)
 EXPR(NamedArg)        // Name := e: a named argument           (objfpc)
 EXPR(Cond)            // if c then a else b                    (objfpc)
+EXPR(Await)           // await e                               (objfpc)
+EXPR(Spawn)           // spawn F(x), Pool.Run(F(x))            (objfpc)
 
 // Statements
 STMT(Empty)
@@ -59,6 +61,9 @@ STMT(Try)             // try ... except / finally ... end      (objfpc)
 STMT(Raise)           // raise [obj]                           (objfpc)
 STMT(VarDecl)         // var x: T := e                         (objfpc)
 STMT(Destructure)     // (a, b) := e; var (a, b) := e          (objfpc)
+STMT(Expr)            // await e; spawn ...;                   (objfpc)
+STMT(Scope)           // scope [token] ... end                 (objfpc)
+STMT(Detached)        // detached [(handler)] call             (objfpc)
 
 #undef STMT
 #undef EXPR

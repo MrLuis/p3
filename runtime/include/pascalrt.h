@@ -414,9 +414,12 @@ PasToken *__pas_token_new(PasToken *parent);
 PasToken *__pas_token_with_timeout(PasToken *parent, int32_t ms);
 void __pas_token_addref(PasToken *k);
 void __pas_token_release(PasToken *k);
+void __pas_token_assign(PasToken **dst, PasToken *src);
+void __pas_token_clear(PasToken **p);
 void __pas_token_cancel(PasToken *k);
 int32_t __pas_token_cancelled(PasToken *k);
 void __pas_token_check(PasToken *k);
+void __pas_token_make(PasToken *parent, int32_t ms, PasToken **dst);
 /* Mutexes and wait queues (condition variables that tasks can wait on). */
 void *__pas_mutex_new(void);
 void __pas_mutex_free(void *m);

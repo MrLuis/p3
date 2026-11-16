@@ -782,6 +782,11 @@ class Checker : public StmtVisitor<Checker>,
     ClassType *IntError = declareExceptionClass("EIntError", External);
     declareExceptionClass("EDivByZero", IntError);
     declareExceptionClass("EIntOverflow", IntError); // (objfpc overflow)
+    // Tasks: a cancelled task's wait raises EOperationCancelled; tokens.
+    declareExceptionClass("EOperationCancelled", ExceptionTy);
+    Standard.insert("tcanceltoken",
+                    Ctx.create<TypeDecl>(SourceLocation(), memberName("TCancelToken"),
+                                         Ctx.getTokenType()));
     declareExceptionClass("EConvertError", ExceptionTy);
   }
 
@@ -867,7 +872,9 @@ class Checker : public StmtVisitor<Checker>,
   static bool isObjFPCOnly(BuiltinKind K) {
     return K == BuiltinKind::AssignFile || K == BuiltinKind::CloseFile ||
            K == BuiltinKind::ExceptAddr || K == BuiltinKind::AddChecked ||
-           K == BuiltinKind::SubChecked || K == BuiltinKind::MulChecked;
+           K == BuiltinKind::SubChecked || K == BuiltinKind::MulChecked ||
+           K == BuiltinKind::Wait || K == BuiltinKind::WhenAll ||
+           K == BuiltinKind::WhenAny;
   }
 
   //===--------------------------------------------------------------------===//
@@ -1205,7 +1212,7 @@ class Checker : public StmtVisitor<Checker>,
                   TR->getClass()));
     if (Target->isPointer() && (Value->isClass() || Value->isClassRef()))
       return llvm::cast<PointerType>(Target)->isUntyped();
-    if (Target->isDynArray())
+    if (Target->isDynArray() || Target->isTask() || Target->isToken())
       return Value->isNil();
     if (Target->isShortString() && Value->isStringish())
       return true; // truncated to the target's length at runtime
@@ -2002,6 +2009,17 @@ class Checker : public StmtVisitor<Checker>,
       auto *P = Ctx.create<PointerType>(nullptr);
       PendingPointers.push_back({llvm::cast<PointerTypeSpec>(TS), P});
       return P;
+    }
+
+    case TypeSpec::TS_Async: {
+      auto *AS = llvm::cast<AsyncTypeSpec>(TS);
+      Type *Inner = nullptr;
+      if (AS->getInner()) {
+        Inner = resolveType(AS->getInner());
+        if (Inner->isError())
+          return errorType();
+      }
+      return Ctx.getTaskType(Inner);
     }
 
     case TypeSpec::TS_Routine: {
@@ -3861,7 +3879,7 @@ class Checker : public StmtVisitor<Checker>,
       return;
     }
     if (M->getMethodKind() != R->getMethodKind() ||
-        M->isFunction() != R->isFunction() ||
+        (M->isFunction() || M->isAsync()) != R->isFunction() ||
         M->isClassMethod() != R->isClassMethod()) {
       Diags.error(Id.Loc,
                   "'" + QName + "' was declared as a " +
@@ -3885,7 +3903,8 @@ class Checker : public StmtVisitor<Checker>,
         P->setType(resolveTypeIn(C, P->getTypeSpec()));
       Type *RT = R->getResultTypeSpec() ? resolveTypeIn(C, R->getResultTypeSpec())
                                         : nullptr;
-      if (!sameSignature(M, R) || (RT && RT != M->getResultType()) ||
+      Type *Declared = M->isAsync() ? M->getAsyncType() : M->getResultType();
+      if (!sameSignature(M, R) || (RT && RT != Declared) ||
           !sameDefaults(M, R)) {
         Diags.error(Id.Loc,
                     "heading of '" + QName + "' does not match its declaration",
@@ -4637,12 +4656,78 @@ class Checker : public StmtVisitor<Checker>,
         ResultTy = errorType();
       }
     }
+    // async T / async: an async routine, whose body is a function's
+    // returning T or a procedure's.
+    if (auto *TT = llvm::dyn_cast<TaskType>(ResultTy)) {
+      R->setAsync(TT);
+      if (R->isExternal())
+        Diags.error(R->getName().Loc,
+                    "an external routine cannot be async",
+                    {R->getName().getRange()});
+      if (!TT->getResult()) {
+        R->setFunction(false);
+        return;
+      }
+      ResultTy = TT->getResult();
+      if (!ResultTy->isError() && !ResultTy->isValidResultType() &&
+          !ResultTy->isShortString() &&
+          !(ResultTy->isRecord() && !containsFile(ResultTy))) {
+        Diags.error(R->getResultTypeSpec()->getBeginLoc(),
+                    "the result of a task cannot be " + quoted(ResultTy),
+                    {R->getResultTypeSpec()->getRange()});
+        ResultTy = errorType();
+      }
+    }
     R->setResultType(ResultTy);
     auto *Result = Ctx.create<VarDecl>(R->getName(), R->getResultTypeSpec(),
                                        VarDecl::Result);
     Result->setType(ResultTy);
     Result->setOwner(R);
     R->setResultVar(Result);
+  }
+
+  /// An async routine's restrictions: its task may outlive its caller, so
+  /// its arguments are copied (no var, out or constref parameters, no open
+  /// or untyped ones), and it is not nested (but a spawn block, which its
+  /// scope waits for) nor a virtual method, constructor or destructor.
+  void checkAsyncRoutine(RoutineDecl *R) {
+    const Identifier &Id = R->getName();
+    if (R->getParent() && !R->isSpawnBlock() && !R->isLambda())
+      Diags.error(Id.Loc,
+                  "async routine '" + Id.Spelling +
+                      "' must be declared at program or unit level, or be a "
+                      "method (its task may outlive the routine around it)",
+                  {Id.getRange()});
+    if (R->isMethod()) {
+      const char *Why = nullptr;
+      if (R->isConstructor() || R->isDestructor())
+        Why = "a constructor or a destructor cannot be async";
+      else if (R->isVirtual() || R->isAbstract() || R->isOverride() ||
+               R->isDispatched())
+        Why = "an async method cannot be virtual (not supported yet)";
+      else if (R->getClass() && R->getClass()->hasSelfByReference())
+        Why = "a record's or helper's method cannot be async (its Self is "
+              "passed by reference)";
+      if (Why)
+        Diags.error(Id.Loc, Why, {Id.getRange()});
+    }
+    for (VarDecl *P : R->getParams()) {
+      Type *T = P->getType();
+      const char *Kind = P->isOutParam()        ? "an 'out'"
+                         : P->isVarParam()      ? "a 'var'"
+                         : P->isConstRefParam() ? "a 'constref'"
+                         : T && (T->isOpenArray() || T->isArrayOfConst())
+                             ? "an open array"
+                         : T && T->isUntyped() ? "an untyped"
+                                               : nullptr;
+      if (Kind)
+        Diags.error(P->getLocation(),
+                    "parameter '" + P->getName().Spelling + "' of async routine '" +
+                        Id.Spelling + "' cannot be " + Kind +
+                        " parameter: its task may outlive the caller's "
+                        "variable; pass a value",
+                    {P->getName().getRange()});
+    }
   }
 
   /// CompareOut false: `out` and `var` parameters count as the same, and
@@ -5108,6 +5193,8 @@ class Checker : public StmtVisitor<Checker>,
 
   void declareRoutine(RoutineDecl *R) {
     if (R->isLambda()) // completed where it is used (completeLambda)
+      return;
+    if (R->isSpawnBlock()) // completed where it is spawned (visitSpawnExpr)
       return;
     if (R->isTemplateMember()) { // of a generic type: see specializeType
       // Its specializations see what is declared up to here (the unit's
@@ -5940,6 +6027,7 @@ class Checker : public StmtVisitor<Checker>,
   /// A type with a C equivalent, for external routines.
   static bool isCType(Type *T) {
     return T->isError() || T->isReal() || T->isPointer() ||
+           T->isToken() || // (the runtime's token, not counted by the call)
            (T->isOrdinal() && !T->getBase()->isBoolean());
   }
 
@@ -6025,6 +6113,8 @@ class Checker : public StmtVisitor<Checker>,
       DeferredBodies->push_back(R);
       return;
     }
+    if (R->isAsync())
+      checkAsyncRoutine(R);
     // The method of a nested class or record also sees the constants and
     // types of the classes around it.
     llvm::SmallVector<std::unique_ptr<Scope>, 2> OuterScopes;
@@ -7578,6 +7668,20 @@ class Checker : public StmtVisitor<Checker>,
       return false;
     };
     switch (BD->getBuiltinKind()) {
+    case BuiltinKind::Wait:
+      return checkWait(Args, Callee, E->getRange(), /*NeedValue=*/true);
+    case BuiltinKind::WhenAll:
+    case BuiltinKind::WhenAny: {
+      if (!Arity(1))
+        return errorType();
+      TaskType *TT = checkTaskArray(Args[0], Callee);
+      if (!TT)
+        return errorType();
+      if (BD->getBuiltinKind() == BuiltinKind::WhenAny)
+        return Ctx.getTaskType(Ctx.getIntegerType());
+      return Ctx.getTaskType(TT->getResult() ? Ctx.getDynArrayType(TT->getResult())
+                                             : nullptr);
+    }
     case BuiltinKind::AddChecked:
     case BuiltinKind::SubChecked:
     case BuiltinKind::MulChecked: { // (a op b, ok) in the type of a op b
@@ -8253,6 +8357,11 @@ public:
       checkScopeAccess(D, W, Callee);
     }
 
+    if (auto *BD = llvm::dyn_cast<BuiltinDecl>(D);
+        BD && BD->getBuiltinKind() == BuiltinKind::Wait) {
+      checkWait(S->getArgs(), Callee, S->getRange(), /*NeedValue=*/false);
+      return;
+    }
     if (auto *BD = llvm::dyn_cast<BuiltinDecl>(D); BD && BD->isProcedure()) {
       switch (BD->getBuiltinKind()) {
       case BuiltinKind::Write:   return checkWrite(S, /*IsWriteln=*/false);
@@ -8343,6 +8452,12 @@ public:
         return checkMemoryProc(S, BD->getBuiltinKind());
       default: llvm_unreachable("not a builtin procedure");
       }
+    }
+    if (auto *R = llvm::dyn_cast<RoutineDecl>(D); R && R->isAsync()) {
+      checkCallArgs(R, Callee, orderedArgs(S, R->getParams(), Callee),
+                    S->getRange());
+      warnDanglingTask(Callee, S->getRange());
+      return;
     }
     if (auto *R = llvm::dyn_cast<RoutineDecl>(D);
         R && (R->isProcedure() || !isISO())) // TP: discard a function result
@@ -8447,6 +8562,9 @@ public:
       Type *T = checkMethodCall(Call);
       if (T)
         Call->setType(T);
+      if (T && T->isTask() && isAsyncCall(Call))
+        if (auto *F = llvm::dyn_cast<FieldExpr>(Call->getCallee()))
+          warnDanglingTask(F->getField(), Call->getRange());
       return;
     }
     if (RoutineType *RT = checkIndirectCallee(Call))
@@ -9326,6 +9444,8 @@ public:
       if (ClassType *C = constructedThroughSelf(R, W);
           C && acceptsArgCount(R->getParams(), 0))
         return C;
+      if (R->isAsync() && acceptsArgCount(R->getParams(), 0))
+        return R->getAsyncType(); // its task
       if (R->isProcedure()) {
         Diags.error(Id.Loc,
                     "procedure '" + Id.Spelling + "' does not return a value",
@@ -9743,6 +9863,11 @@ public:
     }
 
     if (auto *R = llvm::dyn_cast<RoutineDecl>(D)) {
+      if (R->isAsync()) { // its task
+        checkCallArgs(R, Callee, orderedArgs(E, R->getParams(), Callee),
+                      E->getRange());
+        return R->getAsyncType();
+      }
       if (R->isFunction()) {
         checkCallArgs(R, Callee, orderedArgs(E, R->getParams(), Callee),
                       E->getRange());
@@ -10735,6 +10860,233 @@ public:
     return "";
   }
 
+  //===--------------------------------------------------------------------===//
+  // Tasks (objfpc): async routines, await, spawn, scope, detached
+  //===--------------------------------------------------------------------===//
+
+  /// Nesting of scope blocks around the code being checked (spawn needs
+  /// one).
+  unsigned ScopeDepth = 0;
+
+  /// Is the code being checked in an async routine (or a lambda in one)?
+  bool inAsyncRoutine() const {
+    RoutineDecl *R = CurRoutine;
+    while (R && R->isLambda() && !R->isAsync())
+      R = R->getParent();
+    return R && R->isAsync();
+  }
+
+  /// Is E (checked) the call of an async routine?
+  static bool isAsyncCall(Expr *E) {
+    Decl *D = nullptr;
+    if (auto *C = llvm::dyn_cast<CallExpr>(E))
+      D = C->getDecl();
+    else if (auto *N = llvm::dyn_cast<NameRefExpr>(E))
+      D = N->getDecl();
+    else if (auto *F = llvm::dyn_cast<FieldExpr>(E))
+      D = F->getMember();
+    else if (auto *I = llvm::dyn_cast<IndirectCallExpr>(E))
+      if (auto *F = llvm::dyn_cast<FieldExpr>(I->getCallee()))
+        D = F->getMember();
+    auto *R = llvm::dyn_cast_or_null<RoutineDecl>(D);
+    return R && R->isAsync();
+  }
+
+  void warnDanglingTask(const Identifier &Callee, SourceRange Range) {
+    Diags.warning(Callee.Loc,
+                  "dangling task: '" + Callee.Spelling +
+                      "' is never awaited; write 'await " + Callee.Spelling +
+                      "' to wait for it, keep it in a variable to await "
+                      "later, or 'detached " + Callee.Spelling +
+                      "' to let it run on its own",
+                  {Range});
+  }
+
+  /// await e: e a task; its result (NeedValue: one is needed).
+  Type *checkAwait(AwaitExpr *E, bool NeedValue) {
+    Type *T = check(E->getOperand());
+    if (T->isError())
+      return errorType();
+    auto *TT = llvm::dyn_cast<TaskType>(T);
+    if (!TT) {
+      Diags.error(E->getBeginLoc(),
+                  "'await' waits for a task (the call of an async routine), "
+                  "not a value of type " + quoted(T),
+                  {E->getRange()});
+      return errorType();
+    }
+    if (!inAsyncRoutine())
+      Diags.error(E->getBeginLoc(),
+                  "'await' is allowed only in an async routine; elsewhere, "
+                  "Wait(t) waits for a task",
+                  {E->getRange()});
+    if (!TT->getResult()) {
+      if (NeedValue) {
+        Diags.error(E->getBeginLoc(),
+                    "this task has no value (its routine is 'async' without "
+                    "a type)",
+                    {E->getRange()});
+        return errorType();
+      }
+      return T;
+    }
+    return TT->getResult();
+  }
+
+  Type *visitAwaitExpr(AwaitExpr *E) { return checkAwait(E, true); }
+
+  /// The hidden async procedure of spawn begin ... end: declared and
+  /// checked where it is spawned (it uses the variables declared so far).
+  void completeSpawnBlock(RoutineDecl *R) {
+    R->setLambdaDone();
+    resolveSignature(R);
+    unsigned SavedDepth = ScopeDepth;
+    ScopeDepth = 0; // (its task has scopes of its own)
+    declareAndCheckLambda(R);
+    ScopeDepth = SavedDepth;
+  }
+
+  Type *visitSpawnExpr(SpawnExpr *E) {
+    Expr *C = E->getCall();
+    if (auto *CE = llvm::dyn_cast<CallExpr>(C))
+      if (auto *R = llvm::dyn_cast_or_null<RoutineDecl>(CE->getDecl());
+          R && R->isSpawnBlock() && !R->isLambdaDone())
+        completeSpawnBlock(R);
+    Type *T = check(C);
+    if (T->isError())
+      return errorType();
+    const char *Word = E->isPoolRun() ? "Pool.Run" : "spawn";
+    if (!T->isTask() || !isAsyncCall(C)) {
+      Diags.error(C->getBeginLoc(),
+                  llvm::Twine("'") + Word +
+                      "' runs the call of an async routine, not a value of type " +
+                      quoted(T),
+                  {C->getRange()});
+      return errorType();
+    }
+    if (!E->isPoolRun() && ScopeDepth == 0)
+      Diags.error(E->getBeginLoc(),
+                  "'spawn' is allowed only inside a 'scope ... end' block, "
+                  "which waits for the tasks it starts; Pool.Run starts one "
+                  "on its own",
+                  {E->getRange()});
+    return T;
+  }
+
+  void visitExprStmt(ExprStmt *S) {
+    DirectSequence = nullptr;
+    Expr *E = S->getExpr();
+    Type *T;
+    if (auto *A = llvm::dyn_cast<AwaitExpr>(E))
+      T = checkAwait(A, /*NeedValue=*/false);
+    else
+      T = check(E);
+    E->setType(T);
+  }
+
+  void visitScopeStmt(ScopeStmt *S) {
+    DirectSequence = nullptr;
+    if (Expr *Tok = S->getToken()) {
+      Type *T = check(Tok);
+      if (!T->isError() && !T->isToken() && !T->isNil())
+        Diags.error(Tok->getBeginLoc(),
+                    "the token of a scope must be a TCancelToken, not a value "
+                    "of type " + quoted(T),
+                    {Tok->getRange()});
+    }
+    markHasTry(); // its end waits however the block ends
+    ++ScopeDepth;
+    visitSequence(S, S->getBody());
+    --ScopeDepth;
+  }
+
+  void visitDetachedStmt(DetachedStmt *S) {
+    DirectSequence = nullptr;
+    Expr *C = S->getCall();
+    Type *T = check(C);
+    if (!T->isError() && (!T->isTask() || !isAsyncCall(C)))
+      Diags.error(C->getBeginLoc(),
+                  "'detached' runs the call of an async routine, not a value "
+                  "of type " + quoted(T),
+                  {C->getRange()});
+    if (Expr *H = S->getHandler()) {
+      // procedure(E: Exception): a routine (or procedural value)
+      auto *EParam = Ctx.create<VarDecl>(memberName("E"), nullptr,
+                                         VarDecl::ValueParam);
+      EParam->setType(ExceptionTy);
+      auto *Formal = Ctx.create<RoutineType>(
+          Ctx.copyArray<VarDecl *>({EParam}), nullptr);
+      auto *P = Ctx.create<VarDecl>(memberName("handler"), nullptr,
+                                    VarDecl::ValueParam);
+      P->setType(Formal);
+      checkRoutineArg(H, P, Formal);
+      checkLambdaEscape(H, /*Local=*/false);
+      if (!H->getType())
+        H->setType(Formal);
+    }
+  }
+
+  /// Wait(t) (also as a statement: NeedValue false), WhenAll(tasks),
+  /// WhenAny(tasks).
+  Type *checkWait(llvm::ArrayRef<Expr *> Args, const Identifier &Callee,
+                  SourceRange Range, bool NeedValue) {
+    if (Args.size() != 1) {
+      Diags.error(Callee.Loc, "'" + Callee.Spelling + "' expects 1 argument",
+                  {Range});
+      for (Expr *A : Args)
+        check(A);
+      return errorType();
+    }
+    Type *T = check(Args[0]);
+    if (T->isError())
+      return errorType();
+    auto *TT = llvm::dyn_cast<TaskType>(T);
+    if (!TT) {
+      Diags.error(Args[0]->getBeginLoc(),
+                  "'Wait' waits for a task (the call of an async routine), "
+                  "not a value of type " + quoted(T),
+                  {Args[0]->getRange()});
+      return errorType();
+    }
+    if (!TT->getResult()) {
+      if (NeedValue) {
+        Diags.error(Args[0]->getBeginLoc(),
+                    "this task has no value (its routine is 'async' without "
+                    "a type)",
+                    {Args[0]->getRange()});
+        return errorType();
+      }
+      return T;
+    }
+    return TT->getResult();
+  }
+
+  /// The tasks of WhenAll / WhenAny: an array of tasks (static, dynamic or
+  /// open); their task type, or null after a diagnostic.
+  TaskType *checkTaskArray(Expr *A, const Identifier &Callee) {
+    Type *T = check(A);
+    if (T->isError())
+      return nullptr;
+    Type *Elem = nullptr;
+    if (auto *AT = llvm::dyn_cast<ArrayType>(T))
+      Elem = AT->getElementType();
+    else if (auto *DT = llvm::dyn_cast<DynArrayType>(T))
+      Elem = DT->getElementType();
+    else if (auto *OT = llvm::dyn_cast<OpenArrayType>(T))
+      Elem = OT->getElementType();
+    auto *TT = llvm::dyn_cast_or_null<TaskType>(Elem);
+    if (!TT ||
+        (llvm::isa<ArrayType>(T) && llvm::cast<ArrayType>(T)->getIndexType() &&
+         false)) {
+      Diags.error(A->getBeginLoc(),
+                  "'" + Callee.Spelling + "' takes an array of tasks, not a "
+                  "value of type " + quoted(T),
+                  {A->getRange()});
+      return nullptr;
+    }
+    return TT;
+  }
+
   /// A lambda that uses what belongs to the routines around it must not
   /// outlive them: reported if Value is one and is stored (Local: in a
   /// local variable of the current routine, which is allowed).
@@ -11219,6 +11571,8 @@ public:
   /// function's result, or the new object of a constructor called through
   /// its class; null if the call has no value.
   static Type *methodResultType(RoutineDecl *R, FieldExpr *E) {
+    if (R->isAsync())
+      return R->getAsyncType(); // its task
     if (R->isFunction())
       return R->getResultType();
     if (R->isConstructor()) {
