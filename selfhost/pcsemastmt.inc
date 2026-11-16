@@ -2515,6 +2515,7 @@ begin
     d := scopeLookup(cur, s^.callee.name, w)
   else
     d := specializeGeneric(s^.callee, s^.typeArgs);
+  noteLambdaUse(d, w, s^.callee);
   inferred := false; { f(args) for a generic f: its types inferred }
   if (d = nil) and (s^.typeArgs.count = 0) then
     d := inferSpecialization(s^.callee, s^.args, nil, inferred);
@@ -2615,6 +2616,7 @@ begin
             t := check(a0);
           if ownedVarOf(a0) <> nil then
             diagOwnedEscape(ownedVarOf(a0), a0, true);
+          checkLambdaEscape(a0, false);
           ownedDead;
           rt := curRoutine^.resultType;
           curRoutine^.resultAssigned := true;
@@ -2690,6 +2692,7 @@ begin
   checkNameTarget := errorType;
   w := nil;
   d := scopeLookup(cur, target^.ref.name, w);
+  noteLambdaUse(d, w, target^.ref);
   if d = nil then
   begin
     diagUndeclared(target^.ref);
@@ -3087,10 +3090,37 @@ end;
 procedure visitAssign(s: PNode);
 var
   target, savedTarget, root, sum: PNode;
-  targetTy, valueTy: PType;
+  targetTy, valueTy, lt: PType;
   p, d: PDecl;
 begin
   target := s^.target;
+  { a lambda's body, $lambda := e, where no result type is known: the type
+    of e (a quoted constant: a string) }
+  if curRoutine <> nil then
+    if curRoutine^.isLambda and curRoutine^.isFunction and
+       (curRoutine^.resultType = nil) and (target^.kind = nkNameRef) then
+      if target^.ref.name = curRoutine^.ident.name then
+      begin
+        lt := check(s^.value);
+        if not isError(lt) and ((lt^.kind = tyStringLit) or isCharLiteral(s^.value)) then
+          lt := ansiStringType;
+        if not isError(lt) and not isInferable(lt) then
+        begin
+          ms('cannot tell the result type of this lambda from ');
+          if lt^.kind = tyNil then
+            ma('nil')
+          else
+          begin
+            ma('a value of type ');
+            maT(lt);
+          end;
+          ma('; give it one: function(...): T => ...');
+          errR(s^.value^.b, nodeRange(s^.value));
+          lt := errorType;
+        end;
+        curRoutine^.resultType := lt;
+        curRoutine^.resultVar^.varType := lt;
+      end;
   if target^.kind = nkNameRef then
   begin
     targetTy := checkNameTarget(target);
@@ -3204,6 +3234,18 @@ begin
   end;
   if ownedV <> nil then
     ownedAssign(ownedV);
+  if s^.value^.kind = nkAddrOf then { a lambda: where it is kept }
+  begin
+    tv := nil;
+    if (target^.kind = nkNameRef) and (target^.refDecl <> nil) then
+      if target^.refDecl^.kind = dkVar then
+        tv := target^.refDecl;
+    checkLambdaEscape(s^.value,
+                      (tv <> nil) and (target^.refWith = nil) and
+                      (curRoutine <> nil) and (tv^.owner = curRoutine) and
+                      (tv^.varKind = vkVariable) and
+                      ((tv^.init = nil) or tv^.isInitVar) and not tv^.isClassVar);
+  end;
   if isError(targetTy) or isError(valueTy) then
     exit;
   savedOwnedTarget := ownedTarget;
@@ -4382,6 +4424,7 @@ begin
   visitNameRef := errorType;
   w := nil;
   d := scopeLookup(cur, e^.ref.name, w);
+  noteLambdaUse(d, w, e^.ref);
   if d = nil then
   begin
     diagUndeclared(e^.ref);
@@ -4750,6 +4793,7 @@ begin
     d := scopeLookup(cur, e^.callee.name, w)
   else
     d := specializeGeneric(e^.callee, e^.typeArgs);
+  noteLambdaUse(d, w, e^.callee);
   inferred := false; { f(args) for a generic f: its types inferred }
   if (d = nil) and (e^.typeArgs.count = 0) then
   begin
@@ -5250,6 +5294,7 @@ begin
   n := e^.inner;
   w := nil;
   d := scopeLookup(cur, n^.ref.name, w);
+  noteLambdaUse(d, w, n^.ref);
   if d = nil then
   begin
     diagUndeclared(n^.ref);
@@ -5288,6 +5333,10 @@ var
   op: PNode;
   why: string;
 begin
+  completeLambda(e, addrOfTarget);
+  if e^.addrLambda <> nil then
+    if e^.addrLambda^.lambdaBad then
+      exit(errorType);
   t := checkMethodAddr(e);
   if t <> nil then
     exit(t);

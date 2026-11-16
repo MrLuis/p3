@@ -5050,6 +5050,8 @@ class Checker : public StmtVisitor<Checker>,
   }
 
   void declareRoutine(RoutineDecl *R) {
+    if (R->isLambda()) // completed where it is used (completeLambda)
+      return;
     if (R->isTemplateMember()) { // of a generic type: see specializeType
       // Its specializations see what is declared up to here (the unit's
       // implementation, for a generic type of its interface).
@@ -5931,7 +5933,7 @@ class Checker : public StmtVisitor<Checker>,
 
     checkBlock(*R->getBody());
 
-    if (R->isFunction() && !ResultAssigned.count(R) &&
+    if (R->isFunction() && !ResultAssigned.count(R) && R->getResultType() &&
         !R->getResultType()->isError())
       Diags.warning(R->getName().Loc,
                     "function '" + R->getName().Spelling +
@@ -6254,6 +6256,12 @@ class Checker : public StmtVisitor<Checker>,
   /// An argument for a procedural/functional parameter: the name of a
   /// routine (or of another procedural parameter) with a congruent heading.
   void checkRoutineArg(Expr *Arg, VarDecl *P, RoutineType *Formal) {
+    auto *LA = llvm::dyn_cast<AddrOfExpr>(Arg);
+    if (LA) { // a lambda: its types
+      completeLambda(LA, Formal);
+      if (LA->getLambda() && LA->getLambda()->isLambdaBad())
+        return;
+    }
     if (Formal->isOfObject()) { // @obj.M, or a method pointer
       Type *AT = checkValueFor(Formal, Arg);
       if (AT->isError())
@@ -6360,8 +6368,10 @@ class Checker : public StmtVisitor<Checker>,
     if (CDecl != Formal->isCDecl() ||
         !congruent(Formal->getParams(), Formal->getResult(), Params, Result))
       Diags.error(Arg->getBeginLoc(),
-                  "'" + N->getName().Spelling +
-                      "' does not match the heading of parameter '" +
+                  (LA && LA->getLambda()
+                       ? std::string("this lambda")
+                       : "'" + N->getName().Spelling.str() + "'") +
+                      " does not match the heading of parameter '" +
                       P->getName().Spelling + "' (" + quoted(Formal) + ")",
                   {Arg->getRange()});
   }
@@ -6395,7 +6405,7 @@ class Checker : public StmtVisitor<Checker>,
   /// Why routine R cannot be a procedural value (empty: it can). Nested
   /// routines can be passed to ISO procedural parameters (AllowNested).
   static std::string notProceduralValue(RoutineDecl *R, bool AllowNested) {
-    if (R->getParent() && !AllowNested)
+    if (R->getParent() && !AllowNested && !R->isLambda())
       return "only routines declared at program or unit level can be "
              "procedural values";
     if (!R->isExternal())
@@ -8035,6 +8045,7 @@ public:
     WithContext *W = nullptr;
     Decl *D = S->getTypeArgs().empty() ? Cur->lookup(Callee.Name, &W)
                                        : specialize(Callee, S->getTypeArgs());
+    noteLambdaUse(D, W, Callee);
     bool Generic = false; // F(args) for a generic F: its types inferred
     if (!D && S->getTypeArgs().empty())
       D = inferSpecialization(Callee, S->getArgs(), nullptr, Generic);
@@ -8123,6 +8134,7 @@ public:
                       : check(Args[0]);
         if (VarDecl *OV = ownedVarOf(Args[0]))
           diagOwnedEscape(OV, Args[0], /*Returned=*/true);
+        checkLambdaEscape(Args[0], /*Local=*/false);
         ownedDead();
         Type *RT = CurRoutine->getResultType();
         ResultAssigned.insert(CurRoutine);
@@ -8189,6 +8201,7 @@ public:
     const Identifier &Id = Target->getName();
     WithContext *W = nullptr;
     Decl *D = Cur->lookup(Id.Name, &W);
+    noteLambdaUse(D, W, Id);
     if (!D) {
       diagUndeclared(Id);
       return errorType();
@@ -8316,6 +8329,27 @@ public:
 
   void visitAssignStmt(AssignStmt *S) {
     Expr *Target = S->getTarget();
+    // A lambda's body, $lambda := e, where no result type is known: the
+    // type of e (a quoted constant: a string).
+    if (CurRoutine && CurRoutine->isLambda() && CurRoutine->isFunction() &&
+        !CurRoutine->getResultType())
+      if (auto *N = llvm::dyn_cast<NameRefExpr>(Target);
+          N && N->getName().Name == CurRoutine->getName().Name) {
+        Type *T = check(S->getValue());
+        if (!T->isError() && (T->isStringLiteral() || isCharLiteral(S->getValue())))
+          T = Ctx.getAnsiStringType();
+        if (!T->isError() && !isInferable(T)) {
+          Diags.error(S->getValue()->getBeginLoc(),
+                      "cannot tell the result type of this lambda from " +
+                          (T->isNil() ? std::string("nil")
+                                      : "a value of type " + quoted(T)) +
+                          "; give it one: function(...): T => ...",
+                      {S->getValue()->getRange()});
+          T = errorType();
+        }
+        CurRoutine->setResultType(T);
+        CurRoutine->getResultVar()->setType(T);
+      }
     Type *TargetTy;
     if (auto *N = llvm::dyn_cast<NameRefExpr>(Target)) {
       TargetTy = checkNameTarget(N);
@@ -8410,6 +8444,15 @@ public:
     }
     if (OwnedV)
       ownedAssign(OwnedV);
+    if (llvm::isa<AddrOfExpr>(S->getValue())) { // a lambda: where it is kept
+      auto *TN = llvm::dyn_cast<NameRefExpr>(Target);
+      auto *TV = TN ? llvm::dyn_cast_or_null<VarDecl>(TN->getDecl()) : nullptr;
+      checkLambdaEscape(S->getValue(),
+                        TV && !TN->getWith() && CurRoutine &&
+                            TV->getOwner() == CurRoutine &&
+                            TV->getVarKind() == VarDecl::Variable &&
+                            !TV->isTypedConst() && !TV->isClassVar());
+    }
     if (TargetTy->isError() || ValueTy->isError())
       return;
     Expr *SavedOwnedTarget = OwnedTarget;
@@ -9039,6 +9082,7 @@ public:
     const Identifier &Id = E->getName();
     WithContext *W = nullptr;
     Decl *D = Cur->lookup(Id.Name, &W);
+    noteLambdaUse(D, W, Id);
     if (!D) {
       diagUndeclared(Id);
       return errorType();
@@ -9156,6 +9200,7 @@ public:
     const Identifier &Id = N->getName();
     WithContext *W = nullptr;
     Decl *D = Cur->lookup(Id.Name, &W);
+    noteLambdaUse(D, W, Id);
     if (!D) {
       diagUndeclared(Id);
       return errorType();
@@ -9458,6 +9503,7 @@ public:
     WithContext *W = nullptr;
     Decl *D = E->getTypeArgs().empty() ? Cur->lookup(Callee.Name, &W)
                                        : specialize(Callee, E->getTypeArgs());
+    noteLambdaUse(D, W, Callee);
     bool Generic = false; // F(args) for a generic F: its types inferred
     if (!D && E->getTypeArgs().empty())
       D = inferSpecialization(Callee, E->getArgs(),
@@ -10147,7 +10193,147 @@ public:
                                    R->isCDecl(), /*OfObject=*/true);
   }
 
+  /// The lambda A (function(x) => e), used where a value of type Want is
+  /// wanted (null: none): its hidden routine is declared here, nested in
+  /// the current routine and in the current scope. Parameter types left
+  /// out are Want's; the result type left out is Want's, or else the type
+  /// of the body (set by visitAssignStmt). Then A is @routine.
+  void completeLambda(AddrOfExpr *A, RoutineType *Want) {
+    RoutineDecl *R = A->getLambda();
+    if (!R || R->isLambdaDone())
+      return;
+    R->setLambdaDone();
+    auto Params = R->getParams();
+    if (Want && Want->getParams().size() != Params.size()) {
+      Diags.error(A->getBeginLoc(),
+                  "this lambda has " + llvm::Twine(Params.size()) +
+                      (Params.size() == 1 ? " parameter" : " parameters") +
+                      ", but " + quoted(Want) + " is wanted here",
+                  {A->getRange()});
+      R->setLambdaBad();
+    }
+    for (size_t I = 0; I < Params.size(); ++I) {
+      VarDecl *P = Params[I];
+      P->setOwner(R);
+      Type *T;
+      if (P->getTypeSpec()) {
+        T = resolveType(P->getTypeSpec());
+      } else if (Want && I < Want->getParams().size() &&
+                 Want->getParams()[I]->getType()) {
+        VarDecl *WP = Want->getParams()[I];
+        T = WP->getType();
+        if (P->getVarKind() == VarDecl::ValueParam) { // (x): as wanted
+          P->setVarKind(WP->getVarKind());
+          if (WP->isOutParam())
+            P->setOutParam();
+          if (WP->isConstRefParam())
+            P->setConstRefParam();
+        }
+      } else {
+        R->setLambdaBad();
+        if (!Want)
+          Diags.error(P->getLocation(),
+                      "cannot infer the type of parameter '" +
+                          P->getName().Spelling +
+                          "' in this lambda: there is no expected type; add "
+                          "a type, for example function(" +
+                          P->getName().Spelling + ": Integer) => ...",
+                      {P->getName().getRange()});
+        T = errorType();
+      }
+      P->setType(T);
+    }
+    if (R->isFunction()) {
+      Type *ResultTy = nullptr; // (not known yet: the body's)
+      if (R->getResultTypeSpec())
+        ResultTy = resolveType(R->getResultTypeSpec());
+      else if (Want && Want->getResult())
+        ResultTy = Want->getResult();
+      R->setResultType(ResultTy);
+      auto *Result = Ctx.create<VarDecl>(R->getName(), R->getResultTypeSpec(),
+                                         VarDecl::Result);
+      Result->setType(ResultTy);
+      Result->setOwner(R);
+      R->setResultVar(Result);
+    }
+    R->setParent(CurRoutine);
+    Used.insert(R);
+    declare(R);
+    // Its body is checked now, in the middle of a statement.
+    unsigned SavedLoop = LoopDepth;
+    const void *SavedSeq = DirectSequence;
+    std::unique_ptr<Scope> *SavedSeqScope = SeqScope;
+    Expr *SavedAssign = CurAssignTarget, *SavedOwned = OwnedTarget;
+    Expr *SavedIndex = IndexBase, *SavedWanted = WantedCall;
+    RoutineType *SavedAddr = AddrOfTarget;
+    bool SavedKeep = KeepCharLiterals;
+    LoopDepth = 0;
+    DirectSequence = nullptr;
+    SeqScope = nullptr;
+    CurAssignTarget = OwnedTarget = IndexBase = WantedCall = nullptr;
+    AddrOfTarget = nullptr;
+    KeepCharLiterals = false;
+    checkRoutineBody(R);
+    LoopDepth = SavedLoop;
+    DirectSequence = SavedSeq;
+    SeqScope = SavedSeqScope;
+    CurAssignTarget = SavedAssign;
+    OwnedTarget = SavedOwned;
+    IndexBase = SavedIndex;
+    WantedCall = SavedWanted;
+    AddrOfTarget = SavedAddr;
+    KeepCharLiterals = SavedKeep;
+    if (R->isFunction() && !R->getResultType()) {
+      R->setResultType(errorType());
+      R->getResultVar()->setType(errorType());
+    }
+  }
+
+  /// A use, in a lambda, of D (named Id, found through W): if D belongs to
+  /// a routine around the lambda (a variable, a member through Self or a
+  /// with statement, a nested routine), the lambdas up to that routine
+  /// must not outlive it (RoutineDecl::getCapture).
+  void noteLambdaUse(Decl *D, WithContext *W, const Identifier &Id) {
+    if (!CurRoutine || !CurRoutine->isLambda() || !D)
+      return;
+    RoutineDecl *Owner = nullptr;
+    if (auto *V = llvm::dyn_cast<VarDecl>(D); V && !W) {
+      if (!V->getOwner() || V->getOwner() == CurRoutine || V->isTypedConst() ||
+          V->isClassVar())
+        return;
+      Owner = V->getOwner();
+    } else if (auto *R = llvm::dyn_cast<RoutineDecl>(D); R && !W) {
+      if (!R->getParent() || R == CurRoutine)
+        return;
+      Owner = R->getParent();
+    } else if (!W) {
+      return;
+    }
+    for (RoutineDecl *L = CurRoutine; L && L != Owner; L = L->getParent())
+      if (L->isLambda() && !L->getCapture().isValid())
+        L->setCapture(Id);
+  }
+
+  /// A lambda that uses what belongs to the routines around it must not
+  /// outlive them: reported if Value is one and is stored (Local: in a
+  /// local variable of the current routine, which is allowed).
+  void checkLambdaEscape(Expr *Value, bool Local) {
+    auto *A = llvm::dyn_cast<AddrOfExpr>(Value);
+    RoutineDecl *R = A ? A->getLambda() : nullptr;
+    if (!R || !R->getCapture().isValid() || Local)
+      return;
+    Diags.error(Value->getBeginLoc(),
+                "this lambda uses '" + R->getCapture().Spelling +
+                    "' of the routine it is written in, so it must not "
+                    "outlive it: it can be passed as an argument or kept in "
+                    "a local variable, not stored here",
+                {Value->getRange()});
+  }
+
   Type *visitAddrOfExpr(AddrOfExpr *E) {
+    completeLambda(E, AddrOfTarget);
+    if (E->getLambda() && E->getLambda()->isLambdaBad())
+      return errorType();
     if (Type *T = checkMethodAddr(E))
       return T;
     // @routine (Turbo/FPC): a procedural value.

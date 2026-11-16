@@ -101,8 +101,11 @@ class Parser {
   /// specialize TList<integer>.Create in an expression: the type is given
   /// a hidden name ($spec1 = specialize TList<integer>), declared in the
   /// block being parsed, which gets these declarations when it ends.
+  /// (Also the hidden routines of lambdas, $lambda1: see parseLambda.)
   llvm::SmallVector<Decl *, 4> HiddenTypeDecls;
   unsigned HiddenTypes = 0;
+  unsigned HiddenLambdas = 0;
+  Expr *parseLambda();
   GenericTokens *captureSwitches();
   TypeDecl *parseTypeDecl(bool InMembers, bool Generic);
   TypeSpec *parseSpecializeType();

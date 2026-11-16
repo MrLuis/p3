@@ -162,7 +162,11 @@ type
       nkNameRef: (ref: TIdent; refDecl: PDecl; refWith: PWithContext);
       { paren: the inner expression; deref: the pointer; addrof: the operand;
         move (objfpc): move p, the owned variable p (a name) }
-      nkParen, nkDeref, nkAddrOf, nkMove: (inner: PNode; addrMethod, addrCode: PDecl);
+      { addrLambda: a lambda, function(x) => e (objfpc): the hidden
+        routine the parser made of it, which inner names; Sema completes
+        it where the type wanted is known }
+      nkParen, nkDeref, nkAddrOf, nkMove: (inner: PNode; addrMethod, addrCode: PDecl;
+                                         addrLambda: PDecl);
       { opDecl: an advanced record's class operator implementing it
         (Sema); opNegated: <> through the = operator }
       nkUnary: (uop: TUnaryOp; operand: PNode; uopDecl: PDecl);
@@ -548,6 +552,15 @@ type
                     (TList.Add): a template too, parsed again for each
                     specialization of the type }
                   isTemplateMember: boolean;
+                  { the routine of a lambda (function(x) => e): hidden,
+                    nested in the routine the lambda is written in, with
+                    parameter and result types that Sema may take from where
+                    it is used (lambdaDone once it has; lambdaBad: it does
+                    not fit there, reported). lambdaCapture: the first name
+                    it uses of the routines around it (valid: it must not
+                    outlive them) }
+                  isLambda, lambdaDone, lambdaBad: boolean;
+                  lambdaCapture: TIdent;
                   isVirtual, isOverride, isAbstract, isClassMethod: boolean;
                   { overloading (objfpc): the overload directive, the next
                     routine of the name in the same scope or class and this

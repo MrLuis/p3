@@ -600,10 +600,67 @@ var names := ['ann', 'bo'];          { array of string }
 - A variable's type is fixed where it is declared: after `var x := 3`,
   `x := 3.5` is an error. `var x := nil` is an error too.
 
-Not inferred: the parameter and result types of lambdas (pcc has no
-anonymous functions), and the type arguments of a generic type from the
-declared type of a variable (`specialize TList<T>` is always written). The
-types of parameters, fields and function results are always written.
+Not inferred: the type arguments of a generic type from the declared type
+of a variable (`specialize TList<T>` is always written). The types of the
+parameters and results of named routines, and of fields, are always
+written; a lambda's are inferred (see "Lambdas").
+
+**Lambdas** (objfpc; pcc's own syntax): `function(params) => expression`
+and `procedure(params) => statement` are values of a procedural type,
+written where they are used.
+
+```pascal
+type
+  TFn = function(x: Integer): Integer;
+function Apply(f: TFn; v: Integer): Integer;
+
+procedure Run(k: Integer);
+var
+  total: Integer;
+begin
+  Writeln(Apply(function(x) => x + k, 1));        { x: Integer, from TFn }
+  Each(names, procedure(s) => total := total + Length(s));
+  var add := function(a, b: Integer) => a + b;    { returns Integer }
+  Writeln(add(2, 3));
+  Each(names, procedure(s) =>
+    begin
+      Writeln(s);
+      count := count + 1;
+    end);
+end;
+```
+
+- **Parameters** are written as in a heading, with `,` or `;` between them
+  and `var` / `const` as needed. A parameter without a type takes the type
+  (and kind) of the parameter of the procedural type the lambda is passed
+  or assigned to. Without a type to go by (`var f := function(a, b) => a +
+  b`) that is an error: "cannot infer the type of parameter 'a' in this
+  lambda: there is no expected type". The lambda must have as many
+  parameters as that type.
+- **The result** of a `function` lambda is its expression. Its type is
+  written after the parameters (`function(x): Real => x`), or is the
+  procedural type's, or is the type of the expression (a quoted constant
+  is a `string`). A `procedure` lambda's body is one statement, which can
+  be a `begin ... end` block.
+- **What it can use**: everything in scope where it is written, including
+  the parameters and variables of the routine it is in and, in a method,
+  the object's members. It runs with that routine's variables, while that
+  routine runs (as nested routines do; nothing is copied). So a lambda
+  that uses them can be passed as an argument, called, or kept in a local
+  variable of that routine, but not stored where it would outlive the
+  routine (a global, a field, a `var` parameter, a function result): that
+  is an error naming what it uses. A lambda that uses nothing of the
+  routines around it (only its parameters, globals and top-level routines)
+  can be stored anywhere.
+- It is checked where it is used, against the type wanted there:
+  assignments, typed declarations, arguments (also of generic types'
+  methods, where `T` is the type argument), and conditional expressions.
+
+Not supported: lambdas as method pointers (`of object` types), in constant
+expressions, or that outlive the routine whose variables they use (that
+would need captured variables to be copied to the heap); overloads chosen
+by a lambda's shape (an overloaded routine's lambda argument must have its
+parameter types written).
 
 **Conditional expressions** (objfpc; pcc's own): `if c then a else b` is a
 value, `a` where `c` holds and `b` otherwise. Only the branch chosen is

@@ -2738,7 +2738,12 @@ begin
     exit(irLoad(irPtrT, openDescriptor(e), 'data'));
   case e^.kind of
     nkTuple: emitAddress := emitTuple(e);
-    nkCondExpr: emitAddress := visitExpr(e);
+    nkCondExpr:
+      begin
+        { the hidden variable, once set }
+        visitStmt(e^.ceLowered);
+        emitAddress := emitAddress(e^.ceResult);
+      end;
     nkBinary, nkUnary:
       { a record's operator returning a record: a temporary holding it }
       emitAddress := visitExpr(e);

@@ -1,0 +1,53 @@
+; Lambdas (objfpc): parameter types from the type wanted (an error without
+; one), the result type from it or from the body; a lambda that uses what
+; belongs to the routines around it can be passed or kept in a local
+; variable, not stored where it would outlive them.
+; RUN: not %pcc --mode=objfpc -ferror-limit=0 -c %S/Inputs/lambda/errors.pas -o %t.o 2>&1 | FileCheck %s
+; CHECK: errors.pas:26:8: error: this lambda uses 'k' of the routine it is written in, so it must not outlive it: it can be passed as an argument or kept in a local variable, not stored here
+; CHECK: errors.pas:27:10: error: this lambda uses 'local' of the routine it is written in, so it must not outlive it: it can be passed as an argument or kept in a local variable, not stored here
+; CHECK: errors.pas:34:8: error: this lambda uses 'Bias' of the routine it is written in, so it must not outlive it: it can be passed as an argument or kept in a local variable, not stored here
+; CHECK: errors.pas:36:8: error: this lambda uses 'Self' of the routine it is written in, so it must not outlive it: it can be passed as an argument or kept in a local variable, not stored here
+; CHECK: errors.pas:45:8: error: this lambda uses 'Twice' of the routine it is written in, so it must not outlive it: it can be passed as an argument or kept in a local variable, not stored here
+; CHECK: errors.pas:50:21: error: cannot infer the type of parameter 'x' in this lambda: there is no expected type; add a type, for example function(x: Integer) => ...
+; CHECK: errors.pas:50:24: error: cannot infer the type of parameter 'y' in this lambda: there is no expected type; add a type, for example function(y: Integer) => ...
+; CHECK: errors.pas:51:36: error: cannot tell the result type of this lambda from nil; give it one: function(...): T => ...
+; CHECK: errors.pas:52:8: error: this lambda has 2 parameters, but 'TFn' is wanted here
+; CHECK: errors.pas:53:23: error: assigning to 'integer' from incompatible type 'string of length 4'
+; CHECK: errors.pas:54:5: error: assigning to 'TFn' from incompatible type 'function(real): integer'
+; CHECK: errors.pas:55:5: error: assigning to 'TFn' from incompatible type 'function(integer): real'
+; CHECK: errors.pas:56:5: error: assigning to 'TProc' from incompatible type 'function(integer): integer'
+; CHECK: errors.pas:57:5: error: assigning to 'TFn' from incompatible type 'procedure(integer)'
+; CHECK: errors.pas:58:23: error: use of undeclared identifier 'nope'; did you mean 'copy'?
+; CHECK: errors.pas:59:34: error: '.' applied to a value of type 'integer', which is not a record
+; CHECK: errors.pas:60:17: error: this lambda does not match the heading of parameter 'f' ('TFn')
+; CHECK-NOT: error:
+;
+; RUN: not %pcc --mode=objfpc -ferror-limit=0 -c %S/Inputs/lambda/syntax.pas -o %t.o 2>&1 | FileCheck --check-prefix=SYNTAX %s
+; SYNTAX: syntax.pas:7:19: error: expected '=>' before the body of a lambda
+; SYNTAX: syntax.pas:8:18: error: expected ')' after the parameters of a lambda
+; SYNTAX: syntax.pas:9:21: error: expected type name for function result type (declare the type in a 'type' section)
+; SYNTAX: syntax.pas:10:20: error: a procedure cannot have a result type
+;
+; RUN: not %pcc --mode=tp -c %S/Inputs/lambda/tp.pas -o %t.o 2>&1 | FileCheck --check-prefix=TP %s
+; TP: tp.pas:7:8: error: expected expression
+;
+; The tree: the lambda is a hidden routine nested in the one it is written
+; in, its value the routine's address.
+; RUN: %pcc --mode=objfpc --emit-ast %S/Inputs/lambda/ast.pas -o - | FileCheck --check-prefix=AST %s
+; AST: ProcedureDecl 'run' <8:1>
+; AST: FunctionDecl '$lambda1' : integer <10:9>
+; AST-NEXT: ParamDecl 'x' : integer <10:18>
+; AST: NameRefExpr 'k' parameter : integer <10:28>
+; AST: ProcCallStmt 'apply' <10:3>
+; AST-NEXT: AddrOfExpr : TFn <10:9>
+; AST-NEXT: NameRefExpr '$lambda1' function : TFn <10:9>
+;
+; The code: a nested routine, given the frame of the one around it.
+; RUN: %pcc --mode=objfpc --emit-llvm %S/Inputs/lambda/ast.pas -o %t.ll
+; RUN: FileCheck --check-prefix=IR %s < %t.ll
+; RUN: opt -passes=verify -disable-output %t.ll
+; IR-LABEL: define internal void @pas.run(
+; IR: insertvalue { ptr, ptr } { ptr @"pas.run.$lambda1", ptr undef }, ptr %frame, 1
+; IR: call i32 @pas.apply(
+; IR-LABEL: define internal i32 @"pas.run.$lambda1"(ptr %link, i32 %x)
+; IR: getelementptr inbounds %frame.run, ptr %link, i32 0, i32 0

@@ -2062,8 +2062,11 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
     switch (E->getKind()) {
     case Expr::EK_Tuple:
       return emitTuple(llvm::cast<TupleExpr>(E));
-    case Expr::EK_Cond:
-      return visitExpr(E);
+    case Expr::EK_Cond: { // the hidden variable, once set
+      auto *CE = llvm::cast<CondExpr>(E);
+      visitStmt(CE->getLowered());
+      return emitAddress(CE->getResult());
+    }
     case Expr::EK_Binary:
     case Expr::EK_Unary:
       // A record's operator returning a record: a temporary holding it.

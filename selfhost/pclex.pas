@@ -2659,7 +2659,15 @@ begin
       '-': k := tkMinus;
       '*': k := tkStar;
       '/': k := tkSlash;
-      '=': k := tkEqual;
+      '=':
+        begin
+          k := tkEqual;
+          if at(lx, lx.cur) = '>' then { (a lambda's) }
+          begin
+            lx.cur := lx.cur + 1;
+            k := tkEqualGreater;
+          end;
+        end;
       ';': k := tkSemi;
       ',': k := tkComma;
       ')': k := tkRParen;

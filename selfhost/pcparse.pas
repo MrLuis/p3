@@ -97,6 +97,8 @@ var
     being parsed, which gets these declarations (of PDecl) when it ends }
   hiddenTypeDecls: TPtrList;
   hiddenTypes: longint;
+  { (also the hidden routines of lambdas, $lambda1: see parseLambda) }
+  hiddenLambdas: longint;
   { declared(NAME): the units of the uses clauses read (of PIdent), not yet
     given to usedUnitNames; the unit being parsed }
   pendingUses: TPtrList;
@@ -159,6 +161,7 @@ begin
   listInit(genericTypes);
   listInit(hiddenTypeDecls);
   hiddenTypes := 0;
+  hiddenLambdas := 0;
   listInit(pendingUses);
   unitName := nil;
   beforeDeclared := @loadPendingUses;
@@ -495,6 +498,7 @@ end;
 function nestedTypedConstValue: PNode; forward;
 function nestedType: PTypeSpec; forward;
 function nestedStatement: PNode; forward;
+function parseLambda: PNode; forward;
 function nestedFactor: PNode; forward;
 
 function parseBlock: PBlock; forward;
@@ -2144,7 +2148,7 @@ var
   savedPos, savedNesting: longint;
   savedRec, savedStmtToks: PPtrList;
   toks: PGenericTokens;
-  savedHidden: longint;
+  savedHidden, savedLambdas: longint;
 begin
   savedLx := lx;
   savedTok := tok;
@@ -2158,7 +2162,9 @@ begin
   savedStmtToks := stmtTokens;
   savedGeneric := parsingGeneric;
   savedHidden := hiddenTypes;
+  savedLambdas := hiddenLambdas;
   hiddenTypes := 0;
+  hiddenLambdas := 0;
   toks := PGenericTokens(g^.genericTokens);
   lx.longStrings := toks^.longStrings;
   lx.advancedRecords := toks^.advancedRecords;
@@ -2191,6 +2197,7 @@ begin
   stmtTokens := savedStmtToks;
   parsingGeneric := savedGeneric;
   hiddenTypes := savedHidden;
+  hiddenLambdas := savedLambdas;
 end;
 
 { A specialization of generic type g: its declaration parsed again (an
@@ -2203,7 +2210,7 @@ var
   savedHasPeek, savedGeneric: boolean;
   savedPrev: TLoc;
   savedReplay: pointer;
-  savedPos, savedNesting, savedHidden: longint;
+  savedPos, savedNesting, savedHidden, savedLambdas: longint;
   savedRec, savedStmtToks: PPtrList;
   toks, m: PGenericTokens;
   td: PDecl;
@@ -2220,7 +2227,9 @@ begin
   savedStmtToks := stmtTokens;
   savedGeneric := parsingGeneric;
   savedHidden := hiddenTypes;
+  savedLambdas := hiddenLambdas;
   hiddenTypes := 0;
+  hiddenLambdas := 0;
   toks := PGenericTokens(g^.tgTokens);
   recording := nil;
   stmtTokens := nil;
@@ -2248,6 +2257,7 @@ begin
   stmtTokens := savedStmtToks;
   parsingGeneric := savedGeneric;
   hiddenTypes := savedHidden;
+  hiddenLambdas := savedLambdas;
 end;
 
 procedure parseDeclarations(var decls: TPtrList; inInterface: boolean);
@@ -6170,6 +6180,11 @@ begin
       end
       else
         diagError(tok.loc, 'expected expression');
+    tkKwFunction, tkKwProcedure: { function(x) => e, a lambda (objfpc) }
+      if mode = lmObjFPC then
+        exit(parseLambda)
+      else
+        diagError(tok.loc, 'expected expression');
     tkKwInherited:
       exit(parseInherited);
     tkKwNot:
@@ -6257,6 +6272,109 @@ end;
 function nestedType: PTypeSpec;
 begin
   nestedType := parseType;
+end;
+
+{ lambda = ( "function" | "procedure" ) [ "(" [ lparams ] ")" ] [ ":" type ]
+           "=>" ( expression | statement ) .
+  lparams = lparam ( ( ";" | "," ) lparam )* .
+  lparam = [ "var" | "const" ] identList [ ":" type ] .
+  A function's body is an expression, its result; a procedure's is a
+  statement. The lambda becomes a hidden routine ($lambda1) of the block
+  being parsed, whose body is $lambda1 := expression or the statement, and
+  the expression @$lambda1. Types left out are for Sema to find. }
+function parseLambda: PNode;
+var
+  isFunction, hasParamList, ok: boolean;
+  loc: TLoc;
+  params, names, decls, stmts: TPtrList;
+  vk: TVarKind;
+  ts, resultSpec: PTypeSpec;
+  i, hiddenMark: longint;
+  name: TIdent;
+  e, bodyStmt, body, a: PNode;
+  r: PDecl;
+begin
+  parseLambda := nil;
+  isFunction := tok.kind = tkKwFunction;
+  loc := consumeToken;
+  listInit(params);
+  hasParamList := tok.kind = tkLParen;
+  if hasParamList then
+  begin
+    consumeToken;
+    if tok.kind <> tkRParen then
+      repeat
+        vk := vkValueParam;
+        if tryConsume(tkKwVar) then
+          vk := vkVarParam
+        else if tryConsume(tkKwConst) then
+          vk := vkConstParam;
+        listInit(names);
+        if not parseIdentList(names, 'parameter name') then
+          exit;
+        ts := nil;
+        if tryConsume(tkColon) then
+        begin
+          ts := parseTypeIdentifier('parameter type');
+          if ts = nil then
+            exit;
+        end;
+        for i := 0 to names.count - 1 do
+          listAdd(params, newVar(PIdent(listGet(names, i))^, ts, vk));
+        ok := tryConsume(tkSemi);
+        if not ok then
+          ok := tryConsume(tkComma);
+      until not ok;
+    if not expect(tkRParen, 'after the parameters of a lambda') then
+      exit;
+  end;
+  resultSpec := nil;
+  if tok.kind = tkColon then
+  begin
+    if not isFunction then
+      diagError(tok.loc, 'a procedure cannot have a result type');
+    consumeToken;
+    resultSpec := parseTypeIdentifier('function result type');
+    if resultSpec = nil then
+      exit;
+  end;
+  if not expect(tkEqualGreater, 'before the body of a lambda') then
+    exit;
+  hiddenLambdas := hiddenLambdas + 1;
+  name.name := intern('$lambda' + intToStr(hiddenLambdas));
+  name.spelling := name.name;
+  name.loc := loc;
+  { what its body declares by the way (lambdas in it) is its own }
+  hiddenMark := hiddenTypeDecls.count;
+  if isFunction then
+  begin
+    e := parseExpression;
+    if e = nil then
+      exit;
+    bodyStmt := newNode(nkAssign, e^.b, e^.e);
+    bodyStmt^.target := nameRef(name);
+    bodyStmt^.assignLoc := e^.b;
+    bodyStmt^.value := e;
+    bodyStmt^.assignCompound := false;
+  end
+  else
+    bodyStmt := nestedStatement;
+  listInit(stmts);
+  listAdd(stmts, bodyStmt);
+  body := newNode(nkCompound, bodyStmt^.b, bodyStmt^.e);
+  body^.stmts := stmts;
+  listInit(decls);
+  for i := hiddenMark to hiddenTypeDecls.count - 1 do
+    listAdd(decls, listGet(hiddenTypeDecls, i));
+  hiddenTypeDecls.count := hiddenMark;
+  r := newRoutine(loc, name, isFunction, params, hasParamList, resultSpec,
+                  newBlock(decls, body), false);
+  r^.isLambda := true;
+  listAdd(hiddenTypeDecls, r);
+  a := newNode(nkAddrOf, loc, prevTokEnd);
+  a^.inner := nameRef(name);
+  a^.addrLambda := r;
+  parseLambda := a;
 end;
 
 function nestedStatement: PNode;

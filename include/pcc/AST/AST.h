@@ -509,6 +509,10 @@ class AddrOfExpr final : public Expr {
   Expr *Operand;
   RoutineDecl *Method = nullptr; ///< set by Sema: @obj.M, a method pointer
   RoutineDecl *Code = nullptr;   ///< set by Sema: @TFoo.M, a code address
+  /// A lambda, function(x) => e (objfpc): the hidden routine the parser
+  /// made of it, which the operand names; Sema completes it here, where
+  /// the type wanted is known.
+  RoutineDecl *Lambda = nullptr;
 
 public:
   AddrOfExpr(SourceRange R, Expr *Operand) : Expr(EK_AddrOf, R), Operand(Operand) {}
@@ -517,6 +521,8 @@ public:
   void setMethod(RoutineDecl *R) { Method = R; }
   RoutineDecl *getCode() const { return Code; }
   void setCode(RoutineDecl *R) { Code = R; }
+  RoutineDecl *getLambda() const { return Lambda; }
+  void setLambda(RoutineDecl *R) { Lambda = R; }
   static bool classof(const Expr *E) { return E->getKind() == EK_AddrOf; }
 };
 
@@ -1548,6 +1554,8 @@ public:
   Type *getType() const { return Ty; }
   void setType(Type *T) { Ty = T; }
   VarKind getVarKind() const { return VK; }
+  /// (A lambda's parameter without a type: the kind of the one wanted.)
+  void setVarKind(VarKind K) { VK = K; }
   bool isParam() const {
     return VK == ValueParam || VK == VarParam || VK == ConstParam;
   }
@@ -1778,6 +1786,8 @@ class RoutineDecl final : public Decl {
   const void *GenericTokens = nullptr;
   void *GenericScope = nullptr;
   bool TemplateMember = false;
+  bool Lambda = false, LambdaDone = false, LambdaBad = false;
+  Identifier Capture;
   RoutineDecl *GenericDef = nullptr;
   RoutineDecl *Parent = nullptr;    ///< enclosing routine; null at program level
   unsigned Level = 1;               ///< 1 = declared in the program block
@@ -1919,6 +1929,20 @@ public:
   /// template too, parsed again for each specialization of the type.
   bool isTemplateMember() const { return TemplateMember; }
   void setTemplateMember() { TemplateMember = true; }
+  /// The routine of a lambda (function(x) => e): hidden, nested in the
+  /// routine the lambda is written in, with parameter and result types
+  /// that Sema may take from where it is used (isLambdaDone once it has).
+  /// getCapture: the first name it uses of the routines around it (valid:
+  /// it must not outlive them).
+  bool isLambda() const { return Lambda; }
+  void setLambda() { Lambda = true; }
+  bool isLambdaDone() const { return LambdaDone; }
+  void setLambdaDone() { LambdaDone = true; }
+  /// It does not fit where it is used (reported): its value is an error.
+  bool isLambdaBad() const { return LambdaBad; }
+  void setLambdaBad() { LambdaBad = true; }
+  const Identifier &getCapture() const { return Capture; }
+  void setCapture(Identifier Id) { Capture = Id; }
   llvm::ArrayRef<Identifier> getTypeParams() const { return TypeParams; }
   const void *getGenericTokens() const { return GenericTokens; }
   void *getGenericScope() const { return GenericScope; }

@@ -1400,7 +1400,10 @@ void Lexer::lex(Token &T) {
     case '-': K = tok::minus; break;
     case '*': K = tok::star; break;
     case '/': K = tok::slash; break;
-    case '=': K = tok::equal; break;
+    case '=':
+      K = tok::equal;
+      if (*Cur == '>') { ++Cur; K = tok::equal_greater; } // (a lambda's)
+      break;
     case ';': K = tok::semi; break;
     case ',': K = tok::comma; break;
     case ')': K = tok::r_paren; break;

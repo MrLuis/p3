@@ -155,6 +155,87 @@ TypeDecl *Parser::reparseGenericType(const TypeDecl *G,
   return TD;
 }
 
+// lambda = ( "function" | "procedure" ) [ "(" [ lparams ] ")" ] [ ":" type ]
+//          "=>" ( expression | statement ) .
+// lparams = lparam { ( ";" | "," ) lparam } .
+// lparam = [ "var" | "const" ] identList [ ":" type ] .
+// A function's body is an expression, its result; a procedure's is a
+// statement. The lambda becomes a hidden routine ($lambda1) of the block
+// being parsed, whose body is `$lambda1 := expression` or the statement,
+// and the expression @$lambda1. Types left out are for Sema to find.
+Expr *Parser::parseLambda() {
+  bool IsFunction = Tok.is(tok::kw_function);
+  SourceLocation Loc = consumeToken();
+  llvm::SmallVector<VarDecl *, 4> Params;
+  bool HasParamList = Tok.is(tok::l_paren);
+  if (HasParamList) {
+    consumeToken();
+    if (Tok.isNot(tok::r_paren)) {
+      do {
+        VarDecl::VarKind Kind = VarDecl::ValueParam;
+        if (tryConsume(tok::kw_var))
+          Kind = VarDecl::VarParam;
+        else if (tryConsume(tok::kw_const))
+          Kind = VarDecl::ConstParam;
+        llvm::SmallVector<Identifier, 4> Names;
+        if (!parseIdentList(Names, "parameter name"))
+          return nullptr;
+        TypeSpec *TS = nullptr;
+        if (tryConsume(tok::colon)) {
+          TS = parseTypeIdentifier("parameter type");
+          if (!TS)
+            return nullptr;
+        }
+        for (const Identifier &N : Names)
+          Params.push_back(Ctx.create<VarDecl>(N, TS, Kind));
+      } while (tryConsume(tok::semi) || tryConsume(tok::comma));
+    }
+    if (!expect(tok::r_paren, "after the parameters of a lambda"))
+      return nullptr;
+  }
+  TypeSpec *ResultTS = nullptr;
+  if (Tok.is(tok::colon)) {
+    if (!IsFunction)
+      Diags.error(Tok.getLocation(), "a procedure cannot have a result type");
+    consumeToken();
+    ResultTS = parseTypeIdentifier("function result type");
+    if (!ResultTS)
+      return nullptr;
+  }
+  if (!expect(tok::equal_greater, "before the body of a lambda"))
+    return nullptr;
+  std::string HN = "$lambda" + std::to_string(++HiddenLambdas);
+  llvm::StringRef N = Ctx.getStrings().intern(HN);
+  Identifier Name{N, N, Loc};
+  // What its body declares by the way (lambdas in it) is its own.
+  size_t HiddenMark = HiddenTypeDecls.size();
+  Stmt *BodyStmt;
+  if (IsFunction) {
+    Expr *E = parseExpression();
+    if (!E)
+      return nullptr;
+    BodyStmt = Ctx.create<AssignStmt>(E->getRange(),
+                                      Ctx.create<NameRefExpr>(Name),
+                                      E->getBeginLoc(), E);
+  } else {
+    BodyStmt = parseStatement();
+  }
+  auto *Body = Ctx.create<CompoundStmt>(BodyStmt->getRange(),
+                                        Ctx.copyArray<Stmt *>({BodyStmt}));
+  llvm::SmallVector<Decl *, 2> Decls(HiddenTypeDecls.begin() + HiddenMark,
+                                     HiddenTypeDecls.end());
+  HiddenTypeDecls.resize(HiddenMark);
+  auto *R = Ctx.create<RoutineDecl>(
+      Loc, Name, IsFunction, Ctx.copyArray<VarDecl *>(Params), HasParamList,
+      ResultTS, Ctx.create<Block>(Ctx.copyArray<Decl *>(Decls), Body), false);
+  R->setLambda();
+  HiddenTypeDecls.push_back(R);
+  auto *A = Ctx.create<AddrOfExpr>(SourceRange(Loc, PrevTokEnd),
+                                   Ctx.create<NameRefExpr>(Name));
+  A->setLambda(R);
+  return A;
+}
+
 // specialize TList<integer>, a type (objfpc)
 TypeSpec *Parser::parseSpecializeType() {
   SourceLocation Start = Tok.getLocation();
@@ -4376,6 +4457,13 @@ Expr *Parser::parseFactor() {
     return Ctx.create<CondExpr>(SourceRange(IfLoc, PrevTokEnd), Cond, Then,
                                 Else, Lex.longStrings());
   }
+  case tok::kw_function:
+  case tok::kw_procedure: // function(x) => e, a lambda (objfpc)
+    if (!LangOpts.ObjKeywords) {
+      Diags.error(Tok.getLocation(), "expected expression");
+      return nullptr;
+    }
+    return parseLambda();
   case tok::kw_inherited:
     return parseInherited();
   case tok::kw_not: {

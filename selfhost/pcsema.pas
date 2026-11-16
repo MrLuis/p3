@@ -6748,7 +6748,7 @@ var
   p: PDecl;
 begin
   notProceduralValue := '';
-  if (r^.parent <> nil) and not allowNested then
+  if (r^.parent <> nil) and not allowNested and not r^.isLambda then
     exit('only routines declared at program or unit level can be ' +
          'procedural values');
   if not r^.isExternal then
@@ -7508,6 +7508,8 @@ var
   rt: PType;
   inInterface: boolean;
 begin
+  if r^.isLambda then { completed where it is used (completeLambda) }
+    exit;
   if r^.isTemplateMember then { of a generic type: see specializeType }
   begin
     { its specializations see what is declared up to here (the unit's
@@ -8646,7 +8648,8 @@ begin
   if r^.resultName and r^.isFunction and (r^.resultVar <> nil) then
     scopeInsert(cur, intern('result'), r^.resultVar);
   checkBlock(r^.body);
-  if r^.isFunction and not r^.resultAssigned and not isError(r^.resultType) then
+  if r^.isFunction and not r^.resultAssigned and (r^.resultType <> nil) and
+     not isError(r^.resultType) then
   begin
     ms('function ''');
     maN(r^.ident.spelling);
@@ -8920,6 +8923,193 @@ end;
   another procedural parameter) with a congruent heading. }
 function checkValueFor(targetTy: PType; value: PNode): PType; forward;
 
+{ The lambda a (function(x) => e), used where a value of type want is
+  wanted (nil: none): its hidden routine is declared here, nested in the
+  current routine and in the current scope. Parameter types left out are
+  want's; the result type left out is want's, or else the type of the body
+  (set by visitAssign). Then a is @routine. }
+procedure completeLambda(a: PNode; want: PType);
+var
+  r, p, wp, res: PDecl;
+  i: longint;
+  t: PType;
+  savedLoop: longint;
+  savedSeq: pointer;
+  savedSeqScope: PPScope;
+  savedAssign, savedOwned, savedIndex, savedWanted: PNode;
+  savedAddr: PType;
+  savedKeep: boolean;
+begin
+  r := a^.addrLambda;
+  if (r = nil) or r^.lambdaDone then
+    exit;
+  r^.lambdaDone := true;
+  if want <> nil then
+    if want^.routineParams.count <> r^.params.count then
+    begin
+      ms('this lambda has ' + intToStr(r^.params.count));
+      if r^.params.count = 1 then
+        ma(' parameter')
+      else
+        ma(' parameters');
+      ma(', but ');
+      maT(want);
+      ma(' is wanted here');
+      errR(a^.b, nodeRange(a));
+      r^.lambdaBad := true;
+    end;
+  for i := 0 to r^.params.count - 1 do
+  begin
+    p := PDecl(listGet(r^.params, i));
+    p^.owner := r;
+    wp := nil;
+    if want <> nil then
+      if i < want^.routineParams.count then
+        wp := PDecl(listGet(want^.routineParams, i));
+    if p^.varSpec <> nil then
+      t := resolveType(p^.varSpec, nil)
+    else if (wp <> nil) and (wp^.varType <> nil) then
+    begin
+      t := wp^.varType;
+      if p^.varKind = vkValueParam then { (x): as wanted }
+      begin
+        p^.varKind := wp^.varKind;
+        p^.isOut := wp^.isOut;
+        p^.isConstRef := wp^.isConstRef;
+      end;
+    end
+    else
+    begin
+      r^.lambdaBad := true;
+      if want = nil then
+      begin
+        ms('cannot infer the type of parameter ''');
+        maN(p^.ident.spelling);
+        ma(''' in this lambda: there is no expected type; add a type, for ' +
+           'example function(');
+        maN(p^.ident.spelling);
+        ma(': Integer) => ...');
+        errR(p^.loc, identRange(p^.ident));
+      end;
+      t := errorType;
+    end;
+    p^.varType := t;
+  end;
+  if r^.isFunction then
+  begin
+    t := nil; { (not known yet: the body's) }
+    if r^.resultSpec <> nil then
+      t := resolveType(r^.resultSpec, nil)
+    else if want <> nil then
+      t := want^.routineResult;
+    r^.resultType := t;
+    res := newDecl(dkVar, r^.ident, r^.ident.loc);
+    res^.varSpec := r^.resultSpec;
+    res^.varKind := vkResult;
+    res^.varType := t;
+    res^.owner := r;
+    r^.resultVar := res;
+  end;
+  r^.parent := curRoutine;
+  if curRoutine <> nil then
+    r^.level := curRoutine^.level + 1
+  else
+    r^.level := 1;
+  r^.isUsed := true;
+  declare(r);
+  { its body is checked now, in the middle of a statement }
+  savedLoop := loopDepth;
+  savedSeq := directSequence;
+  savedSeqScope := seqScope;
+  savedAssign := curAssignTarget;
+  savedOwned := ownedTarget;
+  savedIndex := indexBase;
+  savedWanted := wantedCall;
+  savedAddr := addrOfTarget;
+  savedKeep := keepCharLiterals;
+  loopDepth := 0;
+  directSequence := nil;
+  seqScope := nil;
+  curAssignTarget := nil;
+  ownedTarget := nil;
+  indexBase := nil;
+  wantedCall := nil;
+  addrOfTarget := nil;
+  keepCharLiterals := false;
+  checkRoutineBody(r);
+  loopDepth := savedLoop;
+  directSequence := savedSeq;
+  seqScope := savedSeqScope;
+  curAssignTarget := savedAssign;
+  ownedTarget := savedOwned;
+  indexBase := savedIndex;
+  wantedCall := savedWanted;
+  addrOfTarget := savedAddr;
+  keepCharLiterals := savedKeep;
+  if r^.isFunction and (r^.resultType = nil) then
+  begin
+    r^.resultType := errorType;
+    r^.resultVar^.varType := errorType;
+  end;
+end;
+
+{ A use, in a lambda, of d (named id, found through w): if d belongs to a
+  routine around the lambda (a variable, a member through Self or a with
+  statement, a nested routine), the lambdas up to that routine must not
+  outlive it (lambdaCapture). }
+procedure noteLambdaUse(d: PDecl; w: PWithContext; const id: TIdent);
+var
+  owner, l: PDecl;
+begin
+  if (curRoutine = nil) or not curRoutine^.isLambda or (d = nil) then
+    exit;
+  owner := nil;
+  if (d^.kind = dkVar) and (w = nil) then
+  begin
+    if (d^.owner = nil) or (d^.owner = curRoutine) or
+       ((d^.init <> nil) and not d^.isInitVar) or d^.isClassVar then
+      exit;
+    owner := d^.owner;
+  end
+  else if (d^.kind = dkRoutine) and (w = nil) then
+  begin
+    if (d^.parent = nil) or (d = curRoutine) then
+      exit;
+    owner := d^.parent;
+  end
+  else if w = nil then
+    exit;
+  l := curRoutine;
+  while (l <> nil) and (l <> owner) do
+  begin
+    if l^.isLambda and not identValid(l^.lambdaCapture) then
+      l^.lambdaCapture := id;
+    l := l^.parent;
+  end;
+end;
+
+{ A lambda that uses what belongs to the routines around it must not
+  outlive them: reported if value is one and is stored (local: in a local
+  variable of the current routine, which is allowed). }
+procedure checkLambdaEscape(value: PNode; local: boolean);
+var
+  r: PDecl;
+begin
+  if value^.kind <> nkAddrOf then
+    exit;
+  r := value^.addrLambda;
+  if (r = nil) or local then
+    exit;
+  if not identValid(r^.lambdaCapture) then
+    exit;
+  ms('this lambda uses ''');
+  maN(r^.lambdaCapture.spelling);
+  ma(''' of the routine it is written in, so it must not outlive it: it ' +
+     'can be passed as an argument or kept in a local variable, not stored ' +
+     'here');
+  errR(value^.b, nodeRange(value));
+end;
+
 procedure checkRoutineArg(arg: PNode; p: PDecl; formal: PType);
 var
   kind: string;
@@ -8930,7 +9120,17 @@ var
   n: PNode;
   why: string;
   ofT, savedTarget: PType;
+  la: PDecl;
 begin
+  la := nil;
+  if arg^.kind = nkAddrOf then { a lambda: its types }
+  begin
+    la := arg^.addrLambda;
+    completeLambda(arg, formal);
+    if la <> nil then
+      if la^.lambdaBad then
+        exit;
+  end;
   if formal^.routineOfObject then { @obj.M, or a method pointer }
   begin
     ofT := checkValueFor(formal, arg);
@@ -9072,9 +9272,15 @@ begin
   if (cdeclConv <> formal^.routineCDecl) or
      not congruent(formal^.routineParams, formal^.routineResult, params, res) then
   begin
-    ms('''');
-    maN(n^.ref.spelling);
-    ma(''' does not match the heading of parameter ''');
+    if la <> nil then
+      ms('this lambda')
+    else
+    begin
+      ms('''');
+      maN(n^.ref.spelling);
+      ma('''');
+    end;
+    ma(' does not match the heading of parameter ''');
     maN(p^.ident.spelling);
     ma(''' (');
     maT(formal);
