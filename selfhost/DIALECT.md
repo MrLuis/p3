@@ -1,7 +1,7 @@
 # The selfhost dialect
 
 This is the exact Pascal subset that the self-hosted compiler (`selfhost/`) may
-be written in. It is milestone S0 of [SELFHOST.md](../SELFHOST.md).
+be written in. It is milestone S0 of [SELFHOST.md](../docs/SELFHOST.md).
 
 **The rule:** every source file must compile and behave the same under both
 compilers below. Anything not listed here is not allowed.
