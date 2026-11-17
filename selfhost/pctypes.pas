@@ -58,6 +58,9 @@ function shortStringType(maxLen: longint): PType;
 function ansiStringType: PType;
 function openArrayType(element: PType): PType;
 function dynArrayType(element: PType): PType;
+{ async T (result nil: async), one for each; TCancelToken }
+function taskType(result_: PType): PType;
+function tokenType: PType;
 { The type of a method pointer: procedure ... of object. }
 function newMethodPointerType(const params: TPtrList; result_: PType; cdecl_: boolean): PType;
 
@@ -141,6 +144,8 @@ var
   setTypes, stringLitTypes, shortStringTypes: TIntMap;
   theAnsiString: PType;
   openArrayTypes, dynArrayTypes: TPtrList; { one for each element type }
+  taskTypes: TPtrList; { one for each result type }
+  theToken: PType;
 
 function newType(kind: TTypeKind): PType;
 var
@@ -343,6 +348,8 @@ begin
   theAnsiString := newType(tyAnsiString);
   listInit(openArrayTypes);
   listInit(dynArrayTypes);
+  listInit(taskTypes);
+  theToken := nil;
   tyErrorT := newType(tyError);
   tyIntegerT := newIntegerType(32, true, 'integer');
   tyInt64T := newIntegerType(64, true, 'int64');
@@ -437,6 +444,30 @@ begin
   t^.dynElement := element;
   listAdd(dynArrayTypes, t);
   dynArrayType := t;
+end;
+
+function taskType(result_: PType): PType;
+var
+  i: longint;
+  t: PType;
+begin
+  for i := 0 to taskTypes.count - 1 do
+  begin
+    t := PType(listGet(taskTypes, i));
+    if t^.taskResult = result_ then
+      exit(t);
+  end;
+  t := newType(tyTask);
+  t^.taskResult := result_;
+  listAdd(taskTypes, t);
+  taskType := t;
+end;
+
+function tokenType: PType;
+begin
+  if theToken = nil then
+    theToken := newType(tyToken);
+  tokenType := theToken;
 end;
 
 function openArrayType(element: PType): PType;
@@ -581,7 +612,8 @@ function isValidResultType(t: PType): boolean;
 begin
   isValidResultType := isSimple(t) or
                        (t^.kind in [tyPointer, tyClass, tyClassRef, tyInterface, tyAnsiString,
-                                    tyDynArray]) or isClosureType(t);
+                                    tyDynArray]) or isClosureType(t) or
+                       (t^.kind in [tyTask, tyToken]);
 end;
 
 function isClosureType(t: PType): boolean;
@@ -767,6 +799,7 @@ begin
     tyAnsiString: isManaged := true;
     tyOpenArray: isManaged := isManaged(t^.openElement);
     tyDynArray: isManaged := true;
+    tyTask, tyToken: isManaged := true;
     tyRoutine: isManaged := t^.routineReference;
     tyArray: isManaged := isManaged(t^.elementType);
     tyRecord:
@@ -999,6 +1032,15 @@ begin
     tyBoolean: bufAdd(b, 'boolean');
     tyChar: bufAdd(b, 'char');
     tyWideChar: bufAdd(b, 'widechar');
+    tyTask:
+      if t^.taskResult <> nil then
+      begin
+        bufAdd(b, 'async ');
+        bufAddTypeName(b, t^.taskResult);
+      end
+      else
+        bufAdd(b, 'async');
+    tyToken: bufAdd(b, 'TCancelToken');
     tyStringLit: bufAdd(b, 'string of length ' + intToStr(t^.strLength));
     tyEnum:
       begin

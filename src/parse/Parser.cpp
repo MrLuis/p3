@@ -3387,8 +3387,11 @@ Stmt *Parser::parseAsyncStatement() {
   if (!LangOpts.ObjKeywords)
     return nullptr;
   SourceLocation Start = Tok.getLocation();
-  if (startsAwaitExpr() || startsSpawnExpr()) {
-    Expr *E = isIdentifierNamed("await") ? parseAwaitExpr() : parseSpawnExpr();
+  bool PoolRun = isAsyncWord("pool") && peekToken().is(tok::period);
+  if (startsAwaitExpr() || startsSpawnExpr() || PoolRun) { // (Pool.Run(f): parseFactor)
+    Expr *E = PoolRun                       ? parseFactor()
+              : isIdentifierNamed("await") ? parseAwaitExpr()
+                                           : parseSpawnExpr();
     if (!E) {
       skipUntil({tok::semi, tok::kw_end});
       return Ctx.create<EmptyStmt>(Start);

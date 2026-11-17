@@ -367,6 +367,14 @@ begin
         lineName('NamedTypeSpec ''', ts^.tname.name);
         loc(ts^.b);
       end;
+    tsAsync:
+      begin
+        line('AsyncTypeSpec');
+        loc(ts^.b);
+        indent := indent + 2;
+        printTypeSpec(ts^.asyncInner);
+        indent := indent - 2;
+      end;
     tsSpecialize:
       begin
         lineName('SpecializeTypeSpec ''', ts^.spName.name);
@@ -1262,6 +1270,35 @@ begin
           visitExpr(s^.vdInit);
         indent := indent - 2;
       end;
+    nkExprStmt:
+      begin
+        line('ExprStmt');
+        loc(s^.b);
+        indent := indent + 2;
+        visitExpr(s^.exprStmtExpr);
+        indent := indent - 2;
+      end;
+    nkScope:
+      begin
+        line('ScopeStmt');
+        loc(s^.b);
+        indent := indent + 2;
+        if s^.scopeToken <> nil then
+          visitExpr(s^.scopeToken);
+        for i := 0 to s^.scopeBody.count - 1 do
+          visitStmt(PNode(listGet(s^.scopeBody, i)));
+        indent := indent - 2;
+      end;
+    nkDetached:
+      begin
+        line('DetachedStmt');
+        loc(s^.b);
+        indent := indent + 2;
+        if s^.detHandler <> nil then
+          visitExpr(s^.detHandler);
+        visitExpr(s^.detCall);
+        indent := indent - 2;
+      end;
     nkDestructure:
       begin
         if s^.dsVars.count = 0 then
@@ -1460,6 +1497,25 @@ begin
         visitExpr(e^.ceCond);
         visitExpr(e^.ceThen);
         visitExpr(e^.ceElse);
+        indent := indent - 2;
+      end;
+    nkAwait:
+      begin
+        line('AwaitExpr');
+        endExpr(e);
+        indent := indent + 2;
+        visitExpr(e^.awaitOperand);
+        indent := indent - 2;
+      end;
+    nkSpawn:
+      begin
+        if e^.spawnPool then
+          line('SpawnExpr pool')
+        else
+          line('SpawnExpr');
+        endExpr(e);
+        indent := indent + 2;
+        visitExpr(e^.spawnCall);
         indent := indent - 2;
       end;
     nkTuple:

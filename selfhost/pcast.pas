@@ -48,11 +48,12 @@ type
     nkIntegerLit, nkRealLit, nkStringLit, nkNameRef, nkParen, nkUnary,
     nkBinary, nkCall, nkFormatted, nkIndex, nkField, nkNil, nkDeref,
     nkSetCtor, nkAddrOf, nkAggregate, nkIndirectCall, nkInherited, nkMove,
-    nkTemplate, nkTuple, nkNamedArg, nkCondExpr,
+    nkTemplate, nkTuple, nkNamedArg, nkCondExpr, nkAwait, nkSpawn,
     { statements }
     nkEmpty, nkCompound, nkProcCall, nkAssign, nkIf, nkWhile, nkRepeat,
     nkFor, nkCase, nkWith, nkLabeled, nkGoto, nkIndirectCallStmt,
-    nkTry, nkRaise, nkForIn, nkVarDecl, nkDestructure);
+    nkTry, nkRaise, nkForIn, nkVarDecl, nkDestructure, nkExprStmt, nkScope,
+    nkDetached);
 
   PNode = ^TNode;
   PDecl = ^TDecl;
@@ -69,7 +70,10 @@ type
                { an untyped parameter's (Turbo/FPC  var x;  const x) }
                tyUntyped,
                { widechar (Turbo/FPC): a 16-bit character code }
-               tyWideChar);
+               tyWideChar,
+               { async T (objfpc): a counted reference to a task;
+                 TCancelToken: a counted cancellation token }
+               tyTask, tyToken);
 
   TType = record
     kind: TTypeKind;
@@ -107,6 +111,7 @@ type
       tyArrayOfConst: (aocElement: PType); { TVarRec }
       tyOpenArray: (openElement: PType);
       tyDynArray: (dynElement: PType);
+      tyTask: (taskResult: PType); { nil: async (no value) }
       { a class (objfpc): its parent (nil only for TObject), own members in
         source order, all fields (the ancestors' first), the virtual methods
         by slot, the program or unit declaring it; a forward declaration
@@ -216,6 +221,15 @@ type
         tmp, the value }
       nkCondExpr: (ceCond, ceThen, ceElse: PNode; ceLong: boolean;
                    ceLowered, ceResult: PNode);
+      { await e; spawn call (spawnPool: Pool.Run(call)) }
+      nkAwait: (awaitOperand: PNode);
+      nkSpawn: (spawnCall: PNode; spawnPool: boolean);
+      { an expression used for its effect (await e; spawn ...;) }
+      nkExprStmt: (exprStmtExpr: PNode);
+      { scope [token] body end (scopeToken nil: none) }
+      nkScope: (scopeToken: PNode; scopeBody: TPtrList);
+      { detached [(handler)] call }
+      nkDetached: (detHandler, detCall: PNode);
       { index: base[index]; field: base.fieldName; fieldDecl is a field,
         or (objfpc) a method or property of a class }
       { objfpc: an array property (obj.P[i, j], P[i] or obj[i], the default
@@ -351,7 +365,7 @@ type
                    tsClassRef, tsInterface, tsHelper,
                    tsUntyped, { an untyped parameter's (absent) type }
                    tsArrayOfConst, tsOpenArray, tsDynArray, tsTuple,
-                   tsSpecialize);
+                   tsSpecialize, tsAsync);
 
   PVariantPart = ^TVariantPart;
 
@@ -378,6 +392,7 @@ type
       { specialize spName<spArgs> (objfpc): the type made of the generic
         type spName for these type arguments (of PTypeSpec) }
       tsSpecialize: (spName: TIdent; spArgs: TPtrList);
+      tsAsync: (asyncInner: PTypeSpec); { async T; nil: async }
       tsSubrange: (lo, hi: PNode);
       tsArray: (indexes: TPtrList; element: PTypeSpec; arrPacked: boolean;
                 arrBitPacked: boolean);
@@ -478,6 +493,10 @@ type
     cgLocal: pointer;
     { a cdecl routine's C entry (cthunk, a PIRFunc), or nil }
     cgThunk: pointer;
+    { an async routine's task: its arguments' record (a PIRType), its
+      entry (R.task) and the function finalizing its arguments
+      (R.taskfini, nil when nothing is counted) (PIRFuncs) }
+    cgArgsTy, cgTaskEntry, cgTaskFini: pointer;
     { separate units: the external symbol of an interface variable or
       routine (nil: none), and whether its unit was compiled separately }
     cgExport: PName;
@@ -596,6 +615,12 @@ type
                     keeps those that are variables or parameters of the
                     routines around it }
                   isCopyAll: boolean;
+                  { an async routine (result async T / async): its calls are
+                    tasks (asyncType); its body is a function's returning T
+                    (resultType) or a procedure's. isSpawnBlock: the hidden
+                    async procedure of spawn begin ... end }
+                  asyncType: PType;
+                  isSpawnBlock: boolean;
                   isVirtual, isOverride, isAbstract, isClassMethod: boolean;
                   { overloading (objfpc): the overload directive, the next
                     routine of the name in the same scope or class and this

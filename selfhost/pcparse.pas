@@ -388,6 +388,15 @@ begin
   isIdentifierNamed := (tok.kind = tkIdentifier) and nameEquals(tok.name, s);
 end;
 
+{ await, spawn, scope, detached and async are not reserved: each is that
+  word where it starts its construct and no declaration of it is visible. }
+function isAsyncWord(const w: string): boolean;
+begin
+  isAsyncWord := (mode = lmObjFPC) and isIdentifierNamed(w) and
+                 not lexIsDeclared(lx, intern(w));
+end;
+
+
 { objfpc: generic function F<T, U>(...): ...; (a template) }
 function startsGeneric: boolean;
 begin
@@ -1327,6 +1336,7 @@ begin
 end;
 
 function parseTypeIdentifier(const context: string): PTypeSpec; forward;
+function parseAsyncType: PTypeSpec; forward;
 
 { routineDecl = ("procedure" name [params] | "function" name [params]
                 [":" typeIdent]) ";" ( "forward" | block ) ";" .
@@ -1351,7 +1361,7 @@ var
   hm: PName;
   cc: longint;
   ccw: string;
-  isFunction, hasParamList, isExternal, overloadDir, inlineDir: boolean;
+  isFunction, hasParamList, isExternal, overloadDir, inlineDir, asyncProc: boolean;
   isVarArgs, resultName: boolean;
   inlineLoc, forwardLoc, varArgsLoc, staticLoc: TLoc;
   libraryName: PName;
@@ -1438,9 +1448,15 @@ begin
   resultSpec := nil;
   if tryConsume(tkColon) then
   begin
-    if not isFunction then
+    { procedure P: async (objfpc): an async procedure (a task, no value) }
+    asyncProc := false;
+    if not isFunction and isAsyncWord('async') then
+      asyncProc := not (peekKind in [tkIdentifier, tkKwString]);
+    if not isFunction and not asyncProc then
       diagError(prevTokEnd, 'a ' + kind + ' cannot have a result type');
     resultSpec := parseTypeIdentifier('function result type');
+    if asyncProc then
+      isFunction := true; { (Sema: its body is a procedure's) }
   end;
 
   if not expect(tkSemi, 'after ' + kind + ' heading') then
@@ -1641,7 +1657,7 @@ var
   hf: longint;
   hm: PName;
   isFunction, hasParamList, isVirtual, isOverride, isAbstract, overloadDir: boolean;
-  isStatic, inlineDir: boolean;
+  isStatic, inlineDir, asyncProc: boolean;
   inlineLoc: TLoc;
   mk: TMethodKind;
   kind, wd: string;
@@ -1669,11 +1685,17 @@ begin
   resultSpec := nil;
   if tryConsume(tkColon) then
   begin
-    if not isFunction then
+    { procedure P: async (objfpc): an async procedure (a task, no value) }
+    asyncProc := false;
+    if not isFunction and isAsyncWord('async') then
+      asyncProc := not (peekKind in [tkIdentifier, tkKwString]);
+    if not isFunction and not asyncProc then
       diagError(prevTokEnd, 'a ' + kind + ' cannot have a result type');
     resultSpec := parseTypeIdentifier('function result type');
     if resultSpec = nil then
       exit;
+    if asyncProc then
+      isFunction := true; { (Sema: its body is a procedure's) }
   end;
   if not expect(tkSemi, 'after ' + kind + ' heading') then
     exit;
@@ -3327,6 +3349,8 @@ begin
       diagError(start, 'a record helper cannot be packed');
     exit(ts);
   end;
+  if not isPacked and isAsyncWord('async') then
+    exit(parseAsyncType);
   { reference to procedure / function (objfpc; `reference` is not
     reserved): a closure, which may outlive the routine it is made in }
   isReference := false;
@@ -3501,12 +3525,36 @@ begin
 end;
 
 { typeIdent (ISO requires these for parameters and function results) }
+{ async [type] (objfpc; `async` is not reserved): a task type. }
+function parseAsyncType: PTypeSpec;
+var
+  start: TLoc;
+  inner, ts: PTypeSpec;
+begin
+  parseAsyncType := nil;
+  start := consumeToken; { async }
+  inner := nil;
+  if ((tok.kind in [tkIdentifier, tkKwString]) or
+      ((tok.kind = tkLParen) and (mode = lmObjFPC))) and { (a tuple type) }
+     not ((tok.kind = tkIdentifier) and isIdentifierNamed('async')) then
+  begin
+    inner := parseTypeIdentifier('the result type of a task');
+    if inner = nil then
+      exit;
+  end;
+  ts := newTypeSpec(tsAsync, start, prevTokEnd);
+  ts^.asyncInner := inner;
+  parseAsyncType := ts;
+end;
+
 function parseTypeIdentifier(const context: string): PTypeSpec;
 var
   ts: PTypeSpec;
   arr: TToken;
 begin
   parseTypeIdentifier := nil;
+  if isAsyncWord('async') then
+    exit(parseAsyncType);
   if tok.kind = tkKwString then
   begin
     { Turbo/FPC: string names a type here }
@@ -4520,6 +4568,346 @@ begin
   parseVarDeclStmt := n;
 end;
 
+{ --- async (objfpc) --- }
+
+function startsAwaitExpr: boolean;
+begin
+  startsAwaitExpr := isAsyncWord('await') and
+                     (peekKind in [tkIdentifier, tkLParen, tkKwInherited]);
+end;
+
+function startsSpawnExpr: boolean;
+begin
+  startsSpawnExpr := isAsyncWord('spawn') and
+                     (peekKind in [tkIdentifier, tkKwBegin, tkLParen]);
+end;
+
+{ await e: e a factor (await F(x) + 1 is (await F(x)) + 1). }
+function parseAwaitExpr: PNode;
+var
+  start: TLoc;
+  op, n: PNode;
+begin
+  parseAwaitExpr := nil;
+  start := consumeToken; { await }
+  op := parseFactor;
+  if op = nil then
+    exit;
+  n := newNode(nkAwait, start, prevTokEnd);
+  n^.awaitOperand := op;
+  parseAwaitExpr := n;
+end;
+
+{ spawn F(args) | spawn begin ... end: the block becomes a hidden async
+  procedure ($spawnN, nested here: it uses this routine's variables, which
+  the scope it is spawned in keeps alive), and the expression its call. }
+function parseSpawnExpr: PNode;
+var
+  start: TLoc;
+  call, body, n: PNode;
+  name: TIdent;
+  hiddenMark, i: longint;
+  decls, noParams, noArgs: TPtrList;
+  r: PDecl;
+  rs: PTypeSpec;
+begin
+  parseSpawnExpr := nil;
+  start := consumeToken; { spawn }
+  if tok.kind <> tkKwBegin then
+  begin
+    call := parseFactor;
+    if call = nil then
+      exit;
+    n := newNode(nkSpawn, start, prevTokEnd);
+    n^.spawnCall := call;
+    n^.spawnPool := false;
+    exit(n);
+  end;
+  hiddenLambdas := hiddenLambdas + 1;
+  name.name := intern('$spawn' + intToStr(hiddenLambdas));
+  name.spelling := name.name;
+  name.loc := start;
+  hiddenMark := hiddenTypeDecls.count;
+  body := parseCompoundStmt;
+  listInit(decls);
+  for i := hiddenMark to hiddenTypeDecls.count - 1 do
+    listAdd(decls, listGet(hiddenTypeDecls, i));
+  hiddenTypeDecls.count := hiddenMark;
+  listInit(noParams);
+  rs := newTypeSpec(tsAsync, start, start);
+  rs^.asyncInner := nil;
+  r := newRoutine(start, name, true, noParams, false, rs, newBlock(decls, body), false);
+  r^.isSpawnBlock := true;
+  listAdd(hiddenTypeDecls, r);
+  listInit(noArgs);
+  call := newNode(nkCall, start, prevTokEnd);
+  call^.callee := name;
+  call^.args := noArgs;
+  call^.callDecl := r; { (declared by Sema when it completes it) }
+  n := newNode(nkSpawn, start, prevTokEnd);
+  n^.spawnCall := call;
+  n^.spawnPool := false;
+  parseSpawnExpr := n;
+end;
+
+{ scope [token] statements end. A token is an expression; without one the
+  first statement starts with a keyword (or the block is empty). }
+function parseScopeStmt: PNode;
+var
+  loc, endLoc: TLoc;
+  token, n: PNode;
+  body: TPtrList;
+  statementWord: boolean;
+begin
+  loc := consumeToken; { scope }
+  token := nil;
+  statementWord := (tok.kind = tkIdentifier) and
+                   (isAsyncWord('await') or isAsyncWord('spawn') or isAsyncWord('scope') or
+                    isAsyncWord('detached') or isIdentifierNamed('checked') or
+                    isIdentifierNamed('unchecked'));
+  if ((tok.kind = tkIdentifier) and not statementWord) or (tok.kind = tkKwNil) then
+  begin
+    token := parseExpression;
+    if token = nil then
+    begin
+      skipUntil([tkKwEnd]);
+      tryConsume(tkKwEnd);
+      exit(emptyStmt(loc));
+    end;
+  end;
+  listInit(body);
+  parseStatementSequence(body, tkKwEnd, loc, 'scope');
+  endLoc := tokenEnd(tok);
+  tryConsume(tkKwEnd);
+  n := newNode(nkScope, loc, endLoc);
+  n^.scopeToken := token;
+  n^.scopeBody := body;
+  parseScopeStmt := n;
+end;
+
+{ detached [(handler)] call }
+function parseDetachedStmt: PNode;
+var
+  loc: TLoc;
+  handler, call, n: PNode;
+begin
+  loc := consumeToken; { detached }
+  handler := nil;
+  if tryConsume(tkLParen) then
+  begin
+    handler := parseExpression;
+    if handler = nil then
+    begin
+      skipUntil([tkSemi, tkKwEnd]);
+      exit(emptyStmt(loc));
+    end;
+    if not expect(tkRParen, 'after the handler of ''detached''') then
+    begin
+      skipUntil([tkSemi, tkKwEnd]);
+      exit(emptyStmt(loc));
+    end;
+  end;
+  call := parseFactor;
+  if call = nil then
+  begin
+    skipUntil([tkSemi, tkKwEnd]);
+    exit(emptyStmt(loc));
+  end;
+  n := newNode(nkDetached, loc, prevTokEnd);
+  n^.detHandler := handler;
+  n^.detCall := call;
+  parseDetachedStmt := n;
+end;
+
+{ A statement of the async words, or nil if the identifier starts none. }
+function parseAsyncStatement: PNode;
+var
+  start: TLoc;
+  e, n: PNode;
+  poolRun: boolean;
+begin
+  parseAsyncStatement := nil;
+  if mode <> lmObjFPC then
+    exit;
+  start := tok.loc;
+  poolRun := isAsyncWord('pool') and (peekKind = tkPeriod);
+  if startsAwaitExpr or startsSpawnExpr or poolRun then { (Pool.Run(f): parseFactor) }
+  begin
+    if poolRun then
+      e := parseFactor
+    else if isIdentifierNamed('await') then
+      e := parseAwaitExpr
+    else
+      e := parseSpawnExpr;
+    if e = nil then
+    begin
+      skipUntil([tkSemi, tkKwEnd]);
+      exit(emptyStmt(start));
+    end;
+    n := newNode(nkExprStmt, start, prevTokEnd);
+    n^.exprStmtExpr := e;
+    exit(n);
+  end;
+  if isAsyncWord('scope') and
+     (peekKind in [tkIdentifier, tkKwNil, tkKwBegin, tkKwVar, tkKwConst, tkKwFor,
+                   tkKwWhile, tkKwRepeat, tkKwIf, tkKwCase, tkKwWith, tkKwTry,
+                   tkKwRaise, tkKwEnd]) then
+    exit(parseScopeStmt);
+  if isAsyncWord('detached') and (peekKind in [tkIdentifier, tkLParen]) then
+    exit(parseDetachedStmt);
+end;
+
+{ for await [var] x in e do s: reads channel e until it is closed:
+    begin
+      var $chN := e;
+      while true do begin
+        var ($vN, $okN) := await $chN.TryReceive;
+        if not $okN then break;
+        [var] x := $vN;
+        s
+      end
+    end }
+function parseForAwait(forLoc: TLoc): PNode;
+var
+  declares: boolean;
+  x, ch, v, ok, tryId, breakId, trueId: TIdent;
+  source, body, chDecl, receive, field, take, stop, setX, loop, whileN, brk,
+    notN, n: PNode;
+  k: longint;
+  vars, stmts, noArgs, noTargets, noTypeArgs: TPtrList;
+
+  function fail: PNode;
+  begin
+    skipUntil([tkSemi, tkKwEnd]);
+    fail := emptyStmt(forLoc);
+  end;
+
+  function hidden(const base: string): TIdent;
+  var
+    id: TIdent;
+  begin
+    id.name := intern(base + intToStr(k));
+    id.spelling := id.name;
+    id.loc := forLoc;
+    hidden := id;
+  end;
+
+  function inlineVar(const id: TIdent): PDecl;
+  var
+    d: PDecl;
+  begin
+    d := newVar(id, nil, vkVariable);
+    d^.isInlineVar := true;
+    inlineVar := d;
+  end;
+
+  function varDeclStmt(const id: TIdent; init: PNode): PNode;
+  var
+    m: PNode;
+    vs: TPtrList;
+  begin
+    listInit(vs);
+    listAdd(vs, inlineVar(id));
+    m := newNode(nkVarDecl, forLoc, prevTokEnd);
+    m^.vdVars := vs;
+    m^.vdInit := init;
+    m^.vdAssignLoc := forLoc;
+    m^.vdLong := lx.longStrings;
+    m^.vdAssign := nil;
+    m^.vdConst := false;
+    varDeclStmt := m;
+  end;
+
+begin
+  consumeToken; { await }
+  declares := tryConsume(tkKwVar);
+  if not expectIdentifier(x, 'control variable after ''for await''') then
+    exit(fail);
+  if declares then
+    declareName(x);
+  if not expect(tkKwIn, 'after the variable of ''for await''') then
+    exit(fail);
+  source := parseExpression;
+  if source = nil then
+    exit(fail);
+  if not expect(tkKwDo, 'after the channel of ''for await''') then
+    exit(fail);
+  body := parseStatement;
+  hiddenLambdas := hiddenLambdas + 1;
+  k := hiddenLambdas;
+  ch := hidden('$ch');
+  v := hidden('$v');
+  ok := hidden('$ok');
+  chDecl := varDeclStmt(ch, source);
+  tryId.name := intern('tryreceive');
+  tryId.spelling := intern('TryReceive');
+  tryId.loc := forLoc;
+  field := newNode(nkField, forLoc, prevTokEnd);
+  field^.base := nameRef(ch);
+  field^.fieldName := tryId;
+  receive := newNode(nkAwait, forLoc, prevTokEnd);
+  receive^.awaitOperand := field;
+  listInit(vars);
+  listAdd(vars, inlineVar(v));
+  listAdd(vars, inlineVar(ok));
+  listInit(noTargets);
+  take := newNode(nkDestructure, forLoc, prevTokEnd);
+  take^.dsTargets := noTargets;
+  take^.dsVars := vars;
+  take^.dsValue := receive;
+  take^.dsAssignLoc := forLoc;
+  take^.dsLong := lx.longStrings;
+  take^.dsInit := nil;
+  listInit(take^.dsAssigns);
+  breakId.name := intern('break');
+  breakId.spelling := intern('break');
+  breakId.loc := forLoc;
+  listInit(noArgs);
+  listInit(noTypeArgs);
+  brk := newNode(nkProcCall, forLoc, prevTokEnd);
+  brk^.callee := breakId;
+  brk^.args := noArgs;
+  brk^.hasParens := false;
+  brk^.typeArgs := noTypeArgs;
+  notN := newNode(nkUnary, forLoc, prevTokEnd);
+  notN^.uop := uoNot;
+  notN^.operand := nameRef(ok);
+  stop := newNode(nkIf, forLoc, prevTokEnd);
+  stop^.cond := notN;
+  stop^.thenStmt := brk;
+  stop^.elseStmt := nil;
+  if declares then
+    setX := varDeclStmt(x, nameRef(v))
+  else
+  begin
+    setX := newNode(nkAssign, forLoc, prevTokEnd);
+    setX^.target := nameRef(x);
+    setX^.assignLoc := forLoc;
+    setX^.value := nameRef(v);
+    setX^.assignCompound := false;
+  end;
+  listInit(stmts);
+  listAdd(stmts, take);
+  listAdd(stmts, stop);
+  listAdd(stmts, setX);
+  listAdd(stmts, body);
+  loop := newNode(nkCompound, forLoc, prevTokEnd);
+  loop^.stmts := stmts;
+  trueId.name := intern('true');
+  trueId.spelling := intern('true');
+  trueId.loc := forLoc;
+  whileN := newNode(nkWhile, forLoc, prevTokEnd);
+  whileN^.cond := nameRef(trueId);
+  whileN^.thenStmt := loop;
+  whileN^.elseStmt := nil;
+  listInit(stmts);
+  listAdd(stmts, chDecl);
+  listAdd(stmts, whileN);
+  n := newNode(nkCompound, forLoc, prevTokEnd);
+  n^.stmts := stmts;
+  parseForAwait := n;
+end;
+
 { checked statements end / unchecked statements end (objfpc; the words are
   not reserved): a block whose integer arithmetic is checked for overflow
   (an EIntOverflow exception) or not (it wraps, and so do integer values
@@ -4633,13 +5021,20 @@ begin
   n := nil;
   case tok.kind of
     tkIdentifier:
-      if startsCheckedBlock then
       begin
         stmtTokens := savedStmtToks; { (not a designator's) }
-        n := parseCheckedBlock;
-      end
-      else
-        n := parseAssignmentOrCall;
+        n := parseAsyncStatement;
+        if n = nil then
+        begin
+          if startsCheckedBlock then
+            n := parseCheckedBlock
+          else
+          begin
+            stmtTokens := @toks;
+            n := parseAssignmentOrCall;
+          end;
+        end;
+      end;
     tkLParen: { Turbo/FPC: (p + 1)^ := x; (obj as TFoo).Show; }
       if mode <> lmISO then
       begin
@@ -5190,6 +5585,8 @@ var
 
 begin
   forLoc := consumeToken;
+  if isAsyncWord('await') and (peekKind in [tkKwVar, tkIdentifier]) then
+    exit(parseForAwait(forLoc));
   { objfpc: for var x [: T] ..., a variable of the loop }
   declares := (mode = lmObjFPC) and (tok.kind = tkKwVar);
   if declares then
@@ -6130,6 +6527,9 @@ end;
          | "(" expression ")" | "not" factor . }
 function parseFactor: PNode;
 var
+  poolId, member: TIdent;
+  poolStart: TLoc;
+  poolN: PNode;
   hid: TIdent;
   hts: PTypeSpec;
   hd: PDecl;
@@ -6174,6 +6574,37 @@ begin
       begin
         if startsCheckedExpr then
           exit(parseCheckedExpr);
+        if startsAwaitExpr then
+          exit(parseAwaitExpr);
+        if startsSpawnExpr then
+          exit(parseSpawnExpr);
+        { Pool.Run(F(args)) (objfpc; Pool not declared): F's task on the pool }
+        if isAsyncWord('pool') and (peekKind = tkPeriod) then
+        begin
+          poolStart := tok.loc;
+          poolId := makeIdentifier(tok);
+          consumeToken;
+          consumeToken; { '.' }
+          if not expectIdentifier(member, 'member name after ''.''') then
+            exit;
+          if (member.name = intern('run')) and (tok.kind = tkLParen) then
+          begin
+            consumeToken;
+            n := parseExpression;
+            if n = nil then
+              exit;
+            if not expect(tkRParen, 'after the call Pool.Run runs') then
+              exit;
+            poolN := newNode(nkSpawn, poolStart, prevTokEnd);
+            poolN^.spawnCall := n;
+            poolN^.spawnPool := true;
+            exit(poolN);
+          end;
+          poolN := newNode(nkField, poolStart, prevTokEnd);
+          poolN^.base := nameRef(poolId);
+          poolN^.fieldName := member;
+          exit(parseSelectors(poolN));
+        end;
         if startsSpecialize then { specialize F<T>(args) }
         begin
           lparen := tok.loc;

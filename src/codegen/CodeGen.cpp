@@ -2982,6 +2982,8 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
         Functions[R] = llvm::Function::Create(
             routineFnType(R), llvm::Function::ExternalLinkage, ExportNames[R], M);
         declareCThunk(R);
+        if (R->isAsync())
+          declareAsync(R, ExportNames[R], /*External=*/true);
         continue;
       }
       declareRoutine(R);
@@ -3071,10 +3073,13 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
       return;
     }
     for (Decl *M : C->getMembers())
-      if (auto *R = llvm::dyn_cast<RoutineDecl>(M); R && !R->isAbstract())
+      if (auto *R = llvm::dyn_cast<RoutineDecl>(M); R && !R->isAbstract()) {
         Functions[R] = llvm::Function::Create(routineFnType(R),
                                               llvm::Function::ExternalLinkage,
                                               ExportNames[R], this->M);
+        if (R->isAsync())
+          declareAsync(R, ExportNames[R], /*External=*/true);
+      }
   }
 
   /// A runtime function used only by programs with classes.
@@ -3241,7 +3246,8 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
     Functions[R] = F;
     declareCThunk(R);
     if (R->isAsync())
-      declareAsync(R, Name);
+      declareAsync(R, Export == ExportNames.end() ? Name : Export->second,
+                   Export != ExportNames.end());
     RoutinesToEmit.push_back(R);
     if (DIB)
       // File scope even for nested routines: lexical nesting would make
@@ -3326,7 +3332,11 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
   llvm::DenseMap<RoutineDecl *, AsyncParts> Asyncs;
   std::vector<RoutineDecl *> AsyncsToEmit;
 
-  void declareAsync(RoutineDecl *R, const std::string &Name) {
+  /// (Name: R's function's; External: R is exported or imported, and so
+  /// are its task's functions.)
+  void declareAsync(RoutineDecl *R, const std::string &Name, bool External) {
+    auto Linkage = External ? llvm::Function::ExternalLinkage
+                            : llvm::Function::InternalLinkage;
     llvm::SmallVector<llvm::Type *, 8> Slots{B.getPtrTy()}; // the link
     if (R->hasSelf())
       Slots.push_back(B.getPtrTy());
@@ -3339,14 +3349,14 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
     A.ArgsTy = llvm::StructType::create(M.getContext(), Slots,
                                         "args." + Name.substr(4));
     A.Entry = llvm::Function::Create(
-        llvm::FunctionType::get(B.getVoidTy(), {B.getPtrTy()}, false),
-        llvm::Function::InternalLinkage, Name + ".task", M);
+        llvm::FunctionType::get(B.getVoidTy(), {B.getPtrTy()}, false), Linkage,
+        Name + ".task", M);
     A.Entry->getArg(0)->setName("task");
     A.Fini = nullptr;
     if (Counted) {
       A.Fini = llvm::Function::Create(
-          llvm::FunctionType::get(B.getVoidTy(), {B.getPtrTy()}, false),
-          llvm::Function::InternalLinkage, Name + ".taskfini", M);
+          llvm::FunctionType::get(B.getVoidTy(), {B.getPtrTy()}, false), Linkage,
+          Name + ".taskfini", M);
       A.Fini->getArg(0)->setName("args");
     }
     Asyncs[R] = A;

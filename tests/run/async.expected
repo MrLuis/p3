@@ -1,0 +1,23 @@
+42
+hello, world
+42
+4 8 abab
+caught in task: task failed
+caught in main: task failed
+main: starting Eager
+eager: before its first wait
+main: Eager is waiting
+eager: after
+main: Eager done
+5 12
+TCounter.x
+all: 30
+shared: 11
+scope: Exception: boom after 20
+cancelled: TRUE
+30 10 20 
+first: 1
+pool failures: 0
+detached failed: boom after 10
+lambda handler: boom after 30
+done

@@ -1,0 +1,38 @@
+; async/await (objfpc): what an async routine may be (its task may outlive
+; its caller: no var/out/open parameters, not nested, not virtual, not a
+; constructor or a record's method, not external), and where await, spawn,
+; scope, detached, Wait, WhenAll, WhenAny and Pool.Run apply. A task never
+; waited for is a dangling task (a warning).
+; RUN: not %pcc --mode=objfpc -ferror-limit=0 -c %S/Inputs/async/errors.pas -o %t.o 2>&1 | FileCheck %s
+; CHECK: errors.pas:22:20: error: parameter 'x' of async routine 'ByRef' cannot be a 'var' parameter: its task may outlive the caller's variable; pass a value
+; CHECK: errors.pas:22:38: error: parameter 'a' of async routine 'ByRef' cannot be an open array parameter: its task may outlive the caller's variable; pass a value
+; CHECK: errors.pas:26:10: error: an external routine cannot be async
+; CHECK: errors.pas:28:17: error: the result of a task cannot be 'text'
+; CHECK: errors.pas:33:12: error: async routine 'Inner' must be declared at program or unit level, or be a method (its task may outlive the routine around it)
+; CHECK: errors.pas:5:14: error: an async method cannot be virtual (not supported yet)
+; CHECK: errors.pas:6:17: error: a constructor or a destructor cannot be async
+; CHECK: errors.pas:10:14: error: a record's or helper's method cannot be async (its Self is passed by reference)
+; CHECK: errors.pas:57:8: error: 'await' is allowed only in an async routine; elsewhere, Wait(t) waits for a task
+; CHECK: errors.pas:58:3: error: 'spawn' is allowed only inside a 'scope ... end' block, which waits for the tasks it starts; Pool.Run starts one on its own
+; CHECK: errors.pas:59:9: error: the token of a scope must be a TCancelToken, not a value of type 'async integer'
+; CHECK: errors.pas:61:12: error: 'Pool.Run' runs the call of an async routine, not a value of type 'integer'
+; CHECK: errors.pas:62:3: warning: dangling task: the task Pool.Run starts is never awaited; keep it in a variable to await later
+; CHECK: errors.pas:70:8: error: 'await' waits for a task (the call of an async routine), not a value of type 'integer'
+; CHECK: errors.pas:71:8: error: this task has no value (its routine is 'async' without a type)
+; CHECK: errors.pas:72:3: warning: dangling task: 'Work' is never awaited; write 'await Work' to wait for it, keep it in a variable to await later, or 'detached Work' to let it run on its own
+; CHECK: errors.pas:74:11: error: procedure 'Plain' does not return a value
+; CHECK: errors.pas:76:12: error: 'detached' runs the call of an async routine, not a value of type 'integer'
+; CHECK: errors.pas:77:12: error: argument for procedure parameter 'handler' must be the name of a procedure
+; CHECK: errors.pas:78:13: error: 'Wait' waits for a task (the call of an async routine), not a value of type 'integer'
+; CHECK: errors.pas:79:13: error: this task has no value (its routine is 'async' without a type)
+; CHECK: errors.pas:80:16: error: 'WhenAll' takes an array of tasks, not a value of type 'integer'
+; CHECK-NOT: error:
+;
+; The words are not reserved: outside objfpc they are plain names (and the
+; functions do not exist); in objfpc, a declaration keeps one a name.
+; RUN: not %pcc --mode=tp -c %S/Inputs/async/tp.pas -o %t.o 2>&1 | FileCheck --check-prefix=TP %s
+; TP: tp.pas:16:3: error: use of undeclared identifier 'Wait'
+; TP-NOT: error:
+; RUN: %pcc --mode=objfpc %S/Inputs/async/declared.pas -o %t.declared
+; RUN: %t.declared | FileCheck --check-prefix=DECLARED %s
+; DECLARED: 4

@@ -1,0 +1,8 @@
+pipeline: 5050
+queued: 3
+names: ann;bob;cy; (send on a closed channel) (receive from a closed channel)
+many: 500500
+timeout: Operation cancelled FALSE
+FALSE
+TRUE TRUE
+checked: EOperationCancelled

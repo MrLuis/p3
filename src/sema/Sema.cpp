@@ -1752,7 +1752,8 @@ class Checker : public StmtVisitor<Checker>,
     auto *Rec = llvm::dyn_cast<RecordType>(T);
     if (!DeclName.empty() && !T->isError() && !llvm::isa<BuiltinType>(T) &&
         !llvm::isa<SpecializeTypeSpec>(TS) && // (so is a specialization)
-        !(Rec && Rec->isTuple())) // (a tuple type is shared by its uses)
+        !(Rec && Rec->isTuple()) && // (a tuple type is shared by its uses)
+        !T->isTask())               // (and so is a task type)
       T->setDeclName(DeclName);
     TS->setResolved(T);
     return T;
@@ -5247,7 +5248,7 @@ class Checker : public StmtVisitor<Checker>,
       }
     }
     if (Fwd && Fwd->isForward() && !Fwd->getBody() && R->getBody()) {
-      if (Fwd->isFunction() != R->isFunction()) {
+      if ((Fwd->isFunction() || Fwd->isAsync()) != R->isFunction()) {
         Diags.error(Id.Loc,
                     "'" + Id.Spelling + "' was declared forward as a " +
                         Fwd->getKindName(),
@@ -5261,7 +5262,8 @@ class Checker : public StmtVisitor<Checker>,
           P->setType(resolveType(P->getTypeSpec()));
         Type *RT = R->getResultTypeSpec() ? resolveType(R->getResultTypeSpec())
                                           : nullptr;
-        if (!sameSignature(Fwd, R) || (RT && RT != Fwd->getResultType()) ||
+        Type *Declared = Fwd->isAsync() ? Fwd->getAsyncType() : Fwd->getResultType();
+        if (!sameSignature(Fwd, R) || (RT && RT != Declared) ||
             !sameDefaults(Fwd, R)) {
           Diags.error(Id.Loc,
                       "heading of '" + Id.Spelling +
@@ -10982,6 +10984,11 @@ public:
     else
       T = check(E);
     E->setType(T);
+    if (auto *SE = llvm::dyn_cast<SpawnExpr>(E); SE && SE->isPoolRun() && !T->isError())
+      Diags.warning(E->getBeginLoc(),
+                    "dangling task: the task Pool.Run starts is never awaited; "
+                    "keep it in a variable to await later",
+                    {E->getRange()});
   }
 
   void visitScopeStmt(ScopeStmt *S) {
@@ -11075,9 +11082,7 @@ public:
     else if (auto *OT = llvm::dyn_cast<OpenArrayType>(T))
       Elem = OT->getElementType();
     auto *TT = llvm::dyn_cast_or_null<TaskType>(Elem);
-    if (!TT ||
-        (llvm::isa<ArrayType>(T) && llvm::cast<ArrayType>(T)->getIndexType() &&
-         false)) {
+    if (!TT) {
       Diags.error(A->getBeginLoc(),
                   "'" + Callee.Spelling + "' takes an array of tasks, not a "
                   "value of type " + quoted(T),

@@ -740,6 +740,12 @@ begin
     exit;
   end;
   k := d^.builtin;
+  if k = bkWait then { Wait(t); }
+  begin
+    ignored := emitAwait(visitExpr(PNode(listGet(s^.args, 0))),
+                         PNode(listGet(s^.args, 0))^.typ);
+    exit;
+  end;
   case k of
     bkWrite, bkWriteln: emitWrite(s, k = bkWriteln);
     bkRead, bkReadln: emitRead(s, k = bkReadln);
@@ -1759,6 +1765,44 @@ begin
   end;
 end;
 
+procedure visitScopeStmt(s: PNode);
+var
+  t: TTryFinally;
+  token, scope, slot, raised: TV;
+begin
+  if (s^.scopeToken <> nil) and (s^.scopeToken^.typ^.kind <> tyNil) then
+    token := visitExpr(s^.scopeToken)
+  else
+    token := irNull;
+  scope := call1(classRuntime('__pas_scope_enter', 'ptr', 'ptr'), token, 'scope');
+  slot := irCreateTemp(irPtrT, 'scope.slot');
+  irStore(scope, slot);
+  pinInMemory(slot);
+  tryFinallyBegin(t);
+  visitStmtList(s^.scopeBody);
+  tryFinallyMiddle(t);
+  raised := irICmp('eq', irLoad(irI32, t.state, 'state'), i32c(1), 'raised');
+  ignoredW := call2(classRuntime('__pas_scope_leave', 'void', 'ptr,i32'),
+                    irLoad(irPtrT, slot, 'scope'), irCast('zext', raised, irI32, ''), '');
+  tryFinallyEnd(t);
+end;
+
+procedure visitDetachedStmt(s: PNode);
+var
+  t, fn, link, pair: TV;
+begin
+  t := visitExpr(s^.detCall);
+  fn := irNull;
+  link := irNull;
+  if s^.detHandler <> nil then
+  begin
+    pair := emitRoutineValue(s^.detHandler);
+    fn := irExtract(pair, 0, irPtrT, 'handler');
+    link := irExtract(pair, 1, irPtrT, 'link');
+  end;
+  ignoredW := call3(classRuntime('__pas_task_detach', 'void', 'ptr,ptr,ptr'), t, fn, link, '');
+end;
+
 procedure emitTryFinally(s: PNode);
 var
   t: TTryFinally;
@@ -1833,6 +1877,9 @@ begin
     nkRaise: visitRaise(s);
     nkVarDecl: visitVarDeclStmt(s);
     nkDestructure: visitDestructureStmt(s);
+    nkExprStmt: ignoredW := visitExpr(s^.exprStmtExpr);
+    nkScope: visitScopeStmt(s);
+    nkDetached: visitDetachedStmt(s);
   else
     ;
   end;
@@ -2443,6 +2490,8 @@ begin
       routineParamTypes(m, params);
       m^.cgFunc := irDeclareFunction(nm(m^.cgExport), routineRetType(m), params, '', '');
       listFree(params);
+      if m^.asyncType <> nil then
+        declareAsync(m, nm(m^.cgExport), true, true);
     end;
   end;
 end;
@@ -2719,6 +2768,8 @@ begin
       r^.cgFunc := irDeclareFunction(nm(r^.cgExport), routineRetType(r), params, '', '');
       listFree(params);
       declareCThunk(r, nm(r^.cgExport));
+      if r^.asyncType <> nil then
+        declareAsync(r, nm(r^.cgExport), true, true);
       continue;
     end;
     declareRoutine(r);
@@ -2831,6 +2882,13 @@ begin
       declareCThunk(r, nm(r^.cgExport))
     else
       declareCThunk(r, name);
+    if r^.asyncType <> nil then
+    begin
+      if r^.cgExport <> nil then
+        declareAsync(r, nm(r^.cgExport), true, false)
+      else
+        declareAsync(r, name, false, false);
+    end;
     if dbgOn then
     begin
       { file scope even for nested routines: lexical nesting would make
@@ -2998,6 +3056,15 @@ begin
   emitFrameFini := f;
 end;
 
+procedure emitAsyncs;
+var
+  i: longint;
+begin
+  for i := 0 to asyncsToEmit.count - 1 do
+    emitAsyncParts(PDecl(listGet(asyncsToEmit, i)));
+  listClear(asyncsToEmit);
+end;
+
 procedure emitRoutineBody(r: PDecl);
 var
   frameT: PIRType;
@@ -3055,6 +3122,8 @@ var
   end;
 
 begin
+  if r^.asyncType <> nil then { (its task's parts, after it) }
+    listAdd(asyncsToEmit, r);
   { a frame on the heap: the function that finalizes it, first }
   frameFini := nil;
   if (frameType(r) <> nil) and r^.heapFrame then
@@ -3479,6 +3548,9 @@ begin
   pinFn := nil;
   pinTemps := true;
   mapInit(dynInfos);
+  mapInit(typeInfos);
+  listInit(asyncsToEmit);
+  nextStart := 0;
   listInit(dynOpElems);
   listInit(dynOpFns);
   mapInit(lowered);
@@ -3576,6 +3648,7 @@ begin
   defineVMTs;
   for i := 0 to routinesToEmit.count - 1 do
     emitRoutineBody(PDecl(listGet(routinesToEmit, i)));
+  emitAsyncs;
   emitCleanups;
   emitCThunks;
 
@@ -3665,6 +3738,7 @@ begin
   defineVMTs;
   for i := 0 to routinesToEmit.count - 1 do
     emitRoutineBody(PDecl(listGet(routinesToEmit, i)));
+  emitAsyncs;
   emitCleanups;
   emitCThunks;
   emitMainBody(prog, units, mainFn);

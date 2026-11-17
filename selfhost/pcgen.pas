@@ -78,6 +78,13 @@ var
     and the element functions to emit: for each type used, the element
     type twice and the fini and addref functions }
   dynInfos: TIntMap;
+  typeInfos: TIntMap; { of PTVBox, by type id: typeInfoOf's }
+  ignoredW: TV; { (a call's value, unused) }
+  { the async routines whose task's functions are still to be emitted }
+  asyncsToEmit: TPtrList;
+  { how the next async call starts its task (set by spawn and Pool.Run,
+    taken by the call): 0 here, 1 spawned in the scope, 2 on the pool }
+  nextStart: longint;
   dynOpElems, dynOpFns: TPtrList;
   progDecl: PDecl;
   curRoutine: PDecl;         { nil while emitting main }
@@ -246,6 +253,8 @@ begin
      (name <> '__pas_free_object') and (name <> '__pas_free_instance') and
      (name <> '__pas_intf_assign') and (name <> '__pas_intf_clear') and
      (name <> '__pas_frame_release') and (name <> '__pas_closure_assign') and
+     (name <> '__pas_task_await') and (name <> '__pas_scope_leave') and
+     (name <> '__pas_task_assign') and (name <> '__pas_task_clear') and
      (name <> '__pas_closure_clear') and
      (name <> '__pas_dyn_clear') and (name <> '__pas_dyn_assign') and
      (name <> '__pas_dyn_setlength') and
@@ -762,6 +771,8 @@ begin
     tyRoutine: lowerType := routinePairT;
     tyClass: lowerType := irPtrT; { a reference to the object }
     tyClassRef: lowerType := irPtrT; { a reference to the class's VMT }
+    tyTask: lowerType := irPtrT;  { a counted reference to the task }
+    tyToken: lowerType := irPtrT; { a counted reference to the token }
     tyInterface: lowerType := routinePairT; { (object, method table) }
   else
     lowerType := irI8;
@@ -1815,6 +1826,9 @@ begin
 end;
 
 function holdResult(const v: TV): TV; forward;
+function emitAsyncCall(r: PDecl; const link, self_: TV; const args: TPtrList): TV; forward;
+function emitAwait(const t: TV; tt: PType): TV; forward;
+function emitWhen(e: PNode; all: boolean): TV; forward;
 procedure emitWriteArg(const f: TV; arg: PNode); forward;
 function holdDynResult(const v: TV; t: PType): TV; forward;
 
@@ -1895,6 +1909,55 @@ begin
   g := irGlobal('dyninfo', 'internal', ty, irConstStruct(ty, elems), true, false, false, 0);
   mapPut(dynInfos, t^.id, irBox(g));
   dynInfoOf := g;
+end;
+
+{ The constant PasDynInfo of values of type t (size, fini and addref, as
+  for a dynamic array's elements): a task's result. }
+function typeInfoOf(t: PType): TV;
+var
+  b: PTVBox;
+  fini, addRef, g: TV;
+  fields, elems: TPtrList;
+  ty: PIRType;
+
+  function op(const name: string): TV;
+  var
+    params: TPtrList;
+    f: PIRFunc;
+  begin
+    listInit(params);
+    listAdd(params, irPtrT);
+    f := irCreateFunction(name, 'internal', irVoidT, params);
+    listFree(params);
+    irSetArgName(f, 0, 'elem');
+    listAdd(dynOpElems, t);
+    listAdd(dynOpFns, f);
+    op := irFuncRef(f);
+  end;
+
+begin
+  b := PTVBox(mapGet(typeInfos, t^.id));
+  if b <> nil then
+    exit(b^);
+  fini := irNull;
+  addRef := irNull;
+  if isManaged(t) then
+  begin
+    fini := op('type.fini');
+    addRef := op('type.addref');
+  end;
+  listInit(fields);
+  listAdd(fields, irI64);
+  listAdd(fields, irPtrT);
+  listAdd(fields, irPtrT);
+  ty := irStructLit(fields);
+  listInit(elems);
+  listAdd(elems, irBox(i64c(sizeOf_(t))));
+  listAdd(elems, irBox(fini));
+  listAdd(elems, irBox(addRef));
+  g := irGlobal('typeinfo', 'internal', ty, irConstStruct(ty, elems), true, false, false, 0);
+  mapPut(typeInfos, t^.id, irBox(g));
+  typeInfoOf := g;
 end;
 
 { A string constant as an ansistring: static characters after a header
@@ -2800,6 +2863,7 @@ begin
     exit(irLoad(irPtrT, openDescriptor(e), 'data'));
   case e^.kind of
     nkTuple: emitAddress := emitTuple(e);
+    nkAwait, nkSpawn: emitAddress := visitExpr(e); { a structured result: in the task }
     nkCondExpr:
       begin
         { the hidden variable, once set }
@@ -3158,6 +3222,24 @@ begin
       end
       else
         intfCall1('__pas_intf_clear', addr);
+    tyTask, tyToken:
+      if addRef then
+      begin
+        if t^.kind = tyTask then
+        begin
+          obj := irLoad(irPtrT, addr, 'task');
+          ignored := call1(classRuntime('__pas_task_addref', 'void', 'ptr'), obj, '');
+        end
+        else
+        begin
+          obj := irLoad(irPtrT, addr, 'token');
+          ignored := call1(classRuntime('__pas_token_addref', 'void', 'ptr'), obj, '');
+        end;
+      end
+      else if t^.kind = tyTask then
+        ignored := call1(classRuntime('__pas_task_clear', 'void', 'ptr'), addr, '')
+      else
+        ignored := call1(classRuntime('__pas_token_clear', 'void', 'ptr'), addr, '');
     tyRoutine: { a closure: its frame }
       if t^.routineReference then
       begin
@@ -3258,6 +3340,10 @@ begin
     ignored := call3(classRuntime('__pas_closure_assign', 'void', 'ptr,ptr,ptr'),
                      addr, fn, frame, '');
   end
+  else if t^.kind = tyTask then
+    ignored := call2(classRuntime('__pas_task_assign', 'void', 'ptr,ptr'), addr, v, '')
+  else if t^.kind = tyToken then
+    ignored := call2(classRuntime('__pas_token_assign', 'void', 'ptr,ptr'), addr, v, '')
   else if isManaged(t) then
     storeInterface(addr, v)
   else
@@ -3576,7 +3662,8 @@ begin
     exit(tmp);
   end;
   { (released by finalizeValue: also a closure's) }
-  if (resTy <> nil) and ((resTy^.kind = tyDynArray) or isClosureType(resTy)) then
+  if (resTy <> nil) and ((resTy^.kind in [tyDynArray, tyTask, tyToken]) or
+                         isClosureType(resTy)) then
     exit(holdDynResult(res, resTy));
   if (resTy <> nil) and isManaged(resTy) then
     exit(holdResult(res));
@@ -3605,6 +3692,8 @@ var
   res: TV;
 begin
   r := canon(r);
+  if r^.asyncType <> nil then
+    exit(emitAsyncCall(r, staticLinkFor(r), irNull, args));
   f := fnOf(r);
   if r^.isExternal then
   begin
@@ -4042,6 +4131,12 @@ var
   msgField: PDecl;
 begin
   emitMethodCallC := irNull;
+  if r^.asyncType <> nil then
+  begin
+    if r^.isClassMethod then
+      exit(emitAsyncCall(r, irNull, receiverClass(obj, selfIsClass, loc), args));
+    exit(emitAsyncCall(r, irNull, obj, args));
+  end;
   if (r^.ownerClass <> nil) and ((r^.ownerClass^.classRecord <> nil) or
                                  (r^.ownerClass^.classHelperFor <> nil)) then
     exit(emitRecordMethodCall(r, obj, args));
@@ -4933,6 +5028,11 @@ var
   f: PIRFunc;
 begin
   case k of
+    bkWait:
+      exit(emitAwait(visitExpr(PNode(listGet(e^.args, 0))),
+                     PNode(listGet(e^.args, 0))^.typ));
+    bkWhenAll, bkWhenAny:
+      exit(emitWhen(e, k = bkWhenAll));
     bkAddChecked, bkSubChecked, bkMulChecked: { the tuple (a op b, no overflow) }
       begin
         r := memType(e^.typ);
@@ -5627,6 +5727,279 @@ begin
   emitTemplate := r;
 end;
 
+{ --- Tasks (objfpc) --- }
+
+{ The parameters of r from its task's arguments: their slot index. }
+function firstParamSlot(r: PDecl): longint;
+begin
+  if hasSelf(r) then
+    firstParamSlot := 2
+  else
+    firstParamSlot := 1;
+end;
+
+{ An async routine's task: its arguments' record [link, Self, params]
+  (copies), its entry R.task(task) (calls R with them, stores the result
+  in the task) and R.taskfini(args) (finalizes them). name: r's
+  function's; external: r is exported or imported (declared: imported),
+  and so are its task's functions. }
+procedure declareAsync(r: PDecl; const name: string; external_, declared: boolean);
+var
+  slots, params: TPtrList;
+  counted: boolean;
+  i: longint;
+  p: PDecl;
+  linkage: string;
+  f: PIRFunc;
+begin
+  listInit(slots);
+  listAdd(slots, irPtrT); { the link }
+  if hasSelf(r) then
+    listAdd(slots, irPtrT);
+  counted := false;
+  for i := 0 to r^.params.count - 1 do
+  begin
+    p := PDecl(listGet(r^.params, i));
+    listAdd(slots, memType(p^.varType));
+    if isManaged(p^.varType) then
+      counted := true;
+  end;
+  r^.cgArgsTy := irStructNamed('args.' + copy(name, 5, 255), slots);
+  listFree(slots);
+  if external_ then
+    linkage := ''
+  else
+    linkage := 'internal';
+  listInit(params);
+  listAdd(params, irPtrT);
+  if declared then
+    f := irDeclareFunction(name + '.task', irVoidT, params, '', '')
+  else
+    f := irCreateFunction(name + '.task', linkage, irVoidT, params);
+  irSetArgName(f, 0, 'task');
+  r^.cgTaskEntry := f;
+  r^.cgTaskFini := nil;
+  if counted then
+  begin
+    if declared then
+      f := irDeclareFunction(name + '.taskfini', irVoidT, params, '', '')
+    else
+      f := irCreateFunction(name + '.taskfini', linkage, irVoidT, params);
+    irSetArgName(f, 0, 'args');
+    r^.cgTaskFini := f;
+  end;
+  listFree(params);
+end;
+
+procedure emitAsyncParts(r: PDecl);
+var
+  argsTy: PIRType;
+  entry, fini: PIRFunc;
+  task, args, resultSlot, addr, res: TV;
+  buf: TBuf;
+  byPointer: boolean;
+  slot, i: longint;
+  p: PDecl;
+  t: PType;
+begin
+  argsTy := PIRType(r^.cgArgsTy);
+  entry := PIRFunc(r^.cgTaskEntry);
+  fini := PIRFunc(r^.cgTaskFini);
+  { R.task(task): R(args...), its result into the task's }
+  curFn := entry;
+  resetAddrAligns;
+  curRoutine := nil;
+  curFrame := irNull;
+  pinTemps := true;
+  curSP := nil;
+  irBeginBody(entry);
+  irSetDebugLoc(nil);
+  irSetInsertPoint(irNewBlock('entry'));
+  task := irArg(entry, 0);
+  args := call1(classRuntime('__pas_task_args', 'ptr', 'ptr'), task, 'args');
+  bufInit(buf);
+  irArgsAdd(buf, irLoad(irPtrT, irStructGEP(argsTy, args, 0, ''), 'link'));
+  if hasSelf(r) then
+    irArgsAdd(buf, irLoad(irPtrT, irStructGEP(argsTy, args, 1, ''), 'self'));
+  resultSlot := irNull;
+  if r^.isFunction then
+    resultSlot := call1(classRuntime('__pas_task_result', 'ptr', 'ptr'), task, 'result');
+  byPointer := r^.isFunction and returnsByPointer(r^.resultType);
+  if byPointer then
+    irArgsAdd(buf, resultSlot);
+  slot := firstParamSlot(r);
+  for i := 0 to r^.params.count - 1 do
+  begin
+    p := PDecl(listGet(r^.params, i));
+    addr := irStructGEP(argsTy, args, slot, '');
+    slot := slot + 1;
+    t := p^.varType;
+    if isStructured(t) then { (the callee copies a value parameter) }
+      irArgsAdd(buf, addr)
+    else
+      irArgsAdd(buf, loadScalar(addr, t, nm(p^.ident.name)));
+  end;
+  res := irCall(fnOf(r), buf, '');
+  bufFree(buf);
+  if r^.isFunction and not byPointer then
+  begin
+    t := r^.resultType;
+    if (t^.kind = tyBoolean) or isOrdinal(t) or (t^.kind = tyReal) then
+      storeScalar(resultSlot, res, t)
+    else { (a counted value moves into the task) }
+      irStore(res, resultSlot);
+  end;
+  irRetVoid;
+  if fini = nil then
+    exit;
+  { R.taskfini(args): the counted arguments released }
+  curFn := fini;
+  resetAddrAligns;
+  irBeginBody(fini);
+  irSetInsertPoint(irNewBlock('entry'));
+  slot := firstParamSlot(r);
+  for i := 0 to r^.params.count - 1 do
+  begin
+    p := PDecl(listGet(r^.params, i));
+    addr := irStructGEP(argsTy, irArg(fini, 0), slot, '');
+    slot := slot + 1;
+    if isManaged(p^.varType) then
+      finalizeValue(addr, p^.varType);
+  end;
+  irRetVoid;
+end;
+
+{ A call of async routine r (link; self_: Self's value or null): its task,
+  made with copies of the arguments and started (here: it runs until it
+  waits or ends). }
+function emitAsyncCall(r: PDecl; const link, self_: TV; const args: TPtrList): TV;
+var
+  mode, i, slot: longint;
+  argsTy: PIRType;
+  info, finiV, task, argsAddr: TV;
+  p: PDecl;
+  arg: PNode;
+  start: string;
+  buf: TBuf;
+begin
+  mode := nextStart;
+  nextStart := 0;
+  argsTy := PIRType(r^.cgArgsTy);
+  if r^.isFunction then
+    info := typeInfoOf(r^.resultType)
+  else
+    info := irNull;
+  if r^.cgTaskFini <> nil then
+    finiV := irFuncRef(PIRFunc(r^.cgTaskFini))
+  else
+    finiV := irNull;
+  bufInit(buf);
+  irArgsAdd(buf, info);
+  irArgsAdd(buf, i64c(argsTy^.size));
+  irArgsAdd(buf, irFuncRef(PIRFunc(r^.cgTaskEntry)));
+  irArgsAdd(buf, finiV);
+  task := irCall(classRuntime('__pas_task_new', 'ptr', 'ptr,i64,ptr,ptr'), buf, 'task');
+  bufFree(buf);
+  argsAddr := call1(classRuntime('__pas_task_args', 'ptr', 'ptr'), task, 'args');
+  irStore(link, irStructGEP(argsTy, argsAddr, 0, ''));
+  if hasSelf(r) then
+    irStore(self_, irStructGEP(argsTy, argsAddr, 1, ''));
+  slot := firstParamSlot(r);
+  for i := 0 to r^.params.count - 1 do
+  begin
+    p := PDecl(listGet(r^.params, i));
+    if i < args.count then
+      arg := PNode(listGet(args, i))
+    else
+      arg := p^.paramDefault;
+    storeExpr(irStructGEP(argsTy, argsAddr, slot, ''), p^.varType, arg);
+    slot := slot + 1;
+  end;
+  if mode = 1 then
+    start := '__pas_task_spawn'
+  else if mode = 2 then
+    start := '__pas_task_run_pool'
+  else
+    start := '__pas_task_start';
+  ignoredW := call1(classRuntime(start, 'void', 'ptr'), task, '');
+  emitAsyncCall := holdDynResult(task, r^.asyncType);
+end;
+
+{ await / Wait: waits for task t (of type tt); its result (an address for
+  a structured type), or null without one. }
+function emitAwait(const t: TV; tt: PType): TV;
+var
+  rt: PType;
+  res: TV;
+begin
+  ignoredW := call1(classRuntime('__pas_task_await', 'void', 'ptr'), t, '');
+  rt := tt^.taskResult;
+  if rt = nil then
+    exit(irNull);
+  res := call1(classRuntime('__pas_task_result', 'ptr', 'ptr'), t, 'result');
+  if isStructured(rt) then
+    exit(res);
+  emitAwait := loadScalar(res, rt, 'awaited');
+end;
+
+{ WhenAll(tasks) / WhenAny(tasks): the tasks' data and count. }
+function emitWhen(e: PNode; all: boolean): TV;
+var
+  a: PNode;
+  at, tt, rt: PType;
+  data, n, desc, task, resInfo, elemInfo: TV;
+  bd: TOrdinalBounds;
+  buf: TBuf;
+begin
+  a := PNode(listGet(e^.args, 0));
+  at := a^.typ;
+  if at^.kind = tyArray then
+  begin
+    data := emitAddress(a);
+    bd := getOrdinalBounds(at^.indexType);
+    n := i64c(bd.hi - bd.lo + 1);
+    tt := at^.elementType;
+  end
+  else if at^.kind = tyDynArray then
+  begin
+    data := visitExpr(a);
+    n := dynLength(data);
+    tt := at^.dynElement;
+  end
+  else
+  begin
+    desc := openDescriptor(a);
+    data := irLoad(irPtrT, desc, 'data');
+    n := openCount(desc);
+    tt := at^.openElement;
+  end;
+  rt := e^.typ;
+  bufInit(buf);
+  irArgsAdd(buf, data);
+  irArgsAdd(buf, n);
+  if all then
+  begin
+    if rt^.taskResult <> nil then
+      resInfo := typeInfoOf(rt^.taskResult)
+    else
+      resInfo := irNull;
+    if tt^.taskResult <> nil then
+      elemInfo := typeInfoOf(tt^.taskResult)
+    else
+      elemInfo := irNull;
+    irArgsAdd(buf, resInfo);
+    irArgsAdd(buf, elemInfo);
+    task := irCall(classRuntime('__pas_when_all', 'ptr', 'ptr,i64,ptr,ptr'), buf, 'whenall');
+  end
+  else
+  begin
+    irArgsAdd(buf, typeInfoOf(rt^.taskResult));
+    task := irCall(classRuntime('__pas_when_any', 'ptr', 'ptr,i64,ptr'), buf, 'whenany');
+  end;
+  bufFree(buf);
+  emitWhen := holdDynResult(task, rt);
+end;
+
 function visitExprKind(e: PNode): TV;
 var
   noArgs: TPtrList;
@@ -5645,6 +6018,16 @@ begin
     nkMove: visitExprKind := emitMove(e);
     nkTemplate: visitExprKind := emitTemplate(e);
     nkTuple: visitExprKind := emitTuple(e);
+    nkAwait: visitExprKind := emitAwait(visitExpr(e^.awaitOperand), e^.awaitOperand^.typ);
+    nkSpawn:
+      begin
+        if e^.spawnPool then
+          nextStart := 2
+        else
+          nextStart := 1;
+        visitExprKind := visitExpr(e^.spawnCall);
+        nextStart := 0;
+      end;
     nkCondExpr:
       begin
         { the if statement Sema made of it sets a hidden variable, which

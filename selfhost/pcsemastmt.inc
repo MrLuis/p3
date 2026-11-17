@@ -1252,6 +1252,212 @@ begin
   checkTypeOrValue := check(arg);
 end;
 
+{ --- Tasks (objfpc): async routines, await, spawn, scope, detached --- }
+
+var
+  { nesting of scope blocks around the code being checked (spawn needs one) }
+  scopeDepth: longint;
+
+{ Is the code being checked in an async routine (or a lambda in one)? }
+function inAsyncRoutine: boolean;
+var
+  r: PDecl;
+begin
+  r := curRoutine;
+  while (r <> nil) and r^.isLambda and (r^.asyncType = nil) do
+    r := r^.parent;
+  inAsyncRoutine := (r <> nil) and (r^.asyncType <> nil);
+end;
+
+{ Is e (checked) the call of an async routine? }
+function isAsyncCall(e: PNode): boolean;
+var
+  d: PDecl;
+begin
+  d := nil;
+  case e^.kind of
+    nkCall: d := e^.callDecl;
+    nkNameRef: d := e^.refDecl;
+    nkField: d := e^.fieldDecl;
+    nkIndirectCall:
+      if e^.calleeExpr^.kind = nkField then
+        d := e^.calleeExpr^.fieldDecl;
+  else
+    ;
+  end;
+  isAsyncCall := (d <> nil) and (d^.kind = dkRoutine) and (d^.asyncType <> nil);
+end;
+
+procedure warnDanglingTask(const callee: TIdent; rng: TRange);
+begin
+  ms('dangling task: ''');
+  maN(callee.spelling);
+  ma(''' is never awaited; write ''await ');
+  maN(callee.spelling);
+  ma(''' to wait for it, keep it in a variable to await later, or ''detached ');
+  maN(callee.spelling);
+  ma(''' to let it run on its own');
+  diagReportBuf(sevWarning, callee.loc, msg, rng, noRange);
+end;
+
+procedure errNoTaskValue(a: PNode);
+begin
+  ms('this task has no value (its routine is ''async'' without a type)');
+  errR(a^.b, nodeRange(a));
+end;
+
+{ await e: e a task; its result (needValue: one is needed). }
+function checkAwait(e: PNode; needValue: boolean): PType;
+var
+  t: PType;
+begin
+  checkAwait := errorType;
+  t := check(e^.awaitOperand);
+  if isError(t) then
+    exit;
+  if t^.kind <> tyTask then
+  begin
+    ms('''await'' waits for a task (the call of an async routine), not a value of type ');
+    maT(t);
+    errR(e^.b, nodeRange(e));
+    exit;
+  end;
+  if not inAsyncRoutine then
+  begin
+    ms('''await'' is allowed only in an async routine; elsewhere, Wait(t) waits for a task');
+    errR(e^.b, nodeRange(e));
+  end;
+  if t^.taskResult = nil then
+  begin
+    if needValue then
+    begin
+      errNoTaskValue(e);
+      exit;
+    end;
+    exit(t);
+  end;
+  checkAwait := t^.taskResult;
+end;
+
+{ Wait(t) (also as a statement: needValue false). }
+function checkWait(const args: TPtrList; const callee: TIdent; rng: TRange;
+                   needValue: boolean): PType;
+var
+  t: PType;
+  a: PNode;
+  i: longint;
+begin
+  checkWait := errorType;
+  if args.count <> 1 then
+  begin
+    ms('');
+    maCallee(callee);
+    ma(' expects 1 argument');
+    errR(callee.loc, rng);
+    for i := 0 to args.count - 1 do
+      check(PNode(listGet(args, i)));
+    exit;
+  end;
+  a := PNode(listGet(args, 0));
+  t := check(a);
+  if isError(t) then
+    exit;
+  if t^.kind <> tyTask then
+  begin
+    ms('''Wait'' waits for a task (the call of an async routine), not a value of type ');
+    maT(t);
+    errR(a^.b, nodeRange(a));
+    exit;
+  end;
+  if t^.taskResult = nil then
+  begin
+    if needValue then
+    begin
+      errNoTaskValue(a);
+      exit;
+    end;
+    exit(t);
+  end;
+  checkWait := t^.taskResult;
+end;
+
+{ The tasks of WhenAll / WhenAny: an array of tasks (static, dynamic or
+  open); their task type, or nil after a diagnostic. }
+function checkTaskArray(a: PNode; const callee: TIdent): PType;
+var
+  t, elem: PType;
+begin
+  checkTaskArray := nil;
+  t := check(a);
+  if isError(t) then
+    exit;
+  elem := nil;
+  case t^.kind of
+    tyArray: elem := t^.elementType;
+    tyDynArray: elem := t^.dynElement;
+    tyOpenArray: elem := t^.openElement;
+  else
+    ;
+  end;
+  if (elem = nil) or (elem^.kind <> tyTask) then
+  begin
+    ms('');
+    maCallee(callee);
+    ma(' takes an array of tasks, not a value of type ');
+    maT(t);
+    errR(a^.b, nodeRange(a));
+    exit;
+  end;
+  checkTaskArray := elem;
+end;
+
+{ The hidden async procedure of spawn begin ... end: declared and checked
+  where it is spawned (it uses the variables declared so far). }
+procedure completeSpawnBlock(r: PDecl);
+var
+  savedDepth: longint;
+begin
+  r^.lambdaDone := true;
+  resolveSignature(r);
+  savedDepth := scopeDepth;
+  scopeDepth := 0; { (its task has scopes of its own) }
+  declareAndCheckLambda(r);
+  scopeDepth := savedDepth;
+end;
+
+function visitSpawn(e: PNode): PType;
+var
+  c: PNode;
+  t: PType;
+begin
+  visitSpawn := errorType;
+  c := e^.spawnCall;
+  if (c^.kind = nkCall) and (c^.callDecl <> nil) and (c^.callDecl^.kind = dkRoutine) and
+     c^.callDecl^.isSpawnBlock and not c^.callDecl^.lambdaDone then
+    completeSpawnBlock(c^.callDecl);
+  t := check(c);
+  if isError(t) then
+    exit;
+  if (t^.kind <> tyTask) or not isAsyncCall(c) then
+  begin
+    if e^.spawnPool then
+      ms('''Pool.Run''')
+    else
+      ms('''spawn''');
+    ma(' runs the call of an async routine, not a value of type ');
+    maT(t);
+    errR(c^.b, nodeRange(c));
+    exit;
+  end;
+  if not e^.spawnPool and (scopeDepth = 0) then
+  begin
+    ms('''spawn'' is allowed only inside a ''scope ... end'' block, which ' +
+       'waits for the tasks it starts; Pool.Run starts one on its own');
+    errR(e^.b, nodeRange(e));
+  end;
+  visitSpawn := t;
+end;
+
 { Built-ins whose arguments are not ordinary values (type names,
   procedural variables) or that take none. false for the others. }
 function checkSpecialBuiltin(e: PNode; bk: TBuiltinKind; var res: PType): boolean;
@@ -1282,6 +1488,22 @@ begin
   checkSpecialBuiltin := true;
   res := errorType;
   case bk of
+    bkWait:
+      res := checkWait(e^.args, e^.callee, nodeRange(e), true);
+    bkWhenAll, bkWhenAny:
+      begin
+        if not arity(1) then
+          exit;
+        t := checkTaskArray(argNode(e, 0), e^.callee);
+        if t = nil then
+          exit;
+        if bk = bkWhenAny then
+          res := taskType(tyIntegerT)
+        else if t^.taskResult <> nil then
+          res := taskType(dynArrayType(t^.taskResult))
+        else
+          res := taskType(nil);
+      end;
     bkAddChecked, bkSubChecked, bkMulChecked: { (a op b, ok) in the type of a op b }
       begin
         if not arity(2) then
@@ -1976,7 +2198,9 @@ end;
 function methodResultType(r: PDecl; e: PNode): PType;
 begin
   methodResultType := nil;
-  if r^.isFunction then
+  if r^.asyncType <> nil then
+    methodResultType := r^.asyncType { its task }
+  else if r^.isFunction then
     methodResultType := r^.resultType
   else if (r^.methodKind = mtConstructor) and namesType(e^.base) then
     methodResultType := e^.base^.typ { TFoo.Create, TOuter.TInner.Create }
@@ -2572,6 +2796,12 @@ begin
     checkScopeAccess(d, w, s^.callee);
   end;
 
+  if (d^.kind = dkBuiltin) and (d^.builtin = bkWait) then
+  begin
+    checkWait(s^.args, s^.callee, nodeRange(s), false);
+    exit;
+  end;
+
   if (d^.kind = dkBuiltin) and d^.isProcedure then
   begin
     case d^.builtin of
@@ -2667,6 +2897,13 @@ begin
     else
       ;
     end;
+    exit;
+  end;
+  if (d^.kind = dkRoutine) and (d^.asyncType <> nil) then
+  begin
+    orderArgs(d^.params, s^.args, s^.callee);
+    checkCallArgs(d^.params, d, s^.callee, s^.args, nodeRange(s));
+    warnDanglingTask(s^.callee, nodeRange(s));
     exit;
   end;
   if (d^.kind = dkRoutine) and (not d^.isFunction or not isISO) then
@@ -4397,6 +4634,83 @@ begin
   ownedLoopEnd(loop, before);
 end;
 
+procedure visitExprStmt(s: PNode);
+var
+  e: PNode;
+begin
+  directSequence := nil;
+  e := s^.exprStmtExpr;
+  if e^.kind = nkAwait then
+    e^.typ := checkAwait(e, false)
+  else
+    e^.typ := check(e);
+  if (e^.kind = nkSpawn) and e^.spawnPool and not isError(e^.typ) then
+  begin
+    ms('dangling task: the task Pool.Run starts is never awaited; keep it in a ' +
+       'variable to await later');
+    diagReportBuf(sevWarning, e^.b, msg, nodeRange(e), noRange);
+  end;
+end;
+
+procedure visitScope(s: PNode);
+var
+  t: PType;
+  k: PNode;
+begin
+  directSequence := nil;
+  k := s^.scopeToken;
+  if k <> nil then
+  begin
+    t := check(k);
+    if not isError(t) and (t^.kind <> tyToken) and (t^.kind <> tyNil) then
+    begin
+      ms('the token of a scope must be a TCancelToken, not a value of type ');
+      maT(t);
+      errR(k^.b, nodeRange(k));
+    end;
+  end;
+  markHasTry; { its end waits however the block ends }
+  scopeDepth := scopeDepth + 1;
+  visitSequence(s, s^.scopeBody);
+  scopeDepth := scopeDepth - 1;
+end;
+
+procedure visitDetached(s: PNode);
+var
+  c, h: PNode;
+  t, formal: PType;
+  eParam, p: PDecl;
+  params: TPtrList;
+begin
+  directSequence := nil;
+  c := s^.detCall;
+  t := check(c);
+  if not isError(t) and ((t^.kind <> tyTask) or not isAsyncCall(c)) then
+  begin
+    ms('''detached'' runs the call of an async routine, not a value of type ');
+    maT(t);
+    errR(c^.b, nodeRange(c));
+  end;
+  h := s^.detHandler;
+  if h <> nil then
+  begin
+    { procedure(E: Exception): a routine (or procedural value) }
+    eParam := newDecl(dkVar, memberIdent('E'), noLoc);
+    eParam^.varKind := vkValueParam;
+    eParam^.varType := exceptionType;
+    listInit(params);
+    listAdd(params, eParam);
+    formal := newRoutineType(params, nil, false);
+    p := newDecl(dkVar, memberIdent('handler'), noLoc);
+    p^.varKind := vkValueParam;
+    p^.varType := formal;
+    checkRoutineArg(h, p, formal);
+    checkLambdaEscape(h, false);
+    if h^.typ = nil then
+      h^.typ := formal;
+  end;
+end;
+
 procedure visitStmt(s: PNode);
 var
   rt: PType;
@@ -4415,6 +4729,10 @@ begin
           rt := checkMethodCall(s^.calleeExpr);
           if rt <> nil then
             s^.calleeExpr^.typ := rt;
+          if (rt <> nil) and (rt^.kind = tyTask) and isAsyncCall(s^.calleeExpr) and
+             (s^.calleeExpr^.calleeExpr^.kind = nkField) then
+            warnDanglingTask(s^.calleeExpr^.calleeExpr^.fieldName,
+                             nodeRange(s^.calleeExpr));
           exit;
         end;
         rt := checkIndirectCallee(s^.calleeExpr);
@@ -4437,6 +4755,9 @@ begin
     nkRaise: visitRaise(s);
     nkVarDecl: visitVarDecl(s);
     nkDestructure: visitDestructure(s);
+    nkExprStmt: visitExprStmt(s);
+    nkScope: visitScope(s);
+    nkDetached: visitDetached(s);
   else
     ;
   end;
@@ -4521,6 +4842,8 @@ begin
       begin
         if (constructedThroughSelf(d, w) <> nil) and acceptsArgCount(d^.params, 0) then
           exit(constructedThroughSelf(d, w));
+        if (d^.asyncType <> nil) and acceptsArgCount(d^.params, 0) then
+          exit(d^.asyncType); { its task }
         if not d^.isFunction then
         begin
           ms('procedure ''');
@@ -4893,6 +5216,12 @@ begin
   end;
   if d^.kind = dkRoutine then
   begin
+    if d^.asyncType <> nil then { its task }
+    begin
+      orderArgs(d^.params, e^.args, e^.callee);
+      checkCallArgs(d^.params, d, e^.callee, e^.args, nodeRange(e));
+      exit(d^.asyncType);
+    end;
     if d^.isFunction then
     begin
       orderArgs(d^.params, e^.args, e^.callee);
@@ -5714,6 +6043,8 @@ begin
     nkCall: visitExpr := visitCall(e);
     nkTuple: visitExpr := checkTuple(e, nil);
     nkCondExpr: visitExpr := checkCond(e, nil);
+    nkAwait: visitExpr := checkAwait(e, true);
+    nkSpawn: visitExpr := visitSpawn(e);
     nkTemplate:
       begin
         { an ansistring; each value is one write can write, with the field

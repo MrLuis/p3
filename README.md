@@ -837,6 +837,91 @@ if not ok then
   Writeln('too large');
 ```
 
+**Async/await and structured concurrency** (objfpc; item 10 of the
+proposals): a routine whose result is `async T` (or `async`, for none) is
+async: calling it makes a *task*, a counted reference to a computation on a
+stack of its own, which starts at once and runs, here, until it first
+waits. `await t` (in an async routine) and `Wait(t)` (anywhere) wait for a
+task and give its value; an exception raised in the task is raised again
+where it is awaited.
+
+```pascal
+uses SysUtils, threading;
+
+function Fetch(id: Integer): async string;
+begin
+  Sleep(10);                       { waits without blocking the thread }
+  Result := 'item ' + IntToStr(id);
+end;
+
+function Both: async string;
+var
+  a, b: async string;
+begin
+  a := Fetch(1);                   { both run at once }
+  b := Fetch(2);
+  Result := (await a) + ', ' + (await b);
+end;
+
+begin
+  Writeln(Wait(Both));
+end.
+```
+
+`scope [token] ... end` is structured concurrency: `spawn F(x)` (or
+`spawn begin ... end`, which may use the routine's variables) starts a
+child task inside it, and the scope's `end` waits for all of them, however
+the block is left. When a child fails, the scope cancels the others and
+raises the first failure. A cancelled task's next wait (an `await`, a
+`Sleep`, a channel) raises `EOperationCancelled`.
+
+```pascal
+function Pipeline(Token: TCancelToken): async Integer;
+var
+  jobs: specialize TChannel<Integer>;
+begin
+  jobs := specialize TChannel<Integer>.Create(4);   { bounded: back-pressure }
+  scope Token.WithTimeout(5000)
+    spawn begin
+      for var j := 1 to 100 do
+        await jobs.Send(j);
+      jobs.Close;
+    end;
+    spawn begin
+      for await var j in jobs do   { until closed }
+        Process(j);
+    end;
+  end;
+  jobs.Free;
+end;
+```
+
+Also: `WhenAll(tasks)` (a task of the array of their values) and
+`WhenAny(tasks)` (a task of the index of the first to end) take a static,
+dynamic or open array of tasks; `Pool.Run(F(x))` starts a task on the
+thread pool (`PCC_POOL_THREADS` workers, by default one per CPU, at least
+2); `detached F(x)` or `detached(Handler) F(x)` lets a task run on its own,
+its exception going to `Handler(E: Exception)`. A task started any other
+way stays on the thread that started it, so code between waits runs where
+it began (the main thread, for one started by the main program). A call
+whose task is dropped warns "dangling task".
+
+Unit `threading` has the rest: `TCancelToken` (predeclared) gets
+`TCancelToken.Create`, `Cancel`, `IsCancelled`, `ThrowIfCancelled`,
+`WithTimeout(ms)` and `NewChild`; `TChannel<T>` has `Create(capacity)` (0:
+unbounded), `Send`, `Receive`, `TryReceive` (`(value, ok)`), `Close` and
+`Count`, and raises `EChannelClosed`. The runtime is thread-safe for this:
+reference counts are atomic, exceptions are per thread, and file I/O is
+locked.
+
+An async routine's task may outlive its caller, so its parameters are
+copied: no `var`, `out`, `constref`, open-array or untyped ones. It is
+declared at program or unit level or is a method (not virtual, not a
+constructor, destructor or record method); `spawn begin ... end` blocks
+are the nested ones. `async`, `await`, `spawn`, `scope`, `detached` and
+`Pool` are not reserved: a visible declaration of the name keeps it a
+name.
+
 **Capture by copy** (pcc's own): `function[k, s](x) => e` is a closure
 with its own copies of `k` and `s`, taken when it is made. Inside it they
 are read-only ("cannot modify 'k', a copy made by this lambda"); what it

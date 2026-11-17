@@ -622,7 +622,7 @@ end;
 function isObjFPCOnly(k: TBuiltinKind): boolean;
 begin
   isObjFPCOnly := k in [bkAssignFile, bkCloseFile, bkExceptAddr, bkAddChecked,
-                        bkSubChecked, bkMulChecked];
+                        bkSubChecked, bkMulChecked, bkWait, bkWhenAll, bkWhenAny];
 end;
 
 procedure stdType(const n: string; t: PType);
@@ -1008,6 +1008,11 @@ begin
   intError := declareExceptionClass('EIntError', external_);
   external_ := declareExceptionClass('EDivByZero', intError);
   external_ := declareExceptionClass('EIntOverflow', intError); { (objfpc overflow) }
+  { tasks: a cancelled task's wait raises EOperationCancelled; tokens }
+  external_ := declareExceptionClass('EOperationCancelled', exceptionType);
+  d := newDecl(dkType, memberIdent('TCancelToken'), noLoc);
+  d^.declType := tokenType;
+  scopeInsert(standard, d^.ident.name, d);
   external_ := declareExceptionClass('EConvertError', exceptionType);
 end;
 
@@ -1574,7 +1579,7 @@ function isAssignable(target, value: PType): boolean;
 begin
   if (target^.kind = tyOpenArray) or (value^.kind = tyOpenArray) then
     exit(false); { only passed along and indexed }
-  if (target^.kind = tyDynArray) and (target <> value) then
+  if (target^.kind in [tyDynArray, tyTask, tyToken]) and (target <> value) then
     exit(value^.kind = tyNil);
   if containsFile(target) or containsFile(value) then
     exit(false); { files cannot be copied }
@@ -3064,6 +3069,17 @@ begin
         errR(ts^.tname.loc, identRange(ts^.tname));
         noteDeclaredHere(d);
       end;
+    tsAsync:
+      begin
+        t := nil;
+        if ts^.asyncInner <> nil then
+        begin
+          t := resolveType(ts^.asyncInner, nil);
+          if isError(t) then
+            exit(errorType);
+        end;
+        exit(taskType(t));
+      end;
     tsSpecialize:
       begin
         d := specializeType(ts^.spName, ts^.spArgs);
@@ -3440,7 +3456,8 @@ begin
   t := buildType(ts);
   if (declName <> nil) and not isError(t) and not isBuiltinType(t) and
      (ts^.kind <> tsSpecialize) and { (so is a specialization) }
-     not ((t^.kind = tyRecord) and t^.isTupleRecord) then { (a tuple type is shared by its uses) }
+     not ((t^.kind = tyRecord) and t^.isTupleRecord) and { (a tuple type is shared by its uses) }
+     (t^.kind <> tyTask) then { (and so is a task type) }
     setDeclName(t, declName);
   ts^.resolved := t;
   resolveType := t;
@@ -4215,7 +4232,7 @@ var
   prm: PDecl;
 begin
   writeFits := false;
-  if (x^.methodKind = mtMethod) and not x^.isFunction and
+  if (x^.methodKind = mtMethod) and not x^.isFunction and (x^.asyncType = nil) and
      (x^.params.count = leading + 1) and indexParamsMatch(p, x) and
      (not p^.propIsClass or x^.isStatic) then
   begin
@@ -5574,7 +5591,7 @@ end;
 
 procedure declareMethodBody(r: PDecl);
 var
-  c, rt, convRT, t: PType;
+  c, rt, convRT, t, declared: PType;
   m, p, x, match, td: PDecl;
   i: longint;
   what, kind: string;
@@ -5741,7 +5758,8 @@ begin
     errR(r^.ident.loc, identRange(r^.ident));
     exit;
   end;
-  if (m^.methodKind <> r^.methodKind) or (m^.isFunction <> r^.isFunction) or
+  if (m^.methodKind <> r^.methodKind) or
+     ((m^.isFunction or (m^.asyncType <> nil)) <> r^.isFunction) or
      (m^.isClassMethod <> r^.isClassMethod) then
   begin
     ms('''');
@@ -5781,7 +5799,10 @@ begin
     rt := nil;
     if r^.resultSpec <> nil then
       rt := resolveTypeIn(c, r^.resultSpec);
-    if not sameSignature(m, r) or ((rt <> nil) and (rt <> m^.resultType)) or
+    declared := m^.resultType;
+    if m^.asyncType <> nil then
+      declared := m^.asyncType;
+    if not sameSignature(m, r) or ((rt <> nil) and (rt <> declared)) or
        not sameDefaults(m, r) then
     begin
       ms('heading of ''');
@@ -6736,6 +6757,32 @@ begin
       resultTy := errorType;
     end;
   end;
+  { async T / async: an async routine, whose body is a function's
+    returning T or a procedure's }
+  if resultTy^.kind = tyTask then
+  begin
+    r^.asyncType := resultTy;
+    if r^.isExternal then
+    begin
+      ms('an external routine cannot be async');
+      errR(r^.ident.loc, identRange(r^.ident));
+    end;
+    if resultTy^.taskResult = nil then
+    begin
+      r^.isFunction := false;
+      exit;
+    end;
+    resultTy := resultTy^.taskResult;
+    if not isError(resultTy) and not isValidResultType(resultTy) and
+       (resultTy^.kind <> tyShortString) and
+       not ((resultTy^.kind = tyRecord) and not containsFile(resultTy)) then
+    begin
+      ms('the result of a task cannot be ');
+      maT(resultTy);
+      errR(r^.resultSpec^.b, specRange(r^.resultSpec));
+      resultTy := errorType;
+    end;
+  end;
   r^.resultType := resultTy;
   res := newDecl(dkVar, r^.ident, r^.ident.loc);
   res^.varSpec := r^.resultSpec;
@@ -6774,6 +6821,7 @@ end;
 function isCType(t: PType): boolean;
 begin
   isCType := isError(t) or (t^.kind = tyReal) or (t^.kind = tyPointer) or
+             (t^.kind = tyToken) or { (the runtime's token, not counted by the call) }
              (isOrdinal(t) and (getBase(t)^.kind <> tyBoolean));
 end;
 
@@ -7591,10 +7639,12 @@ procedure declareRoutine(r: PDecl);
 var
   fwd, p, x, match: PDecl;
   i: longint;
-  rt: PType;
+  rt, declared: PType;
   inInterface: boolean;
 begin
   if r^.isLambda then { completed where it is used (completeLambda) }
+    exit;
+  if r^.isSpawnBlock then { completed where it is spawned (visitSpawn) }
     exit;
   if r^.isTemplateMember then { of a generic type: see specializeType }
   begin
@@ -7676,7 +7726,7 @@ begin
   end;
   if (fwd <> nil) and fwd^.isForward and (fwd^.body = nil) and (r^.body <> nil) then
   begin
-    if fwd^.isFunction <> r^.isFunction then
+    if (fwd^.isFunction or (fwd^.asyncType <> nil)) <> r^.isFunction then
     begin
       ms('''');
       maN(r^.ident.spelling);
@@ -7697,7 +7747,10 @@ begin
       rt := nil;
       if r^.resultSpec <> nil then
         rt := resolveType(r^.resultSpec, nil);
-      if not sameSignature(fwd, r) or ((rt <> nil) and (rt <> fwd^.resultType)) or
+      declared := fwd^.resultType;
+      if fwd^.asyncType <> nil then
+        declared := fwd^.asyncType;
+      if not sameSignature(fwd, r) or ((rt <> nil) and (rt <> declared)) or
          not sameDefaults(fwd, r) then
       begin
         ms('heading of ''');
@@ -8785,6 +8838,70 @@ begin
   finishBlock(b, true);
 end;
 
+{ An async routine's restrictions: its task may outlive its caller, so its
+  arguments are copied (no var, out or constref parameters, no open or
+  untyped ones), and it is not nested (but a spawn block, which its scope
+  waits for) nor a virtual method, constructor or destructor. }
+procedure checkAsyncRoutine(r: PDecl);
+var
+  i: longint;
+  p: PDecl;
+  t: PType;
+  kind, why: string;
+begin
+  if (r^.parent <> nil) and not r^.isSpawnBlock and not r^.isLambda then
+  begin
+    ms('async routine ''');
+    maN(r^.ident.spelling);
+    ma(''' must be declared at program or unit level, or be a method ' +
+       '(its task may outlive the routine around it)');
+    errR(r^.ident.loc, identRange(r^.ident));
+  end;
+  if r^.methodKind <> mtNone then
+  begin
+    why := '';
+    if (r^.methodKind = mtConstructor) or (r^.methodKind = mtDestructor) then
+      why := 'a constructor or a destructor cannot be async'
+    else if r^.isVirtual or r^.isAbstract or r^.isOverride or (r^.vmtIndex >= 0) then
+      why := 'an async method cannot be virtual (not supported yet)'
+    else if (r^.ownerClass <> nil) and (r^.ownerClass^.kind = tyClass) and
+            ((r^.ownerClass^.classRecord <> nil) or (r^.ownerClass^.classHelperFor <> nil)) then
+      why := 'a record''s or helper''s method cannot be async (its Self is ' +
+             'passed by reference)';
+    if why <> '' then
+    begin
+      ms(why);
+      errR(r^.ident.loc, identRange(r^.ident));
+    end;
+  end;
+  for i := 0 to r^.params.count - 1 do
+  begin
+    p := PDecl(listGet(r^.params, i));
+    t := p^.varType;
+    kind := '';
+    if (p^.varKind = vkVarParam) and p^.isOut then
+      kind := 'an ''out'''
+    else if p^.varKind = vkVarParam then
+      kind := 'a ''var'''
+    else if p^.isConstRef then
+      kind := 'a ''constref'''
+    else if (t <> nil) and (t^.kind in [tyOpenArray, tyArrayOfConst]) then
+      kind := 'an open array'
+    else if (t <> nil) and (t^.kind = tyUntyped) then
+      kind := 'an untyped';
+    if kind <> '' then
+    begin
+      ms('parameter ''');
+      maN(p^.ident.spelling);
+      ma(''' of async routine ''');
+      maN(r^.ident.spelling);
+      ma(''' cannot be ' + kind + ' parameter: its task may outlive the ' +
+         'caller''s variable; pass a value');
+      errR(p^.loc, identRange(p^.ident));
+    end;
+  end;
+end;
+
 procedure checkRoutineBody(r: PDecl);
 var
   savedScope, base: PScope;
@@ -8800,6 +8917,8 @@ begin
     listAdd(deferredBodies^, r);
     exit;
   end;
+  if r^.asyncType <> nil then
+    checkAsyncRoutine(r);
   savedScope := cur;
   savedRoutine := curRoutine;
   { the method of a nested class or record also sees the constants and
