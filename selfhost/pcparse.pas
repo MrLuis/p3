@@ -1419,9 +1419,9 @@ var
   libraryExpr, nameExpr: PNode;
   kind: string;
   loc: TLoc;
-  name, clsName, typeParam: TIdent;
+  name, clsName: TIdent;
   i: longint;
-  params, outerNames, typeParams: TPtrList;
+  params, outerNames: TPtrList;
   resultSpec: PTypeSpec;
   externalName: PName;
   r: PDecl;
@@ -3312,7 +3312,12 @@ begin
   end;
   if not expect(tkKwFor, 'in a ' + kindStr) then
     exit;
-  extended := parseTypeIdentifier('the type a helper extends');
+  { (objfpc: also array of T, a dynamic array type, as in a generic helper
+    for every dynamic array) }
+  if (tok.kind = tkKwArray) and (peekKind = tkKwOf) then
+    extended := parseType
+  else
+    extended := parseTypeIdentifier('the type a helper extends');
   if extended = nil then
     exit;
   listInit(members);
@@ -3321,6 +3326,19 @@ begin
   classVars := false;
   while (tok.kind <> tkKwEnd) and (tok.kind <> tkEof) and not diagShouldStop do
   begin
+    if startsGeneric then { generic function M<T>(...) }
+    begin
+      m := parseGenericMethodHeading;
+      if m = nil then
+      begin
+        failed := true;
+        break;
+      end;
+      m^.vis := vis;
+      listAdd(members, m);
+      classVars := false;
+      continue;
+    end;
     if tok.kind = tkIdentifier then
     begin
       wd := nameStr(tok.name);

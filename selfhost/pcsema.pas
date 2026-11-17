@@ -5363,6 +5363,26 @@ begin
   for i := 0 to ts^.helperMembers.count - 1 do
   begin
     m := PDecl(listGet(ts^.helperMembers, i));
+    if (m^.kind = dkRoutine) and (m^.memberKey <> nil) then
+    begin
+      prev := PDecl(mapGet(own, m^.memberKey^.id));
+      if prev <> nil then
+      begin
+        ms('redefinition of generic method ''');
+        maN(m^.ident.spelling);
+        ma('''');
+        errR(m^.ident.loc, identRange(m^.ident));
+        ms('previous definition is here');
+        note(prev^.loc);
+        continue;
+      end;
+      defineGenericMethod(c, m);
+      if m^.isClassMethod then
+        m^.isStatic := true; { no Self }
+      mapPut(own, m^.memberKey^.id, m);
+      listAdd(members, m);
+      continue;
+    end;
     overloadOf := nil;
     prev := PDecl(mapGet(own, m^.ident.name^.id));
     if prev <> nil then
@@ -5977,7 +5997,8 @@ begin
     for j := 0 to c^.classMembers.count - 1 do
     begin
       r := PDecl(listGet(c^.classMembers, j));
-      if (r^.kind = dkRoutine) and (r^.body = nil) then
+      if (r^.kind = dkRoutine) and (r^.body = nil) and
+         not ((r^.memberKey <> nil) and (r^.genericDef <> nil)) then
       begin
         ms('method ''');
         maQualified(c, r^.ident);
@@ -7450,7 +7471,7 @@ end;
 procedure genericMethodsNamed(c: PType; name: PName; var found: TPtrList);
 var
   n: longint;
-  g, owner: PType;
+  owner: PType;
   d: PDecl;
 begin
   listInit(found);
@@ -7797,6 +7818,61 @@ begin
 end;
 
 { generic TList<T> = ...: declared (under its key), not checked. }
+{ The scope key of the last generic type helper declared (see
+  prevGenericHelper). }
+function genericHelpersKey: PName;
+begin
+  genericHelpersKey := intern('#generichelpers');
+end;
+
+{ Is ts, the type generic helper td extends, a pattern that gives all its
+  type parameters (and not a bare parameter: a helper for every type)? }
+function genericHelperPatternOK(td: PDecl; ts: PTypeSpec): boolean;
+var
+  seen: array of boolean;
+  k: longint;
+
+  function walk(x: PTypeSpec): boolean;
+  var
+    m: longint;
+  begin
+    walk := false;
+    if x^.kind = tsNamed then
+    begin
+      if x^.tquals.count = 0 then
+        for m := 0 to td^.tgParams.count - 1 do
+          if PIdent(listGet(td^.tgParams, m))^.name = x^.tname.name then
+            seen[m] := true;
+      exit(true);
+    end;
+    if x^.kind = tsDynArray then
+      exit(walk(x^.dynSpec));
+    if x^.kind = tsSpecialize then
+    begin
+      for m := 0 to x^.spArgs.count - 1 do
+        if not walk(PTypeSpec(listGet(x^.spArgs, m))) then
+          exit;
+      exit(true);
+    end;
+  end;
+
+begin
+  genericHelperPatternOK := false;
+  SetLength(seen, td^.tgParams.count);
+  for k := 0 to td^.tgParams.count - 1 do
+    seen[k] := false;
+  if (ts^.kind = tsNamed) and (ts^.tquals.count = 0) then
+    for k := 0 to td^.tgParams.count - 1 do
+      if PIdent(listGet(td^.tgParams, k))^.name = ts^.tname.name then
+        exit; { (a helper for every type) }
+  if not walk(ts) then
+    exit;
+  for k := 0 to td^.tgParams.count - 1 do
+    if not seen[k] then
+      exit;
+  genericHelperPatternOK := true;
+end;
+
 procedure declareGenericType(td: PDecl);
 var
   i, j: longint;
@@ -7804,6 +7880,20 @@ var
   key: PName;
   prev: PDecl;
 begin
+  if (td^.typeSpec^.kind = tsHelper) and (curRoutine = nil) then
+  begin { a generic helper: also in the chain }
+    if not genericHelperPatternOK(td, td^.typeSpec^.helperFor) then
+    begin
+      ms('a generic helper must extend a type built from all its type ' +
+         'parameters, such as ''array of T'' or ''specialize TGen<T>''');
+      errR(td^.typeSpec^.helperFor^.b, specRange(td^.typeSpec^.helperFor));
+    end
+    else
+    begin
+      td^.prevGenericHelper := lookup(genericHelpersKey);
+      scopeSet(cur, genericHelpersKey, td);
+    end;
+  end;
   td^.declType := errorType;
   if curRoutine <> nil then
   begin
@@ -7849,22 +7939,14 @@ procedure declareRoutine(r: PDecl); forward;
   Name<integer>), in the generic's scope plus the type parameters as type
   aliases; its methods' implementations are parsed again too, and their
   bodies checked later. Nil after a diagnostic. }
+function specializeTypeFor(const name: TIdent; g: PDecl; const types: TPtrList): PDecl; forward;
+
 function specializeType(const name: TIdent; const args: TPtrList): PDecl;
 var
-  types, methods, bodies: TPtrList;
+  types: TPtrList;
   t: PType;
-  g, inst, td, m: PDecl;
-  i, k, errors, pointerMark: longint;
-  ti: PTypeInstance;
-  same: boolean;
-  sb, tb: TBuf;
-  sc, savedScope: PScope;
-  savedRoutine: PDecl;
-  savedPrefix: PName;
-  savedDeferred: PPtrList;
-  p: PIdent;
-  id: TIdent;
-  pending: PInstance;
+  g: PDecl;
+  i: longint;
 begin
   specializeType := nil;
   if not typeInstancesInit then
@@ -7894,6 +7976,33 @@ begin
       ma('s');
     errR(name.loc, identRange(name));
     exit;
+  end;
+  specializeType := specializeTypeFor(name, g, types);
+end;
+
+{ The specialization of generic type g for types (asked for at name), made
+  on first use (see specializeType). }
+function specializeTypeFor(const name: TIdent; g: PDecl; const types: TPtrList): PDecl;
+var
+  methods, bodies: TPtrList;
+  inst, td, m: PDecl;
+  i, k, errors, pointerMark: longint;
+  ti: PTypeInstance;
+  same: boolean;
+  sb, tb: TBuf;
+  sc, savedScope: PScope;
+  savedRoutine: PDecl;
+  savedPrefix: PName;
+  savedDeferred: PPtrList;
+  p: PIdent;
+  id: TIdent;
+  pending: PInstance;
+begin
+  specializeTypeFor := nil;
+  if not typeInstancesInit then
+  begin
+    listInit(typeInstances);
+    typeInstancesInit := true;
   end;
   g^.isUsed := true;
   for i := 0 to typeInstances.count - 1 do
@@ -7993,7 +8102,7 @@ begin
   listAdd(moduleInstances, inst);
   for i := 0 to methods.count - 1 do
     listAdd(moduleInstances, listGet(methods, i));
-  specializeType := inst;
+  specializeTypeFor := inst;
 end;
 
 procedure checkInstances(b: PBlock);
@@ -10239,7 +10348,7 @@ end;
   another (which may use its variables). }
 procedure noteTaskUse(d: PDecl; w: PWithContext; const id: TIdent);
 var
-  s, c: PDecl;
+  s: PDecl;
   ct: PType;
   isSelfVar, readOnly: boolean;
 begin

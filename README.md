@@ -1378,8 +1378,36 @@ class of its own, made from the implementation, so a generic method cannot
 be virtual, override or abstract, a constructor, a destructor or an
 operator. Its implementation must come before its first use, and is
 checked for each specialization (its declaration gives the shape: type
-parameters, parameter kinds). Records and helpers have no generic methods
-yet.
+parameters, parameter kinds). Type helpers can have generic methods too;
+advanced records cannot yet.
+
+**Generic type helpers** (`--mode=objfpc`, `{$modeswitch typehelpers}`;
+pcc's own): `generic TH<T> = type helper for array of T` extends every
+dynamic array, `T` being its element type, and a helper `for specialize
+TGen<T>` (a record helper for a generic record) every matching
+specialization. The helper is specialized where a value uses it, for the
+types the match gives; with generic methods and inference through lambdas
+this gives sequence operations on arrays:
+
+```pascal
+type
+  generic TArrayHelper<T> = type helper for array of T
+    function Count: Integer;
+    function Filter(F: specialize TPred<T>): specialize TArray<T>;
+    generic function Map<R>(F: specialize TFunc<T, R>): specialize TArray<R>;
+  end;
+
+evens := ints.Filter(function(x) => not Odd(x));      { any array of Integer }
+labels := ints.Map(function(x) => 'n' + IntToStr(x));  { an array of string }
+```
+
+As in Free Pascal, one helper applies to a type: an exact helper (`type
+helper for array of Byte`, now also written with `array of`) comes first,
+then the generic ones, the last declared first, which hides the earlier
+ones' methods. The extended type must be built from all the type
+parameters (`array of T`, `specialize TGen<T, string>`); a helper for a
+bare `T` (every type) is an error. Classes and interfaces have no type
+helpers.
 
 **For-in loops** (not in `--mode=iso`), as in Free Pascal: `for x in c do`
 takes `x` through the elements of an array (static, open or dynamic) or a

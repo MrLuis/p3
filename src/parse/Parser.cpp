@@ -2196,7 +2196,11 @@ TypeSpec *Parser::parseTypeHelper(SourceLocation Start, bool Record) {
   }
   if (!expect(tok::kw_for, Record ? "in a record helper" : "in a type helper"))
     return nullptr;
-  TypeSpec *Extended = parseTypeIdentifier("the type a helper extends");
+  // (objfpc: also `array of T`, a dynamic array type, as in a generic
+  // helper for every dynamic array)
+  TypeSpec *Extended = Tok.is(tok::kw_array) && peekToken().is(tok::kw_of)
+                           ? parseType()
+                           : parseTypeIdentifier("the type a helper extends");
   if (!Extended)
     return nullptr;
   llvm::SmallVector<Decl *, 8> Members;
@@ -2208,6 +2212,15 @@ TypeSpec *Parser::parseTypeHelper(SourceLocation Start, bool Record) {
     return nullptr;
   };
   while (Tok.isNot(tok::kw_end) && Tok.isNot(tok::eof) && !Diags.shouldStop()) {
+    if (startsGeneric()) { // generic function M<T>(...)
+      RoutineDecl *R = parseGenericMethodHeading();
+      if (!R)
+        return Fail();
+      R->setVisibility(Vis);
+      Members.push_back(R);
+      ClassVars = false;
+      continue;
+    }
     if (Tok.is(tok::identifier)) {
       llvm::StringRef W = Tok.getIdentifier();
       if (W == "private" || W == "protected" || W == "public" ||

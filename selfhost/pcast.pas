@@ -568,7 +568,11 @@ type
         specialization (specialize TList<integer>). tgParams: the type
         parameters, of PIdent; tgScope: the scope it is declared in (Sema) }
       dkType: (typeSpec: PTypeSpec; declType: PType; tgGeneric: boolean;
-               tgParams: TPtrList; tgTokens, tgScope: pointer);
+               tgParams: TPtrList; tgTokens, tgScope: pointer;
+               { a generic type helper (generic TH<T> = type helper for
+                 array of T): the one declared before it in scope (Sema
+                 keeps them in a chain, the last declared first) }
+               prevGenericHelper: PDecl);
       dkField: (fieldSpec: PTypeSpec; fieldType: PType);
       { methods (objfpc): methodClassName: TFoo of an implementation
         TFoo.Bar; ownerClass, selfVar (the hidden parameter), vmtIndex (a

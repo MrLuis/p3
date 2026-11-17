@@ -2383,7 +2383,79 @@ class Checker : public StmtVisitor<Checker>,
       return helperFor(Ctx.getShortStringType());
     }
     auto *TD = llvm::dyn_cast_or_null<TypeDecl>(Cur->lookup(helperKey(T)));
-    return TD ? llvm::dyn_cast_or_null<ClassType>(TD->getType()) : nullptr;
+    if (TD)
+      return llvm::dyn_cast_or_null<ClassType>(TD->getType());
+    return genericHelperFor(T);
+  }
+
+  /// The scope key of the last generic type helper declared (see
+  /// TypeDecl::getPrevGenericHelper).
+  llvm::StringRef genericHelpersKey() {
+    return Ctx.getStrings().intern("#generichelpers");
+  }
+
+  /// The generic type helpers in scope, the last declared first, whose
+  /// extended type T matches (generic TH<T> = type helper for array of T:
+  /// any dynamic array): the first one's specialization for the type
+  /// arguments the match gives, or null.
+  ClassType *genericHelperFor(Type *T) {
+    if (T->isClass() || T->isClassRef() || T->isInterface())
+      return nullptr;
+    for (auto *G = llvm::dyn_cast_or_null<TypeDecl>(Cur->lookup(genericHelpersKey()));
+         G; G = G->getPrevGenericHelper()) {
+      auto *HS = llvm::cast<HelperTypeSpec>(G->getTypeSpec());
+      llvm::SmallVector<Type *, 2> Bound(G->getTypeParams().size(), nullptr);
+      if (!matchTypePattern(G, HS->getExtended(), T, Bound))
+        continue;
+      if (llvm::is_contained(Bound, nullptr))
+        continue;
+      TypeDecl *I = specializeTypeFor(G->getName(), G, Bound);
+      return I ? llvm::dyn_cast_or_null<ClassType>(I->getType()) : nullptr;
+    }
+    return nullptr;
+  }
+
+  /// Does type T match TS, a type written with the type parameters of
+  /// generic G (a parameter, `array of P`, `specialize TGen<P...>`, or a
+  /// type without them)? The types the parameters stand for go to Bound.
+  bool matchTypePattern(TypeDecl *G, TypeSpec *TS, Type *T,
+                        llvm::SmallVectorImpl<Type *> &Bound) {
+    auto Params = G->getTypeParams();
+    if (auto *N = llvm::dyn_cast<NamedTypeSpec>(TS); N && N->getQualifiers().empty())
+      for (size_t K = 0; K < Params.size(); ++K)
+        if (Params[K].Name == N->getName().Name) {
+          if (Bound[K])
+            return Bound[K] == T;
+          Bound[K] = T;
+          return true;
+        }
+    if (auto *DS = llvm::dyn_cast<DynArrayTypeSpec>(TS)) {
+      auto *DT = llvm::dyn_cast<DynArrayType>(T);
+      return DT && matchTypePattern(G, DS->getElement(), DT->getElementType(), Bound);
+    }
+    if (auto *SS = llvm::dyn_cast<SpecializeTypeSpec>(TS)) {
+      auto *GS = static_cast<Scope *>(G->getGenericScope());
+      auto *Of = llvm::dyn_cast_or_null<TypeDecl>(
+          GS->lookup(genericKey(SS->getName().Name, SS->getArgs().size())));
+      if (!Of)
+        return false;
+      for (auto &[Key, I] : TypeInstances)
+        if (Key.first == Of && I->getType() == T) {
+          for (size_t K = 0; K < SS->getArgs().size(); ++K)
+            if (!matchTypePattern(G, SS->getArgs()[K], Key.second[K], Bound))
+              return false;
+          return true;
+        }
+      return false;
+    }
+    // a type without the parameters: that type
+    if (!llvm::isa<NamedTypeSpec>(TS))
+      return false;
+    Scope *Saved = Cur;
+    Cur = static_cast<Scope *>(G->getGenericScope());
+    Type *Named = resolveType(TS);
+    Cur = Saved;
+    return !Named->isError() && Named == T;
   }
 
   /// The helper of the type Base names (AnsiString.Join), or null.
@@ -2479,6 +2551,21 @@ class Checker : public StmtVisitor<Checker>,
     llvm::StringMap<Decl *> Own;
     for (Decl *M : HS->getMembers()) {
       const Identifier &MN = M->getName();
+      if (auto *R = llvm::dyn_cast<RoutineDecl>(M); R && R->isGenericMethod()) {
+        if (Decl *Prev = Own.lookup(R->getMemberKey())) {
+          Diags.error(MN.Loc,
+                      "redefinition of generic method '" + MN.Spelling + "'",
+                      {MN.getRange()});
+          Diags.note(Prev->getLocation(), "previous definition is here");
+          continue;
+        }
+        defineGenericMethod(C, R);
+        if (R->isClassMethod())
+          R->setStatic(); // no Self
+        Own[R->getMemberKey()] = R;
+        Members.push_back(R);
+        continue;
+      }
       RoutineDecl *OverloadOf = nullptr;
       if (Decl *Prev = Own.lookup(MN.Name)) {
         OverloadOf = llvm::dyn_cast<RoutineDecl>(Prev);
@@ -4026,7 +4113,9 @@ class Checker : public StmtVisitor<Checker>,
     if (llvm::isa_and_nonnull<HelperTypeSpec>(TD->getTypeSpec())) {
       if (auto *C = llvm::dyn_cast_or_null<ClassType>(TD->getType()))
         for (Decl *M : C->getMembers())
-          if (auto *R = llvm::dyn_cast<RoutineDecl>(M); R && !R->getBody())
+          if (auto *R = llvm::dyn_cast<RoutineDecl>(M);
+              R && !R->getBody() &&
+              !(R->isGenericMethod() && R->getGenericDefinition() != R))
             Diags.error(R->getName().Loc,
                         "method '" + qualified(C, R->getName()) +
                             "' is declared but never implemented",
@@ -5065,6 +5154,37 @@ class Checker : public StmtVisitor<Checker>,
     return Found;
   }
 
+  /// Is TS, the type generic helper TD extends, a pattern that gives all
+  /// its type parameters (and not a bare parameter: a helper for every
+  /// type)?
+  bool genericHelperPatternOK(TypeDecl *TD, TypeSpec *TS) {
+    auto Params = TD->getTypeParams();
+    llvm::SmallVector<bool, 2> Seen(Params.size(), false);
+    std::function<bool(TypeSpec *)> Walk = [&](TypeSpec *X) -> bool {
+      if (auto *N = llvm::dyn_cast<NamedTypeSpec>(X)) {
+        if (N->getQualifiers().empty())
+          for (size_t K = 0; K < Params.size(); ++K)
+            if (Params[K].Name == N->getName().Name)
+              Seen[K] = true;
+        return true;
+      }
+      if (auto *DS = llvm::dyn_cast<DynArrayTypeSpec>(X))
+        return Walk(DS->getElement());
+      if (auto *SS = llvm::dyn_cast<SpecializeTypeSpec>(X)) {
+        for (TypeSpec *A : SS->getArgs())
+          if (!Walk(A))
+            return false;
+        return true;
+      }
+      return false;
+    };
+    if (auto *N = llvm::dyn_cast<NamedTypeSpec>(TS); N && N->getQualifiers().empty())
+      for (const Identifier &P : Params)
+        if (P.Name == N->getName().Name)
+          return false; // (a helper for every type)
+    return Walk(TS) && !llvm::is_contained(Seen, false);
+  }
+
   /// Is Name the name of a generic (type or routine), with any number of
   /// type parameters?
   bool isGenericName(llvm::StringRef Name) {
@@ -5076,6 +5196,20 @@ class Checker : public StmtVisitor<Checker>,
 
   /// generic TList<T> = ...: declared (under its key), not checked.
   void declareGenericType(TypeDecl *TD) {
+    if (auto *HS = llvm::dyn_cast<HelperTypeSpec>(TD->getTypeSpec());
+        HS && !CurRoutine) { // a generic helper: also in the chain
+      if (!genericHelperPatternOK(TD, HS->getExtended()))
+        Diags.error(HS->getExtended()->getBeginLoc(),
+                    "a generic helper must extend a type built from all its "
+                    "type parameters, such as 'array of T' or 'specialize "
+                    "TGen<T>'",
+                    {HS->getExtended()->getRange()});
+      else {
+        TD->setPrevGenericHelper(
+            llvm::dyn_cast_or_null<TypeDecl>(Cur->lookup(genericHelpersKey())));
+        Cur->set(genericHelpersKey(), TD);
+      }
+    }
     const Identifier &Id = TD->getName();
     TD->setType(errorType());
     if (CurRoutine) {
@@ -5128,6 +5262,13 @@ class Checker : public StmtVisitor<Checker>,
                   {Name.getRange()});
       return nullptr;
     }
+    return specializeTypeFor(Name, G, Types);
+  }
+
+  /// The specialization of generic type G for Types (asked for at Name),
+  /// made on first use (see specializeType).
+  TypeDecl *specializeTypeFor(const Identifier &Name, TypeDecl *G,
+                              llvm::ArrayRef<Type *> Types) {
     Used.insert(G);
     auto Key = std::make_pair(G, std::vector<Type *>(Types.begin(), Types.end()));
     if (auto It = TypeInstances.find(Key); It != TypeInstances.end())
@@ -11906,7 +12047,10 @@ public:
     if (!ViaClass && !BT->isClass() && !BT->isClassRef() && !BT->isInterface())
       if (ClassType *H = helperFor(BT)) { // a type helper's member
         const ClassType *Owner = nullptr;
-        if (Decl *D = H->findMember(F.Name, &Owner)) {
+        Decl *D = E->getTypeArgs().empty() ? H->findMember(F.Name, &Owner) : nullptr;
+        if (!D) // a generic method (see the classes' below)
+          D = genericMethodOf(E, H, Owner);
+        if (D) {
           checkMemberAccess(D, Owner, F);
           E->setMember(D);
           // Self is by reference: a temporary for a value
@@ -12019,6 +12163,32 @@ public:
     }
     E->setMember(D);
     return D;
+  }
+
+  /// E (obj.M, obj.specialize M<T>): a generic method of C or its
+  /// ancestors, specialized for E's type arguments if it gives them; null
+  /// if there is none (or after a diagnostic, Reported).
+  Decl *genericMethodOf(FieldExpr *E, ClassType *C, const ClassType *&Owner) {
+    const Identifier &F = E->getField();
+    if (!E->getTypeArgs().empty()) {
+      auto *G = llvm::dyn_cast_or_null<RoutineDecl>(
+          C->findMember(genericKey(F.Name, E->getTypeArgs().size()), &Owner));
+      if (!G)
+        return nullptr;
+      llvm::SmallVector<Type *, 2> Types;
+      for (TypeSpec *TS : E->getTypeArgs()) {
+        Type *T = resolveType(TS);
+        if (T->isError())
+          return nullptr;
+        Types.push_back(T);
+      }
+      return instantiateMethod(F, G, Types);
+    }
+    auto Gs = genericMethodsNamed(C, F.Name);
+    if (Gs.empty())
+      return nullptr;
+    C->findMember(genericKey(F.Name, Gs[0]->getTypeParams().size()), &Owner);
+    return Gs[0];
   }
 
   /// "; did you mean 'X'?" for a member name of C: the closest member of
@@ -12174,11 +12344,13 @@ public:
     if (classNamedBy(F->getBase()))
       return true;
     if (ClassType *H = helperNamedBy(F->getBase()))
-      return llvm::isa_and_nonnull<RoutineDecl>(H->findMember(F->getField().Name));
+      return llvm::isa_and_nonnull<RoutineDecl>(H->findMember(F->getField().Name)) ||
+             !genericMethodsNamed(H, F->getField().Name).empty();
     Type *BT = check(F->getBase());
     if (!BT->isClass() && !BT->isClassRef() && !BT->isInterface())
       if (ClassType *H = helperFor(BT);
-          H && llvm::isa_and_nonnull<RoutineDecl>(H->findMember(F->getField().Name)))
+          H && (llvm::isa_and_nonnull<RoutineDecl>(H->findMember(F->getField().Name)) ||
+                !genericMethodsNamed(H, F->getField().Name).empty()))
         return true;
     if (auto *I = llvm::dyn_cast<InterfaceType>(BT))
       return findInterfaceMethod(I, F->getField().Name) != nullptr;

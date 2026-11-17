@@ -1784,6 +1784,11 @@ public:
   void *getGenericTokens() const { return GenericTokens; }
   void *getGenericScope() const { return GenericScope; }
   void setGenericScope(void *S) { GenericScope = S; }
+  /// A generic type helper (generic TH<T> = type helper for array of T):
+  /// the one declared before it in scope (Sema keeps them in a chain, the
+  /// last declared first).
+  TypeDecl *getPrevGenericHelper() const { return PrevGenericHelper; }
+  void setPrevGenericHelper(TypeDecl *H) { PrevGenericHelper = H; }
   static bool classof(const Decl *D) { return D->getKind() == DK_Type; }
 
 private:
@@ -1791,6 +1796,7 @@ private:
   llvm::ArrayRef<Identifier> TypeParams;
   void *GenericTokens = nullptr; ///< the parser's GenericTokens
   void *GenericScope = nullptr;  ///< Sema: the scope it is declared in
+  TypeDecl *PrevGenericHelper = nullptr;
 };
 
 /// A record field.

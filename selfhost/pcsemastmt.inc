@@ -1930,6 +1930,101 @@ end;
 
 { The type helper active for values of type t (the last declared in
   scope; a string constant: the ansistring or shortstring one), or nil. }
+{ Does type t match ts, a type written with the type parameters of generic
+  g (a parameter, array of P, specialize TGen<P...>, or a type without
+  them)? The types the parameters stand for go to bound. }
+function matchTypePattern(g: PDecl; ts: PTypeSpec; t: PType; var bound: TPtrList): boolean;
+var
+  k, m: longint;
+  gs, saved: PScope;
+  od: PDecl;
+  ti: PTypeInstance;
+  named: PType;
+begin
+  matchTypePattern := false;
+  if (ts^.kind = tsNamed) and (ts^.tquals.count = 0) then
+    for k := 0 to g^.tgParams.count - 1 do
+      if PIdent(listGet(g^.tgParams, k))^.name = ts^.tname.name then
+      begin
+        if listGet(bound, k) <> nil then
+          exit(PType(listGet(bound, k)) = t);
+        listSet(bound, k, t);
+        exit(true);
+      end;
+  if ts^.kind = tsDynArray then
+  begin
+    if t^.kind <> tyDynArray then
+      exit;
+    exit(matchTypePattern(g, ts^.dynSpec, t^.dynElement, bound));
+  end;
+  if ts^.kind = tsSpecialize then
+  begin
+    gs := PScope(g^.tgScope);
+    od := scopeFind(gs, genericKey(ts^.spName.name, ts^.spArgs.count));
+    if (od = nil) or (od^.kind <> dkType) or not typeInstancesInit then
+      exit;
+    for k := 0 to typeInstances.count - 1 do
+    begin
+      ti := PTypeInstance(listGet(typeInstances, k));
+      if (ti^.g = od) and (ti^.td^.declType = t) then
+      begin
+        for m := 0 to ts^.spArgs.count - 1 do
+          if not matchTypePattern(g, PTypeSpec(listGet(ts^.spArgs, m)),
+                                  PType(listGet(ti^.types, m)), bound) then
+            exit;
+        exit(true);
+      end;
+    end;
+    exit;
+  end;
+  { a type without the parameters: that type }
+  if ts^.kind <> tsNamed then
+    exit;
+  saved := cur;
+  cur := PScope(g^.tgScope);
+  named := resolveType(ts, nil);
+  cur := saved;
+  matchTypePattern := not isError(named) and (named = t);
+end;
+
+{ The generic type helpers in scope, the last declared first, whose
+  extended type t matches (generic TH<T> = type helper for array of T: any
+  dynamic array): the first one's specialization for the type arguments
+  the match gives, or nil. }
+function genericHelperFor(t: PType): PType;
+var
+  g, inst: PDecl;
+  bound: TPtrList;
+  k: longint;
+  complete: boolean;
+begin
+  genericHelperFor := nil;
+  if t^.kind in [tyClass, tyClassRef, tyInterface] then
+    exit;
+  g := lookup(genericHelpersKey);
+  while g <> nil do
+  begin
+    listInit(bound);
+    for k := 0 to g^.tgParams.count - 1 do
+      listAdd(bound, nil);
+    if matchTypePattern(g, g^.typeSpec^.helperFor, t, bound) then
+    begin
+      complete := true;
+      for k := 0 to bound.count - 1 do
+        if listGet(bound, k) = nil then
+          complete := false;
+      if complete then
+      begin
+        inst := specializeTypeFor(g^.ident, g, bound);
+        if (inst <> nil) and (inst^.declType <> nil) and (inst^.declType^.kind = tyClass) then
+          genericHelperFor := inst^.declType;
+        exit;
+      end;
+    end;
+    g := g^.prevGenericHelper;
+  end;
+end;
+
 function helperFor(t: PType): PType;
 var
   d: PDecl;
@@ -1946,9 +2041,13 @@ begin
     exit(h);
   end;
   d := lookup(helperKey(t));
-  if (d <> nil) and (d^.kind = dkType) and (d^.declType <> nil) and
-     (d^.declType^.kind = tyClass) then
-    helperFor := d^.declType;
+  if d <> nil then
+  begin
+    if (d^.kind = dkType) and (d^.declType <> nil) and (d^.declType^.kind = tyClass) then
+      helperFor := d^.declType;
+    exit;
+  end;
+  helperFor := genericHelperFor(t);
 end;
 
 { The helper of the type base names (AnsiString.Join), or nil. }
@@ -2017,6 +2116,40 @@ begin
 end;
 
 { Resolves r.f / obj.member / TFoo.Create; nil after a diagnostic. }
+{ e (obj.M, obj.specialize M<T>): a generic method of c or its ancestors,
+  specialized for e's type arguments if it gives them; nil if there is none
+  (or after a diagnostic). }
+function genericMethodOf(e: PNode; c: PType; var owner: PType): PDecl;
+var
+  g: PDecl;
+  types, gs: TPtrList;
+  t: PType;
+  i: longint;
+begin
+  genericMethodOf := nil;
+  if e^.fieldTypeArgs.count > 0 then
+  begin
+    g := findMember(c, genericKey(e^.fieldName.name, e^.fieldTypeArgs.count), owner);
+    if (g = nil) or (g^.kind <> dkRoutine) then
+      exit;
+    listInit(types);
+    for i := 0 to e^.fieldTypeArgs.count - 1 do
+    begin
+      t := resolveType(PTypeSpec(listGet(e^.fieldTypeArgs, i)), nil);
+      if isError(t) then
+        exit;
+      listAdd(types, t);
+    end;
+    exit(instantiateMethod(e^.fieldName, g, types));
+  end;
+  genericMethodsNamed(c, e^.fieldName.name, gs);
+  if gs.count = 0 then
+    exit;
+  g := PDecl(listGet(gs, 0));
+  findMember(c, genericKey(e^.fieldName.name, g^.typeParams.count), owner);
+  genericMethodOf := g;
+end;
+
 function resolveMember(e: PNode): PDecl;
 var
   gs, types: TPtrList;
@@ -2091,7 +2224,11 @@ begin
     if h <> nil then { a type helper's member }
     begin
       owner := nil;
-      d := findMember(h, e^.fieldName.name, owner);
+      d := nil;
+      if e^.fieldTypeArgs.count = 0 then
+        d := findMember(h, e^.fieldName.name, owner);
+      if d = nil then { a generic method (see the classes' below) }
+        d := genericMethodOf(e, h, owner);
       if d <> nil then
       begin
         checkMemberAccess(d, owner, e^.fieldName);
@@ -2277,7 +2414,8 @@ begin
   begin
     owner := nil;
     d := findMember(h, callee^.fieldName.name, owner);
-    exit((d <> nil) and (d^.kind = dkRoutine));
+    genericMethodsNamed(h, callee^.fieldName.name, gs);
+    exit(((d <> nil) and (d^.kind = dkRoutine)) or (gs.count > 0));
   end;
   bt := check(callee^.base);
   if not (bt^.kind in [tyClass, tyClassRef, tyInterface]) then
@@ -2287,7 +2425,8 @@ begin
     begin
       owner := nil;
       d := findMember(h, callee^.fieldName.name, owner);
-      if (d <> nil) and (d^.kind = dkRoutine) then
+      genericMethodsNamed(h, callee^.fieldName.name, gs);
+      if ((d <> nil) and (d^.kind = dkRoutine)) or (gs.count > 0) then
         exit(true);
     end;
   end;
