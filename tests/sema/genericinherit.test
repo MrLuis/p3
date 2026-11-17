@@ -1,0 +1,13 @@
+; Generic inheritance and properties in interfaces (objfpc): a heading's
+; specialization must be a class or an interface; an interface's
+; properties are plain ones, read and written through its methods.
+; RUN: not %p3 --mode=objfpc -ferror-limit=0 -c %S/Inputs/genericinherit/errors.pas -o %t.o 2>&1 | FileCheck %s
+; CHECK: errors.pas:8:32: error: 'GetS' must be a method of interface 'IThing': a function without parameters returning 'integer'
+; CHECK: errors.pas:9:36: error: 'Nope' must be a method of interface 'IThing': a function without parameters returning 'integer'
+; CHECK: errors.pas:10:48: error: 'GetX' must be a method of interface 'IThing': a procedure with one parameter of type 'integer'
+; CHECK: errors.pas:11:14: error: the properties of an interface are plain ones (no array property, index, default, class or stored value) for now
+; CHECK: errors.pas:12:14: error: 'X' is already declared in interface 'IThing'
+; CHECK: errors.pas:13:14: error: property 'NoAccess' needs 'read' or 'write'
+; CHECK: errors.pas:20:16: error: 'TBox<integer>' is not a class or interface type
+; CHECK: errors.pas:26:18: error: no method named 'Nothing' in interface 'IThing'
+; CHECK-NOT: error:

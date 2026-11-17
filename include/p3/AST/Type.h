@@ -30,6 +30,7 @@ class ConstDecl;
 class Decl;
 class FieldDecl;
 class RoutineDecl;
+class PropertyDecl;
 class VarDecl;
 struct FieldList;
 
@@ -536,6 +537,7 @@ class InterfaceType final : public Type {
   bool COM = false;
   llvm::ArrayRef<RoutineDecl *> Methods;    ///< own, in source order
   llvm::ArrayRef<RoutineDecl *> AllMethods; ///< by slot
+  llvm::ArrayRef<PropertyDecl *> Properties; ///< own (objfpc)
   const void *Module = nullptr;
   bool Defined = false;
 
@@ -543,6 +545,9 @@ public:
   InterfaceType() : Type(TK_Interface) {}
   InterfaceType *getParent() const { return Parent; }
   llvm::ArrayRef<RoutineDecl *> getMethods() const { return Methods; }
+  /// Its own properties, read and written through its methods.
+  llvm::ArrayRef<PropertyDecl *> getProperties() const { return Properties; }
+  void setProperties(llvm::ArrayRef<PropertyDecl *> P) { Properties = P; }
   llvm::ArrayRef<RoutineDecl *> getAllMethods() const { return AllMethods; }
   const void *getModule() const { return Module; }
   bool isDefined() const { return Defined; }

@@ -477,6 +477,14 @@ begin
     end
     else
     begin
+      if target^.base^.typ^.kind = tyInterface then { its setter }
+      begin
+        listInit(noIndexes);
+        accessorArgs(p, noIndexes, value, args);
+        ignored := emitInterfaceCall(p^.writeDecl, target^.base, target^.fieldName.loc,
+                                     args);
+        exit;
+      end;
       obj := memberObject(target^.base);
       c := target^.base^.typ;
     end;

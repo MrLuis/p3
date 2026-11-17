@@ -4567,6 +4567,53 @@ end;
 
 { The method name of interface i or its nearest ancestor declaring it (the
   first of its overloads). }
+function findInterfaceProperty(i: PType; name: PName): PDecl;
+var
+  k: longint;
+  p: PDecl;
+begin
+  findInterfaceProperty := nil;
+  while i <> nil do
+  begin
+    for k := 0 to i^.intfProps.count - 1 do
+    begin
+      p := PDecl(listGet(i^.intfProps, k));
+      if p^.ident.name = name then
+        exit(p);
+    end;
+    i := i^.intfParent;
+  end;
+end;
+
+{ specialize IGen<...> in a class's or interface's heading: the interface
+  it is, or nil after a diagnostic. }
+function specializedInterface(const id: TIdent; spec: PTypeSpec): PType;
+var
+  t: PType;
+begin
+  specializedInterface := nil;
+  t := resolveType(spec, nil);
+  if isError(t) then
+    exit;
+  if t^.kind <> tyInterface then
+  begin
+    ms('');
+    maT(t);
+    ma(' is not an interface type');
+    errR(spec^.b, specRange(spec));
+    exit;
+  end;
+  if not t^.intfDefined then
+  begin
+    ms('interface ');
+    maT(t);
+    ma(' is not defined yet');
+    errR(id.loc, specRange(spec));
+    exit;
+  end;
+  specializedInterface := t;
+end;
+
 function findInterfaceMethod(i: PType; name: PName): PDecl;
 var
   k: longint;
@@ -4585,10 +4632,103 @@ begin
   end;
 end;
 
+{ property P: T read GetP [write SetP] in interface i (objfpc): its
+  accessors are methods of i (or of its ancestors), a function without
+  parameters returning T and a procedure taking one T. Array properties,
+  index and default specifiers are not supported. False after an error. }
+function defineInterfaceProperty(i: PType; p: PDecl; const earlier: TPtrList): boolean;
+var
+  t: PType;
+  k: longint;
+  dup: boolean;
+  rd, wr: PDecl;
+
+  function accessor(const n: TIdent; isRead: boolean): PDecl;
+  var
+    r: PDecl;
+    fits: boolean;
+  begin
+    accessor := nil;
+    if not identValid(n) then
+      exit;
+    r := findInterfaceMethod(i, n.name);
+    fits := false;
+    if r <> nil then
+    begin
+      if isRead then
+        fits := r^.isFunction and (r^.params.count = 0) and (r^.resultType = t)
+      else
+        fits := not r^.isFunction and (r^.params.count = 1) and
+                (PDecl(listGet(r^.params, 0))^.varKind <> vkVarParam) and
+                (PDecl(listGet(r^.params, 0))^.varType = t);
+    end;
+    if not fits then
+    begin
+      ms('''');
+      maN(n.spelling);
+      ma(''' must be a method of interface ');
+      maT(i);
+      if isRead then
+        ma(': a function without parameters returning ')
+      else
+        ma(': a procedure with one parameter of type ');
+      maT(t);
+      errR(n.loc, identRange(n));
+      exit;
+    end;
+    accessor := r;
+  end;
+
+begin
+  defineInterfaceProperty := false;
+  t := resolveType(p^.propSpec, nil);
+  p^.propType := t;
+  if (p^.propParams.count > 0) or (p^.propIndex <> nil) or p^.propIsDefault or
+     p^.propIsClass or (p^.propDefaultValue <> nil) then
+  begin
+    ms('the properties of an interface are plain ones (no array property, ' +
+       'index, default, class or stored value) for now');
+    errR(p^.ident.loc, identRange(p^.ident));
+    exit;
+  end;
+  dup := (findInterfaceMethod(i, p^.ident.name) <> nil) or
+         (findInterfaceProperty(i, p^.ident.name) <> nil);
+  for k := 0 to earlier.count - 1 do
+    if PDecl(listGet(earlier, k))^.ident.name = p^.ident.name then
+      dup := true;
+  if dup then
+  begin
+    ms('''');
+    maN(p^.ident.spelling);
+    ma(''' is already declared in interface ');
+    maT(i);
+    errR(p^.ident.loc, identRange(p^.ident));
+    exit;
+  end;
+  if isError(t) then
+    exit;
+  rd := accessor(p^.readName, true);
+  wr := accessor(p^.writeName, false);
+  if (identValid(p^.readName) and (rd = nil)) or
+     (identValid(p^.writeName) and (wr = nil)) then
+    exit;
+  if (rd = nil) and (wr = nil) then
+  begin
+    ms('property ''');
+    maN(p^.ident.spelling);
+    ma(''' needs ''read'' or ''write''');
+    errR(p^.ident.loc, identRange(p^.ident));
+    exit;
+  end;
+  p^.readDecl := rd;
+  p^.writeDecl := wr;
+  defineInterfaceProperty := true;
+end;
+
 procedure defineInterfaceMembers(i: PType; ts: PTypeSpec);
 var
   parentIntf: PType;
-  own, all: TPtrList;
+  own, all, props, defined: TPtrList;
   seen: TIntMap;
   k: longint;
   r, inh, prev: PDecl;
@@ -4606,7 +4746,9 @@ begin
   i^.intfCOM := not ts^.isCorba;
   if identValid(ts^.intfParentName) then
   begin
-    if ts^.intfParentName.name = intern(lowerStr(nameStr(i^.declName))) then
+    if ts^.intfParentSpec <> nil then { interface(specialize IBase<T>) }
+      parentIntf := specializedInterface(ts^.intfParentName, ts^.intfParentSpec)
+    else if ts^.intfParentName.name = intern(lowerStr(nameStr(i^.declName))) then
     begin
       ms('interface ');
       maT(i);
@@ -4633,9 +4775,15 @@ begin
     for k := 0 to parentIntf^.intfAllMethods.count - 1 do
       listAdd(all, listGet(parentIntf^.intfAllMethods, k));
   mapInit(seen);
+  listInit(props);
   for k := 0 to ts^.intfMemberList.count - 1 do
   begin
     r := PDecl(listGet(ts^.intfMemberList, k));
+    if r^.kind = dkProperty then
+    begin
+      listAdd(props, r); { (after the methods: they name them) }
+      continue;
+    end;
     r^.routineIntf := i;
     r^.parent := nil;
     r^.level := 1;
@@ -4673,6 +4821,11 @@ begin
     listAdd(own, r);
   end;
   defineInterface(i, parentIntf, own, all, curModule);
+  listInit(defined);
+  for k := 0 to props.count - 1 do
+    if defineInterfaceProperty(i, PDecl(listGet(props, k)), defined) then
+      listAdd(defined, listGet(props, k));
+  i^.intfProps := defined;
 end;
 
 { The methods of class c implementing the methods of interface i (by
@@ -4730,6 +4883,7 @@ end;
 
 procedure defineClassMembers(c: PType; ts: PTypeSpec);
 var
+  pt: PType;
   parentClass, owner, pc, it: PType;
   members, fields, vtable, listed, listedWhere, impls: TPtrList;
   own: TIntMap;
@@ -4741,12 +4895,15 @@ var
   pendingClassMark, pendingPointerMark: longint;
 
   { the interfaces class(TParent, I1, I2) lists }
-  procedure addListed(id: PIdent);
+  procedure addListed(id: PIdent; spec: PTypeSpec);
   var
     t: PType;
     j: longint;
   begin
-    t := lookupInterface(id^);
+    if spec <> nil then
+      t := specializedInterface(id^, spec)
+    else
+      t := lookupInterface(id^);
     if t = nil then
       exit;
     for j := 0 to listed.count - 1 do
@@ -4767,7 +4924,23 @@ begin
   parentClass := tobjectType;
   listInit(listed);
   listInit(listedWhere);
-  if identValid(ts^.parentName) then
+  if ts^.classParentSpec <> nil then { class(specialize TBase<T>) }
+  begin
+    pt := resolveType(ts^.classParentSpec, nil);
+    if pt^.kind = tyInterface then
+      addListed(@ts^.parentName, ts^.classParentSpec)
+    else if (pt^.kind = tyClass) and (pt^.classHelperFor = nil) and
+            (pt^.classRecord = nil) then
+      parentClass := pt
+    else if not isError(pt) then
+    begin
+      ms('');
+      maT(pt);
+      ma(' is not a class or interface type');
+      errR(ts^.classParentSpec^.b, specRange(ts^.classParentSpec));
+    end;
+  end
+  else if identValid(ts^.parentName) then
   begin
     td := lookup(ts^.parentName.name);
     if (td <> nil) and (td^.kind <> dkType) then
@@ -4781,7 +4954,7 @@ begin
     end
     else if (td <> nil) and (td^.declType <> nil) and
             (td^.declType^.kind = tyInterface) then
-      addListed(@ts^.parentName)
+      addListed(@ts^.parentName, nil)
     else
     begin
       pc := lookupClass(ts^.parentName);
@@ -4790,7 +4963,11 @@ begin
     end;
   end;
   for k := 0 to ts^.interfaceNames.count - 1 do
-    addListed(PIdent(listGet(ts^.interfaceNames, k)));
+    if k < ts^.classIntfSpecs.count then
+      addListed(PIdent(listGet(ts^.interfaceNames, k)),
+                PTypeSpec(listGet(ts^.classIntfSpecs, k)))
+    else
+      addListed(PIdent(listGet(ts^.interfaceNames, k)), nil);
   { the objects of COM interfaces are reference counted by
     TInterfacedObject }
   for k := 0 to listed.count - 1 do

@@ -346,6 +346,20 @@ void Parser::parseTypeParamList() {
   GenericTypeParams = Ctx.copyArray<Identifier>(TypeParams);
 }
 
+bool Parser::parseHeadingType(Identifier &Name, TypeSpec *&Spec,
+                              llvm::StringRef What) {
+  Spec = nullptr;
+  if (startsSpecialize()) { // class(specialize TBase<T>)
+    TypeSpec *S = parseSpecializeType();
+    if (!S)
+      return false;
+    Spec = S;
+    Name = llvm::cast<SpecializeTypeSpec>(S)->getName();
+    return true;
+  }
+  return expectIdentifier(Name, What);
+}
+
 // genericMethod = "generic" [ "class" ] ( "function" | "procedure" ) name
 //                 "<" typeParams ">" ... (a method heading, in a class)
 RoutineDecl *Parser::parseGenericMethodHeading(bool InRecord) {
@@ -1895,21 +1909,30 @@ TypeSpec *Parser::parseClassType(SourceLocation Start) {
   }
   Identifier Parent;
   llvm::SmallVector<Identifier, 2> Interfaces; // class(TParent, I1, I2)
+  TypeSpec *ParentSpec = nullptr;              // (specialize TBase<T>)
+  llvm::SmallVector<TypeSpec *, 2> InterfaceSpecs;
+  bool AnySpec = false;
   auto Spec = [&](llvm::ArrayRef<Decl *> Members) {
     auto *CS = Ctx.create<ClassTypeSpec>(SourceRange(Start, PrevTokEnd), Parent,
                                          Members, false);
     CS->setInterfaces(Ctx.copyArray<Identifier>(Interfaces));
+    CS->setParentSpec(ParentSpec);
+    if (AnySpec)
+      CS->setInterfaceSpecs(Ctx.copyArray<TypeSpec *>(InterfaceSpecs));
     return CS;
   };
   if (Tok.is(tok::l_paren)) {
     SourceLocation LParen = consumeToken();
-    if (!expectIdentifier(Parent, "parent class name"))
+    if (!parseHeadingType(Parent, ParentSpec, "parent class name"))
       return nullptr;
     while (tryConsume(tok::comma)) {
       Identifier I;
-      if (!expectIdentifier(I, "interface name"))
+      TypeSpec *IS = nullptr;
+      if (!parseHeadingType(I, IS, "interface name"))
         return nullptr;
       Interfaces.push_back(I);
+      InterfaceSpecs.push_back(IS);
+      AnySpec |= IS != nullptr;
     }
     if (!expect(tok::r_paren, "after parent class name")) {
       Diags.note(LParen, "to match this '('");
@@ -2106,9 +2129,10 @@ TypeSpec *Parser::parseInterfaceType(SourceLocation Start) {
                                          Identifier(), llvm::ArrayRef<Decl *>(),
                                          /*Forward=*/true, Corba, "");
   Identifier Parent;
+  TypeSpec *ParentSpec = nullptr;
   if (Tok.is(tok::l_paren)) {
     SourceLocation LParen = consumeToken();
-    if (!expectIdentifier(Parent, "parent interface name"))
+    if (!parseHeadingType(Parent, ParentSpec, "parent interface name"))
       return nullptr;
     if (!expect(tok::r_paren, "after parent interface name")) {
       Diags.note(LParen, "to match this '('");
@@ -2138,11 +2162,18 @@ TypeSpec *Parser::parseInterfaceType(SourceLocation Start) {
       Members.push_back(R);
       continue;
     }
-    if (Tok.is(tok::kw_property))
-      unsupported("properties in interfaces are");
-    else
-      Diags.error(Tok.getLocation(),
-                  "expected a method heading or 'end' in an interface");
+    if (Tok.is(tok::kw_property)) { // read and written through its methods
+      PropertyDecl *Prop = parsePropertyDecl();
+      if (!Prop) {
+        skipUntil({tok::kw_end});
+        tryConsume(tok::kw_end);
+        return nullptr;
+      }
+      Members.push_back(Prop);
+      continue;
+    }
+    Diags.error(Tok.getLocation(),
+                "expected a method heading, a property or 'end' in an interface");
     skipUntil({tok::kw_end});
     tryConsume(tok::kw_end);
     return nullptr;
@@ -2151,9 +2182,11 @@ TypeSpec *Parser::parseInterfaceType(SourceLocation Start) {
     Diags.note(IntfLoc, "to match this 'interface'");
     return nullptr;
   }
-  return Ctx.create<InterfaceTypeSpec>(SourceRange(Start, PrevTokEnd), Parent,
-                                       Ctx.copyArray<Decl *>(Members), false,
-                                       Corba, GUID);
+  auto *IS = Ctx.create<InterfaceTypeSpec>(SourceRange(Start, PrevTokEnd), Parent,
+                                           Ctx.copyArray<Decl *>(Members), false,
+                                           Corba, GUID);
+  IS->setParentSpec(ParentSpec);
+  return IS;
 }
 
 /// In a `class var` section: identList ":" type ";" (with hints), as

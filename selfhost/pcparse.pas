@@ -2841,6 +2841,22 @@ end;
 function parseArrayType(start: TLoc; packed_: boolean): PTypeSpec; forward;
 function parseRecordType(start: TLoc; packed_: boolean): PTypeSpec; forward;
 
+{ In a class's or interface's heading: a type's name, or (objfpc)
+  specialize TGen<...> (spec, name its generic's name). }
+function parseHeadingType(var name: TIdent; var spec: PTypeSpec; const what: string): boolean;
+begin
+  spec := nil;
+  if startsSpecialize then { class(specialize TBase<T>) }
+  begin
+    spec := parseSpecializeType;
+    if spec = nil then
+      exit(false);
+    name := spec^.spName;
+    exit(true);
+  end;
+  parseHeadingType := expectIdentifier(name, what);
+end;
+
 function classSpec(b, e: TLoc; const parentName: TIdent;
                    const members: TPtrList; isForward: boolean): PTypeSpec;
 var
@@ -2859,6 +2875,9 @@ end;
 // On an error in the members, skips to the class's 'end'.
 function parseClassType(start: TLoc): PTypeSpec;
 var
+  parentSpec, intfSpec: PTypeSpec;
+  intfSpecs: TPtrList;
+  anySpec: boolean;
   race: longint;
   hf: longint;
   hm: PName;
@@ -2890,16 +2909,22 @@ begin
     exit(ts);
   end;
   listInit(intfNames); { class(TParent, I1, I2) }
+  parentSpec := nil; { (specialize TBase<T>) }
+  listInit(intfSpecs);
+  anySpec := false;
   if tok.kind = tkLParen then
   begin
     lparen := consumeToken;
-    if not expectIdentifier(parentName, 'parent class name') then
+    if not parseHeadingType(parentName, parentSpec, 'parent class name') then
       exit;
     while tryConsume(tkComma) do
     begin
-      if not expectIdentifier(intfName, 'interface name') then
+      if not parseHeadingType(intfName, intfSpec, 'interface name') then
         exit;
       listAdd(intfNames, newIdent(intfName));
+      listAdd(intfSpecs, intfSpec);
+      if intfSpec <> nil then
+        anySpec := true;
     end;
     if not expect(tkRParen, 'after parent class name') then
     begin
@@ -2910,6 +2935,9 @@ begin
     begin
       ts := classSpec(start, prevTokEnd, parentName, members, false);
       ts^.interfaceNames := intfNames;
+      ts^.classParentSpec := parentSpec;
+      if anySpec then
+        ts^.classIntfSpecs := intfSpecs;
       exit(ts);
     end;
   end;
@@ -3142,6 +3170,9 @@ begin
   end;
   ts := classSpec(start, prevTokEnd, parentName, members, false);
   ts^.interfaceNames := intfNames;
+  ts^.classParentSpec := parentSpec;
+  if anySpec then
+    ts^.classIntfSpecs := intfSpecs;
   parseClassType := ts;
 end;
 
@@ -3150,6 +3181,7 @@ end;
                   method headings "end" .                 (objfpc, CORBA) }
 function parseInterfaceType(start: TLoc): PTypeSpec;
 var
+  parentSpec: PTypeSpec;
   intfLoc, lparen: TLoc;
   parentName: TIdent;
   members: TPtrList;
@@ -3175,10 +3207,11 @@ begin
     ts^.isCorba := corba;
     exit(ts);
   end;
+  parentSpec := nil;
   if tok.kind = tkLParen then
   begin
     lparen := consumeToken;
-    if not expectIdentifier(parentName, 'parent interface name') then
+    if not parseHeadingType(parentName, parentSpec, 'parent interface name') then
       exit;
     if not expect(tkRParen, 'after parent interface name') then
     begin
@@ -3212,10 +3245,19 @@ begin
       listAdd(members, m);
       continue;
     end;
-    if tok.kind = tkKwProperty then
-      unsupported('properties in interfaces are')
-    else
-      diagError(tok.loc, 'expected a method heading or ''end'' in an interface');
+    if tok.kind = tkKwProperty then { read and written through its methods }
+    begin
+      m := parsePropertyDecl;
+      if m = nil then
+      begin
+        skipUntil([tkKwEnd]);
+        tryConsume(tkKwEnd);
+        exit;
+      end;
+      listAdd(members, m);
+      continue;
+    end;
+    diagError(tok.loc, 'expected a method heading, a property or ''end'' in an interface');
     skipUntil([tkKwEnd]);
     tryConsume(tkKwEnd);
     exit;
@@ -3231,6 +3273,7 @@ begin
   ts^.isForwardIntf := false;
   ts^.guid := guid;
   ts^.isCorba := corba;
+  ts^.intfParentSpec := parentSpec;
   parseInterfaceType := ts;
 end;
 

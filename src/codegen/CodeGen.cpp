@@ -4746,6 +4746,24 @@ public:
   }
 
   /// obj.M(args) or TFoo.Create(args) through FieldExpr F.
+  /// Base.R(Args), Base an interface value: R through its method table.
+  llvm::Value *emitInterfaceCall(RoutineDecl *R, Expr *Base, SourceLocation L,
+                                 llvm::ArrayRef<Expr *> Args) {
+    llvm::Value *V = visitExpr(Base);
+    llvm::Value *Obj = B.CreateExtractValue(V, 0, "obj");
+    llvm::Value *Table = B.CreateExtractValue(V, 1, "itable");
+    if (rangeChecks(L))
+      emitRuntimeCheck(B.CreateIsNull(Obj), "use of a nil interface reference", L);
+    llvm::Value *Slot =
+        B.CreateConstInBoundsGEP1_64(B.getPtrTy(), Table, R->getVMTIndex());
+    llvm::Value *Fn = B.CreateLoad(B.getPtrTy(), Slot, "method");
+    llvm::Value *Result =
+        emitCallTo({routineFnType(R), Fn},
+                   llvm::ConstantPointerNull::get(B.getPtrTy()),
+                   R->getParams(), Args, Obj, resultOf(R));
+    return R->isFunction() ? Result : nullptr;
+  }
+
   llvm::Value *emitMemberCall(FieldExpr *F, llvm::ArrayRef<Expr *> Args) {
     auto *R = llvm::cast<RoutineDecl>(F->getMember());
     if (R->getClass() && R->getClass()->isHelper()) // a type helper's
@@ -4763,22 +4781,8 @@ public:
         return emitCall(R, Args);
       return emitRecordMethodCall(R, emitAddress(F->getBase()), Args);
     }
-    if (F->getBase()->getType()->isInterface()) { // through the method table
-      llvm::Value *V = visitExpr(F->getBase());
-      llvm::Value *Obj = B.CreateExtractValue(V, 0, "obj");
-      llvm::Value *Table = B.CreateExtractValue(V, 1, "itable");
-      if (rangeChecks(F->getField().Loc))
-        emitRuntimeCheck(B.CreateIsNull(Obj), "use of a nil interface reference",
-                         F->getField().Loc);
-      llvm::Value *Slot =
-          B.CreateConstInBoundsGEP1_64(B.getPtrTy(), Table, R->getVMTIndex());
-      llvm::Value *Fn = B.CreateLoad(B.getPtrTy(), Slot, "method");
-      llvm::Value *Result =
-          emitCallTo({routineFnType(R), Fn},
-                     llvm::ConstantPointerNull::get(B.getPtrTy()),
-                     R->getParams(), Args, Obj, resultOf(R));
-      return R->isFunction() ? Result : nullptr;
-    }
+    if (F->getBase()->getType()->isInterface()) // through the method table
+      return emitInterfaceCall(R, F->getBase(), F->getField().Loc, Args);
     if (namesType(F->getBase())) { // TFoo.Create, TOuter.TInner.Create
       auto *C = llvm::cast<ClassType>(F->getBase()->getType());
       if (R->isConstructor())
@@ -4899,6 +4903,9 @@ public:
     if (auto *P = llvm::dyn_cast<PropertyDecl>(D);
         P && helperRoutine(P)) // a type helper's
       return emitPropertyRead(P, helperSelf(F), C);
+    if (auto *P = llvm::dyn_cast<PropertyDecl>(D); P && C->isInterface())
+      return emitInterfaceCall(llvm::cast<RoutineDecl>(P->getRead()), F->getBase(),
+                               F->getField().Loc, {}); // (its getter)
     llvm::Value *Obj = memberObject(F->getBase());
     if (auto *P = llvm::dyn_cast<PropertyDecl>(D))
       return emitPropertyRead(P, Obj, C);
@@ -6063,6 +6070,12 @@ public:
       C = N->getWith()->Record->getType();
     } else {
       auto *F = llvm::cast<FieldExpr>(Target);
+      if (F->getBase()->getType()->isInterface()) { // its setter
+        auto *R = llvm::cast<RoutineDecl>(P->getWrite());
+        emitInterfaceCall(R, F->getBase(), F->getField().Loc,
+                          accessorArgs(P, {}, Value));
+        return;
+      }
       Obj = memberObject(F->getBase());
       C = F->getBase()->getType();
     }

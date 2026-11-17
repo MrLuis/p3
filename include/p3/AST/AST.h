@@ -1481,9 +1481,25 @@ public:
   const Identifier &getParent() const { return Parent; }
   llvm::ArrayRef<Identifier> getInterfaces() const { return Interfaces; }
   void setInterfaces(llvm::ArrayRef<Identifier> I) { Interfaces = I; }
+  /// objfpc: class(specialize TBase<T>, specialize IIter<T>): the parent's
+  /// and the interfaces' specializations (null for a name; the
+  /// interfaces' list is empty or as long as getInterfaces).
+  TypeSpec *getParentSpec() const { return ParentSpec; }
+  void setParentSpec(TypeSpec *S) { ParentSpec = S; }
+  llvm::ArrayRef<TypeSpec *> getInterfaceSpecs() const { return InterfaceSpecs; }
+  void setInterfaceSpecs(llvm::ArrayRef<TypeSpec *> S) { InterfaceSpecs = S; }
+  TypeSpec *getInterfaceSpec(size_t K) const {
+    return K < InterfaceSpecs.size() ? InterfaceSpecs[K] : nullptr;
+  }
   llvm::ArrayRef<Decl *> getMembers() const { return Members; }
   bool isForward() const { return Forward; }
   static bool classof(const TypeSpec *T) { return T->getKind() == TS_Class; }
+
+private:
+  TypeSpec *ParentSpec = nullptr;
+  llvm::ArrayRef<TypeSpec *> InterfaceSpecs;
+
+public:
 };
 
 /// type helper [(Parent)] for Extended members end  (objfpc,
@@ -1518,6 +1534,7 @@ class InterfaceTypeSpec final : public TypeSpec {
   bool Forward;
   bool Corba;           ///< declared under {$interfaces corba}
   llvm::StringRef GUID; ///< ['...'] (no effect)
+  TypeSpec *ParentSpec = nullptr;
 
 public:
   InterfaceTypeSpec(SourceRange R, Identifier Parent,
@@ -1526,6 +1543,10 @@ public:
       : TypeSpec(TS_Interface, R), Parent(Parent), Members(Members),
         Forward(Forward), Corba(Corba), GUID(GUID) {}
   const Identifier &getParent() const { return Parent; }
+  /// objfpc: interface(specialize IBase<T>): the parent's specialization
+  /// (null for a name).
+  TypeSpec *getParentSpec() const { return ParentSpec; }
+  void setParentSpec(TypeSpec *S) { ParentSpec = S; }
   llvm::ArrayRef<Decl *> getMembers() const { return Members; }
   bool isForward() const { return Forward; }
   bool isCorba() const { return Corba; }

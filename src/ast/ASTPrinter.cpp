@@ -561,10 +561,20 @@ class ASTPrinter : public StmtVisitor<ASTPrinter>,
       line(C->isForward() ? "ClassTypeSpec forward" : "ClassTypeSpec");
       if (C->getParent().isValid())
         OS << " '" << C->getParent().Name << '\'';
-      for (const Identifier &I : C->getInterfaces())
-        OS << ", '" << I.Name << '\'';
+      if (C->getParentSpec())
+        OS << " specialize";
+      for (size_t K = 0; K < C->getInterfaces().size(); ++K) {
+        OS << ", '" << C->getInterfaces()[K].Name << '\'';
+        if (C->getInterfaceSpec(K))
+          OS << " specialize";
+      }
       loc(TS->getBeginLoc());
       IndentScope I(Indent);
+      if (C->getParentSpec())
+        printTypeSpec(C->getParentSpec());
+      for (TypeSpec *S : C->getInterfaceSpecs())
+        if (S)
+          printTypeSpec(S);
       for (Decl *M : C->getMembers())
         printDecl(M);
       return;
@@ -576,12 +586,16 @@ class ASTPrinter : public StmtVisitor<ASTPrinter>,
         OS << " com";
       if (I->getParent().isValid())
         OS << " '" << I->getParent().Name << '\'';
+      if (I->getParentSpec())
+        OS << " specialize";
       if (!I->getGUID().empty()) {
         OS << ' ';
         quoted(I->getGUID());
       }
       loc(TS->getBeginLoc());
       IndentScope J(Indent);
+      if (I->getParentSpec())
+        printTypeSpec(I->getParentSpec());
       for (Decl *M : I->getMembers())
         printDecl(M);
       return;

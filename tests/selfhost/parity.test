@@ -152,6 +152,11 @@
 ; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-llvm --extra="-g -o -" --modes=objfpc --ref p3 --new %t.p3 %S/../run/recordgenerics.pas | FileCheck %s
 ; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-ast --extra="-o -" --modes=objfpc --ref p3 --new %t.p3 %S/../run/recordgenerics.pas %S/../sema/Inputs/recordgenerics | FileCheck %s
 ; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-parse-tree --extra="-o -" --modes=objfpc --ref p3 --new %t.p3 %S/../run/recordgenerics.pas %S/../sema/Inputs/recordgenerics | FileCheck %s
+; Generic inheritance and properties in interfaces (objfpc).
+; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-llvm --extra="-o -" --modes=objfpc --ref p3 --new %t.p3 %S/../run/genericinherit.pas %S/../run/intfprops.pas %S/../sema/Inputs/genericinherit | FileCheck %s
+; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-llvm --extra="-g -o -" --modes=objfpc --ref p3 --new %t.p3 %S/../run/genericinherit.pas %S/../run/intfprops.pas | FileCheck %s
+; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-ast --extra="-o -" --modes=objfpc --ref p3 --new %t.p3 %S/../run/genericinherit.pas %S/../run/intfprops.pas %S/../sema/Inputs/genericinherit | FileCheck %s
+; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-parse-tree --extra="-o -" --modes=objfpc --ref p3 --new %t.p3 %S/../run/genericinherit.pas %S/../run/intfprops.pas %S/../sema/Inputs/genericinherit | FileCheck %s
 ; Separate units (S11): the unit modules and the program importing them.
 ; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-llvm --extra="-I %S/../run/Inputs/units/lib -o -" --modes=tp --ref p3 --new %t.p3 %S/../run/Inputs/units | FileCheck %s
 ; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-llvm --extra="-I %S/../run/Inputs/units/lib -fseparate-units -g -o -" --modes=tp --ref p3 --new %t.p3 %S/../run/Inputs/units | FileCheck %s

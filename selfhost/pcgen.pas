@@ -4428,10 +4428,30 @@ begin
 end;
 
 { obj.M(args) or TFoo.Create(args) through e (an nkField). }
+{ base.r(args), base an interface value: r through its method table. }
+function emitInterfaceCall(r: PDecl; base: PNode; loc: TLoc; const args: TPtrList): TV;
+var
+  obj, v, table, slot, fn, res: TV;
+begin
+  v := visitExpr(base);
+  obj := irExtract(v, 0, irPtrT, 'obj');
+  table := irExtract(v, 1, irPtrT, 'itable');
+  if rangeChecks(loc) then
+    emitRuntimeCheck(irICmp('eq', obj, irNull, ''), 'use of a nil interface reference',
+                     loc);
+  slot := irGEP1(irPtrT, table, i64c(r^.vmtIndex), true, '');
+  fn := irLoad(irPtrT, slot, 'method');
+  res := emitCallToSelf(methodFnType(r), fn, irNull, true, obj, true, r^.params, args,
+                        resultOf(r));
+  if r^.isFunction then
+    exit(res);
+  emitInterfaceCall := irNull;
+end;
+
 function emitMemberCall(e: PNode; const args: TPtrList): TV;
 var
   r: PDecl;
-  obj, v, table, slot, fn, res: TV;
+  obj: TV;
 begin
   r := e^.fieldDecl;
   if (r^.ownerClass <> nil) and (r^.ownerClass^.classHelperFor <> nil) then
@@ -4455,21 +4475,7 @@ begin
     exit(emitRecordMethodCall(r, emitAddress(e^.base), args));
   end;
   if e^.base^.typ^.kind = tyInterface then { through the method table }
-  begin
-    v := visitExpr(e^.base);
-    obj := irExtract(v, 0, irPtrT, 'obj');
-    table := irExtract(v, 1, irPtrT, 'itable');
-    if rangeChecks(e^.fieldName.loc) then
-      emitRuntimeCheck(irICmp('eq', obj, irNull, ''), 'use of a nil interface reference',
-                       e^.fieldName.loc);
-    slot := irGEP1(irPtrT, table, i64c(r^.vmtIndex), true, '');
-    fn := irLoad(irPtrT, slot, 'method');
-    res := emitCallToSelf(methodFnType(r), fn, irNull, true, obj, true, r^.params, args,
-                          resultOf(r));
-    if r^.isFunction then
-      exit(res);
-    exit(irNull);
-  end;
+    exit(emitInterfaceCall(r, e^.base, e^.fieldName.loc, args));
   if namesType(e^.base) then { TFoo.Create, TOuter.TInner.Create }
   begin
     if r^.methodKind = mtConstructor then
@@ -4621,6 +4627,11 @@ begin
     exit(emitPropertyRead(d, irNull, nil)); { (no object) }
   if (d^.kind = dkProperty) and (helperRoutine(d) <> nil) then { a type helper's }
     exit(emitPropertyRead(d, helperSelf(e), c));
+  if (d^.kind = dkProperty) and (c^.kind = tyInterface) then { (its getter) }
+  begin
+    listInit(noArgs);
+    exit(emitInterfaceCall(d^.readDecl, e^.base, e^.fieldName.loc, noArgs));
+  end;
   obj := memberObject(e^.base);
   if d^.kind = dkProperty then
     exit(emitPropertyRead(d, obj, c));

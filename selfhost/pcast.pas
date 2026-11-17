@@ -150,7 +150,10 @@ type
         reference counted, CORBA ones are not. }
       tyInterface: (intfParent: PType; intfMethods, intfAllMethods: TPtrList;
                     intfModule: pointer; intfDefined: boolean;
-                    intfCOM: boolean);
+                    intfCOM: boolean;
+                    { its own properties (objfpc), read and written
+                      through its methods }
+                    intfProps: TPtrList);
   end;
 
   TNode = record
@@ -421,12 +424,19 @@ type
         (fields, method headings, properties) in source order }
       { (interfaceNames: the rest of class(P, I1, I2), of PIdent) }
       tsClass: (parentName: TIdent; memberList: TPtrList; isForwardClass: boolean;
-                interfaceNames: TPtrList);
+                interfaceNames: TPtrList;
+                { objfpc: class(specialize TBase<T>, specialize IIter<T>):
+                  the parent's and the interfaces' specializations (nil
+                  for a name; the interfaces' list is empty or as long as
+                  interfaceNames) }
+                classParentSpec: PTypeSpec; classIntfSpecs: TPtrList);
       { interface (objfpc): the parent's name, method headings, forward,
         the GUID string (no effect; nil: none), declared under
         $interfaces corba (else COM) }
       tsInterface: (intfParentName: TIdent; intfMemberList: TPtrList;
-                    isForwardIntf: boolean; guid: PName; isCorba: boolean);
+                    isForwardIntf: boolean; guid: PName; isCorba: boolean;
+                    { objfpc: interface(specialize IBase<T>) }
+                    intfParentSpec: PTypeSpec);
       { type helper [(helperParent)] for helperFor (objfpc): methods,
         properties and constants; helperIsRecord: a record helper (record
         helper ... for a record type) }

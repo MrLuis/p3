@@ -571,14 +571,23 @@ begin
           bufAddName(outBuf, ts^.parentName.name);
           bufAddChar(outBuf, '''');
         end;
+        if ts^.classParentSpec <> nil then
+          bufAdd(outBuf, ' specialize');
         for i := 0 to ts^.interfaceNames.count - 1 do
         begin
           bufAdd(outBuf, ', ''');
           bufAddName(outBuf, PIdent(listGet(ts^.interfaceNames, i))^.name);
           bufAddChar(outBuf, '''');
+          if (i < ts^.classIntfSpecs.count) and (listGet(ts^.classIntfSpecs, i) <> nil) then
+            bufAdd(outBuf, ' specialize');
         end;
         loc(ts^.b);
         indent := indent + 2;
+        if ts^.classParentSpec <> nil then
+          printTypeSpec(ts^.classParentSpec);
+        for i := 0 to ts^.classIntfSpecs.count - 1 do
+          if listGet(ts^.classIntfSpecs, i) <> nil then
+            printTypeSpec(PTypeSpec(listGet(ts^.classIntfSpecs, i)));
         for i := 0 to ts^.memberList.count - 1 do
           printDecl(PDecl(listGet(ts^.memberList, i)));
         indent := indent - 2;
@@ -597,6 +606,8 @@ begin
           bufAddName(outBuf, ts^.intfParentName.name);
           bufAddChar(outBuf, '''');
         end;
+        if ts^.intfParentSpec <> nil then
+          bufAdd(outBuf, ' specialize');
         if (ts^.guid <> nil) and (ts^.guid^.len > 0) then
         begin
           bufAddChar(outBuf, ' ');
@@ -604,6 +615,8 @@ begin
         end;
         loc(ts^.b);
         indent := indent + 2;
+        if ts^.intfParentSpec <> nil then
+          printTypeSpec(ts^.intfParentSpec);
         for i := 0 to ts^.intfMemberList.count - 1 do
           printDecl(PDecl(listGet(ts^.intfMemberList, i)));
         indent := indent - 2;

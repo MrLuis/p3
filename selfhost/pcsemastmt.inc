@@ -2262,6 +2262,15 @@ begin
     d := findInterfaceMethod(bt, e^.fieldName.name);
     if d = nil then
     begin
+      d := findInterfaceProperty(bt, e^.fieldName.name);
+      if d <> nil then
+      begin
+        e^.fieldDecl := d;
+        exit(d);
+      end;
+    end;
+    if d = nil then
+    begin
       ms('no method named ''');
       maN(e^.fieldName.spelling);
       ma(''' in interface ');
@@ -4272,7 +4281,12 @@ begin
       exit(d);
   end;
   if own^.kind = tyInterface then
-    exit(findInterfaceMethod(own, intern(name)));
+  begin
+    d := findInterfaceMethod(own, intern(name));
+    if d = nil then
+      d := findInterfaceProperty(own, intern(name));
+    exit(d);
+  end;
   { (a type helper's: GetEnumerator added to a type by a helper) }
   h := helperFor(t);
   if h <> nil then

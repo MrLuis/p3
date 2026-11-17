@@ -3186,6 +3186,27 @@ class Checker : public StmtVisitor<Checker>,
   }
 
   /// The interface named Id, or null after a diagnostic.
+  /// specialize IGen<...> in a class's or interface's heading: the
+  /// interface it is, or null after a diagnostic.
+  InterfaceType *specializedInterface(const Identifier &Id, TypeSpec *Spec) {
+    Type *T = resolveType(Spec);
+    if (T->isError())
+      return nullptr;
+    auto *I = llvm::dyn_cast<InterfaceType>(T);
+    if (!I) {
+      Diags.error(Spec->getBeginLoc(), quoted(T) + " is not an interface type",
+                  {Spec->getRange()});
+      return nullptr;
+    }
+    if (!I->isDefined()) {
+      Diags.error(Id.Loc,
+                  "interface '" + I->getName() + "' is not defined yet",
+                  {Spec->getRange()});
+      return nullptr;
+    }
+    return I;
+  }
+
   InterfaceType *lookupInterface(const Identifier &Id) {
     Decl *D = Cur->lookup(Id.Name);
     if (!D) {
@@ -3230,7 +3251,9 @@ class Checker : public StmtVisitor<Checker>,
     I->setCOM(!IS->isCorba());
     if (IS->getParent().isValid()) {
       const Identifier &PId = IS->getParent();
-      if (PId.Name == I->getDeclName().lower())
+      if (IS->getParentSpec()) // interface(specialize IBase<T>)
+        Parent = specializedInterface(PId, IS->getParentSpec());
+      else if (PId.Name == I->getDeclName().lower())
         Diags.error(PId.Loc,
                     "interface '" + I->getName() + "' cannot inherit from itself",
                     {PId.getRange()});
@@ -3253,7 +3276,12 @@ class Checker : public StmtVisitor<Checker>,
     if (Parent)
       All.append(Parent->getAllMethods().begin(), Parent->getAllMethods().end());
     llvm::StringMap<RoutineDecl *> Seen;
+    llvm::SmallVector<PropertyDecl *, 4> Props;
     for (Decl *M : IS->getMembers()) {
+      if (auto *Prop = llvm::dyn_cast<PropertyDecl>(M)) {
+        Props.push_back(Prop); // (after the methods: they name them)
+        continue;
+      }
       auto *R = llvm::cast<RoutineDecl>(M);
       const Identifier &Id = R->getName();
       R->setInterface(I);
@@ -3286,6 +3314,84 @@ class Checker : public StmtVisitor<Checker>,
     }
     I->define(Parent, Ctx.copyArray<RoutineDecl *>(Own),
               Ctx.copyArray<RoutineDecl *>(All), CurModule);
+    llvm::SmallVector<PropertyDecl *, 4> Defined;
+    for (PropertyDecl *Prop : Props)
+      if (defineInterfaceProperty(I, Prop, Defined))
+        Defined.push_back(Prop);
+    I->setProperties(Ctx.copyArray<PropertyDecl *>(Defined));
+  }
+
+  /// property P: T read GetP [write SetP] in interface I (objfpc): its
+  /// accessors are methods of I (or of its ancestors), a function without
+  /// parameters returning T and a procedure taking one T. Array properties,
+  /// index and default specifiers are not supported. False after an error.
+  bool defineInterfaceProperty(InterfaceType *I, PropertyDecl *Prop,
+                               llvm::ArrayRef<PropertyDecl *> Earlier) {
+    const Identifier &Id = Prop->getName();
+    Type *T = resolveType(Prop->getTypeSpec());
+    Prop->setType(T);
+    if (Prop->isArrayProperty() || Prop->getIndexSpec() || Prop->isDefault() ||
+        Prop->isClassProperty() || Prop->getDefaultValue()) {
+      Diags.error(Id.Loc,
+                  "the properties of an interface are plain ones (no array "
+                  "property, index, default, class or stored value) for now",
+                  {Id.getRange()});
+      return false;
+    }
+    if (findInterfaceMethod(I, Id.Name) || findInterfaceProperty(I, Id.Name) ||
+        llvm::any_of(Earlier, [&](PropertyDecl *E) {
+          return E->getName().Name == Id.Name;
+        })) {
+      Diags.error(Id.Loc,
+                  "'" + Id.Spelling + "' is already declared in interface '" +
+                      I->getName() + "'",
+                  {Id.getRange()});
+      return false;
+    }
+    if (T->isError())
+      return false;
+    auto Accessor = [&](const Identifier &N, bool Read) -> RoutineDecl * {
+      if (!N.isValid())
+        return nullptr;
+      RoutineDecl *R = findInterfaceMethod(I, N.Name);
+      bool Fits = R && (Read ? R->isFunction() && R->getParams().empty() &&
+                                   R->getResultType() == T
+                             : !R->isFunction() && R->getParams().size() == 1 &&
+                                   !R->getParams()[0]->isVarParam() &&
+                                   R->getParams()[0]->getType() == T);
+      if (!Fits) {
+        Diags.error(N.Loc,
+                    "'" + N.Spelling + "' must be a method of interface '" +
+                        I->getName() + "': " +
+                        (Read ? "a function without parameters returning "
+                              : "a procedure with one parameter of type ") +
+                        quoted(T),
+                    {N.getRange()});
+        return nullptr;
+      }
+      return R;
+    };
+    RoutineDecl *Rd = Accessor(Prop->getReadName(), true);
+    RoutineDecl *Wr = Accessor(Prop->getWriteName(), false);
+    if ((Prop->getReadName().isValid() && !Rd) ||
+        (Prop->getWriteName().isValid() && !Wr))
+      return false;
+    if (!Rd && !Wr) {
+      Diags.error(Id.Loc, "property '" + Id.Spelling + "' needs 'read' or 'write'",
+                  {Id.getRange()});
+      return false;
+    }
+    Prop->setAccessors(Rd, Wr);
+    return true;
+  }
+
+  static PropertyDecl *findInterfaceProperty(InterfaceType *I,
+                                             llvm::StringRef Name) {
+    for (; I; I = I->getParent())
+      for (PropertyDecl *P : I->getProperties())
+        if (P->getName().Name == Name)
+          return P;
+    return nullptr;
   }
 
   /// The methods of class C implementing the methods of interface I (by
@@ -3380,8 +3486,8 @@ class Checker : public StmtVisitor<Checker>,
     // class(TParent, I1, I2): the interfaces it implements (the first name
     // may be one too).
     llvm::SmallVector<std::pair<InterfaceType *, const Identifier *>, 2> Listed;
-    auto AddInterface = [&](const Identifier &Id) {
-      InterfaceType *I = lookupInterface(Id);
+    auto AddInterface = [&](const Identifier &Id, TypeSpec *Spec) {
+      InterfaceType *I = Spec ? specializedInterface(Id, Spec) : lookupInterface(Id);
       if (!I)
         return;
       for (auto &[J, _] : Listed)
@@ -3393,7 +3499,19 @@ class Checker : public StmtVisitor<Checker>,
         }
       Listed.push_back({I, &Id});
     };
-    if (CS->getParent().isValid()) {
+    if (TypeSpec *PS = CS->getParentSpec()) { // class(specialize TBase<T>)
+      const Identifier &PId = CS->getParent();
+      Type *T = resolveType(PS);
+      if (llvm::isa<InterfaceType>(T))
+        AddInterface(PId, PS);
+      else if (auto *P = llvm::dyn_cast<ClassType>(T); P && !P->isHelper() &&
+                                                        !P->getRecord())
+        Parent = P;
+      else if (!T->isError())
+        Diags.error(PS->getBeginLoc(),
+                    quoted(T) + " is not a class or interface type",
+                    {PS->getRange()});
+    } else if (CS->getParent().isValid()) {
       const Identifier &PId = CS->getParent();
       auto *TD = llvm::dyn_cast_or_null<TypeDecl>(Cur->lookup(PId.Name));
       if (PId.Name == C->getDeclName().lower()) {
@@ -3401,13 +3519,13 @@ class Checker : public StmtVisitor<Checker>,
                     "class '" + C->getName() + "' cannot inherit from itself",
                     {PId.getRange()});
       } else if (TD && llvm::isa_and_nonnull<InterfaceType>(TD->getType())) {
-        AddInterface(PId);
+        AddInterface(PId, nullptr);
       } else if (ClassType *P = lookupClass(PId)) {
         Parent = P;
       }
     }
-    for (const Identifier &Id : CS->getInterfaces())
-      AddInterface(Id);
+    for (size_t K = 0; K < CS->getInterfaces().size(); ++K)
+      AddInterface(CS->getInterfaces()[K], CS->getInterfaceSpec(K));
     // The objects of COM interfaces are reference counted by
     // TInterfacedObject.
     for (auto &[I, Where] : Listed)
@@ -9699,8 +9817,11 @@ public:
     if (auto *C = llvm::dyn_cast<ClassType>(Own))
       if (Decl *D = C->findMember(Name))
         return D;
-    if (auto *I = llvm::dyn_cast<InterfaceType>(Own))
-      return findInterfaceMethod(I, Name);
+    if (auto *I = llvm::dyn_cast<InterfaceType>(Own)) {
+      if (RoutineDecl *R = findInterfaceMethod(I, Name))
+        return R;
+      return findInterfaceProperty(I, Name);
+    }
     // (a type helper's: GetEnumerator added to a type by a helper)
     if (ClassType *H = helperFor(T))
       return H->findMember(Name);
@@ -12179,6 +12300,11 @@ public:
     }
     if (auto *I = llvm::dyn_cast<InterfaceType>(BT)) { // s.M, s: an interface
       RoutineDecl *R = findInterfaceMethod(I, F.Name);
+      if (!R)
+        if (PropertyDecl *Prop = findInterfaceProperty(I, F.Name)) {
+          E->setMember(Prop);
+          return Prop;
+        }
       if (!R) {
         Diags.error(F.Loc,
                     "no method named '" + F.Spelling + "' in interface " +

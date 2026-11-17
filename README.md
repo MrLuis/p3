@@ -175,7 +175,12 @@ as are a failed `as` and calling an abstract method.
 - **Interfaces:** `IFoo = interface[(IBase)] ['GUID'] methods end`,
   classes listing them (`class(TBase, IFoo, IBar)`, every method
   implemented), interface variables, parameters and results, `obj is
-  IFoo`, `obj as IFoo`, comparisons and `Assigned`. A value is {object,
+  IFoo`, `obj as IFoo`, comparisons and `Assigned`. An interface can
+  have plain properties, read and written through its methods (`property
+  Current: T read GetCurrent;`). Generic ones can be specialized in a
+  heading: `class(TInterfacedObject, specialize IIter<T>)`,
+  `interface(specialize IBase<T>)`, and a class can inherit from a
+  generic class's specialization (`class(specialize TBox<T>)`). A value is {object,
   the object's class's method table}, so virtual implementations dispatch
   as usual. Interfaces are COM style unless `{$interfaces corba}` (as in
   Free Pascal's objfpc mode):
