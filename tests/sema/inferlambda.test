@@ -1,0 +1,13 @@
+; Type inference through lambdas (objfpc): a lambda's body is checked with
+; the parameter types known; types written in it must agree with the other
+; arguments; a lambda that does not fit the procedural type gives nothing.
+; RUN: not %pcc --mode=objfpc -ferror-limit=0 -c %S/Inputs/inferlambda/errors.pas -o %t.o 2>&1 | FileCheck %s
+; CHECK: errors.pas:26:31: error: '.' applied to a value of type 'integer', which is not a record
+; CHECK: errors.pas:27:29: error: cannot tell the result type of this lambda from nil; give it one: function(...): T => ...
+; CHECK: errors.pas:28:8: error: cannot infer the type parameter 'T' of 'Make' in this call: no argument gives it; give the type: specialize Make<...>
+; CHECK: errors.pas:28:22: error: cannot infer the type of parameter 'x' in this lambda: there is no expected type; add a type, for example function(x: Integer) => ...
+; CHECK: errors.pas:29:14: error: this lambda has 2 parameters, but 'TFunc<integer, integer>' is wanted here
+; CHECK: errors.pas:30:14: error: cannot infer the type parameter 'T' of 'Apply': the arguments give both 'integer' and 'string'; give the type: specialize Apply<...>
+; CHECK: errors.pas:31:14: error: cannot pass a value of type 'reference to procedure(const integer)' to parameter 'F' of type 'TFunc<integer, integer>'
+; CHECK: errors.pas:33:16: error: cannot infer the type parameter 'T' of 'Each': the arguments give both 'integer' and 'string'; give the type: specialize Each<...>
+; CHECK-NOT: error:

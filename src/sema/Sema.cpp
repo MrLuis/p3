@@ -5314,6 +5314,101 @@ class Checker : public StmtVisitor<Checker>,
     return -1;
   }
 
+  /// Lambda L (A), the argument for parameter P of generic Def, whose type
+  /// is a specialization of a generic procedural type G (specialize
+  /// TFunc<T, R>): the type arguments of Def it gives (into Bound, through
+  /// Give). A type written in L gives the type argument there; L's
+  /// parameters without one take the types known; then, if L's result
+  /// is a type argument still unknown, L is completed for those parameter
+  /// types and its body gives it.
+  template <typename GiveFn>
+  void inferThroughLambda(RoutineDecl *Def, VarDecl *P, AddrOfExpr *A,
+                          RoutineDecl *L, llvm::SmallVectorImpl<Type *> &Bound,
+                          bool &OK, GiveFn &Give) {
+    auto *SS = llvm::dyn_cast_or_null<SpecializeTypeSpec>(P->getTypeSpec());
+    auto *GS = static_cast<Scope *>(Def->getGenericScope());
+    if (!SS || !GS)
+      return;
+    auto *G = llvm::dyn_cast_or_null<TypeDecl>(
+        GS->lookup(genericKey(SS->getName().Name, SS->getArgs().size())));
+    auto *RS = G && G->isGeneric()
+                   ? llvm::dyn_cast_or_null<RoutineTypeSpec>(G->getTypeSpec())
+                   : nullptr;
+    if (!RS || RS->isFunction() != L->isFunction() ||
+        RS->getParams().size() != L->getParams().size())
+      return;
+    // The type parameter of G that TS names, or -1.
+    auto GParam = [&](TypeSpec *TS) -> int {
+      auto *N = llvm::dyn_cast_or_null<NamedTypeSpec>(TS);
+      if (!N || !N->getQualifiers().empty())
+        return -1;
+      auto Ps = G->getTypeParams();
+      for (size_t K = 0; K < Ps.size(); ++K)
+        if (Ps[K].Name == N->getName().Name)
+          return static_cast<int>(K);
+      return -1;
+    };
+    // The type of G's type parameter J as Def gives it now: a type argument
+    // of Def (null while unknown), or a type named where Def is declared.
+    auto TypeOfArg = [&](int J, int &K) -> Type * {
+      TypeSpec *TA = SS->getArgs()[J];
+      K = typeParamNamed(Def, TA);
+      if (K >= 0)
+        return Bound[K];
+      auto *N = llvm::dyn_cast<NamedTypeSpec>(TA);
+      if (!N)
+        return nullptr;
+      Scope *Saved = Cur;
+      Cur = GS;
+      Type *T = resolveType(TA);
+      Cur = Saved;
+      return T->isError() ? nullptr : T;
+    };
+    llvm::SmallVector<VarDecl *, 4> WantParams;
+    bool Known = true;
+    for (size_t I = 0; I < RS->getParams().size() && OK; ++I) {
+      VarDecl *RP = RS->getParams()[I], *LP = L->getParams()[I];
+      int J = GParam(RP->getTypeSpec()), K = -1;
+      Type *T = J >= 0 ? TypeOfArg(J, K) : nullptr;
+      if (LP->getTypeSpec()) { // written: it gives the type argument
+        Type *W = resolveType(LP->getTypeSpec());
+        if (K >= 0)
+          Give(K, W, A);
+        T = W->isError() ? nullptr : W;
+      }
+      if (!T)
+        Known = false;
+      auto *V = Ctx.create<VarDecl>(RP->getName(), nullptr, RP->getVarKind());
+      if (RP->isOutParam())
+        V->setOutParam();
+      if (RP->isConstRefParam())
+        V->setConstRefParam();
+      V->setType(T);
+      WantParams.push_back(V);
+    }
+    if (!OK || !L->isFunction())
+      return;
+    int J = GParam(RS->getResult()), K = -1;
+    if (J < 0 || (TypeOfArg(J, K), K < 0))
+      return;
+    if (L->getResultTypeSpec()) { // written
+      Give(K, resolveType(L->getResultTypeSpec()), A);
+      return;
+    }
+    if (Bound[K] || !Known)
+      return;
+    auto *Want = Ctx.create<RoutineType>(
+        Ctx.copyArray<VarDecl *>(WantParams), nullptr,
+        RS->getCallConv() == CallConv::CDecl, RS->isOfObject(), RS->isReference());
+    completeLambda(A, Want);
+    Type *RT = L->getResultType();
+    if (L->isLambdaBad() || !RT || RT->isError()) {
+      OK = false;
+      return;
+    }
+    Give(K, RT, A);
+  }
+
   /// Name(args), where Name is not declared but generic routines Name<...>
   /// are: the specialization for the type arguments that the arguments
   /// give (a parameter of type T or array of T gives T the type of its
@@ -5430,6 +5525,20 @@ class Checker : public StmtVisitor<Checker>,
           Give(K, OA->getElementType(), A);
         continue;
       }
+    }
+    if (!OK)
+      return nullptr;
+    // Lambdas passed for a parameter of a generic procedural type
+    // (specialize TFunc<T, R>): the types written in them give type
+    // arguments; those of their parameters not written come from the type
+    // arguments known (T in), and a result not written from the body,
+    // checked with them (R out).
+    for (size_t I = 0; I < Args.size() && OK; ++I) {
+      VarDecl *P = paramOfArg(Def->getParams(), Args, I);
+      auto *A = llvm::dyn_cast<AddrOfExpr>(argValue(Args[I]));
+      RoutineDecl *L = A ? A->getLambda() : nullptr;
+      if (P && L && !L->isLambdaDone())
+        inferThroughLambda(Def, P, A, L, Bound, OK, Give);
     }
     if (!OK)
       return nullptr;

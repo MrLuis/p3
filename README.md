@@ -577,7 +577,15 @@ var names := ['ann', 'bo'];          { array of string }
   declaration or `exit`. If that is not enough, the error names the type
   parameter and says what to write: `specialize F<...>(...)`, which is
   still accepted everywhere. Named arguments and default values work as
-  for other routines. A routine that is not generic and has the same name
+  for other routines.
+- **Through lambdas.** A lambda passed for a parameter of a generic
+  procedural type (`F: specialize TFunc<T, R>`, with `generic TFunc<T, R>
+  = reference to function(const X: T): R`) works both ways: its untyped
+  parameters take the types already known (from the other arguments, or
+  the class of a generic method's object), and its body gives the type of
+  its result: `ints.Map(function(x) => IntToStr(x))` is a `Map<string>`,
+  `Apply(function(s) => Length(s), 'hi')` an `Apply<string, integer>`.
+  Types written in the lambda give type arguments too. A routine that is not generic and has the same name
   is called instead.
 - **`const x := e`** (also `const x = e` and `const x: T := e`) among the
   statements declares a variable that is set there and cannot be changed
@@ -1361,8 +1369,8 @@ type
     generic function Map<R>(F: specialize TFunc<T, R>): specialize TList<R>;
   end;
 
-strs := ints.specialize Map<string>(function(const X: Integer): string => IntToStr(X));
-total := ints.Fold(0, function(const Acc, X: Integer): Integer => Acc + X);
+strs := ints.Map(function(x) => IntToStr(x));   { Map<string>: x is an Integer }
+total := ints.Fold(0, function(acc, x) => acc + x);
 ```
 
 Each specialization (`TList<integer>.Map<ansistring>`) is a method of the

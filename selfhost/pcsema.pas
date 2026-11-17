@@ -8773,6 +8773,7 @@ end;
   there is such a generic. Nil without one, and after a diagnostic. }
 function inferFor(const name: TIdent; var generics: TPtrList; const args: TPtrList;
                   want: PType): PDecl; forward;
+procedure completeLambda(a: PNode; want: PType); forward;
 
 function inferSpecializationW(const name: TIdent; const args: TPtrList;
                               want: PType; var found: boolean;
@@ -8866,6 +8867,133 @@ var
     listSet(bound, k, joined);
   end;
 
+
+  { Lambda l (a), the argument for parameter p of generic def, whose type
+    is a specialization of a generic procedural type g (specialize
+    TFunc<T, R>): the type arguments of def it gives (into bound, through
+    give). A type written in l gives the type argument there; l's
+    parameters without one take the types known; then, if l's result is a
+    type argument still unknown, l is completed for those parameter types
+    and its body gives it. }
+  procedure throughLambda(p: PDecl; a: PNode; l: PDecl);
+  var
+    ss, rs, ta: PTypeSpec;
+    gs, savedCur: PScope;
+    gt, rp, lp, v: PDecl;
+    wantParams: TPtrList;
+    known: boolean;
+    q, jj, kk: longint;
+    t, w, rt: PType;
+    wantT: PType;
+
+    { the type parameter of gt that ts names, or -1 }
+    function gParam(ts: PTypeSpec): longint;
+    var
+      m: longint;
+    begin
+      gParam := -1;
+      if (ts = nil) or (ts^.kind <> tsNamed) or (ts^.tquals.count > 0) then
+        exit;
+      for m := 0 to gt^.tgParams.count - 1 do
+        if PIdent(listGet(gt^.tgParams, m))^.name = ts^.tname.name then
+          exit(m);
+    end;
+
+    { the type of gt's type parameter jx as def gives it now: a type
+      argument of def (nil while unknown), or a type named where def is
+      declared }
+    function typeOfArg(jx: longint; var kx: longint): PType;
+    var
+      r: PType;
+    begin
+      typeOfArg := nil;
+      ta := PTypeSpec(listGet(ss^.spArgs, jx));
+      kx := typeParamNamed(def, ta);
+      if kx >= 0 then
+        exit(PType(listGet(bound, kx)));
+      if ta^.kind <> tsNamed then
+        exit;
+      savedCur := cur;
+      cur := gs;
+      r := resolveType(ta, nil);
+      cur := savedCur;
+      if not isError(r) then
+        typeOfArg := r;
+    end;
+
+  begin
+    ss := p^.varSpec;
+    gs := PScope(def^.genericScope);
+    if (ss = nil) or (ss^.kind <> tsSpecialize) or (gs = nil) then
+      exit;
+    gt := scopeFind(gs, genericKey(ss^.spName.name, ss^.spArgs.count));
+    rs := nil;
+    if (gt <> nil) and (gt^.kind = dkType) and gt^.tgGeneric then
+      rs := gt^.typeSpec;
+    if (rs = nil) or (rs^.kind <> tsRoutine) or (rs^.rtIsFunction <> l^.isFunction) or
+       (rs^.rtParams.count <> l^.params.count) then
+      exit;
+    listInit(wantParams);
+    known := true;
+    q := 0;
+    while (q < rs^.rtParams.count) and ok do
+    begin
+      rp := PDecl(listGet(rs^.rtParams, q));
+      lp := PDecl(listGet(l^.params, q));
+      jj := gParam(rp^.varSpec);
+      kk := -1;
+      t := nil;
+      if jj >= 0 then
+        t := typeOfArg(jj, kk);
+      if lp^.varSpec <> nil then { written: it gives the type argument }
+      begin
+        w := resolveType(lp^.varSpec, nil);
+        if kk >= 0 then
+          give(kk, w, a);
+        if isError(w) then
+          t := nil
+        else
+          t := w;
+      end;
+      if t = nil then
+        known := false;
+      v := newDecl(dkVar, rp^.ident, rp^.ident.loc);
+      v^.varKind := rp^.varKind;
+      v^.isOut := rp^.isOut;
+      v^.isConstRef := rp^.isConstRef;
+      v^.varType := t;
+      listAdd(wantParams, v);
+      q := q + 1;
+    end;
+    if not ok or not l^.isFunction then
+      exit;
+    jj := gParam(rs^.rtResult);
+    kk := -1;
+    if jj < 0 then
+      exit;
+    t := typeOfArg(jj, kk);
+    if kk < 0 then
+      exit;
+    if l^.resultSpec <> nil then { written }
+    begin
+      give(kk, resolveType(l^.resultSpec, nil), a);
+      exit;
+    end;
+    if (listGet(bound, kk) <> nil) or not known then
+      exit;
+    wantT := newRoutineType(wantParams, nil, rs^.rtCallConv = ccCDecl);
+    wantT^.routineOfObject := rs^.rtOfObject;
+    wantT^.routineReference := rs^.rtReference;
+    completeLambda(a, wantT);
+    rt := l^.resultType;
+    if l^.lambdaBad or (rt = nil) or isError(rt) then
+    begin
+      ok := false;
+      exit;
+    end;
+    give(kk, rt, a);
+  end;
+
 begin
   inferFor := nil;
   if generics.count > 1 then { those that take these arguments }
@@ -8944,6 +9072,23 @@ begin
       else if at^.kind = tyOpenArray then
         give(k, at^.openElement, a);
     end;
+  end;
+  if not ok then
+    exit;
+  { lambdas passed for a parameter of a generic procedural type (specialize
+    TFunc<T, R>): the types written in them give type arguments; those of
+    their parameters not written come from the type arguments known (T
+    in), and a result not written from the body, checked with them (R
+    out) }
+  i := 0;
+  while (i < args.count) and ok do
+  begin
+    p := paramOfArg(def^.params, args, i);
+    a := argValue(PNode(listGet(args, i)));
+    i := i + 1;
+    if (p <> nil) and (a^.kind = nkAddrOf) and (a^.addrLambda <> nil) and
+       not a^.addrLambda^.lambdaDone then
+      throughLambda(p, a, a^.addrLambda);
   end;
   if not ok then
     exit;
