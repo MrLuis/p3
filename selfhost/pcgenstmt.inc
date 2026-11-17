@@ -2484,7 +2484,7 @@ begin
   for i := 0 to c^.classMembers.count - 1 do
   begin
     m := PDecl(listGet(c^.classMembers, i));
-    if (m^.kind = dkRoutine) and not m^.isAbstract then
+    if (m^.kind = dkRoutine) and not m^.isAbstract and (m^.memberKey = nil) then
     begin
       listInit(params);
       routineParamTypes(m, params);
@@ -3370,7 +3370,10 @@ begin
       for j := 0 to c^.classMembers.count - 1 do
       begin
         m := PDecl(listGet(c^.classMembers, j));
-        if (m^.kind = dkVar) or ((m^.kind = dkRoutine) and not m^.isAbstract) then
+        { (a generic method: each module compiles the specializations it
+          uses) }
+        if (m^.kind = dkVar) or ((m^.kind = dkRoutine) and not m^.isAbstract and
+                                 (m^.memberKey = nil)) then
         begin { a class variable or a method }
           m^.cgExport := intern(prefix + '.' + nm(m^.ident.name) + overloadSuffix(m));
           m^.cgImported := imported;

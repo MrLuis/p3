@@ -1,0 +1,14 @@
+; Generic methods of a unit's classes (a plain and a generic class), used
+; by a program: compiled whole and separately (each module compiles the
+; specializations it uses).
+; RUN: rm -rf %t && mkdir -p %t && cp -r %S/Inputs/genericmethods/. %t/
+; RUN: %pcc --mode=objfpc -I %t/lib %t/main.pas -o %t/whole
+; RUN: %t/whole | FileCheck %s
+; RUN: %pcc --mode=objfpc -c %t/lib/boxes.pas -o %t/lib/boxes.o
+; RUN: %pcc --mode=objfpc -I %t/lib -fseparate-units %t/main.pas -o %t/separate
+; RUN: %t/separate | FileCheck %s
+; CHECK:      7
+; CHECK-NEXT: [b b]
+; CHECK-NEXT: s
+; CHECK-NEXT: [b b]
+; CHECK-NEXT: 2.5

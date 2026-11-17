@@ -839,6 +839,12 @@ begin
   for i := 0 to c^.classMembers.count - 1 do
   begin
     d := PDecl(listGet(c^.classMembers, i));
+    if (d^.kind = dkRoutine) and (d^.memberKey <> nil) then
+    begin
+      if d^.memberKey = name then { (found by its key only) }
+        exit(d);
+      continue;
+    end;
     if d^.ident.name = name then
       exit(d);
   end;

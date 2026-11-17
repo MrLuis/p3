@@ -303,7 +303,10 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
               ImportedDecls.insert(V);
             continue;
           }
-          if (auto *R = llvm::dyn_cast<RoutineDecl>(M); R && !R->isAbstract()) {
+          // (a generic method: each module compiles the specializations
+          // it uses)
+          if (auto *R = llvm::dyn_cast<RoutineDecl>(M);
+              R && !R->isAbstract() && !R->isGenericMethod()) {
             ExportNames[R] = Prefix + "." + R->getName().Name.str() +
                              overloadSuffix(R);
             if (Imported)
@@ -3073,7 +3076,8 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
       return;
     }
     for (Decl *M : C->getMembers())
-      if (auto *R = llvm::dyn_cast<RoutineDecl>(M); R && !R->isAbstract()) {
+      if (auto *R = llvm::dyn_cast<RoutineDecl>(M);
+          R && !R->isAbstract() && !R->isGenericMethod()) {
         Functions[R] = llvm::Function::Create(routineFnType(R),
                                               llvm::Function::ExternalLinkage,
                                               ExportNames[R], this->M);

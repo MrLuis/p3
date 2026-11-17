@@ -421,7 +421,7 @@ end;
 function startsGeneric: boolean;
 begin
   startsGeneric := (mode = lmObjFPC) and isIdentifierNamed('generic') and
-                   (peekKind in [tkKwFunction, tkKwProcedure]);
+                   (peekKind in [tkKwFunction, tkKwProcedure, tkKwClass]);
 end;
 
 function startsSpecialize: boolean;
@@ -1383,6 +1383,29 @@ begin
   parseInlineDirective := false;
 end;
 
+{ <T, U> after a generic routine's or method's name (into
+  genericTypeParams). }
+procedure parseTypeParamList;
+var
+  typeParams: TPtrList;
+  typeParam: TIdent;
+begin
+  consumeToken; { '<' }
+  listInit(typeParams);
+  repeat
+    if not expectIdentifier(typeParam, 'type parameter name') then
+      break;
+    listAdd(typeParams, newIdent(typeParam));
+    if tok.kind = tkColon then
+    begin
+      diagError(tok.loc, 'constraints on type parameters are not supported yet');
+      skipUntil([tkGreater, tkSemi]);
+    end;
+  until not (tryConsume(tkComma) or tryConsume(tkSemi));
+  expect(tkGreater, 'after the type parameters');
+  genericTypeParams := typeParams;
+end;
+
 function parseRoutineDecl(headingOnly: boolean): PDecl;
 var
   hf: longint;
@@ -1441,22 +1464,7 @@ begin
   if identValid(name) and not identValid(clsName) then
     declareName(name); { (declared(NAME); a method's is its class's) }
   if parsingGeneric and identValid(name) and (tok.kind = tkLess) then { <T, U> }
-  begin
-    consumeToken;
-    listInit(typeParams);
-    repeat
-      if not expectIdentifier(typeParam, 'type parameter name') then
-        break;
-      listAdd(typeParams, newIdent(typeParam));
-      if tok.kind = tkColon then
-      begin
-        diagError(tok.loc, 'constraints on type parameters are not supported yet');
-        skipUntil([tkGreater, tkSemi]);
-      end;
-    until not (tryConsume(tkComma) or tryConsume(tkSemi));
-    expect(tkGreater, 'after the type parameters');
-    genericTypeParams := typeParams;
-  end;
+    parseTypeParamList;
   if identValid(name) and (mk <> mtNone) and not identValid(clsName) then
   begin
     if parsingClassInit then
@@ -1706,6 +1714,8 @@ begin
 
   if not expectIdentifier(name, kind + ' name') then
     exit;
+  if parsingGeneric and (tok.kind = tkLess) then { generic function M<T> }
+    parseTypeParamList;
   listInit(params);
   hasParamList := tok.kind = tkLParen;
   if hasParamList and not parseFormalParams(params) then
@@ -2114,15 +2124,36 @@ end;
 
 function parseGenericRoutine(headingOnly: boolean): PDecl;
 var
-  genericLoc: TLoc;
+  genericTok, classTok: TToken;
   toks: PGenericTokens;
-  rec: TPtrList;
+  rec, all: TPtrList;
   savedRec: PPtrList;
-  r: PDecl;
+  r, g: PDecl;
   kind: string;
+  classMethod: boolean;
+  last: PGenericTokens;
+  p: PToken;
+  i: longint;
 begin
   parseGenericRoutine := nil;
-  genericLoc := consumeToken; { 'generic' }
+  genericTok := tok;
+  consumeToken; { 'generic' }
+  { generic class function TFoo.M<T> (the implementation of a generic class
+    method) }
+  classMethod := false;
+  classTok := tok;
+  if tok.kind = tkKwClass then
+  begin
+    consumeToken;
+    classMethod := true;
+    if (tok.kind <> tkKwFunction) and (tok.kind <> tkKwProcedure) then
+    begin
+      diagError(tok.loc, 'expected ''function'' or ''procedure'' after ''generic class''');
+      skipUntil([tkSemi, tkKwBegin]);
+      tryConsume(tkSemi);
+      exit;
+    end;
+  end;
   toks := PGenericTokens(arenaAlloc(sizeof(TGenericTokens)));
   toks^.longStrings := lx.longStrings;
   toks^.advancedRecords := lx.advancedRecords;
@@ -2145,10 +2176,53 @@ begin
   recording := savedRec;
   if r = nil then
     exit;
-  if identValid(r^.methodClassName) then
+  if classMethod then
   begin
-    diagError(genericLoc, 'generic methods are not supported yet');
-    exit;
+    if not identValid(r^.methodClassName) then
+    begin
+      if r^.isFunction then
+        kind := 'function'
+      else
+        kind := 'procedure';
+      diagErrorR(r^.ident.loc, 'only a method can be a generic class ' + kind,
+                 identRange(r^.ident));
+      exit;
+    end;
+    r^.isClassMethod := true;
+  end;
+  { A generic method of a generic type (TList.Map<R>): a template of the
+    type, parsed again for each of its specializations (and then a generic
+    method of that specialization). }
+  if identValid(r^.methodClassName) and (r^.outerClassNames.count = 0) and
+     (replay = nil) and (savedRec = nil) then
+  begin
+    g := findGenericType(r^.methodClassName.name);
+    if g <> nil then
+    begin
+      listInit(all);
+      p := PToken(arenaAlloc(sizeof(TToken)));
+      p^ := genericTok;
+      listAdd(all, p);
+      if classMethod then
+      begin
+        p := PToken(arenaAlloc(sizeof(TToken)));
+        p^ := classTok;
+        listAdd(all, p);
+      end;
+      for i := 0 to rec.count - 1 do
+        listAdd(all, listGet(rec, i));
+      toks^.toks := all;
+      last := PGenericTokens(g^.tgTokens);
+      while last^.nextMethod <> nil do
+        last := last^.nextMethod;
+      last^.nextMethod := toks;
+      r^.isGeneric := true;
+      r^.typeParams := g^.tgParams;
+      r^.genericTokens := toks;
+      r^.isTemplateMember := true;
+      parseGenericRoutine := r;
+      exit;
+    end;
   end;
   if genericTypeParams.count = 0 then
   begin
@@ -2166,6 +2240,49 @@ begin
   r^.typeParams := genericTypeParams;
   r^.genericTokens := toks;
   parseGenericRoutine := r;
+end;
+
+{ genericMethod = "generic" [ "class" ] ( "function" | "procedure" ) name
+                  "<" typeParams ">" ... (a method heading, in a class) }
+function parseGenericMethodHeading: PDecl;
+var
+  classMethod, savedParsing: boolean;
+  savedParams, params: TPtrList;
+  r: PDecl;
+begin
+  parseGenericMethodHeading := nil;
+  consumeToken; { 'generic' }
+  classMethod := tryConsume(tkKwClass);
+  if (tok.kind <> tkKwFunction) and (tok.kind <> tkKwProcedure) then
+  begin
+    diagError(tok.loc, 'expected ''function'' or ''procedure'' after ''generic''');
+    exit;
+  end;
+  { (in a generic type, whose own type parameters are being collected) }
+  savedParsing := parsingGeneric;
+  savedParams := genericTypeParams;
+  parsingGeneric := true;
+  listInit(genericTypeParams);
+  r := parseMethodHeading;
+  params := genericTypeParams;
+  parsingGeneric := savedParsing;
+  genericTypeParams := savedParams;
+  if r = nil then
+    exit;
+  if params.count = 0 then
+  begin
+    diagErrorR(r^.ident.loc, 'expected ''<'' and type parameters after the name ' +
+               'of generic method ''' + nameStr(r^.ident.spelling) + '''',
+               identRange(r^.ident));
+    exit;
+  end;
+  r^.isGeneric := true;
+  r^.typeParams := params;
+  r^.genericTokens := nil;
+  r^.memberKey := intern(nameStr(r^.ident.name) + '<' + intToStr(params.count) + '>');
+  if classMethod then
+    r^.isClassMethod := true;
+  parseGenericMethodHeading := r;
 end;
 
 { specialize Name<T1, ...>, after which a call's arguments may follow. }
@@ -2798,6 +2915,19 @@ begin
   classVars := false; { in a class var section }
   while (tok.kind <> tkKwEnd) and (tok.kind <> tkEof) and not diagShouldStop do
   begin
+    if startsGeneric then { generic function M<T>(...) }
+    begin
+      m := parseGenericMethodHeading;
+      if m = nil then
+      begin
+        failed := true;
+        break;
+      end;
+      m^.vis := vis;
+      listAdd(members, m);
+      classVars := false;
+      continue;
+    end;
     if tok.kind = tkIdentifier then
     begin
       wd := nameStr(tok.name);
@@ -6495,7 +6625,7 @@ var
   lbrack: TLoc;
   idx, n: PNode;
   field: TIdent;
-  args: TPtrList;
+  args, typeArgs: TPtrList;
 begin
   parseSelectors := nil;
   while true do
@@ -6522,6 +6652,18 @@ begin
     if tok.kind = tkPeriod then
     begin
       consumeToken;
+      if startsSpecialize then { obj.specialize M<T>: a generic method }
+      begin
+        listInit(typeArgs);
+        if not parseSpecialization(field, typeArgs) then
+          exit;
+        n := newNode(nkField, base^.b, prevTokEnd);
+        n^.base := base;
+        n^.fieldName := field;
+        n^.fieldTypeArgs := typeArgs;
+        base := n;
+        continue;
+      end;
       if not expectIdentifier(field, 'field name after ''.''') then
         exit;
       n := newNode(nkField, base^.b, prevTokEnd);

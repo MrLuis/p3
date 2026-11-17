@@ -180,9 +180,15 @@ bool pcc::isManaged(Type *T) {
 }
 
 Decl *ClassType::findOwnMember(llvm::StringRef Name) const {
-  for (Decl *D : Members)
+  for (Decl *D : Members) {
+    if (auto *R = llvm::dyn_cast<RoutineDecl>(D); R && R->isGenericMethod()) {
+      if (R->getMemberKey() == Name) // (found by its key only)
+        return D;
+      continue;
+    }
     if (D->getName().Name == Name)
       return D;
+  }
   return nullptr;
 }
 

@@ -249,7 +249,10 @@ type
       nkIndex, nkField: (base, index: PNode; fieldName: TIdent;
                          fieldDecl: PDecl; idxProp: PDecl; idxRoot: PNode;
                          idxArgs: TPtrList; constRef: PNode;
-                         helperValue: boolean);
+                         helperValue: boolean;
+                         { obj.specialize M<T>: the type arguments of a
+                           generic method (objfpc) }
+                         fieldTypeArgs: TPtrList);
       { inherited [inhName] (objfpc): the method called and the method
         calling it (Sema); a bare inherited passes the calling method's
         parameters (inhArgs, Sema) }
@@ -591,6 +594,14 @@ type
                     (TList.Add): a template too, parsed again for each
                     specialization of the type }
                   isTemplateMember: boolean;
+                  { a generic method's declaration in its class (generic
+                    function Map<R>(...), objfpc): its member key map<1>
+                    (name<number of type parameters>), the only name it is
+                    found by among the class's members, as generic routines
+                    are found in scopes; nil for other routines. Its
+                    specializations are made from its implementation
+                    (genericDef) and are not members }
+                  memberKey: PName;
                   { the routine of a lambda (function(x) => e): hidden,
                     nested in the routine the lambda is written in, with
                     parameter and result types that Sema may take from where

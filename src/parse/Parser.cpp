@@ -118,7 +118,7 @@ const Token &Parser::peekToken() {
 // objfpc: generic function F<T, U>(...): ...; (a template)
 bool Parser::startsGeneric() {
   return LangOpts.ObjKeywords && isIdentifierNamed("generic") &&
-         peekToken().isOneOf(tok::kw_function, tok::kw_procedure);
+         peekToken().isOneOf(tok::kw_function, tok::kw_procedure, tok::kw_class);
 }
 
 bool Parser::startsSpecialize() {
@@ -318,8 +318,78 @@ TypeSpec *Parser::parseSpecializeType() {
                                         Ctx.copyArray<TypeSpec *>(TypeArgs));
 }
 
+void Parser::parseTypeParamList() {
+  consumeToken(); // '<'
+  llvm::SmallVector<Identifier, 2> TypeParams;
+  do {
+    Identifier P;
+    if (!expectIdentifier(P, "type parameter name"))
+      break;
+    TypeParams.push_back(P);
+    if (Tok.is(tok::colon)) {
+      Diags.error(Tok.getLocation(),
+                  "constraints on type parameters are not supported yet");
+      skipUntil({tok::greater, tok::semi});
+    }
+  } while (tryConsume(tok::comma) || tryConsume(tok::semi));
+  expect(tok::greater, "after the type parameters");
+  GenericTypeParams = Ctx.copyArray<Identifier>(TypeParams);
+}
+
+// genericMethod = "generic" [ "class" ] ( "function" | "procedure" ) name
+//                 "<" typeParams ">" ... (a method heading, in a class)
+RoutineDecl *Parser::parseGenericMethodHeading() {
+  consumeToken(); // 'generic'
+  bool ClassMethod = tryConsume(tok::kw_class);
+  if (Tok.isNot(tok::kw_function) && Tok.isNot(tok::kw_procedure)) {
+    Diags.error(Tok.getLocation(),
+                "expected 'function' or 'procedure' after 'generic'");
+    return nullptr;
+  }
+  // (in a generic type, whose own type parameters are being collected)
+  bool SavedParsing = ParsingGeneric;
+  llvm::ArrayRef<Identifier> SavedParams = GenericTypeParams;
+  ParsingGeneric = true;
+  GenericTypeParams = {};
+  RoutineDecl *R = parseMethodHeading();
+  llvm::ArrayRef<Identifier> Params = GenericTypeParams;
+  ParsingGeneric = SavedParsing;
+  GenericTypeParams = SavedParams;
+  if (!R)
+    return nullptr;
+  if (Params.empty()) {
+    Diags.error(R->getName().Loc,
+                "expected '<' and type parameters after the name of generic "
+                "method '" + R->getName().Spelling + "'",
+                {R->getName().getRange()});
+    return nullptr;
+  }
+  R->setGeneric(Params, nullptr);
+  R->setMemberKey(Ctx.getStrings().intern(
+      (R->getName().Name + "<" + llvm::Twine(Params.size()) + ">").str()));
+  if (ClassMethod)
+    R->setClassMethod();
+  return R;
+}
+
 RoutineDecl *Parser::parseGenericRoutine(bool HeadingOnly) {
-  SourceLocation GenericLoc = consumeToken(); // 'generic'
+  Token GenericTok = Tok;
+  consumeToken(); // 'generic'
+  // generic class function TFoo.M<T> (the implementation of a generic
+  // class method)
+  bool ClassMethod = false;
+  Token ClassTok = Tok;
+  if (Tok.is(tok::kw_class)) {
+    consumeToken();
+    ClassMethod = true;
+    if (Tok.isNot(tok::kw_function) && Tok.isNot(tok::kw_procedure)) {
+      Diags.error(Tok.getLocation(),
+                  "expected 'function' or 'procedure' after 'generic class'");
+      skipUntil({tok::semi, tok::kw_begin});
+      tryConsume(tok::semi);
+      return nullptr;
+    }
+  }
   GenericTokens *Toks = captureSwitches();
   llvm::SmallVector<Token, 64> Rec;
   auto *SavedRec = Recording;
@@ -331,9 +401,37 @@ RoutineDecl *Parser::parseGenericRoutine(bool HeadingOnly) {
   Recording = SavedRec;
   if (!R)
     return nullptr;
-  if (R->getClassName().isValid()) {
-    Diags.error(GenericLoc, "generic methods are not supported yet");
-    return nullptr;
+  if (ClassMethod) {
+    if (!R->getClassName().isValid()) {
+      Diags.error(R->getName().Loc,
+                  "only a method can be a generic class " +
+                      llvm::Twine(R->getKindName()),
+                  {R->getName().getRange()});
+      return nullptr;
+    }
+    R->setClassMethod();
+  }
+  // A generic method of a generic type (TList.Map<R>): a template of the
+  // type, parsed again for each of its specializations (and then a
+  // generic method of that specialization).
+  if (R->getClassName().isValid() && R->getOuterClassNames().empty() &&
+      !Replay && !SavedRec) {
+    auto It = GenericTypes.find(R->getClassName().Name);
+    if (It != GenericTypes.end()) {
+      TypeDecl *G = It->second;
+      llvm::SmallVector<Token, 64> All{GenericTok};
+      if (ClassMethod)
+        All.push_back(ClassTok);
+      All.append(Rec.begin(), Rec.end());
+      Toks->Tokens = Ctx.copyArray<Token>(All);
+      auto *Last = static_cast<GenericTokens *>(G->getGenericTokens());
+      while (Last->NextMethod)
+        Last = Last->NextMethod;
+      Last->NextMethod = Toks;
+      R->setGeneric(G->getTypeParams(), Toks);
+      R->setTemplateMember();
+      return R;
+    }
   }
   if (GenericTypeParams.empty()) {
     Diags.error(R->getName().Loc,
@@ -1168,23 +1266,8 @@ RoutineDecl *Parser::parseRoutineDecl(bool HeadingOnly) {
   }
   if (Name.isValid() && !ClassName.isValid())
     declareName(Name); // (declared(NAME); a method's is its class's)
-  if (ParsingGeneric && Name.isValid() && Tok.is(tok::less)) { // <T, U>
-    consumeToken();
-    llvm::SmallVector<Identifier, 2> TypeParams;
-    do {
-      Identifier P;
-      if (!expectIdentifier(P, "type parameter name"))
-        break;
-      TypeParams.push_back(P);
-      if (Tok.is(tok::colon)) {
-        Diags.error(Tok.getLocation(),
-                    "constraints on type parameters are not supported yet");
-        skipUntil({tok::greater, tok::semi});
-      }
-    } while (tryConsume(tok::comma) || tryConsume(tok::semi));
-    expect(tok::greater, "after the type parameters");
-    GenericTypeParams = Ctx.copyArray<Identifier>(TypeParams);
-  }
+  if (ParsingGeneric && Name.isValid() && Tok.is(tok::less)) // <T, U>
+    parseTypeParamList();
   if (Name.isValid() && MK != MethodKind::None && !ClassName.isValid()) {
     std::string K = (ParsingClassInit ? "class " : "") + std::string(Kind);
     Diags.error(Name.Loc,
@@ -1383,6 +1466,8 @@ RoutineDecl *Parser::parseMethodHeading(bool InRecord, bool RecordClassMethod) {
   Identifier Name;
   if (!expectIdentifier(Name, std::string(Kind) + " name"))
     return nullptr;
+  if (ParsingGeneric && Tok.is(tok::less)) // generic function M<T>
+    parseTypeParamList();
   llvm::SmallVector<VarDecl *, 4> Params;
   bool HasParamList = Tok.is(tok::l_paren);
   if (HasParamList && !parseFormalParams(Params))
@@ -1831,6 +1916,15 @@ TypeSpec *Parser::parseClassType(SourceLocation Start) {
     return nullptr;
   };
   while (Tok.isNot(tok::kw_end) && Tok.isNot(tok::eof) && !Diags.shouldStop()) {
+    if (startsGeneric()) { // generic function M<T>(...)
+      RoutineDecl *R = parseGenericMethodHeading();
+      if (!R)
+        return Fail();
+      R->setVisibility(Vis);
+      Members.push_back(R);
+      ClassVars = false;
+      continue;
+    }
     if (Tok.is(tok::identifier)) {
       llvm::StringRef W = Tok.getIdentifier();
       if (W == "private" || W == "protected" || W == "public" ||
@@ -4578,6 +4672,15 @@ Expr *Parser::parseSelectors(Expr *Base) {
     if (Tok.is(tok::period)) {
       consumeToken();
       Identifier Field;
+      if (startsSpecialize()) { // obj.specialize M<T>: a generic method
+        llvm::SmallVector<TypeSpec *, 2> TypeArgs;
+        if (!parseSpecialization(Field, TypeArgs))
+          return nullptr;
+        Base = Ctx.create<FieldExpr>(SourceRange(Base->getBeginLoc(), PrevTokEnd),
+                                     Base, Field,
+                                     Ctx.copyArray<TypeSpec *>(TypeArgs));
+        continue;
+      }
       if (!expectIdentifier(Field, "field name after '.'"))
         return nullptr;
       Base = Ctx.create<FieldExpr>(SourceRange(Base->getBeginLoc(), PrevTokEnd),

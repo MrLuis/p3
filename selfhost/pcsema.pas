@@ -4007,6 +4007,46 @@ begin
     c^.classDtor := r;
 end;
 
+{ generic function M<T>(...) in class c: a member found only by its key
+  (M<N>), not checked; its specializations are made from its
+  implementation (instantiateMethod). Not virtual: each specialization is a
+  method of its own. }
+procedure defineGenericMethod(c: PType; r: PDecl);
+var
+  i, j: longint;
+  pi, pj: PIdent;
+  bad: string;
+begin
+  r^.ownerClass := c;
+  r^.parent := nil;
+  for i := 0 to r^.typeParams.count - 1 do
+    for j := 0 to i - 1 do
+    begin
+      pi := PIdent(listGet(r^.typeParams, i));
+      pj := PIdent(listGet(r^.typeParams, j));
+      if pi^.name = pj^.name then
+      begin
+        ms('duplicate type parameter ''');
+        maN(pi^.spelling);
+        ma('''');
+        errR(pi^.loc, identRange(pi^));
+      end;
+    end;
+  bad := '';
+  if r^.isVirtual or r^.isOverride or r^.isAbstract then
+    bad := 'a generic method cannot be virtual, override or abstract (each ' +
+           'specialization is a method of its own)'
+  else if (r^.methodKind = mtConstructor) or (r^.methodKind = mtDestructor) then
+    bad := 'a constructor or a destructor cannot be generic'
+  else if r^.methodKind = mtOperator then
+    bad := 'an operator cannot be generic';
+  if bad <> '' then
+  begin
+    ms(bad);
+    errR(r^.ident.loc, identRange(r^.ident));
+  end;
+end;
+
 procedure defineMethod(c, parentClass: PType; r, inh: PDecl; owner: PType;
                        var vtable: TPtrList);
 var
@@ -4789,6 +4829,24 @@ begin
     if (m^.kind = dkRoutine) and (m^.classInit <> ciNone) then
     begin
       defineClassInit(c, m); { not a member }
+      continue;
+    end;
+    if (m^.kind = dkRoutine) and (m^.memberKey <> nil) then
+    begin
+      prev := PDecl(mapGet(own, m^.memberKey^.id));
+      if prev <> nil then
+      begin
+        ms('redefinition of generic method ''');
+        maN(m^.ident.spelling);
+        ma('''');
+        errR(m^.ident.loc, identRange(m^.ident));
+        ms('previous definition is here');
+        note(prev^.loc);
+        continue;
+      end;
+      defineGenericMethod(c, m);
+      mapPut(own, m^.memberKey^.id, m);
+      listAdd(members, m);
       continue;
     end;
     fwd := PDecl(mapGet(own, m^.ident.name^.id));
@@ -5958,7 +6016,8 @@ begin
   begin
     r := PDecl(listGet(d^.typeSpec^.memberList, j));
     if (r^.kind = dkRoutine) and (r^.ownerClass = c) and not r^.isAbstract and
-       (r^.body = nil) and (r^.classInit = ciNone) then
+       (r^.body = nil) and (r^.classInit = ciNone) and
+       not ((r^.memberKey <> nil) and (r^.genericDef <> nil)) then
     begin
       ms('method ''');
       maQualified(c, r^.ident);
@@ -7211,6 +7270,8 @@ begin
 end;
 
 { generic function F<T>...: declared (under its key), not checked. }
+procedure declareGenericMethodBody(r: PDecl); forward;
+
 procedure declareGeneric(r: PDecl);
 var
   i, j: longint;
@@ -7218,6 +7279,11 @@ var
   key: PName;
   prev: PDecl;
 begin
+  if identValid(r^.methodClassName) and (curRoutine = nil) then
+  begin
+    declareGenericMethodBody(r);
+    exit;
+  end;
   if curRoutine <> nil then
   begin
     ms('generic routines must be declared at program or unit level');
@@ -7287,8 +7353,117 @@ end;
   the generic's declaration on first use (its heading resolved now, its
   body checked later); nil after a diagnostic. }
 function instantiateGeneric(const name: TIdent; g: PDecl; const types: TPtrList): PDecl; forward;
+function instantiateMethod(const name: TIdent; g: PDecl; const types: TPtrList): PDecl; forward;
 
-function specializeGeneric(const name: TIdent; const args: TPtrList): PDecl;
+{ generic function TFoo.M<T>(...) begin ... end: the definition of the
+  generic method M<N> of TFoo; its heading must match the declaration's in
+  its shape (type parameters, parameters' kinds and number, function or
+  procedure), the types being checked in each specialization. }
+procedure declareGenericMethodBody(r: PDecl);
+var
+  c, t: PType;
+  td, m, a, b: PDecl;
+  i: longint;
+  same: boolean;
+begin
+  c := nil;
+  if r^.outerClassNames.count > 0 then
+  begin
+    td := lookupMemberPath(r^.outerClassNames, r^.methodClassName);
+    if (td <> nil) and (td^.kind = dkType) then
+    begin
+      t := td^.declType;
+      if (t <> nil) and (t^.kind = tyClass) then
+        c := t;
+    end;
+  end
+  else
+    c := lookupClass(r^.methodClassName);
+  if c = nil then
+    exit;
+  m := findOwnMember(c, genericKey(r^.ident.name, r^.typeParams.count));
+  if (m <> nil) and (m^.kind <> dkRoutine) then
+    m := nil;
+  if m = nil then
+  begin
+    ms('class ''');
+    bufAddTypeName(msg, c);
+    ma(''' has no generic method ''');
+    maN(r^.ident.spelling);
+    ma(''' with ' + intToStr(r^.typeParams.count) + ' type parameter');
+    if r^.typeParams.count <> 1 then
+      ma('s');
+    errR(r^.ident.loc, identRange(r^.ident));
+    exit;
+  end;
+  if c^.classModule <> curModule then
+  begin
+    ms('method ''');
+    maQualified(c, m^.ident);
+    ma(''' must be implemented where its class is declared');
+    errR(r^.ident.loc, identRange(r^.ident));
+    exit;
+  end;
+  if m^.genericDef <> nil then
+  begin
+    ms('redefinition of ''');
+    maQualified(c, m^.ident);
+    ma('''');
+    errR(r^.ident.loc, identRange(r^.ident));
+    exit;
+  end;
+  same := (m^.isFunction = r^.isFunction) and (m^.isClassMethod = r^.isClassMethod) and
+          (m^.params.count = r^.params.count);
+  i := 0;
+  while same and (i < r^.typeParams.count) do
+  begin
+    same := PIdent(listGet(r^.typeParams, i))^.name = PIdent(listGet(m^.typeParams, i))^.name;
+    i := i + 1;
+  end;
+  i := 0;
+  while same and (i < r^.params.count) do
+  begin
+    a := PDecl(listGet(m^.params, i));
+    b := PDecl(listGet(r^.params, i));
+    same := (a^.varKind = b^.varKind) and (a^.isOut = b^.isOut) and
+            (a^.isConstRef = b^.isConstRef) and (a^.ident.name = b^.ident.name);
+    i := i + 1;
+  end;
+  if not same then
+  begin
+    ms('heading of ''');
+    maQualified(c, m^.ident);
+    ma(''' does not match its declaration');
+    errR(r^.ident.loc, identRange(r^.ident));
+    noteDeclaredHere(m);
+    exit;
+  end;
+  r^.genericScope := cur;
+  r^.ownerClass := c;
+  m^.genericDef := r;
+  m^.genericScope := cur;
+  r^.isUsed := true;
+end;
+
+{ The generic methods named name of class c or its ancestors (the nearest
+  of each number of type parameters). }
+procedure genericMethodsNamed(c: PType; name: PName; var found: TPtrList);
+var
+  n: longint;
+  g, owner: PType;
+  d: PDecl;
+begin
+  listInit(found);
+  for n := 1 to 16 do
+  begin
+    owner := nil;
+    d := findMember(c, genericKey(name, n), owner);
+    if (d <> nil) and (d^.kind = dkRoutine) then
+      listAdd(found, d);
+  end;
+end;
+
+function specializeGenericW(const name: TIdent; const args: TPtrList; var w: PWithContext): PDecl;
 var
   types: TPtrList;
   t: PType;
@@ -7296,7 +7471,7 @@ var
   i, k: longint;
   otherGeneric: boolean;
 begin
-  specializeGeneric := nil;
+  specializeGenericW := nil;
   listInit(types);
   for i := 0 to args.count - 1 do
   begin
@@ -7305,9 +7480,11 @@ begin
       exit;
     listAdd(types, t);
   end;
-  g := lookup(genericKey(name.name, args.count));
+  g := scopeLookup(cur, genericKey(name.name, args.count), w);
   if (g <> nil) and (g^.kind <> dkRoutine) then
     g := nil;
+  if (g <> nil) and (g^.memberKey <> nil) then { specialize M<T>(args) in a method }
+    exit(instantiateMethod(name, g, types));
   otherGeneric := false; { f with another number of type parameters }
   k := 1;
   while (k <= 16) and (g = nil) do
@@ -7332,7 +7509,15 @@ begin
       diagUndeclared(name);
     exit;
   end;
-  specializeGeneric := instantiateGeneric(name, g, types);
+  specializeGenericW := instantiateGeneric(name, g, types);
+end;
+
+function specializeGeneric(const name: TIdent; const args: TPtrList): PDecl;
+var
+  w: PWithContext;
+begin
+  w := nil;
+  specializeGeneric := specializeGenericW(name, args, w);
 end;
 
 { The specialization of the generic routine g for the type arguments types
@@ -7449,6 +7634,134 @@ begin
   listAdd(pendingInstances, inst);
   listAdd(moduleInstances, r);
   instantiateGeneric := r;
+end;
+
+{ The specialization of generic method g (of its class) for the type
+  arguments types: its implementation parsed again, named M<types>, a
+  method of the class (not a member) with g's directives; its heading
+  resolved now, its body checked later. Nil after a diagnostic. }
+function instantiateMethod(const name: TIdent; g: PDecl; const types: TPtrList): PDecl;
+var
+  def, r, td: PDecl;
+  c: PType;
+  i, k, errors: longint;
+  inst: PInstance;
+  same: boolean;
+  nb, sb, tb: TBuf;
+  sc, savedScope: PScope;
+  savedRoutine: PDecl;
+  savedPrefix: PName;
+  p: PIdent;
+  id: TIdent;
+begin
+  instantiateMethod := nil;
+  g^.isUsed := true;
+  c := g^.ownerClass;
+  def := genericDefinition(g);
+  if def = g then
+  begin
+    ms('generic method ''');
+    maQualified(c, g^.ident);
+    ma(''' is used before its implementation');
+    errR(name.loc, identRange(name));
+    noteDeclaredHere(g);
+    exit;
+  end;
+  for i := 0 to instances.count - 1 do
+  begin
+    inst := PInstance(listGet(instances, i));
+    if (inst^.g = g) and (inst^.types.count = types.count) then
+    begin
+      same := true;
+      for k := 0 to types.count - 1 do
+        if listGet(inst^.types, k) <> listGet(types, k) then
+          same := false;
+      if same then
+        exit(inst^.r);
+    end;
+  end;
+  r := reparseGeneric(def);
+  if r = nil then
+    exit;
+  bufInit(nb);
+  bufInit(sb);
+  bufAddName(nb, g^.ident.name);
+  bufAddChar(nb, '<');
+  bufAddName(sb, g^.ident.spelling);
+  bufAddChar(sb, '<');
+  for k := 0 to types.count - 1 do
+  begin
+    if k > 0 then
+    begin
+      bufAddChar(nb, ',');
+      bufAdd(sb, ', ');
+    end;
+    bufInit(tb);
+    bufAddTypeName(tb, PType(listGet(types, k)));
+    for i := 0 to tb.len - 1 do
+      bufAddChar(nb, lowerChar(bufCharAt(tb, i)));
+    bufAddChars(sb, tb.data, 0, tb.len);
+    bufFree(tb);
+  end;
+  bufAddChar(nb, '>');
+  bufAddChar(sb, '>');
+  id.name := internChars(nb.data, 0, nb.len);
+  id.spelling := internChars(sb.data, 0, sb.len);
+  id.loc := def^.ident.loc;
+  bufFree(nb);
+  bufFree(sb);
+  r^.ident := id;
+  inst := PInstance(arenaAlloc(sizeof(TInstance)));
+  inst^.g := g;
+  inst^.types := types;
+  inst^.r := r;
+  inst^.use := name.loc;
+  listAdd(instances, inst);
+  { its scope: the implementation's, where the type parameters name the
+    types }
+  sc := newScope(PScope(def^.genericScope));
+  for k := 0 to types.count - 1 do
+  begin
+    p := PIdent(listGet(def^.typeParams, k));
+    td := newDecl(dkType, p^, p^.loc);
+    td^.declType := PType(listGet(types, k));
+    td^.isUsed := true;
+    scopeInsert(sc, p^.name, td);
+  end;
+  inst^.scope := sc;
+  savedScope := cur;
+  savedRoutine := curRoutine;
+  savedPrefix := nestPrefix;
+  cur := sc;
+  curRoutine := nil;
+  nestPrefix := nil;
+  errors := diagNumErrors;
+  r^.parent := nil;
+  r^.level := 1;
+  r^.ownerClass := c;
+  r^.methodKind := mtMethod;
+  if g^.isClassMethod then
+    r^.isClassMethod := true;
+  if g^.isStatic then
+    r^.isStatic := true;
+  r^.vis := g^.vis;
+  resolveSignature(r);
+  if not r^.isStatic then
+    makeSelf(r, c);
+  if diagNumErrors > errors then
+  begin
+    ms('in the specialization ''');
+    maQualified(c, id);
+    ma(''' requested here');
+    note(name.loc);
+  end;
+  cur := savedScope;
+  curRoutine := savedRoutine;
+  nestPrefix := savedPrefix;
+  r^.isUsed := true;
+  listAdd(pendingInstances, inst);
+  listAdd(moduleInstances, r);
+  instantiateMethod := r;
 end;
 
 { Checks the bodies of the specializations made so far (and those they
@@ -8458,11 +8771,55 @@ end;
   several arguments for one T, their common type), and for those still
   unknown the type want wanted of the result, if the result is a T. found:
   there is such a generic. Nil without one, and after a diagnostic. }
+function inferFor(const name: TIdent; var generics: TPtrList; const args: TPtrList;
+                  want: PType): PDecl; forward;
+
+function inferSpecializationW(const name: TIdent; const args: TPtrList;
+                              want: PType; var found: boolean;
+                              var w: PWithContext): PDecl;
+var
+  generics: TPtrList;
+  n: longint;
+  g: PDecl;
+  gw: PWithContext;
+begin
+  inferSpecializationW := nil;
+  found := false;
+  listInit(generics);
+  for n := 1 to 16 do
+  begin
+    gw := nil;
+    g := scopeLookup(cur, genericKey(name.name, n), gw);
+    if (g <> nil) and (g^.kind = dkRoutine) then
+    begin
+      if generics.count = 0 then { (M(args) in a method: Self.M) }
+        w := gw;
+      listAdd(generics, g);
+    end;
+  end;
+  if generics.count = 0 then
+    exit;
+  found := true;
+  inferSpecializationW := inferFor(name, generics, args, want);
+end;
+
 function inferSpecialization(const name: TIdent; const args: TPtrList;
                              want: PType; var found: boolean): PDecl;
 var
-  generics, fit, map, bound: TPtrList;
-  n, i, k, j: longint;
+  w: PWithContext;
+begin
+  w := nil;
+  inferSpecialization := inferSpecializationW(name, args, want, found, w);
+end;
+
+{ Of generics (routines or methods named name), the one whose parameters
+  take args, specialized for the type arguments they (and want, the type
+  wanted of the result) give; nil after a diagnostic. }
+function inferFor(const name: TIdent; var generics: TPtrList; const args: TPtrList;
+                  want: PType): PDecl;
+var
+  fit, map, bound: TPtrList;
+  i, k, j: longint;
   g, def, p: PDecl;
   ok: boolean;
   a: PNode;
@@ -8510,18 +8867,7 @@ var
   end;
 
 begin
-  inferSpecialization := nil;
-  found := false;
-  listInit(generics);
-  for n := 1 to 16 do
-  begin
-    g := lookup(genericKey(name.name, n));
-    if (g <> nil) and (g^.kind = dkRoutine) then
-      listAdd(generics, g);
-  end;
-  if generics.count = 0 then
-    exit;
-  found := true;
+  inferFor := nil;
   if generics.count > 1 then { those that take these arguments }
   begin
     listInit(fit);
@@ -8620,7 +8966,10 @@ begin
       noteDeclaredHere(g);
       exit;
     end;
-  inferSpecialization := instantiateGeneric(name, g, bound);
+  if g^.memberKey <> nil then
+    inferFor := instantiateMethod(name, g, bound)
+  else
+    inferFor := instantiateGeneric(name, g, bound);
 end;
 
 function resolveOverload(first: PDecl; const args: TPtrList; const callee: TIdent;

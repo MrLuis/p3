@@ -840,6 +840,8 @@ begin
           bufAdd(outBuf, ' abstract');
         if d^.hasOverloadDirective then
           bufAdd(outBuf, ' overload');
+        if d^.memberKey <> nil then
+          bufAdd(outBuf, ' generic<' + intToStr(d^.typeParams.count) + '>');
         if d^.isInline then
           bufAdd(outBuf, ' inline');
         if d^.callConv <> ccDefault then
@@ -1576,6 +1578,15 @@ begin
     nkField:
       begin
         lineName('FieldExpr ''', e^.fieldName.name);
+        if e^.fieldTypeArgs.count > 0 then
+          bufAdd(outBuf, ' specialize<' + intToStr(e^.fieldTypeArgs.count) + '>');
+        if (e^.fieldDecl <> nil) and (e^.fieldDecl^.kind = dkRoutine) and
+           (e^.fieldDecl^.ident.name <> e^.fieldName.name) then { a specialization }
+        begin
+          bufAdd(outBuf, ' ''');
+          bufAddName(outBuf, e^.fieldDecl^.ident.name);
+          bufAdd(outBuf, '''');
+        end;
         overloadNumber(e^.fieldDecl);
         endExpr(e);
         indent := indent + 2;

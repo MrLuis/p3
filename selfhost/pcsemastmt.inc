@@ -2019,6 +2019,9 @@ end;
 { Resolves r.f / obj.member / TFoo.Create; nil after a diagnostic. }
 function resolveMember(e: PNode): PDecl;
 var
+  gs, types: TPtrList;
+  t: PType;
+  i: longint;
   viaClass, bt, owner, h: PType;
   d, td: PDecl;
   viaRef, ok, reported: boolean;
@@ -2144,11 +2147,41 @@ begin
     exit;
   end;
   owner := nil;
-  d := findMember(bt, e^.fieldName.name, owner);
+  d := nil;
+  if e^.fieldTypeArgs.count = 0 then
+    d := findMember(bt, e^.fieldName.name, owner);
   if bt^.classRecord <> nil then
     what := 'record'
   else
     what := 'class';
+  if d = nil then { a generic method: specialized here, or by the call (inferred) }
+  begin
+    if e^.fieldTypeArgs.count > 0 then
+    begin
+      d := findMember(bt, genericKey(e^.fieldName.name, e^.fieldTypeArgs.count), owner);
+      if d = nil then
+      begin
+        ms('no generic method ''');
+        maN(e^.fieldName.spelling);
+        ma(''' with ' + intToStr(e^.fieldTypeArgs.count) + ' type parameter');
+        if e^.fieldTypeArgs.count <> 1 then
+          ma('s');
+        ma(' in ' + what + ' ');
+        maT(bt);
+        errR(e^.fieldName.loc, identRange(e^.fieldName));
+        exit;
+      end;
+    end
+    else
+    begin
+      genericMethodsNamed(bt, e^.fieldName.name, gs);
+      if gs.count > 0 then
+      begin
+        d := PDecl(listGet(gs, 0));
+        d := findMember(bt, genericKey(e^.fieldName.name, d^.typeParams.count), owner);
+      end;
+    end;
+  end;
   if d = nil then
   begin
     ms('no member named ''');
@@ -2170,7 +2203,8 @@ begin
             (d^.methodKind <> mtOperator);
     if d^.kind = dkProperty then
       ok := d^.propIsClass;
-    if not ok then
+    if not ok and not ((d^.kind = dkRoutine) and (d^.memberKey <> nil) and
+                       d^.isClassMethod) then
     begin
       ms('only constructors, class methods, class variables and class ' +
          'properties can be used through ');
@@ -2187,6 +2221,21 @@ begin
       errR(e^.fieldName.loc, identRange(e^.fieldName));
       exit;
     end;
+  end;
+  { obj.specialize M<T>: the specialization }
+  if (d^.kind = dkRoutine) and (d^.memberKey <> nil) and (e^.fieldTypeArgs.count > 0) then
+  begin
+    listInit(types);
+    for i := 0 to e^.fieldTypeArgs.count - 1 do
+    begin
+      t := resolveType(PTypeSpec(listGet(e^.fieldTypeArgs, i)), nil);
+      if isError(t) then
+        exit;
+      listAdd(types, t);
+    end;
+    d := instantiateMethod(e^.fieldName, d, types);
+    if d = nil then
+      exit;
   end;
   e^.fieldDecl := d;
   resolveMember := d;
@@ -2213,6 +2262,7 @@ end;
   a call through a procedural value? }
 function isMethodCallee(callee: PNode): boolean;
 var
+  gs: TPtrList;
   bt, owner, h: PType;
   d: PDecl;
 begin
@@ -2251,7 +2301,8 @@ begin
     exit(false);
   owner := nil;
   d := findMember(bt, callee^.fieldName.name, owner);
-  isMethodCallee := (d <> nil) and (d^.kind = dkRoutine);
+  genericMethodsNamed(bt, callee^.fieldName.name, gs);
+  isMethodCallee := ((d <> nil) and (d^.kind = dkRoutine)) or (gs.count > 0);
 end;
 
 { inherited [name]: the inherited method, or nil (after a diagnostic, or
@@ -2490,6 +2541,7 @@ end;
 
 function checkMethodCall(e: PNode): PType;
 var
+  gs: TPtrList;
   f, d: PDecl;
   callee: PNode;
   t: PType;
@@ -2501,7 +2553,19 @@ begin
   d := resolveMember(callee);
   if (d <> nil) and diagOwnedFree(callee) then
     exit(errorType);
-  if (d <> nil) and (d^.kind = dkRoutine) then { objfpc: overloads }
+  if (d <> nil) and (d^.kind = dkRoutine) and (d^.memberKey <> nil) then
+  begin { obj.M(args): the types from the args }
+    genericMethodsNamed(d^.ownerClass, callee^.fieldName.name, gs);
+    d := inferFor(callee^.fieldName, gs, e^.args, nil);
+    if d = nil then
+    begin
+      for i := 0 to e^.args.count - 1 do
+        check(PNode(listGet(e^.args, i)));
+      exit(errorType);
+    end;
+    callee^.fieldDecl := d;
+  end
+  else if (d <> nil) and (d^.kind = dkRoutine) then { objfpc: overloads }
   begin
     d := resolveOverload(d, e^.args, callee^.fieldName, nodeRange(e));
     if d = nil then
@@ -2766,11 +2830,11 @@ begin
   if s^.typeArgs.count = 0 then
     d := scopeLookup(cur, s^.callee.name, w)
   else
-    d := specializeGeneric(s^.callee, s^.typeArgs);
+    d := specializeGenericW(s^.callee, s^.typeArgs, w);
   noteLambdaUse(d, w, s^.callee);
   inferred := false; { f(args) for a generic f: its types inferred }
   if (d = nil) and (s^.typeArgs.count = 0) then
-    d := inferSpecialization(s^.callee, s^.args, nil, inferred);
+    d := inferSpecializationW(s^.callee, s^.args, nil, inferred, w);
   if d = nil then
   begin
     if (s^.typeArgs.count = 0) and not inferred then
@@ -5176,15 +5240,15 @@ begin
   if e^.typeArgs.count = 0 then
     d := scopeLookup(cur, e^.callee.name, w)
   else
-    d := specializeGeneric(e^.callee, e^.typeArgs);
+    d := specializeGenericW(e^.callee, e^.typeArgs, w);
   noteLambdaUse(d, w, e^.callee);
   inferred := false; { f(args) for a generic f: its types inferred }
   if (d = nil) and (e^.typeArgs.count = 0) then
   begin
     if wantedCall = e then
-      d := inferSpecialization(e^.callee, e^.args, wantedType, inferred)
+      d := inferSpecializationW(e^.callee, e^.args, wantedType, inferred, w)
     else
-      d := inferSpecialization(e^.callee, e^.args, nil, inferred);
+      d := inferSpecializationW(e^.callee, e^.args, nil, inferred, w);
   end;
   if d = nil then
   begin
@@ -5987,6 +6051,17 @@ begin
     exit;
   end;
   { a method used as a value: a call without arguments }
+  if d^.memberKey <> nil then
+  begin
+    ms('cannot infer the type parameters of generic method ''');
+    maN(e^.fieldName.spelling);
+    ma(''' without arguments; give them: specialize ');
+    maN(e^.fieldName.spelling);
+    ma('<...>');
+    errR(e^.fieldName.loc, identRange(e^.fieldName));
+    noteDeclaredHere(d);
+    exit;
+  end;
   listInit(noArgs);
   d := resolveOverload(d, noArgs, e^.fieldName, identRange(e^.fieldName));
   if d = nil then

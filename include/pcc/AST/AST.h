@@ -419,12 +419,16 @@ class FieldExpr final : public Expr {
   /// A type helper's member used on a value that is not a variable: code
   /// generation passes Self a temporary holding it (set by Sema).
   bool HelperValue = false;
+  /// obj.specialize M<T>: the type arguments of a generic method (objfpc).
+  llvm::ArrayRef<TypeSpec *> TypeArgs;
 
 public:
-  FieldExpr(SourceRange R, Expr *Base, Identifier Field)
-      : Expr(EK_Field, R), Base(Base), Field(Field) {}
+  FieldExpr(SourceRange R, Expr *Base, Identifier Field,
+            llvm::ArrayRef<TypeSpec *> TypeArgs = {})
+      : Expr(EK_Field, R), Base(Base), Field(Field), TypeArgs(TypeArgs) {}
   Expr *getBase() const { return Base; }
   const Identifier &getField() const { return Field; }
+  llvm::ArrayRef<TypeSpec *> getTypeArgs() const { return TypeArgs; }
   FieldDecl *getFieldDecl() const;
   Decl *getMember() const { return Member; }
   void setMember(Decl *D) { Member = D; }
@@ -1889,6 +1893,7 @@ class RoutineDecl final : public Decl {
   const void *GenericTokens = nullptr;
   void *GenericScope = nullptr;
   bool TemplateMember = false;
+  llvm::StringRef MemberKey; ///< a generic method's: name<N>
   bool Lambda = false, LambdaDone = false, LambdaBad = false;
   bool Closure = false, HeapFrame = false, MethodLambda = false;
   bool CopyFactory = false, Copied = false, CopyAll = false;
@@ -2039,6 +2044,15 @@ public:
   /// template too, parsed again for each specialization of the type.
   bool isTemplateMember() const { return TemplateMember; }
   void setTemplateMember() { TemplateMember = true; }
+  /// A generic method's declaration in its class (`generic function
+  /// Map<R>(...)`, objfpc): its member key `map<1>` (name<number of type
+  /// parameters>), the only name it is found by among the class's members,
+  /// as generic routines are found in scopes; empty for other routines.
+  /// Its specializations are made from its implementation (see
+  /// getGenericDefinition) and are not members.
+  llvm::StringRef getMemberKey() const { return MemberKey; }
+  void setMemberKey(llvm::StringRef K) { MemberKey = K; }
+  bool isGenericMethod() const { return !MemberKey.empty(); }
   /// The routine of a lambda (function(x) => e): hidden, nested in the
   /// routine the lambda is written in, with parameter and result types
   /// that Sema may take from where it is used (isLambdaDone once it has).

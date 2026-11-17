@@ -3341,6 +3341,19 @@ class Checker : public StmtVisitor<Checker>,
         defineClassInit(C, R); // not a member
         continue;
       }
+      if (auto *R = llvm::dyn_cast<RoutineDecl>(M); R && R->isGenericMethod()) {
+        if (Decl *Prev = Own.lookup(R->getMemberKey())) {
+          Diags.error(MN.Loc,
+                      "redefinition of generic method '" + MN.Spelling + "'",
+                      {MN.getRange()});
+          Diags.note(Prev->getLocation(), "previous definition is here");
+          continue;
+        }
+        defineGenericMethod(C, R);
+        Own[R->getMemberKey()] = R;
+        Members.push_back(R);
+        continue;
+      }
       RoutineDecl *OverloadOf = nullptr; // objfpc: an overloaded method
       if (Decl *Fwd = Own.lookup(MN.Name);
           isForwardClassDecl(Fwd) && llvm::isa<TypeDecl>(M)) {
@@ -3450,6 +3463,33 @@ class Checker : public StmtVisitor<Checker>,
       if (!Parent->findInterface(I))
         Impls.push_back({I, implementInterface(C, I, Where)});
     C->setInterfaces(Ctx.copyArray<InterfaceImpl>(Impls));
+  }
+
+  /// generic function M<T>(...) in class C: a member found only by its key
+  /// (M<N>), not checked; its specializations are made from its
+  /// implementation (instantiateMethod). Not virtual: each specialization
+  /// is a method of its own.
+  void defineGenericMethod(ClassType *C, RoutineDecl *R) {
+    const Identifier &Id = R->getName();
+    R->setClass(C);
+    R->setParent(nullptr);
+    auto Params = R->getTypeParams();
+    for (size_t I = 0; I < Params.size(); ++I)
+      for (size_t J = 0; J < I; ++J)
+        if (Params[I].Name == Params[J].Name)
+          Diags.error(Params[I].Loc,
+                      "duplicate type parameter '" + Params[I].Spelling + "'",
+                      {Params[I].getRange()});
+    const char *Bad =
+        R->isVirtual() || R->isOverride() || R->isAbstract()
+            ? "a generic method cannot be virtual, override or abstract (each "
+              "specialization is a method of its own)"
+        : R->isConstructor() || R->isDestructor()
+            ? "a constructor or a destructor cannot be generic"
+        : R->isOperator() ? "an operator cannot be generic"
+                          : nullptr;
+    if (Bad)
+      Diags.error(Id.Loc, Bad, {Id.getRange()});
   }
 
   /// The class constructor or destructor R of class or advanced record C:
@@ -4016,7 +4056,8 @@ class Checker : public StmtVisitor<Checker>,
     for (Decl *M : CS->getMembers()) {
       if (auto *R = llvm::dyn_cast<RoutineDecl>(M);
           R && R->getClass() == C && !R->isAbstract() && !R->getBody() &&
-          !R->isClassInit())
+          !R->isClassInit() &&
+          !(R->isGenericMethod() && R->getGenericDefinition() != R))
         Diags.error(R->getName().Loc,
                     "method '" + qualified(C, R->getName()) +
                         "' is declared but never implemented",
@@ -4826,6 +4867,8 @@ class Checker : public StmtVisitor<Checker>,
   /// generic function F<T>...: declared (under its key), not checked.
   void declareGeneric(RoutineDecl *R) {
     const Identifier &Id = R->getName();
+    if (R->getClassName().isValid() && !CurRoutine)
+      return declareGenericMethodBody(R);
     if (CurRoutine) {
       Diags.error(Id.Loc,
                   "generic routines must be declared at program or unit level",
@@ -4860,6 +4903,166 @@ class Checker : public StmtVisitor<Checker>,
       return;
     }
     Cur->insert(Key, R);
+  }
+
+  /// generic function TFoo.M<T>(...) begin ... end: the definition of the
+  /// generic method M<N> of TFoo; its heading must match the declaration's
+  /// in its shape (type parameters, parameters' kinds and number, function
+  /// or procedure), the types being checked in each specialization.
+  void declareGenericMethodBody(RoutineDecl *R) {
+    const Identifier &CN = R->getClassName(), &Id = R->getName();
+    ClassType *C = nullptr;
+    if (!R->getOuterClassNames().empty()) {
+      auto *TD = llvm::dyn_cast_or_null<TypeDecl>(
+          lookupMemberPath(R->getOuterClassNames(), CN));
+      C = TD ? llvm::dyn_cast<ClassType>(TD->getType()) : nullptr;
+    } else {
+      C = lookupClass(CN);
+    }
+    if (!C)
+      return;
+    auto Params = R->getTypeParams();
+    auto *M = llvm::dyn_cast_or_null<RoutineDecl>(
+        C->findOwnMember(genericKey(Id.Name, Params.size())));
+    if (!M) {
+      Diags.error(Id.Loc,
+                  "class '" + C->getName() + "' has no generic method '" +
+                      Id.Spelling + "' with " + llvm::Twine(Params.size()) +
+                      " type parameter" + (Params.size() == 1 ? "" : "s"),
+                  {Id.getRange()});
+      return;
+    }
+    std::string QName = qualified(C, M->getName());
+    if (C->getModule() != CurModule) {
+      Diags.error(Id.Loc,
+                  "method '" + QName +
+                      "' must be implemented where its class is declared",
+                  {Id.getRange()});
+      return;
+    }
+    if (M->getGenericDefinition() != M) {
+      Diags.error(Id.Loc, "redefinition of '" + QName + "'", {Id.getRange()});
+      return;
+    }
+    bool Same = M->isFunction() == R->isFunction() &&
+                M->isClassMethod() == R->isClassMethod() &&
+                M->getParams().size() == R->getParams().size();
+    for (size_t I = 0; Same && I < Params.size(); ++I)
+      Same = Params[I].Name == M->getTypeParams()[I].Name;
+    for (size_t I = 0; Same && I < R->getParams().size(); ++I) {
+      VarDecl *A = M->getParams()[I], *B = R->getParams()[I];
+      Same = A->getVarKind() == B->getVarKind() &&
+             A->isOutParam() == B->isOutParam() &&
+             A->isConstRefParam() == B->isConstRefParam() &&
+             A->getName().Name == B->getName().Name;
+    }
+    if (!Same) {
+      Diags.error(Id.Loc,
+                  "heading of '" + QName + "' does not match its declaration",
+                  {Id.getRange()});
+      noteDeclaredHere(M);
+      return;
+    }
+    R->setGenericScope(Cur);
+    R->setClass(C);
+    M->setGenericDefinition(R);
+    M->setGenericScope(Cur);
+    Used.insert(R);
+  }
+
+  /// The specialization of generic method G (of its class) for type
+  /// arguments Types: its implementation parsed again, named M<types>, a
+  /// method of the class (not a member) with G's directives; its heading
+  /// resolved now, its body checked later. Null after a diagnostic.
+  RoutineDecl *instantiateMethod(const Identifier &Name, RoutineDecl *G,
+                                 llvm::ArrayRef<Type *> Types) {
+    Used.insert(G);
+    ClassType *C = G->getClass();
+    RoutineDecl *Def = G->getGenericDefinition();
+    if (Def == G) {
+      Diags.error(Name.Loc,
+                  "generic method '" + qualified(C, G->getName()) +
+                      "' is used before its implementation",
+                  {Name.getRange()});
+      noteDeclaredHere(G);
+      return nullptr;
+    }
+    auto Key = std::make_pair(G, std::vector<Type *>(Types.begin(), Types.end()));
+    if (auto It = Instances.find(Key); It != Instances.end())
+      return It->second;
+    RoutineDecl *I = Reparse ? Reparse(Def) : nullptr;
+    if (!I) {
+      if (!Reparse)
+        Diags.error(Name.Loc, "generic methods cannot be specialized here",
+                    {Name.getRange()});
+      return nullptr;
+    }
+    std::string N = (G->getName().Name + "<").str();
+    std::string S = (G->getName().Spelling + "<").str();
+    for (size_t K = 0; K < Types.size(); ++K) {
+      if (K) {
+        N += ",";
+        S += ", ";
+      }
+      N += llvm::StringRef(Types[K]->getName()).lower();
+      S += Types[K]->getName();
+    }
+    N += ">";
+    S += ">";
+    I->setName(Identifier{Ctx.getStrings().intern(N), Ctx.getStrings().intern(S),
+                          Def->getName().Loc});
+    Instances[Key] = I;
+    // Its scope: the implementation's, where the type parameters name the
+    // types.
+    auto Sc = std::make_unique<Scope>(static_cast<Scope *>(Def->getGenericScope()));
+    for (size_t K = 0; K < Types.size(); ++K) {
+      const Identifier &P = Def->getTypeParams()[K];
+      auto *TD = Ctx.create<TypeDecl>(P.Loc, P, Types[K]);
+      Used.insert(TD);
+      Sc->insert(P.Name, TD);
+    }
+    Scope *InstScope = Sc.get();
+    InstanceScopes.push_back(std::move(Sc));
+    Scope *SavedScope = Cur;
+    RoutineDecl *SavedRoutine = CurRoutine;
+    llvm::StringRef SavedPrefix = NestPrefix;
+    Cur = InstScope;
+    CurRoutine = nullptr;
+    NestPrefix = {};
+    unsigned Errors = Diags.getNumErrors();
+    I->setParent(nullptr);
+    I->setClass(C);
+    I->setMethodKind(MethodKind::Method);
+    if (G->isClassMethod())
+      I->setClassMethod();
+    if (G->isStatic())
+      I->setStatic(true);
+    I->setVisibility(G->getVisibility());
+    resolveSignature(I);
+    if (!I->isStatic())
+      makeSelf(I, C);
+    if (Diags.getNumErrors() > Errors)
+      Diags.note(Name.Loc, "in the specialization '" + qualified(C, I->getName()) +
+                               "' requested here");
+    Cur = SavedScope;
+    CurRoutine = SavedRoutine;
+    NestPrefix = SavedPrefix;
+    Used.insert(I);
+    PendingInstances.push_back({I, InstScope, Name.Loc});
+    ModuleInstances.push_back(I);
+    return I;
+  }
+
+  /// The generic methods named Name of class C or its ancestors (the
+  /// nearest of each number of type parameters).
+  llvm::SmallVector<RoutineDecl *, 2> genericMethodsNamed(const ClassType *C,
+                                                          llvm::StringRef Name) {
+    llvm::SmallVector<RoutineDecl *, 2> Found;
+    for (size_t N = 1; N <= 16; ++N)
+      if (auto *G = llvm::dyn_cast_or_null<RoutineDecl>(
+              C->findMember(genericKey(Name, N))))
+        Found.push_back(G);
+    return Found;
   }
 
   /// Is Name the name of a generic (type or routine), with any number of
@@ -4997,7 +5200,10 @@ class Checker : public StmtVisitor<Checker>,
   /// specialize Name<Args>: the routine for those type arguments, made
   /// from the generic's declaration on first use (its heading resolved now,
   /// its body checked later); null after a diagnostic.
-  RoutineDecl *specialize(const Identifier &Name, llvm::ArrayRef<TypeSpec *> Args) {
+  /// (W: the with context the generic was found through, a generic
+  /// method's object: Self in a method.)
+  RoutineDecl *specialize(const Identifier &Name, llvm::ArrayRef<TypeSpec *> Args,
+                          WithContext **W = nullptr) {
     llvm::SmallVector<Type *, 2> Types;
     for (TypeSpec *TS : Args) {
       Type *T = resolveType(TS);
@@ -5006,10 +5212,12 @@ class Checker : public StmtVisitor<Checker>,
       Types.push_back(T);
     }
     auto *G = llvm::dyn_cast_or_null<RoutineDecl>(
-        Cur->lookup(genericKey(Name.Name, Args.size())));
+        Cur->lookup(genericKey(Name.Name, Args.size()), W));
     bool OtherGeneric = false; // F with another number of type parameters
     for (size_t N = 1; N <= 16 && !G; ++N)
       OtherGeneric |= Cur->lookup(genericKey(Name.Name, N)) != nullptr;
+    if (G && G->isGenericMethod()) // specialize M<T>(args) in a method
+      return instantiateMethod(Name, G, Types);
     if (!G) {
       if (Cur->lookup(Name.Name) || OtherGeneric)
         Diags.error(Name.Loc,
@@ -5115,16 +5323,30 @@ class Checker : public StmtVisitor<Checker>,
   /// diagnostic.
   RoutineDecl *inferSpecialization(const Identifier &Name,
                                    llvm::ArrayRef<Expr *> Args, Type *Want,
-                                   bool &Found) {
+                                   bool &Found, WithContext **W = nullptr) {
     Found = false;
     llvm::SmallVector<RoutineDecl *, 2> Generics;
-    for (size_t N = 1; N <= 16; ++N)
+    for (size_t N = 1; N <= 16; ++N) {
+      WithContext *GW = nullptr;
       if (auto *G = llvm::dyn_cast_or_null<RoutineDecl>(
-              Cur->lookup(genericKey(Name.Name, N))))
+              Cur->lookup(genericKey(Name.Name, N), &GW))) {
+        if (Generics.empty() && W) // (M(args) in a method: Self.M)
+          *W = GW;
         Generics.push_back(G);
+      }
+    }
     if (Generics.empty())
       return nullptr;
     Found = true;
+    return inferFor(Name, Generics, Args, Want);
+  }
+
+  /// Of Generics (routines or methods named Name), the one whose
+  /// parameters take Args, specialized for the type arguments they (and
+  /// Want, the type wanted of the result) give; null after a diagnostic.
+  RoutineDecl *inferFor(const Identifier &Name,
+                        llvm::SmallVectorImpl<RoutineDecl *> &Generics,
+                        llvm::ArrayRef<Expr *> Args, Type *Want) {
     if (Generics.size() > 1) { // those that take these arguments
       llvm::SmallVector<RoutineDecl *, 2> Fit;
       for (RoutineDecl *G : Generics) {
@@ -5226,6 +5448,8 @@ class Checker : public StmtVisitor<Checker>,
         noteDeclaredHere(G);
         return nullptr;
       }
+    if (G->isGenericMethod())
+      return instantiateMethod(Name, G, Bound);
     return instantiate(Name, G, Bound);
   }
 
@@ -8401,11 +8625,11 @@ public:
     const Identifier &Callee = S->getCallee();
     WithContext *W = nullptr;
     Decl *D = S->getTypeArgs().empty() ? Cur->lookup(Callee.Name, &W)
-                                       : specialize(Callee, S->getTypeArgs());
+                                       : specialize(Callee, S->getTypeArgs(), &W);
     noteLambdaUse(D, W, Callee);
     bool Generic = false; // F(args) for a generic F: its types inferred
     if (!D && S->getTypeArgs().empty())
-      D = inferSpecialization(Callee, S->getArgs(), nullptr, Generic);
+      D = inferSpecialization(Callee, S->getArgs(), nullptr, Generic, &W);
     if (!D) {
       if (S->getTypeArgs().empty() && !Generic) {
         diagUndeclared(Callee);
@@ -9903,12 +10127,12 @@ public:
     const Identifier &Callee = E->getCallee();
     WithContext *W = nullptr;
     Decl *D = E->getTypeArgs().empty() ? Cur->lookup(Callee.Name, &W)
-                                       : specialize(Callee, E->getTypeArgs());
+                                       : specialize(Callee, E->getTypeArgs(), &W);
     noteLambdaUse(D, W, Callee);
     bool Generic = false; // F(args) for a generic F: its types inferred
     if (!D && E->getTypeArgs().empty())
       D = inferSpecialization(Callee, E->getArgs(),
-                              WantedCall == E ? WantedType : nullptr, Generic);
+                              WantedCall == E ? WantedType : nullptr, Generic, &W);
     if (!D) {
       if (E->getTypeArgs().empty() && !Generic)
         diagUndeclared(Callee);
@@ -11619,8 +11843,26 @@ public:
       return nullptr;
     }
     const ClassType *Owner = nullptr;
-    Decl *D = C->findMember(F.Name, &Owner);
+    Decl *D = E->getTypeArgs().empty() ? C->findMember(F.Name, &Owner) : nullptr;
     const char *What = C->getRecord() ? "record" : "class";
+    if (!D) { // a generic method: specialized here, or by the call (inferred)
+      if (!E->getTypeArgs().empty()) {
+        D = C->findMember(genericKey(F.Name, E->getTypeArgs().size()), &Owner);
+        if (!D) {
+          Diags.error(F.Loc,
+                      "no generic method '" + F.Spelling + "' with " +
+                          llvm::Twine(E->getTypeArgs().size()) +
+                          " type parameter" +
+                          (E->getTypeArgs().size() == 1 ? "" : "s") + " in " +
+                          What + " " + quoted(C),
+                      {F.getRange()});
+          return nullptr;
+        }
+      } else if (auto Gs = genericMethodsNamed(C, F.Name); !Gs.empty()) {
+        D = Gs[0];
+        C->findMember(genericKey(F.Name, Gs[0]->getTypeParams().size()), &Owner);
+      }
+    }
     if (!D) {
       Diags.error(F.Loc,
                   "no member named '" + F.Spelling + "' in " + What + " " +
@@ -11638,7 +11880,9 @@ public:
         OK = (R->isConstructor() || R->isClassMethod()) && !R->isOperator();
       if (auto *P = llvm::dyn_cast<PropertyDecl>(D))
         OK = P->isClassProperty();
-      if (!OK) {
+      if (!OK && !(llvm::isa<RoutineDecl>(D) &&
+                   llvm::cast<RoutineDecl>(D)->isGenericMethod() &&
+                   llvm::cast<RoutineDecl>(D)->isClassMethod())) {
         Diags.error(F.Loc,
                     "only constructors, class methods, class variables and "
                     "class properties can be used through " +
@@ -11649,6 +11893,20 @@ public:
                     {F.getRange()});
         return nullptr;
       }
+    }
+    // obj.specialize M<T>: the specialization
+    if (auto *G = llvm::dyn_cast<RoutineDecl>(D);
+        G && G->isGenericMethod() && !E->getTypeArgs().empty()) {
+      llvm::SmallVector<Type *, 2> Types;
+      for (TypeSpec *TS : E->getTypeArgs()) {
+        Type *T = resolveType(TS);
+        if (T->isError())
+          return nullptr;
+        Types.push_back(T);
+      }
+      D = instantiateMethod(F, G, Types);
+      if (!D)
+        return nullptr;
     }
     E->setMember(D);
     return D;
@@ -11741,6 +11999,15 @@ public:
     if (auto *V = llvm::dyn_cast<VarDecl>(D)) // a class variable
       return V->getType() ? V->getType() : errorType();
     // A method used as a value: a call without arguments.
+    if (auto *G = llvm::cast<RoutineDecl>(D); G->isGenericMethod()) {
+      Diags.error(F.Loc,
+                  "cannot infer the type parameters of generic method '" +
+                      F.Spelling + "' without arguments; give them: "
+                      "specialize " + F.Spelling + "<...>",
+                  {F.getRange()});
+      noteDeclaredHere(G);
+      return errorType();
+    }
     auto *R = resolveOverload(llvm::cast<RoutineDecl>(D), {}, F, F.getRange());
     if (!R)
       return errorType();
@@ -11811,7 +12078,8 @@ public:
     auto *C = llvm::dyn_cast<ClassType>(BT);
     if (auto *CR = llvm::dyn_cast<ClassRefType>(BT))
       C = CR->getClass();
-    return C && llvm::isa_and_nonnull<RoutineDecl>(C->findMember(F->getField().Name));
+    return C && (llvm::isa_and_nonnull<RoutineDecl>(C->findMember(F->getField().Name)) ||
+                 !genericMethodsNamed(C, F->getField().Name).empty());
   }
 
   /// obj.M(args), TFoo.Create(args), inherited M(args): the result type,
@@ -11824,7 +12092,17 @@ public:
     if (D && diagOwnedFree(F))
       return errorType();
     auto *R = llvm::dyn_cast_or_null<RoutineDecl>(D);
-    if (R) { // objfpc: overloads
+    if (R && R->isGenericMethod()) { // obj.M(args): the types from the args
+      llvm::SmallVector<RoutineDecl *, 2> Gs =
+          genericMethodsNamed(R->getClass(), F->getField().Name);
+      R = inferFor(F->getField(), Gs, E->getArgs(), nullptr);
+      if (!R) {
+        for (Expr *A : E->getArgs())
+          check(A);
+        return errorType();
+      }
+      F->setMember(R);
+    } else if (R) { // objfpc: overloads
       R = resolveOverload(R, E->getArgs(), F->getField(), E->getRange());
       if (!R)
         return errorType();

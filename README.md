@@ -1283,8 +1283,7 @@ made once per program or unit: its declaration is parsed again with the
 type parameters naming the type arguments and checked like any routine,
 so errors in it point into the generic, with a note at the use; it is
 compiled as `F<integer>`. A call without `specialize` infers the type
-arguments (see "Inferred types"). Not supported: generic methods,
-constraints, `@specialize F<T>`, and, for a unit compiled separately, generics that use
+arguments (see "Inferred types"). Not supported: constraints, `@specialize F<T>`, and, for a unit compiled separately, generics that use
 what the unit does not export (whole-program compilation allows it).
 
 **Generic types** (`--mode=objfpc`), as in Free Pascal: `generic TName<T>
@@ -1342,11 +1341,37 @@ begin
 
 Generics are declared at program or unit level, also in a unit's interface
 with the methods in its implementation. Not supported: constraints
-(`<T: TObject>`), generic methods of ordinary classes, nested generic
-types, Delphi's `TList<Integer>` without `specialize`, and for a unit
+(`<T: TObject>`), nested generic types, Delphi's `TList<Integer>` without `specialize`, and for a unit
 compiled separately (`-fseparate-units`) generics whose methods use what
 the unit does not export; each separately compiled module that uses a
 specialization also has its own copy of it.
+
+**Generic methods** (`--mode=objfpc`), as in Free Pascal 3.2: a class
+declares `generic function M<T>(...)` (or `generic procedure`, `generic
+class function`), implemented as `generic function TFoo.M<T>(...)`, and
+`obj.specialize M<Integer>(x)` calls it. As for generic routines, pcc
+also infers the type arguments from the arguments, `obj.M(x)`; inside a
+method `M(x)` and `specialize M<T>(x)` call it on Self. Generic classes
+can have generic methods too:
+
+```pascal
+type
+  generic TList<T> = class
+    ...
+    generic function Map<R>(F: specialize TFunc<T, R>): specialize TList<R>;
+  end;
+
+strs := ints.specialize Map<string>(function(const X: Integer): string => IntToStr(X));
+total := ints.Fold(0, function(const Acc, X: Integer): Integer => Acc + X);
+```
+
+Each specialization (`TList<integer>.Map<ansistring>`) is a method of the
+class of its own, made from the implementation, so a generic method cannot
+be virtual, override or abstract, a constructor, a destructor or an
+operator. Its implementation must come before its first use, and is
+checked for each specialization (its declaration gives the shape: type
+parameters, parameter kinds). Records and helpers have no generic methods
+yet.
 
 **For-in loops** (not in `--mode=iso`), as in Free Pascal: `for x in c do`
 takes `x` through the elements of an array (static, open or dynamic) or a

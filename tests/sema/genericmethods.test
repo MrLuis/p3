@@ -1,0 +1,25 @@
+; Generic methods (objfpc): not virtual, constructors or operators; one
+; generic method per name and number of type parameters; its
+; implementation must follow the declaration's shape and come before its
+; uses; the types are given or inferred from the arguments.
+; RUN: not %pcc --mode=objfpc -ferror-limit=0 -c %S/Inputs/genericmethods/errors.pas -o %t.o 2>&1 | FileCheck %s
+; CHECK: errors.pas:5:22: error: a generic method cannot be virtual, override or abstract (each specialization is a method of its own)
+; CHECK: errors.pas:9:22: error: redefinition of generic method 'Dup'
+; CHECK: errors.pas:10:29: error: duplicate type parameter 'T'
+; CHECK: errors.pas:18:11: error: generic method 'TFoo.Early' is used before its implementation
+; CHECK: errors.pas:36:23: error: heading of 'TFoo.Shape' does not match its declaration
+; CHECK: errors.pas:41:23: error: class 'TFoo' has no generic method 'Other' with 1 type parameter
+; CHECK: errors.pas:50:23: error: class 'TFoo' has no generic method 'Id' with 2 type parameters
+; CHECK: errors.pas:6:22: error: method 'TFoo.Never' is declared but never implemented
+; CHECK: errors.pas:8:22: error: method 'TFoo.Dup' is declared but never implemented
+; CHECK: errors.pas:10:22: error: method 'TFoo.Two' is declared but never implemented
+; CHECK: errors.pas:11:22: error: method 'TFoo.Shape' is declared but never implemented
+; CHECK: errors.pas:60:10: error: cannot infer the type parameters of generic method 'Id' without arguments; give them: specialize Id<...>
+; CHECK: errors.pas:61:21: error: no generic method 'Id' with 2 type parameters in class 'TFoo'
+; CHECK: errors.pas:62:10: error: cannot infer the type parameters of generic method 'NoArg' without arguments; give them: specialize NoArg<...>
+; CHECK: errors.pas:64:10: error: too many arguments in call to 'Id': expected 1, got 2
+; CHECK: errors.pas:65:13: error: only constructors, class methods, class variables and class properties can be used through the class name 'TFoo'; 'Id' is a function
+; CHECK: errors.pas:66:32: error: cannot pass a value of type 'integer' to parameter 'X' of type 'string'
+; CHECK: errors.pas:66:5: error: assigning to 'integer' from incompatible type 'string'
+; CHECK: errors.pas:46:23: warning: function 'NoArg<integer>' never assigns its result
+; CHECK-NOT: error:

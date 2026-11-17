@@ -199,6 +199,8 @@ class ASTPrinter : public StmtVisitor<ASTPrinter>,
         OS << " abstract";
       if (R->hasOverloadDirective())
         OS << " overload";
+      if (R->isGenericMethod())
+        OS << " generic<" << R->getTypeParams().size() << '>';
       if (R->isInline())
         OS << " inline";
       if (R->getCallConv() != CallConv::Default)
@@ -953,6 +955,11 @@ public:
   }
   void visitFieldExpr(FieldExpr *E) {
     line("FieldExpr '") << E->getField().Name << '\'';
+    if (!E->getTypeArgs().empty())
+      OS << " specialize<" << E->getTypeArgs().size() << '>';
+    if (auto *R = llvm::dyn_cast_or_null<RoutineDecl>(E->getMember());
+        R && R->getName().Name != E->getField().Name) // a specialization
+      OS << " '" << R->getName().Name << '\'';
     overloadNumber(E->getMember());
     end(E);
     IndentScope I(Indent);

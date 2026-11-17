@@ -141,6 +141,11 @@ class Parser {
   bool startsGeneric();
   bool startsSpecialize();
   RoutineDecl *parseGenericRoutine(bool HeadingOnly);
+  /// `<T, U>` after a generic routine's or method's name (into
+  /// GenericTypeParams).
+  void parseTypeParamList();
+  /// `generic [class] function M<T>(...)` in a class (objfpc).
+  RoutineDecl *parseGenericMethodHeading();
   /// specialize Name<T1, ...>, after which a call's arguments may follow.
   bool parseSpecialization(Identifier &Name,
                            llvm::SmallVectorImpl<TypeSpec *> &TypeArgs);
