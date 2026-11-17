@@ -617,8 +617,8 @@ parameters and results of named routines, and of fields, are always
 written; a lambda's are inferred (see "Lambdas").
 
 **Lambdas** (objfpc; p3's own syntax): `function(params) => expression`
-and `procedure(params) => statement` are values of a procedural type,
-written where they are used.
+(or `=> begin ... end`, setting `Result`) and `procedure(params) =>
+statement` are values of a procedural type, written where they are used.
 
 ```pascal
 type
@@ -653,6 +653,19 @@ end;
   procedural type's, or is the type of the expression (a quoted constant
   is a `string`). A `procedure` lambda's body is one statement, which can
   be a `begin ... end` block.
+- **A block body.** `function(params) => begin ... end` is a function
+  lambda whose body is statements: they set `Result`, the lambda's own
+  (not the enclosing function's), or leave with `exit(value)`. Without a
+  written or wanted result type, the first value given to `Result` (or to
+  `exit`) sets it; a body that never sets one is an error.
+
+  ```pascal
+  var clamp := function(n: Integer) => begin
+                 if n > limit then
+                   exit(limit);
+                 Result := n;
+               end;
+  ```
 - **What it can use**: everything in scope where it is written, including
   the parameters and variables of the routine it is in and, in a method,
   the object's members. It runs with that routine's variables, while that

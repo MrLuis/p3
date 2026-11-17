@@ -2955,6 +2955,33 @@ begin
   nameRefNode := n;
 end;
 
+{ value, the first value a lambda's body gives its result while its result
+  type is not known: that type (a quoted constant: a string). }
+procedure inferLambdaResult(value: PNode);
+var
+  lt: PType;
+begin
+  lt := check(value);
+  if not isError(lt) and ((lt^.kind = tyStringLit) or isCharLiteral(value)) then
+    lt := ansiStringType;
+  if not isError(lt) and not isInferable(lt) then
+  begin
+    ms('cannot tell the result type of this lambda from ');
+    if lt^.kind = tyNil then
+      ma('nil')
+    else
+    begin
+      ma('a value of type ');
+      maT(lt);
+    end;
+    ma('; give it one: function(...): T => ...');
+    errR(value^.b, nodeRange(value));
+    lt := errorType;
+  end;
+  curRoutine^.resultType := lt;
+  curRoutine^.resultVar^.varType := lt;
+end;
+
 procedure visitProcCall(s: PNode);
 var
   ref: PNode;
@@ -3071,6 +3098,10 @@ begin
             exit;
           end;
           a0 := PNode(listGet(s^.args, 0));
+          { (a lambda whose result type is not known yet: exit(value) gives
+            it) }
+          if curRoutine^.isLambda and (curRoutine^.resultType = nil) then
+            inferLambdaResult(a0);
           if (a0^.kind = nkTuple) or (a0^.kind = nkCall) then
             t := checkValueFor(curRoutine^.resultType, a0)
           else
@@ -3564,37 +3595,20 @@ end;
 procedure visitAssign(s: PNode);
 var
   target, savedTarget, root, sum: PNode;
-  targetTy, valueTy, lt: PType;
+  targetTy, valueTy: PType;
   p, d: PDecl;
 begin
   target := s^.target;
-  { a lambda's body, $lambda := e, where no result type is known: the type
-    of e (a quoted constant: a string) }
+  { a lambda's body, $lambda := e (or, in a block body, the first
+    Result := e), where no result type is known: the type of e (a quoted
+    constant: a string) }
   if curRoutine <> nil then
     if curRoutine^.isLambda and curRoutine^.isFunction and
        (curRoutine^.resultType = nil) and (target^.kind = nkNameRef) then
-      if target^.ref.name = curRoutine^.ident.name then
-      begin
-        lt := check(s^.value);
-        if not isError(lt) and ((lt^.kind = tyStringLit) or isCharLiteral(s^.value)) then
-          lt := ansiStringType;
-        if not isError(lt) and not isInferable(lt) then
-        begin
-          ms('cannot tell the result type of this lambda from ');
-          if lt^.kind = tyNil then
-            ma('nil')
-          else
-          begin
-            ma('a value of type ');
-            maT(lt);
-          end;
-          ma('; give it one: function(...): T => ...');
-          errR(s^.value^.b, nodeRange(s^.value));
-          lt := errorType;
-        end;
-        curRoutine^.resultType := lt;
-        curRoutine^.resultVar^.varType := lt;
-      end;
+      if (target^.ref.name = curRoutine^.ident.name) or
+         ((target^.ref.name = intern('result')) and curRoutine^.resultName and
+          (scopeFind(cur, intern('result')) = curRoutine^.resultVar)) then
+        inferLambdaResult(s^.value);
   if target^.kind = nkNameRef then
   begin
     targetTy := checkNameTarget(target);

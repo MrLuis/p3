@@ -7062,7 +7062,7 @@ end;
   the expression @$lambda1. Types left out are for Sema to find. }
 function parseLambda: PNode;
 var
-  isFunction, hasParamList, ok: boolean;
+  isFunction, hasParamList, ok, statementBody: boolean;
   loc: TLoc;
   params, names, decls, stmts, copies, fParams, args, fDecls, fStmts, used: TPtrList;
   savedNames: PPtrList;
@@ -7152,7 +7152,17 @@ begin
   savedNames := lambdaNames;
   if copyAll then
     lambdaNames := @used;
-  if isFunction then
+  statementBody := isFunction and (tok.kind = tkKwBegin);
+  if statementBody then { function(x) => begin ... Result := ...; end }
+  begin
+    bodyStmt := nestedStatement;
+    if bodyStmt = nil then
+    begin
+      lambdaNames := savedNames;
+      exit;
+    end;
+  end
+  else if isFunction then
   begin
     e := parseExpression;
     if e = nil then
@@ -7200,6 +7210,8 @@ begin
   r := newRoutine(loc, name, isFunction, params, hasParamList, resultSpec,
                   newBlock(decls, body), false);
   r^.isLambda := true;
+  if statementBody then { Result: the lambda's ($modeswitch result) }
+    r^.resultName := lx.resultSwitch;
   listAdd(hiddenTypeDecls, r);
   a := newNode(nkAddrOf, loc, prevTokEnd);
   a^.inner := nameRef(name);

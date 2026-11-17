@@ -1,0 +1,8 @@
+; Function lambdas with a block body (objfpc): without a written or wanted
+; result type, the body must give one (Result := value or exit(value)), and
+; not nil; the value must fit the type wanted.
+; RUN: not %p3 --mode=objfpc -ferror-limit=0 -c %S/Inputs/lambdablocks/errors.pas -o %t.o 2>&1 | FileCheck %s
+; CHECK: errors.pas:7:12: error: cannot tell the result type of this lambda: its body does not set Result; give it one: function(...): T => ...
+; CHECK: errors.pas:14:24: error: cannot tell the result type of this lambda from nil; give it one: function(...): T => ...
+; CHECK: errors.pas:17:17: error: assigning to 'integer' from incompatible type 'string of length 4'
+; CHECK-NOT: error:

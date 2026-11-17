@@ -166,10 +166,11 @@ TypeDecl *Parser::reparseGenericType(const TypeDecl *G,
 //          "=>" ( expression | statement ) .
 // lparams = lparam { ( ";" | "," ) lparam } .
 // lparam = [ "var" | "const" ] identList [ ":" type ] .
-// A function's body is an expression, its result; a procedure's is a
-// statement. The lambda becomes a hidden routine ($lambda1) of the block
-// being parsed, whose body is `$lambda1 := expression` or the statement,
-// and the expression @$lambda1. Types left out are for Sema to find.
+// A function's body is an expression, its result, or a `begin ... end`
+// block that sets Result (the lambda's own); a procedure's is a statement.
+// The lambda becomes a hidden routine ($lambda1) of the block being parsed,
+// whose body is `$lambda1 := expression` or the statement, and the
+// expression @$lambda1. Types left out are for Sema to find.
 Expr *Parser::parseLambda() {
   bool IsFunction = Tok.is(tok::kw_function);
   SourceLocation Loc = consumeToken();
@@ -236,7 +237,14 @@ Expr *Parser::parseLambda() {
   if (CopyAll)
     LambdaNames = &Used;
   Stmt *BodyStmt;
-  if (IsFunction) {
+  bool StatementBody = IsFunction && Tok.is(tok::kw_begin);
+  if (StatementBody) { // function(x) => begin ... Result := ...; end
+    BodyStmt = parseStatement();
+    if (!BodyStmt) {
+      LambdaNames = SavedNames;
+      return nullptr;
+    }
+  } else if (IsFunction) {
     Expr *E = parseExpression();
     if (!E) {
       LambdaNames = SavedNames;
@@ -269,6 +277,8 @@ Expr *Parser::parseLambda() {
       Loc, Name, IsFunction, Ctx.copyArray<VarDecl *>(Params), HasParamList,
       ResultTS, Ctx.create<Block>(Ctx.copyArray<Decl *>(Decls), Body), false);
   R->setLambda();
+  if (StatementBody) // Result: the lambda's ({$modeswitch result})
+    R->setResultName(resultSwitch());
   HiddenTypeDecls.push_back(R);
   auto *A = Ctx.create<AddrOfExpr>(SourceRange(Loc, PrevTokEnd),
                                    Ctx.create<NameRefExpr>(Name));

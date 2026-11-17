@@ -10112,6 +10112,11 @@ begin
   declareAndCheckLambda(r);
   if r^.isFunction and (r^.resultType = nil) then
   begin
+    { (a block body that never sets Result: an expression body always gives
+      a type, or an error) }
+    ms('cannot tell the result type of this lambda: its body does not set ' +
+       'Result; give it one: function(...): T => ...');
+    errR(a^.b, nodeRange(a));
     r^.resultType := errorType;
     r^.resultVar^.varType := errorType;
   end;

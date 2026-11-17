@@ -136,6 +136,11 @@
 ; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-llvm --extra="-I %S/../run/Inputs/generichelpers/lib -fseparate-units -g -o -" --modes=objfpc --ref p3 --new %t.p3 %S/../run/Inputs/generichelpers | FileCheck %s
 ; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-ast --extra="-o -" --modes=tp,objfpc --ref p3 --new %t.p3 %S/../run/generichelpers.pas %S/../sema/Inputs/generichelpers | FileCheck %s
 ; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-parse-tree --extra="-o -" --modes=tp,objfpc --ref p3 --new %t.p3 %S/../run/generichelpers.pas %S/../sema/Inputs/generichelpers | FileCheck %s
+; Function lambdas with a block body (objfpc).
+; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-llvm --extra="-o -" --modes=objfpc --ref p3 --new %t.p3 %S/../run/lambdablocks.pas %S/../sema/Inputs/lambdablocks | FileCheck %s
+; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-llvm --extra="-g -o -" --modes=objfpc --ref p3 --new %t.p3 %S/../run/lambdablocks.pas | FileCheck %s
+; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-ast --extra="-o -" --modes=tp,objfpc --ref p3 --new %t.p3 %S/../run/lambdablocks.pas %S/../sema/Inputs/lambdablocks | FileCheck %s
+; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-parse-tree --extra="-o -" --modes=tp,objfpc --ref p3 --new %t.p3 %S/../run/lambdablocks.pas %S/../sema/Inputs/lambdablocks | FileCheck %s
 ; Separate units (S11): the unit modules and the program importing them.
 ; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-llvm --extra="-I %S/../run/Inputs/units/lib -o -" --modes=tp --ref p3 --new %t.p3 %S/../run/Inputs/units | FileCheck %s
 ; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-llvm --extra="-I %S/../run/Inputs/units/lib -fseparate-units -g -o -" --modes=tp --ref p3 --new %t.p3 %S/../run/Inputs/units | FileCheck %s

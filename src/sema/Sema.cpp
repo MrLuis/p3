@@ -8965,6 +8965,9 @@ public:
           ownedDead();
           return;
         }
+        // (a lambda whose result type is not known yet: exit(value) gives it)
+        if (CurRoutine->isLambda() && !CurRoutine->getResultType())
+          inferLambdaResult(Args[0]);
         Type *T = llvm::isa<TupleExpr>(Args[0]) || llvm::isa<CallExpr>(Args[0])
                       ? checkValueFor(CurRoutine->getResultType(), Args[0])
                       : check(Args[0]);
@@ -9178,29 +9181,37 @@ public:
     return false;
   }
 
+  /// Value, the first value a lambda's body gives its result while its
+  /// result type is not known: that type (a quoted constant: a string).
+  void inferLambdaResult(Expr *Value) {
+    Type *T = check(Value);
+    if (!T->isError() && (T->isStringLiteral() || isCharLiteral(Value)))
+      T = Ctx.getAnsiStringType();
+    if (!T->isError() && !isInferable(T)) {
+      Diags.error(Value->getBeginLoc(),
+                  "cannot tell the result type of this lambda from " +
+                      (T->isNil() ? std::string("nil")
+                                  : "a value of type " + quoted(T)) +
+                      "; give it one: function(...): T => ...",
+                  {Value->getRange()});
+      T = errorType();
+    }
+    CurRoutine->setResultType(T);
+    CurRoutine->getResultVar()->setType(T);
+  }
+
   void visitAssignStmt(AssignStmt *S) {
     Expr *Target = S->getTarget();
-    // A lambda's body, $lambda := e, where no result type is known: the
-    // type of e (a quoted constant: a string).
+    // A lambda's body, $lambda := e (or, in a block body, the first
+    // Result := e), where no result type is known: the type of e (a quoted
+    // constant: a string).
     if (CurRoutine && CurRoutine->isLambda() && CurRoutine->isFunction() &&
         !CurRoutine->getResultType())
       if (auto *N = llvm::dyn_cast<NameRefExpr>(Target);
-          N && N->getName().Name == CurRoutine->getName().Name) {
-        Type *T = check(S->getValue());
-        if (!T->isError() && (T->isStringLiteral() || isCharLiteral(S->getValue())))
-          T = Ctx.getAnsiStringType();
-        if (!T->isError() && !isInferable(T)) {
-          Diags.error(S->getValue()->getBeginLoc(),
-                      "cannot tell the result type of this lambda from " +
-                          (T->isNil() ? std::string("nil")
-                                      : "a value of type " + quoted(T)) +
-                          "; give it one: function(...): T => ...",
-                      {S->getValue()->getRange()});
-          T = errorType();
-        }
-        CurRoutine->setResultType(T);
-        CurRoutine->getResultVar()->setType(T);
-      }
+          N && (N->getName().Name == CurRoutine->getName().Name ||
+                (N->getName().Name == "result" && CurRoutine->hasResultName() &&
+                 Cur->lookup("result") == CurRoutine->getResultVar())))
+        inferLambdaResult(S->getValue());
     Type *TargetTy;
     if (auto *N = llvm::dyn_cast<NameRefExpr>(Target)) {
       TargetTy = checkNameTarget(N);
@@ -11144,6 +11155,12 @@ public:
     }
     declareAndCheckLambda(R);
     if (R->isFunction() && !R->getResultType()) {
+      // (a block body that never sets Result: an expression body always
+      // gives a type, or an error)
+      Diags.error(A->getBeginLoc(),
+                  "cannot tell the result type of this lambda: its body does "
+                  "not set Result; give it one: function(...): T => ...",
+                  {A->getRange()});
       R->setResultType(errorType());
       R->getResultVar()->setType(errorType());
     }
