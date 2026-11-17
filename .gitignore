@@ -6,3 +6,6 @@ compile_commands.json
 *.s
 /build-fuzz/
 /examples/*/bin/
+
+# codesight indexes
+.codesight/
