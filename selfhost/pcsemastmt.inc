@@ -3485,6 +3485,16 @@ var
   local, modifiable: boolean;
 begin
   target := s^.target;
+  checkIsolatedCopy(s^.value, 'assigned');
+  if (target^.kind = nkNameRef) and (target^.refDecl <> nil) and
+     (target^.refDecl^.kind = dkVar) and (target^.refDecl^.race = rqShared) and
+     (target^.refWith = nil) and (spawnOutside(target^.refDecl^.owner) <> nil) then
+  begin
+    ms('a spawned task cannot assign shared variable ''');
+    maN(target^.ref.spelling);
+    ma(''', which other tasks use; change what it holds through its methods');
+    errR(target^.ref.loc, nodeRange(target));
+  end;
   { An owned variable's object stays its own unless moved: only a local
     variable can refer to it too. Assigning to the variable gives it an
     object again. }
@@ -5685,9 +5695,9 @@ begin
     diagUndeclared(n^.ref);
     exit;
   end;
-  if (d^.kind <> dkVar) or not d^.isOwned or (w <> nil) then
+  if (d^.kind <> dkVar) or not (d^.isOwned or (d^.race = rqIsolated)) or (w <> nil) then
   begin
-    ms('''move'' needs an owned variable, and ''');
+    ms('''move'' needs an owned or isolated variable, and ''');
     maN(n^.ref.spelling);
     ma(''' is not one');
     errR(n^.ref.loc, identRange(n^.ref));
@@ -5697,6 +5707,8 @@ begin
   n^.refDecl := d;
   n^.typ := d^.varType;
   d^.isUsed := true;
+  if not d^.isOwned then { isolated: its data, the variable left empty }
+    exit(d^.varType);
   if d^.owner <> curRoutine then
   begin
     ms('owned variable ''');

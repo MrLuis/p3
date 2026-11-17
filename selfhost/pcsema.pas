@@ -106,6 +106,8 @@ var
     and break/continue out of it, are not allowed there). objfpc has no
     gotos, so none can leave a try statement. }
   exceptionType: PType;
+  { TSharedObject (objfpc): the root of the thread-safe classes }
+  sharedObjectType: PType;
   arrayOfConstT, pcharT, tmethodT: PType;
   tguidT: PType; { the predeclared TGUID }
   addrOfWantsCode: boolean; { @TFoo.M for a pointer: its code address }
@@ -1070,6 +1072,28 @@ begin
   scopeInsert(standard, d^.ident.name, d);
 end;
 
+{ TSharedObject = class(TObject) end: a class derived from it says it is
+  thread-safe (its methods synchronize what they share), so shared
+  variables can hold its objects. Its VMT is in the runtime. }
+procedure declareSharedObject;
+var
+  members, fields: TPtrList;
+  d: PDecl;
+  i: longint;
+begin
+  sharedObjectType := newClassType;
+  setDeclName(sharedObjectType, intern('TSharedObject'));
+  listInit(members);
+  listInit(fields);
+  for i := 0 to tobjectType^.classAllFields.count - 1 do
+    listAdd(fields, listGet(tobjectType^.classAllFields, i));
+  defineClass(sharedObjectType, tobjectType, members, fields,
+              tobjectType^.classVTable, nil);
+  d := newDecl(dkType, memberIdent('TSharedObject'), noLoc);
+  d^.declType := sharedObjectType;
+  scopeInsert(standard, d^.ident.name, d);
+end;
+
 procedure declareStandardScope;
 var
   pchar: PType;
@@ -1132,6 +1156,7 @@ begin
     declareVarRec;
     declareException;
     declareInterfacedObject;
+    declareSharedObject;
   end;
   { the standard files }
   for f := 1 to 2 do
@@ -3746,6 +3771,7 @@ begin
 end;
 
 procedure defineClassMembers(c: PType; ts: PTypeSpec); forward;
+procedure checkRaceDecl(q: longint; t: PType; const id: TIdent; const what: string); forward;
 function checkConstInit(init: PNode; t: PType; var folded: TConstValue): boolean; forward;
 
 { TFoo = class ... end;  /  TFoo = class; }
@@ -4824,6 +4850,14 @@ begin
             ms('a field of a class cannot be a file');
             errR(m^.ident.loc, identRange(m^.ident));
           end;
+          if m^.race = rqIsolated then
+          begin
+            ms('a field cannot be isolated (only variables can); its object ' +
+               'belongs to whoever has the object');
+            errR(m^.ident.loc, identRange(m^.ident));
+          end
+          else
+            checkRaceDecl(m^.race, m^.fieldType, m^.ident, 'field');
           listAdd(fields, m);
         end;
       dkRoutine:
@@ -6536,6 +6570,52 @@ end;
 
 { x: T owned: a variable of a routine (or one declared among the
   statements), of a class type. }
+{ Can values of type t be shared between tasks? A task, a token, or an
+  object of a class derived from TSharedObject (which synchronizes what it
+  shares). }
+function isThreadSafe(t: PType): boolean;
+begin
+  if t^.kind in [tyTask, tyToken] then
+    exit(true);
+  isThreadSafe := (t^.kind = tyClass) and (sharedObjectType <> nil) and
+                  inheritsFrom(t, sharedObjectType);
+end;
+
+{ Does a value of type t give access to data that others may change (an
+  object that is not thread-safe, a pointer, a dynamic array, an
+  interface)? }
+function sharesMutableData(t: PType): boolean;
+begin
+  if isThreadSafe(t) then
+    exit(false);
+  sharesMutableData := t^.kind in [tyClass, tyPointer, tyDynArray, tyInterface];
+end;
+
+{ shared T: T thread-safe; isolated T: T a reference (a class, a dynamic
+  array or a pointer), which move hands over. }
+procedure checkRaceDecl(q: longint; t: PType; const id: TIdent; const what: string);
+begin
+  if (q = rqNone) or isError(t) then
+    exit;
+  if (q = rqShared) and not isThreadSafe(t) then
+  begin
+    ms('shared ' + what + ' ''');
+    maN(id.spelling);
+    ma(''' must be of a thread-safe type (a class derived from TSharedObject, ' +
+       'such as TAtomic<T>, TLocked<T> or TChannel<T>; a task; a TCancelToken), not ');
+    maT(t);
+    errR(id.loc, identRange(id));
+  end;
+  if (q = rqIsolated) and not (t^.kind in [tyClass, tyDynArray, tyPointer]) then
+  begin
+    ms('isolated ' + what + ' ''');
+    maN(id.spelling);
+    ma(''' must be of a class, dynamic array or pointer type, not ');
+    maT(t);
+    errR(id.loc, identRange(id));
+  end;
+end;
+
 procedure checkOwnedDecl(v: PDecl);
 var
   ok: boolean;
@@ -6572,6 +6652,7 @@ begin
     if ok then
       markHasTry; { freed in a finally part around the routine's body }
   end;
+  checkRaceDecl(v^.race, v^.varType, v^.ident, 'variable');
 end;
 
 procedure declareVar(v: PDecl);
@@ -9638,11 +9719,144 @@ end;
   A closure (a lambda made a reference to value) may outlive them: their
   frames it uses are then kept on the heap (heapFrame), and it must not use
   what does not live in a frame (closureCannotUse). }
+{ The innermost spawn block around the code being checked, if r (a
+  routine; nil: the program) is outside it: the task that would share r's
+  variables. nil otherwise. }
+function spawnOutside(r: PDecl): PDecl;
+var
+  x: PDecl;
+begin
+  spawnOutside := nil;
+  x := curRoutine;
+  while x <> nil do
+  begin
+    if x = r then
+      exit;
+    if x^.isSpawnBlock then
+      exit(x);
+    x := x^.parent;
+  end;
+end;
+
+{ d (used through w) in a spawn block: an isolated variable of another task
+  is an error; under $modeswitch racechecks, so is anything mutable that is
+  not shared: a variable of the routines around it or of the program,
+  Self's members (unless its class is thread-safe), a routine nested in
+  another (which may use its variables). }
+procedure noteTaskUse(d: PDecl; w: PWithContext; const id: TIdent);
+var
+  s, c: PDecl;
+  ct: PType;
+  isSelfVar, readOnly: boolean;
+begin
+  if (d = nil) or (curRoutine = nil) then
+    exit;
+  if w <> nil then
+  begin
+    if w^.routine = nil then
+      exit;
+    s := spawnOutside(w^.routine);
+    if (s = nil) or not s^.isRaceChecked then
+      exit;
+    if w^.isSelf then
+    begin
+      ct := w^.routine^.ownerClass;
+      if ((ct <> nil) and isThreadSafe(ct)) or
+         ((d^.kind = dkField) and (d^.race = rqShared)) then
+        exit;
+      ms('this spawned task uses ''');
+      maN(id.spelling);
+      ma(''' of Self, which other tasks may use at the same time; make it a ' +
+         'shared field, or derive the class from TSharedObject');
+      errR(id.loc, identRange(id));
+    end
+    else
+    begin
+      ms('this spawned task uses ''');
+      maN(id.spelling);
+      ma(''' through a ''with'' statement outside it, which other tasks may ' +
+         'change at the same time');
+      errR(id.loc, identRange(id));
+    end;
+    exit;
+  end;
+  if d^.kind = dkVar then
+  begin
+    s := spawnOutside(d^.owner);
+    if s = nil then
+      exit;
+    if d^.race = rqIsolated then
+    begin
+      ms('isolated variable ''');
+      maN(id.spelling);
+      ma(''' belongs to one task; a spawned task cannot use it (hand it to an ' +
+         'async routine with ''move ');
+      maN(id.spelling);
+      ma(''')');
+      errR(id.loc, identRange(id));
+      noteDeclaredHere(d);
+      exit;
+    end;
+    if not s^.isRaceChecked or (d^.race = rqShared) or isError(d^.varType) then
+      exit;
+    isSelfVar := (d^.owner <> nil) and (d = d^.owner^.selfVar);
+    readOnly := isSelfVar or d^.isReadOnly or
+                ((d^.varKind = vkConstParam) and not d^.isConstRef);
+    if readOnly and not sharesMutableData(d^.varType) then
+      exit;
+    ms('this spawned task uses ''');
+    maN(id.spelling);
+    ma(''', which is not shared: another task may change it at the same time; ' +
+       'declare it shared (of a thread-safe type), or pass its value to an ' +
+       'async routine');
+    errR(id.loc, identRange(id));
+    noteDeclaredHere(d);
+    exit;
+  end;
+  if d^.kind = dkRoutine then
+  begin
+    if (d^.parent = nil) or d^.isLambda or d^.isSpawnBlock then
+      exit;
+    s := spawnOutside(d^.parent);
+    if (s <> nil) and s^.isRaceChecked then
+    begin
+      ms('this spawned task calls ''');
+      maN(id.spelling);
+      ma(''', a routine nested in ''');
+      maN(d^.parent^.ident.spelling);
+      ma(''', which may use that routine''s variables while other tasks change them');
+      errR(id.loc, identRange(id));
+    end;
+  end;
+end;
+
+{ e an isolated variable (by name): it cannot be copied, only moved. }
+procedure checkIsolatedCopy(e: PNode; const where: string);
+var
+  v: PDecl;
+begin
+  while e^.kind = nkParen do
+    e := e^.inner;
+  if e^.kind <> nkNameRef then
+    exit;
+  v := e^.refDecl;
+  if (v = nil) or (v^.kind <> dkVar) or (v^.race <> rqIsolated) then
+    exit;
+  ms('isolated variable ''');
+  maN(e^.ref.spelling);
+  ma(''' cannot be copied (' + where + '): its data belongs to one task; ' +
+     'write ''move ');
+  maN(e^.ref.spelling);
+  ma(''' to hand it over');
+  errR(e^.ref.loc, nodeRange(e));
+end;
+
 procedure noteLambdaUse(d: PDecl; w: PWithContext; const id: TIdent);
 var
   owner, l, f, v, nested: PDecl;
   why: string;
 begin
+  noteTaskUse(d, w, id);
   if (curRoutine = nil) or not curRoutine^.isLambda or (d = nil) then
     exit;
   owner := nil;
@@ -10058,7 +10272,7 @@ begin
   end;
 end;
 
-procedure checkCallArgs(const params: TPtrList; calleeDecl: PDecl;
+procedure checkCallArgsOnly(const params: TPtrList; calleeDecl: PDecl;
                         const callee: TIdent; const args: TPtrList;
                         callRange: TRange);
 var
@@ -10239,6 +10453,19 @@ begin
             isConstRefAddressable(arg) then
       arg^.constRefAddr := true; { its address (else a temporary's) }
   end;
+end;
+
+procedure checkCallArgs(const params: TPtrList; calleeDecl: PDecl;
+                        const callee: TIdent; const args: TPtrList;
+                        callRange: TRange);
+var
+  i: longint;
+begin
+  checkCallArgsOnly(params, calleeDecl, callee, args, callRange);
+  if (calleeDecl <> nil) and (calleeDecl^.kind = dkRoutine) and
+     (calleeDecl^.asyncType <> nil) then { (a task's arguments are copies, which it keeps) }
+    for i := 0 to args.count - 1 do
+      checkIsolatedCopy(PNode(listGet(args, i)), 'passed to a task');
 end;
 
 {$I pcsemastmt.inc}

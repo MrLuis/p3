@@ -7203,6 +7203,8 @@ public:
     llvm::Value *Slot = emitAddress(E->getOperand());
     llvm::Value *Obj = B.CreateLoad(B.getPtrTy(), Slot, "moved");
     B.CreateStore(llvm::ConstantPointerNull::get(B.getPtrTy()), Slot);
+    if (E->getType()->isDynArray()) // (its reference, held to the statement's end)
+      return holdResult(Obj, E->getType());
     return Obj;
   }
 

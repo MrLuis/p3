@@ -39,6 +39,10 @@ class PropertyDecl;
 class VarDecl;
 struct WithContext;
 
+/// objfpc: `x: shared T` (reached by many tasks, T thread-safe) or
+/// `x: isolated T` (one task's; it leaves by `move`).
+enum class RaceQualifier : unsigned char { None, Shared, Isolated };
+
 /// A name as it appears in the source.
 struct Identifier {
   llvm::StringRef Name;     ///< canonical lowercase, interned
@@ -1622,6 +1626,7 @@ private:
   ClassType *VarClass = nullptr;
   bool Captured = false;        ///< set by Sema
   bool Owned = false;           ///< objfpc `x: TFoo owned`
+  RaceQualifier Race = RaceQualifier::None; ///< objfpc `x: shared T`
   bool Inline = false;          ///< objfpc: declared by a `var` statement
   bool ReadOnly = false;      ///< see isReadOnly
   Expr *Absolute = nullptr;     ///< Turbo/FPC `x: T absolute y`: y
@@ -1670,6 +1675,11 @@ public:
   /// routine ends, however it ends; `move x` gives the object up.
   bool isOwned() const { return Owned; }
   void setOwned(bool O = true) { Owned = O; }
+  /// `x: shared T` / `x: isolated T` (objfpc; see RaceQualifier).
+  RaceQualifier getRace() const { return Race; }
+  void setRace(RaceQualifier Q) { Race = Q; }
+  bool isShared() const { return Race == RaceQualifier::Shared; }
+  bool isIsolated() const { return Race == RaceQualifier::Isolated; }
   /// Declared among the statements (a VarDeclStmt's): its scope is the
   /// rest of the statement sequence. Sema adds it to its block's
   /// declarations, after the others.
@@ -1783,6 +1793,7 @@ private:
 class FieldDecl final : public Decl {
   TypeSpec *TS;
   Type *Ty = nullptr;
+  RaceQualifier Race = RaceQualifier::None; ///< a class's `F: shared T`
 
 public:
   FieldDecl(Identifier Name, TypeSpec *TS)
@@ -1790,6 +1801,9 @@ public:
   TypeSpec *getTypeSpec() const { return TS; }
   Type *getType() const { return Ty; }
   void setType(Type *T) { Ty = T; }
+  RaceQualifier getRace() const { return Race; }
+  void setRace(RaceQualifier Q) { Race = Q; }
+  bool isShared() const { return Race == RaceQualifier::Shared; }
   static bool classof(const Decl *D) { return D->getKind() == DK_Field; }
 };
 
@@ -1879,6 +1893,7 @@ class RoutineDecl final : public Decl {
   bool Closure = false, HeapFrame = false, MethodLambda = false;
   bool CopyFactory = false, Copied = false, CopyAll = false;
   bool SpawnBlock = false;
+  bool RaceChecked = false; ///< a spawn block under {$modeswitch racechecks}
   TaskType *Async = nullptr;
   VarDecl *LambdaSelf = nullptr;
   Identifier Capture;
@@ -2076,6 +2091,11 @@ public:
   /// The hidden async procedure of `spawn begin ... end`.
   bool isSpawnBlock() const { return SpawnBlock; }
   void setSpawnBlock() { SpawnBlock = true; }
+  /// A spawn block whose captures are checked ({$modeswitch racechecks}
+  /// where it is written): it may use only shared variables of the
+  /// routines around it and of the program.
+  bool isRaceChecked() const { return RaceChecked; }
+  void setRaceChecked() { RaceChecked = true; }
   VarDecl *getLambdaSelf() const { return LambdaSelf; }
   void setMethodLambda(VarDecl *OuterSelf) {
     MethodLambda = true;

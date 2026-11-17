@@ -89,6 +89,8 @@ class Checker : public StmtVisitor<Checker>,
   /// TInterfacedObject, the root of the classes implementing them.
   InterfaceType *IUnknownTy = nullptr;
   ClassType *TInterfacedObjectTy = nullptr;
+  /// TSharedObject (objfpc): the root of the thread-safe classes.
+  ClassType *TSharedObjectTy = nullptr;
   /// The advanced record being declared by a type declaration (records
   /// with methods must be named, so others are rejected).
   RecordTypeSpec *NamedAdvancedRecord = nullptr;
@@ -480,6 +482,7 @@ class Checker : public StmtVisitor<Checker>,
       declareVarRec();
       declareException();
       declareInterfacedObject();
+      declareSharedObject();
     }
 
     // The standard files (ISO 7185 6.10).
@@ -830,6 +833,19 @@ class Checker : public StmtVisitor<Checker>,
                     Ctx.create<TypeDecl>(SourceLocation(),
                                          memberName("TInterfacedObject"),
                                          TInterfacedObjectTy));
+  }
+
+  /// TSharedObject = class(TObject) end: a class derived from it says it is
+  /// thread-safe (its methods synchronize what they share), so `shared`
+  /// variables can hold its objects. Its VMT is in the runtime.
+  void declareSharedObject() {
+    TSharedObjectTy = Ctx.create<ClassType>();
+    TSharedObjectTy->setDeclName("TSharedObject");
+    TSharedObjectTy->define(TObjectTy, {}, TObjectTy->getAllFields(),
+                            TObjectTy->getVTable(), nullptr);
+    Identifier Id = memberName("TSharedObject");
+    Standard.insert(Id.Name, Ctx.create<TypeDecl>(SourceLocation(), Id,
+                                                  TSharedObjectTy));
   }
 
   /// A predeclared `Name = class(Parent);` (its VMT is in the runtime).
@@ -3371,6 +3387,13 @@ class Checker : public StmtVisitor<Checker>,
         if (containsFile(F->getType()))
           Diags.error(MN.Loc, "a field of a class cannot be a file",
                       {MN.getRange()});
+        if (F->getRace() == RaceQualifier::Isolated)
+          Diags.error(MN.Loc,
+                      "a field cannot be isolated (only variables can); its "
+                      "object belongs to whoever has the object",
+                      {MN.getRange()});
+        else
+          checkRaceDecl(F->getRace(), F->getType(), MN, "field");
         Fields.push_back(F);
         continue;
       }
@@ -4222,6 +4245,48 @@ class Checker : public StmtVisitor<Checker>,
       if (OK)
         markHasTry(); // freed in a finally part around the routine's body
     }
+    checkRaceDecl(V->getRace(), V->getType(), V->getName(), "variable");
+  }
+
+  /// Can values of type T be shared between tasks? A task, a token, or an
+  /// object of a class derived from TSharedObject (which synchronizes what
+  /// it shares).
+  bool isThreadSafe(Type *T) const {
+    if (T->isTask() || T->isToken())
+      return true;
+    auto *C = llvm::dyn_cast<ClassType>(T);
+    return C && TSharedObjectTy && C->inheritsFrom(TSharedObjectTy);
+  }
+
+  /// Does a value of type T give access to data that others may change (an
+  /// object that is not thread-safe, a pointer, a dynamic array, an
+  /// interface)?
+  bool sharesMutableData(Type *T) const {
+    if (isThreadSafe(T))
+      return false;
+    return T->isClass() || T->isPointer() || T->isDynArray() || T->isInterface();
+  }
+
+  /// `shared T`: T thread-safe; `isolated T`: T a reference (a class, a
+  /// dynamic array or a pointer), which `move` hands over.
+  void checkRaceDecl(RaceQualifier Q, Type *T, const Identifier &Id,
+                     const char *What) {
+    if (Q == RaceQualifier::None || T->isError())
+      return;
+    if (Q == RaceQualifier::Shared && !isThreadSafe(T))
+      Diags.error(Id.Loc,
+                  llvm::Twine("shared ") + What + " '" + Id.Spelling +
+                      "' must be of a thread-safe type (a class derived from "
+                      "TSharedObject, such as TAtomic<T>, TLocked<T> or "
+                      "TChannel<T>; a task; a TCancelToken), not " + quoted(T),
+                  {Id.getRange()});
+    if (Q == RaceQualifier::Isolated && !T->isClass() && !T->isDynArray() &&
+        !T->isPointer())
+      Diags.error(Id.Loc,
+                  llvm::Twine("isolated ") + What + " '" + Id.Spelling +
+                      "' must be of a class, dynamic array or pointer type, "
+                      "not " + quoted(T),
+                  {Id.getRange()});
   }
 
   void declareVarInit(VarDecl *V) {
@@ -6682,6 +6747,9 @@ class Checker : public StmtVisitor<Checker>,
   void checkCallArgs(RoutineDecl *R, const Identifier &Callee,
                      llvm::ArrayRef<Expr *> Args, SourceRange CallRange) {
     checkCallArgs(R->getParams(), R, Callee, Args, CallRange);
+    if (R->isAsync()) // (a task's arguments are copies, which it keeps)
+      for (Expr *A : Args)
+        checkIsolatedCopy(A, "passed to a task");
   }
 
   void checkCallArgs(llvm::ArrayRef<VarDecl *> Params, Decl *CalleeDecl,
@@ -8735,6 +8803,16 @@ public:
   /// The rest of the checks of Target := Value, both already checked.
   void finishAssign(AssignStmt *S, Type *TargetTy, Type *ValueTy) {
     Expr *Target = S->getTarget();
+    checkIsolatedCopy(S->getValue(), "assigned");
+    if (auto *TN = llvm::dyn_cast<NameRefExpr>(Target))
+      if (auto *TV = llvm::dyn_cast_or_null<VarDecl>(TN->getDecl());
+          TV && TV->isShared() && !TN->getWith() && spawnOutside(TV->getOwner()))
+        Diags.error(TN->getName().Loc,
+                    "a spawned task cannot assign shared variable '" +
+                        TN->getName().Spelling +
+                        "', which other tasks use; change what it holds "
+                        "through its methods",
+                    {TN->getRange()});
     // An owned variable's object stays its own unless moved: only a local
     // variable can refer to it too. Assigning to the variable gives it an
     // object again.
@@ -9518,10 +9596,10 @@ public:
       return errorType();
     }
     auto *V = llvm::dyn_cast<VarDecl>(D);
-    if (!V || !V->isOwned() || W) {
+    if (!V || !(V->isOwned() || V->isIsolated()) || W) {
       Diags.error(Id.Loc,
-                  "'move' needs an owned variable, and '" + Id.Spelling +
-                      "' is not one",
+                  "'move' needs an owned or isolated variable, and '" +
+                      Id.Spelling + "' is not one",
                   {Id.getRange()});
       noteDeclaredHere(D);
       return errorType();
@@ -9529,6 +9607,8 @@ public:
     N->setDecl(V);
     N->setType(V->getType());
     Used.insert(V);
+    if (!V->isOwned()) // isolated: its data, the variable left empty
+      return V->getType()->isError() ? errorType() : V->getType();
     if (V->getOwner() != CurRoutine) {
       Diags.error(Id.Loc,
                   "owned variable '" + Id.Spelling +
@@ -10758,6 +10838,7 @@ public:
   /// their frames it uses are then kept on the heap (setHeapFrame), and
   /// it must not use what does not live in a frame (closureCannotUse).
   void noteLambdaUse(Decl *D, WithContext *W, const Identifier &Id) {
+    noteTaskUse(D, W, Id);
     if (!CurRoutine || !CurRoutine->isLambda() || !D)
       return;
     RoutineDecl *Owner = nullptr, *Nested = nullptr;
@@ -10830,6 +10911,114 @@ public:
           break;
       }
     }
+  }
+
+  /// The innermost spawn block around the code being checked, if R (a
+  /// routine; null: the program) is outside it: the task that would share
+  /// R's variables. Null otherwise.
+  RoutineDecl *spawnOutside(RoutineDecl *R) const {
+    for (RoutineDecl *X = CurRoutine; X; X = X->getParent()) {
+      if (X == R)
+        return nullptr;
+      if (X->isSpawnBlock())
+        return X;
+    }
+    return nullptr;
+  }
+
+  /// D (used through W) in a spawn block: an isolated variable of another
+  /// task is an error; under {$modeswitch racechecks}, so is anything
+  /// mutable that is not shared: a variable of the routines around it or
+  /// of the program, Self's members (unless its class is thread-safe), a
+  /// routine nested in another (which may use its variables).
+  void noteTaskUse(Decl *D, WithContext *W, const Identifier &Id) {
+    if (!D || !CurRoutine)
+      return;
+    if (W) {
+      if (!W->Routine)
+        return;
+      RoutineDecl *S = spawnOutside(W->Routine);
+      if (!S || !S->isRaceChecked())
+        return;
+      if (W->IsSelf) {
+        ClassType *C = W->Routine->getClass();
+        auto *F = llvm::dyn_cast<FieldDecl>(D);
+        if ((C && isThreadSafe(C)) || (F && F->isShared()))
+          return;
+        Diags.error(Id.Loc,
+                    "this spawned task uses '" + Id.Spelling +
+                        "' of Self, which other tasks may use at the same "
+                        "time; make it a shared field, or derive the class "
+                        "from TSharedObject",
+                    {Id.getRange()});
+      } else {
+        Diags.error(Id.Loc,
+                    "this spawned task uses '" + Id.Spelling +
+                        "' through a 'with' statement outside it, which "
+                        "other tasks may change at the same time",
+                    {Id.getRange()});
+      }
+      return;
+    }
+    if (auto *V = llvm::dyn_cast<VarDecl>(D)) {
+      RoutineDecl *S = spawnOutside(V->getOwner());
+      if (!S)
+        return;
+      if (V->isIsolated()) {
+        Diags.error(Id.Loc,
+                    "isolated variable '" + Id.Spelling +
+                        "' belongs to one task; a spawned task cannot use it "
+                        "(hand it to an async routine with 'move " +
+                        Id.Spelling + "')",
+                    {Id.getRange()});
+        noteDeclaredHere(V);
+        return;
+      }
+      if (!S->isRaceChecked() || V->isShared() || V->getType()->isError())
+        return;
+      bool IsSelf = V->getOwner() && V == V->getOwner()->getSelfVar();
+      bool ReadOnly = IsSelf || V->isReadOnly() ||
+                      (V->isConstParam() && !V->isConstRefParam());
+      if (ReadOnly && !sharesMutableData(V->getType()))
+        return;
+      Diags.error(Id.Loc,
+                  "this spawned task uses '" + Id.Spelling +
+                      "', which is not shared: another task may change it at "
+                      "the same time; declare it shared (of a thread-safe "
+                      "type), or pass its value to an async routine",
+                  {Id.getRange()});
+      noteDeclaredHere(V);
+      return;
+    }
+    if (auto *R = llvm::dyn_cast<RoutineDecl>(D)) {
+      if (!R->getParent() || R->isLambda() || R->isSpawnBlock())
+        return;
+      RoutineDecl *S = spawnOutside(R->getParent());
+      if (S && S->isRaceChecked())
+        Diags.error(Id.Loc,
+                    "this spawned task calls '" + Id.Spelling +
+                        "', a routine nested in '" +
+                        R->getParent()->getName().Spelling +
+                        "', which may use that routine's variables while "
+                        "other tasks change them",
+                    {Id.getRange()});
+    }
+  }
+
+  /// E an isolated variable (by name): it cannot be copied, only moved.
+  void checkIsolatedCopy(Expr *E, const char *Where) {
+    while (auto *P = llvm::dyn_cast<ParenExpr>(E))
+      E = P->getInner();
+    auto *N = llvm::dyn_cast<NameRefExpr>(E);
+    auto *V = N ? llvm::dyn_cast_or_null<VarDecl>(N->getDecl()) : nullptr;
+    if (!V || !V->isIsolated())
+      return;
+    Diags.error(N->getName().Loc,
+                "isolated variable '" + N->getName().Spelling +
+                    "' cannot be copied (" + Where + "): its data belongs to "
+                    "one task; write 'move " + N->getName().Spelling +
+                    "' to hand it over",
+                {N->getRange()});
   }
 
   /// Why a closure cannot use V, a variable of a routine around it (empty:

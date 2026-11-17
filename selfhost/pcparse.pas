@@ -53,7 +53,7 @@ type
   TGenericTokens = record
     toks: TPtrList; { of PToken }
     longStrings, advancedRecords, corbaInterfaces, inlineOn: boolean;
-    typeHelpers, scopedEnums: boolean;
+    typeHelpers, scopedEnums, raceChecks: boolean;
     packRecords: longint;
     resultSwitch, outSwitch, defaultParamsSwitch: boolean;
     { a generic type's: the next of its method implementations (a list
@@ -394,6 +394,26 @@ function isAsyncWord(const w: string): boolean;
 begin
   isAsyncWord := (mode = lmObjFPC) and isIdentifierNamed(w) and
                  not lexIsDeclared(lx, intern(w));
+end;
+
+{ raceQualifier = "shared" | "isolated"  (objfpc, before a type; the words
+  are not reserved: a qualifier where a type follows and no declaration of
+  the word is visible) }
+function parseRaceQualifier: longint;
+var
+  q: longint;
+begin
+  q := rqNone;
+  if isAsyncWord('shared') then
+    q := rqShared
+  else if isAsyncWord('isolated') then
+    q := rqIsolated;
+  if (q <> rqNone) and
+     (peekKind in [tkIdentifier, tkKwArray, tkKwString, tkCaret, tkKwPacked, tkLParen]) then
+    consumeToken
+  else
+    q := rqNone;
+  parseRaceQualifier := q;
 end;
 
 
@@ -963,6 +983,7 @@ begin
   toks^.corbaInterfaces := lx.corbaInterfaces;
   toks^.inlineOn := lx.inlineOn;
   toks^.typeHelpers := lx.typeHelpers;
+  toks^.raceChecks := lx.raceChecks;
   toks^.scopedEnums := lx.scopedEnums;
   toks^.packRecords := lx.packRecords;
   toks^.resultSwitch := lx.resultSwitch;
@@ -980,6 +1001,7 @@ begin
   lx.corbaInterfaces := toks^.corbaInterfaces;
   lx.inlineOn := toks^.inlineOn;
   lx.typeHelpers := toks^.typeHelpers;
+  lx.raceChecks := toks^.raceChecks;
   lx.scopedEnums := toks^.scopedEnums;
   lx.packRecords := toks^.packRecords;
   lx.resultSwitch := toks^.resultSwitch;
@@ -1150,6 +1172,7 @@ var
   dirLoc: TLoc;
   libExpr, nameExpr: PNode;
   listed, owned: boolean;
+  race: longint;
   hf: longint;
   hm: PName;
   names: TPtrList;
@@ -1169,11 +1192,15 @@ begin
   begin
     listInit(names);
     ts := nil;
+    race := rqNone;
     listed := parseIdentList(names, 'variable name');
     for i := 0 to names.count - 1 do
       declareName(PIdent(listGet(names, i))^);
     if listed and expect(tkColon, 'after variable name') then
+    begin
+      race := parseRaceQualifier;
       ts := parseType;
+    end;
     { objfpc: a variable that owns its object,  x: TFoo owned;  (owned is
       not a reserved word) }
     owned := false;
@@ -1231,6 +1258,7 @@ begin
         end;
         v^.absTarget := absTarget;
         v^.isOwned := owned;
+        v^.race := race;
         addHints(v, hf, hm);
         listAdd(decls, v);
       end;
@@ -2101,6 +2129,7 @@ begin
   toks^.corbaInterfaces := lx.corbaInterfaces;
   toks^.inlineOn := lx.inlineOn;
   toks^.typeHelpers := lx.typeHelpers;
+  toks^.raceChecks := lx.raceChecks;
   toks^.scopedEnums := lx.scopedEnums;
   toks^.packRecords := lx.packRecords;
   toks^.resultSwitch := lx.resultSwitch;
@@ -2210,6 +2239,7 @@ begin
   lx.corbaInterfaces := toks^.corbaInterfaces;
   lx.inlineOn := toks^.inlineOn;
   lx.typeHelpers := toks^.typeHelpers;
+  lx.raceChecks := toks^.raceChecks;
   lx.scopedEnums := toks^.scopedEnums;
   lx.packRecords := toks^.packRecords;
   lx.resultSwitch := toks^.resultSwitch;
@@ -2708,6 +2738,7 @@ end;
 // On an error in the members, skips to the class's 'end'.
 function parseClassType(start: TLoc): PTypeSpec;
 var
+  race: longint;
   hf: longint;
   hm: PName;
   classLoc, lparen: TLoc;
@@ -2809,6 +2840,7 @@ begin
         failed := true;
         break;
       end;
+      race := parseRaceQualifier;
       ts := nestedType;
       if ts = nil then
       begin
@@ -2829,6 +2861,7 @@ begin
                        PIdent(listGet(names, i))^.loc);
           m^.fieldSpec := ts;
         end;
+        m^.race := race;
         m^.vis := vis;
         addHints(m, hf, hm);
         listAdd(members, m);
@@ -4466,6 +4499,7 @@ var
   names, vars: TPtrList;
   ts: PTypeSpec;
   owned, isConst: boolean;
+  race: longint;
   init, n: PNode;
   i: longint;
   v: PDecl;
@@ -4509,8 +4543,11 @@ begin
     declareName(PIdent(listGet(names, i))^);
   ts := nil;
   owned := false;
+  race := rqNone;
   if tryConsume(tkColon) then
   begin
+    if not isConst then
+      race := parseRaceQualifier;
     ts := parseType;
     if ts = nil then
       exit(fail);
@@ -4554,6 +4591,7 @@ begin
     v := newVar(PIdent(listGet(names, i))^, ts, vkVariable);
     v^.isInlineVar := true;
     v^.isOwned := owned;
+    v^.race := race;
     listAdd(vars, v);
   end;
   if (init <> nil) and (vars.count > 1) then
@@ -4638,6 +4676,7 @@ begin
   rs^.asyncInner := nil;
   r := newRoutine(start, name, true, noParams, false, rs, newBlock(decls, body), false);
   r^.isSpawnBlock := true;
+  r^.isRaceChecked := lx.raceChecks;
   listAdd(hiddenTypeDecls, r);
   listInit(noArgs);
   call := newNode(nkCall, start, prevTokEnd);

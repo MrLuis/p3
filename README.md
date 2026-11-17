@@ -922,6 +922,57 @@ are the nested ones. `async`, `await`, `spawn`, `scope`, `detached` and
 `Pool` are not reserved: a visible declaration of the name keeps it a
 name.
 
+**Data-race checks** (objfpc; item 11 of the proposals): two qualifiers
+before a variable's type say how tasks may share it. A `shared` variable
+holds a thread-safe value, which many tasks may use at once: an object of
+a class derived from the predeclared `TSharedObject` (unit `threading`'s
+`TAtomic<T>`, `TLocked<T>` and `TChannel<T>`, or your own class that
+synchronizes what it shares), a task or a `TCancelToken`. An `isolated`
+variable (of a class, dynamic array or pointer type) belongs to one task:
+its value cannot be copied (assigned, passed to a task), only handed over
+with `move x`, which leaves `x` empty, and a spawned task cannot use it.
+
+With `{$modeswitch racechecks}` a unit opts in to the rest: a spawned task
+(`spawn begin ... end`) may use only `shared` variables of the routines
+around it and of the program, and cannot assign them; `const` parameters
+and constants that give no access to mutable data are fine too. In a
+method, it may use Self's members only when the class is thread-safe or
+the field is `shared`. Calling a routine nested in another (which may use
+that routine's variables) is an error there.
+
+```pascal
+{$modeswitch racechecks}
+uses threading;
+
+type
+  TStrings = array of string;
+  TBytes = array of Byte;
+  TCounter = specialize TAtomic<Integer>;
+  TCache = specialize TLocked<TStrings>;
+
+var
+  counter: shared TCounter;   { Load, Store, Exchange, CompareExchange,
+                                Add, Increment, Decrement }
+  cache: shared TCache;       { Use runs a procedure with the lock held }
+  buffer: isolated TBytes;
+  total: Integer;
+
+scope
+  spawn begin
+    counter.Increment;                                  { ok: atomic }
+    cache.Use(procedure(var d: TStrings) => SetLength(d, 10));  { ok: locked }
+    total := total + 1;   { error: 'total' is not shared }
+    buffer[0] := 1;       { error: isolated data of another task }
+  end;
+end;
+t := Process(move buffer);  { handed over; buffer is now empty }
+```
+
+`TLocked<T>.Use`'s procedure must not wait (no `await` or `Sleep`): the
+lock is a plain mutex. (`With`, the proposal's name, is a reserved word.)
+`shared` and `isolated` are not reserved: they are qualifiers only where a
+type follows and no declaration of the word is visible.
+
 **Capture by copy** (pcc's own): `function[k, s](x) => e` is a closure
 with its own copies of `k` and `s`, taken when it is made. Inside it they
 are read-only ("cannot modify 'k', a copy made by this lambda"); what it

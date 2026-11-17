@@ -1,0 +1,10 @@
+counted: 5, names: 5
+exchange: 5 100
+cas: TRUE FALSE 7
+add: 10, dec: 9
+moved: 0
+total: 6
+received 2 40
+run: 9
+pool: 40000
+tally: 40

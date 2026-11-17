@@ -48,6 +48,7 @@ class Lexer {
   bool CorbaInterfaces = false; ///< {$interfaces corba} (default: com)
   bool AdvancedRecords = false; ///< {$modeswitch advancedrecords}
   bool TypeHelpers = false;     ///< {$modeswitch typehelpers}
+  bool RaceChecks = false;      ///< {$modeswitch racechecks} (pcc's own)
   bool ScopedEnums = false;     ///< {$scopedenums on}
   /// {$packrecords N} / {$align N} / {$aN}: the largest alignment of the
   /// fields of the records declared after it (1, 2, 4, 8, 16 or 32); 0: the
@@ -173,6 +174,7 @@ public:
   bool advancedRecords() const { return AdvancedRecords; }
   /// May type helpers be declared here ({$modeswitch typehelpers})?
   bool typeHelpers() const { return TypeHelpers; }
+  bool raceChecks() const { return RaceChecks; }
   /// Are the values of enumerations declared here reached only through
   /// their type ({$scopedenums on})?
   bool scopedEnums() const { return ScopedEnums; }

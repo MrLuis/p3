@@ -127,7 +127,8 @@ void Lexer::enterPendingInclude() {
 
 /// {$modeswitch NAME[+|-| ON| OFF]} with Free Pascal 3.2.2's names:
 /// advancedrecords and typehelpers (objfpc), result, out and
-/// defaultparameters (any mode) turn their features on or off; the others
+/// defaultparameters (any mode), and pcc's own racechecks (objfpc), turn
+/// their features on or off; the others
 /// pcc's mode decides (class, objpas, properties, exceptions: objfpc; cvar,
 /// initfinal, hintdirective, allowinline: always) or pcc lacks: a request
 /// for what pcc does is accepted, any other is reported and ignored.
@@ -152,6 +153,10 @@ void Lexer::handleModeSwitch(const char *Start, llvm::StringRef Arg) {
   }
   if (N == "typehelpers") {
     TypeHelpers = On;
+    return;
+  }
+  if (N == "racechecks") { // pcc's own: spawn blocks share only shared data
+    RaceChecks = On;
     return;
   }
   if (N == "result") {

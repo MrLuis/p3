@@ -1,0 +1,34 @@
+; Compile-time data-race checks (objfpc): `shared` needs a thread-safe type
+; and `isolated` a reference; under {$modeswitch racechecks} a spawned task
+; may use only shared variables of the routines around it and of the
+; program (and Self's members when its class is thread-safe or the field
+; is shared), not assign them, nor call routines nested in another; an
+; isolated variable is never copied (assigned, passed to a task), only
+; moved.
+; RUN: not %pcc --mode=objfpc -ferror-limit=0 -c %S/Inputs/racechecks/errors.pas -o %t.o 2>&1 | FileCheck %s
+; CHECK: errors.pas:12:5: error: a field cannot be isolated (only variables can); its object belongs to whoever has the object
+; CHECK: errors.pas:23:3: error: shared variable 'wrong' must be of a thread-safe type (a class derived from TSharedObject, such as TAtomic<T>, TLocked<T> or TChannel<T>; a task; a TCancelToken), not 'integer'
+; CHECK: errors.pas:24:3: error: isolated variable 'alsoWrong' must be of a class, dynamic array or pointer type, not 'integer'
+; CHECK: errors.pas:35:11: error: this spawned task uses 'Count' of Self, which other tasks may use at the same time; make it a shared field, or derive the class from TSharedObject
+; CHECK: errors.pas:64:11: error: this spawned task uses 'sum', which is not shared: another task may change it at the same time; declare it shared (of a thread-safe type), or pass its value to an async routine
+; CHECK: errors.pas:65:11: error: this spawned task uses 'globalCount', which is not shared: another task may change it at the same time; declare it shared (of a thread-safe type), or pass its value to an async routine
+; CHECK: errors.pas:67:15: error: this spawned task uses 'n', which is not shared: another task may change it at the same time; declare it shared (of a thread-safe type), or pass its value to an async routine
+; CHECK: errors.pas:69:7: error: this spawned task uses 'o', which is not shared: another task may change it at the same time; declare it shared (of a thread-safe type), or pass its value to an async routine
+; CHECK: errors.pas:70:7: error: isolated variable 'buffer' belongs to one task; a spawned task cannot use it (hand it to an async routine with 'move buffer')
+; CHECK: errors.pas:71:7: error: this spawned task calls 'Helper', a routine nested in 'Run', which may use that routine's variables while other tasks change them
+; CHECK: errors.pas:72:7: error: a spawned task cannot assign shared variable 'counter', which other tasks use; change what it holds through its methods
+; CHECK: errors.pas:76:12: error: isolated variable 'buffer' cannot be copied (assigned): its data belongs to one task; write 'move buffer' to hand it over
+; CHECK: errors.pas:77:15: error: isolated variable 'other' cannot be copied (assigned): its data belongs to one task; write 'move other' to hand it over
+; CHECK: errors.pas:78:7: error: isolated variable 'buffer' cannot be copied (passed to a task): its data belongs to one task; write 'move buffer' to hand it over
+; CHECK: errors.pas:81:17: error: 'move' needs an owned or isolated variable, and 'plain' is not one
+; CHECK-NOT: error:
+;
+; An isolated variable belongs to one task with or without the modeswitch.
+; RUN: not %pcc --mode=objfpc -c %S/Inputs/racechecks/isolated.pas -o %t.o 2>&1 | FileCheck --check-prefix=ISOLATED %s
+; ISOLATED: isolated.pas:10:17: error: isolated variable 'data' belongs to one task; a spawned task cannot use it (hand it to an async routine with 'move data')
+;
+; Without it, spawned tasks use what they see, as before; the words are
+; plain names where no type follows.
+; RUN: %pcc --mode=objfpc %S/Inputs/racechecks/unchecked.pas -o %t.unchecked
+; RUN: %t.unchecked | FileCheck --check-prefix=UNCHECKED %s
+; UNCHECKED: 6

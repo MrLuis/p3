@@ -75,6 +75,7 @@ type
     corbaInterfaces: boolean; { $interfaces corba (default: com) }
     advancedRecords: boolean; { $modeswitch advancedrecords }
     typeHelpers: boolean; { $modeswitch typehelpers }
+    raceChecks: boolean; { $modeswitch racechecks (pcc's own) }
     longStrings: boolean; { H+: string is an ansistring }
     { macros ($macro on, $define NAME := value, as in Free Pascal): upper-
       case name id -> PMacro; a use of NAME lexes its value (macroStack:
@@ -382,6 +383,7 @@ begin
   lx.corbaInterfaces := false;
   lx.advancedRecords := false;
   lx.typeHelpers := false;
+  lx.raceChecks := false;
   lx.longStrings := false;
   lx.macrosOn := false;
   lx.inlineOn := mode = lmObjFPC;
@@ -1480,6 +1482,11 @@ begin
   if n = 'typehelpers' then
   begin
     lx.typeHelpers := isOn;
+    exit;
+  end;
+  if n = 'racechecks' then { pcc's own: spawn blocks share only shared data }
+  begin
+    lx.raceChecks := isOn;
     exit;
   end;
   if n = 'result' then

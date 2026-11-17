@@ -5642,6 +5642,8 @@ begin
   slot := emitAddress(e^.inner);
   obj := irLoad(irPtrT, slot, 'moved');
   irStore(irNull, slot);
+  if e^.typ^.kind = tyDynArray then { (its reference, held to the statement's end) }
+    exit(holdDynResult(obj, e^.typ));
   emitMove := obj;
 end;
 

@@ -915,6 +915,13 @@ void *const __pas_tinterfacedobject_vmt[5] = {
     (void *)(uintptr_t)sizeof(struct PasInterfacedObject),
     (void *)interfaced_intfs, (void *)(uintptr_t)__pas_tobject_destroy};
 
+/* TSharedObject = class(TObject) (objfpc): the root of the thread-safe
+ * classes, which `shared` variables hold. */
+void *const __pas_tsharedobject_vmt[5] = {
+    (void *)__pas_tobject_vmt, (void *)"\015TSharedObject",
+    (void *)(uintptr_t)sizeof(void *), NULL,
+    (void *)(uintptr_t)__pas_tobject_destroy};
+
 static int32_t *refcount_of(void *obj) {
   return &((struct PasInterfacedObject *)obj)->refcount;
 }

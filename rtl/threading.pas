@@ -1,7 +1,9 @@
 { pcc's Threading: what async code uses besides the language's own words
   (async, await, spawn, scope, detached, Wait, WhenAll, WhenAny,
-  Pool.Run): the methods of TCancelToken, and TChannel<T>, a typed queue
-  between tasks. Needs --mode=objfpc. }
+  Pool.Run): the methods of TCancelToken; TChannel<T>, a typed queue
+  between tasks; and TAtomic<T> and TLocked<T>, values tasks share (the
+  thread-safe classes, derived from the predeclared TSharedObject, that
+  `shared` variables hold). Needs --mode=objfpc. }
 unit threading;
 
 {$H+}
@@ -36,7 +38,7 @@ type
   { A typed queue between tasks: Send waits while a bounded channel is
     full (back-pressure), Receive while it is empty; Close tells receivers
     that no more values come (for await reads until then). }
-  generic TChannel<T> = class
+  generic TChannel<T> = class(TSharedObject)
   private
     FMutex, FNotEmpty, FNotFull: Pointer;
     FItems: array of T;
@@ -54,6 +56,44 @@ type
     function TryReceive: async (T, Boolean);
     procedure Close;
     function Count: Integer;
+  end;
+
+  { A value read and changed by many tasks, one at a time: each method
+    holds a lock (Increment, Decrement and Add need a numeric T). }
+  generic TAtomic<T> = class(TSharedObject)
+  private
+    FMutex: Pointer;
+    FValue: T;
+  public
+    constructor Create(const Value: T);
+    destructor Destroy; override;
+    function Load: T;
+    procedure Store(const Value: T);
+    { the value before }
+    function Exchange(const Value: T): T;
+    { Value stored if the value was Expected; whether it was }
+    function CompareExchange(const Expected, Value: T): Boolean;
+    { the value after }
+    function Add(const Delta: T): T;
+    function Increment: T;
+    function Decrement: T;
+  end;
+
+  { A value tasks share behind a lock: Use runs a procedure on it with the
+    lock held (it must not wait: no await or Sleep in it). }
+  generic TLocked<T> = class(TSharedObject)
+  public type
+    TUse = reference to procedure(var Value: T);
+  private
+    FMutex: Pointer;
+    FValue: T;
+  public
+    constructor Create(const Value: T);
+    destructor Destroy; override;
+    procedure Use(const Action: TUse);
+    { a copy of the value }
+    function Load: T;
+    procedure Store(const Value: T);
   end;
 
 { The runtime's primitives (async.c). }
@@ -211,6 +251,109 @@ begin
     pas_mutex_unlock(FMutex);
   end;
   Result := (Value, Got);
+end;
+
+constructor TAtomic.Create(const Value: T);
+begin
+  FMutex := pas_mutex_new;
+  FValue := Value;
+end;
+
+destructor TAtomic.Destroy;
+begin
+  pas_mutex_free(FMutex);
+  inherited;
+end;
+
+function TAtomic.Load: T;
+begin
+  pas_mutex_lock(FMutex);
+  Result := FValue;
+  pas_mutex_unlock(FMutex);
+end;
+
+procedure TAtomic.Store(const Value: T);
+begin
+  pas_mutex_lock(FMutex);
+  FValue := Value;
+  pas_mutex_unlock(FMutex);
+end;
+
+function TAtomic.Exchange(const Value: T): T;
+begin
+  pas_mutex_lock(FMutex);
+  Result := FValue;
+  FValue := Value;
+  pas_mutex_unlock(FMutex);
+end;
+
+function TAtomic.CompareExchange(const Expected, Value: T): Boolean;
+begin
+  pas_mutex_lock(FMutex);
+  Result := FValue = Expected;
+  if Result then
+    FValue := Value;
+  pas_mutex_unlock(FMutex);
+end;
+
+function TAtomic.Add(const Delta: T): T;
+begin
+  pas_mutex_lock(FMutex);
+  FValue := FValue + Delta;
+  Result := FValue;
+  pas_mutex_unlock(FMutex);
+end;
+
+function TAtomic.Increment: T;
+begin
+  pas_mutex_lock(FMutex);
+  FValue := FValue + 1;
+  Result := FValue;
+  pas_mutex_unlock(FMutex);
+end;
+
+function TAtomic.Decrement: T;
+begin
+  pas_mutex_lock(FMutex);
+  FValue := FValue - 1;
+  Result := FValue;
+  pas_mutex_unlock(FMutex);
+end;
+
+constructor TLocked.Create(const Value: T);
+begin
+  FMutex := pas_mutex_new;
+  FValue := Value;
+end;
+
+destructor TLocked.Destroy;
+begin
+  pas_mutex_free(FMutex);
+  inherited;
+end;
+
+procedure TLocked.Use(const Action: TUse);
+begin
+  pas_mutex_lock(FMutex);
+  try
+    Action(FValue);
+  finally
+    pas_mutex_unlock(FMutex);
+  end;
+end;
+
+function TLocked.Load: T;
+begin
+  pas_mutex_lock(FMutex);
+  Result := FValue;
+  pas_mutex_unlock(FMutex);
+end;
+
+procedure TLocked.Store(const Value: T);
+begin
+  pas_mutex_lock(FMutex);
+  FValue := Value;
+  pas_mutex_unlock(FMutex);
 end;
 
 procedure TChannel.Close;

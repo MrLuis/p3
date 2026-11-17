@@ -138,6 +138,10 @@ class ASTPrinter : public StmtVisitor<ASTPrinter>,
         OS << " absolute";
       if (V->isOwned())
         OS << " owned";
+      if (V->isShared())
+        OS << " shared";
+      if (V->isIsolated())
+        OS << " isolated";
       if (V->getDefault())
         OS << " default";
       visibility(V);
@@ -250,6 +254,10 @@ class ASTPrinter : public StmtVisitor<ASTPrinter>,
       line("FieldDecl '") << F->getName().Name << '\'';
       if (!ParseTree)
         typeSpec(F->getTypeSpec(), F->getType());
+      if (F->getRace() == RaceQualifier::Shared)
+        OS << " shared";
+      if (F->getRace() == RaceQualifier::Isolated)
+        OS << " isolated";
       visibility(F);
       loc(F->getLocation());
       if (ParseTree) {

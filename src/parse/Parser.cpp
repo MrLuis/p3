@@ -58,6 +58,9 @@ bool Parser::advancedRecords() const {
 bool Parser::typeHelpers() const {
   return Replay ? Replay->TypeHelpers : Lex.typeHelpers();
 }
+bool Parser::raceChecks() const {
+  return Replay ? Replay->RaceChecks : Lex.raceChecks();
+}
 bool Parser::corbaInterfaces() const {
   return Replay ? Replay->CorbaInterfaces : Lex.corbaInterfaces();
 }
@@ -131,6 +134,7 @@ GenericTokens *Parser::captureSwitches() {
   Toks->CorbaInterfaces = corbaInterfaces();
   Toks->InlineOn = inlineOn();
   Toks->TypeHelpers = typeHelpers();
+  Toks->RaceChecks = raceChecks();
   Toks->ScopedEnums = scopedEnums();
   Toks->PackRecords = packRecords();
   Toks->ResultSwitch = resultSwitch();
@@ -1004,12 +1008,15 @@ void Parser::parseVarPart(llvm::SmallVectorImpl<Decl *> &Decls) {
   while (Tok.is(tok::identifier) && !startsGeneric() && !Diags.shouldStop()) {
     llvm::SmallVector<Identifier, 4> Names;
     TypeSpec *TS = nullptr;
+    RaceQualifier Race = RaceQualifier::None;
     bool Listed = parseIdentList(Names, "variable name");
     for (const Identifier &N : Names)
       declareName(N);
     if (Listed &&
-        expect(tok::colon, "after variable name"))
+        expect(tok::colon, "after variable name")) {
+      Race = parseRaceQualifier();
       TS = parseType();
+    }
 
     // objfpc: a variable that owns its object,  x: TFoo owned;  (`owned` is
     // not a reserved word)
@@ -1062,6 +1069,7 @@ void Parser::parseVarPart(llvm::SmallVectorImpl<Decl *> &Decls) {
           V->setInitializedVar(Init);
         V->setAbsolute(Absolute);
         V->setOwned(Owned);
+        V->setRace(Race);
         V->addHints(H.Flags, H.Message);
         Decls.push_back(V);
       }
@@ -1853,6 +1861,7 @@ TypeSpec *Parser::parseClassType(SourceLocation Start) {
       if (!parseIdentList(Names, "field name") ||
           !expect(tok::colon, "after field name"))
         return Fail();
+      RaceQualifier Race = parseRaceQualifier();
       TypeSpec *TS = parseType();
       if (!TS)
         return Fail();
@@ -1860,6 +1869,7 @@ TypeSpec *Parser::parseClassType(SourceLocation Start) {
       for (const Identifier &N : Names) {
         if (ClassVars) {
           auto *V = Ctx.create<VarDecl>(N, TS);
+          V->setRace(Race);
           V->setClassVar();
           V->setVisibility(Vis);
           V->addHints(H.Flags, H.Message);
@@ -1869,6 +1879,7 @@ TypeSpec *Parser::parseClassType(SourceLocation Start) {
         auto *F = Ctx.create<FieldDecl>(N, TS);
         F->setVisibility(Vis);
         F->addHints(H.Flags, H.Message);
+        F->setRace(Race);
         Members.push_back(F);
       }
       if (!expect(tok::semi, "after field declaration"))
@@ -3208,7 +3219,10 @@ Stmt *Parser::parseVarDeclStmt() {
     declareName(N);
   TypeSpec *TS = nullptr;
   bool Owned = false;
+  RaceQualifier Race = RaceQualifier::None;
   if (tryConsume(tok::colon)) {
+    if (!IsConst)
+      Race = parseRaceQualifier();
     TS = parseType();
     if (!TS)
       return Fail();
@@ -3244,6 +3258,7 @@ Stmt *Parser::parseVarDeclStmt() {
     auto *V = Ctx.create<VarDecl>(N, TS);
     V->setInline();
     V->setOwned(Owned);
+    V->setRace(Race);
     Vars.push_back(V);
   }
   if (Init && Vars.size() > 1)
@@ -3285,6 +3300,22 @@ Stmt *Parser::parseDestructure(SourceLocation Start,
 
 bool Parser::isAsyncWord(llvm::StringRef W) {
   return LangOpts.ObjKeywords && isIdentifierNamed(W) && !Lex.isDeclared(W);
+}
+
+// raceQualifier = "shared" | "isolated"  (objfpc, before a type; the words
+// are not reserved: a qualifier where a type follows and no declaration of
+// the word is visible)
+RaceQualifier Parser::parseRaceQualifier() {
+  RaceQualifier Q = isAsyncWord("shared")     ? RaceQualifier::Shared
+                    : isAsyncWord("isolated") ? RaceQualifier::Isolated
+                                              : RaceQualifier::None;
+  if (Q != RaceQualifier::None &&
+      peekToken().isOneOf(tok::identifier, tok::kw_array, tok::kw_string,
+                          tok::caret, tok::kw_packed, tok::l_paren))
+    consumeToken();
+  else
+    Q = RaceQualifier::None;
+  return Q;
 }
 
 bool Parser::startsAwaitExpr() {
@@ -3330,6 +3361,8 @@ Expr *Parser::parseSpawnExpr() {
       Ctx.create<AsyncTypeSpec>(SourceRange(Start), nullptr),
       Ctx.create<Block>(Ctx.copyArray<Decl *>(Decls), Body), false);
   R->setSpawnBlock();
+  if (raceChecks())
+    R->setRaceChecked();
   HiddenTypeDecls.push_back(R);
   auto *Call = Ctx.create<CallExpr>(SourceRange(Start, PrevTokEnd), Name,
                                     llvm::ArrayRef<Expr *>());
@@ -3802,6 +3835,7 @@ Expr *Parser::reparseDesignator(llvm::ArrayRef<Token> Toks) {
   G.CorbaInterfaces = corbaInterfaces();
   G.InlineOn = inlineOn();
   G.TypeHelpers = typeHelpers();
+  G.RaceChecks = raceChecks();
   G.ScopedEnums = scopedEnums();
   G.PackRecords = packRecords();
   G.ResultSwitch = resultSwitch();

@@ -34,9 +34,9 @@
 ; CHECK: errors.pas:118:5: error: 'Free' cannot be called on owned variable 'p', which is freed when its routine ends; assign nil to free its object now
 ; CHECK: errors.pas:119:5: error: 'Destroy' cannot be called on owned variable 'p', which is freed when its routine ends; assign nil to free its object now
 ; CHECK: errors.pas:120:9: error: cannot take the address of owned variable 'p'
-; CHECK: errors.pas:121:13: error: 'move' needs an owned variable, and 'b' is not one
+; CHECK: errors.pas:121:13: error: 'move' needs an owned or isolated variable, and 'b' is not one
 ; CHECK: errors.pas:107:3: note: 'b' declared here
-; CHECK: errors.pas:122:13: error: 'move' needs an owned variable, and 'keep' is not one
+; CHECK: errors.pas:122:13: error: 'move' needs an owned or isolated variable, and 'keep' is not one
 ; CHECK: errors.pas:12:3: note: 'keep' declared here
 ; CHECK: errors.pas:131:15: error: owned variable 'p' can only be moved by the routine it belongs to
 ; CHECK: errors.pas:127:3: note: 'p' declared here

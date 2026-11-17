@@ -66,6 +66,7 @@ struct GenericTokens {
   llvm::ArrayRef<Token> Tokens;
   bool LongStrings = false, AdvancedRecords = false, CorbaInterfaces = false,
        InlineOn = false, TypeHelpers = false, ScopedEnums = false,
+       RaceChecks = false,
        ResultSwitch = false, OutSwitch = false, DefaultParamsSwitch = false;
   unsigned PackRecords = 0;
   /// A generic type's: the next of its method implementations (a list
@@ -127,6 +128,9 @@ class Parser {
   bool longStrings() const;
   bool advancedRecords() const;
   bool typeHelpers() const;
+  bool raceChecks() const;
+  /// `shared` or `isolated` before a variable's or field's type (objfpc).
+  RaceQualifier parseRaceQualifier();
   bool scopedEnums() const;
   unsigned packRecords() const;
   bool resultSwitch() const;

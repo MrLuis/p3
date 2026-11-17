@@ -20,6 +20,12 @@ uses pcsys, pcutil, pcdiag;
 
 {$I builtins.inc}
 
+const
+  { a variable's or a class field's race qualifier (objfpc) }
+  rqNone = 0;
+  rqShared = 1;   { x: shared T }
+  rqIsolated = 2; { x: isolated T }
+
 type
   { a name as written: name is the lower-case interned name (nil when
     missing), spelling the text as written }
@@ -476,6 +482,10 @@ type
       number of labels in this routine targeted by non-local gotos }
     isUsed, resultAssigned: boolean;
     nonLocalLabels: longint;
+    { objfpc: a variable's or a class field's qualifier, x: shared T
+      (reached by many tasks, T thread-safe) or x: isolated T (one task's,
+      it leaves by move): rqNone, rqShared, rqIsolated }
+    race: longint;
     { Sema: a routine's variable that a routine nested in it may use (it
       lives in the routine's frame record, which nested routines reach
       through their static link); a routine with a try statement (an
@@ -621,6 +631,10 @@ type
                     async procedure of spawn begin ... end }
                   asyncType: PType;
                   isSpawnBlock: boolean;
+                  { a spawn block under $modeswitch racechecks: it may use
+                    only shared variables of the routines around it and of
+                    the program }
+                  isRaceChecked: boolean;
                   isVirtual, isOverride, isAbstract, isClassMethod: boolean;
                   { overloading (objfpc): the overload directive, the next
                     routine of the name in the same scope or class and this

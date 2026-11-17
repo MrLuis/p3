@@ -264,6 +264,15 @@ begin
     bufAdd(outBuf, ' unimplemented');
 end;
 
+{ ' shared' / ' isolated': a variable's or field's qualifier }
+procedure raceSuffix(d: PDecl);
+begin
+  if d^.race = rqShared then
+    bufAdd(outBuf, ' shared')
+  else if d^.race = rqIsolated then
+    bufAdd(outBuf, ' isolated');
+end;
+
 procedure visibilitySuffix(d: PDecl);
 begin
   hintsSuffix(d);
@@ -742,6 +751,7 @@ begin
             bufAdd(outBuf, ' absolute');
           if d^.isOwned then
             bufAdd(outBuf, ' owned');
+          raceSuffix(d);
           if d^.paramDefault <> nil then
             bufAdd(outBuf, ' default');
           visibilitySuffix(d);
@@ -756,6 +766,7 @@ begin
           bufAdd(outBuf, ' absolute');
         if d^.isOwned then
           bufAdd(outBuf, ' owned');
+        raceSuffix(d);
         if d^.paramDefault <> nil then
           bufAdd(outBuf, ' default');
         visibilitySuffix(d);
@@ -910,6 +921,7 @@ begin
         lineName('FieldDecl ''', d^.ident.name);
         if not parseTree then
           declTypeSuffix(d^.fieldSpec, d^.fieldType);
+        raceSuffix(d);
         visibilitySuffix(d);
         loc(d^.loc);
         if parseTree then

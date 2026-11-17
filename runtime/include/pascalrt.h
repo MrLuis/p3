@@ -246,6 +246,7 @@ extern void *const __pas_tobject_vmt[5];
  * count (FRefCount, an int32) follows the VMT pointer. TInterfacedObject
  * implements IUnknown (iid __pas_iunknown_iid). */
 extern void *const __pas_tinterfacedobject_vmt[5];
+extern void *const __pas_tsharedobject_vmt[5];
 extern const unsigned char __pas_iunknown_iid[];
 typedef struct PasIntf {
   void *obj;
