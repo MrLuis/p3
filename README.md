@@ -580,6 +580,12 @@ var names := ['ann', 'bo'];          { array of string }
   parameter and says what to write: `specialize F<...>(...)`, which is
   still accepted everywhere. Named arguments and default values work as
   for other routines.
+- **Through specializations.** A parameter written `specialize TGen<...,
+  T, ...>` gives `T` the type argument of the specialization its argument
+  is: `Unbox(b)` for `generic function Unbox<T>(const B: specialize
+  TBox<T>): T` and `b: specialize TBox<Integer>` is `Unbox<integer>`
+  (also nested, `specialize TBox<specialize TBox<T>>`, and `array of T`
+  inside).
 - **Through lambdas.** A lambda passed for a parameter of a generic
   procedural type (`F: specialize TFunc<T, R>`, with `generic TFunc<T, R>
   = reference to function(const X: T): R`) works both ways: its untyped

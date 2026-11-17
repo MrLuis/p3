@@ -5455,6 +5455,52 @@ class Checker : public StmtVisitor<Checker>,
     return -1;
   }
 
+  /// Does TS (written in generic Def) name one of Def's type parameters,
+  /// itself or in its type arguments?
+  static bool mentionsTypeParam(RoutineDecl *Def, TypeSpec *TS) {
+    if (typeParamNamed(Def, TS) >= 0)
+      return true;
+    if (auto *SS = llvm::dyn_cast_or_null<SpecializeTypeSpec>(TS))
+      return llvm::any_of(SS->getArgs(), [&](TypeSpec *A) {
+        return mentionsTypeParam(Def, A);
+      });
+    if (auto *DS = llvm::dyn_cast_or_null<DynArrayTypeSpec>(TS))
+      return mentionsTypeParam(Def, DS->getElement());
+    return false;
+  }
+
+  /// SS, a parameter's type written in generic Def (specialize TGen<...>),
+  /// and AT, the type of its argument A: if AT is a specialization of TGen,
+  /// the type arguments of Def that SS's arguments name are AT's (through
+  /// Give; nested specializations and dynamic arrays alike).
+  template <typename GiveFn>
+  void inferFromSpecialization(RoutineDecl *Def, SpecializeTypeSpec *SS,
+                               Type *AT, Expr *A, GiveFn &Give) {
+    auto *GS = static_cast<Scope *>(Def->getGenericScope());
+    auto *G = GS ? llvm::dyn_cast_or_null<TypeDecl>(GS->lookup(
+                       genericKey(SS->getName().Name, SS->getArgs().size())))
+                 : nullptr;
+    if (!G)
+      return;
+    for (auto &[Key, I] : TypeInstances) {
+      if (Key.first != G || I->getType() != AT)
+        continue;
+      for (size_t K = 0; K < SS->getArgs().size(); ++K) {
+        TypeSpec *TA = SS->getArgs()[K];
+        Type *Of = Key.second[K];
+        if (int P = typeParamNamed(Def, TA); P >= 0)
+          Give(P, Of, A);
+        else if (auto *Nested = llvm::dyn_cast<SpecializeTypeSpec>(TA))
+          inferFromSpecialization(Def, Nested, Of, A, Give);
+        else if (auto *DS = llvm::dyn_cast<DynArrayTypeSpec>(TA))
+          if (int Q = typeParamNamed(Def, DS->getElement()); Q >= 0)
+            if (auto *DT = llvm::dyn_cast<DynArrayType>(Of))
+              Give(Q, DT->getElementType(), A);
+      }
+      return;
+    }
+  }
+
   /// Lambda L (A), the argument for parameter P of generic Def, whose type
   /// is a specialization of a generic procedural type G (specialize
   /// TFunc<T, R>): the type arguments of Def it gives (into Bound, through
@@ -5665,6 +5711,17 @@ class Checker : public StmtVisitor<Checker>,
         else if (auto *OA = llvm::dyn_cast<OpenArrayType>(AT))
           Give(K, OA->getElementType(), A);
         continue;
+      }
+      // specialize TGen<..., T, ...>: T from the specialization the
+      // argument is (a lambda's are the lambda pass's, below)
+      if (auto *SS = llvm::dyn_cast_or_null<SpecializeTypeSpec>(TS);
+          SS && mentionsTypeParam(Def, SS) && !pendingLambda(A) &&
+          !isRoutineName(A)) {
+        Type *AT = check(A);
+        if (AT->isError())
+          OK = false;
+        else
+          inferFromSpecialization(Def, SS, AT, A, Give);
       }
     }
     if (!OK)

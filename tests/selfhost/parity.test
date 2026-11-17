@@ -144,6 +144,9 @@
 ; for-in through helpers (objfpc).
 ; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-llvm --extra="-g -o -" --modes=objfpc --ref p3 --new %t.p3 %S/../run/forinhelpers.pas | FileCheck %s
 ; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-ast --extra="-o -" --modes=objfpc --ref p3 --new %t.p3 %S/../run/forinhelpers.pas | FileCheck %s
+; Inference through specializations (objfpc).
+; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-llvm --extra="-o -" --modes=objfpc --ref p3 --new %t.p3 %S/../run/inferspecialize.pas %S/../sema/Inputs/inferspecialize | FileCheck %s
+; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-ast --extra="-o -" --modes=objfpc --ref p3 --new %t.p3 %S/../run/inferspecialize.pas %S/../sema/Inputs/inferspecialize | FileCheck %s
 ; Separate units (S11): the unit modules and the program importing them.
 ; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-llvm --extra="-I %S/../run/Inputs/units/lib -o -" --modes=tp --ref p3 --new %t.p3 %S/../run/Inputs/units | FileCheck %s
 ; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-llvm --extra="-I %S/../run/Inputs/units/lib -fseparate-units -g -o -" --modes=tp --ref p3 --new %t.p3 %S/../run/Inputs/units | FileCheck %s

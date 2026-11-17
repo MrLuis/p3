@@ -8977,6 +8977,72 @@ var
   end;
 
 
+  { does ts (written in def) name one of def's type parameters, itself or
+    in its type arguments? }
+  function mentionsTypeParam(ts: PTypeSpec): boolean;
+  var
+    m: longint;
+  begin
+    mentionsTypeParam := false;
+    if ts = nil then
+      exit;
+    if typeParamNamed(def, ts) >= 0 then
+      exit(true);
+    if ts^.kind = tsSpecialize then
+    begin
+      for m := 0 to ts^.spArgs.count - 1 do
+        if mentionsTypeParam(PTypeSpec(listGet(ts^.spArgs, m))) then
+          exit(true);
+      exit;
+    end;
+    if ts^.kind = tsDynArray then
+      mentionsTypeParam := mentionsTypeParam(ts^.dynSpec);
+  end;
+
+  { ss, a parameter's type written in def (specialize TGen<...>), and at,
+    the type of its argument v: if at is a specialization of TGen, the type
+    arguments of def that ss's arguments name are at's (through give;
+    nested specializations and dynamic arrays alike) }
+  procedure inferFromSpecialization(ss: PTypeSpec; at: PType; v: PNode);
+  var
+    gs: PScope;
+    gd: PDecl;
+    ti: PTypeInstance;
+    m, kk, q: longint;
+    ta: PTypeSpec;
+    tof: PType;
+  begin
+    gs := PScope(def^.genericScope);
+    if (gs = nil) or not typeInstancesInit then
+      exit;
+    gd := scopeFind(gs, genericKey(ss^.spName.name, ss^.spArgs.count));
+    if (gd = nil) or (gd^.kind <> dkType) then
+      exit;
+    for m := 0 to typeInstances.count - 1 do
+    begin
+      ti := PTypeInstance(listGet(typeInstances, m));
+      if (ti^.g <> gd) or (ti^.td^.declType <> at) then
+        continue;
+      for kk := 0 to ss^.spArgs.count - 1 do
+      begin
+        ta := PTypeSpec(listGet(ss^.spArgs, kk));
+        tof := PType(listGet(ti^.types, kk));
+        q := typeParamNamed(def, ta);
+        if q >= 0 then
+          give(q, tof, v)
+        else if ta^.kind = tsSpecialize then
+          inferFromSpecialization(ta, tof, v)
+        else if ta^.kind = tsDynArray then
+        begin
+          q := typeParamNamed(def, ta^.dynSpec);
+          if (q >= 0) and (tof^.kind = tyDynArray) then
+            give(q, tof^.dynElement, v);
+        end;
+      end;
+      exit;
+    end;
+  end;
+
   { Lambda l (a), the argument for parameter p of generic def, whose type
     is a specialization of a generic procedural type g (specialize
     TFunc<T, R>): the type arguments of def it gives (into bound, through
@@ -9180,6 +9246,17 @@ begin
         give(k, at^.dynElement, a)
       else if at^.kind = tyOpenArray then
         give(k, at^.openElement, a);
+    end
+    { specialize TGen<..., T, ...>: T from the specialization the argument
+      is (a lambda's are the lambda pass's, below) }
+    else if (ts <> nil) and (ts^.kind = tsSpecialize) and mentionsTypeParam(ts) and
+            (pendingLambda(a) = nil) and not isRoutineName(a) then
+    begin
+      at := check(a);
+      if isError(at) then
+        ok := false
+      else
+        inferFromSpecialization(ts, at, a);
     end;
   end;
   if not ok then

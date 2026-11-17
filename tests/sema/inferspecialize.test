@@ -1,0 +1,8 @@
+; Inference through specializations (objfpc): two arguments giving one type
+; parameter different types conflict; an argument that is not the
+; specialization the parameter names gives nothing.
+; RUN: not %p3 --mode=objfpc -ferror-limit=0 -c %S/Inputs/inferspecialize/errors.pas -o %t.o 2>&1 | FileCheck %s
+; CHECK: errors.pas:24:20: error: cannot infer the type parameter 'T' of 'Same': the arguments give both 'integer' and 'char'; give the type: specialize Same<...>
+; CHECK: errors.pas:25:14: error: cannot pass a value of type 'TOther<integer>' to parameter 'B' of type 'TBox<integer>'
+; CHECK: errors.pas:26:14: error: cannot pass a value of type 'integer' to parameter 'B' of type 'TBox<integer>'
+; CHECK-NOT: error:
