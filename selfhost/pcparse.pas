@@ -2244,7 +2244,7 @@ end;
 
 { genericMethod = "generic" [ "class" ] ( "function" | "procedure" ) name
                   "<" typeParams ">" ... (a method heading, in a class) }
-function parseGenericMethodHeading: PDecl;
+function parseGenericMethodHeading(inRecord: boolean): PDecl;
 var
   classMethod, savedParsing: boolean;
   savedParams, params: TPtrList;
@@ -2263,7 +2263,11 @@ begin
   savedParams := genericTypeParams;
   parsingGeneric := true;
   listInit(genericTypeParams);
-  r := parseMethodHeading;
+  { (in an advanced record: as its methods, a class method static) }
+  if inRecord then
+    r := parseMethodHeadingR(true, classMethod)
+  else
+    r := parseMethodHeading;
   params := genericTypeParams;
   parsingGeneric := savedParsing;
   genericTypeParams := savedParams;
@@ -2917,7 +2921,7 @@ begin
   begin
     if startsGeneric then { generic function M<T>(...) }
     begin
-      m := parseGenericMethodHeading;
+      m := parseGenericMethodHeading(false);
       if m = nil then
       begin
         failed := true;
@@ -3328,7 +3332,7 @@ begin
   begin
     if startsGeneric then { generic function M<T>(...) }
     begin
-      m := parseGenericMethodHeading;
+      m := parseGenericMethodHeading(false);
       if m = nil then
       begin
         failed := true;
@@ -4074,6 +4078,17 @@ begin
   failed := false;
   while (tok.kind <> tkKwEnd) and (tok.kind <> tkEof) and not diagShouldStop do
   begin
+    if startsGeneric then { generic function M<T>(...) }
+    begin
+      m := parseGenericMethodHeading(true);
+      if m = nil then
+      begin
+        failed := true;
+        break;
+      end;
+      addMember(m);
+      continue;
+    end;
     if tok.kind = tkIdentifier then
     begin
       wd := nameStr(tok.name);

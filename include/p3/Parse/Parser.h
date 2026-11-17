@@ -145,7 +145,7 @@ class Parser {
   /// GenericTypeParams).
   void parseTypeParamList();
   /// `generic [class] function M<T>(...)` in a class (objfpc).
-  RoutineDecl *parseGenericMethodHeading();
+  RoutineDecl *parseGenericMethodHeading(bool InRecord = false);
   /// specialize Name<T1, ...>, after which a call's arguments may follow.
   bool parseSpecialization(Identifier &Name,
                            llvm::SmallVectorImpl<TypeSpec *> &TypeArgs);

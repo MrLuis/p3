@@ -348,7 +348,7 @@ void Parser::parseTypeParamList() {
 
 // genericMethod = "generic" [ "class" ] ( "function" | "procedure" ) name
 //                 "<" typeParams ">" ... (a method heading, in a class)
-RoutineDecl *Parser::parseGenericMethodHeading() {
+RoutineDecl *Parser::parseGenericMethodHeading(bool InRecord) {
   consumeToken(); // 'generic'
   bool ClassMethod = tryConsume(tok::kw_class);
   if (Tok.isNot(tok::kw_function) && Tok.isNot(tok::kw_procedure)) {
@@ -361,7 +361,9 @@ RoutineDecl *Parser::parseGenericMethodHeading() {
   llvm::ArrayRef<Identifier> SavedParams = GenericTypeParams;
   ParsingGeneric = true;
   GenericTypeParams = {};
-  RoutineDecl *R = parseMethodHeading();
+  // (in an advanced record: as its methods, a class method static)
+  RoutineDecl *R = InRecord ? parseMethodHeading(/*InRecord=*/true, ClassMethod)
+                            : parseMethodHeading();
   llvm::ArrayRef<Identifier> Params = GenericTypeParams;
   ParsingGeneric = SavedParsing;
   GenericTypeParams = SavedParams;
@@ -2949,6 +2951,13 @@ TypeSpec *Parser::parseAdvancedRecord(SourceLocation Start,
     ClassVars = false;
   };
   while (Tok.isNot(tok::kw_end) && Tok.isNot(tok::eof) && !Diags.shouldStop()) {
+    if (startsGeneric()) { // generic function M<T>(...)
+      RoutineDecl *R = parseGenericMethodHeading(/*InRecord=*/true);
+      if (!R)
+        return Fail();
+      AddMember(R);
+      continue;
+    }
     if (Tok.is(tok::identifier)) {
       llvm::StringRef W = Tok.getIdentifier();
       if (W == "private" || W == "public") {

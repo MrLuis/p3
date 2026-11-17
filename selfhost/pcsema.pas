@@ -5155,6 +5155,26 @@ begin
         addNestedMembers(PDecl(c), m, members, own);
       continue;
     end;
+    if (m^.kind = dkRoutine) and (m^.memberKey <> nil) then
+    begin
+      prev := PDecl(mapGet(own, m^.memberKey^.id));
+      if prev <> nil then
+      begin
+        ms('redefinition of generic method ''');
+        maN(m^.ident.spelling);
+        ma('''');
+        errR(m^.ident.loc, identRange(m^.ident));
+        ms('previous definition is here');
+        note(prev^.loc);
+        continue;
+      end;
+      defineGenericMethod(c, m);
+      if m^.isClassMethod then
+        m^.isStatic := true; { no Self }
+      mapPut(own, m^.memberKey^.id, m);
+      listAdd(members, m);
+      continue;
+    end;
     overloadOf := nil;
     prev := PDecl(mapGet(own, m^.ident.name^.id));
     if prev <> nil then
@@ -6015,7 +6035,8 @@ begin
     for j := 0 to c^.classMembers.count - 1 do
     begin
       r := PDecl(listGet(c^.classMembers, j));
-      if (r^.kind = dkRoutine) and (r^.body = nil) then
+      if (r^.kind = dkRoutine) and (r^.body = nil) and
+         not ((r^.memberKey <> nil) and (r^.genericDef <> nil)) then
       begin
         ms('method ''');
         maQualified(c, r^.ident);
@@ -7396,10 +7417,18 @@ begin
       t := td^.declType;
       if (t <> nil) and (t^.kind = tyClass) then
         c := t;
+      if (c = nil) and (t <> nil) then
+        c := memberTableOf(t); { an advanced record }
     end;
   end
   else
-    c := lookupClass(r^.methodClassName);
+  begin
+    td := lookup(r^.methodClassName.name);
+    if (td <> nil) and (td^.kind = dkType) and (td^.declType <> nil) then
+      c := memberTableOf(td^.declType); { an advanced record }
+    if c = nil then
+      c := lookupClass(r^.methodClassName);
+  end;
   if c = nil then
     exit;
   m := findOwnMember(c, genericKey(r^.ident.name, r^.typeParams.count));
@@ -7407,7 +7436,12 @@ begin
     m := nil;
   if m = nil then
   begin
-    ms('class ''');
+    if c^.classRecord <> nil then
+      ms('record ''')
+    else if c^.classHelperFor <> nil then
+      ms(helperKindName(c) + ' ''')
+    else
+      ms('class ''');
     bufAddTypeName(msg, c);
     ma(''' has no generic method ''');
     maN(r^.ident.spelling);

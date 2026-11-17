@@ -2781,6 +2781,21 @@ class Checker : public StmtVisitor<Checker>,
           addNestedMembers(C, NT, Members, Own);
         continue;
       }
+      if (auto *R = llvm::dyn_cast<RoutineDecl>(M); R && R->isGenericMethod()) {
+        if (Decl *Prev = Own.lookup(R->getMemberKey())) {
+          Diags.error(MN.Loc,
+                      "redefinition of generic method '" + MN.Spelling + "'",
+                      {MN.getRange()});
+          Diags.note(Prev->getLocation(), "previous definition is here");
+          continue;
+        }
+        defineGenericMethod(C, R);
+        if (R->isClassMethod())
+          R->setStatic(); // no Self
+        Own[R->getMemberKey()] = R;
+        Members.push_back(R);
+        continue;
+      }
       RoutineDecl *OverloadOf = nullptr;
       if (Decl *Prev = Own.lookup(MN.Name)) {
         OverloadOf = llvm::dyn_cast<RoutineDecl>(Prev);
@@ -4125,7 +4140,9 @@ class Checker : public StmtVisitor<Checker>,
     if (ClassType *MT = memberTableOf(TD->getType())) {
       checkClassInitImplemented(MT);
       for (Decl *M : MT->getMembers()) { // an advanced record's
-        if (auto *R = llvm::dyn_cast<RoutineDecl>(M); R && !R->getBody())
+        if (auto *R = llvm::dyn_cast<RoutineDecl>(M);
+            R && !R->getBody() &&
+            !(R->isGenericMethod() && R->getGenericDefinition() != R))
           Diags.error(R->getName().Loc,
                       "method '" + qualified(MT, R->getName()) +
                           "' is declared but never implemented",
@@ -5005,8 +5022,13 @@ class Checker : public StmtVisitor<Checker>,
       auto *TD = llvm::dyn_cast_or_null<TypeDecl>(
           lookupMemberPath(R->getOuterClassNames(), CN));
       C = TD ? llvm::dyn_cast<ClassType>(TD->getType()) : nullptr;
+      if (!C && TD)
+        C = memberTableOf(TD->getType()); // an advanced record
     } else {
-      C = lookupClass(CN);
+      if (auto *TD = llvm::dyn_cast_or_null<TypeDecl>(Cur->lookup(CN.Name)))
+        C = memberTableOf(TD->getType()); // an advanced record
+      if (!C)
+        C = lookupClass(CN);
     }
     if (!C)
       return;
@@ -5015,7 +5037,10 @@ class Checker : public StmtVisitor<Checker>,
         C->findOwnMember(genericKey(Id.Name, Params.size())));
     if (!M) {
       Diags.error(Id.Loc,
-                  "class '" + C->getName() + "' has no generic method '" +
+                  llvm::Twine(C->getRecord()  ? "record"
+                              : C->isHelper() ? C->helperKindName()
+                                              : "class") +
+                      " '" + C->getName() + "' has no generic method '" +
                       Id.Spelling + "' with " + llvm::Twine(Params.size()) +
                       " type parameter" + (Params.size() == 1 ? "" : "s"),
                   {Id.getRange()});

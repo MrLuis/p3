@@ -1399,8 +1399,11 @@ class of its own, made from the implementation, so a generic method cannot
 be virtual, override or abstract, a constructor, a destructor or an
 operator. Its implementation must come before its first use, and is
 checked for each specialization (its declaration gives the shape: type
-parameters, parameter kinds). Type helpers can have generic methods too;
-advanced records cannot yet.
+parameters, parameter kinds). Type helpers and advanced records can have
+generic methods too (a record's generic class methods are `static`, as its
+other class methods), so a generic record can carry its own operations:
+`generic TSeq<T> = record ... generic function Map<R>(...): specialize
+TSeq<R>; end`.
 
 **Generic type helpers** (`--mode=objfpc`, `{$modeswitch typehelpers}`;
 p3's own): `generic TH<T> = type helper for array of T` extends every
