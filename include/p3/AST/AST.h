@@ -34,6 +34,7 @@ class LabelDecl;
 class RoutineDecl;
 class Type;
 class TaskType;
+class IteratorType;
 class TypeSpec;
 class PropertyDecl;
 class VarDecl;
@@ -802,7 +803,7 @@ class ForInStmt final : public Stmt {
 public:
   enum InKind : unsigned char {
     Invalid, Array, OpenArray, DynArray, AnsiString, ShortString,
-    StringConst, Set, Ordinals, Enumerator
+    StringConst, Set, Ordinals, Enumerator, Iterator
   };
 
 private:
@@ -1112,6 +1113,23 @@ public:
 
 /// detached [(handler)] call (objfpc): an async call left to run on its
 /// own; its exception, if any, goes to handler (procedure(E: Exception)).
+/// yield e / yield break / yield from e (objfpc, in an iterator routine).
+class YieldStmt final : public Stmt {
+public:
+  enum YieldKind : unsigned char { Value, Break, From };
+
+private:
+  YieldKind YK;
+  Expr *E; ///< null for yield break
+
+public:
+  YieldStmt(SourceRange R, YieldKind K, Expr *E)
+      : Stmt(SK_Yield, R), YK(K), E(E) {}
+  YieldKind getYieldKind() const { return YK; }
+  Expr *getValue() const { return E; }
+  static bool classof(const Stmt *S) { return S->getKind() == SK_Yield; }
+};
+
 class DetachedStmt final : public Stmt {
   Expr *Handler; ///< null: none
   Expr *Call;
@@ -1406,14 +1424,17 @@ public:
   }
 };
 
-/// async T / async (objfpc): a task type; Inner null for async.
+/// async T / async (objfpc): a task type; Inner null for async. With
+/// Iterator: iterator T (Inner never null), an iterator type.
 class AsyncTypeSpec final : public TypeSpec {
   TypeSpec *Inner;
+  bool Iterator;
 
 public:
-  AsyncTypeSpec(SourceRange R, TypeSpec *Inner)
-      : TypeSpec(TS_Async, R), Inner(Inner) {}
+  AsyncTypeSpec(SourceRange R, TypeSpec *Inner, bool Iterator = false)
+      : TypeSpec(TS_Async, R), Inner(Inner), Iterator(Iterator) {}
   TypeSpec *getInner() const { return Inner; }
+  bool isIterator() const { return Iterator; }
   static bool classof(const TypeSpec *T) { return T->getKind() == TS_Async; }
 };
 
@@ -1927,6 +1948,7 @@ class RoutineDecl final : public Decl {
   bool SpawnBlock = false;
   bool RaceChecked = false; ///< a spawn block under {$modeswitch racechecks}
   TaskType *Async = nullptr;
+  IteratorType *Iter = nullptr;
   VarDecl *LambdaSelf = nullptr;
   Identifier Capture;
   RoutineDecl *GenericDef = nullptr;
@@ -1973,7 +1995,7 @@ public:
         IsForward(IsForward) {}
 
   bool isFunction() const { return IsFunction; }
-  bool isProcedure() const { return !IsFunction && !Async; }
+  bool isProcedure() const { return !IsFunction && !Async && !Iter; }
   llvm::ArrayRef<VarDecl *> getParams() const { return Params; }
   void setParams(llvm::ArrayRef<VarDecl *> P) { Params = P; }
   bool hasParamList() const { return HasParamList; }
@@ -2128,6 +2150,12 @@ public:
   bool isAsync() const { return Async != nullptr; }
   TaskType *getAsyncType() const { return Async; }
   void setAsync(TaskType *T) { Async = T; }
+  /// An iterator routine (result `iterator T`): its calls are iterators,
+  /// of type getIteratorType(), whose values its body yields; the body is
+  /// that of a procedure.
+  bool isIterator() const { return Iter != nullptr; }
+  IteratorType *getIteratorType() const { return Iter; }
+  void setIterator(IteratorType *T) { Iter = T; }
   void setFunction(bool F) { IsFunction = F; }
   /// The hidden async procedure of `spawn begin ... end`.
   bool isSpawnBlock() const { return SpawnBlock; }

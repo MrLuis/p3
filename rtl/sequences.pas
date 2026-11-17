@@ -101,6 +101,24 @@ type
     generic function Fold<A>(const Start: A; F: specialize TStep<A, T>): A;
   end;
 
+  { The operations of an iterator (a function whose result is iterator T,
+    with yield). An iterator runs once: the sequences made from it share
+    it, and each value read from one is gone from the others. }
+  generic TIterSeq<T> = type helper for iterator T
+    { runs it to its next value: False at its end }
+    function MoveNext: Boolean;
+    { the value MoveNext ran it to }
+    function Current: T;
+    function Seq: specialize TSeq<T>;
+    generic function Map<R>(F: specialize TFunc<T, R>): specialize TSeq<R>;
+    function Filter(F: specialize TPred<T>): specialize TSeq<T>;
+    function Take(N: Integer): specialize TSeq<T>;
+    function Skip(N: Integer): specialize TSeq<T>;
+    function TakeWhile(F: specialize TPred<T>): specialize TSeq<T>;
+    generic function Fold<A>(const Start: A; F: specialize TStep<A, T>): A;
+    function ToArray: specialize TArray<T>;
+  end;
+
 { The values of an array (copied: later changes to it are not seen). }
 generic function Seq<T>(const Items: array of T): specialize TSeq<T>;
 { Lo, Lo + 1, ..., Hi }
@@ -575,6 +593,62 @@ begin
         Dec(Left);
       end;
     end;
+end;
+
+function TIterSeq.MoveNext: Boolean;
+begin
+  Result := IteratorNext(Self);
+end;
+
+function TIterSeq.Current: T;
+begin
+  Result := IteratorValue(Self);
+end;
+
+function TIterSeq.Seq: specialize TSeq<T>;
+var
+  It: iterator T;
+begin
+  It := Self;
+  Result.Next := function(var X: T): Boolean => begin
+      Result := IteratorNext(It);
+      if Result then X := IteratorValue(It);
+    end;
+end;
+
+generic function TIterSeq.Map<R>(F: specialize TFunc<T, R>): specialize TSeq<R>;
+begin
+  Result := Seq.specialize Map<R>(F);
+end;
+
+function TIterSeq.Filter(F: specialize TPred<T>): specialize TSeq<T>;
+begin
+  Result := Seq.Filter(F);
+end;
+
+function TIterSeq.Take(N: Integer): specialize TSeq<T>;
+begin
+  Result := Seq.Take(N);
+end;
+
+function TIterSeq.Skip(N: Integer): specialize TSeq<T>;
+begin
+  Result := Seq.Skip(N);
+end;
+
+function TIterSeq.TakeWhile(F: specialize TPred<T>): specialize TSeq<T>;
+begin
+  Result := Seq.TakeWhile(F);
+end;
+
+generic function TIterSeq.Fold<A>(const Start: A; F: specialize TStep<A, T>): A;
+begin
+  Result := Seq.specialize Fold<A>(Start, F);
+end;
+
+function TIterSeq.ToArray: specialize TArray<T>;
+begin
+  Result := Seq.ToArray;
 end;
 
 function TArraySeq.Seq: specialize TSeq<T>;

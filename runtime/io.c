@@ -1091,6 +1091,9 @@ EXCEPTION_VMT(__pas_eintoverflow_vmt, __pas_einterror_vmt, "\014EIntOverflow");
 EXCEPTION_VMT(__pas_econverterror_vmt, __pas_exception_vmt, "\015EConvertError");
 EXCEPTION_VMT(__pas_eoperationcancelled_vmt, __pas_exception_vmt,
               "\023EOperationCancelled");
+/* An iterator's yield when it is being stopped (its last reference gone):
+ * a TObject, not an Exception, so `on E: Exception` does not catch it. */
+EXCEPTION_VMT(__pas_iteratorstop_vmt, __pas_tobject_vmt, "\015EIteratorStop");
 
 void __pas_exc_push(PasExcFrame *f) {
   f->prev = __pas_exc_top;

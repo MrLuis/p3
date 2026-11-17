@@ -60,6 +60,7 @@ function openArrayType(element: PType): PType;
 function dynArrayType(element: PType): PType;
 { async T (result nil: async), one for each; TCancelToken }
 function taskType(result_: PType): PType;
+function iteratorType(element: PType): PType;
 function tokenType: PType;
 { The type of a method pointer: procedure ... of object. }
 function newMethodPointerType(const params: TPtrList; result_: PType; cdecl_: boolean): PType;
@@ -145,6 +146,7 @@ var
   theAnsiString: PType;
   openArrayTypes, dynArrayTypes: TPtrList; { one for each element type }
   taskTypes: TPtrList; { one for each result type }
+  iterTypes: TPtrList; { one for each element type }
   theToken: PType;
 
 function newType(kind: TTypeKind): PType;
@@ -349,6 +351,7 @@ begin
   listInit(openArrayTypes);
   listInit(dynArrayTypes);
   listInit(taskTypes);
+  listInit(iterTypes);
   theToken := nil;
   tyErrorT := newType(tyError);
   tyIntegerT := newIntegerType(32, true, 'integer');
@@ -461,6 +464,23 @@ begin
   t^.taskResult := result_;
   listAdd(taskTypes, t);
   taskType := t;
+end;
+
+function iteratorType(element: PType): PType;
+var
+  i: longint;
+  t: PType;
+begin
+  for i := 0 to iterTypes.count - 1 do
+  begin
+    t := PType(listGet(iterTypes, i));
+    if t^.iterElement = element then
+      exit(t);
+  end;
+  t := newType(tyIterator);
+  t^.iterElement := element;
+  listAdd(iterTypes, t);
+  iteratorType := t;
 end;
 
 function tokenType: PType;
@@ -613,7 +633,7 @@ begin
   isValidResultType := isSimple(t) or
                        (t^.kind in [tyPointer, tyClass, tyClassRef, tyInterface, tyAnsiString,
                                     tyDynArray]) or isClosureType(t) or
-                       (t^.kind in [tyTask, tyToken]);
+                       (t^.kind in [tyTask, tyToken, tyIterator]);
 end;
 
 function isClosureType(t: PType): boolean;
@@ -799,7 +819,7 @@ begin
     tyAnsiString: isManaged := true;
     tyOpenArray: isManaged := isManaged(t^.openElement);
     tyDynArray: isManaged := true;
-    tyTask, tyToken: isManaged := true;
+    tyTask, tyToken, tyIterator: isManaged := true;
     tyRoutine: isManaged := t^.routineReference;
     tyArray: isManaged := isManaged(t^.elementType);
     tyRecord:
@@ -1047,6 +1067,11 @@ begin
       else
         bufAdd(b, 'async');
     tyToken: bufAdd(b, 'TCancelToken');
+    tyIterator:
+      begin
+        bufAdd(b, 'iterator ');
+        bufAddTypeName(b, t^.iterElement);
+      end;
     tyStringLit: bufAdd(b, 'string of length ' + intToStr(t^.strLength));
     tyEnum:
       begin

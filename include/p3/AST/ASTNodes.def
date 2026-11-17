@@ -64,6 +64,7 @@ STMT(Destructure)     // (a, b) := e; var (a, b) := e          (objfpc)
 STMT(Expr)            // await e; spawn ...;                   (objfpc)
 STMT(Scope)           // scope [token] ... end                 (objfpc)
 STMT(Detached)        // detached [(handler)] call             (objfpc)
+STMT(Yield)           // yield e / yield break / yield from e  (objfpc)
 
 #undef STMT
 #undef EXPR

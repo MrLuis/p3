@@ -1188,3 +1188,207 @@ PasTask *__pas_when_all(PasTask *const *tasks, int64_t n, const PasDynInfo *resu
 PasTask *__pas_when_any(PasTask *const *tasks, int64_t n, const PasDynInfo *int_info) {
   return when_new(tasks, n, int_info, when_any_entry, NULL);
 }
+
+/*===- Iterators (generators) ------------------------------------------------===*/
+/* An iterator routine's call is a generator: its body runs on a stack of
+ * its own, from the first __pas_gen_next until it yields (a value in its
+ * slot) or ends; each __pas_gen_next resumes it. No scheduler: the
+ * consumer and the generator switch directly, on the consumer's thread.
+ * Dropping the last reference to a suspended generator resumes it once
+ * more with `stopping` set: its yield raises EIteratorStop (a TObject, not
+ * an Exception), so its finally parts run, and the stop ends it. */
+
+enum { GS_NEW, GS_RUNNING, GS_SUSPENDED, GS_DONE };
+
+typedef struct PasGen {
+  int64_t refs;
+  int state;
+  int stopping;
+  int has_value;                  /* the slot holds a value (to release) */
+  const PasDynInfo *info;         /* the values' type */
+  void (*entry)(struct PasGen *);
+  void (*args_fini)(void *args);
+  int64_t value_size;
+  ucontext_t ctx, back;           /* its own; the consumer's, while it runs */
+  void *stack;
+  const void *back_bottom;        /* (the consumer's stack, for ASan) */
+  size_t back_size;
+  void *fake_stack;
+  PasExcFrame *exc_top;           /* its exception frames, while switched out */
+  void *exception;                /* it failed: the exception, until raised */
+  const char *exc_where;
+  struct PasGen *outer;           /* the generator running before it */
+  char data[];                    /* the value, then the arguments */
+} PasGen;
+
+/* The generator whose body is running on this thread (yield's). */
+_Thread_local PasGen *__pas_gen_current;
+
+extern void *const __pas_iteratorstop_vmt[5];
+
+PasGen *__pas_gen_new(const PasDynInfo *info, int64_t args_size,
+                      void (*entry)(PasGen *), void (*args_fini)(void *)) {
+  int64_t vs = round16(info->elem_size);
+  PasGen *g = calloc(1, sizeof(PasGen) + (size_t)vs + (size_t)args_size);
+  if (!g)
+    __pas_runtime_error("out of memory for an iterator");
+  g->refs = 1;
+  g->info = info;
+  g->entry = entry;
+  g->args_fini = args_fini;
+  g->value_size = vs;
+  return g;
+}
+
+void *__pas_gen_args(PasGen *g) { return g->data + g->value_size; }
+void *__pas_gen_value(PasGen *g) { return g->data; }
+
+static void gen_main(void) {
+  PasGen *g = __pas_gen_current;
+#ifdef PAS_ASAN
+  __sanitizer_finish_switch_fiber(NULL, &g->back_bottom, &g->back_size);
+#endif
+  PasExcFrame f;
+  memset(&f, 0, sizeof f);
+  __pas_exc_push(&f);
+  if (_setjmp(*(jmp_buf *)(void *)f.buf) == 0) {
+    g->entry(g);
+    __pas_exc_pop(&f);
+  } else if (f.object && *(void *const **)f.object == __pas_iteratorstop_vmt) {
+    __pas_free_object(f.object); /* stopped: an ordinary end */
+  } else {
+    g->exception = f.object;
+    g->exc_where = f.where;
+  }
+  if (g->args_fini)
+    g->args_fini(__pas_gen_args(g));
+  g->args_fini = NULL;
+  g->state = GS_DONE;
+  g->exc_top = NULL;
+#ifdef PAS_ASAN
+  __sanitizer_start_switch_fiber(NULL, g->back_bottom, g->back_size);
+#endif
+  setcontext(&g->back); /* (its stack is freed there) */
+  __pas_runtime_error("an iterator resumed after it ended");
+}
+
+/* Runs g until it yields or ends. */
+static void gen_resume(PasGen *g) {
+  if (g->state == GS_NEW) {
+    g->stack = new_stack();
+    getcontext(&g->ctx);
+    g->ctx.uc_stack.ss_sp = g->stack;
+    g->ctx.uc_stack.ss_size = STACK_SIZE;
+    g->ctx.uc_link = NULL;
+    makecontext(&g->ctx, gen_main, 0);
+  }
+  PasExcFrame *saved = __pas_exc_top;
+  __pas_exc_top = g->exc_top;
+  g->outer = __pas_gen_current;
+  __pas_gen_current = g;
+  g->state = GS_RUNNING;
+#ifdef PAS_ASAN
+  void *fake = NULL;
+  __sanitizer_start_switch_fiber(&fake, g->stack, STACK_SIZE);
+#endif
+  swapcontext(&g->back, &g->ctx);
+#ifdef PAS_ASAN
+  __sanitizer_finish_switch_fiber(fake, NULL, NULL);
+#endif
+  __pas_gen_current = g->outer;
+  __pas_exc_top = saved;
+  if (g->state == GS_DONE && g->stack) {
+    free_stack(g->stack);
+    g->stack = NULL;
+  }
+}
+
+/* The next value: 1 (in the slot), or 0 at the end; raises what the body
+ * raised. */
+int32_t __pas_gen_next(PasGen *g) {
+  if (!g)
+    __pas_runtime_error("use of a nil iterator");
+  if (g->state == GS_RUNNING)
+    __pas_runtime_error("an iterator asked for its next value while it runs");
+  if (g->state == GS_DONE)
+    return 0;
+  gen_resume(g);
+  if (g->exception) {
+    void *e = g->exception;
+    g->exception = NULL;
+    __pas_raise(e, g->exc_where ? g->exc_where : "");
+  }
+  return g->state == GS_SUSPENDED;
+}
+
+/* In an iterator's body, before a value is stored: its slot. */
+void *__pas_gen_slot(void) {
+  PasGen *g = __pas_gen_current;
+  if (!g)
+    __pas_runtime_error("yield outside an iterator");
+  g->has_value = 1;
+  return g->data;
+}
+
+static void raise_stop(void) __attribute__((noreturn));
+static void raise_stop(void) {
+  __pas_raise_message(__pas_iteratorstop_vmt, "iterator stopped");
+}
+
+/* In an iterator's body, its value stored: back to the consumer until the
+ * next value is asked for. */
+void __pas_gen_yield(void) {
+  PasGen *g = __pas_gen_current;
+  if (!g)
+    __pas_runtime_error("yield outside an iterator");
+  if (g->stopping)
+    raise_stop();
+  g->state = GS_SUSPENDED;
+  g->exc_top = __pas_exc_top;
+#ifdef PAS_ASAN
+  __sanitizer_start_switch_fiber(&g->fake_stack, g->back_bottom, g->back_size);
+#endif
+  swapcontext(&g->ctx, &g->back);
+#ifdef PAS_ASAN
+  __sanitizer_finish_switch_fiber(g->fake_stack, &g->back_bottom, &g->back_size);
+#endif
+  if (g->stopping)
+    raise_stop();
+}
+
+void __pas_gen_addref(PasGen *g) {
+  if (g)
+    __atomic_fetch_add(&g->refs, 1, __ATOMIC_RELAXED);
+}
+
+void __pas_gen_release(PasGen *g) {
+  if (!g || __atomic_sub_fetch(&g->refs, 1, __ATOMIC_ACQ_REL) != 0)
+    return;
+  if (g->state == GS_SUSPENDED) { /* its finally parts run */
+    g->stopping = 1;
+    g->refs = 1; /* (alive while it unwinds) */
+    gen_resume(g);
+    if (g->exception) { /* (raised while it unwound: dropped) */
+      __pas_free_object(g->exception);
+      g->exception = NULL;
+    }
+  }
+  if (g->state == GS_NEW && g->args_fini)
+    g->args_fini(__pas_gen_args(g));
+  if (g->has_value && g->info->fini)
+    g->info->fini(g->data);
+  free(g);
+}
+
+void __pas_gen_assign(PasGen **dst, PasGen *src) {
+  __pas_gen_addref(src);
+  PasGen *old = *dst;
+  *dst = src;
+  __pas_gen_release(old);
+}
+
+void __pas_gen_clear(PasGen **p) {
+  PasGen *old = *p;
+  *p = NULL;
+  __pas_gen_release(old);
+}

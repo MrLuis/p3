@@ -5,7 +5,7 @@
 ; CHECK: errors.pas:26:17: error: cannot assign to 'i' inside a 'for' loop that it controls
 ; CHECK: errors.pas:26:3: note: 'for' loop is here
 ; CHECK: errors.pas:27:9: error: assigning to 'string' from incompatible type 'integer'
-; CHECK: errors.pas:28:12: error: 'for ... in' cannot enumerate a value of type 'integer' (an array, string, set, ordinal type, or an object or record with a GetEnumerator method)
+; CHECK: errors.pas:28:12: error: 'for ... in' cannot enumerate a value of type 'integer' (an array, string, set, ordinal type, iterator, or an object or record with a GetEnumerator method)
 ; CHECK: errors.pas:29:12: error: 'for ... in' cannot enumerate a value of type 'TPlain'
 ; CHECK: errors.pas:30:12: error: 'for ... in' cannot enumerate a value of type 'TNoEnum': it has no function GetEnumerator without arguments
 ; CHECK: errors.pas:31:12: error: 'for ... in' cannot enumerate a value of type 'TBadGet': it has no function GetEnumerator without arguments

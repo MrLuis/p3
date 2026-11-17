@@ -280,6 +280,9 @@ class Parser {
   Stmt *parseDetachedStmt();
   Stmt *parseForAwait(SourceLocation ForLoc);
   TypeSpec *parseAsyncType();
+  bool startsIteratorType();
+  bool startsYieldStmt();
+  Stmt *parseYieldStmt();
   void setCheckedSwitches(SourceLocation L, bool Checked,
                           CheckDirectives::State &Before,
                           CheckDirectives::State &WrapBefore);

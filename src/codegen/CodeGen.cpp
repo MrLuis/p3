@@ -529,6 +529,7 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
     case Type::TK_Class: // a reference to the object
     case Type::TK_Task:  // a counted reference to the task
     case Type::TK_Token: // a counted reference to the token
+    case Type::TK_Iterator: // a counted reference to the generator
       return B.getPtrTy();
     case Type::TK_Error:
     case Type::TK_Untyped: // (untyped parameters are passed by reference)
@@ -2368,6 +2369,7 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
     case Type::TK_ArrayOfConst:
     case Type::TK_Task:
     case Type::TK_Token:
+    case Type::TK_Iterator:
       return DIB->createPointerType(nullptr, 64);
     case Type::TK_AnsiString:
       return DIB->createPointerType(
@@ -2985,7 +2987,7 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
         Functions[R] = llvm::Function::Create(
             routineFnType(R), llvm::Function::ExternalLinkage, ExportNames[R], M);
         declareCThunk(R);
-        if (R->isAsync())
+        if (R->isAsync() || R->isIterator())
           declareAsync(R, ExportNames[R], /*External=*/true);
         continue;
       }
@@ -3081,7 +3083,7 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
         Functions[R] = llvm::Function::Create(routineFnType(R),
                                               llvm::Function::ExternalLinkage,
                                               ExportNames[R], this->M);
-        if (R->isAsync())
+        if (R->isAsync() || R->isIterator())
           declareAsync(R, ExportNames[R], /*External=*/true);
       }
   }
@@ -3108,6 +3110,8 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
            Name == "__pas_frame_release" || Name == "__pas_closure_assign" ||
            Name == "__pas_task_await" || Name == "__pas_scope_leave" ||
            Name == "__pas_task_assign" || Name == "__pas_task_clear" ||
+           Name == "__pas_gen_next" || Name == "__pas_gen_yield" ||
+           Name == "__pas_gen_assign" || Name == "__pas_gen_clear" ||
            Name == "__pas_closure_clear" ||
            Name == "__pas_dyn_clear" || Name == "__pas_dyn_assign" ||
            Name == "__pas_dyn_setlength" ||
@@ -3249,7 +3253,7 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
       F->addFnAttr(llvm::Attribute::InlineHint);
     Functions[R] = F;
     declareCThunk(R);
-    if (R->isAsync())
+    if (R->isAsync() || R->isIterator())
       declareAsync(R, Export == ExportNames.end() ? Name : Export->second,
                    Export != ExportNames.end());
     RoutinesToEmit.push_back(R);
@@ -3354,13 +3358,13 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
                                         "args." + Name.substr(4));
     A.Entry = llvm::Function::Create(
         llvm::FunctionType::get(B.getVoidTy(), {B.getPtrTy()}, false), Linkage,
-        Name + ".task", M);
-    A.Entry->getArg(0)->setName("task");
+        Name + (R->isIterator() ? ".gen" : ".task"), M);
+    A.Entry->getArg(0)->setName(R->isIterator() ? "gen" : "task");
     A.Fini = nullptr;
     if (Counted) {
       A.Fini = llvm::Function::Create(
           llvm::FunctionType::get(B.getVoidTy(), {B.getPtrTy()}, false), Linkage,
-          Name + ".taskfini", M);
+          Name + (R->isIterator() ? ".genfini" : ".taskfini"), M);
       A.Fini->getArg(0)->setName("args");
     }
     Asyncs[R] = A;
@@ -3383,8 +3387,9 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
     B.SetCurrentDebugLocation(llvm::DebugLoc());
     B.SetInsertPoint(llvm::BasicBlock::Create(M.getContext(), "entry", A.Entry));
     llvm::Value *Task = A.Entry->getArg(0);
-    llvm::Value *Args = B.CreateCall(classRuntime("__pas_task_args", Ptr, {Ptr}),
-                                     {Task}, "args");
+    llvm::Value *Args = B.CreateCall(
+        classRuntime(R->isIterator() ? "__pas_gen_args" : "__pas_task_args", Ptr, {Ptr}),
+        {Task}, "args");
     llvm::SmallVector<llvm::Value *, 8> Values;
     Values.push_back(B.CreateLoad(Ptr, B.CreateStructGEP(A.ArgsTy, Args, 0), "link"));
     if (R->hasSelf())
@@ -3471,6 +3476,48 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
     return holdResult(Task, R->getAsyncType());
   }
 
+  /// A call of iterator routine R (link, Self: Self's value or null): its
+  /// iterator, made with copies of the arguments; its body runs when its
+  /// values are asked for.
+  llvm::Value *emitIteratorCall(RoutineDecl *R, llvm::Value *Link, llvm::Value *Self,
+                                llvm::ArrayRef<Expr *> Args) {
+    AsyncParts &A = Asyncs[R];
+    llvm::PointerType *Ptr = B.getPtrTy();
+    llvm::Constant *Fini = A.Fini ? static_cast<llvm::Constant *>(A.Fini)
+                                  : llvm::ConstantPointerNull::get(Ptr);
+    llvm::Constant *Info = typeInfoOf(R->getIteratorType()->getElementType());
+    llvm::Value *Gen = B.CreateCall(
+        classRuntime("__pas_gen_new", Ptr, {Ptr, B.getInt64Ty(), Ptr, Ptr}),
+        {Info, B.getInt64(DL.getTypeAllocSize(A.ArgsTy)), A.Entry, Fini}, "iter");
+    llvm::Value *ArgsAddr =
+        B.CreateCall(classRuntime("__pas_gen_args", Ptr, {Ptr}), {Gen}, "args");
+    B.CreateStore(Link ? Link : llvm::ConstantPointerNull::get(Ptr),
+                  B.CreateStructGEP(A.ArgsTy, ArgsAddr, 0));
+    if (R->hasSelf())
+      B.CreateStore(Self, B.CreateStructGEP(A.ArgsTy, ArgsAddr, 1));
+    unsigned Slot = firstParamSlot(R);
+    auto Params = R->getParams();
+    for (size_t I = 0; I < Params.size(); ++I) {
+      Expr *Arg = I < Args.size() ? Args[I] : Params[I]->getDefault();
+      storeExpr(B.CreateStructGEP(A.ArgsTy, ArgsAddr, Slot++), Params[I]->getType(),
+                Arg);
+    }
+    return holdResult(Gen, R->getIteratorType());
+  }
+
+  /// IteratorNext(it): runs it to its next value; an i1.
+  llvm::Value *emitIteratorNext(llvm::Value *It) {
+    llvm::Value *R = B.CreateCall(
+        classRuntime("__pas_gen_next", B.getInt32Ty(), {B.getPtrTy()}), {It}, "more");
+    return B.CreateICmpNE(R, B.getInt32(0), "more");
+  }
+
+  /// The address of iterator It's current value.
+  llvm::Value *iteratorValueAddr(llvm::Value *It) {
+    return B.CreateCall(classRuntime("__pas_gen_value", B.getPtrTy(), {B.getPtrTy()}),
+                        {It}, "value");
+  }
+
   /// await / Wait: waits for task T (of type TT); its result (an address
   /// for a structured type), or null without one.
   llvm::Value *emitAwait(llvm::Value *T, TaskType *TT) {
@@ -3521,6 +3568,62 @@ public:
                                   {B.CreateLoad(Ptr, Slot, "scope"),
                                    B.CreateZExt(Raised, B.getInt32Ty())});
                    });
+  }
+
+  /// yield e / yield break / yield from it.
+  void visitYieldStmt(YieldStmt *S) {
+    llvm::PointerType *Ptr = B.getPtrTy();
+    IteratorType *IT = CurRoutine->getIteratorType();
+    Type *ET = IT->getElementType();
+    // (each value is assigned into the slot: what it held is released)
+    auto YieldFrom = [&](llvm::Value *Src, Type *SrcET) {
+      llvm::Value *Slot =
+          B.CreateCall(classRuntime("__pas_gen_slot", Ptr, {}), {}, "slot");
+      if (ET->isStructured()) // (the same type: Sema)
+        copyValue(Slot, Src, ET);
+      else
+        storeValue(Slot,
+                   convertForAssign(loadScalar(Src, SrcET), SrcET, ET,
+                                    S->getBeginLoc()),
+                   ET);
+      B.CreateCall(classRuntime("__pas_gen_yield", B.getVoidTy(), {}), {});
+    };
+    switch (S->getYieldKind()) {
+    case YieldStmt::Break:
+      emitJump(ExitBlock, 0);
+      B.SetInsertPoint(newBlock("after.jump")); // unreachable code follows
+      return;
+    case YieldStmt::Value: {
+      llvm::Value *Slot =
+          B.CreateCall(classRuntime("__pas_gen_slot", Ptr, {}), {}, "slot");
+      storeExpr(Slot, ET, S->getValue());
+      B.CreateCall(classRuntime("__pas_gen_yield", B.getVoidTy(), {}), {});
+      return;
+    }
+    case YieldStmt::From: {
+      Expr *E = S->getValue();
+      Type *SrcET = llvm::cast<IteratorType>(E->getType())->getElementType();
+      llvm::Value *Held = createTemp(Ptr, "from");
+      B.CreateStore(llvm::ConstantPointerNull::get(Ptr), Held);
+      storeValue(Held, visitExpr(E), E->getType()); // (counted)
+      emitTryFinally(
+          [&] {
+            auto *CondBB = newBlock("from.cond");
+            auto *BodyBB = newBlock("from.body");
+            auto *EndBB = newBlock("from.end");
+            B.CreateBr(CondBB);
+            B.SetInsertPoint(CondBB);
+            llvm::Value *I = B.CreateLoad(Ptr, Held, "from");
+            B.CreateCondBr(emitIteratorNext(I), BodyBB, EndBB);
+            B.SetInsertPoint(BodyBB);
+            YieldFrom(iteratorValueAddr(B.CreateLoad(Ptr, Held, "from")), SrcET);
+            B.CreateBr(CondBB);
+            B.SetInsertPoint(EndBB);
+          },
+          [&](llvm::Value *) { finalizeValue(Held, E->getType()); });
+      return;
+    }
+    }
   }
 
   void visitDetachedStmt(DetachedStmt *S) {
@@ -3578,7 +3681,7 @@ public:
   }
 
   void emitRoutineBody(RoutineDecl *R) {
-    if (R->isAsync()) // (its task's parts, after it)
+    if (R->isAsync() || R->isIterator()) // (its task's parts, after it)
       AsyncsToEmit.push_back(R);
     // A frame on the heap: the function that finalizes it, first.
     llvm::Function *FrameFini =
@@ -3968,6 +4071,8 @@ public:
   llvm::Value *emitCall(RoutineDecl *R, llvm::ArrayRef<Expr *> Args) {
     if (R->isAsync())
       return emitAsyncCall(R, staticLinkFor(R), nullptr, Args);
+    if (R->isIterator())
+      return emitIteratorCall(R, staticLinkFor(R), nullptr, Args);
     if (R->isExternal())
       return emitCallTo(ExternalFns[R], nullptr, R->getParams(), Args, nullptr,
                         nullptr, /*ToC=*/true);
@@ -4117,8 +4222,10 @@ public:
                    {Addr});
       return;
     }
-    if (T->isTask() || T->isToken()) {
-      B.CreateCall(classRuntime(T->isTask() ? "__pas_task_clear" : "__pas_token_clear",
+    if (T->isTask() || T->isToken() || T->isIterator()) {
+      B.CreateCall(classRuntime(T->isTask()       ? "__pas_task_clear"
+                                : T->isIterator() ? "__pas_gen_clear"
+                                                  : "__pas_token_clear",
                                 B.getVoidTy(), {B.getPtrTy()}),
                    {Addr});
       return;
@@ -4167,9 +4274,14 @@ public:
       B.CreateCall(frameRuntime("__pas_frame_addref"), {Frame});
       return;
     }
-    if (T->isTask() || T->isToken()) {
-      llvm::Value *H = B.CreateLoad(B.getPtrTy(), Addr, T->isTask() ? "task" : "token");
-      B.CreateCall(classRuntime(T->isTask() ? "__pas_task_addref" : "__pas_token_addref",
+    if (T->isTask() || T->isToken() || T->isIterator()) {
+      llvm::Value *H = B.CreateLoad(B.getPtrTy(), Addr,
+                                    T->isTask()       ? "task"
+                                    : T->isIterator() ? "iter"
+                                                      : "token");
+      B.CreateCall(classRuntime(T->isTask()       ? "__pas_task_addref"
+                                : T->isIterator() ? "__pas_gen_addref"
+                                                  : "__pas_token_addref",
                                 B.getVoidTy(), {B.getPtrTy()}),
                    {H});
       return;
@@ -4215,8 +4327,10 @@ public:
                                 {B.getPtrTy(), B.getPtrTy(), B.getPtrTy()}),
                    {Addr, B.CreateExtractValue(V, 0, "fn"),
                     B.CreateExtractValue(V, 1, "frame")});
-    else if (T->isTask() || T->isToken())
-      B.CreateCall(classRuntime(T->isTask() ? "__pas_task_assign" : "__pas_token_assign",
+    else if (T->isTask() || T->isToken() || T->isIterator())
+      B.CreateCall(classRuntime(T->isTask()       ? "__pas_task_assign"
+                                : T->isIterator() ? "__pas_gen_assign"
+                                                  : "__pas_token_assign",
                                 B.getVoidTy(), {B.getPtrTy(), B.getPtrTy()}),
                    {Addr, V});
     else if (isManaged(T))
@@ -4245,7 +4359,7 @@ public:
   llvm::Value *heldTemp(llvm::Value *V, Type *T = nullptr) {
     // (released by finalizeValue: also a closure's)
     bool Dyn = T && (T->isDynArray() || T->isClosureType() || T->isTask() ||
-                     T->isToken());
+                     T->isToken() || T->isIterator());
     llvm::IRBuilder<> Entry(&CurFn->getEntryBlock(),
                             CurFn->getEntryBlock().begin());
     llvm::Value *Slot = Entry.CreateAlloca(
@@ -4573,6 +4687,11 @@ public:
                            R->isClassMethod() ? receiverClass(Obj, SelfIsClass, L)
                                               : Obj,
                            Args);
+    if (R->isIterator())
+      return emitIteratorCall(R, nullptr,
+                              R->isClassMethod() ? receiverClass(Obj, SelfIsClass, L)
+                                                 : Obj,
+                              Args);
     if (R->getClass() && R->getClass()->hasSelfByReference())
       return emitRecordMethodCall(R, Obj, Args);
     if (R->isConstructor() && SelfIsClass && !Inherited)
@@ -5408,6 +5527,13 @@ public:
     case BuiltinKind::WhenAll:
     case BuiltinKind::WhenAny:
       return emitWhen(E, BD->getBuiltinKind() == BuiltinKind::WhenAll);
+    case BuiltinKind::IteratorNext:
+      return emitIteratorNext(visitExpr(E->getArgs()[0]));
+    case BuiltinKind::IteratorValue: { // (read as a variable's value)
+      Type *ET = E->getType();
+      llvm::Value *Addr = iteratorValueAddr(visitExpr(E->getArgs()[0]));
+      return ET->isStructured() ? Addr : loadScalar(Addr, ET, "value");
+    }
     case BuiltinKind::AddChecked:
     case BuiltinKind::SubChecked:
     case BuiltinKind::MulChecked: { // the tuple (a op b, no overflow)
@@ -6616,6 +6742,27 @@ public:
     case ForInStmt::Enumerator:
       emitForInEnumerator(S);
       return;
+    case ForInStmt::Iterator: {
+      // Held during the loop (and released after it, which stops it if it
+      // has more values: its finally parts run).
+      llvm::PointerType *Ptr = B.getPtrTy();
+      llvm::Value *It = visitExpr(C);
+      B.CreateCall(classRuntime("__pas_gen_addref", B.getVoidTy(), {Ptr}), {It});
+      holdResult(It, C->getType());
+      auto *CondBB = newBlock("forin.cond");
+      auto *BodyBB = newBlock("forin.body");
+      auto *EndBB = newBlock("forin.end");
+      B.CreateBr(CondBB);
+      B.SetInsertPoint(CondBB);
+      B.CreateCondBr(emitIteratorNext(It), BodyBB, EndBB);
+      B.SetInsertPoint(BodyBB);
+      Loops.push_back({CondBB, EndBB, Cleanups.size()});
+      Iteration(iteratorValueAddr(It));
+      Loops.pop_back();
+      B.CreateBr(CondBB);
+      B.SetInsertPoint(EndBB);
+      return;
+    }
     case ForInStmt::Array: {
       auto *AT = llvm::cast<ArrayType>(C->getType());
       llvm::Value *Base = emitAddress(C);

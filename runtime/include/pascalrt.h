@@ -378,6 +378,25 @@ void __pas_owned_done(PasOwnedExc *exc, int32_t raised);
 #endif
 
 
+/*===- Iterators (async.c) ---------------------------------------------------===*/
+/* An iterator routine's call is a generator: made by __pas_gen_new (values
+ * of type info; args_size bytes of arguments, which args_fini finalizes;
+ * entry runs its body), counted, run by __pas_gen_next (1: a value in
+ * __pas_gen_value; 0: the end). In its body, yield stores into
+ * __pas_gen_slot() and calls __pas_gen_yield(). */
+typedef struct PasGen PasGen;
+PasGen *__pas_gen_new(const PasDynInfo *info, int64_t args_size,
+                      void (*entry)(PasGen *), void (*args_fini)(void *));
+void *__pas_gen_args(PasGen *g);
+void *__pas_gen_value(PasGen *g);
+int32_t __pas_gen_next(PasGen *g);
+void *__pas_gen_slot(void);
+void __pas_gen_yield(void);
+void __pas_gen_addref(PasGen *g);
+void __pas_gen_release(PasGen *g);
+void __pas_gen_assign(PasGen **dst, PasGen *src);
+void __pas_gen_clear(PasGen **p);
+
 /*===- Tasks (async.c) ------------------------------------------------------===*/
 /* An async routine's call is a task: made by __pas_task_new (result: of
  * type info, or none; args_size bytes of arguments, which args_fini

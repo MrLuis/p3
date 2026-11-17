@@ -75,7 +75,9 @@ type
     bkMulChecked,
     bkWait,
     bkWhenAll,
-    bkWhenAny);
+    bkWhenAny,
+    bkIteratorNext,
+    bkIteratorValue);
 
 const
   builtinNames: array[TBuiltinKind] of string[15] = (
@@ -152,7 +154,9 @@ const
     'mulchecked',
     'wait',
     'whenall',
-    'whenany');
+    'whenany',
+    'iteratornext',
+    'iteratorvalue');
   builtinIsProcedure: array[TBuiltinKind] of boolean = (
     true,
     true,
@@ -207,6 +211,8 @@ const
     false,
     true,
     true,
+    false,
+    false,
     false,
     false,
     false,

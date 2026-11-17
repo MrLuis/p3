@@ -420,7 +420,7 @@ class ASTPrinter : public StmtVisitor<ASTPrinter>,
       return;
     case TypeSpec::TS_Async: {
       auto *AS = llvm::cast<AsyncTypeSpec>(TS);
-      line("AsyncTypeSpec");
+      line(AS->isIterator() ? "IteratorTypeSpec" : "AsyncTypeSpec");
       loc(TS->getBeginLoc());
       if (AS->getInner()) {
         IndentScope I(Indent);
@@ -907,6 +907,16 @@ public:
       visitExpr(S->getToken());
     for (Stmt *X : S->getBody())
       visitStmt(X);
+  }
+
+  void visitYieldStmt(YieldStmt *S) {
+    line(S->getYieldKind() == YieldStmt::Break  ? "YieldStmt break"
+         : S->getYieldKind() == YieldStmt::From ? "YieldStmt from"
+                                                : "YieldStmt");
+    loc(S->getBeginLoc());
+    IndentScope I(Indent);
+    if (S->getValue())
+      visitExpr(S->getValue());
   }
 
   void visitDetachedStmt(DetachedStmt *S) {

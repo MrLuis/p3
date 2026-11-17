@@ -12,7 +12,7 @@
 ; CHECK: errors.pas:31:5: error: assigning to 'real' from incompatible type 'string of length 2'
 ; CHECK: errors.pas:32:11: error: 'for' loop control variable must be of an ordinal type, not 'real'
 ; CHECK: errors.pas:34:3: error: use of undeclared identifier 'j'; did you mean 'e'?
-; CHECK: errors.pas:35:16: error: 'for ... in' cannot enumerate a value of type 'integer' (an array, string, set, ordinal type, or an object or record with a GetEnumerator method)
+; CHECK: errors.pas:35:16: error: 'for ... in' cannot enumerate a value of type 'integer' (an array, string, set, ordinal type, iterator, or an object or record with a GetEnumerator method)
 ; CHECK: errors.pas:36:11: error: cannot tell the type of 'm' from an empty set; give the variable a type
 ; CHECK: errors.pas:37:22: error: assigning to 'boolean' from incompatible type 'integer'
 ; CHECK: errors.pas:43:7: error: owned variable 'q' must be of a class type, not 'integer'

@@ -115,5 +115,10 @@ BUILTIN_FUNC(Wait,    "wait")
 BUILTIN_FUNC(WhenAll, "whenall")
 BUILTIN_FUNC(WhenAny, "whenany")
 
+// Iterators (objfpc): IteratorNext(it) runs it to its next value (False at
+// the end); IteratorValue(it) is that value.
+BUILTIN_FUNC(IteratorNext,  "iteratornext")
+BUILTIN_FUNC(IteratorValue, "iteratorvalue")
+
 #undef BUILTIN_FUNC
 #undef BUILTIN_PROC

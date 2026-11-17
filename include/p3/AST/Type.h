@@ -64,6 +64,7 @@ public:
     TK_WideChar, ///< widechar (Turbo/FPC): a 16-bit character code
     TK_Task,     ///< async T (objfpc): a counted reference to a task
     TK_Token,    ///< TCancelToken (objfpc): a counted cancellation token
+    TK_Iterator, ///< iterator T (objfpc): a counted reference to a generator
   };
 
 private:
@@ -118,9 +119,10 @@ public:
   bool isValidResultType() const {
     return isSimple() || isPointer() || isClass() || isClassRef() ||
            isInterface() || isAnsiString() || isDynArray() || isClosureType() ||
-           Kind == TK_Task || Kind == TK_Token;
+           Kind == TK_Task || Kind == TK_Token || Kind == TK_Iterator;
   }
   bool isTask() const { return Kind == TK_Task; }
+  bool isIterator() const { return Kind == TK_Iterator; }
   bool isToken() const { return Kind == TK_Token; }
   /// A `reference to` procedural type (objfpc).
   bool isClosureType() const;
@@ -377,6 +379,19 @@ public:
   explicit TaskType(Type *Result) : Type(TK_Task), Result(Result) {}
   Type *getResult() const { return Result; }
   static bool classof(const Type *T) { return T->getKind() == TK_Task; }
+};
+
+/// iterator T (objfpc): the call of an iterator routine, which produces T
+/// values one at a time, its body running until the next yield when a
+/// value is asked for. A value is a counted reference to the runtime's
+/// generator (a pointer, nil for none).
+class IteratorType final : public Type {
+  Type *Element;
+
+public:
+  explicit IteratorType(Type *Element) : Type(TK_Iterator), Element(Element) {}
+  Type *getElementType() const { return Element; }
+  static bool classof(const Type *T) { return T->getKind() == TK_Iterator; }
 };
 
 /// TCancelToken (objfpc): a counted reference to a cancellation token (a

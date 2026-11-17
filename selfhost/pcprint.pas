@@ -378,7 +378,10 @@ begin
       end;
     tsAsync:
       begin
-        line('AsyncTypeSpec');
+        if ts^.asyncIterator then
+          line('IteratorTypeSpec')
+        else
+          line('AsyncTypeSpec');
         loc(ts^.b);
         indent := indent + 2;
         printTypeSpec(ts^.asyncInner);
@@ -1314,6 +1317,20 @@ begin
           visitExpr(s^.scopeToken);
         for i := 0 to s^.scopeBody.count - 1 do
           visitStmt(PNode(listGet(s^.scopeBody, i)));
+        indent := indent - 2;
+      end;
+    nkYield:
+      begin
+        if s^.yieldValue = nil then
+          line('YieldStmt break')
+        else if s^.yieldFrom then
+          line('YieldStmt from')
+        else
+          line('YieldStmt');
+        loc(s^.b);
+        indent := indent + 2;
+        if s^.yieldValue <> nil then
+          visitExpr(s^.yieldValue);
         indent := indent - 2;
       end;
     nkDetached:

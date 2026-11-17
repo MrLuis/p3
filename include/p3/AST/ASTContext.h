@@ -51,6 +51,7 @@ class ASTContext {
   llvm::DenseMap<Type *, OpenArrayType *> OpenArrayTypes;
   llvm::DenseMap<Type *, DynArrayType *> DynArrayTypes;
   llvm::DenseMap<Type *, TaskType *> TaskTypes;
+  llvm::DenseMap<Type *, IteratorType *> IteratorTypes;
   TokenType *TokenTy = nullptr;
 
 public:
@@ -111,6 +112,13 @@ public:
     TaskType *&T = TaskTypes[Result];
     if (!T)
       T = create<TaskType>(Result);
+    return T;
+  }
+  /// iterator T.
+  Type *getIteratorType(Type *Element) {
+    IteratorType *&T = IteratorTypes[Element];
+    if (!T)
+      T = create<IteratorType>(Element);
     return T;
   }
   Type *getTokenType() {

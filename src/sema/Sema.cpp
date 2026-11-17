@@ -896,7 +896,8 @@ class Checker : public StmtVisitor<Checker>,
            K == BuiltinKind::ExceptAddr || K == BuiltinKind::AddChecked ||
            K == BuiltinKind::SubChecked || K == BuiltinKind::MulChecked ||
            K == BuiltinKind::Wait || K == BuiltinKind::WhenAll ||
-           K == BuiltinKind::WhenAny;
+           K == BuiltinKind::WhenAny || K == BuiltinKind::IteratorNext ||
+           K == BuiltinKind::IteratorValue;
   }
 
   //===--------------------------------------------------------------------===//
@@ -1234,7 +1235,8 @@ class Checker : public StmtVisitor<Checker>,
                   TR->getClass()));
     if (Target->isPointer() && (Value->isClass() || Value->isClassRef()))
       return llvm::cast<PointerType>(Target)->isUntyped();
-    if (Target->isDynArray() || Target->isTask() || Target->isToken())
+    if (Target->isDynArray() || Target->isTask() || Target->isToken() ||
+        Target->isIterator())
       return Value->isNil();
     if (Target->isShortString() && Value->isStringish())
       return true; // truncated to the target's length at runtime
@@ -1775,7 +1777,7 @@ class Checker : public StmtVisitor<Checker>,
     if (!DeclName.empty() && !T->isError() && !llvm::isa<BuiltinType>(T) &&
         !llvm::isa<SpecializeTypeSpec>(TS) && // (so is a specialization)
         !(Rec && Rec->isTuple()) && // (a tuple type is shared by its uses)
-        !T->isTask())               // (and so is a task type)
+        !T->isTask() && !T->isIterator()) // (and so are tasks and iterators)
       T->setDeclName(DeclName);
     TS->setResolved(T);
     return T;
@@ -2041,6 +2043,15 @@ class Checker : public StmtVisitor<Checker>,
         Inner = resolveType(AS->getInner());
         if (Inner->isError())
           return errorType();
+      }
+      if (AS->isIterator()) {
+        if (Inner->isUntyped() || containsFile(Inner)) {
+          Diags.error(AS->getInner()->getBeginLoc(),
+                      "the values of an iterator cannot be " + quoted(Inner),
+                      {AS->getInner()->getRange()});
+          return errorType();
+        }
+        return Ctx.getIteratorType(Inner);
       }
       return Ctx.getTaskType(Inner);
     }
@@ -2438,6 +2449,10 @@ class Checker : public StmtVisitor<Checker>,
     if (auto *DS = llvm::dyn_cast<DynArrayTypeSpec>(TS)) {
       auto *DT = llvm::dyn_cast<DynArrayType>(T);
       return DT && matchTypePattern(G, DS->getElement(), DT->getElementType(), Bound);
+    }
+    if (auto *AS = llvm::dyn_cast<AsyncTypeSpec>(TS); AS && AS->isIterator()) {
+      auto *IT = llvm::dyn_cast<IteratorType>(T);
+      return IT && matchTypePattern(G, AS->getInner(), IT->getElementType(), Bound);
     }
     if (auto *SS = llvm::dyn_cast<SpecializeTypeSpec>(TS)) {
       auto *GS = static_cast<Scope *>(G->getGenericScope());
@@ -4169,7 +4184,7 @@ class Checker : public StmtVisitor<Checker>,
       return;
     }
     if (M->getMethodKind() != R->getMethodKind() ||
-        (M->isFunction() || M->isAsync()) != R->isFunction() ||
+        (M->isFunction() || M->isAsync() || M->isIterator()) != R->isFunction() ||
         M->isClassMethod() != R->isClassMethod()) {
       Diags.error(Id.Loc,
                   "'" + QName + "' was declared as a " +
@@ -4193,7 +4208,9 @@ class Checker : public StmtVisitor<Checker>,
         P->setType(resolveTypeIn(C, P->getTypeSpec()));
       Type *RT = R->getResultTypeSpec() ? resolveTypeIn(C, R->getResultTypeSpec())
                                         : nullptr;
-      Type *Declared = M->isAsync() ? M->getAsyncType() : M->getResultType();
+      Type *Declared = M->isAsync()      ? M->getAsyncType()
+                       : M->isIterator() ? M->getIteratorType()
+                                         : M->getResultType();
       if (!sameSignature(M, R) || (RT && RT != Declared) ||
           !sameDefaults(M, R)) {
         Diags.error(Id.Loc,
@@ -4993,6 +5010,17 @@ class Checker : public StmtVisitor<Checker>,
         ResultTy = errorType();
       }
     }
+    // iterator T: an iterator routine, whose body is a procedure's that
+    // yields T values.
+    if (auto *IT = llvm::dyn_cast<IteratorType>(ResultTy)) {
+      R->setIterator(IT);
+      R->setFunction(false);
+      if (R->isExternal())
+        Diags.error(R->getName().Loc,
+                    "an external routine cannot be an iterator",
+                    {R->getName().getRange()});
+      return;
+    }
     // async T / async: an async routine, whose body is a function's
     // returning T or a procedure's.
     if (auto *TT = llvm::dyn_cast<TaskType>(ResultTy)) {
@@ -5027,41 +5055,49 @@ class Checker : public StmtVisitor<Checker>,
   /// its arguments are copied (no var, out or constref parameters, no open
   /// or untyped ones), and it is not nested (but a spawn block, which its
   /// scope waits for) nor a virtual method, constructor or destructor.
+  /// (The same for an iterator routine, whose iterator may outlive its
+  /// caller too.)
   void checkAsyncRoutine(RoutineDecl *R) {
     const Identifier &Id = R->getName();
+    bool It = R->isIterator();
+    std::string Kind = It ? "iterator" : "async";
+    const char *Its = It ? "its iterator" : "its task";
     if (R->getParent() && !R->isSpawnBlock() && !R->isLambda())
       Diags.error(Id.Loc,
-                  "async routine '" + Id.Spelling +
+                  Kind + " routine '" + Id.Spelling +
                       "' must be declared at program or unit level, or be a "
-                      "method (its task may outlive the routine around it)",
+                      "method (" + Its + " may outlive the routine around it)",
                   {Id.getRange()});
     if (R->isMethod()) {
-      const char *Why = nullptr;
+      std::string Why;
       if (R->isConstructor() || R->isDestructor())
-        Why = "a constructor or a destructor cannot be async";
+        Why = It ? "a constructor or a destructor cannot be an iterator"
+                 : "a constructor or a destructor cannot be async";
       else if (R->isVirtual() || R->isAbstract() || R->isOverride() ||
                R->isDispatched())
-        Why = "an async method cannot be virtual (not supported yet)";
+        Why = "an " + Kind + " method cannot be virtual (not supported yet)";
       else if (R->getClass() && R->getClass()->hasSelfByReference())
-        Why = "a record's or helper's method cannot be async (its Self is "
-              "passed by reference)";
-      if (Why)
+        Why = It ? "a record's or helper's method cannot be an iterator (its "
+                   "Self is passed by reference)"
+                 : "a record's or helper's method cannot be async (its Self is "
+                   "passed by reference)";
+      if (!Why.empty())
         Diags.error(Id.Loc, Why, {Id.getRange()});
     }
     for (VarDecl *P : R->getParams()) {
       Type *T = P->getType();
-      const char *Kind = P->isOutParam()        ? "an 'out'"
+      const char *PKind = P->isOutParam()        ? "an 'out'"
                          : P->isVarParam()      ? "a 'var'"
                          : P->isConstRefParam() ? "a 'constref'"
                          : T && (T->isOpenArray() || T->isArrayOfConst())
                              ? "an open array"
                          : T && T->isUntyped() ? "an untyped"
                                                : nullptr;
-      if (Kind)
+      if (PKind)
         Diags.error(P->getLocation(),
-                    "parameter '" + P->getName().Spelling + "' of async routine '" +
-                        Id.Spelling + "' cannot be " + Kind +
-                        " parameter: its task may outlive the caller's "
+                    "parameter '" + P->getName().Spelling + "' of " + Kind +
+                        " routine '" + Id.Spelling + "' cannot be " + PKind +
+                        " parameter: " + Its + " may outlive the caller's "
                         "variable; pass a value",
                     {P->getName().getRange()});
     }
@@ -5319,6 +5355,8 @@ class Checker : public StmtVisitor<Checker>,
       }
       if (auto *DS = llvm::dyn_cast<DynArrayTypeSpec>(X))
         return Walk(DS->getElement());
+      if (auto *AS = llvm::dyn_cast<AsyncTypeSpec>(X); AS && AS->isIterator())
+        return Walk(AS->getInner());
       if (auto *SS = llvm::dyn_cast<SpecializeTypeSpec>(X)) {
         for (TypeSpec *A : SS->getArgs())
           if (!Walk(A))
@@ -5615,6 +5653,8 @@ class Checker : public StmtVisitor<Checker>,
       });
     if (auto *DS = llvm::dyn_cast_or_null<DynArrayTypeSpec>(TS))
       return mentionsTypeParam(Def, DS->getElement());
+    if (auto *AS = llvm::dyn_cast_or_null<AsyncTypeSpec>(TS); AS && AS->isIterator())
+      return mentionsTypeParam(Def, AS->getInner());
     return false;
   }
 
@@ -5861,6 +5901,17 @@ class Checker : public StmtVisitor<Checker>,
           Give(K, OA->getElementType(), A);
         continue;
       }
+      // iterator T: T from the iterator's values
+      if (auto *AS = llvm::dyn_cast_or_null<AsyncTypeSpec>(TS);
+          AS && AS->isIterator())
+        if (int K = typeParamNamed(Def, AS->getInner()); K >= 0) {
+          Type *AT = check(A);
+          if (AT->isError())
+            OK = false;
+          else if (auto *IT = llvm::dyn_cast<IteratorType>(AT))
+            Give(K, IT->getElementType(), A);
+          continue;
+        }
       // specialize TGen<..., T, ...>: T from the specialization the
       // argument is (a lambda's are the lambda pass's, below)
       if (auto *SS = llvm::dyn_cast_or_null<SpecializeTypeSpec>(TS);
@@ -6000,7 +6051,8 @@ class Checker : public StmtVisitor<Checker>,
       }
     }
     if (Fwd && Fwd->isForward() && !Fwd->getBody() && R->getBody()) {
-      if ((Fwd->isFunction() || Fwd->isAsync()) != R->isFunction()) {
+      if ((Fwd->isFunction() || Fwd->isAsync() || Fwd->isIterator()) !=
+          R->isFunction()) {
         Diags.error(Id.Loc,
                     "'" + Id.Spelling + "' was declared forward as a " +
                         Fwd->getKindName(),
@@ -6014,7 +6066,9 @@ class Checker : public StmtVisitor<Checker>,
           P->setType(resolveType(P->getTypeSpec()));
         Type *RT = R->getResultTypeSpec() ? resolveType(R->getResultTypeSpec())
                                           : nullptr;
-        Type *Declared = Fwd->isAsync() ? Fwd->getAsyncType() : Fwd->getResultType();
+        Type *Declared = Fwd->isAsync()      ? Fwd->getAsyncType()
+                         : Fwd->isIterator() ? Fwd->getIteratorType()
+                                             : Fwd->getResultType();
         if (!sameSignature(Fwd, R) || (RT && RT != Declared) ||
             !sameDefaults(Fwd, R)) {
           Diags.error(Id.Loc,
@@ -6867,7 +6921,7 @@ class Checker : public StmtVisitor<Checker>,
       DeferredBodies->push_back(R);
       return;
     }
-    if (R->isAsync())
+    if (R->isAsync() || R->isIterator())
       checkAsyncRoutine(R);
     // The method of a nested class or record also sees the constants and
     // types of the classes around it.
@@ -7434,7 +7488,7 @@ class Checker : public StmtVisitor<Checker>,
   void checkCallArgs(RoutineDecl *R, const Identifier &Callee,
                      llvm::ArrayRef<Expr *> Args, SourceRange CallRange) {
     checkCallArgs(R->getParams(), R, Callee, Args, CallRange);
-    if (R->isAsync()) // (a task's arguments are copies, which it keeps)
+    if (R->isAsync() || R->isIterator()) // (copies, which it keeps)
       for (Expr *A : Args)
         checkIsolatedCopy(A, "passed to a task");
   }
@@ -8439,6 +8493,26 @@ class Checker : public StmtVisitor<Checker>,
       return Ctx.getTaskType(TT->getResult() ? Ctx.getDynArrayType(TT->getResult())
                                              : nullptr);
     }
+    case BuiltinKind::IteratorNext:
+    case BuiltinKind::IteratorValue: { // (it: an iterator)
+      if (!Arity(1))
+        return errorType();
+      Type *T = check(Args[0]);
+      if (T->isError())
+        return T;
+      auto *IT = llvm::dyn_cast<IteratorType>(T);
+      if (!IT) {
+        Diags.error(Args[0]->getBeginLoc(),
+                    "'" + Callee.Spelling + "' needs an iterator, not a value "
+                    "of type " + quoted(T),
+                    {Args[0]->getRange()});
+        return errorType();
+      }
+      markUsesManaged();
+      return BD->getBuiltinKind() == BuiltinKind::IteratorNext
+                 ? Ctx.getBooleanType()
+                 : IT->getElementType();
+    }
     case BuiltinKind::AddChecked:
     case BuiltinKind::SubChecked:
     case BuiltinKind::MulChecked: { // (a op b, ok) in the type of a op b
@@ -9219,6 +9293,12 @@ public:
       warnDanglingTask(Callee, S->getRange());
       return;
     }
+    if (auto *R = llvm::dyn_cast<RoutineDecl>(D); R && R->isIterator()) {
+      checkCallArgs(R, Callee, orderedArgs(S, R->getParams(), Callee),
+                    S->getRange());
+      warnUnusedIterator(Callee, S->getRange());
+      return;
+    }
     if (auto *R = llvm::dyn_cast<RoutineDecl>(D);
         R && (R->isProcedure() || !isISO())) // TP: discard a function result
       return checkCallArgs(R, Callee, orderedArgs(S, R->getParams(), Callee),
@@ -9325,6 +9405,9 @@ public:
       if (T && T->isTask() && isAsyncCall(Call))
         if (auto *F = llvm::dyn_cast<FieldExpr>(Call->getCallee()))
           warnDanglingTask(F->getField(), Call->getRange());
+      if (T && T->isIterator())
+        if (auto *F = llvm::dyn_cast<FieldExpr>(Call->getCallee()))
+          warnUnusedIterator(F->getField(), Call->getRange());
       return;
     }
     if (RoutineType *RT = checkIndirectCallee(Call))
@@ -9928,6 +10011,10 @@ public:
     } else if (auto *ST = llvm::dyn_cast<SetType>(CT)) {
       Kind = ForInStmt::Set;
       Elem = ST->getElementType(); // null for []: no elements
+    } else if (auto *IT = llvm::dyn_cast<IteratorType>(CT)) {
+      Kind = ForInStmt::Iterator; // its values, as it yields them
+      Elem = IT->getElementType();
+      markUsesManaged(); // the iterator is held during the loop
     } else if (CT->isClass() || CT->isInterface() || memberTableOf(CT) ||
                (!CT->isError() && !IsType && findEnumMember(CT, "getenumerator"))) {
       Kind = ForInStmt::Enumerator; // (also through a helper's GetEnumerator)
@@ -9935,8 +10022,8 @@ public:
     if (Kind == ForInStmt::Invalid && !CT->isError() && !IsType)
       Diags.error(CLoc,
                   "'for ... in' cannot enumerate a value of type " + quoted(CT) +
-                      " (an array, string, set, ordinal type, or an object or "
-                      "record with a GetEnumerator method)",
+                      " (an array, string, set, ordinal type, iterator, or an "
+                      "object or record with a GetEnumerator method)",
                   {C->getRange()});
 
     Scope InScope(Cur);
@@ -10233,6 +10320,8 @@ public:
         return C;
       if (R->isAsync() && acceptsArgCount(R->getParams(), 0))
         return R->getAsyncType(); // its task
+      if (R->isIterator() && acceptsArgCount(R->getParams(), 0))
+        return R->getIteratorType(); // its iterator
       if (R->isProcedure()) {
         Diags.error(Id.Loc,
                     "procedure '" + Id.Spelling + "' does not return a value",
@@ -10656,6 +10745,11 @@ public:
         checkCallArgs(R, Callee, orderedArgs(E, R->getParams(), Callee),
                       E->getRange());
         return R->getAsyncType();
+      }
+      if (R->isIterator()) { // its iterator
+        checkCallArgs(R, Callee, orderedArgs(E, R->getParams(), Callee),
+                      E->getRange());
+        return R->getIteratorType();
       }
       if (R->isFunction()) {
         checkCallArgs(R, Callee, orderedArgs(E, R->getParams(), Callee),
@@ -11796,6 +11890,14 @@ public:
     return R && R->isAsync();
   }
 
+  void warnUnusedIterator(const Identifier &Callee, SourceRange Range) {
+    Diags.warning(Callee.Loc,
+                  "the iterator of '" + Callee.Spelling +
+                      "' is never used: its body runs only when its values "
+                      "are asked for (for ... in " + Callee.Spelling + " do)",
+                  {Range});
+  }
+
   void warnDanglingTask(const Identifier &Callee, SourceRange Range) {
     Diags.warning(Callee.Loc,
                   "dangling task: '" + Callee.Spelling +
@@ -11907,6 +12009,62 @@ public:
     ++ScopeDepth;
     visitSequence(S, S->getBody());
     --ScopeDepth;
+  }
+
+  /// yield e / yield break / yield from it, in an iterator routine (not in
+  /// a lambda in one, nor in a finally part).
+  void visitYieldStmt(YieldStmt *S) {
+    DirectSequence = nullptr;
+    SourceLocation L = S->getBeginLoc();
+    RoutineDecl *R = CurRoutine;
+    Expr *V = S->getValue();
+    IteratorType *IT = R ? R->getIteratorType() : nullptr;
+    if (!IT) {
+      Diags.error(L,
+                  R && R->isLambda()
+                      ? "'yield' is not allowed in a lambda"
+                      : "'yield' is only allowed in an iterator routine (one "
+                        "whose result is 'iterator T')",
+                  {S->getRange()});
+      if (V)
+        check(V);
+      return;
+    }
+    if (FinallyLoopDepth >= 0)
+      Diags.error(L, "'yield' is not allowed in a 'finally' part",
+                  {S->getRange()});
+    if (S->getYieldKind() == YieldStmt::Break) {
+      ownedDead();
+      return;
+    }
+    Type *ET = IT->getElementType();
+    if (S->getYieldKind() == YieldStmt::From) {
+      Type *T = check(V);
+      if (T->isError() || ET->isError())
+        return;
+      auto *VT = llvm::dyn_cast<IteratorType>(T);
+      if (!VT || !isAssignable(ET, VT->getElementType()) ||
+          (ET->isStructured() && ET != VT->getElementType()))
+        Diags.error(V->getBeginLoc(),
+                    "'yield from' needs an iterator of " + quoted(ET) +
+                        " values, not a value of type " + quoted(T),
+                    {V->getRange()});
+      markUsesManaged(); // (held while its values are yielded)
+      return;
+    }
+    Type *T = llvm::isa<TupleExpr>(V) || llvm::isa<CallExpr>(V)
+                  ? checkValueFor(ET, V)
+                  : check(V);
+    if (VarDecl *OV = ownedVarOf(V))
+      diagOwnedEscape(OV, V, /*Returned=*/true);
+    checkLambdaEscape(V, /*Local=*/false);
+    if (!T->isError() && !ET->isError() && !isAssignable(ET, T) &&
+        !convertImplicitly(V, ET))
+      Diags.error(V->getBeginLoc(),
+                  "cannot yield a value of type " + quoted(T) +
+                      " from an iterator of " + quoted(ET) + " values",
+                  {V->getRange()});
+    markUsesManaged();
   }
 
   void visitDetachedStmt(DetachedStmt *S) {
@@ -12557,6 +12715,8 @@ public:
   static Type *methodResultType(RoutineDecl *R, FieldExpr *E) {
     if (R->isAsync())
       return R->getAsyncType(); // its task
+    if (R->isIterator())
+      return R->getIteratorType(); // its iterator
     if (R->isFunction())
       return R->getResultType();
     if (R->isConstructor()) {

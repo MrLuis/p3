@@ -1288,6 +1288,17 @@ begin
   isAsyncCall := (d <> nil) and (d^.kind = dkRoutine) and (d^.asyncType <> nil);
 end;
 
+procedure warnUnusedIterator(const callee: TIdent; rng: TRange);
+begin
+  ms('the iterator of ''');
+  maN(callee.spelling);
+  ma(''' is never used: its body runs only when its values are asked for ' +
+     '(for ... in ');
+  maN(callee.spelling);
+  ma(' do)');
+  diagReportBuf(sevWarning, callee.loc, msg, rng, noRange);
+end;
+
 procedure warnDanglingTask(const callee: TIdent; rng: TRange);
 begin
   ms('dangling task: ''');
@@ -1503,6 +1514,31 @@ begin
           res := taskType(dynArrayType(t^.taskResult))
         else
           res := taskType(nil);
+      end;
+    bkIteratorNext, bkIteratorValue: { (it: an iterator) }
+      begin
+        if not arity(1) then
+          exit;
+        t := check(argNode(e, 0));
+        if isError(t) then
+        begin
+          res := t;
+          exit;
+        end;
+        if t^.kind <> tyIterator then
+        begin
+          ms('');
+          maCallee(e^.callee);
+          ma(' needs an iterator, not a value of type ');
+          maT(t);
+          errR(argNode(e, 0)^.b, nodeRange(argNode(e, 0)));
+          exit;
+        end;
+        markUsesManaged;
+        if bk = bkIteratorNext then
+          res := tyBooleanT
+        else
+          res := t^.iterElement;
       end;
     bkAddChecked, bkSubChecked, bkMulChecked: { (a op b, ok) in the type of a op b }
       begin
@@ -1957,6 +1993,12 @@ begin
       exit;
     exit(matchTypePattern(g, ts^.dynSpec, t^.dynElement, bound));
   end;
+  if (ts^.kind = tsAsync) and ts^.asyncIterator then
+  begin
+    if t^.kind <> tyIterator then
+      exit;
+    exit(matchTypePattern(g, ts^.asyncInner, t^.iterElement, bound));
+  end;
   if ts^.kind = tsSpecialize then
   begin
     gs := PScope(g^.tgScope);
@@ -2395,6 +2437,8 @@ begin
   methodResultType := nil;
   if r^.asyncType <> nil then
     methodResultType := r^.asyncType { its task }
+  else if r^.iterType <> nil then
+    methodResultType := r^.iterType { its iterator }
   else if r^.isFunction then
     methodResultType := r^.resultType
   else if (r^.methodKind = mtConstructor) and namesType(e^.base) then
@@ -3147,6 +3191,13 @@ begin
     orderArgs(d^.params, s^.args, s^.callee);
     checkCallArgs(d^.params, d, s^.callee, s^.args, nodeRange(s));
     warnDanglingTask(s^.callee, nodeRange(s));
+    exit;
+  end;
+  if (d^.kind = dkRoutine) and (d^.iterType <> nil) then
+  begin
+    orderArgs(d^.params, s^.args, s^.callee);
+    checkCallArgs(d^.params, d, s^.callee, s^.args, nodeRange(s));
+    warnUnusedIterator(s^.callee, nodeRange(s));
     exit;
   end;
   if (d^.kind = dkRoutine) and (not d^.isFunction or not isISO) then
@@ -4519,6 +4570,12 @@ begin
     kind := fikSet;
     elem := ct^.setElement; { nil for []: no elements }
   end
+  else if ct^.kind = tyIterator then
+  begin
+    kind := fikIterator; { its values, as it yields them }
+    elem := ct^.iterElement;
+    markUsesManaged; { the iterator is held during the loop }
+  end
   else if (ct^.kind = tyClass) or (ct^.kind = tyInterface) or
           (memberTableOf(ct) <> nil) or
           (not isError(ct) and not isType and
@@ -4528,8 +4585,8 @@ begin
   begin
     ms('''for ... in'' cannot enumerate a value of type ');
     maT(ct);
-    ma(' (an array, string, set, ordinal type, or an object or record with ');
-    ma('a GetEnumerator method)');
+    ma(' (an array, string, set, ordinal type, iterator, or an object or ');
+    ma('record with a GetEnumerator method)');
     errR(cLoc, nodeRange(c));
   end;
 
@@ -4928,6 +4985,80 @@ begin
   scopeDepth := scopeDepth - 1;
 end;
 
+{ yield e / yield break / yield from it, in an iterator routine (not in a
+  lambda in one, nor in a finally part). }
+procedure visitYield(s: PNode);
+var
+  r: PDecl;
+  v: PNode;
+  it, et, t: PType;
+begin
+  directSequence := nil;
+  r := curRoutine;
+  v := s^.yieldValue;
+  it := nil;
+  if r <> nil then
+    it := r^.iterType;
+  if it = nil then
+  begin
+    if (r <> nil) and r^.isLambda then
+      ms('''yield'' is not allowed in a lambda')
+    else
+      ms('''yield'' is only allowed in an iterator routine (one whose ' +
+         'result is ''iterator T'')');
+    errR(s^.b, nodeRange(s));
+    if v <> nil then
+      check(v);
+    exit;
+  end;
+  if finallyLoopDepth >= 0 then
+  begin
+    ms('''yield'' is not allowed in a ''finally'' part');
+    errR(s^.b, nodeRange(s));
+  end;
+  if v = nil then { yield break }
+  begin
+    ownedDead;
+    exit;
+  end;
+  et := it^.iterElement;
+  if s^.yieldFrom then
+  begin
+    t := check(v);
+    if isError(t) or isError(et) then
+      exit;
+    if (t^.kind <> tyIterator) or not isAssignable(et, t^.iterElement) or
+       (isStructured(et) and (et <> t^.iterElement)) then
+    begin
+      ms('''yield from'' needs an iterator of ');
+      maT(et);
+      ma(' values, not a value of type ');
+      maT(t);
+      errR(v^.b, nodeRange(v));
+    end;
+    markUsesManaged; { (held while its values are yielded) }
+    exit;
+  end;
+  if (v^.kind = nkTuple) or (v^.kind = nkCall) then
+    t := checkValueFor(et, v)
+  else
+    t := check(v);
+  if ownedVarOf(v) <> nil then
+    diagOwnedEscape(ownedVarOf(v), v, true);
+  checkLambdaEscape(v, false);
+  if not isError(t) and not isError(et) and not isAssignable(et, t) and
+     not convertImplicitly(v, et) then
+  begin
+    ms('cannot yield a value of type ');
+    maT(t);
+    ma(' from an iterator of ');
+    maT(et);
+    ma(' values');
+    errR(v^.b, nodeRange(v));
+  end;
+  markUsesManaged;
+end;
+
 procedure visitDetached(s: PNode);
 var
   c, h: PNode;
@@ -4986,6 +5117,10 @@ begin
              (s^.calleeExpr^.calleeExpr^.kind = nkField) then
             warnDanglingTask(s^.calleeExpr^.calleeExpr^.fieldName,
                              nodeRange(s^.calleeExpr));
+          if (rt <> nil) and (rt^.kind = tyIterator) and
+             (s^.calleeExpr^.calleeExpr^.kind = nkField) then
+            warnUnusedIterator(s^.calleeExpr^.calleeExpr^.fieldName,
+                               nodeRange(s^.calleeExpr));
           exit;
         end;
         rt := checkIndirectCallee(s^.calleeExpr);
@@ -5011,6 +5146,7 @@ begin
     nkExprStmt: visitExprStmt(s);
     nkScope: visitScope(s);
     nkDetached: visitDetached(s);
+    nkYield: visitYield(s);
   else
     ;
   end;
@@ -5097,6 +5233,8 @@ begin
           exit(constructedThroughSelf(d, w));
         if (d^.asyncType <> nil) and acceptsArgCount(d^.params, 0) then
           exit(d^.asyncType); { its task }
+        if (d^.iterType <> nil) and acceptsArgCount(d^.params, 0) then
+          exit(d^.iterType); { its iterator }
         if not d^.isFunction then
         begin
           ms('procedure ''');
@@ -5474,6 +5612,12 @@ begin
       orderArgs(d^.params, e^.args, e^.callee);
       checkCallArgs(d^.params, d, e^.callee, e^.args, nodeRange(e));
       exit(d^.asyncType);
+    end;
+    if d^.iterType <> nil then { its iterator }
+    begin
+      orderArgs(d^.params, e^.args, e^.callee);
+      checkCallArgs(d^.params, d, e^.callee, e^.args, nodeRange(e));
+      exit(d^.iterType);
     end;
     if d^.isFunction then
     begin

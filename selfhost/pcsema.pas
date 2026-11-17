@@ -630,7 +630,8 @@ end;
 function isObjFPCOnly(k: TBuiltinKind): boolean;
 begin
   isObjFPCOnly := k in [bkAssignFile, bkCloseFile, bkExceptAddr, bkAddChecked,
-                        bkSubChecked, bkMulChecked, bkWait, bkWhenAll, bkWhenAny];
+                        bkSubChecked, bkMulChecked, bkWait, bkWhenAll, bkWhenAny,
+                        bkIteratorNext, bkIteratorValue];
 end;
 
 procedure stdType(const n: string; t: PType);
@@ -1610,7 +1611,7 @@ function isAssignable(target, value: PType): boolean;
 begin
   if (target^.kind = tyOpenArray) or (value^.kind = tyOpenArray) then
     exit(false); { only passed along and indexed }
-  if (target^.kind in [tyDynArray, tyTask, tyToken]) and (target <> value) then
+  if (target^.kind in [tyDynArray, tyTask, tyToken, tyIterator]) and (target <> value) then
     exit(value^.kind = tyNil);
   if containsFile(target) or containsFile(value) then
     exit(false); { files cannot be copied }
@@ -3109,6 +3110,17 @@ begin
           if isError(t) then
             exit(errorType);
         end;
+        if ts^.asyncIterator then
+        begin
+          if (t^.kind = tyUntyped) or containsFile(t) then
+          begin
+            ms('the values of an iterator cannot be ');
+            maT(t);
+            errR(ts^.asyncInner^.b, specRange(ts^.asyncInner));
+            exit(errorType);
+          end;
+          exit(iteratorType(t));
+        end;
         exit(taskType(t));
       end;
     tsSpecialize:
@@ -3488,7 +3500,7 @@ begin
   if (declName <> nil) and not isError(t) and not isBuiltinType(t) and
      (ts^.kind <> tsSpecialize) and { (so is a specialization) }
      not ((t^.kind = tyRecord) and t^.isTupleRecord) and { (a tuple type is shared by its uses) }
-     (t^.kind <> tyTask) then { (and so is a task type) }
+     (t^.kind <> tyTask) and (t^.kind <> tyIterator) then { (and so are tasks and iterators) }
     setDeclName(t, declName);
   ts^.resolved := t;
   resolveType := t;
@@ -4305,6 +4317,7 @@ var
 begin
   writeFits := false;
   if (x^.methodKind = mtMethod) and not x^.isFunction and (x^.asyncType = nil) and
+     (x^.iterType = nil) and
      (x^.params.count = leading + 1) and indexParamsMatch(p, x) and
      (not p^.propIsClass or x^.isStatic) then
   begin
@@ -6074,7 +6087,7 @@ begin
     exit;
   end;
   if (m^.methodKind <> r^.methodKind) or
-     ((m^.isFunction or (m^.asyncType <> nil)) <> r^.isFunction) or
+     ((m^.isFunction or (m^.asyncType <> nil) or (m^.iterType <> nil)) <> r^.isFunction) or
      (m^.isClassMethod <> r^.isClassMethod) then
   begin
     ms('''');
@@ -6117,6 +6130,8 @@ begin
     declared := m^.resultType;
     if m^.asyncType <> nil then
       declared := m^.asyncType;
+    if m^.iterType <> nil then
+      declared := m^.iterType;
     if not sameSignature(m, r) or ((rt <> nil) and (rt <> declared)) or
        not sameDefaults(m, r) then
     begin
@@ -7122,6 +7137,19 @@ begin
       resultTy := errorType;
     end;
   end;
+  { iterator T: an iterator routine, whose body is a procedure's that
+    yields T values }
+  if resultTy^.kind = tyIterator then
+  begin
+    r^.iterType := resultTy;
+    r^.isFunction := false;
+    if r^.isExternal then
+    begin
+      ms('an external routine cannot be an iterator');
+      errR(r^.ident.loc, identRange(r^.ident));
+    end;
+    exit;
+  end;
   { async T / async: an async routine, whose body is a function's
     returning T or a procedure's }
   if resultTy^.kind = tyTask then
@@ -8066,6 +8094,8 @@ var
     end;
     if x^.kind = tsDynArray then
       exit(walk(x^.dynSpec));
+    if (x^.kind = tsAsync) and x^.asyncIterator then
+      exit(walk(x^.asyncInner));
     if x^.kind = tsSpecialize then
     begin
       for m := 0 to x^.spArgs.count - 1 do
@@ -8456,7 +8486,8 @@ begin
   end;
   if (fwd <> nil) and fwd^.isForward and (fwd^.body = nil) and (r^.body <> nil) then
   begin
-    if (fwd^.isFunction or (fwd^.asyncType <> nil)) <> r^.isFunction then
+    if (fwd^.isFunction or (fwd^.asyncType <> nil) or (fwd^.iterType <> nil)) <>
+       r^.isFunction then
     begin
       ms('''');
       maN(r^.ident.spelling);
@@ -8480,6 +8511,8 @@ begin
       declared := fwd^.resultType;
       if fwd^.asyncType <> nil then
         declared := fwd^.asyncType;
+      if fwd^.iterType <> nil then
+        declared := fwd^.iterType;
       if not sameSignature(fwd, r) or ((rt <> nil) and (rt <> declared)) or
          not sameDefaults(fwd, r) then
       begin
@@ -9224,6 +9257,8 @@ var
     end;
     if ts^.kind = tsDynArray then
       mentionsTypeParam := mentionsTypeParam(ts^.dynSpec);
+    if (ts^.kind = tsAsync) and ts^.asyncIterator then
+      mentionsTypeParam := mentionsTypeParam(ts^.asyncInner);
   end;
 
   { ss, a parameter's type written in def (specialize TGen<...>), and at,
@@ -9473,6 +9508,16 @@ begin
         give(k, at^.dynElement, a)
       else if at^.kind = tyOpenArray then
         give(k, at^.openElement, a);
+    end
+    { iterator T: T from the iterator's values }
+    else if (ts <> nil) and (ts^.kind = tsAsync) and ts^.asyncIterator and
+            (typeParamNamed(def, ts^.asyncInner) >= 0) then
+    begin
+      at := check(a);
+      if isError(at) then
+        ok := false
+      else if at^.kind = tyIterator then
+        give(typeParamNamed(def, ts^.asyncInner), at^.iterElement, a);
     end
     { specialize TGen<..., T, ...>: T from the specialization the argument
       is (a lambda's are the lambda pass's, below) }
@@ -9830,32 +9875,57 @@ end;
   arguments are copied (no var, out or constref parameters, no open or
   untyped ones), and it is not nested (but a spawn block, which its scope
   waits for) nor a virtual method, constructor or destructor. }
+{ (The same for an iterator routine, whose iterator may outlive its caller
+  too.) }
 procedure checkAsyncRoutine(r: PDecl);
 var
   i: longint;
   p: PDecl;
   t: PType;
-  kind, why: string;
+  kind, why, rkind, its: string;
+  isIt: boolean;
 begin
+  isIt := r^.iterType <> nil;
+  if isIt then
+  begin
+    rkind := 'iterator';
+    its := 'its iterator';
+  end
+  else
+  begin
+    rkind := 'async';
+    its := 'its task';
+  end;
   if (r^.parent <> nil) and not r^.isSpawnBlock and not r^.isLambda then
   begin
-    ms('async routine ''');
+    ms(rkind + ' routine ''');
     maN(r^.ident.spelling);
     ma(''' must be declared at program or unit level, or be a method ' +
-       '(its task may outlive the routine around it)');
+       '(' + its + ' may outlive the routine around it)');
     errR(r^.ident.loc, identRange(r^.ident));
   end;
   if r^.methodKind <> mtNone then
   begin
     why := '';
     if (r^.methodKind = mtConstructor) or (r^.methodKind = mtDestructor) then
-      why := 'a constructor or a destructor cannot be async'
+    begin
+      if isIt then
+        why := 'a constructor or a destructor cannot be an iterator'
+      else
+        why := 'a constructor or a destructor cannot be async';
+    end
     else if r^.isVirtual or r^.isAbstract or r^.isOverride or (r^.vmtIndex >= 0) then
-      why := 'an async method cannot be virtual (not supported yet)'
+      why := 'an ' + rkind + ' method cannot be virtual (not supported yet)'
     else if (r^.ownerClass <> nil) and (r^.ownerClass^.kind = tyClass) and
             ((r^.ownerClass^.classRecord <> nil) or (r^.ownerClass^.classHelperFor <> nil)) then
-      why := 'a record''s or helper''s method cannot be async (its Self is ' +
-             'passed by reference)';
+    begin
+      if isIt then
+        why := 'a record''s or helper''s method cannot be an iterator (its ' +
+               'Self is passed by reference)'
+      else
+        why := 'a record''s or helper''s method cannot be async (its Self is ' +
+               'passed by reference)';
+    end;
     if why <> '' then
     begin
       ms(why);
@@ -9881,9 +9951,9 @@ begin
     begin
       ms('parameter ''');
       maN(p^.ident.spelling);
-      ma(''' of async routine ''');
+      ma(''' of ' + rkind + ' routine ''');
       maN(r^.ident.spelling);
-      ma(''' cannot be ' + kind + ' parameter: its task may outlive the ' +
+      ma(''' cannot be ' + kind + ' parameter: ' + its + ' may outlive the ' +
          'caller''s variable; pass a value');
       errR(p^.loc, identRange(p^.ident));
     end;
@@ -9905,7 +9975,7 @@ begin
     listAdd(deferredBodies^, r);
     exit;
   end;
-  if r^.asyncType <> nil then
+  if (r^.asyncType <> nil) or (r^.iterType <> nil) then
     checkAsyncRoutine(r);
   savedScope := cur;
   savedRoutine := curRoutine;
@@ -11375,7 +11445,7 @@ var
 begin
   checkCallArgsOnly(params, calleeDecl, callee, args, callRange);
   if (calleeDecl <> nil) and (calleeDecl^.kind = dkRoutine) and
-     (calleeDecl^.asyncType <> nil) then { (a task's arguments are copies, which it keeps) }
+     ((calleeDecl^.asyncType <> nil) or (calleeDecl^.iterType <> nil)) then { (copies, which it keeps) }
     for i := 0 to args.count - 1 do
       checkIsolatedCopy(PNode(listGet(args, i)), 'passed to a task');
 end;

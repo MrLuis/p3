@@ -2535,7 +2535,7 @@ TypeSpec *Parser::parseTypeImpl() {
       Diags.error(Start, "a record helper cannot be packed");
     return TS;
   }
-  if (!Packed && isAsyncWord("async"))
+  if (!Packed && (isAsyncWord("async") || startsIteratorType()))
     return parseAsyncType();
   // reference to procedure / function (objfpc; `reference` is not
   // reserved): a closure, which may outlive the routine it is made in.
@@ -2681,8 +2681,25 @@ TypeSpec *Parser::parseTypeImpl() {
 }
 
 // typeIdent (ISO requires these for parameters and function results)
+// iterator type (objfpc; `iterator` is not reserved): where a type
+// follows it.
+bool Parser::startsIteratorType() {
+  return isAsyncWord("iterator") &&
+         (peekToken().isOneOf(tok::identifier, tok::kw_string) ||
+          peekToken().is(tok::l_paren));
+}
+
 // async [type] (objfpc; `async` is not reserved): a task type.
+// iterator type: an iterator type.
 TypeSpec *Parser::parseAsyncType() {
+  if (isIdentifierNamed("iterator")) {
+    SourceLocation Start = consumeToken(); // iterator
+    TypeSpec *Inner = parseTypeIdentifier("the values' type of an iterator");
+    if (!Inner)
+      return nullptr;
+    return Ctx.create<AsyncTypeSpec>(SourceRange(Start, PrevTokEnd), Inner,
+                                     /*Iterator=*/true);
+  }
   SourceLocation Start = consumeToken(); // async
   TypeSpec *Inner = nullptr;
   if ((Tok.isOneOf(tok::identifier, tok::kw_string) ||
@@ -2696,7 +2713,7 @@ TypeSpec *Parser::parseAsyncType() {
 }
 
 TypeSpec *Parser::parseTypeIdentifier(llvm::StringRef Context) {
-  if (isAsyncWord("async"))
+  if (isAsyncWord("async") || startsIteratorType())
     return parseAsyncType();
   if (Tok.is(tok::kw_string)) { // Turbo/FPC: `string` names a type here
     auto *TS = Ctx.create<StringTypeSpec>(Tok.getRange(), nullptr,
@@ -3574,11 +3591,53 @@ Stmt *Parser::parseDetachedStmt() {
   return Ctx.create<DetachedStmt>(SourceRange(Loc, PrevTokEnd), Handler, Call);
 }
 
+// yield e | yield break | yield from e (objfpc; `yield` is not reserved:
+// a statement where an expression or `break` follows it).
+bool Parser::startsYieldStmt() {
+  return isAsyncWord("yield") &&
+         !peekToken().isOneOf(tok::colon_equal, tok::semi, tok::period,
+                              tok::l_square, tok::caret, tok::kw_end,
+                              tok::kw_else, tok::kw_until, tok::eof) &&
+         !peekToken().isOneOf(tok::plus_equal, tok::minus_equal,
+                              tok::star_equal, tok::slash_equal, tok::colon);
+}
+
+Stmt *Parser::parseYieldStmt() {
+  SourceLocation Loc = consumeToken(); // yield
+  if (Tok.is(tok::identifier) && isIdentifierNamed("break") &&
+      peekToken().isOneOf(tok::semi, tok::kw_end, tok::kw_else, tok::kw_until,
+                          tok::eof)) {
+    consumeToken();
+    return Ctx.create<YieldStmt>(SourceRange(Loc, PrevTokEnd), YieldStmt::Break,
+                                 nullptr);
+  }
+  YieldStmt::YieldKind K = YieldStmt::Value;
+  if (isAsyncWord("from") &&
+      !peekToken().isOneOf(tok::semi, tok::kw_end, tok::kw_else, tok::kw_until,
+                           tok::eof, tok::period, tok::l_square, tok::caret) &&
+      !peekToken().isOneOf(tok::r_paren, tok::plus, tok::minus, tok::star,
+                           tok::slash, tok::equal, tok::less, tok::greater) &&
+      !peekToken().isOneOf(tok::kw_and, tok::kw_or, tok::kw_div, tok::kw_mod,
+                           tok::not_equal, tok::less_equal, tok::greater_equal,
+                           tok::kw_in)) {
+    consumeToken(); // from
+    K = YieldStmt::From;
+  }
+  Expr *E = parseExpression();
+  if (!E) {
+    skipUntil({tok::semi, tok::kw_end});
+    return Ctx.create<EmptyStmt>(Loc);
+  }
+  return Ctx.create<YieldStmt>(SourceRange(Loc, PrevTokEnd), K, E);
+}
+
 // A statement of the async words, or null if the identifier starts none.
 Stmt *Parser::parseAsyncStatement() {
   if (!LangOpts.ObjKeywords)
     return nullptr;
   SourceLocation Start = Tok.getLocation();
+  if (startsYieldStmt())
+    return parseYieldStmt();
   bool PoolRun = isAsyncWord("pool") && peekToken().is(tok::period);
   if (startsAwaitExpr() || startsSpawnExpr() || PoolRun) { // (Pool.Run(f): parseFactor)
     Expr *E = PoolRun                       ? parseFactor()

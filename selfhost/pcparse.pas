@@ -774,9 +774,22 @@ var
   savedReplay: pointer;
   savedTypeParams, savedUses: TPtrList;
   savedUnit: PName;
+  savedGenericTypes, savedHiddenDecls: TPtrList;
+  savedHiddenTypes, savedLambdas: longint;
+  savedLambdaNames: PPtrList;
+  savedLastKind: TTokenKind;
+  savedClassInit: boolean;
 begin
   { a used unit may be loaded while another file is parsed (declared(NAME)
-    in $IF): the parser's state is kept }
+    in $IF, or the first time a word that is not reserved, such as async,
+    is checked against the declarations): the parser's state is kept }
+  savedGenericTypes := genericTypes;
+  savedHiddenDecls := hiddenTypeDecls;
+  savedHiddenTypes := hiddenTypes;
+  savedLambdas := hiddenLambdas;
+  savedLambdaNames := lambdaNames;
+  savedLastKind := lastKind;
+  savedClassInit := parsingClassInit;
   savedLx := lx;
   savedMode := mode;
   savedTok := tok;
@@ -811,6 +824,13 @@ begin
   genericTypeParams := savedTypeParams;
   pendingUses := savedUses;
   unitName := savedUnit;
+  genericTypes := savedGenericTypes;
+  hiddenTypeDecls := savedHiddenDecls;
+  hiddenTypes := savedHiddenTypes;
+  hiddenLambdas := savedLambdas;
+  lambdaNames := savedLambdaNames;
+  lastKind := savedLastKind;
+  parsingClassInit := savedClassInit;
 end;
 
 function parseInput(fid: longint; mode: TLangMode; parseUnits: boolean;
@@ -1365,6 +1385,14 @@ end;
 
 function parseTypeIdentifier(const context: string): PTypeSpec; forward;
 function parseAsyncType: PTypeSpec; forward;
+
+{ iterator type (objfpc; `iterator` is not reserved): where a type follows
+  it. }
+function startsIteratorType: boolean;
+begin
+  startsIteratorType := isAsyncWord('iterator') and
+                        (peekKind in [tkIdentifier, tkKwString, tkLParen]);
+end;
 
 { routineDecl = ("procedure" name [params] | "function" name [params]
                 [":" typeIdent]) ";" ( "forward" | block ) ";" .
@@ -3577,7 +3605,7 @@ begin
       diagError(start, 'a record helper cannot be packed');
     exit(ts);
   end;
-  if not isPacked and isAsyncWord('async') then
+  if not isPacked and (isAsyncWord('async') or startsIteratorType) then
     exit(parseAsyncType);
   { reference to procedure / function (objfpc; `reference` is not
     reserved): a closure, which may outlive the routine it is made in }
@@ -3753,13 +3781,25 @@ begin
 end;
 
 { typeIdent (ISO requires these for parameters and function results) }
-{ async [type] (objfpc; `async` is not reserved): a task type. }
+{ async [type] (objfpc; `async` is not reserved): a task type.
+  iterator type: an iterator type. }
 function parseAsyncType: PTypeSpec;
 var
   start: TLoc;
   inner, ts: PTypeSpec;
 begin
   parseAsyncType := nil;
+  if isIdentifierNamed('iterator') then
+  begin
+    start := consumeToken; { iterator }
+    inner := parseTypeIdentifier('the values'' type of an iterator');
+    if inner = nil then
+      exit;
+    ts := newTypeSpec(tsAsync, start, prevTokEnd);
+    ts^.asyncInner := inner;
+    ts^.asyncIterator := true;
+    exit(ts);
+  end;
   start := consumeToken; { async }
   inner := nil;
   if ((tok.kind in [tkIdentifier, tkKwString]) or
@@ -3772,6 +3812,7 @@ begin
   end;
   ts := newTypeSpec(tsAsync, start, prevTokEnd);
   ts^.asyncInner := inner;
+  ts^.asyncIterator := false;
   parseAsyncType := ts;
 end;
 
@@ -3781,7 +3822,7 @@ var
   arr: TToken;
 begin
   parseTypeIdentifier := nil;
-  if isAsyncWord('async') then
+  if isAsyncWord('async') or startsIteratorType then
     exit(parseAsyncType);
   if tok.kind = tkKwString then
   begin
@@ -4880,6 +4921,7 @@ begin
   listInit(noParams);
   rs := newTypeSpec(tsAsync, start, start);
   rs^.asyncInner := nil;
+  rs^.asyncIterator := false;
   r := newRoutine(start, name, true, noParams, false, rs, newBlock(decls, body), false);
   r^.isSpawnBlock := true;
   r^.isRaceChecked := lx.raceChecks;
@@ -4964,6 +5006,56 @@ begin
   parseDetachedStmt := n;
 end;
 
+{ yield e | yield break | yield from e (objfpc; `yield` is not reserved: a
+  statement where an expression or `break` follows it). }
+function startsYieldStmt: boolean;
+begin
+  startsYieldStmt :=
+    isAsyncWord('yield') and
+    not (peekKind in [tkColonEqual, tkSemi, tkPeriod, tkLSquare, tkCaret,
+                      tkKwEnd, tkKwElse, tkKwUntil, tkEof, tkPlusEqual,
+                      tkMinusEqual, tkStarEqual, tkSlashEqual, tkColon]);
+end;
+
+function parseYieldStmt: PNode;
+var
+  loc: TLoc;
+  e, n: PNode;
+  from: boolean;
+begin
+  loc := consumeToken; { yield }
+  if isIdentifierNamed('break') and
+     (peekKind in [tkSemi, tkKwEnd, tkKwElse, tkKwUntil, tkEof]) then
+  begin
+    consumeToken;
+    n := newNode(nkYield, loc, prevTokEnd);
+    n^.yieldValue := nil;
+    n^.yieldFrom := false;
+    exit(n);
+  end;
+  from := false;
+  if isAsyncWord('from') and
+     not (peekKind in [tkSemi, tkKwEnd, tkKwElse, tkKwUntil, tkEof, tkPeriod,
+                       tkLSquare, tkCaret, tkRParen, tkPlus, tkMinus, tkStar,
+                       tkSlash, tkEqual, tkLess, tkGreater, tkKwAnd, tkKwOr,
+                       tkKwDiv, tkKwMod, tkNotEqual, tkLessEqual,
+                       tkGreaterEqual, tkKwIn]) then
+  begin
+    consumeToken; { from }
+    from := true;
+  end;
+  e := parseExpression;
+  if e = nil then
+  begin
+    skipUntil([tkSemi, tkKwEnd]);
+    exit(emptyStmt(loc));
+  end;
+  n := newNode(nkYield, loc, prevTokEnd);
+  n^.yieldValue := e;
+  n^.yieldFrom := from;
+  parseYieldStmt := n;
+end;
+
 { A statement of the async words, or nil if the identifier starts none. }
 function parseAsyncStatement: PNode;
 var
@@ -4975,6 +5067,8 @@ begin
   if mode <> lmObjFPC then
     exit;
   start := tok.loc;
+  if startsYieldStmt then
+    exit(parseYieldStmt);
   poolRun := isAsyncWord('pool') and (peekKind = tkPeriod);
   if startsAwaitExpr or startsSpawnExpr or poolRun then { (Pool.Run(f): parseFactor) }
   begin

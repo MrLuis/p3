@@ -956,6 +956,53 @@ are the nested ones. `async`, `await`, `spawn`, `scope`, `detached` and
 `Pool` are not reserved: a visible declaration of the name keeps it a
 name.
 
+**Iterators** (objfpc; item 14 of the proposals): a routine whose result
+is `iterator T` produces T values one at a time with `yield`. Calling it
+runs nothing: its body starts when the first value is asked for, and each
+further request resumes it after the last `yield`, so endless and
+expensive sequences cost only what is used. `yield e` produces a value,
+`yield break` ends the sequence, and `yield from it` produces every value
+of another iterator (recursive walks). A `for ... in` loop reads one, as
+do `IteratorNext(it)` (False at the end) and `IteratorValue(it)`; `uses
+sequences` adds `it.MoveNext` / `it.Current` and the sequence operations:
+
+```pascal
+function Fibonacci: iterator UInt64;
+begin
+  var a: UInt64 := 0;
+  var b: UInt64 := 1;
+  while True do
+  begin
+    yield a;
+    (a, b) := (b, a + b);
+  end;
+end;
+
+function TNode.Walk: iterator TNode;
+begin
+  yield Self;
+  for var c in Children do
+    yield from c.Walk;
+end;
+
+for var n in Fibonacci.Take(10) do Writeln(n);   { uses sequences }
+```
+
+An iterator is a counted value. When the last reference to one that has
+not finished goes (a loop left with `break`, a variable cleared), its body
+is stopped at its `yield`, so its `finally` parts run (an exception raised
+there is dropped). An exception raised in the body reaches the code that
+asked for the value. Iterators run on a stack of their own (the runtime's
+coroutines, as tasks do), so `yield` works anywhere in the routine's own
+body, inside loops and `try` statements, but not in a `finally` part, a
+nested routine or a lambda. Like async routines, an iterator routine
+is not nested in another routine, is not a virtual method or a record's or
+helper's method, and takes its parameters by value (they are copied when
+it is called). Values may be any type but files (records and tuples
+included: `yield (i, s)`). Written `iterator T` rather than the proposal's
+`Iterator<T>`, as `async T` is, since objfpc needs `specialize` for generic
+syntax; `iterator` and `yield` are not reserved.
+
 **Sequences** (objfpc, unit `sequences`; item 15 of the proposals):
 lazy, chainable operations in the style of LINQ. A `TSeq<T>` produces its
 values one at a time, when asked for: `Map`, `Filter`, `Take`, `Skip`,

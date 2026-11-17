@@ -255,6 +255,8 @@ begin
      (name <> '__pas_frame_release') and (name <> '__pas_closure_assign') and
      (name <> '__pas_task_await') and (name <> '__pas_scope_leave') and
      (name <> '__pas_task_assign') and (name <> '__pas_task_clear') and
+     (name <> '__pas_gen_next') and (name <> '__pas_gen_yield') and
+     (name <> '__pas_gen_assign') and (name <> '__pas_gen_clear') and
      (name <> '__pas_closure_clear') and
      (name <> '__pas_dyn_clear') and (name <> '__pas_dyn_assign') and
      (name <> '__pas_dyn_setlength') and
@@ -773,6 +775,7 @@ begin
     tyClassRef: lowerType := irPtrT; { a reference to the class's VMT }
     tyTask: lowerType := irPtrT;  { a counted reference to the task }
     tyToken: lowerType := irPtrT; { a counted reference to the token }
+    tyIterator: lowerType := irPtrT; { a counted reference to the generator }
     tyInterface: lowerType := routinePairT; { (object, method table) }
   else
     lowerType := irI8;
@@ -1827,6 +1830,9 @@ end;
 
 function holdResult(const v: TV): TV; forward;
 function emitAsyncCall(r: PDecl; const link, self_: TV; const args: TPtrList): TV; forward;
+function emitIteratorCall(r: PDecl; const link, self_: TV; const args: TPtrList): TV; forward;
+function emitIteratorNext(const it: TV): TV; forward;
+function iteratorValueAddr(const it: TV): TV; forward;
 function emitAwait(const t: TV; tt: PType): TV; forward;
 function emitWhen(e: PNode; all: boolean): TV; forward;
 procedure emitWriteArg(const f: TV; arg: PNode); forward;
@@ -3222,13 +3228,18 @@ begin
       end
       else
         intfCall1('__pas_intf_clear', addr);
-    tyTask, tyToken:
+    tyTask, tyToken, tyIterator:
       if addRef then
       begin
         if t^.kind = tyTask then
         begin
           obj := irLoad(irPtrT, addr, 'task');
           ignored := call1(classRuntime('__pas_task_addref', 'void', 'ptr'), obj, '');
+        end
+        else if t^.kind = tyIterator then
+        begin
+          obj := irLoad(irPtrT, addr, 'iter');
+          ignored := call1(classRuntime('__pas_gen_addref', 'void', 'ptr'), obj, '');
         end
         else
         begin
@@ -3238,6 +3249,8 @@ begin
       end
       else if t^.kind = tyTask then
         ignored := call1(classRuntime('__pas_task_clear', 'void', 'ptr'), addr, '')
+      else if t^.kind = tyIterator then
+        ignored := call1(classRuntime('__pas_gen_clear', 'void', 'ptr'), addr, '')
       else
         ignored := call1(classRuntime('__pas_token_clear', 'void', 'ptr'), addr, '');
     tyRoutine: { a closure: its frame }
@@ -3344,6 +3357,8 @@ begin
     ignored := call2(classRuntime('__pas_task_assign', 'void', 'ptr,ptr'), addr, v, '')
   else if t^.kind = tyToken then
     ignored := call2(classRuntime('__pas_token_assign', 'void', 'ptr,ptr'), addr, v, '')
+  else if t^.kind = tyIterator then
+    ignored := call2(classRuntime('__pas_gen_assign', 'void', 'ptr,ptr'), addr, v, '')
   else if isManaged(t) then
     storeInterface(addr, v)
   else
@@ -3662,7 +3677,7 @@ begin
     exit(tmp);
   end;
   { (released by finalizeValue: also a closure's) }
-  if (resTy <> nil) and ((resTy^.kind in [tyDynArray, tyTask, tyToken]) or
+  if (resTy <> nil) and ((resTy^.kind in [tyDynArray, tyTask, tyToken, tyIterator]) or
                          isClosureType(resTy)) then
     exit(holdDynResult(res, resTy));
   if (resTy <> nil) and isManaged(resTy) then
@@ -3694,6 +3709,8 @@ begin
   r := canon(r);
   if r^.asyncType <> nil then
     exit(emitAsyncCall(r, staticLinkFor(r), irNull, args));
+  if r^.iterType <> nil then
+    exit(emitIteratorCall(r, staticLinkFor(r), irNull, args));
   f := fnOf(r);
   if r^.isExternal then
   begin
@@ -4136,6 +4153,12 @@ begin
     if r^.isClassMethod then
       exit(emitAsyncCall(r, irNull, receiverClass(obj, selfIsClass, loc), args));
     exit(emitAsyncCall(r, irNull, obj, args));
+  end;
+  if r^.iterType <> nil then
+  begin
+    if r^.isClassMethod then
+      exit(emitIteratorCall(r, irNull, receiverClass(obj, selfIsClass, loc), args));
+    exit(emitIteratorCall(r, irNull, obj, args));
   end;
   if (r^.ownerClass <> nil) and ((r^.ownerClass^.classRecord <> nil) or
                                  (r^.ownerClass^.classHelperFor <> nil)) then
@@ -5030,7 +5053,7 @@ var
   pairFields: TPtrList;
   argE: PNode;
   at, t: PType;
-  arg, tmp, p, x, one, bad: TV;
+  arg, tmp, p, x, one, bad, addrV: TV;
   v: int64;
   bd: TOrdinalBounds;
   loc: TLoc;
@@ -5044,6 +5067,16 @@ begin
                      PNode(listGet(e^.args, 0))^.typ));
     bkWhenAll, bkWhenAny:
       exit(emitWhen(e, k = bkWhenAll));
+    bkIteratorNext:
+      exit(emitIteratorNext(visitExpr(PNode(listGet(e^.args, 0)))));
+    bkIteratorValue: { (read as a variable's value) }
+      begin
+        argE := PNode(listGet(e^.args, 0));
+        addrV := iteratorValueAddr(visitExpr(argE));
+        if isStructured(e^.typ) then
+          exit(addrV);
+        exit(loadScalar(addrV, e^.typ, 'value'));
+      end;
     bkAddChecked, bkSubChecked, bkMulChecked: { the tuple (a op b, no overflow) }
       begin
         r := memType(e^.typ);
@@ -5762,7 +5795,7 @@ var
   counted: boolean;
   i: longint;
   p: PDecl;
-  linkage: string;
+  linkage, entryName, finiName, argName: string;
   f: PIRFunc;
 begin
   listInit(slots);
@@ -5785,19 +5818,31 @@ begin
     linkage := 'internal';
   listInit(params);
   listAdd(params, irPtrT);
-  if declared then
-    f := irDeclareFunction(name + '.task', irVoidT, params, '', '')
+  if r^.iterType <> nil then
+  begin
+    entryName := name + '.gen';
+    finiName := name + '.genfini';
+    argName := 'gen';
+  end
   else
-    f := irCreateFunction(name + '.task', linkage, irVoidT, params);
-  irSetArgName(f, 0, 'task');
+  begin
+    entryName := name + '.task';
+    finiName := name + '.taskfini';
+    argName := 'task';
+  end;
+  if declared then
+    f := irDeclareFunction(entryName, irVoidT, params, '', '')
+  else
+    f := irCreateFunction(entryName, linkage, irVoidT, params);
+  irSetArgName(f, 0, argName);
   r^.cgTaskEntry := f;
   r^.cgTaskFini := nil;
   if counted then
   begin
     if declared then
-      f := irDeclareFunction(name + '.taskfini', irVoidT, params, '', '')
+      f := irDeclareFunction(finiName, irVoidT, params, '', '')
     else
-      f := irCreateFunction(name + '.taskfini', linkage, irVoidT, params);
+      f := irCreateFunction(finiName, linkage, irVoidT, params);
     irSetArgName(f, 0, 'args');
     r^.cgTaskFini := f;
   end;
@@ -5829,7 +5874,10 @@ begin
   irSetDebugLoc(nil);
   irSetInsertPoint(irNewBlock('entry'));
   task := irArg(entry, 0);
-  args := call1(classRuntime('__pas_task_args', 'ptr', 'ptr'), task, 'args');
+  if r^.iterType <> nil then
+    args := call1(classRuntime('__pas_gen_args', 'ptr', 'ptr'), task, 'args')
+  else
+    args := call1(classRuntime('__pas_task_args', 'ptr', 'ptr'), task, 'args');
   bufInit(buf);
   irArgsAdd(buf, irLoad(irPtrT, irStructGEP(argsTy, args, 0, ''), 'link'));
   if hasSelf(r) then
@@ -5936,6 +5984,63 @@ begin
     start := '__pas_task_start';
   ignoredW := call1(classRuntime(start, 'void', 'ptr'), task, '');
   emitAsyncCall := holdDynResult(task, r^.asyncType);
+end;
+
+{ A call of iterator routine r (link; self_: Self's value or null): its
+  iterator, made with copies of the arguments; its body runs when its
+  values are asked for. }
+function emitIteratorCall(r: PDecl; const link, self_: TV; const args: TPtrList): TV;
+var
+  i, slot: longint;
+  argsTy: PIRType;
+  finiV, gen, argsAddr: TV;
+  p: PDecl;
+  arg: PNode;
+  buf: TBuf;
+begin
+  argsTy := PIRType(r^.cgArgsTy);
+  if r^.cgTaskFini <> nil then
+    finiV := irFuncRef(PIRFunc(r^.cgTaskFini))
+  else
+    finiV := irNull;
+  bufInit(buf);
+  irArgsAdd(buf, typeInfoOf(r^.iterType^.iterElement));
+  irArgsAdd(buf, i64c(argsTy^.size));
+  irArgsAdd(buf, irFuncRef(PIRFunc(r^.cgTaskEntry)));
+  irArgsAdd(buf, finiV);
+  gen := irCall(classRuntime('__pas_gen_new', 'ptr', 'ptr,i64,ptr,ptr'), buf, 'iter');
+  bufFree(buf);
+  argsAddr := call1(classRuntime('__pas_gen_args', 'ptr', 'ptr'), gen, 'args');
+  irStore(link, irStructGEP(argsTy, argsAddr, 0, ''));
+  if hasSelf(r) then
+    irStore(self_, irStructGEP(argsTy, argsAddr, 1, ''));
+  slot := firstParamSlot(r);
+  for i := 0 to r^.params.count - 1 do
+  begin
+    p := PDecl(listGet(r^.params, i));
+    if i < args.count then
+      arg := PNode(listGet(args, i))
+    else
+      arg := p^.paramDefault;
+    storeExpr(irStructGEP(argsTy, argsAddr, slot, ''), p^.varType, arg);
+    slot := slot + 1;
+  end;
+  emitIteratorCall := holdDynResult(gen, r^.iterType);
+end;
+
+{ IteratorNext(it): runs it to its next value; an i1. }
+function emitIteratorNext(const it: TV): TV;
+var
+  r: TV;
+begin
+  r := call1(classRuntime('__pas_gen_next', 'i32', 'ptr'), it, 'more');
+  emitIteratorNext := irICmp('ne', r, i32c(0), 'more');
+end;
+
+{ The address of iterator it's current value. }
+function iteratorValueAddr(const it: TV): TV;
+begin
+  iteratorValueAddr := call1(classRuntime('__pas_gen_value', 'ptr', 'ptr'), it, 'value');
 end;
 
 { await / Wait: waits for task t (of type tt); its result (an address for

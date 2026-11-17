@@ -1,0 +1,15 @@
+; Iterators (objfpc): where yield and iterator routines are allowed, and the
+; types of what they yield.
+; RUN: not %p3 --mode=objfpc -c %S/Inputs/iterators/errors.pas -o %t.o 2>&1 | FileCheck %s
+; CHECK: errors.pas:7:14: error: a record's or helper's method cannot be an iterator (its Self is passed by reference)
+; CHECK: errors.pas:15:20: error: parameter 'x' of iterator routine 'ByRef' cannot be a 'var' parameter: its iterator may outlive the caller's variable; pass a value
+; CHECK: errors.pas:22:9: error: cannot yield a value of type 'string of length 4' from an iterator of 'integer' values
+; CHECK: errors.pas:25:5: error: 'yield' is not allowed in a 'finally' part
+; CHECK: errors.pas:27:3: error: 'exit' with a value is only allowed in a function
+; CHECK: errors.pas:28:14: error: 'yield from' needs an iterator of 'integer' values, not a value of type 'integer'
+; CHECK: errors.pas:32:12: error: iterator routine 'Inner' must be declared at program or unit level, or be a method (its iterator may outlive the routine around it)
+; CHECK: errors.pas:37:3: warning: the iterator of 'Inner' is never used: its body runs only when its values are asked for (for ... in Inner do)
+; CHECK: errors.pas:43:3: error: 'yield' is only allowed in an iterator routine (one whose result is 'iterator T')
+; CHECK: errors.pas:44:27: error: 'yield' is not allowed in a lambda
+; CHECK: errors.pas:52:3: warning: the iterator of 'Wrong' is never used: its body runs only when its values are asked for (for ... in Wrong do)
+; CHECK: errors.pas:53:24: error: 'IteratorNext' needs an iterator, not a value of type 'integer'

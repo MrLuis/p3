@@ -1327,12 +1327,33 @@ var
   dyn: boolean;
   tmp: TV;
   br: TBitRef;
+  condB, bodyB, endB: PIRBlock;
 begin
   c := s^.inColl;
   elem := s^.inElemType;
   case s^.inKind of
     fikEnumerator:
       emitForInEnumerator(s);
+    fikIterator:
+      begin
+        { held during the loop (and released after it, which stops it if
+          it has more values: its finally parts run) }
+        v := visitExpr(c);
+        ignoredW := call1(classRuntime('__pas_gen_addref', 'void', 'ptr'), v, '');
+        v := holdDynResult(v, c^.typ);
+        condB := irNewBlock('forin.cond');
+        bodyB := irNewBlock('forin.body');
+        endB := irNewBlock('forin.end');
+        irBr(condB);
+        irSetInsertPoint(condB);
+        irCondBr(emitIteratorNext(v), bodyB, endB, false);
+        irSetInsertPoint(bodyB);
+        pushLoop(condB, endB);
+        forInIteration(s, iteratorValueAddr(v));
+        popLoop;
+        irBr(condB);
+        irSetInsertPoint(endB);
+      end;
     fikArray:
       begin
         base := emitAddress(c);
@@ -1795,6 +1816,58 @@ begin
   tryFinallyEnd(t);
 end;
 
+{ yield e / yield break / yield from it. Each value is assigned into the
+  iterator's slot: what it held is released. }
+procedure visitYieldStmt(s: PNode);
+var
+  et, srcEt, ct: PType;
+  slot, held, src: TV;
+  e: PNode;
+  t: TTryFinally;
+  condB, bodyB, endB: PIRBlock;
+begin
+  et := curRoutine^.iterType^.iterElement;
+  if s^.yieldValue = nil then { yield break }
+  begin
+    emitJump(exitBlock, nil);
+    irSetInsertPoint(irNewBlock('after.jump')); { unreachable code follows }
+    exit;
+  end;
+  if not s^.yieldFrom then
+  begin
+    slot := call0(classRuntime('__pas_gen_slot', 'ptr', ''), 'slot');
+    storeExpr(slot, et, s^.yieldValue);
+    ignoredW := call0(classRuntime('__pas_gen_yield', 'void', ''), '');
+    exit;
+  end;
+  e := s^.yieldValue;
+  ct := e^.typ;
+  srcEt := ct^.iterElement;
+  held := irCreateTemp(irPtrT, 'from');
+  irStore(irZero(irPtrT), held);
+  storeValue(held, visitExpr(e), ct); { (counted) }
+  tryFinallyBegin(t);
+  condB := irNewBlock('from.cond');
+  bodyB := irNewBlock('from.body');
+  endB := irNewBlock('from.end');
+  irBr(condB);
+  irSetInsertPoint(condB);
+  irCondBr(emitIteratorNext(irLoad(irPtrT, held, 'from')), bodyB, endB, false);
+  irSetInsertPoint(bodyB);
+  src := iteratorValueAddr(irLoad(irPtrT, held, 'from'));
+  slot := call0(classRuntime('__pas_gen_slot', 'ptr', ''), 'slot');
+  if isStructured(et) then { (the same type: Sema) }
+    copyValue(slot, src, et)
+  else
+    storeValue(slot, convertForAssign(loadScalar(src, srcEt, ''), srcEt, et, s^.b), et);
+  ignoredW := call0(classRuntime('__pas_gen_yield', 'void', ''), '');
+  irBr(condB);
+  irSetInsertPoint(endB);
+  tryFinallyMiddle(t);
+  finalizeValue(held, ct);
+  tryFinallyEnd(t);
+end;
+
 procedure visitDetachedStmt(s: PNode);
 var
   t, fn, link, pair: TV;
@@ -1888,6 +1961,7 @@ begin
     nkExprStmt: ignoredW := visitExpr(s^.exprStmtExpr);
     nkScope: visitScopeStmt(s);
     nkDetached: visitDetachedStmt(s);
+    nkYield: visitYieldStmt(s);
   else
     ;
   end;
@@ -2498,7 +2572,7 @@ begin
       routineParamTypes(m, params);
       m^.cgFunc := irDeclareFunction(nm(m^.cgExport), routineRetType(m), params, '', '');
       listFree(params);
-      if m^.asyncType <> nil then
+      if (m^.asyncType <> nil) or (m^.iterType <> nil) then
         declareAsync(m, nm(m^.cgExport), true, true);
     end;
   end;
@@ -2776,7 +2850,7 @@ begin
       r^.cgFunc := irDeclareFunction(nm(r^.cgExport), routineRetType(r), params, '', '');
       listFree(params);
       declareCThunk(r, nm(r^.cgExport));
-      if r^.asyncType <> nil then
+      if (r^.asyncType <> nil) or (r^.iterType <> nil) then
         declareAsync(r, nm(r^.cgExport), true, true);
       continue;
     end;
@@ -2890,7 +2964,7 @@ begin
       declareCThunk(r, nm(r^.cgExport))
     else
       declareCThunk(r, name);
-    if r^.asyncType <> nil then
+    if (r^.asyncType <> nil) or (r^.iterType <> nil) then
     begin
       if r^.cgExport <> nil then
         declareAsync(r, nm(r^.cgExport), true, false)
@@ -3130,7 +3204,7 @@ var
   end;
 
 begin
-  if r^.asyncType <> nil then { (its task's parts, after it) }
+  if (r^.asyncType <> nil) or (r^.iterType <> nil) then { (its task's parts, after it) }
     listAdd(asyncsToEmit, r);
   { a frame on the heap: the function that finalizes it, first }
   frameFini := nil;

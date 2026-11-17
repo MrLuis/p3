@@ -59,7 +59,7 @@ type
     nkEmpty, nkCompound, nkProcCall, nkAssign, nkIf, nkWhile, nkRepeat,
     nkFor, nkCase, nkWith, nkLabeled, nkGoto, nkIndirectCallStmt,
     nkTry, nkRaise, nkForIn, nkVarDecl, nkDestructure, nkExprStmt, nkScope,
-    nkDetached);
+    nkDetached, nkYield);
 
   PNode = ^TNode;
   PDecl = ^TDecl;
@@ -78,8 +78,9 @@ type
                { widechar (Turbo/FPC): a 16-bit character code }
                tyWideChar,
                { async T (objfpc): a counted reference to a task;
-                 TCancelToken: a counted cancellation token }
-               tyTask, tyToken);
+                 TCancelToken: a counted cancellation token; iterator T: a
+                 counted reference to a generator }
+               tyTask, tyToken, tyIterator);
 
   TType = record
     kind: TTypeKind;
@@ -118,6 +119,7 @@ type
       tyOpenArray: (openElement: PType);
       tyDynArray: (dynElement: PType);
       tyTask: (taskResult: PType); { nil: async (no value) }
+      tyIterator: (iterElement: PType);
       { a class (objfpc): its parent (nil only for TObject), own members in
         source order, all fields (the ancestors' first), the virtual methods
         by slot, the program or unit declaring it; a forward declaration
@@ -239,6 +241,8 @@ type
       nkScope: (scopeToken: PNode; scopeBody: TPtrList);
       { detached [(handler)] call }
       nkDetached: (detHandler, detCall: PNode);
+      { yield e / yield break (yieldValue nil) / yield from e (yieldFrom) }
+      nkYield: (yieldValue: PNode; yieldFrom: boolean);
       { index: base[index]; field: base.fieldName; fieldDecl is a field,
         or (objfpc) a method or property of a class }
       { objfpc: an array property (obj.P[i, j], P[i] or obj[i], the default
@@ -404,7 +408,8 @@ type
       { specialize spName<spArgs> (objfpc): the type made of the generic
         type spName for these type arguments (of PTypeSpec) }
       tsSpecialize: (spName: TIdent; spArgs: TPtrList);
-      tsAsync: (asyncInner: PTypeSpec); { async T; nil: async }
+      { async T (nil: async); asyncIterator: iterator T }
+      tsAsync: (asyncInner: PTypeSpec; asyncIterator: boolean);
       tsSubrange: (lo, hi: PNode);
       tsArray: (indexes: TPtrList; element: PTypeSpec; arrPacked: boolean;
                 arrBitPacked: boolean);
@@ -656,6 +661,10 @@ type
                     async procedure of spawn begin ... end }
                   asyncType: PType;
                   isSpawnBlock: boolean;
+                  { an iterator routine (result iterator T): its calls are
+                    iterators (iterType), whose values its body (a
+                    procedure's) yields }
+                  iterType: PType;
                   { a spawn block under $modeswitch racechecks: it may use
                     only shared variables of the routines around it and of
                     the program }
@@ -739,6 +748,7 @@ const
   fikSet = 7;
   fikOrdinals = 8;
   fikEnumerator = 9;
+  fikIterator = 10;
 
   hintDeprecated = 1;
   hintExperimental = 2;

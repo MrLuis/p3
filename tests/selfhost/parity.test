@@ -157,6 +157,11 @@
 ; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-llvm --extra="-g -o -" --modes=objfpc --ref p3 --new %t.p3 %S/../run/genericinherit.pas %S/../run/intfprops.pas | FileCheck %s
 ; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-ast --extra="-o -" --modes=objfpc --ref p3 --new %t.p3 %S/../run/genericinherit.pas %S/../run/intfprops.pas %S/../sema/Inputs/genericinherit | FileCheck %s
 ; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-parse-tree --extra="-o -" --modes=objfpc --ref p3 --new %t.p3 %S/../run/genericinherit.pas %S/../run/intfprops.pas %S/../sema/Inputs/genericinherit | FileCheck %s
+; Iterators (item 14): yield, for-in, the iterator helper of unit sequences.
+; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-parse-tree --extra="-o -" --modes=objfpc --ref p3 --new %t.p3 %S/../run/iterators.pas %S/../run/iterseq.pas %S/../sema/Inputs/iterators | FileCheck %s
+; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-ast --extra="-o -" --modes=objfpc --ref p3 --new %t.p3 %S/../run/iterators.pas %S/../run/iterseq.pas %S/../sema/Inputs/iterators | FileCheck %s
+; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-llvm --extra="-o -" --modes=objfpc --ref p3 --new %t.p3 %S/../run/iterators.pas %S/../run/iterseq.pas %S/../sema/Inputs/iterators | FileCheck %s
+; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-llvm --extra="-g -o -" --modes=objfpc --ref p3 --new %t.p3 %S/../run/iterators.pas | FileCheck %s
 ; Unit sequences (item 15) and the notes of nested specializations.
 ; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-llvm --extra="-o -" --modes=objfpc --ref p3 --new %t.p3 %S/../run/seqops.pas %S/../sema/Inputs/seqops %S/../../rtl/sequences.pas | FileCheck %s
 ; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-llvm --extra="-g -o -" --modes=objfpc --ref p3 --new %t.p3 %S/../run/seqops.pas | FileCheck %s
