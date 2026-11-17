@@ -9610,13 +9610,18 @@ public:
   }
 
   /// The member Name of a class, advanced record or interface, or null.
-  static Decl *findEnumMember(Type *T, llvm::StringRef Name) {
-    if (ClassType *MT = memberTableOf(T))
-      T = MT;
-    if (auto *C = llvm::dyn_cast<ClassType>(T))
-      return C->findMember(Name);
-    if (auto *I = llvm::dyn_cast<InterfaceType>(T))
+  Decl *findEnumMember(Type *T, llvm::StringRef Name) {
+    Type *Own = T;
+    if (ClassType *MT = memberTableOf(Own))
+      Own = MT;
+    if (auto *C = llvm::dyn_cast<ClassType>(Own))
+      if (Decl *D = C->findMember(Name))
+        return D;
+    if (auto *I = llvm::dyn_cast<InterfaceType>(Own))
       return findInterfaceMethod(I, Name);
+    // (a type helper's: GetEnumerator added to a type by a helper)
+    if (ClassType *H = helperFor(T))
+      return H->findMember(Name);
     return nullptr;
   }
 
@@ -9707,8 +9712,9 @@ public:
     } else if (auto *ST = llvm::dyn_cast<SetType>(CT)) {
       Kind = ForInStmt::Set;
       Elem = ST->getElementType(); // null for []: no elements
-    } else if (CT->isClass() || CT->isInterface() || memberTableOf(CT)) {
-      Kind = ForInStmt::Enumerator;
+    } else if (CT->isClass() || CT->isInterface() || memberTableOf(CT) ||
+               (!CT->isError() && !IsType && findEnumMember(CT, "getenumerator"))) {
+      Kind = ForInStmt::Enumerator; // (also through a helper's GetEnumerator)
     }
     if (Kind == ForInStmt::Invalid && !CT->isError() && !IsType)
       Diags.error(CLoc,
@@ -9770,9 +9776,9 @@ public:
     Cur = OuterScope;
   }
 
-  /// A for-in loop over CT through Collection.GetEnumerator: a function
-  /// without arguments whose result has a function MoveNext: boolean and a
-  /// property Current. False after an error.
+  /// A for-in loop over CT through Collection.GetEnumerator (its own, or its
+  /// helper's): a function without arguments whose result has a function
+  /// MoveNext: boolean and a property Current. False after an error.
   template <typename StepFn>
   bool checkEnumerator(ForInStmt *S, Type *CT, bool Usable, Scope &InScope,
                        StepFn MakeStep) {

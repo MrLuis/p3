@@ -1428,7 +1428,8 @@ helpers.
 takes `x` through the elements of an array (static, open or dynamic) or a
 string, the members of a set in order, the values of an ordinal type (`for
 d in TDay`), or the values of an enumerator: `c.GetEnumerator` (a function
-without arguments, of a class, an advanced record or an interface) returns
+without arguments, of a class, an advanced record or an interface, or of
+the type helper that applies to `c`'s type) returns
 a class or advanced record with `function MoveNext: boolean` and `property
 Current`. `x` is a variable, set by an ordinary assignment (conversions and
 range checks apply) and not assignable in the loop. A dynamic array or

@@ -4258,15 +4258,25 @@ end;
 { The member name of a class, advanced record or interface, or nil. }
 function findEnumMember(t: PType; const name: string): PDecl;
 var
-  owner: PType;
+  owner, own, h: PType;
+  d: PDecl;
 begin
   findEnumMember := nil;
-  if memberTableOf(t) <> nil then
-    t := memberTableOf(t);
-  if t^.kind = tyClass then
-    findEnumMember := findMember(t, intern(name), owner)
-  else if t^.kind = tyInterface then
-    findEnumMember := findInterfaceMethod(t, intern(name));
+  own := t;
+  if memberTableOf(own) <> nil then
+    own := memberTableOf(own);
+  if own^.kind = tyClass then
+  begin
+    d := findMember(own, intern(name), owner);
+    if d <> nil then
+      exit(d);
+  end;
+  if own^.kind = tyInterface then
+    exit(findInterfaceMethod(own, intern(name)));
+  { (a type helper's: GetEnumerator added to a type by a helper) }
+  h := helperFor(t);
+  if h <> nil then
+    findEnumMember := findMember(h, intern(name), owner);
 end;
 
 { for inVar in inColl do inBody (Turbo/FPC), as in Free Pascal: the
@@ -4496,8 +4506,10 @@ begin
     elem := ct^.setElement; { nil for []: no elements }
   end
   else if (ct^.kind = tyClass) or (ct^.kind = tyInterface) or
-          (memberTableOf(ct) <> nil) then
-    kind := fikEnumerator;
+          (memberTableOf(ct) <> nil) or
+          (not isError(ct) and not isType and
+           (findEnumMember(ct, 'getenumerator') <> nil)) then
+    kind := fikEnumerator; { (also through a helper's GetEnumerator) }
   if (kind = fikInvalid) and not isError(ct) and not isType then
   begin
     ms('''for ... in'' cannot enumerate a value of type ');
