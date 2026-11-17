@@ -119,7 +119,13 @@ class Checker : public StmtVisitor<Checker>,
     RoutineDecl *R;
     Scope *S;
     SourceLocation Use;
+    /// The instance whose body asked for it (an index into
+    /// PendingInstances), -1 if none: an error in it notes that one's use
+    /// too, so it leads back to the code outside the generics.
+    int Parent = CheckingInstance;
   };
+  /// The pending instance whose body is being checked, or -1.
+  static inline int CheckingInstance = -1;
   std::vector<PendingInstance> PendingInstances;
   std::vector<std::unique_ptr<Scope>> InstanceScopes;
   llvm::SmallVector<Decl *, 4> ModuleInstances;
@@ -5911,14 +5917,21 @@ class Checker : public StmtVisitor<Checker>,
       Scope *SavedScope = Cur;
       Cur = P.S;
       unsigned Errors = Diags.getNumErrors();
+      int SavedChecking = CheckingInstance;
+      CheckingInstance = static_cast<int>(K);
       checkRoutineBody(P.R);
-      if (Diags.getNumErrors() > Errors)
-        Diags.note(P.Use,
+      CheckingInstance = SavedChecking;
+      // (the specializations that led here, innermost first)
+      for (int Q = static_cast<int>(K); Q >= 0 && Diags.getNumErrors() > Errors;
+           Q = PendingInstances[Q].Parent) {
+        const PendingInstance &I = PendingInstances[Q];
+        Diags.note(I.Use,
                    "in the specialization '" +
-                       (P.R->getClass()
-                            ? qualified(P.R->getClass(), P.R->getName())
-                            : P.R->getName().Spelling.str()) +
+                       (I.R->getClass()
+                            ? qualified(I.R->getClass(), I.R->getName())
+                            : I.R->getName().Spelling.str()) +
                        "' requested here");
+      }
       Cur = SavedScope;
     }
     PendingInstances.clear();

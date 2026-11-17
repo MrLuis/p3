@@ -1,0 +1,13 @@
+Cy Dan Zoe 
+1 2 4 8 16 32 64 
+25
+north: 3
+south: 2
+1a 2b 3c 
+34
+3 4 4 TRUE FALSE
+1 2 3 9 9 
+empty: First of an empty sequence
+calls before: 0
+first three: 1 4 9 
+calls after: 3

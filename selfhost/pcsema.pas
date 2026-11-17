@@ -40,6 +40,10 @@ type
     types: TPtrList;
     scope: PScope;
     use: TLoc;
+    { the pending instance whose body asked for it (an index into
+      pendingInstances), -1 if none: an error in it notes that one's use
+      too, so it leads back to the code outside the generics }
+    parent: longint;
   end;
 
   PPendingPointer = ^TPendingPointer;
@@ -130,6 +134,8 @@ var
     code generation }
   instances: TPtrList;        { of PInstance }
   pendingInstances: TPtrList; { of PInstance }
+  { the pending instance whose body is being checked, or -1 }
+  checkingInstance: longint;
   moduleInstances: TPtrList;  { of PDecl }
   { class of C for each class C (by type id): the type of C used as a
     value and of Self in class methods }
@@ -7863,6 +7869,7 @@ begin
   curRoutine := savedRoutine;
   nestPrefix := savedPrefix;
   r^.isUsed := true;
+  inst^.parent := checkingInstance;
   listAdd(pendingInstances, inst);
   listAdd(moduleInstances, r);
   instantiateGeneric := r;
@@ -7991,6 +7998,7 @@ begin
   curRoutine := savedRoutine;
   nestPrefix := savedPrefix;
   r^.isUsed := true;
+  inst^.parent := checkingInstance;
   listAdd(pendingInstances, inst);
   listAdd(moduleInstances, r);
   instantiateMethod := r;
@@ -8307,6 +8315,7 @@ begin
     pending^.types := types;
     pending^.scope := sc;
     pending^.use := name.loc;
+    pending^.parent := checkingInstance;
     listAdd(pendingInstances, pending);
   end;
   { the type and its methods' implementations are the module's }
@@ -8318,8 +8327,8 @@ end;
 
 procedure checkInstances(b: PBlock);
 var
-  k, errors: longint;
-  inst: PInstance;
+  k, q, errors, savedChecking: longint;
+  inst, qi: PInstance;
   savedScope: PScope;
 begin
   k := 0;
@@ -8329,16 +8338,23 @@ begin
     savedScope := cur;
     cur := inst^.scope;
     errors := diagNumErrors;
+    savedChecking := checkingInstance;
+    checkingInstance := k;
     checkRoutineBody(inst^.r);
-    if diagNumErrors > errors then
+    checkingInstance := savedChecking;
+    { (the specializations that led here, innermost first) }
+    q := k;
+    while (q >= 0) and (diagNumErrors > errors) do
     begin
+      qi := PInstance(listGet(pendingInstances, q));
       ms('in the specialization ''');
-      if inst^.r^.ownerClass <> nil then
-        maQualified(inst^.r^.ownerClass, inst^.r^.ident)
+      if qi^.r^.ownerClass <> nil then
+        maQualified(qi^.r^.ownerClass, qi^.r^.ident)
       else
-        maN(inst^.r^.ident.spelling);
+        maN(qi^.r^.ident.spelling);
       ma(''' requested here');
-      note(inst^.use);
+      note(qi^.use);
+      q := qi^.parent;
     end;
     cur := savedScope;
     k := k + 1;
@@ -11481,6 +11497,7 @@ begin
   nestPrefix := nil;
   listInit(instances);
   listInit(pendingInstances);
+  checkingInstance := -1;
   listInit(moduleInstances);
   handlerDepth := 0;
   finallyLoopDepth := -1;

@@ -956,6 +956,43 @@ are the nested ones. `async`, `await`, `spawn`, `scope`, `detached` and
 `Pool` are not reserved: a visible declaration of the name keeps it a
 name.
 
+**Sequences** (objfpc, unit `sequences`; item 15 of the proposals):
+lazy, chainable operations in the style of LINQ. A `TSeq<T>` produces its
+values one at a time, when asked for: `Map`, `Filter`, `Take`, `Skip`,
+`TakeWhile`, `SkipWhile`, `Concat`, `Zip` (pairs, as tuples) and
+`DistinctBy` make new sequences without doing any work; `OrderBy` /
+`OrderByDescending` (stable) and `GroupBy` (groups in the order their
+keys first appear) read the whole sequence when their result is used;
+`ToArray`, `Fold`, `Count`, `Any`, `All`, `First`, `Last`
+(`ESequenceEmpty` when empty), `ForEach` and a `for ... in` loop consume
+it. Sources: `Seq(array)` (a copy), `Range(lo, hi)`, `Iterate(seed, f)`
+(endless) and `Replicate(x, n)`; and every dynamic array has `Seq` and
+the common operations directly (a generic type helper). The lambdas' types
+come from the sequence (inference through lambdas):
+
+```pascal
+uses sequences;
+
+names := customers
+  .Filter(function(c) => c.Active and (c.Balance > 0))
+  .OrderBy(function(c) => c.Name)
+  .Map(function(c) => c.Name)
+  .ToArray;
+
+for var n in Iterate(1, function(x) => x * 2).TakeWhile(function(x) => x < 100) do
+  Write(n, ' ');                                      { 1 2 4 ... 64 }
+```
+
+Operations that compare or combine values are generic in what they need
+(`OrderBy<K>` compares keys with `<`, `DistinctBy<K>` and `GroupBy<K>`
+with `=`), so a sequence of records works as long as the keys support
+them; otherwise the error points into the library, with the chain of
+specializations back to the call. The closures are reference counted: a
+sequence kept in a variable of the routine whose variables its lambdas
+use forms a cycle, which is never freed unless broken (`s.Next := nil`)
+before the routine ends. The array helper takes the one helper a type gets
+(`type helper for array of T` of your own would hide it).
+
 **Data-race checks** (objfpc; item 11 of the proposals): two qualifiers
 before a variable's type say how tasks may share it. A `shared` variable
 holds a thread-safe value, which many tasks may use at once: an object of
