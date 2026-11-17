@@ -1,5 +1,7 @@
 # p3 — a Pascal compiler targeting LLVM
 
+Pascal compiler with a modern twist.
+
 `p3` compiles Pascal (ISO 7185, with optional Turbo/Free Pascal extensions)
 to native executables through LLVM. See [PLAN.md](PLAN.md) for the roadmap.
 
