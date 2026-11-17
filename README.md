@@ -956,6 +956,45 @@ are the nested ones. `async`, `await`, `spawn`, `scope`, `detached` and
 `Pool` are not reserved: a visible declaration of the name keeps it a
 name.
 
+**Null-safe references** (objfpc; item 2 of the proposals). Two
+operators work everywhere: `x?.m` is m of x, or the default value of m's
+type (0, '', nil) where x is nil (`x?.Free;` as a statement is skipped),
+and a chain `a?.b?.c` stops at the first nil; `a ?? b` is a, or b where a
+is nil (or where a's `?.` chain stopped). After `{$nullsafe on}` (until
+`{$nullsafe off}`; `{$push}`/`{$pop}` keep it), a class, interface or
+class-reference type written without `?` is never nil, and `T?` may be:
+
+```pascal
+{$nullsafe on}
+var
+  A: TCustomer;    { never nil }
+  B: TCustomer?;   { may be nil }
+begin
+  A := B;                        { error: 'B' may be nil here }
+  if B <> nil then A := B;       { ok: B is narrowed here }
+  Writeln(B?.Name ?? 'unknown');
+end;
+```
+
+The compiler follows the statements of each routine: a `T?` variable or
+parameter is narrowed by `x <> nil`, `Assigned(x)`, `x is T` (also on the
+right of `and`, after `or` fails, in `if` expressions, and after
+`if x = nil then exit`), and by assignments; a later assignment in a loop
+undoes it for the loop's earlier statements. Errors: a value that may be nil
+assigned or passed to a non-null variable, field, parameter or result, or
+whose member is used (including `with`; `Free` takes nil); a non-null
+variable used before it is assigned; a function with a non-null result
+that may end without setting it; and a constructor that may leave one of
+its class's own non-null fields nil (one that calls another constructor of
+its class counts that one's assignments). Fields, global variables in
+routines and function results are not narrowed: copy them to a local
+variable, or use `?.`. Declarations written outside null-safe code (the
+RTL, older units) are trusted: their values count as non-nil, and nil may
+be given to them. `T?` names no new type: it marks a variable, field,
+parameter or result (not a type declaration). Not checked: methods a
+constructor calls before it assigns the fields, and lambdas that assign
+captured variables.
+
 **Iterators** (objfpc; item 14 of the proposals): a routine whose result
 is `iterator T` produces T values one at a time with `yield`. Calling it
 runs nothing: its body starts when the first value is asked for, and each

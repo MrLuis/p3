@@ -206,7 +206,10 @@ class Checker : public StmtVisitor<Checker>,
     OwnedTry *Prev = nullptr;
   };
   struct OwnedFlow {
-    VarDecl *Vars[MaxOwned];
+    /// The owned variables, and (null safety) the references followed:
+    /// for those, Valid means "may be non-nil" and Moved "may be nil".
+    Decl *Vars[MaxOwned];
+    bool Null[MaxOwned] = {};
     unsigned N = 0;
     OwnedState S;
     SourceLocation MoveLoc[MaxOwned];
@@ -243,7 +246,7 @@ class Checker : public StmtVisitor<Checker>,
     if (!Flow || !V->isOwned())
       return -1;
     for (unsigned I = 0; I < Flow->N; ++I)
-      if (Flow->Vars[I] == V)
+      if (Flow->Vars[I] == V && !Flow->Null[I])
         return static_cast<int>(I);
     return -1; // an enclosing routine's: not followed
   }
@@ -354,6 +357,13 @@ class Checker : public StmtVisitor<Checker>,
     Back.join(L.Continues);
     for (unsigned I = 0; I < Flow->N; ++I)
       if ((Back.Moved & L.Used) & (uint64_t(1) << I)) {
+        if (Flow->Null[I]) {
+          Diags.error(L.EntryUse[I],
+                      "'" + Flow->Vars[I]->getName().Spelling +
+                          "' may be nil here: the loop may set it to nil "
+                          "before its next iteration; check it in the loop");
+          continue;
+        }
         Diags.error(L.EntryUse[I],
                     "owned variable '" + Flow->Vars[I]->getName().Spelling +
                         "' may have been moved by an earlier iteration of "
@@ -387,6 +397,431 @@ class Checker : public StmtVisitor<Checker>,
   void ownedTryEnd(OwnedTry &T) {
     if (Flow)
       Flow->Try = T.Prev;
+  }
+
+  //===--------------------------------------------------------------------===//
+  // Null safety (objfpc, {$nullsafe on})
+  //===--------------------------------------------------------------------===//
+  //
+  // In a block whose statements start where {$nullsafe on}, a reference of a
+  // class, interface or class-reference type written there without `?` is
+  // never nil: what is assigned or passed to it, and the object whose
+  // member is used, must not be nil. A value may be nil when it is nil, a
+  // variable, field or function result declared T?, a `?.`, or a followed
+  // variable that the flow of the statements does not show to be non-nil:
+  // the block's T? variables and parameters (narrowed by `x <> nil`,
+  // Assigned(x), `x is T` and assignments), its non-null variables until
+  // they are first assigned, a function's result and a constructor's own
+  // non-null fields (which must be assigned by its end). Declarations
+  // written outside null-safe code are trusted: their values are not nil,
+  // and nil may be given to them. They are followed in the owned
+  // variables' flow (OwnedFlow), with Valid "may be non-nil" and Moved "may
+  // be nil".
+  bool NullSafeHere = false;
+
+  static bool isNullRef(Type *T) {
+    return T && (T->isClass() || T->isInterface() || T->isClassRef());
+  }
+
+  /// The type written for D (a variable, field, property or function's
+  /// result), if any.
+  static TypeSpec *nullSpec(Decl *D) {
+    if (auto *V = llvm::dyn_cast<VarDecl>(D))
+      return V->getTypeSpec();
+    if (auto *F = llvm::dyn_cast<FieldDecl>(D))
+      return F->getTypeSpec();
+    if (auto *P = llvm::dyn_cast<PropertyDecl>(D))
+      return P->getTypeSpec();
+    if (auto *R = llvm::dyn_cast<RoutineDecl>(D))
+      return R->getResultTypeSpec();
+    return nullptr;
+  }
+  /// Is D declared T? (its value may be nil)?
+  static bool declNullable(Decl *D) {
+    TypeSpec *TS = nullSpec(D);
+    return TS && TS->isNullable();
+  }
+  /// Is D a reference that must not be given nil (written without `?` in
+  /// null-safe code; not a lambda's result, whose type is not written)?
+  static bool declNonNull(Decl *D) {
+    TypeSpec *TS = nullSpec(D);
+    return TS && TS->isNullSafe() && !TS->isNullable();
+  }
+
+  int nullIndex(Decl *D) {
+    if (!Flow || !D)
+      return -1;
+    for (unsigned I = 0; I < Flow->N; ++I)
+      if (Flow->Vars[I] == D && Flow->Null[I])
+        return static_cast<int>(I);
+    return -1;
+  }
+
+  /// D is followed from here (if there is room: the owned variables keep
+  /// some), with these states.
+  void nullTrack(Decl *D, bool MayNil, bool MayNonNil) {
+    if (!Flow || Flow->N >= MaxOwned - 8 || nullIndex(D) >= 0)
+      return;
+    unsigned I = Flow->N++;
+    Flow->Vars[I] = D;
+    Flow->Null[I] = true;
+    nullSet(I, MayNil, MayNonNil);
+  }
+
+  void nullSet(unsigned I, bool MayNil, bool MayNonNil) {
+    if (!Flow->S.isLive())
+      return;
+    uint64_t Bit = uint64_t(1) << I;
+    Flow->S.Moved = MayNil ? Flow->S.Moved | Bit : Flow->S.Moved & ~Bit;
+    Flow->S.Valid = MayNonNil ? Flow->S.Valid | Bit : Flow->S.Valid & ~Bit;
+    ownedChanged(I);
+  }
+
+  /// D is not nil here (a condition said so).
+  void nullNarrow(Decl *D) {
+    int I = nullIndex(D);
+    if (I < 0 || !Flow->S.isLive())
+      return;
+    uint64_t Bit = uint64_t(1) << I;
+    Flow->S.Moved &= ~Bit;
+    Flow->S.Valid |= Bit;
+    Flow->S.Entry[I] = NoLoop;
+  }
+
+  /// A use of followed D that needs it not nil: may it be nil? (Once
+  /// reported, a non-null variable not assigned yet counts as assigned.)
+  bool nullUse(unsigned I, SourceLocation Loc, bool Once) {
+    OwnedState &S = Flow->S;
+    if (!S.isLive())
+      return false;
+    uint64_t Bit = uint64_t(1) << I;
+    if (S.Moved & Bit) {
+      if (Once) {
+        S.Moved &= ~Bit;
+        S.Valid |= Bit;
+      }
+      return true;
+    }
+    unsigned D = Flow->Depth;
+    for (OwnedLoop *L = Flow->Loop; L && D >= S.Entry[I]; L = L->Prev, --D)
+      if (!(L->Used & Bit)) {
+        L->Used |= Bit;
+        L->EntryUse[I] = Loc;
+      }
+    return false;
+  }
+
+  /// The declaration a reference to a followed or declared value is to:
+  /// a variable or routine (x), a field of Self (F, Self.F), another
+  /// member (o.F); null otherwise.
+  static Decl *nullDeclOf(Expr *E) {
+    if (auto *N = llvm::dyn_cast<NameRefExpr>(E))
+      return N->getDecl();
+    if (auto *F = llvm::dyn_cast<FieldExpr>(E))
+      return F->getMember();
+    return nullptr;
+  }
+  /// E is F or Self.F (in a method).
+  static bool isSelfMember(Expr *E) {
+    if (auto *N = llvm::dyn_cast<NameRefExpr>(E))
+      return llvm::isa_and_nonnull<FieldDecl>(N->getDecl()) &&
+             (!N->getWith() || N->getWith()->IsSelf);
+    if (auto *F = llvm::dyn_cast<FieldExpr>(E))
+      if (auto *B = llvm::dyn_cast<NameRefExpr>(F->getBase()))
+        return B->getName().Name == "self" &&
+               llvm::isa_and_nonnull<FieldDecl>(F->getMember());
+    return false;
+  }
+
+  /// The followed declaration E refers to, or -1.
+  int nullIndexOf(Expr *E) {
+    while (auto *P = llvm::dyn_cast<ParenExpr>(E))
+      E = P->getInner();
+    Decl *D = nullDeclOf(E);
+    if (!D)
+      return -1;
+    if (llvm::isa<FieldDecl>(D) && !isSelfMember(E))
+      return -1;
+    if (auto *N = llvm::dyn_cast<NameRefExpr>(E);
+        N && N->getWith() && !N->getWith()->IsSelf)
+      return -1;
+    return nullIndex(D);
+  }
+
+  enum class Nilness { NotNil, MaybeNil, IsNil };
+
+  /// May E (checked) be nil here? (A followed reference: as the flow has
+  /// it, without reporting.)
+  Nilness nilness(Expr *E) {
+    while (auto *P = llvm::dyn_cast<ParenExpr>(E))
+      E = P->getInner();
+    Type *T = E->getType();
+    if (T && T->isNil())
+      return Nilness::IsNil;
+    if (!isNullRef(T))
+      return Nilness::NotNil;
+    if (int I = nullIndexOf(E); I >= 0) {
+      uint64_t Bit = uint64_t(1) << I;
+      if (!Flow->S.isLive() || !(Flow->S.Moved & Bit))
+        return Nilness::NotNil;
+      return (Flow->S.Valid & Bit) ? Nilness::MaybeNil : Nilness::IsNil;
+    }
+    if (llvm::isa<SafeNavExpr>(E))
+      return Nilness::MaybeNil;
+    if (auto *C = llvm::dyn_cast<CoalesceExpr>(E))
+      return nilness(C->getRight());
+    if (auto *C = llvm::dyn_cast<CondExpr>(E)) {
+      Nilness A = nilness(C->getThen()), B = nilness(C->getElse());
+      return A == B ? A : Nilness::MaybeNil;
+    }
+    if (auto *B = llvm::dyn_cast<BinaryExpr>(E); B && B->getOp() == BinaryOp::As)
+      return nilness(B->getLHS());
+    Decl *D = nullDeclOf(E);
+    if (auto *C = llvm::dyn_cast<CallExpr>(E))
+      D = C->getDecl();
+    if (auto *IC = llvm::dyn_cast<IndirectCallExpr>(E))
+      if (auto *F = llvm::dyn_cast<FieldExpr>(IC->getCallee()))
+        D = F->getMember();
+    return D && declNullable(D) ? Nilness::MaybeNil : Nilness::NotNil;
+  }
+
+  /// How E is named in a diagnostic.
+  static std::string nullDesc(Expr *E) {
+    while (auto *P = llvm::dyn_cast<ParenExpr>(E))
+      E = P->getInner();
+    if (auto *N = llvm::dyn_cast<NameRefExpr>(E))
+      return "'" + N->getName().Spelling.str() + "'";
+    if (auto *F = llvm::dyn_cast<FieldExpr>(E))
+      return "'" + F->getField().Spelling.str() + "'";
+    if (auto *C = llvm::dyn_cast<CallExpr>(E))
+      return "the result of '" + C->getCallee().Spelling.str() + "'";
+    if (auto *IC = llvm::dyn_cast<IndirectCallExpr>(E))
+      if (auto *F = llvm::dyn_cast<FieldExpr>(IC->getCallee()))
+        return "the result of '" + F->getField().Spelling.str() + "'";
+    if (llvm::isa<SafeNavExpr>(E))
+      return "the value of '?.'";
+    if (E->getType() && E->getType()->isNil())
+      return "nil";
+    return "this value";
+  }
+
+  /// Where E must not be nil (Why: what needs it, "but ..."; Alt: another
+  /// way out, ", or ..."): an error if it may be.
+  void requireNotNil(Expr *E, const std::string &Why,
+                     const std::string &Alt = "") {
+    if (!NullSafeHere || !E->getType() || E->getType()->isError())
+      return;
+    Expr *X = E;
+    while (auto *P = llvm::dyn_cast<ParenExpr>(X))
+      X = P->getInner();
+    if (X->getType()->isNil()) {
+      llvm::StringRef W(Why), A(Alt);
+      W.consume_front("but ");
+      A.consume_front(", or ");
+      Diags.error(X->getBeginLoc(),
+                  "nil cannot be used here: " + W.str() +
+                      (A.empty() ? "" : " (" + A.str() + " if it may be nil)"),
+                  {X->getRange()});
+      return;
+    }
+    if (!isNullRef(X->getType()))
+      return;
+    std::string What = nullDesc(X);
+    if (int I = nullIndexOf(X); I >= 0) {
+      Decl *D = Flow->Vars[I];
+      auto *V = llvm::dyn_cast<VarDecl>(D);
+      bool Unassigned = !declNullable(D) &&
+                        !(V && V->isParam() && !V->getTypeSpec());
+      bool IsNil = !(Flow->S.Valid & (uint64_t(1) << I));
+      if (!nullUse(static_cast<unsigned>(I), X->getBeginLoc(), Unassigned))
+        return;
+      if (Unassigned && (!V || V->getTypeSpec()))
+        Diags.error(X->getBeginLoc(),
+                    What + " may not have been assigned yet (a reference of a "
+                           "non-null type must be assigned before it is used)",
+                    {X->getRange()});
+      else if (IsNil)
+        Diags.error(X->getBeginLoc(), What + " is nil here, " + Why,
+                    {X->getRange()});
+      else
+        Diags.error(X->getBeginLoc(),
+                    What + " may be nil here, " + Why +
+                        "; check it first (if " + What.substr(1, What.size() - 2) +
+                        " <> nil then ...)" + Alt,
+                    {X->getRange()});
+      return;
+    }
+    Nilness N = nilness(X);
+    if (N == Nilness::NotNil)
+      return;
+    Diags.error(X->getBeginLoc(),
+                What + " may be nil here, " + Why +
+                    "; check it first in a local variable" + Alt,
+                {X->getRange()});
+  }
+
+  /// Target := Value (or the initialization of a variable): Value must not
+  /// be nil if Target is a non-null reference; a followed Target gets its
+  /// nil-ness.
+  void nullAssign(Expr *Target, Decl *TD, Expr *Value) {
+    if (!NullSafeHere || !TD)
+      return;
+    Type *T = Value->getType();
+    if (!T || T->isError())
+      return;
+    Type *TT = nullTypeOf(TD);
+    if (!isNullRef(TT))
+      return;
+    if (declNonNull(TD))
+      requireNotNil(Value,
+                    "but '" + TD->getName().Spelling.str() +
+                        "' is of the non-null type " + quoted(TT),
+                    ", or declare '" + TD->getName().Spelling.str() + "' as " +
+                        ("'" + TT->getName() + "?'"));
+    int I = Target ? nullIndexOf(Target) : nullIndex(TD);
+    if (I < 0)
+      return;
+    Nilness N = nilness(Value);
+    nullSet(static_cast<unsigned>(I), N != Nilness::NotNil, N != Nilness::IsNil);
+  }
+
+  static Type *nullTypeOf(Decl *D) {
+    if (auto *V = llvm::dyn_cast<VarDecl>(D))
+      return V->getType();
+    if (auto *F = llvm::dyn_cast<FieldDecl>(D))
+      return F->getType();
+    if (auto *P = llvm::dyn_cast<PropertyDecl>(D))
+      return P->getType();
+    return nullptr;
+  }
+
+  /// The followed declarations a condition shows to be non-nil when it is
+  /// true (WhenTrue) or false.
+  void nullFacts(Expr *C, bool WhenTrue, llvm::SmallVectorImpl<Decl *> &Out) {
+    while (auto *P = llvm::dyn_cast<ParenExpr>(C))
+      C = P->getInner();
+    auto Var = [&](Expr *E) -> Decl * {
+      int I = nullIndexOf(E);
+      return I >= 0 ? Flow->Vars[I] : nullptr;
+    };
+    auto IsNil = [](Expr *E) {
+      while (auto *P = llvm::dyn_cast<ParenExpr>(E))
+        E = P->getInner();
+      return E->getType() && E->getType()->isNil();
+    };
+    if (auto *U = llvm::dyn_cast<UnaryExpr>(C); U && U->getOp() == UnaryOp::Not) {
+      nullFacts(U->getOperand(), !WhenTrue, Out);
+      return;
+    }
+    if (auto *B = llvm::dyn_cast<BinaryExpr>(C)) {
+      BinaryOp Op = B->getOp();
+      if (Op == BinaryOp::Ne || Op == BinaryOp::Eq) {
+        if (WhenTrue != (Op == BinaryOp::Ne))
+          return;
+        Decl *D = IsNil(B->getRHS()) ? Var(B->getLHS())
+                  : IsNil(B->getLHS()) ? Var(B->getRHS()) : nullptr;
+        if (D)
+          Out.push_back(D);
+        return;
+      }
+      if (Op == BinaryOp::Is) {
+        if (Decl *D = Var(B->getLHS()); D && WhenTrue)
+          Out.push_back(D);
+        return;
+      }
+      if (Op == BinaryOp::And || Op == BinaryOp::Or) {
+        bool Both = (Op == BinaryOp::And) == WhenTrue; // each side holds
+        llvm::SmallVector<Decl *, 4> L, R;
+        nullFacts(B->getLHS(), WhenTrue, L);
+        nullFacts(B->getRHS(), WhenTrue, R);
+        if (Both) {
+          Out.append(L.begin(), L.end());
+          Out.append(R.begin(), R.end());
+        } else {
+          for (Decl *D : L)
+            if (llvm::is_contained(R, D))
+              Out.push_back(D);
+        }
+        return;
+      }
+      return;
+    }
+    if (auto *Call = llvm::dyn_cast<CallExpr>(C); Call && WhenTrue &&
+                                                    Call->getArgs().size() == 1)
+      if (auto *BD = llvm::dyn_cast_or_null<BuiltinDecl>(Call->getDecl());
+          BD && BD->getBuiltinKind() == BuiltinKind::Assigned)
+        if (Decl *D = Var(Call->getArgs()[0]))
+          Out.push_back(D);
+  }
+
+  void nullNarrowBy(Expr *C, bool WhenTrue) {
+    if (!NullSafeHere || !Flow)
+      return;
+    llvm::SmallVector<Decl *, 4> Facts;
+    nullFacts(C, WhenTrue, Facts);
+    for (Decl *D : Facts)
+      nullNarrow(D);
+  }
+
+  /// Where the routine being checked ends (its end, or exit): its non-null
+  /// result, and a constructor's non-null fields, must be set.
+  void nullCheckEnd(SourceLocation Loc, bool AtExit) {
+    if (!NullSafeHere || !Flow || !Flow->S.isLive() || !CurRoutine)
+      return;
+    for (unsigned I = 0; I < Flow->N; ++I) {
+      if (!Flow->Null[I] || !(Flow->S.Moved & (uint64_t(1) << I)))
+        continue;
+      Decl *D = Flow->Vars[I];
+      auto *V = llvm::dyn_cast<VarDecl>(D);
+      bool IsResult = V && V->getVarKind() == VarDecl::Result;
+      if (!IsResult && !llvm::isa<FieldDecl>(D))
+        continue;
+      if (!declNonNull(D))
+        continue;
+      Type *T = nullTypeOf(D);
+      std::string Fix = " (assign it on every path, or declare it " +
+                        ("'" + T->getName() + "?'") + ")";
+      if (IsResult)
+        Diags.error(Loc,
+                    "function '" + CurRoutine->getName().Spelling +
+                        "' may return nil" + (AtExit ? " here" : "") +
+                        ": its result of the non-null type " + quoted(T) +
+                        " may not be assigned" + Fix);
+      else
+        Diags.error(Loc,
+                    "constructor '" + CurRoutine->getName().Spelling +
+                        "' may leave field '" + D->getName().Spelling +
+                        "' of the non-null type " + quoted(T) + " nil" +
+                        (AtExit ? " here" : "") + Fix);
+      Flow->S.Moved &= ~(uint64_t(1) << I); // reported once
+    }
+  }
+
+  /// The block's references that are followed from its start: its
+  /// variables, its routine's T? parameters, non-null result and (a
+  /// constructor) own non-null fields.
+  void nullTrackBlock(Block &B) {
+    if (RoutineDecl *R = CurRoutine; R && R->getBody() == &B) {
+      for (VarDecl *P : R->getParams())
+        if (isNullRef(P->getType()) && declNullable(P))
+          nullTrack(P, true, true);
+      if (VarDecl *Res = R->getResultVar();
+          Res && isNullRef(Res->getType()) && !R->isLambda() &&
+          (declNonNull(Res) || declNullable(Res)))
+        nullTrack(Res, true, false); // (nil until assigned)
+      if (R->isConstructor())
+        if (ClassType *C = R->getClass())
+          for (Decl *M : C->getMembers())
+            if (auto *F = llvm::dyn_cast<FieldDecl>(M);
+                F && isNullRef(F->getType()) && declNonNull(F))
+              nullTrack(F, true, false);
+    }
+    for (Decl *D : B.getDecls())
+      if (auto *V = llvm::dyn_cast<VarDecl>(D);
+          V && V->getVarKind() == VarDecl::Variable && isNullRef(V->getType()) &&
+          !V->isTypedConst() && !V->isClassVar() && !V->getAbsolute() &&
+          !V->isExternal() && V->getTypeSpec() && V->getTypeSpec()->isNullSafe())
+        nullTrack(V, true, false); // nil until assigned
   }
 
   /// Functions whose result has been assigned somewhere in their body.
@@ -1773,6 +2208,21 @@ class Checker : public StmtVisitor<Checker>,
     if (Type *T = TS->getResolved())
       return T;
     Type *T = buildType(TS);
+    if (TS->isNullable() && !T->isError()) { // T?
+      if (!isNullRef(T)) {
+        Diags.error(TS->getBeginLoc(),
+                    "'?' makes a class, interface or class-reference type "
+                    "nullable; " + quoted(T) + " is not one",
+                    {TS->getRange()});
+        T = errorType();
+      } else if (!DeclName.empty()) {
+        Diags.error(TS->getBeginLoc(),
+                    "a nullable type cannot be given a name; write " +
+                        ("'" + T->getName() + "?'") + " where it is used",
+                    {TS->getRange()});
+        T = errorType();
+      }
+    }
     auto *Rec = llvm::dyn_cast<RecordType>(T);
     if (!DeclName.empty() && !T->isError() && !llvm::isa<BuiltinType>(T) &&
         !llvm::isa<SpecializeTypeSpec>(TS) && // (so is a specialization)
@@ -7103,10 +7553,18 @@ class Checker : public StmtVisitor<Checker>,
     for (Decl *D : B.getDecls())
       if (auto *V = llvm::dyn_cast<VarDecl>(D); V && V->isOwned())
         ownedDeclare(V);
+    bool SavedNullSafe = NullSafeHere;
+    NullSafeHere = B.isNullSafe() && LangOpts.ObjKeywords;
+    if (NullSafeHere)
+      nullTrackBlock(B);
     std::vector<Decl *> *SavedInline = InlineVars;
     std::vector<Decl *> BlockInline;
     InlineVars = &BlockInline;
     visitStmt(B.getBody());
+    if (CurRoutine && CurRoutine->getBody() == &B)
+      nullCheckEnd(B.getBody()->getRange().getEnd().getLocWithOffset(-3),
+                   /*AtExit=*/false);
+    NullSafeHere = SavedNullSafe;
     InlineVars = SavedInline;
     Flow = SavedFlow;
     if (!BlockInline.empty()) { // they are the block's too, after the others
@@ -7624,8 +8082,10 @@ class Checker : public StmtVisitor<Checker>,
                           PName.Spelling + "' must have exactly "
                       "type " + quoted(PT),
                       {Arg->getRange()});
-        else
+        else {
           checkNotForControlVar(Arg);
+          nullVarArg(Arg, P);
+        }
         continue;
       }
       checkWideToChar(PT, Arg);
@@ -7636,9 +8096,29 @@ class Checker : public StmtVisitor<Checker>,
                         " to parameter '" + PName.Spelling + "' of type " +
                         quoted(PT),
                     {Arg->getRange()});
-      else if (P->isConstRefParam() && AT == PT && !Arg->getConversion() &&
-               isConstRefAddressable(Arg))
-        Arg->setConstRefAddress(); // its address (else a temporary's)
+      else {
+        if (P->isConstRefParam() && AT == PT && !Arg->getConversion() &&
+            isConstRefAddressable(Arg))
+          Arg->setConstRefAddress(); // its address (else a temporary's)
+        if (NullSafeHere && isNullRef(PT) && declNonNull(P))
+          requireNotNil(Arg, "but parameter '" + PName.Spelling.str() +
+                                 "' is of the non-null type " + quoted(PT));
+      }
+    }
+  }
+
+  /// x passed for var or out parameter P: the callee may rely on it not
+  /// being nil (var P: T), and leaves it as P's type says.
+  void nullVarArg(Expr *Arg, VarDecl *P) {
+    if (!NullSafeHere || !isNullRef(P->getType()))
+      return;
+    if (!P->isOutParam() && declNonNull(P))
+      requireNotNil(Arg, "but parameter '" + P->getName().Spelling.str() +
+                             "' is of the non-null type " +
+                             quoted(P->getType()));
+    if (int I = nullIndexOf(Arg); I >= 0) {
+      bool NonNull = declNonNull(P);
+      nullSet(static_cast<unsigned>(I), !NonNull, true);
     }
   }
 
@@ -8998,6 +9478,8 @@ public:
         InlineVars->push_back(V);
       if (V->isOwned())
         ownedDeclare(V);
+      if (NullSafeHere && isNullRef(T)) // (nil until assigned)
+        nullTrack(V, true, false);
     }
     if (!Init)
       return;
@@ -9237,6 +9719,7 @@ public:
                           "' is not allowed in a 'finally' part",
                       {Callee.getRange()});
         if (Args.empty()) {
+          nullCheckEnd(Callee.Loc, /*AtExit=*/true);
           ownedDead();
           return;
         }
@@ -9261,6 +9744,11 @@ public:
         if (VarDecl *OV = ownedVarOf(Args[0]))
           diagOwnedEscape(OV, Args[0], /*Returned=*/true);
         checkLambdaEscape(Args[0], /*Local=*/false);
+        if (NullSafeHere && !T->isError())
+          if (VarDecl *Res = CurRoutine->getResultVar()) {
+            nullAssign(nullptr, Res, Args[0]);
+            nullCheckEnd(Callee.Loc, /*AtExit=*/true);
+          }
         ownedDead();
         Type *RT = CurRoutine->getResultType();
         ResultAssigned.insert(CurRoutine);
@@ -9300,9 +9788,18 @@ public:
       return;
     }
     if (auto *R = llvm::dyn_cast<RoutineDecl>(D);
-        R && (R->isProcedure() || !isISO())) // TP: discard a function result
-      return checkCallArgs(R, Callee, orderedArgs(S, R->getParams(), Callee),
-                           S->getRange());
+        R && (R->isProcedure() || !isISO())) { // TP: discard a function result
+      checkCallArgs(R, Callee, orderedArgs(S, R->getParams(), Callee),
+                    S->getRange());
+      // A constructor's call of another of its class (on Self): that one
+      // sets the fields.
+      if (NullSafeHere && R->isConstructor() && CurRoutine &&
+          CurRoutine->isConstructor() && Flow)
+        for (unsigned I = 0; I < Flow->N; ++I)
+          if (Flow->Null[I] && llvm::isa<FieldDecl>(Flow->Vars[I]))
+            nullSet(I, false, true);
+      return;
+    }
     if (auto *V = llvm::dyn_cast<VarDecl>(D))
       if (auto *RT = llvm::dyn_cast_or_null<RoutineType>(V->getType());
           RT && !RT->isFunction()) {
@@ -9641,6 +10138,16 @@ public:
                   "assigning to " + quoted(TargetTy) +
                       " from incompatible type " + quoted(ValueTy),
                   {Target->getRange(), S->getValue()->getRange()});
+    else if (NullSafeHere) {
+      Decl *TD = nullDeclOf(Target);
+      if (auto *R = llvm::dyn_cast_or_null<RoutineDecl>(TD)) // F := v
+        TD = R->getResultVar();
+      if (auto *N = llvm::dyn_cast<NameRefExpr>(Target);
+          N && llvm::isa_and_nonnull<RoutineDecl>(N->getDecl()) && TD)
+        nullAssign(nullptr, TD, S->getValue());
+      else
+        nullAssign(Target, TD, S->getValue());
+    }
   }
 
   void visitTryStmt(TryStmt *S) {
@@ -9761,9 +10268,11 @@ public:
     DirectSequence = nullptr;
     checkCondition(S->getCond(), "if");
     OwnedState Before = ownedGet();
+    nullNarrowBy(S->getCond(), true);
     visitStmt(S->getThen());
     OwnedState Then = ownedGet();
     ownedSet(Before);
+    nullNarrowBy(S->getCond(), false);
     if (S->getElse())
       visitStmt(S->getElse());
     ownedJoin(Then);
@@ -9775,9 +10284,15 @@ public:
     ownedLoopBegin(Loop);
     checkCondition(S->getCond(), "while");
     OwnedState Before = ownedGet();
+    nullNarrowBy(S->getCond(), true);
     ++LoopDepth;
     visitStmt(S->getBody());
     --LoopDepth;
+    OwnedState Saved = ownedGet();
+    ownedSet(Before); // (it ends where the condition is false)
+    nullNarrowBy(S->getCond(), false);
+    Before = ownedGet();
+    ownedSet(Saved);
     ownedLoopEnd(Loop, Before);
   }
 
@@ -10195,6 +10710,7 @@ public:
       if (T->isError())
         continue;
       if (auto *CT = llvm::dyn_cast<ClassType>(T)) { // objfpc: an object
+        requireNotNil(W->Record, "but its members are used in 'with'");
         Scopes.push_back(std::make_unique<Scope>(Cur, CT, W));
         Cur = Scopes.back().get();
         continue;
@@ -10539,7 +11055,17 @@ public:
       return checkIsAs(E);
     bool Equality = E->getOp() == BinaryOp::Eq || E->getOp() == BinaryOp::Ne;
     Type *L = Equality ? checkComparand(E->getLHS()) : check(E->getLHS());
+    // a and b: b is evaluated where a holds (a or b: where it does not)
+    bool Logic = (E->getOp() == BinaryOp::And || E->getOp() == BinaryOp::Or) &&
+                 NullSafeHere && L->isBoolean();
+    OwnedState BeforeRHS;
+    if (Logic) {
+      BeforeRHS = ownedGet();
+      nullNarrowBy(E->getLHS(), E->getOp() == BinaryOp::And);
+    }
     Type *R = Equality ? checkComparand(E->getRHS()) : check(E->getRHS());
+    if (Logic)
+      ownedJoin(BeforeRHS);
     if (L->isError() || R->isError())
       return errorType();
     if (Equality && (isMethodPointer(L) || isMethodPointer(R)) &&
@@ -11149,14 +11675,148 @@ public:
 
   Type *visitCondExpr(CondExpr *E) { return checkCond(E, nullptr); }
 
+  /// Can a value of type T be nil, and be tested for it (?., ??)?
+  static bool isNilable(Type *T) {
+    return T->isClass() || T->isInterface() || T->isClassRef() ||
+           T->isPointer();
+  }
+
+  /// A reference to hidden variable V (of type T) at Loc.
+  NameRefExpr *hiddenRef(VarDecl *V, SourceLocation Loc) {
+    Identifier Id = V->getName();
+    Id.Loc = Loc;
+    auto *N = Ctx.create<NameRefExpr>(Id);
+    N->setDecl(V);
+    N->setType(V->getType());
+    return N;
+  }
+
+  Type *visitSafeNavExpr(SafeNavExpr *E) { return checkSafeNav(E); }
+
+  /// x?.m: m's type (null for a statement's call).
+  Type *checkSafeNav(SafeNavExpr *E) {
+    Type *BT = check(E->getBase());
+    if (BT->isError())
+      return BT;
+    if (!BT->isClass() && !BT->isInterface() && !BT->isClassRef()) {
+      Diags.error(E->getHole()->getBeginLoc(),
+                  "'?.' needs a class or interface reference, not a value of "
+                  "type " + quoted(BT),
+                  {E->getBase()->getRange()});
+      return errorType();
+    }
+    VarDecl *Tmp = makeHiddenVar(BT, E->getBeginLoc());
+    if (!Tmp) {
+      Diags.error(E->getHole()->getBeginLoc(),
+                  "'?.' can only be written in the statements of a routine "
+                  "or program",
+                  {E->getRange()});
+      return errorType();
+    }
+    Scope NavScope(Cur);
+    NavScope.insert(E->getHole()->getName().Name, Tmp);
+    Scope *Saved = Cur;
+    Cur = &NavScope;
+    if (E->isStatement()) { // the call, where x is not nil
+      Expr *A = E->getAccess();
+      Stmt *Call;
+      if (auto *IC = llvm::dyn_cast<IndirectCallExpr>(A))
+        Call = Ctx.create<IndirectCallStmt>(A->getRange(), IC);
+      else
+        Call = Ctx.create<ExprStmt>(A->getRange(), A);
+      visitStmt(Call);
+      Cur = Saved;
+      E->setLowered(Tmp, nullptr, nullptr, Call);
+      return nullptr;
+    }
+    Type *AT = check(E->getAccess());
+    Cur = Saved;
+    if (AT->isError())
+      return AT;
+    if (AT->isStructured() || AT->isStringLiteral()) {
+      if (AT->isStringLiteral())
+        AT = E->getAccess()->getType();
+      if (AT->isStructured()) {
+        Diags.error(E->getHole()->getBeginLoc(),
+                    "'?.' gives a value of a simple type, a string or a "
+                    "reference, not of type " + quoted(AT),
+                    {E->getAccess()->getRange()});
+        return errorType();
+      }
+    }
+    VarDecl *Res = makeHiddenVar(AT, E->getBeginLoc());
+    E->setLowered(Tmp, Res, hiddenRef(Res, E->getBeginLoc()), nullptr);
+    return AT;
+  }
+
+  /// a ?? b: a, or b where a is nil. The type: a's, b's value being
+  /// assignable to it (or b's, if a's is).
+  Type *visitCoalesceExpr(CoalesceExpr *E) {
+    Expr *L = E->getLeft();
+    while (auto *P = llvm::dyn_cast<ParenExpr>(L))
+      L = P->getInner();
+    auto *Nav = llvm::dyn_cast<SafeNavExpr>(L);
+    Type *LT = check(E->getLeft());
+    if (LT->isError()) {
+      check(E->getRight());
+      return LT;
+    }
+    bool ByNil = isNilable(LT);
+    if (!ByNil && !Nav) {
+      Diags.error(E->getOpLoc(),
+                  "the left side of '??' must be a reference that may be nil "
+                  "(a class, interface or pointer) or a '?.' chain, not a "
+                  "value of type " + quoted(LT),
+                  {E->getLeft()->getRange()});
+      check(E->getRight());
+      return errorType();
+    }
+    Type *RT = checkValueFor(LT, E->getRight());
+    if (RT->isError())
+      return RT;
+    Type *T = nullptr;
+    if (isAssignable(LT, RT) || convertImplicitly(E->getRight(), LT))
+      T = LT;
+    else if (isInferable(RT) && isAssignable(RT, LT))
+      T = RT;
+    if (!T) {
+      Diags.error(E->getOpLoc(),
+                  "the right side of '??' must be assignable to " + quoted(LT) +
+                      ", not a value of type " + quoted(RT),
+                  {E->getRight()->getRange()});
+      return errorType();
+    }
+    VarDecl *Res = makeHiddenVar(T, E->getBeginLoc());
+    if (!Res) {
+      Diags.error(E->getOpLoc(),
+                  "'??' can only be written in the statements of a routine "
+                  "or program",
+                  {E->getRange()});
+      return errorType();
+    }
+    if (!ByNil) { // the last `?.` of the chain tells whether it got there
+      while (auto *Inner = llvm::dyn_cast_or_null<SafeNavExpr>(Nav->getAccess()))
+        Nav = Inner;
+      Nav->setOk(makeHiddenVar(Ctx.getBooleanType(), E->getBeginLoc()));
+    }
+    E->setLowered(Res, hiddenRef(Res, E->getBeginLoc()));
+    return T;
+  }
+
   /// if c then a else b, a value. Want: the type it is a value for, which
   /// both branches then take; where they cannot, and without Want, its
   /// type is the common type of the branches. It becomes an if statement
   /// that assigns the branch chosen to a hidden variable.
   Type *checkCond(CondExpr *E, Type *Want) {
     checkCondition(E->getCond(), "if");
+    OwnedState Before = ownedGet();
+    nullNarrowBy(E->getCond(), true);
     Type *A = Want ? checkValueFor(Want, E->getThen()) : check(E->getThen());
+    OwnedState AfterThen = ownedGet();
+    ownedSet(Before);
+    nullNarrowBy(E->getCond(), false);
     Type *B = Want ? checkValueFor(Want, E->getElse()) : check(E->getElse());
+    ownedJoin(AfterThen);
     if (A->isError() || B->isError())
       return errorType();
     Type *R = nullptr;
@@ -11983,6 +12643,10 @@ public:
     DirectSequence = nullptr;
     Expr *E = S->getExpr();
     Type *T;
+    if (auto *Nav = llvm::dyn_cast<SafeNavExpr>(E); Nav && Nav->isStatement()) {
+      checkSafeNav(Nav); // (no value)
+      return;
+    }
     if (auto *A = llvm::dyn_cast<AwaitExpr>(E))
       T = checkAwait(A, /*NeedValue=*/false);
     else
@@ -12414,7 +13078,21 @@ public:
   }
 
   /// Resolves r.f / obj.member / TFoo.Create; null after a diagnostic.
+  /// (and, in null-safe code, its object must not be nil)
   Decl *resolveMember(FieldExpr *E) {
+    Decl *D = resolveMemberImpl(E);
+    if (D && NullSafeHere && !classNamedBy(E->getBase()) &&
+        isNullRef(E->getBase()->getType()))
+      if (auto *R = llvm::dyn_cast<RoutineDecl>(D);
+          !R || R->getBuiltin() != TObjectMethod::Free) // (Free: nil is fine)
+        requireNotNil(E->getBase(),
+                      "but its member '" + E->getField().Spelling.str() +
+                          "' is used",
+                      ", or use '?." + E->getField().Spelling.str() + "'");
+    return D;
+  }
+
+  Decl *resolveMemberImpl(FieldExpr *E) {
     const Identifier &F = E->getField();
     ClassType *ViaClass = classNamedBy(E->getBase());
     if (auto *N = llvm::dyn_cast<NameRefExpr>(E->getBase()); ViaClass && N)

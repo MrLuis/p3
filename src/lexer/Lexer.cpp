@@ -241,13 +241,35 @@ void Lexer::handleDirective(const char *Start, llvm::StringRef Text) {
 
   // {$push} / {$pop}: save and restore the local switches (at most 21
   // levels, as in FPC).
+  // {$nullsafe on|off|+|-} (p3's own, objfpc): in the routines that start
+  // after it, a plain class or interface type is never nil (T? may be).
+  if (Word.equals_insensitive("nullsafe")) {
+    llvm::StringRef A = Arg.trim();
+    bool On;
+    if (A.equals_insensitive("on") || A == "+")
+      On = true;
+    else if (A.equals_insensitive("off") || A == "-")
+      On = false;
+    else {
+      Diags.warning(locOf(Start), "expected {$nullsafe on} or {$nullsafe off}; "
+                                  "ignored");
+      return;
+    }
+    if (LangOpts.Mode != LangMode::ObjFPC) {
+      Diags.warning(locOf(Start), "{$nullsafe} needs --mode=objfpc; ignored");
+      return;
+    }
+    NullSafe = On;
+    return;
+  }
+
   if (Word.equals_insensitive("push") && Arg.empty()) {
     if (SwitchStack.size() >= 21) {
       Diags.error(locOf(Start), "too many levels of {$push} (at most 21)");
       return;
     }
     SavedSwitches S{LongStrings, CorbaInterfaces, InlineOn, ScopedEnums,
-                    PackRecords, CheckDirectives::Default,
+                    NullSafe, PackRecords, CheckDirectives::Default,
                     CheckDirectives::Default};
     if (Directives) {
       S.Range = Directives->stateAt(CheckDirectives::Range, locOf(Start));
@@ -266,6 +288,7 @@ void Lexer::handleDirective(const char *Start, llvm::StringRef Text) {
     CorbaInterfaces = S.CorbaInterfaces;
     InlineOn = S.InlineOn;
     ScopedEnums = S.ScopedEnums;
+    NullSafe = S.NullSafe;
     PackRecords = S.PackRecords;
     if (Directives) {
       Directives->addState(locOf(Start), BufBegin, BufEnd,
@@ -1415,6 +1438,13 @@ void Lexer::lex(Token &T) {
     case '[': K = tok::l_square; break;
     case ']': K = tok::r_square; break;
     case '^': K = tok::caret; break;
+    case '?': // T?, x?.m, a ?? b (objfpc)
+      if (!LangOpts.ObjKeywords)
+        break;
+      K = tok::question;
+      if (*Cur == '.' && Cur[1] != '.') { ++Cur; K = tok::question_period; }
+      else if (*Cur == '?') { ++Cur; K = tok::question_question; }
+      break;
     case '@':
       // ISO 7185 allows '@' as an alternative spelling of '^'.
       K = LangOpts.TPKeywords ? tok::at : tok::caret;

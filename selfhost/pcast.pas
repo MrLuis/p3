@@ -55,6 +55,7 @@ type
     nkBinary, nkCall, nkFormatted, nkIndex, nkField, nkNil, nkDeref,
     nkSetCtor, nkAddrOf, nkAggregate, nkIndirectCall, nkInherited, nkMove,
     nkTemplate, nkTuple, nkNamedArg, nkCondExpr, nkAwait, nkSpawn,
+    nkSafeNav, nkCoalesce,
     { statements }
     nkEmpty, nkCompound, nkProcCall, nkAssign, nkIf, nkWhile, nkRepeat,
     nkFor, nkCase, nkWith, nkLabeled, nkGoto, nkIndirectCallStmt,
@@ -232,6 +233,19 @@ type
         tmp, the value }
       nkCondExpr: (ceCond, ceThen, ceElse: PNode; ceLong: boolean;
                    ceLowered, ceResult: PNode);
+      { x?.m (objfpc), safe navigation: navAccess (the selectors from ?. on,
+        applied to navHole, which stands for x's value) where x is not nil;
+        else the default value of its type, or nothing for a call made as
+        a statement (navStatement). Sema: hidden variables for x's value
+        (navTmp), the value (navRes, navResRef) and, for x?.m ?? d (the last
+        ?. of the chain), one that tells whether m was reached (navOk); a
+        statement's call (navCall) }
+      nkSafeNav: (navBase, navAccess, navHole: PNode; navStatement: boolean;
+                  navTmp, navRes, navOk: PDecl; navResRef, navCall: PNode);
+      { a ?? b (objfpc): a, or b where a is nil (or where a's ?. chain
+        stopped). Sema: the hidden variable that holds the value }
+      nkCoalesce: (coLeft, coRight: PNode; coOpLoc: TLoc; coRes: PDecl;
+                   coResRef: PNode);
       { await e; spawn call (spawnPool: Pool.Run(call)) }
       nkAwait: (awaitOperand: PNode);
       nkSpawn: (spawnCall: PNode; spawnPool: boolean);
@@ -389,6 +403,8 @@ type
     kind: TTypeSpecKind;
     b, e: TLoc;
     resolved: PType; { Sema }
+    { T? (objfpc): a reference that may be nil; written where $nullsafe on }
+    tsNullable, tsNullSafe: boolean;
     case TTypeSpecKind of
       { named: the type name; pointer: the pointee's name; class ref
         (objfpc): class of tname }
@@ -471,6 +487,7 @@ type
   TBlock = record
     decls: TPtrList; { of PDecl, in source order }
     body: PNode;     { nkCompound }
+    nullSafe: boolean; { $nullsafe on where its statements start }
   end;
 
   TDeclKind = (dkProgram, dkVar, dkConst, dkType, dkField, dkRoutine,

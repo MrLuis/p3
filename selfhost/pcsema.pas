@@ -1976,7 +1976,10 @@ type
   end;
   POwnedFlow = ^TOwnedFlow;
   TOwnedFlow = record
+    { the owned variables, and (null safety) the references followed: for
+      those, valid means "may be non-nil" and moved "may be nil" }
     vars: array[0..maxOwned - 1] of PDecl;
+    isNull: array[0..maxOwned - 1] of boolean;
     n: longint;
     s: TOwnedState;
     moveLoc: array[0..maxOwned - 1] of TLoc;
@@ -2046,7 +2049,7 @@ begin
   if (flow = nil) or not v^.isOwned then
     exit;
   for i := 0 to flow^.n - 1 do
-    if flow^.vars[i] = v then
+    if (flow^.vars[i] = v) and not flow^.isNull[i] then
       exit(i);
 end;
 
@@ -2183,6 +2186,7 @@ begin
     exit;
   end;
   flow^.vars[flow^.n] := v;
+  flow^.isNull[flow^.n] := false;
   flow^.moveLoc[flow^.n] := 0;
   flow^.changed[flow^.n] := 0;
   flow^.n := flow^.n + 1;
@@ -2220,7 +2224,15 @@ begin
   back := flow^.s;
   ownedJoinInto(back, l.continues);
   for i := 0 to flow^.n - 1 do
-    if ((back.moved and l.used) and (int64(1) shl i)) <> 0 then
+    if (((back.moved and l.used) and (int64(1) shl i)) <> 0) and flow^.isNull[i] then
+    begin
+      ms('''');
+      maN(flow^.vars[i]^.ident.spelling);
+      ma(''' may be nil here: the loop may set it to nil before its next ' +
+         'iteration; check it in the loop');
+      err(l.entryUse[i]);
+    end
+    else if ((back.moved and l.used) and (int64(1) shl i)) <> 0 then
     begin
       ms('owned variable ''');
       maN(flow^.vars[i]^.ident.spelling);
@@ -2265,6 +2277,604 @@ procedure ownedTryEnd(var t: TOwnedTry);
 begin
   if flow <> nil then
     flow^.tryPart := t.prev;
+end;
+
+{ --- Null safety (objfpc, $nullsafe on) ---
+
+  In a block whose statements start where $nullsafe on, a reference of a
+  class, interface or class-reference type written there without ? is
+  never nil: what is assigned or passed to it, and the object whose member
+  is used, must not be nil. A value may be nil when it is nil, a variable,
+  field or function result declared T?, a ?., or a followed variable that
+  the flow of the statements does not show to be non-nil: the block's T?
+  variables and parameters (narrowed by x <> nil, Assigned(x), x is T and
+  assignments), its non-null variables until they are first assigned, a
+  function's result and a constructor's own non-null fields (which must be
+  assigned by its end). Declarations written outside null-safe code are
+  trusted: their values are not nil, and nil may be given to them. They
+  are followed in the owned variables' flow, with valid "may be non-nil"
+  and moved "may be nil". }
+
+const
+  nnNotNil = 0;
+  nnMaybeNil = 1;
+  nnIsNil = 2;
+  { what needs a value not nil (requireNotNil) }
+  nwAssign = 1;
+  nwParam = 2;
+  nwMember = 3;
+  nwWith = 4;
+
+var
+  nullSafeHere: boolean;
+
+function isNullRef(t: PType): boolean;
+begin
+  isNullRef := (t <> nil) and (t^.kind in [tyClass, tyInterface, tyClassRef]);
+end;
+
+{ The type written for d (a variable, field, property or function's
+  result), if any. }
+function nullSpec(d: PDecl): PTypeSpec;
+begin
+  nullSpec := nil;
+  case d^.kind of
+    dkVar: nullSpec := d^.varSpec;
+    dkField: nullSpec := d^.fieldSpec;
+    dkProperty: nullSpec := d^.propSpec;
+    dkRoutine: nullSpec := d^.resultSpec;
+  end;
+end;
+
+{ Is d declared T? (its value may be nil)? }
+function declNullable(d: PDecl): boolean;
+var
+  ts: PTypeSpec;
+begin
+  ts := nullSpec(d);
+  declNullable := (ts <> nil) and ts^.tsNullable;
+end;
+
+{ Is d a reference that must not be given nil (written without ? in
+  null-safe code; not a lambda's result, whose type is not written)? }
+function declNonNull(d: PDecl): boolean;
+var
+  ts: PTypeSpec;
+begin
+  ts := nullSpec(d);
+  declNonNull := (ts <> nil) and ts^.tsNullSafe and not ts^.tsNullable;
+end;
+
+function nullTypeOf(d: PDecl): PType;
+begin
+  nullTypeOf := nil;
+  case d^.kind of
+    dkVar: nullTypeOf := d^.varType;
+    dkField: nullTypeOf := d^.fieldType;
+    dkProperty: nullTypeOf := d^.propType;
+  end;
+end;
+
+function nullIndex(d: PDecl): longint;
+var
+  i: longint;
+begin
+  nullIndex := -1;
+  if (flow = nil) or (d = nil) then
+    exit;
+  for i := 0 to flow^.n - 1 do
+    if (flow^.vars[i] = d) and flow^.isNull[i] then
+      exit(i);
+end;
+
+procedure nullSet(i: longint; mayNil, mayNonNil: boolean);
+var
+  bit: int64;
+begin
+  if not ownedLive(flow^.s) then
+    exit;
+  bit := int64(1) shl i;
+  if mayNil then
+    flow^.s.moved := flow^.s.moved or bit
+  else
+    flow^.s.moved := flow^.s.moved and not bit;
+  if mayNonNil then
+    flow^.s.valid := flow^.s.valid or bit
+  else
+    flow^.s.valid := flow^.s.valid and not bit;
+  ownedChanged(i);
+end;
+
+{ d is followed from here (if there is room: the owned variables keep
+  some), with these states. }
+procedure nullTrack(d: PDecl; mayNil, mayNonNil: boolean);
+var
+  i: longint;
+begin
+  if (flow = nil) or (flow^.n >= maxOwned - 8) or (nullIndex(d) >= 0) then
+    exit;
+  i := flow^.n;
+  flow^.n := flow^.n + 1;
+  flow^.vars[i] := d;
+  flow^.isNull[i] := true;
+  flow^.moveLoc[i] := 0;
+  flow^.changed[i] := 0;
+  nullSet(i, mayNil, mayNonNil);
+end;
+
+{ d is not nil here (a condition said so). }
+procedure nullNarrow(d: PDecl);
+var
+  i: longint;
+  bit: int64;
+begin
+  i := nullIndex(d);
+  if i < 0 then
+    exit;
+  if not ownedLive(flow^.s) then
+    exit;
+  bit := int64(1) shl i;
+  flow^.s.moved := flow^.s.moved and not bit;
+  flow^.s.valid := flow^.s.valid or bit;
+  flow^.s.entry[i] := noLoop;
+end;
+
+{ A use of followed variable i that needs it not nil: may it be nil?
+  (once: reported once, then it counts as assigned) }
+function nullUse(i: longint; loc: TLoc; once: boolean): boolean;
+var
+  bit: int64;
+  d: longint;
+  l: POwnedLoop;
+begin
+  nullUse := false;
+  if not ownedLive(flow^.s) then
+    exit;
+  bit := int64(1) shl i;
+  if (flow^.s.moved and bit) <> 0 then
+  begin
+    if once then
+    begin
+      flow^.s.moved := flow^.s.moved and not bit;
+      flow^.s.valid := flow^.s.valid or bit;
+    end;
+    exit(true);
+  end;
+  d := flow^.depth;
+  l := flow^.loop;
+  while (l <> nil) and (d >= flow^.s.entry[i]) do
+  begin
+    if (l^.used and bit) = 0 then
+    begin
+      l^.used := l^.used or bit;
+      l^.entryUse[i] := loc;
+    end;
+    l := l^.prev;
+    d := d - 1;
+  end;
+end;
+
+function stripParens(e: PNode): PNode;
+begin
+  while e^.kind = nkParen do
+    e := e^.inner;
+  stripParens := e;
+end;
+
+{ The declaration a reference is to: a variable or routine (x), a member
+  (F, Self.F, o.F); nil otherwise. }
+function nullDeclOf(e: PNode): PDecl;
+begin
+  nullDeclOf := nil;
+  if e^.kind = nkNameRef then
+    nullDeclOf := e^.refDecl
+  else if e^.kind = nkField then
+    nullDeclOf := e^.fieldDecl;
+end;
+
+{ e is F or Self.F (in a method). }
+function isSelfMember(e: PNode): boolean;
+begin
+  isSelfMember := false;
+  if e^.kind = nkNameRef then
+    isSelfMember := (e^.refDecl <> nil) and (e^.refDecl^.kind = dkField) and
+                    ((e^.refWith = nil) or e^.refWith^.isSelf)
+  else if (e^.kind = nkField) and (e^.base^.kind = nkNameRef) then
+    isSelfMember := (e^.base^.ref.name = intern('self')) and (e^.fieldDecl <> nil) and
+                    (e^.fieldDecl^.kind = dkField);
+end;
+
+{ The followed declaration e refers to, or -1. }
+function nullIndexOf(e: PNode): longint;
+var
+  d: PDecl;
+begin
+  nullIndexOf := -1;
+  e := stripParens(e);
+  d := nullDeclOf(e);
+  if d = nil then
+    exit;
+  if (d^.kind = dkField) and not isSelfMember(e) then
+    exit;
+  if (e^.kind = nkNameRef) and (e^.refWith <> nil) and not e^.refWith^.isSelf then
+    exit;
+  nullIndexOf := nullIndex(d);
+end;
+
+{ May e (checked) be nil here? (A followed reference: as the flow has it,
+  without reporting.) nnNotNil, nnMaybeNil or nnIsNil. }
+function nilness(e: PNode): longint;
+var
+  t: PType;
+  i, a, b: longint;
+  bit: int64;
+  d: PDecl;
+begin
+  e := stripParens(e);
+  t := e^.typ;
+  if (t <> nil) and (t^.kind = tyNil) then
+    exit(nnIsNil);
+  if not isNullRef(t) then
+    exit(nnNotNil);
+  i := nullIndexOf(e);
+  if i >= 0 then
+  begin
+    bit := int64(1) shl i;
+    if not ownedLive(flow^.s) or ((flow^.s.moved and bit) = 0) then
+      exit(nnNotNil);
+    if (flow^.s.valid and bit) <> 0 then
+      exit(nnMaybeNil);
+    exit(nnIsNil);
+  end;
+  if e^.kind = nkSafeNav then
+    exit(nnMaybeNil);
+  if e^.kind = nkCoalesce then
+    exit(nilness(e^.coRight));
+  if e^.kind = nkCondExpr then
+  begin
+    a := nilness(e^.ceThen);
+    b := nilness(e^.ceElse);
+    if a = b then
+      exit(a);
+    exit(nnMaybeNil);
+  end;
+  if (e^.kind = nkBinary) and (e^.bop = boAs) then
+    exit(nilness(e^.lhs));
+  d := nullDeclOf(e);
+  if e^.kind = nkCall then
+    d := e^.callDecl;
+  if (e^.kind = nkIndirectCall) and (e^.calleeExpr^.kind = nkField) then
+    d := e^.calleeExpr^.fieldDecl;
+  if (d <> nil) and declNullable(d) then
+    nilness := nnMaybeNil
+  else
+    nilness := nnNotNil;
+end;
+
+{ How e is named in a diagnostic (appended to msg). }
+procedure maNullDesc(e: PNode);
+begin
+  e := stripParens(e);
+  if e^.kind = nkNameRef then
+  begin
+    ma('''');
+    maN(e^.ref.spelling);
+    ma('''');
+  end
+  else if e^.kind = nkField then
+  begin
+    ma('''');
+    maN(e^.fieldName.spelling);
+    ma('''');
+  end
+  else if e^.kind = nkCall then
+  begin
+    ma('the result of ''');
+    maN(e^.callee.spelling);
+    ma('''');
+  end
+  else if (e^.kind = nkIndirectCall) and (e^.calleeExpr^.kind = nkField) then
+  begin
+    ma('the result of ''');
+    maN(e^.calleeExpr^.fieldName.spelling);
+    ma('''');
+  end
+  else if e^.kind = nkSafeNav then
+    ma('the value of ''?.''')
+  else if (e^.typ <> nil) and (e^.typ^.kind = tyNil) then
+    ma('nil')
+  else
+    ma('this value');
+end;
+
+{ The name of followed e (a variable, or a field of Self). }
+function nullName(e: PNode): PName;
+begin
+  e := stripParens(e);
+  if e^.kind = nkNameRef then
+    nullName := e^.ref.spelling
+  else
+    nullName := e^.fieldName.spelling;
+end;
+
+{ What needs the value (why: nwAssign, nwParam, nwMember, nwWith; name:
+  the variable's, parameter's or member's; t: its type), with "but ". }
+procedure maNullWhy(why: longint; name: PName; t: PType; withBut: boolean);
+begin
+  if withBut then
+    ma('but ');
+  case why of
+    nwAssign:
+      begin
+        ma('''');
+        maN(name);
+        ma(''' is of the non-null type ');
+        maT(t);
+      end;
+    nwParam:
+      begin
+        ma('parameter ''');
+        maN(name);
+        ma(''' is of the non-null type ');
+        maT(t);
+      end;
+    nwMember:
+      begin
+        ma('its member ''');
+        maN(name);
+        ma(''' is used');
+      end;
+    nwWith: ma('its members are used in ''with''');
+  end;
+end;
+
+function nullHasAlt(why: longint): boolean;
+begin
+  nullHasAlt := (why = nwAssign) or (why = nwMember);
+end;
+
+{ Another way out, with ", or ". }
+procedure maNullAlt(why: longint; name: PName; t: PType; withOr: boolean);
+begin
+  if not nullHasAlt(why) then
+    exit;
+  if withOr then
+    ma(', or ');
+  if why = nwAssign then
+  begin
+    ma('declare ''');
+    maN(name);
+    ma(''' as ''');
+    bufAddTypeName(msg, t);
+    ma('?''');
+  end
+  else
+  begin
+    ma('use ''?.');
+    maN(name);
+    ma('''');
+  end;
+end;
+
+{ Where e must not be nil: an error if it may be. }
+procedure requireNotNil(e: PNode; why: longint; name: PName; t: PType);
+var
+  x: PNode;
+  i: longint;
+  d: PDecl;
+  unassigned, isNil: boolean;
+begin
+  if not nullSafeHere or (e^.typ = nil) or isError(e^.typ) then
+    exit;
+  x := stripParens(e);
+  if x^.typ^.kind = tyNil then
+  begin
+    ms('nil cannot be used here: ');
+    maNullWhy(why, name, t, false);
+    if nullHasAlt(why) then
+    begin
+      ma(' (');
+      maNullAlt(why, name, t, false);
+      ma(' if it may be nil)');
+    end;
+    errR(x^.b, nodeRange(x));
+    exit;
+  end;
+  if not isNullRef(x^.typ) then
+    exit;
+  i := nullIndexOf(x);
+  if i >= 0 then
+  begin
+    d := flow^.vars[i];
+    unassigned := not declNullable(d) and
+                  not ((d^.kind = dkVar) and (d^.varKind in [vkValueParam, vkVarParam,
+                       vkConstParam]) and (d^.varSpec = nil));
+    isNil := (flow^.s.valid and (int64(1) shl i)) = 0;
+    if not nullUse(i, x^.b, unassigned) then
+      exit;
+    ms('');
+    maNullDesc(x);
+    if unassigned and ((d^.kind <> dkVar) or (d^.varSpec <> nil)) then
+      ma(' may not have been assigned yet (a reference of a non-null type ' +
+         'must be assigned before it is used)')
+    else if isNil then
+    begin
+      ma(' is nil here, ');
+      maNullWhy(why, name, t, true);
+    end
+    else
+    begin
+      ma(' may be nil here, ');
+      maNullWhy(why, name, t, true);
+      ma('; check it first (if ');
+      maN(nullName(x));
+      ma(' <> nil then ...)');
+      maNullAlt(why, name, t, true);
+    end;
+    errR(x^.b, nodeRange(x));
+    exit;
+  end;
+  if nilness(x) = nnNotNil then
+    exit;
+  ms('');
+  maNullDesc(x);
+  ma(' may be nil here, ');
+  maNullWhy(why, name, t, true);
+  ma('; check it first in a local variable');
+  maNullAlt(why, name, t, true);
+  errR(x^.b, nodeRange(x));
+end;
+
+{ target := value (or the initialization of a variable): value must not be
+  nil if target is a non-null reference; a followed target gets its
+  nil-ness. }
+procedure nullAssign(target: PNode; td: PDecl; value: PNode);
+var
+  tt: PType;
+  i, n: longint;
+begin
+  if not nullSafeHere or (td = nil) then
+    exit;
+  if (value^.typ = nil) or isError(value^.typ) then
+    exit;
+  tt := nullTypeOf(td);
+  if not isNullRef(tt) then
+    exit;
+  if declNonNull(td) then
+    requireNotNil(value, nwAssign, td^.ident.spelling, tt);
+  if target <> nil then
+    i := nullIndexOf(target)
+  else
+    i := nullIndex(td);
+  if i < 0 then
+    exit;
+  n := nilness(value);
+  nullSet(i, n <> nnNotNil, n <> nnIsNil);
+end;
+
+function nullListHas(const l: TPtrList; d: PDecl): boolean;
+var
+  i: longint;
+begin
+  nullListHas := false;
+  for i := 0 to l.count - 1 do
+    if listGet(l, i) = d then
+      exit(true);
+end;
+
+{ The followed declarations a condition shows to be non-nil when it is
+  true (whenTrue) or false. }
+procedure nullFacts(c: PNode; whenTrue: boolean; var out_: TPtrList);
+var
+  l, r: TPtrList;
+  i: longint;
+  d: PDecl;
+  both: boolean;
+
+  function varOf(e: PNode): PDecl;
+  var
+    k: longint;
+  begin
+    k := nullIndexOf(e);
+    if k >= 0 then
+      varOf := flow^.vars[k]
+    else
+      varOf := nil;
+  end;
+
+  function isNilNode(e: PNode): boolean;
+  begin
+    e := stripParens(e);
+    isNilNode := (e^.typ <> nil) and (e^.typ^.kind = tyNil);
+  end;
+
+begin
+  c := stripParens(c);
+  if (c^.kind = nkUnary) and (c^.uop = uoNot) then
+  begin
+    nullFacts(c^.operand, not whenTrue, out_);
+    exit;
+  end;
+  if c^.kind = nkBinary then
+  begin
+    if (c^.bop = boNe) or (c^.bop = boEq) then
+    begin
+      if whenTrue <> (c^.bop = boNe) then
+        exit;
+      d := nil;
+      if isNilNode(c^.rhs) then
+        d := varOf(c^.lhs)
+      else if isNilNode(c^.lhs) then
+        d := varOf(c^.rhs);
+      if d <> nil then
+        listAdd(out_, d);
+      exit;
+    end;
+    if c^.bop = boIs then
+    begin
+      d := varOf(c^.lhs);
+      if (d <> nil) and whenTrue then
+        listAdd(out_, d);
+      exit;
+    end;
+    if (c^.bop = boAnd) or (c^.bop = boOr) then
+    begin
+      both := (c^.bop = boAnd) = whenTrue; { each side holds }
+      listInit(l);
+      listInit(r);
+      nullFacts(c^.lhs, whenTrue, l);
+      nullFacts(c^.rhs, whenTrue, r);
+      if both then
+      begin
+        for i := 0 to l.count - 1 do
+          listAdd(out_, listGet(l, i));
+        for i := 0 to r.count - 1 do
+          listAdd(out_, listGet(r, i));
+      end
+      else
+        for i := 0 to l.count - 1 do
+          if nullListHas(r, PDecl(listGet(l, i))) then
+            listAdd(out_, listGet(l, i));
+      exit;
+    end;
+    exit;
+  end;
+  if (c^.kind = nkCall) and whenTrue and (c^.args.count = 1) and
+     (c^.callDecl <> nil) and (c^.callDecl^.kind = dkBuiltin) and
+     (c^.callDecl^.builtin = bkAssigned) then
+  begin
+    d := varOf(PNode(listGet(c^.args, 0)));
+    if d <> nil then
+      listAdd(out_, d);
+  end;
+end;
+
+{ x passed for var or out parameter p: the callee may rely on it not being
+  nil (var p: T), and leaves it as p's type says. }
+procedure nullVarArg(arg: PNode; p: PDecl);
+var
+  i: longint;
+begin
+  if not nullSafeHere or not isNullRef(p^.varType) then
+    exit;
+  if not p^.isOut and declNonNull(p) then
+    requireNotNil(arg, nwParam, p^.ident.spelling, p^.varType);
+  i := nullIndexOf(arg);
+  if i >= 0 then
+    nullSet(i, not declNonNull(p), true);
+end;
+
+procedure nullNarrowBy(c: PNode; whenTrue: boolean);
+var
+  facts: TPtrList;
+  i: longint;
+begin
+  if not nullSafeHere or (flow = nil) then
+    exit;
+  listInit(facts);
+  nullFacts(c, whenTrue, facts);
+  for i := 0 to facts.count - 1 do
+    nullNarrow(PDecl(listGet(facts, i)));
 end;
 
 { The object of the owned variable ov would be kept (or returned)
@@ -3497,6 +4107,25 @@ begin
   if ts^.resolved <> nil then
     exit(ts^.resolved);
   t := buildType(ts);
+  if ts^.tsNullable and not isError(t) then { T? }
+  begin
+    if not isNullRef(t) then
+    begin
+      ms('''?'' makes a class, interface or class-reference type nullable; ');
+      maT(t);
+      ma(' is not one');
+      errR(ts^.b, specRange(ts));
+      t := errorType;
+    end
+    else if declName <> nil then
+    begin
+      ms('a nullable type cannot be given a name; write ''');
+      bufAddTypeName(msg, t);
+      ma('?'' where it is used');
+      errR(ts^.b, specRange(ts));
+      t := errorType;
+    end;
+  end;
   if (declName <> nil) and not isError(t) and not isBuiltinType(t) and
      (ts^.kind <> tsSpecialize) and { (so is a specialization) }
      not ((t^.kind = tyRecord) and t^.isTupleRecord) and { (a tuple type is shared by its uses) }
@@ -9778,6 +10407,104 @@ end;
 
 procedure visitStmt(s: PNode); forward;
 
+{ Where the routine being checked ends (its end, or exit): its non-null
+  result, and a constructor's non-null fields, must be set. }
+procedure nullCheckEnd(loc: TLoc; atExit: boolean);
+var
+  i: longint;
+  d: PDecl;
+  t: PType;
+  isResult: boolean;
+begin
+  if not nullSafeHere or (flow = nil) or not ownedLive(flow^.s) or (curRoutine = nil) then
+    exit;
+  for i := 0 to flow^.n - 1 do
+  begin
+    if not flow^.isNull[i] or ((flow^.s.moved and (int64(1) shl i)) = 0) then
+      continue;
+    d := flow^.vars[i];
+    isResult := (d^.kind = dkVar) and (d^.varKind = vkResult);
+    if not isResult and (d^.kind <> dkField) then
+      continue;
+    if not declNonNull(d) then
+      continue;
+    t := nullTypeOf(d);
+    if isResult then
+    begin
+      ms('function ''');
+      maN(curRoutine^.ident.spelling);
+      ma(''' may return nil');
+      if atExit then
+        ma(' here');
+      ma(': its result of the non-null type ');
+      maT(t);
+      ma(' may not be assigned');
+    end
+    else
+    begin
+      ms('constructor ''');
+      maN(curRoutine^.ident.spelling);
+      ma(''' may leave field ''');
+      maN(d^.ident.spelling);
+      ma(''' of the non-null type ');
+      maT(t);
+      ma(' nil');
+      if atExit then
+        ma(' here');
+    end;
+    ma(' (assign it on every path, or declare it ''');
+    bufAddTypeName(msg, t);
+    ma('?'')');
+    err(loc);
+    flow^.s.moved := flow^.s.moved and not (int64(1) shl i); { reported once }
+  end;
+end;
+
+{ The block's references that are followed from its start: its
+  variables, its routine's T? parameters, result and (a constructor) own
+  non-null fields. }
+procedure nullTrackBlock(b: PBlock);
+var
+  r, p, res, m, v: PDecl;
+  c: PType;
+  i: longint;
+begin
+  r := curRoutine;
+  if (r <> nil) and (r^.body = b) then
+  begin
+    for i := 0 to r^.params.count - 1 do
+    begin
+      p := PDecl(listGet(r^.params, i));
+      if isNullRef(p^.varType) and declNullable(p) then
+        nullTrack(p, true, true);
+    end;
+    res := r^.resultVar;
+    if (res <> nil) and isNullRef(res^.varType) and not r^.isLambda and
+       (declNonNull(res) or declNullable(res)) then
+      nullTrack(res, true, false); { (nil until assigned) }
+    if r^.methodKind = mtConstructor then
+    begin
+      c := r^.ownerClass;
+      if (c <> nil) and (c^.kind = tyClass) then
+        for i := 0 to c^.classMembers.count - 1 do
+        begin
+          m := PDecl(listGet(c^.classMembers, i));
+          if (m^.kind = dkField) and isNullRef(m^.fieldType) and declNonNull(m) then
+            nullTrack(m, true, false);
+        end;
+    end;
+  end;
+  for i := 0 to b^.decls.count - 1 do
+  begin
+    v := PDecl(listGet(b^.decls, i));
+    if (v^.kind = dkVar) and (v^.varKind = vkVariable) and isNullRef(v^.varType) and
+       not ((v^.init <> nil) and not v^.isInitVar) and not v^.isClassVar and
+       (v^.absTarget = nil) and not v^.varExternal and (v^.varSpec <> nil) and
+       v^.varSpec^.tsNullSafe then
+      nullTrack(v, true, false); { nil until assigned }
+  end;
+end;
+
 procedure finishBlock(b: PBlock; warnUnused: boolean);
 var
   i, savedHandlers, savedFinally: longint;
@@ -9787,6 +10514,7 @@ var
   blockFlow: TOwnedFlow;
   savedInline: PPtrList;
   blockInline: TPtrList;
+  savedNullSafe: boolean;
 begin
   { ISO 7185 6.1.4: every forward declaration needs a definition in the
     same block }
@@ -9816,6 +10544,8 @@ begin
   blockFlow.tryPart := nil;
   ownedClear(blockFlow.s);
   blockFlow.s.valid := liveBit;
+  for i := 0 to maxOwned - 1 do
+    blockFlow.isNull[i] := false;
   flow := @blockFlow;
   for i := 0 to b^.decls.count - 1 do
   begin
@@ -9823,10 +10553,17 @@ begin
     if (d^.kind = dkVar) and d^.isOwned then
       ownedDeclare(d);
   end;
+  savedNullSafe := nullSafeHere;
+  nullSafeHere := b^.nullSafe and (mode = lmObjFPC);
+  if nullSafeHere then
+    nullTrackBlock(b);
   savedInline := inlineVars;
   listInit(blockInline);
   inlineVars := @blockInline;
   visitStmt(b^.body);
+  if (curRoutine <> nil) and (curRoutine^.body = b) then
+    nullCheckEnd(b^.body^.e - 3, false);
+  nullSafeHere := savedNullSafe;
   inlineVars := savedInline;
   flow := savedFlow;
   { they are the block's too, after the others }
@@ -11415,7 +12152,10 @@ begin
         errR(arg^.b, nodeRange(arg));
       end
       else
+      begin
         checkNotForControlVar(arg);
+        nullVarArg(arg, p);
+      end;
       continue;
     end;
     checkWideToChar(pt, arg);
@@ -11430,10 +12170,15 @@ begin
       maT(pt);
       errR(arg^.b, nodeRange(arg));
     end
-    else if p^.isConstRef and (at = pt) and
-            ((arg^.convOp = nil) or arg^.convSuspended) and
-            isConstRefAddressable(arg) then
-      arg^.constRefAddr := true; { its address (else a temporary's) }
+    else
+    begin
+      if p^.isConstRef and (at = pt) and
+         ((arg^.convOp = nil) or arg^.convSuspended) and
+         isConstRefAddressable(arg) then
+        arg^.constRefAddr := true; { its address (else a temporary's) }
+      if nullSafeHere and isNullRef(pt) and declNonNull(p) then
+        requireNotNil(arg, nwParam, p^.ident.spelling, pt);
+    end;
   end;
 end;
 
@@ -11571,6 +12316,7 @@ begin
   listInit(moduleInstances);
   handlerDepth := 0;
   finallyLoopDepth := -1;
+  nullSafeHere := false;
   listInit(pendingInterfaces);
   mapInit(classRefs);
   addrOfTarget := nil;

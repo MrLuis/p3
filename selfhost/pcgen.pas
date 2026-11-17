@@ -6118,6 +6118,107 @@ begin
   emitWhen := holdDynResult(task, rt);
 end;
 
+{ Is the reference of type t at addr nil? (an i1) }
+function isNilAt(const addr: TV; t: PType): TV;
+var
+  p: TV;
+begin
+  if t^.kind = tyInterface then { object, table }
+    p := irLoad(irPtrT, addr, 'obj')
+  else
+    p := irLoad(irPtrT, addr, 'ref');
+  isNilAt := irICmp('eq', p, irNull, 'isnil');
+end;
+
+{ The default value of type t (0, false, '', nil), as visitExpr gives it. }
+function zeroValue(t: PType): TV;
+begin
+  if isBoolBase(t) then
+    zeroValue := irConstBool(false)
+  else
+    zeroValue := irZero(memType(t));
+end;
+
+{ x?.m: x's value in a hidden variable; where it is not nil, m (in
+  another, which is the value; else the default value) or the call. }
+function visitSafeNav(e: PNode): TV;
+var
+  bt, rt: PType;
+  tmp, res: TV;
+  thenB, endB: PIRBlock;
+begin
+  bt := e^.navBase^.typ;
+  tmp := varAddress(e^.navTmp);
+  storeExpr(tmp, bt, e^.navBase);
+  rt := nil;
+  res := irNull;
+  if e^.navRes <> nil then
+  begin
+    res := varAddress(e^.navRes);
+    rt := e^.navRes^.varType;
+    storeValue(res, zeroValue(rt), rt);
+  end;
+  thenB := irNewBlock('nav.then');
+  endB := irNewBlock('nav.end');
+  irCondBr(isNilAt(tmp, bt), endB, thenB, false);
+  irSetInsertPoint(thenB);
+  if e^.navStatement then
+    visitStmt(e^.navCall)
+  else
+  begin
+    storeExpr(res, rt, e^.navAccess);
+    if e^.navOk <> nil then
+      storeScalar(varAddress(e^.navOk), irConstBool(true), e^.navOk^.varType);
+  end;
+  irBr(endB);
+  irSetInsertPoint(endB);
+  if e^.navStatement then
+    visitSafeNav := irNull
+  else
+    visitSafeNav := visitExpr(e^.navResRef);
+end;
+
+{ a ?? b: a in a hidden variable, replaced by b where a is nil (or where
+  a's chain of ?. stopped). }
+function visitCoalesce(e: PNode): TV;
+var
+  l, nav: PNode;
+  ok: PDecl;
+  t: PType;
+  res, missing: TV;
+  thenB, endB: PIRBlock;
+begin
+  l := e^.coLeft;
+  while l^.kind = nkParen do
+    l := l^.inner;
+  ok := nil;
+  if l^.kind = nkSafeNav then
+  begin
+    nav := l;
+    while nav^.navAccess^.kind = nkSafeNav do
+      nav := nav^.navAccess;
+    ok := nav^.navOk;
+  end;
+  if ok <> nil then
+    storeScalar(varAddress(ok), irConstBool(false), ok^.varType);
+  t := e^.typ;
+  res := varAddress(e^.coRes);
+  storeExpr(res, t, e^.coLeft);
+  if ok <> nil then
+    missing := irBin('xor', loadScalar(varAddress(ok), ok^.varType, ''),
+                     irConstBool(true), 'missing')
+  else
+    missing := isNilAt(res, t);
+  thenB := irNewBlock('coalesce.else');
+  endB := irNewBlock('coalesce.end');
+  irCondBr(missing, thenB, endB, false);
+  irSetInsertPoint(thenB);
+  storeExpr(res, t, e^.coRight);
+  irBr(endB);
+  irSetInsertPoint(endB);
+  visitCoalesce := visitExpr(e^.coResRef);
+end;
+
 function visitExprKind(e: PNode): TV;
 var
   noArgs: TPtrList;
@@ -6146,6 +6247,8 @@ begin
         visitExprKind := visitExpr(e^.spawnCall);
         nextStart := 0;
       end;
+    nkSafeNav: visitExprKind := visitSafeNav(e);
+    nkCoalesce: visitExprKind := visitCoalesce(e);
     nkCondExpr:
       begin
         { the if statement Sema made of it sets a hidden variable, which

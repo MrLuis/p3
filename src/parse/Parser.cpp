@@ -61,6 +61,9 @@ bool Parser::typeHelpers() const {
 bool Parser::raceChecks() const {
   return Replay ? Replay->RaceChecks : Lex.raceChecks();
 }
+bool Parser::nullSafe() const {
+  return Replay ? Replay->NullSafe : Lex.nullSafe();
+}
 bool Parser::corbaInterfaces() const {
   return Replay ? Replay->CorbaInterfaces : Lex.corbaInterfaces();
 }
@@ -135,6 +138,7 @@ GenericTokens *Parser::captureSwitches() {
   Toks->InlineOn = inlineOn();
   Toks->TypeHelpers = typeHelpers();
   Toks->RaceChecks = raceChecks();
+  Toks->NullSafe = nullSafe();
   Toks->ScopedEnums = scopedEnums();
   Toks->PackRecords = packRecords();
   Toks->ResultSwitch = resultSwitch();
@@ -276,6 +280,7 @@ Expr *Parser::parseLambda() {
   auto *R = Ctx.create<RoutineDecl>(
       Loc, Name, IsFunction, Ctx.copyArray<VarDecl *>(Params), HasParamList,
       ResultTS, Ctx.create<Block>(Ctx.copyArray<Decl *>(Decls), Body), false);
+  R->getBody()->setNullSafe(nullSafe());
   R->setLambda();
   if (StatementBody) // Result: the lambda's ({$modeswitch result})
     R->setResultName(resultSwitch());
@@ -305,6 +310,7 @@ Expr *Parser::parseLambda() {
   auto *F = Ctx.create<RoutineDecl>(
       Loc, FName, /*IsFunction=*/true, Ctx.copyArray<VarDecl *>(FParams), true,
       nullptr, Ctx.create<Block>(Ctx.copyArray<Decl *>({R}), FBody), false);
+  F->getBody()->setNullSafe(nullSafe());
   F->setLambda();
   F->setCopyFactory();
   if (CopyAll)
@@ -729,6 +735,7 @@ UnitDecl *Parser::parseUnit() {
   // Optional initialization part.
   llvm::SmallVector<Stmt *, 8> Init;
   SourceLocation InitLoc = Tok.getLocation();
+  bool InitNullSafe = nullSafe();
   if (Tok.isOneOf(tok::kw_begin, tok::kw_initialization)) {
     InitLoc = consumeToken();
     parseStatementSequence(Init, tok::kw_end, InitLoc, "begin");
@@ -743,11 +750,12 @@ UnitDecl *Parser::parseUnit() {
   auto *Empty = Ctx.create<CompoundStmt>(SourceRange(InitLoc), llvm::ArrayRef<Stmt *>());
   auto *Body = Ctx.create<CompoundStmt>(SourceRange(InitLoc, EndLoc),
                                         Ctx.copyArray<Stmt *>(Init));
+  auto *ImplBlock = Ctx.create<Block>(Ctx.copyArray<Decl *>(ImplDecls), Body);
+  ImplBlock->setNullSafe(InitNullSafe);
   return Ctx.create<UnitDecl>(
       UnitLoc, Name, Ctx.copyArray<Identifier>(IfaceUses),
       Ctx.create<Block>(Ctx.copyArray<Decl *>(IfaceDecls), Empty),
-      Ctx.copyArray<Identifier>(ImplUses),
-      Ctx.create<Block>(Ctx.copyArray<Decl *>(ImplDecls), Body));
+      Ctx.copyArray<Identifier>(ImplUses), ImplBlock);
 }
 
 //===----------------------------------------------------------------------===//
@@ -771,6 +779,7 @@ Block *Parser::parseBlock() {
   parseDeclarations(Decls, /*InInterface=*/false);
 
   CompoundStmt *Body = nullptr;
+  bool NullSafe = nullSafe(); // (where its statements start)
   if (Tok.is(tok::kw_begin)) {
     Body = parseCompoundStmt();
   } else {
@@ -785,7 +794,9 @@ Block *Parser::parseBlock() {
   // The types its statements specialized by the way.
   Decls.append(HiddenTypeDecls.begin() + HiddenMark, HiddenTypeDecls.end());
   HiddenTypeDecls.resize(HiddenMark);
-  return Ctx.create<Block>(Ctx.copyArray<Decl *>(Decls), Body);
+  auto *B = Ctx.create<Block>(Ctx.copyArray<Decl *>(Decls), Body);
+  B->setNullSafe(NullSafe);
+  return B;
 }
 
 void Parser::parseDeclarations(llvm::SmallVectorImpl<Decl *> &Decls,
@@ -2509,8 +2520,21 @@ bool Parser::parseFormalParams(llvm::SmallVectorImpl<VarDecl *> &Params,
 TypeSpec *Parser::parseType() {
   if (!enterNesting())
     return nullptr;
-  TypeSpec *TS = parseTypeImpl();
+  TypeSpec *TS = nullableSuffix(parseTypeImpl());
   --Nesting;
+  return TS;
+}
+
+// T? (objfpc), after a type's name: a class or interface reference that
+// may be nil (Sema checks what it names).
+TypeSpec *Parser::nullableSuffix(TypeSpec *TS) {
+  if (TS && nullSafe())
+    TS->setNullSafe();
+  if (TS && Tok.is(tok::question) &&
+      (llvm::isa<NamedTypeSpec>(TS) || llvm::isa<SpecializeTypeSpec>(TS))) {
+    consumeToken();
+    TS->setNullable(PrevTokEnd);
+  }
   return TS;
 }
 
@@ -2713,6 +2737,10 @@ TypeSpec *Parser::parseAsyncType() {
 }
 
 TypeSpec *Parser::parseTypeIdentifier(llvm::StringRef Context) {
+  return nullableSuffix(parseTypeIdentifierImpl(Context));
+}
+
+TypeSpec *Parser::parseTypeIdentifierImpl(llvm::StringRef Context) {
   if (isAsyncWord("async") || startsIteratorType())
     return parseAsyncType();
   if (Tok.is(tok::kw_string)) { // Turbo/FPC: `string` names a type here
@@ -3536,6 +3564,7 @@ Expr *Parser::parseSpawnExpr() {
       Start, Name, /*IsFunction=*/true, llvm::ArrayRef<VarDecl *>(), false,
       Ctx.create<AsyncTypeSpec>(SourceRange(Start), nullptr),
       Ctx.create<Block>(Ctx.copyArray<Decl *>(Decls), Body), false);
+  R->getBody()->setNullSafe(nullSafe());
   R->setSpawnBlock();
   if (raceChecks())
     R->setRaceChecked();
@@ -3946,7 +3975,8 @@ Stmt *Parser::parseAssignmentOrCall() {
   SourceLocation Start = consumeToken();
 
   Expr *Target = Ctx.create<NameRefExpr>(Name);
-  bool HasSelectors = Tok.isOneOf(tok::l_square, tok::period, tok::caret);
+  bool HasSelectors = Tok.isOneOf(tok::l_square, tok::period, tok::caret,
+                                  tok::question_period);
   if (HasSelectors) {
     Target = parseSelectors(Target);
     if (!Target) {
@@ -3981,7 +4011,7 @@ Stmt *Parser::parseAssignmentOrCall() {
   // TFoo(x).Show; f(1)^.n := 2; f(x)(y);
   if (HasParens && LangOpts.Mode != LangMode::ISO &&
       (Tok.isOneOf(tok::l_square, tok::period, tok::caret, tok::colon_equal,
-                   tok::l_paren) ||
+                   tok::l_paren, tok::question_period) ||
        (isAssignOp() && Tok.isNot(tok::equal)))) {
     Expr *Call = Ctx.create<CallExpr>(SourceRange(Start, PrevTokEnd), Name,
                                       Ctx.copyArray<Expr *>(Args));
@@ -4054,6 +4084,7 @@ Expr *Parser::reparseDesignator(llvm::ArrayRef<Token> Toks) {
   G.InlineOn = inlineOn();
   G.TypeHelpers = typeHelpers();
   G.RaceChecks = raceChecks();
+  G.NullSafe = nullSafe();
   G.ScopedEnums = scopedEnums();
   G.PackRecords = packRecords();
   G.ResultSwitch = resultSwitch();
@@ -4091,6 +4122,24 @@ Stmt *Parser::finishDesignatorStmt(SourceLocation Start, Expr *Target) {
 
   if (isAssignOp())
     return parseAssignment(Start, Target);
+
+  if (auto *Nav = llvm::dyn_cast<SafeNavExpr>(Target);
+      Nav && Tok.isOneOf(tok::semi, tok::kw_end, tok::kw_else, tok::kw_until,
+                         tok::eof)) {
+    // x?.P(args); a call where x is not nil (each `?.` of the chain)
+    while (true) {
+      Nav->setStatement();
+      if (auto *Inner = llvm::dyn_cast<SafeNavExpr>(Nav->getAccess())) {
+        Nav = Inner;
+        continue;
+      }
+      if (!llvm::isa<IndirectCallExpr>(Nav->getAccess())) // x?.P
+        Nav->setAccess(Ctx.create<IndirectCallExpr>(
+            Nav->getAccess()->getRange(), Nav->getAccess(), llvm::ArrayRef<Expr *>()));
+      break;
+    }
+    return Ctx.create<ExprStmt>(SourceRange(Start, PrevTokEnd), Target);
+  }
 
   if (LangOpts.Mode != LangMode::ISO &&
       Tok.isOneOf(tok::semi, tok::kw_end, tok::kw_else, tok::kw_until, tok::eof)) {
@@ -4682,6 +4731,14 @@ Expr *Parser::parseExpression() {
   if (!enterNesting())
     return nullptr;
   Expr *E = parseExpressionImpl();
+  // a ?? b (objfpc): below the comparisons, grouping to the right
+  if (E && Tok.is(tok::question_question)) {
+    SourceLocation OpLoc = consumeToken();
+    Expr *R = parseExpression();
+    E = R ? Ctx.create<CoalesceExpr>(
+                SourceRange(E->getBeginLoc(), R->getRange().getEnd()), E, OpLoc, R)
+          : nullptr;
+  }
   --Nesting;
   return E;
 }
@@ -4777,6 +4834,22 @@ Expr *Parser::parseDesignator() {
 
 Expr *Parser::parseSelectors(Expr *Base) {
   while (true) {
+    // x?.m... (objfpc): the selectors that follow apply to x's value
+    // (Hole) where it is not nil
+    if (Tok.is(tok::question_period)) {
+      SourceLocation Q = consumeToken();
+      Identifier Field;
+      if (!expectIdentifier(Field, "member name after '?.'"))
+        return nullptr;
+      llvm::StringRef HN = Ctx.getStrings().intern("$nav");
+      auto *Hole = Ctx.create<NameRefExpr>(Identifier{HN, HN, Q});
+      Expr *Access = parseSelectors(Ctx.create<FieldExpr>(
+          SourceRange(Q, PrevTokEnd), Hole, Field));
+      if (!Access)
+        return nullptr;
+      return Ctx.create<SafeNavExpr>(SourceRange(Base->getBeginLoc(), PrevTokEnd),
+                                     Base, Access, Hole);
+    }
     if (Tok.is(tok::l_square)) {
       SourceLocation LBrack = consumeToken();
       do {

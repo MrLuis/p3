@@ -68,6 +68,9 @@ PUNCT(l_square,      "[")   // also "(."
 PUNCT(r_square,      "]")   // also ".)"
 PUNCT(caret,         "^")   // also "@" in ISO mode
 PUNCT(at,            "@")   // address-of, --mode=tp only
+PUNCT(question,      "?")   // T? (objfpc): a nullable reference type
+PUNCT(question_period, "?.") // x?.m (objfpc): safe navigation
+PUNCT(question_question, "??") // a ?? b (objfpc): a, or b if a is nil
 PUNCT(plus_equal,    "+=")  // {$coperators on} (Free Pascal)
 PUNCT(minus_equal,   "-=")
 PUNCT(star_equal,    "*=")

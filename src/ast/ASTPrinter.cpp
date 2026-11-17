@@ -415,7 +415,8 @@ class ASTPrinter : public StmtVisitor<ASTPrinter>,
       return;
     switch (TS->getKind()) {
     case TypeSpec::TS_Named:
-      line("NamedTypeSpec '") << llvm::cast<NamedTypeSpec>(TS)->getName().Name << '\'';
+      line("NamedTypeSpec '") << llvm::cast<NamedTypeSpec>(TS)->getName().Name << '\''
+                              << (TS->isNullable() ? "?" : "");
       loc(TS->getBeginLoc());
       return;
     case TypeSpec::TS_Async: {
@@ -430,7 +431,8 @@ class ASTPrinter : public StmtVisitor<ASTPrinter>,
     }
     case TypeSpec::TS_Specialize: {
       auto *SS = llvm::cast<SpecializeTypeSpec>(TS);
-      line("SpecializeTypeSpec '") << SS->getName().Name << '\'';
+      line("SpecializeTypeSpec '") << SS->getName().Name << '\''
+                                   << (TS->isNullable() ? "?" : "");
       loc(TS->getBeginLoc());
       IndentScope I(Indent);
       for (TypeSpec *A : SS->getArgs())
@@ -1130,6 +1132,20 @@ public:
     end(E);
     IndentScope I(Indent);
     visitExpr(E->getCall());
+  }
+  void visitSafeNavExpr(SafeNavExpr *E) {
+    line(E->isStatement() ? "SafeNavExpr statement" : "SafeNavExpr");
+    end(E);
+    IndentScope I(Indent);
+    visitExpr(E->getBase());
+    visitExpr(E->getAccess());
+  }
+  void visitCoalesceExpr(CoalesceExpr *E) {
+    line("CoalesceExpr");
+    end(E);
+    IndentScope I(Indent);
+    visitExpr(E->getLeft());
+    visitExpr(E->getRight());
   }
   void visitCondExpr(CondExpr *E) {
     line("CondExpr");

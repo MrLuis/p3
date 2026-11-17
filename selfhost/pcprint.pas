@@ -374,6 +374,8 @@ begin
     tsNamed:
       begin
         lineName('NamedTypeSpec ''', ts^.tname.name);
+        if ts^.tsNullable then
+          bufAddChar(outBuf, '?');
         loc(ts^.b);
       end;
     tsAsync:
@@ -390,6 +392,8 @@ begin
     tsSpecialize:
       begin
         lineName('SpecializeTypeSpec ''', ts^.spName.name);
+        if ts^.tsNullable then
+          bufAddChar(outBuf, '?');
         loc(ts^.b);
         indent := indent + 2;
         for i := 0 to ts^.spArgs.count - 1 do
@@ -1531,6 +1535,27 @@ begin
         indent := indent + 2;
         for i := 0 to e^.tmplParts.count - 1 do
           visitExpr(PNode(listGet(e^.tmplParts, i)));
+        indent := indent - 2;
+      end;
+    nkSafeNav:
+      begin
+        if e^.navStatement then
+          line('SafeNavExpr statement')
+        else
+          line('SafeNavExpr');
+        endExpr(e);
+        indent := indent + 2;
+        visitExpr(e^.navBase);
+        visitExpr(e^.navAccess);
+        indent := indent - 2;
+      end;
+    nkCoalesce:
+      begin
+        line('CoalesceExpr');
+        endExpr(e);
+        indent := indent + 2;
+        visitExpr(e^.coLeft);
+        visitExpr(e^.coRight);
         indent := indent - 2;
       end;
     nkCondExpr:

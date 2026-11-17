@@ -2192,7 +2192,7 @@ begin
   genericMethodOf := g;
 end;
 
-function resolveMember(e: PNode): PDecl;
+function resolveMemberImpl(e: PNode): PDecl;
 var
   gs, types: TPtrList;
   t: PType;
@@ -2202,7 +2202,7 @@ var
   viaRef, ok, reported: boolean;
   what: string;
 begin
-  resolveMember := nil;
+  resolveMemberImpl := nil;
   viaClass := classNamedBy(e^.base);
   if (viaClass <> nil) and (e^.base^.kind = nkNameRef) then { TFoo.Create: a use of TFoo }
     warnHints(e^.base^.refDecl, e^.base^.ref);
@@ -2426,6 +2426,19 @@ begin
       exit;
   end;
   e^.fieldDecl := d;
+  resolveMemberImpl := d;
+end;
+
+{ (and, in null-safe code, its object must not be nil) }
+function resolveMember(e: PNode): PDecl;
+var
+  d: PDecl;
+begin
+  d := resolveMemberImpl(e);
+  if (d <> nil) and nullSafeHere and (classNamedBy(e^.base) = nil) and
+     isNullRef(e^.base^.typ) then
+    if (d^.kind <> dkRoutine) or (d^.objMethod <> obFree) then { (Free: nil is fine) }
+      requireNotNil(e^.base, nwMember, e^.fieldName.spelling, nil);
   resolveMember := d;
 end;
 
@@ -3134,6 +3147,7 @@ begin
           end;
           if s^.args.count = 0 then
           begin
+            nullCheckEnd(s^.callee.loc, true);
             ownedDead;
             exit;
           end;
@@ -3162,6 +3176,11 @@ begin
           if ownedVarOf(a0) <> nil then
             diagOwnedEscape(ownedVarOf(a0), a0, true);
           checkLambdaEscape(a0, false);
+          if nullSafeHere and not isError(t) and (curRoutine^.resultVar <> nil) then
+          begin
+            nullAssign(nil, curRoutine^.resultVar, a0);
+            nullCheckEnd(s^.callee.loc, true);
+          end;
           ownedDead;
           rt := curRoutine^.resultType;
           curRoutine^.resultAssigned := true;
@@ -3205,6 +3224,13 @@ begin
     { Turbo/FPC: a function result may be discarded }
     orderArgs(d^.params, s^.args, s^.callee);
     checkCallArgs(d^.params, d, s^.callee, s^.args, nodeRange(s));
+    { a constructor's call of another of its class (on Self): that one sets
+      the fields }
+    if nullSafeHere and (d^.methodKind = mtConstructor) and (curRoutine <> nil) and
+       (curRoutine^.methodKind = mtConstructor) and (flow <> nil) then
+      for i := 0 to flow^.n - 1 do
+        if flow^.isNull[i] and (flow^.vars[i]^.kind = dkField) then
+          nullSet(i, false, true);
     exit;
   end;
   if (d^.kind = dkVar) and (d^.varType <> nil) and (d^.varType^.kind = tyRoutine) and
@@ -3554,11 +3580,168 @@ procedure finishAssign(s: PNode; targetTy, valueTy: PType); forward;
   branches then take; where they cannot, and without want, its type is the
   common type of the branches. It becomes an if statement that assigns the
   branch chosen to a hidden variable. }
+{ Can a value of type t be nil, and be tested for it (?., ??)? }
+function isNilable(t: PType): boolean;
+begin
+  isNilable := t^.kind in [tyClass, tyInterface, tyClassRef, tyPointer];
+end;
+
+{ A reference to hidden variable v at loc. }
+function hiddenRef(v: PDecl; loc: TLoc): PNode;
+var
+  id: TIdent;
+  n: PNode;
+begin
+  id := v^.ident;
+  id.loc := loc;
+  n := nameRefNode(id);
+  n^.refDecl := v;
+  n^.typ := v^.varType;
+  hiddenRef := n;
+end;
+
+
+{ x?.m: m's type (nil for a statement's call). }
+function checkSafeNav(e: PNode): PType;
+var
+  bt, at: PType;
+  tmp, res: PDecl;
+  sc, saved: PScope;
+  a, call: PNode;
+begin
+  bt := check(e^.navBase);
+  if isError(bt) then
+    exit(bt);
+  if not (bt^.kind in [tyClass, tyInterface, tyClassRef]) then
+  begin
+    ms('''?.'' needs a class or interface reference, not a value of type ');
+    maT(bt);
+    errR(e^.navHole^.b, nodeRange(e^.navBase));
+    exit(errorType);
+  end;
+  tmp := makeHiddenVar(bt, e^.b);
+  if tmp = nil then
+  begin
+    ms('''?.'' can only be written in the statements of a routine or program');
+    errR(e^.navHole^.b, nodeRange(e));
+    exit(errorType);
+  end;
+  sc := newScope(cur);
+  scopeInsert(sc, e^.navHole^.ref.name, tmp);
+  saved := cur;
+  cur := sc;
+  if e^.navStatement then { the call, where x is not nil }
+  begin
+    a := e^.navAccess;
+    if a^.kind = nkIndirectCall then
+    begin
+      call := newNode(nkIndirectCallStmt, a^.b, a^.e);
+      call^.calleeExpr := a;
+      call^.callee := noIdent;
+      listInit(call^.args);
+    end
+    else
+    begin
+      call := newNode(nkExprStmt, a^.b, a^.e);
+      call^.exprStmtExpr := a;
+    end;
+    visitStmt(call);
+    cur := saved;
+    e^.navTmp := tmp;
+    e^.navCall := call;
+    exit(nil);
+  end;
+  at := check(e^.navAccess);
+  cur := saved;
+  if isError(at) then
+    exit(at);
+  if isStructured(at) then
+  begin
+    ms('''?.'' gives a value of a simple type, a string or a reference, not ' +
+       'of type ');
+    maT(at);
+    errR(e^.navHole^.b, nodeRange(e^.navAccess));
+    exit(errorType);
+  end;
+  res := makeHiddenVar(at, e^.b);
+  e^.navTmp := tmp;
+  e^.navRes := res;
+  e^.navResRef := hiddenRef(res, e^.b);
+  checkSafeNav := at;
+end;
+
+{ a ?? b: a, or b where a is nil. The type: a's, b's value being
+  assignable to it (or b's, if a's is). }
+function visitCoalesce(e: PNode): PType;
+var
+  l, nav: PNode;
+  lt, rt, t: PType;
+  byNil: boolean;
+  res: PDecl;
+begin
+  l := e^.coLeft;
+  while l^.kind = nkParen do
+    l := l^.inner;
+  nav := nil;
+  if l^.kind = nkSafeNav then
+    nav := l;
+  lt := check(e^.coLeft);
+  if isError(lt) then
+  begin
+    check(e^.coRight);
+    exit(lt);
+  end;
+  byNil := isNilable(lt);
+  if not byNil and (nav = nil) then
+  begin
+    ms('the left side of ''??'' must be a reference that may be nil (a ' +
+       'class, interface or pointer) or a ''?.'' chain, not a value of type ');
+    maT(lt);
+    errR(e^.coOpLoc, nodeRange(e^.coLeft));
+    check(e^.coRight);
+    exit(errorType);
+  end;
+  rt := checkValueFor(lt, e^.coRight);
+  if isError(rt) then
+    exit(rt);
+  t := nil;
+  if isAssignable(lt, rt) or convertImplicitly(e^.coRight, lt) then
+    t := lt
+  else if isInferable(rt) and isAssignable(rt, lt) then
+    t := rt;
+  if t = nil then
+  begin
+    ms('the right side of ''??'' must be assignable to ');
+    maT(lt);
+    ma(', not a value of type ');
+    maT(rt);
+    errR(e^.coOpLoc, nodeRange(e^.coRight));
+    exit(errorType);
+  end;
+  res := makeHiddenVar(t, e^.b);
+  if res = nil then
+  begin
+    ms('''??'' can only be written in the statements of a routine or program');
+    errR(e^.coOpLoc, nodeRange(e));
+    exit(errorType);
+  end;
+  if not byNil then { the last ?. of the chain tells whether it got there }
+  begin
+    while nav^.navAccess^.kind = nkSafeNav do
+      nav := nav^.navAccess;
+    nav^.navOk := makeHiddenVar(tyBooleanT, e^.b);
+  end;
+  e^.coRes := res;
+  e^.coResRef := hiddenRef(res, e^.b);
+  visitCoalesce := t;
+end;
+
 function checkCond(e: PNode; want: PType): PType;
 var
   a, b, r, str, ta, tb: PType;
   tmp: PDecl;
   thenS, elseS, low: PNode;
+  before, afterThen: TOwnedState;
 
   function ref(loc: TLoc): PNode;
   var
@@ -3589,16 +3772,20 @@ var
 begin
   checkCond := errorType;
   checkCondition(e^.ceCond, 'if');
+  ownedGet(before);
+  nullNarrowBy(e^.ceCond, true);
   if want <> nil then
-  begin
-    a := checkValueFor(want, e^.ceThen);
-    b := checkValueFor(want, e^.ceElse);
-  end
+    a := checkValueFor(want, e^.ceThen)
   else
-  begin
     a := check(e^.ceThen);
+  ownedGet(afterThen);
+  ownedSet(before);
+  nullNarrowBy(e^.ceCond, false);
+  if want <> nil then
+    b := checkValueFor(want, e^.ceElse)
+  else
     b := check(e^.ceElse);
-  end;
+  ownedJoin(afterThen);
   if isError(a) or isError(b) then
     exit;
   r := nil;
@@ -3758,7 +3945,7 @@ end;
 procedure finishAssign(s: PNode; targetTy, valueTy: PType);
 var
   target, savedOwnedTarget: PNode;
-  ownedV, ov, tv: PDecl;
+  ownedV, ov, tv, d: PDecl;
   local, modifiable: boolean;
 begin
   target := s^.target;
@@ -3827,6 +4014,17 @@ begin
     ma(' from incompatible type ');
     maT(valueTy);
     errRR(s^.assignLoc, nodeRange(target), nodeRange(s^.value));
+  end
+  else if nullSafeHere then
+  begin
+    d := nullDeclOf(target);
+    if (d <> nil) and (d^.kind = dkRoutine) then { F := v }
+      d := d^.resultVar;
+    if (target^.kind = nkNameRef) and (target^.refDecl <> nil) and
+       (target^.refDecl^.kind = dkRoutine) and (d <> nil) then
+      nullAssign(nil, d, s^.value)
+    else
+      nullAssign(target, d, s^.value);
   end;
 end;
 
@@ -4008,6 +4206,8 @@ begin
       listAdd(inlineVars^, v);
     if v^.isOwned then
       ownedDeclare(v);
+    if nullSafeHere and isNullRef(t) then { (nil until assigned) }
+      nullTrack(v, true, false);
   end;
   if init = nil then
     exit;
@@ -4717,6 +4917,7 @@ begin
       continue;
     if t^.kind = tyClass then { objfpc: an object }
     begin
+      requireNotNil(w^.rec, nwWith, nil, nil);
       cur := newClassScope(cur, t, w);
       continue;
     end;
@@ -4902,9 +5103,11 @@ begin
   directSequence := nil;
   checkCondition(s^.cond, 'if');
   ownedGet(before);
+  nullNarrowBy(s^.cond, true);
   visitStmt(s^.thenStmt);
   ownedGet(thenEnd);
   ownedSet(before);
+  nullNarrowBy(s^.cond, false);
   if s^.elseStmt <> nil then
     visitStmt(s^.elseStmt);
   ownedJoin(thenEnd);
@@ -4912,16 +5115,22 @@ end;
 
 procedure visitWhile(s: PNode);
 var
-  before: TOwnedState;
+  before, saved: TOwnedState;
   loop: TOwnedLoop;
 begin
   directSequence := nil;
   ownedLoopBegin(loop);
   checkCondition(s^.cond, 'while');
   ownedGet(before);
+  nullNarrowBy(s^.cond, true);
   loopDepth := loopDepth + 1;
   visitStmt(s^.thenStmt);
   loopDepth := loopDepth - 1;
+  ownedGet(saved);
+  ownedSet(before); { (it ends where the condition is false) }
+  nullNarrowBy(s^.cond, false);
+  ownedGet(before);
+  ownedSet(saved);
   ownedLoopEnd(loop, before);
 end;
 
@@ -4950,6 +5159,11 @@ var
 begin
   directSequence := nil;
   e := s^.exprStmtExpr;
+  if (e^.kind = nkSafeNav) and e^.navStatement then
+  begin
+    checkSafeNav(e); { (no value) }
+    exit;
+  end;
   if e^.kind = nkAwait then
     e^.typ := checkAwait(e, false)
   else
@@ -5357,7 +5571,8 @@ function visitBinary(e: PNode): PType;
 var
   l, r: PType;
   op: TBinaryOp;
-  bothIntegers: boolean;
+  bothIntegers, logic: boolean;
+  beforeRHS: TOwnedState;
 
   function integerOp: PType;
   begin
@@ -5377,7 +5592,16 @@ begin
   else
   begin
     l := check(e^.lhs);
+    { a and b: b is evaluated where a holds (a or b: where it does not) }
+    logic := (e^.bop in [boAnd, boOr]) and nullSafeHere and (l^.kind = tyBoolean);
+    if logic then
+    begin
+      ownedGet(beforeRHS);
+      nullNarrowBy(e^.lhs, e^.bop = boAnd);
+    end;
     r := check(e^.rhs);
+    if logic then
+      ownedJoin(beforeRHS);
   end;
   if isError(l) or isError(r) then
     exit;
@@ -6453,6 +6677,8 @@ begin
     nkCall: visitExpr := visitCall(e);
     nkTuple: visitExpr := checkTuple(e, nil);
     nkCondExpr: visitExpr := checkCond(e, nil);
+    nkSafeNav: visitExpr := checkSafeNav(e);
+    nkCoalesce: visitExpr := visitCoalesce(e);
     nkAwait: visitExpr := checkAwait(e, true);
     nkSpawn: visitExpr := visitSpawn(e);
     nkTemplate:

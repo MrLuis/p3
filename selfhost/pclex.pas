@@ -76,6 +76,7 @@ type
     advancedRecords: boolean; { $modeswitch advancedrecords }
     typeHelpers: boolean; { $modeswitch typehelpers }
     raceChecks: boolean; { $modeswitch racechecks (p3's own) }
+    nullSafe: boolean; { $nullsafe on (p3's own, objfpc) }
     longStrings: boolean; { H+: string is an ansistring }
     { macros ($macro on, $define NAME := value, as in Free Pascal): upper-
       case name id -> PMacro; a use of NAME lexes its value (macroStack:
@@ -175,7 +176,7 @@ type
 
   PSavedSwitches = ^TSavedSwitches;
   TSavedSwitches = record
-    longStrings, corbaInterfaces, inlineOn, scopedEnums: boolean;
+    longStrings, corbaInterfaces, inlineOn, scopedEnums, nullSafe: boolean;
     packRecords: longint;
     range, overflow: longint; { as TDirective.state }
   end;
@@ -384,6 +385,7 @@ begin
   lx.advancedRecords := false;
   lx.typeHelpers := false;
   lx.raceChecks := false;
+  lx.nullSafe := false;
   lx.longStrings := false;
   lx.macrosOn := false;
   lx.inlineOn := mode = lmObjFPC;
@@ -1608,6 +1610,30 @@ begin
   end;
   { $inline on / off: whether the inline directive inlines (default: on in
     objfpc mode, as in Free Pascal) }
+  { $nullsafe on / off / + / - (p3's own, objfpc): in the routines that
+    start after it, a plain class or interface type is never nil (T? may
+    be) }
+  if word = 'nullsafe' then
+  begin
+    arg := '';
+    while (b < e) and (length(arg) < 20) do
+    begin
+      arg := arg + lowerChar(at(lx, b));
+      b := b + 1;
+    end;
+    if (arg <> 'on') and (arg <> '+') and (arg <> 'off') and (arg <> '-') then
+    begin
+      diagWarning(locOf(lx, start), 'expected {$nullsafe on} or {$nullsafe off}; ignored');
+      exit;
+    end;
+    if lx.mode <> lmObjFPC then
+    begin
+      diagWarning(locOf(lx, start), '{$nullsafe} needs --mode=objfpc; ignored');
+      exit;
+    end;
+    lx.nullSafe := (arg = 'on') or (arg = '+');
+    exit;
+  end;
   { $push / $pop: save and restore the local switches (at most 21 levels,
     as in FPC) }
   if (word = 'push') and (e = b) then
@@ -1622,6 +1648,7 @@ begin
     saved^.corbaInterfaces := lx.corbaInterfaces;
     saved^.inlineOn := lx.inlineOn;
     saved^.scopedEnums := lx.scopedEnums;
+    saved^.nullSafe := lx.nullSafe;
     saved^.packRecords := lx.packRecords;
     saved^.range := directiveStateAt(swRange, locOf(lx, start));
     saved^.overflow := directiveStateAt(swOverflow, locOf(lx, start));
@@ -1640,6 +1667,7 @@ begin
     lx.corbaInterfaces := saved^.corbaInterfaces;
     lx.inlineOn := saved^.inlineOn;
     lx.scopedEnums := saved^.scopedEnums;
+    lx.nullSafe := saved^.nullSafe;
     lx.packRecords := saved^.packRecords;
     addDirectiveState(lx, locOf(lx, start), swRange, saved^.range);
     addDirectiveState(lx, locOf(lx, start), swOverflow, saved^.overflow);
@@ -2716,6 +2744,21 @@ begin
       '[': k := tkLSquare;
       ']': k := tkRSquare;
       '^': k := tkCaret;
+      '?': { T?, x?.m, a ?? b (objfpc) }
+        if lx.mode = lmObjFPC then
+        begin
+          k := tkQuestion;
+          if (at(lx, lx.cur) = '.') and (at(lx, lx.cur + 1) <> '.') then
+          begin
+            lx.cur := lx.cur + 1;
+            k := tkQuestionPeriod;
+          end
+          else if at(lx, lx.cur) = '?' then
+          begin
+            lx.cur := lx.cur + 1;
+            k := tkQuestionQuestion;
+          end;
+        end;
       '@':
         { ISO 7185 allows '@' as another spelling of '^' }
         if tp then

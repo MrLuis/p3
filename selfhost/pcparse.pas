@@ -53,7 +53,7 @@ type
   TGenericTokens = record
     toks: TPtrList; { of PToken }
     longStrings, advancedRecords, corbaInterfaces, inlineOn: boolean;
-    typeHelpers, scopedEnums, raceChecks: boolean;
+    typeHelpers, scopedEnums, raceChecks, nullSafe: boolean;
     packRecords: longint;
     resultSwitch, outSwitch, defaultParamsSwitch: boolean;
     { a generic type's: the next of its method implementations (a list
@@ -698,6 +698,7 @@ end;
          "end" "." . }
 function parseUnitHere: PDecl;
 var
+  initNullSafe: boolean;
   unitLoc, initLoc, endLoc: TLoc;
   name: TIdent;
   ifaceUses, implUses, ifaceDecls, implDecls, init, none: TPtrList;
@@ -735,6 +736,7 @@ begin
   { optional initialization part }
   listInit(init);
   initLoc := tok.loc;
+  initNullSafe := lx.nullSafe;
   if tok.kind in [tkKwBegin, tkKwInitialization] then
   begin
     initLoc := consumeToken;
@@ -759,6 +761,7 @@ begin
   u^.implUses := implUses;
   u^.iface := newBlock(ifaceDecls, empty);
   u^.impl := newBlock(implDecls, body);
+  u^.impl^.nullSafe := initNullSafe;
   parseUnitHere := u;
 end;
 
@@ -877,11 +880,14 @@ var
   decls: TPtrList;
   body: PNode;
   hiddenMark, i: longint;
+  nullSafe: boolean;
+  blk: PBlock;
 begin
   listInit(decls);
   hiddenMark := hiddenTypeDecls.count;
   parseDeclarations(decls, false);
   body := nil;
+  nullSafe := lx.nullSafe; { (where its statements start) }
   if tok.kind = tkKwBegin then
     body := parseCompoundStmt
   else
@@ -897,7 +903,9 @@ begin
   for i := hiddenMark to hiddenTypeDecls.count - 1 do
     listAdd(decls, listGet(hiddenTypeDecls, i));
   hiddenTypeDecls.count := hiddenMark;
-  parseBlock := newBlock(decls, body);
+  blk := newBlock(decls, body);
+  blk^.nullSafe := nullSafe;
+  parseBlock := blk;
 end;
 
 function parseTypedConstValue: PNode; forward;
@@ -1004,6 +1012,7 @@ begin
   toks^.inlineOn := lx.inlineOn;
   toks^.typeHelpers := lx.typeHelpers;
   toks^.raceChecks := lx.raceChecks;
+  toks^.nullSafe := lx.nullSafe;
   toks^.scopedEnums := lx.scopedEnums;
   toks^.packRecords := lx.packRecords;
   toks^.resultSwitch := lx.resultSwitch;
@@ -1022,6 +1031,7 @@ begin
   lx.inlineOn := toks^.inlineOn;
   lx.typeHelpers := toks^.typeHelpers;
   lx.raceChecks := toks^.raceChecks;
+  lx.nullSafe := toks^.nullSafe;
   lx.scopedEnums := toks^.scopedEnums;
   lx.packRecords := toks^.packRecords;
   lx.resultSwitch := toks^.resultSwitch;
@@ -2189,6 +2199,7 @@ begin
   toks^.inlineOn := lx.inlineOn;
   toks^.typeHelpers := lx.typeHelpers;
   toks^.raceChecks := lx.raceChecks;
+  toks^.nullSafe := lx.nullSafe;
   toks^.scopedEnums := lx.scopedEnums;
   toks^.packRecords := lx.packRecords;
   toks^.resultSwitch := lx.resultSwitch;
@@ -2389,6 +2400,7 @@ begin
   lx.inlineOn := toks^.inlineOn;
   lx.typeHelpers := toks^.typeHelpers;
   lx.raceChecks := toks^.raceChecks;
+  lx.nullSafe := toks^.nullSafe;
   lx.scopedEnums := toks^.scopedEnums;
   lx.packRecords := toks^.packRecords;
   lx.resultSwitch := toks^.resultSwitch;
@@ -3772,11 +3784,27 @@ begin
   parseTypeImpl := parseSimpleType;
 end;
 
+{ T? (objfpc), after a type's name: a class or interface reference that may
+  be nil (Sema checks what it names). }
+function nullableSuffix(ts: PTypeSpec): PTypeSpec;
+begin
+  if (ts <> nil) and lx.nullSafe then
+    ts^.tsNullSafe := true;
+  if (ts <> nil) and (tok.kind = tkQuestion) and
+     ((ts^.kind = tsNamed) or (ts^.kind = tsSpecialize)) then
+  begin
+    consumeToken;
+    ts^.tsNullable := true;
+    ts^.e := prevTokEnd;
+  end;
+  nullableSuffix := ts;
+end;
+
 function parseType: PTypeSpec;
 begin
   if not enterNesting then
     exit(nil);
-  parseType := parseTypeImpl;
+  parseType := nullableSuffix(parseTypeImpl);
   nesting := nesting - 1;
 end;
 
@@ -3816,12 +3844,19 @@ begin
   parseAsyncType := ts;
 end;
 
+function parseTypeIdentifierImpl(const context: string): PTypeSpec; forward;
+
 function parseTypeIdentifier(const context: string): PTypeSpec;
+begin
+  parseTypeIdentifier := nullableSuffix(parseTypeIdentifierImpl(context));
+end;
+
+function parseTypeIdentifierImpl(const context: string): PTypeSpec;
 var
   ts: PTypeSpec;
   arr: TToken;
 begin
-  parseTypeIdentifier := nil;
+  parseTypeIdentifierImpl := nil;
   if isAsyncWord('async') or startsIteratorType then
     exit(parseAsyncType);
   if tok.kind = tkKwString then
@@ -4924,6 +4959,7 @@ begin
   rs^.asyncIterator := false;
   r := newRoutine(start, name, true, noParams, false, rs, newBlock(decls, body), false);
   r^.isSpawnBlock := true;
+  r^.body^.nullSafe := lx.nullSafe;
   r^.isRaceChecked := lx.raceChecks;
   listAdd(hiddenTypeDecls, r);
   listInit(noArgs);
@@ -5632,7 +5668,7 @@ begin
   start := consumeToken;
 
   target := nameRef(name);
-  if tok.kind in [tkLSquare, tkPeriod, tkCaret] then
+  if tok.kind in [tkLSquare, tkPeriod, tkCaret, tkQuestionPeriod] then
   begin
     target := parseSelectors(target);
     if target = nil then
@@ -5669,7 +5705,8 @@ begin
     TFoo(x).Show; f(1)^.n := 2; }
   if hasParens and (mode <> lmISO) and
      (tok.kind in [tkLSquare, tkPeriod, tkCaret, tkColonEqual, tkLParen,
-                   tkPlusEqual, tkMinusEqual, tkStarEqual, tkSlashEqual]) then
+                   tkQuestionPeriod, tkPlusEqual, tkMinusEqual, tkStarEqual,
+                   tkSlashEqual]) then
   begin
     call := newNode(nkCall, start, prevTokEnd);
     call^.callee := name;
@@ -5695,7 +5732,7 @@ end;
   call: r.p(x); a[i]; obj.Show; inherited Create(x); }
 function finishDesignatorStmt(start: TLoc; target: PNode): PNode;
 var
-  call, n: PNode;
+  call, n, nav: PNode;
   none: TPtrList;
 begin
   if tok.kind = tkEqual then
@@ -5704,6 +5741,32 @@ begin
 
   if isAssignOp then
     exit(parseAssignment(start, target));
+
+  if (target^.kind = nkSafeNav) and
+     (tok.kind in [tkSemi, tkKwEnd, tkKwElse, tkKwUntil, tkEof]) then
+  begin
+    { x?.P(args); a call where x is not nil (each ?. of the chain) }
+    nav := target;
+    while true do
+    begin
+      nav^.navStatement := true;
+      if nav^.navAccess^.kind = nkSafeNav then
+      begin
+        nav := nav^.navAccess;
+        continue;
+      end;
+      if nav^.navAccess^.kind <> nkIndirectCall then { x?.P }
+      begin
+        listInit(none);
+        nav^.navAccess := indirectCall(nav^.navAccess^.b, nav^.navAccess^.e,
+                                       nav^.navAccess, none);
+      end;
+      break;
+    end;
+    n := newNode(nkExprStmt, start, prevTokEnd);
+    n^.exprStmtExpr := target;
+    exit(n);
+  end;
 
   if (mode <> lmISO) and
      (tok.kind in [tkSemi, tkKwEnd, tkKwElse, tkKwUntil, tkEof]) then
@@ -6697,10 +6760,30 @@ begin
 end;
 
 function parseExpression: PNode;
+var
+  e, r, n: PNode;
+  opLoc: TLoc;
 begin
   if not enterNesting then
     exit(nil);
-  parseExpression := parseExpressionImpl;
+  e := parseExpressionImpl;
+  { a ?? b (objfpc): below the comparisons, grouping to the right }
+  if (e <> nil) and (tok.kind = tkQuestionQuestion) then
+  begin
+    opLoc := consumeToken;
+    r := parseExpression;
+    if r = nil then
+      e := nil
+    else
+    begin
+      n := newNode(nkCoalesce, e^.b, r^.e);
+      n^.coLeft := e;
+      n^.coOpLoc := opLoc;
+      n^.coRight := r;
+      e := n;
+    end;
+  end;
+  parseExpression := e;
   nesting := nesting - 1;
 end;
 
@@ -6792,14 +6875,37 @@ end;
 
 function parseSelectors(base: PNode): PNode;
 var
-  lbrack: TLoc;
-  idx, n: PNode;
-  field: TIdent;
+  lbrack, q: TLoc;
+  idx, n, hole, access: PNode;
+  field, hid: TIdent;
   args, typeArgs: TPtrList;
 begin
   parseSelectors := nil;
   while true do
   begin
+    { x?.m... (objfpc): the selectors that follow apply to x's value (the
+      hole) where it is not nil }
+    if tok.kind = tkQuestionPeriod then
+    begin
+      q := consumeToken;
+      if not expectIdentifier(field, 'member name after ''?.''') then
+        exit;
+      hid.name := intern('$nav');
+      hid.spelling := hid.name;
+      hid.loc := q;
+      hole := nameRef(hid);
+      n := newNode(nkField, q, prevTokEnd);
+      n^.base := hole;
+      n^.fieldName := field;
+      access := parseSelectors(n);
+      if access = nil then
+        exit;
+      n := newNode(nkSafeNav, base^.b, prevTokEnd);
+      n^.navBase := base;
+      n^.navAccess := access;
+      n^.navHole := hole;
+      exit(n);
+    end;
     if tok.kind = tkLSquare then
     begin
       lbrack := consumeToken;
@@ -7361,6 +7467,7 @@ begin
   hiddenTypeDecls.count := hiddenMark;
   r := newRoutine(loc, name, isFunction, params, hasParamList, resultSpec,
                   newBlock(decls, body), false);
+  r^.body^.nullSafe := lx.nullSafe;
   r^.isLambda := true;
   if statementBody then { Result: the lambda's ($modeswitch result) }
     r^.resultName := lx.resultSwitch;
@@ -7399,6 +7506,7 @@ begin
   listInit(fDecls);
   listAdd(fDecls, r);
   f := newRoutine(loc, fName, true, fParams, true, nil, newBlock(fDecls, fBody), false);
+  f^.body^.nullSafe := lx.nullSafe;
   f^.isLambda := true;
   f^.isCopyFactory := true;
   f^.isCopyAll := copyAll;

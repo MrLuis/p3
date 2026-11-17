@@ -157,6 +157,11 @@
 ; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-llvm --extra="-g -o -" --modes=objfpc --ref p3 --new %t.p3 %S/../run/genericinherit.pas %S/../run/intfprops.pas | FileCheck %s
 ; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-ast --extra="-o -" --modes=objfpc --ref p3 --new %t.p3 %S/../run/genericinherit.pas %S/../run/intfprops.pas %S/../sema/Inputs/genericinherit | FileCheck %s
 ; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-parse-tree --extra="-o -" --modes=objfpc --ref p3 --new %t.p3 %S/../run/genericinherit.pas %S/../run/intfprops.pas %S/../sema/Inputs/genericinherit | FileCheck %s
+; Null-safe references (item 2): T?, ?., ??, the flow checks of $nullsafe.
+; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-parse-tree --extra="-o -" --modes=objfpc --ref p3 --new %t.p3 %S/../run/safenav.pas %S/../run/nullsafe.pas %S/../sema/Inputs/nullsafe | FileCheck %s
+; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-ast --extra="-o -" --modes=objfpc --ref p3 --new %t.p3 %S/../run/safenav.pas %S/../run/nullsafe.pas %S/../sema/Inputs/nullsafe | FileCheck %s
+; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-llvm --extra="-o -" --modes=objfpc --ref p3 --new %t.p3 %S/../run/safenav.pas %S/../run/nullsafe.pas %S/../sema/Inputs/nullsafe | FileCheck %s
+; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-llvm --extra="-g -o -" --modes=objfpc --ref p3 --new %t.p3 %S/../run/safenav.pas %S/../run/nullsafe.pas | FileCheck %s
 ; Iterators (item 14): yield, for-in, the iterator helper of unit sequences.
 ; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-parse-tree --extra="-o -" --modes=objfpc --ref p3 --new %t.p3 %S/../run/iterators.pas %S/../run/iterseq.pas %S/../sema/Inputs/iterators | FileCheck %s
 ; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-ast --extra="-o -" --modes=objfpc --ref p3 --new %t.p3 %S/../run/iterators.pas %S/../run/iterseq.pas %S/../sema/Inputs/iterators | FileCheck %s

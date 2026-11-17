@@ -35,6 +35,7 @@ class RoutineDecl;
 class Type;
 class TaskType;
 class IteratorType;
+class Stmt;
 class TypeSpec;
 class PropertyDecl;
 class VarDecl;
@@ -544,6 +545,69 @@ public:
     Result = R;
   }
   static bool classof(const Expr *E) { return E->getKind() == EK_Cond; }
+};
+
+/// x?.m (objfpc), safe navigation: Access (the selectors from `?.` on,
+/// applied to Hole, which stands for x's value) where x is not nil; else
+/// the default value of its type (0, '', nil), or nothing for a call made
+/// as a statement. A `?.` among the selectors makes Access another one.
+class SafeNavExpr final : public Expr {
+  Expr *Base, *Access;
+  NameRefExpr *Hole;
+  bool Statement = false; ///< x?.P(args); a procedure call
+  /// Set by Sema: hidden variables for x's value (Tmp), the value (Res; not
+  /// for a statement) and, for `x?.m ?? d` (the last `?.` of the chain),
+  /// one that tells whether m was reached (Ok); a statement's call (Call).
+  VarDecl *Tmp = nullptr, *Res = nullptr, *Ok = nullptr;
+  NameRefExpr *ResRef = nullptr;
+  Stmt *Call = nullptr;
+
+public:
+  SafeNavExpr(SourceRange R, Expr *Base, Expr *Access, NameRefExpr *Hole)
+      : Expr(EK_SafeNav, R), Base(Base), Access(Access), Hole(Hole) {}
+  Expr *getBase() const { return Base; }
+  Expr *getAccess() const { return Access; }
+  void setAccess(Expr *A) { Access = A; }
+  NameRefExpr *getHole() const { return Hole; }
+  bool isStatement() const { return Statement; }
+  void setStatement() { Statement = true; }
+  VarDecl *getTmp() const { return Tmp; }
+  VarDecl *getRes() const { return Res; }
+  VarDecl *getOk() const { return Ok; }
+  NameRefExpr *getResRef() const { return ResRef; }
+  Stmt *getCall() const { return Call; }
+  void setLowered(VarDecl *T, VarDecl *R, NameRefExpr *RR, Stmt *C) {
+    Tmp = T;
+    Res = R;
+    ResRef = RR;
+    Call = C;
+  }
+  void setOk(VarDecl *V) { Ok = V; }
+  static bool classof(const Expr *E) { return E->getKind() == EK_SafeNav; }
+};
+
+/// a ?? b (objfpc): a, or b where a is nil (a: a reference, or a `?.`
+/// chain, which is "nil" where it stopped at a nil). Sema: the hidden
+/// variable that holds the value (Res).
+class CoalesceExpr final : public Expr {
+  Expr *Left, *Right;
+  SourceLocation OpLoc;
+  VarDecl *Res = nullptr;
+  NameRefExpr *ResRef = nullptr;
+
+public:
+  CoalesceExpr(SourceRange R, Expr *Left, SourceLocation OpLoc, Expr *Right)
+      : Expr(EK_Coalesce, R), Left(Left), Right(Right), OpLoc(OpLoc) {}
+  Expr *getLeft() const { return Left; }
+  Expr *getRight() const { return Right; }
+  SourceLocation getOpLoc() const { return OpLoc; }
+  VarDecl *getRes() const { return Res; }
+  NameRefExpr *getResRef() const { return ResRef; }
+  void setLowered(VarDecl *V, NameRefExpr *R) {
+    Res = V;
+    ResRef = R;
+  }
+  static bool classof(const Expr *E) { return E->getKind() == EK_Coalesce; }
 };
 
 /// @x  (Turbo/FPC): an untyped pointer to a variable.
@@ -1197,6 +1261,8 @@ private:
   const TypeSpecKind Kind;
   SourceRange Range;
   Type *Resolved = nullptr; ///< set by Sema (shared by `a, b: T`)
+  bool Nullable = false;    ///< T? (objfpc): a reference that may be nil
+  bool NullSafe = false;    ///< written where {$nullsafe on}
 
 protected:
   TypeSpec(TypeSpecKind K, SourceRange R) : Kind(K), Range(R) {}
@@ -1207,6 +1273,13 @@ public:
   SourceLocation getBeginLoc() const { return Range.getBegin(); }
   Type *getResolved() const { return Resolved; }
   void setResolved(Type *T) { Resolved = T; }
+  bool isNullable() const { return Nullable; }
+  bool isNullSafe() const { return NullSafe; }
+  void setNullSafe() { NullSafe = true; }
+  void setNullable(SourceLocation End) {
+    Nullable = true;
+    Range = SourceRange(Range.getBegin(), End);
+  }
 };
 
 /// A type identifier: integer, char, MyType.
@@ -2308,10 +2381,13 @@ public:
 class Block {
   llvm::ArrayRef<Decl *> Decls;
   CompoundStmt *Body;
+  bool NullSafe = false; ///< {$nullsafe on} where its statements start
 
 public:
   Block(llvm::ArrayRef<Decl *> Decls, CompoundStmt *Body)
       : Decls(Decls), Body(Body) {}
+  bool isNullSafe() const { return NullSafe; }
+  void setNullSafe(bool B) { NullSafe = B; }
   llvm::ArrayRef<Decl *> getDecls() const { return Decls; }
   /// Sema adds the specializations of generic routines a module uses.
   void setDecls(llvm::ArrayRef<Decl *> D) { Decls = D; }

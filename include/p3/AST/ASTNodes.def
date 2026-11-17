@@ -41,6 +41,8 @@ EXPR(NamedArg)        // Name := e: a named argument           (objfpc)
 EXPR(Cond)            // if c then a else b                    (objfpc)
 EXPR(Await)           // await e                               (objfpc)
 EXPR(Spawn)           // spawn F(x), Pool.Run(F(x))            (objfpc)
+EXPR(SafeNav)         // x?.m: m of x, unless x is nil         (objfpc)
+EXPR(Coalesce)        // a ?? b: a, or b where a is nil        (objfpc)
 
 // Statements
 STMT(Empty)

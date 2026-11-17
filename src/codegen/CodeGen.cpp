@@ -7615,6 +7615,80 @@ public:
 
   llvm::Value *visitTupleExpr(TupleExpr *E) { return emitTuple(E); }
 
+  /// Is the reference of type T at Addr nil? (an i1)
+  llvm::Value *isNilAt(llvm::Value *Addr, Type *T) {
+    llvm::Value *P;
+    if (T->isInterface()) // {object, table}
+      P = B.CreateLoad(B.getPtrTy(), Addr, "obj");
+    else
+      P = B.CreateLoad(B.getPtrTy(), Addr, "ref");
+    return B.CreateICmpEQ(P, llvm::ConstantPointerNull::get(B.getPtrTy()), "isnil");
+  }
+
+  /// The default value of type T (0, false, '', nil), as visitExpr gives it.
+  llvm::Value *zeroValue(Type *T) {
+    if (T->getBase()->isBoolean())
+      return B.getInt1(false);
+    return llvm::Constant::getNullValue(memType(T));
+  }
+
+  /// x?.m: x's value in a hidden variable; where it is not nil, m (in
+  /// another, which is the value; else the default value) or the call.
+  llvm::Value *visitSafeNavExpr(SafeNavExpr *E) {
+    Expr *Base = E->getBase();
+    Type *BT = Base->getType();
+    llvm::Value *Tmp = varAddress(E->getTmp());
+    storeExpr(Tmp, BT, Base);
+    llvm::Value *Res = E->getRes() ? varAddress(E->getRes()) : nullptr;
+    Type *RT = E->getRes() ? E->getRes()->getType() : nullptr;
+    if (Res)
+      storeValue(Res, zeroValue(RT), RT);
+    auto *ThenBB = newBlock("nav.then");
+    auto *EndBB = newBlock("nav.end");
+    B.CreateCondBr(isNilAt(Tmp, BT), EndBB, ThenBB);
+    B.SetInsertPoint(ThenBB);
+    if (E->isStatement()) {
+      visitStmt(E->getCall());
+    } else {
+      storeExpr(Res, RT, E->getAccess());
+      if (VarDecl *Ok = E->getOk())
+        storeScalar(varAddress(Ok), B.getInt1(true), Ok->getType());
+    }
+    B.CreateBr(EndBB);
+    B.SetInsertPoint(EndBB);
+    return E->isStatement() ? nullptr : visitExpr(E->getResRef());
+  }
+
+  /// a ?? b: a in a hidden variable, replaced by b where a is nil (or where
+  /// a's chain of ?. stopped).
+  llvm::Value *visitCoalesceExpr(CoalesceExpr *E) {
+    Expr *L = E->getLeft();
+    while (auto *P = llvm::dyn_cast<ParenExpr>(L))
+      L = P->getInner();
+    VarDecl *Ok = nullptr;
+    if (auto *Nav = llvm::dyn_cast<SafeNavExpr>(L)) {
+      while (auto *Inner = llvm::dyn_cast<SafeNavExpr>(Nav->getAccess()))
+        Nav = Inner;
+      Ok = Nav->getOk();
+    }
+    if (Ok)
+      storeScalar(varAddress(Ok), B.getInt1(false), Ok->getType());
+    Type *T = E->getType();
+    llvm::Value *Res = varAddress(E->getRes());
+    storeExpr(Res, T, E->getLeft());
+    llvm::Value *Missing =
+        Ok ? B.CreateNot(loadScalar(varAddress(Ok), Ok->getType()), "missing")
+           : isNilAt(Res, T);
+    auto *ThenBB = newBlock("coalesce.else");
+    auto *EndBB = newBlock("coalesce.end");
+    B.CreateCondBr(Missing, ThenBB, EndBB);
+    B.SetInsertPoint(ThenBB);
+    storeExpr(Res, T, E->getRight());
+    B.CreateBr(EndBB);
+    B.SetInsertPoint(EndBB);
+    return visitExpr(E->getResRef());
+  }
+
   /// if c then a else b: the if statement Sema made of it sets a hidden
   /// variable, which is the value.
   llvm::Value *visitCondExpr(CondExpr *E) {
