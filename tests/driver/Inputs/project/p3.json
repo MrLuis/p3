@@ -1,0 +1,13 @@
+{
+  "name": "app",
+  "version": "1.0.0",
+  "description": "A p3 project: its settings are those of the command line",
+  "main": "src/app.pas",
+  "output": "bin/app",
+  "mode": "objfpc",
+  "unitPaths": ["src/lib"],
+  "defines": ["GREETING"],
+  "optimize": 1,
+  "warnings": { "unusedVariable": false },
+  "checks": { "range": true, "overflow": true }
+}

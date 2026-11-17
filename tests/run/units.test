@@ -1,6 +1,6 @@
 ; M12: units. main uses Shapes (next to it) and MathUtils (found via -I);
 ; Shapes itself uses MathUtils. Initialization parts run in dependency order.
-; RUN: %pcc --mode=tp -I %S/Inputs/units/lib %S/Inputs/units/main.pas -o %t
+; RUN: %p3 --mode=tp -I %S/Inputs/units/lib %S/Inputs/units/main.pas -o %t
 ; RUN: %t | FileCheck %s
 ; CHECK:      MathUtils ready
 ; CHECK-NEXT: Shapes ready

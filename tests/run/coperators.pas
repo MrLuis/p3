@@ -5,7 +5,7 @@
   as in Free Pascal; in function f, f += e adds to f's result (also from
   a nested routine). On by default ($coperators off turns them off).
   Output is identical to Free Pascal 3.2.2's (fpc -Mtp).
-  RUN: %pcc --mode=tp %s -o %t
+  RUN: %p3 --mode=tp %s -o %t
   RUN: %t | diff - %S/coperators.expected
 }
 program coperators;

@@ -1,6 +1,6 @@
 ; static on a method's implementation: only on a class method declared
 ; static (as in Free Pascal); leaving it out there is fine.
-; RUN: not %pcc --mode=objfpc -ferror-limit=0 -c %S/Inputs/static-impl/errors.pas -o %t.o 2>&1 | FileCheck %s
+; RUN: not %p3 --mode=objfpc -ferror-limit=0 -c %S/Inputs/static-impl/errors.pas -o %t.o 2>&1 | FileCheck %s
 ; CHECK: errors.pas:9:33: error: 'TObj.A' was not declared 'static'
 ; CHECK: errors.pas:4:11: note: 'A' declared here
 ; CHECK: errors.pas:13:27: error: 'static' is only allowed on class methods

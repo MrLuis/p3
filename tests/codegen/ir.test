@@ -1,5 +1,5 @@
 ; LLVM IR for write/writeln lowering (PLAN.md section 6).
-; RUN: %pcc --emit-llvm %S/Inputs/write.pas -o - | FileCheck %s
+; RUN: %p3 --emit-llvm %S/Inputs/write.pas -o - | FileCheck %s
 ; Strings are stored without a terminating NUL; their length is passed explicitly.
 ; CHECK: @.str = private unnamed_addr constant [2 x i8] c"bc"
 ; CHECK: declare void @__pas_init(i32, ptr)
@@ -21,7 +21,7 @@
 ; CHECK-NEXT: }
 
 ; The optimizer keeps the observable runtime calls.
-; RUN: %pcc --emit-llvm -O2 -fno-inline-runtime %S/Inputs/write.pas -o - | FileCheck --check-prefix=O2 %s
+; RUN: %p3 --emit-llvm -O2 -fno-inline-runtime %S/Inputs/write.pas -o - | FileCheck --check-prefix=O2 %s
 ; O2: define {{.*}}i32 @main(
 ; O2: call void @__pas_write_char(ptr {{.*}}, i8 97, i32 0)
 ; O2: call void @__pas_writeln(ptr

@@ -3,11 +3,11 @@
 #
 #   examples/new <name> [iso|tp|objfpc]      (default: objfpc)
 #
-#   <name>/pcc.json          the project's settings
+#   <name>/p3.json          the project's settings
 #   <name>/src/<name>.pas    the program
 #   <name>/src/lib/          its units
 #
-# Build and run it with:  cd examples/<name> && ../pcc && bin/<name>
+# Build and run it with:  cd examples/<name> && ../p3 && bin/<name>
 set -e
 here=$(cd "$(dirname "$0")" && pwd)
 name=$1
@@ -28,7 +28,7 @@ if [ -e "$dir" ]; then
   exit 1
 fi
 mkdir -p "$dir/src/lib"
-cat > "$dir/pcc.json" <<JSON
+cat > "$dir/p3.json" <<JSON
 {
   "name": "$name",
   "version": "0.1.0",
@@ -56,4 +56,4 @@ end.
 PAS
 fi
 echo "created examples/$name; build and run it with:"
-echo "  cd examples/$name && ../pcc && bin/$name"
+echo "  cd examples/$name && ../p3 && bin/$name"

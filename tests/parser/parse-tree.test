@@ -1,6 +1,6 @@
 ; --emit-parse-tree: the parser's output without Sema, with type specs,
 ; typed-constant values, uses clauses and units (SELFHOST.md S5).
-; RUN: not %pcc --mode=tp --emit-parse-tree %S/Inputs/parse-tree.pas 2>%t.err | FileCheck %s
+; RUN: not %p3 --mode=tp --emit-parse-tree %S/Inputs/parse-tree.pas 2>%t.err | FileCheck %s
 ; RUN: FileCheck --check-prefix=ERR %s < %t.err
 
 ; CHECK:      ProgramDecl 'pt' <1:1>

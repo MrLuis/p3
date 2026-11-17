@@ -1,9 +1,9 @@
 ; slice's length is checked with range checks on.
-; RUN: %pcc --mode=objfpc %S/Inputs/slice-range.pas -o %t
+; RUN: %p3 --mode=objfpc %S/Inputs/slice-range.pas -o %t
 ; RUN: not %t 2>&1 | FileCheck %s
 ; CHECK: 2
 ; CHECK-NEXT: Runtime error: slice length out of bounds at {{.*}}slice-range.pas:7:14
 ; A nil method pointer, called.
-; RUN: %pcc --mode=objfpc %S/Inputs/methodptr-nil.pas -o %t.nil
+; RUN: %p3 --mode=objfpc %S/Inputs/methodptr-nil.pas -o %t.nil
 ; RUN: not %t.nil 2>&1 | FileCheck --check-prefix=NIL %s
 ; NIL: Runtime error: call through a nil procedural value

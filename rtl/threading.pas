@@ -1,4 +1,4 @@
-{ pcc's Threading: what async code uses besides the language's own words
+{ p3's Threading: what async code uses besides the language's own words
   (async, await, spawn, scope, detached, Wait, WhenAll, WhenAny,
   Pool.Run): the methods of TCancelToken; TChannel<T>, a typed queue
   between tasks; and TAtomic<T> and TLocked<T>, values tasks share (the
@@ -11,7 +11,7 @@ unit threading;
 
 interface
 
-{$IFNDEF PCC_OBJFPC}
+{$IFNDEF P3_OBJFPC}
 uses threading_needs_mode_objfpc;
 {$ELSE}
 
@@ -117,7 +117,7 @@ procedure pas_token_check(k: TCancelToken); cdecl; external name '__pas_token_ch
 
 implementation
 
-{$IFDEF PCC_OBJFPC}
+{$IFDEF P3_OBJFPC}
 
 class function TCancelTokenHelper.Create: TCancelToken;
 begin

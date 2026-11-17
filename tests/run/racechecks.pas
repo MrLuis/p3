@@ -3,9 +3,9 @@
   (of thread-safe types: TAtomic<T>, TLocked<T>, TChannel<T>, classes
   derived from TSharedObject); an isolated variable belongs to one task
   and is handed over with move (left empty).
-  RUN: %pcc --mode=objfpc %s -o %t
+  RUN: %p3 --mode=objfpc %s -o %t
   RUN: %t | diff - %S/racechecks.expected
-  RUN: %pcc --mode=objfpc -O2 %s -o %t.fast
+  RUN: %p3 --mode=objfpc -O2 %s -o %t.fast
   RUN: %t.fast | diff - %S/racechecks.expected
 }
 {$H+}

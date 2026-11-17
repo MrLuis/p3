@@ -1,11 +1,11 @@
 { Tuples (objfpc): the types (T1, T2) and (Name: T1, Name: T2), the values
   (a, b), and (a, b) := e / var (a, b) := e, which give the elements of a
   tuple to variables.
-  RUN: %pcc --mode=objfpc %s -o %t
+  RUN: %p3 --mode=objfpc %s -o %t
   RUN: %t | diff - %S/tuple.expected
-  RUN: %pcc --mode=objfpc -O2 -fno-range-checks %s -o %t.fast
+  RUN: %p3 --mode=objfpc -O2 -fno-range-checks %s -o %t.fast
   RUN: %t.fast | diff - %S/tuple.expected
-  RUN: %pcc --mode=objfpc -g %s -o %t.dbg
+  RUN: %p3 --mode=objfpc -g %s -o %t.dbg
   RUN: %t.dbg | diff - %S/tuple.expected
 }
 {$H+}

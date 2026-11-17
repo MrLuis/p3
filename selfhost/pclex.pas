@@ -1,6 +1,6 @@
 unit pclex;
 { The lexer of the self-hosted compiler; a port of src/lexer/Lexer.cpp.
-  Token kinds come from include/pcc/Lexer/TokenKinds.def through the
+  Token kinds come from include/p3/Lexer/TokenKinds.def through the
   generated tokens.inc.
 
   ISO 7185 tokens plus, with --mode=tp, Turbo/FPC ones: // comments,
@@ -75,7 +75,7 @@ type
     corbaInterfaces: boolean; { $interfaces corba (default: com) }
     advancedRecords: boolean; { $modeswitch advancedrecords }
     typeHelpers: boolean; { $modeswitch typehelpers }
-    raceChecks: boolean; { $modeswitch racechecks (pcc's own) }
+    raceChecks: boolean; { $modeswitch racechecks (p3's own) }
     longStrings: boolean; { H+: string is an ansistring }
     { macros ($macro on, $define NAME := value, as in Free Pascal): upper-
       case name id -> PMacro; a use of NAME lexes its value (macroStack:
@@ -86,7 +86,7 @@ type
     { $coperators on: += -= *= /= are tokens (the default except in ISO
       mode, as in Free Pascal, where it is on in every mode) }
     cOperators: boolean;
-    { mode switches that pcc lets a program turn on or off in any mode
+    { mode switches that p3 lets a program turn on or off in any mode
       ($modeswitch result|out|defaultparameters); on in objfpc mode }
     resultSwitch, outSwitch, defaultParamsSwitch: boolean;
     { $scopedenums on: the values of the enumerations declared after it are
@@ -397,13 +397,13 @@ begin
   listInit(lx.switchStack);
   mapInit(lx.macros);
   listInit(lx.macroStack);
-  defineSymbol(lx, 'PCC', true);
+  defineSymbol(lx, 'P3', true);
   if mode = lmISO then
-    defineSymbol(lx, 'PCC_ISO', true)
+    defineSymbol(lx, 'P3_ISO', true)
   else if mode = lmTP then
-    defineSymbol(lx, 'PCC_TP', true)
+    defineSymbol(lx, 'P3_TP', true)
   else
-    defineSymbol(lx, 'PCC_OBJFPC', true);
+    defineSymbol(lx, 'P3_OBJFPC', true);
   for i := 0 to commandLineDefines.count - 1 do
     defineSymbol(lx, nameStr(PName(listGet(commandLineDefines, i))), true);
 end;
@@ -1445,9 +1445,9 @@ end;
 { $modeswitch NAME[+|-| ON| OFF] with Free Pascal 3.2.2's names (text
   [b, e) after the word): advancedrecords and typehelpers (objfpc),
   result, out and defaultparameters (any mode) turn their features on or
-  off; the others pcc's mode decides (class, objpas, properties,
+  off; the others p3's mode decides (class, objpas, properties,
   exceptions: objfpc; cvar, initfinal, hintdirective, allowinline: always)
-  or pcc lacks: a request for what pcc does is accepted, any other is
+  or p3 lacks: a request for what p3 does is accepted, any other is
   reported and ignored. }
 procedure handleModeSwitch(var lx: TLexer; start, b, e: int64);
 var
@@ -1484,7 +1484,7 @@ begin
     lx.typeHelpers := isOn;
     exit;
   end;
-  if n = 'racechecks' then { pcc's own: spawn blocks share only shared data }
+  if n = 'racechecks' then { p3's own: spawn blocks share only shared data }
   begin
     lx.raceChecks := isOn;
     exit;
@@ -1504,7 +1504,7 @@ begin
     lx.defaultParamsSwitch := isOn;
     exit;
   end;
-  { the others: what pcc's mode decides, what it always does, or a feature
+  { the others: what p3's mode decides, what it always does, or a feature
     it lacks }
   if (n = 'class') or (n = 'objpas') or (n = 'properties') or (n = 'exceptions') then
     kind := 'mode'

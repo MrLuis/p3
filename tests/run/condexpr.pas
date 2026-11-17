@@ -1,11 +1,11 @@
 { Conditional expressions (objfpc): if c then a else b is a value, a where
   c holds and b otherwise; only the branch chosen is evaluated. Its type is
   the type wanted of it, or the common type of the branches.
-  RUN: %pcc --mode=objfpc %s -o %t
+  RUN: %p3 --mode=objfpc %s -o %t
   RUN: %t | diff - %S/condexpr.expected
-  RUN: %pcc --mode=objfpc -O2 %s -o %t.fast
+  RUN: %p3 --mode=objfpc -O2 %s -o %t.fast
   RUN: %t.fast | diff - %S/condexpr.expected
-  RUN: %pcc --mode=objfpc -g %s -o %t.dbg
+  RUN: %p3 --mode=objfpc -g %s -o %t.dbg
   RUN: %t.dbg | diff - %S/condexpr.expected
 }
 {$H+}

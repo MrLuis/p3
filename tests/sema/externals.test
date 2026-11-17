@@ -1,12 +1,12 @@
 ; External routines: library and symbol names must be string constants;
 ; varargs (C variadic) needs cdecl and external; callbacks need cdecl
 ; procedural types of C types; which routines can be procedural values.
-; RUN: not %pcc --mode=objfpc -ferror-limit=0 -c %S/Inputs/externals/syntax.pas -o %t.o 2>&1 | FileCheck --check-prefix=SYNTAX %s
+; RUN: not %p3 --mode=objfpc -ferror-limit=0 -c %S/Inputs/externals/syntax.pas -o %t.o 2>&1 | FileCheck --check-prefix=SYNTAX %s
 ; SYNTAX: syntax.pas:2:34: error: 'varargs' is only allowed on external routines
 ; SYNTAX: syntax.pas:4:58: error: expected the external symbol name
 ; SYNTAX-NOT: error:
 
-; RUN: not %pcc --mode=objfpc -ferror-limit=0 -c %S/Inputs/externals/errors.pas -o %t.o 2>&1 | FileCheck %s
+; RUN: not %p3 --mode=objfpc -ferror-limit=0 -c %S/Inputs/externals/errors.pas -o %t.o 2>&1 | FileCheck %s
 ; CHECK: errors.pas:12:39: error: the library name of an external routine must be a string constant
 ; CHECK: errors.pas:13:48: error: the symbol name of an external routine must be a string constant
 ; CHECK: errors.pas:14:10: error: 'varargs' routine 'f3' must be 'cdecl'
@@ -23,11 +23,11 @@
 ; CHECK-NOT: error:
 
 ; The dumps: names resolved after Sema; constants as written in the parse tree.
-; RUN: %pcc --mode=objfpc --emit-ast %S/../run/externals.pas | FileCheck --check-prefix=AST %s
+; RUN: %p3 --mode=objfpc --emit-ast %S/../run/externals.pas | FileCheck --check-prefix=AST %s
 ; AST: FunctionDecl 'strlen' : int64 cdecl external 'strlen' in 'c'
 ; AST: FunctionDecl 'c_sin' : real cdecl external 'sin' in 'm'
 ; AST: FunctionDecl 'printf' : integer cdecl external 'printf' in 'c' varargs
-; RUN: %pcc --mode=objfpc --emit-parse-tree %S/../run/externals.pas | FileCheck --check-prefix=TREE %s
+; RUN: %p3 --mode=objfpc --emit-parse-tree %S/../run/externals.pas | FileCheck --check-prefix=TREE %s
 ; TREE:      FunctionDecl 'c_sin' cdecl external <
 ; TREE:        ExternalLibrary <
 ; TREE-NEXT:     NameRefExpr 'libm' <
@@ -35,7 +35,7 @@
 ; TREE-NEXT:     NameRefExpr 'sinname' <
 
 ; The C entries of cdecl routines (their procedural values), and variadic calls.
-; RUN: %pcc --mode=objfpc --emit-llvm %S/../run/externals.pas -o - | FileCheck --check-prefix=IR %s
+; RUN: %p3 --mode=objfpc --emit-llvm %S/../run/externals.pas -o - | FileCheck --check-prefix=IR %s
 ; IR: call i32 (ptr, ...) @printf(ptr @.cstr.{{[0-9]+}}, i32 42, ptr @.cstr.{{[0-9]+}}, double 2.500000e+00, i32 %{{[0-9]+}}, i64 1234567890123)
 ; IR: call void @qsort(ptr @pas.a, i64 7, i64 4, ptr @cthunk.pas.compare)
 ; IR: store { ptr, ptr } { ptr @cthunk.pas.descending, ptr null }, ptr @pas.cmp

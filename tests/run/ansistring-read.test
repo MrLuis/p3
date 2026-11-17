@@ -1,5 +1,5 @@
 ; readln into an ansistring takes a whole line, of any length.
-; RUN: %pcc --mode=objfpc %S/Inputs/ansistring-read.pas -o %t
+; RUN: %p3 --mode=objfpc %S/Inputs/ansistring-read.pas -o %t
 ; RUN: %t < %S/Inputs/ansistring-read.txt | FileCheck %s
 ; CHECK: 10 short line
 ; CHECK-NEXT: 700 L

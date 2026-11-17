@@ -2,12 +2,12 @@
 ; raised there and handled in the unit's initialization part and in the
 ; program, compiled whole and separately.
 ; RUN: rm -rf %t && mkdir -p %t && cp -r %S/Inputs/exceptions/. %t/
-; RUN: %pcc --mode=objfpc -I %t/lib %t/digits.pas -o %t/whole
+; RUN: %p3 --mode=objfpc -I %t/lib %t/digits.pas -o %t/whole
 ; RUN: not %t/whole > %t/whole.out 2> %t/whole.err
 ; RUN: FileCheck %s < %t/whole.out
 ; RUN: FileCheck --check-prefix=ERR %s < %t/whole.err
-; RUN: %pcc --mode=objfpc -c %t/lib/parsing.pas -o %t/lib/parsing.o
-; RUN: %pcc --mode=objfpc -I %t/lib -fseparate-units %t/digits.pas -o %t/separate
+; RUN: %p3 --mode=objfpc -c %t/lib/parsing.pas -o %t/lib/parsing.o
+; RUN: %p3 --mode=objfpc -I %t/lib -fseparate-units %t/digits.pas -o %t/separate
 ; RUN: not %t/separate > %t/separate.out 2> %t/separate.err
 ; RUN: FileCheck %s < %t/separate.out
 ; RUN: FileCheck --check-prefix=ERR %s < %t/separate.err

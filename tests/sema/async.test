@@ -3,7 +3,7 @@
 ; constructor or a record's method, not external), and where await, spawn,
 ; scope, detached, Wait, WhenAll, WhenAny and Pool.Run apply. A task never
 ; waited for is a dangling task (a warning).
-; RUN: not %pcc --mode=objfpc -ferror-limit=0 -c %S/Inputs/async/errors.pas -o %t.o 2>&1 | FileCheck %s
+; RUN: not %p3 --mode=objfpc -ferror-limit=0 -c %S/Inputs/async/errors.pas -o %t.o 2>&1 | FileCheck %s
 ; CHECK: errors.pas:22:20: error: parameter 'x' of async routine 'ByRef' cannot be a 'var' parameter: its task may outlive the caller's variable; pass a value
 ; CHECK: errors.pas:22:38: error: parameter 'a' of async routine 'ByRef' cannot be an open array parameter: its task may outlive the caller's variable; pass a value
 ; CHECK: errors.pas:26:10: error: an external routine cannot be async
@@ -30,9 +30,9 @@
 ;
 ; The words are not reserved: outside objfpc they are plain names (and the
 ; functions do not exist); in objfpc, a declaration keeps one a name.
-; RUN: not %pcc --mode=tp -c %S/Inputs/async/tp.pas -o %t.o 2>&1 | FileCheck --check-prefix=TP %s
+; RUN: not %p3 --mode=tp -c %S/Inputs/async/tp.pas -o %t.o 2>&1 | FileCheck --check-prefix=TP %s
 ; TP: tp.pas:16:3: error: use of undeclared identifier 'Wait'
 ; TP-NOT: error:
-; RUN: %pcc --mode=objfpc %S/Inputs/async/declared.pas -o %t.declared
+; RUN: %p3 --mode=objfpc %S/Inputs/async/declared.pas -o %t.declared
 ; RUN: %t.declared | FileCheck --check-prefix=DECLARED %s
 ; DECLARED: 4

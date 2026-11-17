@@ -1,9 +1,9 @@
-#include "pcc/AST/Type.h"
-#include "pcc/AST/AST.h"
+#include "p3/AST/Type.h"
+#include "p3/AST/AST.h"
 
 #include "llvm/ADT/StringExtras.h"
 
-using namespace pcc;
+using namespace p3;
 
 bool Type::isIntegerLike() const {
   const Type *T = this;
@@ -20,12 +20,12 @@ bool Type::isSignedIntegerLike() const {
   return I && I->isSigned();
 }
 
-bool pcc::isQWord(const Type *T) {
+bool p3::isQWord(const Type *T) {
   auto *I = llvm::dyn_cast<IntegerType>(T);
   return I && I->getBits() == 64 && !I->isSigned();
 }
 
-bool pcc::haveSameOrdinalHost(Type *A, Type *B) {
+bool p3::haveSameOrdinalHost(Type *A, Type *B) {
   Type *X = A->getBase(), *Y = B->getBase();
   return X == Y || (X->isInteger() && Y->isInteger()) ||
          (A->isCharLike() && B->isCharLike()); // char and widechar
@@ -52,7 +52,7 @@ static unsigned bitLength(uint64_t V) {
   return N;
 }
 
-unsigned pcc::bitPackedWidth(Type *T) {
+unsigned p3::bitPackedWidth(Type *T) {
   switch (T->getKind()) {
   case Type::TK_Integer:
     return llvm::cast<IntegerType>(T)->getBits();
@@ -80,7 +80,7 @@ unsigned pcc::bitPackedWidth(Type *T) {
   }
 }
 
-bool pcc::bitPackedSigned(Type *T) {
+bool p3::bitPackedSigned(Type *T) {
   if (auto *I = llvm::dyn_cast<IntegerType>(T))
     return I->isSigned();
   if (auto *S = llvm::dyn_cast<SubrangeType>(T))
@@ -116,7 +116,7 @@ bool Type::isTextFile() const {
   return F && F->isText();
 }
 
-bool pcc::containsFile(Type *T) {
+bool p3::containsFile(Type *T) {
   if (T->isFile())
     return true;
   if (auto *A = llvm::dyn_cast<ArrayType>(T))
@@ -129,7 +129,7 @@ bool pcc::containsFile(Type *T) {
   return false;
 }
 
-bool pcc::containsRoutineType(Type *T) {
+bool p3::containsRoutineType(Type *T) {
   if (llvm::isa<RoutineType>(T))
     return true;
   if (auto *A = llvm::dyn_cast<ArrayType>(T))
@@ -142,7 +142,7 @@ bool pcc::containsRoutineType(Type *T) {
   return false;
 }
 
-bool pcc::containsInterface(Type *T) {
+bool p3::containsInterface(Type *T) {
   if (auto *I = llvm::dyn_cast<InterfaceType>(T))
     return I->isCOM();
   if (auto *A = llvm::dyn_cast<ArrayType>(T))
@@ -160,7 +160,7 @@ bool Type::isClosureType() const {
   return R && R->isReference();
 }
 
-bool pcc::isManaged(Type *T) {
+bool p3::isManaged(Type *T) {
   if (T->isAnsiString() || T->isDynArray() || T->isTask() || T->isToken())
     return true;
   if (auto *R = llvm::dyn_cast<RoutineType>(T))
@@ -224,7 +224,7 @@ unsigned SetType::getStorageBits() const {
   return Hi <= 31 ? 32 : Hi <= 63 ? 64 : 256;
 }
 
-OrdinalBounds pcc::getOrdinalBounds(Type *T) {
+OrdinalBounds p3::getOrdinalBounds(Type *T) {
   switch (T->getKind()) {
   case Type::TK_Integer: {
     auto *I = llvm::cast<IntegerType>(T);

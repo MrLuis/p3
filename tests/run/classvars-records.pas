@@ -3,9 +3,9 @@
   variable for the type (not part of a record's size), used by its methods
   (also static ones) and through the type (TRec.Count, longint.Full).
   Output is identical to Free Pascal 3.2.2's (fpc -Mobjfpc).
-  RUN: %pcc --mode=objfpc %s -o %t
+  RUN: %p3 --mode=objfpc %s -o %t
   RUN: %t | diff - %S/classvars-records.expected
-  RUN: %pcc --mode=objfpc -O2 -g %s -o %t.O2
+  RUN: %p3 --mode=objfpc -O2 -g %s -o %t.O2
   RUN: %t.O2 | diff - %S/classvars-records.expected
 }
 program classvarsrecords;

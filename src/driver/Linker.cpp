@@ -1,5 +1,5 @@
-#include "pcc/Driver/Linker.h"
-#include "pcc/Basic/Diagnostics.h"
+#include "p3/Driver/Linker.h"
+#include "p3/Basic/Diagnostics.h"
 
 #include "llvm/ADT/SmallString.h"
 #include "llvm/ADT/SmallVector.h"
@@ -8,10 +8,10 @@
 #include "llvm/Support/Process.h"
 #include "llvm/Support/Program.h"
 
-using namespace pcc;
+using namespace p3;
 
-std::string pcc::findRuntimeLibrary() {
-  if (auto Env = llvm::sys::Process::GetEnv("PCC_RUNTIME_LIB"))
+std::string p3::findRuntimeLibrary() {
+  if (auto Env = llvm::sys::Process::GetEnv("P3_RUNTIME_LIB"))
     return *Env;
   // getMainExecutable works without argv[0] on Linux and macOS.
   std::string Exe = llvm::sys::fs::getMainExecutable(nullptr, nullptr);
@@ -21,16 +21,16 @@ std::string pcc::findRuntimeLibrary() {
   return std::string(Path);
 }
 
-std::string pcc::findRuntimeIR() {
-  if (auto Env = llvm::sys::Process::GetEnv("PCC_RUNTIME_IR"))
+std::string p3::findRuntimeIR() {
+  if (auto Env = llvm::sys::Process::GetEnv("P3_RUNTIME_IR"))
     return *Env;
   llvm::SmallString<256> Path(llvm::sys::path::parent_path(findRuntimeLibrary()));
   llvm::sys::path::append(Path, "libpascalrt.ll");
   return std::string(Path);
 }
 
-std::string pcc::findUnitLibrary() {
-  if (auto Env = llvm::sys::Process::GetEnv("PCC_UNIT_DIR"))
+std::string p3::findUnitLibrary() {
+  if (auto Env = llvm::sys::Process::GetEnv("P3_UNIT_DIR"))
     return *Env;
   std::string Exe = llvm::sys::fs::getMainExecutable(nullptr, nullptr);
   llvm::SmallString<256> Path(llvm::sys::path::parent_path(Exe));
@@ -40,24 +40,24 @@ std::string pcc::findUnitLibrary() {
 }
 
 static std::string findLinkerDriver(DiagnosticsEngine &Diags) {
-  if (auto Env = llvm::sys::Process::GetEnv("PCC_CC")) {
+  if (auto Env = llvm::sys::Process::GetEnv("P3_CC")) {
     if (llvm::sys::path::has_parent_path(*Env))
       return *Env;
     if (auto P = llvm::sys::findProgramByName(*Env))
       return *P;
     Diags.error("cannot find linker driver '" + llvm::Twine(*Env) +
-                "' (from PCC_CC)");
+                "' (from P3_CC)");
     return "";
   }
   for (const char *Name : {"clang-19", "clang", "cc", "gcc"})
     if (auto P = llvm::sys::findProgramByName(Name))
       return *P;
   Diags.error("cannot find a C compiler to link with (tried clang-19, clang, "
-              "cc, gcc); set PCC_CC");
+              "cc, gcc); set P3_CC");
   return "";
 }
 
-bool pcc::linkExecutable(llvm::StringRef ObjectFile,
+bool p3::linkExecutable(llvm::StringRef ObjectFile,
                          llvm::ArrayRef<std::string> UnitObjects,
                          llvm::StringRef OutputFile,
                          llvm::ArrayRef<std::string> LibraryDirs,
@@ -66,7 +66,7 @@ bool pcc::linkExecutable(llvm::StringRef ObjectFile,
   std::string RuntimeLib = findRuntimeLibrary();
   if (!llvm::sys::fs::exists(RuntimeLib)) {
     Diags.error("cannot find the Pascal runtime library '" +
-                llvm::Twine(RuntimeLib) + "'; set PCC_RUNTIME_LIB");
+                llvm::Twine(RuntimeLib) + "'; set P3_RUNTIME_LIB");
     return false;
   }
 

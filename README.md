@@ -1,6 +1,6 @@
-# pcc — a Pascal compiler targeting LLVM
+# p3 — a Pascal compiler targeting LLVM
 
-`pcc` compiles Pascal (ISO 7185, with optional Turbo/Free Pascal extensions)
+`p3` compiles Pascal (ISO 7185, with optional Turbo/Free Pascal extensions)
 to native executables through LLVM. See [PLAN.md](PLAN.md) for the roadmap.
 
 **Status:** M11 complete (full ISO 7185 level 0). Supported:
@@ -148,7 +148,7 @@ as are a failed `as` and calling an abstract method.
   before its initialization part or body; at exit (also after `halt`) the
   class destructors run: the program's, then the units' in reverse order,
   each one's in declaration order. Free Pascal has already closed `Output`
-  then; pcc has not, so they can still write.
+  then; p3 has not, so they can still write.
 - **Nested declarations:** `const` and `type` sections in a class or an
   advanced record, in any visibility section, as in Free Pascal: constants
   (typed ones in classes, which are class variables), enumerations,
@@ -362,26 +362,26 @@ compiled before it that was found not to; a call through a procedural
 value, of a virtual method or of an external routine can).
 
 Units are compiled into the program by default. They can also be compiled
-separately: `pcc --mode=tp -c unit.pas` writes `unit.o` (its interface
+separately: `p3 --mode=tp -c unit.pas` writes `unit.o` (its interface
 variables and routines are the symbols `pas.<unit>$<name>`, its
 initialization part `pas.<unit>$$init`), and a program built with
 `-fseparate-units` uses those objects (from next to each unit's source)
 instead of compiling the units again:
 
 ```sh
-pcc --mode=tp -c lib/mathutils.pas && pcc --mode=tp -I lib -c shapes.pas
-pcc --mode=tp -I lib -fseparate-units main.pas -o main
+p3 --mode=tp -c lib/mathutils.pas && p3 --mode=tp -I lib -c shapes.pas
+p3 --mode=tp -I lib -fseparate-units main.pas -o main
 ```
 
 `-L dir` and `-l name` pass library options to the linker.
 
 ### Unit library
 
-pcc ships units named and behaving like Free Pascal's, for Linux, macOS and
+p3 ships units named and behaving like Free Pascal's, for Linux, macOS and
 64-bit Windows: `sysutils`, `strutils`, `math` and `classes` so far. `uses` finds them
 after the program's directory and the `-I` directories, so a unit of your own
-with the same name wins. They live in `<pcc dir>/../lib/pascal` (override with
-`PCC_UNIT_DIR`), built from `rtl/`; what differs between systems is in
+with the same name wins. They live in `<p3 dir>/../lib/pascal` (override with
+`P3_UNIT_DIR`), built from `rtl/`; what differs between systems is in
 `runtime/sys.c`. Their output is checked against Free Pascal 3.2.2's.
 
 | Unit | Contents |
@@ -416,12 +416,12 @@ compiled units are not inlined into their users.
 **`{$modeswitch NAME}`** (also `NAME+`, `NAME-`, `NAME on`, `NAME off`), with
 Free Pascal 3.2.2's names: `advancedrecords` and `typehelpers` (objfpc),
 and `result`, `out` and `defaultparameters`, which work in tp mode too
-(and can be turned off in objfpc mode). pcc's mode decides `class`,
+(and can be turned off in objfpc mode). p3's mode decides `class`,
 `objpas`, `properties` and `exceptions`, and always has `cvar`,
 `initfinal`, `hintdirective` and `allowinline`: asking for the other state
-is a warning. Switches for features pcc lacks (`nestedcomments`,
+is a warning. Switches for features p3 lacks (`nestedcomments`,
 `objectivec1`, ...) can be turned off but not on (a warning); unknown names
-are warnings too. Unlike Free Pascal, pcc also takes them after the start
+are warnings too. Unlike Free Pascal, p3 also takes them after the start
 of a file.
 
 **Variables declared among the statements** (`--mode=objfpc`; as in
@@ -447,7 +447,7 @@ begin
 end;
 ```
 
-**Owned variables** (`--mode=objfpc`; pcc's own, not Free Pascal's): a
+**Owned variables** (`--mode=objfpc`; p3's own, not Free Pascal's): a
 local variable declared `x: TFoo owned` owns its object. The object is
 freed when the variable's scope is left, however it is left: for a
 variable of a routine's `var` section when the routine ends (its end,
@@ -482,7 +482,7 @@ and its exception is raised afterwards, unless an exception is already
 leaving the routine, which goes on. `owned` and `move` are not reserved
 words. Not supported yet: owned fields, parameters and global variables.
 
-**Template strings** (tp and objfpc; pcc's own, not Free Pascal's): a
+**Template strings** (tp and objfpc; p3's own, not Free Pascal's): a
 string between backticks can span lines and take values. `${expr}` puts
 the value of an expression in the text, written as `write` writes it, so a
 value can be anything `write` takes (integers, reals, characters, booleans,
@@ -550,7 +550,7 @@ call. Its values take no field width. Not supported: formats other than
 `write` cannot write (records, sets, objects): convert them in the
 expression. A name `r` used as a tag needs a blank before the backtick.
 
-**Inferred types** (objfpc; pcc's own): types the compiler works out from
+**Inferred types** (objfpc; p3's own): types the compiler works out from
 what is written next to them. Inference is local: from the value on the
 right, or from the type the place expects, in reading order.
 
@@ -594,7 +594,7 @@ var names := ['ann', 'bo'];          { array of string }
   rules of `var x := e`.
 - **Constants.** Where a type is inferred, a whole number is an `Integer`
   (an `Int64` if it does not fit), a number with a fraction a `Real`
-  (pcc's `Double`), and quoted text a `string`, also one character:
+  (p3's `Double`), and quoted text a `string`, also one character:
   `var c := 'a'` is a string; write `var c: Char := 'a'` for a character.
   The value of an expression keeps its type (`var c := s[1]` is a `Char`).
 - **`[a, b, c]`** in `var x := [...]` is a dynamic array (`array of T`) of
@@ -614,7 +614,7 @@ of a variable (`specialize TList<T>` is always written). The types of the
 parameters and results of named routines, and of fields, are always
 written; a lambda's are inferred (see "Lambdas").
 
-**Lambdas** (objfpc; pcc's own syntax): `function(params) => expression`
+**Lambdas** (objfpc; p3's own syntax): `function(params) => expression`
 and `procedure(params) => statement` are values of a procedural type,
 written where they are used.
 
@@ -907,7 +907,7 @@ end;
 Also: `WhenAll(tasks)` (a task of the array of their values) and
 `WhenAny(tasks)` (a task of the index of the first to end) take a static,
 dynamic or open array of tasks; `Pool.Run(F(x))` starts a task on the
-thread pool (`PCC_POOL_THREADS` workers, by default one per CPU, at least
+thread pool (`P3_POOL_THREADS` workers, by default one per CPU, at least
 2); `detached F(x)` or `detached(Handler) F(x)` lets a task run on its own,
 its exception going to `Handler(E: Exception)`. A task started any other
 way stays on the thread that started it, so code between waits runs where
@@ -981,7 +981,7 @@ lock is a plain mutex. (`With`, the proposal's name, is a reserved word.)
 `shared` and `isolated` are not reserved: they are qualifiers only where a
 type follows and no declaration of the word is visible.
 
-**Capture by copy** (pcc's own): `function[k, s](x) => e` is a closure
+**Capture by copy** (p3's own): `function[k, s](x) => e` is a closure
 with its own copies of `k` and `s`, taken when it is made. Inside it they
 are read-only ("cannot modify 'k', a copy made by this lambda"); what it
 uses without listing it, it shares as closures do. Each time the lambda is
@@ -1019,7 +1019,7 @@ a record, as an `of object` type's. Not supported: `reference to ... of
 object` (a method-pointer lambda is one already) and calling conventions,
 comparing values with `=` (use `Assigned`).
 
-**Conditional expressions** (objfpc; pcc's own): `if c then a else b` is a
+**Conditional expressions** (objfpc; p3's own): `if c then a else b` is a
 value, `a` where `c` holds and `b` otherwise. Only the branch chosen is
 evaluated, so `if n = 0 then 0 else total div n` is safe. Both branches
 are needed; they nest (`if x < 0 then -1 else if x > 0 then 1 else 0`).
@@ -1038,7 +1038,7 @@ variable: it cannot be assigned to or passed to a `var` parameter. It can
 only be written among the statements of a routine or program, not in a
 constant.
 
-**Tuples** (objfpc; pcc's own, not Free Pascal's): several values as one,
+**Tuples** (objfpc; p3's own, not Free Pascal's): several values as one,
 without declaring a record. A tuple type lists its element types between
 parentheses, `(Integer, string)`, and can name them, `(Min: Integer, Max:
 Integer)`; a tuple value lists expressions, `(lo, hi)`. A function can
@@ -1192,7 +1192,7 @@ warnings; `-Werror` makes them errors.
 **Calling conventions** (not in `--mode=iso`): `cdecl` and `stdcall` on
 routines (also `forward`, `external` and unit interface headings), methods,
 interface methods and procedural types (`TCb = function(x: integer):
-integer; stdcall;`). pcc calls every routine with the target's C
+integer; stdcall;`). p3 calls every routine with the target's C
 convention; a `cdecl` routine's procedural values can also be called from C
 (see external routines). As in Free Pascal on 64-bit targets, `stdcall` is the default
 convention and `cdecl` a different one: a routine's heading and
@@ -1357,7 +1357,7 @@ specialization also has its own copy of it.
 **Generic methods** (`--mode=objfpc`), as in Free Pascal 3.2: a class
 declares `generic function M<T>(...)` (or `generic procedure`, `generic
 class function`), implemented as `generic function TFoo.M<T>(...)`, and
-`obj.specialize M<Integer>(x)` calls it. As for generic routines, pcc
+`obj.specialize M<Integer>(x)` calls it. As for generic routines, p3
 also infers the type arguments from the arguments, `obj.M(x)`; inside a
 method `M(x)` and `specialize M<T>(x)` call it on Self. Generic classes
 can have generic methods too:
@@ -1382,7 +1382,7 @@ parameters, parameter kinds). Type helpers can have generic methods too;
 advanced records cannot yet.
 
 **Generic type helpers** (`--mode=objfpc`, `{$modeswitch typehelpers}`;
-pcc's own): `generic TH<T> = type helper for array of T` extends every
+p3's own): `generic TH<T> = type helper for array of T` extends every
 dynamic array, `T` being its element type, and a helper `for specialize
 TGen<T>` (a record helper for a generic record) every matching
 specialization. The helper is specialized where a value uses it, for the
@@ -1438,7 +1438,7 @@ on `forward` and interface headings, in units, on methods, constructors,
 interface methods and procedural types. Unlike Free Pascal, a value that does
 not fit the parameter's range (`b: byte = 300`) is an error.
 
-**Named arguments** (objfpc; pcc's own, not Free Pascal's): `Name := value`
+**Named arguments** (objfpc; p3's own, not Free Pascal's): `Name := value`
 among the arguments of a call is the argument for the parameter `Name`, so
 defaults in the middle of a list can be skipped and a call says what its
 values mean.
@@ -1470,7 +1470,7 @@ conversions, as before. Among the routines that fit equally well, the one
 that leaves the fewest parameters to their default values is called, so a
 routine that takes exactly the arguments written beats one that needs
 defaults (`P(1)` calls `P(a: Integer)`, not `P(a: Integer; b: Integer = 0)`;
-Free Pascal 3.2.2 rejects that call as ambiguous, as pcc did). A tie that
+Free Pascal 3.2.2 rejects that call as ambiguous, as p3 did). A tie that
 remains is
 an error that lists the candidates, never a silent choice. A named argument
 only fits the routines that have a parameter of that name, which can tell
@@ -1516,7 +1516,7 @@ a predeclared `TVarRec` (`VType`, compared with `vtInteger`, `vtInt64`,
 `VChar`, `VExtended`, `VString`, `VAnsiString`, `VPChar`, `VPointer`, `VInt64`,
 `VObject`, `VClass`), with `low(a)`, `high(a)` and `length(a)`; `string(p)` or
 `ansistring(p)` reads a `VAnsiString`. Not on `cdecl` routines (they are C
-variadics there; `varargs` is pcc's form).
+variadics there; `varargs` is p3's form).
 
 **Open arrays** (not in `--mode=iso`), as in Free Pascal: a parameter `a:
 array of T` (value, `const` or `var`) takes any array whose elements are
@@ -1550,9 +1550,9 @@ be `nil`, as in Free Pascal.
 ```pascal
 {$DEFINE TRACE}                  { also -d TRACE / -dTRACE on the command line }
 {$IFDEF TRACE} writeln('enter'); {$ENDIF}
-{$IF defined(PCC_OBJFPC) and not defined(SLOW)}
+{$IF defined(P3_OBJFPC) and not defined(SLOW)}
   ...
-{$ELSEIF defined(PCC_TP)}
+{$ELSEIF defined(P3_TP)}
   ...
 {$ELSE}
   ...
@@ -1574,8 +1574,8 @@ read so far). `sizeof` takes the name of a predefined type only
 `NativeUInt`, `PtrUInt` and `SizeUInt` as `qword`): `$IF` is
 evaluated while lexing, so unlike Free Pascal it cannot see declared types or
 variables, and a program's own redeclaration of a predefined name is not
-noticed. `PCC` is
-predefined, and so is one of `PCC_ISO`, `PCC_TP` and `PCC_OBJFPC` (the
+noticed. `P3` is
+predefined, and so is one of `P3_ISO`, `P3_TP` and `P3_OBJFPC` (the
 mode), along with Free Pascal's symbols for the target: `LINUX` and `UNIX`;
 `DARWIN`, `BSD` and `UNIX`; `WINDOWS`, `MSWINDOWS` and `WIN64`; `CPU64` with
 `CPUX86_64` and `CPUAMD64`, or `CPUAARCH64`. Each file (program or unit)
@@ -1593,21 +1593,21 @@ integer or a string if its text is such a literal, the value of the macro
 it names, or else its text as a string. Expanded tokens keep the locations
 of the macro's value (in its `$define`). Without `{$macro on}`, `{$define
 NAME := value}` warns and defines `NAME` without a value. Free Pascal
-compares strings in `$IF` by length only; pcc compares them as strings.
+compares strings in `$IF` by length only; p3 compares them as strings.
 Not supported: macro values on the command line (`-dNAME:=value`).
 
-**Self-hosting:** pcc is also written in Pascal ([selfhost/](selfhost/),
+**Self-hosting:** p3 is also written in Pascal ([selfhost/](selfhost/),
 [SELFHOST.md](SELFHOST.md)); `ninja -C build check-bootstrap` builds it with
 itself, and `utils/seed.py` makes and uses a stage-1 *seed* (a binary plus
 the compiler's LLVM IR) to bootstrap it without this C++ compiler.
 
 **ISO 7185 conformance:** the Pascal-P5 test `iso7185pat.pas` passes all 793
-checks (`utils/iso7185pat.py build/bin/pcc`).
+checks (`utils/iso7185pat.py build/bin/p3`).
 
 ## Benchmarks
 
 ```sh
-utils/bench.py --pcc build/bin/pcc --fpc          # --base <older pcc> to compare two builds
+utils/bench.py --p3 build/bin/p3 --fpc          # --base <older p3> to compare two builds
 ```
 
 compiles the programs of `bench/` (integer loops, nested routines, large
@@ -1622,11 +1622,11 @@ what has been done.
 ## Fuzzing
 
 ```sh
-cmake -S . -B build-fuzz -G Ninja -DPCC_ENABLE_FUZZING=ON \
+cmake -S . -B build-fuzz -G Ninja -DP3_ENABLE_FUZZING=ON \
   -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++ \
   -DCMAKE_CXX_FLAGS="-fsanitize=fuzzer-no-link,address,undefined"
-ninja -C build-fuzz pcc-fuzz
-build-fuzz/bin/pcc-fuzz -max_total_time=300 corpus/ tests/run tests/*/Inputs
+ninja -C build-fuzz p3-fuzz
+build-fuzz/bin/p3-fuzz -max_total_time=300 corpus/ tests/run tests/*/Inputs
 ```
 
 ```pascal
@@ -1640,7 +1640,7 @@ end.
 ```
 
 ```sh
-$ pcc sum.pas && echo "17 25" | ./sum
+$ p3 sum.pas && echo "17 25" | ./sum
 17 + 25 = 42
 even? true
 ```
@@ -1652,13 +1652,13 @@ even? true
 - CMake ≥ 3.20, Ninja, a C++20 compiler
 - `lit` (`pip install lit`)
 - At run time, a C compiler driver (`clang` or `cc`) is used as the linker;
-  override with `PCC_CC`. The runtime library is found at
-  `<pcc dir>/../lib/libpascalrt.a` (override with `PCC_RUNTIME_LIB`), the
-  unit library at `<pcc dir>/../lib/pascal` (override with `PCC_UNIT_DIR`).
+  override with `P3_CC`. The runtime library is found at
+  `<p3 dir>/../lib/libpascalrt.a` (override with `P3_RUNTIME_LIB`), the
+  unit library at `<p3 dir>/../lib/pascal` (override with `P3_UNIT_DIR`).
 - Optional: LLVM's own `clang` and `llvm-link` (in the LLVM tools
   directory). With them the build also writes the runtime as LLVM IR,
   `lib/libpascalrt.ll`, next to the library (override with
-  `PCC_RUNTIME_IR`). From `-O1`, when compiling for the host, pcc links
+  `P3_RUNTIME_IR`). From `-O1`, when compiling for the host, p3 links
   that file into the program's module before optimizing it, so that the
   runtime's small functions (reference counting, string assignment and
   comparison, exception frames, type tests) are inlined; the program still
@@ -1670,25 +1670,25 @@ even? true
 
 ```sh
 cmake -S . -B build -G Ninja            # add -DLLVM_DIR=<prefix>/lib/cmake/llvm if not found
-ninja -C build                          # -> build/bin/pcc
+ninja -C build                          # -> build/bin/p3
 ninja -C build check                    # run the lit test suite
 ```
 
 ## Usage
 
 ```sh
-pcc hello.pas -o hello        # executable (default)
-pcc -c hello.pas              # object file
-pcc -S hello.pas              # assembly
-pcc --emit-llvm hello.pas     # LLVM IR
-pcc --emit-tokens hello.pas   # lexer dump
-pcc --emit-ast hello.pas      # AST dump
-pcc --help                    # all options (-O0..3, -g, --target, --mode=iso|tp|objfpc, ...)
+p3 hello.pas -o hello        # executable (default)
+p3 -c hello.pas              # object file
+p3 -S hello.pas              # assembly
+p3 --emit-llvm hello.pas     # LLVM IR
+p3 --emit-tokens hello.pas   # lexer dump
+p3 --emit-ast hello.pas      # AST dump
+p3 --help                    # all options (-O0..3, -g, --target, --mode=iso|tp|objfpc, ...)
 ```
 
-### Project files (pcc.json)
+### Project files (p3.json)
 
-A project can keep its options in a `pcc.json` file, so that `pcc` alone
+A project can keep its options in a `p3.json` file, so that `p3` alone
 builds it:
 
 ```json
@@ -1705,12 +1705,12 @@ builds it:
 }
 ```
 
-pcc looks for `pcc.json` in the input file's directory (the current
+p3 looks for `p3.json` in the input file's directory (the current
 directory when there is no input file) and then in its parents;
 `--project=<file>` names one and `--no-project` ignores it. Its settings are
 defaults: options on the command line override them (lists, such as unit
 paths and defines, are added after the command line's). Paths in it are
-relative to its directory. Without an input file, pcc builds `main` (into
+relative to its directory. Without an input file, p3 builds `main` (into
 `output`, creating its directory, when building an executable).
 
 | Setting | Value | Command line |
@@ -1729,7 +1729,7 @@ relative to its directory. Without an input file, pcc builds `main` (into
 | `checks` | `{ "range", "overflow" }`: `true` / `false` | `-fno-...-checks` |
 
 The file is strict JSON (strings up to 255 characters). Mistakes are
-reported like source errors (`pcc.json:3:15: error: 'optimize' must be an
+reported like source errors (`p3.json:3:15: error: 'optimize' must be an
 integer from 0 to 3`); an unknown setting is a warning.
 
 ## Layout
@@ -1746,15 +1746,15 @@ integer from 0 to 3`); an unknown setting is a warning.
 | `rtl/` | the unit library (`sysutils`, `strutils`, `math`, `classes`) |
 | `tests/` | lit tests: `lexer/ parser/ sema/ codegen/ driver/`, `run/` (compile + execute + diff), C++ unit tests in `unit/` |
 | `bench/` | benchmark programs with their expected output (`utils/bench.py`) |
-| `examples/` | projects built with the self-hosted compiler (`examples/pcc`, `examples/new <name>`); see [examples/README.md](examples/README.md) |
+| `examples/` | projects built with the self-hosted compiler (`examples/p3`, `examples/new <name>`); see [examples/README.md](examples/README.md) |
 
 ## Writing tests
 
-Tests are lit files with `RUN:` lines; `%pcc` is the compiler under test and
+Tests are lit files with `RUN:` lines; `%p3` is the compiler under test and
 `FileCheck`/`not` come from LLVM. Example:
 
 ```
-; RUN: not %pcc %S/Inputs/bad.pas 2>&1 | FileCheck %s
+; RUN: not %p3 %S/Inputs/bad.pas 2>&1 | FileCheck %s
 ; CHECK: bad.pas:3:5: error: undeclared identifier 'x'
 ```
 

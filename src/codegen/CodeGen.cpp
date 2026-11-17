@@ -33,12 +33,12 @@
 //
 //===----------------------------------------------------------------------===//
 
-#include "pcc/CodeGen/CodeGen.h"
-#include "pcc/AST/ASTVisitor.h"
-#include "pcc/AST/Type.h"
-#include "pcc/Basic/Directives.h"
-#include "pcc/Basic/LangOptions.h"
-#include "pcc/Basic/SourceManager.h"
+#include "p3/CodeGen/CodeGen.h"
+#include "p3/AST/ASTVisitor.h"
+#include "p3/AST/Type.h"
+#include "p3/Basic/Directives.h"
+#include "p3/Basic/LangOptions.h"
+#include "p3/Basic/SourceManager.h"
 
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/DenseSet.h"
@@ -56,7 +56,7 @@
 #include "llvm/Target/TargetMachine.h"
 #include "llvm/TargetParser/Triple.h"
 
-using namespace pcc;
+using namespace p3;
 
 namespace {
 
@@ -886,7 +886,7 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
   /// Throughout this file, instructions are created one statement at a
   /// time, never as two arguments of one call: C++ leaves the order of
   /// argument evaluation unspecified, and the IR must not depend on the
-  /// compiler that built pcc (the self-hosted compiler writes the same IR,
+  /// compiler that built p3 (the self-hosted compiler writes the same IR,
   /// SELFHOST.md S10).
   llvm::Value *outsideRange(llvm::Value *X, int64_t Lo, int64_t Hi) {
     llvm::Value *Below = B.CreateICmpSLT(X, B.getInt64(Lo));
@@ -2328,7 +2328,7 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
     DIUnitFile = DIB->createFile(llvm::sys::path::filename(Abs),
                                  llvm::sys::path::parent_path(Abs));
     CU = DIB->createCompileUnit(llvm::dwarf::DW_LANG_Pascal83, DIUnitFile,
-                                "pcc", CGOpts.OptLevel > 0, "", 0);
+                                "p3", CGOpts.OptLevel > 0, "", 0);
     M.addModuleFlag(llvm::Module::Warning, "Debug Info Version",
                     llvm::DEBUG_METADATA_VERSION);
     // DWARF 4: GNU ld mis-merges DWARF 5 string-offset tables when our
@@ -7545,7 +7545,7 @@ public:
 } // namespace
 
 std::unique_ptr<llvm::Module>
-pcc::generateModule(ProgramDecl &P, llvm::ArrayRef<UnitDecl *> Units,
+p3::generateModule(ProgramDecl &P, llvm::ArrayRef<UnitDecl *> Units,
                     const SourceManager &SM,
                     const LangOptions &LangOpts, const CodeGenOptions &CGOpts,
                     llvm::LLVMContext &Ctx, llvm::TargetMachine &TM,
@@ -7559,7 +7559,7 @@ pcc::generateModule(ProgramDecl &P, llvm::ArrayRef<UnitDecl *> Units,
 }
 
 std::unique_ptr<llvm::Module>
-pcc::generateUnitModule(UnitDecl &U, llvm::ArrayRef<UnitDecl *> Deps,
+p3::generateUnitModule(UnitDecl &U, llvm::ArrayRef<UnitDecl *> Deps,
                         const SourceManager &SM, const LangOptions &LangOpts,
                         const CodeGenOptions &CGOpts, llvm::LLVMContext &Ctx,
                         llvm::TargetMachine &TM, llvm::StringRef SourceFileName) {

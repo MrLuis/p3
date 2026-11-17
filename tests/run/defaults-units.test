@@ -1,10 +1,10 @@
 ; Default parameter values in a unit's interface, compiled whole and
 ; separately; the values are resolved where they are written.
 ; RUN: rm -rf %t && mkdir -p %t && cp -r %S/Inputs/defaults/. %t/
-; RUN: %pcc --mode=objfpc -I %t/lib %t/main.pas -o %t/whole
+; RUN: %p3 --mode=objfpc -I %t/lib %t/main.pas -o %t/whole
 ; RUN: %t/whole | FileCheck %s
-; RUN: %pcc --mode=objfpc -c %t/lib/withdef.pas -o %t/lib/withdef.o
-; RUN: %pcc --mode=objfpc -I %t/lib -fseparate-units %t/main.pas -o %t/separate
+; RUN: %p3 --mode=objfpc -c %t/lib/withdef.pas -o %t/lib/withdef.o
+; RUN: %p3 --mode=objfpc -I %t/lib -fseparate-units %t/main.pas -o %t/separate
 ; RUN: %t/separate | FileCheck %s
 ; CHECK:      42 3
 ; CHECK-NEXT: hello world hello you

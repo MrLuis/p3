@@ -1,13 +1,13 @@
 { Generic methods (objfpc, as in Free Pascal 3.2): generic function M<T>
   in a class, generic function TFoo.M<T> its implementation, called as
-  obj.specialize M<T>(args) or (pcc) with the types inferred from the
+  obj.specialize M<T>(args) or (p3) with the types inferred from the
   arguments, obj.M(args); inside a method also without the object. Class
   methods, methods of generic classes (TList<T>.Map<R>) and inherited ones.
-  RUN: %pcc --mode=objfpc %s -o %t
+  RUN: %p3 --mode=objfpc %s -o %t
   RUN: %t | diff - %S/genericmethods.expected
-  RUN: %pcc --mode=objfpc -O2 %s -o %t.fast
+  RUN: %p3 --mode=objfpc -O2 %s -o %t.fast
   RUN: %t.fast | diff - %S/genericmethods.expected
-  RUN: %pcc --mode=objfpc -g %s -o %t.g
+  RUN: %p3 --mode=objfpc -g %s -o %t.g
   RUN: %t.g | diff - %S/genericmethods.expected
 }
 {$H+}

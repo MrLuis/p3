@@ -1,6 +1,6 @@
 /*===- pascalrt.h - Pascal runtime library ABI ------------------------------===
  *
- * Functions called by code that pcc generates. The compiler declares these
+ * Functions called by code that p3 generates. The compiler declares these
  * itself (src/codegen/CodeGen.cpp); this header documents the ABI and lets
  * the runtime be tested from C. Keep both in sync.
  *

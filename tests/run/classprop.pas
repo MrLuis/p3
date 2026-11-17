@@ -5,7 +5,7 @@
   object, a descendant, Self, and unqualified in static, class and
   instance methods. Output is identical to Free Pascal 3.2.2's
   (fpc -Mobjfpc).
-  RUN: %pcc --mode=objfpc %s -o %t
+  RUN: %p3 --mode=objfpc %s -o %t
   RUN: %t | diff - %S/classprop.expected
 }
 program classprop;
@@ -101,7 +101,7 @@ var
 begin
   TApp.Build := 5;
   writeln(TApp.Build, ' ', TApp.Twice, ' ', TApp.Odd, ' ', TApp.Even);
-  TApp.Title := 'pcc';
+  TApp.Title := 'p3';
   TApp.Title := TApp.Title + ' compiler';
   writeln(TApp.Title, ' ', length(TApp.Title));
   TApp.Names[1] := 'one';

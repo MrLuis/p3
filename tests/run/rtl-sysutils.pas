@@ -1,8 +1,8 @@
-{ pcc's unit library: output identical to Free Pascal 3.2.2's (fpc -Mobjfpc -Sh-).
+{ p3's unit library: output identical to Free Pascal 3.2.2's (fpc -Mobjfpc -Sh-).
   Run in its own directory: it creates and removes directories.
-  RUN: rm -rf %t && mkdir -p %t && %pcc --mode=objfpc %s -o %t/a
+  RUN: rm -rf %t && mkdir -p %t && %p3 --mode=objfpc %s -o %t/a
   RUN: cd %t && env T_SET_VAR=val ./a > out && diff %S/rtl-sysutils.expected out
-  RUN: %pcc --mode=objfpc -O2 %s -o %t/a2
+  RUN: %p3 --mode=objfpc -O2 %s -o %t/a2
   RUN: cd %t && env T_SET_VAR=val ./a2 > out2 && diff %S/rtl-sysutils.expected out2
 }
 program rtlsysutils;

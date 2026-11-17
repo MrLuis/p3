@@ -4,16 +4,16 @@
 // C++ compiler's byte for byte. Keep the two sequences in sync.
 #include "UnitTest.h"
 
-#include "pcc/Basic/Diagnostics.h"
-#include "pcc/Basic/SourceManager.h"
+#include "p3/Basic/Diagnostics.h"
+#include "p3/Basic/SourceManager.h"
 
 #include "llvm/Support/MemoryBuffer.h"
 #include "llvm/Support/raw_ostream.h"
 
-using namespace pcc;
+using namespace p3;
 
 TEST(SelfhostDiag, MatchesPascalPort) {
-  std::string Dir = PCC_SOURCE_DIR "/selfhost/tests/";
+  std::string Dir = P3_SOURCE_DIR "/selfhost/tests/";
   auto Input = llvm::MemoryBuffer::getFile(Dir + "Inputs/diag.txt");
   auto Expected = llvm::MemoryBuffer::getFile(Dir + "t_diag.expected");
   EXPECT_TRUE(bool(Input));

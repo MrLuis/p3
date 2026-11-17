@@ -1,5 +1,5 @@
 ; Name resolution and type checking (M4).
-; RUN: not %pcc -ferror-limit=0 -c %S/Inputs/types.pas -o %t.o 2>&1 | FileCheck %s
+; RUN: not %p3 -ferror-limit=0 -c %S/Inputs/types.pas -o %t.o 2>&1 | FileCheck %s
 
 ; Declarations
 ; CHECK: types.pas:3:5: error: redefinition of 'i'
@@ -42,6 +42,6 @@
 ; CHECK-NOT: error:
 
 ; Predeclared names can be redefined in the program block.
-; RUN: %pcc --emit-ast %S/Inputs/shadow.pas | FileCheck --check-prefix=SHADOW %s
+; RUN: %p3 --emit-ast %S/Inputs/shadow.pas | FileCheck --check-prefix=SHADOW %s
 ; SHADOW: VarDecl 'integer' : char
 ; SHADOW: NameRefExpr 'integer' variable : char

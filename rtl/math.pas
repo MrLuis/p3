@@ -1,4 +1,4 @@
-{ pcc's Math: Free Pascal's names and results, over the C library.
+{ p3's Math: Free Pascal's names and results, over the C library.
   Written in the Turbo dialect so that every mode with units can use it;
   the floating-point overloads of Min, Max, Sign, InRange and EnsureRange
   need --mode=objfpc (overloading). Unlike Free Pascal, domain errors give
@@ -47,7 +47,7 @@ function Max(a, b: int64): int64;
 function Sign(a: int64): longint;
 function InRange(value, a, b: int64): boolean;
 function EnsureRange(value, a, b: int64): int64;
-{$IFDEF PCC_OBJFPC}
+{$IFDEF P3_OBJFPC}
 function MinValue(const data: array of longint): longint;
 function MaxValue(const data: array of longint): longint;
 function Min(a, b: double): double;
@@ -290,7 +290,7 @@ begin
   else EnsureRange := value;
 end;
 
-{$IFDEF PCC_OBJFPC}
+{$IFDEF P3_OBJFPC}
 function MinValue(const data: array of longint): longint;
 begin
   MinValue := MinIntValue(data);

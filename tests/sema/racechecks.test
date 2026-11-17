@@ -5,7 +5,7 @@
 ; is shared), not assign them, nor call routines nested in another; an
 ; isolated variable is never copied (assigned, passed to a task), only
 ; moved.
-; RUN: not %pcc --mode=objfpc -ferror-limit=0 -c %S/Inputs/racechecks/errors.pas -o %t.o 2>&1 | FileCheck %s
+; RUN: not %p3 --mode=objfpc -ferror-limit=0 -c %S/Inputs/racechecks/errors.pas -o %t.o 2>&1 | FileCheck %s
 ; CHECK: errors.pas:12:5: error: a field cannot be isolated (only variables can); its object belongs to whoever has the object
 ; CHECK: errors.pas:23:3: error: shared variable 'wrong' must be of a thread-safe type (a class derived from TSharedObject, such as TAtomic<T>, TLocked<T> or TChannel<T>; a task; a TCancelToken), not 'integer'
 ; CHECK: errors.pas:24:3: error: isolated variable 'alsoWrong' must be of a class, dynamic array or pointer type, not 'integer'
@@ -24,11 +24,11 @@
 ; CHECK-NOT: error:
 ;
 ; An isolated variable belongs to one task with or without the modeswitch.
-; RUN: not %pcc --mode=objfpc -c %S/Inputs/racechecks/isolated.pas -o %t.o 2>&1 | FileCheck --check-prefix=ISOLATED %s
+; RUN: not %p3 --mode=objfpc -c %S/Inputs/racechecks/isolated.pas -o %t.o 2>&1 | FileCheck --check-prefix=ISOLATED %s
 ; ISOLATED: isolated.pas:10:17: error: isolated variable 'data' belongs to one task; a spawned task cannot use it (hand it to an async routine with 'move data')
 ;
 ; Without it, spawned tasks use what they see, as before; the words are
 ; plain names where no type follows.
-; RUN: %pcc --mode=objfpc %S/Inputs/racechecks/unchecked.pas -o %t.unchecked
+; RUN: %p3 --mode=objfpc %S/Inputs/racechecks/unchecked.pas -o %t.unchecked
 ; RUN: %t.unchecked | FileCheck --check-prefix=UNCHECKED %s
 ; UNCHECKED: 6

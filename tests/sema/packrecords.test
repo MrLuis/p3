@@ -2,13 +2,13 @@
 ; Pascal's "illegal record alignment specifier"), and typed constants of
 ; records laid out with a field alignment (packed, {$packrecords}), which
 ; are their bytes, holding values they cannot (ansistrings, pointers).
-; RUN: not %pcc --mode=objfpc -ferror-limit=0 -c %S/Inputs/packrecords/errors.pas -o %t.o 2>&1 | FileCheck %s
+; RUN: not %p3 --mode=objfpc -ferror-limit=0 -c %S/Inputs/packrecords/errors.pas -o %t.o 2>&1 | FileCheck %s
 ; CHECK: errors.pas:2:1: error: illegal record alignment '3': use 1, 2, 4, 8, 16, 32, C, DEFAULT or NORMAL
 ; CHECK: errors.pas:3:1: error: illegal record alignment 'foo': use 1, 2, 4, 8, 16, 32, C, DEFAULT or NORMAL
 ; CHECK: errors.pas:4:1: error: illegal record alignment '5': use 1, 2, 4, 8, 16, 32, ON or OFF
 ; CHECK-NOT: error:
 
-; RUN: not %pcc --mode=objfpc -ferror-limit=0 -c %S/Inputs/packrecords/consts.pas -o %t.o 2>&1 | FileCheck --check-prefix=CONSTS %s
+; RUN: not %p3 --mode=objfpc -ferror-limit=0 -c %S/Inputs/packrecords/consts.pas -o %t.o 2>&1 | FileCheck --check-prefix=CONSTS %s
 ; CONSTS: consts.pas:11:11: error: typed constants of packed records or records under {$packrecords} with values of type 'ansistring' are not supported yet
 ; CONSTS: consts.pas:12:11: error: typed constants of packed records or records under {$packrecords} with values of type 'pointer' are not supported yet
 ; CONSTS: consts.pas:14:15: error: typed constants of packed records or records under {$packrecords} with values of type 'ansistring' are not supported yet

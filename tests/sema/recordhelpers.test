@@ -3,7 +3,7 @@
 ; contain or where it cannot be declared, a helper's name used as a type or
 ; for its members, instance methods through the record's name, missing
 ; bodies, and writing a helper's property (not supported yet).
-; RUN: not %pcc --mode=objfpc -ferror-limit=0 -c %S/Inputs/recordhelpers/errors.pas -o %t.o 2>&1 | FileCheck %s
+; RUN: not %p3 --mode=objfpc -ferror-limit=0 -c %S/Inputs/recordhelpers/errors.pas -o %t.o 2>&1 | FileCheck %s
 ; CHECK: errors.pas:8:28: error: a record helper can only extend a record type, not 'integer' (use a type helper)
 ; CHECK: errors.pas:9:24: error: 'TC' is not a helper
 ; CHECK: errors.pas:16:14: error: the methods of a record helper cannot be 'virtual', 'override' or 'abstract'
@@ -20,7 +20,7 @@
 ; CHECK: errors.pas:54:10: error: no field named 'Nope' in 'TR'
 ; CHECK-NOT: error:
 
-; RUN: not %pcc --mode=objfpc -ferror-limit=0 -c %S/Inputs/recordhelpers/parse.pas -o %t.o 2>&1 | FileCheck --check-prefix=PARSE %s
+; RUN: not %p3 --mode=objfpc -ferror-limit=0 -c %S/Inputs/recordhelpers/parse.pas -o %t.o 2>&1 | FileCheck --check-prefix=PARSE %s
 ; PARSE: parse.pas:6:5: error: a record helper cannot contain fields
 ; PARSE: parse.pas:9:5: error: constructors and destructors in record helpers are not supported yet
 ; PARSE: parse.pas:12:11: error: typed constants in record helpers are not supported yet
@@ -30,5 +30,5 @@
 ; PARSE-NOT: error:
 
 ; Not in tp mode:
-; RUN: not %pcc --mode=tp -c %S/Inputs/recordhelpers/parse.pas -o %t.o 2>&1 | FileCheck --check-prefix=TP %s
+; RUN: not %p3 --mode=tp -c %S/Inputs/recordhelpers/parse.pas -o %t.o 2>&1 | FileCheck --check-prefix=TP %s
 ; TP: parse.pas:5:15: error: record helpers need --mode=objfpc and {$modeswitch advancedrecords}

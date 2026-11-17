@@ -2,7 +2,7 @@
 ; (Self), a static class method and a class operator take no Self, a
 ; constructor fills a zeroed temporary, operators are calls, and `<>`
 ; negates the `=` operator.
-; RUN: %pcc --mode=objfpc --emit-llvm %S/../parser/Inputs/advrecords.pas -o - | FileCheck %s
+; RUN: %p3 --mode=objfpc --emit-llvm %S/../parser/Inputs/advrecords.pas -o - | FileCheck %s
 ; CHECK-LABEL: define i32 @main
 ; CHECK:      %rec = alloca %record.TP, align 8
 ; CHECK:      call void @llvm.memset.p0.i64(ptr align 4 %rec, i8 0, i64 4, i1 false)

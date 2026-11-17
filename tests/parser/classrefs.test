@@ -1,7 +1,7 @@
 ; Class references, class methods and class variables (--mode=objfpc): the
 ; parse tree and checked tree of class of T, class var sections (ended by
 ; var), class methods and their implementations.
-; RUN: %pcc --mode=objfpc --emit-parse-tree %S/Inputs/classrefs.pas -o %t.tree
+; RUN: %p3 --mode=objfpc --emit-parse-tree %S/Inputs/classrefs.pas -o %t.tree
 ; RUN: diff %S/Inputs/classrefs.tree %t.tree
-; RUN: %pcc --mode=objfpc --emit-ast %S/Inputs/classrefs.pas -o %t.ast
+; RUN: %p3 --mode=objfpc --emit-ast %S/Inputs/classrefs.pas -o %t.ast
 ; RUN: diff %S/Inputs/classrefs.ast %t.ast

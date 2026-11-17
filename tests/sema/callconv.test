@@ -2,7 +2,7 @@
 ; 64-bit targets, stdcall is the default convention and cdecl a different
 ; one. Headings and implementations, overrides, interface implementations
 ; and procedural values must agree; a second directive warns.
-; RUN: not %pcc --mode=objfpc -ferror-limit=0 -c %S/Inputs/callconv/errors.pas -o %t.o 2>&1 | FileCheck %s
+; RUN: not %p3 --mode=objfpc -ferror-limit=0 -c %S/Inputs/callconv/errors.pas -o %t.o 2>&1 | FileCheck %s
 ; CHECK: errors.pas:5:46: warning: calling convention 'cdecl' is given twice
 ; CHECK: errors.pas:22:35: warning: calling convention 'cdecl' replaces 'stdcall'
 ; CHECK: errors.pas:10:33: error: class 'TK' does not implement 'IFoo.A'
@@ -24,19 +24,19 @@
 ; CHECK-NOT: error:
 
 ; The directives in the dumps: on routines (as written) and procedural types.
-; RUN: %pcc --mode=objfpc --emit-ast %S/../run/callconv.pas | FileCheck --check-prefix=AST %s
+; RUN: %p3 --mode=objfpc --emit-ast %S/../run/callconv.pas | FileCheck --check-prefix=AST %s
 ; AST: FunctionDecl 'labs' : int64 cdecl external 'labs'
 ; AST: FunctionDecl 'cabs' : integer stdcall external 'abs'
 ; AST: FunctionDecl 'cube' : integer stdcall forward
 ; AST: FunctionDecl 'tderived.twice' cdecl definition
 ; AST: AddrOfExpr : function(integer): integer; cdecl
-; RUN: %pcc --mode=objfpc --emit-parse-tree %S/../run/callconv.pas | FileCheck --check-prefix=TREE %s
+; RUN: %p3 --mode=objfpc --emit-parse-tree %S/../run/callconv.pas | FileCheck --check-prefix=TREE %s
 ; TREE: RoutineTypeSpec function stdcall <
 ; TREE: RoutineTypeSpec function <
 ; TREE: RoutineTypeSpec function cdecl <
 ; TREE: RoutineTypeSpec procedure stdcall <
 
 ; Not directives in ISO Pascal: plain identifiers there.
-; RUN: %pcc --mode=iso --emit-tokens %S/Inputs/callconv/iso.pas | FileCheck --check-prefix=ISO %s
-; RUN: %pcc --mode=iso -c %S/Inputs/callconv/iso.pas -o %t.iso.o
+; RUN: %p3 --mode=iso --emit-tokens %S/Inputs/callconv/iso.pas | FileCheck --check-prefix=ISO %s
+; RUN: %p3 --mode=iso -c %S/Inputs/callconv/iso.pas -o %t.iso.o
 ; ISO: identifier 'stdcall'

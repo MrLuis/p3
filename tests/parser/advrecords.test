@@ -2,7 +2,7 @@
 ; tree and checked tree of a record with visibility sections, a
 ; constructor, methods, a static class method, class operators and a
 ; property; operators and conversions are marked in the checked tree.
-; RUN: %pcc --mode=objfpc --emit-parse-tree %S/Inputs/advrecords.pas -o %t.tree
+; RUN: %p3 --mode=objfpc --emit-parse-tree %S/Inputs/advrecords.pas -o %t.tree
 ; RUN: diff %S/Inputs/advrecords.tree %t.tree
-; RUN: %pcc --mode=objfpc --emit-ast %S/Inputs/advrecords.pas -o %t.ast
+; RUN: %p3 --mode=objfpc --emit-ast %S/Inputs/advrecords.pas -o %t.ast
 ; RUN: diff %S/Inputs/advrecords.ast %t.ast

@@ -1,6 +1,6 @@
 ; --emit-tokens writes to stdout by default, or to -o <file>.
-; RUN: %pcc --emit-tokens %S/Inputs/hello.pas | FileCheck %s
-; RUN: %pcc --emit-tokens %S/Inputs/hello.pas -o %t.tokens
+; RUN: %p3 --emit-tokens %S/Inputs/hello.pas | FileCheck %s
+; RUN: %p3 --emit-tokens %S/Inputs/hello.pas -o %t.tokens
 ; RUN: FileCheck %s < %t.tokens
 ; CHECK:      1:1 kw_program 'program'
 ; CHECK-NEXT: 1:9 identifier 'hello' name=hello

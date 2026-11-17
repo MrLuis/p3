@@ -1,6 +1,6 @@
 ; M4 lowering: globals, boolean storage as i8, signed vs unsigned compares,
 ; runtime-checked div.
-; RUN: %pcc --emit-llvm %S/Inputs/vars.pas -o - | FileCheck %s
+; RUN: %p3 --emit-llvm %S/Inputs/vars.pas -o - | FileCheck %s
 ; CHECK-DAG: @pas.x = internal global i32 0
 ; CHECK-DAG: @pas.b = internal global i8 0
 ; CHECK-DAG: @pas.c = internal global i8 0

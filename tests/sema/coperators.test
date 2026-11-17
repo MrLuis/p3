@@ -4,7 +4,7 @@
 ; target (Free Pascal rejects it too), nor a function outside its body.
 ; {$coperators off} turns them off (then `+=` is `+` and `=`); they are
 ; off in ISO mode unless {$coperators on}.
-; RUN: not %pcc --mode=objfpc -ferror-limit=0 -c %S/Inputs/coperators/errors.pas -o %t.o 2>&1 | FileCheck %s
+; RUN: not %p3 --mode=objfpc -ferror-limit=0 -c %S/Inputs/coperators/errors.pas -o %t.o 2>&1 | FileCheck %s
 ; CHECK: errors.pas:17:3: error: cannot assign to untyped parameter 'u'; assign to a typecast such as longint(u)
 ; CHECK-NOT: errors.pas:17:
 ; CHECK: errors.pas:24:3: error: use of undeclared identifier 'undeclared'
@@ -18,13 +18,13 @@
 ; CHECK: errors.pas:30:5: error: invalid operands to '-' ('string' and 'char')
 ; CHECK: errors.pas:31:7: error: '+=' cannot assign to a property; use ':='
 ; CHECK-NOT: errors.pas:32
-; RUN: not %pcc --mode=tp -c %S/Inputs/coperators/off.pas -o %t.o 2>&1 | FileCheck --check-prefix=OFF %s
+; RUN: not %p3 --mode=tp -c %S/Inputs/coperators/off.pas -o %t.o 2>&1 | FileCheck --check-prefix=OFF %s
 ; OFF-NOT: off.pas:5
 ; OFF: off.pas:7:5: error:
-; RUN: not %pcc --mode=iso -c %S/Inputs/coperators/iso.pas -o %t.o 2>&1 | FileCheck --check-prefix=ISO %s
+; RUN: not %p3 --mode=iso -c %S/Inputs/coperators/iso.pas -o %t.o 2>&1 | FileCheck --check-prefix=ISO %s
 ; ISO: iso.pas:6:5: error:
-; RUN: %pcc --mode=iso %S/Inputs/coperators/isoon.pas -o %t.isoon
+; RUN: %p3 --mode=iso %S/Inputs/coperators/isoon.pas -o %t.isoon
 ; RUN: %t.isoon | FileCheck --check-prefix=ISOON %s
 ; ISOON: 2
-; RUN: not %pcc --mode=tp -c %S/Inputs/coperators/directive.pas -o %t.o 2>&1 | FileCheck --check-prefix=DIR %s
+; RUN: not %p3 --mode=tp -c %S/Inputs/coperators/directive.pas -o %t.o 2>&1 | FileCheck --check-prefix=DIR %s
 ; DIR: directive.pas:1:1: error: expected {$coperators on} or {$coperators off}

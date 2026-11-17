@@ -2,7 +2,7 @@
 ; during an indexed loop that tests the index before stepping; a set is
 ; scanned bit by bit; a class enumerator is protected by a finally part
 ; that frees it.
-; RUN: %pcc --mode=objfpc --emit-llvm %S/Inputs/forin.pas -o - | FileCheck %s
+; RUN: %p3 --mode=objfpc --emit-llvm %S/Inputs/forin.pas -o - | FileCheck %s
 ; CHECK-LABEL: define i32 @main(
 ; CHECK:     call void @__pas_dyn_addref(ptr %[[A:.*]])
 ; CHECK:     %[[N:.*]] = call i64 @__pas_dyn_length(ptr %[[A]])

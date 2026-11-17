@@ -1,12 +1,12 @@
-#include "pcc/Basic/Diagnostics.h"
-#include "pcc/Basic/SourceManager.h"
+#include "p3/Basic/Diagnostics.h"
+#include "p3/Basic/SourceManager.h"
 
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/Support/SourceMgr.h"
 #include "llvm/Support/WithColor.h"
 #include "llvm/Support/raw_ostream.h"
 
-using namespace pcc;
+using namespace p3;
 
 DiagnosticsEngine::DiagnosticsEngine(SourceManager &SM, llvm::raw_ostream &OS)
     : SM(SM), OS(OS) {}
@@ -87,7 +87,7 @@ void DiagnosticsEngine::emit(Severity S, SourceLocation Loc,
       SMRanges.push_back(R.getSMRange());
 
   if (!Loc.isValid()) {
-    // "pcc: error: msg" -- no file, line or source excerpt.
+    // "p3: error: msg" -- no file, line or source excerpt.
     llvm::SMDiagnostic D(/*filename=*/"", Kind, Msg.str());
     D.print(ProgName.c_str(), OS, ShowColors);
   } else {

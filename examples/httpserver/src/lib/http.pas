@@ -213,7 +213,7 @@ var
   head: string;
 begin
   head := 'HTTP/1.1 ' + IntToStr(status) + ' ' + StatusText(status) + CRLF +
-          'Server: pcc-httpserver' + CRLF +
+          'Server: p3-httpserver' + CRLF +
           'Content-Type: ' + contentType + CRLF +
           'Content-Length: ' + IntToStr(length(body)) + CRLF +
           'Connection: close' + CRLF + CRLF;

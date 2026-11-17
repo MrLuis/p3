@@ -1,0 +1,21 @@
+#!/bin/sh
+# Runs the self-hosted compiler (build/bin/p3-self) with the given
+# arguments, building it first if needed. Without arguments, in a project
+# directory, it builds the project described by p3.json.
+#
+#   P3_BUILD_DIR   the CMake build directory (default: <repository>/build)
+set -e
+here=$(cd "$(dirname "$0")" && pwd)
+build=${P3_BUILD_DIR:-$here/../build}
+if [ ! -f "$build/build.ninja" ] && [ ! -f "$build/Makefile" ]; then
+  echo "examples/p3: no build directory at $build; configure the compiler first" >&2
+  echo "  cmake -S . -B build -G Ninja && cmake --build build" >&2
+  exit 1
+fi
+# (rebuilds p3-self only when the compiler's sources changed)
+cmake --build "$build" --target p3-self >/dev/null || {
+  echo "examples/p3: building the self-hosted compiler failed; run" >&2
+  echo "  cmake --build $build --target p3-self" >&2
+  exit 1
+}
+exec "$build/bin/p3-self" "$@"

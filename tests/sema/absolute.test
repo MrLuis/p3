@@ -1,7 +1,7 @@
 ; Variables declared `absolute` (not in --mode=iso): one name per declaration,
 ; overlaying a variable, a field of a record or an element at a constant
 ; index. Memory addresses are not supported. `absolute` is not reserved.
-; RUN: not %pcc --mode=objfpc -ferror-limit=0 -c %S/Inputs/absolute/errors.pas -o %t.o 2>&1 | FileCheck %s
+; RUN: not %p3 --mode=objfpc -ferror-limit=0 -c %S/Inputs/absolute/errors.pas -o %t.o 2>&1 | FileCheck %s
 ; CHECK: errors.pas:12:24: error: use of undeclared identifier 'nope'
 ; CHECK: errors.pas:13:24: error: 'absolute' with a memory address is not supported
 ; CHECK: errors.pas:14:24: error: 'absolute' with a memory address is not supported
@@ -21,14 +21,14 @@
 ; CHECK: errors.pas:25:25: error: 'absolute' needs a variable
 ; CHECK: errors.pas:28:25: error: 'absolute' needs a variable
 ; CHECK-NOT: error:
-; RUN: not %pcc --mode=objfpc -c %S/Inputs/absolute/names.pas -o %t.o 2>&1 | FileCheck --check-prefix=NAMES %s
+; RUN: not %p3 --mode=objfpc -c %S/Inputs/absolute/names.pas -o %t.o 2>&1 | FileCheck --check-prefix=NAMES %s
 ; NAMES: names.pas:3:17: error: 'absolute' can only be used with one variable
-; RUN: not %pcc -c %S/Inputs/absolute/iso.pas -o %t.o 2>&1 | FileCheck --check-prefix=ISO %s
+; RUN: not %p3 -c %S/Inputs/absolute/iso.pas -o %t.o 2>&1 | FileCheck --check-prefix=ISO %s
 ; ISO: iso.pas:3:14: error: 'absolute' is a Turbo/Free Pascal extension; use --mode=tp
-; RUN: %pcc --mode=tp --emit-parse-tree %S/Inputs/absolute/tree.pas | FileCheck --check-prefix=TREE %s
+; RUN: %p3 --mode=tp --emit-parse-tree %S/Inputs/absolute/tree.pas | FileCheck --check-prefix=TREE %s
 ; TREE:      VarDecl 'y' absolute <3:3>
 ; TREE:      Absolute <3:23>
 ; TREE-NEXT:   NameRefExpr 'x'
 ; TREE:      VarDecl 'absolute' <4:3>
-; RUN: %pcc --mode=tp --emit-ast %S/Inputs/absolute/tree.pas | FileCheck --check-prefix=AST %s
+; RUN: %p3 --mode=tp --emit-ast %S/Inputs/absolute/tree.pas | FileCheck --check-prefix=AST %s
 ; AST:       VarDecl 'y' : integer absolute <3:3>

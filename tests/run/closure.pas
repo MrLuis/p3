@@ -4,11 +4,11 @@
   routine has returned and no closure holds it any more. Values of the
   type are counted like ansistrings: in variables, fields, arrays, records,
   parameters and results.
-  RUN: %pcc --mode=objfpc %s -o %t
+  RUN: %p3 --mode=objfpc %s -o %t
   RUN: %t | diff - %S/closure.expected
-  RUN: %pcc --mode=objfpc -O2 %s -o %t.fast
+  RUN: %p3 --mode=objfpc -O2 %s -o %t.fast
   RUN: %t.fast | diff - %S/closure.expected
-  RUN: %pcc --mode=objfpc -g %s -o %t.dbg
+  RUN: %p3 --mode=objfpc -g %s -o %t.dbg
   RUN: %t.dbg | diff - %S/closure.expected
 }
 {$H+}

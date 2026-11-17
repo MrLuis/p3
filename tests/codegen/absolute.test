@@ -1,7 +1,7 @@
 ; An `absolute` variable has no storage: its uses are those of what it
 ; overlays, which alone is created, released and finalized. A nested routine
 ; using an overlay puts the overlaid variable in the frame record.
-; RUN: %pcc --mode=objfpc --emit-llvm %S/Inputs/absolute.pas -o %t.ll
+; RUN: %p3 --mode=objfpc --emit-llvm %S/Inputs/absolute.pas -o %t.ll
 ; RUN: FileCheck %s < %t.ll
 ; RUN: FileCheck --check-prefix=LOCAL %s < %t.ll
 ; CHECK-NOT: @pas.gv

@@ -1,145 +1,145 @@
-; S10: the self-hosted compiler writes the same LLVM IR as the C++ pcc,
+; S10: the self-hosted compiler writes the same LLVM IR as the C++ p3,
 ; byte for byte, with and without -g: for the programs of the run tests,
 ; the compiler's own source, random programs from utils/gen-pascal.py, and
 ; programs with classes.
 ; (By hand, at scale: see selfhost/README.md.)
 ; REQUIRES: selfhost-build
-; RUN: %pcc --mode=tp %selfhost-flags -I %S/../../selfhost %S/../../selfhost/pcc.pas -o %t.pcc
+; RUN: %p3 --mode=tp %selfhost-flags -I %S/../../selfhost %S/../../selfhost/p3.pas -o %t.p3
 ; RUN: rm -rf %t.gen && mkdir -p %t.gen/iso %t.gen/tp
 ; RUN: python3 %S/../../utils/gen-pascal.py --mode iso --count 15 --seed 5 --out %t.gen/iso
 ; RUN: python3 %S/../../utils/gen-pascal.py --mode tp --count 15 --seed 6 --out %t.gen/tp
-; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-llvm --extra="-o -" --ref pcc --new %t.pcc %S/../run %S/../codegen/Inputs | FileCheck %s
-; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-llvm --extra="-g -o -" --ref pcc --new %t.pcc %S/../run %S/../codegen/Inputs | FileCheck %s
-; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-llvm --extra="-o -" --modes=tp --ref pcc --new %t.pcc %S/../../selfhost/pcc.pas | FileCheck %s
-; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-llvm --extra="-g -o -" --modes=iso --ref pcc --new %t.pcc %t.gen/iso | FileCheck %s
-; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-llvm --extra="-g -o -" --modes=tp --ref pcc --new %t.pcc %t.gen/tp | FileCheck %s
+; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-llvm --extra="-o -" --ref p3 --new %t.p3 %S/../run %S/../codegen/Inputs | FileCheck %s
+; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-llvm --extra="-g -o -" --ref p3 --new %t.p3 %S/../run %S/../codegen/Inputs | FileCheck %s
+; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-llvm --extra="-o -" --modes=tp --ref p3 --new %t.p3 %S/../../selfhost/p3.pas | FileCheck %s
+; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-llvm --extra="-g -o -" --modes=iso --ref p3 --new %t.p3 %t.gen/iso | FileCheck %s
+; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-llvm --extra="-g -o -" --modes=tp --ref p3 --new %t.p3 %t.gen/tp | FileCheck %s
 ; Classes (--mode=objfpc), with and without -g, and with units compiled
 ; whole and separately.
-; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-llvm --extra="-I %S/../run/Inputs/classes/lib -o -" --modes=objfpc --ref pcc --new %t.pcc %S/../run/classes.pas %S/../run/classes2.pas %S/../run/Inputs/classes %S/../codegen/Inputs/classes.pas | FileCheck %s
-; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-llvm --extra="-I %S/../run/Inputs/classes/lib -g -o -" --modes=objfpc --ref pcc --new %t.pcc %S/../run/classes.pas %S/../run/classes2.pas %S/../run/Inputs/classes %S/../codegen/Inputs/classes.pas | FileCheck %s
-; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-llvm --extra="-I %S/../run/Inputs/classes/lib -fseparate-units -g -o -" --modes=objfpc --ref pcc --new %t.pcc %S/../run/Inputs/classes | FileCheck %s
+; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-llvm --extra="-I %S/../run/Inputs/classes/lib -o -" --modes=objfpc --ref p3 --new %t.p3 %S/../run/classes.pas %S/../run/classes2.pas %S/../run/Inputs/classes %S/../codegen/Inputs/classes.pas | FileCheck %s
+; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-llvm --extra="-I %S/../run/Inputs/classes/lib -g -o -" --modes=objfpc --ref p3 --new %t.p3 %S/../run/classes.pas %S/../run/classes2.pas %S/../run/Inputs/classes %S/../codegen/Inputs/classes.pas | FileCheck %s
+; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-llvm --extra="-I %S/../run/Inputs/classes/lib -fseparate-units -g -o -" --modes=objfpc --ref p3 --new %t.p3 %S/../run/Inputs/classes | FileCheck %s
 ; Owned variables (--mode=objfpc), with and without -g, whole and separate.
-; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-llvm --extra="-o -" --modes=objfpc --ref pcc --new %t.pcc %S/../run/owned.pas %S/../codegen/Inputs/owned.pas %S/../sema/Inputs/owned | FileCheck %s
-; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-llvm --extra="-g -o -" --modes=objfpc --ref pcc --new %t.pcc %S/../run/owned.pas %S/../codegen/Inputs/owned.pas | FileCheck %s
-; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-llvm --extra="-I %S/../run/Inputs/owned/lib -fseparate-units -g -o -" --modes=objfpc --ref pcc --new %t.pcc %S/../run/Inputs/owned | FileCheck %s
+; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-llvm --extra="-o -" --modes=objfpc --ref p3 --new %t.p3 %S/../run/owned.pas %S/../codegen/Inputs/owned.pas %S/../sema/Inputs/owned | FileCheck %s
+; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-llvm --extra="-g -o -" --modes=objfpc --ref p3 --new %t.p3 %S/../run/owned.pas %S/../codegen/Inputs/owned.pas | FileCheck %s
+; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-llvm --extra="-I %S/../run/Inputs/owned/lib -fseparate-units -g -o -" --modes=objfpc --ref p3 --new %t.p3 %S/../run/Inputs/owned | FileCheck %s
 ; Variables declared among the statements (--mode=objfpc).
-; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-llvm --extra="-o -" --modes=objfpc --ref pcc --new %t.pcc %S/../run/inlinevar.pas %S/../codegen/Inputs/inlinevar.pas %S/../sema/Inputs/inlinevar | FileCheck %s
-; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-llvm --extra="-g -o -" --modes=objfpc --ref pcc --new %t.pcc %S/../run/inlinevar.pas %S/../codegen/Inputs/inlinevar.pas | FileCheck %s
-; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-ast --extra="-o -" --modes=objfpc --ref pcc --new %t.pcc %S/../run/inlinevar.pas %S/../run/owned.pas | FileCheck %s
-; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-parse-tree --extra="-o -" --modes=objfpc --ref pcc --new %t.pcc %S/../run/inlinevar.pas %S/../run/owned.pas | FileCheck %s
+; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-llvm --extra="-o -" --modes=objfpc --ref p3 --new %t.p3 %S/../run/inlinevar.pas %S/../codegen/Inputs/inlinevar.pas %S/../sema/Inputs/inlinevar | FileCheck %s
+; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-llvm --extra="-g -o -" --modes=objfpc --ref p3 --new %t.p3 %S/../run/inlinevar.pas %S/../codegen/Inputs/inlinevar.pas | FileCheck %s
+; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-ast --extra="-o -" --modes=objfpc --ref p3 --new %t.p3 %S/../run/inlinevar.pas %S/../run/owned.pas | FileCheck %s
+; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-parse-tree --extra="-o -" --modes=objfpc --ref p3 --new %t.p3 %S/../run/inlinevar.pas %S/../run/owned.pas | FileCheck %s
 ; Template strings (tp and objfpc): tokens, trees, diagnostics and code.
-; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-llvm --extra="-o -" --modes=tp,objfpc --ref pcc --new %t.pcc %S/../run/template.pas %S/../run/template-classes.pas %S/../codegen/Inputs/template.pas %S/../sema/Inputs/template | FileCheck %s
-; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-llvm --extra="-g -o -" --modes=objfpc --ref pcc --new %t.pcc %S/../run/template.pas %S/../run/template-classes.pas %S/../codegen/Inputs/template.pas | FileCheck %s
-; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-ast --extra="-o -" --modes=tp,objfpc --ref pcc --new %t.pcc %S/../run/template.pas %S/../run/template-classes.pas %S/../sema/Inputs/template | FileCheck %s
-; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-parse-tree --extra="-o -" --modes=tp,objfpc --ref pcc --new %t.pcc %S/../run/template.pas %S/../run/template-classes.pas %S/../sema/Inputs/template | FileCheck %s
-; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-tokens --modes=iso,tp,objfpc --ref pcc --new %t.pcc %S/../lexer/Inputs/templates.pas %S/../run/template.pas | FileCheck %s
+; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-llvm --extra="-o -" --modes=tp,objfpc --ref p3 --new %t.p3 %S/../run/template.pas %S/../run/template-classes.pas %S/../codegen/Inputs/template.pas %S/../sema/Inputs/template | FileCheck %s
+; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-llvm --extra="-g -o -" --modes=objfpc --ref p3 --new %t.p3 %S/../run/template.pas %S/../run/template-classes.pas %S/../codegen/Inputs/template.pas | FileCheck %s
+; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-ast --extra="-o -" --modes=tp,objfpc --ref p3 --new %t.p3 %S/../run/template.pas %S/../run/template-classes.pas %S/../sema/Inputs/template | FileCheck %s
+; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-parse-tree --extra="-o -" --modes=tp,objfpc --ref p3 --new %t.p3 %S/../run/template.pas %S/../run/template-classes.pas %S/../sema/Inputs/template | FileCheck %s
+; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-tokens --modes=iso,tp,objfpc --ref p3 --new %t.p3 %S/../lexer/Inputs/templates.pas %S/../run/template.pas | FileCheck %s
 ; Tuples (objfpc).
-; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-llvm --extra="-o -" --modes=tp,objfpc --ref pcc --new %t.pcc %S/../run/tuple.pas %S/../run/tuple-more.pas %S/../run/tuple-targets.pas %S/../codegen/Inputs/tuple.pas %S/../sema/Inputs/tuple | FileCheck %s
-; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-llvm --extra="-g -o -" --modes=objfpc --ref pcc --new %t.pcc %S/../run/tuple.pas %S/../run/tuple-more.pas %S/../run/tuple-targets.pas %S/../codegen/Inputs/tuple.pas | FileCheck %s
-; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-ast --extra="-o -" --modes=tp,objfpc --ref pcc --new %t.pcc %S/../run/tuple.pas %S/../run/tuple-more.pas %S/../run/tuple-targets.pas %S/../sema/Inputs/tuple | FileCheck %s
-; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-parse-tree --extra="-o -" --modes=tp,objfpc --ref pcc --new %t.pcc %S/../run/tuple.pas %S/../run/tuple-more.pas %S/../run/tuple-targets.pas %S/../sema/Inputs/tuple | FileCheck %s
+; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-llvm --extra="-o -" --modes=tp,objfpc --ref p3 --new %t.p3 %S/../run/tuple.pas %S/../run/tuple-more.pas %S/../run/tuple-targets.pas %S/../codegen/Inputs/tuple.pas %S/../sema/Inputs/tuple | FileCheck %s
+; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-llvm --extra="-g -o -" --modes=objfpc --ref p3 --new %t.p3 %S/../run/tuple.pas %S/../run/tuple-more.pas %S/../run/tuple-targets.pas %S/../codegen/Inputs/tuple.pas | FileCheck %s
+; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-ast --extra="-o -" --modes=tp,objfpc --ref p3 --new %t.p3 %S/../run/tuple.pas %S/../run/tuple-more.pas %S/../run/tuple-targets.pas %S/../sema/Inputs/tuple | FileCheck %s
+; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-parse-tree --extra="-o -" --modes=tp,objfpc --ref p3 --new %t.p3 %S/../run/tuple.pas %S/../run/tuple-more.pas %S/../run/tuple-targets.pas %S/../sema/Inputs/tuple | FileCheck %s
 ; Named arguments (objfpc).
-; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-llvm --extra="-o -" --modes=tp,objfpc --ref pcc --new %t.pcc %S/../run/namedargs.pas %S/../codegen/Inputs/namedargs.pas %S/../sema/Inputs/namedargs %S/../sema/Inputs/defaults | FileCheck %s
-; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-llvm --extra="-g -o -" --modes=objfpc --ref pcc --new %t.pcc %S/../run/namedargs.pas %S/../codegen/Inputs/namedargs.pas | FileCheck %s
-; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-ast --extra="-o -" --modes=tp,objfpc --ref pcc --new %t.pcc %S/../run/namedargs.pas %S/../sema/Inputs/namedargs | FileCheck %s
-; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-parse-tree --extra="-o -" --modes=tp,objfpc --ref pcc --new %t.pcc %S/../run/namedargs.pas %S/../sema/Inputs/namedargs | FileCheck %s
+; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-llvm --extra="-o -" --modes=tp,objfpc --ref p3 --new %t.p3 %S/../run/namedargs.pas %S/../codegen/Inputs/namedargs.pas %S/../sema/Inputs/namedargs %S/../sema/Inputs/defaults | FileCheck %s
+; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-llvm --extra="-g -o -" --modes=objfpc --ref p3 --new %t.p3 %S/../run/namedargs.pas %S/../codegen/Inputs/namedargs.pas | FileCheck %s
+; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-ast --extra="-o -" --modes=tp,objfpc --ref p3 --new %t.p3 %S/../run/namedargs.pas %S/../sema/Inputs/namedargs | FileCheck %s
+; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-parse-tree --extra="-o -" --modes=tp,objfpc --ref p3 --new %t.p3 %S/../run/namedargs.pas %S/../sema/Inputs/namedargs | FileCheck %s
 ; Inferred types (objfpc).
-; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-llvm --extra="-o -" --modes=tp,objfpc --ref pcc --new %t.pcc %S/../run/inference.pas %S/../sema/Inputs/inference | FileCheck %s
-; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-llvm --extra="-g -o -" --modes=objfpc --ref pcc --new %t.pcc %S/../run/inference.pas | FileCheck %s
-; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-ast --extra="-o -" --modes=tp,objfpc --ref pcc --new %t.pcc %S/../run/inference.pas %S/../sema/Inputs/inference | FileCheck %s
-; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-parse-tree --extra="-o -" --modes=tp,objfpc --ref pcc --new %t.pcc %S/../run/inference.pas %S/../sema/Inputs/inference | FileCheck %s
+; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-llvm --extra="-o -" --modes=tp,objfpc --ref p3 --new %t.p3 %S/../run/inference.pas %S/../sema/Inputs/inference | FileCheck %s
+; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-llvm --extra="-g -o -" --modes=objfpc --ref p3 --new %t.p3 %S/../run/inference.pas | FileCheck %s
+; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-ast --extra="-o -" --modes=tp,objfpc --ref p3 --new %t.p3 %S/../run/inference.pas %S/../sema/Inputs/inference | FileCheck %s
+; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-parse-tree --extra="-o -" --modes=tp,objfpc --ref p3 --new %t.p3 %S/../run/inference.pas %S/../sema/Inputs/inference | FileCheck %s
 ; Conditional expressions (objfpc).
-; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-llvm --extra="-o -" --modes=tp,objfpc --ref pcc --new %t.pcc %S/../run/condexpr.pas %S/../sema/Inputs/condexpr | FileCheck %s
-; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-llvm --extra="-g -o -" --modes=objfpc --ref pcc --new %t.pcc %S/../run/condexpr.pas | FileCheck %s
-; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-ast --extra="-o -" --modes=tp,objfpc --ref pcc --new %t.pcc %S/../run/condexpr.pas %S/../sema/Inputs/condexpr | FileCheck %s
-; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-parse-tree --extra="-o -" --modes=tp,objfpc --ref pcc --new %t.pcc %S/../run/condexpr.pas %S/../sema/Inputs/condexpr | FileCheck %s
+; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-llvm --extra="-o -" --modes=tp,objfpc --ref p3 --new %t.p3 %S/../run/condexpr.pas %S/../sema/Inputs/condexpr | FileCheck %s
+; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-llvm --extra="-g -o -" --modes=objfpc --ref p3 --new %t.p3 %S/../run/condexpr.pas | FileCheck %s
+; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-ast --extra="-o -" --modes=tp,objfpc --ref p3 --new %t.p3 %S/../run/condexpr.pas %S/../sema/Inputs/condexpr | FileCheck %s
+; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-parse-tree --extra="-o -" --modes=tp,objfpc --ref p3 --new %t.p3 %S/../run/condexpr.pas %S/../sema/Inputs/condexpr | FileCheck %s
 ; Generic types (objfpc).
-; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-llvm --extra="-o -" --modes=tp,objfpc --ref pcc --new %t.pcc %S/../run/generictypes.pas %S/../sema/Inputs/generictypes | FileCheck %s
-; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-llvm --extra="-g -o -" --modes=objfpc --ref pcc --new %t.pcc %S/../run/generictypes.pas | FileCheck %s
-; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-ast --extra="-o -" --modes=tp,objfpc --ref pcc --new %t.pcc %S/../run/generictypes.pas %S/../sema/Inputs/generictypes | FileCheck %s
-; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-parse-tree --extra="-o -" --modes=tp,objfpc --ref pcc --new %t.pcc %S/../run/generictypes.pas %S/../sema/Inputs/generictypes | FileCheck %s
-; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-llvm --extra="-I %S/../run/Inputs/generictypes/lib -g -o -" --modes=objfpc --ref pcc --new %t.pcc %S/../run/Inputs/generictypes | FileCheck %s
-; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-llvm --extra="-I %S/../run/Inputs/generictypes-private/lib -o -" --modes=objfpc --ref pcc --new %t.pcc %S/../run/Inputs/generictypes-private | FileCheck %s
+; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-llvm --extra="-o -" --modes=tp,objfpc --ref p3 --new %t.p3 %S/../run/generictypes.pas %S/../sema/Inputs/generictypes | FileCheck %s
+; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-llvm --extra="-g -o -" --modes=objfpc --ref p3 --new %t.p3 %S/../run/generictypes.pas | FileCheck %s
+; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-ast --extra="-o -" --modes=tp,objfpc --ref p3 --new %t.p3 %S/../run/generictypes.pas %S/../sema/Inputs/generictypes | FileCheck %s
+; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-parse-tree --extra="-o -" --modes=tp,objfpc --ref p3 --new %t.p3 %S/../run/generictypes.pas %S/../sema/Inputs/generictypes | FileCheck %s
+; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-llvm --extra="-I %S/../run/Inputs/generictypes/lib -g -o -" --modes=objfpc --ref p3 --new %t.p3 %S/../run/Inputs/generictypes | FileCheck %s
+; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-llvm --extra="-I %S/../run/Inputs/generictypes-private/lib -o -" --modes=objfpc --ref p3 --new %t.p3 %S/../run/Inputs/generictypes-private | FileCheck %s
 ; Lambdas (objfpc).
-; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-llvm --extra="-o -" --modes=tp,objfpc --ref pcc --new %t.pcc %S/../run/lambda.pas %S/../sema/Inputs/lambda | FileCheck %s
-; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-llvm --extra="-o -" --modes=tp,objfpc --ref pcc --new %t.pcc %S/../run/closure.pas %S/../sema/Inputs/closure | FileCheck %s
-; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-llvm --extra="-o -" --modes=tp,objfpc --ref pcc --new %t.pcc %S/../run/methodlambda.pas %S/../sema/Inputs/methodlambda | FileCheck %s
-; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-llvm --extra="-o -" --modes=tp,objfpc --ref pcc --new %t.pcc %S/../run/lambdaoverloads.pas %S/../sema/Inputs/lambdaoverloads | FileCheck %s
-; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-llvm --extra="-o -" --modes=tp,objfpc --ref pcc --new %t.pcc %S/../run/constlambdas.pas %S/../sema/Inputs/constlambdas | FileCheck %s
-; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-llvm --extra="-o -" --modes=tp,objfpc --ref pcc --new %t.pcc %S/../run/copycapture.pas %S/../sema/Inputs/copycapture | FileCheck %s
-; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-llvm --extra="-o -" --modes=tp,objfpc --ref pcc --new %t.pcc %S/../run/copyall.pas %S/../sema/Inputs/copyall | FileCheck %s
-; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-llvm --extra="-o -" --modes=tp,objfpc --ref pcc --new %t.pcc %S/../run/checked.pas %S/../run/checkedconv.pas %S/../sema/Inputs/checked | FileCheck %s
-; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-llvm --extra="-g -o -" --modes=objfpc --ref pcc --new %t.pcc %S/../run/lambda.pas | FileCheck %s
-; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-llvm --extra="-g -o -" --modes=objfpc --ref pcc --new %t.pcc %S/../run/closure.pas | FileCheck %s
-; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-llvm --extra="-g -o -" --modes=objfpc --ref pcc --new %t.pcc %S/../run/methodlambda.pas | FileCheck %s
-; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-llvm --extra="-g -o -" --modes=objfpc --ref pcc --new %t.pcc %S/../run/lambdaoverloads.pas | FileCheck %s
-; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-llvm --extra="-g -o -" --modes=objfpc --ref pcc --new %t.pcc %S/../run/constlambdas.pas | FileCheck %s
-; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-llvm --extra="-g -o -" --modes=objfpc --ref pcc --new %t.pcc %S/../run/copycapture.pas | FileCheck %s
-; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-llvm --extra="-g -o -" --modes=objfpc --ref pcc --new %t.pcc %S/../run/copyall.pas | FileCheck %s
-; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-llvm --extra="-g -o -" --modes=objfpc --ref pcc --new %t.pcc %S/../run/checked.pas | FileCheck %s
-; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-llvm --extra="-g -o -" --modes=objfpc --ref pcc --new %t.pcc %S/../run/checkedconv.pas | FileCheck %s
-; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-ast --extra="-o -" --modes=tp,objfpc --ref pcc --new %t.pcc %S/../run/lambda.pas %S/../sema/Inputs/lambda | FileCheck %s
-; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-ast --extra="-o -" --modes=tp,objfpc --ref pcc --new %t.pcc %S/../run/closure.pas %S/../sema/Inputs/closure | FileCheck %s
-; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-ast --extra="-o -" --modes=tp,objfpc --ref pcc --new %t.pcc %S/../run/methodlambda.pas %S/../sema/Inputs/methodlambda | FileCheck %s
-; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-ast --extra="-o -" --modes=tp,objfpc --ref pcc --new %t.pcc %S/../run/lambdaoverloads.pas %S/../sema/Inputs/lambdaoverloads | FileCheck %s
-; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-ast --extra="-o -" --modes=tp,objfpc --ref pcc --new %t.pcc %S/../run/constlambdas.pas %S/../sema/Inputs/constlambdas | FileCheck %s
-; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-ast --extra="-o -" --modes=tp,objfpc --ref pcc --new %t.pcc %S/../run/copycapture.pas %S/../sema/Inputs/copycapture | FileCheck %s
-; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-ast --extra="-o -" --modes=tp,objfpc --ref pcc --new %t.pcc %S/../run/copyall.pas %S/../sema/Inputs/copyall | FileCheck %s
-; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-ast --extra="-o -" --modes=tp,objfpc --ref pcc --new %t.pcc %S/../run/checked.pas %S/../run/checkedconv.pas %S/../sema/Inputs/checked | FileCheck %s
-; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-parse-tree --extra="-o -" --modes=tp,objfpc --ref pcc --new %t.pcc %S/../run/lambda.pas %S/../sema/Inputs/lambda | FileCheck %s
-; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-parse-tree --extra="-o -" --modes=tp,objfpc --ref pcc --new %t.pcc %S/../run/closure.pas %S/../sema/Inputs/closure | FileCheck %s
-; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-parse-tree --extra="-o -" --modes=tp,objfpc --ref pcc --new %t.pcc %S/../run/methodlambda.pas %S/../sema/Inputs/methodlambda | FileCheck %s
-; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-parse-tree --extra="-o -" --modes=tp,objfpc --ref pcc --new %t.pcc %S/../run/lambdaoverloads.pas %S/../sema/Inputs/lambdaoverloads | FileCheck %s
-; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-parse-tree --extra="-o -" --modes=tp,objfpc --ref pcc --new %t.pcc %S/../run/constlambdas.pas %S/../sema/Inputs/constlambdas | FileCheck %s
-; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-parse-tree --extra="-o -" --modes=tp,objfpc --ref pcc --new %t.pcc %S/../run/copycapture.pas %S/../sema/Inputs/copycapture | FileCheck %s
-; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-parse-tree --extra="-o -" --modes=tp,objfpc --ref pcc --new %t.pcc %S/../run/copyall.pas %S/../sema/Inputs/copyall | FileCheck %s
-; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-parse-tree --extra="-o -" --modes=tp,objfpc --ref pcc --new %t.pcc %S/../run/checked.pas %S/../run/checkedconv.pas %S/../sema/Inputs/checked | FileCheck %s
-; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-tokens --modes=iso,tp,objfpc --ref pcc --new %t.pcc %S/../run/lambda.pas | FileCheck %s
-; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-tokens --modes=iso,tp,objfpc --ref pcc --new %t.pcc %S/../run/closure.pas | FileCheck %s
-; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-tokens --modes=iso,tp,objfpc --ref pcc --new %t.pcc %S/../run/methodlambda.pas | FileCheck %s
-; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-tokens --modes=iso,tp,objfpc --ref pcc --new %t.pcc %S/../run/lambdaoverloads.pas | FileCheck %s
-; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-tokens --modes=iso,tp,objfpc --ref pcc --new %t.pcc %S/../run/constlambdas.pas | FileCheck %s
-; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-tokens --modes=iso,tp,objfpc --ref pcc --new %t.pcc %S/../run/copycapture.pas | FileCheck %s
-; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-tokens --modes=iso,tp,objfpc --ref pcc --new %t.pcc %S/../run/copyall.pas | FileCheck %s
-; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-tokens --modes=iso,tp,objfpc --ref pcc --new %t.pcc %S/../run/checked.pas | FileCheck %s
-; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-tokens --modes=iso,tp,objfpc --ref pcc --new %t.pcc %S/../run/checkedconv.pas | FileCheck %s
+; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-llvm --extra="-o -" --modes=tp,objfpc --ref p3 --new %t.p3 %S/../run/lambda.pas %S/../sema/Inputs/lambda | FileCheck %s
+; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-llvm --extra="-o -" --modes=tp,objfpc --ref p3 --new %t.p3 %S/../run/closure.pas %S/../sema/Inputs/closure | FileCheck %s
+; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-llvm --extra="-o -" --modes=tp,objfpc --ref p3 --new %t.p3 %S/../run/methodlambda.pas %S/../sema/Inputs/methodlambda | FileCheck %s
+; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-llvm --extra="-o -" --modes=tp,objfpc --ref p3 --new %t.p3 %S/../run/lambdaoverloads.pas %S/../sema/Inputs/lambdaoverloads | FileCheck %s
+; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-llvm --extra="-o -" --modes=tp,objfpc --ref p3 --new %t.p3 %S/../run/constlambdas.pas %S/../sema/Inputs/constlambdas | FileCheck %s
+; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-llvm --extra="-o -" --modes=tp,objfpc --ref p3 --new %t.p3 %S/../run/copycapture.pas %S/../sema/Inputs/copycapture | FileCheck %s
+; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-llvm --extra="-o -" --modes=tp,objfpc --ref p3 --new %t.p3 %S/../run/copyall.pas %S/../sema/Inputs/copyall | FileCheck %s
+; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-llvm --extra="-o -" --modes=tp,objfpc --ref p3 --new %t.p3 %S/../run/checked.pas %S/../run/checkedconv.pas %S/../sema/Inputs/checked | FileCheck %s
+; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-llvm --extra="-g -o -" --modes=objfpc --ref p3 --new %t.p3 %S/../run/lambda.pas | FileCheck %s
+; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-llvm --extra="-g -o -" --modes=objfpc --ref p3 --new %t.p3 %S/../run/closure.pas | FileCheck %s
+; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-llvm --extra="-g -o -" --modes=objfpc --ref p3 --new %t.p3 %S/../run/methodlambda.pas | FileCheck %s
+; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-llvm --extra="-g -o -" --modes=objfpc --ref p3 --new %t.p3 %S/../run/lambdaoverloads.pas | FileCheck %s
+; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-llvm --extra="-g -o -" --modes=objfpc --ref p3 --new %t.p3 %S/../run/constlambdas.pas | FileCheck %s
+; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-llvm --extra="-g -o -" --modes=objfpc --ref p3 --new %t.p3 %S/../run/copycapture.pas | FileCheck %s
+; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-llvm --extra="-g -o -" --modes=objfpc --ref p3 --new %t.p3 %S/../run/copyall.pas | FileCheck %s
+; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-llvm --extra="-g -o -" --modes=objfpc --ref p3 --new %t.p3 %S/../run/checked.pas | FileCheck %s
+; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-llvm --extra="-g -o -" --modes=objfpc --ref p3 --new %t.p3 %S/../run/checkedconv.pas | FileCheck %s
+; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-ast --extra="-o -" --modes=tp,objfpc --ref p3 --new %t.p3 %S/../run/lambda.pas %S/../sema/Inputs/lambda | FileCheck %s
+; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-ast --extra="-o -" --modes=tp,objfpc --ref p3 --new %t.p3 %S/../run/closure.pas %S/../sema/Inputs/closure | FileCheck %s
+; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-ast --extra="-o -" --modes=tp,objfpc --ref p3 --new %t.p3 %S/../run/methodlambda.pas %S/../sema/Inputs/methodlambda | FileCheck %s
+; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-ast --extra="-o -" --modes=tp,objfpc --ref p3 --new %t.p3 %S/../run/lambdaoverloads.pas %S/../sema/Inputs/lambdaoverloads | FileCheck %s
+; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-ast --extra="-o -" --modes=tp,objfpc --ref p3 --new %t.p3 %S/../run/constlambdas.pas %S/../sema/Inputs/constlambdas | FileCheck %s
+; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-ast --extra="-o -" --modes=tp,objfpc --ref p3 --new %t.p3 %S/../run/copycapture.pas %S/../sema/Inputs/copycapture | FileCheck %s
+; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-ast --extra="-o -" --modes=tp,objfpc --ref p3 --new %t.p3 %S/../run/copyall.pas %S/../sema/Inputs/copyall | FileCheck %s
+; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-ast --extra="-o -" --modes=tp,objfpc --ref p3 --new %t.p3 %S/../run/checked.pas %S/../run/checkedconv.pas %S/../sema/Inputs/checked | FileCheck %s
+; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-parse-tree --extra="-o -" --modes=tp,objfpc --ref p3 --new %t.p3 %S/../run/lambda.pas %S/../sema/Inputs/lambda | FileCheck %s
+; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-parse-tree --extra="-o -" --modes=tp,objfpc --ref p3 --new %t.p3 %S/../run/closure.pas %S/../sema/Inputs/closure | FileCheck %s
+; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-parse-tree --extra="-o -" --modes=tp,objfpc --ref p3 --new %t.p3 %S/../run/methodlambda.pas %S/../sema/Inputs/methodlambda | FileCheck %s
+; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-parse-tree --extra="-o -" --modes=tp,objfpc --ref p3 --new %t.p3 %S/../run/lambdaoverloads.pas %S/../sema/Inputs/lambdaoverloads | FileCheck %s
+; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-parse-tree --extra="-o -" --modes=tp,objfpc --ref p3 --new %t.p3 %S/../run/constlambdas.pas %S/../sema/Inputs/constlambdas | FileCheck %s
+; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-parse-tree --extra="-o -" --modes=tp,objfpc --ref p3 --new %t.p3 %S/../run/copycapture.pas %S/../sema/Inputs/copycapture | FileCheck %s
+; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-parse-tree --extra="-o -" --modes=tp,objfpc --ref p3 --new %t.p3 %S/../run/copyall.pas %S/../sema/Inputs/copyall | FileCheck %s
+; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-parse-tree --extra="-o -" --modes=tp,objfpc --ref p3 --new %t.p3 %S/../run/checked.pas %S/../run/checkedconv.pas %S/../sema/Inputs/checked | FileCheck %s
+; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-tokens --modes=iso,tp,objfpc --ref p3 --new %t.p3 %S/../run/lambda.pas | FileCheck %s
+; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-tokens --modes=iso,tp,objfpc --ref p3 --new %t.p3 %S/../run/closure.pas | FileCheck %s
+; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-tokens --modes=iso,tp,objfpc --ref p3 --new %t.p3 %S/../run/methodlambda.pas | FileCheck %s
+; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-tokens --modes=iso,tp,objfpc --ref p3 --new %t.p3 %S/../run/lambdaoverloads.pas | FileCheck %s
+; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-tokens --modes=iso,tp,objfpc --ref p3 --new %t.p3 %S/../run/constlambdas.pas | FileCheck %s
+; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-tokens --modes=iso,tp,objfpc --ref p3 --new %t.p3 %S/../run/copycapture.pas | FileCheck %s
+; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-tokens --modes=iso,tp,objfpc --ref p3 --new %t.p3 %S/../run/copyall.pas | FileCheck %s
+; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-tokens --modes=iso,tp,objfpc --ref p3 --new %t.p3 %S/../run/checked.pas | FileCheck %s
+; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-tokens --modes=iso,tp,objfpc --ref p3 --new %t.p3 %S/../run/checkedconv.pas | FileCheck %s
 ; async/await, scopes, tokens and channels (objfpc): the programs, the
 ; diagnostics, unit threading, and units compiled whole and separately.
-; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-llvm --extra="-o -" --modes=objfpc --ref pcc --new %t.pcc %S/../run/async.pas %S/../run/channels.pas %S/../sema/Inputs/async %S/../../rtl/threading.pas | FileCheck %s
-; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-llvm --extra="-g -o -" --modes=objfpc --ref pcc --new %t.pcc %S/../run/async.pas %S/../run/channels.pas | FileCheck %s
-; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-llvm --extra="-I %S/../run/Inputs/async/lib -o -" --modes=objfpc --ref pcc --new %t.pcc %S/../run/Inputs/async | FileCheck %s
-; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-llvm --extra="-I %S/../run/Inputs/async/lib -fseparate-units -g -o -" --modes=objfpc --ref pcc --new %t.pcc %S/../run/Inputs/async | FileCheck %s
-; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-ast --extra="-o -" --modes=tp,objfpc --ref pcc --new %t.pcc %S/../run/async.pas %S/../run/channels.pas %S/../sema/Inputs/async | FileCheck %s
-; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-parse-tree --extra="-o -" --modes=tp,objfpc --ref pcc --new %t.pcc %S/../run/async.pas %S/../run/channels.pas %S/../sema/Inputs/async | FileCheck %s
-; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-tokens --modes=iso,tp,objfpc --ref pcc --new %t.pcc %S/../run/async.pas %S/../run/channels.pas | FileCheck %s
+; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-llvm --extra="-o -" --modes=objfpc --ref p3 --new %t.p3 %S/../run/async.pas %S/../run/channels.pas %S/../sema/Inputs/async %S/../../rtl/threading.pas | FileCheck %s
+; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-llvm --extra="-g -o -" --modes=objfpc --ref p3 --new %t.p3 %S/../run/async.pas %S/../run/channels.pas | FileCheck %s
+; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-llvm --extra="-I %S/../run/Inputs/async/lib -o -" --modes=objfpc --ref p3 --new %t.p3 %S/../run/Inputs/async | FileCheck %s
+; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-llvm --extra="-I %S/../run/Inputs/async/lib -fseparate-units -g -o -" --modes=objfpc --ref p3 --new %t.p3 %S/../run/Inputs/async | FileCheck %s
+; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-ast --extra="-o -" --modes=tp,objfpc --ref p3 --new %t.p3 %S/../run/async.pas %S/../run/channels.pas %S/../sema/Inputs/async | FileCheck %s
+; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-parse-tree --extra="-o -" --modes=tp,objfpc --ref p3 --new %t.p3 %S/../run/async.pas %S/../run/channels.pas %S/../sema/Inputs/async | FileCheck %s
+; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-tokens --modes=iso,tp,objfpc --ref p3 --new %t.p3 %S/../run/async.pas %S/../run/channels.pas | FileCheck %s
 ; Data-race checks (objfpc): shared and isolated, racechecks.
-; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-llvm --extra="-o -" --modes=objfpc --ref pcc --new %t.pcc %S/../run/racechecks.pas %S/../sema/Inputs/racechecks | FileCheck %s
-; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-llvm --extra="-g -o -" --modes=objfpc --ref pcc --new %t.pcc %S/../run/racechecks.pas | FileCheck %s
-; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-ast --extra="-o -" --modes=tp,objfpc --ref pcc --new %t.pcc %S/../run/racechecks.pas %S/../sema/Inputs/racechecks | FileCheck %s
-; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-parse-tree --extra="-o -" --modes=tp,objfpc --ref pcc --new %t.pcc %S/../run/racechecks.pas %S/../sema/Inputs/racechecks | FileCheck %s
-; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-tokens --modes=iso,tp,objfpc --ref pcc --new %t.pcc %S/../run/racechecks.pas | FileCheck %s
+; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-llvm --extra="-o -" --modes=objfpc --ref p3 --new %t.p3 %S/../run/racechecks.pas %S/../sema/Inputs/racechecks | FileCheck %s
+; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-llvm --extra="-g -o -" --modes=objfpc --ref p3 --new %t.p3 %S/../run/racechecks.pas | FileCheck %s
+; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-ast --extra="-o -" --modes=tp,objfpc --ref p3 --new %t.p3 %S/../run/racechecks.pas %S/../sema/Inputs/racechecks | FileCheck %s
+; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-parse-tree --extra="-o -" --modes=tp,objfpc --ref p3 --new %t.p3 %S/../run/racechecks.pas %S/../sema/Inputs/racechecks | FileCheck %s
+; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-tokens --modes=iso,tp,objfpc --ref p3 --new %t.p3 %S/../run/racechecks.pas | FileCheck %s
 ; Generic methods (objfpc), also of generic classes and in separate units.
-; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-llvm --extra="-o -" --modes=objfpc --ref pcc --new %t.pcc %S/../run/genericmethods.pas %S/../sema/Inputs/genericmethods | FileCheck %s
-; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-llvm --extra="-g -o -" --modes=objfpc --ref pcc --new %t.pcc %S/../run/genericmethods.pas | FileCheck %s
-; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-llvm --extra="-I %S/../run/Inputs/genericmethods/lib -o -" --modes=objfpc --ref pcc --new %t.pcc %S/../run/Inputs/genericmethods | FileCheck %s
-; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-llvm --extra="-I %S/../run/Inputs/genericmethods/lib -fseparate-units -g -o -" --modes=objfpc --ref pcc --new %t.pcc %S/../run/Inputs/genericmethods | FileCheck %s
-; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-ast --extra="-o -" --modes=tp,objfpc --ref pcc --new %t.pcc %S/../run/genericmethods.pas %S/../sema/Inputs/genericmethods | FileCheck %s
-; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-parse-tree --extra="-o -" --modes=tp,objfpc --ref pcc --new %t.pcc %S/../run/genericmethods.pas %S/../sema/Inputs/genericmethods | FileCheck %s
-; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-tokens --modes=iso,tp,objfpc --ref pcc --new %t.pcc %S/../run/genericmethods.pas | FileCheck %s
+; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-llvm --extra="-o -" --modes=objfpc --ref p3 --new %t.p3 %S/../run/genericmethods.pas %S/../sema/Inputs/genericmethods | FileCheck %s
+; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-llvm --extra="-g -o -" --modes=objfpc --ref p3 --new %t.p3 %S/../run/genericmethods.pas | FileCheck %s
+; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-llvm --extra="-I %S/../run/Inputs/genericmethods/lib -o -" --modes=objfpc --ref p3 --new %t.p3 %S/../run/Inputs/genericmethods | FileCheck %s
+; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-llvm --extra="-I %S/../run/Inputs/genericmethods/lib -fseparate-units -g -o -" --modes=objfpc --ref p3 --new %t.p3 %S/../run/Inputs/genericmethods | FileCheck %s
+; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-ast --extra="-o -" --modes=tp,objfpc --ref p3 --new %t.p3 %S/../run/genericmethods.pas %S/../sema/Inputs/genericmethods | FileCheck %s
+; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-parse-tree --extra="-o -" --modes=tp,objfpc --ref p3 --new %t.p3 %S/../run/genericmethods.pas %S/../sema/Inputs/genericmethods | FileCheck %s
+; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-tokens --modes=iso,tp,objfpc --ref p3 --new %t.p3 %S/../run/genericmethods.pas | FileCheck %s
 ; Inference through lambdas (objfpc).
-; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-llvm --extra="-o -" --modes=objfpc --ref pcc --new %t.pcc %S/../run/inferlambda.pas %S/../sema/Inputs/inferlambda | FileCheck %s
-; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-llvm --extra="-g -o -" --modes=objfpc --ref pcc --new %t.pcc %S/../run/inferlambda.pas | FileCheck %s
-; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-ast --extra="-o -" --modes=tp,objfpc --ref pcc --new %t.pcc %S/../run/inferlambda.pas %S/../sema/Inputs/inferlambda | FileCheck %s
+; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-llvm --extra="-o -" --modes=objfpc --ref p3 --new %t.p3 %S/../run/inferlambda.pas %S/../sema/Inputs/inferlambda | FileCheck %s
+; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-llvm --extra="-g -o -" --modes=objfpc --ref p3 --new %t.p3 %S/../run/inferlambda.pas | FileCheck %s
+; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-ast --extra="-o -" --modes=tp,objfpc --ref p3 --new %t.p3 %S/../run/inferlambda.pas %S/../sema/Inputs/inferlambda | FileCheck %s
 ; Generic type helpers (objfpc), also in separate units.
-; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-llvm --extra="-o -" --modes=objfpc --ref pcc --new %t.pcc %S/../run/generichelpers.pas %S/../sema/Inputs/generichelpers | FileCheck %s
-; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-llvm --extra="-g -o -" --modes=objfpc --ref pcc --new %t.pcc %S/../run/generichelpers.pas | FileCheck %s
-; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-llvm --extra="-I %S/../run/Inputs/generichelpers/lib -fseparate-units -g -o -" --modes=objfpc --ref pcc --new %t.pcc %S/../run/Inputs/generichelpers | FileCheck %s
-; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-ast --extra="-o -" --modes=tp,objfpc --ref pcc --new %t.pcc %S/../run/generichelpers.pas %S/../sema/Inputs/generichelpers | FileCheck %s
-; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-parse-tree --extra="-o -" --modes=tp,objfpc --ref pcc --new %t.pcc %S/../run/generichelpers.pas %S/../sema/Inputs/generichelpers | FileCheck %s
+; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-llvm --extra="-o -" --modes=objfpc --ref p3 --new %t.p3 %S/../run/generichelpers.pas %S/../sema/Inputs/generichelpers | FileCheck %s
+; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-llvm --extra="-g -o -" --modes=objfpc --ref p3 --new %t.p3 %S/../run/generichelpers.pas | FileCheck %s
+; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-llvm --extra="-I %S/../run/Inputs/generichelpers/lib -fseparate-units -g -o -" --modes=objfpc --ref p3 --new %t.p3 %S/../run/Inputs/generichelpers | FileCheck %s
+; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-ast --extra="-o -" --modes=tp,objfpc --ref p3 --new %t.p3 %S/../run/generichelpers.pas %S/../sema/Inputs/generichelpers | FileCheck %s
+; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-parse-tree --extra="-o -" --modes=tp,objfpc --ref p3 --new %t.p3 %S/../run/generichelpers.pas %S/../sema/Inputs/generichelpers | FileCheck %s
 ; Separate units (S11): the unit modules and the program importing them.
-; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-llvm --extra="-I %S/../run/Inputs/units/lib -o -" --modes=tp --ref pcc --new %t.pcc %S/../run/Inputs/units | FileCheck %s
-; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-llvm --extra="-I %S/../run/Inputs/units/lib -fseparate-units -g -o -" --modes=tp --ref pcc --new %t.pcc %S/../run/Inputs/units | FileCheck %s
+; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-llvm --extra="-I %S/../run/Inputs/units/lib -o -" --modes=tp --ref p3 --new %t.p3 %S/../run/Inputs/units | FileCheck %s
+; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-llvm --extra="-I %S/../run/Inputs/units/lib -fseparate-units -g -o -" --modes=tp --ref p3 --new %t.p3 %S/../run/Inputs/units | FileCheck %s
 ; Unreachable routines removed (optimization.md, item 21), and kept.
-; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-llvm --extra="-I %S/../codegen/Inputs/unused/lib -g -o -" --modes=objfpc --ref pcc --new %t.pcc %S/../codegen/Inputs/unused | FileCheck %s
-; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-llvm --extra="-I %S/../codegen/Inputs/unused/lib -fkeep-unused -o -" --modes=objfpc --ref pcc --new %t.pcc %S/../codegen/Inputs/unused | FileCheck %s
+; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-llvm --extra="-I %S/../codegen/Inputs/unused/lib -g -o -" --modes=objfpc --ref p3 --new %t.p3 %S/../codegen/Inputs/unused | FileCheck %s
+; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-llvm --extra="-I %S/../codegen/Inputs/unused/lib -fkeep-unused -o -" --modes=objfpc --ref p3 --new %t.p3 %S/../codegen/Inputs/unused | FileCheck %s
 ; CHECK: runs, 0 differ

@@ -3,7 +3,7 @@
 ; classes (not supported yet), a helper's name used as a type or for its
 ; members, instance methods through the type name, missing bodies, and
 ; writing a helper's property (not supported yet).
-; RUN: not %pcc --mode=objfpc -ferror-limit=0 -c %S/Inputs/typehelpers/errors.pas -o %t.o 2>&1 | FileCheck %s
+; RUN: not %p3 --mode=objfpc -ferror-limit=0 -c %S/Inputs/typehelpers/errors.pas -o %t.o 2>&1 | FileCheck %s
 ; CHECK: errors.pas:6:22: error: 'TC' is not a type helper
 ; CHECK: errors.pas:13:14: error: the methods of a type helper cannot be 'virtual', 'override' or 'abstract'
 ; CHECK: errors.pas:15:23: error: 'TH' is a helper for 'integer', not for 'byte'
@@ -19,7 +19,7 @@
 ; CHECK: errors.pas:50:10: error: '.' applied to a value of type 'integer', which is not a record
 ; CHECK-NOT: error:
 
-; RUN: not %pcc --mode=objfpc -ferror-limit=0 -c %S/Inputs/typehelpers/parse.pas -o %t.o 2>&1 | FileCheck --check-prefix=PARSE %s
+; RUN: not %p3 --mode=objfpc -ferror-limit=0 -c %S/Inputs/typehelpers/parse.pas -o %t.o 2>&1 | FileCheck --check-prefix=PARSE %s
 ; PARSE: parse.pas:6:5: error: a type helper cannot contain fields
 ; PARSE: parse.pas:9:5: error: constructors and destructors in type helpers are not supported yet
 ; PARSE: parse.pas:12:20: error: the class methods of a record must be 'static'
@@ -29,5 +29,5 @@
 ; PARSE-NOT: error:
 
 ; Not in tp mode:
-; RUN: not %pcc --mode=tp -c %S/Inputs/typehelpers/parse.pas -o %t.o 2>&1 | FileCheck --check-prefix=TP %s
+; RUN: not %p3 --mode=tp -c %S/Inputs/typehelpers/parse.pas -o %t.o 2>&1 | FileCheck --check-prefix=TP %s
 ; TP: parse.pas:5:13: error: type helpers need --mode=objfpc and {$modeswitch typehelpers}

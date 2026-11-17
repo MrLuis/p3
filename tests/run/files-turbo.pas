@@ -5,9 +5,9 @@
   write after reset); named text files. The files go to the path given as
   the first argument. Output is
   identical to Free Pascal 3.2.2's (fpc -Mtp and -Mobjfpc).
-  RUN: %pcc --mode=tp %s -o %t
+  RUN: %p3 --mode=tp %s -o %t
   RUN: %t %t.tmp | diff - %S/files-turbo.expected
-  RUN: %pcc --mode=objfpc -O2 %s -o %t.objfpc
+  RUN: %p3 --mode=objfpc -O2 %s -o %t.objfpc
   RUN: %t.objfpc %t.tmp2 | diff - %S/files-turbo.expected
 }
 program filesturbo;

@@ -1,6 +1,6 @@
-{ pcc's unit library in --mode=tp: no overloads and no exceptions, so the
+{ p3's unit library in --mode=tp: no overloads and no exceptions, so the
   one-signature routines only, and a bad conversion is a runtime error.
-  RUN: %pcc --mode=tp %s -o %t
+  RUN: %p3 --mode=tp %s -o %t
   RUN: not %t 2>&1 | FileCheck %s
   CHECK: 42 FF hello 3 8
   CHECK-NEXT: 1.5

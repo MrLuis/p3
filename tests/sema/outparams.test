@@ -2,7 +2,7 @@
 ; and different from var in headings, overrides, interfaces and procedural
 ; types; overloads cannot differ only by them. `out` is an ordinary name
 ; outside parameter lists and in the other modes.
-; RUN: not %pcc --mode=objfpc -ferror-limit=0 -c %S/Inputs/outparams/errors.pas -o %t.o 2>&1 | FileCheck %s
+; RUN: not %p3 --mode=objfpc -ferror-limit=0 -c %S/Inputs/outparams/errors.pas -o %t.o 2>&1 | FileCheck %s
 ; CHECK: errors.pas:10:15: error: heading of 'M' does not match the method it overrides in 'TC'
 ; CHECK: errors.pas:15:33: error: class 'TI' does not implement 'I.Q'
 ; CHECK: errors.pas:19:14: error: heading of 'TC.N' does not match its declaration
@@ -13,18 +13,18 @@
 ; CHECK: errors.pas:36:5: error: assigning to 'TG' from incompatible type 'procedure(out integer)'
 ; CHECK: errors.pas:38:8: error: cannot assign to 'x' inside a 'for' loop that it controls
 ; CHECK-NOT: error:
-; RUN: not %pcc --mode=objfpc -c %S/Inputs/outparams/overload.pas -o %t.o 2>&1 | FileCheck --check-prefix=OVERLOAD %s
+; RUN: not %p3 --mode=objfpc -c %S/Inputs/outparams/overload.pas -o %t.o 2>&1 | FileCheck --check-prefix=OVERLOAD %s
 ; OVERLOAD: overload.pas:3:11: error: redefinition of 'P' (overloads must differ in their parameters)
-; RUN: not %pcc --mode=objfpc -c %S/Inputs/outparams/default.pas -o %t.o 2>&1 | FileCheck --check-prefix=DEFAULT %s
+; RUN: not %p3 --mode=objfpc -c %S/Inputs/outparams/default.pas -o %t.o 2>&1 | FileCheck --check-prefix=DEFAULT %s
 ; DEFAULT: default.pas:2:28: error: only value and const parameters can have a default value
-; RUN: not %pcc --mode=objfpc -c %S/Inputs/outparams/name.pas -o %t.o 2>&1 | FileCheck --check-prefix=NAME %s
+; RUN: not %p3 --mode=objfpc -c %S/Inputs/outparams/name.pas -o %t.o 2>&1 | FileCheck --check-prefix=NAME %s
 ; NAME: name.pas:2:16: error: expected parameter name
-; RUN: not %pcc --mode=tp -c %S/Inputs/outparams/tp.pas -o %t.o 2>&1 | FileCheck --check-prefix=TP %s
+; RUN: not %p3 --mode=tp -c %S/Inputs/outparams/tp.pas -o %t.o 2>&1 | FileCheck --check-prefix=TP %s
 ; TP: tp.pas:2:16: error: expected ':' after parameter name
-; RUN: %pcc --mode=tp -c %S/Inputs/outparams/tpmode.pas -o %t.o
-; RUN: %pcc --mode=objfpc --emit-parse-tree %S/Inputs/outparams/tree.pas | FileCheck --check-prefix=TREE %s
+; RUN: %p3 --mode=tp -c %S/Inputs/outparams/tpmode.pas -o %t.o
+; RUN: %p3 --mode=objfpc --emit-parse-tree %S/Inputs/outparams/tree.pas | FileCheck --check-prefix=TREE %s
 ; TREE:      ParamDecl out 'a' <2:17>
 ; TREE:      ParamDecl out 'b' <2:33>
 ; TREE-NEXT:   UntypedTypeSpec <2:33>
-; RUN: %pcc --mode=objfpc --emit-ast %S/Inputs/outparams/tree.pas | FileCheck --check-prefix=AST %s
+; RUN: %p3 --mode=objfpc --emit-ast %S/Inputs/outparams/tree.pas | FileCheck --check-prefix=AST %s
 ; AST:       ParamDecl out 'a' : integer <2:17>

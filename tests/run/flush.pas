@@ -1,10 +1,10 @@
 { flush(f) (Turbo/FPC) writes out a text file's buffered output: another
   reader of the file, and output written without Pascal's buffer, see
   what was written before it. Output is identical to Free Pascal's.
-  RUN: %pcc --mode=tp %s -o %t
+  RUN: %p3 --mode=tp %s -o %t
   RUN: %t %t.tmp > %t.out
   RUN: diff %t.out %S/flush.expected
-  RUN: %pcc --mode=objfpc -O2 %s -o %t.fast
+  RUN: %p3 --mode=objfpc -O2 %s -o %t.fast
   RUN: %t.fast %t.tmp > %t.out
   RUN: diff %t.out %S/flush.expected
 }

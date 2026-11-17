@@ -1,5 +1,5 @@
-#include "pcc/CodeGen/Backend.h"
-#include "pcc/Basic/Diagnostics.h"
+#include "p3/CodeGen/Backend.h"
+#include "p3/Basic/Diagnostics.h"
 
 #include "llvm/IR/LegacyPassManager.h"
 #include "llvm/IR/Module.h"
@@ -15,9 +15,9 @@
 #include "llvm/Target/TargetMachine.h"
 #include "llvm/Target/TargetOptions.h"
 
-using namespace pcc;
+using namespace p3;
 
-void pcc::initializeAllLLVMTargets() {
+void p3::initializeAllLLVMTargets() {
   llvm::InitializeAllTargetInfos();
   llvm::InitializeAllTargets();
   llvm::InitializeAllTargetMCs();
@@ -35,7 +35,7 @@ static llvm::CodeGenOptLevel toCodeGenOptLevel(unsigned OptLevel) {
 }
 
 std::unique_ptr<llvm::TargetMachine>
-pcc::createTargetMachine(llvm::StringRef Triple, unsigned OptLevel,
+p3::createTargetMachine(llvm::StringRef Triple, unsigned OptLevel,
                          DiagnosticsEngine &Diags) {
   std::string Err;
   const llvm::Target *T = llvm::TargetRegistry::lookupTarget(Triple.str(), Err);
@@ -54,7 +54,7 @@ pcc::createTargetMachine(llvm::StringRef Triple, unsigned OptLevel,
   return TM;
 }
 
-void pcc::linkRuntimeIR(llvm::Module &M, llvm::StringRef Path,
+void p3::linkRuntimeIR(llvm::Module &M, llvm::StringRef Path,
                         DiagnosticsEngine &Diags) {
   if (!llvm::sys::fs::exists(Path))
     return;
@@ -73,7 +73,7 @@ void pcc::linkRuntimeIR(llvm::Module &M, llvm::StringRef Path,
                   "'; runtime functions are not inlined");
 }
 
-void pcc::optimizeModule(llvm::Module &M, llvm::TargetMachine &TM,
+void p3::optimizeModule(llvm::Module &M, llvm::TargetMachine &TM,
                          unsigned OptLevel) {
   llvm::LoopAnalysisManager LAM;
   llvm::FunctionAnalysisManager FAM;
@@ -100,7 +100,7 @@ void pcc::optimizeModule(llvm::Module &M, llvm::TargetMachine &TM,
   MPM.run(M, MAM);
 }
 
-bool pcc::verifyModule(llvm::Module &M, DiagnosticsEngine &Diags) {
+bool p3::verifyModule(llvm::Module &M, DiagnosticsEngine &Diags) {
   std::string Msg;
   llvm::raw_string_ostream OS(Msg);
   if (!llvm::verifyModule(M, &OS))
@@ -110,7 +110,7 @@ bool pcc::verifyModule(llvm::Module &M, DiagnosticsEngine &Diags) {
   return false;
 }
 
-bool pcc::emitOutput(llvm::Module &M, llvm::TargetMachine &TM, OutputKind Kind,
+bool p3::emitOutput(llvm::Module &M, llvm::TargetMachine &TM, OutputKind Kind,
                      llvm::StringRef Path, DiagnosticsEngine &Diags) {
   std::error_code EC;
   llvm::raw_fd_ostream OS(Path, EC,

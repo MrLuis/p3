@@ -2,7 +2,7 @@
 ; records/enums/arrays, globals, and frame-based locals and parameters
 ; (var parameters are dereferenced). Checked interactively with gdb; here
 ; with llvm-dwarfdump.
-; RUN: %pcc -g -c %S/Inputs/debuginfo.pas -o %t.o
+; RUN: %p3 -g -c %S/Inputs/debuginfo.pas -o %t.o
 ; RUN: llvm-dwarfdump --verify %t.o | FileCheck --check-prefix=VERIFY %s
 ; VERIFY: No errors.
 ; RUN: llvm-dwarfdump --debug-info %t.o | FileCheck %s
@@ -47,6 +47,6 @@
 ; LINES-DAG: {{^0x[0-9a-f]+ +26 }}
 
 ; Without -g there is no debug info.
-; RUN: %pcc -c %S/Inputs/debuginfo.pas -o %t.nodebug.o
+; RUN: %p3 -c %S/Inputs/debuginfo.pas -o %t.nodebug.o
 ; RUN: llvm-dwarfdump --debug-info %t.nodebug.o | FileCheck --check-prefix=NODEBUG %s
 ; NODEBUG-NOT: DW_TAG_compile_unit

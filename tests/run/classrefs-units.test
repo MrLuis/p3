@@ -2,15 +2,15 @@
 ; (--mode=objfpc), compiled whole and separately: a separately compiled
 ; unit exports a class variable as pas.<unit>$<class>.<name>.
 ; RUN: rm -rf %t && mkdir -p %t && cp -r %S/Inputs/classrefs/. %t/
-; RUN: %pcc --mode=objfpc -I %t/lib %t/host.pas -o %t/whole
+; RUN: %p3 --mode=objfpc -I %t/lib %t/host.pas -o %t/whole
 ; RUN: %t/whole | FileCheck %s
-; RUN: %pcc --mode=objfpc -c %t/lib/registry.pas -o %t/lib/registry.o
-; RUN: %pcc --mode=objfpc -I %t/lib -fseparate-units %t/host.pas -o %t/separate
+; RUN: %p3 --mode=objfpc -c %t/lib/registry.pas -o %t/lib/registry.o
+; RUN: %p3 --mode=objfpc -I %t/lib -fseparate-units %t/host.pas -o %t/separate
 ; RUN: %t/separate | FileCheck %s
 ; CHECK:      TPlugin p1@plugin plugin
 ; CHECK-NEXT: TAudio p2@audio! audio
 ; CHECK-NEXT: loaded 2 2
-; RUN: %pcc --mode=objfpc --emit-llvm %t/lib/registry.pas -o - | FileCheck --check-prefix=UNIT %s
+; RUN: %p3 --mode=objfpc --emit-llvm %t/lib/registry.pas -o - | FileCheck --check-prefix=UNIT %s
 ; UNIT: @"pas.registry$tplugin.loaded" = global i32 0
-; RUN: %pcc --mode=objfpc -I %t/lib -fseparate-units --emit-llvm %t/host.pas -o - | FileCheck --check-prefix=PROG %s
+; RUN: %p3 --mode=objfpc -I %t/lib -fseparate-units --emit-llvm %t/host.pas -o - | FileCheck --check-prefix=PROG %s
 ; PROG: @"pas.registry$tplugin.loaded" = external global i32

@@ -3,10 +3,10 @@
   pointer); p - q counts them; inc and dec move a pointer variable; p[i]
   is (p + i)^; pointers are ordered by address. Output is identical to
   Free Pascal's.
-  RUN: %pcc --mode=tp %s -o %t
+  RUN: %p3 --mode=tp %s -o %t
   RUN: %t > %t.out
   RUN: diff %t.out %S/ptrarith.expected
-  RUN: %pcc --mode=tp -O2 -fno-range-checks %s -o %t.fast
+  RUN: %p3 --mode=tp -O2 -fno-range-checks %s -o %t.fast
   RUN: %t.fast > %t.out
   RUN: diff %t.out %S/ptrarith.expected
 }

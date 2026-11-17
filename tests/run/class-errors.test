@@ -1,6 +1,6 @@
 ; Runtime errors of classes (--mode=objfpc): a failed `as`, a call of an
 ; abstract method, a virtual call or a field access through nil.
-; RUN: %pcc --mode=objfpc %S/Inputs/classes/rterrors.pas -o %t
+; RUN: %p3 --mode=objfpc %S/Inputs/classes/rterrors.pas -o %t
 ; RUN: not %t as 2>&1 | FileCheck --check-prefix=AS %s
 ; AS: C.P
 ; AS-NEXT: Runtime error: invalid class typecast at {{.*}}rterrors.pas:15:23
@@ -11,7 +11,7 @@
 ; RUN: not %t field 2>&1 | FileCheck --check-prefix=FIELD %s
 ; FIELD: Runtime error: use of a nil object reference at {{.*}}rterrors.pas:18:23
 ; Without range checks the nil checks are left out (the `as` check is not).
-; RUN: %pcc --mode=objfpc -fno-range-checks --emit-llvm %S/Inputs/classes/rterrors.pas -o - | FileCheck --check-prefix=NOCHECK %s
+; RUN: %p3 --mode=objfpc -fno-range-checks --emit-llvm %S/Inputs/classes/rterrors.pas -o - | FileCheck --check-prefix=NOCHECK %s
 ; NOCHECK-NOT: nil object
 ; NOCHECK: invalid class typecast
 ; NOCHECK-NOT: nil object

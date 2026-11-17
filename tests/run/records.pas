@@ -2,10 +2,10 @@
   before the record is laid out for anything else), record function
   results (Turbo/FPC), and -g with untyped pointers. Found while porting
   selfhost/pcutil and pcdiag (S3). Expected output from Free Pascal 3.2.2.
-  RUN: %pcc --mode=tp %s -o %t
+  RUN: %p3 --mode=tp %s -o %t
   RUN:  %t > %t.out
   RUN: diff %S/records.expected %t.out
-  RUN: %pcc --mode=tp -g %s -o %t.g
+  RUN: %p3 --mode=tp -g %s -o %t.g
   RUN:  %t.g > %t.g.out
   RUN: diff %S/records.expected %t.g.out
 }

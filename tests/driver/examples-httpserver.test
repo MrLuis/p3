@@ -1,16 +1,16 @@
-; examples/httpserver builds from its pcc.json and serves requests: files,
+; examples/httpserver builds from its p3.json and serves requests: files,
 ; the status page, errors, and a 1 MiB binary file byte for byte; it stops
 ; after --requests.
 ; RUN: rm -rf %t && mkdir -p %t && cp -R %S/../../examples/httpserver %t/
 ; RUN: rm -rf %t/httpserver/bin
-; RUN: cd %t/httpserver && %pcc-project 2>&1 | count 0
+; RUN: cd %t/httpserver && %p3-project 2>&1 | count 0
 ; RUN: python3 %S/Inputs/httpserver-check.py %t/httpserver/bin/httpserver %t/httpserver/public | FileCheck %s
 ; CHECK:      GET / 200
 ; CHECK-NEXT: GET /hello.txt 200
 ; CHECK-NEXT: GET /hello%2Etxt?x=1 200
 ; CHECK-NEXT: GET /status 200
 ; CHECK-NEXT: GET /missing 404
-; CHECK-NEXT: GET /%2e%2e/pcc.json 403
+; CHECK-NEXT: GET /%2e%2e/p3.json 403
 ; CHECK-NEXT: POST / 405
 ; CHECK-NEXT: GET /blob.bin 200 1048576
 ; CHECK-NEXT: server stopped

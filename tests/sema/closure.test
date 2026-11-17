@@ -4,7 +4,7 @@
 ; function's result, a record method's Self), nor its nested routines; a
 ; reference value and a plain procedural value do not convert into each
 ; other. A lambda cannot use a field through a with statement outside it.
-; RUN: not %pcc --mode=objfpc -ferror-limit=0 -c %S/Inputs/closure/errors.pas -o %t.o 2>&1 | FileCheck %s
+; RUN: not %p3 --mode=objfpc -ferror-limit=0 -c %S/Inputs/closure/errors.pas -o %t.o 2>&1 | FileCheck %s
 ; CHECK: errors.pas:15:32: error: this closure uses 'a', through the Self of 'Get' (a record, passed by reference), which may not exist when the closure runs; copy it to a local variable first
 ; CHECK: errors.pas:26:26: error: this closure uses 'v', a 'var' parameter of 'ByVar', which may not exist when the closure runs; copy it to a local variable first
 ; CHECK: errors.pas:26:31: error: this closure uses 'o', an 'out' parameter of 'ByVar', which may not exist when the closure runs; copy it to a local variable first
@@ -20,7 +20,7 @@
 ; CHECK: errors.pas:76:29: error: this lambda uses 'a' through a 'with' statement outside it; name the record instead
 ; CHECK-NOT: error:
 ;
-; RUN: not %pcc --mode=objfpc -ferror-limit=0 -c %S/Inputs/closure/syntax.pas -o %t.o 2>&1 | FileCheck --check-prefix=SYNTAX %s
+; RUN: not %p3 --mode=objfpc -ferror-limit=0 -c %S/Inputs/closure/syntax.pas -o %t.o 2>&1 | FileCheck --check-prefix=SYNTAX %s
 ; SYNTAX: syntax.pas:3:31: error: a 'reference to' type cannot be 'of object'
 ; SYNTAX: syntax.pas:4:8: error: a 'reference to' type cannot have a calling convention
 ; SYNTAX: syntax.pas:5:21: error: expected 'procedure' or 'function' after 'reference to'
@@ -28,13 +28,13 @@
 ;
 ; `reference` is not reserved: outside objfpc, and as a name, it is an
 ; identifier.
-; RUN: not %pcc --mode=tp -c %S/Inputs/closure/tp.pas -o %t.o 2>&1 | FileCheck --check-prefix=TP %s
+; RUN: not %p3 --mode=tp -c %S/Inputs/closure/tp.pas -o %t.o 2>&1 | FileCheck --check-prefix=TP %s
 ; TP: tp.pas:3:18: error: expected ';' after type declaration
 ;
-; RUN: %pcc --mode=objfpc --emit-parse-tree %S/Inputs/closure/ast.pas -o - | FileCheck --check-prefix=PARSE %s
+; RUN: %p3 --mode=objfpc --emit-parse-tree %S/Inputs/closure/ast.pas -o - | FileCheck --check-prefix=PARSE %s
 ; PARSE: RoutineTypeSpec function reference <4:9>
 ;
-; RUN: %pcc --mode=objfpc --emit-ast %S/Inputs/closure/ast.pas -o - | FileCheck --check-prefix=AST %s
+; RUN: %p3 --mode=objfpc --emit-ast %S/Inputs/closure/ast.pas -o - | FileCheck --check-prefix=AST %s
 ; AST: TypeDecl 'tfn' = TFn <4:3>
 ; AST: NameRefExpr 'result' function result : TFn <11:3>
 ; AST-NEXT: AddrOfExpr : reference to function(integer): integer <11:13>
@@ -42,7 +42,7 @@
 ; The code: the frame of the routine the closure is made in is on the heap,
 ; reference counted; frame.fini releases what it holds when the last
 ; reference goes. Reference values are counted where they are stored.
-; RUN: %pcc --mode=objfpc --emit-llvm %S/Inputs/closure/ast.pas -o %t.ll
+; RUN: %p3 --mode=objfpc --emit-llvm %S/Inputs/closure/ast.pas -o %t.ll
 ; RUN: FileCheck --check-prefix=IR %s < %t.ll
 ; RUN: opt -passes=verify -disable-output %t.ll
 ; IR-LABEL: define i32 @main(

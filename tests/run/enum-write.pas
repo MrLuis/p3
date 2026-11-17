@@ -4,11 +4,11 @@
   succ/pred/High/Low, to output or to a text file variable; a field width
   pads on the right and never cuts. Output is identical to Free Pascal
   3.2.2's (fpc -Mtp and -Mobjfpc).
-  RUN: %pcc --mode=tp %s -o %t
+  RUN: %p3 --mode=tp %s -o %t
   RUN: %t | diff - %S/enum-write.expected
-  RUN: %pcc --mode=objfpc %s -o %t.objfpc
+  RUN: %p3 --mode=objfpc %s -o %t.objfpc
   RUN: %t.objfpc | diff - %S/enum-write.expected
-  RUN: %pcc --mode=objfpc -O2 -g %s -o %t.O2
+  RUN: %p3 --mode=objfpc -O2 -g %s -o %t.O2
   RUN: %t.O2 | diff - %S/enum-write.expected
 }
 program enumwrite;

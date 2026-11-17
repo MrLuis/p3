@@ -1,28 +1,28 @@
-; Project files (pcc.json): found in the input's directory or its parents
+; Project files (p3.json): found in the input's directory or its parents
 ; (the current directory without an input file), named with --project,
 ; ignored with --no-project. Their settings are defaults the command line
 ; overrides; their paths are relative to their directory; without an input
-; file pcc builds their main program (into their output, whose directory
+; file p3 builds their main program (into their output, whose directory
 ; is created).
 ; RUN: rm -rf %t && mkdir -p %t && cp -R %S/Inputs/project %t/
-; RUN: cd %t/project && %pcc-project 2>&1 | count 0
+; RUN: cd %t/project && %p3-project 2>&1 | count 0
 ; RUN: %t/project/bin/app | FileCheck --check-prefix=OUT %s
-; RUN: cd %t/project/src && %pcc-project app.pas -o %t/app2 2>&1 | count 0
+; RUN: cd %t/project/src && %p3-project app.pas -o %t/app2 2>&1 | count 0
 ; RUN: %t/app2 | FileCheck --check-prefix=OUT %s
 ; OUT: hello, project
-; RUN: cd %t/project && %pcc-project --emit-ast | FileCheck --check-prefix=AST %s
+; RUN: cd %t/project && %p3-project --emit-ast | FileCheck --check-prefix=AST %s
 ; AST: ProgramDecl 'app'
 
 ; The command line wins: --mode=iso rejects the units the project's objfpc
 ; allows; -o replaces the project's output.
-; RUN: cd %t/project && not %pcc-project --mode=iso 2>&1 | FileCheck --check-prefix=ISO %s
+; RUN: cd %t/project && not %p3-project --mode=iso 2>&1 | FileCheck --check-prefix=ISO %s
 ; ISO: src/app.pas:4:1: error: units are a Turbo/Free Pascal extension; use --mode=tp
-; RUN: cd %t/project && %pcc-project -o %t/app3 && %t/app3 | FileCheck --check-prefix=OUT %s
-; RUN: cd %t/project && not %pcc-project --no-project 2>&1 | FileCheck --check-prefix=NONE %s
-; NONE: pcc: error: no input file
+; RUN: cd %t/project && %p3-project -o %t/app3 && %t/app3 | FileCheck --check-prefix=OUT %s
+; RUN: cd %t/project && not %p3-project --no-project 2>&1 | FileCheck --check-prefix=NONE %s
+; NONE: p3: error: no input file
 
 ; Settings checked: types, values, duplicates; unknown names warn.
-; RUN: not %pcc-project --project=%S/Inputs/project-files/settings.json -ferror-limit=0 %S/Inputs/project-files/hello.pas 2>&1 | FileCheck --check-prefix=SET %s
+; RUN: not %p3-project --project=%S/Inputs/project-files/settings.json -ferror-limit=0 %S/Inputs/project-files/hello.pas 2>&1 | FileCheck --check-prefix=SET %s
 ; SET: settings.json:11:3: error: duplicate setting 'main'
 ; SET: settings.json:2:11: error: 'mode' must be "iso", "tp" or "objfpc"
 ; SET: settings.json:3:15: error: 'optimize' must be an integer from 0 to 3
@@ -36,13 +36,13 @@
 ; SET-NOT: hello.pas
 
 ; JSON syntax: the first error; strict JSON values otherwise accepted.
-; RUN: not %pcc-project --project=%S/Inputs/project-files/syntax.json %S/Inputs/project-files/hello.pas 2>&1 | FileCheck --check-prefix=SYN %s
+; RUN: not %p3-project --project=%S/Inputs/project-files/syntax.json %S/Inputs/project-files/hello.pas 2>&1 | FileCheck --check-prefix=SYN %s
 ; SYN: syntax.json:3:19: error: expected ',' or ']'
 ; SYN-NOT: error:
-; RUN: %pcc-project --project=%S/Inputs/project-files/values.json %S/Inputs/project-files/hello.pas -o %t/hello 2>&1 | FileCheck --check-prefix=VAL %s
+; RUN: %p3-project --project=%S/Inputs/project-files/values.json %S/Inputs/project-files/hello.pas -o %t/hello 2>&1 | FileCheck --check-prefix=VAL %s
 ; VAL: values.json:1:74: warning: unknown setting 'x'; ignored
 ; VAL-NOT: error:
-; RUN: not %pcc-project --project=%t/nonexistent.json 2>&1 | FileCheck --check-prefix=OPEN %s
-; OPEN: pcc: error: cannot open project file '{{.*}}nonexistent.json': No such file or directory
-; RUN: cd %t && not %pcc-project --project=%S/Inputs/project-files/nomain.json 2>&1 | FileCheck --check-prefix=MAIN %s
-; MAIN: pcc: error: no input file, and the project file '{{.*}}nomain.json' has no "main" program
+; RUN: not %p3-project --project=%t/nonexistent.json 2>&1 | FileCheck --check-prefix=OPEN %s
+; OPEN: p3: error: cannot open project file '{{.*}}nonexistent.json': No such file or directory
+; RUN: cd %t && not %p3-project --project=%S/Inputs/project-files/nomain.json 2>&1 | FileCheck --check-prefix=MAIN %s
+; MAIN: p3: error: no input file, and the project file '{{.*}}nomain.json' has no "main" program

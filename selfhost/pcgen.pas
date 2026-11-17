@@ -13,12 +13,12 @@ unit pcgen;
       a class's VMT is a constant [2 + N x ptr]: parent VMT, class name,
       virtual methods; methods take Self after the static link
 
-  The module must print exactly as the C++ pcc's (SELFHOST.md S10), so
+  The module must print exactly as the C++ p3's (SELFHOST.md S10), so
   this code creates the same values, with the same names, in the same
   order as CodeGen.cpp; pcir folds constants and prints like LLVM. Where
   the C++ code passes several instruction-creating expressions to one
   call, they are evaluated left to right (in locals), as clang, which
-  builds the C++ pcc, evaluates them.
+  builds the C++ p3, evaluates them.
 
   Not yet: debug information (-g). }
 

@@ -3,7 +3,7 @@
 ; one that is not given needs a default value (which it may have anywhere
 ; in the list). Overloads: the arguments written decide, then the fewest
 ; parameters left to their default values; a tie is an error.
-; RUN: not %pcc --mode=objfpc -ferror-limit=0 -c %S/Inputs/namedargs/errors.pas -o %t.o 2>&1 | FileCheck %s
+; RUN: not %p3 --mode=objfpc -ferror-limit=0 -c %S/Inputs/namedargs/errors.pas -o %t.o 2>&1 | FileCheck %s
 ; CHECK: errors.pas:55:11: error: 'Connect' has no parameter named 'Hots'
 ; CHECK: errors.pas:56:16: error: parameter 'Host' is given twice
 ; CHECK: errors.pas:56:11: note: its other argument is here
@@ -41,12 +41,12 @@
 ; CHECK: errors.pas:88:35: error: use of undeclared identifier 'nope'; did you mean 'copy'?
 ; CHECK-NOT: error:
 ;
-; RUN: not %pcc --mode=tp -c %S/Inputs/namedargs/tp.pas -o %t.o 2>&1 | FileCheck --check-prefix=TP %s
+; RUN: not %p3 --mode=tp -c %S/Inputs/namedargs/tp.pas -o %t.o 2>&1 | FileCheck --check-prefix=TP %s
 ; TP: tp.pas:6:8: error: named arguments need --mode=objfpc
 ;
 ; Sema puts the arguments in the order of the parameters; one left out
 ; before the last one given is its default value.
-; RUN: %pcc --mode=objfpc --emit-ast %S/Inputs/namedargs/ast.pas -o - | FileCheck --check-prefix=AST %s
+; RUN: %p3 --mode=objfpc --emit-ast %S/Inputs/namedargs/ast.pas -o - | FileCheck --check-prefix=AST %s
 ; AST: ProcCallStmt 'connect' <7:3>
 ; AST-NEXT: CharLiteralExpr "a" : char <7:11>
 ; AST-NEXT: IntegerLiteralExpr 5432 : integer <2:49>
@@ -57,7 +57,7 @@
 ; AST-NEXT: IntegerLiteralExpr 30 : integer <2:74>
 ; AST-NEXT: NameRefExpr 'false' constant : boolean <8:21>
 ;
-; RUN: %pcc --mode=objfpc --emit-parse-tree %S/Inputs/namedargs/ast.pas -o - | FileCheck --check-prefix=TREE %s
+; RUN: %p3 --mode=objfpc --emit-parse-tree %S/Inputs/namedargs/ast.pas -o - | FileCheck --check-prefix=TREE %s
 ; TREE: NamedArgExpr 'timeout' <7:16>
 ; TREE-NEXT: IntegerLiteralExpr 5 <7:27>
 ; TREE: NamedArgExpr 'usetls' <8:11>

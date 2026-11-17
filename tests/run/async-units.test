@@ -2,10 +2,10 @@
 ; program using it: compiled whole and separately (their tasks' entries
 ; are exported with them).
 ; RUN: rm -rf %t && mkdir -p %t && cp -r %S/Inputs/async/. %t/
-; RUN: %pcc --mode=objfpc -I %t/lib %t/main.pas -o %t/whole
+; RUN: %p3 --mode=objfpc -I %t/lib %t/main.pas -o %t/whole
 ; RUN: %t/whole | FileCheck %s
-; RUN: %pcc --mode=objfpc -c %t/lib/tasks.pas -o %t/lib/tasks.o
-; RUN: %pcc --mode=objfpc -I %t/lib -fseparate-units %t/main.pas -o %t/separate
+; RUN: %p3 --mode=objfpc -c %t/lib/tasks.pas -o %t/lib/tasks.o
+; RUN: %p3 --mode=objfpc -I %t/lib -fseparate-units %t/main.pas -o %t/separate
 ; RUN: %t/separate | FileCheck %s
 ; CHECK:      note: in a task
 ; CHECK-NEXT: 12

@@ -2,13 +2,13 @@
   alone and inside records and arrays; they can be assigned afterwards, and
   local ones keep their values between calls. Output identical to Free Pascal
   3.2.2's (fpc -Mobjfpc).
-  RUN: %pcc --mode=objfpc %s -o %t
+  RUN: %p3 --mode=objfpc %s -o %t
   RUN:  %t > %t.out
   RUN: diff %S/methodconstants.expected %t.out
-  RUN: %pcc --mode=objfpc -O2 %s -o %t.O2
+  RUN: %p3 --mode=objfpc -O2 %s -o %t.O2
   RUN:  %t.O2 > %t.O2.out
   RUN: diff %S/methodconstants.expected %t.O2.out
-  RUN: %pcc --mode=objfpc -g %s -o %t.g
+  RUN: %p3 --mode=objfpc -g %s -o %t.g
   RUN:  %t.g > %t.g.out
   RUN: diff %S/methodconstants.expected %t.g.out
 }

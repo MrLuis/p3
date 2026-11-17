@@ -1,29 +1,29 @@
-; Conditional compilation in the lexer: the predefined symbols (PCC and one
+; Conditional compilation in the lexer: the predefined symbols (P3 and one
 ; for the mode), -d, skipped text (only comments, strings and conditional
 ; directives are recognized in it), conditionals around and in include
 ; files, and the errors.
-; RUN: %pcc --emit-tokens %S/Inputs/cond/modes.pas | FileCheck --check-prefix=ISO %s
-; ISO:      1:14 identifier 'a'
-; ISO-NEXT: 2:18 identifier 'iso'
-; ISO-NEXT: 6:45 identifier 'nocmdline'
+; RUN: %p3 --emit-tokens %S/Inputs/cond/modes.pas | FileCheck --check-prefix=ISO %s
+; ISO:      1:13 identifier 'a'
+; ISO-NEXT: 2:17 identifier 'iso'
+; ISO-NEXT: 6:44 identifier 'nocmdline'
 ; ISO-NEXT: 9:44 identifier 'z'
 ; ISO-NEXT: eof
-; RUN: %pcc --mode=tp -dCmdLine --emit-tokens %S/Inputs/cond/modes.pas | FileCheck --check-prefix=TP %s
-; TP:      1:14 identifier 'a'
-; TP-NEXT: 3:17 identifier 'tp'
+; RUN: %p3 --mode=tp -dCmdLine --emit-tokens %S/Inputs/cond/modes.pas | FileCheck --check-prefix=TP %s
+; TP:      1:13 identifier 'a'
+; TP-NEXT: 3:16 identifier 'tp'
 ; TP-NEXT: 5:18 identifier 'cmdline'
 ; TP-NEXT: 9:44 identifier 'z'
 ; TP-NEXT: eof
-; RUN: %pcc --mode=objfpc -d cmdline -d Other --emit-tokens %S/Inputs/cond/modes.pas | FileCheck --check-prefix=OBJ %s
-; OBJ:      1:14 identifier 'a'
-; OBJ-NEXT: 4:21 identifier 'objfpc'
+; RUN: %p3 --mode=objfpc -d cmdline -d Other --emit-tokens %S/Inputs/cond/modes.pas | FileCheck --check-prefix=OBJ %s
+; OBJ:      1:13 identifier 'a'
+; OBJ-NEXT: 4:20 identifier 'objfpc'
 ; OBJ-NEXT: 5:18 identifier 'cmdline'
 ; OBJ-NEXT: 9:44 identifier 'z'
 
 ; An include file shares the including file's symbols; a conditional must
 ; end in the file that starts it, and an include directive in a skipped
 ; branch is not followed.
-; RUN: not %pcc --mode=tp --emit-tokens %S/Inputs/cond/include.pas 2>&1 | FileCheck --check-prefix=INC %s
+; RUN: not %p3 --mode=tp --emit-tokens %S/Inputs/cond/include.pas 2>&1 | FileCheck --check-prefix=INC %s
 ; INC:      cond.inc:3:1: error: $ENDIF without a matching $IF or $IFDEF
 ; INC:      cond.inc:4:1: error: $IFDEF is not terminated; expected $ENDIF before the end of the file
 ; INC:      2:15 identifier 'i'
@@ -32,7 +32,7 @@
 ; INC-NOT:  error
 ; INC:      eof
 
-; RUN: not %pcc --mode=tp -ferror-limit=0 --emit-tokens %S/Inputs/cond/errors.pas 2>&1 >/dev/null | FileCheck --check-prefix=ERR %s
+; RUN: not %p3 --mode=tp -ferror-limit=0 --emit-tokens %S/Inputs/cond/errors.pas 2>&1 >/dev/null | FileCheck --check-prefix=ERR %s
 ; ERR:      errors.pas:2:1: error: $ELSE without a matching $IF or $IFDEF
 ; ERR-NEXT: {$else}
 ; ERR-NEXT: ^

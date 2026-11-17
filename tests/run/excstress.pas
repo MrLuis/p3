@@ -1,8 +1,8 @@
 {
-  RUN: %pcc --mode=objfpc %s -o %t && %t | diff - %S/excstress.expected
-  RUN: %pcc --mode=objfpc -O2 %s -o %t.o2 && %t.o2 | diff - %S/excstress.expected
-  RUN: %pcc --mode=objfpc -O3 -fno-range-checks -fno-overflow-checks %s -o %t.o3 && %t.o3 | diff - %S/excstress.expected
-  RUN: %pcc --mode=objfpc -O2 -fno-inline-runtime %s -o %t.ni && %t.ni | diff - %S/excstress.expected
+  RUN: %p3 --mode=objfpc %s -o %t && %t | diff - %S/excstress.expected
+  RUN: %p3 --mode=objfpc -O2 %s -o %t.o2 && %t.o2 | diff - %S/excstress.expected
+  RUN: %p3 --mode=objfpc -O3 -fno-range-checks -fno-overflow-checks %s -o %t.o3 && %t.o3 | diff - %S/excstress.expected
+  RUN: %p3 --mode=objfpc -O2 -fno-inline-runtime %s -o %t.ni && %t.ni | diff - %S/excstress.expected
 }
 { Exceptions while managed values are alive: ansistrings and COM interfaces
   in variables, parameters, results and temporaries, in routines with and

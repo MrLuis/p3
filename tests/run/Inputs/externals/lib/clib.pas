@@ -8,10 +8,10 @@ const
   libc = 'c';
 
 function c_labs(x: int64): int64; cdecl; external libc name 'labs';
-function missing1(x: longint): longint; cdecl; external 'pcc_no_such_library';
+function missing1(x: longint): longint; cdecl; external 'p3_no_such_library';
 
 implementation
 
-function missing2: longint; cdecl; external 'libpcc_no_such.so.1' name 'missing2';
+function missing2: longint; cdecl; external 'libp3_no_such.so.1' name 'missing2';
 
 end.

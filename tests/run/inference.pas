@@ -4,11 +4,11 @@
   the type of its value; quoted text is a string where a type is inferred,
   and [a, b, c] an array (a set if its elements are enumeration values,
   characters or booleans, or it has a range).
-  RUN: %pcc --mode=objfpc %s -o %t
+  RUN: %p3 --mode=objfpc %s -o %t
   RUN: %t | diff - %S/inference.expected
-  RUN: %pcc --mode=objfpc -O2 %s -o %t.fast
+  RUN: %p3 --mode=objfpc -O2 %s -o %t.fast
   RUN: %t.fast | diff - %S/inference.expected
-  RUN: %pcc --mode=objfpc -g %s -o %t.dbg
+  RUN: %p3 --mode=objfpc -g %s -o %t.dbg
   RUN: %t.dbg | diff - %S/inference.expected
 }
 {$H+}
@@ -64,7 +64,7 @@ end;
 
 generic function Zero<T>: T;
 var
-  none: T;   { (pcc starts variables at zero) }
+  none: T;   { (p3 starts variables at zero) }
 begin
   Result := none;
 end;

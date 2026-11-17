@@ -1,13 +1,13 @@
 { Classes (--mode=objfpc): fields, methods, constructors and destructors,
   virtual and abstract methods, inherited, properties, Self, Result, is/as,
   typecasts, with on objects, TObject (Create, Destroy, Free, ClassName).
-  RUN: %pcc --mode=objfpc %s -o %t
+  RUN: %p3 --mode=objfpc %s -o %t
   RUN:  %t > %t.out
   RUN: diff %S/classes.expected %t.out
-  RUN: %pcc --mode=objfpc -O2 %s -o %t.O2
+  RUN: %p3 --mode=objfpc -O2 %s -o %t.O2
   RUN:  %t.O2 > %t.O2.out
   RUN: diff %S/classes.expected %t.O2.out
-  RUN: %pcc --mode=objfpc -g %s -o %t.g
+  RUN: %p3 --mode=objfpc -g %s -o %t.g
   RUN:  %t.g > %t.g.out
   RUN: diff %S/classes.expected %t.g.out
 }

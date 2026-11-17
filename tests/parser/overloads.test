@@ -1,7 +1,7 @@
 ; Overloading (--mode=objfpc): the overload directive in the parse tree;
 ; the checked tree numbers overloaded routines (#N) and shows which one each
 ; call means.
-; RUN: %pcc --mode=objfpc --emit-parse-tree %S/Inputs/overloads.pas -o %t.tree
+; RUN: %p3 --mode=objfpc --emit-parse-tree %S/Inputs/overloads.pas -o %t.tree
 ; RUN: diff %S/Inputs/overloads.tree %t.tree
-; RUN: %pcc --mode=objfpc --emit-ast %S/Inputs/overloads.pas -o %t.ast
+; RUN: %p3 --mode=objfpc --emit-ast %S/Inputs/overloads.pas -o %t.ast
 ; RUN: diff %S/Inputs/overloads.ast %t.ast

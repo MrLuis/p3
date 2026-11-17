@@ -1,9 +1,9 @@
 { M6: procedures, functions, var parameters, recursion, nested routines
   with up-level access (static links), forward declarations.
-  RUN: %pcc %s -o %t
+  RUN: %p3 %s -o %t
   RUN: %t > %t.out
   RUN: diff %S/routines.expected %t.out
-  RUN: %pcc -O2 %s -o %t.O2
+  RUN: %p3 -O2 %s -o %t.O2
   RUN: %t.O2 > %t.O2.out
   RUN: diff %S/routines.expected %t.O2.out
 }

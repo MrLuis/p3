@@ -3,7 +3,7 @@
 # the output with the .expected files.
 #
 #   run.sh fpc                 # Free Pascal (the reference implementation)
-#   run.sh pcc [path/to/pcc]   # pcc --mode=tp (default: build/bin/pcc)
+#   run.sh p3 [path/to/p3]   # p3 --mode=tp (default: build/bin/p3)
 #   run.sh fpc --update        # regenerate the .expected files from FPC
 #
 # Exit status: 0 if every program matches, 1 otherwise.
@@ -12,11 +12,11 @@ here=$(cd "$(dirname "$0")" && pwd)
 compiler=${1:-}
 case "$compiler" in
   fpc) update=${2:-} ;;
-  pcc) pcc=${2:-$here/../../build/bin/pcc}; update= ;;
-  *) echo "usage: $0 fpc [--update] | pcc [path/to/pcc]" >&2; exit 2 ;;
+  p3) p3=${2:-$here/../../build/bin/p3}; update= ;;
+  *) echo "usage: $0 fpc [--update] | p3 [path/to/p3]" >&2; exit 2 ;;
 esac
 
-work=$(mktemp -d "${TMPDIR:-/tmp}/pcc-dialect.XXXXXX")
+work=$(mktemp -d "${TMPDIR:-/tmp}/p3-dialect.XXXXXX")
 trap 'rm -rf "$work"' EXIT
 pass=0; fail=0
 
@@ -25,11 +25,11 @@ for src in "$here"/d[0-9][0-9]_*.pas; do
   exe=$work/$name
   if [ "$compiler" = fpc ]; then
     # objfpc mode with short strings; range and overflow
-    # checks on, as in pcc.
+    # checks on, as in p3.
     fpc -v0 -Mobjfpc -Sh- -Cr -Co -Fu"$here" -Fi"$here" -FU"$work" \
         -o"$exe" "$src" >"$work/$name.log" 2>&1
   else
-    "$pcc" --mode=tp -I "$here" "$src" -o "$exe" >"$work/$name.log" 2>&1
+    "$p3" --mode=tp -I "$here" "$src" -o "$exe" >"$work/$name.log" 2>&1
   fi
   if [ $? -ne 0 ]; then
     echo "FAIL $name (compile)"; sed 's/^/    /' "$work/$name.log" | head -5

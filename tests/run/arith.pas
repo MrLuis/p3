@@ -1,8 +1,8 @@
 { Integer / boolean / char semantics (ISO 7185 6.7).
-  RUN: %pcc %s -o %t
+  RUN: %p3 %s -o %t
   RUN: %t > %t.out
   RUN: diff %S/arith.expected %t.out
-  RUN: %pcc -O2 %s -o %t.O2
+  RUN: %p3 -O2 %s -o %t.O2
   RUN: %t.O2 > %t.O2.out
   RUN: diff %S/arith.expected %t.O2.out
 }

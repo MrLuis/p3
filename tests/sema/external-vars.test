@@ -1,11 +1,11 @@
 ; External variables: at program or unit level, not initialized or
 ; absolute, a string constant library and symbol, `cvar` with `external`,
 ; and `name` for one variable only.
-; RUN: not %pcc --mode=objfpc -ferror-limit=0 -c %S/Inputs/external/vars.pas -o %t.o 2>&1 | FileCheck %s
+; RUN: not %p3 --mode=objfpc -ferror-limit=0 -c %S/Inputs/external/vars.pas -o %t.o 2>&1 | FileCheck %s
 ; CHECK: vars.pas:6:3: error: 'cvar' without 'external' (a variable for C code to use) is not supported yet
 ; CHECK: vars.pas:7:3: error: external variable 'd' cannot be initialized
 ; CHECK: vars.pas:8:24: error: the library name of an external variable must be a string constant
 ; CHECK: vars.pas:11:3: error: external variable 'local' must be declared at program or unit level
 ; CHECK-NOT: error:
-; RUN: not %pcc --mode=objfpc -ferror-limit=0 -c %S/Inputs/external/parse.pas -o %t.o 2>&1 | FileCheck --check-prefix=PARSE %s
+; RUN: not %p3 --mode=objfpc -ferror-limit=0 -c %S/Inputs/external/parse.pas -o %t.o 2>&1 | FileCheck --check-prefix=PARSE %s
 ; PARSE: parse.pas:3:18: error: 'name' can only be given for one variable

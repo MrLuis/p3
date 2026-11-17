@@ -1,4 +1,4 @@
-{ pcc's StrUtils: Free Pascal's names and results, on ansistrings. Written
+{ p3's StrUtils: Free Pascal's names and results, on ansistrings. Written
   in the Turbo dialect so that every mode with units can use it. PosEx from
   the start of the string (two parameters) needs --mode=objfpc (overloading). }
 unit strutils;
@@ -41,7 +41,7 @@ function AnsiIndexStr(const text: string; const values: array of string): longin
 function AnsiIndexText(const text: string; const values: array of string): longint;
 function AnsiMatchStr(const text: string; const values: array of string): boolean;
 function AnsiMatchText(const text: string; const values: array of string): boolean;
-{$IFDEF PCC_OBJFPC}
+{$IFDEF P3_OBJFPC}
 function PosEx(const sub, s: string): longint;
 {$ENDIF}
 
@@ -193,7 +193,7 @@ begin
     PosEx := p + offset - 1;
 end;
 
-{$IFDEF PCC_OBJFPC}
+{$IFDEF P3_OBJFPC}
 function PosEx(const sub, s: string): longint;
 begin
   PosEx := PosEx(sub, s, 1);

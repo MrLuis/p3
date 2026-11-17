@@ -1,9 +1,9 @@
 { M12 (Turbo/FPC): short strings -- +, comparisons, indexing, string
   results, length/copy/pos/concat/upcase/delete/insert, read/write.
-  RUN: %pcc --mode=tp %s -o %t
+  RUN: %p3 --mode=tp %s -o %t
   RUN: echo line of input | %t > %t.out
   RUN: diff %S/strs.expected %t.out
-  RUN: %pcc --mode=tp -O2 %s -o %t.O2
+  RUN: %p3 --mode=tp -O2 %s -o %t.O2
   RUN: echo line of input | %t.O2 > %t.O2.out
   RUN: diff %S/strs.expected %t.O2.out
 }

@@ -2,9 +2,9 @@
   bounded channel is full, Receive while it is empty, Close ends
   `for await`), and TCancelToken's methods (Create, Cancel, IsCancelled,
   WithTimeout, NewChild, ThrowIfCancelled).
-  RUN: %pcc --mode=objfpc %s -o %t
+  RUN: %p3 --mode=objfpc %s -o %t
   RUN: %t | diff - %S/channels.expected
-  RUN: %pcc --mode=objfpc -O2 %s -o %t.fast
+  RUN: %p3 --mode=objfpc -O2 %s -o %t.fast
   RUN: %t.fast | diff - %S/channels.expected
 }
 {$H+}

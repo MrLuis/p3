@@ -1,12 +1,12 @@
 unit pcproject;
-{ The project file, pcc.json, of the self-hosted compiler; a port of
+{ The project file, p3.json, of the self-hosted compiler; a port of
   src/driver/Project.cpp, with the same diagnostics. A project file holds
   settings for compiling a project's programs and units (mode, unit and
   library paths, defines, libraries, optimization, debug info, target,
   warnings, checks) and its main program and output. It is looked for in
   the input file's directory (the current directory without an input file)
   and its parents; --project=<file> names one, --no-project ignores it.
-  pcc.pas applies the settings under the command line's. Paths in it are
+  p3.pas applies the settings under the command line's. Paths in it are
   relative to its directory. }
 
 interface
@@ -627,7 +627,7 @@ begin
     v := m^.value;
     n := m^.name;
     if (n = 'name') or (n = 'version') or (n = 'description') then
-      getString(v, n, str) { for people and tools: not used by pcc }
+      getString(v, n, str) { for people and tools: not used by p3 }
     else if n = 'main' then
       s.hasMain := getString(v, n, s.main)
     else if n = 'output' then
@@ -743,13 +743,13 @@ begin
     cwd := absolutePath('.');
     while dir <> '' do
     begin
-      if sysIsRegularFile(joinPath(dir, 'pcc.json')) then
+      if sysIsRegularFile(joinPath(dir, 'p3.json')) then
       begin
         if dir = cwd then
           s.base := ''
         else
           s.base := joinPath(dir, '');
-        s.path := s.base + 'pcc.json';
+        s.path := s.base + 'p3.json';
         break;
       end;
       dir := parentDir(dir);

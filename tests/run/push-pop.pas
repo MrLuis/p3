@@ -4,9 +4,9 @@
   enumerations, and range and overflow checks (R, Q). A PUSH or POP in a
   branch that is not compiled has no effect. Output is identical to Free
   Pascal 3.2.2's (fpc -Mobjfpc and -Mtp).
-  RUN: %pcc --mode=objfpc %s -o %t
+  RUN: %p3 --mode=objfpc %s -o %t
   RUN: %t | diff - %S/push-pop.expected
-  RUN: %pcc --mode=tp %s -o %t.tp
+  RUN: %p3 --mode=tp %s -o %t.tp
   RUN: %t.tp | diff - %S/push-pop.expected
 }
 program pushpop;

@@ -2,10 +2,10 @@
   signed/unsigned arithmetic, wrap-around under Q-/R-, int64 trunc/round,
   banker's rounding. The expected output was produced by Free Pascal 3.2.2
   (fpc -Mobjfpc -Sh- -Cr -Co).
-  RUN: %pcc --mode=tp %s -o %t
+  RUN: %p3 --mode=tp %s -o %t
   RUN:  %t > %t.out
   RUN: diff %S/ints.expected %t.out
-  RUN: %pcc --mode=tp -O2 %s -o %t.O2
+  RUN: %p3 --mode=tp -O2 %s -o %t.O2
   RUN:  %t.O2 > %t.O2.out
   RUN: diff %S/ints.expected %t.O2.out
 }

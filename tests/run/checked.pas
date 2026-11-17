@@ -4,11 +4,11 @@
   narrower integer type (two's complement: the low bits). AddChecked,
   SubChecked and MulChecked give (value, ok) instead of raising.
   checked(e) and unchecked(e) do the same for one expression.
-  RUN: %pcc --mode=objfpc %s -o %t
+  RUN: %p3 --mode=objfpc %s -o %t
   RUN: %t | diff - %S/checked.expected
-  RUN: %pcc --mode=objfpc -O2 %s -o %t.fast
+  RUN: %p3 --mode=objfpc -O2 %s -o %t.fast
   RUN: %t.fast | diff - %S/checked.expected
-  RUN: %pcc --mode=objfpc -g %s -o %t.dbg
+  RUN: %p3 --mode=objfpc -g %s -o %t.dbg
   RUN: %t.dbg | diff - %S/checked.expected
 }
 {$H+}

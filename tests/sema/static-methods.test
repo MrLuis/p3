@@ -1,7 +1,7 @@
 ; Static class methods: only class methods can be static, not virtual ones;
 ; without Self, a static method cannot use instance members or class
 ; methods that need Self.
-; RUN: not %pcc --mode=objfpc -ferror-limit=0 -c %S/Inputs/static/errors.pas -o %t.o 2>&1 | FileCheck %s
+; RUN: not %p3 --mode=objfpc -ferror-limit=0 -c %S/Inputs/static/errors.pas -o %t.o 2>&1 | FileCheck %s
 ; CHECK: errors.pas:6:15: error: only class methods can be 'static'
 ; CHECK: errors.pas:7:21: error: 'static' cannot be used with 'virtual'
 ; CHECK: errors.pas:12:3: error: instance member 'F' cannot be used in a static class method

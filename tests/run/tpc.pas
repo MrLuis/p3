@@ -1,9 +1,9 @@
 { M12 (Turbo/FPC): typed constants (static, even in routines),
   untyped pointer, @, function calls as statements.
-  RUN: %pcc --mode=tp %s -o %t
+  RUN: %p3 --mode=tp %s -o %t
   RUN:  %t > %t.out
   RUN: diff %S/tpc.expected %t.out
-  RUN: %pcc --mode=tp -O2 %s -o %t.O2
+  RUN: %p3 --mode=tp -O2 %s -o %t.O2
   RUN:  %t.O2 > %t.O2.out
   RUN: diff %S/tpc.expected %t.O2.out
 }

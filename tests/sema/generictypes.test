@@ -2,7 +2,7 @@
 ; not checked; specialize TName<integer> is the type made of it (and of the
 ; implementations of its methods) for those type arguments, checked like
 ; any type, with a note at the use for errors in it.
-; RUN: not %pcc --mode=objfpc -ferror-limit=0 -c %S/Inputs/generictypes/errors.pas -o %t.o 2>&1 | FileCheck %s
+; RUN: not %p3 --mode=objfpc -ferror-limit=0 -c %S/Inputs/generictypes/errors.pas -o %t.o 2>&1 | FileCheck %s
 ; CHECK: errors.pas:13:11: error: redefinition of generic 'TTwice'
 ; CHECK: errors.pas:10:11: note: previous definition is here
 ; CHECK: errors.pas:16:19: error: duplicate type parameter 'T'
@@ -27,16 +27,16 @@
 ; CHECK: errors.pas:43:15: error: invalid operands to '+' ('TRec' and 'TRec')
 ; CHECK: errors.pas:61:17: note: in the specialization 'TSum<TRec>.Total' requested here
 ;
-; RUN: not %pcc --mode=objfpc -c %S/Inputs/generictypes/syntax.pas -o %t.o 2>&1 | FileCheck --check-prefix=SYNTAX %s
+; RUN: not %p3 --mode=objfpc -c %S/Inputs/generictypes/syntax.pas -o %t.o 2>&1 | FileCheck --check-prefix=SYNTAX %s
 ; SYNTAX: syntax.pas:3:20: error: expected '<' and type parameters after the name of a generic type
 ;
-; RUN: not %pcc --mode=tp -c %S/Inputs/generictypes/tp.pas -o %t.o 2>&1 | FileCheck --check-prefix=TP %s
+; RUN: not %p3 --mode=tp -c %S/Inputs/generictypes/tp.pas -o %t.o 2>&1 | FileCheck --check-prefix=TP %s
 ; TP: tp.pas:3:10: error: expected '=' after type name
 ;
 ; The tree: the template; each specialization, a type declaration of the
 ; module with its methods' implementations; in an expression the type gets
 ; a hidden name.
-; RUN: %pcc --mode=objfpc --emit-ast %S/Inputs/generictypes/ast.pas -o - | FileCheck --check-prefix=AST %s
+; RUN: %p3 --mode=objfpc --emit-ast %S/Inputs/generictypes/ast.pas -o - | FileCheck --check-prefix=AST %s
 ; AST: GenericTypeDecl 'tbox' <t> <3:11>
 ; AST: TypeDecl 'tintbox' = class(TObject) <7:3>
 ; AST: FunctionDecl 'tbox.get' <8:1>
@@ -48,7 +48,7 @@
 ; AST: TypeDecl 'tbox' = class(TObject) <3:11>
 ; AST-NEXT: FunctionDecl 'tbox.get' definition <8:1>
 ;
-; RUN: %pcc --mode=objfpc --emit-parse-tree %S/Inputs/generictypes/ast.pas -o - | FileCheck --check-prefix=TREE %s
+; RUN: %p3 --mode=objfpc --emit-parse-tree %S/Inputs/generictypes/ast.pas -o - | FileCheck --check-prefix=TREE %s
 ; TREE: GenericTypeDecl 'tbox' <t> <3:11>
 ; TREE-NEXT: ClassTypeSpec
 ; TREE: SpecializeTypeSpec 'tbox' <7:13>

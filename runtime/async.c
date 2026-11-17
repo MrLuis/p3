@@ -496,7 +496,7 @@ static void *pool_main(void *arg) {
 static PasContext *pool_context(void) {
   if (!__pas_async_pool) {
     long n = sysconf(_SC_NPROCESSORS_ONLN);
-    const char *env = getenv("PCC_POOL_THREADS");
+    const char *env = getenv("P3_POOL_THREADS");
     if (env && atoi(env) > 0)
       n = atoi(env);
     if (n < 2)

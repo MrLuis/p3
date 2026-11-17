@@ -3,7 +3,7 @@
 (selfhost/pcllvm.pas, SELFHOST.md S11): declarations of the target
 initialization functions of the LLVM it is linked with, and
 llvmInitializeTargets, which calls them (llvm::InitializeAllTargets,
-...TargetMCs and ...AsmPrinters, as the C++ pcc does).
+...TargetMCs and ...AsmPrinters, as the C++ p3 does).
 
 LLVM-C's LLVMInitializeAllTargets is an inline function over the targets
 of the LLVM build, so the list comes from that build's headers:

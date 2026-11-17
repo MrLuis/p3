@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Turns the runtime's LLVM IR into libpascalrt.ll, which pcc links into
+"""Turns the runtime's LLVM IR into libpascalrt.ll, which p3 links into
 optimized programs so that the runtime's small functions are inlined
 (optimization.md, item 3).
 
@@ -12,9 +12,9 @@ into one module by llvm-link. The output differs in that:
     the optimizer can inline or read them, and the program still links the
     library's copies (libpascalrt.a), which every call that is not inlined
     goes to;
-  - the target triple and data layout are gone (pcc sets its module's), and
+  - the target triple and data layout are gone (p3 sets its module's), and
     so are the module flags and the target-cpu/target-features attributes,
-    which would keep LLVM from inlining into pcc's functions.
+    which would keep LLVM from inlining into p3's functions.
 
 A variable of the runtime that is not a constant must have external
 linkage: a static one would get a second copy in the program, apart from

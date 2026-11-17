@@ -1,5 +1,5 @@
 ; Dynamic arrays (not in --mode=iso): `array of T` outside a parameter list.
-; RUN: not %pcc --mode=objfpc -ferror-limit=0 -c %S/Inputs/dynarrays/errors.pas -o %t.o 2>&1 | FileCheck %s
+; RUN: not %p3 --mode=objfpc -ferror-limit=0 -c %S/Inputs/dynarrays/errors.pas -o %t.o 2>&1 | FileCheck %s
 ; CHECK: errors.pas:4:17: error: the elements of a dynamic array cannot be files
 ; CHECK: errors.pas:5:19: error: the components of a file cannot be dynamic arrays
 ; CHECK: errors.pas:8:14: error: a variant part cannot contain dynamic arrays
@@ -22,12 +22,12 @@
 ; CHECK: errors.pas:33:9: error: a value of type 'integer' cannot be an element of a dynamic array of 'TI'
 ; CHECK: errors.pas:34:11: error: cannot write a value of type 'TI'
 ; CHECK-NOT: error:
-; RUN: not %pcc --mode=iso -c %S/Inputs/dynarrays/iso.pas -o %t.o 2>&1 | FileCheck --check-prefix=ISO %s
+; RUN: not %p3 --mode=iso -c %S/Inputs/dynarrays/iso.pas -o %t.o 2>&1 | FileCheck --check-prefix=ISO %s
 ; ISO: iso.pas:2:13: error: expected '[' after 'array'
-; RUN: %pcc --mode=tp --emit-parse-tree %S/Inputs/dynarrays/tree.pas | FileCheck --check-prefix=TREE %s
+; RUN: %p3 --mode=tp --emit-parse-tree %S/Inputs/dynarrays/tree.pas | FileCheck --check-prefix=TREE %s
 ; TREE:      DynArrayTypeSpec <3:8>
 ; TREE-NEXT:   NamedTypeSpec 'longint' <3:17>
 ; TREE:      DynArrayTypeSpec <6:6>
 ; TREE-NEXT:   DynArrayTypeSpec <6:15>
-; RUN: %pcc --mode=tp --emit-ast %S/Inputs/dynarrays/tree.pas 2>/dev/null | FileCheck --check-prefix=AST %s
+; RUN: %p3 --mode=tp --emit-ast %S/Inputs/dynarrays/tree.pas 2>/dev/null | FileCheck --check-prefix=AST %s
 ; AST:       VarDecl 'm' : array of array of byte <6:3>

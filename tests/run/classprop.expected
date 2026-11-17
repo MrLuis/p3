@@ -1,11 +1,11 @@
 SetBuild 5
 5 10 TRUE FALSE
-pcc compiler 12
+p3 compiler 11
 one []
 SetBuild 7
 7 7 14
-14 pcc compiler
-static: 7 14 pcc compiler
+14 p3 compiler
+static: 7 14 p3 compiler
 class: 7 14
-instance: 7 pcc compiler one
+instance: 7 p3 compiler one
 4 8 4 8

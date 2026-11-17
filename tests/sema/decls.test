@@ -1,5 +1,5 @@
 ; M7/M8: constants, types, arrays, records, strings.
-; RUN: not %pcc -ferror-limit=0 -c %S/Inputs/decls.pas -o %t.o 2>&1 | FileCheck %s
+; RUN: not %p3 -ferror-limit=0 -c %S/Inputs/decls.pas -o %t.o 2>&1 | FileCheck %s
 
 ; CHECK: decls.pas:4:7: error: constant expressions are a Turbo/Free Pascal extension; use --mode=tp
 ; CHECK: decls.pas:9:10: error: subrange lower bound 5 is greater than upper bound 1
@@ -26,5 +26,5 @@
 ; CHECK-NOT: error:
 
 ; Constant expressions are fine in TP mode.
-; RUN: not %pcc --mode=tp -ferror-limit=0 -c %S/Inputs/decls.pas -o %t.o 2>&1 | FileCheck --check-prefix=TP %s
+; RUN: not %p3 --mode=tp -ferror-limit=0 -c %S/Inputs/decls.pas -o %t.o 2>&1 | FileCheck --check-prefix=TP %s
 ; TP-NOT: constant expressions

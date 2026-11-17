@@ -17,11 +17,11 @@ if it exists), the self-hosted compiler is built at -O2 and timed
 compiling its own source to LLVM IR: the large, realistic case.
 
 Usage:
-  utils/bench.py --pcc build/bin/pcc [--base other/bin/pcc] [--fpc]
+  utils/bench.py --p3 build/bin/p3 [--base other/bin/p3] [--fpc]
       [--runs 3] [--configs O0,O2,O2-fast] [--only name,...]
       [--json out.json] [--update]
 
---base measures a second pcc (an older build) and prints how the first one
+--base measures a second p3 (an older build) and prints how the first one
 compares. --update rewrites the .expected files from the first
 configuration's output. Exit status 1 if a benchmark fails to build, run
 or give the expected output.
@@ -83,14 +83,14 @@ def measure(compile_cmd, exe, expected, runs, update, env=None):
     return {"run": run, "compile": ctime, "size": os.path.getsize(exe)}
 
 
-def bench_programs(label, pcc, configs, names, runs, work, update, env):
+def bench_programs(label, p3, configs, names, runs, work, update, env):
     results = {}
     for name in names:
         src = os.path.join(BENCH, name + ".pas")
         expected = os.path.join(BENCH, name + ".expected")
         for i, cfg in enumerate(configs):
             exe = os.path.join(work, "%s-%s-%s" % (label, name, cfg))
-            cmd = [pcc, "--no-project", "--mode=objfpc"] + CONFIGS[cfg] + [src, "-o", exe]
+            cmd = [p3, "--no-project", "--mode=objfpc"] + CONFIGS[cfg] + [src, "-o", exe]
             results[(name, cfg)] = measure(cmd, exe, expected, runs, update and i == 0, env)
             sys.stderr.write(".")
             sys.stderr.flush()
@@ -112,13 +112,13 @@ def bench_fpc(fpc, names, runs, work):
     return results
 
 
-def bench_selfhost(label, pcc, flags_file, runs, work, env):
+def bench_selfhost(label, p3, flags_file, runs, work, env):
     """Builds the self-hosted compiler at -O2 and times it compiling itself."""
     with open(flags_file) as f:
         flags = shlex.split(f.read())
-    src = os.path.join(ROOT, "selfhost", "pcc.pas")
+    src = os.path.join(ROOT, "selfhost", "p3.pas")
     exe = os.path.join(work, label + "-selfhost")
-    cmd = [pcc, "--no-project", "--mode=tp", "-O2"] + flags + \
+    cmd = [p3, "--no-project", "--mode=tp", "-O2"] + flags + \
           ["-I", os.path.join(ROOT, "selfhost"), src, "-o", exe]
     ctime, r = timed(cmd, env=env)
     if r.returncode != 0:
@@ -149,8 +149,8 @@ def fmt_time(res):
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
-    ap.add_argument("--pcc", required=True)
-    ap.add_argument("--base", help="a second pcc to compare with")
+    ap.add_argument("--p3", required=True)
+    ap.add_argument("--base", help="a second p3 to compare with")
     ap.add_argument("--fpc", action="store_true", help="also measure Free Pascal (-O2)")
     ap.add_argument("--runs", type=int, default=3)
     ap.add_argument("--configs", default="O0,O2,O2-fast")
@@ -173,23 +173,23 @@ def main():
     selfhost = not args.no_selfhost and os.path.exists(args.selfhost_flags) and \
         (not args.only or "selfhost" in args.only.split(","))
 
-    compilers = [("pcc", os.path.abspath(args.pcc))]
+    compilers = [("p3", os.path.abspath(args.p3))]
     if args.base:
         compilers.append(("base", os.path.abspath(args.base)))
-    work = tempfile.mkdtemp(prefix="pcc-bench-")
+    work = tempfile.mkdtemp(prefix="p3-bench-")
     results = {}
     failed = False
     try:
-        for label, pcc in compilers:
-            # Each pcc with the unit library and runtime installed next to it.
+        for label, p3 in compilers:
+            # Each p3 with the unit library and runtime installed next to it.
             env = dict(os.environ)
-            env.pop("PCC_UNIT_DIR", None)
-            env.pop("PCC_RUNTIME_LIB", None)
-            results[label] = bench_programs(label, pcc, configs, names, args.runs, work,
-                                            args.update and label == "pcc", env)
+            env.pop("P3_UNIT_DIR", None)
+            env.pop("P3_RUNTIME_LIB", None)
+            results[label] = bench_programs(label, p3, configs, names, args.runs, work,
+                                            args.update and label == "p3", env)
             if selfhost:
                 results[label][("selfhost", "O2")] = bench_selfhost(
-                    label, pcc, args.selfhost_flags, args.runs, work, env)
+                    label, p3, args.selfhost_flags, args.runs, work, env)
         if args.fpc:
             fpc = shutil.which("fpc")
             if not fpc:
@@ -205,7 +205,7 @@ def main():
     if "fpc" in results:
         cols.append(("fpc", "fpc"))
     print("Run time, seconds (best of %d)" % args.runs)
-    print("%-12s" % "" + "".join("%13s" % (cfg if label == "pcc" else label + " " + cfg
+    print("%-12s" % "" + "".join("%13s" % (cfg if label == "p3" else label + " " + cfg
                                              if label == "base" else "fpc -O2")
                                  for label, cfg in cols))
     rows = names + (["selfhost"] if selfhost else [])
@@ -225,12 +225,12 @@ def main():
         print("(selfhost: the self-hosted compiler, built at -O2, compiling itself to IR)")
 
     if args.base:
-        print("\npcc against base (run time; below 1.00 is faster)")
+        print("\np3 against base (run time; below 1.00 is faster)")
         print("%-12s" % "" + "".join("%10s" % cfg for cfg in configs))
         for name in rows:
             line = "%-12s" % name
             for cfg in configs:
-                a = results["pcc"].get((name, cfg))
+                a = results["p3"].get((name, cfg))
                 b = results["base"].get((name, cfg))
                 if not a or not b or "error" in a or "error" in b:
                     line += "%10s" % "-"
@@ -238,12 +238,12 @@ def main():
                     line += "%10.2f" % (a["run"] / b["run"])
             print(line)
 
-    print("\nCompile time, seconds, and executable size, KiB (pcc)")
+    print("\nCompile time, seconds, and executable size, KiB (p3)")
     print("%-12s" % "" + "".join("%18s" % cfg for cfg in configs))
     for name in rows:
         line = "%-12s" % name
         for cfg in configs:
-            res = results["pcc"].get((name, cfg))
+            res = results["p3"].get((name, cfg))
             if res is None or "error" in res:
                 line += "%18s" % "-"
             else:

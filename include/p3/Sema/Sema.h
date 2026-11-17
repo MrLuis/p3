@@ -1,0 +1,77 @@
+//===- Sema.h - Semantic analysis ---------------------------------*- C++ -*-===//
+//
+// Resolves names, computes and checks types, and annotates the AST
+// (Expr::setType, NameRefExpr::setDecl, ...). Code generation may assume a
+// program accepted by Sema is valid.
+//
+// M4 scope: predeclared types integer/boolean/char, constants
+// true/false/maxint, the procedures write/writeln/read/readln, the functions
+// abs/sqr/odd/ord/chr/succ/pred, program-level variables, assignment, and
+// the integer/boolean/char operators.
+//
+//===----------------------------------------------------------------------===//
+#ifndef P3_SEMA_SEMA_H
+#define P3_SEMA_SEMA_H
+
+#include "llvm/ADT/ArrayRef.h"
+#include "llvm/ADT/SmallVector.h"
+
+#include <cstdint>
+#include <functional>
+#include <vector>
+#include <string>
+
+namespace p3 {
+
+class ASTContext;
+class DiagnosticsEngine;
+class ProgramDecl;
+class RoutineDecl;
+class TypeDecl;
+class Decl;
+class UnitDecl;
+struct LangOptions;
+
+/// Largest value of the predeclared type `integer` (we lower it to i32).
+constexpr int64_t PascalMaxInt = 2147483647;
+
+class Sema {
+public:
+  /// Parses a generic routine's declaration again, for a specialization.
+  using ReparseFn = std::function<RoutineDecl *(const RoutineDecl *Generic)>;
+  /// Parses a generic type's declaration again, and the implementations of
+  /// its methods (into Methods), for a specialization.
+  using ReparseTypeFn = std::function<TypeDecl *(
+      const TypeDecl *Generic, llvm::SmallVectorImpl<Decl *> &Methods)>;
+
+private:
+  ASTContext &Ctx;
+  DiagnosticsEngine &Diags;
+  const LangOptions &LangOpts;
+  ReparseFn Reparse;
+  ReparseTypeFn ReparseType;
+
+public:
+  Sema(ASTContext &Ctx, DiagnosticsEngine &Diags, const LangOptions &LangOpts,
+       ReparseFn Reparse = nullptr, ReparseTypeFn ReparseType = nullptr)
+      : Ctx(Ctx), Diags(Diags), LangOpts(LangOpts), Reparse(std::move(Reparse)),
+        ReparseType(std::move(ReparseType)) {}
+
+  /// Returns true if the program is valid. Units must be in dependency
+  /// order (a unit before the units and program that use it).
+  /// SeparateUnits: the units were compiled separately; only their
+  /// interfaces are checked.
+  bool check(ProgramDecl &P, llvm::ArrayRef<UnitDecl *> Units = {},
+             bool SeparateUnits = false);
+  /// Checks unit U, compiled on its own; Deps (dependency order) are the
+  /// units it uses, directly or not, of which only the interfaces matter.
+  bool checkUnit(UnitDecl &U, llvm::ArrayRef<UnitDecl *> Deps);
+
+  /// The predeclared names (lower case) of the language mode, which
+  /// declared(NAME) in $IF sees.
+  std::vector<std::string> standardNames();
+};
+
+} // namespace p3
+
+#endif // P3_SEMA_SEMA_H

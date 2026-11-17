@@ -1,5 +1,5 @@
 ; Integer and real literals; '1..10' must not lex as a real.
-; RUN: %pcc --emit-tokens %S/Inputs/numbers.pas | FileCheck %s
+; RUN: %p3 --emit-tokens %S/Inputs/numbers.pas | FileCheck %s
 
 ; CHECK:      1:1 integer_literal '0' value=0
 ; CHECK-NEXT: 1:3 integer_literal '42' value=42

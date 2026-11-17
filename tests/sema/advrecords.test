@@ -1,6 +1,6 @@
 ; Advanced records (--mode=objfpc, {$modeswitch advancedrecords}): what is
 ; rejected in their declarations, implementations and uses.
-; RUN: not %pcc --mode=objfpc -ferror-limit=0 -c %S/Inputs/advrecords/syntax.pas -o %t.o 2>&1 | FileCheck --check-prefix=SYNTAX %s
+; RUN: not %p3 --mode=objfpc -ferror-limit=0 -c %S/Inputs/advrecords/syntax.pas -o %t.o 2>&1 | FileCheck --check-prefix=SYNTAX %s
 ; SYNTAX: syntax.pas:5:5: error: methods and properties in records need {$modeswitch advancedrecords}
 ; SYNTAX: syntax.pas:9:20: error: the class methods of a record must be 'static'
 ; SYNTAX: syntax.pas:10:15: error: only the class methods of a record can be 'static'
@@ -10,7 +10,7 @@
 ; SYNTAX: syntax.pas:24:11: error: class operators can only be declared in records
 ; SYNTAX-NOT: error:
 
-; RUN: not %pcc --mode=objfpc -ferror-limit=0 -c %S/Inputs/advrecords/errors.pas -o %t.o 2>&1 | FileCheck %s
+; RUN: not %p3 --mode=objfpc -ferror-limit=0 -c %S/Inputs/advrecords/errors.pas -o %t.o 2>&1 | FileCheck %s
 ; CHECK: errors.pas:11:17: error: a record's constructor needs parameters
 ; CHECK: errors.pas:12:15: error: the methods of a record cannot be 'virtual', 'override' or 'abstract'
 ; CHECK: errors.pas:19:20: error: 'operator -' takes one or two parameters

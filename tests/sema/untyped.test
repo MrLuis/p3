@@ -1,7 +1,7 @@
 ; Untyped parameters (Turbo/FPC  var x;  const x): only typecasts, @x, and
 ; untyped parameters (also move and fillchar's) can use them; arguments must
 ; be variables; typecasts of const ones are read-only. Not in ISO Pascal.
-; RUN: not %pcc --mode=tp -ferror-limit=0 -c %S/Inputs/untyped/errors.pas -o %t.o 2>&1 | FileCheck %s
+; RUN: not %p3 --mode=tp -ferror-limit=0 -c %S/Inputs/untyped/errors.pas -o %t.o 2>&1 | FileCheck %s
 ; CHECK: errors.pas:4:11: error: 'x' is an untyped parameter: use a typecast such as longint(x), its address, or pass it to an untyped parameter
 ; CHECK: errors.pas:8:3: error: cannot assign to untyped parameter 'x'; assign to a typecast such as longint(x)
 ; CHECK: errors.pas:13:8: error: 'x' is an untyped parameter
@@ -16,17 +16,17 @@
 ; CHECK: errors.pas:44:13: error: argument for untyped parameter 'x' must be a variable
 ; CHECK-NOT: error:
 
-; RUN: not %pcc --mode=iso -c %S/Inputs/untyped/iso.pas -o %t.o 2>&1 | FileCheck --check-prefix=ISO %s
+; RUN: not %p3 --mode=iso -c %S/Inputs/untyped/iso.pas -o %t.o 2>&1 | FileCheck --check-prefix=ISO %s
 ; ISO: iso.pas:2:18: error: expected ':' after parameter name
 
 ; The dumps, and what the code passes: addresses.
-; RUN: %pcc --mode=objfpc --emit-ast %S/../run/untyped.pas | FileCheck --check-prefix=AST %s
+; RUN: %p3 --mode=objfpc --emit-ast %S/../run/untyped.pas | FileCheck --check-prefix=AST %s
 ; AST: ParamDecl const 'a' : untyped
 ; AST: ParamDecl var 'x' : untyped
-; RUN: %pcc --mode=objfpc --emit-parse-tree %S/../run/untyped.pas | FileCheck --check-prefix=TREE %s
+; RUN: %p3 --mode=objfpc --emit-parse-tree %S/../run/untyped.pas | FileCheck --check-prefix=TREE %s
 ; TREE:      ParamDecl const 'data' <22:27>
 ; TREE-NEXT:   UntypedTypeSpec <22:27>
-; RUN: %pcc --mode=objfpc --emit-llvm %S/../run/untyped.pas -o - | FileCheck --check-prefix=IR %s
+; RUN: %p3 --mode=objfpc --emit-llvm %S/../run/untyped.pas -o - | FileCheck --check-prefix=IR %s
 ; IR: declare i32 @memcmp(ptr, ptr, i64)
 ; IR: call void @pas.setlong(ptr null, ptr @pas.i, i32 42)
 ; IR: define internal void @pas.setlong(ptr %link, ptr %x, i32 %v)

@@ -1,13 +1,13 @@
 ; {$modeswitch}: in objfpc mode, result and out turned off (Result and out
 ; are then ordinary names), and class and exceptions (already on)
-; accepted; output as Free Pascal's. Switches that pcc's mode decides or
-; always has cannot be changed, those of features pcc lacks cannot be turned
+; accepted; output as Free Pascal's. Switches that p3's mode decides or
+; always has cannot be changed, those of features p3 lacks cannot be turned
 ; on, and unknown names and forms are reported (warnings, as Free Pascal's).
 ; RUN: rm -rf %t && mkdir -p %t
-; RUN: %pcc --mode=objfpc %S/Inputs/modeswitch/resultoff.pas -o %t/resultoff
+; RUN: %p3 --mode=objfpc %S/Inputs/modeswitch/resultoff.pas -o %t/resultoff
 ; RUN: %t/resultoff | FileCheck --check-prefix=OFF %s
 ; OFF: 15
-; RUN: %pcc --mode=tp -c %S/Inputs/modeswitch/warnings.pas -o %t/w.o 2>&1 | FileCheck --check-prefix=TP %s
+; RUN: %p3 --mode=tp -c %S/Inputs/modeswitch/warnings.pas -o %t/w.o 2>&1 | FileCheck --check-prefix=TP %s
 ; TP: warnings.pas:2:1: warning: mode switch 'class' cannot be turned on in --mode=tp; use --mode=objfpc (ignored)
 ; TP: warnings.pas:3:1: warning: mode switch 'cvar' cannot be turned off; ignored
 ; TP: warnings.pas:4:1: warning: mode switch 'nestedcomments' is not supported; ignored
@@ -15,5 +15,5 @@
 ; TP: warnings.pas:6:1: warning: unknown mode switch 'bogus'; ignored
 ; TP: warnings.pas:7:1: warning: expected {$modeswitch NAME} (with +, -, ON or OFF); ignored
 ; TP-NOT: warning:
-; RUN: %pcc --mode=objfpc -c %S/Inputs/modeswitch/warnings.pas -o %t/w2.o 2>&1 | FileCheck --check-prefix=OBJFPC %s
+; RUN: %p3 --mode=objfpc -c %S/Inputs/modeswitch/warnings.pas -o %t/w2.o 2>&1 | FileCheck --check-prefix=OBJFPC %s
 ; OBJFPC: warnings.pas:8:1: warning: mode switch 'objpas' cannot be turned off in --mode=objfpc; use --mode=tp (ignored)

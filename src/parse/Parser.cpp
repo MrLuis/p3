@@ -1,9 +1,9 @@
-#include "pcc/Parse/Parser.h"
-#include "pcc/AST/ASTContext.h"
-#include "pcc/Basic/Diagnostics.h"
-#include "pcc/Lexer/Lexer.h"
+#include "p3/Parse/Parser.h"
+#include "p3/AST/ASTContext.h"
+#include "p3/Basic/Diagnostics.h"
+#include "p3/Lexer/Lexer.h"
 
-using namespace pcc;
+using namespace p3;
 
 Parser::Parser(Lexer &Lex, DiagnosticsEngine &Diags, ASTContext &Ctx)
     : Lex(Lex), Diags(Diags), Ctx(Ctx), LangOpts(Lex.getLangOpts()) {

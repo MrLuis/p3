@@ -3,16 +3,16 @@
 ; levels, are errors (as in Free Pascal); {$interfaces} and {$inline} are
 ; local switches too.
 ; RUN: rm -rf %t && mkdir -p %t
-; RUN: %pcc --mode=tp %S/Inputs/push-pop/default.pas -o %t/default && not %t/default 2>&1 | FileCheck --check-prefix=DEFAULT %s
+; RUN: %p3 --mode=tp %S/Inputs/push-pop/default.pas -o %t/default && not %t/default 2>&1 | FileCheck --check-prefix=DEFAULT %s
 ; DEFAULT: Runtime error: value out of range at {{.*}}default.pas:8:8
-; RUN: not %pcc --mode=tp -c %S/Inputs/push-pop/pop.pas -o %t/pop.o 2>&1 | FileCheck --check-prefix=POP %s
+; RUN: not %p3 --mode=tp -c %S/Inputs/push-pop/pop.pas -o %t/pop.o 2>&1 | FileCheck --check-prefix=POP %s
 ; POP: pop.pas:2:1: error: {$pop} without a preceding {$push}
-; RUN: not %pcc --mode=tp -c %S/Inputs/push-pop/deep.pas -o %t/deep.o 2>&1 | FileCheck --check-prefix=DEEP %s
+; RUN: not %p3 --mode=tp -c %S/Inputs/push-pop/deep.pas -o %t/deep.o 2>&1 | FileCheck --check-prefix=DEEP %s
 ; DEEP: deep.pas:3:1: error: too many levels of {$push} (at most 21)
 ; DEEP-NOT: error:
-; RUN: %pcc --mode=objfpc --emit-ast %S/Inputs/push-pop/kinds.pas | FileCheck --check-prefix=AST %s
+; RUN: %p3 --mode=objfpc --emit-ast %S/Inputs/push-pop/kinds.pas | FileCheck --check-prefix=AST %s
 ; AST: TypeDecl 'icomfoo' = interface(IUnknown) <
 ; AST: TypeDecl 'icorbafoo' = interface <
-; RUN: %pcc --mode=objfpc --emit-llvm %S/Inputs/push-pop/kinds.pas -o - | FileCheck --check-prefix=IR %s
+; RUN: %p3 --mode=objfpc --emit-llvm %S/Inputs/push-pop/kinds.pas -o - | FileCheck --check-prefix=IR %s
 ; IR: define internal {{.*}} @pas.twice({{.*}}) {{.*}}#[[A:[0-9]+]]
 ; IR: attributes #[[A]] = { inlinehint

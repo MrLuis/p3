@@ -3,7 +3,7 @@
 ; its parent's frame as a hidden first argument (the static link) and
 ; reaches the parent's variables through it. A routine with nested routines
 ; keeps its own link in its frame (field 0) for them to follow.
-; RUN: %pcc --emit-llvm %S/Inputs/nested.pas -o - | FileCheck %s
+; RUN: %p3 --emit-llvm %S/Inputs/nested.pas -o - | FileCheck %s
 
 ; CHECK-DAG: %frame.outer = type { i32, i32 }
 ; CHECK-DAG: %frame.outer.mid = type { ptr }
@@ -49,14 +49,14 @@
 
 ; Arrays, records and strings start zeroed at -O0, or with -fzero-init; a
 ; string always starts empty.
-; RUN: %pcc --mode=tp --emit-llvm %S/Inputs/zeroinit.pas -o - | FileCheck --check-prefix=ZERO %s
-; RUN: %pcc --mode=tp --emit-llvm -fno-zero-init -fzero-init %S/Inputs/zeroinit.pas -o - | FileCheck --check-prefix=ZERO %s
+; RUN: %p3 --mode=tp --emit-llvm %S/Inputs/zeroinit.pas -o - | FileCheck --check-prefix=ZERO %s
+; RUN: %p3 --mode=tp --emit-llvm -fno-zero-init -fzero-init %S/Inputs/zeroinit.pas -o - | FileCheck --check-prefix=ZERO %s
 ; ZERO: define internal void @pas.p(
 ; ZERO-DAG: call void @llvm.memset.p0.i64(ptr align 4 %a, i8 0, i64 400, i1 false)
 ; ZERO-DAG: call void @llvm.memset.p0.i64(ptr align 1 %s, i8 0, i64 256, i1 false)
 ; ZERO-DAG: store i32 0, ptr %n
-; RUN: %pcc --mode=tp --emit-llvm -fno-zero-init %S/Inputs/zeroinit.pas -o - | FileCheck --check-prefix=NOZERO %s
-; RUN: %pcc --mode=tp --emit-llvm -O1 -fno-inline-runtime -fzero-init -fno-zero-init %S/Inputs/zeroinit.pas -o - | FileCheck --check-prefix=NOZERO-O1 %s
+; RUN: %p3 --mode=tp --emit-llvm -fno-zero-init %S/Inputs/zeroinit.pas -o - | FileCheck --check-prefix=NOZERO %s
+; RUN: %p3 --mode=tp --emit-llvm -O1 -fno-inline-runtime -fzero-init -fno-zero-init %S/Inputs/zeroinit.pas -o - | FileCheck --check-prefix=NOZERO-O1 %s
 ; NOZERO: define internal void @pas.p(
 ; NOZERO-NOT: llvm.memset
 ; NOZERO-DAG: store i8 0, ptr %s
@@ -65,6 +65,6 @@
 ; NOZERO-O1-NOT: llvm.memset
 
 ; At -O2 the frames disappear.
-; RUN: %pcc --emit-llvm -O2 %S/Inputs/nested.pas -o - | FileCheck --check-prefix=O2 %s
+; RUN: %p3 --emit-llvm -O2 %S/Inputs/nested.pas -o - | FileCheck --check-prefix=O2 %s
 ; O2: define {{.*}}i32 @main(
 ; O2-NOT: alloca

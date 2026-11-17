@@ -3,11 +3,11 @@
   a parameter that is not given takes its default value, wherever it is in
   the list. Among overloaded routines that fit equally well, the one that
   leaves fewer parameters to their default values is called.
-  RUN: %pcc --mode=objfpc %s -o %t
+  RUN: %p3 --mode=objfpc %s -o %t
   RUN: %t | diff - %S/namedargs.expected
-  RUN: %pcc --mode=objfpc -O2 %s -o %t.fast
+  RUN: %p3 --mode=objfpc -O2 %s -o %t.fast
   RUN: %t.fast | diff - %S/namedargs.expected
-  RUN: %pcc --mode=objfpc -g %s -o %t.dbg
+  RUN: %p3 --mode=objfpc -g %s -o %t.dbg
   RUN: %t.dbg | diff - %S/namedargs.expected
 }
 {$H+}

@@ -3,9 +3,9 @@
   Pascal's RTL (Class Function TORDINALHELPER.Parse(...): TORDINALTYPE;
   inline; static;); on a plain routine it has no effect. Output is
   identical to Free Pascal 3.2.2's (fpc -Mobjfpc).
-  RUN: %pcc --mode=objfpc %s -o %t
+  RUN: %p3 --mode=objfpc %s -o %t
   RUN: %t | diff - %S/static-impl.expected
-  RUN: %pcc --mode=objfpc -O2 %s -o %t.O2
+  RUN: %p3 --mode=objfpc -O2 %s -o %t.O2
   RUN: %t.O2 | diff - %S/static-impl.expected
 }
 program staticimpl;

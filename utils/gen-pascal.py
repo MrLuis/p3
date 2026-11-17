@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Generates random valid Pascal programs for differential testing of the
-two compilers' code generation (SELFHOST.md S10): the C++ pcc and the
+two compilers' code generation (SELFHOST.md S10): the C++ p3 and the
 self-hosted one must write identical --emit-llvm output for each.
 
   utils/gen-pascal.py [--mode iso|tp] [--seed N] [--count N] --out DIR

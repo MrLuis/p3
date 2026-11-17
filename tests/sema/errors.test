@@ -1,5 +1,5 @@
 ; Semantic checks available before M4 (scopes and types arrive in M4).
-; RUN: not %pcc -c %S/Inputs/errors.pas -o %t.o 2>&1 | FileCheck %s
+; RUN: not %p3 -c %S/Inputs/errors.pas -o %t.o 2>&1 | FileCheck %s
 ; CHECK: errors.pas:1:32: error: duplicate program parameter 'output'
 ; CHECK: errors.pas:1:18: note: previous occurrence is here
 ; CHECK: errors.pas:3:3: error: use of undeclared identifier 'foo'

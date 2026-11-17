@@ -1,4 +1,4 @@
-{ pcc's Classes: TList and TStringList with Free Pascal's names and results.
+{ p3's Classes: TList and TStringList with Free Pascal's names and results.
   Needs --mode=objfpc. }
 unit classes;
 
@@ -6,7 +6,7 @@ unit classes;
 
 interface
 
-{$IFNDEF PCC_OBJFPC}
+{$IFNDEF P3_OBJFPC}
 uses classes_needs_mode_objfpc;
 {$ELSE}
 
@@ -206,7 +206,7 @@ type
 
 implementation
 
-{$IFDEF PCC_OBJFPC}
+{$IFDEF P3_OBJFPC}
 
 uses sysutils;
 

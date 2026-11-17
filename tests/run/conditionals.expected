@@ -1,5 +1,5 @@
 mode debug, level 1, level2 gone TRUE
-compiled by pcc
+compiled by p3
 in tp mode
 extra was defined on the command line
 1: debug, elseif true

@@ -1,8 +1,8 @@
 { for ... in in --mode=tp (no classes): arrays, strings, sets and ordinal
   types. Output is identical to Free Pascal 3.2.2's (fpc -Mtp).
-  RUN: %pcc --mode=tp %s -o %t
+  RUN: %p3 --mode=tp %s -o %t
   RUN: %t | diff - %S/forin-tp.expected
-  RUN: %pcc --mode=tp -O2 %s -o %t.O2
+  RUN: %p3 --mode=tp -O2 %s -o %t.O2
   RUN: %t.O2 | diff - %S/forin-tp.expected
 }
 program forintp;

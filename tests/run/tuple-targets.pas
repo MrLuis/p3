@@ -2,7 +2,7 @@
   property, an array element, a field through with); a tuple written out
   picks an overload by its own element types; nil, [] and @x take the
   element types of the tuple wanted.
-  RUN: %pcc --mode=objfpc %s -o %t
+  RUN: %p3 --mode=objfpc %s -o %t
   RUN: %t | diff - %S/tuple-targets.expected
 }
 {$H+}

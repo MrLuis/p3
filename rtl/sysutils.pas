@@ -1,4 +1,4 @@
-{ pcc's SysUtils: Free Pascal's names and results, on ansistrings. Written
+{ p3's SysUtils: Free Pascal's names and results, on ansistrings. Written
   in the Turbo dialect so that every mode with units can use it. In --mode=objfpc conversion failures
   raise EConvertError (predeclared, as Exception is); in --mode=tp, where
   there are no exceptions, they are runtime errors. The two-parameter
@@ -39,12 +39,12 @@ type
 
 { integers }
 function IntToStr(value: int64): string;
-{$IFDEF PCC_OBJFPC}
+{$IFDEF P3_OBJFPC}
 function IntToStr(value: qword): string;
 {$ENDIF}
 function UIntToStr(value: qword): string;
 function IntToHex(value: int64; digits: longint): string;
-{$IFDEF PCC_OBJFPC}
+{$IFDEF P3_OBJFPC}
 function IntToHex(value: longint; digits: longint): string;
 {$ENDIF}
 function StrToInt(const s: string): longint;
@@ -65,7 +65,7 @@ function TryStrToFloat(const s: string; var value: double): boolean;
 
 { booleans }
 function BoolToStr(b: boolean): string;
-{$IFDEF PCC_OBJFPC}
+{$IFDEF P3_OBJFPC}
 function BoolToStr(b, useBoolStrs: boolean): string;
 {$ENDIF}
 
@@ -141,7 +141,7 @@ function sys_tick_ms: int64; cdecl; external name '__pas_sys_tick_ms';
 procedure sys_sleep(ms: longint); cdecl; external name '__pas_sys_sleep';
 
 procedure convertError(const msg: string);
-{$IFDEF PCC_OBJFPC}
+{$IFDEF P3_OBJFPC}
 begin
   raise EConvertError.Create(msg);
 end;
@@ -184,7 +184,7 @@ begin
   UIntToStr := r;
 end;
 
-{$IFDEF PCC_OBJFPC}
+{$IFDEF P3_OBJFPC}
 function IntToStr(value: qword): string;
 begin
   IntToStr := UIntToStr(value);
@@ -210,7 +210,7 @@ begin
   IntToHex := r;
 end;
 
-{$IFDEF PCC_OBJFPC}
+{$IFDEF P3_OBJFPC}
 function IntToHex(value: longint; digits: longint): string;
 var
   v: int64;
@@ -562,7 +562,7 @@ begin
     BoolToStr := '0';
 end;
 
-{$IFDEF PCC_OBJFPC}
+{$IFDEF P3_OBJFPC}
 function BoolToStr(b, useBoolStrs: boolean): string;
 begin
   if not useBoolStrs then

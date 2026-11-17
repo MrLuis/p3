@@ -1,9 +1,9 @@
 #include "UnitTest.h"
 
-#include "pcc/Basic/Diagnostics.h"
-#include "pcc/Basic/SourceManager.h"
+#include "p3/Basic/Diagnostics.h"
+#include "p3/Basic/SourceManager.h"
 
-using namespace pcc;
+using namespace p3;
 
 namespace {
 const char *Src = "program hello;\n"
@@ -94,8 +94,8 @@ TEST(Diagnostics, NoLocation) {
 
   D.error("no input file");
   D.fatal("giving up");
-  EXPECT_EQ(Out, std::string("pcc: error: no input file\n"
-                             "pcc: fatal error: giving up\n"));
+  EXPECT_EQ(Out, std::string("p3: error: no input file\n"
+                             "p3: fatal error: giving up\n"));
   EXPECT_TRUE(D.shouldStop());
 }
 
@@ -107,7 +107,7 @@ TEST(Diagnostics, WarningsAsErrors) {
   D.setWarningsAsErrors(true);
 
   D.warning("unused variable");
-  EXPECT_EQ(Out, std::string("pcc: error: unused variable\n"));
+  EXPECT_EQ(Out, std::string("p3: error: unused variable\n"));
   EXPECT_EQ(D.getNumErrors(), 1u);
   EXPECT_EQ(D.getNumWarnings(), 0u);
 }
@@ -126,10 +126,10 @@ TEST(Diagnostics, ErrorLimitStopsAndSuppressesNotes) {
   D.note("n3");  // attached to a suppressed error -> dropped
   D.error("e4"); // after stop -> dropped
   EXPECT_EQ(Out, std::string(
-                     "pcc: error: e1\n"
-                     "pcc: note: n1\n"
-                     "pcc: error: e2\n"
-                     "pcc: fatal error: too many errors emitted, stopping "
+                     "p3: error: e1\n"
+                     "p3: note: n1\n"
+                     "p3: error: e2\n"
+                     "p3: fatal error: too many errors emitted, stopping "
                      "now [-ferror-limit=]\n"));
   EXPECT_EQ(D.getNumErrors(), 2u);
   EXPECT_TRUE(D.shouldStop());

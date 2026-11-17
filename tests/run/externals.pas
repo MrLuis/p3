@@ -4,10 +4,10 @@
   routines, external or not, as procedural values. C's printf writes to the
   same stdout as writeln. The output is identical to Free Pascal 3.2.2's
   (fpc -Mobjfpc), but for the lines C prints, which FPC does not flush.
-  RUN: %pcc --mode=objfpc %s -o %t
+  RUN: %p3 --mode=objfpc %s -o %t
   RUN: %t > %t.out
   RUN: diff %S/externals.expected %t.out
-  RUN: %pcc --mode=objfpc -O2 %s -o %t.O2
+  RUN: %p3 --mode=objfpc -O2 %s -o %t.O2
   RUN: %t.O2 > %t.O2.out
   RUN: diff %S/externals.expected %t.O2.out
 }

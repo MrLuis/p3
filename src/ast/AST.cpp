@@ -1,9 +1,9 @@
-#include "pcc/AST/AST.h"
-#include "pcc/AST/Type.h"
+#include "p3/AST/AST.h"
+#include "p3/AST/Type.h"
 
-using namespace pcc;
+using namespace p3;
 
-const char *pcc::getOpSpelling(UnaryOp Op) {
+const char *p3::getOpSpelling(UnaryOp Op) {
   switch (Op) {
   case UnaryOp::Plus:  return "+";
   case UnaryOp::Minus: return "-";
@@ -12,7 +12,7 @@ const char *pcc::getOpSpelling(UnaryOp Op) {
   return "?";
 }
 
-const char *pcc::getOpSpelling(BinaryOp Op) {
+const char *p3::getOpSpelling(BinaryOp Op) {
   switch (Op) {
   case BinaryOp::Add:     return "+";
   case BinaryOp::Sub:     return "-";
@@ -38,7 +38,7 @@ const char *pcc::getOpSpelling(BinaryOp Op) {
   return "?";
 }
 
-bool pcc::isRelational(BinaryOp Op) {
+bool p3::isRelational(BinaryOp Op) {
   switch (Op) {
   case BinaryOp::Eq: case BinaryOp::Ne: case BinaryOp::Lt: case BinaryOp::Le:
   case BinaryOp::Gt: case BinaryOp::Ge: case BinaryOp::In: case BinaryOp::Is:
@@ -80,7 +80,7 @@ const char *Decl::getKindName() const {
   return "declaration";
 }
 
-bool pcc::isBitPackedComponent(Expr *E) {
+bool p3::isBitPackedComponent(Expr *E) {
   if (auto *I = llvm::dyn_cast<IndexExpr>(E)) {
     auto *A = I->getProperty() || !I->getBase()->getType()
                   ? nullptr

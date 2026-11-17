@@ -4,7 +4,7 @@
 ; integers, seek/filepos not on text files, the name a string, and the
 ; arguments of the others. AssignFile is objfpc only; ISO Pascal has no
 ; untyped files.
-; RUN: not %pcc --mode=tp -ferror-limit=0 -c %S/Inputs/files-turbo/errors.pas -o %t.o 2>&1 | FileCheck %s
+; RUN: not %p3 --mode=tp -ferror-limit=0 -c %S/Inputs/files-turbo/errors.pas -o %t.o 2>&1 | FileCheck %s
 ; CHECK: errors.pas:9:3: error: 'write' cannot be used on an untyped file; use 'blockwrite'
 ; CHECK: errors.pas:10:3: error: 'read' cannot be used on an untyped file; use 'blockread'
 ; CHECK: errors.pas:11:8: error: an untyped file has no buffer variable
@@ -20,7 +20,7 @@
 ; CHECK: errors.pas:21:12: error: the record size of 'reset' must be an integer, not 'char'
 ; CHECK: errors.pas:22:9: error: 'close' expects a file variable, not a value of type 'integer'
 ; CHECK-NOT: error:
-; RUN: not %pcc --mode=tp -c %S/Inputs/files-turbo/tp.pas -o %t.o 2>&1 | FileCheck --check-prefix=TP %s
+; RUN: not %p3 --mode=tp -c %S/Inputs/files-turbo/tp.pas -o %t.o 2>&1 | FileCheck --check-prefix=TP %s
 ; TP: tp.pas:3:7: error: use of undeclared identifier 'AssignFile'
-; RUN: not %pcc -c %S/Inputs/files-turbo/iso.pas -o %t.o 2>&1 | FileCheck --check-prefix=ISO %s
+; RUN: not %p3 -c %S/Inputs/files-turbo/iso.pas -o %t.o 2>&1 | FileCheck --check-prefix=ISO %s
 ; ISO: iso.pas:2:12: error: expected 'of' after 'file'

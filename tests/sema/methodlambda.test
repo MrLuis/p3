@@ -2,7 +2,7 @@
 ; has a Self of its own, the object of the method it is written in (that
 ; method must be an object's), or nil outside methods. It uses nothing of
 ; the routines around it.
-; RUN: not %pcc --mode=objfpc -ferror-limit=0 -c %S/Inputs/methodlambda/errors.pas -o %t.o 2>&1 | FileCheck %s
+; RUN: not %p3 --mode=objfpc -ferror-limit=0 -c %S/Inputs/methodlambda/errors.pas -o %t.o 2>&1 | FileCheck %s
 ; CHECK: errors.pas:21:8: error: a lambda can be a method pointer ('of object') only in an object's method, whose Self is its object, or outside methods (its object is nil)
 ; CHECK: errors.pas:30:27: error: this method-pointer lambda uses 'k' of the routine around it; it can use only its object's members, its parameters and what is declared at program or unit level
 ; CHECK: errors.pas:31:27: error: this method-pointer lambda uses 'local' of the routine around it; it can use only its object's members, its parameters and what is declared at program or unit level
@@ -12,14 +12,14 @@
 ; CHECK: errors.pas:49:23: error: use of undeclared identifier 'Self'
 ; CHECK-NOT: error:
 ;
-; RUN: %pcc --mode=objfpc --emit-ast %S/Inputs/methodlambda/ast.pas -o - | FileCheck --check-prefix=AST %s
+; RUN: %p3 --mode=objfpc --emit-ast %S/Inputs/methodlambda/ast.pas -o - | FileCheck --check-prefix=AST %s
 ; AST: FunctionDecl '$lambda1' : integer <12:8>
 ; AST: NameRefExpr 'k' field (self) : integer <12:27>
 ; AST: AddrOfExpr : function(integer): integer of object <12:8>
 ;
 ; The code: the lambda takes Self after the static link, as a method does;
 ; its value is {code, the Self where it is made}.
-; RUN: %pcc --mode=objfpc --emit-llvm %S/Inputs/methodlambda/ast.pas -o %t.ll
+; RUN: %p3 --mode=objfpc --emit-llvm %S/Inputs/methodlambda/ast.pas -o %t.ll
 ; RUN: FileCheck --check-prefix=IR %s < %t.ll
 ; RUN: opt -passes=verify -disable-output %t.ll
 ; IR-LABEL: define internal void @pas.tthing.init(ptr %link, ptr %self)

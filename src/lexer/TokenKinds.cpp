@@ -1,20 +1,20 @@
-#include "pcc/Lexer/TokenKinds.h"
-#include "pcc/Basic/LangOptions.h"
+#include "p3/Lexer/TokenKinds.h"
+#include "p3/Basic/LangOptions.h"
 
 #include "llvm/ADT/StringMap.h"
 
-using namespace pcc;
+using namespace p3;
 
 static const char *const TokNames[] = {
 #define TOK(ID) #ID,
-#include "pcc/Lexer/TokenKinds.def"
+#include "p3/Lexer/TokenKinds.def"
 };
 
 static const char *const TokSpellings[] = {
 #define TOK(ID) nullptr,
 #define PUNCT(ID, SP) SP,
 #define KEYWORD(ID, SP, FLAGS) SP,
-#include "pcc/Lexer/TokenKinds.def"
+#include "p3/Lexer/TokenKinds.def"
 };
 
 const char *tok::getTokenName(TokenKind K) {
@@ -28,7 +28,7 @@ const char *tok::getSpelling(TokenKind K) {
 bool tok::isKeyword(TokenKind K) {
   switch (K) {
 #define KEYWORD(ID, SP, FLAGS) case ID:
-#include "pcc/Lexer/TokenKinds.def"
+#include "p3/Lexer/TokenKinds.def"
     return true;
   default:
     return false;
@@ -38,7 +38,7 @@ bool tok::isKeyword(TokenKind K) {
 bool tok::isPunctuator(TokenKind K) {
   switch (K) {
 #define PUNCT(ID, SP) case ID:
-#include "pcc/Lexer/TokenKinds.def"
+#include "p3/Lexer/TokenKinds.def"
     return true;
   default:
     return false;
@@ -60,7 +60,7 @@ const llvm::StringMap<KeywordInfo> &keywordTable() {
     using namespace tok;
     llvm::StringMap<KeywordInfo> M;
 #define KEYWORD(ID, SP, FLAGS) M[SP] = {ID, FLAGS};
-#include "pcc/Lexer/TokenKinds.def"
+#include "p3/Lexer/TokenKinds.def"
     return M;
   }();
   return Table;

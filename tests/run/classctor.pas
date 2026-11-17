@@ -7,7 +7,7 @@
   constructor may share its name with a constructor (Create). Up to the
   class destructors, output is identical to Free Pascal 3.2.2's (fpc
   -Mobjfpc), whose own output file is already closed when they run.
-  RUN: %pcc --mode=objfpc %s -o %t
+  RUN: %p3 --mode=objfpc %s -o %t
   RUN: not %t > %t.out
   RUN: diff %t.out %S/classctor.expected
 }

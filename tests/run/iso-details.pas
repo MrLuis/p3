@@ -2,7 +2,7 @@
   mixed comment delimiters, pointer binding to the current scope, dispose of
   an expression, new/dispose with variant selectors, arrays and records of
   files.
-  RUN: %pcc %s -o %t
+  RUN: %p3 %s -o %t
   RUN: %t > %t.out
   RUN: diff %S/iso-details.expected %t.out
 }

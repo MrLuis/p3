@@ -1,8 +1,8 @@
 ; TGUID typed constants: strings that are not '{XXXXXXXX-XXXX-XXXX-XXXX-
 ; XXXXXXXXXXXX}' or '' (as Free Pascal's "Improper GUID syntax"), and values
 ; that are not strings; DWord's range. The same in tp and objfpc.
-; RUN: not %pcc --mode=tp -ferror-limit=0 -c %S/Inputs/guid-consts/errors.pas -o %t.o 2>&1 | FileCheck %s
-; RUN: not %pcc --mode=objfpc -ferror-limit=0 -c %S/Inputs/guid-consts/errors.pas -o %t.o 2>&1 | FileCheck %s
+; RUN: not %p3 --mode=tp -ferror-limit=0 -c %S/Inputs/guid-consts/errors.pas -o %t.o 2>&1 | FileCheck %s
+; RUN: not %p3 --mode=objfpc -ferror-limit=0 -c %S/Inputs/guid-consts/errors.pas -o %t.o 2>&1 | FileCheck %s
 ; CHECK: errors.pas:4:18: error: improper GUID syntax: expected '{XXXXXXXX-XXXX-XXXX-XXXX-XXXXXXXXXXXX}' (hexadecimal digits) or ''
 ; CHECK: errors.pas:5:21: error: improper GUID syntax
 ; CHECK: errors.pas:6:19: error: improper GUID syntax

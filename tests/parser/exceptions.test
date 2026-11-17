@@ -1,12 +1,12 @@
 ; Exceptions (--mode=objfpc): the parse tree and the checked tree of try
 ; and raise statements, and syntax errors.
 ; `uses sysutils` without the library: the dumps show only this program.
-; RUN: env PCC_UNIT_DIR=%t.nolib %pcc --mode=objfpc --emit-parse-tree %S/Inputs/exceptions.pas -o %t.tree
+; RUN: env P3_UNIT_DIR=%t.nolib %p3 --mode=objfpc --emit-parse-tree %S/Inputs/exceptions.pas -o %t.tree
 ; RUN: diff %S/Inputs/exceptions.tree %t.tree
-; RUN: env PCC_UNIT_DIR=%t.nolib %pcc --mode=objfpc --emit-ast %S/Inputs/exceptions.pas -o %t.ast
+; RUN: env P3_UNIT_DIR=%t.nolib %p3 --mode=objfpc --emit-ast %S/Inputs/exceptions.pas -o %t.ast
 ; RUN: diff %S/Inputs/exceptions.ast %t.ast
 
-; RUN: not %pcc --mode=objfpc -ferror-limit=0 --emit-parse-tree %S/Inputs/exception-syntax.pas 2>&1 >/dev/null | FileCheck --check-prefix=SYNTAX %s
+; RUN: not %p3 --mode=objfpc -ferror-limit=0 --emit-parse-tree %S/Inputs/exception-syntax.pas 2>&1 >/dev/null | FileCheck --check-prefix=SYNTAX %s
 ; SYNTAX: exception-syntax.pas:5:3: error: expected 'except' or 'finally'
 ; SYNTAX-NEXT: end;
 ; SYNTAX: exception-syntax.pas:3:3: note: to match this 'try'

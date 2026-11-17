@@ -4,7 +4,7 @@
 ; destructor's exception aside, __pas_owned_done raises it unless one is
 ; already leaving the routine (state 1). Assigning to an owned variable
 ; frees the object it had (__pas_owned_set); move loads it and stores nil.
-; RUN: %pcc --mode=objfpc --emit-llvm %S/Inputs/owned.pas -o %t.ll
+; RUN: %p3 --mode=objfpc --emit-llvm %S/Inputs/owned.pas -o %t.ll
 ; RUN: FileCheck %s < %t.ll
 ; RUN: opt -passes=verify -disable-output %t.ll
 

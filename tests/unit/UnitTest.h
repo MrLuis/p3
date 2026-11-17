@@ -5,8 +5,8 @@
 //   TEST(Suite, Name) { EXPECT_EQ(a, b); EXPECT_TRUE(x); }
 //
 //===----------------------------------------------------------------------===//
-#ifndef PCC_UNITTEST_H
-#define PCC_UNITTEST_H
+#ifndef P3_UNITTEST_H
+#define P3_UNITTEST_H
 
 #include "llvm/Support/raw_ostream.h"
 
@@ -14,7 +14,7 @@
 #include <string>
 #include <vector>
 
-namespace pcc::unittest {
+namespace p3::unittest {
 
 struct TestCase {
   const char *Suite;
@@ -31,18 +31,18 @@ struct Registrar {
   }
 };
 
-} // namespace pcc::unittest
+} // namespace p3::unittest
 
 #define TEST(SUITE, NAME)                                                      \
   static void SUITE##_##NAME##_impl();                                         \
-  static ::pcc::unittest::Registrar SUITE##_##NAME##_reg(#SUITE, #NAME,        \
+  static ::p3::unittest::Registrar SUITE##_##NAME##_reg(#SUITE, #NAME,        \
                                                          SUITE##_##NAME##_impl);\
   static void SUITE##_##NAME##_impl()
 
 #define EXPECT_TRUE(C)                                                         \
   do {                                                                         \
     if (!(C))                                                                  \
-      ::pcc::unittest::reportFailure(__FILE__, __LINE__,                       \
+      ::p3::unittest::reportFailure(__FILE__, __LINE__,                       \
                                      "expected true: " #C);                    \
   } while (0)
 
@@ -56,8 +56,8 @@ struct Registrar {
       std::string _m;                                                          \
       llvm::raw_string_ostream _os(_m);                                        \
       _os << "expected " #A " == " #B "\n  lhs: " << _a << "\n  rhs: " << _b;  \
-      ::pcc::unittest::reportFailure(__FILE__, __LINE__, _m);                  \
+      ::p3::unittest::reportFailure(__FILE__, __LINE__, _m);                  \
     }                                                                          \
   } while (0)
 
-#endif // PCC_UNITTEST_H
+#endif // P3_UNITTEST_H

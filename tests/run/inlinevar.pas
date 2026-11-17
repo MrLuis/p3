@@ -4,9 +4,9 @@
   sequence (or loop) it is declared in, may hide an outer one, and is set
   (to its value, or to zero) each time the declaration runs. An owned one
   is freed when its sequence is left, however it is left.
-  RUN: %pcc --mode=objfpc %s -o %t
+  RUN: %p3 --mode=objfpc %s -o %t
   RUN: %t | diff - %S/inlinevar.expected
-  RUN: %pcc --mode=objfpc -O2 -fno-range-checks %s -o %t.fast
+  RUN: %p3 --mode=objfpc -O2 -fno-range-checks %s -o %t.fast
   RUN: %t.fast | diff - %S/inlinevar.expected
 }
 {$H+}

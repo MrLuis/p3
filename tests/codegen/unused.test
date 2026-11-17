@@ -5,7 +5,7 @@
 ; is taken; the methods in the VMT of a class that is referred to.
 ; -fkeep-unused keeps everything.
 ; RUN: rm -rf %t && mkdir -p %t && cp -r %S/Inputs/unused/. %t/
-; RUN: %pcc --mode=objfpc --emit-llvm -I %t/lib %t/main.pas -o %t/main.ll
+; RUN: %p3 --mode=objfpc --emit-llvm -I %t/lib %t/main.pas -o %t/main.ll
 ; RUN: FileCheck %s < %t/main.ll
 ; RUN: FileCheck --check-prefix=GONE %s < %t/main.ll
 ; RUN: opt -passes=verify -disable-output %t/main.ll
@@ -35,16 +35,16 @@
 ; GONE-NOT: a unit of tools
 ;
 ; The program runs the same either way.
-; RUN: %pcc --mode=objfpc -I %t/lib %t/main.pas -o %t/main
+; RUN: %p3 --mode=objfpc -I %t/lib %t/main.pas -o %t/main
 ; RUN: %t/main | FileCheck --check-prefix=OUT %s
-; RUN: %pcc --mode=objfpc -O2 -I %t/lib %t/main.pas -o %t/main2
+; RUN: %p3 --mode=objfpc -O2 -I %t/lib %t/main.pas -o %t/main2
 ; RUN: %t/main2 | FileCheck --check-prefix=OUT %s
-; RUN: %pcc --mode=objfpc --fkeep-unused -I %t/lib %t/main.pas -o %t/mainkeep
+; RUN: %p3 --mode=objfpc --fkeep-unused -I %t/lib %t/main.pas -o %t/mainkeep
 ; RUN: %t/mainkeep | FileCheck --check-prefix=OUT %s
 ; OUT: 8 -5 9 shape
 ;
 ; -fkeep-unused: everything is there.
-; RUN: %pcc --mode=objfpc --emit-llvm --fkeep-unused -I %t/lib %t/main.pas -o - | FileCheck --check-prefix=KEEP %s
+; RUN: %p3 --mode=objfpc --emit-llvm --fkeep-unused -I %t/lib %t/main.pas -o - | FileCheck --check-prefix=KEEP %s
 ; KEEP-DAG: define internal i32 @pas.unused(
 ; KEEP-DAG: define internal void @pas.unusedhelper(
 ; KEEP-DAG: define internal void @pas.unused2(
@@ -58,7 +58,7 @@
 ; A unit compiled on its own keeps its interface (external symbols, which
 ; other modules may use) and what that refers to: Hidden, called by Thrice.
 ; Orphan, in the implementation only and not called, is removed.
-; RUN: %pcc --mode=objfpc -c --emit-llvm %t/lib/tools.pas -o %t/tools.ll
+; RUN: %p3 --mode=objfpc -c --emit-llvm %t/lib/tools.pas -o %t/tools.ll
 ; RUN: FileCheck --check-prefix=UNIT %s < %t/tools.ll
 ; RUN: FileCheck --check-prefix=UNITGONE %s < %t/tools.ll
 ; UNIT-DAG: define i32 @"pas.tools$twice"(
@@ -71,6 +71,6 @@
 ; UNITGONE-NOT: an orphan
 ;
 ; Separately compiled units and the program linking them.
-; RUN: %pcc --mode=objfpc -c %t/lib/tools.pas -o %t/lib/tools.o
-; RUN: %pcc --mode=objfpc -I %t/lib -fseparate-units %t/main.pas -o %t/separate
+; RUN: %p3 --mode=objfpc -c %t/lib/tools.pas -o %t/lib/tools.o
+; RUN: %p3 --mode=objfpc -I %t/lib -fseparate-units %t/main.pas -o %t/separate
 ; RUN: %t/separate | FileCheck --check-prefix=OUT %s

@@ -1,5 +1,5 @@
 ; M12 (Turbo/FPC) semantic errors.
-; RUN: not %pcc --mode=tp -ferror-limit=0 -c %S/Inputs/m12.pas -o %t.o 2>&1 | FileCheck %s
+; RUN: not %p3 --mode=tp -ferror-limit=0 -c %S/Inputs/m12.pas -o %t.o 2>&1 | FileCheck %s
 
 ; CHECK: m12.pas:2:20: error: string length must be an integer in 1..255
 ; CHECK: m12.pas:5:3: error: 'break' is only allowed inside a loop
@@ -12,6 +12,6 @@
 ; CHECK-NOT: error:
 
 ; Turbo/FPC syntax is rejected in ISO mode.
-; RUN: not %pcc -ferror-limit=0 -c %S/Inputs/tp-in-iso.pas -o %t.o 2>&1 | FileCheck --check-prefix=ISO %s
+; RUN: not %p3 -ferror-limit=0 -c %S/Inputs/tp-in-iso.pas -o %t.o 2>&1 | FileCheck --check-prefix=ISO %s
 ; ISO: tp-in-iso.pas:2:8: error: expected '=' in constant declaration (typed constants need --mode=tp)
 ; ISO: tp-in-iso.pas:5:8: error: invalid character '$' in source

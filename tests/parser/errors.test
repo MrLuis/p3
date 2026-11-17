@@ -1,32 +1,32 @@
 ; Syntax errors: location, message, and recovery (later errors still found).
 
-; RUN: not %pcc --emit-ast %S/Inputs/missing-semi-heading.pas 2>&1 >/dev/null | FileCheck --check-prefix=HEAD %s
+; RUN: not %p3 --emit-ast %S/Inputs/missing-semi-heading.pas 2>&1 >/dev/null | FileCheck --check-prefix=HEAD %s
 ; HEAD: missing-semi-heading.pas:1:10: error: expected ';' after program heading
 
-; RUN: not %pcc --emit-ast %S/Inputs/missing-semi-stmts.pas 2>&1 >/dev/null | FileCheck --check-prefix=SEMI %s
+; RUN: not %p3 --emit-ast %S/Inputs/missing-semi-stmts.pas 2>&1 >/dev/null | FileCheck --check-prefix=SEMI %s
 ; SEMI: missing-semi-stmts.pas:3:15: error: expected ';' between statements
 ; SEMI-NOT: error:
 
-; RUN: not %pcc --emit-ast %S/Inputs/missing-period.pas 2>&1 >/dev/null | FileCheck --check-prefix=DOT %s
+; RUN: not %p3 --emit-ast %S/Inputs/missing-period.pas 2>&1 >/dev/null | FileCheck --check-prefix=DOT %s
 ; DOT: missing-period.pas:3:4: error: expected '.' at end of program
 
-; RUN: not %pcc --emit-ast %S/Inputs/missing-end.pas 2>&1 >/dev/null | FileCheck --check-prefix=END %s
+; RUN: not %p3 --emit-ast %S/Inputs/missing-end.pas 2>&1 >/dev/null | FileCheck --check-prefix=END %s
 ; END:      missing-end.pas:4:1: error: expected 'end'
 ; END:      missing-end.pas:2:1: note: to match this 'begin'
 ; END:      missing-end.pas:3:16: error: expected '.' at end of program
 
-; RUN: not %pcc --emit-ast %S/Inputs/unbalanced-paren.pas 2>&1 >/dev/null | FileCheck --check-prefix=PAREN %s
+; RUN: not %p3 --emit-ast %S/Inputs/unbalanced-paren.pas 2>&1 >/dev/null | FileCheck --check-prefix=PAREN %s
 ; PAREN: unbalanced-paren.pas:3:17: error: expected ')' after arguments
 ; PAREN: unbalanced-paren.pas:3:10: note: to match this '('
 
-; RUN: not %pcc --emit-ast %S/Inputs/no-program.pas 2>&1 >/dev/null | FileCheck --check-prefix=PROG %s
+; RUN: not %p3 --emit-ast %S/Inputs/no-program.pas 2>&1 >/dev/null | FileCheck --check-prefix=PROG %s
 ; PROG: no-program.pas:1:1: error: expected 'program'
 ; PROG-NOT: error:
 
-; RUN: not %pcc --emit-ast %S/Inputs/empty-parens.pas 2>&1 >/dev/null | FileCheck --check-prefix=EMPTY %s
+; RUN: not %p3 --emit-ast %S/Inputs/empty-parens.pas 2>&1 >/dev/null | FileCheck --check-prefix=EMPTY %s
 ; EMPTY: empty-parens.pas:3:11: error: expected expression
 ; EMPTY: empty-parens.pas:3:10: note: an empty argument list '()' is not allowed; omit the parentheses
 
 
 ; Errors stop compilation before code generation.
-; RUN: not %pcc -c %S/Inputs/missing-period.pas -o %t.o 2>&1 | FileCheck --check-prefix=DOT %s
+; RUN: not %p3 -c %S/Inputs/missing-period.pas -o %t.o 2>&1 | FileCheck --check-prefix=DOT %s

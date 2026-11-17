@@ -1,49 +1,49 @@
-configure_file(${PROJECT_SOURCE_DIR}/include/pcc/Basic/Version.h.in
-               ${PROJECT_BINARY_DIR}/include/pcc/Basic/Version.h @ONLY)
+configure_file(${PROJECT_SOURCE_DIR}/include/p3/Basic/Version.h.in
+               ${PROJECT_BINARY_DIR}/include/p3/Basic/Version.h @ONLY)
 
-add_library(pccBasic STATIC
+add_library(p3Basic STATIC
   basic/SourceManager.cpp
   basic/Diagnostics.cpp
 )
-target_include_directories(pccBasic PUBLIC ${PROJECT_BINARY_DIR}/include)
-target_link_libraries(pccBasic PUBLIC ${PCC_LLVM_LIBS})
+target_include_directories(p3Basic PUBLIC ${PROJECT_BINARY_DIR}/include)
+target_link_libraries(p3Basic PUBLIC ${P3_LLVM_LIBS})
 
-add_library(pccLexer STATIC
+add_library(p3Lexer STATIC
   lexer/TokenKinds.cpp
   lexer/Lexer.cpp
 )
-target_link_libraries(pccLexer PUBLIC pccBasic)
+target_link_libraries(p3Lexer PUBLIC p3Basic)
 
-add_library(pccAST STATIC
+add_library(p3AST STATIC
   ast/AST.cpp
   ast/Type.cpp
   ast/ASTPrinter.cpp
 )
-target_link_libraries(pccAST PUBLIC pccBasic)
+target_link_libraries(p3AST PUBLIC p3Basic)
 
-add_library(pccParse STATIC
+add_library(p3Parse STATIC
   parse/Parser.cpp
 )
-target_link_libraries(pccParse PUBLIC pccLexer pccAST)
+target_link_libraries(p3Parse PUBLIC p3Lexer p3AST)
 
-add_library(pccSema STATIC
+add_library(p3Sema STATIC
   sema/Sema.cpp
 )
-target_link_libraries(pccSema PUBLIC pccAST)
+target_link_libraries(p3Sema PUBLIC p3AST)
 
-add_library(pccCodeGen STATIC
+add_library(p3CodeGen STATIC
   codegen/CodeGen.cpp
   codegen/Backend.cpp
 )
-target_link_libraries(pccCodeGen PUBLIC pccAST)
+target_link_libraries(p3CodeGen PUBLIC p3AST)
 
-add_library(pccDriver STATIC
+add_library(p3Driver STATIC
   driver/Driver.cpp
   driver/Linker.cpp
   driver/Project.cpp
 )
-target_link_libraries(pccDriver PUBLIC pccParse pccSema pccCodeGen)
+target_link_libraries(p3Driver PUBLIC p3Parse p3Sema p3CodeGen)
 
-add_executable(pcc driver/main.cpp)
-target_link_libraries(pcc PRIVATE pccDriver)
-set_target_properties(pcc PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${PROJECT_BINARY_DIR}/bin)
+add_executable(p3 driver/main.cpp)
+target_link_libraries(p3 PRIVATE p3Driver)
+set_target_properties(p3 PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${PROJECT_BINARY_DIR}/bin)

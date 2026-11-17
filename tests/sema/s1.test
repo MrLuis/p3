@@ -1,8 +1,8 @@
 ; S1 (Turbo/FPC) semantic errors: sized integers, typecasts, typed
 ; constants, const parameters, external routines, procedural values,
 ; exit(value), sizeof/low/high/assigned.
-; RUN: not %pcc --mode=tp -ferror-limit=0 -c %S/Inputs/s1/errors.pas -o %t.o 2>&1 | FileCheck %s
-; RUN: not %pcc --mode=tp -c %S/Inputs/s1/missing-include.pas -o %t.o 2>&1 | FileCheck --check-prefix=INC %s
+; RUN: not %p3 --mode=tp -ferror-limit=0 -c %S/Inputs/s1/errors.pas -o %t.o 2>&1 | FileCheck %s
+; RUN: not %p3 --mode=tp -c %S/Inputs/s1/missing-include.pas -o %t.o 2>&1 | FileCheck --check-prefix=INC %s
 
 ; CHECK: errors.pas:6:16: error: array index type 'int64' is too large; use a subrange such as 1..100
 ; CHECK: errors.pas:8:33: error: initializer for 'array [1..3] of integer' must list 3 elements, separated by ','

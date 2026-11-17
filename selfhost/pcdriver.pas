@@ -2,10 +2,10 @@ unit pcdriver;
 { The back end of the driver: src/codegen/Backend.cpp and
   src/driver/Linker.cpp. The IR text pcgen writes is compiled in process
   by libLLVM (pcllvm): parsed, verified, optimized with the same pass
-  pipeline as the C++ pcc and emitted by a target machine set up like its
+  pipeline as the C++ p3 and emitted by a target machine set up like its
   own (SELFHOST.md S11). Executables are linked with the Pascal runtime by
-  a C compiler: $PCC_CC, else clang-19, clang, cc or gcc. The runtime
-  library is $PCC_RUNTIME_LIB, else ../lib/libpascalrt.a next to the
+  a C compiler: $P3_CC, else clang-19, clang, cc or gcc. The runtime
+  library is $P3_RUNTIME_LIB, else ../lib/libpascalrt.a next to the
   executable. }
 
 interface
@@ -24,8 +24,8 @@ function moduleLayout(const triple: string; var layout: string): boolean;
   output) at optimization level opt for triple. }
 function emitOutput(const ir: TBuf; const name: string; kind: TOutputKind; opt: longint;
                     const triple, path: string; const unitObjects: TPtrList): boolean;
-{ The directory of pcc's unit library, searched after -I directories:
-  $PCC_UNIT_DIR, else ../lib/pascal next to the executable. }
+{ The directory of p3's unit library, searched after -I directories:
+  $P3_UNIT_DIR, else ../lib/pascal next to the executable. }
 function findUnitLibrary: string;
 { -l and -L options, passed to the linker. }
 procedure addLinkerArg(const arg: string);
@@ -119,14 +119,14 @@ var
   value: string;
   cc: string;
 begin
-  cc := findTool('PCC_CC', 'clang-19 clang cc gcc', fromEnv);
+  cc := findTool('P3_CC', 'clang-19 clang cc gcc', fromEnv);
   if cc = '' then
   begin
-    if fromEnv and sysGetEnv('PCC_CC', value) then
-      diagError(noLoc, 'cannot find linker driver ''' + value + ''' (from PCC_CC)')
+    if fromEnv and sysGetEnv('P3_CC', value) then
+      diagError(noLoc, 'cannot find linker driver ''' + value + ''' (from P3_CC)')
     else
       diagError(noLoc, 'cannot find a C compiler to link with (tried clang-19, ' +
-                       'clang, cc, gcc); set PCC_CC');
+                       'clang, cc, gcc); set P3_CC');
   end;
   findLinkerDriver := cc;
 end;
@@ -171,20 +171,20 @@ function findRuntimeLibrary: string;
 var
   value, exe: string;
 begin
-  if sysGetEnv('PCC_RUNTIME_LIB', value) then
+  if sysGetEnv('P3_RUNTIME_LIB', value) then
     exit(value);
   exe := sysExecutablePath;
   findRuntimeLibrary := removeDots(pathJoin(pathDirName(exe), '../lib/libpascalrt.a'));
 end;
 
 { The runtime as LLVM IR, linked into optimized programs for inlining:
-  $PCC_RUNTIME_IR, else libpascalrt.ll next to the runtime library. It
+  $P3_RUNTIME_IR, else libpascalrt.ll next to the runtime library. It
   need not exist. }
 function findRuntimeIR: string;
 var
   value: string;
 begin
-  if sysGetEnv('PCC_RUNTIME_IR', value) then
+  if sysGetEnv('P3_RUNTIME_IR', value) then
     exit(value);
   findRuntimeIR := pathJoin(pathDirName(findRuntimeLibrary), 'libpascalrt.ll');
 end;
@@ -193,7 +193,7 @@ function findUnitLibrary: string;
 var
   value, exe: string;
 begin
-  if sysGetEnv('PCC_UNIT_DIR', value) then
+  if sysGetEnv('P3_UNIT_DIR', value) then
     exit(value);
   exe := sysExecutablePath;
   findUnitLibrary := removeDots(pathJoin(pathDirName(exe), '../lib/pascal'));
@@ -246,7 +246,7 @@ begin
   if not sysFileExists(runtime) then
   begin
     diagError(noLoc, 'cannot find the Pascal runtime library ''' + runtime +
-                     '''; set PCC_RUNTIME_LIB');
+                     '''; set P3_RUNTIME_LIB');
     exit;
   end;
   cc := findLinkerDriver;
@@ -314,7 +314,7 @@ var
   code: TBuf;
 begin
   emitOutput := false;
-  { at -O0 the IR is printed as generated, like the C++ pcc does }
+  { at -O0 the IR is printed as generated, like the C++ p3 does }
   if (kind = okLLVM) and (opt = 0) then
     exit(writeText(ir, path));
   if (kind = okExe) and (triple <> llvmDefaultTriple) then
@@ -391,7 +391,7 @@ end;
 
 procedure printVersion;
 begin
-  sysWrite(sysOut, 'pcc version ' + pccVersion + ' (LLVM ' + llvmVersion + ')' + #10);
+  sysWrite(sysOut, 'p3 version ' + p3Version + ' (LLVM ' + llvmVersion + ')' + #10);
   sysWrite(sysOut, '  Default target: ' + llvmDefaultTriple + #10);
   sysWrite(sysOut, '  Host CPU: ' + llvmHostCPU + #10);
 end;

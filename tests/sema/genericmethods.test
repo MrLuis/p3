@@ -2,7 +2,7 @@
 ; generic method per name and number of type parameters; its
 ; implementation must follow the declaration's shape and come before its
 ; uses; the types are given or inferred from the arguments.
-; RUN: not %pcc --mode=objfpc -ferror-limit=0 -c %S/Inputs/genericmethods/errors.pas -o %t.o 2>&1 | FileCheck %s
+; RUN: not %p3 --mode=objfpc -ferror-limit=0 -c %S/Inputs/genericmethods/errors.pas -o %t.o 2>&1 | FileCheck %s
 ; CHECK: errors.pas:5:22: error: a generic method cannot be virtual, override or abstract (each specialization is a method of its own)
 ; CHECK: errors.pas:9:22: error: redefinition of generic method 'Dup'
 ; CHECK: errors.pas:10:29: error: duplicate type parameter 'T'

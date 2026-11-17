@@ -5,11 +5,11 @@
   (the larger representation holds the result); assignments that narrow;
   parameters; enumerations; for-in; sets in records, arrays and a typed
   file. Output is identical to Free Pascal 3.2.2's (fpc -Mobjfpc).
-  RUN: %pcc --mode=tp %s -o %t
+  RUN: %p3 --mode=tp %s -o %t
   RUN: %t %t.tmp | diff - %S/setsizes.expected
-  RUN: %pcc --mode=tp -O2 %s -o %t.2
+  RUN: %p3 --mode=tp -O2 %s -o %t.2
   RUN: %t.2 %t.tmp | diff - %S/setsizes.expected
-  RUN: %pcc --mode=tp -O2 -fno-range-checks %s -o %t.3
+  RUN: %p3 --mode=tp -O2 -fno-range-checks %s -o %t.3
   RUN: %t.3 %t.tmp | diff - %S/setsizes.expected
 }
 program setsizes;

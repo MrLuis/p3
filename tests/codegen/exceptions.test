@@ -2,7 +2,7 @@
 ; { prev, object, where, address, jmp_buf } (with the routine's frame, which keeps
 ; its variables in memory) and calls _setjmp on it; a raise lands where
 ; _setjmp returns nonzero. Exception's VMT is in the runtime.
-; RUN: %pcc --mode=objfpc --emit-llvm %S/Inputs/exceptions.pas -o %t.ll
+; RUN: %p3 --mode=objfpc --emit-llvm %S/Inputs/exceptions.pas -o %t.ll
 ; RUN: FileCheck %s < %t.ll
 ; RUN: FileCheck --check-prefix=MAIN %s < %t.ll
 ; RUN: FileCheck --check-prefix=GLOBAL %s < %t.ll
@@ -66,13 +66,13 @@
 
 ; Integer div and mod by zero: in objfpc an EDivByZero exception (raised by
 ; the runtime), elsewhere a runtime error.
-; RUN: %pcc --mode=objfpc --emit-llvm %S/Inputs/divzero.pas -o - | FileCheck --check-prefix=DIV %s
+; RUN: %p3 --mode=objfpc --emit-llvm %S/Inputs/divzero.pas -o - | FileCheck --check-prefix=DIV %s
 ; DIV:      br i1 %{{[0-9]+}}, label %rt.error, label %rt.ok, !prof
 ; DIV:      rt.error:
 ; DIV-NEXT: call void @__pas_raise_divzero(ptr @.where)
 ; DIV-NEXT: unreachable
 ; DIV: declare void @__pas_raise_divzero(ptr) #[[COLD:[0-9]+]]
 ; DIV: attributes #[[COLD]] = { cold noreturn nounwind }
-; RUN: %pcc --mode=tp --emit-llvm %S/Inputs/divzero.pas -o - | FileCheck --check-prefix=TPDIV %s
+; RUN: %p3 --mode=tp --emit-llvm %S/Inputs/divzero.pas -o - | FileCheck --check-prefix=TPDIV %s
 ; TPDIV-NOT: __pas_raise_divzero
 ; TPDIV: call void @__pas_runtime_error(ptr @.rterr)

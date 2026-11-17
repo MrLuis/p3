@@ -2,7 +2,7 @@
 ; same type wherever they are written alike; the values (a, b), whose
 ; elements take the types of the tuple wanted; and (a, b) := e and
 ; var (a, b) := e, each element assigned as by an assignment.
-; RUN: not %pcc --mode=objfpc -ferror-limit=0 -c %S/Inputs/tuple/errors.pas -o %t.o 2>&1 | FileCheck %s
+; RUN: not %p3 --mode=objfpc -ferror-limit=0 -c %S/Inputs/tuple/errors.pas -o %t.o 2>&1 | FileCheck %s
 ; CHECK: errors.pas:5:22: error: the elements of a tuple cannot be files
 ; CHECK: errors.pas:6:23: error: duplicate element name 'a'
 ; CHECK: errors.pas:7:21: error: duplicate element name 'Item1'
@@ -35,7 +35,7 @@
 ; element types are not reported.
 ; CHECK-NOT: errors.pas:59
 ;
-; RUN: not %pcc --mode=objfpc -ferror-limit=0 -c %S/Inputs/tuple/more.pas -o %t.o 2>&1 | FileCheck --check-prefix=MORE %s
+; RUN: not %p3 --mode=objfpc -ferror-limit=0 -c %S/Inputs/tuple/more.pas -o %t.o 2>&1 | FileCheck --check-prefix=MORE %s
 ; MORE: more.pas:14:8: error: cannot return a value of type '(integer, ansistring)' from a function of type '(integer, integer)'
 ; MORE: more.pas:25:30: error: a tuple can only be written in the statements of a routine or program
 ; MORE: more.pas:34:17: error: initializer for '(integer, integer)' must list 2 elements, separated by ','
@@ -52,7 +52,7 @@
 ; MORE: more.pas:55:4: error: expression is not assignable
 ; MORE-NOT: more.pas:5{{[0-4]}}:
 ;
-; RUN: not %pcc --mode=objfpc -ferror-limit=0 -c %S/Inputs/tuple/syntax.pas -o %t.o 2>&1 | FileCheck --check-prefix=SYNTAX %s
+; RUN: not %p3 --mode=objfpc -ferror-limit=0 -c %S/Inputs/tuple/syntax.pas -o %t.o 2>&1 | FileCheck --check-prefix=SYNTAX %s
 ; SYNTAX: syntax.pas:3:10: error: a tuple type has two elements or more
 ; SYNTAX: syntax.pas:4:34: error: expected ')' after the elements of a tuple type
 ; SYNTAX: syntax.pas:8:10: error: expected ':=' and a tuple after these variables
@@ -63,14 +63,14 @@
 ; SYNTAX: syntax.pas:12:8: note: to match this '('
 ;
 ; Not in the other modes: there (a, b) is a list of enumeration values.
-; RUN: not %pcc --mode=tp -c %S/Inputs/tuple/tp.pas -o %t.o 2>&1 | FileCheck --check-prefix=TP %s
+; RUN: not %p3 --mode=tp -c %S/Inputs/tuple/tp.pas -o %t.o 2>&1 | FileCheck --check-prefix=TP %s
 ; TP: tp.pas:7:5: error: tuples need --mode=objfpc
 ; TP: tp.pas:7:3: note: to match this '('
 ; TP-NOT: tp.pas:3
 ;
 ; The tree: a list of type names is a tuple type, of other names an
 ; enumeration; a tuple value has the type it is given.
-; RUN: %pcc --mode=objfpc --emit-ast %S/Inputs/tuple/ast.pas -o - | FileCheck --check-prefix=AST %s
+; RUN: %p3 --mode=objfpc --emit-ast %S/Inputs/tuple/ast.pas -o - | FileCheck --check-prefix=AST %s
 ; AST: TypeDecl 'tpair' = (integer, integer) <3:3>
 ; AST: TypeDecl 'tnamed' = (Name: string, Age: integer) <4:3>
 ; AST: TypeDecl 'tcolor' = (red, green) <5:3>
@@ -89,7 +89,7 @@
 ; AST: FieldExpr 'item1' : integer <17:8>
 ; AST-NEXT: TupleExpr : (integer, string) <17:8>
 ;
-; RUN: %pcc --mode=objfpc --emit-parse-tree %S/Inputs/tuple/ast.pas -o - | FileCheck --check-prefix=TREE %s
+; RUN: %p3 --mode=objfpc --emit-parse-tree %S/Inputs/tuple/ast.pas -o - | FileCheck --check-prefix=TREE %s
 ; TREE: TupleTypeSpec
 ; TREE-NEXT: TupleElement 'name'
 ; TREE: EnumTypeSpec

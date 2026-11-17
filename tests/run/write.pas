@@ -1,5 +1,5 @@
 { write / writeln with strings, chars and integers.
-  RUN: %pcc %s -o %t
+  RUN: %p3 %s -o %t
   RUN: %t > %t.out
   RUN: diff %S/write.expected %t.out
 }

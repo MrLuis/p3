@@ -4,11 +4,11 @@
   uses class variables and other static methods, and @TFoo.P is an
   ordinary procedural value. Output is identical to Free Pascal 3.2.2's
   (fpc -Mobjfpc).
-  RUN: %pcc --mode=objfpc %s -o %t
+  RUN: %p3 --mode=objfpc %s -o %t
   RUN: %t | diff - %S/static-methods.expected
-  RUN: %pcc --mode=objfpc -O2 %s -o %t.O2
+  RUN: %p3 --mode=objfpc -O2 %s -o %t.O2
   RUN: %t.O2 | diff - %S/static-methods.expected
-  RUN: %pcc --mode=objfpc -g %s -o %t.g
+  RUN: %p3 --mode=objfpc -g %s -o %t.g
   RUN: %t.g | diff - %S/static-methods.expected
 }
 program staticmethods;

@@ -3,7 +3,7 @@
 ; constants, variables, fields, routines, methods and properties: each use
 ; is warned about (group -Wdeprecated), with a note on the declaration.
 ; The uses are the ones Free Pascal 3.2.2 reports.
-; RUN: %pcc --mode=objfpc -c %S/Inputs/hints/kinds.pas -o %t.o 2>&1 | FileCheck %s
+; RUN: %p3 --mode=objfpc -c %S/Inputs/hints/kinds.pas -o %t.o 2>&1 | FileCheck %s
 ; CHECK:      kinds.pas:31:6: warning: 'TOld' is deprecated [-Wdeprecated]
 ; CHECK:      kinds.pas:3:3: note: 'TOld' declared here
 ; CHECK:      kinds.pas:31:15: warning: 'TMsg' is deprecated: use TNew [-Wdeprecated]
@@ -46,7 +46,7 @@
 
 ; Through a unit: a deprecated type, and of two overloads the one called.
 ; A directive on an implementation only (not on its heading) has no effect.
-; RUN: %pcc --mode=objfpc -I %S/Inputs/hints/lib -c %S/Inputs/hints/useslib.pas -o %t.o 2>&1 | FileCheck --check-prefix=UNIT %s
+; RUN: %p3 --mode=objfpc -I %S/Inputs/hints/lib -c %S/Inputs/hints/useslib.pas -o %t.o 2>&1 | FileCheck --check-prefix=UNIT %s
 ; UNIT:      useslib.pas:4:6: warning: 'TLegacy' is deprecated: use TModern [-Wdeprecated]
 ; UNIT:      oldlib.pas:6:3: note: 'TLegacy' declared here
 ; UNIT:      useslib.pas:7:3: warning: 'Show' is deprecated: pass integers [-Wdeprecated]
@@ -54,12 +54,12 @@
 ; UNIT-NOT:  warning
 
 ; -Wno-deprecated turns them off; -Werror makes them errors.
-; RUN: %pcc --mode=objfpc -Wno-deprecated -Wno-unused-variable -c %S/Inputs/hints/kinds.pas -o %t.o 2>&1 | count 0
-; RUN: not %pcc --mode=objfpc -Werror -I %S/Inputs/hints/lib -c %S/Inputs/hints/useslib.pas -o %t.o 2>&1 | FileCheck --check-prefix=WERROR %s
+; RUN: %p3 --mode=objfpc -Wno-deprecated -Wno-unused-variable -c %S/Inputs/hints/kinds.pas -o %t.o 2>&1 | count 0
+; RUN: not %p3 --mode=objfpc -Werror -I %S/Inputs/hints/lib -c %S/Inputs/hints/useslib.pas -o %t.o 2>&1 | FileCheck --check-prefix=WERROR %s
 ; WERROR: useslib.pas:4:6: error: 'TLegacy' is deprecated: use TModern [-Wdeprecated]
 
 ; The parse tree shows them.
-; RUN: %pcc --mode=objfpc --emit-parse-tree %S/Inputs/hints/kinds.pas | FileCheck --check-prefix=TREE %s
+; RUN: %p3 --mode=objfpc --emit-parse-tree %S/Inputs/hints/kinds.pas | FileCheck --check-prefix=TREE %s
 ; TREE: TypeDecl 'tmsg' deprecated "use TNew" <4:3>
 ; TREE: ProcedureDecl 'm' deprecated "use N" <9:5>
 ; TREE: PropertyDecl 'p' read 'f' deprecated <10:14>

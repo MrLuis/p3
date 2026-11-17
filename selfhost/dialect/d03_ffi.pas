@@ -33,7 +33,7 @@ begin
   s := 'hello';
   writeln(c_strlen(cstr(s)));
   writeln(c_strlen('literal'));
-  writeln(c_getenv('PCC_DIALECT_NO_SUCH_VARIABLE') = nil);
+  writeln(c_getenv('P3_DIALECT_NO_SUCH_VARIABLE') = nil);
   writeln(c_strtod('2.5e3', nil):0:1);
   { the low byte of the wait status is 0, the exit code is in bits 8..15 }
   writeln(c_system('exit 3') shr 8);

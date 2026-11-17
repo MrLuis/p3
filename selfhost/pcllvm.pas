@@ -3,7 +3,7 @@ unit pcllvm;
   LLVM-C API of libLLVM, used as src/codegen/Backend.cpp uses LLVM. The
   IR text pcgen writes is parsed into a module, verified, optimized with
   the same pass pipeline and compiled by a target machine set up like the
-  C++ pcc's (CPU "generic", PIC).
+  C++ p3's (CPU "generic", PIC).
 
   The functions are declared without a library: the compiler is linked
   with libLLVM (LLVM-19 on Linux, LLVM on macOS; see selfhost/README.md).
@@ -305,7 +305,7 @@ begin
   begin
     if runtimeIR <> '' then
       rtProblem := linkRuntimeIR(ctx, m, runtimeIR);
-    { llvm::PipelineTuningOptions' defaults, as the C++ pcc's PassBuilder
+    { llvm::PipelineTuningOptions' defaults, as the C++ p3's PassBuilder
       has them }
     opts := LLVMCreatePassBuilderOptions;
     LLVMPassBuilderOptionsSetLoopInterleaving(opts, 1);

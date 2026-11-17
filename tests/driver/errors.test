@@ -1,16 +1,16 @@
 ; Driver-level errors and exit codes.
 
-; RUN: not %pcc 2>&1 | FileCheck --check-prefix=NOINPUT %s
-; NOINPUT: pcc: error: no input file
+; RUN: not %p3 2>&1 | FileCheck --check-prefix=NOINPUT %s
+; NOINPUT: p3: error: no input file
 
-; RUN: not %pcc %t.does-not-exist.pas 2>&1 | FileCheck --check-prefix=MISSING %s
-; MISSING: pcc: error: cannot open input file '{{.*}}does-not-exist.pas': {{[Nn]}}o such file or directory
+; RUN: not %p3 %t.does-not-exist.pas 2>&1 | FileCheck --check-prefix=MISSING %s
+; MISSING: p3: error: cannot open input file '{{.*}}does-not-exist.pas': {{[Nn]}}o such file or directory
 
-; RUN: not %pcc -O7 %S/Inputs/hello.pas 2>&1 | FileCheck --check-prefix=OPT %s
-; OPT: pcc: error: invalid optimization level '-O7' (expected 0-3)
+; RUN: not %p3 -O7 %S/Inputs/hello.pas 2>&1 | FileCheck --check-prefix=OPT %s
+; OPT: p3: error: invalid optimization level '-O7' (expected 0-3)
 
-; RUN: not %pcc --target=bogus-unknown-thing %S/Inputs/hello.pas 2>&1 | FileCheck --check-prefix=TARGET %s
-; TARGET: pcc: error: unsupported target 'bogus-unknown-thing
+; RUN: not %p3 --target=bogus-unknown-thing %S/Inputs/hello.pas 2>&1 | FileCheck --check-prefix=TARGET %s
+; TARGET: p3: error: unsupported target 'bogus-unknown-thing
 
-; RUN: not %pcc --mode=delphi %S/Inputs/hello.pas 2>&1 | FileCheck --check-prefix=MODE %s
+; RUN: not %p3 --mode=delphi %S/Inputs/hello.pas 2>&1 | FileCheck --check-prefix=MODE %s
 ; MODE: Cannot find option named 'delphi'

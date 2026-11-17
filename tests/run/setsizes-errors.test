@@ -2,7 +2,7 @@
 ; (or a smaller range) is range-checked: a member that does not fit is a
 ; runtime error; without range checks it is dropped. A constructor's
 ; element must be in 0..255.
-; RUN: %pcc --mode=tp %S/Inputs/setsizes/narrowing.pas -o %t
+; RUN: %p3 --mode=tp %S/Inputs/setsizes/narrowing.pas -o %t
 ; RUN: not %t wide-small 2>&1 | FileCheck --check-prefix=WS %s
 ; WS: Runtime error: set member out of range at {{.*}}narrowing.pas:19:37
 ; RUN: not %t mid-small 2>&1 | FileCheck --check-prefix=MS %s
@@ -24,7 +24,7 @@
 ; NONE: TRUE TRUE TRUE TRUE FALSE
 ;
 ; Without range checks, the members that do not fit are dropped.
-; RUN: %pcc --mode=tp -O2 -fno-range-checks %S/Inputs/setsizes/narrowing.pas -o %t.u
+; RUN: %p3 --mode=tp -O2 -fno-range-checks %S/Inputs/setsizes/narrowing.pas -o %t.u
 ; RUN: %t.u wide-small | FileCheck --check-prefix=UWS %s
 ; UWS: TRUE FALSE TRUE TRUE FALSE
 ; RUN: %t.u wide-mid | FileCheck --check-prefix=UWM %s
@@ -33,11 +33,11 @@
 ; x in [...] is tested without building the set: by comparisons, a 64-bit
 ; mask or (many scattered members) the 256-bit constant; every element is
 ; evaluated once (1530 calls of F), at any level and without checks.
-; RUN: %pcc --mode=tp %S/Inputs/setsizes/membership.pas -o %t.m
+; RUN: %p3 --mode=tp %S/Inputs/setsizes/membership.pas -o %t.m
 ; RUN: %t.m | FileCheck --check-prefix=IN %s
-; RUN: %pcc --mode=tp -O2 %S/Inputs/setsizes/membership.pas -o %t.m2
+; RUN: %p3 --mode=tp -O2 %S/Inputs/setsizes/membership.pas -o %t.m2
 ; RUN: %t.m2 | FileCheck --check-prefix=IN %s
-; RUN: %pcc --mode=tp -fno-range-checks %S/Inputs/setsizes/membership.pas -o %t.m3
+; RUN: %p3 --mode=tp -fno-range-checks %S/Inputs/setsizes/membership.pas -o %t.m3
 ; RUN: %t.m3 | FileCheck --check-prefix=IN %s
 ; IN:      948571 1530
 ; IN-NEXT: 422053

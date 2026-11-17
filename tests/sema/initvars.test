@@ -1,19 +1,19 @@
 ; Initialized variables (--mode=objfpc):  var x: T = value;  one name per
 ; declaration, a constant value of the variable's type, and only in objfpc
 ; mode; the parse tree and checked tree mark them.
-; RUN: not %pcc --mode=objfpc -ferror-limit=0 -c %S/Inputs/initvars/errors.pas -o %t.o 2>&1 | FileCheck %s
+; RUN: not %p3 --mode=objfpc -ferror-limit=0 -c %S/Inputs/initvars/errors.pas -o %t.o 2>&1 | FileCheck %s
 ; CHECK: errors.pas:3:16: error: cannot initialize 'integer' with a value of type 'char'
 ; CHECK: errors.pas:4:16: error: use of undeclared identifier 'count'
 ; CHECK: errors.pas:10:16: error: initial value must be a constant
 ; CHECK-NOT: error:
-; RUN: not %pcc --mode=objfpc -c %S/Inputs/initvars/names.pas -o %t.o 2>&1 | FileCheck --check-prefix=NAMES %s
+; RUN: not %p3 --mode=objfpc -c %S/Inputs/initvars/names.pas -o %t.o 2>&1 | FileCheck --check-prefix=NAMES %s
 ; NAMES: names.pas:3:17: error: only one variable can be initialized
-; RUN: not %pcc --mode=tp -c %S/Inputs/initvars/tp.pas -o %t.o 2>&1 | FileCheck --check-prefix=TP %s
+; RUN: not %p3 --mode=tp -c %S/Inputs/initvars/tp.pas -o %t.o 2>&1 | FileCheck --check-prefix=TP %s
 ; TP: tp.pas:3:14: error: initialized variables are a Free Pascal extension; use --mode=objfpc
-; RUN: %pcc --mode=objfpc --emit-parse-tree %S/Inputs/initvars/tp.pas | FileCheck --check-prefix=TREE %s
+; RUN: %p3 --mode=objfpc --emit-parse-tree %S/Inputs/initvars/tp.pas | FileCheck --check-prefix=TREE %s
 ; TREE:      VarDecl 'n' initialized <3:3>
 ; TREE-NEXT:   NamedTypeSpec 'integer' <3:6>
 ; TREE-NEXT:   Init <3:16>
 ; TREE-NEXT:     IntegerLiteralExpr 1 <3:16>
-; RUN: %pcc --mode=objfpc --emit-ast %S/Inputs/initvars/tp.pas 2>/dev/null | FileCheck --check-prefix=AST %s
+; RUN: %p3 --mode=objfpc --emit-ast %S/Inputs/initvars/tp.pas 2>/dev/null | FileCheck --check-prefix=AST %s
 ; AST: VarDecl 'n' : integer initialized <3:3>

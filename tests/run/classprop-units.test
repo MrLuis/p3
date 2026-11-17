@@ -2,10 +2,10 @@
 ; variables and static class methods as accessors), used by the program,
 ; compiled whole and separately.
 ; RUN: rm -rf %t && mkdir -p %t && cp -r %S/Inputs/classprop/. %t/
-; RUN: %pcc --mode=objfpc -I %t/lib %t/main.pas -o %t/whole
+; RUN: %p3 --mode=objfpc -I %t/lib %t/main.pas -o %t/whole
 ; RUN: %t/whole | FileCheck %s
-; RUN: %pcc --mode=objfpc -c %t/lib/config.pas -o %t/lib/config.o
-; RUN: %pcc --mode=objfpc -I %t/lib -fseparate-units %t/main.pas -o %t/separate
+; RUN: %p3 --mode=objfpc -c %t/lib/config.pas -o %t/lib/config.o
+; RUN: %p3 --mode=objfpc -I %t/lib -fseparate-units %t/main.pas -o %t/separate
 ; RUN: %t/separate | FileCheck %s
 ; CHECK: app#3
 ; CHECK-NEXT: 9 app#9

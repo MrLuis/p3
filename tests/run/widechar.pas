@@ -8,11 +8,11 @@
   pointers, var parameters and results; ord, succ, pred, low, high,
   typecasts, for loops, in, write. Output is identical to Free Pascal
   3.2.2's (fpc -Mtp and -Mobjfpc).
-  RUN: %pcc --mode=tp %s -o %t
+  RUN: %p3 --mode=tp %s -o %t
   RUN: %t | diff - %S/widechar.expected
-  RUN: %pcc --mode=objfpc -O2 %s -o %t.objfpc
+  RUN: %p3 --mode=objfpc -O2 %s -o %t.objfpc
   RUN: %t.objfpc | diff - %S/widechar.expected
-  RUN: %pcc --mode=objfpc -g %s -o %t.g
+  RUN: %p3 --mode=objfpc -g %s -o %t.g
   RUN: %t.g | diff - %S/widechar.expected
 }
 program widechartest;

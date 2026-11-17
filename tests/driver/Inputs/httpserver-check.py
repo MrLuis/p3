@@ -24,11 +24,11 @@ def request(method, path):
 
 checks = [
     ("GET", "/", 200, "text/html; charset=utf-8", b"It works"),
-    ("GET", "/hello.txt", 200, "text/plain; charset=utf-8", b"Hello from pcc httpserver\n"),
+    ("GET", "/hello.txt", 200, "text/plain; charset=utf-8", b"Hello from p3 httpserver\n"),
     ("GET", "/hello%2Etxt?x=1", 200, "text/plain; charset=utf-8", b"Hello"),
     ("GET", "/status", 200, "text/html; charset=utf-8", b"requests served: 3"),
     ("GET", "/missing", 404, "text/html; charset=utf-8", b"404 Not Found"),
-    ("GET", "/%2e%2e/pcc.json", 403, "text/html; charset=utf-8", b"403 Forbidden"),
+    ("GET", "/%2e%2e/p3.json", 403, "text/html; charset=utf-8", b"403 Forbidden"),
     ("POST", "/", 405, "text/html; charset=utf-8", b"405 Method Not Allowed"),
 ]
 for method, path, status, ctype, text in checks:

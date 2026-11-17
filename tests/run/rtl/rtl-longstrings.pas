@@ -1,9 +1,9 @@
-{ pcc's unit library on strings longer than 255 characters. Output identical
+{ p3's unit library on strings longer than 255 characters. Output identical
   to Free Pascal 3.2.2's (fpc -Mobjfpc). Run in its own directory: it creates
   and removes files.
-  RUN: rm -rf %t && mkdir -p %t && %pcc --mode=objfpc %s -o %t/a
+  RUN: rm -rf %t && mkdir -p %t && %p3 --mode=objfpc %s -o %t/a
   RUN: cd %t && ./a > out && diff %S/rtl-longstrings.expected out
-  RUN: %pcc --mode=objfpc -fseparate-units %s -o %t/a2
+  RUN: %p3 --mode=objfpc -fseparate-units %s -o %t/a2
   RUN: cd %t && ./a2 > out2 && diff %S/rtl-longstrings.expected out2
 }
 program rtllongstrings;

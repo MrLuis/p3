@@ -1,75 +1,75 @@
 ; S7-S8: the self-hosted code generator and driver. The Pascal compiler
-; built by pcc must write IR that passes the verifier, build run tests into
+; built by p3 must write IR that passes the verifier, build run tests into
 ; programs with the expected output (its driver lets clang assemble the IR
 ; and links with the runtime), and compile itself into a stage 2 compiler
 ; that writes the same IR: the bootstrap fixed point. (By hand also: the
-; whole lit suite with PCC_UNDER_TEST, iso7185pat.pas, and identical IR from
-; the pcc-built, FPC-built and stage 2 compilers; see selfhost/README.md.)
+; whole lit suite with P3_UNDER_TEST, iso7185pat.pas, and identical IR from
+; the p3-built, FPC-built and stage 2 compilers; see selfhost/README.md.)
 ; REQUIRES: selfhost-build
-; RUN: %pcc --mode=tp %selfhost-flags -I %S/../../selfhost %S/../../selfhost/pcc.pas -o %t.pcc
+; RUN: %p3 --mode=tp %selfhost-flags -I %S/../../selfhost %S/../../selfhost/p3.pas -o %t.p3
 ;
 ; Valid IR, also for units.
-; RUN: %t.pcc --emit-llvm %S/../run/control.pas -o - | opt -passes=verify -disable-output
-; RUN: %t.pcc --mode=tp --emit-llvm -I %S/../run/Inputs/units/lib %S/../run/Inputs/units/main.pas -o - | opt -passes=verify -disable-output
+; RUN: %t.p3 --emit-llvm %S/../run/control.pas -o - | opt -passes=verify -disable-output
+; RUN: %t.p3 --mode=tp --emit-llvm -I %S/../run/Inputs/units/lib %S/../run/Inputs/units/main.pas -o - | opt -passes=verify -disable-output
 ;
 ; Programs, ISO, Turbo and objfpc mode, at -O0 and -O2.
-; RUN: env PCC_RUNTIME_LIB=%pcc-runtime-lib %t.pcc %S/../run/arith.pas -o %t.arith
+; RUN: env P3_RUNTIME_LIB=%p3-runtime-lib %t.p3 %S/../run/arith.pas -o %t.arith
 ; RUN: %t.arith > %t.arith.out && diff %S/../run/arith.expected %t.arith.out
-; RUN: env PCC_RUNTIME_LIB=%pcc-runtime-lib %t.pcc -O2 %S/../run/routines.pas -o %t.routines
+; RUN: env P3_RUNTIME_LIB=%p3-runtime-lib %t.p3 -O2 %S/../run/routines.pas -o %t.routines
 ; RUN: %t.routines > %t.routines.out && diff %S/../run/routines.expected %t.routines.out
-; RUN: env PCC_RUNTIME_LIB=%pcc-runtime-lib %t.pcc %S/../run/gotoproc.pas -o %t.gotoproc
+; RUN: env P3_RUNTIME_LIB=%p3-runtime-lib %t.p3 %S/../run/gotoproc.pas -o %t.gotoproc
 ; RUN: %t.gotoproc > %t.gotoproc.out && diff %S/../run/gotoproc.expected %t.gotoproc.out
-; RUN: env PCC_RUNTIME_LIB=%pcc-runtime-lib %t.pcc %S/../run/ptrsets.pas -o %t.ptrsets
+; RUN: env P3_RUNTIME_LIB=%p3-runtime-lib %t.p3 %S/../run/ptrsets.pas -o %t.ptrsets
 ; RUN: %t.ptrsets > %t.ptrsets.out && diff %S/../run/ptrsets.expected %t.ptrsets.out
-; RUN: env PCC_RUNTIME_LIB=%pcc-runtime-lib %t.pcc --mode=tp %S/../run/records.pas -o %t.records
+; RUN: env P3_RUNTIME_LIB=%p3-runtime-lib %t.p3 --mode=tp %S/../run/records.pas -o %t.records
 ; RUN: %t.records > %t.records.out && diff %S/../run/records.expected %t.records.out
-; RUN: env PCC_RUNTIME_LIB=%pcc-runtime-lib %t.pcc --mode=tp -O2 %S/../run/tpa.pas -o %t.tpa
+; RUN: env P3_RUNTIME_LIB=%p3-runtime-lib %t.p3 --mode=tp -O2 %S/../run/tpa.pas -o %t.tpa
 ; RUN: %t.tpa > %t.tpa.out && diff %S/../run/tpa.expected %t.tpa.out
-; RUN: env PCC_RUNTIME_LIB=%pcc-runtime-lib %t.pcc --mode=tp %S/../run/ints.pas -o %t.ints
+; RUN: env P3_RUNTIME_LIB=%p3-runtime-lib %t.p3 --mode=tp %S/../run/ints.pas -o %t.ints
 ; RUN: %t.ints > %t.ints.out && diff %S/../run/ints.expected %t.ints.out
-; RUN: env PCC_RUNTIME_LIB=%pcc-runtime-lib %t.pcc --mode=objfpc %S/../run/classes.pas -o %t.classes
+; RUN: env P3_RUNTIME_LIB=%p3-runtime-lib %t.p3 --mode=objfpc %S/../run/classes.pas -o %t.classes
 ; RUN: %t.classes > %t.classes.out && diff %S/../run/classes.expected %t.classes.out
 ;
 ; A runtime error.
-; RUN: env PCC_RUNTIME_LIB=%pcc-runtime-lib %t.pcc %S/Inputs/rterr.pas -o %t.rterr
+; RUN: env P3_RUNTIME_LIB=%p3-runtime-lib %t.p3 %S/Inputs/rterr.pas -o %t.rterr
 ; RUN: not %t.rterr 2>&1 | FileCheck --check-prefix=RTERR %s
 ; RTERR: value out of range at {{.*}}rterr.pas:7:12
 ;
 ; The unit library, compiled with the program.
-; RUN: env PCC_RUNTIME_LIB=%pcc-runtime-lib %t.pcc --mode=objfpc %S/../run/rtl-strutils.pas -o %t.rtlstr
+; RUN: env P3_RUNTIME_LIB=%p3-runtime-lib %t.p3 --mode=objfpc %S/../run/rtl-strutils.pas -o %t.rtlstr
 ; RUN: %t.rtlstr > %t.rtlstr.out && diff %S/../run/rtl-strutils.expected %t.rtlstr.out
-; RUN: env PCC_RUNTIME_LIB=%pcc-runtime-lib %t.pcc --mode=objfpc %S/../run/rtl-math.pas -o %t.rtlmath
+; RUN: env P3_RUNTIME_LIB=%p3-runtime-lib %t.p3 --mode=objfpc %S/../run/rtl-math.pas -o %t.rtlmath
 ; RUN: %t.rtlmath > %t.rtlmath.out && diff %S/../run/rtl-math.expected %t.rtlmath.out
-; RUN: env PCC_RUNTIME_LIB=%pcc-runtime-lib %t.pcc --mode=objfpc %S/../run/rtl/rtl-classes.pas -o %t.rtlclasses
+; RUN: env P3_RUNTIME_LIB=%p3-runtime-lib %t.p3 --mode=objfpc %S/../run/rtl/rtl-classes.pas -o %t.rtlclasses
 ; RUN: rm -rf %t.d && mkdir -p %t.d && cd %t.d && %t.rtlclasses > out && diff %S/../run/rtl/rtl-classes.expected out
-; RUN: env PCC_RUNTIME_LIB=%pcc-runtime-lib %t.pcc --mode=objfpc %S/../run/ansistrings.pas -o %t.ansi
+; RUN: env P3_RUNTIME_LIB=%p3-runtime-lib %t.p3 --mode=objfpc %S/../run/ansistrings.pas -o %t.ansi
 ; RUN: %t.ansi > %t.ansi.out && diff %S/../run/ansistrings.expected %t.ansi.out
-; RUN: env PCC_RUNTIME_LIB=%pcc-runtime-lib %t.pcc --mode=objfpc %S/../run/format.pas -o %t.format
+; RUN: env P3_RUNTIME_LIB=%p3-runtime-lib %t.p3 --mode=objfpc %S/../run/format.pas -o %t.format
 ; RUN: %t.format > %t.format.out && diff %S/../run/format.expected %t.format.out
-; RUN: env PCC_RUNTIME_LIB=%pcc-runtime-lib %t.pcc --mode=objfpc %S/../run/arrayofconst.pas -o %t.aoc
+; RUN: env P3_RUNTIME_LIB=%p3-runtime-lib %t.p3 --mode=objfpc %S/../run/arrayofconst.pas -o %t.aoc
 ; RUN: %t.aoc > %t.aoc.out && diff %S/../run/arrayofconst.expected %t.aoc.out
-; RUN: env PCC_RUNTIME_LIB=%pcc-runtime-lib %t.pcc --mode=objfpc %S/../run/ansistring-records.pas -o %t.recs
+; RUN: env P3_RUNTIME_LIB=%p3-runtime-lib %t.p3 --mode=objfpc %S/../run/ansistring-records.pas -o %t.recs
 ; RUN: %t.recs > %t.recs.out && diff %S/../run/ansistring-records.expected %t.recs.out
-; RUN: env PCC_RUNTIME_LIB=%pcc-runtime-lib %t.pcc --mode=objfpc %S/../run/openarrays.pas -o %t.open
+; RUN: env P3_RUNTIME_LIB=%p3-runtime-lib %t.p3 --mode=objfpc %S/../run/openarrays.pas -o %t.open
 ; RUN: %t.open > %t.open.out && diff %S/../run/openarrays.expected %t.open.out
-; RUN: env PCC_RUNTIME_LIB=%pcc-runtime-lib %t.pcc --mode=objfpc %S/../run/methodpointers.pas -o %t.mp
+; RUN: env P3_RUNTIME_LIB=%p3-runtime-lib %t.p3 --mode=objfpc %S/../run/methodpointers.pas -o %t.mp
 ; RUN: %t.mp > %t.mp.out && diff %S/../run/methodpointers.expected %t.mp.out
-; RUN: env PCC_RUNTIME_LIB=%pcc-runtime-lib %t.pcc --mode=objfpc %S/../run/slice.pas -o %t.slice
+; RUN: env P3_RUNTIME_LIB=%p3-runtime-lib %t.p3 --mode=objfpc %S/../run/slice.pas -o %t.slice
 ; RUN: %t.slice > %t.slice.out && diff %S/../run/slice.expected %t.slice.out
-; RUN: env PCC_RUNTIME_LIB=%pcc-runtime-lib %t.pcc --mode=objfpc %S/../run/tmethod.pas -o %t.tmethod
+; RUN: env P3_RUNTIME_LIB=%p3-runtime-lib %t.p3 --mode=objfpc %S/../run/tmethod.pas -o %t.tmethod
 ; RUN: %t.tmethod > %t.tmethod.out && diff %S/../run/tmethod.expected %t.tmethod.out
-; RUN: env PCC_RUNTIME_LIB=%pcc-runtime-lib %t.pcc --mode=objfpc %S/../run/methodconstants.pas -o %t.mconst
+; RUN: env P3_RUNTIME_LIB=%p3-runtime-lib %t.p3 --mode=objfpc %S/../run/methodconstants.pas -o %t.mconst
 ; RUN: %t.mconst > %t.mconst.out && diff %S/../run/methodconstants.expected %t.mconst.out
-; RUN: env PCC_RUNTIME_LIB=%pcc-runtime-lib %t.pcc --mode=objfpc %S/../run/callchains.pas -o %t.chains
+; RUN: env P3_RUNTIME_LIB=%p3-runtime-lib %t.p3 --mode=objfpc %S/../run/callchains.pas -o %t.chains
 ; RUN: %t.chains > %t.chains.out && diff %S/../run/callchains.expected %t.chains.out
-; RUN: %t.pcc --mode=tp --emit-llvm --target=x86_64-w64-mingw32 %S/../driver/Inputs/unit-library/target.pas -o - | FileCheck --check-prefix=TARGET %S/../driver/unit-library.test
+; RUN: %t.p3 --mode=tp --emit-llvm --target=x86_64-w64-mingw32 %S/../driver/Inputs/unit-library/target.pas -o - | FileCheck --check-prefix=TARGET %S/../driver/unit-library.test
 ;
 ; The driver: the runtime is looked for next to the executable.
-; RUN: env -u PCC_RUNTIME_LIB not %t.pcc %S/Inputs/rterr.pas -o %t.none 2>&1 | FileCheck --check-prefix=NORT %s
-; NORT: error: cannot find the Pascal runtime library '{{.*}}lib{{/|\\}}libpascalrt.a'; set PCC_RUNTIME_LIB
+; RUN: env -u P3_RUNTIME_LIB not %t.p3 %S/Inputs/rterr.pas -o %t.none 2>&1 | FileCheck --check-prefix=NORT %s
+; NORT: error: cannot find the Pascal runtime library '{{.*}}lib{{/|\\}}libpascalrt.a'; set P3_RUNTIME_LIB
 ;
 ; The bootstrap fixed point.
-; RUN: %t.pcc --mode=tp %selfhost-flags -I %S/../../selfhost %S/../../selfhost/pcc.pas --emit-llvm -o %t.stage2.ll
-; RUN: env PCC_RUNTIME_LIB=%pcc-runtime-lib %t.pcc --mode=tp %selfhost-flags -I %S/../../selfhost %S/../../selfhost/pcc.pas -o %t.stage2
-; RUN: %t.stage2 --mode=tp %selfhost-flags -I %S/../../selfhost %S/../../selfhost/pcc.pas --emit-llvm -o %t.stage3.ll
+; RUN: %t.p3 --mode=tp %selfhost-flags -I %S/../../selfhost %S/../../selfhost/p3.pas --emit-llvm -o %t.stage2.ll
+; RUN: env P3_RUNTIME_LIB=%p3-runtime-lib %t.p3 --mode=tp %selfhost-flags -I %S/../../selfhost %S/../../selfhost/p3.pas -o %t.stage2
+; RUN: %t.stage2 --mode=tp %selfhost-flags -I %S/../../selfhost %S/../../selfhost/p3.pas --emit-llvm -o %t.stage3.ll
 ; RUN: diff %t.stage2.ll %t.stage3.ll

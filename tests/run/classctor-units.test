@@ -6,11 +6,11 @@
 ; program's, then the units' in reverse order, each unit's in declaration
 ; order (Free Pascal's order, written to a file there).
 ; RUN: rm -rf %t && mkdir -p %t && cp -r %S/Inputs/classctor/. %t/
-; RUN: %pcc --mode=objfpc -I %t/lib %t/main.pas -o %t/whole
+; RUN: %p3 --mode=objfpc -I %t/lib %t/main.pas -o %t/whole
 ; RUN: %t/whole | FileCheck %s
-; RUN: %pcc --mode=objfpc -c %t/lib/ubase.pas -o %t/lib/ubase.o
-; RUN: %pcc --mode=objfpc -I %t/lib -c %t/lib/utwo.pas -o %t/lib/utwo.o
-; RUN: %pcc --mode=objfpc -I %t/lib -fseparate-units %t/main.pas -o %t/separate
+; RUN: %p3 --mode=objfpc -c %t/lib/ubase.pas -o %t/lib/ubase.o
+; RUN: %p3 --mode=objfpc -I %t/lib -c %t/lib/utwo.pas -o %t/lib/utwo.o
+; RUN: %p3 --mode=objfpc -I %t/lib -fseparate-units %t/main.pas -o %t/separate
 ; RUN: %t/separate | FileCheck %s
 ; CHECK: TBase class constructor
 ; CHECK-NEXT: ubase initialization TRUE
@@ -28,7 +28,7 @@
 ; A class constructor's symbol is apart from a method of the same name, and
 ; is not exported; the unit's initialization function calls it and
 ; registers the class destructor.
-; RUN: %pcc --mode=objfpc -c --emit-llvm %t/lib/ubase.pas -o - | FileCheck --check-prefix=IR %s
+; RUN: %p3 --mode=objfpc -c --emit-llvm %t/lib/ubase.pas -o - | FileCheck --check-prefix=IR %s
 ; IR: define void @"pas.ubase$$init"()
 ; IR: call void @"pas.tbase.create$cctor"(ptr null)
 ; IR-NEXT: call void @__pas_at_exit(ptr @"pas.tbase.destroy$cdtor")

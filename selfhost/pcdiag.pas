@@ -1,6 +1,6 @@
 unit pcdiag;
 { Source files and diagnostics of the self-hosted compiler; the Pascal
-  counterpart of SourceManager.h and Diagnostics.h in include/pcc/Basic.
+  counterpart of SourceManager.h and Diagnostics.h in include/p3/Basic.
 
   Locations: every loaded file occupies a range of one global location
   space (like clang): file k covers start(k) .. start(k) + len(k), the last
@@ -15,7 +15,7 @@ unit pcdiag;
 
   Tabs in the source line expand to 8 columns; a line with non-ASCII bytes
   is printed without a caret line. Diagnostics without a location print as
-  "pcc: error: ...". Colors are not supported yet. }
+  "p3: error: ...". Colors are not supported yet. }
 
 interface
 
@@ -288,7 +288,7 @@ end;
 procedure diagInit;
 begin
   diagStream := sysErr;
-  diagProgName := 'pcc';
+  diagProgName := 'p3';
   errorLimit := 0;
   warningsAsErrors := false;
   listInit(disabledGroups);

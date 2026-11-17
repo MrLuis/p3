@@ -1,14 +1,14 @@
-#include "pcc/Driver/Driver.h"
-#include "pcc/AST/ASTContext.h"
-#include "pcc/AST/ASTPrinter.h"
-#include "pcc/Basic/Directives.h"
-#include "pcc/CodeGen/Backend.h"
-#include "pcc/CodeGen/CodeGen.h"
-#include "pcc/Driver/Linker.h"
-#include "pcc/Driver/Project.h"
-#include "pcc/Lexer/Lexer.h"
-#include "pcc/Parse/Parser.h"
-#include "pcc/Sema/Sema.h"
+#include "p3/Driver/Driver.h"
+#include "p3/AST/ASTContext.h"
+#include "p3/AST/ASTPrinter.h"
+#include "p3/Basic/Directives.h"
+#include "p3/CodeGen/Backend.h"
+#include "p3/CodeGen/CodeGen.h"
+#include "p3/Driver/Linker.h"
+#include "p3/Driver/Project.h"
+#include "p3/Lexer/Lexer.h"
+#include "p3/Parse/Parser.h"
+#include "p3/Sema/Sema.h"
 
 #include "llvm/ADT/SmallString.h"
 #include "llvm/ADT/StringSet.h"
@@ -28,13 +28,13 @@
 #include "llvm/TargetParser/Host.h"
 #include "llvm/TargetParser/Triple.h"
 
-using namespace pcc;
+using namespace p3;
 
 //===----------------------------------------------------------------------===//
 // CompilerOptions helpers
 //===----------------------------------------------------------------------===//
 
-const char *pcc::getActionName(Action A) {
+const char *p3::getActionName(Action A) {
   switch (A) {
   case Action::EmitTokens: return "--emit-tokens";
   case Action::EmitAST:    return "--emit-ast";
@@ -47,7 +47,7 @@ const char *pcc::getActionName(Action A) {
   return "?";
 }
 
-std::string pcc::getDefaultOutputFile(const CompilerOptions &Opts) {
+std::string p3::getDefaultOutputFile(const CompilerOptions &Opts) {
   if (Opts.Act == Action::EmitTokens || Opts.Act == Action::EmitAST ||
       Opts.Act == Action::EmitParseTree)
     return "-";
@@ -105,7 +105,7 @@ bool Driver::validateOptions() {
   return validateTarget();
 }
 
-/// The symbols Free Pascal predefines for the targets pcc's library supports
+/// The symbols Free Pascal predefines for the targets p3's library supports
 /// (Linux, macOS and Windows; x86-64 and AArch64).
 static void addTargetDefines(const llvm::Triple &T,
                              std::vector<std::string> &Defines) {
@@ -140,7 +140,7 @@ bool Driver::validateTarget() {
 }
 
 int Driver::run() {
-  // The project file's settings (pcc.json), under the command line's.
+  // The project file's settings (p3.json), under the command line's.
   if (!applyProjectFile(Opts, SM, Diags))
     return 1;
   configure();
@@ -388,7 +388,7 @@ bool Driver::finishModule(llvm::Module &Mod, llvm::TargetMachine &TMRef,
   // Executable: object file in a temp dir, then link.
   llvm::SmallString<128> ObjPath;
   if (std::error_code EC =
-          llvm::sys::fs::createTemporaryFile("pcc", "o", ObjPath)) {
+          llvm::sys::fs::createTemporaryFile("p3", "o", ObjPath)) {
     Diags.error("cannot create temporary file: " + EC.message());
     return false;
   }
@@ -490,7 +490,7 @@ void Driver::visitUnit(const Identifier &U, ASTContext &Ctx,
     Diags.error(U.Loc,
                 "cannot find unit '" + U.Spelling + "' (looked for " +
                     U.Name + ".pas next to the program, in -I directories "
-                    "and in pcc's unit library)",
+                    "and in p3's unit library)",
                 {U.getRange()});
     return;
   }

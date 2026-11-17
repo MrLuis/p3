@@ -2,8 +2,8 @@
 ; subtracted, compatible pointers are subtracted and ordered, typed
 ; pointers are indexed by integers, inc and dec take a pointer variable.
 ; flush takes one text file variable.
-; RUN: not %pcc --mode=tp -ferror-limit=0 -c %S/Inputs/ptrarith/errors.pas -o %t.o 2>&1 | FileCheck %s
-; RUN: not %pcc --mode=objfpc -ferror-limit=0 -c %S/Inputs/ptrarith/errors.pas -o %t.o 2>&1 | FileCheck %s
+; RUN: not %p3 --mode=tp -ferror-limit=0 -c %S/Inputs/ptrarith/errors.pas -o %t.o 2>&1 | FileCheck %s
+; RUN: not %p3 --mode=objfpc -ferror-limit=0 -c %S/Inputs/ptrarith/errors.pas -o %t.o 2>&1 | FileCheck %s
 ; CHECK: errors.pas:14:10: error: invalid operands to '+' ('PInt' and 'PInt')
 ; CHECK: errors.pas:15:10: error: invalid operands to '*' ('PInt' and 'integer')
 ; CHECK: errors.pas:16:10: error: invalid operands to '+' ('PInt' and 'real')
@@ -26,7 +26,7 @@
 ; CHECK-NOT: error:
 ;
 ; Neither is part of ISO 7185.
-; RUN: not %pcc -ferror-limit=0 -c %S/Inputs/ptrarith/iso.pas -o %t.o 2>&1 | FileCheck --check-prefix=ISO %s
+; RUN: not %p3 -ferror-limit=0 -c %S/Inputs/ptrarith/iso.pas -o %t.o 2>&1 | FileCheck --check-prefix=ISO %s
 ; ISO: iso.pas:9:10: error: invalid operands to '+' ('PInt' and 'integer')
 ; ISO: iso.pas:10:10: error: subscripted value is not an array (type 'PInt')
 ; ISO: iso.pas:11:8: error: invalid operands to '<' ('PInt' and 'PInt')
@@ -35,10 +35,10 @@
 ;
 ; write and writeln take a pchar (any pointer to char) outside ISO mode;
 ; other pointers cannot be written.
-; RUN: not %pcc --mode=tp -ferror-limit=0 -c %S/Inputs/ptrarith/write.pas -o %t.o 2>&1 | FileCheck --check-prefix=WR %s
+; RUN: not %p3 --mode=tp -ferror-limit=0 -c %S/Inputs/ptrarith/write.pas -o %t.o 2>&1 | FileCheck --check-prefix=WR %s
 ; WR: write.pas:13:11: error: cannot write a value of type 'PInt'
 ; WR-NOT: error:
-; RUN: not %pcc -ferror-limit=0 -c %S/Inputs/ptrarith/write.pas -o %t.o 2>&1 | FileCheck --check-prefix=WRISO %s
+; RUN: not %p3 -ferror-limit=0 -c %S/Inputs/ptrarith/write.pas -o %t.o 2>&1 | FileCheck --check-prefix=WRISO %s
 ; WRISO: write.pas:12:11: error: cannot write a value of type 'PCh'
 ; WRISO: write.pas:13:11: error: cannot write a value of type 'PInt'
 ; WRISO-NOT: error:

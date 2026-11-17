@@ -1,8 +1,8 @@
 ; Template strings (tp, objfpc): a value is one `write` can write, with the
 ; field width and precision it takes there; the template is an ansistring;
 ; a tagged one is a call with the text parts and the values.
-; RUN: not %pcc --mode=objfpc -ferror-limit=0 -c %S/Inputs/template/errors.pas -o %t.o 2>&1 | FileCheck %s
-; RUN: not %pcc --mode=tp -ferror-limit=0 -c %S/Inputs/template/errors.pas -o %t.o 2>&1 | FileCheck %s
+; RUN: not %p3 --mode=objfpc -ferror-limit=0 -c %S/Inputs/template/errors.pas -o %t.o 2>&1 | FileCheck %s
+; RUN: not %p3 --mode=tp -ferror-limit=0 -c %S/Inputs/template/errors.pas -o %t.o 2>&1 | FileCheck %s
 ; CHECK: errors.pas:29:7: error: constant value must be a constant
 ; CHECK: errors.pas:32:13: error: a value of type 'TRec' cannot be put in a template string
 ; CHECK: errors.pas:32:20: error: a value of type '^integer' cannot be put in a template string
@@ -23,7 +23,7 @@
 ; CHECK-NOT: errors.pas:37
 ;
 ; Syntax: each value is an expression, closed by '}'.
-; RUN: not %pcc --mode=objfpc -ferror-limit=0 -c %S/Inputs/template/syntax.pas -o %t.o 2>&1 | FileCheck --check-prefix=SYNTAX %s
+; RUN: not %p3 --mode=objfpc -ferror-limit=0 -c %S/Inputs/template/syntax.pas -o %t.o 2>&1 | FileCheck --check-prefix=SYNTAX %s
 ; SYNTAX: syntax.pas:6:17: error: expected expression
 ; SYNTAX: syntax.pas:7:17: error: expected '}' after the value in a template string
 ; SYNTAX: syntax.pas:8:19: error: expected expression
@@ -33,7 +33,7 @@
 ;
 ; The parts of a template: text and values in turn, the text without the
 ; layout's indentation; a tagged template is a call.
-; RUN: %pcc --mode=objfpc --emit-ast %S/Inputs/template/ast.pas | FileCheck --check-prefix=AST %s
+; RUN: %p3 --mode=objfpc --emit-ast %S/Inputs/template/ast.pas | FileCheck --check-prefix=AST %s
 ; AST:      AssignStmt <10:3>
 ; AST-NEXT:   NameRefExpr 's' variable : ansistring <10:3>
 ; AST-NEXT:   TemplateExpr : ansistring <10:8>

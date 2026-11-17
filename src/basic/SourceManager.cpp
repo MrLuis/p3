@@ -1,8 +1,8 @@
-#include "pcc/Basic/SourceManager.h"
+#include "p3/Basic/SourceManager.h"
 
 #include "llvm/Support/MemoryBuffer.h"
 
-using namespace pcc;
+using namespace p3;
 
 llvm::ErrorOr<FileID> SourceManager::loadFile(llvm::StringRef Path) {
   auto BufOrErr = llvm::MemoryBuffer::getFileOrSTDIN(Path, /*IsText=*/true);

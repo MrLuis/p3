@@ -1,10 +1,10 @@
 { sizeof(predefined type) in $IF: each size the lexer knows, checked against
   the sizeof of the generated code. Not compared with Free Pascal, whose
   integer is 2 bytes in objfpc mode.
-  RUN: %pcc --mode=objfpc %s -o %t
+  RUN: %p3 --mode=objfpc %s -o %t
   RUN:  %t > %t.out
   RUN: diff %S/sizeof-directive.expected %t.out
-  RUN: %pcc --mode=tp %s -o %t.tp
+  RUN: %p3 --mode=tp %s -o %t.tp
   RUN:  %t.tp > %t.tp.out
   RUN: diff %S/sizeof-directive.expected %t.tp.out
 }

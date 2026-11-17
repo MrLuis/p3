@@ -1,9 +1,9 @@
 { Distinct types (T = type X, not in --mode=iso), as in Free Pascal: here
   an alias of X, compatible with it everywhere, also as a var argument.
   Output is identical to Free Pascal 3.2.2's (fpc -Mobjfpc).
-  RUN: %pcc --mode=objfpc %s -o %t
+  RUN: %p3 --mode=objfpc %s -o %t
   RUN: %t | diff - %S/distinct.expected
-  RUN: %pcc --mode=tp %s -o %t.tp
+  RUN: %p3 --mode=tp %s -o %t.tp
   RUN: %t.tp | diff - %S/distinct.expected
 }
 program distinct;

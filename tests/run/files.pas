@@ -1,7 +1,7 @@
 { M10: files -- text and typed, internal files, buffer variables, eof/eoln,
   a program parameter bound to the first command-line argument, pack/unpack.
   RUN: rm -f %t.data
-  RUN: %pcc %s -o %t
+  RUN: %p3 %s -o %t
   RUN: %t %t.data > %t.out
   RUN: diff %S/files.expected %t.out
   RUN: diff %S/Inputs/files.data %t.data

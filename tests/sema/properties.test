@@ -1,6 +1,6 @@
 ; Properties and visibility (--mode=objfpc): accessors of array and indexed
 ; properties, the default property, strict private and strict protected.
-; RUN: not %pcc --mode=objfpc -ferror-limit=0 -c %S/Inputs/properties/errors.pas -o %t.o 2>&1 | FileCheck %s
+; RUN: not %p3 --mode=objfpc -ferror-limit=0 -c %S/Inputs/properties/errors.pas -o %t.o 2>&1 | FileCheck %s
 ; CHECK: errors.pas:14:14: error: class 'TA' already has a default property
 ; CHECK: errors.pas:13:14: note: 'P' declared here
 ; CHECK: errors.pas:15:42: error: 'FS' cannot be read as property 'R' of type 'integer' (use a function (i: integer): integer)

@@ -1,3 +1,3 @@
-; RUN: %pcc --version | FileCheck %s
-; CHECK: pcc version {{[0-9]+\.[0-9]+\.[0-9]+}} (LLVM 19.
+; RUN: %p3 --version | FileCheck %s
+; CHECK: p3 version {{[0-9]+\.[0-9]+\.[0-9]+}} (LLVM 19.
 ; CHECK-NEXT: Default target:

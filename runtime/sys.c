@@ -1,5 +1,5 @@
 /*
- * The operating system side of pcc's unit library (rtl/): what differs
+ * The operating system side of p3's unit library (rtl/): what differs
  * between Linux, macOS and 64-bit Windows, behind one set of functions.
  * Paths are NUL-terminated; functions returning int32_t return 1 on success
  * and 0 on failure.

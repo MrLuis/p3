@@ -1,10 +1,10 @@
 ; Generic routines of a unit's interface, specialized by the program,
 ; compiled whole and separately.
 ; RUN: rm -rf %t && mkdir -p %t && cp -r %S/Inputs/generics/. %t/
-; RUN: %pcc --mode=objfpc -I %t/lib %t/main.pas -o %t/whole
+; RUN: %p3 --mode=objfpc -I %t/lib %t/main.pas -o %t/whole
 ; RUN: %t/whole | FileCheck %s
-; RUN: %pcc --mode=objfpc -c %t/lib/gutil.pas -o %t/lib/gutil.o
-; RUN: %pcc --mode=objfpc -I %t/lib -fseparate-units %t/main.pas -o %t/separate
+; RUN: %p3 --mode=objfpc -c %t/lib/gutil.pas -o %t/lib/gutil.o
+; RUN: %p3 --mode=objfpc -I %t/lib -fseparate-units %t/main.pas -o %t/separate
 ; RUN: %t/separate | FileCheck %s
 ; CHECK:      42 abab
 ; CHECK-NEXT: 1, 2, 3
@@ -12,10 +12,10 @@
 ; A generic using what its unit keeps private: fine compiled whole, but a
 ; separately compiled unit's specializations see only its interface.
 ; RUN: rm -rf %t.p && mkdir -p %t.p && cp -r %S/Inputs/generics-private/. %t.p/
-; RUN: %pcc --mode=objfpc -I %t.p/lib %t.p/main.pas -o %t.p/whole
+; RUN: %p3 --mode=objfpc -I %t.p/lib %t.p/main.pas -o %t.p/whole
 ; RUN: %t.p/whole | FileCheck --check-prefix=PRIV %s
 ; PRIV: 42
-; RUN: %pcc --mode=objfpc -c %t.p/lib/gpriv.pas -o %t.p/lib/gpriv.o
-; RUN: not %pcc --mode=objfpc -I %t.p/lib -fseparate-units %t.p/main.pas -o %t.p/separate 2>&1 | FileCheck --check-prefix=SEP %s
+; RUN: %p3 --mode=objfpc -c %t.p/lib/gpriv.pas -o %t.p/lib/gpriv.o
+; RUN: not %p3 --mode=objfpc -I %t.p/lib -fseparate-units %t.p/main.pas -o %t.p/separate 2>&1 | FileCheck --check-prefix=SEP %s
 ; SEP: gpriv.pas:11:17: error: use of undeclared identifier 'Factor'
 ; SEP: main.pas:4:22: note: in the specialization 'Scaled<integer>' requested here

@@ -1,10 +1,10 @@
 { slice(a, n) passed to open array parameters: value, const and var, static
   and open arrays, managed elements, overloads. Output identical to Free
   Pascal 3.2.2's (fpc -Mobjfpc).
-  RUN: %pcc --mode=objfpc %s -o %t
+  RUN: %p3 --mode=objfpc %s -o %t
   RUN:  %t > %t.out
   RUN: diff %S/slice.expected %t.out
-  RUN: %pcc --mode=objfpc -O2 %s -o %t.O2
+  RUN: %p3 --mode=objfpc -O2 %s -o %t.O2
   RUN:  %t.O2 > %t.O2.out
   RUN: diff %S/slice.expected %t.O2.out
 }

@@ -1,7 +1,7 @@
 ; Generic type helpers (objfpc): the extended type must be built from all
 ; the type parameters (not a bare one); one helper applies to a type, the
 ; last generic one declared hiding the earlier ones.
-; RUN: not %pcc --mode=objfpc -ferror-limit=0 -c %S/Inputs/generichelpers/errors.pas -o %t.o 2>&1 | FileCheck %s
+; RUN: not %p3 --mode=objfpc -ferror-limit=0 -c %S/Inputs/generichelpers/errors.pas -o %t.o 2>&1 | FileCheck %s
 ; CHECK: errors.pas:4:37: error: a generic helper must extend a type built from all its type parameters, such as 'array of T' or 'specialize TGen<T>'
 ; CHECK: errors.pas:7:40: error: a generic helper must extend a type built from all its type parameters, such as 'array of T' or 'specialize TGen<T>'
 ; CHECK: errors.pas:29:13: error: '.' applied to a value of type 'TInts', which is not a record

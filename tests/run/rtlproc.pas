@@ -2,9 +2,9 @@
   routine of Free Pascal's run-time library and has no effect; with other
   directives, forward, on methods; not reserved. Output is identical to
   Free Pascal 3.2.2's (fpc -Mobjfpc).
-  RUN: %pcc --mode=objfpc %s -o %t
+  RUN: %p3 --mode=objfpc %s -o %t
   RUN: %t | diff - %S/rtlproc.expected
-  RUN: %pcc --mode=tp %s -o %t.tp
+  RUN: %p3 --mode=tp %s -o %t.tp
   RUN: %t.tp | diff - %S/rtlproc.expected
 }
 program rtlproc_directive;

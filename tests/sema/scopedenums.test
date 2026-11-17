@@ -1,7 +1,7 @@
 ; {$scopedenums on}: a value of a scoped enumeration is not in scope (not
 ; even in its class's methods), a value it does not have, a value repeated
 ; in it, and a toggle that is neither on nor off.
-; RUN: not %pcc --mode=objfpc -ferror-limit=0 -c %S/Inputs/scopedenums/errors.pas -o %t.o 2>&1 | FileCheck %s
+; RUN: not %p3 --mode=objfpc -ferror-limit=0 -c %S/Inputs/scopedenums/errors.pas -o %t.o 2>&1 | FileCheck %s
 ; CHECK: errors.pas:4:25: error: redefinition of 'Red'
 ; CHECK: errors.pas:4:13: note: previous definition is here
 ; CHECK: errors.pas:15:13: error: use of undeclared identifier 'One'
@@ -9,13 +9,13 @@
 ; CHECK: errors.pas:19:15: error: no value named 'Nope' in enumeration 'TColor'
 ; CHECK-NOT: error:
 
-; RUN: not %pcc --mode=tp -c %S/Inputs/scopedenums/toggle.pas -o %t.o 2>&1 | FileCheck --check-prefix=TOGGLE %s
+; RUN: not %p3 --mode=tp -c %S/Inputs/scopedenums/toggle.pas -o %t.o 2>&1 | FileCheck --check-prefix=TOGGLE %s
 ; TOGGLE: toggle.pas:2:1: error: expected {$scopedenums on} or {$scopedenums off}
 
 ; objfpc: a qualified default parameter value, a type helper's members next
 ; to the values (TColor.Blue.Code, TColor.Count), a scoped enumeration in a
 ; class (TOuter.TKind.One); output as Free Pascal's.
-; RUN: %pcc --mode=objfpc %S/Inputs/scopedenums/objfpc.pas -o %t.objfpc
+; RUN: %p3 --mode=objfpc %S/Inputs/scopedenums/objfpc.pas -o %t.objfpc
 ; RUN: %t.objfpc | FileCheck --check-prefix=OBJFPC %s
 ; OBJFPC:      1 2
 ; OBJFPC-NEXT: 20 3

@@ -8,13 +8,13 @@
   copies and var parameters through fields left unaligned, and typed
   constants. Output is identical to Free Pascal 3.2.2's (fpc -Mobjfpc and
   -Mtp).
-  RUN: %pcc --mode=objfpc %s -o %t
+  RUN: %p3 --mode=objfpc %s -o %t
   RUN: %t | diff - %S/packrecords.expected
-  RUN: %pcc --mode=tp %s -o %t.tp
+  RUN: %p3 --mode=tp %s -o %t.tp
   RUN: %t.tp | diff - %S/packrecords.expected
-  RUN: %pcc --mode=objfpc -O2 %s -o %t.O2
+  RUN: %p3 --mode=objfpc -O2 %s -o %t.O2
   RUN: %t.O2 | diff - %S/packrecords.expected
-  RUN: %pcc --mode=objfpc -g %s -o %t.g
+  RUN: %p3 --mode=objfpc -g %s -o %t.g
   RUN: %t.g | diff - %S/packrecords.expected
 }
 program packrecords;

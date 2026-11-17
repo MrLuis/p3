@@ -1,6 +1,6 @@
 program hello;
 { Greets the names on the command line (or the world), using a unit of the
-  project (src/lib/greeting.pas) and one of pcc's library (sysutils). }
+  project (src/lib/greeting.pas) and one of p3's library (sysutils). }
 uses sysutils, greeting;
 var
   i: Integer;

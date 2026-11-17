@@ -4,7 +4,7 @@
   Pascal's). ExceptAddr, in a handler, is the address of the exception it
   handles (nil outside handlers); a re-raise keeps it. Output is identical
   to Free Pascal 3.2.2's (fpc -Mobjfpc, with SysUtils).
-  RUN: %pcc --mode=objfpc %s -o %t
+  RUN: %p3 --mode=objfpc %s -o %t
   RUN: %t | diff - %S/raiseat.expected
 }
 program raiseat;

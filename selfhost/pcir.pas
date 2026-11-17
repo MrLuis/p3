@@ -1,6 +1,6 @@
 unit pcir;
 { A builder for textual LLVM IR that writes exactly what LLVM 19 prints for
-  the module the C++ pcc builds with IRBuilder (SELFHOST.md S10: the two
+  the module the C++ p3 builds with IRBuilder (SELFHOST.md S10: the two
   compilers' --emit-llvm output must be identical). It models what shows
   in the text:
 

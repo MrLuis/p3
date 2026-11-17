@@ -2,16 +2,16 @@
   defined(), not, and, or, true, false and parentheses,
   $ELSEIF / $ELSE / $ENDIF / $IFEND, nesting, skipped text that would not
   compile (unterminated strings, bad characters, directives), (* *) and //
-  directives and comments, -d on the command line and the predefined PCC
+  directives and comments, -d on the command line and the predefined P3
   symbols. The output is identical to Free Pascal 3.2.2's
-  (fpc -Mobjfpc -dPCC -dPCC_TP -dEXTRA).
-  RUN: %pcc --mode=tp -dEXTRA %s -o %t
+  (fpc -Mobjfpc -dP3 -dP3_TP -dEXTRA).
+  RUN: %p3 --mode=tp -dEXTRA %s -o %t
   RUN:  %t > %t.out
   RUN: diff %S/conditionals.expected %t.out
-  RUN: %pcc --mode=tp -O2 -d extra %s -o %t.O2
+  RUN: %p3 --mode=tp -O2 -d extra %s -o %t.O2
   RUN:  %t.O2 > %t.O2.out
   RUN: diff %S/conditionals.expected %t.O2.out
-  RUN: %pcc --mode=tp -g -dExtra %s -o %t.g
+  RUN: %p3 --mode=tp -g -dExtra %s -o %t.g
   RUN:  %t.g > %t.g.out
   RUN: diff %S/conditionals.expected %t.g.out
 }
@@ -53,10 +53,10 @@ var
 
 begin
   writeln('mode ', Mode, ', level ', Level, ', level2 gone ', Gone);
-{$ifdef PCC}
-  writeln('compiled by pcc');
-  {$ifdef PCC_TP} writeln('in tp mode'); {$endif}
-  {$ifdef PCC_ISO} writeln('in iso mode'); {$endif}
+{$ifdef P3}
+  writeln('compiled by p3');
+  {$ifdef P3_TP} writeln('in tp mode'); {$endif}
+  {$ifdef P3_ISO} writeln('in iso mode'); {$endif}
 {$else}
   writeln('compiled by something else');
 {$endif}

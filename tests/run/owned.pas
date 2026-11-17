@@ -4,9 +4,9 @@
   first. `move x` gives the object up: x is nil afterwards. A destructor
   that raises does not stop the others being freed; its exception is
   raised afterwards unless another is already leaving the routine.
-  RUN: %pcc --mode=objfpc %s -o %t
+  RUN: %p3 --mode=objfpc %s -o %t
   RUN: %t | diff - %S/owned.expected
-  RUN: %pcc --mode=objfpc -O2 -fno-range-checks %s -o %t.fast
+  RUN: %p3 --mode=objfpc -O2 -fno-range-checks %s -o %t.fast
   RUN: %t.fast | diff - %S/owned.expected
 }
 program owned;

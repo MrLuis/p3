@@ -1,7 +1,7 @@
 ; All reserved words (PLAN.md 4.2/4.3, and objfpc's), mixed case.
-; RUN: %pcc --emit-tokens %S/Inputs/keywords.pas | FileCheck --check-prefixes=CHECK,ISO,NOOBJ %s
-; RUN: %pcc --emit-tokens --mode=tp %S/Inputs/keywords.pas | FileCheck --check-prefixes=CHECK,TP,NOOBJ %s
-; RUN: %pcc --emit-tokens --mode=objfpc %S/Inputs/keywords.pas | FileCheck --check-prefixes=CHECK,TP,OBJ %s
+; RUN: %p3 --emit-tokens %S/Inputs/keywords.pas | FileCheck --check-prefixes=CHECK,ISO,NOOBJ %s
+; RUN: %p3 --emit-tokens --mode=tp %S/Inputs/keywords.pas | FileCheck --check-prefixes=CHECK,TP,NOOBJ %s
+; RUN: %p3 --emit-tokens --mode=objfpc %S/Inputs/keywords.pas | FileCheck --check-prefixes=CHECK,TP,OBJ %s
 
 ; CHECK: 1:1 kw_and 'AND'
 ; CHECK-NEXT: 1:{{[0-9]+}} kw_array 'Array'

@@ -3,11 +3,11 @@
    ${value:width:digits} written as write writes them. The layout's line
    breaks and indentation are removed; r`...` is raw; Tag`...` calls Tag
    with the text parts and the values.
-   RUN: %pcc --mode=tp %s -o %t
+   RUN: %p3 --mode=tp %s -o %t
    RUN: %t | diff - %S/template.expected
-   RUN: %pcc --mode=objfpc -O2 -fno-range-checks %s -o %t.fast
+   RUN: %p3 --mode=objfpc -O2 -fno-range-checks %s -o %t.fast
    RUN: %t.fast | diff - %S/template.expected
-   RUN: %pcc --mode=objfpc -g %s -o %t.g
+   RUN: %p3 --mode=objfpc -g %s -o %t.g
    RUN: %t.g | diff - %S/template.expected
 *)
 program template;

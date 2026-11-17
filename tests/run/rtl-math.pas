@@ -1,7 +1,7 @@
-{ pcc's unit library: output identical to Free Pascal 3.2.2's (fpc -Mobjfpc -Sh-).
-  RUN: %pcc --mode=objfpc %s -o %t
+{ p3's unit library: output identical to Free Pascal 3.2.2's (fpc -Mobjfpc -Sh-).
+  RUN: %p3 --mode=objfpc %s -o %t
   RUN: %t > %t.out && diff %S/rtl-math.expected %t.out
-  RUN: %pcc --mode=objfpc -O2 %s -o %t
+  RUN: %p3 --mode=objfpc -O2 %s -o %t
   RUN: %t > %t.out && diff %S/rtl-math.expected %t.out
 }
 program rtlmath;

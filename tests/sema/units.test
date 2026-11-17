@@ -1,12 +1,12 @@
 ; M12: unit errors.
 ; Implementation-only names are private.
-; RUN: not %pcc --mode=tp -I %S/../run/Inputs/units/lib -c %S/Inputs/units/priv.pas -o %t.o 2>&1 | FileCheck --check-prefix=PRIV %s
+; RUN: not %p3 --mode=tp -I %S/../run/Inputs/units/lib -c %S/Inputs/units/priv.pas -o %t.o 2>&1 | FileCheck --check-prefix=PRIV %s
 ; PRIV: priv.pas:4:11: error: use of undeclared identifier 'helper'
 ; A unit that cannot be found (reported once per use, not as "circular").
-; RUN: not %pcc --mode=tp -c %S/../run/Inputs/units/main.pas -o %t.o 2>&1 | FileCheck --check-prefix=MISSING %s
+; RUN: not %p3 --mode=tp -c %S/../run/Inputs/units/main.pas -o %t.o 2>&1 | FileCheck --check-prefix=MISSING %s
 ; MISSING: shapes.pas:3:6: error: cannot find unit 'MathUtils'
 ; MISSING-NOT: circular
-; RUN: not %pcc --mode=tp -c %S/Inputs/units/cyc.pas -o %t.o 2>&1 | FileCheck --check-prefix=CYCLE %s
+; RUN: not %p3 --mode=tp -c %S/Inputs/units/cyc.pas -o %t.o 2>&1 | FileCheck --check-prefix=CYCLE %s
 ; CYCLE: b.pas:3:6: error: circular unit reference to 'A'
-; RUN: not %pcc -c %S/../run/Inputs/units/main.pas -o %t.o 2>&1 | FileCheck --check-prefix=ISO %s
+; RUN: not %p3 -c %S/../run/Inputs/units/main.pas -o %t.o 2>&1 | FileCheck --check-prefix=ISO %s
 ; ISO: main.pas:2:1: error: units are a Turbo/Free Pascal extension; use --mode=tp

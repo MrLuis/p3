@@ -3,7 +3,7 @@
 ; stores the value, or zero after releasing what the variable held. After
 ; the declaration of an owned variable, the rest of its statement sequence
 ; is the protected part of a try-finally that frees it.
-; RUN: %pcc --mode=objfpc --emit-llvm %S/Inputs/inlinevar.pas -o %t.ll
+; RUN: %p3 --mode=objfpc --emit-llvm %S/Inputs/inlinevar.pas -o %t.ll
 ; RUN: FileCheck %s < %t.ll
 ; RUN: opt -passes=verify -disable-output %t.ll
 

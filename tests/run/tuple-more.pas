@@ -2,9 +2,9 @@
   recursive function (each activation builds its tuples in its own hidden
   variables), across exceptions, in a nested routine, and as the initial
   value of a variable.
-  RUN: %pcc --mode=objfpc %s -o %t
+  RUN: %p3 --mode=objfpc %s -o %t
   RUN: %t | diff - %S/tuple-more.expected
-  RUN: %pcc --mode=objfpc -O2 %s -o %t.fast
+  RUN: %p3 --mode=objfpc -O2 %s -o %t.fast
   RUN: %t.fast | diff - %S/tuple-more.expected
 }
 {$H+}

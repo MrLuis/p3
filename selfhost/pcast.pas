@@ -1,6 +1,6 @@
 unit pcast;
 { The abstract syntax tree of the self-hosted compiler; the Pascal
-  counterpart of include/pcc/AST/AST.h.
+  counterpart of include/p3/AST/AST.h.
 
   Expressions and statements are one record type, TNode, with a variant
   part per kind; declarations are TDecl, written types TTypeSpec. All nodes
@@ -736,7 +736,7 @@ const
   hintLibrary = 8;
   hintUnimplemented = 16;
 
-  { Calling convention directives (Turbo/FPC), as written. pcc calls every
+  { Calling convention directives (Turbo/FPC), as written. p3 calls every
     routine with the target's C convention (a cdecl routine's procedural
     values point to a C entry without the static link); as in Free Pascal on 64-bit
     targets, 'stdcall' is the default convention and 'cdecl' a different

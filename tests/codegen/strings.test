@@ -3,7 +3,7 @@
 ; temporary); a value parameter gets the caller's string and copies the
 ; characters in use into its own variable; a const parameter reads the
 ; caller's. s := s + x appends in place.
-; RUN: %pcc --mode=tp --emit-llvm %S/Inputs/strpass.pas -o - | FileCheck %s
+; RUN: %p3 --mode=tp --emit-llvm %S/Inputs/strpass.pas -o - | FileCheck %s
 
 ; CHECK-LABEL: define i32 @main(
 ; CHECK:      %result = alloca [256 x i8]

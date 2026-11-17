@@ -2,7 +2,7 @@
 ; (always, as in Free Pascal, whose error 107 it is); ISO Pascal cannot
 ; write enumerations.
 ; RUN: rm -rf %t && mkdir -p %t
-; RUN: %pcc --mode=tp -fno-range-checks %S/Inputs/enum-write/bad.pas -o %t/bad && not %t/bad 2>&1 | FileCheck --check-prefix=BAD %s
+; RUN: %p3 --mode=tp -fno-range-checks %S/Inputs/enum-write/bad.pas -o %t/bad && not %t/bad 2>&1 | FileCheck --check-prefix=BAD %s
 ; BAD: Runtime error: invalid enumeration value at {{.*}}bad.pas:10:11
-; RUN: not %pcc -c %S/Inputs/enum-write/iso.pas -o %t/iso.o 2>&1 | FileCheck --check-prefix=ISO %s
+; RUN: not %p3 -c %S/Inputs/enum-write/iso.pas -o %t/iso.o 2>&1 | FileCheck --check-prefix=ISO %s
 ; ISO: iso.pas:8:11: error: cannot write a value of type 'TColor'

@@ -7,13 +7,13 @@
   constructor runs, IInterface / IUnknown, is / as between interfaces and
   from an interface to a class. Output is identical to Free Pascal 3.2.2's
   (fpc -Mobjfpc).
-  RUN: %pcc --mode=objfpc %s -o %t
+  RUN: %p3 --mode=objfpc %s -o %t
   RUN:  %t > %t.out
   RUN: diff %S/cominterfaces.expected %t.out
-  RUN: %pcc --mode=objfpc -O2 %s -o %t.O2
+  RUN: %p3 --mode=objfpc -O2 %s -o %t.O2
   RUN:  %t.O2 > %t.O2.out
   RUN: diff %S/cominterfaces.expected %t.O2.out
-  RUN: %pcc --mode=objfpc -g %s -o %t.g
+  RUN: %p3 --mode=objfpc -g %s -o %t.g
   RUN:  %t.g > %t.g.out
   RUN: diff %S/cominterfaces.expected %t.g.out
 }
@@ -242,7 +242,7 @@ end;
 
 { Free Pascal passes a function's result to a local variable directly
   but holds it in a hidden temporary otherwise, until the routine ends;
-  pcc releases such temporaries when the statement ends. The scenarios
+  p3 releases such temporaries when the statement ends. The scenarios
   below give results to local variables only, so that both agree. }
 
 procedure Assignment;

@@ -2,7 +2,7 @@
 ; (qword values are unsigned), qword as a set element or array index type,
 ; case labels for a qword selector (ordered unsigned), integer literals
 ; beyond 2^64-1, and no qword in ISO mode.
-; RUN: not %pcc --mode=objfpc -ferror-limit=0 -c %S/Inputs/qword/errors.pas -o %t.o 2>&1 | FileCheck %s
+; RUN: not %p3 --mode=objfpc -ferror-limit=0 -c %S/Inputs/qword/errors.pas -o %t.o 2>&1 | FileCheck %s
 ; CHECK: errors.pas:3:16: error: value -1 is out of range for 'qword'
 ; CHECK: errors.pas:5:17: error: value 9223372036854775808 is out of range for 'int64'
 ; CHECK: errors.pas:7:17: error: set element type 'qword' has values outside 0..255; use a subrange
@@ -14,9 +14,9 @@
 ; CHECK: errors.pas:18:5: note: previous case label is here
 ; CHECK-NOT: error:
 
-; RUN: not %pcc --mode=tp -c %S/Inputs/qword/toobig.pas -o %t.o 2>&1 | FileCheck --check-prefix=BIG %s
+; RUN: not %p3 --mode=tp -c %S/Inputs/qword/toobig.pas -o %t.o 2>&1 | FileCheck --check-prefix=BIG %s
 ; BIG: toobig.pas:4:12: error: integer literal is too large
 ; BIG-NOT: error:
 
-; RUN: not %pcc -c %S/Inputs/qword/iso.pas -o %t.o 2>&1 | FileCheck --check-prefix=ISO %s
+; RUN: not %p3 -c %S/Inputs/qword/iso.pas -o %t.o 2>&1 | FileCheck --check-prefix=ISO %s
 ; ISO: iso.pas:2:8: error: unknown type name 'qword'

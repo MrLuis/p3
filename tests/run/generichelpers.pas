@@ -1,15 +1,15 @@
-{ Generic type helpers (objfpc, pcc's own): generic TH<T> = type helper
+{ Generic type helpers (objfpc, p3's own): generic TH<T> = type helper
   for array of T extends every dynamic array (T its element type), and a
   helper for specialize TGen<T> every specialization of TGen that matches.
   The helper is specialized where it is used; an exact (non-generic)
   helper comes first, then the generic ones, the last declared first (one
   helper applies to a type, as in Free Pascal).
   Generic methods in them (Map<R>) take their types from lambdas.
-  RUN: %pcc --mode=objfpc %s -o %t
+  RUN: %p3 --mode=objfpc %s -o %t
   RUN: %t | diff - %S/generichelpers.expected
-  RUN: %pcc --mode=objfpc -O2 %s -o %t.fast
+  RUN: %p3 --mode=objfpc -O2 %s -o %t.fast
   RUN: %t.fast | diff - %S/generichelpers.expected
-  RUN: %pcc --mode=objfpc -g %s -o %t.g
+  RUN: %p3 --mode=objfpc -g %s -o %t.g
   RUN: %t.g | diff - %S/generichelpers.expected
 }
 {$H+}

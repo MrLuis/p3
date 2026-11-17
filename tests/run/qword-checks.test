@@ -2,19 +2,19 @@
 ; signed types out of range, overflow of + and -, succ of the last value,
 ; and read (0 .. 2^64-1, no sign).
 ; RUN: rm -rf %t && mkdir -p %t
-; RUN: %pcc --mode=tp %S/Inputs/qword-checks/neg.pas -o %t/neg && not %t/neg 2>&1 | FileCheck --check-prefix=NEG %s
+; RUN: %p3 --mode=tp %S/Inputs/qword-checks/neg.pas -o %t/neg && not %t/neg 2>&1 | FileCheck --check-prefix=NEG %s
 ; NEG: Runtime error: value out of range at {{.*}}neg.pas:5:8
-; RUN: %pcc --mode=tp %S/Inputs/qword-checks/toint.pas -o %t/toint && not %t/toint 2>&1 | FileCheck --check-prefix=TOINT %s
+; RUN: %p3 --mode=tp %S/Inputs/qword-checks/toint.pas -o %t/toint && not %t/toint 2>&1 | FileCheck --check-prefix=TOINT %s
 ; TOINT: Runtime error: value out of range at {{.*}}toint.pas:5:8
-; RUN: %pcc --mode=tp %S/Inputs/qword-checks/toi64.pas -o %t/toi64 && not %t/toi64 2>&1 | FileCheck --check-prefix=TOI64 %s
+; RUN: %p3 --mode=tp %S/Inputs/qword-checks/toi64.pas -o %t/toi64 && not %t/toi64 2>&1 | FileCheck --check-prefix=TOI64 %s
 ; TOI64: Runtime error: value out of range at {{.*}}toi64.pas:7:8
-; RUN: %pcc --mode=tp %S/Inputs/qword-checks/add.pas -o %t/add && not %t/add 2>&1 | FileCheck --check-prefix=ADD %s
+; RUN: %p3 --mode=tp %S/Inputs/qword-checks/add.pas -o %t/add && not %t/add 2>&1 | FileCheck --check-prefix=ADD %s
 ; ADD: Runtime error: integer overflow at {{.*}}add.pas:6:10
-; RUN: %pcc --mode=tp %S/Inputs/qword-checks/sub.pas -o %t/sub && not %t/sub 2>&1 | FileCheck --check-prefix=SUB %s
+; RUN: %p3 --mode=tp %S/Inputs/qword-checks/sub.pas -o %t/sub && not %t/sub 2>&1 | FileCheck --check-prefix=SUB %s
 ; SUB: Runtime error: integer overflow at {{.*}}sub.pas:6:10
-; RUN: %pcc --mode=tp %S/Inputs/qword-checks/succmax.pas -o %t/succmax && not %t/succmax 2>&1 | FileCheck --check-prefix=SUCC %s
+; RUN: %p3 --mode=tp %S/Inputs/qword-checks/succmax.pas -o %t/succmax && not %t/succmax 2>&1 | FileCheck --check-prefix=SUCC %s
 ; SUCC: Runtime error: 'succ' of the last value of its type at {{.*}}succmax.pas:5:8
-; RUN: %pcc --mode=tp %S/Inputs/qword-checks/readq.pas -o %t/readq
+; RUN: %p3 --mode=tp %S/Inputs/qword-checks/readq.pas -o %t/readq
 ; RUN: printf '18446744073709551615 +7\n' | %t/readq | FileCheck --check-prefix=READ %s
 ; READ: 18446744073709551615
 ; READ-NEXT: 7

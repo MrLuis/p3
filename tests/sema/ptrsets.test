@@ -1,5 +1,5 @@
 ; M9: pointer and set type checking.
-; RUN: not %pcc -ferror-limit=0 -c %S/Inputs/ptrsets.pas -o %t.o 2>&1 | FileCheck %s
+; RUN: not %p3 -ferror-limit=0 -c %S/Inputs/ptrsets.pas -o %t.o 2>&1 | FileCheck %s
 
 ; CHECK: ptrsets.pas:4:15: error: set element type 'integer' has values outside 0..255; use a subrange
 ; CHECK: ptrsets.pas:5:15: error: set element type must be an ordinal type, not 'real'

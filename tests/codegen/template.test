@@ -5,7 +5,7 @@
 ; string, held in a temporary like any string result. A template without
 ; values is a string constant, and a tagged one a call with two open
 ; arrays.
-; RUN: %pcc --mode=objfpc --emit-llvm %S/Inputs/template.pas -o %t.ll
+; RUN: %p3 --mode=objfpc --emit-llvm %S/Inputs/template.pas -o %t.ll
 ; RUN: FileCheck %s < %t.ll
 ; RUN: opt -passes=verify -disable-output %t.ll
 

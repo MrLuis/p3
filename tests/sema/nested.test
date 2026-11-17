@@ -2,7 +2,7 @@
 ; members, a constant used as a type, a type used as a value, strict
 ; private access, forward classes that are never defined, redefinitions,
 ; nested names outside their class, and what is not supported yet.
-; RUN: not %pcc --mode=objfpc -ferror-limit=0 -c %S/Inputs/nested/errors.pas -o %t.o 2>&1 | FileCheck %s
+; RUN: not %p3 --mode=objfpc -ferror-limit=0 -c %S/Inputs/nested/errors.pas -o %t.o 2>&1 | FileCheck %s
 ; CHECK: errors.pas:11:10: error: interfaces cannot be declared in a class or record yet
 ; CHECK: errors.pas:13:11: error: redefinition of 'Cap'
 ; CHECK: errors.pas:8:11: note: previous definition is here
@@ -19,7 +19,7 @@
 ; CHECK: errors.pas:33:15: error: 'Cap' is a constant, not a method
 ; CHECK-NOT: error:
 
-; RUN: not %pcc --mode=objfpc -ferror-limit=0 -c %S/Inputs/nested/parse.pas -o %t.o 2>&1 | FileCheck --check-prefix=PARSE %s
+; RUN: not %p3 --mode=objfpc -ferror-limit=0 -c %S/Inputs/nested/parse.pas -o %t.o 2>&1 | FileCheck --check-prefix=PARSE %s
 ; PARSE: parse.pas:5:11: error: typed constants in records are not supported yet
 ; PARSE: parse.pas:12:3: error: expected constant name after 'const'
 ; PARSE-NOT: error:

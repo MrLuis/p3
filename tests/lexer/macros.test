@@ -4,7 +4,7 @@
 ; integer or string literal, the value of the macro it names, or its text
 ; (a string); strings compare and concatenate (Free Pascal compares only
 ; their lengths), and `in [...]` takes values and ranges.
-; RUN: %pcc --mode=tp --emit-tokens %S/Inputs/macros.pas | FileCheck %s
+; RUN: %p3 --mode=tp --emit-tokens %S/Inputs/macros.pas | FileCheck %s
 ; CHECK:      5:1 identifier 'a'
 ; CHECK-NEXT: 2:18 integer_literal '1'
 ; CHECK-NEXT: 2:19 comma ','
@@ -18,7 +18,7 @@
 ; CHECK-NEXT: 12:1 identifier 'WORD'
 ; CHECK-NEXT: eof
 
-; RUN: not %pcc --mode=tp -ferror-limit=0 --emit-tokens %S/Inputs/macro-errors.pas 2>&1 >/dev/null | FileCheck --check-prefix=ERR %s
+; RUN: not %p3 --mode=tp -ferror-limit=0 --emit-tokens %S/Inputs/macro-errors.pas 2>&1 >/dev/null | FileCheck --check-prefix=ERR %s
 ; ERR: macro-errors.pas:2:15: warning: expanding macros exceeds a depth of 16
 ; ERR: macro-errors.pas:6:1: error: incompatible types in $IF expression
 ; ERR: macro-errors.pas:7:1: error: division by zero in $IF expression
@@ -32,7 +32,7 @@
 
 ; Macros cross include files: one defined in the including file is used in
 ; the included one, and the other way round.
-; RUN: %pcc --mode=tp --emit-tokens %S/Inputs/macros-inc.pas | FileCheck --check-prefix=INC %s
+; RUN: %p3 --mode=tp --emit-tokens %S/Inputs/macros-inc.pas | FileCheck --check-prefix=INC %s
 ; INC:      2:19 integer_literal '1'
 ; INC-NEXT: 2:21 plus '+'
 ; INC-NEXT: 2:7 integer_literal '3'

@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """Bootstraps the self-hosted compiler (SELFHOST.md S9) and checks it.
 
-  stage 0  the C++ pcc
-  stage 1  selfhost/pcc.pas built by stage 0
-  stage 2  selfhost/pcc.pas built by stage 1
-  stage 3  selfhost/pcc.pas built by stage 2
+  stage 0  the C++ p3
+  stage 1  selfhost/p3.pas built by stage 0
+  stage 2  selfhost/p3.pas built by stage 1
+  stage 3  selfhost/p3.pas built by stage 2
 
-Each stage is installed as <work>/stageN/bin/pcc with the runtime in
+Each stage is installed as <work>/stageN/bin/p3 with the runtime in
 <work>/stageN/lib, where the compiler looks for it. Checks:
 
   1. stages 1, 2 and 3 write the same --emit-llvm output for their own
@@ -20,14 +20,14 @@ Each stage is installed as <work>/stageN/bin/pcc with the runtime in
   5. with --fpc: an independent stage 1 built by Free Pascal leads to the
      same stage 2 IR;
   6. with --separate: stage 3 builds the compiler from separately compiled
-     units (each unit with -c, then pcc.pas with -fseparate-units), and
+     units (each unit with -c, then p3.pas with -fseparate-units), and
      that compiler writes the same IR.
 
 The self-hosted compiler links with libLLVM (its LLVM-C back end, S11):
 --flags gives the build options CMake wrote to build/selfhost/flags.txt.
 
 Usage:
-  utils/bootstrap.py --pcc build/bin/pcc --runtime build/lib/libpascalrt.a \\
+  utils/bootstrap.py --p3 build/bin/p3 --runtime build/lib/libpascalrt.a \\
       [--flags build/selfhost/flags.txt] [--work build/bootstrap] [-O N]
       [--fpc] [--modules] [--no-exe-compare]
 Exit status 0 if every check passes.
@@ -43,7 +43,7 @@ import tempfile
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SELFHOST = os.path.join(ROOT, "selfhost")
-SOURCE = os.path.join(SELFHOST, "pcc.pas")
+SOURCE = os.path.join(SELFHOST, "p3.pas")
 
 
 def log(msg):
@@ -65,7 +65,7 @@ def install(work, name, runtime):
     os.makedirs(os.path.join(stage, "bin"), exist_ok=True)
     os.makedirs(os.path.join(stage, "lib"), exist_ok=True)
     shutil.copyfile(runtime, os.path.join(stage, "lib", "libpascalrt.a"))
-    return os.path.join(stage, "bin", "pcc")
+    return os.path.join(stage, "bin", "p3")
 
 
 FLAGS = []
@@ -80,7 +80,7 @@ def emit_ir(compiler, out):
 
 
 def fpc_flags():
-    """The pcc build flags as Free Pascal options."""
+    """The p3 build flags as Free Pascal options."""
     out = []
     i = 0
     while i < len(FLAGS):
@@ -119,11 +119,11 @@ def module_ir(compiler, path, mode):
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
-    ap.add_argument("--pcc", required=True, help="the C++ pcc (stage 0)")
+    ap.add_argument("--p3", required=True, help="the C++ p3 (stage 0)")
     ap.add_argument("--runtime", required=True, help="libpascalrt.a")
     ap.add_argument("--work", default=os.path.join(ROOT, "build", "bootstrap"))
     ap.add_argument("--flags", default=os.path.join(ROOT, "build", "selfhost", "flags.txt"),
-                    help="file with the options that build selfhost/pcc.pas")
+                    help="file with the options that build selfhost/p3.pas")
     ap.add_argument("-O", dest="opt", type=int, default=2,
                     help="optimization level of the stages (default 2)")
     ap.add_argument("--fpc", action="store_true",
@@ -143,7 +143,7 @@ def main():
     os.makedirs(work)
     failures = []
 
-    stages = {0: os.path.abspath(args.pcc)}
+    stages = {0: os.path.abspath(args.p3)}
     for n in (1, 2, 3):
         stages[n] = install(work, "stage%d" % n, args.runtime)
         log("building stage %d with stage %d" % (n, n - 1))
@@ -156,9 +156,9 @@ def main():
         emit_ir(stages[n], irs[n])
     for a, b in ((1, 2), (2, 3)):
         if filecmp.cmp(irs[a], irs[b], shallow=False):
-            log("stage %d and stage %d IR for pcc.pas: identical" % (a, b))
+            log("stage %d and stage %d IR for p3.pas: identical" % (a, b))
         else:
-            failures.append("stage %d and stage %d write different IR for pcc.pas" % (a, b))
+            failures.append("stage %d and stage %d write different IR for p3.pas" % (a, b))
 
     # 2. Every module of the repository.
     if args.modules:
@@ -183,7 +183,7 @@ def main():
         failures.append("stage 2 and stage 3 executables differ")
 
     # 4. Stage 3 works.
-    with tempfile.TemporaryDirectory(prefix="pcc-bootstrap") as tmp:
+    with tempfile.TemporaryDirectory(prefix="p3-bootstrap") as tmp:
         hello = os.path.join(tmp, "hello")
         run([stages[3], os.path.join(ROOT, "tests", "driver", "Inputs", "hello.pas"),
              "-o", hello])
@@ -224,14 +224,14 @@ def main():
         sep = install(work, "stage3-separate", args.runtime)
         log("building the compiler from separately compiled units with stage 3")
         for f in sorted(os.listdir(src)):
-            if f.endswith(".pas") and f != "pcc.pas":
+            if f.endswith(".pas") and f != "p3.pas":
                 text = open(os.path.join(src, f)).read()
                 if text.lstrip().lower().startswith("unit "):
                     run([stages[3], "--mode=tp", "-O%d" % args.opt] + FLAGS +
                         ["-c", os.path.join(src, f), "-o",
                          os.path.join(src, f[:-4] + ".o")])
         run([stages[3], "--mode=tp", "-O%d" % args.opt, "-fseparate-units"] + FLAGS +
-            ["-I", src, os.path.join(src, "pcc.pas"), "-o", sep])
+            ["-I", src, os.path.join(src, "p3.pas"), "-o", sep])
         ir = os.path.join(work, "stage3-separate.ll")
         emit_ir(sep, ir)
         if filecmp.cmp(ir, irs[2], shallow=False):

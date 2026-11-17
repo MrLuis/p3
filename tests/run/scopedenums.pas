@@ -5,11 +5,11 @@
   Qualified values work wherever constants do: subrange bounds, case and
   variant labels, sets, array indexes, typed constants, for loops. Output is
   identical to Free Pascal 3.2.2's (fpc -Mtp and -Mobjfpc).
-  RUN: %pcc --mode=tp %s -o %t
+  RUN: %p3 --mode=tp %s -o %t
   RUN: %t | diff - %S/scopedenums.expected
-  RUN: %pcc --mode=objfpc %s -o %t.objfpc
+  RUN: %p3 --mode=objfpc %s -o %t.objfpc
   RUN: %t.objfpc | diff - %S/scopedenums.expected
-  RUN: %pcc --mode=objfpc -O2 -g %s -o %t.O2
+  RUN: %p3 --mode=objfpc -O2 -g %s -o %t.O2
   RUN: %t.O2 | diff - %S/scopedenums.expected
 }
 program scopedenums;

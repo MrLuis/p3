@@ -1,5 +1,5 @@
 ; M10: labels/goto, procedural parameters, files.
-; RUN: not %pcc -ferror-limit=0 -c %S/Inputs/m10.pas -o %t.o 2>&1 | FileCheck %s
+; RUN: not %p3 -ferror-limit=0 -c %S/Inputs/m10.pas -o %t.o 2>&1 | FileCheck %s
 
 ; CHECK: m10.pas:2:16: error: label 3 is declared twice
 ; CHECK: m10.pas:2:13: note: previous declaration is here

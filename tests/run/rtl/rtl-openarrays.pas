@@ -1,9 +1,9 @@
 { The unit library's routines taking open arrays. Output identical to Free
   Pascal 3.2.2's (fpc -Mobjfpc).
-  RUN: %pcc --mode=objfpc %s -o %t
+  RUN: %p3 --mode=objfpc %s -o %t
   RUN:  %t > %t.out
   RUN: diff %S/rtl-openarrays.expected %t.out
-  RUN: %pcc --mode=objfpc -fseparate-units %s -o %t.sep
+  RUN: %p3 --mode=objfpc -fseparate-units %s -o %t.sep
   RUN:  %t.sep > %t.sep.out
   RUN: diff %S/rtl-openarrays.expected %t.sep.out
 }

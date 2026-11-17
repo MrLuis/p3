@@ -1,5 +1,5 @@
 ; Classes (--mode=objfpc): declaration and use errors.
-; RUN: not %pcc --mode=objfpc -ferror-limit=0 -c %S/Inputs/classes/errors.pas -o %t.o 2>&1 | FileCheck %s
+; RUN: not %p3 --mode=objfpc -ferror-limit=0 -c %S/Inputs/classes/errors.pas -o %t.o 2>&1 | FileCheck %s
 ; CHECK: errors.pas:10:15: error: abstract method 'R' must be 'virtual'
 ; CHECK: errors.pas:13:30: error: no field or method named 'Nope' in 'TA'
 ; CHECK: errors.pas:14:27: error: 'FX' cannot be read as property 'W' of type 'real' (use a field of that type or a function without parameters returning it)
@@ -44,7 +44,7 @@
 ; CHECK: errors.pas:57:5: error: procedure 'P' does not return a value
 ; CHECK-NOT: {{error|warning}}:
 ;
-; RUN: not %pcc --mode=objfpc -ferror-limit=0 -c %S/Inputs/classes/more.pas -o %t.o 2>&1 | FileCheck --check-prefix=MORE %s
+; RUN: not %p3 --mode=objfpc -ferror-limit=0 -c %S/Inputs/classes/more.pas -o %t.o 2>&1 | FileCheck --check-prefix=MORE %s
 ; MORE: more.pas:16:13: error: no inherited method 'P' in 'TObject'
 ; MORE: more.pas:17:3: error: use of undeclared identifier 'Sh'
 ; MORE: more.pas:6:14: warning: function 'G' never assigns its result
@@ -67,7 +67,7 @@
 ;
 ; Private members are visible in the unit declaring the class, protected
 ; ones also in methods of descendants.
-; RUN: not %pcc --mode=objfpc -ferror-limit=0 -I %S/../run/Inputs/classes/lib -c %S/Inputs/classes/visibility.pas -o %t.o 2>&1 | FileCheck --check-prefix=VIS %s
+; RUN: not %p3 --mode=objfpc -ferror-limit=0 -I %S/../run/Inputs/classes/lib -c %S/Inputs/classes/visibility.pas -o %t.o 2>&1 | FileCheck --check-prefix=VIS %s
 ; VIS: visibility.pas:9:13: error: 'FName' is a private member of 'TAnimal'
 ; VIS: animals.pas:6:5: note: 'FName' declared here
 ; VIS: visibility.pas:14:22: error: 'Sound' is a protected member of 'TAnimal'

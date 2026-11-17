@@ -1,5 +1,5 @@
 ; M5 semantic checks.
-; RUN: not %pcc -ferror-limit=0 -c %S/Inputs/control.pas -o %t.o 2>&1 | FileCheck %s
+; RUN: not %p3 -ferror-limit=0 -c %S/Inputs/control.pas -o %t.o 2>&1 | FileCheck %s
 
 ; CHECK: control.pas:4:6: error: condition of 'if' must be of type 'boolean', not 'integer'
 ; CHECK: control.pas:5:9: error: condition of 'while' must be of type 'boolean', not 'char'
@@ -28,7 +28,7 @@
 ; CHECK-NOT: error:
 
 ; Duplicate detection also covers overlapping ranges and chars.
-; RUN: not %pcc --mode=tp -c %S/Inputs/case-ranges.pas -o %t.o 2>&1 | FileCheck --check-prefix=RANGE %s
+; RUN: not %p3 --mode=tp -c %S/Inputs/case-ranges.pas -o %t.o 2>&1 | FileCheck --check-prefix=RANGE %s
 ; RANGE: case-ranges.pas:6:5: error: duplicate case label value 5
 ; RANGE: case-ranges.pas:5:5: note: previous case label is here
 ; RANGE: case-ranges.pas:10:5: error: duplicate case label value 'b'

@@ -2,10 +2,10 @@
   parameters, exit(value), procedural types, structured typed constants,
   nested includes, external C functions. The expected output was produced
   by Free Pascal 3.2.2 (fpc -Mobjfpc -Sh- -Cr -Co -FiInputs/s1).
-  RUN: %pcc --mode=tp -I %S/Inputs/s1 %s -o %t
+  RUN: %p3 --mode=tp -I %S/Inputs/s1 %s -o %t
   RUN:  %t > %t.out
   RUN: diff %S/s1.expected %t.out
-  RUN: %pcc --mode=tp -O2 -I %S/Inputs/s1 %s -o %t.O2
+  RUN: %p3 --mode=tp -O2 -I %S/Inputs/s1 %s -o %t.O2
   RUN:  %t.O2 > %t.O2.out
   RUN: diff %S/s1.expected %t.O2.out
 }

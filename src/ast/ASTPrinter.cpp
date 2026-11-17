@@ -10,15 +10,15 @@
 //
 //===----------------------------------------------------------------------===//
 
-#include "pcc/AST/ASTPrinter.h"
-#include "pcc/AST/ASTVisitor.h"
-#include "pcc/AST/Type.h"
-#include "pcc/Basic/SourceManager.h"
+#include "p3/AST/ASTPrinter.h"
+#include "p3/AST/ASTVisitor.h"
+#include "p3/AST/Type.h"
+#include "p3/Basic/SourceManager.h"
 
 #include "llvm/Support/Format.h"
 #include "llvm/Support/raw_ostream.h"
 
-using namespace pcc;
+using namespace p3;
 
 namespace {
 
@@ -1134,12 +1134,12 @@ public:
 
 } // namespace
 
-void pcc::printAST(ProgramDecl &P, const SourceManager &SM,
+void p3::printAST(ProgramDecl &P, const SourceManager &SM,
                    llvm::raw_ostream &OS) {
   ASTPrinter(SM, OS).printProgram(P);
 }
 
-void pcc::printParseTree(ProgramDecl &P, llvm::ArrayRef<UnitDecl *> Units,
+void p3::printParseTree(ProgramDecl &P, llvm::ArrayRef<UnitDecl *> Units,
                          const SourceManager &SM, llvm::raw_ostream &OS) {
   ASTPrinter Printer(SM, OS, /*ParseTree=*/true);
   for (UnitDecl *U : Units)

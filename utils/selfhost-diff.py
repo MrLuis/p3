@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""Differential test: runs the C++ pcc and the self-hosted pcc with the same
+"""Differential test: runs the C++ p3 and the self-hosted p3 with the same
 arguments on many inputs and compares stdout, stderr and the exit status.
 
 Usage:
-  utils/selfhost-diff.py --ref build/bin/pcc --new <selfhost pcc> \\
+  utils/selfhost-diff.py --ref build/bin/p3 --new <selfhost p3> \\
       [--action=--emit-tokens] [--modes=iso,tp] [--jobs=N] [--show=5] PATH...
 
 PATHs are files or directories (searched recursively for *.pas, or for

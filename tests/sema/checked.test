@@ -1,34 +1,34 @@
 ; Scoped checked arithmetic (objfpc): AddChecked / SubChecked / MulChecked
 ; take two integers; `checked` and `unchecked` are not reserved (and are
 ; plain names outside objfpc, where the functions do not exist).
-; RUN: not %pcc --mode=objfpc -ferror-limit=0 -c %S/Inputs/checked/errors.pas -o %t.o 2>&1 | FileCheck %s
+; RUN: not %p3 --mode=objfpc -ferror-limit=0 -c %S/Inputs/checked/errors.pas -o %t.o 2>&1 | FileCheck %s
 ; CHECK: errors.pas:7:8: error: 'AddChecked' expects integer arguments, not 'integer' and 'real'
 ; CHECK: errors.pas:8:8: error: 'MulChecked' expects 2 arguments
 ; CHECK: errors.pas:9:8: error: 'SubChecked' expects integer arguments, not 'char' and 'integer'
 ; CHECK-NOT: error:
 ;
 ; A block ends with `end`.
-; RUN: not %pcc --mode=objfpc -c %S/Inputs/checked/syntax.pas -o %t.o 2>&1 | FileCheck --check-prefix=SYNTAX %s
+; RUN: not %p3 --mode=objfpc -c %S/Inputs/checked/syntax.pas -o %t.o 2>&1 | FileCheck --check-prefix=SYNTAX %s
 ; SYNTAX: syntax.pas:7:4: error: expected ';' or 'end' after statement
 ;
-; RUN: not %pcc --mode=tp -c %S/Inputs/checked/tp.pas -o %t.o 2>&1 | FileCheck --check-prefix=TP %s
+; RUN: not %p3 --mode=tp -c %S/Inputs/checked/tp.pas -o %t.o 2>&1 | FileCheck --check-prefix=TP %s
 ; TP: tp.pas:6:3: error: use of undeclared identifier 'AddChecked'
 ; TP-NOT: tp.pas:5
 ;
 ; Overflow in objfpc raises EIntOverflow; unhandled, it is reported as such.
-; RUN: %pcc --mode=objfpc %S/Inputs/checked/unhandled.pas -o %t.unhandled
+; RUN: %p3 --mode=objfpc %S/Inputs/checked/unhandled.pas -o %t.unhandled
 ; RUN: not %t.unhandled 2>&1 | FileCheck --check-prefix=UNHANDLED %s
 ; UNHANDLED: Runtime error: unhandled exception EIntOverflow at {{.*}}unhandled.pas:7:12: Arithmetic overflow
 ;
 ; In an unchecked block a subrange is still range-checked: only integer
 ; types wrap.
-; RUN: %pcc --mode=objfpc %S/Inputs/checked/subrange.pas -o %t.subrange
+; RUN: %p3 --mode=objfpc %S/Inputs/checked/subrange.pas -o %t.subrange
 ; RUN: not %t.subrange 2>&1 | FileCheck --check-prefix=SUBRANGE %s
 ; SUBRANGE: Runtime error: value out of range at {{.*}}subrange.pas:10:10
 ;
 ; The code: checked, an overflow intrinsic and a call that raises; unchecked,
 ; a plain add (which wraps).
-; RUN: %pcc --mode=objfpc --emit-llvm %S/Inputs/checked/unhandled.pas -o %t.ll
+; RUN: %p3 --mode=objfpc --emit-llvm %S/Inputs/checked/unhandled.pas -o %t.ll
 ; RUN: FileCheck --check-prefix=IR %s < %t.ll
 ; IR: call { i32, i1 } @llvm.sadd.with.overflow.i32(
 ; IR: call void @__pas_raise_overflow(ptr
@@ -36,5 +36,5 @@
 ; IR: attributes #[[ATTR]] = { cold noreturn nounwind }
 ;
 ; checked(expression): its parenthesis is closed.
-; RUN: not %pcc --mode=objfpc -c %S/Inputs/checked/syntax2.pas -o %t.o 2>&1 | FileCheck --check-prefix=SYNTAX2 %s
+; RUN: not %p3 --mode=objfpc -c %S/Inputs/checked/syntax2.pas -o %t.o 2>&1 | FileCheck --check-prefix=SYNTAX2 %s
 ; SYNTAX2: syntax2.pas:5:21: error: expected ')' after the expression of 'checked'

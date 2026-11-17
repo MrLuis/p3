@@ -1,13 +1,13 @@
 { Array of const: TVarRec's fields, forwarding, overloads, methods, CreateFmt;
   output identical to Free Pascal 3.2.2's (fpc -Mobjfpc) on 64-bit targets
   without extended reals.
-  RUN: %pcc --mode=objfpc %s -o %t
+  RUN: %p3 --mode=objfpc %s -o %t
   RUN:  %t > %t.out
   RUN: diff %S/arrayofconst.expected %t.out
-  RUN: %pcc --mode=objfpc -O2 %s -o %t.O2
+  RUN: %p3 --mode=objfpc -O2 %s -o %t.O2
   RUN:  %t.O2 > %t.O2.out
   RUN: diff %S/arrayofconst.expected %t.O2.out
-  RUN: %pcc --mode=objfpc -g %s -o %t.g
+  RUN: %p3 --mode=objfpc -g %s -o %t.g
   RUN:  %t.g > %t.g.out
   RUN: diff %S/arrayofconst.expected %t.g.out
 }

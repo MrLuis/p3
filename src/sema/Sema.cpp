@@ -11,12 +11,12 @@
 //
 //===----------------------------------------------------------------------===//
 
-#include "pcc/Sema/Sema.h"
-#include "pcc/AST/ASTContext.h"
-#include "pcc/AST/ASTVisitor.h"
-#include "pcc/Basic/Diagnostics.h"
-#include "pcc/Basic/LangOptions.h"
-#include "pcc/Sema/Scope.h"
+#include "p3/Sema/Sema.h"
+#include "p3/AST/ASTContext.h"
+#include "p3/AST/ASTVisitor.h"
+#include "p3/Basic/Diagnostics.h"
+#include "p3/Basic/LangOptions.h"
+#include "p3/Sema/Scope.h"
 
 #include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/StringExtras.h"
@@ -29,7 +29,7 @@
 #include <memory>
 #include <optional>
 
-using namespace pcc;
+using namespace p3;
 
 namespace {
 
@@ -511,7 +511,7 @@ class Checker : public StmtVisitor<Checker>,
       (!isObjFPCOnly(BuiltinKind::ID) || LangOpts.ObjKeywords))                \
     Standard.insert(NAME, Ctx.create<BuiltinDecl>(predeclaredName(NAME),       \
                                                   BuiltinKind::ID, false));
-#include "pcc/AST/Builtins.def"
+#include "p3/AST/Builtins.def"
   }
 
   /// Identifier for a predeclared member: lookup name lowercase, spelled

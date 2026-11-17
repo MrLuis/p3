@@ -1,15 +1,15 @@
 #include "UnitTest.h"
 
-using namespace pcc::unittest;
+using namespace p3::unittest;
 
 static unsigned Failures = 0;
 
-std::vector<TestCase> &pcc::unittest::registry() {
+std::vector<TestCase> &p3::unittest::registry() {
   static std::vector<TestCase> R;
   return R;
 }
 
-void pcc::unittest::reportFailure(const char *File, int Line,
+void p3::unittest::reportFailure(const char *File, int Line,
                                   const std::string &Msg) {
   ++Failures;
   llvm::errs() << File << ':' << Line << ": FAILURE: " << Msg << '\n';

@@ -1,5 +1,5 @@
 ; Array of const: where it can be used and what it can hold.
-; RUN: not %pcc --mode=objfpc -ferror-limit=0 --emit-ast %S/Inputs/arrayofconst/errors.pas 2>&1 | FileCheck %s
+; RUN: not %p3 --mode=objfpc -ferror-limit=0 --emit-ast %S/Inputs/arrayofconst/errors.pas 2>&1 | FileCheck %s
 ; CHECK: errors.pas:8:11: error: constant value must be a constant
 ; CHECK: errors.pas:11:10: error: array index must be an integer
 ; CHECK: errors.pas:12:5: error: assigning to 'integer' from incompatible type 'array of const'
@@ -12,5 +12,5 @@
 ; CHECK: errors.pas:24:17: error: 'high' expects an ordinal type, an array or a string, not 'TRec'
 ; CHECK-NOT: error:
 ;
-; RUN: not %pcc --emit-ast %S/Inputs/arrayofconst/iso.pas 2>&1 | FileCheck --check-prefix=ISO %s
+; RUN: not %p3 --emit-ast %S/Inputs/arrayofconst/iso.pas 2>&1 | FileCheck --check-prefix=ISO %s
 ; ISO: iso.pas:2:{{[0-9]+}}: error: conformant array parameters are not supported yet

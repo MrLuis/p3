@@ -4,7 +4,7 @@
 ; division by zero raises EDivByZero (as in Free Pascal with SysUtils). An
 ; exception raised `at` an address is reported at it (as by Free Pascal),
 ; re-raised too.
-; RUN: %pcc --mode=objfpc %S/Inputs/exceptions/rterrors.pas -o %t
+; RUN: %p3 --mode=objfpc %S/Inputs/exceptions/rterrors.pas -o %t
 ; RUN: not %t exception 2>&1 | FileCheck --check-prefix=EXC %s
 ; EXC: Runtime error: unhandled exception Exception at {{.*}}rterrors.pas:22:5: boom
 ; RUN: not %t subclass 2>&1 | FileCheck --check-prefix=SUB %s

@@ -1,5 +1,5 @@
 { Turbo/FPC case extensions: label ranges, else/otherwise, no match = no-op.
-  RUN: %pcc --mode=tp %s -o %t
+  RUN: %p3 --mode=tp %s -o %t
   RUN: %t > %t.out
   RUN: diff %S/case-tp.expected %t.out
 }

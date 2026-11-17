@@ -1,5 +1,5 @@
 ; Identifiers are case-insensitive; the canonical name is lowercase.
-; RUN: %pcc --emit-tokens %S/Inputs/identifiers.pas | FileCheck %s
+; RUN: %p3 --emit-tokens %S/Inputs/identifiers.pas | FileCheck %s
 
 ; CHECK:      1:1 identifier 'Foo' name=foo
 ; CHECK-NEXT: 1:5 identifier 'FOO' name=foo

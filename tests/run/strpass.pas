@@ -1,7 +1,7 @@
 {
-  RUN: %pcc --mode=objfpc %s -o %t && %t | diff - %S/strpass.expected
-  RUN: %pcc --mode=objfpc -O2 %s -o %t.o2 && %t.o2 | diff - %S/strpass.expected
-  RUN: %pcc --mode=objfpc -O2 -fno-inline-runtime -g %s -o %t.g && %t.g | diff - %S/strpass.expected
+  RUN: %p3 --mode=objfpc %s -o %t && %t | diff - %S/strpass.expected
+  RUN: %p3 --mode=objfpc -O2 %s -o %t.o2 && %t.o2 | diff - %S/strpass.expected
+  RUN: %p3 --mode=objfpc -O2 -fno-inline-runtime -g %s -o %t.g && %t.g | diff - %S/strpass.expected
 }
 { Short strings in calls: value parameters are the callee's own copies (cut
   to its size), const parameters read the caller's string, functions write

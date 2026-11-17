@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-"""Runs the Pascal-P5 ISO 7185 conformance test (iso7185pat.pas) with pcc.
+"""Runs the Pascal-P5 ISO 7185 conformance test (iso7185pat.pas) with p3.
 
 The test is self-checking: each line prints `<result> s/b <expected>`. Real
 numbers are compared numerically (their exponent format is implementation
 defined), everything else as whitespace-normalized text.
 
-Usage:  utils/iso7185pat.py <pcc> [workdir]
+Usage:  utils/iso7185pat.py <p3> [workdir]
 Downloads iso7185pat.pas/.inp from github.com/samiam95124/Pascal-P5 into
 workdir (default: ./iso7185pat-work) unless already present.
 """
@@ -41,7 +41,7 @@ QUIRKS = {
 }
 
 def main():
-    pcc = sys.argv[1]
+    p3 = sys.argv[1]
     work = sys.argv[2] if len(sys.argv) > 2 else "iso7185pat-work"
     os.makedirs(work, exist_ok=True)
     for name in ("iso7185pat.pas", "iso7185pat.inp"):
@@ -49,7 +49,7 @@ def main():
         if not os.path.exists(path):
             urllib.request.urlretrieve(BASE + name, path)
     exe = os.path.join(work, "iso7185pat")
-    subprocess.run([pcc, os.path.join(work, "iso7185pat.pas"), "-o", exe], check=True)
+    subprocess.run([p3, os.path.join(work, "iso7185pat.pas"), "-o", exe], check=True)
     with open(os.path.join(work, "iso7185pat.inp")) as inp:
         out = subprocess.run([exe], stdin=inp, capture_output=True, text=True, check=True).stdout
     lines = out.splitlines()

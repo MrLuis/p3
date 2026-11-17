@@ -2,13 +2,13 @@
 ; implementation, and in a unit's routine (set again on each call);
 ; compiled whole and separately.
 ; RUN: rm -rf %t && mkdir -p %t && cp -r %S/Inputs/initvars/. %t/
-; RUN: %pcc --mode=objfpc -I %t/lib %t/app.pas -o %t/whole
+; RUN: %p3 --mode=objfpc -I %t/lib %t/app.pas -o %t/whole
 ; RUN: %t/whole | FileCheck %s
-; RUN: %pcc --mode=objfpc -c %t/lib/settings.pas -o %t/lib/settings.o
-; RUN: %pcc --mode=objfpc -I %t/lib -fseparate-units %t/app.pas -o %t/separate
+; RUN: %p3 --mode=objfpc -c %t/lib/settings.pas -o %t/lib/settings.o
+; RUN: %p3 --mode=objfpc -I %t/lib -fseparate-units %t/app.pas -o %t/separate
 ; RUN: %t/separate | FileCheck %s
 ; CHECK:      TRUE 3 settings 101 102
 ; CHECK-NEXT: 4
-; RUN: %pcc --mode=objfpc --emit-llvm %t/lib/settings.pas -o - | FileCheck --check-prefix=UNIT %s
+; RUN: %p3 --mode=objfpc --emit-llvm %t/lib/settings.pas -o - | FileCheck --check-prefix=UNIT %s
 ; UNIT-DAG: @"pas.settings$level" = global i32 3
 ; UNIT-DAG: @pas.lastid = internal global i32 100

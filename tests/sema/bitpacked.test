@@ -2,7 +2,7 @@
 ; supported yet), and the elements and fields without an address (var
 ; arguments, '@', absolute, inc, read, untyped parameters, open arrays),
 ; and initialized variables (not supported yet).
-; RUN: not %pcc --mode=objfpc -ferror-limit=0 -c %S/Inputs/bitpacked/errors.pas -o %t.o 2>&1 | FileCheck %s
+; RUN: not %p3 --mode=objfpc -ferror-limit=0 -c %S/Inputs/bitpacked/errors.pas -o %t.o 2>&1 | FileCheck %s
 ; CHECK: errors.pas:8:5: error: a field of type 'real' in a bitpacked record is not supported yet
 ; CHECK: errors.pas:9:5: error: a field of type 'pointer' in a bitpacked record is not supported yet
 ; CHECK: errors.pas:10:5: error: a field of type 'record' in a bitpacked record is not supported yet

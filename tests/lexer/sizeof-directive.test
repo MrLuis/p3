@@ -1,6 +1,6 @@
 ; sizeof(predefined type) in $IF: any case and spacing, in arithmetic, not
 ; checked in a skipped branch, and a macro called sizeof takes precedence.
-; RUN: %pcc --mode=tp --emit-tokens %S/Inputs/cond/sizeof.pas | FileCheck %s
+; RUN: %p3 --mode=tp --emit-tokens %S/Inputs/cond/sizeof.pas | FileCheck %s
 ; CHECK:      1:24 identifier 'one'
 ; CHECK-NEXT: 2:39 identifier 'notwo'
 ; CHECK-NEXT: 3:43 identifier 'arith'
@@ -8,7 +8,7 @@
 ; CHECK-NEXT: 9:24 identifier 'again'
 ; CHECK-NEXT: eof
 
-; RUN: not %pcc --mode=objfpc -ferror-limit=0 --emit-tokens %S/Inputs/cond/sizeof-errors.pas 2>&1 >/dev/null | FileCheck --check-prefix=ERR %s
+; RUN: not %p3 --mode=objfpc -ferror-limit=0 --emit-tokens %S/Inputs/cond/sizeof-errors.pas 2>&1 >/dev/null | FileCheck --check-prefix=ERR %s
 ; ERR: sizeof-errors.pas:1:1: error: 'sizeof' in $IF needs a predefined type, not 'TMine'
 ; ERR: sizeof-errors.pas:2:1: error: invalid $IF expression
 ; ERR: sizeof-errors.pas:3:1: error: invalid $IF expression
@@ -18,5 +18,5 @@
 ; ERR-NOT: error:
 
 ; ISO 7185 has no sizeof.
-; RUN: not %pcc --mode=iso -ferror-limit=0 --emit-tokens %S/Inputs/cond/sizeof-errors.pas 2>&1 >/dev/null | FileCheck --check-prefix=ISO %s
+; RUN: not %p3 --mode=iso -ferror-limit=0 --emit-tokens %S/Inputs/cond/sizeof-errors.pas 2>&1 >/dev/null | FileCheck --check-prefix=ISO %s
 ; ISO: sizeof-errors.pas:1:1: error: 'sizeof' has no value in $IF

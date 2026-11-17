@@ -1,7 +1,7 @@
 ; Class references, class methods and class variables (--mode=objfpc):
 ; class of T, what class methods and class references may use, class
 ; method implementations, assignments and comparisons of class references.
-; RUN: not %pcc --mode=objfpc -ferror-limit=0 -c %S/Inputs/classrefs/errors.pas -o %t.o 2>&1 | FileCheck %s
+; RUN: not %p3 --mode=objfpc -ferror-limit=0 -c %S/Inputs/classrefs/errors.pas -o %t.o 2>&1 | FileCheck %s
 ; CHECK: errors.pas:4:19: error: 'TRec' is not a class type
 ; CHECK: errors.pas:3:3: note: 'TRec' declared here
 ; CHECK: errors.pas:5:20: error: unknown class name 'TMissing'

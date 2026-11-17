@@ -5,7 +5,7 @@ and one page of its own (`/status`).
 
 ```sh
 cd examples/httpserver
-../pcc                     # builds bin/httpserver
+../p3                     # builds bin/httpserver
 bin/httpserver             # http://127.0.0.1:8080/, serving public/
 ```
 

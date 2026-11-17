@@ -4,7 +4,7 @@
 ; TObject's VMT and Destroy (slot 0) are in the runtime. Methods take Self
 ; after the static link and keep it in an alloca (in their frame if a
 ; nested routine uses it).
-; RUN: %pcc --mode=objfpc --emit-llvm %S/Inputs/classes.pas -o - | FileCheck %s
+; RUN: %p3 --mode=objfpc --emit-llvm %S/Inputs/classes.pas -o - | FileCheck %s
 
 ; CHECK: @vmt.ta = internal constant [6 x ptr] [ptr @__pas_tobject_vmt, ptr @.str, ptr inttoptr (i64 16 to ptr), ptr null, ptr @__pas_tobject_destroy, ptr @pas.ta.v]
 ; CHECK: @vmt.tb = internal constant [6 x ptr] [ptr @vmt.ta, ptr @.str.1, ptr inttoptr (i64 24 to ptr), ptr null, ptr @__pas_tobject_destroy, ptr @pas.tb.v]
@@ -40,7 +40,7 @@
 
 ; -g: a class is a pointer to a structure of its fields; methods are named
 ; Class.Method, at their implementation, with Self as first parameter.
-; RUN: %pcc --mode=objfpc -g -c %S/Inputs/classes.pas -o %t.o
+; RUN: %p3 --mode=objfpc -g -c %S/Inputs/classes.pas -o %t.o
 ; RUN: llvm-dwarfdump --verify %t.o | FileCheck --check-prefix=VERIFY %s
 ; VERIFY: No errors.
 ; RUN: llvm-dwarfdump --debug-info %t.o | FileCheck --check-prefix=DEBUG %s

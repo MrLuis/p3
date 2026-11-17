@@ -3,7 +3,7 @@
 ; T.Name`, matching the declaration's name), static (no Self), and not
 ; members (they cannot be called; a method may have the same name), as in
 ; Free Pascal.
-; RUN: not %pcc --mode=objfpc -ferror-limit=0 -c %S/Inputs/classctor/errors.pas -o %t.o 2>&1 | FileCheck %s
+; RUN: not %p3 --mode=objfpc -ferror-limit=0 -c %S/Inputs/classctor/errors.pas -o %t.o 2>&1 | FileCheck %s
 ; CHECK: errors.pas:5:23: error: only one class constructor can be declared in class 'T'
 ; CHECK: errors.pas:4:11: note: 'A' declared here
 ; CHECK: errors.pas:6:22: error: a class destructor cannot have parameters
@@ -17,16 +17,16 @@
 ; CHECK: errors.pas:14:23: error: class constructor 'T3.Init' is declared but never implemented
 ; CHECK: errors.pas:23:6: error: no member named 'Init' in class 'T2'
 ; CHECK-NOT: error
-; RUN: not %pcc --mode=objfpc -c %S/Inputs/classctor/toplevel.pas -o %t.o 2>&1 | FileCheck --check-prefix=TOP %s
+; RUN: not %p3 --mode=objfpc -c %S/Inputs/classctor/toplevel.pas -o %t.o 2>&1 | FileCheck --check-prefix=TOP %s
 ; TOP: toplevel.pas:2:19: error: a class constructor must be declared in a class; implement it as 'class constructor TClass.X'
-; RUN: not %pcc --mode=objfpc -ferror-limit=0 -c %S/Inputs/classctor/record.pas -o %t.o 2>&1 | FileCheck --check-prefix=REC %s
+; RUN: not %p3 --mode=objfpc -ferror-limit=0 -c %S/Inputs/classctor/record.pas -o %t.o 2>&1 | FileCheck --check-prefix=REC %s
 ; REC: record.pas:5:23: error: a class constructor cannot have parameters
 ; REC: record.pas:6:23: error: only one class constructor can be declared in record 'TR'
 ; REC: record.pas:5:11: note: 'Init' declared here
 ; REC: record.pas:8:22: error: a class constructor cannot have parameters
 ;
 ; The AST shows them as ClassConstructorDecl and ClassDestructorDecl.
-; RUN: %pcc --mode=objfpc --emit-ast -o - %S/../run/classctor.pas | FileCheck --check-prefix=AST %s
+; RUN: %p3 --mode=objfpc --emit-ast -o - %S/../run/classctor.pas | FileCheck --check-prefix=AST %s
 ; AST: ClassConstructorDecl 'tcounter.create' definition
 ; AST: ClassDestructorDecl 'tcounter.destroy' definition
 ; AST: ConstructorDecl 'tcounter.create' definition

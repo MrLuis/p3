@@ -1,5 +1,5 @@
 ; TMethod: the conversions and assignments that are rejected.
-; RUN: not %pcc --mode=objfpc -ferror-limit=0 --emit-ast %S/Inputs/tmethod/errors.pas 2>&1 | FileCheck %s
+; RUN: not %p3 --mode=objfpc -ferror-limit=0 --emit-ast %S/Inputs/tmethod/errors.pas 2>&1 | FileCheck %s
 ; CHECK: errors.pas:16:33: error: cannot modify constant parameter 'e'
 ; CHECK: errors.pas:24:5: error: assigning to 'TE' from incompatible type 'TMethod'
 ; CHECK: errors.pas:25:5: error: assigning to 'TMethod' from incompatible type 'TE'

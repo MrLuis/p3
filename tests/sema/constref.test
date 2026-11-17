@@ -3,7 +3,7 @@
 ; procedural type) while overloads cannot tell them apart, as in Free
 ; Pascal. In tp mode too (where `constref` is still a usable name); not in
 ; ISO Pascal.
-; RUN: not %pcc --mode=objfpc -ferror-limit=0 -c %S/Inputs/constref/errors.pas -o %t.o 2>&1 | FileCheck %s
+; RUN: not %p3 --mode=objfpc -ferror-limit=0 -c %S/Inputs/constref/errors.pas -o %t.o 2>&1 | FileCheck %s
 ; CHECK: errors.pas:12:3: error: cannot modify constant parameter 'x'
 ; CHECK: errors.pas:13:7: error: cannot modify constant parameter 'x'
 ; CHECK: errors.pas:14:9: error: cannot modify constant parameter 'x'
@@ -12,10 +12,10 @@
 ; CHECK: errors.pas:30:5: error: assigning to 'TP1' from incompatible type 'procedure(constref integer)'
 ; CHECK-NOT: error:
 
-; RUN: %pcc --mode=tp %S/Inputs/constref/tp.pas -o %t.tp
+; RUN: %p3 --mode=tp %S/Inputs/constref/tp.pas -o %t.tp
 ; RUN: %t.tp | FileCheck --check-prefix=TP %s
 ; TP:      2 5 TRUE
 ; TP-NEXT: 14 5 FALSE
 
-; RUN: not %pcc -c %S/Inputs/constref/iso.pas -o %t.o 2>&1 | FileCheck --check-prefix=ISO %s
+; RUN: not %p3 -c %S/Inputs/constref/iso.pas -o %t.o 2>&1 | FileCheck --check-prefix=ISO %s
 ; ISO: iso.pas:2:21: error: expected ':' after parameter name

@@ -1,59 +1,59 @@
-; pcc's unit library: found next to the compiler (<bin>/../lib/pascal, or
-; $PCC_UNIT_DIR), searched after the input's directory and -I directories.
+; p3's unit library: found next to the compiler (<bin>/../lib/pascal, or
+; $P3_UNIT_DIR), searched after the input's directory and -I directories.
 ; RUN: rm -rf %t && mkdir -p %t/own %t/lib
-; RUN: env -u PCC_UNIT_DIR %pcc --mode=tp %S/Inputs/unit-library/hello.pas -o %t/hello
+; RUN: env -u P3_UNIT_DIR %p3 --mode=tp %S/Inputs/unit-library/hello.pas -o %t/hello
 ; RUN: %t/hello | FileCheck --check-prefix=LIB %s
 ; LIB: 42
 
 ; The program's own units come first.
 ; RUN: cp %S/Inputs/unit-library/own/sysutils.pas %t/own/
-; RUN: %pcc --mode=tp -I %t/own %S/Inputs/unit-library/hello.pas -o %t/own/hello
+; RUN: %p3 --mode=tp -I %t/own %S/Inputs/unit-library/hello.pas -o %t/own/hello
 ; RUN: %t/own/hello | FileCheck --check-prefix=OWN %s
 ; OWN: mine
 
-; $PCC_UNIT_DIR replaces the library. Without one, `uses sysutils` still
+; $P3_UNIT_DIR replaces the library. Without one, `uses sysutils` still
 ; compiles in objfpc mode (Exception is predeclared), not in tp mode.
 ; RUN: cp %S/Inputs/unit-library/own/sysutils.pas %t/lib/
-; RUN: env PCC_UNIT_DIR=%t/lib %pcc --mode=tp %S/Inputs/unit-library/hello.pas -o %t/lib/hello
+; RUN: env P3_UNIT_DIR=%t/lib %p3 --mode=tp %S/Inputs/unit-library/hello.pas -o %t/lib/hello
 ; RUN: %t/lib/hello | FileCheck --check-prefix=OWN %s
-; RUN: not env PCC_UNIT_DIR=%t/none %pcc --mode=tp %S/Inputs/unit-library/hello.pas 2>&1 | FileCheck --check-prefix=NONE %s
-; NONE: error: cannot find unit 'sysutils' (looked for sysutils.pas next to the program, in -I directories and in pcc's unit library)
-; RUN: env PCC_UNIT_DIR=%t/none %pcc --mode=objfpc %S/Inputs/unit-library/exception.pas -o %t/exc
+; RUN: not env P3_UNIT_DIR=%t/none %p3 --mode=tp %S/Inputs/unit-library/hello.pas 2>&1 | FileCheck --check-prefix=NONE %s
+; NONE: error: cannot find unit 'sysutils' (looked for sysutils.pas next to the program, in -I directories and in p3's unit library)
+; RUN: env P3_UNIT_DIR=%t/none %p3 --mode=objfpc %S/Inputs/unit-library/exception.pas -o %t/exc
 ; RUN: %t/exc | FileCheck --check-prefix=EXC %s
 ; EXC: caught
 
 ; The library's objects, built with it, serve -fseparate-units.
-; RUN: %pcc --mode=objfpc -fseparate-units %S/Inputs/unit-library/hello.pas -o %t/sep
+; RUN: %p3 --mode=objfpc -fseparate-units %S/Inputs/unit-library/hello.pas -o %t/sep
 ; RUN: %t/sep | FileCheck --check-prefix=LIB %s
 
 ; Classes needs objfpc mode, and says so.
-; RUN: not %pcc --mode=tp %S/Inputs/unit-library/usesclasses.pas 2>&1 | FileCheck --check-prefix=NEEDS %s
+; RUN: not %p3 --mode=tp %S/Inputs/unit-library/usesclasses.pas 2>&1 | FileCheck --check-prefix=NEEDS %s
 ; NEEDS: error: cannot find unit 'classes_needs_mode_objfpc'
 
 ; Free Pascal's target symbols.
-; RUN: %pcc --target=x86_64-unknown-linux-gnu --mode=tp --emit-llvm %S/Inputs/unit-library/target.pas -o - | FileCheck --check-prefix=LINUX %s
+; RUN: %p3 --target=x86_64-unknown-linux-gnu --mode=tp --emit-llvm %S/Inputs/unit-library/target.pas -o - | FileCheck --check-prefix=LINUX %s
 ; LINUX: linux"
 ; LINUX: unix"
 ; LINUX: x8664"
 ; LINUX: cpu64"
-; RUN: %pcc --target=aarch64-unknown-linux-gnu --mode=tp --emit-llvm %S/Inputs/unit-library/target.pas -o - | FileCheck --check-prefix=LINUXARM %s
+; RUN: %p3 --target=aarch64-unknown-linux-gnu --mode=tp --emit-llvm %S/Inputs/unit-library/target.pas -o - | FileCheck --check-prefix=LINUXARM %s
 ; LINUXARM: linux"
 ; LINUXARM: unix"
 ; LINUXARM: aarch64"
 ; LINUXARM: cpu64"
-; RUN: %pcc --target=arm64-apple-macosx13.0.0 --mode=tp --emit-llvm %S/Inputs/unit-library/target.pas -o - | FileCheck --check-prefix=MAC %s
+; RUN: %p3 --target=arm64-apple-macosx13.0.0 --mode=tp --emit-llvm %S/Inputs/unit-library/target.pas -o - | FileCheck --check-prefix=MAC %s
 ; MAC: darwin"
 ; MAC: bsd"
 ; MAC: unix"
 ; MAC: aarch64"
 ; MAC: cpu64"
-; RUN: %pcc --target=x86_64-apple-darwin22 --mode=tp --emit-llvm %S/Inputs/unit-library/target.pas -o - | FileCheck --check-prefix=MACX %s
+; RUN: %p3 --target=x86_64-apple-darwin22 --mode=tp --emit-llvm %S/Inputs/unit-library/target.pas -o - | FileCheck --check-prefix=MACX %s
 ; MACX: darwin"
 ; MACX: bsd"
 ; MACX: unix"
 ; MACX: x8664"
 ; MACX: cpu64"
-; RUN: %pcc --target=x86_64-w64-mingw32 --mode=tp --emit-llvm %S/Inputs/unit-library/target.pas -o - | FileCheck --check-prefix=WIN %s
+; RUN: %p3 --target=x86_64-w64-mingw32 --mode=tp --emit-llvm %S/Inputs/unit-library/target.pas -o - | FileCheck --check-prefix=WIN %s
 ; WIN: windows"
 ; WIN: mswindows"
 ; WIN: win64"

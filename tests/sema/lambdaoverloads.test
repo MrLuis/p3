@@ -3,7 +3,7 @@
 ; Parameters without a type fit any type, so overloads that differ only
 ; there are ambiguous; a written type without a kind fits a value
 ; parameter best.
-; RUN: not %pcc --mode=objfpc -ferror-limit=0 -c %S/Inputs/lambdaoverloads/errors.pas -o %t.o 2>&1 | FileCheck %s
+; RUN: not %p3 --mode=objfpc -ferror-limit=0 -c %S/Inputs/lambdaoverloads/errors.pas -o %t.o 2>&1 | FileCheck %s
 ; CHECK: errors.pas:49:3: error: ambiguous call to overloaded 'Calc' with arguments (lambda function(?): ?)
 ; CHECK: errors.pas:11:1: note: candidate: Calc(TUnary): integer
 ; CHECK: errors.pas:16:1: note: candidate: Calc(TRealFn): integer

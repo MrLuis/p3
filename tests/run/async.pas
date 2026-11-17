@@ -5,11 +5,11 @@
   fails, cancels the others and raises the first failure; WhenAll and
   WhenAny wait for arrays of tasks; Pool.Run starts a task on the thread
   pool; detached lets one run on its own, its failure to a handler.
-  RUN: %pcc --mode=objfpc %s -o %t
+  RUN: %p3 --mode=objfpc %s -o %t
   RUN: %t | diff - %S/async.expected
-  RUN: %pcc --mode=objfpc -O2 %s -o %t.fast
+  RUN: %p3 --mode=objfpc -O2 %s -o %t.fast
   RUN: %t.fast | diff - %S/async.expected
-  RUN: %pcc --mode=objfpc -g %s -o %t.g
+  RUN: %p3 --mode=objfpc -g %s -o %t.g
   RUN: %t.g | diff - %S/async.expected
 }
 {$H+}

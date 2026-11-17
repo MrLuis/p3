@@ -1,4 +1,4 @@
 ; The selfhost dialect checks (selfhost/dialect, SELFHOST.md S1): eight
 ; programs whose expected output comes from Free Pascal.
-; RUN: %S/../../selfhost/dialect/run.sh pcc pcc | FileCheck %s
+; RUN: %S/../../selfhost/dialect/run.sh p3 p3 | FileCheck %s
 ; CHECK: 8 passed, 0 failed

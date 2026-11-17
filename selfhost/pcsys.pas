@@ -48,7 +48,7 @@ function sysGetEnv(const name: string; var value: string): boolean;
 function sysRun(const cmd: string): longint;
 { the same for a command of any length: count bytes at p }
 function sysRunChars(p: PCharArray; count: int64): longint;
-{ A new empty file in $TMPDIR (or /tmp) named pcc-XXXXXX<suffix>; '' if
+{ A new empty file in $TMPDIR (or /tmp) named p3-XXXXXX<suffix>; '' if
   it cannot be created. }
 function sysTempFile(const suffix: string): string;
 { The absolute path of path with links resolved (C realpath); '' if it
@@ -341,7 +341,7 @@ begin
     dir := '/tmp';
   if dir[length(dir)] <> '/' then
     dir := dir + '/';
-  toC(dir + 'pcc-XXXXXX' + suffix, t);
+  toC(dir + 'p3-XXXXXX' + suffix, t);
   fd := c_mkstemps(@t[1], length(suffix));
   if fd < 0 then
     exit('');

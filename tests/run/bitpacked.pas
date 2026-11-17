@@ -8,13 +8,13 @@
   bitpacked records, multi-dimensional arrays, for ... in, const and value
   arguments. The bytes are dumped through absolute overlays. Output is
   identical to Free Pascal 3.2.2's (fpc -Mobjfpc).
-  RUN: %pcc --mode=objfpc %s -o %t
+  RUN: %p3 --mode=objfpc %s -o %t
   RUN: %t | diff - %S/bitpacked.expected
-  RUN: %pcc --mode=objfpc -O2 %s -o %t.O2
+  RUN: %p3 --mode=objfpc -O2 %s -o %t.O2
   RUN: %t.O2 | diff - %S/bitpacked.expected
-  RUN: %pcc --mode=objfpc -O3 -fno-range-checks -fno-overflow-checks %s -o %t.O3
+  RUN: %p3 --mode=objfpc -O3 -fno-range-checks -fno-overflow-checks %s -o %t.O3
   RUN: %t.O3 | diff - %S/bitpacked.expected
-  RUN: %pcc --mode=objfpc -g %s -o %t.g
+  RUN: %p3 --mode=objfpc -g %s -o %t.g
   RUN: %t.g | diff - %S/bitpacked.expected
 }
 program bitpacked;

@@ -1,22 +1,22 @@
 ; S4-S6: the self-hosted lexer, parser and Sema. The generated tables must be
 ; current, the sources must follow the dialect, and the Pascal compiler
-; built by pcc must print exactly the same --emit-tokens, --emit-parse-tree
-; and --emit-ast output, diagnostics and exit status as the C++ pcc for
+; built by p3 must print exactly the same --emit-tokens, --emit-parse-tree
+; and --emit-ast output, diagnostics and exit status as the C++ p3 for
 ; every .pas file in the repository, in all modes. (By hand also: the fuzz
 ; corpus, mutants and iso7185pat.pas, and the FPC-built compiler; see
 ; selfhost/README.md.)
 ; REQUIRES: selfhost-build
 ; RUN: python3 %S/../../utils/gen-selfhost-tables.py --check
-; RUN: python3 %S/../../utils/selfhost-lint.py %S/../../selfhost/pcsys.pas %S/../../selfhost/pcutil.pas %S/../../selfhost/pcdiag.pas %S/../../selfhost/pclex.pas %S/../../selfhost/pcast.pas %S/../../selfhost/pctypes.pas %S/../../selfhost/pcscope.pas %S/../../selfhost/pcsema.pas %S/../../selfhost/pcsemastmt.inc %S/../../selfhost/pcparse.pas %S/../../selfhost/pcprint.pas %S/../../selfhost/pcir.pas %S/../../selfhost/pcgen.pas %S/../../selfhost/pcgenstmt.inc %S/../../selfhost/pcgendbg.inc %S/../../selfhost/pcdriver.pas %S/../../selfhost/pcllvm.pas %S/../../selfhost/pcc.pas
-; RUN: %pcc --mode=tp %selfhost-flags -I %S/../../selfhost %S/../../selfhost/pcc.pas -o %t.pcc
-; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-tokens --ref pcc --new %t.pcc %S/.. %S/../../selfhost | FileCheck %s
-; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-parse-tree --ref pcc --new %t.pcc %S/.. %S/../../selfhost | FileCheck %s
-; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-ast --ref pcc --new %t.pcc %S/.. %S/../../selfhost | FileCheck %s
-; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-parse-tree --modes=tp --extra="-I %S/../run/Inputs/units/lib" --ref pcc --new %t.pcc %S/../run/Inputs/units/main.pas | FileCheck %s
+; RUN: python3 %S/../../utils/selfhost-lint.py %S/../../selfhost/pcsys.pas %S/../../selfhost/pcutil.pas %S/../../selfhost/pcdiag.pas %S/../../selfhost/pclex.pas %S/../../selfhost/pcast.pas %S/../../selfhost/pctypes.pas %S/../../selfhost/pcscope.pas %S/../../selfhost/pcsema.pas %S/../../selfhost/pcsemastmt.inc %S/../../selfhost/pcparse.pas %S/../../selfhost/pcprint.pas %S/../../selfhost/pcir.pas %S/../../selfhost/pcgen.pas %S/../../selfhost/pcgenstmt.inc %S/../../selfhost/pcgendbg.inc %S/../../selfhost/pcdriver.pas %S/../../selfhost/pcllvm.pas %S/../../selfhost/p3.pas
+; RUN: %p3 --mode=tp %selfhost-flags -I %S/../../selfhost %S/../../selfhost/p3.pas -o %t.p3
+; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-tokens --ref p3 --new %t.p3 %S/.. %S/../../selfhost | FileCheck %s
+; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-parse-tree --ref p3 --new %t.p3 %S/.. %S/../../selfhost | FileCheck %s
+; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-ast --ref p3 --new %t.p3 %S/.. %S/../../selfhost | FileCheck %s
+; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-parse-tree --modes=tp --extra="-I %S/../run/Inputs/units/lib" --ref p3 --new %t.p3 %S/../run/Inputs/units/main.pas | FileCheck %s
 ; Classes (--mode=objfpc): every .pas file of the repository, and with
 ; units and diagnostics for all errors.
-; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-tokens --modes=objfpc --ref pcc --new %t.pcc %S/.. | FileCheck %s
-; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-parse-tree --modes=objfpc --ref pcc --new %t.pcc %S/.. | FileCheck %s
-; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-ast --modes=objfpc --extra="-ferror-limit=0 -I %S/../run/Inputs/classes/lib" --ref pcc --new %t.pcc %S/.. | FileCheck %s
-; RUN: python3 %S/../../utils/selfhost-diff.py --action=-c --modes=objfpc --extra="-ferror-limit=0 -I %S/../run/Inputs/classes/lib -o /dev/null" --ref pcc --new %t.pcc %S/../sema/Inputs/classes %S/../run/Inputs/classes/lib | FileCheck %s
+; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-tokens --modes=objfpc --ref p3 --new %t.p3 %S/.. | FileCheck %s
+; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-parse-tree --modes=objfpc --ref p3 --new %t.p3 %S/.. | FileCheck %s
+; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-ast --modes=objfpc --extra="-ferror-limit=0 -I %S/../run/Inputs/classes/lib" --ref p3 --new %t.p3 %S/.. | FileCheck %s
+; RUN: python3 %S/../../utils/selfhost-diff.py --action=-c --modes=objfpc --extra="-ferror-limit=0 -I %S/../run/Inputs/classes/lib -o /dev/null" --ref p3 --new %t.p3 %S/../sema/Inputs/classes %S/../run/Inputs/classes/lib | FileCheck %s
 ; CHECK: runs, 0 differ

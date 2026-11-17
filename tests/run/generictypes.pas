@@ -3,11 +3,11 @@
   specialize TName<integer> is the type made of it for those type
   arguments, the same type wherever it is written. The implementations of
   a generic class's methods (TName.Method) are templates too.
-  RUN: %pcc --mode=objfpc %s -o %t
+  RUN: %p3 --mode=objfpc %s -o %t
   RUN: %t | diff - %S/generictypes.expected
-  RUN: %pcc --mode=objfpc -O2 %s -o %t.fast
+  RUN: %p3 --mode=objfpc -O2 %s -o %t.fast
   RUN: %t.fast | diff - %S/generictypes.expected
-  RUN: %pcc --mode=objfpc -g %s -o %t.dbg
+  RUN: %p3 --mode=objfpc -g %s -o %t.dbg
   RUN: %t.dbg | diff - %S/generictypes.expected
 }
 {$H+}

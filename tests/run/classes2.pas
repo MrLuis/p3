@@ -2,10 +2,10 @@
   string properties with setters, functions returning objects and strings,
   constructors and destructors called on objects, virtual functions with
   string results, unqualified calls from nested routines, with on objects.
-  RUN: %pcc --mode=objfpc %s -o %t
+  RUN: %p3 --mode=objfpc %s -o %t
   RUN:  %t > %t.out
   RUN: diff %S/classes2.expected %t.out
-  RUN: %pcc --mode=objfpc -O2 %s -o %t.O2
+  RUN: %p3 --mode=objfpc -O2 %s -o %t.O2
   RUN:  %t.O2 > %t.O2.out
   RUN: diff %S/classes2.expected %t.O2.out
 }

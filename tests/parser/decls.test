@@ -2,10 +2,10 @@
 
 ; The tree shows folded constants, resolved types, parameters vs function
 ; results, and calls.
-; RUN: %pcc --emit-ast %S/Inputs/decls.pas -o %t.ast
+; RUN: %p3 --emit-ast %S/Inputs/decls.pas -o %t.ast
 ; RUN: diff %S/Inputs/decls.ast %t.ast
 
-; RUN: not %pcc --emit-ast %S/Inputs/decl-syntax.pas 2>&1 >/dev/null | FileCheck --check-prefix=SYNTAX %s
+; RUN: not %p3 --emit-ast %S/Inputs/decl-syntax.pas 2>&1 >/dev/null | FileCheck --check-prefix=SYNTAX %s
 ; SYNTAX: decl-syntax.pas:2:16: error: conformant array parameters are not supported yet
 ; SYNTAX: decl-syntax.pas:4:15: error: expected parameter name
 ; SYNTAX: decl-syntax.pas:8:1: error: in ISO Pascal, 'type' declarations must come before 'procedure' declarations; use --mode=tp to mix them

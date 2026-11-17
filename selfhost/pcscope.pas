@@ -1,5 +1,5 @@
 unit pcscope;
-{ Name scopes for Sema; a port of include/pcc/Sema/Scope.h. A scope maps
+{ Name scopes for Sema; a port of include/p3/Sema/Scope.h. A scope maps
   lower-case names to declarations; a `with` scope exposes a record's
   fields; units add the interface scopes of the units they use. In
   objfpc, `with obj do` and every method body open a scope exposing the

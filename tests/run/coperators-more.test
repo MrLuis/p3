@@ -4,19 +4,19 @@
 ; as Free Pascal's. The AST shows x += e as the assignment x := x + e,
 ; marked compound, and the tokens are plus_equal, minus_equal, star_equal
 ; and slash_equal.
-; RUN: %pcc --mode=objfpc %S/Inputs/coperators/objfpc.pas -o %t
+; RUN: %p3 --mode=objfpc %S/Inputs/coperators/objfpc.pas -o %t
 ; RUN: %t | FileCheck %s
 ; CHECK: 42
 ; CHECK-NEXT: 8 abab
 ; CHECK-NEXT: -4 2
 ; CHECK-NEXT: 55
-; RUN: %pcc --mode=objfpc --emit-ast -o - %S/Inputs/coperators/objfpc.pas | FileCheck --check-prefix=AST %s
+; RUN: %p3 --mode=objfpc --emit-ast -o - %S/Inputs/coperators/objfpc.pas | FileCheck --check-prefix=AST %s
 ; AST: AssignStmt compound
 ; AST-NEXT: NameRefExpr 'result'
 ; AST-NEXT: BinaryExpr '+'
 ; AST-NEXT: NameRefExpr 'result'
 ; AST-NEXT: NameRefExpr 'v'
-; RUN: %pcc --mode=tp --emit-tokens -o - %S/Inputs/coperators/tokens.pas | FileCheck --check-prefix=TOK %s
+; RUN: %p3 --mode=tp --emit-tokens -o - %S/Inputs/coperators/tokens.pas | FileCheck --check-prefix=TOK %s
 ; TOK: plus_equal '+='
 ; TOK: minus_equal '-='
 ; TOK: star_equal '*='

@@ -1,6 +1,6 @@
 ; Every operator / punctuator (PLAN.md 4.4).
-; RUN: %pcc --emit-tokens %S/Inputs/punctuation.pas | FileCheck --check-prefixes=CHECK,ISO %s
-; RUN: %pcc --emit-tokens --mode=tp %S/Inputs/punctuation.pas | FileCheck --check-prefixes=CHECK,TP %s
+; RUN: %p3 --emit-tokens %S/Inputs/punctuation.pas | FileCheck --check-prefixes=CHECK,ISO %s
+; RUN: %p3 --emit-tokens --mode=tp %S/Inputs/punctuation.pas | FileCheck --check-prefixes=CHECK,TP %s
 
 ; CHECK:      1:1 plus '+'
 ; CHECK-NEXT: 1:3 minus '-'

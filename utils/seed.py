@@ -1,26 +1,26 @@
 #!/usr/bin/env python3
 """The stage-1 seed (SELFHOST.md S11): bootstrapping the self-hosted
-compiler without the C++ pcc.
+compiler without the C++ p3.
 
 A seed is a directory (and a .tar.gz of it) named
-pcc-seed-<version>-<triple>, holding
+p3-seed-<version>-<triple>, holding
 
-  bin/pcc              a stage-1 compiler for <triple> (linked with libLLVM)
+  bin/p3              a stage-1 compiler for <triple> (linked with libLLVM)
   lib/libpascalrt.a    its runtime
-  pcc.ll               the compiler as LLVM IR (selfhost/pcc.pas at -O0): a
+  p3.ll               the compiler as LLVM IR (selfhost/p3.pas at -O0): a
                        stage 1 for <triple> can be built from it with clang
                        alone, where the binary does not run
   SEED.txt             version, triple, LLVM version, source commit, and
                        the SHA-256 of each file
 
-  utils/seed.py make --pcc build/bin/pcc --runtime build/lib/libpascalrt.a \\
+  utils/seed.py make --p3 build/bin/p3 --runtime build/lib/libpascalrt.a \\
       [--flags build/selfhost/flags.txt] [--out build/seed]
-      Builds a seed: stage 1 with the C++ pcc, the seed's compiler (stage 2)
+      Builds a seed: stage 1 with the C++ p3, the seed's compiler (stage 2)
       with stage 1, and the seed's IR with stage 2.
 
   utils/seed.py bootstrap --seed <dir or .tar.gz> [--from binary|ir]
       [--work build/seed-bootstrap] [--llvm-config llvm-config-19]
-      Bootstraps from a seed: no C++ pcc and no CMake. The runtime is
+      Bootstraps from a seed: no C++ p3 and no CMake. The runtime is
       compiled from runtime/*.c with cc, the LLVM-specific parts come from
       llvm-config. Stage 1 is the seed's binary (or built from its IR with
       clang); stage 2 and stage 3 are built from selfhost/; stage 2 and
@@ -43,7 +43,7 @@ import tarfile
 import tempfile
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-SOURCE = os.path.join("selfhost", "pcc.pas")  # relative to ROOT
+SOURCE = os.path.join("selfhost", "p3.pas")  # relative to ROOT
 
 
 def log(msg):
@@ -79,7 +79,7 @@ def install(stage_dir, runtime):
     os.makedirs(os.path.join(stage_dir, "bin"), exist_ok=True)
     os.makedirs(os.path.join(stage_dir, "lib"), exist_ok=True)
     shutil.copyfile(runtime, os.path.join(stage_dir, "lib", "libpascalrt.a"))
-    return os.path.join(stage_dir, "bin", "pcc")
+    return os.path.join(stage_dir, "bin", "p3")
 
 
 def version_line(compiler):
@@ -103,31 +103,31 @@ def git_commit():
 
 def cmd_make(args):
     flags = shlex.split(open(args.flags).read())
-    work = tempfile.mkdtemp(prefix="pcc-seed")
+    work = tempfile.mkdtemp(prefix="p3-seed")
     try:
         s1 = install(os.path.join(work, "stage1"), args.runtime)
-        log("building stage 1 with the C++ pcc")
-        compile_self(os.path.abspath(args.pcc), flags, s1, ["-O2"])
+        log("building stage 1 with the C++ p3")
+        compile_self(os.path.abspath(args.p3), flags, s1, ["-O2"])
         s2 = install(os.path.join(work, "stage2"), args.runtime)
         log("building the seed compiler (stage 2) with stage 1")
         compile_self(s1, flags, s2, ["-O2"])
         version, llvm, triple = version_line(s2)
-        name = "pcc-seed-%s-%s" % (version, triple)
+        name = "p3-seed-%s-%s" % (version, triple)
         out = os.path.join(os.path.abspath(args.out), name)
         if os.path.exists(out):
             shutil.rmtree(out)
         os.makedirs(os.path.join(out, "bin"))
         os.makedirs(os.path.join(out, "lib"))
-        shutil.copy2(s2, os.path.join(out, "bin", "pcc"))
+        shutil.copy2(s2, os.path.join(out, "bin", "p3"))
         shutil.copyfile(args.runtime, os.path.join(out, "lib", "libpascalrt.a"))
         log("writing the seed IR")
-        emit_ir(s2, flags, os.path.join(out, "pcc.ll"))
-        files = ["bin/pcc", "lib/libpascalrt.a", "pcc.ll"]
+        emit_ir(s2, flags, os.path.join(out, "p3.ll"))
+        files = ["bin/p3", "lib/libpascalrt.a", "p3.ll"]
         with open(os.path.join(out, "SEED.txt"), "w") as f:
-            f.write("pcc stage-1 seed (SELFHOST.md S11)\n\n")
+            f.write("p3 stage-1 seed (SELFHOST.md S11)\n\n")
             f.write("version: %s\ntarget: %s\nLLVM: %s\nsource commit: %s\n\n" %
                     (version, triple, llvm, git_commit()))
-            f.write("Bootstrap from it, in a pcc source tree:\n"
+            f.write("Bootstrap from it, in a p3 source tree:\n"
                     "  utils/seed.py bootstrap --seed <this directory or .tar.gz>\n\n")
             f.write("SHA-256:\n")
             for rel in files:
@@ -143,7 +143,7 @@ def cmd_make(args):
 
 
 def llvm_settings(llvm_config, include_out):
-    """The flags that build selfhost/pcc.pas, without CMake: the target
+    """The flags that build selfhost/p3.pas, without CMake: the target
     initializers and the libLLVM link options, from llvm-config."""
     includedir = run([llvm_config, "--includedir"]).strip()
     libdir = run([llvm_config, "--libdir"]).strip()
@@ -218,13 +218,13 @@ def cmd_bootstrap(args):
 
     s1 = install(os.path.join(work, "stage1"), runtime)
     if args.from_ == "binary":
-        shutil.copy2(os.path.join(seed, "bin", "pcc"), s1)
+        shutil.copy2(os.path.join(seed, "bin", "p3"), s1)
         log("stage 1: the seed's binary")
     else:
         clang = args.clang or shutil.which("clang-19") or shutil.which("clang")
         if not clang:
             sys.exit("seed: --from ir needs clang (set --clang)")
-        run([clang, "-w", "-O2", os.path.join(seed, "pcc.ll"), runtime,
+        run([clang, "-w", "-O2", os.path.join(seed, "p3.ll"), runtime,
              "-L" + libdir] + libs + ["-lm", "-o", s1])
         log("stage 1: built from the seed's IR with %s" % clang)
 
@@ -241,7 +241,7 @@ def cmd_bootstrap(args):
         log("stage 2 and stage 3 write the same IR")
     else:
         failures.append("stage 2 and stage 3 write different IR")
-    seed_ir = open(os.path.join(seed, "pcc.ll"), "rb").read()
+    seed_ir = open(os.path.join(seed, "p3.ll"), "rb").read()
     if open(ir2, "rb").read() == seed_ir:
         log("stage 2 writes the seed's IR: the sources are the seed's")
     else:
@@ -259,7 +259,7 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     sub = ap.add_subparsers(dest="cmd", required=True)
     mk = sub.add_parser("make", help="build a seed")
-    mk.add_argument("--pcc", required=True, help="the C++ pcc")
+    mk.add_argument("--p3", required=True, help="the C++ p3")
     mk.add_argument("--runtime", required=True, help="libpascalrt.a")
     mk.add_argument("--flags", default=os.path.join(ROOT, "build", "selfhost", "flags.txt"))
     mk.add_argument("--out", default=os.path.join(ROOT, "build", "seed"))

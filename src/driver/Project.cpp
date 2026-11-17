@@ -1,4 +1,4 @@
-//===- Project.cpp - pcc.json project settings ----------------------------===//
+//===- Project.cpp - p3.json project settings ----------------------------===//
 //
 // A small JSON reader (strict JSON; strings up to 255 bytes, as in the
 // self-hosted compiler, whose selfhost/pcproject.pas this mirrors so both
@@ -6,9 +6,9 @@
 //
 //===----------------------------------------------------------------------===//
 
-#include "pcc/Driver/Project.h"
-#include "pcc/Basic/Diagnostics.h"
-#include "pcc/Basic/SourceManager.h"
+#include "p3/Driver/Project.h"
+#include "p3/Basic/Diagnostics.h"
+#include "p3/Basic/SourceManager.h"
 
 #include "llvm/Support/FileSystem.h"
 
@@ -17,7 +17,7 @@
 #include <string>
 #include <vector>
 
-using namespace pcc;
+using namespace p3;
 
 namespace {
 
@@ -472,7 +472,7 @@ public:
       const JValue &V = *M.Value;
       const std::string &N = M.Name;
       if (N == "name" || N == "version" || N == "description") {
-        string(V, N); // for people and tools: not used by pcc
+        string(V, N); // for people and tools: not used by p3
       } else if (N == "main") {
         S.Main = string(V, N);
       } else if (N == "output") {
@@ -542,7 +542,7 @@ std::string projectPath(const std::string &Base, const std::string &P) {
 
 } // namespace
 
-bool pcc::applyProjectFile(CompilerOptions &Opts, SourceManager &SM,
+bool p3::applyProjectFile(CompilerOptions &Opts, SourceManager &SM,
                            DiagnosticsEngine &Diags) {
   if (Opts.NoProject)
     return true;
@@ -560,9 +560,9 @@ bool pcc::applyProjectFile(CompilerOptions &Opts, SourceManager &SM,
       Dir = parentDir(absolutePath(Opts.InputFile));
     std::string Cwd = absolutePath(".");
     for (; !Dir.empty(); Dir = parentDir(Dir))
-      if (isRegularFile(joinPath(Dir, "pcc.json"))) {
+      if (isRegularFile(joinPath(Dir, "p3.json"))) {
         Base = Dir == Cwd ? "" : joinPath(Dir, "");
-        Path = Base + "pcc.json";
+        Path = Base + "p3.json";
         break;
       }
     if (Path.empty())

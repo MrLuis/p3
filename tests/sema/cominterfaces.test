@@ -2,7 +2,7 @@
 ; from TInterfacedObject, COM and CORBA interfaces do not mix, and COM
 ; interfaces (reference counted) cannot be in variant parts, files or
 ; record results. is/as take a COM interface on the left (its object).
-; RUN: not %pcc --mode=objfpc -ferror-limit=0 -c %S/Inputs/com/errors.pas -o %t.o 2>&1 | FileCheck %s
+; RUN: not %p3 --mode=objfpc -ferror-limit=0 -c %S/Inputs/com/errors.pas -o %t.o 2>&1 | FileCheck %s
 ; CHECK: errors.pas:6:27: error: class 'TPlain' implements the COM interface 'IA', so it must descend from TInterfacedObject
 ; CHECK: errors.pas:13:24: error: a CORBA interface cannot inherit from the COM interface 'IA'
 ; CHECK: errors.pas:16:26: error: a COM interface cannot inherit from the CORBA interface 'IC'
@@ -13,14 +13,14 @@
 ; CHECK-NOT: error
 
 ; The parse tree marks COM interfaces.
-; RUN: %pcc --mode=objfpc --emit-parse-tree %S/Inputs/com/errors.pas | FileCheck --check-prefix=TREE %s
+; RUN: %p3 --mode=objfpc --emit-parse-tree %S/Inputs/com/errors.pas | FileCheck --check-prefix=TREE %s
 ; TREE:      TypeDecl 'ia' <3:3>
 ; TREE-NEXT:   InterfaceTypeSpec com <3:8>
 ; TREE:      TypeDecl 'ic' <10:3>
 ; TREE-NEXT:   InterfaceTypeSpec <10:8>
 
 ; An interface type needs a name (it used to crash code generation).
-; RUN: not %pcc --mode=objfpc -ferror-limit=0 -c %S/Inputs/com/anonymous.pas -o %t.o 2>&1 | FileCheck --check-prefix=ANON %s
+; RUN: not %p3 --mode=objfpc -ferror-limit=0 -c %S/Inputs/com/anonymous.pas -o %t.o 2>&1 | FileCheck --check-prefix=ANON %s
 ; ANON: anonymous.pas:2:8: error: an interface type must be declared in a 'type' section
 ; ANON: anonymous.pas:3:21: error: an interface type must be declared in a 'type' section
 ; ANON-NOT: error

@@ -3,9 +3,9 @@
   defaultparameters (parameters' default values) turned on; names that tp
   mode already has (cvar, initfinal, hintdirective) and the + / ON forms
   are accepted. Output is identical to Free Pascal 3.2.2's (fpc -Mtp).
-  (Free Pascal takes mode switches only at the start of a file; pcc also
+  (Free Pascal takes mode switches only at the start of a file; p3 also
   later.)
-  RUN: %pcc --mode=tp %s -o %t
+  RUN: %p3 --mode=tp %s -o %t
   RUN: %t | diff - %S/modeswitch.expected
 }
 program modeswitch;

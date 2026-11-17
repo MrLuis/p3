@@ -1,5 +1,5 @@
 ; COM interfaces (--mode=objfpc): reference counting in the IR.
-; RUN: %pcc --mode=objfpc --emit-llvm %S/Inputs/com.pas -o - | FileCheck %s
+; RUN: %p3 --mode=objfpc --emit-llvm %S/Inputs/com.pas -o - | FileCheck %s
 
 ; A class with interface fields: its cleanup function is in its interface
 ; table, after the number of interfaces (IUnknown, from TInterfacedObject,

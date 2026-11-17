@@ -2,10 +2,10 @@
   characters it points to, up to the NUL; nothing for nil (not even
   padding); a field width pads on the left. Any pointer to char is a pchar. Output is identical to
   Free Pascal's.
-  RUN: %pcc --mode=tp %s -o %t
+  RUN: %p3 --mode=tp %s -o %t
   RUN: %t %t.tmp > %t.out
   RUN: diff %t.out %S/writepchar.expected
-  RUN: %pcc --mode=objfpc -O2 %s -o %t.fast
+  RUN: %p3 --mode=objfpc -O2 %s -o %t.fast
   RUN: %t.fast %t.tmp > %t.out
   RUN: diff %t.out %S/writepchar.expected
 }
@@ -57,7 +57,7 @@ begin
   writeln(c);
   r.name := p;
   writeln(r.name, ' ', Tail(r.name, 4));
-  writeln(c_getenv('PCC_NO_SUCH_VARIABLE'), '.');
+  writeln(c_getenv('P3_NO_SUCH_VARIABLE'), '.');
 
   { cut at the first NUL }
   line[6] := #0;

@@ -1,5 +1,5 @@
 { read / readln of integers and chars from standard input.
-  RUN: %pcc %s -o %t
+  RUN: %p3 %s -o %t
   RUN: %t < %S/Inputs/io.input > %t.out
   RUN: diff %S/io.expected %t.out
 }

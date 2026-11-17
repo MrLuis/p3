@@ -3,7 +3,7 @@
 ; one type parameter: their common type) and from the type wanted of its
 ; result; what cannot be told is reported with what to add. const x := e
 ; cannot be changed. Quoted text is a string, [a, b] an array.
-; RUN: not %pcc --mode=objfpc -ferror-limit=0 -c %S/Inputs/inference/errors.pas -o %t.o 2>&1 | FileCheck %s
+; RUN: not %p3 --mode=objfpc -ferror-limit=0 -c %S/Inputs/inference/errors.pas -o %t.o 2>&1 | FileCheck %s
 ; CHECK: errors.pas:52:19: error: cannot infer the type parameter 'T' of 'Largest': the arguments give both 'integer' and 'ansistring'; give the type: specialize Largest<...>
 ; CHECK: errors.pas:53:21: error: cannot infer the type parameter 'T' of 'Largest': the arguments give both 'TColor' and 'integer'; give the type: specialize Largest<...>
 ; CHECK: errors.pas:55:3: error: cannot infer the type parameter 'T' of 'Make' in this call: no argument gives it; give the type: specialize Make<...>
@@ -36,16 +36,16 @@
 ; CHECK: errors.pas:19:10: error: assigning to 'ansistring' from incompatible type 'integer'
 ; CHECK: errors.pas:58:8: note: in the specialization 'Conv<integer, ansistring>' requested here
 ;
-; RUN: not %pcc --mode=objfpc -c %S/Inputs/inference/syntax.pas -o %t.o 2>&1 | FileCheck --check-prefix=SYNTAX %s
+; RUN: not %p3 --mode=objfpc -c %S/Inputs/inference/syntax.pas -o %t.o 2>&1 | FileCheck --check-prefix=SYNTAX %s
 ; SYNTAX: syntax.pas:3:19: error: expected ':=' and a value after constant name
 ; SYNTAX: syntax.pas:4:14: error: only one constant can be declared at a time
 ; SYNTAX: syntax.pas:5:9: error: expected constant name
 ; SYNTAX: syntax.pas:6:9: error: expected constant name
 ;
-; RUN: not %pcc --mode=tp -c %S/Inputs/inference/tp.pas -o %t.o 2>&1 | FileCheck --check-prefix=TP %s
+; RUN: not %p3 --mode=tp -c %S/Inputs/inference/tp.pas -o %t.o 2>&1 | FileCheck --check-prefix=TP %s
 ; TP: tp.pas:4:3: error: constants declared among the statements need --mode=objfpc
 ;
-; RUN: %pcc --mode=objfpc --emit-ast %S/Inputs/inference/ast.pas -o - | FileCheck --check-prefix=AST %s
+; RUN: %p3 --mode=objfpc --emit-ast %S/Inputs/inference/ast.pas -o - | FileCheck --check-prefix=AST %s
 ; (the specializations follow the generics, before the statements)
 ; AST: FunctionDecl 'largest<real>' : real <3:9>
 ; AST: FunctionDecl 'make<real>' : real <7:9>

@@ -1,7 +1,7 @@
 ; for ... in: the control variable (a variable, not assigned in the loop),
 ; what can be enumerated, and the enumerator protocol (GetEnumerator without
 ; arguments, MoveNext: boolean, property Current).
-; RUN: not %pcc --mode=objfpc -ferror-limit=0 -c %S/Inputs/forin/errors.pas -o %t.o 2>&1 | FileCheck %s
+; RUN: not %p3 --mode=objfpc -ferror-limit=0 -c %S/Inputs/forin/errors.pas -o %t.o 2>&1 | FileCheck %s
 ; CHECK: errors.pas:26:17: error: cannot assign to 'i' inside a 'for' loop that it controls
 ; CHECK: errors.pas:26:3: note: 'for' loop is here
 ; CHECK: errors.pas:27:9: error: assigning to 'string' from incompatible type 'integer'
@@ -18,5 +18,5 @@
 ; CHECK: errors.pas:37:21: error: cannot assign to 'i' inside a 'for' loop that it controls
 ; CHECK-NOT: error:
 
-; RUN: not %pcc --mode=iso -c %S/Inputs/forin/iso.pas -o %t.o 2>&1 | FileCheck --check-prefix=ISO %s
+; RUN: not %p3 --mode=iso -c %S/Inputs/forin/iso.pas -o %t.o 2>&1 | FileCheck --check-prefix=ISO %s
 ; ISO: iso.pas:3:13: error: 'for ... in' is a Turbo/Free Pascal extension; use --mode=tp or --mode=objfpc

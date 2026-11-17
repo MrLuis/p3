@@ -1,6 +1,6 @@
 ; M11: did-you-mean suggestions and unused-variable warnings.
-; RUN: not %pcc -c %S/Inputs/suggest.pas -o %t.o 2>&1 | FileCheck %s
-; RUN: not %pcc -Wno-unused-variable -c %S/Inputs/suggest.pas -o %t.o 2>&1 | FileCheck --check-prefix=QUIET %s
+; RUN: not %p3 -c %S/Inputs/suggest.pas -o %t.o 2>&1 | FileCheck %s
+; RUN: not %p3 -Wno-unused-variable -c %S/Inputs/suggest.pas -o %t.o 2>&1 | FileCheck --check-prefix=QUIET %s
 ; QUIET-NOT: warning:
 
 ; CHECK: suggest.pas:3:32: error: unknown type name 'Pont'; did you mean 'Point'?

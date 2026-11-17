@@ -1,8 +1,8 @@
 { M9: pointers (new/dispose, linked list, binary tree) and sets.
-  RUN: %pcc %s -o %t
+  RUN: %p3 %s -o %t
   RUN: %t > %t.out
   RUN: diff %S/ptrsets.expected %t.out
-  RUN: %pcc -O2 %s -o %t.O2
+  RUN: %p3 -O2 %s -o %t.O2
   RUN: %t.O2 > %t.O2.out
   RUN: diff %S/ptrsets.expected %t.O2.out
 }

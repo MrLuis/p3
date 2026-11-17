@@ -1,7 +1,7 @@
 { TStringList's OnChange and OnChanging: which operations fire them, and
   BeginUpdate/EndUpdate. Output identical to Free Pascal 3.2.2's (fpc -Mobjfpc).
   Run in its own directory: it creates a file.
-  RUN: rm -rf %t && mkdir -p %t && %pcc --mode=objfpc %s -o %t/a
+  RUN: rm -rf %t && mkdir -p %t && %p3 --mode=objfpc %s -o %t/a
   RUN: cd %t && ./a > out && diff %S/rtl-onchange.expected out
 }
 program rtlonchange;

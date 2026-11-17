@@ -1,7 +1,7 @@
 ; Overloading (--mode=objfpc): overloads must differ in their parameters;
 ; method implementations match one of them; calls with no best fit (none,
 ; or a tie) and an overloaded @p without a target heading are errors.
-; RUN: not %pcc --mode=objfpc -ferror-limit=0 -c %S/Inputs/overloads/errors.pas -o %t.o 2>&1 | FileCheck %s
+; RUN: not %p3 --mode=objfpc -ferror-limit=0 -c %S/Inputs/overloads/errors.pas -o %t.o 2>&1 | FileCheck %s
 ; CHECK: errors.pas:6:15: error: redefinition of 'M' (overloads must differ in their parameters)
 ; CHECK: errors.pas:4:5: note: previous definition is here
 ; CHECK: errors.pas:8:14: error: redefinition of 'N' (overloads must differ in their parameters)
@@ -35,5 +35,5 @@
 ; CHECK-NOT: {{error|warning}}
 
 ; Without --mode=objfpc there is no overloading.
-; RUN: not %pcc --mode=tp -c %S/Inputs/overloads/tp.pas -o %t.o 2>&1 | FileCheck --check-prefix=TP %s
+; RUN: not %p3 --mode=tp -c %S/Inputs/overloads/tp.pas -o %t.o 2>&1 | FileCheck --check-prefix=TP %s
 ; TP: tp.pas:3:11: error: redefinition of 'P'

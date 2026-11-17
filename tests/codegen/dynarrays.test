@@ -1,7 +1,7 @@
 ; A dynamic array is a pointer to its elements. Each array type has a constant
 ; PasDynInfo: the element size and, for managed elements, functions that
 ; release and count one element.
-; RUN: %pcc --mode=objfpc --emit-llvm %S/Inputs/dynarrays.pas -o - | FileCheck %s
+; RUN: %p3 --mode=objfpc --emit-llvm %S/Inputs/dynarrays.pas -o - | FileCheck %s
 ; CHECK-DAG: @pas.a = internal global ptr null
 ; CHECK-DAG: @dyninfo = internal constant { i64, ptr, ptr } { i64 4, ptr null, ptr null }
 ; CHECK-DAG: @dyninfo.{{[0-9]+}} = internal constant { i64, ptr, ptr } { i64 8, ptr @dyn.fini, ptr @dyn.addref }

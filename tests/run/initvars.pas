@@ -4,13 +4,13 @@
   their values. Ordinals, reals, chars, enumerations, subranges,
   strings, arrays and records. Output is identical to Free
   Pascal 3.2.2's (fpc -Mobjfpc).
-  RUN: %pcc --mode=objfpc %s -o %t
+  RUN: %p3 --mode=objfpc %s -o %t
   RUN:  %t > %t.out
   RUN: diff %S/initvars.expected %t.out
-  RUN: %pcc --mode=objfpc -O2 %s -o %t.O2
+  RUN: %p3 --mode=objfpc -O2 %s -o %t.O2
   RUN:  %t.O2 > %t.O2.out
   RUN: diff %S/initvars.expected %t.O2.out
-  RUN: %pcc --mode=objfpc -g %s -o %t.g
+  RUN: %p3 --mode=objfpc -g %s -o %t.g
   RUN:  %t.g > %t.g.out
   RUN: diff %S/initvars.expected %t.g.out
 }

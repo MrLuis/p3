@@ -3,11 +3,11 @@
   (it sees the object's members, as the method does); outside methods,
   nil. It uses nothing of the routines around it, so like @Self.M it can
   be stored anywhere: event handlers.
-  RUN: %pcc --mode=objfpc %s -o %t
+  RUN: %p3 --mode=objfpc %s -o %t
   RUN: %t | diff - %S/methodlambda.expected
-  RUN: %pcc --mode=objfpc -O2 %s -o %t.fast
+  RUN: %p3 --mode=objfpc -O2 %s -o %t.fast
   RUN: %t.fast | diff - %S/methodlambda.expected
-  RUN: %pcc --mode=objfpc -g %s -o %t.dbg
+  RUN: %p3 --mode=objfpc -g %s -o %t.dbg
   RUN: %t.dbg | diff - %S/methodlambda.expected
 }
 {$H+}

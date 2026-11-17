@@ -1,7 +1,7 @@
 ; String / char literals with '' escapes.
-; RUN: %pcc --emit-tokens %S/Inputs/strings.pas | FileCheck %s
-; RUN: not %pcc --emit-tokens %S/Inputs/empty-string.pas 2>&1 >/dev/null | FileCheck --check-prefix=ISO-EMPTY %s
-; RUN: %pcc --emit-tokens --mode=tp %S/Inputs/empty-string.pas | FileCheck --check-prefix=TP-EMPTY %s
+; RUN: %p3 --emit-tokens %S/Inputs/strings.pas | FileCheck %s
+; RUN: not %p3 --emit-tokens %S/Inputs/empty-string.pas 2>&1 >/dev/null | FileCheck --check-prefix=ISO-EMPTY %s
+; RUN: %p3 --emit-tokens --mode=tp %S/Inputs/empty-string.pas | FileCheck --check-prefix=TP-EMPTY %s
 
 ; CHECK:      1:1 string_literal ''Hello, World!'' value="Hello, World!"
 ; CHECK-NEXT: 1:17 string_literal ''c'' value="c"

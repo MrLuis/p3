@@ -4,20 +4,20 @@
 ; interfaces), in programs and units, compiled whole and separately.
 ; Output is identical to Free Pascal 3.2.2's.
 ; RUN: rm -rf %t && mkdir -p %t && cp -r %S/Inputs/declared/. %t/
-; RUN: %pcc --mode=objfpc -I %t/lib %t/main.pas -o %t/whole
+; RUN: %p3 --mode=objfpc -I %t/lib %t/main.pas -o %t/whole
 ; RUN: %t/whole | FileCheck %s
-; RUN: %pcc --mode=tp -I %t/lib %t/main.pas -o %t/tp
+; RUN: %p3 --mode=tp -I %t/lib %t/main.pas -o %t/tp
 ; RUN: %t/tp | FileCheck %s
-; RUN: %pcc --mode=objfpc -c %t/lib/paths.pas -o %t/lib/paths.o
-; RUN: %pcc --mode=objfpc -I %t/lib -c %t/lib/files.pas -o %t/lib/files.o
-; RUN: %pcc --mode=objfpc -I %t/lib -fseparate-units %t/main.pas -o %t/separate
+; RUN: %p3 --mode=objfpc -c %t/lib/paths.pas -o %t/lib/paths.o
+; RUN: %p3 --mode=objfpc -I %t/lib -c %t/lib/files.pas -o %t/lib/files.o
+; RUN: %p3 --mode=objfpc -I %t/lib -fseparate-units %t/main.pas -o %t/separate
 ; RUN: %t/separate | FileCheck %s
 ; CHECK:      decls noTBar std+unit noLater noLocOutside P+unitname noIndirect 300
 ; CHECK-NEXT: with /
 ; CHECK-NEXT: Loc and Param inside 7
 
 ; A qualified name is an error, as in Free Pascal.
-; RUN: not %pcc --mode=objfpc -ferror-limit=0 --emit-tokens %S/../lexer/Inputs/cond/declared-errors.pas 2>&1 >/dev/null | FileCheck --check-prefix=ERR %s
+; RUN: not %p3 --mode=objfpc -ferror-limit=0 --emit-tokens %S/../lexer/Inputs/cond/declared-errors.pas 2>&1 >/dev/null | FileCheck --check-prefix=ERR %s
 ; ERR: declared-errors.pas:1:1: error: invalid $IF expression
 ; ERR: declared-errors.pas:2:1: error: invalid $IF expression
 ; ERR: declared-errors.pas:3:1: error: invalid $IF expression

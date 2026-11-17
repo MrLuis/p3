@@ -1,8 +1,8 @@
-#include "pcc/Lexer/Lexer.h"
-#include "pcc/Basic/Diagnostics.h"
-#include "pcc/Basic/Directives.h"
-#include "pcc/Basic/SourceManager.h"
-#include "pcc/Basic/StringPool.h"
+#include "p3/Lexer/Lexer.h"
+#include "p3/Basic/Diagnostics.h"
+#include "p3/Basic/Directives.h"
+#include "p3/Basic/SourceManager.h"
+#include "p3/Basic/StringPool.h"
 
 #include "llvm/ADT/APFloat.h"
 #include "llvm/ADT/SmallString.h"
@@ -13,7 +13,7 @@
 #include "llvm/Support/MathExtras.h"
 #include "llvm/Support/Path.h"
 
-using namespace pcc;
+using namespace p3;
 
 static bool isIdentStart(char C) { return llvm::isAlpha(C) || C == '_'; }
 static bool isIdentBody(char C) { return llvm::isAlnum(C) || C == '_'; }
@@ -32,10 +32,10 @@ Lexer::Lexer(const SourceManager &SM, FileID FID, DiagnosticsEngine &Diags,
   // MemoryBuffers are NUL-terminated, so peeking one char past a token
   // (e.g. Cur[1]) is always safe, even at BufEnd.
   NameScopes.emplace_back(); // the file's own declarations (declared())
-  Defines.insert("PCC");
-  Defines.insert(LangOpts.Mode == LangMode::ISO  ? "PCC_ISO"
-                 : LangOpts.Mode == LangMode::TP ? "PCC_TP"
-                                                 : "PCC_OBJFPC");
+  Defines.insert("P3");
+  Defines.insert(LangOpts.Mode == LangMode::ISO  ? "P3_ISO"
+                 : LangOpts.Mode == LangMode::TP ? "P3_TP"
+                                                 : "P3_OBJFPC");
 }
 
 void Lexer::setDefines(llvm::ArrayRef<std::string> Names) {
@@ -127,11 +127,11 @@ void Lexer::enterPendingInclude() {
 
 /// {$modeswitch NAME[+|-| ON| OFF]} with Free Pascal 3.2.2's names:
 /// advancedrecords and typehelpers (objfpc), result, out and
-/// defaultparameters (any mode), and pcc's own racechecks (objfpc), turn
+/// defaultparameters (any mode), and p3's own racechecks (objfpc), turn
 /// their features on or off; the others
-/// pcc's mode decides (class, objpas, properties, exceptions: objfpc; cvar,
-/// initfinal, hintdirective, allowinline: always) or pcc lacks: a request
-/// for what pcc does is accepted, any other is reported and ignored.
+/// p3's mode decides (class, objpas, properties, exceptions: objfpc; cvar,
+/// initfinal, hintdirective, allowinline: always) or p3 lacks: a request
+/// for what p3 does is accepted, any other is reported and ignored.
 void Lexer::handleModeSwitch(const char *Start, llvm::StringRef Arg) {
   llvm::StringRef Name = Arg.take_while(isIdentBody);
   llvm::StringRef Rest = Arg.drop_front(Name.size()).trim();
@@ -155,7 +155,7 @@ void Lexer::handleModeSwitch(const char *Start, llvm::StringRef Arg) {
     TypeHelpers = On;
     return;
   }
-  if (N == "racechecks") { // pcc's own: spawn blocks share only shared data
+  if (N == "racechecks") { // p3's own: spawn blocks share only shared data
     RaceChecks = On;
     return;
   }
@@ -171,7 +171,7 @@ void Lexer::handleModeSwitch(const char *Start, llvm::StringRef Arg) {
     DefaultParamsSwitch = On;
     return;
   }
-  // The others: what pcc's mode decides, what it always does, or a
+  // The others: what p3's mode decides, what it always does, or a
   // feature it lacks.
   enum { ByMode, Always, Lacking } Kind;
   if (N == "class" || N == "objpas" || N == "properties" || N == "exceptions")

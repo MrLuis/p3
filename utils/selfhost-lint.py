@@ -7,7 +7,7 @@
     objfpc reserved words and modifiers, are not used;
   * a function without parameters does not use its own name in its body
     except as an assignment target ("f := ..."): FPC's objfpc mode reads
-    the name as the result variable, pcc as a recursive call.
+    the name as the result variable, p3 as a recursive call.
 
 Usage: utils/selfhost-lint.py file.pas ...   (exit 1 on a violation)
 """
@@ -83,7 +83,7 @@ def lint_self_reference(path, text):
             for occ in re.finditer(r"\b%s\b" % re.escape(name), code, re.I):
                 if not re.match(r"\s*:=", code[occ.end():]):
                     errors.append("%s:%d: '%s' has no parameters and refers to "
-                                  "itself (a recursive call in pcc, the result "
+                                  "itself (a recursive call in p3, the result "
                                   "in FPC objfpc)" % (path, j + 1, name))
             j += 1
         i = j

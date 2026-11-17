@@ -1,5 +1,5 @@
 ; Open arrays: what can be passed and what the callee can do.
-; RUN: not %pcc --mode=objfpc -ferror-limit=0 --emit-ast %S/Inputs/openarrays/errors.pas 2>&1 | FileCheck %s
+; RUN: not %p3 --mode=objfpc -ferror-limit=0 --emit-ast %S/Inputs/openarrays/errors.pas 2>&1 | FileCheck %s
 ; CHECK: errors.pas:8:31: error: the elements of an open array cannot be files
 ; CHECK: errors.pas:11:11: error: constant value must be a constant
 ; CHECK: errors.pas:14:3: error: cannot modify constant parameter 'a'
@@ -19,8 +19,8 @@
 ; CHECK: errors.pas:36:6: error: cannot pass a value of type 'string' to parameter 'a' of type 'array of char'
 ; CHECK-NOT: error:
 ;
-; RUN: not %pcc --mode=objfpc --emit-ast %S/Inputs/openarrays/syntax.pas 2>&1 | FileCheck --check-prefix=SYN %s
+; RUN: not %p3 --mode=objfpc --emit-ast %S/Inputs/openarrays/syntax.pas 2>&1 | FileCheck --check-prefix=SYN %s
 ; SYN: syntax.pas:2:25: error: expected type name for the elements of an open array (declare the type in a 'type' section)
 ;
-; RUN: not %pcc --emit-ast %S/Inputs/openarrays/iso.pas 2>&1 | FileCheck --check-prefix=ISO %s
+; RUN: not %p3 --emit-ast %S/Inputs/openarrays/iso.pas 2>&1 | FileCheck --check-prefix=ISO %s
 ; ISO: iso.pas:2:{{[0-9]+}}: error: conformant array parameters are not supported yet

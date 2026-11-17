@@ -1,11 +1,11 @@
-{ pcc's unit library, Classes: TList and TStringList. Output identical to
+{ p3's unit library, Classes: TList and TStringList. Output identical to
   Free Pascal 3.2.2's (fpc -Mobjfpc -Sh-). Run in its own directory: it
   creates and removes files.
-  RUN: rm -rf %t && mkdir -p %t && %pcc --mode=objfpc %s -o %t/a
+  RUN: rm -rf %t && mkdir -p %t && %p3 --mode=objfpc %s -o %t/a
   RUN: cd %t && ./a > out && diff %S/rtl-classes.expected out
-  RUN: %pcc --mode=objfpc -O2 %s -o %t/a2
+  RUN: %p3 --mode=objfpc -O2 %s -o %t/a2
   RUN: cd %t && ./a2 > out2 && diff %S/rtl-classes.expected out2
-  RUN: %pcc --mode=objfpc -fseparate-units %s -o %t/a3
+  RUN: %p3 --mode=objfpc -fseparate-units %s -o %t/a3
   RUN: cd %t && ./a3 > out3 && diff %S/rtl-classes.expected out3
 }
 program rtlclasses;

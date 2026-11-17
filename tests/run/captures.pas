@@ -1,14 +1,14 @@
 {
-  RUN: %pcc --mode=objfpc %s -o %t && %t | diff - %S/captures.expected
-  RUN: %pcc --mode=objfpc -O2 %s -o %t.o2 && %t.o2 | diff - %S/captures.expected
-  RUN: %pcc --mode=objfpc -O2 -fzero-init -g %s -o %t.g && %t.g | diff - %S/captures.expected
+  RUN: %p3 --mode=objfpc %s -o %t && %t | diff - %S/captures.expected
+  RUN: %p3 --mode=objfpc -O2 %s -o %t.o2 && %t.o2 | diff - %S/captures.expected
+  RUN: %p3 --mode=objfpc -O2 -fzero-init -g %s -o %t.g && %t.g | diff - %S/captures.expected
 }
 { Variables used by nested routines live in their routine's frame record,
   the others in allocas (registers when optimized). Every way a nested
   routine reaches an enclosing routine's variable, and variables that
   must keep their values when an exception arrives. Output is identical
   to Free Pascal 3.2.2's (fpc -Mobjfpc) except for the `fresh` line: Free
-  Pascal leaves local variables undefined, pcc starts them from zero. }
+  Pascal leaves local variables undefined, p3 starts them from zero. }
 program captures;
 {$H+}
 uses sysutils;

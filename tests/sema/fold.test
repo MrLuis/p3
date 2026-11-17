@@ -2,9 +2,9 @@
 ; 'not' in the operand's type, round per mode (halves to even in Turbo mode), trunc
 ; of an out-of-range value is not folded; "did you mean" ties go to the
 ; alphabetically first name.
-; RUN: not %pcc --mode=tp --emit-ast %S/Inputs/fold.pas 2>%t.err | FileCheck --check-prefix=TP %s
+; RUN: not %p3 --mode=tp --emit-ast %S/Inputs/fold.pas 2>%t.err | FileCheck --check-prefix=TP %s
 ; RUN: FileCheck --check-prefix=ERR %s < %t.err
-; RUN: not %pcc --emit-ast %S/Inputs/fold.pas 2>&1 | FileCheck --check-prefix=ISO %s
+; RUN: not %p3 --emit-ast %S/Inputs/fold.pas 2>&1 | FileCheck --check-prefix=ISO %s
 
 ; TP: ConstDecl 'c1' : integer = -6
 ; TP: ConstDecl 'c2' : byte = 55

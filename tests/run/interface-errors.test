@@ -1,6 +1,6 @@
 ; Runtime errors of interfaces (--mode=objfpc): a failed `as`, and a call
 ; through a nil interface (under range checks).
-; RUN: %pcc --mode=objfpc %S/Inputs/interfaces/rterrors.pas -o %t
+; RUN: %p3 --mode=objfpc %S/Inputs/interfaces/rterrors.pas -o %t
 ; RUN: not %t as 2>&1 | FileCheck --check-prefix=AS %s
 ; AS: TA.P
 ; AS-NEXT: Runtime error: invalid interface typecast at {{.*}}rterrors.pas:19:12

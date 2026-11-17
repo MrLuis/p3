@@ -2,9 +2,9 @@
    are method calls and properties, an exception raised by a value, and
    templates as the values of variables declared among the statements
    and in a generic routine.
-   RUN: %pcc --mode=objfpc %s -o %t
+   RUN: %p3 --mode=objfpc %s -o %t
    RUN: %t | diff - %S/template-classes.expected
-   RUN: %pcc --mode=objfpc -O2 %s -o %t.fast
+   RUN: %p3 --mode=objfpc -O2 %s -o %t.fast
    RUN: %t.fast | diff - %S/template-classes.expected
 *)
 program templateclasses;

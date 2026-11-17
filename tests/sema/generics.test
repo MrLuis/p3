@@ -2,7 +2,7 @@
 ; routines, missing definitions, specializing what is not a generic (or
 ; with another number of type arguments), and errors in a specialization's
 ; body, reported where the generic says it with a note at the use.
-; RUN: not %pcc --mode=objfpc -ferror-limit=0 -c %S/Inputs/generics/errors.pas -o %t.o 2>&1 | FileCheck %s
+; RUN: not %p3 --mode=objfpc -ferror-limit=0 -c %S/Inputs/generics/errors.pas -o %t.o 2>&1 | FileCheck %s
 ; CHECK: errors.pas:6:25: error: duplicate type parameter 'T'
 ; CHECK: errors.pas:14:18: error: redefinition of generic function 'Twice'
 ; CHECK: errors.pas:10:9: note: previous definition is here
@@ -18,7 +18,7 @@
 ; CHECK: errors.pas:29:19: note: in the specialization 'Bad<boolean>' requested here
 ; CHECK-NOT: error:
 
-; RUN: not %pcc --mode=objfpc -ferror-limit=0 -c %S/Inputs/generics/parse.pas -o %t.o 2>&1 | FileCheck --check-prefix=PARSE %s
+; RUN: not %p3 --mode=objfpc -ferror-limit=0 -c %S/Inputs/generics/parse.pas -o %t.o 2>&1 | FileCheck --check-prefix=PARSE %s
 ; PARSE: parse.pas:2:18: error: expected '<' and type parameters after the name of generic function 'NoParams'
 ; PARSE: parse.pas:3:31: error: constraints on type parameters are not supported yet
 ; PARSE-NOT: error:

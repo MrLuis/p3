@@ -1,12 +1,12 @@
-{ Type inference through lambdas (objfpc, pcc's own): a lambda passed
+{ Type inference through lambdas (objfpc, p3's own): a lambda passed
   for a parameter of a generic procedural type (specialize TFunc<T, R>)
   takes the types of its parameters from the type arguments known (T in,
   from the other arguments or the receiver's class) and gives the result's
   type argument by its body (R out). Types written in it give type
   arguments too.
-  RUN: %pcc --mode=objfpc %s -o %t
+  RUN: %p3 --mode=objfpc %s -o %t
   RUN: %t | diff - %S/inferlambda.expected
-  RUN: %pcc --mode=objfpc -O2 %s -o %t.fast
+  RUN: %p3 --mode=objfpc -O2 %s -o %t.fast
   RUN: %t.fast | diff - %S/inferlambda.expected
 }
 {$H+}

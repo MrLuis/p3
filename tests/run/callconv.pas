@@ -1,12 +1,12 @@
 { Calling convention directives (cdecl, stdcall; FPC, --mode=objfpc) on
   routines, forward and external declarations, methods, interface methods
-  and procedural types. pcc calls everything with the C convention; as in
+  and procedural types. p3 calls everything with the C convention; as in
   Free Pascal on 64-bit targets, stdcall is the default convention. The
   output is identical to Free Pascal 3.2.2's (fpc -Mobjfpc).
-  RUN: %pcc --mode=objfpc %s -o %t
+  RUN: %p3 --mode=objfpc %s -o %t
   RUN: %t > %t.out
   RUN: diff %S/callconv.expected %t.out
-  RUN: %pcc --mode=objfpc -O2 %s -o %t.O2
+  RUN: %p3 --mode=objfpc -O2 %s -o %t.O2
   RUN: %t.O2 > %t.O2.out
   RUN: diff %S/callconv.expected %t.O2.out
 }

@@ -1,7 +1,7 @@
-; The projects of examples/ build from their pcc.json and run.
+; The projects of examples/ build from their p3.json and run.
 ; RUN: rm -rf %t && mkdir -p %t && cp -R %S/../../examples/hello %t/
 ; RUN: rm -rf %t/hello/bin
-; RUN: cd %t/hello && %pcc-project 2>&1 | count 0
+; RUN: cd %t/hello && %p3-project 2>&1 | count 0
 ; RUN: %t/hello/bin/hello | FileCheck %s
 ; CHECK:      Hello, world!
 ; CHECK-NEXT: 1 greeting(s)

@@ -2,7 +2,7 @@
 ; class methods (as in Free Pascal); an instance property's cannot be a
 ; class variable. Read-only and write-only class properties, and an
 ; instance property used through the class name.
-; RUN: not %pcc --mode=objfpc -ferror-limit=0 -c %S/Inputs/classprop/errors.pas -o %t.o 2>&1 | FileCheck %s
+; RUN: not %p3 --mode=objfpc -ferror-limit=0 -c %S/Inputs/classprop/errors.pas -o %t.o 2>&1 | FileCheck %s
 ; CHECK: errors.pas:13:36: error: 'FI' cannot be read as class property 'A' of type 'integer' (use a class variable of that type or a static class function without parameters returning it)
 ; CHECK: errors.pas:14:36: error: 'GetI' cannot be read as class property 'B' of type 'integer'
 ; CHECK: errors.pas:15:36: error: 'GetC' cannot be read as class property 'C' of type 'integer'
@@ -15,5 +15,5 @@
 ; CHECK-NOT: error:
 ;
 ; The parse tree marks a class property.
-; RUN: %pcc --mode=objfpc --emit-parse-tree -o - %S/../run/classprop.pas | FileCheck --check-prefix=TREE %s
+; RUN: %p3 --mode=objfpc --emit-parse-tree -o - %S/../run/classprop.pas | FileCheck --check-prefix=TREE %s
 ; TREE: PropertyDecl 'build' read 'fbuild' write 'setbuild' class

@@ -1,6 +1,6 @@
 ; Variables declared among the statements (objfpc): scopes, the types of
 ; values, owned ones.
-; RUN: not %pcc --mode=objfpc -ferror-limit=0 -c %S/Inputs/inlinevar/errors.pas -o %t.o 2>&1 | FileCheck %s
+; RUN: not %p3 --mode=objfpc -ferror-limit=0 -c %S/Inputs/inlinevar/errors.pas -o %t.o 2>&1 | FileCheck %s
 ; CHECK: errors.pas:18:5: error: a variable can only be declared in a statement sequence (between 'begin' and 'end')
 ; CHECK: errors.pas:20:7: error: redefinition of 'x'
 ; CHECK: errors.pas:19:7: note: previous definition is here
@@ -26,20 +26,20 @@
 ; CHECK-NOT: error:
 ;
 ; A type or a value is needed; only one variable can have a value.
-; RUN: not %pcc --mode=objfpc -ferror-limit=0 -c %S/Inputs/inlinevar/syntax.pas -o %t.o 2>&1 | FileCheck --check-prefix=SYNTAX %s
+; RUN: not %p3 --mode=objfpc -ferror-limit=0 -c %S/Inputs/inlinevar/syntax.pas -o %t.o 2>&1 | FileCheck --check-prefix=SYNTAX %s
 ; SYNTAX: syntax.pas:3:12: error: only one variable can be initialized
 ; SYNTAX: syntax.pas:4:14: error: expected ':' and a type, or ':=' and a value, after variable name
 ; SYNTAX: syntax.pas:5:7: error: expected variable name
 ; SYNTAX-NOT: error:
 ;
 ; Only with --mode=objfpc.
-; RUN: not %pcc --mode=tp -ferror-limit=0 -c %S/Inputs/inlinevar/tp.pas -o %t.o 2>&1 | FileCheck --check-prefix=TP %s
+; RUN: not %p3 --mode=tp -ferror-limit=0 -c %S/Inputs/inlinevar/tp.pas -o %t.o 2>&1 | FileCheck --check-prefix=TP %s
 ; TP: tp.pas:5:3: error: variables declared among the statements need --mode=objfpc
 ; TP: tp.pas:6:7: error: expected control variable after 'for'
 ;
 ; The tree shows the declaration with its variables and value, and a loop's variable
 ; before the name that uses it.
-; RUN: %pcc --mode=objfpc --emit-ast -o - %S/../run/inlinevar.pas | FileCheck --check-prefix=AST %s
+; RUN: %p3 --mode=objfpc --emit-ast -o - %S/../run/inlinevar.pas | FileCheck --check-prefix=AST %s
 ; AST:      VarDeclStmt <50:3>
 ; AST-NEXT:   VarDecl 'i' : integer <50:7>
 ; AST-NEXT:   IntegerLiteralExpr 42 : integer <50:12>

@@ -1,5 +1,5 @@
 { Open arrays in --mode=tp; an index outside 0..high is a runtime error.
-  RUN: %pcc --mode=tp %s -o %t
+  RUN: %p3 --mode=tp %s -o %t
   RUN: not %t 2>&1 | FileCheck %s
   CHECK: 6 2
   CHECK-NEXT: 3.50

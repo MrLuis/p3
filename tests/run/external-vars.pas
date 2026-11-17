@@ -3,9 +3,9 @@
   symbol: the name as written unless given; `external` and `cvar` are not
   reserved). errno is the C library's per-thread one, through its accessor;
   StdCLib (classic Mac OS) names the C library.
-  RUN: %pcc --mode=objfpc %s -o %t
+  RUN: %p3 --mode=objfpc %s -o %t
   RUN: %t | FileCheck %s
-  RUN: %pcc --mode=tp -O2 %s -o %t.O2
+  RUN: %p3 --mode=tp -O2 %s -o %t.O2
   RUN: %t.O2 | FileCheck %s
   CHECK:      1 1 1
   CHECK-NEXT: 5 3
