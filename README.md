@@ -1615,7 +1615,8 @@ utils/bench.py --p3 build/bin/p3 --fpc          # --base <older p3> to compare t
 compiles the programs of `bench/` (integer loops, nested routines, large
 locals, short strings, ansistrings, sets, classes, exceptions, text output,
 real arithmetic) at `-O0`, `-O2` and `-O2` without runtime checks, checks
-their output against `bench/<name>.expected`, and prints run time,
+their output against `bench/<name>.expected` (a large output: its SHA-256,
+in `bench/<name>.expected.sha256`), and prints run time,
 executable size and compile time; `--fpc` adds Free Pascal's `-O2`. The
 last row is the self-hosted compiler, built at `-O2`, compiling itself.
 [optimization.md](optimization.md) lists the optimizations considered and

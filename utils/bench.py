@@ -5,7 +5,8 @@ compile time (optimization.md, item 0).
 Each bench/<name>.pas is compiled with --mode=objfpc in every configuration,
 run --runs times (the best time counts) and its output compared with
 bench/<name>.expected, so a benchmark that computes something else fails
-instead of looking fast. Configurations:
+instead of looking fast. A large output (over 4 KB) is kept as its SHA-256
+instead, in bench/<name>.expected.sha256. Configurations:
 
   O0        -O0
   O2        -O2 (runtime checks on, as by default)
@@ -22,11 +23,12 @@ Usage:
       [--json out.json] [--update]
 
 --base measures a second p3 (an older build) and prints how the first one
-compares. --update rewrites the .expected files from the first
-configuration's output. Exit status 1 if a benchmark fails to build, run
+compares. --update rewrites the .expected (or .expected.sha256) files from
+the first configuration's output. Exit status 1 if a benchmark fails to build, run
 or give the expected output.
 """
 import argparse
+import hashlib
 import json
 import os
 import shlex
@@ -62,6 +64,37 @@ def best_run(exe, runs):
     return best
 
 
+# Outputs larger than this are kept as their SHA-256 (<name>.expected.sha256).
+HASH_ABOVE = 4096
+
+
+def write_expected(expected, output):
+    """Records a benchmark's output: the text, or its hash if large."""
+    hashed = expected + ".sha256"
+    if len(output) > HASH_ABOVE:
+        with open(hashed, "w") as f:
+            f.write(hashlib.sha256(output).hexdigest() + "\n")
+        if os.path.exists(expected):
+            os.remove(expected)
+    else:
+        with open(expected, "wb") as f:
+            f.write(output)
+        if os.path.exists(hashed):
+            os.remove(hashed)
+
+
+def matches_expected(expected, output):
+    """Does output match the recorded one (True when none is recorded)?"""
+    if os.path.exists(expected):
+        with open(expected, "rb") as f:
+            return f.read() == output
+    hashed = expected + ".sha256"
+    if os.path.exists(hashed):
+        with open(hashed) as f:
+            return f.read().strip() == hashlib.sha256(output).hexdigest()
+    return True
+
+
 def measure(compile_cmd, exe, expected, runs, update, env=None):
     """Compiles and runs one benchmark; a dict of its numbers or an error."""
     ctime, r = timed(compile_cmd, env=env)
@@ -71,12 +104,9 @@ def measure(compile_cmd, exe, expected, runs, update, env=None):
     if out.returncode != 0:
         return {"error": "exit status %d" % out.returncode}
     if update:
-        with open(expected, "wb") as f:
-            f.write(out.stdout)
-    elif os.path.exists(expected):
-        with open(expected, "rb") as f:
-            if f.read() != out.stdout:
-                return {"error": "wrong output"}
+        write_expected(expected, out.stdout)
+    elif not matches_expected(expected, out.stdout):
+        return {"error": "wrong output"}
     run = best_run(exe, runs)
     if run is None:
         return {"error": "fails when run again"}
@@ -160,7 +190,7 @@ def main():
     ap.add_argument("--no-selfhost", action="store_true")
     ap.add_argument("--json", help="write the numbers to this file")
     ap.add_argument("--update", action="store_true",
-                    help="rewrite the .expected files")
+                    help="rewrite the .expected (.expected.sha256) files")
     args = ap.parse_args()
 
     configs = args.configs.split(",")
