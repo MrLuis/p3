@@ -1,6 +1,7 @@
 #include "p3/CodeGen/Backend.h"
 #include "p3/Basic/Diagnostics.h"
 
+#include "llvm/ADT/SmallString.h"
 #include "llvm/IR/LegacyPassManager.h"
 #include "llvm/IR/Module.h"
 #include "llvm/IR/Verifier.h"
@@ -12,6 +13,7 @@
 #include "llvm/Support/SourceMgr.h"
 #include "llvm/Support/TargetSelect.h"
 #include "llvm/Support/raw_ostream.h"
+#include "llvm/Support/Path.h"
 #include "llvm/Target/TargetMachine.h"
 #include "llvm/Target/TargetOptions.h"
 
@@ -72,6 +74,59 @@ void p3::linkRuntimeIR(llvm::Module &M, llvm::StringRef Path,
   if (llvm::Linker::linkModules(M, std::move(RT)))
     Diags.warning("cannot link the runtime's LLVM IR '" + Path +
                   "'; runtime functions are not inlined");
+}
+
+static void markAvailableExternally(llvm::Module &M) {
+  for (llvm::Function &F : M)
+    if (!F.isDeclaration() && F.hasExternalLinkage())
+      F.setLinkage(llvm::GlobalValue::AvailableExternallyLinkage);
+  for (llvm::GlobalVariable &G : M.globals())
+    if (!G.isDeclaration() && G.hasExternalLinkage())
+      G.setLinkage(llvm::GlobalValue::AvailableExternallyLinkage);
+}
+
+void p3::linkUnitIR(llvm::Module &M, llvm::ArrayRef<std::string> ObjectPaths,
+                     DiagnosticsEngine &Diags) {
+  for (const std::string &Obj : ObjectPaths) {
+    llvm::SmallString<256> Path(Obj);
+    llvm::sys::path::replace_extension(Path, "ll");
+    if (!llvm::sys::fs::exists(Path))
+      continue;
+    llvm::SMDiagnostic Err;
+    std::unique_ptr<llvm::Module> U =
+        llvm::parseIRFile(Path, Err, M.getContext());
+    if (!U) {
+      Diags.warning("cannot read the unit's LLVM IR '" + Path + "' (" +
+                    Err.getMessage() + "); its routines are not inlined");
+      continue;
+    }
+    U->setTargetTriple(M.getTargetTriple());
+    U->setDataLayout(M.getDataLayout());
+    // Importing a unit with mutable internal state would duplicate it (the
+    // inlined code and the object would use different copies). Such a unit
+    // keeps its calls.
+    bool MutableInternal = llvm::any_of(U->globals(), [](llvm::GlobalVariable &G) {
+      return G.hasLocalLinkage() && !G.isConstant();
+    });
+    if (MutableInternal)
+      continue;
+    markAvailableExternally(*U);
+    if (llvm::Linker::linkModules(M, std::move(U)))
+      Diags.warning("cannot link the unit's LLVM IR '" + Path +
+                    "'; its routines are not inlined");
+  }
+}
+
+bool p3::writeModuleIR(llvm::Module &M, llvm::StringRef Path,
+                        DiagnosticsEngine &Diags) {
+  std::error_code EC;
+  llvm::raw_fd_ostream OS(Path, EC, llvm::sys::fs::OF_Text);
+  if (EC) {
+    Diags.warning("cannot open '" + Path + "': " + EC.message());
+    return false;
+  }
+  M.print(OS, nullptr);
+  return true;
 }
 
 void p3::optimizeModule(llvm::Module &M, llvm::TargetMachine &TM,

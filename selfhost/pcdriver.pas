@@ -35,6 +35,8 @@ procedure addLinkerArg(const arg: string);
   when compiling for the host (the runtime's LLVM IR, libpascalrt.ll, is
   linked into the module before it is optimized) unless this is called. }
 procedure disableRuntimeInlining;
+{ Writes the module's textual IR to path (the .ll next to a unit's object). }
+function writeModuleText(const ir: TBuf; const path: string): boolean;
 { The host CPU and its features (-mcpu=native). }
 function hostCPUName: string;
 function hostCPUFeatures: string;
@@ -42,6 +44,13 @@ function hostCPUFeatures: string;
 procedure printVersion;
 
 implementation
+
+function writeText(const ir: TBuf; const path: string): boolean; forward;
+
+function writeModuleText(const ir: TBuf; const path: string): boolean;
+begin
+  writeModuleText := writeText(ir, path);
+end;
 
 function hostCPUName: string;
 begin
@@ -319,6 +328,26 @@ begin
   bufFree(b);
 end;
 
+{ The unit's IR next to its object: path.o -> path.ll. }
+function objectIRPath(const obj: string): string;
+var
+  i: longint;
+  r: string;
+begin
+  r := obj;
+  for i := length(r) downto 1 do
+  begin
+    if r[i] = '/' then
+      break;
+    if r[i] = '.' then
+    begin
+      r := copy(r, 1, i - 1);
+      break;
+    end;
+  end;
+  objectIRPath := r + '.ll';
+end;
+
 function emitOutput(const ir: TBuf; const name: string; kind: TOutputKind; opt: longint;
                     sizeLevel: longint;
                     const triple, cpu, features, path: string;
@@ -328,6 +357,8 @@ var
   err: TBuf;
   e, obj, runtimeIR, rtProblem: string;
   ok: boolean;
+  i: longint;
+  unitIRs: TPtrList;
   code: TBuf;
 begin
   emitOutput := false;
@@ -350,6 +381,14 @@ begin
     exit;
   end;
   bufInit(err);
+  { the units' IR, for cross-unit inlining at -O1+ (item 17) }
+  listInit(unitIRs);
+  for i := 0 to unitObjects.count - 1 do
+  begin
+    e := objectIRPath(nameStr(PName(listGet(unitObjects, i))));
+    if sysFileExists(e) then
+      listAdd(unitIRs, intern(e));
+  end;
   { the runtime's IR is built for the host }
   runtimeIR := '';
   if (opt > 0) and not noInlineRuntime and (triple = llvmDefaultTriple) then
@@ -358,7 +397,9 @@ begin
     if not sysFileExists(runtimeIR) then
       runtimeIR := '';
   end;
-  m := llvmParseAndOptimize(ir, name, tm, opt, sizeLevel, runtimeIR, rtProblem, err);
+  m := llvmParseAndOptimize(ir, name, tm, opt, sizeLevel, unitIRs, runtimeIR,
+                            rtProblem, err);
+  listFree(unitIRs);
   if rtProblem <> '' then
     diagWarning(noLoc, 'cannot read the runtime''s LLVM IR ''' + runtimeIR + ''' (' +
                        rtProblem + '); runtime functions are not inlined');

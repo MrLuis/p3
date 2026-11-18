@@ -820,6 +820,26 @@ begin
   objectPath := r + '.o';
 end;
 
+{ path with its extension replaced by .ll (the IR next to a unit's object) }
+function unitIRPath(const path: string): string;
+var
+  i: longint;
+  r: string;
+begin
+  r := path;
+  for i := length(r) downto 1 do
+  begin
+    if r[i] = '/' then
+      break;
+    if r[i] = '.' then
+    begin
+      r := copy(r, 1, i - 1);
+      break;
+    end;
+  end;
+  unitIRPath := r + '.ll';
+end;
+
 { The objects of separately compiled units, next to their sources; false
   (and an error) if one is missing. }
 { The libraries named by the external routines of block b (external 'z'),
@@ -863,7 +883,7 @@ begin
   end;
 end;
 
-function findUnitObjects(var objects: TPtrList): boolean;
+function findUnitObjects(var objects: TPtrList; required: boolean): boolean;
 var
   i, f, line, col: longint;
   u: PDecl;
@@ -877,9 +897,13 @@ begin
     obj := objectPath(smFileName(f));
     if not sysFileExists(obj) then
     begin
-      diagError(noLoc, 'cannot find ''' + obj + ''', the object file of unit ''' +
-                       nameStr(u^.ident.spelling) + '''; compile the unit with -c');
-      exit;
+      if required then
+      begin
+        diagError(noLoc, 'cannot find ''' + obj + ''', the object file of unit ''' +
+                         nameStr(u^.ident.spelling) + '''; compile the unit with -c');
+        exit;
+      end;
+      continue;
     end;
     listAdd(objects, intern(obj));
   end;
@@ -926,6 +950,9 @@ begin
     kind := okObj;
   end;
   listInit(noObjects);
+  if (kind = okObj) and (optLevel > 0) and (outputFile <> '-') then
+    if not writeModuleText(outBuf, unitIRPath(outputFile)) then
+      exit;
   compileUnit := emitOutput(outBuf, smFileName(fid), kind, optLevel, sizeLevel,
                             targetTriple, targetCPU, targetFeatures, outputFile,
                             noObjects);
@@ -1091,7 +1118,7 @@ begin
         if not moduleLayout(targetTriple, modLayout) then
           sysExit(1);
         listInit(unitObjects);
-        if separateUnits and (action = actExe) and not findUnitObjects(unitObjects) then
+        if separateUnits and not findUnitObjects(unitObjects, action = actExe) then
           sysExit(1);
         listInit(extLibs);
         for i := 0 to units.count - 1 do

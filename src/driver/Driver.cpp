@@ -282,15 +282,18 @@ bool Driver::runPipeline(FileID FID) {
 
   // Separately compiled units: their objects, next to their sources.
   std::vector<std::string> UnitObjects;
-  if (Opts.SeparateUnits && Opts.Act == Action::EmitExe)
+  if (Opts.SeparateUnits)
     for (UnitDecl *U : Units) {
       llvm::SmallString<256> Obj(
           SM.getPresumedLoc(U->getLocation()).Filename);
       llvm::sys::path::replace_extension(Obj, "o");
       if (!llvm::sys::fs::exists(Obj)) {
-        Diags.error("cannot find '" + Obj + "', the object file of unit '" +
-                    U->getName().Spelling + "'; compile the unit with -c");
-        return false;
+        if (Opts.Act == Action::EmitExe) {
+          Diags.error("cannot find '" + Obj + "', the object file of unit '" +
+                      U->getName().Spelling + "'; compile the unit with -c");
+          return false;
+        }
+        continue; // -c/-S/--emit-llvm: the object is only needed to link
       }
       UnitObjects.push_back(std::string(Obj));
     }
@@ -376,6 +379,15 @@ bool Driver::compileUnit(Parser &P, FileID FID, ASTContext &Ctx,
   CGOpts.SeparateUnits = true;
   auto M = generateUnitModule(*Unit, Deps, SM, LangOpts, CGOpts, LLVMCtx, *TM,
                               SM.getFilename(FID));
+  // At -O1+ leave the unit's IR next to its object: a program compiled with
+  // -fseparate-units links it before optimizing, to inline inline routines
+  // (item 17).
+  if (Opts.Act == Action::EmitObj && Opts.OptLevel > 0 &&
+      Opts.OutputFile != "-") {
+    llvm::SmallString<256> IRPath(Opts.OutputFile);
+    llvm::sys::path::replace_extension(IRPath, "ll");
+    writeModuleIR(*M, IRPath, Diags);
+  }
   return finishModule(*M, *TM, {});
 }
 
@@ -390,6 +402,8 @@ bool Driver::finishModule(llvm::Module &Mod, llvm::TargetMachine &TMRef,
   // LoopSimplify reshapes loops), making -O0 IR differ between targets
   // and from the self-hosted compiler's (SELFHOST.md S10).
   if (Opts.OptLevel > 0) {
+    if (!UnitObjects.empty())
+      linkUnitIR(*M, UnitObjects, Diags);
     // The runtime's IR is built for the host.
     if (Opts.InlineRuntime &&
         llvm::Triple(Opts.TargetTriple) ==

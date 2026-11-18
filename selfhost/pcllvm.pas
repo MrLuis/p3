@@ -33,13 +33,16 @@ function llvmTargetMachine(target: pointer; const triple: string; opt: longint;
 function llvmDataLayout(tm: pointer): string;
 { Parses IR text into a module (named name), verifies it and, at opt > 0,
   runs default<O[opt]>. Returns the module, or nil and the error.
+  unitIRs: the separately compiled units' IR files to link before the
+  optimization (their definitions stay available_externally), or empty.
   runtimeIR: the runtime's LLVM IR (libpascalrt.ll) to link into the
   module before it is optimized, so that the runtime's functions can be
   inlined, or ''; if that file cannot be used, rtProblem says why (else
   it is ''). }
 function llvmParseAndOptimize(const ir: TBuf; const name: string; tm: pointer; opt: longint;
-                              sizeLevel: longint; const runtimeIR: string;
-                              var rtProblem: string; var err: TBuf): pointer;
+                              sizeLevel: longint; const unitIRs: TPtrList;
+                              const runtimeIR: string; var rtProblem: string;
+                              var err: TBuf): pointer;
 { Writes the module as IR text, assembly or an object file. }
 function llvmPrintModule(m: pointer; const path: string; var err: TBuf): boolean;
 { Appends the assembly or object code for the module to ob. }
@@ -65,6 +68,22 @@ procedure LLVMSetDataLayout(m: pointer; layout: pchar); cdecl;
   external name 'LLVMSetDataLayout';
 function LLVMLinkModules2(dest, src: pointer): longint; cdecl;
   external name 'LLVMLinkModules2';
+function LLVMGetFirstFunction(m: pointer): pointer; cdecl;
+  external name 'LLVMGetFirstFunction';
+function LLVMGetNextFunction(f: pointer): pointer; cdecl;
+  external name 'LLVMGetNextFunction';
+function LLVMGetFirstGlobal(m: pointer): pointer; cdecl;
+  external name 'LLVMGetFirstGlobal';
+function LLVMGetNextGlobal(g: pointer): pointer; cdecl;
+  external name 'LLVMGetNextGlobal';
+function LLVMIsDeclaration(v: pointer): longint; cdecl;
+  external name 'LLVMIsDeclaration';
+function LLVMGetLinkage(v: pointer): longint; cdecl;
+  external name 'LLVMGetLinkage';
+function LLVMIsGlobalConstant(v: pointer): longint; cdecl;
+  external name 'LLVMIsGlobalConstant';
+procedure LLVMSetLinkage(v: pointer; linkage: longint); cdecl;
+  external name 'LLVMSetLinkage';
 procedure LLVMDisposeMessage(msg: pchar); cdecl; external name 'LLVMDisposeMessage';
 function LLVMGetDefaultTargetTriple: pchar; cdecl; external name 'LLVMGetDefaultTargetTriple';
 function LLVMNormalizeTargetTriple(t: pchar): pchar; cdecl;
@@ -295,9 +314,88 @@ begin
     linkRuntimeIR := 'it cannot be linked';
 end;
 
+{ A module's definitions with external linkage become available_externally:
+  the body is available to inline, while the object still provides it. }
+{ Does the unit have a mutable internal (or private) global? Then importing
+  its IR would give the inlined code and the object different copies. }
+function hasMutableInternalGlobal(u: pointer): boolean;
+var
+  g: pointer;
+  l: longint;
+begin
+  hasMutableInternalGlobal := false;
+  g := LLVMGetFirstGlobal(u);
+  while g <> nil do
+  begin
+    l := LLVMGetLinkage(g);
+    if ((l = 8) or (l = 9)) and (LLVMIsGlobalConstant(g) = 0) then
+      exit(true);
+    g := LLVMGetNextGlobal(g);
+  end;
+end;
+
+procedure markAvailableExternally(u: pointer);
+var
+  v: pointer;
+begin
+  v := LLVMGetFirstFunction(u);
+  while v <> nil do
+  begin
+    if (LLVMIsDeclaration(v) = 0) and (LLVMGetLinkage(v) = 0) then
+      LLVMSetLinkage(v, 1);
+    v := LLVMGetNextFunction(v);
+  end;
+  v := LLVMGetFirstGlobal(u);
+  while v <> nil do
+  begin
+    if (LLVMIsDeclaration(v) = 0) and (LLVMGetLinkage(v) = 0) then
+      LLVMSetLinkage(v, 1);
+    v := LLVMGetNextGlobal(v);
+  end;
+end;
+
+{ Links the units' IR files (item 17) into m; unreadable or missing files
+  are ignored. }
+function linkUnitIRs(ctx, m: pointer; const paths: TPtrList): string;
+var
+  i: longint;
+  u, buf: pointer;
+  msg: pchar;
+  pb: string;
+begin
+  linkUnitIRs := '';
+  for i := 0 to paths.count - 1 do
+  begin
+    buf := nil;
+    msg := nil;
+    if LLVMCreateMemoryBufferWithContentsOfFile(
+         cstr(nameStr(PName(listGet(paths, i))), pb), buf, msg) <> 0 then
+    begin
+      LLVMDisposeMessage(msg);
+      continue;
+    end;
+    u := nil;
+    msg := nil;
+    if LLVMParseIRInContext(ctx, buf, u, msg) <> 0 then
+    begin
+      LLVMDisposeMessage(msg);
+      continue;
+    end;
+    LLVMSetTarget(u, LLVMGetTarget(m));
+    LLVMSetDataLayout(u, LLVMGetDataLayoutStr(m));
+    { importing mutable internal state would duplicate it }
+    if hasMutableInternalGlobal(u) then
+      continue;
+    markAvailableExternally(u);
+    if LLVMLinkModules2(m, u) <> 0 then
+      linkUnitIRs := 'a unit cannot be linked';
+  end;
+end;
+
 function llvmParseAndOptimize(const ir: TBuf; const name: string; tm: pointer; opt: longint;
-                              sizeLevel: longint; const runtimeIR: string;
-                              var rtProblem: string; var err: TBuf): pointer;
+                              sizeLevel: longint; const unitIRs: TPtrList;
+                              const runtimeIR: string; var rtProblem: string;
+                              var err: TBuf): pointer;
 var
   ctx, buf, m, e, opts: pointer;
   msg: pchar;
@@ -325,6 +423,8 @@ begin
     LLVMDisposeMessage(msg);
   if opt > 0 then
   begin
+    if unitIRs.count > 0 then
+      linkUnitIRs(ctx, m, unitIRs);
     if runtimeIR <> '' then
       rtProblem := linkRuntimeIR(ctx, m, runtimeIR);
     { llvm::PipelineTuningOptions' defaults, as the C++ p3's PassBuilder
