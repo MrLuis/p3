@@ -60,6 +60,106 @@ using namespace p3;
 
 namespace {
 
+/// Does the runtime function Name only read the memory reachable from its
+/// pointer arguments, and always return? (Item 9: these are facts LLVM
+/// cannot infer across the library boundary.)
+static bool runtimeIsPureQuery(llvm::StringRef Name) {
+  return Name == "__pas_str_compare" || Name == "__pas_str_pos" ||
+         Name == "__pas_astr_compare" || Name == "__pas_astr_pos" ||
+         Name == "__pas_astr_length" || Name == "__pas_astr_bad_index" ||
+         Name == "__pas_dyn_length" || Name == "__pas_dyn_bad_index" ||
+         Name == "__pas_aoc_bad_index" || Name == "__pas_class_is" ||
+         Name == "__pas_class_inherits" || Name == "__pas_intf_lookup" ||
+         Name == "memcmp";
+}
+
+/// Does the runtime function Name return a new allocation (or NULL), never
+/// a pointer into an existing object?
+static bool runtimeReturnsFresh(llvm::StringRef Name) {
+  return Name == "__pas_new" || Name == "__pas_astr_from_chars" ||
+         Name == "__pas_astr_from_pstr" || Name == "__pas_astr_from_char" ||
+         Name == "__pas_astr_from_cstr" || Name == "__pas_astr_join" ||
+         Name == "__pas_dyn_new" || Name == "__pas_dyn_copy" ||
+         Name == "__pas_format" || Name == "__pas_tmpl_add";
+}
+
+/// The pointer parameters of the runtime function Name that it only reads,
+/// and never captures.
+static bool runtimeReadsParam(llvm::StringRef Name, unsigned I) {
+  if (Name == "__pas_str_compare" || Name == "__pas_str_pos" ||
+      Name == "__pas_astr_compare" || Name == "__pas_astr_pos" ||
+      Name == "__pas_class_is" || Name == "__pas_class_inherits" ||
+      Name == "__pas_intf_lookup" || Name == "memcmp")
+    return I <= 1;
+  if (Name == "__pas_astr_length" || Name == "__pas_astr_bad_index" ||
+      Name == "__pas_dyn_length" || Name == "__pas_dyn_bad_index" ||
+      Name == "__pas_aoc_bad_index" || Name == "__pas_astr_from_chars" ||
+      Name == "__pas_astr_from_pstr" || Name == "__pas_astr_from_cstr" ||
+      Name == "__pas_astr_pchar" || Name == "__pas_dyn_copy" ||
+      Name == "__pas_dyn_new" || Name == "__pas_write_enum")
+    return I == 0;
+  if (Name == "__pas_str_assign" || Name == "__pas_str_copy")
+    return I == 2 || I == 1;
+  if (Name == "__pas_str_concat")
+    return I == 1 || I == 2;
+  if (Name == "__pas_str_append")
+    return I == 2;
+  if (Name == "__pas_str_insert")
+    return I == 0;
+  if (Name == "__pas_write_str" || Name == "__pas_write_pstr" ||
+      Name == "__pas_write_cstr" || Name == "__pas_write_astr")
+    return I == 1;
+  if (Name == "__pas_astr_to_pstr")
+    return I == 2;
+  if (Name == "__pas_astr_join")
+    return I == 0 || I == 1 || I == 3;
+  if (Name == "__pas_format")
+    return I == 0 || I == 1;
+  if (Name == "__pas_format_pstr")
+    return I == 1 || I == 2;
+  if (Name == "__pas_intf_as" || Name == "__pas_class_as")
+    return I <= 2;
+  return false;
+}
+
+/// Adds to the runtime function F the attributes that are true of it: its
+/// memory effects and return, plus those of its parameters (item 9).
+static void addRuntimeAttrs(llvm::Function *F) {
+  llvm::LLVMContext &C = F->getContext();
+  llvm::StringRef Name = F->getName();
+  if (runtimeIsPureQuery(Name)) {
+    F->addFnAttr(llvm::Attribute::getWithMemoryEffects(
+        C, llvm::MemoryEffects::argMemOnly(llvm::ModRefInfo::Ref)));
+    F->addFnAttr(llvm::Attribute::WillReturn);
+  } else if (Name == "__pas_astr_pchar") {
+    F->addFnAttr(llvm::Attribute::getWithMemoryEffects(
+        C, llvm::MemoryEffects::none()));
+    F->addFnAttr(llvm::Attribute::WillReturn);
+  }
+  if (runtimeReturnsFresh(Name))
+    F->addRetAttr(llvm::Attribute::NoAlias);
+  if (Name == "__pas_abstract_error") {
+    F->addFnAttr(llvm::Attribute::Cold);
+    F->addFnAttr(llvm::Attribute::NoReturn);
+  }
+  if (Name == "__pas_new") { // calloc(1, size), and returns zeroed memory
+    llvm::AttrBuilder B(C);
+    B.addAllocKindAttr(llvm::AllocFnKind::Alloc |
+                       llvm::AllocFnKind::Zeroed);
+    B.addAllocSizeAttr(0, std::nullopt);
+    F->addFnAttrs(B);
+  }
+  for (unsigned I = 0; I < F->arg_size(); ++I) {
+    if (!F->getArg(I)->getType()->isPointerTy() ||
+        !runtimeReadsParam(Name, I))
+      continue;
+    llvm::AttrBuilder B(C);
+    B.addAttribute(llvm::Attribute::NoCapture);
+    B.addAttribute(llvm::Attribute::ReadOnly);
+    F->addParamAttrs(I, B);
+  }
+}
+
 /// Declarations of the libpascalrt entry points (runtime/include/pascalrt.h)
 /// and the C library functions we call.
 struct Runtime {
@@ -85,8 +185,9 @@ struct Runtime {
                     llvm::ArrayRef<llvm::Type *> Params) {
       llvm::FunctionCallee F = M.getOrInsertFunction(
           Name, llvm::FunctionType::get(Ret, Params, /*isVarArg=*/false));
-      llvm::cast<llvm::Function>(F.getCallee())
-          ->addFnAttr(llvm::Attribute::NoUnwind);
+      auto *Fn = llvm::cast<llvm::Function>(F.getCallee());
+      Fn->addFnAttr(llvm::Attribute::NoUnwind);
+      addRuntimeAttrs(Fn);
       return F;
     };
     Init = Decl("__pas_init", Void, {I32, Ptr});
@@ -3098,8 +3199,10 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
                                     llvm::ArrayRef<llvm::Type *> Params) {
     llvm::FunctionCallee F = M.getOrInsertFunction(
         Name, llvm::FunctionType::get(Ret, Params, /*isVarArg=*/false));
-    llvm::cast<llvm::Function>(F.getCallee())->addFnAttr(llvm::Attribute::NoUnwind);
-    RuntimeFns.insert(llvm::cast<llvm::Function>(F.getCallee()));
+    auto *Fn = llvm::cast<llvm::Function>(F.getCallee());
+    Fn->addFnAttr(llvm::Attribute::NoUnwind);
+    addRuntimeAttrs(Fn);
+    RuntimeFns.insert(Fn);
     return F;
   }
 
@@ -3192,6 +3295,16 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
     VMTsToDefine.clear();
   }
 
+  /// A by-reference parameter is an address: never nil, and it points to a
+  /// value of its type (item 9). LLVM cannot infer this across a call.
+  void addByRefParamAttrs(llvm::Argument *A, Type *T) {
+    llvm::AttrBuilder B(A->getContext());
+    B.addAttribute(llvm::Attribute::NonNull);
+    if (!T->isUntyped())
+      B.addDereferenceableAttr(DL.getTypeStoreSize(memType(T)).getFixedValue());
+    A->addAttrs(B);
+  }
+
   /// Creates the LLVM function and frame type of routine R (a method: of
   /// its canonical declaration), queues its body and declares the
   /// routines nested in it.
@@ -3248,12 +3361,23 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
         Export == ExportNames.end() ? Name : Export->second, M);
     unsigned ArgNo = 0;
     F->getArg(ArgNo++)->setName("link");
-    if (R->hasSelf())
-      F->getArg(ArgNo++)->setName("self");
-    if (R->isFunction() && returnsByPointer(R->getResultType()))
-      F->getArg(ArgNo++)->setName("result.ptr");
-    for (VarDecl *P : R->getParams())
-      F->getArg(ArgNo++)->setName(P->getName().Name);
+    if (R->hasSelf()) {
+      llvm::Argument *Self = F->getArg(ArgNo++);
+      Self->setName("self");
+      if (R->getClass() && R->getClass()->hasSelfByReference())
+        addByRefParamAttrs(Self, R->getSelfVar()->getType());
+    }
+    if (R->isFunction() && returnsByPointer(R->getResultType())) {
+      llvm::Argument *Result = F->getArg(ArgNo++);
+      Result->setName("result.ptr");
+      addByRefParamAttrs(Result, R->getResultType());
+    }
+    for (VarDecl *P : R->getParams()) {
+      llvm::Argument *A = F->getArg(ArgNo++);
+      A->setName(P->getName().Name);
+      if (isByRef(P))
+        addByRefParamAttrs(A, P->getType());
+    }
     if (R->isInline()) // the `inline` directive
       F->addFnAttr(llvm::Attribute::InlineHint);
     Functions[R] = F;
@@ -4655,7 +4779,11 @@ public:
   llvm::Value *loadVMTSlot(llvm::Value *VMT, unsigned Slot,
                            const llvm::Twine &Name) {
     llvm::Value *P = B.CreateConstInBoundsGEP1_64(B.getPtrTy(), VMT, Slot);
-    return B.CreateLoad(B.getPtrTy(), P, Name);
+    auto *L = B.CreateLoad(B.getPtrTy(), P, Name);
+    // A VMT is a constant global: its slots never change (item 9).
+    L->setMetadata(llvm::LLVMContext::MD_invariant_load,
+                   llvm::MDNode::get(M.getContext(), {}));
+    return L;
   }
 
   /// The class (VMT) of a method call's receiver: Obj itself if SelfIsClass,

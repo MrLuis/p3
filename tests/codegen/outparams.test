@@ -6,6 +6,6 @@
 ; CHECK-NEXT: %[[T:[a-z0-9.]+]] = load ptr, ptr @pas.t
 ; CHECK-NEXT: %{{.*}} = call {{.*}}@__pas_astr_length(ptr %[[T]])
 ; CHECK:      call void @pas.p(ptr null, i32 %{{.*}}, ptr @pas.t, ptr @pas.k)
-; CHECK-LABEL: define internal void @pas.p(ptr %link, i32 %n, ptr %s, ptr %i)
+; CHECK-LABEL: define internal void @pas.p(ptr %link, i32 %n, ptr nonnull dereferenceable(8) %s, ptr nonnull dereferenceable(4) %i)
 ; CHECK-NOT:  __pas_astr_clear
 ; CHECK:      ret void

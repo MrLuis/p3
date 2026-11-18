@@ -21,7 +21,7 @@
 ;
 ; RUN: %p3 --mode=objfpc --emit-llvm %t/lib/animals.pas -o - | FileCheck --check-prefix=UNIT %s
 ; UNIT-DAG: @"pas.animals$tanimal$vmt" = constant [7 x ptr] [ptr @__pas_tobject_vmt, ptr @.str, ptr inttoptr (i64 {{[0-9]+}} to ptr), ptr null, ptr @__pas_tobject_destroy, ptr @"pas.animals$tanimal.sound", ptr @"pas.animals$tanimal.describe"]
-; UNIT-DAG: define void @"pas.animals$tanimal.create"(ptr %link, ptr %self, ptr %aname, i32 %alegs)
+; UNIT-DAG: define void @"pas.animals$tanimal.create"(ptr %link, ptr %self, ptr nonnull dereferenceable(256) %aname, i32 %alegs)
 ; UNIT-DAG: define void @"pas.animals$tanimal.speak"(ptr %link, ptr %self)
 ; RUN: %p3 --mode=objfpc -I %t/lib -fseparate-units --emit-llvm %t/zoo.pas -o - | FileCheck --check-prefix=PROG %s
 ; PROG-DAG: @"pas.animals$tanimal$vmt" = external constant [7 x ptr]

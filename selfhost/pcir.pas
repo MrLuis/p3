@@ -108,14 +108,17 @@ type
     block: PIRBlock;     { the block it is in }
     dbgLoc: PMeta;       { !dbg, or nil }
     unlikely: boolean;   { !prof branch weights }
+    invariantLoad: boolean; { !invariant.load }
     records: TPtrList;   { of PDbgRecord, printed before the instruction }
   end;
 
   TIRFunc = record
     name: string;        { as printed, with @ }
     ret: PIRType;
+    retAttrs: string;    { return attributes, printed before the type }
     params: TPtrList;    { of PIRType }
     argNames: TPtrList;  { of PName (nil: unnamed) }
+    paramAttrs: TPtrList; { of PName: per-parameter attributes (nil: none) }
     isDecl: boolean;
     linkage: string;
     attrs: string;
@@ -192,6 +195,10 @@ function irFindFunction(const name: string): PIRFunc;
 function irCreateFunction(const name, linkage: string; ret: PIRType;
                           const params: TPtrList): PIRFunc;
 procedure irSetArgName(f: PIRFunc; i: longint; const name: string);
+{ Return and parameter attributes, as LLVM prints them ('noalias',
+  'nonnull dereferenceable(8)'); '' for none. }
+procedure irSetRetAttrs(f: PIRFunc; const attrs: string);
+procedure irSetArgAttrs(f: PIRFunc; i: longint; const attrs: string);
 function irArg(f: PIRFunc; i: longint): TV;
 function irFuncRef(f: PIRFunc): TV;
 { Exceptions (CodeGen.cpp's mayRaise). A call of f cannot raise one: a
@@ -219,6 +226,8 @@ function irFNeg(const a: TV; const name: string): TV;
 function irCast(const op: string; const v: TV; dst: PIRType; const name: string): TV;
 function irSelect(const c, a, b: TV; const name: string): TV;
 function irLoad(t: PIRType; const p: TV; const name: string): TV;
+{ a load with !invariant.load (the loaded memory never changes) }
+function irLoadInv(t: PIRType; const p: TV; const name: string): TV;
 procedure irStore(const v, p: TV);
 { load / store with the given alignment (not the type's) }
 function irLoadAlign(t: PIRType; const p: TV; align: longint; const name: string): TV;
@@ -290,6 +299,8 @@ procedure irWriteModule(var outText: TBuf);
 
 implementation
 
+function irMetaText(const s: string): PMeta; forward;
+
 type
   PGlobal = ^TGlobal;
   TGlobal = record
@@ -346,7 +357,7 @@ var
   metaByText: TIntMap;   { name id of a uniqued node's text -> PMeta }
   namedMetas: TPtrList;  { of PName (name), PPtrList (operands), in pairs }
   curLoc: PMeta;
-  branchWeights: PMeta;
+  branchWeights, invariantLoadMeta: PMeta;
 
   cur: PIRFunc;
   curBlock: PIRBlock;
@@ -1636,6 +1647,7 @@ begin
   listInit(namedMetas);
   curLoc := nil;
   branchWeights := nil;
+  invariantLoadMeta := nil;
   modSource := sourceName;
   modTriple := triple;
   modLayout := dataLayout;
@@ -1752,12 +1764,15 @@ begin
   n := uniqueGlobalName(name);
   f^.name := '@' + quotedName(n);
   f^.ret := ret;
+  f^.retAttrs := '';
   listInit(f^.params);
   listInit(f^.argNames);
+  listInit(f^.paramAttrs);
   for i := 0 to params.count - 1 do
   begin
     listAdd(f^.params, listGet(params, i));
     listAdd(f^.argNames, nil);
+    listAdd(f^.paramAttrs, nil);
   end;
   listInit(f^.blocks);
   listInit(f^.entryTemps);
@@ -1807,6 +1822,17 @@ end;
 procedure irSetArgName(f: PIRFunc; i: longint; const name: string);
 begin
   listSet(f^.argNames, i, intern(uniqueLocal(f, name)));
+end;
+
+procedure irSetRetAttrs(f: PIRFunc; const attrs: string);
+begin
+  f^.retAttrs := attrs;
+end;
+
+procedure irSetArgAttrs(f: PIRFunc; i: longint; const attrs: string);
+begin
+  if attrs <> '' then
+    listSet(f^.paramAttrs, i, intern(attrs));
 end;
 
 function irArg(f: PIRFunc; i: longint): TV;
@@ -1895,6 +1921,7 @@ begin
   i^.defId := 0;
   i^.dbgLoc := curLoc;
   i^.unlikely := false;
+  i^.invariantLoad := false;
   listInit(i^.records);
   res := '';
   if hasResult then
@@ -2318,6 +2345,14 @@ begin
   irLoad := irV(t, res);
 end;
 
+function irLoadInv(t: PIRType; const p: TV; const name: string): TV;
+begin
+  irLoadInv := irLoad(t, p, name);
+  if invariantLoadMeta = nil then
+    invariantLoadMeta := irMetaText('!{}');
+  PIRInst(listGet(curBlock^.insts, curBlock^.insts.count - 1))^.invariantLoad := true;
+end;
+
 procedure irStore(const v, p: TV);
 var
   i: PIRInst;
@@ -2594,8 +2629,6 @@ function irCall(f: PIRFunc; const args: TBuf; const name: string): TV;
 begin
   irCall := irCallPtr(f^.ret, irFuncRef(f), args, name);
 end;
-
-function irMetaText(const s: string): PMeta; forward;
 
 procedure addPred(target: PIRBlock);
 begin
@@ -2961,23 +2994,27 @@ begin
   emitText(ob, b.data, b.len);
 end;
 
-function paramList(f: PIRFunc; withNames: boolean): string;
+{ The parameter list, appended to ob: long enough to need a TBuf in tp
+  mode, where string is a short string. }
+procedure appendParamList(var ob: TBuf; f: PIRFunc; withNames: boolean);
 var
-  s: string;
   i: longint;
 begin
   if f^.isDecl and (f^.paramText <> '') then
-    exit(f^.paramText);
-  s := '';
+  begin
+    emitStr(ob, f^.paramText);
+    exit;
+  end;
   for i := 0 to f^.params.count - 1 do
   begin
     if i > 0 then
-      s := s + ', ';
-    s := s + PIRType(listGet(f^.params, i))^.text;
+      emitStr(ob, ', ');
+    emitStr(ob, PIRType(listGet(f^.params, i))^.text);
+    if listGet(f^.paramAttrs, i) <> nil then
+      emitStr(ob, ' ' + nameStr(PName(listGet(f^.paramAttrs, i))));
     if withNames and (listGet(f^.argNames, i) <> nil) then
-      s := s + ' %' + quotedName(nameStr(PName(listGet(f^.argNames, i))));
+      emitStr(ob, ' %' + quotedName(nameStr(PName(listGet(f^.argNames, i)))));
   end;
-  paramList := s;
 end;
 
 procedure numberDefs(f: PIRFunc);
@@ -3027,6 +3064,8 @@ begin
     emitStr(ob, ', !dbg ' + irMetaRef(i^.dbgLoc));
   if i^.unlikely then
     emitStr(ob, ', !prof ' + irMetaRef(branchWeights));
+  if i^.invariantLoad then
+    emitStr(ob, ', !invariant.load ' + irMetaRef(invariantLoadMeta));
   emitStr(ob, #10);
 end;
 
@@ -3058,6 +3097,8 @@ begin
     numberMeta(r^.loc);
   end;
   numberMeta(i^.dbgLoc);
+  if i^.invariantLoad then
+    numberMeta(invariantLoadMeta);
   if i^.unlikely then
     numberMeta(branchWeights);
 end;
@@ -3116,7 +3157,12 @@ begin
     emitStr(ob, '; Function Attrs: ' + f^.attrs + #10);
   if f^.isDecl then
   begin
-    emitStr(ob, 'declare ' + f^.ret^.text + ' ' + f^.name + '(' + paramList(f, false) + ')');
+    emitStr(ob, 'declare ');
+    if f^.retAttrs <> '' then
+      emitStr(ob, f^.retAttrs + ' ');
+    emitStr(ob, f^.ret^.text + ' ' + f^.name + '(');
+    appendParamList(ob, f, false);
+    emitStr(ob, ')');
     if attrNum >= 0 then
       emitStr(ob, ' #' + intToStr(attrNum));
     emitStr(ob, #10);
@@ -3126,7 +3172,11 @@ begin
   emitStr(ob, 'define ');
   if f^.linkage <> '' then
     emitStr(ob, f^.linkage + ' ');
-  emitStr(ob, f^.ret^.text + ' ' + f^.name + '(' + paramList(f, true) + ')');
+  if f^.retAttrs <> '' then
+    emitStr(ob, f^.retAttrs + ' ');
+  emitStr(ob, f^.ret^.text + ' ' + f^.name + '(');
+  appendParamList(ob, f, true);
+  emitStr(ob, ')');
   if attrNum >= 0 then
     emitStr(ob, ' #' + intToStr(attrNum));
   if f^.dbg <> nil then

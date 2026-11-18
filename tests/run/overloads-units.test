@@ -9,5 +9,5 @@
 ; CHECK: #6 "abab"
 ; RUN: %p3 --mode=objfpc --emit-llvm %t/lib/fmt.pas -o - | FileCheck --check-prefix=UNIT %s
 ; UNIT-DAG: define i32 @"pas.fmt$twice$1"(ptr %link, i32 %x)
-; UNIT-DAG: define void @"pas.fmt$twice$2"(ptr %link, ptr %result.ptr, ptr %s)
-; UNIT-DAG: define void @"pas.fmt$tformatter.show$1"(ptr %link, ptr %self, ptr %result.ptr, i32 %x)
+; UNIT-DAG: define void @"pas.fmt$twice$2"(ptr %link, ptr nonnull dereferenceable(256) %result.ptr, ptr nonnull dereferenceable(256) %s)
+; UNIT-DAG: define void @"pas.fmt$tformatter.show$1"(ptr %link, ptr %self, ptr nonnull dereferenceable(256) %result.ptr, i32 %x)

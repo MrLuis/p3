@@ -227,6 +227,93 @@ begin
     typeOfSpec := irVoidT;
 end;
 
+{ Item 9: facts about the runtime functions that LLVM cannot infer across
+  the library boundary (the same tables as addRuntimeAttrs in CodeGen.cpp). }
+function runtimeIsPureQuery(const name: string): boolean;
+begin
+  runtimeIsPureQuery :=
+    (name = '__pas_str_compare') or (name = '__pas_str_pos') or
+    (name = '__pas_astr_compare') or (name = '__pas_astr_pos') or
+    (name = '__pas_astr_length') or (name = '__pas_astr_bad_index') or
+    (name = '__pas_dyn_length') or (name = '__pas_dyn_bad_index') or
+    (name = '__pas_aoc_bad_index') or (name = '__pas_class_is') or
+    (name = '__pas_class_inherits') or (name = '__pas_intf_lookup') or
+    (name = 'memcmp');
+end;
+
+function runtimeReturnsFresh(const name: string): boolean;
+begin
+  runtimeReturnsFresh :=
+    (name = '__pas_new') or (name = '__pas_astr_from_chars') or
+    (name = '__pas_astr_from_pstr') or (name = '__pas_astr_from_char') or
+    (name = '__pas_astr_from_cstr') or (name = '__pas_astr_join') or
+    (name = '__pas_dyn_new') or (name = '__pas_dyn_copy') or
+    (name = '__pas_format') or (name = '__pas_tmpl_add');
+end;
+
+function runtimeReadsParam(const name: string; i: longint): boolean;
+begin
+  runtimeReadsParam := false;
+  if (name = '__pas_str_compare') or (name = '__pas_str_pos') or
+     (name = '__pas_astr_compare') or (name = '__pas_astr_pos') or
+     (name = '__pas_class_is') or (name = '__pas_class_inherits') or
+     (name = '__pas_intf_lookup') or (name = 'memcmp') then
+    runtimeReadsParam := i <= 1
+  else if (name = '__pas_astr_length') or (name = '__pas_astr_bad_index') or
+          (name = '__pas_dyn_length') or (name = '__pas_dyn_bad_index') or
+          (name = '__pas_aoc_bad_index') or (name = '__pas_astr_from_chars') or
+          (name = '__pas_astr_from_pstr') or (name = '__pas_astr_from_cstr') or
+          (name = '__pas_astr_pchar') or (name = '__pas_dyn_copy') or
+          (name = '__pas_dyn_new') or (name = '__pas_write_enum') then
+    runtimeReadsParam := i = 0
+  else if (name = '__pas_str_assign') or (name = '__pas_str_copy') then
+    runtimeReadsParam := (i = 1) or (i = 2)
+  else if name = '__pas_str_concat' then
+    runtimeReadsParam := (i = 1) or (i = 2)
+  else if name = '__pas_str_append' then
+    runtimeReadsParam := i = 2
+  else if name = '__pas_str_insert' then
+    runtimeReadsParam := i = 0
+  else if (name = '__pas_write_str') or (name = '__pas_write_pstr') or
+          (name = '__pas_write_cstr') or (name = '__pas_write_astr') then
+    runtimeReadsParam := i = 1
+  else if name = '__pas_astr_to_pstr' then
+    runtimeReadsParam := i = 2
+  else if name = '__pas_astr_join' then
+    runtimeReadsParam := (i = 0) or (i = 1) or (i = 3)
+  else if name = '__pas_format' then
+    runtimeReadsParam := (i = 0) or (i = 1)
+  else if name = '__pas_format_pstr' then
+    runtimeReadsParam := (i = 1) or (i = 2)
+  else if (name = '__pas_intf_as') or (name = '__pas_class_as') then
+    runtimeReadsParam := i <= 2;
+end;
+
+{ The function attributes (the base is 'nounwind' for plain runtime
+  functions). }
+function runtimeAttrs(const name, base: string): string;
+begin
+  runtimeAttrs := base;
+  if base <> 'nounwind' then
+    exit;
+  if runtimeIsPureQuery(name) then
+    runtimeAttrs := 'nounwind willreturn memory(argmem: read)'
+  else if name = '__pas_astr_pchar' then
+    runtimeAttrs := 'nounwind willreturn memory(none)'
+  else if name = '__pas_new' then
+    runtimeAttrs := 'nounwind allockind("alloc,zeroed") allocsize(0)'
+  else if name = '__pas_abstract_error' then
+    runtimeAttrs := 'cold noreturn nounwind';
+end;
+
+function runtimeRetAttr(const name: string): string;
+begin
+  if runtimeReturnsFresh(name) then
+    runtimeRetAttr := 'noalias'
+  else
+    runtimeRetAttr := '';
+end;
+
 { A declaration with parameter types given as 'i32,ptr'. }
 procedure declareRT(const name, ret, params, attrs: string);
 var
@@ -246,7 +333,13 @@ begin
     end
     else
       part := part + params[i];
-  ignored := irDeclareFunction(name, typeOfSpec(ret), list, attrs, '');
+  ignored := irDeclareFunction(name, typeOfSpec(ret), list,
+                               runtimeAttrs(name, attrs), '');
+  irSetRetAttrs(ignored, runtimeRetAttr(name));
+  for i := 0 to list.count - 1 do
+    if (PIRType(listGet(list, i))^.kind = ikPtr) and
+       runtimeReadsParam(name, i) then
+      irSetArgAttrs(ignored, i, 'nocapture readonly');
   listFree(list);
   { Can a call of it raise an exception? Those that raise one, and those
     that may run a destructor (which is Pascal code): releasing an object
@@ -3854,7 +3947,7 @@ var
   p: TV;
 begin
   p := irGEP1(irPtrT, vmt, i64c(slot), true, '');
-  loadVMTSlot := irLoad(irPtrT, p, name);
+  loadVMTSlot := irLoadInv(irPtrT, p, name);
 end;
 
 { The address of virtual method index in the VMT of object obj. }

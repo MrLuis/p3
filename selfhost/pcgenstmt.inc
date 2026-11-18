@@ -2974,6 +2974,16 @@ begin
   end;
 end;
 
+{ Item 9: a by-reference parameter is an address: never nil, and it points
+  to a value of its type. }
+function byRefParamAttr(t: PType): string;
+begin
+  if t^.kind = tyUntyped then
+    byRefParamAttr := 'nonnull'
+  else
+    byRefParamAttr := 'nonnull dereferenceable(' + intToStr(sizeOf_(t)) + ')';
+end;
+
 { The function and frame of routine r (of a method: its canonical
   declaration): frame [static link], [Self], parameters, locals, [result],
   [jmp_buf]. Every routine takes its static link first (null at the outer
@@ -3061,17 +3071,24 @@ begin
     if hasSelf(r) then
     begin
       irSetArgName(f, 1, 'self');
+      if (r^.ownerClass <> nil) and
+         ((r^.ownerClass^.classRecord <> nil) or
+          (r^.ownerClass^.classHelperFor <> nil)) then
+        irSetArgAttrs(f, 1, byRefParamAttr(r^.selfVar^.varType));
       argNo := 2;
     end;
     if r^.isFunction and returnsByPointer(r^.resultType) then
     begin
       irSetArgName(f, argNo, 'result.ptr');
+      irSetArgAttrs(f, argNo, byRefParamAttr(r^.resultType));
       argNo := argNo + 1;
     end;
     for j := 0 to r^.params.count - 1 do
     begin
       p := PDecl(listGet(r^.params, j));
       irSetArgName(f, j + argNo, nm(p^.ident.name));
+      if isByRef(p) then
+        irSetArgAttrs(f, j + argNo, byRefParamAttr(p^.varType));
     end;
     if r^.isInline then { the inline directive }
       f^.attrs := 'inlinehint';

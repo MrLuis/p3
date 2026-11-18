@@ -27,6 +27,6 @@
 ; TREE:      ParamDecl const 'data' <22:27>
 ; TREE-NEXT:   UntypedTypeSpec <22:27>
 ; RUN: %p3 --mode=objfpc --emit-llvm %S/../run/untyped.pas -o - | FileCheck --check-prefix=IR %s
-; IR: declare i32 @memcmp(ptr, ptr, i64)
+; IR: declare i32 @memcmp(ptr nocapture readonly, ptr nocapture readonly, i64)
 ; IR: call void @pas.setlong(ptr null, ptr @pas.i, i32 42)
-; IR: define internal void @pas.setlong(ptr %link, ptr %x, i32 %v)
+; IR: define internal void @pas.setlong(ptr %link, ptr nonnull %x, i32 %v)
