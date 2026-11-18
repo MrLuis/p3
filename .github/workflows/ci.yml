@@ -73,3 +73,32 @@ jobs:
           gh release create "$GITHUB_REF_NAME" build/seed/*.tar.gz build/seed/*.tar.gz.sha256 \
             --title "p3 stage-1 seed $GITHUB_REF_NAME" \
             --notes "Bootstrap the self-hosted compiler without the C++ p3: utils/seed.py bootstrap --seed <file> (see SELFHOST.md)."
+
+  release:
+    runs-on: ubuntu-24.04
+    env:
+      LLVM_VERSION: 19
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install LLVM ${{ env.LLVM_VERSION }}
+        run: |
+          wget -q https://apt.llvm.org/llvm.sh
+          sudo bash llvm.sh "$LLVM_VERSION"
+          sudo apt-get install -y "llvm-$LLVM_VERSION-dev" "llvm-$LLVM_VERSION-tools" \
+            "clang-$LLVM_VERSION" ninja-build zlib1g-dev libzstd-dev libedit-dev libxml2-dev
+          pip install lit
+
+      - name: Configure (Release)
+        run: |
+          cmake -S . -B build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DLLVM_DIR=/usr/lib/llvm-$LLVM_VERSION/lib/cmake/llvm \
+            -DCMAKE_C_COMPILER=clang-$LLVM_VERSION \
+            -DCMAKE_CXX_COMPILER=clang++-$LLVM_VERSION
+
+      - name: Build (Release)
+        run: ninja -C build
+
+      - name: Test (Release)
+        run: ninja -C build check

@@ -6,8 +6,10 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
+# Installed binaries should be optimized; use -DCMAKE_BUILD_TYPE=Debug (or
+# RelWithDebInfo) for development (optimization.md item 24).
 if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
-  set(CMAKE_BUILD_TYPE Debug CACHE STRING "Build type" FORCE)
+  set(CMAKE_BUILD_TYPE Release CACHE STRING "Build type" FORCE)
 endif()
 
 # ---------------------------------------------------------------------------
@@ -33,6 +35,8 @@ if(NOT LLVM_ENABLE_RTTI)
 endif()
 
 option(P3_LINK_LLVM_DYLIB "Link against the shared libLLVM if available" ON)
+option(P3_SELFHOST_NO_CHECKS
+       "Build the self-hosted compiler with range and overflow checks off" OFF)
 if(P3_LINK_LLVM_DYLIB AND TARGET LLVM)
   set(P3_LLVM_LIBS LLVM)
 else()
@@ -116,6 +120,10 @@ set(P3_SELFHOST_RUNTIME_FLAGS "")
 if(APPLE)
   set(P3_SELFHOST_RUNTIME_FLAGS -fno-inline-runtime)
 endif()
+set(P3_SELFHOST_CHECK_FLAGS "")
+if(P3_SELFHOST_NO_CHECKS)
+  set(P3_SELFHOST_CHECK_FLAGS -fno-range-checks -fno-overflow-checks)
+endif()
 if(P3_SELFHOST_FLAGS)
   file(GLOB P3_SELFHOST_SOURCES CONFIGURE_DEPENDS
        ${PROJECT_SOURCE_DIR}/selfhost/*.pas ${PROJECT_SOURCE_DIR}/selfhost/*.inc)
@@ -123,7 +131,7 @@ if(P3_SELFHOST_FLAGS)
   add_custom_command(
     OUTPUT ${PROJECT_BINARY_DIR}/bin/p3-self
     COMMAND $<TARGET_FILE:p3> --no-project --mode=tp -O2 ${P3_SELFHOST_RUNTIME_FLAGS}
-            ${P3_SELFHOST_FLAG_LIST}
+            ${P3_SELFHOST_CHECK_FLAGS} ${P3_SELFHOST_FLAG_LIST}
             -I ${PROJECT_SOURCE_DIR}/selfhost ${PROJECT_SOURCE_DIR}/selfhost/p3.pas
             -o ${PROJECT_BINARY_DIR}/bin/p3-self
     DEPENDS p3 pascalrt rtl ${P3_SELFHOST_SOURCES}

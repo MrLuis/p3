@@ -11,6 +11,13 @@ endif()
 # DWARF 4 like p3's own output: GNU ld mis-merges mixed DWARF 4/5 objects.
 target_compile_options(pascalrt PRIVATE $<$<CONFIG:Debug>:-gdwarf-4>
   -ffunction-sections -fdata-sections)
+# The runtime is part of every program, whatever p3's -O level: optimize it
+# in every configuration (optimization.md item 24).
+if(MSVC)
+  target_compile_options(pascalrt PRIVATE /O2)
+else()
+  target_compile_options(pascalrt PRIVATE -O2)
+endif()
 set_target_properties(pascalrt PROPERTIES
   C_STANDARD 11
   POSITION_INDEPENDENT_CODE ON

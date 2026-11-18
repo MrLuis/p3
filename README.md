@@ -20,6 +20,13 @@ cmake -G Ninja -S . -B build
 ninja -C build
 ```
 
+The default configuration is `Release` (`-O2`/`-O3`); use
+`-DCMAKE_BUILD_TYPE=Debug` (or `RelWithDebInfo`) while working on the
+compiler. The C runtime is built at `-O2` in every configuration, and
+`ninja -C build p3-self` builds the distributed self-hosted compiler at
+`-O2`; `-DP3_SELFHOST_NO_CHECKS=ON` turns its range and overflow checks
+off once the compiler is trusted enough for that.
+
 ## Usage
 
 ```sh
