@@ -55,6 +55,14 @@ void __pas_astr_assign(char **dst, char *src) {
   release(old);
 }
 
+/* Stores src without counting it, and releases what dst held: the reference
+ * in src moves to dst (a function result, or a static string constant). */
+void __pas_astr_take(char **dst, char *src) {
+  char *old = *dst;
+  *dst = src;
+  release(old);
+}
+
 void __pas_astr_clear(char **p) {
   char *old = *p;
   *p = NULL;
@@ -215,6 +223,40 @@ void __pas_astr_insert(char *src, char **p, int32_t index) {
   if (index <= n)
     memcpy(r + index - 1 + ls, *p + index - 1, (size_t)(n - index + 1));
   release(*p);
+  *p = r;
+}
+
+/* s := s + x: appends to s in place when s is the only reference to its
+ * characters, and as a copy otherwise. x may be s (or share its data). */
+void __pas_astr_append(char **p, char *x) {
+  int64_t m = LEN(x);
+  if (m <= 0)
+    return;
+  char *s = *p;
+  if (s == x) { /* s + s: copy the characters before the old string goes */
+    int64_t n = LEN(s);
+    char *r = alloc_str(n + m);
+    if (n > 0)
+      memcpy(r, s, (size_t)n);
+    memcpy(r + n, x, (size_t)m);
+    release(s);
+    *p = r;
+    return;
+  }
+  if (!s) {
+    *p = from_chars(x, m);
+    return;
+  }
+  s = __pas_astr_unique(p);
+  int64_t n = LEN(s);
+  AnsiHeader *h =
+      realloc(HEADER(s), sizeof(AnsiHeader) + (size_t)n + (size_t)m + 1);
+  if (!h)
+    __pas_runtime_error("out of memory in a string");
+  h->length = n + m;
+  char *r = (char *)(h + 1);
+  memcpy(r + n, x, (size_t)m);
+  r[n + m] = '\0';
   *p = r;
 }
 

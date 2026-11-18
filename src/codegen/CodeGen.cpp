@@ -245,6 +245,11 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
   llvm::SmallVector<llvm::Value *, 4> LiveTemps;
   llvm::SmallVector<llvm::Value *, 4> RoutineTemps;
   llvm::DenseMap<llvm::Value *, Type *> RecordTemps; ///< record temporaries' types
+  /// A direct call whose ansistring result is moved into the assignment
+  /// target: no temporary holds it (NoHoldAnsiResult), and the call that
+  /// returned it took that path (TookAnsiResult).
+  bool NoHoldAnsiResult = false;
+  bool TookAnsiResult = false;
   /// Classes whose cleanup functions (releasing their own fields' COM
   /// interfaces) are to be emitted.
   std::vector<std::pair<ClassType *, llvm::Function *>> CleanupsToEmit;
@@ -3923,7 +3928,12 @@ public:
       ResultTmp = createTemp(memType(ResultTy), "result");
       Values.push_back(ResultTmp);
     }
+    // The arguments' results are held as usual; only a direct call's own
+    // ansistring result may move into its assignment target.
+    bool NoHold = NoHoldAnsiResult;
+    NoHoldAnsiResult = false;
     emitArgValues(Params, Args, Values, ToC);
+    NoHoldAnsiResult = NoHold;
     llvm::Value *Result = B.CreateCall(Callee, Values);
     if (ResultTmp) // expressions use a string's address
       return ResultTmp;
@@ -3938,8 +3948,13 @@ public:
       B.CreateStore(Result, Tmp);
       return Tmp;
     }
-    if (ResultTy && isManaged(ResultTy))
+    if (ResultTy && isManaged(ResultTy)) {
+      if (NoHold && ResultTy->isAnsiString()) {
+        TookAnsiResult = true;
+        return Result;
+      }
       return holdResult(Result, ResultTy);
+    }
     return Result;
   }
 
@@ -4319,7 +4334,10 @@ public:
   /// Stores V (scalar, of type T) at Addr: counted for COM interfaces.
   void storeValue(llvm::Value *Addr, llvm::Value *V, Type *T) {
     if (T->isAnsiString())
-      astrCall("__pas_astr_assign", B.getVoidTy(), {Addr, V});
+      // A static string constant has refs < 0: storing it needs no count.
+      astrCall(llvm::isa<llvm::Constant>(V) ? "__pas_astr_take"
+                                            : "__pas_astr_assign",
+               B.getVoidTy(), {Addr, V});
     else if (T->isDynArray())
       astrCall("__pas_dyn_assign", B.getVoidTy(), {Addr, V});
     else if (T->isClosureType())
@@ -6105,6 +6123,56 @@ public:
     return Sum->getRHS();
   }
 
+  static Expr *skipParens(Expr *E) {
+    while (auto *P = llvm::dyn_cast<ParenExpr>(E))
+      E = P->getInner();
+    return E;
+  }
+
+  static bool isTargetName(Expr *E, VarDecl *V) {
+    auto *N = llvm::dyn_cast<NameRefExpr>(skipParens(E));
+    return N && N->getDecl() == V && !N->getWith();
+  }
+
+  /// Is E, after parentheses and ansistring casts, Target itself?
+  static bool isDirectTargetRef(Expr *E, VarDecl *V) {
+    E = skipParens(E);
+    if (auto *C = llvm::dyn_cast<CallExpr>(E);
+        C && E->getType()->isAnsiString() && C->getArgs().size() == 1 &&
+        (C->isVarCast() || llvm::isa_and_nonnull<TypeDecl>(C->getDecl())))
+      return isDirectTargetRef(C->getArgs()[0], V);
+    return isTargetName(E, V);
+  }
+
+  /// The right operands of a left-nested ansistring addition whose leftmost
+  /// operand is V: s + a + b gives {a, b}.
+  static bool ansiAppends(Expr *Value, VarDecl *V,
+                          llvm::SmallVectorImpl<Expr *> &Parts) {
+    auto *Sum = llvm::dyn_cast<BinaryExpr>(Value);
+    if (!Sum || Sum->getOp() != BinaryOp::Add || Sum->getOperator() ||
+        !Value->getType()->isAnsiString())
+      return false;
+    if (!isTargetName(Sum->getLHS(), V) &&
+        !ansiAppends(Sum->getLHS(), V, Parts))
+      return false;
+    Parts.push_back(Sum->getRHS());
+    return true;
+  }
+
+  /// A direct call of a function (or through a procedural value) whose
+  /// result is an ansistring: the reference it returns is new, so an
+  /// assignment can move it instead of counting it and releasing it later.
+  static bool isFreshAnsiCall(Expr *Value) {
+    auto *C = llvm::dyn_cast<CallExpr>(Value);
+    if (!C || !Value->getType()->isAnsiString() || C->isVarCast() ||
+        C->isMethodCast())
+      return false;
+    if (C->getCalleeValue())
+      return true;
+    return llvm::isa_and_nonnull<RoutineDecl>(C->getDecl()) ||
+           llvm::isa_and_nonnull<VarDecl>(C->getDecl());
+  }
+
   void visitAssignStmt(AssignStmt *S) {
     Expr *Target = S->getTarget(), *Value = S->getValue();
     Type *TT = Target->getType();
@@ -6126,8 +6194,53 @@ public:
       return;
     }
     if (TT->isAnsiString()) {
+      VarDecl *TV = nullptr;
+      if (auto *N = llvm::dyn_cast<NameRefExpr>(Target); N && !N->getWith())
+        TV = llvm::dyn_cast_or_null<VarDecl>(N->getDecl());
+      llvm::SmallVector<Expr *, 4> Parts;
+      if (TV && ansiAppends(Value, TV, Parts)) {
+        if (Parts.size() == 1) {
+          // s := s + x: x goes to the end of s, in place when s is unique.
+          llvm::Value *Dst = emitAddress(Target);
+          llvm::Value *Src = emitAnsi(Parts[0]);
+          astrCall("__pas_astr_append", B.getVoidTy(), {Dst, Src});
+          return;
+        }
+        // s + a + b ...: evaluate every part before changing s, then append
+        // them in order. (A bare s among the parts would read it after the
+        // first append; keep the general concatenation for that.)
+        bool Safe = true;
+        for (Expr *P : Parts)
+          if (isDirectTargetRef(P, TV)) {
+            Safe = false;
+            break;
+          }
+        if (Safe) {
+          llvm::Value *Dst = emitAddress(Target);
+          llvm::SmallVector<llvm::Value *, 4> Values;
+          for (Expr *P : Parts)
+            Values.push_back(emitAnsi(P));
+          for (llvm::Value *V : Values)
+            astrCall("__pas_astr_append", B.getVoidTy(), {Dst, V});
+          return;
+        }
+      }
+      bool Take = isFreshAnsiCall(Value) && llvm::isa<NameRefExpr>(Target);
+      if (Take) {
+        NoHoldAnsiResult = true;
+        TookAnsiResult = false;
+      }
       llvm::Value *V = emitAnsi(Value);
-      storeValue(emitAddress(Target), V, TT);
+      if (Take) {
+        NoHoldAnsiResult = false;
+        Take = TookAnsiResult;
+      }
+      llvm::Value *Dst = emitAddress(Target);
+      if (Take) {
+        astrCall("__pas_astr_take", B.getVoidTy(), {Dst, V});
+        return;
+      }
+      storeValue(Dst, V, TT);
       return;
     }
     if (TT->isStructured()) {

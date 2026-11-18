@@ -521,6 +521,63 @@ begin
   appendedTo := value^.rhs;
 end;
 
+function skipParensNode(e: PNode): PNode;
+begin
+  while e^.kind = nkParen do
+    e := e^.inner;
+  skipParensNode := e;
+end;
+
+function isTargetNameNode(e: PNode; d: PDecl): boolean;
+begin
+  e := skipParensNode(e);
+  isTargetNameNode := (e^.kind = nkNameRef) and (e^.refDecl = d) and
+                      (e^.refWith = nil);
+end;
+
+{ Is e, after parentheses and ansistring casts, the variable d itself? }
+function isDirectTargetRefNode(e: PNode; d: PDecl): boolean;
+begin
+  e := skipParensNode(e);
+  if (e^.kind = nkCall) and (e^.typ <> nil) and (e^.typ^.kind = tyAnsiString) and
+     (e^.args.count = 1) and
+     (e^.isVarCast or ((e^.callDecl <> nil) and (e^.callDecl^.kind = dkType))) then
+    exit(isDirectTargetRefNode(PNode(listGet(e^.args, 0)), d));
+  isDirectTargetRefNode := isTargetNameNode(e, d);
+end;
+
+{ The right operands of a left-nested ansistring addition whose leftmost
+  operand is d: s + a + b gives a and b. }
+function ansiAppends(value: PNode; d: PDecl; var parts: TPtrList): boolean;
+begin
+  ansiAppends := false;
+  if (value^.kind <> nkBinary) or (value^.bop <> boAdd) or
+     (value^.opDecl <> nil) or (value^.typ^.kind <> tyAnsiString) then
+    exit;
+  if not isTargetNameNode(value^.lhs, d) then
+    if not ansiAppends(value^.lhs, d, parts) then
+      exit;
+  listAdd(parts, value^.rhs);
+  ansiAppends := true;
+end;
+
+{ A direct call of a function (or through a procedural value) whose result
+  is an ansistring: the reference it returns is new, so an assignment can
+  move it instead of counting it and releasing it later. }
+function isFreshAnsiCall(value: PNode): boolean;
+begin
+  isFreshAnsiCall := false;
+  if not (value^.kind in [nkCall, nkIndirectCall]) or (value^.typ = nil) or
+     (value^.typ^.kind <> tyAnsiString) or value^.isVarCast or
+     (value^.methodCast <> 0) then
+    exit;
+  if (value^.calleeExpr <> nil) or (value^.callValue <> nil) then
+    exit(true);
+  if value^.callDecl <> nil then
+    if value^.callDecl^.kind in [dkRoutine, dkVar] then
+      exit(true);
+end;
+
 procedure visitAssign(s: PNode);
 var
   more: PNode;
@@ -528,6 +585,10 @@ var
   tt: PType;
   dst, src, pair, v: TV;
   p: PDecl;
+  take, safe: boolean;
+  dV: PDecl;
+  parts, vals: TPtrList;
+  k: longint;
 begin
   target := s^.target;
   value := s^.value;
@@ -554,8 +615,63 @@ begin
   end;
   if tt^.kind = tyAnsiString then
   begin
+    dV := nil;
+    if (target^.kind = nkNameRef) and (target^.refWith = nil) and
+       (target^.refDecl <> nil) and (target^.refDecl^.kind = dkVar) then
+      dV := target^.refDecl;
+    listInit(parts);
+    if (dV <> nil) and ansiAppends(value, dV, parts) then
+    begin
+      if parts.count = 1 then
+      begin
+        { s := s + x: x goes to the end of s, in place when s is unique }
+        dst := emitAddress(target);
+        src := emitAnsi(PNode(listGet(parts, 0)));
+        astrV2('__pas_astr_append', 'ptr,ptr', dst, src);
+        listFree(parts);
+        exit;
+      end;
+      { s + a + b ...: evaluate every part before changing s, then append
+        them in order. (A bare s among the parts would read it after the
+        first append; keep the general concatenation for that.) }
+      safe := true;
+      for k := 0 to parts.count - 1 do
+        if isDirectTargetRefNode(PNode(listGet(parts, k)), dV) then
+          safe := false;
+      if safe then
+      begin
+        dst := emitAddress(target);
+        listInit(vals);
+        for k := 0 to parts.count - 1 do
+          listAdd(vals, irBox(emitAnsi(PNode(listGet(parts, k)))));
+        for k := 0 to vals.count - 1 do
+          astrV2('__pas_astr_append', 'ptr,ptr', dst,
+                 PTVBox(listGet(vals, k))^);
+        listFree(vals);
+        listFree(parts);
+        exit;
+      end;
+    end;
+    listFree(parts);
+    take := isFreshAnsiCall(value) and (target^.kind = nkNameRef);
+    if take then
+    begin
+      noHoldAnsiResult := true;
+      tookAnsiResult := false;
+    end;
     v := emitAnsi(value);
-    storeValue(emitAddress(target), v, tt);
+    if take then
+    begin
+      noHoldAnsiResult := false;
+      take := tookAnsiResult;
+    end;
+    dst := emitAddress(target);
+    if take then
+    begin
+      astrV2('__pas_astr_take', 'ptr,ptr', dst, v);
+      exit;
+    end;
+    storeValue(dst, v, tt);
     exit;
   end;
   if isStructured(tt) then

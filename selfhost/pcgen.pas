@@ -96,6 +96,10 @@ var
     pinInMemory)? In a routine without try statements they are pinned
     later, if its body turns out to need protection. }
   pinTemps: boolean;
+  { A direct call whose ansistring result is moved into the assignment
+    target: no temporary holds it (noHoldAnsiResult), and the call that
+    returned it took that path (tookAnsiResult). }
+  noHoldAnsiResult, tookAnsiResult: boolean;
   lowered: TIntMap;          { type id -> PIRType }
   ansiConsts: TIntMap;       { name id of the characters -> PTVBox of the .astr }
   stringConsts: TIntMap;     { name id of the bytes -> PTVBox of the global }
@@ -3343,7 +3347,13 @@ var
   fn, frame, ignored: TV;
 begin
   if t^.kind = tyAnsiString then
-    astrV2('__pas_astr_assign', 'ptr,ptr', addr, v)
+  begin
+    { A static string constant has refs < 0: storing it needs no count. }
+    if irIsConst(v) then
+      astrV2('__pas_astr_take', 'ptr,ptr', addr, v)
+    else
+      astrV2('__pas_astr_assign', 'ptr,ptr', addr, v);
+  end
   else if t^.kind = tyDynArray then
     astrV2('__pas_dyn_assign', 'ptr,ptr', addr, v)
   else if isClosureType(t) then
@@ -3650,6 +3660,7 @@ function emitCallToSelf(ret: PIRType; const callee: TV; const link: TV;
 var
   buf: TBuf;
   tmp, res: TV;
+  holdAnsi: boolean;
 begin
   bufInit(buf);
   if hasLink then { external (C) routines have none }
@@ -3661,7 +3672,12 @@ begin
     tmp := irCreateTemp(memType(resTy), 'result');
     irArgsAdd(buf, tmp);
   end;
+  { The arguments' results are held as usual; only a direct call's own
+    ansistring result may move into its assignment target. }
+  holdAnsi := noHoldAnsiResult;
+  noHoldAnsiResult := false;
   emitArgValues(params, args, buf, false);
+  noHoldAnsiResult := holdAnsi;
   res := irCallPtr(ret, callee, buf, '');
   bufFree(buf);
   if returnsByPointer(resTy) then { expressions use a string's address }
@@ -3680,6 +3696,11 @@ begin
   if (resTy <> nil) and ((resTy^.kind in [tyDynArray, tyTask, tyToken, tyIterator]) or
                          isClosureType(resTy)) then
     exit(holdDynResult(res, resTy));
+  if (resTy <> nil) and (resTy^.kind = tyAnsiString) and holdAnsi then
+  begin
+    tookAnsiResult := true;
+    exit(res);
+  end;
   if (resTy <> nil) and isManaged(resTy) then
     exit(holdResult(res));
   emitCallToSelf := res;

@@ -156,6 +156,8 @@ int32_t __pas_dyn_bad_index(const void *a, int64_t index);
 
 void __pas_astr_addref(char *s);
 void __pas_astr_assign(char **dst, char *src);
+/* Stores src without counting it, moving its reference to dst. */
+void __pas_astr_take(char **dst, char *src);
 void __pas_astr_clear(char **p);
 int32_t __pas_astr_length(const char *s);
 char *__pas_astr_from_chars(const char *p, int64_t len);
@@ -175,6 +177,8 @@ int32_t __pas_astr_bad_index(const char *s, int64_t index);
 void __pas_astr_setlength(char **p, int32_t len);
 void __pas_astr_delete(char **p, int32_t index, int32_t count);
 void __pas_astr_insert(char *src, char **p, int32_t index);
+/* s := s + x, in place when s is the only reference to its characters. */
+void __pas_astr_append(char **p, char *x);
 void __pas_str_setlength(unsigned char *s, int32_t maxlen, int32_t len);
 void __pas_write_astr(PasFile *f, const char *s, int32_t width);
 /* write(f, p) of a pchar: the C string p points to (nothing for nil, not

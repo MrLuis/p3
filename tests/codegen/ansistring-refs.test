@@ -1,0 +1,28 @@
+; Ansistring reference-count elision (--mode=objfpc): assigning a static
+; string constant needs no count; a function's fresh result may move into
+; the assignment target instead of being held, counted and released.
+; s := s + x appends to s in place when s is the only reference.
+; RUN: %p3 --mode=objfpc --emit-llvm %S/Inputs/ansistring-refs.pas -o %t.ll
+; RUN: FileCheck %s < %t.ll
+; RUN: opt -passes=verify -disable-output %t.ll
+
+; CHECK-LABEL: define i32 @main(
+; s := 'a'
+; CHECK: call void @__pas_astr_take(ptr @pas.s, ptr getelementptr inbounds (i8, ptr @.astr{{.*}}, i64 16))
+; t := s
+; CHECK-NOT: __pas_astr_addref
+; CHECK: call void @__pas_astr_assign(ptr @pas.t, ptr %s
+; s := s + t
+; CHECK: call void @__pas_astr_append(ptr @pas.s, ptr %t
+; s := s + 'b' + 'c'
+; CHECK: call void @__pas_astr_append(ptr @pas.s, ptr getelementptr inbounds (i8, ptr @.astr{{.*}}, i64 16))
+; CHECK: call void @__pas_astr_append(ptr @pas.s, ptr getelementptr inbounds (i8, ptr @.astr{{.*}}, i64 16))
+; s := F(t): the result is not held in a temporary.
+; CHECK: [[R:%[0-9]+]] = call ptr @pas.f(
+; CHECK-NEXT: call void @__pas_astr_take(ptr @pas.s, ptr [[R]])
+; t := s
+; CHECK: call void @__pas_astr_assign(ptr @pas.t, ptr %s{{[0-9]*}})
+
+; The function result is an existing reference: it is counted.
+; CHECK-LABEL: define internal ptr @pas.f(
+; CHECK: call void @__pas_astr_assign(ptr %f{{[0-9]*}}, ptr %x
