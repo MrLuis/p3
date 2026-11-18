@@ -47,7 +47,7 @@
 ; RUN: opt -passes=verify -disable-output %t.ll
 ; IR-LABEL: define i32 @main(
 ; IR: call void @__pas_closure_assign(ptr @pas.f, ptr %fn, ptr %frame)
-; IR-LABEL: define internal { ptr, ptr } @pas.makeadder(ptr %link, i32 %n)
+; IR-LABEL: define internal { ptr, ptr } @pas.makeadder(i32 %n)
 ; IR: %frame = call ptr @__pas_frame_new(i64 32, ptr @frame.fini.makeadder)
 ; IR: insertvalue { ptr, ptr } { ptr @"pas.makeadder.$lambda1", ptr undef }, ptr %frame, 1
 ; IR: call void @__pas_closure_assign(

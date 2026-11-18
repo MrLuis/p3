@@ -2710,7 +2710,7 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
                          llvm::DILocation::get(M.getContext(), Line, 0, CurSP),
                          B.GetInsertBlock());
     };
-    unsigned ArgNo = 1;
+    unsigned ArgNo = 1; // DWARF parameter numbers are 1-based
     if (R->hasSelf())
       Declare(R->getSelfVar(), ArgNo++);
     for (VarDecl *P : R->getParams())
@@ -3047,10 +3047,18 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
     return llvm::FunctionType::get(RetTy, ParamTys, false);
   }
 
+  /// Does R take the hidden static-link first parameter? Only a nested
+  /// routine needs it; methods keep it for method pointers, as do async and
+  /// iterator routines (their argument record has a link slot) (item 20).
+  static bool needsLink(RoutineDecl *R) {
+    return R->hasStaticLink() || R->hasSelf() || R->isMethod() ||
+           R->isAsync() || R->isIterator();
+  }
+
   llvm::FunctionType *routineFnType(RoutineDecl *R) {
     return routineFnType(R->getParams(),
                          R->isFunction() ? R->getResultType() : nullptr,
-                         R->hasSelf());
+                         R->hasSelf(), needsLink(R));
   }
 
   /// An external (C) routine: no static link, C types (a callback: a
@@ -3081,14 +3089,15 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
     llvm::Function *Target = Functions[R];
     llvm::Type *Result = Target->getReturnType();
     llvm::SmallVector<llvm::Type *, 8> ParamTys(
-        Target->getFunctionType()->param_begin() + 1,
+        Target->getFunctionType()->param_begin() + (needsLink(R) ? 1 : 0),
         Target->getFunctionType()->param_end());
     auto *T = llvm::Function::Create(llvm::FunctionType::get(Result, ParamTys, false),
                                      llvm::Function::InternalLinkage,
                                      "cthunk." + Target->getName(), M);
     llvm::IRBuilder<> TB(llvm::BasicBlock::Create(M.getContext(), "entry", T));
-    llvm::SmallVector<llvm::Value *, 8> Args{
-        llvm::ConstantPointerNull::get(B.getPtrTy())};
+    llvm::SmallVector<llvm::Value *, 8> Args;
+    if (needsLink(R))
+      Args.push_back(llvm::ConstantPointerNull::get(B.getPtrTy()));
     unsigned First = R->isFunction() && returnsByPointer(R->getResultType());
     for (unsigned I = 0; I < T->arg_size(); ++I) {
       if (I >= First)
@@ -3103,13 +3112,45 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
     CThunks[R] = T;
   }
 
+  /// Thunks that give a top-level routine the {link, params} signature its
+  /// procedural values have (item 20).
+  llvm::DenseMap<RoutineDecl *, llvm::Function *> LinkThunks;
+
   /// The function a procedural value of routine R points to.
   llvm::Value *routineFunction(RoutineDecl *R) {
     if (R->isExternal())
       return ExternalFns[R].getCallee();
     if (llvm::Function *T = CThunks.lookup(R))
       return T;
-    return Functions[R];
+    if (needsLink(R))
+      return Functions[R];
+    if (llvm::Function *T = LinkThunks.lookup(R))
+      return T;
+    llvm::Function *Target = Functions[R];
+    auto *T = llvm::Function::Create(
+        routineFnType(R->getParams(),
+                      R->isFunction() ? R->getResultType() : nullptr, false,
+                      /*HasLink=*/true),
+        llvm::Function::InternalLinkage,
+        "linkthunk." + Target->getName(), M);
+    T->arg_begin()->setName("link");
+    llvm::IRBuilder<> TB(llvm::BasicBlock::Create(M.getContext(), "entry", T));
+    llvm::SmallVector<llvm::Value *, 8> Args;
+    unsigned First = R->isFunction() && returnsByPointer(R->getResultType());
+    for (unsigned I = 0; I < T->arg_size(); ++I) {
+      if (I == 0) // the link this thunk ignores
+        continue;
+      if (I - 1 >= First)
+        T->getArg(I)->setName(R->getParams()[I - 1 - First]->getName().Name);
+      Args.push_back(T->getArg(I));
+    }
+    llvm::Value *V = TB.CreateCall(Target, Args);
+    if (V->getType()->isVoidTy())
+      TB.CreateRetVoid();
+    else
+      TB.CreateRet(V);
+    LinkThunks[R] = T;
+    return T;
   }
 
   void declareRoutines(Block &Blk) {
@@ -3446,7 +3487,8 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
                                     : llvm::Function::ExternalLinkage,
         Export == ExportNames.end() ? Name : Export->second, M);
     unsigned ArgNo = 0;
-    F->getArg(ArgNo++)->setName("link");
+    if (needsLink(R))
+      F->getArg(ArgNo++)->setName("link");
     if (R->hasSelf()) {
       llvm::Argument *Self = F->getArg(ArgNo++);
       Self->setName("self");
@@ -3953,7 +3995,7 @@ public:
       if (V != ResultVar || !ResultByPointer)
         emitZeroInit(varSlot(V), V->getType());
 
-    unsigned ArgNo = 1;
+    unsigned ArgNo = needsLink(R) ? 1 : 0;
     if (LinkInFrame.count(R))
       B.CreateStore(F->getArg(0), B.CreateStructGEP(FrameTy, CurFrame, 0));
     if (FrameFini && parentFrameOnHeap(R)) // the frame holds its parent's
@@ -4102,6 +4144,12 @@ public:
       return llvm::ConstantPointerNull::get(B.getPtrTy());
     return R->hasStaticLink() ? framePtrFor(R->getParent())
                               : llvm::ConstantPointerNull::get(B.getPtrTy());
+  }
+
+  /// The link argument of a direct call: null when the routine has no link
+  /// parameter (emitCallTo must not pass an extra null).
+  llvm::Value *callLink(RoutineDecl *R) {
+    return needsLink(R) ? staticLinkFor(R) : nullptr;
   }
 
   /// {function, static link} for a routine passed as a procedural argument.
@@ -4301,8 +4349,8 @@ public:
     if (R->isExternal())
       return emitCallTo(ExternalFns[R], nullptr, R->getParams(), Args, nullptr,
                         nullptr, /*ToC=*/true);
-    return emitCallTo(Functions[R], staticLinkFor(R), R->getParams(), Args,
-                      nullptr, resultOf(R));
+    return emitCallTo(Functions[R], callLink(R), R->getParams(), Args, nullptr,
+                      resultOf(R));
   }
 
   /// Call through a procedural / functional parameter or variable.

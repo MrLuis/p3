@@ -2378,10 +2378,7 @@ begin
     exit(irZero(ty));
   r := canon(r);
   listInit(elems);
-  if r^.cgThunk <> nil then
-    listAdd(elems, irBox(irFuncRef(PIRFunc(r^.cgThunk))))
-  else
-    listAdd(elems, irBox(irFuncRef(fnOf(r))));
+  listAdd(elems, irBox(irFuncRef(routineEntry(r))));
   listAdd(elems, irBox(irNull));
   routineConstant := irConstStruct(ty, elems);
   listFree(elems);
@@ -2666,7 +2663,8 @@ procedure routineParamTypes(r: PDecl; var params: TPtrList);
 var
   j: longint;
 begin
-  listAdd(params, irPtrT);
+  if needsLink(r) then
+    listAdd(params, irPtrT);
   if hasSelf(r) then
     listAdd(params, irPtrT);
   if r^.isFunction and returnsByPointer(r^.resultType) then
@@ -2900,6 +2898,48 @@ procedure declareRoutine(r: PDecl); forward;
   procedural values point to it): cthunk.<sym>, which calls r with a null
   static link; created right after r, its body emitted with the
   routines'. }
+{ The function a procedural value of r points to: the routine itself when
+  it takes the link (an external routine, a nested one, or a cdecl one's
+  C entry), else a thunk with the procedural value's (link, params)
+  signature that ignores the link (item 20). }
+function routineEntry(r: PDecl): PIRFunc;
+var
+  params: TPtrList;
+  f, target: PIRFunc;
+  i, argNo: longint;
+  p: PDecl;
+begin
+  r := canon(r);
+  if r^.cgThunk <> nil then
+    exit(PIRFunc(r^.cgThunk));
+  if r^.isExternal then
+    exit(PIRFunc(r^.cgFunc));
+  if needsLink(r) then
+    exit(fnOf(r));
+  target := fnOf(r);
+  listInit(params);
+  listAdd(params, irPtrT);
+  if r^.isFunction and returnsByPointer(r^.resultType) then
+    listAdd(params, irPtrT);
+  for i := 0 to r^.params.count - 1 do
+    listAdd(params, paramIRType(PDecl(listGet(r^.params, i))));
+  f := irCreateFunction('linkthunk.' + mangle(r), 'internal',
+                        routineRetType(r), params);
+  listFree(params);
+  irSetArgName(f, 0, 'link');
+  argNo := 1;
+  if r^.isFunction and returnsByPointer(r^.resultType) then
+    argNo := argNo + 1;
+  for i := 0 to r^.params.count - 1 do
+  begin
+    p := PDecl(listGet(r^.params, i));
+    irSetArgName(f, argNo + i, nm(p^.ident.name));
+  end;
+  r^.cgThunk := f;
+  listAdd(thunksToEmit, r);
+  routineEntry := f;
+end;
+
 procedure declareCThunk(r: PDecl; const sym: string);
 var
   params: TPtrList;
@@ -2910,7 +2950,7 @@ begin
     exit;
   target := fnOf(r);
   listInit(params);
-  for i := 1 to target^.params.count - 1 do
+  for i := 0 to target^.params.count - 1 do
     listAdd(params, listGet(target^.params, i));
   t := irCreateFunction('cthunk.' + sym, 'internal', target^.ret, params);
   listFree(params);
@@ -2938,9 +2978,16 @@ begin
   irSetDebugLoc(nil);
   irSetInsertPoint(irNewBlock('entry'));
   bufInit(buf);
-  irArgsAdd(buf, irNull);
-  for i := 0 to t^.params.count - 1 do
-    irArgsAdd(buf, irArg(t, i));
+  if isCDecl(r) then
+  begin
+    for i := 0 to t^.params.count - 1 do
+      irArgsAdd(buf, irArg(t, i));
+  end
+  else { a link thunk: skip its link argument }
+  begin
+    for i := 1 to t^.params.count - 1 do
+      irArgsAdd(buf, irArg(t, i));
+  end;
   res := irCall(fnOf(r), buf, '');
   bufFree(buf);
   if t^.ret^.kind = ikVoid then
@@ -3121,16 +3168,20 @@ begin
     else
       f := irCreateFunction(name, 'internal', ret, params);
     listFree(params);
-    irSetArgName(f, 0, 'link');
-    argNo := 1;
+    argNo := 0;
+    if needsLink(r) then
+    begin
+      irSetArgName(f, 0, 'link');
+      argNo := 1;
+    end;
     if hasSelf(r) then
     begin
-      irSetArgName(f, 1, 'self');
+      irSetArgName(f, argNo, 'self');
       if (r^.ownerClass <> nil) and
          ((r^.ownerClass^.classRecord <> nil) or
           (r^.ownerClass^.classHelperFor <> nil)) then
-        irSetArgAttrs(f, 1, byRefParamAttr(r^.selfVar^.varType));
-      argNo := 2;
+        irSetArgAttrs(f, argNo, byRefParamAttr(r^.selfVar^.varType));
+      argNo := argNo + 1;
     end;
     if r^.isFunction and returnsByPointer(r^.resultType) then
     begin
@@ -3453,11 +3504,14 @@ begin
     irStore(irArg(f, 0), irStructGEP(frameT, curFrame, 0, ''));
   if (frameFini <> nil) and parentFrameOnHeap(r) then { the frame holds its parent's }
     ignoredV := call1(frameRuntime('__pas_frame_addref'), irArg(f, 0), '');
-  argNo := 1;
+  if needsLink(r) then
+    argNo := 1
+  else
+    argNo := 0;
   if hasSelf(r) then
   begin
-    irStore(irArg(f, 1), varSlot(r^.selfVar));
-    argNo := 2;
+    irStore(irArg(f, argNo), varSlot(r^.selfVar));
+    argNo := argNo + 1;
   end;
   if resultByPointer then { the caller's temporary }
   begin
@@ -3932,7 +3986,6 @@ begin
     emitRoutineBody(PDecl(listGet(routinesToEmit, i)));
   emitAsyncs;
   emitCleanups;
-  emitCThunks;
 
   { the initialization part: files, then the statements }
   curFn := initFn;
@@ -3958,6 +4011,7 @@ begin
   irSetInsertPoint(exitBlock);
   irRetVoid;
   emitDynOps;
+  emitCThunks;
   if dbgOn then
     finalizeDebugInfo;
   if not keepUnused then
@@ -4022,9 +4076,9 @@ begin
     emitRoutineBody(PDecl(listGet(routinesToEmit, i)));
   emitAsyncs;
   emitCleanups;
-  emitCThunks;
   emitMainBody(prog, units, mainFn);
   emitDynOps;
+  emitCThunks;
   if dbgOn then
     finalizeDebugInfo;
   if not keepUnused then

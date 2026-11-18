@@ -18,13 +18,13 @@
 ; The symbols.
 ; RUN: %p3 --mode=tp -I %t/lib --emit-llvm %t/lib/mathutils.pas -o - | FileCheck --check-prefix=UNIT %s
 ; UNIT-DAG: @"pas.mathutils$calls" = global i32 0
-; UNIT-DAG: define i32 @"pas.mathutils$square"(ptr %link, i32 %x)
+; UNIT-DAG: define i32 @"pas.mathutils$square"(i32 %x)
 ; UNIT-DAG: define void @"pas.mathutils$$init"()
 ; RUN: %p3 --mode=tp -I %t/lib -fseparate-units --emit-llvm %t/main.pas -o %t/main.ll
 ; RUN: FileCheck --check-prefix=PROG %s < %t/main.ll
 ; RUN: FileCheck --check-prefix=INIT %s < %t/main.ll
 ; PROG-DAG: @"pas.mathutils$calls" = external global i32
-; PROG-DAG: declare i32 @"pas.mathutils$gcd"(ptr, i32, i32)
+; PROG-DAG: declare i32 @"pas.mathutils$gcd"(i32, i32)
 ; INIT: call void @"pas.mathutils$$init"()
 ; INIT-NEXT: call void @"pas.shapes$$init"()
 ;

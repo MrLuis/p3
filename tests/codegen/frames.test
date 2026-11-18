@@ -13,7 +13,7 @@
 ; CHECK-NOT: %frame.plain = type
 
 ; Every routine takes a static link first (null at program level).
-; CHECK: define internal void @pas.outer(ptr %link, i32 %p)
+; CHECK: define internal void @pas.outer(i32 %p)
 ; CHECK:   %frame = alloca %frame.outer
 ; Not captured: an alloca; locals start from zero.
 ; CHECK:   %own = alloca i32
@@ -39,7 +39,7 @@
 ; CHECK:   getelementptr inbounds %frame.outer, ptr {{%.*}}, i32 0, i32 1
 
 ; No nested routines: allocas only.
-; CHECK: define internal i32 @pas.plain(ptr %link, i32 %a)
+; CHECK: define internal i32 @pas.plain(i32 %a)
 ; CHECK-NOT: %frame
 ; CHECK:   %a.addr = alloca i32
 ; CHECK:   %plain = alloca i32

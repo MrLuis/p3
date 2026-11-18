@@ -1,6 +1,6 @@
 ; A default parameter value is passed by the caller, as if written there.
 ; RUN: %p3 --mode=objfpc --emit-llvm %S/Inputs/defaults.pas -o - | FileCheck %s
 ; CHECK-LABEL: define i32 @main(
-; CHECK:      call void @pas.p(ptr null, i32 1, i32 7, ptr @.str
-; CHECK-NEXT: call void @pas.p(ptr null, i32 1, i32 2, ptr @.str
-; CHECK-LABEL: define internal void @pas.p(ptr %link, i32 %a, i32 %b, ptr nonnull dereferenceable(256) %c)
+; CHECK:      call void @pas.p(i32 1, i32 7, ptr @.str
+; CHECK-NEXT: call void @pas.p(i32 1, i32 2, ptr @.str
+; CHECK-LABEL: define internal void @pas.p(i32 %a, i32 %b, ptr nonnull dereferenceable(256) %c)

@@ -16,5 +16,5 @@
 ; RUN: %p3 --mode=objfpc --emit-llvm %S/../run/constlambdas.pas -o %t.ll
 ; RUN: FileCheck --check-prefix=IR %s < %t.ll
 ; RUN: opt -passes=verify -disable-output %t.ll
-; IR: @pas.ident = internal global { ptr, ptr } { ptr @pas.id, ptr null }
-; IR: @pas.twice = internal global { ptr, ptr } { ptr @"pas.$lambda1", ptr null }
+; IR: @pas.ident = internal global { ptr, ptr } { ptr @linkthunk.pas.id, ptr null }
+; IR: @pas.twice = internal global { ptr, ptr } { ptr @"linkthunk.pas.$lambda1", ptr null }

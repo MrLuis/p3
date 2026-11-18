@@ -1,0 +1,11 @@
+; A top-level routine has no static-link parameter; taking its address
+; gives a small thunk with the procedural value's {link, params} signature
+; (item 20).
+; RUN: %p3 --mode=objfpc --emit-llvm %S/Inputs/nolink.pas -o - | FileCheck %s
+; RUN: %p3 --mode=objfpc --emit-llvm %S/Inputs/nolink.pas -o - | opt -passes=verify -disable-output
+
+; CHECK-DAG: define internal i32 @pas.twice(i32 %x)
+; CHECK-DAG: call i32 @pas.twice(i32 21)
+; CHECK-DAG: define internal i32 @linkthunk.pas.twice(ptr %link, i32 %x)
+; CHECK-DAG: store { ptr, ptr } { ptr @linkthunk.pas.twice, ptr null }, ptr @pas.f
+; CHECK-DAG: call i32 %{{.*}}(ptr %{{.*}}, i32 20)

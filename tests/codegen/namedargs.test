@@ -9,4 +9,4 @@
 ; CHECK-LABEL: define i32 @main(
 ; CHECK: [[W:%[0-9]+]] = call i32 @pas.first(
 ; CHECK-NEXT: [[S:%[0-9]+]] = call i32 @pas.second(
-; CHECK-NEXT: call i32 @pas.area(ptr null, i32 [[W]], i32 2, i32 [[S]])
+; CHECK-NEXT: call i32 @pas.area(i32 [[W]], i32 2, i32 [[S]])

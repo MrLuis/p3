@@ -233,6 +233,16 @@ begin
   hasSelf := ((r^.methodKind <> mtNone) and not r^.isStatic) or r^.isMethodLambda;
 end;
 
+{ Does r take the hidden static-link first parameter? Only a nested routine
+  needs it; methods (and method lambdas) keep it for method pointers, as do
+  async and iterator routines, whose argument record has a link slot
+  (item 20). }
+function needsLink(r: PDecl): boolean;
+begin
+  needsLink := (r^.parent <> nil) or hasSelf(r) or (r^.methodKind <> mtNone) or
+               (r^.asyncType <> nil) or (r^.iterType <> nil);
+end;
+
 function canon(r: PDecl): PDecl;
 begin
   if r^.canonical <> nil then
@@ -3284,17 +3294,17 @@ begin
 end;
 
 { the pair (function, static link) for a routine }
+function routineEntry(r: PDecl): PIRFunc; forward;
+
 function routinePairOf(r: PDecl): TV;
 var
   pair, link, fn: TV;
 begin
   r := canon(r);
   { the function a procedural value points to: an external routine, a
-    cdecl routine's C entry, or the routine }
-  if r^.cgThunk <> nil then
-    fn := irFuncRef(PIRFunc(r^.cgThunk))
-  else
-    fn := irFuncRef(fnOf(r));
+    cdecl routine's C entry, a top-level routine's link thunk, or the
+    routine itself }
+  fn := irFuncRef(routineEntry(r));
   pair := irInsert(irUndef(routinePairT), fn, 0, '');
   link := staticLinkFor(r);
   routinePairOf := irInsert(pair, link, 1, '');
@@ -3958,8 +3968,12 @@ begin
     bufFree(buf);
     exit(res);
   end;
-  emitCall := emitCallTo(f^.ret, irFuncRef(f), staticLinkFor(r), true, r^.params, args,
-                         resultOf(r));
+  if needsLink(r) then
+    emitCall := emitCallTo(f^.ret, irFuncRef(f), staticLinkFor(r), true, r^.params,
+                           args, resultOf(r))
+  else
+    emitCall := emitCallTo(f^.ret, irFuncRef(f), irNull, false, r^.params, args,
+                           resultOf(r));
 end;
 
 function retTypeOf(result_: PType): PIRType;

@@ -16,7 +16,7 @@
 
 ; A value parameter takes a reference; a const one does not. A routine with
 ; interface variables is protected: an exception leaving it releases them.
-; CHECK-LABEL: define internal void @pas.use(ptr %link, { ptr, ptr } %a, { ptr, ptr } %b)
+; CHECK-LABEL: define internal void @pas.use({ ptr, ptr } %a, { ptr, ptr } %b)
 ; CHECK:      %intf.tmp = alloca { ptr, ptr }, align 8
 ; CHECK-NEXT: store { ptr, ptr } zeroinitializer, ptr %intf.tmp, align 8
 ; CHECK:      store { ptr, ptr } %a, ptr %[[A:a[0-9]+]], align 8
@@ -31,7 +31,7 @@
 ; Assignment: references the new object, releases the old one.
 ; CHECK:      call void @__pas_intf_assign(ptr %l{{[0-9]+}}, ptr %obj{{[0-9]+}}, ptr %itable)
 ; A function's result is held until the statement ends.
-; CHECK:      %[[R:[0-9]+]] = call { ptr, ptr } @pas.make(ptr null)
+; CHECK:      %[[R:[0-9]+]] = call { ptr, ptr } @pas.make()
 ; CHECK-NEXT: call void @__pas_intf_clear(ptr %intf.tmp)
 ; CHECK-NEXT: store { ptr, ptr } %[[R]], ptr %intf.tmp, align 8
 ; CHECK:      exit:
