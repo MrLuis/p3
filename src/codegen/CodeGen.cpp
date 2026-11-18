@@ -96,8 +96,10 @@ static bool runtimeReadsParam(llvm::StringRef Name, unsigned I) {
       Name == "__pas_aoc_bad_index" || Name == "__pas_astr_from_chars" ||
       Name == "__pas_astr_from_pstr" || Name == "__pas_astr_from_cstr" ||
       Name == "__pas_astr_pchar" || Name == "__pas_dyn_copy" ||
-      Name == "__pas_dyn_new" || Name == "__pas_write_enum")
+      Name == "__pas_dyn_new")
     return I == 0;
+  if (Name == "__pas_write_enum")
+    return I == 1; // the names table (not the file it writes to)
   if (Name == "__pas_str_assign" || Name == "__pas_str_copy")
     return I == 2 || I == 1;
   if (Name == "__pas_str_concat")

@@ -268,8 +268,10 @@ begin
           (name = '__pas_aoc_bad_index') or (name = '__pas_astr_from_chars') or
           (name = '__pas_astr_from_pstr') or (name = '__pas_astr_from_cstr') or
           (name = '__pas_astr_pchar') or (name = '__pas_dyn_copy') or
-          (name = '__pas_dyn_new') or (name = '__pas_write_enum') then
+          (name = '__pas_dyn_new') then
     runtimeReadsParam := i = 0
+  else if name = '__pas_write_enum' then
+    runtimeReadsParam := i = 1 { the names table, not the file it writes to }
   else if (name = '__pas_str_assign') or (name = '__pas_str_copy') then
     runtimeReadsParam := (i = 1) or (i = 2)
   else if name = '__pas_str_concat' then
