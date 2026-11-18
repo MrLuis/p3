@@ -76,4 +76,4 @@
 ; DIV: attributes #[[COLD]] = { cold noreturn nounwind }
 ; RUN: %p3 --mode=tp --emit-llvm %S/Inputs/divzero.pas -o - | FileCheck --check-prefix=TPDIV %s
 ; TPDIV-NOT: __pas_raise_divzero
-; TPDIV: call void @__pas_runtime_error(ptr @.rterr)
+; TPDIV: call void @__pas_runtime_error_at(ptr @.rterr, ptr @.loc)

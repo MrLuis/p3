@@ -104,6 +104,16 @@ void __pas_runtime_error(const char *msg) {
   exit(2);
 }
 
+void __pas_runtime_error_at(const char *msg, const PasLoc *loc) {
+  fflush(stdout);
+  if (loc && loc->file)
+    fprintf(stderr, "Runtime error: %s at %s:%d:%d\n", msg, loc->file,
+            loc->line, loc->column);
+  else
+    fprintf(stderr, "Runtime error: %s\n", msg);
+  exit(2);
+}
+
 static void file_error(const PasFile *f, const char *what) {
   char msg[512];
   snprintf(msg, sizeof msg, "%s (file '%s')", what,

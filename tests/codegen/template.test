@@ -26,7 +26,7 @@
 ; CHECK: call void @__pas_write_enum(
 ; CHECK-NEXT: call ptr @__pas_tmpl_add(ptr [[S3]], ptr getelementptr inbounds
 ; `plain text`
-; CHECK: call void @__pas_astr_take(ptr %{{s[0-9]*}}, ptr getelementptr inbounds (i8, ptr @.astr.6, i64 16))
+; CHECK: call void @__pas_astr_take(ptr %{{s[0-9]*}}, ptr getelementptr inbounds (i8, ptr @.astr.7, i64 16))
 ; Tag`a ${n} b`
 ; CHECK: store i64 2, ptr
 ; CHECK: call ptr @pas.tag(

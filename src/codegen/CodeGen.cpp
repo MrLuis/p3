@@ -167,7 +167,7 @@ static void addRuntimeAttrs(llvm::Function *F) {
 struct Runtime {
   llvm::FunctionCallee Init, Fini, WriteStr, WriteChar, WriteInt, WriteBool,
       WriteReal, Writeln, ReadInt, ReadInt64, ReadChar, ReadReal, Readln,
-      RuntimeError,
+      RuntimeError, RuntimeErrorAt,
       Memcmp, Atan, New, Dispose, FileNew, FileFree, ProgramParam, Reset,
       Rewrite, Get, Put, Page, Eof, Eoln, Buffer, ReadElem, WriteElem,
       SetJmp, LongJmp, StrAssign, StrConcat, StrCompare, StrCopy, StrPos,
@@ -224,6 +224,10 @@ struct Runtime {
     auto *RE = llvm::cast<llvm::Function>(RuntimeError.getCallee());
     RE->addFnAttr(llvm::Attribute::NoReturn);
     RE->addFnAttr(llvm::Attribute::Cold);
+    RuntimeErrorAt = Decl("__pas_runtime_error_at", Void, {Ptr, Ptr});
+    auto *REA = llvm::cast<llvm::Function>(RuntimeErrorAt.getCallee());
+    REA->addFnAttr(llvm::Attribute::NoReturn);
+    REA->addFnAttr(llvm::Attribute::Cold);
     Memcmp = Decl("memcmp", I32, {Ptr, Ptr, I64});
     New = Decl("__pas_new", Ptr, {I64});
     Dispose = Decl("__pas_dispose", Void, {Ptr});
@@ -304,6 +308,10 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
   llvm::DenseSet<ClassType *> ClassSet, ExportedClasses;
   llvm::DenseMap<WithContext *, llvm::Value *> WithAddrs;
   llvm::StringMap<llvm::GlobalVariable *> StringConstants;
+  /// Item 13: runtime-error messages and the location records and file
+  /// strings the checks share.
+  llvm::StringMap<llvm::Constant *> ErrorMessages, FileStrings;
+  llvm::StringMap<llvm::GlobalVariable *> LocationRecords;
   /// The names of an enumeration's values (for write), by type.
   llvm::DenseMap<EnumType *, llvm::GlobalVariable *> EnumNameTables;
   llvm::StringMap<llvm::GlobalVariable *> AnsiConstants;
@@ -900,11 +908,50 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
     return llvm::BasicBlock::Create(M.getContext(), Name, CurFn);
   }
 
-  /// __pas_runtime_error("<Msg> at file:line:col"); unreachable.
-  /// Callers must set a new insertion point afterwards.
+  /// The .rterr global of a message (shared by every check that uses it).
+  llvm::Constant *errorMessage(llvm::StringRef Msg) {
+    llvm::Constant *&Text = ErrorMessages[Msg];
+    if (!Text)
+      Text = B.CreateGlobalString(Msg, ".rterr");
+    return Text;
+  }
+
+  /// The .file global of a source file name (one per file, item 13).
+  llvm::Constant *fileString(llvm::StringRef File) {
+    llvm::Constant *&Text = FileStrings[File];
+    if (!Text)
+      Text = B.CreateGlobalString(File, ".file");
+    return Text;
+  }
+
+  /// The pooled { file, line, column } record of L, or null (item 13).
+  llvm::Constant *locationRecord(SourceLocation L) {
+    llvm::Type *Ptr = B.getPtrTy();
+    PresumedLoc P = SM.getPresumedLoc(L);
+    if (!P.isValid())
+      return llvm::ConstantPointerNull::get(llvm::cast<llvm::PointerType>(Ptr));
+    std::string Key =
+        (P.Filename + ":" + llvm::Twine(P.Line) + ":" + llvm::Twine(P.Column))
+            .str();
+    llvm::GlobalVariable *&G = LocationRecords[Key];
+    if (!G) {
+      auto *Ty = llvm::StructType::get(M.getContext(), {Ptr, B.getInt32Ty(),
+                                                        B.getInt32Ty()});
+      llvm::Constant *Init = llvm::ConstantStruct::get(
+          Ty, {fileString(P.Filename), B.getInt32(P.Line),
+               B.getInt32(P.Column)});
+      G = new llvm::GlobalVariable(M, Ty, /*isConstant=*/true,
+                                   llvm::GlobalValue::PrivateLinkage, Init,
+                                   ".loc");
+      G->setAlignment(llvm::Align(8));
+    }
+    return G;
+  }
+
+  /// __pas_runtime_error_at("<Msg>", &loc); unreachable. Callers must set
+  /// a new insertion point afterwards.
   void emitRuntimeError(llvm::StringRef Msg, SourceLocation L) {
-    llvm::Constant *Text = B.CreateGlobalString((Msg + where(L)).str(), ".rterr");
-    B.CreateCall(RT.RuntimeError, {Text});
+    B.CreateCall(RT.RuntimeErrorAt, {errorMessage(Msg), locationRecord(L)});
     B.CreateUnreachable();
   }
 

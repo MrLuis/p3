@@ -29,9 +29,21 @@ void __pas_fini(void);
  * (no truncation) and booleans print as TRUE/FALSE. */
 extern int32_t __pas_tp_mode;
 
-/* Reports a runtime error ("Runtime error: <msg>") and exits with status 2.
- * The compiler passes messages like "division by zero at prog.pas:12:9". */
+/* Reports a runtime error ("Runtime error: <msg>") and exits with status 2. */
 void __pas_runtime_error(const char *msg) __attribute__((noreturn));
+
+/* A pooled source location, shared by the checks of one source position. */
+typedef struct PasLoc {
+  const char *file;
+  int32_t line;
+  int32_t column;
+} PasLoc;
+
+/* Reports "Runtime error: <msg> at <file>:<line>:<column>" (or without the
+ * location when loc is NULL) and exits with status 2. The compiler shares
+ * one file string per file and one PasLoc per source position. */
+void __pas_runtime_error_at(const char *msg, const PasLoc *loc)
+    __attribute__((noreturn));
 
 /*===- Files (ISO 7185 6.4.3.5, 6.6.5.2, 6.9) -------------------------------===
  *

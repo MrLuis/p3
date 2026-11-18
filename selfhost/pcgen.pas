@@ -102,6 +102,8 @@ var
   noHoldAnsiResult, tookAnsiResult: boolean;
   lowered: TIntMap;          { type id -> PIRType }
   ansiConsts: TIntMap;       { name id of the characters -> PTVBox of the .astr }
+  { item 13: the checks' shared error messages, file strings and locations }
+  errMsgs, fileStrs, locRecs: TIntMap;
   stringConsts: TIntMap;     { name id of the bytes -> PTVBox of the global }
   enumNameTables: TIntMap;   { type id -> PTVBox: an enumeration's names }
   routinesToEmit: TPtrList;  { of PDecl }
@@ -400,6 +402,7 @@ begin
   declareRT('__pas_read_elem', 'void', 'ptr,ptr', nu);
   declareRT('__pas_write_elem', 'void', 'ptr,ptr', nu);
   declareRT('__pas_runtime_error', 'void', 'ptr', 'cold noreturn nounwind');
+  declareRT('__pas_runtime_error_at', 'void', 'ptr,ptr', 'cold noreturn nounwind');
   declareRT('memcmp', 'i32', 'ptr,ptr,i64', nu);
   declareRT('__pas_new', 'ptr', 'i64', nu);
   declareRT('__pas_dispose', 'void', 'ptr', nu);
@@ -1124,18 +1127,94 @@ begin
   bufAdd(b, ':' + intToStr(line) + ':' + intToStr(col));
 end;
 
-{ __pas_runtime_error("<msg> at file:line:col"); unreachable. Callers set a
-  new insertion point afterwards. }
-procedure emitRuntimeErrorB(const msg: TBuf; loc: TLoc);
+function bufToStr(const b: TBuf): string;
 var
-  b: TBuf;
+  i: longint;
+  s: string;
 begin
-  bufInit(b);
-  bufAddChars(b, msg.data, 0, msg.len);
-  bufAddWhere(b, loc);
-  rtv1('__pas_runtime_error', globalString(b.data, 0, b.len, '.rterr'));
+  s := '';
+  for i := 0 to b.len - 1 do
+    s := s + bufCharAt(b, i);
+  bufToStr := s;
+end;
+
+{ The .rterr global of a message (shared by the checks that use it). }
+function errorMessageB(const b: TBuf): TV;
+var
+  key: PName;
+  m: PTVBox;
+begin
+  key := intern(bufToStr(b));
+  m := PTVBox(mapGet(errMsgs, key^.id));
+  if m = nil then
+  begin
+    m := irBox(globalString(b.data, 0, b.len, '.rterr'));
+    mapPut(errMsgs, key^.id, m);
+  end;
+  errorMessageB := m^;
+end;
+
+{ The .file global of a source file name (one per file, item 13). }
+function fileString(const name: string): TV;
+var
+  key: PName;
+  p: PTVBox;
+begin
+  key := intern(name);
+  p := PTVBox(mapGet(fileStrs, key^.id));
+  if p = nil then
+  begin
+    if length(name) = 0 then
+      p := irBox(irNull)
+    else
+      p := irBox(globalString(PCharArray(@name[1]), 0, length(name), '.file'));
+    mapPut(fileStrs, key^.id, p);
+  end;
+  fileString := p^;
+end;
+
+{ The pooled (file, line, column) record of loc, or null (item 13). }
+function locationRecord(loc: TLoc): TV;
+var
+  key: PName;
+  p: PTVBox;
+  fid, line, col: longint;
+  fname: string;
+  fields, elems: TPtrList;
+  ty: PIRType;
+begin
+  if loc = noLoc then
+    exit(irNull);
+  smPresumed(loc, fid, line, col);
+  fname := smFileName(fid);
+  key := intern(fname + ':' + intToStr(line) + ':' + intToStr(col));
+  p := PTVBox(mapGet(locRecs, key^.id));
+  if p = nil then
+  begin
+    listInit(fields);
+    listAdd(fields, irPtrT);
+    listAdd(fields, irI32);
+    listAdd(fields, irI32);
+    ty := irStructLit(fields);
+    listFree(fields);
+    listInit(elems);
+    listAdd(elems, irBox(fileString(fname)));
+    listAdd(elems, irBox(i32c(line)));
+    listAdd(elems, irBox(i32c(col)));
+    p := irBox(irGlobal('.loc', 'private', ty, irConstStruct(ty, elems), true,
+                        false, false, 8));
+    listFree(elems);
+    mapPut(locRecs, key^.id, p);
+  end;
+  locationRecord := p^;
+end;
+
+{ __pas_runtime_error_at("<msg>", &loc); unreachable. Callers set a new
+  insertion point afterwards. }
+procedure emitRuntimeErrorB(const msg: TBuf; loc: TLoc);
+begin
+  rtv2('__pas_runtime_error_at', errorMessageB(msg), locationRecord(loc));
   irUnreachable;
-  bufFree(b);
 end;
 
 procedure emitRuntimeError(const msg: string; loc: TLoc);

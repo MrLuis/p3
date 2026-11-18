@@ -3800,6 +3800,9 @@ begin
   mapInit(addrAligns);
   addrAlignGen := 0;
   mapInit(ansiConsts);
+  mapInit(errMsgs);
+  mapInit(fileStrs);
+  mapInit(locRecs);
   mapInit(classLayouts);
   mapInit(vmts);
   mapInit(iids);
