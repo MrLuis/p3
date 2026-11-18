@@ -107,13 +107,23 @@ endif()
 # `ninja p3-self`: the self-hosted compiler, built by p3 at -O2 as
 # <build>/bin/p3-self, next to p3, so that it finds the same runtime and
 # unit library (<bindir>/../lib). examples/ builds its projects with it.
+#
+# On macOS, inlining the runtime IR into the self-hosted compiler produces a
+# p3-self that crashes while compiling routines with string results (a
+# PAGEOFF12 relocation in the large, inlined code generator is not applied by
+# the system linker). Keep the compiler binary on the plain runtime calls.
+set(P3_SELFHOST_RUNTIME_FLAGS "")
+if(APPLE)
+  set(P3_SELFHOST_RUNTIME_FLAGS -fno-inline-runtime)
+endif()
 if(P3_SELFHOST_FLAGS)
   file(GLOB P3_SELFHOST_SOURCES CONFIGURE_DEPENDS
        ${PROJECT_SOURCE_DIR}/selfhost/*.pas ${PROJECT_SOURCE_DIR}/selfhost/*.inc)
   separate_arguments(P3_SELFHOST_FLAG_LIST NATIVE_COMMAND "${P3_SELFHOST_FLAGS}")
   add_custom_command(
     OUTPUT ${PROJECT_BINARY_DIR}/bin/p3-self
-    COMMAND $<TARGET_FILE:p3> --no-project --mode=tp -O2 ${P3_SELFHOST_FLAG_LIST}
+    COMMAND $<TARGET_FILE:p3> --no-project --mode=tp -O2 ${P3_SELFHOST_RUNTIME_FLAGS}
+            ${P3_SELFHOST_FLAG_LIST}
             -I ${PROJECT_SOURCE_DIR}/selfhost ${PROJECT_SOURCE_DIR}/selfhost/p3.pas
             -o ${PROJECT_BINARY_DIR}/bin/p3-self
     DEPENDS p3 pascalrt rtl ${P3_SELFHOST_SOURCES}

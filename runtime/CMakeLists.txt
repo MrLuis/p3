@@ -2,6 +2,12 @@
 # Lands in <build>/lib so the compiler finds it at <bindir>/../lib.
 add_library(pascalrt STATIC io.c sys.c ansi.c format.c async.c)
 target_include_directories(pascalrt PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
+# async.c asks for POSIX with _XOPEN_SOURCE, which hides the BSD extensions
+# it uses (MAP_ANONYMOUS, _SC_NPROCESSORS_ONLN); _DARWIN_C_SOURCE brings them
+# back on macOS.
+if(APPLE)
+  target_compile_options(pascalrt PRIVATE -D_DARWIN_C_SOURCE)
+endif()
 # DWARF 4 like p3's own output: GNU ld mis-merges mixed DWARF 4/5 objects.
 target_compile_options(pascalrt PRIVATE $<$<CONFIG:Debug>:-gdwarf-4>)
 set_target_properties(pascalrt PROPERTIES
