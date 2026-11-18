@@ -1,16 +1,17 @@
 ; LLVM IR for write/writeln lowering (PLAN.md section 6).
 ; RUN: %p3 --emit-llvm %S/Inputs/write.pas -o - | FileCheck %s
 ; Strings are stored without a terminating NUL; their length is passed explicitly.
-; CHECK: @.str = private unnamed_addr constant [2 x i8] c"bc"
+; CHECK: @.str = private unnamed_addr constant [2 x i8] c"a\00"
+; CHECK: @.str.1 = private unnamed_addr constant [3 x i8] c"bc\00"
 ; CHECK: declare void @__pas_init(i32, ptr)
 ; CHECK: define i32 @main(i32 %argc, ptr %argv) #{{[0-9]+}} {
 ; CHECK-NEXT: entry:
 ; CHECK-NEXT:   call void @__pas_init(i32 %argc, ptr %argv)
 ; Text I/O goes through the PasFile* of `output`.
 ; CHECK-NEXT:   [[F1:%.*]] = load ptr, ptr @__pas_output
-; CHECK-NEXT:   call void @__pas_write_char(ptr [[F1]], i8 97, i32 0)
+; CHECK-NEXT:   call void @__pas_write_str(ptr [[F1]], ptr @.str, i64 1, i32 0)
 ; CHECK-NEXT:   [[F2:%.*]] = load ptr, ptr @__pas_output
-; CHECK-NEXT:   call void @__pas_write_str(ptr [[F2]], ptr @.str, i64 2, i32 0)
+; CHECK-NEXT:   call void @__pas_write_str(ptr [[F2]], ptr @.str.1, i64 2, i32 0)
 ; CHECK-NEXT:   call void @__pas_write_int(ptr [[F2]], i64 7, i32 0)
 ; CHECK-NEXT:   call void @__pas_writeln(ptr [[F2]])
 ; Every function ends in one exit block (the target of TP's `exit`).
@@ -23,6 +24,6 @@
 ; The optimizer keeps the observable runtime calls.
 ; RUN: %p3 --emit-llvm -O2 -fno-inline-runtime %S/Inputs/write.pas -o - | FileCheck --check-prefix=O2 %s
 ; O2: define {{.*}}i32 @main(
-; O2: call void @__pas_write_char(ptr {{.*}}, i8 97, i32 0)
+; O2: call void @__pas_write_str(ptr {{.*}}, ptr {{.*}}, i64 1, i32 0)
 ; O2: call void @__pas_writeln(ptr
 ; O2: ret i32 0

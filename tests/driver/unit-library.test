@@ -32,35 +32,35 @@
 
 ; Free Pascal's target symbols.
 ; RUN: %p3 --target=x86_64-unknown-linux-gnu --mode=tp --emit-llvm %S/Inputs/unit-library/target.pas -o - | FileCheck --check-prefix=LINUX %s
-; LINUX: linux"
-; LINUX: unix"
-; LINUX: x8664"
-; LINUX: cpu64"
+; LINUX: linux
+; LINUX: unix
+; LINUX: x8664
+; LINUX: cpu64
 ; RUN: %p3 --target=aarch64-unknown-linux-gnu --mode=tp --emit-llvm %S/Inputs/unit-library/target.pas -o - | FileCheck --check-prefix=LINUXARM %s
-; LINUXARM: linux"
-; LINUXARM: unix"
-; LINUXARM: aarch64"
-; LINUXARM: cpu64"
+; LINUXARM: linux
+; LINUXARM: unix
+; LINUXARM: aarch64
+; LINUXARM: cpu64
 ; RUN: %p3 --target=arm64-apple-macosx13.0.0 --mode=tp --emit-llvm %S/Inputs/unit-library/target.pas -o - | FileCheck --check-prefix=MAC %s
-; MAC: darwin"
-; MAC: bsd"
-; MAC: unix"
-; MAC: aarch64"
-; MAC: cpu64"
+; MAC: darwin
+; MAC: bsd
+; MAC: unix
+; MAC: aarch64
+; MAC: cpu64
 ; RUN: %p3 --target=x86_64-apple-darwin22 --mode=tp --emit-llvm %S/Inputs/unit-library/target.pas -o - | FileCheck --check-prefix=MACX %s
-; MACX: darwin"
-; MACX: bsd"
-; MACX: unix"
-; MACX: x8664"
-; MACX: cpu64"
+; MACX: darwin
+; MACX: bsd
+; MACX: unix
+; MACX: x8664
+; MACX: cpu64
 ; RUN: %p3 --target=x86_64-w64-mingw32 --mode=tp --emit-llvm %S/Inputs/unit-library/target.pas -o - | FileCheck --check-prefix=WIN %s
-; WIN: windows"
-; WIN: mswindows"
-; WIN: win64"
-; WIN: x8664"
-; WIN: cpu64"
-; TARGET: windows"
-; TARGET: mswindows"
-; TARGET: win64"
-; TARGET: x8664"
-; TARGET: cpu64"
+; WIN: windows
+; WIN: mswindows
+; WIN: win64
+; WIN: x8664
+; WIN: cpu64
+; TARGET: windows
+; TARGET: mswindows
+; TARGET: win64
+; TARGET: x8664
+; TARGET: cpu64

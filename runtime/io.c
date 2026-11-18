@@ -34,6 +34,9 @@ void _longjmp(jmp_buf env, int value) __attribute__((noreturn));
 #include <string.h>
 #ifndef _WIN32
 #include <pthread.h>
+#include <unistd.h>
+#else
+#include <io.h>
 #endif
 
 /* Files are shared between threads: each operation on one (and on the list
@@ -126,9 +129,25 @@ static void file_error(const PasFile *f, const char *what) {
 
 unsigned char __pas_std_buf_in, __pas_std_buf_out;
 
+/* The large buffer of a redirected standard output (item 19): static, since
+ * it must live as long as the stream. */
+char __pas_out_buf[1 << 16];
+
 void __pas_init(int32_t argc, char **argv) {
   __pas_prog_argc = argc;
   __pas_prog_argv = argv;
+  /* A program writing to a pipe or a file gets a large buffer instead of
+   * stdio's line-buffered terminal one (item 19). */
+  {
+    int tty;
+#ifdef _WIN32
+    tty = _isatty(_fileno(stdout));
+#else
+    tty = isatty(fileno(stdout));
+#endif
+    if (!tty)
+      setvbuf(stdout, __pas_out_buf, _IOFBF, sizeof __pas_out_buf);
+  }
   __pas_std_input = (struct PasFile){.fp = stdin, .mode = MODE_INSPECT, .is_text = 1,
                                .is_std = 1, .elem_size = 1, .buf = &__pas_std_buf_in};
   __pas_std_output = (struct PasFile){.fp = stdout, .mode = MODE_GENERATE,
@@ -619,8 +638,26 @@ void __pas_write_elem(PasFile *f, const void *src) {
 /*===- Text output ----------------------------------------------------------===*/
 
 static void pad(PasFile *f, int32_t n) {
-  for (; n > 0; --n)
-    putc(' ', f->fp);
+  static const char spaces[64] =
+      "                                                                ";
+  while (n > 0) {
+    size_t k = n > (int32_t)sizeof spaces ? sizeof spaces : (size_t)n;
+    fwrite(spaces, 1, k, f->fp);
+    n -= (int32_t)k;
+  }
+}
+
+/* Writes the decimal digits of v (unsigned) to buf; returns the length. */
+static int decimal(char *buf, uint64_t v) {
+  char tmp[20];
+  int n = 0;
+  do {
+    tmp[n++] = (char)('0' + (int)(v % 10));
+    v /= 10;
+  } while (v);
+  for (int i = 0; i < n; ++i)
+    buf[i] = tmp[n - 1 - i];
+  return n;
 }
 
 void __pas_write_str(PasFile *f, const char *s, int64_t len, int32_t width) {
@@ -641,14 +678,22 @@ void __pas_write_char(PasFile *f, char c, int32_t width) {
   IO_GUARD();
   need_generate(f);
   pad(f, width - 1);
-  putc((unsigned char)c, f->fp);
+  fwrite(&c, 1, 1, f->fp);
 }
 
 void __pas_write_int(PasFile *f, int64_t v, int32_t width) {
   IO_GUARD();
   need_generate(f);
   char buf[24];
-  int n = snprintf(buf, sizeof buf, "%" PRId64, v);
+  int n = 0;
+  uint64_t u;
+  if (v < 0) {
+    buf[n++] = '-';
+    u = (uint64_t)0 - (uint64_t)v;
+  } else {
+    u = (uint64_t)v;
+  }
+  n += decimal(buf + n, u);
   pad(f, width - n); /* integers are never truncated */
   fwrite(buf, 1, (size_t)n, f->fp);
 }
@@ -657,7 +702,7 @@ void __pas_write_uint(PasFile *f, uint64_t v, int32_t width) {
   IO_GUARD();
   need_generate(f);
   char buf[24];
-  int n = snprintf(buf, sizeof buf, "%" PRIu64, v);
+  int n = decimal(buf, v);
   pad(f, width - n);
   fwrite(buf, 1, (size_t)n, f->fp);
 }
@@ -721,7 +766,7 @@ void __pas_write_real(PasFile *f, double x, int32_t width, int32_t frac) {
 void __pas_writeln(PasFile *f) {
   IO_GUARD();
   need_generate(f);
-  putc('\n', f->fp);
+  fputc('\n', f->fp);
 }
 
 /*===- Text input -----------------------------------------------------------===*/

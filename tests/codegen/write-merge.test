@@ -1,0 +1,9 @@
+; Adjacent string/character literals become one write, and writeln's
+; newline is folded into a trailing literal (item 19).
+; RUN: %p3 --emit-llvm %S/Inputs/write-merge.pas -o - | FileCheck %s
+
+; CHECK: @.str = private unnamed_addr constant [4 x i8] c"abc\00"
+; CHECK: @.str.1 = private unnamed_addr constant [4 x i8] c"xy\0A\00"
+; CHECK: call void @__pas_write_str(ptr {{.*}}, ptr @.str, i64 3, i32 0)
+; CHECK: call void @__pas_write_str(ptr {{.*}}, ptr @.str.1, i64 3, i32 0)
+; CHECK-NOT: call void @__pas_writeln

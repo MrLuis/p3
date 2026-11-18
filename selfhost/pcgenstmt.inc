@@ -156,7 +156,10 @@ procedure emitWrite(s: PNode; isWriteln: boolean);
 var
   ft: PType;
   f, a: TV;
-  first, i: longint;
+  first, i, j: longint;
+  arg: PNode;
+  text: TBuf;
+  last: boolean;
 begin
   f := fileTarget(s^.args, false, ft, first);
   if (ft <> nil) and not ft^.isText then
@@ -168,8 +171,38 @@ begin
     end;
     exit;
   end;
-  for i := first to s^.args.count - 1 do
+  { adjacent string and character literals become one write; a trailing
+    literal of writeln gets the newline (item 19) }
+  i := first;
+  while i < s^.args.count do
+  begin
+    bufInit(text);
+    j := i;
+    while j < s^.args.count do
+    begin
+      arg := PNode(listGet(s^.args, j));
+      if (arg^.kind <> nkStringLit) or (arg^.strWide <> 0) then
+        break;
+      bufAddChars(text, arg^.strValue^.chars, 0, arg^.strValue^.len);
+      j := j + 1;
+    end;
+    if j > i then
+    begin
+      last := j = s^.args.count;
+      if last and isWriteln then
+        bufAddChar(text, #10);
+      a := globalString(text.data, 0, text.len, '.str');
+      rtv4('__pas_write_str', f, a, i64c(text.len), i32c(0));
+      bufFree(text);
+      if last and isWriteln then
+        exit;
+      i := j;
+      continue;
+    end;
+    bufFree(text);
     emitWriteArg(f, PNode(listGet(s^.args, i)));
+    i := i + 1;
+  end;
   if isWriteln then
     rtv1('__pas_writeln', f);
 end;

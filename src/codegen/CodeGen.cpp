@@ -5572,8 +5572,33 @@ public:
                      {File, addressForValue(Arg, FT->getElementType())});
       return;
     }
-    for (Expr *Arg : Args)
-      emitWriteArg(File, Arg);
+    // Adjacent string and character literals become one write; a trailing
+    // literal of writeln gets the newline (item 19).
+    for (size_t I = 0; I < Args.size();) {
+      std::string Text;
+      size_t J = I;
+      while (J < Args.size()) {
+        auto *SL = llvm::dyn_cast<StringLiteralExpr>(Args[J]);
+        if (!SL || SL->isWideCharLiteral())
+          break;
+        Text += SL->getValue().str();
+        ++J;
+      }
+      if (J > I) {
+        bool Last = J == Args.size();
+        if (Last && IsWriteln)
+          Text.push_back('\n');
+        llvm::Constant *S = B.CreateGlobalString(Text, ".str");
+        B.CreateCall(RT.WriteStr,
+                     {File, S, B.getInt64(Text.size()), B.getInt32(0)});
+        if (Last && IsWriteln)
+          return;
+        I = J;
+        continue;
+      }
+      emitWriteArg(File, Args[I]);
+      ++I;
+    }
     if (IsWriteln)
       B.CreateCall(RT.Writeln, {File});
   }

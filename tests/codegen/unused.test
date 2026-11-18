@@ -53,7 +53,7 @@
 ; KEEP-DAG: define internal i32 @pas.orphan(
 ; KEEP-DAG: define internal void @pas.describe(
 ; KEEP-DAG: define internal i32 @pas.tunusedshape.area(
-; KEEP-DAG: c"never called"
+; KEEP-DAG: c"never called
 ;
 ; A unit compiled on its own keeps its interface (external symbols, which
 ; other modules may use) and what that refers to: Hidden, called by Thrice.
