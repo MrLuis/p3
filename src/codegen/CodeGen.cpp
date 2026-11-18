@@ -6038,6 +6038,11 @@ public:
                 const LangOptions &LangOpts, const CodeGenOptions &CGOpts)
       : M(M), DL(M.getDataLayout()), B(M.getContext()), RT(M), SM(SM),
         LangOpts(LangOpts), CGOpts(CGOpts) {
+    if (CGOpts.FastMath) { // on the FP instructions IRBuilder creates
+      llvm::FastMathFlags FMF;
+      FMF.setFast();
+      B.setFastMathFlags(FMF);
+    }
     for (const llvm::Function &F : M) // RT's declarations
       RuntimeFns.insert(&F);
   }
@@ -7927,9 +7932,10 @@ public:
       case BinaryOp::Sub: return B.CreateFSub(L, R, "sub");
       case BinaryOp::Mul: return B.CreateFMul(L, R, "mul");
       case BinaryOp::RealDiv:
-        emitRuntimeCheck(
-            B.CreateFCmpOEQ(R, llvm::ConstantFP::get(B.getDoubleTy(), 0.0)),
-            "division by zero", E->getOpLoc());
+        if (rangeChecks(E->getOpLoc()))
+          emitRuntimeCheck(
+              B.CreateFCmpOEQ(R, llvm::ConstantFP::get(B.getDoubleTy(), 0.0)),
+              "division by zero", E->getOpLoc());
         return B.CreateFDiv(L, R, "div");
       default: llvm_unreachable("not a real operator");
       }

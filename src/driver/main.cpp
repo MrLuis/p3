@@ -3,6 +3,7 @@
 #include "p3/Basic/Version.h"
 #include "p3/Driver/Driver.h"
 
+#include "llvm/ADT/StringRef.h"
 #include "llvm/Config/llvm-config.h"
 #include "llvm/Support/CommandLine.h"
 #include "llvm/Support/InitLLVM.h"
@@ -158,6 +159,15 @@ static void printVersion(llvm::raw_ostream &OS) {
 int main(int argc, char **argv) {
   llvm::InitLLVM X(argc, argv);
 
+  // LLVM registers its own -ffast-math option, so read ours from argv (the
+  // option itself stays LLVM's) before parsing the rest.
+  bool FastMathFlag = false;
+  for (int I = 1; I < argc; ++I) {
+    llvm::StringRef A(argv[I]);
+    if (A == "-ffast-math" || A == "--ffast-math")
+      FastMathFlag = true;
+  }
+
   cl::HideUnrelatedOptions(P3Category);
   cl::SetVersionPrinter(printVersion);
   cl::ParseCommandLineOptions(argc, argv,
@@ -188,6 +198,7 @@ int main(int argc, char **argv) {
   Opts.WarnUnusedVariables = !NoUnusedVariable;
   Opts.WarnDeprecated = !NoDeprecated;
   Opts.OverflowChecks = !NoOverflowChecks;
+  Opts.FastMath = FastMathFlag;
   Opts.ProjectFile = ProjectFile;
   Opts.NoProject = NoProject;
   Opts.GivenOutput = OutputFile.getNumOccurrences() > 0;

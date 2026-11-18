@@ -41,7 +41,20 @@ procedure generateUnitModule(u: PDecl; const deps: TPtrList; m: TLangMode;
                              debugInfo, optimized, zeroInit, keepUnused: boolean;
                              var outText: TBuf);
 
+{ -ffast-math: set the fast-math flags on the floating-point instructions
+  of the modules generated from now on. }
+procedure cgSetFastMath(b: boolean);
+
+var
+  { -ffast-math, for the modules generated from now on; cgSetFastMath sets it }
+  optFastMath: boolean;
+
 implementation
+
+procedure cgSetFastMath(b: boolean);
+begin
+  optFastMath := b;
+end;
 
 type
   PLargeRange = ^TLargeRange;
@@ -1212,8 +1225,13 @@ end;
 { __pas_runtime_error_at("<msg>", &loc); unreachable. Callers set a new
   insertion point afterwards. }
 procedure emitRuntimeErrorB(const msg: TBuf; loc: TLoc);
+var
+  m, l: TV;
 begin
-  rtv2('__pas_runtime_error_at', errorMessageB(msg), locationRecord(loc));
+  { in locals: FPC evaluates arguments right to left }
+  m := errorMessageB(msg);
+  l := locationRecord(loc);
+  rtv2('__pas_runtime_error_at', m, l);
   irUnreachable;
 end;
 
@@ -5812,8 +5830,9 @@ begin
       boMul: exit(irBin('fmul', l, r, 'mul'));
     else
       begin
-        emitRuntimeCheck(irFCmp('oeq', r, irConstDouble(0.0), ''), 'division by zero',
-                         e^.opLoc);
+        if rangeChecks(e^.opLoc) then
+          emitRuntimeCheck(irFCmp('oeq', r, irConstDouble(0.0), ''),
+                           'division by zero', e^.opLoc);
         exit(irBin('fdiv', l, r, 'div'));
       end;
     end;

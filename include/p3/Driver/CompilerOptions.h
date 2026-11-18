@@ -50,6 +50,9 @@ struct CompilerOptions {
   bool WarnDeprecated = true;      ///< -Wno-deprecated disables
   bool RangeChecks = true;    ///< -fno-range-checks disables
   bool OverflowChecks = true; ///< -fno-overflow-checks disables
+  /// -ffast-math: set the fast-math flags on floating-point instructions
+  /// (contraction, reassociation, no NaN/Inf assumptions, ...).
+  bool FastMath = false;
   /// Local arrays, records and strings start zeroed: -fzero-init /
   /// -fno-zero-init; without either, at -O0 only.
   std::optional<bool> ZeroInit;

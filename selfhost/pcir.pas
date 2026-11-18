@@ -201,6 +201,9 @@ procedure irSetRetAttrs(f: PIRFunc; const attrs: string);
 procedure irSetArgAttrs(f: PIRFunc; i: longint; const attrs: string);
 function irArg(f: PIRFunc; i: longint): TV;
 function irFuncRef(f: PIRFunc): TV;
+{ -ffast-math: set the fast-math flags on the floating-point instructions
+  created from now on. }
+procedure irSetFastMath(b: boolean);
 { Exceptions (CodeGen.cpp's mayRaise). A call of f cannot raise one: a
   runtime function that neither raises nor runs Pascal code, or a routine
   whose code was found not to. }
@@ -358,6 +361,7 @@ var
   namedMetas: TPtrList;  { of PName (name), PPtrList (operands), in pairs }
   curLoc: PMeta;
   branchWeights, invariantLoadMeta: PMeta;
+  fastMath: boolean;
 
   cur: PIRFunc;
   curBlock: PIRBlock;
@@ -2108,7 +2112,11 @@ begin
   if (a.kind = vkFP) and (b.kind = vkFP) then
     exit(irConstDouble(foldFPBin(op, a.fp, b.fp)));
   i := newInst(res, name, true);
-  bufAdd(i^.text, op + ' ' + a.t^.text + ' ' + a.v + ', ' + b.v);
+  if fastMath and ((op = 'fadd') or (op = 'fsub') or (op = 'fmul') or
+                   (op = 'fdiv') or (op = 'frem')) then
+    bufAdd(i^.text, op + ' fast ' + a.t^.text + ' ' + a.v + ', ' + b.v)
+  else
+    bufAdd(i^.text, op + ' ' + a.t^.text + ' ' + a.v + ', ' + b.v);
   append(i);
   irBin := irV(a.t, res);
 end;
@@ -2212,7 +2220,10 @@ begin
   if (a.kind = vkFP) and (b.kind = vkFP) then
     exit(irConstBool(fcmpHolds(pred, a.fp, b.fp)));
   i := newInst(res, name, true);
-  bufAdd(i^.text, 'fcmp ' + pred + ' double ' + a.v + ', ' + b.v);
+  if fastMath then
+    bufAdd(i^.text, 'fcmp fast ' + pred + ' double ' + a.v + ', ' + b.v)
+  else
+    bufAdd(i^.text, 'fcmp ' + pred + ' double ' + a.v + ', ' + b.v);
   append(i);
   irFCmp := irV(irI1, res);
 end;
@@ -2225,7 +2236,10 @@ begin
   if a.kind = vkFP then
     exit(irConstDouble(fpOfBits(fpBits(a.fp) xor (-9223372036854775807 - 1))));
   i := newInst(res, name, true);
-  bufAdd(i^.text, 'fneg double ' + a.v);
+  if fastMath then
+    bufAdd(i^.text, 'fneg fast double ' + a.v)
+  else
+    bufAdd(i^.text, 'fneg double ' + a.v);
   append(i);
   irFNeg := irV(irDoubleT, res);
 end;
@@ -2345,6 +2359,11 @@ begin
   bufAdd(i^.text, 'load ' + t^.text + ', ptr ' + p.v + ', align ' + intToStr(t^.align));
   append(i);
   irLoad := irV(t, res);
+end;
+
+procedure irSetFastMath(b: boolean);
+begin
+  fastMath := b;
 end;
 
 function irLoadInv(t: PIRType; const p: TV; const name: string): TV;

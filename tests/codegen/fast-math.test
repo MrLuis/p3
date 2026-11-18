@@ -1,0 +1,25 @@
+; -ffast-math sets the fast-math flags on floating-point instructions.
+; A real division is only checked when range checks are on (item 14).
+; RUN: %p3 --mode=objfpc --ffast-math --emit-llvm %S/Inputs/fastmath.pas -o - | FileCheck %s
+; RUN: %p3 --mode=objfpc --ffast-math --emit-llvm %S/Inputs/fastmath.pas -o - | opt -passes=verify -disable-output
+
+; CHECK-LABEL: define i32 @main(
+; CHECK-DAG: [[MUL:%.*]] = fmul fast double
+; CHECK-DAG: [[ADD:%.*]] = fadd fast double
+; CHECK-DAG: [[DIV:%.*]] = fdiv fast double
+; CHECK-DAG: [[SUB:%.*]] = fsub fast double
+; CHECK-DAG: [[NEG:%.*]] = fneg fast double
+; CHECK-DAG: fcmp fast olt double
+; The check on the divisor stays (range checks are on by default).
+; CHECK-DAG: fcmp fast oeq double {{.*}}, 0.000000e+00
+
+; Without the flag the instructions have no flags.
+; RUN: %p3 --mode=objfpc --emit-llvm %S/Inputs/fastmath.pas -o - | FileCheck --check-prefix=NOFM %s
+; NOFM: fmul double
+; NOFM: fadd double
+
+; -fno-range-checks turns the real-division check off.
+; RUN: %p3 --mode=objfpc -fno-range-checks --emit-llvm %S/Inputs/fastmath.pas -o - | FileCheck --check-prefix=NORANGE %s
+; NORANGE-NOT: division by zero
+; NORANGE-NOT: fcmp oeq double {{.*}}, 0.000000e+00
+; NORANGE: fdiv double

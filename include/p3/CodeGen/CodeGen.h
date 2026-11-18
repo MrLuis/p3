@@ -28,6 +28,8 @@ struct CodeGenOptions {
   bool RangeChecks = true;
   /// Integer + - * abs sqr and unary minus.
   bool OverflowChecks = true;
+  /// -ffast-math: set the fast-math flags on floating-point instructions.
+  bool FastMath = false;
   /// {$R±} / {$Q±} switches found in the source (may be null).
   const CheckDirectives *Directives = nullptr;
   /// -g: emit DWARF debug information.

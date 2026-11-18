@@ -252,6 +252,7 @@ bool Driver::runPipeline(FileID FID) {
   CodeGenOptions CGOpts;
   CGOpts.RangeChecks = Opts.RangeChecks;
   CGOpts.OverflowChecks = Opts.OverflowChecks;
+  CGOpts.FastMath = Opts.FastMath;
   CGOpts.Directives = &Directives;
   CGOpts.DebugInfo = Opts.DebugInfo;
   CGOpts.OptLevel = Opts.OptLevel;
@@ -342,6 +343,7 @@ bool Driver::compileUnit(Parser &P, FileID FID, ASTContext &Ctx,
   CodeGenOptions CGOpts;
   CGOpts.RangeChecks = Opts.RangeChecks;
   CGOpts.OverflowChecks = Opts.OverflowChecks;
+  CGOpts.FastMath = Opts.FastMath;
   CGOpts.Directives = &Directives;
   CGOpts.DebugInfo = Opts.DebugInfo;
   CGOpts.OptLevel = Opts.OptLevel;

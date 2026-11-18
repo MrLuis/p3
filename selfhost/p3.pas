@@ -18,6 +18,8 @@ var
   errorLimit: longint;
   werror, noUnusedVariable, noDeprecated: boolean;
   rangeChecksOn, overflowChecksOn, debugInfo, separateUnits: boolean;
+  { -ffast-math: set the fast-math flags on floating-point instructions }
+  fastMath: boolean;
   { -fkeep-unused: keep the routines and data nothing reachable refers to }
   keepUnused: boolean;
   optLevel: longint;
@@ -136,6 +138,7 @@ begin
   helpLine('    =never                     -   Never');
   helpLine('  --ferror-limit=<N>           - Stop after N errors (0 = no limit)');
   helpLine('  --fkeep-unused               - Keep the routines and data that nothing reachable from the program refers to');
+  helpLine('  --ffast-math                 - Set the fast-math flags on floating-point instructions (contraction, reassociation, no NaN/Inf assumptions)');
   helpLine('  --fno-inline-runtime         - Do not inline the runtime''s functions (from -O1 they are, when compiling for the host)');
   helpLine('  --fno-overflow-checks        - Disable runtime integer overflow checks');
   helpLine('  --fno-range-checks           - Disable runtime range checks (subranges, array indices, ...)');
@@ -155,13 +158,13 @@ begin
 end;
 
 const
-  numFlags = 21;
+  numFlags = 22;
   flagNames: array[1..numFlags] of string[20] = (
     'help', 'help-list', 'version', 'emit-tokens', 'emit-ast', 'emit-parse-tree',
     'emit-llvm', 'S', 'c', 'Werror', 'Wno-unused-variable', 'Wno-deprecated',
     'fno-overflow-checks',
     'fno-range-checks', 'fseparate-units', 'g', 'no-project', 'fzero-init',
-    'fno-zero-init', 'fno-inline-runtime', 'fkeep-unused');
+    'fno-zero-init', 'fno-inline-runtime', 'fkeep-unused', 'ffast-math');
   numValueOpts = 11;
   valueOptNames: array[1..numValueOpts] of string[20] = (
     'o', 'mode', 'fdiagnostics-color', 'ferror-limit', 'target', 'I', 'O', 'L', 'l',
@@ -381,6 +384,7 @@ begin
   zeroInitOpt := 0;
   rangeChecksOn := true;
   overflowChecksOn := true;
+  fastMath := false;
   debugInfo := false;
   keepUnused := false;
   separateUnits := false;
@@ -463,6 +467,8 @@ begin
       rangeChecksOn := false
     else if name = 'fno-overflow-checks' then
       overflowChecksOn := false
+    else if name = 'ffast-math' then
+      fastMath := true
     else if name = 'fno-inline-runtime' then
       disableRuntimeInlining
     else if name = 'fkeep-unused' then
@@ -952,6 +958,7 @@ begin
   if noDeprecated then
     diagDisableWarning('deprecated');
   applyProject;
+  cgSetFastMath(fastMath);
   if inputFile = '' then
     usageError('no input file');
   if optLevel > 3 then

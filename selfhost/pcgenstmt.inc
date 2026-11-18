@@ -3782,6 +3782,7 @@ procedure startModule(m: TLangMode; rangeChecksOn, overflowChecksOn: boolean;
 var
   fields: TPtrList;
 begin
+  irSetFastMath(optFastMath);
   mode := m;
   optRange := rangeChecksOn;
   optOverflow := overflowChecksOn;
