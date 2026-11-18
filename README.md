@@ -106,6 +106,7 @@ All in [`docs/`](docs/):
 - [docs/PLAN.md](docs/PLAN.md): design and roadmap
 - [docs/SELFHOST.md](docs/SELFHOST.md): plan for the self-hosted compiler
 - [docs/optimization.md](docs/optimization.md): optimizations considered and done
+- [docs/optimization2.md](docs/optimization2.md): executable-speed analysis after those items
 
 Also: [selfhost/README.md](selfhost/README.md),
 [selfhost/DIALECT.md](selfhost/DIALECT.md) and

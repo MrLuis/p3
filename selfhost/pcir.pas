@@ -71,6 +71,9 @@ type
     fp: double;      { vkFP }
     agg: pointer;    { vkAgg: a PPtrList of PTVBox, the elements }
     fn: pointer;     { a reference to a function: the PIRFunc, else nil }
+    { optimization2 item 1: a conservative integer range, when known }
+    rKnown: boolean;
+    rLo, rHi: int64;
   end;
   PTVBox = ^TV;
 
@@ -701,7 +704,11 @@ end;
 { the low 64 bits as an int64 }
 function limbsToInt(const l: TLimbs): int64;
 begin
+  { the shift sets the sign bit for large unsigned values; the compiler's
+    own overflow checks must not fire here }
+  {$Q-}{$R-}
   limbsToInt := (l[1] shl 32) or l[0];
+  {$Q+}{$R+}
 end;
 
 function limbBit(const l: TLimbs; i: longint): boolean;
@@ -1214,6 +1221,9 @@ begin
   r.agg := nil;
   r.fn := nil;
   r.fp := 0.0;
+  r.rKnown := false;
+  r.rLo := 0;
+  r.rHi := 0;
   limbsOfInt(0, r.limbs);
   irV := r;
 end;
@@ -1242,15 +1252,26 @@ begin
   r.limbs := l;
   normalize(r.limbs, t^.bits);
   r.v := intText(t, r.limbs);
+  if t^.bits <= 64 then
+  begin
+    r.rKnown := true;
+    r.rLo := limbsToInt(r.limbs);
+    r.rHi := r.rLo;
+  end;
   irConstLimbs := r;
 end;
 
 function irConstInt(t: PIRType; v: int64): TV;
 var
   l: TLimbs;
+  r: TV;
 begin
   limbsOfInt(v, l);
-  irConstInt := irConstLimbs(t, l);
+  r := irConstLimbs(t, l);
+  r.rKnown := true;
+  r.rLo := v;
+  r.rHi := v;
+  irConstInt := r;
 end;
 
 function irConstBool(b: boolean): TV;

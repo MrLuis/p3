@@ -1420,6 +1420,9 @@ begin
     exit;
   tb := getOrdinalBounds(target);
   fb := getOrdinalBounds(src);
+  if isSignedOrdinal(src) and isSignedOrdinal(target) and v.rKnown and
+     (v.rLo >= tb.lo) and (v.rHi <= tb.hi) then
+    exit;
   if isQWord(getBase(src)) then { its values, unsigned: those above target's }
   begin
     if isQWord(target) then
@@ -1554,6 +1557,109 @@ begin
   irSetInsertPoint(okB);
 end;
 
+function signedTypeRange(bits: longint; var lo, hi: int64): boolean;
+begin
+  signedTypeRange := false;
+  if (bits <= 0) or (bits > 64) then
+    exit;
+  if bits = 64 then
+  begin
+    lo := low(int64);
+    hi := high(int64);
+  end
+  else
+  begin
+    lo := -(int64(1) shl (bits - 1));
+    hi := (int64(1) shl (bits - 1)) - 1;
+  end;
+  signedTypeRange := true;
+end;
+
+function addOverflows(a, b: int64; var r: int64): boolean;
+begin
+  addOverflows := false;
+  if b > 0 then
+  begin
+    if a > high(int64) - b then
+      exit(true);
+  end
+  else if b < 0 then
+    if a < low(int64) - b then
+      exit(true);
+  r := a + b;
+end;
+
+function subOverflows(a, b: int64; var r: int64): boolean;
+begin
+  subOverflows := false;
+  if b > 0 then
+  begin
+    if a < low(int64) + b then
+      exit(true);
+  end
+  else if b < 0 then
+    if a > high(int64) + b then
+      exit(true);
+  r := a - b;
+end;
+
+function abs64(x: int64): int64;
+begin
+  if x < 0 then
+    abs64 := -x
+  else
+    abs64 := x;
+end;
+
+{ The range of l op r in lo..hi, when it fits int64. }
+function combineRange(const op: string; aKnown: boolean; aLo, aHi: int64;
+                      bKnown: boolean; bLo, bHi: int64;
+                      var lo, hi: int64): boolean;
+var
+  p1, p2, p3, p4: int64;
+begin
+  combineRange := false;
+  if not (aKnown and bKnown) then
+    exit;
+  if op = 'add' then
+  begin
+    if addOverflows(aLo, bLo, lo) or addOverflows(aHi, bHi, hi) then
+      exit;
+    combineRange := true;
+    exit;
+  end;
+  if op = 'sub' then
+  begin
+    exit;
+    if subOverflows(aLo, bHi, lo) or subOverflows(aHi, bLo, hi) then
+      exit;
+    combineRange := true;
+    exit;
+  end;
+  if op = 'mul' then
+  begin
+    if (aLo = low(int64)) or (aHi = low(int64)) or
+       (bLo = low(int64)) or (bHi = low(int64)) then
+      exit;
+    if (abs64(aLo) > 3037000499) or (abs64(aHi) > 3037000499) or
+       (abs64(bLo) > 3037000499) or (abs64(bHi) > 3037000499) then
+      exit;
+    p1 := aLo * bLo;
+    p2 := aLo * bHi;
+    p3 := aHi * bLo;
+    p4 := aHi * bHi;
+    lo := p1;
+    if p2 < lo then lo := p2;
+    if p3 < lo then lo := p3;
+    if p4 < lo then lo := p4;
+    hi := p1;
+    if p2 > hi then hi := p2;
+    if p3 > hi then hi := p3;
+    if p4 > hi then hi := p4;
+    combineRange := true;
+  end;
+end;
+
 { l op r ('add', 'sub' or 'mul') with an overflow check if enabled }
 function emitCheckedArith(const op: string; signed: boolean; const l, r: TV;
                           loc: TLoc; const name: string): TV;
@@ -1562,10 +1668,25 @@ var
   fields: TPtrList;
   pairT: PIRType;
   f: PIRFunc;
-  res, ovf: TV;
+  res, ovf, rv: TV;
+  lo, hi, tyLo, tyHi: int64;
+  safe: boolean;
 begin
-  if not overflowChecks(loc) then
-    exit(irBin(op, l, r, name));
+  safe := signed and combineRange(op, l.rKnown, l.rLo, l.rHi, r.rKnown,
+                                  r.rLo, r.rHi, lo, hi) and
+          signedTypeRange(l.t^.bits, tyLo, tyHi) and
+          (lo >= tyLo) and (hi <= tyHi);
+  if (not overflowChecks(loc)) or safe then
+  begin
+    rv := irBin(op, l, r, name);
+    if safe then
+    begin
+      rv.rKnown := true;
+      rv.rLo := lo;
+      rv.rHi := hi;
+    end;
+    exit(rv);
+  end;
   if signed then
     fname := 'llvm.s' + op + '.with.overflow.' + l.t^.text
   else
@@ -1579,7 +1700,14 @@ begin
   res := call2(f, l, r, '');
   ovf := irExtract(res, 1, irI1, '');
   emitOverflowCheck(ovf, 'integer overflow', loc);
-  emitCheckedArith := irExtract(res, 0, l.t, name);
+  rv := irExtract(res, 0, l.t, name);
+  if signed and signedTypeRange(l.t^.bits, tyLo, tyHi) then
+  begin
+    rv.rKnown := true;
+    rv.rLo := tyLo;
+    rv.rHi := tyHi;
+  end;
+  emitCheckedArith := rv;
 end;
 
 { --- Variables and frames --- }
@@ -5682,6 +5810,7 @@ end;
 function visitNameRef(e: PNode): TV;
 var
   d: PDecl;
+  v: TV;
   noArgs: TPtrList;
 begin
   d := e^.refDecl;
@@ -5714,7 +5843,17 @@ begin
   if isBitPackedComponent(e) then
     exit(bitLoad(e));
   if d^.kind in [dkVar, dkField] then
-    exit(loadScalar(emitAddress(e), e^.typ, nm(e^.ref.name)));
+  begin
+    v := loadScalar(emitAddress(e), e^.typ, nm(e^.ref.name));
+    if d^.cgRangeKnown then
+    begin
+      v.rKnown := true;
+      v.rLo := d^.cgRangeLo;
+      v.rHi := d^.cgRangeHi;
+    end;
+    visitNameRef := v;
+    exit;
+  end;
   if d^.kind = dkRoutine then
   begin
     listInit(noArgs);

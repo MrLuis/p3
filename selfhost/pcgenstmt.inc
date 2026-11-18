@@ -1214,6 +1214,8 @@ var
   start, final, start64, final64, enter, i, done, next: TV;
   checkB, loopB, latchB, incB, endB, preB: PIRBlock;
   phi: PIRInst;
+  oldKnown: boolean;
+  oldLo, oldHi: int64;
 begin
   v := s^.forVar^.refDecl;
   varTy := v^.varType;
@@ -1259,9 +1261,29 @@ begin
   i := irPhi(start.t, nm(v^.ident.name), phi);
   irAddIncoming(phi, start, preB);
   storeScalar(varAddress(v), i, varTy);
+  oldKnown := v^.cgRangeKnown;
+  oldLo := v^.cgRangeLo;
+  oldHi := v^.cgRangeHi;
+  if isSignedOrdinal(varTy) and start.rKnown and final.rKnown then
+  begin
+    v^.cgRangeKnown := true;
+    if start.rLo < final.rLo then
+      v^.cgRangeLo := start.rLo
+    else
+      v^.cgRangeLo := final.rLo;
+    if start.rHi > final.rHi then
+      v^.cgRangeHi := start.rHi
+    else
+      v^.cgRangeHi := final.rHi;
+  end
+  else
+    v^.cgRangeKnown := false;
   pushLoop(latchB, endB);
   visitStmt(s^.forBody);
   popLoop;
+  v^.cgRangeKnown := oldKnown;
+  v^.cgRangeLo := oldLo;
+  v^.cgRangeHi := oldHi;
   irBr(latchB);
   irSetInsertPoint(latchB);
   done := irICmp('eq', i, final, 'for.done');

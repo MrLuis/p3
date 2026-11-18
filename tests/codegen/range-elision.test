@@ -1,0 +1,11 @@
+; A for variable's constant bounds prove its range: no bounds or overflow
+; checks in the body; a value of unknown range is still checked
+; (optimization2.md item 1).
+; RUN: %p3 --mode=objfpc --emit-llvm %S/Inputs/range-elision.pas -o - | FileCheck %s
+
+; CHECK-LABEL: define internal i32 @pas.known(
+; CHECK-NOT: llvm.sadd.with.overflow
+; CHECK-NOT: rt.error
+; CHECK-LABEL: define internal i32 @pas.unknown(
+; CHECK: llvm.sadd.with.overflow
+; CHECK: rt.error

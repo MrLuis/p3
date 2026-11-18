@@ -531,6 +531,10 @@ type
       a routine's function, frame type and jmp_buf slot, the frame slot of
       a local, a field's byte offset, a label's basic block }
     cgValue, cgFunc, cgFrame, cgBlock, cgDbg: pointer;
+    { optimization2 item 1: an active for-loop variable's range, set while
+      its body is emitted }
+    cgRangeKnown: boolean;
+    cgRangeLo, cgRangeHi: int64;
     { a routine's variable: in its frame record (slot cgSlot), else in
       an alloca (cgLocal, a boxed value); a routine whose frame record
       starts with its static link }

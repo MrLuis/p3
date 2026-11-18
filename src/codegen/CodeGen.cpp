@@ -361,6 +361,14 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
   llvm::SmallVector<llvm::Value *, 4> LiveTemps;
   llvm::SmallVector<llvm::Value *, 4> RoutineTemps;
   llvm::DenseMap<llvm::Value *, Type *> RecordTemps; ///< record temporaries' types
+  /// Conservative integer ranges (optimization2.md item 1): active for-loop
+  /// control variables, and values computed from them and constants.
+  struct ValueRange {
+    bool Known = false;
+    int64_t Lo = 0, Hi = 0;
+  };
+  llvm::DenseMap<VarDecl *, ValueRange> VarRanges;
+  llvm::DenseMap<const llvm::Value *, ValueRange> ValueRanges;
   /// A direct call whose ansistring result is moved into the assignment
   /// target: no temporary holds it (NoHoldAnsiResult), and the call that
   /// returned it took that path (TookAnsiResult).
@@ -1043,6 +1051,69 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
                               : B.CreateZExt(V, B.getInt64Ty());
   }
 
+  /// The range of an already emitted integer value: a literal, a load of an
+  /// active loop variable, or a result noted by the arithmetic below.
+  ValueRange rangeOfValue(const llvm::Value *V) const {
+    auto It = ValueRanges.find(V);
+    if (It != ValueRanges.end())
+      return It->second;
+    if (auto *C = llvm::dyn_cast<llvm::ConstantInt>(V))
+      if (C->getBitWidth() <= 64)
+        return {true, C->getSExtValue(), C->getSExtValue()};
+    return {};
+  }
+
+  void noteRange(const llvm::Value *V, ValueRange R) {
+    if (R.Known)
+      ValueRanges[V] = R;
+  }
+
+  /// The bounds of a signed integer type of Bits bits.
+  static bool signedRange(unsigned Bits, ValueRange &R) {
+    if (Bits == 0 || Bits > 64)
+      return false;
+    if (Bits == 64) {
+      R = {true, INT64_MIN, INT64_MAX};
+      return true;
+    }
+    R = {true, -(int64_t(1) << (Bits - 1)), (int64_t(1) << (Bits - 1)) - 1};
+    return true;
+  }
+
+  static bool inInt64(__int128 V) {
+    return V >= INT64_MIN && V <= INT64_MAX;
+  }
+
+  /// The range of A op B (add, sub or mul), when it fits int64.
+  static bool combineRange(BinaryOp Op, ValueRange A, ValueRange B,
+                           ValueRange &R) {
+    if (!A.Known || !B.Known)
+      return false;
+    __int128 Lo, Hi;
+    switch (Op) {
+    case BinaryOp::Add:
+      Lo = (__int128)A.Lo + B.Lo;
+      Hi = (__int128)A.Hi + B.Hi;
+      break;
+    case BinaryOp::Sub:
+      Lo = (__int128)A.Lo - B.Hi;
+      Hi = (__int128)A.Hi - B.Lo;
+      break;
+    case BinaryOp::Mul: {
+      __int128 P1 = (__int128)A.Lo * B.Lo, P2 = (__int128)A.Lo * B.Hi;
+      __int128 P3 = (__int128)A.Hi * B.Lo, P4 = (__int128)A.Hi * B.Hi;
+      Lo = std::min(std::min(P1, P2), std::min(P3, P4));
+      Hi = std::max(std::max(P1, P2), std::max(P3, P4));
+      break;
+    }
+    default: return false;
+    }
+    if (!inInt64(Lo) || !inInt64(Hi))
+      return false;
+    R = {true, (int64_t)Lo, (int64_t)Hi};
+    return true;
+  }
+
   /// X < Lo or X > Hi, for an i64 X.
   ///
   /// Throughout this file, instructions are created one statement at a
@@ -1077,6 +1148,11 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
     };
     OrdinalBounds TB = getOrdinalBounds(Target);
     OrdinalBounds FB = getOrdinalBounds(From);
+    if (isSignedOrdinal(From) && isSignedOrdinal(Target)) {
+      ValueRange R = rangeOfValue(V);
+      if (R.Known && R.Lo >= TB.Lo && R.Hi <= TB.Hi)
+        return;
+    }
     bool FromQWord = isQWord(From->getBase()), ToQWord = isQWord(Target);
     if (FromQWord) { // its values, unsigned: those above Target's
       if (ToQWord)
@@ -1710,18 +1786,45 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
   llvm::Value *emitCheckedArith(llvm::Intrinsic::ID ID, llvm::Value *L,
                                 llvm::Value *R, SourceLocation Loc,
                                 const llvm::Twine &Name) {
-    if (!overflowChecks(Loc)) {
-      switch (ID) {
-      case llvm::Intrinsic::sadd_with_overflow:
-      case llvm::Intrinsic::uadd_with_overflow: return B.CreateAdd(L, R, Name);
-      case llvm::Intrinsic::ssub_with_overflow:
-      case llvm::Intrinsic::usub_with_overflow: return B.CreateSub(L, R, Name);
-      default: return B.CreateMul(L, R, Name);
-      }
+    BinaryOp Op = ID == llvm::Intrinsic::sadd_with_overflow ||
+                          ID == llvm::Intrinsic::uadd_with_overflow
+                      ? BinaryOp::Add
+                  : ID == llvm::Intrinsic::ssub_with_overflow ||
+                            ID == llvm::Intrinsic::usub_with_overflow
+                      ? BinaryOp::Sub
+                      : BinaryOp::Mul;
+    bool Signed = ID == llvm::Intrinsic::sadd_with_overflow ||
+                  ID == llvm::Intrinsic::ssub_with_overflow ||
+                  ID == llvm::Intrinsic::smul_with_overflow;
+    ValueRange ResultRange;
+    // (subtraction is left alone for now: it is a separate range rule)
+    bool Safe = Signed && Op != BinaryOp::Sub &&
+                combineRange(Op, rangeOfValue(L), rangeOfValue(R), ResultRange);
+    if (Safe) {
+      auto *T = llvm::cast<llvm::IntegerType>(L->getType());
+      ValueRange TypeRange;
+      if (!signedRange(T->getBitWidth(), TypeRange) ||
+          ResultRange.Lo < TypeRange.Lo || ResultRange.Hi > TypeRange.Hi)
+        Safe = false;
+    }
+    if (!overflowChecks(Loc) || Safe) {
+      llvm::Value *Result = Op == BinaryOp::Add   ? B.CreateAdd(L, R, Name)
+                            : Op == BinaryOp::Sub ? B.CreateSub(L, R, Name)
+                                                  : B.CreateMul(L, R, Name);
+      if (Safe)
+        noteRange(Result, ResultRange);
+      return Result;
     }
     llvm::Value *Res = B.CreateBinaryIntrinsic(ID, L, R);
     emitOverflowCheck(B.CreateExtractValue(Res, 1), "integer overflow", Loc);
-    return B.CreateExtractValue(Res, 0, Name);
+    llvm::Value *Result = B.CreateExtractValue(Res, 0, Name);
+    if (Signed) {
+      auto *T = llvm::cast<llvm::IntegerType>(L->getType());
+      ValueRange TypeRange;
+      if (signedRange(T->getBitWidth(), TypeRange))
+        noteRange(Result, TypeRange);
+    }
+    return Result;
   }
 
   /// if (Cond) integer overflow (What): a runtime error, or (objfpc) an
@@ -7164,9 +7267,22 @@ public:
     llvm::PHINode *I = B.CreatePHI(Start->getType(), 2, V->getName().Name);
     I->addIncoming(Start, PreBB);
     storeScalar(varAddress(V), I, VarTy);
+    auto OldRange = VarRanges.find(V);
+    bool HadRange = OldRange != VarRanges.end();
+    ValueRange Saved = HadRange ? OldRange->second : ValueRange{};
+    ValueRange StartRange = rangeOfValue(Start), FinalRange = rangeOfValue(Final);
+    if (isSignedOrdinal(VarTy) && StartRange.Known && FinalRange.Known)
+      VarRanges[V] = {true, std::min(StartRange.Lo, FinalRange.Lo),
+                      std::max(StartRange.Hi, FinalRange.Hi)};
+    else
+      VarRanges.erase(V);
     Loops.push_back({LatchBB, EndBB, Cleanups.size()});
     visitStmt(S->getBody());
     Loops.pop_back();
+    if (HadRange)
+      VarRanges[V] = Saved;
+    else
+      VarRanges.erase(V);
     B.CreateBr(LatchBB);
     B.SetInsertPoint(LatchBB);
     B.CreateCondBr(B.CreateICmpEQ(I, Final, "for.done"), EndBB, IncBB);
@@ -7770,7 +7886,12 @@ public:
   //===--------------------------------------------------------------------===//
 
   llvm::Value *visitIntegerLiteralExpr(IntegerLiteralExpr *E) {
-    return llvm::ConstantInt::get(regType(E->getType()), E->getValue());
+    llvm::Value *V =
+        llvm::ConstantInt::get(regType(E->getType()), E->getValue());
+    if (isSignedOrdinal(E->getType()))
+      noteRange(V, {true, static_cast<int64_t>(E->getValue()),
+                    static_cast<int64_t>(E->getValue())});
+    return V;
   }
 
   llvm::Value *visitRealLiteralExpr(RealLiteralExpr *E) {
@@ -7811,8 +7932,15 @@ public:
     }
     if (isBitPackedComponent(E))
       return bitLoad(E);
-    if (llvm::isa<VarDecl>(D) || llvm::isa<FieldDecl>(D))
-      return loadScalar(emitAddress(E), E->getType(), E->getName().Name);
+    if (llvm::isa<VarDecl>(D) || llvm::isa<FieldDecl>(D)) {
+      llvm::Value *V = loadScalar(emitAddress(E), E->getType(), E->getName().Name);
+      if (auto *VD = llvm::dyn_cast<VarDecl>(D)) {
+        auto It = VarRanges.find(VD);
+        if (It != VarRanges.end())
+          noteRange(V, It->second);
+      }
+      return V;
+    }
     if (auto *R = llvm::dyn_cast<RoutineDecl>(D))
       return emitCall(R, {}); // parameterless function
     if (auto *BD = llvm::dyn_cast<BuiltinDecl>(D)) {
@@ -7826,8 +7954,11 @@ public:
     const ConstValue &V = C->getValue();
     if (V.K == ConstValue::Real)
       return llvm::ConstantFP::get(B.getDoubleTy(), V.RealVal);
-    return llvm::ConstantInt::get(regType(C->getType()),
-                                  static_cast<uint64_t>(V.Int), true);
+    llvm::Value *R = llvm::ConstantInt::get(regType(C->getType()),
+                                            static_cast<uint64_t>(V.Int), true);
+    if (isSignedOrdinal(C->getType()))
+      noteRange(R, {true, V.Int, V.Int});
+    return R;
   }
 
   llvm::Value *visitParenExpr(ParenExpr *E) { return visitExpr(E->getInner()); }
