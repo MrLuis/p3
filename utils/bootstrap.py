@@ -71,8 +71,15 @@ def install(work, name, runtime):
 FLAGS = []
 
 
-def build_stage(compiler, out, opt):
-    run([compiler, "--mode=tp", "-O%d" % opt] + FLAGS + ["-I", SELFHOST, SOURCE, "-o", out])
+def build_stage(compiler, out, opt, runtime=None):
+    env = os.environ.copy()
+    if runtime:
+        # Every stage links the same runtime file, so its path (which macOS
+        # puts in the debug/symbol data and so in the code signature) is
+        # identical in stages 2 and 3.
+        env["P3_RUNTIME_LIB"] = runtime
+    run([compiler, "--mode=tp", "-O%d" % opt] + FLAGS + ["-I", SELFHOST, SOURCE, "-o", out],
+        env=env)
 
 
 def emit_ir(compiler, out):
@@ -143,11 +150,15 @@ def main():
     os.makedirs(work)
     failures = []
 
+    runtime = os.path.join(work, "runtime", "libpascalrt.a")
+    os.makedirs(os.path.dirname(runtime))
+    shutil.copyfile(args.runtime, runtime)
+
     stages = {0: os.path.abspath(args.p3)}
     for n in (1, 2, 3):
         stages[n] = install(work, "stage%d" % n, args.runtime)
         log("building stage %d with stage %d" % (n, n - 1))
-        build_stage(stages[n - 1], stages[n], args.opt)
+        build_stage(stages[n - 1], stages[n], args.opt, runtime)
 
     # 1. The compiler's own IR.
     irs = {}
@@ -206,7 +217,7 @@ def main():
             run([fpc, "-v0", "-Mobjfpc", "-Sh-", "-Cr", "-Co", "-FU" + units,
                  "-Fu" + SELFHOST] + fpc_flags() + ["-o" + s1, SOURCE])
             s2 = install(work, "stage2-fpc", args.runtime)
-            build_stage(s1, s2, args.opt)
+            build_stage(s1, s2, args.opt, runtime)
             ir1 = os.path.join(work, "stage1-fpc.ll")
             ir2 = os.path.join(work, "stage2-fpc.ll")
             emit_ir(s1, ir1)
