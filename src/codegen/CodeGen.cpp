@@ -295,6 +295,11 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
   llvm::DenseMap<ClassType *, llvm::StructType *> ClassLayouts;
   llvm::DenseMap<ClassType *, llvm::GlobalVariable *> VMTs;
   std::vector<ClassType *> VMTsToDefine;
+  /// Every class declared in this module (item 11: the whole-program class
+  /// hierarchy), and those with an interface visible to separately
+  /// compiled units.
+  llvm::SmallVector<ClassType *, 16> AllClasses;
+  llvm::DenseSet<ClassType *> ClassSet, ExportedClasses;
   llvm::DenseMap<WithContext *, llvm::Value *> WithAddrs;
   llvm::StringMap<llvm::GlobalVariable *> StringConstants;
   /// The names of an enumeration's values (for write), by type.
@@ -397,6 +402,7 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
     for (Decl *D : withNested(U.getInterface()->getDecls())) {
       if (ClassType *C = definedClass(D)) {
         // A class: its VMT and its methods.
+        ExportedClasses.insert(C);
         std::string Prefix =
             ("pas." + U.getName().Name + "$" + C->getDeclName().lower()).str();
         ExportNames[D] = Prefix + "$vmt";
@@ -3168,6 +3174,8 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
   /// A class: its VMT (defined once all methods are declared), and for a
   /// class of a separately compiled unit its methods' declarations.
   void declareClass(Decl *D, ClassType *C) {
+    if (ClassSet.insert(C).second)
+      AllClasses.push_back(C);
     auto Export = ExportNames.find(D);
     bool Imported = ImportedDecls.count(D);
     auto *Ty = llvm::ArrayType::get(B.getPtrTy(), 4 + C->getVTable().size());
@@ -4774,6 +4782,32 @@ public:
                        "method");
   }
 
+  /// Can a virtual call of R be a direct call? Only if no class of the
+  /// whole-program hierarchy that descends from R's overrides it; with
+  /// -fseparate-units only for a class that a separately compiled unit
+  /// cannot see (item 11).
+  bool canDevirtualize(RoutineDecl *R) {
+    ClassType *C = R->getClass();
+    if (!C || R->isAbstract() || !R->isDispatched() || !Functions.count(R))
+      return false;
+    if (CGOpts.SeparateUnits &&
+        (C->getModule() == nullptr || ExportedClasses.count(C)))
+      return false;
+    int Idx = R->getVMTIndex();
+    llvm::ArrayRef<RoutineDecl *> VTable = C->getVTable();
+    if (Idx < 0 || static_cast<size_t>(Idx) >= VTable.size() ||
+        VTable[Idx] != R)
+      return false;
+    for (ClassType *D : AllClasses) {
+      if (D == C || !D->inheritsFrom(C))
+        continue;
+      llvm::ArrayRef<RoutineDecl *> DVT = D->getVTable();
+      if (static_cast<size_t>(Idx) < DVT.size() && DVT[Idx] != R)
+        return false;
+    }
+    return true;
+  }
+
   /// Entry Slot of a VMT: 0 the parent's VMT, 1 the class name, 2 the
   /// instance size, 3 the interface table, 4... the virtual methods.
   llvm::Value *loadVMTSlot(llvm::Value *VMT, unsigned Slot,
@@ -4895,7 +4929,7 @@ public:
     if (R->isClassMethod()) { // Self: the class
       llvm::Value *Self = receiverClass(Obj, SelfIsClass, L);
       llvm::FunctionCallee Fn = Functions[R];
-      if (!Inherited && R->isDispatched()) {
+      if (!Inherited && R->isDispatched() && !canDevirtualize(R)) {
         emitNilClassCheck(Self, L);
         Fn = {routineFnType(R), loadVMTSlot(Self, 4 + R->getVMTIndex(), "method")};
       }
@@ -4903,7 +4937,7 @@ public:
                           R->getParams(), Args, Self, resultOf(R));
       return R->isFunction() ? Result : nullptr;
     }
-    if (!Inherited && R->isDispatched()) {
+    if (!Inherited && R->isDispatched() && !canDevirtualize(R)) {
       emitNilObjectCheck(Obj, L);
       llvm::Value *Fn = loadVirtual(Obj, static_cast<unsigned>(R->getVMTIndex()));
       Result = emitCallTo({routineFnType(R), Fn},

@@ -2660,6 +2660,7 @@ var
   m: PDecl;
   params: TPtrList;
 begin
+  listAdd(allClasses, c);
   ty := irArray(4 + c^.classVTable.count, irPtrT);
   if d^.cgExport = nil then
   begin
@@ -3579,6 +3580,7 @@ begin
     if c <> nil then
     begin
       { a class: its VMT and its methods }
+      mapPut(exportedClasses, c^.id, c);
       prefix := 'pas.' + nm(u^.ident.name) + '$' + lowerStr(nm(c^.declName));
       d^.cgExport := intern(prefix + '$vmt');
       d^.cgImported := imported;
@@ -3781,6 +3783,8 @@ begin
   mapInit(vmts);
   mapInit(iids);
   listInit(vmtsToDefine);
+  listInit(allClasses);
+  mapInit(exportedClasses);
   listInit(liveTemps);
   listInit(routineTemps);
   listInit(deferredInits);

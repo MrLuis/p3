@@ -131,6 +131,10 @@ var
   { interfaces' iids (by type id, PTVBox) }
   iids: TIntMap;
   vmtsToDefine: TPtrList;
+  { item 11: every class declared in the module, and those whose interface
+    a separately compiled unit can see (by type id) }
+  allClasses: TPtrList;
+  exportedClasses: TIntMap;
   { reference counting (COM interfaces): a function's COM interface result
     is held in a temporary until the statement ends (liveTemps: the current
     statements', innermost last, of PTVBox); a routine releases the
@@ -4125,6 +4129,42 @@ begin
   irSetInsertPoint(okB);
 end;
 
+{ Can a virtual call of r be a direct call? Only if no class of the
+  whole-program hierarchy that descends from r's overrides it; with
+  -fseparate-units only for a class a separately compiled unit cannot see
+  (item 11). }
+function canDevirtualize(r: PDecl): boolean;
+var
+  c, d: PType;
+  i: longint;
+  v: PDecl;
+begin
+  canDevirtualize := false;
+  c := r^.ownerClass;
+  if (c = nil) or (r^.vmtIndex < 0) or r^.isAbstract or
+     (r^.cgFunc = nil) then
+    exit;
+  if separate and
+     ((c^.classModule = nil) or (mapGet(exportedClasses, c^.id) <> nil)) then
+    exit;
+  if (r^.vmtIndex >= c^.classVTable.count) or
+     (PDecl(listGet(c^.classVTable, r^.vmtIndex)) <> r) then
+    exit;
+  for i := 0 to allClasses.count - 1 do
+  begin
+    d := PType(listGet(allClasses, i));
+    if (d = c) or not inheritsFrom(d, c) then
+      continue;
+    if r^.vmtIndex < d^.classVTable.count then
+    begin
+      v := PDecl(listGet(d^.classVTable, r^.vmtIndex));
+      if v <> r then
+        exit;
+    end;
+  end;
+  canDevirtualize := true;
+end;
+
 { obj.Free: if obj <> nil then obj.Destroy (virtual), then release it. }
 procedure emitFree(const obj: TV);
 var
@@ -4332,7 +4372,7 @@ begin
   if r^.isClassMethod then { Self: the class }
   begin
     self_ := receiverClass(obj, selfIsClass, loc);
-    if not inherited_ and (r^.vmtIndex >= 0) then
+    if not inherited_ and (r^.vmtIndex >= 0) and not canDevirtualize(r) then
     begin
       emitNilClassCheck(self_, loc);
       fn := loadVMTSlot(self_, 4 + r^.vmtIndex, 'method');
@@ -4349,7 +4389,7 @@ begin
       emitMethodCallC := res;
     exit;
   end;
-  if not inherited_ and (r^.vmtIndex >= 0) then
+  if not inherited_ and (r^.vmtIndex >= 0) and not canDevirtualize(r) then
   begin
     emitNilObjectCheck(obj, loc);
     fn := loadVirtual(obj, r^.vmtIndex);

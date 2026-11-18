@@ -1,0 +1,17 @@
+; Devirtualization from the whole-program class hierarchy (--mode=objfpc):
+; a virtual method that no descendant overrides is called directly; one
+; that a descendant overrides is still dispatched through the VMT.
+; RUN: %p3 --mode=objfpc --emit-llvm %S/Inputs/devirt.pas -o - | FileCheck %s
+; RUN: %p3 --mode=objfpc --emit-llvm %S/Inputs/devirt.pas -o - | opt -passes=verify -disable-output
+
+; CHECK-LABEL: define i32 @main(
+; B is a TBase: Unchanged is not overridden anywhere, so direct.
+; CHECK: call void @pas.tbase.unchanged(ptr null, ptr %b)
+; Changed is overridden by TChild: dispatched.
+; CHECK: [[VMT:%.*]] = load ptr, ptr %b{{[0-9]*}}, align 8
+; CHECK: [[METHOD:%.*]] = load ptr, ptr %{{[0-9]+}}, align 8, !invariant.load
+; CHECK: call void [[METHOD]](ptr null, ptr %b{{[0-9]*}})
+; L is a TLeaf, which has no descendants: direct calls, also of the
+; override it inherits from TChild.
+; CHECK: call void @pas.tbase.unchanged(ptr null, ptr %l)
+; CHECK: call void @pas.tchild.changed(ptr null, ptr %l{{[0-9]*}})
