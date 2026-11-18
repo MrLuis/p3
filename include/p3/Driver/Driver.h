@@ -58,9 +58,9 @@ class Driver {
   void loadUnits(llvm::ArrayRef<Identifier> Uses, ASTContext &Ctx,
                  CheckDirectives &Directives,
                  llvm::SmallVectorImpl<UnitDecl *> &Ordered,
-                 llvm::StringRef Self = "");
+                 llvm::StringRef Self = "", bool InterfacesOnly = false);
   void visitUnit(const Identifier &U, ASTContext &Ctx,
-                 CheckDirectives &Directives);
+                 CheckDirectives &Directives, bool InterfacesOnly);
   llvm::StringMap<UnitDecl *> UnitsDone;
   llvm::StringSet<> UnitsInProgress;
   llvm::DenseSet<const char *> FailedUses; ///< by the location of the name

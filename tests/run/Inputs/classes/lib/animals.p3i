@@ -1,0 +1,23 @@
+unit animals;
+interface
+type
+  TAnimal = class
+  private
+    FName: string;
+    FLegs: integer;
+  protected
+    function Sound: string; virtual;
+  public
+    constructor Create(const AName: string; ALegs: integer);
+    procedure Speak;
+    function Describe(Prefix: string; Count: integer): string; virtual;
+    property Name: string read FName;
+    property Legs: integer read FLegs write FLegs;
+  end;
+var
+  Created: integer;
+
+// p3 interface v1
+// source c678f48e70fda841
+implementation
+end.

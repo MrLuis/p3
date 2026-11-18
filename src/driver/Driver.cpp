@@ -13,10 +13,12 @@
 #include "llvm/ADT/SmallString.h"
 #include "llvm/ADT/StringSet.h"
 
+#include <cctype>
 #include <functional>
 #include "llvm/IR/LLVMContext.h"
 #include "llvm/IR/Module.h"
 #include "llvm/Support/ErrorHandling.h"
+#include "llvm/Support/MemoryBuffer.h"
 #include "llvm/Support/FileUtilities.h"
 #include "llvm/Target/TargetMachine.h"
 
@@ -68,6 +70,207 @@ std::string p3::getDefaultOutputFile(const CompilerOptions &Opts) {
     return "-";
   }
 }
+
+namespace {
+
+/// FNV-1a of a file's bytes, as 16 lowercase hex digits: the interface
+/// files' source and dependency stamp (item 22).
+uint64_t interfaceHash(llvm::StringRef S) {
+  uint64_t H = 14695981039346656037ull;
+  for (unsigned char C : S) {
+    H ^= C;
+    H *= 1099511628211ull;
+  }
+  return H;
+}
+
+std::string hashHex(uint64_t V) {
+  static const char Digits[] = "0123456789abcdef";
+  std::string S(16, '0');
+  for (int I = 15; I >= 0; --I, V >>= 4)
+    S[I] = Digits[V & 15];
+  return S;
+}
+
+bool readFileBytes(llvm::StringRef Path, std::string &Out) {
+  auto B = llvm::MemoryBuffer::getFile(Path);
+  if (!B)
+    return false;
+  Out = (*B)->getBuffer().str();
+  return true;
+}
+
+bool findUnitSource(llvm::StringRef Name, llvm::ArrayRef<std::string> Dirs,
+                    std::string &Out) {
+  for (const std::string &Dir : Dirs)
+    for (const char *Ext : {".pas", ".pp"}) {
+      llvm::SmallString<256> Path(Dir);
+      llvm::sys::path::append(Path, Name + Ext);
+      if (llvm::sys::fs::exists(Path)) {
+        Out = std::string(Path);
+        return true;
+      }
+    }
+  return false;
+}
+
+/// The offset of the `implementation` keyword, skipping comments and
+/// strings, or S.size() if there is none.
+size_t implementationOffset(llvm::StringRef S) {
+  size_t I = 0, N = S.size();
+  while (I < N) {
+    char C = S[I];
+    if (C == '\'' || C == '#') { // string (and a # code follows it)
+      ++I;
+      while (I < N) {
+        if (S[I] == '\'') {
+          if (I + 1 < N && S[I + 1] == '\'') {
+            I += 2;
+            continue;
+          }
+          ++I;
+          break;
+        }
+        ++I;
+      }
+      continue;
+    }
+    if (C == '{') {
+      ++I;
+      while (I < N && S[I] != '}')
+        ++I;
+      ++I;
+      continue;
+    }
+    if (C == '(' && I + 1 < N && S[I + 1] == '*') {
+      I += 2;
+      while (I + 1 < N && !(S[I] == '*' && S[I + 1] == ')'))
+        ++I;
+      I += 2;
+      continue;
+    }
+    if (C == '/' && I + 1 < N && S[I + 1] == '/') {
+      while (I < N && S[I] != '\n')
+        ++I;
+      continue;
+    }
+    if (std::isalpha(static_cast<unsigned char>(C)) || C == '_') {
+      size_t B = I;
+      while (I < N && (std::isalnum(static_cast<unsigned char>(S[I])) ||
+                       S[I] == '_'))
+        ++I;
+      if (S.slice(B, I).equals_insensitive("implementation"))
+        return B;
+      continue;
+    }
+    ++I;
+  }
+  return N;
+}
+
+/// Does S contain the word "generic" (a cheap, conservative test: such a
+/// unit's implementation has bodies a precompiled interface would lose)?
+bool containsGenerics(llvm::StringRef S) {
+  for (size_t I = 0; I + 7 <= S.size(); ++I)
+    if (S.substr(I, 7).equals_insensitive("generic"))
+      return true;
+  return false;
+}
+
+/// Reads a .p3i header; false if it is malformed or its source or a
+/// dependency changed. Dirs: where a dependency's source is looked for.
+bool interfaceValid(llvm::StringRef Path, llvm::StringRef SourcePath,
+                    llvm::ArrayRef<std::string> Dirs) {
+  std::string Text;
+  if (!readFileBytes(Path, Text))
+    return false;
+  llvm::StringRef S(Text);
+  llvm::StringRef Marker = "// p3 interface v1\n";
+  size_t M = S.find(Marker);
+  if (M == llvm::StringRef::npos)
+    return false;
+  S = S.drop_front(M + Marker.size());
+  std::string SourceBytes;
+  if (!readFileBytes(SourcePath, SourceBytes))
+    return false;
+  std::string SourceHash = hashHex(interfaceHash(SourceBytes));
+  bool SawSource = false;
+  while (!S.empty()) {
+    size_t NL = S.find('\n');
+    llvm::StringRef Line = S.substr(0, NL);
+    if (NL == llvm::StringRef::npos)
+      S = "";
+    else
+      S = S.drop_front(NL + 1);
+    if (Line.consume_front("// generics")) {
+      return false;
+    }
+    if (Line.consume_front("// source ")) {
+      if (Line.trim() != SourceHash)
+        return false;
+      SawSource = true;
+    } else if (Line.consume_front("// use ")) {
+      size_t Space = Line.find(' ');
+      if (Space == llvm::StringRef::npos)
+        return false;
+      llvm::StringRef Name = Line.substr(0, Space);
+      llvm::StringRef Hash = Line.substr(Space + 1).trim();
+      std::string Dep;
+      if (!findUnitSource(Name, Dirs, Dep))
+        return false;
+      std::string DepBytes;
+      if (!readFileBytes(Dep, DepBytes) ||
+          hashHex(interfaceHash(DepBytes)) != Hash)
+        return false;
+    } else if (!Line.starts_with("//")) {
+      break; // the unit text starts here
+    }
+  }
+  return SawSource;
+}
+
+/// Writes the precompiled interface of Unit next to its object (item 22):
+/// the source text through the `implementation` keyword, with a header
+/// holding the source and interface dependencies' hashes.
+bool writeInterfaceFile(UnitDecl &Unit, llvm::ArrayRef<UnitDecl *> Deps,
+                        llvm::StringRef Source,
+                        llvm::ArrayRef<std::string> Dirs,
+                        llvm::StringRef Path, DiagnosticsEngine &Diags) {
+  size_t Off = implementationOffset(Source);
+  if (Off >= Source.size())
+    return false;
+  std::string Text = Source.substr(0, Off).str();
+  Text += "\n// p3 interface v1\n";
+  if (containsGenerics(Source))
+    Text += "// generics\n";
+  Text += "// source " + hashHex(interfaceHash(Source)) + "\n";
+  for (const Identifier &Use : Unit.getInterfaceUses()) {
+    UnitDecl *Dep = nullptr;
+    for (UnitDecl *D : Deps)
+      if (D->getName().Name == Use.Name) {
+        Dep = D;
+        break;
+      }
+    std::string DepPath;
+    std::string DepBytes;
+    if (!Dep || !findUnitSource(Use.Name, Dirs, DepPath) ||
+        !readFileBytes(DepPath, DepBytes))
+      continue;
+    Text += "// use " + Use.Name.str() + " " +
+            hashHex(interfaceHash(DepBytes)) + "\n";
+  }
+  Text += "implementation\nend.\n";
+  std::error_code EC;
+  llvm::raw_fd_ostream OS(Path, EC, llvm::sys::fs::OF_Text);
+  if (EC) {
+    Diags.warning("cannot write interface file '" + Path + "'");
+    return false;
+  }
+  OS << Text;
+  return true;
+}
+
+} // namespace
 
 //===----------------------------------------------------------------------===//
 // Driver
@@ -214,7 +417,8 @@ bool Driver::runPipeline(FileID FID) {
   ProgramDecl *Program = P.parseProgram();
   llvm::SmallVector<UnitDecl *, 4> Units;
   if (!Diags.hasErrors())
-    loadUnits(Program->getUses(), Ctx, Directives, Units);
+    loadUnits(Program->getUses(), Ctx, Directives, Units, "",
+              Opts.SeparateUnits);
 
   if (Opts.Act == Action::EmitParseTree) { // the parser alone (S5)
     auto OS = openTextOutput(Opts.OutputFile, Diags);
@@ -342,7 +546,7 @@ bool Driver::compileUnit(Parser &P, FileID FID, ASTContext &Ctx,
   Uses.append(Unit->getImplementationUses().begin(),
               Unit->getImplementationUses().end());
   llvm::SmallVector<UnitDecl *, 4> Deps;
-  loadUnits(Uses, Ctx, Directives, Deps, Unit->getName().Name);
+  loadUnits(Uses, Ctx, Directives, Deps, Unit->getName().Name, true);
   auto Reparse = [&](const RoutineDecl *G) {
     return Parser(P.getLexer(), Diags, Ctx).reparseGeneric(G);
   };
@@ -353,6 +557,20 @@ bool Driver::compileUnit(Parser &P, FileID FID, ASTContext &Ctx,
   if (Diags.hasErrors() ||
       !Sema(Ctx, Diags, LangOpts, Reparse, ReparseType).checkUnit(*Unit, Deps))
     return false;
+  if (Opts.Act == Action::EmitObj && Opts.OutputFile != "-") {
+    llvm::SmallVector<std::string, 4> Dirs{
+        llvm::sys::path::parent_path(Opts.InputFile).str()};
+    Dirs.append(Opts.IncludeDirs.begin(), Opts.IncludeDirs.end());
+    Dirs.push_back(findUnitLibrary());
+    llvm::StringRef Source = SM.getBufferData(FID);
+    llvm::SmallString<256> P3I(Opts.OutputFile);
+    llvm::sys::path::replace_extension(P3I, "p3i");
+    writeInterfaceFile(*Unit, Deps, Source, Dirs, P3I, Diags);
+    llvm::SmallString<256> SrcP3I(SM.getFilename(FID));
+    llvm::sys::path::replace_extension(SrcP3I, "p3i");
+    if (SrcP3I != P3I)
+      writeInterfaceFile(*Unit, Deps, Source, Dirs, SrcP3I, Diags);
+  }
   if (Opts.Act == Action::EmitExe) {
     Diags.error("'" + llvm::Twine(Opts.InputFile) +
                 "' is a unit: compile it with -c, -S or --emit-llvm and link "
@@ -458,7 +676,7 @@ void Driver::prepareParser(Parser &P, ASTContext &Ctx,
   P.enableDeclared([this, &Ctx, &Directives](llvm::ArrayRef<Identifier> Uses,
                                              llvm::StringRef Self) {
     llvm::SmallVector<UnitDecl *, 4> Loaded;
-    loadUnits(Uses, Ctx, Directives, Loaded, Self);
+    loadUnits(Uses, Ctx, Directives, Loaded, Self, Opts.SeparateUnits);
     std::vector<std::string> Names;
     for (const Identifier &U : Uses) {
       Names.push_back(U.Name.str());
@@ -481,7 +699,7 @@ void Driver::prepareParser(Parser &P, ASTContext &Ctx,
 void Driver::loadUnits(llvm::ArrayRef<Identifier> Uses, ASTContext &Ctx,
                        CheckDirectives &Directives,
                        llvm::SmallVectorImpl<UnitDecl *> &Ordered,
-                       llvm::StringRef Self) {
+                       llvm::StringRef Self, bool InterfacesOnly) {
   if (!Self.empty())
     UnitsInProgress.insert(Self);
   if (!Uses.empty() && LangOpts.Mode == LangMode::ISO) {
@@ -489,12 +707,12 @@ void Driver::loadUnits(llvm::ArrayRef<Identifier> Uses, ASTContext &Ctx,
     return;
   }
   for (const Identifier &U : Uses)
-    visitUnit(U, Ctx, Directives);
+    visitUnit(U, Ctx, Directives, InterfacesOnly);
   Ordered.assign(UnitsOrdered.begin(), UnitsOrdered.end());
 }
 
 void Driver::visitUnit(const Identifier &U, ASTContext &Ctx,
-                       CheckDirectives &Directives) {
+                       CheckDirectives &Directives, bool InterfacesOnly) {
   // (a use that failed to load is not tried again when the units are
   // loaded once more, after an early load for declared(NAME))
   if (UnitsDone.count(U.Name) || FailedUses.count(U.Loc.getPointer()) ||
@@ -534,6 +752,12 @@ void Driver::visitUnit(const Identifier &U, ASTContext &Ctx,
                 {U.getRange()});
     return;
   }
+  if (InterfacesOnly) {
+    llvm::SmallString<256> P3I(Found);
+    llvm::sys::path::replace_extension(P3I, "p3i");
+    if (llvm::sys::fs::exists(P3I) && interfaceValid(P3I, Found, Dirs))
+      Found = std::string(P3I);
+  }
   auto FIDOrErr = SM.loadFile(Found);
   if (!FIDOrErr) {
     FailedUses.insert(U.Loc.getPointer());
@@ -559,9 +783,10 @@ void Driver::visitUnit(const Identifier &U, ASTContext &Ctx,
                     Unit->getName().Spelling + "', expected '" + U.Spelling +
                     "'");
   for (const Identifier &Dep : Unit->getInterfaceUses())
-    visitUnit(Dep, Ctx, Directives);
-  for (const Identifier &Dep : Unit->getImplementationUses())
-    visitUnit(Dep, Ctx, Directives);
+    visitUnit(Dep, Ctx, Directives, InterfacesOnly);
+  if (!InterfacesOnly)
+    for (const Identifier &Dep : Unit->getImplementationUses())
+      visitUnit(Dep, Ctx, Directives, InterfacesOnly);
   UnitsInProgress.erase(U.Name);
   UnitsDone[U.Name] = Unit;
   UnitsOrdered.push_back(Unit);

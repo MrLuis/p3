@@ -1,0 +1,20 @@
+; A unit compiled with -c leaves a precompiled interface next to its object
+; and source; a program with -fseparate-units reads it instead of parsing
+; the implementation (item 22).
+; RUN: rm -rf %t && mkdir -p %t && cp -r %S/Inputs/iface/. %t/
+; RUN: %p3 --mode=objfpc -I %t/lib -c %t/lib/ifaceu.pas -o %t/lib/ifaceu.o
+; RUN: test -f %t/lib/ifaceu.p3i
+; RUN: FileCheck --check-prefix=IFACE %s < %t/lib/ifaceu.p3i
+; RUN: %p3 --mode=objfpc -I %t/lib -fseparate-units --emit-llvm %t/main.pas -o - | FileCheck --check-prefix=IR %s
+; A changed source invalidates the interface; the source is parsed again
+; (and its deliberately broken implementation is reported).
+; RUN: python3 -c "p='%t/lib/ifaceu.pas'; s=open(p).read().replace('Twice := x * 2;', 'this is broken'); open(p,'w').write(s)"
+; RUN: not %p3 --mode=objfpc -I %t/lib -fseparate-units --emit-llvm %t/main.pas -o /dev/null 2>&1 | FileCheck --check-prefix=STALE %s
+
+; IFACE: unit ifaceu;
+; IFACE: function Twice(x: integer): integer;
+; IFACE: // p3 interface v1
+; IFACE: // source {{[0-9a-f]+}}
+; IFACE: implementation
+; IR: define i32 @main
+; STALE: error:

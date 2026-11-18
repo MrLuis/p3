@@ -675,10 +675,324 @@ begin
   end;
 end;
 
-procedure visitUnit(const u: TIdent);
+function replaceExt(const path, ext: string): string;
+var
+  i: longint;
+  r: string;
+begin
+  r := path;
+  for i := length(r) downto 1 do
+  begin
+    if r[i] = '/' then
+      break;
+    if r[i] = '.' then
+    begin
+      r := copy(r, 1, i - 1);
+      break;
+    end;
+  end;
+  replaceExt := r + ext;
+end;
+
+{ FNV-1a of some bytes, as the interface files' stamp (item 22). }
+function ifHash(p: PCharArray; len: int64): int64;
+var
+  i: int64;
+  h: int64;
+begin
+  h := -3750763034362895579; { 0xcbf29ce484222325 }
+  {$Q-}{$R-}
+  for i := 0 to len - 1 do
+  begin
+    h := h xor int64(ord(p^[i]));
+    h := h * 1099511628211;
+  end;
+  {$Q+}{$R+}
+  ifHash := h;
+end;
+
+function ifHashHex(h: int64): string;
+const
+  digits = '0123456789abcdef';
+var
+  i: longint;
+  s: string;
+begin
+  s := '';
+  for i := 15 downto 0 do
+    s := s + digits[((h shr (i * 4)) and 15) + 1];
+  ifHashHex := s;
+end;
+
+function ifFindUnitSource(const name: string; const dirs: TPtrList;
+                          var found: string): boolean;
+var
+  i, b, x: longint;
+  base, ext, path: string;
+begin
+  found := '';
+  for i := 0 to dirs.count - 1 do
+    for b := 1 to 2 do
+      for x := 1 to 2 do
+      begin
+        if b = 1 then
+          base := name
+        else
+          base := name;
+        if x = 1 then
+          ext := '.pas'
+        else
+          ext := '.pp';
+        path := pathJoin(nameStr(PName(listGet(dirs, i))), base + ext);
+        if (found = '') and sysFileExists(path) then
+          found := path;
+      end;
+  ifFindUnitSource := found <> '';
+end;
+
+function ifLower(c: char): char;
+begin
+  if (c >= 'A') and (c <= 'Z') then
+    ifLower := chr(ord(c) + 32)
+  else
+    ifLower := c;
+end;
+
+function ifIdChar(c: char): boolean;
+begin
+  ifIdChar := ((c >= 'a') and (c <= 'z')) or ((c >= 'A') and (c <= 'Z')) or
+              ((c >= '0') and (c <= '9')) or (c = '_');
+end;
+
+{ Does the source contain the word generic? (Conservative: such a unit's
+  implementation has bodies a precompiled interface would lose.) }
+function ifContainsGenerics(p: PCharArray; len: int64): boolean;
+var
+  i: int64;
+  w: string;
+begin
+  ifContainsGenerics := false;
+  for i := 0 to len - 7 do
+  begin
+    w := '';
+    w := ifLower(p^[i]) + ifLower(p^[i + 1]) + ifLower(p^[i + 2]) +
+         ifLower(p^[i + 3]) + ifLower(p^[i + 4]) + ifLower(p^[i + 5]) +
+         ifLower(p^[i + 6]);
+    if w = 'generic' then
+      exit(true);
+  end;
+end;
+
+{ The offset of the implementation keyword, skipping comments and strings,
+  or len. }
+function ifImplementationOffset(p: PCharArray; len: int64): int64;
+var
+  i, j: int64;
+  c: char;
+  word: boolean;
+begin
+  i := 0;
+  while i < len do
+  begin
+    c := p^[i];
+    if c = '''' then
+    begin
+      i := i + 1;
+      while i < len do
+      begin
+        if p^[i] = '''' then
+        begin
+          if (i + 1 < len) and (p^[i + 1] = '''') then
+            i := i + 2
+          else
+          begin
+            i := i + 1;
+            break;
+          end;
+        end
+        else
+          i := i + 1;
+      end;
+      continue;
+    end;
+    if c = '{' then
+    begin
+      i := i + 1;
+      while (i < len) and (p^[i] <> '}') do
+        i := i + 1;
+      i := i + 1;
+      continue;
+    end;
+    if (c = '(') and (i + 1 < len) and (p^[i + 1] = '*') then
+    begin
+      i := i + 2;
+      while (i + 1 < len) and not ((p^[i] = '*') and (p^[i + 1] = ')')) do
+        i := i + 1;
+      i := i + 2;
+      continue;
+    end;
+    if (c = '/') and (i + 1 < len) and (p^[i + 1] = '/') then
+    begin
+      while (i < len) and (p^[i] <> #10) do
+        i := i + 1;
+      continue;
+    end;
+    if ifIdChar(c) and not ((c >= '0') and (c <= '9')) then
+    begin
+      j := i;
+      while (j < len) and ifIdChar(p^[j]) do
+        j := j + 1;
+      word := j - i = 14;
+      if word then
+      begin
+        word := (ifLower(p^[i]) = 'i') and (ifLower(p^[i + 1]) = 'm') and
+                (ifLower(p^[i + 2]) = 'p') and (ifLower(p^[i + 3]) = 'l') and
+                (ifLower(p^[i + 4]) = 'e') and (ifLower(p^[i + 5]) = 'm') and
+                (ifLower(p^[i + 6]) = 'e') and (ifLower(p^[i + 7]) = 'n') and
+                (ifLower(p^[i + 8]) = 't') and (ifLower(p^[i + 9]) = 'a') and
+                (ifLower(p^[i + 10]) = 't') and (ifLower(p^[i + 11]) = 'i') and
+                (ifLower(p^[i + 12]) = 'o') and (ifLower(p^[i + 13]) = 'n');
+      end;
+      if word then
+        exit(i);
+      i := j;
+      continue;
+    end;
+    i := i + 1;
+  end;
+  ifImplementationOffset := len;
+end;
+
+{ Checks the .p3i's source and dependency hashes (item 22). }
+function ifInterfaceValid(const p3iPath, sourcePath: string;
+                          const dirs: TPtrList): boolean;
+var
+  data: PCharArray;
+  len, p, start, i: int64;
+  text: TBuf;
+  line, rest, name, hash, dep: string;
+  depData: PCharArray;
+  depLen: int64;
+  sawSource, ok, found: boolean;
+begin
+  ifInterfaceValid := false;
+  if not sysReadFile(p3iPath, data, len) then
+    exit;
+  if not sysReadFile(sourcePath, depData, depLen) then
+    exit;
+  hash := ifHashHex(ifHash(depData, depLen));
+  sawSource := false;
+  ok := true;
+  found := false;
+  bufInit(text);
+  bufAddChars(text, data, 0, len);
+  p := 0;
+  while (p < text.len) and ok do
+  begin
+    start := p;
+    while (p < text.len) and (text.data^[p] <> #10) do
+      p := p + 1;
+    line := '';
+    for i := start to p - 1 do
+      line := line + text.data^[i];
+    if p < text.len then
+      p := p + 1;
+    if not found then
+    begin
+      if line = '// p3 interface v1' then
+        found := true;
+      continue;
+    end;
+    if copy(line, 1, 11) = '// source ' then
+    begin
+      if copy(line, 12, length(line)) <> hash then
+        ok := false
+      else
+        sawSource := true;
+      continue;
+    end;
+    if copy(line, 1, 7) = '// use ' then
+    begin
+      rest := copy(line, 8, length(line));
+      i := pos(' ', rest);
+      if i = 0 then
+        ok := false
+      else
+      begin
+        name := copy(rest, 1, i - 1);
+        hash := copy(rest, i + 1, length(rest));
+        if not ifFindUnitSource(name, dirs, dep) then
+          ok := false
+        else if not sysReadFile(dep, depData, depLen) then
+          ok := false
+        else if ifHashHex(ifHash(depData, depLen)) <> hash then
+          ok := false;
+      end;
+      continue;
+    end;
+    if copy(line, 1, 11) = '// generics' then
+    begin
+      ok := false;
+      continue;
+    end;
+    if copy(line, 1, 2) <> '//' then
+      break;
+  end;
+  bufFree(text);
+  ifInterfaceValid := found and ok and sawSource;
+end;
+
+{ Writes the unit u's precompiled interface to path (item 22). }
+procedure ifWriteInterface(u: PDecl; const deps: TPtrList;
+                           srcData: PCharArray; srcLen: int64;
+                           const dirs: TPtrList; const path: string);
+var
+  off, i, j: int64;
+  text: TBuf;
+  useName: PName;
+  dep: PDecl;
+  depPath: string;
+  depData: PCharArray;
+  depLen: int64;
+  depName: PName;
+begin
+  off := ifImplementationOffset(srcData, srcLen);
+  if off >= srcLen then
+    exit;
+  bufInit(text);
+  bufAddChars(text, srcData, 0, off);
+  bufAdd(text, #10 + '// p3 interface v1' + #10);
+  if ifContainsGenerics(srcData, srcLen) then
+    bufAdd(text, '// generics' + #10);
+  bufAdd(text, '// source ' + ifHashHex(ifHash(srcData, srcLen)) + #10);
+  for i := 0 to u^.ifaceUses.count - 1 do
+  begin
+    useName := PIdent(listGet(u^.ifaceUses, i))^.name;
+    dep := nil;
+    for j := 0 to deps.count - 1 do
+    begin
+      depName := PDecl(listGet(deps, j))^.ident.name;
+      if depName = useName then
+      begin
+        dep := PDecl(listGet(deps, j));
+        break;
+      end;
+    end;
+    if (dep <> nil) and ifFindUnitSource(nameStr(useName), dirs, depPath) and
+       sysReadFile(depPath, depData, depLen) then
+      bufAdd(text, '// use ' + nameStr(useName) + ' ' +
+                    ifHashHex(ifHash(depData, depLen)) + #10);
+  end;
+  bufAdd(text, 'implementation' + #10 + 'end.' + #10);
+  if not sysWriteFile(path, text.data, text.len) then
+    diagWarning(noLoc, 'cannot write interface file ''' + path + '''');
+  bufFree(text);
+end;
+
+procedure visitUnit(const u: TIdent; interfacesOnly: boolean);
 var
   dirs: TPtrList;
-  found, path, base, ext: string;
+  found, path, base, ext, e: string;
   i, b, x, fid: longint;
   unitDecl: PDecl;
 begin
@@ -729,6 +1043,12 @@ begin
                'and in p3''s unit library)', identRange(u));
     exit;
   end;
+  if interfacesOnly then
+  begin
+    e := replaceExt(found, '.p3i');
+    if sysFileExists(e) and ifInterfaceValid(e, found, dirs) then
+      found := e;
+  end;
   if not smLoadFile(found, fid) then
   begin
     mapPut(failedUses, u.loc, u.name);
@@ -747,16 +1067,17 @@ begin
               nameStr(unitDecl^.ident.spelling) + ''', expected ''' +
               nameStr(u.spelling) + '''');
   for i := 0 to unitDecl^.ifaceUses.count - 1 do
-    visitUnit(PIdent(listGet(unitDecl^.ifaceUses, i))^);
-  for i := 0 to unitDecl^.implUses.count - 1 do
-    visitUnit(PIdent(listGet(unitDecl^.implUses, i))^);
+    visitUnit(PIdent(listGet(unitDecl^.ifaceUses, i))^, interfacesOnly);
+  if not interfacesOnly then
+    for i := 0 to unitDecl^.implUses.count - 1 do
+      visitUnit(PIdent(listGet(unitDecl^.implUses, i))^, interfacesOnly);
   mapPut(inProgress, u.name^.id, nil);
   mapPut(unitsDone, u.name^.id, unitDecl);
   listAdd(units, unitDecl);
 end;
 
 { Finds, parses and orders (dependencies first) the units in usesList. }
-procedure loadUnits(const usesList: TPtrList);
+procedure loadUnits(const usesList: TPtrList; interfacesOnly: boolean);
 var
   i: longint;
 begin
@@ -767,7 +1088,7 @@ begin
     exit;
   end;
   for i := 0 to usesList.count - 1 do
-    visitUnit(PIdent(listGet(usesList, i))^);
+    visitUnit(PIdent(listGet(usesList, i))^, interfacesOnly);
 end;
 
 { declared(NAME) after a uses clause: the units' names and those of their
@@ -781,7 +1102,7 @@ var
 begin
   if selfName <> nil then
     mapPut(inProgress, selfName^.id, selfName);
-  loadUnits(usesList);
+  loadUnits(usesList, separateUnits);
   for i := 0 to usesList.count - 1 do
   begin
     u := PIdent(listGet(usesList, i));
@@ -918,7 +1239,8 @@ var
   i: longint;
   layout: string;
   kind: TOutputKind;
-  noObjects: TPtrList;
+  noObjects, dirs: TPtrList;
+  p3i, srcP3i: string;
 begin
   compileUnit := false;
   if (u = nil) or diagHasErrors then
@@ -929,9 +1251,23 @@ begin
   for i := 0 to u^.implUses.count - 1 do
     listAdd(uses_, listGet(u^.implUses, i));
   selfUnit := u^.ident.name;
-  loadUnits(uses_);
+  loadUnits(uses_, true);
   if diagHasErrors or not semaCheckUnit(u, units, mode) then
     exit;
+  if (action = actObj) and (outputFile <> '-') then
+  begin
+    listInit(dirs);
+    listAdd(dirs, intern(pathDirName(inputFile)));
+    for i := 0 to includeDirs.count - 1 do
+      listAdd(dirs, listGet(includeDirs, i));
+    listAdd(dirs, intern(findUnitLibrary));
+    p3i := replaceExt(outputFile, '.p3i');
+    ifWriteInterface(u, units, smFileData(fid), smFileLen(fid), dirs, p3i);
+    srcP3i := replaceExt(smFileName(fid), '.p3i');
+    if srcP3i <> p3i then
+      ifWriteInterface(u, units, smFileData(fid), smFileLen(fid), dirs, srcP3i);
+    listFree(dirs);
+  end;
   if action = actExe then
   begin
     diagError(noLoc, '''' + inputFile + ''' is a unit: compile it with -c, -S or ' +
@@ -1089,7 +1425,7 @@ begin
     actParseTree:
       begin
         if not diagHasErrors then
-          loadUnits(prog^.progUses);
+          loadUnits(prog^.progUses, separateUnits);
         printParseTree(outBuf, prog, units);
         ok := writeOutput;
       end;
@@ -1103,7 +1439,7 @@ begin
       { --emit-ast and the code-generating actions: parse, load units and
         check (Sema is skipped after syntax errors) }
       if not diagHasErrors then
-        loadUnits(prog^.progUses);
+        loadUnits(prog^.progUses, separateUnits);
       semaOK := false;
       if not diagHasErrors then
         semaOK := semaCheck(prog, units, mode, separateUnits);
