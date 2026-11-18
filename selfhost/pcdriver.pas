@@ -258,10 +258,76 @@ begin
   moduleLayout := true;
 end;
 
+{ -mmacosx-version-min for a Mach-O target: the object's target triple
+  records the deployment target, while clang's default may be older (which
+  makes ld warn). Darwin N maps to macOS N-9 (25 -> 16). }
+function macDeploymentMin(const triple: string): string;
+var
+  p, i, major: longint;
+  majorStr, minorStr: string;
+begin
+  macDeploymentMin := '';
+  p := pos('darwin', triple);
+  if p > 0 then
+  begin
+    i := p + 6;
+    majorStr := '';
+    while (i <= length(triple)) and (triple[i] >= '0') and (triple[i] <= '9') do
+    begin
+      majorStr := majorStr + triple[i];
+      i := i + 1;
+    end;
+    if majorStr = '' then
+      exit;
+    major := 0;
+    for i := 1 to length(majorStr) do
+      major := major * 10 + (ord(majorStr[i]) - ord('0'));
+    if major >= 20 then
+      major := major - 9
+    else
+      major := 10;
+    { the object's target version: the Darwin major, minor 0 }
+    macDeploymentMin := intToStr(major) + '.0';
+    exit;
+  end;
+  p := pos('macosx', triple);
+  if p = 0 then
+    p := pos('macos', triple);
+  if p > 0 then
+  begin
+    if pos('macosx', triple) > 0 then
+      i := p + 6
+    else
+      i := p + 5;
+    majorStr := '';
+    minorStr := '';
+    while (i <= length(triple)) and (triple[i] >= '0') and (triple[i] <= '9') do
+    begin
+      majorStr := majorStr + triple[i];
+      i := i + 1;
+    end;
+    if (i <= length(triple)) and (triple[i] = '.') then
+    begin
+      i := i + 1;
+      while (i <= length(triple)) and (triple[i] >= '0') and (triple[i] <= '9') do
+      begin
+        minorStr := minorStr + triple[i];
+        i := i + 1;
+      end;
+    end;
+    if majorStr <> '' then
+    begin
+      if minorStr = '' then
+        minorStr := '0';
+      macDeploymentMin := majorStr + '.' + minorStr;
+    end;
+  end;
+end;
+
 function linkExecutable(const obj: string; const unitObjects: TPtrList;
                         const path, triple: string): boolean;
 var
-  runtime, cc: string;
+  runtime, cc, e: string;
   cmd: TBuf;
   status, i: longint;
 begin
@@ -287,6 +353,9 @@ begin
     addArg(cmd, nameStr(PName(listGet(libraryDirs, i))));
   for i := 0 to libraries.count - 1 do
     addArg(cmd, nameStr(PName(listGet(libraries, i))));
+  e := macDeploymentMin(triple);
+  if e <> '' then
+    addArg(cmd, '-mmacosx-version-min=' + e);
   { dead-code stripping of the unused sections (item 18) }
   if (pos('darwin', triple) > 0) or (pos('macos', triple) > 0) or
      (pos('apple', triple) > 0) then

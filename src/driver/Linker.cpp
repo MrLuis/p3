@@ -81,12 +81,20 @@ bool p3::linkExecutable(llvm::StringRef ObjectFile,
     Extra.push_back("-L" + D);
   for (const std::string &L : Libraries)
     Extra.push_back("-l" + L);
+  llvm::Triple T(Triple);
+  // On macOS the object records the deployment target from the target
+  // triple; clang's default can be older, which makes ld warn that the
+  // object was built for a newer macOS. Use the object's target.
+  if (T.isMacOSX()) {
+    llvm::VersionTuple V;
+    if (T.getMacOSXVersion(V))
+      Extra.push_back("-mmacosx-version-min=" + V.getAsString());
+  }
   llvm::SmallVector<llvm::StringRef, 8> Args = {CC, ObjectFile};
   Args.append(UnitObjects.begin(), UnitObjects.end());
   Args.push_back(RuntimeLib);
   Args.append(Extra.begin(), Extra.end());
   // Dead-code stripping of the unused sections (item 18).
-  llvm::Triple T(Triple);
   if (T.isOSBinFormatELF())
     Args.push_back("-Wl,--gc-sections");
   else if (T.isOSBinFormatMachO())
