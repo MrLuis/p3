@@ -259,7 +259,7 @@ begin
 end;
 
 function linkExecutable(const obj: string; const unitObjects: TPtrList;
-                        const path: string): boolean;
+                        const path, triple: string): boolean;
 var
   runtime, cc: string;
   cmd: TBuf;
@@ -287,6 +287,15 @@ begin
     addArg(cmd, nameStr(PName(listGet(libraryDirs, i))));
   for i := 0 to libraries.count - 1 do
     addArg(cmd, nameStr(PName(listGet(libraries, i))));
+  { dead-code stripping of the unused sections (item 18) }
+  if (pos('darwin', triple) > 0) or (pos('macos', triple) > 0) or
+     (pos('apple', triple) > 0) then
+    addArg(cmd, '-Wl,-dead_strip')
+  else if (pos('windows', triple) > 0) or (pos('mingw', triple) > 0) or
+          (pos('win32', triple) > 0) then
+    addArg(cmd, '-Wl,/OPT:REF')
+  else
+    addArg(cmd, '-Wl,--gc-sections');
   addArg(cmd, '-lm');
   addArg(cmd, '-o');
   addArg(cmd, path);
@@ -433,7 +442,7 @@ begin
       diagError(noLoc, 'cannot create temporary file');
       exit;
     end;
-    ok := writeText(code, obj) and linkExecutable(obj, unitObjects, path);
+    ok := writeText(code, obj) and linkExecutable(obj, unitObjects, path, triple);
     sysRemoveFile(obj);
     exit(ok);
   end;

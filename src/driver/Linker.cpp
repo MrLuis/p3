@@ -7,6 +7,7 @@
 #include "llvm/Support/Path.h"
 #include "llvm/Support/Process.h"
 #include "llvm/Support/Program.h"
+#include "llvm/TargetParser/Triple.h"
 
 using namespace p3;
 
@@ -62,7 +63,7 @@ bool p3::linkExecutable(llvm::StringRef ObjectFile,
                          llvm::StringRef OutputFile,
                          llvm::ArrayRef<std::string> LibraryDirs,
                          llvm::ArrayRef<std::string> Libraries,
-                         DiagnosticsEngine &Diags) {
+                         llvm::StringRef Triple, DiagnosticsEngine &Diags) {
   std::string RuntimeLib = findRuntimeLibrary();
   if (!llvm::sys::fs::exists(RuntimeLib)) {
     Diags.error("cannot find the Pascal runtime library '" +
@@ -84,6 +85,14 @@ bool p3::linkExecutable(llvm::StringRef ObjectFile,
   Args.append(UnitObjects.begin(), UnitObjects.end());
   Args.push_back(RuntimeLib);
   Args.append(Extra.begin(), Extra.end());
+  // Dead-code stripping of the unused sections (item 18).
+  llvm::Triple T(Triple);
+  if (T.isOSBinFormatELF())
+    Args.push_back("-Wl,--gc-sections");
+  else if (T.isOSBinFormatMachO())
+    Args.push_back("-Wl,-dead_strip");
+  else if (T.isOSBinFormatCOFF())
+    Args.push_back("-Wl,/OPT:REF");
   Args.append({"-lm", "-o", OutputFile});
 
   std::string ErrMsg;

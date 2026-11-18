@@ -40,7 +40,7 @@ bool linkExecutable(llvm::StringRef ObjectFile,
                     llvm::StringRef OutputFile,
                     llvm::ArrayRef<std::string> LibraryDirs,
                     llvm::ArrayRef<std::string> Libraries,
-                    DiagnosticsEngine &Diags);
+                    llvm::StringRef Triple, DiagnosticsEngine &Diags);
 
 } // namespace p3
 

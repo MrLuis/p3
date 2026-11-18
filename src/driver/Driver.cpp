@@ -439,7 +439,7 @@ bool Driver::finishModule(llvm::Module &Mod, llvm::TargetMachine &TMRef,
   Libraries.insert(Libraries.end(), ExternalLibraries.begin(),
                    ExternalLibraries.end());
   return linkExecutable(ObjPath, UnitObjects, Opts.OutputFile, Opts.LibraryDirs,
-                        Libraries, Diags);
+                        Libraries, Opts.TargetTriple, Diags);
 }
 
 Driver::~Driver() = default;

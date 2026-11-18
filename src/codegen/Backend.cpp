@@ -47,6 +47,10 @@ p3::createTargetMachine(llvm::StringRef Triple, unsigned OptLevel,
     return nullptr;
   }
   llvm::TargetOptions Options;
+  // Each function and global in its own section, for the link-time garbage
+  // collection (item 18).
+  Options.FunctionSections = true;
+  Options.DataSections = true;
   // PIC so the objects link into position-independent executables, which
   // is what clang/gcc produce by default on modern Linux and macOS.
   std::unique_ptr<llvm::TargetMachine> TM(T->createTargetMachine(

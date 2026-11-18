@@ -9,7 +9,8 @@ if(APPLE)
   target_compile_options(pascalrt PRIVATE -D_DARWIN_C_SOURCE)
 endif()
 # DWARF 4 like p3's own output: GNU ld mis-merges mixed DWARF 4/5 objects.
-target_compile_options(pascalrt PRIVATE $<$<CONFIG:Debug>:-gdwarf-4>)
+target_compile_options(pascalrt PRIVATE $<$<CONFIG:Debug>:-gdwarf-4>
+  -ffunction-sections -fdata-sections)
 set_target_properties(pascalrt PROPERTIES
   C_STANDARD 11
   POSITION_INDEPENDENT_CODE ON
