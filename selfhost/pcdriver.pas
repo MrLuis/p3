@@ -324,10 +324,36 @@ begin
   end;
 end;
 
+function isMachOTriple(const triple: string): boolean;
+begin
+  isMachOTriple := (pos('darwin', triple) > 0) or (pos('macos', triple) > 0) or
+                   (pos('apple', triple) > 0);
+end;
+
+{ Finds a library named as a file in the -L directories. }
+function findLibraryFile(const fname: string; const dirs: TPtrList): string;
+var
+  i: longint;
+  d, path: string;
+begin
+  findLibraryFile := '';
+  if pos('/', fname) > 0 then
+    exit(fname);
+  for i := 0 to dirs.count - 1 do
+  begin
+    d := nameStr(PName(listGet(dirs, i)));
+    if copy(d, 1, 2) = '-L' then
+      d := copy(d, 3, length(d));
+    path := pathJoin(d, fname);
+    if sysFileExists(path) then
+      exit(path);
+  end;
+end;
+
 function linkExecutable(const obj: string; const unitObjects: TPtrList;
                         const path, triple: string): boolean;
 var
-  runtime, cc, e: string;
+  runtime, cc, e, l, f, found: string;
   cmd: TBuf;
   status, i: longint;
 begin
@@ -348,11 +374,26 @@ begin
   for i := 0 to unitObjects.count - 1 do
     addArg(cmd, nameStr(PName(listGet(unitObjects, i))));
   addArg(cmd, runtime);
-  { -L directories, then -l libraries (each in command-line order) }
+  { -L directories, then -l libraries (each in command-line order). A
+    library named as a file ("-l:name") is a GNU ld extension; on Mach-O
+    resolve the file in the -L directories and pass its path. }
   for i := 0 to libraryDirs.count - 1 do
     addArg(cmd, nameStr(PName(listGet(libraryDirs, i))));
   for i := 0 to libraries.count - 1 do
-    addArg(cmd, nameStr(PName(listGet(libraries, i))));
+  begin
+    l := nameStr(PName(listGet(libraries, i)));
+    if isMachOTriple(triple) and (copy(l, 1, 3) = '-l:') then
+    begin
+      f := copy(l, 4, length(l));
+      found := findLibraryFile(f, libraryDirs);
+      if found <> '' then
+        addArg(cmd, found)
+      else
+        addArg(cmd, f);
+    end
+    else
+      addArg(cmd, l);
+  end;
   e := macDeploymentMin(triple);
   if e <> '' then
     addArg(cmd, '-mmacosx-version-min=' + e);

@@ -75,13 +75,31 @@ bool p3::linkExecutable(llvm::StringRef ObjectFile,
   if (CC.empty())
     return false;
 
-  // -L directories, then -l libraries (each in command-line order).
+  // -L directories, then -l libraries (each in command-line order). A
+  // library named as a file (":name") is -l:name, a GNU ld extension; on
+  // Mach-O resolve the file in the -L directories and pass its path.
+  llvm::Triple T(Triple);
   std::vector<std::string> Extra;
   for (const std::string &D : LibraryDirs)
     Extra.push_back("-L" + D);
-  for (const std::string &L : Libraries)
-    Extra.push_back("-l" + L);
-  llvm::Triple T(Triple);
+  for (const std::string &L : Libraries) {
+    if (T.isOSBinFormatMachO() && !L.empty() && L[0] == ':') {
+      llvm::StringRef File(L.c_str() + 1);
+      std::string Found;
+      if (!File.contains('/'))
+        for (const std::string &D : LibraryDirs) {
+          llvm::SmallString<256> Path(D);
+          llvm::sys::path::append(Path, File);
+          if (llvm::sys::fs::exists(Path)) {
+            Found = std::string(Path);
+            break;
+          }
+        }
+      Extra.push_back(Found.empty() ? File.str() : Found);
+    } else {
+      Extra.push_back("-l" + L);
+    }
+  }
   // On macOS the object records the deployment target from the target
   // triple; clang's default can be older, which makes ld warn that the
   // object was built for a newer macOS. Use the object's target.

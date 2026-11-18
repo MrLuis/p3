@@ -5,10 +5,13 @@
 ; RUN: %p3 --mode=tp %S/Inputs/externals/ok.pas -o %t.ok
 ; RUN: %t.ok | FileCheck --check-prefix=OK %s
 ; OK: 7
-; RUN: not %p3 --mode=tp -I %S/Inputs/externals/lib %S/Inputs/externals/uses.pas -o %t 2>&1 | FileCheck %s
+; RUN: not %p3 --mode=tp %S/Inputs/externals/missingname.pas -o %t.name 2>&1 | FileCheck --check-prefix=NAME %s
+; RUN: not %p3 --mode=tp %S/Inputs/externals/missingfile.pas -o %t.file 2>&1 | FileCheck --check-prefix=FILE %s
 ; RUN: rm -rf %t.dir && mkdir -p %t.dir && cp %S/Inputs/externals/lib/clib.pas %t.dir/
 ; RUN: %p3 --mode=tp -c %t.dir/clib.pas -o %t.dir/clib.o
-; RUN: not %p3 --mode=tp -fseparate-units -I %t.dir %S/Inputs/externals/uses.pas -o %t 2>&1 | FileCheck %s
-; CHECK-DAG: -lp3_no_such_library
-; CHECK-DAG: -l:libp3_no_such.so.1
-; CHECK: linker command failed
+; RUN: not %p3 --mode=tp -fseparate-units -I %t.dir %S/Inputs/externals/uses.pas -o %t 2>&1 | FileCheck --check-prefix=SEP %s
+; NAME-DAG: p3_no_such_library
+; NAME: linker command failed
+; FILE-DAG: libp3_no_such.so.1
+; FILE: linker command failed
+; SEP: linker command failed
