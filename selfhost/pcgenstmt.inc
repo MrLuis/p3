@@ -3784,6 +3784,7 @@ var
 begin
   irSetFastMath(optFastMath);
   irSetTarget(optCPU, optFeatures);
+  irSetSizeLevel(optSizeLevel);
   mode := m;
   optRange := rangeChecksOn;
   optOverflow := overflowChecksOn;

@@ -6159,6 +6159,10 @@ public:
     for (llvm::Function &F : M)
       if (!F.isDeclaration()) {
         F.addFnAttr(llvm::Attribute::NoUnwind);
+        if (CGOpts.SizeLevel == 1)
+          F.addFnAttr(llvm::Attribute::OptimizeForSize);
+        else if (CGOpts.SizeLevel == 2)
+          F.addFnAttr(llvm::Attribute::MinSize);
         if (TargetAttrs) {
           F.addFnAttr("target-cpu", CGOpts.TargetCPU);
           if (!CGOpts.TargetFeatures.empty())

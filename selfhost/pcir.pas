@@ -207,6 +207,8 @@ function irFuncRef(f: PIRFunc): TV;
 procedure irSetFastMath(b: boolean);
 { -mcpu / -mattr: the target attributes of the function definitions. }
 procedure irSetTarget(const cpu, features: string);
+{ -Os (1) / -Oz (2): the definitions' optsize/minsize attributes. }
+procedure irSetSizeLevel(n: longint);
 { Exceptions (CodeGen.cpp's mayRaise). A call of f cannot raise one: a
   runtime function that neither raises nor runs Pascal code, or a routine
   whose code was found not to. }
@@ -366,6 +368,7 @@ var
   branchWeights, invariantLoadMeta: PMeta;
   fastMath: boolean;
   targetCPU, targetFeatures: string;
+  sizeLevel: longint;
 
   cur: PIRFunc;
   curBlock: PIRBlock;
@@ -2377,6 +2380,11 @@ begin
   targetFeatures := features;
 end;
 
+procedure irSetSizeLevel(n: longint);
+begin
+  sizeLevel := n;
+end;
+
 function irLoadInv(t: PIRType; const p: TV; const name: string): TV;
 begin
   irLoadInv := irLoad(t, p, name);
@@ -3533,6 +3541,18 @@ begin
     f := PIRFunc(listGet(funcs, i));
     if f^.isDecl then
       continue;
+    if sizeLevel = 1 then
+    begin
+      if f^.attrs <> '' then
+        f^.attrs := f^.attrs + ' ';
+      f^.attrs := f^.attrs + 'optsize';
+    end
+    else if sizeLevel = 2 then
+    begin
+      if f^.attrs <> '' then
+        f^.attrs := f^.attrs + ' ';
+      f^.attrs := f^.attrs + 'minsize';
+    end;
     if (targetCPU <> '') and
        ((targetCPU <> 'generic') or (targetFeatures <> '')) then
       f^.targetAttrs := '"target-cpu"="' + targetCPU + '"';

@@ -34,6 +34,8 @@ struct CompilerOptions {
   Action Act = Action::EmitExe;
   LangMode Mode = LangMode::ISO;
   unsigned OptLevel = 0;    ///< 0..3
+  /// -Os (1) / -Oz (2): optimize for size rather than speed.
+  unsigned SizeLevel = 0;
   bool DebugInfo = false;   ///< -g
   std::string TargetTriple; ///< empty = host
   /// -mcpu / -mattr (and the project file's "cpu"): the target CPU and

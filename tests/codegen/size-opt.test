@@ -1,0 +1,7 @@
+; -Os / -Oz run LLVM's size pipelines and mark the definitions optsize /
+; minsize.
+; RUN: %p3 --mode=objfpc -Os --emit-llvm %S/Inputs/fastmath.pas -o - | FileCheck --check-prefix=OS %s
+; RUN: %p3 --mode=objfpc -Oz --emit-llvm %S/Inputs/fastmath.pas -o - | FileCheck --check-prefix=OZ %s
+
+; OS: attributes #{{[0-9]+}} = { {{.*}}optsize{{.*}} }
+; OZ: attributes #{{[0-9]+}} = { {{.*}}minsize{{.*}} }

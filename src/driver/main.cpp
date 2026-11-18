@@ -111,6 +111,14 @@ static cl::opt<bool> NoRangeChecks(
     cl::desc("Disable runtime range checks (subranges, array indices, ...)"),
     cl::cat(P3Category));
 
+static cl::opt<bool> OptimizeSize(
+    "Os", cl::desc("Optimize for size (like -O2, SLP vectorization on)"),
+    cl::cat(P3Category));
+
+static cl::opt<bool> OptimizeSizeAggressive(
+    "Oz", cl::desc("Optimize aggressively for size (like -Os)"),
+    cl::cat(P3Category));
+
 static cl::opt<std::string> MCPU(
     "mcpu", cl::desc("Target CPU (default: generic; 'native': the host CPU)"),
     cl::value_desc("cpu"), cl::cat(P3Category));
@@ -187,6 +195,11 @@ int main(int argc, char **argv) {
   Opts.Act = Act;
   Opts.Mode = Mode;
   Opts.OptLevel = OptLevel;
+  if (OptimizeSize || OptimizeSizeAggressive) {
+    Opts.OptLevel = 2;
+    Opts.SizeLevel = OptimizeSizeAggressive ? 2 : 1;
+    Opts.GivenOptLevel = true;
+  }
   Opts.DebugInfo = DebugInfo;
   Opts.IncludeDirs.assign(IncludeDirs.begin(), IncludeDirs.end());
   Opts.LibraryDirs.assign(LibraryDirs.begin(), LibraryDirs.end());

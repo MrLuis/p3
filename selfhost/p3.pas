@@ -23,6 +23,8 @@ var
   { -mcpu / -mattr: the target CPU and features; "native" = the host CPU }
   targetCPU, targetFeatures: string;
   givenCPU: boolean;
+  { -Os (1) / -Oz (2): optimize for size }
+  sizeLevel: longint;
   { -fkeep-unused: keep the routines and data nothing reachable refers to }
   keepUnused: boolean;
   optLevel: longint;
@@ -143,6 +145,8 @@ begin
   helpLine('  --fkeep-unused               - Keep the routines and data that nothing reachable from the program refers to');
   helpLine('  --ffast-math                 - Set the fast-math flags on floating-point instructions (contraction, reassociation, no NaN/Inf assumptions)');
   helpLine('  -mcpu <cpu>                  - Target CPU (default: generic; ''native'': the host CPU)');
+  helpLine('  -Os                          - Optimize for size (like -O2, SLP vectorization on)');
+  helpLine('  -Oz                          - Optimize aggressively for size (like -Os)');
   helpLine('  -mattr <features>            - Target features, e.g. +avx2,-sse4.2');
   helpLine('  --fno-inline-runtime         - Do not inline the runtime''s functions (from -O1 they are, when compiling for the host)');
   helpLine('  --fno-overflow-checks        - Disable runtime integer overflow checks');
@@ -163,13 +167,13 @@ begin
 end;
 
 const
-  numFlags = 22;
+  numFlags = 24;
   flagNames: array[1..numFlags] of string[20] = (
     'help', 'help-list', 'version', 'emit-tokens', 'emit-ast', 'emit-parse-tree',
     'emit-llvm', 'S', 'c', 'Werror', 'Wno-unused-variable', 'Wno-deprecated',
     'fno-overflow-checks',
     'fno-range-checks', 'fseparate-units', 'g', 'no-project', 'fzero-init',
-    'fno-zero-init', 'fno-inline-runtime', 'fkeep-unused', 'ffast-math');
+    'fno-zero-init', 'fno-inline-runtime', 'fkeep-unused', 'ffast-math', 'Os', 'Oz');
   numValueOpts = 13;
   valueOptNames: array[1..numValueOpts] of string[20] = (
     'o', 'mode', 'fdiagnostics-color', 'ferror-limit', 'target', 'I', 'O', 'L', 'l',
@@ -395,6 +399,7 @@ begin
   targetCPU := 'generic';
   targetFeatures := '';
   givenCPU := false;
+  sizeLevel := 0;
   debugInfo := false;
   keepUnused := false;
   separateUnits := false;
@@ -544,6 +549,19 @@ begin
     else if name = 'O' then
     begin
       optLevel := parseUInt(name, takeValue);
+      sizeLevel := 0;
+      givenOptLevel := true;
+    end
+    else if name = 'Os' then
+    begin
+      optLevel := 2;
+      sizeLevel := 1;
+      givenOptLevel := true;
+    end
+    else if name = 'Oz' then
+    begin
+      optLevel := 2;
+      sizeLevel := 2;
       givenOptLevel := true;
     end
     else if name = 'l' then
@@ -908,8 +926,9 @@ begin
     kind := okObj;
   end;
   listInit(noObjects);
-  compileUnit := emitOutput(outBuf, smFileName(fid), kind, optLevel, targetTriple,
-                            targetCPU, targetFeatures, outputFile, noObjects);
+  compileUnit := emitOutput(outBuf, smFileName(fid), kind, optLevel, sizeLevel,
+                            targetTriple, targetCPU, targetFeatures, outputFile,
+                            noObjects);
 end;
 
 { The input file's name without directory and extension ('a' for standard
@@ -982,6 +1001,7 @@ begin
       targetFeatures := hostCPUFeatures;
   end;
   cgSetTarget(targetCPU, targetFeatures);
+  cgSetSizeLevel(sizeLevel);
   cgSetFastMath(fastMath);
   if inputFile = '' then
     usageError('no input file');
@@ -1090,8 +1110,9 @@ begin
         else
           kind := okExe;
         end;
-        ok := emitOutput(outBuf, smFileName(fid), kind, optLevel, targetTriple,
-                         targetCPU, targetFeatures, outputFile, unitObjects);
+        ok := emitOutput(outBuf, smFileName(fid), kind, optLevel, sizeLevel,
+                         targetTriple, targetCPU, targetFeatures, outputFile,
+                         unitObjects);
       end;
     end;
   end;

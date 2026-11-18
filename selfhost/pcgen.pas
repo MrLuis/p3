@@ -47,11 +47,14 @@ procedure cgSetFastMath(b: boolean);
 { -mcpu / -mattr: the target CPU and features the functions' target
   attributes carry into the IR. }
 procedure cgSetTarget(const cpu, features: string);
+{ -Os (1) / -Oz (2): the definitions' optsize/minsize attributes. }
+procedure cgSetSizeLevel(n: longint);
 
 var
   { -ffast-math, for the modules generated from now on; cgSetFastMath sets it }
   optFastMath: boolean;
   optCPU, optFeatures: string;
+  optSizeLevel: longint;
 
 implementation
 
@@ -64,6 +67,11 @@ procedure cgSetTarget(const cpu, features: string);
 begin
   optCPU := cpu;
   optFeatures := features;
+end;
+
+procedure cgSetSizeLevel(n: longint);
+begin
+  optSizeLevel := n;
 end;
 
 type

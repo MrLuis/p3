@@ -75,13 +75,15 @@ void p3::linkRuntimeIR(llvm::Module &M, llvm::StringRef Path,
 }
 
 void p3::optimizeModule(llvm::Module &M, llvm::TargetMachine &TM,
-                         unsigned OptLevel) {
+                         unsigned OptLevel, unsigned SizeLevel) {
   llvm::LoopAnalysisManager LAM;
   llvm::FunctionAnalysisManager FAM;
   llvm::CGSCCAnalysisManager CGAM;
   llvm::ModuleAnalysisManager MAM;
 
-  llvm::PassBuilder PB(&TM);
+  llvm::PipelineTuningOptions PTO;
+  PTO.SLPVectorization = SizeLevel > 0 || OptLevel >= 2;
+  llvm::PassBuilder PB(&TM, PTO);
   PB.registerModuleAnalyses(MAM);
   PB.registerCGSCCAnalyses(CGAM);
   PB.registerFunctionAnalyses(FAM);
@@ -89,15 +91,20 @@ void p3::optimizeModule(llvm::Module &M, llvm::TargetMachine &TM,
   PB.crossRegisterProxies(LAM, FAM, CGAM, MAM);
 
   llvm::OptimizationLevel Level;
-  switch (OptLevel) {
-  case 0:  Level = llvm::OptimizationLevel::O0; break;
-  case 1:  Level = llvm::OptimizationLevel::O1; break;
-  case 2:  Level = llvm::OptimizationLevel::O2; break;
-  default: Level = llvm::OptimizationLevel::O3; break;
-  }
-  llvm::ModulePassManager MPM = OptLevel == 0
-                                    ? PB.buildO0DefaultPipeline(Level)
-                                    : PB.buildPerModuleDefaultPipeline(Level);
+  if (SizeLevel == 1)
+    Level = llvm::OptimizationLevel::Os;
+  else if (SizeLevel == 2)
+    Level = llvm::OptimizationLevel::Oz;
+  else
+    switch (OptLevel) {
+    case 0:  Level = llvm::OptimizationLevel::O0; break;
+    case 1:  Level = llvm::OptimizationLevel::O1; break;
+    case 2:  Level = llvm::OptimizationLevel::O2; break;
+    default: Level = llvm::OptimizationLevel::O3; break;
+    }
+  llvm::ModulePassManager MPM =
+      OptLevel == 0 && SizeLevel == 0 ? PB.buildO0DefaultPipeline(Level)
+                                      : PB.buildPerModuleDefaultPipeline(Level);
   MPM.run(M, MAM);
 }
 

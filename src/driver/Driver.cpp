@@ -275,6 +275,7 @@ bool Driver::runPipeline(FileID FID) {
   CGOpts.Directives = &Directives;
   CGOpts.DebugInfo = Opts.DebugInfo;
   CGOpts.OptLevel = Opts.OptLevel;
+  CGOpts.SizeLevel = Opts.SizeLevel;
   CGOpts.ZeroInit = Opts.ZeroInit.value_or(Opts.OptLevel == 0);
   CGOpts.KeepUnused = Opts.KeepUnused;
   CGOpts.SeparateUnits = Opts.SeparateUnits;
@@ -369,6 +370,7 @@ bool Driver::compileUnit(Parser &P, FileID FID, ASTContext &Ctx,
   CGOpts.Directives = &Directives;
   CGOpts.DebugInfo = Opts.DebugInfo;
   CGOpts.OptLevel = Opts.OptLevel;
+  CGOpts.SizeLevel = Opts.SizeLevel;
   CGOpts.ZeroInit = Opts.ZeroInit.value_or(Opts.OptLevel == 0);
   CGOpts.KeepUnused = Opts.KeepUnused;
   CGOpts.SeparateUnits = true;
@@ -393,7 +395,7 @@ bool Driver::finishModule(llvm::Module &Mod, llvm::TargetMachine &TMRef,
         llvm::Triple(Opts.TargetTriple) ==
             llvm::Triple(llvm::sys::getDefaultTargetTriple()))
       linkRuntimeIR(*M, findRuntimeIR(), Diags);
-    optimizeModule(*M, *TM, Opts.OptLevel);
+    optimizeModule(*M, *TM, Opts.OptLevel, Opts.SizeLevel);
   }
 
   switch (Opts.Act) {

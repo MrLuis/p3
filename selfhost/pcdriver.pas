@@ -23,6 +23,7 @@ function moduleLayout(const triple: string; var layout: string): boolean;
 { Writes the IR module ir (named name) as kind to path ('-': standard
   output) at optimization level opt for triple. }
 function emitOutput(const ir: TBuf; const name: string; kind: TOutputKind; opt: longint;
+                    sizeLevel: longint;
                     const triple, cpu, features, path: string;
                     const unitObjects: TPtrList): boolean;
 { The directory of p3's unit library, searched after -I directories:
@@ -319,6 +320,7 @@ begin
 end;
 
 function emitOutput(const ir: TBuf; const name: string; kind: TOutputKind; opt: longint;
+                    sizeLevel: longint;
                     const triple, cpu, features, path: string;
                     const unitObjects: TPtrList): boolean;
 var
@@ -356,7 +358,7 @@ begin
     if not sysFileExists(runtimeIR) then
       runtimeIR := '';
   end;
-  m := llvmParseAndOptimize(ir, name, tm, opt, runtimeIR, rtProblem, err);
+  m := llvmParseAndOptimize(ir, name, tm, opt, sizeLevel, runtimeIR, rtProblem, err);
   if rtProblem <> '' then
     diagWarning(noLoc, 'cannot read the runtime''s LLVM IR ''' + runtimeIR + ''' (' +
                        rtProblem + '); runtime functions are not inlined');

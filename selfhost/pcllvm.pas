@@ -38,8 +38,8 @@ function llvmDataLayout(tm: pointer): string;
   inlined, or ''; if that file cannot be used, rtProblem says why (else
   it is ''). }
 function llvmParseAndOptimize(const ir: TBuf; const name: string; tm: pointer; opt: longint;
-                              const runtimeIR: string; var rtProblem: string;
-                              var err: TBuf): pointer;
+                              sizeLevel: longint; const runtimeIR: string;
+                              var rtProblem: string; var err: TBuf): pointer;
 { Writes the module as IR text, assembly or an object file. }
 function llvmPrintModule(m: pointer; const path: string; var err: TBuf): boolean;
 { Appends the assembly or object code for the module to ob. }
@@ -296,8 +296,8 @@ begin
 end;
 
 function llvmParseAndOptimize(const ir: TBuf; const name: string; tm: pointer; opt: longint;
-                              const runtimeIR: string; var rtProblem: string;
-                              var err: TBuf): pointer;
+                              sizeLevel: longint; const runtimeIR: string;
+                              var rtProblem: string; var err: TBuf): pointer;
 var
   ctx, buf, m, e, opts: pointer;
   msg: pchar;
@@ -332,9 +332,17 @@ begin
     opts := LLVMCreatePassBuilderOptions;
     LLVMPassBuilderOptionsSetLoopInterleaving(opts, 1);
     LLVMPassBuilderOptionsSetLoopVectorization(opts, 1);
-    LLVMPassBuilderOptionsSetSLPVectorization(opts, 0);
+    if (sizeLevel > 0) or (opt >= 2) then
+      LLVMPassBuilderOptionsSetSLPVectorization(opts, 1)
+    else
+      LLVMPassBuilderOptionsSetSLPVectorization(opts, 0);
     LLVMPassBuilderOptionsSetLoopUnrolling(opts, 1);
-    e := LLVMRunPasses(m, cstr('default<O' + intToStr(opt) + '>', passes), tm, opts);
+    if sizeLevel = 1 then
+      e := LLVMRunPasses(m, cstr('default<Os>', passes), tm, opts)
+    else if sizeLevel = 2 then
+      e := LLVMRunPasses(m, cstr('default<Oz>', passes), tm, opts)
+    else
+      e := LLVMRunPasses(m, cstr('default<O' + intToStr(opt) + '>', passes), tm, opts);
     if e <> nil then
     begin
       takeMessage(err, LLVMGetErrorMessage(e));

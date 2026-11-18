@@ -40,6 +40,8 @@ struct CodeGenOptions {
   bool DebugInfo = false;
   /// For the debug info's "optimized" flag.
   unsigned OptLevel = 0;
+  /// -Os (1) / -Oz (2): optsize/minsize function attributes.
+  unsigned SizeLevel = 0;
   /// Local arrays, records and strings start zeroed (-fzero-init; the
   /// default at -O0). Scalars, and what holds managed values or files,
   /// always do.
