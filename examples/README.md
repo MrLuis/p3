@@ -45,3 +45,4 @@ that. Executables go to the project's `bin/`, which git ignores.
 |---|---|
 | `hello` | a program with a class in a unit of its own and a unit of p3's library (`sysutils`) |
 | `httpserver` | a basic HTTP server: C library sockets through `external` routines, ansistrings, units; see its [README](httpserver/README.md) |
+| `sqlite` | SQLite through `external` routines, a small wrapper with tagged SQL templates, tuples and an enumerator; see its [README](sqlite/README.md) |

@@ -1,0 +1,11 @@
+{
+  "name": "sqlite",
+  "version": "0.1.0",
+  "description": "SQLite through external C routines, with tagged SQL templates",
+  "main": "src/sqlite.pas",
+  "output": "bin/sqlite",
+  "mode": "objfpc",
+  "unitPaths": ["src/lib"],
+  "optimize": 0,
+  "debug": true
+}
