@@ -83,7 +83,7 @@ def install(stage_dir, runtime):
 
 
 def version_line(compiler):
-    """'0.1.0', '19.1.7', 'aarch64-unknown-linux-gnu' from --version."""
+    """'0.1.1', '19.1.7', 'aarch64-unknown-linux-gnu' from --version."""
     out = run([compiler, "--version"]).splitlines()
     first = out[0].split()
     version = first[2]
