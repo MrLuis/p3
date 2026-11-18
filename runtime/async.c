@@ -123,7 +123,7 @@ PasContext **__pas_async_pool;
 int __pas_async_pool_size;
 int __pas_async_pool_next;
 
-extern void *const __pas_eoperationcancelled_vmt[5];
+extern void *const __pas_eoperationcancelled_vmt[7];
 void __pas_raise_message(void *const *vmt, const char *text)
     __attribute__((noreturn));
 
@@ -1224,7 +1224,7 @@ typedef struct PasGen {
 /* The generator whose body is running on this thread (yield's). */
 _Thread_local PasGen *__pas_gen_current;
 
-extern void *const __pas_iteratorstop_vmt[5];
+extern void *const __pas_iteratorstop_vmt[7];
 
 PasGen *__pas_gen_new(const PasDynInfo *info, int64_t args_size,
                       void (*entry)(PasGen *), void (*args_fini)(void *)) {

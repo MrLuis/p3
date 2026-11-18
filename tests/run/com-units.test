@@ -17,6 +17,6 @@
 ; CHECK-NEXT: done
 ;
 ; RUN: %p3 --mode=objfpc --emit-llvm %t/lib/counters.pas -o - | FileCheck --check-prefix=UNIT %s
-; UNIT-DAG: @"pas.counters$tcounter$vmt" = constant [6 x ptr] [ptr @__pas_tinterfacedobject_vmt, ptr @.str, ptr inttoptr (i64 {{[0-9]+}} to ptr), ptr @intfs.tcounter, ptr @"pas.counters$tcounter.destroy", ptr @"pas.counters$tcounter.next"]
+; UNIT-DAG: @"pas.counters$tcounter$vmt" = constant [8 x ptr] [ptr @__pas_tinterfacedobject_vmt, ptr @.str, ptr inttoptr (i64 {{[0-9]+}} to ptr), ptr @intfs.tcounter, ptr inttoptr (i64 2 to ptr), ptr @ancestors.tcounter, ptr @"pas.counters$tcounter.destroy", ptr @"pas.counters$tcounter.next"]
 ; UNIT-DAG: @intfs.tcounter = internal constant [6 x ptr] [ptr inttoptr (i64 2 to ptr), ptr @cleanup.tcounter, ptr @__pas_iunknown_iid, ptr @itable.tcounter.iunknown, ptr @"pas.counters$icounter$iid", ptr @itable.tcounter.icounter]
 ; UNIT-DAG: define internal void @cleanup.tcounter(ptr %self)

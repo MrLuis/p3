@@ -3962,7 +3962,7 @@ var
   vmt: TV;
 begin
   vmt := irLoad(irPtrT, obj, 'vmt');
-  loadVirtual := loadVMTSlot(vmt, 4 + index, 'method');
+  loadVirtual := loadVMTSlot(vmt, 6 + index, 'method');
 end;
 
 { if vmt = nil then a runtime error, under range checks }
@@ -3995,8 +3995,8 @@ begin
     exit(g^);
   name := '__pas_' + lowerStr(nameStr(c^.declName)) + '_vmt';
   if not irFindGlobal(name, v) then
-    v := irGlobal(name, 'external', irArray(5, irPtrT), irNull, true,
-                  false, true, 0);
+    v := irGlobal(name, 'external', irArray(6 + c^.classVTable.count, irPtrT),
+                  irNull, true, false, true, 0);
   mapPut(vmts, c^.id, irBox(v));
   vmtOf := v;
 end;
@@ -4165,6 +4165,115 @@ begin
     end;
   end;
   canDevirtualize := true;
+end;
+
+function classIsClosed(c: PType): boolean;
+begin
+  classIsClosed := not separate or
+                   ((c^.classModule <> nil) and
+                    (mapGet(exportedClasses, c^.id) = nil));
+end;
+
+function classDepth(c: PType): longint;
+var
+  d: longint;
+  a: PType;
+begin
+  d := 0;
+  a := c;
+  while (a <> nil) and (a^.classParent <> nil) do
+  begin
+    d := d + 1;
+    a := a^.classParent;
+  end;
+  classDepth := d;
+end;
+
+function classHasDescendants(c: PType): boolean;
+var
+  i: longint;
+  d: PType;
+begin
+  if c^.classModule = nil then { a predeclared class: the runtime's own
+                                 descendants are not in allClasses }
+    exit(true);
+  if not classIsClosed(c) then
+    exit(true);
+  for i := 0 to allClasses.count - 1 do
+  begin
+    d := PType(listGet(allClasses, i));
+    if (d <> c) and inheritsFrom(d, c) then
+      exit(true);
+  end;
+  classHasDescendants := false;
+end;
+
+{ Is vmt the VMT of c or of a descendant? A class with no descendants only
+  needs the equality test; otherwise the depth and ancestor display make it
+  two loads and two compares (item 12). }
+function classIsVMT(const vmt: TV; c: PType): TV;
+var
+  target, exact, depth, ancestors, slot, ancestor, inside: TV;
+  d: longint;
+begin
+  target := vmtOf(c);
+  if not classHasDescendants(c) then
+    exit(irICmp('eq', vmt, target, 'is'));
+  d := classDepth(c);
+  exact := irICmp('eq', vmt, target, 'is.exact');
+  depth := irCast('ptrtoint', loadVMTSlot(vmt, 4, 'depth'), irI64, '');
+  ancestors := loadVMTSlot(vmt, 5, 'ancestors');
+  slot := irGEP1(irPtrT, ancestors, i64c(d), true, '');
+  ancestor := irLoad(irPtrT, slot, 'ancestor');
+  inside := irBin('and', irICmp('uge', depth, i64c(d), ''),
+                  irICmp('eq', ancestor, target, ''), 'is.display');
+  classIsVMT := irBin('or', exact, inside, 'is');
+end;
+
+{ obj is c: false for nil, else classIsVMT. }
+function emitClassIs(const obj: TV; c: PType): TV;
+var
+  nullB, checkB, endB: PIRBlock;
+  vmt, r, res: TV;
+  phi: PIRInst;
+begin
+  nullB := irNewBlock('is.null');
+  checkB := irNewBlock('is.check');
+  endB := irNewBlock('is.end');
+  irCondBr(irICmp('eq', obj, irNull, ''), nullB, checkB, false);
+  irSetInsertPoint(nullB);
+  irBr(endB);
+  irSetInsertPoint(checkB);
+  vmt := irLoad(irPtrT, obj, 'vmt');
+  r := classIsVMT(vmt, c);
+  irBr(endB);
+  irSetInsertPoint(endB);
+  res := irPhi(irI1, 'is', phi);
+  irAddIncoming(phi, irConstBool(false), nullB);
+  irAddIncoming(phi, r, checkB);
+  emitClassIs := res;
+end;
+
+{ obj as c: obj, or a runtime error if it is not a c (item 12). }
+function emitClassAs(const obj: TV; c: PType; loc: TLoc): TV;
+var
+  nullB, checkB, errB, okB: PIRBlock;
+  vmt: TV;
+begin
+  nullB := irNewBlock('as.null');
+  checkB := irNewBlock('as.check');
+  errB := irNewBlock('as.error');
+  okB := irNewBlock('as.ok');
+  irCondBr(irICmp('eq', obj, irNull, ''), nullB, checkB, false);
+  irSetInsertPoint(nullB);
+  irBr(okB);
+  irSetInsertPoint(checkB);
+  vmt := irLoad(irPtrT, obj, 'vmt');
+  irCondBr(classIsVMT(vmt, c), okB, errB, false);
+  irSetInsertPoint(errB);
+  emitRuntimeError('invalid class typecast', loc);
+  irSetInsertPoint(okB);
+  emitClassAs := obj;
 end;
 
 { obj.Free: if obj <> nil then obj.Destroy (virtual), then release it. }
@@ -4377,7 +4486,7 @@ begin
     if not inherited_ and (r^.vmtIndex >= 0) and not canDevirtualize(r) then
     begin
       emitNilClassCheck(self_, loc);
-      fn := loadVMTSlot(self_, 4 + r^.vmtIndex, 'method');
+      fn := loadVMTSlot(self_, 6 + r^.vmtIndex, 'method');
       res := emitCallToSelf(methodFnType(r), fn, irNull, true, self_, true, r^.params, args,
                             resultOf(r));
     end
@@ -4584,7 +4693,7 @@ begin
   end;
   if ctor^.vmtIndex >= 0 then
   begin
-    fn := loadVMTSlot(vmt, 4 + ctor^.vmtIndex, 'ctor');
+    fn := loadVMTSlot(vmt, 6 + ctor^.vmtIndex, 'ctor');
     ignored := irCallPtr(irVoidT, fn, buf, '');
   end
   else
@@ -4823,7 +4932,7 @@ end;
 { obj is TFoo / obj as TFoo: the runtime walks obj's chain of VMTs. }
 function emitIsAs(e: PNode): TV;
 var
-  obj, vmt, r, msgG: TV;
+  obj, r, msgG: TV;
   b: TBuf;
 begin
   obj := visitExpr(e^.lhs);
@@ -4846,19 +4955,9 @@ begin
                iidOf(e^.rhs^.typ), msgG, 'itable');
     exit(makeInterface(obj, r));
   end;
-  vmt := vmtOf(e^.rhs^.typ);
   if e^.bop = boIs then
-  begin
-    r := call2(classRuntime('__pas_class_is', 'i32', 'ptr,ptr'), obj, vmt, '');
-    exit(irICmp('ne', r, i32c(0), 'is'));
-  end;
-  bufInit(b);
-  bufAdd(b, 'invalid class typecast');
-  bufAddWhere(b, e^.opLoc);
-  msgG := globalString(b.data, 0, b.len, '.rterr');
-  bufFree(b);
-  emitIsAs := call3(classRuntime('__pas_class_as', 'ptr', 'ptr,ptr,ptr'), obj, vmt, msgG,
-                    'as');
+    exit(emitClassIs(obj, e^.rhs^.typ));
+  emitIsAs := emitClassAs(obj, e^.rhs^.typ, e^.opLoc);
 end;
 
 { --- Operators --- }
@@ -5791,7 +5890,7 @@ begin
   begin
     obj := receiverClass(obj, selfIsClass, loc);
     if r^.vmtIndex >= 0 then
-      code := loadVMTSlot(obj, 4 + r^.vmtIndex, 'method');
+      code := loadVMTSlot(obj, 6 + r^.vmtIndex, 'method');
   end
   else if r^.vmtIndex >= 0 then
   begin

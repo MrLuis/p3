@@ -1755,11 +1755,11 @@ begin
   for i := 0 to s^.handlers.count - 1 do
   begin
     hd := PExceptHandler(listGet(s^.handlers, i));
-    isv := call2(classRuntime('__pas_class_is', 'i32', 'ptr,ptr'), obj,
-                 vmtOf(hd^.hClass), '');
+    isv := irLoad(irPtrT, obj, 'vmt');
+    isv := classIsVMT(isv, hd^.hClass);
     doB := irNewBlock('handler.do');
     nextB := irNewBlock('handler.next');
-    irCondBr(irICmp('ne', isv, i32c(0), ''), doB, nextB, false);
+    irCondBr(isv, doB, nextB, false);
     irSetInsertPoint(doB);
     if hd^.hVar <> nil then
     begin
@@ -2661,7 +2661,7 @@ var
   params: TPtrList;
 begin
   listAdd(allClasses, c);
-  ty := irArray(4 + c^.classVTable.count, irPtrT);
+  ty := irArray(6 + c^.classVTable.count, irPtrT);
   if d^.cgExport = nil then
   begin
     name := 'vmt.' + lowerStr(nm(c^.declName));
@@ -2806,10 +2806,12 @@ end;
 procedure defineVMTs;
 var
   i, j: longint;
-  c: PType;
+  c, a: PType;
   r: PDecl;
-  elems: TPtrList;
+  elems, anc, ancElems: TPtrList;
   g: PTVBox;
+  ancTy, vmtTy: PIRType;
+  ancG: TV;
 begin
   for i := 0 to vmtsToDefine.count - 1 do
   begin
@@ -2819,6 +2821,23 @@ begin
     listAdd(elems, irBox(getPStrConstant(c^.declName^.chars, 0, c^.declName^.len)));
     listAdd(elems, irBox(irConstIntToPtr(instanceSize(c))));
     listAdd(elems, irBox(interfaceTable(c)));
+    { the ancestor display: the VMTs from the root down to c (item 12) }
+    listInit(anc);
+    a := c;
+    while a <> nil do
+    begin
+      listAdd(anc, irBox(vmtOf(a)));
+      a := a^.classParent;
+    end;
+    listInit(ancElems);
+    for j := anc.count - 1 downto 0 do
+      listAdd(ancElems, listGet(anc, j));
+    ancTy := irArray(anc.count, irPtrT);
+    ancG := irGlobal('ancestors.' + lowerStr(nm(c^.declName)), 'internal', ancTy,
+                     irConstArray(ancTy, ancElems), true, false, false, 8);
+    listFree(ancElems);
+    listAdd(elems, irBox(irConstIntToPtr(anc.count - 1)));
+    listAdd(elems, irBox(ancG));
     for j := 0 to c^.classVTable.count - 1 do
     begin
       r := PDecl(listGet(c^.classVTable, j));
@@ -2830,9 +2849,11 @@ begin
       else
         listAdd(elems, irBox(irFuncRef(fnOf(r))));
     end;
+    vmtTy := irArray(elems.count, irPtrT);
     g := PTVBox(mapGet(vmts, c^.id));
-    irSetGlobalInit(g^, irConstArray(irArray(elems.count, irPtrT), elems));
+    irSetGlobalInit(g^, irConstArray(vmtTy, elems));
     listFree(elems);
+    listFree(anc);
   end;
   listClear(vmtsToDefine);
 end;

@@ -6,9 +6,9 @@
 ; nested routine uses it).
 ; RUN: %p3 --mode=objfpc --emit-llvm %S/Inputs/classes.pas -o - | FileCheck %s
 
-; CHECK: @vmt.ta = internal constant [6 x ptr] [ptr @__pas_tobject_vmt, ptr @.str, ptr inttoptr (i64 16 to ptr), ptr null, ptr @__pas_tobject_destroy, ptr @pas.ta.v]
-; CHECK: @vmt.tb = internal constant [6 x ptr] [ptr @vmt.ta, ptr @.str.1, ptr inttoptr (i64 24 to ptr), ptr null, ptr @__pas_tobject_destroy, ptr @pas.tb.v]
-; CHECK: @__pas_tobject_vmt = external constant [5 x ptr]
+; CHECK: @vmt.ta = internal constant [8 x ptr] [ptr @__pas_tobject_vmt, ptr @.str, ptr inttoptr (i64 16 to ptr), ptr null, ptr inttoptr (i64 1 to ptr), ptr @ancestors.ta, ptr @__pas_tobject_destroy, ptr @pas.ta.v]
+; CHECK: @vmt.tb = internal constant [8 x ptr] [ptr @vmt.ta, ptr @.str.1, ptr inttoptr (i64 24 to ptr), ptr null, ptr inttoptr (i64 2 to ptr), ptr @ancestors.tb, ptr @__pas_tobject_destroy, ptr @pas.tb.v]
+; CHECK: @__pas_tobject_vmt = external constant [7 x ptr]
 ; CHECK: @.str = private unnamed_addr constant [3 x i8] c"\02TA"
 
 ; TB.Create: TObject's constructor does nothing; the object is 24 bytes
@@ -16,18 +16,20 @@
 ; CHECK-LABEL: define i32 @main(
 ; CHECK:      %obj = call ptr @__pas_new(i64 24)
 ; CHECK-NEXT: store ptr @vmt.tb, ptr %obj, align 8
-; A virtual call (checked for nil): slot 1 is at index 5 of the VMT.
+; A virtual call (checked for nil): slot 1 is at index 7 of the VMT.
 ; CHECK:      %vmt = load ptr, ptr %a, align 8
-; CHECK-NEXT: %[[SLOT:[0-9]+]] = getelementptr inbounds ptr, ptr %vmt, i64 5
+; CHECK-NEXT: %[[SLOT:[0-9]+]] = getelementptr inbounds ptr, ptr %vmt, i64 7
 ; CHECK-NEXT: %method = load ptr, ptr %[[SLOT]], align 8
 ; CHECK-NEXT: call void %method(ptr null, ptr %a, i32 2)
 ; A static method.
 ; CHECK:      call void @pas.ta.s(ptr null, ptr %a1)
-; CHECK:      call i32 @__pas_class_is(ptr %a2, ptr @vmt.tb)
+; An exact type test (TB has no descendants): obj.vmt == TB.vmt.
+; CHECK:      [[IVMT:%vmt[0-9]*]] = load ptr, ptr %a2, align 8
+; CHECK-NEXT: [[IS:%is[0-9]*]] = icmp eq ptr [[IVMT]], @vmt.tb
 ; Free: Destroy (slot 0) unless nil, then free its fields' interfaces and memory.
 ; CHECK:      br i1 %{{[0-9]+}}, label %free.end, label %free.do
-; CHECK:      getelementptr inbounds ptr, ptr %vmt4, i64 4
-; CHECK:      call void @__pas_free_instance(ptr %a3)
+; CHECK:      getelementptr inbounds ptr, ptr %vmt{{[0-9]+}}, i64 6
+; CHECK:      call void @__pas_free_instance(ptr %a{{[0-9]+}})
 
 ; CHECK-LABEL: define internal void @pas.ta.v(ptr %link, ptr %self, i32 %n)
 ; CHECK:      %self.addr = alloca ptr, align 8

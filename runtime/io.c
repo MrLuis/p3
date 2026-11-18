@@ -896,8 +896,55 @@ void __pas_tobject_destroy(void *link, void *self) {
   (void)self;
 }
 
-void *const __pas_tobject_vmt[5] = {
+/* A VMT is [parent, name, instance size, interface table, depth,
+ * ancestors, virtual methods...]. The ancestor display has the VMT of each
+ * class of the hierarchy, the root first, so that a type test is
+ * depth(obj) >= depth(C) && obj.vmt.ancestors[depth(C)] == C (item 12). */
+extern void *const __pas_tobject_vmt[7];
+extern void *const __pas_tinterfacedobject_vmt[7];
+extern void *const __pas_tsharedobject_vmt[7];
+extern void *const __pas_exception_vmt[7];
+extern void *const __pas_eexternal_vmt[7];
+extern void *const __pas_einterror_vmt[7];
+extern void *const __pas_edivbyzero_vmt[7];
+extern void *const __pas_eintoverflow_vmt[7];
+extern void *const __pas_econverterror_vmt[7];
+extern void *const __pas_eoperationcancelled_vmt[7];
+extern void *const __pas_iteratorstop_vmt[7];
+
+static void *const tobject_ancestors[1] = {(void *)__pas_tobject_vmt};
+static void *const interfacedobject_ancestors[2] = {
+    (void *)__pas_tobject_vmt, (void *)__pas_tinterfacedobject_vmt};
+static void *const sharedobject_ancestors[2] = {
+    (void *)__pas_tobject_vmt, (void *)__pas_tsharedobject_vmt};
+static void *const exception_ancestors[2] = {
+    (void *)__pas_tobject_vmt, (void *)__pas_exception_vmt};
+static void *const eexternal_ancestors[3] = {
+    (void *)__pas_tobject_vmt, (void *)__pas_exception_vmt,
+    (void *)__pas_eexternal_vmt};
+static void *const einterror_ancestors[4] = {
+    (void *)__pas_tobject_vmt, (void *)__pas_exception_vmt,
+    (void *)__pas_eexternal_vmt, (void *)__pas_einterror_vmt};
+static void *const edivbyzero_ancestors[5] = {
+    (void *)__pas_tobject_vmt, (void *)__pas_exception_vmt,
+    (void *)__pas_eexternal_vmt, (void *)__pas_einterror_vmt,
+    (void *)__pas_edivbyzero_vmt};
+static void *const eintoverflow_ancestors[5] = {
+    (void *)__pas_tobject_vmt, (void *)__pas_exception_vmt,
+    (void *)__pas_eexternal_vmt, (void *)__pas_einterror_vmt,
+    (void *)__pas_eintoverflow_vmt};
+static void *const econverterror_ancestors[3] = {
+    (void *)__pas_tobject_vmt, (void *)__pas_exception_vmt,
+    (void *)__pas_econverterror_vmt};
+static void *const eoperationcancelled_ancestors[3] = {
+    (void *)__pas_tobject_vmt, (void *)__pas_exception_vmt,
+    (void *)__pas_eoperationcancelled_vmt};
+static void *const iteratorstop_ancestors[2] = {
+    (void *)__pas_tobject_vmt, (void *)__pas_iteratorstop_vmt};
+
+void *const __pas_tobject_vmt[7] = {
     NULL, (void *)"\007TObject", (void *)(uintptr_t)sizeof(void *), NULL,
+    (void *)(uintptr_t)0, (void *)tobject_ancestors,
     (void *)(uintptr_t)__pas_tobject_destroy};
 
 /* TInterfacedObject: TObject, then FRefCount; implements IUnknown. */
@@ -910,16 +957,19 @@ static void *const iunknown_methods[1] = {NULL};
 static void *const interfaced_intfs[4] = {
     (void *)(uintptr_t)1, NULL, (void *)__pas_iunknown_iid,
     (void *)iunknown_methods};
-void *const __pas_tinterfacedobject_vmt[5] = {
+void *const __pas_tinterfacedobject_vmt[7] = {
     (void *)__pas_tobject_vmt, (void *)"\021TInterfacedObject",
     (void *)(uintptr_t)sizeof(struct PasInterfacedObject),
-    (void *)interfaced_intfs, (void *)(uintptr_t)__pas_tobject_destroy};
+    (void *)interfaced_intfs, (void *)(uintptr_t)1,
+    (void *)interfacedobject_ancestors,
+    (void *)(uintptr_t)__pas_tobject_destroy};
 
 /* TSharedObject = class(TObject) (objfpc): the root of the thread-safe
  * classes, which `shared` variables hold. */
-void *const __pas_tsharedobject_vmt[5] = {
+void *const __pas_tsharedobject_vmt[7] = {
     (void *)__pas_tobject_vmt, (void *)"\015TSharedObject",
-    (void *)(uintptr_t)sizeof(void *), NULL,
+    (void *)(uintptr_t)sizeof(void *), NULL, (void *)(uintptr_t)1,
+    (void *)sharedobject_ancestors,
     (void *)(uintptr_t)__pas_tobject_destroy};
 
 static int32_t *refcount_of(void *obj) {
@@ -1036,10 +1086,14 @@ void *__pas_intf_as(const void *obj, const void *iid, const char *msg) {
 }
 
 int32_t __pas_class_inherits(const void *cls, const void *vmt) {
-  for (void *const *v = cls; v; v = (void *const *)v[0])
-    if (v == vmt)
-      return 1;
-  return 0;
+  if (!cls || !vmt)
+    return 0;
+  const void *const *c = (const void *const *)cls;
+  uintptr_t depth = (uintptr_t)c[4];
+  uintptr_t target = (uintptr_t)((const void *const *)vmt)[4];
+  if (depth < target)
+    return 0;
+  return ((const void *const *)c[5])[target] == vmt;
 }
 
 int32_t __pas_class_is(const void *obj, const void *vmt) {
@@ -1079,21 +1133,30 @@ struct PasExceptionObject {
   unsigned char message[256];
 };
 
-#define EXCEPTION_VMT(name, parent, text)                                      \
-  void *const name[5] = {(void *)(parent), (void *)(text),                     \
+#define EXCEPTION_VMT(name, parent, text, depth, ancestors)                    \
+  void *const name[7] = {(void *)(parent), (void *)(text),                     \
                          (void *)(uintptr_t)sizeof(struct PasExceptionObject), \
-                         NULL, (void *)(uintptr_t)__pas_tobject_destroy}
-EXCEPTION_VMT(__pas_exception_vmt, __pas_tobject_vmt, "\011Exception");
-EXCEPTION_VMT(__pas_eexternal_vmt, __pas_exception_vmt, "\011EExternal");
-EXCEPTION_VMT(__pas_einterror_vmt, __pas_eexternal_vmt, "\011EIntError");
-EXCEPTION_VMT(__pas_edivbyzero_vmt, __pas_einterror_vmt, "\012EDivByZero");
-EXCEPTION_VMT(__pas_eintoverflow_vmt, __pas_einterror_vmt, "\014EIntOverflow");
-EXCEPTION_VMT(__pas_econverterror_vmt, __pas_exception_vmt, "\015EConvertError");
+                         NULL, (void *)(uintptr_t)(depth),                     \
+                         (void *)(ancestors),                                  \
+                         (void *)(uintptr_t)__pas_tobject_destroy}
+EXCEPTION_VMT(__pas_exception_vmt, __pas_tobject_vmt, "\011Exception", 1,
+              exception_ancestors);
+EXCEPTION_VMT(__pas_eexternal_vmt, __pas_exception_vmt, "\011EExternal", 2,
+              eexternal_ancestors);
+EXCEPTION_VMT(__pas_einterror_vmt, __pas_eexternal_vmt, "\011EIntError", 3,
+              einterror_ancestors);
+EXCEPTION_VMT(__pas_edivbyzero_vmt, __pas_einterror_vmt, "\012EDivByZero", 4,
+              edivbyzero_ancestors);
+EXCEPTION_VMT(__pas_eintoverflow_vmt, __pas_einterror_vmt, "\014EIntOverflow", 4,
+              eintoverflow_ancestors);
+EXCEPTION_VMT(__pas_econverterror_vmt, __pas_exception_vmt, "\015EConvertError", 2,
+              econverterror_ancestors);
 EXCEPTION_VMT(__pas_eoperationcancelled_vmt, __pas_exception_vmt,
-              "\023EOperationCancelled");
+              "\023EOperationCancelled", 2, eoperationcancelled_ancestors);
 /* An iterator's yield when it is being stopped (its last reference gone):
  * a TObject, not an Exception, so `on E: Exception` does not catch it. */
-EXCEPTION_VMT(__pas_iteratorstop_vmt, __pas_tobject_vmt, "\015EIteratorStop");
+EXCEPTION_VMT(__pas_iteratorstop_vmt, __pas_tobject_vmt, "\015EIteratorStop", 1,
+              iteratorstop_ancestors);
 
 void __pas_exc_push(PasExcFrame *f) {
   f->prev = __pas_exc_top;
@@ -1200,7 +1263,7 @@ void __pas_raise_convert(char *msg, size_t n) {
 
 void __pas_free_object(void *obj) {
   void (*destroy)(void *, void *) =
-      (void (*)(void *, void *))(*(void *const *const *)obj)[4];
+      (void (*)(void *, void *))(*(void *const *const *)obj)[6];
   destroy(NULL, obj);
   __pas_free_instance(obj);
 }

@@ -3180,7 +3180,7 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
       AllClasses.push_back(C);
     auto Export = ExportNames.find(D);
     bool Imported = ImportedDecls.count(D);
-    auto *Ty = llvm::ArrayType::get(B.getPtrTy(), 4 + C->getVTable().size());
+    auto *Ty = llvm::ArrayType::get(B.getPtrTy(), 6 + C->getVTable().size());
     std::string Name = Export == ExportNames.end()
                            ? "vmt." + C->getDeclName().lower()
                            : Export->second;
@@ -3270,13 +3270,32 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
     llvm::GlobalVariable *G = M.getNamedGlobal(Name);
     if (!G)
       G = new llvm::GlobalVariable(
-          M, llvm::ArrayType::get(B.getPtrTy(), 5), /*isConstant=*/true,
-          llvm::GlobalValue::ExternalLinkage, nullptr, Name);
+          M, llvm::ArrayType::get(B.getPtrTy(), 6 + C->getVTable().size()),
+          /*isConstant=*/true, llvm::GlobalValue::ExternalLinkage, nullptr,
+          Name);
     VMTs[C] = G;
     return G;
   }
 
-  /// Fills in the VMTs: parent VMT, class name, virtual methods.
+  /// The depth of C in its hierarchy (TObject: 0).
+  static unsigned classDepth(ClassType *C) {
+    unsigned Depth = 0;
+    for (ClassType *A = C; A && A->getParent(); A = A->getParent())
+      ++Depth;
+    return Depth;
+  }
+
+  /// The VMTs from C's root to C itself, for a VMT's ancestor display.
+  llvm::SmallVector<llvm::Constant *, 8> classAncestors(ClassType *C) {
+    llvm::SmallVector<llvm::Constant *, 8> Ancestors;
+    for (ClassType *A = C; A; A = A->getParent())
+      Ancestors.push_back(vmtOf(A));
+    std::reverse(Ancestors.begin(), Ancestors.end());
+    return Ancestors;
+  }
+
+  /// Fills in the VMTs: parent VMT, class name, instance size, interface
+  /// table, hierarchy depth, ancestor display, then the virtual methods.
   void defineVMTs() {
     for (ClassType *C : VMTsToDefine) {
       llvm::SmallVector<llvm::Constant *, 8> Slots;
@@ -3285,6 +3304,16 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
       Slots.push_back(llvm::ConstantExpr::getIntToPtr(
           B.getInt64(instanceSize(C)), B.getPtrTy()));
       Slots.push_back(interfaceTable(C));
+      llvm::SmallVector<llvm::Constant *, 8> Ancestors = classAncestors(C);
+      auto *AncTy = llvm::ArrayType::get(B.getPtrTy(), Ancestors.size());
+      auto *Anc = new llvm::GlobalVariable(
+          M, AncTy, /*isConstant=*/true, llvm::GlobalValue::InternalLinkage,
+          llvm::ConstantArray::get(AncTy, Ancestors),
+          "ancestors." + C->getDeclName().lower());
+      Anc->setAlignment(llvm::Align(8));
+      Slots.push_back(llvm::ConstantExpr::getIntToPtr(
+          B.getInt64(Ancestors.size() - 1), B.getPtrTy()));
+      Slots.push_back(Anc);
       for (RoutineDecl *R : C->getVTable()) {
         if (R->getBuiltin() == TObjectMethod::Destroy)
           Slots.push_back(llvm::cast<llvm::Function>(
@@ -4291,7 +4320,7 @@ public:
     if (R->isClassMethod()) {
       Obj = receiverClass(Obj, SelfIsClass, L);
       if (R->isDispatched())
-        Code = loadVMTSlot(Obj, 4 + R->getVMTIndex(), "method");
+        Code = loadVMTSlot(Obj, 6 + R->getVMTIndex(), "method");
     } else if (R->isDispatched()) {
       emitNilObjectCheck(Obj, L);
       Code = loadVirtual(Obj, static_cast<unsigned>(R->getVMTIndex()));
@@ -4780,8 +4809,27 @@ public:
 
   /// Address of virtual method Index in the VMT of object Obj.
   llvm::Value *loadVirtual(llvm::Value *Obj, unsigned Index) {
-    return loadVMTSlot(B.CreateLoad(B.getPtrTy(), Obj, "vmt"), 4 + Index,
+    return loadVMTSlot(B.CreateLoad(B.getPtrTy(), Obj, "vmt"), 6 + Index,
                        "method");
+  }
+
+  /// Can no separately compiled unit see C (and so subclass it)?
+  bool classIsClosed(ClassType *C) const {
+    return !CGOpts.SeparateUnits ||
+           (C->getModule() != nullptr && !ExportedClasses.count(C));
+  }
+
+  /// Does C have descendants in what this compilation can see? Unknown
+  /// (separately compiled) descendants count when C is not closed.
+  bool classHasDescendants(ClassType *C) {
+    if (C->getModule() == nullptr) // a predeclared class: the runtime's own
+      return true;                 // descendants are not in AllClasses
+    if (!classIsClosed(C))
+      return true;
+    for (ClassType *D : AllClasses)
+      if (D != C && D->inheritsFrom(C))
+        return true;
+    return false;
   }
 
   /// Can a virtual call of R be a direct call? Only if no class of the
@@ -4792,8 +4840,7 @@ public:
     ClassType *C = R->getClass();
     if (!C || R->isAbstract() || !R->isDispatched() || !Functions.count(R))
       return false;
-    if (CGOpts.SeparateUnits &&
-        (C->getModule() == nullptr || ExportedClasses.count(C)))
+    if (!classIsClosed(C))
       return false;
     int Idx = R->getVMTIndex();
     llvm::ArrayRef<RoutineDecl *> VTable = C->getVTable();
@@ -4933,7 +4980,7 @@ public:
       llvm::FunctionCallee Fn = Functions[R];
       if (!Inherited && R->isDispatched() && !canDevirtualize(R)) {
         emitNilClassCheck(Self, L);
-        Fn = {routineFnType(R), loadVMTSlot(Self, 4 + R->getVMTIndex(), "method")};
+        Fn = {routineFnType(R), loadVMTSlot(Self, 6 + R->getVMTIndex(), "method")};
       }
       Result = emitCallTo(Fn, llvm::ConstantPointerNull::get(B.getPtrTy()),
                           R->getParams(), Args, Self, resultOf(R));
@@ -5031,7 +5078,7 @@ public:
     llvm::Value *F = emitProtect(Failed, "ctor.call");
     if (Ctor->isDispatched())
       B.CreateCall(routineFnType(Ctor),
-                   loadVMTSlot(VMT, 4 + Ctor->getVMTIndex(), "ctor"), Values);
+                   loadVMTSlot(VMT, 6 + Ctor->getVMTIndex(), "ctor"), Values);
     else
       B.CreateCall(Functions[Ctor], Values);
     B.CreateCall(excRuntime("__pas_exc_pop"), {F});
@@ -7415,13 +7462,11 @@ public:
       B.CreateBr(End);
     };
     for (ExceptHandler *Handler : S->getHandlers()) {
-      llvm::Value *Is = B.CreateCall(
-          classRuntime("__pas_class_is", B.getInt32Ty(),
-                       {B.getPtrTy(), B.getPtrTy()}),
-          {Obj, vmtOf(Handler->getClass())});
+      llvm::Value *HandlerVMT = B.CreateLoad(B.getPtrTy(), Obj, "vmt");
+      llvm::Value *Is = classIsVMT(HandlerVMT, Handler->getClass());
       auto *Do = newBlock("handler.do");
       auto *Next = newBlock("handler.next");
-      B.CreateCondBr(B.CreateICmpNE(Is, B.getInt32(0)), Do, Next);
+      B.CreateCondBr(Is, Do, Next);
       B.SetInsertPoint(Do);
       if (VarDecl *V = Handler->getVar()) {
         llvm::Value *Slot = createTemp(B.getPtrTy(), V->getName().Name);
@@ -7682,6 +7727,65 @@ public:
   }
 
   /// obj is TFoo / obj as TFoo: the runtime walks obj's VMT chain.
+  /// Is a VMT the VMT of C or of a descendant? A class with no descendants
+  /// only needs the equality test; otherwise the depth and ancestor display
+  /// make it two loads and two compares (item 12).
+  llvm::Value *classIsVMT(llvm::Value *VMT, ClassType *C) {
+    llvm::Constant *Target = vmtOf(C);
+    if (!classHasDescendants(C))
+      return B.CreateICmpEQ(VMT, Target, "is");
+    unsigned Depth = classDepth(C);
+    llvm::Value *Exact = B.CreateICmpEQ(VMT, Target, "is.exact");
+    llvm::Value *ODepth =
+        B.CreatePtrToInt(loadVMTSlot(VMT, 4, "depth"), B.getInt64Ty());
+    llvm::Value *Ancestors = loadVMTSlot(VMT, 5, "ancestors");
+    llvm::Value *Slot =
+        B.CreateConstInBoundsGEP1_64(B.getPtrTy(), Ancestors, Depth);
+    llvm::Value *Ancestor = B.CreateLoad(B.getPtrTy(), Slot, "ancestor");
+    llvm::Value *In = B.CreateAnd(
+        B.CreateICmpUGE(ODepth, B.getInt64(Depth)),
+        B.CreateICmpEQ(Ancestor, Target), "is.display");
+    return B.CreateOr(Exact, In, "is");
+  }
+
+  /// obj is C: false for nil, else classIsVMT.
+  llvm::Value *emitClassIs(llvm::Value *Obj, ClassType *C) {
+    auto *NullBB = newBlock("is.null");
+    auto *CheckBB = newBlock("is.check");
+    auto *EndBB = newBlock("is.end");
+    B.CreateCondBr(B.CreateIsNull(Obj), NullBB, CheckBB);
+    B.SetInsertPoint(NullBB);
+    B.CreateBr(EndBB);
+    B.SetInsertPoint(CheckBB);
+    llvm::Value *VMT = B.CreateLoad(B.getPtrTy(), Obj, "vmt");
+    llvm::Value *R = classIsVMT(VMT, C);
+    llvm::BasicBlock *CheckEnd = B.GetInsertBlock();
+    B.CreateBr(EndBB);
+    B.SetInsertPoint(EndBB);
+    auto *Phi = B.CreatePHI(B.getInt1Ty(), 2, "is");
+    Phi->addIncoming(B.getFalse(), NullBB);
+    Phi->addIncoming(R, CheckEnd);
+    return Phi;
+  }
+
+  /// obj as C: obj, or a runtime error if it is not a C (item 12).
+  llvm::Value *emitClassAs(llvm::Value *Obj, ClassType *C, SourceLocation L) {
+    auto *NullBB = newBlock("as.null");
+    auto *CheckBB = newBlock("as.check");
+    auto *ErrBB = newBlock("as.error");
+    auto *OkBB = newBlock("as.ok");
+    B.CreateCondBr(B.CreateIsNull(Obj), NullBB, CheckBB);
+    B.SetInsertPoint(NullBB);
+    B.CreateBr(OkBB);
+    B.SetInsertPoint(CheckBB);
+    llvm::Value *VMT = B.CreateLoad(B.getPtrTy(), Obj, "vmt");
+    B.CreateCondBr(classIsVMT(VMT, C), OkBB, ErrBB);
+    B.SetInsertPoint(ErrBB);
+    emitRuntimeError("invalid class typecast", L);
+    B.SetInsertPoint(OkBB);
+    return Obj;
+  }
+
   llvm::Value *emitIsAs(BinaryExpr *E) {
     llvm::Value *Obj = visitExpr(E->getLHS());
     if (E->getLHS()->getType()->isInterface()) // a COM interface's object
@@ -7702,18 +7806,10 @@ public:
           {Obj, iidOf(I), Msg}, "itable");
       return makeInterface(Obj, T);
     }
-    llvm::Constant *VMT = vmtOf(llvm::cast<ClassType>(E->getRHS()->getType()));
-    if (E->getOp() == BinaryOp::Is) {
-      llvm::Value *R = B.CreateCall(
-          classRuntime("__pas_class_is", B.getInt32Ty(), {B.getPtrTy(), B.getPtrTy()}),
-          {Obj, VMT});
-      return B.CreateICmpNE(R, B.getInt32(0), "is");
-    }
-    llvm::Constant *Msg = B.CreateGlobalString(
-        ("invalid class typecast" + where(E->getOpLoc())), ".rterr");
-    return B.CreateCall(classRuntime("__pas_class_as", B.getPtrTy(),
-                                     {B.getPtrTy(), B.getPtrTy(), B.getPtrTy()}),
-                        {Obj, VMT, Msg}, "as");
+    auto *C = llvm::cast<ClassType>(E->getRHS()->getType());
+    if (E->getOp() == BinaryOp::Is)
+      return emitClassIs(Obj, C);
+    return emitClassAs(Obj, C, E->getOpLoc());
   }
 
   llvm::Value *visitBinaryExpr(BinaryExpr *E) {

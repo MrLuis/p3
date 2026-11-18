@@ -238,19 +238,21 @@ void __pas_paramstr(unsigned char *dst, int32_t index);
  * An object starts with a pointer to its class's VMT, an array of pointers:
  * [0] the parent class's VMT (NULL for TObject), [1] the class name as a
  * length-prefixed string, [2] the instance size (an integer), [3] the
- * interface table or NULL, [4...] the virtual methods; [4] is Destroy. A
- * class reference is a VMT pointer. Methods take (static link, Self,
+ * interface table or NULL, [4] the depth of the class in its hierarchy,
+ * [5] its ancestor display (the VMT of each class from the root down to
+ * it), [6...] the virtual methods; [6] is Destroy. A class reference is a
+ * VMT pointer. Methods take (static link, Self,
  * parameters...); a class method's Self is a class reference.
  * The interface table: [n, cleanup, iid1, methods1, ..., iidn, methodsn]
  * (n an integer): the interfaces the class implements and its method
  * tables for them; cleanup (or NULL) releases the COM interfaces held by
  * the class's own fields. An interface value is {object, method table}. */
-extern void *const __pas_tobject_vmt[5];
+extern void *const __pas_tobject_vmt[7];
 /* COM interfaces: their objects are TInterfacedObjects, whose reference
  * count (FRefCount, an int32) follows the VMT pointer. TInterfacedObject
  * implements IUnknown (iid __pas_iunknown_iid). */
-extern void *const __pas_tinterfacedobject_vmt[5];
-extern void *const __pas_tsharedobject_vmt[5];
+extern void *const __pas_tinterfacedobject_vmt[7];
+extern void *const __pas_tsharedobject_vmt[7];
 extern const unsigned char __pas_iunknown_iid[];
 typedef struct PasIntf {
   void *obj;
@@ -327,14 +329,14 @@ typedef struct PasExcFrame {
 /* Exception (Free Pascal's SysUtils): [TObject's VMT, "Exception",
  * Destroy]; its instances hold the message, a short string, after the VMT
  * pointer. */
-extern void *const __pas_exception_vmt[5];
+extern void *const __pas_exception_vmt[7];
 /* EExternal = class(Exception), EIntError = class(EExternal),
  * EDivByZero = class(EIntError) (SysUtils). */
-extern void *const __pas_eexternal_vmt[5];
-extern void *const __pas_einterror_vmt[5];
-extern void *const __pas_edivbyzero_vmt[5];
+extern void *const __pas_eexternal_vmt[7];
+extern void *const __pas_einterror_vmt[7];
+extern void *const __pas_edivbyzero_vmt[7];
 /* EConvertError = class(Exception) (SysUtils). */
-extern void *const __pas_econverterror_vmt[5];
+extern void *const __pas_econverterror_vmt[7];
 /* The compiled code keeps what it reads after an exception arrives in
  * memory (see pinInMemory in the code generator): _longjmp does not undo
  * changes there, as it does for registers. */
@@ -455,7 +457,7 @@ void __pas_waitq_wait(void *q, void *m);
 void __pas_waitq_signal(void *q);
 void __pas_waitq_broadcast(void *q);
 /* EOperationCancelled = class(Exception): a cancelled task's wait. */
-extern void *const __pas_eoperationcancelled_vmt[5];
+extern void *const __pas_eoperationcancelled_vmt[7];
 /* Raises a new exception of class vmt (Exception's layout) with text. */
 void __pas_raise_message(void *const *vmt, const char *text) __attribute__((noreturn));
 

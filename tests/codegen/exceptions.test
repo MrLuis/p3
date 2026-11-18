@@ -42,7 +42,8 @@
 ; CHECK-NEXT: br label %exit
 ; CHECK:      handler.raise:
 ; CHECK-NEXT: call void @__pas_reraise_free(ptr %[[HANDLER]], ptr %exc)
-; CHECK:      %{{[0-9]+}} = call i32 @__pas_class_is(ptr %exc, ptr @__pas_exception_vmt)
+; CHECK:      %[[EVMT:[a-z.0-9]+]] = load ptr, ptr %exc, align 8
+; CHECK-NEXT: %[[IEXACT:[a-z.0-9]+]] = icmp eq ptr %[[EVMT]], @__pas_exception_vmt
 ; A handler that ends releases the exception.
 ; CHECK:      call void @__pas_free_object(ptr %exc)
 

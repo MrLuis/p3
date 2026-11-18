@@ -4,7 +4,7 @@
 ; A class with interface fields: its cleanup function is in its interface
 ; table, after the number of interfaces (IUnknown, from TInterfacedObject,
 ; and IA).
-; CHECK: @vmt.ta = internal constant [5 x ptr] [ptr @__pas_tinterfacedobject_vmt, ptr @.str, ptr inttoptr (i64 32 to ptr), ptr @intfs.ta, ptr @__pas_tobject_destroy]
+; CHECK: @vmt.ta = internal constant [7 x ptr] [ptr @__pas_tinterfacedobject_vmt, ptr @.str, ptr inttoptr (i64 32 to ptr), ptr @intfs.ta, ptr inttoptr (i64 2 to ptr), ptr @ancestors.ta, ptr @__pas_tobject_destroy]
 ; CHECK: @itable.ta.iunknown = internal constant [0 x ptr] zeroinitializer
 ; CHECK: @__pas_iunknown_iid = external constant i8
 ; CHECK: @intfs.ta = internal constant [6 x ptr] [ptr inttoptr (i64 2 to ptr), ptr @cleanup.ta, ptr @__pas_iunknown_iid, ptr @itable.ta.iunknown, ptr @iid.ia, ptr @itable.ta.ia]
