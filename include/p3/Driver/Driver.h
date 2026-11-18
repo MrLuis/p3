@@ -47,6 +47,7 @@ class Driver {
 
   bool validateOptions();
   bool validateTarget();
+  void resolveTargetCPU();
 
   /// lex -> parse -> sema -> codegen -> emit/link, stopping at Opts.Act.
   bool runPipeline(FileID FID);

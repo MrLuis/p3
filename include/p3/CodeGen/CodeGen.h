@@ -6,6 +6,7 @@
 #include "llvm/ADT/StringRef.h"
 
 #include <memory>
+#include <string>
 
 namespace llvm {
 class LLVMContext;
@@ -30,6 +31,9 @@ struct CodeGenOptions {
   bool OverflowChecks = true;
   /// -ffast-math: set the fast-math flags on floating-point instructions.
   bool FastMath = false;
+  /// The target CPU and features (-mcpu / -mattr); the functions' target
+  /// attributes carry them into the IR.
+  std::string TargetCPU = "generic", TargetFeatures;
   /// {$R±} / {$Q±} switches found in the source (may be null).
   const CheckDirectives *Directives = nullptr;
   /// -g: emit DWARF debug information.

@@ -6154,9 +6154,17 @@ public:
   /// based (item 10). LLVM cannot infer it for calls through procedural
   /// values, virtual methods or separately compiled units.
   void markDefinedFunctionsNounwind() {
+    bool TargetAttrs = CGOpts.TargetCPU != "generic" ||
+                        !CGOpts.TargetFeatures.empty();
     for (llvm::Function &F : M)
-      if (!F.isDeclaration())
+      if (!F.isDeclaration()) {
         F.addFnAttr(llvm::Attribute::NoUnwind);
+        if (TargetAttrs) {
+          F.addFnAttr("target-cpu", CGOpts.TargetCPU);
+          if (!CGOpts.TargetFeatures.empty())
+            F.addFnAttr("target-features", CGOpts.TargetFeatures);
+        }
+      }
   }
 
   /// Removes the definitions with internal linkage (routines, constants,

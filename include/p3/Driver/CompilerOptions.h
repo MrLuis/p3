@@ -36,6 +36,10 @@ struct CompilerOptions {
   unsigned OptLevel = 0;    ///< 0..3
   bool DebugInfo = false;   ///< -g
   std::string TargetTriple; ///< empty = host
+  /// -mcpu / -mattr (and the project file's "cpu"): the target CPU and
+  /// features passed to LLVM; "native" at -mcpu means the host CPU.
+  std::string TargetCPU = "generic", TargetFeatures;
+  bool GivenCPU = false;
   std::vector<std::string> IncludeDirs; ///< -I: where to look for units
   std::vector<std::string> LibraryDirs; ///< -L: passed to the linker
   std::vector<std::string> Libraries;   ///< -l: passed to the linker

@@ -3783,6 +3783,7 @@ var
   fields: TPtrList;
 begin
   irSetFastMath(optFastMath);
+  irSetTarget(optCPU, optFeatures);
   mode := m;
   optRange := rangeChecksOn;
   optOverflow := overflowChecksOn;

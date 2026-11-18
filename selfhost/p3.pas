@@ -20,6 +20,9 @@ var
   rangeChecksOn, overflowChecksOn, debugInfo, separateUnits: boolean;
   { -ffast-math: set the fast-math flags on floating-point instructions }
   fastMath: boolean;
+  { -mcpu / -mattr: the target CPU and features; "native" = the host CPU }
+  targetCPU, targetFeatures: string;
+  givenCPU: boolean;
   { -fkeep-unused: keep the routines and data nothing reachable refers to }
   keepUnused: boolean;
   optLevel: longint;
@@ -139,6 +142,8 @@ begin
   helpLine('  --ferror-limit=<N>           - Stop after N errors (0 = no limit)');
   helpLine('  --fkeep-unused               - Keep the routines and data that nothing reachable from the program refers to');
   helpLine('  --ffast-math                 - Set the fast-math flags on floating-point instructions (contraction, reassociation, no NaN/Inf assumptions)');
+  helpLine('  -mcpu <cpu>                  - Target CPU (default: generic; ''native'': the host CPU)');
+  helpLine('  -mattr <features>            - Target features, e.g. +avx2,-sse4.2');
   helpLine('  --fno-inline-runtime         - Do not inline the runtime''s functions (from -O1 they are, when compiling for the host)');
   helpLine('  --fno-overflow-checks        - Disable runtime integer overflow checks');
   helpLine('  --fno-range-checks           - Disable runtime range checks (subranges, array indices, ...)');
@@ -165,10 +170,10 @@ const
     'fno-overflow-checks',
     'fno-range-checks', 'fseparate-units', 'g', 'no-project', 'fzero-init',
     'fno-zero-init', 'fno-inline-runtime', 'fkeep-unused', 'ffast-math');
-  numValueOpts = 11;
+  numValueOpts = 13;
   valueOptNames: array[1..numValueOpts] of string[20] = (
     'o', 'mode', 'fdiagnostics-color', 'ferror-limit', 'target', 'I', 'O', 'L', 'l',
-    'd', 'project');
+    'd', 'project', 'mcpu', 'mattr');
 
 function isFlag(const name: string): boolean;
 var
@@ -309,6 +314,8 @@ begin
     optLevel := s.optLevel;
   if s.hasTarget and not givenTarget then
     targetTriple := s.target;
+  if s.hasCPU and not givenCPU then
+    targetCPU := s.cpu;
   if s.hasErrorLimit and not givenErrorLimit then
     errorLimit := s.errorLimit;
   debugInfo := debugInfo or s.debug;
@@ -385,6 +392,9 @@ begin
   rangeChecksOn := true;
   overflowChecksOn := true;
   fastMath := false;
+  targetCPU := 'generic';
+  targetFeatures := '';
+  givenCPU := false;
   debugInfo := false;
   keepUnused := false;
   separateUnits := false;
@@ -520,6 +530,13 @@ begin
       targetTriple := takeValue;
       givenTarget := true;
     end
+    else if name = 'mcpu' then
+    begin
+      targetCPU := takeValue;
+      givenCPU := true;
+    end
+    else if name = 'mattr' then
+      targetFeatures := takeValue
     else if name = 'I' then
       listAdd(includeDirs, intern(takeValue))
     else if name = 'd' then
@@ -892,7 +909,7 @@ begin
   end;
   listInit(noObjects);
   compileUnit := emitOutput(outBuf, smFileName(fid), kind, optLevel, targetTriple,
-                            outputFile, noObjects);
+                            targetCPU, targetFeatures, outputFile, noObjects);
 end;
 
 { The input file's name without directory and extension ('a' for standard
@@ -958,6 +975,13 @@ begin
   if noDeprecated then
     diagDisableWarning('deprecated');
   applyProject;
+  if targetCPU = 'native' then
+  begin
+    targetCPU := hostCPUName;
+    if targetFeatures = '' then
+      targetFeatures := hostCPUFeatures;
+  end;
+  cgSetTarget(targetCPU, targetFeatures);
   cgSetFastMath(fastMath);
   if inputFile = '' then
     usageError('no input file');
@@ -1066,8 +1090,8 @@ begin
         else
           kind := okExe;
         end;
-        ok := emitOutput(outBuf, smFileName(fid), kind, optLevel, targetTriple, outputFile,
-                         unitObjects);
+        ok := emitOutput(outBuf, smFileName(fid), kind, optLevel, targetTriple,
+                         targetCPU, targetFeatures, outputFile, unitObjects);
       end;
     end;
   end;

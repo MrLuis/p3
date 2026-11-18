@@ -36,6 +36,7 @@ static llvm::CodeGenOptLevel toCodeGenOptLevel(unsigned OptLevel) {
 
 std::unique_ptr<llvm::TargetMachine>
 p3::createTargetMachine(llvm::StringRef Triple, unsigned OptLevel,
+                         llvm::StringRef CPU, llvm::StringRef Features,
                          DiagnosticsEngine &Diags) {
   std::string Err;
   const llvm::Target *T = llvm::TargetRegistry::lookupTarget(Triple.str(), Err);
@@ -47,8 +48,8 @@ p3::createTargetMachine(llvm::StringRef Triple, unsigned OptLevel,
   // PIC so the objects link into position-independent executables, which
   // is what clang/gcc produce by default on modern Linux and macOS.
   std::unique_ptr<llvm::TargetMachine> TM(T->createTargetMachine(
-      Triple, /*CPU=*/"generic", /*Features=*/"", Options, llvm::Reloc::PIC_,
-      std::nullopt, toCodeGenOptLevel(OptLevel)));
+      Triple, CPU, Features, Options, llvm::Reloc::PIC_, std::nullopt,
+      toCodeGenOptLevel(OptLevel)));
   if (!TM)
     Diags.error("could not create target machine for '" + Triple + "'");
   return TM;

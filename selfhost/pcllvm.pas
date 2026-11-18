@@ -21,11 +21,14 @@ procedure llvmInit;
 function llvmDefaultTriple: string;
 function llvmNormalizeTriple(const t: string): string;
 function llvmHostCPU: string;
+function llvmHostCPUFeatures: string;
 function llvmVersion: string;
 { The target for triple, or nil and the error message. }
 function llvmLookupTarget(const triple: string; var err: string): pointer;
-{ A target machine for triple at an optimization level (0-3). }
-function llvmTargetMachine(target: pointer; const triple: string; opt: longint): pointer;
+{ A target machine for triple at an optimization level (0-3), with the
+  given CPU and features ('' = the target's default). }
+function llvmTargetMachine(target: pointer; const triple: string; opt: longint;
+                           const cpu, features: string): pointer;
 { The data layout string of a target machine. }
 function llvmDataLayout(tm: pointer): string;
 { Parses IR text into a module (named name), verifies it and, at opt > 0,
@@ -67,6 +70,7 @@ function LLVMGetDefaultTargetTriple: pchar; cdecl; external name 'LLVMGetDefault
 function LLVMNormalizeTargetTriple(t: pchar): pchar; cdecl;
   external name 'LLVMNormalizeTargetTriple';
 function LLVMGetHostCPUName: pchar; cdecl; external name 'LLVMGetHostCPUName';
+function LLVMGetHostCPUFeatures: pchar; cdecl; external name 'LLVMGetHostCPUFeatures';
 procedure LLVMGetVersion(var major, minor, patch: longint); cdecl;
   external name 'LLVMGetVersion';
 function LLVMGetTargetFromTriple(t: pchar; var target: pointer; var msg: pchar): longint;
@@ -195,6 +199,17 @@ begin
   LLVMDisposeMessage(p);
 end;
 
+function llvmHostCPUFeatures: string;
+var
+  p: pchar;
+begin
+  p := LLVMGetHostCPUFeatures;
+  if p = nil then
+    exit('');
+  llvmHostCPUFeatures := str(p);
+  LLVMDisposeMessage(p);
+end;
+
 function llvmVersion: string;
 var
   major, minor, patch: longint;
@@ -222,13 +237,20 @@ begin
   llvmLookupTarget := target;
 end;
 
-function llvmTargetMachine(target: pointer; const triple: string; opt: longint): pointer;
+function llvmTargetMachine(target: pointer; const triple: string; opt: longint;
+                           const cpu, features: string): pointer;
 var
-  b, cpu, features: string;
+  b, c, f: string;
+  cpu_, feats: string;
 begin
+  if cpu = '' then
+    cpu_ := 'generic'
+  else
+    cpu_ := cpu;
+  feats := features;
   llvmTargetMachine := LLVMCreateTargetMachine(target, cstr(triple, b),
-                                               cstr('generic', cpu), cstr('', features),
-                                               opt, relocPIC, codeModelDefault);
+                                               cstr(cpu_, c), cstr(feats, f), opt,
+                                               relocPIC, codeModelDefault);
 end;
 
 function llvmDataLayout(tm: pointer): string;

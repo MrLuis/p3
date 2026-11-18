@@ -375,7 +375,7 @@ public:
 
 /// The settings of a project file, checked.
 struct Settings {
-  std::optional<std::string> Main, Output, Target;
+  std::optional<std::string> Main, Output, Target, CPU;
   std::optional<LangMode> Mode;
   std::optional<unsigned> OptLevel, ErrorLimit;
   std::optional<bool> Debug, SeparateUnits, WarningsAsErrors,
@@ -479,6 +479,8 @@ public:
         S.Output = string(V, N);
       } else if (N == "target") {
         S.Target = string(V, N);
+      } else if (N == "cpu") {
+        S.CPU = string(V, N);
       } else if (N == "mode") {
         if (V.K == JValue::String && V.Text == "iso")
           S.Mode = LangMode::ISO;
@@ -603,6 +605,8 @@ bool p3::applyProjectFile(CompilerOptions &Opts, SourceManager &SM,
     Opts.OptLevel = *S.OptLevel;
   if (S.Target && !Opts.GivenTarget)
     Opts.TargetTriple = *S.Target;
+  if (S.CPU && !Opts.GivenCPU)
+    Opts.TargetCPU = *S.CPU;
   if (S.ErrorLimit && !Opts.GivenErrorLimit)
     Opts.ErrorLimit = *S.ErrorLimit;
   Opts.DebugInfo = Opts.DebugInfo || S.Debug.value_or(false);

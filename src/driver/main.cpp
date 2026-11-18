@@ -111,6 +111,14 @@ static cl::opt<bool> NoRangeChecks(
     cl::desc("Disable runtime range checks (subranges, array indices, ...)"),
     cl::cat(P3Category));
 
+static cl::opt<std::string> MCPU(
+    "mcpu", cl::desc("Target CPU (default: generic; 'native': the host CPU)"),
+    cl::value_desc("cpu"), cl::cat(P3Category));
+
+static cl::opt<std::string> MAttr(
+    "mattr", cl::desc("Target features, e.g. +avx2,-sse4.2"),
+    cl::value_desc("features"), cl::cat(P3Category));
+
 static cl::opt<bool> NoInlineRuntime(
     "fno-inline-runtime",
     cl::desc("Do not inline the runtime's functions (from -O1 they are, "
@@ -186,6 +194,11 @@ int main(int argc, char **argv) {
   Opts.Defines.assign(Defines.begin(), Defines.end());
   Opts.SeparateUnits = SeparateUnits;
   Opts.TargetTriple = TargetTriple;
+  if (MCPU.getNumOccurrences()) {
+    Opts.TargetCPU = MCPU;
+    Opts.GivenCPU = true;
+  }
+  Opts.TargetFeatures = MAttr;
   Opts.Color = Color;
   Opts.ErrorLimit = ErrorLimit;
   Opts.WarningsAsErrors = Werror;

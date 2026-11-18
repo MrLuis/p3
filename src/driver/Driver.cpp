@@ -25,6 +25,8 @@
 #include "llvm/Support/Format.h"
 #include "llvm/Support/Path.h"
 #include "llvm/Support/raw_ostream.h"
+#include "llvm-c/Core.h"
+#include "llvm-c/TargetMachine.h"
 #include "llvm/TargetParser/Host.h"
 #include "llvm/TargetParser/Triple.h"
 
@@ -124,6 +126,19 @@ static void addTargetDefines(const llvm::Triple &T,
     Defines.insert(Defines.end(), {"CPUAARCH64", "CPU64"});
 }
 
+void Driver::resolveTargetCPU() {
+  if (Opts.TargetCPU != "native")
+    return;
+  Opts.TargetCPU = llvm::sys::getHostCPUName().str();
+  if (Opts.TargetFeatures.empty()) {
+    char *F = LLVMGetHostCPUFeatures();
+    if (F) {
+      Opts.TargetFeatures = F;
+      LLVMDisposeMessage(F);
+    }
+  }
+}
+
 bool Driver::validateTarget() {
   initializeAllLLVMTargets();
   std::string TripleStr = Opts.TargetTriple.empty()
@@ -143,6 +158,7 @@ int Driver::run() {
   // The project file's settings (p3.json), under the command line's.
   if (!applyProjectFile(Opts, SM, Diags))
     return 1;
+  resolveTargetCPU();
   configure();
   if (Opts.OutputFile.empty())
     Opts.OutputFile = getDefaultOutputFile(Opts);
@@ -244,7 +260,8 @@ bool Driver::runPipeline(FileID FID) {
     return false;
   }
 
-  auto TM = createTargetMachine(Opts.TargetTriple, Opts.OptLevel, Diags);
+  auto TM = createTargetMachine(Opts.TargetTriple, Opts.OptLevel, Opts.TargetCPU,
+                                Opts.TargetFeatures, Diags);
   if (!TM)
     return false;
 
@@ -253,6 +270,8 @@ bool Driver::runPipeline(FileID FID) {
   CGOpts.RangeChecks = Opts.RangeChecks;
   CGOpts.OverflowChecks = Opts.OverflowChecks;
   CGOpts.FastMath = Opts.FastMath;
+  CGOpts.TargetCPU = Opts.TargetCPU;
+  CGOpts.TargetFeatures = Opts.TargetFeatures;
   CGOpts.Directives = &Directives;
   CGOpts.DebugInfo = Opts.DebugInfo;
   CGOpts.OptLevel = Opts.OptLevel;
@@ -336,7 +355,8 @@ bool Driver::compileUnit(Parser &P, FileID FID, ASTContext &Ctx,
                 "it into a program built with -fseparate-units");
     return false;
   }
-  auto TM = createTargetMachine(Opts.TargetTriple, Opts.OptLevel, Diags);
+  auto TM = createTargetMachine(Opts.TargetTriple, Opts.OptLevel, Opts.TargetCPU,
+                                Opts.TargetFeatures, Diags);
   if (!TM)
     return false;
   llvm::LLVMContext LLVMCtx;
@@ -344,6 +364,8 @@ bool Driver::compileUnit(Parser &P, FileID FID, ASTContext &Ctx,
   CGOpts.RangeChecks = Opts.RangeChecks;
   CGOpts.OverflowChecks = Opts.OverflowChecks;
   CGOpts.FastMath = Opts.FastMath;
+  CGOpts.TargetCPU = Opts.TargetCPU;
+  CGOpts.TargetFeatures = Opts.TargetFeatures;
   CGOpts.Directives = &Directives;
   CGOpts.DebugInfo = Opts.DebugInfo;
   CGOpts.OptLevel = Opts.OptLevel;

@@ -122,6 +122,7 @@ type
     isDecl: boolean;
     linkage: string;
     attrs: string;
+    targetAttrs: string;  { target-cpu/target-features: in the group, not the comment }
     paramText: string;
     blocks: TPtrList;    { of PIRBlock, in creation order }
     entryTemps: TPtrList; { of PIRInst: allocas at the entry's start, oldest first }
@@ -204,6 +205,8 @@ function irFuncRef(f: PIRFunc): TV;
 { -ffast-math: set the fast-math flags on the floating-point instructions
   created from now on. }
 procedure irSetFastMath(b: boolean);
+{ -mcpu / -mattr: the target attributes of the function definitions. }
+procedure irSetTarget(const cpu, features: string);
 { Exceptions (CodeGen.cpp's mayRaise). A call of f cannot raise one: a
   runtime function that neither raises nor runs Pascal code, or a routine
   whose code was found not to. }
@@ -362,6 +365,7 @@ var
   curLoc: PMeta;
   branchWeights, invariantLoadMeta: PMeta;
   fastMath: boolean;
+  targetCPU, targetFeatures: string;
 
   cur: PIRFunc;
   curBlock: PIRBlock;
@@ -1788,6 +1792,7 @@ begin
   f^.raises := false;
   f^.live := false;
   f^.attrs := '';
+  f^.targetAttrs := '';
   f^.paramText := '';
   f^.linkage := '';
   listAdd(funcs, f);
@@ -2364,6 +2369,12 @@ end;
 procedure irSetFastMath(b: boolean);
 begin
   fastMath := b;
+end;
+
+procedure irSetTarget(const cpu, features: string);
+begin
+  targetCPU := cpu;
+  targetFeatures := features;
 end;
 
 function irLoadInv(t: PIRType; const p: TV; const name: string): TV;
@@ -3494,6 +3505,7 @@ var
   f: PIRFunc;
   t: PIRType;
   found: boolean;
+  groupAttrs: string;
   fnAttr: TIntMap;       { function index -> group number + 1 }
   l: PPtrList;
   m: PMeta;
@@ -3515,22 +3527,46 @@ begin
       n := n + 1;
     end;
   end;
+  { the target attributes of the definitions (item 15) }
+  for i := 0 to funcs.count - 1 do
+  begin
+    f := PIRFunc(listGet(funcs, i));
+    if f^.isDecl then
+      continue;
+    if (targetCPU <> '') and
+       ((targetCPU <> 'generic') or (targetFeatures <> '')) then
+      f^.targetAttrs := '"target-cpu"="' + targetCPU + '"';
+    if targetFeatures <> '' then
+    begin
+      if f^.targetAttrs <> '' then
+        f^.targetAttrs := f^.targetAttrs + ' ';
+      f^.targetAttrs := f^.targetAttrs + '"target-features"="' +
+                        targetFeatures + '"';
+    end;
+  end;
   { attribute groups, in function order }
   for i := 0 to funcs.count - 1 do
   begin
     f := PIRFunc(listGet(funcs, i));
-    if f^.attrs = '' then
+    if (f^.attrs = '') and (f^.targetAttrs = '') then
       continue;
+    groupAttrs := f^.attrs;
+    if f^.targetAttrs <> '' then
+    begin
+      if groupAttrs <> '' then
+        groupAttrs := groupAttrs + ' ';
+      groupAttrs := groupAttrs + f^.targetAttrs;
+    end;
     found := false;
     for k := 0 to attrNames.count - 1 do
-      if nameStr(PName(listGet(attrNames, k))) = f^.attrs then
+      if nameStr(PName(listGet(attrNames, k))) = groupAttrs then
       begin
         mapPut(fnAttr, i, boxInt(k));
         found := true;
       end;
     if not found then
     begin
-      listAdd(attrNames, intern(f^.attrs));
+      listAdd(attrNames, intern(groupAttrs));
       mapPut(fnAttr, i, boxInt(attrNames.count - 1));
     end;
   end;

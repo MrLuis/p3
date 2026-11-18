@@ -23,7 +23,8 @@ function moduleLayout(const triple: string; var layout: string): boolean;
 { Writes the IR module ir (named name) as kind to path ('-': standard
   output) at optimization level opt for triple. }
 function emitOutput(const ir: TBuf; const name: string; kind: TOutputKind; opt: longint;
-                    const triple, path: string; const unitObjects: TPtrList): boolean;
+                    const triple, cpu, features, path: string;
+                    const unitObjects: TPtrList): boolean;
 { The directory of p3's unit library, searched after -I directories:
   $P3_UNIT_DIR, else ../lib/pascal next to the executable. }
 function findUnitLibrary: string;
@@ -33,10 +34,23 @@ procedure addLinkerArg(const arg: string);
   when compiling for the host (the runtime's LLVM IR, libpascalrt.ll, is
   linked into the module before it is optimized) unless this is called. }
 procedure disableRuntimeInlining;
+{ The host CPU and its features (-mcpu=native). }
+function hostCPUName: string;
+function hostCPUFeatures: string;
 { --version }
 procedure printVersion;
 
 implementation
+
+function hostCPUName: string;
+begin
+  hostCPUName := llvmHostCPU;
+end;
+
+function hostCPUFeatures: string;
+begin
+  hostCPUFeatures := llvmHostCPUFeatures;
+end;
 
 {$I version.inc}
 
@@ -224,7 +238,7 @@ begin
   target := llvmLookupTarget(triple, err);
   if target = nil then
     exit;
-  tm := llvmTargetMachine(target, triple, 0);
+  tm := llvmTargetMachine(target, triple, 0, '', '');
   if tm = nil then
   begin
     diagError(noLoc, 'could not create target machine for ''' + triple + '''');
@@ -305,7 +319,8 @@ begin
 end;
 
 function emitOutput(const ir: TBuf; const name: string; kind: TOutputKind; opt: longint;
-                    const triple, path: string; const unitObjects: TPtrList): boolean;
+                    const triple, cpu, features, path: string;
+                    const unitObjects: TPtrList): boolean;
 var
   target, tm, m: pointer;
   err: TBuf;
@@ -326,7 +341,7 @@ begin
   target := llvmLookupTarget(triple, e);
   tm := nil;
   if target <> nil then
-    tm := llvmTargetMachine(target, triple, opt);
+    tm := llvmTargetMachine(target, triple, opt, cpu, features);
   if tm = nil then
   begin
     diagError(noLoc, 'could not create target machine for ''' + triple + '''');

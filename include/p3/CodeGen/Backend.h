@@ -22,6 +22,7 @@ void initializeAllLLVMTargets();
 /// error and returns null.
 std::unique_ptr<llvm::TargetMachine>
 createTargetMachine(llvm::StringRef Triple, unsigned OptLevel,
+                    llvm::StringRef CPU, llvm::StringRef Features,
                     DiagnosticsEngine &Diags);
 
 /// Links the runtime's LLVM IR (libpascalrt.ll, at Path) into M, so that

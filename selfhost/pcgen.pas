@@ -44,16 +44,26 @@ procedure generateUnitModule(u: PDecl; const deps: TPtrList; m: TLangMode;
 { -ffast-math: set the fast-math flags on the floating-point instructions
   of the modules generated from now on. }
 procedure cgSetFastMath(b: boolean);
+{ -mcpu / -mattr: the target CPU and features the functions' target
+  attributes carry into the IR. }
+procedure cgSetTarget(const cpu, features: string);
 
 var
   { -ffast-math, for the modules generated from now on; cgSetFastMath sets it }
   optFastMath: boolean;
+  optCPU, optFeatures: string;
 
 implementation
 
 procedure cgSetFastMath(b: boolean);
 begin
   optFastMath := b;
+end;
+
+procedure cgSetTarget(const cpu, features: string);
+begin
+  optCPU := cpu;
+  optFeatures := features;
 end;
 
 type

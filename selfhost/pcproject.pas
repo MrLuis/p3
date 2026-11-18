@@ -17,8 +17,9 @@ type
   TProjectSettings = record
     path: string;          { the file read ('': none) }
     base: string;          { its directory: '' or ending in '/' }
-    hasMain, hasOutput, hasTarget, hasMode, hasOptLevel, hasErrorLimit: boolean;
-    main, output, target: string; { main, output: relative to base }
+    hasMain, hasOutput, hasTarget, hasCPU, hasMode, hasOptLevel,
+    hasErrorLimit: boolean;
+    main, output, target, cpu: string; { main, output: relative to base }
     mode: TLangMode;
     optLevel, errorLimit: longint;
     { flags, false when absent }
@@ -634,6 +635,8 @@ begin
       s.hasOutput := getString(v, n, s.output)
     else if n = 'target' then
       s.hasTarget := getString(v, n, s.target)
+    else if n = 'cpu' then
+      s.hasCPU := getString(v, n, s.cpu)
     else if n = 'mode' then
     begin
       s.hasMode := true;
@@ -712,6 +715,7 @@ begin
   s.hasMain := false;
   s.hasOutput := false;
   s.hasTarget := false;
+  s.hasCPU := false;
   s.hasMode := false;
   s.hasOptLevel := false;
   s.hasErrorLimit := false;
