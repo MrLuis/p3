@@ -3,6 +3,7 @@
 compile_commands.json
 *.o
 *.ll
+*.p3i
 *.s
 /build-fuzz/
 /examples/*/bin/
