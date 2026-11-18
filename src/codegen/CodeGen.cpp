@@ -6008,10 +6008,20 @@ public:
     B.CreateCall(RT.Fini);
     B.CreateRet(B.getInt32(0));
     emitDynOps();
+    markDefinedFunctionsNounwind();
     if (DIB)
       DIB->finalize();
     if (!CGOpts.KeepUnused)
       removeUnreachable();
+  }
+
+  /// Nothing unwinds through p3's frames: exceptions are _setjmp/_longjmp
+  /// based (item 10). LLVM cannot infer it for calls through procedural
+  /// values, virtual methods or separately compiled units.
+  void markDefinedFunctionsNounwind() {
+    for (llvm::Function &F : M)
+      if (!F.isDeclaration())
+        F.addFnAttr(llvm::Attribute::NoUnwind);
   }
 
   /// Removes the definitions with internal linkage (routines, constants,
@@ -6169,6 +6179,7 @@ public:
     B.SetInsertPoint(ExitBlock);
     B.CreateRetVoid();
     emitDynOps();
+    markDefinedFunctionsNounwind();
     if (DIB)
       DIB->finalize();
     if (!CGOpts.KeepUnused)

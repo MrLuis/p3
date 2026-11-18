@@ -41,7 +41,7 @@
 ; IR: store { ptr, ptr } { ptr @cthunk.pas.descending, ptr null }, ptr @pas.cmp
 ; IR: declare i32 @printf(ptr, ...)
 ; IR: define internal i32 @pas.compare(ptr %link, ptr %a, ptr %b)
-; IR: define internal i32 @cthunk.pas.compare(ptr %a, ptr %b) {
+; IR: define internal i32 @cthunk.pas.compare(ptr %a, ptr %b) #{{[0-9]+}} {
 ; IR-NEXT: entry:
 ; IR-NEXT:   %0 = call i32 @pas.compare(ptr null, ptr %a, ptr %b)
 ; IR-NEXT:   ret i32 %0

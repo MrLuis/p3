@@ -1816,6 +1816,8 @@ begin
   f := newFunc(name, ret, params);
   f^.isDecl := false;
   f^.linkage := linkage;
+  { nothing unwinds through p3's frames (item 10) }
+  f^.attrs := 'nounwind';
   irCreateFunction := f;
 end;
 

@@ -3,10 +3,10 @@
 ; {$inline off}; {$inline on} is the default in objfpc mode only (as in
 ; Free Pascal). It cannot go with forward, external or virtual methods.
 ; RUN: %p3 --mode=objfpc --emit-llvm %S/Inputs/inline/inline.pas -o - | FileCheck %s
-; CHECK:      ; Function Attrs: inlinehint
+; CHECK:      ; Function Attrs: inlinehint nounwind
 ; CHECK-NEXT: define internal i32 @pas.sq(ptr %link, i32 %x) #[[A:[0-9]+]] {
-; CHECK:      define internal i32 @pas.cube(ptr %link, i32 %x) {
-; CHECK:      attributes #[[A]] = { inlinehint }
+; CHECK:      define internal i32 @pas.cube(ptr %link, i32 %x) #{{[0-9]+}} {
+; CHECK:      attributes #[[A]] = { inlinehint nounwind }
 ; RUN: %p3 --mode=objfpc -O2 --emit-llvm %S/Inputs/inline/inline.pas -o - | FileCheck --check-prefix=O2 %s
 ; O2-NOT: call {{.*}}@pas.sq
 ; RUN: %p3 --mode=objfpc --emit-ast %S/Inputs/inline/inline.pas | FileCheck --check-prefix=AST %s

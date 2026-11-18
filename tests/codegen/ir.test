@@ -3,7 +3,7 @@
 ; Strings are stored without a terminating NUL; their length is passed explicitly.
 ; CHECK: @.str = private unnamed_addr constant [2 x i8] c"bc"
 ; CHECK: declare void @__pas_init(i32, ptr)
-; CHECK: define i32 @main(i32 %argc, ptr %argv) {
+; CHECK: define i32 @main(i32 %argc, ptr %argv) #{{[0-9]+}} {
 ; CHECK-NEXT: entry:
 ; CHECK-NEXT:   call void @__pas_init(i32 %argc, ptr %argv)
 ; Text I/O goes through the PasFile* of `output`.

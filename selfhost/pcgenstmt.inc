@@ -3091,7 +3091,7 @@ begin
         irSetArgAttrs(f, j + argNo, byRefParamAttr(p^.varType));
     end;
     if r^.isInline then { the inline directive }
-      f^.attrs := 'inlinehint';
+      f^.attrs := 'inlinehint nounwind';
     r^.cgFunc := f;
     if r^.cgExport <> nil then
       declareCThunk(r, nm(r^.cgExport))
