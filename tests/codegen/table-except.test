@@ -8,9 +8,10 @@
 ; CHECK: to label %{{.*}} unwind label %try.landing
 ; CHECK: try.landing:
 ; CHECK: landingpad { ptr, i32 }
-; CHECK-NEXT: catch ptr null
+; CHECK-NEXT: cleanup
 ; CHECK: [[EXC:%.*]] = call ptr @__pas_unwind_object(ptr
 ; CHECK: call void @__pas_free_object(ptr [[EXC]])
+; CHECK: call void @__pas_unwind_release(ptr
 
 ; SETJMP: call i32 @_setjmp(
 ; SETJMP-NOT: personality ptr @__pas_personality

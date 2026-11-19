@@ -11,12 +11,17 @@
 #if defined(__unix__) || defined(__APPLE__)
 
 #include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
+
+extern _Thread_local PasExcFrame *__pas_exc_top;
 
 enum {
   DW_EH_PE_omit = 0xff,
   DW_EH_PE_absptr = 0x00,
-  DW_EH_PE_uleb128 = 0x01
+  DW_EH_PE_uleb128 = 0x01,
+  DW_EH_PE_sleb128 = 0x09
 };
 
 typedef struct PasLSDA {
@@ -26,6 +31,7 @@ typedef struct PasLSDA {
   const unsigned char *end;
   uintptr_t lpStart;
   unsigned typeEncoding;
+  unsigned callEncoding;
 } PasLSDA;
 
 static uint64_t readULEB(const unsigned char **pp, const unsigned char *end) {
@@ -86,7 +92,7 @@ static int lsdaInit(PasLSDA *l, const unsigned char *data,
   }
   if (p >= end)
     return 0;
-  ++p; /* call-site encoding */
+  l->callEncoding = *p++;
   uint64_t n = readULEB(&p, end);
   if (p + n > end)
     return 0;
@@ -105,15 +111,44 @@ static int readPointer(const unsigned char **pp, const unsigned char *end,
   return 1;
 }
 
+static int readCallValue(const unsigned char **pp, const unsigned char *end,
+                         unsigned encoding, uint64_t *out) {
+  if (encoding == DW_EH_PE_uleb128) {
+    *out = readULEB(pp, end);
+    return 1;
+  }
+  if (encoding == DW_EH_PE_sleb128) {
+    *out = (uint64_t)readSLEB(pp, end);
+    return 1;
+  }
+  if (encoding == 0x03 && *pp + 4 <= end) { /* udata4 */
+    uint32_t v;
+    memcpy(&v, *pp, 4);
+    *pp += 4;
+    *out = v;
+    return 1;
+  }
+  if (encoding == 0x0b && *pp + 4 <= end) { /* sdata4 */
+    int32_t v;
+    memcpy(&v, *pp, 4);
+    *pp += 4;
+    *out = (uint64_t)v;
+    return 1;
+  }
+  return 0;
+}
+
 static int lsdaCallSite(const PasLSDA *l, uintptr_t ip, uintptr_t *landing,
                         const unsigned char **action) {
   const unsigned char *p = l->callSites;
   while (p < l->actionTable) {
-    uint64_t start = readULEB(&p, l->end);
-    uint64_t len = readULEB(&p, l->end);
-    uint64_t pad = readULEB(&p, l->end);
-    uint64_t act = readULEB(&p, l->end);
-    if (ip >= l->lpStart + start && ip < l->lpStart + start + len) {
+    uint64_t start, len, pad, act;
+    if (!readCallValue(&p, l->end, l->callEncoding, &start) ||
+        !readCallValue(&p, l->end, l->callEncoding, &len) ||
+        !readCallValue(&p, l->end, l->callEncoding, &pad) ||
+        !readCallValue(&p, l->end, l->callEncoding, &act))
+      return 0;
+    if (ip >= l->lpStart + start && ip <= l->lpStart + start + len) {
       *landing = l->lpStart + pad;
       *action = act ? l->actionTable + act - 1 : NULL;
       return 1;
@@ -178,15 +213,16 @@ _Unwind_Reason_Code __pas_personality(int version, _Unwind_Action actions,
     return _URC_CONTINUE_UNWIND;
   uintptr_t landing = 0;
   const unsigned char *action = NULL;
-  if (!lsdaCallSite(&l, (uintptr_t)_Unwind_GetIP(context), &landing, &action) ||
-      !landing)
+  int cs = lsdaCallSite(&l, (uintptr_t)_Unwind_GetIP(context), &landing, &action);
+  if (!cs || !landing)
     return _URC_CONTINUE_UNWIND;
   PasUnwindException *e = (PasUnwindException *)unwind;
   int catch = (e->object && action) ? lsdaCatch(&l, action, e->object) : 0;
+  int cleanup = (!action || lsdaHasCleanup(&l, action));
   if (actions & _UA_SEARCH_PHASE)
-    return catch ? _URC_HANDLER_FOUND : _URC_CONTINUE_UNWIND;
+    return (catch || cleanup) ? _URC_HANDLER_FOUND : _URC_CONTINUE_UNWIND;
   if (actions & _UA_CLEANUP_PHASE) {
-    if (catch || (action && lsdaHasCleanup(&l, action))) {
+    if (catch || cleanup) {
       _Unwind_SetGR(context, __builtin_eh_return_data_regno(0),
                     (uintptr_t)unwind);
       _Unwind_SetGR(context, __builtin_eh_return_data_regno(1),
@@ -200,6 +236,57 @@ _Unwind_Reason_Code __pas_personality(int version, _Unwind_Action actions,
 
 void *__pas_unwind_object(struct _Unwind_Exception *unwind) {
   return unwind ? ((PasUnwindException *)unwind)->object : NULL;
+}
+
+void __pas_unwind_release(struct _Unwind_Exception *unwind) {
+  if (unwind)
+    _Unwind_DeleteException(unwind);
+}
+
+#define PAS_UNWIND_CLASS ((uint64_t)0x5033583300000001ULL)
+
+static void unwind_cleanup(_Unwind_Reason_Code reason,
+                           struct _Unwind_Exception *unwind) {
+  (void)reason;
+  free(unwind);
+}
+
+static void raise_table(void *obj, const char *where, void *address)
+    __attribute__((noreturn));
+
+static void raise_table(void *obj, const char *where, void *address) {
+  if (!obj) {
+    char msg[300];
+    snprintf(msg, sizeof msg, "'raise' of a nil object%s%s",
+             where && *where ? " at " : "", where ? where : "");
+    __pas_runtime_error(msg);
+  }
+  /* Mixed setjmp/table nesting is not supported: while a setjmp frame is
+   * active, keep the legacy longjmp path instead of unwinding past it. */
+  if (__pas_exc_top)
+    __pas_raise(obj, where);
+  PasUnwindException *e = calloc(1, sizeof *e);
+  if (!e)
+    __pas_runtime_error("out of memory in an exception");
+  e->unwind.exception_class = PAS_UNWIND_CLASS;
+  e->unwind.exception_cleanup = unwind_cleanup;
+  e->object = obj;
+  e->where = where;
+  e->address = address;
+  _Unwind_Reason_Code r = _Unwind_RaiseException(&e->unwind);
+  __pas_unwind_release(&e->unwind);
+  if (r == _URC_END_OF_STACK)
+    __pas_unhandled(obj, where, address);
+  __pas_runtime_error("exception unwinding failed");
+}
+
+void __pas_raise_table(void *obj, const char *where) {
+  raise_table(obj, where, __builtin_return_address(0));
+}
+
+void __pas_raise_table_at(void *obj, const char *where, void *address) {
+  (void)where;
+  raise_table(obj, NULL, address);
 }
 
 /* One call site (1..16), one catch action for __pas_exception_vmt, and the

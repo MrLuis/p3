@@ -1356,7 +1356,7 @@ void __pas_exc_pop(PasExcFrame *f) { __pas_exc_top = f->prev; }
 
 /* "Runtime error: unhandled exception <class> at <where>[: <message>]";
  * at $<address> (16 hexadecimal digits, as Free Pascal) for raise ... at. */
-static void unhandled(void *obj, const char *where, void *address) {
+void __pas_unhandled(void *obj, const char *where, void *address) {
   const unsigned char *name = (*(const unsigned char *const *const *)obj)[1];
   char msg[700];
   int n = snprintf(msg, sizeof msg, "unhandled exception %.*s", name[0],
@@ -1396,7 +1396,7 @@ static void raise_to_frame(void *obj, const char *where, void *address) {
   }
   PasExcFrame *f = __pas_exc_top;
   if (!f)
-    unhandled(obj, where, address);
+    __pas_unhandled(obj, where, address);
   __pas_exc_top = f->prev;
   f->object = obj;
   f->where = where;

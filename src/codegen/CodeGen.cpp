@@ -8678,7 +8678,7 @@ public:
     if (!S)
       return true;
     if (llvm::isa<TryStmt>(S) || llvm::isa<ScopeStmt>(S) ||
-        llvm::isa<ForInStmt>(S) || llvm::isa<RaiseStmt>(S))
+        llvm::isa<ForInStmt>(S))
       return false;
     if (auto *C = llvm::dyn_cast<CompoundStmt>(S)) {
       for (Stmt *B : C->getBody())
@@ -8742,13 +8742,16 @@ public:
     llvm::StructType *LPType =
         llvm::StructType::get(B.getPtrTy(), B.getInt32Ty());
     llvm::LandingPadInst *LP = B.CreateLandingPad(LPType, 0, "lp");
-    LP->addClause(llvm::ConstantPointerNull::get(B.getPtrTy()));
+    LP->setCleanup(true);
     llvm::Value *Exc = B.CreateExtractValue(LP, 0, "unwind.exc");
     llvm::Value *Obj = B.CreateCall(
         classRuntime("__pas_unwind_object", B.getPtrTy(), {B.getPtrTy()}),
         {Exc}, "exc");
     emitSequence(S->getExceptBody());
     B.CreateCall(excRuntime("__pas_free_object"), {Obj});
+    B.CreateCall(classRuntime("__pas_unwind_release", B.getVoidTy(),
+                              {B.getPtrTy()}),
+                 {Exc});
     B.CreateBr(End);
     B.SetInsertPoint(End);
   }
@@ -8938,11 +8941,22 @@ public:
         visitExpr(S->getFrame());
       llvm::Value *Addr = visitExpr(S->getAddress());
       llvm::Value *Obj = visitExpr(S->getObject());
-      B.CreateCall(excRuntime("__pas_raise_at"),
-                   {Obj, whereText(S->getBeginLoc()), Addr});
+      if (CGOpts.TableExceptions)
+        emitCallOrInvoke(classRuntime("__pas_raise_table_at", B.getVoidTy(),
+                                      {B.getPtrTy(), B.getPtrTy(), B.getPtrTy()}),
+                         {Obj, whereText(S->getBeginLoc()), Addr});
+      else
+        B.CreateCall(excRuntime("__pas_raise_at"),
+                     {Obj, whereText(S->getBeginLoc()), Addr});
     } else {
       llvm::Value *Obj = visitExpr(S->getObject());
-      B.CreateCall(excRuntime("__pas_raise"), {Obj, whereText(S->getBeginLoc())});
+      if (CGOpts.TableExceptions)
+        emitCallOrInvoke(classRuntime("__pas_raise_table", B.getVoidTy(),
+                                      {B.getPtrTy(), B.getPtrTy()}),
+                         {Obj, whereText(S->getBeginLoc())});
+      else
+        B.CreateCall(excRuntime("__pas_raise"),
+                     {Obj, whereText(S->getBeginLoc())});
     }
     B.CreateUnreachable();
     B.SetInsertPoint(newBlock("after.raise")); // unreachable code follows
