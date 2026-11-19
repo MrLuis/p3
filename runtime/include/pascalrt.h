@@ -354,6 +354,8 @@ void __pas_unwind_release(struct _Unwind_Exception *exception);
 void __pas_raise_table(void *obj, const char *where) __attribute__((noreturn));
 void __pas_raise_table_at(void *obj, const char *where, void *address)
     __attribute__((noreturn));
+void __pas_reraise_table(void *exception) __attribute__((noreturn));
+extern char __pas_catch_all;
 #endif
 void __pas_unhandled(void *obj, const char *where, void *address)
     __attribute__((noreturn));

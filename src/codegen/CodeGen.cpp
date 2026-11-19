@@ -8661,10 +8661,14 @@ public:
   void emitJump(llvm::BasicBlock *Target, size_t Depth) {
     for (size_t I = Cleanups.size(); I > Depth; --I) {
       Cleanup &C = Cleanups[I - 1];
-      B.CreateCall(excRuntime("__pas_exc_pop"), {C.Frame});
-      if (C.K == Cleanup::Handler) {
+      if (C.K == Cleanup::TryBody) {
+        B.CreateCall(excRuntime("__pas_exc_pop"), {C.Frame});
+      } else if (C.K == Cleanup::Handler) {
+        B.CreateCall(excRuntime("__pas_exc_pop"), {C.Frame});
         B.CreateCall(excRuntime("__pas_free_object"), {C.Object});
       } else if (C.K == Cleanup::Finally) {
+        if (C.Frame) // a setjmp frame; a table finally has none
+          B.CreateCall(excRuntime("__pas_exc_pop"), {C.Frame});
         B.CreateStore(B.getInt32(2 + C.Exits.size()), C.State);
         auto *Cont = newBlock("finally.cont");
         C.Exits.push_back(Cont);
@@ -8735,12 +8739,12 @@ public:
   }
 
   bool tableTryCandidate(TryStmt *S) {
-    if (S->isFinally() || !Cleanups.empty())
+    if (!Cleanups.empty())
       return false;
     for (Stmt *B : S->getBody())
       if (!tableSafeStmt(B))
         return false;
-    return tableSafeHandlerBody(S->getExceptBody());
+    return S->isFinally() ? true : tableSafeHandlerBody(S->getExceptBody());
   }
 
   void emitUnwindResume(llvm::Value *Exc) {
@@ -8819,9 +8823,65 @@ public:
     B.SetInsertPoint(End);
   }
 
+  void emitTableTryFinally(TryStmt *S) {
+    auto *Landing = newBlock("finally.raise");
+    auto *Finally = newBlock("finally");
+    auto *End = newBlock("try.end");
+    llvm::FunctionCallee Personality =
+        classRuntime("__pas_personality", B.getInt32Ty(),
+                     {B.getInt32Ty(), B.getInt32Ty(), B.getInt64Ty(),
+                      B.getPtrTy(), B.getPtrTy()});
+    CurFn->setPersonalityFn(
+        llvm::cast<llvm::Constant>(Personality.getCallee()));
+    llvm::Value *State = createTemp(B.getInt32Ty(), "finally.state");
+    llvm::Value *ExcSlot = createTemp(B.getPtrTy(), "finally.exc");
+    llvm::Value *SavedExc = TableHandlerExc;
+    llvm::BasicBlock *SavedUnwind = TableUnwind;
+    TableUnwind = Landing;
+    Cleanups.emplace_back(Cleanup::Finally, nullptr, nullptr, State, Finally);
+    emitSequence(S->getBody());
+    llvm::SmallVector<llvm::BasicBlock *, 2> Exits =
+        std::move(Cleanups.back().Exits);
+    Cleanups.pop_back();
+    TableUnwind = SavedUnwind;
+    B.CreateStore(B.getInt32(0), State);
+    B.CreateStore(llvm::ConstantPointerNull::get(B.getPtrTy()), ExcSlot);
+    B.CreateBr(Finally);
+
+    B.SetInsertPoint(Landing);
+    llvm::StructType *LPType =
+        llvm::StructType::get(B.getPtrTy(), B.getInt32Ty());
+    llvm::LandingPadInst *LP = B.CreateLandingPad(LPType, 0, "lp");
+    LP->addClause(M.getOrInsertGlobal("__pas_catch_all", B.getInt8Ty()));
+    llvm::Value *Exc = B.CreateExtractValue(LP, 0, "unwind.exc");
+    B.CreateStore(B.getInt32(1), State);
+    B.CreateStore(Exc, ExcSlot);
+    B.CreateBr(Finally);
+
+    B.SetInsertPoint(Finally);
+    TableHandlerExc = B.CreateLoad(B.getPtrTy(), ExcSlot, "finally.exc");
+    emitSequence(S->getFinallyBody());
+    TableHandlerExc = SavedExc;
+    llvm::SwitchInst *SW =
+        B.CreateSwitch(B.CreateLoad(B.getInt32Ty(), State, "state"), End);
+    auto *Reraise = newBlock("finally.reraise");
+    SW->addCase(B.getInt32(1), Reraise);
+    for (size_t K = 0; K < Exits.size(); ++K)
+      SW->addCase(B.getInt32(2 + K), Exits[K]);
+    B.SetInsertPoint(Reraise);
+    B.CreateCall(classRuntime("__pas_reraise_table", B.getVoidTy(),
+                              {B.getPtrTy()}),
+                 {B.CreateLoad(B.getPtrTy(), ExcSlot, "finally.exc")});
+    B.CreateUnreachable();
+    B.SetInsertPoint(End);
+  }
+
   void visitTryStmt(TryStmt *S) {
     if (CGOpts.TableExceptions && tableTryCandidate(S)) {
-      emitTableTryExcept(S);
+      if (S->isFinally())
+        emitTableTryFinally(S);
+      else
+        emitTableTryExcept(S);
       return;
     }
     if (S->isFinally()) {

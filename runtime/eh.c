@@ -17,6 +17,8 @@
 
 extern _Thread_local PasExcFrame *__pas_exc_top;
 
+char __pas_catch_all;
+
 enum {
   DW_EH_PE_omit = 0xff,
   DW_EH_PE_absptr = 0x00,
@@ -104,11 +106,37 @@ static int lsdaInit(PasLSDA *l, const unsigned char *data,
 
 static int readPointer(const unsigned char **pp, const unsigned char *end,
                        unsigned encoding, uintptr_t *out) {
-  if (encoding != DW_EH_PE_absptr || *pp + sizeof(uintptr_t) > end)
-    return 0;
-  memcpy(out, *pp, sizeof(uintptr_t));
-  *pp += sizeof(uintptr_t);
-  return 1;
+  const unsigned char *start = *pp;
+  if (encoding == DW_EH_PE_absptr) {
+    if (*pp + sizeof(uintptr_t) > end)
+      return 0;
+    memcpy(out, *pp, sizeof(uintptr_t));
+    *pp += sizeof(uintptr_t);
+    return 1;
+  }
+  unsigned fmt = encoding & 0x0f;
+  if ((fmt == 0x0b || fmt == 0x03) && *pp + 4 <= end) {
+    uintptr_t value;
+    if (fmt == 0x0b) {
+      int32_t v;
+      memcpy(&v, *pp, 4);
+      value = (uintptr_t)((intptr_t)start + v);
+    } else {
+      uint32_t v;
+      memcpy(&v, *pp, 4);
+      value = (uintptr_t)start + v;
+    }
+    *pp += 4;
+    if (encoding & 0x80) {
+      if (value + sizeof(uintptr_t) > (uintptr_t)end)
+        return 0;
+      memcpy(out, (const void *)value, sizeof(uintptr_t));
+    } else {
+      *out = value;
+    }
+    return 1;
+  }
+  return 0;
 }
 
 static int readCallValue(const unsigned char **pp, const unsigned char *end,
@@ -287,6 +315,16 @@ void __pas_raise_table(void *obj, const char *where) {
 void __pas_raise_table_at(void *obj, const char *where, void *address) {
   (void)where;
   raise_table(obj, NULL, address);
+}
+
+void __pas_reraise_table(void *unwind) {
+  if (!unwind)
+    __pas_runtime_error("re-raise without an exception");
+  _Unwind_Reason_Code r =
+      _Unwind_RaiseException((struct _Unwind_Exception *)unwind);
+  if (r == _URC_END_OF_STACK)
+    raise_table(((PasUnwindException *)unwind)->object, NULL, NULL);
+  __pas_runtime_error("exception unwinding failed");
 }
 
 /* One call site (1..16), one catch action for __pas_exception_vmt, and the
