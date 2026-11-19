@@ -123,6 +123,10 @@ var
   curFrame: TV;
   pinFn: PIRFunc;            { the function pinSlot belongs to; see pinInMemory }
   pinSlot: TV;
+  { optimization2 item 3: the pin analysis's result variable and a scratch
+    set it passes where no writes are collected }
+  paCurResult: PDecl;
+  paDummy: TPtrList;
   { Are temporaries holding managed values pinned when they are made (see
     pinInMemory)? In a routine without try statements they are pinned
     later, if its body turns out to need protection. }
@@ -1866,15 +1870,38 @@ begin
   varSlot := PTVBox(v^.cgLocal)^;
 end;
 
-{ Is v kept in its routine's frame record? Variables that nested routines
-  use are, and those that must be in memory when an exception arrives
-  through _longjmp: all of them in a routine where execution continues
-  afterwards (try statements, non-local labels), else the managed ones,
-  which are released on the way out. The other variables get an alloca
-  each, which the optimizer turns into registers. }
-function inFrame(v: PDecl; pinAll: boolean): boolean;
+function listHasPtr(const l: TPtrList; p: pointer): boolean;
+var
+  i: longint;
 begin
-  inFrame := pinAll or v^.captured or (not isByRef(v) and isManaged(v^.varType));
+  for i := 0 to l.count - 1 do
+    if listGet(l, i) = p then
+      exit(true);
+  listHasPtr := false;
+end;
+
+procedure listAddUnique(var l: TPtrList; p: pointer);
+begin
+  if not listHasPtr(l, p) then
+    listAdd(l, p);
+end;
+
+procedure listAppendUnique(var dst: TPtrList; const src: TPtrList);
+var
+  i: longint;
+begin
+  for i := 0 to src.count - 1 do
+    listAddUnique(dst, listGet(src, i));
+end;
+
+{ Is v kept in its routine's frame record? Variables that nested routines
+  use are, those whose write must survive an exception are (pins), and the
+  managed ones, which are released on the way out. The other variables get
+  an alloca each, which the optimizer turns into registers. }
+function inFrame(v: PDecl; pinAll: boolean; const pins: TPtrList): boolean;
+begin
+  inFrame := pinAll or listHasPtr(pins, v) or v^.captured or
+             (not isByRef(v) and isManaged(v^.varType));
 end;
 
 { The start value of a local variable or function result at addr: zero.

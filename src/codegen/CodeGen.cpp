@@ -262,6 +262,778 @@ struct Runtime {
   }
 };
 
+using VarSet = llvm::DenseSet<VarDecl *>;
+
+/// Finds the locals that have to stay in the frame when a routine has a try
+/// statement: a write inside a protected region is visible after a _longjmp
+/// only if the variable is in memory. A variable that is only read, or is
+/// overwritten before any read after the landing, can stay in an alloca.
+/// The analysis is deliberately conservative around calls (an argument of an
+/// unknown call may be a var parameter) and loops.
+class PinAnalysis {
+  RoutineDecl *R;
+  VarSet Pins;
+
+  /// The variable whose storage an assignment to E writes, if local: x,
+  /// r.f and a[i] write x, r and a (not the index).
+  void addTarget(Expr *E, VarSet &Out) {
+    if (!E)
+      return;
+    if (auto *P = llvm::dyn_cast<ParenExpr>(E)) {
+      addTarget(P->getInner(), Out);
+      return;
+    }
+    if (auto *N = llvm::dyn_cast<NameRefExpr>(E)) {
+      if (auto *V = llvm::dyn_cast_or_null<VarDecl>(N->getDecl())) {
+        Out.insert(V->getAbsoluteRoot() ? V->getAbsoluteRoot() : V);
+      } else if (N->getWith()) {
+        addTarget(N->getWith()->Record, Out);
+      }
+      return;
+    }
+    if (auto *F = llvm::dyn_cast<FieldExpr>(E)) {
+      addTarget(F->getBase(), Out);
+      return;
+    }
+    if (auto *I = llvm::dyn_cast<IndexExpr>(E)) {
+      addTarget(I->getBase(), Out);
+      return;
+    }
+    if (auto *D = llvm::dyn_cast<DerefExpr>(E)) {
+      // The pointee changes. Keep the pointer in memory too: if LLVM keeps it
+      // in a register, it may forward a field through it across the setjmp.
+      addTarget(D->getBase(), Out);
+      return;
+    }
+  }
+
+  /// Calls that can write through a var/out parameter. A routine's parameter
+  /// list says which arguments; builtins are handled by their known effects;
+  /// an unknown call gets the conservative answer (every argument).
+  void addCallWrites(Decl *D, llvm::ArrayRef<Expr *> Args, VarSet &Out) {
+    auto Mark = [&](size_t I) {
+      if (I < Args.size())
+        addTarget(Args[I], Out);
+    };
+    if (auto *B = llvm::dyn_cast_or_null<BuiltinDecl>(D)) {
+      switch (B->getBuiltinKind()) {
+      case BuiltinKind::Write:
+      case BuiltinKind::Writeln:
+      case BuiltinKind::Halt:
+      case BuiltinKind::Break:
+      case BuiltinKind::Continue:
+        return;
+      case BuiltinKind::Exit:
+        if (!Args.empty() && R->isFunction())
+          Out.insert(R->getResultVar());
+        return;
+      case BuiltinKind::Inc:
+      case BuiltinKind::Dec:
+      case BuiltinKind::SetLength:
+      case BuiltinKind::Delete:
+      case BuiltinKind::Insert:
+      case BuiltinKind::GetMem:
+      case BuiltinKind::FreeMem:
+      case BuiltinKind::ReallocMem:
+      case BuiltinKind::FillChar:
+      case BuiltinKind::New:
+      case BuiltinKind::Dispose:
+      case BuiltinKind::Assign:
+      case BuiltinKind::AssignFile:
+      case BuiltinKind::Reset:
+      case BuiltinKind::Rewrite:
+      case BuiltinKind::Get:
+      case BuiltinKind::Put:
+      case BuiltinKind::Page:
+      case BuiltinKind::Close:
+      case BuiltinKind::CloseFile:
+      case BuiltinKind::Flush:
+      case BuiltinKind::Seek:
+        Mark(0);
+        return;
+      case BuiltinKind::Move:
+        Mark(1);
+        return;
+      case BuiltinKind::BlockRead:
+      case BuiltinKind::BlockWrite:
+        for (size_t I = 1; I < Args.size(); ++I)
+          Mark(I);
+        return;
+      case BuiltinKind::Pack:
+      case BuiltinKind::Unpack:
+        for (size_t I = 0; I < Args.size(); ++I)
+          Mark(I);
+        return;
+      default:
+        for (size_t I = 0; I < Args.size(); ++I)
+          Mark(I);
+        return;
+      }
+    }
+    if (auto *RD = llvm::dyn_cast_or_null<RoutineDecl>(D)) {
+      auto Params = RD->getParams();
+      for (size_t I = 0; I < Args.size() && I < Params.size(); ++I)
+        if (Params[I]->isVarParam() || Params[I]->isOutParam())
+          addTarget(Args[I], Out);
+      return;
+    }
+    // A procedural value or an unknown declaration.
+    for (size_t I = 0; I < Args.size(); ++I)
+      Mark(I);
+  }
+
+  void addWrittenExpr(Expr *E, VarSet &Out) {
+    if (!E)
+      return;
+    if (auto *C = llvm::dyn_cast<CallExpr>(E)) {
+      addCallWrites(C->getDecl(), C->getArgs(), Out);
+      if (C->getWith())
+        addTarget(C->getWith()->Record, Out);
+      addTarget(C->getCalleeValue(), Out);
+      addWrittenExpr(C->getCalleeValue(), Out);
+      for (Expr *A : C->getArgs())
+        addWrittenExpr(A, Out);
+      return;
+    }
+    if (auto *C = llvm::dyn_cast<IndirectCallExpr>(E)) {
+      for (Expr *A : C->getArgs())
+        addTarget(A, Out);
+      addTarget(C->getCallee(), Out);
+      addWrittenExpr(C->getCallee(), Out);
+      for (Expr *A : C->getArgs())
+        addWrittenExpr(A, Out);
+      return;
+    }
+    if (auto *P = llvm::dyn_cast<ParenExpr>(E)) {
+      addWrittenExpr(P->getInner(), Out);
+      return;
+    }
+    if (auto *U = llvm::dyn_cast<UnaryExpr>(E)) {
+      addWrittenExpr(U->getOperand(), Out);
+      return;
+    }
+    if (auto *B = llvm::dyn_cast<BinaryExpr>(E)) {
+      addWrittenExpr(B->getLHS(), Out);
+      addWrittenExpr(B->getRHS(), Out);
+      return;
+    }
+    if (auto *F = llvm::dyn_cast<FormattedExpr>(E)) {
+      addWrittenExpr(F->getValue(), Out);
+      addWrittenExpr(F->getWidth(), Out);
+      addWrittenExpr(F->getPrecision(), Out);
+      return;
+    }
+    if (auto *I = llvm::dyn_cast<IndexExpr>(E)) {
+      addWrittenExpr(I->getBase(), Out);
+      addWrittenExpr(I->getIndex(), Out);
+      return;
+    }
+    if (auto *F = llvm::dyn_cast<FieldExpr>(E)) {
+      addWrittenExpr(F->getBase(), Out);
+      return;
+    }
+    if (auto *A = llvm::dyn_cast<AddrOfExpr>(E)) {
+      // The address escapes: a call inside the protected code may write it.
+      addTarget(A->getOperand(), Out);
+      addWrittenExpr(A->getOperand(), Out);
+      return;
+    }
+    if (auto *D = llvm::dyn_cast<DerefExpr>(E)) {
+      addWrittenExpr(D->getBase(), Out);
+      return;
+    }
+    if (auto *S = llvm::dyn_cast<SetCtorExpr>(E)) {
+      for (const SetElement &El : S->getElements()) {
+        addWrittenExpr(El.Lo, Out);
+        addWrittenExpr(El.Hi, Out);
+      }
+      return;
+    }
+    if (auto *A = llvm::dyn_cast<AggregateExpr>(E)) {
+      for (AggregateElement *El : A->getElements())
+        addWrittenExpr(El->Value, Out);
+      return;
+    }
+    if (auto *T = llvm::dyn_cast<TemplateExpr>(E)) {
+      for (Expr *P : T->getParts())
+        addWrittenExpr(P, Out);
+      return;
+    }
+    if (auto *T = llvm::dyn_cast<TupleExpr>(E)) {
+      for (Expr *X : T->getElements())
+        addWrittenExpr(X, Out);
+      return;
+    }
+    if (auto *N = llvm::dyn_cast<NamedArgExpr>(E)) {
+      addWrittenExpr(N->getValue(), Out);
+      return;
+    }
+    if (auto *C = llvm::dyn_cast<CondExpr>(E)) {
+      addWrittenExpr(C->getCond(), Out);
+      addWrittenExpr(C->getThen(), Out);
+      addWrittenExpr(C->getElse(), Out);
+      return;
+    }
+    if (auto *A = llvm::dyn_cast<AwaitExpr>(E)) {
+      addWrittenExpr(A->getOperand(), Out);
+      return;
+    }
+    if (auto *S = llvm::dyn_cast<SpawnExpr>(E)) {
+      addWrittenExpr(S->getCall(), Out);
+      return;
+    }
+    if (auto *S = llvm::dyn_cast<SafeNavExpr>(E)) {
+      addWrittenExpr(S->getBase(), Out);
+      addWrittenExpr(S->getAccess(), Out);
+      return;
+    }
+    if (auto *C = llvm::dyn_cast<CoalesceExpr>(E)) {
+      addWrittenExpr(C->getLeft(), Out);
+      addWrittenExpr(C->getRight(), Out);
+      return;
+    }
+    if (auto *M = llvm::dyn_cast<MoveExpr>(E)) {
+      addWrittenExpr(M->getOperand(), Out);
+      return;
+    }
+    if (auto *I = llvm::dyn_cast<InheritedExpr>(E)) {
+      for (Expr *A : I->getImplicitArgs())
+        addWrittenExpr(A, Out);
+      return;
+    }
+  }
+
+  void addWrittenList(llvm::ArrayRef<Stmt *> Body, VarSet &Out) {
+    for (Stmt *S : Body)
+      addWrittenStmt(S, Out);
+  }
+
+  void addWrittenStmt(Stmt *S, VarSet &Out) {
+    if (!S)
+      return;
+    if (auto *C = llvm::dyn_cast<CompoundStmt>(S)) {
+      addWrittenList(C->getBody(), Out);
+      return;
+    }
+    if (auto *A = llvm::dyn_cast<AssignStmt>(S)) {
+      addTarget(A->getTarget(), Out);
+      addWrittenExpr(A->getValue(), Out);
+      return;
+    }
+    if (auto *P = llvm::dyn_cast<ProcCallStmt>(S)) {
+      addCallWrites(P->getDecl(), P->getArgs(), Out);
+      if (P->getWith())
+        addTarget(P->getWith()->Record, Out);
+      addTarget(P->getCalleeValue(), Out);
+      addWrittenExpr(P->getCalleeValue(), Out);
+      for (Expr *A : P->getArgs())
+        addWrittenExpr(A, Out);
+      return;
+    }
+    if (auto *I = llvm::dyn_cast<IndirectCallStmt>(S)) {
+      addWrittenExpr(I->getCall(), Out);
+      return;
+    }
+    if (auto *I = llvm::dyn_cast<IfStmt>(S)) {
+      addWrittenExpr(I->getCond(), Out);
+      addWrittenStmt(I->getThen(), Out);
+      addWrittenStmt(I->getElse(), Out);
+      return;
+    }
+    if (auto *W = llvm::dyn_cast<WhileStmt>(S)) {
+      addWrittenExpr(W->getCond(), Out);
+      addWrittenStmt(W->getBody(), Out);
+      return;
+    }
+    if (auto *R = llvm::dyn_cast<RepeatStmt>(S)) {
+      addWrittenList(R->getBody(), Out);
+      addWrittenExpr(R->getCond(), Out);
+      return;
+    }
+    if (auto *F = llvm::dyn_cast<ForStmt>(S)) {
+      addTarget(F->getVar(), Out);
+      addWrittenExpr(F->getInit(), Out);
+      addWrittenExpr(F->getFinal(), Out);
+      addWrittenStmt(F->getBody(), Out);
+      return;
+    }
+    if (auto *F = llvm::dyn_cast<ForInStmt>(S)) {
+      addTarget(F->getVar(), Out);
+      if (F->getElementVar())
+        Out.insert(F->getElementVar());
+      if (F->getCollectionVar())
+        Out.insert(F->getCollectionVar());
+      if (F->getEnumeratorVar())
+        Out.insert(F->getEnumeratorVar());
+      addWrittenExpr(F->getCollection(), Out);
+      if (F->getStep())
+        addWrittenStmt(F->getStep(), Out);
+      addWrittenExpr(F->getGetEnumerator(), Out);
+      addWrittenExpr(F->getMoveNext(), Out);
+      addWrittenStmt(F->getBody(), Out);
+      return;
+    }
+    if (auto *C = llvm::dyn_cast<CaseStmt>(S)) {
+      addWrittenExpr(C->getSelector(), Out);
+      for (CaseArm *A : C->getArms()) {
+        for (CaseLabel *L : A->getLabels()) {
+          addWrittenExpr(L->Lo, Out);
+          addWrittenExpr(L->Hi, Out);
+        }
+        addWrittenStmt(A->getBody(), Out);
+      }
+      addWrittenList(C->getElseBody(), Out);
+      return;
+    }
+    if (auto *W = llvm::dyn_cast<WithStmt>(S)) {
+      for (WithContext *C : W->getRecords())
+        addWrittenExpr(C->Record, Out);
+      addWrittenStmt(W->getBody(), Out);
+      return;
+    }
+    if (auto *L = llvm::dyn_cast<LabeledStmt>(S)) {
+      addWrittenStmt(L->getBody(), Out);
+      return;
+    }
+    if (auto *T = llvm::dyn_cast<TryStmt>(S)) {
+      addWrittenList(T->getBody(), Out);
+      for (ExceptHandler *H : T->getHandlers())
+        addWrittenStmt(H->getBody(), Out);
+      addWrittenList(T->getExceptBody(), Out);
+      return;
+    }
+    if (auto *R = llvm::dyn_cast<RaiseStmt>(S)) {
+      addWrittenExpr(R->getObject(), Out);
+      addWrittenExpr(R->getAddress(), Out);
+      addWrittenExpr(R->getFrame(), Out);
+      return;
+    }
+    if (auto *V = llvm::dyn_cast<VarDeclStmt>(S)) {
+      for (VarDecl *D : V->getVars())
+        Out.insert(D);
+      addWrittenExpr(V->getInit(), Out);
+      return;
+    }
+    if (auto *D = llvm::dyn_cast<DestructureStmt>(S)) {
+      for (VarDecl *V : D->getVars())
+        Out.insert(V);
+      for (Expr *T : D->getTargets())
+        addTarget(T, Out);
+      addWrittenExpr(D->getValue(), Out);
+      return;
+    }
+    if (auto *E = llvm::dyn_cast<ExprStmt>(S)) {
+      addWrittenExpr(E->getExpr(), Out);
+      return;
+    }
+    if (auto *S2 = llvm::dyn_cast<ScopeStmt>(S)) {
+      addWrittenExpr(S2->getToken(), Out);
+      addWrittenList(S2->getBody(), Out);
+      return;
+    }
+    if (auto *D = llvm::dyn_cast<DetachedStmt>(S)) {
+      addWrittenExpr(D->getHandler(), Out);
+      addWrittenExpr(D->getCall(), Out);
+      return;
+    }
+    if (auto *Y = llvm::dyn_cast<YieldStmt>(S)) {
+      addWrittenExpr(Y->getValue(), Out);
+      return;
+    }
+  }
+
+  /// The variables an assignment target reads to compute its address: a[i]
+  /// reads a and i, p^ reads p, r.f reads r, but x := e does not read x.
+  static void addTargetReads(Expr *E, VarSet &Out) {
+    if (!E)
+      return;
+    if (auto *P = llvm::dyn_cast<ParenExpr>(E)) {
+      addTargetReads(P->getInner(), Out);
+      return;
+    }
+    if (llvm::isa<NameRefExpr>(E))
+      return;
+    if (auto *F = llvm::dyn_cast<FieldExpr>(E)) {
+      addUsed(F->getBase(), Out);
+      return;
+    }
+    if (auto *I = llvm::dyn_cast<IndexExpr>(E)) {
+      addUsed(I->getBase(), Out);
+      addUsed(I->getIndex(), Out);
+      return;
+    }
+    if (auto *D = llvm::dyn_cast<DerefExpr>(E)) {
+      addUsed(D->getBase(), Out);
+      return;
+    }
+  }
+
+  static void addUsed(Expr *E, VarSet &Out) {
+    if (!E)
+      return;
+    if (auto *N = llvm::dyn_cast<NameRefExpr>(E)) {
+      if (auto *V = llvm::dyn_cast_or_null<VarDecl>(N->getDecl())) {
+        Out.insert(V->getAbsoluteRoot() ? V->getAbsoluteRoot() : V);
+      } else if (N->getWith()) {
+        addUsed(N->getWith()->Record, Out);
+      }
+      return;
+    }
+    if (auto *P = llvm::dyn_cast<ParenExpr>(E)) {
+      addUsed(P->getInner(), Out);
+      return;
+    }
+    if (auto *U = llvm::dyn_cast<UnaryExpr>(E)) {
+      addUsed(U->getOperand(), Out);
+      return;
+    }
+    if (auto *B = llvm::dyn_cast<BinaryExpr>(E)) {
+      addUsed(B->getLHS(), Out);
+      addUsed(B->getRHS(), Out);
+      return;
+    }
+    if (auto *C = llvm::dyn_cast<CallExpr>(E)) {
+      if (C->getWith())
+        addUsed(C->getWith()->Record, Out);
+      addUsed(C->getCalleeValue(), Out);
+      for (Expr *A : C->getArgs())
+        addUsed(A, Out);
+      return;
+    }
+    if (auto *F = llvm::dyn_cast<FormattedExpr>(E)) {
+      addUsed(F->getValue(), Out);
+      addUsed(F->getWidth(), Out);
+      addUsed(F->getPrecision(), Out);
+      return;
+    }
+    if (auto *I = llvm::dyn_cast<IndexExpr>(E)) {
+      addUsed(I->getBase(), Out);
+      addUsed(I->getIndex(), Out);
+      return;
+    }
+    if (auto *F = llvm::dyn_cast<FieldExpr>(E)) {
+      addUsed(F->getBase(), Out);
+      return;
+    }
+    if (auto *A = llvm::dyn_cast<AddrOfExpr>(E)) {
+      addUsed(A->getOperand(), Out);
+      return;
+    }
+    if (auto *D = llvm::dyn_cast<DerefExpr>(E)) {
+      addUsed(D->getBase(), Out);
+      return;
+    }
+    if (auto *S = llvm::dyn_cast<SetCtorExpr>(E)) {
+      for (const SetElement &El : S->getElements()) {
+        addUsed(El.Lo, Out);
+        addUsed(El.Hi, Out);
+      }
+      return;
+    }
+    if (auto *A = llvm::dyn_cast<AggregateExpr>(E)) {
+      for (AggregateElement *El : A->getElements())
+        addUsed(El->Value, Out);
+      return;
+    }
+    if (auto *C = llvm::dyn_cast<IndirectCallExpr>(E)) {
+      addUsed(C->getCallee(), Out);
+      for (Expr *A : C->getArgs())
+        addUsed(A, Out);
+      return;
+    }
+    if (auto *I = llvm::dyn_cast<InheritedExpr>(E)) {
+      for (Expr *A : I->getImplicitArgs())
+        addUsed(A, Out);
+      return;
+    }
+    if (auto *M = llvm::dyn_cast<MoveExpr>(E)) {
+      addUsed(M->getOperand(), Out);
+      return;
+    }
+    if (auto *T = llvm::dyn_cast<TemplateExpr>(E)) {
+      for (Expr *P : T->getParts())
+        addUsed(P, Out);
+      return;
+    }
+    if (auto *T = llvm::dyn_cast<TupleExpr>(E)) {
+      for (Expr *X : T->getElements())
+        addUsed(X, Out);
+      return;
+    }
+    if (auto *N = llvm::dyn_cast<NamedArgExpr>(E)) {
+      addUsed(N->getValue(), Out);
+      return;
+    }
+    if (auto *C = llvm::dyn_cast<CondExpr>(E)) {
+      addUsed(C->getCond(), Out);
+      addUsed(C->getThen(), Out);
+      addUsed(C->getElse(), Out);
+      return;
+    }
+    if (auto *A = llvm::dyn_cast<AwaitExpr>(E)) {
+      addUsed(A->getOperand(), Out);
+      return;
+    }
+    if (auto *S = llvm::dyn_cast<SpawnExpr>(E)) {
+      addUsed(S->getCall(), Out);
+      return;
+    }
+    if (auto *S = llvm::dyn_cast<SafeNavExpr>(E)) {
+      addUsed(S->getBase(), Out);
+      addUsed(S->getAccess(), Out);
+      return;
+    }
+    if (auto *C = llvm::dyn_cast<CoalesceExpr>(E)) {
+      addUsed(C->getLeft(), Out);
+      addUsed(C->getRight(), Out);
+      return;
+    }
+  }
+
+  static void addUsedList(llvm::ArrayRef<Stmt *> Body, VarSet &Out) {
+    for (Stmt *S : Body)
+      addUsedStmt(S, Out);
+  }
+
+  static void addUsedStmt(Stmt *S, VarSet &Out) {
+    if (!S)
+      return;
+    if (auto *C = llvm::dyn_cast<CompoundStmt>(S)) {
+      addUsedList(C->getBody(), Out);
+      return;
+    }
+    if (auto *P = llvm::dyn_cast<ProcCallStmt>(S)) {
+      if (P->getWith())
+        addUsed(P->getWith()->Record, Out);
+      addUsed(P->getCalleeValue(), Out);
+      for (Expr *A : P->getArgs())
+        addUsed(A, Out);
+      return;
+    }
+    if (auto *I = llvm::dyn_cast<IndirectCallStmt>(S)) {
+      addUsed(I->getCall(), Out);
+      return;
+    }
+    if (auto *A = llvm::dyn_cast<AssignStmt>(S)) {
+      if (A->isCompound())
+        addUsed(A->getTarget(), Out);
+      else
+        addTargetReads(A->getTarget(), Out);
+      addUsed(A->getValue(), Out);
+      return;
+    }
+    if (auto *I = llvm::dyn_cast<IfStmt>(S)) {
+      addUsed(I->getCond(), Out);
+      addUsedStmt(I->getThen(), Out);
+      addUsedStmt(I->getElse(), Out);
+      return;
+    }
+    if (auto *W = llvm::dyn_cast<WhileStmt>(S)) {
+      addUsed(W->getCond(), Out);
+      addUsedStmt(W->getBody(), Out);
+      return;
+    }
+    if (auto *R = llvm::dyn_cast<RepeatStmt>(S)) {
+      addUsedList(R->getBody(), Out);
+      addUsed(R->getCond(), Out);
+      return;
+    }
+    if (auto *F = llvm::dyn_cast<ForStmt>(S)) {
+      addUsed(F->getVar(), Out);
+      addUsed(F->getInit(), Out);
+      addUsed(F->getFinal(), Out);
+      addUsedStmt(F->getBody(), Out);
+      return;
+    }
+    if (auto *F = llvm::dyn_cast<ForInStmt>(S)) {
+      addUsed(F->getVar(), Out);
+      addUsed(F->getCollection(), Out);
+      addUsedStmt(F->getBody(), Out);
+      return;
+    }
+    if (auto *C = llvm::dyn_cast<CaseStmt>(S)) {
+      addUsed(C->getSelector(), Out);
+      for (CaseArm *A : C->getArms()) {
+        for (CaseLabel *L : A->getLabels()) {
+          addUsed(L->Lo, Out);
+          addUsed(L->Hi, Out);
+        }
+        addUsedStmt(A->getBody(), Out);
+      }
+      addUsedList(C->getElseBody(), Out);
+      return;
+    }
+    if (auto *W = llvm::dyn_cast<WithStmt>(S)) {
+      for (WithContext *C : W->getRecords())
+        addUsed(C->Record, Out);
+      addUsedStmt(W->getBody(), Out);
+      return;
+    }
+    if (auto *L = llvm::dyn_cast<LabeledStmt>(S)) {
+      addUsedStmt(L->getBody(), Out);
+      return;
+    }
+    if (auto *T = llvm::dyn_cast<TryStmt>(S)) {
+      addUsedList(T->getBody(), Out);
+      for (ExceptHandler *H : T->getHandlers())
+        addUsedStmt(H->getBody(), Out);
+      addUsedList(T->getExceptBody(), Out);
+      return;
+    }
+    if (auto *R = llvm::dyn_cast<RaiseStmt>(S)) {
+      addUsed(R->getObject(), Out);
+      addUsed(R->getAddress(), Out);
+      addUsed(R->getFrame(), Out);
+      return;
+    }
+    if (auto *V = llvm::dyn_cast<VarDeclStmt>(S)) {
+      addUsed(V->getInit(), Out);
+      return;
+    }
+    if (auto *D = llvm::dyn_cast<DestructureStmt>(S)) {
+      for (Expr *T : D->getTargets())
+        addUsed(T, Out);
+      addUsed(D->getValue(), Out);
+      return;
+    }
+    if (auto *E = llvm::dyn_cast<ExprStmt>(S)) {
+      addUsed(E->getExpr(), Out);
+      return;
+    }
+    if (auto *S2 = llvm::dyn_cast<ScopeStmt>(S)) {
+      addUsed(S2->getToken(), Out);
+      addUsedList(S2->getBody(), Out);
+      return;
+    }
+    if (auto *D = llvm::dyn_cast<DetachedStmt>(S)) {
+      addUsed(D->getHandler(), Out);
+      addUsed(D->getCall(), Out);
+      return;
+    }
+    if (auto *Y = llvm::dyn_cast<YieldStmt>(S)) {
+      addUsed(Y->getValue(), Out);
+      return;
+    }
+  }
+
+  void pinList(llvm::ArrayRef<Stmt *> Body, VarSet After) {
+    for (auto It = Body.rbegin(); It != Body.rend(); ++It) {
+      pinStmt(*It, After);
+      addUsedStmt(*It, After);
+    }
+  }
+
+  void pinStmt(Stmt *S, const VarSet &After) {
+    if (!S)
+      return;
+    if (auto *C = llvm::dyn_cast<CompoundStmt>(S)) {
+      pinList(C->getBody(), After);
+      return;
+    }
+    if (auto *T = llvm::dyn_cast<TryStmt>(S)) {
+      VarSet Landing = After;
+      for (ExceptHandler *H : T->getHandlers())
+        addUsedStmt(H->getBody(), Landing);
+      addUsedList(T->getExceptBody(), Landing);
+      VarSet Written;
+      addWrittenList(T->getBody(), Written);
+      for (VarDecl *V : Written)
+        if (Landing.count(V))
+          Pins.insert(V);
+      pinList(T->getBody(), Landing);
+      for (ExceptHandler *H : T->getHandlers())
+        pinStmt(H->getBody(), After);
+      pinList(T->getExceptBody(), After);
+      return;
+    }
+    if (auto *I = llvm::dyn_cast<IfStmt>(S)) {
+      pinStmt(I->getThen(), After);
+      pinStmt(I->getElse(), After);
+      return;
+    }
+    if (auto *W = llvm::dyn_cast<WhileStmt>(S)) {
+      VarSet LoopAfter = After;
+      addUsed(W->getCond(), LoopAfter);
+      addUsedStmt(W->getBody(), LoopAfter);
+      pinStmt(W->getBody(), LoopAfter);
+      return;
+    }
+    if (auto *R = llvm::dyn_cast<RepeatStmt>(S)) {
+      VarSet LoopAfter = After;
+      addUsedList(R->getBody(), LoopAfter);
+      addUsed(R->getCond(), LoopAfter);
+      pinList(R->getBody(), LoopAfter);
+      return;
+    }
+    if (auto *F = llvm::dyn_cast<ForStmt>(S)) {
+      VarSet LoopAfter = After;
+      addUsed(F->getVar(), LoopAfter);
+      addUsed(F->getInit(), LoopAfter);
+      addUsed(F->getFinal(), LoopAfter);
+      addUsedStmt(F->getBody(), LoopAfter);
+      pinStmt(F->getBody(), LoopAfter);
+      return;
+    }
+    if (auto *F = llvm::dyn_cast<ForInStmt>(S)) {
+      VarSet LoopAfter = After;
+      addUsed(F->getVar(), LoopAfter);
+      addUsed(F->getCollection(), LoopAfter);
+      addUsedStmt(F->getBody(), LoopAfter);
+      pinStmt(F->getBody(), LoopAfter);
+      return;
+    }
+    if (auto *C = llvm::dyn_cast<CaseStmt>(S)) {
+      for (CaseArm *A : C->getArms())
+        pinStmt(A->getBody(), After);
+      pinList(C->getElseBody(), After);
+      return;
+    }
+    if (auto *W = llvm::dyn_cast<WithStmt>(S)) {
+      pinStmt(W->getBody(), After);
+      return;
+    }
+    if (auto *L = llvm::dyn_cast<LabeledStmt>(S)) {
+      pinStmt(L->getBody(), After);
+      return;
+    }
+    if (auto *S2 = llvm::dyn_cast<ScopeStmt>(S)) {
+      pinList(S2->getBody(), After);
+      return;
+    }
+  }
+
+public:
+  explicit PinAnalysis(RoutineDecl *R) : R(R) {}
+
+  VarSet run() {
+    VarSet After;
+    if (R->isFunction())
+      After.insert(R->getResultVar());
+    // Owned variables are freed by an implicit try-finally around the body;
+    // its landing reads them, and any write to one happens inside it.
+    bool Owned = false;
+    for (Decl *D : R->getBody()->getDecls())
+      if (auto *V = llvm::dyn_cast<VarDecl>(D)) {
+        // A file local is closed on the way out, after the landing.
+        if (V->getType() && containsFile(V->getType()))
+          After.insert(V);
+        if (V->isOwned()) {
+          After.insert(V);
+          Owned = true;
+        }
+      }
+    if (Owned) {
+      VarSet Written;
+      addWrittenStmt(R->getBody()->getBody(), Written);
+      for (VarDecl *V : Written)
+        if (After.count(V))
+          Pins.insert(V);
+    }
+    pinStmt(R->getBody()->getBody(), After);
+    return Pins;
+  }
+};
+
 class CodeGenModule : public StmtVisitor<CodeGenModule>,
                       public ExprVisitor<CodeGenModule, llvm::Value *> {
   llvm::Module &M;
@@ -2231,8 +3003,8 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
   /// continues afterwards (try statements, non-local labels), else the
   /// managed ones, which are released on the way out. The other variables
   /// get an alloca each, which the optimizer turns into registers.
-  bool inFrame(VarDecl *V, bool PinAll) {
-    return PinAll || V->isCaptured() ||
+  bool inFrame(VarDecl *V, bool PinAll, const VarSet &PinVars) {
+    return PinAll || PinVars.count(V) || V->isCaptured() ||
            (!isByRef(V) && isManaged(V->getType()));
   }
 
@@ -3555,9 +4327,12 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
       LinkInFrame.insert(R);
       Slots.push_back(B.getPtrTy());
     }
-    bool PinAll = R->hasTry() || hasNonLocalLabels(*R->getBody());
+    bool PinAll = hasNonLocalLabels(*R->getBody());
+    VarSet PinVars;
+    if (!PinAll && R->hasTry())
+      PinVars = PinAnalysis(R).run();
     auto AddSlot = [&](VarDecl *V) {
-      if (!inFrame(V, PinAll))
+      if (!inFrame(V, PinAll, PinVars))
         return;
       FrameSlots[V] = Slots.size();
       Slots.push_back(isByRef(V) ? B.getPtrTy() : memType(V->getType()));

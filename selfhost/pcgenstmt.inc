@@ -3002,6 +3002,605 @@ begin
   listClear(vmtsToDefine);
 end;
 
+{ --- Pin analysis (optimization2 item 3) -------------------------------- }
+
+{ The variable whose storage a write through e changes: x, r.f and a[i]
+  write x, r and a (not the index). An absolute variable writes its root. }
+procedure paAddTarget(e: PNode; var outSet: TPtrList); forward;
+
+procedure paAddTarget(e: PNode; var outSet: TPtrList);
+begin
+  if e = nil then
+    exit;
+  case e^.kind of
+    nkParen:
+      paAddTarget(e^.inner, outSet);
+    nkNameRef:
+      if (e^.refDecl <> nil) and (e^.refDecl^.kind = dkVar) then
+      begin
+        if e^.refDecl^.absRoot <> nil then
+          listAddUnique(outSet, e^.refDecl^.absRoot)
+        else
+          listAddUnique(outSet, e^.refDecl);
+      end
+      else if e^.refWith <> nil then
+        paAddTarget(e^.refWith^.rec, outSet);
+    nkField:
+      paAddTarget(e^.base, outSet);
+    nkIndex:
+      paAddTarget(e^.base, outSet);
+    nkDeref:
+      { the pointee changes; keep the pointer in memory too }
+      paAddTarget(e^.inner, outSet);
+  end;
+end;
+
+procedure paExpr(e: PNode; var used, written: TPtrList;
+                 collectUsed, collectWritten: boolean); forward;
+procedure paStmt(s: PNode; var used, written: TPtrList;
+                 collectUsed, collectWritten: boolean); forward;
+
+{ The variables an assignment target reads to compute its address: a[i]
+  reads a and i, p^ reads p, r.f reads r, but x := e does not read x. }
+procedure paAddTargetReads(e: PNode; var used: TPtrList);
+begin
+  if e = nil then
+    exit;
+  case e^.kind of
+    nkParen:
+      paAddTargetReads(e^.inner, used);
+    nkNameRef:
+      ;
+    nkField:
+      paExpr(e^.base, used, paDummy, true, false);
+    nkIndex:
+      begin
+        paExpr(e^.base, used, paDummy, true, false);
+        paExpr(e^.index, used, paDummy, true, false);
+      end;
+    nkDeref:
+      paExpr(e^.inner, used, paDummy, true, false);
+  end;
+end;
+
+procedure paList(const l: TPtrList; var used, written: TPtrList;
+                 collectUsed, collectWritten: boolean);
+var
+  i: longint;
+begin
+  for i := 0 to l.count - 1 do
+    paStmt(PNode(listGet(l, i)), used, written, collectUsed, collectWritten);
+end;
+
+procedure paCallWrites(d: PDecl; const args: TPtrList; var written: TPtrList);
+var
+  i: longint;
+  p: PDecl;
+  procedure mark(idx: longint);
+  begin
+    if idx < args.count then
+      paAddTarget(PNode(listGet(args, idx)), written);
+  end;
+begin
+  if (d <> nil) and (d^.kind = dkBuiltin) then
+  begin
+    case d^.builtin of
+      bkWrite, bkWriteln, bkHalt, bkBreak, bkContinue:
+        exit;
+      bkExit:
+        if (args.count > 0) and (paCurResult <> nil) then
+          listAddUnique(written, paCurResult);
+      bkInc, bkDec, bkSetLength, bkDelete, bkInsert, bkGetMem, bkFreeMem,
+      bkReallocMem, bkFillChar, bkNew, bkDispose, bkAssign, bkAssignFile,
+      bkReset, bkRewrite, bkGet, bkPut, bkPage, bkClose, bkCloseFile,
+      bkFlush, bkSeek:
+        mark(0);
+      bkMove:
+        mark(1);
+      bkBlockRead, bkBlockWrite:
+        for i := 1 to args.count - 1 do
+          mark(i);
+      bkPack, bkUnpack:
+        for i := 0 to args.count - 1 do
+          mark(i);
+    else
+      for i := 0 to args.count - 1 do
+        mark(i);
+    end;
+    exit;
+  end;
+  if (d <> nil) and (d^.kind = dkRoutine) then
+  begin
+    for i := 0 to args.count - 1 do
+    begin
+      if i >= d^.params.count then
+        break;
+      p := PDecl(listGet(d^.params, i));
+      if (p^.varKind = vkVarParam) or p^.isOut then
+        mark(i);
+    end;
+    exit;
+  end;
+  { a procedural value or an unknown declaration }
+  for i := 0 to args.count - 1 do
+    mark(i);
+end;
+
+procedure paExpr(e: PNode; var used, written: TPtrList;
+                 collectUsed, collectWritten: boolean);
+var
+  i: longint;
+  el: PAggElement;
+  se: PSetElement;
+begin
+  if e = nil then
+    exit;
+  case e^.kind of
+    nkNameRef:
+      if (e^.refDecl <> nil) and (e^.refDecl^.kind = dkVar) then
+      begin
+        if collectUsed then
+          if e^.refDecl^.absRoot <> nil then
+            listAddUnique(used, e^.refDecl^.absRoot)
+          else
+            listAddUnique(used, e^.refDecl);
+      end
+      else if e^.refWith <> nil then
+        paExpr(e^.refWith^.rec, used, written, collectUsed, collectWritten);
+    nkAddrOf:
+      begin
+        { the address escapes: a call inside the protected code may write it }
+        if collectWritten then
+          paAddTarget(e^.inner, written);
+        paExpr(e^.inner, used, written, collectUsed, collectWritten);
+      end;
+    nkParen, nkDeref, nkMove:
+      paExpr(e^.inner, used, written, collectUsed, collectWritten);
+    nkUnary:
+      paExpr(e^.operand, used, written, collectUsed, collectWritten);
+    nkBinary:
+      begin
+        paExpr(e^.lhs, used, written, collectUsed, collectWritten);
+        paExpr(e^.rhs, used, written, collectUsed, collectWritten);
+      end;
+    nkCall:
+      begin
+        if collectWritten then
+        begin
+          paCallWrites(e^.callDecl, e^.args, written);
+          if e^.callWith <> nil then
+            paAddTarget(e^.callWith^.rec, written);
+          paAddTarget(e^.calleeExpr, written);
+        end;
+        if e^.callWith <> nil then
+          paExpr(e^.callWith^.rec, used, written, collectUsed, collectWritten);
+        paExpr(e^.calleeExpr, used, written, collectUsed, collectWritten);
+        for i := 0 to e^.args.count - 1 do
+          paExpr(PNode(listGet(e^.args, i)), used, written,
+                 collectUsed, collectWritten);
+      end;
+    nkIndirectCall:
+      begin
+        if collectWritten then
+        begin
+          for i := 0 to e^.args.count - 1 do
+            paAddTarget(PNode(listGet(e^.args, i)), written);
+          paAddTarget(e^.calleeExpr, written);
+        end;
+        paExpr(e^.calleeExpr, used, written, collectUsed, collectWritten);
+        for i := 0 to e^.args.count - 1 do
+          paExpr(PNode(listGet(e^.args, i)), used, written,
+                 collectUsed, collectWritten);
+      end;
+    nkFormatted:
+      begin
+        paExpr(e^.fmtValue, used, written, collectUsed, collectWritten);
+        paExpr(e^.fmtWidth, used, written, collectUsed, collectWritten);
+        paExpr(e^.fmtPrecision, used, written, collectUsed, collectWritten);
+      end;
+    nkIndex:
+      begin
+        paExpr(e^.base, used, written, collectUsed, collectWritten);
+        paExpr(e^.index, used, written, collectUsed, collectWritten);
+      end;
+    nkField:
+      paExpr(e^.base, used, written, collectUsed, collectWritten);
+    nkSetCtor:
+      for i := 0 to e^.setElems.count - 1 do
+      begin
+        se := PSetElement(listGet(e^.setElems, i));
+        paExpr(se^.lo, used, written, collectUsed, collectWritten);
+        paExpr(se^.hi, used, written, collectUsed, collectWritten);
+      end;
+    nkAggregate:
+      for i := 0 to e^.aggElems.count - 1 do
+      begin
+        el := PAggElement(listGet(e^.aggElems, i));
+        paExpr(el^.value, used, written, collectUsed, collectWritten);
+      end;
+    nkTemplate:
+      for i := 0 to e^.tmplParts.count - 1 do
+        paExpr(PNode(listGet(e^.tmplParts, i)), used, written,
+               collectUsed, collectWritten);
+    nkTuple:
+      for i := 0 to e^.tupElems.count - 1 do
+        paExpr(PNode(listGet(e^.tupElems, i)), used, written,
+               collectUsed, collectWritten);
+    nkNamedArg:
+      paExpr(e^.naValue, used, written, collectUsed, collectWritten);
+    nkCondExpr:
+      begin
+        paExpr(e^.ceCond, used, written, collectUsed, collectWritten);
+        paExpr(e^.ceThen, used, written, collectUsed, collectWritten);
+        paExpr(e^.ceElse, used, written, collectUsed, collectWritten);
+      end;
+    nkAwait:
+      paExpr(e^.awaitOperand, used, written, collectUsed, collectWritten);
+    nkSpawn:
+      paExpr(e^.spawnCall, used, written, collectUsed, collectWritten);
+    nkSafeNav:
+      begin
+        paExpr(e^.navBase, used, written, collectUsed, collectWritten);
+        paExpr(e^.navAccess, used, written, collectUsed, collectWritten);
+      end;
+    nkCoalesce:
+      begin
+        paExpr(e^.coLeft, used, written, collectUsed, collectWritten);
+        paExpr(e^.coRight, used, written, collectUsed, collectWritten);
+      end;
+    nkInherited:
+      for i := 0 to e^.inhArgs.count - 1 do
+        paExpr(PNode(listGet(e^.inhArgs, i)), used, written,
+               collectUsed, collectWritten);
+  end;
+end;
+
+procedure paStmt(s: PNode; var used, written: TPtrList;
+                 collectUsed, collectWritten: boolean);
+var
+  i, j: longint;
+  arm: PCaseArm;
+  lbl: PCaseLabel;
+  w: PWithContext;
+  h: PExceptHandler;
+begin
+  if s = nil then
+    exit;
+  case s^.kind of
+    nkEmpty, nkGoto:
+      ;
+    nkCompound:
+      paList(s^.stmts, used, written, collectUsed, collectWritten);
+    nkProcCall:
+      begin
+        if collectWritten then
+        begin
+          paCallWrites(s^.callDecl, s^.args, written);
+          if s^.callWith <> nil then
+            paAddTarget(s^.callWith^.rec, written);
+          paAddTarget(s^.calleeExpr, written);
+        end;
+        if s^.callWith <> nil then
+          paExpr(s^.callWith^.rec, used, written, collectUsed, collectWritten);
+        paExpr(s^.calleeExpr, used, written, collectUsed, collectWritten);
+        for i := 0 to s^.args.count - 1 do
+          paExpr(PNode(listGet(s^.args, i)), used, written,
+                 collectUsed, collectWritten);
+      end;
+    nkIndirectCallStmt:
+      paExpr(s^.calleeExpr, used, written, collectUsed, collectWritten);
+    nkAssign:
+      begin
+        if collectWritten then
+          paAddTarget(s^.target, written);
+        if collectUsed then
+        begin
+          if s^.assignCompound then
+            paExpr(s^.target, used, written, collectUsed, collectWritten)
+          else
+            paAddTargetReads(s^.target, used);
+        end;
+        paExpr(s^.value, used, written, collectUsed, collectWritten);
+      end;
+    nkIf:
+      begin
+        paExpr(s^.cond, used, written, collectUsed, collectWritten);
+        paStmt(s^.thenStmt, used, written, collectUsed, collectWritten);
+        paStmt(s^.elseStmt, used, written, collectUsed, collectWritten);
+      end;
+    nkWhile:
+      begin
+        paExpr(s^.cond, used, written, collectUsed, collectWritten);
+        paStmt(s^.thenStmt, used, written, collectUsed, collectWritten);
+      end;
+    nkRepeat:
+      begin
+        paList(s^.stmts, used, written, collectUsed, collectWritten);
+        paExpr(s^.untilCond, used, written, collectUsed, collectWritten);
+      end;
+    nkFor:
+      begin
+        if collectWritten then
+        begin
+          paAddTarget(s^.forVar, written);
+          if s^.forInline <> nil then
+            listAddUnique(written, s^.forInline);
+        end;
+        paExpr(s^.forVar, used, written, collectUsed, collectWritten);
+        paExpr(s^.forInit, used, written, collectUsed, collectWritten);
+        paExpr(s^.forFinal, used, written, collectUsed, collectWritten);
+        paStmt(s^.forBody, used, written, collectUsed, collectWritten);
+      end;
+    nkForIn:
+      begin
+        if collectWritten then
+        begin
+          paAddTarget(s^.inVar, written);
+          if s^.inInline <> nil then
+            listAddUnique(written, s^.inInline);
+          if s^.inElemVar <> nil then
+            listAddUnique(written, s^.inElemVar);
+          if s^.inCollVar <> nil then
+            listAddUnique(written, s^.inCollVar);
+          if s^.inEnumVar <> nil then
+            listAddUnique(written, s^.inEnumVar);
+        end;
+        paExpr(s^.inVar, used, written, collectUsed, collectWritten);
+        paExpr(s^.inColl, used, written, collectUsed, collectWritten);
+        paStmt(s^.inStep, used, written, collectUsed, collectWritten);
+        paExpr(s^.inGetEnum, used, written, collectUsed, collectWritten);
+        paExpr(s^.inMoveNext, used, written, collectUsed, collectWritten);
+        paStmt(s^.inBody, used, written, collectUsed, collectWritten);
+      end;
+    nkCase:
+      begin
+        paExpr(s^.selector, used, written, collectUsed, collectWritten);
+        for i := 0 to s^.arms.count - 1 do
+        begin
+          arm := PCaseArm(listGet(s^.arms, i));
+          for j := 0 to arm^.labels.count - 1 do
+          begin
+            lbl := PCaseLabel(listGet(arm^.labels, j));
+            paExpr(lbl^.lo, used, written, collectUsed, collectWritten);
+            paExpr(lbl^.hi, used, written, collectUsed, collectWritten);
+          end;
+          paStmt(arm^.body, used, written, collectUsed, collectWritten);
+        end;
+        paList(s^.elseBody, used, written, collectUsed, collectWritten);
+      end;
+    nkWith:
+      begin
+        for i := 0 to s^.withRecords.count - 1 do
+        begin
+          w := PWithContext(listGet(s^.withRecords, i));
+          paExpr(w^.rec, used, written, collectUsed, collectWritten);
+        end;
+        paStmt(s^.withBody, used, written, collectUsed, collectWritten);
+      end;
+    nkLabeled:
+      paStmt(s^.lblBody, used, written, collectUsed, collectWritten);
+    nkTry:
+      begin
+        paList(s^.tryBody, used, written, collectUsed, collectWritten);
+        for i := 0 to s^.handlers.count - 1 do
+        begin
+          h := PExceptHandler(listGet(s^.handlers, i));
+          paStmt(h^.hBody, used, written, collectUsed, collectWritten);
+        end;
+        paList(s^.partBody, used, written, collectUsed, collectWritten);
+      end;
+    nkRaise:
+      begin
+        paExpr(s^.raiseObj, used, written, collectUsed, collectWritten);
+        paExpr(s^.raiseAddr, used, written, collectUsed, collectWritten);
+        paExpr(s^.raiseFrame, used, written, collectUsed, collectWritten);
+      end;
+    nkVarDecl:
+      begin
+        if collectWritten then
+          for i := 0 to s^.vdVars.count - 1 do
+            listAddUnique(written, PDecl(listGet(s^.vdVars, i)));
+        paExpr(s^.vdInit, used, written, collectUsed, collectWritten);
+      end;
+    nkDestructure:
+      begin
+        if collectWritten then
+        begin
+          for i := 0 to s^.dsVars.count - 1 do
+            listAddUnique(written, PDecl(listGet(s^.dsVars, i)));
+          for i := 0 to s^.dsTargets.count - 1 do
+            paAddTarget(PNode(listGet(s^.dsTargets, i)), written);
+        end;
+        paExpr(s^.dsValue, used, written, collectUsed, collectWritten);
+      end;
+    nkExprStmt:
+      paExpr(s^.exprStmtExpr, used, written, collectUsed, collectWritten);
+    nkScope:
+      begin
+        paExpr(s^.scopeToken, used, written, collectUsed, collectWritten);
+        paList(s^.scopeBody, used, written, collectUsed, collectWritten);
+      end;
+    nkDetached:
+      begin
+        paExpr(s^.detHandler, used, written, collectUsed, collectWritten);
+        paExpr(s^.detCall, used, written, collectUsed, collectWritten);
+      end;
+    nkYield:
+      paExpr(s^.yieldValue, used, written, collectUsed, collectWritten);
+  end;
+end;
+
+procedure paPinStmt(s: PNode; const after: TPtrList; var pins: TPtrList); forward;
+
+procedure paPinList(const l: TPtrList; const after: TPtrList;
+                    var pins: TPtrList);
+var
+  i: longint;
+  a: TPtrList;
+begin
+  listInit(a);
+  listAppendUnique(a, after);
+  for i := l.count - 1 downto 0 do
+  begin
+    paPinStmt(PNode(listGet(l, i)), a, pins);
+    paStmt(PNode(listGet(l, i)), a, paDummy, true, false);
+  end;
+  listFree(a);
+end;
+
+procedure paPinStmt(s: PNode; const after: TPtrList; var pins: TPtrList);
+var
+  i: longint;
+  landing, written, loopAfter, dummy: TPtrList;
+  arm: PCaseArm;
+  h: PExceptHandler;
+  v: PDecl;
+begin
+  if s = nil then
+    exit;
+  case s^.kind of
+    nkCompound:
+      paPinList(s^.stmts, after, pins);
+    nkTry:
+      begin
+        listInit(landing);
+        listAppendUnique(landing, after);
+        listInit(dummy);
+        listInit(written);
+        for i := 0 to s^.handlers.count - 1 do
+        begin
+          h := PExceptHandler(listGet(s^.handlers, i));
+          paStmt(h^.hBody, landing, dummy, true, false);
+        end;
+        paList(s^.partBody, landing, dummy, true, false);
+        paList(s^.tryBody, dummy, written, false, true);
+        for i := 0 to written.count - 1 do
+        begin
+          v := PDecl(listGet(written, i));
+          if listHasPtr(landing, v) then
+            listAddUnique(pins, v);
+        end;
+        paPinList(s^.tryBody, landing, pins);
+        for i := 0 to s^.handlers.count - 1 do
+        begin
+          h := PExceptHandler(listGet(s^.handlers, i));
+          paPinStmt(h^.hBody, after, pins);
+        end;
+        paPinList(s^.partBody, after, pins);
+        listFree(landing);
+        listFree(written);
+      end;
+    nkIf:
+      begin
+        paPinStmt(s^.thenStmt, after, pins);
+        paPinStmt(s^.elseStmt, after, pins);
+      end;
+    nkWhile:
+      begin
+        listInit(loopAfter);
+        listAppendUnique(loopAfter, after);
+        paExpr(s^.cond, loopAfter, paDummy, true, false);
+        paStmt(s^.thenStmt, loopAfter, paDummy, true, false);
+        paPinStmt(s^.thenStmt, loopAfter, pins);
+        listFree(loopAfter);
+      end;
+    nkRepeat:
+      begin
+        listInit(loopAfter);
+        listAppendUnique(loopAfter, after);
+        paList(s^.stmts, loopAfter, paDummy, true, false);
+        paExpr(s^.untilCond, loopAfter, paDummy, true, false);
+        paPinList(s^.stmts, loopAfter, pins);
+        listFree(loopAfter);
+      end;
+    nkFor:
+      begin
+        listInit(loopAfter);
+        listAppendUnique(loopAfter, after);
+        paExpr(s^.forVar, loopAfter, paDummy, true, false);
+        paExpr(s^.forInit, loopAfter, paDummy, true, false);
+        paExpr(s^.forFinal, loopAfter, paDummy, true, false);
+        paStmt(s^.forBody, loopAfter, paDummy, true, false);
+        paPinStmt(s^.forBody, loopAfter, pins);
+        listFree(loopAfter);
+      end;
+    nkForIn:
+      begin
+        listInit(loopAfter);
+        listAppendUnique(loopAfter, after);
+        paExpr(s^.inVar, loopAfter, paDummy, true, false);
+        paExpr(s^.inColl, loopAfter, paDummy, true, false);
+        paStmt(s^.inBody, loopAfter, paDummy, true, false);
+        paPinStmt(s^.inBody, loopAfter, pins);
+        listFree(loopAfter);
+      end;
+    nkCase:
+      begin
+        for i := 0 to s^.arms.count - 1 do
+        begin
+          arm := PCaseArm(listGet(s^.arms, i));
+          paPinStmt(arm^.body, after, pins);
+        end;
+        paPinList(s^.elseBody, after, pins);
+      end;
+    nkWith:
+      paPinStmt(s^.withBody, after, pins);
+    nkLabeled:
+      paPinStmt(s^.lblBody, after, pins);
+    nkScope:
+      paPinList(s^.scopeBody, after, pins);
+  end;
+end;
+
+procedure computePinVars(r: PDecl; var pins: TPtrList);
+var
+  after, writtenAll: TPtrList;
+  i: longint;
+  v: PDecl;
+  owned: boolean;
+begin
+  listInit(pins);
+  listInit(after);
+  paCurResult := nil;
+  if r^.isFunction and (r^.resultVar <> nil) then
+  begin
+    paCurResult := r^.resultVar;
+    listAddUnique(after, r^.resultVar);
+  end;
+  { owned variables are freed by an implicit try-finally around the body;
+    its landing reads them, and any write to one happens inside it }
+  owned := false;
+  for i := 0 to r^.body^.decls.count - 1 do
+  begin
+    v := PDecl(listGet(r^.body^.decls, i));
+    if v^.kind = dkVar then
+    begin
+      { a file local is closed on the way out, after the landing }
+      if (v^.varType <> nil) and containsFile(v^.varType) then
+        listAddUnique(after, v);
+      if v^.isOwned then
+      begin
+        listAddUnique(after, v);
+        owned := true;
+      end;
+    end;
+  end;
+  if owned then
+  begin
+    listInit(writtenAll);
+    paStmt(r^.body^.body, paDummy, writtenAll, false, true);
+    for i := 0 to writtenAll.count - 1 do
+    begin
+      v := PDecl(listGet(writtenAll, i));
+      if listHasPtr(after, v) then
+        listAddUnique(pins, v);
+    end;
+    listFree(writtenAll);
+  end;
+  paPinStmt(r^.body^.body, after, pins);
+  listFree(after);
+end;
+
 procedure declareRoutine(r: PDecl); forward;
 
 { Lays out the frames of the routines declared in blk (recursively),
@@ -3207,7 +3806,7 @@ procedure declareRoutine(r: PDecl);
 var
   j, argNo: longint;
   v, p: PDecl;
-  slots, params: TPtrList;
+  slots, params, pinVars: TPtrList;
   name, dbgName: string;
   f: PIRFunc;
   ret: PIRType;
@@ -3217,7 +3816,7 @@ var
   procedure addSlot(x: PDecl);
   begin
     x^.cgLocal := nil;
-    x^.cgInFrame := inFrame(x, pinAll);
+    x^.cgInFrame := inFrame(x, pinAll, pinVars);
     if not x^.cgInFrame then
       exit;
     x^.cgSlot := slots.count;
@@ -3243,7 +3842,10 @@ begin
     r^.cgLinkInFrame := (r^.parent <> nil) and hasNested;
     if r^.cgLinkInFrame then
       listAdd(slots, irPtrT);
-    pinAll := r^.hasTry or hasNonLocalLabels(r^.body);
+    pinAll := hasNonLocalLabels(r^.body);
+    listInit(pinVars);
+    if not pinAll and r^.hasTry then
+      computePinVars(r, pinVars);
     if hasSelf(r) then
       addSlot(r^.selfVar);
     for j := 0 to r^.params.count - 1 do
@@ -3260,6 +3862,7 @@ begin
     end;
     if r^.isFunction then
       addSlot(r^.resultVar);
+    listFree(pinVars);
     name := mangle(r);
     r^.cgFrame := nil;
     if slots.count > 0 then
