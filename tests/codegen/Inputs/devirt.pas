@@ -38,4 +38,5 @@ begin
   L.Changed;
   B.Destroy;
   L.Destroy;
+  TChild.Create.Changed
 end.

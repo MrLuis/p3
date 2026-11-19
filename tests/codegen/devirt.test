@@ -15,3 +15,7 @@
 ; override it inherits from TChild.
 ; CHECK: call void @pas.tbase.unchanged(ptr null, ptr %l)
 ; CHECK: call void @pas.tchild.changed(ptr null, ptr %l{{[0-9]*}})
+; A direct constructor result's exact class is known.
+; CHECK: [[OBJ:%.*]] = call ptr @__pas_new(
+; CHECK: store ptr @vmt.tchild, ptr [[OBJ]]
+; CHECK: call void @pas.tchild.changed(ptr null, ptr [[OBJ]])

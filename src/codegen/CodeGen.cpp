@@ -1176,6 +1176,9 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
   };
   llvm::DenseMap<VarDecl *, ValueRange> VarRanges;
   llvm::DenseMap<const llvm::Value *, ValueRange> ValueRanges;
+  /// The exact class of an object pointer when it is a direct constructor
+  /// result (optimization2 item 10).
+  llvm::DenseMap<const llvm::Value *, ClassType *> KnownClass;
   /// A direct call whose ansistring result is moved into the assignment
   /// target: no temporary holds it (NoHoldAnsiResult), and the call that
   /// returned it took that path (TookAnsiResult).
@@ -6064,15 +6067,28 @@ public:
                           R->getParams(), Args, Self, resultOf(R));
       return R->isFunction() ? Result : nullptr;
     }
-    if (!Inherited && R->isDispatched() && !canDevirtualize(R)) {
+    ClassType *Exact = KnownClass.lookup(Obj);
+    RoutineDecl *Impl = nullptr;
+    if (!Inherited && R->isDispatched() && Exact && R->getVMTIndex() >= 0) {
+      auto VTable = Exact->getVTable();
+      unsigned Idx = static_cast<unsigned>(R->getVMTIndex());
+      if (Idx < VTable.size()) {
+        Impl = VTable[Idx];
+        if (!Impl || Impl->isAbstract() || !Functions.count(Impl))
+          Impl = nullptr;
+      }
+    }
+    if (!Inherited && R->isDispatched() && !Impl && !canDevirtualize(R)) {
       emitNilObjectCheck(Obj, L);
       llvm::Value *Fn = loadVirtual(Obj, static_cast<unsigned>(R->getVMTIndex()));
       Result = emitCallTo({routineFnType(R), Fn},
                           llvm::ConstantPointerNull::get(B.getPtrTy()),
                           R->getParams(), Args, Obj, resultOf(R));
     } else {
-      Result = emitCallTo(Functions[R], llvm::ConstantPointerNull::get(B.getPtrTy()),
-                          R->getParams(), Args, Obj, resultOf(R));
+      RoutineDecl *Direct = Impl ? Impl : R;
+      Result = emitCallTo(Functions[Direct],
+                          llvm::ConstantPointerNull::get(B.getPtrTy()),
+                          R->getParams(), Args, Obj, resultOf(Direct));
     }
     if (R->isDestructor() && !Inherited)
       B.CreateCall(intfRuntime("__pas_free_instance"), {Obj});
@@ -6089,6 +6105,7 @@ public:
       llvm::Value *Obj =
           B.CreateCall(RT.New, {B.getInt64(instanceSize(C))}, "obj");
       B.CreateStore(vmtOf(C), Obj);
+      KnownClass[Obj] = C;
       emitMethodCall(Ctor, Obj, Args, /*Inherited=*/true, L);
       return Obj;
     }
@@ -6107,6 +6124,7 @@ public:
       B.CreateCall(Functions[Ctor], Values);
       if (Counted)
         B.CreateCall(intfRuntime("__pas_interfaced_constructed"), {Obj});
+      KnownClass[Obj] = C;
       return Obj;
     }
     auto *Failed = newBlock("ctor.raise");
@@ -6121,6 +6139,7 @@ public:
     B.CreateCall(excRuntime("__pas_reraise_free"), {F, Obj});
     B.CreateUnreachable();
     B.SetInsertPoint(Done);
+    KnownClass[Obj] = C;
     return Obj;
   }
 

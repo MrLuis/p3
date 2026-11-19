@@ -4795,7 +4795,7 @@ function emitMethodCallC(r: PDecl; const obj: TV; const args: TPtrList;
 var
   vmt, fn, res, self_, arg, inh: TV;
   f: PIRFunc;
-  msgField: PDecl;
+  impl, direct, msgField: PDecl;
 begin
   emitMethodCallC := irNull;
   if r^.asyncType <> nil then
@@ -4885,7 +4885,16 @@ begin
       emitMethodCallC := res;
     exit;
   end;
-  if not inherited_ and (r^.vmtIndex >= 0) and not canDevirtualize(r) then
+  impl := nil;
+  if (not inherited_) and (r^.vmtIndex >= 0) and (obj.knownClass <> nil) then
+    if r^.vmtIndex < PType(obj.knownClass)^.classVTable.count then
+    begin
+      impl := PDecl(listGet(PType(obj.knownClass)^.classVTable, r^.vmtIndex));
+      if (impl = nil) or impl^.isAbstract or (impl^.cgFunc = nil) then
+        impl := nil;
+    end;
+  if not inherited_ and (r^.vmtIndex >= 0) and (impl = nil) and
+     not canDevirtualize(r) then
   begin
     emitNilObjectCheck(obj, loc);
     fn := loadVirtual(obj, r^.vmtIndex);
@@ -4894,9 +4903,13 @@ begin
   end
   else
   begin
-    f := fnOf(r);
+    if impl <> nil then
+      direct := impl
+    else
+      direct := r;
+    f := fnOf(direct);
     res := emitCallToSelf(f^.ret, irFuncRef(f), irNull, true, obj, true, r^.params, args,
-                          resultOf(r));
+                          resultOf(direct));
   end;
   if (r^.methodKind = mtDestructor) and not inherited_ then
     intfCall1('__pas_free_instance', obj);
@@ -4978,6 +4991,7 @@ begin
   begin
     obj := call1(rtFn('__pas_new'), i64c(instanceSize(c)), 'obj');
     irStore(vmtOf(c), obj);
+    obj.knownClass := c;
     ignored := emitMethodCall(ctor, obj, args, true, loc);
     exit(obj);
   end;
@@ -5003,6 +5017,7 @@ begin
     bufFree(argBuf);
     if counted then
       intfCall1('__pas_interfaced_constructed', obj);
+    obj.knownClass := c;
     exit(obj);
   end;
   failed := irNewBlock('ctor.raise');
@@ -5027,6 +5042,7 @@ begin
   excCall2('__pas_reraise_free', f, obj);
   irUnreachable;
   irSetInsertPoint(done);
+  obj.knownClass := c;
   emitConstruction := obj;
 end;
 

@@ -74,6 +74,8 @@ type
     { optimization2 item 1: a conservative integer range, when known }
     rKnown: boolean;
     rLo, rHi: int64;
+    { optimization2 item 10: the exact class of a new object pointer }
+    knownClass: pointer;
   end;
   PTVBox = ^TV;
 
@@ -1224,6 +1226,7 @@ begin
   r.rKnown := false;
   r.rLo := 0;
   r.rHi := 0;
+  r.knownClass := nil;
   limbsOfInt(0, r.limbs);
   irV := r;
 end;
