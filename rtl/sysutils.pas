@@ -639,9 +639,34 @@ begin
   CompareStr := length(a) - length(b);
 end;
 
+{ CompareStr of the two lowercased (ASCII), without making them: a
+  character pair is lowercased only where it differs. }
 function CompareText(const a, b: string): longint;
+var
+  i, n: longint;
+  ca, cb: char;
 begin
-  CompareText := CompareStr(LowerCase(a), LowerCase(b));
+  n := length(a);
+  if length(b) < n then
+    n := length(b);
+  for i := 1 to n do
+  begin
+    ca := a[i];
+    cb := b[i];
+    if ca <> cb then
+    begin
+      if (ca >= 'A') and (ca <= 'Z') then
+        ca := chr(ord(ca) + 32);
+      if (cb >= 'A') and (cb <= 'Z') then
+        cb := chr(ord(cb) + 32);
+      if ca <> cb then
+      begin
+        CompareText := ord(ca) - ord(cb);
+        exit;
+      end;
+    end;
+  end;
+  CompareText := length(a) - length(b);
 end;
 
 function SameText(const a, b: string): boolean;
