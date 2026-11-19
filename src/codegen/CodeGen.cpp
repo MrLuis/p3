@@ -1187,6 +1187,9 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
   /// The unwind edge of the innermost eligible table-based try body, or
   /// null. emitCallOrInvoke makes a call an invoke when this is set.
   llvm::BasicBlock *TableUnwind = nullptr;
+  /// The _Unwind_Exception* while a table-based handler body is emitted
+  /// (for a bare `raise`).
+  llvm::Value *TableHandlerExc = nullptr;
   /// Classes whose cleanup functions (releasing their own fields' COM
   /// interfaces) are to be emitted.
   std::vector<std::pair<ClassType *, llvm::Function *>> CleanupsToEmit;
@@ -8715,12 +8718,9 @@ public:
     return true;
   }
 
-  /// A handler that re-raises or raises a new exception is still a setjmp
-  /// shape in this stage; so is a try nested in an outer setjmp region.
+  /// A nested try is still a setjmp shape in this stage.
   bool tableSafeHandlerBody(llvm::ArrayRef<Stmt *> Body) {
     for (Stmt *S : Body) {
-      if (llvm::isa<RaiseStmt>(S))
-        return false;
       if (auto *C = llvm::dyn_cast<CompoundStmt>(S)) {
         if (!tableSafeHandlerBody(C->getBody()))
           return false;
@@ -8735,12 +8735,21 @@ public:
   }
 
   bool tableTryCandidate(TryStmt *S) {
-    if (S->isFinally() || !S->getHandlers().empty() || !Cleanups.empty())
+    if (S->isFinally() || !Cleanups.empty())
       return false;
     for (Stmt *B : S->getBody())
       if (!tableSafeStmt(B))
         return false;
     return tableSafeHandlerBody(S->getExceptBody());
+  }
+
+  void emitUnwindResume(llvm::Value *Exc) {
+    llvm::FunctionCallee Resume = M.getOrInsertFunction(
+        "_Unwind_Resume",
+        llvm::FunctionType::get(B.getVoidTy(), {B.getPtrTy()}, false));
+    llvm::cast<llvm::Function>(Resume.getCallee())
+        ->addFnAttr(llvm::Attribute::NoReturn);
+    B.CreateCall(Resume, {Exc});
   }
 
   void emitTableTryExcept(TryStmt *S) {
@@ -8767,12 +8776,46 @@ public:
     llvm::Value *Obj = B.CreateCall(
         classRuntime("__pas_unwind_object", B.getPtrTy(), {B.getPtrTy()}),
         {Exc}, "exc");
-    emitSequence(S->getExceptBody());
-    B.CreateCall(excRuntime("__pas_free_object"), {Obj});
-    B.CreateCall(classRuntime("__pas_unwind_release", B.getVoidTy(),
-                              {B.getPtrTy()}),
-                 {Exc});
-    B.CreateBr(End);
+    llvm::Value *HandlerVMT = B.CreateLoad(B.getPtrTy(), Obj, "vmt");
+    auto *Next = newBlock("handler.next");
+    B.CreateBr(Next);
+    for (ExceptHandler *H : S->getHandlers()) {
+      B.SetInsertPoint(Next);
+      llvm::Value *Is = classIsVMT(HandlerVMT, H->getClass());
+      auto *Do = newBlock("handler.do");
+      Next = newBlock("handler.next");
+      B.CreateCondBr(Is, Do, Next);
+      B.SetInsertPoint(Do);
+      if (VarDecl *V = H->getVar()) {
+        llvm::Value *Slot = createTemp(B.getPtrTy(), V->getName().Name);
+        B.CreateStore(Obj, Slot);
+        HandlerVars[V] = Slot;
+      }
+      llvm::Value *SavedExc = TableHandlerExc;
+      TableHandlerExc = Exc;
+      visitStmt(H->getBody());
+      TableHandlerExc = SavedExc;
+      B.CreateCall(excRuntime("__pas_free_object"), {Obj});
+      B.CreateCall(classRuntime("__pas_unwind_release", B.getVoidTy(),
+                                {B.getPtrTy()}),
+                   {Exc});
+      B.CreateBr(End);
+    }
+    B.SetInsertPoint(Next);
+    if (S->catchesAll()) {
+      llvm::Value *SavedExc = TableHandlerExc;
+      TableHandlerExc = Exc;
+      emitSequence(S->getExceptBody());
+      TableHandlerExc = SavedExc;
+      B.CreateCall(excRuntime("__pas_free_object"), {Obj});
+      B.CreateCall(classRuntime("__pas_unwind_release", B.getVoidTy(),
+                                {B.getPtrTy()}),
+                   {Exc});
+      B.CreateBr(End);
+    } else {
+      emitUnwindResume(Exc);
+      B.CreateUnreachable();
+    }
     B.SetInsertPoint(End);
   }
 
@@ -8953,6 +8996,12 @@ public:
 
   void visitRaiseStmt(RaiseStmt *S) {
     if (S->isReraise()) {
+      if (CGOpts.TableExceptions && TableHandlerExc) {
+        emitUnwindResume(TableHandlerExc);
+        B.CreateUnreachable();
+        B.SetInsertPoint(newBlock("after.raise"));
+        return;
+      }
       B.CreateCall(excRuntime("__pas_reraise"), {HandledFrames.back()});
     } else if (S->getAddress()) {
       // Free Pascal's order: the frame (only evaluated), the address, the
