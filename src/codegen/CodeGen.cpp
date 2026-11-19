@@ -1145,10 +1145,12 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
     llvm::Value *State = nullptr;
     llvm::BasicBlock *FinallyBB = nullptr;
     llvm::SmallVector<llvm::BasicBlock *, 2> Exits;
+    bool Table = false; ///< a table-based finally, not a setjmp one
     Cleanup(Kind K, llvm::Value *Frame, llvm::Value *Object = nullptr,
-            llvm::Value *State = nullptr, llvm::BasicBlock *FinallyBB = nullptr)
+            llvm::Value *State = nullptr, llvm::BasicBlock *FinallyBB = nullptr,
+            bool Table = false)
         : K(K), Frame(Frame), Object(Object), State(State),
-          FinallyBB(FinallyBB) {}
+          FinallyBB(FinallyBB), Table(Table) {}
   };
   std::vector<Cleanup> Cleanups;
   /// The try statements' frames of the running exception handlers,
@@ -8685,8 +8687,9 @@ public:
   bool tableSafeStmt(Stmt *S) {
     if (!S)
       return true;
-    if (llvm::isa<TryStmt>(S) || llvm::isa<ScopeStmt>(S) ||
-        llvm::isa<ForInStmt>(S))
+    if (auto *T = llvm::dyn_cast<TryStmt>(S))
+      return tableTryCandidate(T);
+    if (llvm::isa<ScopeStmt>(S) || llvm::isa<ForInStmt>(S))
       return false;
     if (auto *C = llvm::dyn_cast<CompoundStmt>(S)) {
       for (Stmt *B : C->getBody())
@@ -8739,8 +8742,9 @@ public:
   }
 
   bool tableTryCandidate(TryStmt *S) {
-    if (!Cleanups.empty())
-      return false;
+    for (const Cleanup &C : Cleanups)
+      if (!C.Table)
+        return false;
     for (Stmt *B : S->getBody())
       if (!tableSafeStmt(B))
         return false;
@@ -8754,7 +8758,7 @@ public:
         llvm::FunctionType::get(B.getVoidTy(), {B.getPtrTy()}, false));
     llvm::cast<llvm::Function>(Resume.getCallee())
         ->addFnAttr(llvm::Attribute::NoReturn);
-    B.CreateCall(Resume, {Exc});
+    emitCallOrInvoke(Resume, {Exc});
   }
 
   void emitTableTryExcept(TryStmt *S) {
@@ -8839,7 +8843,8 @@ public:
     llvm::Value *SavedExc = TableHandlerExc;
     llvm::BasicBlock *SavedUnwind = TableUnwind;
     TableUnwind = Landing;
-    Cleanups.emplace_back(Cleanup::Finally, nullptr, nullptr, State, Finally);
+    Cleanups.emplace_back(Cleanup::Finally, nullptr, nullptr, State, Finally,
+                          /*Table=*/true);
     emitSequence(S->getBody());
     llvm::SmallVector<llvm::BasicBlock *, 2> Exits =
         std::move(Cleanups.back().Exits);
@@ -8870,9 +8875,9 @@ public:
     for (size_t K = 0; K < Exits.size(); ++K)
       SW->addCase(B.getInt32(2 + K), Exits[K]);
     B.SetInsertPoint(Reraise);
-    B.CreateCall(classRuntime("__pas_reraise_table", B.getVoidTy(),
-                              {B.getPtrTy()}),
-                 {B.CreateLoad(B.getPtrTy(), ExcSlot, "finally.exc")});
+    emitCallOrInvoke(classRuntime("__pas_reraise_table", B.getVoidTy(),
+                                  {B.getPtrTy()}),
+                     {B.CreateLoad(B.getPtrTy(), ExcSlot, "finally.exc")});
     B.CreateUnreachable();
     B.SetInsertPoint(End);
   }

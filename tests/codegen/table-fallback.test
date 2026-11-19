@@ -9,7 +9,7 @@
 ; CHECK-LABEL: define internal void @pas.handlerraise(
 ; CHECK: personality ptr @__pas_personality
 ; CHECK: call void @__pas_raise_table(
-; Nested try still falls back to setjmp.
-; CHECK-LABEL: define internal void @pas.nested(
-; CHECK: call i32 @_setjmp(
-; CHECK-NOT: personality ptr @__pas_personality
+; Nested try is table-lowered now (8d3).
+; CHECK-LABEL: define internal void @pas.nested() personality ptr @__pas_personality {
+; CHECK-NOT: call i32 @_setjmp(
+; CHECK: ret void
