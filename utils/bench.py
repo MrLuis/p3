@@ -13,17 +13,29 @@ instead, in bench/<name>.expected.sha256. Configurations:
   O2-fast   -O2 -fno-range-checks -fno-overflow-checks
 
 With --fpc, Free Pascal's -O2 (which has no checks: compare with O2-fast)
-is measured too. With --selfhost-flags (default: build/selfhost/flags.txt
-if it exists), the self-hosted compiler is built at -O2 and timed
-compiling its own source to LLVM IR: the large, realistic case.
+is measured too.
+
+Compile time (optimization3.md, item 3): the self-hosted compiler is built
+at -O2 by each p3, then both compilers, the C++ p3 and the self-hosted one
+it built, compile selfhost/p3.pas (~56,000 lines) at each level of
+--selfhost-levels, best of --selfhost-runs (at least 5 for a compile
+under 5 s, where one run is noisy):
+
+  IR        -O0 --emit-llvm (the front end)
+  O0, O1, O2  that level, to an object file (-c)
+
+The build flags are --selfhost-flags, by default selfhost/flags.txt of each
+p3's build directory (<build>/bin/p3), else build/selfhost/flags.txt;
+without them (or with --no-selfhost) this part is skipped.
 
 Usage:
   utils/bench.py --p3 build/bin/p3 [--base other/bin/p3] [--fpc]
       [--runs 3] [--configs O0,O2,O2-fast] [--only name,...]
+      [--selfhost-runs 1] [--selfhost-levels IR,O0,O1,O2]
       [--json out.json] [--update]
 
 --base measures a second p3 (an older build) and prints how the first one
-compares. --update rewrites the .expected (or .expected.sha256) files from
+compares, in run time and in compile time. --update rewrites the .expected (or .expected.sha256) files from
 the first configuration's output. Exit status 1 if a benchmark fails to build, run
 or give the expected output.
 """
@@ -45,6 +57,19 @@ CONFIGS = {
     "O2": ["-O2"],
     "O2-fast": ["-O2", "-fno-range-checks", "-fno-overflow-checks"],
 }
+SELFHOST_LEVELS = {
+    "IR": ["-O0", "--emit-llvm"],
+    "O0": ["-O0", "-c"],
+    "O1": ["-O1", "-c"],
+    "O2": ["-O2", "-c"],
+}
+# The two compilers of the compile-time table: the p3 under test, and the
+# self-hosted compiler it builds.
+SELFHOST_COMPILERS = [("cpp", "C++ p3"), ("self", "self-hosted p3")]
+# A compile of selfhost/p3.pas shorter than QUICK_BELOW seconds is
+# repeated at least QUICK_RUNS times.
+QUICK_BELOW = 5.0
+QUICK_RUNS = 5
 
 
 def timed(cmd, stdout=subprocess.DEVNULL, **kw):
@@ -142,17 +167,42 @@ def bench_fpc(fpc, names, runs, work):
     return results
 
 
-def bench_selfhost(label, p3, flags_file, runs, work, env):
-    """Builds the self-hosted compiler at -O2 and times it compiling itself."""
+def build_dir(p3):
+    """The build directory of a p3 at <build>/bin/p3."""
+    return os.path.dirname(os.path.dirname(os.path.abspath(p3)))
+
+
+def selfhost_flags_file(p3, override):
+    """The self-hosted build flags for this p3, or None."""
+    if override:
+        return override
+    for f in (os.path.join(build_dir(p3), "selfhost", "flags.txt"),
+              os.path.join(ROOT, "build", "selfhost", "flags.txt")):
+        if os.path.exists(f):
+            return f
+    return None
+
+
+def error_text(what, r):
+    return what + ": " + r.stderr.decode(errors="replace").strip()[:200]
+
+
+def bench_selfhost(label, p3, flags_file, levels, runs, work, env):
+    """Builds the self-hosted compiler at -O2 with p3, then times p3 and
+    the compiler it built compiling selfhost/p3.pas at each level.
+    Results: ("selfhost:build", "O2") and ("selfhost:<compiler>", level)."""
     with open(flags_file) as f:
         flags = shlex.split(f.read())
-    src = os.path.join(ROOT, "selfhost", "p3.pas")
+    srcdir = os.path.join(ROOT, "selfhost")
+    src = os.path.join(srcdir, "p3.pas")
     exe = os.path.join(work, label + "-selfhost")
-    cmd = [p3, "--no-project", "--mode=tp", "-O2"] + flags + \
-          ["-I", os.path.join(ROOT, "selfhost"), src, "-o", exe]
+    cmd = [p3, "--no-project", "--mode=tp", "-O2"] + flags + ["-I", srcdir, src, "-o", exe]
     ctime, r = timed(cmd, env=env)
     if r.returncode != 0:
-        return {"error": "does not compile: " + r.stderr.decode(errors="replace").strip()[:200]}
+        return {("selfhost:build", "O2"): {"error": error_text("does not compile", r)}}
+    results = {("selfhost:build", "O2"): {"compile": ctime, "size": os.path.getsize(exe)}}
+    sys.stderr.write(".")
+    sys.stderr.flush()
     # The include directories of the flags (generated LLVM tables), not
     # its link options.
     includes = []
@@ -161,20 +211,87 @@ def bench_selfhost(label, p3, flags_file, runs, work, env):
             includes += ["-I", flags[i + 1]]
         elif flag.startswith("-I") and len(flag) > 2:
             includes.append(flag)
-    best = None
-    for _ in range(runs):
-        t, r = timed([exe, "--no-project", "--mode=tp"] + includes +
-                     ["-I", os.path.join(ROOT, "selfhost"), src, "--emit-llvm",
-                      "-o", os.devnull], env=env)
-        if r.returncode != 0:
-            return {"error": "the compiler it builds fails: " +
-                    r.stderr.decode(errors="replace").strip()[:200]}
-        best = t if best is None or t < best else best
-    return {"run": best, "compile": ctime, "size": os.path.getsize(exe)}
+    # The self-hosted compiler is not next to a lib/ directory: give it p3's.
+    lib = os.path.join(build_dir(p3), "lib")
+    self_env = dict(env, P3_RUNTIME_LIB=os.path.join(lib, "libpascalrt.a"),
+                    P3_UNIT_DIR=os.path.join(lib, "pascal"))
+    for key, compiler, cenv in (("cpp", p3, env), ("self", exe, self_env)):
+        for level in levels:
+            out = os.path.join(work, "%s-%s-%s.out" % (label, key, level))
+            cmd = [compiler, "--no-project", "--mode=tp"] + SELFHOST_LEVELS[level] + \
+                includes + ["-I", srcdir, src, "-o", out]
+            best = None
+            n = 0
+            # Short compiles are noisy: at least QUICK_RUNS of them.
+            while n < max(runs, 1) or (n < QUICK_RUNS and best["compile"] < QUICK_BELOW):
+                t, r = timed(cmd, env=cenv)
+                if r.returncode != 0:
+                    best = {"error": error_text("fails", r)}
+                    break
+                best = {"compile": t} if best is None or t < best["compile"] else best
+                n += 1
+            results[("selfhost:" + key, level)] = best
+            sys.stderr.write(".")
+            sys.stderr.flush()
+    return results
 
 
 def fmt_time(res):
     return "%8.3f" % res["run"] if "error" not in res else "    FAIL"
+
+
+def print_selfhost(compilers, results, levels, runs):
+    """Prints the compile-time table of selfhost/p3.pas (and, with a base,
+    the ratios); True if anything failed."""
+    failed = False
+    print("\nCompiling selfhost/p3.pas, seconds (best of %d, of %d under %g s; "
+          "IR: -O0 --emit-llvm, else to an object file)"
+          % (runs, max(runs, QUICK_RUNS), QUICK_BELOW))
+    print("%-22s" % "" + "".join("%9s" % lv for lv in levels))
+    for label, _ in compilers:
+        build = results[label].get(("selfhost:build", "O2"))
+        if "error" in build:
+            failed = True
+            sys.stderr.write("bench: selfhost (%s, building it): %s\n" % (label, build["error"]))
+        for key, name in SELFHOST_COMPILERS:
+            line = "%-22s" % ((label + " " if label != "p3" else "") + name)
+            for lv in levels:
+                res = results[label].get(("selfhost:" + key, lv))
+                if res is None:
+                    line += "%9s" % "-"
+                elif "error" in res:
+                    failed = True
+                    sys.stderr.write("bench: selfhost (%s %s %s): %s\n"
+                                     % (label, name, lv, res["error"]))
+                    line += "%9s" % "FAIL"
+                else:
+                    line += "%9.2f" % res["compile"]
+            print(line)
+    for label, _ in compilers:
+        build = results[label][("selfhost:build", "O2")]
+        if "error" not in build:
+            print("(%sself-hosted p3: built at -O2 in %.1f s, %d KiB)"
+                  % (label + " " if label != "p3" else "", build["compile"],
+                     build["size"] // 1024))
+
+    if len(compilers) > 1:
+        print("\np3 against base (compile time of selfhost/p3.pas; below 1.00 is faster)")
+        print("%-22s" % "" + "".join("%9s" % lv for lv in levels))
+        for key, name in SELFHOST_COMPILERS:
+            line = "%-22s" % name
+            for lv in levels:
+                a = results["p3"].get(("selfhost:" + key, lv))
+                b = results["base"].get(("selfhost:" + key, lv))
+                if not a or not b or "error" in a or "error" in b:
+                    line += "%9s" % "-"
+                else:
+                    line += "%9.2f" % (a["compile"] / b["compile"])
+            print(line)
+        a = results["p3"][("selfhost:build", "O2")]
+        b = results["base"][("selfhost:build", "O2")]
+        if "error" not in a and "error" not in b:
+            print("%-22s%9.2f" % ("build (-O2, linked)", a["compile"] / b["compile"]))
+    return failed
 
 
 def main():
@@ -186,7 +303,10 @@ def main():
     ap.add_argument("--configs", default="O0,O2,O2-fast")
     ap.add_argument("--only", help="comma-separated benchmark names")
     ap.add_argument("--selfhost-flags",
-                    default=os.path.join(ROOT, "build", "selfhost", "flags.txt"))
+                    help="build flags of the self-hosted compiler (default: "
+                         "selfhost/flags.txt of each p3's build directory)")
+    ap.add_argument("--selfhost-runs", type=int, default=1)
+    ap.add_argument("--selfhost-levels", default="IR,O0,O1,O2")
     ap.add_argument("--no-selfhost", action="store_true")
     ap.add_argument("--json", help="write the numbers to this file")
     ap.add_argument("--update", action="store_true",
@@ -200,12 +320,21 @@ def main():
     names = sorted(f[:-4] for f in os.listdir(BENCH) if f.endswith(".pas"))
     if args.only:
         names = [n for n in names if n in args.only.split(",")]
-    selfhost = not args.no_selfhost and os.path.exists(args.selfhost_flags) and \
-        (not args.only or "selfhost" in args.only.split(","))
+    levels = args.selfhost_levels.split(",")
+    for lv in levels:
+        if lv not in SELFHOST_LEVELS:
+            ap.error("unknown level '%s' (%s)" % (lv, ", ".join(SELFHOST_LEVELS)))
 
     compilers = [("p3", os.path.abspath(args.p3))]
     if args.base:
         compilers.append(("base", os.path.abspath(args.base)))
+    flags_files = {label: selfhost_flags_file(p3, args.selfhost_flags)
+                   for label, p3 in compilers}
+    selfhost = not args.no_selfhost and flags_files["p3"] is not None and \
+        (not args.only or "selfhost" in args.only.split(","))
+    if not args.no_selfhost and flags_files["p3"] is None:
+        sys.stderr.write("bench: no selfhost/flags.txt: compile time of "
+                         "selfhost/p3.pas not measured\n")
     work = tempfile.mkdtemp(prefix="p3-bench-")
     results = {}
     failed = False
@@ -218,8 +347,13 @@ def main():
             results[label] = bench_programs(label, p3, configs, names, args.runs, work,
                                             args.update and label == "p3", env)
             if selfhost:
-                results[label][("selfhost", "O2")] = bench_selfhost(
-                    label, p3, args.selfhost_flags, args.runs, work, env)
+                if flags_files[label] is None:
+                    results[label][("selfhost:build", "O2")] = {
+                        "error": "no selfhost/flags.txt for " + p3}
+                else:
+                    results[label].update(bench_selfhost(
+                        label, p3, flags_files[label], levels, args.selfhost_runs,
+                        work, env))
         if args.fpc:
             fpc = shutil.which("fpc")
             if not fpc:
@@ -238,7 +372,7 @@ def main():
     print("%-12s" % "" + "".join("%13s" % (cfg if label == "p3" else label + " " + cfg
                                              if label == "base" else "fpc -O2")
                                  for label, cfg in cols))
-    rows = names + (["selfhost"] if selfhost else [])
+    rows = names
     for name in rows:
         line = "%-12s" % name
         for label, cfg in cols:
@@ -251,8 +385,6 @@ def main():
                 sys.stderr.write("bench: %s (%s %s): %s\n" % (name, label, cfg, res["error"]))
             line += "     " + fmt_time(res)
         print(line)
-    if selfhost:
-        print("(selfhost: the self-hosted compiler, built at -O2, compiling itself to IR)")
 
     if args.base:
         print("\np3 against base (run time; below 1.00 is faster)")
@@ -279,6 +411,9 @@ def main():
             else:
                 line += "%9.2f %8d" % (res["compile"], res["size"] // 1024)
         print(line)
+
+    if selfhost and print_selfhost(compilers, results, levels, args.selfhost_runs):
+        failed = True
 
     if args.json:
         with open(args.json, "w") as f:
