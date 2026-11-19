@@ -80,6 +80,8 @@ function LLVMIsDeclaration(v: pointer): longint; cdecl;
   external name 'LLVMIsDeclaration';
 function LLVMGetLinkage(v: pointer): longint; cdecl;
   external name 'LLVMGetLinkage';
+function LLVMGetFirstUse(v: pointer): pointer; cdecl;
+  external name 'LLVMGetFirstUse';
 function LLVMIsGlobalConstant(v: pointer): longint; cdecl;
   external name 'LLVMIsGlobalConstant';
 procedure LLVMSetLinkage(v: pointer; linkage: longint); cdecl;
@@ -344,7 +346,8 @@ begin
   while g <> nil do
   begin
     l := LLVMGetLinkage(g);
-    if ((l = 8) or (l = 9)) and (LLVMIsGlobalConstant(g) = 0) then
+    if ((l = 8) or (l = 9)) and (LLVMIsGlobalConstant(g) = 0) and
+       (LLVMGetFirstUse(g) <> nil) then
       exit(true);
     g := LLVMGetNextGlobal(g);
   end;

@@ -117,10 +117,11 @@ void p3::linkUnitIR(llvm::Module &M, llvm::ArrayRef<std::string> ObjectPaths,
     U->setTargetTriple(M.getTargetTriple());
     U->setDataLayout(M.getDataLayout());
     // Importing a unit with mutable internal state would duplicate it (the
-    // inlined code and the object would use different copies). Such a unit
-    // keeps its calls.
+    // inlined code and the object would use different copies). A mutable
+    // global that no code refers to cannot be observed: it does not block
+    // the import (optimization2 item 6, first stage).
     bool MutableInternal = llvm::any_of(U->globals(), [](llvm::GlobalVariable &G) {
-      return G.hasLocalLinkage() && !G.isConstant();
+      return G.hasLocalLinkage() && !G.isConstant() && !G.use_empty();
     });
     if (MutableInternal)
       continue;
