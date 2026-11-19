@@ -8715,7 +8715,7 @@ public:
   }
 
   bool tableTryCandidate(TryStmt *S) {
-    if (S->isFinally() || !S->catchesAll())
+    if (S->isFinally() || !S->getHandlers().empty())
       return false;
     for (Stmt *B : S->getBody())
       if (!tableSafeStmt(B))
@@ -8742,15 +8742,14 @@ public:
     llvm::StructType *LPType =
         llvm::StructType::get(B.getPtrTy(), B.getInt32Ty());
     llvm::LandingPadInst *LP = B.CreateLandingPad(LPType, 0, "lp");
-    LP->setCleanup(true);
+    LP->addClause(llvm::ConstantPointerNull::get(B.getPtrTy()));
     llvm::Value *Exc = B.CreateExtractValue(LP, 0, "unwind.exc");
-    llvm::FunctionCallee Resume = M.getOrInsertFunction(
-        "_Unwind_Resume", llvm::FunctionType::get(B.getVoidTy(),
-                                                  {B.getPtrTy()}, false));
-    llvm::cast<llvm::Function>(Resume.getCallee())
-        ->addFnAttr(llvm::Attribute::NoReturn);
-    B.CreateCall(Resume, {Exc});
-    B.CreateUnreachable();
+    llvm::Value *Obj = B.CreateCall(
+        classRuntime("__pas_unwind_object", B.getPtrTy(), {B.getPtrTy()}),
+        {Exc}, "exc");
+    emitSequence(S->getExceptBody());
+    B.CreateCall(excRuntime("__pas_free_object"), {Obj});
+    B.CreateBr(End);
     B.SetInsertPoint(End);
   }
 

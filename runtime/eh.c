@@ -135,7 +135,7 @@ static int lsdaCatch(const PasLSDA *l, const unsigned char *p, void *obj) {
         if (!readPointer(&tp, l->end, l->typeEncoding, &type))
           return 0;
       if (readPointer(&tp, l->end, l->typeEncoding, &type) &&
-          __pas_class_is(obj, (void *const *)type))
+          (type == 0 || __pas_class_is(obj, (void *const *)type)))
         return (int)filter;
     }
     if (!next)
@@ -196,6 +196,10 @@ _Unwind_Reason_Code __pas_personality(int version, _Unwind_Action actions,
     }
   }
   return _URC_CONTINUE_UNWIND;
+}
+
+void *__pas_unwind_object(struct _Unwind_Exception *unwind) {
+  return unwind ? ((PasUnwindException *)unwind)->object : NULL;
 }
 
 /* One call site (1..16), one catch action for __pas_exception_vmt, and the

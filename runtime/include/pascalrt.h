@@ -349,6 +349,7 @@ _Unwind_Reason_Code __pas_personality(int version, _Unwind_Action actions,
                                       struct _Unwind_Exception *exception,
                                       struct _Unwind_Context *context);
 int32_t __pas_eh_selftest(void);
+void *__pas_unwind_object(struct _Unwind_Exception *exception);
 #endif
 
 typedef struct PasExcFrame {
