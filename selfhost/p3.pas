@@ -629,6 +629,26 @@ var
 var
   selfUnit: PName;      { the unit being compiled, if any: using it is circular }
 
+{ optimization3 item 2: on AArch64 Linux, atomics use the library's
+  __aarch64_* helpers, which run the LSE instructions where the CPU has
+  them and an LL/SC loop elsewhere (clang's default there). Without the
+  feature the generic CPU always gets the loop, in the program's code and in
+  the inlined runtime (reference counts). A -mattr that says anything about
+  LSE is left alone. Darwin is not changed: not measured. }
+procedure addDefaultTargetFeatures(const triple: string; var features: string);
+var
+  f: string;
+begin
+  if (pos('aarch64', triple) <> 1) or (pos('linux', triple) = 0) then
+    exit;
+  f := lowerStr(features);
+  if (pos('lse', f) > 0) or (pos('outline-atomics', f) > 0) then
+    exit;
+  if features <> '' then
+    features := features + ',';
+  features := features + '+outline-atomics';
+end;
+
 { The symbols Free Pascal predefines for the targets p3's library supports
   (Linux, macOS and Windows; x86-64 and AArch64). }
 procedure addTargetDefines(const triple: string);
@@ -1363,7 +1383,6 @@ begin
     if targetFeatures = '' then
       targetFeatures := hostCPUFeatures;
   end;
-  cgSetTarget(targetCPU, targetFeatures);
   cgSetSizeLevel(sizeLevel);
   cgSetFastMath(fastMath);
   if inputFile = '' then
@@ -1373,6 +1392,8 @@ begin
                ''' (expected 0-3)');
   if not validateTarget(targetTriple) then
     sysExit(1);
+  addDefaultTargetFeatures(targetTriple, targetFeatures);
+  cgSetTarget(targetCPU, targetFeatures);
   addTargetDefines(targetTriple);
   if outputFile = '' then
     case action of

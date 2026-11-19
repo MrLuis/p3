@@ -329,6 +329,25 @@ static void addTargetDefines(const llvm::Triple &T,
     Defines.insert(Defines.end(), {"CPUAARCH64", "CPU64"});
 }
 
+/// optimization3 item 2: on AArch64 Linux, atomics use the library's
+/// `__aarch64_*` helpers, which run the LSE instructions where the CPU has
+/// them and an LL/SC loop elsewhere (clang's default there). Without the
+/// feature the generic CPU always gets the loop, in the program's code and in
+/// the inlined runtime (reference counts: `ansistr` is a third slower). A
+/// -mattr that says anything about LSE is left alone. Darwin is not changed:
+/// not measured.
+static void addDefaultTargetFeatures(const llvm::Triple &T,
+                                     std::string &Features) {
+  if (T.getArch() != llvm::Triple::aarch64 || !T.isOSLinux())
+    return;
+  llvm::StringRef F = Features;
+  if (F.contains_insensitive("lse") || F.contains_insensitive("outline-atomics"))
+    return;
+  if (!Features.empty())
+    Features += ',';
+  Features += "+outline-atomics";
+}
+
 void Driver::resolveTargetCPU() {
   if (Opts.TargetCPU != "native")
     return;
@@ -354,6 +373,7 @@ bool Driver::validateTarget() {
   }
   Opts.TargetTriple = TripleStr;
   addTargetDefines(llvm::Triple(TripleStr), Opts.Defines);
+  addDefaultTargetFeatures(llvm::Triple(TripleStr), Opts.TargetFeatures);
   return true;
 }
 

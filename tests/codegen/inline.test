@@ -6,7 +6,8 @@
 ; CHECK:      ; Function Attrs: inlinehint nounwind
 ; CHECK-NEXT: define internal i32 @pas.sq(i32 %x) #[[A:[0-9]+]] {
 ; CHECK:      define internal i32 @pas.cube(i32 %x) #{{[0-9]+}} {
-; CHECK:      attributes #[[A]] = { inlinehint nounwind }
+; (AArch64 Linux adds target-cpu and target-features, optimization3 item 2)
+; CHECK:      attributes #[[A]] = { inlinehint nounwind{{.*}} }
 ; RUN: %p3 --mode=objfpc -O2 --emit-llvm %S/Inputs/inline/inline.pas -o - | FileCheck --check-prefix=O2 %s
 ; O2-NOT: call {{.*}}@pas.sq
 ; RUN: %p3 --mode=objfpc --emit-ast %S/Inputs/inline/inline.pas | FileCheck --check-prefix=AST %s
