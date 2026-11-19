@@ -33,6 +33,7 @@ createTargetMachine(llvm::StringRef Triple, unsigned OptLevel,
 /// Without the file M stays as it is; a file that cannot be read is
 /// reported as a warning.
 void linkRuntimeIR(llvm::Module &M, llvm::StringRef Path,
+                   llvm::StringRef CPU, llvm::StringRef Features,
                    DiagnosticsEngine &Diags);
 
 /// Links the IR that each separately compiled unit left next to its object

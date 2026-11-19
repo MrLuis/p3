@@ -11,6 +11,17 @@ endif()
 # DWARF 4 like p3's own output: GNU ld mis-merges mixed DWARF 4/5 objects.
 target_compile_options(pascalrt PRIVATE $<$<CONFIG:Debug>:-gdwarf-4>
   -ffunction-sections -fdata-sections)
+# Build the runtime for a chosen CPU/features too (optimization2 item 9):
+# -DP3_RUNTIME_CPU=native (or x86-64-v2, ...) and -DP3_RUNTIME_MATTR=...
+# Otherwise the generic baseline stays in place.
+set(P3_RUNTIME_CPU "" CACHE STRING "CPU for the runtime library and IR")
+set(P3_RUNTIME_MATTR "" CACHE STRING "target features for the runtime library and IR")
+if(P3_RUNTIME_CPU)
+  target_compile_options(pascalrt PRIVATE -mcpu=${P3_RUNTIME_CPU})
+endif()
+if(P3_RUNTIME_MATTR)
+  target_compile_options(pascalrt PRIVATE -mattr=${P3_RUNTIME_MATTR})
+endif()
 # The runtime is part of every program, whatever p3's -O level: optimize it
 # in every configuration (optimization.md item 24).
 if(MSVC)
@@ -34,6 +45,12 @@ find_program(P3_RT_LLVM_LINK NAMES llvm-link-${P3_LLVM_VERSION} llvm-link
 find_package(Python3 COMPONENTS Interpreter)
 set(P3_RT_IR_FLAGS -O2 -g0 -std=gnu11 -fPIC -fno-strict-aliasing
     -fno-stack-protector -fno-unwind-tables -fno-asynchronous-unwind-tables)
+if(P3_RUNTIME_CPU)
+  list(APPEND P3_RT_IR_FLAGS -mcpu=${P3_RUNTIME_CPU})
+endif()
+if(P3_RUNTIME_MATTR)
+  list(APPEND P3_RT_IR_FLAGS -mattr=${P3_RUNTIME_MATTR})
+endif()
 set(P3_RT_IR_PROBLEM "")
 if(NOT P3_RT_CLANG OR NOT P3_RT_LLVM_LINK)
   set(P3_RT_IR_PROBLEM

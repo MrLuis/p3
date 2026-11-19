@@ -62,6 +62,7 @@ p3::createTargetMachine(llvm::StringRef Triple, unsigned OptLevel,
 }
 
 void p3::linkRuntimeIR(llvm::Module &M, llvm::StringRef Path,
+                        llvm::StringRef CPU, llvm::StringRef Features,
                         DiagnosticsEngine &Diags) {
   if (!llvm::sys::fs::exists(Path))
     return;
@@ -75,6 +76,15 @@ void p3::linkRuntimeIR(llvm::Module &M, llvm::StringRef Path,
   // The file has no target of its own (utils/gen-runtime-ir.py).
   RT->setTargetTriple(M.getTargetTriple());
   RT->setDataLayout(M.getDataLayout());
+  // The runtime IR is generic: give its functions the program's target so
+  // that the parts that are inlined use the selected CPU and features.
+  for (llvm::Function &F : *RT)
+    if (!F.isDeclaration()) {
+      if (!CPU.empty())
+        F.addFnAttr("target-cpu", CPU);
+      if (!Features.empty())
+        F.addFnAttr("target-features", Features);
+    }
   if (llvm::Linker::linkModules(M, std::move(RT)))
     Diags.warning("cannot link the runtime's LLVM IR '" + Path +
                   "'; runtime functions are not inlined");

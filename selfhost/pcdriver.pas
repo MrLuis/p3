@@ -517,7 +517,7 @@ begin
       runtimeIR := '';
   end;
   m := llvmParseAndOptimize(ir, name, tm, opt, sizeLevel, unitIRs, runtimeIR,
-                            rtProblem, err);
+                            cpu, features, rtProblem, err);
   listFree(unitIRs);
   if rtProblem <> '' then
     diagWarning(noLoc, 'cannot read the runtime''s LLVM IR ''' + runtimeIR + ''' (' +

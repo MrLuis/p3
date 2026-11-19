@@ -41,8 +41,8 @@ function llvmDataLayout(tm: pointer): string;
   it is ''). }
 function llvmParseAndOptimize(const ir: TBuf; const name: string; tm: pointer; opt: longint;
                               sizeLevel: longint; const unitIRs: TPtrList;
-                              const runtimeIR: string; var rtProblem: string;
-                              var err: TBuf): pointer;
+                              const runtimeIR, cpu, features: string;
+                              var rtProblem: string; var err: TBuf): pointer;
 { Writes the module as IR text, assembly or an object file. }
 function llvmPrintModule(m: pointer; const path: string; var err: TBuf): boolean;
 { Appends the assembly or object code for the module to ob. }
@@ -90,6 +90,8 @@ function LLVMNormalizeTargetTriple(t: pchar): pchar; cdecl;
   external name 'LLVMNormalizeTargetTriple';
 function LLVMGetHostCPUName: pchar; cdecl; external name 'LLVMGetHostCPUName';
 function LLVMGetHostCPUFeatures: pchar; cdecl; external name 'LLVMGetHostCPUFeatures';
+procedure LLVMAddTargetDependentFunctionAttr(fn: pointer; a, v: pchar); cdecl;
+  external name 'LLVMAddTargetDependentFunctionAttr';
 procedure LLVMGetVersion(var major, minor, patch: longint); cdecl;
   external name 'LLVMGetVersion';
 function LLVMGetTargetFromTriple(t: pchar; var target: pointer; var msg: pchar): longint;
@@ -284,11 +286,12 @@ end;
 { Links the runtime's LLVM IR at path into m (Backend.cpp's linkRuntimeIR):
   its functions stay available_externally, and calls that are not inlined
   go to the library. Returns '' or why the file cannot be used. }
-function linkRuntimeIR(ctx, m: pointer; const path: string): string;
+function linkRuntimeIR(ctx, m: pointer; const path, cpu, features: string): string;
 var
   buf, rt: pointer;
   msg: pchar;
-  pb: string;
+  pb, a, b, c, d: string;
+  f: pointer;
 begin
   linkRuntimeIR := '';
   buf := nil;
@@ -310,6 +313,19 @@ begin
   { the file has no target of its own (utils/gen-runtime-ir.py) }
   LLVMSetTarget(rt, LLVMGetTarget(m));
   LLVMSetDataLayout(rt, LLVMGetDataLayoutStr(m));
+  { the runtime IR is generic: give its functions the program's target }
+  f := LLVMGetFirstFunction(rt);
+  while f <> nil do
+  begin
+    if LLVMIsDeclaration(f) = 0 then
+    begin
+      if cpu <> '' then
+        LLVMAddTargetDependentFunctionAttr(f, cstr('target-cpu', a), cstr(cpu, b));
+      if features <> '' then
+        LLVMAddTargetDependentFunctionAttr(f, cstr('target-features', c), cstr(features, d));
+    end;
+    f := LLVMGetNextFunction(f);
+  end;
   if LLVMLinkModules2(m, rt) <> 0 then
     linkRuntimeIR := 'it cannot be linked';
 end;
@@ -394,8 +410,8 @@ end;
 
 function llvmParseAndOptimize(const ir: TBuf; const name: string; tm: pointer; opt: longint;
                               sizeLevel: longint; const unitIRs: TPtrList;
-                              const runtimeIR: string; var rtProblem: string;
-                              var err: TBuf): pointer;
+                              const runtimeIR, cpu, features: string;
+                              var rtProblem: string; var err: TBuf): pointer;
 var
   ctx, buf, m, e, opts: pointer;
   msg: pchar;
@@ -426,7 +442,7 @@ begin
     if unitIRs.count > 0 then
       linkUnitIRs(ctx, m, unitIRs);
     if runtimeIR <> '' then
-      rtProblem := linkRuntimeIR(ctx, m, runtimeIR);
+      rtProblem := linkRuntimeIR(ctx, m, runtimeIR, cpu, features);
     { llvm::PipelineTuningOptions' defaults, as the C++ p3's PassBuilder
       has them }
     opts := LLVMCreatePassBuilderOptions;

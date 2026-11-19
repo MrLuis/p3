@@ -626,7 +626,8 @@ bool Driver::finishModule(llvm::Module &Mod, llvm::TargetMachine &TMRef,
     if (Opts.InlineRuntime &&
         llvm::Triple(Opts.TargetTriple) ==
             llvm::Triple(llvm::sys::getDefaultTargetTriple()))
-      linkRuntimeIR(*M, findRuntimeIR(), Diags);
+      linkRuntimeIR(*M, findRuntimeIR(), Opts.TargetCPU, Opts.TargetFeatures,
+                    Diags);
     optimizeModule(*M, *TM, Opts.OptLevel, Opts.SizeLevel);
   }
 
