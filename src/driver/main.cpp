@@ -133,11 +133,6 @@ static cl::opt<bool> NoInlineRuntime(
              "when compiling for the host)"),
     cl::cat(P3Category));
 
-static cl::opt<bool> TableExceptions(
-    "ftable-exceptions",
-    cl::desc("Use invoke/landingpad for eligible try statements (experimental)"),
-    cl::cat(P3Category));
-
 static cl::opt<bool> KeepUnused(
     "fkeep-unused",
     cl::desc("Keep the routines and data that nothing reachable from the "
@@ -222,7 +217,6 @@ int main(int argc, char **argv) {
   Opts.WarningsAsErrors = Werror;
   Opts.RangeChecks = !NoRangeChecks;
   Opts.InlineRuntime = !NoInlineRuntime;
-  Opts.TableExceptions = TableExceptions;
   Opts.KeepUnused = KeepUnused;
   if (ZeroInitOn || ZeroInitOff) // the last one given wins
     Opts.ZeroInit = !ZeroInitOff || (ZeroInitOn && ZeroInitOn.getPosition() >

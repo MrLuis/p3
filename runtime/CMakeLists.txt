@@ -1,6 +1,6 @@
 # libpascalrt: the C runtime linked into every Pascal executable.
 # Lands in <build>/lib so the compiler finds it at <bindir>/../lib.
-add_library(pascalrt STATIC io.c sys.c ansi.c format.c async.c eh.c)
+add_library(pascalrt STATIC io.c sys.c ansi.c format.c async.c)
 target_include_directories(pascalrt PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
 # async.c asks for POSIX with _XOPEN_SOURCE, which hides the BSD extensions
 # it uses (MAP_ANONYMOUS, _SC_NPROCESSORS_ONLN); _DARWIN_C_SOURCE brings them
@@ -93,7 +93,7 @@ if(NOT P3_RT_IR_PROBLEM)
   set(P3_RT_IR_DIR ${CMAKE_CURRENT_BINARY_DIR}/ir)
   file(MAKE_DIRECTORY ${P3_RT_IR_DIR})
   set(P3_RT_IR_PARTS "")
-  foreach(src io sys ansi format eh)
+  foreach(src io sys ansi format)
     add_custom_command(
       OUTPUT ${P3_RT_IR_DIR}/${src}.ll
       COMMAND ${P3_RT_CLANG} ${P3_RT_IR_FLAGS}

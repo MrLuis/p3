@@ -334,32 +334,6 @@ void __pas_abstract_error(void) __attribute__((noreturn));
  * protected statements, which end with __pas_exc_pop; nonzero means an
  * exception landed, f->object (already popped). Errors exit with status 2.
  * (The compiler's type is { ptr, ptr, ptr, ptr, [64 x i64] }.) */
-#if defined(__unix__) || defined(__APPLE__)
-#include <unwind.h>
-/* The header the table-based unwinder attaches to a Pascal exception
- * object (optimization2 item 8a). */
-typedef struct PasUnwindException {
-  struct _Unwind_Exception unwind;
-  void *object;
-  const char *where;
-  void *address;
-} PasUnwindException;
-_Unwind_Reason_Code __pas_personality(int version, _Unwind_Action actions,
-                                      uint64_t exceptionClass,
-                                      struct _Unwind_Exception *exception,
-                                      struct _Unwind_Context *context);
-int32_t __pas_eh_selftest(void);
-void *__pas_unwind_object(struct _Unwind_Exception *exception);
-void __pas_unwind_release(struct _Unwind_Exception *exception);
-void __pas_raise_table(void *obj, const char *where) __attribute__((noreturn));
-void __pas_raise_table_at(void *obj, const char *where, void *address)
-    __attribute__((noreturn));
-void __pas_reraise_table(void *exception) __attribute__((noreturn));
-extern char __pas_catch_all;
-#endif
-void __pas_unhandled(void *obj, const char *where, void *address)
-    __attribute__((noreturn));
-
 typedef struct PasExcFrame {
   struct PasExcFrame *prev;
   void *object;      /* the exception, once raised to this frame */

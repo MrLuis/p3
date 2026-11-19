@@ -1145,12 +1145,10 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
     llvm::Value *State = nullptr;
     llvm::BasicBlock *FinallyBB = nullptr;
     llvm::SmallVector<llvm::BasicBlock *, 2> Exits;
-    bool Table = false; ///< a table-based finally, not a setjmp one
     Cleanup(Kind K, llvm::Value *Frame, llvm::Value *Object = nullptr,
-            llvm::Value *State = nullptr, llvm::BasicBlock *FinallyBB = nullptr,
-            bool Table = false)
+            llvm::Value *State = nullptr, llvm::BasicBlock *FinallyBB = nullptr)
         : K(K), Frame(Frame), Object(Object), State(State),
-          FinallyBB(FinallyBB), Table(Table) {}
+          FinallyBB(FinallyBB) {}
   };
   std::vector<Cleanup> Cleanups;
   /// The try statements' frames of the running exception handlers,
@@ -1186,12 +1184,6 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
   /// returned it took that path (TookAnsiResult).
   bool NoHoldAnsiResult = false;
   bool TookAnsiResult = false;
-  /// The unwind edge of the innermost eligible table-based try body, or
-  /// null. emitCallOrInvoke makes a call an invoke when this is set.
-  llvm::BasicBlock *TableUnwind = nullptr;
-  /// The _Unwind_Exception* while a table-based handler body is emitted
-  /// (for a bare `raise`).
-  llvm::Value *TableHandlerExc = nullptr;
   /// Classes whose cleanup functions (releasing their own fields' COM
   /// interfaces) are to be emitted.
   std::vector<std::pair<ClassType *, llvm::Function *>> CleanupsToEmit;
@@ -2075,7 +2067,7 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
     llvm::SmallVector<llvm::Type *, 4> Params;
     for (llvm::Value *A : Args)
       Params.push_back(A->getType());
-    return emitCallOrInvoke(classRuntime(Name, Ret, Params), Args);
+    return B.CreateCall(classRuntime(Name, Ret, Params), Args);
   }
 
   /// Any string-like expression, or a pchar, as an ansistring (borrowed: a
@@ -4653,7 +4645,7 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
       else
         Values.push_back(loadScalar(Addr, T, P->getName().Name));
     }
-    auto *Call = emitCallOrInvoke(Functions[R], Values);
+    auto *Call = B.CreateCall(Functions[R], Values);
     if (ByPointer)
       addResultCallAttrs(Call, ResultArgNo, R->getResultType());
     llvm::Value *Result = Call;
@@ -5160,20 +5152,6 @@ public:
     return B.CreateInsertValue(Pair, staticLinkFor(R), 1);
   }
 
-  /// The single place that turns a Pascal call into a call or, under the
-  /// table-exception flag (8b2+), an invoke. Stage 8b1 keeps the old call.
-  llvm::CallBase *emitCallOrInvoke(llvm::FunctionCallee Callee,
-                                   llvm::ArrayRef<llvm::Value *> Args,
-                                   const llvm::Twine &Name = "") {
-    if (!TableUnwind)
-      return B.CreateCall(Callee, Args, Name);
-    llvm::BasicBlock *Normal = newBlock("call.cont");
-    llvm::CallBase *Call =
-        B.CreateInvoke(Callee, Normal, TableUnwind, Args, Name);
-    B.SetInsertPoint(Normal);
-    return Call;
-  }
-
   llvm::Value *emitCallTo(llvm::FunctionCallee Callee, llvm::Value *Link,
                           llvm::ArrayRef<VarDecl *> Params,
                           llvm::ArrayRef<Expr *> Args,
@@ -5197,7 +5175,7 @@ public:
     NoHoldAnsiResult = false;
     emitArgValues(Params, Args, Values, ToC);
     NoHoldAnsiResult = NoHold;
-    auto *Call = emitCallOrInvoke(Callee, Values);
+    auto *Call = B.CreateCall(Callee, Values);
     if (ByPointer)
       addResultCallAttrs(Call, ResultArgNo, ResultTy);
     llvm::Value *Result = Call;
@@ -5494,21 +5472,21 @@ public:
       return;
     }
     if (T->isInterface()) {
-      emitCallOrInvoke(intfRuntime("__pas_intf_clear"), {Addr});
+      B.CreateCall(intfRuntime("__pas_intf_clear"), {Addr});
       return;
     }
     if (T->isClosureType()) {
-      emitCallOrInvoke(classRuntime("__pas_closure_clear", B.getVoidTy(),
-                                    {B.getPtrTy()}),
-                       {Addr});
+      B.CreateCall(classRuntime("__pas_closure_clear", B.getVoidTy(),
+                                {B.getPtrTy()}),
+                   {Addr});
       return;
     }
     if (T->isTask() || T->isToken() || T->isIterator()) {
-      emitCallOrInvoke(classRuntime(T->isTask()       ? "__pas_task_clear"
-                                    : T->isIterator() ? "__pas_gen_clear"
-                                                      : "__pas_token_clear",
-                                    B.getVoidTy(), {B.getPtrTy()}),
-                       {Addr});
+      B.CreateCall(classRuntime(T->isTask()       ? "__pas_task_clear"
+                                : T->isIterator() ? "__pas_gen_clear"
+                                                  : "__pas_token_clear",
+                                B.getVoidTy(), {B.getPtrTy()}),
+                   {Addr});
       return;
     }
     if (auto *A = llvm::dyn_cast<ArrayType>(T)) {
@@ -6143,7 +6121,7 @@ public:
     if (Counted)
       B.CreateCall(intfRuntime("__pas_interfaced_construct"), {Obj});
     if (NoRaiseFns.count(Functions[Ctor])) { // nothing to protect against
-      emitCallOrInvoke(Functions[Ctor], Values);
+      B.CreateCall(Functions[Ctor], Values);
       if (Counted)
         B.CreateCall(intfRuntime("__pas_interfaced_constructed"), {Obj});
       KnownClass[Obj] = C;
@@ -6151,7 +6129,7 @@ public:
     }
     auto *Failed = newBlock("ctor.raise");
     llvm::Value *F = emitProtect(Failed, "ctor.call");
-    emitCallOrInvoke(Functions[Ctor], Values);
+    B.CreateCall(Functions[Ctor], Values);
     B.CreateCall(excRuntime("__pas_exc_pop"), {F});
     if (Counted)
       B.CreateCall(intfRuntime("__pas_interfaced_constructed"), {Obj});
@@ -6199,7 +6177,7 @@ public:
       B.CreateCall(routineFnType(Ctor),
                    loadVMTSlot(VMT, 6 + Ctor->getVMTIndex(), "ctor"), Values);
     else
-      emitCallOrInvoke(Functions[Ctor], Values);
+      B.CreateCall(Functions[Ctor], Values);
     B.CreateCall(excRuntime("__pas_exc_pop"), {F});
     if (Counted)
       B.CreateCall(intfRuntime("__pas_interfaced_constructed"), {Obj});
@@ -7324,8 +7302,7 @@ public:
                         !CGOpts.TargetFeatures.empty();
     for (llvm::Function &F : M)
       if (!F.isDeclaration()) {
-        if (!CGOpts.TableExceptions)
-          F.addFnAttr(llvm::Attribute::NoUnwind);
+        F.addFnAttr(llvm::Attribute::NoUnwind);
         if (CGOpts.SizeLevel == 1)
           F.addFnAttr(llvm::Attribute::OptimizeForSize);
         else if (CGOpts.SizeLevel == 2)
@@ -7428,8 +7405,8 @@ public:
         if (!C || ImportedDecls.count(D))
           continue;
         if (RoutineDecl *R = C->getClassConstructor(); R && Functions.count(R))
-          emitCallOrInvoke(Functions[R],
-                           {llvm::ConstantPointerNull::get(B.getPtrTy())});
+          B.CreateCall(Functions[R],
+                       {llvm::ConstantPointerNull::get(B.getPtrTy())});
         if (RoutineDecl *R = C->getClassDestructor(); R && Functions.count(R))
           Dtors.push_back(R);
       }
@@ -8663,14 +8640,10 @@ public:
   void emitJump(llvm::BasicBlock *Target, size_t Depth) {
     for (size_t I = Cleanups.size(); I > Depth; --I) {
       Cleanup &C = Cleanups[I - 1];
-      if (C.K == Cleanup::TryBody) {
-        B.CreateCall(excRuntime("__pas_exc_pop"), {C.Frame});
-      } else if (C.K == Cleanup::Handler) {
-        B.CreateCall(excRuntime("__pas_exc_pop"), {C.Frame});
+      B.CreateCall(excRuntime("__pas_exc_pop"), {C.Frame});
+      if (C.K == Cleanup::Handler) {
         B.CreateCall(excRuntime("__pas_free_object"), {C.Object});
       } else if (C.K == Cleanup::Finally) {
-        if (C.Frame) // a setjmp frame; a table finally has none
-          B.CreateCall(excRuntime("__pas_exc_pop"), {C.Frame});
         B.CreateStore(B.getInt32(2 + C.Exits.size()), C.State);
         auto *Cont = newBlock("finally.cont");
         C.Exits.push_back(Cont);
@@ -8681,215 +8654,7 @@ public:
     B.CreateBr(Target);
   }
 
-  /// Stage 8b3 can lower a catch-all try body made of ordinary statements.
-  /// Nested try/scope/for-in bodies and raise still use the setjmp machinery
-  /// (8d/8e/8b5), so mixing them under this flag is refused.
-  bool tableSafeStmt(Stmt *S) {
-    if (!S)
-      return true;
-    if (auto *T = llvm::dyn_cast<TryStmt>(S))
-      return tableTryCandidate(T);
-    if (llvm::isa<ScopeStmt>(S) || llvm::isa<ForInStmt>(S))
-      return false;
-    if (auto *C = llvm::dyn_cast<CompoundStmt>(S)) {
-      for (Stmt *B : C->getBody())
-        if (!tableSafeStmt(B))
-          return false;
-      return true;
-    }
-    if (auto *I = llvm::dyn_cast<IfStmt>(S))
-      return tableSafeStmt(I->getThen()) && tableSafeStmt(I->getElse());
-    if (auto *W = llvm::dyn_cast<WhileStmt>(S))
-      return tableSafeStmt(W->getBody());
-    if (auto *R = llvm::dyn_cast<RepeatStmt>(S)) {
-      for (Stmt *B : R->getBody())
-        if (!tableSafeStmt(B))
-          return false;
-      return true;
-    }
-    if (auto *F = llvm::dyn_cast<ForStmt>(S))
-      return tableSafeStmt(F->getBody());
-    if (auto *C = llvm::dyn_cast<CaseStmt>(S)) {
-      for (CaseArm *A : C->getArms())
-        if (!tableSafeStmt(A->getBody()))
-          return false;
-      for (Stmt *B : C->getElseBody())
-        if (!tableSafeStmt(B))
-          return false;
-      return true;
-    }
-    if (auto *W = llvm::dyn_cast<WithStmt>(S))
-      return tableSafeStmt(W->getBody());
-    if (auto *L = llvm::dyn_cast<LabeledStmt>(S))
-      return tableSafeStmt(L->getBody());
-    return true;
-  }
-
-  /// A nested try is still a setjmp shape in this stage.
-  bool tableSafeHandlerBody(llvm::ArrayRef<Stmt *> Body) {
-    for (Stmt *S : Body) {
-      if (auto *C = llvm::dyn_cast<CompoundStmt>(S)) {
-        if (!tableSafeHandlerBody(C->getBody()))
-          return false;
-      } else if (auto *I = llvm::dyn_cast<IfStmt>(S)) {
-        if (!tableSafeHandlerBody({I->getThen()}) ||
-            (I->getElse() && !tableSafeHandlerBody({I->getElse()})))
-          return false;
-      } else if (auto *T = llvm::dyn_cast<TryStmt>(S))
-        return false;
-    }
-    return true;
-  }
-
-  bool tableTryCandidate(TryStmt *S) {
-    for (const Cleanup &C : Cleanups)
-      if (!C.Table)
-        return false;
-    for (Stmt *B : S->getBody())
-      if (!tableSafeStmt(B))
-        return false;
-    return tableSafeHandlerBody(S->isFinally() ? S->getFinallyBody()
-                                               : S->getExceptBody());
-  }
-
-  void emitUnwindResume(llvm::Value *Exc) {
-    llvm::FunctionCallee Resume = M.getOrInsertFunction(
-        "_Unwind_Resume",
-        llvm::FunctionType::get(B.getVoidTy(), {B.getPtrTy()}, false));
-    llvm::cast<llvm::Function>(Resume.getCallee())
-        ->addFnAttr(llvm::Attribute::NoReturn);
-    emitCallOrInvoke(Resume, {Exc});
-  }
-
-  void emitTableTryExcept(TryStmt *S) {
-    auto *Landing = newBlock("try.landing");
-    auto *End = newBlock("try.end");
-    llvm::FunctionCallee Personality =
-        classRuntime("__pas_personality", B.getInt32Ty(),
-                     {B.getInt32Ty(), B.getInt32Ty(), B.getInt64Ty(),
-                      B.getPtrTy(), B.getPtrTy()});
-    CurFn->setPersonalityFn(
-        llvm::cast<llvm::Constant>(Personality.getCallee()));
-    llvm::BasicBlock *Saved = TableUnwind;
-    TableUnwind = Landing;
-    emitSequence(S->getBody());
-    TableUnwind = Saved;
-    B.CreateBr(End);
-
-    B.SetInsertPoint(Landing);
-    llvm::StructType *LPType =
-        llvm::StructType::get(B.getPtrTy(), B.getInt32Ty());
-    llvm::LandingPadInst *LP = B.CreateLandingPad(LPType, 0, "lp");
-    LP->setCleanup(true);
-    llvm::Value *Exc = B.CreateExtractValue(LP, 0, "unwind.exc");
-    llvm::Value *Obj = B.CreateCall(
-        classRuntime("__pas_unwind_object", B.getPtrTy(), {B.getPtrTy()}),
-        {Exc}, "exc");
-    llvm::Value *HandlerVMT = B.CreateLoad(B.getPtrTy(), Obj, "vmt");
-    auto *Next = newBlock("handler.next");
-    B.CreateBr(Next);
-    for (ExceptHandler *H : S->getHandlers()) {
-      B.SetInsertPoint(Next);
-      llvm::Value *Is = classIsVMT(HandlerVMT, H->getClass());
-      auto *Do = newBlock("handler.do");
-      Next = newBlock("handler.next");
-      B.CreateCondBr(Is, Do, Next);
-      B.SetInsertPoint(Do);
-      if (VarDecl *V = H->getVar()) {
-        llvm::Value *Slot = createTemp(B.getPtrTy(), V->getName().Name);
-        B.CreateStore(Obj, Slot);
-        HandlerVars[V] = Slot;
-      }
-      llvm::Value *SavedExc = TableHandlerExc;
-      TableHandlerExc = Exc;
-      visitStmt(H->getBody());
-      TableHandlerExc = SavedExc;
-      emitCallOrInvoke(excRuntime("__pas_free_object"), {Obj});
-      emitCallOrInvoke(classRuntime("__pas_unwind_release", B.getVoidTy(),
-                                    {B.getPtrTy()}),
-                       {Exc});
-      B.CreateBr(End);
-    }
-    B.SetInsertPoint(Next);
-    if (S->catchesAll()) {
-      llvm::Value *SavedExc = TableHandlerExc;
-      TableHandlerExc = Exc;
-      emitSequence(S->getExceptBody());
-      TableHandlerExc = SavedExc;
-      emitCallOrInvoke(excRuntime("__pas_free_object"), {Obj});
-      emitCallOrInvoke(classRuntime("__pas_unwind_release", B.getVoidTy(),
-                                    {B.getPtrTy()}),
-                       {Exc});
-      B.CreateBr(End);
-    } else {
-      emitUnwindResume(Exc);
-      B.CreateUnreachable();
-    }
-    B.SetInsertPoint(End);
-  }
-
-  void emitTableTryFinally(TryStmt *S) {
-    auto *Landing = newBlock("finally.raise");
-    auto *Finally = newBlock("finally");
-    auto *End = newBlock("try.end");
-    llvm::FunctionCallee Personality =
-        classRuntime("__pas_personality", B.getInt32Ty(),
-                     {B.getInt32Ty(), B.getInt32Ty(), B.getInt64Ty(),
-                      B.getPtrTy(), B.getPtrTy()});
-    CurFn->setPersonalityFn(
-        llvm::cast<llvm::Constant>(Personality.getCallee()));
-    llvm::Value *State = createTemp(B.getInt32Ty(), "finally.state");
-    llvm::Value *ExcSlot = createTemp(B.getPtrTy(), "finally.exc");
-    llvm::Value *SavedExc = TableHandlerExc;
-    llvm::BasicBlock *SavedUnwind = TableUnwind;
-    TableUnwind = Landing;
-    Cleanups.emplace_back(Cleanup::Finally, nullptr, nullptr, State, Finally,
-                          /*Table=*/true);
-    emitSequence(S->getBody());
-    llvm::SmallVector<llvm::BasicBlock *, 2> Exits =
-        std::move(Cleanups.back().Exits);
-    Cleanups.pop_back();
-    TableUnwind = SavedUnwind;
-    B.CreateStore(B.getInt32(0), State);
-    B.CreateStore(llvm::ConstantPointerNull::get(B.getPtrTy()), ExcSlot);
-    B.CreateBr(Finally);
-
-    B.SetInsertPoint(Landing);
-    llvm::StructType *LPType =
-        llvm::StructType::get(B.getPtrTy(), B.getInt32Ty());
-    llvm::LandingPadInst *LP = B.CreateLandingPad(LPType, 0, "lp");
-    LP->setCleanup(true);
-    llvm::Value *Exc = B.CreateExtractValue(LP, 0, "unwind.exc");
-    B.CreateStore(B.getInt32(1), State);
-    B.CreateStore(Exc, ExcSlot);
-    B.CreateBr(Finally);
-
-    B.SetInsertPoint(Finally);
-    TableHandlerExc = B.CreateLoad(B.getPtrTy(), ExcSlot, "finally.exc");
-    emitSequence(S->getFinallyBody());
-    TableHandlerExc = SavedExc;
-    llvm::SwitchInst *SW =
-        B.CreateSwitch(B.CreateLoad(B.getInt32Ty(), State, "state"), End);
-    auto *Reraise = newBlock("finally.reraise");
-    SW->addCase(B.getInt32(1), Reraise);
-    for (size_t K = 0; K < Exits.size(); ++K)
-      SW->addCase(B.getInt32(2 + K), Exits[K]);
-    B.SetInsertPoint(Reraise);
-    emitCallOrInvoke(classRuntime("__pas_reraise_table", B.getVoidTy(),
-                                  {B.getPtrTy()}),
-                     {B.CreateLoad(B.getPtrTy(), ExcSlot, "finally.exc")});
-    B.CreateUnreachable();
-    B.SetInsertPoint(End);
-  }
-
   void visitTryStmt(TryStmt *S) {
-    if (CGOpts.TableExceptions && tableTryCandidate(S)) {
-      if (S->isFinally())
-        emitTableTryFinally(S);
-      else
-        emitTableTryExcept(S);
-      return;
-    }
     if (S->isFinally()) {
       emitTryFinally(S);
       return;
@@ -8977,14 +8742,13 @@ public:
     llvm::Value *Pending = createTemp(PendingTy, "owned.exc");
     B.CreateStore(llvm::Constant::getNullValue(PendingTy), Pending);
     for (VarDecl *V : llvm::reverse(Owned))
-      emitCallOrInvoke(classRuntime("__pas_owned_free", B.getVoidTy(),
-                                    {Ptr, Ptr}),
-                       {varAddress(V), Pending});
+      B.CreateCall(classRuntime("__pas_owned_free", B.getVoidTy(), {Ptr, Ptr}),
+                   {varAddress(V), Pending});
     llvm::Value *Raised = B.CreateICmpEQ(
         B.CreateLoad(B.getInt32Ty(), State, "state"), B.getInt32(1), "raised");
-    emitCallOrInvoke(classRuntime("__pas_owned_done", B.getVoidTy(),
-                                  {Ptr, B.getInt32Ty()}),
-                     {Pending, B.CreateZExt(Raised, B.getInt32Ty())});
+    B.CreateCall(classRuntime("__pas_owned_done", B.getVoidTy(),
+                              {Ptr, B.getInt32Ty()}),
+                 {Pending, B.CreateZExt(Raised, B.getInt32Ty())});
   }
 
   /// FinallyPart is given the state's variable: 0 after the body's normal
@@ -9063,12 +8827,6 @@ public:
 
   void visitRaiseStmt(RaiseStmt *S) {
     if (S->isReraise()) {
-      if (CGOpts.TableExceptions && TableHandlerExc) {
-        emitUnwindResume(TableHandlerExc);
-        B.CreateUnreachable();
-        B.SetInsertPoint(newBlock("after.raise"));
-        return;
-      }
       B.CreateCall(excRuntime("__pas_reraise"), {HandledFrames.back()});
     } else if (S->getAddress()) {
       // Free Pascal's order: the frame (only evaluated), the address, the
@@ -9077,28 +8835,11 @@ public:
         visitExpr(S->getFrame());
       llvm::Value *Addr = visitExpr(S->getAddress());
       llvm::Value *Obj = visitExpr(S->getObject());
-      if (CGOpts.TableExceptions) {
-        llvm::FunctionCallee Raise = M.getOrInsertFunction(
-            "__pas_raise_table_at",
-            llvm::FunctionType::get(
-                B.getVoidTy(), {B.getPtrTy(), B.getPtrTy(), B.getPtrTy()},
-                false));
-        emitCallOrInvoke(Raise,
-                         {Obj, whereText(S->getBeginLoc()), Addr});
-      } else
-        B.CreateCall(excRuntime("__pas_raise_at"),
-                     {Obj, whereText(S->getBeginLoc()), Addr});
+      B.CreateCall(excRuntime("__pas_raise_at"),
+                   {Obj, whereText(S->getBeginLoc()), Addr});
     } else {
       llvm::Value *Obj = visitExpr(S->getObject());
-      if (CGOpts.TableExceptions) {
-        llvm::FunctionCallee Raise = M.getOrInsertFunction(
-            "__pas_raise_table",
-            llvm::FunctionType::get(B.getVoidTy(),
-                                    {B.getPtrTy(), B.getPtrTy()}, false));
-        emitCallOrInvoke(Raise, {Obj, whereText(S->getBeginLoc())});
-      } else
-        B.CreateCall(excRuntime("__pas_raise"),
-                     {Obj, whereText(S->getBeginLoc())});
+      B.CreateCall(excRuntime("__pas_raise"), {Obj, whereText(S->getBeginLoc())});
     }
     B.CreateUnreachable();
     B.SetInsertPoint(newBlock("after.raise")); // unreachable code follows
