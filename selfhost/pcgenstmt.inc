@@ -3641,7 +3641,10 @@ begin
   irSetArgName(f, 0, 'link');
   argNo := 1;
   if r^.isFunction and returnsByPointer(r^.resultType) then
+  begin
+    irSetArgAttrs(f, argNo, resultParamAttr(r^.resultType));
     argNo := argNo + 1;
+  end;
   for i := 0 to r^.params.count - 1 do
   begin
     p := PDecl(listGet(r^.params, i));
@@ -3668,7 +3671,10 @@ begin
   listFree(params);
   first := 0;
   if r^.isFunction and returnsByPointer(r^.resultType) then
+  begin
     first := 1;
+    irSetArgAttrs(t, 0, resultParamAttr(r^.resultType));
+  end;
   for i := 0 to r^.params.count - 1 do
     irSetArgName(t, i + first, nm(PDecl(listGet(r^.params, i))^.ident.name));
   r^.cgThunk := t;
@@ -3693,12 +3699,18 @@ begin
   if isCDecl(r) then
   begin
     for i := 0 to t^.params.count - 1 do
-      irArgsAdd(buf, irArg(t, i));
+      if (i = 0) and r^.isFunction and returnsByPointer(r^.resultType) then
+        irArgsAddAttr(buf, irArg(t, i), resultCallAttr(r^.resultType))
+      else
+        irArgsAdd(buf, irArg(t, i));
   end
   else { a link thunk: skip its link argument }
   begin
     for i := 1 to t^.params.count - 1 do
-      irArgsAdd(buf, irArg(t, i));
+      if (i = 1) and r^.isFunction and returnsByPointer(r^.resultType) then
+        irArgsAddAttr(buf, irArg(t, i), resultCallAttr(r^.resultType))
+      else
+        irArgsAdd(buf, irArg(t, i));
   end;
   res := irCall(fnOf(r), buf, '');
   bufFree(buf);
@@ -3753,6 +3765,9 @@ begin
           routineParamTypes(m, params);
           m^.cgFunc := irDeclareFunction(nm(m^.cgExport), routineRetType(m), params,
                                          '', '');
+          if m^.isFunction and returnsByPointer(m^.resultType) then
+            irSetArgAttrs(PIRFunc(m^.cgFunc), resultArgIndex(m),
+                          resultParamAttr(m^.resultType));
           listFree(params);
         end;
       end;
@@ -3778,6 +3793,9 @@ begin
       listInit(params);
       routineParamTypes(r, params);
       r^.cgFunc := irDeclareFunction(nm(r^.cgExport), routineRetType(r), params, '', '');
+      if r^.isFunction and returnsByPointer(r^.resultType) then
+        irSetArgAttrs(PIRFunc(r^.cgFunc), resultArgIndex(r),
+                      resultParamAttr(r^.resultType));
       listFree(params);
       declareCThunk(r, nm(r^.cgExport));
       if (r^.asyncType <> nil) or (r^.iterType <> nil) then
@@ -3786,16 +3804,6 @@ begin
     end;
     declareRoutine(r);
   end;
-end;
-
-{ Item 9: a by-reference parameter is an address: never nil, and it points
-  to a value of its type. }
-function byRefParamAttr(t: PType): string;
-begin
-  if t^.kind = tyUntyped then
-    byRefParamAttr := 'nonnull'
-  else
-    byRefParamAttr := 'nonnull dereferenceable(' + intToStr(sizeOf_(t)) + ')';
 end;
 
 { The function and frame of routine r (of a method: its canonical
@@ -3890,6 +3898,12 @@ begin
       irSetArgName(f, 0, 'link');
       argNo := 1;
     end;
+    if r^.isFunction and returnsByPointer(r^.resultType) then
+    begin
+      irSetArgName(f, argNo, 'result.ptr');
+      irSetArgAttrs(f, argNo, resultParamAttr(r^.resultType));
+      argNo := argNo + 1;
+    end;
     if hasSelf(r) then
     begin
       irSetArgName(f, argNo, 'self');
@@ -3897,12 +3911,6 @@ begin
          ((r^.ownerClass^.classRecord <> nil) or
           (r^.ownerClass^.classHelperFor <> nil)) then
         irSetArgAttrs(f, argNo, byRefParamAttr(r^.selfVar^.varType));
-      argNo := argNo + 1;
-    end;
-    if r^.isFunction and returnsByPointer(r^.resultType) then
-    begin
-      irSetArgName(f, argNo, 'result.ptr');
-      irSetArgAttrs(f, argNo, byRefParamAttr(r^.resultType));
       argNo := argNo + 1;
     end;
     for j := 0 to r^.params.count - 1 do
@@ -4224,16 +4232,16 @@ begin
     argNo := 1
   else
     argNo := 0;
-  if hasSelf(r) then
-  begin
-    irStore(irArg(f, argNo), varSlot(r^.selfVar));
-    argNo := argNo + 1;
-  end;
   if resultByPointer then { the caller's temporary }
   begin
     irStore(irArg(f, argNo), varSlot(r^.resultVar));
     argNo := argNo + 1;
     emitZeroInit(varAddress(r^.resultVar), r^.resultVar^.varType);
+  end;
+  if hasSelf(r) then
+  begin
+    irStore(irArg(f, argNo), varSlot(r^.selfVar));
+    argNo := argNo + 1;
   end;
   for i := 0 to r^.params.count - 1 do
   begin

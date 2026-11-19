@@ -315,8 +315,10 @@ begin
           (name = '__pas_aoc_bad_index') or (name = '__pas_astr_from_chars') or
           (name = '__pas_astr_from_pstr') or (name = '__pas_astr_from_cstr') or
           (name = '__pas_astr_pchar') or (name = '__pas_dyn_copy') or
-          (name = '__pas_dyn_new') then
+          (name = '__pas_dyn_new') or (name = '__pas_astr_copy') then
     runtimeReadsParam := i = 0
+  else if name = '__pas_tmpl_add' then
+    runtimeReadsParam := i <= 1
   else if name = '__pas_write_enum' then
     runtimeReadsParam := i = 1 { the names table, not the file it writes to }
   else if (name = '__pas_str_assign') or (name = '__pas_str_copy') then
@@ -342,6 +344,15 @@ begin
     runtimeReadsParam := i <= 2;
 end;
 
+{ A runtime destination that it only writes, and that cannot alias a
+  source of the call (item 4). }
+function runtimeWritesParam(const name: string; i: longint): boolean;
+begin
+  runtimeWritesParam := ((name = '__pas_read_elem') and (i = 1)) or
+                        ((name = '__pas_read_str') and (i = 1)) or
+                        ((name = '__pas_paramstr') and (i = 0));
+end;
+
 { The function attributes (the base is 'nounwind' for plain runtime
   functions). }
 function runtimeAttrs(const name, base: string): string;
@@ -355,6 +366,10 @@ begin
     runtimeAttrs := 'nounwind willreturn memory(none)'
   else if name = '__pas_new' then
     runtimeAttrs := 'nounwind allockind("alloc,zeroed") allocsize(0)'
+  else if name = '__pas_dyn_new' then
+    runtimeAttrs := 'nounwind allockind("alloc,zeroed")'
+  else if name = '__pas_realloc' then
+    runtimeAttrs := 'nounwind allockind("realloc") allocsize(1)'
   else if name = '__pas_abstract_error' then
     runtimeAttrs := 'cold noreturn nounwind';
 end;
@@ -390,9 +405,11 @@ begin
                                runtimeAttrs(name, attrs), '');
   irSetRetAttrs(ignored, runtimeRetAttr(name));
   for i := 0 to list.count - 1 do
-    if (PIRType(listGet(list, i))^.kind = ikPtr) and
-       runtimeReadsParam(name, i) then
-      irSetArgAttrs(ignored, i, 'nocapture readonly');
+    if PIRType(listGet(list, i))^.kind = ikPtr then
+      if runtimeReadsParam(name, i) then
+        irSetArgAttrs(ignored, i, 'nocapture readonly')
+      else if runtimeWritesParam(name, i) then
+        irSetArgAttrs(ignored, i, 'nocapture writeonly');
   listFree(list);
   { Can a call of it raise an exception? Those that raise one, and those
     that may run a destructor (which is Pascal code): releasing an object
@@ -1726,6 +1743,37 @@ end;
 function returnsByPointer(t: PType): boolean;
 begin
   returnsByPointer := (t <> nil) and (t^.kind = tyShortString);
+end;
+
+{ Item 9: a by-reference parameter is an address: never nil, and it points
+  to a value of its type. }
+function byRefParamAttr(t: PType): string;
+begin
+  if t^.kind = tyUntyped then
+    byRefParamAttr := 'nonnull'
+  else
+    byRefParamAttr := 'nonnull dereferenceable(' + intToStr(sizeOf_(t)) + ')';
+end;
+
+{ Item 4: the hidden result pointer is a fresh caller temporary: it cannot
+  alias an argument, and LLVM's ABI can return through it. }
+function resultParamAttr(t: PType): string;
+begin
+  resultParamAttr := 'noalias nonnull sret(' + memType(t)^.text + ') ' +
+                     'dereferenceable(' + intToStr(sizeOf_(t)) + ')';
+end;
+
+function resultCallAttr(t: PType): string;
+begin
+  resultCallAttr := 'noalias sret(' + memType(t)^.text + ')';
+end;
+
+function resultArgIndex(r: PDecl): longint;
+begin
+  if needsLink(r) then
+    resultArgIndex := 1
+  else
+    resultArgIndex := 0;
 end;
 
 { A constref parameter passed as a pointer where a const one is not: of a
@@ -4047,13 +4095,13 @@ begin
   bufInit(buf);
   if hasLink then { external (C) routines have none }
     irArgsAdd(buf, link);
-  if hasSelf then { methods }
-    irArgsAdd(buf, self_);
   if returnsByPointer(resTy) then
   begin
     tmp := irCreateTemp(memType(resTy), 'result');
-    irArgsAdd(buf, tmp);
+    irArgsAddAttr(buf, tmp, resultCallAttr(resTy));
   end;
+  if hasSelf then { methods: after the result pointer }
+    irArgsAdd(buf, self_);
   { The arguments' results are held as usual; only a direct call's own
     ansistring result may move into its assignment target. }
   holdAnsi := noHoldAnsiResult;
@@ -6434,14 +6482,14 @@ begin
     args := call1(classRuntime('__pas_task_args', 'ptr', 'ptr'), task, 'args');
   bufInit(buf);
   irArgsAdd(buf, irLoad(irPtrT, irStructGEP(argsTy, args, 0, ''), 'link'));
-  if hasSelf(r) then
-    irArgsAdd(buf, irLoad(irPtrT, irStructGEP(argsTy, args, 1, ''), 'self'));
   resultSlot := irNull;
   if r^.isFunction then
     resultSlot := call1(classRuntime('__pas_task_result', 'ptr', 'ptr'), task, 'result');
   byPointer := r^.isFunction and returnsByPointer(r^.resultType);
   if byPointer then
-    irArgsAdd(buf, resultSlot);
+    irArgsAddAttr(buf, resultSlot, resultCallAttr(r^.resultType));
+  if hasSelf(r) then
+    irArgsAdd(buf, irLoad(irPtrT, irStructGEP(argsTy, args, 1, ''), 'self'));
   slot := firstParamSlot(r);
   for i := 0 to r^.params.count - 1 do
   begin

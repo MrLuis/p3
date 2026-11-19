@@ -1,0 +1,17 @@
+; More runtime attributes (optimization2 item 4): write-only destinations,
+; nocapture readonly sources, and allocator facts.
+; RUN: %p3 --mode=objfpc --emit-llvm %S/Inputs/write.pas -o - | FileCheck --check-prefix=IO %s
+; RUN: %p3 --mode=objfpc --emit-llvm %S/Inputs/runtime-attrs.pas -o - | FileCheck --check-prefix=ATTR %s
+; RUN: %p3 --mode=tp --emit-llvm %S/Inputs/template.pas -o - | FileCheck --check-prefix=TMPL %s
+
+; IO-DAG: declare void @__pas_read_elem(ptr, ptr nocapture writeonly)
+; IO-DAG: declare void @__pas_read_str(ptr, ptr nocapture writeonly, i32)
+; IO-DAG: declare void @__pas_paramstr(ptr nocapture writeonly, i32)
+
+; ATTR-DAG: declare ptr @__pas_realloc(ptr, i64) #[[REALLOC:[0-9]+]]
+; ATTR-DAG: attributes #[[REALLOC]] = { nounwind allockind("realloc") allocsize(1) }
+; ATTR-DAG: declare noalias ptr @__pas_dyn_new(ptr nocapture readonly, i64) #[[DYN:[0-9]+]]
+; ATTR-DAG: attributes #[[DYN]] = { nounwind allockind("alloc,zeroed") }
+; ATTR-DAG: declare ptr @__pas_astr_copy(ptr nocapture readonly, i32, i32)
+
+; TMPL: declare noalias ptr @__pas_tmpl_add(ptr nocapture readonly, ptr nocapture readonly)

@@ -96,8 +96,10 @@ static bool runtimeReadsParam(llvm::StringRef Name, unsigned I) {
       Name == "__pas_aoc_bad_index" || Name == "__pas_astr_from_chars" ||
       Name == "__pas_astr_from_pstr" || Name == "__pas_astr_from_cstr" ||
       Name == "__pas_astr_pchar" || Name == "__pas_dyn_copy" ||
-      Name == "__pas_dyn_new")
+      Name == "__pas_dyn_new" || Name == "__pas_astr_copy")
     return I == 0;
+  if (Name == "__pas_tmpl_add")
+    return I <= 1;
   if (Name == "__pas_write_enum")
     return I == 1; // the names table (not the file it writes to)
   if (Name == "__pas_str_assign" || Name == "__pas_str_copy")
@@ -122,6 +124,14 @@ static bool runtimeReadsParam(llvm::StringRef Name, unsigned I) {
   if (Name == "__pas_intf_as" || Name == "__pas_class_as")
     return I <= 2;
   return false;
+}
+
+/// A runtime destination that it only writes, and that cannot alias a
+/// source of the call (item 4).
+static bool runtimeWritesParam(llvm::StringRef Name, unsigned I) {
+  return (Name == "__pas_read_elem" && I == 1) ||
+         (Name == "__pas_read_str" && I == 1) ||
+         (Name == "__pas_paramstr" && I == 0);
 }
 
 /// Adds to the runtime function F the attributes that are true of it: its
@@ -150,15 +160,33 @@ static void addRuntimeAttrs(llvm::Function *F) {
                        llvm::AllocFnKind::Zeroed);
     B.addAllocSizeAttr(0, std::nullopt);
     F->addFnAttrs(B);
+  } else if (Name == "__pas_dyn_new") { // calloc(1, header + count * size)
+    llvm::AttrBuilder B(C);
+    B.addAllocKindAttr(llvm::AllocFnKind::Alloc |
+                       llvm::AllocFnKind::Zeroed);
+    F->addFnAttrs(B);
+  } else if (Name == "__pas_realloc") {
+    llvm::AttrBuilder B(C);
+    B.addAllocKindAttr(llvm::AllocFnKind::Realloc);
+    B.addAllocSizeAttr(1, std::nullopt);
+    F->addFnAttrs(B);
   }
   for (unsigned I = 0; I < F->arg_size(); ++I) {
-    if (!F->getArg(I)->getType()->isPointerTy() ||
-        !runtimeReadsParam(Name, I))
+    if (!F->getArg(I)->getType()->isPointerTy())
       continue;
     llvm::AttrBuilder B(C);
-    B.addAttribute(llvm::Attribute::NoCapture);
-    B.addAttribute(llvm::Attribute::ReadOnly);
-    F->addParamAttrs(I, B);
+    bool Any = false;
+    if (runtimeReadsParam(Name, I)) {
+      B.addAttribute(llvm::Attribute::NoCapture);
+      B.addAttribute(llvm::Attribute::ReadOnly);
+      Any = true;
+    } else if (runtimeWritesParam(Name, I)) {
+      B.addAttribute(llvm::Attribute::NoCapture);
+      B.addAttribute(llvm::Attribute::WriteOnly);
+      Any = true;
+    }
+    if (Any)
+      F->addParamAttrs(I, B);
   }
 }
 
@@ -3911,12 +3939,14 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
     llvm::SmallVector<llvm::Type *, 8> ParamTys;
     if (HasLink)
       ParamTys.push_back(B.getPtrTy());
-    if (HasSelf) // methods: Self after the static link
-      ParamTys.push_back(B.getPtrTy());
-    if (returnsByPointer(Result)) { // where the result goes
+    // The result pointer is first or second so that it can be sret; Self
+    // follows it (a method has a static link first).
+    if (returnsByPointer(Result)) {
       ParamTys.push_back(B.getPtrTy());
       Result = nullptr;
     }
+    if (HasSelf)
+      ParamTys.push_back(B.getPtrTy());
     for (VarDecl *P : Params)
       ParamTys.push_back(P->isVarParam() || P->getType()->isStructured() ||
                                  P->getType()->isUntyped() || isConstRefPtr(P)
@@ -3973,17 +4003,22 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
     auto *T = llvm::Function::Create(llvm::FunctionType::get(Result, ParamTys, false),
                                      llvm::Function::InternalLinkage,
                                      "cthunk." + Target->getName(), M);
+    unsigned First = R->isFunction() && returnsByPointer(R->getResultType());
+    if (First)
+      addResultParamAttrs(T->getArg(0), R->getResultType());
     llvm::IRBuilder<> TB(llvm::BasicBlock::Create(M.getContext(), "entry", T));
     llvm::SmallVector<llvm::Value *, 8> Args;
     if (needsLink(R))
       Args.push_back(llvm::ConstantPointerNull::get(B.getPtrTy()));
-    unsigned First = R->isFunction() && returnsByPointer(R->getResultType());
     for (unsigned I = 0; I < T->arg_size(); ++I) {
       if (I >= First)
         T->getArg(I)->setName(R->getParams()[I - First]->getName().Name);
       Args.push_back(T->getArg(I));
     }
-    llvm::Value *V = TB.CreateCall(Target, Args);
+    auto *Call = TB.CreateCall(Target, Args);
+    if (First)
+      addResultCallAttrs(Call, needsLink(R) ? 1 : 0, R->getResultType());
+    llvm::Value *V = Call;
     if (Result->isVoidTy())
       TB.CreateRetVoid();
     else
@@ -4013,9 +4048,11 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
         llvm::Function::InternalLinkage,
         "linkthunk." + Target->getName(), M);
     T->arg_begin()->setName("link");
+    unsigned First = R->isFunction() && returnsByPointer(R->getResultType());
+    if (First)
+      addResultParamAttrs(T->getArg(1), R->getResultType());
     llvm::IRBuilder<> TB(llvm::BasicBlock::Create(M.getContext(), "entry", T));
     llvm::SmallVector<llvm::Value *, 8> Args;
-    unsigned First = R->isFunction() && returnsByPointer(R->getResultType());
     for (unsigned I = 0; I < T->arg_size(); ++I) {
       if (I == 0) // the link this thunk ignores
         continue;
@@ -4023,7 +4060,10 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
         T->getArg(I)->setName(R->getParams()[I - 1 - First]->getName().Name);
       Args.push_back(T->getArg(I));
     }
-    llvm::Value *V = TB.CreateCall(Target, Args);
+    auto *Call = TB.CreateCall(Target, Args);
+    if (First)
+      addResultCallAttrs(Call, 0, R->getResultType());
+    llvm::Value *V = Call;
     if (V->getType()->isVoidTy())
       TB.CreateRetVoid();
     else
@@ -4045,10 +4085,13 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
       if (ClassType *MT = advancedRecord(D)) {
         // A record of a separately compiled unit: its methods, declared.
         for (Decl *M : MT->getMembers())
-          if (auto *R = llvm::dyn_cast<RoutineDecl>(M); R && ImportedDecls.count(R))
-            Functions[R] = llvm::Function::Create(routineFnType(R),
-                                                  llvm::Function::ExternalLinkage,
-                                                  ExportNames[R], this->M);
+          if (auto *R = llvm::dyn_cast<RoutineDecl>(M); R && ImportedDecls.count(R)) {
+            auto *F = llvm::Function::Create(routineFnType(R),
+                                             llvm::Function::ExternalLinkage,
+                                             ExportNames[R], this->M);
+            addResultAttrs(F, R);
+            Functions[R] = F;
+          }
         continue;
       }
       auto *R = llvm::dyn_cast<RoutineDecl>(D);
@@ -4065,8 +4108,10 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
       }
       if (ImportedDecls.count(R)) {
         // A routine of a separately compiled unit: declared only.
-        Functions[R] = llvm::Function::Create(
+        auto *F = llvm::Function::Create(
             routineFnType(R), llvm::Function::ExternalLinkage, ExportNames[R], M);
+        addResultAttrs(F, R);
+        Functions[R] = F;
         declareCThunk(R);
         if (R->isAsync() || R->isIterator())
           declareAsync(R, ExportNames[R], /*External=*/true);
@@ -4311,6 +4356,35 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
     A->addAttrs(B);
   }
 
+  /// The hidden result pointer is a fresh caller temporary (item 4): it
+  /// cannot alias an argument, and LLVM's ABI can return through it.
+  void addResultParamAttrs(llvm::Argument *A, Type *T) {
+    llvm::AttrBuilder B(A->getContext());
+    B.addAttribute(llvm::Attribute::NoAlias);
+    B.addStructRetAttr(memType(T));
+    B.addAttribute(llvm::Attribute::NonNull);
+    B.addDereferenceableAttr(DL.getTypeStoreSize(memType(T)).getFixedValue());
+    A->addAttrs(B);
+  }
+
+  /// The same facts at a call site, where they change the ABI on targets
+  /// with an indirect-result convention.
+  void addResultCallAttrs(llvm::CallBase *CB, unsigned ArgNo, Type *T) {
+    CB->addParamAttr(ArgNo, llvm::Attribute::NoAlias);
+    CB->addParamAttr(ArgNo,
+                     llvm::Attribute::getWithStructRetType(B.getContext(),
+                                                           memType(T)));
+  }
+
+  /// Marks the hidden result pointer of a function declaration, if it has
+  /// one.
+  void addResultAttrs(llvm::Function *F, RoutineDecl *R) {
+    if (!R->isFunction() || !returnsByPointer(R->getResultType()))
+      return;
+    unsigned ArgNo = needsLink(R) ? 1 : 0;
+    addResultParamAttrs(F->getArg(ArgNo), R->getResultType());
+  }
+
   /// Creates the LLVM function and frame type of routine R (a method: of
   /// its canonical declaration), queues its body and declares the
   /// routines nested in it.
@@ -4371,16 +4445,16 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
     unsigned ArgNo = 0;
     if (needsLink(R))
       F->getArg(ArgNo++)->setName("link");
+    if (R->isFunction() && returnsByPointer(R->getResultType())) {
+      llvm::Argument *Result = F->getArg(ArgNo++);
+      Result->setName("result.ptr");
+      addResultParamAttrs(Result, R->getResultType());
+    }
     if (R->hasSelf()) {
       llvm::Argument *Self = F->getArg(ArgNo++);
       Self->setName("self");
       if (R->getClass() && R->getClass()->hasSelfByReference())
         addByRefParamAttrs(Self, R->getSelfVar()->getType());
-    }
-    if (R->isFunction() && returnsByPointer(R->getResultType())) {
-      llvm::Argument *Result = F->getArg(ArgNo++);
-      Result->setName("result.ptr");
-      addByRefParamAttrs(Result, R->getResultType());
     }
     for (VarDecl *P : R->getParams()) {
       llvm::Argument *A = F->getArg(ArgNo++);
@@ -4531,15 +4605,16 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
         {Task}, "args");
     llvm::SmallVector<llvm::Value *, 8> Values;
     Values.push_back(B.CreateLoad(Ptr, B.CreateStructGEP(A.ArgsTy, Args, 0), "link"));
-    if (R->hasSelf())
-      Values.push_back(B.CreateLoad(Ptr, B.CreateStructGEP(A.ArgsTy, Args, 1), "self"));
     llvm::Value *ResultSlot = nullptr;
     if (R->isFunction())
       ResultSlot = B.CreateCall(classRuntime("__pas_task_result", Ptr, {Ptr}),
                                 {Task}, "result");
     bool ByPointer = R->isFunction() && returnsByPointer(R->getResultType());
+    unsigned ResultArgNo = Values.size();
     if (ByPointer)
       Values.push_back(ResultSlot);
+    if (R->hasSelf())
+      Values.push_back(B.CreateLoad(Ptr, B.CreateStructGEP(A.ArgsTy, Args, 1), "self"));
     unsigned Slot = firstParamSlot(R);
     for (VarDecl *P : R->getParams()) {
       llvm::Value *Addr = B.CreateStructGEP(A.ArgsTy, Args, Slot++);
@@ -4549,7 +4624,10 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
       else
         Values.push_back(loadScalar(Addr, T, P->getName().Name));
     }
-    llvm::Value *Result = B.CreateCall(Functions[R], Values);
+    auto *Call = B.CreateCall(Functions[R], Values);
+    if (ByPointer)
+      addResultCallAttrs(Call, ResultArgNo, R->getResultType());
+    llvm::Value *Result = Call;
     if (R->isFunction() && !ByPointer) {
       Type *T = R->getResultType();
       if (T->isBoolean() || T->isOrdinal() || T->isReal())
@@ -4882,12 +4960,12 @@ public:
       B.CreateStore(F->getArg(0), B.CreateStructGEP(FrameTy, CurFrame, 0));
     if (FrameFini && parentFrameOnHeap(R)) // the frame holds its parent's
       B.CreateCall(frameRuntime("__pas_frame_addref"), {F->getArg(0)});
-    if (R->hasSelf())
-      B.CreateStore(F->getArg(ArgNo++), varSlot(R->getSelfVar()));
     if (ResultByPointer) { // the caller's temporary
       B.CreateStore(F->getArg(ArgNo++), varSlot(ResultVar));
       emitZeroInit(varAddress(ResultVar), ResultVar->getType());
     }
+    if (R->hasSelf())
+      B.CreateStore(F->getArg(ArgNo++), varSlot(R->getSelfVar()));
     // The variables holding COM interfaces: value parameters (one more
     // reference each), then local variables (nil at first).
     llvm::SmallVector<std::pair<llvm::Value *, Type *>, 4> Managed;
@@ -5061,20 +5139,25 @@ public:
     llvm::SmallVector<llvm::Value *, 8> Values;
     if (Link) // external (C) routines have none
       Values.push_back(Link);
-    if (Self) // methods
-      Values.push_back(Self);
     llvm::Value *ResultTmp = nullptr;
-    if (returnsByPointer(ResultTy) && !ToC) {
+    unsigned ResultArgNo = Values.size();
+    bool ByPointer = returnsByPointer(ResultTy) && !ToC;
+    if (ByPointer) {
       ResultTmp = createTemp(memType(ResultTy), "result");
       Values.push_back(ResultTmp);
     }
+    if (Self) // methods: after the result pointer
+      Values.push_back(Self);
     // The arguments' results are held as usual; only a direct call's own
     // ansistring result may move into its assignment target.
     bool NoHold = NoHoldAnsiResult;
     NoHoldAnsiResult = false;
     emitArgValues(Params, Args, Values, ToC);
     NoHoldAnsiResult = NoHold;
-    llvm::Value *Result = B.CreateCall(Callee, Values);
+    auto *Call = B.CreateCall(Callee, Values);
+    if (ByPointer)
+      addResultCallAttrs(Call, ResultArgNo, ResultTy);
+    llvm::Value *Result = Call;
     if (ResultTmp) // expressions use a string's address
       return ResultTmp;
     // A string or record result comes back by value; expressions use its
