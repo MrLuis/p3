@@ -8671,24 +8671,56 @@ public:
     B.CreateBr(Target);
   }
 
-  /// Stage 8b2 handles only a try body of direct, no-argument Pascal calls
-  /// and a catch-all except; other shapes stay on setjmp.
+  /// Stage 8b3 can lower a catch-all try body made of ordinary statements.
+  /// Nested try/scope/for-in bodies and raise still use the setjmp machinery
+  /// (8d/8e/8b5), so mixing them under this flag is refused.
+  bool tableSafeStmt(Stmt *S) {
+    if (!S)
+      return true;
+    if (llvm::isa<TryStmt>(S) || llvm::isa<ScopeStmt>(S) ||
+        llvm::isa<ForInStmt>(S) || llvm::isa<RaiseStmt>(S))
+      return false;
+    if (auto *C = llvm::dyn_cast<CompoundStmt>(S)) {
+      for (Stmt *B : C->getBody())
+        if (!tableSafeStmt(B))
+          return false;
+      return true;
+    }
+    if (auto *I = llvm::dyn_cast<IfStmt>(S))
+      return tableSafeStmt(I->getThen()) && tableSafeStmt(I->getElse());
+    if (auto *W = llvm::dyn_cast<WhileStmt>(S))
+      return tableSafeStmt(W->getBody());
+    if (auto *R = llvm::dyn_cast<RepeatStmt>(S)) {
+      for (Stmt *B : R->getBody())
+        if (!tableSafeStmt(B))
+          return false;
+      return true;
+    }
+    if (auto *F = llvm::dyn_cast<ForStmt>(S))
+      return tableSafeStmt(F->getBody());
+    if (auto *C = llvm::dyn_cast<CaseStmt>(S)) {
+      for (CaseArm *A : C->getArms())
+        if (!tableSafeStmt(A->getBody()))
+          return false;
+      for (Stmt *B : C->getElseBody())
+        if (!tableSafeStmt(B))
+          return false;
+      return true;
+    }
+    if (auto *W = llvm::dyn_cast<WithStmt>(S))
+      return tableSafeStmt(W->getBody());
+    if (auto *L = llvm::dyn_cast<LabeledStmt>(S))
+      return tableSafeStmt(L->getBody());
+    return true;
+  }
+
   bool tableTryCandidate(TryStmt *S) {
     if (S->isFinally() || !S->catchesAll())
       return false;
-    bool Call = false;
-    for (Stmt *B : S->getBody()) {
-      if (llvm::isa<EmptyStmt>(B))
-        continue;
-      auto *P = llvm::dyn_cast<ProcCallStmt>(B);
-      if (!P || !P->getArgs().empty() || P->getCalleeValue() || P->getWith())
+    for (Stmt *B : S->getBody())
+      if (!tableSafeStmt(B))
         return false;
-      auto *R = llvm::dyn_cast_or_null<RoutineDecl>(P->getDecl());
-      if (!R || R->isExternal() || !Functions.count(R))
-        return false;
-      Call = true;
-    }
-    return Call;
+    return true;
   }
 
   void emitTableTryExcept(TryStmt *S) {
