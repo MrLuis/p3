@@ -42,6 +42,7 @@
 
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/DenseSet.h"
+#include "llvm/ADT/ScopeExit.h"
 #include "llvm/ADT/StringMap.h"
 #include "llvm/BinaryFormat/Dwarf.h"
 #include "llvm/IR/DIBuilder.h"
@@ -301,6 +302,21 @@ using VarSet = llvm::DenseSet<VarDecl *>;
 class PinAnalysis {
   RoutineDecl *R;
   VarSet Pins;
+  /// Leave out the targets of plain `x := e` (otherWrites).
+  bool SkipPlainAssigns = false;
+
+public:
+  /// The variable of a plain `x := e`: a bare variable name, not reached
+  /// through `with` and not an `absolute` overlay.
+  static VarDecl *plainAssignTarget(Expr *E) {
+    auto *N = llvm::dyn_cast<NameRefExpr>(E);
+    if (!N || N->getWith())
+      return nullptr;
+    auto *V = llvm::dyn_cast_or_null<VarDecl>(N->getDecl());
+    return V && !V->getAbsoluteRoot() ? V : nullptr;
+  }
+
+private:
 
   /// The variable whose storage an assignment to E writes, if local: x,
   /// r.f and a[i] write x, r and a (not the index).
@@ -544,7 +560,8 @@ class PinAnalysis {
       return;
     }
     if (auto *A = llvm::dyn_cast<AssignStmt>(S)) {
-      addTarget(A->getTarget(), Out);
+      if (!SkipPlainAssigns || !plainAssignTarget(A->getTarget()))
+        addTarget(A->getTarget(), Out);
       addWrittenExpr(A->getValue(), Out);
       return;
     }
@@ -1036,6 +1053,19 @@ public:
   /// Adds the variables that E reads or names (optimization3 item 1).
   static void usedBy(Expr *E, VarSet &Out) { addUsed(E, Out); }
 
+  /// Adds the variables that S may write (optimization3 item 4).
+  void writtenBy(Stmt *S, VarSet &Out) { addWrittenStmt(S, Out); }
+
+  /// The variables that S writes other than by a plain `x := e`: through
+  /// a var argument, @x, a for loop, an overlay... (optimization3 item 4).
+  VarSet otherWrites(Stmt *S) {
+    VarSet Out;
+    SkipPlainAssigns = true;
+    addWrittenStmt(S, Out);
+    SkipPlainAssigns = false;
+    return Out;
+  }
+
   VarSet run() {
     VarSet After;
     if (R->isFunction())
@@ -1179,6 +1209,14 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
   };
   llvm::DenseMap<VarDecl *, ValueRange> VarRanges;
   llvm::DenseMap<const llvm::Value *, ValueRange> ValueRanges;
+  /// The current routine's local variables whose range is followed from
+  /// store to store (optimization3 item 4): signed ordinals written only
+  /// by plain `x := e`, never captured, overlaid or address-taken. Empty in
+  /// a routine with labels.
+  VarSet RangeLocals;
+  /// Inside a for loop: the range such a variable keeps throughout it (an
+  /// accumulator, `x := x + c`), which a forgotten range falls back to.
+  llvm::DenseMap<VarDecl *, ValueRange> LoopRanges;
   /// The exact class of an object pointer when it is a direct constructor
   /// result (optimization2 item 10).
   llvm::DenseMap<const llvm::Value *, ClassType *> KnownClass;
@@ -1831,8 +1869,16 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
       return wideToChar(V);
     if (Dst->isIntegerTy(1))
       return B.CreateICmpNE(V, llvm::ConstantInt::get(V->getType(), 0));
-    return isSignedOrdinal(From) ? B.CreateSExtOrTrunc(V, Dst)
-                                 : B.CreateZExtOrTrunc(V, Dst);
+    llvm::Value *R = isSignedOrdinal(From) ? B.CreateSExtOrTrunc(V, Dst)
+                                           : B.CreateZExtOrTrunc(V, Dst);
+    // A known range survives a conversion that keeps the value: a sign
+    // extension, or a truncation to a signed type that holds the range.
+    ValueRange VR = rangeOfValue(V), DstRange;
+    if (VR.Known && isSignedOrdinal(From) && isSignedOrdinal(To) &&
+        signedRange(Dst->getIntegerBitWidth(), DstRange) &&
+        VR.Lo >= DstRange.Lo && VR.Hi <= DstRange.Hi)
+      noteRange(R, VR);
+    return R;
   }
 
   /// A widechar's code as a char, as Free Pascal converts it: '?' above
@@ -1876,9 +1922,151 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
     return {};
   }
 
+  /// (Not for a constant: those are shared, and rangeOfValue knows their
+  /// exact range.)
   void noteRange(const llvm::Value *V, ValueRange R) {
-    if (R.Known)
+    if (R.Known && !llvm::isa<llvm::Constant>(V))
       ValueRanges[V] = R;
+  }
+
+  /// Sets (or, R unknown, forgets) the range of a variable of RangeLocals.
+  /// Inside a loop that bounds it, a forgotten range is that bound.
+  void setVarRange(VarDecl *V, ValueRange R) {
+    if (!R.Known) {
+      auto It = LoopRanges.find(V);
+      if (It != LoopRanges.end())
+        R = It->second;
+    }
+    if (R.Known)
+      VarRanges[V] = R;
+    else
+      VarRanges.erase(V);
+  }
+
+  /// The variables of RangeLocals that S may write.
+  VarSet rangeLocalsWrittenBy(Stmt *S) {
+    VarSet All, Out;
+    PinAnalysis(CurRoutine).writtenBy(S, All);
+    for (VarDecl *V : All)
+      if (RangeLocals.count(V))
+        Out.insert(V);
+    return Out;
+  }
+
+  void forgetRanges(const VarSet &Vars) {
+    for (VarDecl *V : Vars)
+      setVarRange(V, {});
+  }
+
+  /// Chooses RangeLocals for R, each starting at 0 (the value every scalar
+  /// local starts with, see emitZeroInit).
+  void initRangeLocals(RoutineDecl *R) {
+    RangeLocals.clear();
+    LoopRanges.clear();
+    // (a label: a goto may arrive with any value)
+    for (Decl *D : R->getBody()->getDecls())
+      if (llvm::isa<LabelDecl>(D))
+        return;
+    VarSet Other = PinAnalysis(R).otherWrites(R->getBody()->getBody());
+    for (Decl *D : R->getBody()->getDecls()) {
+      auto *V = llvm::dyn_cast<VarDecl>(D);
+      if (!V || V->getVarKind() != VarDecl::Variable || V->isTypedConst() ||
+          V->isInitializedVar() || V->isInline() || V->getAbsolute() ||
+          V->isCaptured() || V->isOwned() || Other.count(V) || !V->getType() ||
+          !V->getType()->isOrdinal() || !isSignedOrdinal(V->getType()))
+        continue;
+      RangeLocals.insert(V);
+      VarRanges[V] = {true, 0, 0};
+    }
+  }
+
+  /// An integer constant written as a literal, a named constant or one of
+  /// those negated: its value.
+  static bool constInt(Expr *E, int64_t &Out) {
+    if (auto *P = llvm::dyn_cast<ParenExpr>(E))
+      return constInt(P->getInner(), Out);
+    if (auto *L = llvm::dyn_cast<IntegerLiteralExpr>(E)) {
+      if (L->getValue() > uint64_t(INT64_MAX))
+        return false;
+      Out = int64_t(L->getValue());
+      return true;
+    }
+    if (auto *U = llvm::dyn_cast<UnaryExpr>(E)) {
+      int64_t X;
+      if (U->getOp() == UnaryOp::Not || !constInt(U->getOperand(), X) ||
+          X == INT64_MIN)
+        return false;
+      Out = U->getOp() == UnaryOp::Minus ? -X : X;
+      return true;
+    }
+    if (auto *N = llvm::dyn_cast<NameRefExpr>(E))
+      if (auto *C = llvm::dyn_cast_or_null<ConstDecl>(N->getDecl()))
+        if (C->getValue().K == ConstValue::Ordinal && C->getType() &&
+            C->getType()->isIntegerLike()) {
+          Out = C->getValue().Int;
+          return true;
+        }
+    return false;
+  }
+
+  /// V := V + c, V := c + V or V := V - c, for a constant c: its step.
+  static bool accumulatorStep(AssignStmt *A, VarDecl *V, int64_t &Step) {
+    auto *E = llvm::dyn_cast<BinaryExpr>(A->getValue());
+    if (!E)
+      return false;
+    auto IsV = [&](Expr *X) { return PinAnalysis::plainAssignTarget(X) == V; };
+    if (E->getOp() == BinaryOp::Add) {
+      if (IsV(E->getLHS()) && constInt(E->getRHS(), Step))
+        return true;
+      return IsV(E->getRHS()) && constInt(E->getLHS(), Step);
+    }
+    if (E->getOp() == BinaryOp::Sub && IsV(E->getLHS()) &&
+        constInt(E->getRHS(), Step) && Step != INT64_MIN) {
+      Step = -Step;
+      return true;
+    }
+    return false;
+  }
+
+  /// Does every write of V in S (a for loop's body) add a constant to it,
+  /// each at most once per iteration (not inside an inner loop)? Adds the
+  /// possible change per iteration to [DLo, DHi]; false if that overflows
+  /// int64 (as everywhere in this rule: the self-hosted compiler has no
+  /// wider integers, and must come to the same answer).
+  bool accumulatorSteps(Stmt *S, VarDecl *V, int64_t &DLo, int64_t &DHi) {
+    if (!S)
+      return true;
+    if (auto *C = llvm::dyn_cast<CompoundStmt>(S)) {
+      for (Stmt *X : C->getBody())
+        if (!accumulatorSteps(X, V, DLo, DHi))
+          return false;
+      return true;
+    }
+    if (auto *A = llvm::dyn_cast<AssignStmt>(S)) {
+      if (PinAnalysis::plainAssignTarget(A->getTarget()) != V)
+        return true; // (V is only written by assignments to it)
+      int64_t Step;
+      if (!accumulatorStep(A, V, Step))
+        return false;
+      return !__builtin_add_overflow(Step < 0 ? DLo : DHi, Step,
+                                     Step < 0 ? &DLo : &DHi);
+    }
+    if (auto *I = llvm::dyn_cast<IfStmt>(S))
+      return accumulatorSteps(I->getThen(), V, DLo, DHi) &&
+             accumulatorSteps(I->getElse(), V, DLo, DHi);
+    if (auto *C = llvm::dyn_cast<CaseStmt>(S)) {
+      for (CaseArm *A : C->getArms())
+        if (!accumulatorSteps(A->getBody(), V, DLo, DHi))
+          return false;
+      for (Stmt *X : C->getElseBody())
+        if (!accumulatorSteps(X, V, DLo, DHi))
+          return false;
+      return true;
+    }
+    // Anything else (an inner loop, a try statement...): V not written.
+    VarSet W;
+    PinAnalysis(CurRoutine).writtenBy(S, W);
+    return !W.count(V);
   }
 
   /// The bounds of a signed integer type of Bits bits.
@@ -2625,8 +2813,7 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
                   ID == llvm::Intrinsic::ssub_with_overflow ||
                   ID == llvm::Intrinsic::smul_with_overflow;
     ValueRange ResultRange;
-    // (subtraction is left alone for now: it is a separate range rule)
-    bool Safe = Signed && Op != BinaryOp::Sub &&
+    bool Safe = Signed &&
                 combineRange(Op, rangeOfValue(L), rangeOfValue(R), ResultRange);
     if (Safe) {
       auto *T = llvm::cast<llvm::IntegerType>(L->getType());
@@ -2636,9 +2823,12 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
         Safe = false;
     }
     if (!overflowChecks(Loc) || Safe) {
-      llvm::Value *Result = Op == BinaryOp::Add   ? B.CreateAdd(L, R, Name)
-                            : Op == BinaryOp::Sub ? B.CreateSub(L, R, Name)
-                                                  : B.CreateMul(L, R, Name);
+      // A proven result gets nsw (optimization3 item 4): LLVM may then use
+      // it. An unchecked one wraps, as Pascal's unchecked arithmetic does.
+      llvm::Value *Result =
+          Op == BinaryOp::Add   ? B.CreateAdd(L, R, Name, false, Safe)
+          : Op == BinaryOp::Sub ? B.CreateSub(L, R, Name, false, Safe)
+                                : B.CreateMul(L, R, Name, false, Safe);
       if (Safe)
         noteRange(Result, ResultRange);
       return Result;
@@ -5059,11 +5249,17 @@ public:
       if (auto *V = llvm::dyn_cast<VarDecl>(D);
           V && V->isOwned() && !V->isInline()) // (those: with their sequence)
         Owned.push_back(V);
+    if (!R->isAsync() && !R->isIterator())
+      initRangeLocals(R);
     if (Owned.empty())
       visitStmt(R->getBody()->getBody());
     else
       emitTryFinally([&] { visitStmt(R->getBody()->getBody()); },
                      [&](llvm::Value *State) { emitFreeOwned(Owned, State); });
+    for (VarDecl *V : RangeLocals)
+      VarRanges.erase(V);
+    RangeLocals.clear();
+    LoopRanges.clear();
     B.CreateBr(ExitBlock);
     if (BeforeBody) {
       llvm::DebugLoc Loc = B.getCurrentDebugLocation();
@@ -7497,7 +7693,25 @@ public:
   void visitStmt(Stmt *S) {
     setDebugLoc(S->getBeginLoc());
     size_t Mark = LiveTemps.size(), StringMark = StringTemps.size();
+    // The ranges of RangeLocals (optimization3 item 4) hold from store to
+    // store in straight-line code. A statement with other control flow
+    // forgets those of the variables it writes when it ends, since they
+    // depend on the path taken; and when it starts, if code in it may run
+    // again or be reached from the middle of it (a loop, a try statement).
+    // A for loop does its own (visitForStmt).
+    VarSet Written;
+    bool Track = !RangeLocals.empty() && !llvm::isa<AssignStmt>(S) &&
+                 !llvm::isa<CompoundStmt>(S) && !llvm::isa<ProcCallStmt>(S) &&
+                 !llvm::isa<EmptyStmt>(S) && !llvm::isa<ForStmt>(S);
+    if (Track) {
+      Written = rangeLocalsWrittenBy(S);
+      if (!llvm::isa<IfStmt>(S) && !llvm::isa<CaseStmt>(S) &&
+          !llvm::isa<WithStmt>(S))
+        forgetRanges(Written);
+    }
     StmtVisitor<CodeGenModule>::visitStmt(S);
+    if (Track)
+      forgetRanges(Written);
     releaseTemps(Mark); // the results held by its expressions
     releaseStringTemps(StringMark);
   }
@@ -7669,6 +7883,15 @@ public:
   void visitAssignStmt(AssignStmt *S) {
     Expr *Target = S->getTarget(), *Value = S->getValue();
     Type *TT = Target->getType();
+    // A variable of RangeLocals: the stored value's range from now on
+    // (noted below), else none.
+    VarDecl *RangeVar = PinAnalysis::plainAssignTarget(Target);
+    if (RangeVar && !RangeLocals.count(RangeVar))
+      RangeVar = nullptr;
+    auto ForgetRange = llvm::make_scope_exit([&] {
+      if (RangeVar)
+        setVarRange(RangeVar, {});
+    });
     if (PropertyDecl *P = assignedProperty(Target)) {
       emitPropertyWrite(P, Target, Value);
       return;
@@ -7762,6 +7985,10 @@ public:
       return;
     }
     storeValue(emitAddress(Target), V, TT);
+    if (RangeVar) {
+      setVarRange(RangeVar, rangeOfValue(V));
+      RangeVar = nullptr;
+    }
   }
 
   /// Is E an owned variable (`x: TFoo owned`)?
@@ -8263,6 +8490,27 @@ public:
     bool Signed = isSignedOrdinal(VarTy);
     bool Down = S->isDownto();
 
+    // Variables of RangeLocals the loop writes: their ranges are forgotten
+    // in it and after it, except for accumulators (x := x + c), which stay
+    // within their start value plus the most the loop can add.
+    struct Accumulator {
+      VarDecl *V;
+      ValueRange Start;
+      int64_t DLo, DHi;
+    };
+    llvm::SmallVector<Accumulator, 2> Accs;
+    VarSet Written;
+    if (!RangeLocals.empty()) {
+      Written = rangeLocalsWrittenBy(S);
+      for (VarDecl *A : Written) {
+        auto It = VarRanges.find(A);
+        int64_t DLo = 0, DHi = 0;
+        if (It != VarRanges.end() &&
+            accumulatorSteps(S->getBody(), A, DLo, DHi))
+          Accs.push_back({A, It->second, DLo, DHi});
+      }
+    }
+
     llvm::Value *Start = visitExpr(S->getInit());
     llvm::Value *Final = visitExpr(S->getFinal());
     // The bounds may have other integer types than the variable: compare
@@ -8309,6 +8557,45 @@ public:
                       std::max(StartRange.Hi, FinalRange.Hi)};
     else
       VarRanges.erase(V);
+    // At most Trips iterations: an accumulator stays within its start
+    // range plus Trips times the most one iteration adds (or subtracts),
+    // at every point of the loop and after it. Only a bound that fits its
+    // type counts (so that no step can have wrapped), computed in int64
+    // (an overflow: no bound).
+    llvm::SmallVector<std::pair<VarDecl *, ValueRange>, 2> Bounds;
+    llvm::SmallVector<std::pair<VarDecl *, std::optional<ValueRange>>, 2> OldLoop;
+    if (!Accs.empty() && isSignedOrdinal(VarTy) && StartRange.Known &&
+        FinalRange.Known) {
+      int64_t Trips;
+      bool Overflow =
+          Down ? __builtin_sub_overflow(StartRange.Hi, FinalRange.Lo, &Trips)
+               : __builtin_sub_overflow(FinalRange.Hi, StartRange.Lo, &Trips);
+      Overflow = Overflow || __builtin_add_overflow(Trips, 1, &Trips);
+      if (!Overflow && Trips < 0)
+        Trips = 0;
+      for (const Accumulator &A : Accs) {
+        ValueRange TypeRange;
+        int64_t Lo, Hi;
+        if (Overflow ||
+            !signedRange(regType(A.V->getType())->getIntegerBitWidth(), TypeRange) ||
+            __builtin_mul_overflow(Trips, A.DLo, &Lo) ||
+            __builtin_add_overflow(A.Start.Lo, Lo, &Lo) ||
+            __builtin_mul_overflow(Trips, A.DHi, &Hi) ||
+            __builtin_add_overflow(A.Start.Hi, Hi, &Hi) ||
+            Lo < TypeRange.Lo || Hi > TypeRange.Hi)
+          continue;
+        Bounds.push_back({A.V, {true, Lo, Hi}});
+      }
+    }
+    forgetRanges(Written);
+    for (auto &[A, R] : Bounds) {
+      auto It = LoopRanges.find(A);
+      OldLoop.push_back({A, It != LoopRanges.end()
+                                ? std::optional<ValueRange>(It->second)
+                                : std::nullopt});
+      LoopRanges[A] = R;
+      VarRanges[A] = R;
+    }
     Loops.push_back({LatchBB, EndBB, Cleanups.size()});
     visitStmt(S->getBody());
     Loops.pop_back();
@@ -8316,6 +8603,15 @@ public:
       VarRanges[V] = Saved;
     else
       VarRanges.erase(V);
+    for (auto &[A, Old] : OldLoop) {
+      if (Old)
+        LoopRanges[A] = *Old;
+      else
+        LoopRanges.erase(A);
+    }
+    forgetRanges(Written);
+    for (auto &[A, R] : Bounds)
+      VarRanges[A] = R;
     B.CreateBr(LatchBB);
     B.SetInsertPoint(LatchBB);
     B.CreateCondBr(B.CreateICmpEQ(I, Final, "for.done"), EndBB, IncBB);
@@ -9200,7 +9496,12 @@ public:
     }
     switch (Op) {
     // Turbo/FPC bitwise operators (booleans: xor only).
-    case BinaryOp::And: return B.CreateAnd(L, R, "and");
+    case BinaryOp::And: {
+      llvm::Value *V = B.CreateAnd(L, R, "and");
+      if (Signed)
+        noteRange(V, andRange(rangeOfValue(L), rangeOfValue(R)));
+      return V;
+    }
     case BinaryOp::Or:  return B.CreateOr(L, R, "or");
     case BinaryOp::Xor: return B.CreateXor(L, R, "xor");
     case BinaryOp::Shl: {
@@ -9216,11 +9517,66 @@ public:
                               Op == BinaryOp::Add   ? "add"
                               : Op == BinaryOp::Sub ? "sub"
                                                     : "mul");
-    case BinaryOp::IntDiv: return emitDiv(L, R, Signed, Loc);
-    case BinaryOp::Mod:    return emitMod(L, R, Signed, Loc);
+    case BinaryOp::IntDiv: {
+      llvm::Value *V = emitDiv(L, R, Signed, Loc);
+      if (Signed)
+        noteRange(V, divRange(L, R));
+      return V;
+    }
+    case BinaryOp::Mod: {
+      llvm::Value *V = emitMod(L, R, Signed, Loc);
+      if (Signed)
+        noteRange(V, modRange(L, R));
+      return V;
+    }
     default:
       llvm_unreachable("operator rejected by Sema");
     }
+  }
+
+  /// The range of the signed x and y: with a non-negative operand, 0 up to
+  /// it (the other operand's bits can only clear its bits).
+  static ValueRange andRange(ValueRange X, ValueRange Y) {
+    if (X.Known && X.Lo >= 0 && Y.Known && Y.Lo >= 0)
+      return {true, 0, std::min(X.Hi, Y.Hi)};
+    if (X.Known && X.Lo >= 0)
+      return {true, 0, X.Hi};
+    if (Y.Known && Y.Lo >= 0)
+      return {true, 0, Y.Hi};
+    return {};
+  }
+
+  /// The range of the signed l div c, for a constant c > 0: l's range (or
+  /// its type's) divided by c; division truncates, which is monotonic.
+  ValueRange divRange(llvm::Value *L, llvm::Value *R) const {
+    auto *C = llvm::dyn_cast<llvm::ConstantInt>(R);
+    if (!C || C->getBitWidth() > 64 || C->getSExtValue() <= 0)
+      return {};
+    int64_t D = C->getSExtValue();
+    ValueRange X = rangeOfValue(L);
+    if (!X.Known && !signedRange(L->getType()->getIntegerBitWidth(), X))
+      return {};
+    return {true, X.Lo / D, X.Hi / D};
+  }
+
+  /// The range of the signed l mod c, for a constant c > 0: 0 .. c-1 for a
+  /// non-negative l (and in ISO mode, where the result is never negative),
+  /// else -(c-1) .. c-1 (Turbo/FPC: the sign of l). Within l's own range
+  /// when that is smaller.
+  ValueRange modRange(llvm::Value *L, llvm::Value *R) const {
+    auto *C = llvm::dyn_cast<llvm::ConstantInt>(R);
+    if (!C || C->getBitWidth() > 64 || C->getSExtValue() <= 0)
+      return {};
+    int64_t M = C->getSExtValue() - 1;
+    ValueRange X = rangeOfValue(L);
+    if (LangOpts.Mode == LangMode::ISO)
+      return {true, 0, M};
+    if (X.Known && X.Lo >= 0)
+      return {true, 0, std::min(M, X.Hi)};
+    if (X.Known)
+      return {true, std::max(-M, std::min(X.Lo, int64_t(0))),
+              std::min(M, std::max(X.Hi, int64_t(0)))};
+    return {true, -M, M};
   }
 
   llvm::Value *visitCallExpr(CallExpr *E) {

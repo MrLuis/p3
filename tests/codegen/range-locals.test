@@ -1,0 +1,48 @@
+; Ranges of local variables, from store to store and for a for loop's
+; accumulators, and of subtraction, mod, div and `and`: proven arithmetic
+; has no overflow check and is nsw; a variable that may have changed in
+; another way is still checked (optimization3.md item 4).
+; RUN: %p3 --mode=objfpc --emit-llvm %S/Inputs/range-locals.pas -o - | FileCheck %s
+; RUN: %p3 --mode=tp --emit-llvm %S/Inputs/range-labels.pas -o - | FileCheck %s --check-prefix=LABELS
+; RUN: %p3 --mode=objfpc %S/Inputs/range-locals.pas -o %t && %t | FileCheck %s --check-prefix=OUT
+
+; count: 0 .. 1000 in and after the loop.
+; CHECK-LABEL: define internal i32 @pas.counter(
+; CHECK-NOT: with.overflow
+; CHECK: add nsw i32 %{{.*}}, 1
+; CHECK-NOT: with.overflow
+
+; x: 10 - 2*100 .. 10 + 3*100.
+; CHECK-LABEL: define internal i32 @pas.twosteps(
+; CHECK-NOT: with.overflow
+; CHECK: mul nsw i32 %{{.*}}, 1000
+; CHECK-NOT: with.overflow
+
+; CHECK-LABEL: define internal i32 @pas.stored(
+; CHECK-NOT: with.overflow
+; CHECK: sub nsw
+; CHECK-NOT: with.overflow
+
+; CHECK-LABEL: define internal i32 @pas.merged(
+; CHECK: llvm.sadd.with.overflow
+; CHECK-LABEL: define internal i32 @pas.inwhile(
+; CHECK: llvm.smul.with.overflow
+; CHECK: llvm.sadd.with.overflow
+; CHECK-LABEL: define internal i32 @pas.nested(
+; CHECK: llvm.sadd.with.overflow
+; CHECK-LABEL: define internal i32 @pas.notconst(
+; CHECK: llvm.sadd.with.overflow
+; CHECK-LABEL: define internal i32 @pas.byvar(
+; CHECK: llvm.sadd.with.overflow
+; CHECK-LABEL: define internal i32 @pas.addressed(
+; CHECK: llvm.sadd.with.overflow
+; CHECK-LABEL: define internal i32 @pas.intry(
+; CHECK: llvm.sadd.with.overflow
+
+; LABELS-LABEL: define internal i32 @pas.labelled(
+; LABELS: llvm.sadd.with.overflow
+; LABELS-LABEL: define internal i32 @pas.straight(
+; LABELS-NOT: with.overflow
+; LABELS: declare
+
+; OUT: 101 55000 224967 5 9 6 21 8 8 8

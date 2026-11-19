@@ -535,6 +535,12 @@ type
       its body is emitted }
     cgRangeKnown: boolean;
     cgRangeLo, cgRangeHi: int64;
+    { optimization3 item 4: a local variable whose range is followed from
+      store to store (cgRangeLocal), and inside a for loop the range it
+      keeps throughout it (an accumulator), which a forgotten range falls
+      back to }
+    cgRangeLocal, cgLoopKnown: boolean;
+    cgLoopLo, cgLoopHi: int64;
     { a routine's variable: in its frame record (slot cgSlot), else in
       an alloca (cgLocal, a boxed value); a routine whose frame record
       starts with its static link }

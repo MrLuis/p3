@@ -233,6 +233,8 @@ function irInsertBlock: PIRBlock;
 { Instructions; name '' for an unnamed result. Constant operands fold as
   with IRBuilder's ConstantFolder. }
 function irBin(const op: string; const a, b: TV; const name: string): TV;
+{ add/sub/mul nsw (an operation proven not to overflow) }
+function irBinNsw(const op: string; const a, b: TV; const name: string): TV;
 function irICmp(const pred: string; const a, b: TV; const name: string): TV;
 function irFCmp(const pred: string; const a, b: TV; const name: string): TV;
 function irFNeg(const a: TV; const name: string): TV;
@@ -2151,6 +2153,23 @@ begin
     bufAdd(i^.text, op + ' ' + a.t^.text + ' ' + a.v + ', ' + b.v);
   append(i);
   irBin := irV(a.t, res);
+end;
+
+function irBinNsw(const op: string; const a, b: TV; const name: string): TV;
+var
+  i: PIRInst;
+  res: string;
+  r: TV;
+begin
+  if (a.kind = vkPoison) or (b.kind = vkPoison) then
+    if irIsConst(a) and irIsConst(b) then
+      exit(irPoison(a.t));
+  if isIntConst(a) and isIntConst(b) and foldIntBin(op, a, b, r) then
+    exit(r);
+  i := newInst(res, name, true);
+  bufAdd(i^.text, op + ' nsw ' + a.t^.text + ' ' + a.v + ', ' + b.v);
+  append(i);
+  irBinNsw := irV(a.t, res);
 end;
 
 function icmpHolds(const pred: string; const a, b: TV): boolean;

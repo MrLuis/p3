@@ -134,6 +134,14 @@ var
     set it passes where no writes are collected }
   paCurResult: PDecl;
   paDummy: TPtrList;
+  { optimization3 item 4: the current routine's local variables whose
+    range is followed from store to store (cgRangeLocal), and the pin
+    analysis leaving out the targets of plain x := e (paSkipPlain) }
+  rangeLocals: TPtrList;
+  paSkipPlain: boolean;
+  { the value the last assignment to a scalar stored (see visitAssign) }
+  assignStored: TV;
+  assignStoredSet: boolean;
   { Are temporaries holding managed values pinned when they are made (see
     pinInMemory)? In a routine without try statements they are pinned
     later, if its body turns out to need protection. }
@@ -1367,11 +1375,15 @@ begin
   wideToChar := irSelect(fits, ch, i8c(ord('?')), 'tochar');
 end;
 
+function signedTypeRange(bits: longint; var lo, hi: int64): boolean; forward;
+
 { An ordinal register value of type src as the register type of dst
   (extended by src's signedness, or truncated). No range check. }
 function convertOrdinal(const v: TV; src, dst: PType): TV;
 var
   d: PIRType;
+  r: TV;
+  tyLo, tyHi: int64;
 begin
   d := regType(dst);
   if irSameType(v.t, d) then
@@ -1381,11 +1393,23 @@ begin
   if d^.bits = 1 then
     exit(irICmp('ne', v, irConstInt(v.t, 0), ''));
   if d^.bits < v.t^.bits then
-    convertOrdinal := irCast('trunc', v, d, '')
+    r := irCast('trunc', v, d, '')
   else if isSignedOrdinal(src) then
-    convertOrdinal := irCast('sext', v, d, '')
+    r := irCast('sext', v, d, '')
   else
-    convertOrdinal := irCast('zext', v, d, '');
+    r := irCast('zext', v, d, '');
+  { a known range survives a conversion that keeps the value: a sign
+    extension, or a truncation to a signed type that holds the range
+    (optimization3 item 4) }
+  if v.rKnown and isSignedOrdinal(src) and isSignedOrdinal(dst) and
+     not irIsConst(r) and signedTypeRange(d^.bits, tyLo, tyHi) and
+     (v.rLo >= tyLo) and (v.rHi <= tyHi) then
+  begin
+    r.rKnown := true;
+    r.rLo := v.rLo;
+    r.rHi := v.rHi;
+  end;
+  convertOrdinal := r;
 end;
 
 { An ordinal register value widened to i64 (CreateSExt / CreateZExt). }
@@ -1627,11 +1651,17 @@ begin
 end;
 
 function subOverflows(a, b: int64; var r: int64): boolean;
+var
+  t: int64;
 begin
   subOverflows := false;
   if b > 0 then
   begin
-    if a < low(int64) + b then
+    { low(int64) + b, in steps: Free Pascal 3.2 (-Co) computes the sum as
+      b - $8000000000000000, which overflows }
+    t := high(int64) - b;
+    t := -t - 1;
+    if a < t then
       exit(true);
   end
   else if b < 0 then
@@ -1640,12 +1670,30 @@ begin
   r := a - b;
 end;
 
-function abs64(x: int64): int64;
+{ a * b in r, unless it overflows int64 (the tests of CERT INT32-C; div
+  truncates, as in C). }
+function mulOverflows(a, b: int64; var r: int64): boolean;
 begin
-  if x < 0 then
-    abs64 := -x
-  else
-    abs64 := x;
+  mulOverflows := true;
+  if a > 0 then
+  begin
+    if b > 0 then
+    begin
+      if a > high(int64) div b then
+        exit;
+    end
+    else if b < low(int64) div a then
+      exit;
+  end
+  else if b > 0 then
+  begin
+    if a < low(int64) div b then
+      exit;
+  end
+  else if (a <> 0) and (b < high(int64) div a) then
+    exit;
+  r := a * b;
+  mulOverflows := false;
 end;
 
 { The range of l op r in lo..hi, when it fits int64. }
@@ -1667,7 +1715,6 @@ begin
   end;
   if op = 'sub' then
   begin
-    exit;
     if subOverflows(aLo, bHi, lo) or subOverflows(aHi, bLo, hi) then
       exit;
     combineRange := true;
@@ -1675,16 +1722,9 @@ begin
   end;
   if op = 'mul' then
   begin
-    if (aLo = low(int64)) or (aHi = low(int64)) or
-       (bLo = low(int64)) or (bHi = low(int64)) then
+    if mulOverflows(aLo, bLo, p1) or mulOverflows(aLo, bHi, p2) or
+       mulOverflows(aHi, bLo, p3) or mulOverflows(aHi, bHi, p4) then
       exit;
-    if (abs64(aLo) > 3037000499) or (abs64(aHi) > 3037000499) or
-       (abs64(bLo) > 3037000499) or (abs64(bHi) > 3037000499) then
-      exit;
-    p1 := aLo * bLo;
-    p2 := aLo * bHi;
-    p3 := aHi * bLo;
-    p4 := aHi * bHi;
     lo := p1;
     if p2 < lo then lo := p2;
     if p3 < lo then lo := p3;
@@ -1715,7 +1755,12 @@ begin
           (lo >= tyLo) and (hi <= tyHi);
   if (not overflowChecks(loc)) or safe then
   begin
-    rv := irBin(op, l, r, name);
+    { a proven result gets nsw (optimization3 item 4); an unchecked one
+      wraps, as Pascal's unchecked arithmetic does }
+    if safe then
+      rv := irBinNsw(op, l, r, name)
+    else
+      rv := irBin(op, l, r, name);
     if safe then
     begin
       rv.rKnown := true;
@@ -5424,6 +5469,85 @@ begin
   signedMin := irConstLimbs(t, l);
 end;
 
+{ v's range, lo..hi, unless v is a constant (whose range is exact). }
+procedure noteRange(var v: TV; lo, hi: int64);
+begin
+  if irIsConst(v) then
+    exit;
+  v.rKnown := true;
+  v.rLo := lo;
+  v.rHi := hi;
+end;
+
+{ The range of the signed x and y: with a non-negative operand, 0 up to it
+  (optimization3 item 4). }
+procedure andRange(var v: TV; const x, y: TV);
+begin
+  if x.rKnown and (x.rLo >= 0) and y.rKnown and (y.rLo >= 0) then
+  begin
+    if x.rHi < y.rHi then
+      noteRange(v, 0, x.rHi)
+    else
+      noteRange(v, 0, y.rHi);
+  end
+  else if x.rKnown and (x.rLo >= 0) then
+    noteRange(v, 0, x.rHi)
+  else if y.rKnown and (y.rLo >= 0) then
+    noteRange(v, 0, y.rHi);
+end;
+
+{ The range of the signed l div c, for a constant c > 0: l's range (or its
+  type's) divided by c; division truncates, which is monotonic. }
+procedure divRange(var v: TV; const l, r: TV);
+var
+  c, lo, hi: int64;
+begin
+  if (r.t^.bits > 64) or not irIsConstInt(r, c) or (c <= 0) then
+    exit;
+  if l.rKnown then
+  begin
+    lo := l.rLo;
+    hi := l.rHi;
+  end
+  else if not signedTypeRange(l.t^.bits, lo, hi) then
+    exit;
+  noteRange(v, lo div c, hi div c);
+end;
+
+{ The range of the signed l mod c, for a constant c > 0: 0 .. c-1 for a
+  non-negative l (and in ISO mode, where the result is never negative),
+  else -(c-1) .. c-1 (Turbo/FPC: the sign of l). Within l's own range when
+  that is smaller. }
+procedure modRange(var v: TV; const l, r: TV);
+var
+  c, m, lo, hi: int64;
+begin
+  if (r.t^.bits > 64) or not irIsConstInt(r, c) or (c <= 0) then
+    exit;
+  m := c - 1;
+  if mode = lmISO then
+    noteRange(v, 0, m)
+  else if l.rKnown and (l.rLo >= 0) then
+  begin
+    if l.rHi < m then
+      noteRange(v, 0, l.rHi)
+    else
+      noteRange(v, 0, m);
+  end
+  else if l.rKnown then
+  begin
+    lo := l.rLo;
+    if lo > 0 then lo := 0;
+    if lo < -m then lo := -m;
+    hi := l.rHi;
+    if hi < 0 then hi := 0;
+    if hi > m then hi := m;
+    noteRange(v, lo, hi);
+  end
+  else
+    noteRange(v, -m, m);
+end;
+
 function emitDiv(const l, r: TV; signed: boolean; loc: TLoc): TV;
 var
   c: int64;
@@ -6071,7 +6195,7 @@ var
   signed: boolean;
   loc: TLoc;
   args: TPtrList;
-  v: TV;
+  v, res: TV;
 begin
   op := e^.bop;
   if e^.opDecl <> nil then { a record's class operator }
@@ -6181,7 +6305,13 @@ begin
   end;
   case op of
     { Turbo/FPC bitwise operators (booleans: xor only) }
-    boAnd: visitBinary := irBin('and', l, r, 'and');
+    boAnd:
+      begin
+        res := irBin('and', l, r, 'and');
+        if signed then
+          andRange(res, l, r);
+        visitBinary := res;
+      end;
     boOr: visitBinary := irBin('or', l, r, 'or');
     boXor: visitBinary := irBin('xor', l, r, 'xor');
     boShl:
@@ -6198,8 +6328,20 @@ begin
     boAdd: visitBinary := emitCheckedArith('add', signed, l, r, loc, 'add');
     boSub: visitBinary := emitCheckedArith('sub', signed, l, r, loc, 'sub');
     boMul: visitBinary := emitCheckedArith('mul', signed, l, r, loc, 'mul');
-    boIntDiv: visitBinary := emitDiv(l, r, signed, loc);
-    boMod: visitBinary := emitMod(l, r, signed, loc);
+    boIntDiv:
+      begin
+        res := emitDiv(l, r, signed, loc);
+        if signed then
+          divRange(res, l, r);
+        visitBinary := res;
+      end;
+    boMod:
+      begin
+        res := emitMod(l, r, signed, loc);
+        if signed then
+          modRange(res, l, r);
+        visitBinary := res;
+      end;
   else
     visitBinary := l;
   end;

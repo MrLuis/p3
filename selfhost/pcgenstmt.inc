@@ -704,7 +704,17 @@ end;
 
 function emitResultInPlace(target, value: PNode; tt: PType): boolean; forward;
 
-procedure visitAssign(s: PNode);
+{ Ranges of local variables (optimization3 item 4); after the pin
+  analysis. }
+function plainAssignTarget(e: PNode): PDecl; forward;
+procedure setVarRange(v: PDecl; known: boolean; lo, hi: int64); forward;
+procedure rangeLocalsWrittenBy(s: PNode; var outl: TPtrList); forward;
+procedure forgetRanges(const l: TPtrList); forward;
+function accumulatorSteps(s: PNode; v: PDecl; var dLo, dHi: int64): boolean; forward;
+procedure initRangeLocals(r: PDecl); forward;
+procedure endRangeLocals; forward;
+
+procedure visitAssignInner(s: PNode);
 var
   more: PNode;
   target, value: PNode;
@@ -831,6 +841,31 @@ begin
     exit;
   end;
   storeValue(emitAddress(target), v, tt);
+  assignStored := v;
+  assignStoredSet := true;
+end;
+
+{ target := value. A variable of rangeLocals gets the stored value's
+  range from now on (optimization3 item 4), else none. }
+procedure visitAssign(s: PNode);
+var
+  rangeVar: PDecl;
+  stored: boolean;
+begin
+  rangeVar := plainAssignTarget(s^.target);
+  if (rangeVar <> nil) and not rangeVar^.cgRangeLocal then
+    rangeVar := nil;
+  assignStoredSet := false;
+  visitAssignInner(s);
+  stored := assignStoredSet;
+  assignStoredSet := false;
+  if rangeVar <> nil then
+  begin
+    if stored then
+      setVarRange(rangeVar, assignStored.rKnown, assignStored.rLo, assignStored.rHi)
+    else
+      setVarRange(rangeVar, false, 0, 0);
+  end;
 end;
 
 { exit(value): sets the result first }
@@ -1301,9 +1336,20 @@ end;
     if i = final goto end                  (test before stepping: no
   inc:                                      overflow at maxint)
     next = i + 1 (- 1); goto loop }
+type
+  { a for loop's accumulator (optimization3 item 4): x := x + c in its
+    body, from a start range; its bound, and the loop bound it had }
+  PAccumulator = ^TAccumulator;
+  TAccumulator = record
+    v: PDecl;
+    startLo, startHi, dLo, dHi, lo, hi: int64;
+    bounded, oldKnown: boolean;
+    oldLo, oldHi: int64;
+  end;
+
 procedure visitFor(s: PNode);
 var
-  v: PDecl;
+  v, a: PDecl;
   varTy: PType;
   down: boolean;
   start, final, start64, final64, enter, i, done, next: TV;
@@ -1311,10 +1357,42 @@ var
   phi: PIRInst;
   oldKnown: boolean;
   oldLo, oldHi: int64;
+  written, accs: TPtrList;
+  acc: PAccumulator;
+  k: longint;
+  dLo, dHi, trips, tyLo, tyHi, x: int64;
+  overflow, fits: boolean;
 begin
   v := s^.forVar^.refDecl;
   varTy := v^.varType;
   down := s^.isDownto;
+  { Variables of rangeLocals the loop writes: their ranges are forgotten in
+    it and after it, except for accumulators (x := x + c), which stay
+    within their start value plus the most the loop can add. }
+  listInit(written);
+  listInit(accs);
+  if rangeLocals.count > 0 then
+  begin
+    listFree(written);
+    rangeLocalsWrittenBy(s, written);
+    for k := 0 to written.count - 1 do
+    begin
+      a := PDecl(listGet(written, k));
+      dLo := 0;
+      dHi := 0;
+      if a^.cgRangeKnown and accumulatorSteps(s^.forBody, a, dLo, dHi) then
+      begin
+        acc := PAccumulator(arenaAlloc(sizeof(TAccumulator)));
+        acc^.v := a;
+        acc^.startLo := a^.cgRangeLo;
+        acc^.startHi := a^.cgRangeHi;
+        acc^.dLo := dLo;
+        acc^.dHi := dHi;
+        acc^.bounded := false;
+        listAdd(accs, acc);
+      end;
+    end;
+  end;
   start := visitExpr(s^.forInit);
   final := visitExpr(s^.forFinal);
   { the bounds may have other integer types than the variable: compare
@@ -1373,12 +1451,78 @@ begin
   end
   else
     v^.cgRangeKnown := false;
+  { At most trips iterations: an accumulator stays within its start range
+    plus trips times the most one iteration adds (or subtracts), at every
+    point of the loop and after it. Only a bound that fits its type counts
+    (so that no step can have wrapped), computed in int64 (an overflow: no
+    bound). }
+  if (accs.count > 0) and isSignedOrdinal(varTy) and start.rKnown and
+     final.rKnown then
+  begin
+    if down then
+      overflow := subOverflows(start.rHi, final.rLo, trips)
+    else
+      overflow := subOverflows(final.rHi, start.rLo, trips);
+    if not overflow then
+      overflow := addOverflows(trips, 1, trips);
+    if not overflow and (trips < 0) then
+      trips := 0;
+    for k := 0 to accs.count - 1 do
+    begin
+      acc := PAccumulator(listGet(accs, k));
+      fits := not overflow and
+              signedTypeRange(regType(acc^.v^.varType)^.bits, tyLo, tyHi);
+      if fits then
+        fits := not mulOverflows(trips, acc^.dLo, x) and
+                not addOverflows(acc^.startLo, x, acc^.lo);
+      if fits then
+        fits := not mulOverflows(trips, acc^.dHi, x) and
+                not addOverflows(acc^.startHi, x, acc^.hi);
+      acc^.bounded := fits and (acc^.lo >= tyLo) and (acc^.hi <= tyHi);
+    end;
+  end;
+  forgetRanges(written);
+  for k := 0 to accs.count - 1 do
+  begin
+    acc := PAccumulator(listGet(accs, k));
+    if acc^.bounded then
+    begin
+      a := acc^.v;
+      acc^.oldKnown := a^.cgLoopKnown;
+      acc^.oldLo := a^.cgLoopLo;
+      acc^.oldHi := a^.cgLoopHi;
+      a^.cgLoopKnown := true;
+      a^.cgLoopLo := acc^.lo;
+      a^.cgLoopHi := acc^.hi;
+      setVarRange(a, true, acc^.lo, acc^.hi);
+    end;
+  end;
   pushLoop(latchB, endB);
   visitStmt(s^.forBody);
   popLoop;
   v^.cgRangeKnown := oldKnown;
   v^.cgRangeLo := oldLo;
   v^.cgRangeHi := oldHi;
+  for k := 0 to accs.count - 1 do
+  begin
+    acc := PAccumulator(listGet(accs, k));
+    if acc^.bounded then
+    begin
+      a := acc^.v;
+      a^.cgLoopKnown := acc^.oldKnown;
+      a^.cgLoopLo := acc^.oldLo;
+      a^.cgLoopHi := acc^.oldHi;
+    end;
+  end;
+  forgetRanges(written);
+  for k := 0 to accs.count - 1 do
+  begin
+    acc := PAccumulator(listGet(accs, k));
+    if acc^.bounded then
+      setVarRange(acc^.v, true, acc^.lo, acc^.hi);
+  end;
+  listFree(written);
+  listFree(accs);
   irBr(latchB);
   irSetInsertPoint(latchB);
   done := irICmp('eq', i, final, 'for.done');
@@ -2191,11 +2335,27 @@ var
   mark, stringMark: longint;
   ignored: TV;
   b: PIRBlock;
+  written: TPtrList;
+  track: boolean;
 begin
   { statements carry their source position into the debug information }
   setDebugLoc(s^.b);
   mark := liveTemps.count;
   stringMark := stringTemps.count;
+  { The ranges of rangeLocals (optimization3 item 4) hold from store to
+    store in straight-line code. A statement with other control flow
+    forgets those of the variables it writes when it ends, since they
+    depend on the path taken; and when it starts, if code in it may run
+    again or be reached from the middle of it (a loop, a try statement). A
+    for loop does its own (visitFor). }
+  track := (rangeLocals.count > 0) and
+           not (s^.kind in [nkAssign, nkCompound, nkProcCall, nkEmpty, nkFor]);
+  if track then
+  begin
+    rangeLocalsWrittenBy(s, written);
+    if not (s^.kind in [nkIf, nkCase, nkWith]) then
+      forgetRanges(written);
+  end;
   case s^.kind of
     nkEmpty: ;
     nkCompound: visitStmtList(s^.stmts);
@@ -2231,6 +2391,11 @@ begin
     nkYield: visitYieldStmt(s);
   else
     ;
+  end;
+  if track then
+  begin
+    forgetRanges(written);
+    listFree(written);
   end;
   releaseTemps(mark); { the results held by its expressions }
   releaseStringTemps(stringMark);
@@ -3297,7 +3462,8 @@ begin
       paExpr(s^.calleeExpr, used, written, collectUsed, collectWritten);
     nkAssign:
       begin
-        if collectWritten then
+        if collectWritten and
+           not (paSkipPlain and (plainAssignTarget(s^.target) <> nil)) then
           paAddTarget(s^.target, written);
         if collectUsed then
         begin
@@ -3434,6 +3600,257 @@ begin
     nkYield:
       paExpr(s^.yieldValue, used, written, collectUsed, collectWritten);
   end;
+end;
+
+{ --- Ranges of local variables (optimization3 item 4) ------------------ }
+
+{ The variable of a plain x := e: a bare variable name, not reached
+  through with and not an absolute overlay. }
+function plainAssignTarget(e: PNode): PDecl;
+var
+  d: PDecl;
+begin
+  plainAssignTarget := nil;
+  if (e = nil) or (e^.kind <> nkNameRef) or (e^.refWith <> nil) then
+    exit;
+  d := e^.refDecl;
+  if (d <> nil) and (d^.kind = dkVar) and (d^.absRoot = nil) then
+    plainAssignTarget := d;
+end;
+
+{ Sets (or, not known, forgets) the range of a variable of rangeLocals.
+  Inside a loop that bounds it, a forgotten range is that bound. }
+procedure setVarRange(v: PDecl; known: boolean; lo, hi: int64);
+begin
+  if not known and v^.cgLoopKnown then
+  begin
+    known := true;
+    lo := v^.cgLoopLo;
+    hi := v^.cgLoopHi;
+  end;
+  v^.cgRangeKnown := known;
+  if known then
+  begin
+    v^.cgRangeLo := lo;
+    v^.cgRangeHi := hi;
+  end;
+end;
+
+{ The variables of rangeLocals that s may write. }
+procedure rangeLocalsWrittenBy(s: PNode; var outl: TPtrList);
+var
+  used, all: TPtrList;
+  i: longint;
+  v: PDecl;
+begin
+  listInit(used);
+  listInit(all);
+  paStmt(s, used, all, false, true);
+  listInit(outl);
+  for i := 0 to all.count - 1 do
+  begin
+    v := PDecl(listGet(all, i));
+    if v^.cgRangeLocal then
+      listAdd(outl, v);
+  end;
+  listFree(used);
+  listFree(all);
+end;
+
+procedure forgetRanges(const l: TPtrList);
+var
+  i: longint;
+begin
+  for i := 0 to l.count - 1 do
+    setVarRange(PDecl(listGet(l, i)), false, 0, 0);
+end;
+
+{ An integer constant written as a literal, a named constant or one of
+  those negated: its value. }
+function constIntOf(e: PNode; var value: int64): boolean;
+var
+  x: int64;
+  d: PDecl;
+begin
+  constIntOf := false;
+  if e = nil then
+    exit;
+  case e^.kind of
+    nkParen:
+      constIntOf := constIntOf(e^.inner, value);
+    nkIntegerLit:
+      { (as an unsigned 64-bit value: above high(int64), none) }
+      if e^.intValue >= 0 then
+      begin
+        value := e^.intValue;
+        constIntOf := true;
+      end;
+    nkUnary:
+      if (e^.uop <> uoNot) and constIntOf(e^.operand, x) and
+         (x <> low(int64)) then
+      begin
+        if e^.uop = uoMinus then
+          value := -x
+        else
+          value := x;
+        constIntOf := true;
+      end;
+    nkNameRef:
+      begin
+        d := e^.refDecl;
+        if (d <> nil) and (d^.kind = dkConst) and
+           (d^.constValue.kind = ckOrdinal) and (d^.constType <> nil) and
+           isIntegerLike(d^.constType) then
+        begin
+          value := d^.constValue.intVal;
+          constIntOf := true;
+        end;
+      end;
+  end;
+end;
+
+{ v := v + c, v := c + v or v := v - c, for a constant c: its step. }
+function accumulatorStep(s: PNode; v: PDecl; var step: int64): boolean;
+var
+  e: PNode;
+begin
+  accumulatorStep := false;
+  e := s^.value;
+  if (e = nil) or (e^.kind <> nkBinary) then
+    exit;
+  if e^.bop = boAdd then
+  begin
+    if (plainAssignTarget(e^.lhs) = v) and constIntOf(e^.rhs, step) then
+      exit(true);
+    accumulatorStep := (plainAssignTarget(e^.rhs) = v) and constIntOf(e^.lhs, step);
+  end
+  else if (e^.bop = boSub) and (plainAssignTarget(e^.lhs) = v) and
+          constIntOf(e^.rhs, step) and (step <> low(int64)) then
+  begin
+    step := -step;
+    accumulatorStep := true;
+  end;
+end;
+
+{ Does every write of v in s (a for loop's body) add a constant to it, each
+  at most once per iteration (not inside an inner loop)? Adds the possible
+  change per iteration to dLo..dHi; false if that overflows int64. }
+function accumulatorSteps(s: PNode; v: PDecl; var dLo, dHi: int64): boolean;
+var
+  i: longint;
+  step, r: int64;
+  arm: PCaseArm;
+  used, w: TPtrList;
+begin
+  accumulatorSteps := true;
+  if s = nil then
+    exit;
+  case s^.kind of
+    nkCompound:
+      begin
+        for i := 0 to s^.stmts.count - 1 do
+          if not accumulatorSteps(PNode(listGet(s^.stmts, i)), v, dLo, dHi) then
+            exit(false);
+      end;
+    nkAssign:
+      begin
+        if plainAssignTarget(s^.target) <> v then
+          exit; { (v is only written by assignments to it) }
+        if not accumulatorStep(s, v, step) then
+          exit(false);
+        if step < 0 then
+        begin
+          if addOverflows(dLo, step, r) then
+            exit(false);
+          dLo := r;
+        end
+        else
+        begin
+          if addOverflows(dHi, step, r) then
+            exit(false);
+          dHi := r;
+        end;
+      end;
+    nkIf:
+      accumulatorSteps := accumulatorSteps(s^.thenStmt, v, dLo, dHi) and
+                          accumulatorSteps(s^.elseStmt, v, dLo, dHi);
+    nkCase:
+      begin
+        for i := 0 to s^.arms.count - 1 do
+        begin
+          arm := PCaseArm(listGet(s^.arms, i));
+          if not accumulatorSteps(arm^.body, v, dLo, dHi) then
+            exit(false);
+        end;
+        for i := 0 to s^.elseBody.count - 1 do
+          if not accumulatorSteps(PNode(listGet(s^.elseBody, i)), v, dLo, dHi) then
+            exit(false);
+      end;
+  else
+    begin
+      { anything else (an inner loop, a try statement...): v not written }
+      listInit(used);
+      listInit(w);
+      paStmt(s, used, w, false, true);
+      accumulatorSteps := not listHasPtr(w, v);
+      listFree(used);
+      listFree(w);
+    end;
+  end;
+end;
+
+{ Chooses rangeLocals for r, each starting at 0 (the value every scalar
+  local starts with, see emitZeroInit). None in a routine with a label (a
+  goto may arrive with any value). }
+procedure initRangeLocals(r: PDecl);
+var
+  i: longint;
+  v: PDecl;
+  used, other: TPtrList;
+begin
+  listClear(rangeLocals);
+  for i := 0 to r^.body^.decls.count - 1 do
+    if PDecl(listGet(r^.body^.decls, i))^.kind = dkLabel then
+      exit;
+  listInit(used);
+  listInit(other);
+  paSkipPlain := true;
+  paStmt(r^.body^.body, used, other, false, true);
+  paSkipPlain := false;
+  for i := 0 to r^.body^.decls.count - 1 do
+  begin
+    v := PDecl(listGet(r^.body^.decls, i));
+    if (v^.kind <> dkVar) or (v^.varKind <> vkVariable) or
+       ((v^.init <> nil) and not v^.isInitVar) or v^.isInitVar or
+       v^.isInlineVar or (v^.absTarget <> nil) or v^.captured or
+       v^.isOwned or listHasPtr(other, v) or (v^.varType = nil) then
+      continue;
+    if not isOrdinal(v^.varType) or not isSignedOrdinal(v^.varType) then
+      continue;
+    v^.cgRangeLocal := true;
+    v^.cgRangeKnown := true;
+    v^.cgRangeLo := 0;
+    v^.cgRangeHi := 0;
+    listAdd(rangeLocals, v);
+  end;
+  listFree(used);
+  listFree(other);
+end;
+
+{ After the routine's body: nothing followed any more. }
+procedure endRangeLocals;
+var
+  i: longint;
+  v: PDecl;
+begin
+  for i := 0 to rangeLocals.count - 1 do
+  begin
+    v := PDecl(listGet(rangeLocals, i));
+    v^.cgRangeLocal := false;
+    v^.cgRangeKnown := false;
+    v^.cgLoopKnown := false;
+  end;
+  listClear(rangeLocals);
 end;
 
 procedure paPinStmt(s: PNode; const after: TPtrList; var pins: TPtrList); forward;
@@ -4382,6 +4799,8 @@ begin
     if (v^.kind = dkVar) and v^.isOwned and not v^.isInlineVar then
       listAdd(owned, v);
   end;
+  if (r^.asyncType = nil) and (r^.iterType = nil) then
+    initRangeLocals(r);
   if owned.count = 0 then
     visitStmt(r^.body^.body)
   else
@@ -4392,6 +4811,7 @@ begin
     emitFreeOwned(owned, ownedTry.state);
     tryFinallyEnd(ownedTry);
   end;
+  endRangeLocals;
   listFree(owned);
   irBr(exitBlock);
   if beforeBody <> nil then
@@ -4669,6 +5089,8 @@ begin
   mapInit(dynInfos);
   mapInit(typeInfos);
   listInit(asyncsToEmit);
+  listInit(rangeLocals);
+  paSkipPlain := false;
   nextStart := 0;
   listInit(dynOpElems);
   listInit(dynOpFns);
