@@ -7319,7 +7319,8 @@ public:
                         !CGOpts.TargetFeatures.empty();
     for (llvm::Function &F : M)
       if (!F.isDeclaration()) {
-        F.addFnAttr(llvm::Attribute::NoUnwind);
+        if (!CGOpts.TableExceptions)
+          F.addFnAttr(llvm::Attribute::NoUnwind);
         if (CGOpts.SizeLevel == 1)
           F.addFnAttr(llvm::Attribute::OptimizeForSize);
         else if (CGOpts.SizeLevel == 2)
@@ -8714,13 +8715,32 @@ public:
     return true;
   }
 
+  /// A handler that re-raises or raises a new exception is still a setjmp
+  /// shape in this stage; so is a try nested in an outer setjmp region.
+  bool tableSafeHandlerBody(llvm::ArrayRef<Stmt *> Body) {
+    for (Stmt *S : Body) {
+      if (llvm::isa<RaiseStmt>(S))
+        return false;
+      if (auto *C = llvm::dyn_cast<CompoundStmt>(S)) {
+        if (!tableSafeHandlerBody(C->getBody()))
+          return false;
+      } else if (auto *I = llvm::dyn_cast<IfStmt>(S)) {
+        if (!tableSafeHandlerBody({I->getThen()}) ||
+            (I->getElse() && !tableSafeHandlerBody({I->getElse()})))
+          return false;
+      } else if (auto *T = llvm::dyn_cast<TryStmt>(S))
+        return false;
+    }
+    return true;
+  }
+
   bool tableTryCandidate(TryStmt *S) {
-    if (S->isFinally() || !S->getHandlers().empty())
+    if (S->isFinally() || !S->getHandlers().empty() || !Cleanups.empty())
       return false;
     for (Stmt *B : S->getBody())
       if (!tableSafeStmt(B))
         return false;
-    return true;
+    return tableSafeHandlerBody(S->getExceptBody());
   }
 
   void emitTableTryExcept(TryStmt *S) {
@@ -8941,20 +8961,26 @@ public:
         visitExpr(S->getFrame());
       llvm::Value *Addr = visitExpr(S->getAddress());
       llvm::Value *Obj = visitExpr(S->getObject());
-      if (CGOpts.TableExceptions)
-        emitCallOrInvoke(classRuntime("__pas_raise_table_at", B.getVoidTy(),
-                                      {B.getPtrTy(), B.getPtrTy(), B.getPtrTy()}),
+      if (CGOpts.TableExceptions) {
+        llvm::FunctionCallee Raise = M.getOrInsertFunction(
+            "__pas_raise_table_at",
+            llvm::FunctionType::get(
+                B.getVoidTy(), {B.getPtrTy(), B.getPtrTy(), B.getPtrTy()},
+                false));
+        emitCallOrInvoke(Raise,
                          {Obj, whereText(S->getBeginLoc()), Addr});
-      else
+      } else
         B.CreateCall(excRuntime("__pas_raise_at"),
                      {Obj, whereText(S->getBeginLoc()), Addr});
     } else {
       llvm::Value *Obj = visitExpr(S->getObject());
-      if (CGOpts.TableExceptions)
-        emitCallOrInvoke(classRuntime("__pas_raise_table", B.getVoidTy(),
-                                      {B.getPtrTy(), B.getPtrTy()}),
-                         {Obj, whereText(S->getBeginLoc())});
-      else
+      if (CGOpts.TableExceptions) {
+        llvm::FunctionCallee Raise = M.getOrInsertFunction(
+            "__pas_raise_table",
+            llvm::FunctionType::get(B.getVoidTy(),
+                                    {B.getPtrTy(), B.getPtrTy()}, false));
+        emitCallOrInvoke(Raise, {Obj, whereText(S->getBeginLoc())});
+      } else
         B.CreateCall(excRuntime("__pas_raise"),
                      {Obj, whereText(S->getBeginLoc())});
     }

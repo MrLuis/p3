@@ -2,7 +2,7 @@
 ; invoke: direct, procedural value, constructor and method.
 ; RUN: %p3 --mode=objfpc --ftable-exceptions --emit-llvm %S/Inputs/table-calls.pas -o - | FileCheck %s
 
-; CHECK: define i32 @main(i32 %argc, ptr %argv) #{{[0-9]+}} personality ptr @__pas_personality
+; CHECK: define i32 @main(i32 %argc, ptr %argv){{.*}} personality ptr @__pas_personality
 ; CHECK-DAG: invoke void @pas.p(i32 1)
 ; CHECK-DAG: invoke void %{{.*}}(ptr {{.*}}, i32 2)
 ; CHECK-DAG: invoke void @pas.tc.create(ptr null, ptr {{.*}})
