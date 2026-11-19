@@ -29,6 +29,27 @@ void __pas_fini(void);
  * (no truncation) and booleans print as TRUE/FALSE. */
 extern int32_t __pas_tp_mode;
 
+/* Nonzero once the runtime has started a thread (the task pool or the
+ * timer thread, async.c). Until then reference counts (ansistrings,
+ * dynamic arrays, interfaces) change with plain operations, as in Free
+ * Pascal without cthreads; from then on atomically (optimization3.md item
+ * 6). It is set before the first pthread_create, while one thread runs,
+ * and never cleared: no other thread can see it change, and the new
+ * thread sees it set, as it sees every value made before it started. */
+extern int32_t __pas_threads_started;
+void __pas_start_threads(void);
+
+/* A reference count's increment, decrement (the new count) and acquire
+ * load, atomic once threads have started. */
+#define PAS_RC_INC(p)                                                       \
+  (__pas_threads_started ? (void)__atomic_fetch_add((p), 1, __ATOMIC_RELAXED) \
+                         : (void)(++*(p)))
+#define PAS_RC_DEC(p)                                                       \
+  (__pas_threads_started ? __atomic_sub_fetch((p), 1, __ATOMIC_ACQ_REL)     \
+                         : --*(p))
+#define PAS_RC_LOAD_ACQUIRE(p)                                              \
+  (__pas_threads_started ? __atomic_load_n((p), __ATOMIC_ACQUIRE) : *(p))
+
 /* Reports a runtime error ("Runtime error: <msg>") and exits with status 2. */
 void __pas_runtime_error(const char *msg) __attribute__((noreturn));
 

@@ -492,6 +492,13 @@ static void *pool_main(void *arg) {
   return NULL;
 }
 
+/* Before a thread is created: reference counts become atomic from now on
+   (pascalrt.h). Set while this is the only thread, so a plain store does;
+   pthread_create publishes it to the new thread. */
+void __pas_start_threads(void) {
+  __pas_threads_started = 1;
+}
+
 /* Under the lock: the pool, started when first needed. */
 static PasContext *pool_context(void) {
   if (!__pas_async_pool) {
@@ -510,6 +517,7 @@ static PasContext *pool_context(void) {
       pthread_attr_t a;
       pthread_attr_init(&a);
       pthread_attr_setdetachstate(&a, PTHREAD_CREATE_DETACHED);
+      __pas_start_threads();
       if (pthread_create(&th, &a, pool_main, __pas_async_pool[i]) != 0)
         __pas_runtime_error("cannot start the thread pool");
       pthread_attr_destroy(&a);
@@ -895,6 +903,7 @@ static void add_timer(PasTimer *m) {
     pthread_attr_t a;
     pthread_attr_init(&a);
     pthread_attr_setdetachstate(&a, PTHREAD_CREATE_DETACHED);
+    __pas_start_threads();
     if (pthread_create(&th, &a, timer_main, NULL) != 0)
       __pas_runtime_error("cannot start the timer thread");
     pthread_attr_destroy(&a);

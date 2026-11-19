@@ -1167,11 +1167,11 @@ static int32_t *refcount_of(void *obj) {
 
 void __pas_intf_addref(void *obj) {
   if (obj)
-    __atomic_fetch_add(refcount_of(obj), 1, __ATOMIC_RELAXED);
+    PAS_RC_INC(refcount_of(obj));
 }
 
 void __pas_intf_release(void *obj) {
-  if (obj && __atomic_sub_fetch(refcount_of(obj), 1, __ATOMIC_ACQ_REL) == 0)
+  if (obj && PAS_RC_DEC(refcount_of(obj)) == 0)
     __pas_free_object(obj);
 }
 
@@ -1210,14 +1210,14 @@ void *__pas_frame_new(int64_t size, void (*fini)(void *frame)) {
 
 void __pas_frame_addref(void *frame) {
   if (frame)
-    __atomic_fetch_add(&frame_header(frame)->refcount, 1, __ATOMIC_RELAXED);
+    PAS_RC_INC(&frame_header(frame)->refcount);
 }
 
 void __pas_frame_release(void *frame) {
   if (!frame)
     return;
   PasFrameHeader *h = frame_header(frame);
-  if (__atomic_sub_fetch(&h->refcount, 1, __ATOMIC_ACQ_REL) == 0) {
+  if (PAS_RC_DEC(&h->refcount) == 0) {
     h->fini(frame);
     free(h);
   }
@@ -1241,7 +1241,7 @@ void __pas_closure_clear(PasClosure *p) {
 void __pas_interfaced_construct(void *obj) { *refcount_of(obj) = 1; }
 
 void __pas_interfaced_constructed(void *obj) {
-  __atomic_fetch_sub(refcount_of(obj), 1, __ATOMIC_ACQ_REL);
+  PAS_RC_DEC(refcount_of(obj));
 }
 
 void __pas_free_instance(void *obj) {

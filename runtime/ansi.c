@@ -36,15 +36,19 @@ static char *from_chars(const char *p, int64_t len) {
   return s;
 }
 
-/* Counts change atomically: values are shared between threads (tasks). */
+int32_t __pas_threads_started = 0;
+
+/* Counts change atomically once threads have started: values are then
+   shared between threads (tasks); plainly before (PAS_RC_INC...,
+   pascalrt.h). */
 void __pas_astr_addref(char *s) {
   if (s && __atomic_load_n(&HEADER(s)->refs, __ATOMIC_RELAXED) > 0)
-    __atomic_fetch_add(&HEADER(s)->refs, 1, __ATOMIC_RELAXED);
+    PAS_RC_INC(&HEADER(s)->refs);
 }
 
 static void release(char *s) {
   if (s && __atomic_load_n(&HEADER(s)->refs, __ATOMIC_RELAXED) > 0 &&
-      __atomic_sub_fetch(&HEADER(s)->refs, 1, __ATOMIC_ACQ_REL) == 0)
+      PAS_RC_DEC(&HEADER(s)->refs) == 0)
     free(HEADER(s));
 }
 
@@ -159,7 +163,7 @@ char *__pas_astr_copy(char *s, int32_t index, int32_t count) {
 /* Makes *p the only reference to its characters; returns them. */
 char *__pas_astr_unique(char **p) {
   char *s = *p;
-  if (s && __atomic_load_n(&HEADER(s)->refs, __ATOMIC_ACQUIRE) != 1) {
+  if (s && PAS_RC_LOAD_ACQUIRE(&HEADER(s)->refs) != 1) {
     char *copy = from_chars(s, LEN(s));
     release(s);
     *p = s = copy;
@@ -304,7 +308,7 @@ int64_t __pas_dyn_length(const void *a) {
 
 void __pas_dyn_addref(void *a) {
   if (a)
-    __atomic_fetch_add(&DYN_HEADER(a)->refs, 1, __ATOMIC_RELAXED);
+    PAS_RC_INC(&DYN_HEADER(a)->refs);
 }
 
 static void dyn_fini(const PasDynInfo *info, char *elems, int64_t from, int64_t to) {
@@ -317,7 +321,7 @@ static void dyn_release(void *a) {
   if (!a)
     return;
   DynHeader *h = DYN_HEADER(a);
-  if (__atomic_sub_fetch(&h->refs, 1, __ATOMIC_ACQ_REL) != 0)
+  if (PAS_RC_DEC(&h->refs) != 0)
     return;
   dyn_fini(h->info, a, 0, h->length);
   free(h);
@@ -363,7 +367,7 @@ void __pas_dyn_setlength(void **a, const PasDynInfo *info, int64_t count) {
     return;
   }
   DynHeader *h = DYN_HEADER(old);
-  if (__atomic_load_n(&h->refs, __ATOMIC_ACQUIRE) > 1) {
+  if (PAS_RC_LOAD_ACQUIRE(&h->refs) > 1) {
     /* shared: this variable gets its own */
     *a = dyn_duplicate(old, 0, count < h->length ? count : h->length, count, info);
     dyn_release(old);
