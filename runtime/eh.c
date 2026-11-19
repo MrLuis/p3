@@ -320,10 +320,10 @@ void __pas_raise_table_at(void *obj, const char *where, void *address) {
 void __pas_reraise_table(void *unwind) {
   if (!unwind)
     __pas_runtime_error("re-raise without an exception");
-  _Unwind_Reason_Code r =
-      _Unwind_RaiseException((struct _Unwind_Exception *)unwind);
+  PasUnwindException *e = (PasUnwindException *)unwind;
+  _Unwind_Reason_Code r = _Unwind_RaiseException(&e->unwind);
   if (r == _URC_END_OF_STACK)
-    raise_table(((PasUnwindException *)unwind)->object, NULL, NULL);
+    __pas_unhandled(e->object, e->where, e->address);
   __pas_runtime_error("exception unwinding failed");
 }
 

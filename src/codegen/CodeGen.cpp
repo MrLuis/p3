@@ -8744,7 +8744,8 @@ public:
     for (Stmt *B : S->getBody())
       if (!tableSafeStmt(B))
         return false;
-    return S->isFinally() ? true : tableSafeHandlerBody(S->getExceptBody());
+    return tableSafeHandlerBody(S->isFinally() ? S->getFinallyBody()
+                                               : S->getExceptBody());
   }
 
   void emitUnwindResume(llvm::Value *Exc) {
@@ -8852,7 +8853,7 @@ public:
     llvm::StructType *LPType =
         llvm::StructType::get(B.getPtrTy(), B.getInt32Ty());
     llvm::LandingPadInst *LP = B.CreateLandingPad(LPType, 0, "lp");
-    LP->addClause(M.getOrInsertGlobal("__pas_catch_all", B.getInt8Ty()));
+    LP->setCleanup(true);
     llvm::Value *Exc = B.CreateExtractValue(LP, 0, "unwind.exc");
     B.CreateStore(B.getInt32(1), State);
     B.CreateStore(Exc, ExcSlot);

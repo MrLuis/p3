@@ -1,0 +1,8 @@
+; The exception end of a table try..finally: the finally part runs once and
+; the original exception is reported (optimization2 item 8d2).
+; RUN: %p3 --mode=objfpc --ftable-exceptions %S/Inputs/table-finally-error.pas -o %t
+; RUN: not %t > %t.out 2> %t.err
+; RUN: FileCheck --check-prefix=OUT %s < %t.out
+; RUN: FileCheck --check-prefix=ERR %s < %t.err
+; OUT: f
+; ERR: unhandled exception Exception at {{.*}}table-finally-error.pas:4:5: first
