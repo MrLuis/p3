@@ -2073,7 +2073,7 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
     llvm::SmallVector<llvm::Type *, 4> Params;
     for (llvm::Value *A : Args)
       Params.push_back(A->getType());
-    return B.CreateCall(classRuntime(Name, Ret, Params), Args);
+    return emitCallOrInvoke(classRuntime(Name, Ret, Params), Args);
   }
 
   /// Any string-like expression, or a pchar, as an ansistring (borrowed: a
@@ -5492,21 +5492,21 @@ public:
       return;
     }
     if (T->isInterface()) {
-      B.CreateCall(intfRuntime("__pas_intf_clear"), {Addr});
+      emitCallOrInvoke(intfRuntime("__pas_intf_clear"), {Addr});
       return;
     }
     if (T->isClosureType()) {
-      B.CreateCall(classRuntime("__pas_closure_clear", B.getVoidTy(),
-                                {B.getPtrTy()}),
-                   {Addr});
+      emitCallOrInvoke(classRuntime("__pas_closure_clear", B.getVoidTy(),
+                                    {B.getPtrTy()}),
+                       {Addr});
       return;
     }
     if (T->isTask() || T->isToken() || T->isIterator()) {
-      B.CreateCall(classRuntime(T->isTask()       ? "__pas_task_clear"
-                                : T->isIterator() ? "__pas_gen_clear"
-                                                  : "__pas_token_clear",
-                                B.getVoidTy(), {B.getPtrTy()}),
-                   {Addr});
+      emitCallOrInvoke(classRuntime(T->isTask()       ? "__pas_task_clear"
+                                    : T->isIterator() ? "__pas_gen_clear"
+                                                      : "__pas_token_clear",
+                                    B.getVoidTy(), {B.getPtrTy()}),
+                       {Addr});
       return;
     }
     if (auto *A = llvm::dyn_cast<ArrayType>(T)) {
@@ -8799,10 +8799,10 @@ public:
       TableHandlerExc = Exc;
       visitStmt(H->getBody());
       TableHandlerExc = SavedExc;
-      B.CreateCall(excRuntime("__pas_free_object"), {Obj});
-      B.CreateCall(classRuntime("__pas_unwind_release", B.getVoidTy(),
-                                {B.getPtrTy()}),
-                   {Exc});
+      emitCallOrInvoke(excRuntime("__pas_free_object"), {Obj});
+      emitCallOrInvoke(classRuntime("__pas_unwind_release", B.getVoidTy(),
+                                    {B.getPtrTy()}),
+                       {Exc});
       B.CreateBr(End);
     }
     B.SetInsertPoint(Next);
@@ -8811,10 +8811,10 @@ public:
       TableHandlerExc = Exc;
       emitSequence(S->getExceptBody());
       TableHandlerExc = SavedExc;
-      B.CreateCall(excRuntime("__pas_free_object"), {Obj});
-      B.CreateCall(classRuntime("__pas_unwind_release", B.getVoidTy(),
-                                {B.getPtrTy()}),
-                   {Exc});
+      emitCallOrInvoke(excRuntime("__pas_free_object"), {Obj});
+      emitCallOrInvoke(classRuntime("__pas_unwind_release", B.getVoidTy(),
+                                    {B.getPtrTy()}),
+                       {Exc});
       B.CreateBr(End);
     } else {
       emitUnwindResume(Exc);
@@ -8971,13 +8971,14 @@ public:
     llvm::Value *Pending = createTemp(PendingTy, "owned.exc");
     B.CreateStore(llvm::Constant::getNullValue(PendingTy), Pending);
     for (VarDecl *V : llvm::reverse(Owned))
-      B.CreateCall(classRuntime("__pas_owned_free", B.getVoidTy(), {Ptr, Ptr}),
-                   {varAddress(V), Pending});
+      emitCallOrInvoke(classRuntime("__pas_owned_free", B.getVoidTy(),
+                                    {Ptr, Ptr}),
+                       {varAddress(V), Pending});
     llvm::Value *Raised = B.CreateICmpEQ(
         B.CreateLoad(B.getInt32Ty(), State, "state"), B.getInt32(1), "raised");
-    B.CreateCall(classRuntime("__pas_owned_done", B.getVoidTy(),
-                              {Ptr, B.getInt32Ty()}),
-                 {Pending, B.CreateZExt(Raised, B.getInt32Ty())});
+    emitCallOrInvoke(classRuntime("__pas_owned_done", B.getVoidTy(),
+                                  {Ptr, B.getInt32Ty()}),
+                     {Pending, B.CreateZExt(Raised, B.getInt32Ty())});
   }
 
   /// FinallyPart is given the state's variable: 0 after the body's normal
