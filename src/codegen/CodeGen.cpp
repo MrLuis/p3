@@ -4645,7 +4645,7 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
       else
         Values.push_back(loadScalar(Addr, T, P->getName().Name));
     }
-    auto *Call = B.CreateCall(Functions[R], Values);
+    auto *Call = emitCallOrInvoke(Functions[R], Values);
     if (ByPointer)
       addResultCallAttrs(Call, ResultArgNo, R->getResultType());
     llvm::Value *Result = Call;
@@ -5152,6 +5152,14 @@ public:
     return B.CreateInsertValue(Pair, staticLinkFor(R), 1);
   }
 
+  /// The single place that turns a Pascal call into a call or, under the
+  /// table-exception flag (8b2+), an invoke. Stage 8b1 keeps the old call.
+  llvm::CallInst *emitCallOrInvoke(llvm::FunctionCallee Callee,
+                                   llvm::ArrayRef<llvm::Value *> Args,
+                                   const llvm::Twine &Name = "") {
+    return B.CreateCall(Callee, Args, Name);
+  }
+
   llvm::Value *emitCallTo(llvm::FunctionCallee Callee, llvm::Value *Link,
                           llvm::ArrayRef<VarDecl *> Params,
                           llvm::ArrayRef<Expr *> Args,
@@ -5175,7 +5183,7 @@ public:
     NoHoldAnsiResult = false;
     emitArgValues(Params, Args, Values, ToC);
     NoHoldAnsiResult = NoHold;
-    auto *Call = B.CreateCall(Callee, Values);
+    auto *Call = emitCallOrInvoke(Callee, Values);
     if (ByPointer)
       addResultCallAttrs(Call, ResultArgNo, ResultTy);
     llvm::Value *Result = Call;
@@ -6121,7 +6129,7 @@ public:
     if (Counted)
       B.CreateCall(intfRuntime("__pas_interfaced_construct"), {Obj});
     if (NoRaiseFns.count(Functions[Ctor])) { // nothing to protect against
-      B.CreateCall(Functions[Ctor], Values);
+      emitCallOrInvoke(Functions[Ctor], Values);
       if (Counted)
         B.CreateCall(intfRuntime("__pas_interfaced_constructed"), {Obj});
       KnownClass[Obj] = C;
@@ -6129,7 +6137,7 @@ public:
     }
     auto *Failed = newBlock("ctor.raise");
     llvm::Value *F = emitProtect(Failed, "ctor.call");
-    B.CreateCall(Functions[Ctor], Values);
+    emitCallOrInvoke(Functions[Ctor], Values);
     B.CreateCall(excRuntime("__pas_exc_pop"), {F});
     if (Counted)
       B.CreateCall(intfRuntime("__pas_interfaced_constructed"), {Obj});
@@ -6177,7 +6185,7 @@ public:
       B.CreateCall(routineFnType(Ctor),
                    loadVMTSlot(VMT, 6 + Ctor->getVMTIndex(), "ctor"), Values);
     else
-      B.CreateCall(Functions[Ctor], Values);
+      emitCallOrInvoke(Functions[Ctor], Values);
     B.CreateCall(excRuntime("__pas_exc_pop"), {F});
     if (Counted)
       B.CreateCall(intfRuntime("__pas_interfaced_constructed"), {Obj});
@@ -7405,8 +7413,8 @@ public:
         if (!C || ImportedDecls.count(D))
           continue;
         if (RoutineDecl *R = C->getClassConstructor(); R && Functions.count(R))
-          B.CreateCall(Functions[R],
-                       {llvm::ConstantPointerNull::get(B.getPtrTy())});
+          emitCallOrInvoke(Functions[R],
+                           {llvm::ConstantPointerNull::get(B.getPtrTy())});
         if (RoutineDecl *R = C->getClassDestructor(); R && Functions.count(R))
           Dtors.push_back(R);
       }
