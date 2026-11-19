@@ -1,0 +1,16 @@
+; Stage 8b2: an eligible try..except under -ftable-exceptions uses invoke and
+; an empty landing pad that resumes unwinding; the default stays setjmp.
+; RUN: %p3 --mode=objfpc --ftable-exceptions --emit-llvm %S/Inputs/table-except.pas -o - | FileCheck %s
+; RUN: %p3 --mode=objfpc --emit-llvm %S/Inputs/table-except.pas -o - | FileCheck --check-prefix=SETJMP %s
+
+; CHECK: define i32 @main(i32 %argc, ptr %argv) #{{[0-9]+}} personality ptr @__pas_personality
+; CHECK: invoke void @pas.p()
+; CHECK: to label %{{.*}} unwind label %try.landing
+; CHECK: try.landing:
+; CHECK: landingpad { ptr, i32 }
+; CHECK-NEXT: cleanup
+; CHECK: call void @_Unwind_Resume(ptr
+; CHECK: unreachable
+
+; SETJMP: call i32 @_setjmp(
+; SETJMP-NOT: personality ptr @__pas_personality

@@ -73,6 +73,10 @@ struct CompilerOptions {
   /// optimized); -fno-inline-runtime disables that.
   bool InlineRuntime = true;
 
+  /// -ftable-exceptions: use invoke/landingpad for eligible try statements
+  /// (optimization2.md item 8; experimental).
+  bool TableExceptions = false;
+
   /// The project file (p3.json, see Project.h): --project=<file> (empty:
   /// look for one), --no-project.
   std::string ProjectFile;

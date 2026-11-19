@@ -1184,6 +1184,9 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
   /// returned it took that path (TookAnsiResult).
   bool NoHoldAnsiResult = false;
   bool TookAnsiResult = false;
+  /// The unwind edge of the innermost eligible table-based try body, or
+  /// null. emitCallOrInvoke makes a call an invoke when this is set.
+  llvm::BasicBlock *TableUnwind = nullptr;
   /// Classes whose cleanup functions (releasing their own fields' COM
   /// interfaces) are to be emitted.
   std::vector<std::pair<ClassType *, llvm::Function *>> CleanupsToEmit;
@@ -5154,10 +5157,16 @@ public:
 
   /// The single place that turns a Pascal call into a call or, under the
   /// table-exception flag (8b2+), an invoke. Stage 8b1 keeps the old call.
-  llvm::CallInst *emitCallOrInvoke(llvm::FunctionCallee Callee,
+  llvm::CallBase *emitCallOrInvoke(llvm::FunctionCallee Callee,
                                    llvm::ArrayRef<llvm::Value *> Args,
                                    const llvm::Twine &Name = "") {
-    return B.CreateCall(Callee, Args, Name);
+    if (!TableUnwind)
+      return B.CreateCall(Callee, Args, Name);
+    llvm::BasicBlock *Normal = newBlock("call.cont");
+    llvm::CallBase *Call =
+        B.CreateInvoke(Callee, Normal, TableUnwind, Args, Name);
+    B.SetInsertPoint(Normal);
+    return Call;
   }
 
   llvm::Value *emitCallTo(llvm::FunctionCallee Callee, llvm::Value *Link,
@@ -8662,7 +8671,62 @@ public:
     B.CreateBr(Target);
   }
 
+  /// Stage 8b2 handles only a try body of direct, no-argument Pascal calls
+  /// and a catch-all except; other shapes stay on setjmp.
+  bool tableTryCandidate(TryStmt *S) {
+    if (S->isFinally() || !S->catchesAll())
+      return false;
+    bool Call = false;
+    for (Stmt *B : S->getBody()) {
+      if (llvm::isa<EmptyStmt>(B))
+        continue;
+      auto *P = llvm::dyn_cast<ProcCallStmt>(B);
+      if (!P || !P->getArgs().empty() || P->getCalleeValue() || P->getWith())
+        return false;
+      auto *R = llvm::dyn_cast_or_null<RoutineDecl>(P->getDecl());
+      if (!R || R->isExternal() || !Functions.count(R))
+        return false;
+      Call = true;
+    }
+    return Call;
+  }
+
+  void emitTableTryExcept(TryStmt *S) {
+    auto *Landing = newBlock("try.landing");
+    auto *End = newBlock("try.end");
+    llvm::FunctionCallee Personality =
+        classRuntime("__pas_personality", B.getInt32Ty(),
+                     {B.getInt32Ty(), B.getInt32Ty(), B.getInt64Ty(),
+                      B.getPtrTy(), B.getPtrTy()});
+    CurFn->setPersonalityFn(
+        llvm::cast<llvm::Constant>(Personality.getCallee()));
+    llvm::BasicBlock *Saved = TableUnwind;
+    TableUnwind = Landing;
+    emitSequence(S->getBody());
+    TableUnwind = Saved;
+    B.CreateBr(End);
+
+    B.SetInsertPoint(Landing);
+    llvm::StructType *LPType =
+        llvm::StructType::get(B.getPtrTy(), B.getInt32Ty());
+    llvm::LandingPadInst *LP = B.CreateLandingPad(LPType, 0, "lp");
+    LP->setCleanup(true);
+    llvm::Value *Exc = B.CreateExtractValue(LP, 0, "unwind.exc");
+    llvm::FunctionCallee Resume = M.getOrInsertFunction(
+        "_Unwind_Resume", llvm::FunctionType::get(B.getVoidTy(),
+                                                  {B.getPtrTy()}, false));
+    llvm::cast<llvm::Function>(Resume.getCallee())
+        ->addFnAttr(llvm::Attribute::NoReturn);
+    B.CreateCall(Resume, {Exc});
+    B.CreateUnreachable();
+    B.SetInsertPoint(End);
+  }
+
   void visitTryStmt(TryStmt *S) {
+    if (CGOpts.TableExceptions && tableTryCandidate(S)) {
+      emitTableTryExcept(S);
+      return;
+    }
     if (S->isFinally()) {
       emitTryFinally(S);
       return;

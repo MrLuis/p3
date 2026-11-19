@@ -55,6 +55,9 @@ struct CodeGenOptions {
   /// (pas.<unit>$<name>), and main calls their initialization functions
   /// (pas.<unit>$$init) instead of containing their code.
   bool SeparateUnits = false;
+  /// -ftable-exceptions: lower eligible try statements with invoke and
+  /// landingpad (item 8b2).
+  bool TableExceptions = false;
 };
 
 /// Lowers a Sema-checked program to an LLVM module for TM's target.
