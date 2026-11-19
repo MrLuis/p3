@@ -2677,7 +2677,7 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
   /// Parameters passed as a pointer to the caller's variable: var
   /// parameters, const parameters of string and structured types, and
   /// constref parameters (to the caller's variable, or a temporary).
-  static bool isByRef(VarDecl *V) {
+  bool isByRef(VarDecl *V) {
     return (V->isVarParam() && !V->getType()->isArrayOfConst() &&
             !V->getType()->isOpenArray()) ||
            isConstRefPtr(V) ||
@@ -2700,7 +2700,17 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
   /// passes (to a temporary of its own), instead of being returned? Short
   /// strings are: as a value LLVM would move all their 256 bytes, one by
   /// one. The function's result variable is then that temporary.
-  static bool returnsByPointer(Type *T) { return T && T->isShortString(); }
+  bool returnsByPointer(Type *T) {
+    if (!T)
+      return false;
+    if (T->isShortString())
+      return true;
+    // optimization3 item 1: a record of more than two registers (and
+    // without counted fields, which the callee releases on an exception)
+    // is written through the caller's temporary too. As a first-class
+    // aggregate LLVM copies it element by element at every call.
+    return T->isRecord() && !isManaged(T) && sizeOf(T) > 16;
+  }
 
   /// pas.<outer>.<name> for routines, pas.<class>.<name> for methods.
   static std::string mangle(RoutineDecl *R) {

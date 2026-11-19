@@ -1,0 +1,13 @@
+; A function result that is a record of more than 16 bytes is written
+; through a pointer to a temporary of the caller (like a short string): its
+; result variable is that temporary, and the call passes it as
+; `noalias sret`. Smaller records are still returned as values.
+; RUN: %p3 --mode=objfpc --emit-llvm %S/Inputs/recresult.pas -o - | FileCheck %s
+
+; CHECK-LABEL: define i32 @main(
+; CHECK:      %result2 = alloca %record.TBig
+; CHECK:      call {{.*}}@pas.makesmall(i32 1)
+; CHECK:      call {{.*}}@pas.maketwo(i32 2)
+; CHECK:      call void @pas.makebig(ptr noalias sret(%record.TBig) %result2, i32 3)
+
+; CHECK-LABEL: define internal void @pas.makebig(ptr noalias nonnull sret(%record.TBig) dereferenceable(24) %result.ptr, i32 %n)

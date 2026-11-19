@@ -1749,10 +1749,19 @@ end;
 { Is a function result of type t written through a pointer the caller
   passes (to a temporary of its own), instead of being returned? Short
   strings are: as a value LLVM would move all their 256 bytes, one by
-  one. The function's result variable is then that temporary. }
+  one; so are records of more than 16 bytes without counted fields. The
+  function's result variable is then that temporary. }
 function returnsByPointer(t: PType): boolean;
 begin
-  returnsByPointer := (t <> nil) and (t^.kind = tyShortString);
+  if t = nil then
+    returnsByPointer := false
+  else if t^.kind = tyShortString then
+    returnsByPointer := true
+  else
+    { optimization3 item 1: a record of more than two registers, without
+      counted fields (which the callee releases on an exception) }
+    returnsByPointer := (t^.kind = tyRecord) and not isManaged(t) and
+                        (sizeOf_(t) > 16);
 end;
 
 { Item 9: a by-reference parameter is an address: never nil, and it points
