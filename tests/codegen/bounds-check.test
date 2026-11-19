@@ -1,0 +1,6 @@
+; A bounds check is one unsigned comparison: (uint64)(i - lo) > hi - lo
+; (optimization2.md item 7).
+; RUN: %p3 --mode=objfpc --emit-llvm %S/Inputs/bounds-check.pas -o - | FileCheck %s
+
+; CHECK: [[OFF:%.*]] = sub i64 {{%.*}}, 0
+; CHECK-NEXT: {{%.*}} = icmp ugt i64 [[OFF]], 9

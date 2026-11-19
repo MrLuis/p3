@@ -1929,9 +1929,11 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
   /// compiler that built p3 (the self-hosted compiler writes the same IR,
   /// SELFHOST.md S10).
   llvm::Value *outsideRange(llvm::Value *X, int64_t Lo, int64_t Hi) {
-    llvm::Value *Below = B.CreateICmpSLT(X, B.getInt64(Lo));
-    llvm::Value *Above = B.CreateICmpSGT(X, B.getInt64(Hi));
-    return B.CreateOr(Below, Above);
+    // One unsigned comparison: (uint64)(X - Lo) > (uint64)(Hi - Lo). The
+    // subtraction wraps, so X < Lo becomes a huge offset.
+    llvm::Value *Off = B.CreateSub(X, B.getInt64(Lo));
+    llvm::Value *Span = B.CreateSub(B.getInt64(Hi), B.getInt64(Lo));
+    return B.CreateICmpUGT(Off, Span);
   }
 
   /// Checks that ordinal value V (of type From) lies within Target's bounds.

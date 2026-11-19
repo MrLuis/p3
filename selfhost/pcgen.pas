@@ -1407,11 +1407,13 @@ end;
 { x < lo or x > hi, for an i64 x }
 function outsideRange(const x: TV; lo, hi: int64): TV;
 var
-  below, above: TV;
+  off, span: TV;
 begin
-  below := irICmp('slt', x, i64c(lo), '');
-  above := irICmp('sgt', x, i64c(hi), '');
-  outsideRange := irBin('or', below, above, '');
+  { one unsigned comparison: (uint64)(x - lo) > (uint64)(hi - lo); the
+    subtraction wraps, so x < lo becomes a huge offset }
+  off := irBin('sub', x, i64c(lo), '');
+  span := irBin('sub', i64c(hi), i64c(lo), '');
+  outsideRange := irICmp('ugt', off, span, '');
 end;
 
 { Checks that ordinal value v (of type src) lies within target's bounds. }
