@@ -1163,6 +1163,9 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
   /// references in its value parameters, local variables and temporaries
   /// (RoutineTemps) when it ends, also when an exception leaves it.
   llvm::SmallVector<llvm::Value *, 4> LiveTemps;
+  /// The short-string temporaries made by the current statement, and their
+  /// sizes: lifetime.start at creation, lifetime.end when it ends (item 5).
+  llvm::SmallVector<std::pair<llvm::Value *, uint64_t>, 8> StringTemps;
   llvm::SmallVector<llvm::Value *, 4> RoutineTemps;
   llvm::DenseMap<llvm::Value *, Type *> RecordTemps; ///< record temporaries' types
   /// Conservative integer ranges (optimization2.md item 1): active for-loop
@@ -2269,7 +2272,20 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
   }
 
   llvm::Value *newStringTemp(unsigned MaxLen = 255) {
-    return createTemp(llvm::ArrayType::get(B.getInt8Ty(), MaxLen + 1), "str");
+    llvm::Value *Tmp =
+        createTemp(llvm::ArrayType::get(B.getInt8Ty(), MaxLen + 1), "str");
+    uint64_t Size = MaxLen + 1;
+    B.CreateLifetimeStart(Tmp, B.getInt64(Size));
+    StringTemps.push_back({Tmp, Size});
+    return Tmp;
+  }
+
+  /// Ends the lifetime of the short-string temporaries made since Mark.
+  void releaseStringTemps(size_t Mark) {
+    for (size_t I = Mark; I < StringTemps.size(); ++I)
+      B.CreateLifetimeEnd(StringTemps[I].first,
+                          B.getInt64(StringTemps[I].second));
+    StringTemps.resize(Mark);
   }
 
   /// Any string-like expression as a pointer to a length-prefixed string.
@@ -7443,9 +7459,10 @@ public:
   /// Statements carry their source position into the debug info.
   void visitStmt(Stmt *S) {
     setDebugLoc(S->getBeginLoc());
-    size_t Mark = LiveTemps.size();
+    size_t Mark = LiveTemps.size(), StringMark = StringTemps.size();
     StmtVisitor<CodeGenModule>::visitStmt(S);
     releaseTemps(Mark); // the results held by its expressions
+    releaseStringTemps(StringMark);
   }
 
   //===--------------------------------------------------------------------===//
@@ -7556,9 +7573,13 @@ public:
   /// result is an ansistring: the reference it returns is new, so an
   /// assignment can move it instead of counting it and releasing it later.
   static bool isFreshAnsiCall(Expr *Value) {
+    if (!Value->getType()->isAnsiString())
+      return false;
+    if (llvm::isa<InheritedExpr>(Value) ||
+        llvm::isa<IndirectCallExpr>(Value))
+      return true;
     auto *C = llvm::dyn_cast<CallExpr>(Value);
-    if (!C || !Value->getType()->isAnsiString() || C->isVarCast() ||
-        C->isMethodCast())
+    if (!C || C->isVarCast() || C->isMethodCast())
       return false;
     if (C->getCalleeValue())
       return true;

@@ -2184,13 +2184,14 @@ end;
 
 procedure visitStmt(s: PNode);
 var
-  mark: longint;
+  mark, stringMark: longint;
   ignored: TV;
   b: PIRBlock;
 begin
   { statements carry their source position into the debug information }
   setDebugLoc(s^.b);
   mark := liveTemps.count;
+  stringMark := stringTemps.count;
   case s^.kind of
     nkEmpty: ;
     nkCompound: visitStmtList(s^.stmts);
@@ -2228,6 +2229,7 @@ begin
     ;
   end;
   releaseTemps(mark); { the results held by its expressions }
+  releaseStringTemps(stringMark);
 end;
 
 { --- Declarations --- }
@@ -4625,6 +4627,7 @@ begin
   mapInit(exportedClasses);
   listInit(liveTemps);
   listInit(routineTemps);
+  listInit(stringTemps);
   listInit(deferredInits);
   listInit(cleanupClasses);
   listInit(cleanupFns);

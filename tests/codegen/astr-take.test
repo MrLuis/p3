@@ -1,0 +1,7 @@
+; An inherited method's ansistring result is fresh: the assignment moves it
+; into Result instead of counting and releasing it (optimization2 item 5).
+; RUN: %p3 --mode=objfpc --emit-llvm %S/Inputs/astr-take.pas -o - | FileCheck %s
+
+; CHECK-LABEL: define internal ptr @pas.td.f(
+; CHECK: %[[R:.*]] = call ptr @pas.tb.f(
+; CHECK: call void @__pas_astr_take(ptr {{.*}}, ptr %[[R]])

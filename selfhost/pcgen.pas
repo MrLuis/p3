@@ -81,6 +81,13 @@ type
     target: PIRBlock;
   end;
 
+  { A short-string temporary and its lifetime size (item 5). }
+  PStringTemp = ^TStringTemp;
+  TStringTemp = record
+    addr: TV;
+    size: int64;
+  end;
+
   { Exceptions (objfpc): a try statement or running handler around the
     statement being emitted. exit, break and continue leaving it pop its
     PasExcFrame (emitJump):
@@ -180,6 +187,7 @@ var
     classes whose cleanup functions are to be emitted (of PType) and the
     functions (of PIRFunc). }
   liveTemps, routineTemps: TPtrList;
+  stringTemps: TPtrList; { of PStringTemp, the current statement's }
   { static variables whose initial values hold procedural values: set once
     the routines are declared (finishStaticInits) }
   deferredInits: TPtrList;
@@ -2430,9 +2438,49 @@ begin
   getAnsiConstant := irGEP1(irI8, g^, i64c(16), true, '');
 end;
 
-function newStringTemp(maxLen: int64): TV;
+procedure emitLifetime(const start: boolean; const addr: TV; size: int64);
+var
+  f: PIRFunc;
+  ignored: TV;
 begin
-  newStringTemp := irCreateTemp(irArray(maxLen + 1, irI8), 'str');
+  if start then
+    f := intrinsic('llvm.lifetime.start.p0', irVoidT, irI64, irPtrT,
+                   'nocallback nofree nosync nounwind willreturn memory(argmem: readwrite)',
+                   'i64 immarg, ptr nocapture')
+  else
+    f := intrinsic('llvm.lifetime.end.p0', irVoidT, irI64, irPtrT,
+                   'nocallback nofree nosync nounwind willreturn memory(argmem: readwrite)',
+                   'i64 immarg, ptr nocapture');
+  ignored := call2(f, i64c(size), addr, '');
+end;
+
+function newStringTemp(maxLen: int64): TV;
+var
+  tmp: TV;
+  st: PStringTemp;
+begin
+  tmp := irCreateTemp(irArray(maxLen + 1, irI8), 'str');
+  st := PStringTemp(arenaAlloc(sizeof(TStringTemp)));
+  st^.addr := tmp;
+  st^.size := maxLen + 1;
+  listAdd(stringTemps, st);
+  emitLifetime(true, tmp, st^.size);
+  newStringTemp := tmp;
+end;
+
+{ Ends the lifetime of the short-string temporaries made since mark. }
+procedure releaseStringTemps(mark: longint);
+var
+  k: longint;
+  st: PStringTemp;
+begin
+  for k := mark to stringTemps.count - 1 do
+  begin
+    st := PStringTemp(listGet(stringTemps, k));
+    emitLifetime(false, st^.addr, st^.size);
+  end;
+  while stringTemps.count > mark do
+    listPop(stringTemps);
 end;
 
 { A char or widechar expression's value as a char. }

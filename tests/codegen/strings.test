@@ -20,4 +20,8 @@
 ; CHECK:      call void @__pas_str_assign(ptr %s.addr, i32 255, ptr %s)
 ; CHECK:      store ptr %t, ptr %t.addr
 ; CHECK:      call void @__pas_str_append(ptr %s.addr, i32 255, ptr
+; The concatenation temporary lives only for this statement (item 5).
+; CHECK:      call void @llvm.lifetime.start.p0(i64 256, ptr %[[STR:str[0-9]*]])
+; CHECK:      call void @__pas_str_concat(ptr %[[STR]], ptr %s.addr, ptr %t.ref)
+; CHECK:      call void @llvm.lifetime.end.p0(i64 256, ptr %[[STR]])
 ; CHECK:      ret void
