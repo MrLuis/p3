@@ -702,6 +702,8 @@ begin
       exit(true);
 end;
 
+function emitResultInPlace(target, value: PNode; tt: PType): boolean; forward;
+
 procedure visitAssign(s: PNode);
 var
   more: PNode;
@@ -800,6 +802,8 @@ begin
   end;
   if isStructured(tt) then
   begin
+    if emitResultInPlace(target, value, tt) then
+      exit;
     dst := emitAddress(target);
     src := emitAddress(value);
     copyValue(dst, src, tt);
@@ -3552,6 +3556,64 @@ begin
     nkScope:
       paPinList(s^.scopeBody, after, pins);
   end;
+end;
+
+{ optimization3 item 1: `Result := F(...)` where F returns a record by
+  pointer: this function's own result pointer is passed on to F, instead of
+  a temporary that is then copied. The pointer is `noalias` (the caller's
+  fresh temporary), so nothing else can see the record while F writes it.
+  Not done when the routine has a try or a non-local label (an exception
+  caught here could see a half-written result), when the result variable
+  is captured (a nested routine could read it), or when an argument
+  mentions the result (F zeroes and fills it before it copies its value
+  parameters). Returns whether the assignment was emitted. }
+function emitResultInPlace(target, value: PNode; tt: PType): boolean;
+var
+  rv, r: PDecl;
+  c: PNode;
+  used: TPtrList;
+  i: longint;
+  dst, res: TV;
+begin
+  emitResultInPlace := false;
+  if (not returnsByPointer(tt)) or (curRoutine = nil) or pinTemps then
+    exit;
+  if not curRoutine^.isFunction then
+    exit;
+  rv := curRoutine^.resultVar;
+  if (target^.kind <> nkNameRef) or (target^.refWith <> nil) or
+     (target^.refDecl <> rv) or (not isByRef(rv)) or rv^.cgInFrame or
+     rv^.captured then
+    exit;
+  c := value;
+  while c^.kind = nkParen do
+    c := c^.inner;
+  if (c^.kind <> nkCall) or (c^.methodCast <> 0) or c^.isVarCast or
+     (c^.callValue <> nil) or (c^.callWith <> nil) then
+    exit;
+  r := c^.callDecl;
+  if (r = nil) or (r^.kind <> dkRoutine) then
+    exit;
+  if (not r^.isFunction) or (r^.methodKind <> mtNone) or r^.isStatic or
+     r^.isExternal or (r^.asyncType <> nil) or (r^.iterType <> nil) or
+     (r^.resultType <> tt) then
+    exit;
+  listInit(used);
+  for i := 0 to c^.args.count - 1 do
+    paExpr(PNode(listGet(c^.args, i)), used, paDummy, true, false);
+  for i := 0 to r^.params.count - 1 do
+    paExpr(PDecl(listGet(r^.params, i))^.paramDefault, used, paDummy, true, false);
+  if listHasPtr(used, rv) then
+  begin
+    listFree(used);
+    exit;
+  end;
+  listFree(used);
+  dst := emitAddress(target);
+  resultDst := dst;
+  hasResultDst := true;
+  res := emitCall(r, c^.args);
+  emitResultInPlace := true;
 end;
 
 procedure computePinVars(r: PDecl; var pins: TPtrList);

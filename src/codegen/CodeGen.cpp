@@ -1033,6 +1033,9 @@ class PinAnalysis {
 public:
   explicit PinAnalysis(RoutineDecl *R) : R(R) {}
 
+  /// Adds the variables that E reads or names (optimization3 item 1).
+  static void usedBy(Expr *E, VarSet &Out) { addUsed(E, Out); }
+
   VarSet run() {
     VarSet After;
     if (R->isFunction())
@@ -5166,7 +5169,8 @@ public:
                           llvm::ArrayRef<VarDecl *> Params,
                           llvm::ArrayRef<Expr *> Args,
                           llvm::Value *Self = nullptr,
-                          Type *ResultTy = nullptr, bool ToC = false) {
+                          Type *ResultTy = nullptr, bool ToC = false,
+                          llvm::Value *ResultDst = nullptr) {
     llvm::SmallVector<llvm::Value *, 8> Values;
     if (Link) // external (C) routines have none
       Values.push_back(Link);
@@ -5174,7 +5178,8 @@ public:
     unsigned ResultArgNo = Values.size();
     bool ByPointer = returnsByPointer(ResultTy) && !ToC;
     if (ByPointer) {
-      ResultTmp = createTemp(memType(ResultTy), "result");
+      // (ResultDst: the destination of the assignment, see emitResultInPlace)
+      ResultTmp = ResultDst ? ResultDst : createTemp(memType(ResultTy), "result");
       Values.push_back(ResultTmp);
     }
     if (Self) // methods: after the result pointer
@@ -5337,7 +5342,8 @@ public:
     return nullptr;
   }
 
-  llvm::Value *emitCall(RoutineDecl *R, llvm::ArrayRef<Expr *> Args) {
+  llvm::Value *emitCall(RoutineDecl *R, llvm::ArrayRef<Expr *> Args,
+                        llvm::Value *ResultDst = nullptr) {
     if (R->isAsync())
       return emitAsyncCall(R, staticLinkFor(R), nullptr, Args);
     if (R->isIterator())
@@ -5346,7 +5352,7 @@ public:
       return emitCallTo(ExternalFns[R], nullptr, R->getParams(), Args, nullptr,
                         nullptr, /*ToC=*/true);
     return emitCallTo(Functions[R], callLink(R), R->getParams(), Args, nullptr,
-                      resultOf(R));
+                      resultOf(R), /*ToC=*/false, ResultDst);
   }
 
   /// Call through a procedural / functional parameter or variable.
@@ -7618,6 +7624,48 @@ public:
            llvm::isa_and_nonnull<VarDecl>(C->getDecl());
   }
 
+  /// optimization3 item 1: `Result := F(...)` where F returns a record by
+  /// pointer: this function's own result pointer is passed on to F, instead
+  /// of a temporary that is then copied. The pointer is `noalias` (the
+  /// caller's fresh temporary), so nothing else can see the record while F
+  /// writes it. Not done when
+  ///  - the routine has a try or a non-local label (an exception caught
+  ///    here could see a half-written result),
+  ///  - the result variable is captured (a nested routine could read it),
+  ///  - an argument mentions the result (F zeroes and fills it before it
+  ///    copies its value parameters).
+  /// Returns whether the assignment was emitted.
+  bool emitResultInPlace(Expr *Target, Expr *Value, Type *TT) {
+    if (!returnsByPointer(TT) || !CurRoutine || !CurRoutine->isFunction() ||
+        PinTemps)
+      return false;
+    VarDecl *RV = CurRoutine->getResultVar();
+    auto *N = llvm::dyn_cast<NameRefExpr>(Target);
+    if (!N || N->getWith() || N->getDecl() != RV || !isByRef(RV) ||
+        FrameSlots.count(RV) || RV->isCaptured())
+      return false;
+    while (auto *P = llvm::dyn_cast<ParenExpr>(Value))
+      Value = P->getInner();
+    auto *C = llvm::dyn_cast<CallExpr>(Value);
+    if (!C || C->isMethodCast() || C->isVarCast() || C->getCalleeValue() ||
+        C->getWith())
+      return false;
+    auto *R = llvm::dyn_cast_or_null<RoutineDecl>(C->getDecl());
+    if (!R || !R->isFunction() || R->isMethod() || R->isStatic() ||
+        R->isExternal() || R->isAsync() || R->isIterator() ||
+        R->getResultType() != TT)
+      return false;
+    VarSet Used;
+    for (Expr *A : C->getArgs())
+      PinAnalysis::usedBy(A, Used);
+    for (VarDecl *P : R->getParams())
+      PinAnalysis::usedBy(P->getDefault(), Used);
+    if (Used.count(RV))
+      return false;
+    emitCall(R, C->getArgs(), emitAddress(Target));
+    return true;
+  }
+
   void visitAssignStmt(AssignStmt *S) {
     Expr *Target = S->getTarget(), *Value = S->getValue();
     Type *TT = Target->getType();
@@ -7689,6 +7737,8 @@ public:
       return;
     }
     if (TT->isStructured()) {
+      if (emitResultInPlace(Target, Value, TT))
+        return;
       llvm::Value *Dst = emitAddress(Target);
       copyValue(Dst, emitAddress(Value), TT);
       return;

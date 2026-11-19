@@ -138,6 +138,9 @@ var
     pinInMemory)? In a routine without try statements they are pinned
     later, if its body turns out to need protection. }
   pinTemps: boolean;
+  resultDst: TV;             { optimization3 item 1: the destination of the call being
+                               emitted, where its record result goes }
+  hasResultDst: boolean;
   { A direct call whose ansistring result is moved into the assignment
     target: no temporary holds it (noHoldAnsiResult), and the call that
     returned it took that path (tookAnsiResult). }
@@ -4156,9 +4159,13 @@ begin
     irArgsAdd(buf, link);
   if returnsByPointer(resTy) then
   begin
-    tmp := irCreateTemp(memType(resTy), 'result');
+    if hasResultDst then
+      tmp := resultDst
+    else
+      tmp := irCreateTemp(memType(resTy), 'result');
     irArgsAddAttr(buf, tmp, resultCallAttr(resTy));
   end;
+  hasResultDst := false; { (only this call's result, not its arguments') }
   if hasSelf then { methods: after the result pointer }
     irArgsAdd(buf, self_);
   { The arguments' results are held as usual; only a direct call's own

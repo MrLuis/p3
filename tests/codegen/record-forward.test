@@ -1,0 +1,22 @@
+; `Result := F(...)` with F returning a record through a result pointer:
+; the function's own result pointer is passed on to F, with no temporary and
+; no copy. It is not when an argument mentions Result, or when the routine
+; has a try (an exception caught there could see a half-written result).
+; RUN: %p3 --mode=objfpc --emit-llvm %S/Inputs/recforward.pas -o - | FileCheck %s
+
+; CHECK-LABEL: define internal void @pas.forward(
+; CHECK-NOT:  alloca %record.TBig
+; CHECK:      %forward.ref1 = load ptr, ptr %forward
+; CHECK:      call void @pas.make(ptr noalias sret(%record.TBig) %forward.ref1, i32
+; CHECK-NOT:  memcpy
+; CHECK:      ret void
+
+; CHECK-LABEL: define internal void @pas.mentions(
+; CHECK:      %result = alloca %record.TBig
+; CHECK:      call void @pas.rot(ptr noalias sret(%record.TBig) %result,
+; CHECK:      call void @llvm.memcpy
+
+; CHECK-LABEL: define internal void @pas.guarded(
+; CHECK:      %result = alloca %record.TBig
+; CHECK:      call void @pas.make(ptr noalias sret(%record.TBig) %result, i32
+; CHECK:      call void @llvm.memcpy

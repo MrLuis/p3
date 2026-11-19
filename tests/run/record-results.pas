@@ -3,9 +3,15 @@
   returned as a value. Checks both sizes, a record with a short string and
   an array, a result used as an argument and with a field selector,
   `x := F(x)`, nested calls, recursion, methods of classes and advanced
-  records, operators, a property getter, an exception raised
-  after the result was partly written, and a loop reusing the result.
-  Output is identical to Free Pascal 3.2.2's (fpc -Mobjfpc).
+  records, operators, an exception raised after the result was partly
+  written, a loop reusing the result, and `Result := F(...)` (the result
+  pointer is passed on) with the cases that must keep a temporary: an
+  argument that mentions Result and a try in the function.
+  Output is identical to Free Pascal 3.2.2's (fpc -Mobjfpc) except for
+  one line: after `Result := Failing(5)` raises inside a try, Free Pascal
+  shows the half-written record it passed to Failing (5 98 97); p3 leaves
+  the assignment undone (99 98 97), as it did before the result pointer
+  was passed on.
   RUN: %p3 --mode=objfpc %s -o %t
   RUN:  %t > %t.out
   RUN: diff %S/record-results.expected %t.out
@@ -120,6 +126,33 @@ begin
   Result.b := n; Result.c := n;
 end;
 
+{ Result := F(...): forwarded; and the cases that are not. }
+function Wrap(n: longint): TBig;
+begin
+  Result := MakeBig(n * 2);
+end;
+
+function Wrap3(n: longint): TBig;
+begin
+  Result := Wrap(Wrap(n).a);
+end;
+
+function MentionsResult(n: longint): TBig;
+begin
+  Result := MakeBig(n);
+  Result := Rotate(Result);
+end;
+
+function Guarded(n: longint): TBig;
+begin
+  Result.a := 99; Result.b := 98; Result.c := 97;
+  try
+    Result := Failing(n);
+  except
+    on E: EFail do ;
+  end;
+end;
+
 function TMaker.Make(n: longint): TMixed;
 begin
   Result := MakeMixed(n + base);
@@ -178,6 +211,17 @@ begin
     total := total + Sum(MakeMixed(i)) + mx.id;
   end;
   writeln(total);
+  { Result := F(...) }
+  bg := Wrap(4);
+  writeln(bg.a, ' ', bg.b, ' ', bg.c);
+  bg := Wrap3(1);
+  writeln(bg.a, ' ', bg.b, ' ', bg.c);
+  bg := MentionsResult(1);
+  writeln(bg.a, ' ', bg.b, ' ', bg.c);
+  bg := Guarded(1);
+  writeln(bg.a, ' ', bg.b, ' ', bg.c);
+  bg := Guarded(5);
+  writeln(bg.a, ' ', bg.b, ' ', bg.c);
   { an exception after a partly written result }
   bg := MakeBig(1);
   caught := false;
