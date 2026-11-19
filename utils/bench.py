@@ -13,7 +13,8 @@ instead, in bench/<name>.expected.sha256. Configurations:
   O2-fast   -O2 -fno-range-checks -fno-overflow-checks
 
 With --fpc, Free Pascal's -O2 (which has no checks: compare with O2-fast)
-is measured too.
+is measured too, except for the programs in P3_ONLY (p3's own language,
+such as lifetime_owned, the owned-variable twin of lifetime).
 
 Compile time (optimization3.md, item 3): the self-hosted compiler is built
 at -O2 by each p3, then both compilers, the C++ p3 and the self-hosted one
@@ -57,6 +58,11 @@ CONFIGS = {
     "O2": ["-O2"],
     "O2-fast": ["-O2", "-fno-range-checks", "-fno-overflow-checks"],
 }
+# Programs that use p3's own language (owned variables...): not compiled
+# by Free Pascal under --fpc.
+P3_ONLY = {"lifetime_owned"}
+# The width of the benchmark-name column.
+NAME_COL = "%-16s"
 SELFHOST_LEVELS = {
     "IR": ["-O0", "--emit-llvm"],
     "O0": ["-O0", "-c"],
@@ -141,7 +147,12 @@ def measure(compile_cmd, exe, expected, runs, update, env=None):
 def bench_programs(label, p3, configs, names, runs, work, update, env):
     results = {}
     for name in names:
-        src = os.path.join(BENCH, name + ".pas")
+        # Compiled from a directory of its own: next to the others, `uses
+        # Classes` would find bench/classes.pas.
+        d = os.path.join(work, "%s-src-%s" % (label, name))
+        os.makedirs(d, exist_ok=True)
+        shutil.copy(os.path.join(BENCH, name + ".pas"), d)
+        src = os.path.join(d, name + ".pas")
         expected = os.path.join(BENCH, name + ".expected")
         for i, cfg in enumerate(configs):
             exe = os.path.join(work, "%s-%s-%s" % (label, name, cfg))
@@ -155,6 +166,8 @@ def bench_programs(label, p3, configs, names, runs, work, update, env):
 def bench_fpc(fpc, names, runs, work):
     results = {}
     for name in names:
+        if name in P3_ONLY:
+            continue
         d = os.path.join(work, "fpc-" + name)
         os.makedirs(d, exist_ok=True)
         shutil.copy(os.path.join(BENCH, name + ".pas"), d)
@@ -369,12 +382,12 @@ def main():
     if "fpc" in results:
         cols.append(("fpc", "fpc"))
     print("Run time, seconds (best of %d)" % args.runs)
-    print("%-12s" % "" + "".join("%13s" % (cfg if label == "p3" else label + " " + cfg
+    print(NAME_COL % "" + "".join("%13s" % (cfg if label == "p3" else label + " " + cfg
                                              if label == "base" else "fpc -O2")
                                  for label, cfg in cols))
     rows = names
     for name in rows:
-        line = "%-12s" % name
+        line = NAME_COL % name
         for label, cfg in cols:
             res = results[label].get((name, cfg))
             if res is None:
@@ -388,9 +401,9 @@ def main():
 
     if args.base:
         print("\np3 against base (run time; below 1.00 is faster)")
-        print("%-12s" % "" + "".join("%10s" % cfg for cfg in configs))
+        print(NAME_COL % "" + "".join("%10s" % cfg for cfg in configs))
         for name in rows:
-            line = "%-12s" % name
+            line = NAME_COL % name
             for cfg in configs:
                 a = results["p3"].get((name, cfg))
                 b = results["base"].get((name, cfg))
@@ -401,9 +414,9 @@ def main():
             print(line)
 
     print("\nCompile time, seconds, and executable size, KiB (p3)")
-    print("%-12s" % "" + "".join("%18s" % cfg for cfg in configs))
+    print(NAME_COL % "" + "".join("%18s" % cfg for cfg in configs))
     for name in rows:
-        line = "%-12s" % name
+        line = NAME_COL % name
         for cfg in configs:
             res = results["p3"].get((name, cfg))
             if res is None or "error" in res:
