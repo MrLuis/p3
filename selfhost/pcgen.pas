@@ -418,6 +418,9 @@ const
 begin
   declareRT('__pas_init', 'void', 'i32,ptr', nu);
   declareRT('__pas_fini', 'void', '', nu);
+  declareRT('__pas_write_begin', 'void', 'ptr', nu);
+  declareRT('__pas_write_end', 'void', 'ptr', nu);
+  declareRT('__pas_write_discard', 'void', 'ptr', nu);
   declareRT('__pas_write_str', 'void', 'ptr,ptr,i64,i32', nu);
   declareRT('__pas_write_char', 'void', 'ptr,i8,i32', nu);
   declareRT('__pas_write_int', 'void', 'ptr,i64,i32', nu);

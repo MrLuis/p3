@@ -90,6 +90,57 @@ begin
                    f, table, x, width, '');
 end;
 
+{ An expression that cannot call Pascal code: its evaluation cannot raise
+  an exception, so it is safe to format it into the write buffer. Runtime
+  calls (bounds checks, string concatenation) are fine: the end of the
+  statement flushes the buffer, or the next statement discards it. }
+function simpleWriteExpr(e: PNode): boolean;
+begin
+  simpleWriteExpr := false;
+  if e = nil then
+    exit;
+  case e^.kind of
+    nkParen:
+      exit(simpleWriteExpr(e^.inner));
+    nkIntegerLit, nkRealLit, nkStringLit:
+      exit(true);
+    nkNameRef:
+      exit((e^.refWith = nil) and (e^.refDecl <> nil) and
+           (e^.refDecl^.kind in [dkVar, dkConst]));
+    nkUnary:
+      if e^.uopDecl = nil then
+        exit(simpleWriteExpr(e^.operand));
+    nkBinary:
+      if (e^.opDecl = nil) and simpleWriteExpr(e^.lhs) and
+         simpleWriteExpr(e^.rhs) then
+        exit(true);
+    nkIndex:
+      if (e^.idxProp = nil) and simpleWriteExpr(e^.base) and
+         simpleWriteExpr(e^.index) then
+        exit(true);
+    nkField:
+      if (e^.fieldDecl <> nil) and (e^.fieldDecl^.kind = dkField) then
+        exit(simpleWriteExpr(e^.base));
+  end;
+end;
+
+function simpleWriteArg(arg: PNode): boolean;
+begin
+  simpleWriteArg := false;
+  if arg^.kind = nkFormatted then
+  begin
+    if not simpleWriteExpr(arg^.fmtValue) then
+      exit;
+    if (arg^.fmtWidth <> nil) and not simpleWriteExpr(arg^.fmtWidth) then
+      exit;
+    if (arg^.fmtPrecision <> nil) and
+       not simpleWriteExpr(arg^.fmtPrecision) then
+      exit;
+    exit(true);
+  end;
+  simpleWriteArg := simpleWriteExpr(arg);
+end;
+
 procedure emitWriteArg(const f: TV; arg: PNode);
 var
   value: PNode;
@@ -152,6 +203,30 @@ begin
     rtv3('__pas_write_int', f, toI64(v, t), width);
 end;
 
+{ Appends a compile-time constant write argument to a merged literal. Only
+  ordinals: a real would need the runtime's exact formatting. }
+function appendWriteConst(arg: PNode; var text: TBuf): boolean;
+begin
+  appendWriteConst := false;
+  if arg^.kind = nkStringLit then
+  begin
+    if arg^.strWide <> 0 then
+      exit;
+    bufAddChars(text, arg^.strValue^.chars, 0, arg^.strValue^.len);
+    exit(true);
+  end;
+  if arg^.kind = nkIntegerLit then
+  begin
+    if (arg^.typ = nil) or not isIntegerLike(arg^.typ) then
+      exit;
+    if isQWord(arg^.typ) then
+      bufAdd(text, uintToStr(arg^.intValue))
+    else
+      bufAdd(text, intToStr(arg^.intValue));
+    exit(true);
+  end;
+end;
+
 procedure emitWrite(s: PNode; isWriteln: boolean);
 var
   ft: PType;
@@ -159,7 +234,7 @@ var
   first, i, j: longint;
   arg: PNode;
   text: TBuf;
-  last: boolean;
+  last, batch, newlineWritten: boolean;
 begin
   f := fileTarget(s^.args, false, ft, first);
   if (ft <> nil) and not ft^.isText then
@@ -171,8 +246,20 @@ begin
     end;
     exit;
   end;
-  { adjacent string and character literals become one write; a trailing
-    literal of writeln gets the newline (item 19) }
+  batch := true;
+  for i := first to s^.args.count - 1 do
+    if not simpleWriteArg(PNode(listGet(s^.args, i))) then
+    begin
+      batch := false;
+      break;
+    end;
+  if batch then
+    rtv1('__pas_write_begin', f)
+  else
+    rtv1('__pas_write_discard', f);
+  { adjacent string, character and ordinal literals become one write; a
+    trailing literal of writeln gets the newline (items 19 and 2) }
+  newlineWritten := false;
   i := first;
   while i < s^.args.count do
   begin
@@ -181,9 +268,8 @@ begin
     while j < s^.args.count do
     begin
       arg := PNode(listGet(s^.args, j));
-      if (arg^.kind <> nkStringLit) or (arg^.strWide <> 0) then
+      if not appendWriteConst(arg, text) then
         break;
-      bufAddChars(text, arg^.strValue^.chars, 0, arg^.strValue^.len);
       j := j + 1;
     end;
     if j > i then
@@ -195,7 +281,10 @@ begin
       rtv4('__pas_write_str', f, a, i64c(text.len), i32c(0));
       bufFree(text);
       if last and isWriteln then
-        exit;
+      begin
+        newlineWritten := true;
+        break;
+      end;
       i := j;
       continue;
     end;
@@ -203,8 +292,10 @@ begin
     emitWriteArg(f, PNode(listGet(s^.args, i)));
     i := i + 1;
   end;
-  if isWriteln then
+  if isWriteln and not newlineWritten then
     rtv1('__pas_writeln', f);
+  if batch then
+    rtv1('__pas_write_end', f);
 end;
 
 procedure emitReadArg(const f: TV; arg: PNode);

@@ -637,12 +637,103 @@ void __pas_write_elem(PasFile *f, const void *src) {
 
 /*===- Text output ----------------------------------------------------------===*/
 
+/* The code generator wraps a write statement whose arguments are simple
+ * (no Pascal calls) in __pas_write_begin/__pas_write_end: the arguments are
+ * formatted into this thread-local buffer and written with one fwrite and
+ * one lock. An exception leaving the statement leaves no lock behind; the
+ * next write statement discards the unflushed buffer (optimization2.md
+ * item 2). */
+typedef struct WriteBatch {
+  PasFile *file;
+  char *data;
+  size_t len, cap;
+} WriteBatch;
+_Thread_local WriteBatch __pas_write_batch;
+
+static int batchActive(PasFile *f) { return __pas_write_batch.file == f; }
+
+static void batchAppend(PasFile *f, const char *p, size_t n) {
+  (void)f;
+  if (__pas_write_batch.len + n > __pas_write_batch.cap) {
+    size_t cap = __pas_write_batch.cap ? __pas_write_batch.cap : 256;
+    while (cap < __pas_write_batch.len + n)
+      cap *= 2;
+    char *data = realloc(__pas_write_batch.data, cap);
+    if (!data)
+      __pas_runtime_error("out of memory in write");
+    __pas_write_batch.data = data;
+    __pas_write_batch.cap = cap;
+  }
+  memcpy(__pas_write_batch.data + __pas_write_batch.len, p, n);
+  __pas_write_batch.len += n;
+}
+
+static void writeText(PasFile *f, const char *p, size_t n) {
+  if (batchActive(f))
+    batchAppend(f, p, n);
+  else
+    fwrite(p, 1, n, f->fp);
+}
+
+/* Starts a write: batched statements need no lock (the end takes it once);
+ * the others take it here. */
+static int writeStart(PasFile *f) {
+  if (batchActive(f))
+    return 0;
+#ifdef _WIN32
+  need_generate(f);
+  return 0;
+#else
+  io_lock();
+  need_generate(f);
+  return 1;
+#endif
+}
+
+static void writeDone(int locked) {
+#ifndef _WIN32
+  if (locked)
+    io_unlock(NULL);
+#else
+  (void)locked;
+#endif
+}
+
+void __pas_write_begin(PasFile *f) {
+  __pas_write_batch.file = f;
+  __pas_write_batch.len = 0;
+}
+
+void __pas_write_discard(PasFile *f) {
+  (void)f; /* no legitimate nested batch: a statement always starts clean */
+  __pas_write_batch.file = NULL;
+  __pas_write_batch.len = 0;
+}
+
+void __pas_write_end(PasFile *f) {
+  if (__pas_write_batch.file != f)
+    return;
+#ifndef _WIN32
+  io_lock();
+  need_generate(f);
+  int locked = 1;
+#else
+  need_generate(f);
+  int locked = 0;
+#endif
+  if (__pas_write_batch.len)
+    fwrite(__pas_write_batch.data, 1, __pas_write_batch.len, f->fp);
+  writeDone(locked);
+  __pas_write_batch.file = NULL;
+  __pas_write_batch.len = 0;
+}
+
 static void pad(PasFile *f, int32_t n) {
   static const char spaces[64] =
       "                                                                ";
   while (n > 0) {
     size_t k = n > (int32_t)sizeof spaces ? sizeof spaces : (size_t)n;
-    fwrite(spaces, 1, k, f->fp);
+    writeText(f, spaces, k);
     n -= (int32_t)k;
   }
 }
@@ -660,9 +751,49 @@ static int decimal(char *buf, uint64_t v) {
   return n;
 }
 
+/* [-]digits.frac for frac <= 9, in the current rounding mode, or -1 when
+ * the value or precision is out of the fast path's range. */
+static int fixedText(char *buf, int cap, double x, int frac) {
+  static const double powers[10] = {1e0, 1e1, 1e2, 1e3, 1e4,
+                                    1e5, 1e6, 1e7, 1e8, 1e9};
+  if (frac < 0 || frac > 9)
+    return -1;
+  double y = signbit(x) ? -x : x;
+  double scaled = y * powers[frac];
+  if (!(scaled < 1.0e15))
+    return -1;
+  /* y * 10^frac is not exact; fall back to snprintf when it is too close
+   * to a rounding boundary for the multiplication error to change a digit. */
+  double fracPart = scaled - floor(scaled);
+  if (fabs(fracPart - 0.5) <= fabs(scaled) * 0x1p-50)
+    return -1;
+  double rounded = nearbyint(scaled);
+  if (!(rounded < 1.0e15))
+    return -1;
+  uint64_t q = (uint64_t)rounded;
+  uint64_t scale = (uint64_t)powers[frac];
+  uint64_t ip = q / scale, fp = q % scale;
+  int n = 0;
+  if (signbit(x))
+    buf[n++] = '-';
+  n += decimal(buf + n, ip);
+  if (frac > 0) {
+    buf[n++] = '.';
+    char digits[10];
+    for (int i = frac - 1; i >= 0; --i) {
+      digits[i] = (char)('0' + (int)(fp % 10));
+      fp /= 10;
+    }
+    if (n + frac >= cap)
+      return -1;
+    memcpy(buf + n, digits, (size_t)frac);
+    n += frac;
+  }
+  return n < cap ? n : -1;
+}
+
 void __pas_write_str(PasFile *f, const char *s, int64_t len, int32_t width) {
-  IO_GUARD();
-  need_generate(f);
+  int locked = writeStart(f);
   if (width > 0) {
     if (len > width) {
       if (!__pas_tp_mode)
@@ -671,19 +802,19 @@ void __pas_write_str(PasFile *f, const char *s, int64_t len, int32_t width) {
       pad(f, width - (int32_t)len);
     }
   }
-  fwrite(s, 1, (size_t)len, f->fp);
+  writeText(f, s, (size_t)len);
+  writeDone(locked);
 }
 
 void __pas_write_char(PasFile *f, char c, int32_t width) {
-  IO_GUARD();
-  need_generate(f);
+  int locked = writeStart(f);
   pad(f, width - 1);
-  fwrite(&c, 1, 1, f->fp);
+  writeText(f, &c, 1);
+  writeDone(locked);
 }
 
 void __pas_write_int(PasFile *f, int64_t v, int32_t width) {
-  IO_GUARD();
-  need_generate(f);
+  int locked = writeStart(f);
   char buf[24];
   int n = 0;
   uint64_t u;
@@ -695,29 +826,29 @@ void __pas_write_int(PasFile *f, int64_t v, int32_t width) {
   }
   n += decimal(buf + n, u);
   pad(f, width - n); /* integers are never truncated */
-  fwrite(buf, 1, (size_t)n, f->fp);
+  writeText(f, buf, (size_t)n);
+  writeDone(locked);
 }
 
 void __pas_write_uint(PasFile *f, uint64_t v, int32_t width) {
-  IO_GUARD();
-  need_generate(f);
+  int locked = writeStart(f);
   char buf[24];
   int n = decimal(buf, v);
   pad(f, width - n);
-  fwrite(buf, 1, (size_t)n, f->fp);
+  writeText(f, buf, (size_t)n);
+  writeDone(locked);
 }
 
 void __pas_write_enum(PasFile *f, const unsigned char *const *names, int64_t v,
                       int32_t width) {
-  IO_GUARD();
-  need_generate(f);
+  int locked = writeStart(f);
   const unsigned char *s = names[v];
-  fwrite(s + 1, 1, s[0], f->fp);
+  writeText(f, (const char *)s + 1, s[0]);
   pad(f, width - s[0]);
+  writeDone(locked);
 }
 
 void __pas_write_bool(PasFile *f, int32_t b, int32_t width) {
-  IO_GUARD();
   if (b)
     __pas_write_str(f, __pas_tp_mode ? "TRUE" : "true", 4, width);
   else
@@ -725,18 +856,20 @@ void __pas_write_bool(PasFile *f, int32_t b, int32_t width) {
 }
 
 void __pas_write_real(PasFile *f, double x, int32_t width, int32_t frac) {
-  IO_GUARD();
-  need_generate(f);
+  int locked = writeStart(f);
   char buf[512];
   int n;
   if (isnan(x) || isinf(x)) {
     const char *s = isnan(x) ? "NaN" : (x < 0 ? "-Inf" : " Inf");
     __pas_write_str(f, s, (int64_t)strlen(s), width);
+    writeDone(locked);
     return;
   }
   if (frac >= 0) {
     /* Fixed-point: [-]digits.fraction, right-aligned in `width`. */
-    n = snprintf(buf, sizeof buf, "%.*f", frac > 300 ? 300 : frac, x);
+    n = fixedText(buf, (int)sizeof buf, x, frac);
+    if (n < 0)
+      n = snprintf(buf, sizeof buf, "%.*f", frac > 300 ? 300 : frac, x);
   } else {
     /* Floating-point: a sign position (' ' or '-'), one digit, '.',
      * DecPlaces digits, 'E', exponent sign, 3 exponent digits;
@@ -760,13 +893,14 @@ void __pas_write_real(PasFile *f, double x, int32_t width, int32_t frac) {
   if (n > (int)sizeof buf - 1)
     n = (int)sizeof buf - 1;
   pad(f, width - n); /* reals are never truncated */
-  fwrite(buf, 1, (size_t)n, f->fp);
+  writeText(f, buf, (size_t)n);
+  writeDone(locked);
 }
 
 void __pas_writeln(PasFile *f) {
-  IO_GUARD();
-  need_generate(f);
-  fputc('\n', f->fp);
+  int locked = writeStart(f);
+  writeText(f, "\n", 1);
+  writeDone(locked);
 }
 
 /*===- Text input -----------------------------------------------------------===*/
@@ -1472,20 +1606,17 @@ void __pas_str_insert(const unsigned char *src, unsigned char *s, int32_t maxlen
 }
 
 void __pas_write_pstr(PasFile *f, const unsigned char *s, int32_t width) {
-  IO_GUARD();
   __pas_write_str(f, (const char *)s + 1, s[0], width);
 }
 
 /* write(f, p) of a pchar: the characters up to the NUL; nothing for nil,
  * not even the padding of a field width (as in Free Pascal). */
 void __pas_write_cstr(PasFile *f, const char *s, int32_t width) {
-  IO_GUARD();
   if (s)
     __pas_write_str(f, s, (int64_t)strlen(s), width);
 }
 
 void __pas_write_astr(PasFile *f, const char *s, int32_t width) {
-  IO_GUARD();
   __pas_write_str(f, s ? s : "", __pas_astr_length(s), width);
 }
 

@@ -1,0 +1,15 @@
+; A write whose arguments cannot call Pascal code uses one begin/end pair;
+; one with a call discards the buffer and stays on the direct path (item 2).
+; RUN: %p3 --emit-llvm %S/Inputs/write-batch.pas -o - | FileCheck %s
+
+; CHECK: call void @__pas_write_begin(ptr [[F1:%.*]])
+; CHECK: call void @__pas_write_int(ptr [[F1]], i64 {{.*}}, i32 0)
+; CHECK: call void @__pas_write_end(ptr [[F1]])
+; CHECK: call void @__pas_write_discard(ptr [[F2:%.*]])
+; CHECK: call void @__pas_write_str(ptr [[F2]], ptr {{.*}}, i64 1, i32 0)
+; CHECK: call i32 @pas.f()
+; CHECK: call void @__pas_write_int(ptr [[F2]], i64 {{.*}}, i32 0)
+; CHECK: call void @__pas_writeln(ptr [[F2]])
+; CHECK: call void @__pas_write_begin(ptr [[F3:%.*]])
+; CHECK: call void @__pas_writeln(ptr [[F3]])
+; CHECK: call void @__pas_write_end(ptr [[F3]])

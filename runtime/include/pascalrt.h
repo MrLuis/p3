@@ -103,7 +103,13 @@ void __pas_read_elem(PasFile *f, void *dst);
 void __pas_write_elem(PasFile *f, const void *src);
 
 /*===- Text output (write / writeln) ----------------------------------------===
- * width <= 0 means no field width was given. Per ISO 7185 6.9.3, strings and
+ * A write statement whose arguments are simple: format into a thread-local
+ * buffer, then write it with one fwrite and one lock. Discard drops an
+ * unflushed buffer (an exception left the statement). */
+void __pas_write_begin(PasFile *f);
+void __pas_write_end(PasFile *f);
+void __pas_write_discard(PasFile *f);
+/* width <= 0 means no field width was given. Per ISO 7185 6.9.3, strings and
  * booleans longer than their field width are truncated; numbers never are. */
 void __pas_write_str(PasFile *f, const char *s, int64_t len, int32_t width);
 void __pas_write_char(PasFile *f, char c, int32_t width);

@@ -165,8 +165,9 @@ static void addRuntimeAttrs(llvm::Function *F) {
 /// Declarations of the libpascalrt entry points (runtime/include/pascalrt.h)
 /// and the C library functions we call.
 struct Runtime {
-  llvm::FunctionCallee Init, Fini, WriteStr, WriteChar, WriteInt, WriteBool,
-      WriteReal, Writeln, ReadInt, ReadInt64, ReadChar, ReadReal, Readln,
+  llvm::FunctionCallee Init, Fini, WriteBegin, WriteEnd, WriteDiscard,
+      WriteStr, WriteChar, WriteInt, WriteBool, WriteReal, Writeln,
+      ReadInt, ReadInt64, ReadChar, ReadReal, Readln,
       RuntimeError, RuntimeErrorAt,
       Memcmp, Atan, New, Dispose, FileNew, FileFree, ProgramParam, Reset,
       Rewrite, Get, Put, Page, Eof, Eoln, Buffer, ReadElem, WriteElem,
@@ -195,6 +196,9 @@ struct Runtime {
     Init = Decl("__pas_init", Void, {I32, Ptr});
     Fini = Decl("__pas_fini", Void, {});
     // Text I/O: the first argument is the PasFile*.
+    WriteBegin = Decl("__pas_write_begin", Void, {Ptr});
+    WriteEnd = Decl("__pas_write_end", Void, {Ptr});
+    WriteDiscard = Decl("__pas_write_discard", Void, {Ptr});
     WriteStr = Decl("__pas_write_str", Void, {Ptr, Ptr, I64, I32});
     WriteChar = Decl("__pas_write_char", Void, {Ptr, I8, I32});
     WriteInt = Decl("__pas_write_int", Void, {Ptr, I64, I32});
@@ -5713,6 +5717,65 @@ public:
     return Tmp;
   }
 
+  /// An expression that cannot call Pascal code: its evaluation cannot raise
+  /// an exception, so it is safe to format it into the write buffer. Runtime
+  /// calls (bounds checks, string concatenation) are fine: the end of the
+  /// statement flushes the buffer, or the next statement discards it.
+  static bool simpleWriteExpr(Expr *E) {
+    if (auto *P = llvm::dyn_cast<ParenExpr>(E))
+      return simpleWriteExpr(P->getInner());
+    if (llvm::isa<IntegerLiteralExpr>(E) || llvm::isa<RealLiteralExpr>(E) ||
+        llvm::isa<StringLiteralExpr>(E))
+      return true;
+    if (auto *N = llvm::dyn_cast<NameRefExpr>(E)) {
+      Decl *D = N->getDecl();
+      return !N->getWith() && D &&
+             (llvm::isa<VarDecl>(D) || llvm::isa<ConstDecl>(D));
+    }
+    if (auto *U = llvm::dyn_cast<UnaryExpr>(E))
+      return !U->getOperator() && simpleWriteExpr(U->getOperand());
+    if (auto *B = llvm::dyn_cast<BinaryExpr>(E))
+      return !B->getOperator() && simpleWriteExpr(B->getLHS()) &&
+             simpleWriteExpr(B->getRHS());
+    if (auto *I = llvm::dyn_cast<IndexExpr>(E))
+      return !I->getProperty() && simpleWriteExpr(I->getBase()) &&
+             simpleWriteExpr(I->getIndex());
+    if (auto *F = llvm::dyn_cast<FieldExpr>(E))
+      return F->getMember() && llvm::isa<FieldDecl>(F->getMember()) &&
+             simpleWriteExpr(F->getBase());
+    return false;
+  }
+
+  static bool simpleWriteArg(Expr *E) {
+    if (auto *F = llvm::dyn_cast<FormattedExpr>(E))
+      return simpleWriteExpr(F->getValue()) &&
+             (!F->getWidth() || simpleWriteExpr(F->getWidth())) &&
+             (!F->getPrecision() || simpleWriteExpr(F->getPrecision()));
+    return simpleWriteExpr(E);
+  }
+
+  /// Appends a compile-time constant write argument to a merged literal.
+  /// Only ordinals: a real would need the runtime's exact formatting.
+  static bool appendConstText(Expr *E, std::string &Text) {
+    if (auto *SL = llvm::dyn_cast<StringLiteralExpr>(E)) {
+      if (SL->isWideCharLiteral())
+        return false;
+      Text += SL->getValue().str();
+      return true;
+    }
+    if (auto *IL = llvm::dyn_cast<IntegerLiteralExpr>(E)) {
+      Type *T = IL->getType();
+      if (!T || !T->isInteger())
+        return false;
+      if (isSignedOrdinal(T))
+        Text += std::to_string((int64_t)IL->getValue());
+      else
+        Text += std::to_string(IL->getValue());
+      return true;
+    }
+    return false;
+  }
+
   void emitWrite(ProcCallStmt *S, bool IsWriteln) {
     llvm::ArrayRef<Expr *> Args = S->getArgs();
     FileType *FT;
@@ -5723,16 +5786,22 @@ public:
                      {File, addressForValue(Arg, FT->getElementType())});
       return;
     }
-    // Adjacent string and character literals become one write; a trailing
-    // literal of writeln gets the newline (item 19).
+    bool Batch = true;
+    for (Expr *Arg : Args)
+      if (!simpleWriteArg(Arg)) {
+        Batch = false;
+        break;
+      }
+    B.CreateCall(Batch ? RT.WriteBegin : RT.WriteDiscard, {File});
+    // Adjacent string, character and ordinal literals become one write; a
+    // trailing literal of writeln gets the newline (items 19 and 2).
+    bool NewlineWritten = false;
     for (size_t I = 0; I < Args.size();) {
       std::string Text;
       size_t J = I;
       while (J < Args.size()) {
-        auto *SL = llvm::dyn_cast<StringLiteralExpr>(Args[J]);
-        if (!SL || SL->isWideCharLiteral())
+        if (!appendConstText(Args[J], Text))
           break;
-        Text += SL->getValue().str();
         ++J;
       }
       if (J > I) {
@@ -5742,16 +5811,20 @@ public:
         llvm::Constant *S = B.CreateGlobalString(Text, ".str");
         B.CreateCall(RT.WriteStr,
                      {File, S, B.getInt64(Text.size()), B.getInt32(0)});
-        if (Last && IsWriteln)
-          return;
+        if (Last && IsWriteln) {
+          NewlineWritten = true;
+          break;
+        }
         I = J;
         continue;
       }
       emitWriteArg(File, Args[I]);
       ++I;
     }
-    if (IsWriteln)
+    if (IsWriteln && !NewlineWritten)
       B.CreateCall(RT.Writeln, {File});
+    if (Batch)
+      B.CreateCall(RT.WriteEnd, {File});
   }
 
   void emitRead(ProcCallStmt *S, bool IsReadln) {
