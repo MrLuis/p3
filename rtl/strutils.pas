@@ -175,6 +175,36 @@ begin
   PadRight := AddCharR(' ', s, n);
 end;
 
+{ Whether sub is at position at of s (it fits there), without case
+  (ASCII): a pair is lowercased only where it differs, as in CompareText;
+  no string is made (docs/strutils-review.md ST-5). }
+function textAt(const sub, s: string; at: longint): boolean;
+var
+  i, n: longint;
+  a, b: PChar;
+  ca, cb: char;
+begin
+  textAt := false;
+  n := length(sub);
+  a := PChar(sub);
+  b := PChar(s) + (at - 1);
+  for i := 0 to n - 1 do
+  begin
+    ca := a[i];
+    cb := b[i];
+    if ca <> cb then
+    begin
+      if (ca >= 'A') and (ca <= 'Z') then
+        ca := chr(ord(ca) + 32);
+      if (cb >= 'A') and (cb <= 'Z') then
+        cb := chr(ord(cb) + 32);
+      if ca <> cb then
+        exit;
+    end;
+  end;
+  textAt := true;
+end;
+
 function StartsStr(const sub, s: string): boolean;
 begin
   StartsStr := (length(sub) <= length(s)) and (copy(s, 1, length(sub)) = sub);
@@ -187,12 +217,13 @@ end;
 
 function StartsText(const sub, s: string): boolean;
 begin
-  StartsText := StartsStr(LowerCase(sub), LowerCase(s));
+  StartsText := (length(sub) <= length(s)) and textAt(sub, s, 1);
 end;
 
 function EndsText(const sub, s: string): boolean;
 begin
-  EndsText := EndsStr(LowerCase(sub), LowerCase(s));
+  EndsText := (length(sub) <= length(s)) and
+    textAt(sub, s, length(s) - length(sub) + 1);
 end;
 
 function ContainsStr(const s, sub: string): boolean;

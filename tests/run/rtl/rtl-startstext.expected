@@ -1,0 +1,28 @@
+"abc" "abcdef": TRUE FALSE
+"def" "abcdef": FALSE TRUE
+"abcdef" "abcdef": TRUE TRUE
+"ABC" "abcdef": TRUE FALSE
+"DEF" "abcdef": FALSE TRUE
+"aBcDeF" "AbCdEf": TRUE TRUE
+"abcdefg" "abcdef": FALSE FALSE
+"xabcdef" "abcdef": FALSE FALSE
+"" "abcdef": TRUE TRUE
+"abc" "": FALSE FALSE
+"" "": TRUE TRUE
+"xbc" "abcdef": FALSE FALSE
+"axc" "abcdef": FALSE FALSE
+"abx" "abcdef": FALSE FALSE
+"xef" "abcdef": FALSE FALSE
+"dxf" "abcdef": FALSE FALSE
+"dex" "abcdef": FALSE FALSE
+"@" "`bc": FALSE FALSE
+"a@" "a`": FALSE FALSE
+"`" "@bc": FALSE FALSE
+"[" "{": FALSE FALSE
+"Z" "z": TRUE TRUE
+"the quick brown" "The Quick Brown Fox": TRUE FALSE
+"BROWN FOX" "The Quick Brown Fox": FALSE TRUE
+"The Quick Brown" "The Quick Brown Fox": TRUE FALSE
+"Brown Fox" "The Quick Brown Fox": FALSE TRUE
+"Èa" "Èabc": TRUE FALSE
+random differences: 0
