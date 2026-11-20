@@ -134,6 +134,156 @@ implementation
 
 {$IFDEF P3_OBJFPC}
 
+{ Hashing of keys, for DistinctBy and GroupBy (docs/sequences-review.md
+  SQ-2, SQ-3). KeyHash gives a hash that is the same for keys that are
+  equal, and True, for the key types it knows: the integer kinds, string,
+  Char, Boolean, pointers and classes (by reference). For any other type
+  the untyped overload is chosen: False, and the caller searches the keys
+  it has one by one, as it always did. }
+type
+  PHashByte = ^Byte;
+
+{$Q-}{$R-}
+function Mix64(V: QWord): Cardinal;
+begin
+  V := V xor (V shr 33);
+  V := V * QWord($FF51AFD7ED558CCD);
+  V := V xor (V shr 33);
+  V := V * QWord($C4CEB9FE1A85EC53);
+  V := V xor (V shr 33);
+  Result := Cardinal(V and $FFFFFFFF);
+end;
+
+function KeyHash(const X: Int64; out H: Cardinal): Boolean; overload;
+begin
+  H := Mix64(QWord(X));
+  Result := True;
+end;
+
+function KeyHash(const X: QWord; out H: Cardinal): Boolean; overload;
+begin
+  H := Mix64(X);
+  Result := True;
+end;
+
+function KeyHash(const X: Char; out H: Cardinal): Boolean; overload;
+begin
+  H := Mix64(Ord(X));
+  Result := True;
+end;
+
+function KeyHash(const X: Boolean; out H: Cardinal): Boolean; overload;
+begin
+  H := Mix64(Ord(X));
+  Result := True;
+end;
+
+function KeyHash(const X: Pointer; out H: Cardinal): Boolean; overload;
+begin
+  H := Mix64(QWord(PHashByte(X) - PHashByte(nil)));
+  Result := True;
+end;
+
+function KeyHash(const X: string; out H: Cardinal): Boolean; overload;
+var
+  I: Integer;
+  V: Cardinal;
+begin
+  V := 2166136261;
+  for I := 1 to Length(X) do
+    V := (V xor Cardinal(Ord(X[I]))) * 16777619;
+  H := Mix64(V);
+  Result := True;
+end;
+
+function KeyHash(const X; out H: Cardinal): Boolean; overload;
+begin
+  H := 0;
+  Result := False;
+end;
+{$Q+}{$R+}
+
+{ The distinct keys seen so far, in the order they first came: Find gives a
+  key's index, adding the key if it is new. A key with a hash is looked up
+  in an open-addressing table (Slots holds an index + 1, 0 is empty; the
+  table is a power of 2, at least twice the keys); any other is searched for in Keys one
+  by one, the key of the last Find first, which makes runs of one key cheap. }
+type
+  generic TKeyIndex<K> = record
+    Keys: specialize TArray<K>;
+    Hashes: specialize TArray<Cardinal>;
+    Slots: specialize TArray<Integer>;
+    Count, Last: Integer;
+    function Find(const KY: K; out Added: Boolean): Integer;
+    procedure Rehash(NewSize: Integer);
+  end;
+
+procedure TKeyIndex.Rehash(NewSize: Integer);
+var
+  I, Slot: Integer;
+begin
+  Slots := nil;
+  SetLength(Slots, NewSize);
+  for I := 0 to Count - 1 do
+  begin
+    Slot := Integer(Hashes[I] and Cardinal(NewSize - 1));
+    while Slots[Slot] <> 0 do
+      Slot := (Slot + 1) and (NewSize - 1);
+    Slots[Slot] := I + 1;
+  end;
+end;
+
+function TKeyIndex.Find(const KY: K; out Added: Boolean): Integer;
+var
+  H: Cardinal;
+  Slot, J: Integer;
+  List: specialize TArray<K>;
+begin
+  Added := False;
+  if KeyHash(KY, H) then
+  begin
+    if Length(Slots) < 2 * (Count + 1) then
+      if Length(Slots) = 0 then
+        Rehash(16)
+      else
+        Rehash(Length(Slots) * 2);
+    Slot := Integer(H and Cardinal(Length(Slots) - 1));
+    while Slots[Slot] <> 0 do
+    begin
+      J := Slots[Slot] - 1;
+      if (Hashes[J] = H) and (Keys[J] = KY) then
+        exit(J);
+      Slot := (Slot + 1) and (Length(Slots) - 1);
+    end;
+    Slots[Slot] := Count + 1;
+  end
+  else
+  begin
+    if (Last < Count) and (Keys[Last] = KY) then
+      exit(Last);
+    List := Keys;
+    J := 0;
+    while (J < Count) and not (List[J] = KY) do
+      Inc(J);
+    if J < Count then
+    begin
+      Last := J;
+      exit(J);
+    end;
+  end;
+  if Count = Length(Keys) then
+  begin
+    SetLength(Keys, 2 * Count + 4);
+    SetLength(Hashes, 2 * Count + 4);
+  end;
+  Keys[Count] := KY;
+  Hashes[Count] := H;
+  Last := Count;
+  Result := Count;
+  Inc(Count);
+  Added := True;
+end;
+
 function TSeqEnum.MoveNext: Boolean;
 begin
   Result := Next(Cur);
@@ -276,28 +426,17 @@ end;
 generic function TSeq.DistinctBy<K>(Key: specialize TFunc<T, K>): specialize TSeq<T>;
 var
   Src: specialize TNext<T>;
-  Seen: specialize TArray<K>;
+  Seen: specialize TKeyIndex<K>;
 begin
   Src := Next;
-  Seen := nil;
   Result.Next := function(var Y: T): Boolean => begin
       Result := Src(Y);
       while Result do
       begin
-        var KY := Key(Y);
-        var Found := False;
-        for var I := 0 to High(Seen) do
-          if Seen[I] = KY then
-          begin
-            Found := True;
-            break;
-          end;
-        if not Found then
-        begin
-          SetLength(Seen, Length(Seen) + 1);
-          Seen[High(Seen)] := KY;
+        var Added: Boolean;
+        Seen.Find(Key(Y), Added);
+        if Added then
           exit(True);
-        end;
         Result := Src(Y);
       end;
     end;
@@ -465,6 +604,7 @@ generic function TSeq.GroupBy<K>(Key: specialize TFunc<T, K>): specialize TSeq<s
 var
   Src: specialize TNext<T>;
   Groups: specialize TArray<specialize TGroup<K, T>>;
+  Index: specialize TKeyIndex<K>;
   Pos: Integer;
   Done: Boolean;
 begin
@@ -478,14 +618,12 @@ begin
         Groups := nil;
         while Src(X) do
         begin
-          var KX := Key(X);
-          var G := 0;
-          while (G < Length(Groups)) and not (Groups[G].Key = KX) do
-            Inc(G);
-          if G = Length(Groups) then
+          var Added: Boolean;
+          var G := Index.Find(Key(X), Added);
+          if Added then
           begin
             SetLength(Groups, G + 1);
-            Groups[G].Key := KX;
+            Groups[G].Key := Index.Keys[G];
           end;
           var N := Length(Groups[G].Items);
           SetLength(Groups[G].Items, N + 1);

@@ -1,0 +1,19 @@
+integer, mode 0: 0 keys, 0 differences
+integer, mode 1: 1 keys, 0 differences
+integer, mode 2: 1 keys, 0 differences
+integer, mode 3: 7 keys, 0 differences
+integer, mode 4: 2403 keys, 0 differences
+integer, mode 5: 3922 keys, 0 differences
+integer, mode 6: 50 keys, 0 differences
+byte: 256 keys, 0 differences
+int64: 1975 keys, 0 differences
+qword: 298 keys, 0 differences
+cardinal: 491 keys, 0 differences
+string: 2526 keys, 0 differences
+string, empty: 0 keys, 0 differences
+string, empty keys: 1 keys, 0 differences
+char: 60 keys, 0 differences
+boolean: 2 keys, 0 differences
+class: 40 keys, 0 differences
+enumeration: 4 keys, 0 differences
+double: 30 keys, 0 differences
