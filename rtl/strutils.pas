@@ -49,14 +49,25 @@ implementation
 
 uses sysutils;
 
+{ Makes the result once and writes it through a pointer, reading s from
+  its end (docs/strutils-review.md ST-7). }
 function ReverseString(const s: string): string;
 var
-  i: longint;
+  i, n: longint;
   r: string;
+  p, q: PChar;
 begin
-  r := s;
-  for i := 1 to length(s) do
-    r[i] := s[length(s) - i + 1];
+  n := length(s);
+  if n = 0 then
+  begin
+    ReverseString := '';
+    exit;
+  end;
+  setlength(r, n);
+  p := PChar(r);
+  q := PChar(s) + (n - 1);
+  for i := 0 to n - 1 do
+    p[i] := (q - i)^;
   ReverseString := r;
 end;
 

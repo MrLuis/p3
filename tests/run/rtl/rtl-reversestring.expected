@@ -1,0 +1,10 @@
+"" -> ""
+"a" -> "a"
+"ab" -> "ba"
+"abc" -> "cba"
+"abcd" -> "dcba"
+"Hello, World!" -> "!dlroW ,olleH"
+"aÈbÿc" -> "cÿbÈa"
+256: 256 255 0 TRUE TRUE
+unchanged Xegnahcnu
+random differences: 0
