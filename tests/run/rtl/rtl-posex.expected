@@ -1,0 +1,26 @@
+PosEx(b, abcabc, 1) = 2
+PosEx(b, abcabc, 2) = 2
+PosEx(b, abcabc, 3) = 5
+PosEx(b, abcabc, 5) = 5
+PosEx(b, abcabc, 6) = 0
+PosEx(c, abcabc, 6) = 6
+PosEx(c, abcabc, 7) = 0
+PosEx(abc, abcabc, 4) = 4
+PosEx(abc, abcabc, 5) = 0
+PosEx(abcd, abc, 1) = 0
+PosEx(abc, abc, 1) = 1
+PosEx(abc, abc, 0) = 0
+PosEx(, abc, 1) = 0
+PosEx(a, , 1) = 0
+PosEx(, , 1) = 0
+PosEx(aa, aaaa, 1) = 1
+PosEx(aa, aaaa, 2) = 2
+PosEx(aa, aaaa, 3) = 3
+PosEx(aa, aaaa, 4) = 0
+PosEx(ab, aab, 1) = 2
+PosEx(aab, aaab, 1) = 2
+4
+0
+0
+scan: 999500
+random differences: 0

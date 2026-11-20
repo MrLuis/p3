@@ -181,16 +181,43 @@ begin
   AnsiContainsStr := ContainsStr(s, sub);
 end;
 
-function PosEx(const sub, s: string; offset: longint): longint;
+{ The position of the first sub in s at or after start; 0 if none (sub is
+  not empty). The same search as sysutils' own posFrom, which is not
+  exported. }
+function findFrom(const sub, s: string; start: longint): longint;
 var
-  p: longint;
+  i, j, last, m: longint;
+begin
+  findFrom := 0;
+  m := length(sub);
+  last := length(s) - m + 1;
+  i := start;
+  while i <= last do
+  begin
+    if s[i] = sub[1] then
+    begin
+      j := 2;
+      while (j <= m) and (s[i + j - 1] = sub[j]) do
+        j := j + 1;
+      if j > m then
+      begin
+        findFrom := i;
+        exit;
+      end;
+    end;
+    i := i + 1;
+  end;
+end;
+
+{ Searches s in place from offset: no copy of the rest of the string, so a
+  scan that goes on from each match is linear (docs/strutils-review.md
+  ST-1). }
+function PosEx(const sub, s: string; offset: longint): longint;
 begin
   PosEx := 0;
   if (offset < 1) or (offset > length(s)) or (sub = '') then
     exit;
-  p := pos(sub, copy(s, offset, high(longint)));
-  if p > 0 then
-    PosEx := p + offset - 1;
+  PosEx := findFrom(sub, s, offset);
 end;
 
 {$IFDEF P3_OBJFPC}
