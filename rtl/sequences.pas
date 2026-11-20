@@ -297,10 +297,10 @@ end;
 generic function TSeq.Map<R>(F: specialize TFunc<T, R>): specialize TSeq<R>;
 var
   Src: specialize TNext<T>;
+  X: T;
 begin
   Src := Next;
   Result.Next := function(var Y: R): Boolean => begin
-      var X: T;
       Result := Src(X);
       if Result then
         Y := F(X);
