@@ -1,0 +1,18 @@
+; A routine that uses managed values gets an exception frame only when its
+; landing would release something (a managed local, temporary or result):
+; with nothing to release, the exception leaves it the same way without
+; one, and the frame costs a setjmp per call.
+; RUN: %p3 --mode=objfpc --emit-llvm %S/Inputs/exc-frame.pas -o - | FileCheck %s
+; RUN: %p3 --mode=objfpc %S/Inputs/exc-frame.pas -o %t && %t | FileCheck %s --check-prefix=OUT
+
+; CHECK-LABEL: define internal i32 @pas.passon(
+; CHECK-NOT: __pas_exc_push
+; CHECK: ret i32
+; CHECK-LABEL: define internal i32 @pas.withlocal(
+; CHECK: __pas_exc_push
+; CHECK: managed.raise
+; CHECK-LABEL: define internal i32 @pas.withtemp(
+; CHECK: __pas_exc_push
+; CHECK: managed.raise
+
+; OUT: -1 1 1

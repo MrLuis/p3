@@ -5265,7 +5265,12 @@ public:
       llvm::DebugLoc Loc = B.getCurrentDebugLocation();
       B.SetInsertPoint(BeforeBody);
       setDebugLoc(R->getBodyLocation());
-      if (mayRaise()) {
+      // Only when the landing has something to release: with nothing, it
+      // would only raise again, as the exception does without it (and the
+      // frame costs a setjmp on every call).
+      bool Releases = !Managed.empty() || ManagedResult ||
+                      !RoutineTemps.empty() || FrameFini;
+      if (Releases && mayRaise()) {
         if (!PinTemps) { // what the landing releases
           if (CurFrame)
             pinInMemory(CurFrame);

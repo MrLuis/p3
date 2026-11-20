@@ -4819,7 +4819,11 @@ begin
     savedLoc := irDebugLoc;
     irSetInsertPoint(beforeBody);
     setDebugLoc(bodyLoc(r));
-    if irMayRaise then
+    { only when the landing has something to release: with nothing, it
+      would only raise again, as the exception does without it (and the
+      frame costs a setjmp on every call) }
+    if ((managedAddrs.count > 0) or managedResult or (routineTemps.count > 0) or
+        (frameFini <> nil)) and irMayRaise then
     begin
       if not pinTemps then { what the landing releases }
       begin
