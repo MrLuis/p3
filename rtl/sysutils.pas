@@ -623,6 +623,8 @@ begin
   LowerCase := r;
 end;
 
+{ (no range checks in these two: i stays within both strings) }
+{$push}{$R-}
 function CompareStr(const a, b: string): longint;
 var
   i, n: longint;
@@ -668,6 +670,7 @@ begin
   end;
   CompareText := length(a) - length(b);
 end;
+{$pop}
 
 function SameText(const a, b: string): boolean;
 begin

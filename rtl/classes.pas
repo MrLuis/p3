@@ -1229,10 +1229,19 @@ begin
   Index := L;
 end;
 
+{ Unsorted: a scan of the items themselves, not of Strings[i] (a virtual
+  call and a copy of each string, as TStrings.IndexOf does). }
 function TStringList.IndexOf(const S: string): longint;
+var
+  i: longint;
 begin
   if not FSorted then
-    Result := inherited IndexOf(S)
+  begin
+    for i := 0 to FCount - 1 do
+      if DoCompareText(FList^[i].FStr, S) = 0 then
+        exit(i);
+    Result := -1;
+  end
   else if not Find(S, Result) then
     Result := -1;
 end;
