@@ -192,6 +192,7 @@ type
     procedure Exchange(Index1, Index2: longint); override;
     function Find(const S: string; var Index: longint): boolean; virtual;
     function IndexOf(const S: string): longint; override;
+    function IndexOfName(const Name: string): longint; override;
     procedure Insert(Index: longint; const S: string); override;
     procedure Sort; virtual;
     property CaseSensitive: boolean read FCaseSensitive write SetCaseSensitive;
@@ -1272,6 +1273,62 @@ begin
   end
   else if not Find(S, Result) then
     Result := -1;
+end;
+
+{ Scans the items themselves (not Strings[i]). A TStringList itself
+  compares in place: a name is Name when the separator first comes right
+  after length(Name) characters and those are Name (case-sensitively or
+  not), which is when CompareStr / CompareText of copy(s, 1, p - 1) and
+  Name is 0, without the copy. A descendant may override DoCompareText:
+  it gets the copy, as in TStrings. }
+function TStringList.IndexOfName(const Name: string): longint;
+var
+  i, k, n: longint;
+  sep, a, b: char;
+  same: boolean;
+begin
+  CheckSpecialChars;
+  sep := FNameValueSeparator;
+  if ClassType <> TStringList then
+  begin
+    for i := 0 to FCount - 1 do
+    begin
+      k := pos(sep, FList^[i].FStr);
+      if (k > 0) and (DoCompareText(copy(FList^[i].FStr, 1, k - 1), Name) = 0) then
+        exit(i);
+    end;
+    exit(-1);
+  end;
+  n := length(Name);
+  for i := 0 to FCount - 1 do
+    if (length(FList^[i].FStr) > n) and (FList^[i].FStr[n + 1] = sep) then
+    begin
+      same := true;
+      for k := 1 to n do
+      begin
+        a := FList^[i].FStr[k];
+        b := Name[k];
+        if a = sep then
+          same := false
+        else if a <> b then
+        begin
+          if not FCaseSensitive then
+          begin
+            if (a >= 'A') and (a <= 'Z') then
+              a := chr(ord(a) + 32);
+            if (b >= 'A') and (b <= 'Z') then
+              b := chr(ord(b) + 32);
+          end;
+          if a <> b then
+            same := false;
+        end;
+        if not same then
+          break;
+      end;
+      if same then
+        exit(i);
+    end;
+  Result := -1;
 end;
 
 function TStringList.Add(const S: string): longint;
