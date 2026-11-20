@@ -348,17 +348,35 @@ begin
   Dec2Numb := AddChar('0', r, len);
 end;
 
+{ Makes the result once and writes the bits from the last digit back,
+  through a pointer; digits past the 64th are '0', as in Free Pascal
+  (docs/strutils-review.md ST-3). }
 function IntToBin(value: int64; digits: longint): string;
 var
-  i: longint;
+  i, bits: longint;
   r: string;
+  p: PChar;
 begin
-  r := '';
-  for i := digits - 1 downto 0 do
-    if (value shr i) and 1 = 1 then
-      r := r + '1'
+  if digits <= 0 then
+  begin
+    IntToBin := '';
+    exit;
+  end;
+  setlength(r, digits);
+  p := PChar(r);
+  bits := digits;
+  if bits > 64 then
+    bits := 64;
+  for i := digits - 1 downto digits - bits do
+  begin
+    if value and 1 = 1 then
+      p[i] := '1'
     else
-      r := r + '0';
+      p[i] := '0';
+    value := value shr 1;
+  end;
+  for i := 0 to digits - bits - 1 do
+    p[i] := '0';
   IntToBin := r;
 end;
 
