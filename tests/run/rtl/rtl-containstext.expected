@@ -1,0 +1,23 @@
+"The Quick Brown Fox" "the": TRUE
+"The Quick Brown Fox" "FOX": TRUE
+"The Quick Brown Fox" "qUICK bROWN": TRUE
+"The Quick Brown Fox" "The Quick Brown Fox": TRUE
+"The Quick Brown Fox" "THE QUICK BROWN FOXES": FALSE
+"The Quick Brown Fox" "Foxy": FALSE
+"The Quick Brown Fox" "quick  brown": FALSE
+"The Quick Brown Fox" "": FALSE
+"" "": FALSE
+"" "a": FALSE
+"a" "A": TRUE
+"A" "a": TRUE
+"@bc" "`BC": FALSE
+"`bc" "@BC": FALSE
+"x@y" "X`Y": FALSE
+"[z]" "{Z}": FALSE
+"1234" "23": TRUE
+"aaaaaaaaab" "AAB": TRUE
+"aaaaaaaaaa" "AAB": FALSE
+"abababababc" "ABC": TRUE
+"a»b" "»B": TRUE
+"a»b" "…B": FALSE
+random differences: 0

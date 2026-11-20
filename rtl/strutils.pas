@@ -258,9 +258,32 @@ begin
   ContainsStr := (sub <> '') and (pos(sub, s) > 0);
 end;
 
+{ Scans s in place for the first character of sub in either case, then
+  compares the rest with textAt: no string is made
+  (docs/strutils-review.md ST-10). }
 function ContainsText(const s, sub: string): boolean;
+var
+  i, last: longint;
+  lo, up: char;
+  p: PChar;
 begin
-  ContainsText := ContainsStr(LowerCase(s), LowerCase(sub));
+  ContainsText := false;
+  last := length(s) - length(sub);
+  if (sub = '') or (last < 0) then
+    exit;
+  lo := sub[1];
+  if (lo >= 'A') and (lo <= 'Z') then
+    lo := chr(ord(lo) + 32);
+  up := lo;
+  if (lo >= 'a') and (lo <= 'z') then
+    up := chr(ord(lo) - 32);
+  p := PChar(s);
+  for i := 0 to last do
+    if ((p[i] = lo) or (p[i] = up)) and textAt(sub, s, i + 1) then
+    begin
+      ContainsText := true;
+      exit;
+    end;
 end;
 
 function AnsiStartsStr(const sub, s: string): boolean;
