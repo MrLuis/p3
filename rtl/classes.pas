@@ -943,9 +943,12 @@ begin
   begin
     s := Strings[i];
     doQuote := false;
-    for j := 1 to length(s) do
-      if s[j] in breaks then
-        doQuote := true;
+    j := 1;
+    while (j <= length(s)) and not doQuote do
+    begin
+      doQuote := s[j] in breaks;
+      j := j + 1;
+    end;
     if doQuote then
       Result := Result + q + StringReplace(s, q, q + q, [rfReplaceAll]) + q
     else
