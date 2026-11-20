@@ -715,37 +715,100 @@ begin
   QuotedStr := r + '''';
 end;
 
+{ The position of the first sub in s at or after start; 0 if none. }
+function posFrom(const sub, s: string; start: longint): longint;
+var
+  i, j, last, m: longint;
+begin
+  posFrom := 0;
+  m := length(sub);
+  last := length(s) - m + 1;
+  i := start;
+  while i <= last do
+  begin
+    if s[i] = sub[1] then
+    begin
+      j := 2;
+      while (j <= m) and (s[i + j - 1] = sub[j]) do
+        j := j + 1;
+      if j > m then
+      begin
+        posFrom := i;
+        exit;
+      end;
+    end;
+    i := i + 1;
+  end;
+end;
+
+{ n characters of src from position at to position to of dst (n >= 0) }
+procedure putChars(const src: string; at: longint; var dst: string; to_, n: longint);
+begin
+  if n > 0 then
+    move(src[at], dst[to_], n);
+end;
+
+{ The matches are counted, the result is made once at its final length,
+  and the pieces are copied into it: no match moves the rest of the
+  string (docs/sysutils-review.md SU-1). The search is in s itself, or in
+  its lowercase copy for rfIgnoreCase (the text copied is always s's). }
 function StringReplace(const s, from, into: string; flags: TReplaceFlags): string;
 var
-  rest, restCmp, fromCmp, r: string;
-  p: longint;
+  cs, fc, r: string;
+  p, m, k, count, last, d: longint;
+  all: boolean;
 begin
   if from = '' then
   begin
     StringReplace := s;
     exit;
   end;
-  rest := s;
   if rfIgnoreCase in flags then
   begin
-    restCmp := LowerCase(s);
-    fromCmp := LowerCase(from);
+    cs := LowerCase(s);
+    fc := LowerCase(from);
   end
   else
   begin
-    restCmp := s;
-    fromCmp := from;
+    cs := s;
+    fc := from;
   end;
+  all := rfReplaceAll in flags;
+  m := length(from);
+  count := 0;
+  p := posFrom(fc, cs, 1);
+  while p > 0 do
+  begin
+    count := count + 1;
+    if all then
+      p := posFrom(fc, cs, p + m)
+    else
+      p := 0;
+  end;
+  if count = 0 then
+  begin
+    StringReplace := s;
+    exit;
+  end;
+  k := length(into);
   r := '';
-  repeat
-    p := pos(fromCmp, restCmp);
-    if p = 0 then
-      break;
-    r := r + copy(rest, 1, p - 1) + into;
-    delete(rest, 1, p - 1 + length(from));
-    delete(restCmp, 1, p - 1 + length(from));
-  until not (rfReplaceAll in flags);
-  StringReplace := r + rest;
+  setlength(r, length(s) + count * (k - m));
+  last := 1;
+  d := 1;
+  p := posFrom(fc, cs, 1);
+  while count > 0 do
+  begin
+    putChars(s, last, r, d, p - last);
+    d := d + (p - last);
+    putChars(into, 1, r, d, k);
+    d := d + k;
+    last := p + m;
+    count := count - 1;
+    if count > 0 then
+      p := posFrom(fc, cs, last);
+  end;
+  putChars(s, last, r, d, length(s) - last + 1);
+  StringReplace := r;
 end;
 
 function IsDelimiter(const delimiters, s: string; index: longint): boolean;
