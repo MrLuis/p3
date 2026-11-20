@@ -726,27 +726,54 @@ begin
     Trim := copy(s, i, n - i + 1);
 end;
 
+{ UpperCase and LowerCase look for the first character to change; with
+  none they return s itself, otherwise the first write makes the copy and
+  the rest is written through a pointer (docs/sysutils-review.md SU-7). }
 function UpperCase(const s: string): string;
 var
-  i: longint;
+  i, n: longint;
   r: string;
+  p: PChar;
 begin
+  n := length(s);
+  i := 1;
+  while (i <= n) and not ((s[i] >= 'a') and (s[i] <= 'z')) do
+    i := i + 1;
+  if i > n then
+  begin
+    UpperCase := s;
+    exit;
+  end;
   r := s;
-  for i := 1 to length(r) do
-    if (r[i] >= 'a') and (r[i] <= 'z') then
-      r[i] := chr(ord(r[i]) - 32);
+  r[i] := chr(ord(r[i]) - 32);
+  p := PChar(r);
+  for i := i to n - 1 do
+    if (p[i] >= 'a') and (p[i] <= 'z') then
+      p[i] := chr(ord(p[i]) - 32);
   UpperCase := r;
 end;
 
 function LowerCase(const s: string): string;
 var
-  i: longint;
+  i, n: longint;
   r: string;
+  p: PChar;
 begin
+  n := length(s);
+  i := 1;
+  while (i <= n) and not ((s[i] >= 'A') and (s[i] <= 'Z')) do
+    i := i + 1;
+  if i > n then
+  begin
+    LowerCase := s;
+    exit;
+  end;
   r := s;
-  for i := 1 to length(r) do
-    if (r[i] >= 'A') and (r[i] <= 'Z') then
-      r[i] := chr(ord(r[i]) + 32);
+  r[i] := chr(ord(r[i]) + 32);
+  p := PChar(r);
+  for i := i to n - 1 do
+    if (p[i] >= 'A') and (p[i] <= 'Z') then
+      p[i] := chr(ord(p[i]) + 32);
   LowerCase := r;
 end;
 

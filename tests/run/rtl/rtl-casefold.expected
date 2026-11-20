@@ -1,0 +1,22 @@
+[] -> [] []
+[1234 !?-_] -> [1234 !?-_] [1234 !?-_]
+[lower only] -> [LOWER ONLY] [lower only]
+[UPPER ONLY] -> [UPPER ONLY] [upper only]
+[MiXeD cAsE 123 wOrDs] -> [MIXED CASE 123 WORDS] [mixed case 123 words]
+[a] -> [A] [a]
+[Z] -> [Z] [z]
+[1234567890a] -> [1234567890A] [1234567890a]
+[1234567890A] -> [1234567890A] [1234567890a]
+[abcdefghijklmnopqrstuvwxyz] -> [ABCDEFGHIJKLMNOPQRSTUVWXYZ] [abcdefghijklmnopqrstuvwxyz]
+[ABCDEFGHIJKLMNOPQRSTUVWXYZ] -> [ABCDEFGHIJKLMNOPQRSTUVWXYZ] [abcdefghijklmnopqrstuvwxyz]
+[first Letter then long tail of lowercase and UPPERCASE text, 42 chars+] -> [FIRST LETTER THEN LONG TAIL OF LOWERCASE AND UPPERCASE TEXT, 42 CHARS+] [first letter then long tail of lowercase and uppercase text, 42 chars+]
+[long digits 1234567890 1234567890 1234567890 and finally X] -> [LONG DIGITS 1234567890 1234567890 1234567890 AND FINALLY X] [long digits 1234567890 1234567890 1234567890 and finally x]
+[long digits 1234567890 1234567890 1234567890 and finally x] -> [LONG DIGITS 1234567890 1234567890 1234567890 AND FINALLY X] [long digits 1234567890 1234567890 1234567890 and finally x]
+[@[`{ the characters next to the letters ranges: AZ az] -> [@[`{ THE CHARACTERS NEXT TO THE LETTERS RANGES: AZ AZ] [@[`{ the characters next to the letters ranges: az az]
+bytes changed by UpperCase: 26 by LowerCase: 26
+TRUE TRUE
+Hello World HELLO WORLD
+Hello World hello world
+already lower Already lower
+ALREADY UPPER aLREADY UPPER
+random differences: 0
