@@ -1293,13 +1293,18 @@ begin
   Changed;
 end;
 
+{ The two items' bytes trade places: each slot's string moves, whole, to
+  the other, so no reference count changes (a TStringItem copy would add
+  and release references three times). }
 procedure TStringList.ExchangeItems(Index1, Index2: longint);
 var
-  t: TStringItem;
+  t: record { TStringItem's layout, uncounted }
+    FStr, FObject: pointer;
+  end;
 begin
-  t := FList^[Index1];
-  FList^[Index1] := FList^[Index2];
-  FList^[Index2] := t;
+  moveBytes(@FList^[Index1], @t, sizeof(TStringItem));
+  moveBytes(@FList^[Index2], @FList^[Index1], sizeof(TStringItem));
+  moveBytes(@t, @FList^[Index2], sizeof(TStringItem));
 end;
 
 procedure TStringList.Exchange(Index1, Index2: longint);

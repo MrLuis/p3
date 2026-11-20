@@ -624,37 +624,60 @@ begin
 end;
 
 { (no range checks in these two: i stays within both strings) }
-{$push}{$R-}
+{$push}{$R-}{$Q-}
+type
+  PCompareBlock = ^QWord;
+
+{ The index (from 0) of the first 8-byte block of a and b, both n bytes
+  or longer, that differs, or the start of the last partial block: equal
+  blocks are skipped a word at a time (unaligned loads). }
+function equalPrefix(a, b: PChar; n: longint): longint;
+var
+  i: longint;
+begin
+  i := 0;
+  while (i + 8 <= n) and (PCompareBlock(a + i)^ = PCompareBlock(b + i)^) do
+    i := i + 8;
+  equalPrefix := i;
+end;
+
 function CompareStr(const a, b: string): longint;
 var
   i, n: longint;
+  pa, pb: PChar;
 begin
   n := length(a);
   if length(b) < n then
     n := length(b);
-  for i := 1 to n do
-    if a[i] <> b[i] then
+  pa := PChar(a);
+  pb := PChar(b);
+  for i := equalPrefix(pa, pb, n) to n - 1 do
+    if pa[i] <> pb[i] then
     begin
-      CompareStr := ord(a[i]) - ord(b[i]);
+      CompareStr := ord(pa[i]) - ord(pb[i]);
       exit;
     end;
   CompareStr := length(a) - length(b);
 end;
 
 { CompareStr of the two lowercased (ASCII), without making them: a
-  character pair is lowercased only where it differs. }
+  character pair is lowercased only where it differs (and equal blocks,
+  equal whatever the case, are skipped whole). }
 function CompareText(const a, b: string): longint;
 var
   i, n: longint;
+  pa, pb: PChar;
   ca, cb: char;
 begin
   n := length(a);
   if length(b) < n then
     n := length(b);
-  for i := 1 to n do
+  pa := PChar(a);
+  pb := PChar(b);
+  for i := equalPrefix(pa, pb, n) to n - 1 do
   begin
-    ca := a[i];
-    cb := b[i];
+    ca := pa[i];
+    cb := pb[i];
     if ca <> cb then
     begin
       if (ca >= 'A') and (ca <= 'Z') then
