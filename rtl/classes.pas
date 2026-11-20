@@ -94,9 +94,9 @@ type
     procedure SetValue(const Name, Value: string);
     function GetValueFromIndex(Index: longint): string;
     procedure SetValueFromIndex(Index: longint; const Value: string);
-    function GetTextStr: string;
     procedure SetTextStr(const Value: string);
   protected
+    function GetTextStr: string; virtual;
     procedure Error(const Msg: string; Data: longint);
     function Get(Index: longint): string; virtual; abstract;
     function GetCapacity: longint; virtual;
@@ -180,6 +180,7 @@ type
     procedure PutObject(Index: longint; AObject: TObject); override;
     procedure SetCapacity(NewCapacity: longint); override;
     function DoCompareText(const s1, s2: string): longint; override;
+    function GetTextStr: string; override;
     procedure SetUpdateState(Updating: boolean); override;
     procedure Changed; virtual;
     procedure Changing; virtual;
@@ -862,11 +863,27 @@ end;
 
 function TStrings.GetTextStr: string;
 var
-  i: longint;
+  i, n, total, le, p: longint;
+  s, eol: string;
 begin
+  n := Count;
   Result := '';
-  for i := 0 to Count - 1 do
-    Result := Result + Strings[i] + LineEnding;
+  eol := LineEnding;
+  le := length(eol);
+  total := 0;
+  for i := 0 to n - 1 do
+    total := total + length(Strings[i]) + le;
+  SetLength(Result, total);
+  p := 1;
+  for i := 0 to n - 1 do
+  begin
+    s := Strings[i];
+    if length(s) > 0 then
+      moveBytes(@s[1], @Result[p], length(s));
+    p := p + length(s);
+    moveBytes(@eol[1], @Result[p], le);
+    p := p + le;
+  end;
 end;
 
 { Lines end with LF, CR or CR LF; a last end of line makes no empty line. }
@@ -1281,6 +1298,33 @@ end;
   not), which is when CompareStr / CompareText of copy(s, 1, p - 1) and
   Name is 0, without the copy. A descendant may override DoCompareText:
   it gets the copy, as in TStrings. }
+{ The lines are added up and copied in place (docs/classes-review.md CL-3);
+  a descendant takes TStrings' way, through Strings[i]. }
+function TStringList.GetTextStr: string;
+var
+  i, total, le, p, len: longint;
+  eol: string;
+begin
+  if ClassType <> TStringList then
+    exit(inherited GetTextStr);
+  eol := LineEnding;
+  le := length(eol);
+  total := 0;
+  for i := 0 to FCount - 1 do
+    total := total + length(FList^[i].FStr) + le;
+  SetLength(Result, total);
+  p := 1;
+  for i := 0 to FCount - 1 do
+  begin
+    len := length(FList^[i].FStr);
+    if len > 0 then
+      moveBytes(@FList^[i].FStr[1], @Result[p], len);
+    p := p + len;
+    moveBytes(@eol[1], @Result[p], le);
+    p := p + le;
+  end;
+end;
+
 function TStringList.IndexOfName(const Name: string): longint;
 var
   i, k, n: longint;
