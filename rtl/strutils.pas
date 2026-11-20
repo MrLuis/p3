@@ -450,15 +450,34 @@ function Dec2Numb(n: int64; len, base: byte): string;
 const
   digits: string[36] = '0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ';
 var
+  buf: array[0..63] of char;
+  at, k, total: longint;
   r: string;
 begin
-  r := '';
-  while n > 0 do
+  { the digits from the end of buf (base 2 needs 63), then the result made
+    once with the zero padding in front (docs/strutils-review.md ST-9) }
+  at := 64;
+  while (n > 0) and (at > 0) do
   begin
-    r := digits[n mod base + 1] + r;
+    at := at - 1;
+    buf[at] := digits[n mod base + 1];
     n := n div base;
   end;
-  Dec2Numb := AddChar('0', r, len);
+  k := 64 - at;
+  total := len;
+  if total < k then
+    total := k;
+  if total = 0 then
+  begin
+    Dec2Numb := '';
+    exit;
+  end;
+  setlength(r, total);
+  if total > k then
+    fillchar(r[1], total - k, '0');
+  if k > 0 then
+    move(buf[at], r[total - k + 1], k);
+  Dec2Numb := r;
 end;
 
 { Makes the result once and writes the bits from the last digit back,
