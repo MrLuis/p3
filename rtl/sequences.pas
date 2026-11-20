@@ -284,6 +284,105 @@ begin
   Added := True;
 end;
 
+{ Copying an open array (docs/sequences-review.md SQ-7). BulkCopy copies a
+  whole array with one move, and gives True, for the element types that hold
+  no reference (the integer kinds, Double, Char, Boolean). For any
+  other the untyped overload is chosen: False, and the caller copies item
+  by item, as a managed type needs (the counts of strings and dynamic
+  arrays). Same way as KeyHash. }
+function BulkCopy(const Src: array of Integer; var Dest: specialize TArray<Integer>): Boolean; overload;
+begin
+  SetLength(Dest, Length(Src));
+  if Length(Src) > 0 then
+    move(Src[0], Dest[0], Length(Src) * SizeOf(Integer));
+  Result := True;
+end;
+
+function BulkCopy(const Src: array of Int64; var Dest: specialize TArray<Int64>): Boolean; overload;
+begin
+  SetLength(Dest, Length(Src));
+  if Length(Src) > 0 then
+    move(Src[0], Dest[0], Length(Src) * SizeOf(Int64));
+  Result := True;
+end;
+
+function BulkCopy(const Src: array of Byte; var Dest: specialize TArray<Byte>): Boolean; overload;
+begin
+  SetLength(Dest, Length(Src));
+  if Length(Src) > 0 then
+    move(Src[0], Dest[0], Length(Src) * SizeOf(Byte));
+  Result := True;
+end;
+
+function BulkCopy(const Src: array of Word; var Dest: specialize TArray<Word>): Boolean; overload;
+begin
+  SetLength(Dest, Length(Src));
+  if Length(Src) > 0 then
+    move(Src[0], Dest[0], Length(Src) * SizeOf(Word));
+  Result := True;
+end;
+
+function BulkCopy(const Src: array of Cardinal; var Dest: specialize TArray<Cardinal>): Boolean; overload;
+begin
+  SetLength(Dest, Length(Src));
+  if Length(Src) > 0 then
+    move(Src[0], Dest[0], Length(Src) * SizeOf(Cardinal));
+  Result := True;
+end;
+
+function BulkCopy(const Src: array of QWord; var Dest: specialize TArray<QWord>): Boolean; overload;
+begin
+  SetLength(Dest, Length(Src));
+  if Length(Src) > 0 then
+    move(Src[0], Dest[0], Length(Src) * SizeOf(QWord));
+  Result := True;
+end;
+
+function BulkCopy(const Src: array of SmallInt; var Dest: specialize TArray<SmallInt>): Boolean; overload;
+begin
+  SetLength(Dest, Length(Src));
+  if Length(Src) > 0 then
+    move(Src[0], Dest[0], Length(Src) * SizeOf(SmallInt));
+  Result := True;
+end;
+
+function BulkCopy(const Src: array of ShortInt; var Dest: specialize TArray<ShortInt>): Boolean; overload;
+begin
+  SetLength(Dest, Length(Src));
+  if Length(Src) > 0 then
+    move(Src[0], Dest[0], Length(Src) * SizeOf(ShortInt));
+  Result := True;
+end;
+
+function BulkCopy(const Src: array of Double; var Dest: specialize TArray<Double>): Boolean; overload;
+begin
+  SetLength(Dest, Length(Src));
+  if Length(Src) > 0 then
+    move(Src[0], Dest[0], Length(Src) * SizeOf(Double));
+  Result := True;
+end;
+
+function BulkCopy(const Src: array of Char; var Dest: specialize TArray<Char>): Boolean; overload;
+begin
+  SetLength(Dest, Length(Src));
+  if Length(Src) > 0 then
+    move(Src[0], Dest[0], Length(Src) * SizeOf(Char));
+  Result := True;
+end;
+
+function BulkCopy(const Src: array of Boolean; var Dest: specialize TArray<Boolean>): Boolean; overload;
+begin
+  SetLength(Dest, Length(Src));
+  if Length(Src) > 0 then
+    move(Src[0], Dest[0], Length(Src) * SizeOf(Boolean));
+  Result := True;
+end;
+
+function BulkCopy(const Src; var Dest): Boolean; overload;
+begin
+  Result := False;
+end;
+
 function TSeqEnum.MoveNext: Boolean;
 begin
   Result := Next(Cur);
@@ -760,9 +859,13 @@ var
   A: specialize TArray<T>;
   I: Integer;
 begin
-  SetLength(A, Length(Items));
-  for I := 0 to High(Items) do
-    A[I] := Items[I];
+  A := nil;
+  if not BulkCopy(Items, A) then
+  begin
+    SetLength(A, Length(Items));
+    for I := 0 to High(Items) do
+      A[I] := Items[I];
+  end;
   Result := specialize SeqOfArray<T>(A);
 end;
 

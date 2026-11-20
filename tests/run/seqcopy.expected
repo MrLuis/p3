@@ -1,0 +1,18 @@
+integers (5): 3 1 4 1 5
+empty (0):
+bytes (3): 200 7 255
+words (2): 65535 1
+smallints (2): -32768 5
+shortints (2): -128 127
+cardinals (2): 4000000 0
+chars (3): 97 98 122
+booleans (3): 1 0 1
+doubles (3): 6 -9 4000
+enumeration (3): 2 0 1
+strings (3): 2 0 3
+int64s (2): 5 -5
+qwords (2): 615 2
+records (2): 27 39
+after change (3): 1 2 3
+strings after change (2): 2 1
+large: 14999850000
