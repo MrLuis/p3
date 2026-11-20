@@ -463,15 +463,19 @@ begin
 end;
 
 { Free Pascal's general format with 15 significant digits: fixed notation
-  unless the decimal exponent is below -5 or at least 15. }
+  unless the decimal exponent is below -5 or at least 15. The C text
+  (d.ddddde[+-]xx) is read in its buffer and the result is written into a
+  second one, so only the result is made as a string (docs/
+  sysutils-review.md SU-4). }
 function FloatToStr(value: double): string;
 const
   precision = 15;
 var
-  buf: array[0..63] of char;
-  text, digits, r: string;
-  p, e, i, last: longint;
-  negative: boolean;
+  buf, outb: array[0..63] of char;
+  dg: array[0..31] of char;
+  r: string;
+  at, p, q, e, nd, o, i, ae: longint;
+  negative, negExp: boolean;
 begin
   if value <> value then
   begin
@@ -492,42 +496,123 @@ begin
     exit;
   end;
   sys_format_double(@buf[0], 64, value, precision);
-  text := StrPas(@buf[0]);
-  negative := text[1] = '-';
+  negative := buf[0] = '-';
+  at := 0;
   if negative then
-    delete(text, 1, 1);
-  { d.ddddde[+-]xx }
-  p := pos('e', text);
-  e := StrToInt(copy(text, p + 1, high(longint)));
-  digits := text[1] + copy(text, 3, p - 3);
-  last := length(digits);
-  while (last > 1) and (digits[last] = '0') do
-    last := last - 1;
-  digits := copy(digits, 1, last);
+    at := 1;
+  { the digits: buf[at] and what follows the '.' up to the 'e' }
+  p := at + 2;
+  while buf[p] <> 'e' do
+    p := p + 1;
+  dg[0] := buf[at];
+  nd := 1;
+  for i := at + 2 to p - 1 do
+  begin
+    dg[nd] := buf[i];
+    nd := nd + 1;
+  end;
+  { the exponent: a sign and the digits up to the end }
+  negExp := buf[p + 1] = '-';
+  e := 0;
+  q := p + 2;
+  while buf[q] <> #0 do
+  begin
+    e := e * 10 + (ord(buf[q]) - ord('0'));
+    q := q + 1;
+  end;
+  if negExp then
+    e := -e;
+  while (nd > 1) and (dg[nd - 1] = '0') do
+    nd := nd - 1;
+  o := 0;
+  if negative then
+  begin
+    outb[o] := '-';
+    o := o + 1;
+  end;
   if (e < -5) or (e >= precision) then
   begin
-    r := digits[1];
-    if length(digits) > 1 then
-      r := r + '.' + copy(digits, 2, high(longint));
-    r := r + 'E' + IntToStr(e);
+    outb[o] := dg[0];
+    o := o + 1;
+    if nd > 1 then
+    begin
+      outb[o] := '.';
+      o := o + 1;
+      for i := 1 to nd - 1 do
+      begin
+        outb[o] := dg[i];
+        o := o + 1;
+      end;
+    end;
+    outb[o] := 'E';
+    o := o + 1;
+    ae := e;
+    if e < 0 then
+    begin
+      outb[o] := '-';
+      o := o + 1;
+      ae := -e;
+    end;
+    if ae >= 100 then
+    begin
+      outb[o] := chr(ord('0') + ae div 100);
+      o := o + 1;
+    end;
+    if ae >= 10 then
+    begin
+      outb[o] := chr(ord('0') + (ae div 10) mod 10);
+      o := o + 1;
+    end;
+    outb[o] := chr(ord('0') + ae mod 10);
+    o := o + 1;
   end
   else if e < 0 then
   begin
-    r := '0.';
+    outb[o] := '0';
+    outb[o + 1] := '.';
+    o := o + 2;
     for i := 1 to -e - 1 do
-      r := r + '0';
-    r := r + digits;
+    begin
+      outb[o] := '0';
+      o := o + 1;
+    end;
+    for i := 0 to nd - 1 do
+    begin
+      outb[o] := dg[i];
+      o := o + 1;
+    end;
   end
-  else if length(digits) <= e + 1 then
+  else if nd <= e + 1 then
   begin
-    r := digits;
-    for i := length(digits) + 1 to e + 1 do
-      r := r + '0';
+    for i := 0 to nd - 1 do
+    begin
+      outb[o] := dg[i];
+      o := o + 1;
+    end;
+    for i := nd to e do
+    begin
+      outb[o] := '0';
+      o := o + 1;
+    end;
   end
   else
-    r := copy(digits, 1, e + 1) + '.' + copy(digits, e + 2, high(longint));
-  if negative then
-    r := '-' + r;
+  begin
+    for i := 0 to e do
+    begin
+      outb[o] := dg[i];
+      o := o + 1;
+    end;
+    outb[o] := '.';
+    o := o + 1;
+    for i := e + 1 to nd - 1 do
+    begin
+      outb[o] := dg[i];
+      o := o + 1;
+    end;
+  end;
+  r := '';
+  setlength(r, o);
+  move(outb[0], r[1], o);
   FloatToStr := r;
 end;
 
