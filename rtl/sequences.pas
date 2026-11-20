@@ -321,91 +321,144 @@ begin
     end;
 end;
 
-generic function TSeq.OrderBy<K>(Key: specialize TFunc<T, K>): specialize TSeq<T>;
+{ Stable merge sort of Items[0..N-1] by Keys (moved along with them): a
+  value goes after the ones with an equal key, so only < is needed on K.
+  Descending puts the larger keys first, equal keys still in their order. }
+generic procedure SortByKey<T, K>(var Items: specialize TArray<T>;
+  var Keys: specialize TArray<K>; N: Integer; Descending: Boolean);
 var
-  Src: specialize TNext<T>;
+  A, B, Tmp: specialize TArray<T>;
+  KA, KB, KTmp: specialize TArray<K>;
+  Width, Lo, Mid, Hi, L, R, O: Integer;
+  TakeRight: Boolean;
+begin
+  if N < 2 then
+    exit;
+  A := Items;
+  KA := Keys;
+  B := nil;
+  KB := nil;
+  SetLength(B, N);
+  SetLength(KB, N);
+  Width := 1;
+  while Width < N do
+  begin
+    Lo := 0;
+    while Lo < N do
+    begin
+      Mid := Lo + Width;
+      if Mid > N then
+        Mid := N;
+      Hi := Mid + Width;
+      if Hi > N then
+        Hi := N;
+      L := Lo;
+      R := Mid;
+      O := Lo;
+      while (L < Mid) and (R < Hi) do
+      begin
+        if Descending then
+          TakeRight := KA[L] < KA[R]
+        else
+          TakeRight := KA[R] < KA[L];
+        if TakeRight then
+        begin
+          B[O] := A[R];
+          KB[O] := KA[R];
+          Inc(R);
+        end
+        else
+        begin
+          B[O] := A[L];
+          KB[O] := KA[L];
+          Inc(L);
+        end;
+        Inc(O);
+      end;
+      while L < Mid do
+      begin
+        B[O] := A[L];
+        KB[O] := KA[L];
+        Inc(L);
+        Inc(O);
+      end;
+      while R < Hi do
+      begin
+        B[O] := A[R];
+        KB[O] := KA[R];
+        Inc(R);
+        Inc(O);
+      end;
+      Lo := Hi;
+    end;
+    Tmp := A;
+    A := B;
+    B := Tmp;
+    KTmp := KA;
+    KA := KB;
+    KB := KTmp;
+    Width := Width * 2;
+  end;
+  Items := A;
+  Keys := KA;
+end;
+
+{ OrderBy and OrderByDescending: nothing is read until the first value is
+  asked for; then the whole source is read (the arrays grow by doubling)
+  and sorted, and given out in order. The sorted values are released after
+  the last one. }
+generic function OrderedSeq<T, K>(Src: specialize TNext<T>;
+  Key: specialize TFunc<T, K>; Descending: Boolean): specialize TSeq<T>;
+var
   Sorted: specialize TArray<T>;
-  Pos: Integer;
+  Pos, N: Integer;
   Done: Boolean;
 begin
-  Src := Next;
   Done := False;
   Pos := 0;
+  N := 0;
   Result.Next := function(var Y: T): Boolean => begin
       if not Done then
       begin
-        { read it all, then an insertion sort on the keys (stable) }
         var Keys: specialize TArray<K>;
         var X: T;
         Sorted := nil;
         Keys := nil;
         while Src(X) do
         begin
-          var KX := Key(X);
-          var J := Length(Sorted);
-          SetLength(Sorted, J + 1);
-          SetLength(Keys, J + 1);
-          while (J > 0) and (KX < Keys[J - 1]) do
+          if N = Length(Sorted) then
           begin
-            Sorted[J] := Sorted[J - 1];
-            Keys[J] := Keys[J - 1];
-            Dec(J);
+            SetLength(Sorted, 2 * N + 4);
+            SetLength(Keys, 2 * N + 4);
           end;
-          Sorted[J] := X;
-          Keys[J] := KX;
+          Sorted[N] := X;
+          Keys[N] := Key(X);
+          Inc(N);
         end;
+        SetLength(Sorted, N);
+        SetLength(Keys, N);
+        specialize SortByKey<T, K>(Sorted, Keys, N, Descending);
         Done := True;
       end;
-      Result := Pos < Length(Sorted);
+      Result := Pos < N;
       if Result then
       begin
         Y := Sorted[Pos];
         Inc(Pos);
+        if Pos = N then
+          Sorted := nil;
       end;
     end;
 end;
 
-generic function TSeq.OrderByDescending<K>(Key: specialize TFunc<T, K>): specialize TSeq<T>;
-var
-  Src: specialize TNext<T>;
-  Sorted: specialize TArray<T>;
-  Pos: Integer;
-  Done: Boolean;
+generic function TSeq.OrderBy<K>(Key: specialize TFunc<T, K>): specialize TSeq<T>;
 begin
-  Src := Next;
-  Done := False;
-  Pos := 0;
-  Result.Next := function(var Y: T): Boolean => begin
-      if not Done then
-      begin
-        var Keys: specialize TArray<K>;
-        var X: T;
-        Sorted := nil;
-        Keys := nil;
-        while Src(X) do
-        begin
-          var KX := Key(X);
-          var J := Length(Sorted);
-          SetLength(Sorted, J + 1);
-          SetLength(Keys, J + 1);
-          while (J > 0) and (Keys[J - 1] < KX) do
-          begin
-            Sorted[J] := Sorted[J - 1];
-            Keys[J] := Keys[J - 1];
-            Dec(J);
-          end;
-          Sorted[J] := X;
-          Keys[J] := KX;
-        end;
-        Done := True;
-      end;
-      Result := Pos < Length(Sorted);
-      if Result then
-      begin
-        Y := Sorted[Pos];
-        Inc(Pos);
-      end;
-    end;
+  Result := specialize OrderedSeq<T, K>(Next, Key, False);
+end;
+
+generic function TSeq.OrderByDescending<K>(Key: specialize TFunc<T, K>): specialize TSeq<T>;
+begin
+  Result := specialize OrderedSeq<T, K>(Next, Key, True);
 end;
 
 generic function TSeq.GroupBy<K>(Key: specialize TFunc<T, K>): specialize TSeq<specialize TGroup<K, T>>;
