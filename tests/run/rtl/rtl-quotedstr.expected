@@ -1,0 +1,13 @@
+[] 0 -> [''] 2
+[plain] 5 -> ['plain'] 7
+['] 1 -> [''''] 4
+[''] 2 -> [''''''] 6
+['''] 3 -> [''''''''] 8
+[it's] 4 -> ['it''s'] 7
+['start] 6 -> ['''start'] 9
+[end'] 4 -> ['end'''] 7
+['both'] 6 -> ['''both'''] 10
+[a''b] 4 -> ['a''''b'] 8
+[a'b'c'd] 7 -> ['a''b''c''d'] 12
+[one two three four] 18 -> ['one two three four'] 20
+random differences: 0

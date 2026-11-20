@@ -717,19 +717,45 @@ begin
   SameText := CompareText(a, b) = 0;
 end;
 
+{ n characters of src from position at to position to of dst (n >= 0) }
+procedure putChars(const src: string; at: longint; var dst: string; to_, n: longint);
+begin
+  if n > 0 then
+    move(src[at], dst[to_], n);
+end;
+
+{ The quotes are counted, the result is made once at its final length, and
+  the text between the quotes is copied in runs (docs/sysutils-review.md
+  SU-3). }
 function QuotedStr(const s: string): string;
 var
-  i: longint;
   r: string;
+  i, n, quotes, start, d: longint;
 begin
-  r := '''';
-  for i := 1 to length(s) do
-  begin
+  n := length(s);
+  quotes := 0;
+  for i := 1 to n do
     if s[i] = '''' then
-      r := r + '''';
-    r := r + s[i];
-  end;
-  QuotedStr := r + '''';
+      quotes := quotes + 1;
+  r := '';
+  setlength(r, n + quotes + 2);
+  r[1] := '''';
+  d := 2;
+  start := 1;
+  if quotes > 0 then
+    for i := 1 to n do
+      if s[i] = '''' then
+      begin
+        { the run up to and including this quote, then the quote again }
+        putChars(s, start, r, d, i - start + 1);
+        d := d + (i - start + 1);
+        r[d] := '''';
+        d := d + 1;
+        start := i + 1;
+      end;
+  putChars(s, start, r, d, n - start + 1);
+  r[n + quotes + 2] := '''';
+  QuotedStr := r;
 end;
 
 { The position of the first sub in s at or after start; 0 if none. }
@@ -756,13 +782,6 @@ begin
     end;
     i := i + 1;
   end;
-end;
-
-{ n characters of src from position at to position to of dst (n >= 0) }
-procedure putChars(const src: string; at: longint; var dst: string; to_, n: longint);
-begin
-  if n > 0 then
-    move(src[at], dst[to_], n);
 end;
 
 { The matches are counted, the result is made once at its final length,
