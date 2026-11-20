@@ -225,7 +225,7 @@ type
 
 function c_fopen(name, mode: pchar): pointer; cdecl; external name 'fopen';
 function c_fclose(f: pointer): longint; cdecl; external name 'fclose';
-function c_fgetc(f: pointer): longint; cdecl; external name 'fgetc';
+function c_fread(p: pointer; size, n: int64; f: pointer): int64; cdecl; external name 'fread';
 function c_fwrite(p: pointer; size, n: int64; f: pointer): int64; cdecl; external name 'fwrite';
 function sys_strerror: pchar; cdecl; external name '__pas_sys_strerror';
 
@@ -998,55 +998,83 @@ begin
   SetDelimited(AValue, ',', '"', false);
 end;
 
+{ Read in blocks (fgetc would take the file's lock for every character),
+  each line ending with LF, CR or CR LF, as SetTextStr splits them: a last
+  end of line makes no empty line. A line begun in one block and ended in
+  a later one is carried in part. }
 procedure TStrings.LoadFromFile(const FileName: string);
+const
+  BlockSize = 65536;
 var
-  line: string;
   f: pointer;
-  c, n: longint;
+  buf: PChar;
+  got, i, start: int64;
+  part: string;
   pendingLine, afterCR: boolean;
+  c: char;
 
-  procedure takeLine;
+  { buf[start .. upto - 1], after what part holds }
+  function piece(upto: int64): string;
+  var
+    n: int64;
   begin
-    Add(copy(line, 1, n));
-    n := 0;
+    n := upto - start;
+    SetLength(Result, n);
+    if n > 0 then
+      moveBytes(@buf[start], @Result[1], n);
+    if part <> '' then
+      Result := part + Result;
   end;
 
 begin
   f := c_fopen(pchar(FileName), 'rb');
   if f = nil then
     raise EFOpenError.Create('Unable to open file "' + FileName + '": ' + StrPas(sys_strerror));
+  buf := nil;
   BeginUpdate;
-  Clear;
-  setlength(line, 256);
-  n := 0;
-  pendingLine := false;
-  afterCR := false;
-  c := c_fgetc(f);
-  while c >= 0 do
-  begin
-    if (c = 10) and afterCR then
-      afterCR := false
-    else if (c = 10) or (c = 13) then
+  try
+    Clear;
+    getmem(buf, BlockSize);
+    part := '';
+    pendingLine := false;
+    afterCR := false;
+    got := c_fread(buf, 1, BlockSize, f);
+    while got > 0 do
     begin
-      takeLine;
-      pendingLine := false;
-      afterCR := c = 13;
-    end
-    else
-    begin
-      afterCR := false;
-      pendingLine := true;
-      if n = length(line) then
-        setlength(line, n * 2);
-      n := n + 1;
-      line[n] := chr(c);
+      start := 0;
+      for i := 0 to got - 1 do
+      begin
+        c := buf[i];
+        if (c = #10) and afterCR then
+        begin
+          afterCR := false;
+          start := i + 1;
+        end
+        else if (c = #10) or (c = #13) then
+        begin
+          Add(piece(i));
+          part := '';
+          pendingLine := false;
+          afterCR := c = #13;
+          start := i + 1;
+        end
+        else
+        begin
+          afterCR := false;
+          pendingLine := true;
+        end;
+      end;
+      if start < got then
+        part := piece(got);
+      got := c_fread(buf, 1, BlockSize, f);
     end;
-    c := c_fgetc(f);
+    if pendingLine then
+      Add(part);
+  finally
+    freemem(buf);
+    c_fclose(f);
+    EndUpdate;
   end;
-  c_fclose(f);
-  if pendingLine then
-    takeLine;
-  EndUpdate;
 end;
 
 procedure TStrings.SaveToFile(const FileName: string);

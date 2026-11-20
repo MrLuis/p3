@@ -1,0 +1,9 @@
+CR at a block end, LF after it: 2 lines, TRUE, last 1
+CR LF just before a block end: 2 lines, TRUE, last 1
+LF first in a block: 2 lines, TRUE, last 1
+CR last in the file at a block end: 1 lines, TRUE, last 65535
+a line over three blocks: 1 lines, TRUE, last 196615
+a line over two blocks, then more: 3 lines, TRUE, last 1
+an empty line at a block end: 3 lines, TRUE, last 1
+exactly one block: 1 lines, TRUE, last 65535
+30000 lines, mixed ends: 30000 lines, TRUE, last 10
