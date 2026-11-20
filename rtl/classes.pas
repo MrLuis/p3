@@ -392,10 +392,25 @@ begin
     Notify(item, lnDeleted);
 end;
 
+{ From the last item down: each is taken out (Count is its index) and then
+  notified, as Delete does; the capacity shrinks once at the end to what the
+  halvings in RemoveAt would have left. }
 procedure TList.Clear;
+var
+  item: pointer;
+  cap: longint;
 begin
   while FCount > 0 do
-    Delete(FCount - 1);
+  begin
+    FCount := FCount - 1;
+    item := FList^[FCount];
+    if item <> nil then
+      Notify(item, lnDeleted);
+  end;
+  cap := FCapacity;
+  while (cap > 256) and (FCount < cap shr 2) do
+    cap := cap shr 1;
+  SetCapacity(cap);
 end;
 
 procedure TList.Exchange(Index1, Index2: longint);
