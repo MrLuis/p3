@@ -334,9 +334,41 @@ begin
   ReplaceText := StringReplace(s, from, into, [rfReplaceAll, rfIgnoreCase]);
 end;
 
+{ copy(s, 1, start - 1) + sub + copy(s, start + count, ...), made once:
+  the two parts of s are clamped as copy clamps them and moved into place
+  with sub between (docs/strutils-review.md ST-8). }
 function StuffString(const s: string; start, count: longint; const sub: string): string;
+var
+  n, head, from, tail, m: longint;
+  r: string;
 begin
-  StuffString := copy(s, 1, start - 1) + sub + copy(s, start + count, high(longint));
+  n := length(s);
+  head := start - 1;
+  if head < 0 then
+    head := 0
+  else if head > n then
+    head := n;
+  from := start + count;
+  if from < 1 then
+    from := 1;
+  if from > n then
+    tail := 0
+  else
+    tail := n - from + 1;
+  m := length(sub);
+  if head + m + tail = 0 then
+  begin
+    StuffString := '';
+    exit;
+  end;
+  setlength(r, head + m + tail);
+  if head > 0 then
+    move(s[1], r[1], head);
+  if m > 0 then
+    move(sub[1], r[head + 1], m);
+  if tail > 0 then
+    move(s[from], r[head + m + 1], tail);
+  StuffString := r;
 end;
 
 function Copy2Symb(const s: string; symb: char): string;
