@@ -682,6 +682,8 @@ begin
 end;
 {$ENDIF}
 
+{ Each finds what to cut and makes one string; when nothing is cut it
+  returns s itself, without a copy (docs/sysutils-review.md SU-6). }
 function TrimLeft(const s: string): string;
 var
   i: longint;
@@ -689,7 +691,10 @@ begin
   i := 1;
   while (i <= length(s)) and (s[i] <= ' ') do
     i := i + 1;
-  TrimLeft := copy(s, i, high(longint));
+  if i = 1 then
+    TrimLeft := s
+  else
+    TrimLeft := copy(s, i, high(longint));
 end;
 
 function TrimRight(const s: string): string;
@@ -699,12 +704,26 @@ begin
   n := length(s);
   while (n > 0) and (s[n] <= ' ') do
     n := n - 1;
-  TrimRight := copy(s, 1, n);
+  if n = length(s) then
+    TrimRight := s
+  else
+    TrimRight := copy(s, 1, n);
 end;
 
 function Trim(const s: string): string;
+var
+  i, n: longint;
 begin
-  Trim := TrimLeft(TrimRight(s));
+  n := length(s);
+  while (n > 0) and (s[n] <= ' ') do
+    n := n - 1;
+  i := 1;
+  while (i <= n) and (s[i] <= ' ') do
+    i := i + 1;
+  if (i = 1) and (n = length(s)) then
+    Trim := s
+  else
+    Trim := copy(s, i, n - i + 1);
 end;
 
 function UpperCase(const s: string): string;
