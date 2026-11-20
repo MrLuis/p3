@@ -723,19 +723,28 @@ begin
   Result := X;
 end;
 
+{ Reads into two variables in turn: only the last value is copied into
+  Result (a source may leave junk in X when it reports the end, so the
+  value before it is kept in the other variable). }
 function TSeq.Last: T;
 var
-  X: T;
-  Any_: Boolean;
+  A, B: T;
 begin
-  Any_ := False;
-  while Next(X) do
-  begin
-    Result := X;
-    Any_ := True;
-  end;
-  if not Any_ then
+  if not Next(A) then
     raise ESequenceEmpty.Create('Last of an empty sequence');
+  while True do
+  begin
+    if not Next(B) then
+    begin
+      Result := A;
+      exit;
+    end;
+    if not Next(A) then
+    begin
+      Result := B;
+      exit;
+    end;
+  end;
 end;
 
 procedure TSeq.ForEach(F: specialize TProc<T>);
