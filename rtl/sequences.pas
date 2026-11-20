@@ -615,20 +615,39 @@ begin
       if not Done then
       begin
         var X: T;
+        var Counts: specialize TArray<Integer>;
         Groups := nil;
+        Counts := nil;
         while Src(X) do
         begin
           var Added: Boolean;
           var G := Index.Find(Key(X), Added);
           if Added then
           begin
-            SetLength(Groups, G + 1);
+            if G = Length(Groups) then
+            begin
+              SetLength(Groups, 2 * G + 4);
+              SetLength(Counts, 2 * G + 4);
+            end;
             Groups[G].Key := Index.Keys[G];
           end;
-          var N := Length(Groups[G].Items);
-          SetLength(Groups[G].Items, N + 1);
+          var N := Counts[G];
+          if N = Length(Groups[G].Items) then
+            if N = 0 then
+              SetLength(Groups[G].Items, 1)
+            else
+              SetLength(Groups[G].Items, 2 * N);
           Groups[G].Items[N] := X;
+          Counts[G] := N + 1;
         end;
+        { trim what the doubling left over }
+        SetLength(Groups, Index.Count);
+        for var G := 0 to Index.Count - 1 do
+          if Length(Groups[G].Items) <> Counts[G] then
+            SetLength(Groups[G].Items, Counts[G]);
+        Index.Keys := nil;
+        Index.Hashes := nil;
+        Index.Slots := nil;
         Done := True;
       end;
       Result := Pos < Length(Groups);
