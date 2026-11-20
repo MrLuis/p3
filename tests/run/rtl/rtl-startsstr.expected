@@ -1,0 +1,29 @@
+"abc" "abcdef": TRUE FALSE TRUE FALSE
+"def" "abcdef": FALSE TRUE FALSE TRUE
+"abcdef" "abcdef": TRUE TRUE TRUE TRUE
+"ABC" "abcdef": FALSE FALSE FALSE FALSE
+"DEF" "abcdef": FALSE FALSE FALSE FALSE
+"aBcDeF" "AbCdEf": FALSE FALSE FALSE FALSE
+"abcdefg" "abcdef": FALSE FALSE FALSE FALSE
+"xabcdef" "abcdef": FALSE FALSE FALSE FALSE
+"" "abcdef": TRUE TRUE TRUE TRUE
+"abc" "": FALSE FALSE FALSE FALSE
+"" "": TRUE TRUE TRUE TRUE
+"xbc" "abcdef": FALSE FALSE FALSE FALSE
+"axc" "abcdef": FALSE FALSE FALSE FALSE
+"abx" "abcdef": FALSE FALSE FALSE FALSE
+"xef" "abcdef": FALSE FALSE FALSE FALSE
+"dxf" "abcdef": FALSE FALSE FALSE FALSE
+"dex" "abcdef": FALSE FALSE FALSE FALSE
+"@" "`bc": FALSE FALSE FALSE FALSE
+"a@" "a`": FALSE FALSE FALSE FALSE
+"`" "@bc": FALSE FALSE FALSE FALSE
+"[" "{": FALSE FALSE FALSE FALSE
+"Z" "z": FALSE FALSE FALSE FALSE
+"the quick brown" "The Quick Brown Fox": FALSE FALSE FALSE FALSE
+"BROWN FOX" "The Quick Brown Fox": FALSE FALSE FALSE FALSE
+"The Quick Brown" "The Quick Brown Fox": TRUE FALSE TRUE FALSE
+"Brown Fox" "The Quick Brown Fox": FALSE TRUE FALSE TRUE
+"Èa" "Èabc": TRUE FALSE TRUE FALSE
+"È" "è": FALSE FALSE FALSE FALSE
+random differences: 0
