@@ -1,0 +1,17 @@
+DupeString("ab", 0) = ""
+DupeString("ab", -1) = ""
+DupeString("ab", -100) = ""
+DupeString("ab", 1) = "ab"
+DupeString("ab", 2) = "abab"
+DupeString("ab", 3) = "ababab"
+DupeString("ab", 7) = "ababababababab"
+DupeString("x", 8) = "xxxxxxxx"
+DupeString("x", 9) = "xxxxxxxxx"
+DupeString("", 5) = ""
+DupeString("", 0) = ""
+DupeString("hello ", 5) = "hello hello hello hello hello "
+length 2000 abab TRUE
+length 12291 TRUE
+length 65536
+hello Jello
+random differences: 0

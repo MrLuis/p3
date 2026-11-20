@@ -90,15 +90,38 @@ begin
   end;
 end;
 
+{ Makes the result once at its full length, moves s into the start, then
+  doubles the filled part each step: log2(count) moves
+  (docs/strutils-review.md ST-4). }
 function DupeString(const s: string; count: longint): string;
 var
+  n, total, done, k: longint;
   r: string;
+  p: PChar;
 begin
-  r := '';
-  while count > 0 do
+  n := length(s);
+  if (count <= 0) or (n = 0) then
   begin
-    r := r + s;
-    count := count - 1;
+    DupeString := '';
+    exit;
+  end;
+  if count = 1 then
+  begin
+    DupeString := s;
+    exit;
+  end;
+  total := n * count;
+  setlength(r, total);
+  p := PChar(r);
+  move(s[1], p^, n);
+  done := n;
+  while done < total do
+  begin
+    k := done;
+    if k > total - done then
+      k := total - done;
+    move(p^, p[done], k);
+    done := done + k;
   end;
   DupeString := r;
 end;
