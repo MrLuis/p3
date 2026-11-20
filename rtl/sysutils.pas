@@ -208,22 +208,28 @@ begin
 end;
 {$ENDIF}
 
-{ digits is a minimum: the value's own digits are never cut }
+{ digits is a minimum: the value's own digits are never cut. The result is
+  made once at its final length and filled from the end (docs/
+  sysutils-review.md SU-5). }
 function IntToHex(value: int64; digits: longint): string;
 const
   hex: string[16] = '0123456789ABCDEF';
 var
   r: string;
-  i, used: longint;
+  i, used, total: longint;
 begin
   used := 16;
   while (used > 1) and (((value shr (4 * (used - 1))) and 15) = 0) do
     used := used - 1;
+  total := used;
+  if digits > total then
+    total := digits;
   r := '';
-  for i := used + 1 to digits do
-    r := r + '0';
-  for i := used - 1 downto 0 do
-    r := r + hex[((value shr (4 * i)) and 15) + 1];
+  setlength(r, total);
+  for i := 1 to total - used do
+    r[i] := '0';
+  for i := 0 to used - 1 do
+    r[total - i] := hex[((value shr (4 * i)) and 15) + 1];
   IntToHex := r;
 end;
 
