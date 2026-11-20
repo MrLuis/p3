@@ -151,36 +151,53 @@ begin
 end;
 {$ENDIF}
 
+{ The digits are written from the end of a buffer (20 characters hold
+  -9223372036854775808 and 2^64-1) and the string is made once from what
+  was used (docs/sysutils-review.md SU-2). }
 function IntToStr(value: int64): string;
 var
+  buf: array[0..20] of char;
   r: string;
-  digit: longint;
+  digit, at: longint;
   negative: boolean;
 begin
   negative := value < 0;
-  r := '';
+  at := 21;
   repeat
     { on the negative side, so that the lowest int64 works }
     digit := value mod 10;
     if digit < 0 then
       digit := -digit;
-    r := chr(ord('0') + digit) + r;
+    at := at - 1;
+    buf[at - 1] := chr(ord('0') + digit);
     value := value div 10;
   until value = 0;
   if negative then
-    r := '-' + r;
+  begin
+    at := at - 1;
+    buf[at - 1] := '-';
+  end;
+  r := '';
+  setlength(r, 21 - at);
+  move(buf[at - 1], r[1], 21 - at);
   IntToStr := r;
 end;
 
 function UIntToStr(value: qword): string;
 var
+  buf: array[0..19] of char;
   r: string;
+  at: longint;
 begin
-  r := '';
+  at := 20;
   repeat
-    r := chr(ord('0') + value mod 10) + r;
+    at := at - 1;
+    buf[at] := chr(ord('0') + value mod 10);
     value := value div 10;
   until value = 0;
+  r := '';
+  setlength(r, 20 - at);
+  move(buf[at], r[1], 20 - at);
   UIntToStr := r;
 end;
 
