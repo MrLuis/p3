@@ -108,6 +108,7 @@ All in [`docs/`](docs/):
 - [docs/optimization.md](docs/optimization.md): optimizations considered and done
 - [docs/optimization2.md](docs/optimization2.md): executable-speed analysis after those items
 - [docs/optimization3.md](docs/optimization3.md): third pass, including compile time
+- [docs/classes-review.md](docs/classes-review.md): follow-ups for `rtl/classes.pas`
 
 Also: [selfhost/README.md](selfhost/README.md),
 [selfhost/DIALECT.md](selfhost/DIALECT.md) and
