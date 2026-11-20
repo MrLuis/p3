@@ -103,27 +103,43 @@ begin
   DupeString := r;
 end;
 
-function padding(c: char; n: longint): string;
+{ AddChar and AddCharR make the result once at its full length, fill the
+  pad and move s into place; s itself when there is nothing to add
+  (docs/strutils-review.md ST-2). }
+function AddChar(c: char; const s: string; n: longint): string;
 var
+  k: longint;
   r: string;
 begin
-  r := '';
-  while n > 0 do
+  k := n - length(s);
+  if k <= 0 then
   begin
-    r := r + c;
-    n := n - 1;
+    AddChar := s;
+    exit;
   end;
-  padding := r;
-end;
-
-function AddChar(c: char; const s: string; n: longint): string;
-begin
-  AddChar := padding(c, n - length(s)) + s;
+  setlength(r, n);
+  fillchar(r[1], k, c);
+  if length(s) > 0 then
+    move(s[1], r[k + 1], length(s));
+  AddChar := r;
 end;
 
 function AddCharR(c: char; const s: string; n: longint): string;
+var
+  k: longint;
+  r: string;
 begin
-  AddCharR := s + padding(c, n - length(s));
+  k := n - length(s);
+  if k <= 0 then
+  begin
+    AddCharR := s;
+    exit;
+  end;
+  setlength(r, n);
+  if length(s) > 0 then
+    move(s[1], r[1], length(s));
+  fillchar(r[length(s) + 1], k, c);
+  AddCharR := r;
 end;
 
 function PadLeft(const s: string; n: longint): string;

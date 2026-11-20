@@ -1,0 +1,19 @@
+AddChar(*, "abc", 5) = "**abc"  AddCharR = "abc**"
+AddChar(*, "abc", 4) = "*abc"  AddCharR = "abc*"
+AddChar(*, "abc", 3) = "abc"  AddCharR = "abc"
+AddChar(*, "abc", 2) = "abc"  AddCharR = "abc"
+AddChar(*, "abc", 0) = "abc"  AddCharR = "abc"
+AddChar(*, "abc", -3) = "abc"  AddCharR = "abc"
+AddChar(*, "", 3) = "***"  AddCharR = "***"
+AddChar(*, "", 0) = ""  AddCharR = ""
+AddChar(*, "", -1) = ""  AddCharR = ""
+AddChar(0, "42", 6) = "000042"  AddCharR = "420000"
+AddChar(	, "x", 3) = "		x"  AddCharR = "x		"
+PadLeft  "                 abc"
+PadRight "abc                 "
+PadLeft  "abc"
+PadRight "    "
+length 1000 1000
+Dec2Numb 000011111111 FF 0000
+hello Jello hell!
+random differences: 0
