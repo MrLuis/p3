@@ -29,6 +29,11 @@ std::string findRuntimeLibrary();
 /// $P3_UNIT_DIR, else <dir of p3>/../lib/pascal
 std::string findUnitLibrary();
 
+/// The C compiler-rt's profile runtime for PGO: searched next to LLVM's
+/// libraries (<libdir>/clang/*/lib/<host>/libclang_rt.profile*), or
+/// $P3_PROFILE_RUNTIME.
+std::string findProfileRuntimeLibrary();
+
 /// The runtime as LLVM IR, linked into optimized programs for inlining:
 /// $P3_RUNTIME_IR, else libpascalrt.ll next to the runtime library. It
 /// need not exist.

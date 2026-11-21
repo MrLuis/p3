@@ -9,7 +9,12 @@
 #include "llvm/Linker/Linker.h"
 #include "llvm/MC/TargetRegistry.h"
 #include "llvm/Passes/PassBuilder.h"
+#include "llvm/Transforms/Instrumentation/InstrProfiling.h"
+#include "llvm/Transforms/Instrumentation/PGOInstrumentation.h"
+
+#include <optional>
 #include "llvm/Support/FileSystem.h"
+#include "llvm/Support/Process.h"
 #include "llvm/Support/SourceMgr.h"
 #include "llvm/Support/TargetSelect.h"
 #include "llvm/Support/raw_ostream.h"
@@ -146,7 +151,9 @@ bool p3::writeModuleIR(llvm::Module &M, llvm::StringRef Path,
 }
 
 void p3::optimizeModule(llvm::Module &M, llvm::TargetMachine &TM,
-                         unsigned OptLevel, unsigned SizeLevel) {
+                         unsigned OptLevel, unsigned SizeLevel,
+                         const std::string &ProfileGen,
+                         const std::string &ProfileUse) {
   llvm::LoopAnalysisManager LAM;
   llvm::FunctionAnalysisManager FAM;
   llvm::CGSCCAnalysisManager CGAM;
@@ -154,7 +161,15 @@ void p3::optimizeModule(llvm::Module &M, llvm::TargetMachine &TM,
 
   llvm::PipelineTuningOptions PTO;
   PTO.SLPVectorization = SizeLevel > 0 || OptLevel >= 2;
-  llvm::PassBuilder PB(&TM, PTO);
+  // PGO (item LB-4): -fprofile-instr-generate gives IRInstr (the builder
+  // puts the instrumentation at its own, pre-inlining stage), and
+  // -fprofile-instr-use gives IRUse (the profile drives the pipeline).
+  std::optional<llvm::PGOOptions> PGOOpt;
+  if (!ProfileUse.empty())
+    PGOOpt.emplace(ProfileUse, "", "", "", llvm::PGOOptions::IRUse);
+  else if (!ProfileGen.empty())
+    PGOOpt = llvm::PGOOptions("", "", "", "", llvm::PGOOptions::IRInstr);
+  llvm::PassBuilder PB(&TM, PTO, PGOOpt, /*PIC=*/nullptr);
   PB.registerModuleAnalyses(MAM);
   PB.registerCGSCCAnalyses(CGAM);
   PB.registerFunctionAnalyses(FAM);

@@ -180,6 +180,16 @@ int main(int argc, char **argv) {
   llvm::cl::opt<bool> FastMathFlag(
       "ffast-math", llvm::cl::cat(P3Category),
       llvm::cl::desc("Use fast-math flags on floating-point instructions"));
+  // -fprofile-instr-generate: build with the counters; =<path> gives the
+  // .profraw, otherwise the environment's (or default.profraw) on exit.
+  llvm::cl::opt<std::string> ProfileInstrGenerate(
+      "fprofile-instr-generate", llvm::cl::cat(P3Category),
+      llvm::cl::desc("Build with the profile counters (=<profraw path>)"),
+      llvm::cl::ValueOptional);
+  // -fprofile-instr-use=<file>: optimize with the profile.
+  llvm::cl::opt<std::string> ProfileInstrUse(
+      "fprofile-instr-use", llvm::cl::cat(P3Category),
+      llvm::cl::desc("Optimize with the profile at <file>"));
 
   cl::HideUnrelatedOptions(P3Category);
   cl::SetVersionPrinter(printVersion);
@@ -223,6 +233,14 @@ int main(int argc, char **argv) {
   Opts.WarnDeprecated = !NoDeprecated;
   Opts.OverflowChecks = !NoOverflowChecks;
   Opts.FastMath = FastMathFlag;
+  // A bare -fprofile-instr-generate takes the runtime's default profile
+  // name (ValueOptional parses it as the empty string): the sentinel
+  // 'true' keeps the two flags apart.
+  Opts.ProfileInstrGenerate =
+      ProfileInstrGenerate.getNumOccurrences() > 0 && ProfileInstrGenerate.empty()
+          ? std::string("true")
+          : ProfileInstrGenerate;
+  Opts.ProfileInstrUse = ProfileInstrUse;
   Opts.ProjectFile = ProjectFile;
   Opts.NoProject = NoProject;
   Opts.GivenOutput = OutputFile.getNumOccurrences() > 0;

@@ -27,6 +27,22 @@ endif()
 message(STATUS "Using LLVM ${LLVM_PACKAGE_VERSION} from ${LLVM_DIR}")
 
 include_directories(SYSTEM ${LLVM_INCLUDE_DIRS})
+# The PGO profile runtime is searched in LLVM's libraries directory.
+cmake_path(GET LLVM_DIR PARENT_PATH P3_LLVM_LIBDIR_TWO)
+cmake_path(GET P3_LLVM_LIBDIR_TWO PARENT_PATH P3_LLVM_LIBDIR_TWO)
+set(P3_LLVM_LIBDIR "")
+foreach(_D IN LISTS LLVM_LIBRARY_DIRS LLVM_DIR)
+  cmake_path(GET _D PARENT_PATH _P1)
+  cmake_path(GET _P1 PARENT_PATH _P1)
+  if(EXISTS ${_P1}/clang)
+    set(P3_LLVM_LIBDIR ${_P1})
+    break()
+  endif()
+endforeach()
+if(P3_LLVM_LIBDIR STREQUAL "")
+  execute_process(COMMAND ${LLVM_TOOLS_BINARY_DIR}/llvm-config --libdir OUTPUT_VARIABLE P3_LLVM_LIBDIR OUTPUT_STRIP_TRAILING_WHITESPACE)
+endif()
+add_compile_definitions(P3_LLVM_LIBDIR="${P3_LLVM_LIBDIR}")
 separate_arguments(LLVM_DEFINITIONS_LIST NATIVE_COMMAND ${LLVM_DEFINITIONS})
 add_definitions(${LLVM_DEFINITIONS_LIST})
 
@@ -87,13 +103,13 @@ if(NOT P3_SELFHOST_PROBLEM AND NOT P3_LLVM_CONFIG)
 endif()
 if(NOT P3_SELFHOST_PROBLEM)
   execute_process(COMMAND ${P3_LLVM_CONFIG} --libdir
-                  OUTPUT_VARIABLE P3_LLVM_LIBDIR OUTPUT_STRIP_TRAILING_WHITESPACE
+                  OUTPUT_VARIABLE P3_SELFHOST_LLVM_LIBDIR OUTPUT_STRIP_TRAILING_WHITESPACE
                   RESULT_VARIABLE P3_LIBDIR_RESULT)
   execute_process(COMMAND ${P3_LLVM_CONFIG} --link-shared --libs
                   OUTPUT_VARIABLE P3_LLVM_LIBS OUTPUT_STRIP_TRAILING_WHITESPACE
                   RESULT_VARIABLE P3_LIBS_RESULT)
   if(NOT P3_LIBDIR_RESULT EQUAL 0 OR NOT P3_LIBS_RESULT EQUAL 0
-     OR P3_LLVM_LIBDIR STREQUAL "" OR P3_LLVM_LIBS STREQUAL "")
+     OR P3_SELFHOST_LLVM_LIBDIR STREQUAL "" OR P3_LLVM_LIBS STREQUAL "")
     set(P3_SELFHOST_PROBLEM
         "${P3_LLVM_CONFIG} gave no libLLVM to link (--libdir, --link-shared --libs)")
   endif()
@@ -103,7 +119,7 @@ if(P3_SELFHOST_PROBLEM)
   message(WARNING "The self-hosted compiler cannot be built: ${P3_SELFHOST_PROBLEM}. "
                   "Its tests and the check-bootstrap and seed targets are left out.")
 else()
-  set(P3_SELFHOST_FLAGS "-I ${P3_SELFHOST_DIR} -L${P3_LLVM_LIBDIR} ${P3_LLVM_LIBS}")
+  set(P3_SELFHOST_FLAGS "-I ${P3_SELFHOST_DIR} -L${P3_SELFHOST_LLVM_LIBDIR} ${P3_LLVM_LIBS}")
   file(WRITE ${P3_SELFHOST_DIR}/flags.txt "${P3_SELFHOST_FLAGS}\n")
   message(STATUS "Self-hosted compiler build flags: ${P3_SELFHOST_FLAGS}")
 endif()

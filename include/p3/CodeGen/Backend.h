@@ -48,9 +48,13 @@ bool writeModuleIR(llvm::Module &M, llvm::StringRef Path,
                    DiagnosticsEngine &Diags);
 
 /// Runs the standard LLVM -O0..-O3 module pipeline, or -Os/-Oz when
-/// SizeLevel is 1 or 2.
+/// SizeLevel is 1 or 2. With ProfileGen (a -fprofile-instr-generate
+/// build), the profile counters go in before the inlining; with
+/// ProfileUse, the profile at the path drives the pipeline.
 void optimizeModule(llvm::Module &M, llvm::TargetMachine &TM, unsigned OptLevel,
-                    unsigned SizeLevel = 0);
+                    unsigned SizeLevel = 0,
+                    const std::string &ProfileGen = std::string(),
+                    const std::string &ProfileUse = std::string());
 
 /// Returns false (after reporting) if the module is malformed -- always an
 /// internal compiler bug.

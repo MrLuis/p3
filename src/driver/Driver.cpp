@@ -501,6 +501,8 @@ bool Driver::runPipeline(FileID FID) {
   CGOpts.DebugInfo = Opts.DebugInfo;
   CGOpts.OptLevel = Opts.OptLevel;
   CGOpts.SizeLevel = Opts.SizeLevel;
+  CGOpts.ProfileInstrGenerate = Opts.ProfileInstrGenerate;
+  CGOpts.ProfileInstrUse = Opts.ProfileInstrUse;
   CGOpts.ZeroInit = Opts.ZeroInit.value_or(Opts.OptLevel == 0);
   CGOpts.KeepUnused = Opts.KeepUnused;
   CGOpts.SeparateUnits = Opts.SeparateUnits;
@@ -613,6 +615,8 @@ bool Driver::compileUnit(Parser &P, FileID FID, ASTContext &Ctx,
   CGOpts.DebugInfo = Opts.DebugInfo;
   CGOpts.OptLevel = Opts.OptLevel;
   CGOpts.SizeLevel = Opts.SizeLevel;
+  CGOpts.ProfileInstrGenerate = Opts.ProfileInstrGenerate;
+  CGOpts.ProfileInstrUse = Opts.ProfileInstrUse;
   CGOpts.ZeroInit = Opts.ZeroInit.value_or(Opts.OptLevel == 0);
   CGOpts.KeepUnused = Opts.KeepUnused;
   CGOpts.SeparateUnits = true;
@@ -649,7 +653,8 @@ bool Driver::finishModule(llvm::Module &Mod, llvm::TargetMachine &TMRef,
             llvm::Triple(llvm::sys::getDefaultTargetTriple()))
       linkRuntimeIR(*M, findRuntimeIR(), Opts.TargetCPU, Opts.TargetFeatures,
                     Diags);
-    optimizeModule(*M, *TM, Opts.OptLevel, Opts.SizeLevel);
+    optimizeModule(*M, *TM, Opts.OptLevel, Opts.SizeLevel,
+                   Opts.ProfileInstrGenerate, Opts.ProfileInstrUse);
   }
 
   switch (Opts.Act) {
@@ -676,6 +681,15 @@ bool Driver::finishModule(llvm::Module &Mod, llvm::TargetMachine &TMRef,
   if (!emitOutput(*M, *TM, OutputKind::Object, ObjPath, Diags))
     return false;
   std::vector<std::string> Libraries = Opts.Libraries;
+  if (!Opts.ProfileInstrGenerate.empty()) {
+    std::string ProfileRuntime = findProfileRuntimeLibrary();
+    if (ProfileRuntime.empty()) {
+      Diags.error("cannot find the profile runtime (libclang_rt.profile) "
+                  "next to LLVM's libraries; set P3_PROFILE_RUNTIME");
+      return false;
+    }
+    Libraries.push_back(ProfileRuntime);
+  }
   Libraries.insert(Libraries.end(), ExternalLibraries.begin(),
                    ExternalLibraries.end());
   return linkExecutable(ObjPath, UnitObjects, Opts.OutputFile, Opts.LibraryDirs,

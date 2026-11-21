@@ -73,6 +73,12 @@ struct CompilerOptions {
   /// optimized); -fno-inline-runtime disables that.
   bool InlineRuntime = true;
 
+  /// -fprofile-instr-generate[=<file>]: build with the counters and link
+  /// the profile runtime; the program writes <file> (or the default
+  /// default.profraw, overridable with LLVM_PROFILE_FILE) on exit.
+  std::string ProfileInstrGenerate;
+  /// -fprofile-instr-use=<file>: optimize with the profile.
+  std::string ProfileInstrUse;
   /// The project file (p3.json, see Project.h): --project=<file> (empty:
   /// look for one), --no-project.
   std::string ProjectFile;

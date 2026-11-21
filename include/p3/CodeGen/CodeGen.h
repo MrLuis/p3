@@ -55,6 +55,11 @@ struct CodeGenOptions {
   /// (pas.<unit>$<name>), and main calls their initialization functions
   /// (pas.<unit>$$init) instead of containing their code.
   bool SeparateUnits = false;
+  /// -fprofile-instr-generate[=<file>]: the counters go in, and the
+  /// profile runtime is linked (a nonempty value is the profraw path).
+  std::string ProfileInstrGenerate;
+  /// -fprofile-instr-use=<file>: optimize with the profile.
+  std::string ProfileInstrUse;
 };
 
 /// Lowers a Sema-checked program to an LLVM module for TM's target.
