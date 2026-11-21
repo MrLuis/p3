@@ -359,11 +359,15 @@ end;
 
 { copy(s, 1, start - 1) + sub + copy(s, start + count, ...), made once:
   the two parts of s are clamped as copy clamps them and moved into place
-  with sub between (docs/strutils-review.md ST-8). }
+  with sub between (docs/strutils-review.md ST-8). The head arrives
+  already in place: the result borrows s and setlength keeps s's own
+  first characters, so only sub and the tail move, and setlength clears
+  at most what the tail moves over (docs/strutils-review.md ST-11). }
 function StuffString(const s: string; start, count: longint; const sub: string): string;
 var
   n, head, from, tail, m: longint;
   r: string;
+  ps, pd: PChar;
 begin
   n := length(s);
   head := start - 1;
@@ -379,18 +383,20 @@ begin
   else
     tail := n - from + 1;
   m := length(sub);
-  if head + m + tail = 0 then
+  n := head + m + tail;
+  if n = 0 then
   begin
     StuffString := '';
     exit;
   end;
-  setlength(r, head + m + tail);
-  if head > 0 then
-    move(s[1], r[1], head);
+  r := s;
+  setlength(r, n);
+  ps := PChar(s);
+  pd := PChar(r);
   if m > 0 then
-    move(sub[1], r[head + 1], m);
+    move(PChar(sub)^, (pd + head)^, m);
   if tail > 0 then
-    move(s[from], r[head + m + 1], tail);
+    move((ps + from - 1)^, (pd + head + m)^, tail);
   StuffString := r;
 end;
 
