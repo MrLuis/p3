@@ -393,10 +393,22 @@ begin
     runtimeAttrs := 'cold noreturn nounwind';
 end;
 
+{ The runtime function Name returns 0 or 1: its result's `range` return
+  attribute, as the runtime's code keeps (llvm-23.md LB-2). }
+function runtimeReturnsBool(const name: string): boolean;
+begin
+  runtimeReturnsBool := (name = '__pas_astr_bad_index') or
+                        (name = '__pas_dyn_bad_index') or
+                        (name = '__pas_aoc_bad_index') or
+                        (name = '__pas_token_cancelled');
+end;
+
 function runtimeRetAttr(const name: string): string;
 begin
   if runtimeReturnsFresh(name) then
     runtimeRetAttr := 'noalias'
+  else if runtimeReturnsBool(name) then
+    runtimeRetAttr := 'range(i32 0, 2)'
   else
     runtimeRetAttr := '';
 end;

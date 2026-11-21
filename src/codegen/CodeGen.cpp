@@ -127,6 +127,13 @@ static bool runtimeReadsParam(llvm::StringRef Name, unsigned I) {
   return false;
 }
 
+/// The runtime function Name returns 0 or 1: its result's `range` return
+/// attribute (the runtime's code keeps it; llvm-23.md LB-2).
+static bool runtimeReturnsBool(llvm::StringRef Name) {
+  return Name == "__pas_astr_bad_index" || Name == "__pas_dyn_bad_index" ||
+         Name == "__pas_aoc_bad_index" || Name == "__pas_token_cancelled";
+}
+
 /// A runtime destination that it only writes, and that cannot alias a
 /// source of the call (item 4).
 static bool runtimeWritesParam(llvm::StringRef Name, unsigned I) {
@@ -151,6 +158,12 @@ static void addRuntimeAttrs(llvm::Function *F) {
   }
   if (runtimeReturnsFresh(Name))
     F->addRetAttr(llvm::Attribute::NoAlias);
+  if (runtimeReturnsBool(Name)) { // 0 or 1: the range's return attribute
+    llvm::AttrBuilder B(C);
+    B.addRangeAttr(llvm::ConstantRange(llvm::APInt(32, 0),
+                                          llvm::APInt(32, 2)));
+    F->addRetAttrs(B);
+  }
   if (Name == "__pas_abstract_error") {
     F->addFnAttr(llvm::Attribute::Cold);
     F->addFnAttr(llvm::Attribute::NoReturn);
