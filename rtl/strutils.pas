@@ -467,10 +467,57 @@ begin
   AnsiMatchText := MatchText(text, values);
 end;
 
+{ The value of s as hexadecimal, made without a '$' + s string: when s
+  starts with $ it is StrToInt's as it is; otherwise its digits are taken
+  in place, on the negative side, as StrToInt's parse builds them, and the
+  answer is TryStrToInt's same longint range. Anything the digits loop
+  refuses goes to StrToInt('$' + s), which fails with the same '$' + s
+  named in its message as before (docs/strutils-review.md ST-12). }
 function Hex2Dec(const s: string): longint;
+const
+  lowest = -9223372036854775807 - 1;
+var
+  i: longint;
+  c: char;
+  d: longint;
+  ok: boolean;
+  v: int64;
 begin
   if (s <> '') and (s[1] = '$') then
-    Hex2Dec := StrToInt(s)
+  begin
+    Hex2Dec := StrToInt(s);
+    exit;
+  end;
+  if s = '' then
+  begin
+    Hex2Dec := StrToInt('$' + s);
+    exit;
+  end;
+  v := 0;
+  ok := true;
+  for i := 1 to length(s) do
+  begin
+    c := s[i];
+    if (c >= '0') and (c <= '9') then
+      d := ord(c) - ord('0')
+    else if (c >= 'a') and (c <= 'f') then
+      d := ord(c) - (ord('a') - 10)
+    else if (c >= 'A') and (c <= 'F') then
+      d := ord(c) - (ord('A') - 10)
+    else
+    begin
+      ok := false;
+      break;
+    end;
+    if v < (lowest + d) div 16 then
+    begin
+      ok := false;
+      break;
+    end;
+    v := v * 16 - d;
+  end;
+  if ok and (v <> lowest) and (-v >= -2147483647 - 1) and (-v <= 2147483647) then
+    Hex2Dec := -v
   else
     Hex2Dec := StrToInt('$' + s);
 end;
