@@ -10,3 +10,6 @@ compile_commands.json
 
 # codesight indexes
 .codesight/
+
+# the design docs are local-only
+docs/
