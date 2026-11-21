@@ -2062,6 +2062,25 @@ begin
   irStoreVolatile(addr, pinSlot);
 end;
 
+{ Whether the index node is a plain variable whose range the analysis
+  knows at or above loNeeded and small enough that the scaled offset
+  stays inside 64 bits: nuw on the index GEP then (llvm-23.md LB-1). }
+function indexFlags(n: PNode; loNeeded: int64): boolean;
+var
+  d: PDecl;
+begin
+  indexFlags := false;
+  if n^.kind = nkParen then
+    n := n^.operand;
+  if (n^.kind <> nkNameRef) or (n^.refDecl = nil) then
+    exit;
+  d := n^.refDecl;
+  if not d^.cgRangeKnown then
+    exit;
+  indexFlags := (d^.cgRangeLo >= loNeeded) and
+                (d^.cgRangeHi <= loNeeded + 1073741824);
+end;
+
 function emitAddress(e: PNode): TV; forward;
 function emitTuple(e: PNode): TV; forward;
 
@@ -3537,7 +3556,8 @@ begin
             bad := irICmp('ne', bad, i32c(0), '');
             emitRuntimeCheck(bad, 'array index out of bounds', e^.index^.b);
           end;
-          exit(irGEP1(memType(bt^.dynElement), base, x, true, ''));
+          exit(irGEP1(memType(bt^.dynElement), base, x, true, '',
+                      indexFlags(e^.index, 0)));
         end;
         if bt^.kind = tyOpenArray then
         begin
@@ -3548,7 +3568,8 @@ begin
             bad := irICmp('uge', x, openCount(openDescriptor(e^.base)), '');
             emitRuntimeCheck(bad, 'array index out of bounds', e^.index^.b);
           end;
-          exit(irGEP1(memType(bt^.openElement), base, x, true, ''));
+          exit(irGEP1(memType(bt^.openElement), base, x, true, '',
+                      indexFlags(e^.index, 0)));
         end;
         if bt^.kind = tyArrayOfConst then
         begin
@@ -3575,7 +3596,7 @@ begin
             base := call1(classRuntime('__pas_astr_unique', 'ptr', 'ptr'), base, '');
           emitAnsiIndexCheck(base, x, e^.index^.b);
           offset := irBin('sub', x, i64c(1), '');
-          exit(irGEP1(irI8, base, offset, true, ''));
+          exit(irGEP1(irI8, base, offset, true, '', indexFlags(e^.index, 1)));
         end;
         if bt^.kind = tyShortString then
         begin
@@ -3587,7 +3608,8 @@ begin
             bad := outsideRange(x, 0, bt^.maxLength);
             emitRuntimeCheck(bad, 'string index out of bounds', e^.index^.b);
           end;
-          exit(irGEP1(irI8, base, toI64(idx, idxTy), true, ''));
+          exit(irGEP1(irI8, base, toI64(idx, idxTy), true, '',
+                      indexFlags(e^.index, 0)));
         end;
         if bt^.kind = tyStringLit then
         begin
@@ -3600,7 +3622,7 @@ begin
             emitRuntimeCheck(bad, 'string index out of bounds', e^.index^.b);
           end;
           offset := irBin('sub', x, i64c(1), '');
-          exit(irGEP1(irI8, base, offset, true, ''));
+          exit(irGEP1(irI8, base, offset, true, '', indexFlags(e^.index, 1)));
         end;
         base := emitAddress(e^.base);
         idx := visitExpr(e^.index);
@@ -3609,7 +3631,8 @@ begin
         bd := getOrdinalBounds(bt^.indexType);
         offset := irBin('sub', toI64(idx, idxTy), i64c(bd.lo), 'idx');
         baseAlign := addrAlign(base, bt);
-        elemAddr := irGEP2(memType(bt), base, i64c(0), offset, '');
+        elemAddr := irGEP2(memType(bt), base, i64c(0), offset, '',
+                           indexFlags(e^.index, bd.lo));
         { (elements are a multiple of their alignment apart) }
         if baseAlign < alignOf(bt^.elementType) then
           setAddrAlign(elemAddr, baseAlign);
@@ -6505,7 +6528,8 @@ begin
   x := toI64(visitExpr(e^.index), e^.index^.typ);
   emitAnsiIndexCheck(s, x, e^.index^.b);
   offset := irBin('sub', x, i64c(1), '');
-  emitAnsiIndexRead := loadScalar(irGEP1(irI8, s, offset, true, ''), e^.typ, '');
+  emitAnsiIndexRead := loadScalar(irGEP1(irI8, s, offset, true, '',
+                            indexFlags(e^.index, 1)), e^.typ, '');
 end;
 
 { A method-pointer lambda's value: (code, object), the object the Self

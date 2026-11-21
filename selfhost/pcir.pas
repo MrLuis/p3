@@ -1,4 +1,5 @@
 unit pcir;
+{$modeswitch defaultparameters}
 { A builder for textual LLVM IR that writes exactly what LLVM 19 prints for
   the module the C++ p3 builds with IRBuilder (SELFHOST.md S10: the two
   compilers' --emit-llvm output must be identical). It models what shows
@@ -251,8 +252,8 @@ procedure irStoreAlign(const v, p: TV; align: longint);
 function irLowBits(t: PIRType; w: longint): TV;
 procedure irStoreVolatile(const v, p: TV);
 { getelementptr [inbounds] src, p, idx (one or two i64/i32 indices) }
-function irGEP1(src: PIRType; const p, i0: TV; inbounds: boolean; const name: string): TV;
-function irGEP2(src: PIRType; const p, i0, i1: TV; const name: string): TV;
+function irGEP1(src: PIRType; const p, i0: TV; inbounds: boolean; const name: string; nuw: boolean = false): TV;
+function irGEP2(src: PIRType; const p, i0, i1: TV; const name: string; nuw: boolean = false): TV;
 function irStructGEP(st: PIRType; const p: TV; field: longint; const name: string): TV;
 function irExtract(const agg: TV; idx: longint; t: PIRType; const name: string): TV;
 function irInsert(const agg, v: TV; idx: longint; const name: string): TV;
@@ -2531,18 +2532,20 @@ begin
   gep := irV(irPtrT, res);
 end;
 
-function irGEP1(src: PIRType; const p, i0: TV; inbounds: boolean; const name: string): TV;
+function irGEP1(src: PIRType; const p, i0: TV; inbounds: boolean;
+                const name: string; nuw: boolean = false): TV;
 begin
   irGEP1 := gep(src, p, i0.t^.text + ' ' + i0.v, irIsConst(i0),
-                irIsConst(i0) and irIsNullValue(i0), inbounds, false, name);
+                irIsConst(i0) and irIsNullValue(i0), inbounds, nuw, name);
 end;
 
-function irGEP2(src: PIRType; const p, i0, i1: TV; const name: string): TV;
+function irGEP2(src: PIRType; const p, i0, i1: TV; const name: string;
+                nuw: boolean = false): TV;
 begin
   irGEP2 := gep(src, p, i0.t^.text + ' ' + i0.v + ', ' + i1.t^.text + ' ' + i1.v,
                 irIsConst(i0) and irIsConst(i1),
                 irIsConst(i0) and irIsConst(i1) and irIsNullValue(i0) and
-                irIsNullValue(i1), true, false, name);
+                irIsNullValue(i1), true, nuw, name);
 end;
 
 function irStructGEP(st: PIRType; const p: TV; field: longint; const name: string): TV;

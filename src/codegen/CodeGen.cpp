@@ -1912,6 +1912,27 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
     return B.CreateTrunc(toI64(visitExpr(E), E->getType()), B.getInt32Ty());
   }
 
+  /// The no-wrap flags for an element index: `nuw` when the index is a
+  /// plain variable whose range the analysis knows at or above LoNeeded
+  /// and small enough that the scaled offset stays inside 64 bits
+  /// (llvm-23.md LB-1). Inbounds is the GEP's own.
+  llvm::GEPNoWrapFlags indexFlags(Expr *Idx, int64_t LoNeeded) {
+    auto *N = llvm::dyn_cast<NameRefExpr>(unwrapConst(Idx));
+    auto *VD =
+        N ? llvm::dyn_cast_or_null<VarDecl>(N->getDecl()) : nullptr;
+    if (!VD)
+      return llvm::GEPNoWrapFlags::inBounds();
+    auto It = VarRanges.find(VD);
+    if (It == VarRanges.end())
+      return llvm::GEPNoWrapFlags::inBounds();
+    const ValueRange &R = It->second;
+    if (!R.Known || R.Lo < LoNeeded || R.Hi > LoNeeded + (int64_t(1) << 30))
+      return llvm::GEPNoWrapFlags::inBounds();
+    return llvm::GEPNoWrapFlags::fromRaw(
+        llvm::GEPNoWrapFlags::inBounds().getRaw() |
+        llvm::GEPNoWrapFlags::noUnsignedWrap().getRaw());
+  }
+
   static unsigned intBits(Type *T) {
     return llvm::cast<IntegerType>(T->getBase())->getBits();
   }
@@ -3537,7 +3558,7 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
           emitRuntimeCheck(B.CreateICmpUGE(X, openCount(openDescriptor(I->getBase()))),
                            "array index out of bounds",
                            I->getIndex()->getBeginLoc());
-        return B.CreateInBoundsGEP(memType(OA->getElementType()), Data, X);
+        return B.CreateGEP(memType(OA->getElementType()), Data, X, "", indexFlags(I->getIndex(), 0));
       }
       if (auto *AC = llvm::dyn_cast<ArrayOfConstType>(I->getBase()->getType())) {
         llvm::Value *A = visitExpr(I->getBase());
@@ -3567,7 +3588,7 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
                                           B.getInt32(0)),
                            "array index out of bounds",
                            I->getIndex()->getBeginLoc());
-        return B.CreateInBoundsGEP(memType(Elem), Data, X);
+        return B.CreateGEP(memType(Elem), Data, X, "", indexFlags(I->getIndex(), 0));
       }
       if (I->getBase()->getType()->isAnsiString()) {
         // An address may be written through: the string must be unshared,
@@ -3579,8 +3600,9 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
                 ? B.CreateLoad(B.getPtrTy(), Base, "s")
                 : astrCall("__pas_astr_unique", B.getPtrTy(), {Base});
         emitAnsiIndexCheck(Data, X, I->getIndex()->getBeginLoc());
-        return B.CreateInBoundsGEP(B.getInt8Ty(), Data,
-                                   B.CreateSub(X, B.getInt64(1)));
+        return B.CreateGEP(B.getInt8Ty(), Data,
+                           B.CreateSub(X, B.getInt64(1)), "",
+                           indexFlags(I->getIndex(), 1));
       }
       if (auto *SS = llvm::dyn_cast<ShortStringType>(I->getBase()->getType())) {
         llvm::Value *Base = emitAddress(I->getBase());
@@ -3600,8 +3622,9 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
         if (rangeChecks(I->getIndex()->getBeginLoc()))
           emitRuntimeCheck(outsideRange(X, 1, static_cast<int64_t>(SL->getLength())),
                            "string index out of bounds", I->getIndex()->getBeginLoc());
-        return B.CreateInBoundsGEP(B.getInt8Ty(), Base,
-                                   B.CreateSub(X, B.getInt64(1)));
+        return B.CreateGEP(B.getInt8Ty(), Base,
+                           B.CreateSub(X, B.getInt64(1)), "",
+                           indexFlags(I->getIndex(), 1));
       }
       auto *AT = llvm::cast<ArrayType>(I->getBase()->getType());
       llvm::Value *Base = emitAddress(I->getBase());
@@ -3613,8 +3636,9 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
       llvm::Value *Offset =
           B.CreateSub(toI64(Idx, IdxTy), B.getInt64(Bd.Lo), "idx");
       uint64_t BaseAlign = addrAlign(Base, AT);
-      llvm::Value *Elem =
-          B.CreateInBoundsGEP(memType(AT), Base, {B.getInt64(0), Offset});
+      llvm::Value *Elem = B.CreateGEP(memType(AT), Base,
+                                      {B.getInt64(0), Offset}, "",
+                                      indexFlags(I->getIndex(), Bd.Lo));
       // (elements are a multiple of their alignment apart)
       if (BaseAlign < alignOf(AT->getElementType()))
         AddrAligns[Elem] = BaseAlign;
@@ -9882,8 +9906,9 @@ public:
       llvm::Value *S = visitExpr(E->getBase());
       llvm::Value *X = toI64(visitExpr(E->getIndex()), E->getIndex()->getType());
       emitAnsiIndexCheck(S, X, E->getIndex()->getBeginLoc());
-      return loadScalar(B.CreateInBoundsGEP(B.getInt8Ty(), S,
-                                            B.CreateSub(X, B.getInt64(1))),
+      return loadScalar(B.CreateGEP(B.getInt8Ty(), S,
+                                    B.CreateSub(X, B.getInt64(1)), "",
+                                    indexFlags(E->getIndex(), 1)),
                         E->getType());
     }
     return loadScalar(emitAddress(E), E->getType());
