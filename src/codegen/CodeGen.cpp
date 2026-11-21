@@ -1895,6 +1895,18 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
     return E->getType()->getBase()->isWideChar() ? wideToChar(V) : V;
   }
 
+  /// A character as the (pointer, count) piece of a join: an own entry
+  /// byte holding it, instead of a fresh one-character string.
+  llvm::Value *emitCharPiece(Expr *E) {
+    llvm::IRBuilder<> Entry(&CurFn->getEntryBlock(),
+                            CurFn->getEntryBlock().begin());
+    llvm::Value *M =
+        Entry.CreateAlloca(B.getInt8Ty(), nullptr, "char.tmp");
+    Entry.CreateStore(llvm::Constant::getNullValue(B.getInt8Ty()), M);
+    B.CreateStore(emitCharValue(E), M);
+    return M;
+  }
+
   /// An integer expression as i32 (field widths, string positions).
   llvm::Value *emitI32(Expr *E) {
     return B.CreateTrunc(toI64(visitExpr(E), E->getType()), B.getInt32Ty());
@@ -2602,11 +2614,7 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
                 astrCall("__pas_astr_length", B.getInt32Ty(), {M}),
                 B.getInt64Ty());
           } else {
-            llvm::IRBuilder<> Entry(&CurFn->getEntryBlock(),
-                                    CurFn->getEntryBlock().begin());
-            M = Entry.CreateAlloca(B.getInt8Ty(), nullptr, "char.tmp");
-            Entry.CreateStore(llvm::Constant::getNullValue(B.getInt8Ty()), M);
-            B.CreateStore(emitCharValue(Args[1]), M);
+            M = emitCharPiece(Args[1]);
             N = B.getInt64(1);
           }
           llvm::Value *C = emitAnsi(Args[2]);
@@ -9468,16 +9476,33 @@ public:
           N = B.CreateZExt(astrCall("__pas_astr_length", B.getInt32Ty(), {M}),
                            B.getInt64Ty());
         } else {
-          llvm::IRBuilder<> Entry(&CurFn->getEntryBlock(),
-                                  CurFn->getEntryBlock().begin());
-          M = Entry.CreateAlloca(B.getInt8Ty(), nullptr, "char.tmp");
-          Entry.CreateStore(llvm::Constant::getNullValue(B.getInt8Ty()), M);
-          B.CreateStore(emitCharValue(BLHS->getRHS()), M);
+          M = emitCharPiece(BLHS->getRHS());
           N = B.getInt64(1);
         }
         llvm::Value *C = emitAnsi(E->getRHS());
         return holdResult(
             astrCall("__pas_astr_join", B.getPtrTy(), {A, M, N, C}));
+      }
+      // c + s and s + c, with the character on its own byte and the
+      // string's or the empty end's characters as the nil side of the
+      // join (item 7): one allocation, where a fresh one-character
+      // string and a concat were two.
+      if (E->getLHS()->getType()->isCharLike() &&
+          E->getRHS()->getType()->isAnsiString()) {
+        llvm::Value *M = emitCharPiece(E->getLHS());
+        llvm::Value *C = emitAnsi(E->getRHS());
+        return holdResult(astrCall(
+            "__pas_astr_join", B.getPtrTy(),
+            {llvm::ConstantPointerNull::get(B.getPtrTy()), M, B.getInt64(1),
+             C}));
+      }
+      if (E->getLHS()->getType()->isAnsiString() &&
+          E->getRHS()->getType()->isCharLike()) {
+        llvm::Value *L = emitAnsi(E->getLHS());
+        llvm::Value *M = emitCharPiece(E->getRHS());
+        return holdResult(astrCall(
+            "__pas_astr_join", B.getPtrTy(),
+            {L, M, B.getInt64(1), llvm::ConstantPointerNull::get(B.getPtrTy())}));
       }
       llvm::Value *L = emitAnsi(E->getLHS());
       llvm::Value *R = emitAnsi(E->getRHS());

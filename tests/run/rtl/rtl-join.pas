@@ -51,6 +51,9 @@ begin
   writeln('10: ' + 'A' + 'B' + 'C');
   writeln('11: ' + big + ' ' + big);
   writeln('12: ', length(Thrice(big)), ' ', Thrice(ins));
+  writeln('13: ' + big + sep);
+  writeln('14: ' + sep + big);
+  writeln('15: ' + empty + sep + big);
 
   { every shape's value, against the pairwise concatenation }
   writeln(Pair(big, big, big) = big + big + big, ' ',

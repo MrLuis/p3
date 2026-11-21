@@ -2553,6 +2553,17 @@ begin
   emitCharValue := v;
 end;
 
+{ A character as the (pointer, count) piece of a join: an own entry byte
+  holding it, instead of a fresh one-character string. }
+function emitCharPiece(e: PNode): TV;
+var
+  slot: TV;
+begin
+  slot := irCreateTempInit(irI8, 'char.tmp', irZero(irI8));
+  irStore(emitCharValue(e), slot);
+  emitCharPiece := slot;
+end;
+
 
 { Any string-like expression as a pointer to a length-prefixed string. }
 function emitPStr(e: PNode): TV;
@@ -2957,8 +2968,7 @@ begin
           end
           else
           begin
-            s1 := irCreateTempInit(irI8, 'char.tmp', irZero(irI8));
-            irStore(emitCharValue(PNode(listGet(e^.args, 1))), s1);
+            s1 := emitCharPiece(PNode(listGet(e^.args, 1)));
             n1 := i64c(1);
           end;
           s0 := emitAnsi(PNode(listGet(e^.args, 2)));
@@ -6266,14 +6276,31 @@ begin
       end
       else
       begin
-        m := irCreateTempInit(irI8, 'char.tmp', irZero(irI8));
-        irStore(emitCharValue(lhs^.rhs), m);
+        m := emitCharPiece(lhs^.rhs);
         w := i64c(1);
       end;
       r := emitAnsi(e^.rhs);
       exit(holdResult(call4(classRuntime('__pas_astr_join', 'ptr',
                                           'ptr,ptr,i64,ptr'),
                             l, m, w, r, '')));
+    end;
+    { c + s and s + c, with the character on its own byte and the string's
+      or the empty end's characters as the nil side of the join (item 7) }
+    if isCharLike(e^.lhs^.typ) and (e^.rhs^.typ^.kind = tyAnsiString) then
+    begin
+      l := emitCharPiece(e^.lhs);
+      r := emitAnsi(e^.rhs);
+      exit(holdResult(call4(classRuntime('__pas_astr_join', 'ptr',
+                                          'ptr,ptr,i64,ptr'),
+                            irZero(irPtrT), l, i64c(1), r, '')));
+    end;
+    if (e^.lhs^.typ^.kind = tyAnsiString) and isCharLike(e^.rhs^.typ) then
+    begin
+      l := emitAnsi(e^.lhs);
+      r := emitCharPiece(e^.rhs);
+      exit(holdResult(call4(classRuntime('__pas_astr_join', 'ptr',
+                                          'ptr,ptr,i64,ptr'),
+                            l, r, i64c(1), irZero(irPtrT), '')));
     end;
     l := emitAnsi(e^.lhs);
     r := emitAnsi(e^.rhs);
