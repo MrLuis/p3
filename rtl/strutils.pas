@@ -186,8 +186,31 @@ begin
   PadRight := AddCharR(' ', s, n);
 end;
 
-{ Whether sub is at position at of s (it fits there), compared in place
-  (docs/strutils-review.md ST-6). }
+{ (no range checks in this one: i stays within both strings, whose
+  lengths hold n), as in sysutils' own copy }
+{$push}{$R-}{$Q-}
+type
+  PCompareBlock = ^QWord;
+
+{ The index (from 0) of the first 8-byte block of a and b, both n bytes
+  or longer, that differs, or the start of the last partial block: equal
+  blocks are skipped a word at a time (unaligned loads), the 6 lines of
+  sysutils' equalPrefix, repeated as its helpers were (ST-14). }
+function equalPrefix(a, b: PChar; n: longint): longint;
+var
+  i: longint;
+begin
+  i := 0;
+  while (i + 8 <= n) and (PCompareBlock(a + i)^ = PCompareBlock(b + i)^) do
+    i := i + 8;
+  equalPrefix := i;
+end;
+{$pop}
+
+{ Whether sub is at position at of s (it fits there), compared in place:
+  equal blocks of 8 first, a word at a time, then the tail by bytes, so
+  that a long shared prefix is skimmed (docs/strutils-review.md ST-6,
+  ST-15). }
 function strAt(const sub, s: string; at: longint): boolean;
 var
   i, n: longint;
@@ -196,7 +219,7 @@ begin
   n := length(sub);
   a := PChar(sub);
   b := PChar(s) + (at - 1);
-  i := 0;
+  i := equalPrefix(a, b, n);
   while (i < n) and (a[i] = b[i]) do
     i := i + 1;
   strAt := i = n;
@@ -328,8 +351,9 @@ begin
 end;
 
 { The position of the first sub in s at or after start; 0 if none (sub is
-  not empty). The same search as sysutils' own posFrom, which is not
-  exported. }
+  not empty). The same search as sysutils' own posFrom, kept in step at
+  both ends (ST-1, ST-14): strutils uses sysutils, and no helper is
+  exported from it than Free Pascal's names. }
 function findFrom(const sub, s: string; start: longint): longint;
 var
   i, j, last, m: longint;

@@ -895,7 +895,9 @@ begin
   QuotedStr := r;
 end;
 
-{ The position of the first sub in s at or after start; 0 if none. }
+{ The position of the first sub in s at or after start; 0 if none. Kept
+  in step with strutils' findFrom, which repeats it for its PosEx (ST-1,
+  ST-14): this unit cannot use strutils, and no helper is exported. }
 function posFrom(const sub, s: string; start: longint): longint;
 var
   i, j, last, m: longint;
