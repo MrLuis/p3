@@ -1962,6 +1962,22 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
     return M;
   }
 
+  /// The loop's hoist scope that covers the index's base: the array whose
+  /// length check is hoisted, innermost loop last.
+  /// The loop's hoist scope that covers the index's base: the array whose
+  /// length this for checks (null: none). Innermost loop last.
+  const std::pair<VarDecl *, llvm::Value *> *checkedScopeOf(const Expr *E) const {
+    if (!CurRoutine) // (the walk and its proof are per routine)
+      return nullptr;
+    auto *V = countedBase(E);
+    if (!V)
+      return nullptr;
+    for (size_t I = CheckedBases.size(); I > 0; --I)
+      if (CheckedBases[I - 1].first == V)
+        return &CheckedBases[I - 1];
+    return nullptr;
+  }
+
   /// An integer expression as i32 (field widths, string positions).
   llvm::Value *emitI32(Expr *E) {
     return B.CreateTrunc(toI64(visitExpr(E), E->getType()), B.getInt32Ty());
@@ -2044,6 +2060,288 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
   void forgetRanges(const VarSet &Vars) {
     for (VarDecl *V : Vars)
       setVarRange(V, {});
+  }
+
+  //===--- LB-5 (docs/llvm-23.md): one length check per loop for the
+  // counted types. A for loop whose body indexes a dynamic array, an
+  // open array or an array of const with the bare control variable only,
+  // and whose body provably cannot change the array, checks the length
+  // once at the loop's entry; the accesses inside run without their
+  // per-element checks, which unblocks LLVM's vectorizer. The walk bails
+  // (and the accesses keep their own checks) for anything it cannot
+  // follow: indirect calls and lambdas (unseen writes), spawn blocks and
+  // async calls (the task may outlive and reach the array), await,
+  // detached, yields, move (the variable nils), `@x` and `x^` (an
+  // escape), memory-management calls, goto targets (labels) and
+  // break/continue/exit (whose flow would make an out-of-range first
+  // access skip the per-element check the hoist replaces).
+
+  /// The counted-type bases whose checks the for loop hoists: the array
+  /// variable with its loaded length (null for open arrays, whose count
+  /// rides the argument descriptor), innermost loop last.
+  llvm::SmallVector<std::pair<VarDecl *, llvm::Value *>, 2> CheckedBases;
+
+  /// A bare variable reference, unwrapping parens and const wrappers.
+  static NameRefExpr *plainVarRef(const Expr *E) {
+    return llvm::dyn_cast_or_null<NameRefExpr>(unwrapConst(const_cast<Expr *>(E)));
+  }
+
+  /// The base's variable when E reads or writes a counted type (dynamic
+  /// array, open array, array of const) through a plain variable of the
+  /// routine itself (never captured: a nested routine or a spawn block
+  /// could write it unseen).
+  VarDecl *countedBase(const Expr *E) const {
+    E = unwrapConst(const_cast<Expr *>(E));
+    if (auto *P = llvm::dyn_cast<ParenExpr>(E))
+      return countedBase(P->getInner());
+    if (auto *F = llvm::dyn_cast<FieldExpr>(E))
+      return nullptr;
+    const Expr *Base = E;
+    if (auto *I = llvm::dyn_cast<IndexExpr>(E))
+      Base = I->getBase();
+    auto *N = plainVarRef(Base);
+    if (!N)
+      return nullptr;
+    auto *D = N->getDecl();
+    if (!D)
+      return nullptr;
+    auto *V = llvm::dyn_cast_or_null<VarDecl>(D);
+    if (!V || V->isCaptured() || !V->getType())
+      return nullptr;
+    if (V->getOwner() != CurRoutine) {
+      // A global: only when the routine is flat — no nested routines in
+      // its declarations (none of them — however deep — could otherwise
+      // write the global's length with no var parameter to see).
+      if (!CurRoutine || !CurRoutine->getBody())
+        return nullptr;
+      for (Decl *ND : CurRoutine->getBody() ? CurRoutine->getBody()->getDecls() : llvm::ArrayRef<Decl *>())
+        if (llvm::isa<RoutineDecl>(ND))
+          return nullptr;
+      return V;
+    }
+    if (!V || false || !V->getType())
+      return nullptr;
+    Type *T = V->getType();
+    if (!T->isDynArray() && !T->isOpenArray() && !T->isArrayOfConst())
+      return nullptr;
+    return V;
+  }
+
+  /// The hoist's state for one walked loop: bail = anything unseen was
+  /// met; the bases' element accesses, with the bare control variable's
+  /// bareness and the unconditional-ness of the access's statement.
+  struct HoistWalk {
+    bool Bail = false; // a global unseen: no hoisting at all
+    // base: seen (first), all accesses' index is the bare variable, all
+    // accesses unconditional, and the base itself unwritten (checked by
+    // writtenBy outside).
+    llvm::DenseMap<VarDecl *, std::tuple<bool, bool, bool, Expr *>> Bases;
+    void touch(VarDecl *V, Expr *Base, bool Bare, bool Unconditional) {
+      auto &E = Bases[V];
+      bool Seen = std::get<0>(E);
+      std::get<0>(E) = true;
+      std::get<1>(E) = Seen ? (std::get<1>(E) && Bare) : Bare;
+      std::get<2>(E) = std::get<2>(E) || !Unconditional;
+      if (!std::get<3>(E))
+        std::get<3>(E) = Base;
+    }
+  };
+
+  void hoistWalk(const Stmt *S, HoistWalk &W, bool Unconditional) const {
+    if (!S)
+      return;
+    if (auto *C = llvm::dyn_cast<CompoundStmt>(S)) {
+      for (Stmt *X : C->getBody())
+        hoistWalk(X, W, Unconditional);
+      return;
+    }
+    if (auto *A = llvm::dyn_cast<AssignStmt>(S)) {
+      hoistExpr(A->getTarget(), W, Unconditional);
+      hoistExpr(A->getValue(), W, Unconditional);
+      return;
+    }
+    if (auto *P = llvm::dyn_cast<ProcCallStmt>(S)) {
+      if (!P->getDecl()) // a call whose callee's writes are unseen
+        W.Bail = true;
+      for (Expr *A : P->getArgs())
+        hoistExpr(A, W, Unconditional);
+      if (P->getCalleeValue())
+        hoistExpr(P->getCalleeValue(), W, Unconditional);
+      return;
+    }
+    if (llvm::isa<IndirectCallStmt>(S)) {
+      W.Bail = true;
+      return;
+    }
+    if (auto *I = llvm::dyn_cast<IfStmt>(S)) {
+      hoistExpr(I->getCond(), W, Unconditional);
+      // the accesses inside are conditional
+      hoistWalk(I->getThen(), W, false);
+      if (I->getElse())
+        hoistWalk(I->getElse(), W, false);
+      return;
+    }
+    if (auto *W2 = llvm::dyn_cast<WhileStmt>(S)) {
+      hoistExpr(W2->getCond(), W, Unconditional);
+      // the cond may run unseen rounds: its accesses are conditional
+      hoistWalk(W2->getBody(), W, false);
+      return;
+    }
+    if (auto *R = llvm::dyn_cast<RepeatStmt>(S)) {
+      for (Stmt *X : R->getBody())
+        hoistWalk(X, W, Unconditional);
+      hoistExpr(R->getCond(), W, Unconditional);
+      return;
+    }
+    if (auto *F = llvm::dyn_cast<ForStmt>(S)) {
+      hoistExpr(F->getInit(), W, Unconditional);
+      hoistExpr(F->getFinal(), W, Unconditional);
+      // (an entered for runs at least once: the entry check is hoisted)
+      hoistWalk(F->getBody(), W, Unconditional);
+      return;
+    }
+    if (auto *F = llvm::dyn_cast<ForInStmt>(S)) {
+      hoistExpr(F->getCollection(), W, Unconditional);
+      // (a collection may be empty: its body's accesses are conditional)
+      hoistWalk(F->getBody(), W, false);
+      return;
+    }
+    if (auto *T = llvm::dyn_cast<TryStmt>(S)) {
+      W.Bail = true;
+      return;
+    }
+    if (auto *C = llvm::dyn_cast<CaseStmt>(S)) {
+      hoistExpr(C->getSelector(), W, Unconditional);
+      for (CaseArm *A : C->getArms()) {
+        for (CaseLabel *L : A->getLabels()) {
+          hoistExpr(L->Lo, W, Unconditional);
+          if (L->Hi)
+            hoistExpr(L->Hi, W, Unconditional);
+        }
+        hoistWalk(A->getBody(), W, false);
+      }
+      for (Stmt *X : C->getElseBody())
+        hoistWalk(X, W, false);
+      return;
+    }
+    if (auto *W2 = llvm::dyn_cast<WithStmt>(S)) {
+      // the records' own evaluations may name arrays
+      for (WithContext *X : W2->getRecords())
+        if (X->Record)
+          hoistExpr(X->Record, W, Unconditional);
+      hoistWalk(W2->getBody(), W, Unconditional);
+      return;
+    }
+    if (auto *L = llvm::dyn_cast<LabeledStmt>(S)) {
+      W.Bail = true; // a goto target inside
+      return;
+    }
+    if (auto *SC = llvm::dyn_cast<ScopeStmt>(S)) {
+      for (Stmt *X : SC->getBody())
+        hoistWalk(X, W, Unconditional);
+      return;
+    }
+    if (llvm::isa<ExprStmt>(S) || llvm::isa<VarDeclStmt>(S) ||
+        llvm::isa<DestructureStmt>(S) || llvm::isa<RaiseStmt>(S) ||
+        llvm::isa<GotoStmt>(S) || llvm::isa<YieldStmt>(S) ||
+        llvm::isa<DetachedStmt>(S))
+      W.Bail = true;
+  }
+
+  void hoistExpr(const Expr *E, HoistWalk &W, bool Unconditional) const {
+    if (!E)
+      return;
+    E = unwrapConst(const_cast<Expr *>(E));
+    if (auto *P = llvm::dyn_cast<ParenExpr>(E))
+      return hoistExpr(P->getInner(), W, Unconditional);
+    if (llvm::isa<SpawnExpr>(E) || llvm::isa<AwaitExpr>(E) ||
+        llvm::isa<MoveExpr>(E) || llvm::isa<AddrOfExpr>(E) ||
+        llvm::isa<IndirectCallExpr>(E) || llvm::isa<DerefExpr>(E)) {
+      W.Bail = true;
+      return;
+    }
+    if (auto *C = llvm::dyn_cast<CallExpr>(E)) {
+      if (!C->getDecl()) {
+        W.Bail = true;
+        return;
+      }
+      if (auto *B = llvm::dyn_cast<BuiltinDecl>(C->getDecl()))
+        switch (B->getBuiltinKind()) {
+        case BuiltinKind::GetMem:
+        case BuiltinKind::FreeMem:
+        case BuiltinKind::ReallocMem:
+          W.Bail = true;
+          return;
+        default:
+          break;
+        }
+      hoistExpr(C->getCalleeValue(), W, Unconditional);
+      for (Expr *A : C->getArgs())
+        hoistExpr(A, W, Unconditional);
+      return;
+    }
+    if (auto *I = llvm::dyn_cast<IndexExpr>(E)) {
+      hoistExpr(I->getBase(), W, Unconditional);
+      hoistExpr(I->getIndex(), W, Unconditional);
+      // an element access of a counted type (whose base is a plain
+      // variable), recorded: bare index, and whether unconditional
+      auto *V = countedBase(E);
+      if (V) {
+        bool Bare = false;
+        if (auto *N = plainVarRef(I->getIndex()))
+          Bare = N->getDecl() == CurForVar;
+        W.touch(V, const_cast<Expr *>(I->getBase()), Bare, Unconditional);
+      }
+      return;
+    }
+    if (auto *U = llvm::dyn_cast<UnaryExpr>(E))
+      return hoistExpr(U->getOperand(), W, Unconditional);
+    if (auto *B = llvm::dyn_cast<BinaryExpr>(E))
+      return hoistExpr(B->getLHS(), W, Unconditional),
+             hoistExpr(B->getRHS(), W, Unconditional);
+    if (auto *F = llvm::dyn_cast<FormattedExpr>(E))
+      return hoistExpr(F->getValue(), W, Unconditional);
+    if (auto *N = llvm::dyn_cast<NameRefExpr>(E))
+      (void)N; // plain reads
+  }
+
+  VarDecl *CurForVar = nullptr;
+
+  /// The bases the loop hoists: every access's index is the bare control
+  /// variable, unconditional, with nothing that bails. Null on none.
+  llvm::SmallVector<std::pair<VarDecl *, Expr *>, 2>
+  hoistableBases(ForStmt *S) {
+    llvm::SmallVector<std::pair<VarDecl *, Expr *>, 2> Out;
+    // (Parked until the self-hosted compiler's walk mirrors this one:
+    // parity requires both or neither, and the mirror is the next step.)
+    return Out;
+    if (!CurRoutine) // (the program's own body: no frame to speak of)
+      return Out;
+    VarDecl *Var = llvm::cast<VarDecl>(S->getVar()->getDecl());
+    VarDecl *SavedForVar = CurForVar;
+    CurForVar = Var;
+    HoistWalk W;
+    hoistWalk(S->getBody(), W, true);
+    hoistExpr(S->getInit(), W, true);
+    hoistExpr(S->getFinal(), W, true);
+    CurForVar = SavedForVar;
+    if (W.Bail)
+      return Out;
+    VarSet Written;
+    PinAnalysis(CurRoutine).writtenBy(S->getBody(), Written);
+    if (Written.count(Var))
+      return Out; // the control variable is written inside
+    for (auto &[V, T] : W.Bases) {
+      auto *BaseExpr = plainVarRef(std::get<3>(T));
+      auto *Base = llvm::dyn_cast_or_null<VarDecl>(BaseExpr ? BaseExpr->getDecl()
+                                                            : nullptr);
+      if (std::get<0>(T) && std::get<1>(T) && !std::get<2>(T) && Base &&
+          !Written.count(Base))
+        Out.push_back({V, std::get<3>(T)}); // (a SetLength or an
+                                            // assignment of the base was
+                                            // walked: it stays out)
+    }
+    return Out;
   }
 
   /// Chooses RangeLocals for R, each starting at 0 (the value every scalar
@@ -3609,7 +3907,8 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
       if (auto *OA = llvm::dyn_cast<OpenArrayType>(I->getBase()->getType())) {
         llvm::Value *Data = emitAddress(I->getBase());
         llvm::Value *X = toI64(visitExpr(I->getIndex()), I->getIndex()->getType());
-        if (rangeChecks(I->getIndex()->getBeginLoc()))
+        if (rangeChecks(I->getIndex()->getBeginLoc()) &&
+            !checkedScopeOf(I->getBase()))
           emitRuntimeCheck(B.CreateICmpUGE(X, openCount(openDescriptor(I->getBase()))),
                            "array index out of bounds",
                            I->getIndex()->getBeginLoc());
@@ -3618,7 +3917,8 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
       if (auto *AC = llvm::dyn_cast<ArrayOfConstType>(I->getBase()->getType())) {
         llvm::Value *A = visitExpr(I->getBase());
         llvm::Value *X = toI64(visitExpr(I->getIndex()), I->getIndex()->getType());
-        if (rangeChecks(I->getIndex()->getBeginLoc()))
+        if (rangeChecks(I->getIndex()->getBeginLoc()) &&
+            !checkedScopeOf(I->getBase()))
           emitRuntimeCheck(B.CreateICmpNE(astrCall("__pas_aoc_bad_index",
                                                    B.getInt32Ty(), {A, X}),
                                           B.getInt32(0)),
@@ -3636,8 +3936,11 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
       if (I->getBase()->getType()->isDynArray()) {
         Type *Elem = llvm::cast<DynArrayType>(I->getBase()->getType())->getElementType();
         llvm::Value *Data = visitExpr(I->getBase());
+        if (auto *H = checkedScopeOf(I->getBase()))
+          Data = H->second; // the pointer loaded at the loop's entry
         llvm::Value *X = toI64(visitExpr(I->getIndex()), I->getIndex()->getType());
-        if (rangeChecks(I->getIndex()->getBeginLoc()))
+        if (rangeChecks(I->getIndex()->getBeginLoc()) &&
+            !checkedScopeOf(I->getBase()))
           emitRuntimeCheck(B.CreateICmpNE(astrCall("__pas_dyn_bad_index",
                                                    B.getInt32Ty(), {Data, X}),
                                           B.getInt32(0)),
@@ -8668,12 +8971,84 @@ public:
                    S->getFinal()->getBeginLoc(), "'for' loop bound out of range");
     Start = convertOrdinal(Start, S->getInit()->getType(), VarTy);
     Final = convertOrdinal(Final, S->getFinal()->getType(), VarTy);
-    llvm::BasicBlock *PreBB = B.GetInsertBlock();
+    // LB-5 (docs/llvm-23.md): the hoisted length checks of the counted
+    // bases, on the path where the loop is entered (Start ≤ Last). The
+    // block for the loop's incoming phi is captured after (the checks
+    // split the block).
+    llvm::SmallVector<std::pair<VarDecl *, Expr *>, 2> Hoists =
+        hoistableBases(S);
+    bool Hoisted = rangeChecks(S->getInit()->getBeginLoc()) && !Hoists.empty();
+    if (Hoisted) {
+      ValueRange StartRange = rangeOfValue(Start),
+                 FinalRange = rangeOfValue(Final);
+      llvm::Value *Last64 = toI64(Final, VarTy),
+                  *Start64v = toI64(Start, VarTy);
+      bool HaveStart = StartRange.Known && FinalRange.Known,
+           HaveLast = FinalRange.Known;
+      llvm::SmallVector<llvm::Value *, 2> Datas;
+      llvm::SmallVector<Expr *, 2> Nodes;
+      for (auto &[Base, BaseNode] : Hoists) {
+        (void)Base;
+        Datas.push_back(visitExpr(const_cast<Expr *>(BaseNode)));
+        Nodes.push_back(const_cast<Expr *>(BaseNode));
+      }
+      for (unsigned HI = 0; HI < Hoists.size(); ++HI) {
+        auto &[Base, BaseNode] = Hoists[HI];
+        llvm::Value *Data = Datas[HI];
+        Type *BT = Base->getType();
+        if (BT->isOpenArray()) {
+          if (Down) {
+            if (HaveStart)
+              emitRuntimeCheck(B.CreateICmpSLT(Start64v, B.getInt64(0)),
+                               "array index out of bounds",
+                               S->getInit()->getBeginLoc());
+            emitRuntimeCheck(
+                B.CreateICmpUGE(Start64v, openCount(openDescriptor(BaseNode))),
+                "array index out of bounds", S->getFinal()->getBeginLoc());
+          } else {
+            if (HaveLast)
+              emitRuntimeCheck(B.CreateICmpSLT(Last64, B.getInt64(0)),
+                               "array index out of bounds",
+                               S->getInit()->getBeginLoc());
+            emitRuntimeCheck(
+                B.CreateICmpUGE(Last64, openCount(openDescriptor(BaseNode))),
+                "array index out of bounds", S->getFinal()->getBeginLoc());
+          }
+        } else {
+          auto *DT = llvm::dyn_cast_or_null<DynArrayType>(BT);
+          if (!DT)
+            break; // (not a counted-typed base after all: keep checks)
+          Type *Elem = DT->getElementType();
+          llvm::Value *Data = visitExpr(const_cast<Expr *>(BaseNode));
+          llvm::Value *Count =
+              astrCall("__pas_dyn_length", B.getInt64Ty(), {Data});
+          if (Down) {
+            if (HaveStart)
+              emitRuntimeCheck(B.CreateICmpSLT(Start64v, B.getInt64(0)),
+                               "array index out of bounds",
+                               S->getInit()->getBeginLoc());
+            emitRuntimeCheck(
+                B.CreateICmpUGE(Start64v, Count),
+                "array index out of bounds", S->getFinal()->getBeginLoc());
+          } else {
+            if (HaveLast)
+              emitRuntimeCheck(B.CreateICmpSLT(Last64, B.getInt64(0)),
+                               "array index out of bounds",
+                               S->getInit()->getBeginLoc());
+            emitRuntimeCheck(B.CreateICmpUGE(Last64, Count),
+                             "array index out of bounds",
+                             S->getFinal()->getBeginLoc());
+          }
+        }
+      }
+      for (unsigned HI = 0; HI < Hoists.size(); ++HI)
+        CheckedBases.push_back({Hoists[HI].first, Datas[HI]});
+    }
     B.CreateBr(LoopBB);
 
     B.SetInsertPoint(LoopBB);
     llvm::PHINode *I = B.CreatePHI(Start->getType(), 2, V->getName().Name);
-    I->addIncoming(Start, PreBB);
+    I->addIncoming(Start, B.GetInsertBlock()->getSinglePredecessor());
     storeScalar(varAddress(V), I, VarTy);
     auto OldRange = VarRanges.find(V);
     bool HadRange = OldRange != VarRanges.end();
@@ -8725,6 +9100,9 @@ public:
     }
     Loops.push_back({LatchBB, EndBB, Cleanups.size()});
     visitStmt(S->getBody());
+    if (Hoisted)
+      for (unsigned K = 0; K < Hoists.size(); ++K)
+        CheckedBases.pop_back(); // (the loop's own, innermost last)
     Loops.pop_back();
     if (HadRange)
       VarRanges[V] = Saved;
@@ -8912,11 +9290,11 @@ public:
     auto *LatchBB = newBlock("forin.latch");
     auto *IncBB = newBlock("forin.inc");
     auto *EndBB = newBlock("forin.end");
-    llvm::BasicBlock *PreBB = B.GetInsertBlock();
     B.CreateCondBr(B.CreateICmpSLE(Lo, Hi), LoopBB, EndBB);
     B.SetInsertPoint(LoopBB);
     llvm::PHINode *I = B.CreatePHI(B.getInt64Ty(), 2, "in.index");
-    I->addIncoming(Lo, PreBB);
+    llvm::BasicBlock *InPreBB = B.GetInsertBlock()->getSinglePredecessor();
+    I->addIncoming(Lo, InPreBB);
     Loops.push_back({LatchBB, EndBB, Cleanups.size()});
     Fn(I, LatchBB);
     Loops.pop_back();
