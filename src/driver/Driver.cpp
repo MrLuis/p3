@@ -367,7 +367,8 @@ bool Driver::validateTarget() {
                               ? llvm::sys::getDefaultTargetTriple()
                               : llvm::Triple::normalize(Opts.TargetTriple);
   std::string Err;
-  if (!llvm::TargetRegistry::lookupTarget(TripleStr, Err)) {
+  llvm::Triple TheTriple(TripleStr);
+  if (!llvm::TargetRegistry::lookupTarget(TheTriple, Err)) {
     Diags.error("unsupported target '" + llvm::Twine(TripleStr) + "': " + Err);
     return false;
   }

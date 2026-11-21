@@ -426,9 +426,9 @@ begin
   for i := 0 to list.count - 1 do
     if PIRType(listGet(list, i))^.kind = ikPtr then
       if runtimeReadsParam(name, i) then
-        irSetArgAttrs(ignored, i, 'nocapture readonly')
+        irSetArgAttrs(ignored, i, 'readonly captures(none)')
       else if runtimeWritesParam(name, i) then
-        irSetArgAttrs(ignored, i, 'nocapture writeonly');
+        irSetArgAttrs(ignored, i, 'writeonly captures(none)');
   listFree(list);
   { Can a call of it raise an exception? Those that raise one, and those
     that may run a destructor (which is Pascal code): releasing an object
@@ -510,7 +510,8 @@ begin
 end;
 
 const
-  speculatable = 'nocallback nofree nosync nounwind speculatable willreturn memory(none)';
+  speculatable = 'nocallback nocreateundeforpoison nofree nosync nounwind speculatable willreturn memory(none)';
+  speculatablePlain = 'nocallback nofree nosync nounwind speculatable willreturn memory(none)';
 
 { An intrinsic, declared on first use (Intrinsic::getDeclaration). }
 function intrinsic(const name: string; ret: PIRType; const p1, p2: PIRType;
@@ -630,7 +631,8 @@ var
   ignored: TV;
 begin
   f := intrinsic(fname, irVoidT, nil, nil,
-                 'nocallback nofree nounwind willreturn memory(argmem: readwrite)', paramText);
+                 'nocallback nofree nosync nounwind willreturn memory(argmem: readwrite)',
+                 paramText);
   if f^.params.count = 0 then
   begin
     listAdd(f^.params, irPtrT);
@@ -656,7 +658,7 @@ end;
 procedure emitMemCpyAligned(const dst, src, n: TV; align: int64);
 begin
   memTransfer('llvm.memcpy.p0.p0.i64',
-              'ptr noalias nocapture writeonly, ptr noalias nocapture readonly, i64, i1 immarg',
+              'ptr noalias writeonly captures(none), ptr noalias readonly captures(none), i64, i1 immarg',
               dst, src, n, align);
 end;
 
@@ -668,7 +670,7 @@ end;
 procedure emitMemMove(const dst, src, n: TV);
 begin
   memTransfer('llvm.memmove.p0.p0.i64',
-              'ptr nocapture writeonly, ptr nocapture readonly, i64, i1 immarg',
+              'ptr writeonly captures(none), ptr readonly captures(none), i64, i1 immarg',
               dst, src, n, 1);
 end;
 
@@ -679,8 +681,8 @@ var
   ignored: TV;
 begin
   f := intrinsic('llvm.memset.p0.i64', irVoidT, nil, nil,
-                 'nocallback nofree nounwind willreturn memory(argmem: write)',
-                 'ptr nocapture writeonly, i8, i64, i1 immarg');
+                 'nocallback nofree nosync nounwind willreturn memory(argmem: write)',
+                 'ptr writeonly captures(none), i8, i64, i1 immarg');
   if f^.params.count = 0 then
   begin
     listAdd(f^.params, irPtrT);
@@ -1157,7 +1159,7 @@ end;
 procedure copyAggregate(const dst, src: TV; t: PType);
 begin
   memTransfer2('llvm.memcpy.p0.p0.i64',
-               'ptr noalias nocapture writeonly, ptr noalias nocapture readonly, i64, i1 immarg',
+               'ptr noalias writeonly captures(none), ptr noalias readonly captures(none), i64, i1 immarg',
                dst, src, i64c(sizeOf_(t)), addrAlign(dst, t), addrAlign(src, t));
 end;
 
@@ -2502,15 +2504,16 @@ var
   f: PIRFunc;
   ignored: TV;
 begin
+  { (LLVM 23 dropped the size operand: the lifetime is the pointer's) }
   if start then
-    f := intrinsic('llvm.lifetime.start.p0', irVoidT, irI64, irPtrT,
+    f := intrinsic('llvm.lifetime.start.p0', irVoidT, irPtrT, nil,
                    'nocallback nofree nosync nounwind willreturn memory(argmem: readwrite)',
-                   'i64 immarg, ptr nocapture')
+                   'ptr captures(none)')
   else
-    f := intrinsic('llvm.lifetime.end.p0', irVoidT, irI64, irPtrT,
+    f := intrinsic('llvm.lifetime.end.p0', irVoidT, irPtrT, nil,
                    'nocallback nofree nosync nounwind willreturn memory(argmem: readwrite)',
-                   'i64 immarg, ptr nocapture');
-  ignored := call2(f, i64c(size), addr, '');
+                   'ptr captures(none)');
+  ignored := call1(f, addr, '');
 end;
 
 function newStringTemp(maxLen: int64): TV;
@@ -6067,7 +6070,7 @@ begin
           emitOverflowCheck(irICmp('eq', arg, signedMin(arg.t), ''),
                             'integer overflow in ''abs''', loc);
         r := arg.t;
-        f := intrinsic('llvm.abs.' + r^.text, r, r, irI1, speculatable,
+        f := intrinsic('llvm.abs.' + r^.text, r, r, irI1, speculatablePlain,
                        r^.text + ', i1 immarg');
         exit(call2(f, arg, irConstBool(false), 'abs'));
       end;

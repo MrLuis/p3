@@ -1208,7 +1208,7 @@ begin
     s := hexDigit(longint(b and 15)) + s;
     b := b shr 4;
   until b = 0;
-  doubleText := '0x' + s;
+  doubleText := 'f0x' + s;
 end;
 
 { ===================================================================== }
@@ -2498,7 +2498,7 @@ end;
 { a GEP with indices given as text ("i64 0, i64 3"); folds when the
   pointer and all indices are constants }
 function gep(src: PIRType; const p: TV; const idxText: string; allConst, allZero,
-             inbounds: boolean; const name: string): TV;
+             inbounds, nuw: boolean; const name: string): TV;
 var
   i: PIRInst;
   res, kw: string;
@@ -2508,6 +2508,8 @@ begin
   kw := 'getelementptr ';
   if inbounds then
     kw := kw + 'inbounds ';
+  if nuw then
+    kw := kw + 'nuw ';
   if allConst and (p.kind in [vkGlobal, vkConstExpr, vkNull]) then
   begin
     if allZero then
@@ -2532,7 +2534,7 @@ end;
 function irGEP1(src: PIRType; const p, i0: TV; inbounds: boolean; const name: string): TV;
 begin
   irGEP1 := gep(src, p, i0.t^.text + ' ' + i0.v, irIsConst(i0),
-                irIsConst(i0) and irIsNullValue(i0), inbounds, name);
+                irIsConst(i0) and irIsNullValue(i0), inbounds, false, name);
 end;
 
 function irGEP2(src: PIRType; const p, i0, i1: TV; const name: string): TV;
@@ -2540,12 +2542,13 @@ begin
   irGEP2 := gep(src, p, i0.t^.text + ' ' + i0.v + ', ' + i1.t^.text + ' ' + i1.v,
                 irIsConst(i0) and irIsConst(i1),
                 irIsConst(i0) and irIsConst(i1) and irIsNullValue(i0) and
-                irIsNullValue(i1), true, name);
+                irIsNullValue(i1), true, false, name);
 end;
 
 function irStructGEP(st: PIRType; const p: TV; field: longint; const name: string): TV;
 begin
-  irStructGEP := gep(st, p, 'i32 0, i32 ' + intToStr(field), true, field = 0, true, name);
+  irStructGEP := gep(st, p, 'i32 0, i32 ' + intToStr(field), true, field = 0,
+                     true, true, name);
 end;
 
 function irExtract(const agg: TV; idx: longint; t: PIRType; const name: string): TV;

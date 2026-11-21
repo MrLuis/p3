@@ -50,4 +50,4 @@
 ; IR: insertvalue { ptr, ptr } { ptr @"pas.run.$lambda1", ptr undef }, ptr %frame, 1
 ; IR: call i32 @pas.apply(
 ; IR-LABEL: define internal i32 @"pas.run.$lambda1"(ptr %link, i32 %x)
-; IR: getelementptr inbounds %frame.run, ptr %link, i32 0, i32 0
+; IR: getelementptr inbounds nuw %frame.run, ptr %link, i32 0, i32 0

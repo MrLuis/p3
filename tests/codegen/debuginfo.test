@@ -8,38 +8,53 @@
 ; RUN: llvm-dwarfdump --debug-info %t.o | FileCheck %s
 
 ; CHECK: DW_AT_language (DW_LANG_Pascal83)
-; CHECK: DW_TAG_variable
-; CHECK-NEXT: DW_AT_name ("p")
-; CHECK: DW_TAG_structure_type
-; CHECK-NEXT: DW_AT_name ("Point")
-; CHECK: DW_TAG_member
-; CHECK-NEXT: DW_AT_name ("x")
 ; CHECK: DW_TAG_enumeration_type
-; CHECK: DW_AT_name ("Color")
+; CHECK-DAG: DW_AT_type (0x0000{{[0-9a-f]+}} "integer")
+; CHECK-DAG: DW_AT_name ("Color")
 ; CHECK: DW_TAG_enumerator
 ; CHECK-NEXT: DW_AT_name ("red")
-; CHECK: DW_TAG_variable
-; CHECK-NEXT: DW_AT_name ("g")
-; CHECK: DW_TAG_array_type
-; CHECK: DW_TAG_subrange_type
-; CHECK: DW_AT_count (0x03)
+; CHECK: DW_TAG_base_type
+; CHECK-NEXT: DW_AT_name ("integer")
 ; CHECK: DW_TAG_subprogram
 ; CHECK: DW_AT_name ("main")
 ; CHECK: DW_TAG_subprogram
 ; CHECK: DW_AT_name ("accumulate")
 ; CHECK: DW_TAG_formal_parameter
-; CHECK-NEXT: DW_AT_location (DW_OP_fbreg +{{[0-9]+}}, DW_OP_plus_uconst 0x0, DW_OP_deref)
-; CHECK-NEXT: DW_AT_name ("acc")
+; CHECK-DAG: DW_AT_location (DW_OP_fbreg +{{[0-9]+}}, DW_OP_plus_uconst 0x0, DW_OP_deref)
+; CHECK-DAG: DW_AT_name ("acc")
 ; step is not used by the nested routine: an alloca of its own.
 ; CHECK: DW_TAG_formal_parameter
-; CHECK-NEXT: DW_AT_location (DW_OP_fbreg +{{[0-9]+}})
-; CHECK-NEXT: DW_AT_name ("step")
+; CHECK-DAG: DW_AT_location (DW_OP_fbreg +{{[0-9]+}})
+; CHECK-DAG: DW_AT_name ("step")
 ; CHECK: DW_TAG_variable
-; CHECK-NEXT: DW_AT_location (DW_OP_fbreg +{{[0-9]+}}, DW_OP_plus_uconst 0x8)
-; CHECK-NEXT: DW_AT_name ("doubled")
+; CHECK-DAG: DW_AT_location (DW_OP_fbreg +{{[0-9]+}}, DW_OP_plus_uconst 0x8)
+; CHECK-DAG: DW_AT_name ("doubled")
 ; CHECK: DW_TAG_subprogram
 ; CHECK: DW_AT_name ("bump")
-
+; CHECK: DW_TAG_variable
+; CHECK-DAG: DW_AT_name ("p")
+; CHECK-DAG: DW_AT_type (0x0000{{[0-9a-f]+}} "Point")
+; CHECK-DAG: DW_AT_location (DW_OP_addr 0x{{[0-9a-f]+}})
+; CHECK: DW_TAG_structure_type
+; CHECK-NEXT: DW_AT_name ("Point")
+; CHECK: DW_TAG_member
+; CHECK-NEXT: DW_AT_name ("x")
+; CHECK: DW_TAG_member
+; CHECK-NEXT: DW_AT_name ("y")
+; CHECK: DW_TAG_member
+; CHECK-NEXT: DW_AT_name ("c")
+; CHECK: DW_TAG_variable
+; CHECK: DW_AT_name ("g")
+; CHECK: DW_TAG_typedef
+; CHECK-DAG: DW_AT_type (0x0000{{[0-9a-f]+}} "integer[3]")
+; CHECK-DAG: DW_AT_name ("Grid")
+; CHECK: DW_TAG_array_type
+; CHECK: DW_TAG_subrange_type
+; CHECK: DW_AT_count (0x03)
+; CHECK: DW_TAG_base_type
+; CHECK-NEXT: DW_AT_name ("__ARRAY_SIZE_TYPE__")
+; CHECK: DW_TAG_variable
+; CHECK-NEXT: DW_AT_name ("total")
 ; Line table: statements map to their source lines.
 ; RUN: llvm-dwarfdump --debug-line %t.o | FileCheck --check-prefix=LINES %s
 ; LINES: debuginfo.pas

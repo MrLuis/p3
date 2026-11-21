@@ -15,7 +15,7 @@ endif()
 # ---------------------------------------------------------------------------
 # LLVM (pinned major version; override with -DLLVM_DIR=...)
 # ---------------------------------------------------------------------------
-set(P3_LLVM_VERSION 19)
+set(P3_LLVM_VERSION 23)
 find_package(LLVM REQUIRED CONFIG
   HINTS /usr/lib/llvm-${P3_LLVM_VERSION}/lib/cmake/llvm
         /opt/homebrew/opt/llvm@${P3_LLVM_VERSION}/lib/cmake/llvm

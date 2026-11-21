@@ -13,7 +13,7 @@
 ; CHECK-NOT:  %frame.p
 ; CHECK-NOT:  store volatile ptr
 ; CHECK:      call void @__pas_exc_push(ptr %excframe)
-; CHECK-NEXT: %[[BUF:[0-9]+]] = getelementptr inbounds { ptr, ptr, ptr, ptr, [64 x i64] }, ptr %excframe, i32 0, i32 4
+; CHECK-NEXT: %[[BUF:[0-9]+]] = getelementptr inbounds nuw { ptr, ptr, ptr, ptr, [64 x i64] }, ptr %excframe, i32 0, i32 4
 ; CHECK-NEXT: %jmp = call i32 @_setjmp(ptr %[[BUF]])
 ; CHECK-NEXT: %[[CAUGHT:[0-9]+]] = icmp ne i32 %jmp, 0
 ; CHECK-NEXT: br i1 %[[CAUGHT]], label %try.except, label %try.body

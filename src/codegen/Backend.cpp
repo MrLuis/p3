@@ -41,7 +41,8 @@ p3::createTargetMachine(llvm::StringRef Triple, unsigned OptLevel,
                          llvm::StringRef CPU, llvm::StringRef Features,
                          DiagnosticsEngine &Diags) {
   std::string Err;
-  const llvm::Target *T = llvm::TargetRegistry::lookupTarget(Triple.str(), Err);
+  llvm::Triple TheTriple(Triple.str());
+  const llvm::Target *T = llvm::TargetRegistry::lookupTarget(TheTriple, Err);
   if (!T) {
     Diags.error("unsupported target '" + Triple + "': " + Err);
     return nullptr;
@@ -54,7 +55,7 @@ p3::createTargetMachine(llvm::StringRef Triple, unsigned OptLevel,
   // PIC so the objects link into position-independent executables, which
   // is what clang/gcc produce by default on modern Linux and macOS.
   std::unique_ptr<llvm::TargetMachine> TM(T->createTargetMachine(
-      Triple, CPU, Features, Options, llvm::Reloc::PIC_, std::nullopt,
+      TheTriple, CPU, Features, Options, llvm::Reloc::PIC_, std::nullopt,
       toCodeGenOptLevel(OptLevel)));
   if (!TM)
     Diags.error("could not create target machine for '" + Triple + "'");
@@ -160,11 +161,14 @@ void p3::optimizeModule(llvm::Module &M, llvm::TargetMachine &TM,
   PB.registerLoopAnalyses(LAM);
   PB.crossRegisterProxies(LAM, FAM, CGAM, MAM);
 
+  // (LLVM 23 folded OptimizationLevel's size levels out: Os and Oz map
+  // by their own help text, -Os "like -O2, SLP vectorization on" and
+  // -Oz "like -Os".)
   llvm::OptimizationLevel Level;
   if (SizeLevel == 1)
-    Level = llvm::OptimizationLevel::Os;
+    Level = llvm::OptimizationLevel::O2;
   else if (SizeLevel == 2)
-    Level = llvm::OptimizationLevel::Oz;
+    Level = llvm::OptimizationLevel::O1;
   else
     switch (OptLevel) {
     case 0:  Level = llvm::OptimizationLevel::O0; break;

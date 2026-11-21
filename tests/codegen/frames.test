@@ -17,10 +17,10 @@
 ; CHECK:   %frame = alloca %frame.outer
 ; Not captured: an alloca; locals start from zero.
 ; CHECK:   %own = alloca i32
-; CHECK:   [[L:%.*]] = getelementptr inbounds %frame.outer, ptr %frame, i32 0, i32 1
+; CHECK:   [[L:%.*]] = getelementptr inbounds nuw %frame.outer, ptr %frame, i32 0, i32 1
 ; CHECK:   store i32 0, ptr [[L]]
 ; CHECK:   store i32 0, ptr %own
-; CHECK:   [[P:%.*]] = getelementptr inbounds %frame.outer, ptr %frame, i32 0, i32 0
+; CHECK:   [[P:%.*]] = getelementptr inbounds nuw %frame.outer, ptr %frame, i32 0, i32 0
 ; CHECK:   store i32 %p, ptr [[P]]
 ; CHECK:   call void @pas.outer.mid(ptr %frame)
 
@@ -32,11 +32,11 @@
 ; Up-level access: follow mid's link (in its frame) to outer's frame.
 ; CHECK: define internal void @pas.outer.mid.inner(ptr %link)
 ; CHECK-NOT: alloca
-; CHECK:   [[S:%.*]] = getelementptr inbounds %frame.outer.mid, ptr %link, i32 0, i32 0
+; CHECK:   [[S:%.*]] = getelementptr inbounds nuw %frame.outer.mid, ptr %link, i32 0, i32 0
 ; CHECK:   [[L1:%.*]] = load ptr, ptr [[S]]
-; CHECK:   getelementptr inbounds %frame.outer, ptr [[L1]], i32 0, i32 0
+; CHECK:   getelementptr inbounds nuw %frame.outer, ptr [[L1]], i32 0, i32 0
 ; CHECK:   load i32, ptr @pas.g
-; CHECK:   getelementptr inbounds %frame.outer, ptr {{%.*}}, i32 0, i32 1
+; CHECK:   getelementptr inbounds nuw %frame.outer, ptr {{%.*}}, i32 0, i32 1
 
 ; No nested routines: allocas only.
 ; CHECK: define internal i32 @pas.plain(i32 %a)

@@ -11,5 +11,5 @@
 ; CHECK: %dead = alloca i32
 ; CHECK: %before = alloca i32
 ; live and the result are written in the try and read in the handler.
-; CHECK: %live = getelementptr inbounds %frame.f, ptr %frame, i32 0, i32 0
-; CHECK: %f = getelementptr inbounds %frame.f, ptr %frame, i32 0, i32 1
+; CHECK: %live = getelementptr inbounds nuw %frame.f, ptr %frame, i32 0, i32 0
+; CHECK: %f = getelementptr inbounds nuw %frame.f, ptr %frame, i32 0, i32 1

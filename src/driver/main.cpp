@@ -175,14 +175,11 @@ static void printVersion(llvm::raw_ostream &OS) {
 int main(int argc, char **argv) {
   llvm::InitLLVM X(argc, argv);
 
-  // LLVM registers its own -ffast-math option, so read ours from argv (the
-  // option itself stays LLVM's) before parsing the rest.
-  bool FastMathFlag = false;
-  for (int I = 1; I < argc; ++I) {
-    llvm::StringRef A(argv[I]);
-    if (A == "-ffast-math" || A == "--ffast-math")
-      FastMathFlag = true;
-  }
+  // (LLVM 19 registered its own -ffast-math option; 23 does not, so it
+  // is one of p3's.)
+  llvm::cl::opt<bool> FastMathFlag(
+      "ffast-math", llvm::cl::cat(P3Category),
+      llvm::cl::desc("Use fast-math flags on floating-point instructions"));
 
   cl::HideUnrelatedOptions(P3Category);
   cl::SetVersionPrinter(printVersion);
@@ -195,6 +192,7 @@ int main(int argc, char **argv) {
   Opts.Act = Act;
   Opts.Mode = Mode;
   Opts.OptLevel = OptLevel;
+  Opts.FastMath = FastMathFlag;
   if (OptimizeSize || OptimizeSizeAggressive) {
     Opts.OptLevel = 2;
     Opts.SizeLevel = OptimizeSizeAggressive ? 2 : 1;

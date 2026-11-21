@@ -178,11 +178,11 @@ static void addRuntimeAttrs(llvm::Function *F) {
     llvm::AttrBuilder B(C);
     bool Any = false;
     if (runtimeReadsParam(Name, I)) {
-      B.addAttribute(llvm::Attribute::NoCapture);
+      B.addCapturesAttr(llvm::CaptureInfo::none());
       B.addAttribute(llvm::Attribute::ReadOnly);
       Any = true;
     } else if (runtimeWritesParam(Name, I)) {
-      B.addAttribute(llvm::Attribute::NoCapture);
+      B.addCapturesAttr(llvm::CaptureInfo::none());
       B.addAttribute(llvm::Attribute::WriteOnly);
       Any = true;
     }
@@ -2492,17 +2492,15 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
   llvm::Value *newStringTemp(unsigned MaxLen = 255) {
     llvm::Value *Tmp =
         createTemp(llvm::ArrayType::get(B.getInt8Ty(), MaxLen + 1), "str");
-    uint64_t Size = MaxLen + 1;
-    B.CreateLifetimeStart(Tmp, B.getInt64(Size));
-    StringTemps.push_back({Tmp, Size});
+    B.CreateLifetimeStart(Tmp);
+    StringTemps.push_back({Tmp, MaxLen + 1});
     return Tmp;
   }
 
   /// Ends the lifetime of the short-string temporaries made since Mark.
   void releaseStringTemps(size_t Mark) {
     for (size_t I = Mark; I < StringTemps.size(); ++I)
-      B.CreateLifetimeEnd(StringTemps[I].first,
-                          B.getInt64(StringTemps[I].second));
+      B.CreateLifetimeEnd(StringTemps[I].first);
     StringTemps.resize(Mark);
   }
 
@@ -9922,7 +9920,7 @@ p3::generateModule(ProgramDecl &P, llvm::ArrayRef<UnitDecl *> Units,
                     llvm::StringRef SourceFileName) {
   auto M = std::make_unique<llvm::Module>(SourceFileName, Ctx);
   M->setSourceFileName(SourceFileName);
-  M->setTargetTriple(TM.getTargetTriple().str());
+  M->setTargetTriple(TM.getTargetTriple());
   M->setDataLayout(TM.createDataLayout());
   CodeGenModule(*M, SM, LangOpts, CGOpts).emitProgram(P, Units);
   return M;
@@ -9935,7 +9933,7 @@ p3::generateUnitModule(UnitDecl &U, llvm::ArrayRef<UnitDecl *> Deps,
                         llvm::TargetMachine &TM, llvm::StringRef SourceFileName) {
   auto M = std::make_unique<llvm::Module>(SourceFileName, Ctx);
   M->setSourceFileName(SourceFileName);
-  M->setTargetTriple(TM.getTargetTriple().str());
+  M->setTargetTriple(TM.getTargetTriple());
   M->setDataLayout(TM.createDataLayout());
   CodeGenModule(*M, SM, LangOpts, CGOpts).emitUnit(U, Deps);
   return M;

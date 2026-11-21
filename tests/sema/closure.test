@@ -54,9 +54,9 @@
 ; IR: call void @__pas_frame_release(ptr %frame)
 ; IR-NEXT: ret { ptr, ptr }
 ; IR-LABEL: define internal i32 @"pas.makeadder.$lambda1"(ptr %link, i32 %x)
-; IR: getelementptr inbounds %frame.makeadder, ptr %link, i32 0, i32 0
+; IR: getelementptr inbounds nuw %frame.makeadder, ptr %link, i32 0, i32 0
 ; IR-LABEL: define internal void @frame.fini.makeadder(ptr %frame)
 ; IR-NEXT: entry:
-; IR-NEXT: [[S:%[0-9]+]] = getelementptr inbounds %frame.makeadder, ptr %frame, i32 0, i32 1
+; IR-NEXT: [[S:%[0-9]+]] = getelementptr inbounds nuw %frame.makeadder, ptr %frame, i32 0, i32 1
 ; IR-NEXT: call void @__pas_astr_clear(ptr [[S]])
 ; IR-NEXT: ret void

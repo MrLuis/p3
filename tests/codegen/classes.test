@@ -46,14 +46,14 @@
 ; RUN: llvm-dwarfdump --verify %t.o | FileCheck --check-prefix=VERIFY %s
 ; VERIFY: No errors.
 ; RUN: llvm-dwarfdump --debug-info %t.o | FileCheck --check-prefix=DEBUG %s
-; DEBUG:      DW_TAG_structure_type
-; DEBUG-NEXT: DW_AT_name ("TA")
-; DEBUG:      DW_TAG_member
-; DEBUG-NEXT: DW_AT_name ("X")
-; DEBUG:      DW_AT_data_member_location (0x08)
 ; DEBUG:      DW_TAG_subprogram
 ; DEBUG:      DW_AT_name ("TA.V")
 ; DEBUG:      DW_AT_decl_line (12)
 ; DEBUG:      DW_TAG_formal_parameter
 ; DEBUG:      DW_AT_name ("Self")
 ; DEBUG:      DW_AT_type ({{.*}} "TA *")
+; DEBUG:      DW_TAG_structure_type
+; DEBUG-NEXT: DW_AT_name ("TA")
+; DEBUG:      DW_TAG_member
+; DEBUG-NEXT: DW_AT_name ("X")
+; DEBUG:      DW_AT_data_member_location (0x08)
