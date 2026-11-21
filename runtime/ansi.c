@@ -281,10 +281,22 @@ typedef struct DynHeader {
   int64_t refs;
   int64_t length;
   const PasDynInfo *info;
-  int64_t pad; /* keeps the elements 16-byte aligned, as malloc's block */
+  /* The room there is, at least the length: growth by SetLength only
+   * realoccasions when it is exceeded, like a list that keeps spare
+   * room. Invisible to programs (length is the language's only bound),
+   * and never read past length. */
+  int64_t capacity;
 } DynHeader;
 
 #define DYN_HEADER(a) ((DynHeader *)(void *)((char *)(a) - sizeof(DynHeader)))
+
+/* The room a SetLength that has to grow asks for: the count, unless the
+ * capacity's own quarter (plus one, so small capacities grow) is more,
+ * which keeps the step ~1.25x, as TStringList's capacity does. */
+static int64_t dyn_capacity(const DynHeader *h, int64_t count) {
+  int64_t room = h->capacity + (h->capacity >> 2) + 1;
+  return count > room ? count : room;
+}
 
 static size_t dyn_size(const PasDynInfo *info, int64_t count) {
   return sizeof(DynHeader) + (size_t)count * (size_t)info->elem_size;
@@ -298,6 +310,7 @@ void *__pas_dyn_new(const PasDynInfo *info, int64_t count) {
     __pas_runtime_error("out of memory in a dynamic array");
   h->refs = 1;
   h->length = count;
+  h->capacity = count;
   h->info = info;
   return h + 1;
 }
@@ -376,11 +389,24 @@ void __pas_dyn_setlength(void **a, const PasDynInfo *info, int64_t count) {
   int64_t length = h->length;
   if (count == length)
     return;
-  dyn_fini(info, old, count, length);
-  h = realloc(h, dyn_size(info, count));
+  if (count > length && count <= h->capacity) {
+    /* there is room: the elements take it, no reallocation (the bytes
+     * between length and count were never read) */
+    memset((char *)(h + 1) + length * info->elem_size, 0,
+           (size_t)(count - length) * (size_t)info->elem_size);
+    h->length = count;
+    return;
+  }
+  int64_t keep = count < length ? count : length;
+  dyn_fini(info, old, keep, length);
+  /* A real growth past the room takes the headroom rule's room; a
+   * truncation reallocs to what it keeps, as before. */
+  int64_t cap = count < length ? count : dyn_capacity(h, count);
+  h = realloc(h, dyn_size(info, cap));
   if (!h)
     __pas_runtime_error("out of memory in a dynamic array");
   h->length = count;
+  h->capacity = cap;
   if (count > length)
     memset((char *)(h + 1) + length * info->elem_size, 0,
            (size_t)(count - length) * (size_t)info->elem_size);
