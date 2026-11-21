@@ -353,23 +353,29 @@ end;
 { The position of the first sub in s at or after start; 0 if none (sub is
   not empty). The same search as sysutils' own posFrom, kept in step at
   both ends (ST-1, ST-14): strutils uses sysutils, and no helper is
-  exported from it than Free Pascal's names. }
+  exported from it than Free Pascal's names. In place through two PChars,
+  as posFrom is (SU-8, of sysutils-review.md). }
 function findFrom(const sub, s: string; start: longint): longint;
 var
   i, j, last, m: longint;
+  a, b: PChar;
 begin
   findFrom := 0;
   m := length(sub);
+  if m = 0 then
+    exit;
   last := length(s) - m + 1;
+  a := PChar(sub);
+  b := PChar(s);
   i := start;
   while i <= last do
   begin
-    if s[i] = sub[1] then
+    if b[i - 1] = a[0] then
     begin
-      j := 2;
-      while (j <= m) and (s[i + j - 1] = sub[j]) do
+      j := 1;
+      while (j < m) and (b[i - 1 + j] = a[j]) do
         j := j + 1;
-      if j > m then
+      if j = m then
       begin
         findFrom := i;
         exit;

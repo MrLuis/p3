@@ -895,25 +895,35 @@ begin
   QuotedStr := r;
 end;
 
+{ (no range checks in this one: the indexes stay within both strings) }
+{$push}{$R-}{$Q-}
 { The position of the first sub in s at or after start; 0 if none. Kept
   in step with strutils' findFrom, which repeats it for its PosEx (ST-1,
-  ST-14): this unit cannot use strutils, and no helper is exported. }
+  ST-14): this unit cannot use strutils, and no helper is exported. The
+  search is in place through two PChars: first character, then the rest,
+  no copy of the rest and no count or bounds work at a byte of s.
+  (docs/sysutils-review.md SU-8) }
 function posFrom(const sub, s: string; start: longint): longint;
 var
   i, j, last, m: longint;
+  a, b: PChar;
 begin
   posFrom := 0;
   m := length(sub);
+  if (m = 0) or (start < 1) then
+    exit;
   last := length(s) - m + 1;
+  a := PChar(sub);
+  b := PChar(s);
   i := start;
   while i <= last do
   begin
-    if s[i] = sub[1] then
+    if b[i - 1] = a[0] then
     begin
-      j := 2;
-      while (j <= m) and (s[i + j - 1] = sub[j]) do
+      j := 1;
+      while (j < m) and (b[i - 1 + j] = a[j]) do
         j := j + 1;
-      if j > m then
+      if j = m then
       begin
         posFrom := i;
         exit;
@@ -923,40 +933,97 @@ begin
   end;
 end;
 
+{ The same search without case: like CompareText, a pair is lowercased
+  only where it differs, and the first character of sub, folded once,
+  is scanned for in either case (docs/sysutils-review.md SU-8). }
+function posFromText(const sub, s: string; start: longint): longint;
+var
+  i, j, last, m: longint;
+  lo, up, ca, cb: char;
+  a, b: PChar;
+  ok: boolean;
+begin
+  posFromText := 0;
+  m := length(sub);
+  if (m = 0) or (start < 1) then
+    exit;
+  last := length(s) - m + 1;
+  lo := sub[1];
+  if (lo >= 'A') and (lo <= 'Z') then
+    lo := chr(ord(lo) + 32);
+  up := lo;
+  if (lo >= 'a') and (lo <= 'z') then
+    up := chr(ord(lo) - 32);
+  a := PChar(sub);
+  b := PChar(s);
+  i := start;
+  while i <= last do
+  begin
+    if (b[i - 1] = lo) or (b[i - 1] = up) then
+    begin
+      ok := true;
+      for j := 1 to m - 1 do
+      begin
+        ca := a[j];
+        cb := b[i - 1 + j];
+        if ca <> cb then
+        begin
+          if (ca >= 'A') and (ca <= 'Z') then
+            ca := chr(ord(ca) + 32);
+          if (cb >= 'A') and (cb <= 'Z') then
+            cb := chr(ord(cb) + 32);
+          if ca <> cb then
+          begin
+            ok := false;
+            break;
+          end;
+        end;
+      end;
+      if ok then
+      begin
+        posFromText := i;
+        exit;
+      end;
+    end;
+    i := i + 1;
+  end;
+end;
+{$pop}
+
 { The matches are counted, the result is made once at its final length,
   and the pieces are copied into it: no match moves the rest of the
-  string (docs/sysutils-review.md SU-1). The search is in s itself, or in
-  its lowercase copy for rfIgnoreCase (the text copied is always s's). }
+  string (docs/sysutils-review.md SU-1). The search is in s itself: in
+  place through posFrom, with a pair folded where it differs for
+  rfIgnoreCase (SU-8), and the text copied is always s's. }
 function StringReplace(const s, from, into: string; flags: TReplaceFlags): string;
 var
-  cs, fc, r: string;
+  r: string;
   p, m, k, count, last, d: longint;
-  all: boolean;
+  all, ignore: boolean;
 begin
   if from = '' then
   begin
     StringReplace := s;
     exit;
   end;
-  if rfIgnoreCase in flags then
-  begin
-    cs := LowerCase(s);
-    fc := LowerCase(from);
-  end
-  else
-  begin
-    cs := s;
-    fc := from;
-  end;
   all := rfReplaceAll in flags;
+  ignore := rfIgnoreCase in flags;
   m := length(from);
   count := 0;
-  p := posFrom(fc, cs, 1);
+  if ignore then
+    p := posFromText(from, s, 1)
+  else
+    p := posFrom(from, s, 1);
   while p > 0 do
   begin
     count := count + 1;
     if all then
-      p := posFrom(fc, cs, p + m)
+    begin
+      if ignore then
+        p := posFromText(from, s, p + m)
+      else
+        p := posFrom(from, s, p + m);
+    end
     else
       p := 0;
   end;
@@ -970,7 +1037,10 @@ begin
   setlength(r, length(s) + count * (k - m));
   last := 1;
   d := 1;
-  p := posFrom(fc, cs, 1);
+  if ignore then
+    p := posFromText(from, s, 1)
+  else
+    p := posFrom(from, s, 1);
   while count > 0 do
   begin
     putChars(s, last, r, d, p - last);
@@ -980,7 +1050,12 @@ begin
     last := p + m;
     count := count - 1;
     if count > 0 then
-      p := posFrom(fc, cs, last);
+    begin
+      if ignore then
+        p := posFromText(from, s, last)
+      else
+        p := posFrom(from, s, last);
+    end;
   end;
   putChars(s, last, r, d, length(s) - last + 1);
   StringReplace := r;
