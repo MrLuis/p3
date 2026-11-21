@@ -468,6 +468,15 @@ void __pas_task_await(PasTask *t);
 int32_t __pas_task_done(PasTask *t);
 void __pas_task_detach(PasTask *t, void *handler_fn, void *handler_link);
 void __pas_task_sleep(int32_t ms);
+/* Parks the current task until fd is readable (want_write 0) or writable
+ * (want_write 1), through one shared poller thread (for unit netasync).
+ * Wakes it with EOperationCancelled if its token is cancelled. */
+void __pas_task_wait_fd(int32_t fd, int32_t want_write);
+/* Marks fd blocking (on 0) or non-blocking, through the C runtime (plain C
+   can call the variadic fcntl; calls emitted by p3 threads cannot) */
+void __pas_fd_nonblock(int32_t fd, int32_t on);
+/* Starts the netasync poller thread (unit netasync calls it at init) */
+void __pas_fd_poller_start(void);
 PasTask *__pas_when_all(PasTask *const *tasks, int64_t n, const PasDynInfo *result_info,
                         const PasDynInfo *elem);
 PasTask *__pas_when_any(PasTask *const *tasks, int64_t n, const PasDynInfo *int_info);

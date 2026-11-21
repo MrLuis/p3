@@ -22,14 +22,24 @@
 #include "pascalrt.h"
 
 #include <errno.h>
+#include <netinet/in.h>
+#include <poll.h>
 #include <pthread.h>
 #include <setjmp.h>
 #include <stdlib.h>
 #include <string.h>
+#include <fcntl.h>
 #include <sys/mman.h>
+#include <sys/socket.h>
 #include <time.h>
 #include <ucontext.h>
 #include <unistd.h>
+
+#ifdef __linux__
+#include <sys/epoll.h>
+#else
+#include <sys/event.h>
+#endif
 
 #if defined(__SANITIZE_ADDRESS__)
 #define PAS_ASAN 1
@@ -312,6 +322,50 @@ static void raise_cancelled(void) {
 void *__pas_async_stacks[STACK_CACHE];
 int __pas_async_nstacks;
 
+#ifdef __APPLE__
+/* macOS malloc reserves a huge span of address space (MAGMA: observed
+   0x1000000000..0x7000000000 on macOS 26) whose slabs it brings up by
+   changing their protection as needed. An anonymous mmap(NULL) can land
+   inside it, and the allocator's next slab then runs into the stack's
+   guard page (SIGBUS in the middle of malloc). Task stacks go above it. */
+#define PAS_MALLOC_RESERVE_LOW 0x1000000000ULL
+#define PAS_MALLOC_RESERVE_HIGH 0x7000000000ULL
+#define PAS_STACK_HINT_START 0xFC00000000ULL
+static void *new_stack(void) {
+  LOCK();
+  void *s = __pas_async_nstacks ? __pas_async_stacks[--__pas_async_nstacks] : NULL;
+  UNLOCK();
+  if (s)
+    return s;
+  long page = sysconf(_SC_PAGESIZE);
+  size_t len = STACK_SIZE + (size_t)page;
+  char *m = mmap(NULL, len, PROT_READ | PROT_WRITE,
+                 MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+  if (m == MAP_FAILED)
+    __pas_runtime_error("out of memory for a task's stack");
+  if ((uintptr_t)m >= PAS_MALLOC_RESERVE_LOW &&
+      (uintptr_t)m < PAS_MALLOC_RESERVE_HIGH) {
+    munmap(m, len);
+    uintptr_t hint = PAS_STACK_HINT_START;
+    m = MAP_FAILED;
+    for (int t = 0; t < 4096 && m == MAP_FAILED; t++, hint -= len) {
+      m = mmap((void *)hint, len, PROT_READ | PROT_WRITE,
+               MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+      if (m == MAP_FAILED)
+        continue;
+      if ((uintptr_t)m >= PAS_MALLOC_RESERVE_LOW &&
+          (uintptr_t)m < PAS_MALLOC_RESERVE_HIGH) {
+        munmap(m, len);
+        m = MAP_FAILED;
+      }
+    }
+    if (m == MAP_FAILED)
+      __pas_runtime_error("out of memory for a task's stack");
+  }
+  mprotect(m, (size_t)page, PROT_NONE); /* a guard page below */
+  return m + page;
+}
+#else
 static void *new_stack(void) {
   LOCK();
   void *s = __pas_async_nstacks ? __pas_async_stacks[--__pas_async_nstacks] : NULL;
@@ -326,6 +380,7 @@ static void *new_stack(void) {
   mprotect(m, (size_t)page, PROT_NONE); /* a guard page below */
   return m + page;
 }
+#endif
 
 static void free_stack(void *s) {
   LOCK();
@@ -994,6 +1049,219 @@ void __pas_token_make(PasToken *parent, int32_t ms, PasToken **dst) {
 /* Cancellation checked by hand (TCancelToken.ThrowIfCancelled). */
 void __pas_token_check(PasToken *k) {
   if (__pas_token_cancelled(k))
+    raise_cancelled();
+}
+
+/*===- Waiting on descriptors (unit netasync) ------------------------------===*/
+
+/* A task parks until a descriptor is readable or writable (__pas_task_wait_fd);
+ * one small poller thread holds the kernel interest and wakes tasks. The wait
+ * record belongs to the task's wait: the poller only marks it dead (and drops
+ * the kernel interest), the task unlinks and frees it when it resumes. A wait
+ * that ends cancelled leaves its (harmless, small) record behind. Everything
+ * here is covered by the same lock as the rest of the file. */
+
+typedef struct PasFdWait {
+  int fd;
+  int write;         /* 1: waiting to write */
+  int armed;         /* kernel interest in place */
+  int dead;          /* done: to disarm and free */
+  PasWaiter w;
+  struct PasFdWait *next;
+} PasFdWait;
+
+static void fd_poller_start(void);
+static PasFdWait *fd_waits;       /* records under the lock */
+static int fd_poll_fd = -1;
+static int fd_poll_started;
+static pthread_t fd_poller_thread;
+
+static void fd_arm(PasFdWait *rec) {
+#ifdef __linux__
+  struct epoll_event ev;
+  memset(&ev, 0, sizeof ev);
+  ev.events = rec->write ? EPOLLOUT : EPOLLIN;
+  ev.data.ptr = rec;
+  epoll_ctl(fd_poll_fd, EPOLL_CTL_ADD, rec->fd, &ev);
+#else
+  struct kevent kn;
+  memset(&kn, 0, sizeof kn);
+  kn.ident = (uintptr_t)rec->fd;
+  kn.filter = rec->write ? EVFILT_WRITE : EVFILT_READ;
+  kn.flags = EV_ADD;
+  kn.udata = rec;
+  kevent(fd_poll_fd, &kn, 1, NULL, 0, NULL);
+#endif
+  rec->armed = 1;
+}
+
+static void fd_disarm(PasFdWait *rec) {
+#ifdef __linux__
+  epoll_ctl(fd_poll_fd, EPOLL_CTL_DEL, rec->fd, NULL);
+#else
+  struct kevent kn;
+  memset(&kn, 0, sizeof kn);
+  kn.ident = (uintptr_t)rec->fd;
+  kn.filter = rec->write ? EVFILT_WRITE : EVFILT_READ;
+  kn.flags = EV_DELETE;
+  kevent(fd_poll_fd, &kn, 1, NULL, 0, NULL);
+#endif
+  rec->armed = 0;
+}
+
+/* Under the lock: the record is done for its task. */
+static void fd_retire(PasFdWait *rec) {
+  if (rec->dead)
+    return;
+  rec->dead = 1;
+  if (rec->armed)
+    fd_disarm(rec);
+}
+
+static void *fd_poller_main(void *arg) {
+  (void)arg;
+  struct pollfd pf;
+  pf.events = 0;
+  for (;;) {
+#ifdef __linux__
+    struct epoll_event evs[64];
+    int n = epoll_wait(fd_poll_fd, evs, 64, 1000);
+#else
+    struct kevent evs[64];
+    struct timespec ts;
+    ts.tv_sec = 1;
+    ts.tv_nsec = 0;
+    int n = kevent(fd_poll_fd, NULL, 0, evs, 64, &ts);
+#endif
+    if (n < 0)
+      continue;
+    for (int i = 0; i < n; i++) {
+#ifdef __linux__
+      PasFdWait *rec = evs[i].data.ptr;
+#else
+      PasFdWait *rec = evs[i].udata;
+#endif
+      LOCK();
+      if (!rec->dead) {
+        wake(&rec->w, WAKE_NORMAL);
+        fd_retire(rec);
+      }
+      UNLOCK();
+    }
+    { /* records marked dead by tasks that got cancelled while parked */
+      LOCK();
+      for (PasFdWait *rec = fd_waits; rec; rec = rec->next) {
+        if (rec->dead && rec->armed)
+          fd_disarm(rec);
+      }
+      UNLOCK();
+    }
+  }
+  return NULL;
+}
+
+/* Turns a descriptor blocking (on 0) or non-blocking (other), for unit
+   netasync: plain C, so the variadic fcntl is safe here (calls emitted by
+   p3 threads cannot use it). */
+void __pas_fd_nonblock(int32_t fd, int32_t on) {
+  int flags = fcntl(fd, F_GETFL, 0);
+  if (flags < 0)
+    return;
+#ifdef __linux__
+  if (on)
+    flags |= O_NONBLOCK;
+  else
+    flags &= ~O_NONBLOCK;
+#else
+  if (on)
+    flags |= O_NONBLOCK;
+  else
+    flags &= ~O_NONBLOCK;
+#endif
+  fcntl(fd, F_SETFL, flags);
+}
+
+/* Called once, from unit netasync's initialization (plain context). */
+void __pas_fd_poller_start(void) {
+  LOCK();
+  fd_poller_start();
+  UNLOCK();
+}
+
+static void fd_poller_start(void) {
+  if (fd_poll_started)
+    return;
+  fd_poll_started = 1;
+#ifdef __linux__
+  fd_poll_fd = epoll_create1(0);
+#else
+  fd_poll_fd = kqueue();
+#endif
+  if (fd_poll_fd < 0)
+    __pas_runtime_error("the netasync poller could not start");
+  pthread_attr_t a2;
+  pthread_attr_init(&a2);
+  pthread_attr_setdetachstate(&a2, PTHREAD_CREATE_DETACHED);
+  if (pthread_create(&fd_poller_thread, &a2, fd_poller_main, NULL) != 0)
+    __pas_runtime_error("the netasync poller thread could not start");
+  pthread_attr_destroy(&a2);
+}
+
+/* Parks the current task until fd is readable (want 0) or writable (want 1).
+ * Outside a task, it blocks this thread with poll(). A cancelled token woke
+ * the task with EOperationCancelled (raised here). */
+void __pas_task_wait_fd(int32_t fd, int32_t want_write) {
+  PasContext *c = context();
+  PasTask *me = c->current;
+  if (!me) {
+    struct pollfd pf;
+    memset(&pf, 0, sizeof pf);
+    pf.fd = fd;
+    pf.events = want_write ? POLLOUT : POLLIN;
+    while (poll(&pf, 1, 1000) <= 0)
+      ;
+    return;
+  }
+  LOCK();
+  if (cancelled_locked(me->token)) {
+    UNLOCK();
+    raise_cancelled();
+  }
+  fd_poller_start();
+  PasFdWait *rec = malloc(sizeof *rec);
+  if (!rec)
+    __pas_runtime_error("out of memory waiting on a socket");
+  memset(rec, 0, sizeof *rec);
+  rec->fd = fd;
+  rec->write = want_write ? 1 : 0;
+  rec->w.next = NULL;
+  rec->w.task = me;
+  rec->w.thread = NULL;
+  rec->w.signaled = 0;
+  rec->next = fd_waits;
+  fd_waits = rec;
+  fd_arm(rec);
+  Observation o;
+  observe(me, &o);
+  me->state = TS_WAITING;
+  me->wake = WAKE_NORMAL;
+  UNLOCK();
+  suspend(me);
+  LOCK();
+  me->state = TS_RUNNING;
+  unobserve(&o);
+  int cancelled = me->wake == WAKE_CANCEL;
+  fd_retire(rec);
+  { /* the record is the task's: drop it from the list, free it here */
+    PasFdWait **p = &fd_waits;
+    while (*p && *p != rec)
+      p = &(*p)->next;
+    if (*p)
+      *p = rec->next;
+  }
+  UNLOCK();
+  free(rec);
+  if (cancelled)
     raise_cancelled();
 }
 
