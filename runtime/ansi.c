@@ -113,7 +113,7 @@ char *__pas_astr_concat(char *a, char *b) {
 }
 
 char *__pas_astr_join(const char *a, const char *p, int64_t n, const char *b) {
-  int64_t la = LEN(a), lb = LEN(b);
+  int64_t la = a ? LEN(a) : 0, lb = b ? LEN(b) : 0;
   if (la + n + lb <= 0)
     return NULL;
   char *s = alloc_str(la + n + lb);

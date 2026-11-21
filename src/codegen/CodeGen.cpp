@@ -2587,9 +2587,36 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
     }
     default: { // Concat
       if (E->getType()->isAnsiString()) {
-        llvm::Value *R = emitAnsi(Args[0]);
-        for (Expr *A : Args.drop_front()) {
-          llvm::Value *S = emitAnsi(A);
+        // Concat(a, b, c): three joined in one allocation, then pairwise.
+        llvm::Value *R = nullptr;
+        size_t From = 1;
+        if (Args.size() >= 3 && Args[0]->getType()->isAnsiString() &&
+            (Args[1]->getType()->isAnsiString() ||
+             Args[1]->getType()->isCharLike()) &&
+            Args[2]->getType()->isAnsiString()) {
+          llvm::Value *A = emitAnsi(Args[0]);
+          llvm::Value *M = nullptr, *N = nullptr;
+          if (Args[1]->getType()->isAnsiString()) {
+            M = emitAnsi(Args[1]);
+            N = B.CreateZExt(
+                astrCall("__pas_astr_length", B.getInt32Ty(), {M}),
+                B.getInt64Ty());
+          } else {
+            llvm::IRBuilder<> Entry(&CurFn->getEntryBlock(),
+                                    CurFn->getEntryBlock().begin());
+            M = Entry.CreateAlloca(B.getInt8Ty(), nullptr, "char.tmp");
+            Entry.CreateStore(llvm::Constant::getNullValue(B.getInt8Ty()), M);
+            B.CreateStore(emitCharValue(Args[1]), M);
+            N = B.getInt64(1);
+          }
+          llvm::Value *C = emitAnsi(Args[2]);
+          R = holdResult(
+              astrCall("__pas_astr_join", B.getPtrTy(), {A, M, N, C}));
+          From = 3;
+        } else
+          R = emitAnsi(Args[0]);
+        for (size_t I = From; I < Args.size(); ++I) {
+          llvm::Value *S = emitAnsi(Args[I]);
           R = holdResult(astrCall("__pas_astr_concat", B.getPtrTy(), {R, S}));
         }
         return R;
@@ -9425,6 +9452,33 @@ public:
     if ((Op == BinaryOp::And || Op == BinaryOp::Or) && E->getType()->isBoolean())
       return emitShortCircuit(E);
     if (E->getType()->isAnsiString()) {
+      // (a + b) + c, the characters of all three joined in one allocation
+      // (optimization3.md item 7): __pas_astr_join reads its pieces before
+      // the fresh buffer is written, so no piece can be it. The middle
+      // piece may be a character: an own byte, instead of a fresh string.
+      if (auto *BLHS = llvm::dyn_cast<BinaryExpr>(E->getLHS());
+          BLHS && BLHS->getOp() == BinaryOp::Add &&
+          BLHS->getType()->isAnsiString() &&
+          (BLHS->getRHS()->getType()->isAnsiString() ||
+           BLHS->getRHS()->getType()->isCharLike())) {
+        llvm::Value *A = emitAnsi(BLHS->getLHS());
+        llvm::Value *M = nullptr, *N = nullptr;
+        if (BLHS->getRHS()->getType()->isAnsiString()) {
+          M = emitAnsi(BLHS->getRHS());
+          N = B.CreateZExt(astrCall("__pas_astr_length", B.getInt32Ty(), {M}),
+                           B.getInt64Ty());
+        } else {
+          llvm::IRBuilder<> Entry(&CurFn->getEntryBlock(),
+                                  CurFn->getEntryBlock().begin());
+          M = Entry.CreateAlloca(B.getInt8Ty(), nullptr, "char.tmp");
+          Entry.CreateStore(llvm::Constant::getNullValue(B.getInt8Ty()), M);
+          B.CreateStore(emitCharValue(BLHS->getRHS()), M);
+          N = B.getInt64(1);
+        }
+        llvm::Value *C = emitAnsi(E->getRHS());
+        return holdResult(
+            astrCall("__pas_astr_join", B.getPtrTy(), {A, M, N, C}));
+      }
       llvm::Value *L = emitAnsi(E->getLHS());
       llvm::Value *R = emitAnsi(E->getRHS());
       return holdResult(astrCall("__pas_astr_concat", B.getPtrTy(), {L, R}));

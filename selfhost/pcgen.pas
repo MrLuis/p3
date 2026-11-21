@@ -2852,7 +2852,7 @@ function emitStringFunction(e: PNode; k: TBuiltinKind): TV;
 var
   a0: PNode;
   t: PType;
-  c, lo, hi, isLower, dec, s0, s1, tmp, n1, n2, ignored, len: TV;
+  c, lo, hi, isLower, dec, s0, s1, tmp, n1, n2, n32, ignored, len: TV;
   i: longint;
 begin
   a0 := PNode(listGet(e^.args, 0));
@@ -2938,15 +2938,46 @@ begin
       end;
   else
     begin
-      { concat }
+      { concat: three joined in one allocation, then pairwise. The middle
+        piece may be a character: an own byte, instead of a fresh string. }
       if e^.typ^.kind = tyAnsiString then
       begin
-        tmp := emitAnsi(a0);
-        for i := 1 to e^.args.count - 1 do
+        if (e^.args.count >= 3) and
+           (PNode(listGet(e^.args, 0))^.typ^.kind = tyAnsiString) and
+           ((PNode(listGet(e^.args, 1))^.typ^.kind = tyAnsiString) or
+            isCharLike(PNode(listGet(e^.args, 1))^.typ)) and
+           (PNode(listGet(e^.args, 2))^.typ^.kind = tyAnsiString) then
+        begin
+          tmp := emitAnsi(a0);
+          if PNode(listGet(e^.args, 1))^.typ^.kind = tyAnsiString then
+          begin
+            s1 := emitAnsi(PNode(listGet(e^.args, 1)));
+            n32 := call1(classRuntime('__pas_astr_length', 'i32', 'ptr'), s1, '');
+            n1 := irCast('zext', n32, irI64, '');
+          end
+          else
+          begin
+            s1 := irCreateTempInit(irI8, 'char.tmp', irZero(irI8));
+            irStore(emitCharValue(PNode(listGet(e^.args, 1))), s1);
+            n1 := i64c(1);
+          end;
+          s0 := emitAnsi(PNode(listGet(e^.args, 2)));
+          tmp := holdResult(call4(classRuntime('__pas_astr_join', 'ptr',
+                                                'ptr,ptr,i64,ptr'),
+                                  tmp, s1, n1, s0, ''));
+          i := 3;
+        end
+        else
+        begin
+          tmp := emitAnsi(a0);
+          i := 1;
+        end;
+        while i < e^.args.count do
         begin
           s1 := emitAnsi(PNode(listGet(e^.args, i)));
           tmp := holdResult(call2(classRuntime('__pas_astr_concat', 'ptr', 'ptr,ptr'),
                                   tmp, s1, ''));
+          i := i + 1;
         end;
         exit(tmp);
       end;
@@ -6191,7 +6222,8 @@ function visitBinary(e: PNode): TV;
 var
   op: TBinaryOp;
   lt, rt, opTy: PType;
-  l, r, tmp, notR, masked: TV;
+  lhs: PNode;
+  l, r, m, n32, w, tmp, notR, masked: TV;
   signed: boolean;
   loc: TLoc;
   args: TPtrList;
@@ -6215,6 +6247,34 @@ begin
     exit(emitShortCircuit(e));
   if e^.typ^.kind = tyAnsiString then
   begin
+    { (a + b) + c, the characters of all three joined in one allocation
+      (item 7 of optimization3.md): __pas_astr_join reads its pieces
+      before the fresh buffer is written, so no piece can be it. The
+      middle piece may be a character: an own byte, instead of a fresh
+      string. }
+    lhs := e^.lhs;
+    if (lhs^.kind = nkBinary) and (lhs^.bop = boAdd) and
+       ((lhs^.typ^.kind = tyAnsiString) and
+        ((lhs^.rhs^.typ^.kind = tyAnsiString) or isCharLike(lhs^.rhs^.typ))) then
+    begin
+      l := emitAnsi(lhs^.lhs);
+      if lhs^.rhs^.typ^.kind = tyAnsiString then
+      begin
+        m := emitAnsi(lhs^.rhs);
+        n32 := call1(classRuntime('__pas_astr_length', 'i32', 'ptr'), m, '');
+        w := irCast('zext', n32, irI64, '');
+      end
+      else
+      begin
+        m := irCreateTempInit(irI8, 'char.tmp', irZero(irI8));
+        irStore(emitCharValue(lhs^.rhs), m);
+        w := i64c(1);
+      end;
+      r := emitAnsi(e^.rhs);
+      exit(holdResult(call4(classRuntime('__pas_astr_join', 'ptr',
+                                          'ptr,ptr,i64,ptr'),
+                            l, m, w, r, '')));
+    end;
     l := emitAnsi(e^.lhs);
     r := emitAnsi(e^.rhs);
     exit(holdResult(call2(classRuntime('__pas_astr_concat', 'ptr', 'ptr,ptr'), l, r, '')));
