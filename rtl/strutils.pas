@@ -259,17 +259,21 @@ begin
 end;
 
 { Scans s in place for the first character of sub in either case, then
-  compares the rest with textAt: no string is made
-  (docs/strutils-review.md ST-10). }
+  compares the rest from the second character, lower-folding a pair only
+  where it differs, through two PChars made once: no string and no helper
+  call at a candidate, whose first character has already matched
+  (docs/strutils-review.md ST-10, ST-13). }
 function ContainsText(const s, sub: string): boolean;
 var
-  i, last: longint;
-  lo, up: char;
-  p: PChar;
+  i, j, last, n: longint;
+  lo, up, ca, cb: char;
+  ok: boolean;
+  p, q: PChar;
 begin
   ContainsText := false;
-  last := length(s) - length(sub);
-  if (sub = '') or (last < 0) then
+  n := length(sub);
+  last := length(s) - n;
+  if (n = 0) or (last < 0) then
     exit;
   lo := sub[1];
   if (lo >= 'A') and (lo <= 'Z') then
@@ -278,11 +282,33 @@ begin
   if (lo >= 'a') and (lo <= 'z') then
     up := chr(ord(lo) - 32);
   p := PChar(s);
+  q := PChar(sub);
   for i := 0 to last do
-    if ((p[i] = lo) or (p[i] = up)) and textAt(sub, s, i + 1) then
+    if (p[i] = lo) or (p[i] = up) then
     begin
-      ContainsText := true;
-      exit;
+      ok := true;
+      for j := 1 to n - 1 do
+      begin
+        ca := q[j];
+        cb := p[i + j];
+        if ca <> cb then
+        begin
+          if (ca >= 'A') and (ca <= 'Z') then
+            ca := chr(ord(ca) + 32);
+          if (cb >= 'A') and (cb <= 'Z') then
+            cb := chr(ord(cb) + 32);
+          if ca <> cb then
+          begin
+            ok := false;
+            break;
+          end;
+        end;
+      end;
+      if ok then
+      begin
+        ContainsText := true;
+        exit;
+      end;
     end;
 end;
 
