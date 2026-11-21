@@ -1,0 +1,9 @@
+{
+  "name": "netasync",
+  "version": "0.1.0",
+  "description": "A concurrent TCP echo server written with the netasync unit: one task per connection, tasks park on socket readiness instead of blocking the thread",
+  "main": "src/netasync_demo.pas",
+  "output": "bin/netasync_demo",
+  "mode": "objfpc",
+  "optimize": 2
+}

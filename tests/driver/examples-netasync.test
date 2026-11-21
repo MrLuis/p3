@@ -1,0 +1,14 @@
+{ netasync driver: builds examples/netasync, runs its echo server with
+ * --requests 4, drives four connections through it, verifies the echoes
+ * and the clean stop.
+ * RUN: rm -rf %t && mkdir -p %t && cp -R %S/../../examples/netasync %t/
+ * RUN: rm -rf %t/netasync/bin
+ * RUN: cd %t/netasync && %p3-project 2>&1 | count 0
+ * RUN: python3 %S/Inputs/netasync-check.py %t/netasync/bin/netasync_demo | FileCheck %s
+ * CHECK:      listening: ok
+ * CHECK-NEXT: echo 1: one
+ * CHECK-NEXT: echo 2: second line
+ * CHECK-NEXT: echo 3: third
+ * CHECK-NEXT: echo 4: the fourth!
+ * CHECK-NEXT: server stopped: ok
+  }
