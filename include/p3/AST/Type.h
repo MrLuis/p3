@@ -65,6 +65,7 @@ public:
     TK_Task,     ///< async T (objfpc): a counted reference to a task
     TK_Token,    ///< TCancelToken (objfpc): a counted cancellation token
     TK_Iterator, ///< iterator T (objfpc): a counted reference to a generator
+    TK_Vector,   ///< vector[N] of T (p3's own): SIMD lanes, elementwise
   };
 
 private:
@@ -94,6 +95,7 @@ public:
   bool isNil() const { return Kind == TK_Nil; }
   bool isUntyped() const { return Kind == TK_Untyped; }
   bool isSet() const { return Kind == TK_Set; }
+  bool isVector() const { return Kind == TK_Vector; }
   bool isFile() const { return Kind == TK_File; }
   bool isShortString() const { return Kind == TK_ShortString; }
   bool isAnsiString() const { return Kind == TK_AnsiString; }
@@ -400,6 +402,21 @@ class TokenType final : public Type {
 public:
   TokenType() : Type(TK_Token) {}
   static bool classof(const Type *T) { return T->getKind() == TK_Token; }
+};
+
+/// vector[N] of T (p3's own): N SIMD lanes of an ordinal or real element
+/// type, elementwise operators, indexing reads and writes. A value type
+/// (registers and stack slots): no reference counting, no elements.
+class VectorType final : public Type {
+  Type *Element;
+  int64_t N;
+
+public:
+  VectorType(Type *Element, int64_t N)
+      : Type(TK_Vector), Element(Element), N(N) {}
+  Type *getElementType() const { return Element; }
+  int64_t getCount() const { return N; }
+  static bool classof(const Type *T) { return T->getKind() == TK_Vector; }
 };
 
 /// A parameter's `array of T` (Turbo/FPC): passed as a {data, count} pair.

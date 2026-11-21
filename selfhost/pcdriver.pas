@@ -431,7 +431,8 @@ begin
     bufWrite(ir, sysOut)
   else if not sysWriteFile(path, ir.data, ir.len) then
   begin
-    diagError(noLoc, 'cannot open output file ''' + path + '''');
+    diagError(noLoc, 'cannot open output file ''' + path + ''': ' +
+               sysOpenError(path));
     writeText := false;
   end;
 end;

@@ -429,6 +429,15 @@ class ASTPrinter : public StmtVisitor<ASTPrinter>,
       }
       return;
     }
+    case TypeSpec::TS_Vector: {
+      auto *V = llvm::cast<VectorTypeSpec>(TS);
+      line("VectorTypeSpec");
+      loc(TS->getBeginLoc());
+      IndentScope I(Indent);
+      visitExpr(V->getCountExpr());
+      printTypeSpec(V->getElementType());
+      return;
+    }
     case TypeSpec::TS_Specialize: {
       auto *SS = llvm::cast<SpecializeTypeSpec>(TS);
       line("SpecializeTypeSpec '") << SS->getName().Name << '\''

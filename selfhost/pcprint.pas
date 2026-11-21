@@ -552,6 +552,15 @@ begin
         lineName('ClassRefTypeSpec ''', ts^.tname.name);
         loc(ts^.b);
       end;
+    tsVector:
+      begin
+        line('VectorTypeSpec');
+        loc(ts^.b);
+        indent := indent + 2;
+        visitExpr(ts^.vecCount);
+        printTypeSpec(ts^.vecSpec);
+        indent := indent - 2;
+      end;
     tsString:
       begin
         if ts^.isLong then

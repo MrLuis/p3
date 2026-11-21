@@ -81,7 +81,10 @@ type
                { async T (objfpc): a counted reference to a task;
                  TCancelToken: a counted cancellation token; iterator T: a
                  counted reference to a generator }
-               tyTask, tyToken, tyIterator);
+               tyTask, tyToken, tyIterator,
+               { vector[N] of T (p3's own, like async: not reserved): an
+                 LLVM vector, whose elements are T's 1..N components }
+               tyVector);
 
   TType = record
     kind: TTypeKind;
@@ -120,6 +123,7 @@ type
       tyOpenArray: (openElement: PType);
       tyDynArray: (dynElement: PType);
       tyTask: (taskResult: PType); { nil: async (no value) }
+      tyVector: (vecElement: PType; vecCount: int64);
       tyIterator: (iterElement: PType);
       { a class (objfpc): its parent (nil only for TObject), own members in
         source order, all fields (the ancestors' first), the virtual methods
@@ -395,7 +399,7 @@ type
                    tsClassRef, tsInterface, tsHelper,
                    tsUntyped, { an untyped parameter's (absent) type }
                    tsArrayOfConst, tsOpenArray, tsDynArray, tsTuple,
-                   tsSpecialize, tsAsync);
+                   tsSpecialize, tsAsync, tsVector);
 
   PVariantPart = ^TVariantPart;
 
@@ -426,6 +430,8 @@ type
       tsSpecialize: (spName: TIdent; spArgs: TPtrList);
       { async T (nil: async); asyncIterator: iterator T }
       tsAsync: (asyncInner: PTypeSpec; asyncIterator: boolean);
+      { vector[N] of T (p3's own, like async: not reserved) }
+      tsVector: (vecSpec: PTypeSpec; vecCount: PNode);
       tsSubrange: (lo, hi: PNode);
       tsArray: (indexes: TPtrList; element: PTypeSpec; arrPacked: boolean;
                 arrBitPacked: boolean);

@@ -1248,6 +1248,7 @@ public:
     TS_Named, TS_Enum, TS_Subrange, TS_Array, TS_Record, TS_Pointer, TS_Set,
     TS_File, TS_Routine, TS_String, TS_Class, TS_ClassRef, TS_Interface,
     TS_Helper,
+    TS_Vector,
     TS_Untyped,
     TS_ArrayOfConst,
     TS_OpenArray,
@@ -1556,6 +1557,19 @@ public:
       : TypeSpec(TS_Set, R), Element(Element) {}
   TypeSpec *getElement() const { return Element; }
   static bool classof(const TypeSpec *T) { return T->getKind() == TS_Set; }
+};
+
+/// vector[N] of T (p3's own): the SIMD lanes type.
+class VectorTypeSpec final : public TypeSpec {
+  TypeSpec *Element;
+  Expr *N;
+
+public:
+  VectorTypeSpec(SourceRange R, TypeSpec *Element, Expr *N)
+      : TypeSpec(TS_Vector, R), Element(Element), N(N) {}
+  TypeSpec *getElementType() const { return Element; }
+  Expr *getCountExpr() const { return N; }
+  static bool classof(const TypeSpec *T) { return T->getKind() == TS_Vector; }
 };
 
 /// class [(Parent)] members end   (objfpc); `class;` declares a class

@@ -3590,6 +3590,7 @@ var
   start: TLoc;
   isPacked, isFunction, isSet, isReference: boolean;
   elem, resultSpec, ts: PTypeSpec;
+  n: PNode;
   maxLen: PNode;
   params: TPtrList;
   target: TIdent;
@@ -3622,6 +3623,27 @@ begin
   { reference to procedure / function (objfpc; `reference` is not
     reserved): a closure, which may outlive the routine it is made in }
   isReference := false;
+  { vector[N] of T (p3's own, like async: not reserved) }
+  if not isPacked and (mode <> lmISO) and
+     isIdentifierNamed('vector') and (peekKind = tkLSquare) then
+  begin
+    consumeToken; { vector }
+    consumeToken; { [ }
+    n := parseExpression;
+    if n = nil then
+      exit;
+    if not expect(tkRSquare, 'after the vector''s length') then
+      exit;
+    if not expect(tkKwOf, 'after the vector''s length') then
+      exit;
+    elem := parseType;
+    if elem = nil then
+      exit;
+    ts := newTypeSpec(tsVector, start, prevTokEnd);
+    ts^.vecSpec := elem;
+    ts^.vecCount := n;
+    exit(ts);
+  end;
   if not isPacked and (mode = lmObjFPC) and isIdentifierNamed('reference') and
      (peekKind = tkKwTo) then
   begin

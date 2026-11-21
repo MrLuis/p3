@@ -1,0 +1,34 @@
+; A `vector[N] of T` (llvm-23.md LB-6) lowers to an LLVM vector: the
+; elements are the 1..N components, addressed like an array of T, and
+; the elementwise operators add/sub/mul whole vectors (without the
+; per-lane overflow checks). Sema rejects lanes with different shapes,
+; elements that are not ordinal or real, and out-of-bounds constant
+; indices (those errors live in the sema suite).
+; RUN: %p3 --mode=objfpc --emit-llvm %S/Inputs/vector.pas -o %t.ll
+; RUN: FileCheck %s < %t.ll
+; CHECK-DAG: @pas.v = internal global <4 x double> zeroinitializer
+; CHECK-LABEL: define i32 @main(
+; v[1] reads the first element (the GEP folds away), v[4] the last:
+; CHECK:     [[V1:%[0-9a-zA-Z.]+]] = load double, ptr @pas.v, align 8
+; CHECK:     call void @__pas_write_real(ptr %file, double [[V1]]
+; CHECK:     [[V4:%[0-9a-zA-Z.]+]] = load double, ptr getelementptr inbounds (<4 x double>, ptr @pas.v, i64 0, i64 3), align 8
+; CHECK:     call void @__pas_write_real(ptr %file, double [[V4]]
+; The element: a GEP into the vector (1-based, so i - 1).
+; CHECK:     [[FOR:%[0-9a-zA-Z.]+]] = getelementptr inbounds nuw <4 x double>, ptr @pas.v, i64 0, i64
+; CHECK:     store double %mul, ptr [[FOR]], align 8
+
+; RUN: %p3 --mode=objfpc --emit-llvm %S/Inputs/vectors.pas -o %t2.ll
+; RUN: FileCheck --check-prefix=ELEM %s < %t2.ll
+; ELEM-DAG: @pas.a = internal global <4 x i32> zeroinitializer
+; ELEM-DAG: @pas.b = internal global <4 x i32> zeroinitializer
+; ELEM-DAG: @pas.v = internal global <4 x double> zeroinitializer
+; ELEM-DAG: @pas.w = internal global <4 x double> zeroinitializer
+; The constant element indices fold to their GEPs:
+; ELEM:     %7 = load i32, ptr getelementptr inbounds (<4 x i32>, ptr @pas.a, i64 0, i64 1), align 4
+; ELEM:     %8 = load i32, ptr getelementptr inbounds (<4 x i32>, ptr @pas.b, i64 0, i64 1), align 4
+; b := a + a: the whole vectors, without per-lane overflow checks.
+; ELEM:     [[A1:%[0-9a-zA-Z.]+]] = load <4 x i32>, ptr @pas.a, align 16
+; ELEM-NOT: with_overflow
+; ELEM:     [[A2:%[0-9a-zA-Z.]+]] = load <4 x i32>, ptr @pas.a, align 16
+; ELEM:     %ve.add = add <4 x i32> [[A1]], [[A2]]
+; ELEM:     store <4 x i32> %ve.add, ptr @pas.b, align 16

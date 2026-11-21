@@ -379,6 +379,10 @@ std::string Type::getName() const {
     Type *E = llvm::cast<SetType>(this)->getElementType();
     return E ? "set of " + E->getName() : "empty set";
   }
+  case TK_Vector:
+    return "vector[" +
+           std::to_string(llvm::cast<VectorType>(this)->getCount()) + "] of " +
+           llvm::cast<VectorType>(this)->getElementType()->getName();
   case TK_Class:
     return "class";
   case TK_ClassRef:

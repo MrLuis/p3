@@ -997,6 +997,8 @@ begin
     tyEnum: lowerType := irI32;
     tySubrange: lowerType := memType(t^.host);
     tyStringLit: lowerType := irArray(t^.strLength, irI8);
+    tyVector: { vector[N] of T (llvm-23.md LB-6): an LLVM vector of T }
+      lowerType := irVector(t^.vecCount, memType(t^.vecElement));
     tyArray:
       begin
         bd := getOrdinalBounds(t^.indexType);
@@ -3702,6 +3704,22 @@ begin
           end;
           offset := irBin('sub', x, i64c(1), '');
           exit(irGEP1(irI8, base, offset, true, '', indexFlags(e^.index, 1)));
+        end;
+        if bt^.kind = tyVector then
+        begin
+          { vector[N] of T (llvm-23.md LB-6): the 1..N components, laid out
+            like an array of T (a GEP into the vector) }
+          base := emitAddress(e^.base);
+          idx := visitExpr(e^.index);
+          x := toI64(idx, idxTy);
+          if rangeChecks(e^.index^.b) then
+          begin
+            bad := outsideRange(x, 1, bt^.vecCount);
+            emitRuntimeCheck(bad, 'vector index out of bounds', e^.index^.b);
+          end;
+          offset := irBin('sub', x, i64c(1), '');
+          exit(irGEP2(memType(bt), base, i64c(0), offset, '',
+                      indexFlags(e^.index, 1)));
         end;
         base := emitAddress(e^.base);
         idx := visitExpr(e^.index);
@@ -6493,6 +6511,26 @@ begin
         exit(irBin('fdiv', l, r, 'div'));
       end;
     end;
+  end;
+
+  { vector[N] of T (llvm-23.md LB-6): elementwise, without the per-lane
+    overflow checks (LLVM's vectors have no checked add/sub/mul) }
+  if e^.typ^.kind = tyVector then
+  begin
+    if e^.typ^.vecElement^.kind = tyReal then
+      case op of
+        boAdd: exit(irBin('fadd', l, r, 've.add'));
+        boSub: exit(irBin('fsub', l, r, 've.sub'));
+      else
+        exit(irBin('fmul', l, r, 've.mul'));
+      end
+    else
+      case op of
+        boAdd: exit(irBin('add', l, r, 've.add'));
+        boSub: exit(irBin('sub', l, r, 've.sub'));
+      else
+        exit(irBin('mul', l, r, 've.mul'));
+      end;
   end;
 
   loc := e^.opLoc;

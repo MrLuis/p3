@@ -37,7 +37,9 @@ interface
 uses pcsys, pcutil;
 
 type
-  TIRKind = (ikVoid, ikInt, ikDouble, ikPtr, ikArray, ikStruct);
+  TIRKind = (ikVoid, ikInt, ikDouble, ikPtr, ikArray, ikStruct,
+             { <n x elem>, p3's own vector[N] of T (llvm-23.md LB-6) }
+             ikVector);
 
   TInt64Array = array[0..$FFFFFF] of int64;
   PInt64Array = ^TInt64Array;
@@ -46,8 +48,8 @@ type
   TIRType = record
     kind: TIRKind;
     bits: longint;        { ikInt }
-    count: int64;         { ikArray }
-    elem: PIRType;        { ikArray }
+    count: int64;         { ikArray and ikVector's lanes }
+    elem: PIRType;        { ikArray and ikVector's element }
     fields: TPtrList;     { ikStruct: of PIRType }
     offsets: PInt64Array; { ikStruct: byte offset of each field }
     text: string;         { 'i32', '[4 x i8]', a literal struct, or a marker }
@@ -151,6 +153,7 @@ procedure irInit(const sourceName, triple, dataLayout: string);
 { --- Types --- }
 function irInt(bits: longint): PIRType;
 function irArray(n: int64; elem: PIRType): PIRType;
+function irVector(count: int64; elem: PIRType): PIRType;
 function irStructLit(const fields: TPtrList): PIRType;
 { A named struct; the name is made unique as LLVM does (name.0, ...). }
 function irStructNamed(const name: string; const fields: TPtrList): PIRType;
@@ -593,6 +596,27 @@ begin
   t^.prefAlign := elem^.prefAlign;
   t^.size := n * elem^.size;
   irArray := t;
+end;
+
+{ <count x elem>: its alignment is the size rounded up to a power of two
+  (LLVM's rule for vector types; it has no cap), at least 1 byte. }
+function irVector(count: int64; elem: PIRType): PIRType;
+var
+  t: PIRType;
+  size, align: int64;
+begin
+  t := newIRType(ikVector);
+  t^.count := count;
+  t^.elem := elem;
+  t^.text := '<' + intToStr(count) + ' x ' + elem^.text + '>';
+  t^.size := count * elem^.size;
+  size := t^.size;
+  align := 1;
+  while align < size do
+    align := align * 2;
+  t^.align := align;
+  t^.prefAlign := align;
+  irVector := t;
 end;
 
 procedure layoutStruct(t: PIRType);
@@ -2990,7 +3014,7 @@ begin
   if t = nil then
     exit;
   case t^.kind of
-    ikArray: visitType(t^.elem);
+    ikArray, ikVector: visitType(t^.elem);
     ikStruct:
       begin
         if t^.named then

@@ -36,6 +36,9 @@ function newArrayType(index, element: PType; packed_: boolean): PType;
 function newRecordType(fl: PFieldList; const all: TPtrList; packed_: boolean): PType;
 function newPointerType(pointee: PType): PType;
 function newSetType(element: PType): PType;
+
+{ vector[N] of T (p3's own, like async: not reserved) }
+function newVectorType(element: PType; count: int64): PType;
 function newFileType(element: PType): PType;
 function newRoutineType(const params: TPtrList; result_: PType;
                         cdecl_: boolean): PType;
@@ -232,6 +235,16 @@ begin
   t := newType(tySet);
   t^.setElement := element;
   newSetType := t;
+end;
+
+function newVectorType(element: PType; count: int64): PType;
+var
+  t: PType;
+begin
+  t := newType(tyVector);
+  t^.vecElement := element;
+  t^.vecCount := count;
+  newVectorType := t;
 end;
 
 function newFileType(element: PType): PType;
@@ -1089,6 +1102,13 @@ begin
         bufAddOrdinal(b, t^.host, t^.lo);
         bufAdd(b, '..');
         bufAddOrdinal(b, t^.host, t^.hi);
+      end;
+    tyVector:
+      begin
+        bufAdd(b, 'vector[');
+        bufAddInt(b, t^.vecCount);
+        bufAdd(b, '] of ');
+        bufAddTypeName(b, t^.vecElement);
       end;
     tyArray:
       begin

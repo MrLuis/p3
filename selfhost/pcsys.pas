@@ -33,6 +33,8 @@ function sysReadFile(const path: string; var data: PCharArray;
 function sysWriteFile(const path: string; p: PCharArray; count: int64): boolean;
 { Why path cannot be read, as strerror would say it (errno is not portable
   to reach): missing, or present but unreadable. }
+{ Is path a directory (stat's S_IFDIR)? }
+function sysIsDirectory(const path: string): boolean;
 function sysOpenError(const path: string): string;
 function sysFileExists(const path: string): boolean;
 { Does path name a file that is not a directory? }
@@ -162,6 +164,12 @@ begin
     f := c_fopen(@cpath[1], 'rb');
   if f = nil then
     exit;
+  if (path <> '-') and sysIsDirectory(path) then
+  begin { a directory reads no bytes as a file does not (LLVM's
+         'Is a directory') }
+    c_fclose(f);
+    exit;
+  end;
   cap := 65536;
   getmem(data, cap);
   repeat
@@ -200,6 +208,29 @@ end;
 
 function c_access(path: pchar; mode: longint): longint; cdecl; external 'c' name 'access';
 
+{ stat's st_mode sits 4 bytes in (darwin arm64): st_dev (4 bytes), then
+  st_mode (2). The buffer is struct stat's whole 144 bytes: stat writes
+  all of it. }
+type
+  TCStat = packed record
+    dev: longint;
+    mode: word;
+    pad: array[0..137] of byte; { the rest of struct stat (144 bytes) }
+  end;
+
+function c_stat(path: pchar; st: pointer): longint; cdecl; external 'c' name 'stat';
+
+function sysIsDirectory(const path: string): boolean;
+var
+  cpath: string;
+  stats: TCStat;
+begin
+  toC(path, cpath);
+  if c_stat(@cpath[1], @stats) <> 0 then
+    exit(false);
+  sysIsDirectory := (stats.mode and $F000) = $4000;
+end;
+
 function sysOpenError(const path: string): string;
 var
   cpath: string;
@@ -207,6 +238,8 @@ begin
   toC(path, cpath);
   if c_access(@cpath[1], 0) <> 0 then
     sysOpenError := 'No such file or directory'
+  else if sysIsDirectory(path) then
+    sysOpenError := 'Is a directory'
   else
     sysOpenError := 'Permission denied';
 end;

@@ -1550,6 +1550,12 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
       return B.getPtrTy();
     case Type::TK_Set:
       return setType(T);
+    case Type::TK_Vector: { // the lanes as one register-shaped value
+      auto *V = llvm::cast<VectorType>(T);
+      return llvm::VectorType::get(memType(V->getElementType()),
+                                   static_cast<unsigned>(V->getCount()),
+                                   /*Scalable=*/false);
+    }
     case Type::TK_ShortString: // length byte + chars
       return llvm::ArrayType::get(
           B.getInt8Ty(), llvm::cast<ShortStringType>(T)->getMaxLength() + 1);
@@ -3983,6 +3989,21 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
         return B.CreateGEP(B.getInt8Ty(), Base,
                            B.CreateSub(X, B.getInt64(1)), "",
                            indexFlags(I->getIndex(), 1));
+      }
+      // vector[N] of T (llvm-23.md LB-6): elements 1..N, laid out like an
+      // array of T (a GEP into the LLVM vector).
+      if (auto *VT = llvm::dyn_cast<VectorType>(I->getBase()->getType())) {
+        llvm::Value *Base = emitAddress(I->getBase());
+        llvm::Value *Idx = visitExpr(I->getIndex());
+        llvm::Value *X = toI64(Idx, I->getIndex()->getType());
+        if (rangeChecks(I->getIndex()->getBeginLoc()))
+          emitRuntimeCheck(outsideRange(X, 1, VT->getCount()),
+                           "vector index out of bounds",
+                           I->getIndex()->getBeginLoc());
+        llvm::Value *Elem = B.CreateGEP(
+            memType(VT), Base, {B.getInt64(0), B.CreateSub(X, B.getInt64(1))},
+            "", indexFlags(I->getIndex(), 1));
+        return Elem;
       }
       auto *AT = llvm::cast<ArrayType>(I->getBase()->getType());
       llvm::Value *Base = emitAddress(I->getBase());
@@ -10032,6 +10053,25 @@ public:
               "division by zero", E->getOpLoc());
         return B.CreateFDiv(L, R, "div");
       default: llvm_unreachable("not a real operator");
+      }
+    }
+
+    // vector[N] of T (llvm-23.md LB-6): elementwise, without the per-lane
+    // overflow checks (LLVM's vectors have no checked add/sub/mul).
+    if (auto *VT = llvm::dyn_cast<VectorType>(E->getType())) {
+      bool RealLane = VT->getElementType()->isReal();
+      switch (Op) {
+      case BinaryOp::Add:
+        return RealLane ? B.CreateFAdd(L, R, "ve.add")
+                        : B.CreateAdd(L, R, "ve.add");
+      case BinaryOp::Sub:
+        return RealLane ? B.CreateFSub(L, R, "ve.sub")
+                        : B.CreateSub(L, R, "ve.sub");
+      case BinaryOp::Mul:
+        return RealLane ? B.CreateFMul(L, R, "ve.mul")
+                        : B.CreateMul(L, R, "ve.mul");
+      default:
+        llvm_unreachable("operator rejected by Sema");
       }
     }
 

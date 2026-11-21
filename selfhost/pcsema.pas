@@ -1570,6 +1570,9 @@ begin
   if (a^.kind = tySet) and (b^.kind = tySet) then
     exit(isEmptySet(a) or isEmptySet(b) or
          haveSameOrdinalHost(a^.setElement, b^.setElement));
+  if (a^.kind = tyVector) and (b^.kind = tyVector) then
+    exit((a^.vecCount = b^.vecCount) and
+         haveSameOrdinalHost(a^.vecElement, b^.vecElement));
   if isOrdinal(a) and isOrdinal(b) then
     exit(haveSameOrdinalHost(a, b));
   if isStringType(a) and isStringType(b) then
@@ -3602,6 +3605,7 @@ var
   tupTypes, tupIds: TPtrList;
   es: PTypeSpec;
   named: boolean;
+  c: TConstant;
   d, cd, prev: PDecl;
   t, elem, idx, res: PType;
   i, j: longint;
@@ -3997,6 +4001,39 @@ begin
           exit;
         end;
         buildType := newFileType(elem);
+      end;
+    tsVector:
+      begin
+        elem := resolveType(ts^.vecSpec, nil);
+        if isError(elem) then
+          exit;
+        if not isOrdinal(elem) and (elem^.kind <> tyReal) then
+        begin
+          ms('a vector''s element type must be ordinal or real, not ');
+          maT(elem);
+          errR(ts^.vecSpec^.b, specRange(ts^.vecSpec));
+          exit;
+        end;
+        if isQWord(elem) then
+        begin
+          ms('a vector''s element type cannot be qword');
+          err(ts^.vecSpec^.b);
+          exit;
+        end;
+        if not evaluateConstant(ts^.vecCount, 'vector length', c) or
+           (c.value.kind <> ckOrdinal) then
+        begin
+          ms('a vector''s length must be a constant');
+          err(ts^.vecCount^.b);
+          exit;
+        end;
+        if (c.value.intVal < 1) or (c.value.intVal > 64) then
+        begin
+          ms('a vector''s length must be 1..64');
+          err(ts^.vecCount^.b);
+          exit;
+        end;
+        buildType := newVectorType(elem, c.value.intVal);
       end;
     tsSet:
       begin

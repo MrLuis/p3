@@ -1,0 +1,12 @@
+; Sema rejects what cannot form a vector (llvm-23.md LB-6): qword (no
+; LLVM lane type), a count outside 1..64 and elements that are neither
+; ordinal nor real; an index that is not an integer, and an
+; out-of-bounds constant index. A dynamic index is only checked at run
+; time, so it needs no diagnostic.
+; RUN: not %p3 --mode=objfpc -ferror-limit=0 -c %S/Inputs/vector-errors.pas -o %t.o 2>&1 | FileCheck %s
+
+; CHECK: vector-errors.pas:5:21: error: a vector's element type cannot be qword
+; CHECK: vector-errors.pas:6:15: error: a vector's length must be 1..64
+; CHECK: vector-errors.pas:7:21: error: a vector's element type must be ordinal or real, not 'record'
+; CHECK: vector-errors.pas:14:13: error: vector index must be an integer
+; CHECK: vector-errors.pas:14:21: error: vector index 3 is out of bounds 1..2

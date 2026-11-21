@@ -2575,6 +2575,22 @@ TypeSpec *Parser::parseTypeImpl() {
     }
     Reference = true;
   }
+  // vector[N] of T (p3's own, like async: not reserved)
+  if (!Packed && LangOpts.Mode != LangMode::ISO &&
+      isIdentifierNamed("vector") && peekToken().is(tok::l_square)) {
+    consumeToken();
+    consumeToken();
+    Expr *N = nullptr;
+    if (!(N = parseExpression()) ||
+        !expect(tok::r_square, "after the vector's length"))
+      return nullptr;
+    if (!expect(tok::kw_of, "after the vector's length"))
+      return nullptr;
+    TypeSpec *Elem = parseType();
+    if (!Elem)
+      return nullptr;
+    return Ctx.create<VectorTypeSpec>(SourceRange(Start, PrevTokEnd), Elem, N);
+  }
   switch (Tok.getKind()) {
   case tok::kw_array:
     return parseArrayType(Start, Packed);

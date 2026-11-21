@@ -5684,6 +5684,14 @@ begin
   case op of
     boAdd, boSub, boMul:
       begin
+        { vector[N] of T (llvm-23.md LB-6): the elementwise operators of two
+          same-shaped vectors. No per-lane overflow checks: LLVM's vectors
+          have no checked add/sub/mul (so this stays ahead of the
+          integers', which would not carry over) }
+        if (l^.kind = tyVector) and (r^.kind = tyVector) and
+           (l^.vecCount = r^.vecCount) and
+           areCompatible(l^.vecElement, r^.vecElement) then
+          exit(l);
         if bothIntegers then
           exit(integerOp);
         if isNumeric(l) and isNumeric(r) then
@@ -6095,6 +6103,25 @@ begin
       exit;
     end;
     exit(bt^.pointee);
+  end;
+  if bt^.kind = tyVector then
+  begin
+    if not isIntegerLike(it) then
+    begin
+      ms('vector index must be an integer');
+      errR(e^.index^.b, nodeRange(e^.index));
+      exit;
+    end;
+    if fold(e^.index, c) and (c.value.kind = ckOrdinal) and
+       ((c.value.intVal < 1) or (c.value.intVal > bt^.vecCount)) then
+    begin
+      ms('vector index ');
+      maI(c.value.intVal);
+      ma(' is out of bounds 1..');
+      maI(bt^.vecCount);
+      errR(e^.index^.b, nodeRange(e^.index));
+    end;
+    exit(bt^.vecElement);
   end;
   if bt^.kind <> tyArray then
   begin

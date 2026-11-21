@@ -1603,6 +1603,12 @@ class Checker : public StmtVisitor<Checker>,
       return SA->isEmptySet() || SB->isEmptySet() ||
              haveSameOrdinalHost(SA->getElementType(), SB->getElementType());
     }
+    if (A->isVector() && B->isVector()) {
+      auto *VA = llvm::cast<VectorType>(A), *VB = llvm::cast<VectorType>(B);
+      return VA->getCount() == VB->getCount() &&
+             haveSameOrdinalHost(VA->getElementType(),
+                                 VB->getElementType());
+    }
     if (A->isOrdinal() && B->isOrdinal())
       return haveSameOrdinalHost(A, B);
     if (A->isStringType() && B->isStringType())
@@ -2596,6 +2602,38 @@ class Checker : public StmtVisitor<Checker>,
         return errorType();
       }
       return Ctx.create<SetType>(Elem);
+    }
+
+    case TypeSpec::TS_Vector: {
+      auto *VS = llvm::cast<VectorTypeSpec>(TS);
+      Type *Elem = resolveType(VS->getElementType());
+      if (Elem->isError())
+        return errorType();
+      if (!Elem->isOrdinal() && !Elem->isReal()) {
+        Diags.error(VS->getElementType()->getBeginLoc(),
+                    "a vector's element type must be ordinal or real, not " +
+                        quoted(Elem),
+                    {VS->getElementType()->getRange()});
+        return errorType();
+      }
+      if (isQWord(Elem)) {
+        Diags.error(VS->getElementType()->getBeginLoc(),
+                    "a vector's element type cannot be qword");
+        return errorType();
+      }
+      auto CN = evaluateConstant(VS->getCountExpr(), "vector length");
+      if (!CN || CN->Value.K != ConstValue::Ordinal) {
+        Diags.error(VS->getCountExpr()->getBeginLoc(),
+                    "a vector's length must be a constant");
+        return errorType();
+      }
+      int64_t N = CN->Value.Int;
+      if (N < 1 || N > 64) {
+        Diags.error(VS->getCountExpr()->getBeginLoc(),
+                    "a vector's length must be 1..64");
+        return errorType();
+      }
+      return Ctx.create<VectorType>(Elem, N);
     }
 
     case TypeSpec::TS_Class:
@@ -11144,6 +11182,15 @@ public:
     };
     switch (Op) {
     case BinaryOp::Add: case BinaryOp::Sub: case BinaryOp::Mul:
+      // vector[N] of T: the elementwise operators of two same-shaped
+      // vectors (llvm-23.md LB-6). No per-lane overflow checks: LLVM's
+      // vector adds carry no checked form (documented in the item).
+      if (L->isVector() && R->isVector() &&
+          llvm::cast<VectorType>(L)->getCount() ==
+              llvm::cast<VectorType>(R)->getCount() &&
+          areCompatible(llvm::cast<VectorType>(L)->getElementType(),
+                        llvm::cast<VectorType>(R)->getElementType()))
+        return L;
       if (BothIntegers)
         return IntegerOp();
       if (L->isNumeric() && R->isNumeric())
@@ -11478,6 +11525,23 @@ public:
         return errorType();
       }
       return PT->getPointee();
+    }
+    if (auto *VT = llvm::dyn_cast<VectorType>(BT)) {
+      if (!IT->isIntegerLike()) {
+        Diags.error(E->getIndex()->getBeginLoc(), "vector index must be an integer",
+                    {E->getIndex()->getRange()});
+        return errorType();
+      }
+      if (auto C = fold(E->getIndex()))
+        if (C->Value.K == ConstValue::Ordinal &&
+            (C->Value.Int < 1 ||
+             static_cast<uint64_t>(C->Value.Int) > VT->getCount()))
+          Diags.error(E->getIndex()->getBeginLoc(),
+                      "vector index " + std::to_string(C->Value.Int) +
+                          " is out of bounds 1.." +
+                          std::to_string(VT->getCount()),
+                      {E->getIndex()->getRange()});
+      return VT->getElementType();
     }
     auto *AT = llvm::dyn_cast<ArrayType>(BT);
     if (!AT) {
