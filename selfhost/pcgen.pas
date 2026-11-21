@@ -2812,14 +2812,24 @@ end;
 function emitOpenArrayArg(arg: PNode; oa: PType): TV;
 var
   t: PType;
+  d: PDecl;
   bd: TOrdinalBounds;
   data, c: TV;
 begin
   t := arg^.typ;
   if arg^.kind = nkSetCtor then { typed as the parameter }
     exit(emitOpenArrayCtor(arg, oa));
-  if arg^.kind = nkCall then { no function returns one }
+  d := arg^.callDecl;
+  if (arg^.kind = nkCall) and (d <> nil) and (d^.kind = dkBuiltin) and
+     (d^.builtin = bkSlice) then
     exit(emitSlice(arg));
+  if arg^.kind = nkCall then
+  begin
+    { a call's own result (a Copy, or a routine's array result): the
+      count is the result's length }
+    data := visitExpr(arg);
+    exit(newOpenDescriptor(data, dynLength(data)));
+  end;
   if t = oa then
     exit(openDescriptor(arg));
   if t^.kind = tyArray then

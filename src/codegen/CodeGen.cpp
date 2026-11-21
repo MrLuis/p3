@@ -2336,14 +2336,24 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
     return Desc;
   }
 
-  /// The open array passed for Arg: another one, [...] built in a
-  /// temporary, an array, or a string constant.
+  /// The open array passed for Arg: another one, a slice built in a
+  /// temporary, a call's own result, an array, or a string constant.
   llvm::Value *emitOpenArrayArg(Expr *Arg, OpenArrayType *OA) {
     Type *T = Arg->getType();
     if (auto *S = llvm::dyn_cast<SetCtorExpr>(Arg)) // typed as the parameter
       return emitOpenArrayCtor(S, OA);
-    if (auto *C = llvm::dyn_cast<CallExpr>(Arg)) // no function returns one
+    if (auto *C = llvm::dyn_cast_or_null<CallExpr>(Arg);
+        C && C->getDecl() && llvm::isa<BuiltinDecl>(C->getDecl()) &&
+        llvm::cast<BuiltinDecl>(C->getDecl())->getBuiltinKind() ==
+            BuiltinKind::Slice)
       return emitSlice(C);
+    if (auto *C = llvm::dyn_cast_or_null<CallExpr>(Arg)) {
+      // a call's own result (a Copy, or a routine's array result; an
+      // argument the sema typed as the parameter included): the count is
+      // the result's length
+      llvm::Value *Data = visitExpr(C);
+      return newOpenDescriptor(Data, dynLength(Data));
+    }
     if (T == OA)
       return openDescriptor(Arg);
     if (auto *A = llvm::dyn_cast<ArrayType>(T)) {
