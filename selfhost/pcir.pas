@@ -154,6 +154,11 @@ procedure irInit(const sourceName, triple, dataLayout: string);
 function irInt(bits: longint): PIRType;
 function irArray(n: int64; elem: PIRType): PIRType;
 function irVector(count: int64; elem: PIRType): PIRType;
+{ The two instructions of LLVM's CreateVectorSplat with the name
+  splat (LB-6): the scalar's insertelement into a poison vector, then
+  the broadcast shuffle. }
+function irSplatInsert(vec: PIRType; const scalar: TV; const name: string): TV;
+function irSplatShuffle(vec: PIRType; const inserted: TV; const name: string): TV;
 function irStructLit(const fields: TPtrList): PIRType;
 { A named struct; the name is made unique as LLVM does (name.0, ...). }
 function irStructNamed(const name: string; const fields: TPtrList): PIRType;
@@ -618,6 +623,7 @@ begin
   t^.prefAlign := align;
   irVector := t;
 end;
+
 
 procedure layoutStruct(t: PIRType);
 var
@@ -2016,6 +2022,32 @@ begin
   listClear(curBlock^.pending);
   listAdd(curBlock^.insts, i);
 end;
+
+function irSplatInsert(vec: PIRType; const scalar: TV; const name: string): TV;
+var
+  i: PIRInst;
+  res: string;
+begin
+  i := newInst(res, name, true);
+  bufAdd(i^.text, 'insertelement ' + vec^.text + ' poison, ' +
+                  scalar.t^.text + ' ' + scalar.v + ', i64 0');
+  append(i);
+  irSplatInsert := irV(vec, res);
+end;
+
+function irSplatShuffle(vec: PIRType; const inserted: TV; const name: string): TV;
+var
+  i: PIRInst;
+  res: string;
+begin
+  i := newInst(res, name, true);
+  bufAdd(i^.text, 'shufflevector ' + vec^.text + ' ' + inserted.v + ', ' +
+                  vec^.text + ' poison, <' + intToStr(vec^.count) +
+                  ' x i32> zeroinitializer');
+  append(i);
+  irSplatShuffle := irV(vec, res);
+end;
+
 
 { --- Folding (ConstantFolder) --- }
 

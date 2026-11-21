@@ -6361,6 +6361,62 @@ begin
   end;
 end;
 
+{ The elementwise operators of vectors (LB-6): a scalar operand is
+  broadcast to the lanes (LLVM's CreateVectorSplat, whose constant
+  splats fold to the operand); the lanes' arithmetic carries no checks. }
+function vectorBinary(e: PNode; op: TBinaryOp; const l: TV; lt: PType;
+                      const r: TV; rt: PType): TV;
+var
+  vec, lane: PIRType;
+  l2, r2: TV;
+  laneReal: boolean;
+
+  { A splat in the form LLVM's IRBuilder gives: constants fold (the
+    operand), values get the two instructions, named splat. }
+  function broadcast(const v: TV; t: PType): TV;
+  var
+    sv, inserted: TV;
+  begin
+    if t^.kind = tyVector then
+      exit(v);
+    if laneReal then
+      sv := toDouble(v, t)
+    else
+      sv := convertOrdinal(v, t, e^.typ^.vecElement);
+    if irIsConst(sv) then
+      broadcast := irV(lane, 'splat (' + sv.t^.text + ' ' + sv.v + ')')
+    else
+    begin
+      inserted := irSplatInsert(vec, sv, 'splat.splatinsert');
+      broadcast := irSplatShuffle(vec, inserted, 'splat.splat');
+    end;
+  end;
+
+begin
+  vec := memType(e^.typ);
+  lane := vec^.elem;
+  laneReal := e^.typ^.vecElement^.kind = tyReal;
+  l2 := broadcast(l, lt);
+  r2 := broadcast(r, rt);
+  case op of
+    boAdd:
+      if laneReal then
+        vectorBinary := irBin('fadd', l2, r2, 've.add')
+      else
+        vectorBinary := irBin('add', l2, r2, 've.add');
+    boSub:
+      if laneReal then
+        vectorBinary := irBin('fsub', l2, r2, 've.sub')
+      else
+        vectorBinary := irBin('sub', l2, r2, 've.sub');
+  else
+    if laneReal then
+      vectorBinary := irBin('fmul', l2, r2, 've.mul')
+    else
+      vectorBinary := irBin('mul', l2, r2, 've.mul');
+  end;
+end;
+
 function visitBinary(e: PNode): TV;
 var
   op: TBinaryOp;
@@ -6516,22 +6572,7 @@ begin
   { vector[N] of T (llvm-23.md LB-6): elementwise, without the per-lane
     overflow checks (LLVM's vectors have no checked add/sub/mul) }
   if e^.typ^.kind = tyVector then
-  begin
-    if e^.typ^.vecElement^.kind = tyReal then
-      case op of
-        boAdd: exit(irBin('fadd', l, r, 've.add'));
-        boSub: exit(irBin('fsub', l, r, 've.sub'));
-      else
-        exit(irBin('fmul', l, r, 've.mul'));
-      end
-    else
-      case op of
-        boAdd: exit(irBin('add', l, r, 've.add'));
-        boSub: exit(irBin('sub', l, r, 've.sub'));
-      else
-        exit(irBin('mul', l, r, 've.mul'));
-      end;
-  end;
+    exit(vectorBinary(e, op, l, lt, r, rt));
 
   loc := e^.opLoc;
   { integer operators: both operands in the operand type chosen by Sema }

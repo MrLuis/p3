@@ -60,7 +60,7 @@ CONFIGS = {
 }
 # Programs that use p3's own language (owned variables...): not compiled
 # by Free Pascal under --fpc.
-P3_ONLY = {"lifetime_owned"}
+P3_ONLY = {"lifetime_owned", "vectors"}
 # The width of the benchmark-name column.
 NAME_COL = "%-16s"
 SELFHOST_LEVELS = {

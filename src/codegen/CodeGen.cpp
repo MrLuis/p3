@@ -10059,6 +10059,16 @@ public:
     // vector[N] of T (llvm-23.md LB-6): elementwise, without the per-lane
     // overflow checks (LLVM's vectors have no checked add/sub/mul).
     if (auto *VT = llvm::dyn_cast<VectorType>(E->getType())) {
+      // The scalar operand of a vector-scalar op: broadcast to the lanes.
+      auto Broadcast = [&](llvm::Value *V, Type *T) -> llvm::Value * {
+        if (llvm::isa<VectorType>(T))
+          return V;
+        Type *ET = VT->getElementType();
+        V = ET->isReal() ? toDouble(V, T) : convertOrdinal(V, T, ET);
+        return B.CreateVectorSplat(VT->getCount(), V, "splat");
+      };
+      L = Broadcast(L, LT);
+      R = Broadcast(R, RTy);
       bool RealLane = VT->getElementType()->isReal();
       switch (Op) {
       case BinaryOp::Add:

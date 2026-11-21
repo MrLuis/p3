@@ -11180,6 +11180,18 @@ public:
       E->setOperandType(T);
       return T;
     };
+    // Can S (a non-vector numeric scalar) stand beside the vector VT
+    // under an elementwise operator: the scalar broadcast to every lane
+    // (llvm-23.md LB-6)? A real element takes any numeric (the ordinary
+    // integer-to-real promotion); an integer element needs the scalar
+    // compatible with it.
+    auto VecScalar = [&](Type *VTy, Type *S) {
+      auto *VT = llvm::dyn_cast<VectorType>(VTy);
+      if (!VT || S->isVector())
+        return false;
+      Type *E = VT->getElementType();
+      return E->isReal() ? S->isNumeric() : areCompatible(E, S);
+    };
     switch (Op) {
     case BinaryOp::Add: case BinaryOp::Sub: case BinaryOp::Mul:
       // vector[N] of T: the elementwise operators of two same-shaped
@@ -11191,12 +11203,21 @@ public:
           areCompatible(llvm::cast<VectorType>(L)->getElementType(),
                         llvm::cast<VectorType>(R)->getElementType()))
         return L;
+      if (VecScalar(L, R) || VecScalar(R, L))
+        return L->isVector() ? L : R;
       if (BothIntegers)
         return IntegerOp();
       if (L->isNumeric() && R->isNumeric())
         return Ctx.getRealType();
       break;
     case BinaryOp::RealDiv:
+      if (VecScalar(L, R) || VecScalar(R, L)) {
+        // the lanes divide: only a real element's vector (/ is Pascal's
+        // real division)
+        auto *VT = llvm::cast<VectorType>(L->isVector() ? L : R);
+        if (VT->getElementType()->isReal())
+          return L->isVector() ? L : R;
+      }
       if (L->isNumeric() && R->isNumeric())
         return Ctx.getRealType();
       break;

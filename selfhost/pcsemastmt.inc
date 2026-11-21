@@ -5567,9 +5567,28 @@ begin
   checkComparand := check(e);
 end;
 
+{ Can S (a non-vector numeric scalar) stand beside the vector VT under
+  an elementwise operator: the scalar broadcast to every lane
+  (llvm-23.md LB-6)? A real element takes any numeric (the ordinary
+  integer-to-real promotion); an integer element needs the scalar
+  compatible with it. }
+function vecScalar(vt, sc: PType): boolean;
+var
+  elem: PType;
+begin
+  vecScalar := false;
+  if (vt^.kind <> tyVector) or (sc^.kind = tyVector) then
+    exit;
+  elem := vt^.vecElement;
+  if elem^.kind = tyReal then
+    vecScalar := isNumeric(sc)
+  else
+    vecScalar := areCompatible(elem, sc);
+end;
+
 function visitBinary(e: PNode): PType;
 var
-  l, r: PType;
+  l, r, vecTy: PType;
   op: TBinaryOp;
   bothIntegers, logic: boolean;
   beforeRHS: TOwnedState;
@@ -5692,14 +5711,33 @@ begin
            (l^.vecCount = r^.vecCount) and
            areCompatible(l^.vecElement, r^.vecElement) then
           exit(l);
+        { ... and with a numeric scalar }
+        if vecScalar(l, r) then
+          exit(l);
+        if vecScalar(r, l) then
+          exit(r);
         if bothIntegers then
           exit(integerOp);
         if isNumeric(l) and isNumeric(r) then
           exit(tyRealT);
       end;
     boRealDiv:
-      if isNumeric(l) and isNumeric(r) then
-        exit(tyRealT);
+      begin
+        { the lanes divide: only a real element's vector (/ is Pascal's
+          real division) }
+        vecTy := l;
+        if vecTy^.kind <> tyVector then
+          vecTy := r;
+        if (vecScalar(l, r) or vecScalar(r, l)) and
+           (vecTy^.vecElement^.kind = tyReal) then
+        begin
+          if l^.kind = tyVector then
+            exit(l);
+          exit(r);
+        end;
+        if isNumeric(l) and isNumeric(r) then
+          exit(tyRealT);
+      end;
     boIntDiv, boMod:
       if bothIntegers then
         exit(integerOp);
