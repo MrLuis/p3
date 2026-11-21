@@ -1116,21 +1116,68 @@ begin
   end;
 end;
 
+{ The lines are joined into one block of 64 KiB (from getmem, a task's
+  coroutine stack may not hold it) and written whole: one c_fwrite for a
+  full block, instead of a string and a locked write per line. The
+  written bytes are the same: every line, then LineEnding
+  (docs/classes-review.md CL-10). }
 procedure TStrings.SaveToFile(const FileName: string);
+const
+  BlockSize = 65536;
 var
-  s: string;
   f: pointer;
-  i: longint;
+  buf, src, pe: PChar;
+  eol: string;
+  i, at, len, le, n, j: longint;
+  s: string;
 begin
   f := c_fopen(pchar(FileName), 'wb');
   if f = nil then
     raise EFCreateError.Create('Unable to create file "' + FileName + '": ' + StrPas(sys_strerror));
-  for i := 0 to Count - 1 do
-  begin
-    s := Strings[i] + LineEnding;
-    c_fwrite(pchar(s), 1, length(s), f);
+  buf := nil;
+  try
+    getmem(buf, BlockSize);
+    eol := LineEnding;
+    le := length(eol);
+    pe := PChar(eol);
+    at := 0;
+    for i := 0 to Count - 1 do
+    begin
+      s := Strings[i];
+      len := length(s);
+      src := PChar(s);
+      j := 0;
+      while j < len do
+      begin
+        n := BlockSize - at;
+        if n > len - j then
+          n := len - j;
+        moveBytes(PChar(src + j), PChar(buf + at), n);
+        at := at + n;
+        j := j + n;
+        if at = BlockSize then
+        begin
+          c_fwrite(buf, 1, BlockSize, f);
+          at := 0;
+        end;
+      end;
+      for j := 1 to le do
+      begin
+        buf[at] := pe[j - 1];
+        at := at + 1;
+        if at = BlockSize then
+        begin
+          c_fwrite(buf, 1, BlockSize, f);
+          at := 0;
+        end;
+      end;
+    end;
+    if at > 0 then
+      c_fwrite(buf, 1, at, f);
+  finally
+    freemem(buf);
+    c_fclose(f);
   end;
-  c_fclose(f);
 end;
 
 { TStringList }
