@@ -35,7 +35,7 @@ build/bin/p3 --mode=tp hello.pas         # Turbo/Free Pascal extensions
 build/bin/p3 --mode=objfpc hello.pas     # plus classes, exceptions, ...
 ```
 
-See the [language and compiler reference](docs/README.md) for the full list
+See the language and compiler reference for the full list
 of modes, options and supported features.
 
 ## Features
@@ -43,7 +43,7 @@ of modes, options and supported features.
 Beyond ISO 7185 and the Turbo/Free Pascal extensions, p3 has features of its
 own. They need `--mode=objfpc` unless noted; each works in both compilers
 (most come from the "Modernizing Pascal" proposals). The details and
-examples are in the [reference](docs/README.md).
+examples are in the reference.
 
 - **Variables among the statements**: `var x := e;` anywhere in a block, and
   `for var i := 1 to n do`.
@@ -96,23 +96,7 @@ ninja -C build check
 | `tests/`, `bench/` | lit tests and benchmarks |
 | `examples/` | example projects built with the self-hosted compiler |
 | `utils/`, `tools/` | helper scripts |
-| `docs/` | documentation (below) |
-
-## Documentation
-
-All in [`docs/`](docs/):
-
-- [docs/README.md](docs/README.md): language and compiler reference
-- [docs/PLAN.md](docs/PLAN.md): design and roadmap
-- [docs/SELFHOST.md](docs/SELFHOST.md): plan for the self-hosted compiler
-- [docs/optimization.md](docs/optimization.md): optimizations considered and done
-- [docs/optimization2.md](docs/optimization2.md): executable-speed analysis after those items
-- [docs/optimization3.md](docs/optimization3.md): third pass, including compile time
-- [docs/classes-review.md](docs/classes-review.md): follow-ups for `rtl/classes.pas`
-
-Also: [selfhost/README.md](selfhost/README.md),
-[selfhost/DIALECT.md](selfhost/DIALECT.md) and
-[examples/README.md](examples/README.md).
+| `docs/` | documentation |
 
 ## License
 
