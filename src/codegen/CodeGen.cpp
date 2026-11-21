@@ -134,6 +134,42 @@ static bool runtimeReturnsBool(llvm::StringRef Name) {
          Name == "__pas_aoc_bad_index" || Name == "__pas_token_cancelled";
 }
 
+/// The pointer parameter I of the runtime function Name is a counted
+/// string's or dynamic array's own variable slot: the pointer, whenever
+/// it is set, is a variable's address, and holds a value pointer at it
+/// (llvm-23.md LB-3).
+static bool runtimeSlotParam(llvm::StringRef Name, unsigned I) {
+  return (Name == "__pas_astr_setlength" || Name == "__pas_astr_clear" ||
+          Name == "__pas_astr_assign" || Name == "__pas_astr_take" ||
+          Name == "__pas_astr_append" || Name == "__pas_dyn_setlength" ||
+          Name == "__pas_dyn_clear" || Name == "__pas_dyn_assign") &&
+         I == 0;
+}
+
+/// The runtime function Name never frees its pointer arguments (it only
+/// reads them, or builds a new string of their bytes): `nofree`, from
+/// the functions' own code (llvm-23.md LB-3). The functions that may
+/// free (the releases, the clears, the reallocs) stay out.
+static bool runtimeNeverFree(llvm::StringRef Name) {
+  return runtimeIsPureQuery(Name) ||
+         Name == "__pas_astr_from_chars" || Name == "__pas_astr_from_pstr" ||
+         Name == "__pas_astr_from_cstr" || Name == "__pas_astr_from_char" ||
+         Name == "__pas_astr_join" || Name == "__pas_astr_copy" || Name == "__pas_astr_pchar" ||
+         Name == "__pas_astr_concat" || Name == "__pas_astr_addref" ||
+         Name == "__pas_astr_pos" || Name == "__pas_dyn_copy" ||
+         Name == "__pas_dyn_length" || Name == "__pas_dyn_new" ||
+         Name == "__pas_write_str" || Name == "__pas_write_pstr" ||
+         Name == "__pas_write_cstr" || Name == "__pas_write_astr" ||
+         Name == "__pas_write_char" || Name == "__pas_write_int" ||
+         Name == "__pas_write_bool" || Name == "__pas_write_real" ||
+         Name == "__pas_write_enum" || Name == "__pas_write_elem" ||
+         Name == "__pas_read_elem" || Name == "__pas_read_int" ||
+         Name == "__pas_read_int64" || Name == "__pas_read_char" ||
+         Name == "__pas_read_real" || Name == "__pas_read_str" ||
+         Name == "__pas_format" || Name == "__pas_format_pstr" ||
+         Name == "__pas_tmpl_add" || Name == "__pas_paramstr";
+}
+
 /// A runtime destination that it only writes, and that cannot alias a
 /// source of the call (item 4).
 static bool runtimeWritesParam(llvm::StringRef Name, unsigned I) {
@@ -199,9 +235,15 @@ static void addRuntimeAttrs(llvm::Function *F) {
       B.addAttribute(llvm::Attribute::WriteOnly);
       Any = true;
     }
+    if (runtimeSlotParam(Name, I)) {
+      B.addDereferenceableOrNullAttr(8);
+      Any = true;
+    }
     if (Any)
       F->addParamAttrs(I, B);
   }
+  if (runtimeNeverFree(Name))
+    F->addFnAttr(llvm::Attribute::NoFree);
 }
 
 /// Declarations of the libpascalrt entry points (runtime/include/pascalrt.h)

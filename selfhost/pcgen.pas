@@ -372,25 +372,88 @@ begin
                         ((name = '__pas_paramstr') and (i = 0));
 end;
 
+function runtimeSlotParam(const name: string; i: longint): boolean;
+begin
+  runtimeSlotParam := ((name = '__pas_astr_setlength') or
+                       (name = '__pas_astr_clear') or
+                       (name = '__pas_astr_assign') or
+                       (name = '__pas_astr_take') or
+                       (name = '__pas_astr_append') or
+                       (name = '__pas_dyn_setlength') or
+                       (name = '__pas_dyn_clear') or
+                       (name = '__pas_dyn_assign')) and (i = 0);
+end;
+
+{ The runtime function Name never frees its pointer arguments: `nofree`,
+  from the functions' own code (llvm-23.md LB-3). The functions that may
+  free (the releases, the clears, the appends' slot owners, the unique's
+  release, the reallocs and free) stay out. }
+function runtimeNeverFree(const name: string): boolean;
+begin
+  runtimeNeverFree := runtimeIsPureQuery(name) or
+                      (name = '__pas_astr_from_chars') or
+                      (name = '__pas_astr_from_pstr') or
+                      (name = '__pas_astr_from_cstr') or
+                      (name = '__pas_astr_from_char') or
+                      (name = '__pas_astr_join') or
+                      (name = '__pas_astr_copy') or
+                      (name = '__pas_astr_pchar') or
+                      (name = '__pas_astr_concat') or
+                      (name = '__pas_astr_addref') or
+                      (name = '__pas_astr_pos') or
+                      (name = '__pas_dyn_copy') or
+                      (name = '__pas_dyn_length') or
+                      (name = '__pas_dyn_new') or
+                      (name = '__pas_write_str') or
+                      (name = '__pas_write_pstr') or
+                      (name = '__pas_write_cstr') or
+                      (name = '__pas_write_astr') or
+                      (name = '__pas_write_char') or
+                      (name = '__pas_write_int') or
+                      (name = '__pas_write_bool') or
+                      (name = '__pas_write_real') or
+                      (name = '__pas_write_enum') or
+                      (name = '__pas_write_elem') or
+                      (name = '__pas_read_elem') or
+                      (name = '__pas_read_int') or
+                      (name = '__pas_read_int64') or
+                      (name = '__pas_read_char') or
+                      (name = '__pas_read_real') or
+                      (name = '__pas_read_str') or
+                      (name = '__pas_format') or
+                      (name = '__pas_format_pstr') or
+                      (name = '__pas_tmpl_add') or
+                      (name = '__pas_paramstr');
+end;
+
 { The function attributes (the base is 'nounwind' for plain runtime
   functions). }
 function runtimeAttrs(const name, base: string): string;
+var
+  r: string;
 begin
-  runtimeAttrs := base;
   if base <> 'nounwind' then
+  begin
+    runtimeAttrs := base;
     exit;
+  end;
   if runtimeIsPureQuery(name) then
-    runtimeAttrs := 'nounwind willreturn memory(argmem: read)'
+    r := 'nounwind willreturn memory(argmem: read)'
   else if name = '__pas_astr_pchar' then
-    runtimeAttrs := 'nounwind willreturn memory(none)'
+    r := 'nounwind willreturn memory(none)'
   else if name = '__pas_new' then
-    runtimeAttrs := 'nounwind allockind("alloc,zeroed") allocsize(0)'
+    r := 'nounwind allockind("alloc,zeroed") allocsize(0)'
   else if name = '__pas_dyn_new' then
-    runtimeAttrs := 'nounwind allockind("alloc,zeroed")'
+    r := 'nounwind allockind("alloc,zeroed")'
   else if name = '__pas_realloc' then
-    runtimeAttrs := 'nounwind allockind("realloc") allocsize(1)'
+    r := 'nounwind allockind("realloc") allocsize(1)'
   else if name = '__pas_abstract_error' then
-    runtimeAttrs := 'cold noreturn nounwind';
+    r := 'cold noreturn nounwind'
+  else
+    r := base;
+  if runtimeNeverFree(name) then
+    r := 'nofree ' + r;
+  runtimeAttrs := r;
 end;
 
 { The runtime function Name returns 0 or 1: its result's `range` return
@@ -437,10 +500,14 @@ begin
   irSetRetAttrs(ignored, runtimeRetAttr(name));
   for i := 0 to list.count - 1 do
     if PIRType(listGet(list, i))^.kind = ikPtr then
+    begin
       if runtimeReadsParam(name, i) then
         irSetArgAttrs(ignored, i, 'readonly captures(none)')
       else if runtimeWritesParam(name, i) then
         irSetArgAttrs(ignored, i, 'writeonly captures(none)');
+      if runtimeSlotParam(name, i) then
+        irSetArgAttrs(ignored, i, 'dereferenceable_or_null(8)');
+    end;
   listFree(list);
   { Can a call of it raise an exception? Those that raise one, and those
     that may run a destructor (which is Pascal code): releasing an object

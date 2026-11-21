@@ -11,7 +11,7 @@
 ; ATTR-DAG: declare ptr @__pas_realloc(ptr, i64) #[[REALLOC:[0-9]+]]
 ; ATTR-DAG: attributes #[[REALLOC]] = { nounwind allockind("realloc") allocsize(1) }
 ; ATTR-DAG: declare noalias ptr @__pas_dyn_new(ptr readonly captures(none), i64) #[[DYN:[0-9]+]]
-; ATTR-DAG: attributes #[[DYN]] = { nounwind allockind("alloc,zeroed") }
+; ATTR-DAG: attributes #[[DYN]] = { nofree nounwind allockind("alloc,zeroed") }
 ; ATTR-DAG: declare ptr @__pas_astr_copy(ptr readonly captures(none), i32, i32)
 
 ; TMPL: declare noalias ptr @__pas_tmpl_add(ptr readonly captures(none), ptr readonly captures(none))
