@@ -26,10 +26,18 @@ begin
   NetClose(conn);
 end;
 
+{ Each connection goes to the thread pool (Pool.Run): a task started any
+  other way, `detached` included, stays on the thread that started it —
+  here the acceptor's — and the server would run on one thread. }
+function Launch(conn: TSocket): async;
+begin
+  await Pool.Run(Serve(conn));
+end;
+
 function Acceptor(listener: TSocket): async;
 begin
   while true do
-    detached Serve(await NetAccept(listener));
+    detached Launch(await NetAccept(listener));
 end;
 
 var
