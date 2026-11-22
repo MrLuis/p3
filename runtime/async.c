@@ -599,7 +599,106 @@ static void raise_cancelled(void) {
 
 /*===- Switching -------------------------------------------------------------===*/
 
-#define STACK_SIZE (1024 * 1024)
+/* Task (and iterator) stacks: 1 MB unless P3_TASK_STACK_SIZE (bytes, or
+ * with a k/K or m/M suffix) or __pas_task_set_stack_size chose another; at
+ * least 16 KB, rounded up to whole pages, each with a guard page below.
+ * The size is fixed when the first stack is made: the caches hold stacks of
+ * one size (and munmap is given that size). A stack is a mapping of its own,
+ * so the size sets the address space a parked task reserves, not what it
+ * uses: only the pages it touched are resident. */
+#define STACK_SIZE_DEFAULT ((size_t)1024 * 1024)
+#define STACK_SIZE_MIN ((size_t)16 * 1024)
+#define STACK_SIZE_MAX ((size_t)1024 * 1024 * 1024)
+static size_t stack_size_v;     /* 0 until chosen (atomic) */
+static int stack_size_fixed;    /* a stack was made: no more changes (atomic) */
+
+static size_t stack_size_round(uint64_t n) {
+  size_t page = (size_t)sysconf(_SC_PAGESIZE);
+  if (n < STACK_SIZE_MIN)
+    n = STACK_SIZE_MIN;
+  if (n > STACK_SIZE_MAX)
+    n = STACK_SIZE_MAX;
+  return ((size_t)n + page - 1) / page * page;
+}
+
+/* "65536", "64k", "1m" -> bytes; 0 when it is not a size. */
+static uint64_t stack_size_parse(const char *s) {
+  if (!s || !*s)
+    return 0;
+  uint64_t n = 0;
+  const char *p = s;
+  while (*p >= '0' && *p <= '9') {
+    n = n * 10 + (uint64_t)(*p - '0');
+    if (n > ((uint64_t)1 << 40))
+      return 0;
+    p++;
+  }
+  if (p == s)
+    return 0;
+  if (*p == 'k' || *p == 'K') {
+    n *= 1024;
+    p++;
+  } else if (*p == 'm' || *p == 'M') {
+    n *= 1024 * 1024;
+    p++;
+  }
+  return *p ? 0 : n;
+}
+
+/* Under LOCK: the size, chosen now if it was not (the environment, or the
+ * default). */
+static size_t stack_size_choose_locked(void) {
+  size_t v = stack_size_v;
+  if (!v) {
+    const char *env = getenv("P3_TASK_STACK_SIZE");
+    uint64_t n = stack_size_parse(env);
+    if (env && !n) {
+      static const char warn[] =
+          "p3: P3_TASK_STACK_SIZE is not a size (bytes, or with k or m); "
+          "using the default 1m\n";
+      ssize_t r = write(2, warn, sizeof warn - 1);
+      (void)r;
+    }
+    v = n ? stack_size_round(n) : STACK_SIZE_DEFAULT;
+    __atomic_store_n(&stack_size_v, v, __ATOMIC_RELEASE);
+  }
+  return v;
+}
+
+/* The size of every task stack; fixed from the first stack on. */
+static size_t stack_size(void) {
+  size_t v = __atomic_load_n(&stack_size_v, __ATOMIC_ACQUIRE);
+  if (v && __atomic_load_n(&stack_size_fixed, __ATOMIC_ACQUIRE))
+    return v;
+  LOCK();
+  v = stack_size_choose_locked();
+  __atomic_store_n(&stack_size_fixed, 1, __ATOMIC_RELEASE);
+  UNLOCK();
+  return v;
+}
+
+int64_t __pas_task_stack_size(void) {
+  if (__atomic_load_n(&stack_size_fixed, __ATOMIC_ACQUIRE))
+    return (int64_t)__atomic_load_n(&stack_size_v, __ATOMIC_ACQUIRE);
+  LOCK();
+  size_t v = stack_size_choose_locked();
+  UNLOCK();
+  return (int64_t)v;
+}
+
+/* Sets the stack size (clamped and rounded as above) if no stack was made
+ * yet: 1; 0 once tasks or iterators have started (the size stays). */
+int32_t __pas_task_set_stack_size(int64_t bytes) {
+  LOCK();
+  if (__atomic_load_n(&stack_size_fixed, __ATOMIC_ACQUIRE)) {
+    UNLOCK();
+    return 0;
+  }
+  __atomic_store_n(&stack_size_v, stack_size_round(bytes > 0 ? (uint64_t)bytes : 0),
+                   __ATOMIC_RELEASE);
+  UNLOCK();
+  return 1;
+}
 #define STACK_CACHE 16
 void *__pas_async_stacks[STACK_CACHE];
 int __pas_async_nstacks;
@@ -629,7 +728,7 @@ static void *new_stack(void) {
   if (s)
     return s;
   long page = sysconf(_SC_PAGESIZE);
-  size_t len = STACK_SIZE + (size_t)page;
+  size_t len = stack_size() + (size_t)page;
   char *m = mmap(NULL, len, PROT_READ | PROT_WRITE,
                  MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
   if (m == MAP_FAILED)
@@ -666,7 +765,7 @@ static void *new_stack(void) {
   if (s)
     return s;
   long page = sysconf(_SC_PAGESIZE);
-  char *m = mmap(NULL, STACK_SIZE + (size_t)page, PROT_READ | PROT_WRITE,
+  char *m = mmap(NULL, stack_size() + (size_t)page, PROT_READ | PROT_WRITE,
                  MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
   if (m == MAP_FAILED)
     __pas_runtime_error("out of memory for a task's stack");
@@ -688,7 +787,7 @@ static void free_stack(void *s) {
   UNLOCK();
   if (s) {
     long page = sysconf(_SC_PAGESIZE);
-    munmap((char *)s - page, STACK_SIZE + (size_t)page);
+    munmap((char *)s - page, stack_size() + (size_t)page);
   }
 }
 
@@ -794,7 +893,7 @@ static void task_main(void) {
 /* Starts t (a new task, here: its home's thread). */
 static void start(PasTask *t, PasCtx *from) {
   t->stack = new_stack();
-  t->stack_size = STACK_SIZE;
+  t->stack_size = stack_size();
 #ifdef PAS_TSAN
   t->tsan_fiber = __tsan_create_fiber(0);
 #endif
@@ -2947,7 +3046,7 @@ static void gen_resume(PasGen *g) {
     g->stack = new_stack();
     getcontext(&g->ctx);
     g->ctx.uc_stack.ss_sp = g->stack;
-    g->ctx.uc_stack.ss_size = STACK_SIZE;
+    g->ctx.uc_stack.ss_size = stack_size();
     g->ctx.uc_link = NULL;
     makecontext(&g->ctx, gen_main, 0);
   }
@@ -2958,7 +3057,7 @@ static void gen_resume(PasGen *g) {
   g->state = GS_RUNNING;
 #ifdef PAS_ASAN
   void *fake = NULL;
-  __sanitizer_start_switch_fiber(&fake, g->stack, STACK_SIZE);
+  __sanitizer_start_switch_fiber(&fake, g->stack, stack_size());
 #endif
   swapcontext(&g->back, &g->ctx);
 #ifdef PAS_ASAN

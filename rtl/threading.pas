@@ -96,7 +96,24 @@ type
     procedure Store(const Value: T);
   end;
 
+{ The size of each task's stack (and an iterator's), in bytes: 1 MB unless
+  the environment's P3_TASK_STACK_SIZE (bytes, or with a k or m suffix, as
+  in 64k) or SetTaskStackSize chose another; at least 16 KB, rounded up to
+  whole pages, with a guard page below. A stack reserves that much address
+  space while its task lives, but only the pages it touches use memory: a
+  server holding one task per connection lowers it to hold more of them.
+  Code that runs in a task (and what it calls) must fit: big local arrays,
+  deep recursion and some C routines (name resolution) want room. }
+function TaskStackSize: Int64;
+{ Sets the stack size for every task and iterator — only before the first
+  one starts (the stacks are made and reused at one size): True if it was
+  set, False once it is too late (the size stays). }
+function SetTaskStackSize(Bytes: Int64): Boolean;
+
 { The runtime's primitives (async.c). }
+function pas_task_stack_size: Int64; cdecl; external name '__pas_task_stack_size';
+function pas_task_set_stack_size(bytes: Int64): longint; cdecl;
+  external name '__pas_task_set_stack_size';
 function pas_mutex_new: Pointer; cdecl; external name '__pas_mutex_new';
 procedure pas_mutex_free(m: Pointer); cdecl; external name '__pas_mutex_free';
 procedure pas_mutex_lock(m: Pointer); cdecl; external name '__pas_mutex_lock';
@@ -118,6 +135,16 @@ procedure pas_token_check(k: TCancelToken); cdecl; external name '__pas_token_ch
 implementation
 
 {$IFDEF P3_OBJFPC}
+
+function TaskStackSize: Int64;
+begin
+  Result := pas_task_stack_size;
+end;
+
+function SetTaskStackSize(Bytes: Int64): Boolean;
+begin
+  Result := pas_task_set_stack_size(Bytes) <> 0;
+end;
 
 class function TCancelTokenHelper.Create: TCancelToken;
 begin

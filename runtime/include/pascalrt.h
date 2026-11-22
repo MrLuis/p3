@@ -468,6 +468,10 @@ void __pas_task_await(PasTask *t);
 int32_t __pas_task_done(PasTask *t);
 void __pas_task_detach(PasTask *t, void *handler_fn, void *handler_link);
 void __pas_task_sleep(int32_t ms);
+/* The size of task (and iterator) stacks; set it before the first task or
+ * iterator starts (1), or not anymore (0). Also P3_TASK_STACK_SIZE. */
+int64_t __pas_task_stack_size(void);
+int32_t __pas_task_set_stack_size(int64_t bytes);
 /* Parks the current task until fd is readable (want_write 0) or writable
  * (want_write 1), through one shared poller thread. Its result is the
  * bitmask of what fired: 1 readable, 2 writable, 4 failed (POLLERR/POLLHUP
