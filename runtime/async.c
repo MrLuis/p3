@@ -37,6 +37,7 @@
 
 #ifdef __linux__
 #include <sys/epoll.h>
+#include <sys/eventfd.h>
 #else
 #include <sys/event.h>
 #endif
@@ -54,6 +55,130 @@
 
 int _setjmp(jmp_buf env);
 extern _Thread_local PasExcFrame *__pas_exc_top;
+
+/*===- Task context switch --------------------------------------------------===*/
+
+/* A task switch saves the callee-saved registers on the running stack and
+ * loads the other stack's — what a function call would preserve anyway, and
+ * no syscall. swapcontext also saves and restores the signal mask, one
+ * sigprocmask syscall per switch (two per park and wake); the runtime never
+ * changes masks per task, so the fast switch leaves the mask alone.
+ * aarch64 and x86_64 have it; other targets keep ucontext. */
+#if (defined(__aarch64__) || defined(__x86_64__)) && !defined(PAS_UCONTEXT)
+#define PAS_FAST_CTX 1
+typedef struct PasCtx {
+  void *sp;   /* the saved stack pointer, its registers just above */
+} PasCtx;
+
+/* Saves the running context's registers and stack pointer in *save_sp and
+ * continues the one whose stack pointer is load_sp. */
+void __pas_ctx_switch(void **save_sp, void *load_sp);
+/* First code of a new context: calls the function made in its frame. */
+void __pas_ctx_start(void);
+
+#if defined(__APPLE__)
+#define PAS_ASM_SYM(x) "_" #x
+#else
+#define PAS_ASM_SYM(x) #x
+#endif
+
+#if defined(__aarch64__)
+/* frame (176 bytes): x19..x28, x29, x30, then d8..d15 */
+__asm__(".text\n"
+        ".p2align 2\n"
+        ".globl " PAS_ASM_SYM(__pas_ctx_switch) "\n"
+        PAS_ASM_SYM(__pas_ctx_switch) ":\n"
+        "  sub sp, sp, #176\n"
+        "  stp x19, x20, [sp, #0]\n"
+        "  stp x21, x22, [sp, #16]\n"
+        "  stp x23, x24, [sp, #32]\n"
+        "  stp x25, x26, [sp, #48]\n"
+        "  stp x27, x28, [sp, #64]\n"
+        "  stp x29, x30, [sp, #80]\n"
+        "  stp d8, d9, [sp, #96]\n"
+        "  stp d10, d11, [sp, #112]\n"
+        "  stp d12, d13, [sp, #128]\n"
+        "  stp d14, d15, [sp, #144]\n"
+        "  mov x9, sp\n"
+        "  str x9, [x0]\n"
+        "  mov sp, x1\n"
+        "  ldp x19, x20, [sp, #0]\n"
+        "  ldp x21, x22, [sp, #16]\n"
+        "  ldp x23, x24, [sp, #32]\n"
+        "  ldp x25, x26, [sp, #48]\n"
+        "  ldp x27, x28, [sp, #64]\n"
+        "  ldp x29, x30, [sp, #80]\n"
+        "  ldp d8, d9, [sp, #96]\n"
+        "  ldp d10, d11, [sp, #112]\n"
+        "  ldp d12, d13, [sp, #128]\n"
+        "  ldp d14, d15, [sp, #144]\n"
+        "  add sp, sp, #176\n"
+        "  ret\n"
+        ".p2align 2\n"
+        ".globl " PAS_ASM_SYM(__pas_ctx_start) "\n"
+        PAS_ASM_SYM(__pas_ctx_start) ":\n"
+        "  mov x29, #0\n"
+        "  mov x30, #0\n"
+        "  blr x19\n"
+        "  brk #0\n");
+#define PAS_CTX_FRAME 176
+#else
+/* frame (64 bytes): mxcsr + x87 control word, r15, r14, r13, r12, rbx,
+ * rbp, then the return address */
+__asm__(".text\n"
+        ".p2align 4\n"
+        ".globl " PAS_ASM_SYM(__pas_ctx_switch) "\n"
+        PAS_ASM_SYM(__pas_ctx_switch) ":\n"
+        "  pushq %rbp\n"
+        "  pushq %rbx\n"
+        "  pushq %r12\n"
+        "  pushq %r13\n"
+        "  pushq %r14\n"
+        "  pushq %r15\n"
+        "  subq $8, %rsp\n"
+        "  stmxcsr (%rsp)\n"
+        "  fnstcw 4(%rsp)\n"
+        "  movq %rsp, (%rdi)\n"
+        "  movq %rsi, %rsp\n"
+        "  ldmxcsr (%rsp)\n"
+        "  fldcw 4(%rsp)\n"
+        "  addq $8, %rsp\n"
+        "  popq %r15\n"
+        "  popq %r14\n"
+        "  popq %r13\n"
+        "  popq %r12\n"
+        "  popq %rbx\n"
+        "  popq %rbp\n"
+        "  ret\n"
+        ".p2align 4\n"
+        ".globl " PAS_ASM_SYM(__pas_ctx_start) "\n"
+        PAS_ASM_SYM(__pas_ctx_start) ":\n"
+        "  andq $-16, %rsp\n"
+        "  xorl %ebp, %ebp\n"
+        "  callq *%rbx\n"
+        "  ud2\n");
+#define PAS_CTX_FRAME 64
+#endif
+
+/* A context that starts in fn on [stack, stack + size). */
+static void ctx_make(PasCtx *c, void *stack, size_t size, void (*fn)(void)) {
+  uintptr_t top = ((uintptr_t)stack + size) & ~(uintptr_t)15;
+  uintptr_t *f = (uintptr_t *)(top - 16 - PAS_CTX_FRAME);
+  memset(f, 0, PAS_CTX_FRAME);
+#if defined(__aarch64__)
+  f[0] = (uintptr_t)fn;                  /* x19 */
+  f[11] = (uintptr_t)__pas_ctx_start;    /* x30: where the first ret goes */
+#else
+  ((uint32_t *)f)[0] = 0x1F80;           /* mxcsr: the default */
+  ((uint32_t *)f)[1] = 0x037F;           /* x87 control word: the default */
+  f[5] = (uintptr_t)fn;                  /* rbx */
+  f[7] = (uintptr_t)__pas_ctx_start;     /* return address */
+#endif
+  c->sp = f;
+}
+#else
+typedef ucontext_t PasCtx;
+#endif
 
 /* (Variables have external linkage: see utils/gen-runtime-ir.py.) */
 pthread_mutex_t __pas_async_mutex = PTHREAD_MUTEX_INITIALIZER;
@@ -92,10 +217,10 @@ struct PasTask {
   void (*args_fini)(void *args);
   int64_t result_size;
   PasContext *home;
-  ucontext_t ctx;
+  PasCtx ctx;
   void *stack;
   size_t stack_size;
-  ucontext_t *resumer;          /* where it goes when it waits or ends */
+  PasCtx *resumer;              /* where it goes when it waits or ends */
   const void *resumer_bottom;   /* (the resumer's stack, for ASan) */
   size_t resumer_size;
   void *fake_stack;
@@ -118,7 +243,44 @@ struct PasContext {
   PasTask *starting;    /* (handed to task_main) */
   PasScope *scopes;     /* scopes open outside any task */
   int is_pool;
+  /* The thread's own poller (kqueue/epoll), created by its first fd wait:
+   * from then on the thread blocks in it instead of on cv, so socket
+   * readiness wakes the tasks right on the thread that runs them, in
+   * batches, with no poller thread in between (the event-loop design of
+   * a hand-written server). -1 before. */
+  int pfd;
+  int sleeping;         /* blocked in pfd: a post from elsewhere pokes it */
+  int wakefd;           /* Linux: the eventfd those pokes write */
+  uint8_t *fdtab;       /* per descriptor: FDT_* (what is armed directly) */
+  int fdcap;
+  struct PasFdWait **dheap; /* its waits with a deadline, a min-heap */
+  int dcount, dcap;
 };
+
+#define PAS_WAKE_MARK ((void *)1) /* the poke's registration */
+
+/* Under the lock: there is work for c's thread (a task was queued, or a
+ * thread waiter was woken). A thread blocked in its poller is poked —
+ * only when it sleeps, so a busy thread pays no syscall. */
+static void ctx_signal(PasContext *c) {
+  if (c->pfd >= 0) {
+    if (c->sleeping) {
+      c->sleeping = 0;
+#ifdef __linux__
+      uint64_t one = 1;
+      ssize_t r = write(c->wakefd, &one, sizeof one);
+      (void)r;
+#else
+      struct kevent k;
+      /* (a change rewrites the event's udata: keep the marker) */
+      EV_SET(&k, 1, EVFILT_USER, 0, NOTE_TRIGGER, 0, PAS_WAKE_MARK);
+      kevent(c->pfd, &k, 1, NULL, 0, NULL);
+#endif
+    }
+  } else {
+    pthread_cond_broadcast(&c->cv);
+  }
+}
 
 struct PasScope {
   PasScope *outer;
@@ -145,6 +307,8 @@ static PasContext *new_context(int is_pool) {
     __pas_runtime_error("out of memory for a thread's tasks");
   pthread_cond_init(&c->cv, NULL);
   c->is_pool = is_pool;
+  c->pfd = -1;
+  c->wakefd = -1;
   return c;
 }
 
@@ -163,7 +327,7 @@ static void post(PasTask *t) {
   else
     c->head = t;
   c->tail = t;
-  pthread_cond_signal(&c->cv);
+  ctx_signal(c);
 }
 
 static PasTask *pop(PasContext *c) {
@@ -187,7 +351,7 @@ static void wake(PasWaiter *w, int why) {
     t->wake = why;
     post(t);
   } else {
-    pthread_cond_broadcast(&w->thread->cv);
+    ctx_signal(w->thread);
   }
 }
 
@@ -321,6 +485,13 @@ static void raise_cancelled(void) {
 #define STACK_CACHE 16
 void *__pas_async_stacks[STACK_CACHE];
 int __pas_async_nstacks;
+/* Each thread keeps the stacks of its ended tasks too, without the lock:
+ * every `await` of an async call is a task of its own, so a server with
+ * many connections starts and ends tasks at its request rate, and a stack
+ * that misses the cache costs an mmap, an mprotect and later an munmap. */
+#define STACK_TCACHE 256
+_Thread_local void *__pas_async_tstacks[STACK_TCACHE];
+_Thread_local int __pas_async_ntstacks;
 
 #ifdef __APPLE__
 /* macOS malloc reserves a huge span of address space (MAGMA: observed
@@ -332,6 +503,8 @@ int __pas_async_nstacks;
 #define PAS_MALLOC_RESERVE_HIGH 0x7000000000ULL
 #define PAS_STACK_HINT_START 0xFC00000000ULL
 static void *new_stack(void) {
+  if (__pas_async_ntstacks)
+    return __pas_async_tstacks[--__pas_async_ntstacks];
   LOCK();
   void *s = __pas_async_nstacks ? __pas_async_stacks[--__pas_async_nstacks] : NULL;
   UNLOCK();
@@ -367,6 +540,8 @@ static void *new_stack(void) {
 }
 #else
 static void *new_stack(void) {
+  if (__pas_async_ntstacks)
+    return __pas_async_tstacks[--__pas_async_ntstacks];
   LOCK();
   void *s = __pas_async_nstacks ? __pas_async_stacks[--__pas_async_nstacks] : NULL;
   UNLOCK();
@@ -383,6 +558,10 @@ static void *new_stack(void) {
 #endif
 
 static void free_stack(void *s) {
+  if (__pas_async_ntstacks < STACK_TCACHE) {
+    __pas_async_tstacks[__pas_async_ntstacks++] = s;
+    return;
+  }
   LOCK();
   if (__pas_async_nstacks < STACK_CACHE) {
     __pas_async_stacks[__pas_async_nstacks++] = s;
@@ -398,7 +577,7 @@ static void free_stack(void *s) {
 void __pas_task_release(PasTask *t);
 
 /* From here into t until it waits or ends; from is where it comes back. */
-static void switch_into(PasTask *t, ucontext_t *from) {
+static void switch_into(PasTask *t, PasCtx *from) {
   PasContext *c = context();
   PasTask *prev = c->current;
   PasExcFrame *saved = __pas_exc_top;
@@ -409,7 +588,11 @@ static void switch_into(PasTask *t, ucontext_t *from) {
   void *fake = NULL;
   __sanitizer_start_switch_fiber(&fake, t->stack, t->stack_size);
 #endif
+#ifdef PAS_FAST_CTX
+  __pas_ctx_switch(&from->sp, t->ctx.sp);
+#else
   swapcontext(from, &t->ctx);
+#endif
 #ifdef PAS_ASAN
   __sanitizer_finish_switch_fiber(fake, NULL, NULL);
 #endif
@@ -428,7 +611,11 @@ static void suspend(PasTask *t) {
 #ifdef PAS_ASAN
   __sanitizer_start_switch_fiber(&t->fake_stack, t->resumer_bottom, t->resumer_size);
 #endif
+#ifdef PAS_FAST_CTX
+  __pas_ctx_switch(&t->ctx.sp, t->resumer->sp);
+#else
   swapcontext(&t->ctx, t->resumer);
+#endif
 #ifdef PAS_ASAN
   __sanitizer_finish_switch_fiber(t->fake_stack, &t->resumer_bottom, &t->resumer_size);
 #endif
@@ -461,19 +648,30 @@ static void task_main(void) {
 #ifdef PAS_ASAN
   __sanitizer_start_switch_fiber(NULL, t->resumer_bottom, t->resumer_size);
 #endif
+#ifdef PAS_FAST_CTX
+  {
+    void *dead; /* this context is never resumed */
+    __pas_ctx_switch(&dead, t->resumer->sp); /* (its stack is freed there) */
+  }
+#else
   setcontext(t->resumer); /* (its stack is freed there) */
+#endif
   __pas_runtime_error("a task resumed after it ended");
 }
 
 /* Starts t (a new task, here: its home's thread). */
-static void start(PasTask *t, ucontext_t *from) {
+static void start(PasTask *t, PasCtx *from) {
   t->stack = new_stack();
   t->stack_size = STACK_SIZE;
+#ifdef PAS_FAST_CTX
+  ctx_make(&t->ctx, t->stack, t->stack_size, task_main);
+#else
   getcontext(&t->ctx);
   t->ctx.uc_stack.ss_sp = t->stack;
   t->ctx.uc_stack.ss_size = t->stack_size;
   t->ctx.uc_link = NULL;
   makecontext(&t->ctx, task_main, 0);
+#endif
   LOCK();
   t->state = TS_RUNNING;
   UNLOCK();
@@ -483,7 +681,7 @@ static void start(PasTask *t, ucontext_t *from) {
 
 /* Runs t (ready or new) on this thread until it waits or ends. */
 static void resume(PasTask *t) {
-  ucontext_t here;
+  PasCtx here;
   if (t->state == TS_NEW) {
     start(t, &here);
     return;
@@ -503,6 +701,8 @@ static int64_t now_ms(void) {
   return (int64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
 }
 
+static void ctx_poll_once(PasContext *c, int64_t deadline_ms);
+
 static void loop_until(PasContext *c, int (*done)(void *), void *arg,
                        int64_t deadline_ms) {
   while (!done(arg)) {
@@ -511,6 +711,13 @@ static void loop_until(PasContext *c, int (*done)(void *), void *arg,
       UNLOCK();
       resume(t);
       LOCK();
+      continue;
+    }
+    if (c->pfd >= 0) {
+      /* this thread waits on sockets: block in its poller */
+      if (deadline_ms && deadline_ms - now_ms() <= 0)
+        return;
+      ctx_poll_once(c, deadline_ms);
       continue;
     }
     if (deadline_ms) {
@@ -653,7 +860,7 @@ void __pas_task_start(PasTask *t) {
   t->token = current_token();
   __pas_token_addref(t->token);
   __pas_task_addref(t); /* its own, while it runs */
-  ucontext_t here;
+  PasCtx here;
   start(t, &here);
 }
 
@@ -1056,12 +1263,13 @@ void __pas_token_check(PasToken *k) {
 
 /* A task parks until a descriptor is readable or writable (__pas_task_wait_fd)
  * or until an async read/send completes (__pas_task_recv/__pas_task_send).
- * One small poller thread holds the kernel interest and hands completions to
- * the tasks. Backends, chosen at runtime: io_uring (Linux, raw syscalls — no
- * liburing dependency), epoll (Linux fallback for kernels and sandboxes
- * without io_uring), and kqueue (macOS). On the io_uring backend a wait
- * submits io_uring ops (RECV/SEND/POLL_ADD) and is woken by its completion;
- * on the poll backends the syscall happens after the wake, in the task.
+ * Backends, chosen at runtime: kqueue (macOS) and epoll (Linux), one poller
+ * per thread (see "The per-thread pollers" below), and io_uring (Linux,
+ * opt-in with P3_NET_URING=1, raw syscalls — no liburing dependency): one
+ * ring whose small poller thread hands completions to the tasks. On the
+ * io_uring backend a wait submits io_uring ops (RECV/SEND/POLL_ADD) and is
+ * woken by its completion; on the poll backends the syscall happens in the
+ * task (recv tries first and parks only on EAGAIN).
  *
  * A wait record belongs to its wait: the park helper frees it on return when
  * no completion can follow (poll backends; an io_uring completion reaped
@@ -1074,19 +1282,19 @@ void __pas_token_check(PasToken *k) {
  * Several records may wait on one descriptor at once (tasks of one or
  * several threads: a shared listener's acceptors, a database fd watched by
  * a driver task here and by the pool there). The poll backends arm each
- * record on its own dup of the fd, so every record is addressable on its
- * own and one record's retire cannot take the kernel interest away from
- * its still-parked peers; the readiness of the underlying file description
- * wakes each of the records parked on it, and the extra ones simply find
- * the transient EAGAIN their next syscall would produce. On io_uring every
- * wait is already its own op keyed by user_data, so nothing is shared.
+ * record on its own registration (the fd itself in each thread's poller, a
+ * dup for a second waiter in the same poller), so one record's retire
+ * cannot take the kernel interest away from its still-parked peers; the
+ * readiness of the descriptor wakes each of the records parked on it (a
+ * firing record wakes its peers: fd_parked), and the extra ones simply
+ * find the transient EAGAIN their next syscall would produce. On io_uring
+ * every wait is already its own op keyed by user_data, so nothing is
+ * shared.
  *
  * The wait reports what fired, as a bitmask it returns: 1 = readable,
  * 2 = writable, 4 = the descriptor is in an error state (POLLERR/POLLHUP
- * on the poll backends, a failed poll completion on io_uring). With the
- * dup-per-record registrations each record's report carries the event of
- * its own registration, not of a shared one. Everything here is covered by
- * the same lock as the rest of the file. */
+ * on the poll backends, a failed poll completion on io_uring). Everything
+ * here is covered by the same lock as the rest of the file. */
 
 enum {
   FD_BACKEND_KQUEUE = 0,
@@ -1131,9 +1339,14 @@ typedef struct PasFdWait {
                         8 = the deadline fired first) */
   void *buf;         /* io_uring: recv/send buffer */
   int32_t len;
+  PasContext *ctx;   /* poll backends: whose poller it is armed in */
+  int direct;        /* poll backends: armed on fd itself (not a dup) */
+  int fired;         /* poll backends: its one-shot event came */
+  int hidx;          /* poll backends: its slot in ctx->dheap */
+  int parked;        /* poll backends: on fd_parked[fd] */
+  struct PasFdWait *fprev, *fnext; /* fd_parked[fd]: its peers on fd */
   PasWaiter w;
-  struct PasFdWait *next;
-  struct PasFdWait *dnext; /* the poller's deadline list */
+  struct PasFdWait *next;  /* io_uring: fd_waits */
 } PasFdWait;
 
 #ifdef __linux__
@@ -1216,13 +1429,14 @@ struct pas_uring_params {
 static void fd_poller_start(void);
 static void fd_retire(PasFdWait *rec);
 int32_t __pas_task_wait_fd2(int32_t fd, int32_t want_write, int32_t deadline_ms);
-static PasFdWait *fd_waits;       /* records under the lock */
-static PasFdWait *fd_deadlines;   /* poll-backend records with a deadline */
 static int64_t fd_waits_abandoned; /* records a cancelled io_uring wait left behind */
 static int fd_backend = FD_BACKEND_KQUEUE;
-static int fd_poll_fd = -1;
 static int fd_poll_started;
+#ifdef __linux__
+static PasFdWait *fd_waits;       /* io_uring records, under the lock */
+static int fd_poll_fd = -1;       /* the io_uring ring */
 static pthread_t fd_poller_thread;
+#endif
 
 #ifdef __linux__
 static void *ur_sq_ring, *ur_cq_ring;
@@ -1232,6 +1446,7 @@ static struct pas_uring_cqe *ur_cqes;
 static struct pas_uring_sqe *ur_sqes;
 #endif
 
+#ifdef __linux__
 static void fd_unlink(PasFdWait *rec) {
   PasFdWait **p = &fd_waits;
   while (*p && *p != rec)
@@ -1239,6 +1454,7 @@ static void fd_unlink(PasFdWait *rec) {
   if (*p)
     *p = rec->next;
 }
+#endif
 
 /* The bits __pas_task_wait_fd returns: 1 = readable, 2 = writable,
  * 4 = failed. */
@@ -1274,57 +1490,224 @@ static int64_t fd_now_us(void) {
   return (int64_t)ts.tv_sec * 1000000LL + (int64_t)ts.tv_nsec / 1000;
 }
 
-/* Under the lock: the record is done for its task (poll backends). The
- * drop releases the record's own registration (see fd_arm); the caller's
- * fd itself is never closed here. */
+/*===- The per-thread pollers (kqueue / epoll) -------------------------------===
+ *
+ * Every thread that waits on a descriptor gets its own poller (ctx_poller),
+ * and a wait is armed in the poller of the task's home thread: the thread
+ * that runs the task is the one that blocks on its socket, so readiness
+ * turns into a queued task without another thread or a lock hand-off, and
+ * one kevent/epoll_wait returns the events of many tasks at once.
+ *
+ * Registrations are one-shot (EV_ONESHOT; EPOLLONESHOT re-armed by one
+ * EPOLL_CTL_MOD): a wait costs one syscall to arm and none to drop once it
+ * fired. The first waiter of a descriptor (per direction on kqueue, per
+ * descriptor on epoll, which keeps one registration per fd) arms the fd
+ * itself; a second concurrent waiter in the same poller arms a dup of it,
+ * as before, so each record stays addressable on its own. Pollers of
+ * different threads register the same descriptor independently (a
+ * listener shared by acceptors on several threads needs no dup at all).
+ *
+ * Records are only ever touched by their home thread's poller and their
+ * own task, which runs on that same thread: an event batch is processed
+ * completely before any task runs, so a record is never freed while an
+ * event that names it is still pending. */
+
+enum { FDT_READ = 1, FDT_WRITE = 2, FDT_EPOLL_REG = 4 };
+
+/* Every armed poll-backend wait, by descriptor, whatever its thread. Each
+ * poller tests readiness on its own, and a level-triggered filter is
+ * re-checked when it is delivered: when the task woken on one thread
+ * consumes the readiness first (an accept), the same descriptor's waiter
+ * in another thread's poller would never hear of it. So a firing wait
+ * wakes its parked peers on the same descriptor and direction too — every
+ * waiter parked at the moment of the readiness gets its wake, as the
+ * documented semantics say (the extra ones see a transient EAGAIN). */
+static PasFdWait **fd_parked;
+static int fd_parked_cap;
+
+static void fd_park_link(PasFdWait *rec) {
+  int fd = rec->fd;
+  if (fd >= fd_parked_cap) {
+    int n = fd_parked_cap ? fd_parked_cap : 1024;
+    while (n <= fd)
+      n *= 2;
+    PasFdWait **t = realloc(fd_parked, (size_t)n * sizeof *t);
+    if (!t)
+      __pas_runtime_error("out of memory waiting on a socket");
+    memset(t + fd_parked_cap, 0, (size_t)(n - fd_parked_cap) * sizeof *t);
+    fd_parked = t;
+    fd_parked_cap = n;
+  }
+  rec->fprev = NULL;
+  rec->fnext = fd_parked[fd];
+  if (rec->fnext)
+    rec->fnext->fprev = rec;
+  fd_parked[fd] = rec;
+  rec->parked = 1;
+}
+
+static void fd_park_unlink(PasFdWait *rec) {
+  if (!rec->parked)
+    return;
+  if (rec->fprev)
+    rec->fprev->fnext = rec->fnext;
+  else
+    fd_parked[rec->fd] = rec->fnext;
+  if (rec->fnext)
+    rec->fnext->fprev = rec->fprev;
+  rec->fprev = rec->fnext = NULL;
+  rec->parked = 0;
+}
+
+/* Under the lock, on c's thread: c gets its poller (and its poke). */
+static void ctx_poller(PasContext *c) {
+  if (c->pfd >= 0)
+    return;
+#ifdef __linux__
+  int p = epoll_create1(EPOLL_CLOEXEC);
+  int e = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
+  if (p < 0 || e < 0)
+    __pas_runtime_error("the netasync poller could not start");
+  struct epoll_event ev;
+  memset(&ev, 0, sizeof ev);
+  ev.events = EPOLLIN;
+  ev.data.ptr = PAS_WAKE_MARK;
+  epoll_ctl(p, EPOLL_CTL_ADD, e, &ev);
+  c->wakefd = e;
+#else
+  int p = kqueue();
+  if (p < 0)
+    __pas_runtime_error("the netasync poller could not start");
+  struct kevent k;
+  EV_SET(&k, 1, EVFILT_USER, EV_ADD | EV_CLEAR, 0, 0, PAS_WAKE_MARK);
+  kevent(p, &k, 1, NULL, 0, NULL);
+#endif
+  c->pfd = p;
+}
+
+/* c's entry for descriptor fd (the table grows on demand). */
+static uint8_t *ctx_fdent(PasContext *c, int fd) {
+  if (fd >= c->fdcap) {
+    int n = c->fdcap ? c->fdcap : 1024;
+    while (n <= fd)
+      n *= 2;
+    uint8_t *t = realloc(c->fdtab, (size_t)n);
+    if (!t)
+      __pas_runtime_error("out of memory waiting on a socket");
+    memset(t + c->fdcap, 0, (size_t)(n - c->fdcap));
+    c->fdtab = t;
+    c->fdcap = n;
+  }
+  return &c->fdtab[fd];
+}
+
+/* The deadline heap: the earliest deadline first, records know their slot. */
+static void dheap_set(PasContext *c, int i, PasFdWait *rec) {
+  c->dheap[i] = rec;
+  rec->hidx = i;
+}
+
+static void dheap_up(PasContext *c, int i) {
+  PasFdWait *rec = c->dheap[i];
+  while (i > 0) {
+    int parent = (i - 1) / 2;
+    if (c->dheap[parent]->deadline_us <= rec->deadline_us)
+      break;
+    dheap_set(c, i, c->dheap[parent]);
+    i = parent;
+  }
+  dheap_set(c, i, rec);
+}
+
+static void dheap_down(PasContext *c, int i) {
+  PasFdWait *rec = c->dheap[i];
+  for (;;) {
+    int l = 2 * i + 1, best = i;
+    int64_t bd = rec->deadline_us;
+    if (l < c->dcount && c->dheap[l]->deadline_us < bd) {
+      best = l;
+      bd = c->dheap[l]->deadline_us;
+    }
+    if (l + 1 < c->dcount && c->dheap[l + 1]->deadline_us < bd)
+      best = l + 1;
+    if (best == i)
+      break;
+    dheap_set(c, i, c->dheap[best]);
+    i = best;
+  }
+  dheap_set(c, i, rec);
+}
+
+static void dheap_push(PasContext *c, PasFdWait *rec) {
+  if (c->dcount == c->dcap) {
+    int n = c->dcap ? 2 * c->dcap : 64;
+    PasFdWait **h = realloc(c->dheap, (size_t)n * sizeof *h);
+    if (!h)
+      __pas_runtime_error("out of memory waiting on a socket");
+    c->dheap = h;
+    c->dcap = n;
+  }
+  dheap_set(c, c->dcount++, rec);
+  dheap_up(c, rec->hidx);
+}
+
+static void dheap_remove(PasContext *c, PasFdWait *rec) {
+  int i = rec->hidx;
+  PasFdWait *last = c->dheap[--c->dcount];
+  if (i < c->dcount) {
+    dheap_set(c, i, last);
+    dheap_up(c, i);
+    dheap_down(c, last->hidx);
+  }
+  rec->hidx = -1;
+}
+
+/* Under the lock: the record is done for its task (poll backends). A fired
+ * one-shot registration is already gone (or, on epoll, disabled until the
+ * next MOD re-arms it); one that did not fire is dropped; a dup is closed,
+ * which drops its registration. The caller's fd itself is never closed. */
 static void fd_retire(PasFdWait *rec) {
   if (rec->state != 0)
     return;
   rec->state = 1;
+  PasContext *c = rec->ctx;
+  fd_park_unlink(rec);
   if (rec->has_deadline) {
-    PasFdWait **p = &fd_deadlines;
-    while (*p && *p != rec)
-      p = &(*p)->dnext;
-    if (*p)
-      *p = rec->dnext;
-    rec->dnext = NULL;
+    dheap_remove(c, rec);
     rec->has_deadline = 0;
   }
-  if (rec->armed) {
-    rec->armed = 0;
-    int afd = rec->arm_fd;
-    rec->arm_fd = -1;
-    if (afd >= 0) {
+  if (!rec->armed)
+    return;
+  rec->armed = 0;
+  if (rec->direct) {
+    uint8_t *e = ctx_fdent(c, rec->fd);
+    *e &= (uint8_t)~(rec->write ? FDT_WRITE : FDT_READ);
+    if (!rec->fired) {
 #ifdef __linux__
-      epoll_ctl(fd_poll_fd, EPOLL_CTL_DEL, afd, NULL);
+      epoll_ctl(c->pfd, EPOLL_CTL_DEL, rec->fd, NULL);
+      *e &= (uint8_t)~FDT_EPOLL_REG;
 #else
       struct kevent kn;
-      memset(&kn, 0, sizeof kn);
-      kn.ident = (uintptr_t)afd;
-      kn.filter = rec->write ? EVFILT_WRITE : EVFILT_READ;
-      kn.flags = EV_DELETE;
-      kevent(fd_poll_fd, &kn, 1, NULL, 0, NULL);
+      EV_SET(&kn, rec->fd, rec->write ? EVFILT_WRITE : EVFILT_READ, EV_DELETE,
+             0, 0, NULL);
+      kevent(c->pfd, &kn, 1, NULL, 0, NULL);
 #endif
-      if (afd != rec->fd)
-        close(afd);
     }
+  } else if (rec->arm_fd >= 0) {
+    close(rec->arm_fd);
   }
+  rec->arm_fd = -1;
 }
 
-/* Under the lock: records whose deadline passed get their NW_TIMEOUT
- * wake. The deadline list belongs to the poll backends (io_uring pairs
- * the wait with a linked TIMEOUT op instead). */
-static void fd_fire_deadlines(void) {
+/* Under the lock, on c's thread: records whose deadline passed get their
+ * NW_TIMEOUT wake. (io_uring pairs its waits with a linked TIMEOUT op.) */
+static void ctx_fire_deadlines(PasContext *c) {
+  if (c->dcount == 0)
+    return;
   int64_t now = fd_now_us();
-  PasFdWait **p = &fd_deadlines;
-  while (*p) {
-    PasFdWait *rec = *p;
-    if (rec->deadline_us > now) {
-      p = &rec->dnext;
-      continue;
-    }
-    *p = rec->dnext;
-    rec->dnext = NULL;
+  while (c->dcount > 0 && c->dheap[0]->deadline_us <= now) {
+    PasFdWait *rec = c->dheap[0];
+    dheap_remove(c, rec);
     rec->has_deadline = 0;
     if (rec->state != 0)
       continue;
@@ -1334,27 +1717,83 @@ static void fd_fire_deadlines(void) {
   }
 }
 
-/* Under the lock: how long the poller may block. The 10 ms cap bounds how
- * long a deadline added *while* it sleeps has to wait — without it, a
- * record parked with a short deadline could sit out a full 1 s block
- * (a wake pipe would avoid the quantum; the 100 polls/s idle cost is
- * cheaper than any new machinery). */
-static int fd_poll_wait_ms(void) {
-  PasFdWait *p = fd_deadlines;
-  int64_t best = 0;
-  while (p) {
-    if (best == 0 || p->deadline_us < best)
-      best = p->deadline_us;
-    p = p->dnext;
+/* Under the lock, on c's thread (no task ready): blocks in c's poller until
+ * an event, a poke, its earliest wait deadline or deadline_ms (a
+ * CLOCK_MONOTONIC time in ms, 0 = none), then delivers what fired. */
+static void ctx_poll_once(PasContext *c, int64_t deadline_ms) {
+  int64_t wait_ms = -1;
+  if (c->dcount > 0) {
+    wait_ms = (c->dheap[0]->deadline_us - fd_now_us() + 999) / 1000;
+    if (wait_ms < 0)
+      wait_ms = 0;
   }
-  if (best == 0)
-    return 10;
-  int64_t ms = (best - fd_now_us() + 999) / 1000;
-  if (ms < 1)
-    return 1;
-  if (ms > 10)
-    return 10;
-  return (int)ms;
+  if (deadline_ms) {
+    int64_t left = deadline_ms - now_ms();
+    if (left < 0)
+      left = 0;
+    if (wait_ms < 0 || left < wait_ms)
+      wait_ms = left;
+  }
+  if (wait_ms > 3600000)
+    wait_ms = 3600000;
+  c->sleeping = 1;
+  UNLOCK();
+#ifdef __linux__
+  struct epoll_event evs[256];
+  int n = epoll_wait(c->pfd, evs, 256, (int)wait_ms);
+#else
+  struct kevent evs[256];
+  struct timespec ts, *tsp = NULL;
+  if (wait_ms >= 0) {
+    ts.tv_sec = wait_ms / 1000;
+    ts.tv_nsec = (long)(wait_ms % 1000) * 1000000L;
+    tsp = &ts;
+  }
+  int n = kevent(c->pfd, NULL, 0, evs, 256, tsp);
+#endif
+  LOCK();
+  c->sleeping = 0;
+  for (int i = 0; i < n; i++) {
+#ifdef __linux__
+    void *data = evs[i].data.ptr;
+    if (data == PAS_WAKE_MARK) {
+      uint64_t v;
+      ssize_t r = read(c->wakefd, &v, sizeof v);
+      (void)r;
+      continue;
+    }
+#else
+    void *data = evs[i].udata;
+    if (data == PAS_WAKE_MARK || (evs[i].flags & EV_ERROR))
+      continue;
+#endif
+    PasFdWait *rec = data;
+    if (rec->state != 0)
+      continue;
+#ifdef __linux__
+    rec->res = fd_bits_epoll(evs[i].events);
+#else
+    rec->res = fd_bits_kqueue(&evs[i]);
+#endif
+    rec->fired = 1;
+    int fd = rec->fd, write = rec->write;
+    int64_t bits = rec->res;
+    wake(&rec->w, WAKE_NORMAL);
+    fd_retire(rec);
+    /* its peers on the same descriptor (other threads' pollers, or dups
+     * here) get the readiness too; each retire unlinks, so restart */
+    for (PasFdWait *o = fd < fd_parked_cap ? fd_parked[fd] : NULL; o;) {
+      if (o->write != write) {
+        o = o->fnext;
+        continue;
+      }
+      o->res = bits;
+      wake(&o->w, WAKE_NORMAL);
+      fd_retire(o);
+      o = fd_parked[fd];
+    }
+  }
+  ctx_fire_deadlines(c);
 }
 
 #ifdef __linux__
@@ -1494,33 +1933,80 @@ static void uring_reap_cqe(struct pas_uring_cqe *cqe) {
  * otherwise merge or overwrite registrations keyed by the fd alone — epoll
  * drops a second ADD with EEXIST, and a kqueue knote carries one udata, so
  * a second EV_ADD would re-address the knote the first record parked on. */
-static void fd_arm(PasFdWait *rec) {
+/* Arms rec in its context's poller: 0, or -1 when the descriptor cannot be
+ * waited on (closed, not pollable, out of descriptors for a dup). */
+static int fd_arm(PasFdWait *rec) {
 #ifdef __linux__
   if (fd_backend == FD_BACKEND_URING) {
     uring_submit_rec(rec);
-    return;
+    return 0;
   }
-  rec->arm_fd = dup(rec->fd);
-  if (rec->arm_fd < 0)
-    rec->arm_fd = rec->fd;   /* out of descriptors: share, best effort */
+#endif
+  PasContext *c = rec->ctx;
+  uint8_t dir = rec->write ? FDT_WRITE : FDT_READ;
+  uint8_t *e = ctx_fdent(c, rec->fd);
+#ifdef __linux__
   struct epoll_event ev;
   memset(&ev, 0, sizeof ev);
-  ev.events = rec->write ? EPOLLOUT : EPOLLIN;
+  ev.events = (rec->write ? EPOLLOUT : EPOLLIN) | EPOLLONESHOT;
   ev.data.ptr = rec;
-  epoll_ctl(fd_poll_fd, EPOLL_CTL_ADD, rec->arm_fd, &ev);
+  if (!(*e & (FDT_READ | FDT_WRITE))) {
+    int r;
+    if (*e & FDT_EPOLL_REG) {
+      /* re-arm the registration a fired wait left disabled; the fd may
+       * have been closed and its number reused since: then add */
+      r = epoll_ctl(c->pfd, EPOLL_CTL_MOD, rec->fd, &ev);
+      if (r < 0 && errno == ENOENT)
+        r = epoll_ctl(c->pfd, EPOLL_CTL_ADD, rec->fd, &ev);
+    } else {
+      r = epoll_ctl(c->pfd, EPOLL_CTL_ADD, rec->fd, &ev);
+      if (r < 0 && errno == EEXIST)
+        r = epoll_ctl(c->pfd, EPOLL_CTL_MOD, rec->fd, &ev);
+    }
+    if (r < 0) {
+      *e &= (uint8_t)~FDT_EPOLL_REG;
+      return -1;
+    }
+    *e |= FDT_EPOLL_REG | dir;
+    rec->direct = 1;
+    rec->arm_fd = rec->fd;
+    rec->armed = 1;
+    return 0;
+  }
+  int afd = dup(rec->fd);
+  if (afd < 0)
+    return -1;
+  if (epoll_ctl(c->pfd, EPOLL_CTL_ADD, afd, &ev) < 0) {
+    close(afd);
+    return -1;
+  }
 #else
-  rec->arm_fd = dup(rec->fd);
-  if (rec->arm_fd < 0)
-    rec->arm_fd = rec->fd;   /* out of descriptors: share, best effort */
   struct kevent kn;
-  memset(&kn, 0, sizeof kn);
-  kn.ident = (uintptr_t)rec->arm_fd;
-  kn.filter = rec->write ? EVFILT_WRITE : EVFILT_READ;
-  kn.flags = EV_ADD;
-  kn.udata = rec;
-  kevent(fd_poll_fd, &kn, 1, NULL, 0, NULL);
+  if (!(*e & dir)) {
+    EV_SET(&kn, rec->fd, rec->write ? EVFILT_WRITE : EVFILT_READ,
+           EV_ADD | EV_ONESHOT, 0, 0, rec);
+    if (kevent(c->pfd, &kn, 1, NULL, 0, NULL) < 0)
+      return -1;
+    *e |= dir;
+    rec->direct = 1;
+    rec->arm_fd = rec->fd;
+    rec->armed = 1;
+    return 0;
+  }
+  int afd = dup(rec->fd);
+  if (afd < 0)
+    return -1;
+  EV_SET(&kn, afd, rec->write ? EVFILT_WRITE : EVFILT_READ,
+         EV_ADD | EV_ONESHOT, 0, 0, rec);
+  if (kevent(c->pfd, &kn, 1, NULL, 0, NULL) < 0) {
+    close(afd);
+    return -1;
+  }
 #endif
+  rec->direct = 0;
+  rec->arm_fd = afd;
   rec->armed = 1;
+  return 0;
 }
 
 /* Parks the current task on rec (linked); on return the lock is released and
@@ -1573,7 +2059,6 @@ static int fd_park(PasFdWait *rec, int64_t *out) {
    * the poller mapped in rec->res go to the caller. */
   fd_retire(rec);
   *out = rec->res;
-  fd_unlink(rec);
   UNLOCK();
   free(rec);
   return cancelled;
@@ -1625,42 +2110,8 @@ static int64_t fd_uring_op(int op, int32_t fd, void *buf, int32_t len) {
 }
 #endif
 
+#ifdef __linux__
 static void *fd_poller_main(void *arg);
-
-#ifndef __linux__
-static void *fd_poller_main(void *arg) {
-  (void)arg;
-  for (;;) {
-    int wait_ms;
-    LOCK();
-    fd_fire_deadlines();
-    wait_ms = fd_poll_wait_ms();
-    UNLOCK();
-    struct kevent evs[64];
-    struct timespec ts;
-    ts.tv_sec = wait_ms / 1000;
-    ts.tv_nsec = (long)(wait_ms % 1000) * 1000000L;
-    int n = kevent(fd_poll_fd, NULL, 0, evs, 64, &ts);
-    if (n < 0) {
-      if (errno == EINTR)
-        continue;
-      continue;
-    }
-    for (int i = 0; i < n; i++) {
-      if (evs[i].flags & EV_ERROR)
-        continue;      /* disarmed while in flight; nothing to do */
-      PasFdWait *rec = evs[i].udata;
-      LOCK();
-      if (rec->state == 0) {
-        rec->res = fd_bits_kqueue(&evs[i]);
-        wake(&rec->w, WAKE_NORMAL);
-        fd_retire(rec);
-      }
-      UNLOCK();
-    }
-  }
-  return NULL;
-}
 #endif
 
 #ifdef __linux__
@@ -1690,30 +2141,7 @@ static void *fd_poller_main(void *arg) {
       UNLOCK();
     }
   }
-  for (;;) {
-    int wait_ms;
-    LOCK();
-    fd_fire_deadlines();
-    wait_ms = fd_poll_wait_ms();
-    UNLOCK();
-    struct epoll_event evs[64];
-    int n = epoll_wait(fd_poll_fd, evs, 64, wait_ms);
-    if (n < 0) {
-      if (errno == EINTR)
-        continue;
-      continue;
-    }
-    for (int i = 0; i < n; i++) {
-      PasFdWait *rec = evs[i].data.ptr;
-      LOCK();
-      if (rec->state == 0) {
-        rec->res = fd_bits_epoll(evs[i].events);
-        wake(&rec->w, WAKE_NORMAL);
-        fd_retire(rec);
-      }
-      UNLOCK();
-    }
-  }
+  return NULL;
 }
 #endif
 
@@ -1766,7 +2194,11 @@ static void fd_poller_start(void) {
   fd_poll_started = 1;
 #ifdef __linux__
   fd_backend = FD_BACKEND_EPOLL;
-  { /* io_uring first; falls back to epoll when the kernel has none */
+  /* Per-thread epoll is the default: readiness reaches the task on its own
+   * thread, in batches. The shared io_uring ring (one poller thread hands
+   * every completion to the pool) stays available with P3_NET_URING=1. */
+  const char *uenv = getenv("P3_NET_URING");
+  if (uenv && uenv[0] == '1') { /* io_uring; falls back to epoll when the kernel has none */
     struct pas_uring_params params;
     memset(&params, 0, sizeof params);
     int fd = syscall(SYS_io_uring_setup, PAS_URING_ENTRIES, &params);
@@ -1812,23 +2244,17 @@ static void fd_poller_start(void) {
       }
     }
   }
-  if (fd_backend != FD_BACKEND_URING) {
-    fd_poll_fd = epoll_create1(0);
-    if (fd_poll_fd < 0)
-      __pas_runtime_error("the netasync poller could not start");
-  }
-#else
-  fd_backend = FD_BACKEND_KQUEUE;
-  fd_poll_fd = kqueue();
-  if (fd_poll_fd < 0)
-    __pas_runtime_error("the netasync poller could not start");
-#endif
+  if (fd_backend != FD_BACKEND_URING)
+    return;   /* epoll: each thread makes its own poller (ctx_poller) */
   pthread_attr_t a2;
   pthread_attr_init(&a2);
   pthread_attr_setdetachstate(&a2, PTHREAD_CREATE_DETACHED);
   if (pthread_create(&fd_poller_thread, &a2, fd_poller_main, NULL) != 0)
     __pas_runtime_error("the netasync poller thread could not start");
   pthread_attr_destroy(&a2);
+#else
+  fd_backend = FD_BACKEND_KQUEUE;   /* each thread makes its own kqueue */
+#endif
 }
 
 /* Parks the current task until fd is readable (want_write 0) or writable
@@ -1880,12 +2306,20 @@ int32_t __pas_task_wait_fd2(int32_t fd, int32_t want_write, int32_t deadline_ms)
     raise_cancelled();
   }
   fd_poller_start();
+  int uring = 0;
+#ifdef __linux__
+  uring = fd_backend == FD_BACKEND_URING;
+#endif
+  if (!uring)
+    ctx_poller(c);
   PasFdWait *rec = malloc(sizeof *rec);
   if (!rec)
     __pas_runtime_error("out of memory waiting on a socket");
   memset(rec, 0, sizeof *rec);
   rec->fd = fd;
   rec->arm_fd = -1;
+  rec->ctx = c;
+  rec->hidx = -1;
   rec->write = want_write ? 1 : 0;
   rec->op = want_write ? FD_OP_POLLWRITE : FD_OP_POLLREAD;
   rec->pending = 1;   /* io_uring: one completion; a deadline makes it two */
@@ -1898,18 +2332,27 @@ int32_t __pas_task_wait_fd2(int32_t fd, int32_t want_write, int32_t deadline_ms)
   rec->w.task = me;
   rec->w.thread = NULL;
   rec->w.signaled = 0;
-  rec->next = fd_waits;
-  fd_waits = rec;
 #ifdef __linux__
-  if (fd_backend == FD_BACKEND_URING && rec->has_deadline)
-    rec->pending = 2;
-  else
+  if (uring) {
+    rec->next = fd_waits;
+    fd_waits = rec;
+    if (rec->has_deadline)
+      rec->pending = 2;
+  } else
 #endif
   if (rec->has_deadline) {
-    rec->dnext = fd_deadlines;
-    fd_deadlines = rec;
+    dheap_push(c, rec);
   }
-  fd_arm(rec);
+  if (fd_arm(rec) < 0) {
+    /* not waitable (closed, not pollable, no descriptor for a dup):
+     * report the error state instead of parking forever */
+    fd_retire(rec);
+    UNLOCK();
+    free(rec);
+    return 4;
+  }
+  if (!uring)
+    fd_park_link(rec);
   int64_t fired;
   int cancelled = fd_park(rec, &fired);
   if (cancelled)
@@ -1966,10 +2409,10 @@ int64_t __pas_task_recv(int32_t fd, void *buf, int32_t len) {
     return fd_uring_op(FD_OP_RECV, fd, buf, len);
   }
 #endif
-  /* poll backends: park until readiness (raises on cancellation), then
-   * the recv syscall happens here */
+  /* poll backends: try the recv first — data that is already there (a
+   * pipelined request, a reply that beat the task back) costs no park —
+   * and park on readiness (raises on cancellation) only on EAGAIN */
   for (;;) {
-    __pas_task_wait_fd(fd, 0);
     ssize_t n = recv(fd, buf, len, 0);
     if (n > 0)
       return n;
@@ -1977,8 +2420,10 @@ int64_t __pas_task_recv(int32_t fd, void *buf, int32_t len) {
       return 0;
     if (errno == EINTR)
       continue;
-    if (errno == EAGAIN || errno == EWOULDBLOCK)
-      continue;                     /* lost the readiness race: re-park */
+    if (errno == EAGAIN || errno == EWOULDBLOCK) {
+      __pas_task_wait_fd(fd, 0);
+      continue;
+    }
     return -(int64_t)errno;
   }
 }

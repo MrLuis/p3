@@ -1,10 +1,13 @@
 { netasync — awaitable BSD sockets for p3's async/await runtime.
   TCP over IPv4, on Linux and macOS (Windows: later). The entry points that
   can wait are async routines: called from a task they park it (the OS
-  thread goes on with other tasks) until the socket is ready, through one
-  shared poller thread and the runtime's task scheduler — so a cancelled
-  token wakes a parked task with EOperationCancelled, and no thread ever
-  blocks in a syscall.
+  thread goes on with other tasks) until the socket is ready, through the
+  poller of the task's own thread (kqueue on macOS, epoll on Linux; the
+  shared io_uring ring with P3_NET_URING=1) and the runtime's task
+  scheduler — so a cancelled token wakes a parked task with
+  EOperationCancelled, and no thread ever blocks in a syscall. Readiness
+  is delivered on the thread that runs the task, in batches, with no
+  thread hop: the shape of a hand-written per-core event loop.
 
   Called from plain (non-async) code, the same functions block the calling
   thread instead of parking it.
@@ -281,12 +284,19 @@ function inet_ntop(af: cint; src: pointer; dst: pchar; size: cint): pchar;
 type
   Paddrinfo = ^Taddrinfo;
   PPaddrinfo = ^Paddrinfo;
+  { struct addrinfo: macOS/BSD put ai_canonname before ai_addr, glibc
+    the other way round }
   Taddrinfo = record
     flags, family: cint;
     socktype, protocol: cint;
     addrlen: cuint;
+{$IFDEF DARWIN}
     canonname: pchar;
     addr: pointer;
+{$ELSE}
+    addr: pointer;
+    canonname: pchar;
+{$ENDIF}
     next: Paddrinfo;
   end;
 
