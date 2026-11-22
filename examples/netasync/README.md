@@ -2,9 +2,11 @@
 
 A concurrent TCP echo server built with the **`netasync` unit**: the whole
 server is async/await — the accept loop and one task per connection, all
-parked on socket readiness through the runtime's task scheduler instead of
-blocking threads. No threads are ever blocked in a syscall: `epoll`/`kevent`
-readiness is delivered into the tasks by one poller thread.
+parked on sockets through the runtime's task scheduler instead of blocking
+threads. No threads are ever blocked in a syscall: on Linux an io_uring
+poller submits the receive/send/poll ops themselves and hands completions to
+the tasks (epoll fallback when the kernel or sandbox has no io_uring); on
+macOS kevent readiness wakes the tasks and they make the call.
 
 What it shows:
 

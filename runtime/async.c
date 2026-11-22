@@ -1054,39 +1054,467 @@ void __pas_token_check(PasToken *k) {
 
 /*===- Waiting on descriptors (unit netasync) ------------------------------===*/
 
-/* A task parks until a descriptor is readable or writable (__pas_task_wait_fd);
- * one small poller thread holds the kernel interest and wakes tasks. The wait
- * record belongs to the task's wait: the poller only marks it dead (and drops
- * the kernel interest), the task unlinks and frees it when it resumes. A wait
- * that ends cancelled leaves its (harmless, small) record behind. Everything
- * here is covered by the same lock as the rest of the file. */
+/* A task parks until a descriptor is readable or writable (__pas_task_wait_fd)
+ * or until an async read/send completes (__pas_task_recv/__pas_task_send).
+ * One small poller thread holds the kernel interest and hands completions to
+ * the tasks. Backends, chosen at runtime: io_uring (Linux, raw syscalls — no
+ * liburing dependency), epoll (Linux fallback for kernels and sandboxes
+ * without io_uring), and kqueue (macOS). On the io_uring backend a wait
+ * submits io_uring ops (RECV/SEND/POLL_ADD) and is woken by its completion;
+ * on the poll backends the syscall happens after the wake, in the task.
+ *
+ * A wait record belongs to its wait: the park helper frees it on return when
+ * no completion can follow (poll backends; an io_uring completion reaped
+ * before the task resumes). A cancelled io_uring wait abandons its record on
+ * purpose — a completion may follow the task's rise, or never come — and
+ * leaks it (bounded, ~72 bytes per cancellation); the record is marked freed
+ * at the cancellation, and every completion reader skips freed records
+ * without touching them again.
+ *
+ * Several records may wait on one descriptor at once (tasks of one or
+ * several threads: a shared listener's acceptors, a database fd watched by
+ * a driver task here and by the pool there). The poll backends arm each
+ * record on its own dup of the fd, so every record is addressable on its
+ * own and one record's retire cannot take the kernel interest away from
+ * its still-parked peers; the readiness of the underlying file description
+ * wakes each of the records parked on it, and the extra ones simply find
+ * the transient EAGAIN their next syscall would produce. On io_uring every
+ * wait is already its own op keyed by user_data, so nothing is shared.
+ *
+ * The wait reports what fired, as a bitmask it returns: 1 = readable,
+ * 2 = writable, 4 = the descriptor is in an error state (POLLERR/POLLHUP
+ * on the poll backends, a failed poll completion on io_uring). With the
+ * dup-per-record registrations each record's report carries the event of
+ * its own registration, not of a shared one. Everything here is covered by
+ * the same lock as the rest of the file. */
+
+enum {
+  FD_BACKEND_KQUEUE = 0,
+  FD_BACKEND_EPOLL = 1,
+  FD_BACKEND_URING = 2,
+  FD_OP_RECV = 1,
+  FD_OP_SEND = 2,
+  FD_OP_POLLREAD = 3,
+  FD_OP_POLLWRITE = 4
+};
+
+/* The kernel's __kernel_timespec for IORING_OP_TIMEOUT (16 bytes); the
+ * wait record embeds one, so it is declared for all backends. */
+struct pas_timespec {
+  int64_t tv_sec;
+  int64_t tv_nsec;
+};
 
 typedef struct PasFdWait {
   int fd;
+  int arm_fd;        /* what the poll backends registered (a dup of fd); -1 on io_uring and before arming */
   int write;         /* 1: waiting to write */
-  int armed;         /* kernel interest in place */
-  int dead;          /* done: to disarm and free */
+  int op;            /* FD_OP_* (io_uring) */
+  int armed;         /* kernel interest in place (poll backends) */
+  int state;         /* io_uring: 0 waiting, 1 cancelled, 2 completed;
+                        poll backends: 1 retired */
+  int freed;         /* done for good: completions skip it, no free */
+  int pending;       /* io_uring: completions still in flight (2 for a
+                        record armed with a linked timeout, 1 otherwise) */
+  int seen;          /* io_uring: its first completion is processed */
+  int left;          /* io_uring: the task resumed and consumed the result;
+                        the record is freed by the reaper that takes
+                        pending to 0 (the task may be gone by then) */
+  int has_deadline;  /* 1: armed with a linked timeout (io_uring) or on
+                        the poller's deadline list (poll backends) */
+  int deadline_ms;   /* io_uring: the linked timeout's value */
+  int64_t deadline_us; /* poll backends: when it fires (monotonic us) */
+  struct pas_timespec ts; /* io_uring: the linked timeout's timespec */
+  int64_t res;       /* io_uring: completion result (POLL_ADD: revents,
+                        or negative on failure); poll backends: the
+                        bits the poller mapped at the wake (1/2/4, or
+                        8 = the deadline fired first) */
+  void *buf;         /* io_uring: recv/send buffer */
+  int32_t len;
   PasWaiter w;
   struct PasFdWait *next;
+  struct PasFdWait *dnext; /* the poller's deadline list */
 } PasFdWait;
 
+#ifdef __linux__
+/* Raw io_uring: constants and ring/SQE/CQE structures defined here, so the
+ * runtime needs neither liburing nor linux/io_uring.h. The opcodes are
+ * io_uring.h's enum numbers (SEND 26, RECV 27 — the older 9/10 are
+ * SENDMSG/RECVMSG, which take a struct msghdr, not a plain buffer). POLL_ADD
+ * reads its events from the SQE's poll_events/msg_flags union, not from len. */
+#ifndef IORING_OP_POLL_ADD
+#define IORING_OP_POLL_ADD 6
+#define IORING_OP_POLL_REMOVE 7
+#define IORING_OP_TIMEOUT 11
+#define IORING_OP_SEND 26
+#define IORING_OP_RECV 27
+#endif
+#ifndef IOSQE_IO_LINK
+#define IOSQE_IO_LINK (1U << 3)
+#endif
+#ifndef ETIME
+#define ETIME 62
+#endif
+#ifndef ECANCELLED
+#define ECANCELLED 125
+#endif
+#ifndef IORING_ENTER_GETEVENTS
+#define IORING_ENTER_GETEVENTS 1
+#endif
+#ifndef IORING_OFF_SQ_RING
+#define IORING_OFF_SQ_RING 0ULL
+#define IORING_OFF_CQ_RING 0x8000000ULL
+#define IORING_OFF_SQES 0x10000000ULL
+#endif
+#ifndef SYS_io_uring_setup
+#define SYS_io_uring_setup 425
+#define SYS_io_uring_enter 426
+#endif
+#define PAS_URING_ENTRIES 16384
+
+struct pas_uring_sqe {
+  uint8_t opcode;
+  uint8_t flags;
+  uint16_t ioprio;
+  int32_t fd;
+  uint64_t off;
+  uint64_t addr;
+  uint32_t len;
+  uint32_t msg_flags;
+  uint64_t user_data;
+  uint16_t buf_index;
+  uint16_t personality;
+  int32_t splice_fd_in;
+  uint64_t pad2[2];
+};
+
+struct pas_uring_cqe {
+  uint64_t user_data;
+  int32_t res;
+  uint32_t flags;
+};
+
+struct pas_uring_sq_off {
+  uint32_t head, tail, ring_mask, ring_entries, flags, dropped, array;
+  uint32_t resv[3];
+};
+
+struct pas_uring_cq_off {
+  uint32_t head, tail, ring_mask, ring_entries, overflow, cqes;
+  uint32_t resv[3];   /* (the kernel's struct is 120 bytes total) */
+};
+
+struct pas_uring_params {
+  uint32_t sq_entries, cq_entries, flags, sq_thread_cpu, sq_thread_idle,
+           features, wq_fd;
+  uint32_t resv[3];
+  struct pas_uring_sq_off sq_off;
+  struct pas_uring_cq_off cq_off;
+};
+#endif
+
 static void fd_poller_start(void);
+static void fd_retire(PasFdWait *rec);
+int32_t __pas_task_wait_fd2(int32_t fd, int32_t want_write, int32_t deadline_ms);
 static PasFdWait *fd_waits;       /* records under the lock */
+static PasFdWait *fd_deadlines;   /* poll-backend records with a deadline */
+static int64_t fd_waits_abandoned; /* records a cancelled io_uring wait left behind */
+static int fd_backend = FD_BACKEND_KQUEUE;
 static int fd_poll_fd = -1;
 static int fd_poll_started;
 static pthread_t fd_poller_thread;
 
+#ifdef __linux__
+static void *ur_sq_ring, *ur_cq_ring;
+static unsigned *ur_sq_head, *ur_sq_tail, *ur_sq_mask, *ur_sq_array;
+static unsigned *ur_cq_head, *ur_cq_tail, *ur_cq_mask;
+static struct pas_uring_cqe *ur_cqes;
+static struct pas_uring_sqe *ur_sqes;
+#endif
+
+static void fd_unlink(PasFdWait *rec) {
+  PasFdWait **p = &fd_waits;
+  while (*p && *p != rec)
+    p = &(*p)->next;
+  if (*p)
+    *p = rec->next;
+}
+
+/* The bits __pas_task_wait_fd returns: 1 = readable, 2 = writable,
+ * 4 = failed. */
+
+#ifdef __linux__
+static int64_t fd_bits_epoll(uint32_t events) {
+  int64_t bits = 0;
+  if (events & EPOLLIN)
+    bits |= 1;
+  if (events & EPOLLOUT)
+    bits |= 2;
+  if (events & (EPOLLERR | EPOLLHUP))
+    bits |= 4;
+  return bits;
+}
+#else
+static int64_t fd_bits_kqueue(const struct kevent *ev) {
+  int64_t bits = (ev->filter == EVFILT_WRITE) ? 2 : 1;
+  if ((ev->flags & EV_EOF) && ev->filter == EVFILT_WRITE)
+    bits |= 4;   /* the peer stopped receiving: sends end in EPIPE */
+  /* an EV_EOF on EVFILT_READ is a normal read side at EOF */
+  return bits;
+}
+#endif
+
+static int64_t fd_now_us(void) {
+  struct timespec ts;
+#ifdef __linux__
+  clock_gettime(CLOCK_MONOTONIC, &ts);
+#else
+  clock_gettime(CLOCK_MONOTONIC, &ts);
+#endif
+  return (int64_t)ts.tv_sec * 1000000LL + (int64_t)ts.tv_nsec / 1000;
+}
+
+/* Under the lock: the record is done for its task (poll backends). The
+ * drop releases the record's own registration (see fd_arm); the caller's
+ * fd itself is never closed here. */
+static void fd_retire(PasFdWait *rec) {
+  if (rec->state != 0)
+    return;
+  rec->state = 1;
+  if (rec->has_deadline) {
+    PasFdWait **p = &fd_deadlines;
+    while (*p && *p != rec)
+      p = &(*p)->dnext;
+    if (*p)
+      *p = rec->dnext;
+    rec->dnext = NULL;
+    rec->has_deadline = 0;
+  }
+  if (rec->armed) {
+    rec->armed = 0;
+    int afd = rec->arm_fd;
+    rec->arm_fd = -1;
+    if (afd >= 0) {
+#ifdef __linux__
+      epoll_ctl(fd_poll_fd, EPOLL_CTL_DEL, afd, NULL);
+#else
+      struct kevent kn;
+      memset(&kn, 0, sizeof kn);
+      kn.ident = (uintptr_t)afd;
+      kn.filter = rec->write ? EVFILT_WRITE : EVFILT_READ;
+      kn.flags = EV_DELETE;
+      kevent(fd_poll_fd, &kn, 1, NULL, 0, NULL);
+#endif
+      if (afd != rec->fd)
+        close(afd);
+    }
+  }
+}
+
+/* Under the lock: records whose deadline passed get their NW_TIMEOUT
+ * wake. The deadline list belongs to the poll backends (io_uring pairs
+ * the wait with a linked TIMEOUT op instead). */
+static void fd_fire_deadlines(void) {
+  int64_t now = fd_now_us();
+  PasFdWait **p = &fd_deadlines;
+  while (*p) {
+    PasFdWait *rec = *p;
+    if (rec->deadline_us > now) {
+      p = &rec->dnext;
+      continue;
+    }
+    *p = rec->dnext;
+    rec->dnext = NULL;
+    rec->has_deadline = 0;
+    if (rec->state != 0)
+      continue;
+    rec->res = 8;   /* NW_TIMEOUT: the deadline won the race */
+    wake(&rec->w, WAKE_NORMAL);
+    fd_retire(rec);
+  }
+}
+
+/* Under the lock: how long the poller may block. The 10 ms cap bounds how
+ * long a deadline added *while* it sleeps has to wait — without it, a
+ * record parked with a short deadline could sit out a full 1 s block
+ * (a wake pipe would avoid the quantum; the 100 polls/s idle cost is
+ * cheaper than any new machinery). */
+static int fd_poll_wait_ms(void) {
+  PasFdWait *p = fd_deadlines;
+  int64_t best = 0;
+  while (p) {
+    if (best == 0 || p->deadline_us < best)
+      best = p->deadline_us;
+    p = p->dnext;
+  }
+  if (best == 0)
+    return 10;
+  int64_t ms = (best - fd_now_us() + 999) / 1000;
+  if (ms < 1)
+    return 1;
+  if (ms > 10)
+    return 10;
+  return (int)ms;
+}
+
+#ifdef __linux__
+/* Under the lock: process one CQE of the ring (defined below the submit
+ * helper; declared here because the full-ring rescue inside it reaps). */
+static void uring_reap_cqe(struct pas_uring_cqe *cqe);
+/* Fills and publishes the SQE of rec, then submits (under the lock; the
+ * caller holds it). The slot stays occupied until a completion is reaped. */
+static void uring_submit_rec(PasFdWait *rec) {
+  struct pas_uring_sqe *sqe;
+  unsigned tail, head, idx;
+  int tries = 0;
+  for (;;) {
+    head = __atomic_load_n(ur_cq_head, __ATOMIC_ACQUIRE);
+    tail = __atomic_load_n(ur_sq_tail, __ATOMIC_RELAXED);
+    /* a record with a deadline publishes two linked SQEs */
+    unsigned need = rec->has_deadline ? 2 : 1;
+    if (tail - head + need <= *ur_sq_mask)
+      break;
+    /* full: reap what completed already; drop the lock around the yield so
+     * the poller can go on reaping for the other threads */
+    unsigned h2 = head;
+    unsigned ct = __atomic_load_n(ur_cq_tail, __ATOMIC_ACQUIRE);
+    while (h2 != ct) {
+      uring_reap_cqe(&ur_cqes[h2 & *ur_sq_mask]);
+      h2++;
+    }
+    __atomic_store_n(ur_cq_head, h2, __ATOMIC_RELEASE);
+    if (tail - h2 + need <= *ur_sq_mask)
+      break;
+    if (tries++ > 1000)
+      __pas_runtime_error("netasync: too many concurrent socket waits");
+    UNLOCK();
+    sched_yield();
+    LOCK();
+  }
+  idx = tail & *ur_sq_mask;
+  sqe = &ur_sqes[idx];
+  memset(sqe, 0, sizeof *sqe);
+  sqe->user_data = (uint64_t)(uintptr_t)rec;
+  switch (rec->op) {
+    case FD_OP_RECV:
+      sqe->opcode = IORING_OP_RECV;
+      sqe->fd = rec->fd;
+      sqe->addr = (uint64_t)(uintptr_t)rec->buf;
+      sqe->len = (uint32_t)rec->len;
+      break;
+    case FD_OP_SEND:
+      sqe->opcode = IORING_OP_SEND;
+      sqe->fd = rec->fd;
+      sqe->addr = (uint64_t)(uintptr_t)rec->buf;
+      sqe->len = (uint32_t)rec->len;
+      sqe->msg_flags = MSG_NOSIGNAL;
+      break;
+    case FD_OP_POLLREAD:
+      sqe->opcode = IORING_OP_POLL_ADD;
+      sqe->fd = rec->fd;
+      sqe->msg_flags = POLLIN;   /* (the poll_events field) */
+      break;
+    default:
+      sqe->opcode = IORING_OP_POLL_ADD;
+      sqe->fd = rec->fd;
+      sqe->msg_flags = POLLOUT;
+      break;
+  }
+  __atomic_store_n(ur_sq_tail, tail + 1, __ATOMIC_RELEASE);
+  if (rec->has_deadline) {
+    /* the wait's own op is left unlinked: an independent TIMEOUT is
+     * submitted next to it, and either completes first (the pair's
+     * pending/left logic in the reaper handles the remnant; no link) */
+    struct pas_uring_sqe *sqe2 = &ur_sqes[(tail + 1) & *ur_sq_mask];
+    memset(sqe2, 0, sizeof *sqe2);
+    sqe2->user_data = (uint64_t)(uintptr_t)rec;
+    sqe2->opcode = IORING_OP_TIMEOUT;
+    rec->ts.tv_sec = (int64_t)rec->deadline_ms / 1000;
+    rec->ts.tv_nsec = (int64_t)(rec->deadline_ms % 1000) * 1000000;
+    sqe2->addr = (uint64_t)(uintptr_t)&rec->ts;
+    sqe2->len = 1;
+    __atomic_store_n(ur_sq_tail, tail + 2, __ATOMIC_RELEASE);
+    int r = syscall(SYS_io_uring_enter, fd_poll_fd, 2, 0, 0, NULL, 0);
+    (void)r;
+    return;
+  }
+  int r = syscall(SYS_io_uring_enter, fd_poll_fd, 1, 0, 0, NULL, 0);
+  (void)r;
+}
+
+/* A wait cancelled on the io_uring backend: for a poll op, ask the kernel
+ * to stop it (best effort — the abandoned record never needs its
+ * completion); recv/send complete on their own. */
+static void uring_cancel_rec(PasFdWait *rec) {
+  unsigned tail, head;
+  if (rec->op != FD_OP_POLLREAD && rec->op != FD_OP_POLLWRITE)
+    return;
+  head = __atomic_load_n(ur_cq_head, __ATOMIC_ACQUIRE);
+  tail = __atomic_load_n(ur_sq_tail, __ATOMIC_RELAXED);
+  if (tail - head >= *ur_sq_mask)
+    return;                    /* full: the poll completes on its own */
+  struct pas_uring_sqe *sqe = &ur_sqes[tail & *ur_sq_mask];
+  memset(sqe, 0, sizeof *sqe);
+  sqe->opcode = IORING_OP_POLL_REMOVE;
+  sqe->addr = (uint64_t)(uintptr_t)rec;
+  __atomic_store_n(ur_sq_tail, tail + 1, __ATOMIC_RELEASE);
+  int r = syscall(SYS_io_uring_enter, fd_poll_fd, 1, 0, 0, NULL, 0);
+  (void)r;
+}
+
+/* Under the lock: one CQE reaped. The first completion of a record stores
+ * the result and wakes its task; a record armed with a linked timeout has
+ * a pair of completions, so the pending count falls with every member and
+ * the last one frees the record unless the task already left it (then the
+ * reaper frees). A cancelled record is marked freed at its cancellation
+ * and every later member is skipped here. */
+static void uring_reap_cqe(struct pas_uring_cqe *cqe) {
+  PasFdWait *rec = (PasFdWait *)(uintptr_t)cqe->user_data;
+  if (!rec || rec->freed)
+    return;          /* NULL: a poll removal; freed: abandoned or done */
+  if (rec->pending > 0)
+    rec->pending--;
+  if (!rec->seen) {
+    rec->seen = 1;
+    rec->res = cqe->res;
+    rec->freed = rec->pending == 0;
+    fd_unlink(rec);
+    wake(&rec->w, WAKE_NORMAL);
+  } else if (rec->pending == 0) {
+    rec->freed = 1;
+    if (rec->left)
+      free(rec);
+  }
+}
+#endif
+
+/* Called under the lock: submit the kernel interest for rec. On the poll
+ * backends the record arms its own dup of fd: an fd may have several
+ * records parked at once (see the section comment), and the kernel would
+ * otherwise merge or overwrite registrations keyed by the fd alone — epoll
+ * drops a second ADD with EEXIST, and a kqueue knote carries one udata, so
+ * a second EV_ADD would re-address the knote the first record parked on. */
 static void fd_arm(PasFdWait *rec) {
 #ifdef __linux__
+  if (fd_backend == FD_BACKEND_URING) {
+    uring_submit_rec(rec);
+    return;
+  }
+  rec->arm_fd = dup(rec->fd);
+  if (rec->arm_fd < 0)
+    rec->arm_fd = rec->fd;   /* out of descriptors: share, best effort */
   struct epoll_event ev;
   memset(&ev, 0, sizeof ev);
   ev.events = rec->write ? EPOLLOUT : EPOLLIN;
   ev.data.ptr = rec;
-  epoll_ctl(fd_poll_fd, EPOLL_CTL_ADD, rec->fd, &ev);
+  epoll_ctl(fd_poll_fd, EPOLL_CTL_ADD, rec->arm_fd, &ev);
 #else
+  rec->arm_fd = dup(rec->fd);
+  if (rec->arm_fd < 0)
+    rec->arm_fd = rec->fd;   /* out of descriptors: share, best effort */
   struct kevent kn;
   memset(&kn, 0, sizeof kn);
-  kn.ident = (uintptr_t)rec->fd;
+  kn.ident = (uintptr_t)rec->arm_fd;
   kn.filter = rec->write ? EVFILT_WRITE : EVFILT_READ;
   kn.flags = EV_ADD;
   kn.udata = rec;
@@ -1095,74 +1523,218 @@ static void fd_arm(PasFdWait *rec) {
   rec->armed = 1;
 }
 
-static void fd_disarm(PasFdWait *rec) {
+/* Parks the current task on rec (linked); on return the lock is released and
+ * rec is disposed of (freed by the task, or abandoned when cancelled on
+ * io_uring): *out carries the io_uring completion (recv/send), otherwise
+ * the mapped bits (poll backends) or the raw completion (io_uring poll
+ * waits). Returns 0 completed, 1 cancelled. */
+static int fd_park(PasFdWait *rec, int64_t *out) {
+  PasContext *c = context();
+  PasTask *me = c->current;
+  Observation o;
+  observe(me, &o);
+  me->state = TS_WAITING;
+  me->wake = WAKE_NORMAL;
+  UNLOCK();
+  suspend(me);
+  LOCK();
+  me->state = TS_RUNNING;
+  unobserve(&o);
+  int cancelled = me->wake == WAKE_CANCEL;
 #ifdef __linux__
-  epoll_ctl(fd_poll_fd, EPOLL_CTL_DEL, rec->fd, NULL);
-#else
-  struct kevent kn;
-  memset(&kn, 0, sizeof kn);
-  kn.ident = (uintptr_t)rec->fd;
-  kn.filter = rec->write ? EVFILT_WRITE : EVFILT_READ;
-  kn.flags = EV_DELETE;
-  kevent(fd_poll_fd, &kn, 1, NULL, 0, NULL);
+  if (fd_backend == FD_BACKEND_URING) {
+    int64_t res = rec->res; /* the completion */
+    if (cancelled) {
+      /* no free here: a completion may follow the task's rise (or never
+       * come) — the record is abandoned, marked freed so completions and
+       * submissions skip it */
+      rec->state = 1;
+      rec->freed = 1;
+      fd_waits_abandoned++;
+      uring_cancel_rec(rec);   /* best effort: stop a poll still pending */
+      fd_unlink(rec);
+      UNLOCK();
+      *out = res;
+      return 1;
+    }
+    fd_unlink(rec);
+    UNLOCK();
+    *out = res;
+    if (rec->freed)
+      free(rec);       /* every member of the pair is reaped: all ours */
+    else
+      rec->left = 1;   /* the linked timeout may still complete: the
+                          reaper that takes pending to 0 frees it */
+    return 0;
+  }
 #endif
-  rec->armed = 0;
+  /* poll backends: drop the kernel interest; there is no completion to
+   * wait for — the syscall happens in the caller after the wake. The bits
+   * the poller mapped in rec->res go to the caller. */
+  fd_retire(rec);
+  *out = rec->res;
+  fd_unlink(rec);
+  UNLOCK();
+  free(rec);
+  return cancelled;
 }
 
-/* Under the lock: the record is done for its task. */
-static void fd_retire(PasFdWait *rec) {
-  if (rec->dead)
-    return;
-  rec->dead = 1;
-  if (rec->armed)
-    fd_disarm(rec);
+#ifdef __linux__
+/* Parks the current task on one io_uring op (RECV or SEND): submits it,
+ * waits for the completion, and retries the transient results (a readiness
+ * race, or a redelivered signal) after re-parking on the fd. The result is
+ * the op's completion: what recv/send would return, or negative (-errno);
+ * a cancelled wait raises. */
+static int64_t fd_uring_op(int op, int32_t fd, void *buf, int32_t len) {
+  PasTask *me = context()->current;
+  for (;;) {
+    int64_t res;
+    LOCK();
+    if (cancelled_locked(me->token)) {
+      UNLOCK();
+      raise_cancelled();
+    }
+    PasFdWait *rec = malloc(sizeof *rec);
+    if (!rec)
+      __pas_runtime_error("out of memory waiting on a socket");
+    memset(rec, 0, sizeof *rec);
+    rec->fd = fd;
+    rec->arm_fd = -1;
+    rec->op = op;
+    rec->buf = buf;
+    rec->len = len;
+    rec->w.next = NULL;
+    rec->w.task = me;
+    rec->w.thread = NULL;
+    rec->w.signaled = 0;
+    rec->next = fd_waits;
+    fd_waits = rec;
+    fd_arm(rec);                    /* submits the op */
+    int cancelled = fd_park(rec, &res);
+    if (cancelled)
+      raise_cancelled();            /* the record was abandoned above */
+    if (res >= 0)
+      return res;
+    if (res == -EINTR)
+      continue;
+    if (res != -EAGAIN && res != -EWOULDBLOCK)
+      return res;                   /* a failure to report to the caller */
+    /* lost the readiness race: re-park until readable/writable */
+    __pas_task_wait_fd(fd, op == FD_OP_SEND ? 1 : 0);
+  }
 }
+#endif
 
+static void *fd_poller_main(void *arg);
+
+#ifndef __linux__
 static void *fd_poller_main(void *arg) {
   (void)arg;
-  struct pollfd pf;
-  pf.events = 0;
   for (;;) {
-#ifdef __linux__
-    struct epoll_event evs[64];
-    int n = epoll_wait(fd_poll_fd, evs, 64, 1000);
-#else
+    int wait_ms;
+    LOCK();
+    fd_fire_deadlines();
+    wait_ms = fd_poll_wait_ms();
+    UNLOCK();
     struct kevent evs[64];
     struct timespec ts;
-    ts.tv_sec = 1;
-    ts.tv_nsec = 0;
+    ts.tv_sec = wait_ms / 1000;
+    ts.tv_nsec = (long)(wait_ms % 1000) * 1000000L;
     int n = kevent(fd_poll_fd, NULL, 0, evs, 64, &ts);
-#endif
-    if (n < 0)
+    if (n < 0) {
+      if (errno == EINTR)
+        continue;
       continue;
+    }
     for (int i = 0; i < n; i++) {
-#ifdef __linux__
-      PasFdWait *rec = evs[i].data.ptr;
-#else
+      if (evs[i].flags & EV_ERROR)
+        continue;      /* disarmed while in flight; nothing to do */
       PasFdWait *rec = evs[i].udata;
-#endif
       LOCK();
-      if (!rec->dead) {
+      if (rec->state == 0) {
+        rec->res = fd_bits_kqueue(&evs[i]);
         wake(&rec->w, WAKE_NORMAL);
         fd_retire(rec);
-      }
-      UNLOCK();
-    }
-    { /* records marked dead by tasks that got cancelled while parked */
-      LOCK();
-      for (PasFdWait *rec = fd_waits; rec; rec = rec->next) {
-        if (rec->dead && rec->armed)
-          fd_disarm(rec);
       }
       UNLOCK();
     }
   }
   return NULL;
 }
+#endif
 
-/* Turns a descriptor blocking (on 0) or non-blocking (other), for unit
-   netasync: plain C, so the variadic fcntl is safe here (calls emitted by
-   p3 threads cannot use it). */
+#ifdef __linux__
+static void *fd_poller_main(void *arg) {
+  (void)arg;
+  if (fd_backend == FD_BACKEND_URING) {
+    for (;;) {
+      /* cheap check without the lock: anything to reap? */
+      unsigned head = __atomic_load_n(ur_cq_head, __ATOMIC_ACQUIRE);
+      unsigned tail = __atomic_load_n(ur_cq_tail, __ATOMIC_ACQUIRE);
+      if (head == tail) {
+        /* nothing: block until the next completion (this also submits
+         * what pending SQEs tasks left published in the ring) */
+        syscall(SYS_io_uring_enter, fd_poll_fd, 0, 1,
+                IORING_ENTER_GETEVENTS, NULL, 0);
+        continue;
+      }
+      LOCK();
+      /* reap fresh state (tasks may have reaped under the lock meanwhile) */
+      head = __atomic_load_n(ur_cq_head, __ATOMIC_RELAXED);
+      tail = __atomic_load_n(ur_cq_tail, __ATOMIC_ACQUIRE);
+      while (head != tail) {
+        uring_reap_cqe(&ur_cqes[head & *ur_sq_mask]);
+        head++;
+      }
+      __atomic_store_n(ur_cq_head, head, __ATOMIC_RELEASE);
+      UNLOCK();
+    }
+  }
+  for (;;) {
+    int wait_ms;
+    LOCK();
+    fd_fire_deadlines();
+    wait_ms = fd_poll_wait_ms();
+    UNLOCK();
+    struct epoll_event evs[64];
+    int n = epoll_wait(fd_poll_fd, evs, 64, wait_ms);
+    if (n < 0) {
+      if (errno == EINTR)
+        continue;
+      continue;
+    }
+    for (int i = 0; i < n; i++) {
+      PasFdWait *rec = evs[i].data.ptr;
+      LOCK();
+      if (rec->state == 0) {
+        rec->res = fd_bits_epoll(evs[i].events);
+        wake(&rec->w, WAKE_NORMAL);
+        fd_retire(rec);
+      }
+      UNLOCK();
+    }
+  }
+}
+#endif
+
+/* The wait records a cancelled io_uring wait abandoned on purpose (a
+ * completion may follow the task's rise, or never come): the record leaks
+ * by design, ~72 bytes each, bounded by the number of cancellations. The
+ * poll backends retire their records cleanly, so this stays 0 there. Leak
+ * tests compare this counter, not the allocator. For unit netasync. */
+int64_t __pas_net_waits_abandoned(void) {
+  return fd_waits_abandoned;
+}
+
+/* The poller backend in place: 0 kevent, 1 epoll, 2 io_uring. For benchmark
+ * reports and logs. For unit netasync. */
+int32_t __pas_net_fd_backend(void) {
+  return fd_backend;
+}
+
+/* Marks a descriptor blocking (on 0) or non-blocking, through the C runtime
+ * (plain C can call the variadic fcntl; calls emitted by p3 threads cannot).
+ * For unit netasync. */
 void __pas_fd_nonblock(int32_t fd, int32_t on) {
   int flags = fcntl(fd, F_GETFL, 0);
   if (flags < 0)
@@ -1193,12 +1765,64 @@ static void fd_poller_start(void) {
     return;
   fd_poll_started = 1;
 #ifdef __linux__
-  fd_poll_fd = epoll_create1(0);
+  fd_backend = FD_BACKEND_EPOLL;
+  { /* io_uring first; falls back to epoll when the kernel has none */
+    struct pas_uring_params params;
+    memset(&params, 0, sizeof params);
+    int fd = syscall(SYS_io_uring_setup, PAS_URING_ENTRIES, &params);
+    if (fd >= 0 && params.sq_off.array && params.cq_off.cqes) {
+      size_t sq_len = params.sq_off.array +
+                      (size_t)params.sq_entries * sizeof(unsigned);
+      size_t cq_len = params.cq_off.cqes +
+                      (size_t)params.cq_entries * sizeof(struct pas_uring_cqe);
+      size_t sqe_len = (size_t)params.sq_entries * sizeof(struct pas_uring_sqe);
+      ur_sq_ring = mmap(NULL, sq_len, PROT_READ | PROT_WRITE,
+                        MAP_SHARED | MAP_POPULATE, fd, IORING_OFF_SQ_RING);
+      ur_cq_ring = mmap(NULL, cq_len, PROT_READ | PROT_WRITE,
+                        MAP_SHARED | MAP_POPULATE, fd, IORING_OFF_CQ_RING);
+      ur_sqes = mmap(NULL, sqe_len, PROT_READ | PROT_WRITE,
+                     MAP_SHARED | MAP_POPULATE, fd, IORING_OFF_SQES);
+      if (ur_sq_ring != MAP_FAILED && ur_cq_ring != MAP_FAILED &&
+          ur_sqes != MAP_FAILED) {
+        ur_sq_head = (unsigned *)((char *)ur_sq_ring + params.sq_off.head);
+        ur_sq_tail = (unsigned *)((char *)ur_sq_ring + params.sq_off.tail);
+        ur_sq_mask = (unsigned *)((char *)ur_sq_ring + params.sq_off.ring_mask);
+        ur_sq_array = (unsigned *)((char *)ur_sq_ring + params.sq_off.array);
+        ur_cq_head = (unsigned *)((char *)ur_cq_ring + params.cq_off.head);
+        ur_cq_tail = (unsigned *)((char *)ur_cq_ring + params.cq_off.tail);
+        ur_cq_mask = (unsigned *)((char *)ur_cq_ring + params.cq_off.ring_mask);
+        ur_cqes = (struct pas_uring_cqe *)((char *)ur_cq_ring +
+                                           params.cq_off.cqes);
+        /* the SQ array is userspace's job: map each index to itself (the
+         * kernel reads SQEs through it — an all-zero array resubmits the
+         * first SQE over and over and drops the rest) */
+        for (unsigned i = 0; i < params.sq_entries; i++)
+          ur_sq_array[i] = i;
+        *ur_sq_tail = 0;
+        fd_poll_fd = fd;
+        fd_backend = FD_BACKEND_URING;
+      } else {
+        if (ur_sq_ring != MAP_FAILED)
+          munmap(ur_sq_ring, sq_len);
+        if (ur_cq_ring != MAP_FAILED)
+          munmap(ur_cq_ring, cq_len);
+        if (ur_sqes != MAP_FAILED)
+          munmap(ur_sqes, sqe_len);
+        close(fd);
+      }
+    }
+  }
+  if (fd_backend != FD_BACKEND_URING) {
+    fd_poll_fd = epoll_create1(0);
+    if (fd_poll_fd < 0)
+      __pas_runtime_error("the netasync poller could not start");
+  }
 #else
+  fd_backend = FD_BACKEND_KQUEUE;
   fd_poll_fd = kqueue();
-#endif
   if (fd_poll_fd < 0)
     __pas_runtime_error("the netasync poller could not start");
+#endif
   pthread_attr_t a2;
   pthread_attr_init(&a2);
   pthread_attr_setdetachstate(&a2, PTHREAD_CREATE_DETACHED);
@@ -1207,10 +1831,20 @@ static void fd_poller_start(void) {
   pthread_attr_destroy(&a2);
 }
 
-/* Parks the current task until fd is readable (want 0) or writable (want 1).
- * Outside a task, it blocks this thread with poll(). A cancelled token woke
- * the task with EOperationCancelled (raised here). */
-void __pas_task_wait_fd(int32_t fd, int32_t want_write) {
+/* Parks the current task until fd is readable (want_write 0) or writable
+ * (want_write 1), and reports what fired: its integer result is the bitmask
+ * 1 = readable, 2 = writable, 4 = the descriptor is in an error state
+ * (POLLERR/POLLHUP revents on the poll backends, a negative POLL_ADD
+ * completion on io_uring), and 8 = the deadline expired first (only
+ * __pas_task_wait_fd2). Outside a task, it blocks this thread with
+ * poll(). A cancelled token woke the task with EOperationCancelled
+ * (raised here; on io_uring the record is abandoned and leaks, unlike a
+ * deadline, whose pair completes and frees normally). */
+int32_t __pas_task_wait_fd(int32_t fd, int32_t want_write) {
+  return __pas_task_wait_fd2(fd, want_write, 0);
+}
+
+int32_t __pas_task_wait_fd2(int32_t fd, int32_t want_write, int32_t deadline_ms) {
   PasContext *c = context();
   PasTask *me = c->current;
   if (!me) {
@@ -1218,9 +1852,27 @@ void __pas_task_wait_fd(int32_t fd, int32_t want_write) {
     memset(&pf, 0, sizeof pf);
     pf.fd = fd;
     pf.events = want_write ? POLLOUT : POLLIN;
-    while (poll(&pf, 1, 1000) <= 0)
-      ;
-    return;
+    int64_t remain = deadline_ms;
+    for (;;) {
+      if (deadline_ms > 0 && remain <= 0)
+        return 8;
+      int poll_ms = 1000;
+      if (deadline_ms > 0 && remain < 1000)
+        poll_ms = (int)remain;
+      int r = poll(&pf, 1, poll_ms);
+      if (r > 0) {
+        int32_t bits = 0;
+        if (pf.revents & POLLIN)
+          bits |= 1;
+        if (pf.revents & POLLOUT)
+          bits |= 2;
+        if (pf.revents & (POLLERR | POLLHUP | POLLNVAL))
+          bits |= 4;
+        return bits;
+      }
+      if (deadline_ms > 0)
+        remain -= poll_ms;
+    }
   }
   LOCK();
   if (cancelled_locked(me->token)) {
@@ -1233,37 +1885,147 @@ void __pas_task_wait_fd(int32_t fd, int32_t want_write) {
     __pas_runtime_error("out of memory waiting on a socket");
   memset(rec, 0, sizeof *rec);
   rec->fd = fd;
+  rec->arm_fd = -1;
   rec->write = want_write ? 1 : 0;
+  rec->op = want_write ? FD_OP_POLLWRITE : FD_OP_POLLREAD;
+  rec->pending = 1;   /* io_uring: one completion; a deadline makes it two */
+  if (deadline_ms > 0) {
+    rec->has_deadline = 1;
+    rec->deadline_ms = deadline_ms;
+    rec->deadline_us = fd_now_us() + (int64_t)deadline_ms * 1000;
+  }
   rec->w.next = NULL;
   rec->w.task = me;
   rec->w.thread = NULL;
   rec->w.signaled = 0;
   rec->next = fd_waits;
   fd_waits = rec;
-  fd_arm(rec);
-  Observation o;
-  observe(me, &o);
-  me->state = TS_WAITING;
-  me->wake = WAKE_NORMAL;
-  UNLOCK();
-  suspend(me);
-  LOCK();
-  me->state = TS_RUNNING;
-  unobserve(&o);
-  int cancelled = me->wake == WAKE_CANCEL;
-  fd_retire(rec);
-  { /* the record is the task's: drop it from the list, free it here */
-    PasFdWait **p = &fd_waits;
-    while (*p && *p != rec)
-      p = &(*p)->next;
-    if (*p)
-      *p = rec->next;
+#ifdef __linux__
+  if (fd_backend == FD_BACKEND_URING && rec->has_deadline)
+    rec->pending = 2;
+  else
+#endif
+  if (rec->has_deadline) {
+    rec->dnext = fd_deadlines;
+    fd_deadlines = rec;
   }
-  UNLOCK();
-  free(rec);
+  fd_arm(rec);
+  int64_t fired;
+  int cancelled = fd_park(rec, &fired);
   if (cancelled)
     raise_cancelled();
+#ifdef __linux__
+  if (fd_backend == FD_BACKEND_URING) {
+    /* raw POLL_ADD revents come in the completion (negative on failure);
+     * a deadline's pair carries -ECANCELLED / -ETIME, both a timeout */
+    int32_t bits = 0;
+    if (fired < 0) {
+      if (-fired == ECANCELLED || -fired == ETIME)
+        bits = 8;
+      else
+        bits = 4;
+    } else {
+      if (fired & 1)
+        bits |= 1;               /* POLLIN */
+      if (fired & 4)
+        bits |= 2;               /* POLLOUT */
+      if (fired & (8 | 16 | 32))
+        bits |= 4;               /* POLLERR | POLLHUP | POLLNVAL */
+    }
+    return bits;
+  }
+#endif
+  return (int32_t)fired;   /* the poll backends deliver the mapped bits */
 }
+
+/* Parks the current task until recv(fd, buf, len) completes; the result: the
+ * count read, 0 at the end of the connection, or negative (-errno). Outside
+ * a task: polls, then recvs. */
+int64_t __pas_task_recv(int32_t fd, void *buf, int32_t len) {
+  PasContext *c = context();
+  PasTask *me = c->current;
+  if (!me) {
+    struct pollfd pf;
+    memset(&pf, 0, sizeof pf);
+    pf.fd = fd;
+    pf.events = POLLIN;
+    for (;;) {
+      while (poll(&pf, 1, 1000) <= 0)
+        ;
+      ssize_t n = recv(fd, buf, len, 0);
+      if (n < 0 && errno == EINTR)
+        continue;
+      if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK))
+        continue;
+      return n < 0 ? -(int64_t)errno : n;
+    }
+  }
+#ifdef __linux__
+  if (fd_backend == FD_BACKEND_URING) {
+    /* native async recv: the completion is the recv result */
+    return fd_uring_op(FD_OP_RECV, fd, buf, len);
+  }
+#endif
+  /* poll backends: park until readiness (raises on cancellation), then
+   * the recv syscall happens here */
+  for (;;) {
+    __pas_task_wait_fd(fd, 0);
+    ssize_t n = recv(fd, buf, len, 0);
+    if (n > 0)
+      return n;
+    if (n == 0)
+      return 0;
+    if (errno == EINTR)
+      continue;
+    if (errno == EAGAIN || errno == EWOULDBLOCK)
+      continue;                     /* lost the readiness race: re-park */
+    return -(int64_t)errno;
+  }
+}
+
+/* Same parking protocol for send(fd, buf, len). */
+int64_t __pas_task_send(int32_t fd, void *buf, int32_t len) {
+  PasContext *c = context();
+  PasTask *me = c->current;
+  if (!me) {
+    ssize_t n;
+    for (;;) {
+      n = send(fd, buf, len, MSG_NOSIGNAL);
+      if (n >= 0)
+        return n;
+      if (errno == EINTR)
+        continue;
+      if (errno == EAGAIN || errno == EWOULDBLOCK) {
+        struct pollfd pf;
+        memset(&pf, 0, sizeof pf);
+        pf.fd = fd;
+        pf.events = POLLOUT;
+        poll(&pf, 1, 1000);
+        continue;
+      }
+      return -(int64_t)errno;
+    }
+  }
+#ifdef __linux__
+  if (fd_backend == FD_BACKEND_URING) {
+    /* native async send: the completion is the send result */
+    return fd_uring_op(FD_OP_SEND, fd, buf, len);
+  }
+#endif
+  for (;;) {
+    ssize_t n = send(fd, buf, len, MSG_NOSIGNAL);
+    if (n >= 0)
+      return n;
+    if (errno == EINTR)
+      continue;
+    if (errno == EAGAIN || errno == EWOULDBLOCK) {
+      __pas_task_wait_fd(fd, 0 + 1);
+      continue;
+    }
+    return -(int64_t)errno;
+  }
+}
+
 
 /*===- Mutexes and wait queues (for unit threading) -------------------------===*/
 

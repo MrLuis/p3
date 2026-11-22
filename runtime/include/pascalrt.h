@@ -469,14 +469,34 @@ int32_t __pas_task_done(PasTask *t);
 void __pas_task_detach(PasTask *t, void *handler_fn, void *handler_link);
 void __pas_task_sleep(int32_t ms);
 /* Parks the current task until fd is readable (want_write 0) or writable
- * (want_write 1), through one shared poller thread (for unit netasync).
- * Wakes it with EOperationCancelled if its token is cancelled. */
-void __pas_task_wait_fd(int32_t fd, int32_t want_write);
+ * (want_write 1), through one shared poller thread. Its result is the
+ * bitmask of what fired: 1 readable, 2 writable, 4 failed (POLLERR/POLLHUP
+ * on the poll backends, a failed poll completion on io_uring). Wakes the
+ * task with EOperationCancelled if its token is cancelled. For unit
+ * netasync. */
+int32_t __pas_task_wait_fd(int32_t fd, int32_t want_write);
+/* Same, with a deadline (0: wait as long as it takes). DeadlineMs counts
+ * from the call; the result's bit 8 (NW_TIMEOUT) says the deadline expired
+ * with nothing else to report, and — unlike a cancellation — the wait
+ * record completes and is freed normally. */
+int32_t __pas_task_wait_fd2(int32_t fd, int32_t want_write, int32_t deadline_ms);
 /* Marks fd blocking (on 0) or non-blocking, through the C runtime (plain C
    can call the variadic fcntl; calls emitted by p3 threads cannot) */
 void __pas_fd_nonblock(int32_t fd, int32_t on);
 /* Starts the netasync poller thread (unit netasync calls it at init) */
 void __pas_fd_poller_start(void);
+/* The wait records a cancelled io_uring wait abandoned by design (~72 B
+ * each; the poll backends retire cleanly). For unit netasync's leak tests. */
+int64_t __pas_net_waits_abandoned(void);
+/* The netasync poller backend in place: 0 kevent, 1 epoll, 2 io_uring.
+ * For benchmark reports and logs. */
+int32_t __pas_net_fd_backend(void);
+/* Parks the current task until recv(fd, buf, len) completes; result: the
+ * count, 0 at connection end, or negative (-errno). For unit netasync. */
+int64_t __pas_task_recv(int32_t fd, void *buf, int32_t len);
+/* Parks the current task until send(fd, buf, len) completes; result: the
+ * count sent or negative (-errno). For unit netasync. */
+int64_t __pas_task_send(int32_t fd, void *buf, int32_t len);
 PasTask *__pas_when_all(PasTask *const *tasks, int64_t n, const PasDynInfo *result_info,
                         const PasDynInfo *elem);
 PasTask *__pas_when_any(PasTask *const *tasks, int64_t n, const PasDynInfo *int_info);

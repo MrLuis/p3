@@ -1,0 +1,15 @@
+reuseport: ok
+resolve: 127.0.0.1
+client 1: one
+client 2: 2nd
+client 3: three!
+client 4: four
+served: 4
+extra parks: 1
+udp 1: alpha
+udp 2: beta
+extra waits: ok
+keepalive: set
+shutwrite: ok
+wait timeout: ok
+waits abandoned: 0
