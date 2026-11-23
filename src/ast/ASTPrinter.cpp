@@ -343,6 +343,12 @@ class ASTPrinter : public StmtVisitor<ASTPrinter>,
       OS << " library";
     if (H & Decl::HintUnimplemented)
       OS << " unimplemented";
+    // [Attr] / [Attr(a, b)]: the name, and how many arguments
+    for (const Attribute &A : D->getAttributes()) {
+      OS << " attribute '" << A.Name.Name << '\'';
+      if (A.HasArgs)
+        OS << '(' << A.Args.size() << ')';
+    }
   }
 
   void visibility(Decl *D) {

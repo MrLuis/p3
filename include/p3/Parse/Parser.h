@@ -221,6 +221,13 @@ class Parser {
   unsigned char hintFlagOf(const Token &T) const;
   Hints parseHints();
   bool parseSeparatedHint(Hints &H);
+  /// Attributes (`[Name]`, `[Name(args)]`) before a declaration, collected
+  /// until the declaration they belong to is made.
+  using AttrList = llvm::SmallVector<Attribute, 2>;
+  bool parseAttributes(AttrList &Out);
+  AttrList CarriedAttrs; ///< read by a type part, for the routine after it
+  llvm::ArrayRef<Attribute> takeAttributes(AttrList &Pending);
+  void attachAttributes(AttrList &Pending, llvm::ArrayRef<Decl *> Ds);
   /// A calling convention word (cdecl, stdcall) at Tok, or Default.
   CallConv callConvOf(const Token &T) const;
   /// Consumes the calling convention word at Tok into CC (warning if one

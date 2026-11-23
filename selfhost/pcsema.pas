@@ -4206,8 +4206,54 @@ procedure declareInterface(td: PDecl); forward;
 procedure declareAdvancedRecord(td: PDecl); forward;
 procedure declareHelper(td: PDecl); forward;
 
+{ The arguments of d's attributes must be constants. (An attribute names a
+  source generator; nothing here gives one a meaning.) }
+procedure checkAttributes(d: PDecl);
+var
+  i, j: longint;
+  a: PAttribute;
+  c: TConstant;
+  ok: boolean;
+begin
+  if (d^.attrs.count = 0) or d^.attrsChecked then
+    exit;
+  d^.attrsChecked := true;
+  for i := 0 to d^.attrs.count - 1 do
+  begin
+    a := PAttribute(listGet(d^.attrs, i));
+    for j := 0 to a^.args.count - 1 do
+      ok := evaluateConstant(PNode(listGet(a^.args, j)),
+                             'an argument of attribute ''' +
+                             nameStr(a^.name.spelling) + '''', c);
+  end;
+end;
+
+{ The attributes of a type declaration and of its fields and members. }
+procedure checkTypeAttributes(td: PDecl);
+var
+  ts: PTypeSpec;
+  i: longint;
+begin
+  checkAttributes(td);
+  ts := td^.typeSpec;
+  if ts = nil then
+    exit;
+  if ts^.kind = tsClass then
+    for i := 0 to ts^.memberList.count - 1 do
+      checkAttributes(PDecl(listGet(ts^.memberList, i)))
+  else if ts^.kind = tsRecord then
+  begin
+    for i := 0 to ts^.recMembers.count - 1 do
+      checkAttributes(PDecl(listGet(ts^.recMembers, i)));
+    if ts^.fields <> nil then
+      for i := 0 to ts^.fields^.fixed.count - 1 do
+        checkAttributes(PDecl(listGet(ts^.fields^.fixed, i)));
+  end;
+end;
+
 procedure declareType(td: PDecl);
 begin
+  checkTypeAttributes(td);
   if td^.tgGeneric then
   begin
     declareGenericType(td);
@@ -7757,6 +7803,7 @@ var
   p, res: PDecl;
   resultTy: PType;
 begin
+  checkAttributes(r);
   for i := 0 to r^.params.count - 1 do
   begin
     p := PDecl(listGet(r^.params, i));

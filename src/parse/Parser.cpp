@@ -803,8 +803,20 @@ void Parser::parseDeclarations(llvm::SmallVectorImpl<Decl *> &Decls,
                                bool InInterface) {
   int LastRank = -1;
   llvm::StringRef LastWord;
+  AttrList PendingAttrs; // [Attr] before a routine, held until it is parsed
 
-  while ((startsDeclarationPart() || startsGeneric()) && !Diags.shouldStop()) {
+  while ((startsDeclarationPart() || startsGeneric() ||
+          Tok.is(tok::l_square)) &&
+         !Diags.shouldStop()) {
+    PendingAttrs.append(CarriedAttrs.begin(), CarriedAttrs.end());
+    CarriedAttrs.clear();
+    if (Tok.is(tok::l_square)) {
+      if (!parseAttributes(PendingAttrs)) {
+        PendingAttrs.clear();
+        skipUntil({tok::semi, tok::kw_begin});
+      }
+      continue;
+    }
     if (Tok.is(tok::identifier)) { // generic function F<T>...
       if (RoutineDecl *R = parseGenericRoutine(InInterface))
         Decls.push_back(R);
@@ -913,6 +925,9 @@ void Parser::parseDeclarations(llvm::SmallVectorImpl<Decl *> &Decls,
       break;
     }
     }
+    if (!PendingAttrs.empty() && Decls.size() > FirstDecl)
+      attachAttributes(PendingAttrs,
+                       llvm::ArrayRef<Decl *>(Decls).slice(FirstDecl));
     if (MethodSwitches) {
       Recording = nullptr;
       auto *R = Decls.size() == FirstDecl + 1
@@ -933,7 +948,13 @@ void Parser::parseDeclarations(llvm::SmallVectorImpl<Decl *> &Decls,
         R->setTemplateMember();
       }
     }
+    PendingAttrs.clear();
   }
+  PendingAttrs.append(CarriedAttrs.begin(), CarriedAttrs.end());
+  CarriedAttrs.clear();
+  if (!PendingAttrs.empty())
+    Diags.error(Tok.getLocation(), "attributes without a declaration after "
+                                   "them");
 }
 
 // typedConstValue = expression | aggregate .
@@ -1037,12 +1058,31 @@ void Parser::parseConstPart(llvm::SmallVectorImpl<Decl *> &Decls,
 void Parser::parseTypePart(llvm::SmallVectorImpl<Decl *> &Decls,
                            bool InMembers) {
   consumeToken(); // 'type'
-  if (Tok.isNot(tok::identifier) || (InMembers && isVisibilityWord())) {
+  if (Tok.isNot(tok::l_square) &&
+      (Tok.isNot(tok::identifier) || (InMembers && isVisibilityWord()))) {
     Diags.error(Tok.getLocation(), "expected type name after 'type'");
     return;
   }
-  while (Tok.is(tok::identifier) && !(InMembers && isVisibilityWord()) &&
-         !startsGeneric() && !Diags.shouldStop()) {
+  AttrList Pending;
+  while (Tok.isOneOf(tok::identifier, tok::l_square) &&
+         !(InMembers && isVisibilityWord()) && !startsGeneric() &&
+         !Diags.shouldStop()) {
+    if (Tok.is(tok::l_square)) { // [Attr] before a type declaration
+      if (!parseAttributes(Pending))
+        return skipUntil({tok::semi, tok::kw_begin});
+      if (Tok.isNot(tok::identifier)) {
+        if (!InMembers) {
+          // `[Attr] function F` after a type section: the routine's
+          // (parseDeclarations reports it if nothing follows)
+          CarriedAttrs = std::move(Pending);
+          return;
+        }
+        Diags.error(Tok.getLocation(), "expected type name after the "
+                                       "attributes");
+        return;
+      }
+      continue;
+    }
     // generic TList<T> = ...: a template, kept as its tokens
     if (LangOpts.ObjKeywords && !InMembers && isIdentifierNamed("generic") &&
         peekToken().is(tok::identifier)) {
@@ -1055,15 +1095,23 @@ void Parser::parseTypePart(llvm::SmallVectorImpl<Decl *> &Decls,
       Recording = SavedRec;
       if (TD) {
         Toks->Tokens = Ctx.copyArray<Token>(Rec);
+        attachAttributes(Pending, {TD});
         TD->setGeneric(GenericTypeParams, Toks);
         GenericTypes[TD->getName().Name] = TD;
         Decls.push_back(TD);
       }
+      Pending.clear();
       continue;
     }
-    if (TypeDecl *TD = parseTypeDecl(InMembers, /*Generic=*/false))
+    if (TypeDecl *TD = parseTypeDecl(InMembers, /*Generic=*/false)) {
+      attachAttributes(Pending, {TD});
       Decls.push_back(TD);
+    }
+    Pending.clear();
   }
+  if (!Pending.empty())
+    Diags.error(Tok.getLocation(), "attributes without a declaration after "
+                                   "them");
 }
 
 // typeDecl = ident [ "<" ident { "," ident } ">" ] "=" type hints ";" .
@@ -1689,6 +1737,67 @@ bool Parser::parseSeparatedHint(Hints &H) {
   return true;
 }
 
+// attributes = { "[" attribute { "," attribute } "]" } .
+// attribute  = ident [ "(" [ expr { "," expr } ] ")" ] .   (Turbo/FPC)
+// Appends to Out; false after an error.
+bool Parser::parseAttributes(AttrList &Out) {
+  while (Tok.is(tok::l_square)) {
+    SourceLocation Open = consumeToken();
+    if (LangOpts.Mode == LangMode::ISO) {
+      Diags.error(Open, "attributes are a Turbo/Free Pascal extension; use "
+                        "--mode=tp");
+      return false;
+    }
+    do {
+      Attribute A;
+      if (!expectIdentifier(A.Name, "attribute name"))
+        return false;
+      llvm::SmallVector<Expr *, 4> Args;
+      SourceLocation End = PrevTokEnd;
+      if (Tok.is(tok::l_paren)) {
+        SourceLocation LParen = consumeToken();
+        A.HasArgs = true;
+        if (Tok.isNot(tok::r_paren)) {
+          do {
+            Expr *E = parseExpression();
+            if (!E)
+              return false;
+            Args.push_back(E);
+          } while (tryConsume(tok::comma));
+        }
+        if (!expect(tok::r_paren, "after the attribute's arguments")) {
+          Diags.note(LParen, "to match this '('");
+          return false;
+        }
+        End = PrevTokEnd;
+      }
+      A.Args = Ctx.copyArray<Expr *>(Args);
+      A.Range = SourceRange(A.Name.Loc, End);
+      Out.push_back(A);
+    } while (tryConsume(tok::comma));
+    if (!expect(tok::r_square, "after the attributes")) {
+      Diags.note(Open, "to match this '['");
+      return false;
+    }
+  }
+  return true;
+}
+
+// The pending attributes, copied into the AST's storage; Pending is emptied.
+llvm::ArrayRef<Attribute> Parser::takeAttributes(AttrList &Pending) {
+  llvm::ArrayRef<Attribute> R = Ctx.copyArray<Attribute>(Pending);
+  Pending.clear();
+  return R;
+}
+
+void Parser::attachAttributes(AttrList &Pending, llvm::ArrayRef<Decl *> Ds) {
+  if (Pending.empty() || Ds.empty())
+    return;
+  llvm::ArrayRef<Attribute> A = takeAttributes(Pending);
+  for (Decl *D : Ds)
+    D->setAttributes(A);
+}
+
 // The `inline` directive (after the keyword at Loc): whether the routine is
 // to be inlined. It needs {$inline on}, the default in objfpc mode (as in
 // Free Pascal); with {$inline off} there it is accepted and ignored.
@@ -1961,7 +2070,22 @@ TypeSpec *Parser::parseClassType(SourceLocation Start) {
     tryConsume(tok::kw_end);
     return nullptr;
   };
+  // attributes wait here until the member they precede has been made
+  AttrList Pending;
+  size_t AttrStart = 0;
+  auto FlushAttrs = [&]() {
+    if (!Pending.empty() && Members.size() > AttrStart)
+      attachAttributes(Pending, llvm::ArrayRef<Decl *>(Members).slice(AttrStart));
+  };
   while (Tok.isNot(tok::kw_end) && Tok.isNot(tok::eof) && !Diags.shouldStop()) {
+    FlushAttrs();
+    if (Tok.is(tok::l_square)) {
+      if (Pending.empty())
+        AttrStart = Members.size();
+      if (!parseAttributes(Pending))
+        return Fail();
+      continue;
+    }
     if (startsGeneric()) { // generic function M<T>(...)
       RoutineDecl *R = parseGenericMethodHeading();
       if (!R)
@@ -2119,6 +2243,12 @@ TypeSpec *Parser::parseClassType(SourceLocation Start) {
     }
     Diags.error(Tok.getLocation(),
                 "expected a field, method or property declaration, or 'end'");
+    return Fail();
+  }
+  FlushAttrs();
+  if (!Pending.empty()) {
+    Diags.error(Tok.getLocation(), "attributes without a declaration after "
+                                   "them");
     return Fail();
   }
   if (!expect(tok::kw_end, "at end of class type")) {
@@ -3044,7 +3174,27 @@ TypeSpec *Parser::parseAdvancedRecord(SourceLocation Start,
     AfterMethods = true;
     ClassVars = false;
   };
+  AttrList Pending;
+  size_t FixedStart = 0, MemberStart = 0;
+  auto FlushAttrs = [&]() {
+    if (Pending.empty() ||
+        (Fixed.size() <= FixedStart && Members.size() <= MemberStart))
+      return;
+    llvm::SmallVector<Decl *, 8> Ds(Fixed.begin() + FixedStart, Fixed.end());
+    Ds.append(Members.begin() + MemberStart, Members.end());
+    attachAttributes(Pending, Ds);
+  };
   while (Tok.isNot(tok::kw_end) && Tok.isNot(tok::eof) && !Diags.shouldStop()) {
+    FlushAttrs();
+    if (Tok.is(tok::l_square)) {
+      if (Pending.empty()) {
+        FixedStart = Fixed.size();
+        MemberStart = Members.size();
+      }
+      if (!parseAttributes(Pending))
+        return Fail();
+      continue;
+    }
     if (startsGeneric()) { // generic function M<T>(...)
       RoutineDecl *R = parseGenericMethodHeading(/*InRecord=*/true);
       if (!R)
@@ -3213,6 +3363,12 @@ TypeSpec *Parser::parseAdvancedRecord(SourceLocation Start,
                 "expected a field, method or property declaration, or 'end'");
     return Fail();
   }
+  FlushAttrs();
+  if (!Pending.empty()) {
+    Diags.error(Tok.getLocation(), "attributes without a declaration after "
+                                   "them");
+    return Fail();
+  }
   if (!expect(tok::kw_end, "at end of record type")) {
     Diags.note(RecordLoc, "to match this 'record'");
     return nullptr;
@@ -3230,7 +3386,15 @@ TypeSpec *Parser::parseAdvancedRecord(SourceLocation Start,
 //             [ ";" variantPart ] [ ";" ] .
 FieldList *Parser::parseFieldList(tok::TokenKind Close) {
   llvm::SmallVector<FieldDecl *, 8> Fixed;
-  while (Tok.is(tok::identifier)) {
+  AttrList Pending;
+  while (Tok.isOneOf(tok::identifier, tok::l_square)) {
+    if (!parseAttributes(Pending))
+      return nullptr;
+    if (Tok.isNot(tok::identifier)) {
+      Diags.error(Tok.getLocation(), "expected a field name after the "
+                                     "attributes");
+      return nullptr;
+    }
     llvm::SmallVector<Identifier, 4> Names;
     if (!parseIdentList(Names, "field name") ||
         !expect(tok::colon, "after field name"))
@@ -3239,9 +3403,11 @@ FieldList *Parser::parseFieldList(tok::TokenKind Close) {
     if (!TS)
       return nullptr;
     Hints H = parseHints();
+    llvm::ArrayRef<Attribute> Attrs = takeAttributes(Pending);
     for (const Identifier &N : Names) {
       auto *F = Ctx.create<FieldDecl>(N, TS);
       F->addHints(H.Flags, H.Message);
+      F->setAttributes(Attrs);
       Fixed.push_back(F);
     }
     if (!tryConsume(tok::semi))

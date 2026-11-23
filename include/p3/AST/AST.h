@@ -1684,6 +1684,17 @@ enum class Visibility : unsigned char {
   Public, Published, Protected, Private, StrictProtected, StrictPrivate
 };
 
+/// An attribute written before a declaration: `[Name]` or
+/// `[Name(arg, ...)]`. The arguments are constant expressions (checked by
+/// sema). It names a source generator; the compiler itself gives no
+/// attribute a meaning.
+struct Attribute {
+  Identifier Name;
+  llvm::ArrayRef<Expr *> Args;
+  bool HasArgs = false; ///< written with parentheses
+  SourceRange Range;    ///< from `Name` to the closing `)`
+};
+
 class Decl {
 public:
   enum DeclKind {
@@ -1731,9 +1742,20 @@ public:
       HintMessage = Message;
   }
 
+  /// The attributes written before the declaration, in source order.
+  llvm::ArrayRef<Attribute> getAttributes() const { return Attrs; }
+  bool hasAttribute(llvm::StringRef LowerName) const {
+    for (const Attribute &A : Attrs)
+      if (A.Name.Name == LowerName)
+        return true;
+    return false;
+  }
+  void setAttributes(llvm::ArrayRef<Attribute> A) { Attrs = A; }
+
 private:
   unsigned char Hints = 0;
   llvm::StringRef HintMessage; ///< deprecated's message, if any
+  llvm::ArrayRef<Attribute> Attrs;
 };
 
 /// A variable, a formal parameter, or a function's result slot.

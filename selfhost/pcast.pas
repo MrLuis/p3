@@ -36,6 +36,16 @@ type
   end;
   PIdent = ^TIdent;
 
+  { an attribute written before a declaration: [name] or [name(args)];
+    args: PNode, constants (Sema checks them); it names a source generator,
+    the compiler gives none a meaning }
+  TAttribute = record
+    name: TIdent;
+    args: TPtrList;
+    hasArgs: boolean;
+  end;
+  PAttribute = ^TAttribute;
+
   TConstKind = (ckNone, ckOrdinal, ckReal, ckString);
   TConstValue = record
     kind: TConstKind;
@@ -519,6 +529,9 @@ type
       entity is warned about; hintMessage: deprecated's, or nil }
     hints: longint;
     hintMessage: PName;
+    { the attributes written before the declaration, in source order }
+    attrs: TPtrList; { of PAttribute }
+    attrsChecked: boolean; { Sema: the attributes' arguments were checked }
     { Sema: referenced anywhere; a function whose result is assigned; the
       number of labels in this routine targeted by non-local gotos }
     isUsed, resultAssigned: boolean;

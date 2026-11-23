@@ -1,0 +1,15 @@
+; Attributes ([Name] and [Name(args)] before a type, field, method,
+; property or routine): kept on the declaration and shown in --emit-ast;
+; the arguments must be constants; a stray attribute is an error.
+; RUN: %p3 --mode=objfpc --emit-ast %S/Inputs/attributes/ok.pas -o %t.ast
+; RUN: FileCheck --check-prefix=AST %s < %t.ast
+; RUN: not %p3 --mode=objfpc -c %S/Inputs/attributes/nonconst.pas -o %t.o 2>&1 | FileCheck --check-prefix=NONCONST %s
+; RUN: not %p3 --mode=objfpc -c %S/Inputs/attributes/stray.pas -o %t.o 2>&1 | FileCheck --check-prefix=STRAY %s
+; RUN: not %p3 -c %S/Inputs/attributes/iso.pas -o %t.o 2>&1 | FileCheck --check-prefix=ISO %s
+; AST: TypeDecl 'trec' {{.*}} attribute 'gen'(2)
+; AST: ProcedureDecl 'p' attribute 'fast'
+; NONCONST: nonconst.pas:5:8: error: an argument of attribute 'Gen' must be a constant
+; NONCONST: nonconst.pas:7:10: error: use of undeclared identifier 'Undeclared'
+; STRAY: stray.pas:6:3: error: attributes without a declaration after them
+; STRAY: stray.pas:8:1: error: attributes without a declaration after them
+; ISO: iso.pas:3:3: error: attributes are a Turbo/Free Pascal extension; use --mode=tp

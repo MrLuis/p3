@@ -72,6 +72,8 @@ var
   prevTokEnd: TLoc;
   { parseFieldList skipped to the record's end after an error }
   recordBodySkipped: boolean;
+  { attributes a type part read for the routine after it }
+  carriedAttrs: TPtrList;
   { generic routines: the tokens consumed are recorded (recording, of
     PToken); or tokens are replayed from a generic's instead of being
     lexed }
@@ -558,6 +560,76 @@ function parseCompoundStmt: PNode; forward;
 procedure parseStatementSequence(var body: TPtrList; terminator: TTokenKind;
                                  openLoc: TLoc; const openWord: string); forward;
 function parseExpression: PNode; forward;
+
+{ attributes = ( "[" attribute ( "," attribute )* "]" )* .
+  attribute  = ident [ "(" [ expr ( "," expr )* ] ")" ] .   (Turbo/FPC)
+  Appends PAttribute items to attrList; false after an error. }
+function parseAttributes(var attrList: TPtrList): boolean;
+var
+  open, lparen: TLoc;
+  a: PAttribute;
+  e: PNode;
+begin
+  parseAttributes := false;
+  while tok.kind = tkLSquare do
+  begin
+    open := consumeToken;
+    if mode = lmISO then
+    begin
+      diagError(open, 'attributes are a Turbo/Free Pascal extension; use ' +
+                '--mode=tp');
+      exit;
+    end;
+    repeat
+      a := PAttribute(arenaAlloc(sizeof(TAttribute)));
+      if not expectIdentifier(a^.name, 'attribute name') then
+        exit;
+      if tok.kind = tkLParen then
+      begin
+        lparen := consumeToken;
+        a^.hasArgs := true;
+        if tok.kind <> tkRParen then
+          repeat
+            e := parseExpression;
+            if e = nil then
+              exit;
+            listAdd(a^.args, e);
+          until not tryConsume(tkComma);
+        if not expect(tkRParen, 'after the attribute''s arguments') then
+        begin
+          diagNote(lparen, 'to match this ''(''');
+          exit;
+        end;
+      end;
+      listAdd(attrList, a);
+    until not tryConsume(tkComma);
+    if not expect(tkRSquare, 'after the attributes') then
+    begin
+      diagNote(open, 'to match this ''[''');
+      exit;
+    end;
+  end;
+  parseAttributes := true;
+end;
+
+{ Gives the pending attributes to items[start..] (declarations); pending
+  is emptied. }
+procedure attachAttributes(var pending: TPtrList; const items: TPtrList;
+                           start: longint);
+var
+  i, j: longint;
+  d: PDecl;
+begin
+  if pending.count = 0 then
+    exit;
+  for i := start to items.count - 1 do
+  begin
+    d := PDecl(listGet(items, i));
+    for j := 0 to pending.count - 1 do
+      listAdd(d^.attrs, listGet(pending, j));
+  end;
+  listClear(pending);
+end;
 function parseSimpleExpression: PNode; forward;
 { first: the expression's first factor, already parsed (no sign) }
 function parseSimpleExpressionFrom(first: PNode): PNode; forward;
@@ -1144,18 +1216,42 @@ procedure parseTypePart(var decls: TPtrList; inMembers: boolean);
 var
   d: PDecl;
   toks: PGenericTokens;
-  rec: TPtrList;
+  rec, pending, one: TPtrList;
   savedRec: PPtrList;
 begin
   consumeToken; { 'type' }
-  if (tok.kind <> tkIdentifier) or (inMembers and isVisibilityWord) then
+  if (tok.kind <> tkLSquare) and
+     ((tok.kind <> tkIdentifier) or (inMembers and isVisibilityWord)) then
   begin
     diagError(tok.loc, 'expected type name after ''type''');
     exit;
   end;
-  while (tok.kind = tkIdentifier) and not (inMembers and isVisibilityWord) and
+  listInit(pending);
+  while ((tok.kind = tkIdentifier) or (tok.kind = tkLSquare)) and
+        not (inMembers and isVisibilityWord) and
         not startsGeneric and not diagShouldStop do
   begin
+    if tok.kind = tkLSquare then { [Attr] before a type declaration }
+    begin
+      if not parseAttributes(pending) then
+      begin
+        skipUntil([tkSemi, tkKwBegin]);
+        exit;
+      end;
+      if tok.kind <> tkIdentifier then
+      begin
+        if not inMembers then
+        begin
+          { [Attr] function F after a type section: the routine's
+            (parseDeclarations reports it if nothing follows) }
+          carriedAttrs := pending;
+          exit;
+        end;
+        diagError(tok.loc, 'expected type name after the attributes');
+        exit;
+      end;
+      continue;
+    end;
     { generic TList<T> = ...: a template, kept as its tokens }
     if (mode = lmObjFPC) and not inMembers and isIdentifierNamed('generic') and
        (peekKind = tkIdentifier) then
@@ -1175,14 +1271,26 @@ begin
         d^.tgTokens := toks;
         d^.tgScope := nil;
         listAdd(genericTypes, d);
+        listInit(one);
+        listAdd(one, d);
+        attachAttributes(pending, one, 0);
         listAdd(decls, d);
       end;
+      listClear(pending);
       continue;
     end;
     d := parseTypeDecl(inMembers, false);
     if d <> nil then
+    begin
+      listInit(one);
+      listAdd(one, d);
+      attachAttributes(pending, one, 0);
       listAdd(decls, d);
+    end;
+    listClear(pending);
   end;
+  if pending.count > 0 then
+    diagError(tok.loc, 'attributes without a declaration after them');
 end;
 
 function newVar(const id: TIdent; ts: PTypeSpec; vk: TVarKind): PDecl;
@@ -2497,13 +2605,27 @@ var
   r, g: PDecl;
   ci, firstDecl: longint;
   ok: boolean;
-  methodToks: TPtrList;
+  methodToks, pendingAttrs: TPtrList;
   methodSwitches, last: PGenericTokens;
 begin
   lastRank := -1;
   lastWord := '';
-  while (startsDeclarationPart or startsGeneric) and not diagShouldStop do
+  listInit(pendingAttrs); { [Attr] before a routine, held until it is parsed }
+  while (startsDeclarationPart or startsGeneric or (tok.kind = tkLSquare)) and
+        not diagShouldStop do
   begin
+    for ci := 0 to carriedAttrs.count - 1 do
+      listAdd(pendingAttrs, listGet(carriedAttrs, ci));
+    listClear(carriedAttrs);
+    if tok.kind = tkLSquare then
+    begin
+      if not parseAttributes(pendingAttrs) then
+      begin
+        listClear(pendingAttrs);
+        skipUntil([tkSemi, tkKwBegin]);
+      end;
+      continue;
+    end;
     if tok.kind = tkIdentifier then { generic function F<T>... }
     begin
       r := parseGenericRoutine(inInterface);
@@ -2618,6 +2740,8 @@ begin
         end;
       end;
     end;
+    if (pendingAttrs.count > 0) and (decls.count > firstDecl) then
+      attachAttributes(pendingAttrs, decls, firstDecl);
     if methodSwitches <> nil then
     begin
       recording := nil;
@@ -2645,7 +2769,13 @@ begin
         r^.isTemplateMember := true;
       end;
     end;
+    listClear(pendingAttrs);
   end;
+  for ci := 0 to carriedAttrs.count - 1 do
+    listAdd(pendingAttrs, listGet(carriedAttrs, ci));
+  listClear(carriedAttrs);
+  if pendingAttrs.count > 0 then
+    diagError(tok.loc, 'attributes without a declaration after them');
 end;
 
 // typedConstValue = expression | aggregate .
@@ -2932,7 +3062,8 @@ var
   nested: TPtrList;
   failed, classVars: boolean;
   className, intfName: TIdent;
-  intfNames: TPtrList;
+  intfNames, pending: TPtrList;
+  attrStart: longint;
 begin
   parseClassType := nil;
   classLoc := consumeToken; { 'class' }
@@ -2985,8 +3116,24 @@ begin
   vis := vsPublic;
   failed := false;
   classVars := false; { in a class var section }
+  { attributes wait until the member they precede has been made }
+  listInit(pending);
+  attrStart := 0;
   while (tok.kind <> tkKwEnd) and (tok.kind <> tkEof) and not diagShouldStop do
   begin
+    if (pending.count > 0) and (members.count > attrStart) then
+      attachAttributes(pending, members, attrStart);
+    if tok.kind = tkLSquare then
+    begin
+      if pending.count = 0 then
+        attrStart := members.count;
+      if not parseAttributes(pending) then
+      begin
+        failed := true;
+        break;
+      end;
+      continue;
+    end;
     if startsGeneric then { generic function M<T>(...) }
     begin
       m := parseGenericMethodHeading(false);
@@ -3199,6 +3346,15 @@ begin
   end;
   if failed then
   begin
+    skipUntil([tkKwEnd]);
+    tryConsume(tkKwEnd);
+    exit;
+  end;
+  if (pending.count > 0) and (members.count > attrStart) then
+    attachAttributes(pending, members, attrStart);
+  if pending.count > 0 then
+  begin
+    diagError(tok.loc, 'attributes without a declaration after them');
     skipUntil([tkKwEnd]);
     tryConsume(tkKwEnd);
     exit;
@@ -4199,6 +4355,22 @@ var
   f, m: PDecl;
   i: longint;
   fl: PFieldList;
+  pending: TPtrList;
+  fixedStart, memberStart: longint;
+
+  { the pending attributes go to what was added since they were read }
+  procedure flushAttrs;
+  var
+    copy: TPtrList;
+  begin
+    if pending.count = 0 then
+      exit;
+    if (fixed.count <= fixedStart) and (members.count <= memberStart) then
+      exit;
+    copy := pending; { (attachAttributes empties what it is given) }
+    attachAttributes(copy, fixed, fixedStart);
+    attachAttributes(pending, members, memberStart);
+  end;
 
   procedure addMember(d: PDecl);
   begin
@@ -4217,8 +4389,26 @@ begin
   afterMethods := false;
   classVars := false;
   failed := false;
+  listInit(pending);
+  fixedStart := 0;
+  memberStart := 0;
   while (tok.kind <> tkKwEnd) and (tok.kind <> tkEof) and not diagShouldStop do
   begin
+    flushAttrs;
+    if tok.kind = tkLSquare then
+    begin
+      if pending.count = 0 then
+      begin
+        fixedStart := fixed.count;
+        memberStart := members.count;
+      end;
+      if not parseAttributes(pending) then
+      begin
+        failed := true;
+        break;
+      end;
+      continue;
+    end;
     if startsGeneric then { generic function M<T>(...) }
     begin
       m := parseGenericMethodHeading(true);
@@ -4456,6 +4646,14 @@ begin
     tryConsume(tkKwEnd);
     exit;
   end;
+  flushAttrs;
+  if pending.count > 0 then
+  begin
+    diagError(tok.loc, 'attributes without a declaration after them');
+    skipUntil([tkKwEnd]);
+    tryConsume(tkKwEnd);
+    exit;
+  end;
   if not expect(tkKwEnd, 'at end of record type') then
   begin
     diagNote(recordLoc, 'to match this ''record''');
@@ -4527,17 +4725,25 @@ function parseFieldList(close: TTokenKind): PFieldList;
 var
   hf: longint;
   hm: PName;
-  fixed, names: TPtrList;
+  fixed, names, pending: TPtrList;
   ts: PTypeSpec;
   vp: PVariantPart;
   fl: PFieldList;
   f: PDecl;
-  i: longint;
+  i, j: longint;
 begin
   parseFieldList := nil;
   listInit(fixed);
-  while tok.kind = tkIdentifier do
+  listInit(pending);
+  while (tok.kind = tkIdentifier) or (tok.kind = tkLSquare) do
   begin
+    if not parseAttributes(pending) then
+      exit;
+    if tok.kind <> tkIdentifier then
+    begin
+      diagError(tok.loc, 'expected a field name after the attributes');
+      exit;
+    end;
     listInit(names);
     if not parseIdentList(names, 'field name') or
        not expect(tkColon, 'after field name') then
@@ -4551,8 +4757,11 @@ begin
       f := newDecl(dkField, PIdent(listGet(names, i))^, PIdent(listGet(names, i))^.loc);
       f^.fieldSpec := ts;
       addHints(f, hf, hm);
+      for j := 0 to pending.count - 1 do
+        listAdd(f^.attrs, listGet(pending, j));
       listAdd(fixed, f);
     end;
+    listClear(pending);
     if not tryConsume(tkSemi) then
       break;
   end;

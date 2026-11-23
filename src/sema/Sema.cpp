@@ -829,6 +829,7 @@ class Checker : public StmtVisitor<Checker>,
 
   /// Variables referenced anywhere (read or written).
   llvm::DenseSet<Decl *> Used;
+  llvm::DenseSet<Decl *> AttributesChecked; // (checkAttributes ran on them)
 
   /// `^T` where T was not declared yet: resolved at the end of the type
   /// section (ISO 7185 6.2.2.9 allows pointers to later types).
@@ -2844,7 +2845,36 @@ class Checker : public StmtVisitor<Checker>,
     declare(C);
   }
 
+  /// The arguments of D's attributes must be constants. (An attribute names
+  /// a source generator; nothing here gives one a meaning.)
+  void checkAttributes(Decl *D) {
+    if (D->getAttributes().empty() || !AttributesChecked.insert(D).second)
+      return;
+    for (const Attribute &A : D->getAttributes())
+      for (Expr *Arg : A.Args)
+        evaluateConstant(Arg, "an argument of attribute '" +
+                                  A.Name.Spelling.str() + "'");
+  }
+
+  /// The attributes of a type declaration and of its fields and members.
+  void checkTypeAttributes(TypeDecl *TD) {
+    checkAttributes(TD);
+    TypeSpec *TS = TD->getTypeSpec();
+    llvm::ArrayRef<Decl *> Members;
+    if (auto *CS = llvm::dyn_cast_or_null<ClassTypeSpec>(TS)) {
+      Members = CS->getMembers();
+    } else if (auto *RS = llvm::dyn_cast_or_null<RecordTypeSpec>(TS)) {
+      Members = RS->getMembers();
+      if (FieldList *FL = RS->getFields())
+        for (FieldDecl *F : FL->Fixed)
+          checkAttributes(F);
+    }
+    for (Decl *M : Members)
+      checkAttributes(M);
+  }
+
   void declareType(TypeDecl *TD) {
+    checkTypeAttributes(TD);
     if (TD->isGeneric())
       return declareGenericType(TD);
     if (auto *CS = llvm::dyn_cast<ClassTypeSpec>(TD->getTypeSpec()))
@@ -5460,6 +5490,7 @@ class Checker : public StmtVisitor<Checker>,
 
   /// Resolves a routine's parameter and result types.
   void resolveSignature(RoutineDecl *R) {
+    checkAttributes(R);
     for (VarDecl *P : R->getParams()) {
       P->setOwner(R);
       P->setType(resolveType(P->getTypeSpec()));

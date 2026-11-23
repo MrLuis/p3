@@ -244,6 +244,9 @@ end;
 
 { hint directives (deprecated 'message', experimental, ...) }
 procedure hintsSuffix(d: PDecl);
+var
+  i: longint;
+  a: PAttribute;
 begin
   if (d^.hints and hintDeprecated) <> 0 then
   begin
@@ -262,6 +265,14 @@ begin
     bufAdd(outBuf, ' library');
   if (d^.hints and hintUnimplemented) <> 0 then
     bufAdd(outBuf, ' unimplemented');
+  { [Attr] / [Attr(a, b)]: the name, and how many arguments }
+  for i := 0 to d^.attrs.count - 1 do
+  begin
+    a := PAttribute(listGet(d^.attrs, i));
+    bufAdd(outBuf, ' attribute ''' + nameStr(a^.name.name) + '''');
+    if a^.hasArgs then
+      bufAdd(outBuf, '(' + intToStr(a^.args.count) + ')');
+  end;
 end;
 
 { ' shared' / ' isolated': a variable's or field's qualifier }
