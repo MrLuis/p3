@@ -75,6 +75,10 @@ type
     function GetDepth: Integer;
   public
     constructor Create(const Text: string; Options: TJsonReaderOptions = []);
+    { a reader of the value at Text[Start, Start + Len) (0-based offsets;
+      positions stay those of Text) }
+    constructor CreateRange(const Text: string; Start, Len: Integer;
+                            Options: TJsonReaderOptions = []);
     { Moves to the next token; false at the end of the text (Token jtEnd),
       after one whole value. }
     function Read: Boolean;
@@ -228,6 +232,44 @@ type
     Value: TJsonValue;
   end;
 
+  { --- lazy access ---
+
+    JsonGet finds one value in a JSON text by its path, reading only what
+    comes before it on the way (the members it passes are skipped: their
+    brackets and strings are checked, not the rest). The value is a
+    TJsonLazy: where it is in the text, read when asked. }
+
+  TJsonLazy = record
+  private
+    FText: string;
+    FStart, FLen: Integer;
+    function Reader: TJsonReader;
+  public
+    function Exists: Boolean;
+    function Kind: TJsonKind;
+    { its JSON text }
+    function Raw: string;
+    property Text: string read FText;
+    property Start: Integer read FStart;
+    property Len: Integer read FLen;
+    function IsNull: Boolean;
+    function AsString: string;
+    function AsInt64: Int64;
+    function AsUInt64: QWord;
+    function AsDouble: Double;
+    function AsBoolean: Boolean;
+    { a value inside this one }
+    function Get(const Path: array of TJsonKey): TJsonLazy;
+    function GetPath(const Pointer: string): TJsonLazy;
+    { the value as a document (free it) }
+    function Parse: TJsonDocument;
+  end;
+
+  TJsonLazyMember = record
+    Key: string;
+    Value: TJsonLazy;
+  end;
+
   TJsonDocument = class
   private
     FSource: string;
@@ -303,6 +345,19 @@ function JsonParse(const Text: string;
 function JsonValid(const Text: string): Boolean;
 { D as JSON: the shortest text that reads back as D }
 function JsonFloat(D: Double): string;
+{ The value at Path in Text: JsonGet(S, ['users', 0, 'name']) (not Exists
+  when there is none; EJsonError for bad JSON on the way). }
+function JsonGet(const Text: string; const Path: array of TJsonKey): TJsonLazy;
+{ the same, by a JSON Pointer: JsonGetPath(S, '/users/0/name') }
+function JsonGetPath(const Text, Pointer: string): TJsonLazy;
+{ the whole text as a lazy value }
+function JsonLazy(const Text: string): TJsonLazy;
+{ the elements of the array Text (or L) is, the members of the object, read
+  as they are asked for }
+function JsonArrayItems(const Text: string): iterator TJsonLazy; overload;
+function JsonArrayItems(const L: TJsonLazy): iterator TJsonLazy; overload;
+function JsonObjectItems(const Text: string): iterator TJsonLazyMember; overload;
+function JsonObjectItems(const L: TJsonLazy): iterator TJsonLazyMember; overload;
 { the elements of an array, the members of an object, for for-in }
 function JsonItems(const V: TJsonValue): iterator TJsonValue;
 function JsonMembers(const V: TJsonValue): iterator TJsonMember;
@@ -577,6 +632,18 @@ begin
   FDepth := 0;
   FMaxDepth := 512;
   FOptions := Options;
+end;
+
+constructor TJsonReader.CreateRange(const Text: string; Start, Len: Integer;
+                                    Options: TJsonReaderOptions);
+begin
+  Create(Text, Options);
+  if Start < 0 then
+    Start := 0;
+  if Start + Len > Length(FText) then
+    Len := Length(FText) - Start;
+  FPos := Start;
+  FLen := Start + Len;
 end;
 
 procedure TJsonReader.Fail(const Reason: string; At: Integer);
@@ -2345,6 +2412,372 @@ begin
     M.Value := V.At(I);
     yield M;
   end;
+end;
+
+{ --- lazy access --- }
+
+{ the extent of the value whose first token R just read: [Start, Stop) }
+procedure ValueExtent(R: TJsonReader; out Start, Stop: Integer);
+begin
+  case R.Token of
+    jtBeginObject, jtBeginArray:
+      begin
+        Start := R.TokenStart;
+        R.Skip;
+        Stop := R.Position;
+      end;
+    jtString:
+      begin
+        Start := R.TokenStart - 1;
+        Stop := R.TokenStop + 1;
+      end;
+  else
+    begin
+      Start := R.TokenStart;
+      Stop := R.TokenStop;
+    end;
+  end;
+end;
+
+function LazyOf(const Text: string; Start, Stop: Integer): TJsonLazy;
+begin
+  Result.FText := Text;
+  Result.FStart := Start;
+  Result.FLen := Stop - Start;
+end;
+
+function Missing(const Text: string): TJsonLazy;
+begin
+  Result.FText := Text;
+  Result.FStart := 0;
+  Result.FLen := -1;
+end;
+
+type
+  { a step of a path: a name, an index, or (a JSON Pointer's) either }
+  TStep = record
+    Name: string;
+    Index: Integer;   { -1: none }
+    IsName: Boolean;
+  end;
+  TStepArray = array of TStep;
+
+function KeySteps(const Path: array of TJsonKey): TStepArray;
+var
+  I: Integer;
+begin
+  SetLength(Result, Length(Path));
+  for I := 0 to High(Path) do
+  begin
+    Result[I].Name := Path[I].Name;
+    Result[I].Index := Path[I].Index;
+    Result[I].IsName := Path[I].Index < 0;
+  end;
+end;
+
+function PointerSteps(const Pointer: string): TStepArray;
+var
+  I, J, K, N, Idx: Integer;
+  Part: string;
+  Ok: Boolean;
+begin
+  SetLength(Result, 0);
+  if Pointer = '' then
+    Exit;
+  if Pointer[1] <> '/' then
+    raise EJsonError.Create('a JSON Pointer starts with ''/'': ''' + Pointer + '''');
+  I := 2;
+  N := 0;
+  while True do
+  begin
+    J := I;
+    while (J <= Length(Pointer)) and (Pointer[J] <> '/') do
+      Inc(J);
+    Part := StringReplace(StringReplace(Copy(Pointer, I, J - I), '~1', '/',
+                          [rfReplaceAll]), '~0', '~', [rfReplaceAll]);
+    SetLength(Result, N + 1);
+    Result[N].Name := Part;
+    Result[N].IsName := True;
+    Ok := (Part <> '') and ((Part = '0') or (Part[1] <> '0'));
+    Idx := 0;
+    for K := 1 to Length(Part) do
+      if Ok and (Part[K] in ['0'..'9']) and (Idx < 100000000) then
+        Idx := Idx * 10 + Ord(Part[K]) - Ord('0')
+      else
+        Ok := False;
+    if Ok then
+      Result[N].Index := Idx
+    else
+      Result[N].Index := -1;
+    Inc(N);
+    if J > Length(Pointer) then
+      Break;
+    I := J + 1;
+  end;
+end;
+
+function Walk(const Text: string; Start, Len: Integer;
+              const Steps: TStepArray): TJsonLazy;
+var
+  R: TJsonReader;
+  S, N, A, B: Integer;
+  Found: Boolean;
+begin
+  Result := Missing(Text);
+  if Len < 0 then
+    Exit;
+  R := TJsonReader.CreateRange(Text, Start, Len);
+  try
+    R.Read;
+    for S := 0 to High(Steps) do
+    begin
+      Found := False;
+      if (R.Token = jtBeginObject) and Steps[S].IsName then
+      begin
+        while R.Read and (R.Token = jtKey) do
+        begin
+          if R.StringEquals(Steps[S].Name) then
+          begin
+            R.Read; { its value }
+            Found := True;
+            Break;
+          end;
+          R.Skip;
+        end;
+      end
+      else if (R.Token = jtBeginArray) and (Steps[S].Index >= 0) then
+      begin
+        N := 0;
+        while R.Read and (R.Token <> jtEndArray) do
+        begin
+          if N = Steps[S].Index then
+          begin
+            Found := True;
+            Break;
+          end;
+          R.Skip;
+          Inc(N);
+        end;
+      end;
+      if not Found then
+        Exit;
+    end;
+    ValueExtent(R, A, B);
+    Result := LazyOf(Text, A, B);
+  finally
+    R.Free;
+  end;
+end;
+
+function JsonLazy(const Text: string): TJsonLazy;
+var
+  I, J: Integer;
+begin
+  { (without the whitespace around it) }
+  I := 1;
+  while (I <= Length(Text)) and (Text[I] in [' ', #9, #10, #13]) do
+    Inc(I);
+  J := Length(Text);
+  while (J >= I) and (Text[J] in [' ', #9, #10, #13]) do
+    Dec(J);
+  Result := LazyOf(Text, I - 1, J);
+end;
+
+function JsonGet(const Text: string; const Path: array of TJsonKey): TJsonLazy;
+begin
+  Result := Walk(Text, 0, Length(Text), KeySteps(Path));
+end;
+
+function JsonGetPath(const Text, Pointer: string): TJsonLazy;
+begin
+  Result := Walk(Text, 0, Length(Text), PointerSteps(Pointer));
+end;
+
+function TJsonLazy.Get(const Path: array of TJsonKey): TJsonLazy;
+begin
+  Result := Walk(FText, FStart, FLen, KeySteps(Path));
+end;
+
+function TJsonLazy.GetPath(const Pointer: string): TJsonLazy;
+begin
+  Result := Walk(FText, FStart, FLen, PointerSteps(Pointer));
+end;
+
+function TJsonLazy.Exists: Boolean;
+begin
+  Result := FLen >= 0;
+end;
+
+function TJsonLazy.Kind: TJsonKind;
+begin
+  if FLen <= 0 then
+    raise EJsonError.Create('the value is not there');
+  case FText[FStart + 1] of
+    '{': Result := jkObject;
+    '[': Result := jkArray;
+    '"': Result := jkString;
+    't': Result := jkTrue;
+    'f': Result := jkFalse;
+    'n': Result := jkNull;
+  else
+    Result := jkNumber;
+  end;
+end;
+
+function TJsonLazy.Raw: string;
+begin
+  if FLen < 0 then
+    Result := ''
+  else
+    Result := Copy(FText, FStart + 1, FLen);
+end;
+
+function TJsonLazy.IsNull: Boolean;
+begin
+  Result := (FLen > 0) and (FText[FStart + 1] = 'n');
+end;
+
+function TJsonLazy.Reader: TJsonReader;
+begin
+  if FLen < 0 then
+    raise EJsonError.Create('the value is not there');
+  Result := TJsonReader.CreateRange(FText, FStart, FLen);
+  Result.Read;
+end;
+
+function TJsonLazy.AsString: string;
+var
+  R: TJsonReader;
+begin
+  R := Reader;
+  try
+    if R.Token <> jtString then
+      raise EJsonError.Create('expected a string, found ' + KindNames[Kind]);
+    Result := R.AsString;
+  finally
+    R.Free;
+  end;
+end;
+
+function TJsonLazy.AsInt64: Int64;
+var
+  R: TJsonReader;
+begin
+  R := Reader;
+  try
+    if R.Token <> jtNumber then
+      raise EJsonError.Create('expected a number, found ' + KindNames[Kind]);
+    Result := R.AsInt64;
+  finally
+    R.Free;
+  end;
+end;
+
+function TJsonLazy.AsUInt64: QWord;
+var
+  R: TJsonReader;
+begin
+  R := Reader;
+  try
+    if R.Token <> jtNumber then
+      raise EJsonError.Create('expected a number, found ' + KindNames[Kind]);
+    Result := R.AsUInt64;
+  finally
+    R.Free;
+  end;
+end;
+
+function TJsonLazy.AsDouble: Double;
+var
+  R: TJsonReader;
+begin
+  R := Reader;
+  try
+    if R.Token <> jtNumber then
+      raise EJsonError.Create('expected a number, found ' + KindNames[Kind]);
+    Result := R.AsDouble;
+  finally
+    R.Free;
+  end;
+end;
+
+function TJsonLazy.AsBoolean: Boolean;
+var
+  R: TJsonReader;
+begin
+  R := Reader;
+  try
+    if not (R.Token in [jtTrue, jtFalse]) then
+      raise EJsonError.Create('expected a boolean, found ' + KindNames[Kind]);
+    Result := R.Token = jtTrue;
+  finally
+    R.Free;
+  end;
+end;
+
+function TJsonLazy.Parse: TJsonDocument;
+begin
+  if FLen < 0 then
+    raise EJsonError.Create('the value is not there');
+  Result := JsonParse(Raw);
+end;
+
+function JsonArrayItems(const L: TJsonLazy): iterator TJsonLazy;
+var
+  R: TJsonReader;
+  A, B: Integer;
+begin
+  if L.FLen < 0 then
+    Exit;
+  R := TJsonReader.CreateRange(L.FText, L.FStart, L.FLen);
+  try
+    R.Read;
+    if R.Token <> jtBeginArray then
+      raise EJsonError.Create('expected an array, found ' + KindNames[L.Kind]);
+    while R.Read and (R.Token <> jtEndArray) do
+    begin
+      ValueExtent(R, A, B);
+      yield LazyOf(L.FText, A, B);
+    end;
+  finally
+    R.Free;
+  end;
+end;
+
+function JsonArrayItems(const Text: string): iterator TJsonLazy;
+begin
+  yield from JsonArrayItems(JsonLazy(Text));
+end;
+
+function JsonObjectItems(const L: TJsonLazy): iterator TJsonLazyMember;
+var
+  R: TJsonReader;
+  A, B: Integer;
+  M: TJsonLazyMember;
+begin
+  if L.FLen < 0 then
+    Exit;
+  R := TJsonReader.CreateRange(L.FText, L.FStart, L.FLen);
+  try
+    R.Read;
+    if R.Token <> jtBeginObject then
+      raise EJsonError.Create('expected an object, found ' + KindNames[L.Kind]);
+    while R.Read and (R.Token = jtKey) do
+    begin
+      M.Key := R.AsString;
+      R.Read;
+      ValueExtent(R, A, B);
+      M.Value := LazyOf(L.FText, A, B);
+      yield M;
+    end;
+  finally
+    R.Free;
+  end;
+end;
+
+function JsonObjectItems(const Text: string): iterator TJsonLazyMember;
+begin
+  yield from JsonObjectItems(JsonLazy(Text));
 end;
 
 end.

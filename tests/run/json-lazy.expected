@@ -1,0 +1,15 @@
+Ada
+41
+["en", "fr"]
+FALSE FALSE FALSE FALSE
+TRUE TRUE 3.0 TRUE
+2 2 6 {"count": 2, "a/b": true, "next": null}
+Ada:36 Alan:41 
+count=2 a/b=true next=null 
+1 [2, 3] {"a": 4} "five" null (5)
+10 20 
+fr {"name":"Ada","langs":["en","fr"],"age":36}
+1
+EOF while parsing a string at line 1 column 33
+expected a string, found a number
+expected an array, found an object
