@@ -1,0 +1,8 @@
+{
+  "permissions": {
+    "allow": [
+      "mcp__plan-progress__plan_progress",
+      "Bash(nm *)"
+    ]
+  }
+}
