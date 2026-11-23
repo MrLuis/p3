@@ -25,6 +25,16 @@ foreach(unit ${P3_RTL_UNITS})
   list(APPEND P3_RTL_OBJECTS ${P3_RTL_DIR}/${unit}.o)
 endforeach()
 
+# Include files of the units.
+foreach(inc json_pow5.inc)
+  add_custom_command(
+    OUTPUT ${P3_RTL_DIR}/${inc}
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            ${CMAKE_CURRENT_SOURCE_DIR}/${inc} ${P3_RTL_DIR}/${inc}
+    DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/${inc})
+  list(APPEND P3_RTL_SOURCES ${P3_RTL_DIR}/${inc})
+endforeach()
+
 # Source generators of the library (--generator=NAME, "generators":
 # ["NAME"] in p3.json): <bindir>/../lib/pascal/generators/NAME.pas.
 set(P3_RTL_GENERATORS json)

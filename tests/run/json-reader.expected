@@ -3,6 +3,7 @@ string(just a string)
 [ [ [ ] ] { } ] 
 { key(long key with more than eight bytes) string(and a long value too, 0123456789) } 
 { key(x) number(1) } 
+{ key(a) number(1) key(b) number(2) key(c) number(3) } 
 y_object_empty_key: ok
 y_string_unicode: ok
 y_number_minus_zero: ok
@@ -54,3 +55,4 @@ n_number_too_large: number out of range at line 1 column 1 [0]
 TRUE FALSE
 skip keep [ ] } FALSE
 fast path: 0 of 20000 differ
+wide path: 0 differ

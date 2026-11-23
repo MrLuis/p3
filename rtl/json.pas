@@ -12,7 +12,8 @@ unit json;
   qword at once); a string without escapes is copied once, when it is read;
   numbers are converted when they are read, exactly: integers to Int64 or
   UInt64, others to the nearest double (directly for up to 15 digits and
-  powers of ten up to 22, else through the C library's strtod).
+  powers of ten up to 22, by the Eisel-Lemire algorithm for up to 19
+  digits, through the C library's strtod for more).
 
   Errors raise EJsonError, with the offset, line and column of the problem
   and a message such as  expected ',' or ']' at line 1 column 17.
@@ -56,6 +57,10 @@ type
     FEscaped: Boolean;        { a string token with escapes }
     FNumParsed: Boolean;
     FNumKind: TJsonNumberKind;
+    { the current number's parts, taken while reading it }
+    FNumMant: QWord;
+    FNumExp, FNumDigits: Integer;
+    FNumNeg, FNumIsInt, FNumBig: Boolean;
     FInt: Int64;
     FUInt: QWord;
     FDouble: Double;
@@ -402,6 +407,113 @@ const
 
 function c_strtod(p: PChar; endp: Pointer): Double; cdecl; external 'c' name 'strtod';
 
+{$I json_pow5.inc}
+
+type
+  PDouble = ^Double;
+
+{ the high 64 bits of A * B (Lo: the low ones) }
+function Mul128(A, B: QWord; out Lo: QWord): QWord; inline;
+var
+  ALo, AHi, BLo, BHi, P0, P1, P2, P3, Mid: QWord;
+begin
+  ALo := A and $FFFFFFFF;
+  AHi := A shr 32;
+  BLo := B and $FFFFFFFF;
+  BHi := B shr 32;
+  P0 := ALo * BLo;
+  P1 := ALo * BHi;
+  P2 := AHi * BLo;
+  P3 := AHi * BHi;
+  Mid := P1 + (P0 shr 32) + (P2 and $FFFFFFFF);
+  Lo := (Mid shl 32) or (P0 and $FFFFFFFF);
+  Result := P3 + (Mid shr 32) + (P2 shr 32);
+end;
+
+{ the leading zero bits of W (W <> 0) }
+function LeadingZeros(W: QWord): Integer;
+begin
+  Result := 0;
+  if W shr 32 = 0 then begin Inc(Result, 32); W := W shl 32; end;
+  if W shr 48 = 0 then begin Inc(Result, 16); W := W shl 16; end;
+  if W shr 56 = 0 then begin Inc(Result, 8); W := W shl 8; end;
+  if W shr 60 = 0 then begin Inc(Result, 4); W := W shl 4; end;
+  if W shr 62 = 0 then begin Inc(Result, 2); W := W shl 2; end;
+  if W shr 63 = 0 then Inc(Result);
+end;
+
+function DoubleOfBits(Bits: QWord): Double; inline;
+begin
+  Result := PDouble(@Bits)^;
+end;
+
+{ The double nearest to W * 10^Q (W > 0, at most 19 digits): the
+  Eisel-Lemire algorithm (Lemire, "Number parsing at a gigabyte per
+  second", 2021; with the 128-bit product it needs no fallback for
+  doubles: Mushtak and Lemire, 2023), after fast_float's compute_float. }
+function EiselLemire(W: QWord; Q: Integer): Double;
+const
+  Infinite = QWord($7FF0000000000000);
+var
+  Lz, Index, UpperBit, Shift, Power2, X: Integer;
+  Hi, Lo, Hi2, Lo2, Mant: QWord;
+begin
+  if Q < Pow5Smallest then
+    Exit(0.0);
+  if Q > Pow5Largest then
+    Exit(DoubleOfBits(Infinite));
+  Lz := LeadingZeros(W);
+  W := W shl Lz;
+  Index := 2 * (Q - Pow5Smallest);
+  Hi := Mul128(W, Pow5Table[Index], Lo);
+  if Hi and $1FF = $1FF then
+  begin
+    Hi2 := Mul128(W, Pow5Table[Index + 1], Lo2);
+    Lo := Lo + Hi2;
+    if Hi2 > Lo then
+      Inc(Hi);
+  end;
+  UpperBit := Integer(Hi shr 63);
+  Shift := UpperBit + 9;
+  Mant := Hi shr Shift;
+  { floor(Q * log2(10)) + 63, as fast_float's power(q) }
+  X := 217706 * Q;
+  if X >= 0 then
+    X := X shr 16
+  else
+    X := -((-X + 65535) shr 16);
+  Power2 := X + 63 + UpperBit - Lz + 1023;
+  if Power2 <= 0 then
+  begin
+    { a subnormal }
+    if -Power2 + 1 >= 64 then
+      Exit(0.0);
+    Mant := Mant shr (-Power2 + 1);
+    Mant := Mant + (Mant and 1);
+    Mant := Mant shr 1;
+    if Mant < QWord(1) shl 52 then
+      Power2 := 0
+    else
+      Power2 := 1;
+    Exit(DoubleOfBits(Mant or (QWord(Power2) shl 52)));
+  end;
+  { exactly halfway: round to even }
+  if (Lo <= 1) and (Q >= -4) and (Q <= 23) and (Mant and 3 = 1) and
+     (Mant shl Shift = Hi) then
+    Mant := Mant and not QWord(1);
+  Mant := Mant + (Mant and 1);
+  Mant := Mant shr 1;
+  if Mant >= QWord(2) shl 52 then
+  begin
+    Mant := QWord(1) shl 52;
+    Inc(Power2);
+  end;
+  Mant := Mant and not (QWord(1) shl 52);
+  if Power2 >= $7FF then
+    Exit(DoubleOfBits(Infinite));
+  Result := DoubleOfBits(Mant or (QWord(Power2) shl 52));
+end;
+
 { Does W contain a byte B? }
 function HasByte(W: QWord; B: Byte): Boolean; inline;
 var
@@ -699,9 +811,10 @@ begin
     if C = ' ' then
     begin
       { (indentation: runs of spaces, 8 at a time) }
-      while (FPos + 8 <= FLen) and (PQWord(FP + FPos)^ = Spaces8) do
-        Inc(FPos, 8);
-      Inc(FPos);
+      if (FPos + 8 <= FLen) and (PQWord(FP + FPos)^ = Spaces8) then
+        Inc(FPos, 8)
+      else
+        Inc(FPos);
     end
     else if (C = #10) or (C = #13) or (C = #9) then
       Inc(FPos)
@@ -819,45 +932,100 @@ begin
   FPos := I + 1;
 end;
 
+{ A number: its grammar checked, and its digits taken on the way (up to
+  19 significant ones in FMant; FBig past them), for ParseNumber. }
 procedure TJsonReader.ReadNumberToken;
 var
-  I: Integer;
+  I, Digits, Frac, ExpVal: Integer;
+  M: QWord;
+  D: Cardinal;
+  Big, ExpNeg: Boolean;
 begin
   FStart := FPos;
   I := FPos;
-  if FP[I] = '-' then
+  FNumNeg := FP[I] = '-';
+  if FNumNeg then
     Inc(I);
   if I >= FLen then
     Fail('EOF while parsing a value', I);
+  M := 0;
+  Digits := 0;
+  Frac := 0;
+  Big := False;
+  FNumIsInt := True;
   if FP[I] = '0' then
   begin
     Inc(I);
-    if (I < FLen) and (FP[I] in ['0'..'9']) then
+    if (I < FLen) and (Cardinal(Ord(FP[I]) - Ord('0')) < 10) then
       Fail('invalid number', I);
   end
-  else if FP[I] in ['1'..'9'] then
-    while (I < FLen) and (FP[I] in ['0'..'9']) do
-      Inc(I)
+  else if Cardinal(Ord(FP[I]) - Ord('1')) < 9 then
+    while I < FLen do
+    begin
+      D := Cardinal(Ord(FP[I]) - Ord('0'));
+      if D >= 10 then
+        Break;
+      if Digits < 19 then
+        M := M * 10 + D
+      else
+        Big := True;
+      Inc(Digits);
+      Inc(I);
+    end
   else
     Fail('invalid number', I);
   if (I < FLen) and (FP[I] = '.') then
   begin
+    FNumIsInt := False;
     Inc(I);
-    if (I >= FLen) or not (FP[I] in ['0'..'9']) then
+    if (I >= FLen) or (Cardinal(Ord(FP[I]) - Ord('0')) >= 10) then
       Fail('invalid number', I);
-    while (I < FLen) and (FP[I] in ['0'..'9']) do
+    while I < FLen do
+    begin
+      D := Cardinal(Ord(FP[I]) - Ord('0'));
+      if D >= 10 then
+        Break;
+      if Digits < 19 then
+      begin
+        M := M * 10 + D;
+        Inc(Frac);
+        if M <> 0 then
+          Inc(Digits); { (leading zeros are not significant) }
+      end
+      else
+        Big := True;
       Inc(I);
+    end;
   end;
-  if (I < FLen) and (FP[I] in ['e', 'E']) then
+  FNumExp := 0;
+  if (I < FLen) and ((FP[I] = 'e') or (FP[I] = 'E')) then
   begin
+    FNumIsInt := False;
     Inc(I);
-    if (I < FLen) and (FP[I] in ['+', '-']) then
+    ExpNeg := False;
+    if (I < FLen) and ((FP[I] = '+') or (FP[I] = '-')) then
+    begin
+      ExpNeg := FP[I] = '-';
       Inc(I);
-    if (I >= FLen) or not (FP[I] in ['0'..'9']) then
+    end;
+    if (I >= FLen) or (Cardinal(Ord(FP[I]) - Ord('0')) >= 10) then
       Fail('invalid number', I);
-    while (I < FLen) and (FP[I] in ['0'..'9']) do
+    ExpVal := 0;
+    while I < FLen do
+    begin
+      D := Cardinal(Ord(FP[I]) - Ord('0'));
+      if D >= 10 then
+        Break;
+      if ExpVal < 100000 then
+        ExpVal := ExpVal * 10 + Integer(D);
       Inc(I);
+    end;
+    if ExpNeg then FNumExp := -ExpVal else FNumExp := ExpVal;
   end;
+  FNumExp := FNumExp - Frac;
+  FNumMant := M;
+  FNumDigits := Digits;
+  FNumBig := Big;
   FStop := I;
   FPos := I;
   FToken := jtNumber;
@@ -1200,46 +1368,19 @@ end;
 
 procedure TJsonReader.ParseNumber;
 var
-  I, Digits, Frac, Exp10, ExpVal: Integer;
-  Neg, ExpNeg, Big: Boolean;
   M: QWord;
   D: Double;
-  Buf: string;
 begin
   if FToken <> jtNumber then
     Expected('a number');
   if FNumParsed then
     Exit;
   FNumParsed := True;
-  I := FStart;
-  Neg := FP[I] = '-';
-  if Neg then
-    Inc(I);
-  M := 0;
-  Digits := 0;
-  Big := False;
-  while (I < FStop) and (FP[I] in ['0'..'9']) do
+  M := FNumMant;
+  if FNumIsInt and not FNumBig then
   begin
-    if Digits < 19 then
-      M := M * 10 + QWord(Ord(FP[I]) - Ord('0'))
-    else if Digits = 19 then
-    begin
-      { the 20th digit: still a UInt64 if no overflow }
-      if (M > QWord(1844674407370955161)) or
-         ((M = QWord(1844674407370955161)) and (FP[I] > '5')) then
-        Big := True
-      else
-        M := M * 10 + QWord(Ord(FP[I]) - Ord('0'));
-    end
-    else
-      Big := True;
-    Inc(Digits);
-    Inc(I);
-  end;
-  if (I = FStop) and not Big then
-  begin
-    { an integer }
-    if Neg then
+    { an integer: Int64, or UInt64 }
+    if FNumNeg then
     begin
       if M <= QWord(High(Int64)) + 1 then
       begin
@@ -1264,57 +1405,42 @@ begin
       Exit;
     end;
   end;
-  FNumKind := jnDouble;
-  { the fast path: few digits, a small power of ten (exact in a double) }
-  if not Big then
+  if FNumIsInt and FNumBig then
   begin
-    Frac := 0;
-    if (I < FStop) and (FP[I] = '.') then
+    { 20 digits: a UInt64 if it fits }
+    if not FNumNeg and (FStop - FStart = 20) and
+       ((M < QWord(1844674407370955161)) or
+        ((M = QWord(1844674407370955161)) and (FP[FStart + 19] <= '5'))) then
     begin
-      Inc(I);
-      while (I < FStop) and (FP[I] in ['0'..'9']) do
-      begin
-        if Digits < 19 then
-          M := M * 10 + QWord(Ord(FP[I]) - Ord('0'))
-        else
-          Big := True;
-        Inc(Digits);
-        Inc(Frac);
-        Inc(I);
-      end;
-    end;
-    Exp10 := 0;
-    if (I < FStop) and (FP[I] in ['e', 'E']) then
-    begin
-      Inc(I);
-      ExpNeg := FP[I] = '-';
-      if FP[I] in ['+', '-'] then
-        Inc(I);
-      ExpVal := 0;
-      while I < FStop do
-      begin
-        if ExpVal < 100000 then
-          ExpVal := ExpVal * 10 + (Ord(FP[I]) - Ord('0'));
-        Inc(I);
-      end;
-      if ExpNeg then Exp10 := -ExpVal else Exp10 := ExpVal;
-    end;
-    Exp10 := Exp10 - Frac;
-    if not Big and (M <= QWord(1) shl 53) and (Exp10 >= -22) and
-       (Exp10 <= 22) then
-    begin
-      D := M;
-      if Exp10 >= 0 then
-        FDouble := D * Pow10[Exp10]
-      else
-        FDouble := D / Pow10[-Exp10];
-      if Neg then
-        FDouble := -FDouble;
+      FNumKind := jnUInt64;
+      FUInt := M * 10 + QWord(Ord(FP[FStart + 19]) - Ord('0'));
+      FDouble := FUInt;
       Exit;
     end;
   end;
-  Buf := Copy(FText, FStart + 1, FStop - FStart);
-  FDouble := c_strtod(PChar(Buf), nil);
+  FNumKind := jnDouble;
+  if not FNumBig then
+  begin
+    { exact: a small power of ten, or the Eisel-Lemire algorithm }
+    if (M <= QWord(1) shl 53) and (FNumExp >= -22) and (FNumExp <= 22) then
+    begin
+      D := M;
+      if FNumExp >= 0 then
+        FDouble := D * Pow10[FNumExp]
+      else
+        FDouble := D / Pow10[-FNumExp];
+    end
+    else if M = 0 then
+      FDouble := 0.0
+    else
+      FDouble := EiselLemire(M, FNumExp);
+    if FNumNeg then
+      FDouble := -FDouble;
+  end
+  else
+    { more digits: through strtod, in place (the number was checked, and
+      what follows it stops strtod) }
+    FDouble := c_strtod(FP + FStart, nil);
   if FDouble - FDouble <> 0 then { (infinite) }
   begin
     FNumParsed := False;

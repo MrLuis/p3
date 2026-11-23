@@ -146,6 +146,72 @@ begin
   WriteLn('fast path: ', Bad, ' of 20000 differ');
 end;
 
+{ up to 19 digits and any exponent: the Eisel-Lemire path, the same
+  doubles as strtod; and hard cases (ties, subnormals, the largest) }
+procedure WidePath;
+const
+  Hard: array[0..13] of string = ('9007199254740993.0', '9007199254740995.0',
+    '2.2250738585072011e-308', '2.2250738585072014e-308',
+    '1.7976931348623157e308', '4.9406564584124654e-324',
+    '2.4703282292062327e-324', '2.4703282292062328e-324',
+    '7.2057594037927933e16', '1e-400', '0.0000000000000000000000001',
+    '123456789012345678e-5', '-0e10', '1.00000000000000011102230246251565404236316680908203125');
+var
+  Seed: QWord;
+  I, J, Bad, Digits: Integer;
+  S: string;
+  R: TJsonReader;
+
+  function Next(N: Integer): Integer;
+  begin
+    {$Q-}{$R-}
+    Seed := Seed * 6364136223846793005 + 1442695040888963407;
+    Result := Integer((Seed shr 33) mod QWord(N));
+    {$Q+}{$R+}
+  end;
+
+  procedure Compare(const T: string);
+  begin
+    R := TJsonReader.Create(T);
+    R.Read;
+    if R.AsDouble <> c_strtod(PChar(T), nil) then
+    begin
+      Inc(Bad);
+      if Bad < 5 then
+        WriteLn('differs: ', T);
+    end;
+    R.Free;
+  end;
+
+begin
+  Seed := 7;
+  Bad := 0;
+  for I := 0 to High(Hard) do
+    Compare(Hard[I]);
+  for I := 1 to 100000 do
+  begin
+    S := '';
+    if Next(2) = 0 then
+      S := '-';
+    Digits := 1 + Next(19);
+    S := S + Chr(Ord('1') + Next(9));
+    for J := 2 to Digits do
+      S := S + Chr(Ord('0') + Next(10));
+    if Next(2) = 0 then
+      Insert('.', S, Length(S) - Next(Digits div 2 + 1));
+    if (S[Length(S)] = '.') or (S[Length(S)] = '-') then
+      S := S + '5';
+    S := S + 'e' + IntToStr(Next(680) - 350);
+    try
+      Compare(S);
+    except
+      on EJsonError do
+        ; { (out of range: also an error for strtod's infinity) }
+    end;
+  end;
+  WriteLn('wide path: ', Bad, ' differ');
+end;
+
 procedure SkipDemo;
 var
   R: TJsonReader;
@@ -175,6 +241,8 @@ begin
   Tokens('[[[]], {}]');
   Tokens('{"long key with more than eight bytes": "and a long value too, 0123456789"}');
   Tokens(#10'  {'#10'    "x": 1'#10'  }'#10);
+  { runs of exactly 8 and 16 spaces, and of 9 }
+  Tokens('{'#10'        "a": 1,'#10'                "b": 2,'#10'         "c": 3}');
 
   Check('y_object_empty_key', '{"":0}');
   Check('y_string_unicode', '"' + U('00e9') + '' + U('D834') + '' + U('DD1E') + ' caf' + #$C3#$A9 + '"');
@@ -233,4 +301,5 @@ begin
   WriteLn(JsonValidUtf8('caf' + #$C3#$A9), ' ', JsonValidUtf8(#$FF));
   SkipDemo;
   FastPath;
+  WidePath;
 end.
