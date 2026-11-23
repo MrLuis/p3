@@ -62,6 +62,27 @@ begin
   WriteLn('skip stress: ', Bad, ' missed');
 end;
 
+{ skipping matches the kinds of brackets; short texts (under 16 bytes)
+  are skipped byte by byte }
+procedure SkipChecks;
+const
+  Bad: array[0..3] of string = ('{"x": [1}, "a": 1}', '{"x": {"y": 1], "a": 1}',
+    '{"x": [[1]}], "a": 1}', '{"x": [{"q": "]}"}}, "a": 1}');
+var
+  I: Integer;
+begin
+  for I := 0 to High(Bad) do
+    try
+      WriteLn(JsonGet(Bad[I], ['a']).AsInt64, ' (not seen)');
+    except
+      on E: EJsonError do
+        WriteLn(E.Message);
+    end;
+  WriteLn(JsonGet('{"s":[1],"a":2}', ['a']).AsInt64, ' ',
+          JsonGet('{"s":"]\"","a":3}', ['a']).AsInt64, ' ',
+          JsonGet('[[{}],[],4]', [2]).AsInt64);
+end;
+
 var
   S, K: string;
   L, E: TJsonLazy;
@@ -71,6 +92,7 @@ var
 
 begin
   SkipStress;
+  SkipChecks;
   S := '{"users": [{"name": "Ada", "langs": ["en", "fr"], "age": 36},' +
        ' {"name": "Alan", "langs": [], "age": 41}],' +
        ' "meta": {"count": 2, "a/b": true, "next": null}, "big": [' +

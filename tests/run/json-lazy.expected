@@ -1,4 +1,9 @@
 skip stress: 0 missed
+expected ',' or ']' at line 1 column 9
+expected ',' or '}' at line 1 column 14
+expected ',' or ']' at line 1 column 11
+expected ',' or ']' at line 1 column 19
+2 3 4
 Ada
 41
 ["en", "fr"]

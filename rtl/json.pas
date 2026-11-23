@@ -88,7 +88,8 @@ type
       after one whole value. }
     function Read: Boolean;
     { Passes over the current value: after a jtBeginObject or jtBeginArray
-      token, to its end (checking brackets and strings only, which is fast);
+      token, to its end (its brackets matched and its strings closed, nothing
+      more is checked: which is fast);
       after a key, over the key's value; else nothing. }
     procedure Skip;
     property Token: TJsonToken read FToken;
@@ -243,7 +244,8 @@ type
 
     JsonGet finds one value in a JSON text by its path, reading only what
     comes before it on the way (the members it passes are skipped: their
-    brackets and strings are checked, not the rest). The value is a
+    brackets are matched and their strings closed, nothing more is
+    checked). The value is a
     TJsonLazy: where it is in the text, read when asked. }
 
   TJsonLazy = record
@@ -385,7 +387,9 @@ implementation
 
 type
   PQWord = ^QWord;
-  { 16 bytes of text at once (SIMD: SSE2, NEON) }
+  { 16 bytes of text at once (SIMD: SSE2 on x86-64, NEON on AArch64; on a
+  target without vectors LLVM makes them scalar code, slower than the
+  8-byte scans they replace) }
   TBytes16 = vector[16] of Byte;
 
 const
@@ -1211,10 +1215,11 @@ begin
   Result := True;
 end;
 
-{ Over the rest of the container just opened: brackets and strings only.
-  16 bytes at a time: a mask of the quotes, backslashes and brackets, whose
-  bits are taken in order (a backslash in a string skips the byte after it,
-  brackets in strings do not count). }
+{ Over the rest of the container just opened: its brackets matched and
+  its strings closed, nothing else. 16 bytes at a time: a mask of the
+  quotes, backslashes and brackets, whose bits are taken in order (a
+  backslash in a string skips the byte after it, brackets in strings do
+  not count). }
 procedure TJsonReader.SkipContainer;
 var
   Level, I, P, Skip: Integer;
@@ -1222,6 +1227,8 @@ var
   M: QWord;
   C: Char;
   InString: Boolean;
+  { the closing bracket each open one wants: Opens[1] is the container's }
+  Opens: array of Char;
 
   { the byte at P: false when the container ends there }
   function Take(P: Integer): Boolean;
@@ -1240,9 +1247,17 @@ var
     end;
     case C of
       '"': InString := True;
-      '{', '[': Inc(Level);
+      '{', '[':
+        begin
+          Inc(Level);
+          if Level >= Length(Opens) then
+            SetLength(Opens, Length(Opens) * 2 + 16);
+          if C = '{' then Opens[Level] := '}' else Opens[Level] := ']';
+        end;
       '}', ']':
         begin
+          if C <> Opens[Level] then
+            Fail('expected '','' or ''' + Opens[Level] + '''', P);
           Dec(Level);
           if Level = 0 then
           begin
@@ -1259,6 +1274,8 @@ var
 
 begin
   Level := 1;
+  SetLength(Opens, 16);
+  if FStack[FDepth - 1] then Opens[1] := '}' else Opens[1] := ']';
   I := FPos;
   Skip := 0;
   InString := False;

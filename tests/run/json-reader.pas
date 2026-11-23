@@ -212,6 +212,72 @@ begin
   WriteLn('wide path: ', Bad, ' differ');
 end;
 
+{ JsonValidUtf8 and JsonQuote on long texts (their 16-byte paths): a bad
+  or special byte at every offset, against byte-by-byte references }
+procedure LongTexts;
+var
+  I, J, Bad: Integer;
+  S, Ref: string;
+
+  function StringOfChar(C: Char; N: Integer): string;
+  var
+    K: Integer;
+  begin
+    SetLength(Result, N);
+    for K := 1 to N do
+      Result[K] := C;
+  end;
+
+  function RefQuote(const T: string): string;
+  var
+    K: Integer;
+  begin
+    Result := '"';
+    for K := 1 to Length(T) do
+      case T[K] of
+        '"': Result := Result + '\"';
+        '\': Result := Result + '\\';
+        #8: Result := Result + '\b';
+        #9: Result := Result + '\t';
+        #10: Result := Result + '\n';
+        #12: Result := Result + '\f';
+        #13: Result := Result + '\r';
+        #0..#7, #11, #14..#31:
+          Result := Result + '\u00' + LowerCase(IntToHex(Ord(T[K]), 2));
+      else
+        Result := Result + T[K];
+      end;
+    Result := Result + '"';
+  end;
+
+begin
+  Bad := 0;
+  for I := 0 to 40 do
+    for J := 41 to 70 do
+    begin
+      { valid: ASCII with an é at I; invalid: a lone continuation byte at I }
+      S := StringOfChar('a', J);
+      Insert(#$C3#$A9, S, I + 1);
+      if not JsonValidUtf8(S) then
+        Inc(Bad);
+      S := StringOfChar('a', J);
+      Insert(#$A9, S, I + 1);
+      if JsonValidUtf8(S) then
+        Inc(Bad);
+      { a byte to escape at I, among others }
+      S := StringOfChar('x', J);
+      S[I + 1] := Chr(I mod 4 * 11);
+      if I mod 3 = 0 then
+        S[I + 1] := '"';
+      if I mod 5 = 0 then
+        S[I + 1] := '\';
+      Ref := RefQuote(S);
+      if JsonQuote(S) <> Ref then
+        Inc(Bad);
+    end;
+  WriteLn('long texts: ', Bad, ' wrong');
+end;
+
 procedure SkipDemo;
 var
   R: TJsonReader;
@@ -302,4 +368,5 @@ begin
   SkipDemo;
   FastPath;
   WidePath;
+  LongTexts;
 end.

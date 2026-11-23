@@ -225,8 +225,9 @@ end.
   `Path('/a/0')`, `Get`, `TryGet` and `As...Def`, and changed with `Put`,
   `Add`, `Delete` and `Remove`. `JsonItems` and `JsonMembers` iterate.
 - **`JsonGet`, `JsonGetPath`, `JsonArrayItems`, `JsonObjectItems`**: lazy
-  access. A path is followed by skipping everything else (its brackets and
-  strings are checked, not the rest), and a `TJsonLazy` is read when asked.
+  access. A path is followed by skipping everything else: its brackets are
+  matched and its strings closed, and nothing more is checked. A
+  `TJsonLazy` is read when asked.
 - **`TJsonWriter`**: compact or pretty output; doubles are written as the
   shortest text that reads back the same.
 - **Typed JSON** through the library's json generator (`--generator=json`,

@@ -56,3 +56,4 @@ TRUE FALSE
 skip keep [ ] } FALSE
 fast path: 0 of 20000 differ
 wide path: 0 differ
+long texts: 0 wrong
