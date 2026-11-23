@@ -5944,6 +5944,8 @@ function emitTypecast(e: PNode): TV;
 var
   arg: PNode;
   v: TV;
+  se, te: PType;
+  tt: PIRType;
 begin
   arg := PNode(listGet(e^.args, 0));
   if isMethodPointer(e^.typ) and (arg^.typ^.kind = tyRecord) then { TEv(m) }
@@ -5955,6 +5957,30 @@ begin
   if e^.typ^.kind = tyShortString then
     exit(emitPStr(arg));
   v := visitExpr(arg);
+  if e^.typ^.kind = tyVector then { lane by lane }
+  begin
+    se := arg^.typ^.vecElement;
+    te := e^.typ^.vecElement;
+    tt := memType(e^.typ);
+    if te^.kind = tyReal then
+    begin
+      if se^.kind = tyReal then
+        exit(v);
+      if isSignedOrdinal(se) then
+        exit(irCast('sitofp', v, tt, 'vconv'));
+      exit(irCast('uitofp', v, tt, 'vconv'));
+    end;
+    if getBase(te)^.kind = tyBoolean then { nonzero lanes are true: 1 }
+      exit(irCast('zext', irVecCmp('icmp', 'ne', v, irV(v.t, 'zeroinitializer'), ''),
+                  tt, 'vconv'));
+    if v.t = tt then
+      exit(v);
+    if v.t^.elem^.bits > tt^.elem^.bits then
+      exit(irCast('trunc', v, tt, 'vconv'));
+    if isSignedOrdinal(se) then
+      exit(irCast('sext', v, tt, 'vconv'));
+    exit(irCast('zext', v, tt, 'vconv'));
+  end;
   if arg^.typ^.kind = tyAnsiString then
   begin
     { pchar(s) is never nil }

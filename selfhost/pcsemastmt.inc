@@ -1227,6 +1227,15 @@ begin
   end;
   if (t^.kind = tyAnsiString) and (isStringish(at) or (at^.kind = tyPointer)) then
     exit(t); { an untyped pointer is taken to be an ansistring }
+  { vector[N] of T: lane by lane, between vectors of one length, from
+    ordinal lanes to ordinal or real ones (a mask's booleans become 0 and
+    1), or between real ones }
+  if (t^.kind = tyVector) and (at^.kind = tyVector) and
+     (t^.vecCount = at^.vecCount) and
+     ((isOrdinal(at^.vecElement) and (isOrdinal(t^.vecElement) or
+                                      (t^.vecElement^.kind = tyReal))) or
+      ((at^.vecElement^.kind = tyReal) and (t^.vecElement^.kind = tyReal))) then
+    exit(t);
   if (t^.kind = tyShortString) and isStringish(at) then
     exit(t);
   if (isOrdinal(t) and isOrdinal(at)) or

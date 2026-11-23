@@ -9161,6 +9161,17 @@ class Checker : public StmtVisitor<Checker>,
       return T; // an untyped pointer is taken to be an ansistring
     if (T->isShortString() && AT->isStringish())
       return T;
+    // vector[N] of T: lane by lane, between vectors of one length, from
+    // ordinal lanes to ordinal or real ones (a mask's booleans become 0 and
+    // 1), or between real ones
+    if (auto *TV = llvm::dyn_cast<VectorType>(T))
+      if (auto *AV = llvm::dyn_cast<VectorType>(AT)) {
+        Type *TE = TV->getElementType(), *AE = AV->getElementType();
+        if (TV->getCount() == AV->getCount() &&
+            ((AE->isOrdinal() && (TE->isOrdinal() || TE->isReal())) ||
+             (AE->isReal() && TE->isReal())))
+          return T;
+      }
     if ((T->isOrdinal() && AT->isOrdinal()) ||
         (T->isPointer() &&
          (AT->isPointer() || AT->isNil() || AT->isClass() || AT->isAnsiString() ||

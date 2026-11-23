@@ -7583,6 +7583,23 @@ public:
     if (E->getType()->isShortString())
       return emitPStr(Arg);
     llvm::Value *V = visitExpr(Arg);
+    if (auto *TV = llvm::dyn_cast<VectorType>(E->getType())) { // lane by lane
+      Type *SE = llvm::cast<VectorType>(Arg->getType())->getElementType();
+      Type *TE = TV->getElementType();
+      llvm::Type *To = memType(TV);
+      if (TE->isReal())
+        return SE->isReal() ? V
+               : isSignedOrdinal(SE) ? B.CreateSIToFP(V, To, "vconv")
+                                     : B.CreateUIToFP(V, To, "vconv");
+      if (TE->getBase()->isBoolean()) // nonzero lanes are true: 1
+        return B.CreateZExt(
+            B.CreateICmpNE(V, llvm::Constant::getNullValue(V->getType())), To,
+            "vconv");
+      if (V->getType() == To)
+        return V;
+      return isSignedOrdinal(SE) ? B.CreateSExtOrTrunc(V, To, "vconv")
+                                 : B.CreateZExtOrTrunc(V, To, "vconv");
+    }
     if (Arg->getType()->isAnsiString()) { // pchar(s) is never nil
       auto *P = llvm::cast<PointerType>(E->getType());
       if (!P->isUntyped() && P->getPointee()->isChar())
