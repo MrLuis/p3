@@ -4139,9 +4139,18 @@ Stmt *Parser::finishDesignatorStmt(SourceLocation Start, Expr *Target) {
   if (isAssignOp())
     return parseAssignment(Start, Target);
 
+  // What may follow a call statement: the usual ends of a statement, and
+  // what ends a lambda's statement body written as an argument or an
+  // element: F(procedure(C) => C.Reply(1, 'x'), more) — anything else
+  // there is still an error, reported by whatever encloses it.
+  auto EndsCallStmt = [&] {
+    return Tok.isOneOf(tok::semi, tok::kw_end, tok::kw_else, tok::kw_until,
+                       tok::eof) ||
+           Tok.isOneOf(tok::r_paren, tok::comma, tok::r_square);
+  };
+
   if (auto *Nav = llvm::dyn_cast<SafeNavExpr>(Target);
-      Nav && Tok.isOneOf(tok::semi, tok::kw_end, tok::kw_else, tok::kw_until,
-                         tok::eof)) {
+      Nav && EndsCallStmt()) {
     // x?.P(args); a call where x is not nil (each `?.` of the chain)
     while (true) {
       Nav->setStatement();
@@ -4157,8 +4166,7 @@ Stmt *Parser::finishDesignatorStmt(SourceLocation Start, Expr *Target) {
     return Ctx.create<ExprStmt>(SourceRange(Start, PrevTokEnd), Target);
   }
 
-  if (LangOpts.Mode != LangMode::ISO &&
-      Tok.isOneOf(tok::semi, tok::kw_end, tok::kw_else, tok::kw_until, tok::eof)) {
+  if (LangOpts.Mode != LangMode::ISO && EndsCallStmt()) {
     auto *Call = llvm::dyn_cast<IndirectCallExpr>(Target);
     if (!Call) // r.p without arguments
       Call = Ctx.create<IndirectCallExpr>(Target->getRange(), Target,

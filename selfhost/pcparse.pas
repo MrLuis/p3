@@ -5764,8 +5764,12 @@ begin
   if isAssignOp then
     exit(parseAssignment(start, target));
 
+  { what may follow a call statement: the usual ends of a statement, and
+    what ends a lambda's statement body written as an argument or an
+    element: F(procedure(C) => C.Reply(1, 'x'), more) }
   if (target^.kind = nkSafeNav) and
-     (tok.kind in [tkSemi, tkKwEnd, tkKwElse, tkKwUntil, tkEof]) then
+     (tok.kind in [tkSemi, tkKwEnd, tkKwElse, tkKwUntil, tkEof,
+                   tkRParen, tkComma, tkRSquare]) then
   begin
     { x?.P(args); a call where x is not nil (each ?. of the chain) }
     nav := target;
@@ -5791,7 +5795,8 @@ begin
   end;
 
   if (mode <> lmISO) and
-     (tok.kind in [tkSemi, tkKwEnd, tkKwElse, tkKwUntil, tkEof]) then
+     (tok.kind in [tkSemi, tkKwEnd, tkKwElse, tkKwUntil, tkEof,
+                   tkRParen, tkComma, tkRSquare]) then
   begin
     call := target;
     if call^.kind <> nkIndirectCall then { r.p without arguments }

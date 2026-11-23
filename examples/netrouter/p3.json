@@ -1,0 +1,9 @@
+{
+  "name": "netrouter",
+  "version": "0.1.0",
+  "description": "A small HTTP/1.1 server on netasync whose routes, URL parameters, middleware and sub-routers come from the netrouter unit",
+  "main": "src/netrouter_demo.pas",
+  "output": "bin/netrouter_demo",
+  "mode": "objfpc",
+  "optimize": 2
+}

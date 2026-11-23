@@ -1,7 +1,7 @@
 # p3's unit library: copied to <build>/lib/pascal, where the compiler finds
 # it at <bindir>/../lib/pascal, with each unit's object next to its source
 # for -fseparate-units (compiled in objfpc mode, for the host).
-set(P3_RTL_UNITS sysutils strutils math classes threading sequences netasync)
+set(P3_RTL_UNITS sysutils strutils math classes threading sequences netasync netrouter)
 set(P3_RTL_DIR ${PROJECT_BINARY_DIR}/lib/pascal)
 
 set(P3_RTL_SOURCES)

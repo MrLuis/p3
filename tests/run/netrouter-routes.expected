@@ -1,0 +1,81 @@
+-- static, parameters, priority
+GET / -> log(home)  [/]
+GET /posts -> log(list)  [/posts]
+POST /posts -> log(create)  [/posts]
+GET /posts/new -> log(new-form)  [/posts/new]
+GET /posts/42 -> log(show id=42)  [/posts/{id:[0-9]+}]
+GET /posts/hello-world -> log(by-slug slug=hello-world)  [/posts/{slug}]
+DELETE /posts/42 -> log(delete id=42)  [/posts/{id:[0-9]+}]
+GET /files/report.tar.gz -> log(file name=report ext=tar.gz)  [/files/{name}.{ext}]
+GET /archive/2024/07 -> log(archive year=2024 month=07)  [/archive/{year:\d{4}}/{month:0[1-9]|1[0-2]}]
+GET /archive/2024/13 -> 404 log(not-found)
+GET /static/css/site.css -> log(static *=css/site.css)  [/static/*]
+GET /static/ -> log(static *=)  [/static/*]
+-- backtracking, any method, custom method
+GET /a/b/c -> log(axc x=b)  [/a/{x}/c]
+GET /a/b/d -> log(abd)  [/a/b/d]
+PATCH /any -> log(any)  [/any]
+PURGE /cache -> log(purge)  [/cache]
+-- 404 / 405
+GET /nowhere -> 404 log(not-found)
+GET /posts/ -> 404 log(not-found)
+PUT /posts -> 405 allow: GET, POST 
+DELETE /posts/hello-world -> 405 allow: GET 
+-- middleware, groups
+GET /me -> log(denied)  [/me]
+GET /me -> log(me)  [/me]
+GET /admin/stats -> log(admin(stats))  [/admin/stats]
+-- sub-routers
+GET /users/7 -> log(users(user uid=7))  [/users/{uid}]
+GET /users/7/ -> log(users(user uid=7))  [/users/{uid}]
+GET /users/7/posts/99 -> log(users(user-post uid=7 pid=99))  [/users/{uid}/posts/{pid}]
+GET /api -> log(api-root)  [/api]
+GET /api/ -> log(api-root)  [/api]
+GET /api/v1/ping -> log(pong)  [/api/v1/ping]
+GET /api/v1/items/x9 -> log(item id=x9)  [/api/v1/items/{id}]
+GET /api/v2/nothing -> 404 log(not-found)
+-- without a context of the caller
+own context: TRUE log(show id=5)
+-- walk
+GET /
+GET /posts
+POST /posts
+GET /posts/new
+GET /posts/{id:[0-9]+}
+GET /posts/{slug}
+DELETE /posts/{id:[0-9]+}
+GET /files/{name}.{ext}
+GET /archive/{year:\d{4}}/{month:0[1-9]|1[0-2]}
+GET /static/*
+GET /a/b/d
+GET /a/{x}/c
+* /any
+PURGE /cache
+GET /me
+GET /admin/stats
+GET /users/{uid}/
+GET /users/{uid}/posts/{pid}
+GET /api/
+GET /api/v1/ping
+GET /api/v1/items/{id}
+-- configuration errors
+use after routes: raised
+no leading slash: raised
+star not last: raised
+conflicting names: raised
+bad expression: raised
+adjacent parameters: raised
+-- expressions
+rx digits: ok
+rx \d{4}: ok
+rx {2,3}: ok
+rx alternation: ok
+rx group+: ok
+rx class: ok
+rx negated: ok
+rx anchors: ok
+rx optional: ok
+rx dot star: ok
+rx backtrack: ok
+-- threads
+served from 4 tasks: 8000
