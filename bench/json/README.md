@@ -31,22 +31,25 @@ better).
 |---|---:|---:|---:|
 | twitter: parse dom | 644 | 421 | 1795 |
 | twitter: write dom | 1556 | 1408 | 2641 |
-| twitter: lazy get | 1815 | — | 1320 |
+| twitter: lazy get | 4511 | — | 1320 |
 | citm_catalog: parse dom | 682 | 561 | 2248 |
 | citm_catalog: write dom | 2071 | 3128 | 3342 |
-| citm_catalog: lazy get | 1078 | — | 1699 |
+| citm_catalog: lazy get | 5554 | — | 1699 |
 | canada: parse dom | 292 | 338 | 1036 |
 | canada: write dom | 1044 | 837 | 815 |
-| canada: lazy get | 1174 | — | 1126 |
+| canada: lazy get | 5787 | — | 1126 |
 | canada: typed read | 308 | 474 | 527 |
 
 Reading tokens alone: twitter 478, citm_catalog 797, canada 488 MB/s.
 
 What this says: on strings and structure unit `json` parses faster than
 serde_json and about a third as fast as sonic-rs, whose parser uses SIMD
-(p3 scans 8 bytes at a time in general-purpose registers); writing is in
-the same range as both; lazy access is like sonic-rs's (both skip what is
-not asked for). Numbers are the weak side: each float is converted when
+for its whole first pass (p3 reads token by token, and scans strings 8
+bytes at a time: 16-byte vectors measured slower there, the strings being
+short); writing is in the same range as both. Lazy access skips what is not
+asked for 16 bytes at a time with SIMD vectors (`vector[16] of Byte`, a
+lane comparison, `VectorMask`, `CountTrailingZeros`): about three times
+sonic-rs's. Numbers are the weak side: each float is converted when
 read (Eisel-Lemire, exact), but the DOM and the generated code add work
 per number that serde and sonic do not have, so canada.json is below both.
 A document's nodes also keep strings in the source text, so the DOM is

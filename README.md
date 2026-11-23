@@ -74,6 +74,12 @@ examples are in the reference.
 - **Iterators**: `function Fibonacci: iterator UInt64` with `yield`, usable in
   `for ... in`.
 - **Lazy sequences**: LINQ-style `map`/`filter`/... in the `sequences` unit.
+- **SIMD vectors**: `vector[N] of T` with elementwise `+ - *`, lane
+  comparisons giving a vector of booleans (`V = Ord('"')`), lane `and`,
+  `or`, `xor`, `not`, `VectorLoad`/`VectorStore` at any address and
+  `VectorMask` (a bit per lane); with `PopCnt`, `CountTrailingZeros` and
+  `CountLeadingZeros` a byte scan is a load, a compare, a mask and a count
+  (SSE2, NEON).
 - **Reachability pruning**: code nothing refers to is left out of the
   executable, also at `-O0`.
 - **Attributes, partial types and source generators**: `[Serializable]`
@@ -236,9 +242,11 @@ end.
   - Strings are checked as UTF-8.
   - Errors raise `EJsonError` with a line, a column and a serde_json-style
     message.
-- **Speed**: text is scanned 8 bytes at a time. On the usual benchmark files
-  it parses faster than serde_json on strings and structure, but slower on
-  numbers and slower than sonic-rs's SIMD parser. Results are in
+- **Speed**: strings are scanned 8 bytes at a time. Skipping a value (lazy
+  access, `Skip`), escaping and the UTF-8 check use 16-byte SIMD vectors.
+  On the usual benchmark files it parses faster than serde_json on strings
+  and structure, but slower on numbers and slower than sonic-rs's SIMD
+  parser. Lazy access is about three times sonic-rs's. Results are in
   [`bench/json`](bench/json/README.md), and an example is in
   [`examples/json`](examples/json/README.md).
 

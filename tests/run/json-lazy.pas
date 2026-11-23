@@ -10,6 +10,58 @@ program jsonlazy;
 {$H+}
 uses sysutils, json;
 
+{ documents whose skipped member has strings with quotes, backslashes and
+  brackets at every offset (the 16-byte blocks of the skip): the value
+  after it is found }
+procedure SkipStress;
+const
+  Pieces: array[0..9] of string = ('"', '\', '[', ']', '{', '}', 'a', 'bc',
+    '\"', '"\');
+var
+  Seed: QWord;
+  I, J, K, N, Bad: Integer;
+  Doc, Str: string;
+
+  function Next(M: Integer): Integer;
+  begin
+    {$Q-}{$R-}
+    Seed := Seed * 6364136223846793005 + 1442695040888963407;
+    Result := Integer((Seed shr 33) mod QWord(M));
+    {$Q+}{$R+}
+  end;
+
+begin
+  Seed := 3;
+  Bad := 0;
+  for I := 1 to 3000 do
+  begin
+    Doc := '{"skip": [';
+    N := Next(12);
+    for J := 1 to N do
+    begin
+      Str := '';
+      for K := 1 to Next(10) do
+        Str := Str + Pieces[Next(10)];
+      if J > 1 then
+        Doc := Doc + ',';
+      case Next(3) of
+        0: Doc := Doc + JsonQuote(Str);
+        1: Doc := Doc + '[' + JsonQuote(Str) + ', {"k": ' + JsonQuote(Str) + '}]';
+      else
+        Doc := Doc + '{' + JsonQuote(Str) + ': [[], {}]}';
+      end;
+    end;
+    Doc := Doc + '], "tail": ' + IntToStr(I) + '}';
+    if JsonGet(Doc, ['tail']).AsInt64 <> I then
+    begin
+      Inc(Bad);
+      if Bad < 3 then
+        WriteLn('missed: ', Doc);
+    end;
+  end;
+  WriteLn('skip stress: ', Bad, ' missed');
+end;
+
 var
   S, K: string;
   L, E: TJsonLazy;
@@ -18,6 +70,7 @@ var
   N: Integer;
 
 begin
+  SkipStress;
   S := '{"users": [{"name": "Ada", "langs": ["en", "fr"], "age": 36},' +
        ' {"name": "Alan", "langs": [], "age": 41}],' +
        ' "meta": {"count": 2, "a/b": true, "next": null}, "big": [' +

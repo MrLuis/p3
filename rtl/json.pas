@@ -385,6 +385,8 @@ implementation
 
 type
   PQWord = ^QWord;
+  { 16 bytes of text at once (SIMD: SSE2, NEON) }
+  TBytes16 = vector[16] of Byte;
 
 const
   Ones = QWord($0101010101010101);
@@ -593,6 +595,13 @@ begin
   I := 0;
   while I < Len do
   begin
+    { ASCII runs: 16 bytes at a time, then 8 }
+    if (I + 16 <= Len) and
+       (VectorMask(VectorLoad(TBytes16, P + I) >= 128) = 0) then
+    begin
+      Inc(I, 16);
+      Continue;
+    end;
     if (I + 8 <= Len) and (PQWord(P + I)^ and Highs = 0) then
     begin
       Inc(I, 8);
@@ -642,7 +651,8 @@ procedure JsonEscapeTo(var Buf: string; var Len: Integer; const S: string);
 var
   P: PChar;
   I, Run, N: Integer;
-  W: QWord;
+  W, M: QWord;
+  V: TBytes16;
   C: Char;
 begin
   P := PChar(S);
@@ -651,7 +661,19 @@ begin
   Run := 0; { the start of the bytes not yet copied }
   while I < N do
   begin
-    if I + 8 <= N then
+    { 16 bytes at a time, to the next one to escape }
+    if I + 16 <= N then
+    begin
+      V := VectorLoad(TBytes16, P + I);
+      M := VectorMask((V = Ord('"')) or (V = Ord('\')) or (V < 32));
+      if M = 0 then
+      begin
+        Inc(I, 16);
+        Continue;
+      end;
+      Inc(I, CountTrailingZeros(M));
+    end
+    else if I + 8 <= N then
     begin
       W := PQWord(P + I)^;
       if not HasByte(W, Ord('"')) and not HasByte(W, Ord('\')) and
@@ -864,7 +886,8 @@ begin
   I := FPos + 1;
   while True do
   begin
-    { 8 bytes at a time while none ends the string or needs a look }
+    { 8 bytes at a time while none ends the string or needs a look (16 at
+      a time with vectors measured slower here: most strings are short) }
     while I + 8 <= FLen do
     begin
       W := PQWord(FP + I)^;
@@ -1188,58 +1211,80 @@ begin
   Result := True;
 end;
 
-{ Over the rest of the container just opened: brackets and strings only. }
+{ Over the rest of the container just opened: brackets and strings only.
+  16 bytes at a time: a mask of the quotes, backslashes and brackets, whose
+  bits are taken in order (a backslash in a string skips the byte after it,
+  brackets in strings do not count). }
 procedure TJsonReader.SkipContainer;
 var
-  Level, I: Integer;
-  W: QWord;
+  Level, I, P, Skip: Integer;
+  V: TBytes16;
+  M: QWord;
   C: Char;
-begin
-  Level := 1;
-  I := FPos;
-  while I < FLen do
+  InString: Boolean;
+
+  { the byte at P: false when the container ends there }
+  function Take(P: Integer): Boolean;
   begin
-    C := FP[I];
+    Result := True;
+    if P < Skip then
+      Exit; { (escaped) }
+    C := FP[P];
+    if InString then
+    begin
+      if C = '\' then
+        Skip := P + 2
+      else if C = '"' then
+        InString := False;
+      Exit;
+    end;
     case C of
-      '"':
-        begin
-          Inc(I);
-          while True do
-          begin
-            while (I + 8 <= FLen) do
-            begin
-              W := PQWord(FP + I)^;
-              if HasByte(W, Ord('"')) or HasByte(W, Ord('\')) then
-                Break;
-              Inc(I, 8);
-            end;
-            if I >= FLen then
-              Fail('EOF while parsing a string', FLen);
-            if FP[I] = '"' then
-              Break;
-            if FP[I] = '\' then
-              Inc(I, 2)
-            else
-              Inc(I);
-          end;
-        end;
+      '"': InString := True;
       '{', '[': Inc(Level);
       '}', ']':
         begin
           Dec(Level);
           if Level = 0 then
           begin
-            FStart := I;
-            FPos := I + 1;
+            FStart := P;
+            FPos := P + 1;
             if C = '}' then FToken := jtEndObject else FToken := jtEndArray;
             Dec(FDepth);
             if FDepth = 0 then FState := rsDone else FState := rsAfterValue;
-            Exit;
+            Result := False;
           end;
         end;
     end;
+  end;
+
+begin
+  Level := 1;
+  I := FPos;
+  Skip := 0;
+  InString := False;
+  while I + 16 <= FLen do
+  begin
+    V := VectorLoad(TBytes16, FP + I);
+    M := VectorMask((V = Ord('"')) or (V = Ord('\')) or (V = Ord('{')) or
+                    (V = Ord('}')) or (V = Ord('[')) or (V = Ord(']')));
+    while M <> 0 do
+    begin
+      P := I + CountTrailingZeros(M);
+      if not Take(P) then
+        Exit;
+      M := M and (M - 1);
+    end;
+    Inc(I, 16);
+  end;
+  while I < FLen do
+  begin
+    if FP[I] in ['"', '\', '{', '}', '[', ']'] then
+      if not Take(I) then
+        Exit;
     Inc(I);
   end;
+  if InString then
+    Fail('EOF while parsing a string', FLen);
   Fail('EOF while parsing a value', FLen);
 end;
 
