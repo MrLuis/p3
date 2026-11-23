@@ -101,3 +101,47 @@ ninja -C build check
 ## License
 
 See [LICENSE](LICENSE).
+
+## Compiler directives
+
+All handled in `selfhost/pclex.pas` (the C++ compiler recognizes the same set).
+
+**Conditionals** (pclex.pas:1284-1293)
+
+`$IF` `$IFDEF` `$IFNDEF` `$IFOPT` `$ELSEIF` `$ELSE` `$ENDIF` `$IFEND`
+`$DEFINE` `$UNDEF`
+
+**Files / linking**
+
+- `$I file` / `$INCLUDE file` (pclex.pas:1579)
+- `$interfaces com|corba` (pclex.pas:1594)
+
+**Switch-like directives**
+
+- `$H+`/`$H-` (long strings; long form `$longstrings on/off`, pclex.pas:1762)
+- `$R+`/`$R-` (range checks), `$Q+`/`$Q-` (overflow checks) (pclex.pas:1802-1805;
+  comma lists like `{$R-,Q+}` work)
+- `$A+|-`, `$A1|2|4|8|16|32`, `$align N|on|off` (pclex.pas:1692,1706,1795)
+- `$packrecords 1|2|4|8|16|32|C|DEFAULT|NORMAL` (pclex.pas:1679)
+- `$scopedenums on/off` (pclex.pas:1711)
+- `$inline on/off` (pclex.pas:1723)
+- `$coperators on/off` (pclex.pas:1736)
+- `$macro on/off` (pclex.pas:1750)
+- `$nullsafe on/off` (p3's own, objfpc mode) (pclex.pas:1616)
+- `$push` / `$pop` (pclex.pas:1639,1658)
+
+**Mode switches** — `$modeswitch NAME on/off` (pclex.pas:1454)
+
+- Effective: `advancedrecords`, `typehelpers`, `racechecks` (p3's own),
+  `result`, `out`, `defaultparameters`
+- Accepted but mode-decided: `class`, `objpas`, `properties`, `exceptions`
+- Accepted but always on: `cvar`, `initfinal`, `hintdirective`, `allowinline`
+- Known-and-ignored (p3 lacks them): `pchartostring`, `nestedcomments`,
+  `classicprocvars`, `macprocvars`, `repeatforward`, `pointertoprocvar`,
+  `autoderef`, `ansistrings`, `duplicatelocals`, `objectivec1`/`objectivec2`,
+  `nestedprocvars`, `nonlocalgoto`, `isounaryminus`, `systemcodepage`,
+  `finalfields`, `unicodestrings`, `cblocks`, `isoio`, `isoprogramparas`,
+  `isomod`, `arrayoperators`
+
+Any other switch letter is warned about and ignored ("listing, boolean
+evaluation, ..." — pclex.pas:1792).
