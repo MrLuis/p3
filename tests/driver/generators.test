@@ -26,6 +26,11 @@
 ; DUMP: p3model{{.}}1
 ; DUMP: type{{.}}TCustomer{{.}}record
 ; DUMP: arg{{.}}ident{{.}}Format.Json
+; DUMP: type{{.}}TColor{{.}}enum{{.+}}19{{.}}18
+; DUMP-NEXT: attr{{.}}Serializable
+; DUMP-NEXT: value{{.}}Red{{.}}19{{.}}28
+; DUMP-NEXT: value{{.}}Green{{.}}19{{.}}33
+; DUMP-NEXT: endtype
 ; NOTGEN: is not a source generator
 ; MISSING: cannot open generator
 ; AST: ProgramDecl 'jsongenerator' generator 'serializable'

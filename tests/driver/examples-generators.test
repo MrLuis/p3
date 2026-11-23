@@ -1,0 +1,25 @@
+; examples/generators: source generators (enum names, JSON) and compiletime
+; constants, built from its p3.json (by the self-hosted p3 in
+; tests/selfhost/compiletime.test).
+; RUN: rm -rf %t && mkdir -p %t && cp -R %S/../../examples/generators %t/
+; RUN: rm -rf %t/generators/bin %t/generators/gen
+; RUN: cd %t/generators && %p3-project 2>&1 | count 0
+; RUN: %t/generators/bin/shop | FileCheck %s
+; RUN: %t/generators/bin/shop CANCELLED | FileCheck --check-prefix=PARSE %s
+; RUN: %t/generators/bin/shop lost | FileCheck --check-prefix=NOT %s
+; RUN: FileCheck --check-prefix=INTF %s < %t/generators/gen/orders.intf.inc
+; A field the generator cannot write: an error at the field.
+; RUN: rm -rf %t/bad && cp -R %S/../../examples/generators %t/bad && rm -rf %t/bad/bin %t/bad/gen
+; RUN: sed -i.bak 's/    Note: string;/    Note: string; Tags: array[1..3] of string;/' %t/bad/src/lib/orders.pas
+; RUN: cd %t/bad && not %p3-project 2>&1 | FileCheck --check-prefix=BAD %s
+; CHECK:      Orders today
+; CHECK-NEXT: ============
+; CHECK-NEXT: {"Number": 1042, "Customer": {"Id": 7, "Name": "Ada \"the Countess\"", "vip": true}, "Status": "Paid", "Total": 99.5, "Note": "leave at the door"}
+; CHECK-NEXT: status: Paid
+; CHECK-NEXT: 'shipped' is Shipped (2)
+; CHECK-NEXT: crc32: 8D9D8D36
+; PARSE: 'CANCELLED' is Cancelled (3)
+; NOT: 'lost' is not a status
+; INTF: TOrder = partial record
+; INTF: TStatusNames = type helper for TStatus
+; BAD: orders.pas:26:19: error: a field of type array[1..3] of string cannot be written as JSON; mark it [Skip]

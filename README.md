@@ -120,7 +120,10 @@ units next to it (names, types as written, attributes with literal
 arguments, locations; `--emit-model=serializable file.pas` prints it), and
 includes what it writes in the file that declares the type: the
 `W.Member(...)` declarations in a `partial` second half of the type, the
-`W.Line(...)` lines after the unit's declarations. The generated code is in
+`W.Line(...)` lines after the unit's declarations, the `W.Declaration(...)`
+lines next to the type (a type helper, say: an enumeration marked with the
+attribute is in the model too, with its values, but cannot be partial). The
+generated code is in
 `gen/` next to the input (`--generated-dir`), where it can be read and
 debugged; errors in it point there, and `W.Error(Field, 'message')` reports
 at the user's own declaration. Types must be declared in a unit's interface
@@ -133,6 +136,9 @@ system has one. It is not sandboxed otherwise: it is a native program, so
 only use generators you trust. In `p3.json`: `generators`, `generatedDir`,
 `generatorTimeout`. Not done yet: generics and properties in the model, a
 generator that uses the output of another, resolved types in the model.
+
+[`examples/generators`](examples/generators/README.md) is a project with
+two generators (enumeration names, JSON) and compiletime constants.
 
 ## Compiletime functions
 

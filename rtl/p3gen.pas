@@ -10,8 +10,11 @@ unit p3gen;
   writer. The compiler includes that Pascal source in the unit (or program)
   that declares the type: the member declarations W.Member(...) go in a
   `partial` half of the type, the lines W.Line(...) after the unit's other
-  declarations (so they are method bodies, as in an implementation part).
+  declarations (so they are method bodies, as in an implementation part),
+  and the lines W.Declaration(...) next to the type (a type helper, for an
+  enumeration, which cannot be partial).
 
+  The types are records, classes and enumerations (with their values).
   The description is syntactic: names, types as written, attributes with
   literal arguments, source locations. It is the same for every run, and
   so is a generator's output. }
@@ -72,10 +75,11 @@ type
 
   TTypeModel = class(TMemberModel)
   public
-    Kind: string; { 'record' or 'class' }
+    Kind: string; { 'record', 'class' or 'enum' }
     Parent: string; { the written parent class, if any }
     Fields: array of TFieldModel;
     Methods: array of TMethodModel;
+    Values: array of TMemberModel; { an enumeration's, in order }
   end;
 
   TSourceWriter = class
@@ -86,6 +90,10 @@ type
     procedure Member(const Decl: string);
     { a line of source after the unit's declarations: a method body }
     procedure Line(const S: string);
+    { a line of a declaration next to the type (in the interface of its
+      unit), such as a type helper for an enumeration, which cannot be
+      partial: 'type TColorHelper = type helper for TColor' }
+    procedure Declaration(const S: string);
     { a diagnostic at the declaration of M (a type, field or method) }
     procedure Error(M: TMemberModel; const Msg: string);
     procedure Warning(M: TMemberModel; const Msg: string);
@@ -210,6 +218,11 @@ begin
   WriteLn('member'#9, Escape(Decl));
 end;
 
+procedure TSourceWriter.Declaration(const S: string);
+begin
+  WriteLn('decl'#9, Escape(S));
+end;
+
 procedure TSourceWriter.Line(const S: string);
 begin
   WriteLn('line'#9, Escape(S));
@@ -253,6 +266,7 @@ var
   Field: TFieldModel;
   Method: TMethodModel;
   Cur: TMemberModel; { what attr lines belong to }
+  Value: TMemberModel;
   A: TAttributeModel;
   P: TParamModel;
   Arg: TAttributeArg;
@@ -313,6 +327,17 @@ begin
       P.Mode := Fs[3];
       SetLength(Method.Params, Length(Method.Params) + 1);
       Method.Params[Length(Method.Params) - 1] := P;
+    end
+    else if Fs[0] = 'value' then
+    begin
+      Value := TMemberModel.Create;
+      Value.Name := Fs[1];
+      Value.Visibility := 'public';
+      Value.Line := Integer(ToInt(Fs[2]));
+      Value.Col := Integer(ToInt(Fs[3]));
+      SetLength(T.Values, Length(T.Values) + 1);
+      T.Values[Length(T.Values) - 1] := Value;
+      Cur := Value;
     end
     else if Fs[0] = 'attr' then
     begin

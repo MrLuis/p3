@@ -1095,7 +1095,8 @@ begin
 
   bufInit(cmd);
   addQuoted(cmd, self);
-  bufAdd(cmd, ' --no-project -O0 ');
+  { (without warnings about the variables copied only for diagnostics) }
+  bufAdd(cmd, ' --no-project -O0 --Wno-unused-variable ');
   addQuoted(cmd, '--mode=' + modeName(optMode));
   bufAdd(cmd, ' ');
   addQuoted(cmd, '--generated-dir=' + genDir);

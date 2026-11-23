@@ -16,5 +16,6 @@ type
   public
     constructor Create;
   end;
+  [Serializable] TColor = (Red, Green);
 begin
 end.

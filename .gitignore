@@ -7,6 +7,7 @@ compile_commands.json
 *.s
 /build-fuzz/
 /examples/*/bin/
+/examples/*/gen/
 
 # codesight indexes
 .codesight/

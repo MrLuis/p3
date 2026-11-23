@@ -728,7 +728,9 @@ bool Evaluator::evaluate(FileInfo &F, TopDecl &X, RoutineDecl *Fn,
                          StampPath = ExeS + ".stamp";
 
   std::string Self = fs::getMainExecutable(nullptr, nullptr);
+  // (without warnings about the variables copied only for diagnostics)
   std::vector<std::string> Args{Self, "--no-project", "-O0",
+                                "--Wno-unused-variable",
                                 std::string("--mode=") + modeName(Opts.Mode),
                                 "--generated-dir=" + GenAbs};
   llvm::SmallString<256> FileDir(llvm::sys::path::parent_path(F.Path));

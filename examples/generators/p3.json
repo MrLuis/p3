@@ -1,0 +1,13 @@
+{
+  "name": "generators",
+  "version": "0.1.0",
+  "description": "Source generators (enum names, JSON) and compiletime constants",
+  "main": "src/shop.pas",
+  "output": "bin/shop",
+  "mode": "objfpc",
+  "unitPaths": ["src/lib"],
+  "generators": ["generators/enumgen.pas", "generators/jsongen.pas"],
+  "generatedDir": "gen",
+  "optimize": 0,
+  "debug": true
+}

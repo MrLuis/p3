@@ -30,3 +30,11 @@
 ; CHECK-NEXT: 832040 8 8
 ; CHECK: 9 25 hello, unit hello, program Wed
 ; SLOW: slow.pas:12:3: error: cannot compute constant 'X': 'Loop' ran longer than 1 seconds
+; examples/generators (source generators and compiletime constants), built
+; from its p3.json.
+; RUN: rm -rf %t.ex && mkdir %t.ex && cp -R %S/../../examples/generators %t.ex/ && rm -rf %t.ex/generators/bin %t.ex/generators/gen
+; RUN: cd %t.ex/generators && env P3_RUNTIME_LIB=%p3-runtime-lib %t.p3
+; RUN: %t.ex/generators/bin/shop paid | FileCheck --check-prefix=EXAMPLE %s
+; EXAMPLE: "Status": "Paid", "Total": 99.5
+; EXAMPLE: 'paid' is Paid (1)
+; EXAMPLE: crc32: 8D9D8D36
