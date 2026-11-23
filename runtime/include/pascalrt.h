@@ -472,6 +472,11 @@ void __pas_task_sleep(int32_t ms);
  * iterator starts (1), or not anymore (0). Also P3_TASK_STACK_SIZE. */
 int64_t __pas_task_stack_size(void);
 int32_t __pas_task_set_stack_size(int64_t bytes);
+/* Guard pages below task stacks (1, the default) or not (0: a slab of
+ * stacks is one mapping; overflow is caught by a canary); set it before the
+ * first task or iterator (1), or not anymore (0). Also P3_TASK_STACK_GUARD. */
+int32_t __pas_task_stack_guard(void);
+int32_t __pas_task_set_stack_guard(int32_t on);
 /* Parks the current task until fd is readable (want_write 0) or writable
  * (want_write 1), through one shared poller thread. Its result is the
  * bitmask of what fired: 1 readable, 2 writable, 4 failed (POLLERR/POLLHUP
@@ -484,6 +489,9 @@ int32_t __pas_task_wait_fd(int32_t fd, int32_t want_write);
  * with nothing else to report, and — unlike a cancellation — the wait
  * record completes and is freed normally. */
 int32_t __pas_task_wait_fd2(int32_t fd, int32_t want_write, int32_t deadline_ms);
+/* A syscall on fd succeeded without parking: wake the waits parked on it
+ * (in that direction). */
+void __pas_fd_wake_peers(int32_t fd, int32_t want_write);
 /* Marks fd blocking (on 0) or non-blocking, through the C runtime (plain C
    can call the variadic fcntl; calls emitted by p3 threads cannot) */
 void __pas_fd_nonblock(int32_t fd, int32_t on);

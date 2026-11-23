@@ -665,13 +665,17 @@ static size_t stack_size_choose_locked(void) {
   return v;
 }
 
-/* The size of every task stack; fixed from the first stack on. */
+static int stack_guard_choose_locked(void);
+
+/* The size of every task stack; fixed from the first stack on (and the
+ * guard pages' choice with it). */
 static size_t stack_size(void) {
   size_t v = __atomic_load_n(&stack_size_v, __ATOMIC_ACQUIRE);
   if (v && __atomic_load_n(&stack_size_fixed, __ATOMIC_ACQUIRE))
     return v;
   LOCK();
   v = stack_size_choose_locked();
+  stack_guard_choose_locked();
   __atomic_store_n(&stack_size_fixed, 1, __ATOMIC_RELEASE);
   UNLOCK();
   return v;
@@ -699,96 +703,196 @@ int32_t __pas_task_set_stack_size(int64_t bytes) {
   UNLOCK();
   return 1;
 }
-#define STACK_CACHE 16
-void *__pas_async_stacks[STACK_CACHE];
-int __pas_async_nstacks;
-/* Each thread keeps the stacks of its ended tasks too, without the lock:
- * every `await` of an async call is a task of its own, so a server with
- * many connections starts and ends tasks at its request rate, and a stack
- * that misses the cache costs an mmap, an mprotect and later an munmap. */
+/* Stacks come from slabs: one mapping holds many stacks, carved in order,
+ * and a stack goes back to a free list when its task ends — slabs are never
+ * unmapped. With guard pages (the default; P3_TASK_STACK_GUARD=0 or
+ * __pas_task_set_stack_guard drop them) each stack has a PROT_NONE page
+ * below it, which splits the slab into two kernel mappings (VMAs) per
+ * stack: an overflow faults at once, but a process can hold only about
+ * vm.max_map_count / 2 parked tasks (Linux: 65530 -> ~32k). Without guards
+ * a slab is one mapping however many stacks it holds, and an overflow is
+ * only caught, not stopped: below each stack lies an unused gap of
+ * STACK_GAP bytes (address space only: untouched, it costs no memory),
+ * and a task that switches out with its stack pointer below its stack is
+ * stopped with an error. An overflow that returned before its task
+ * switched out goes unseen (it landed in the gap, harmlessly, if it was
+ * smaller); a bigger one reaches the stack below, whose parked task keeps
+ * its wait records near its top, and may crash elsewhere. (A canary at the
+ * bottom of each stack would see more, but writing it makes that page
+ * resident: a page per parked task, as much as all the rest it uses.) *
+ * The check needs the fast context switch (aarch64, x86_64). */
+#define STACK_SLAB_BYTES ((size_t)64 * 1024 * 1024)
+#define STACK_GAP ((size_t)16 * 1024)
+static int stack_guard_v = -1;   /* -1 until chosen (under LOCK) */
+
+/* Each thread keeps the stacks of its ended tasks, without the lock: every
+ * `await` of an async call is a task of its own, so a server starts and
+ * ends tasks at its request rate. */
 #define STACK_TCACHE 256
 _Thread_local void *__pas_async_tstacks[STACK_TCACHE];
 _Thread_local int __pas_async_ntstacks;
 
-#ifdef __APPLE__
-/* macOS malloc reserves a huge span of address space (MAGMA: observed
-   0x1000000000..0x7000000000 on macOS 26) whose slabs it brings up by
-   changing their protection as needed. An anonymous mmap(NULL) can land
-   inside it, and the allocator's next slab then runs into the stack's
-   guard page (SIGBUS in the middle of malloc). Task stacks go above it. */
-#define PAS_MALLOC_RESERVE_LOW 0x1000000000ULL
-#define PAS_MALLOC_RESERVE_HIGH 0x7000000000ULL
-#define PAS_STACK_HINT_START 0xFC00000000ULL
-static void *new_stack(void) {
-  if (__pas_async_ntstacks)
-    return __pas_async_tstacks[--__pas_async_ntstacks];
+/* Under LOCK: the slab being carved, and the free list (an array: the
+ * stacks in it keep no link, so their memory can be released). */
+static char *stack_slab_next;
+static size_t stack_slab_left;     /* stacks still to carve from it */
+static void **stack_free;
+static size_t stack_nfree, stack_capfree;
+int64_t __pas_async_stack_slabs;   /* slabs mapped (for tests) */
+
+/* Under LOCK: guard pages on or off, chosen now if they were not. */
+static int stack_guard_choose_locked(void) {
+  if (stack_guard_v < 0) {
+    const char *env = getenv("P3_TASK_STACK_GUARD");
+    stack_guard_v = !(env && (env[0] == '0' || strcmp(env, "off") == 0 ||
+                              strcmp(env, "no") == 0));
+  }
+  return stack_guard_v;
+}
+
+static int stack_guard(void) {
+  stack_size();   /* (fixes both: the size and the guards) */
+  return stack_guard_v;
+}
+
+int32_t __pas_task_stack_guard(void) {
   LOCK();
-  void *s = __pas_async_nstacks ? __pas_async_stacks[--__pas_async_nstacks] : NULL;
+  int g = stack_guard_choose_locked();
   UNLOCK();
-  if (s)
-    return s;
-  long page = sysconf(_SC_PAGESIZE);
-  size_t len = stack_size() + (size_t)page;
+  return g;
+}
+
+/* Guard pages on (1) or off (0) — only before the first stack is made: 1
+ * when set, 0 when it is too late. */
+int32_t __pas_task_set_stack_guard(int32_t on) {
+  LOCK();
+  if (__atomic_load_n(&stack_size_fixed, __ATOMIC_ACQUIRE)) {
+    UNLOCK();
+    return 0;
+  }
+  stack_guard_v = on ? 1 : 0;
+  UNLOCK();
+  return 1;
+}
+
+/* After task t switched out: its stack pointer within its stack. */
+static void stack_check(PasTask *t) {
+#ifdef PAS_FAST_CTX
+  if (!stack_guard_v && t->stack && (char *)t->ctx.sp < (char *)t->stack)
+    __pas_runtime_error("a task overflowed its stack (P3_TASK_STACK_SIZE is "
+                        "too small for it; without guard pages, "
+                        "P3_TASK_STACK_GUARD=0, an overflow is only seen when "
+                        "the task switches out)");
+#else
+  (void)t;
+#endif
+}
+
+/* len bytes of fresh address space for stacks. */
+static char *stack_map(size_t len) {
   char *m = mmap(NULL, len, PROT_READ | PROT_WRITE,
                  MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
   if (m == MAP_FAILED)
-    __pas_runtime_error("out of memory for a task's stack");
-  if ((uintptr_t)m >= PAS_MALLOC_RESERVE_LOW &&
-      (uintptr_t)m < PAS_MALLOC_RESERVE_HIGH) {
+    __pas_runtime_error("out of memory for task stacks");
+#ifdef __APPLE__
+  /* macOS malloc reserves a huge span of address space (MAGMA: observed
+     0x1000000000..0x7000000000 on macOS 26) whose slabs it brings up by
+     changing their protection as needed. An anonymous mmap(NULL) can land
+     inside it, and the allocator's next slab then runs into a stack's
+     guard page (SIGBUS in the middle of malloc). Task stacks go above it. */
+  const uintptr_t lo = 0x1000000000ULL, hi = 0x7000000000ULL;
+  if ((uintptr_t)m >= lo && (uintptr_t)m < hi) {
     munmap(m, len);
-    uintptr_t hint = PAS_STACK_HINT_START;
+    uintptr_t hint = 0xFC00000000ULL;
     m = MAP_FAILED;
     for (int t = 0; t < 4096 && m == MAP_FAILED; t++, hint -= len) {
       m = mmap((void *)hint, len, PROT_READ | PROT_WRITE,
                MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
       if (m == MAP_FAILED)
         continue;
-      if ((uintptr_t)m >= PAS_MALLOC_RESERVE_LOW &&
-          (uintptr_t)m < PAS_MALLOC_RESERVE_HIGH) {
+      if ((uintptr_t)m >= lo && (uintptr_t)m < hi) {
         munmap(m, len);
         m = MAP_FAILED;
       }
     }
     if (m == MAP_FAILED)
-      __pas_runtime_error("out of memory for a task's stack");
+      __pas_runtime_error("out of memory for task stacks");
   }
-  mprotect(m, (size_t)page, PROT_NONE); /* a guard page below */
-  return m + page;
+#endif
+  return m;
 }
-#else
+
+/* Below each stack: its guard page, or the unprotected gap. */
+static size_t stack_below(size_t page, int guard) {
+  if (guard)
+    return page;
+  return (STACK_GAP + page - 1) / page * page;
+}
+
+/* Under LOCK: a new slab to carve (stride: a stack and what lies below). */
+static void stack_slab_new(size_t size, size_t page, int guard) {
+  size_t stride = size + stack_below(page, guard);
+  size_t n = STACK_SLAB_BYTES / stride;
+  if (n < 1)
+    n = 1;
+  if (n > 4096)
+    n = 4096;
+  char *m = stack_map(n * stride);
+  if (guard)
+    for (size_t i = 0; i < n; i++)
+      if (mprotect(m + i * stride, page, PROT_NONE) != 0)
+        __pas_runtime_error("cannot place a task stack's guard page (too many "
+                            "mappings: vm.max_map_count?); P3_TASK_STACK_GUARD=0 "
+                            "keeps a slab of stacks in one mapping");
+  stack_slab_next = m;
+  stack_slab_left = n;
+  __pas_async_stack_slabs++;
+}
+
 static void *new_stack(void) {
   if (__pas_async_ntstacks)
     return __pas_async_tstacks[--__pas_async_ntstacks];
+  size_t size = stack_size();
+  int guard = stack_guard();
+  size_t page = (size_t)sysconf(_SC_PAGESIZE);
+  void *s;
   LOCK();
-  void *s = __pas_async_nstacks ? __pas_async_stacks[--__pas_async_nstacks] : NULL;
+  if (stack_nfree) {
+    s = stack_free[--stack_nfree];
+  } else {
+    if (!stack_slab_left)
+      stack_slab_new(size, page, guard);
+    s = stack_slab_next + stack_below(page, guard);
+    stack_slab_next += size + stack_below(page, guard);
+    stack_slab_left--;
+  }
   UNLOCK();
-  if (s)
-    return s;
-  long page = sysconf(_SC_PAGESIZE);
-  char *m = mmap(NULL, stack_size() + (size_t)page, PROT_READ | PROT_WRITE,
-                 MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
-  if (m == MAP_FAILED)
-    __pas_runtime_error("out of memory for a task's stack");
-  mprotect(m, (size_t)page, PROT_NONE); /* a guard page below */
-  return m + page;
+  return s;
 }
-#endif
 
 static void free_stack(void *s) {
   if (__pas_async_ntstacks < STACK_TCACHE) {
     __pas_async_tstacks[__pas_async_ntstacks++] = s;
     return;
   }
+  /* past the thread's cache: its memory goes back to the system (the
+   * address space stays, for the next stack) */
+#ifdef __APPLE__
+  madvise(s, stack_size(), MADV_FREE);
+#else
+  madvise(s, stack_size(), MADV_DONTNEED);
+#endif
   LOCK();
-  if (__pas_async_nstacks < STACK_CACHE) {
-    __pas_async_stacks[__pas_async_nstacks++] = s;
-    s = NULL;
+  if (stack_nfree == stack_capfree) {
+    size_t n = stack_capfree ? 2 * stack_capfree : 1024;
+    void **a = realloc(stack_free, n * sizeof *a);
+    if (!a)
+      __pas_runtime_error("out of memory for task stacks");
+    stack_free = a;
+    stack_capfree = n;
   }
+  stack_free[stack_nfree++] = s;
   UNLOCK();
-  if (s) {
-    long page = sysconf(_SC_PAGESIZE);
-    munmap((char *)s - page, stack_size() + (size_t)page);
-  }
 }
 
 void __pas_task_release(PasTask *t);
@@ -819,6 +923,7 @@ static void switch_into(PasTask *t, PasCtx *from) {
 #endif
   c->current = prev;
   __pas_exc_top = saved;
+  stack_check(t);
   int st = task_state(t);
   if (st == TS_DONE || st == TS_FAILED) { /* it ended */
 #ifdef PAS_TSAN
@@ -1841,6 +1946,26 @@ static void fd_fire(PasFdWait *rec, int64_t bits) {
   spin_unlock(lk);
 }
 
+/* A task found fd ready by trying its syscall, without parking (an accept
+ * that succeeded at once): the waits parked on fd in that direction are
+ * woken as if their readiness had fired. Their own registrations may never
+ * report it: the kernel checks readiness again when it delivers an event,
+ * and the syscall has just consumed it. Without this, a waiter beside a
+ * busy acceptor could sleep through every connection. */
+void __pas_fd_wake_peers(int32_t fd, int32_t want_write) {
+  PasFdWait **head = fd_slot(fd, 0);
+  if (!head || !__atomic_load_n(head, __ATOMIC_ACQUIRE))
+    return;
+  int *lk = fd_lock_of(fd);
+  spin_lock(lk);
+  for (PasFdWait *o = *head; o; o = o->fnext)
+    if (o->write == (want_write ? 1 : 0) && !o->w.signaled) {
+      o->res = want_write ? 2 : 1;
+      wake(&o->w, WAKE_NORMAL);
+    }
+  spin_unlock(lk);
+}
+
 /* On c's thread: c gets its poller (and its poke). */
 static void ctx_poller(PasContext *c) {
   if (c->pfd >= 0)
@@ -2644,6 +2769,11 @@ int32_t __pas_task_wait_fd2(int32_t fd, int32_t want_write, int32_t deadline_ms)
     rec->deadline_us = fd_now_us() + (int64_t)deadline_ms * 1000;
     dheap_push(c, rec);
   }
+  /* peers first, then the kernel: once armed, a readiness can be seen
+   * and consumed on another thread (an accept) before this thread's poller
+   * looks — the firing peer's fan-out is then this wait's only wake, so it
+   * must already find it (an early wake just signals it: park sees that) */
+  fd_park_link(rec);
   if (fd_arm(rec) < 0) {
     /* not waitable (closed, not pollable, no descriptor for a dup):
      * report the error state instead of parking forever */
@@ -2651,7 +2781,6 @@ int32_t __pas_task_wait_fd2(int32_t fd, int32_t want_write, int32_t deadline_ms)
     free(rec);
     return 4;
   }
-  fd_park_link(rec);
   Observation o;
   observe(me, &o);
   int cancelled = park(me, woken, &rec->w, 1);

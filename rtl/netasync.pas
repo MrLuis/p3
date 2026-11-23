@@ -326,6 +326,8 @@ function pas_task_send(fd: cint; buf: pointer; len: cint): Int64; cdecl;
 procedure pas_fd_nonblock(fd: cint; on: cint); cdecl;
   external name '__pas_fd_nonblock';
 procedure pas_fd_poller_start; cdecl; external name '__pas_fd_poller_start';
+procedure pas_fd_wake_peers(fd: cint; want_write: cint); cdecl;
+  external name '__pas_fd_wake_peers';
 function pas_net_waits_abandoned: int64; cdecl;
   external name '__pas_net_waits_abandoned';
 
@@ -452,6 +454,9 @@ begin
     n := accept(Listener, nil, nil);
     if n >= 0 then
     begin
+      { other waits parked on the listener (on other threads) may never
+        see this readiness: the accept consumed it }
+      pas_fd_wake_peers(Listener, 0);
       { the listener's nonblocking flag is not inherited on every kernel,
         and macOS does not hand accepted sockets its SO_NOSIGPIPE }
       NetAdopt(n);

@@ -24,6 +24,7 @@ var
   gClients: array[1..4] of shortstring;
   gServed, gExtraParks: Integer;
   gExtraBits: boolean = true;
+  gExtraArmed: boolean = false;   { the extra waiter is about to park }
   gKeepAlive: boolean = false;
   gShutOk: boolean = true;
   gUdpPort: Integer;
@@ -84,6 +85,7 @@ function ExtraWaiter(listener: TSocket): async;
 var
   bits: Integer;
 begin
+  gExtraArmed := true;
   bits := NetWaitFd(listener, true, false);
   inc(gExtraParks);
   if (bits and NW_READ) = 0 then
@@ -127,6 +129,12 @@ var
   n, off: Integer;
 begin
   SetLength(got, MSG);
+  { connect only once the extra waiter parks: its thread may start late,
+    and a waiter that parks after the last connection was served has
+    nothing left to wake it }
+  while not gExtraArmed do
+    Sleep(1);
+  Sleep(20);
   conn := await NetConnect(Host, gPort);
   var sent := await NetSendAll(conn, Padded(s));
   off := 0;

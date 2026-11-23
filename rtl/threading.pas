@@ -109,8 +109,25 @@ function TaskStackSize: Int64;
   one starts (the stacks are made and reused at one size): True if it was
   set, False once it is too late (the size stays). }
 function SetTaskStackSize(Bytes: Int64): Boolean;
+{ Whether task stacks have a guard page below them (True by default;
+  P3_TASK_STACK_GUARD=0 turns them off). Stacks are carved from shared
+  slabs; a guard page splits a slab into two kernel mappings per stack, so
+  a process holds at most about vm.max_map_count / 2 parked tasks (Linux:
+  ~32k) — without guards a whole slab is one mapping. An overflow then
+  is not stopped by a fault: an unused 16 KB gap lies below each stack, and
+  a task that switches out with its stack pointer below its stack stops the
+  program with an error. An overflow that returned before the task switched
+  out goes unseen (harmless within the gap; a bigger one may damage the
+  stack below). }
+function TaskStackGuard: Boolean;
+{ Guard pages on or off — only before the first task or iterator starts:
+  True if it was set, False once it is too late. }
+function SetTaskStackGuard(On: Boolean): Boolean;
 
 { The runtime's primitives (async.c). }
+function pas_task_stack_guard: longint; cdecl; external name '__pas_task_stack_guard';
+function pas_task_set_stack_guard(on: longint): longint; cdecl;
+  external name '__pas_task_set_stack_guard';
 function pas_task_stack_size: Int64; cdecl; external name '__pas_task_stack_size';
 function pas_task_set_stack_size(bytes: Int64): longint; cdecl;
   external name '__pas_task_set_stack_size';
@@ -144,6 +161,16 @@ end;
 function SetTaskStackSize(Bytes: Int64): Boolean;
 begin
   Result := pas_task_set_stack_size(Bytes) <> 0;
+end;
+
+function TaskStackGuard: Boolean;
+begin
+  Result := pas_task_stack_guard <> 0;
+end;
+
+function SetTaskStackGuard(On: Boolean): Boolean;
+begin
+  Result := pas_task_set_stack_guard(Ord(On)) <> 0;
 end;
 
 class function TCancelTokenHelper.Create: TCancelToken;
