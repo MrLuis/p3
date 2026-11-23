@@ -145,3 +145,71 @@ All handled in `selfhost/pclex.pas` (the C++ compiler recognizes the same set).
 
 Any other switch letter is warned about and ignored ("listing, boolean
 evaluation, ..." — pclex.pas:1792).
+
+## Compiler parameters
+
+As printed by `p3 --help` (parsed in `selfhost/p3.pas`, same set in the C++
+compiler).
+
+**Output and actions** (default: a linked executable named after the input)
+
+- `-o <file>` — write output to `<file>` (default: input name without `.pas`)
+- `-S` — emit target assembly (`.s`)
+- `-c` — emit an object file (`.o`)
+- `--emit-llvm` — emit LLVM IR (`.ll`)
+- `--emit-ast` — dump the parsed AST
+- `--emit-parse-tree` — dump the parse tree (no semantic analysis; for testing)
+- `--emit-tokens` — dump lexer tokens
+
+**Language**
+
+- `--mode=<iso|tp|objfpc>` — language dialect (default: `iso`)
+
+**Optimization and code generation**
+
+- `-O <level>` — optimization level 0-3 (default: `0`)
+- `-Os` — optimize for size (like `-O2`, SLP vectorization on)
+- `-Oz` — optimize aggressively for size (like `-Os`)
+- `--ffast-math` — fast-math flags on floating-point instructions (off by default)
+- `--fkeep-unused` — keep routines and data nothing reachable refers to (off by
+  default: such code is pruned, also at `-O0`)
+- `--fseparate-units` — link separately compiled units (each compiled with
+  `-c` to `<unit>.o` next to its source; off by default)
+- `-g` — generate debug information (off by default)
+- `--target=<triple>` — target triple (default: host)
+- `-mcpu <cpu>` — target CPU (default: `generic`; `native` selects the host CPU)
+- `-mattr <features>` — target features, e.g. `+avx2,-sse4.2`
+
+**Runtime checks**
+
+- `--fno-overflow-checks` — disable runtime integer overflow checks (on by default)
+- `--fno-range-checks` — disable runtime range checks (subranges, array
+  indices, ...; on by default)
+- `--fno-zero-init` / `--fzero-init` — local arrays, records and strings start
+  zeroed at `-O0` (the default there); from `-O1` they are not (use
+  `--fzero-init` to ask for it)
+- `--fno-inline-runtime` — do not inline the runtime's functions (from `-O1`
+  they are, when compiling for the host)
+
+**Searching and linking**
+
+- `-I <dir>` — add a directory to the unit search path
+- `-L <dir>` — add a directory to the library search path (linking)
+- `-l <name>` — link with library `<name>`
+- `--project=<file>` — read project settings from `<file>` (default: the first
+  `p3.json` in the input file's directory or its parents)
+- `--no-project` — do not read a project file
+
+**Diagnostics**
+
+- `--Werror` — treat warnings as errors (off by default)
+- `--Wno-deprecated` — do not warn about uses of deprecated declarations
+- `--Wno-unused-variable` — do not warn about unused variables
+- `--fdiagnostics-color=<auto|always|never>` — colorize diagnostics (default: `auto`)
+- `-d <name>` — define a symbol for conditional compilation (`{$IFDEF}`)
+- `--ferror-limit=<N>` — stop after N errors (default: `20`; `0` = no limit)
+
+**Information**
+
+- `--help` — display available options
+- `--version` — display the version of this program
