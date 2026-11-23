@@ -1,0 +1,56 @@
+{ key(a) [ number(1) number(2.5) number(-3e2) true false null ] key(b) { key(c) string(d) } key(e) [ ] } 
+string(just a string) 
+[ [ [ ] ] { } ] 
+{ key(long key with more than eight bytes) string(and a long value too, 0123456789) } 
+{ key(x) number(1) } 
+y_object_empty_key: ok
+y_string_unicode: ok
+y_number_minus_zero: ok
+y_structure_lonely_null: ok
+y_string_escapes: ok
+n_trailing_comma_array: trailing comma at line 1 column 4 [3]
+n_trailing_comma_object: trailing comma at line 1 column 8 [7]
+n_missing_colon: expected ':' at line 1 column 6 [5]
+n_key_not_string: key must be a string at line 1 column 2 [1]
+n_unclosed_array: EOF while parsing a list at line 1 column 6 [5]
+n_unclosed_string: EOF while parsing a string at line 1 column 5 [4]
+n_bad_escape: invalid escape at line 1 column 3 [2]
+n_short_unicode: invalid escape at line 1 column 6 [5]
+n_control_in_string: control character (\u09) while parsing a string at line 1 column 3 [2]
+n_leading_zero: invalid number at line 1 column 2 [1]
+n_plus: expected value at line 1 column 1 [0]
+n_dot_no_digits: invalid number at line 1 column 3 [2]
+n_exp_no_digits: invalid number at line 1 column 4 [3]
+n_two_values: trailing characters at line 1 column 3 [2]
+n_true_misspelled: EOF while parsing a value at line 1 column 4 [3]
+n_comment: trailing characters at line 1 column 5 [4]
+n_empty: EOF while parsing a value at line 1 column 1 [0]
+n_wrong_close: expected ',' or ']' at line 1 column 3 [2]
+n_comma_first: expected value at line 1 column 2 [1]
+n_invalid_utf8: invalid UTF-8 in a string at line 1 column 2 [1]
+n_overlong_utf8: invalid UTF-8 in a string at line 1 column 2 [1]
+n_surrogate_utf8: invalid UTF-8 in a string at line 1 column 2 [1]
+n_lone_surrogate: lone leading surrogate in hex escape at line 1 column 2 [1]
+n_lone_low_surrogate: lone trailing surrogate in hex escape at line 1 column 2 [1]
+n_position: expected ',' or ']' at line 3 column 4 [18]
+n_too_deep: recursion limit exceeded (more than 512 nested arrays and objects) at line 1 column 513 [512]
+0 -> Int64 0
+-17 -> Int64 -17
+9223372036854775807 -> Int64 9223372036854775807
+-9223372036854775808 -> Int64 -9223372036854775808
+9223372036854775808 -> UInt64 9223372036854775808
+18446744073709551615 -> UInt64 18446744073709551615
+18446744073709551616 -> Double  1.8446744073709551616000E+019
+0.1 -> Double  1.0000000000000000555112E-001
+1.5e3 -> Double  1.5000000000000000000000E+003
+-2.5E-3 -> Double -2.5000000000000000520417E-003
+123456789012345678901234567890 -> Double  1.2345678901234567787772E+029
+n_number_too_large: number out of range at line 1 column 1 [0]
+4.9406564584124654e-324 -> Double  4.9406564584124654417657E-324
+0.30000000000000004 -> Double  3.0000000000000004440892E-001
+"Aé€😀" -> 41 C3 A9 E2 82 AC F0 9F 98 80
+"tab\there" -> 74 61 62 09 68 65 72 65
+"say \"hi\"\\\n\u0001 and é"
+TRUE FALSE
+skip keep [ ] } FALSE
+fast path: 0 of 20000 differ
