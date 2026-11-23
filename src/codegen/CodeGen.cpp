@@ -6971,8 +6971,8 @@ public:
       C = N->getWith()->Record->getType();
       return withBase(N->getWith());
     }
-    C = Root->getType(); // the default property
-    return emitObject(Root);
+    C = Root->getType(); // the default property (a record's: its address)
+    return memberObject(Root);
   }
 
   /// The object whose member Base.M is used: Base's object (checked for

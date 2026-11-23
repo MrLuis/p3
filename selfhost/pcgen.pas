@@ -5508,8 +5508,8 @@ begin
     c := root^.refWith^.rec^.typ;
     exit(withBase(root^.refWith));
   end;
-  c := root^.typ; { the default property }
-  propertyObject := emitObject(root);
+  c := root^.typ; { the default property (a record's: its address) }
+  propertyObject := memberObject(root);
 end;
 
 { The value of array property access e (an address for strings and

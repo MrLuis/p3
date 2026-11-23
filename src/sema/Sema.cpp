@@ -3380,12 +3380,7 @@ class Checker : public StmtVisitor<Checker>,
         }
         continue;
       }
-      auto *P = llvm::cast<PropertyDecl>(M);
-      if (P->isDefault())
-        Diags.error(P->getLocation(),
-                    "a record cannot have a default property",
-                    {P->getName().getRange()});
-      definePropertyAccessors(C, P, Own, nullptr);
+      definePropertyAccessors(C, llvm::cast<PropertyDecl>(M), Own, nullptr);
     }
     C->define(nullptr, Ctx.copyArray<Decl *>(Members), RT->getAllFields(), {},
               CurModule);
@@ -11673,6 +11668,14 @@ public:
         PendingIndexes.erase(It);
         return checkPropertyIndex(E, std::move(Pend));
       }
+      // An advanced record's default property: r[i].
+      if (ClassType *MT = BT->isRecord() ? memberTableOf(BT) : nullptr)
+        if (PropertyDecl *P = defaultProperty(MT)) {
+          Identifier Id = P->getName();
+          Id.Loc = E->getBase()->getBeginLoc();
+          checkMemberAccess(P, MT, Id);
+          return checkPropertyIndex(E, {P, E->getBase(), {}});
+        }
       if (auto *C = llvm::dyn_cast<ClassType>(BT)) {
         PropertyDecl *P = defaultProperty(C);
         if (!P) {

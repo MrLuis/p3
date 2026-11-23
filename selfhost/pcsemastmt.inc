@@ -6023,7 +6023,7 @@ end;
 
 function visitIndex(e: PNode): PType;
 var
-  bt, it, idx, owner: PType;
+  bt, it, idx, owner, mt: PType;
   c: TConstant;
   bd: TOrdinalBounds;
   savedBase, root: PNode;
@@ -6050,6 +6050,23 @@ begin
       args := pi^.args;
       removePending(pi);
       exit(checkPropertyIndex(e, prop, root, args));
+    end;
+    { an advanced record's default property: r[i] }
+    if bt^.kind = tyRecord then
+    begin
+      mt := memberTableOf(bt);
+      if mt <> nil then
+      begin
+        prop := defaultProperty(mt);
+        if prop <> nil then
+        begin
+          id := prop^.ident;
+          id.loc := e^.base^.b;
+          checkMemberAccess(prop, mt, id);
+          listInit(args);
+          exit(checkPropertyIndex(e, prop, e^.base, args));
+        end;
+      end;
     end;
     if bt^.kind = tyClass then
     begin

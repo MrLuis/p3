@@ -6327,11 +6327,6 @@ begin
       end;
       continue;
     end;
-    if m^.propIsDefault then
-    begin
-      ms('a record cannot have a default property');
-      errR(m^.loc, identRange(m^.ident));
-    end;
     definePropertyAccessors(c, nil, m, own);
   end;
   listInit(noVTable);
