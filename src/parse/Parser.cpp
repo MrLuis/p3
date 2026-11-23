@@ -1105,7 +1105,8 @@ void Parser::parseTypePart(llvm::SmallVectorImpl<Decl *> &Decls,
     }
     if (TypeDecl *TD = parseTypeDecl(InMembers, /*Generic=*/false)) {
       attachAttributes(Pending, {TD});
-      Decls.push_back(TD);
+      if (!TD->isPartial() || !mergePartial(TD, Decls))
+        Decls.push_back(TD);
     }
     Pending.clear();
   }
@@ -1148,6 +1149,7 @@ TypeDecl *Parser::parseTypeDecl(bool InMembers, bool Generic) {
       GenericTypeParams = Ctx.copyArray<Identifier>(TypeParams);
     }
     TypeSpec *TS = nullptr;
+    bool IsPartial = false;
     if (ParamsOK && expect(tok::equal, "after type name")) {
       // T = type X (Free Pascal): a distinct type, here an alias of X; or
       // T = type helper for X (objfpc)
@@ -1162,6 +1164,26 @@ TypeDecl *Parser::parseTypeDecl(bool InMembers, bool Generic) {
                                  "Free Pascal extension; use --mode=tp");
           TS = parseType();
         }
+      } else if (isIdentifierNamed("partial") &&
+                 peekToken().isOneOf(tok::kw_record, tok::kw_class,
+                                 tok::kw_packed)) {
+        // T = partial record|class ... end: merged with the other
+        // partial declarations of T (see mergePartial)
+        SourceLocation PartialLoc = consumeToken();
+        if (LangOpts.Mode == LangMode::ISO)
+          Diags.error(PartialLoc, "'partial' is a p3 extension; use "
+                                  "--mode=tp");
+        if (Generic)
+          Diags.error(PartialLoc, "a generic type cannot be partial");
+        IsPartial = true;
+        TS = parseType();
+        if (TS && !llvm::isa<RecordTypeSpec>(TS) &&
+            !(llvm::isa<ClassTypeSpec>(TS) &&
+              !llvm::cast<ClassTypeSpec>(TS)->isForward())) {
+          Diags.error(PartialLoc, "only a record or a class declaration can "
+                                  "be partial");
+          IsPartial = false;
+        }
       } else {
         TS = parseType();
       }
@@ -1170,6 +1192,8 @@ TypeDecl *Parser::parseTypeDecl(bool InMembers, bool Generic) {
     if (TS) {
       TD = Ctx.create<TypeDecl>(Name.Loc, Name, TS);
       TD->addHints(H.Flags, H.Message);
+      if (IsPartial)
+        TD->setPartial();
     } else
       skipUntil({tok::semi, tok::kw_begin});
     if (!expect(tok::semi, "after type declaration")) {
@@ -1178,6 +1202,76 @@ TypeDecl *Parser::parseTypeDecl(bool InMembers, bool Generic) {
     }
   }
   return TD;
+}
+
+// A partial declaration after another of the same name in Decls is merged
+// into it: its fields, members, variant part and attributes are appended,
+// and it is dropped. True if it was merged (or was an error); false if it
+// is the first, which stays. Only the first one may name the parent class
+// and the interfaces. (Source generators write the later halves.)
+bool Parser::mergePartial(TypeDecl *Later,
+                          llvm::SmallVectorImpl<Decl *> &Decls) {
+  TypeDecl *First = nullptr;
+  for (Decl *D : Decls)
+    if (auto *T = llvm::dyn_cast<TypeDecl>(D))
+      if (T->getName().Name == Later->getName().Name)
+        First = T;
+  if (!First)
+    return false;
+  const Identifier &Id = Later->getName();
+  if (!First->isPartial()) {
+    Diags.error(Later->getLocation(),
+                "type '" + Id.Spelling.str() + "' is already declared and is "
+                "not partial", {Id.getRange()});
+    Diags.note(First->getLocation(), "declared here");
+    return true;
+  }
+  auto Mismatch = [&](const char *What) {
+    Diags.error(Later->getLocation(),
+                "the partial declarations of '" + Id.Spelling.str() + "' " +
+                    What, {Id.getRange()});
+    Diags.note(First->getLocation(), "first declared here");
+    return true;
+  };
+  llvm::SmallVector<Decl *, 16> Members;
+  if (auto *FR = llvm::dyn_cast<RecordTypeSpec>(First->getTypeSpec())) {
+    auto *LR = llvm::dyn_cast<RecordTypeSpec>(Later->getTypeSpec());
+    if (!LR)
+      return Mismatch("must be all records or all classes");
+    if (FR->isPacked() != LR->isPacked())
+      return Mismatch("must all be packed or none");
+    FieldList *FF = FR->getFields(), *LF = LR->getFields();
+    if (LF->Variant && FF->Variant)
+      return Mismatch("have two variant parts");
+    if (FF->Variant && !LF->Fixed.empty())
+      return Mismatch("add fields after the variant part");
+    llvm::SmallVector<FieldDecl *, 16> Fixed(FF->Fixed.begin(), FF->Fixed.end());
+    Fixed.append(LF->Fixed.begin(), LF->Fixed.end());
+    FF->Fixed = Ctx.copyArray<FieldDecl *>(Fixed);
+    if (LF->Variant)
+      FF->Variant = LF->Variant;
+    Members.append(FR->getMembers().begin(), FR->getMembers().end());
+    Members.append(LR->getMembers().begin(), LR->getMembers().end());
+    FR->setMembers(Ctx.copyArray<Decl *>(Members));
+  } else if (auto *FC = llvm::dyn_cast<ClassTypeSpec>(First->getTypeSpec())) {
+    auto *LC = llvm::dyn_cast<ClassTypeSpec>(Later->getTypeSpec());
+    if (!LC)
+      return Mismatch("must be all records or all classes");
+    if (LC->getParent().isValid() || !LC->getInterfaces().empty() ||
+        LC->getParentSpec())
+      return Mismatch("can name the parent class and the interfaces only in "
+                      "the first one");
+    Members.append(FC->getMembers().begin(), FC->getMembers().end());
+    Members.append(LC->getMembers().begin(), LC->getMembers().end());
+    FC->setMembers(Ctx.copyArray<Decl *>(Members));
+  }
+  if (!Later->getAttributes().empty()) {
+    llvm::SmallVector<Attribute, 4> As(First->getAttributes().begin(),
+                                       First->getAttributes().end());
+    As.append(Later->getAttributes().begin(), Later->getAttributes().end());
+    First->setAttributes(Ctx.copyArray<Attribute>(As));
+  }
+  return true;
 }
 
 // varPart = "var" identList ":" type ";" { identList ":" type ";" } .

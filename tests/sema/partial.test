@@ -1,0 +1,13 @@
+; Partial types (T = partial record|class, merged by the parser): the
+; halves are one type in the checked tree; mismatches are errors.
+; RUN: %p3 --mode=objfpc --emit-ast %S/Inputs/partial/ok.pas -o %t.ast
+; RUN: FileCheck --check-prefix=AST %s < %t.ast
+; RUN: not %p3 --mode=objfpc -c %S/Inputs/partial/errors.pas -o %t.o 2>&1 | FileCheck --check-prefix=ERR %s
+; AST: TypeDecl 'ta' = record x: integer; y: integer; end partial
+; AST: TypeDecl 'tb' = class(TObject) partial
+; ERR: errors.pas:6:3: error: type 'TPlain' is already declared and is not partial
+; ERR: errors.pas:3:3: note: declared here
+; ERR: errors.pas:12:3: error: the partial declarations of 'TR' must be all records or all classes
+; ERR: errors.pas:18:3: error: the partial declarations of 'TP' must all be packed or none
+; ERR: errors.pas:23:3: error: the partial declarations of 'TC' can name the parent class and the interfaces only in the first one
+; ERR: errors.pas:25:8: error: only a record or a class declaration can be partial

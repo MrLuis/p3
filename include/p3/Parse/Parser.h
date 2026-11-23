@@ -110,6 +110,7 @@ class Parser {
   Expr *parseLambda();
   GenericTokens *captureSwitches();
   TypeDecl *parseTypeDecl(bool InMembers, bool Generic);
+  bool mergePartial(TypeDecl *Later, llvm::SmallVectorImpl<Decl *> &Decls);
   TypeSpec *parseSpecializeType();
   llvm::ArrayRef<Identifier> GenericTypeParams;
   /// declared(NAME) in $IF: the used units' names (their own, and those of

@@ -747,6 +747,8 @@ begin
           bufAdd(outBuf, ' = ');
           addDescribedType(d^.declType);
         end;
+        if d^.isPartial then
+          bufAdd(outBuf, ' partial');
         hintsSuffix(d);
         loc(d^.loc);
         if parseTree then

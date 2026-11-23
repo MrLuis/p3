@@ -1600,6 +1600,7 @@ public:
     return K < InterfaceSpecs.size() ? InterfaceSpecs[K] : nullptr;
   }
   llvm::ArrayRef<Decl *> getMembers() const { return Members; }
+  void setMembers(llvm::ArrayRef<Decl *> M) { Members = M; }
   bool isForward() const { return Forward; }
   static bool classof(const TypeSpec *T) { return T->getKind() == TS_Class; }
 
@@ -1922,6 +1923,10 @@ public:
   TypeSpec *getTypeSpec() const { return TS; }
   Type *getType() const { return Ty; }
   void setType(Type *T) { Ty = T; }
+  /// T = partial record|class ... end: one of several declarations of T in
+  /// a declaration part, which the parser merges into the first.
+  bool isPartial() const { return Partial; }
+  void setPartial() { Partial = true; }
   /// generic TList<T> = ... (objfpc): a template. Its tokens, and those of
   /// each method implementation (TList.Add), are kept by the parser, which
   /// parses them again for every specialization (specialize TList<integer>).
@@ -1943,6 +1948,7 @@ public:
   static bool classof(const Decl *D) { return D->getKind() == DK_Type; }
 
 private:
+  bool Partial = false;
   bool Generic = false;
   llvm::ArrayRef<Identifier> TypeParams;
   void *GenericTokens = nullptr; ///< the parser's GenericTokens

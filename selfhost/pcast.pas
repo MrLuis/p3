@@ -532,6 +532,9 @@ type
     { the attributes written before the declaration, in source order }
     attrs: TPtrList; { of PAttribute }
     attrsChecked: boolean; { Sema: the attributes' arguments were checked }
+    { T = partial record|class: merged into the first declaration of T by the
+      parser }
+    isPartial: boolean;
     { Sema: referenced anywhere; a function whose result is assigned; the
       number of labels in this routine targeted by non-local gotos }
     isUsed, resultAssigned: boolean;

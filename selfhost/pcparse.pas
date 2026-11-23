@@ -1137,6 +1137,7 @@ var
   name, tp: TIdent;
   ts: PTypeSpec;
   d: PDecl;
+  isPartial: boolean;
   paramsOK: boolean;
   typeParams: TPtrList;
 begin
@@ -1171,6 +1172,7 @@ begin
       genericTypeParams := typeParams;
     end;
     ts := nil;
+    isPartial := false;
     if paramsOK then
       paramsOK := expect(tkEqual, 'after type name');
     if paramsOK then
@@ -1190,6 +1192,26 @@ begin
           ts := parseType;
         end;
       end
+      else if isIdentifierNamed('partial') and
+              (peekKind in [tkKwRecord, tkKwClass, tkKwPacked]) then
+      begin
+        { T = partial record|class ... end: merged with the other partial
+          declarations of T (see mergePartial) }
+        typeLoc := consumeToken;
+        if mode = lmISO then
+          diagError(typeLoc, '''partial'' is a p3 extension; use --mode=tp');
+        if generic then
+          diagError(typeLoc, 'a generic type cannot be partial');
+        isPartial := true;
+        ts := parseType;
+        if (ts <> nil) and (ts^.kind <> tsRecord) and
+           ((ts^.kind <> tsClass) or ts^.isForwardClass) then
+        begin
+          diagError(typeLoc, 'only a record or a class declaration can be ' +
+                    'partial');
+          isPartial := false;
+        end;
+      end
       else
         ts := parseType;
     end;
@@ -1199,6 +1221,7 @@ begin
       d := newDecl(dkType, name, name.loc);
       d^.typeSpec := ts;
       d^.tgGeneric := false;
+      d^.isPartial := isPartial;
       addHints(d, hf, hm);
     end
     else
@@ -1210,6 +1233,100 @@ begin
     end;
   end;
   parseTypeDecl := d;
+end;
+
+{ A partial declaration after another of the same name in decls is merged
+  into it: its fields, members, variant part and attributes are appended,
+  and it is dropped. True if it was merged (or was an error); false if it
+  is the first, which stays. Only the first one may name the parent class
+  and the interfaces. (Source generators write the later halves.) }
+function mergePartial(later: PDecl; var decls: TPtrList): boolean;
+var
+  first, t: PDecl;
+  i: longint;
+  fs, ls: PTypeSpec;
+  ff, lf: PFieldList;
+
+  function mismatch(const what: string): boolean;
+  begin
+    diagErrorR(later^.loc, 'the partial declarations of ''' +
+               nameStr(later^.ident.spelling) + ''' ' + what,
+               identRange(later^.ident));
+    diagNote(first^.loc, 'first declared here');
+    mismatch := true;
+  end;
+
+begin
+  first := nil;
+  for i := 0 to decls.count - 1 do
+  begin
+    t := PDecl(listGet(decls, i));
+    if (t^.kind = dkType) and (t^.ident.name = later^.ident.name) then
+      first := t;
+  end;
+  if first = nil then
+    exit(false);
+  mergePartial := true;
+  if not first^.isPartial then
+  begin
+    diagErrorR(later^.loc, 'type ''' + nameStr(later^.ident.spelling) +
+               ''' is already declared and is not partial',
+               identRange(later^.ident));
+    diagNote(first^.loc, 'declared here');
+    exit;
+  end;
+  fs := first^.typeSpec;
+  ls := later^.typeSpec;
+  if fs^.kind = tsRecord then
+  begin
+    if ls^.kind <> tsRecord then
+    begin
+      mismatch('must be all records or all classes');
+      exit;
+    end;
+    if fs^.recPacked <> ls^.recPacked then
+    begin
+      mismatch('must all be packed or none');
+      exit;
+    end;
+    ff := fs^.fields;
+    lf := ls^.fields;
+    if (lf^.variant <> nil) and (ff^.variant <> nil) then
+    begin
+      mismatch('have two variant parts');
+      exit;
+    end;
+    if (ff^.variant <> nil) and (lf^.fixed.count > 0) then
+    begin
+      mismatch('add fields after the variant part');
+      exit;
+    end;
+    for i := 0 to lf^.fixed.count - 1 do
+      listAdd(ff^.fixed, listGet(lf^.fixed, i));
+    if lf^.variant <> nil then
+      ff^.variant := lf^.variant;
+    for i := 0 to ls^.recMembers.count - 1 do
+      listAdd(fs^.recMembers, listGet(ls^.recMembers, i));
+  end
+  else if fs^.kind = tsClass then
+  begin
+    if ls^.kind <> tsClass then
+    begin
+      mismatch('must be all records or all classes');
+      exit;
+    end;
+    if identValid(ls^.parentName) or (ls^.interfaceNames.count > 0) or
+       (ls^.classParentSpec <> nil) then
+    begin
+      mismatch('can name the parent class and the interfaces only in the ' +
+               'first one');
+      exit;
+    end;
+    for i := 0 to ls^.memberList.count - 1 do
+      listAdd(fs^.memberList, listGet(ls^.memberList, i));
+  end;
+  for i := 0 to later^.attrs.count - 1 do
+    listAdd(first^.attrs, listGet(later^.attrs, i));
 end;
 
 procedure parseTypePart(var decls: TPtrList; inMembers: boolean);
@@ -1285,7 +1402,8 @@ begin
       listInit(one);
       listAdd(one, d);
       attachAttributes(pending, one, 0);
-      listAdd(decls, d);
+      if not d^.isPartial or not mergePartial(d, decls) then
+        listAdd(decls, d);
     end;
     listClear(pending);
   end;

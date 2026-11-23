@@ -111,6 +111,8 @@ class ASTPrinter : public StmtVisitor<ASTPrinter>,
       line("TypeDecl '") << T->getName().Name << '\'';
       if (T->getType())
         OS << " = " << describeType(T->getType());
+      if (T->isPartial())
+        OS << " partial";
       hints(T);
       loc(T->getLocation());
       if (ParseTree) {
