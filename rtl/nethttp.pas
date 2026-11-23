@@ -232,6 +232,56 @@ function HttpSafePath(const P: string): Boolean;
 
 implementation
 
+type
+  { 16 bytes of a request at once (SIMD: SSE2, NEON) }
+  THttpScan16 = vector[16] of Byte;
+
+{ The first CR of P[i, limit), or limit: 16 bytes at a time, then one by
+  one. }
+function FindCR(P: PAnsiChar; i, limit: Integer): Integer;
+var
+  mask: QWord;
+begin
+  while i + 16 <= limit do
+  begin
+    mask := VectorMask(VectorLoad(THttpScan16, P + i) = 13);
+    if mask <> 0 then
+      exit(i + CountTrailingZeros(mask));
+    i := i + 16;
+  end;
+  while (i < limit) and ((P + i)^ <> #13) do
+    inc(i);
+  Result := i;
+end;
+
+{ The start of the first CR LF CR LF in P[0, Len), or -1; hpHeadTooLarge
+  in TooLarge when it is not within HttpLimits.MaxHeadBytes (as the byte
+  loop it replaces decided: found at an offset up to the limit, or not
+  found and Len over it). }
+function FindHeadEnd(P: PAnsiChar; Len: Integer; out TooLarge: Boolean): Integer;
+var
+  i: Integer;
+begin
+  TooLarge := false;
+  i := 0;
+  while true do
+  begin
+    i := FindCR(P, i, Len - 3);
+    if i >= Len - 3 then
+      break;
+    if i > HttpLimits.MaxHeadBytes then
+    begin
+      TooLarge := true;
+      exit(-1);
+    end;
+    if ((P + i + 1)^ = #10) and ((P + i + 2)^ = #13) and ((P + i + 3)^ = #10) then
+      exit(i);
+    inc(i);
+  end;
+  TooLarge := Len > HttpLimits.MaxHeadBytes;
+  Result := -1;
+end;
+
 {$IFDEF P3_OBJFPC}
 
 const
@@ -528,33 +578,18 @@ function HttpParseRequest(P: PAnsiChar; Len: Integer; C: THttpContext;
 var
   headEnd, i, lineEnd, ls, colon, vs, ve, sp1, sp2: Integer;
   cl, v: Int64;
-  hasCL, chunked, hasTE, http11: Boolean;
+  hasCL, chunked, hasTE, http11, tooLarge: Boolean;
   connClose, connKeep: Boolean;
   bodyUsed: Integer;
   chunkBody: string;
 begin
   Used := 0;
   { the head: up to the empty line }
-  headEnd := -1;
-  i := 0;
-  while i + 3 < Len do
-  begin
-    if ((P + i)^ = #13) and ((P + i + 1)^ = #10) and ((P + i + 2)^ = #13) and
-       ((P + i + 3)^ = #10) then
-    begin
-      headEnd := i;
-      break;
-    end;
-    if i >= HttpLimits.MaxHeadBytes then
-      exit(hpHeadTooLarge);
-    inc(i);
-  end;
+  headEnd := FindHeadEnd(P, Len, tooLarge);
+  if tooLarge then
+    exit(hpHeadTooLarge);
   if headEnd < 0 then
-  begin
-    if Len > HttpLimits.MaxHeadBytes then
-      exit(hpHeadTooLarge);
     exit(hpIncomplete);
-  end;
   C.FBuf := P;
   C.FNHeaders := 0;
   C.FChunked := false;
@@ -562,9 +597,9 @@ begin
   C.FPathMade := false;
   C.FPath := '';
   { the request line: METHOD SP target SP HTTP/1.x }
-  lineEnd := 0;
-  while not (((P + lineEnd)^ = #13) and ((P + lineEnd + 1)^ = #10)) do
-    inc(lineEnd);
+  lineEnd := FindCR(P, 0, headEnd + 2);
+  while (P + lineEnd + 1)^ <> #10 do
+    lineEnd := FindCR(P, lineEnd + 1, headEnd + 2);
   sp1 := 0;
   while (sp1 < lineEnd) and ((P + sp1)^ <> ' ') do
   begin
@@ -611,9 +646,9 @@ begin
   ls := lineEnd + 2;
   while ls < headEnd + 2 do
   begin
-    i := ls;
-    while not (((P + i)^ = #13) and ((P + i + 1)^ = #10)) do
-      inc(i);
+    i := FindCR(P, ls, headEnd + 2);
+    while (P + i + 1)^ <> #10 do
+      i := FindCR(P, i + 1, headEnd + 2);
     lineEnd := i;
     if (P + ls)^ in [' ', #9] then
       exit(hpBad);              { a folded line }

@@ -8,14 +8,17 @@
   RUN: %p3 --mode=objfpc -O2 %s -o %t.fast
   RUN: %t.fast | FileCheck %s
   RUN: %p3 --mode=tp -O2 %s -o %t.tp
-  RUN: %t.tp | FileCheck %s
   CHECK: search: 0 wrong
   CHECK: compare: 0 wrong
+  RUN: %t.tp | FileCheck --check-prefix=TP %s
   CHECK: case: 0 wrong
+  CHECK: lines: 0 wrong
+  TP: case: 0 wrong
 }
 program rtlsimd;
 {$H+}
-uses sysutils, strutils;
+uses sysutils, strutils
+  {$IFDEF P3_OBJFPC}, classes{$ENDIF};
 
 var
   Seed: QWord;
@@ -122,8 +125,43 @@ begin
   RefCase := r;
 end;
 
+{$IFDEF P3_OBJFPC}
+{ the lines of s, as TStrings.SetTextStr splits them (LF, CR or CR LF;
+  no line after a last break), joined with '|' }
+function RefLines(const s: string): string;
+var
+  r, line: string;
+  i: longint;
+begin
+  r := '';
+  line := '';
+  i := 1;
+  while i <= length(s) do
+  begin
+    if (s[i] = #13) or (s[i] = #10) then
+    begin
+      r := r + line + '|';
+      line := '';
+      if (s[i] = #13) and (i < length(s)) and (s[i + 1] = #10) then
+        i := i + 1;
+    end
+    else
+      line := line + s[i];
+    i := i + 1;
+  end;
+  if line <> '' then
+    r := r + line + '|';
+  RefLines := r;
+end;
+
+{$ENDIF}
+
 var
   i, n, start, bad: longint;
+  {$IFDEF P3_OBJFPC}
+  list: TStringList;
+  joined: string;
+  {$ENDIF}
   s, sub, t, u: string;
 begin
   Seed := 11;
@@ -186,4 +224,21 @@ begin
   if u <> 'a literal of more than thirty-two bytes, upper case' then
     bad := bad + 1;
   writeln('case: ', bad, ' wrong');
+
+  {$IFDEF P3_OBJFPC}
+  bad := 0;
+  list := TStringList.Create;
+  for i := 1 to 3000 do
+  begin
+    s := RandomText(Next(100), 'abcd' + #10 + #13);
+    list.Text := s;
+    joined := '';
+    for n := 0 to list.Count - 1 do
+      joined := joined + list[n] + '|';
+    if joined <> RefLines(s) then
+      bad := bad + 1;
+  end;
+  list.Free;
+  writeln('lines: ', bad, ' wrong');
+  {$ENDIF}
 end.

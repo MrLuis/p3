@@ -37,6 +37,34 @@ begin
   end;
 end;
 
+{ the head scanned 16 bytes at a time: line ends and the empty line at
+  every offset of the blocks, a lone CR in a value, and a head cut short:
+  each parses, with its values, or is incomplete }
+procedure BlockOffsets;
+var
+  i, j, bad, used: Integer;
+  pad, req: string;
+begin
+  bad := 0;
+  for i := 0 to 40 do
+    for j := 0 to 20 do
+    begin
+      pad := '';
+      while Length(pad) < i do
+        pad := pad + Chr(Ord('a') + Length(pad) mod 26);
+      req := 'GET /' + Copy(pad, 1, j) + ' HTTP/1.1'#13#10'Host: h'#13#10 +
+             'X-Pad: ' + pad + #13#10'X-Cr: a'#13'b'#13#10#13#10;
+      Keep := req;
+      if (Parse(Keep, used) <> hpOk) or (used <> Length(req)) or
+         (C.Header('x-pad') <> pad) or (C.Header('x-cr') <> 'a' + #13 + 'b') then
+        bad := bad + 1;
+      Keep := Copy(req, 1, Length(req) - 1);
+      if Parse(Keep, used) <> hpIncomplete then
+        bad := bad + 1;
+    end;
+  Writeln('block offsets: ', bad, ' wrong');
+end;
+
 function Show(const S: string): string;
 var
   i: Integer;
@@ -140,5 +168,6 @@ begin
   R('GET / HTTP/1.1' + NL + NL);
   C.Redirect(302, '/there');
   Writeln(Show(C.Response));
+  BlockOffsets;
   C.Free;
 end.

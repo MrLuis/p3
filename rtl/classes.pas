@@ -212,6 +212,33 @@ implementation
 
 uses sysutils;
 
+type
+  { 16 bytes of a text at once (SIMD: SSE2, NEON) }
+  TTextScan16 = vector[16] of byte;
+
+{ The first LF or CR of p[i, n) (0-based), or n: 16 bytes at a time, then
+  one by one }
+function findLineBreak(p: PChar; i, n: longint): longint;
+var
+  v: TTextScan16;
+  mask: QWord;
+begin
+  while i + 16 <= n do
+  begin
+    v := VectorLoad(TTextScan16, p + i);
+    mask := VectorMask((v = 10) or (v = 13));
+    if mask <> 0 then
+    begin
+      findLineBreak := i + CountTrailingZeros(mask);
+      exit;
+    end;
+    i := i + 16;
+  end;
+  while (i < n) and (p[i] <> #10) and (p[i] <> #13) do
+    i := i + 1;
+  findLineBreak := i;
+end;
+
 const
   SListIndexError = 'List index (';
   SOutOfBounds = ') out of bounds';
@@ -916,8 +943,7 @@ begin
     while i <= length(Value) do
     begin
       start := i;
-      while (i <= length(Value)) and (Value[i] <> #10) and (Value[i] <> #13) do
-        i := i + 1;
+      i := findLineBreak(PChar(Value), i - 1, length(Value)) + 1;
       Add(copy(Value, start, i - start));
       if (i <= length(Value)) and (Value[i] = #13) then
         i := i + 1;
