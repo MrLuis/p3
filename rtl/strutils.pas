@@ -49,6 +49,10 @@ implementation
 
 uses sysutils;
 
+type
+  { 16 bytes of a string at once (SIMD: SSE2, NEON) }
+  TScan16 = vector[16] of byte;
+
 { Makes the result once and writes it through a pointer, reading s from
   its end (docs/strutils-review.md ST-7). }
 function ReverseString(const s: string): string;
@@ -357,8 +361,10 @@ end;
   as posFrom is (SU-8, of sysutils-review.md). }
 function findFrom(const sub, s: string; start: longint): longint;
 var
-  i, j, last, m: longint;
+  i, j, k, last, m: longint;
   a, b: PChar;
+  mask: QWord;
+  first, final: byte;
 begin
   findFrom := 0;
   m := length(sub);
@@ -368,6 +374,29 @@ begin
   a := PChar(sub);
   b := PChar(s);
   i := start;
+  { 16 starts at a time: those whose first and last bytes are sub's }
+  first := ord(a[0]);
+  final := ord(a[m - 1]);
+  while i + 15 <= last do
+  begin
+    mask := VectorMask((VectorLoad(TScan16, b + i - 1) = first) and
+                       (VectorLoad(TScan16, b + i + m - 2) = final));
+    while mask <> 0 do
+    begin
+      k := i + CountTrailingZeros(mask);
+      j := 1;
+      while (j < m - 1) and (b[k - 1 + j] = a[j]) do
+        j := j + 1;
+      if j >= m - 1 then
+      begin
+        findFrom := k;
+        exit;
+      end;
+      mask := mask and (mask - 1);
+    end;
+    i := i + 16;
+  end;
+  { the last starts one by one }
   while i <= last do
   begin
     if b[i - 1] = a[0] then

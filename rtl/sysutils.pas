@@ -122,6 +122,11 @@ procedure Sleep(ms: longint);
 implementation
 
 type
+  { 16 bytes of a string at once (SIMD: SSE2, NEON): the scans of long
+    strings go 16 bytes at a time }
+  TScan16 = vector[16] of byte;
+
+type
   TTimeFields = array[0..6] of longint;
 
 function c_getenv(name: pchar): pchar; cdecl; external name 'getenv';
@@ -729,6 +734,62 @@ end;
 { UpperCase and LowerCase look for the first character to change; with
   none they return s itself, otherwise the first write makes the copy and
   the rest is written through a pointer (docs/sysutils-review.md SU-7). }
+{ r: UpperCase (down: the letters lo..hi lose 32) or LowerCase of s, a
+  string of 32 bytes or more: the first letter to change 16 bytes at a time, then the
+  rest 16 at a time (the letters' lanes changed by 32) }
+procedure changeCase(const s: string; lo, hi: byte; down: boolean;
+                     var r: string);
+var
+  i, j, n: longint;
+  p: PChar;
+  v: TScan16;
+  mask: QWord;
+begin
+  n := length(s);
+  i := 1;
+  p := PChar(s);
+  while i + 15 <= n do
+  begin
+    v := VectorLoad(TScan16, p + i - 1);
+    mask := VectorMask((v >= lo) and (v <= hi));
+    if mask <> 0 then
+    begin
+      i := i + CountTrailingZeros(mask);
+      break;
+    end;
+    i := i + 16;
+  end;
+  while (i <= n) and not ((ord(s[i]) >= lo) and (ord(s[i]) <= hi)) do
+    i := i + 1;
+  r := s;
+  if i > n then
+    exit;
+  { the first change through r[i] makes r a copy of its own (s is not
+    written); the rest through a pointer }
+  if down then
+    r[i] := chr(ord(r[i]) - 32)
+  else
+    r[i] := chr(ord(r[i]) + 32);
+  p := PChar(r);
+  j := i;
+  while j + 16 <= n do
+  begin
+    v := VectorLoad(TScan16, p + j);
+    if down then
+      v := v - TScan16((v >= lo) and (v <= hi)) * 32
+    else
+      v := v + TScan16((v >= lo) and (v <= hi)) * 32;
+    VectorStore(p + j, v);
+    j := j + 16;
+  end;
+  for j := j to n - 1 do
+    if (ord(p[j]) >= lo) and (ord(p[j]) <= hi) then
+      if down then
+        p[j] := chr(ord(p[j]) - 32)
+      else
+        p[j] := chr(ord(p[j]) + 32);
+end;
+
 function UpperCase(const s: string): string;
 var
   i, n: longint;
@@ -736,6 +797,12 @@ var
   p: PChar;
 begin
   n := length(s);
+  if n >= 32 then
+  begin
+    changeCase(s, 97, 122, true, r);
+    UpperCase := r;
+    exit;
+  end;
   i := 1;
   while (i <= n) and not ((s[i] >= 'a') and (s[i] <= 'z')) do
     i := i + 1;
@@ -760,6 +827,12 @@ var
   p: PChar;
 begin
   n := length(s);
+  if n >= 32 then
+  begin
+    changeCase(s, 65, 90, false, r);
+    LowerCase := r;
+    exit;
+  end;
   i := 1;
   while (i <= n) and not ((s[i] >= 'A') and (s[i] <= 'Z')) do
     i := i + 1;
@@ -785,11 +858,41 @@ type
 { The index (from 0) of the first 8-byte block of a and b, both n bytes
   or longer, that differs, or the start of the last partial block: equal
   blocks are skipped a word at a time (unaligned loads). }
-function equalPrefix(a, b: PChar; n: longint): longint;
+{ (from 32 bytes: 16 at a time, the first that differs) }
+function equalPrefixLong(a, b: PChar; n: longint): longint;
+var
+  i: longint;
+  mask: QWord;
+begin
+  i := 0;
+  while i + 16 <= n do
+  begin
+    mask := VectorMask(VectorLoad(TScan16, a + i) <> VectorLoad(TScan16, b + i));
+    if mask <> 0 then
+    begin
+      equalPrefixLong := i + CountTrailingZeros(mask);
+      exit;
+    end;
+    i := i + 16;
+  end;
+  equalPrefixLong := i;
+end;
+
+{$inline on}
+function equalPrefix(a, b: PChar; n: longint): longint; inline;
 var
   i: longint;
 begin
   i := 0;
+  if n >= 32 then
+  begin
+    i := equalPrefixLong(a, b, n);
+    if i < n - n mod 16 then
+    begin
+      equalPrefix := i; { (a difference) }
+      exit;
+    end;
+  end;
   while (i + 8 <= n) and (PCompareBlock(a + i)^ = PCompareBlock(b + i)^) do
     i := i + 8;
   equalPrefix := i;
@@ -905,8 +1008,10 @@ end;
   (docs/sysutils-review.md SU-8) }
 function posFrom(const sub, s: string; start: longint): longint;
 var
-  i, j, last, m: longint;
+  i, j, k, last, m: longint;
   a, b: PChar;
+  mask: QWord;
+  first, final: byte;
 begin
   posFrom := 0;
   m := length(sub);
@@ -916,6 +1021,29 @@ begin
   a := PChar(sub);
   b := PChar(s);
   i := start;
+  { 16 starts at a time: those whose first and last bytes are sub's }
+  first := ord(a[0]);
+  final := ord(a[m - 1]);
+  while i + 15 <= last do
+  begin
+    mask := VectorMask((VectorLoad(TScan16, b + i - 1) = first) and
+                       (VectorLoad(TScan16, b + i + m - 2) = final));
+    while mask <> 0 do
+    begin
+      k := i + CountTrailingZeros(mask);
+      j := 1;
+      while (j < m - 1) and (b[k - 1 + j] = a[j]) do
+        j := j + 1;
+      if j >= m - 1 then
+      begin
+        posFrom := k;
+        exit;
+      end;
+      mask := mask and (mask - 1);
+    end;
+    i := i + 16;
+  end;
+  { the last starts one by one }
   while i <= last do
   begin
     if b[i - 1] = a[0] then
