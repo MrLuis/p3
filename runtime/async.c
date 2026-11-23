@@ -3106,7 +3106,7 @@ typedef struct PasGen {
   void (*entry)(struct PasGen *);
   void (*args_fini)(void *args);
   int64_t value_size;
-  ucontext_t ctx, back;           /* its own; the consumer's, while it runs */
+  PasCtx ctx, back;               /* its own; the consumer's, while it runs */
   void *stack;
   const void *back_bottom;        /* (the consumer's stack, for ASan) */
   size_t back_size;
@@ -3165,7 +3165,12 @@ static void gen_main(void) {
 #ifdef PAS_ASAN
   __sanitizer_start_switch_fiber(NULL, g->back_bottom, g->back_size);
 #endif
+#ifdef PAS_FAST_CTX
+  void *dead;
+  __pas_ctx_switch(&dead, g->back.sp); /* (its stack is freed there) */
+#else
   setcontext(&g->back); /* (its stack is freed there) */
+#endif
   __pas_runtime_error("an iterator resumed after it ended");
 }
 
@@ -3173,11 +3178,15 @@ static void gen_main(void) {
 static void gen_resume(PasGen *g) {
   if (g->state == GS_NEW) {
     g->stack = new_stack();
+#ifdef PAS_FAST_CTX
+    ctx_make(&g->ctx, g->stack, stack_size(), gen_main);
+#else
     getcontext(&g->ctx);
     g->ctx.uc_stack.ss_sp = g->stack;
     g->ctx.uc_stack.ss_size = stack_size();
     g->ctx.uc_link = NULL;
     makecontext(&g->ctx, gen_main, 0);
+#endif
   }
   PasExcFrame *saved = __pas_exc_top;
   __pas_exc_top = g->exc_top;
@@ -3188,7 +3197,11 @@ static void gen_resume(PasGen *g) {
   void *fake = NULL;
   __sanitizer_start_switch_fiber(&fake, g->stack, stack_size());
 #endif
+#ifdef PAS_FAST_CTX
+  __pas_ctx_switch(&g->back.sp, g->ctx.sp);
+#else
   swapcontext(&g->back, &g->ctx);
+#endif
 #ifdef PAS_ASAN
   __sanitizer_finish_switch_fiber(fake, NULL, NULL);
 #endif
@@ -3245,7 +3258,11 @@ void __pas_gen_yield(void) {
 #ifdef PAS_ASAN
   __sanitizer_start_switch_fiber(&g->fake_stack, g->back_bottom, g->back_size);
 #endif
+#ifdef PAS_FAST_CTX
+  __pas_ctx_switch(&g->ctx.sp, g->back.sp);
+#else
   swapcontext(&g->ctx, &g->back);
+#endif
 #ifdef PAS_ASAN
   __sanitizer_finish_switch_fiber(g->fake_stack, &g->back_bottom, &g->back_size);
 #endif
