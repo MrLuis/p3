@@ -6047,6 +6047,31 @@ begin
           exit(addrV);
         exit(loadScalar(addrV, e^.typ, 'value'));
       end;
+    bkPopCnt, bkCountTrailingZeros, bkCountLeadingZeros:
+      begin
+        { in the width of the argument's type }
+        argE := PNode(listGet(e^.args, 0));
+        arg := visitExpr(argE);
+        if k = bkPopCnt then
+          x := call1(intrinsic('llvm.ctpop.' + arg.t^.text, arg.t, arg.t, nil,
+                               speculatable, ''), arg, '')
+        else
+        begin
+          if k = bkCountTrailingZeros then
+            opName := 'llvm.cttz.'
+          else
+            opName := 'llvm.ctlz.';
+          x := call2(intrinsic(opName + arg.t^.text, arg.t, arg.t, irI1,
+                               speculatablePlain, arg.t^.text + ', i1 immarg'),
+                     arg, irConstBool(false), '');
+        end;
+        r := memType(e^.typ);
+        if x.t^.bits < r^.bits then
+          x := irCast('zext', x, r, 'bits')
+        else if x.t^.bits > r^.bits then
+          x := irCast('trunc', x, r, 'bits');
+        exit(x);
+      end;
     bkAddChecked, bkSubChecked, bkMulChecked: { the tuple (a op b, no overflow) }
       begin
         r := memType(e^.typ);

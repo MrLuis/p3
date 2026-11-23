@@ -65,7 +65,7 @@ def builtins_inc():
         out.append("    bk%s%s" % (ident, "," if i + 1 < len(items) else ");"))
     out.append("")
     out.append("const")
-    out.append("  builtinNames: array[TBuiltinKind] of string[15] = (")
+    out.append("  builtinNames: array[TBuiltinKind] of string[20] = (")
     for i, (_, _, name) in enumerate(items):
         out.append("    '%s'%s" % (name, "," if i + 1 < len(items) else ");"))
     out.append("  builtinIsProcedure: array[TBuiltinKind] of boolean = (")

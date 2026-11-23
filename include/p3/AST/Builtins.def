@@ -120,5 +120,12 @@ BUILTIN_FUNC(WhenAny, "whenany")
 BUILTIN_FUNC(IteratorNext,  "iteratornext")
 BUILTIN_FUNC(IteratorValue, "iteratorvalue")
 
+// Bits (tp, objfpc): the set bits of an integer (PopCnt, Free Pascal's), and
+// its zero bits below the lowest set bit / above the highest one (p3's own),
+// in the width of its type (all of them for 0).
+BUILTIN_FUNC(PopCnt,             "popcnt")
+BUILTIN_FUNC(CountTrailingZeros, "counttrailingzeros")
+BUILTIN_FUNC(CountLeadingZeros,  "countleadingzeros")
+
 #undef BUILTIN_FUNC
 #undef BUILTIN_PROC

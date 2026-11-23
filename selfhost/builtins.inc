@@ -77,10 +77,13 @@ type
     bkWhenAll,
     bkWhenAny,
     bkIteratorNext,
-    bkIteratorValue);
+    bkIteratorValue,
+    bkPopCnt,
+    bkCountTrailingZeros,
+    bkCountLeadingZeros);
 
 const
-  builtinNames: array[TBuiltinKind] of string[15] = (
+  builtinNames: array[TBuiltinKind] of string[20] = (
     'write',
     'writeln',
     'read',
@@ -156,7 +159,10 @@ const
     'whenall',
     'whenany',
     'iteratornext',
-    'iteratorvalue');
+    'iteratorvalue',
+    'popcnt',
+    'counttrailingzeros',
+    'countleadingzeros');
   builtinIsProcedure: array[TBuiltinKind] of boolean = (
     true,
     true,
@@ -211,6 +217,9 @@ const
     false,
     true,
     true,
+    false,
+    false,
+    false,
     false,
     false,
     false,

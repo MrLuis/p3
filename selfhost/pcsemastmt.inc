@@ -1540,6 +1540,24 @@ begin
         else
           res := t^.iterElement;
       end;
+    bkPopCnt, bkCountTrailingZeros, bkCountLeadingZeros: { the bits of an integer }
+      begin
+        if not arity(1) then
+          exit;
+        t := check(argNode(e, 0));
+        if isError(t) then
+          exit;
+        if not isIntegerLike(t) then
+        begin
+          ms('');
+          maCallee(e^.callee);
+          ma(' expects an integer, not ');
+          maT(t);
+          errR(argNode(e, 0)^.b, nodeRange(argNode(e, 0)));
+          exit;
+        end;
+        res := tyIntegerT;
+      end;
     bkAddChecked, bkSubChecked, bkMulChecked: { (a op b, ok) in the type of a op b }
       begin
         if not arity(2) then

@@ -7617,6 +7617,22 @@ public:
       llvm::Value *Addr = iteratorValueAddr(visitExpr(E->getArgs()[0]));
       return ET->isStructured() ? Addr : loadScalar(Addr, ET, "value");
     }
+    case BuiltinKind::PopCnt:
+    case BuiltinKind::CountTrailingZeros:
+    case BuiltinKind::CountLeadingZeros: { // in the width of the argument's type
+      Expr *A = E->getArgs()[0];
+      llvm::Value *V = visitExpr(A);
+      llvm::Value *R;
+      BuiltinKind K = BD->getBuiltinKind();
+      if (K == BuiltinKind::PopCnt)
+        R = B.CreateUnaryIntrinsic(llvm::Intrinsic::ctpop, V);
+      else
+        R = B.CreateBinaryIntrinsic(K == BuiltinKind::CountTrailingZeros
+                                        ? llvm::Intrinsic::cttz
+                                        : llvm::Intrinsic::ctlz,
+                                    V, B.getFalse());
+      return B.CreateZExtOrTrunc(R, memType(E->getType()), "bits");
+    }
     case BuiltinKind::AddChecked:
     case BuiltinKind::SubChecked:
     case BuiltinKind::MulChecked: { // the tuple (a op b, no overflow)

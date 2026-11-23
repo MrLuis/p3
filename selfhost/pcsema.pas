@@ -628,6 +628,7 @@ begin
                     bkHalt, bkSizeOf, bkLow, bkHigh, bkAssigned, bkParamCount,
                     bkParamStr, bkAssign, bkClose, bkFlush, bkBlockRead, bkBlockWrite,
                     bkSeek, bkFilePos, bkFileSize, bkGetFileHandle,
+                    bkPopCnt, bkCountTrailingZeros, bkCountLeadingZeros,
                     bkAssignFile, bkCloseFile, bkExceptAddr];
 end;
 

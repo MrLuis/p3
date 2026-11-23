@@ -1318,6 +1318,9 @@ class Checker : public StmtVisitor<Checker>,
     case BuiltinKind::Seek: case BuiltinKind::FilePos:
     case BuiltinKind::FileSize: case BuiltinKind::GetFileHandle:
       return true;
+    case BuiltinKind::PopCnt: case BuiltinKind::CountTrailingZeros:
+    case BuiltinKind::CountLeadingZeros:
+      return true;
     case BuiltinKind::AssignFile: case BuiltinKind::CloseFile:
     case BuiltinKind::ExceptAddr:
       return true; // (and objfpc only: see isObjFPCOnly)
@@ -9243,6 +9246,23 @@ class Checker : public StmtVisitor<Checker>,
       return BD->getBuiltinKind() == BuiltinKind::IteratorNext
                  ? Ctx.getBooleanType()
                  : IT->getElementType();
+    }
+    case BuiltinKind::PopCnt:
+    case BuiltinKind::CountTrailingZeros:
+    case BuiltinKind::CountLeadingZeros: { // the bits of an integer
+      if (!Arity(1))
+        return errorType();
+      Type *T = check(Args[0]);
+      if (T->isError())
+        return T;
+      if (!T->isIntegerLike()) {
+        Diags.error(Args[0]->getBeginLoc(),
+                    "'" + Callee.Spelling + "' expects an integer, not " +
+                        quoted(T),
+                    {Args[0]->getRange()});
+        return errorType();
+      }
+      return Ctx.getIntegerType();
     }
     case BuiltinKind::AddChecked:
     case BuiltinKind::SubChecked:
