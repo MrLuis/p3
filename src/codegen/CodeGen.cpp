@@ -9860,6 +9860,10 @@ public:
       return emitCheckedArith(BinaryOp::Sub, isSignedOrdinal(T), intConst(V, 0),
                               V, E->getOpLoc(), "neg");
     case UnaryOp::Not:
+      // a vector of booleans: lanes of 0 and 1
+      if (auto *VT = llvm::dyn_cast<VectorType>(T);
+          VT && VT->getElementType()->getBase()->isBoolean())
+        return B.CreateXor(V, llvm::ConstantInt::get(V->getType(), 1), "not");
       return B.CreateNot(V, "not");
     }
     llvm_unreachable("bad unary op");
@@ -9951,6 +9955,57 @@ public:
     return emitClassAs(Obj, C, E->getOpLoc());
   }
 
+  /// vector[N] of T: a comparison lane by lane (a vector of booleans, lanes
+  /// of 0 and 1), or and/or/xor of the lanes; a scalar operand is
+  /// broadcast to every lane.
+  llvm::Value *emitVectorLanes(BinaryExpr *E) {
+    Type *LT = E->getLHS()->getType(), *RTy = E->getRHS()->getType();
+    auto *OT = llvm::cast<VectorType>(LT->isVector() ? LT : RTy);
+    Type *ET = OT->getElementType();
+    llvm::Type *LaneTy = memType(ET);
+    auto Operand = [&](Expr *X) -> llvm::Value * {
+      llvm::Value *V = visitExpr(X);
+      if (X->getType()->isVector())
+        return V;
+      if (ET->isReal())
+        V = toDouble(V, X->getType());
+      else
+        V = B.CreateZExtOrTrunc(convertOrdinal(V, X->getType(), ET), LaneTy);
+      return B.CreateVectorSplat(OT->getCount(), V, "splat");
+    };
+    llvm::Value *L = Operand(E->getLHS());
+    llvm::Value *R = Operand(E->getRHS());
+    BinaryOp Op = E->getOp();
+    switch (Op) {
+    case BinaryOp::And: return B.CreateAnd(L, R, "ve.and");
+    case BinaryOp::Or: return B.CreateOr(L, R, "ve.or");
+    case BinaryOp::Xor: return B.CreateXor(L, R, "ve.xor");
+    default: break;
+    }
+    llvm::Value *C;
+    if (ET->isReal()) {
+      llvm::CmpInst::Predicate P =
+          Op == BinaryOp::Eq ? llvm::CmpInst::FCMP_OEQ
+          : Op == BinaryOp::Ne ? llvm::CmpInst::FCMP_UNE
+          : Op == BinaryOp::Lt ? llvm::CmpInst::FCMP_OLT
+          : Op == BinaryOp::Le ? llvm::CmpInst::FCMP_OLE
+          : Op == BinaryOp::Gt ? llvm::CmpInst::FCMP_OGT
+                               : llvm::CmpInst::FCMP_OGE;
+      C = B.CreateFCmp(P, L, R, "ve.cmp");
+    } else {
+      bool S = isSignedOrdinal(ET);
+      llvm::CmpInst::Predicate P =
+          Op == BinaryOp::Eq ? llvm::CmpInst::ICMP_EQ
+          : Op == BinaryOp::Ne ? llvm::CmpInst::ICMP_NE
+          : Op == BinaryOp::Lt ? (S ? llvm::CmpInst::ICMP_SLT : llvm::CmpInst::ICMP_ULT)
+          : Op == BinaryOp::Le ? (S ? llvm::CmpInst::ICMP_SLE : llvm::CmpInst::ICMP_ULE)
+          : Op == BinaryOp::Gt ? (S ? llvm::CmpInst::ICMP_SGT : llvm::CmpInst::ICMP_UGT)
+                               : (S ? llvm::CmpInst::ICMP_SGE : llvm::CmpInst::ICMP_UGE);
+      C = B.CreateICmp(P, L, R, "ve.cmp");
+    }
+    return B.CreateZExt(C, memType(E->getType()), "ve.mask");
+  }
+
   llvm::Value *visitBinaryExpr(BinaryExpr *E) {
     BinaryOp Op = E->getOp();
     if (RoutineDecl *ClassOp = E->getOperator()) { // a record's operator
@@ -10016,6 +10071,10 @@ public:
                    {Tmp, emitPStr(E->getLHS()), emitPStr(E->getRHS())});
       return Tmp;
     }
+    if (E->getType()->isVector() &&
+        (isRelational(Op) || Op == BinaryOp::And || Op == BinaryOp::Or ||
+         Op == BinaryOp::Xor))
+      return emitVectorLanes(E);
     if (isRelational(Op))
       return emitCompare(E);
 

@@ -5572,6 +5572,10 @@ begin
   begin
     if getBase(t)^.kind = tyBoolean then
       exit(tyBooleanT);
+    { vector[N] of T: lane by lane, of boolean or integer lanes }
+    if (t^.kind = tyVector) and ((getBase(t^.vecElement)^.kind = tyBoolean) or
+                                 isIntegerLike(t^.vecElement)) then
+      exit(t);
     if not isISO and isIntegerLike(t) then { bitwise not, same type }
       exit(getBase(t));
   end
@@ -5629,11 +5633,22 @@ begin
     vecScalar := areCompatible(elem, sc);
 end;
 
+{ vector[N] of boolean: what lane-by-lane comparisons give (a mask) }
+var
+  booleanVectors: array[1..64] of PType;
+
+function booleanVector(n: int64): PType;
+begin
+  if booleanVectors[n] = nil then
+    booleanVectors[n] := newVectorType(tyBooleanT, n);
+  booleanVector := booleanVectors[n];
+end;
+
 function visitBinary(e: PNode): PType;
 var
   l, r, vecTy: PType;
   op: TBinaryOp;
-  bothIntegers, logic: boolean;
+  bothIntegers, logic, fits: boolean;
   beforeRHS: TOwnedState;
 
   function integerOp: PType;
@@ -5742,6 +5757,24 @@ begin
     end;
   end;
 
+  { vector[N] of T: comparisons lane by lane, giving a vector of booleans
+    (a mask); and, or, xor of boolean or integer lanes }
+  if (l^.kind = tyVector) or (r^.kind = tyVector) then
+  begin
+    vecTy := l;
+    if vecTy^.kind <> tyVector then
+      vecTy := r;
+    fits := ((l^.kind = tyVector) and (r^.kind = tyVector) and
+             (l^.vecCount = r^.vecCount) and
+             areCompatible(l^.vecElement, r^.vecElement)) or
+            vecScalar(l, r) or vecScalar(r, l);
+    if fits and (op in [boEq, boNe, boLt, boLe, boGt, boGe]) then
+      exit(booleanVector(vecTy^.vecCount));
+    if fits and (op in [boAnd, boOr, boXor]) and
+       ((getBase(vecTy^.vecElement)^.kind = tyBoolean) or
+        isIntegerLike(vecTy^.vecElement)) then
+      exit(vecTy);
+  end;
   bothIntegers := isIntegerLike(l) and isIntegerLike(r);
   case op of
     boAdd, boSub, boMul:

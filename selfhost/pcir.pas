@@ -246,6 +246,8 @@ function irBin(const op: string; const a, b: TV; const name: string): TV;
 function irBinNsw(const op: string; const a, b: TV; const name: string): TV;
 function irICmp(const pred: string; const a, b: TV; const name: string): TV;
 function irFCmp(const pred: string; const a, b: TV; const name: string): TV;
+{ a comparison of vectors (op: icmp or fcmp): a vector of i1 }
+function irVecCmp(const op, pred: string; const a, b: TV; const name: string): TV;
 function irFNeg(const a: TV; const name: string): TV;
 function irCast(const op: string; const v: TV; dst: PIRType; const name: string): TV;
 function irSelect(const c, a, b: TV; const name: string): TV;
@@ -2334,6 +2336,20 @@ begin
     bufAdd(i^.text, 'fcmp ' + pred + ' double ' + a.v + ', ' + b.v);
   append(i);
   irFCmp := irV(irI1, res);
+end;
+
+function irVecCmp(const op, pred: string; const a, b: TV; const name: string): TV;
+var
+  i: PIRInst;
+  res: string;
+begin
+  i := newInst(res, name, true);
+  if (op = 'fcmp') and fastMath then
+    bufAdd(i^.text, 'fcmp fast ' + pred + ' ' + a.t^.text + ' ' + a.v + ', ' + b.v)
+  else
+    bufAdd(i^.text, op + ' ' + pred + ' ' + a.t^.text + ' ' + a.v + ', ' + b.v);
+  append(i);
+  irVecCmp := irV(irVector(a.t^.count, irI1), res);
 end;
 
 function irFNeg(const a: TV; const name: string): TV;

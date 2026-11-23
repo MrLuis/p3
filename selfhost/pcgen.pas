@@ -6382,8 +6382,103 @@ begin
         visitUnary := emitCheckedArith('sub', isSignedOrdinal(t), irConstInt(v.t, 0),
                                        v, e^.b, 'neg');
   else
-    visitUnary := irBin('xor', v, irConstInt(v.t, -1), 'not');
+    if t^.kind = tyVector then
+    begin
+      { lane by lane: a vector of booleans has lanes of 0 and 1 }
+      if getBase(t^.vecElement)^.kind = tyBoolean then
+        visitUnary := irBin('xor', v, irV(v.t, 'splat (' + v.t^.elem^.text + ' 1)'),
+                            'not')
+      else
+        visitUnary := irBin('xor', v, irV(v.t, 'splat (' + v.t^.elem^.text + ' -1)'),
+                            'not');
+    end
+    else
+      visitUnary := irBin('xor', v, irConstInt(v.t, -1), 'not');
   end;
+end;
+
+{ vector[N] of T: a comparison lane by lane (a vector of booleans, lanes of
+  0 and 1), or and/or/xor of the lanes; a scalar operand is broadcast to
+  every lane }
+function vectorLanes(e: PNode): TV;
+var
+  ot, et: PType;
+  vec, laneT: PIRType;
+  l, r, c: TV;
+  real, signed: boolean;
+  pred: string;
+
+  function operand(x: PNode): TV;
+  var
+    v, sv, inserted: TV;
+  begin
+    v := visitExpr(x);
+    if x^.typ^.kind = tyVector then
+      exit(v);
+    if real then
+      sv := toDouble(v, x^.typ)
+    else
+    begin
+      sv := convertOrdinal(v, x^.typ, et);
+      if sv.t^.bits < laneT^.bits then
+        sv := irCast('zext', sv, laneT, '')
+      else if sv.t^.bits > laneT^.bits then
+        sv := irCast('trunc', sv, laneT, '');
+    end;
+    if irIsConst(sv) then
+    begin
+      { (as LLVM prints a splat of zero) }
+      if (sv.v = '0') or (sv.v = '0.000000e+00') then
+        exit(irV(vec, 'zeroinitializer'));
+      exit(irV(vec, 'splat (' + sv.t^.text + ' ' + sv.v + ')'));
+    end;
+    inserted := irSplatInsert(vec, sv, 'splat.splatinsert');
+    operand := irSplatShuffle(vec, inserted, 'splat.splat');
+  end;
+
+begin
+  ot := e^.lhs^.typ;
+  if ot^.kind <> tyVector then
+    ot := e^.rhs^.typ;
+  et := ot^.vecElement;
+  vec := memType(ot);
+  laneT := vec^.elem;
+  real := et^.kind = tyReal;
+  l := operand(e^.lhs);
+  r := operand(e^.rhs);
+  case e^.bop of
+    boAnd: exit(irBin('and', l, r, 've.and'));
+    boOr: exit(irBin('or', l, r, 've.or'));
+    boXor: exit(irBin('xor', l, r, 've.xor'));
+  end;
+  if real then
+  begin
+    case e^.bop of
+      boEq: pred := 'oeq';
+      boNe: pred := 'une';
+      boLt: pred := 'olt';
+      boLe: pred := 'ole';
+      boGt: pred := 'ogt';
+    else
+      pred := 'oge';
+    end;
+    c := irVecCmp('fcmp', pred, l, r, 've.cmp');
+  end
+  else
+  begin
+    signed := isSignedOrdinal(et);
+    case e^.bop of
+      boEq: pred := 'eq';
+      boNe: pred := 'ne';
+      boLt: if signed then pred := 'slt' else pred := 'ult';
+      boLe: if signed then pred := 'sle' else pred := 'ule';
+      boGt: if signed then pred := 'sgt' else pred := 'ugt';
+    else
+      if signed then pred := 'sge' else pred := 'uge';
+    end;
+    c := irVecCmp('icmp', pred, l, r, 've.cmp');
+  end;
+  vectorLanes := irCast('zext', c, memType(e^.typ), 've.mask');
 end;
 
 { The elementwise operators of vectors (LB-6): a scalar operand is
@@ -6529,6 +6624,9 @@ begin
     rtv3('__pas_str_concat', tmp, l, r);
     exit(tmp);
   end;
+  if (e^.typ^.kind = tyVector) and
+     (isRelational(op) or (op in [boAnd, boOr, boXor])) then
+    exit(vectorLanes(e));
   if isRelational(op) then
     exit(emitCompare(e));
 

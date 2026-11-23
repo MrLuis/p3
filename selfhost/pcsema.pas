@@ -1809,6 +1809,11 @@ begin
     exit(true);
   if sameTupleShape(target, value) then
     exit(true);
+  { vector[N] of T: by shape (the same length and lane type), so the vector
+    of booleans a comparison gives fits any declared one }
+  if (target^.kind = tyVector) and (value^.kind = tyVector) then
+    exit((target^.vecCount = value^.vecCount) and
+         (getBase(target^.vecElement) = getBase(value^.vecElement)));
   if (target^.kind = tyReal) and isIntegerLike(value) then
     exit(true);
   if (target^.kind = tyPointer) and ((value^.kind = tyNil) or (value^.kind = tyPointer)) then

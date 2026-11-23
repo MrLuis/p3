@@ -1654,6 +1654,13 @@ class Checker : public StmtVisitor<Checker>,
       return true;
     if (sameTupleShape(Target, Value))
       return true;
+    // vector[N] of T: by shape (the same length and lane type), so the
+    // vector of booleans a comparison gives fits any declared one
+    if (auto *TV = llvm::dyn_cast<VectorType>(Target))
+      if (auto *VV = llvm::dyn_cast<VectorType>(Value))
+        return TV->getCount() == VV->getCount() &&
+               TV->getElementType()->getBase() ==
+                   VV->getElementType()->getBase();
     if (Target->isReal() && Value->isIntegerLike())
       return true;
     if (Target->isPointer() && (Value->isNil() || Value->isPointer()))
@@ -11207,6 +11214,15 @@ public:
     return V->getType();
   }
 
+  /// vector[N] of boolean: what lane-by-lane comparisons give (a mask).
+  llvm::DenseMap<unsigned, VectorType *> BooleanVectors;
+  VectorType *booleanVector(unsigned N) {
+    VectorType *&V = BooleanVectors[N];
+    if (!V)
+      V = Ctx.create<VectorType>(Ctx.getBooleanType(), N);
+    return V;
+  }
+
   Type *visitUnaryExpr(UnaryExpr *E) {
     Type *T = check(E->getOperand());
     if (T->isError())
@@ -11216,6 +11232,11 @@ public:
     if (E->getOp() == UnaryOp::Not) {
       if (T->getBase()->isBoolean())
         return Ctx.getBooleanType();
+      // vector[N] of T: lane by lane, of boolean or integer lanes
+      if (auto *VT = llvm::dyn_cast<VectorType>(T);
+          VT && (VT->getElementType()->getBase()->isBoolean() ||
+                 VT->getElementType()->isIntegerLike()))
+        return T;
       if (!isISO() && T->isIntegerLike()) // Turbo/FPC: bitwise not, same type
         return T->getBase();
     } else if (T->isNumeric()) {
@@ -11427,6 +11448,32 @@ public:
       Type *E = VT->getElementType();
       return E->isReal() ? S->isNumeric() : areCompatible(E, S);
     };
+    // vector[N] of T: comparisons lane by lane, giving a vector of booleans
+    // (a mask); and, or, xor of boolean or integer lanes.
+    if (L->isVector() || R->isVector()) {
+      bool SameShape =
+          L->isVector() && R->isVector() &&
+          llvm::cast<VectorType>(L)->getCount() ==
+              llvm::cast<VectorType>(R)->getCount() &&
+          areCompatible(llvm::cast<VectorType>(L)->getElementType(),
+                        llvm::cast<VectorType>(R)->getElementType());
+      bool Fits = SameShape || VecScalar(L, R) || VecScalar(R, L);
+      auto *VT = llvm::cast<VectorType>(L->isVector() ? L : R);
+      Type *Elem = VT->getElementType();
+      switch (Op) {
+      case BinaryOp::Eq: case BinaryOp::Ne: case BinaryOp::Lt:
+      case BinaryOp::Le: case BinaryOp::Gt: case BinaryOp::Ge:
+        if (Fits)
+          return booleanVector(VT->getCount());
+        break;
+      case BinaryOp::And: case BinaryOp::Or: case BinaryOp::Xor:
+        if (Fits && (Elem->getBase()->isBoolean() || Elem->isIntegerLike()))
+          return VT;
+        break;
+      default:
+        break;
+      }
+    }
     switch (Op) {
     case BinaryOp::Add: case BinaryOp::Sub: case BinaryOp::Mul:
       // vector[N] of T: the elementwise operators of two same-shaped
