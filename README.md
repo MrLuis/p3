@@ -176,9 +176,27 @@ compiler).
 - `--fseparate-units` — link separately compiled units (each compiled with
   `-c` to `<unit>.o` next to its source; off by default)
 - `-g` — generate debug information (off by default)
-- `--target=<triple>` — target triple (default: host)
-- `-mcpu <cpu>` — target CPU (default: `generic`; `native` selects the host CPU)
+- `--target=<triple>` — target triple (default: host). Any triple of a target
+  LLVM 19 was built with: X86, AArch64, ARM, RISCV, Mips, PowerPC, WebAssembly,
+  AMDGPU, NVPTX, AVR, MSP430, BPF, Hexagon, Lanai, LoongArch, M68k, Sparc,
+  SystemZ, VE, XCore, Xtensa — written as `x86_64-pc-linux-gnu`,
+  `aarch64-apple-darwin`, ... For a non-host triple only `-S`, `-c` and
+  `--emit-llvm` work; linking an executable needs the host triple.
+- `-mcpu <cpu>` — target CPU (default: `generic`; `native` selects the host
+  CPU and its feature set). Other names are the target's LLVM CPU names —
+  e.g. for x86 `x86-64-v3`, `skylake`, `znver4`; for AArch64 `apple-m1`,
+  `neoverse-n2` — passed to LLVM, which rejects unknown ones.
 - `-mattr <features>` — target features, e.g. `+avx2,-sse4.2`
+
+**Cross-compiling**
+
+Compilation to a non-host triple works as usual (`-S`, `-c`, `--emit-llvm`);
+Windows is supported the same way — `--target=x86_64-w64-mingw32` or
+`--target=x86_64-pc-windows-msvc` — and the unit library then takes its
+`MSWINDOWS` branches. Linking an executable always uses the runtime library
+built for the host, so executables are only produced for the host triple;
+build Windows binaries by running the compiler on Windows (its driver
+understands them — `-Wl,/OPT:REF`, `.msvc` and MinGW triples).
 
 **Runtime checks**
 
@@ -213,3 +231,55 @@ compiler).
 
 - `--help` — display available options
 - `--version` — display the version of this program
+
+## The project file (p3.json)
+
+A project file holds settings for compiling a project's programs and units
+(mode, unit and library paths, defines, libraries, optimization, debug info,
+target, warnings, checks) and its main program and output. It is one JSON
+object; its paths are relative to its own directory. It is parsed in
+`selfhost/pcproject.pas` (a port of `src/driver/Project.cpp`, same
+diagnostics).
+
+It is looked for in the input file's directory (the current directory without
+an input file) and its parents; `--project=<file>` names one explicitly, and
+`--no-project` ignores project files altogether. The command line wins over
+the project in value settings (`mode`, `output`, `optimize`, `target`, `cpu`,
+`errorLimit`); the boolean flags combine — the project can turn on
+`debug`/`separateUnits`/warnings-as-errors just as `-g`/`--fseparate-units`/
+`--Werror` can, and it can turn off checks just as `--fno-range-checks` can.
+
+| Setting | Meaning | Default when absent |
+| --- | --- | --- |
+| `name`, `version`, `description` | for people and tools; not used by p3 | — |
+| `main` | the main program to build when p3 runs with no input file | — (an error then) |
+| `output` | where the executable goes for a `main` build (parent directories are created) | the input name |
+| `mode` | `"iso"`, `"tp"` or `"objfpc"` | `iso` |
+| `optimize` | optimization level, an integer from 0 to 3 | 0 |
+| `errorLimit` | stop after this many errors; 0 means no limit | 20 |
+| `debug` | generate debug information | false |
+| `separateUnits` | link separately compiled units (like `--fseparate-units`) | false |
+| `unitPaths` | array of directories added to the unit search path (like `-I`) | — |
+| `defines` | array of symbols defined for conditional compilation (like `-d`) | — |
+| `libraryPaths` | array of directories added to the linker's search path (like `-L`) | — |
+| `libraries` | array of libraries to link with (like `-l`) | — |
+| `target` | the target triple | host |
+| `cpu` | the target CPU (like `-mcpu`) | generic |
+| `warnings` | object: `asErrors`, `unusedVariable`, `deprecated` | all `true` |
+| `checks` | object: `range`, `overflow` | all `true` |
+
+A duplicate setting is an error; an unknown one is warned about and ignored.
+Example (`examples/httploopserver/p3.json`):
+
+```json
+{
+  "name": "httploopserver",
+  "version": "0.1.0",
+  "description": "An HTTP/1.1 server on a single-threaded poll() event loop (non-blocking sockets, keep-alive) routed by netrouter",
+  "main": "src/httploopserver.pas",
+  "output": "bin/httploopserver",
+  "mode": "objfpc",
+  "unitPaths": ["src/lib"],
+  "optimize": 2
+}
+```
