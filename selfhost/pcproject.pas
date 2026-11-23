@@ -18,15 +18,17 @@ type
     path: string;          { the file read ('': none) }
     base: string;          { its directory: '' or ending in '/' }
     hasMain, hasOutput, hasTarget, hasCPU, hasMode, hasOptLevel,
-    hasErrorLimit: boolean;
+    hasErrorLimit, hasGeneratedDir, hasGeneratorTimeout: boolean;
     main, output, target, cpu: string; { main, output: relative to base }
+    generatedDir: string;   { relative to base }
+    generatorTimeout: longint;
     mode: TLangMode;
     optLevel, errorLimit: longint;
     { flags, false when absent }
     debug, separateUnits, warningsAsErrors: boolean;
     { switches, true when absent }
     warnUnusedVariables, warnDeprecated, rangeChecks, overflowChecks: boolean;
-    unitPaths, defines, libraryPaths, libraries: TPtrList; { of PName }
+    unitPaths, defines, libraryPaths, libraries, generators: TPtrList; { of PName }
   end;
 
 { Finds (projectFile = '': from inputFile's directory up) and reads the
@@ -669,6 +671,20 @@ begin
       getStrings(v, n, s.libraryPaths)
     else if n = 'libraries' then
       getStrings(v, n, s.libraries)
+    else if n = 'generators' then
+      getStrings(v, n, s.generators)
+    else if n = 'generatedDir' then
+      s.hasGeneratedDir := getString(v, n, s.generatedDir)
+    else if n = 'generatorTimeout' then
+    begin
+      s.hasGeneratorTimeout := getInt(v, n, 86400, 'an integer from 1 to 86400',
+                                      s.generatorTimeout);
+      if s.hasGeneratorTimeout and (s.generatorTimeout = 0) then
+      begin
+        bad(v, n, 'an integer from 1 to 86400');
+        s.hasGeneratorTimeout := false;
+      end;
+    end
     else if (n = 'warnings') or (n = 'checks') then
     begin
       if v^.kind <> jObject then
@@ -719,6 +735,8 @@ begin
   s.hasMode := false;
   s.hasOptLevel := false;
   s.hasErrorLimit := false;
+  s.hasGeneratedDir := false;
+  s.hasGeneratorTimeout := false;
   s.debug := false;
   s.separateUnits := false;
   s.warningsAsErrors := false;
@@ -730,6 +748,7 @@ begin
   listInit(s.defines);
   listInit(s.libraryPaths);
   listInit(s.libraries);
+  listInit(s.generators);
   if projectFile <> '' then
   begin
     s.path := projectFile;

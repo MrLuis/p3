@@ -239,6 +239,7 @@ int main(int argc, char **argv) {
   Opts.Generators.assign(GeneratorFiles.begin(), GeneratorFiles.end());
   Opts.GeneratedDir = GeneratedDir;
   Opts.GeneratorTimeout = GeneratorTimeout;
+  Opts.GivenGeneratorTimeout = GeneratorTimeout.getNumOccurrences() > 0;
   if (EmitModelAttr.getNumOccurrences()) {
     Opts.Act = Action::EmitModel;
     Opts.ModelAttr = llvm::StringRef(EmitModelAttr).lower();

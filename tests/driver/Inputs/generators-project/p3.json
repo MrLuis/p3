@@ -1,0 +1,9 @@
+{
+  "name": "jsonproject",
+  "main": "main.pas",
+  "output": "out/main",
+  "mode": "objfpc",
+  "generators": ["jsongen.pas"],
+  "generatedDir": "generated",
+  "generatorTimeout": 20
+}

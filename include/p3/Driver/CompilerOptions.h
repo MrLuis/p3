@@ -53,6 +53,7 @@ struct CompilerOptions {
   std::vector<std::string> Generators;
   std::string GeneratedDir;
   unsigned GeneratorTimeout = 30; ///< seconds one generator may run
+  bool GivenGeneratorTimeout = false;
   std::string ModelAttr;          ///< --emit-model's attribute
   /// -fseparate-units: the program's units were compiled separately (with
   /// -c, to <unit>.o next to their sources); link those objects.

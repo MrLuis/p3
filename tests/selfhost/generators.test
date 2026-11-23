@@ -16,5 +16,23 @@
 ; RUN: %p3 --mode=objfpc --emit-ast %S/../driver/Inputs/generators/jsongen.pas > %t.ast.cpp
 ; RUN: %t.p3 --mode=objfpc --emit-ast %S/../driver/Inputs/generators/jsongen.pas > %t.ast.self
 ; RUN: diff %t.ast.cpp %t.ast.self
+; The project file's generators, and the caches.
+; RUN: rm -rf %t.proj && mkdir %t.proj
+; RUN: cp %S/../driver/Inputs/generators/jsongen.pas %S/../driver/Inputs/generators/customer.pas %S/../driver/Inputs/generators/main.pas %S/../driver/Inputs/generators-project/p3.json %t.proj
+; RUN: cd %t.proj && env P3_RUNTIME_LIB=%p3-runtime-lib %t.p3
+; RUN: %t.proj/out/main | FileCheck --check-prefix=CHECK %s
+; RUN: printf 'line\t{ cached }\n' >> %t.proj/generated/customer.JsonGenerator.out
+; RUN: cd %t.proj && env P3_RUNTIME_LIB=%p3-runtime-lib %t.p3
+; RUN: FileCheck --check-prefix=CACHED %s < %t.proj/generated/customer.impl.inc
+; RUN: sed -i.bak 's/Active: Boolean;/Active: Boolean; Age: Integer;/' %t.proj/customer.pas
+; RUN: cd %t.proj && env P3_RUNTIME_LIB=%p3-runtime-lib %t.p3
+; RUN: FileCheck --check-prefix=FRESH %s < %t.proj/generated/customer.impl.inc
+; RUN: cd %t.proj && not env P3_RUNTIME_LIB=%p3-runtime-lib %t.p3 --no-project --mode=objfpc --generator=%S/../driver/Inputs/generators/slowgen.pas --generator-timeout=1 --generated-dir=%t.slow main.pas -o %t.slow.exe 2>&1 | FileCheck --check-prefix=SLOW %s
+; RUN: not env P3_RUNTIME_LIB=%p3-runtime-lib %t.p3 --project=%S/../driver/Inputs/generators-project/badtimeout.json 2>&1 | FileCheck --check-prefix=BAD %s
+; CACHED: { cached }
+; FRESH-NOT: { cached }
+; FRESH: "Age"
+; SLOW: error: generator 'SlowGenerator' ran longer than 1 seconds
+; BAD: error: 'generatorTimeout' must be an integer from 1 to 86400
 ; CHECK: {"Id": 7, "Name": "Ada", "Active": true}
 ; ERR: bad.pas:8:5: error: type TObject cannot be serialized, mark the field [Skip]

@@ -36,6 +36,7 @@ var
   generators: TPtrList; { of PName }
   generatedDir, emitModelAttr: string;
   generatorTimeout: longint;
+  givenGeneratorTimeout: boolean;
 
 { Do local arrays, records and strings start zeroed? }
 function zeroInit: boolean;
@@ -342,6 +343,12 @@ begin
     listAdd(includeDirs, intern(projectPath(s, nameStr(PName(listGet(s.unitPaths, i))))));
   for i := 0 to s.libraryPaths.count - 1 do
     addLinkerArg('-L' + projectPath(s, nameStr(PName(listGet(s.libraryPaths, i)))));
+  for i := 0 to s.generators.count - 1 do
+    listAdd(generators, intern(projectPath(s, nameStr(PName(listGet(s.generators, i))))));
+  if s.hasGeneratedDir and (generatedDir = '') then
+    generatedDir := projectPath(s, s.generatedDir);
+  if s.hasGeneratorTimeout and not givenGeneratorTimeout then
+    generatorTimeout := s.generatorTimeout;
   for i := 0 to s.defines.count - 1 do
     listAdd(commandLineDefines, listGet(s.defines, i));
   for i := 0 to s.libraries.count - 1 do
@@ -396,6 +403,7 @@ begin
   generatedDir := '';
   emitModelAttr := '';
   generatorTimeout := 30;
+  givenGeneratorTimeout := false;
   targetTriple := '';
   action := actExe;
   mode := lmISO;
@@ -559,7 +567,10 @@ begin
     else if name = 'generated-dir' then
       generatedDir := takeValue
     else if name = 'generator-timeout' then
-      generatorTimeout := parseUInt(name, takeValue)
+    begin
+      generatorTimeout := parseUInt(name, takeValue);
+      givenGeneratorTimeout := true;
+    end
     else if name = 'emit-model' then
     begin
       action := actModel;

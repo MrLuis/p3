@@ -444,6 +444,106 @@ begin
   writeBuf := sysWriteFile(path, b.data, b.len);
 end;
 
+{ Writes b unless the file already has it (a build system sees an unchanged
+  file). }
+function writeIfChanged(const path: string; const b: TBuf): boolean;
+var
+  data: PCharArray;
+  len, i: int64;
+  same: boolean;
+begin
+  if sysReadFile(path, data, len) and (len = b.len) then
+  begin
+    same := true;
+    i := 0;
+    while same and (i < len) do
+    begin
+      same := data^[i] = b.data^[i];
+      i := i + 1;
+    end;
+    if same then
+      exit(true);
+  end;
+  writeIfChanged := writeBuf(path, b);
+end;
+
+{ --- Caches: the hash is FNV-1a over the bytes, as the interface files' --- }
+
+const
+  fnvSeed = -3750763034362895579; { 0xcbf29ce484222325 }
+
+function fnvBytes(p: PCharArray; len: int64; seed: int64): int64;
+var
+  i: int64;
+  h: int64;
+begin
+  h := seed;
+  {$Q-}{$R-}
+  for i := 0 to len - 1 do
+  begin
+    h := h xor int64(ord(p^[i]));
+    h := h * 1099511628211;
+  end;
+  {$Q+}{$R+}
+  fnvBytes := h;
+end;
+
+function fnvString(const s: string; seed: int64): int64;
+var
+  i: longint;
+  h: int64;
+begin
+  h := seed;
+  {$Q-}{$R-}
+  for i := 1 to length(s) do
+  begin
+    h := h xor int64(ord(s[i]));
+    h := h * 1099511628211;
+  end;
+  {$Q+}{$R+}
+  fnvString := h;
+end;
+
+function hex16(h: int64): string;
+const
+  digits = '0123456789abcdef';
+var
+  i: longint;
+  s: string;
+begin
+  s := '';
+  for i := 15 downto 0 do
+    s := s + digits[((h shr (i * 4)) and 15) + 1];
+  hex16 := s;
+end;
+
+{ Is the stamp file path just value? (a cache is valid) }
+function stampIs(const path, value: string): boolean;
+var
+  data: PCharArray;
+  len, i: int64;
+  same: boolean;
+begin
+  stampIs := false;
+  if not sysReadFile(path, data, len) or (len <> length(value)) then
+    exit;
+  same := true;
+  for i := 0 to len - 1 do
+    if data^[i] <> value[i + 1] then
+      same := false;
+  stampIs := same;
+end;
+
+procedure writeStamp(const path, value: string);
+var
+  b: TBuf;
+begin
+  bufInit(b);
+  bufAdd(b, value);
+  writeBuf(path, b);
+  bufFree(b);
+end;
+
 { --- The files read --- }
 
 type
@@ -658,7 +758,7 @@ var
   base, ext, cand, foundPath: string;
   bb, ee: longint;
   numTypes: longint;
-  model, outText, intf, impl, spliced: TBuf;
+  model, intf, impl, spliced: TBuf;
   modelPath, outPath, intfPath, implPath: string;
   rc: longint;
   outData: PCharArray;
@@ -672,6 +772,11 @@ var
   sp: PSplice;
   srcData: PCharArray;
   srcLen, a, b2: int64;
+  buildHash, runHash: int64;
+  haveHash: boolean;
+  exeData: PCharArray;
+  exeLen: int64;
+  buildStamp, runStamp, stampPath: string;
   incI, incM: string;
 
   function newType(const nm, kd: string): PTypeOut;
@@ -753,6 +858,20 @@ begin
     else
       gi^.exe := pathJoin(binDir, stem(p));
     listAdd(gens, gi);
+    { the generator is built again when its source (or the -I directories)
+      changed; delete gen/.bin to force it }
+    haveHash := readWhole(p, srcData, srcLen);
+    buildHash := 0;
+    if haveHash then
+    begin
+      buildHash := fnvBytes(srcData, srcLen, fnvSeed);
+      for j := 0 to includeDirs.count - 1 do
+        buildHash := fnvString(nameStr(PName(listGet(includeDirs, j))), buildHash);
+    end;
+    buildStamp := gi^.exe + '.stamp';
+    if haveHash and sysFileExists(gi^.exe) and
+       stampIs(buildStamp, hex16(buildHash)) then
+      continue;
     bufInit(cmd);
     addQuoted(cmd, self);
     bufAdd(cmd, ' --no-project --mode=objfpc');
@@ -777,6 +896,8 @@ begin
       diagError(noLoc, 'generator ''' + p + ''' failed to build');
       exit;
     end;
+    if haveHash then
+      writeStamp(buildStamp, hex16(buildHash));
   end;
 
   { --- the project's sources: the input and the units it uses --- }
@@ -869,34 +990,47 @@ begin
       end;
       modelPath := pathJoin(genDir, stem(src^.path) + '.' + gi^.name + '.model');
       outPath := pathJoin(genDir, stem(src^.path) + '.' + gi^.name + '.out');
-      if not writeBuf(modelPath, model) then
+      if not writeIfChanged(modelPath, model) then
       begin
         diagError(noLoc, 'cannot write ''' + modelPath + '''');
         exit;
       end;
+      { the output is kept while the model and the generator are the same:
+        the same input gives the same output }
+      exeLen := 0;
+      runHash := fnvSeed;
+      if readWhole(gi^.exe, exeData, exeLen) then
+        runHash := fnvBytes(exeData, exeLen, fnvSeed);
+      runHash := fnvBytes(model.data, model.len, runHash);
+      runStamp := hex16(runHash);
+      stampPath := outPath + '.stamp';
       bufFree(model);
-      bufInit(cmd);
-      bufAdd(cmd, 'ulimit -t ');
-      bufAddInt(cmd, timeoutSecs);
-      bufAdd(cmd, '; ulimit -v 2097152 2>/dev/null; ');
-      addQuoted(cmd, gi^.exe);
-      bufAdd(cmd, ' < ');
-      addQuoted(cmd, modelPath);
-      bufAdd(cmd, ' > ');
-      addQuoted(cmd, outPath);
-      rc := runCommand(cmd);
-      bufFree(cmd);
-      if rc = 152 then { SIGXCPU: the time limit }
+      if not (sysFileExists(outPath) and stampIs(stampPath, runStamp)) then
       begin
-        fail('generator ''' + gi^.name + ''' ran longer than ' +
-             intToStr(timeoutSecs) + ' seconds');
-        continue;
-      end;
-      if rc <> 0 then
-      begin
-        fail('generator ''' + gi^.name + ''' failed (exit status ' +
-             intToStr(rc) + ')');
-        continue;
+        bufInit(cmd);
+        bufAdd(cmd, 'ulimit -t ');
+        bufAddInt(cmd, timeoutSecs);
+        bufAdd(cmd, '; ulimit -v 2097152 2>/dev/null; ');
+        addQuoted(cmd, gi^.exe);
+        bufAdd(cmd, ' < ');
+        addQuoted(cmd, modelPath);
+        bufAdd(cmd, ' > ');
+        addQuoted(cmd, outPath);
+        rc := runCommand(cmd);
+        bufFree(cmd);
+        if (rc = 152) or (rc = 137) then { SIGXCPU or SIGKILL: the time limit }
+        begin
+          fail('generator ''' + gi^.name + ''' ran longer than ' +
+               intToStr(timeoutSecs) + ' seconds');
+          continue;
+        end;
+        if rc <> 0 then
+        begin
+          fail('generator ''' + gi^.name + ''' failed (exit status ' +
+               intToStr(rc) + ')');
+          continue;
+        end;
+        writeStamp(stampPath, runStamp);
       end;
       if not readWhole(outPath, outData, outLen) then
       begin
@@ -975,7 +1109,7 @@ begin
     end;
     intfPath := pathJoin(genDir, base + '.intf.inc');
     implPath := pathJoin(genDir, base + '.impl.inc');
-    if not writeBuf(intfPath, intf) or not writeBuf(implPath, impl) then
+    if not writeIfChanged(intfPath, intf) or not writeIfChanged(implPath, impl) then
     begin
       diagError(noLoc, 'cannot write ''' + intfPath + '''');
       exit;

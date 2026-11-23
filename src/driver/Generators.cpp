@@ -292,6 +292,56 @@ struct GeneratorInfo {
   std::string Path, Name, Attr, Exe;
 };
 
+/// FNV-1a over Data, from Seed (as the interface files' hash).
+uint64_t fnv(llvm::StringRef Data, uint64_t Seed = 14695981039346656037ull) {
+  uint64_t H = Seed;
+  for (unsigned char C : Data) {
+    H ^= C;
+    H *= 1099511628211ull;
+  }
+  return H;
+}
+
+std::string hex16(uint64_t V) {
+  static const char Digits[] = "0123456789abcdef";
+  std::string S(16, '0');
+  for (int I = 15; I >= 0; --I, V >>= 4)
+    S[I] = Digits[V & 15];
+  return S;
+}
+
+bool readFileText(llvm::StringRef Path, std::string &Out) {
+  auto B = llvm::MemoryBuffer::getFile(Path);
+  if (!B)
+    return false;
+  Out = (*B)->getBuffer().str();
+  return true;
+}
+
+/// Is the stamp file Path just Value? (a cache is valid)
+bool stampIs(llvm::StringRef Path, llvm::StringRef Value) {
+  std::string Text;
+  return readFileText(Path, Text) && Text == Value;
+}
+
+bool writeText(llvm::StringRef Path, llvm::StringRef Text) {
+  std::error_code EC;
+  llvm::raw_fd_ostream OS(Path, EC, llvm::sys::fs::OF_Text);
+  if (EC)
+    return false;
+  OS << Text;
+  return true;
+}
+
+/// Writes Text unless the file already has it (a build system sees an
+/// unchanged file).
+bool writeIfChanged(llvm::StringRef Path, llvm::StringRef Text) {
+  std::string Old;
+  if (readFileText(Path, Old) && Old == Text)
+    return true;
+  return writeText(Path, Text);
+}
+
 /// What the generators wrote for one type.
 struct TypeOutput {
   std::string Name, Kind;
@@ -444,6 +494,18 @@ bool Driver::runGenerators() {
       llvm::sys::path::append(Exe, llvm::sys::path::stem(Path));
       G.Exe = std::string(Exe);
     }
+    // The generator is built again when its source (or the -I directories)
+    // changed; delete gen/.bin to force it.
+    std::string SrcText;
+    uint64_t BuildHash = 0;
+    if (readFileText(Path, SrcText)) {
+      BuildHash = fnv(SrcText);
+      for (const std::string &D : Opts.IncludeDirs)
+        BuildHash = fnv(D, BuildHash);
+    }
+    std::string BuildStamp = G.Exe + ".stamp";
+    if (BuildHash && fs::exists(G.Exe) && stampIs(BuildStamp, hex16(BuildHash)))
+      continue;
     std::vector<std::string> Args{Self, "--no-project", "--mode=objfpc"};
     for (const std::string &D : Opts.IncludeDirs)
       Args.push_back("-I" + D);
@@ -459,6 +521,8 @@ bool Driver::runGenerators() {
     if (RC != 0)
       return Fail("generator '" + Path + "' failed to build" +
                   (Err.empty() ? "" : ": " + Err));
+    if (BuildHash)
+      writeText(BuildStamp, hex16(BuildHash));
   }
 
   // --- the project's sources: the input and the units it uses -------------
@@ -532,30 +596,35 @@ bool Driver::runGenerators() {
       llvm::SmallString<256> ModelPath(GenDir), OutPath(GenDir);
       llvm::sys::path::append(ModelPath, Base + "." + G.Name + ".model");
       llvm::sys::path::append(OutPath, Base + "." + G.Name + ".out");
-      {
-        std::error_code EC;
-        llvm::raw_fd_ostream OS(ModelPath, EC, fs::OF_Text);
-        if (EC)
-          return Fail("cannot write '" + ModelPath + "': " + EC.message());
-        OS << Model;
-      }
-      std::vector<std::optional<llvm::StringRef>> Redirects = {
-          llvm::StringRef(ModelPath), llvm::StringRef(OutPath), std::nullopt};
-      std::string Err;
-      int RC = llvm::sys::ExecuteAndWait(
-          G.Exe, {G.Exe}, std::nullopt, Redirects, Opts.GeneratorTimeout,
-          /*MemoryLimit=*/2048, &Err);
-      if (RC == -2) {
-        Diags.error("generator '" + G.Name + "' ran longer than " +
-                    std::to_string(Opts.GeneratorTimeout) + " seconds");
-        OK = false;
-        continue;
-      }
-      if (RC != 0) {
-        Diags.error("generator '" + G.Name + "' failed (exit status " +
-                    std::to_string(RC) + ")" + (Err.empty() ? "" : ": " + Err));
-        OK = false;
-        continue;
+      if (!writeIfChanged(ModelPath, Model))
+        return Fail("cannot write '" + ModelPath + "'");
+      // The output is kept while the model and the generator are the
+      // same: the same input gives the same output.
+      std::string ExeBytes;
+      readFileText(G.Exe, ExeBytes);
+      std::string RunStamp = hex16(fnv(Model, fnv(ExeBytes)));
+      std::string StampPath = std::string(OutPath) + ".stamp";
+      if (!(fs::exists(OutPath) && stampIs(StampPath, RunStamp))) {
+        std::vector<std::optional<llvm::StringRef>> Redirects = {
+            llvm::StringRef(ModelPath), llvm::StringRef(OutPath), std::nullopt};
+        std::string Err;
+        int RC = llvm::sys::ExecuteAndWait(
+            G.Exe, {G.Exe}, std::nullopt, Redirects, Opts.GeneratorTimeout,
+            /*MemoryLimit=*/2048, &Err);
+        if (RC == -2) {
+          Diags.error("generator '" + G.Name + "' ran longer than " +
+                      std::to_string(Opts.GeneratorTimeout) + " seconds");
+          OK = false;
+          continue;
+        }
+        if (RC != 0) {
+          Diags.error("generator '" + G.Name + "' failed (exit status " +
+                      std::to_string(RC) + ")" +
+                      (Err.empty() ? "" : ": " + Err));
+          OK = false;
+          continue;
+        }
+        writeText(StampPath, RunStamp);
       }
       auto OutBuf = llvm::MemoryBuffer::getFile(OutPath);
       if (!OutBuf) {
@@ -610,14 +679,8 @@ bool Driver::runGenerators() {
     llvm::SmallString<256> IntfPath(GenDir), ImplPath(GenDir);
     llvm::sys::path::append(IntfPath, Base + ".intf.inc");
     llvm::sys::path::append(ImplPath, Base + ".impl.inc");
-    for (auto &[P, Text] : {std::pair<llvm::StringRef, std::string &>(IntfPath, Intf),
-                            std::pair<llvm::StringRef, std::string &>(ImplPath, Impl)}) {
-      std::error_code EC;
-      llvm::raw_fd_ostream OS(P, EC, fs::OF_Text);
-      if (EC)
-        return Fail("cannot write '" + P + "': " + EC.message());
-      OS << Text;
-    }
+    if (!writeIfChanged(IntfPath, Intf) || !writeIfChanged(ImplPath, Impl))
+      return Fail("cannot write '" + IntfPath + "'");
 
     // The source with the two includes, on the lines of the points they
     // go before (so no line of it moves).

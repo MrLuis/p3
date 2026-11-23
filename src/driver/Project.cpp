@@ -375,12 +375,13 @@ public:
 
 /// The settings of a project file, checked.
 struct Settings {
-  std::optional<std::string> Main, Output, Target, CPU;
+  std::optional<std::string> Main, Output, Target, CPU, GeneratedDir;
   std::optional<LangMode> Mode;
-  std::optional<unsigned> OptLevel, ErrorLimit;
+  std::optional<unsigned> OptLevel, ErrorLimit, GeneratorTimeout;
   std::optional<bool> Debug, SeparateUnits, WarningsAsErrors,
       WarnUnusedVariables, WarnDeprecated, RangeChecks, OverflowChecks;
-  std::vector<std::string> UnitPaths, Defines, LibraryPaths, Libraries;
+  std::vector<std::string> UnitPaths, Defines, LibraryPaths, Libraries,
+      Generators;
 };
 
 class SettingsChecker {
@@ -506,6 +507,16 @@ public:
         strings(V, N, S.LibraryPaths);
       } else if (N == "libraries") {
         strings(V, N, S.Libraries);
+      } else if (N == "generators") {
+        strings(V, N, S.Generators);
+      } else if (N == "generatedDir") {
+        S.GeneratedDir = string(V, N);
+      } else if (N == "generatorTimeout") {
+        S.GeneratorTimeout = integer(V, N, 86400, "an integer from 1 to 86400");
+        if (S.GeneratorTimeout && *S.GeneratorTimeout == 0) {
+          bad(V, N, "an integer from 1 to 86400");
+          S.GeneratorTimeout.reset();
+        }
       } else if (N == "warnings" || N == "checks") {
         if (V.K != JValue::Object) {
           bad(V, N, "an object");
@@ -622,6 +633,12 @@ bool p3::applyProjectFile(CompilerOptions &Opts, SourceManager &SM,
     Opts.IncludeDirs.push_back(projectPath(Base, P));
   for (const std::string &P : S.LibraryPaths)
     Opts.LibraryDirs.push_back(projectPath(Base, P));
+  for (const std::string &P : S.Generators)
+    Opts.Generators.push_back(projectPath(Base, P));
+  if (S.GeneratedDir && Opts.GeneratedDir.empty())
+    Opts.GeneratedDir = projectPath(Base, *S.GeneratedDir);
+  if (S.GeneratorTimeout && !Opts.GivenGeneratorTimeout)
+    Opts.GeneratorTimeout = *S.GeneratorTimeout;
   Opts.Defines.insert(Opts.Defines.end(), S.Defines.begin(), S.Defines.end());
   Opts.Libraries.insert(Opts.Libraries.end(), S.Libraries.begin(),
                         S.Libraries.end());

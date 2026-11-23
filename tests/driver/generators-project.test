@@ -1,0 +1,32 @@
+; Source generators in a project: p3.json lists them ("generators",
+; "generatedDir", "generatorTimeout"); the generator is built, and runs, only
+; when its source, or the model of the types it handles, changed.
+; RUN: rm -rf %t.proj && mkdir %t.proj
+; RUN: cp %S/Inputs/generators/jsongen.pas %S/Inputs/generators/customer.pas %S/Inputs/generators/main.pas %S/Inputs/generators-project/p3.json %t.proj
+; RUN: cd %t.proj && %p3-project
+; RUN: %t.proj/out/main | FileCheck --check-prefix=OUT %s
+; RUN: FileCheck --check-prefix=INTF %s < %t.proj/generated/customer.intf.inc
+; The output is kept: a line added to it is still there after another build.
+; RUN: printf 'line\t{ cached }\n' >> %t.proj/generated/customer.JsonGenerator.out
+; RUN: cd %t.proj && %p3-project
+; RUN: FileCheck --check-prefix=CACHED %s < %t.proj/generated/customer.impl.inc
+; A new field changes the model: the generator runs again.
+; RUN: sed -i.bak 's/Active: Boolean;/Active: Boolean; Age: Integer;/' %t.proj/customer.pas
+; RUN: cd %t.proj && %p3-project
+; RUN: FileCheck --check-prefix=FRESH %s < %t.proj/generated/customer.impl.inc
+; RUN: %t.proj/out/main | FileCheck --check-prefix=OUT2 %s
+; The command line wins: a different directory for the code.
+; RUN: cd %t.proj && %p3-project --generated-dir=%t.proj/elsewhere
+; RUN: FileCheck --check-prefix=INTF %s < %t.proj/elsewhere/customer.intf.inc
+; A generator that does not finish is stopped.
+; RUN: cd %t.proj && not %p3 --no-project --mode=objfpc --generator=%S/Inputs/generators/slowgen.pas --generator-timeout=1 --generated-dir=%t.slow main.pas -o %t.slow.exe 2>&1 | FileCheck --check-prefix=SLOW %s
+; A setting that is not valid.
+; RUN: not %p3-project --project=%S/Inputs/generators-project/badtimeout.json 2>&1 | FileCheck --check-prefix=BAD %s
+; OUT: {"Id": 7, "Name": "Ada", "Active": true}
+; OUT2: {"Id": 7, "Name": "Ada", "Active": true, "Age": 0}
+; INTF: function ToJson: string;
+; CACHED: { cached }
+; FRESH-NOT: { cached }
+; FRESH: "Age"
+; SLOW: error: generator 'SlowGenerator' ran longer than 1 seconds
+; BAD: error: 'generatorTimeout' must be an integer from 1 to 86400

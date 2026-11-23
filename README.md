@@ -76,6 +76,63 @@ examples are in the reference.
 - **Lazy sequences**: LINQ-style `map`/`filter`/... in the `sequences` unit.
 - **Reachability pruning**: code nothing refers to is left out of the
   executable, also at `-O0`.
+- **Attributes, partial types and source generators**: `[Serializable]`
+  before a type, field or method; `T = partial record|class` declared in
+  pieces; and generators, programs that read a description of the types
+  marked with an attribute and write Pascal for them (see below).
+
+## Source generators
+
+A generator writes Pascal source for the types marked with one attribute, at
+build time, with no run-time type information. It is a program that starts
+`generator Name for Attr;`, uses the unit `p3gen`, and calls `RunGenerator`:
+
+```pascal
+generator JsonGenerator for Serializable;
+uses p3gen;
+
+procedure Generate(const T: TTypeModel; W: TSourceWriter);
+begin
+  W.Member('function ToJson: string;');
+  W.Line('function ' + T.Name + '.ToJson: string;');
+  W.Line('begin Result := ''{...}''; end;');
+end;
+
+begin
+  RunGenerator(@Generate);
+end.
+```
+
+```pascal
+unit customer;
+interface
+type
+  [Serializable]
+  TCustomer = partial record
+    Id: Integer;
+    [Skip] Cache: Pointer;
+  end;
+```
+
+`p3 --generator=jsongen.pas main.pas` builds the generator, runs it on a text
+description of each type marked `[Serializable]` in the program and in the
+units next to it (names, types as written, attributes with literal
+arguments, locations; `--emit-model=serializable file.pas` prints it), and
+includes what it writes in the file that declares the type: the
+`W.Member(...)` declarations in a `partial` second half of the type, the
+`W.Line(...)` lines after the unit's declarations. The generated code is in
+`gen/` next to the input (`--generated-dir`), where it can be read and
+debugged; errors in it point there, and `W.Error(Field, 'message')` reports
+at the user's own declaration. Types must be declared in a unit's interface
+or in a program, as `partial`.
+
+The generator is built again only when its source changes, and runs again
+only when the model of the types it handles (or the generator) changes; it
+stops after `--generator-timeout` seconds (30), with a memory limit where the
+system has one. It is not sandboxed otherwise: it is a native program, so
+only use generators you trust. In `p3.json`: `generators`, `generatedDir`,
+`generatorTimeout`. Not done yet: generics and properties in the model, a
+generator that uses the output of another, resolved types in the model.
 
 ## Testing
 
@@ -160,10 +217,20 @@ compiler).
 - `--emit-ast` — dump the parsed AST
 - `--emit-parse-tree` — dump the parse tree (no semantic analysis; for testing)
 - `--emit-tokens` — dump lexer tokens
+- `--emit-model=<attr>` — print the source generator model of the types marked
+  `[attr]` (for testing)
 
 **Language**
 
 - `--mode=<iso|tp|objfpc>` — language dialect (default: `iso`)
+
+**Source generators**
+
+- `--generator=<file>` — build and run a source generator first (repeatable;
+  the code it writes is included in the units that declare its types)
+- `--generated-dir=<dir>` — where that code goes (default: `gen` next to the
+  input)
+- `--generator-timeout=<seconds>` — how long a generator may run (default 30)
 
 **Optimization and code generation**
 
@@ -263,6 +330,9 @@ the project in value settings (`mode`, `output`, `optimize`, `target`, `cpu`,
 | `defines` | array of symbols defined for conditional compilation (like `-d`) | — |
 | `libraryPaths` | array of directories added to the linker's search path (like `-L`) | — |
 | `libraries` | array of libraries to link with (like `-l`) | — |
+| `generators` | array of source generator programs (like `--generator`) | — |
+| `generatedDir` | where the generators' code goes (like `--generated-dir`) | `gen` |
+| `generatorTimeout` | seconds a generator may run, 1 to 86400 | 30 |
 | `target` | the target triple | host |
 | `cpu` | the target CPU (like `-mcpu`) | generic |
 | `warnings` | object: `asErrors`, `unusedVariable`, `deprecated` | all `true` |
