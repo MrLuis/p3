@@ -629,6 +629,7 @@ begin
                     bkParamStr, bkAssign, bkClose, bkFlush, bkBlockRead, bkBlockWrite,
                     bkSeek, bkFilePos, bkFileSize, bkGetFileHandle,
                     bkPopCnt, bkCountTrailingZeros, bkCountLeadingZeros,
+                    bkVectorMask, bkVectorLoad, bkVectorStore,
                     bkAssignFile, bkCloseFile, bkExceptAddr];
 end;
 

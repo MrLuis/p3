@@ -80,7 +80,10 @@ type
     bkIteratorValue,
     bkPopCnt,
     bkCountTrailingZeros,
-    bkCountLeadingZeros);
+    bkCountLeadingZeros,
+    bkVectorMask,
+    bkVectorLoad,
+    bkVectorStore);
 
 const
   builtinNames: array[TBuiltinKind] of string[20] = (
@@ -162,7 +165,10 @@ const
     'iteratorvalue',
     'popcnt',
     'counttrailingzeros',
-    'countleadingzeros');
+    'countleadingzeros',
+    'vectormask',
+    'vectorload',
+    'vectorstore');
   builtinIsProcedure: array[TBuiltinKind] of boolean = (
     true,
     true,
@@ -242,4 +248,7 @@ const
     false,
     false,
     false,
-    false);
+    false,
+    false,
+    false,
+    true);

@@ -127,5 +127,13 @@ BUILTIN_FUNC(PopCnt,             "popcnt")
 BUILTIN_FUNC(CountTrailingZeros, "counttrailingzeros")
 BUILTIN_FUNC(CountLeadingZeros,  "countleadingzeros")
 
+// Vectors (tp, objfpc; p3's own): VectorMask(m), a vector of booleans as
+// the bits of a qword (bit 0: the first lane); VectorLoad(T, p), a vector
+// of type T read from address p, and VectorStore(p, v), written there (any
+// alignment).
+BUILTIN_FUNC(VectorMask,  "vectormask")
+BUILTIN_FUNC(VectorLoad,  "vectorload")
+BUILTIN_PROC(VectorStore, "vectorstore")
+
 #undef BUILTIN_FUNC
 #undef BUILTIN_PROC

@@ -6047,6 +6047,21 @@ begin
           exit(addrV);
         exit(loadScalar(addrV, e^.typ, 'value'));
       end;
+    bkVectorMask: { a bit per lane: lane 1 is bit 0 }
+      begin
+        argE := PNode(listGet(e^.args, 0));
+        arg := visitExpr(argE);
+        x := irCast('trunc', arg, irVector(argE^.typ^.vecCount, irI1), 'lanes');
+        x := irCast('bitcast', x, irInt(argE^.typ^.vecCount), 'mask');
+        if x.t^.bits < 64 then
+          x := irCast('zext', x, irI64, 'mask');
+        exit(x);
+      end;
+    bkVectorLoad: { from any address (alignment 1) }
+      begin
+        argE := PNode(listGet(e^.args, 1));
+        exit(irLoadAlign(memType(e^.typ), visitExpr(argE), 1, 'vload'));
+      end;
     bkPopCnt, bkCountTrailingZeros, bkCountLeadingZeros:
       begin
         { in the width of the argument's type }

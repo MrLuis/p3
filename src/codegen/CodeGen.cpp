@@ -7617,6 +7617,21 @@ public:
       llvm::Value *Addr = iteratorValueAddr(visitExpr(E->getArgs()[0]));
       return ET->isStructured() ? Addr : loadScalar(Addr, ET, "value");
     }
+    case BuiltinKind::VectorMask: { // a bit per lane: lane 1 is bit 0
+      Expr *A = E->getArgs()[0];
+      auto *VT = llvm::cast<VectorType>(A->getType());
+      unsigned N = VT->getCount();
+      llvm::Value *V = visitExpr(A);
+      llvm::Value *Bits = B.CreateTrunc(
+          V, llvm::FixedVectorType::get(B.getInt1Ty(), N), "lanes");
+      Bits = B.CreateBitCast(Bits, B.getIntNTy(N), "mask");
+      return B.CreateZExtOrTrunc(Bits, B.getInt64Ty(), "mask");
+    }
+    case BuiltinKind::VectorLoad: { // from any address (alignment 1)
+      llvm::Value *P = visitExpr(E->getArgs()[1]);
+      return B.CreateAlignedLoad(memType(E->getType()), P, llvm::MaybeAlign(1),
+                                 "vload");
+    }
     case BuiltinKind::PopCnt:
     case BuiltinKind::CountTrailingZeros:
     case BuiltinKind::CountLeadingZeros: { // in the width of the argument's type
@@ -8842,6 +8857,12 @@ public:
         B.CreateMemMove(Dst, llvm::MaybeAlign(1), emitAddress(A[0]),
                         llvm::MaybeAlign(1), Count);
       }
+      return;
+    }
+    case BuiltinKind::VectorStore: { // at any address (alignment 1)
+      auto A = S->getArgs();
+      llvm::Value *P = visitExpr(A[0]);
+      B.CreateAlignedStore(visitExpr(A[1]), P, llvm::MaybeAlign(1));
       return;
     }
     case BuiltinKind::Halt: {

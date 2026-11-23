@@ -1221,6 +1221,11 @@ begin
           emitMemMove(dst, src, cnt);
         end;
       end;
+    bkVectorStore: { at any address (alignment 1) }
+      begin
+        p := visitExpr(PNode(listGet(s^.args, 0)));
+        irStoreAlign(visitExpr(PNode(listGet(s^.args, 1))), p, 1);
+      end;
     bkHalt:
       begin
         if s^.args.count = 0 then

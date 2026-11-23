@@ -752,6 +752,44 @@ end;
 
 { getmem(p, n) freemem(p) reallocmem(p, n) fillchar(x, n, v)
   move(src, dst, n) halt[(code)] }
+{ VectorStore(address, vector) }
+procedure checkVectorStore(s: PNode);
+var
+  p, v: PType;
+  i: longint;
+begin
+  if s^.args.count <> 2 then
+  begin
+    ms('');
+    maCallee(s^.callee);
+    ma(' expects 2 arguments');
+    errR(s^.callee.loc, nodeRange(s));
+    for i := 0 to s^.args.count - 1 do
+      check(PNode(listGet(s^.args, i)));
+    exit;
+  end;
+  p := check(PNode(listGet(s^.args, 0)));
+  v := check(PNode(listGet(s^.args, 1)));
+  if isError(p) or isError(v) then
+    exit;
+  if p^.kind <> tyPointer then
+  begin
+    ms('');
+    maCallee(s^.callee);
+    ma(' expects an address, not ');
+    maT(p);
+    errR(PNode(listGet(s^.args, 0))^.b, nodeRange(PNode(listGet(s^.args, 0))));
+  end;
+  if v^.kind <> tyVector then
+  begin
+    ms('');
+    maCallee(s^.callee);
+    ma(' expects a vector, not ');
+    maT(v);
+    errR(PNode(listGet(s^.args, 1))^.b, nodeRange(PNode(listGet(s^.args, 1))));
+  end;
+end;
+
 procedure checkMemoryProc(s: PNode; k: TBuiltinKind);
 var
   want, i: longint;
@@ -1539,6 +1577,52 @@ begin
           res := tyBooleanT
         else
           res := t^.iterElement;
+      end;
+    bkVectorMask: { the lanes of a vector of booleans }
+      begin
+        if not arity(1) then
+          exit;
+        t := check(argNode(e, 0));
+        if isError(t) then
+          exit;
+        if (t^.kind <> tyVector) or (getBase(t^.vecElement)^.kind <> tyBoolean) then
+        begin
+          ms('');
+          maCallee(e^.callee);
+          ma(' expects a vector of booleans (a comparison of vectors), not ');
+          maT(t);
+          errR(argNode(e, 0)^.b, nodeRange(argNode(e, 0)));
+          exit;
+        end;
+        res := tyQWordT;
+      end;
+    bkVectorLoad: { VectorLoad(TVector, address) }
+      begin
+        if not arity(2) then
+          exit;
+        t := checkTypeOrValue(argNode(e, 0));
+        lt := check(argNode(e, 1));
+        if isError(t) or isError(lt) then
+          exit;
+        if t^.kind <> tyVector then
+        begin
+          ms('');
+          maCallee(e^.callee);
+          ma(' expects a vector type, not ');
+          maT(t);
+          errR(argNode(e, 0)^.b, nodeRange(argNode(e, 0)));
+          exit;
+        end;
+        if lt^.kind <> tyPointer then
+        begin
+          ms('');
+          maCallee(e^.callee);
+          ma(' expects an address, not ');
+          maT(lt);
+          errR(argNode(e, 1)^.b, nodeRange(argNode(e, 1)));
+          exit;
+        end;
+        res := t;
       end;
     bkPopCnt, bkCountTrailingZeros, bkCountLeadingZeros: { the bits of an integer }
       begin
@@ -3218,6 +3302,7 @@ begin
       bkPack, bkUnpack: checkPackUnpack(s, d^.builtin = bkPack);
       bkGetMem, bkFreeMem, bkReallocMem, bkFillChar, bkMove, bkHalt:
         checkMemoryProc(s, d^.builtin);
+      bkVectorStore: checkVectorStore(s);
     else
       ;
     end;

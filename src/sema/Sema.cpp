@@ -1319,7 +1319,8 @@ class Checker : public StmtVisitor<Checker>,
     case BuiltinKind::FileSize: case BuiltinKind::GetFileHandle:
       return true;
     case BuiltinKind::PopCnt: case BuiltinKind::CountTrailingZeros:
-    case BuiltinKind::CountLeadingZeros:
+    case BuiltinKind::CountLeadingZeros: case BuiltinKind::VectorMask:
+    case BuiltinKind::VectorLoad: case BuiltinKind::VectorStore:
       return true;
     case BuiltinKind::AssignFile: case BuiltinKind::CloseFile:
     case BuiltinKind::ExceptAddr:
@@ -9254,6 +9255,46 @@ class Checker : public StmtVisitor<Checker>,
                  ? Ctx.getBooleanType()
                  : IT->getElementType();
     }
+    case BuiltinKind::VectorMask: { // the lanes of a vector of booleans
+      if (!Arity(1))
+        return errorType();
+      Type *T = check(Args[0]);
+      if (T->isError())
+        return T;
+      auto *VT = llvm::dyn_cast<VectorType>(T);
+      if (!VT || !VT->getElementType()->getBase()->isBoolean()) {
+        Diags.error(Args[0]->getBeginLoc(),
+                    "'" + Callee.Spelling +
+                        "' expects a vector of booleans (a comparison of "
+                        "vectors), not " + quoted(T),
+                    {Args[0]->getRange()});
+        return errorType();
+      }
+      return Ctx.getQWordType();
+    }
+    case BuiltinKind::VectorLoad: { // VectorLoad(TVector, address)
+      if (!Arity(2))
+        return errorType();
+      Type *T = checkTypeOrValue(Args[0]);
+      Type *P = check(Args[1]);
+      if (T->isError() || P->isError())
+        return errorType();
+      if (!T->isVector()) {
+        Diags.error(Args[0]->getBeginLoc(),
+                    "'" + Callee.Spelling + "' expects a vector type, not " +
+                        quoted(T),
+                    {Args[0]->getRange()});
+        return errorType();
+      }
+      if (!P->isPointer()) {
+        Diags.error(Args[1]->getBeginLoc(),
+                    "'" + Callee.Spelling + "' expects an address, not " +
+                        quoted(P),
+                    {Args[1]->getRange()});
+        return errorType();
+      }
+      return T;
+    }
     case BuiltinKind::PopCnt:
     case BuiltinKind::CountTrailingZeros:
     case BuiltinKind::CountLeadingZeros: { // the bits of an integer
@@ -9462,6 +9503,32 @@ class Checker : public StmtVisitor<Checker>,
         checkModifiable(Args[1]);
       return;
     }
+  }
+
+  /// VectorStore(address, vector)
+  void checkVectorStore(ProcCallStmt *S) {
+    const Identifier &Callee = S->getCallee();
+    auto Args = S->getArgs();
+    if (Args.size() != 2) {
+      Diags.error(Callee.Loc, "'" + Callee.Spelling + "' expects 2 arguments",
+                  {S->getRange()});
+      for (Expr *A : Args)
+        check(A);
+      return;
+    }
+    Type *P = check(Args[0]);
+    Type *V = check(Args[1]);
+    if (P->isError() || V->isError())
+      return;
+    if (!P->isPointer())
+      Diags.error(Args[0]->getBeginLoc(),
+                  "'" + Callee.Spelling + "' expects an address, not " +
+                      quoted(P),
+                  {Args[0]->getRange()});
+    if (!V->isVector())
+      Diags.error(Args[1]->getBeginLoc(),
+                  "'" + Callee.Spelling + "' expects a vector, not " + quoted(V),
+                  {Args[1]->getRange()});
   }
 
 public:
@@ -10050,6 +10117,8 @@ public:
       case BuiltinKind::ReallocMem: case BuiltinKind::FillChar:
       case BuiltinKind::Move: case BuiltinKind::Halt:
         return checkMemoryProc(S, BD->getBuiltinKind());
+      case BuiltinKind::VectorStore:
+        return checkVectorStore(S);
       default: llvm_unreachable("not a builtin procedure");
       }
     }
