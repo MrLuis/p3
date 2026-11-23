@@ -40,15 +40,33 @@
    Serving. HttpServeLoop installs OnOpen / OnData / OnClose on a
    TNetLoopServer: every whole request received is answered on the loop's
    thread (a handler must not wait there). HttpServeAsync accepts on a
-   listener and serves each connection as a task on the thread pool (a
-   handler may wait: Wait(...) parks its connection only); idle connections
-   close after HttpLimits.IdleTimeoutMs. Both answer a request that cannot
-   be parsed with its error and close; After (optional) runs after each
-   answer (counting, logging).
+   listener and serves each connection as a task, on the thread pool or on
+   the accepting thread (a handler may wait: Wait(...) parks its connection
+   only); a connection closes after HttpLimits.IdleTimeoutMs without a
+   request, or RequestTimeoutMs on one request or one answer. Both answer a
+   request that cannot be parsed with its error (HttpOnBadRequest, if set,
+   writes it: C.Status holds the code) and close; After (optional) runs
+   after each answer (counting, logging).
+
+   Answering later (loop engine). A handler that starts work which ends in
+   another callback of its loop (a query on a database socket the loop
+   watches, a timer) calls C.Defer and returns; the request is then done
+   being read (copy what is needed first: the request accessors are not
+   valid after Defer), and the connection's next requests wait. Whoever
+   finishes fills the answer in and calls C.Complete, on the same loop
+   thread: the answer goes out and the connection goes on. If the client
+   left meanwhile, Complete frees the context instead (do not touch it
+   after Complete). C.Conn is the context's connection (nil on the async
+   engine), C.Conn.Loop its loop.
+
+   Memory. Between requests an idle keep-alive connection keeps no buffer
+   and a small context (Shrink); on the loop engine none at all, unless the
+   program keeps per-connection C.Data on it.
 
    Routers. THttpRouter is netrouter's TRouter over THttpContext; serving
    one answers 404 / 405 (Allow:) itself unless its NotFound /
-   MethodNotAllowed handlers do. FileServer(root) is a handler for a
+   MethodNotAllowed handlers do. C.Data is the program's, per connection,
+   and is freed with the context. FileServer(root) is a handler for a
    catch-all route (/static/* -> root/...), ServeFile answers one file:
    content type by extension, a directory's index.html, 403 for '..'. *)
 unit nethttp;
@@ -69,6 +87,7 @@ type
     MaxHeaders: Integer;      { (431) }
     MaxBodyBytes: Integer;    { (413) }
     IdleTimeoutMs: Integer;   { HttpServeAsync: a quiet keep-alive connection closes }
+    RequestTimeoutMs: Integer;{ HttpServeAsync: to receive one request / send one answer }
   end;
 
   THttpParse = (hpIncomplete, hpOk, hpBad, hpHeadTooLarge, hpBodyTooLarge, hpBadVersion);
@@ -76,6 +95,9 @@ type
   THttpSpan = record
     Off, Len: Integer;        { into the request's buffer }
   end;
+
+  THttpContext = class;
+  THttpHandler = reference to procedure(C: THttpContext);
 
   { A request and its answer. Its request part reads the buffer the request
     was parsed from: valid while the handler runs. }
@@ -88,6 +110,7 @@ type
     FChunkedBody: string;
     FChunked: Boolean;
     FKeepAlive: Boolean;
+    FIsHead: Boolean;
     FPath: string;
     FPathMade: Boolean;
     { the answer }
@@ -97,13 +120,18 @@ type
     FBody: string;
     FAnswered: Boolean;
     FClose: Boolean;
+    FRoute: TRouteContext;
+    { the loop engine }
+    FConn: TLoopConn;
+    FHandler, FAfter: THttpHandler;
+    FDeferred, FOrphan, FInPump: Boolean;
     function Span(const S: THttpSpan): string;
     procedure ResetAnswer;
     procedure SetStatus(Code: Integer);
     procedure SetContentType(const Value: string);
+    function GetRoute: TRouteContext;
   public
-    Route: TRouteContext;      { netrouter's, reused }
-    Data: TObject;             { the program's, per connection }
+    Data: TObject;             { the program's, per connection (freed with it) }
     constructor Create;
     destructor Destroy; override;
     { ---- the request ---- }
@@ -135,6 +163,9 @@ type
     procedure Redirect(Code: Integer; const Location: string);
     { close the connection after this answer }
     procedure Close;
+    { (loop engine) the answer comes later: Complete sends it }
+    procedure Defer;
+    procedure Complete;
     { the whole answer: status line, headers, body (none for HEAD) }
     function Response: string;
     property Status: Integer read FStatus write SetStatus;
@@ -142,13 +173,23 @@ type
     property Answered: Boolean read FAnswered;
     property ResponseBody: string read FBody;
     property Closing: Boolean read FClose;
+    property Deferred: Boolean read FDeferred;
+    { the loop engine's connection (nil on the async engine) }
+    property Conn: TLoopConn read FConn;
+    { netrouter's context, reused (made on first use) }
+    property Route: TRouteContext read GetRoute;
+    { (internal) drops what a request left behind: the engines call it
+      when the connection goes idle }
+    procedure Shrink;
   end;
 
-  THttpHandler = reference to procedure(C: THttpContext);
   THttpRouter = specialize TRouter<THttpContext>;
 
 var
   HttpLimits: THttpLimits;
+  { writes the answer to a request that could not be parsed (C.Status: its
+    code; the connection closes after it); nil: a plain text one }
+  HttpOnBadRequest: THttpHandler;
 
 { One request from P[0..Len): hpOk (Used: its bytes; C holds it), or
   hpIncomplete (more bytes needed), or an error (HttpErrorStatus). }
@@ -171,12 +212,13 @@ function RouterHandler(R: THttpRouter): THttpHandler;
 procedure HttpServeLoop(Server: TNetLoopServer; const Handler: THttpHandler;
                         const After: THttpHandler = nil);
 
-{ Serve the connections of Listener, each as a task on the pool; does not
-  return (run it with Wait, or spawn it). After runs after each answer has
-  been sent, in the connection's task. }
+{ Serve the connections of Listener, each as a task (on the pool); does
+  not return (run it with Wait, or spawn it). After runs after each answer
+  has been sent, in the connection's task. }
 function HttpServeAsync(Listener: TSocket; Handler: THttpHandler;
-                        After: THttpHandler = nil): async;
-{ (a router: HttpServeAsync(listener, RouterHandler(r))) }
+                        After: THttpHandler = nil; OnPool: Boolean = true): async;
+{ (a router: HttpServeAsync(listener, RouterHandler(r))). OnPool false: the
+  connections' tasks stay on the thread that runs HttpServeAsync. }
 
 { the file Name: content type by extension; a directory's index.html; 404 }
 procedure ServeFile(C: THttpContext; const Name: string);
@@ -557,6 +599,8 @@ begin
   if ((P + C.FVersion.Off + 5)^ <> '1') or not ((P + C.FVersion.Off + 7)^ in ['0', '1']) then
     exit(hpBadVersion);
   http11 := (P + C.FVersion.Off + 7)^ = '1';
+  C.FIsHead := (sp1 = 4) and (P^ = 'H') and ((P + 1)^ = 'E') and ((P + 2)^ = 'A') and
+               ((P + 3)^ = 'D');
   { the headers }
   hasCL := false;
   hasTE := false;
@@ -665,14 +709,37 @@ end;
 constructor THttpContext.Create;
 begin
   inherited Create;
-  Route := TRouteContext.Create;
   ResetAnswer;
 end;
 
 destructor THttpContext.Destroy;
 begin
-  Route.Free;
+  Data.Free;
+  FRoute.Free;
   inherited Destroy;
+end;
+
+function THttpContext.GetRoute: TRouteContext;
+begin
+  if FRoute = nil then
+    FRoute := TRouteContext.Create;
+  Result := FRoute;
+end;
+
+procedure THttpContext.Shrink;
+begin
+  { an idle keep-alive connection keeps its context: make it small }
+  FRoute.Free;
+  FRoute := nil;
+  SetLength(FNames, 0);
+  SetLength(FValues, 0);
+  FNHeaders := 0;
+  FBuf := nil;
+  FPath := '';
+  FPathMade := false;
+  FChunkedBody := '';
+  FChunked := false;
+  ResetAnswer;
 end;
 
 procedure THttpContext.ResetAnswer;
@@ -925,24 +992,75 @@ begin
   FClose := true;
 end;
 
-function THttpContext.Response: string;
-var
-  r, conn: string;
-  noBody: Boolean;
+procedure THttpContext.Defer;
 begin
-  if KeepAlive then
-    conn := 'keep-alive'
-  else
-    conn := 'close';
+  if FConn = nil then
+    raise Exception.Create('nethttp: Defer is for the loop engine (HttpServeLoop)');
+  FDeferred := true;
+end;
+
+
+{ S into R at Pos (R long enough) }
+procedure Put(var R: string; var Pos: Integer; const S: string); inline;
+begin
+  if S <> '' then
+  begin
+    Move(S[1], R[Pos], Length(S));
+    Pos := Pos + Length(S);
+  end;
+end;
+
+function THttpContext.Response: string;
+const
+  CT = 'Content-Type: ';
+  CL = 'Content-Length: ';
+  CONN_KEEP = 'Connection: keep-alive'#13#10;
+  CONN_CLOSE = 'Connection: close'#13#10;
+var
+  r, code, text, len, conn: string;
+  noBody, withBody: Boolean;
+  n, pos: Integer;
+begin
+  { one allocation: the length first, then the pieces }
+  if KeepAlive then conn := CONN_KEEP else conn := CONN_CLOSE;
   noBody := (FStatus < 200) or (FStatus = 204) or (FStatus = 304);
-  r := 'HTTP/1.1 ' + IntToStr(FStatus) + ' ' + HttpStatusText(FStatus) + CRLF;
-  if (FContentType <> '') and not noBody then
-    r := r + 'Content-Type: ' + FContentType + CRLF;
+  withBody := not noBody and not FIsHead;
+  code := IntToStr(FStatus);
+  text := HttpStatusText(FStatus);
+  n := 9 + Length(code) + 1 + Length(text) + 2 + Length(conn) + Length(FHeaders) + 2;
   if not noBody then
-    r := r + 'Content-Length: ' + IntToStr(Length(FBody)) + CRLF;
-  r := r + 'Connection: ' + conn + CRLF + FHeaders + CRLF;
-  if not noBody and (Method <> 'HEAD') then
-    r := r + FBody;
+  begin
+    len := IntToStr(Length(FBody));
+    n := n + Length(CL) + Length(len) + 2;
+    if FContentType <> '' then
+      n := n + Length(CT) + Length(FContentType) + 2;
+  end;
+  if withBody then
+    n := n + Length(FBody);
+  SetLength(r, n);
+  pos := 1;
+  Put(r, pos, 'HTTP/1.1 ');
+  Put(r, pos, code);
+  Put(r, pos, ' ');
+  Put(r, pos, text);
+  Put(r, pos, CRLF);
+  if not noBody then
+  begin
+    if FContentType <> '' then
+    begin
+      Put(r, pos, CT);
+      Put(r, pos, FContentType);
+      Put(r, pos, CRLF);
+    end;
+    Put(r, pos, CL);
+    Put(r, pos, len);
+    Put(r, pos, CRLF);
+  end;
+  Put(r, pos, conn);
+  Put(r, pos, FHeaders);
+  Put(r, pos, CRLF);
+  if withBody then
+    Put(r, pos, FBody);
   Result := r;
 end;
 
@@ -1045,66 +1163,232 @@ begin
   end;
 end;
 
+{ ---- a request that cannot be parsed ---- }
+
+procedure BadRequest(Ctx: THttpContext; Res: THttpParse);
+var
+  code: Integer;
+begin
+  code := HttpErrorStatus(Res);
+  Ctx.ResetAnswer;
+  Ctx.FKeepAlive := false;
+  Ctx.FIsHead := false;
+  Ctx.FMethod.Len := 0;
+  Ctx.FTarget.Len := 0;
+  Ctx.FNHeaders := 0;
+  Ctx.FBodySpan.Len := 0;
+  Ctx.FChunked := false;
+  Ctx.FStatus := code;
+  if Assigned(HttpOnBadRequest) then
+    HttpOnBadRequest(Ctx)
+  else
+    Ctx.Text(code, HttpStatusText(code) + #10);
+  Ctx.Close;
+end;
+
 { ---- serving on netloop ---- }
+
+{ every whole request in the connection's input, answered in order; stops
+  at a deferred one (its Complete goes on) }
+procedure LoopPump(Ctx: THttpContext);
+var
+  c: TLoopConn;
+  off, used: Integer;
+  res: THttpParse;
+begin
+  c := Ctx.FConn;
+  off := 0;
+  Ctx.FInPump := true;
+  while not c.Closing do
+  begin
+    res := HttpParseRequest(c.InPtr + off, c.InCount - off, Ctx, used);
+    if res = hpIncomplete then
+      break;
+    if res <> hpOk then
+    begin
+      BadRequest(Ctx, res);
+      c.Write(Ctx.Response);
+      c.Close;
+      if Assigned(Ctx.FAfter) then Ctx.FAfter(Ctx);
+      off := c.InCount;
+      break;
+    end;
+    Ctx.FHandler(Ctx);
+    off := off + used;
+    if Ctx.FDeferred then
+    begin
+      c.Hold := true;          { a peer that closes its side still gets it }
+      break;
+    end;
+    c.Write(Ctx.Response);
+    if Assigned(Ctx.FAfter) then Ctx.FAfter(Ctx);
+    if not Ctx.KeepAlive then
+      c.Close;
+  end;
+  Ctx.FInPump := false;
+  c.Consume(off);
+  if (c.InCount = 0) and not Ctx.FDeferred then
+    if Ctx.Data = nil then
+    begin
+      { idle: no context at all (the next bytes make one) }
+      c.Obj := nil;
+      Ctx.Free;
+    end
+    else
+      Ctx.Shrink;              { (it keeps the program's Data) }
+end;
+
+procedure THttpContext.Complete;
+var
+  c: TLoopConn;
+begin
+  if not FDeferred then
+    exit;
+  FDeferred := false;
+  if FInPump then
+    exit;                      { completed before its handler returned }
+  if FOrphan then
+  begin
+    Free;                      { the connection is gone }
+    exit;
+  end;
+  c := FConn;
+  c.Hold := false;
+  c.Write(Response);
+  if Assigned(FAfter) then FAfter(Self);
+  if not KeepAlive then
+    c.Close
+  else
+    LoopPump(Self);            { the requests that came meanwhile }
+end;
+
+type
+  { what a server's connections are served with (a lambda that passes a
+    captured closure on as an argument would call it instead: p3 bug) }
+  THttpLoopBinding = class
+    Handler, After: THttpHandler;
+  end;
+
+procedure LoopOpen(C: TLoopConn);
+begin
+  C.Obj := nil;                { (a context comes with the first bytes) }
+end;
+
+procedure LoopClose(C: TLoopConn);
+var
+  ctx: THttpContext;
+begin
+  ctx := THttpContext(C.Obj);
+  C.Obj := nil;
+  if ctx = nil then
+    exit;
+  if ctx.FDeferred then
+  begin
+    ctx.FOrphan := true;       { Complete frees it }
+    ctx.FConn := nil;
+  end
+  else
+    ctx.Free;
+end;
+
+procedure LoopData(C: TLoopConn; B: THttpLoopBinding);
+var
+  ctx: THttpContext;
+begin
+  ctx := THttpContext(C.Obj);
+  if ctx = nil then
+  begin
+    if C.InCount = 0 then
+      exit;                    { (the peer closed, idle) }
+    ctx := THttpContext.Create;
+    ctx.FConn := C;
+    ctx.FHandler := B.Handler;
+    ctx.FAfter := B.After;
+    C.Obj := ctx;
+  end;
+  if not ctx.FDeferred then
+    LoopPump(ctx);             { (may free ctx: the connection is idle) }
+end;
 
 procedure HttpServeLoop(Server: TNetLoopServer; const Handler: THttpHandler;
                         const After: THttpHandler = nil);
 var
-  h, a: THttpHandler;
+  b: THttpLoopBinding;
 begin
-  h := Handler;
-  a := After;
-  Server.OnOpen := procedure(C: TLoopConn) => C.Obj := THttpContext.Create;
-  Server.OnClose := procedure(C: TLoopConn) => C.Obj.Free;
-  Server.OnData := procedure(C: TLoopConn) => begin
-    var ctx := THttpContext(C.Obj);
-    var off := 0;
-    var used: Integer;
-    while not C.Closing do
-    begin
-      var res := HttpParseRequest(C.InPtr + off, C.InCount - off, ctx, used);
-      if res = hpIncomplete then
-        break;
-      if res <> hpOk then
-      begin
-        ctx.ResetAnswer;
-        ctx.FKeepAlive := false;
-        ctx.FMethod.Len := 0;
-        ctx.Text(HttpErrorStatus(res), HttpStatusText(HttpErrorStatus(res)) + #10);
-        ctx.Close;
-        C.Write(ctx.Response);
-        C.Close;
-        if Assigned(a) then a(ctx);
-        off := C.InCount;
-        break;
-      end;
-      ctx.ResetAnswer;
-      h(ctx);
-      C.Write(ctx.Response);
-      if not ctx.KeepAlive then
-        C.Close;
-      off := off + used;
-      if Assigned(a) then a(ctx);
-    end;
-    C.Consume(off);
-  end;
+  b := THttpLoopBinding.Create;   { (lives as long as the server's callbacks) }
+  b.Handler := Handler;
+  b.After := After;
+  Server.OnOpen := @LoopOpen;
+  Server.OnClose := @LoopClose;
+  Server.OnData := procedure(C: TLoopConn) => LoopData(C, b);
 end;
 
 { ---- serving on netasync ---- }
+
+const
+  EINTR_ = 4;
+{$IFDEF DARWIN}
+  EAGAIN_ = 35;
+  MSG_NOSIGNAL_ = 0;           { (NetAccept's sockets have SO_NOSIGPIPE) }
+{$ELSE}
+  EAGAIN_ = 11;
+  MSG_NOSIGNAL_ = $4000;
+{$ENDIF}
+
+var
+  c_errno: LongInt; external 'c' name 'errno';
+
+function c_recv(s: LongInt; buf: Pointer; len: Int64; flags: LongInt): Int64; cdecl; external 'c' name 'recv';
+function c_send(s: LongInt; buf: Pointer; len: Int64; flags: LongInt): Int64; cdecl; external 'c' name 'send';
+
+{ every byte, parking the task on EAGAIN (no task per call); false: the
+  peer is gone, or RequestTimeoutMs passed without progress }
+function SendAll(Sock: TSocket; P: PAnsiChar; Len: Integer): Boolean;
+var
+  off: Integer;
+  n: Int64;
+  e, bits: Integer;
+begin
+  off := 0;
+  while off < Len do
+  begin
+    n := c_send(Sock, P + off, Len - off, MSG_NOSIGNAL_);
+    if n > 0 then
+    begin
+      off := off + Integer(n);
+      continue;
+    end;
+    e := c_errno;
+    if (n < 0) and (e = EINTR_) then
+      continue;
+    if (n < 0) and (e = EAGAIN_) then
+    begin
+      bits := NetWaitFdUntil(Sock, false, true, HttpLimits.RequestTimeoutMs);
+      if (bits and NW_TIMEOUT) <> 0 then
+        exit(false);
+      continue;
+    end;
+    exit(false);
+  end;
+  Result := true;
+end;
 
 function HttpServeConn(Sock: TSocket; Handler: THttpHandler; After: THttpHandler): async;
 var
   ctx: THttpContext;
   buf: PAnsiChar;
-  cap, len, used, n, bits: Integer;
+  cap, len, used, e, bits, wait: Integer;
+  n: Int64;
   res: THttpParse;
   resp: string;
+  peerGone: Boolean;
 begin
   NetSetNoDelay(Sock);
   ctx := THttpContext.Create;
-  cap := 16384;
-  GetMem(buf, cap);
+  cap := 0;
+  buf := nil;
   len := 0;
+  peerGone := false;
   try
     while true do
     begin
@@ -1114,39 +1398,60 @@ begin
         res := hpIncomplete;
       if res = hpIncomplete then
       begin
+        if peerGone then
+          exit;                 { (with half a request, or none) }
         if len = cap then
         begin
-          cap := cap * 2;
+          if cap = 0 then cap := 4096 else cap := cap * 2;
           ReallocMem(buf, cap);
         end;
-        if (len = 0) and (HttpLimits.IdleTimeoutMs > 0) then
+        n := c_recv(Sock, buf + len, cap - len, 0);
+        if n > 0 then
         begin
-          bits := NetWaitFdUntil(Sock, true, false, HttpLimits.IdleTimeoutMs);
-          if (bits and NW_TIMEOUT) <> 0 then
-            exit;             { quiet for too long }
+          len := len + Integer(n);
+          continue;
         end;
-        n := await NetReadInto(Sock, buf + len, cap - len);
-        if n <= 0 then
-          exit;               { the client is gone }
-        len := len + n;
+        if n = 0 then
+        begin
+          peerGone := true;
+          continue;
+        end;
+        e := c_errno;
+        if e = EINTR_ then
+          continue;
+        if e <> EAGAIN_ then
+          exit;
+        if len = 0 then
+        begin
+          { idle: no buffer (and a small context) while waiting }
+          FreeMem(buf);
+          buf := nil;
+          cap := 0;
+          ctx.Shrink;
+          wait := HttpLimits.IdleTimeoutMs;
+        end
+        else
+          wait := HttpLimits.RequestTimeoutMs;
+        if wait > 0 then
+          bits := NetWaitFdUntil(Sock, true, false, wait)
+        else
+          bits := NetWaitFd(Sock, true, false);
+        if (bits and NW_TIMEOUT) <> 0 then
+          exit;
         continue;
       end;
       if res <> hpOk then
       begin
-        ctx.ResetAnswer;
-        ctx.FKeepAlive := false;
-        ctx.FMethod.Len := 0;
-        ctx.Text(HttpErrorStatus(res), HttpStatusText(HttpErrorStatus(res)) + #10);
-        ctx.Close;
+        BadRequest(ctx, res);
         resp := ctx.Response;
-        await NetSendPtr(Sock, PChar(resp), Length(resp));
+        SendAll(Sock, PAnsiChar(resp), Length(resp));
         if Assigned(After) then After(ctx);
         exit;
       end;
-      ctx.ResetAnswer;
       Handler(ctx);
       resp := ctx.Response;
-      await NetSendPtr(Sock, PChar(resp), Length(resp));
+      if not SendAll(Sock, PAnsiChar(resp), Length(resp)) then
+        exit;
       if Assigned(After) then After(ctx);
       if not ctx.KeepAlive then
         exit;
@@ -1156,7 +1461,8 @@ begin
         Move((buf + used)^, buf^, len);
     end;
   finally
-    FreeMem(buf);
+    if buf <> nil then
+      FreeMem(buf);
     ctx.Free;
     NetClose(Sock);
   end;
@@ -1173,10 +1479,14 @@ begin
   { a connection that broke: nothing to answer }
 end;
 
-function HttpServeAsync(Listener: TSocket; Handler: THttpHandler; After: THttpHandler): async;
+function HttpServeAsync(Listener: TSocket; Handler: THttpHandler; After: THttpHandler;
+                        OnPool: Boolean): async;
 begin
   while true do
-    detached(HttpDropped) HttpLaunch(await NetAccept(Listener), Handler, After);
+    if OnPool then
+      detached(HttpDropped) HttpLaunch(await NetAccept(Listener), Handler, After)
+    else
+      detached(HttpDropped) HttpServeConn(await NetAccept(Listener), Handler, After);
 end;
 
 initialization
@@ -1184,6 +1494,7 @@ initialization
   HttpLimits.MaxHeaders := 100;
   HttpLimits.MaxBodyBytes := 8 * 1024 * 1024;
   HttpLimits.IdleTimeoutMs := 75000;
+  HttpLimits.RequestTimeoutMs := 30000;
 
 {$ENDIF}
 

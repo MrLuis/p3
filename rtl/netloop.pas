@@ -43,6 +43,23 @@
    Timeouts. With IdleTimeoutMs > 0 a connection without a byte in or out
    for that long is closed (checked each second).
 
+   Answering later. A connection may be written to (Write, Close) from any
+   callback of its loop, not only its own OnData: from a timer, or from the
+   watch of another descriptor (a database socket) whose answer completes a
+   request; the loop sends it when the callback returns. While C.Hold is
+   true, the peer closing its side does not close the connection: an answer
+   still being worked on can be sent (set it back to false when done).
+
+   Loops. Each loop is a TNetLoop, given to OnLoopStart (on its thread,
+   before it serves: open what it needs, a database pool, into L.Data) and
+   OnLoopStop (after its connections are closed). C.Loop is a connection's.
+   On its own thread a program can also have a loop
+     WatchFd(fd, read, write, proc)  call proc when fd is readable/writable
+                                     (a descriptor the program owns: Unwatch
+                                     it before closing it; SetInterest
+                                     changes what is waited for)
+     Every(ms, proc)                 call proc every ms milliseconds
+
    Stop (any thread, also a callback) makes every loop stop accepting and
    reading, send the output still pending (2 s at most), close its
    connections and return; Run returns when all have. *)
@@ -60,12 +77,19 @@ uses sysutils, netasync;
 
 type
   TNetLoopServer = class;
+  TNetLoop = class;
+
+  { what an event names: a connection or a watched descriptor }
+  TLoopItem = class
+  private
+    FKind: Integer;             { 1 connection, 2 watch }
+  end;
 
   { One connection. Its methods are for the callbacks of its loop only. }
-  TLoopConn = class
+  TLoopConn = class(TLoopItem)
   private
     FSock: TSocket;
-    FLoop: TObject;             { its TLoop }
+    FLoop: TNetLoop;
     FIn, FOut: PAnsiChar;
     FInLen, FInCap: Integer;
     FOutLen, FOutCap, FOutSent: Integer;
@@ -74,11 +98,17 @@ type
     FLastIO: Int64;
     FPrev, FNext: TLoopConn;    { its loop's connections }
     FDeadNext: TLoopConn;       { its loop's graveyard }
+    FDirty: Boolean;            { written outside its own callbacks }
+    FDirtyNext: TLoopConn;
     procedure Grow(var Buf: PAnsiChar; var Cap: Integer; Need: Integer);
+    procedure Touched;
   public
     { the program's: anything to keep with the connection }
     Obj: TObject;
     Tag: Pointer;
+    { true: the peer closing its side does not close the connection (an
+      answer is still being worked on) }
+    Hold: Boolean;
     destructor Destroy; override;
     { the bytes received and not consumed yet }
     function InPtr: PAnsiChar;
@@ -94,12 +124,85 @@ type
     procedure Abort;
     function OutPending: Integer;
     function LoopIndex: Integer;
+    property Loop: TNetLoop read FLoop;
     property Socket: TSocket read FSock;
     property PeerClosed: Boolean read FPeerClosed;
     property Closing: Boolean read FClosing;
   end;
 
   TLoopProc = reference to procedure(C: TLoopConn);
+  TNetLoopProc = reference to procedure(L: TNetLoop);
+
+  TLoopWatch = class;
+  TLoopFdProc = reference to procedure(W: TLoopWatch; Readable, Writable: Boolean);
+
+  { A descriptor the program owns, watched by a loop (WatchFd). }
+  TLoopWatch = class(TLoopItem)
+  private
+    FFd: Integer;
+    FLoop: TNetLoop;
+    FRead, FWrite: Boolean;
+    FDone: Boolean;
+    FDeadNext: TLoopWatch;
+    FProc: TLoopFdProc;
+  public
+    Obj: TObject;
+    Tag: Pointer;
+    { what is waited for }
+    procedure SetInterest(Read, Write: Boolean);
+    property Fd: Integer read FFd;
+    property Loop: TNetLoop read FLoop;
+  end;
+
+  TLoopTimer = record
+    Every: Int64;
+    Next: Int64;
+    Proc: TNetLoopProc;
+  end;
+
+  { One event loop (one thread). Its methods are for its own thread. }
+  TNetLoop = class
+  private
+    FServer: TNetLoopServer;
+    FIndex: Integer;
+    FFd: Integer;                   { epoll / kqueue }
+    FListeners: array of TSocket;
+    FHead: TLoopConn;               { its connections }
+    FDead: TLoopConn;               { closed during this turn }
+    FDeadWatches: TLoopWatch;
+    FDirty: TLoopConn;              { written outside their callbacks }
+    FCurrent: TLoopConn;            { whose callback runs }
+    FTimers: array of TLoopTimer;
+    FTid: PtrUInt;
+    FCount: Integer;
+    procedure Watch(C: TLoopConn);
+    procedure Interest(C: TLoopConn);
+    procedure WatchListener(L: TSocket);
+    procedure AcceptAll;
+    procedure ReadSome(C: TLoopConn);
+    procedure Flush(C: TLoopConn);
+    procedure Finish(C: TLoopConn);
+    procedure Bury(C: TLoopConn);
+    procedure Sweep(Now: Int64);
+    procedure FinishDirty;
+    procedure FireWatch(W: TLoopWatch; Readable, Writable: Boolean);
+    procedure RunTimers(Now: Int64);
+    function WaitMs(Now: Int64): Integer;
+    procedure Main;
+  public
+    { the program's: what this loop's callbacks share (OnLoopStart) }
+    Data: TObject;
+    { calls Proc when Fd is readable / writable, on this loop }
+    function WatchFd(Fd: Integer; Read, Write: Boolean; const Proc: TLoopFdProc): TLoopWatch;
+    { stops watching (before the program closes the descriptor); W is
+      freed when this turn ends }
+    procedure Unwatch(W: TLoopWatch);
+    { calls Proc every Ms milliseconds (from the next turn on) }
+    procedure Every(Ms: Integer; const Proc: TNetLoopProc);
+    property Index: Integer read FIndex;
+    property Server: TNetLoopServer read FServer;
+    property ConnCount: Integer read FCount;
+  end;
 
   TNetLoopServer = class
   private
@@ -107,11 +210,13 @@ type
     FHosts: array of string;
     FPorts: array of Integer;
     FListen: array of array of TSocket;   { [loop][listener] }
-    FLoops: array of TObject;
+    FLoops: array of TNetLoop;
     FStop: Integer;                       { 1: Stop was called (read each turn) }
     FRunning: Boolean;
   public
     OnOpen, OnData, OnClose: TLoopProc;
+    { on each loop's thread: before it serves / after it has stopped }
+    OnLoopStart, OnLoopStop: TNetLoopProc;
     { ms without a byte in or out before a connection is closed; 0: never }
     IdleTimeoutMs: Integer;
     { unsent output above which a connection is not read (back-pressure) }
@@ -235,30 +340,6 @@ function kevent(kq: cint; changes: PKEvent; nchanges: cint; events: PKEvent;
                 nevents: cint; timeout: Pointer): cint; cdecl; external 'c';
 {$ENDIF}
 
-{ ---- a loop ---- }
-
-type
-  TLoop = class
-    Server: TNetLoopServer;
-    Index: Integer;
-    Fd: cint;                       { epoll / kqueue }
-    Listeners: array of TSocket;
-    Head: TLoopConn;                { its connections }
-    Dead: TLoopConn;                { closed during this turn }
-    Tid: TPthread;
-    Count: Integer;
-    procedure Watch(C: TLoopConn);
-    procedure Interest(C: TLoopConn);
-    procedure WatchListener(L: TSocket);
-    procedure AcceptAll;
-    procedure ReadSome(C: TLoopConn);
-    procedure Flush(C: TLoopConn);
-    procedure Finish(C: TLoopConn);
-    procedure Bury(C: TLoopConn);
-    procedure Sweep(Now: Int64);
-    procedure Main;
-  end;
-
 { ---- TLoopConn ---- }
 
 destructor TLoopConn.Destroy;
@@ -318,6 +399,16 @@ begin
   FInLen := FInLen - N;
 end;
 
+{ changed outside its own callback: the loop finishes it after this one }
+procedure TLoopConn.Touched;
+begin
+  if FDirty or FClosed or (FLoop.FCurrent = Self) then
+    exit;
+  FDirty := true;
+  FDirtyNext := FLoop.FDirty;
+  FLoop.FDirty := Self;
+end;
+
 procedure TLoopConn.WriteBuf(P: Pointer; N: Integer);
 begin
   if (N <= 0) or FClosed then
@@ -325,6 +416,7 @@ begin
   Grow(FOut, FOutCap, FOutLen + N);
   Move(PAnsiChar(P)^, (FOut + FOutLen)^, N);
   FOutLen := FOutLen + N;
+  Touched;
 end;
 
 procedure TLoopConn.Write(const S: string);
@@ -336,6 +428,7 @@ end;
 procedure TLoopConn.Close;
 begin
   FClosing := true;
+  Touched;
 end;
 
 procedure TLoopConn.Abort;
@@ -343,6 +436,7 @@ begin
   FClosing := true;
   FOutLen := 0;
   FOutSent := 0;
+  Touched;
 end;
 
 function TLoopConn.OutPending: Integer;
@@ -352,12 +446,12 @@ end;
 
 function TLoopConn.LoopIndex: Integer;
 begin
-  Result := TLoop(FLoop).Index;
+  Result := FLoop.FIndex;
 end;
 
-{ ---- TLoop ---- }
+{ ---- TNetLoop ---- }
 
-procedure TLoop.WatchListener(L: TSocket);
+procedure TNetLoop.WatchListener(L: TSocket);
 {$IFDEF LINUX}
 var
   ev: TEpollEvent;
@@ -365,7 +459,7 @@ begin
   FillChar(ev, sizeof(ev), 0);
   ev.events := EPOLLIN;
   ev.data := nil;               { nil: a listener }
-  epoll_ctl(Fd, EPOLL_CTL_ADD, L, @ev);
+  epoll_ctl(FFd, EPOLL_CTL_ADD, L, @ev);
 end;
 {$ELSE}
 var
@@ -376,12 +470,12 @@ begin
   k.filter := EVFILT_READ;
   k.flags := EV_ADD;
   k.udata := nil;
-  kevent(Fd, @k, 1, nil, 0, nil);
+  kevent(FFd, @k, 1, nil, 0, nil);
 end;
 {$ENDIF}
 
 { a new connection: reading on, writing registered but off }
-procedure TLoop.Watch(C: TLoopConn);
+procedure TNetLoop.Watch(C: TLoopConn);
 {$IFDEF LINUX}
 var
   ev: TEpollEvent;
@@ -389,7 +483,7 @@ begin
   FillChar(ev, sizeof(ev), 0);
   ev.events := EPOLLIN;
   ev.data := C;
-  epoll_ctl(Fd, EPOLL_CTL_ADD, C.FSock, @ev);
+  epoll_ctl(FFd, EPOLL_CTL_ADD, C.FSock, @ev);
 end;
 {$ELSE}
 var
@@ -404,13 +498,13 @@ begin
   k[1].filter := EVFILT_WRITE;
   k[1].flags := EV_ADD or EV_DISABLE;
   k[1].udata := C;
-  kevent(Fd, @k[0], 2, nil, 0, nil);
+  kevent(FFd, @k[0], 2, nil, 0, nil);
 end;
 {$ENDIF}
 
 { reading on unless back-pressured (or finished); writing on while output
   is pending - changed only when it changes }
-procedure TLoop.Interest(C: TLoopConn);
+procedure TNetLoop.Interest(C: TLoopConn);
 var
   wantWrite, readOff: Boolean;
 {$IFDEF LINUX}
@@ -421,7 +515,7 @@ var
 {$ENDIF}
 begin
   wantWrite := C.OutPending > 0;
-  readOff := C.FPeerClosed or C.FClosing or (C.OutPending > Server.MaxOutput);
+  readOff := C.FPeerClosed or C.FClosing or (C.OutPending > FServer.MaxOutput);
   if (wantWrite = C.FWriteOn) and (readOff = C.FReadOff) then
     exit;
 {$IFDEF LINUX}
@@ -429,7 +523,7 @@ begin
   ev.data := C;
   if not readOff then ev.events := ev.events or EPOLLIN;
   if wantWrite then ev.events := ev.events or EPOLLOUT;
-  epoll_ctl(Fd, EPOLL_CTL_MOD, C.FSock, @ev);
+  epoll_ctl(FFd, EPOLL_CTL_MOD, C.FSock, @ev);
 {$ELSE}
   FillChar(k, sizeof(k), 0);
   n := 0;
@@ -449,27 +543,27 @@ begin
     k[n].udata := C;
     inc(n);
   end;
-  kevent(Fd, @k[0], n, nil, 0, nil);
+  kevent(FFd, @k[0], n, nil, 0, nil);
 {$ENDIF}
   C.FWriteOn := wantWrite;
   C.FReadOff := readOff;
 end;
 
-procedure TLoop.AcceptAll;
+procedure TNetLoop.AcceptAll;
 var
   i: Integer;
   s: cint;
   c: TLoopConn;
 begin
-  if Server.FStop <> 0 then
+  if FServer.FStop <> 0 then
     exit;
-  for i := 0 to High(Listeners) do
+  for i := 0 to High(FListeners) do
     while true do
     begin
 {$IFDEF LINUX}
-      s := c_accept4(Listeners[i], nil, nil, SOCK_NONBLOCK or SOCK_CLOEXEC);
+      s := c_accept4(FListeners[i], nil, nil, SOCK_NONBLOCK or SOCK_CLOEXEC);
 {$ELSE}
-      s := c_accept(Listeners[i], nil, nil);
+      s := c_accept(FListeners[i], nil, nil);
 {$ENDIF}
       if s < 0 then
         break;                  { EAGAIN: no more now (another loop took it) }
@@ -478,39 +572,48 @@ begin
 {$ENDIF}
       NetSetNoDelay(s);
       c := TLoopConn.Create;
+      c.FKind := 1;
       c.FSock := s;
       c.FLoop := Self;
       c.FLastIO := GetTickCount64;
-      c.FNext := Head;
-      if Head <> nil then Head.FPrev := c;
-      Head := c;
-      inc(Count);
+      c.FNext := FHead;
+      if FHead <> nil then FHead.FPrev := c;
+      FHead := c;
+      inc(FCount);
       Watch(c);
-      if Assigned(Server.OnOpen) then
-        Server.OnOpen(c);
+      if Assigned(FServer.OnOpen) then
+      begin
+        FCurrent := c;
+        FServer.OnOpen(c);
+        FCurrent := nil;
+      end;
       if c.FClosing then
         Finish(c);
     end;
 end;
 
 { c is done: its callbacks are over, its record goes when this turn ends }
-procedure TLoop.Bury(C: TLoopConn);
+procedure TNetLoop.Bury(C: TLoopConn);
 begin
   if C.FClosed then
     exit;
   C.FClosed := true;
   c_close(C.FSock);             { (drops its registrations) }
-  if C.FPrev <> nil then C.FPrev.FNext := C.FNext else Head := C.FNext;
+  if C.FPrev <> nil then C.FPrev.FNext := C.FNext else FHead := C.FNext;
   if C.FNext <> nil then C.FNext.FPrev := C.FPrev;
-  dec(Count);
-  if Assigned(Server.OnClose) then
-    Server.OnClose(C);
-  C.FDeadNext := Dead;
-  Dead := C;
+  dec(FCount);
+  if Assigned(FServer.OnClose) then
+  begin
+    FCurrent := C;
+    FServer.OnClose(C);
+    FCurrent := nil;
+  end;
+  C.FDeadNext := FDead;
+  FDead := C;
 end;
 
 { after a callback: send, then close it if it is finished }
-procedure TLoop.Finish(C: TLoopConn);
+procedure TNetLoop.Finish(C: TLoopConn);
 begin
   if C.FClosed then
     exit;
@@ -518,13 +621,13 @@ begin
     Flush(C);
   if C.FClosed then
     exit;
-  if (C.FClosing or C.FPeerClosed) and (C.OutPending = 0) then
+  if (C.FClosing or (C.FPeerClosed and not C.Hold)) and (C.OutPending = 0) then
     Bury(C)
   else
     Interest(C);
 end;
 
-procedure TLoop.Flush(C: TLoopConn);
+procedure TNetLoop.Flush(C: TLoopConn);
 var
   n: Int64;
 begin
@@ -559,7 +662,7 @@ begin
   end;
 end;
 
-procedure TLoop.ReadSome(C: TLoopConn);
+procedure TNetLoop.ReadSome(C: TLoopConn);
 var
   n: Int64;
   got: Boolean;
@@ -574,7 +677,7 @@ begin
       C.FInLen := C.FInLen + n;
       C.FLastIO := GetTickCount64;
       got := true;
-      if C.FInLen > Server.MaxInput then
+      if C.FInLen > FServer.MaxInput then
       begin
         C.Abort;
         Finish(C);
@@ -597,22 +700,26 @@ begin
     C.FIn := nil;
     C.FInCap := 0;
   end;
-  if got and Assigned(Server.OnData) and not C.FClosed then
-    Server.OnData(C);
+  if got and Assigned(FServer.OnData) and not C.FClosed then
+  begin
+    FCurrent := C;
+    FServer.OnData(C);
+    FCurrent := nil;
+  end;
   Finish(C);
 end;
 
-procedure TLoop.Sweep(Now: Int64);
+procedure TNetLoop.Sweep(Now: Int64);
 var
   c, nxt: TLoopConn;
 begin
-  if Server.IdleTimeoutMs <= 0 then
+  if FServer.IdleTimeoutMs <= 0 then
     exit;
-  c := Head;
+  c := FHead;
   while c <> nil do
   begin
     nxt := c.FNext;
-    if Now - c.FLastIO > Server.IdleTimeoutMs then
+    if Now - c.FLastIO > FServer.IdleTimeoutMs then
     begin
       c.Abort;
       Bury(c);
@@ -621,13 +728,152 @@ begin
   end;
 end;
 
-procedure TLoop.Main;
+procedure TNetLoop.FinishDirty;
+var
+  c: TLoopConn;
+begin
+  while FDirty <> nil do
+  begin
+    c := FDirty;
+    FDirty := c.FDirtyNext;
+    c.FDirty := false;
+    c.FDirtyNext := nil;
+    Finish(c);
+  end;
+end;
+
+{ ---- watched descriptors ---- }
+
+procedure SetWatch(L: TNetLoop; W: TLoopWatch; Op: Integer);
+{$IFDEF LINUX}
+var
+  ev: TEpollEvent;
+begin
+  FillChar(ev, sizeof(ev), 0);
+  ev.data := W;
+  if W.FRead then ev.events := ev.events or EPOLLIN;
+  if W.FWrite then ev.events := ev.events or EPOLLOUT;
+  epoll_ctl(L.FFd, Op, W.FFd, @ev);
+end;
+{$ELSE}
+var
+  k: array[0..1] of TKEvent;
+begin
+  FillChar(k, sizeof(k), 0);
+  k[0].ident := W.FFd;
+  k[0].filter := EVFILT_READ;
+  k[0].udata := W;
+  k[1].ident := W.FFd;
+  k[1].filter := EVFILT_WRITE;
+  k[1].udata := W;
+  if Op = 2 then
+  begin
+    k[0].flags := EV_DELETE;
+    k[1].flags := EV_DELETE;
+  end
+  else
+  begin
+    if W.FRead then k[0].flags := EV_ADD or EV_ENABLE else k[0].flags := EV_ADD or EV_DISABLE;
+    if W.FWrite then k[1].flags := EV_ADD or EV_ENABLE else k[1].flags := EV_ADD or EV_DISABLE;
+  end;
+  kevent(L.FFd, @k[0], 2, nil, 0, nil);
+end;
+{$ENDIF}
+
+function TNetLoop.WatchFd(Fd: Integer; Read, Write: Boolean; const Proc: TLoopFdProc): TLoopWatch;
+var
+  w: TLoopWatch;
+begin
+  w := TLoopWatch.Create;
+  w.FKind := 2;
+  w.FFd := Fd;
+  w.FLoop := Self;
+  w.FRead := Read;
+  w.FWrite := Write;
+  w.FProc := Proc;
+  SetWatch(Self, w, 1);          { (EPOLL_CTL_ADD) }
+  Result := w;
+end;
+
+procedure TLoopWatch.SetInterest(Read, Write: Boolean);
+begin
+  if FDone or ((Read = FRead) and (Write = FWrite)) then
+    exit;
+  FRead := Read;
+  FWrite := Write;
+  SetWatch(FLoop, Self, 3);      { (EPOLL_CTL_MOD; kqueue: EV_ADD again) }
+end;
+
+procedure TNetLoop.Unwatch(W: TLoopWatch);
+begin
+  if (W = nil) or W.FDone then
+    exit;
+  W.FDone := true;
+  SetWatch(Self, W, 2);          { (EPOLL_CTL_DEL / EV_DELETE) }
+  W.FDeadNext := FDeadWatches;
+  FDeadWatches := W;
+end;
+
+procedure TNetLoop.FireWatch(W: TLoopWatch; Readable, Writable: Boolean);
+begin
+  if W.FDone then
+    exit;                        { unwatched earlier this turn }
+  W.FProc(W, Readable and W.FRead, Writable and W.FWrite);
+  FinishDirty;
+end;
+
+{ ---- timers ---- }
+
+procedure TNetLoop.Every(Ms: Integer; const Proc: TNetLoopProc);
+var
+  n: Integer;
+begin
+  if Ms < 1 then Ms := 1;
+  n := Length(FTimers);
+  SetLength(FTimers, n + 1);
+  FTimers[n].Every := Ms;
+  FTimers[n].Next := GetTickCount64 + Ms;
+  FTimers[n].Proc := Proc;
+end;
+
+procedure TNetLoop.RunTimers(Now: Int64);
+var
+  i: Integer;
+  p: TNetLoopProc;
+begin
+  for i := 0 to High(FTimers) do
+    if Now >= FTimers[i].Next then
+    begin
+      FTimers[i].Next := Now + FTimers[i].Every;
+      p := FTimers[i].Proc;
+      p(Self);
+      FinishDirty;
+    end;
+end;
+
+{ how long the next wait may be: 250 ms, or less for a timer due sooner }
+function TNetLoop.WaitMs(Now: Int64): Integer;
+var
+  i: Integer;
+  d: Int64;
+begin
+  Result := 250;
+  for i := 0 to High(FTimers) do
+  begin
+    d := FTimers[i].Next - Now;
+    if d < 0 then d := 0;
+    if d < Result then Result := Integer(d);
+  end;
+end;
+
+procedure TNetLoop.Main;
 const
   MAXEV = 256;
 var
   i, n: Integer;
   data: Pointer;
   c, nxt: TLoopConn;
+  w: TLoopWatch;
   lastSweep, stopAt, now: Int64;
   stopping: Boolean;
 {$IFDEF LINUX}
@@ -638,19 +884,21 @@ var
   ts: TTimespec;
 {$ENDIF}
 begin
-  for i := 0 to High(Listeners) do
-    WatchListener(Listeners[i]);
+  if Assigned(FServer.OnLoopStart) then
+    FServer.OnLoopStart(Self);
+  for i := 0 to High(FListeners) do
+    WatchListener(FListeners[i]);
   lastSweep := GetTickCount64;
   stopping := false;
   stopAt := 0;
   while true do
   begin
 {$IFDEF LINUX}
-    n := epoll_wait(Fd, @evs[0], MAXEV, 250);
+    n := epoll_wait(FFd, @evs[0], MAXEV, WaitMs(GetTickCount64));
 {$ELSE}
     ts.sec := 0;
-    ts.nsec := 250000000;
-    n := kevent(Fd, nil, 0, @evs[0], MAXEV, @ts);
+    ts.nsec := Int64(WaitMs(GetTickCount64)) * 1000000;
+    n := kevent(FFd, nil, 0, @evs[0], MAXEV, @ts);
 {$ENDIF}
     if n < 0 then
       n := 0;                   { EINTR }
@@ -665,6 +913,18 @@ begin
       if data = nil then
       begin
         AcceptAll;
+        FinishDirty;
+        continue;
+      end;
+      if TLoopItem(data).FKind = 2 then
+      begin
+{$IFDEF LINUX}
+        FireWatch(TLoopWatch(data), (bits and (EPOLLIN or EPOLLERR or EPOLLHUP)) <> 0,
+                  (bits and (EPOLLOUT or EPOLLERR or EPOLLHUP)) <> 0);
+{$ELSE}
+        if (evs[i].flags and EV_ERROR) = 0 then
+          FireWatch(TLoopWatch(data), evs[i].filter = EVFILT_READ, evs[i].filter = EVFILT_WRITE);
+{$ENDIF}
         continue;
       end;
       c := TLoopConn(data);
@@ -674,10 +934,16 @@ begin
       if (bits and EPOLLOUT) <> 0 then
         Finish(c);
       if not c.FClosed and ((bits and (EPOLLIN or EPOLLERR or EPOLLHUP)) <> 0) then
-        if c.FReadOff then
-          Finish(c)
+        if not c.FReadOff then
+          ReadSome(c)
+        else if (bits and (EPOLLERR or EPOLLHUP)) <> 0 then
+        begin
+          c.Abort;              { broken both ways (and reported until closed) }
+          Bury(c);
+        end
         else
-          ReadSome(c);
+          Finish(c);
+      FinishDirty;
 {$ELSE}
       if (evs[i].flags and EV_ERROR) <> 0 then
         continue;
@@ -685,20 +951,22 @@ begin
         Finish(c)
       else if not c.FReadOff then
         ReadSome(c);
+      FinishDirty;
 {$ENDIF}
     end;
     now := GetTickCount64;
+    RunTimers(now);
     if now - lastSweep >= 1000 then
     begin
       Sweep(now);
       lastSweep := now;
     end;
     { Stop: no more reading; out with what is pending, then done }
-    if not stopping and (Server.FStop <> 0) then
+    if not stopping and (FServer.FStop <> 0) then
     begin
       stopping := true;
       stopAt := now + 2000;
-      c := Head;
+      c := FHead;
       while c <> nil do
       begin
         nxt := c.FNext;
@@ -707,34 +975,49 @@ begin
         c := nxt;
       end;
     end;
+    FinishDirty;
     { the graveyard: no event of a later turn names them }
-    while Dead <> nil do
+    while FDead <> nil do
     begin
-      c := Dead;
-      Dead := c.FDeadNext;
+      c := FDead;
+      FDead := c.FDeadNext;
       c.Free;
     end;
-    if stopping and ((Head = nil) or (now >= stopAt)) then
+    while FDeadWatches <> nil do
+    begin
+      w := FDeadWatches;
+      FDeadWatches := w.FDeadNext;
+      w.Free;
+    end;
+    if stopping and ((FHead = nil) or (now >= stopAt)) then
       break;
   end;
   { whatever is left }
-  while Head <> nil do
+  while FHead <> nil do
   begin
-    Head.Abort;
-    Bury(Head);
+    FHead.Abort;
+    Bury(FHead);
   end;
-  while Dead <> nil do
+  while FDead <> nil do
   begin
-    c := Dead;
-    Dead := c.FDeadNext;
+    c := FDead;
+    FDead := c.FDeadNext;
     c.Free;
   end;
-  c_close(Fd);
+  if Assigned(FServer.OnLoopStop) then
+    FServer.OnLoopStop(Self);
+  while FDeadWatches <> nil do
+  begin
+    w := FDeadWatches;
+    FDeadWatches := w.FDeadNext;
+    w.Free;
+  end;
+  c_close(FFd);
 end;
 
 function LoopThread(Arg: Pointer): Pointer; cdecl;
 begin
-  TLoop(Arg).Main;
+  TNetLoop(Arg).Main;
   Result := nil;
 end;
 
@@ -819,7 +1102,7 @@ end;
 procedure TNetLoopServer.Run;
 var
   i: Integer;
-  l: TLoop;
+  l: TNetLoop;
 begin
   if FRunning then
     raise ENetError.Create('netloop: Run while running');
@@ -830,27 +1113,27 @@ begin
   SetLength(FLoops, FThreads);
   for i := 0 to FThreads - 1 do
   begin
-    l := TLoop.Create;
-    l.Server := Self;
-    l.Index := i;
-    l.Listeners := FListen[i];
+    l := TNetLoop.Create;
+    l.FServer := Self;
+    l.FIndex := i;
+    l.FListeners := FListen[i];
 {$IFDEF LINUX}
-    l.Fd := epoll_create1(0);
+    l.FFd := epoll_create1(0);
 {$ELSE}
-    l.Fd := kqueue;
+    l.FFd := kqueue;
 {$ENDIF}
-    if l.Fd < 0 then
+    if l.FFd < 0 then
       raise ENetError.Create('netloop: no event queue');
     FLoops[i] := l;
   end;
   if FThreads > 1 then
     pas_start_threads;
   for i := 1 to FThreads - 1 do
-    if pthread_create(TLoop(FLoops[i]).Tid, nil, @LoopThread, FLoops[i]) <> 0 then
+    if pthread_create(FLoops[i].FTid, nil, @LoopThread, FLoops[i]) <> 0 then
       raise ENetError.Create('netloop: cannot start a loop thread');
-  TLoop(FLoops[0]).Main;
+  FLoops[0].Main;
   for i := 1 to FThreads - 1 do
-    pthread_join(TLoop(FLoops[i]).Tid, nil);
+    pthread_join(FLoops[i].FTid, nil);
   for i := 0 to FThreads - 1 do
     FLoops[i].Free;
   SetLength(FLoops, 0);

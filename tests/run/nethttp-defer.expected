@@ -1,0 +1,7 @@
+timer: timer 1
+pipe: pipe 1
+sync: sync
+pipelined: timer a | now | pipe b | sync | timer c
+half-closed: timer h
+after 20 clients left: now
+contexts freed: 26 (of 26 connections)
