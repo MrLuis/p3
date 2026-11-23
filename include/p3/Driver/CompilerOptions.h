@@ -20,6 +20,7 @@ enum class Action {
   EmitTokens, ///< --emit-tokens : dump lexer output
   EmitAST,    ///< --emit-ast    : dump the parsed AST
   EmitParseTree, ///< --emit-parse-tree : the AST without Sema, with units
+  EmitModel,  ///< --emit-model=ATTR : the generator model of the types marked [ATTR]
   EmitLLVM,   ///< --emit-llvm   : textual LLVM IR (.ll)
   EmitAsm,    ///< -S            : target assembly (.s)
   EmitObj,    ///< -c            : object file (.o)
@@ -46,6 +47,13 @@ struct CompilerOptions {
   std::vector<std::string> LibraryDirs; ///< -L: passed to the linker
   std::vector<std::string> Libraries;   ///< -l: passed to the linker
   std::vector<std::string> Defines;     ///< -d: conditional symbols
+  /// --generator=FILE: source generators (programs starting `generator Name
+  /// for Attr;`), built and run before the compilation, which then includes
+  /// the code they write into --generated-dir (default: gen next to the input).
+  std::vector<std::string> Generators;
+  std::string GeneratedDir;
+  unsigned GeneratorTimeout = 30; ///< seconds one generator may run
+  std::string ModelAttr;          ///< --emit-model's attribute
   /// -fseparate-units: the program's units were compiled separately (with
   /// -c, to <unit>.o next to their sources); link those objects.
   bool SeparateUnits = false;

@@ -102,7 +102,10 @@ void Lexer::enterPendingInclude() {
   std::string Found;
   for (const std::string &Dir : Dirs) {
     llvm::SmallString<256> Path(Dir);
-    llvm::sys::path::append(Path, Name);
+    if (llvm::sys::path::is_absolute(Name)) // (generated code is included so)
+      Path = Name;
+    else
+      llvm::sys::path::append(Path, Name);
     if (llvm::sys::fs::is_regular_file(Path)) {
       Found = std::string(Path);
       break;

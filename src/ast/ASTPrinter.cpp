@@ -728,6 +728,8 @@ public:
 
   void printProgram(ProgramDecl &P) {
     line("ProgramDecl '") << P.getName().Name << '\'';
+    if (P.isGenerator())
+      OS << " generator '" << P.getGeneratorFor().Name << '\'';
     loc(P.getLocation());
     IndentScope S(Indent);
     for (const Identifier &Param : P.getParams()) {

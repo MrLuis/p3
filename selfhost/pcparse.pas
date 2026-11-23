@@ -669,12 +669,27 @@ var
   params, usesList: TPtrList;
   b: PBlock;
   p: PDecl;
+  genFor: TIdent;
 begin
   programLoc := tok.loc;
   name := noIdent;
+  genFor := noIdent;
   listInit(params);
   listInit(usesList);
-  if not tryConsume(tkKwProgram) then
+  if isIdentifierNamed('generator') and (peekKind = tkIdentifier) then
+  begin
+    { generator Name for Attr;  (a source generator, see unit p3gen) }
+    consumeToken;
+    name := makeIdentifier(tok);
+    consumeToken;
+    if expect(tkKwFor, 'after the generator''s name') then
+      expectIdentifier(genFor, 'attribute name after ''for''');
+    if not expect(tkSemi, 'after generator heading') then
+      skipUntil([tkSemi, tkKwBegin, tkKwVar, tkKwConst, tkKwType, tkKwLabel,
+                 tkKwProcedure, tkKwFunction]);
+    tryConsume(tkSemi);
+  end
+  else if not tryConsume(tkKwProgram) then
   begin
     diagError(tok.loc, 'expected ''program''');
     { recover by looking for the program's block }
@@ -746,6 +761,7 @@ begin
   p^.progParams := params;
   p^.progUses := usesList;
   p^.progBlock := b;
+  p^.generatorFor := genFor;
   parseProgramHere := p;
 end;
 
@@ -771,7 +787,7 @@ end;
 function parseUnitHere: PDecl;
 var
   initNullSafe: boolean;
-  unitLoc, initLoc, endLoc: TLoc;
+  unitLoc, initLoc, endLoc, implLoc, declsEndLoc: TLoc;
   name: TIdent;
   ifaceUses, implUses, ifaceDecls, implDecls, init, none: TPtrList;
   empty, body: PNode;
@@ -798,12 +814,14 @@ begin
   listInit(ifaceDecls);
   parseDeclarations(ifaceDecls, true);
 
+  implLoc := tok.loc;
   if not expect(tkKwImplementation, 'after the interface part') then
     exit;
   if tok.kind = tkKwUses then
     parseUsesClause(implUses);
   listInit(implDecls);
   parseDeclarations(implDecls, false);
+  declsEndLoc := tok.loc;
 
   { optional initialization part }
   listInit(init);
@@ -834,6 +852,8 @@ begin
   u^.iface := newBlock(ifaceDecls, empty);
   u^.impl := newBlock(implDecls, body);
   u^.impl^.nullSafe := initNullSafe;
+  u^.implLoc := implLoc;
+  u^.declsEndLoc := declsEndLoc;
   parseUnitHere := u;
 end;
 

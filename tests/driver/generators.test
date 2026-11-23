@@ -1,0 +1,31 @@
+; Source generators: p3 --generator=FILE builds and runs a generator (a
+; program that starts `generator Name for Attr;`, unit p3gen), which reads
+; the model of the types marked [Attr] and writes Pascal source. The
+; compiler includes it in the unit that declares the type: the member
+; declarations go in a `partial` half, the method bodies after the unit's
+; declarations.
+; RUN: %p3 --mode=objfpc --generator=%S/Inputs/generators/jsongen.pas --generated-dir=%t.gen %S/Inputs/generators/main.pas -o %t
+; RUN: %t | FileCheck --check-prefix=OUT %s
+; RUN: FileCheck --check-prefix=INTF %s < %t.gen/customer.intf.inc
+; RUN: FileCheck --check-prefix=IMPL %s < %t.gen/customer.impl.inc
+; RUN: not %p3 --mode=objfpc --generator=%S/Inputs/generators/jsongen.pas --generated-dir=%t.bad %S/Inputs/generators/mainbad.pas -o %t.bad.exe 2>&1 | FileCheck --check-prefix=ERR %s
+; RUN: %p3 --mode=objfpc --emit-model=serializable %S/Inputs/generators/model.pas | FileCheck --check-prefix=DUMP %s
+; RUN: %p3 --mode=objfpc --emit-model=none %S/Inputs/generators/model.pas | count 0
+; RUN: not %p3 --mode=objfpc --generator=%S/Inputs/generators/main.pas %S/Inputs/generators/main.pas -o %t.x 2>&1 | FileCheck --check-prefix=NOTGEN %s
+; RUN: not %p3 --mode=objfpc --generator=%S/Inputs/generators/nonexistent.pas %S/Inputs/generators/main.pas -o %t.x 2>&1 | FileCheck --check-prefix=MISSING %s
+; RUN: %p3 --mode=objfpc --emit-ast %S/Inputs/generators/jsongen.pas | FileCheck --check-prefix=AST %s
+; OUT: {"Id": 7, "Name": "Ada", "Active": true}
+; INTF: type
+; INTF-NEXT: TCustomer = partial record
+; INTF-NEXT: function ToJson: string;
+; INTF-NEXT: end;
+; IMPL: function TCustomer.ToJson: string;
+; IMPL: '"Id": ' + IntToStr(Id)
+; IMPL-NOT: Cache
+; ERR: bad.pas:8:5: error: type TObject cannot be serialized, mark the field [Skip]
+; DUMP: p3model{{.}}1
+; DUMP: type{{.}}TCustomer{{.}}record
+; DUMP: arg{{.}}ident{{.}}Format.Json
+; NOTGEN: is not a source generator
+; MISSING: cannot open generator
+; AST: ProgramDecl 'jsongenerator' generator 'serializable'

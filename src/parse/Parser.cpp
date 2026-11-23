@@ -622,9 +622,22 @@ bool Parser::isIdentifierNamed(llvm::StringRef Name) const {
 ProgramDecl *Parser::parseProgram() {
   SourceLocation ProgramLoc = Tok.getLocation();
   Identifier Name;
+  Identifier GeneratorFor;
   llvm::SmallVector<Identifier, 4> Params;
 
-  if (!tryConsume(tok::kw_program)) {
+  // generator Name for Attr;  (a source generator, see unit p3gen)
+  if (isIdentifierNamed("generator") && peekToken().is(tok::identifier)) {
+    consumeToken();
+    Name = makeIdentifier(Tok);
+    consumeToken();
+    if (expect(tok::kw_for, "after the generator's name"))
+      expectIdentifier(GeneratorFor, "attribute name after 'for'");
+    if (!expect(tok::semi, "after generator heading"))
+      skipUntil({tok::semi, tok::kw_begin, tok::kw_var, tok::kw_const,
+                 tok::kw_type, tok::kw_label, tok::kw_procedure,
+                 tok::kw_function});
+    tryConsume(tok::semi);
+  } else if (!tryConsume(tok::kw_program)) {
     Diags.error(Tok.getLocation(), "expected 'program'");
     // Recover by looking for the program's block.
     while (Tok.isNot(tok::eof) && !Tok.is(tok::kw_begin) &&
@@ -684,9 +697,12 @@ ProgramDecl *Parser::parseProgram() {
     }
   }
 
-  return Ctx.create<ProgramDecl>(ProgramLoc, Name,
-                                 Ctx.copyArray<Identifier>(Params), B,
-                                 Ctx.copyArray<Identifier>(Uses));
+  auto *PD = Ctx.create<ProgramDecl>(ProgramLoc, Name,
+                                     Ctx.copyArray<Identifier>(Params), B,
+                                     Ctx.copyArray<Identifier>(Uses));
+  if (GeneratorFor.isValid())
+    PD->setGeneratorFor(GeneratorFor);
+  return PD;
 }
 
 // uses = "uses" ident { "," ident } ";" .
@@ -725,12 +741,14 @@ UnitDecl *Parser::parseUnit() {
   llvm::SmallVector<Decl *, 16> IfaceDecls;
   parseDeclarations(IfaceDecls, /*InInterface=*/true);
 
+  SourceLocation ImplementationLoc = Tok.getLocation();
   if (!expect(tok::kw_implementation, "after the interface part"))
     return nullptr;
   if (Tok.is(tok::kw_uses))
     parseUsesClause(ImplUses);
   llvm::SmallVector<Decl *, 16> ImplDecls;
   parseDeclarations(ImplDecls, /*InInterface=*/false);
+  SourceLocation DeclsEnd = Tok.getLocation();
 
   // Optional initialization part.
   llvm::SmallVector<Stmt *, 8> Init;
@@ -752,10 +770,12 @@ UnitDecl *Parser::parseUnit() {
                                         Ctx.copyArray<Stmt *>(Init));
   auto *ImplBlock = Ctx.create<Block>(Ctx.copyArray<Decl *>(ImplDecls), Body);
   ImplBlock->setNullSafe(InitNullSafe);
-  return Ctx.create<UnitDecl>(
+  auto *UD = Ctx.create<UnitDecl>(
       UnitLoc, Name, Ctx.copyArray<Identifier>(IfaceUses),
       Ctx.create<Block>(Ctx.copyArray<Decl *>(IfaceDecls), Empty),
       Ctx.copyArray<Identifier>(ImplUses), ImplBlock);
+  UD->setSplicePoints(ImplementationLoc, DeclsEnd);
+  return UD;
 }
 
 //===----------------------------------------------------------------------===//

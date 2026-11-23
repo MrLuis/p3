@@ -535,6 +535,13 @@ type
     { T = partial record|class: merged into the first declaration of T by the
       parser }
     isPartial: boolean;
+    { generator Name for Attr;  (a program): the attribute's name, else no
+      name }
+    generatorFor: TIdent;
+    { a unit: where source generators splice their code in: the
+      implementation keyword, and the token ending the implementation's
+      declarations }
+    implLoc, declsEndLoc: TLoc;
     { Sema: referenced anywhere; a function whose result is assigned; the
       number of labels in this routine targeted by non-local gotos }
     isUsed, resultAssigned: boolean;

@@ -1854,16 +1854,24 @@ begin
   end;
   { next to the including file, then the -I directories }
   found := '';
-  candidate := pathJoin(pathDirName(smFileName(lx.fid)), name);
-  if sysIsRegularFile(candidate) then
-    found := candidate;
-  i := 0;
-  while (found = '') and (i < includeDirs.count) do
+  if (length(name) > 0) and (name[1] = '/') then { (generated code is included so) }
   begin
-    candidate := pathJoin(nameStr(PName(listGet(includeDirs, i))), name);
+    if sysIsRegularFile(name) then
+      found := name;
+  end
+  else
+  begin
+    candidate := pathJoin(pathDirName(smFileName(lx.fid)), name);
     if sysIsRegularFile(candidate) then
       found := candidate;
-    i := i + 1;
+    i := 0;
+    while (found = '') and (i < includeDirs.count) do
+    begin
+      candidate := pathJoin(nameStr(PName(listGet(includeDirs, i))), name);
+      if sysIsRegularFile(candidate) then
+        found := candidate;
+      i := i + 1;
+    end;
   end;
   if found = '' then
   begin

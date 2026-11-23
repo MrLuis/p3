@@ -1,0 +1,20 @@
+; Source generators in the self-hosted compiler: the same model, the same
+; generated code, the same diagnostics as the C++ p3's (tests/driver/
+; generators.test has the scenario).
+; REQUIRES: selfhost-build
+; RUN: %p3 --mode=tp %selfhost-flags -I %S/../../selfhost %S/../../selfhost/p3.pas -o %t.p3
+; RUN: %p3 --mode=objfpc --generator=%S/../driver/Inputs/generators/jsongen.pas --generated-dir=%t.cpp %S/../driver/Inputs/generators/main.pas -o %t.cpp.exe
+; RUN: env P3_RUNTIME_LIB=%p3-runtime-lib %t.p3 --mode=objfpc --generator=%S/../driver/Inputs/generators/jsongen.pas --generated-dir=%t.self %S/../driver/Inputs/generators/main.pas -o %t.self.exe
+; RUN: %t.self.exe | FileCheck %s
+; RUN: diff %t.cpp/customer.intf.inc %t.self/customer.intf.inc
+; RUN: diff %t.cpp/customer.impl.inc %t.self/customer.impl.inc
+; RUN: diff %t.cpp/customer.JsonGenerator.model %t.self/customer.JsonGenerator.model
+; RUN: %p3 --mode=objfpc --emit-model=serializable %S/../driver/Inputs/generators/model.pas > %t.model.cpp
+; RUN: %t.p3 --mode=objfpc --emit-model=serializable %S/../driver/Inputs/generators/model.pas > %t.model.self
+; RUN: diff %t.model.cpp %t.model.self
+; RUN: not env P3_RUNTIME_LIB=%p3-runtime-lib %t.p3 --mode=objfpc --generator=%S/../driver/Inputs/generators/jsongen.pas --generated-dir=%t.bad %S/../driver/Inputs/generators/mainbad.pas -o %t.bad.exe 2>&1 | FileCheck --check-prefix=ERR %s
+; RUN: %p3 --mode=objfpc --emit-ast %S/../driver/Inputs/generators/jsongen.pas > %t.ast.cpp
+; RUN: %t.p3 --mode=objfpc --emit-ast %S/../driver/Inputs/generators/jsongen.pas > %t.ast.self
+; RUN: diff %t.ast.cpp %t.ast.self
+; CHECK: {"Id": 7, "Name": "Ada", "Active": true}
+; ERR: bad.pas:8:5: error: type TObject cannot be serialized, mark the field [Skip]

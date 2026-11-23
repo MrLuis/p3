@@ -2450,7 +2450,16 @@ public:
   llvm::ArrayRef<Identifier> getParams() const { return Params; }
   llvm::ArrayRef<Identifier> getUses() const { return Uses; }
   Block *getBlock() const { return Body; }
+  /// `generator Name for Attr;` instead of `program Name;`: a source
+  /// generator for the types marked [Attr], an ordinary program otherwise
+  /// (its main block calls RunGenerator, unit p3gen).
+  const Identifier &getGeneratorFor() const { return GeneratorFor; }
+  void setGeneratorFor(Identifier A) { GeneratorFor = A; }
+  bool isGenerator() const { return GeneratorFor.isValid(); }
   static bool classof(const Decl *D) { return D->getKind() == DK_Program; }
+
+private:
+  Identifier GeneratorFor;
 };
 
 /// unit Name; interface [uses ...] decls implementation [uses ...] decls
@@ -2475,7 +2484,20 @@ public:
   }
   Block *getInterface() const { return Interface; }
   Block *getImplementation() const { return Implementation; }
+  /// Where source generators splice their output in: the `implementation`
+  /// keyword (the generated type halves go before it) and the token that
+  /// ends the implementation's declarations (`initialization`, `begin` or
+  /// the final `end`: the generated method bodies go before it).
+  SourceLocation getImplementationLoc() const { return ImplementationLoc; }
+  SourceLocation getImplementationDeclsEnd() const { return DeclsEnd; }
+  void setSplicePoints(SourceLocation Impl, SourceLocation End) {
+    ImplementationLoc = Impl;
+    DeclsEnd = End;
+  }
   static bool classof(const Decl *D) { return D->getKind() == DK_Unit; }
+
+private:
+  SourceLocation ImplementationLoc, DeclsEnd;
 };
 
 inline FieldDecl *FieldExpr::getFieldDecl() const {

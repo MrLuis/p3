@@ -43,6 +43,7 @@ const char *p3::getActionName(Action A) {
   case Action::EmitTokens: return "--emit-tokens";
   case Action::EmitAST:    return "--emit-ast";
   case Action::EmitParseTree: return "--emit-parse-tree";
+  case Action::EmitModel:  return "--emit-model";
   case Action::EmitLLVM:   return "--emit-llvm";
   case Action::EmitAsm:    return "-S";
   case Action::EmitObj:    return "-c";
@@ -53,7 +54,7 @@ const char *p3::getActionName(Action A) {
 
 std::string p3::getDefaultOutputFile(const CompilerOptions &Opts) {
   if (Opts.Act == Action::EmitTokens || Opts.Act == Action::EmitAST ||
-      Opts.Act == Action::EmitParseTree)
+      Opts.Act == Action::EmitParseTree || Opts.Act == Action::EmitModel)
     return "-";
 
   llvm::StringRef Stem = llvm::sys::path::stem(Opts.InputFile);
@@ -389,7 +390,12 @@ int Driver::run() {
   if (!validateOptions())
     return 1;
 
-  auto FIDOrErr = SM.loadFile(Opts.InputFile);
+  if (Opts.Act == Action::EmitModel)
+    return emitModel() ? 0 : 1;
+  if (!Opts.Generators.empty() && !runGenerators())
+    return 1;
+
+  auto FIDOrErr = loadSource(Opts.InputFile);
   if (!FIDOrErr) {
     Diags.error("cannot open input file '" + llvm::Twine(Opts.InputFile) +
                 "': " + FIDOrErr.getError().message());
@@ -794,7 +800,7 @@ void Driver::visitUnit(const Identifier &U, ASTContext &Ctx,
     if (llvm::sys::fs::exists(P3I) && interfaceValid(P3I, Found, Dirs))
       Found = std::string(P3I);
   }
-  auto FIDOrErr = SM.loadFile(Found);
+  auto FIDOrErr = loadSource(Found);
   if (!FIDOrErr) {
     FailedUses.insert(U.Loc.getPointer());
     Diags.error(U.Loc, "cannot open unit file '" + llvm::Twine(Found) + "'");

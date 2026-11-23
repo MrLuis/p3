@@ -45,6 +45,14 @@ class Driver {
   DiagnosticsEngine Diags;
   StringPool Strings;
 
+  /// Source generators (Generators.cpp): built and run before the
+  /// compilation; the code they write is included into the sources that
+  /// declare the types they handle, which loadSource reads.
+  bool runGenerators();
+  bool emitModel();
+  llvm::StringMap<std::string> Splices; ///< absolute path -> its text
+  llvm::ErrorOr<FileID> loadSource(llvm::StringRef Path);
+
   bool validateOptions();
   bool validateTarget();
   void resolveTargetCPU();

@@ -78,6 +78,12 @@ procedure diagNote(loc: TLoc; const msg: string);
 procedure diagNoteR(loc: TLoc; const msg: string; r: TRange);
 procedure diagFatal(loc: TLoc; const msg: string);
 
+{ Quiet mode: diagnostics are dropped (and not counted) until diagQuietEnd,
+  which returns how many errors were dropped. A file parsed quietly can be
+  parsed again, to be reported on. }
+procedure diagQuietBegin;
+function diagQuietEnd: longint;
+
 function diagNumErrors: longint;
 function diagNumWarnings: longint;
 function diagHasErrors: boolean;
@@ -112,6 +118,8 @@ var
   numErrors, numWarnings: longint;
   fatalOccurred: boolean;
   lastDiagSuppressed: boolean;
+  quietMode: boolean;
+  quietErrors: longint;
 
 { --- Source manager --- }
 
@@ -502,6 +510,12 @@ end;
 procedure diagReportBuf(sev: TSeverity; loc: TLoc; const msg: TBuf;
                         r1, r2: TRange);
 begin
+  if quietMode then
+  begin
+    if (sev = sevError) or (sev = sevFatal) then
+      quietErrors := quietErrors + 1;
+    exit;
+  end;
   { after a fatal error or the error limit, stay quiet }
   if fatalOccurred then
   begin
@@ -540,6 +554,18 @@ begin
     ;
   end;
   emit(sev, loc, msg, r1, r2);
+end;
+
+procedure diagQuietBegin;
+begin
+  quietMode := true;
+  quietErrors := 0;
+end;
+
+function diagQuietEnd: longint;
+begin
+  quietMode := false;
+  diagQuietEnd := quietErrors;
 end;
 
 procedure diagReport(sev: TSeverity; loc: TLoc; const msg: string;

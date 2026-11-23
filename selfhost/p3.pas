@@ -6,10 +6,10 @@ program p3;
   linker for -S, -c, -O and executables. }
 
 uses pcsys, pcutil, pcdiag, pclex, pcast, pctypes, pcparse, pcprint, pcsema, pcgen, pcproject,
-     pcdriver;
+     pcdriver, pcsrcgen;
 
 type
-  TAction = (actTokens, actParseTree, actAST, actLLVM, actAsm, actObj, actExe);
+  TAction = (actTokens, actParseTree, actAST, actModel, actLLVM, actAsm, actObj, actExe);
 
 var
   inputFile, outputFile: string;
@@ -32,6 +32,10 @@ var
     (local arrays, records and strings start zeroed at -O0 only) }
   zeroInitOpt: longint;
   outBuf: TBuf;
+  { --generator, --generated-dir, --generator-timeout, --emit-model }
+  generators: TPtrList; { of PName }
+  generatedDir, emitModelAttr: string;
+  generatorTimeout: longint;
 
 { Do local arrays, records and strings start zeroed? }
 function zeroInit: boolean;
@@ -137,6 +141,7 @@ begin
   helpLine('  --Wno-deprecated             - Do not warn about uses of deprecated (experimental, platform, library, unimplemented) declarations');
   helpLine('  --Wno-unused-variable        - Do not warn about unused variables');
   helpLine('  -d <name>                    - Define a symbol for conditional compilation ({$IFDEF})');
+  helpLine('  --emit-model=<attr>          - Print the generator model of the types marked [attr] (for testing)');
   helpLine('  --fdiagnostics-color=<value> - Colorize diagnostics:');
   helpLine('    =auto                      -   If stderr is a tty');
   helpLine('    =always                    -   Always');
@@ -155,6 +160,9 @@ begin
   helpLine('  --fseparate-units            - Link separately compiled units (each compiled with -c to <unit>.o next to its source)');
   helpLine('  --fzero-init                 - Local arrays, records and strings start zeroed (the default at -O0)');
   helpLine('  -g                           - Generate debug information');
+  helpLine('  --generated-dir=<dir>        - Where the generators'' code is written (default: gen next to the input)');
+  helpLine('  --generator=<file>           - Build and run a source generator (a program that starts `generator Name for Attr;`) first');
+  helpLine('  --generator-timeout=<seconds> - Seconds a generator may run (default 30)');
   helpLine('  -l <name>                    - Link with library <name>');
   helpLine('  --mode=<value>               - Language dialect:');
   helpLine('    =iso                       -   ISO 7185 Pascal');
@@ -174,10 +182,11 @@ const
     'fno-overflow-checks',
     'fno-range-checks', 'fseparate-units', 'g', 'no-project', 'fzero-init',
     'fno-zero-init', 'fno-inline-runtime', 'fkeep-unused', 'ffast-math', 'Os', 'Oz');
-  numValueOpts = 13;
+  numValueOpts = 17;
   valueOptNames: array[1..numValueOpts] of string[20] = (
     'o', 'mode', 'fdiagnostics-color', 'ferror-limit', 'target', 'I', 'O', 'L', 'l',
-    'd', 'project', 'mcpu', 'mattr');
+    'd', 'project', 'mcpu', 'mattr', 'generator', 'generated-dir',
+    'generator-timeout', 'emit-model');
 
 function isFlag(const name: string): boolean;
 var
@@ -384,6 +393,9 @@ var
 begin
   inputFile := '';
   outputFile := '';
+  generatedDir := '';
+  emitModelAttr := '';
+  generatorTimeout := 30;
   targetTriple := '';
   action := actExe;
   mode := lmISO;
@@ -542,6 +554,17 @@ begin
     end
     else if name = 'mattr' then
       targetFeatures := takeValue
+    else if name = 'generator' then
+      listAdd(generators, intern(takeValue))
+    else if name = 'generated-dir' then
+      generatedDir := takeValue
+    else if name = 'generator-timeout' then
+      generatorTimeout := parseUInt(name, takeValue)
+    else if name = 'emit-model' then
+    begin
+      action := actModel;
+      emitModelAttr := lowerStr(takeValue);
+    end
     else if name = 'I' then
       listAdd(includeDirs, intern(takeValue))
     else if name = 'd' then
@@ -1009,6 +1032,22 @@ begin
   bufFree(text);
 end;
 
+{ Loads a source file: with the code the source generators wrote for it
+  included, if they wrote any. }
+function loadSource(const path: string; var fid: longint): boolean;
+var
+  data: PCharArray;
+  len: int64;
+begin
+  if spliceFor(path, data, len) then
+  begin
+    fid := smAddBuffer(path, data, len);
+    loadSource := true;
+  end
+  else
+    loadSource := smLoadFile(path, fid);
+end;
+
 procedure visitUnit(const u: TIdent; interfacesOnly: boolean);
 var
   dirs: TPtrList;
@@ -1069,7 +1108,7 @@ begin
     if sysFileExists(e) and ifInterfaceValid(e, found, dirs) then
       found := e;
   end;
-  if not smLoadFile(found, fid) then
+  if not loadSource(found, fid) then
   begin
     mapPut(failedUses, u.loc, u.name);
     diagError(u.loc, 'cannot open unit file ''' + found + '''');
@@ -1424,6 +1463,27 @@ begin
   if action <> actTokens then
   begin
     lexSetPredeclared(standardNames(mode));
+    if action = actModel then
+    begin
+      if not modelOfFile(inputFile, mode, emitModelAttr, outBuf) then
+      begin
+        diagError(noLoc, 'cannot read ''' + inputFile +
+                  ''': it has syntax errors');
+        sysExit(1);
+      end;
+      if writeOutput then
+        sysExit(0);
+      sysExit(1);
+    end;
+    if generators.count > 0 then
+    begin
+      if not runGenerators(inputFile, generators, generatedDir, includeDirs,
+                           mode, generatorTimeout) then
+        sysExit(1);
+      if not loadSource(inputFile, fid) then
+        usageError('cannot open input file ''' + inputFile + ''': ' +
+                   sysOpenError(inputFile));
+    end;
     usedUnitNames := @declaredUnitNames;
     { a program or (Turbo/FPC) a unit, parsed once (a unit's body only
       when it is to be compiled) }

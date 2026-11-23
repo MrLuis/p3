@@ -1074,6 +1074,8 @@ var
   id: PIdent;
 begin
   lineName('ProgramDecl ''', p^.ident.name);
+  if identValid(p^.generatorFor) then
+    bufAdd(outBuf, ' generator ''' + nameStr(p^.generatorFor.name) + '''');
   loc(p^.loc);
   indent := indent + 2;
   for i := 0 to p^.progParams.count - 1 do

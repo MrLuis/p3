@@ -45,6 +45,29 @@ static cl::list<std::string>
                 cl::value_desc("dir"), cl::cat(P3Category));
 
 static cl::list<std::string>
+    GeneratorFiles("generator",
+                   cl::desc("Build and run a source generator (a program that "
+                            "starts `generator Name for Attr;`) first"),
+                   cl::value_desc("file"), cl::cat(P3Category));
+
+static cl::opt<std::string>
+    GeneratedDir("generated-dir",
+                 cl::desc("Where the generators' code is written (default: "
+                          "gen next to the input)"),
+                 cl::value_desc("dir"), cl::cat(P3Category));
+
+static cl::opt<unsigned>
+    GeneratorTimeout("generator-timeout", cl::init(30),
+                     cl::desc("Seconds a generator may run (default 30)"),
+                     cl::value_desc("seconds"), cl::cat(P3Category));
+
+static cl::opt<std::string>
+    EmitModelAttr("emit-model",
+                  cl::desc("Print the generator model of the types marked "
+                           "[attr] (for testing)"),
+                  cl::value_desc("attr"), cl::cat(P3Category));
+
+static cl::list<std::string>
     Defines("d", cl::Prefix,
             cl::desc("Define a symbol for conditional compilation ({$IFDEF})"),
             cl::value_desc("name"), cl::cat(P3Category));
@@ -213,6 +236,13 @@ int main(int argc, char **argv) {
   Opts.LibraryDirs.assign(LibraryDirs.begin(), LibraryDirs.end());
   Opts.Libraries.assign(Libraries.begin(), Libraries.end());
   Opts.Defines.assign(Defines.begin(), Defines.end());
+  Opts.Generators.assign(GeneratorFiles.begin(), GeneratorFiles.end());
+  Opts.GeneratedDir = GeneratedDir;
+  Opts.GeneratorTimeout = GeneratorTimeout;
+  if (EmitModelAttr.getNumOccurrences()) {
+    Opts.Act = Action::EmitModel;
+    Opts.ModelAttr = llvm::StringRef(EmitModelAttr).lower();
+  }
   Opts.SeparateUnits = SeparateUnits;
   Opts.TargetTriple = TargetTriple;
   if (MCPU.getNumOccurrences()) {
