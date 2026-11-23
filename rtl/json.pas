@@ -98,6 +98,10 @@ type
     function StringEquals(const S: string): Boolean;
     { the offset of the current token (its opening quote, for a string) }
     property TokenStart: Integer read FStart;
+    { the end of the current token's text (a string's closing quote) }
+    property TokenStop: Integer read FStop;
+    { the current string or key has escapes }
+    property TokenEscaped: Boolean read FEscaped;
     property Position: Integer read FPos;
     property Depth: Integer read GetDepth;
     { the most nested containers allowed (512 by default) }
@@ -106,6 +110,202 @@ type
     { raises EJsonError at offset At }
     procedure Error(const Reason: string; At: Integer);
   end;
+
+  { --- documents ---
+
+    TJsonDocument holds a parsed (or built) JSON value: its nodes are in
+    the document's own memory, in large blocks; the strings and numbers
+    read from the text stay there until used (a string is decoded when
+    read, and written back as it was). A TJsonValue is a handle on a node
+    of a document, valid while the document is: copy it freely. }
+
+  TJsonKind = (jkNull, jkFalse, jkTrue, jkNumber, jkString, jkArray, jkObject);
+
+  TJsonDocument = class;
+  TJsonWriter = class;
+
+  PJsonNode = ^TJsonNode;
+  TJsonNode = record
+    Kind: TJsonKind;
+    NumKind: TJsonNumberKind;
+    InSource: Boolean; { a string or number in the source text }
+    Escaped: Boolean;  { (a source string with escapes) }
+    Start, Len: Integer;
+    Int: Int64;        { an integer (UInt64: its bits) }
+    Dbl: Double;
+    Str: string;       { a string not in the source (or decoded) }
+    Count: Integer;    { an array's or object's members }
+    Items: array of PJsonNode;
+    Keys: array of PJsonNode; { an object's: string nodes }
+  end;
+
+  { the index of V[...]: a key or an array index }
+  TJsonKey = record
+    Name: string;
+    Index: Integer; { -1 for a name }
+    class operator :=(const S: string): TJsonKey;
+    class operator :=(I: Integer): TJsonKey;
+  end;
+
+  TJsonValue = record
+  private
+    FNode: PJsonNode;
+    FDoc: TJsonDocument;
+    function GetItem(const K: TJsonKey): TJsonValue;
+    procedure Need(K: TJsonKind; const What: string);
+    function NewChild(K: TJsonKind): PJsonNode;
+    procedure AddNode(N: PJsonNode);
+    procedure PutNode(const Key: string; N: PJsonNode);
+    function Adopt(const V: TJsonValue): PJsonNode;
+  public
+    { a value that is not there: V['missing'], V[99] }
+    function Exists: Boolean;
+    function Kind: TJsonKind;
+    function IsNull: Boolean;
+    function IsBoolean: Boolean;
+    function IsNumber: Boolean;
+    function IsInteger: Boolean;
+    function IsString: Boolean;
+    function IsArray: Boolean;
+    function IsObject: Boolean;
+    { these raise EJsonError when the value is of another kind (or is not
+      there); AsInt64 also for a number that is not an Int64 }
+    function AsString: string;
+    function AsInt64: Int64;
+    function AsUInt64: QWord;
+    function AsDouble: Double;
+    function AsBoolean: Boolean;
+    { ... and these give Default instead }
+    function AsStringDef(const Default: string): string;
+    function AsInt64Def(Default: Int64): Int64;
+    function AsDoubleDef(Default: Double): Double;
+    function AsBooleanDef(Default: Boolean): Boolean;
+    { the members of an array or object (0 for the others) }
+    function Count: Integer;
+    { an object's member (first of the key; not there: not Exists) }
+    function Get(const Key: string): TJsonValue;
+    function TryGet(const Key: string; out V: TJsonValue): Boolean;
+    function Has(const Key: string): Boolean;
+    { an array's element, or an object's I-th value }
+    function At(I: Integer): TJsonValue;
+    { an object's I-th key }
+    function KeyAt(I: Integer): string;
+    { V['name'], V[0], V['a'][0]['b'] }
+    property Items[const K: TJsonKey]: TJsonValue read GetItem; default;
+    { by a JSON Pointer (RFC 6901): '/a/0/b' ('' is V itself) }
+    function Path(const Pointer: string): TJsonValue;
+    { changes: an object's member (replaced if the key is there) ... }
+    procedure Put(const Key: string; const S: string); overload;
+    procedure Put(const Key: string; I: Int64); overload;
+    procedure Put(const Key: string; D: Double); overload;
+    procedure Put(const Key: string; B: Boolean); overload;
+    procedure Put(const Key: string; const V: TJsonValue); overload;
+    procedure PutNull(const Key: string);
+    function PutObject(const Key: string): TJsonValue;
+    function PutArray(const Key: string): TJsonValue;
+    { ... an array's element, at its end }
+    procedure Add(const S: string); overload;
+    procedure Add(I: Int64); overload;
+    procedure Add(D: Double); overload;
+    procedure Add(B: Boolean); overload;
+    procedure Add(const V: TJsonValue); overload;
+    procedure AddNull;
+    function AddObject: TJsonValue;
+    function AddArray: TJsonValue;
+    { removes an object's member (false if it is not there) }
+    function Delete(const Key: string): Boolean;
+    { removes an array's element }
+    procedure Remove(I: Integer);
+    procedure Clear;
+    { the value as JSON text }
+    function ToJson(Pretty: Boolean = False): string;
+    procedure WriteTo(W: TJsonWriter);
+    property Document: TJsonDocument read FDoc;
+  end;
+
+  TJsonMember = record
+    Key: string;
+    Value: TJsonValue;
+  end;
+
+  TJsonDocument = class
+  private
+    FSource: string;
+    FBlocks: array of array of TJsonNode;
+    FUsed: Integer;
+    FRoot: PJsonNode;
+    function NewNode(K: TJsonKind): PJsonNode;
+    function Handle(N: PJsonNode): TJsonValue;
+    function NodeString(N: PJsonNode): string;
+    function CopyNode(Src: TJsonDocument; N: PJsonNode): PJsonNode;
+  public
+    { an empty document (its root null) }
+    constructor Create;
+    destructor Destroy; override;
+    { parses Text into this document (replacing what it had) }
+    procedure Load(const Text: string; Options: TJsonReaderOptions = []);
+    function Root: TJsonValue;
+    procedure SetRoot(const V: TJsonValue);
+    { values of this document not yet placed (Put, Add or SetRoot them) }
+    function NewObject: TJsonValue;
+    function NewArray: TJsonValue;
+    function NewString(const S: string): TJsonValue;
+    function NewInteger(I: Int64): TJsonValue;
+    function NewNumber(D: Double): TJsonValue;
+    function NewBoolean(B: Boolean): TJsonValue;
+    function NewNull: TJsonValue;
+    function ToJson(Pretty: Boolean = False): string;
+  end;
+
+  { --- writing ---
+
+    TJsonWriter writes JSON text: compact, or pretty (two spaces for each
+    level, as serde_json's to_string_pretty). Commas and colons are its
+    business; doubles are written as the shortest text that reads back as
+    the same double. }
+  TJsonWriter = class
+  private
+    FBuf: string;
+    FLen: Integer;
+    FPretty: Boolean;
+    FCount: array of Integer; { per open container: its members so far }
+    FDepth: Integer;
+    FAfterKey: Boolean;
+    procedure BeforeValue;
+    procedure Open(C: Char);
+    procedure Close(C: Char);
+    procedure NewLine;
+  public
+    constructor Create(Pretty: Boolean = False);
+    procedure BeginObject;
+    procedure EndObject;
+    procedure BeginArray;
+    procedure EndArray;
+    procedure Key(const K: string);
+    procedure Value(const S: string); overload;
+    procedure Value(I: Int64); overload;
+    procedure Value(D: Double); overload;
+    procedure Value(B: Boolean); overload;
+    procedure ValueUInt64(Q: QWord);
+    procedure Null;
+    { JSON text written as it is (it must be valid) }
+    procedure Raw(const JsonText: string);
+    procedure RawChars(P: PChar; N: Integer);
+    { the text written so far }
+    function Text: string;
+    procedure Clear;
+  end;
+
+{ Parses Text: a new document (free it), or EJsonError. }
+function JsonParse(const Text: string;
+                   Options: TJsonReaderOptions = []): TJsonDocument;
+{ Is Text one valid JSON value? }
+function JsonValid(const Text: string): Boolean;
+{ D as JSON: the shortest text that reads back as D }
+function JsonFloat(D: Double): string;
+{ the elements of an array, the members of an object, for for-in }
+function JsonItems(const V: TJsonValue): iterator TJsonValue;
+function JsonMembers(const V: TJsonValue): iterator TJsonMember;
 
 { The line and column (1-based) of byte offset Offset of Text. }
 procedure JsonLineColumn(const Text: string; Offset: Integer;
@@ -337,6 +537,35 @@ end;
 
 { --- the reader --- }
 
+function HexValue(C: Char): Integer; inline;
+begin
+  case C of
+    '0'..'9': Result := Ord(C) - Ord('0');
+    'a'..'f': Result := Ord(C) - Ord('a') + 10;
+  else
+    Result := Ord(C) - Ord('A') + 10;
+  end;
+end;
+
+{ The code point of the 4 hex digits at P[I] (checked before). }
+function Hex4(P: PChar; I: Integer): Integer; inline;
+begin
+  Result := (HexValue(P[I]) shl 12) or (HexValue(P[I + 1]) shl 8) or
+            (HexValue(P[I + 2]) shl 4) or HexValue(P[I + 3]);
+end;
+
+function IsHex4(P: PChar; I, Len: Integer): Boolean;
+var
+  K: Integer;
+begin
+  Result := I + 4 <= Len;
+  if Result then
+    for K := I to I + 3 do
+      if not (P[K] in ['0'..'9', 'a'..'f', 'A'..'F']) then
+        Result := False;
+end;
+
+
 constructor TJsonReader.Create(const Text: string; Options: TJsonReaderOptions);
 begin
   FText := Text;
@@ -467,6 +696,20 @@ begin
               if not (FP[I + N] in ['0'..'9', 'a'..'f', 'A'..'F']) then
                 Fail('invalid escape', I + N);
             end;
+            N := Hex4(FP, I + 2);
+            if (N >= $D800) and (N <= $DBFF) then
+            begin
+              { a surrogate pair: the low half must follow }
+              if (I + 12 > FLen) or (FP[I + 6] <> '\') or (FP[I + 7] <> 'u') or
+                 not IsHex4(FP, I + 8, FLen) then
+                Fail('lone leading surrogate in hex escape', I);
+              N := Hex4(FP, I + 8);
+              if (N < $DC00) or (N > $DFFF) then
+                Fail('invalid surrogate pair in hex escape', I + 6);
+              Inc(I, 6);
+            end
+            else if (N >= $DC00) and (N <= $DFFF) then
+              Fail('lone trailing surrogate in hex escape', I);
             Inc(I, 6);
           end;
       else
@@ -765,92 +1008,82 @@ begin
   Result := Copy(FText, FStart + 1, FStop - FStart);
 end;
 
-function HexValue(C: Char): Integer; inline;
-begin
-  case C of
-    '0'..'9': Result := Ord(C) - Ord('0');
-    'a'..'f': Result := Ord(C) - Ord('a') + 10;
-  else
-    Result := Ord(C) - Ord('A') + 10;
-  end;
-end;
-
-function TJsonReader.AsString: string;
+{ The text of the string P[Start, Stop) (its escapes checked when it was
+  read), decoded. }
+function JsonDecode(P: PChar; Start, Stop: Integer): string;
 var
   I, Len, Run, CP, Lo: Integer;
   C: Char;
+  Buf: string;
+begin
+  SetLength(Buf, Stop - Start);
+  Len := 0;
+  I := Start;
+  Run := I;
+  while I < Stop do
+  begin
+    if P[I] <> '\' then
+    begin
+      Inc(I);
+      Continue;
+    end;
+    AddChars(Buf, Len, P + Run, I - Run);
+    C := P[I + 1];
+    Inc(I, 2);
+    case C of
+      'b': AddChar(Buf, Len, #8);
+      'f': AddChar(Buf, Len, #12);
+      'n': AddChar(Buf, Len, #10);
+      'r': AddChar(Buf, Len, #13);
+      't': AddChar(Buf, Len, #9);
+      'u':
+        begin
+          CP := Hex4(P, I);
+          Inc(I, 4);
+          if (CP >= $D800) and (CP <= $DBFF) then
+          begin
+            Lo := Hex4(P, I + 2);
+            Inc(I, 6);
+            CP := $10000 + ((CP - $D800) shl 10) + (Lo - $DC00);
+          end;
+          if CP < $80 then
+            AddChar(Buf, Len, Chr(CP))
+          else if CP < $800 then
+          begin
+            AddChar(Buf, Len, Chr($C0 or (CP shr 6)));
+            AddChar(Buf, Len, Chr($80 or (CP and $3F)));
+          end
+          else if CP < $10000 then
+          begin
+            AddChar(Buf, Len, Chr($E0 or (CP shr 12)));
+            AddChar(Buf, Len, Chr($80 or ((CP shr 6) and $3F)));
+            AddChar(Buf, Len, Chr($80 or (CP and $3F)));
+          end
+          else
+          begin
+            AddChar(Buf, Len, Chr($F0 or (CP shr 18)));
+            AddChar(Buf, Len, Chr($80 or ((CP shr 12) and $3F)));
+            AddChar(Buf, Len, Chr($80 or ((CP shr 6) and $3F)));
+            AddChar(Buf, Len, Chr($80 or (CP and $3F)));
+          end;
+        end;
+    else
+      AddChar(Buf, Len, C); { " \ / }
+    end;
+    Run := I;
+  end;
+  AddChars(Buf, Len, P + Run, Stop - Run);
+  SetLength(Buf, Len);
+  Result := Buf;
+end;
+
+function TJsonReader.AsString: string;
 begin
   if not (FToken in [jtString, jtKey]) then
     Fail('not a string', FStart);
   if not FEscaped then
     Exit(Copy(FText, FStart + 1, FStop - FStart));
-  SetLength(Result, FStop - FStart);
-  Len := 0;
-  I := FStart;
-  Run := I;
-  while I < FStop do
-  begin
-    if FP[I] <> '\' then
-    begin
-      Inc(I);
-      Continue;
-    end;
-    AddChars(Result, Len, FP + Run, I - Run);
-    C := FP[I + 1];
-    Inc(I, 2);
-    case C of
-      'b': AddChar(Result, Len, #8);
-      'f': AddChar(Result, Len, #12);
-      'n': AddChar(Result, Len, #10);
-      'r': AddChar(Result, Len, #13);
-      't': AddChar(Result, Len, #9);
-      'u':
-        begin
-          CP := (HexValue(FP[I]) shl 12) or (HexValue(FP[I + 1]) shl 8) or
-                (HexValue(FP[I + 2]) shl 4) or HexValue(FP[I + 3]);
-          Inc(I, 4);
-          if (CP >= $D800) and (CP <= $DBFF) then
-          begin
-            { a surrogate pair: the low half must follow }
-            if (I + 6 > FStop) or (FP[I] <> '\') or (FP[I + 1] <> 'u') then
-              Fail('lone leading surrogate in hex escape', I - 6);
-            Lo := (HexValue(FP[I + 2]) shl 12) or (HexValue(FP[I + 3]) shl 8) or
-                  (HexValue(FP[I + 4]) shl 4) or HexValue(FP[I + 5]);
-            if (Lo < $DC00) or (Lo > $DFFF) then
-              Fail('invalid surrogate pair in hex escape', I);
-            Inc(I, 6);
-            CP := $10000 + ((CP - $D800) shl 10) + (Lo - $DC00);
-          end
-          else if (CP >= $DC00) and (CP <= $DFFF) then
-            Fail('lone trailing surrogate in hex escape', I - 6);
-          if CP < $80 then
-            AddChar(Result, Len, Chr(CP))
-          else if CP < $800 then
-          begin
-            AddChar(Result, Len, Chr($C0 or (CP shr 6)));
-            AddChar(Result, Len, Chr($80 or (CP and $3F)));
-          end
-          else if CP < $10000 then
-          begin
-            AddChar(Result, Len, Chr($E0 or (CP shr 12)));
-            AddChar(Result, Len, Chr($80 or ((CP shr 6) and $3F)));
-            AddChar(Result, Len, Chr($80 or (CP and $3F)));
-          end
-          else
-          begin
-            AddChar(Result, Len, Chr($F0 or (CP shr 18)));
-            AddChar(Result, Len, Chr($80 or ((CP shr 12) and $3F)));
-            AddChar(Result, Len, Chr($80 or ((CP shr 6) and $3F)));
-            AddChar(Result, Len, Chr($80 or (CP and $3F)));
-          end;
-        end;
-    else
-      AddChar(Result, Len, C); { " \ / }
-    end;
-    Run := I;
-  end;
-  AddChars(Result, Len, FP + Run, FStop - Run);
-  SetLength(Result, Len);
+  Result := JsonDecode(FP, FStart, FStop);
 end;
 
 function TJsonReader.StringEquals(const S: string): Boolean;
@@ -1048,6 +1281,1069 @@ begin
     jtFalse: Result := False;
   else
     Fail('not a boolean', FStart);
+  end;
+end;
+
+{ --- writing --- }
+
+function c_snprintf(buf: PChar; n: SizeInt; fmt: PChar): Integer; cdecl;
+  varargs; external 'c' name 'snprintf';
+
+function JsonFloat(D: Double): string;
+var
+  Buf: array[0..39] of Char;
+  P: Integer;
+  S: string;
+begin
+  if D - D <> 0 then
+    raise EJsonError.Create('a number that is not finite cannot be written as JSON');
+  for P := 15 to 17 do
+  begin
+    c_snprintf(@Buf[0], 40, '%.*g', P, D);
+    if (P = 17) or (c_strtod(@Buf[0], nil) = D) then
+      Break;
+  end;
+  S := PChar(@Buf[0]);
+  if (Pos('.', S) = 0) and (Pos('e', S) = 0) then
+    S := S + '.0';
+  Result := S;
+end;
+
+constructor TJsonWriter.Create(Pretty: Boolean);
+begin
+  FPretty := Pretty;
+  SetLength(FBuf, 256);
+  FLen := 0;
+  FDepth := 0;
+end;
+
+procedure TJsonWriter.Clear;
+begin
+  FLen := 0;
+  FDepth := 0;
+  FAfterKey := False;
+end;
+
+function TJsonWriter.Text: string;
+begin
+  Result := Copy(FBuf, 1, FLen);
+end;
+
+procedure TJsonWriter.RawChars(P: PChar; N: Integer);
+begin
+  AddChars(FBuf, FLen, P, N);
+end;
+
+procedure TJsonWriter.NewLine;
+var
+  I: Integer;
+begin
+  AddChar(FBuf, FLen, #10);
+  for I := 1 to FDepth do
+  begin
+    AddChar(FBuf, FLen, ' ');
+    AddChar(FBuf, FLen, ' ');
+  end;
+end;
+
+{ the comma and line break before a value (not after a key) }
+procedure TJsonWriter.BeforeValue;
+begin
+  if FAfterKey then
+  begin
+    FAfterKey := False;
+    Exit;
+  end;
+  if FDepth > 0 then
+  begin
+    if FCount[FDepth - 1] > 0 then
+      AddChar(FBuf, FLen, ',');
+    Inc(FCount[FDepth - 1]);
+    if FPretty then
+      NewLine;
+  end;
+end;
+
+procedure TJsonWriter.Open(C: Char);
+begin
+  BeforeValue;
+  AddChar(FBuf, FLen, C);
+  if FDepth >= Length(FCount) then
+    SetLength(FCount, Length(FCount) * 2 + 16);
+  FCount[FDepth] := 0;
+  Inc(FDepth);
+end;
+
+procedure TJsonWriter.Close(C: Char);
+var
+  Had: Boolean;
+begin
+  if FDepth = 0 then
+    raise EJsonError.Create('nothing to close');
+  Had := FCount[FDepth - 1] > 0;
+  Dec(FDepth);
+  if FPretty and Had then
+    NewLine;
+  AddChar(FBuf, FLen, C);
+end;
+
+procedure TJsonWriter.BeginObject;
+begin
+  Open('{');
+end;
+
+procedure TJsonWriter.EndObject;
+begin
+  Close('}');
+end;
+
+procedure TJsonWriter.BeginArray;
+begin
+  Open('[');
+end;
+
+procedure TJsonWriter.EndArray;
+begin
+  Close(']');
+end;
+
+procedure TJsonWriter.Key(const K: string);
+begin
+  BeforeValue;
+  AddChar(FBuf, FLen, '"');
+  JsonEscapeTo(FBuf, FLen, K);
+  AddChar(FBuf, FLen, '"');
+  AddChar(FBuf, FLen, ':');
+  if FPretty then
+    AddChar(FBuf, FLen, ' ');
+  FAfterKey := True;
+end;
+
+procedure TJsonWriter.Value(const S: string);
+begin
+  BeforeValue;
+  AddChar(FBuf, FLen, '"');
+  JsonEscapeTo(FBuf, FLen, S);
+  AddChar(FBuf, FLen, '"');
+end;
+
+procedure TJsonWriter.Value(I: Int64);
+var
+  S: string;
+begin
+  BeforeValue;
+  S := IntToStr(I);
+  AddChars(FBuf, FLen, PChar(S), Length(S));
+end;
+
+procedure TJsonWriter.ValueUInt64(Q: QWord);
+var
+  S: string;
+begin
+  BeforeValue;
+  S := IntToStr(Q);
+  AddChars(FBuf, FLen, PChar(S), Length(S));
+end;
+
+procedure TJsonWriter.Value(D: Double);
+var
+  S: string;
+begin
+  S := JsonFloat(D);
+  BeforeValue;
+  AddChars(FBuf, FLen, PChar(S), Length(S));
+end;
+
+procedure TJsonWriter.Value(B: Boolean);
+begin
+  BeforeValue;
+  if B then
+    AddChars(FBuf, FLen, 'true', 4)
+  else
+    AddChars(FBuf, FLen, 'false', 5);
+end;
+
+procedure TJsonWriter.Null;
+begin
+  BeforeValue;
+  AddChars(FBuf, FLen, 'null', 4);
+end;
+
+procedure TJsonWriter.Raw(const JsonText: string);
+begin
+  BeforeValue;
+  AddChars(FBuf, FLen, PChar(JsonText), Length(JsonText));
+end;
+
+{ --- documents --- }
+
+class operator TJsonKey.:=(const S: string): TJsonKey;
+begin
+  Result.Name := S;
+  Result.Index := -1;
+end;
+
+class operator TJsonKey.:=(I: Integer): TJsonKey;
+begin
+  Result.Name := '';
+  Result.Index := I;
+end;
+
+const
+  KindNames: array[TJsonKind] of string = ('null', 'a boolean', 'a boolean',
+    'a number', 'a string', 'an array', 'an object');
+
+constructor TJsonDocument.Create;
+begin
+  FRoot := NewNode(jkNull);
+end;
+
+destructor TJsonDocument.Destroy;
+begin
+  FBlocks := nil;
+  inherited Destroy;
+end;
+
+function TJsonDocument.NewNode(K: TJsonKind): PJsonNode;
+var
+  N: Integer;
+begin
+  N := Length(FBlocks);
+  if (N = 0) or (FUsed = Length(FBlocks[N - 1])) then
+  begin
+    SetLength(FBlocks, N + 1);
+    if N = 0 then
+      SetLength(FBlocks[N], 64)
+    else if Length(FBlocks[N - 1]) < 65536 then
+      SetLength(FBlocks[N], Length(FBlocks[N - 1]) * 2)
+    else
+      SetLength(FBlocks[N], 65536);
+    FUsed := 0;
+    Inc(N);
+  end;
+  Result := @FBlocks[N - 1][FUsed];
+  Inc(FUsed);
+  Result^.Kind := K;
+end;
+
+function TJsonDocument.Handle(N: PJsonNode): TJsonValue;
+begin
+  Result.FNode := N;
+  Result.FDoc := Self;
+end;
+
+function TJsonDocument.Root: TJsonValue;
+begin
+  Result := Handle(FRoot);
+end;
+
+procedure TJsonDocument.SetRoot(const V: TJsonValue);
+begin
+  FRoot := Root.Adopt(V);
+end;
+
+function TJsonDocument.NodeString(N: PJsonNode): string;
+begin
+  if not N^.InSource then
+    Exit(N^.Str);
+  if not N^.Escaped then
+    Exit(Copy(FSource, N^.Start + 1, N^.Len));
+  { decoded once }
+  N^.Str := JsonDecode(PChar(FSource), N^.Start, N^.Start + N^.Len);
+  N^.InSource := False;
+  Result := N^.Str;
+end;
+
+procedure TJsonDocument.Load(const Text: string; Options: TJsonReaderOptions);
+var
+  R: TJsonReader;
+  Frames: array of PJsonNode;
+  Bases: array of Integer;
+  Vals, Keys: array of PJsonNode;
+  Depth, Top, I, B: Integer;
+  N, PendingKey, C: PJsonNode;
+
+  procedure Attach(X: PJsonNode);
+  begin
+    if Depth = 0 then
+    begin
+      FRoot := X;
+      Exit;
+    end;
+    if Top >= Length(Vals) then
+    begin
+      SetLength(Vals, Length(Vals) * 2 + 64);
+      SetLength(Keys, Length(Vals));
+    end;
+    Vals[Top] := X;
+    Keys[Top] := PendingKey;
+    Inc(Top);
+  end;
+
+  function Leaf(K: TJsonKind): PJsonNode;
+  begin
+    Result := NewNode(K);
+    Attach(Result);
+  end;
+
+begin
+  FBlocks := nil;
+  FUsed := 0;
+  FSource := Text;
+  R := TJsonReader.Create(FSource, Options);
+  Depth := 0;
+  Top := 0;
+  PendingKey := nil;
+  try
+    while R.Read do
+      case R.Token of
+        jtBeginObject, jtBeginArray:
+          begin
+            if R.Token = jtBeginObject then N := Leaf(jkObject) else N := Leaf(jkArray);
+            if Depth >= Length(Frames) then
+            begin
+              SetLength(Frames, Length(Frames) * 2 + 16);
+              SetLength(Bases, Length(Frames));
+            end;
+            Frames[Depth] := N;
+            Bases[Depth] := Top;
+            Inc(Depth);
+          end;
+        jtEndObject, jtEndArray:
+          begin
+            Dec(Depth);
+            C := Frames[Depth];
+            B := Bases[Depth];
+            C^.Count := Top - B;
+            SetLength(C^.Items, C^.Count);
+            for I := 0 to C^.Count - 1 do
+              C^.Items[I] := Vals[B + I];
+            if C^.Kind = jkObject then
+            begin
+              SetLength(C^.Keys, C^.Count);
+              for I := 0 to C^.Count - 1 do
+                C^.Keys[I] := Keys[B + I];
+            end;
+            Top := B;
+          end;
+        jtKey:
+          begin
+            PendingKey := NewNode(jkString);
+            PendingKey^.InSource := True;
+            PendingKey^.Escaped := R.TokenEscaped;
+            PendingKey^.Start := R.TokenStart;
+            PendingKey^.Len := R.TokenStop - R.TokenStart;
+          end;
+        jtString:
+          begin
+            N := Leaf(jkString);
+            N^.InSource := True;
+            N^.Escaped := R.TokenEscaped;
+            N^.Start := R.TokenStart;
+            N^.Len := R.TokenStop - R.TokenStart;
+          end;
+        jtNumber:
+          begin
+            N := Leaf(jkNumber);
+            N^.InSource := True;
+            N^.Start := R.TokenStart;
+            N^.Len := R.TokenStop - R.TokenStart;
+            N^.NumKind := R.NumberKind;
+            case N^.NumKind of
+              jnInt64: N^.Int := R.AsInt64;
+              jnUInt64: N^.Int := Int64(R.AsUInt64);
+            end;
+            N^.Dbl := R.AsDouble;
+          end;
+        jtTrue: Leaf(jkTrue);
+        jtFalse: Leaf(jkFalse);
+        jtNull: Leaf(jkNull);
+      end;
+  finally
+    R.Free;
+  end;
+end;
+
+function TJsonDocument.CopyNode(Src: TJsonDocument; N: PJsonNode): PJsonNode;
+var
+  I: Integer;
+begin
+  Result := NewNode(N^.Kind);
+  Result^.NumKind := N^.NumKind;
+  Result^.Int := N^.Int;
+  Result^.Dbl := N^.Dbl;
+  case N^.Kind of
+    jkString: Result^.Str := Src.NodeString(N);
+    jkNumber:
+      if N^.InSource then
+      begin
+        { (its text as written) }
+        Result^.Str := Copy(Src.FSource, N^.Start + 1, N^.Len);
+      end
+      else
+        Result^.Str := N^.Str;
+    jkArray, jkObject:
+      begin
+        Result^.Count := N^.Count;
+        SetLength(Result^.Items, N^.Count);
+        for I := 0 to N^.Count - 1 do
+          Result^.Items[I] := CopyNode(Src, N^.Items[I]);
+        if N^.Kind = jkObject then
+        begin
+          SetLength(Result^.Keys, N^.Count);
+          for I := 0 to N^.Count - 1 do
+            Result^.Keys[I] := CopyNode(Src, N^.Keys[I]);
+        end;
+      end;
+  end;
+end;
+
+function TJsonDocument.NewObject: TJsonValue;
+begin
+  Result := Handle(NewNode(jkObject));
+end;
+
+function TJsonDocument.NewArray: TJsonValue;
+begin
+  Result := Handle(NewNode(jkArray));
+end;
+
+function TJsonDocument.NewString(const S: string): TJsonValue;
+var
+  N: PJsonNode;
+begin
+  N := NewNode(jkString);
+  N^.Str := S;
+  Result := Handle(N);
+end;
+
+function TJsonDocument.NewInteger(I: Int64): TJsonValue;
+var
+  N: PJsonNode;
+begin
+  N := NewNode(jkNumber);
+  N^.NumKind := jnInt64;
+  N^.Int := I;
+  N^.Dbl := I;
+  Result := Handle(N);
+end;
+
+function TJsonDocument.NewNumber(D: Double): TJsonValue;
+var
+  N: PJsonNode;
+begin
+  N := NewNode(jkNumber);
+  N^.NumKind := jnDouble;
+  N^.Dbl := D;
+  Result := Handle(N);
+end;
+
+function TJsonDocument.NewBoolean(B: Boolean): TJsonValue;
+begin
+  if B then
+    Result := Handle(NewNode(jkTrue))
+  else
+    Result := Handle(NewNode(jkFalse));
+end;
+
+function TJsonDocument.NewNull: TJsonValue;
+begin
+  Result := Handle(NewNode(jkNull));
+end;
+
+function TJsonDocument.ToJson(Pretty: Boolean): string;
+begin
+  Result := Root.ToJson(Pretty);
+end;
+
+function JsonParse(const Text: string; Options: TJsonReaderOptions): TJsonDocument;
+var
+  D: TJsonDocument;
+begin
+  D := TJsonDocument.Create;
+  try
+    D.Load(Text, Options);
+  except
+    D.Free;
+    raise;
+  end;
+  Result := D;
+end;
+
+function JsonValid(const Text: string): Boolean;
+var
+  R: TJsonReader;
+begin
+  R := TJsonReader.Create(Text);
+  try
+    try
+      while R.Read do
+        ;
+      Result := True;
+    except
+      on EJsonError do
+        Result := False;
+    end;
+  finally
+    R.Free;
+  end;
+end;
+
+{ --- values --- }
+
+procedure TJsonValue.Need(K: TJsonKind; const What: string);
+var
+  Found: string;
+begin
+  if FNode = nil then
+    raise EJsonError.Create('expected ' + What + ', but the value is not there');
+  if (FNode^.Kind = K) or ((K = jkTrue) and (FNode^.Kind = jkFalse)) then
+    Exit;
+  Found := KindNames[FNode^.Kind];
+  raise EJsonError.Create('expected ' + What + ', found ' + Found);
+end;
+
+function TJsonValue.Exists: Boolean;
+begin
+  Result := FNode <> nil;
+end;
+
+function TJsonValue.Kind: TJsonKind;
+begin
+  if FNode = nil then
+    raise EJsonError.Create('the value is not there');
+  Result := FNode^.Kind;
+end;
+
+function TJsonValue.IsNull: Boolean;
+begin
+  Result := (FNode <> nil) and (FNode^.Kind = jkNull);
+end;
+
+function TJsonValue.IsBoolean: Boolean;
+begin
+  Result := (FNode <> nil) and (FNode^.Kind in [jkTrue, jkFalse]);
+end;
+
+function TJsonValue.IsNumber: Boolean;
+begin
+  Result := (FNode <> nil) and (FNode^.Kind = jkNumber);
+end;
+
+function TJsonValue.IsInteger: Boolean;
+begin
+  Result := (FNode <> nil) and (FNode^.Kind = jkNumber) and
+            (FNode^.NumKind <> jnDouble);
+end;
+
+function TJsonValue.IsString: Boolean;
+begin
+  Result := (FNode <> nil) and (FNode^.Kind = jkString);
+end;
+
+function TJsonValue.IsArray: Boolean;
+begin
+  Result := (FNode <> nil) and (FNode^.Kind = jkArray);
+end;
+
+function TJsonValue.IsObject: Boolean;
+begin
+  Result := (FNode <> nil) and (FNode^.Kind = jkObject);
+end;
+
+function TJsonValue.AsString: string;
+begin
+  Need(jkString, 'a string');
+  Result := FDoc.NodeString(FNode);
+end;
+
+function TJsonValue.AsInt64: Int64;
+begin
+  Need(jkNumber, 'a number');
+  if FNode^.NumKind <> jnInt64 then
+    raise EJsonError.Create('expected an Int64, found ' +
+                            FDoc.Handle(FNode).ToJson);
+  Result := FNode^.Int;
+end;
+
+function TJsonValue.AsUInt64: QWord;
+begin
+  Need(jkNumber, 'a number');
+  if (FNode^.NumKind = jnUInt64) or
+     ((FNode^.NumKind = jnInt64) and (FNode^.Int >= 0)) then
+    Result := QWord(FNode^.Int)
+  else
+    raise EJsonError.Create('expected a UInt64, found ' +
+                            FDoc.Handle(FNode).ToJson);
+end;
+
+function TJsonValue.AsDouble: Double;
+begin
+  Need(jkNumber, 'a number');
+  Result := FNode^.Dbl;
+end;
+
+function TJsonValue.AsBoolean: Boolean;
+begin
+  Need(jkTrue, 'a boolean');
+  Result := FNode^.Kind = jkTrue;
+end;
+
+function TJsonValue.AsStringDef(const Default: string): string;
+begin
+  if IsString then Result := AsString else Result := Default;
+end;
+
+function TJsonValue.AsInt64Def(Default: Int64): Int64;
+begin
+  if IsNumber and (FNode^.NumKind = jnInt64) then
+    Result := FNode^.Int
+  else
+    Result := Default;
+end;
+
+function TJsonValue.AsDoubleDef(Default: Double): Double;
+begin
+  if IsNumber then Result := FNode^.Dbl else Result := Default;
+end;
+
+function TJsonValue.AsBooleanDef(Default: Boolean): Boolean;
+begin
+  if IsBoolean then Result := FNode^.Kind = jkTrue else Result := Default;
+end;
+
+function TJsonValue.Count: Integer;
+begin
+  if (FNode <> nil) and (FNode^.Kind in [jkArray, jkObject]) then
+    Result := FNode^.Count
+  else
+    Result := 0;
+end;
+
+{ Is key node K the string S? (no decoding when it has no escapes) }
+function KeyIs(D: TJsonDocument; K: PJsonNode; const S: string): Boolean;
+var
+  P, Q: PChar;
+  I, N: Integer;
+begin
+  if not K^.InSource or K^.Escaped then
+    Exit(D.NodeString(K) = S);
+  N := K^.Len;
+  if N <> Length(S) then
+    Exit(False);
+  P := PChar(D.FSource) + K^.Start;
+  Q := PChar(S);
+  I := 0;
+  while I + 8 <= N do
+  begin
+    if PQWord(P + I)^ <> PQWord(Q + I)^ then
+      Exit(False);
+    Inc(I, 8);
+  end;
+  while I < N do
+  begin
+    if P[I] <> Q[I] then
+      Exit(False);
+    Inc(I);
+  end;
+  Result := True;
+end;
+
+function IndexOfKey(D: TJsonDocument; N: PJsonNode; const Key: string): Integer;
+var
+  I: Integer;
+begin
+  for I := 0 to N^.Count - 1 do
+    if KeyIs(D, N^.Keys[I], Key) then
+      Exit(I);
+  Result := -1;
+end;
+
+function TJsonValue.Get(const Key: string): TJsonValue;
+var
+  I: Integer;
+begin
+  Result.FDoc := FDoc;
+  Result.FNode := nil;
+  if (FNode = nil) or (FNode^.Kind <> jkObject) then
+    Exit;
+  I := IndexOfKey(FDoc, FNode, Key);
+  if I >= 0 then
+    Result.FNode := FNode^.Items[I];
+end;
+
+function TJsonValue.TryGet(const Key: string; out V: TJsonValue): Boolean;
+begin
+  V := Get(Key);
+  Result := V.FNode <> nil;
+end;
+
+function TJsonValue.Has(const Key: string): Boolean;
+begin
+  Result := Get(Key).FNode <> nil;
+end;
+
+function TJsonValue.At(I: Integer): TJsonValue;
+begin
+  Result.FDoc := FDoc;
+  Result.FNode := nil;
+  if (FNode <> nil) and (FNode^.Kind in [jkArray, jkObject]) and (I >= 0) and
+     (I < FNode^.Count) then
+    Result.FNode := FNode^.Items[I];
+end;
+
+function TJsonValue.KeyAt(I: Integer): string;
+begin
+  Need(jkObject, 'an object');
+  if (I < 0) or (I >= FNode^.Count) then
+    raise EJsonError.Create('no member ' + IntToStr(I));
+  Result := FDoc.NodeString(FNode^.Keys[I]);
+end;
+
+function TJsonValue.GetItem(const K: TJsonKey): TJsonValue;
+begin
+  if K.Index >= 0 then
+    Result := At(K.Index)
+  else
+    Result := Get(K.Name);
+end;
+
+function TJsonValue.Path(const Pointer: string): TJsonValue;
+var
+  I, J, Idx: Integer;
+  Part: string;
+  Ok: Boolean;
+begin
+  Result := Self;
+  if Pointer = '' then
+    Exit;
+  if Pointer[1] <> '/' then
+    raise EJsonError.Create('a JSON Pointer starts with ''/'': ''' + Pointer + '''');
+  I := 2;
+  while Result.FNode <> nil do
+  begin
+    J := I;
+    while (J <= Length(Pointer)) and (Pointer[J] <> '/') do
+      Inc(J);
+    Part := Copy(Pointer, I, J - I);
+    { ~1 is '/', ~0 is '~' }
+    Part := StringReplace(StringReplace(Part, '~1', '/', [rfReplaceAll]),
+                          '~0', '~', [rfReplaceAll]);
+    if Result.FNode^.Kind = jkArray then
+    begin
+      Ok := (Part <> '') and ((Part = '0') or (Part[1] <> '0'));
+      Idx := 0;
+      for J := 1 to Length(Part) do
+        if Ok and (Part[J] in ['0'..'9']) and (Idx < 100000000) then
+          Idx := Idx * 10 + Ord(Part[J]) - Ord('0')
+        else
+          Ok := False;
+      if Ok then
+        Result := Result.At(Idx)
+      else
+        Result.FNode := nil;
+    end
+    else
+      Result := Result.Get(Part);
+    J := I;
+    while (J <= Length(Pointer)) and (Pointer[J] <> '/') do
+      Inc(J);
+    if J > Length(Pointer) then
+      Exit;
+    I := J + 1;
+  end;
+end;
+
+{ --- changes --- }
+
+function TJsonValue.NewChild(K: TJsonKind): PJsonNode;
+begin
+  if FNode = nil then
+    raise EJsonError.Create('the value is not there');
+  Result := FDoc.NewNode(K);
+end;
+
+{ V's node in this document (copied if it is another document's) }
+function TJsonValue.Adopt(const V: TJsonValue): PJsonNode;
+begin
+  if V.FNode = nil then
+    raise EJsonError.Create('the value is not there');
+  if V.FDoc = FDoc then
+    Result := V.FNode
+  else
+    Result := FDoc.CopyNode(V.FDoc, V.FNode);
+end;
+
+procedure Grow(N: PJsonNode);
+var
+  Cap: Integer;
+begin
+  Cap := Length(N^.Items);
+  if N^.Count < Cap then
+    Exit;
+  Cap := Cap * 2 + 4;
+  SetLength(N^.Items, Cap);
+  if N^.Kind = jkObject then
+    SetLength(N^.Keys, Cap);
+end;
+
+procedure TJsonValue.AddNode(N: PJsonNode);
+begin
+  Need(jkArray, 'an array');
+  Grow(FNode);
+  FNode^.Items[FNode^.Count] := N;
+  Inc(FNode^.Count);
+end;
+
+procedure TJsonValue.PutNode(const Key: string; N: PJsonNode);
+var
+  I: Integer;
+  K: PJsonNode;
+begin
+  Need(jkObject, 'an object');
+  I := IndexOfKey(FDoc, FNode, Key);
+  if I >= 0 then
+  begin
+    FNode^.Items[I] := N;
+    Exit;
+  end;
+  Grow(FNode);
+  K := FDoc.NewNode(jkString);
+  K^.Str := Key;
+  FNode^.Keys[FNode^.Count] := K;
+  FNode^.Items[FNode^.Count] := N;
+  Inc(FNode^.Count);
+end;
+
+procedure TJsonValue.Put(const Key: string; const S: string);
+begin
+  PutNode(Key, FDoc.NewString(S).FNode);
+end;
+
+procedure TJsonValue.Put(const Key: string; I: Int64);
+begin
+  PutNode(Key, FDoc.NewInteger(I).FNode);
+end;
+
+procedure TJsonValue.Put(const Key: string; D: Double);
+begin
+  PutNode(Key, FDoc.NewNumber(D).FNode);
+end;
+
+procedure TJsonValue.Put(const Key: string; B: Boolean);
+begin
+  PutNode(Key, FDoc.NewBoolean(B).FNode);
+end;
+
+procedure TJsonValue.Put(const Key: string; const V: TJsonValue);
+begin
+  PutNode(Key, Adopt(V));
+end;
+
+procedure TJsonValue.PutNull(const Key: string);
+begin
+  PutNode(Key, NewChild(jkNull));
+end;
+
+function TJsonValue.PutObject(const Key: string): TJsonValue;
+begin
+  Result := FDoc.Handle(NewChild(jkObject));
+  PutNode(Key, Result.FNode);
+end;
+
+function TJsonValue.PutArray(const Key: string): TJsonValue;
+begin
+  Result := FDoc.Handle(NewChild(jkArray));
+  PutNode(Key, Result.FNode);
+end;
+
+procedure TJsonValue.Add(const S: string);
+begin
+  AddNode(FDoc.NewString(S).FNode);
+end;
+
+procedure TJsonValue.Add(I: Int64);
+begin
+  AddNode(FDoc.NewInteger(I).FNode);
+end;
+
+procedure TJsonValue.Add(D: Double);
+begin
+  AddNode(FDoc.NewNumber(D).FNode);
+end;
+
+procedure TJsonValue.Add(B: Boolean);
+begin
+  AddNode(FDoc.NewBoolean(B).FNode);
+end;
+
+procedure TJsonValue.Add(const V: TJsonValue);
+begin
+  AddNode(Adopt(V));
+end;
+
+procedure TJsonValue.AddNull;
+begin
+  AddNode(NewChild(jkNull));
+end;
+
+function TJsonValue.AddObject: TJsonValue;
+begin
+  Result := FDoc.Handle(NewChild(jkObject));
+  AddNode(Result.FNode);
+end;
+
+function TJsonValue.AddArray: TJsonValue;
+begin
+  Result := FDoc.Handle(NewChild(jkArray));
+  AddNode(Result.FNode);
+end;
+
+function TJsonValue.Delete(const Key: string): Boolean;
+var
+  I, J: Integer;
+begin
+  Need(jkObject, 'an object');
+  I := IndexOfKey(FDoc, FNode, Key);
+  Result := I >= 0;
+  if not Result then
+    Exit;
+  for J := I to FNode^.Count - 2 do
+  begin
+    FNode^.Items[J] := FNode^.Items[J + 1];
+    FNode^.Keys[J] := FNode^.Keys[J + 1];
+  end;
+  Dec(FNode^.Count);
+end;
+
+procedure TJsonValue.Remove(I: Integer);
+var
+  J: Integer;
+begin
+  Need(jkArray, 'an array');
+  if (I < 0) or (I >= FNode^.Count) then
+    raise EJsonError.Create('no element ' + IntToStr(I));
+  for J := I to FNode^.Count - 2 do
+    FNode^.Items[J] := FNode^.Items[J + 1];
+  Dec(FNode^.Count);
+end;
+
+procedure TJsonValue.Clear;
+begin
+  if (FNode <> nil) and (FNode^.Kind in [jkArray, jkObject]) then
+    FNode^.Count := 0;
+end;
+
+{ --- writing values --- }
+
+procedure WriteNode(W: TJsonWriter; D: TJsonDocument; N: PJsonNode);
+var
+  I: Integer;
+  K: PJsonNode;
+begin
+  case N^.Kind of
+    jkNull: W.Null;
+    jkTrue: W.Value(True);
+    jkFalse: W.Value(False);
+    jkNumber:
+      if N^.InSource then
+      begin
+        W.BeforeValue; { (as written) }
+        W.RawChars(PChar(D.FSource) + N^.Start, N^.Len);
+      end
+      else if N^.Str <> '' then
+        W.Raw(N^.Str)
+      else
+        case N^.NumKind of
+          jnInt64: W.Value(N^.Int);
+          jnUInt64: W.ValueUInt64(QWord(N^.Int));
+        else
+          W.Value(N^.Dbl);
+        end;
+    jkString:
+      if N^.InSource then
+      begin
+        { (the source's text: valid JSON, escapes and all) }
+        W.BeforeValue;
+        AddChar(W.FBuf, W.FLen, '"');
+        W.RawChars(PChar(D.FSource) + N^.Start, N^.Len);
+        AddChar(W.FBuf, W.FLen, '"');
+      end
+      else
+        W.Value(N^.Str);
+    jkArray:
+      begin
+        W.BeginArray;
+        for I := 0 to N^.Count - 1 do
+          WriteNode(W, D, N^.Items[I]);
+        W.EndArray;
+      end;
+    jkObject:
+      begin
+        W.BeginObject;
+        for I := 0 to N^.Count - 1 do
+        begin
+          K := N^.Keys[I];
+          if K^.InSource then
+          begin
+            W.BeforeValue;
+            AddChar(W.FBuf, W.FLen, '"');
+            W.RawChars(PChar(D.FSource) + K^.Start, K^.Len);
+            AddChar(W.FBuf, W.FLen, '"');
+            AddChar(W.FBuf, W.FLen, ':');
+            if W.FPretty then
+              AddChar(W.FBuf, W.FLen, ' ');
+            W.FAfterKey := True;
+          end
+          else
+            W.Key(K^.Str);
+          WriteNode(W, D, N^.Items[I]);
+        end;
+        W.EndObject;
+      end;
+  end;
+end;
+
+procedure TJsonValue.WriteTo(W: TJsonWriter);
+begin
+  if FNode = nil then
+    raise EJsonError.Create('the value is not there');
+  WriteNode(W, FDoc, FNode);
+end;
+
+function TJsonValue.ToJson(Pretty: Boolean): string;
+var
+  W: TJsonWriter;
+begin
+  W := TJsonWriter.Create(Pretty);
+  try
+    WriteTo(W);
+    Result := W.Text;
+  finally
+    W.Free;
+  end;
+end;
+
+function JsonItems(const V: TJsonValue): iterator TJsonValue;
+var
+  I: Integer;
+begin
+  for I := 0 to V.Count - 1 do
+    yield V.At(I);
+end;
+
+function JsonMembers(const V: TJsonValue): iterator TJsonMember;
+var
+  I: Integer;
+  M: TJsonMember;
+begin
+  if not V.IsObject then
+    Exit;
+  for I := 0 to V.Count - 1 do
+  begin
+    M.Key := V.KeyAt(I);
+    M.Value := V.At(I);
+    yield M;
   end;
 end;
 

@@ -13,6 +13,12 @@ const
   TokenNames: array[TJsonToken] of string = ('none', '{', '}', '[', ']',
     'key', 'string', 'number', 'true', 'false', 'null', 'end');
 
+function U(const Hex: string): string;
+begin
+  { a \u escape (written in pieces) }
+  Result := '\' + 'u' + Hex;
+end;
+
 procedure Tokens(const S: string);
 var
   R: TJsonReader;
@@ -171,7 +177,7 @@ begin
   Tokens(#10'  {'#10'    "x": 1'#10'  }'#10);
 
   Check('y_object_empty_key', '{"":0}');
-  Check('y_string_unicode', '"é𝄞 caf' + #$C3#$A9 + '"');
+  Check('y_string_unicode', '"' + U('00e9') + '' + U('D834') + '' + U('DD1E') + ' caf' + #$C3#$A9 + '"');
   Check('y_number_minus_zero', '-0');
   Check('y_structure_lonely_null', 'null');
   Check('y_string_escapes', '"\"\\\/\b\f\n\r\t"');
@@ -220,7 +226,7 @@ begin
   Number('4.9406564584124654e-324');
   Number('0.30000000000000004');
 
-  Escaped('"Aé€😀"');
+  Escaped('"' + U('0041') + '' + U('00e9') + '' + U('20ac') + '' + U('d83d') + '' + U('de00') + '"');
   Escaped('"tab\there"');
 
   WriteLn(JsonQuote('say "hi"\' + #10 + #1 + ' and ' + #$C3#$A9));

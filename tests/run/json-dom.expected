@@ -1,0 +1,61 @@
+Ada 36 8
+poeté London
+TRUE FALSE FALSE FALSE
+18446744073709551615 -2000.0 TRUE FALSE
+London math 1 2 FALSE 8
+TRUE
+none -1 TRUE
+math;poeté;
+city="London";zip=null;
+name age tags address scores a/b m~n esc 
+{"name":"Ada","age":36,"tags":["math","poeté"],"address":{"city":"London","zip":null},"scores":[1.5,-2e3,18446744073709551615,0.1],"a/b":1,"m~n":2,"esc":"line\nnext"}
+{
+  "city": "London",
+  "zip": null
+}
+TRUE FALSE
+{"name":"Ada","age":37,"tags":["poeté","new \"one\""],"address":{"city":"London"},"ok":true,"ratio":0.25,"none":null,"list":[1,2.5,{"k":"v"}]}
+{
+  "name": "Ada",
+  "age": 37,
+  "tags": [
+    "poeté",
+    "new \"one\""
+  ],
+  "address": {
+    "city": "London"
+  },
+  "ok": true,
+  "ratio": 0.25,
+  "none": null,
+  "list": [
+    1,
+    2.5,
+    {
+      "k": "v"
+    }
+  ]
+}
+{"copied":{"city":"London"},"pi":3.141592653589793,"third":0.3333333333333333,"big":1e+300,"small":4.94065645841247e-324,"int":-9223372036854775808,"whole":2.0,"empty":[],"nothing":{}}
+{
+  "copied": {
+    "city": "London"
+  },
+  "pi": 3.141592653589793,
+  "third": 0.3333333333333333,
+  "big": 1e+300,
+  "small": 4.94065645841247e-324,
+  "int": -9223372036854775808,
+  "whole": 2.0,
+  "empty": [],
+  "nothing": {}
+}
+[1,{"a":[]},"x\u0041",-0.0,1E2]
+TRUE
+trailing comma at line 1 column 13
+expected a number, found a string
+expected an Int64, found 1.5
+expected a string, but the value is not there
+expected an array, found an object
+TRUE FALSE FALSE
+0.1 100.0 1e+21 -1.5e-07 123456789.125

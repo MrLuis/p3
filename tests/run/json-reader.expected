@@ -48,7 +48,7 @@ n_too_deep: recursion limit exceeded (more than 512 nested arrays and objects) a
 n_number_too_large: number out of range at line 1 column 1 [0]
 4.9406564584124654e-324 -> Double  4.9406564584124654417657E-324
 0.30000000000000004 -> Double  3.0000000000000004440892E-001
-"Aé€😀" -> 41 C3 A9 E2 82 AC F0 9F 98 80
+"\u0041\u00e9\u20ac\ud83d\ude00" -> 41 C3 A9 E2 82 AC F0 9F 98 80
 "tab\there" -> 74 61 62 09 68 65 72 65
 "say \"hi\"\\\n\u0001 and é"
 TRUE FALSE
