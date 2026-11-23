@@ -80,6 +80,11 @@ examples are in the reference.
   before a type, field or method; `T = partial record|class` declared in
   pieces; and generators, programs that read a description of the types
   marked with an attribute and write Pascal for them (see below).
+- **Compiletime functions**: `const Table = BuildTable;` computed while
+  compiling (see below).
+- **JSON**: unit `json`, after Rust's sonic-rs: a pull reader, documents,
+  lookup of one value without parsing the rest, and typed reading and
+  writing generated at build time (see below).
 
 ## Source generators
 
@@ -183,6 +188,59 @@ can be an ordinal, real or string type, an enumeration, or an array or
 record of these (sets not yet), declared in the program or its units'
 sources. A function may now also return a static array (Free Pascal does).
 `--emit-ast` does not compute them.
+
+## JSON
+
+Unit `json` reads and writes JSON, after Rust's
+[sonic-rs](https://github.com/cloudwego/sonic-rs):
+
+```pascal
+uses json;
+
+var
+  D: TJsonDocument;
+begin
+  D := JsonParse('{"users": [{"name": "Ada", "langs": ["en", "fr"]}]}');
+  WriteLn(D.Root['users'][0]['name'].AsString);      // Ada
+  D.Root['users'][0]['langs'].Add('de');
+  WriteLn(D.ToJson(True));                            // pretty
+  D.Free;
+  WriteLn(JsonGet(Text, ['users', 0, 'name']).AsString);  // one value, lazily
+  WriteLn(JsonGetPath(Text, '/users/0/name').AsString);   // a JSON Pointer
+end.
+```
+
+- **`TJsonReader`**: a pull reader. `Read` moves to the next token and
+  checks the grammar; `AsString`, `AsInt64`, `AsDouble`, ... read it;
+  `Skip` passes over a value.
+- **`TJsonDocument`, `TJsonValue`**: a document in blocks of nodes owned by
+  the document. Strings and numbers stay in the source text until read, and
+  are written back as they were. Values are accessed with `V['key'][0]`,
+  `Path('/a/0')`, `Get`, `TryGet` and `As...Def`, and changed with `Put`,
+  `Add`, `Delete` and `Remove`. `JsonItems` and `JsonMembers` iterate.
+- **`JsonGet`, `JsonGetPath`, `JsonArrayItems`, `JsonObjectItems`**: lazy
+  access. A path is followed by skipping everything else (its brackets and
+  strings are checked, not the rest), and a `TJsonLazy` is read when asked.
+- **`TJsonWriter`**: compact or pretty output; doubles are written as the
+  shortest text that reads back the same.
+- **Typed JSON** through the library's json generator (`--generator=json`,
+  or `"generators": ["json"]` in `p3.json`). A record, class or enumeration
+  marked `[Json]` gets `ToJson`, `FromJson`, `JsonWrite` and `JsonRead`,
+  which read straight into the value. Fields can be numbers, strings,
+  booleans, dynamic arrays and `[Json]` types; `[Skip]` and
+  `[JsonName('n')]` are supported. Any other field type is an error at the
+  field, while compiling.
+- **Numbers and errors**:
+  - Integers are exact (`Int64`, or `UInt64`). Other numbers convert to the
+    nearest double (Eisel-Lemire for up to 19 digits).
+  - Strings are checked as UTF-8.
+  - Errors raise `EJsonError` with a line, a column and a serde_json-style
+    message.
+- **Speed**: text is scanned 8 bytes at a time. On the usual benchmark files
+  it parses faster than serde_json on strings and structure, but slower on
+  numbers and slower than sonic-rs's SIMD parser. Results are in
+  [`bench/json`](bench/json/README.md), and an example is in
+  [`examples/json`](examples/json/README.md).
 
 ## Testing
 

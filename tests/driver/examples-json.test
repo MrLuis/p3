@@ -1,0 +1,22 @@
+; examples/json: unit json and the library's json generator, built from its
+; p3.json.
+; RUN: rm -rf %t && mkdir -p %t && cp -R %S/../../examples/json %t/
+; RUN: rm -rf %t/json/bin %t/json/gen
+; RUN: cd %t/json && %p3-project 2>&1 | count 0
+; RUN: %t/json/bin/jsontool team %t/json/data/team.json | FileCheck --check-prefix=TEAM %s
+; RUN: %t/json/bin/jsontool get %t/json/data/team.json /members/1/name | FileCheck --check-prefix=GET %s
+; RUN: %t/json/bin/jsontool stats %t/json/data/team.json | FileCheck --check-prefix=STATS %s
+; RUN: %t/json/bin/jsontool compact %t/json/data/team.json > %t/compact.json
+; RUN: %t/json/bin/jsontool pretty %t/compact.json > %t/pretty.json
+; RUN: %t/json/bin/jsontool compact %t/pretty.json | diff - %t/compact.json
+; RUN: printf '{"a": [1,\n  2,]}' > %t/bad.json
+; RUN: not %t/json/bin/jsontool check %t/bad.json | FileCheck --check-prefix=BAD %s
+; TEAM: compilers: 3 members, budget 125000.50
+; TEAM-NEXT: Ada (Lead, since 2019) parsing LLVM
+; TEAM-NEXT: Niklaus (Senior, since 2021) Pascal
+; TEAM-NEXT: Grace (Junior, since 2025)
+; TEAM-NEXT: {"name":"Grace","level":"Senior","started":2025,"skills":[]}
+; GET: Niklaus
+; STATS: string 10
+; STATS: depth 5
+; BAD: bad.json:2:5: trailing comma

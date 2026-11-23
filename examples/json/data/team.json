@@ -1,0 +1,9 @@
+{
+  "team": "compilers",
+  "budget": 125000.5,
+  "members": [
+    {"name": "Ada", "level": "Lead", "started": 2019, "skills": ["parsing", "LLVM"]},
+    {"name": "Niklaus", "level": "Senior", "started": 2021, "skills": ["Pascal"]},
+    {"name": "Grace", "level": "Junior", "started": 2025, "skills": []}
+  ]
+}

@@ -46,6 +46,7 @@ that. Executables go to the project's `bin/`, which git ignores.
 | `hello` | a program with a class in a unit of its own and a unit of p3's library (`sysutils`) |
 | `httpasyncserver` | an HTTP/1.1 server on the async engine: `netasync` tasks (one per connection, keep-alive), HTTP by `nethttp`, routes by `netrouter`, a handler that waits; see its [README](httpasyncserver/README.md) |
 | `httploopserver` | the same site on the loop engine: the `netloop` unit's per-thread epoll/kqueue event loops, HTTP by `nethttp`, routes by `netrouter`; see its [README](httploopserver/README.md) |
+| `json` | unit `json` (after sonic-rs): a document parsed and written, a value found by a JSON Pointer without parsing the rest, typed records through the library's json generator; see its [README](json/README.md) |
 | `generators` | source generators and compiletime functions: `[EnumNames]` gives an enumeration `ToString`/`TryParse`, `[Json]` gives records `ToJson`, a CRC table computed by the compiler; see its [README](generators/README.md) |
 | `sqlite` | SQLite through `external` routines, a small wrapper with tagged SQL templates, tuples and an enumerator; see its [README](sqlite/README.md) |
 | `netasync` | a concurrent TCP echo server built on the `netasync` unit: async/await sockets, `scope`/`spawn`/`detached`, unit-library `threading`; see its [README](netasync/README.md) |

@@ -1,0 +1,12 @@
+{
+  "name": "json",
+  "version": "0.1.0",
+  "description": "A small JSON tool on unit json: pretty, get, check, stats, typed records",
+  "main": "src/jsontool.pas",
+  "output": "bin/jsontool",
+  "mode": "objfpc",
+  "unitPaths": ["src/lib"],
+  "generators": ["json"],
+  "generatedDir": "gen",
+  "optimize": 2
+}

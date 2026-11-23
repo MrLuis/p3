@@ -13,8 +13,8 @@ generator JsonGenerator for Json;
     class function FromJson(const S: AnsiString): T; static;
 
   (JsonRead starts at the value's first token, read already). An
-  enumeration gets a type helper with JsonWrite and JsonRead (its values by
-  name).
+  enumeration gets a type helper with JsonWrite, JsonRead and ToString (its
+  values by name).
 
   Fields: integers, QWord/UInt64, reals, strings, booleans, dynamic arrays
   of these and of [Json] types, and [Json] types (a class: null for nil).
@@ -235,6 +235,7 @@ begin
                 '); static;');
   W.Declaration('    class function JsonRead(R: TJsonReader): ' + T.Name +
                 '; static;');
+  W.Declaration('    function ToString: AnsiString;');
   W.Declaration('  end;');
 
   W.Line('class procedure ' + H + '.JsonWrite(W: TJsonWriter; V: ' + T.Name + ');');
@@ -244,6 +245,17 @@ begin
   begin
     V := T.Values[I].Name;
     W.Line('    ' + T.Name + '.' + V + ': W.Value(' + Quoted(V) + ');');
+  end;
+  W.Line('  end;');
+  W.Line('end;');
+
+  W.Line('function ' + H + '.ToString: AnsiString;');
+  W.Line('begin');
+  W.Line('  case Self of');
+  for I := 0 to Length(T.Values) - 1 do
+  begin
+    V := T.Values[I].Name;
+    W.Line('    ' + T.Name + '.' + V + ': Result := ' + Quoted(V) + ';');
   end;
   W.Line('  end;');
   W.Line('end;');
