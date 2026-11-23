@@ -344,7 +344,10 @@ begin
   for i := 0 to s.libraryPaths.count - 1 do
     addLinkerArg('-L' + projectPath(s, nameStr(PName(listGet(s.libraryPaths, i)))));
   for i := 0 to s.generators.count - 1 do
-    listAdd(generators, intern(projectPath(s, nameStr(PName(listGet(s.generators, i))))));
+    if isLibraryGenerator(nameStr(PName(listGet(s.generators, i)))) then
+      listAdd(generators, listGet(s.generators, i)) { (a library one: its name) }
+    else
+      listAdd(generators, intern(projectPath(s, nameStr(PName(listGet(s.generators, i))))));
   if s.hasGeneratedDir and (generatedDir = '') then
     generatedDir := projectPath(s, s.generatedDir);
   if s.hasGeneratorTimeout and not givenGeneratorTimeout then

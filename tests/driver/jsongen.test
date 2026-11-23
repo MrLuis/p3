@@ -1,0 +1,30 @@
+; The json generator of p3's library (--generator=json, or "generators":
+; ["json"] in p3.json): records, classes and enumerations marked [Json]
+; get JsonWrite/JsonRead/ToJson/FromJson, which write and read them
+; straight with unit json's writer and reader.
+; RUN: rm -rf %t.gen
+; RUN: %p3 --mode=objfpc --generator=json --generated-dir=%t.gen %S/Inputs/jsongen/main.pas -o %t
+; RUN: %t | FileCheck %s
+; RUN: FileCheck --check-prefix=INTF %s < %t.gen/people.intf.inc
+; A field the generator cannot write: an error at the field.
+; RUN: not %p3 --mode=objfpc --generator=json --generated-dir=%t.bad %S/Inputs/jsongen/bad.pas -o %t.x 2>&1 | FileCheck --check-prefix=BAD %s
+; A library generator named in a project file.
+; RUN: rm -rf %t.proj && mkdir %t.proj && cp %S/Inputs/jsongen/main.pas %S/Inputs/jsongen/people.pas %t.proj
+; RUN: printf '{"main": "main.pas", "output": "out/main", "mode": "objfpc", "generators": ["json"]}' > %t.proj/p3.json
+; RUN: cd %t.proj && %p3-project
+; RUN: %t.proj/out/main | FileCheck %s
+; RUN: not %p3 --mode=objfpc --generator=nosuch %S/Inputs/jsongen/main.pas -o %t.x 2>&1 | FileCheck --check-prefix=MISSING %s
+; CHECK: {"Id":7,"Name":"Ada \"the Countess\"","Score":99.5,"Active":true,"Big":18446744073709551615,"Role":"Editor","Home":{"City":"London","zip_code":"NW1"},"Tags":["math","poetry"],"Matrix":{{\[\[}}1,2],[3]],"Others":[{"City":"Paris","zip_code":""}]}
+; CHECK-NEXT: TRUE Ada "the Countess" TRUE 3 Paris 18446744073709551615
+; CHECK-NEXT: Bo 0 0 TRUE TRUE
+; CHECK: "Lead": null,
+; CHECK: core lead TRUE NW1
+; CHECK-NEXT: unknown TRole value 'Owner' at line 1 column 10
+; CHECK-NEXT: expected a number, found a string at line 1 column 8
+; CHECK-NEXT: expected an object (TPerson), found an array at line 1 column 1
+; INTF: TPerson = partial record
+; INTF: class function JsonRead(R: TJsonReader): TPerson; static;
+; INTF: TRoleJson = type helper for TRole
+; BAD: bad.pas:9:5: error: a field of type Pointer cannot be read or written as JSON
+; BAD: bad.pas:10:5: error: a field of type array[1..3] of Integer cannot be read or written as JSON
+; MISSING: cannot open generator '{{.*}}generators/nosuch.pas'

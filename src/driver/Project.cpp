@@ -7,6 +7,7 @@
 //===----------------------------------------------------------------------===//
 
 #include "p3/Driver/Project.h"
+#include "p3/Driver/Generators.h"
 #include "p3/Basic/Diagnostics.h"
 #include "p3/Basic/SourceManager.h"
 
@@ -633,8 +634,8 @@ bool p3::applyProjectFile(CompilerOptions &Opts, SourceManager &SM,
     Opts.IncludeDirs.push_back(projectPath(Base, P));
   for (const std::string &P : S.LibraryPaths)
     Opts.LibraryDirs.push_back(projectPath(Base, P));
-  for (const std::string &P : S.Generators)
-    Opts.Generators.push_back(projectPath(Base, P));
+  for (const std::string &P : S.Generators) // (a library one: its name)
+    Opts.Generators.push_back(isLibraryGenerator(P) ? P : projectPath(Base, P));
   if (S.GeneratedDir && Opts.GeneratedDir.empty())
     Opts.GeneratedDir = projectPath(Base, *S.GeneratedDir);
   if (S.GeneratorTimeout && !Opts.GivenGeneratorTimeout)

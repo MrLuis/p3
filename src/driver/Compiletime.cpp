@@ -749,7 +749,8 @@ bool Evaluator::evaluate(FileInfo &F, TopDecl &X, RoutineDecl *Fn,
     Args.push_back("-d" + D);
   for (const std::string &G : Opts.Generators) {
     llvm::SmallString<256> A(G);
-    fs::make_absolute(A);
+    if (!isLibraryGenerator(G))
+      fs::make_absolute(A);
     Args.push_back("--generator=" + std::string(A));
   }
   Args.push_back("--generator-timeout=" +

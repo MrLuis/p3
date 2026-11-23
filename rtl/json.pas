@@ -113,6 +113,8 @@ type
     property Text: string read FText;
     { raises EJsonError at offset At }
     procedure Error(const Reason: string; At: Integer);
+    { raises 'expected What, found <the current token>' }
+    procedure Expected(const What: string);
   end;
 
   { --- documents ---
@@ -661,6 +663,22 @@ begin
   raise E;
 end;
 
+const
+  TokenKinds: array[TJsonToken] of string = ('nothing', 'an object',
+    'the end of an object', 'an array', 'the end of an array', 'a key',
+    'a string', 'a number', 'a boolean', 'a boolean', 'null', 'the end');
+
+{ the current token is not What: an error at it }
+procedure TJsonReader.Expected(const What: string);
+var
+  At: Integer;
+begin
+  At := FStart;
+  if FToken in [jtString, jtKey] then
+    Dec(At); { (its quote) }
+  Fail('expected ' + What + ', found ' + TokenKinds[FToken], At);
+end;
+
 procedure TJsonReader.Error(const Reason: string; At: Integer);
 begin
   Fail(Reason, At);
@@ -1147,7 +1165,7 @@ end;
 function TJsonReader.AsString: string;
 begin
   if not (FToken in [jtString, jtKey]) then
-    Fail('not a string', FStart);
+    Expected('a string');
   if not FEscaped then
     Exit(Copy(FText, FStart + 1, FStop - FStart));
   Result := JsonDecode(FP, FStart, FStop);
@@ -1189,7 +1207,7 @@ var
   Buf: string;
 begin
   if FToken <> jtNumber then
-    Fail('not a number', FStart);
+    Expected('a number');
   if FNumParsed then
     Exit;
   FNumParsed := True;
@@ -1347,7 +1365,7 @@ begin
     jtTrue: Result := True;
     jtFalse: Result := False;
   else
-    Fail('not a boolean', FStart);
+    Expected('a boolean');
   end;
 end;
 

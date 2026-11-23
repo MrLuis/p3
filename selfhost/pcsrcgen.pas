@@ -13,7 +13,7 @@ unit pcsrcgen;
 
 interface
 
-uses pcsys, pcutil, pcdiag, pcast, pclex, pcparse;
+uses pcsys, pcutil, pcdiag, pcast, pclex, pcparse, pcdriver;
 
 { Appends s with \, tab and newline escaped. }
 procedure addEscaped(var b: TBuf; const s: string);
@@ -35,6 +35,11 @@ function spliceFor(const path: string; var data: PCharArray;
   has syntax errors. }
 function modelOfFile(const path: string; mode: TLangMode; const attr: string;
                      var model: TBuf): boolean;
+{ A generator of p3's library: a name without a directory or an extension
+  (--generator=json), found at <unit library>/generators/<name>.pas. }
+function isLibraryGenerator(const path: string): boolean;
+{ The file of generator path (a library generator's, or path itself). }
+function generatorFile(const path: string): string;
 { Makes data (len bytes followed by #0) the text of the file path, read by
   spliceFor (in place of what it had). }
 procedure addSplice(const path: string; data: PCharArray; len: int64);
@@ -589,6 +594,30 @@ type
 var
   splices: TPtrList; { of PSplice }
 
+function isLibraryGenerator(const path: string): boolean;
+var
+  i: longint;
+  r: boolean;
+begin
+  r := path <> '';
+  for i := 1 to length(path) do
+    if (path[i] = '/') or (path[i] = '\') then
+      r := false;
+  if (length(path) >= 4) and (copy(path, length(path) - 3, 4) = '.pas') then
+    r := false;
+  if (length(path) >= 3) and (copy(path, length(path) - 2, 3) = '.pp') then
+    r := false;
+  isLibraryGenerator := r;
+end;
+
+function generatorFile(const path: string): string;
+begin
+  if isLibraryGenerator(path) then
+    generatorFile := pathJoin(pathJoin(findUnitLibrary, 'generators'), path + '.pas')
+  else
+    generatorFile := path;
+end;
+
 procedure addSplice(const path: string; data: PCharArray; len: int64);
 var
   i: longint;
@@ -878,7 +907,7 @@ begin
   listInit(gens);
   for i := 0 to generators.count - 1 do
   begin
-    p := nameStr(PName(listGet(generators, i)));
+    p := generatorFile(nameStr(PName(listGet(generators, i))));
     gi := PGenInfo(arenaAlloc(sizeof(TGenInfo)));
     gi^.path := p;
     gi^.name := '';

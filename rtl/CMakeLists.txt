@@ -25,4 +25,17 @@ foreach(unit ${P3_RTL_UNITS})
   list(APPEND P3_RTL_OBJECTS ${P3_RTL_DIR}/${unit}.o)
 endforeach()
 
+# Source generators of the library (--generator=NAME, "generators":
+# ["NAME"] in p3.json): <bindir>/../lib/pascal/generators/NAME.pas.
+set(P3_RTL_GENERATORS json)
+foreach(gen ${P3_RTL_GENERATORS})
+  add_custom_command(
+    OUTPUT ${P3_RTL_DIR}/generators/${gen}.pas
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            ${CMAKE_CURRENT_SOURCE_DIR}/generators/${gen}.pas
+            ${P3_RTL_DIR}/generators/${gen}.pas
+    DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/generators/${gen}.pas)
+  list(APPEND P3_RTL_SOURCES ${P3_RTL_DIR}/generators/${gen}.pas)
+endforeach()
+
 add_custom_target(rtl ALL DEPENDS ${P3_RTL_SOURCES} ${P3_RTL_OBJECTS})

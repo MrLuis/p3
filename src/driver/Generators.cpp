@@ -16,6 +16,7 @@
 //===----------------------------------------------------------------------===//
 
 #include "p3/Driver/Generators.h"
+#include "p3/Driver/Linker.h"
 
 #include "p3/AST/AST.h"
 #include "p3/AST/ASTContext.h"
@@ -252,6 +253,20 @@ std::string p3::buildModel(const SourceManager &SM, Decl *Root,
 // The driver side: build and run the generators, splice in what they write
 //===----------------------------------------------------------------------===//
 
+bool p3::isLibraryGenerator(llvm::StringRef Path) {
+  return !Path.empty() && Path.find('/') == llvm::StringRef::npos &&
+         Path.find('\\') == llvm::StringRef::npos &&
+         !Path.ends_with(".pas") && !Path.ends_with(".pp");
+}
+
+std::string p3::generatorFile(llvm::StringRef Path) {
+  if (!isLibraryGenerator(Path))
+    return Path.str();
+  llvm::SmallString<256> F(findUnitLibrary());
+  llvm::sys::path::append(F, "generators", Path + ".pas");
+  return std::string(F);
+}
+
 std::string p3::absolutePath(llvm::StringRef P) {
   llvm::SmallString<256> A(P);
   llvm::sys::fs::make_absolute(A);
@@ -472,7 +487,8 @@ bool Driver::runGenerators() {
 
   // --- the generators: header, then build ---------------------------------
   std::vector<GeneratorInfo> Gens;
-  for (const std::string &Path : Opts.Generators) {
+  for (const std::string &Given : Opts.Generators) {
+    std::string Path = generatorFile(Given);
     auto FIDOrErr = SM.loadFile(Path);
     if (!FIDOrErr)
       return Fail("cannot open generator '" + Path +

@@ -29,6 +29,15 @@
 ; RUN: FileCheck --check-prefix=FRESH %s < %t.proj/generated/customer.impl.inc
 ; RUN: cd %t.proj && not env P3_RUNTIME_LIB=%p3-runtime-lib %t.p3 --no-project --mode=objfpc --generator=%S/../driver/Inputs/generators/slowgen.pas --generator-timeout=1 --generated-dir=%t.slow main.pas -o %t.slow.exe 2>&1 | FileCheck --check-prefix=SLOW %s
 ; RUN: not env P3_RUNTIME_LIB=%p3-runtime-lib %t.p3 --project=%S/../driver/Inputs/generators-project/badtimeout.json 2>&1 | FileCheck --check-prefix=BAD %s
+; The json generator of the library: the same code and output.
+; RUN: rm -rf %t.jcpp %t.jself
+; RUN: %p3 --mode=objfpc --generator=json --generated-dir=%t.jcpp %S/../driver/Inputs/jsongen/main.pas -o %t.jcpp.exe
+; RUN: env P3_RUNTIME_LIB=%p3-runtime-lib %t.p3 --mode=objfpc --generator=json --generated-dir=%t.jself %S/../driver/Inputs/jsongen/main.pas -o %t.jself.exe
+; RUN: diff %t.jcpp/people.intf.inc %t.jself/people.intf.inc
+; RUN: diff %t.jcpp/people.impl.inc %t.jself/people.impl.inc
+; RUN: %t.jcpp.exe > %t.jcpp.out
+; RUN: %t.jself.exe > %t.jself.out
+; RUN: diff %t.jcpp.out %t.jself.out
 ; CACHED: { cached }
 ; FRESH-NOT: { cached }
 ; FRESH: "Age"

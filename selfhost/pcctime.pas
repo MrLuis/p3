@@ -856,7 +856,7 @@ var
   o, locals, code, cmd, errText, outText: TBuf;
   curLine, curCol: longint;
   kw, err, genDir, ctDir, base, srcPath, exe, outPath, errPath, stampPath,
-    self, fileDir, inputDir, stamp: string;
+    self, fileDir, inputDir, stamp, a: string;
   key: int64;
   exeData: PCharArray;
   exeLen: int64;
@@ -1120,7 +1120,10 @@ begin
   for i := 0 to optGenerators.count - 1 do
   begin
     bufAdd(cmd, ' ');
-    addQuoted(cmd, '--generator=' + absPath(nameStr(PName(listGet(optGenerators, i)))));
+    a := nameStr(PName(listGet(optGenerators, i)));
+    if not isLibraryGenerator(a) then
+      a := absPath(a);
+    addQuoted(cmd, '--generator=' + a);
   end;
   bufAdd(cmd, ' --generator-timeout=');
   bufAddInt(cmd, optTimeout);

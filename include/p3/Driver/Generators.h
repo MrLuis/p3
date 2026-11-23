@@ -29,6 +29,12 @@ class Decl;
 std::string buildModel(const SourceManager &SM, Decl *Root,
                        llvm::StringRef AttrLower, unsigned &NumTypes);
 
+/// A generator of p3's library: a name without a directory or an extension
+/// (--generator=json), found at <unit library>/generators/<name>.pas.
+bool isLibraryGenerator(llvm::StringRef Path);
+/// The file of generator Path (a library generator's, or Path itself).
+std::string generatorFile(llvm::StringRef Path);
+
 /// P made absolute, without . and .. (the key of Driver's splices).
 std::string absolutePath(llvm::StringRef P);
 
