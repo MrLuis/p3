@@ -1,0 +1,40 @@
+; Compiletime constants: const X = F(args), F a compiletime function, at
+; the level of a program or unit. The compiler builds and runs a program
+; that prints F(args) as a Pascal constant (in <generated dir>/.ct), puts
+; the value in place of the call, and compiles the new text.
+; RUN: rm -rf %t.gen
+; RUN: %p3 --mode=objfpc --generated-dir=%t.gen %S/Inputs/compiletime/main.pas -o %t
+; RUN: %t | FileCheck --check-prefix=OUT %s
+; RUN: FileCheck --check-prefix=PROG %s < %t.gen/.ct/main.I1.pas
+; The output is reused while the program, the sources and the compiler are
+; unchanged (Small, computed from F30, is computed again).
+; RUN: sed -i.bak 's/@p3ct@832040/@p3ct@1234/' %t.gen/.ct/main.F30.out
+; RUN: %p3 --mode=objfpc --generated-dir=%t.gen %S/Inputs/compiletime/main.pas -o %t
+; RUN: %t | FileCheck --check-prefix=CACHED %s
+; Errors: a function outside the subset (diagnostics at the source's own
+; lines), a runtime error, the time limit, a constant in a routine.
+; RUN: not %p3 --mode=objfpc --generated-dir=%t.gen %S/Inputs/compiletime/bad.pas -o %t.x 2>&1 | FileCheck --check-prefix=BAD %s
+; RUN: not %p3 --mode=objfpc --generated-dir=%t.gen %S/Inputs/compiletime/fail.pas -o %t.x 2>&1 | FileCheck --check-prefix=FAIL %s
+; RUN: not %p3 --mode=objfpc --generated-dir=%t.gen --generator-timeout=1 %S/Inputs/compiletime/slow.pas -o %t.x 2>&1 | FileCheck --check-prefix=SLOW %s
+; RUN: not %p3 --mode=objfpc --generated-dir=%t.gen %S/Inputs/compiletime/nested.pas -o %t.x 2>&1 | FileCheck --check-prefix=NESTED %s
+; A unit compiled alone: its interface file has the values.
+; RUN: rm -rf %t.sep && mkdir %t.sep && cp %S/Inputs/compiletime/tables.pas %t.sep
+; RUN: %p3 --mode=objfpc --generated-dir=%t.sep/gen -c %t.sep/tables.pas -o %t.sep/tables.o
+; RUN: FileCheck --check-prefix=P3I %s < %t.sep/tables.p3i
+; OUT: 1996959894 755167117
+; OUT-NEXT: 832040 8 8
+; OUT-NEXT: it's C
+; OUT-NEXT: x Blue TRUE q TRUE
+; OUT-NEXT: 9 25 hello, unit hello, program Wed
+; PROG: program p3ct; uses tables;
+; PROG: function Info(k: integer): TInfo; compiletime;
+; PROG: p3ct_out(Info(2));
+; CACHED: 1234 1 1
+; BAD: bad.pas:6:3: error: compiletime function 'F' cannot call 'writeln'
+; BAD: bad.pas:7:8: error: compiletime function 'F' cannot use variable 'g'
+; BAD: bad.pas:10:3: error: cannot compute constant 'X': the program that computes it ({{.*}}bad.X.pas) did not compile
+; FAIL: fail.pas:12:3: error: cannot compute constant 'X': 'F' failed (exit status 2): Runtime error: array index out of bounds at {{.*}}fail.pas:8:5
+; SLOW: slow.pas:12:3: error: cannot compute constant 'X': 'Loop' ran longer than 1 seconds
+; NESTED: nested.pas:8:7: error: the value of compiletime function 'Twice' is computed only for a constant declared at the level of a program or unit
+; P3I: Sq: TSquares = (1, 4, 9, 16, 25);
+; P3I: Hello = 'hello, unit';

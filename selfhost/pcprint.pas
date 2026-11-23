@@ -886,6 +886,8 @@ begin
           bufAdd(outBuf, ' generic<' + intToStr(d^.typeParams.count) + '>');
         if d^.isInline then
           bufAdd(outBuf, ' inline');
+        if d^.isCompiletime then
+          bufAdd(outBuf, ' compiletime');
         if d^.callConv <> ccDefault then
           bufAdd(outBuf, ' ' + callConvName(d^.callConv));
         overloadNumber(d);

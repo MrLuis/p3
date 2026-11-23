@@ -7,7 +7,7 @@
 ; selfhost/README.md.)
 ; REQUIRES: selfhost-build
 ; RUN: python3 %S/../../utils/gen-selfhost-tables.py --check
-; RUN: python3 %S/../../utils/selfhost-lint.py %S/../../selfhost/pcsys.pas %S/../../selfhost/pcutil.pas %S/../../selfhost/pcdiag.pas %S/../../selfhost/pclex.pas %S/../../selfhost/pcast.pas %S/../../selfhost/pctypes.pas %S/../../selfhost/pcscope.pas %S/../../selfhost/pcsema.pas %S/../../selfhost/pcsemastmt.inc %S/../../selfhost/pcparse.pas %S/../../selfhost/pcprint.pas %S/../../selfhost/pcir.pas %S/../../selfhost/pcgen.pas %S/../../selfhost/pcgenstmt.inc %S/../../selfhost/pcgendbg.inc %S/../../selfhost/pcdriver.pas %S/../../selfhost/pcllvm.pas %S/../../selfhost/pcsrcgen.pas %S/../../selfhost/p3.pas
+; RUN: python3 %S/../../utils/selfhost-lint.py %S/../../selfhost/pcsys.pas %S/../../selfhost/pcutil.pas %S/../../selfhost/pcdiag.pas %S/../../selfhost/pclex.pas %S/../../selfhost/pcast.pas %S/../../selfhost/pctypes.pas %S/../../selfhost/pcscope.pas %S/../../selfhost/pcsema.pas %S/../../selfhost/pcsemastmt.inc %S/../../selfhost/pcparse.pas %S/../../selfhost/pcprint.pas %S/../../selfhost/pcir.pas %S/../../selfhost/pcgen.pas %S/../../selfhost/pcgenstmt.inc %S/../../selfhost/pcgendbg.inc %S/../../selfhost/pcdriver.pas %S/../../selfhost/pcllvm.pas %S/../../selfhost/pcsrcgen.pas %S/../../selfhost/pcctime.pas %S/../../selfhost/p3.pas
 ; RUN: %p3 --mode=tp %selfhost-flags -I %S/../../selfhost %S/../../selfhost/p3.pas -o %t.p3
 ; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-tokens --ref p3 --new %t.p3 %S/.. %S/../../selfhost | FileCheck %s
 ; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-parse-tree --ref p3 --new %t.p3 %S/.. %S/../../selfhost | FileCheck %s

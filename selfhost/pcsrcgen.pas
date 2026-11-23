@@ -35,6 +35,24 @@ function spliceFor(const path: string; var data: PCharArray;
   has syntax errors. }
 function modelOfFile(const path: string; mode: TLangMode; const attr: string;
                      var model: TBuf): boolean;
+{ Makes data (len bytes followed by #0) the text of the file path, read by
+  spliceFor (in place of what it had). }
+procedure addSplice(const path: string; data: PCharArray; len: int64);
+
+{ Helpers shared with pcctime (compiletime constants). }
+const
+  fnvSeed = -3750763034362895579; { 0xcbf29ce484222325 }
+function absPath(const path: string): string;
+procedure addQuoted(var b: TBuf; const s: string);
+function runCommand(var cmd: TBuf): longint;
+function readWhole(const path: string; var data: PCharArray; var len: int64): boolean;
+function writeBuf(const path: string; const b: TBuf): boolean;
+function fnvBytes(p: PCharArray; len: int64; seed: int64): int64;
+function fnvString(const s: string; seed: int64): int64;
+function hex16(h: int64): string;
+function stampIs(const path, value: string): boolean;
+procedure writeStamp(const path, value: string);
+function stem(const path: string): string;
 
 implementation
 
@@ -469,9 +487,6 @@ end;
 
 { --- Caches: the hash is FNV-1a over the bytes, as the interface files' --- }
 
-const
-  fnvSeed = -3750763034362895579; { 0xcbf29ce484222325 }
-
 function fnvBytes(p: PCharArray; len: int64; seed: int64): int64;
 var
   i: int64;
@@ -563,6 +578,27 @@ type
 
 var
   splices: TPtrList; { of PSplice }
+
+procedure addSplice(const path: string; data: PCharArray; len: int64);
+var
+  i: longint;
+  a: PName;
+  sp: PSplice;
+begin
+  a := intern(absPath(path));
+  for i := 0 to splices.count - 1 do
+    if PSplice(listGet(splices, i))^.path = a then
+    begin
+      PSplice(listGet(splices, i))^.data := data;
+      PSplice(listGet(splices, i))^.len := len;
+      exit;
+    end;
+  sp := PSplice(arenaAlloc(sizeof(TSplice)));
+  sp^.path := a;
+  sp^.data := data;
+  sp^.len := len;
+  listAdd(splices, sp);
+end;
 
 function spliceFor(const path: string; var data: PCharArray;
                    var len: int64): boolean;

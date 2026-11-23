@@ -10,6 +10,11 @@ interface
 
 uses pcsys, pcutil, pcdiag, pclex, pcast, pctypes, pcscope, pcparse;
 
+var
+  { const X = F(args) (F compiletime) at the level of a program or unit was
+    not computed (--emit-ast): X is left without a value, quietly }
+  semaCompiletimeDeferred: boolean;
+
 { Checks the units (dependencies first) and the program. Returns true if
   they are valid. }
 function semaCheck(prog: PDecl; const units: TPtrList; m: TLangMode;
@@ -1492,9 +1497,187 @@ begin
     curRoutine^.canonical^.usesManaged := true;
 end;
 
+{ --- compiletime functions ---
+  A compiletime function (and the routines nested in it) runs while
+  compiling: no I/O, pointers, objects, procedural values or files, no
+  global variables (typed constants can be read), and it calls only
+  compiletime functions, its nested routines and the builtins without
+  side effects. }
+
+{ The compiletime function the current routine is (or is nested in). }
+function compiletimeRoutine: PDecl;
+var
+  r: PDecl;
+begin
+  r := curRoutine;
+  while r <> nil do
+  begin
+    if r^.isCompiletime then
+      exit(r);
+    r := r^.parent;
+  end;
+  compiletimeRoutine := nil;
+end;
+
+{ Is r the current routine, or one around it? }
+function enclosesCurrent(r: PDecl): boolean;
+var
+  e: PDecl;
+begin
+  e := curRoutine;
+  while e <> nil do
+  begin
+    if e = r then
+      exit(true);
+    e := e^.parent;
+  end;
+  enclosesCurrent := false;
+end;
+
+{ f, if e is a call of compiletime function f (F or F(args)). }
+function compiletimeCallee(e: PNode): PDecl;
+var
+  w: PWithContext;
+  d: PDecl;
+  name: PName;
+begin
+  compiletimeCallee := nil;
+  if e = nil then
+    exit;
+  if e^.kind = nkCall then
+    name := e^.callee.name
+  else if e^.kind = nkNameRef then
+    name := e^.ref.name
+  else
+    exit;
+  w := nil;
+  d := scopeLookup(cur, name, w);
+  if (d = nil) or (d^.kind <> dkRoutine) then
+    exit;
+  while d <> nil do
+  begin
+    if d^.isCompiletime then
+      exit(d);
+    d := d^.nextOverload;
+  end;
+end;
+
+function compiletimeBuiltinAllowed(k: TBuiltinKind): boolean;
+begin
+  compiletimeBuiltinAllowed := not (k in
+    [bkWrite, bkWriteln, bkRead, bkReadln, bkReset, bkRewrite, bkGet, bkPut,
+     bkPage, bkEof, bkEoln, bkAssign, bkAssignFile, bkClose, bkCloseFile,
+     bkFlush, bkBlockRead, bkBlockWrite, bkSeek, bkFilePos, bkFileSize,
+     bkGetFileHandle, bkGetMem, bkFreeMem, bkReallocMem, bkHalt,
+     bkParamCount, bkParamStr, bkExceptAddr, bkNew, bkDispose, bkWait,
+     bkWhenAll, bkWhenAny]);
+end;
+
+procedure compiletimeError(ct: PDecl; loc: TLoc; r: TRange; const what: string);
+begin
+  ms('compiletime function ''');
+  maN(ct^.ident.spelling);
+  ma(''' cannot ' + what);
+  errR(loc, r);
+end;
+
+{ A use of d (a name, a call) in compiletime function ct. }
+procedure checkCompiletimeUse(ct, d: PDecl; loc: TLoc; r: TRange;
+                              isWrite: boolean);
+var
+  c, p: PDecl;
+begin
+  if d = nil then
+    exit;
+  case d^.kind of
+    dkBuiltin:
+      if not compiletimeBuiltinAllowed(d^.builtin) then
+        compiletimeError(ct, loc, r, 'call ''' + nameStr(d^.ident.spelling) +
+                         ''' (no input, output or memory management)');
+    dkVar:
+      begin
+        if d^.loc = noLoc then
+          compiletimeError(ct, loc, r, 'use ''' +
+                           nameStr(d^.ident.spelling) + '''')
+        else if (d^.init <> nil) and not d^.isInitVar and (d^.owner = nil) then
+        begin
+          if isWrite then
+            compiletimeError(ct, loc, r, 'assign to typed constant ''' +
+                             nameStr(d^.ident.spelling) + '''');
+        end
+        else if (d^.owner = nil) or not enclosesCurrent(d^.owner) then
+          compiletimeError(ct, loc, r, 'use variable ''' +
+                           nameStr(d^.ident.spelling) +
+                           ''' (only its own parameters and variables)');
+      end;
+    dkRoutine:
+      begin
+        if (d^.methodKind <> mtNone) or (d^.ownerClass <> nil) then
+        begin
+          compiletimeError(ct, loc, r, 'call method ''' +
+                           nameStr(d^.ident.spelling) + '''');
+          exit;
+        end;
+        c := d;
+        if d^.canonical <> nil then
+          c := d^.canonical;
+        if c^.isCompiletime or d^.isCompiletime then
+          exit;
+        p := c^.parent;
+        while p <> nil do
+        begin
+          if p = ct then
+            exit; { nested in it }
+          p := p^.parent;
+        end;
+        compiletimeError(ct, loc, r, 'call ''' + nameStr(d^.ident.spelling) +
+                         ''', which is not compiletime');
+      end;
+  else
+    ;
+  end;
+end;
+
+{ e (of type t) in compiletime function ct. }
+procedure checkCompiletimeExpr(ct: PDecl; e: PNode; t: PType);
+var
+  what: string;
+begin
+  what := '';
+  if (t <> nil) and not isError(t) then
+    case t^.kind of
+      tyPointer, tyNil: what := 'pointers';
+      tyClass, tyClassRef, tyInterface: what := 'objects';
+      tyFile: what := 'files';
+      tyRoutine: what := 'procedural values';
+      tyTask, tyToken: what := 'tasks';
+    else
+      ;
+    end;
+  if what <> '' then
+  begin
+    compiletimeError(ct, e^.b, nodeRange(e), 'use ' + what);
+    exit;
+  end;
+  case e^.kind of
+    nkNameRef:
+      checkCompiletimeUse(ct, e^.refDecl, e^.ref.loc, identRange(e^.ref),
+                          false);
+    nkCall:
+      checkCompiletimeUse(ct, e^.callDecl, e^.callee.loc,
+                          identRange(e^.callee), false);
+    nkIndirectCall, nkInherited:
+      compiletimeError(ct, e^.b, nodeRange(e),
+                       'call methods or procedural values');
+  else
+    ;
+  end;
+end;
+
 function check(e: PNode): PType;
 var
   t: PType;
+  ctr: PDecl;
   allow: boolean;
   nameS: string;
 begin
@@ -1503,6 +1686,9 @@ begin
   if e^.typ <> nil then
     exit(e^.typ);
   t := visitExpr(e);
+  ctr := compiletimeRoutine;
+  if ctr <> nil then
+    checkCompiletimeExpr(ctr, e, t);
   if (t^.kind = tyUntyped) and not allow then
   begin
     if e^.kind = nkNameRef then
@@ -4186,7 +4372,30 @@ end;
 procedure declareConst(c: PDecl);
 var
   v: TConstant;
+  f: PDecl;
 begin
+  { const X = F(args), F compiletime: the driver replaces it with the value
+    at the level of a program or unit (pcctime.pas) }
+  f := compiletimeCallee(c^.constInit);
+  if (f <> nil) and semaCompiletimeDeferred and (curRoutine = nil) then
+  begin
+    c^.constType := errorType;
+    c^.constValue := constNone;
+    declare(c);
+    exit;
+  end;
+  if f <> nil then
+  begin
+    ms('the value of compiletime function ''');
+    maN(f^.ident.spelling);
+    ma(''' is computed only for a constant declared at the level of a ' +
+       'program or unit');
+    errR(c^.constInit^.b, nodeRange(c^.constInit));
+    c^.constType := errorType;
+    c^.constValue := constNone;
+    declare(c);
+    exit;
+  end;
   if evaluateConstant(c^.constInit, 'constant value', v) then
   begin
     c^.constType := v.ty;
@@ -7831,11 +8040,12 @@ begin
   else
   begin
     resultTy := resolveType(r^.resultSpec, nil);
-    { ISO: a simple type or a pointer; Turbo/FPC also strings and records
-      (without files) }
+    { ISO: a simple type or a pointer; Turbo/FPC also strings, records and
+      arrays (without files) }
     if not isError(resultTy) and not isValidResultType(resultTy) and
        (resultTy^.kind <> tyShortString) and not isMethodPointer(resultTy) and
-       not (not isISO and (resultTy^.kind = tyRecord) and not containsFile(resultTy)) then
+       not (not isISO and (resultTy^.kind in [tyRecord, tyArray]) and
+            not containsFile(resultTy)) then
     begin
       ms('function result type must be a simple or pointer type, not ');
       maT(resultTy);
@@ -9254,6 +9464,8 @@ begin
     r^.canonical := fwd;
     if r^.isInline then
       fwd^.isInline := true;
+    if r^.isCompiletime then
+      fwd^.isCompiletime := true;
     checkRoutineBody(fwd);
     exit;
   end;

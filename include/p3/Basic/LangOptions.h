@@ -21,6 +21,9 @@ struct LangOptions {
   bool ObjKeywords = false;
   /// '' (empty string literal) is allowed.
   bool EmptyStrings = false;
+  /// `const X = F(args)` (F compiletime) at the level of a program or
+  /// unit was not computed (--emit-ast): X is left without a value, quietly.
+  bool CompiletimeDeferred = false;
 
   static LangOptions forMode(LangMode M) {
     LangOptions LO;

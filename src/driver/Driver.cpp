@@ -404,6 +404,24 @@ int Driver::run() {
 
   FileID FID = *FIDOrErr;
   bool OK = runPipeline(FID);
+  if (CompiletimeRestart) {
+    // Compiletime constants were computed: again, on the new text (the
+    // warnings given already are not repeated).
+    CompiletimeRestart = false;
+    UnitsDone.clear();
+    UnitsInProgress.clear();
+    FailedUses.clear();
+    UnitsOrdered.clear();
+    ExternalLibraries.clear();
+    Diags.setSkipRepeatedWarnings(true);
+    auto Again = loadSource(Opts.InputFile);
+    if (!Again) {
+      Diags.error("cannot open input file '" + llvm::Twine(Opts.InputFile) +
+                  "'");
+      return 1;
+    }
+    OK = runPipeline(*Again);
+  }
   return OK && !Diags.hasErrors() ? 0 : 1;
 }
 
@@ -453,6 +471,19 @@ bool Driver::runPipeline(FileID FID) {
       return false;
     printParseTree(*Program, Units, SM, *OS);
     return true;
+  }
+
+  // --- compiletime constants: computed, then parsed again (not for a
+  // dump: --emit-ast leaves them as calls) -------------------------------
+  LangOpts.CompiletimeDeferred = Opts.Act == Action::EmitAST;
+  if (!Diags.hasErrors() && Opts.Act != Action::EmitAST) {
+    bool Restart = false;
+    if (!evaluateCompiletime(Program, Units, Restart))
+      return false;
+    if (Restart) {
+      CompiletimeRestart = true;
+      return true;
+    }
   }
 
   // --- M4: semantic analysis (skipped after syntax errors) ---------------
@@ -576,6 +607,15 @@ bool Driver::compileUnit(Parser &P, FileID FID, ASTContext &Ctx,
               Unit->getImplementationUses().end());
   llvm::SmallVector<UnitDecl *, 4> Deps;
   loadUnits(Uses, Ctx, Directives, Deps, Unit->getName().Name, true);
+  if (!Diags.hasErrors()) {
+    bool Restart = false;
+    if (!evaluateCompiletime(Unit, Deps, Restart))
+      return false;
+    if (Restart) {
+      CompiletimeRestart = true;
+      return true;
+    }
+  }
   auto Reparse = [&](const RoutineDecl *G) {
     return Parser(P.getLexer(), Diags, Ctx).reparseGeneric(G);
   };

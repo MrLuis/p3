@@ -3273,7 +3273,7 @@ end;
 function checkNameTarget(target: PNode): PType;
 var
   w: PWithContext;
-  d, enc, x: PDecl;
+  d, enc, x, ct: PDecl;
 begin
   checkNameTarget := errorType;
   w := nil;
@@ -3320,6 +3320,9 @@ begin
   target^.refWith := w;
   d^.isUsed := true;
   warnHints(d, target^.ref);
+  ct := compiletimeRoutine;
+  if ct <> nil then
+    checkCompiletimeUse(ct, d, target^.ref.loc, identRange(target^.ref), true);
   if d^.kind = dkVar then
   begin
     checkNotForControlVar(target);
@@ -5309,7 +5312,7 @@ begin
   end;
 end;
 
-procedure visitStmt(s: PNode);
+procedure visitStmtKind(s: PNode);
 var
   rt: PType;
 begin
@@ -5361,6 +5364,28 @@ begin
     nkScope: visitScope(s);
     nkDetached: visitDetached(s);
     nkYield: visitYield(s);
+  else
+    ;
+  end;
+end;
+
+procedure visitStmt(s: PNode);
+var
+  ct: PDecl;
+begin
+  visitStmtKind(s);
+  ct := compiletimeRoutine;
+  if ct = nil then
+    exit;
+  case s^.kind of
+    nkProcCall:
+      checkCompiletimeUse(ct, s^.callDecl, s^.callee.loc,
+                          identRange(s^.callee), false);
+    nkIndirectCallStmt:
+      compiletimeError(ct, s^.b, nodeRange(s),
+                       'call methods or procedural values');
+    nkRaise:
+      compiletimeError(ct, s^.b, nodeRange(s), 'raise exceptions');
   else
     ;
   end;

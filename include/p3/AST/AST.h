@@ -2044,6 +2044,7 @@ class RoutineDecl final : public Decl {
   bool HasTry = false;
   bool Static = false;
   bool Inline = false;
+  bool Compiletime = false;
   CallConv CC = CallConv::Default; ///< the directive written
   bool InheritedCDecl = false;     ///< an override of a cdecl method
   RoutineDecl *Canonical = nullptr; ///< set on a definition of a forward decl
@@ -2174,6 +2175,11 @@ public:
   /// LLVM to inline the routine (inlinehint).
   bool isInline() const { return Inline; }
   void setInline() { Inline = true; }
+  /// The `compiletime` directive (objfpc and tp): a function in a
+  /// restricted subset (no I/O, pointers, objects or global variables)
+  /// that the compiler runs to compute a constant (`const X = F(args)`).
+  bool isCompiletime() const { return Compiletime; }
+  void setCompiletime() { Compiletime = true; }
   /// A routine or method implementation's `static` directive (Free Pascal:
   /// repeats the declaration's; ignored on plain routines); invalid if none.
   SourceLocation getStaticDirectiveLoc() const { return StaticDirectiveLoc; }

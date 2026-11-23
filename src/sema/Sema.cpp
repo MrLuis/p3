@@ -1518,6 +1518,8 @@ class Checker : public StmtVisitor<Checker>,
     if (Type *Cached = E->getType())
       return Cached;
     Type *T = visitExpr(E);
+    if (RoutineDecl *CT = compiletimeRoutine())
+      checkCompiletimeExpr(CT, E, T);
     if (T->isUntyped() && !Allow) {
       auto *N = llvm::dyn_cast<NameRefExpr>(E);
       Diags.error(E->getBeginLoc(),
@@ -2838,6 +2840,24 @@ class Checker : public StmtVisitor<Checker>,
   //===--------------------------------------------------------------------===//
 
   void declareConst(ConstDecl *C) {
+    // const X = F(args), F compiletime: the driver replaces it with the
+    // value at the level of a program or unit (Compiletime.cpp).
+    if (RoutineDecl *F = compiletimeCallee(C->getInit())) {
+      if (LangOpts.CompiletimeDeferred && !CurRoutine) {
+        C->setValue(errorType(), ConstValue());
+        declare(C);
+        return;
+      }
+      Diags.error(C->getInit()->getBeginLoc(),
+                  "the value of compiletime function '" +
+                      F->getName().Spelling +
+                      "' is computed only for a constant declared at the "
+                      "level of a program or unit",
+                  {C->getInit()->getRange()});
+      C->setValue(errorType(), ConstValue());
+      declare(C);
+      return;
+    }
     if (auto V = evaluateConstant(C->getInit(), "constant value"))
       C->setValue(V->Ty, V->Value);
     else
@@ -5511,10 +5531,11 @@ class Checker : public StmtVisitor<Checker>,
     } else {
       ResultTy = resolveType(R->getResultTypeSpec());
       // ISO 7185 6.6.2: the result type is a simple type (or a pointer).
-      // Turbo/FPC also return strings and records (without files).
+      // Turbo/FPC also return strings, records and arrays (without files).
       if (!ResultTy->isError() && !ResultTy->isValidResultType() &&
           !ResultTy->isShortString() && !isMethodPointer(ResultTy) &&
-          !(!isISO() && ResultTy->isRecord() && !containsFile(ResultTy))) {
+          !(!isISO() && (ResultTy->isRecord() || ResultTy->isArray()) &&
+            !containsFile(ResultTy))) {
         Diags.error(R->getResultTypeSpec()->getBeginLoc(),
                     "function result type must be a simple or pointer type, not " +
                         quoted(ResultTy),
@@ -6611,6 +6632,8 @@ class Checker : public StmtVisitor<Checker>,
       R->setCanonical(Fwd);
       if (R->isInline())
         Fwd->setInline();
+      if (R->isCompiletime())
+        Fwd->setCompiletime();
       checkRoutineBody(Fwd);
       return;
     }
@@ -7522,6 +7545,170 @@ class Checker : public StmtVisitor<Checker>,
 
     Cur = SavedScope;
     CurRoutine = SavedRoutine;
+  }
+
+  // --- compiletime functions ------------------------------------------------
+  // A compiletime function (and the routines nested in it) runs while
+  // compiling: no I/O, pointers, objects, procedural values or files, no
+  // global variables (typed constants can be read), and it calls only
+  // compiletime functions, its nested routines and the builtins without
+  // side effects.
+
+  /// The compiletime function the current routine is (or is nested in).
+  RoutineDecl *compiletimeRoutine() const {
+    for (RoutineDecl *R = CurRoutine; R; R = R->getParent())
+      if (R->isCompiletime())
+        return R;
+    return nullptr;
+  }
+
+  /// Is R the current routine, or one around it?
+  bool enclosesCurrent(const RoutineDecl *R) const {
+    for (RoutineDecl *E = CurRoutine; E; E = E->getParent())
+      if (E == R)
+        return true;
+    return false;
+  }
+
+  /// F, if E is a call of compiletime function F (F or F(args)).
+  RoutineDecl *compiletimeCallee(Expr *E) {
+    Identifier Id;
+    if (auto *C = llvm::dyn_cast_or_null<CallExpr>(E))
+      Id = C->getCallee();
+    else if (auto *N = llvm::dyn_cast_or_null<NameRefExpr>(E))
+      Id = N->getName();
+    else
+      return nullptr;
+    auto *R = llvm::dyn_cast_or_null<RoutineDecl>(Cur->lookup(Id.Name));
+    for (RoutineDecl *X = R; X; X = X->getNextOverload())
+      if (X->isCompiletime())
+        return X;
+    return nullptr;
+  }
+
+  static bool compiletimeBuiltinAllowed(BuiltinKind K) {
+    switch (K) {
+    case BuiltinKind::Write: case BuiltinKind::Writeln:
+    case BuiltinKind::Read: case BuiltinKind::Readln:
+    case BuiltinKind::Reset: case BuiltinKind::Rewrite:
+    case BuiltinKind::Get: case BuiltinKind::Put: case BuiltinKind::Page:
+    case BuiltinKind::Eof: case BuiltinKind::Eoln:
+    case BuiltinKind::Assign: case BuiltinKind::AssignFile:
+    case BuiltinKind::Close: case BuiltinKind::CloseFile:
+    case BuiltinKind::Flush: case BuiltinKind::BlockRead:
+    case BuiltinKind::BlockWrite: case BuiltinKind::Seek:
+    case BuiltinKind::FilePos: case BuiltinKind::FileSize:
+    case BuiltinKind::GetFileHandle: case BuiltinKind::GetMem:
+    case BuiltinKind::FreeMem: case BuiltinKind::ReallocMem:
+    case BuiltinKind::Halt: case BuiltinKind::ParamCount:
+    case BuiltinKind::ParamStr: case BuiltinKind::ExceptAddr:
+    case BuiltinKind::New: case BuiltinKind::Dispose:
+    case BuiltinKind::Wait: case BuiltinKind::WhenAll:
+    case BuiltinKind::WhenAny:
+      return false;
+    default:
+      return true;
+    }
+  }
+
+  void compiletimeError(RoutineDecl *CT, SourceLocation L, SourceRange R,
+                        const llvm::Twine &What) {
+    Diags.error(L,
+                "compiletime function '" + CT->getName().Spelling +
+                    "' cannot " + What,
+                {R});
+  }
+
+  /// A use of D (a name, a call) in compiletime function CT.
+  void checkCompiletimeUse(RoutineDecl *CT, Decl *D, SourceLocation L,
+                           SourceRange Range, bool Write = false) {
+    if (!D)
+      return;
+    if (auto *B = llvm::dyn_cast<BuiltinDecl>(D)) {
+      if (!compiletimeBuiltinAllowed(B->getBuiltinKind()))
+        compiletimeError(CT, L, Range,
+                         "call '" + B->getName().Spelling +
+                             "' (no input, output or memory management)");
+      return;
+    }
+    if (auto *V = llvm::dyn_cast<VarDecl>(D)) {
+      if (V->isPredeclared())
+        return compiletimeError(CT, L, Range,
+                                "use '" + V->getName().Spelling + "'");
+      if (V->isTypedConst() && !V->getOwner()) {
+        if (Write)
+          compiletimeError(CT, L, Range,
+                           "assign to typed constant '" +
+                               V->getName().Spelling + "'");
+        return;
+      }
+      if (!V->getOwner() || !enclosesCurrent(V->getOwner()))
+        compiletimeError(CT, L, Range,
+                         "use variable '" + V->getName().Spelling +
+                             "' (only its own parameters and variables)");
+      return;
+    }
+    if (auto *R = llvm::dyn_cast<RoutineDecl>(D)) {
+      if (R->isMethod() || R->getClass())
+        return compiletimeError(CT, L, Range,
+                                "call method '" + R->getName().Spelling + "'");
+      RoutineDecl *C = R->getCanonical() ? R->getCanonical() : R;
+      if (C->isCompiletime() || R->isCompiletime())
+        return;
+      for (RoutineDecl *P = C->getParent(); P; P = P->getParent())
+        if (P == CT)
+          return; // nested in it
+      compiletimeError(CT, L, Range,
+                       "call '" + R->getName().Spelling +
+                           "', which is not compiletime");
+    }
+  }
+
+  /// E (of type T) in compiletime function CT.
+  void checkCompiletimeExpr(RoutineDecl *CT, Expr *E, Type *T) {
+    if (T && !T->isError()) {
+      const char *What = nullptr;
+      switch (T->getKind()) {
+      case Type::TK_Pointer: case Type::TK_Nil: What = "pointers"; break;
+      case Type::TK_Class: case Type::TK_ClassRef: case Type::TK_Interface:
+        What = "objects";
+        break;
+      case Type::TK_File: What = "files"; break;
+      case Type::TK_Routine: What = "procedural values"; break;
+      case Type::TK_Task: case Type::TK_Token: What = "tasks"; break;
+      default: break;
+      }
+      if (What) {
+        compiletimeError(CT, E->getBeginLoc(), E->getRange(),
+                         llvm::Twine("use ") + What);
+        return;
+      }
+    }
+    if (auto *N = llvm::dyn_cast<NameRefExpr>(E))
+      checkCompiletimeUse(CT, N->getDecl(), N->getName().Loc,
+                          N->getName().getRange());
+    else if (auto *C = llvm::dyn_cast<CallExpr>(E))
+      checkCompiletimeUse(CT, C->getDecl(), C->getCallee().Loc,
+                          C->getCallee().getRange());
+    else if (llvm::isa<IndirectCallExpr>(E) || llvm::isa<InheritedExpr>(E))
+      compiletimeError(CT, E->getBeginLoc(), E->getRange(),
+                       "call methods or procedural values");
+  }
+
+  void visitStmt(Stmt *S) {
+    StmtVisitor<Checker>::visitStmt(S);
+    RoutineDecl *CT = compiletimeRoutine();
+    if (!CT)
+      return;
+    if (auto *P = llvm::dyn_cast<ProcCallStmt>(S))
+      checkCompiletimeUse(CT, P->getDecl(), P->getCallee().Loc,
+                          P->getCallee().getRange());
+    else if (llvm::isa<IndirectCallStmt>(S))
+      compiletimeError(CT, S->getBeginLoc(), S->getRange(),
+                       "call methods or procedural values");
+    else if (llvm::isa<RaiseStmt>(S))
+      compiletimeError(CT, S->getBeginLoc(), S->getRange(),
+                       "raise exceptions");
   }
 
   /// Resolves the pointer types since Mark whose targets are visible now
@@ -9939,6 +10126,8 @@ public:
     Target->setWith(W);
     Used.insert(D);
     warnHints(D, Id);
+    if (RoutineDecl *CT = compiletimeRoutine())
+      checkCompiletimeUse(CT, D, Id.Loc, Id.getRange(), /*Write=*/true);
     if (auto *V = llvm::dyn_cast<VarDecl>(D)) {
       checkNotForControlVar(Target);
       if (V->getVarKind() == VarDecl::Result) // objfpc `Result`

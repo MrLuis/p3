@@ -45,6 +45,11 @@ class DiagnosticsEngine {
   bool FatalOccurred = false;
   /// Notes attach to the preceding diagnostic and are dropped with it.
   bool LastDiagSuppressed = false;
+  /// Warnings given so far (file:line:col:message), and whether to drop a
+  /// repeat: the compiler parses again after computing compiletime
+  /// constants (Compiletime.cpp).
+  llvm::StringSet<> WarningsSeen;
+  bool SkipRepeatedWarnings = false;
 
   void emit(Severity S, SourceLocation Loc, const llvm::Twine &Msg,
             llvm::ArrayRef<SourceRange> Ranges);
@@ -77,6 +82,7 @@ public:
       report(Severity::Warning, Loc, Msg + " [-W" + Group + "]", Ranges);
   }
   void disableWarning(llvm::StringRef Group) { DisabledWarnings.insert(Group); }
+  void setSkipRepeatedWarnings(bool V) { SkipRepeatedWarnings = V; }
   bool isWarningEnabled(llvm::StringRef Group) const {
     return !DisabledWarnings.contains(Group);
   }

@@ -749,6 +749,10 @@ type
                   { the inline directive (with $inline on): code generation
                     asks LLVM to inline the routine (inlinehint) }
                   isInline: boolean;
+                  { the compiletime directive: a function in a restricted
+                    subset that the compiler runs to compute a constant
+                    (const X = F(args)) }
+                  isCompiletime: boolean;
                   { the calling convention written (ccDefault, ccCDecl,
                     ccStdCall); inheritedCDecl: an override of a cdecl
                     method (Sema). See isCDecl. }

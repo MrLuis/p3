@@ -6,7 +6,7 @@ program p3;
   linker for -S, -c, -O and executables. }
 
 uses pcsys, pcutil, pcdiag, pclex, pcast, pctypes, pcparse, pcprint, pcsema, pcgen, pcproject,
-     pcdriver, pcsrcgen;
+     pcdriver, pcsrcgen, pcctime;
 
 type
   TAction = (actTokens, actParseTree, actAST, actModel, actLLVM, actAsm, actObj, actExe);
@@ -1303,6 +1303,42 @@ end;
 
 { A unit file as the input: its own module (S11). }
 { Compiles the unit u parsed from file fid. }
+{ Forgets the units loaded (to load them again). }
+procedure resetUnits;
+begin
+  listInit(units);
+  mapInit(unitsDone);
+  mapInit(inProgress);
+  mapInit(failedUses);
+end;
+
+{ Compiletime constants (pcctime): computed after parsing; the sources get
+  their values, and root (with fid) is parsed again from the new text.
+  False after errors. }
+function computeCompiletime(var root: PDecl; var fid: longint;
+                            parseBody: boolean): boolean;
+var
+  restart, isU: boolean;
+begin
+  computeCompiletime := false;
+  if not evaluateCompiletime(root, units, mode, inputFile, generatedDir,
+                             includeDirs, commandLineDefines, generators,
+                             generatorTimeout, restart) then
+    exit;
+  computeCompiletime := true;
+  if not restart then
+    exit;
+  resetUnits;
+  diagSetSkipRepeatedWarnings(true);
+  if not loadSource(inputFile, fid) then
+  begin
+    diagError(noLoc, 'cannot open input file ''' + inputFile + '''');
+    exit(false);
+  end;
+  root := parseInput(fid, mode, parseBody, isU);
+  computeCompiletime := root <> nil;
+end;
+
 function compileUnit(fid: longint; u: PDecl): boolean;
 var
   uses_: TPtrList;
@@ -1322,6 +1358,18 @@ begin
     listAdd(uses_, listGet(u^.implUses, i));
   selfUnit := u^.ident.name;
   loadUnits(uses_, true);
+  if not diagHasErrors then
+  begin
+    if not computeCompiletime(u, fid, true) then
+      exit;
+    listInit(uses_);
+    for i := 0 to u^.ifaceUses.count - 1 do
+      listAdd(uses_, listGet(u^.ifaceUses, i));
+    for i := 0 to u^.implUses.count - 1 do
+      listAdd(uses_, listGet(u^.implUses, i));
+    if units.count = 0 then
+      loadUnits(uses_, true);
+  end;
   if diagHasErrors or not semaCheckUnit(u, units, mode) then
     exit;
   if (action = actObj) and (outputFile <> '-') then
@@ -1532,6 +1580,15 @@ begin
         check (Sema is skipped after syntax errors) }
       if not diagHasErrors then
         loadUnits(prog^.progUses, separateUnits);
+      { (not for a dump: --emit-ast leaves them as calls) }
+      semaCompiletimeDeferred := action = actAST;
+      if not diagHasErrors and (action <> actAST) then
+      begin
+        if not computeCompiletime(prog, fid, action <> actParseTree) then
+          sysExit(1);
+        if (units.count = 0) and not diagHasErrors then
+          loadUnits(prog^.progUses, separateUnits);
+      end;
       semaOK := false;
       if not diagHasErrors then
         semaOK := semaCheck(prog, units, mode, separateUnits);

@@ -27,6 +27,18 @@ void DiagnosticsEngine::report(Severity S, SourceLocation Loc,
     return;
   }
 
+  if (S == Severity::Warning) {
+    std::string Key;
+    if (PresumedLoc P = SM.getPresumedLoc(Loc); P.isValid())
+      Key = (P.Filename + ":" + llvm::Twine(P.Line) + ":" +
+             llvm::Twine(P.Column) + ":")
+                .str();
+    Key += Msg.str();
+    if (!WarningsSeen.insert(Key).second && SkipRepeatedWarnings) {
+      LastDiagSuppressed = true;
+      return;
+    }
+  }
   if (S == Severity::Warning && WarningsAsErrors)
     S = Severity::Error;
 

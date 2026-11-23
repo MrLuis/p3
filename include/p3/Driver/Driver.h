@@ -37,6 +37,7 @@ class CheckDirectives;
 struct Identifier;
 class UnitDecl;
 class Block;
+class Decl;
 
 class Driver {
   CompilerOptions Opts;
@@ -52,6 +53,13 @@ class Driver {
   bool emitModel();
   llvm::StringMap<std::string> Splices; ///< absolute path -> its text
   llvm::ErrorOr<FileID> loadSource(llvm::StringRef Path);
+
+  /// Compiletime constants (Compiletime.cpp): computed after parsing; the
+  /// sources get their values (Splices) and the pipeline starts again
+  /// (Restart).
+  bool evaluateCompiletime(Decl *Root, llvm::ArrayRef<UnitDecl *> Units,
+                           bool &Restart);
+  bool CompiletimeRestart = false;
 
   bool validateOptions();
   bool validateTarget();

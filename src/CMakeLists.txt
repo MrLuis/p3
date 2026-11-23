@@ -39,6 +39,7 @@ target_link_libraries(p3CodeGen PUBLIC p3AST)
 
 add_library(p3Driver STATIC
   driver/Driver.cpp
+  driver/Compiletime.cpp
   driver/Generators.cpp
   driver/Linker.cpp
   driver/Project.cpp

@@ -244,14 +244,14 @@ std::string p3::buildModel(const SourceManager &SM, Decl *Root,
 // The driver side: build and run the generators, splice in what they write
 //===----------------------------------------------------------------------===//
 
-namespace {
-
-std::string absolutePath(llvm::StringRef P) {
+std::string p3::absolutePath(llvm::StringRef P) {
   llvm::SmallString<256> A(P);
   llvm::sys::fs::make_absolute(A);
   llvm::sys::path::remove_dots(A, /*remove_dot_dot=*/true);
   return std::string(A);
 }
+
+namespace {
 
 /// A file parsed without reporting (the compilation proper reports).
 struct QuietParse {

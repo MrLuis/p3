@@ -1,0 +1,32 @@
+; Compiletime constants in the self-hosted compiler: the same programs,
+; values and diagnostics as the C++ p3's (tests/driver/compiletime.test has
+; the scenarios, tests/sema/compiletime.test the subset).
+; REQUIRES: selfhost-build
+; RUN: %p3 --mode=tp %selfhost-flags -I %S/../../selfhost %S/../../selfhost/p3.pas -o %t.p3
+; RUN: rm -rf %t.cpp %t.self
+; RUN: %p3 --mode=objfpc --generated-dir=%t.cpp %S/../driver/Inputs/compiletime/main.pas -o %t.cpp.exe
+; RUN: env P3_RUNTIME_LIB=%p3-runtime-lib %t.p3 --mode=objfpc --generated-dir=%t.self %S/../driver/Inputs/compiletime/main.pas -o %t.self.exe
+; RUN: %t.self.exe | FileCheck %s
+; RUN: diff %t.cpp/.ct/main.I1.pas %t.self/.ct/main.I1.pas
+; RUN: diff %t.cpp/.ct/main.CrcTable.out %t.self/.ct/main.CrcTable.out
+; RUN: diff %t.cpp/.ct/tables.Sq.pas %t.self/.ct/tables.Sq.pas
+; RUN: not %p3 --mode=objfpc --generated-dir=%t.cpp %S/../driver/Inputs/compiletime/bad.pas -o %t.x > %t.bad.cpp 2>&1
+; RUN: not env P3_RUNTIME_LIB=%p3-runtime-lib %t.p3 --mode=objfpc --generated-dir=%t.cpp %S/../driver/Inputs/compiletime/bad.pas -o %t.x > %t.bad.self 2>&1
+; RUN: diff %t.bad.cpp %t.bad.self
+; RUN: not %p3 --mode=objfpc --generated-dir=%t.cpp %S/../driver/Inputs/compiletime/fail.pas -o %t.x > %t.fail.cpp 2>&1
+; RUN: not env P3_RUNTIME_LIB=%p3-runtime-lib %t.p3 --mode=objfpc --generated-dir=%t.cpp %S/../driver/Inputs/compiletime/fail.pas -o %t.x > %t.fail.self 2>&1
+; RUN: diff %t.fail.cpp %t.fail.self
+; RUN: not %p3 --mode=objfpc --generated-dir=%t.cpp %S/../driver/Inputs/compiletime/nested.pas -o %t.x > %t.nested.cpp 2>&1
+; RUN: not env P3_RUNTIME_LIB=%p3-runtime-lib %t.p3 --mode=objfpc --generated-dir=%t.cpp %S/../driver/Inputs/compiletime/nested.pas -o %t.x > %t.nested.self 2>&1
+; RUN: diff %t.nested.cpp %t.nested.self
+; RUN: not env P3_RUNTIME_LIB=%p3-runtime-lib %t.p3 --mode=objfpc --generated-dir=%t.self --generator-timeout=1 %S/../driver/Inputs/compiletime/slow.pas -o %t.x 2>&1 | FileCheck --check-prefix=SLOW %s
+; RUN: not %p3 --mode=objfpc -c %S/../sema/Inputs/compiletime/subset.pas -o %t.o > %t.subset.cpp 2>&1
+; RUN: not %t.p3 --mode=objfpc -c %S/../sema/Inputs/compiletime/subset.pas -o %t.o > %t.subset.self 2>&1
+; RUN: diff %t.subset.cpp %t.subset.self
+; RUN: not %p3 --mode=objfpc -c %S/../sema/Inputs/compiletime/directives.pas -o %t.o > %t.dir.cpp 2>&1
+; RUN: not %t.p3 --mode=objfpc -c %S/../sema/Inputs/compiletime/directives.pas -o %t.o > %t.dir.self 2>&1
+; RUN: diff %t.dir.cpp %t.dir.self
+; CHECK: 1996959894 755167117
+; CHECK-NEXT: 832040 8 8
+; CHECK: 9 25 hello, unit hello, program Wed
+; SLOW: slow.pas:12:3: error: cannot compute constant 'X': 'Loop' ran longer than 1 seconds

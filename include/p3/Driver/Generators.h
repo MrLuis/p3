@@ -29,6 +29,9 @@ class Decl;
 std::string buildModel(const SourceManager &SM, Decl *Root,
                        llvm::StringRef AttrLower, unsigned &NumTypes);
 
+/// P made absolute, without . and .. (the key of Driver's splices).
+std::string absolutePath(llvm::StringRef P);
+
 /// Escapes \, tab and newline in a model or output field.
 std::string escapeField(llvm::StringRef S);
 std::string unescapeField(llvm::StringRef S);

@@ -1504,8 +1504,9 @@ RoutineDecl *Parser::parseRoutineDecl(bool HeadingOnly) {
   // external [library] [name symbol];  (library, symbol: string constants)
   // objfpc: overload;
   bool IsExternal = false, Overload = false, Inline = false, VarArgs = false;
+  bool Compiletime = false;
   CallConv CC = CallConv::Default;
-  SourceLocation InlineLoc, VarArgsLoc, StaticLoc;
+  SourceLocation InlineLoc, VarArgsLoc, StaticLoc, CompiletimeLoc;
   llvm::StringRef ExternalName, LibraryName;
   Expr *LibraryExpr = nullptr, *NameExpr = nullptr;
   Hints H;
@@ -1532,6 +1533,13 @@ RoutineDecl *Parser::parseRoutineDecl(bool HeadingOnly) {
     if (isIdentifierNamed("static") && peekToken().is(tok::semi)) {
       StaticLoc = consumeToken();
       expect(tok::semi, "after 'static'");
+      continue;
+    }
+    // compiletime: a function the compiler runs for `const X = F(args)`
+    if (isIdentifierNamed("compiletime") && peekToken().is(tok::semi)) {
+      CompiletimeLoc = consumeToken();
+      Compiletime = true;
+      expect(tok::semi, "after 'compiletime'");
       continue;
     }
     if (isIdentifierNamed("varargs")) {
@@ -1571,7 +1579,14 @@ RoutineDecl *Parser::parseRoutineDecl(bool HeadingOnly) {
   }
   if (VarArgs && !IsExternal)
     Diags.error(VarArgsLoc, "'varargs' is only allowed on external routines");
+  if (Compiletime && !IsFunction)
+    Diags.error(CompiletimeLoc, "only a function can be 'compiletime'");
+  if (Compiletime && ClassName.isValid())
+    Diags.error(CompiletimeLoc, "a method cannot be 'compiletime'");
   if (IsExternal) {
+    if (CompiletimeLoc.isValid())
+      Diags.error(CompiletimeLoc,
+                  "'compiletime' cannot be used with 'external'");
     if (InlineLoc.isValid())
       Diags.error(InlineLoc, "'inline' cannot be used with 'external'");
     if (!Name.isValid())
@@ -1602,6 +1617,8 @@ RoutineDecl *Parser::parseRoutineDecl(bool HeadingOnly) {
       R->setOverloadDirective();
     if (R && Inline)
       R->setInline();
+    if (R && Compiletime)
+      R->setCompiletime();
     if (R) {
       R->setCallConv(CC);
       R->addHints(H.Flags, H.Message);
@@ -1722,6 +1739,8 @@ RoutineDecl *Parser::parseMethodHeading(bool InRecord, bool RecordClassMethod) {
       // reintroduce: hides an inherited virtual method without a warning;
       // rtlproc: Free Pascal's RTL marker (a field if followed by ':' or ',')
       // (hides an inherited virtual method without a warning: no effect)
+    } else if (W == "compiletime" && peekToken().is(tok::semi)) {
+      Diags.error(Tok.getLocation(), "a method cannot be 'compiletime'");
     } else if (W == "dynamic" || W == "message" || W == "final" ||
                W == "external" || W == "forward") {
       unsupported("'" + W.str() + "' on methods is");

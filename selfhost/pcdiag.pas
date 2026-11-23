@@ -84,6 +84,10 @@ procedure diagFatal(loc: TLoc; const msg: string);
 procedure diagQuietBegin;
 function diagQuietEnd: longint;
 
+{ Drop a warning given already (same file, line, column and message): the
+  compiler parses again after computing compiletime constants. }
+procedure diagSetSkipRepeatedWarnings(enabled: boolean);
+
 function diagNumErrors: longint;
 function diagNumWarnings: longint;
 function diagHasErrors: boolean;
@@ -120,6 +124,8 @@ var
   lastDiagSuppressed: boolean;
   quietMode: boolean;
   quietErrors: longint;
+  warningsSeen: TIntMap; { name ids of file:line:col:message }
+  skipRepeatedWarnings: boolean;
 
 { --- Source manager --- }
 
@@ -304,6 +310,8 @@ begin
   numWarnings := 0;
   fatalOccurred := false;
   lastDiagSuppressed := false;
+  mapInit(warningsSeen);
+  skipRepeatedWarnings := false;
 end;
 
 procedure diagSetErrorLimit(n: longint);
@@ -507,6 +515,31 @@ begin
   bufFree(msg);
 end;
 
+{ Records warning msg at loc: false if it was given already. }
+function noteWarning(loc: TLoc; const msg: TBuf): boolean;
+var
+  key: string;
+  fid, line, col, i: longint;
+  k: PName;
+begin
+  key := '';
+  smPresumed(loc, fid, line, col);
+  if line > 0 then
+    key := smFileName(fid) + ':' + intToStr(line) + ':' + intToStr(col) + ':';
+  for i := 0 to msg.len - 1 do
+    key := key + msg.data^[i];
+  k := intern(key);
+  if mapHas(warningsSeen, k^.id) then
+    exit(false);
+  mapPut(warningsSeen, k^.id, k);
+  noteWarning := true;
+end;
+
+procedure diagSetSkipRepeatedWarnings(enabled: boolean);
+begin
+  skipRepeatedWarnings := enabled;
+end;
+
 procedure diagReportBuf(sev: TSeverity; loc: TLoc; const msg: TBuf;
                         r1, r2: TRange);
 begin
@@ -529,6 +562,12 @@ begin
       emit(sev, loc, msg, r1, r2);
     exit;
   end;
+  if sev = sevWarning then
+    if not noteWarning(loc, msg) and skipRepeatedWarnings then
+    begin
+      lastDiagSuppressed := true;
+      exit;
+    end;
   if (sev = sevWarning) and warningsAsErrors then
     sev := sevError;
   lastDiagSuppressed := false;

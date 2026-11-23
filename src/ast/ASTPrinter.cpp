@@ -205,6 +205,8 @@ class ASTPrinter : public StmtVisitor<ASTPrinter>,
         OS << " generic<" << R->getTypeParams().size() << '>';
       if (R->isInline())
         OS << " inline";
+      if (R->isCompiletime())
+        OS << " compiletime";
       if (R->getCallConv() != CallConv::Default)
         OS << ' ' << callConvName(R->getCallConv());
       overloadNumber(R);

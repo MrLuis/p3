@@ -1697,6 +1697,8 @@ var
   cc: longint;
   ccw: string;
   isFunction, hasParamList, isExternal, overloadDir, inlineDir, asyncProc: boolean;
+  compiletimeDir: boolean;
+  compiletimeLoc: TLoc;
   isVarArgs, resultName: boolean;
   inlineLoc, forwardLoc, varArgsLoc, staticLoc: TLoc;
   libraryName: PName;
@@ -1789,6 +1791,8 @@ begin
   cc := ccDefault;
   isVarArgs := false;
   varArgsLoc := noLoc;
+  compiletimeDir := false;
+  compiletimeLoc := noLoc;
   libraryName := nil;
   libraryExpr := nil;
   nameExpr := nil;
@@ -1829,6 +1833,14 @@ begin
     begin
       staticLoc := consumeToken;
       expect(tkSemi, 'after ''static''');
+      continue;
+    end;
+    { compiletime: a function the compiler runs for const X = F(args) }
+    if isIdentifierNamed('compiletime') and (peekKind = tkSemi) then
+    begin
+      compiletimeLoc := consumeToken;
+      compiletimeDir := true;
+      expect(tkSemi, 'after ''compiletime''');
       continue;
     end;
     if isIdentifierNamed('varargs') then
@@ -1873,8 +1885,15 @@ begin
   end;
   if isVarArgs and not isExternal then
     diagError(varArgsLoc, '''varargs'' is only allowed on external routines');
+  if compiletimeDir and not isFunction then
+    diagError(compiletimeLoc, 'only a function can be ''compiletime''');
+  if compiletimeDir and identValid(clsName) then
+    diagError(compiletimeLoc, 'a method cannot be ''compiletime''');
   if isExternal then
   begin
+    if compiletimeLoc <> noLoc then
+      diagError(compiletimeLoc,
+                '''compiletime'' cannot be used with ''external''');
     if inlineLoc <> noLoc then
       diagError(inlineLoc, '''inline'' cannot be used with ''external''');
     if not identValid(name) then
@@ -1908,6 +1927,7 @@ begin
                       nil, true);
       r^.hasOverloadDirective := overloadDir;
       r^.isInline := inlineDir;
+      r^.isCompiletime := compiletimeDir;
       r^.callConv := cc;
       r^.staticDirLoc := staticLoc;
       r^.resultName := resultName;
@@ -1929,6 +1949,7 @@ begin
                       nil, true);
       r^.hasOverloadDirective := overloadDir;
       r^.isInline := inlineDir;
+      r^.isCompiletime := compiletimeDir;
       r^.callConv := cc;
       r^.staticDirLoc := staticLoc;
       r^.resultName := resultName;
@@ -1958,6 +1979,7 @@ begin
     r^.outerClassNames := outerNames;
     r^.hasOverloadDirective := overloadDir;
     r^.isInline := inlineDir;
+    r^.isCompiletime := compiletimeDir;
     r^.callConv := cc;
     r^.staticDirLoc := staticLoc;
     r^.resultName := resultName;
@@ -2065,6 +2087,8 @@ begin
             ((wd = 'rtlproc') and not (peekKind in [tkColon, tkComma])) then
       { reintroduce: hides an inherited virtual method without a warning;
         rtlproc: Free Pascal's RTL marker (a field if followed by : or ,) }
+    else if (wd = 'compiletime') and (peekKind = tkSemi) then
+      diagError(tok.loc, 'a method cannot be ''compiletime''')
     else if (wd = 'dynamic') or (wd = 'message') or
             (wd = 'final') or (wd = 'external') or (wd = 'forward') then
     begin

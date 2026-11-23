@@ -1,0 +1,22 @@
+; compiletime functions: the restricted subset (no I/O, pointers, objects,
+; global variables or calls of other routines), the directive's place, and
+; the directive in the checked tree.
+; RUN: not %p3 --mode=objfpc -c %S/Inputs/compiletime/subset.pas -o %t.o 2>&1 | FileCheck --check-prefix=SUBSET %s
+; RUN: not %p3 --mode=objfpc -c %S/Inputs/compiletime/directives.pas -o %t.o 2>&1 | FileCheck --check-prefix=DIR %s
+; RUN: %p3 --mode=objfpc --emit-ast %S/Inputs/compiletime/subset.pas -o %t.ast 2>/dev/null || true
+; RUN: FileCheck --check-prefix=AST %s < %t.ast
+; SUBSET-NOT: Inner
+; SUBSET-NOT: 'Sq'
+; SUBSET: subset.pas:31:3: error: compiletime function 'Bad' cannot call 'writeln' (no input, output or memory management)
+; SUBSET: subset.pas:32:3: error: compiletime function 'Bad' cannot use variable 'g' (only its own parameters and variables)
+; SUBSET: subset.pas:33:8: error: compiletime function 'Bad' cannot call 'Helper', which is not compiletime
+; SUBSET: subset.pas:34:3: error: compiletime function 'Bad' cannot assign to typed constant 'tc'
+; SUBSET: subset.pas:35:8: error: compiletime function 'Bad' cannot use pointers
+; SUBSET: subset.pas:36:8: error: compiletime function 'Bad' cannot use objects
+; SUBSET: subset.pas:37:3: error: compiletime function 'Bad' cannot call methods or procedural values
+; SUBSET: subset.pas:38:3: error: compiletime function 'Bad' cannot raise exceptions
+; DIR: directives.pas:4:26: error: a method cannot be 'compiletime'
+; DIR: directives.pas:6:14: error: only a function can be 'compiletime'
+; DIR: directives.pas:9:22: error: 'compiletime' cannot be used with 'external'
+; AST: FunctionDecl 'sq' : integer compiletime
+; AST: FunctionDecl 'bad' : TT compiletime

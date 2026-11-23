@@ -134,6 +134,50 @@ only use generators you trust. In `p3.json`: `generators`, `generatedDir`,
 `generatorTimeout`. Not done yet: generics and properties in the model, a
 generator that uses the output of another, resolved types in the model.
 
+## Compiletime functions
+
+A function marked `compiletime` runs while compiling, to compute a constant
+declared at the level of a program or unit (`--mode=tp` and `objfpc`):
+
+```pascal
+type
+  TCrcTable = array[0..255] of LongWord;
+
+function BuildCrcTable: TCrcTable; compiletime;
+var
+  i, j: Integer;
+  c: LongWord;
+begin
+  for i := 0 to 255 do
+  begin
+    c := i;
+    for j := 1 to 8 do
+      if Odd(c) then c := (c shr 1) xor $EDB88320 else c := c shr 1;
+    Result[i] := c;
+  end;
+end;
+
+const
+  CrcTable = BuildCrcTable;   // computed while compiling
+  N = Fib(30);                // (Fib compiletime too) a plain constant
+```
+
+The function may not do input or output, use pointers, objects, files,
+procedural values or global variables (it can read typed constants), and
+calls only compiletime functions, the routines nested in it and builtins
+such as `Length`, `Copy` or `Ord`; the compiler reports the rest. For each
+such constant, p3 writes a small program to `gen/.ct/` (`--generated-dir`),
+builds and runs it with the time and memory limits of generators
+(`--generator-timeout`), and uses its value: a typed constant for an array
+or record (`CrcTable: TCrcTable = (0, 1996959894, ...)`), a plain constant
+otherwise. A runtime error or the time limit is reported at the constant.
+The value is computed again only when the sources or the compiler change. A
+constant can use earlier ones and units' compiletime functions. The result
+can be an ordinal, real or string type, an enumeration, or an array or
+record of these (sets not yet), declared in the program or its units'
+sources. A function may now also return a static array (Free Pascal does).
+`--emit-ast` does not compute them.
+
 ## Testing
 
 Tests are [lit](https://llvm.org/docs/CommandGuide/lit.html) files under
@@ -230,7 +274,8 @@ compiler).
   the code it writes is included in the units that declare its types)
 - `--generated-dir=<dir>` — where that code goes (default: `gen` next to the
   input)
-- `--generator-timeout=<seconds>` — how long a generator may run (default 30)
+- `--generator-timeout=<seconds>` — how long a generator, or the program
+  computing a compiletime constant, may run (default 30)
 
 **Optimization and code generation**
 
