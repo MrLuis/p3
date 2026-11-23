@@ -44,6 +44,8 @@ that. Executables go to the project's `bin/`, which git ignores.
 | Project | Shows |
 |---|---|
 | `hello` | a program with a class in a unit of its own and a unit of p3's library (`sysutils`) |
-| `httpserver` | a basic HTTP server: C library sockets through `external` routines, ansistrings, units; see its [README](httpserver/README.md) |
+| `httpasyncserver` | an HTTP/1.1 server on the async engine: `netasync` tasks (one per connection, keep-alive), HTTP by `nethttp`, routes by `netrouter`, a handler that waits; see its [README](httpasyncserver/README.md) |
+| `httploopserver` | the same site on the loop engine: the `netloop` unit's per-thread epoll/kqueue event loops, HTTP by `nethttp`, routes by `netrouter`; see its [README](httploopserver/README.md) |
 | `sqlite` | SQLite through `external` routines, a small wrapper with tagged SQL templates, tuples and an enumerator; see its [README](sqlite/README.md) |
 | `netasync` | a concurrent TCP echo server built on the `netasync` unit: async/await sockets, `scope`/`spawn`/`detached`, unit-library `threading`; see its [README](netasync/README.md) |
+| `netrouter` | chi-style routing with the `netrouter` unit: URL parameters, expressions, middleware, sub-routers, on a small netasync server; see its [README](netrouter/README.md) |

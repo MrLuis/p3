@@ -1,0 +1,9 @@
+two lines in one write: TRUE
+a line in two writes: TRUE
+3 MB answer: 3145729 bytes, all x: TRUE
+Close after the answer: TRUE
+half-close, answered then closed: TRUE
+idle timeout: closed, after 0.4-2.5 s: TRUE
+20 clients x 50 round trips: 1000
+after Stop: the server closed it: TRUE
+connections opened 24, closed 24, lines 1007

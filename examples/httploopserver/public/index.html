@@ -1,0 +1,21 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>p3 httploopserver</title>
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <h1>It works</h1>
+  <p>This page is served by httploopserver, a small HTTP server written in Pascal:
+     netloop event loops (epoll / kqueue), its routes by the <code>netrouter</code> unit.</p>
+  <ul>
+    <li><a href="/status">/status</a>: a page the server makes</li>
+    <li><a href="/hello.txt">/hello.txt</a>: a plain text file (the <code>/*</code> route)</li>
+    <li><a href="/hello/world">/hello/{name}</a>: a URL parameter</li>
+    <li><a href="/posts/42">/posts/{id:[0-9]+}</a>: a parameter with an expression</li>
+    <li><a href="/api/echo/hi">/api/echo/{word}</a>, <a href="/api/routes">/api/routes</a>: a JSON sub-router</li>
+    <li><a href="/missing">/missing</a>: a 404</li>
+  </ul>
+</body>
+</html>

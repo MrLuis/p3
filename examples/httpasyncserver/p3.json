@@ -1,0 +1,10 @@
+{
+  "name": "httpasyncserver",
+  "version": "0.1.0",
+  "description": "An HTTP/1.1 server on netasync (one task per connection, keep-alive) routed by netrouter",
+  "main": "src/httpasyncserver.pas",
+  "output": "bin/httpasyncserver",
+  "mode": "objfpc",
+  "unitPaths": ["src/lib"],
+  "optimize": 2
+}

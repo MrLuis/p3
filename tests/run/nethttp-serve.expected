@@ -1,0 +1,27 @@
+loop  hello: 200 (close) hello ann
+loop  keep-alive x3: 200 hello a | 200 hello b | 200 (close) hello c
+loop  query: 200 (close) name=b c x=1
+loop  POST length: 200 (close) got hello
+loop  POST chunked: 200 (close) got abcde
+loop  file: 200 (close) a note
+loop  file index: 200 (close) <p>index</p>
+loop  file missing: 404 (close) 404 page not found
+loop  file ..: 403 (close) 403 forbidden
+loop  HEAD: 200 (close)
+loop  404: 404 (close) 404 page not found
+loop  405: 405 [Allow: GET, HEAD] (close) 405 method not allowed
+loop  400 then closed: 200 hello ok | 400 (close) Bad Request
+async hello: 200 (close) hello ann
+async keep-alive x3: 200 hello a | 200 hello b | 200 (close) hello c
+async query: 200 (close) name=b c x=1
+async POST length: 200 (close) got hello
+async POST chunked: 200 (close) got abcde
+async file: 200 (close) a note
+async file index: 200 (close) <p>index</p>
+async file missing: 404 (close) 404 page not found
+async file ..: 403 (close) 403 forbidden
+async HEAD: 200 (close)
+async 404: 404 (close) 404 page not found
+async 405: 405 [Allow: GET, HEAD] (close) 405 method not allowed
+async 400 then closed: 200 hello ok | 400 (close) Bad Request
+answers (After): 32

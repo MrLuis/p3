@@ -1,0 +1,10 @@
+{
+  "name": "httploopserver",
+  "version": "0.1.0",
+  "description": "An HTTP/1.1 server on a single-threaded poll() event loop (non-blocking sockets, keep-alive) routed by netrouter",
+  "main": "src/httploopserver.pas",
+  "output": "bin/httploopserver",
+  "mode": "objfpc",
+  "unitPaths": ["src/lib"],
+  "optimize": 2
+}

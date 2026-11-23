@@ -1,0 +1,23 @@
+; examples/httpasyncserver builds from its p3.json and serves the site of
+; its src/lib/site.pas, routed by netrouter: files, the status page, URL
+; parameters, the JSON sub-router, errors, HEAD and a 1 MiB file, all on
+; one keep-alive connection; it stops after --requests.
+; RUN: rm -rf %t && mkdir -p %t && cp -R %S/../../examples/httpasyncserver %t/
+; RUN: rm -rf %t/httpasyncserver/bin
+; RUN: cd %t/httpasyncserver && %p3-project 2>&1 | count 0
+; RUN: python3 %S/Inputs/httpexample-check.py %t/httpasyncserver/bin/httpasyncserver %t/httpasyncserver/public --async | FileCheck %s
+; CHECK:      GET / 200
+; CHECK-NEXT: GET /hello.txt 200
+; CHECK-NEXT: GET /hello%2Etxt?x=1 200
+; CHECK-NEXT: GET /status 200
+; CHECK-NEXT: GET /hello/ann 200
+; CHECK-NEXT: GET /posts/42 200
+; CHECK-NEXT: GET /posts/abc 404
+; CHECK-NEXT: GET /api/echo/hi 200
+; CHECK-NEXT: GET /missing 404
+; CHECK-NEXT: GET /%2e%2e/p3.json 403
+; CHECK-NEXT: POST / 405 Allow: GET, HEAD
+; CHECK-NEXT: HEAD /hello.txt 200 Content-Length: 23
+; CHECK-NEXT: GET /sleep/50 200
+; CHECK-NEXT: GET /blob.bin 200 1048576
+; CHECK-NEXT: server stopped

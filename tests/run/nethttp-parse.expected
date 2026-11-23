@@ -1,0 +1,43 @@
+-- request line, path, query
+ok(51) method=GET path=/a b/c raw=/a%20b/c query=x=1&y=%41+B&flag version=HTTP/1.1
+y=A B x=1 flag=[] none=[]
+ok(22) OPTIONS *
+ok(25) PURGE
+-- headers
+ok(73) count=3 x-thing=[spaced value] HOST=[example] has accept=TRUE has cookie=FALSE first=Host:example
+-- keep-alive
+1.1: TRUE
+1.1 close: FALSE
+1.1 upgrade, close: FALSE
+1.0: FALSE
+1.0 keep-alive: TRUE
+-- bodies and pipelining
+ok(44) body=hello
+short body: incomplete
+pipelined: first used 44 of 68; then ok(24) /second
+chunked: ok(92) body=Wikipedia (all 92)
+chunked, cut: incomplete
+incomplete head: incomplete
+nothing: incomplete
+-- errors
+no target: 400
+target without /: 400
+HTTP/2.0: 505
+not HTTP: 400
+CL and TE: 400
+two CLs: 400
+same CL twice: ok(62)
+CL not a number: 400
+CL too big: 413
+TE gzip: 400
+folded header: 400
+space in a name: 400
+201 headers: 431
+a 20 KB head: 431
+bad chunk size: 400
+-- answers
+HTTP/1.1 200 OK\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: 2\r\nConnection: keep-alive\r\n\r\nhi
+HTTP/1.1 200 OK\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: 2\r\nConnection: keep-alive\r\n\r\n
+HTTP/1.1 204 No Content\r\nConnection: close\r\n\r\n
+HTTP/1.1 201 Created\r\nContent-Type: application/json\r\nContent-Length: 2\r\nConnection: close\r\nX-B: 2\r\nx-a: 3\r\n\r\n{}
+HTTP/1.1 302 Found\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: 28\r\nConnection: keep-alive\r\nLocation: /there\r\n\r\n<a href="/there">Found</a>.\n
