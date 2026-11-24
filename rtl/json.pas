@@ -149,6 +149,12 @@ type
     Count: Integer;    { an array's or object's members }
     Items: array of PJsonNode;
     Keys: array of PJsonNode; { an object's: string nodes }
+    { an object's lookup table (open addressing, member index + 1, 0 empty;
+      a power of 2 of at least twice the members), made when a big object is
+      first searched; Indexed members are in it, so a table that does not
+      cover Count is stale }
+    Slots: array of Integer;
+    Indexed: Integer;
   end;
 
   { the index of V[...]: a key or an array index }
@@ -2239,13 +2245,93 @@ begin
   Result := True;
 end;
 
-function IndexOfKey(D: TJsonDocument; N: PJsonNode; const Key: string): Integer;
+function HashBytes(P: PChar; N: Integer): Cardinal;
 var
   I: Integer;
+  H: Cardinal;
 begin
-  for I := 0 to N^.Count - 1 do
+  H := 2166136261;
+  for I := 0 to N - 1 do
+    H := (H xor Cardinal(Ord(P[I]))) * 16777619;
+  Result := H xor (H shr 15);
+end;
+
+function HashString(const S: string): Cardinal;
+begin
+  Result := HashBytes(PChar(S), Length(S));
+end;
+
+{ the hash of a key node's text (decoded) }
+function KeyNodeHash(D: TJsonDocument; K: PJsonNode): Cardinal;
+begin
+  if K^.InSource and not K^.Escaped then
+    Result := HashBytes(PChar(D.FSource) + K^.Start, K^.Len)
+  else
+    Result := HashString(D.NodeString(K));
+end;
+
+{ member M into the table (not when an earlier member has its key: the first
+  one is found) }
+procedure IndexAddMember(D: TJsonDocument; N: PJsonNode; M: Integer);
+var
+  Mask, Slot, J: Integer;
+  Name: string;
+  Named: Boolean;
+begin
+  Mask := Length(N^.Slots) - 1;
+  Slot := Integer(KeyNodeHash(D, N^.Keys[M]) and Cardinal(Mask));
+  Named := False;
+  while N^.Slots[Slot] <> 0 do
+  begin
+    J := N^.Slots[Slot] - 1;
+    if not Named then
+    begin
+      Name := D.NodeString(N^.Keys[M]);
+      Named := True;
+    end;
+    if (J < M) and KeyIs(D, N^.Keys[J], Name) then
+      Exit;
+    Slot := (Slot + 1) and Mask;
+  end;
+  N^.Slots[Slot] := M + 1;
+end;
+
+procedure IndexBuild(D: TJsonDocument; N: PJsonNode);
+var
+  Size, M: Integer;
+begin
+  Size := 32;
+  while Size < 2 * N^.Count do
+    Size := Size * 2;
+  N^.Slots := nil;
+  SetLength(N^.Slots, Size);
+  for M := 0 to N^.Count - 1 do
+    IndexAddMember(D, N, M);
+  N^.Indexed := N^.Count;
+end;
+
+function IndexOfKey(D: TJsonDocument; N: PJsonNode; const Key: string): Integer;
+var
+  I, Mask, Slot: Integer;
+begin
+  if N^.Count < 16 then
+  begin
+    for I := 0 to N^.Count - 1 do
+      if KeyIs(D, N^.Keys[I], Key) then
+        Exit(I);
+    Exit(-1);
+  end;
+  if (Length(N^.Slots) = 0) or (N^.Indexed <> N^.Count) then
+    IndexBuild(D, N);
+  Mask := Length(N^.Slots) - 1;
+  Slot := Integer(HashString(Key) and Cardinal(Mask));
+  while N^.Slots[Slot] <> 0 do
+  begin
+    I := N^.Slots[Slot] - 1;
     if KeyIs(D, N^.Keys[I], Key) then
       Exit(I);
+    Slot := (Slot + 1) and Mask;
+  end;
   Result := -1;
 end;
 
@@ -2403,6 +2489,15 @@ begin
   FNode^.Keys[FNode^.Count] := K;
   FNode^.Items[FNode^.Count] := N;
   Inc(FNode^.Count);
+  { keep a table up to date (a full one is made again when next needed) }
+  if Length(FNode^.Slots) > 0 then
+    if (FNode^.Indexed = FNode^.Count - 1) and (2 * FNode^.Count <= Length(FNode^.Slots)) then
+    begin
+      IndexAddMember(FDoc, FNode, FNode^.Count - 1);
+      FNode^.Indexed := FNode^.Count;
+    end
+    else
+      FNode^.Slots := nil;
 end;
 
 procedure TJsonValue.Put(const Key: string; const S: string);
@@ -2504,6 +2599,7 @@ begin
     FNode^.Keys[J] := FNode^.Keys[J + 1];
   end;
   Dec(FNode^.Count);
+  FNode^.Slots := nil;
 end;
 
 procedure TJsonValue.Remove(I: Integer);
@@ -2521,7 +2617,10 @@ end;
 procedure TJsonValue.Clear;
 begin
   if (FNode <> nil) and (FNode^.Kind in [jkArray, jkObject]) then
+  begin
     FNode^.Count := 0;
+    FNode^.Slots := nil;
+  end;
 end;
 
 { --- writing values --- }

@@ -1,0 +1,7 @@
+parsed: 43 k0=0 k5=5 k39=39 ab=77 none=-
+after put: 44 k5=5000 new=1 ab=77
+after delete: 43 k7=- k8=8 new=1
+put again: 44 k7=70 key at end=k7
+cleared: 0 k0=-
+refilled: 30 m29=87 k0=-
+built: 3000 wrong=0 none=-
