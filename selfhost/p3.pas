@@ -1502,7 +1502,9 @@ begin
       actAsm: outputFile := inputStem + '.s';
       actObj: outputFile := inputStem + '.o';
       actExe:
-        if inputFile = '-' then
+        if isWindowsTriple(targetTriple) then
+          outputFile := inputStem + '.exe'
+        else if inputFile = '-' then
           outputFile := 'a.out'
         else
           outputFile := inputStem;

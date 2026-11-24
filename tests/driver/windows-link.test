@@ -1,0 +1,26 @@
+; Windows executables from any host: with the runtime built for MinGW-w64
+; (P3_CROSS_TARGETS), p3 links with x86_64-w64-mingw32-gcc. The programs run
+; under Wine in tests/windows.
+; REQUIRES: windows-runtime
+; RUN: rm -rf %t.dir && mkdir -p %t.dir
+; RUN: %p3 --target=x86_64-w64-mingw32 %S/Inputs/hello.pas -o %t.dir/hello.exe
+; RUN: llvm-readobj --file-headers %t.dir/hello.exe | FileCheck --check-prefix=PE %s
+; PE: Format: COFF-x86-64
+; PE: Characteristics [
+; PE: IMAGE_FILE_EXECUTABLE_IMAGE
+
+; Linked statically: Windows' own DLLs only, not MinGW's (libwinpthread,
+; libgcc), and the runtime's __pas_setjmp, not the C library's _setjmp.
+; RUN: llvm-readobj --coff-imports %t.dir/hello.exe | FileCheck --check-prefix=DLLS %s
+; DLLS: Name: KERNEL32.dll
+; DLLS-NOT: winpthread
+; DLLS-NOT: libgcc
+
+; The same through the target's MinGW spelling, and without -o: <stem>.exe.
+; RUN: cp %S/Inputs/hello.pas %t.dir/greet.pas
+; RUN: cd %t.dir && %p3 --target=x86_64-w64-windows-gnu greet.pas
+; RUN: llvm-readobj --file-headers %t.dir/greet.exe | FileCheck --check-prefix=PE %s
+
+; External 'c' routines: Windows has no libc to name (msvcrt/UCRT is
+; always linked).
+; RUN: %p3 --mode=objfpc --target=x86_64-w64-mingw32 %S/../run/externals.pas -o %t.dir/externals.exe

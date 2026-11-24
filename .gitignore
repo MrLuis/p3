@@ -16,3 +16,4 @@ compile_commands.json
 docs/
 /bench/json/data/
 /bench/json/rust/target/
+__pycache__/

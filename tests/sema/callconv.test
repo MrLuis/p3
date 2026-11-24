@@ -25,7 +25,7 @@
 
 ; The directives in the dumps: on routines (as written) and procedural types.
 ; RUN: %p3 --mode=objfpc --emit-ast %S/../run/callconv.pas | FileCheck --check-prefix=AST %s
-; AST: FunctionDecl 'labs' : int64 cdecl external 'labs'
+; AST: FunctionDecl 'labs' : int64 cdecl external 'llabs'
 ; AST: FunctionDecl 'cabs' : integer stdcall external 'abs'
 ; AST: FunctionDecl 'cube' : integer stdcall forward
 ; AST: FunctionDecl 'tderived.twice' cdecl definition

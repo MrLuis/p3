@@ -26,7 +26,7 @@ type
   TProc = procedure(const s: string; var n: longint);
 
 function c_strcmp(a, b: pchar): longint; cdecl; external 'c' name 'strcmp';
-function c_labs(x: int64): int64; cdecl; external 'c' name 'labs';
+function c_labs(x: int64): int64; cdecl; external 'c' name 'llabs';
 
 function addFn(a, b: longint): longint;
 begin

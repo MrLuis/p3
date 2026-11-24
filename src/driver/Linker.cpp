@@ -12,13 +12,31 @@
 
 using namespace p3;
 
-std::string p3::findRuntimeLibrary() {
-  if (auto Env = llvm::sys::Process::GetEnv("P3_RUNTIME_LIB"))
-    return *Env;
+bool p3::isHostTriple(llvm::StringRef Triple) {
+  return Triple.empty() ||
+         llvm::Triple(Triple) == llvm::Triple(llvm::sys::getDefaultTargetTriple());
+}
+
+std::string p3::runtimeTargetName(llvm::StringRef Triple) {
+  llvm::Triple T(Triple);
+  if (T.isWindowsGNUEnvironment())
+    return (T.getArchName() + "-w64-mingw32").str();
+  return Triple.str();
+}
+
+std::string p3::findRuntimeLibrary(llvm::StringRef Triple) {
+  bool Host = isHostTriple(Triple);
+  if (Host)
+    if (auto Env = llvm::sys::Process::GetEnv("P3_RUNTIME_LIB"))
+      return *Env;
   // getMainExecutable works without argv[0] on Linux and macOS.
   std::string Exe = llvm::sys::fs::getMainExecutable(nullptr, nullptr);
   llvm::SmallString<256> Path(llvm::sys::path::parent_path(Exe));
-  llvm::sys::path::append(Path, "..", "lib", "libpascalrt.a");
+  if (Host)
+    llvm::sys::path::append(Path, "..", "lib", "libpascalrt.a");
+  else
+    llvm::sys::path::append(Path, "..", "lib", runtimeTargetName(Triple),
+                            "libpascalrt.a");
   llvm::sys::path::remove_dots(Path, /*remove_dot_dot=*/true);
   return std::string(Path);
 }
@@ -86,7 +104,21 @@ std::string p3::findUnitLibrary() {
   return std::string(Path);
 }
 
-static std::string findLinkerDriver(DiagnosticsEngine &Diags) {
+static std::string findLinkerDriver(llvm::StringRef Triple,
+                                    DiagnosticsEngine &Diags) {
+  // Another target: its own C toolchain (MinGW-w64's for Windows), which
+  // knows where the target's C library and system libraries are.
+  if (!isHostTriple(Triple)) {
+    std::string Name = runtimeTargetName(Triple);
+    if (auto Env = llvm::sys::Process::GetEnv("P3_CROSS_CC"))
+      return *Env;
+    for (const char *Suffix : {"-gcc", "-clang"})
+      if (auto P = llvm::sys::findProgramByName(Name + Suffix))
+        return *P;
+    Diags.error("cannot find a C compiler to link for '" + llvm::Twine(Triple) +
+                "' (tried " + Name + "-gcc, " + Name + "-clang); set P3_CROSS_CC");
+    return "";
+  }
   if (auto Env = llvm::sys::Process::GetEnv("P3_CC")) {
     if (llvm::sys::path::has_parent_path(*Env))
       return *Env;
@@ -110,14 +142,14 @@ bool p3::linkExecutable(llvm::StringRef ObjectFile,
                          llvm::ArrayRef<std::string> LibraryDirs,
                          llvm::ArrayRef<std::string> Libraries,
                          llvm::StringRef Triple, DiagnosticsEngine &Diags) {
-  std::string RuntimeLib = findRuntimeLibrary();
+  std::string RuntimeLib = findRuntimeLibrary(Triple);
   if (!llvm::sys::fs::exists(RuntimeLib)) {
     Diags.error("cannot find the Pascal runtime library '" +
                 llvm::Twine(RuntimeLib) + "'; set P3_RUNTIME_LIB");
     return false;
   }
 
-  std::string CC = findLinkerDriver(Diags);
+  std::string CC = findLinkerDriver(Triple, Diags);
   if (CC.empty())
     return false;
 
@@ -129,6 +161,10 @@ bool p3::linkExecutable(llvm::StringRef ObjectFile,
   for (const std::string &D : LibraryDirs)
     Extra.push_back("-L" + D);
   for (const std::string &L : Libraries) {
+    // `external 'c'`: on Windows the C library (msvcrt or UCRT) is always
+    // linked, and there is no libc to name.
+    if (T.isOSWindows() && L == "c")
+      continue;
     if (L.find('/') != std::string::npos) {
       // A path (the profile runtime, or ':<file>' spellings): it is
       // passed as it is, without a -L search - a bare file name without
@@ -174,12 +210,16 @@ bool p3::linkExecutable(llvm::StringRef ObjectFile,
   Args.push_back(RuntimeLib);
   Args.append(Extra.begin(), Extra.end());
   // Dead-code stripping of the unused sections (item 18).
-  if (T.isOSBinFormatELF())
-    Args.push_back("-Wl,--gc-sections");
+  if (T.isOSBinFormatELF() || T.isWindowsGNUEnvironment())
+    Args.push_back("-Wl,--gc-sections"); // GNU ld, MinGW's too
   else if (T.isOSBinFormatMachO())
     Args.push_back("-Wl,-dead_strip");
   else if (T.isOSBinFormatCOFF())
     Args.push_back("-Wl,/OPT:REF");
+  // MinGW: a self-contained executable, without MinGW's own DLLs (the
+  // runtime's thread-local variables need libwinpthread's).
+  if (T.isWindowsGNUEnvironment())
+    Args.push_back("-static");
   Args.append({"-lm", "-o", OutputFile});
 
   std::string ErrMsg;

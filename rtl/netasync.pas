@@ -195,12 +195,9 @@ procedure NetWaitReady(S: TSocket; WantRead, WantWrite: Boolean);
 implementation
 
 {$IFDEF P3_OBJFPC}
-{$IFNDEF LINUX}{$IFNDEF DARWIN}
-uses netasync_needs_linux_or_darwin;
-{$ENDIF}{$ENDIF}
-
 uses
-  sysutils;
+  sysutils
+  {$IFNDEF LINUX}{$IFNDEF DARWIN}, netasync_needs_linux_or_darwin{$ENDIF}{$ENDIF};
 
 type
   cint = longint;

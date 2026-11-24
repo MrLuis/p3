@@ -25,8 +25,14 @@
 #ifdef _WIN32
 /* Windows has no _longjmp, and its _setjmp takes a second argument and a
  * 16-byte aligned buffer: the runtime has its own pair (sys.c), which
- * compiled code links to under the usual names. */
-void _longjmp(jmp_buf env, int value) __attribute__((noreturn));
+ * compiled code calls too, as __pas_setjmp and __pas_longjmp. */
+int __pas_setjmp(jmp_buf env) __attribute__((returns_twice));
+void __pas_longjmp(jmp_buf env, int value) __attribute__((noreturn));
+#define rt_setjmp __pas_setjmp
+#define rt_longjmp __pas_longjmp
+#else
+#define rt_setjmp _setjmp
+#define rt_longjmp _longjmp
 #endif
 #include <stddef.h>
 #include <stdio.h>
@@ -1401,7 +1407,7 @@ static void raise_to_frame(void *obj, const char *where, void *address) {
   f->object = obj;
   f->where = where;
   f->address = address;
-  _longjmp(*(jmp_buf *)(void *)f->buf, 1);
+  rt_longjmp(*(jmp_buf *)(void *)f->buf, 1);
 }
 
 void __pas_reraise(PasExcFrame *f) {
@@ -1477,7 +1483,7 @@ void __pas_owned_free(void **slot, PasOwnedExc *exc) {
     return;
   PasExcFrame f;
   __pas_exc_push(&f);
-  if (_setjmp(*(jmp_buf *)(void *)f.buf) == 0) {
+  if (rt_setjmp(*(jmp_buf *)(void *)f.buf) == 0) {
     __pas_free_object(obj);
     __pas_exc_pop(&f);
     return;

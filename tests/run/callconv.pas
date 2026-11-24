@@ -38,7 +38,7 @@ type
     procedure Say(const s: string); cdecl;
   end;
 
-function labs(x: int64): int64; cdecl; external 'c' name 'labs';
+function labs(x: int64): int64; cdecl; external 'c' name 'llabs';
 function cabs(x: longint): longint; stdcall; external 'c' name 'abs';
 
 function Square(x: integer): integer; stdcall;

@@ -17,7 +17,7 @@ const
   libc = 'c';
   libm = 'm';
   sinName = 'sin';
-  fmt = 'printf: %d %s %.2f %c %ld'#10;
+  fmt = 'printf: %d %s %.2f %c %lld'#10;
 
 type
   PLongint = ^longint;

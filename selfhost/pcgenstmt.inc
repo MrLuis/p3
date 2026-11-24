@@ -474,7 +474,7 @@ var
   i: longint;
   d: PDecl;
 begin
-  r := call1(rtFn('_setjmp'), buf, 'jmp');
+  r := call1(rtFn(setJmpName), buf, 'jmp');
   start := irNewBlock('body');
   sw := irSwitch(r, start);
   for i := 0 to blk^.decls.count - 1 do
@@ -1983,7 +1983,7 @@ begin
     end
     else
       buf := mainJmpBuf;
-    rtv2('_longjmp', buf, i32c(l^.labelIndex));
+    rtv2(longJmpName, buf, i32c(l^.labelIndex));
     irUnreachable;
   end;
   irSetInsertPoint(irNewBlock('after.goto')); { unreachable code follows }

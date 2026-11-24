@@ -29,6 +29,8 @@ function emitOutput(const ir: TBuf; const name: string; kind: TOutputKind; opt: 
 { The directory of p3's unit library, searched after -I directories:
   $P3_UNIT_DIR, else ../lib/pascal next to the executable. }
 function findUnitLibrary: string;
+{ Is triple a Windows one (MSVC or MinGW)? }
+function isWindowsTriple(const triple: string): boolean;
 { -l and -L options, passed to the linker. }
 procedure addLinkerArg(const arg: string);
 { -fno-inline-runtime: from -O1 the runtime's small functions are inlined
@@ -137,12 +139,52 @@ begin
   findTool := '';
 end;
 
-function findLinkerDriver: string;
+function isWindowsTriple(const triple: string): boolean;
+begin
+  isWindowsTriple := (pos('windows', triple) > 0) or (pos('mingw', triple) > 0) or
+                     (pos('win32', triple) > 0);
+end;
+
+{ A MinGW triple (x86_64-w64-mingw32, x86_64-w64-windows-gnu)? }
+function isMinGWTriple(const triple: string): boolean;
+begin
+  isMinGWTriple := isWindowsTriple(triple) and
+                   ((pos('mingw', triple) > 0) or (pos('-gnu', triple) > 0));
+end;
+
+function isHostTriple(const triple: string): boolean;
+begin
+  isHostTriple := (triple = '') or (triple = llvmDefaultTriple);
+end;
+
+{ The name of triple's runtime directory and C toolchain prefix: MinGW
+  triples as MinGW-w64 spells them (x86_64-w64-mingw32), others as they
+  are. }
+function runtimeTargetName(const triple: string): string;
+begin
+  if isMinGWTriple(triple) then
+    exit(copy(triple, 1, pos('-', triple) - 1) + '-w64-mingw32');
+  runtimeTargetName := triple;
+end;
+
+function findLinkerDriver(const triple: string): string;
 var
   fromEnv: boolean;
-  value: string;
+  value, name: string;
   cc: string;
 begin
+  { another target: its own C toolchain (MinGW-w64's for Windows), which
+    knows where the target's C library and system libraries are }
+  if not isHostTriple(triple) then
+  begin
+    name := runtimeTargetName(triple);
+    cc := findTool('P3_CROSS_CC', name + '-gcc ' + name + '-clang', fromEnv);
+    if cc = '' then
+      diagError(noLoc, 'cannot find a C compiler to link for ''' + triple +
+                       ''' (tried ' + name + '-gcc, ' + name +
+                       '-clang); set P3_CROSS_CC');
+    exit(cc);
+  end;
   cc := findTool('P3_CC', 'clang-19 clang cc gcc', fromEnv);
   if cc = '' then
   begin
@@ -191,13 +233,19 @@ begin
   removeDots := r;
 end;
 
-function findRuntimeLibrary: string;
+{ The runtime library for triple ('': the host). For the host:
+  $P3_RUNTIME_LIB, else ../lib/libpascalrt.a next to p3; for another
+  target, ../lib/<runtimeTargetName>/libpascalrt.a. }
+function findRuntimeLibrary(const triple: string): string;
 var
   value, exe: string;
 begin
+  exe := sysExecutablePath;
+  if not isHostTriple(triple) then
+    exit(removeDots(pathJoin(pathDirName(exe), '../lib/' +
+                             runtimeTargetName(triple) + '/libpascalrt.a')));
   if sysGetEnv('P3_RUNTIME_LIB', value) then
     exit(value);
-  exe := sysExecutablePath;
   findRuntimeLibrary := removeDots(pathJoin(pathDirName(exe), '../lib/libpascalrt.a'));
 end;
 
@@ -210,7 +258,7 @@ var
 begin
   if sysGetEnv('P3_RUNTIME_IR', value) then
     exit(value);
-  findRuntimeIR := pathJoin(pathDirName(findRuntimeLibrary), 'libpascalrt.ll');
+  findRuntimeIR := pathJoin(pathDirName(findRuntimeLibrary('')), 'libpascalrt.ll');
 end;
 
 function findUnitLibrary: string;
@@ -358,14 +406,14 @@ var
   status, i: longint;
 begin
   linkExecutable := false;
-  runtime := findRuntimeLibrary;
+  runtime := findRuntimeLibrary(triple);
   if not sysFileExists(runtime) then
   begin
     diagError(noLoc, 'cannot find the Pascal runtime library ''' + runtime +
                      '''; set P3_RUNTIME_LIB');
     exit;
   end;
-  cc := findLinkerDriver;
+  cc := findLinkerDriver(triple);
   if cc = '' then
     exit;
   bufInit(cmd);
@@ -382,6 +430,10 @@ begin
   for i := 0 to libraries.count - 1 do
   begin
     l := nameStr(PName(listGet(libraries, i)));
+    { external 'c': on Windows the C library (msvcrt or UCRT) is always
+      linked, and there is no libc to name }
+    if isWindowsTriple(triple) and (l = '-lc') then
+      continue;
     if isMachOTriple(triple) and (copy(l, 1, 3) = '-l:') then
     begin
       f := copy(l, 4, length(l));
@@ -401,11 +453,14 @@ begin
   if (pos('darwin', triple) > 0) or (pos('macos', triple) > 0) or
      (pos('apple', triple) > 0) then
     addArg(cmd, '-Wl,-dead_strip')
-  else if (pos('windows', triple) > 0) or (pos('mingw', triple) > 0) or
-          (pos('win32', triple) > 0) then
+  else if isWindowsTriple(triple) and not isMinGWTriple(triple) then
     addArg(cmd, '-Wl,/OPT:REF')
   else
     addArg(cmd, '-Wl,--gc-sections');
+  { MinGW: a self-contained executable, without MinGW's own DLLs (the
+    runtime's thread-local variables need libwinpthread's) }
+  if isMinGWTriple(triple) then
+    addArg(cmd, '-static');
   addArg(cmd, '-lm');
   addArg(cmd, '-o');
   addArg(cmd, path);
@@ -485,10 +540,14 @@ begin
   { at -O0 the IR is printed as generated, like the C++ p3 does }
   if (kind = okLLVM) and (opt = 0) then
     exit(writeText(ir, path));
-  if (kind = okExe) and (triple <> llvmDefaultTriple) then
+  { linking for another target needs the runtime built for it }
+  if (kind = okExe) and not isHostTriple(triple) and
+     not sysFileExists(findRuntimeLibrary(triple)) then
   begin
-    diagError(noLoc, 'linking for a non-host target (''' + triple +
-                     ''') is not supported yet; use -c, -S or --emit-llvm');
+    diagError(noLoc, 'no Pascal runtime for target ''' + triple +
+                     ''' (configure p3 with -DP3_CROSS_TARGETS=' +
+                     runtimeTargetName(triple) +
+                     '); -c, -S and --emit-llvm work without it');
     exit;
   end;
   target := llvmLookupTarget(triple, e);

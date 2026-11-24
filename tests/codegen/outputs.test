@@ -40,9 +40,10 @@
 ; RUN: llvm-readobj --file-headers %t.dir/wasm.o | FileCheck --check-prefix=WASM %s
 ; WASM: Format: WASM
 
-; ...but linking executables is host-only for now.
+; ...but linking an executable for another target needs the runtime built
+; for it (P3_CROSS_TARGETS; tests/driver/windows-link.test).
 ; RUN: not %p3 --target=riscv64-unknown-linux-gnu %S/../driver/Inputs/hello.pas -o %t.dir/rv 2>&1 | FileCheck --check-prefix=XLINK %s
-; XLINK: error: linking for a non-host target ('riscv64-unknown-linux-gnu') is not supported yet; use -c, -S or --emit-llvm
+; XLINK: error: no Pascal runtime for target 'riscv64-unknown-linux-gnu' (configure p3 with -DP3_CROSS_TARGETS=riscv64-unknown-linux-gnu); -c, -S and --emit-llvm work without it
 
 
 ; Missing runtime library is reported clearly.

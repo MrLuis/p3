@@ -337,10 +337,13 @@ struct Runtime {
     WritePStr = Decl("__pas_write_pstr", Void, {Ptr, Ptr, I32});
     ReadStr = Decl("__pas_read_str", Void, {Ptr, Ptr, I32});
     // Non-local goto. The underscore variants do not save the signal mask.
-    SetJmp = Decl("_setjmp", I32, {Ptr});
+    // Windows has no _longjmp and a different _setjmp: the runtime's own
+    // pair, under its own names (MinGW's C library has a _setjmp too).
+    bool Win = llvm::Triple(M.getTargetTriple()).isOSWindows();
+    SetJmp = Decl(Win ? "__pas_setjmp" : "_setjmp", I32, {Ptr});
     llvm::cast<llvm::Function>(SetJmp.getCallee())
         ->addFnAttr(llvm::Attribute::ReturnsTwice);
-    LongJmp = Decl("_longjmp", Void, {Ptr, I32});
+    LongJmp = Decl(Win ? "__pas_longjmp" : "_longjmp", Void, {Ptr, I32});
     llvm::cast<llvm::Function>(LongJmp.getCallee())
         ->addFnAttr(llvm::Attribute::NoReturn);
   }

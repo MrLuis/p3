@@ -119,3 +119,49 @@ else()
   message(WARNING "libpascalrt.ll is not built: ${P3_RT_IR_PROBLEM}. p3 works "
                   "without it, but does not inline runtime functions.")
 endif()
+
+# The runtime for other targets, so that p3 links executables for them too:
+# <build>/lib/<triple>/libpascalrt.a, built with the target's own C
+# toolchain (<triple>-gcc and <triple>-ar: MinGW-w64's for Windows). By
+# default every target whose compiler is installed.
+set(P3_CROSS_TARGET_CANDIDATES x86_64-w64-mingw32)
+set(P3_CROSS_TARGETS "" CACHE STRING
+    "other targets to build the runtime for (default: those whose <triple>-gcc is found; OFF for none)")
+set(P3_CROSS_LIST "")
+if(P3_CROSS_TARGETS STREQUAL "")
+  foreach(triple ${P3_CROSS_TARGET_CANDIDATES})
+    find_program(P3_CROSS_CC_${triple} ${triple}-gcc)
+    if(P3_CROSS_CC_${triple})
+      list(APPEND P3_CROSS_LIST ${triple})
+    endif()
+  endforeach()
+elseif(NOT P3_CROSS_TARGETS STREQUAL "OFF")
+  set(P3_CROSS_LIST ${P3_CROSS_TARGETS})
+endif()
+foreach(triple ${P3_CROSS_LIST})
+  find_program(P3_CROSS_CC_${triple} ${triple}-gcc REQUIRED)
+  find_program(P3_CROSS_AR_${triple} ${triple}-ar REQUIRED)
+  set(dir ${CMAKE_CURRENT_BINARY_DIR}/${triple})
+  file(MAKE_DIRECTORY ${dir} ${PROJECT_BINARY_DIR}/lib/${triple})
+  set(objs "")
+  foreach(src io sys ansi format)
+    add_custom_command(
+      OUTPUT ${dir}/${src}.o
+      COMMAND ${P3_CROSS_CC_${triple}} -std=gnu11 -O2 -ffunction-sections
+              -fdata-sections -I ${CMAKE_CURRENT_SOURCE_DIR}/include
+              -c ${CMAKE_CURRENT_SOURCE_DIR}/${src}.c -o ${dir}/${src}.o
+      DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/${src}.c
+              ${CMAKE_CURRENT_SOURCE_DIR}/include/pascalrt.h
+      VERBATIM)
+    list(APPEND objs ${dir}/${src}.o)
+  endforeach()
+  set(lib ${PROJECT_BINARY_DIR}/lib/${triple}/libpascalrt.a)
+  add_custom_command(
+    OUTPUT ${lib}
+    COMMAND ${CMAKE_COMMAND} -E rm -f ${lib}
+    COMMAND ${P3_CROSS_AR_${triple}} rcs ${lib} ${objs}
+    DEPENDS ${objs}
+    VERBATIM)
+  add_custom_target(pascalrt-${triple} ALL DEPENDS ${lib})
+  message(STATUS "p3 runtime for ${triple}: ${P3_CROSS_CC_${triple}}")
+endforeach()

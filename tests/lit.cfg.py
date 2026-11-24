@@ -74,6 +74,7 @@ p3_under_test = os.environ.get("P3_UNDER_TEST") or \
     os.path.join(config.p3_tools_dir, "p3")
 # %p3 ignores project files, so a p3.json in a directory above the tree
 # cannot change the tests; the project tests use %p3-project.
+config.p3_under_test = p3_under_test + " -fdiagnostics-color=never --no-project"
 config.substitutions.append(("%p3-project", p3_under_test + " -fdiagnostics-color=never"))
 config.substitutions.append(("%p3", p3_under_test + " -fdiagnostics-color=never --no-project"))
 # The tools and runtime p3 uses, if set.
@@ -83,6 +84,17 @@ for var in ("P3_RUNTIME_LIB", "P3_RUNTIME_IR", "P3_CC", "P3_UNIT_DIR"):
 # This build's unit library, whichever compiler is under test (a self-hosted
 # one built by a test does not sit next to it).
 config.environment.setdefault("P3_UNIT_DIR", os.path.join(config.p3_obj_root, "lib", "pascal"))
+
+# Windows: the runtime built for MinGW-w64 x86-64 (P3_CROSS_TARGETS), so
+# that p3 links Windows programs (REQUIRES: windows-runtime); Wine, which
+# runs them (tests/windows).
+if os.path.exists(os.path.join(config.p3_obj_root, "lib", "x86_64-w64-mingw32",
+                               "libpascalrt.a")):
+    config.available_features.add("windows-runtime")
+import shutil
+config.wine = shutil.which("wine")
+if config.wine:
+    config.available_features.add("wine")
 
 # On macOS the LLVM tools directory put on PATH above usually holds a
 # Homebrew clang-19, which p3's driver tries first for linking. Its config

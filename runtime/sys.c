@@ -40,13 +40,14 @@ typedef struct stat StatBuf;
 
 #if defined(_WIN32) && defined(__x86_64__)
 /* The _setjmp/_longjmp pair of compiled code and of the runtime on 64-bit
- * Windows: every callee-saved register of the Microsoft x64 convention, in
+ * Windows, named __pas_setjmp/__pas_longjmp (MinGW's C library has a
+ * _setjmp of its own): every callee-saved register of the Microsoft x64 convention, in
  * a buffer without alignment requirements. Control moves directly, without
  * structured exception unwinding. */
 __asm__(".text\n"
-        ".globl _setjmp\n"
-        ".def _setjmp; .scl 2; .type 32; .endef\n"
-        "_setjmp:\n"
+        ".globl __pas_setjmp\n"
+        ".def __pas_setjmp; .scl 2; .type 32; .endef\n"
+        "__pas_setjmp:\n"
         "  movq %rbx, 0(%rcx)\n"
         "  movq %rbp, 8(%rcx)\n"
         "  movq %rdi, 16(%rcx)\n"
@@ -73,9 +74,9 @@ __asm__(".text\n"
         "  fnstcw 244(%rcx)\n"
         "  xorl %eax, %eax\n"
         "  ret\n"
-        ".globl _longjmp\n"
-        ".def _longjmp; .scl 2; .type 32; .endef\n"
-        "_longjmp:\n"
+        ".globl __pas_longjmp\n"
+        ".def __pas_longjmp; .scl 2; .type 32; .endef\n"
+        "__pas_longjmp:\n"
         "  movl %edx, %eax\n"
         "  testl %eax, %eax\n"
         "  jnz 1f\n"

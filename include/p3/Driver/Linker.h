@@ -22,8 +22,18 @@ namespace p3 {
 
 class DiagnosticsEngine;
 
-/// Default location: <dir of p3>/../lib/libpascalrt.a
-std::string findRuntimeLibrary();
+/// The runtime library for Triple (empty: the host). For the host:
+/// $P3_RUNTIME_LIB, else <dir of p3>/../lib/libpascalrt.a; for another
+/// target, <dir of p3>/../lib/<runtimeTargetName>/libpascalrt.a (built when
+/// p3 is configured with that target in P3_CROSS_TARGETS).
+std::string findRuntimeLibrary(llvm::StringRef Triple = "");
+
+/// The name of Triple's runtime directory and C toolchain prefix: MinGW
+/// triples as MinGW-w64 spells them (x86_64-w64-mingw32), others as they are.
+std::string runtimeTargetName(llvm::StringRef Triple);
+
+/// Is Triple the host's?
+bool isHostTriple(llvm::StringRef Triple);
 
 /// The directory of p3's unit library, searched after -I directories:
 /// $P3_UNIT_DIR, else <dir of p3>/../lib/pascal

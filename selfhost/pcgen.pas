@@ -530,6 +530,30 @@ begin
     irSetNoRaise(ignored);
 end;
 
+{ Windows has no _longjmp and a different _setjmp: the runtime's own pair,
+  under its own names (MinGW's C library has a _setjmp too). }
+function isWindowsTarget: boolean;
+begin
+  isWindowsTarget := (pos('windows', cgTriple) > 0) or (pos('mingw', cgTriple) > 0) or
+                     (pos('win32', cgTriple) > 0);
+end;
+
+function setJmpName: string;
+begin
+  if isWindowsTarget then
+    setJmpName := '__pas_setjmp'
+  else
+    setJmpName := '_setjmp';
+end;
+
+function longJmpName: string;
+begin
+  if isWindowsTarget then
+    longJmpName := '__pas_longjmp'
+  else
+    longJmpName := '_longjmp';
+end;
+
 { The runtime and C library functions, in the order of the C++ Runtime. }
 procedure declareRuntime;
 const
@@ -584,8 +608,8 @@ begin
   declareRT('__pas_str_insert', 'void', 'ptr,ptr,i32,i32', nu);
   declareRT('__pas_write_pstr', 'void', 'ptr,ptr,i32', nu);
   declareRT('__pas_read_str', 'void', 'ptr,ptr,i32', nu);
-  declareRT('_setjmp', 'i32', 'ptr', 'nounwind returns_twice');
-  declareRT('_longjmp', 'void', 'ptr,i32', 'noreturn nounwind');
+  declareRT(setJmpName, 'i32', 'ptr', 'nounwind returns_twice');
+  declareRT(longJmpName, 'void', 'ptr,i32', 'noreturn nounwind');
 end;
 
 const
@@ -1899,7 +1923,9 @@ end;
   to a value of its type. }
 function byRefParamAttr(t: PType): string;
 begin
-  if t^.kind = tyUntyped then
+  { untyped, or of no size (a record of class variables only): LLVM has no
+    dereferenceable(0), and the C++ p3 adds none }
+  if (t^.kind = tyUntyped) or (sizeOf_(t) = 0) then
     byRefParamAttr := 'nonnull'
   else
     byRefParamAttr := 'nonnull dereferenceable(' + intToStr(sizeOf_(t)) + ')';
@@ -4703,7 +4729,7 @@ var
 begin
   f := irCreateTemp(excFrameT, 'excframe');
   excCall1('__pas_exc_push', f);
-  r := call1(rtFn('_setjmp'), irStructGEP(excFrameT, f, 4, ''), 'jmp');
+  r := call1(rtFn(setJmpName), irStructGEP(excFrameT, f, 4, ''), 'jmp');
   if body = nil then
     body := irNewBlock(bodyName);
   irCondBr(irICmp('ne', r, i32c(0), ''), landing, body, false);

@@ -66,6 +66,8 @@ std::string p3::getDefaultOutputFile(const CompilerOptions &Opts) {
   case Action::EmitAsm:  return (Stem + ".s").str();
   case Action::EmitObj:  return (Stem + ".o").str();
   case Action::EmitExe:
+    if (llvm::Triple(Opts.TargetTriple).isOSWindows())
+      return (Stem + ".exe").str();
     return Opts.InputFile == "-" ? std::string("a.out") : Stem.str();
   default:
     return "-";
@@ -513,13 +515,17 @@ bool Driver::runPipeline(FileID FID) {
 
   // --- M3: code generation ------------------------------------------------
 
-  bool IsHost = llvm::Triple(Opts.TargetTriple) ==
-                llvm::Triple(llvm::sys::getDefaultTargetTriple());
-  if (Opts.Act == Action::EmitExe && !IsHost) {
-    Diags.error("linking for a non-host target ('" +
-                llvm::Twine(Opts.TargetTriple) +
-                "') is not supported yet; use -c, -S or --emit-llvm");
-    return false;
+  // Linking for another target needs the runtime built for it.
+  if (Opts.Act == Action::EmitExe && !isHostTriple(Opts.TargetTriple)) {
+    std::string Lib = findRuntimeLibrary(Opts.TargetTriple);
+    if (!llvm::sys::fs::exists(Lib)) {
+      Diags.error("no Pascal runtime for target '" +
+                  llvm::Twine(Opts.TargetTriple) +
+                  "' (configure p3 with -DP3_CROSS_TARGETS=" +
+                  runtimeTargetName(Opts.TargetTriple) +
+                  "); -c, -S and --emit-llvm work without it");
+      return false;
+    }
   }
 
   auto TM = createTargetMachine(Opts.TargetTriple, Opts.OptLevel, Opts.TargetCPU,
