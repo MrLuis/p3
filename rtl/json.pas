@@ -1700,22 +1700,39 @@ begin
   AddChar(FBuf, FLen, '"');
 end;
 
-procedure TJsonWriter.Value(I: Int64);
+{ the digits of Q, written backwards into a stack buffer (no string made) }
+procedure AddDigits(var Buf: string; var Len: Integer; Q: QWord; Negative: Boolean);
 var
-  S: string;
+  Tmp: array[0..24] of AnsiChar;
+  I: Integer;
+begin
+  I := 25;
+  repeat
+    Dec(I);
+    Tmp[I] := AnsiChar(Ord('0') + Integer(Q mod 10));
+    Q := Q div 10;
+  until Q = 0;
+  if Negative then
+  begin
+    Dec(I);
+    Tmp[I] := '-';
+  end;
+  AddChars(Buf, Len, PChar(@Tmp[I]), 25 - I);
+end;
+
+procedure TJsonWriter.Value(I: Int64);
 begin
   BeforeValue;
-  S := IntToStr(I);
-  AddChars(FBuf, FLen, PChar(S), Length(S));
+  if I < 0 then
+    AddDigits(FBuf, FLen, QWord(-(I + 1)) + 1, True)    { (also Low(Int64)) }
+  else
+    AddDigits(FBuf, FLen, QWord(I), False);
 end;
 
 procedure TJsonWriter.ValueUInt64(Q: QWord);
-var
-  S: string;
 begin
   BeforeValue;
-  S := IntToStr(Q);
-  AddChars(FBuf, FLen, PChar(S), Length(S));
+  AddDigits(FBuf, FLen, Q, False);
 end;
 
 procedure TJsonWriter.Value(D: Double);
