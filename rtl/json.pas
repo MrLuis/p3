@@ -1568,24 +1568,219 @@ end;
 function c_snprintf(buf: PChar; n: SizeInt; fmt: PChar): Integer; cdecl;
   varargs; external 'c' name 'snprintf';
 
+{ P significant digits of |D|, correctly rounded, by C's printf (%.*e): the
+  digits and the decimal exponent of the first }
+procedure PrintfDigits(D: Double; P: Integer; var Dig: array of Integer;
+                       out E: Integer);
+var
+  Buf: array[0..63] of Char;
+  I, N, Sign: Integer;
+begin
+  c_snprintf(@Buf[0], 64, '%.*e', P - 1, D);
+  I := 0;
+  if Buf[0] = '-' then
+    I := 1;
+  N := 0;
+  while Buf[I] <> 'e' do
+  begin
+    if Buf[I] <> '.' then
+    begin
+      Dig[N] := Ord(Buf[I]) - Ord('0');
+      Inc(N);
+    end;
+    Inc(I);
+  end;
+  Inc(I);
+  Sign := 1;
+  if Buf[I] = '-' then
+    Sign := -1;
+  Inc(I);
+  E := 0;
+  while Buf[I] <> #0 do
+  begin
+    E := E * 10 + Ord(Buf[I]) - Ord('0');
+    Inc(I);
+  end;
+  E := E * Sign;
+end;
+
+{ D as the shortest of "%.15g", "%.16g", "%.17g" that reads back as D (the
+  text printf makes, plus ".0" for a number with no point or exponent).
+  One printf gives 17 digits; the 16 and 15 digit candidates are those
+  digits rounded (printf again only when the dropped digits are a tie that
+  the 17 digit rounding hides), and a candidate is tested by reading it
+  with Eisel-Lemire instead of strtod. }
 function JsonFloat(D: Double): string;
 var
-  Buf: array[0..39] of Char;
-  P: Integer;
-  S: string;
+  Dig, Cand: array[0..16] of Integer;
+  Out: array[0..40] of Char;
+  P, I, E, CE, N, T, X, O: Integer;
+  M: QWord;
+  Neg, Amb, Same: Boolean;
+  V, A: Double;
 begin
   if D - D <> 0 then
     raise EJsonError.Create('a number that is not finite cannot be written as JSON');
-  for P := 15 to 17 do
+  Neg := PQWord(@D)^ shr 63 <> 0;
+  if D = 0 then
   begin
-    c_snprintf(@Buf[0], 40, '%.*g', P, D);
-    if (P = 17) or (c_strtod(@Buf[0], nil) = D) then
-      Break;
+    if Neg then
+      Exit('-0.0');
+    Exit('0.0');
   end;
-  S := PChar(@Buf[0]);
-  if (Pos('.', S) = 0) and (Pos('e', S) = 0) then
-    S := S + '.0';
-  Result := S;
+  A := D;
+  if Neg then
+    A := -D;
+  PrintfDigits(D, 17, Dig, E);
+  P := 15;
+  while True do
+  begin
+    CE := E;
+    if P = 17 then
+    begin
+      for I := 0 to 16 do
+        Cand[I] := Dig[I];
+      Break;
+    end;
+    { round the 17 digits at P }
+    Amb := False;
+    if P = 15 then
+    begin
+      T := Dig[15] * 10 + Dig[16];
+      Amb := T = 50;
+    end
+    else
+    begin
+      T := Dig[16];
+      Amb := T = 5;
+    end;
+    if Amb then
+      PrintfDigits(D, P, Cand, CE)
+    else
+    begin
+      for I := 0 to P - 1 do
+        Cand[I] := Dig[I];
+      if ((P = 15) and (T > 50)) or ((P = 16) and (T > 5)) then
+      begin
+        I := P - 1;
+        while (I >= 0) and (Cand[I] = 9) do
+        begin
+          Cand[I] := 0;
+          Dec(I);
+        end;
+        if I >= 0 then
+          Inc(Cand[I])
+        else
+        begin
+          Cand[0] := 1;
+          Inc(CE);
+        end;
+      end;
+    end;
+    M := 0;
+    for I := 0 to P - 1 do
+      M := M * 10 + QWord(Cand[I]);
+    V := EiselLemire(M, CE - (P - 1));
+    if V = A then
+      Break;
+    Inc(P);
+  end;
+  { %g: the digits without trailing zeros, in the fixed or the exponent form }
+  N := P;
+  while (N > 1) and (Cand[N - 1] = 0) do
+    Dec(N);
+  X := CE;
+  O := 0;
+  if Neg then
+  begin
+    Out[O] := '-';
+    Inc(O);
+  end;
+  Same := False;       { (a point or an exponent was written) }
+  if (X < -4) or (X >= P) then
+  begin
+    Out[O] := Chr(Ord('0') + Cand[0]);
+    Inc(O);
+    if N > 1 then
+    begin
+      Out[O] := '.';
+      Inc(O);
+      for I := 1 to N - 1 do
+      begin
+        Out[O] := Chr(Ord('0') + Cand[I]);
+        Inc(O);
+      end;
+    end;
+    Out[O] := 'e';
+    Inc(O);
+    if X < 0 then
+    begin
+      Out[O] := '-';
+      X := -X;
+    end
+    else
+      Out[O] := '+';
+    Inc(O);
+    if X >= 100 then
+    begin
+      Out[O] := Chr(Ord('0') + X div 100);
+      Inc(O);
+    end;
+    Out[O] := Chr(Ord('0') + (X div 10) mod 10);
+    Inc(O);
+    Out[O] := Chr(Ord('0') + X mod 10);
+    Inc(O);
+    Same := True;
+  end
+  else if X >= 0 then
+  begin
+    for I := 0 to X do
+    begin
+      if I < N then
+        Out[O] := Chr(Ord('0') + Cand[I])
+      else
+        Out[O] := '0';
+      Inc(O);
+    end;
+    if N > X + 1 then
+    begin
+      Out[O] := '.';
+      Inc(O);
+      for I := X + 1 to N - 1 do
+      begin
+        Out[O] := Chr(Ord('0') + Cand[I]);
+        Inc(O);
+      end;
+      Same := True;
+    end;
+  end
+  else
+  begin
+    Out[O] := '0';
+    Inc(O);
+    Out[O] := '.';
+    Inc(O);
+    for I := 1 to -X - 1 do
+    begin
+      Out[O] := '0';
+      Inc(O);
+    end;
+    for I := 0 to N - 1 do
+    begin
+      Out[O] := Chr(Ord('0') + Cand[I]);
+      Inc(O);
+    end;
+    Same := True;
+  end;
+  if not Same then
+  begin
+    Out[O] := '.';
+    Inc(O);
+    Out[O] := '0';
+    Inc(O);
+  end;
+  SetLength(Result, O);
+  Move(Out[0], Result[1], O);
 end;
 
 constructor TJsonWriter.Create(Pretty: Boolean);
