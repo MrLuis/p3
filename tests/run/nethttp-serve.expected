@@ -9,7 +9,10 @@ loop  file missing: 404 (close) 404 page not found
 loop  file ..: 403 (close) 403 forbidden
 loop  file twice-encoded: 404 (close) 404 page not found
 loop  headers and writes: 200 [Allow: POST] (close) abcd
-loop  HEAD: 200 (close)
+loop  HEAD file: 200 (close) cl=7
+loop  HEAD index: 200 (close) cl=13
+loop  HEAD missing: 404 (close) cl=19
+loop  HEAD: 200 (close) cl=7
 loop  404: 404 (close) 404 page not found
 loop  405: 405 [Allow: GET, HEAD] (close) 405 method not allowed
 loop  400 then closed: 200 hello ok | 400 (close) Bad Request
@@ -24,8 +27,11 @@ async file missing: 404 (close) 404 page not found
 async file ..: 403 (close) 403 forbidden
 async file twice-encoded: 404 (close) 404 page not found
 async headers and writes: 200 [Allow: POST] (close) abcd
-async HEAD: 200 (close)
+async HEAD file: 200 (close) cl=7
+async HEAD index: 200 (close) cl=13
+async HEAD missing: 404 (close) cl=19
+async HEAD: 200 (close) cl=7
 async 404: 404 (close) 404 page not found
 async 405: 405 [Allow: GET, HEAD] (close) 405 method not allowed
 async 400 then closed: 200 hello ok | 400 (close) Bad Request
-answers (After): 36
+answers (After): 42

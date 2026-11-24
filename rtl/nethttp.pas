@@ -126,6 +126,7 @@ type
     FBodyBuf: PAnsiChar;
     FBodyLen, FBodyCap: Integer;
     FBuffered: Boolean;
+    FHeadLength: Int64;        { a HEAD answer's Content-Length when its body is not made (-1: its own) }
     FAnswered: Boolean;
     FClose: Boolean;
     FRoute: TRouteContext;
@@ -818,6 +819,7 @@ begin
   FBody := '';
   FBodyLen := 0;
   FBuffered := false;
+  FHeadLength := -1;
   FAnswered := false;
   FClose := false;
 end;
@@ -1104,7 +1106,9 @@ end;
 
 function THttpContext.BodyLength: Integer;
 begin
-  if FBuffered then
+  if FHeadLength >= 0 then
+    Result := Integer(FHeadLength)
+  else if FBuffered then
     Result := FBodyLen
   else
     Result := Length(FBody);
@@ -1261,12 +1265,30 @@ end;
 function c_fopen(name, mode: PChar): Pointer; cdecl; external 'c' name 'fopen';
 function c_fread(buf: Pointer; size, count: Int64; f: Pointer): Int64; cdecl; external 'c' name 'fread';
 function c_fclose(f: Pointer): LongInt; cdecl; external 'c' name 'fclose';
+function c_fseek(f: Pointer; off: Int64; whence: LongInt): LongInt; cdecl; external 'c' name 'fseeko';
+function c_ftell(f: Pointer): Int64; cdecl; external 'c' name 'ftello';
 
+{ the size of an open file by seeking to its end and back; -1 when it cannot
+  seek (a pipe) }
+function OpenFileSize(f: Pointer): Int64;
+begin
+  Result := -1;
+  if c_fseek(f, 0, 2) <> 0 then
+    exit;
+  Result := c_ftell(f);
+  if c_fseek(f, 0, 0) <> 0 then
+    Result := -1;
+end;
+
+{ the whole file: made once at its size and read straight into the result
+  (the bytes it has when opened: a file that shrinks gives what is there,
+  one that grows is cut at the size seen); a file that cannot say its size
+  (a pipe) is read in pieces }
 function ReadWholeFile(const Name: string; out Content: string): Boolean;
 var
   f: Pointer;
   buf: array[0..65535] of AnsiChar;
-  n, used: Int64;
+  n, used, size: Int64;
   r: string;
 begin
   Result := false;
@@ -1276,23 +1298,48 @@ begin
     exit;
   r := '';
   used := 0;
-  repeat
-    n := c_fread(@buf[0], 1, sizeof(buf), f);
-    if n > 0 then
+  size := OpenFileSize(f);
+  if size >= 0 then
+  begin
+    if size > 0 then
     begin
-      SetLength(r, used + n);
-      Move(buf[0], r[used + 1], n);
-      used := used + n;
+      SetLengthRaw(r, size);
+      used := c_fread(PChar(r), 1, size, f);
+      if used < size then
+        SetLength(r, used);
     end;
-  until n < sizeof(buf);
+  end
+  else
+    repeat
+      n := c_fread(@buf[0], 1, sizeof(buf), f);
+      if n > 0 then
+      begin
+        SetLength(r, used + n);
+        Move(buf[0], r[used + 1], n);
+        used := used + n;
+      end;
+    until n < sizeof(buf);
   c_fclose(f);
   Content := r;
   Result := true;
 end;
 
+{ the size of the file, or -1 }
+function FileLength(const Name: string): Int64;
+var
+  f: Pointer;
+begin
+  f := c_fopen(PChar(Name), 'rb');
+  if f = nil then
+    exit(-1);
+  Result := OpenFileSize(f);
+  c_fclose(f);
+end;
+
 procedure ServeFile(C: THttpContext; const Name: string);
 var
   fn, content: string;
+  size: Int64;
 begin
   fn := Name;
   if DirectoryExists(fn) then
@@ -1304,6 +1351,19 @@ begin
   if not FileExists(fn) then
   begin
     C.Text(404, '404 page not found' + #10);
+    exit;
+  end;
+  if C.FIsHead then
+  begin
+    { HEAD: the length and type, without reading the file }
+    size := FileLength(fn);
+    if size < 0 then
+    begin
+      C.Text(500, 'the file could not be read' + #10);
+      exit;
+    end;
+    C.Send(200, HttpContentType(fn), '');
+    C.FHeadLength := size;
     exit;
   end;
   if not ReadWholeFile(fn, content) then

@@ -72,6 +72,8 @@ begin
       Result := Result + ' [' + Copy(head, p, Pos(NL, Copy(head, p, Length(head)) + NL) - 1) + ']';
     if Pos('Connection: close', head) > 0 then
       Result := Result + ' (close)';
+    if (body = '') and (cl > 0) then
+      Result := Result + ' cl=' + IntToStr(cl);
     if body <> '' then
       Result := Result + ' ' + TrimRight(body);
     rest := Copy(rest, e + 4 + cl, Length(rest));
@@ -98,6 +100,9 @@ begin
   Show('file ..', 'GET /files/%2e%2e/secret HTTP/1.1' + NL + 'Connection: close' + NL + NL);
   Show('file twice-encoded', 'GET /files/no%2574e.txt HTTP/1.1' + NL + 'Connection: close' + NL + NL);
   Show('headers and writes', 'GET /hdr HTTP/1.1' + NL + 'Connection: close' + NL + NL);
+  Show('HEAD file', 'HEAD /files/note.txt HTTP/1.1' + NL + 'Connection: close' + NL + NL);
+  Show('HEAD index', 'HEAD /files/ HTTP/1.1' + NL + 'Connection: close' + NL + NL);
+  Show('HEAD missing', 'HEAD /files/none.txt HTTP/1.1' + NL + 'Connection: close' + NL + NL);
   Show('HEAD', 'HEAD /hello/h HTTP/1.1' + NL + 'Connection: close' + NL + NL);
   Show('404', 'GET /nowhere HTTP/1.1' + NL + 'Connection: close' + NL + NL);
   Show('405', 'DELETE /hello/x HTTP/1.1' + NL + 'Connection: close' + NL + NL);
@@ -136,6 +141,7 @@ begin
   Router.Post('/echo', procedure(C: THttpContext; R: TRouteContext) =>
     C.Text(200, 'got ' + C.Body));
   Router.Get('/files/*', FileServer('site'));
+  Router.Head('/files/*', FileServer('site'));
   Router.Get('/hdr', procedure(C: THttpContext; R: TRouteContext) => begin
     C.SetHeader('allow', 'GET');
     C.AddHeader('X-B', '2');
