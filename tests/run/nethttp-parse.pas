@@ -90,6 +90,11 @@ begin
           ' query=', C.Query, ' version=', C.Version);
   Writeln('y=', C.QueryParam('y'), ' x=', C.QueryParam('x'), ' flag=[', C.QueryParam('flag'),
           '] none=[', C.QueryParam('none'), ']');
+  { an encoded key, an empty value, the first of two, empty pairs, a key that is a prefix }
+  req := 'GET /p?a%62=7&k=&d=1&d=2&&ab2=x&q+r=s%26t& HTTP/1.1' + NL + 'Host: h' + NL + NL;
+  Writeln(R(req), ' ab=[', C.QueryParam('ab'), '] k=[', C.QueryParam('k'), '] d=[', C.QueryParam('d'),
+          '] ab2=[', C.QueryParam('ab2'), '] a=[', C.QueryParam('a'), '] q r=[', C.QueryParam('q r'),
+          '] none=[', C.QueryParam('none'), ']');
   Writeln(R('OPTIONS * HTTP/1.1' + NL + NL), ' ', C.Method, ' ', C.Target);
   Writeln(R('PURGE /cache HTTP/1.1' + NL + NL), ' ', C.Method);
 

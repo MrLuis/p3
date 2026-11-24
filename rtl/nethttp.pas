@@ -307,6 +307,19 @@ begin
     Result := c;
 end;
 
+{ P[0..Len) equals S, ignoring ASCII case in both }
+function SameNoCaseBoth(P: PAnsiChar; Len: Integer; const S: string): Boolean;
+var
+  i: Integer;
+begin
+  if Len <> Length(S) then
+    exit(false);
+  for i := 0 to Len - 1 do
+    if LowerAscii((P + i)^) <> LowerAscii(S[i + 1]) then
+      exit(false);
+  Result := true;
+end;
+
 { P[0..Len) equals S, case-insensitive (S lowercase) }
 function SameNoCase(P: PAnsiChar; Len: Integer; const S: string): Boolean;
 var
@@ -876,35 +889,62 @@ end;
 
 function THttpContext.QueryParam(const Name: string): string;
 var
-  q, pair, k: string;
-  i, e: Integer;
+  q, endq, i, ps, pe, ke: Integer;
+  plain, match: Boolean;
+  sp: THttpSpan;
 begin
   Result := '';
-  q := Query;
-  while q <> '' do
-  begin
-    i := Pos('&', q);
-    if i = 0 then
+  q := -1;
+  for i := 0 to FTarget.Len - 1 do
+    if (FBuf + FTarget.Off + i)^ = '?' then
     begin
-      pair := q;
-      q := '';
+      q := FTarget.Off + i + 1;
+      break;
+    end;
+  if q < 0 then
+    exit;
+  endq := FTarget.Off + FTarget.Len;
+  { the pairs are read where they are: only the value found is made }
+  ps := q;
+  while ps < endq do
+  begin
+    pe := ps;
+    while (pe < endq) and ((FBuf + pe)^ <> '&') do
+      Inc(pe);
+    ke := ps;
+    plain := true;
+    while (ke < pe) and ((FBuf + ke)^ <> '=') do
+    begin
+      if ((FBuf + ke)^ = '%') or ((FBuf + ke)^ = '+') then
+        plain := false;
+      Inc(ke);
+    end;
+    if plain then
+    begin
+      match := ke - ps = Length(Name);
+      i := 0;
+      while match and (i < ke - ps) do
+      begin
+        if (FBuf + ps + i)^ <> Name[i + 1] then
+          match := false;
+        Inc(i);
+      end;
     end
     else
     begin
-      pair := Copy(q, 1, i - 1);
-      q := Copy(q, i + 1, Length(q));
+      sp.Off := ps;
+      sp.Len := ke - ps;
+      match := HttpUrlDecode(Span(sp), true) = Name;
     end;
-    e := Pos('=', pair);
-    if e = 0 then
-      k := pair
-    else
-      k := Copy(pair, 1, e - 1);
-    if HttpUrlDecode(k, true) = Name then
+    if match then
     begin
-      if e = 0 then
+      if ke >= pe then
         exit('');
-      exit(HttpUrlDecode(Copy(pair, e + 1, Length(pair)), true));
+      sp.Off := ke + 1;
+      sp.Len := pe - ke - 1;
+      exit(HttpUrlDecode(Span(sp), true));
     end;
+    ps := pe + 1;
   end;
 end;
 
@@ -921,11 +961,9 @@ end;
 function THttpContext.HasHeader(const Name: string): Boolean;
 var
   i: Integer;
-  low: string;
 begin
-  low := LowerCase(Name);
   for i := 0 to FNHeaders - 1 do
-    if SameNoCase(FBuf + FNames[i].Off, FNames[i].Len, low) then
+    if SameNoCaseBoth(FBuf + FNames[i].Off, FNames[i].Len, Name) then
       exit(true);
   Result := false;
 end;
@@ -933,11 +971,9 @@ end;
 function THttpContext.Header(const Name: string): string;
 var
   i: Integer;
-  low: string;
 begin
-  low := LowerCase(Name);
   for i := 0 to FNHeaders - 1 do
-    if SameNoCase(FBuf + FNames[i].Off, FNames[i].Len, low) then
+    if SameNoCaseBoth(FBuf + FNames[i].Off, FNames[i].Len, Name) then
       exit(Span(FValues[i]));
   Result := '';
 end;

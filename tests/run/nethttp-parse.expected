@@ -1,6 +1,7 @@
 -- request line, path, query
 ok(51) method=GET path=/a b/c raw=/a%20b/c query=x=1&y=%41+B&flag version=HTTP/1.1
 y=A B x=1 flag=[] none=[]
+ok(64) ab=[7] k=[] d=[1] ab2=[x] a=[] q r=[s&t] none=[]
 ok(22) OPTIONS *
 ok(25) PURGE
 -- headers
