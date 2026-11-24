@@ -1126,7 +1126,7 @@ end;
 function StringReplace(const s, from, into: string; flags: TReplaceFlags): string;
 var
   r: string;
-  p, m, k, count, last, d: longint;
+  p, m, k, count, last, d, first: longint;
   all, ignore: boolean;
 begin
   if from = '' then
@@ -1142,6 +1142,7 @@ begin
     p := posFromText(from, s, 1)
   else
     p := posFrom(from, s, 1);
+  first := p;                   { (the copy below starts from it) }
   while p > 0 do
   begin
     count := count + 1;
@@ -1165,10 +1166,7 @@ begin
   setlength(r, length(s) + count * (k - m));
   last := 1;
   d := 1;
-  if ignore then
-    p := posFromText(from, s, 1)
-  else
-    p := posFrom(from, s, 1);
+  p := first;
   while count > 0 do
   begin
     putChars(s, last, r, d, p - last);
