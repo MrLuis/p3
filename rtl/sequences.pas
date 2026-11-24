@@ -184,6 +184,22 @@ begin
   Result := True;
 end;
 
+{ The bits of a float, with -0.0 as +0.0 (they compare equal, so they must
+  hash alike). NaN never equals anything: its hash does not matter. }
+function KeyHash(const X: Double; out H: Cardinal): Boolean; overload;
+var
+  Bits: QWord;
+  V: Double;
+begin
+  V := X;
+  if V = 0 then
+    Bits := 0
+  else
+    move(V, Bits, SizeOf(Double));
+  H := Mix64(Bits);
+  Result := True;
+end;
+
 function KeyHash(const X: string; out H: Cardinal): Boolean; overload;
 var
   I: Integer;

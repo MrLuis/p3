@@ -1,7 +1,7 @@
 { DistinctBy and GroupBy (docs/sequences-review.md SQ-2, SQ-3) look a key up
   in a hash table when the unit can hash its type (the integer kinds,
   string, Char, Boolean, pointers and classes) and search the keys one by
-  one for any other (an enumeration, Double). Every case is compared with a
+  one for any other (an enumeration). Every case is compared with a
   reference written here: the first value of each key, the groups in the
   order their keys first appear, the values in their order in each group.
   Keys that are equal strings in different allocations, many keys, one
@@ -204,18 +204,32 @@ end;
 procedure Unhashed;
 var
   E: specialize TArray<TColor>;
-  D: specialize TArray<Double>;
   I: Integer;
 begin
-  E := nil; D := nil;
+  E := nil;
   SetLength(E, 400);
-  SetLength(D, 400);
   for I := 0 to 399 do
-  begin
     E[I] := TColor(Rnd(4));
-    D[I] := Rnd(30) / 4;
-  end;
   specialize CheckKeys<TColor>('enumeration', E);
+end;
+
+{ hashed: +0.0 and -0.0 are one key }
+procedure Floats;
+var
+  D: specialize TArray<Double>;
+  I, K: Integer;
+  Zero: Double;
+begin
+  D := nil;
+  Zero := 0;
+  SetLength(D, 2000);
+  for I := 0 to 1999 do
+  begin
+    K := Rnd(30);
+    D[I] := K / 4;
+    if (K = 0) and (I mod 2 = 0) then
+      D[I] := -Zero;
+  end;
   specialize CheckKeys<Double>('double', D);
 end;
 
@@ -227,4 +241,5 @@ begin
   Chars;
   Objects;
   Unhashed;
+  Floats;
 end.
