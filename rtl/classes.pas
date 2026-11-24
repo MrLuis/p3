@@ -169,6 +169,9 @@ type
     procedure InsertItem(Index: longint; const S: string; AObject: TObject);
     procedure ExchangeItems(Index1, Index2: longint);
     procedure QuickSort(L, R: longint; Compare: TStringListSortCompare);
+    procedure IntroSort(L, R, depth: longint; Compare: TStringListSortCompare);
+    procedure InsertionSort(L, R: longint; Compare: TStringListSortCompare);
+    procedure HeapSort(L, R: longint; Compare: TStringListSortCompare);
     procedure SetSorted(Value: boolean);
     procedure SetCaseSensitive(Value: boolean);
   protected
@@ -1543,35 +1546,120 @@ begin
   Changed;
 end;
 
+{ Items L..R in order. Hoare's partition around the first item (the median of
+  three moved there), stopping on equal items, so many equal keys split the
+  range in halves (the old partition made them O(n^2)); the larger side is
+  looped on, the smaller recursed into; ranges of 12 or fewer are sorted by
+  insertion; past 2 log2(n) levels the range is heap sorted. }
 procedure TStringList.QuickSort(L, R: longint; Compare: TStringListSortCompare);
 var
-  pivot, vL, vR: longint;
+  depth, n: longint;
 begin
-  if R - L <= 1 then
+  n := R - L + 1;
+  depth := 0;
+  while n > 1 do
   begin
-    if (L < R) and (Compare(Self, L, R) > 0) then
-      ExchangeItems(L, R);
-    exit;
+    depth := depth + 2;
+    n := n shr 1;
   end;
-  vL := L;
-  vR := R;
-  pivot := L + (R - L) div 2;
-  while vL < vR do
+  IntroSort(L, R, depth, Compare);
+end;
+
+procedure TStringList.InsertionSort(L, R: longint; Compare: TStringListSortCompare);
+var
+  i, j: longint;
+begin
+  for i := L + 1 to R do
   begin
-    while (vL < pivot) and (Compare(Self, vL, pivot) <= 0) do
-      vL := vL + 1;
-    while (vR > pivot) and (Compare(Self, vR, pivot) > 0) do
-      vR := vR - 1;
-    ExchangeItems(vL, vR);
-    if pivot = vL then
-      pivot := vR
-    else if pivot = vR then
-      pivot := vL;
+    j := i;
+    while (j > L) and (Compare(Self, j - 1, j) > 0) do
+    begin
+      ExchangeItems(j - 1, j);
+      j := j - 1;
+    end;
   end;
-  if pivot - 1 >= L then
-    QuickSort(L, pivot - 1, Compare);
-  if pivot + 1 <= R then
-    QuickSort(pivot + 1, R, Compare);
+end;
+
+procedure TStringList.HeapSort(L, R: longint; Compare: TStringListSortCompare);
+var
+  n, i, root, child: longint;
+
+  procedure sift(start, count: longint);
+  begin
+    root := start;
+    while true do
+    begin
+      child := 2 * root + 1;
+      if child >= count then
+        break;
+      if (child + 1 < count) and (Compare(Self, L + child, L + child + 1) < 0) then
+        child := child + 1;
+      if Compare(Self, L + root, L + child) >= 0 then
+        break;
+      ExchangeItems(L + root, L + child);
+      root := child;
+    end;
+  end;
+
+begin
+  n := R - L + 1;
+  for i := (n - 2) div 2 downto 0 do
+    sift(i, n);
+  for i := n - 1 downto 1 do
+  begin
+    ExchangeItems(L, L + i);
+    sift(0, i);
+  end;
+end;
+
+procedure TStringList.IntroSort(L, R, depth: longint; Compare: TStringListSortCompare);
+var
+  m, i, j: longint;
+begin
+  while R - L > 12 do
+  begin
+    if depth = 0 then
+    begin
+      HeapSort(L, R, Compare);
+      exit;
+    end;
+    depth := depth - 1;
+    { the median of the first, middle and last items goes first }
+    m := L + (R - L) div 2;
+    if Compare(Self, m, L) < 0 then ExchangeItems(m, L);
+    if Compare(Self, R, m) < 0 then
+    begin
+      ExchangeItems(R, m);
+      if Compare(Self, m, L) < 0 then ExchangeItems(m, L);
+    end;
+    ExchangeItems(L, m);
+    i := L;
+    j := R + 1;
+    while true do
+    begin
+      i := i + 1;
+      while (i <= R) and (Compare(Self, i, L) < 0) do
+        i := i + 1;
+      j := j - 1;
+      while (j > L) and (Compare(Self, j, L) > 0) do
+        j := j - 1;
+      if i >= j then
+        break;
+      ExchangeItems(i, j);
+    end;
+    ExchangeItems(L, j);
+    if j - L < R - j then
+    begin
+      IntroSort(L, j - 1, depth, Compare);
+      L := j + 1;
+    end
+    else
+    begin
+      IntroSort(j + 1, R, depth, Compare);
+      R := j - 1;
+    end;
+  end;
+  InsertionSort(L, R, Compare);
 end;
 
 procedure TStringList.CustomSort(Compare: TStringListSortCompare);
