@@ -173,11 +173,12 @@ begin
         Put(W, Ind + '  while R.Read and (R.Token <> jtEndArray) do');
         Put(W, Ind + '  begin');
         Put(W, Ind + '    if ' + N + ' = Length(' + T + ') then');
-        Put(W, Ind + '      SetLength(' + T + ', ' + N + ' * 2 + 4);');
+        Put(W, Ind + '      SetLength(' + T + ', ' + N + ' * 2 + 2);');
         EmitRead(W, Elem, T + '[' + N + ']', Ind + '    ');
         Put(W, Ind + '    Inc(' + N + ');');
         Put(W, Ind + '  end;');
-        Put(W, Ind + '  SetLength(' + T + ', ' + N + ');');
+        Put(W, Ind + '  if ' + N + ' <> Length(' + T + ') then');
+        Put(W, Ind + '    SetLength(' + T + ', ' + N + ');');
         Put(W, Ind + 'end;');
         Dec(Depth);
       end;
