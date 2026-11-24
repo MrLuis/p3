@@ -94,6 +94,10 @@ function ChangeFileExt(const name, ext: string): string;
 function IncludeTrailingPathDelimiter(const path: string): string;
 function ExcludeTrailingPathDelimiter(const path: string): string;
 
+{ SetLength for a string that is then written whole: the new bytes are not
+  zeroed first (a builder otherwise writes every byte twice) }
+procedure SetLengthRaw(var s: string; n: longint); cdecl; external name '__pas_astr_setlength_raw';
+
 { files and directories }
 function FileExists(const name: string): boolean;
 function DirectoryExists(const name: string): boolean;
@@ -230,7 +234,7 @@ begin
   if digits > total then
     total := digits;
   r := '';
-  setlength(r, total);
+  SetLengthRaw(r, total);
   for i := 1 to total - used do
     r[i] := '0';
   for i := 0 to used - 1 do
@@ -616,7 +620,7 @@ begin
     end;
   end;
   r := '';
-  setlength(r, o);
+  SetLengthRaw(r, o);
   move(outb[0], r[1], o);
   FloatToStr := r;
 end;
@@ -1163,7 +1167,7 @@ begin
   end;
   k := length(into);
   r := '';
-  setlength(r, length(s) + count * (k - m));
+  SetLengthRaw(r, length(s) + count * (k - m));
   last := 1;
   d := 1;
   p := first;

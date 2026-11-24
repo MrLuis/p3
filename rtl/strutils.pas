@@ -67,7 +67,7 @@ begin
     ReverseString := '';
     exit;
   end;
-  setlength(r, n);
+  SetLengthRaw(r, n);
   p := PChar(r);
   q := PChar(s) + (n - 1);
   for i := 0 to n - 1 do
@@ -126,7 +126,7 @@ begin
     exit;
   end;
   total := n * count;
-  setlength(r, total);
+  SetLengthRaw(r, total);
   p := PChar(r);
   move(s[1], p^, n);
   done := n;
@@ -155,7 +155,7 @@ begin
     AddChar := s;
     exit;
   end;
-  setlength(r, n);
+  SetLengthRaw(r, n);
   fillchar(r[1], k, c);
   if length(s) > 0 then
     move(s[1], r[k + 1], length(s));
@@ -173,7 +173,7 @@ begin
     AddCharR := s;
     exit;
   end;
-  setlength(r, n);
+  SetLengthRaw(r, n);
   if length(s) > 0 then
     move(s[1], r[1], length(s));
   fillchar(r[length(s) + 1], k, c);
@@ -633,7 +633,7 @@ begin
     Dec2Numb := '';
     exit;
   end;
-  setlength(r, total);
+  SetLengthRaw(r, total);
   if total > k then
     fillchar(r[1], total - k, '0');
   if k > 0 then

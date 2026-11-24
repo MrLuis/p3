@@ -196,6 +196,28 @@ void __pas_astr_setlength(char **p, int32_t len) {
   *p = n;
 }
 
+/* SetLength for a string the caller is about to fill whole: what grows past
+ * the old contents is not zeroed (setlength above zeroes it, and a builder
+ * that writes every byte pays for writing it twice). */
+void __pas_astr_setlength_raw(char **p, int32_t len) {
+  char *s = *p;
+  int64_t old = LEN(s);
+  if (len <= 0) {
+    __pas_astr_clear(p);
+    return;
+  }
+  if (len == old) {
+    __pas_astr_unique(p);
+    return;
+  }
+  char *n = alloc_str(len);
+  int64_t keep = old < len ? old : len;
+  if (keep > 0)
+    memcpy(n, s, (size_t)keep);
+  release(s);
+  *p = n;
+}
+
 void __pas_astr_delete(char **p, int32_t index, int32_t count) {
   int64_t n = LEN(*p);
   if (index < 1 || index > n || count <= 0)
