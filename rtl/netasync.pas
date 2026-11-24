@@ -176,6 +176,15 @@ function NetReadInto(S: TSocket; buf: pointer; Max: Integer): async LongInt;
   straight from an arena or the parser), or raises ENetError; the count
   sent. }
 function NetSendPtr(S: TSocket; buf: pointer; len: LongInt): async LongInt;
+{ The same operations as plain calls, for a task (or the main thread) that
+  waits for them anyway: each parks the calling task itself, so `await`ing
+  the async versions above only adds a child task per call (creation,
+  switch, completion). Same results, same ENetError. }
+function NetAcceptDirect(Listener: TSocket): TSocket;
+function NetReadSomeDirect(S: TSocket; Max: Integer): TNetBytes;
+function NetSendAllDirect(S: TSocket; const Data: TNetBytes): LongInt;
+function NetReadIntoDirect(S: TSocket; buf: pointer; Max: Integer): LongInt;
+function NetSendPtrDirect(S: TSocket; buf: pointer; len: LongInt): LongInt;
 { Parks the current task until S is readable (WantRead) or writable
   (WantWrite, winning if both); also works for foreign descriptors (like
   a database driver's fd). Returns the NW_* bits of what fired — NW_FAIL
@@ -500,7 +509,7 @@ end;
 
 { ---- the async entry points ---- }
 
-function NetAccept(Listener: TSocket): async TSocket;
+function NetAcceptDirect(Listener: TSocket): TSocket;
 var
   n: TSocket;
 begin
@@ -631,7 +640,7 @@ begin
   Result := NetConnectFinish(s);
 end;
 
-function NetReadSome(S: TSocket; Max: Integer): async TNetBytes;
+function NetReadSomeDirect(S: TSocket; Max: Integer): TNetBytes;
 var
   one: array[0..4095] of byte;
   out: TNetBytes;
@@ -702,7 +711,7 @@ begin
     pas_task_wait_fd(S, 0);
 end;
 
-function NetReadInto(S: TSocket; buf: pointer; Max: Integer): async LongInt;
+function NetReadIntoDirect(S: TSocket; buf: pointer; Max: Integer): LongInt;
 var
   n: Int64;
 begin
@@ -712,7 +721,7 @@ begin
   Result := n;
 end;
 
-function NetSendPtr(S: TSocket; buf: pointer; len: LongInt): async LongInt;
+function NetSendPtrDirect(S: TSocket; buf: pointer; len: LongInt): LongInt;
 var
   off, len2: longint;
   chunk: cint;
@@ -736,11 +745,36 @@ begin
   Result := off;
 end;
 
-function NetSendAll(S: TSocket; const Data: TNetBytes): async LongInt;
+function NetSendAllDirect(S: TSocket; const Data: TNetBytes): LongInt;
 begin
   if Length(Data) = 0 then
     exit(0);
-  Result := await NetSendPtr(S, @Data[0], Length(Data));
+  Result := NetSendPtrDirect(S, @Data[0], Length(Data));
+end;
+
+function NetAccept(Listener: TSocket): async TSocket;
+begin
+  Result := NetAcceptDirect(Listener);
+end;
+
+function NetReadSome(S: TSocket; Max: Integer): async TNetBytes;
+begin
+  Result := NetReadSomeDirect(S, Max);
+end;
+
+function NetReadInto(S: TSocket; buf: pointer; Max: Integer): async LongInt;
+begin
+  Result := NetReadIntoDirect(S, buf, Max);
+end;
+
+function NetSendPtr(S: TSocket; buf: pointer; len: LongInt): async LongInt;
+begin
+  Result := NetSendPtrDirect(S, buf, len);
+end;
+
+function NetSendAll(S: TSocket; const Data: TNetBytes): async LongInt;
+begin
+  Result := NetSendAllDirect(S, Data);
 end;
 
 procedure NetSetKeepAliveTimer(S: TSocket; IdleSec, IntvlSec, Count: Integer);

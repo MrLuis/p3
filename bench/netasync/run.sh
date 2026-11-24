@@ -17,6 +17,7 @@ CC=${CC:-cc}
 $CC -O2 -pthread "$HERE/pingpong.c" -o "$OUT/pingpong"
 $CC -O2 -pthread "$HERE/loop_echo.c" -o "$OUT/loop_echo"
 (cd "$OUT" && $P3 --mode=objfpc -O2 "$HERE/echo.pas" -o "$OUT/echo" >/dev/null)
+(cd "$OUT" && $P3 --mode=objfpc -O2 "$HERE/echo_direct.pas" -o "$OUT/echo_direct" >/dev/null)
 
 PORT=$((20000 + RANDOM % 20000))
 run() { # name, server command...
@@ -38,4 +39,5 @@ echo "conns=$CONNS seconds=$SECS ($(uname -sm))"
 for t in $THREADS; do
   run "loop_echo  threads=$t" "$OUT/loop_echo" "$PORT" "$t"
   run "netasync   threads=$t" env P3_POOL_THREADS="$t" "$OUT/echo" "$PORT"
+  run "direct     threads=$t" env P3_POOL_THREADS="$t" "$OUT/echo_direct" "$PORT"
 done

@@ -1755,9 +1755,9 @@ function HttpServeAsync(Listener: TSocket; Handler: THttpHandler; After: THttpHa
 begin
   while true do
     if OnPool then
-      detached(HttpDropped) HttpLaunch(await NetAccept(Listener), Handler, After)
+      detached(HttpDropped) HttpLaunch(NetAcceptDirect(Listener), Handler, After)
     else
-      detached(HttpDropped) HttpServeConn(await NetAccept(Listener), Handler, After);
+      detached(HttpDropped) HttpServeConn(NetAcceptDirect(Listener), Handler, After);
 end;
 
 initialization
