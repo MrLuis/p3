@@ -186,6 +186,9 @@ type
   TRouteNode = class
   public
     Statics: array of TRouteEdge;
+    { a node with many literal edges finds one by a table (open addressing,
+      edge index + 1, 0 empty), kept up to date as edges are added }
+    StaticSlots: array of Integer;
     Patterns: array of TRouteEdge;   { expressions first, then plain }
     CatchAll: TRouteNode;
     Methods: array of string;        { the endpoints here: method ('*' any) }
@@ -193,6 +196,9 @@ type
     destructor Destroy; override;
     function EndpointFor(const Method: string): Integer;
     function AllowedList: string;
+    procedure AddStatic(const Edge: TRouteEdge);
+    { the literal edge for the L bytes at P, or -1 }
+    function FindStatic(P: PAnsiChar; L: Integer): Integer;
   end;
 
   { The tree: patterns in, endpoint indexes out. }
@@ -979,6 +985,79 @@ begin
   inherited Destroy;
 end;
 
+{$Q-}{$R-}
+function SegHash(P: PAnsiChar; L: Integer): Cardinal;
+var
+  i: Integer;
+  h: Cardinal;
+begin
+  h := 2166136261;
+  for i := 0 to L - 1 do
+    h := (h xor Cardinal(Ord((P + i)^))) * 16777619;
+  Result := h xor (h shr 15);
+end;
+{$Q+}{$R+}
+
+procedure TRouteNode.AddStatic(const Edge: TRouteEdge);
+var
+  i, slot, mask, size: Integer;
+begin
+  SetLength(Statics, Length(Statics) + 1);
+  Statics[High(Statics)] := Edge;
+  if Length(Statics) < 8 then
+    exit;
+  if 2 * Length(Statics) > Length(StaticSlots) then
+  begin
+    size := 32;
+    while size < 2 * Length(Statics) do
+      size := size * 2;
+    SetLength(StaticSlots, 0);
+    SetLength(StaticSlots, size);
+    for i := 0 to High(Statics) do
+    begin
+      mask := size - 1;
+      slot := Integer(SegHash(PAnsiChar(Statics[i].Key), Length(Statics[i].Key)) and Cardinal(mask));
+      while StaticSlots[slot] <> 0 do
+        slot := (slot + 1) and mask;
+      StaticSlots[slot] := i + 1;
+    end;
+  end
+  else
+  begin
+    i := High(Statics);
+    mask := Length(StaticSlots) - 1;
+    slot := Integer(SegHash(PAnsiChar(Edge.Key), Length(Edge.Key)) and Cardinal(mask));
+    while StaticSlots[slot] <> 0 do
+      slot := (slot + 1) and mask;
+    StaticSlots[slot] := i + 1;
+  end;
+end;
+
+function TRouteNode.FindStatic(P: PAnsiChar; L: Integer): Integer;
+var
+  i, slot, mask: Integer;
+begin
+  if Length(StaticSlots) = 0 then
+  begin
+    for i := 0 to High(Statics) do
+      if (Length(Statics[i].Key) = L) and
+         ((L = 0) or SameBytes(P, PAnsiChar(Statics[i].Key), L)) then
+        exit(i);
+    exit(-1);
+  end;
+  mask := Length(StaticSlots) - 1;
+  slot := Integer(SegHash(P, L) and Cardinal(mask));
+  while StaticSlots[slot] <> 0 do
+  begin
+    i := StaticSlots[slot] - 1;
+    if (Length(Statics[i].Key) = L) and
+       ((L = 0) or SameBytes(P, PAnsiChar(Statics[i].Key), L)) then
+      exit(i);
+    slot := (slot + 1) and mask;
+  end;
+  Result := -1;
+end;
+
 function TRouteNode.EndpointFor(const Method: string): Integer;
 var
   i, any: Integer;
@@ -1086,8 +1165,7 @@ begin
         SetLength(edge.Parts, 0);
         edge.HasRx := false;
         edge.Node := TRouteNode.Create;
-        SetLength(node.Statics, Length(node.Statics) + 1);
-        node.Statics[High(node.Statics)] := edge;
+        node.AddStatic(edge);
         node := edge.Node;
       end;
     end
@@ -1166,19 +1244,17 @@ begin
   L := segEnd - SegStart;
   save := Ctx.ParamCount;
   { literal segments }
-  for i := 0 to High(Node.Statics) do
-    if (Length(Node.Statics[i].Key) = L) and
-       ((L = 0) or SameBytes(p + SegStart - 1, PAnsiChar(Node.Statics[i].Key), L)) then
-    begin
-      child := Node.Statics[i].Node;
-      if last then
-        Result := LeafEndpoint(child, Ctx, Method, NotAllowedAt)
-      else
-        Result := MatchFrom(child, Path, segEnd + 1, Ctx, Method, NotAllowedAt);
-      if Result >= 0 then
-        exit;
-      break;
-    end;
+  i := Node.FindStatic(p + SegStart - 1, L);
+  if i >= 0 then
+  begin
+    child := Node.Statics[i].Node;
+    if last then
+      Result := LeafEndpoint(child, Ctx, Method, NotAllowedAt)
+    else
+      Result := MatchFrom(child, Path, segEnd + 1, Ctx, Method, NotAllowedAt);
+    if Result >= 0 then
+      exit;
+  end;
   { parameters (expressions first) }
   for i := 0 to High(Node.Patterns) do
   begin
