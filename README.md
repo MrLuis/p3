@@ -264,6 +264,9 @@ Tests are [lit](https://llvm.org/docs/CommandGuide/lit.html) files under
 ninja -C build check
 ```
 
+With MinGW-w64 and Wine installed, `tests/windows` also runs the programs
+of `tests/run` as Windows executables (see Cross-compiling).
+
 ## Repository layout
 
 | Path | Contents |
@@ -369,8 +372,9 @@ compiler).
   LLVM 19 was built with: X86, AArch64, ARM, RISCV, Mips, PowerPC, WebAssembly,
   AMDGPU, NVPTX, AVR, MSP430, BPF, Hexagon, Lanai, LoongArch, M68k, Sparc,
   SystemZ, VE, XCore, Xtensa — written as `x86_64-pc-linux-gnu`,
-  `aarch64-apple-darwin`, ... For a non-host triple only `-S`, `-c` and
-  `--emit-llvm` work; linking an executable needs the host triple.
+  `aarch64-apple-darwin`, ... For a non-host triple `-S`, `-c` and
+  `--emit-llvm` always work; linking an executable needs the runtime built
+  for that target (see Cross-compiling: Windows has it).
 - `-mcpu <cpu>` — target CPU (default: `generic`; `native` selects the host
   CPU and its feature set). Other names are the target's LLVM CPU names —
   e.g. for x86 `x86-64-v3`, `skylake`, `znver4`; for AArch64 `apple-m1`,
@@ -379,13 +383,30 @@ compiler).
 
 **Cross-compiling**
 
-Compilation to a non-host triple works as usual (`-S`, `-c`, `--emit-llvm`);
-Windows is supported the same way — `--target=x86_64-w64-mingw32` or
-`--target=x86_64-pc-windows-msvc` — and the unit library then takes its
-`MSWINDOWS` branches. Linking an executable always uses the runtime library
-built for the host, so executables are only produced for the host triple;
-build Windows binaries by running the compiler on Windows (its driver
-understands them — `-Wl,/OPT:REF`, `.msvc` and MinGW triples).
+Compilation to a non-host triple works as usual (`-S`, `-c`, `--emit-llvm`),
+and the unit library takes the target's branches (`MSWINDOWS`, `LINUX`,
+`DARWIN`).
+
+Windows executables (64-bit x86) come from any host. Install MinGW-w64
+(`brew install mingw-w64`, or the distribution's `mingw-w64` package):
+CMake finds `x86_64-w64-mingw32-gcc` and builds the runtime for Windows too,
+into `lib/x86_64-w64-mingw32/libpascalrt.a`. Then:
+
+```sh
+build/bin/p3 --mode=objfpc --target=x86_64-w64-mingw32 hello.pas   # hello.exe
+```
+
+p3 links with the target's own toolchain (`x86_64-w64-mingw32-gcc`, or
+`P3_CROSS_CC`), statically: the program needs no DLL but Windows' own (the
+Universal C Runtime, Windows 10 and later). `-DP3_CROSS_TARGETS=<triples>`
+picks the targets to build the runtime for (`OFF`: none). Everything but
+the network units (`netasync`, `netloop`, `nethttp`: Linux and macOS for
+now) works there, tasks and iterators included. With
+[Wine](https://www.winehq.org/) installed, the tests run every program of
+`tests/run` again as a Windows program (`tests/windows`).
+
+Without the runtime for a target, p3 says how to build it; the MSVC triple
+(`x86_64-pc-windows-msvc`) and other targets compile but do not link yet.
 
 **Runtime checks**
 
