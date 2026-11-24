@@ -27,7 +27,7 @@ uses sysutils, threading;
   CHECK-NEXT: set 100: TRUE 16384
   CHECK-NEXT: set 70000: TRUE rounded=TRUE
   CHECK-NEXT: set 64k again: TRUE 65536
-  CHECK-NEXT: tasks: 4 x 2000 deep = 8000
+  CHECK-NEXT: tasks: 4 x 500 deep = 2000
   CHECK-NEXT: iterator: 15
   CHECK-NEXT: after start: FALSE 65536
   ENV: env: 32768 guard=TRUE
@@ -42,7 +42,8 @@ uses sysutils, threading;
   OVF: overflowed its stack
 }
 
-{ about 2000 frames of ~64 bytes: well within 64 KB }
+{ 500 frames of 32 bytes (64 on Windows, with its shadow space): well
+  within 64 KB }
 function Depth(n: Integer): Integer;
 begin
   if n = 0 then
@@ -130,11 +131,11 @@ begin
   ok := SetTaskStackSize(64 * 1024);
   Writeln('set 64k again: ', ok, ' ', TaskStackSize);
   for i := 1 to 4 do
-    t[i] := Pool.Run(Work(2000));
+    t[i] := Pool.Run(Work(500));
   total := 0;
   for i := 1 to 4 do
     total := total + Wait(t[i]);
-  Writeln('tasks: 4 x 2000 deep = ', total);
+  Writeln('tasks: 4 x 500 deep = ', total);
   s := 0;
   for var v in Count(5) do
     s := s + v;

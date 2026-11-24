@@ -144,7 +144,7 @@ foreach(triple ${P3_CROSS_LIST})
   set(dir ${CMAKE_CURRENT_BINARY_DIR}/${triple})
   file(MAKE_DIRECTORY ${dir} ${PROJECT_BINARY_DIR}/lib/${triple})
   set(objs "")
-  foreach(src io sys ansi format)
+  foreach(src io sys ansi format async)
     add_custom_command(
       OUTPUT ${dir}/${src}.o
       COMMAND ${P3_CROSS_CC_${triple}} -std=gnu11 -O2 -ffunction-sections

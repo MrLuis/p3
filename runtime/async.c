@@ -22,25 +22,31 @@
 #include "pascalrt.h"
 
 #include <errno.h>
-#include <netinet/in.h>
-#include <poll.h>
 #include <pthread.h>
 #include <sched.h>
 #include <setjmp.h>
 #include <stdlib.h>
 #include <string.h>
-#include <fcntl.h>
-#include <sys/mman.h>
-#include <sys/socket.h>
 #include <time.h>
-#include <ucontext.h>
 #include <unistd.h>
 
+#ifdef _WIN32
+/* Windows (MinGW-w64): threads from winpthreads, stacks from VirtualAlloc,
+ * no waiting on descriptors (the network units are Linux and macOS only). */
+#include <windows.h>
+#else
+#include <fcntl.h>
+#include <netinet/in.h>
+#include <poll.h>
+#include <sys/mman.h>
+#include <sys/socket.h>
+#include <ucontext.h>
 #ifdef __linux__
 #include <sys/epoll.h>
 #include <sys/eventfd.h>
 #else
 #include <sys/event.h>
+#endif
 #endif
 
 #if defined(__SANITIZE_ADDRESS__)
@@ -69,8 +75,35 @@ void __tsan_destroy_fiber(void *fiber);
 void __tsan_switch_to_fiber(void *fiber, unsigned flags);
 #endif
 
+#ifdef _WIN32
+/* the runtime's own pair on Windows (sys.c) */
+int __pas_setjmp(jmp_buf env) __attribute__((returns_twice));
+#define _setjmp __pas_setjmp
+#else
 int _setjmp(jmp_buf env);
+#endif
 extern _Thread_local PasExcFrame *__pas_exc_top;
+
+/* The page size and the number of processors. */
+static size_t page_size(void) {
+#ifdef _WIN32
+  SYSTEM_INFO si;
+  GetSystemInfo(&si);
+  return si.dwPageSize;
+#else
+  return (size_t)sysconf(_SC_PAGESIZE);
+#endif
+}
+
+static long cpu_count(void) {
+#ifdef _WIN32
+  SYSTEM_INFO si;
+  GetSystemInfo(&si);
+  return (long)si.dwNumberOfProcessors;
+#else
+  return sysconf(_SC_NPROCESSORS_ONLN);
+#endif
+}
 
 /*===- Task context switch --------------------------------------------------===*/
 
@@ -138,6 +171,82 @@ __asm__(".text\n"
         "  blr x19\n"
         "  brk #0\n");
 #define PAS_CTX_FRAME 176
+#elif defined(_WIN32)
+/* Windows x64: frame (272 bytes): xmm6..xmm15, mxcsr + x87 control word,
+ * the thread's stack bounds in its TIB (StackBase, StackLimit,
+ * DeallocationStack: Windows checks the stack pointer against them), a
+ * spare slot, r15, r14, r13, r12, rsi, rdi, rbx, rbp, then the return
+ * address. Arguments in rcx and rdx. */
+__asm__(".text\n"
+        ".p2align 4\n"
+        ".globl " PAS_ASM_SYM(__pas_ctx_switch) "\n"
+        PAS_ASM_SYM(__pas_ctx_switch) ":\n"
+        "  pushq %rbp\n"
+        "  pushq %rbx\n"
+        "  pushq %rdi\n"
+        "  pushq %rsi\n"
+        "  pushq %r12\n"
+        "  pushq %r13\n"
+        "  pushq %r14\n"
+        "  pushq %r15\n"
+        "  subq $200, %rsp\n"
+        "  movups %xmm6, 0(%rsp)\n"
+        "  movups %xmm7, 16(%rsp)\n"
+        "  movups %xmm8, 32(%rsp)\n"
+        "  movups %xmm9, 48(%rsp)\n"
+        "  movups %xmm10, 64(%rsp)\n"
+        "  movups %xmm11, 80(%rsp)\n"
+        "  movups %xmm12, 96(%rsp)\n"
+        "  movups %xmm13, 112(%rsp)\n"
+        "  movups %xmm14, 128(%rsp)\n"
+        "  movups %xmm15, 144(%rsp)\n"
+        "  stmxcsr 160(%rsp)\n"
+        "  fnstcw 164(%rsp)\n"
+        "  movq %gs:0x08, %rax\n"
+        "  movq %rax, 168(%rsp)\n"
+        "  movq %gs:0x10, %rax\n"
+        "  movq %rax, 176(%rsp)\n"
+        "  movq %gs:0x1478, %rax\n"
+        "  movq %rax, 184(%rsp)\n"
+        "  movq %rsp, (%rcx)\n"
+        "  movq %rdx, %rsp\n"
+        "  movq 168(%rsp), %rax\n"
+        "  movq %rax, %gs:0x08\n"
+        "  movq 176(%rsp), %rax\n"
+        "  movq %rax, %gs:0x10\n"
+        "  movq 184(%rsp), %rax\n"
+        "  movq %rax, %gs:0x1478\n"
+        "  ldmxcsr 160(%rsp)\n"
+        "  fldcw 164(%rsp)\n"
+        "  movups 0(%rsp), %xmm6\n"
+        "  movups 16(%rsp), %xmm7\n"
+        "  movups 32(%rsp), %xmm8\n"
+        "  movups 48(%rsp), %xmm9\n"
+        "  movups 64(%rsp), %xmm10\n"
+        "  movups 80(%rsp), %xmm11\n"
+        "  movups 96(%rsp), %xmm12\n"
+        "  movups 112(%rsp), %xmm13\n"
+        "  movups 128(%rsp), %xmm14\n"
+        "  movups 144(%rsp), %xmm15\n"
+        "  addq $200, %rsp\n"
+        "  popq %r15\n"
+        "  popq %r14\n"
+        "  popq %r13\n"
+        "  popq %r12\n"
+        "  popq %rsi\n"
+        "  popq %rdi\n"
+        "  popq %rbx\n"
+        "  popq %rbp\n"
+        "  ret\n"
+        ".p2align 4\n"
+        ".globl " PAS_ASM_SYM(__pas_ctx_start) "\n"
+        PAS_ASM_SYM(__pas_ctx_start) ":\n"
+        "  andq $-16, %rsp\n"
+        "  subq $32, %rsp\n"  /* the callee's shadow space */
+        "  xorl %ebp, %ebp\n"
+        "  callq *%rbx\n"
+        "  ud2\n");
+#define PAS_CTX_FRAME 272
 #else
 /* frame (64 bytes): mxcsr + x87 control word, r15, r14, r13, r12, rbx,
  * rbp, then the return address */
@@ -176,6 +285,10 @@ __asm__(".text\n"
 #define PAS_CTX_FRAME 64
 #endif
 
+#ifdef _WIN32
+static size_t stack_floor_gap(void);
+#endif
+
 /* A context that starts in fn on [stack, stack + size). */
 static void ctx_make(PasCtx *c, void *stack, size_t size, void (*fn)(void)) {
   uintptr_t top = ((uintptr_t)stack + size) & ~(uintptr_t)15;
@@ -184,6 +297,16 @@ static void ctx_make(PasCtx *c, void *stack, size_t size, void (*fn)(void)) {
 #if defined(__aarch64__)
   f[0] = (uintptr_t)fn;                  /* x19 */
   f[11] = (uintptr_t)__pas_ctx_start;    /* x30: where the first ret goes */
+#elif defined(_WIN32)
+  ((uint32_t *)f)[40] = 0x1F80;          /* mxcsr: the default */
+  ((uint32_t *)f)[41] = 0x037F;          /* x87 control word: the default */
+  f[21] = top;                           /* StackBase */
+  f[22] = (uintptr_t)stack;              /* StackLimit */
+  /* DeallocationStack: the guard page (or gap) below is part of the
+     stack, so an overflow into it is a stack overflow to Windows */
+  f[23] = (uintptr_t)stack - stack_floor_gap();
+  f[31] = (uintptr_t)fn;                 /* rbx */
+  f[33] = (uintptr_t)__pas_ctx_start;    /* return address */
 #else
   ((uint32_t *)f)[0] = 0x1F80;           /* mxcsr: the default */
   ((uint32_t *)f)[1] = 0x037F;           /* x87 control word: the default */
@@ -333,6 +456,7 @@ struct PasContext {
  * thread waiter was woken). A thread blocked in its poller is poked —
  * only when it sleeps, so a busy thread pays no syscall. */
 static void ctx_signal_locked(PasContext *c) {
+#ifndef _WIN32
   if (c->pfd >= 0) {
     if (c->sleeping) {
       c->sleeping = 0;
@@ -347,9 +471,10 @@ static void ctx_signal_locked(PasContext *c) {
       kevent(c->pfd, &k, 1, NULL, 0, NULL);
 #endif
     }
-  } else {
-    pthread_cond_broadcast(&c->cv);
+    return;
   }
+#endif
+  pthread_cond_broadcast(&c->cv);
 }
 
 static void ctx_signal(PasContext *c) {
@@ -613,7 +738,7 @@ static size_t stack_size_v;     /* 0 until chosen (atomic) */
 static int stack_size_fixed;    /* a stack was made: no more changes (atomic) */
 
 static size_t stack_size_round(uint64_t n) {
-  size_t page = (size_t)sysconf(_SC_PAGESIZE);
+  size_t page = page_size();
   if (n < STACK_SIZE_MIN)
     n = STACK_SIZE_MIN;
   if (n > STACK_SIZE_MAX)
@@ -790,6 +915,14 @@ static void stack_check(PasTask *t) {
 
 /* len bytes of fresh address space for stacks. */
 static char *stack_map(size_t len) {
+#ifdef _WIN32
+  /* reserved only: each stack is committed when it is carved (new_stack);
+     its guard page stays reserved, which faults like PROT_NONE */
+  char *m = VirtualAlloc(NULL, len, MEM_RESERVE, PAGE_NOACCESS);
+  if (!m)
+    __pas_runtime_error("out of memory for task stacks");
+  return m;
+#else
   char *m = mmap(NULL, len, PROT_READ | PROT_WRITE,
                  MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
   if (m == MAP_FAILED)
@@ -820,6 +953,7 @@ static char *stack_map(size_t len) {
   }
 #endif
   return m;
+#endif
 }
 
 /* Below each stack: its guard page, or the unprotected gap. */
@@ -828,6 +962,13 @@ static size_t stack_below(size_t page, int guard) {
     return page;
   return (STACK_GAP + page - 1) / page * page;
 }
+
+#ifdef _WIN32
+/* What lies below each stack (its guard page or gap). */
+static size_t stack_floor_gap(void) {
+  return stack_below(page_size(), stack_guard());
+}
+#endif
 
 /* Under LOCK: a new slab to carve (stride: a stack and what lies below). */
 static void stack_slab_new(size_t size, size_t page, int guard) {
@@ -838,12 +979,16 @@ static void stack_slab_new(size_t size, size_t page, int guard) {
   if (n > 4096)
     n = 4096;
   char *m = stack_map(n * stride);
+#ifndef _WIN32
   if (guard)
     for (size_t i = 0; i < n; i++)
       if (mprotect(m + i * stride, page, PROT_NONE) != 0)
         __pas_runtime_error("cannot place a task stack's guard page (too many "
                             "mappings: vm.max_map_count?); P3_TASK_STACK_GUARD=0 "
                             "keeps a slab of stacks in one mapping");
+#else
+  (void)guard;
+#endif
   stack_slab_next = m;
   stack_slab_left = n;
   __pas_async_stack_slabs++;
@@ -854,7 +999,7 @@ static void *new_stack(void) {
     return __pas_async_tstacks[--__pas_async_ntstacks];
   size_t size = stack_size();
   int guard = stack_guard();
-  size_t page = (size_t)sysconf(_SC_PAGESIZE);
+  size_t page = page_size();
   void *s;
   LOCK();
   if (stack_nfree) {
@@ -865,6 +1010,22 @@ static void *new_stack(void) {
     s = stack_slab_next + stack_below(page, guard);
     stack_slab_next += size + stack_below(page, guard);
     stack_slab_left--;
+#ifdef _WIN32
+    /* The stack and what lies below it, committed. Without guard pages the
+       gap is writable, as on the other systems (an overflow is caught when
+       its task switches out). With them, the page below is a PAGE_GUARD
+       page inside the stack's bounds (see ctx_make), as on a Windows
+       thread's own stack: an overflow is STATUS_STACK_OVERFLOW, which ends
+       the program (a plain inaccessible page would fault again in the
+       exception's dispatch, on the same stack, endlessly). */
+    char *lo = (char *)s - stack_below(page, guard);
+    DWORD old;
+    if (!VirtualAlloc(lo, (size_t)((char *)s + size - lo), MEM_COMMIT, PAGE_READWRITE) ||
+        (guard && !VirtualProtect(lo, page, PAGE_READWRITE | PAGE_GUARD, &old))) {
+      UNLOCK();
+      __pas_runtime_error("out of memory for task stacks");
+    }
+#endif
   }
   UNLOCK();
   return s;
@@ -877,7 +1038,9 @@ static void free_stack(void *s) {
   }
   /* past the thread's cache: its memory goes back to the system (the
    * address space stays, for the next stack) */
-#ifdef __APPLE__
+#if defined(_WIN32)
+  VirtualAlloc(s, stack_size(), MEM_RESET, PAGE_READWRITE);
+#elif defined(__APPLE__)
   madvise(s, stack_size(), MADV_FREE);
 #else
   madvise(s, stack_size(), MADV_DONTNEED);
@@ -1116,7 +1279,7 @@ static PasContext *pool_context(void) {
       UNLOCK();
       goto started;
     }
-    long n = sysconf(_SC_NPROCESSORS_ONLN);
+    long n = cpu_count();
     const char *env = getenv("P3_POOL_THREADS");
     if (env && atoi(env) > 0)
       n = atoi(env);
@@ -1598,6 +1761,13 @@ void __pas_token_check(PasToken *k) {
     raise_cancelled();
 }
 
+#ifdef _WIN32
+/* No waiting on descriptors: a thread's poller never starts (pfd stays -1). */
+static void ctx_poll_once(PasContext *c, int64_t deadline_ms) {
+  (void)c;
+  (void)deadline_ms;
+}
+#else
 /*===- Waiting on descriptors (unit netasync) ------------------------------===*/
 
 /* A task parks until a descriptor is readable or writable (__pas_task_wait_fd)
@@ -2883,6 +3053,8 @@ int64_t __pas_task_send(int32_t fd, void *buf, int32_t len) {
   }
 }
 
+
+#endif /* !_WIN32 */
 
 /*===- Mutexes and wait queues (for unit threading) -------------------------===*/
 
