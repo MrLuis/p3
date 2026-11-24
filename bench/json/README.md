@@ -59,7 +59,7 @@ cheap to build and write back but each string is decoded when read.
 
 | File | |
 |---|---|
-| `jsonbench.pas` | the p3 benchmark |
+| `jsonbench.pas` | the p3 benchmark (also typed write of canada.json, and an object of 20000 members built with Put and read with Get) |
 | `canadatypes.pas` | canada.json as `[Json]` records |
 | `rust/` | the same operations with serde_json and sonic-rs |
 | `fetch-data.sh` | downloads `data/` (not in the repository) |
