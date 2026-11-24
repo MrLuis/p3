@@ -1336,6 +1336,7 @@ var
   I, Len, Run, CP, Lo: Integer;
   C: Char;
   Buf: string;
+  M: QWord;
 begin
   SetLength(Buf, Stop - Start);
   Len := 0;
@@ -1345,7 +1346,17 @@ begin
   begin
     if P[I] <> '\' then
     begin
-      Inc(I);
+      { on to the next backslash, 16 bytes at a time }
+      if I + 16 <= Stop then
+      begin
+        M := VectorMask(VectorLoad(TBytes16, P + I) = Ord('\'));
+        if M = 0 then
+          Inc(I, 16)
+        else
+          Inc(I, CountTrailingZeros(M));
+      end
+      else
+        Inc(I);
       Continue;
     end;
     AddChars(Buf, Len, P + Run, I - Run);
@@ -1407,13 +1418,139 @@ begin
   Result := JsonDecode(FP, FStart, FStop);
 end;
 
+{ Is the escaped text P[Start, Stop), decoded, the string S? Compared as it is
+  decoded: no string is made. }
+function EscapedEquals(P: PChar; Start, Stop: Integer; const S: string): Boolean;
+var
+  I, O, CP, Lo, N, J, T: Integer;
+  Ok: Boolean;
+  Bytes: array[0..3] of Byte;
+  K: Integer;
+  M: QWord;
+  Q: PChar;
+begin
+  I := Start;
+  O := 0;
+  N := Length(S);
+  Q := PChar(S);
+  Ok := True;
+  while Ok and (I < Stop) do
+  begin
+    K := 0;
+    if P[I] <> '\' then
+    begin
+      { a run to the next backslash (16 bytes at a time), compared whole }
+      J := I;
+      while J < Stop do
+      begin
+        if J + 16 <= Stop then
+        begin
+          M := VectorMask(VectorLoad(TBytes16, P + J) = Ord('\'));
+          if M = 0 then
+            Inc(J, 16)
+          else
+          begin
+            Inc(J, CountTrailingZeros(M));
+            Break;
+          end;
+        end
+        else if P[J] = '\' then
+          Break
+        else
+          Inc(J);
+      end;
+      if O + (J - I) > N then
+        Ok := False
+      else
+      begin
+        T := 0;
+        while Ok and (T + 8 <= J - I) do
+        begin
+          if PQWord(P + I + T)^ <> PQWord(Q + O + T)^ then
+            Ok := False;
+          Inc(T, 8);
+        end;
+        while Ok and (T < J - I) do
+        begin
+          if P[I + T] <> Q[O + T] then
+            Ok := False;
+          Inc(T);
+        end;
+      end;
+      O := O + (J - I);
+      I := J;
+      Continue;
+    end
+    else
+    begin
+      case P[I + 1] of
+        'b': Bytes[0] := 8;
+        'f': Bytes[0] := 12;
+        'n': Bytes[0] := 10;
+        'r': Bytes[0] := 13;
+        't': Bytes[0] := 9;
+        'u': Bytes[0] := 0;
+      else
+        Bytes[0] := Ord(P[I + 1]);   { " \ / }
+      end;
+      K := 1;
+      if P[I + 1] = 'u' then
+      begin
+        CP := Hex4(P, I + 2);
+        Inc(I, 6);
+        if (CP >= $D800) and (CP <= $DBFF) then
+        begin
+          Lo := Hex4(P, I + 2);
+          Inc(I, 6);
+          CP := $10000 + ((CP - $D800) shl 10) + (Lo - $DC00);
+        end;
+        if CP < $80 then
+          Bytes[0] := CP
+        else if CP < $800 then
+        begin
+          Bytes[0] := $C0 or (CP shr 6);
+          Bytes[1] := $80 or (CP and $3F);
+          K := 2;
+        end
+        else if CP < $10000 then
+        begin
+          Bytes[0] := $E0 or (CP shr 12);
+          Bytes[1] := $80 or ((CP shr 6) and $3F);
+          Bytes[2] := $80 or (CP and $3F);
+          K := 3;
+        end
+        else
+        begin
+          Bytes[0] := $F0 or (CP shr 18);
+          Bytes[1] := $80 or ((CP shr 12) and $3F);
+          Bytes[2] := $80 or ((CP shr 6) and $3F);
+          Bytes[3] := $80 or (CP and $3F);
+          K := 4;
+        end;
+      end
+      else
+        Inc(I, 2);
+    end;
+    if O + K > N then
+      Ok := False
+    else
+      for CP := 0 to K - 1 do
+      begin
+        if Ord(S[O + 1 + CP]) <> Bytes[CP] then
+          Ok := False;
+      end;
+    O := O + K;
+  end;
+  Result := Ok and (O = N);
+end;
+
 function TJsonReader.StringEquals(const S: string): Boolean;
 var
   N, I: Integer;
   Q: PChar;
 begin
   if FEscaped then
-    Exit(AsString = S);
+    Exit(EscapedEquals(FP, FStart, FStop, S));
   N := FStop - FStart;
   if N <> Length(S) then
     Exit(False);
