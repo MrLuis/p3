@@ -1,11 +1,21 @@
-# p3 — a Pascal compiler targeting LLVM
+# p3 — a modern implementation of a Pascal compiler
+
+Why another pascal compiler? Well it I had some extra tokens to spare... actually the 
+story is a bit larger than that, but boring neverthe less. Antway, I'm not thinking about
+replace Delphi, nor Free Pascal. I was more looking towards server side coding, with
+a bit more modern features that current compilers might not care to implement. You will 
+be able to see ownership management (basic implementation of rust owner/borrow), SIMD
+as a first class feature, better Lamda implementations, and so on... We are even moving
+towards to memory safe implementations (althou there is a lot of work there). We would like 
+to also support more platform, right now is Linux, MacOS, and Win64... LLVM does provide
+more way to extent to other platform, however more work need to be done in that direction.
 
 `p3` compiles Pascal to native executables through LLVM. It starts from
 ISO 7185 and adds Turbo/Free Pascal extensions (units, strings, classes,
 exceptions, ...) plus a few features of its own (null-safe references,
 owned variables, template strings, iterators with `yield`, lazy sequences).
 
-There are two compilers, kept in parity:
+For quality control (and a bit of self insecurity), there are two compilers, kept in parity:
 
 - **C++ `p3`** (`src/`, `include/`): the original compiler, built with CMake.
 - **Self-hosted `p3`** (`selfhost/`): the same compiler written in Pascal,
@@ -55,7 +65,7 @@ examples are in the reference.
 - **Template strings**: `` `Hello ${Name}, ${Total:0:2}` `` spans lines and
   takes values; routines can tag a template.
 - **Tuples and destructuring**: several values as one, returned from a
-  routine and unpacked on assignment.
+  routine and unpacked on assignment. `function test(const inData:string) : (val1: string; val2: integer);`
 - **Named arguments and defaults anywhere**: `Open(Path, Mode := fmRead)`.
 - **Lambdas and closures**: `function(x) => x * 2`, block bodies, capture by
   copy (`function[k](x) => ...`), closures that outlive their routine.
@@ -92,7 +102,7 @@ examples are in the reference.
   marked with an attribute and write Pascal for them (see below).
 - **Compiletime functions**: `const Table = BuildTable;` computed while
   compiling (see below).
-- **JSON**: unit `json`, after Rust's sonic-rs: a pull reader, documents,
+- **JSON**: unit `json` a pull reader, documents,
   lookup of one value without parsing the rest, and typed reading and
   writing generated at build time (see below).
 
