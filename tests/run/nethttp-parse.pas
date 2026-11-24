@@ -81,6 +81,58 @@ const
 var
   req, big: string;
   used, i: Integer;
+{ a chunked request delivered in pieces to a resumable context (as the engines
+  do): every piece size gives what the whole request gives }
+procedure Pieces;
+var
+  Whole, Got, Want: string;
+  Req: array[0..4] of string;
+  Piece, K, Used, Have, Bad: Integer;
+  Res: THttpParse;
+  P: THttpContext;
+begin
+  Req[0] := 'POST /u HTTP/1.1' + NL + 'Transfer-Encoding: chunked' + NL + NL +
+            '4' + NL + 'wiki' + NL + '5;ext=1' + NL + 'pedia' + NL + 'E' + NL + ' in ' + NL + NL + 'chunks.' + NL + '0' + NL + NL;
+  Req[1] := 'POST /u HTTP/1.1' + NL + 'Transfer-Encoding: chunked' + NL + NL + '0' + NL + NL;
+  Req[2] := 'POST /u HTTP/1.1' + NL + 'Transfer-Encoding: chunked' + NL + NL +
+            '3' + NL + 'abc' + NL + '0' + NL + 'X-Trailer: yes' + NL + NL;
+  Req[3] := 'POST /u HTTP/1.1' + NL + 'Transfer-Encoding: chunked' + NL + NL +
+            '3' + NL + 'abc' + NL + 'zz' + NL + 'def' + NL;       { bad: the next size is not hex }
+  Req[4] := 'POST /u HTTP/1.1' + NL + 'Transfer-Encoding: chunked' + NL + NL +
+            '3' + NL + 'abcX' + NL;                                 { bad: no CRLF after the data }
+  P := THttpContext.Create;
+  P.Resumable := true;
+  Bad := 0;
+  for K := 0 to 4 do
+  begin
+    Whole := Req[K];
+    C.Free;
+    C := THttpContext.Create;
+    Res := HttpParseRequest(PAnsiChar(Whole), Length(Whole), C, Used);
+    Want := IntToStr(Ord(Res)) + ':' + IntToStr(Used) + ':' + C.Body;
+    for Piece := 1 to 40 do
+    begin
+      Have := Piece;
+      repeat
+        if Have > Length(Whole) then
+          Have := Length(Whole);
+        Res := HttpParseRequest(PAnsiChar(Whole), Have, P, Used);
+        if (Res <> hpIncomplete) or (Have = Length(Whole)) then
+          break;
+        Have := Have + Piece;
+      until false;
+      Got := IntToStr(Ord(Res)) + ':' + IntToStr(Used) + ':' + P.Body;
+      if Got <> Want then
+      begin
+        Inc(Bad);
+        Writeln('piece ', Piece, ' of request ', K, ': ', Got, ' wanted ', Want);
+      end;
+    end;
+  end;
+  P.Free;
+  Writeln('chunked in pieces: ', Bad, ' differences');
+end;
+
 begin
   C := THttpContext.Create;
 
@@ -174,5 +226,6 @@ begin
   C.Redirect(302, '/there');
   Writeln(Show(C.Response));
   BlockOffsets;
+  Pieces;
   C.Free;
 end.

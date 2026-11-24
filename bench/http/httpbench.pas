@@ -133,6 +133,9 @@ begin
   App.Get('/files/{name}.gz', procedure(C: TReq; X: TRouteContext) => begin Inc(C.N); end);
   App.Get('/users/{id}', procedure(C: TReq; X: TRouteContext) => begin Inc(C.N); end);
   Ctx := THttpContext.Create;
+{$IFDEF RESUME}
+  Ctx.Resumable := true;         { as the engines have it (units that have it) }
+{$ENDIF}
   Frag := 'GET /api/v1/users/12345?fields=name,email HTTP/1.1'#13#10;
   for I := 1 to 12 do
     Frag := Frag + 'X-Header-' + IntToStr(I) + ': some value for header number ' + IntToStr(I) + #13#10;

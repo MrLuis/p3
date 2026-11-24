@@ -16,7 +16,7 @@ for u in nethttp netrouter netloop netasync threading sysutils classes json_pow5
   f=$u; case $u in *.inc) ;; *) f=$u.pas ;; esac
   git -C "$root" show "$base:rtl/$f" > "$out/base/$f" 2>/dev/null || rm -f "$out/base/$f"
 done
-"$p3" --no-project --mode=objfpc -O2 "$here/httpbench.pas" -o "$out/new"
+"$p3" --no-project --mode=objfpc -O2 -dRESUME "$here/httpbench.pas" -o "$out/new"
 "$p3" --no-project --mode=objfpc -O2 -I"$out/base" "$here/httpbench.pas" -o "$out/old"
 echo "== $base"; "$out/old" "$secs"
 echo "== working tree"; "$out/new" "$secs"

@@ -109,6 +109,11 @@ type
     FNHeaders: Integer;
     FChunkedBody: string;
     FChunked: Boolean;
+    { where the chunked body was read up to (a chunk boundary) when the bytes
+      were incomplete: used only when FResumable (the engines: each call is the
+      same request with more bytes after it) }
+    FResumeI, FResumeTotal: Integer;
+    FResumable: Boolean;
     FKeepAlive: Boolean;
     FIsHead: Boolean;
     FPath: string;
@@ -144,6 +149,10 @@ type
     function BuildResponse(WithBytes: Boolean): string;
   public
     Data: TObject;             { the program's, per connection (freed with it) }
+    { true: every HttpParseRequest on this context is the same request again
+      with more bytes after it, until it answers hpOk or an error, so a
+      chunked body is not read again from its start (the engines set it) }
+    property Resumable: Boolean read FResumable write FResumable;
     constructor Create;
     destructor Destroy; override;
     { ---- the request ---- }
@@ -525,20 +534,28 @@ begin
   Result := false;
 end;
 
-{ a chunked body from P[0..Len): hpOk with Used and the decoded Body }
+{ a chunked body from P[0..Len): hpOk with Used and the decoded Body.
+  Pass 1 checks the framing and adds the sizes up; the decoded body is made
+  once, at its size, by pass 2 (it used to grow by every chunk, copying what
+  it had). Resume: where an earlier call on the same bytes stopped at a
+  chunk boundary (I, Total; 0, 0 to start): an incomplete answer leaves the
+  last boundary reached there, so the next call does not read the chunks
+  again. }
 function ParseChunked(P: PAnsiChar; Len: Integer; out Body: string;
-                      out Used: Integer): THttpParse;
+                      out Used: Integer; var ResumeI, ResumeTotal: Integer): THttpParse;
 var
-  i, n, d, size, total: Integer;
+  i, n, d, size, total, k, at: Integer;
   b: string;
 begin
   Used := 0;
   Body := '';
-  b := '';
-  total := 0;
-  i := 0;
+  total := ResumeTotal;
+  i := ResumeI;
   while true do
   begin
+    { a chunk starts here (a boundary a later call can start from) }
+    ResumeI := i;
+    ResumeTotal := total;
     { size in hex [; extensions] CRLF }
     size := 0;
     n := 0;
@@ -575,9 +592,6 @@ begin
       exit(hpBodyTooLarge);
     if i + size + 2 > Len then
       exit(hpIncomplete);
-    n := Length(b);
-    SetLength(b, n + size);
-    Move((P + i)^, b[n + 1], size);
     i := i + size;
     if ((P + i)^ <> #13) or ((P + i + 1)^ <> #10) then
       exit(hpBad);
@@ -599,7 +613,30 @@ begin
       exit(hpIncomplete);
     i := i + 2;
   end;
+  { pass 2: the chunks are whole and well formed: copy them }
+  SetLengthRaw(b, total);
+  k := 0;
+  at := 0;
+  while true do
+  begin
+    size := 0;
+    while HexDigit((P + at)^) >= 0 do
+    begin
+      size := size * 16 + HexDigit((P + at)^);
+      inc(at);
+    end;
+    while (P + at)^ <> #13 do
+      inc(at);
+    at := at + 2;
+    if size = 0 then
+      break;
+    Move((P + at)^, b[k + 1], size);
+    k := k + size;
+    at := at + size + 2;
+  end;
   Body := b;
+  ResumeI := 0;
+  ResumeTotal := 0;
   Used := i;
   Result := hpOk;
 end;
@@ -752,7 +789,18 @@ begin
   C.FBodySpan.Off := headEnd + 4;
   if chunked then
   begin
-    Result := ParseChunked(P + headEnd + 4, Len - headEnd - 4, chunkBody, bodyUsed);
+    if not C.FResumable then
+    begin
+      C.FResumeI := 0;
+      C.FResumeTotal := 0;
+    end;
+    Result := ParseChunked(P + headEnd + 4, Len - headEnd - 4, chunkBody, bodyUsed,
+                           C.FResumeI, C.FResumeTotal);
+    if Result <> hpIncomplete then
+    begin
+      C.FResumeI := 0;
+      C.FResumeTotal := 0;
+    end;
     if Result <> hpOk then
       exit;
     C.FChunked := true;
@@ -1578,6 +1626,7 @@ begin
     if C.InCount = 0 then
       exit;                    { (the peer closed, idle) }
     ctx := THttpContext.Create;
+    ctx.FResumable := true;
     ctx.FConn := C;
     ctx.FHandler := B.Handler;
     ctx.FAfter := B.After;
@@ -1693,6 +1742,7 @@ var
 begin
   NetSetNoDelay(Sock);
   ctx := THttpContext.Create;
+  ctx.FResumable := true;
   cap := 0;
   buf := nil;
   len := 0;
