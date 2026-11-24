@@ -176,6 +176,7 @@ type
     FTimers: array of TLoopTimer;
     FTid: PtrUInt;
     FCount: Integer;
+    FNow: Int64;                    { the clock, read once per turn: FLastIO }
     procedure Watch(C: TLoopConn);
     procedure Interest(C: TLoopConn);
     procedure WatchListener(L: TSocket);
@@ -650,7 +651,7 @@ begin
       c.FKind := 1;
       c.FSock := s;
       c.FLoop := Self;
-      c.FLastIO := GetTickCount64;
+      c.FLastIO := FNow;
       c.FNext := FHead;
       if FHead <> nil then FHead.FPrev := c;
       FHead := c;
@@ -712,7 +713,7 @@ begin
     if n > 0 then
     begin
       C.FOutSent := C.FOutSent + n;
-      C.FLastIO := GetTickCount64;
+      C.FLastIO := FNow;
     end
     else if (n < 0) and (errno = EINTR) then
       continue
@@ -756,7 +757,7 @@ begin
     if n > 0 then
     begin
       C.FInLen := C.FInLen + n;
-      C.FLastIO := GetTickCount64;
+      C.FLastIO := FNow;
       got := true;
       if C.FInLen > FServer.MaxInput then
       begin
@@ -970,6 +971,7 @@ begin
   for i := 0 to High(FListeners) do
     WatchListener(FListeners[i]);
   lastSweep := GetTickCount64;
+  FNow := lastSweep;
   stopping := false;
   stopAt := 0;
   while true do
@@ -983,6 +985,7 @@ begin
 {$ENDIF}
     if n < 0 then
       n := 0;                   { EINTR }
+    FNow := GetTickCount64;
     for i := 0 to n - 1 do
     begin
 {$IFDEF NETLOOP_EPOLL}
