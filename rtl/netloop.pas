@@ -92,6 +92,7 @@ type
     FLoop: TNetLoop;
     FIn, FOut: PAnsiChar;
     FInLen, FInCap: Integer;
+    FInOff: Integer;            { the first byte not consumed yet }
     FOutLen, FOutCap, FOutSent: Integer;
     FPeerClosed, FClosing, FClosed: Boolean;
     FWriteOn, FReadOff: Boolean;
@@ -436,38 +437,41 @@ end;
 
 function TLoopConn.InPtr: PAnsiChar;
 begin
-  Result := FIn;
+  Result := FIn + FInOff;
 end;
 
 function TLoopConn.InCount: Integer;
 begin
-  Result := FInLen;
+  Result := FInLen - FInOff;
 end;
 
 function TLoopConn.InText: string;
 var
   t: string;
 begin
-  SetLength(t, FInLen);
-  if FInLen > 0 then
-    Move(FIn^, t[1], FInLen);
+  SetLength(t, FInLen - FInOff);
+  if FInLen > FInOff then
+    Move((FIn + FInOff)^, t[1], FInLen - FInOff);
   Result := t;
 end;
 
+{ Consume only moves a cursor: the bytes left are moved down once, when more
+  arrive (ReadSome), so taking messages one at a time costs nothing per
+  message. }
 procedure TLoopConn.Consume(N: Integer);
 begin
   if N <= 0 then
     exit;
-  if N >= FInLen then
+  if N >= FInLen - FInOff then
   begin
     FInLen := 0;
+    FInOff := 0;
     FreeMem(FIn);          { idle: no buffer }
     FIn := nil;
     FInCap := 0;
     exit;
   end;
-  Move((FIn + N)^, FIn^, FInLen - N);
-  FInLen := FInLen - N;
+  FInOff := FInOff + N;
 end;
 
 { changed outside its own callback: the loop finishes it after this one }
@@ -739,6 +743,12 @@ var
   got: Boolean;
 begin
   got := false;
+  if C.FInOff > 0 then
+  begin
+    C.FInLen := C.FInLen - C.FInOff;
+    Move((C.FIn + C.FInOff)^, C.FIn^, C.FInLen);
+    C.FInOff := 0;
+  end;
   while not C.FPeerClosed do
   begin
     C.Grow(C.FIn, C.FInCap, C.FInLen + 16384);

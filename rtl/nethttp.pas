@@ -1443,7 +1443,7 @@ function HttpServeConn(Sock: TSocket; Handler: THttpHandler; After: THttpHandler
 var
   ctx: THttpContext;
   buf: PAnsiChar;
-  cap, len, used, e, bits, wait: Integer;
+  cap, len, start, used, e, bits, wait: Integer;
   n: Int64;
   res: THttpParse;
   resp: string;
@@ -1454,18 +1454,27 @@ begin
   cap := 0;
   buf := nil;
   len := 0;
+  start := 0;                   { the pipelined bytes before it are done with }
   peerGone := false;
   try
     while true do
     begin
-      if len > 0 then
-        res := HttpParseRequest(buf, len, ctx, used)
+      if len > start then
+        res := HttpParseRequest(buf + start, len - start, ctx, used)
       else
         res := hpIncomplete;
       if res = hpIncomplete then
       begin
         if peerGone then
           exit;                 { (with half a request, or none) }
+        if start > 0 then
+        begin
+          { move what is left down, once per receive (not per request) }
+          len := len - start;
+          if len > 0 then
+            Move((buf + start)^, buf^, len);
+          start := 0;
+        end;
         if len = cap then
         begin
           if cap = 0 then cap := 4096 else cap := cap * 2;
@@ -1522,9 +1531,7 @@ begin
       if not ctx.KeepAlive then
         exit;
       { the next request: what followed this one }
-      len := len - used;
-      if len > 0 then
-        Move((buf + used)^, buf^, len);
+      start := start + used;
     end;
   finally
     if buf <> nil then
