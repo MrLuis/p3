@@ -205,8 +205,11 @@ type
       { opDecl: an advanced record's class operator implementing it
         (Sema); opNegated: <> through the = operator }
       nkUnary: (uop: TUnaryOp; operand: PNode; uopDecl: PDecl);
+      { binConstRef: a concatenation of string constants ('a' + 'b'):
+        Sema's reference to the constant it is, used in its place }
       nkBinary: (bop: TBinaryOp; opLoc: TLoc; lhs, rhs: PNode;
-                 operandType: PType; opDecl: PDecl; opNegated: boolean);
+                 operandType: PType; opDecl: PDecl; opNegated: boolean;
+                 binConstRef: PNode);
       { call / proccall: callee named; indirectcall: calleeExpr; the
         indirect call statement holds an nkIndirectCall in calleeExpr }
       { callWith: a method found through a class scope is called on the

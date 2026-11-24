@@ -3865,6 +3865,9 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
       return emitAddress(CE->getResult());
     }
     case Expr::EK_Binary:
+      if (NameRefExpr *Ref = llvm::cast<BinaryExpr>(E)->getConstRef())
+        return emitAddress(Ref); // 'a' + 'b': a string constant
+      return visitExpr(E); // a record's operator: a temporary holding it
     case Expr::EK_Unary:
       // A record's operator returning a record: a temporary holding it.
       return visitExpr(E);
@@ -6427,6 +6430,9 @@ public:
   static Expr *unwrapConst(Expr *E) {
     if (auto *F = llvm::dyn_cast<FieldExpr>(E))
       if (NameRefExpr *Ref = F->getConstRef())
+        return Ref;
+    if (auto *B = llvm::dyn_cast<BinaryExpr>(E)) // 'a' + 'b'
+      if (NameRefExpr *Ref = B->getConstRef())
         return Ref;
     return E;
   }
@@ -10045,6 +10051,8 @@ public:
   }
 
   llvm::Value *visitBinaryExpr(BinaryExpr *E) {
+    if (NameRefExpr *Ref = E->getConstRef()) // 'a' + 'b': a constant
+      return visitExpr(Ref);
     BinaryOp Op = E->getOp();
     if (RoutineDecl *ClassOp = E->getOperator()) { // a record's operator
       llvm::Value *V = emitCall(ClassOp, {E->getLHS(), E->getRHS()});

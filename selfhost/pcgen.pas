@@ -2172,6 +2172,8 @@ begin
   unwrapConst := e;
   if (e^.kind = nkField) and (e^.constRef <> nil) then
     unwrapConst := e^.constRef;
+  if (e^.kind = nkBinary) and (e^.binConstRef <> nil) then { 'a' + 'b' }
+    unwrapConst := e^.binConstRef;
 end;
 
 { Does e name a type (TFoo, TOuter.TInner)? }
@@ -3572,8 +3574,11 @@ begin
         emitAddress := emitAddress(e^.ceResult);
       end;
     nkBinary, nkUnary:
-      { a record's operator returning a record: a temporary holding it }
-      emitAddress := visitExpr(e);
+      if (e^.kind = nkBinary) and (e^.binConstRef <> nil) then
+        emitAddress := emitAddress(e^.binConstRef) { 'a' + 'b': a string constant }
+      else
+        { a record's operator returning a record: a temporary holding it }
+        emitAddress := visitExpr(e);
     nkNameRef:
       begin
         d := e^.refDecl;
@@ -7532,7 +7537,11 @@ begin
           visitExprKind := visitExpr(e^.ceResult);
       end;
     nkUnary: visitExprKind := visitUnary(e);
-    nkBinary: visitExprKind := visitBinary(e);
+    nkBinary:
+      if e^.binConstRef <> nil then { 'a' + 'b': a constant }
+        visitExprKind := visitExpr(e^.binConstRef)
+      else
+        visitExprKind := visitBinary(e);
     nkCall: visitExprKind := visitCall(e);
     nkIndirectCall: visitExprKind := visitIndirectCall(e);
     nkAddrOf:

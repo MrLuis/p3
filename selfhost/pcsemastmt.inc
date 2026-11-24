@@ -5727,6 +5727,67 @@ begin
     vecScalar := areCompatible(elem, sc);
 end;
 
+{ The text of a string or char constant (added to b), if e is one. }
+function constantText(e: PNode; var b: TBuf): boolean;
+var
+  c: TConstant;
+begin
+  constantText := false;
+  if not fold(e, c) then
+    exit;
+  if c.value.kind = ckString then
+  begin
+    bufAddChars(b, c.value.strVal^.chars, 0, c.value.strVal^.len);
+    exit(true);
+  end;
+  if (c.value.kind = ckOrdinal) and (getBase(c.ty)^.kind = tyChar) then
+  begin
+    bufAddChar(b, chr(c.value.intVal));
+    exit(true);
+  end;
+end;
+
+{ e = A + B of string or char constants: the constant it is (a hidden
+  constant declaration e refers to); its type, or nil if it is not one }
+function foldConcatenation(e: PNode): PType;
+var
+  b: TBuf;
+  t: PType;
+  v: TConstValue;
+  id: TIdent;
+  d: PDecl;
+  ref: PNode;
+begin
+  foldConcatenation := nil;
+  bufInit(b);
+  if not constantText(e^.lhs, b) or not constantText(e^.rhs, b) then
+  begin
+    bufFree(b);
+    exit;
+  end;
+  if b.len = 1 then
+  begin
+    t := tyCharT;
+    v := constOrdinal(ord(b.data^[0]));
+  end
+  else
+  begin
+    t := stringLiteralType(b.len);
+    v := constString(internChars(b.data, 0, b.len));
+  end;
+  bufFree(b);
+  id := predeclaredIdent('(constant)');
+  id.loc := e^.b;
+  d := newDecl(dkConst, id, noLoc);
+  d^.constType := t;
+  d^.constValue := v;
+  ref := nameRefNode(id);
+  ref^.refDecl := d;
+  ref^.typ := t;
+  e^.binConstRef := ref;
+  foldConcatenation := t;
+end;
+
 { vector[N] of boolean: what lane-by-lane comparisons give (a mask) }
 var
   booleanVectors: array[1..64] of PType;
@@ -5787,6 +5848,11 @@ begin
   begin
     if (op = boAdd) and not (isNumeric(l) or isNumeric(r)) then
     begin
+      { of string constants: a constant, of any length (not a shortstring
+        of at most 255 characters) }
+      vecTy := foldConcatenation(e);
+      if vecTy <> nil then
+        exit(vecTy);
       if (l^.kind = tyAnsiString) or (r^.kind = tyAnsiString) then
         exit(ansiStringType);
       exit(shortStringType(255));

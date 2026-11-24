@@ -285,11 +285,17 @@ public:
     Operator = R;
     Negated = Negate;
   }
+  /// A concatenation of string constants ('a' + 'b', S + 'c'): Sema's
+  /// reference to the constant it is, which code generation uses in place
+  /// of this expression (as a FieldExpr's).
+  NameRefExpr *getConstRef() const { return ConstRef; }
+  void setConstRef(NameRefExpr *N) { ConstRef = N; }
   static bool classof(const Expr *E) { return E->getKind() == EK_Binary; }
 
 private:
   RoutineDecl *Operator = nullptr;
   bool Negated = false;
+  NameRefExpr *ConstRef = nullptr;
 };
 
 /// Function call: abs(x), f(1, 2).

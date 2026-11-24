@@ -3367,6 +3367,8 @@ begin
       end;
     nkBinary:
       begin
+        if e^.binConstRef <> nil then { 'a' + 'b' }
+          exit(fold(e^.binConstRef, c));
         if not fold(e^.lhs, l) or not fold(e^.rhs, r) or
            (l.value.kind = ckString) or (r.value.kind = ckString) then
           exit;

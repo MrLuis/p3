@@ -1997,6 +1997,8 @@ class Checker : public StmtVisitor<Checker>,
     }
     case Expr::EK_Binary: {
       auto *B = llvm::cast<BinaryExpr>(E);
+      if (NameRefExpr *Ref = B->getConstRef()) // 'a' + 'b'
+        return fold(Ref);
       auto L = fold(B->getLHS()), R = fold(B->getRHS());
       if (!L || !R || L->Value.K == ConstValue::String ||
           R->Value.K == ConstValue::String)
@@ -11424,6 +11426,48 @@ public:
     return check(E);
   }
 
+  /// The text of a string or char constant (S), if E is one.
+  bool constantText(Expr *E, std::string &S) {
+    auto C = fold(E);
+    if (!C)
+      return false;
+    if (C->Value.K == ConstValue::String) {
+      S = C->Value.Str.str();
+      return true;
+    }
+    if (C->Value.K == ConstValue::Ordinal && C->Ty->getBase()->isChar()) {
+      S = std::string(1, static_cast<char>(C->Value.Int));
+      return true;
+    }
+    return false;
+  }
+
+  /// A + B of string or char constants: the constant it is (a hidden
+  /// constant declaration E refers to); its type, or null if it is not one.
+  Type *foldConcatenation(BinaryExpr *E) {
+    std::string A, B;
+    if (!constantText(E->getLHS(), A) || !constantText(E->getRHS(), B))
+      return nullptr;
+    std::string S = A + B;
+    Type *T;
+    ConstValue V;
+    if (S.size() == 1) {
+      T = Ctx.getCharType();
+      V = ConstValue::ordinal(static_cast<uint8_t>(S[0]));
+    } else {
+      T = Ctx.getStringLiteralType(S.size());
+      V = ConstValue::string(Ctx.getStrings().intern(S));
+    }
+    Identifier Id = predeclaredName("(constant)");
+    Id.Loc = E->getBeginLoc();
+    auto *C = Ctx.create<ConstDecl>(SourceLocation(), Id, T, V);
+    auto *Ref = Ctx.create<NameRefExpr>(Id);
+    Ref->setDecl(C);
+    Ref->setType(T);
+    E->setConstRef(Ref);
+    return T;
+  }
+
   Type *visitBinaryExpr(BinaryExpr *E) {
     if (E->getOp() == BinaryOp::Is || E->getOp() == BinaryOp::As)
       return checkIsAs(E);
@@ -11451,6 +11495,11 @@ public:
     BinaryOp Op = E->getOp();
     // Turbo/FPC strings: + concatenates, comparisons work for any lengths.
     if (!isISO() && L->isStringish() && R->isStringish()) {
+      // Of string constants: a constant, of any length (not a shortstring
+      // of at most 255 characters).
+      if (Op == BinaryOp::Add && !(L->isNumeric() || R->isNumeric()))
+        if (Type *T = foldConcatenation(E))
+          return T;
       if (Op == BinaryOp::Add && !(L->isNumeric() || R->isNumeric()))
         return L->isAnsiString() || R->isAnsiString() ? Ctx.getAnsiStringType()
                                                       : Ctx.getShortStringType();

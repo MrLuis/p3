@@ -102,7 +102,6 @@ begin
   Lines := '';
   for I := 1 to 2000 do
     Lines := Lines + 'line number ' + IntToStr(I) + ' of the text, with some words' + #10;
-  { (line by line: a constant expression longer than 255 bytes is cut) }
   Head := 'GET /api/v1/users/12345?fields=name,email HTTP/1.1'#13#10;
   Head := Head + 'Host: example.com'#13#10;
   Head := Head + 'User-Agent: Mozilla/5.0 (Macintosh; Intel Mac OS X 14_0) AppleWebKit/537.36'#13#10;
