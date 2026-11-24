@@ -66,7 +66,8 @@ type
     ReuseAddr: boolean;  { SO_REUSEADDR }
     ReusePort: boolean;  { SO_REUSEPORT: several sockets may bind the same
                           (host, port) together and the kernel balances
-                          the accepts among them }
+                          the accepts among them (Linux, macOS; Windows
+                          has none: ENetError) }
   end;
 
 const
@@ -197,12 +198,23 @@ implementation
 {$IFDEF P3_OBJFPC}
 uses
   sysutils
-  {$IFNDEF LINUX}{$IFNDEF DARWIN}, netasync_needs_linux_or_darwin{$ENDIF}{$ENDIF};
+  {$IFNDEF LINUX}{$IFNDEF DARWIN}{$IFNDEF MSWINDOWS}, netasync_needs_linux_darwin_or_windows{$ENDIF}{$ENDIF}{$ENDIF};
 
 type
   cint = longint;
   cuint = cardinal;
   ssize_t = int64;
+{$IFDEF MSWINDOWS}
+  { Winsock: a SOCKET is pointer-sized (its handles fit TSocket), recv and
+    send return an int, inet_ntop takes a size_t }
+  csock = int64;
+  cssize = cint;
+  csize = int64;
+{$ELSE}
+  csock = cint;
+  cssize = ssize_t;
+  csize = cint;
+{$ENDIF}
 
 const
   AF_INET = 2;
@@ -219,6 +231,18 @@ const
   EAGAIN = 11;
   EWOULDBLOCK = 11;
   EINTR = 4;
+{$ENDIF}
+{$IFDEF MSWINDOWS}
+  SOL_SOCKET = $ffff;
+  SO_REUSEADDR = 4;
+  SO_REUSEPORT = 0;        { none: see NetListenTo }
+  SO_KEEPALIVE = 8;
+  SO_ERROR = $1007;
+  MSG_NOSIGNAL = 0;        { no SIGPIPE on Windows }
+  EINPROGRESS = 10036;     { WSAEINPROGRESS }
+  EAGAIN = 10035;          { WSAEWOULDBLOCK: also a connect in progress }
+  EWOULDBLOCK = 10035;
+  EINTR = 10004;           { WSAEINTR }
 {$ENDIF}
 {$IFDEF DARWIN}
   SOL_SOCKET = $ffff;
@@ -240,54 +264,78 @@ const
   TCP_KEEPINTVL = 5;
   TCP_KEEPCNT = 6;
 {$ENDIF}
+{$IFDEF MSWINDOWS}
+  TCP_KEEPIDLE = 3;        { (Windows 10 1709 and later) }
+  TCP_KEEPINTVL = 17;
+  TCP_KEEPCNT = 16;
+{$ENDIF}
 {$IFDEF DARWIN}
   TCP_KEEPALIVE = $10;     { first probe delay }
   TCP_KEEPINTVL = $101;
   TCP_KEEPCNT = $102;
 {$ENDIF}
 
+{$IFDEF MSWINDOWS}
+function WSAGetLastError: cint; cdecl; external 'ws2_32' name 'WSAGetLastError';
+function WSAStartup(version: word; data: pointer): cint; cdecl;
+  external 'ws2_32' name 'WSAStartup';
+
+{ the last socket error (Winsock keeps it per thread, not in errno) }
+function errno: cint;
+begin
+  Result := WSAGetLastError;
+end;
+{$ELSE}
 var
   errno: cint; external 'c' name 'errno';
+{$ENDIF}
 
-procedure libc_close(s: cint); cdecl; external 'c' name 'close';
-function socket(af, t, p: cint): cint; cdecl; external 'c' name 'socket';
-function bind(s: cint; addr: pointer; len: cint): cint; cdecl; external 'c' name 'bind';
-function listen(s, backlog: cint): cint; cdecl; external 'c' name 'listen';
-function accept(s: cint; addr: pointer; len: pointer): cint; cdecl;
-  external 'c' name 'accept';
-function connect(s: cint; addr: pointer; len: cint): cint; cdecl;
-  external 'c' name 'connect';
-function recv(s: cint; buf: pointer; len: cint; flags: cint): ssize_t; cdecl;
-  external 'c' name 'recv';
-function send(s: cint; buf: pointer; len: cint; flags: cint): ssize_t; cdecl;
-  external 'c' name 'send';
-procedure setsockopt(s, level, optname: cint; optval: pointer; optlen: cuint); cdecl;
-  external 'c' name 'setsockopt';
-function getsockopt(s, level, optname: cint; optval: pointer; len: pointer): cint; cdecl;
-  external 'c' name 'getsockopt';
-function getsockname(s: cint; addr: pointer; len: pointer): cint; cdecl;
-  external 'c' name 'getsockname';
-function shutdown(s, how: cint): cint; cdecl;
-  external 'c' name 'shutdown';
-function sendto(s: cint; buf: pointer; len: cint; flags: cint;
-                dst: pointer; dstlen: cint): ssize_t; cdecl;
-  external 'c' name 'sendto';
-function recvfrom(s: cint; buf: pointer; len: cint; flags: cint;
-                  src: pointer; srclen: pointer): ssize_t; cdecl;
-  external 'c' name 'recvfrom';
-function inet_ntop(af: cint; src: pointer; dst: pchar; size: cint): pchar;
-  cdecl; external 'c' name 'inet_ntop';
+procedure libc_close(s: csock); cdecl;
+  external {$IFDEF MSWINDOWS}'ws2_32' name 'closesocket'{$ELSE}'c' name 'close'{$ENDIF};
+function socket(af, t, p: cint): cint; cdecl;
+  external {$IFDEF MSWINDOWS}'ws2_32'{$ELSE}'c'{$ENDIF} name 'socket';
+function bind(s: csock; addr: pointer; len: cint): cint; cdecl;
+  external {$IFDEF MSWINDOWS}'ws2_32'{$ELSE}'c'{$ENDIF} name 'bind';
+function listen(s: csock; backlog: cint): cint; cdecl;
+  external {$IFDEF MSWINDOWS}'ws2_32'{$ELSE}'c'{$ENDIF} name 'listen';
+function accept(s: csock; addr: pointer; len: pointer): cint; cdecl;
+  external {$IFDEF MSWINDOWS}'ws2_32'{$ELSE}'c'{$ENDIF} name 'accept';
+function connect(s: csock; addr: pointer; len: cint): cint; cdecl;
+  external {$IFDEF MSWINDOWS}'ws2_32'{$ELSE}'c'{$ENDIF} name 'connect';
+function recv(s: csock; buf: pointer; len: cint; flags: cint): cssize; cdecl;
+  external {$IFDEF MSWINDOWS}'ws2_32'{$ELSE}'c'{$ENDIF} name 'recv';
+function send(s: csock; buf: pointer; len: cint; flags: cint): cssize; cdecl;
+  external {$IFDEF MSWINDOWS}'ws2_32'{$ELSE}'c'{$ENDIF} name 'send';
+procedure setsockopt(s: csock; level, optname: cint; optval: pointer; optlen: cuint); cdecl;
+  external {$IFDEF MSWINDOWS}'ws2_32'{$ELSE}'c'{$ENDIF} name 'setsockopt';
+function getsockopt(s: csock; level, optname: cint; optval: pointer; len: pointer): cint; cdecl;
+  external {$IFDEF MSWINDOWS}'ws2_32'{$ELSE}'c'{$ENDIF} name 'getsockopt';
+function getsockname(s: csock; addr: pointer; len: pointer): cint; cdecl;
+  external {$IFDEF MSWINDOWS}'ws2_32'{$ELSE}'c'{$ENDIF} name 'getsockname';
+function shutdown(s: csock; how: cint): cint; cdecl;
+  external {$IFDEF MSWINDOWS}'ws2_32'{$ELSE}'c'{$ENDIF} name 'shutdown';
+function sendto(s: csock; buf: pointer; len: cint; flags: cint;
+                dst: pointer; dstlen: cint): cssize; cdecl;
+  external {$IFDEF MSWINDOWS}'ws2_32'{$ELSE}'c'{$ENDIF} name 'sendto';
+function recvfrom(s: csock; buf: pointer; len: cint; flags: cint;
+                  src: pointer; srclen: pointer): cssize; cdecl;
+  external {$IFDEF MSWINDOWS}'ws2_32'{$ELSE}'c'{$ENDIF} name 'recvfrom';
+function inet_ntop(af: cint; src: pointer; dst: pchar; size: csize): pchar;
+  cdecl; external {$IFDEF MSWINDOWS}'ws2_32'{$ELSE}'c'{$ENDIF} name 'inet_ntop';
 
+{$IFDEF DARWIN}{$DEFINE NET_CANONNAME_FIRST}{$ENDIF}
+{$IFDEF MSWINDOWS}{$DEFINE NET_CANONNAME_FIRST}{$ENDIF}
 type
   Paddrinfo = ^Taddrinfo;
   PPaddrinfo = ^Paddrinfo;
-  { struct addrinfo: macOS/BSD put ai_canonname before ai_addr, glibc
-    the other way round }
+  { struct addrinfo: macOS/BSD and Windows put ai_canonname before
+    ai_addr, glibc the other way round (Windows' ai_addrlen is a size_t:
+    its low half, then the padding before the next pointer) }
   Taddrinfo = record
     flags, family: cint;
     socktype, protocol: cint;
     addrlen: cuint;
-{$IFDEF DARWIN}
+{$IFDEF NET_CANONNAME_FIRST}
     canonname: pchar;
     addr: pointer;
 {$ELSE}
@@ -299,11 +347,11 @@ type
 
 function getaddrinfo(node: pchar; service: pchar; hints: paddrinfo;
                      res: PPaddrinfo): cint; cdecl;
-  external 'c' name 'getaddrinfo';
+  external {$IFDEF MSWINDOWS}'ws2_32'{$ELSE}'c'{$ENDIF} name 'getaddrinfo';
 procedure freeaddrinfo(res: paddrinfo); cdecl;
-  external 'c' name 'freeaddrinfo';
+  external {$IFDEF MSWINDOWS}'ws2_32'{$ELSE}'c'{$ENDIF} name 'freeaddrinfo';
 function inet_pton(af: cint; const src: pchar; dst: pointer): cint; cdecl;
-  external 'c' name 'inet_pton';
+  external {$IFDEF MSWINDOWS}'ws2_32'{$ELSE}'c'{$ENDIF} name 'inet_pton';
 {$IFDEF LINUX}
 function accept4(s: cint; addr: pointer; len: pointer; flags: cint): cint; cdecl;
   external 'c' name 'accept4';
@@ -363,6 +411,10 @@ var
   one: cint;
   s: TSocket;
 begin
+{$IFDEF MSWINDOWS}
+  if opt.ReusePort then
+    raise ENetError.Create('net: ReusePort is not supported on Windows');
+{$ENDIF}
   s := socket(AF_INET, SOCK_STREAM, 0);
   if s < 0 then
     raise ENetError.Create('net: socket failed (' + IntToStr(errno) + ')');
@@ -372,10 +424,16 @@ begin
 {$ENDIF}
   pas_fd_nonblock(s, 1);
   one := 1;
+{$IFNDEF MSWINDOWS}
   if opt.ReuseAddr then
     setsockopt(s, SOL_SOCKET, SO_REUSEADDR, @one, cuint(sizeof(one)));
   if opt.ReusePort then
     setsockopt(s, SOL_SOCKET, SO_REUSEPORT, @one, cuint(sizeof(one)));
+{$ENDIF}
+  { (Windows: a listener rebinds a port in TIME_WAIT without SO_REUSEADDR,
+    whose Windows meaning is another: letting a second socket take a port
+    in use; and there is no SO_REUSEPORT to balance one port over several
+    listeners) }
   fillchar(addr, sizeof(addr), 0);
 {$IFDEF DARWIN}
   addr.len := sizeof(TSockAddrIn);
@@ -866,6 +924,14 @@ function NetUdpRecv(S: TSocket; buf: pointer; Max: Integer): async LongInt;
 begin
   Result := await NetReadInto(S, buf, Max);
 end;
+
+{$IFDEF MSWINDOWS}
+var
+  wsaData: array[0..511] of byte;   { (a WSADATA, 408 bytes on Win64) }
+
+initialization
+  WSAStartup($0202, @wsaData);
+{$ENDIF}
 
 {$ENDIF}
 

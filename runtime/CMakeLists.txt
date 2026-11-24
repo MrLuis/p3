@@ -144,16 +144,22 @@ foreach(triple ${P3_CROSS_LIST})
   set(dir ${CMAKE_CURRENT_BINARY_DIR}/${triple})
   file(MAKE_DIRECTORY ${dir} ${PROJECT_BINARY_DIR}/lib/${triple})
   set(objs "")
-  foreach(src io sys ansi format async)
+  set(srcs io sys ansi format async)
+  if(triple MATCHES "mingw|windows")
+    list(APPEND srcs wepoll/wepoll)   # the socket pollers (async.c)
+  endif()
+  foreach(src ${srcs})
+    get_filename_component(obj ${src} NAME)
     add_custom_command(
-      OUTPUT ${dir}/${src}.o
+      OUTPUT ${dir}/${obj}.o
       COMMAND ${P3_CROSS_CC_${triple}} -std=gnu11 -O2 -ffunction-sections
               -fdata-sections -I ${CMAKE_CURRENT_SOURCE_DIR}/include
-              -c ${CMAKE_CURRENT_SOURCE_DIR}/${src}.c -o ${dir}/${src}.o
+              -c ${CMAKE_CURRENT_SOURCE_DIR}/${src}.c -o ${dir}/${obj}.o
       DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/${src}.c
               ${CMAKE_CURRENT_SOURCE_DIR}/include/pascalrt.h
+              ${CMAKE_CURRENT_SOURCE_DIR}/wepoll/wepoll.h
       VERBATIM)
-    list(APPEND objs ${dir}/${src}.o)
+    list(APPEND objs ${dir}/${obj}.o)
   endforeach()
   set(lib ${PROJECT_BINARY_DIR}/lib/${triple}/libpascalrt.a)
   add_custom_command(

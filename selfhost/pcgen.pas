@@ -4467,6 +4467,14 @@ begin
     resultOf := nil;
 end;
 
+function retTypeOf(result_: PType): PIRType;
+begin
+  if (result_ = nil) or returnsByPointer(result_) then
+    retTypeOf := irVoidT
+  else
+    retTypeOf := regType(result_);
+end;
+
 function emitCall(r: PDecl; const args: TPtrList): TV;
 var
   f: PIRFunc;
@@ -4483,10 +4491,14 @@ begin
   begin
     bufInit(buf);
     emitArgValues(r^.params, args, buf, true);
+    { the routine's own result type: another declaration of the same C
+      name (another unit's) may have declared the IR function with
+      another (a procedure and a function for closesocket), as the C++
+      p3 calls it }
     if r^.isVarArgs then
       res := irCallVarArg(f, irFuncRef(f), buf, '')
     else
-      res := irCallPtr(f^.ret, irFuncRef(f), buf, '');
+      res := irCallPtr(retTypeOf(resultOf(r)), irFuncRef(f), buf, '');
     bufFree(buf);
     exit(res);
   end;
@@ -4496,14 +4508,6 @@ begin
   else
     emitCall := emitCallTo(f^.ret, irFuncRef(f), irNull, false, r^.params, args,
                            resultOf(r));
-end;
-
-function retTypeOf(result_: PType): PIRType;
-begin
-  if (result_ = nil) or returnsByPointer(result_) then
-    retTypeOf := irVoidT
-  else
-    retTypeOf := regType(result_);
 end;
 
 { Calls the routine value pair of type rt; nilLoc: where to report a nil

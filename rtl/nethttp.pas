@@ -1361,6 +1361,11 @@ end;
 { ---- serving on netasync ---- }
 
 const
+{$IFDEF MSWINDOWS}
+  EINTR_ = 10004;              { WSAEINTR }
+  EAGAIN_ = 10035;             { WSAEWOULDBLOCK }
+  MSG_NOSIGNAL_ = 0;
+{$ELSE}
   EINTR_ = 4;
 {$IFDEF DARWIN}
   EAGAIN_ = 35;
@@ -1369,12 +1374,38 @@ const
   EAGAIN_ = 11;
   MSG_NOSIGNAL_ = $4000;
 {$ENDIF}
+{$ENDIF}
 
+{$IFDEF MSWINDOWS}
+function WSAGetLastError: LongInt; cdecl; external 'ws2_32' name 'WSAGetLastError';
+{ Winsock: a SOCKET is pointer-sized, recv and send return an int }
+function ws_recv(s: Int64; buf: Pointer; len: LongInt; flags: LongInt): LongInt; cdecl;
+  external 'ws2_32' name 'recv';
+function ws_send(s: Int64; buf: Pointer; len: LongInt; flags: LongInt): LongInt; cdecl;
+  external 'ws2_32' name 'send';
+
+{ the last socket error (Winsock keeps it per thread, not in errno) }
+function c_errno: LongInt;
+begin
+  Result := WSAGetLastError;
+end;
+
+function c_recv(s: LongInt; buf: Pointer; len: Int64; flags: LongInt): Int64;
+begin
+  Result := ws_recv(s, buf, LongInt(len), flags);
+end;
+
+function c_send(s: LongInt; buf: Pointer; len: Int64; flags: LongInt): Int64;
+begin
+  Result := ws_send(s, buf, LongInt(len), flags);
+end;
+{$ELSE}
 var
   c_errno: LongInt; external 'c' name 'errno';
 
 function c_recv(s: LongInt; buf: Pointer; len: Int64; flags: LongInt): Int64; cdecl; external 'c' name 'recv';
 function c_send(s: LongInt; buf: Pointer; len: Int64; flags: LongInt): Int64; cdecl; external 'c' name 'send';
+{$ENDIF}
 
 { every byte, parking the task on EAGAIN (no task per call); false: the
   peer is gone, or RequestTimeoutMs passed without progress }

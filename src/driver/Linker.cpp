@@ -220,6 +220,9 @@ bool p3::linkExecutable(llvm::StringRef ObjectFile,
   // runtime's thread-local variables need libwinpthread's).
   if (T.isWindowsGNUEnvironment())
     Args.push_back("-static");
+  // Windows: the runtime's socket waits (and unit netasync) use Winsock.
+  if (T.isOSWindows())
+    Args.push_back("-lws2_32");
   Args.append({"-lm", "-o", OutputFile});
 
   std::string ErrMsg;

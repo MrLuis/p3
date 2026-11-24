@@ -461,6 +461,9 @@ begin
     runtime's thread-local variables need libwinpthread's) }
   if isMinGWTriple(triple) then
     addArg(cmd, '-static');
+  { Windows: the runtime's socket waits (and unit netasync) use Winsock }
+  if isWindowsTriple(triple) then
+    addArg(cmd, '-lws2_32');
   addArg(cmd, '-lm');
   addArg(cmd, '-o');
   addArg(cmd, path);

@@ -399,9 +399,14 @@ build/bin/p3 --mode=objfpc --target=x86_64-w64-mingw32 hello.pas   # hello.exe
 p3 links with the target's own toolchain (`x86_64-w64-mingw32-gcc`, or
 `P3_CROSS_CC`), statically: the program needs no DLL but Windows' own (the
 Universal C Runtime, Windows 10 and later). `-DP3_CROSS_TARGETS=<triples>`
-picks the targets to build the runtime for (`OFF`: none). Everything but
-the network units (`netasync`, `netloop`, `nethttp`: Linux and macOS for
-now) works there, tasks and iterators included. With
+picks the targets to build the runtime for (`OFF`: none). The whole unit
+library works there, tasks, iterators and the network units included:
+`netasync`, `netloop` and `nethttp` use Winsock, and wait on sockets with
+the bundled [wepoll](https://github.com/piscisaureus/wepoll) (epoll over
+the AFD driver's polling, BSD-2-Clause, in `runtime/wepoll`), as on Linux.
+Two things differ: `TNetListenOpts.ReusePort` raises `ENetError` (Windows
+has no `SO_REUSEPORT`; `netloop` shares one listener among its loops, as on
+macOS), and `TNetLoop.WatchFd` takes sockets only. With
 [Wine](https://www.winehq.org/) installed, the tests run every program of
 `tests/run` again as a Windows program (`tests/windows`).
 

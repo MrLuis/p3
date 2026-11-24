@@ -165,7 +165,7 @@ type
   private
     FServer: TNetLoopServer;
     FIndex: Integer;
-    FFd: Integer;                   { epoll / kqueue }
+    FFd: PtrInt;                    { epoll / kqueue / wepoll's HANDLE }
     FListeners: array of TSocket;
     FHead: TLoopConn;               { its connections }
     FDead: TLoopConn;               { closed during this turn }
@@ -250,6 +250,51 @@ type
   TPthread = PtrUInt;
   TThreadStart = function(Arg: Pointer): Pointer; cdecl;
 
+{ Linux and Windows wait with epoll (Windows: wepoll, epoll over the AFD
+  driver's polling, in p3's runtime), macOS with kqueue }
+{$IFDEF LINUX}{$DEFINE NETLOOP_EPOLL}{$ENDIF}
+{$IFDEF MSWINDOWS}{$DEFINE NETLOOP_EPOLL}{$ENDIF}
+
+{$IFDEF MSWINDOWS}
+const
+  EINTR = 10004;               { WSAEINTR }
+  EAGAIN = 10035;              { WSAEWOULDBLOCK }
+  MSG_NOSIGNAL = 0;
+
+function WSAGetLastError: cint; cdecl; external 'ws2_32' name 'WSAGetLastError';
+
+{ the last socket error (Winsock keeps it per thread, not in errno) }
+function errno: cint;
+begin
+  Result := WSAGetLastError;
+end;
+
+{ Winsock: a SOCKET is pointer-sized, recv and send return an int }
+function c_accept(s: Int64; addr, len: Pointer): cint; cdecl; external 'ws2_32' name 'accept';
+function c_recv_ws(s: Int64; buf: Pointer; len: cint; flags: cint): cint; cdecl; external 'ws2_32' name 'recv';
+function c_send_ws(s: Int64; buf: Pointer; len: cint; flags: cint): cint; cdecl; external 'ws2_32' name 'send';
+function c_closesocket(s: Int64): cint; cdecl; external 'ws2_32' name 'closesocket';
+function GetActiveProcessorCount(group: Word): Cardinal; cdecl; external 'kernel32' name 'GetActiveProcessorCount';
+
+function c_recv(s: cint; buf: Pointer; len: Int64; flags: cint): Int64;
+begin
+  Result := c_recv_ws(s, buf, cint(len), flags);
+end;
+
+function c_send(s: cint; buf: Pointer; len: Int64; flags: cint): Int64;
+begin
+  Result := c_send_ws(s, buf, cint(len), flags);
+end;
+
+function c_close(fd: cint): cint;
+begin
+  Result := c_closesocket(fd);
+end;
+
+function pthread_create(var tid: TPthread; attr: Pointer; start: TThreadStart; arg: Pointer): cint;
+  cdecl; external 'pthread' name 'pthread_create';
+function pthread_join(tid: TPthread; ret: Pointer): cint; cdecl; external 'pthread' name 'pthread_join';
+{$ELSE}
 const
   EINTR = 4;
 {$IFDEF DARWIN}
@@ -276,6 +321,7 @@ function c_sysconf(name: cint): Int64; cdecl; external 'c' name 'sysconf';
 function pthread_create(var tid: TPthread; attr: Pointer; start: TThreadStart; arg: Pointer): cint;
   cdecl; external 'c' name 'pthread_create';
 function pthread_join(tid: TPthread; ret: Pointer): cint; cdecl; external 'c' name 'pthread_join';
+{$ENDIF}
 { the runtime: counted values become thread-safe before a thread exists }
 procedure pas_start_threads; cdecl; external name '__pas_start_threads';
 
@@ -309,6 +355,31 @@ type
 function epoll_create1(flags: cint): cint; cdecl; external 'c';
 function epoll_ctl(epfd, op, fd: cint; ev: PEpollEvent): cint; cdecl; external 'c';
 function epoll_wait(epfd: cint; evs: PEpollEvent; max, timeout: cint): cint; cdecl; external 'c';
+{$ENDIF}
+
+{$IFDEF MSWINDOWS}
+const
+  EPOLLIN = $1;
+  EPOLLOUT = $4;
+  EPOLLERR = $8;
+  EPOLLHUP = $10;
+  EPOLL_CTL_ADD = 1;           { (wepoll's numbers: MOD and DEL are swapped }
+  EPOLL_CTL_MOD = 2;           {  against Linux's) }
+  EPOLL_CTL_DEL = 3;
+type
+  TEpollEvent = record         { struct epoll_event: not packed in wepoll }
+    events: Cardinal;
+    pad: Cardinal;
+    data: Pointer;
+  end;
+  PEpollEvent = ^TEpollEvent;
+{ wepoll (in p3's runtime): the port is a HANDLE, the descriptor a SOCKET }
+function epoll_create1(flags: cint): PtrInt; cdecl; external name 'epoll_create1';
+function epoll_close(ep: PtrInt): cint; cdecl; external name 'epoll_close';
+function epoll_ctl(ep: PtrInt; op: cint; s: Int64; ev: PEpollEvent): cint; cdecl;
+  external name 'epoll_ctl';
+function epoll_wait(ep: PtrInt; evs: PEpollEvent; max, timeout: cint): cint; cdecl;
+  external name 'epoll_wait';
 {$ENDIF}
 
 {$IFDEF DARWIN}
@@ -452,7 +523,7 @@ end;
 { ---- TNetLoop ---- }
 
 procedure TNetLoop.WatchListener(L: TSocket);
-{$IFDEF LINUX}
+{$IFDEF NETLOOP_EPOLL}
 var
   ev: TEpollEvent;
 begin
@@ -476,7 +547,7 @@ end;
 
 { a new connection: reading on, writing registered but off }
 procedure TNetLoop.Watch(C: TLoopConn);
-{$IFDEF LINUX}
+{$IFDEF NETLOOP_EPOLL}
 var
   ev: TEpollEvent;
 begin
@@ -507,7 +578,7 @@ end;
 procedure TNetLoop.Interest(C: TLoopConn);
 var
   wantWrite, readOff: Boolean;
-{$IFDEF LINUX}
+{$IFDEF NETLOOP_EPOLL}
   ev: TEpollEvent;
 {$ELSE}
   k: array[0..1] of TKEvent;
@@ -518,7 +589,7 @@ begin
   readOff := C.FPeerClosed or C.FClosing or (C.OutPending > FServer.MaxOutput);
   if (wantWrite = C.FWriteOn) and (readOff = C.FReadOff) then
     exit;
-{$IFDEF LINUX}
+{$IFDEF NETLOOP_EPOLL}
   FillChar(ev, sizeof(ev), 0);
   ev.data := C;
   if not readOff then ev.events := ev.events or EPOLLIN;
@@ -567,8 +638,8 @@ begin
 {$ENDIF}
       if s < 0 then
         break;                  { EAGAIN: no more now (another loop took it) }
-{$IFDEF DARWIN}
-      NetAdopt(s);              { non-blocking, no SIGPIPE }
+{$IFNDEF LINUX}
+      NetAdopt(s);              { non-blocking (and on macOS no SIGPIPE) }
 {$ENDIF}
       NetSetNoDelay(s);
       c := TLoopConn.Create;
@@ -745,7 +816,7 @@ end;
 { ---- watched descriptors ---- }
 
 procedure SetWatch(L: TNetLoop; W: TLoopWatch; Op: Integer);
-{$IFDEF LINUX}
+{$IFDEF NETLOOP_EPOLL}
 var
   ev: TEpollEvent;
 begin
@@ -876,7 +947,7 @@ var
   w: TLoopWatch;
   lastSweep, stopAt, now: Int64;
   stopping: Boolean;
-{$IFDEF LINUX}
+{$IFDEF NETLOOP_EPOLL}
   evs: array[0..MAXEV - 1] of TEpollEvent;
   bits: Cardinal;
 {$ELSE}
@@ -893,7 +964,7 @@ begin
   stopAt := 0;
   while true do
   begin
-{$IFDEF LINUX}
+{$IFDEF NETLOOP_EPOLL}
     n := epoll_wait(FFd, @evs[0], MAXEV, WaitMs(GetTickCount64));
 {$ELSE}
     ts.sec := 0;
@@ -904,7 +975,7 @@ begin
       n := 0;                   { EINTR }
     for i := 0 to n - 1 do
     begin
-{$IFDEF LINUX}
+{$IFDEF NETLOOP_EPOLL}
       data := evs[i].data;
       bits := evs[i].events;
 {$ELSE}
@@ -918,7 +989,7 @@ begin
       end;
       if TLoopItem(data).FKind = 2 then
       begin
-{$IFDEF LINUX}
+{$IFDEF NETLOOP_EPOLL}
         FireWatch(TLoopWatch(data), (bits and (EPOLLIN or EPOLLERR or EPOLLHUP)) <> 0,
                   (bits and (EPOLLOUT or EPOLLERR or EPOLLHUP)) <> 0);
 {$ELSE}
@@ -930,7 +1001,7 @@ begin
       c := TLoopConn(data);
       if c.FClosed then
         continue;               { closed earlier this turn }
-{$IFDEF LINUX}
+{$IFDEF NETLOOP_EPOLL}
       if (bits and EPOLLOUT) <> 0 then
         Finish(c);
       if not c.FClosed and ((bits and (EPOLLIN or EPOLLERR or EPOLLHUP)) <> 0) then
@@ -1012,7 +1083,11 @@ begin
     FDeadWatches := w.FDeadNext;
     w.Free;
   end;
+{$IFDEF MSWINDOWS}
+  epoll_close(FFd);
+{$ELSE}
   c_close(FFd);
+{$ENDIF}
 end;
 
 function LoopThread(Arg: Pointer): Pointer; cdecl;
@@ -1030,7 +1105,11 @@ begin
   inherited Create;
   if Threads <= 0 then
   begin
+{$IFDEF MSWINDOWS}
+    n := GetActiveProcessorCount($FFFF);   { ALL_PROCESSOR_GROUPS }
+{$ELSE}
     n := c_sysconf(SC_NPROCESSORS_ONLN);
+{$ENDIF}
     if n < 1 then n := 1;
     Threads := Integer(n);
   end;
@@ -1117,12 +1196,16 @@ begin
     l.FServer := Self;
     l.FIndex := i;
     l.FListeners := FListen[i];
-{$IFDEF LINUX}
+{$IFDEF NETLOOP_EPOLL}
     l.FFd := epoll_create1(0);
 {$ELSE}
     l.FFd := kqueue;
 {$ENDIF}
+{$IFDEF MSWINDOWS}
+    if l.FFd = 0 then           { (a NULL HANDLE) }
+{$ELSE}
     if l.FFd < 0 then
+{$ENDIF}
       raise ENetError.Create('netloop: no event queue');
     FLoops[i] := l;
   end;

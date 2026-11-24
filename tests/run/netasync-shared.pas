@@ -254,9 +254,20 @@ var
   shPort: Integer;
   resolveHost: string;
 begin
-  { two sockets on one port, both carrying SO_REUSEPORT }
+  { two sockets on one port, both carrying SO_REUSEPORT (Windows has no
+    such option: NetListenTo refuses it) }
   opt.ReuseAddr := true;
   opt.ReusePort := true;
+{$IFDEF MSWINDOWS}
+  try
+    rp1 := NetListenTo('127.0.0.1', 0, 8, opt);
+    Writeln('reuseport: FAIL');
+    halt(1);
+  except
+    on E: ENetError do
+      Writeln('reuseport: ', E.Message);
+  end;
+{$ELSE}
   rp1 := NetListenTo('127.0.0.1', 0, 8, opt);
   rp2 := NetListenTo('127.0.0.1', NetBoundPort(rp1), 8, opt);
   if (rp1 >= 0) and (rp2 >= 0) and
@@ -269,6 +280,7 @@ begin
   end;
   NetClose(rp1);
   NetClose(rp2);
+{$ENDIF}
 
   { the name path of NetConnect and the pool-thread resolver }
   resolveHost := Wait(NetResolve('localhost'));

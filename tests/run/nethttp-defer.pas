@@ -1,6 +1,6 @@
 { nethttp's deferred answers on netloop, finished from other callbacks of
   the loop: a timer (TNetLoop.Every) and a watched descriptor (WatchFd on a
-  pipe). Checks: answers keep the order of pipelined requests behind a
+  pipe; on Windows, which polls only sockets, a loopback UDP pair). Checks: answers keep the order of pipelined requests behind a
   deferred one; a client that half-closes still gets its answer (Hold); a
   client that leaves while its answer is deferred frees its context when
   Complete comes (C.Data's destructor counts); Complete inside the handler
@@ -34,10 +34,46 @@ begin
   inherited Destroy;
 end;
 
+{$IFDEF MSWINDOWS}
+function ws_send(s: Int64; buf: Pointer; n, flags: LongInt): LongInt; cdecl;
+  external 'ws2_32' name 'send';
+function ws_recv(s: Int64; buf: Pointer; n, flags: LongInt): LongInt; cdecl;
+  external 'ws2_32' name 'recv';
+function ws_shutdown(s: Int64; how: LongInt): LongInt; cdecl;
+  external 'ws2_32' name 'shutdown';
+
+function c_write(fd: LongInt; buf: Pointer; n: Int64): Int64;
+begin
+  Result := ws_send(fd, buf, LongInt(n), 0);
+end;
+
+function c_read(fd: LongInt; buf: Pointer; n: Int64): Int64;
+begin
+  Result := ws_recv(fd, buf, LongInt(n), 0);
+end;
+
+function c_shutdown(fd, how: LongInt): LongInt;
+begin
+  Result := ws_shutdown(fd, how);
+end;
+
+{ the "pipe": a datagram socket and one sending to it }
+procedure MakePipe(var fds: array of Integer);
+begin
+  fds[0] := NetUdpBind('127.0.0.1', 0);
+  fds[1] := NetUdpConnect('127.0.0.1', NetBoundPort(fds[0]));
+end;
+{$ELSE}
 function c_pipe(fds: Pointer): LongInt; cdecl; external 'c' name 'pipe';
 function c_write(fd: LongInt; buf: Pointer; n: Int64): Int64; cdecl; external 'c' name 'write';
 function c_read(fd: LongInt; buf: Pointer; n: Int64): Int64; cdecl; external 'c' name 'read';
 function c_shutdown(fd, how: LongInt): LongInt; cdecl; external 'c' name 'shutdown';
+
+procedure MakePipe(var fds: array of Integer);
+begin
+  c_pipe(@fds[0]);
+end;
+{$ENDIF}
 
 function Pending(C: THttpContext): TPending;
 begin
@@ -86,7 +122,7 @@ var
   w: TLoopWatch;
 begin
   p := TPending.Create;
-  c_pipe(@fds[0]);
+  MakePipe(fds);
   p.PipeIn := fds[0];
   p.PipeOut := fds[1];
   L.Data := p;

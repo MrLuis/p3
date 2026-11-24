@@ -32,8 +32,12 @@
 
 #ifdef _WIN32
 /* Windows (MinGW-w64): threads from winpthreads, stacks from VirtualAlloc,
- * no waiting on descriptors (the network units are Linux and macOS only). */
+ * sockets from Winsock and their per-thread pollers from wepoll (epoll over
+ * the AFD driver's polling). */
+#include <winsock2.h>
+#include <ws2tcpip.h>
 #include <windows.h>
+#include "../wepoll/wepoll.h"
 #else
 #include <fcntl.h>
 #include <netinet/in.h>
@@ -443,7 +447,11 @@ struct PasContext {
    * a hand-written server). -1 before. */
   int pfd;
   int sleeping;         /* blocked in pfd: a post from elsewhere pokes it */
-  int wakefd;           /* Linux: the eventfd those pokes write */
+  int wakefd;           /* Linux: the eventfd those pokes write; Windows:
+                           the loopback socket they send a byte to */
+#ifdef _WIN32
+  HANDLE ep;            /* Windows: the wepoll port (pfd is then 0) */
+#endif
   uint8_t *fdtab;       /* per descriptor: FDT_* (what is armed directly) */
   int fdcap;
   struct PasFdWait **dheap; /* its waits with a deadline, a min-heap */
@@ -456,11 +464,13 @@ struct PasContext {
  * thread waiter was woken). A thread blocked in its poller is poked —
  * only when it sleeps, so a busy thread pays no syscall. */
 static void ctx_signal_locked(PasContext *c) {
-#ifndef _WIN32
   if (c->pfd >= 0) {
     if (c->sleeping) {
       c->sleeping = 0;
-#ifdef __linux__
+#if defined(_WIN32)
+      /* a byte to the poller's loopback socket */
+      send((SOCKET)(intptr_t)c->wakefd, "", 1, 0);
+#elif defined(__linux__)
       uint64_t one = 1;
       ssize_t r = write(c->wakefd, &one, sizeof one);
       (void)r;
@@ -473,7 +483,6 @@ static void ctx_signal_locked(PasContext *c) {
     }
     return;
   }
-#endif
   pthread_cond_broadcast(&c->cv);
 }
 
@@ -1761,13 +1770,6 @@ void __pas_token_check(PasToken *k) {
     raise_cancelled();
 }
 
-#ifdef _WIN32
-/* No waiting on descriptors: a thread's poller never starts (pfd stays -1). */
-static void ctx_poll_once(PasContext *c, int64_t deadline_ms) {
-  (void)c;
-  (void)deadline_ms;
-}
-#else
 /*===- Waiting on descriptors (unit netasync) ------------------------------===*/
 
 /* A task parks until a descriptor is readable or writable (__pas_task_wait_fd)
@@ -1804,6 +1806,43 @@ static void ctx_poll_once(PasContext *c, int64_t deadline_ms) {
  * 2 = writable, 4 = the descriptor is in an error state (POLLERR/POLLHUP
  * on the poll backends, a failed poll completion on io_uring). Everything
  * here is covered by the same lock as the rest of the file. */
+
+/* The per-thread epoll pollers serve Linux and, through wepoll, Windows;
+ * macOS has kqueue. On Windows descriptors are SOCKETs (handles that fit
+ * an int32, as unit netasync passes them), errors come from
+ * WSAGetLastError, and a socket is duplicated with WSADuplicateSocket. */
+#if defined(__linux__) || defined(_WIN32)
+#define PAS_EPOLL 1
+#endif
+#ifdef _WIN32
+#define EPH(c) ((c)->ep)
+#define SOCK(fd) ((SOCKET)(intptr_t)(fd))
+#define MSG_NOSIGNAL 0
+#define NET_EAGAIN WSAEWOULDBLOCK
+#define NET_EINTR WSAEINTR
+static int net_err(void) { return WSAGetLastError(); }
+static void sock_close(int fd) { closesocket(SOCK(fd)); }
+static int sock_dup(int fd) {
+  WSAPROTOCOL_INFOW info;
+  if (WSADuplicateSocketW(SOCK(fd), GetCurrentProcessId(), &info) != 0)
+    return -1;
+  SOCKET s = WSASocketW(FROM_PROTOCOL_INFO, FROM_PROTOCOL_INFO,
+                        FROM_PROTOCOL_INFO, &info, 0, WSA_FLAG_OVERLAPPED);
+  return s == INVALID_SOCKET ? -1 : (int)(intptr_t)s;
+}
+#define pollfd_t WSAPOLLFD
+#define sock_poll(p, n, ms) WSAPoll((p), (n), (ms))
+#else
+#define EPH(c) ((c)->pfd)
+#define SOCK(fd) (fd)
+#define NET_EAGAIN EAGAIN
+#define NET_EINTR EINTR
+static int net_err(void) { return errno; }
+static void sock_close(int fd) { close(fd); }
+static int sock_dup(int fd) { return dup(fd); }
+#define pollfd_t struct pollfd
+#define sock_poll(p, n, ms) poll((p), (n), (ms))
+#endif
 
 enum {
   FD_BACKEND_KQUEUE = 0,
@@ -1968,7 +2007,7 @@ static void fd_unlink(PasFdWait *rec) {
 /* The bits __pas_task_wait_fd returns: 1 = readable, 2 = writable,
  * 4 = failed. */
 
-#ifdef __linux__
+#ifdef PAS_EPOLL
 static int64_t fd_bits_epoll(uint32_t events) {
   int64_t bits = 0;
   if (events & EPOLLIN)
@@ -2140,7 +2179,32 @@ void __pas_fd_wake_peers(int32_t fd, int32_t want_write) {
 static void ctx_poller(PasContext *c) {
   if (c->pfd >= 0)
     return;
-#ifdef __linux__
+#if defined(_WIN32)
+  /* the poke: a loopback UDP socket connected to itself, level-triggered
+     readable while a byte waits */
+  HANDLE p = epoll_create1(0);
+  SOCKET e = socket(AF_INET, SOCK_DGRAM, 0);
+  struct sockaddr_in a;
+  int alen = sizeof a;
+  memset(&a, 0, sizeof a);
+  a.sin_family = AF_INET;
+  a.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+  u_long nb = 1;
+  if (!p || e == INVALID_SOCKET || bind(e, (struct sockaddr *)&a, sizeof a) != 0 ||
+      getsockname(e, (struct sockaddr *)&a, &alen) != 0 ||
+      connect(e, (struct sockaddr *)&a, sizeof a) != 0 ||
+      ioctlsocket(e, FIONBIO, &nb) != 0)
+    __pas_runtime_error("the netasync poller could not start");
+  struct epoll_event ev;
+  memset(&ev, 0, sizeof ev);
+  ev.events = EPOLLIN;
+  ev.data.ptr = PAS_WAKE_MARK;
+  epoll_ctl(p, EPOLL_CTL_ADD, e, &ev);
+  c->wakefd = (int)(intptr_t)e;
+  c->ep = p;
+  c->pfd = 0;
+  return;
+#elif defined(__linux__)
   int p = epoll_create1(EPOLL_CLOEXEC);
   int e = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
   if (p < 0 || e < 0)
@@ -2159,7 +2223,9 @@ static void ctx_poller(PasContext *c) {
   EV_SET(&k, 1, EVFILT_USER, EV_ADD | EV_CLEAR, 0, 0, PAS_WAKE_MARK);
   kevent(p, &k, 1, NULL, 0, NULL);
 #endif
+#ifndef _WIN32
   c->pfd = p;
+#endif
 }
 
 /* c's entry for descriptor fd (the table grows on demand). */
@@ -2260,8 +2326,8 @@ static void fd_retire(PasFdWait *rec) {
     uint8_t *e = ctx_fdent(c, rec->fd);
     *e &= (uint8_t)~(rec->write ? FDT_WRITE : FDT_READ);
     if (!rec->fired) {
-#ifdef __linux__
-      epoll_ctl(c->pfd, EPOLL_CTL_DEL, rec->fd, NULL);
+#ifdef PAS_EPOLL
+      epoll_ctl(EPH(c), EPOLL_CTL_DEL, SOCK(rec->fd), NULL);
       *e &= (uint8_t)~FDT_EPOLL_REG;
 #else
       struct kevent kn;
@@ -2271,7 +2337,7 @@ static void fd_retire(PasFdWait *rec) {
 #endif
     }
   } else if (rec->arm_fd >= 0) {
-    close(rec->arm_fd);
+    sock_close(rec->arm_fd);
   }
   rec->arm_fd = -1;
 }
@@ -2313,9 +2379,9 @@ static void ctx_poll_once(PasContext *c, int64_t deadline_ms) {
   }
   if (wait_ms > 3600000)
     wait_ms = 3600000;
-#ifdef __linux__
+#ifdef PAS_EPOLL
   struct epoll_event evs[256];
-  int n = epoll_wait(c->pfd, evs, 256, (int)wait_ms);
+  int n = epoll_wait(EPH(c), evs, 256, (int)wait_ms);
 #else
   struct kevent evs[256];
   struct timespec ts, *tsp = NULL;
@@ -2330,12 +2396,18 @@ static void ctx_poll_once(PasContext *c, int64_t deadline_ms) {
   c->sleeping = 0;
   pthread_mutex_unlock(&c->qmu);
   for (int i = 0; i < n; i++) {
-#ifdef __linux__
+#ifdef PAS_EPOLL
     void *data = evs[i].data.ptr;
     if (data == PAS_WAKE_MARK) {
+#ifdef _WIN32
+      char v[16];
+      while (recv(SOCK(c->wakefd), v, sizeof v, 0) > 0)
+        ;
+#else
       uint64_t v;
       ssize_t r = read(c->wakefd, &v, sizeof v);
       (void)r;
+#endif
       continue;
     }
     int64_t bits = fd_bits_epoll(evs[i].events);
@@ -2504,7 +2576,7 @@ static int fd_arm(PasFdWait *rec) {
   PasContext *c = rec->ctx;
   uint8_t dir = rec->write ? FDT_WRITE : FDT_READ;
   uint8_t *e = ctx_fdent(c, rec->fd);
-#ifdef __linux__
+#ifdef PAS_EPOLL
   struct epoll_event ev;
   memset(&ev, 0, sizeof ev);
   ev.events = (rec->write ? EPOLLOUT : EPOLLIN) | EPOLLONESHOT;
@@ -2514,13 +2586,13 @@ static int fd_arm(PasFdWait *rec) {
     if (*e & FDT_EPOLL_REG) {
       /* re-arm the registration a fired wait left disabled; the fd may
        * have been closed and its number reused since: then add */
-      r = epoll_ctl(c->pfd, EPOLL_CTL_MOD, rec->fd, &ev);
+      r = epoll_ctl(EPH(c), EPOLL_CTL_MOD, SOCK(rec->fd), &ev);
       if (r < 0 && errno == ENOENT)
-        r = epoll_ctl(c->pfd, EPOLL_CTL_ADD, rec->fd, &ev);
+        r = epoll_ctl(EPH(c), EPOLL_CTL_ADD, SOCK(rec->fd), &ev);
     } else {
-      r = epoll_ctl(c->pfd, EPOLL_CTL_ADD, rec->fd, &ev);
+      r = epoll_ctl(EPH(c), EPOLL_CTL_ADD, SOCK(rec->fd), &ev);
       if (r < 0 && errno == EEXIST)
-        r = epoll_ctl(c->pfd, EPOLL_CTL_MOD, rec->fd, &ev);
+        r = epoll_ctl(EPH(c), EPOLL_CTL_MOD, SOCK(rec->fd), &ev);
     }
     if (r < 0) {
       *e &= (uint8_t)~FDT_EPOLL_REG;
@@ -2532,11 +2604,11 @@ static int fd_arm(PasFdWait *rec) {
     rec->armed = 1;
     return 0;
   }
-  int afd = dup(rec->fd);
+  int afd = sock_dup(rec->fd);
   if (afd < 0)
     return -1;
-  if (epoll_ctl(c->pfd, EPOLL_CTL_ADD, afd, &ev) < 0) {
-    close(afd);
+  if (epoll_ctl(EPH(c), EPOLL_CTL_ADD, SOCK(afd), &ev) < 0) {
+    sock_close(afd);
     return -1;
   }
 #else
@@ -2552,7 +2624,7 @@ static int fd_arm(PasFdWait *rec) {
     rec->armed = 1;
     return 0;
   }
-  int afd = dup(rec->fd);
+  int afd = sock_dup(rec->fd);
   if (afd < 0)
     return -1;
   EV_SET(&kn, afd, rec->write ? EVFILT_WRITE : EVFILT_READ,
@@ -2716,6 +2788,11 @@ int32_t __pas_net_fd_backend(void) {
  * (plain C can call the variadic fcntl; calls emitted by p3 threads cannot).
  * For unit netasync. */
 void __pas_fd_nonblock(int32_t fd, int32_t on) {
+#ifdef _WIN32
+  u_long v = on ? 1 : 0;
+  ioctlsocket(SOCK(fd), FIONBIO, &v);
+  return;
+#else
   int flags = fcntl(fd, F_GETFL, 0);
   if (flags < 0)
     return;
@@ -2731,6 +2808,7 @@ void __pas_fd_nonblock(int32_t fd, int32_t on) {
     flags &= ~O_NONBLOCK;
 #endif
   fcntl(fd, F_SETFL, flags);
+#endif
 }
 
 /* Called once, from unit netasync's initialization (plain context). */
@@ -2752,7 +2830,11 @@ static void fd_poller_start_once(void) {
 static void fd_poller_start(void) {
   if (fd_poll_started)
     return;
-#ifdef __linux__
+#if defined(_WIN32)
+  WSADATA wsa;
+  WSAStartup(MAKEWORD(2, 2), &wsa);
+  fd_backend = FD_BACKEND_EPOLL;   /* wepoll: each thread makes its own */
+#elif defined(__linux__)
   fd_backend = FD_BACKEND_EPOLL;
   /* Per-thread epoll is the default: readiness reaches the task on its own
    * thread, in batches. The shared io_uring ring (one poller thread hands
@@ -2888,9 +2970,9 @@ int32_t __pas_task_wait_fd2(int32_t fd, int32_t want_write, int32_t deadline_ms)
   PasContext *c = context();
   PasTask *me = c->current;
   if (!me) {
-    struct pollfd pf;
+    pollfd_t pf;
     memset(&pf, 0, sizeof pf);
-    pf.fd = fd;
+    pf.fd = SOCK(fd);
     pf.events = want_write ? POLLOUT : POLLIN;
     int64_t remain = deadline_ms;
     for (;;) {
@@ -2899,7 +2981,7 @@ int32_t __pas_task_wait_fd2(int32_t fd, int32_t want_write, int32_t deadline_ms)
       int poll_ms = 1000;
       if (deadline_ms > 0 && remain < 1000)
         poll_ms = (int)remain;
-      int r = poll(&pf, 1, poll_ms);
+      int r = sock_poll(&pf, 1, poll_ms);
       if (r > 0) {
         int32_t bits = 0;
         if (pf.revents & POLLIN)
@@ -2970,19 +3052,20 @@ int64_t __pas_task_recv(int32_t fd, void *buf, int32_t len) {
   PasContext *c = context();
   PasTask *me = c->current;
   if (!me) {
-    struct pollfd pf;
+    pollfd_t pf;
     memset(&pf, 0, sizeof pf);
-    pf.fd = fd;
+    pf.fd = SOCK(fd);
     pf.events = POLLIN;
     for (;;) {
-      while (poll(&pf, 1, 1000) <= 0)
+      while (sock_poll(&pf, 1, 1000) <= 0)
         ;
-      ssize_t n = recv(fd, buf, len, 0);
-      if (n < 0 && errno == EINTR)
+      int64_t n = recv(SOCK(fd), buf, len, 0);
+      int err = n < 0 ? net_err() : 0;
+      if (n < 0 && err == NET_EINTR)
         continue;
-      if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK))
+      if (n < 0 && err == NET_EAGAIN)
         continue;
-      return n < 0 ? -(int64_t)errno : n;
+      return n < 0 ? -(int64_t)err : n;
     }
   }
 #ifdef __linux__
@@ -2995,18 +3078,19 @@ int64_t __pas_task_recv(int32_t fd, void *buf, int32_t len) {
    * pipelined request, a reply that beat the task back) costs no park —
    * and park on readiness (raises on cancellation) only on EAGAIN */
   for (;;) {
-    ssize_t n = recv(fd, buf, len, 0);
+    int64_t n = recv(SOCK(fd), buf, len, 0);
     if (n > 0)
       return n;
     if (n == 0)
       return 0;
-    if (errno == EINTR)
+    int err = net_err();
+    if (err == NET_EINTR)
       continue;
-    if (errno == EAGAIN || errno == EWOULDBLOCK) {
+    if (err == NET_EAGAIN) {
       __pas_task_wait_fd(fd, 0);
       continue;
     }
-    return -(int64_t)errno;
+    return -(int64_t)err;
   }
 }
 
@@ -3015,22 +3099,23 @@ int64_t __pas_task_send(int32_t fd, void *buf, int32_t len) {
   PasContext *c = context();
   PasTask *me = c->current;
   if (!me) {
-    ssize_t n;
+    int64_t n;
     for (;;) {
-      n = send(fd, buf, len, MSG_NOSIGNAL);
+      n = send(SOCK(fd), buf, len, MSG_NOSIGNAL);
       if (n >= 0)
         return n;
-      if (errno == EINTR)
+      int err = net_err();
+      if (err == NET_EINTR)
         continue;
-      if (errno == EAGAIN || errno == EWOULDBLOCK) {
-        struct pollfd pf;
+      if (err == NET_EAGAIN) {
+        pollfd_t pf;
         memset(&pf, 0, sizeof pf);
-        pf.fd = fd;
+        pf.fd = SOCK(fd);
         pf.events = POLLOUT;
-        poll(&pf, 1, 1000);
+        sock_poll(&pf, 1, 1000);
         continue;
       }
-      return -(int64_t)errno;
+      return -(int64_t)err;
     }
   }
 #ifdef __linux__
@@ -3040,21 +3125,20 @@ int64_t __pas_task_send(int32_t fd, void *buf, int32_t len) {
   }
 #endif
   for (;;) {
-    ssize_t n = send(fd, buf, len, MSG_NOSIGNAL);
+    int64_t n = send(SOCK(fd), buf, len, MSG_NOSIGNAL);
     if (n >= 0)
       return n;
-    if (errno == EINTR)
+    int err = net_err();
+    if (err == NET_EINTR)
       continue;
-    if (errno == EAGAIN || errno == EWOULDBLOCK) {
+    if (err == NET_EAGAIN) {
       __pas_task_wait_fd(fd, 0 + 1);
       continue;
     }
-    return -(int64_t)errno;
+    return -(int64_t)err;
   }
 }
 
-
-#endif /* !_WIN32 */
 
 /*===- Mutexes and wait queues (for unit threading) -------------------------===*/
 
