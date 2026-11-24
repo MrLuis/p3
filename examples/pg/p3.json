@@ -1,0 +1,11 @@
+{
+  "name": "pg",
+  "version": "0.1.0",
+  "description": "PostgreSQL through external C routines (libpq)",
+  "main": "src/pg.pas",
+  "output": "bin/pg",
+  "mode": "objfpc",
+  "libraryPaths": ["/opt/homebrew/opt/libpq/lib"],
+  "optimize": 0,
+  "debug": true
+}
