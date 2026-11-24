@@ -58,8 +58,9 @@ type
     function Count: Integer;
   end;
 
-  { A value read and changed by many tasks, one at a time: each method
-    holds a lock (Increment, Decrement and Add need a numeric T). }
+  { A value read and changed by many tasks, one at a time: Integer and
+    Int64 use atomic operations, any other type holds a lock for each
+    method (Increment, Decrement and Add need a numeric T). }
   generic TAtomic<T> = class(TSharedObject)
   private
     FMutex: Pointer;
@@ -307,6 +308,125 @@ begin
   Result := (Value, Got);
 end;
 
+{ Atomic operations for TAtomic<Integer> and TAtomic<Int64>: the overload
+  whose type is the value's does it with the runtime's atomics and gives
+  True; for any other type the untyped overload is chosen, which gives
+  False, and TAtomic takes its lock (the same way as sequences' KeyHash). }
+function atomic_load32(p: Pointer): LongInt; cdecl; external name '__pas_atomic_load32';
+procedure atomic_store32(p: Pointer; v: LongInt); cdecl; external name '__pas_atomic_store32';
+function atomic_xchg32(p: Pointer; v: LongInt): LongInt; cdecl; external name '__pas_atomic_xchg32';
+function atomic_cas32(p: Pointer; expected, v: LongInt): LongInt; cdecl; external name '__pas_atomic_cas32';
+function atomic_add32(p: Pointer; d: LongInt): LongInt; cdecl; external name '__pas_atomic_add32';
+function atomic_load64(p: Pointer): Int64; cdecl; external name '__pas_atomic_load64';
+procedure atomic_store64(p: Pointer; v: Int64); cdecl; external name '__pas_atomic_store64';
+function atomic_xchg64(p: Pointer; v: Int64): Int64; cdecl; external name '__pas_atomic_xchg64';
+function atomic_cas64(p: Pointer; expected, v: Int64): LongInt; cdecl; external name '__pas_atomic_cas64';
+function atomic_add64(p: Pointer; d: Int64): Int64; cdecl; external name '__pas_atomic_add64';
+
+function FastLoad(var X: Integer; var R: Integer): Boolean; overload;
+begin
+  R := atomic_load32(@X);
+  Result := True;
+end;
+
+function FastLoad(var X: Int64; var R: Int64): Boolean; overload;
+begin
+  R := atomic_load64(@X);
+  Result := True;
+end;
+
+function FastLoad(var X; var R): Boolean; overload;
+begin
+  Result := False;
+end;
+
+function FastStore(var X: Integer; V: Integer): Boolean; overload;
+begin
+  atomic_store32(@X, V);
+  Result := True;
+end;
+
+function FastStore(var X: Int64; V: Int64): Boolean; overload;
+begin
+  atomic_store64(@X, V);
+  Result := True;
+end;
+
+function FastStore(var X; const V): Boolean; overload;
+begin
+  Result := False;
+end;
+
+function FastExchange(var X: Integer; V: Integer; var R: Integer): Boolean; overload;
+begin
+  R := atomic_xchg32(@X, V);
+  Result := True;
+end;
+
+function FastExchange(var X: Int64; V: Int64; var R: Int64): Boolean; overload;
+begin
+  R := atomic_xchg64(@X, V);
+  Result := True;
+end;
+
+function FastExchange(var X; const V; var R): Boolean; overload;
+begin
+  Result := False;
+end;
+
+{ Done: whether it was handled; Swapped: whether the value was Expected }
+function FastCompareExchange(var X: Integer; Expected, V: Integer; var Swapped: Boolean): Boolean; overload;
+begin
+  Swapped := atomic_cas32(@X, Expected, V) <> 0;
+  Result := True;
+end;
+
+function FastCompareExchange(var X: Int64; Expected, V: Int64; var Swapped: Boolean): Boolean; overload;
+begin
+  Swapped := atomic_cas64(@X, Expected, V) <> 0;
+  Result := True;
+end;
+
+function FastCompareExchange(var X; const Expected, V; var Swapped: Boolean): Boolean; overload;
+begin
+  Result := False;
+end;
+
+function FastAdd(var X: Integer; D: Integer; var R: Integer): Boolean; overload;
+begin
+  R := atomic_add32(@X, D);
+  Result := True;
+end;
+
+function FastAdd(var X: Int64; D: Int64; var R: Int64): Boolean; overload;
+begin
+  R := atomic_add64(@X, D);
+  Result := True;
+end;
+
+function FastAdd(var X; const D; var R): Boolean; overload;
+begin
+  Result := False;
+end;
+
+{ one more / one less }
+function FastStep(var X: Integer; Up: Boolean; var R: Integer): Boolean; overload;
+begin
+  if Up then R := atomic_add32(@X, 1) else R := atomic_add32(@X, -1);
+  Result := True;
+end;
+
+function FastStep(var X: Int64; Up: Boolean; var R: Int64): Boolean; overload;
+begin
+  if Up then R := atomic_add64(@X, 1) else R := atomic_add64(@X, -1);
+  Result := True;
+end;
+
+function FastStep(var X; Up: Boolean; var R): Boolean; overload;
+begin
+  Result := False;
+end;
+
 constructor TAtomic.Create(const Value: T);
 begin
   FMutex := pas_mutex_new;
@@ -321,6 +441,8 @@ end;
 
 function TAtomic.Load: T;
 begin
+  if FastLoad(FValue, Result) then
+    exit;
   pas_mutex_lock(FMutex);
   Result := FValue;
   pas_mutex_unlock(FMutex);
@@ -328,6 +450,8 @@ end;
 
 procedure TAtomic.Store(const Value: T);
 begin
+  if FastStore(FValue, Value) then
+    exit;
   pas_mutex_lock(FMutex);
   FValue := Value;
   pas_mutex_unlock(FMutex);
@@ -335,6 +459,8 @@ end;
 
 function TAtomic.Exchange(const Value: T): T;
 begin
+  if FastExchange(FValue, Value, Result) then
+    exit;
   pas_mutex_lock(FMutex);
   Result := FValue;
   FValue := Value;
@@ -343,6 +469,8 @@ end;
 
 function TAtomic.CompareExchange(const Expected, Value: T): Boolean;
 begin
+  if FastCompareExchange(FValue, Expected, Value, Result) then
+    exit;
   pas_mutex_lock(FMutex);
   Result := FValue = Expected;
   if Result then
@@ -352,6 +480,8 @@ end;
 
 function TAtomic.Add(const Delta: T): T;
 begin
+  if FastAdd(FValue, Delta, Result) then
+    exit;
   pas_mutex_lock(FMutex);
   FValue := FValue + Delta;
   Result := FValue;
@@ -360,6 +490,8 @@ end;
 
 function TAtomic.Increment: T;
 begin
+  if FastStep(FValue, True, Result) then
+    exit;
   pas_mutex_lock(FMutex);
   FValue := FValue + 1;
   Result := FValue;
@@ -368,6 +500,8 @@ end;
 
 function TAtomic.Decrement: T;
 begin
+  if FastStep(FValue, False, Result) then
+    exit;
   pas_mutex_lock(FMutex);
   FValue := FValue - 1;
   Result := FValue;

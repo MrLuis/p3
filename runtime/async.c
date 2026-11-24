@@ -3162,6 +3162,23 @@ void __pas_mutex_free(void *m) {
   }
 }
 
+/* Sequentially consistent atomics on 32- and 64-bit integers: unit threading's
+   TAtomic<Integer> and TAtomic<Int64> use them instead of a mutex. */
+int32_t __pas_atomic_load32(int32_t *p) { return __atomic_load_n(p, __ATOMIC_SEQ_CST); }
+void __pas_atomic_store32(int32_t *p, int32_t v) { __atomic_store_n(p, v, __ATOMIC_SEQ_CST); }
+int32_t __pas_atomic_xchg32(int32_t *p, int32_t v) { return __atomic_exchange_n(p, v, __ATOMIC_SEQ_CST); }
+int32_t __pas_atomic_cas32(int32_t *p, int32_t expected, int32_t v) {
+  return __atomic_compare_exchange_n(p, &expected, v, 0, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST);
+}
+int32_t __pas_atomic_add32(int32_t *p, int32_t d) { return __atomic_add_fetch(p, d, __ATOMIC_SEQ_CST); }
+int64_t __pas_atomic_load64(int64_t *p) { return __atomic_load_n(p, __ATOMIC_SEQ_CST); }
+void __pas_atomic_store64(int64_t *p, int64_t v) { __atomic_store_n(p, v, __ATOMIC_SEQ_CST); }
+int64_t __pas_atomic_xchg64(int64_t *p, int64_t v) { return __atomic_exchange_n(p, v, __ATOMIC_SEQ_CST); }
+int32_t __pas_atomic_cas64(int64_t *p, int64_t expected, int64_t v) {
+  return __atomic_compare_exchange_n(p, &expected, v, 0, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST);
+}
+int64_t __pas_atomic_add64(int64_t *p, int64_t d) { return __atomic_add_fetch(p, d, __ATOMIC_SEQ_CST); }
+
 void __pas_mutex_lock(void *m) { pthread_mutex_lock(m); }
 void __pas_mutex_unlock(void *m) { pthread_mutex_unlock(m); }
 
