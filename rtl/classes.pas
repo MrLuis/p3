@@ -962,34 +962,76 @@ end;
 function TStrings.GetDelimited(d, q: char; strict: boolean): string;
 var
   breaks: set of char;
-  i, j: longint;
+  i, j, k, n, total, qs: longint;
   s: string;
-  doQuote: boolean;
+  quote: array of boolean;
 begin
   if strict then
     breaks := [#0, q, d]
   else
     breaks := [#0..' ', q, d];
-  Result := '';
-  for i := 0 to Count - 1 do
+  n := Count;
+  { pass 1: which items need quotes, and the size of the result }
+  quote := nil;
+  SetLength(quote, n);
+  total := 0;
+  for i := 0 to n - 1 do
   begin
     s := Strings[i];
-    doQuote := false;
-    j := 1;
-    while (j <= length(s)) and not doQuote do
+    qs := 0;
+    for j := 1 to length(s) do
     begin
-      doQuote := s[j] in breaks;
-      j := j + 1;
+      if s[j] in breaks then
+        quote[i] := true;
+      if s[j] = q then
+        qs := qs + 1;
     end;
-    if doQuote then
-      Result := Result + q + StringReplace(s, q, q + q, [rfReplaceAll]) + q
-    else
-      Result := Result + s;
-    if i < Count - 1 then
-      Result := Result + d;
+    total := total + length(s);
+    if quote[i] then
+      total := total + 2 + qs;
   end;
-  if (Result = '') and (Count = 1) then
+  if n > 1 then
+    total := total + n - 1;
+  if (total = 0) and (n = 1) then
+  begin
     Result := q + q;
+    exit;
+  end;
+  { pass 2: written once }
+  Result := '';
+  SetLengthRaw(Result, total);
+  k := 1;
+  for i := 0 to n - 1 do
+  begin
+    s := Strings[i];
+    if quote[i] then
+    begin
+      Result[k] := q;
+      k := k + 1;
+      for j := 1 to length(s) do
+      begin
+        Result[k] := s[j];
+        k := k + 1;
+        if s[j] = q then
+        begin
+          Result[k] := q;
+          k := k + 1;
+        end;
+      end;
+      Result[k] := q;
+      k := k + 1;
+    end
+    else if length(s) > 0 then
+    begin
+      moveBytes(@s[1], @Result[k], length(s));
+      k := k + length(s);
+    end;
+    if i < n - 1 then
+    begin
+      Result[k] := d;
+      k := k + 1;
+    end;
+  end;
 end;
 
 procedure TStrings.SetDelimited(const AValue: string; d, q: char; strict: boolean);
@@ -1076,7 +1118,7 @@ const
 var
   f: pointer;
   buf: PChar;
-  got, i, start: int64;
+  got, i, j, start: int64;
   part: string;
   pendingLine, afterCR: boolean;
   c: char;
@@ -1110,26 +1152,34 @@ begin
     while got > 0 do
     begin
       start := 0;
-      for i := 0 to got - 1 do
+      i := 0;
+      while i < got do
       begin
-        c := buf[i];
-        if (c = #10) and afterCR then
+        if afterCR and (buf[i] = #10) then
         begin
           afterCR := false;
-          start := i + 1;
-        end
-        else if (c = #10) or (c = #13) then
-        begin
-          Add(piece(i));
-          part := '';
-          pendingLine := false;
-          afterCR := c = #13;
-          start := i + 1;
-        end
-        else
+          i := i + 1;
+          start := i;
+          continue;
+        end;
+        { the next line break (16 bytes at a time) }
+        j := findLineBreak(buf, longint(i), longint(got));
+        if j > i then
         begin
           afterCR := false;
           pendingLine := true;
+        end;
+        if j >= got then
+          i := got
+        else
+        begin
+          c := buf[j];
+          Add(piece(j));
+          part := '';
+          pendingLine := false;
+          afterCR := c = #13;
+          start := j + 1;
+          i := j + 1;
         end;
       end;
       if start < got then

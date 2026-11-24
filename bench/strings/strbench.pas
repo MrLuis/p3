@@ -18,6 +18,7 @@ var
   Short, Mid, Long, LongUpper, Needle, Head, Lines: string;
   A64, B64, A1K, B1K: string;
   Ctx: THttpContext;
+  DelimList: TStringList;
 
 function Now: Double;
 begin
@@ -52,6 +53,17 @@ procedure ReplaceLong; begin Inc(Sink, Length(StringReplace(Long, 'needle', 'pin
 procedure DupeLong; begin Inc(Sink, Length(DupeString('0123456789abcdef', 8000))); end;
 procedure ReverseLong; begin Inc(Sink, Length(ReverseString(Long))); end;
 procedure PadLong; begin Inc(Sink, Length(AddChar('x', Long, Length(Long) + 100))); end;
+procedure MakeFile;
+var F: text; I: Integer;
+begin
+  Assign(F, 'strbench.tmp');
+  Rewrite(F);
+  for I := 1 to 40000 do
+    Writeln(F, 'line number ', I, ' of the file, with some words in it');
+  Close(F);
+end;
+procedure LoadFile; var L: TStringList; begin L := TStringList.Create; L.LoadFromFile('strbench.tmp'); Inc(Sink, L.Count); L.Free; end;
+procedure Delimited; begin Inc(Sink, Length(DelimList.DelimitedText)); end;
 procedure CmpShort; begin Inc(Sink, CompareStr('content-length', 'content-type')); end;
 procedure Cmp64; begin Inc(Sink, CompareStr(A64, B64)); end;
 procedure Cmp1K; begin Inc(Sink, CompareStr(A1K, B1K)); end;
@@ -114,6 +126,10 @@ begin
   Head := Head + 'Connection: keep-alive'#13#10;
   Head := Head + 'Cookie: session=abcdef0123456789abcdef0123456789; theme=dark'#13#10#13#10;
   Ctx := THttpContext.Create;
+  MakeFile;
+  DelimList := TStringList.Create;
+  for I := 1 to 2000 do
+    if I mod 5 = 0 then DelimList.Add('item "' + IntToStr(I) + '", with quotes') else DelimList.Add('item' + IntToStr(I));
   WriteLn('strings (', Length(Long), ' bytes long)');
   Measure('PosEx short (19 B)', @PosShort, 20000);
   Measure('PosEx mid (61 B)', @PosMid, 20000);
@@ -123,6 +139,8 @@ begin
   Measure('DupeString 128 KB', @DupeLong, 20);
   Measure('ReverseString long', @ReverseLong, 20);
   Measure('AddChar long', @PadLong, 20);
+  Measure('LoadFromFile (40000 lines)', @LoadFile, 5);
+  Measure('DelimitedText (2000 items)', @Delimited, 20);
   Measure('CompareStr short', @CmpShort, 20000);
   Measure('CompareStr 64 B', @Cmp64, 20000);
   Measure('CompareStr 1 KB', @Cmp1K, 5000);
