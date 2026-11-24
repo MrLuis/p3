@@ -141,6 +141,7 @@ type
     function GetRoute: TRouteContext;
     function GetResponseBody: string;
     function BodyLength: Integer;
+    function BuildResponse(WithBytes: Boolean): string;
   public
     Data: TObject;             { the program's, per connection (freed with it) }
     constructor Create;
@@ -179,6 +180,12 @@ type
     procedure Complete;
     { the whole answer: status line, headers, body (none for HEAD) }
     function Response: string;
+    { the status line and headers only (Content-Length is the body's); the
+      body's bytes where they are: for a big answer sent in two writes }
+    function ResponseHead: string;
+    function SendsBody: Boolean;
+    function BodyPtr: PAnsiChar;
+    procedure WriteTo(C: TLoopConn);
     property Status: Integer read FStatus write SetStatus;
     property ContentType: string read FContentType write SetContentType;
     property Answered: Boolean read FAnswered;
@@ -1177,7 +1184,7 @@ begin
   end;
 end;
 
-function THttpContext.Response: string;
+function THttpContext.BuildResponse(WithBytes: Boolean): string;
 const
   CT = 'Content-Type: ';
   CL = 'Content-Length: ';
@@ -1191,7 +1198,7 @@ begin
   { one allocation: the length first, then the pieces }
   if KeepAlive then conn := CONN_KEEP else conn := CONN_CLOSE;
   noBody := (FStatus < 200) or (FStatus = 204) or (FStatus = 304);
-  withBody := not noBody and not FIsHead;
+  withBody := not noBody and not FIsHead and WithBytes;
   code := IntToStr(FStatus);
   text := HttpStatusText(FStatus);
   n := 9 + Length(code) + 1 + Length(text) + 2 + Length(conn) + FHdrLen + 2;
@@ -1239,6 +1246,43 @@ begin
     else
       Put(r, pos, FBody);
   Result := r;
+end;
+
+function THttpContext.Response: string;
+begin
+  Result := BuildResponse(True);
+end;
+
+function THttpContext.ResponseHead: string;
+begin
+  Result := BuildResponse(False);
+end;
+
+function THttpContext.SendsBody: Boolean;
+begin
+  Result := not ((FStatus < 200) or (FStatus = 204) or (FStatus = 304)) and
+            not FIsHead and (FHeadLength < 0) and (BodyLength > 0);
+end;
+
+function THttpContext.BodyPtr: PAnsiChar;
+begin
+  if FBuffered then
+    Result := FBodyBuf
+  else
+    Result := PAnsiChar(FBody);
+end;
+
+{ the answer onto a loop connection: a big body goes from where it is into
+  the output buffer, not through a string made of head + body first }
+procedure THttpContext.WriteTo(C: TLoopConn);
+begin
+  if SendsBody and (BodyLength >= 4096) then
+  begin
+    C.Write(ResponseHead);
+    C.WriteBuf(BodyPtr, BodyLength);
+  end
+  else
+    C.Write(Response);
 end;
 
 { ---- routers ---- }
@@ -1453,7 +1497,7 @@ begin
       c.Hold := true;          { a peer that closes its side still gets it }
       break;
     end;
-    c.Write(Ctx.Response);
+    Ctx.WriteTo(c);
     if Assigned(Ctx.FAfter) then Ctx.FAfter(Ctx);
     if not Ctx.KeepAlive then
       c.Close;
@@ -1487,7 +1531,7 @@ begin
   end;
   c := FConn;
   c.Hold := false;
-  c.Write(Response);
+  WriteTo(c);
   if Assigned(FAfter) then FAfter(Self);
   if not KeepAlive then
     c.Close
@@ -1722,9 +1766,21 @@ begin
         exit;
       end;
       Handler(ctx);
-      resp := ctx.Response;
-      if not SendAll(Sock, PAnsiChar(resp), Length(resp)) then
-        exit;
+      if ctx.SendsBody and (ctx.BodyLength >= 16384) then
+      begin
+        { a big body goes from where it is, after its head }
+        resp := ctx.ResponseHead;
+        if not SendAll(Sock, PAnsiChar(resp), Length(resp)) then
+          exit;
+        if not SendAll(Sock, ctx.BodyPtr, ctx.BodyLength) then
+          exit;
+      end
+      else
+      begin
+        resp := ctx.Response;
+        if not SendAll(Sock, PAnsiChar(resp), Length(resp)) then
+          exit;
+      end;
       if Assigned(After) then After(ctx);
       if not ctx.KeepAlive then
         exit;
