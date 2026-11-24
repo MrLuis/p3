@@ -801,14 +801,11 @@ end;
 
 { ---- segment patterns ---- }
 
+function c_memcmp(A, B: Pointer; N: Int64): LongInt; cdecl; external 'c' name 'memcmp';
+
 function SameBytes(A, B: PAnsiChar; N: Integer): Boolean;
-var
-  i: Integer;
 begin
-  for i := 0 to N - 1 do
-    if (A + i)^ <> (B + i)^ then
-      exit(false);
-  Result := true;
+  Result := (N <= 0) or (c_memcmp(A, B, N) = 0);
 end;
 
 function IsParamName(const S: string): Boolean;
