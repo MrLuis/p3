@@ -56,6 +56,7 @@ end;
 procedure RouteLast; begin App.Serve('GET', '/api/route-with-a-longish-name-299', Req, RC); end;
 procedure RouteMiddle; begin App.Serve('GET', '/api/route-with-a-longish-name-150', Req, RC); end;
 procedure RouteParam; begin App.Serve('GET', '/users/42', Req, RC); end;
+procedure RouteMixed; begin App.Serve('GET', '/files/a-rather-long-file-name-with-many-characters-in-it.tar.gz', Req, RC); end;
 procedure RouteMissing; begin App.Serve('GET', '/api/nothing-here', Req, RC); end;
 
 { the request, delivered in pieces of Piece bytes: every piece is a recv, and
@@ -129,6 +130,7 @@ begin
   RC := TRouteContext.Create;
   for I := 0 to 299 do
     App.Get('/api/route-with-a-longish-name-' + IntToStr(I), procedure(C: TReq; X: TRouteContext) => begin Inc(C.N); end);
+  App.Get('/files/{name}.gz', procedure(C: TReq; X: TRouteContext) => begin Inc(C.N); end);
   App.Get('/users/{id}', procedure(C: TReq; X: TRouteContext) => begin Inc(C.N); end);
   Ctx := THttpContext.Create;
   Frag := 'GET /api/v1/users/12345?fields=name,email HTTP/1.1'#13#10;
@@ -148,6 +150,7 @@ begin
   Measure('literal route, last of 300', @RouteLast, 20000);
   Measure('literal route, middle', @RouteMiddle, 20000);
   Measure('parameter route', @RouteParam, 20000);
+  Measure('{name}.{ext} route', @RouteMixed, 20000);
   Measure('no route', @RouteMissing, 20000);
   WriteLn('parser');
   Measure('head in 64-byte pieces', @FragHead, 2000);

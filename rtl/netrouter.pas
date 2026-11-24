@@ -952,7 +952,7 @@ begin
   at := S + 1;
   while at + L <= E do
   begin
-    if SameBytes(p + at - 1, PAnsiChar(nxt), L) then
+    if ((L = 0) or ((p + at - 1)^ = nxt[1])) and SameBytes(p + at - 1, PAnsiChar(nxt), L) then
       if (part^.Rx = nil) or part^.Rx.Matches(p + S - 1, at - S) then
       begin
         Ctx.PushParam(part^.Text, S, at - S);
