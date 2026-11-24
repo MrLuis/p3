@@ -97,6 +97,7 @@ begin
   Show('file missing', 'GET /files/none.txt HTTP/1.1' + NL + 'Connection: close' + NL + NL);
   Show('file ..', 'GET /files/%2e%2e/secret HTTP/1.1' + NL + 'Connection: close' + NL + NL);
   Show('file twice-encoded', 'GET /files/no%2574e.txt HTTP/1.1' + NL + 'Connection: close' + NL + NL);
+  Show('headers and writes', 'GET /hdr HTTP/1.1' + NL + 'Connection: close' + NL + NL);
   Show('HEAD', 'HEAD /hello/h HTTP/1.1' + NL + 'Connection: close' + NL + NL);
   Show('404', 'GET /nowhere HTTP/1.1' + NL + 'Connection: close' + NL + NL);
   Show('405', 'DELETE /hello/x HTTP/1.1' + NL + 'Connection: close' + NL + NL);
@@ -135,6 +136,13 @@ begin
   Router.Post('/echo', procedure(C: THttpContext; R: TRouteContext) =>
     C.Text(200, 'got ' + C.Body));
   Router.Get('/files/*', FileServer('site'));
+  Router.Get('/hdr', procedure(C: THttpContext; R: TRouteContext) => begin
+    C.SetHeader('allow', 'GET');
+    C.AddHeader('X-B', '2');
+    C.SetHeader('Allow', 'POST');     { replaces the first, whatever the case }
+    C.Write('ab');
+    C.Write('cd');
+  end);
   Router.Head('/hello/{name}', procedure(C: THttpContext; R: TRouteContext) =>
     C.Text(200, 'hello ' + R.URLParam('name')));
 

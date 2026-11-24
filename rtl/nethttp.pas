@@ -116,8 +116,16 @@ type
     { the answer }
     FStatus: Integer;
     FContentType: string;
-    FHeaders: string;          { extra header lines, each ending in CRLF }
+    { extra header lines, each ending in CRLF (a buffer grown by doubling,
+      so that adding a header does not copy the others) }
+    FHdr: PAnsiChar;
+    FHdrLen, FHdrCap: Integer;
+    { the body: the string Send was given, or (once Write was called) the
+      buffer FBodyBuf, grown by doubling }
     FBody: string;
+    FBodyBuf: PAnsiChar;
+    FBodyLen, FBodyCap: Integer;
+    FBuffered: Boolean;
     FAnswered: Boolean;
     FClose: Boolean;
     FRoute: TRouteContext;
@@ -130,6 +138,8 @@ type
     procedure SetStatus(Code: Integer);
     procedure SetContentType(const Value: string);
     function GetRoute: TRouteContext;
+    function GetResponseBody: string;
+    function BodyLength: Integer;
   public
     Data: TObject;             { the program's, per connection (freed with it) }
     constructor Create;
@@ -171,7 +181,7 @@ type
     property Status: Integer read FStatus write SetStatus;
     property ContentType: string read FContentType write SetContentType;
     property Answered: Boolean read FAnswered;
-    property ResponseBody: string read FBody;
+    property ResponseBody: string read GetResponseBody;
     property Closing: Boolean read FClose;
     property Deferred: Boolean read FDeferred;
     { the loop engine's connection (nil on the async engine) }
@@ -749,6 +759,8 @@ end;
 
 destructor THttpContext.Destroy;
 begin
+  if FHdr <> nil then FreeMem(FHdr);
+  if FBodyBuf <> nil then FreeMem(FBodyBuf);
   Data.Free;
   FRoute.Free;
   inherited Destroy;
@@ -763,6 +775,14 @@ end;
 
 procedure THttpContext.Shrink;
 begin
+  if FHdr <> nil then FreeMem(FHdr);
+  FHdr := nil;
+  FHdrLen := 0;
+  FHdrCap := 0;
+  if FBodyBuf <> nil then FreeMem(FBodyBuf);
+  FBodyBuf := nil;
+  FBodyLen := 0;
+  FBodyCap := 0;
   { an idle keep-alive connection keeps its context: make it small }
   FRoute.Free;
   FRoute := nil;
@@ -781,8 +801,10 @@ procedure THttpContext.ResetAnswer;
 begin
   FStatus := 200;
   FContentType := '';
-  FHeaders := '';
+  FHdrLen := 0;                { (the buffers are kept for the next answer) }
   FBody := '';
+  FBodyLen := 0;
+  FBuffered := false;
   FAnswered := false;
   FClose := false;
 end;
@@ -960,36 +982,105 @@ begin
   FAnswered := true;
 end;
 
+{ S at the end of the buffer P (Len bytes of Cap), growing it by doubling }
+procedure BufAppend(var P: PAnsiChar; var Len, Cap: Integer; const S: string);
+var
+  n: Integer;
+begin
+  if S = '' then
+    exit;
+  if Len + Length(S) > Cap then
+  begin
+    n := Cap;
+    if n < 256 then n := 256;
+    while n < Len + Length(S) do
+      n := n * 2;
+    ReallocMem(P, n);
+    Cap := n;
+  end;
+  Move(S[1], (P + Len)^, Length(S));
+  Len := Len + Length(S);
+end;
+
+{ the header line that starts with Low (lowercase, with its colon) in
+  P[0..Len): where it starts, and its length with the CRLF; -1: none }
+function FindHeaderLine(P: PAnsiChar; Len: Integer; const Low: string;
+                        out LineLen: Integer): Integer;
+var
+  i, e: Integer;
+begin
+  i := 0;
+  while i < Len do
+  begin
+    e := i;
+    while (e < Len) and ((P + e)^ <> #13) do
+      Inc(e);
+    if (e - i >= Length(Low)) and SameNoCase(P + i, Length(Low), Low) then
+    begin
+      LineLen := e + 2 - i;
+      exit(i);
+    end;
+    i := e + 2;
+  end;
+  Result := -1;
+end;
+
 procedure THttpContext.SetHeader(const Name, Value: string);
 var
-  low, line: string;
-  p, e: Integer;
+  at, n: Integer;
 begin
   { drop a line of the same name, then add }
-  low := LowerCase(Name) + ':';
-  p := Pos(CRLF + low, CRLF + LowerCase(FHeaders));
-  if p > 0 then
+  at := FindHeaderLine(FHdr, FHdrLen, LowerCase(Name) + ':', n);
+  if at >= 0 then
   begin
-    e := p;
-    while (e <= Length(FHeaders)) and (FHeaders[e] <> #13) do
-      inc(e);
-    Delete(FHeaders, p, e - p + 2);
+    Move((FHdr + at + n)^, (FHdr + at)^, FHdrLen - at - n);
+    FHdrLen := FHdrLen - n;
   end;
-  line := Name + ': ' + Value + CRLF;
-  FHeaders := FHeaders + line;
+  BufAppend(FHdr, FHdrLen, FHdrCap, Name);
+  BufAppend(FHdr, FHdrLen, FHdrCap, ': ');
+  BufAppend(FHdr, FHdrLen, FHdrCap, Value);
+  BufAppend(FHdr, FHdrLen, FHdrCap, CRLF);
   FAnswered := true;
 end;
 
 procedure THttpContext.AddHeader(const Name, Value: string);
 begin
-  FHeaders := FHeaders + Name + ': ' + Value + CRLF;
+  BufAppend(FHdr, FHdrLen, FHdrCap, Name);
+  BufAppend(FHdr, FHdrLen, FHdrCap, ': ');
+  BufAppend(FHdr, FHdrLen, FHdrCap, Value);
+  BufAppend(FHdr, FHdrLen, FHdrCap, CRLF);
   FAnswered := true;
 end;
 
 procedure THttpContext.Write(const S: string);
 begin
-  FBody := FBody + S;
+  if not FBuffered then
+  begin
+    { what Send gave comes first }
+    FBodyLen := 0;
+    BufAppend(FBodyBuf, FBodyLen, FBodyCap, FBody);
+    FBody := '';
+    FBuffered := true;
+  end;
+  BufAppend(FBodyBuf, FBodyLen, FBodyCap, S);
   FAnswered := true;
+end;
+
+function THttpContext.BodyLength: Integer;
+begin
+  if FBuffered then
+    Result := FBodyLen
+  else
+    Result := Length(FBody);
+end;
+
+function THttpContext.GetResponseBody: string;
+begin
+  if not FBuffered then
+    exit(FBody);
+  SetLength(Result, FBodyLen);
+  if FBodyLen > 0 then
+    Move(FBodyBuf^, Result[1], FBodyLen);
 end;
 
 procedure THttpContext.Send(Code: Integer; const CType, Content: string);
@@ -997,6 +1088,7 @@ begin
   FStatus := Code;
   FContentType := CType;
   FBody := Content;
+  FBuffered := false;
   FAnswered := true;
 end;
 
@@ -1062,16 +1154,16 @@ begin
   withBody := not noBody and not FIsHead;
   code := IntToStr(FStatus);
   text := HttpStatusText(FStatus);
-  n := 9 + Length(code) + 1 + Length(text) + 2 + Length(conn) + Length(FHeaders) + 2;
+  n := 9 + Length(code) + 1 + Length(text) + 2 + Length(conn) + FHdrLen + 2;
   if not noBody then
   begin
-    len := IntToStr(Length(FBody));
+    len := IntToStr(BodyLength);
     n := n + Length(CL) + Length(len) + 2;
     if FContentType <> '' then
       n := n + Length(CT) + Length(FContentType) + 2;
   end;
   if withBody then
-    n := n + Length(FBody);
+    n := n + BodyLength;
   SetLength(r, n);
   pos := 1;
   Put(r, pos, 'HTTP/1.1 ');
@@ -1092,10 +1184,20 @@ begin
     Put(r, pos, CRLF);
   end;
   Put(r, pos, conn);
-  Put(r, pos, FHeaders);
+  if FHdrLen > 0 then
+  begin
+    Move(FHdr^, r[pos], FHdrLen);
+    pos := pos + FHdrLen;
+  end;
   Put(r, pos, CRLF);
   if withBody then
-    Put(r, pos, FBody);
+    if FBuffered then
+    begin
+      if FBodyLen > 0 then
+        Move(FBodyBuf^, r[pos], FBodyLen);
+    end
+    else
+      Put(r, pos, FBody);
   Result := r;
 end;
 
