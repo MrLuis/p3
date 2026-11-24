@@ -96,6 +96,7 @@ begin
   Show('file index', 'GET /files/ HTTP/1.1' + NL + 'Connection: close' + NL + NL);
   Show('file missing', 'GET /files/none.txt HTTP/1.1' + NL + 'Connection: close' + NL + NL);
   Show('file ..', 'GET /files/%2e%2e/secret HTTP/1.1' + NL + 'Connection: close' + NL + NL);
+  Show('file twice-encoded', 'GET /files/no%2574e.txt HTTP/1.1' + NL + 'Connection: close' + NL + NL);
   Show('HEAD', 'HEAD /hello/h HTTP/1.1' + NL + 'Connection: close' + NL + NL);
   Show('404', 'GET /nowhere HTTP/1.1' + NL + 'Connection: close' + NL + NL);
   Show('405', 'DELETE /hello/x HTTP/1.1' + NL + 'Connection: close' + NL + NL);

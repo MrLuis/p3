@@ -1188,7 +1188,7 @@ begin
     if not RC.HasParam('*', rest) then
       rest := C.Path
     else
-      rest := '/' + HttpUrlDecode(rest);
+      rest := '/' + rest; { C.Path is already decoded: decoding again would read %2574 as t }
     if not HttpSafePath(rest) then
     begin
       C.Text(403, '403 forbidden' + #10);

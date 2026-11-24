@@ -7,6 +7,7 @@ loop  file: 200 (close) a note
 loop  file index: 200 (close) <p>index</p>
 loop  file missing: 404 (close) 404 page not found
 loop  file ..: 403 (close) 403 forbidden
+loop  file twice-encoded: 404 (close) 404 page not found
 loop  HEAD: 200 (close)
 loop  404: 404 (close) 404 page not found
 loop  405: 405 [Allow: GET, HEAD] (close) 405 method not allowed
@@ -20,8 +21,9 @@ async file: 200 (close) a note
 async file index: 200 (close) <p>index</p>
 async file missing: 404 (close) 404 page not found
 async file ..: 403 (close) 403 forbidden
+async file twice-encoded: 404 (close) 404 page not found
 async HEAD: 200 (close)
 async 404: 404 (close) 404 page not found
 async 405: 405 [Allow: GET, HEAD] (close) 405 method not allowed
 async 400 then closed: 200 hello ok | 400 (close) Bad Request
-answers (After): 32
+answers (After): 34
