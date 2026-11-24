@@ -3144,6 +3144,7 @@ int64_t __pas_task_send(int32_t fd, void *buf, int32_t len) {
 
 typedef struct PasWaitQueue {
   int lk;
+  int nwait;          /* waiters in the list: a signal with none is skipped */
   PasWaiter *waiters;
 } PasWaitQueue;
 
@@ -3216,6 +3217,7 @@ void __pas_waitq_wait(void *qp, void *m) {
   PasWaiter w = {NULL, me, me ? NULL : c, 0};
   spin_lock(&q->lk);
   add_waiter(&q->waiters, &w);
+  __atomic_add_fetch(&q->nwait, 1, __ATOMIC_SEQ_CST);
   spin_unlock(&q->lk);
   int cancelled = 0;
   if (!me) {
@@ -3230,6 +3232,7 @@ void __pas_waitq_wait(void *qp, void *m) {
   }
   spin_lock(&q->lk);
   remove_waiter(&q->waiters, &w);
+  __atomic_sub_fetch(&q->nwait, 1, __ATOMIC_SEQ_CST);
   if (cancelled && w.signaled)
     waitq_signal_locked(q); /* (a signal taken on the way out: pass it on) */
   spin_unlock(&q->lk);
@@ -3238,8 +3241,13 @@ void __pas_waitq_wait(void *qp, void *m) {
     raise_cancelled();
 }
 
+/* Callers hold the mutex that the waiters released in __pas_waitq_wait, and a
+ * waiter counts itself in before it releases it: nwait = 0 here means nobody
+ * waits, and the spin lock and the list walk can be skipped. */
 void __pas_waitq_signal(void *qp) {
   PasWaitQueue *q = qp;
+  if (__atomic_load_n(&q->nwait, __ATOMIC_SEQ_CST) == 0)
+    return;
   spin_lock(&q->lk);
   waitq_signal_locked(q);
   spin_unlock(&q->lk);
