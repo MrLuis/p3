@@ -79,7 +79,11 @@ examples are in the reference.
   `or`, `xor`, `not`, `VectorLoad`/`VectorStore` at any address and
   `VectorMask` (a bit per lane); with `PopCnt`, `CountTrailingZeros` and
   `CountLeadingZeros` a byte scan is a load, a compare, a mask and a count
-  (SSE2, NEON).
+  (SSE2, NEON); `T(v)` converts vectors lane by lane. The unit library
+  scans long strings 16 bytes at a time with them: substring search
+  (`PosEx`, `StringReplace`), `CompareStr`, `CompareText`, `UpperCase`,
+  `LowerCase`, `TStrings.Text`, nethttp's request parsing, and unit json
+  (see [`bench/strings`](bench/strings/README.md)).
 - **Reachability pruning**: code nothing refers to is left out of the
   executable, also at `-O0`.
 - **Attributes, partial types and source generators**: `[Serializable]`
