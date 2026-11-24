@@ -638,12 +638,24 @@ var
   m: cint;
   n: Int64;
 begin
-  if Max > sizeof(one) then
-    m := sizeof(one)
+  if Max > 65536 then
+    m := 65536
   else if Max > 0 then
     m := Max
   else
     m := 1;
+  if m > sizeof(one) then
+  begin
+    { a big read goes straight into the result (then cut to what came) }
+    SetLength(out, m);
+    n := pas_task_recv(S, @out[0], m);
+    if n < 0 then
+      raise ENetError.Create('net: read failed (' + IntToStr(-n) + ')');
+    if n < m then
+      SetLength(out, n);
+    Result := out;
+    exit;
+  end;
   n := pas_task_recv(S, @one, m);
   if n < 0 then
     raise ENetError.Create('net: read failed (' + IntToStr(-n) + ')');
