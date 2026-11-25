@@ -14,6 +14,16 @@ foreach(unit ${P3_RTL_UNITS})
   list(APPEND P3_RTL_SOURCES ${P3_RTL_DIR}/${unit}.pas)
 endforeach()
 
+# Include files of the units (before the objects, which depend on them).
+foreach(inc json_pow5.inc)
+  add_custom_command(
+    OUTPUT ${P3_RTL_DIR}/${inc}
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            ${CMAKE_CURRENT_SOURCE_DIR}/${inc} ${P3_RTL_DIR}/${inc}
+    DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/${inc})
+  list(APPEND P3_RTL_SOURCES ${P3_RTL_DIR}/${inc})
+endforeach()
+
 set(P3_RTL_OBJECTS)
 foreach(unit ${P3_RTL_UNITS})
   add_custom_command(
@@ -23,16 +33,6 @@ foreach(unit ${P3_RTL_UNITS})
     DEPENDS p3 ${P3_RTL_SOURCES}
             $<$<TARGET_EXISTS:pascalrt-ir>:${PROJECT_BINARY_DIR}/lib/libpascalrt.ll>)
   list(APPEND P3_RTL_OBJECTS ${P3_RTL_DIR}/${unit}.o)
-endforeach()
-
-# Include files of the units.
-foreach(inc json_pow5.inc)
-  add_custom_command(
-    OUTPUT ${P3_RTL_DIR}/${inc}
-    COMMAND ${CMAKE_COMMAND} -E copy_if_different
-            ${CMAKE_CURRENT_SOURCE_DIR}/${inc} ${P3_RTL_DIR}/${inc}
-    DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/${inc})
-  list(APPEND P3_RTL_SOURCES ${P3_RTL_DIR}/${inc})
 endforeach()
 
 # Source generators of the library (--generator=NAME, "generators":
