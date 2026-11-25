@@ -84,6 +84,25 @@ sudo update-alternatives --set x86_64-w64-mingw32-gcc \
 
 See **Cross-compiling** under [Compiler parameters](#compiler-parameters).
 
+### Installing
+
+After building:
+
+```sh
+cmake --install build --prefix <dir>
+```
+
+This writes the C++ compiler to `<dir>/bin/p3`, the runtime and unit library
+to `<dir>/lib` (with the Windows runtime, if it was built), and the licenses
+to `<dir>/share/doc/p3`. p3 finds its runtime and units relative to its own
+location, so the directory can be moved; keep its layout. The self-hosted
+compiler is not installed.
+
+The installed p3 still needs the shared LLVM library it was built against
+(unless configured with `-DP3_LINK_LLVM_DYLIB=OFF`, which is untested), and
+a C compiler to link programs. It is not a self-contained package for a
+machine without them.
+
 ## Usage
 
 ```sh

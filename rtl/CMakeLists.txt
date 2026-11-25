@@ -49,3 +49,19 @@ foreach(gen ${P3_RTL_GENERATORS})
 endforeach()
 
 add_custom_target(rtl ALL DEPENDS ${P3_RTL_SOURCES} ${P3_RTL_OBJECTS})
+
+# `cmake --install`: the unit library as it is in the build directory. Each
+# unit's .p3i (not written for every unit) and .ll are by-products of
+# compiling its object, for -fseparate-units. Files are named one by one, so
+# that leftovers in an old build directory are not installed.
+foreach(unit ${P3_RTL_UNITS})
+  install(FILES ${P3_RTL_DIR}/${unit}.pas ${P3_RTL_DIR}/${unit}.o
+          DESTINATION lib/pascal)
+  install(FILES ${P3_RTL_DIR}/${unit}.p3i ${P3_RTL_DIR}/${unit}.ll
+          DESTINATION lib/pascal OPTIONAL)
+endforeach()
+install(FILES ${P3_RTL_DIR}/json_pow5.inc DESTINATION lib/pascal)
+foreach(gen ${P3_RTL_GENERATORS})
+  install(FILES ${P3_RTL_DIR}/generators/${gen}.pas
+          DESTINATION lib/pascal/generators)
+endforeach()

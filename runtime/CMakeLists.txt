@@ -33,6 +33,7 @@ set_target_properties(pascalrt PROPERTIES
   C_STANDARD 11
   POSITION_INDEPENDENT_CODE ON
   ARCHIVE_OUTPUT_DIRECTORY ${PROJECT_BINARY_DIR}/lib)
+install(TARGETS pascalrt ARCHIVE DESTINATION lib)
 
 # libpascalrt.ll: the runtime as LLVM IR, which p3 links into optimized
 # programs so that small runtime functions are inlined (optimization.md,
@@ -112,6 +113,7 @@ if(NOT P3_RT_IR_PROBLEM)
     DEPENDS ${P3_RT_IR_PARTS} ${PROJECT_SOURCE_DIR}/utils/gen-runtime-ir.py
     VERBATIM)
   add_custom_target(pascalrt-ir ALL DEPENDS ${PROJECT_BINARY_DIR}/lib/libpascalrt.ll)
+  install(FILES ${PROJECT_BINARY_DIR}/lib/libpascalrt.ll DESTINATION lib)
   add_dependencies(pascalrt pascalrt-ir)
 else()
   # A file of an earlier configuration would be out of date.
@@ -169,5 +171,11 @@ foreach(triple ${P3_CROSS_LIST})
     DEPENDS ${objs}
     VERBATIM)
   add_custom_target(pascalrt-${triple} ALL DEPENDS ${lib})
+  install(FILES ${lib} DESTINATION lib/${triple})
+  if(triple MATCHES "mingw|windows")
+    # wepoll's license goes with the library that contains it.
+    install(FILES ${CMAKE_CURRENT_SOURCE_DIR}/wepoll/LICENSE
+            DESTINATION share/doc/p3 RENAME LICENSE.wepoll)
+  endif()
   message(STATUS "p3 runtime for ${triple}: ${P3_CROSS_CC_${triple}}")
 endforeach()

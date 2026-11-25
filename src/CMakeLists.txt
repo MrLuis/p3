@@ -49,3 +49,11 @@ target_link_libraries(p3Driver PUBLIC p3Parse p3Sema p3CodeGen)
 add_executable(p3 driver/main.cpp)
 target_link_libraries(p3 PRIVATE p3Driver)
 set_target_properties(p3 PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${PROJECT_BINARY_DIR}/bin)
+
+# `cmake --install`: bin/p3, with the runtime and units in ../lib, where it
+# looks for them (hence these names, not GNUInstallDirs' lib64 and such).
+# The installed p3 keeps the path to a shared libLLVM that is outside the
+# system's search path (Homebrew's, say).
+set_target_properties(p3 PROPERTIES INSTALL_RPATH_USE_LINK_PATH ON)
+install(TARGETS p3 RUNTIME DESTINATION bin)
+install(FILES ${PROJECT_SOURCE_DIR}/LICENSE DESTINATION share/doc/p3)

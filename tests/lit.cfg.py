@@ -5,6 +5,8 @@
 #   %p3            the compiler under test, ignoring project files (p3.json)
 #   %p3-project    the compiler under test, reading project files
 #   %p3-unittests  the C++ unit test binary
+#   %cmake         the CMake that configured the build
+#   %build-dir     the build directory
 #   FileCheck, not  from the LLVM tools directory
 import os
 import sys
@@ -53,6 +55,9 @@ else:
 if not selfhost_flags:
     selfhost_flags = "--missing-selfhost-flags-rerun-cmake"
 config.substitutions.append(("%selfhost-flags", selfhost_flags))
+# %cmake: unset in a build directory configured before it was added.
+config.substitutions.append(("%cmake", getattr(config, "cmake", "cmake")))
+config.substitutions.append(("%build-dir", config.p3_obj_root))
 # %p3-runtime-lib: this build's runtime, for compilers not installed next
 # to it (before %p3, which is a prefix of it).
 config.substitutions.append(

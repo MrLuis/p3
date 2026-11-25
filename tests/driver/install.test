@@ -1,0 +1,25 @@
+; `cmake --install` makes a self-contained layout: a copy moved elsewhere
+; finds its own runtime and unit library. The variables that would point it
+; back at the build directory are unset. (The installed compiler is always
+; the C++ p3, whatever P3_UNDER_TEST says.)
+; RUN: rm -rf %t.dir && mkdir -p %t.dir
+; RUN: %cmake --install %build-dir --prefix %t.dir/prefix > %t.dir/install.log
+; RUN: mv %t.dir/prefix %t.dir/moved
+; RUN: ls %t.dir/moved/lib/libpascalrt.a %t.dir/moved/lib/pascal/sysutils.pas %t.dir/moved/lib/pascal/sysutils.o %t.dir/moved/lib/pascal/json_pow5.inc %t.dir/moved/lib/pascal/generators/json.pas %t.dir/moved/share/doc/p3/LICENSE
+
+; A hello program.
+; RUN: env -u P3_UNIT_DIR -u P3_RUNTIME_LIB -u P3_RUNTIME_IR %t.dir/moved/bin/p3 --no-project %S/Inputs/hello.pas -o %t.dir/hello
+; RUN: %t.dir/hello | FileCheck --check-prefix=HELLO %s
+; HELLO: Hello, World!
+
+; Library units, compiled with the program and linked from their installed
+; objects.
+; RUN: env -u P3_UNIT_DIR -u P3_RUNTIME_LIB -u P3_RUNTIME_IR %t.dir/moved/bin/p3 --no-project --mode=objfpc -O2 %S/Inputs/install-units.pas -o %t.dir/units
+; RUN: %t.dir/units | FileCheck --check-prefix=UNITS %s
+; RUN: env -u P3_UNIT_DIR -u P3_RUNTIME_LIB -u P3_RUNTIME_IR %t.dir/moved/bin/p3 --no-project --mode=objfpc -O2 -fseparate-units %S/Inputs/install-units.pas -o %t.dir/separate
+; RUN: %t.dir/separate | FileCheck --check-prefix=UNITS %s
+; UNITS: INSTALLED moved
+
+; Tasks.
+; RUN: env -u P3_UNIT_DIR -u P3_RUNTIME_LIB -u P3_RUNTIME_IR %t.dir/moved/bin/p3 --no-project --mode=objfpc -O2 %S/../run/async.pas -o %t.dir/async
+; RUN: %t.dir/async | diff - %S/../run/async.expected
