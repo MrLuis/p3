@@ -1291,7 +1291,8 @@ begin
   getNameConstant := getStringConstant(n^.chars, 0, n^.len);
 end;
 
-{ IRBuilder::CreateGlobalString: a NUL-terminated private constant. }
+{ IRBuilder::CreateGlobalString: a NUL-terminated private constant, with
+  the data layout's preferred alignment of i8 (4 on AArch64 Linux). }
 function globalString(p: PCharArray; start, count: int64; const name: string): TV;
 var
   b: TBuf;
@@ -1300,7 +1301,8 @@ begin
   bufAddChars(b, p, start, count);
   bufAddChar(b, #0);
   globalString := irGlobal(name, 'private', irArray(count + 1, irI8),
-                           irConstBytes(b.data, 0, b.len), true, true, false, 1);
+                           irConstBytes(b.data, 0, b.len), true, true, false,
+                           longint(irInt(8)^.prefAlign));
   bufFree(b);
 end;
 

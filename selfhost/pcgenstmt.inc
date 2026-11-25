@@ -691,8 +691,11 @@ end;
 function isFreshAnsiCall(value: PNode): boolean;
 begin
   isFreshAnsiCall := false;
-  if not (value^.kind in [nkCall, nkIndirectCall]) or (value^.typ = nil) or
-     (value^.typ^.kind <> tyAnsiString) or value^.isVarCast or
+  if (value^.typ = nil) or (value^.typ^.kind <> tyAnsiString) then
+    exit;
+  if value^.kind = nkInherited then
+    exit(true);
+  if not (value^.kind in [nkCall, nkIndirectCall]) or value^.isVarCast or
      (value^.methodCast <> 0) then
     exit;
   if (value^.calleeExpr <> nil) or (value^.callValue <> nil) then

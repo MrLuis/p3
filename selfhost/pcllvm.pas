@@ -456,10 +456,12 @@ begin
     else
       LLVMPassBuilderOptionsSetSLPVectorization(opts, 0);
     LLVMPassBuilderOptionsSetLoopUnrolling(opts, 1);
+    { LLVM 23 has no Os and Oz pipelines: as the C++ p3, -Os runs O2's
+      and -Oz O1's (the definitions are marked optsize or minsize) }
     if sizeLevel = 1 then
-      e := LLVMRunPasses(m, cstr('default<Os>', passes), tm, opts)
+      e := LLVMRunPasses(m, cstr('default<O2>', passes), tm, opts)
     else if sizeLevel = 2 then
-      e := LLVMRunPasses(m, cstr('default<Oz>', passes), tm, opts)
+      e := LLVMRunPasses(m, cstr('default<O1>', passes), tm, opts)
     else
       e := LLVMRunPasses(m, cstr('default<O' + intToStr(opt) + '>', passes), tm, opts);
     if e <> nil then

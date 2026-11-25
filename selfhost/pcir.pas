@@ -1236,11 +1236,13 @@ begin
     if ok and ((fpBits(back) = b) or ((e = 0) and (mant = 0))) then
       exit(s);
   end;
+  { all 16 digits: LLVM rejects a shorter f0x literal }
   s := '';
-  repeat
+  for e := 1 to 16 do
+  begin
     s := hexDigit(longint(b and 15)) + s;
     b := b shr 4;
-  until b = 0;
+  end;
   doubleText := 'f0x' + s;
 end;
 

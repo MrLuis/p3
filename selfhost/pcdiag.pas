@@ -274,10 +274,10 @@ begin
   end;
   {$R+}
   line := lo + 1;
-  { column: bytes since the last '\n' or '\r' }
+  { column: bytes since the last '\n', as LLVM 23's SourceMgr counts it }
   p := off;
   {$R-}
-  while (p > 0) and not isLineBreak(f^.data^[p - 1]) do
+  while (p > 0) and (f^.data^[p - 1] <> #10) do
     p := p - 1;
   {$R+}
   col := longint(off - p) + 1;
@@ -426,8 +426,13 @@ begin
         caret.data^[i] := '~';
     {$R+}
   end;
-  colNo := off - lineStart;
+  { the caret is at the column of the message's header, counted from the
+    last '\n' even when a bare '\r' starts the line shown (as LLVM 23) }
+  colNo := off;
   {$R-}
+  while (colNo > 0) and (data^[colNo - 1] <> #10) do
+    colNo := colNo - 1;
+  colNo := off - colNo;
   if colNo <= numColumns then
     caret.data^[colNo] := '^'
   else

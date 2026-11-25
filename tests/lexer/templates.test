@@ -58,9 +58,9 @@
 ; must end.
 ; RUN: printf 'a `x\r\n  y\rz` `open ${b} never closed\n' > %t.pas
 ; RUN: not %p3 --mode=tp --emit-tokens %t.pas 2>&1 | FileCheck --check-prefix=ENDS %s
-; (The bare CR inside line 2 splits the source's lines for the
-; diagnostics, as llvm::SourceMgr's line and column accounting does
-; since LLVM 22: the positions after it shift against LLVM 19's.)
+; (The bare CR inside line 2 ends the source line a diagnostic shows, but
+; columns count from the last \n: llvm::SourceMgr's accounting since
+; LLVM 22, unlike LLVM 19's.)
 ; ENDS: 2:17: error: unterminated template string
 ; ENDS: 1:3 string_literal '`x
 ; ENDS: value="x\n  y\nz"

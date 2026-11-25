@@ -13,6 +13,9 @@
 ; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-llvm --extra="-o -" --modes=tp --ref p3 --new %t.p3 %S/../../selfhost/p3.pas | FileCheck %s
 ; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-llvm --extra="-g -o -" --modes=iso --ref p3 --new %t.p3 %t.gen/iso | FileCheck %s
 ; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-llvm --extra="-g -o -" --modes=tp --ref p3 --new %t.p3 %t.gen/tp | FileCheck %s
+; A target whose data layout aligns strings differently (AArch64 Linux:
+; i8:8:32), checked from any host.
+; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-llvm --extra="--target=aarch64-unknown-linux-gnu -o -" --ref p3 --new %t.p3 %S/../run %S/../codegen/Inputs | FileCheck %s
 ; Classes (--mode=objfpc), with and without -g, and with units compiled
 ; whole and separately.
 ; RUN: python3 %S/../../utils/selfhost-diff.py --action=--emit-llvm --extra="-I %S/../run/Inputs/classes/lib -o -" --modes=objfpc --ref p3 --new %t.p3 %S/../run/classes.pas %S/../run/classes2.pas %S/../run/Inputs/classes %S/../codegen/Inputs/classes.pas | FileCheck %s
