@@ -1,0 +1,7 @@
+; The objects of p3's own units are built for the host: -fseparate-units for
+; another target stops with that, before the linker would reject them.
+; (Without -fseparate-units the units are compiled with the program, for any
+; target.)
+; RUN: not %p3 --no-project --mode=objfpc -O2 -fseparate-units --target=x86_64-w64-mingw32 %S/Inputs/install-units.pas -o %t.exe 2>&1 | FileCheck %s
+; CHECK: error: unit '{{[a-z]+}}' of p3's library is compiled for the host only; build for '{{.*}}' without -fseparate-units
+; CHECK-NOT: file format not recognized

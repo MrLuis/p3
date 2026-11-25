@@ -33,7 +33,7 @@ limit() {
 }
 
 # Nothing may point p3 anywhere but into its own package.
-unset P3_UNIT_DIR P3_RUNTIME_LIB P3_RUNTIME_IR P3_CC
+unset P3_UNIT_DIR P3_RUNTIME_LIB P3_RUNTIME_IR P3_CC  # (not P3_CROSS_CC)
 
 if ls -d /usr/lib/llvm* /usr/lib/*/libLLVM* >/dev/null 2>&1; then
   echo "package-smoke: note: this system has LLVM installed"
@@ -78,5 +78,23 @@ for program in async netasync-echo; do
       fail "$program's output ($opt)"
   done
 done
+
+# Windows programs, when MinGW-w64 is installed (or P3_CROSS_CC names it):
+# the package's Windows runtime, and the library units compiled for Windows.
+if [ -n "${P3_CROSS_CC:-}" ] || command -v x86_64-w64-mingw32-gcc >/dev/null; then
+  for opt in -O0 -O2; do
+    "$p3" --mode=objfpc $opt --target=x86_64-w64-mingw32 \
+      "$tests/driver/Inputs/install-units.pas" -o units.exe ||
+      fail "building units.exe ($opt)"
+    [ "$(head -c 2 units.exe)" = MZ ] || fail "units.exe is not a Windows program"
+    if command -v wine >/dev/null; then
+      [ "$(wine units.exe | tr -d '\r')" = 'INSTALLED moved' ] ||
+        fail "units.exe's output under Wine ($opt)"
+    fi
+  done
+  "$p3" --mode=objfpc -O2 --target=x86_64-w64-mingw32 \
+    "$tests/run/netasync-echo.pas" -o echo.exe || fail "building echo.exe"
+  echo "package-smoke: Windows programs built"
+fi
 
 echo "package-smoke: PASS"

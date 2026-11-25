@@ -33,6 +33,8 @@ function emitOutput(const ir: TBuf; const name: string; kind: TOutputKind; opt: 
 function findUnitLibrary: string;
 { Is triple a Windows one (MSVC or MinGW)? }
 function isWindowsTriple(const triple: string): boolean;
+{ Is triple the host's ('' or LLVM's default triple)? }
+function isHostTriple(const triple: string): boolean;
 { -l and -L options, passed to the linker. }
 procedure addLinkerArg(const arg: string);
 { -fno-inline-runtime: from -O1 the runtime's small functions are inlined

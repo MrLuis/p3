@@ -1313,6 +1313,18 @@ begin
     u := PDecl(listGet(units, i));
     smPresumed(u^.loc, f, line, col);
     obj := objectPath(smFileName(f));
+    { the library's units are compiled for the host only }
+    if not isHostTriple(targetTriple) and (pathDirName(obj) = findUnitLibrary) then
+    begin
+      if required then
+      begin
+        diagError(noLoc, 'unit ''' + nameStr(u^.ident.spelling) +
+                         ''' of p3''s library is compiled for the host only; build for ''' +
+                         targetTriple + ''' without -fseparate-units');
+        exit;
+      end;
+      continue;
+    end;
     if not sysFileExists(obj) then
     begin
       if required then

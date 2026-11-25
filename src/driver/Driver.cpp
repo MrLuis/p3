@@ -558,6 +558,17 @@ bool Driver::runPipeline(FileID FID) {
       llvm::SmallString<256> Obj(
           SM.getPresumedLoc(U->getLocation()).Filename);
       llvm::sys::path::replace_extension(Obj, "o");
+      // The library's units are compiled for the host only.
+      if (!isHostTriple(Opts.TargetTriple) &&
+          llvm::sys::path::parent_path(Obj) == findUnitLibrary()) {
+        if (Opts.Act == Action::EmitExe) {
+          Diags.error("unit '" + U->getName().Spelling +
+                      "' of p3's library is compiled for the host only; build "
+                      "for '" + Opts.TargetTriple + "' without -fseparate-units");
+          return false;
+        }
+        continue;
+      }
       if (!llvm::sys::fs::exists(Obj)) {
         if (Opts.Act == Action::EmitExe) {
           Diags.error("cannot find '" + Obj + "', the object file of unit '" +

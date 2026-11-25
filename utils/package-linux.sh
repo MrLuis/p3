@@ -67,7 +67,12 @@ newest=$(printf '%s\n%s\n' "$glibc" "$max_glibc" | sort -V | tail -1)
 [ "$newest" = "$max_glibc" ] || fail "bin/p3 needs glibc $glibc, newer than $max_glibc"
 
 # p3's own license and the third-party notices (installed by CMake).
-for f in LICENSE THIRD_PARTY_NOTICES.md; do
+# The runtime for Windows programs (cross-compiled with MinGW-w64), and the
+# license of wepoll, which it contains.
+[ -f "$root/lib/x86_64-w64-mingw32/libpascalrt.a" ] ||
+  fail "lib/x86_64-w64-mingw32/libpascalrt.a was not built (P3_CROSS_TARGETS)"
+
+for f in LICENSE THIRD_PARTY_NOTICES.md LICENSE.wepoll; do
   [ -s "$root/share/doc/p3/$f" ] || fail "share/doc/p3/$f was not installed"
 done
 
