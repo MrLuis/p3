@@ -1,0 +1,103 @@
+# The downloadable Linux archives: p3 with LLVM linked statically, built on
+# the oldest distribution supported (Ubuntu 22.04, glibc 2.35), then
+# unpacked and tried on clean systems. Nothing is published: the archives
+# stay with the run as artifacts.
+name: Package
+
+on:
+  workflow_dispatch:
+  push:
+    tags: ['v*']
+    # And whenever the packaging itself changes, on any branch. (GitHub does
+    # not apply path filters to pushed tags.)
+    branches: ['**']
+    paths:
+      - .github/workflows/package.yml
+      - .github/actions/setup-llvm/**
+      - utils/package-linux.sh
+      - utils/package-smoke.sh
+
+jobs:
+  linux:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-22.04, ubuntu-22.04-arm]  # x86-64 and ARM64
+    runs-on: ${{ matrix.os }}
+    env:
+      LLVM_VERSION: 23
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up LLVM ${{ env.LLVM_VERSION }}
+        uses: ./.github/actions/setup-llvm
+        with:
+          llvm-version: ${{ env.LLVM_VERSION }}
+
+      # --as-needed: LLVM names system libraries p3 uses nothing of (libz3).
+      # The C++ and GCC runtimes go into p3. No Windows runtime yet.
+      - name: Configure (static LLVM)
+        run: |
+          cmake -S . -B build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DLLVM_DIR="$LLVM_PREFIX/lib/cmake/llvm" \
+            -DCMAKE_C_COMPILER="$HOST_CC" \
+            -DCMAKE_CXX_COMPILER="$HOST_CXX" \
+            -DP3_LINK_LLVM_DYLIB=OFF \
+            -DCMAKE_EXE_LINKER_FLAGS="-Wl,--as-needed -static-libstdc++ -static-libgcc" \
+            -DP3_CROSS_TARGETS=OFF
+
+      - name: Build
+        run: ninja -C build
+
+      - name: Test
+        run: ninja -C build check
+
+      - name: Package
+        run: utils/package-linux.sh build dist
+
+      - name: Upload the package
+        uses: actions/upload-artifact@v4
+        with:
+          name: p3-linux-${{ matrix.os }}
+          path: dist/*
+          if-no-files-found: error
+
+  # The uploaded archive on systems that never saw the build or LLVM: first
+  # as they come, then with the C compiler a user would install.
+  try:
+    needs: linux
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-22.04, ubuntu-22.04-arm]
+        image: ['ubuntu:22.04', 'ubuntu:24.04', 'debian:bookworm-slim', 'debian:trixie-slim']
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4  # for the test programs
+
+      - name: Download the package
+        uses: actions/download-artifact@v4
+        with:
+          name: p3-linux-${{ matrix.os }}
+          path: dist
+
+      - name: Unpack
+        run: |
+          (cd dist && sha256sum -c ./*.sha256)
+          mkdir unpacked
+          tar -C unpacked -xJf dist/*.tar.xz
+
+      - name: Try it in ${{ matrix.image }}
+        env:
+          IMAGE: ${{ matrix.image }}
+        run: |
+          docker run --rm \
+            -v "$PWD/unpacked:/unpacked:ro" -v "$PWD/utils:/utils:ro" \
+            -v "$PWD/tests:/src/tests:ro" "$IMAGE" sh -ec '
+              p3dir=$(echo /unpacked/p3-*)
+              sh /utils/package-smoke.sh "$p3dir" /src
+              apt-get update -qq
+              DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends gcc libc6-dev >/dev/null
+              sh /utils/package-smoke.sh "$p3dir" /src
+            '
