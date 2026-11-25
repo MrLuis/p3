@@ -1,3 +1,4 @@
+{ SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception }
 unit pctypes;
 { Semantic types of the self-hosted compiler: the predeclared types and the
   type constructors (the C++ ASTContext), and the predicates, bounds and

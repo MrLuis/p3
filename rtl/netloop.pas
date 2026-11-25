@@ -1,3 +1,4 @@
+{ SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception }
 (* netloop - the loop engine: TCP servers on per-thread event loops over
    non-blocking sockets, the design of a hand-written C10K server, as a
    library. The sibling of netasync, which runs one task per connection:

@@ -1,3 +1,4 @@
+{ SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception }
 { Included by pcsema.pas: built-in routines, statements and expressions
   (the second half of src/sema/Sema.cpp). }
 

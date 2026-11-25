@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //===- Token.h - One lexed token ----------------------------------*- C++ -*-===//
 #ifndef P3_LEXER_TOKEN_H
 #define P3_LEXER_TOKEN_H

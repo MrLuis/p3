@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //===- Parser.h - Recursive-descent Pascal parser -----------------*- C++ -*-===//
 //
 // Grammar accepted so far (M8):

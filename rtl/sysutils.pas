@@ -1,3 +1,4 @@
+{ SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception }
 { p3's SysUtils: Free Pascal's names and results, on ansistrings. Written
   in the Turbo dialect so that every mode with units can use it. In --mode=objfpc conversion failures
   raise EConvertError (predeclared, as Exception is); in --mode=tp, where

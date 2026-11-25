@@ -1,3 +1,4 @@
+{ SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception }
 { p3's Sequences: lazy, chainable operations on sequences (item 15 of the
   "Modernizing Pascal" proposals). A TSeq<T> produces its values one at a
   time, when they are asked for; operations such as Map, Filter and Take

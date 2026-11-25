@@ -1,3 +1,4 @@
+{ SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception }
 { pcgen, continued: debug information (-g), the port of CodeGen.cpp's
   DIBuilder code. The metadata nodes are built with the texts and operand
   orders LLVM 23 gives them, so the module prints as the C++ p3's. Nodes

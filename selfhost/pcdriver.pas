@@ -1,3 +1,4 @@
+{ SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception }
 unit pcdriver;
 { The back end of the driver: src/codegen/Backend.cpp and
   src/driver/Linker.cpp. The IR text pcgen writes is compiled in process

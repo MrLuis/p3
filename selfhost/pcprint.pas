@@ -1,3 +1,4 @@
+{ SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception }
 unit pcprint;
 { The AST dump of the self-hosted compiler; a port of src/ast/ASTPrinter.cpp.
   One node per line, indented by depth:

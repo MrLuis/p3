@@ -35,6 +35,7 @@ Exit status 0 if every check passes.
 import argparse
 import filecmp
 import os
+import re
 import shlex
 import shutil
 import subprocess
@@ -244,7 +245,8 @@ def main():
         for f in sorted(os.listdir(src)):
             if f.endswith(".pas") and f != "p3.pas":
                 text = open(os.path.join(src, f)).read()
-                if text.lstrip().lower().startswith("unit "):
+                # A unit's first word, after any comments ({ ... }).
+                if re.match(r"(?:\s|\{[^}]*\})*unit\s", text, re.IGNORECASE):
                     run([stages[3], "--mode=tp", "-O%d" % args.opt] + FLAGS +
                         ["-c", os.path.join(src, f), "-o",
                          os.path.join(src, f[:-4] + ".o")])

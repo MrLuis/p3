@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception */
 /*===- async_deadline_test.c: in-task deadline waits exercised end to end.
  *
  * Not part of libpascalrt: build standalone next to the runtime and run

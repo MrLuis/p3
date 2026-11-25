@@ -1,3 +1,4 @@
+{ SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception }
 { p3's Threading: what async code uses besides the language's own words
   (async, await, spawn, scope, detached, Wait, WhenAll, WhenAny,
   Pool.Run): the methods of TCancelToken; TChannel<T>, a typed queue

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //===- CodeGen.h - AST -> LLVM IR ---------------------------------*- C++ -*-===//
 #ifndef P3_CODEGEN_CODEGEN_H
 #define P3_CODEGEN_CODEGEN_H

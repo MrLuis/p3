@@ -1,3 +1,4 @@
+{ SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception }
 unit pcproject;
 { The project file, p3.json, of the self-hosted compiler; a port of
   src/driver/Project.cpp, with the same diagnostics. A project file holds

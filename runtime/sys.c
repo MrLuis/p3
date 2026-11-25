@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception */
 /*
  * The operating system side of p3's unit library (rtl/): what differs
  * between Linux, macOS and 64-bit Windows, behind one set of functions.

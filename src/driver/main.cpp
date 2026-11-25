@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //===- main.cpp - p3 command line entry point ----------------------------===//
 
 #include "p3/Basic/Version.h"

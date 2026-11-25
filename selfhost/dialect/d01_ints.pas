@@ -1,3 +1,4 @@
+{ SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception }
 program d01_ints;
 { Dialect check L1 (sized integers, double) and L10 (wrapping arithmetic,
   bit operators). }

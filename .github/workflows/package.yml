@@ -16,6 +16,9 @@ on:
       - .github/actions/setup-llvm/**
       - utils/package-linux.sh
       - utils/package-smoke.sh
+      - LICENSE
+      - THIRD_PARTY_NOTICES.md
+      - licenses/**
 
 jobs:
   linux:

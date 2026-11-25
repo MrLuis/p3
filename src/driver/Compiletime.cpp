@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //===- Compiletime.cpp - Constants computed by compiletime functions ----===//
 //
 // `function F(...): T; compiletime;` is a function in a restricted subset

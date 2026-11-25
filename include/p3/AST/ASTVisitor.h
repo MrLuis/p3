@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //===- ASTVisitor.h - CRTP dispatch over AST nodes ----------------*- C++ -*-===//
 //
 //   class MyPass : public StmtVisitor<MyPass>, public ExprVisitor<MyPass, llvm::Value *> {

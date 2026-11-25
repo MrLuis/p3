@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //===- ASTNodes.def - Every AST node class ------------------------*- C++ -*-===//
 //
 // X-macro list of concrete AST node classes. Adding a node here makes the

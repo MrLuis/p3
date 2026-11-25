@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 #ifndef P3_BASIC_VERSION_H
 #define P3_BASIC_VERSION_H
 

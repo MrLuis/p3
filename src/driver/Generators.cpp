@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //===- Generators.cpp - The model of attributed types -------------------===//
 //
 // See include/p3/Driver/Generators.h. One line per fact, fields separated by

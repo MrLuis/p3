@@ -1,3 +1,4 @@
+{ SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception }
 { p3's Classes: TList and TStringList with Free Pascal's names and results.
   Needs --mode=objfpc. }
 unit classes;

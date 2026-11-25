@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //===- ASTPrinter.h - --emit-ast ----------------------------------*- C++ -*-===//
 #ifndef P3_AST_ASTPRINTER_H
 #define P3_AST_ASTPRINTER_H

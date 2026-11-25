@@ -1,3 +1,4 @@
+{ SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception }
 unit pcctime;
 { Constants computed by compiletime functions (modernizing-pascal.md item
   19): the Pascal counterpart of src/driver/Compiletime.cpp, which explains

@@ -1,3 +1,4 @@
+{ SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception }
 program p3;
 { The self-hosted Pascal compiler: command line and pipeline. It accepts
   the C++ p3's options (src/driver/main.cpp) and must behave the same.

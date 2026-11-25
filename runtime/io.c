@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception */
 /*===- io.c - Files, text I/O and heap for Pascal programs -------------------===
  *
  * ISO 7185 file model: each file has a mode (undefined / inspection /

@@ -1,3 +1,4 @@
+{ SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception }
 program d03_ffi;
 { Dialect check L5: external C functions (cdecl), pchar, string literals
   passed as pchar, and a C call that runs a subprocess (L11). }

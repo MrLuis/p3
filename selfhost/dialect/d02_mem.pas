@@ -1,3 +1,4 @@
+{ SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception }
 program d02_mem;
 { Dialect check L2 (typecasts), L3 (raw memory) and L4 (open-ended arrays
   through a pointer to a large array type, indexed with range checks off). }

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //===- ASTContext.h - Owns all AST nodes and types ----------------*- C++ -*-===//
 //
 // AST nodes and types are allocated in a bump-pointer arena and freed all at

@@ -1,3 +1,4 @@
+{ SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception }
 program d06_strings;
 { Dialect check L12: string parameters (value, var, const), short-string
   truncation, string results, and the existing string routines. }

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //===- Generators.h - Source generators ---------------------------*- C++ -*-===//
 //
 // Source generators (modernizing-pascal.md item 19). A generator is a program

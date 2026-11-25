@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //===- Type.h - Semantic types ------------------------------------*- C++ -*-===//
 //
 // Types as Sema understands them (as opposed to TypeSpec, which is how a type

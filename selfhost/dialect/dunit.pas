@@ -1,3 +1,4 @@
+{ SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception }
 unit dunit;
 { Unit used by d08_units.pas. }
 

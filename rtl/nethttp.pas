@@ -1,3 +1,4 @@
+{ SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception }
 (* nethttp - HTTP/1.1 for p3's servers: the layer between the network
    engines (netasync's tasks, netloop's event loops) and the routing
    (netrouter). It parses requests, gives handlers one context to read the

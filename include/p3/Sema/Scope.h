@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //===- Scope.h - Lexical scopes / symbol table --------------------*- C++ -*-===//
 //
 // Pascal scopes nest: the standard scope (predeclared integer, writeln, ...)

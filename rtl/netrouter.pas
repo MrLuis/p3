@@ -1,3 +1,4 @@
+{ SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception }
 (* netrouter — HTTP request routing in the style of Go's chi: routes by
   method and path pattern, URL parameters, middleware chains, groups,
   sub-routers. Routing only: it never parses a request nor writes a

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //===- TokenKinds.def - Every Pascal token ------------------------*- C++ -*-===//
 //
 // The complete token catalog from PLAN.md §4, declared once (X-macro).

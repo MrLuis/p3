@@ -1,3 +1,4 @@
+{ SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception }
 generator JsonGenerator for Json;
 { Typed JSON for unit json: for each record, class or enumeration marked
   [Json], code that writes it with a TJsonWriter and reads it with a

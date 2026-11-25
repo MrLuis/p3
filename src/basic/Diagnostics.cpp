@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 #include "p3/Basic/Diagnostics.h"
 #include "p3/Basic/SourceManager.h"
 

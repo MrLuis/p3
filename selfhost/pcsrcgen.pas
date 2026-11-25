@@ -1,3 +1,4 @@
+{ SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception }
 unit pcsrcgen;
 { Source generators (modernizing-pascal.md item 19): the Pascal counterpart
   of src/driver/Generators.cpp and include/p3/Driver/Generators.h; see there

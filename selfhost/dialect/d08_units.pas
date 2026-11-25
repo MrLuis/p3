@@ -1,3 +1,4 @@
+{ SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception }
 program d08_units;
 { Dialect check: units, nested routines with access to outer locals,
   short-circuit boolean evaluation. }

@@ -5,7 +5,7 @@
 ; RUN: rm -rf %t.dir && mkdir -p %t.dir
 ; RUN: %cmake --install %build-dir --prefix %t.dir/prefix > %t.dir/install.log
 ; RUN: mv %t.dir/prefix %t.dir/moved
-; RUN: ls %t.dir/moved/lib/libpascalrt.a %t.dir/moved/lib/pascal/sysutils.pas %t.dir/moved/lib/pascal/sysutils.o %t.dir/moved/lib/pascal/json_pow5.inc %t.dir/moved/lib/pascal/generators/json.pas %t.dir/moved/share/doc/p3/LICENSE
+; RUN: ls %t.dir/moved/lib/libpascalrt.a %t.dir/moved/lib/pascal/sysutils.pas %t.dir/moved/lib/pascal/sysutils.o %t.dir/moved/lib/pascal/json_pow5.inc %t.dir/moved/lib/pascal/generators/json.pas %t.dir/moved/share/doc/p3/LICENSE %t.dir/moved/share/doc/p3/THIRD_PARTY_NOTICES.md
 
 ; A hello program.
 ; RUN: env -u P3_UNIT_DIR -u P3_RUNTIME_LIB -u P3_RUNTIME_IR %t.dir/moved/bin/p3 --no-project %S/Inputs/hello.pas -o %t.dir/hello

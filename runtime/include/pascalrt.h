@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception */
 /*===- pascalrt.h - Pascal runtime library ABI ------------------------------===
  *
  * Functions called by code that p3 generates. The compiler declares these

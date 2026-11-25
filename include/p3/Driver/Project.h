@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //===- Project.h - p3.json project settings ----------------------*- C++ -*-===//
 //
 // A project file, p3.json, holds settings for compiling the programs and

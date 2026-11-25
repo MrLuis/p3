@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //===- StringPool.h - Interned, stable strings --------------------*- C++ -*-===//
 //
 // Identifier names and literal values live here for the whole compilation, so

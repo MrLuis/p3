@@ -1,3 +1,4 @@
+{ SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception }
 unit pcir;
 {$modeswitch defaultparameters}
 { A builder for textual LLVM IR that writes exactly what LLVM 23 prints for

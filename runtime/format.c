@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception */
 /*
  * Format: Free Pascal's algorithm and results, on the array of const that
  * compiled code builds: a header slot holding the element count, then one

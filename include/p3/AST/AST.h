@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //===- AST.h - Pascal abstract syntax tree ------------------------*- C++ -*-===//
 //
 // Node families, each with LLVM-style RTTI (isa<>/cast<>/dyn_cast<>):

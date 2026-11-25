@@ -1,3 +1,4 @@
+{ SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception }
 unit pcllvm;
 { The self-hosted compiler's back end in process (SELFHOST.md S11): the
   LLVM-C API of libLLVM, used as src/codegen/Backend.cpp uses LLVM. The

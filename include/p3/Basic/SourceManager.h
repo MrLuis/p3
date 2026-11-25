@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //===- SourceManager.h - Owns source buffers ----------------------*- C++ -*-===//
 //
 // Owns every source buffer the compiler reads and maps SourceLocations back to

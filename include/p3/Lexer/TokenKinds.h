@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //===- TokenKinds.h - Token kind enum and helpers -----------------*- C++ -*-===//
 #ifndef P3_LEXER_TOKENKINDS_H
 #define P3_LEXER_TOKENKINDS_H

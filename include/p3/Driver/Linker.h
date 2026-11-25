@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //===- Linker.h - Link object files into an executable ------------*- C++ -*-===//
 //
 // Delegates to a C compiler driver (clang or cc), which knows where the

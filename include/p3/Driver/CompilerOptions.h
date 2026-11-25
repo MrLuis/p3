@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //===- CompilerOptions.h - Settings for one compiler run ----------*- C++ -*-===//
 //
 // Plain data describing what the user asked for. main.cpp fills it from the

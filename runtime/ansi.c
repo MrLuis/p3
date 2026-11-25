@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception */
 /*
  * Ansistrings: reference-counted strings of any length, with Free Pascal's
  * layout. A value is NULL (the empty string) or a pointer to NUL-terminated

@@ -1,3 +1,4 @@
+{ SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception }
 unit pcsys;
 { Operating-system access for the self-hosted compiler. Every C library
   call lives here (DIALECT.md section 3); all input and output goes

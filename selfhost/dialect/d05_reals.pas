@@ -1,3 +1,4 @@
+{ SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception }
 program d05_reals;
 { Dialect check L9: reinterpreting a double's bits through a variant
   record (needed to print LLVM hex float constants). }

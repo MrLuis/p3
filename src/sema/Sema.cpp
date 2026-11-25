@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //===- Sema.cpp - Semantic analysis -------------------------------------===//
 //
 // One pass over the AST, in declaration order (Pascal requires

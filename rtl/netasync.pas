@@ -1,3 +1,4 @@
+{ SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception }
 { netasync — awaitable BSD sockets for p3's async/await runtime.
   TCP over IPv4, on Linux and macOS (Windows: later). The entry points that
   can wait are async routines: called from a task they park it (the OS

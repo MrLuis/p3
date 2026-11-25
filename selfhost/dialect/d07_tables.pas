@@ -1,3 +1,4 @@
+{ SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception }
 program d07_tables;
 { Dialect check R2 (procedural types), R3 (exit with a value, case else),
   R4 ($I include), R5 (low/high), R6 (typed-constant arrays of records). }

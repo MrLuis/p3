@@ -1,3 +1,4 @@
+{ SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception }
 unit sqlite3;
 
 { SQLite 3, imported from the C API reference (sqlite.org/capi3ref.html,

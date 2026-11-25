@@ -1,3 +1,4 @@
+{ SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception }
 unit pcgen;
 { Code generation: a checked program and its units to LLVM IR; the port of
   src/codegen/CodeGen.cpp, whose header describes the lowering:

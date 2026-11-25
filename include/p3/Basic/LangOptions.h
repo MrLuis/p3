@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //===- LangOptions.h - Pascal dialect switches --------------------*- C++ -*-===//
 #ifndef P3_BASIC_LANGOPTIONS_H
 #define P3_BASIC_LANGOPTIONS_H

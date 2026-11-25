@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //===- Diagnostics.h - Error / warning reporting ------------------*- C++ -*-===//
 //
 // All user-facing compiler messages go through DiagnosticsEngine. Output format

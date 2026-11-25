@@ -1,3 +1,4 @@
+{ SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception }
 unit pclex;
 { The lexer of the self-hosted compiler; a port of src/lexer/Lexer.cpp.
   Token kinds come from include/p3/Lexer/TokenKinds.def through the

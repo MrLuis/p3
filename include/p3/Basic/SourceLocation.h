@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //===- SourceLocation.h - Positions in Pascal source --------------*- C++ -*-===//
 //
 // A SourceLocation is a cheap, copyable handle to a position inside a buffer

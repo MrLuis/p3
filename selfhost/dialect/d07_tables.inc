@@ -1,3 +1,4 @@
+{ SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception }
 { included by d07_tables.pas (R4) }
 type
   TTokKind = (tkIdent, tkBegin, tkEnd, tkIf);

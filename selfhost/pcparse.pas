@@ -1,3 +1,4 @@
+{ SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception }
 unit pcparse;
 { The recursive-descent parser of the self-hosted compiler; a port of
   src/parse/Parser.cpp. It must produce the same tree and report the same

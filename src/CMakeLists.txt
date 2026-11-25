@@ -56,4 +56,6 @@ set_target_properties(p3 PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${PROJECT_BINARY_DI
 # system's search path (Homebrew's, say).
 set_target_properties(p3 PROPERTIES INSTALL_RPATH_USE_LINK_PATH ON)
 install(TARGETS p3 RUNTIME DESTINATION bin)
-install(FILES ${PROJECT_SOURCE_DIR}/LICENSE DESTINATION share/doc/p3)
+install(FILES ${PROJECT_SOURCE_DIR}/LICENSE
+              ${PROJECT_SOURCE_DIR}/THIRD_PARTY_NOTICES.md
+        DESTINATION share/doc/p3)

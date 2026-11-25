@@ -1,3 +1,4 @@
+{ SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception }
 unit pcscope;
 { Name scopes for Sema; a port of include/p3/Sema/Scope.h. A scope maps
   lower-case names to declarations; a `with` scope exposes a record's

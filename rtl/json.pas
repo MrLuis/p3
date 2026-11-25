@@ -1,3 +1,4 @@
+{ SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception }
 unit json;
 { JSON, after Rust's sonic-rs (github.com/cloudwego/sonic-rs).
 

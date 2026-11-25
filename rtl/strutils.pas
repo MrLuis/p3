@@ -1,3 +1,4 @@
+{ SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception }
 { p3's StrUtils: Free Pascal's names and results, on ansistrings. Written
   in the Turbo dialect so that every mode with units can use it. PosEx from
   the start of the string (two parameters) needs --mode=objfpc (overloading). }

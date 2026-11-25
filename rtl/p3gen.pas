@@ -1,3 +1,4 @@
+{ SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception }
 unit p3gen;
 { Source generators: what a generator program uses.
 

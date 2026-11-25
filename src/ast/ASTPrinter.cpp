@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //===- ASTPrinter.cpp - --emit-ast ----------------------------------------===//
 //
 // One node per line, indented by depth:

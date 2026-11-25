@@ -355,7 +355,19 @@ of `tests/run` as Windows executables (see Cross-compiling).
 
 ## License
 
-See [LICENSE](LICENSE).
+Copyright 2026 Luis Ortega.
+
+p3 (both compilers, the runtime and the unit library) is licensed under the
+[Apache License 2.0 with LLVM Exceptions](LICENSE), LLVM's own license
+(SPDX: `Apache-2.0 WITH LLVM-exception`). The exception means that programs
+you compile with p3 may be distributed under terms of your choice without
+p3's license notices, although they contain parts of its runtime and unit
+library.
+
+Some material has other terms, listed in
+[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md). **Windows programs that
+wait on sockets contain wepoll and must carry its notice.** Versions of p3
+published before this change were under the GNU GPL version 2.
 
 ## Compiler directives
 

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //===- Project.cpp - p3.json project settings ----------------------------===//
 //
 // A small JSON reader (strict JSON; strings up to 255 bytes, as in the

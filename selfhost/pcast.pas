@@ -1,3 +1,4 @@
+{ SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception }
 unit pcast;
 { The abstract syntax tree of the self-hosted compiler; the Pascal
   counterpart of include/p3/AST/AST.h.

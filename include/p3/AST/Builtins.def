@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //===- Builtins.def - Predeclared procedures and functions --------*- C++ -*-===//
 //
 // Required procedures/functions of ISO 7185 6.6.5-6.6.6 that are implemented.

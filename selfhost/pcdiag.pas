@@ -1,3 +1,4 @@
+{ SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception }
 unit pcdiag;
 { Source files and diagnostics of the self-hosted compiler; the Pascal
   counterpart of SourceManager.h and Diagnostics.h in include/p3/Basic.

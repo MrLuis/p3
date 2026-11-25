@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //===- Directives.h - Compiler directives in comments -------------*- C++ -*-===//
 //
 // `{$R-}`, `{$Q+}`, `(*$R+,Q-*)` switch runtime checks from that point of the

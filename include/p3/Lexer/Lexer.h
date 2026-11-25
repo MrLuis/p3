@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //===- Lexer.h - Pascal tokenizer ---------------------------------*- C++ -*-===//
 //
 // Turns one source buffer into a stream of Tokens. Errors are reported through

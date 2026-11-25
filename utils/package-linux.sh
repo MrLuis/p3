@@ -61,8 +61,18 @@ glibc=$(objdump -T "$root/bin/p3" | grep -oE 'GLIBC_[0-9.]+' | sed 's/GLIBC_//' 
 newest=$(printf '%s\n%s\n' "$glibc" "$max_glibc" | sort -V | tail -1)
 [ "$newest" = "$max_glibc" ] || fail "bin/p3 needs glibc $glibc, newer than $max_glibc"
 
-# LLVM is in bin/p3: its license goes along. Debian's copyright file refers
-# to the system's copy of the Apache License for the full text.
+# p3's own license and the third-party notices (installed by CMake).
+for f in LICENSE THIRD_PARTY_NOTICES.md; do
+  [ -s "$root/share/doc/p3/$f" ] || fail "share/doc/p3/$f was not installed"
+done
+
+# LLVM is in bin/p3: its license goes along, as LLVM publishes it (with its
+# notes on third-party code), and with the copyright file of the package it
+# came from. That Debian file refers to the system's copy of the Apache
+# License for the full text.
+llvm_license=$(dirname "$0")/../licenses/llvm/LICENSE.TXT
+[ -f "$llvm_license" ] || fail "no $llvm_license"
+cp "$llvm_license" "$root/share/doc/p3/LICENSE.llvm-project"
 [ -f "$llvm_doc/copyright" ] || fail "no $llvm_doc/copyright"
 [ -f "$apache" ] || fail "no $apache"
 {

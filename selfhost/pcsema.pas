@@ -1,3 +1,4 @@
+{ SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception }
 unit pcsema;
 { Semantic analysis of the self-hosted compiler; a port of
   src/sema/Sema.cpp. One pass over the tree in declaration order: scopes,

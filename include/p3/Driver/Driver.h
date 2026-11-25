@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //===- Driver.h - Runs the compilation pipeline -------------------*- C++ -*-===//
 #ifndef P3_DRIVER_DRIVER_H
 #define P3_DRIVER_DRIVER_H
