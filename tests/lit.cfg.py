@@ -66,7 +66,7 @@ config.substitutions.append(
 # at -O1 and up (before %p3-runtime-lib and %p3, prefixes of it). CMake
 # builds it when this LLVM has clang and llvm-link; tests that need it say
 # REQUIRES: runtime-ir.
-runtime_ir = os.path.join(config.p3_obj_root, "lib", "libpascalrt.ll")
+runtime_ir = os.path.join(config.p3_obj_root, "lib", "pascal", "libpascalrt.ll")
 if os.path.exists(runtime_ir):
     config.available_features.add("runtime-ir")
 config.substitutions.insert(0, ("%p3-runtime-ir", runtime_ir))

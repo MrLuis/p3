@@ -31,7 +31,7 @@ foreach(unit ${P3_RTL_UNITS})
     COMMAND $<TARGET_FILE:p3> --no-project --mode=objfpc -O2 -c
             ${P3_RTL_DIR}/${unit}.pas -o ${P3_RTL_DIR}/${unit}.o
     DEPENDS p3 ${P3_RTL_SOURCES}
-            $<$<TARGET_EXISTS:pascalrt-ir>:${PROJECT_BINARY_DIR}/lib/libpascalrt.ll>)
+            $<$<TARGET_EXISTS:pascalrt-ir>:${PROJECT_BINARY_DIR}/lib/pascal/libpascalrt.ll>)
   list(APPEND P3_RTL_OBJECTS ${P3_RTL_DIR}/${unit}.o)
 endforeach()
 

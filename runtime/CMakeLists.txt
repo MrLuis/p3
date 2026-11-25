@@ -92,7 +92,7 @@ else()
 endif()
 if(NOT P3_RT_IR_PROBLEM)
   set(P3_RT_IR_DIR ${CMAKE_CURRENT_BINARY_DIR}/ir)
-  file(MAKE_DIRECTORY ${P3_RT_IR_DIR})
+  file(MAKE_DIRECTORY ${P3_RT_IR_DIR} ${PROJECT_BINARY_DIR}/lib/pascal)
   set(P3_RT_IR_PARTS "")
   foreach(src io sys ansi format)
     add_custom_command(
@@ -106,18 +106,18 @@ if(NOT P3_RT_IR_PROBLEM)
     list(APPEND P3_RT_IR_PARTS ${P3_RT_IR_DIR}/${src}.ll)
   endforeach()
   add_custom_command(
-    OUTPUT ${PROJECT_BINARY_DIR}/lib/libpascalrt.ll
+    OUTPUT ${PROJECT_BINARY_DIR}/lib/pascal/libpascalrt.ll
     COMMAND ${P3_RT_LLVM_LINK} -S ${P3_RT_IR_PARTS} -o ${P3_RT_IR_DIR}/linked.ll
     COMMAND ${Python3_EXECUTABLE} ${PROJECT_SOURCE_DIR}/utils/gen-runtime-ir.py
-            ${P3_RT_IR_DIR}/linked.ll ${PROJECT_BINARY_DIR}/lib/libpascalrt.ll
+            ${P3_RT_IR_DIR}/linked.ll ${PROJECT_BINARY_DIR}/lib/pascal/libpascalrt.ll
     DEPENDS ${P3_RT_IR_PARTS} ${PROJECT_SOURCE_DIR}/utils/gen-runtime-ir.py
     VERBATIM)
-  add_custom_target(pascalrt-ir ALL DEPENDS ${PROJECT_BINARY_DIR}/lib/libpascalrt.ll)
-  install(FILES ${PROJECT_BINARY_DIR}/lib/libpascalrt.ll DESTINATION lib)
+  add_custom_target(pascalrt-ir ALL DEPENDS ${PROJECT_BINARY_DIR}/lib/pascal/libpascalrt.ll)
+  install(FILES ${PROJECT_BINARY_DIR}/lib/pascal/libpascalrt.ll DESTINATION lib/pascal)
   add_dependencies(pascalrt pascalrt-ir)
 else()
   # A file of an earlier configuration would be out of date.
-  file(REMOVE ${PROJECT_BINARY_DIR}/lib/libpascalrt.ll)
+  file(REMOVE ${PROJECT_BINARY_DIR}/lib/pascal/libpascalrt.ll)
   message(WARNING "libpascalrt.ll is not built: ${P3_RT_IR_PROBLEM}. p3 works "
                   "without it, but does not inline runtime functions.")
 endif()

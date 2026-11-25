@@ -49,7 +49,7 @@ root=$work/$name
 cmake --install "$build" --prefix "$root" --strip >/dev/null
 
 # The runtime IR lets p3 inline runtime functions; do not ship without it.
-[ -f "$root/lib/libpascalrt.ll" ] || fail "lib/libpascalrt.ll was not built"
+[ -f "$root/lib/pascal/libpascalrt.ll" ] || fail "lib/pascal/libpascalrt.ll was not built"
 
 # What the compiler needs from the user's system: glibc, and zlib and zstd,
 # which every Debian and Ubuntu system has. Not LLVM, and not the C++

@@ -91,7 +91,7 @@ std::string p3::findRuntimeIR() {
   if (auto Env = llvm::sys::Process::GetEnv("P3_RUNTIME_IR"))
     return *Env;
   llvm::SmallString<256> Path(llvm::sys::path::parent_path(findRuntimeLibrary()));
-  llvm::sys::path::append(Path, "libpascalrt.ll");
+  llvm::sys::path::append(Path, "pascal", "libpascalrt.ll");
   return std::string(Path);
 }
 

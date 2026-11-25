@@ -45,7 +45,7 @@ trap 'rm -rf "$work"' EXIT
 root=$work/$name
 cmake --install "$build" --prefix "$root" --strip >/dev/null
 
-[ -f "$root/lib/libpascalrt.ll" ] || fail "lib/libpascalrt.ll was not built"
+[ -f "$root/lib/pascal/libpascalrt.ll" ] || fail "lib/pascal/libpascalrt.ll was not built"
 
 # Only macOS's own libraries: not LLVM's, and nothing from Homebrew.
 needed=$(otool -L "$root/bin/p3" | tail -n +2 | awk '{print $1}')

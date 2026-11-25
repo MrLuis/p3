@@ -46,7 +46,8 @@ std::string findUnitLibrary();
 std::string findProfileRuntimeLibrary();
 
 /// The runtime as LLVM IR, linked into optimized programs for inlining:
-/// $P3_RUNTIME_IR, else libpascalrt.ll next to the runtime library. It
+/// $P3_RUNTIME_IR, else pascal/libpascalrt.ll next to the runtime library
+/// (lib/pascal: not lib, where Homebrew allows only libraries). It
 /// need not exist.
 std::string findRuntimeIR();
 
