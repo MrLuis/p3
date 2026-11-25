@@ -30,6 +30,7 @@ var
   gUdpPort: Integer;
   gUdp1, gUdp2: shortstring;
   gWaitOk: boolean = true;
+  gWaitWhy: shortstring = '';
 
 function Padded(const s: string): TNetBytes;
 var
@@ -108,7 +109,10 @@ begin
     bits := NetWaitFdUntil(q, true, false, 25);
     n := Integer(GetTickCount64 - t0);
     if (bits <> NW_TIMEOUT) or (n < 24) or (n > 500) then
+    begin
       gWaitOk := false;
+      gWaitWhy := 'deadline ' + IntToStr(i) + ': bits ' + IntToStr(bits) + ' after ' + IntToStr(n) + ' ms';
+    end;
   end;
   NetUdpPeerTo(q, '127.0.0.1', NetBoundPort(q));
   SetLength(buf, 8);
@@ -118,7 +122,10 @@ begin
   bits := NetWaitFdUntil(q, true, false, 400);
   n := Integer(GetTickCount64 - t0);
   if (bits <> NW_READ) or (n > 50) then
+  begin
     gWaitOk := false;
+    gWaitWhy := 'datagram: bits ' + IntToStr(bits) + ' after ' + IntToStr(n) + ' ms';
+  end;
   NetClose(q);
 end;
 
@@ -355,7 +362,7 @@ begin
     Writeln('wait timeout: ok')
   else
   begin
-    Writeln('wait timeout: FAIL');
+    Writeln('wait timeout: FAIL (', gWaitWhy, ')');
     halt(1);
   end;
   Writeln('waits abandoned: ', NetWaitsAbandoned);

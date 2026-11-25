@@ -225,7 +225,15 @@ void __pas_sys_localtime(int32_t *fields) {
 
 int64_t __pas_sys_tick_ms(void) {
 #ifdef _WIN32
-  return (int64_t)GetTickCount64();
+  /* Not GetTickCount64, which moves in steps of about 15.6 ms: the same
+   * clock as the runtime's deadlines (clock_gettime, from QPC). */
+  static LARGE_INTEGER freq;
+  LARGE_INTEGER c;
+  if (freq.QuadPart == 0)
+    QueryPerformanceFrequency(&freq);
+  QueryPerformanceCounter(&c);
+  return (int64_t)(c.QuadPart / freq.QuadPart * 1000 +
+                   c.QuadPart % freq.QuadPart * 1000 / freq.QuadPart);
 #else
   struct timespec ts;
   clock_gettime(CLOCK_MONOTONIC, &ts);

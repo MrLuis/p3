@@ -222,16 +222,24 @@ class WineRunFormat(lit.formats.base.TestFormat):
             log.append("$ " + " ".join(cmd))
             io = {"input": stdin_text.encode()} if stdin_text is not None else {
                 "stdin": open(at(inp), "rb") if inp else subprocess.DEVNULL}
-            try:
-                r = subprocess.run(cmd, cwd=cwd, env=dict(env, **run_env),
-                                   stdout=subprocess.PIPE,
-                                   stderr=subprocess.STDOUT if merge else subprocess.PIPE,
-                                   timeout=120, **io)
-            except subprocess.TimeoutExpired:
-                raise Failure("timed out: " + " ".join(cmd))
-            finally:
-                if inp:
-                    io["stdin"].close()
+            # Wine (not the program: they pass on Windows) now and then
+            # hangs a process; one timeout is retried, and the log says so.
+            for attempt in (1, 2):
+                if inp and attempt == 2:
+                    io["stdin"] = open(at(inp), "rb")
+                try:
+                    r = subprocess.run(cmd, cwd=cwd, env=dict(env, **run_env),
+                                       stdout=subprocess.PIPE,
+                                       stderr=subprocess.STDOUT if merge else subprocess.PIPE,
+                                       timeout=120, **io)
+                    break
+                except subprocess.TimeoutExpired:
+                    if attempt == 2:
+                        raise Failure("timed out twice: " + " ".join(cmd))
+                    log.append("timed out once under Wine; retried")
+                finally:
+                    if inp:
+                        io["stdin"].close()
             text = r.stdout.replace(b"\r\n", b"\n").decode("utf-8", "replace")
             if (r.returncode != 0) != expect_fail:
                 raise Failure("exit code %d\n--- stdout\n%s--- stderr\n%s" %
