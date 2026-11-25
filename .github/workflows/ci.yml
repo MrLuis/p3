@@ -6,9 +6,11 @@ on:
 
 jobs:
   build-and-test:
-    runs-on: ubuntu-24.04
-    permissions:
-      contents: write  # gh release create, for seed-v* tags only
+    strategy:
+      fail-fast: false  # a failure on one platform does not hide the other's
+      matrix:
+        os: [ubuntu-24.04, ubuntu-24.04-arm]  # x86-64 and ARM64
+    runs-on: ${{ matrix.os }}
     env:
       LLVM_VERSION: 23
     steps:
@@ -47,8 +49,8 @@ jobs:
         run: P3_UNDER_TEST=$PWD/build/bootstrap/stage2/bin/p3 lit -sv build/tests
 
       # S11: the stage-1 seed. Build it, bootstrap from it without the C++
-      # p3, and keep it as an artifact; a pushed tag seed-v* publishes it
-      # as a GitHub release.
+      # p3, and keep it as an artifact, one per platform (the publish-seed
+      # job releases them for a pushed tag seed-v*).
       - name: Build the stage-1 seed
         run: ninja -C build seed
 
@@ -60,22 +62,41 @@ jobs:
       - name: Upload the seed
         uses: actions/upload-artifact@v4
         with:
-          name: p3-seed
+          name: p3-seed-${{ matrix.os }}
           path: |
             build/seed/*.tar.gz
             build/seed/*.tar.gz.sha256
 
-      - name: Publish the seed (tags seed-v*)
-        if: startsWith(github.ref, 'refs/tags/seed-v')
+  # One release for all platforms' seeds, and only when every one passed.
+  publish-seed:
+    needs: build-and-test
+    if: startsWith(github.ref, 'refs/tags/seed-v')
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write  # gh release create
+    steps:
+      - name: Download the seeds
+        uses: actions/download-artifact@v4
+        with:
+          pattern: p3-seed-*
+          path: seed
+          merge-multiple: true
+
+      - name: Publish the seeds
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create "$GITHUB_REF_NAME" build/seed/*.tar.gz build/seed/*.tar.gz.sha256 \
+          gh release create "$GITHUB_REF_NAME" seed/*.tar.gz seed/*.tar.gz.sha256 \
+            --repo "$GITHUB_REPOSITORY" --verify-tag \
             --title "p3 stage-1 seed $GITHUB_REF_NAME" \
-            --notes "Bootstrap the self-hosted compiler without the C++ p3: utils/seed.py bootstrap --seed <file> (see SELFHOST.md)."
+            --notes "Bootstrap the self-hosted compiler without the C++ p3: utils/seed.py bootstrap --seed <file> (see selfhost/README.md)."
 
   release:
-    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, ubuntu-24.04-arm]
+    runs-on: ${{ matrix.os }}
     env:
       LLVM_VERSION: 23
     steps:
