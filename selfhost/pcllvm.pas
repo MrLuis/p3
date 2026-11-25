@@ -6,7 +6,7 @@ unit pcllvm;
   C++ p3's (CPU "generic", PIC).
 
   The functions are declared without a library: the compiler is linked
-  with libLLVM (LLVM-19 on Linux, LLVM on macOS; see selfhost/README.md).
+  with libLLVM (LLVM-23 on Linux, LLVM on macOS; see selfhost/README.md).
   The target initialization functions depend on the LLVM build and are
   generated into llvmtargets.inc by utils/gen-llvm-targets.py. }
 

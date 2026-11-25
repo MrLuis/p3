@@ -4,7 +4,7 @@ unit pcdriver;
   by libLLVM (pcllvm): parsed, verified, optimized with the same pass
   pipeline as the C++ p3 and emitted by a target machine set up like its
   own (SELFHOST.md S11). Executables are linked with the Pascal runtime by
-  a C compiler: $P3_CC, else clang-19, clang, cc or gcc. The runtime
+  a C compiler: $P3_CC, else clang-23, clang, cc or gcc. The runtime
   library is $P3_RUNTIME_LIB, else ../lib/libpascalrt.a next to the
   executable. }
 
@@ -185,13 +185,13 @@ begin
                        '-clang); set P3_CROSS_CC');
     exit(cc);
   end;
-  cc := findTool('P3_CC', 'clang-19 clang cc gcc', fromEnv);
+  cc := findTool('P3_CC', 'clang-23 clang cc gcc', fromEnv);
   if cc = '' then
   begin
     if fromEnv and sysGetEnv('P3_CC', value) then
       diagError(noLoc, 'cannot find linker driver ''' + value + ''' (from P3_CC)')
     else
-      diagError(noLoc, 'cannot find a C compiler to link with (tried clang-19, ' +
+      diagError(noLoc, 'cannot find a C compiler to link with (tried clang-23, ' +
                        'clang, cc, gcc); set P3_CC');
   end;
   findLinkerDriver := cc;

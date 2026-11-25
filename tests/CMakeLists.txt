@@ -12,7 +12,7 @@ set_target_properties(p3-unittests PROPERTIES
 find_program(LIT_EXECUTABLE NAMES lit llvm-lit lit.py
   HINTS ${LLVM_TOOLS_BINARY_DIR} $ENV{HOME}/.local/bin)
 # LLVM's FileCheck, or the Python port (`pipx install filecheck`) for LLVM
-# packages that don't ship it (e.g. Homebrew's llvm@19).
+# packages that don't ship it (e.g. Homebrew's llvm@23).
 find_program(FILECHECK_EXECUTABLE NAMES FileCheck filecheck
   HINTS ${LLVM_TOOLS_BINARY_DIR} $ENV{HOME}/.local/bin)
 

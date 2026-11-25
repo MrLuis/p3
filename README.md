@@ -23,7 +23,11 @@ For quality control (and a bit of self insecurity), there are two compilers, kep
 
 ## Building
 
-Requires CMake, a C++ compiler and LLVM.
+Requires CMake 3.20 or later, a C++20 compiler and LLVM 23 (CMake rejects
+other major versions). Ninja is used below. The self-hosted compiler and the
+inlining of runtime functions also need Python 3; the latter needs LLVM's
+`clang` and `llvm-link` too. If CMake does not find LLVM, pass
+`-DLLVM_DIR=<llvm>/lib/cmake/llvm`.
 
 ```sh
 cmake -G Ninja -S . -B build
@@ -36,6 +40,49 @@ compiler. The C runtime is built at `-O2` in every configuration, and
 `ninja -C build p3-self` builds the distributed self-hosted compiler at
 `-O2`; `-DP3_SELFHOST_NO_CHECKS=ON` turns its range and overflow checks
 off once the compiler is trusted enough for that.
+
+### Ubuntu 24.04
+
+LLVM 23 comes from [apt.llvm.org](https://apt.llvm.org):
+
+```sh
+sudo apt-get update
+sudo apt-get install -y git cmake ninja-build build-essential python3 wget \
+  zlib1g-dev libzstd-dev libedit-dev libxml2-dev
+wget https://apt.llvm.org/llvm.sh
+sudo bash llvm.sh 23
+sudo apt-get install -y llvm-23-dev llvm-23-tools clang-23
+
+cmake -G Ninja -S . -B build \
+  -DLLVM_DIR=/usr/lib/llvm-23/lib/cmake/llvm \
+  -DCMAKE_C_COMPILER=clang-23 -DCMAKE_CXX_COMPILER=clang++-23
+ninja -C build
+```
+
+### Windows
+
+p3 does not build natively on Windows yet. Build it in
+[WSL2](https://learn.microsoft.com/windows/wsl/install): in an administrator
+PowerShell, run
+
+```powershell
+wsl --install -d Ubuntu-24.04
+```
+
+Then follow the Ubuntu 24.04 steps above inside Ubuntu, with the repository
+cloned into the Linux file system (under `~`, which is much faster than
+`/mnt/c`). The compiler is then a Linux program. For it to write Windows
+executables, install MinGW-w64 (`sudo apt-get install -y mingw-w64`) before
+running `cmake` (if `build/` is already configured, run `cmake` again), and
+select its POSIX threads variant, without which linking fails with undefined
+`pthread_` references:
+
+```sh
+sudo update-alternatives --set x86_64-w64-mingw32-gcc \
+  /usr/bin/x86_64-w64-mingw32-gcc-posix
+```
+
+See **Cross-compiling** under [Compiler parameters](#compiler-parameters).
 
 ## Usage
 
@@ -274,6 +321,10 @@ Tests are [lit](https://llvm.org/docs/CommandGuide/lit.html) files under
 ninja -C build check
 ```
 
+This needs `lit` and `FileCheck`. On Ubuntu, `FileCheck` is in
+`llvm-23-tools`; install `lit` with `pipx install lit` (package `pipx`, then
+`pipx ensurepath` and a new shell) and run `cmake` again.
+
 With MinGW-w64 and Wine installed, `tests/windows` also runs the programs
 of `tests/run` as Windows executables (see Cross-compiling).
 
@@ -379,7 +430,7 @@ compiler).
   `-c` to `<unit>.o` next to its source; off by default)
 - `-g` — generate debug information (off by default)
 - `--target=<triple>` — target triple (default: host). Any triple of a target
-  LLVM 19 was built with: X86, AArch64, ARM, RISCV, Mips, PowerPC, WebAssembly,
+  LLVM 23 was built with: X86, AArch64, ARM, RISCV, Mips, PowerPC, WebAssembly,
   AMDGPU, NVPTX, AVR, MSP430, BPF, Hexagon, Lanai, LoongArch, M68k, Sparc,
   SystemZ, VE, XCore, Xtensa — written as `x86_64-pc-linux-gnu`,
   `aarch64-apple-darwin`, ... For a non-host triple `-S`, `-c` and

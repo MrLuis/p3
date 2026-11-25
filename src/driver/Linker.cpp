@@ -53,14 +53,14 @@ std::string p3::findProfileRuntimeLibrary() {
   llvm::SmallVector<std::string, 6> LibDirs;
   if (auto P = llvm::sys::Process::GetEnv("P3_LLVM_LIBDIR"))
     LibDirs.push_back(*P);
-  for (const char *Name : {"clang-23", "llvm@23", "llvm", "clang-19", "llvm@19"})
+  for (const char *Name : {"clang-23", "llvm@23", "llvm"})
     if (auto P = llvm::sys::findProgramByName(Name)) {
       llvm::StringRef Dir = llvm::sys::path::parent_path(*P);
       LibDirs.push_back((llvm::Twine(Dir) + "/../lib").str());
       break;
     }
   LibDirs.push_back(P3_LLVM_LIBDIR);
-  LibDirs.push_back("/usr/lib/llvm-19/lib");
+  LibDirs.push_back("/usr/lib/llvm-23/lib");
   for (const std::string &D : LibDirs) {
     std::error_code EC;
     llvm::SmallString<256> Clang(D);
@@ -128,10 +128,10 @@ static std::string findLinkerDriver(llvm::StringRef Triple,
                 "' (from P3_CC)");
     return "";
   }
-  for (const char *Name : {"clang-19", "clang", "cc", "gcc"})
+  for (const char *Name : {"clang-23", "clang", "cc", "gcc"})
     if (auto P = llvm::sys::findProgramByName(Name))
       return *P;
-  Diags.error("cannot find a C compiler to link with (tried clang-19, clang, "
+  Diags.error("cannot find a C compiler to link with (tried clang-23, clang, "
               "cc, gcc); set P3_CC");
   return "";
 }

@@ -10,7 +10,7 @@ jobs:
     permissions:
       contents: write  # gh release create, for seed-v* tags only
     env:
-      LLVM_VERSION: 19
+      LLVM_VERSION: 23
     steps:
       - uses: actions/checkout@v4
 
@@ -77,7 +77,7 @@ jobs:
   release:
     runs-on: ubuntu-24.04
     env:
-      LLVM_VERSION: 19
+      LLVM_VERSION: 23
     steps:
       - uses: actions/checkout@v4
 

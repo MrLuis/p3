@@ -5,13 +5,13 @@ p3 written in Pascal (the dialect in [DIALECT.md](DIALECT.md)); the plan is
 the LLVM-C API), so it needs two things from the CMake build: the target
 initializers of that LLVM (`build/selfhost/llvmtargets.inc`, written by
 `utils/gen-llvm-targets.py`) and the link options, both in
-`build/selfhost/flags.txt` (e.g. `-I build/selfhost -L/usr/lib/llvm-19/lib
--lLLVM-19`). It builds with p3 and with Free Pascal:
+`build/selfhost/flags.txt` (e.g. `-I build/selfhost -L/usr/lib/llvm-23/lib
+-lLLVM-23`). It builds with p3 and with Free Pascal:
 
 ```sh
 build/bin/p3 --mode=tp $(cat build/selfhost/flags.txt) -I selfhost selfhost/p3.pas -o build/p3-self
 fpc -Mobjfpc -Sh- -Cr -Co -FUbuild/fpc-units -Fibuild/selfhost \
-    -k-L/usr/lib/llvm-19/lib -k-lLLVM-19 -obuild/p3-fpc selfhost/p3.pas
+    -k-L/usr/lib/llvm-23/lib -k-lLLVM-23 -obuild/p3-fpc selfhost/p3.pas
 ```
 
 | File | Contents |
@@ -28,7 +28,7 @@ fpc -Mobjfpc -Sh- -Cr -Co -FUbuild/fpc-units -Fibuild/selfhost \
 | `pcsema.pas`, `pcsemastmt.inc` | semantic analysis (Sema.cpp) |
 | `builtins.inc` | generated from `include/p3/AST/Builtins.def` |
 | `tokens.inc` | generated from `include/p3/Lexer/TokenKinds.def` by `utils/gen-selfhost-tables.py` |
-| `pcir.pas` | a builder for textual LLVM IR that prints exactly as LLVM 19 prints the C++ p3's module: constant folding, names, block order, alignments, metadata |
+| `pcir.pas` | a builder for textual LLVM IR that prints exactly as LLVM 23 prints the C++ p3's module: constant folding, names, block order, alignments, metadata |
 | `pcgen.pas`, `pcgenstmt.inc`, `pcgendbg.inc` | code generation and debug information (CodeGen.cpp) |
 | `pcdriver.pas` | the back end of the driver: clang for `-S`, `-c` and `-O`, linking with the runtime, `--target`, `--version` |
 | `pcllvm.pas` | the LLVM-C API: parse, verify, optimize and emit in process (Backend.cpp) |
@@ -43,7 +43,7 @@ The Pascal compiler writes LLVM IR as text, then libLLVM parses, verifies,
 optimizes (the same `default<On>` pipeline as the C++ p3) and compiles it
 in process, with a target machine set up like the C++ p3's; the default
 triple, data layout, host CPU and target checks come from LLVM too. It
-links like the C++ p3 (`$P3_CC`, else clang-19, clang, cc or gcc) with
+links like the C++ p3 (`$P3_CC`, else clang-23, clang, cc or gcc) with
 `$P3_RUNTIME_LIB`, else `../lib/libpascalrt.a` next to its executable; `-L`
 and `-l` add libraries. The unit library is `$P3_UNIT_DIR`, else
 `../lib/pascal` next to its executable. Its `--emit-llvm` output at `-O0` is byte-identical
@@ -85,7 +85,7 @@ Testing:
   on more inputs (fuzz corpora).
 - The stage-1 seed: `ninja -C build seed` writes `build/seed/p3-seed-*`;
   `utils/seed.py bootstrap --seed <seed> [--from ir]` bootstraps from it
-  without the C++ p3 (needs `cc`, libLLVM 19 and `llvm-config`, and clang
+  without the C++ p3 (needs `cc`, libLLVM 23 and `llvm-config`, and clang
   for `--from ir`). See SELFHOST.md S11.
 - Separate units: `utils/bootstrap.py --separate` also builds the compiler
   from its separately compiled units (each unit with `-c`, then `p3.pas`

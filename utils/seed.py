@@ -19,7 +19,7 @@ p3-seed-<version>-<triple>, holding
       with stage 1, and the seed's IR with stage 2.
 
   utils/seed.py bootstrap --seed <dir or .tar.gz> [--from binary|ir]
-      [--work build/seed-bootstrap] [--llvm-config llvm-config-19]
+      [--work build/seed-bootstrap] [--llvm-config llvm-config-23]
       Bootstraps from a seed: no C++ p3 and no CMake. The runtime is
       compiled from runtime/*.c with cc, the LLVM-specific parts come from
       llvm-config. Stage 1 is the seed's binary (or built from its IR with
@@ -221,7 +221,7 @@ def cmd_bootstrap(args):
         shutil.copy2(os.path.join(seed, "bin", "p3"), s1)
         log("stage 1: the seed's binary")
     else:
-        clang = args.clang or shutil.which("clang-19") or shutil.which("clang")
+        clang = args.clang or shutil.which("clang-23") or shutil.which("clang")
         if not clang:
             sys.exit("seed: --from ir needs clang (set --clang)")
         run([clang, "-w", "-O2", os.path.join(seed, "p3.ll"), runtime,
@@ -267,7 +267,7 @@ def main():
     bs.add_argument("--seed", required=True, help="a seed directory or .tar.gz")
     bs.add_argument("--from", dest="from_", choices=["binary", "ir"], default="binary")
     bs.add_argument("--work", default=os.path.join(ROOT, "build", "seed-bootstrap"))
-    bs.add_argument("--llvm-config", default=shutil.which("llvm-config-19") or "llvm-config")
+    bs.add_argument("--llvm-config", default=shutil.which("llvm-config-23") or "llvm-config")
     bs.add_argument("--clang", help="for --from ir")
     bs.add_argument("--require-same", action="store_true",
                     help="fail unless the sources are those of the seed")

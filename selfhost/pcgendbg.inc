@@ -1,6 +1,6 @@
 { pcgen, continued: debug information (-g), the port of CodeGen.cpp's
   DIBuilder code. The metadata nodes are built with the texts and operand
-  orders LLVM 19 gives them, so the module prints as the C++ p3's. Nodes
+  orders LLVM 23 gives them, so the module prints as the C++ p3's. Nodes
   whose text is known only at the end (the compile unit's lists, a
   subprogram's retainedNodes) are placeholders filled by finalizeDebugInfo,
   as DIBuilder::finalize does. }

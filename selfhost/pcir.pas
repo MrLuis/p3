@@ -1,6 +1,6 @@
 unit pcir;
 {$modeswitch defaultparameters}
-{ A builder for textual LLVM IR that writes exactly what LLVM 19 prints for
+{ A builder for textual LLVM IR that writes exactly what LLVM 23 prints for
   the module the C++ p3 builds with IRBuilder (SELFHOST.md S10: the two
   compilers' --emit-llvm output must be identical). It models what shows
   in the text:
@@ -469,7 +469,7 @@ var
   f: TSpecFields;
   abi, pref: int64;
 begin
-  { LLVM 19's defaults }
+  { LLVM's defaults }
   dlNumInts := 0;
   setIntAlign(1, 1, 1);
   setIntAlign(8, 1, 1);

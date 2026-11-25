@@ -97,7 +97,7 @@ if config.wine:
     config.available_features.add("wine")
 
 # On macOS the LLVM tools directory put on PATH above usually holds a
-# Homebrew clang-19, which p3's driver tries first for linking. Its config
+# Homebrew clang, which p3's driver may pick for linking. Its config
 # file pins an SDK (-isysroot) that need not match the installed Command
 # Line Tools, and it ignores SDKROOT, so links fail (`library not found for
 # -lm`). Link with the system C compiler instead, unless P3_CC is set.
