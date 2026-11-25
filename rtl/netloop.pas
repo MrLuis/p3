@@ -675,6 +675,13 @@ begin
   if C.FClosed then
     exit;
   C.FClosed := true;
+{$IFDEF MSWINDOWS}
+  { wepoll, unlike epoll and kqueue, drops a closed socket only at a later
+    wait, and may first deliver events queued for it, naming C after it is
+    freed; and Windows reuses the handle at once, which ADD then refuses
+    (EEXIST): the next connection would never be watched }
+  epoll_ctl(FFd, EPOLL_CTL_DEL, C.FSock, nil);
+{$ENDIF}
   c_close(C.FSock);             { (drops its registrations) }
   if C.FPrev <> nil then C.FPrev.FNext := C.FNext else FHead := C.FNext;
   if C.FNext <> nil then C.FNext.FPrev := C.FPrev;

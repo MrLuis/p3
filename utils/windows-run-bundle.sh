@@ -6,6 +6,8 @@
 #   utils/windows-run-bundle.sh <bundle dir>
 #
 # RUNNER runs a program somewhere else (RUNNER=wine, to try this script).
+# NET_REPEAT runs the event-loop programs (net*) that many times: their
+# failures can depend on timing (default 1).
 set -u
 
 if [ $# -ne 1 ]; then
@@ -24,11 +26,19 @@ passed=0
 failed=()
 for exe in "$bundle"/*.exe; do
   name=$(basename "$exe" .exe)
-  dir=$work/$name
-  mkdir "$dir"
-  (cd "$dir" && $limit $runner "$exe" </dev/null >out 2>err)
-  status=$?
-  tr -d '\r' <"$dir/out" >"$dir/out.lf"
+  times=1
+  case $name in net*) times=${NET_REPEAT:-1} ;; esac
+  for run in $(seq 1 "$times"); do
+    dir=$work/$name.$run
+    mkdir "$dir"
+    (cd "$dir" && $limit $runner "$exe" </dev/null >out 2>err)
+    status=$?
+    tr -d '\r' <"$dir/out" >"$dir/out.lf"
+    if [ $status -ne 0 ] || ! cmp -s "$bundle/$name.expected" "$dir/out.lf"; then
+      [ "$times" -gt 1 ] && echo "($name: run $run of $times)"
+      break
+    fi
+  done
   if [ $status -ne 0 ]; then
     echo "FAIL: $name: exit status $status"
     tail -20 "$dir/out.lf" | sed 's/^/  stdout: /'
