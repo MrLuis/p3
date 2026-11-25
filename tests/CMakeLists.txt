@@ -50,7 +50,7 @@ if(Python3_FOUND AND P3_SELFHOST_FLAGS)
             --p3 $<TARGET_FILE:p3> --runtime $<TARGET_FILE:pascalrt>
             --work ${PROJECT_BINARY_DIR}/bootstrap
             --flags ${PROJECT_BINARY_DIR}/selfhost/flags.txt ${P3_BOOTSTRAP_ARGS}
-    DEPENDS p3 pascalrt
+    DEPENDS p3 pascalrt rtl
     COMMENT "Bootstrapping the self-hosted compiler"
     USES_TERMINAL)
   # The stage-1 seed (S11): build/seed/p3-seed-<version>-<triple>[.tar.gz].

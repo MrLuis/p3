@@ -158,9 +158,13 @@ def build_runtime(work):
     """libpascalrt.a from runtime/*.c with the C compiler."""
     cc = os.environ.get("CC") or shutil.which("cc") or shutil.which("clang") or "gcc"
     objs = []
-    for name in ("io", "sys", "ansi", "format"):
+    # As runtime/CMakeLists.txt builds it: the same sources, GNU C11 (the
+    # runtime uses POSIX and GNU functions that plain C11 hides).
+    extra = ["-D_DARWIN_C_SOURCE"] if sys.platform == "darwin" else []
+    for name in ("io", "sys", "ansi", "format", "async"):
         obj = os.path.join(work, name + ".o")
-        run([cc, "-std=c11", "-O2", "-fPIC", "-I", os.path.join("runtime", "include"),
+        run([cc, "-std=gnu11", "-O2", "-fPIC"] + extra +
+            ["-I", os.path.join("runtime", "include"),
              "-c", os.path.join("runtime", name + ".c"), "-o", obj])
         objs.append(obj)
     lib = os.path.join(work, "libpascalrt.a")

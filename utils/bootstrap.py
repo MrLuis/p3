@@ -69,6 +69,10 @@ def install(work, name, runtime):
 
 
 FLAGS = []
+# The unit library (and its source generators) the compared compilations
+# use: one directory for every stage, since its path can show up in the
+# output. The stages have none of their own.
+UNIT_DIR = ""
 
 
 def build_stage(compiler, out, opt, runtime=None):
@@ -120,7 +124,8 @@ def module_ir(compiler, path, mode):
     if mode == "tp":
         extra = ["-I", units]
     r = subprocess.run([compiler, "--mode=" + mode, "--emit-llvm"] + extra +
-                       [path, "-o", "-"], capture_output=True, timeout=60)
+                       [path, "-o", "-"], capture_output=True, timeout=60,
+                       env=dict(os.environ, P3_UNIT_DIR=UNIT_DIR))
     return r.returncode, r.stdout, r.stderr
 
 
@@ -142,6 +147,8 @@ def main():
     ap.add_argument("--no-exe-compare", action="store_true",
                     help="do not require identical stage 2 and 3 executables")
     args = ap.parse_args()
+    global UNIT_DIR
+    UNIT_DIR = os.path.join(os.path.dirname(os.path.abspath(args.runtime)), "pascal")
     FLAGS.extend(shlex.split(open(args.flags).read()))
 
     work = os.path.abspath(args.work)
@@ -249,6 +256,12 @@ def main():
             log("the separately built compiler gives the same IR")
         else:
             failures.append("the separately built compiler gives different IR")
+
+    # The stage 2 compiler can then be used like an installed one (CI runs
+    # the test suite with it): the unit library goes next to it. Last, so
+    # that no comparison above sees a stage's own copy.
+    shutil.copytree(UNIT_DIR, os.path.join(work, "stage2", "lib", "pascal"),
+                    dirs_exist_ok=True)
 
     for f in failures:
         log("FAIL: " + f)
