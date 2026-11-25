@@ -61,6 +61,28 @@ else()
     ${LLVM_TARGETS_TO_BUILD})
 endif()
 
+# For a downloadable package with LLVM linked statically: LLVM's libraries
+# name Z3, which p3 uses nothing of but which the linker keeps when it is
+# named by path (Homebrew's), and a shared zstd that the user's system may
+# not have. Link zstd statically and leave Z3 out; a link error says if a
+# later LLVM needs it.
+option(P3_LLVM_STATIC_DEPS
+       "With P3_LINK_LLVM_DYLIB=OFF, link LLVM's zstd statically and leave out Z3" OFF)
+if(P3_LLVM_STATIC_DEPS)
+  if(NOT P3_LLVM_LIBS STREQUAL "LLVM" AND TARGET LLVMSupport)
+    get_target_property(_p3_deps LLVMSupport INTERFACE_LINK_LIBRARIES)
+    list(FILTER _p3_deps EXCLUDE REGEX "[zZ]3")
+    if(TARGET zstd::libzstd_static)
+      list(TRANSFORM _p3_deps REPLACE "^zstd::libzstd_shared$" "zstd::libzstd_static")
+    elseif("zstd::libzstd_shared" IN_LIST _p3_deps)
+      message(FATAL_ERROR "P3_LLVM_STATIC_DEPS: LLVM links a shared zstd, and no static one was found")
+    endif()
+    set_target_properties(LLVMSupport PROPERTIES INTERFACE_LINK_LIBRARIES "${_p3_deps}")
+  else()
+    message(FATAL_ERROR "P3_LLVM_STATIC_DEPS needs P3_LINK_LLVM_DYLIB=OFF")
+  endif()
+endif()
+
 add_compile_options(-Wall -Wextra -Wno-unused-parameter)
 
 include_directories(${CMAKE_CURRENT_SOURCE_DIR}/include)

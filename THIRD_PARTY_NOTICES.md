@@ -117,6 +117,12 @@ p3 is built on LLVM (<https://llvm.org>). A package that has LLVM linked into
 p3 carries LLVM's license with it
 ([licenses/llvm/LICENSE.TXT](licenses/llvm/LICENSE.TXT)).
 
+## zstd
+
+The macOS package has zstd (<https://github.com/facebook/zstd>), which LLVM
+uses, linked into p3, and carries its BSD license as
+`share/doc/p3/LICENSE.zstd`. The Linux packages use the system's zstd.
+
 ## Programs for Windows
 
 p3 links Windows programs statically with the MinGW-w64 runtime and

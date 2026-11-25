@@ -23,6 +23,15 @@ fail() {
   exit 1
 }
 
+# macOS has no timeout(1).
+limit() {
+  if command -v timeout >/dev/null; then
+    timeout 60 "$@"
+  else
+    "$@"
+  fi
+}
+
 # Nothing may point p3 anywhere but into its own package.
 unset P3_UNIT_DIR P3_RUNTIME_LIB P3_RUNTIME_IR P3_CC
 
@@ -58,12 +67,13 @@ for opts in -O0 -O2 -g '-O2 -fseparate-units'; do
   [ "$(./units)" = 'INSTALLED moved' ] || fail "the units program's output ($opts)"
 done
 
-# Tasks (per-architecture assembly) and the network units (epoll, loopback).
+# Tasks (per-architecture assembly) and the network units (epoll or kqueue,
+# loopback).
 for program in async netasync-echo; do
   for opt in -O0 -O2; do
     "$p3" --mode=objfpc $opt "$tests/run/$program.pas" -o "$program" ||
       fail "building $program $opt"
-    timeout 60 "./$program" > "$program.out" || fail "running $program $opt"
+    limit "./$program" > "$program.out" || fail "running $program $opt"
     diff "$program.out" "$tests/run/$program.expected" ||
       fail "$program's output ($opt)"
   done

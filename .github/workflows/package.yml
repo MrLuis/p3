@@ -1,6 +1,7 @@
-# The downloadable Linux archives: p3 with LLVM linked statically, built on
-# the oldest distribution supported (Ubuntu 22.04, glibc 2.35), then
-# unpacked and tried on clean systems. Nothing is published: the archives
+# The downloadable archives: p3 with LLVM linked statically. Linux's are
+# built on the oldest distribution supported (Ubuntu 22.04, glibc 2.35),
+# then unpacked and tried on clean systems; macOS's is for the runner's
+# macOS and later (Homebrew's LLVM is built for it). Nothing is published: the archives
 # stay with the run as artifacts.
 name: Package
 
@@ -15,6 +16,7 @@ on:
       - .github/workflows/package.yml
       - .github/actions/setup-llvm/**
       - utils/package-linux.sh
+      - utils/package-macos.sh
       - utils/package-smoke.sh
       - LICENSE
       - THIRD_PARTY_NOTICES.md
@@ -104,3 +106,57 @@ jobs:
               DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends gcc libc6-dev >/dev/null
               sh /utils/package-smoke.sh "$p3dir" /src
             '
+
+  # Homebrew's LLVM is built for the macOS it runs on, so that version is the
+  # package's minimum; -fatal_warnings stops the link if an object needs a
+  # newer one. The package is then tried with nothing from Homebrew in PATH
+  # (Apple's cc links); p3 must not need anything Homebrew installed.
+  macos:
+    runs-on: macos-15
+    env:
+      LLVM_VERSION: 23
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up LLVM ${{ env.LLVM_VERSION }}
+        uses: ./.github/actions/setup-llvm
+        with:
+          llvm-version: ${{ env.LLVM_VERSION }}
+
+      - name: Configure (static LLVM)
+        run: |
+          macos_min="$(sw_vers -productVersion | cut -d. -f1).0"
+          echo "MACOS_MIN=$macos_min" >> "$GITHUB_ENV"
+          cmake -S . -B build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DLLVM_DIR="$LLVM_PREFIX/lib/cmake/llvm" \
+            -DCMAKE_C_COMPILER="$HOST_CC" \
+            -DCMAKE_CXX_COMPILER="$HOST_CXX" \
+            -DP3_LINK_LLVM_DYLIB=OFF \
+            -DP3_LLVM_STATIC_DEPS=ON \
+            -DCMAKE_OSX_DEPLOYMENT_TARGET="$macos_min" \
+            -DCMAKE_EXE_LINKER_FLAGS="-Wl,-dead_strip_dylibs -Wl,-fatal_warnings" \
+            -DP3_CROSS_TARGETS=OFF
+
+      - name: Build
+        run: ninja -C build
+
+      - name: Test
+        run: ninja -C build check
+
+      - name: Package
+        run: utils/package-macos.sh build dist
+
+      - name: Try it without Homebrew
+        run: |
+          (cd dist && shasum -a 256 -c ./*.sha256)
+          mkdir unpacked
+          tar -C unpacked -xJf dist/*.tar.xz
+          env -i HOME="$HOME" PATH=/usr/bin:/bin sh utils/package-smoke.sh unpacked/p3-* .
+
+      - name: Upload the package
+        uses: actions/upload-artifact@v4
+        with:
+          name: p3-macos-arm64
+          path: dist/*
+          if-no-files-found: error
