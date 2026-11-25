@@ -24,7 +24,8 @@ function moduleLayout(const triple: string; var layout: string): boolean;
   output) at optimization level opt for triple. }
 function emitOutput(const ir: TBuf; const name: string; kind: TOutputKind; opt: longint;
                     sizeLevel: longint;
-                    const triple, cpu, features, path: string;
+                    const triple, cpu: string; features: PName;
+                    const path: string;
                     const unitObjects: TPtrList): boolean;
 { The directory of p3's unit library, searched after -I directories:
   $P3_UNIT_DIR, else ../lib/pascal next to the executable. }
@@ -41,7 +42,7 @@ procedure disableRuntimeInlining;
 function writeModuleText(const ir: TBuf; const path: string): boolean;
 { The host CPU and its features (-mcpu=native). }
 function hostCPUName: string;
-function hostCPUFeatures: string;
+function hostCPUFeatures: PName;
 { --version }
 procedure printVersion;
 
@@ -59,7 +60,7 @@ begin
   hostCPUName := llvmHostCPU;
 end;
 
-function hostCPUFeatures: string;
+function hostCPUFeatures: PName;
 begin
   hostCPUFeatures := llvmHostCPUFeatures;
 end;
@@ -296,7 +297,7 @@ begin
   target := llvmLookupTarget(triple, err);
   if target = nil then
     exit;
-  tm := llvmTargetMachine(target, triple, 0, '', '');
+  tm := llvmTargetMachine(target, triple, 0, '', intern(''));
   if tm = nil then
   begin
     diagError(noLoc, 'could not create target machine for ''' + triple + '''');
@@ -528,7 +529,8 @@ end;
 
 function emitOutput(const ir: TBuf; const name: string; kind: TOutputKind; opt: longint;
                     sizeLevel: longint;
-                    const triple, cpu, features, path: string;
+                    const triple, cpu: string; features: PName;
+                    const path: string;
                     const unitObjects: TPtrList): boolean;
 var
   target, tm, m: pointer;

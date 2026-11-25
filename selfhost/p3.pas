@@ -21,7 +21,8 @@ var
   { -ffast-math: set the fast-math flags on floating-point instructions }
   fastMath: boolean;
   { -mcpu / -mattr: the target CPU and features; "native" = the host CPU }
-  targetCPU, targetFeatures: string;
+  targetCPU: string;
+  targetFeatures: PName;
   givenCPU: boolean;
   { -Os (1) / -Oz (2): optimize for size }
   sizeLevel: longint;
@@ -420,7 +421,7 @@ begin
   overflowChecksOn := true;
   fastMath := false;
   targetCPU := 'generic';
-  targetFeatures := '';
+  targetFeatures := intern('');
   givenCPU := false;
   sizeLevel := 0;
   debugInfo := false;
@@ -564,7 +565,7 @@ begin
       givenCPU := true;
     end
     else if name = 'mattr' then
-      targetFeatures := takeValue
+      targetFeatures := intern(takeValue)
     else if name = 'generator' then
       listAdd(generators, intern(takeValue))
     else if name = 'generated-dir' then
@@ -672,18 +673,40 @@ var
   feature the generic CPU always gets the loop, in the program's code and in
   the inlined runtime (reference counts). A -mattr that says anything about
   LSE is left alone. Darwin is not changed: not measured. }
-procedure addDefaultTargetFeatures(const triple: string; var features: string);
+{ Does n hold s (lower case), letters in either case? }
+function nameHasText(n: PName; const s: string): boolean;
 var
-  f: string;
+  i: int64;
+  k: longint;
+begin
+  nameHasText := false;
+  for i := 0 to n^.len - length(s) do
+  begin
+    k := 0;
+    {$R-}
+    while (k < length(s)) and (lowerChar(n^.chars^[i + k]) = s[k + 1]) do
+      k := k + 1;
+    {$R+}
+    if k = length(s) then
+      exit(true);
+  end;
+end;
+
+procedure addDefaultTargetFeatures(const triple: string; var features: PName);
+var
+  b: TBuf;
 begin
   if (pos('aarch64', triple) <> 1) or (pos('linux', triple) = 0) then
     exit;
-  f := lowerStr(features);
-  if (pos('lse', f) > 0) or (pos('outline-atomics', f) > 0) then
+  if nameHasText(features, 'lse') or nameHasText(features, 'outline-atomics') then
     exit;
-  if features <> '' then
-    features := features + ',';
-  features := features + '+outline-atomics';
+  bufInit(b);
+  bufAddName(b, features);
+  if features^.len > 0 then
+    bufAddChar(b, ',');
+  bufAdd(b, '+outline-atomics');
+  features := internChars(b.data, 0, b.len);
+  bufFree(b);
 end;
 
 { The symbols Free Pascal predefines for the targets p3's library supports
@@ -1481,7 +1504,7 @@ begin
   if targetCPU = 'native' then
   begin
     targetCPU := hostCPUName;
-    if targetFeatures = '' then
+    if targetFeatures^.len = 0 then
       targetFeatures := hostCPUFeatures;
   end;
   cgSetSizeLevel(sizeLevel);

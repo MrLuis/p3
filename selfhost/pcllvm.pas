@@ -21,14 +21,14 @@ procedure llvmInit;
 function llvmDefaultTriple: string;
 function llvmNormalizeTriple(const t: string): string;
 function llvmHostCPU: string;
-function llvmHostCPUFeatures: string;
+function llvmHostCPUFeatures: PName; { any length }
 function llvmVersion: string;
 { The target for triple, or nil and the error message. }
 function llvmLookupTarget(const triple: string; var err: string): pointer;
 { A target machine for triple at an optimization level (0-3), with the
   given CPU and features ('' = the target's default). }
 function llvmTargetMachine(target: pointer; const triple: string; opt: longint;
-                           const cpu, features: string): pointer;
+                           const cpu: string; features: PName): pointer;
 { The data layout string of a target machine. }
 function llvmDataLayout(tm: pointer): string;
 { Parses IR text into a module (named name), verifies it and, at opt > 0,
@@ -41,7 +41,7 @@ function llvmDataLayout(tm: pointer): string;
   it is ''). }
 function llvmParseAndOptimize(const ir: TBuf; const name: string; tm: pointer; opt: longint;
                               sizeLevel: longint; const unitIRs: TPtrList;
-                              const runtimeIR, cpu, features: string;
+                              const runtimeIR, cpu: string; features: PName;
                               var rtProblem: string; var err: TBuf): pointer;
 { Writes the module as IR text, assembly or an object file. }
 function llvmPrintModule(m: pointer; const path: string; var err: TBuf): boolean;
@@ -222,14 +222,22 @@ begin
   LLVMDisposeMessage(p);
 end;
 
-function llvmHostCPUFeatures: string;
+function llvmHostCPUFeatures: PName;
 var
   p: pchar;
+  a: PCharArray;
+  n: int64;
 begin
   p := LLVMGetHostCPUFeatures;
   if p = nil then
-    exit('');
-  llvmHostCPUFeatures := str(p);
+    exit(intern(''));
+  a := PCharArray(p);
+  n := 0;
+  {$R-}
+  while a^[n] <> #0 do
+    n := n + 1;
+  {$R+}
+  llvmHostCPUFeatures := internChars(a, 0, n);
   LLVMDisposeMessage(p);
 end;
 
@@ -261,18 +269,18 @@ begin
 end;
 
 function llvmTargetMachine(target: pointer; const triple: string; opt: longint;
-                           const cpu, features: string): pointer;
+                           const cpu: string; features: PName): pointer;
 var
-  b, c, f: string;
-  cpu_, feats: string;
+  b, c: string;
+  cpu_: string;
 begin
   if cpu = '' then
     cpu_ := 'generic'
   else
     cpu_ := cpu;
-  feats := features;
   llvmTargetMachine := LLVMCreateTargetMachine(target, cstr(triple, b),
-                                               cstr(cpu_, c), cstr(feats, f), opt,
+                                               cstr(cpu_, c),
+                                               pchar(features^.chars), opt,
                                                relocPIC, codeModelDefault);
 end;
 
@@ -288,7 +296,8 @@ end;
 { Links the runtime's LLVM IR at path into m (Backend.cpp's linkRuntimeIR):
   its functions stay available_externally, and calls that are not inlined
   go to the library. Returns '' or why the file cannot be used. }
-function linkRuntimeIR(ctx, m: pointer; const path, cpu, features: string): string;
+function linkRuntimeIR(ctx, m: pointer; const path, cpu: string;
+                       features: PName): string;
 var
   buf, rt: pointer;
   msg: pchar;
@@ -323,8 +332,9 @@ begin
     begin
       if cpu <> '' then
         LLVMAddTargetDependentFunctionAttr(f, cstr('target-cpu', a), cstr(cpu, b));
-      if features <> '' then
-        LLVMAddTargetDependentFunctionAttr(f, cstr('target-features', c), cstr(features, d));
+      if features^.len > 0 then
+        LLVMAddTargetDependentFunctionAttr(f, cstr('target-features', c),
+                                           pchar(features^.chars));
     end;
     f := LLVMGetNextFunction(f);
   end;
@@ -413,7 +423,7 @@ end;
 
 function llvmParseAndOptimize(const ir: TBuf; const name: string; tm: pointer; opt: longint;
                               sizeLevel: longint; const unitIRs: TPtrList;
-                              const runtimeIR, cpu, features: string;
+                              const runtimeIR, cpu: string; features: PName;
                               var rtProblem: string; var err: TBuf): pointer;
 var
   ctx, buf, m, e, opts: pointer;

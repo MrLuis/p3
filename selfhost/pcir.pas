@@ -220,7 +220,7 @@ function irFuncRef(f: PIRFunc): TV;
   created from now on. }
 procedure irSetFastMath(b: boolean);
 { -mcpu / -mattr: the target attributes of the function definitions. }
-procedure irSetTarget(const cpu, features: string);
+procedure irSetTarget(const cpu: string; features: PName);
 { -Os (1) / -Oz (2): the definitions' optsize/minsize attributes. }
 procedure irSetSizeLevel(n: longint);
 { Exceptions (CodeGen.cpp's mayRaise). A call of f cannot raise one: a
@@ -385,7 +385,8 @@ var
   curLoc: PMeta;
   branchWeights, invariantLoadMeta: PMeta;
   fastMath: boolean;
-  targetCPU, targetFeatures: string;
+  targetCPU: string;
+  targetFeatures: PName; { set by irSetTarget }
   sizeLevel: longint;
 
   cur: PIRFunc;
@@ -2492,7 +2493,7 @@ begin
   fastMath := b;
 end;
 
-procedure irSetTarget(const cpu, features: string);
+procedure irSetTarget(const cpu: string; features: PName);
 begin
   targetCPU := cpu;
   targetFeatures := features;
@@ -3627,6 +3628,31 @@ begin
   listFree(liveGlobals);
 end;
 
+{ In an attribute group's text, where "target-features" goes: always last. }
+const
+  featuresMark = #1;
+
+{ Writes an attribute group's text, the features in place of the mark. }
+procedure emitAttrGroup(var ob: TBuf; group: PName);
+var
+  marked: boolean;
+begin
+  marked := false;
+  {$R-}
+  if group^.len > 0 then
+    marked := group^.chars^[group^.len - 1] = featuresMark;
+  {$R+}
+  if not marked then
+    bufAddName(ob, group)
+  else
+  begin
+    bufAddChars(ob, group^.chars, 0, group^.len - 1);
+    bufAdd(ob, '"target-features"="');
+    bufAddName(ob, targetFeatures);
+    bufAddChar(ob, '"');
+  end;
+end;
+
 procedure irWriteModule(var outText: TBuf);
 var
   attrNames: TPtrList;   { of PName: the attribute groups, numbered }
@@ -3677,14 +3703,15 @@ begin
       f^.attrs := f^.attrs + 'minsize';
     end;
     if (targetCPU <> '') and
-       ((targetCPU <> 'generic') or (targetFeatures <> '')) then
+       ((targetCPU <> 'generic') or (targetFeatures^.len > 0)) then
       f^.targetAttrs := '"target-cpu"="' + targetCPU + '"';
-    if targetFeatures <> '' then
+    { the features can be longer than a string: a mark stands for them (last
+      in the group) until the group is written }
+    if targetFeatures^.len > 0 then
     begin
       if f^.targetAttrs <> '' then
         f^.targetAttrs := f^.targetAttrs + ' ';
-      f^.targetAttrs := f^.targetAttrs + '"target-features"="' +
-                        targetFeatures + '"';
+      f^.targetAttrs := f^.targetAttrs + featuresMark;
     end;
   end;
   { attribute groups, in function order }
@@ -3766,8 +3793,11 @@ begin
   begin
     bufAddChar(outText, #10);
     for i := 0 to attrNames.count - 1 do
-      bufAdd(outText, 'attributes #' + intToStr(i) + ' = { ' +
-                      nameStr(PName(listGet(attrNames, i))) + ' }' + #10);
+    begin
+      bufAdd(outText, 'attributes #' + intToStr(i) + ' = { ');
+      emitAttrGroup(outText, PName(listGet(attrNames, i)));
+      bufAdd(outText, ' }' + #10);
+    end;
   end;
   { named metadata, then the nodes by number }
   scanning := false;

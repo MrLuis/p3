@@ -46,14 +46,15 @@ procedure generateUnitModule(u: PDecl; const deps: TPtrList; m: TLangMode;
 procedure cgSetFastMath(b: boolean);
 { -mcpu / -mattr: the target CPU and features the functions' target
   attributes carry into the IR. }
-procedure cgSetTarget(const cpu, features: string);
+procedure cgSetTarget(const cpu: string; features: PName);
 { -Os (1) / -Oz (2): the definitions' optsize/minsize attributes. }
 procedure cgSetSizeLevel(n: longint);
 
 var
   { -ffast-math, for the modules generated from now on; cgSetFastMath sets it }
   optFastMath: boolean;
-  optCPU, optFeatures: string;
+  optCPU: string;
+  optFeatures: PName; { set by cgSetTarget }
   optSizeLevel: longint;
 
 implementation
@@ -63,7 +64,7 @@ begin
   optFastMath := b;
 end;
 
-procedure cgSetTarget(const cpu, features: string);
+procedure cgSetTarget(const cpu: string; features: PName);
 begin
   optCPU := cpu;
   optFeatures := features;
