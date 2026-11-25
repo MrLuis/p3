@@ -135,9 +135,11 @@ static void file_error(const PasFile *f, const char *what) {
 
 unsigned char __pas_std_buf_in, __pas_std_buf_out;
 
-/* The large buffer of a redirected standard output (item 19): static, since
- * it must live as long as the stream. */
-char __pas_out_buf[1 << 16];
+/* The large buffer of a redirected standard output (item 19): static storage,
+ * since it must live as long as the stream. The alignment is stated because
+ * Apple's linker otherwise gives a zeroed array of this size more than a
+ * page's, and warns on every link that it reduced it. */
+_Alignas(16) char __pas_out_buf[1 << 16];
 
 void __pas_init(int32_t argc, char **argv) {
   __pas_prog_argc = argc;

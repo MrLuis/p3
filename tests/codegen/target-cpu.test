@@ -1,7 +1,10 @@
 ; -mcpu chooses the target CPU; the definitions carry target-cpu (and the
-; features) as function attributes so they survive into bitcode.
-; RUN: %p3 --mode=objfpc -mcpu=native --emit-llvm %S/Inputs/fastmath.pas -o - | FileCheck %s
+; features) as function attributes so they survive into bitcode. Checked
+; with a named CPU, for a target given here: what "native" finds depends on
+; the machine (on a virtual Mac, "generic" and no features, so no
+; attributes). Its output must still be valid IR.
+; RUN: %p3 --mode=objfpc --target=x86_64-unknown-linux-gnu -mcpu=x86-64-v3 --emit-llvm %S/Inputs/fastmath.pas -o - | FileCheck %s
 ; RUN: %p3 --mode=objfpc -mcpu=native --emit-llvm %S/Inputs/fastmath.pas -o - | opt -passes=verify -disable-output
 
 ; CHECK-LABEL: define i32 @main(
-; CHECK: attributes #{{[0-9]+}} = { nounwind "target-cpu"="{{.+}}"
+; CHECK: attributes #{{[0-9]+}} = { nounwind "target-cpu"="x86-64-v3"

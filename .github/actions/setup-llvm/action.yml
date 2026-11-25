@@ -1,0 +1,51 @@
+name: Set up LLVM
+description: >
+  Installs LLVM, Ninja and lit, and Free Pascal if asked for. Sets
+  LLVM_PREFIX, and HOST_CC and HOST_CXX, the compilers that build p3.
+  (Not CC and CXX: utils/seed.py reads CC.)
+inputs:
+  llvm-version:
+    description: LLVM's major version
+    required: true
+  fpc:
+    description: install Free Pascal too ('true' or 'false')
+    default: 'false'
+runs:
+  using: composite
+  steps:
+    - name: Install with apt (Linux)
+      if: runner.os == 'Linux'
+      shell: bash
+      env:
+        V: ${{ inputs.llvm-version }}
+        FPC: ${{ inputs.fpc }}
+      run: |
+        wget -q https://apt.llvm.org/llvm.sh
+        sudo bash llvm.sh "$V"
+        sudo apt-get install -y "llvm-$V-dev" "llvm-$V-tools" "clang-$V" \
+          ninja-build zlib1g-dev libzstd-dev libedit-dev libxml2-dev
+        if [ "$FPC" = true ]; then sudo apt-get install -y fp-compiler; fi
+        pip install lit
+        {
+          echo "LLVM_PREFIX=/usr/lib/llvm-$V"
+          echo "HOST_CC=clang-$V"
+          echo "HOST_CXX=clang++-$V"
+        } >> "$GITHUB_ENV"
+
+    # Homebrew has no versioned llvm@23 yet: its llvm is installed, and
+    # CMake stops if that is another major version. p3 is built with Apple's
+    # compilers, as on a developer's machine.
+    - name: Install with Homebrew (macOS)
+      if: runner.os == 'macOS'
+      shell: bash
+      env:
+        FPC: ${{ inputs.fpc }}
+      run: |
+        brew update --quiet
+        brew install llvm ninja lit
+        if [ "$FPC" = true ]; then brew install fpc; fi
+        {
+          echo "LLVM_PREFIX=$(brew --prefix llvm)"
+          echo "HOST_CC=/usr/bin/clang"
+          echo "HOST_CXX=/usr/bin/clang++"
+        } >> "$GITHUB_ENV"

@@ -9,29 +9,27 @@ jobs:
     strategy:
       fail-fast: false  # a failure on one platform does not hide the other's
       matrix:
-        os: [ubuntu-24.04, ubuntu-24.04-arm]  # x86-64 and ARM64
+        # Linux x86-64 and ARM64, macOS ARM64
+        os: [ubuntu-24.04, ubuntu-24.04-arm, macos-15]
     runs-on: ${{ matrix.os }}
     env:
       LLVM_VERSION: 23
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install LLVM ${{ env.LLVM_VERSION }}
-        run: |
-          wget -q https://apt.llvm.org/llvm.sh
-          sudo bash llvm.sh "$LLVM_VERSION"
-          sudo apt-get install -y "llvm-$LLVM_VERSION-dev" "llvm-$LLVM_VERSION-tools" \
-            "clang-$LLVM_VERSION" ninja-build zlib1g-dev libzstd-dev libedit-dev libxml2-dev \
-            fp-compiler
-          pip install lit
+      - name: Set up LLVM ${{ env.LLVM_VERSION }}
+        uses: ./.github/actions/setup-llvm
+        with:
+          llvm-version: ${{ env.LLVM_VERSION }}
+          fpc: 'true'  # the bootstrap's Free Pascal path
 
       - name: Configure
         run: |
           cmake -S . -B build -G Ninja \
             -DCMAKE_BUILD_TYPE=Debug \
-            -DLLVM_DIR=/usr/lib/llvm-$LLVM_VERSION/lib/cmake/llvm \
-            -DCMAKE_C_COMPILER=clang-$LLVM_VERSION \
-            -DCMAKE_CXX_COMPILER=clang++-$LLVM_VERSION
+            -DLLVM_DIR="$LLVM_PREFIX/lib/cmake/llvm" \
+            -DCMAKE_C_COMPILER="$HOST_CC" \
+            -DCMAKE_CXX_COMPILER="$HOST_CXX"
 
       - name: Build
         run: ninja -C build
@@ -57,7 +55,7 @@ jobs:
       - name: Bootstrap from the seed
         run: |
           python3 utils/seed.py bootstrap --require-same \
-            --seed build/seed/p3-seed-*.tar.gz --llvm-config llvm-config-$LLVM_VERSION
+            --seed build/seed/p3-seed-*.tar.gz --llvm-config "$LLVM_PREFIX/bin/llvm-config"
 
       - name: Upload the seed
         uses: actions/upload-artifact@v4
@@ -95,28 +93,25 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-24.04, ubuntu-24.04-arm]
+        os: [ubuntu-24.04, ubuntu-24.04-arm, macos-15]
     runs-on: ${{ matrix.os }}
     env:
       LLVM_VERSION: 23
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install LLVM ${{ env.LLVM_VERSION }}
-        run: |
-          wget -q https://apt.llvm.org/llvm.sh
-          sudo bash llvm.sh "$LLVM_VERSION"
-          sudo apt-get install -y "llvm-$LLVM_VERSION-dev" "llvm-$LLVM_VERSION-tools" \
-            "clang-$LLVM_VERSION" ninja-build zlib1g-dev libzstd-dev libedit-dev libxml2-dev
-          pip install lit
+      - name: Set up LLVM ${{ env.LLVM_VERSION }}
+        uses: ./.github/actions/setup-llvm
+        with:
+          llvm-version: ${{ env.LLVM_VERSION }}
 
       - name: Configure (Release)
         run: |
           cmake -S . -B build -G Ninja \
             -DCMAKE_BUILD_TYPE=Release \
-            -DLLVM_DIR=/usr/lib/llvm-$LLVM_VERSION/lib/cmake/llvm \
-            -DCMAKE_C_COMPILER=clang-$LLVM_VERSION \
-            -DCMAKE_CXX_COMPILER=clang++-$LLVM_VERSION
+            -DLLVM_DIR="$LLVM_PREFIX/lib/cmake/llvm" \
+            -DCMAKE_C_COMPILER="$HOST_CC" \
+            -DCMAKE_CXX_COMPILER="$HOST_CXX"
 
       - name: Build (Release)
         run: ninja -C build
