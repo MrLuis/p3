@@ -122,7 +122,23 @@ int32_t __pas_sys_file_exists(const char *path) {
 
 int32_t __pas_sys_dir_exists(const char *path) {
   StatBuf st;
-  return STAT(path, &st) == 0 && IS_DIR(st.st_mode);
+  if (STAT(path, &st) == 0)
+    return IS_DIR(st.st_mode);
+#ifdef _WIN32
+  /* The C library's stat does not find "dir/" or "dir\", which other
+   * systems do; a root such as "C:\" works only with its separator, so it
+   * is tried as given first. */
+  size_t n = strlen(path);
+  if (n > 1 && n < MAX_PATH && (path[n - 1] == '/' || path[n - 1] == '\\')) {
+    char trimmed[MAX_PATH];
+    while (n > 1 && (path[n - 1] == '/' || path[n - 1] == '\\'))
+      n--;
+    memcpy(trimmed, path, n);
+    trimmed[n] = '\0';
+    return STAT(trimmed, &st) == 0 && IS_DIR(st.st_mode);
+  }
+#endif
+  return 0;
 }
 
 int32_t __pas_sys_mkdir(const char *path) {
