@@ -1,0 +1,105 @@
+# Releases: a pushed tag v<version> builds, tests and packages every
+# platform from the tagged commit (package.yml), and publishes the archives
+# only once all of them have passed. A tag with a suffix (v0.2.0-rc.1) is a
+# pre-release; its number must be CMakeLists.txt's version, and so must a
+# plain tag's.
+#
+# Run by hand (workflow_dispatch), it does the same from the chosen branch,
+# without publishing: a rehearsal. (seed-v* tags are ci.yml's.)
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  version:
+    runs-on: ubuntu-24.04
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+      prerelease: ${{ steps.v.outputs.prerelease }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: The tag and CMake's version
+        id: v
+        env:
+          REF_TYPE: ${{ github.ref_type }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          cmake_version=$(sed -n 's/^project(p3 VERSION \([0-9.]*\) .*/\1/p' CMakeLists.txt)
+          [ -n "$cmake_version" ] || { echo "::error::no version in CMakeLists.txt"; exit 1; }
+          if [ "$REF_TYPE" = tag ]; then
+            version=${REF_NAME#v}
+          else
+            version=$cmake_version
+          fi
+          case $version in
+            "$cmake_version") prerelease=false ;;
+            "$cmake_version"-?*) prerelease=true ;;
+            *)
+              echo "::error::tag $REF_NAME does not name version $cmake_version (CMakeLists.txt)"
+              exit 1 ;;
+          esac
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "prerelease=$prerelease" >> "$GITHUB_OUTPUT"
+          echo "version $version, pre-release: $prerelease"
+
+  package:
+    needs: version
+    uses: ./.github/workflows/package.yml
+    with:
+      version: ${{ needs.version.outputs.version }}
+
+  # The only job that may write to the repository, and only after every
+  # platform was built, tested and tried: a release is never partly uploaded.
+  publish:
+    needs: [version, package]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - name: Download the archives
+        uses: actions/download-artifact@v4
+        with:
+          pattern: p3-*
+          path: dist
+          merge-multiple: true
+
+      - name: Check them
+        env:
+          VERSION: ${{ needs.version.outputs.version }}
+        run: |
+          cd dist
+          ls -l
+          for a in linux-x86_64 linux-arm64 macos-arm64; do
+            [ -f "p3-$VERSION-$a.tar.xz" ] || { echo "::error::no p3-$VERSION-$a.tar.xz"; exit 1; }
+          done
+          sha256sum -c ./*.sha256
+
+      - name: Publish
+        if: github.ref_type == 'tag'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ github.ref_name }}
+          VERSION: ${{ needs.version.outputs.version }}
+          PRERELEASE: ${{ needs.version.outputs.prerelease }}
+        run: |
+          flags=
+          if [ "$PRERELEASE" = true ]; then flags=--prerelease; fi
+          gh release create "$TAG" dist/* --verify-tag $flags \
+            --title "p3 $VERSION" --generate-notes
+
+      - name: Rehearsal only
+        if: github.ref_type != 'tag'
+        run: |
+          echo "Not a tag, so nothing is published. A tag would publish:" dist/*

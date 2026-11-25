@@ -29,8 +29,13 @@ fail() {
   exit 1
 }
 
+# P3_VERSION names a release (0.2.0-rc.1); its number must be CMake's.
 version=$(sed -n 's/^project(p3 VERSION \([0-9.]*\) .*/\1/p' "$(dirname "$0")/../CMakeLists.txt")
 [ -n "$version" ] || fail "no version in CMakeLists.txt"
+case ${P3_VERSION:-$version} in
+  "$version" | "$version"-*) version=${P3_VERSION:-$version} ;;
+  *) fail "P3_VERSION $P3_VERSION is not version $version" ;;
+esac
 case $(uname -m) in
   x86_64) arch=x86_64 ;;
   aarch64) arch=arm64 ;;
