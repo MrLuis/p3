@@ -21,6 +21,16 @@
 ; RUN: cd %t.dir && %p3 --target=x86_64-w64-windows-gnu greet.pas
 ; RUN: llvm-readobj --file-headers %t.dir/greet.exe | FileCheck --check-prefix=PE %s
 
+; Tasks use winpthreads: linked with both of MinGW's thread models, and
+; without its DLL.
+; RUN: %p3 --mode=objfpc -O2 --target=x86_64-w64-mingw32 %S/../run/async.pas -o %t.dir/async.exe
+; RUN: llvm-readobj --coff-imports %t.dir/async.exe | FileCheck --check-prefix=DLLS %s
+
+; P3_CROSS_CC: a bare name is looked up in PATH.
+; RUN: env P3_CROSS_CC=x86_64-w64-mingw32-gcc %p3 --target=x86_64-w64-mingw32 %S/Inputs/hello.pas -o %t.dir/named.exe
+; RUN: not env P3_CROSS_CC=no-such-gcc %p3 --target=x86_64-w64-mingw32 %S/Inputs/hello.pas -o %t.dir/none.exe 2>&1 | FileCheck --check-prefix=NOCC %s
+; NOCC: error: cannot find linker driver 'no-such-gcc' (from P3_CROSS_CC)
+
 ; External 'c' routines: Windows has no libc to name (msvcrt/UCRT is
 ; always linked).
 ; RUN: %p3 --mode=objfpc --target=x86_64-w64-mingw32 %S/../run/externals.pas -o %t.dir/externals.exe

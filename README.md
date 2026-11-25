@@ -73,14 +73,8 @@ Then follow the Ubuntu 24.04 steps above inside Ubuntu, with the repository
 cloned into the Linux file system (under `~`, which is much faster than
 `/mnt/c`). The compiler is then a Linux program. For it to write Windows
 executables, install MinGW-w64 (`sudo apt-get install -y mingw-w64`) before
-running `cmake` (if `build/` is already configured, run `cmake` again), and
-select its POSIX threads variant, without which linking fails with undefined
-`pthread_` references:
-
-```sh
-sudo update-alternatives --set x86_64-w64-mingw32-gcc \
-  /usr/bin/x86_64-w64-mingw32-gcc-posix
-```
+running `cmake` (if `build/` is already configured, run `cmake` again). Either
+of MinGW's thread variants works.
 
 See **Cross-compiling** under [Compiler parameters](#compiler-parameters).
 

@@ -181,9 +181,15 @@ begin
     name := runtimeTargetName(triple);
     cc := findTool('P3_CROSS_CC', name + '-gcc ' + name + '-clang', fromEnv);
     if cc = '' then
-      diagError(noLoc, 'cannot find a C compiler to link for ''' + triple +
-                       ''' (tried ' + name + '-gcc, ' + name +
-                       '-clang); set P3_CROSS_CC');
+    begin
+      if fromEnv and sysGetEnv('P3_CROSS_CC', value) then
+        diagError(noLoc, 'cannot find linker driver ''' + value +
+                         ''' (from P3_CROSS_CC)')
+      else
+        diagError(noLoc, 'cannot find a C compiler to link for ''' + triple +
+                         ''' (tried ' + name + '-gcc, ' + name +
+                         '-clang); set P3_CROSS_CC');
+    end;
     exit(cc);
   end;
   cc := findTool('P3_CC', 'clang-23 clang cc gcc', fromEnv);
@@ -458,10 +464,15 @@ begin
     addArg(cmd, '-Wl,/OPT:REF')
   else
     addArg(cmd, '-Wl,--gc-sections');
-  { MinGW: a self-contained executable, without MinGW's own DLLs (the
-    runtime's thread-local variables need libwinpthread's) }
+  { MinGW: a self-contained executable, without MinGW's own DLLs. The
+    runtime's tasks use winpthreads, which a toolchain of the posix thread
+    model links by itself and one of the win32 model (Debian's and Ubuntu's
+    default) does not. }
   if isMinGWTriple(triple) then
+  begin
     addArg(cmd, '-static');
+    addArg(cmd, '-lpthread');
+  end;
   { Windows: the runtime's socket waits (and unit netasync) use Winsock }
   if isWindowsTriple(triple) then
     addArg(cmd, '-lws2_32');

@@ -104,6 +104,20 @@ std::string p3::findUnitLibrary() {
   return std::string(Path);
 }
 
+/// The linker driver an environment variable names: a path as it is, a bare
+/// name looked up in $PATH.
+static std::string linkerDriverFromEnv(llvm::StringRef Value,
+                                       llvm::StringRef Variable,
+                                       DiagnosticsEngine &Diags) {
+  if (llvm::sys::path::has_parent_path(Value))
+    return Value.str();
+  if (auto P = llvm::sys::findProgramByName(Value))
+    return *P;
+  Diags.error("cannot find linker driver '" + llvm::Twine(Value) +
+              "' (from " + Variable + ")");
+  return "";
+}
+
 static std::string findLinkerDriver(llvm::StringRef Triple,
                                     DiagnosticsEngine &Diags) {
   // Another target: its own C toolchain (MinGW-w64's for Windows), which
@@ -111,7 +125,7 @@ static std::string findLinkerDriver(llvm::StringRef Triple,
   if (!isHostTriple(Triple)) {
     std::string Name = runtimeTargetName(Triple);
     if (auto Env = llvm::sys::Process::GetEnv("P3_CROSS_CC"))
-      return *Env;
+      return linkerDriverFromEnv(*Env, "P3_CROSS_CC", Diags);
     for (const char *Suffix : {"-gcc", "-clang"})
       if (auto P = llvm::sys::findProgramByName(Name + Suffix))
         return *P;
@@ -119,15 +133,8 @@ static std::string findLinkerDriver(llvm::StringRef Triple,
                 "' (tried " + Name + "-gcc, " + Name + "-clang); set P3_CROSS_CC");
     return "";
   }
-  if (auto Env = llvm::sys::Process::GetEnv("P3_CC")) {
-    if (llvm::sys::path::has_parent_path(*Env))
-      return *Env;
-    if (auto P = llvm::sys::findProgramByName(*Env))
-      return *P;
-    Diags.error("cannot find linker driver '" + llvm::Twine(*Env) +
-                "' (from P3_CC)");
-    return "";
-  }
+  if (auto Env = llvm::sys::Process::GetEnv("P3_CC"))
+    return linkerDriverFromEnv(*Env, "P3_CC", Diags);
   for (const char *Name : {"clang-23", "clang", "cc", "gcc"})
     if (auto P = llvm::sys::findProgramByName(Name))
       return *P;
@@ -216,10 +223,12 @@ bool p3::linkExecutable(llvm::StringRef ObjectFile,
     Args.push_back("-Wl,-dead_strip");
   else if (T.isOSBinFormatCOFF())
     Args.push_back("-Wl,/OPT:REF");
-  // MinGW: a self-contained executable, without MinGW's own DLLs (the
-  // runtime's thread-local variables need libwinpthread's).
+  // MinGW: a self-contained executable, without MinGW's own DLLs. The
+  // runtime's tasks use winpthreads, which a toolchain of the posix thread
+  // model links by itself and one of the win32 model (Debian's and Ubuntu's
+  // default) does not.
   if (T.isWindowsGNUEnvironment())
-    Args.push_back("-static");
+    Args.append({"-static", "-lpthread"});
   // Windows: the runtime's socket waits (and unit netasync) use Winsock.
   if (T.isOSWindows())
     Args.push_back("-lws2_32");
