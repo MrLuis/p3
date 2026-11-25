@@ -89,6 +89,53 @@ jobs:
             --title "p3 stage-1 seed $GITHUB_REF_NAME" \
             --notes "Bootstrap the self-hosted compiler without the C++ p3: utils/seed.py bootstrap --seed <file> (see selfhost/README.md)."
 
+  # Windows programs, cross-compiled with MinGW-w64 and run under Wine:
+  # tests/windows replays the programs of tests/run, built by both
+  # compilers. (Wine is not Windows.)
+  windows-wine:
+    runs-on: ubuntu-24.04
+    env:
+      LLVM_VERSION: 23
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up LLVM ${{ env.LLVM_VERSION }}
+        uses: ./.github/actions/setup-llvm
+        with:
+          llvm-version: ${{ env.LLVM_VERSION }}
+
+      - name: Install MinGW-w64 and Wine
+        run: |
+          sudo apt-get install -y gcc-mingw-w64-x86-64 wine wine64
+          wine --version
+
+      - name: Configure
+        run: |
+          cmake -S . -B build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DLLVM_DIR="$LLVM_PREFIX/lib/cmake/llvm" \
+            -DCMAKE_C_COMPILER="$HOST_CC" \
+            -DCMAKE_CXX_COMPILER="$HOST_CXX" \
+            -DP3_CROSS_TARGETS=x86_64-w64-mingw32
+
+      - name: Build
+        run: |
+          ninja -C build
+          ninja -C build p3-self
+
+      # lit skips these tests, and passes, when the Windows runtime or Wine
+      # is missing: check both, and that tests did run.
+      - name: Test Windows programs
+        run: |
+          test -f build/lib/x86_64-w64-mingw32/libpascalrt.a
+          test -x build/bin/p3-self
+          command -v wine
+          lit -v build/tests/driver/windows-link.test build/tests/windows | tee windows.log
+          grep -qE 'PASS: p3 :: driver/windows-link' windows.log
+          grep -qE 'PASS: p3 :: windows/[^/]+\.pas ' windows.log
+          grep -qE 'PASS: p3 :: windows/self/' windows.log
+        shell: bash
+
   release:
     strategy:
       fail-fast: false
