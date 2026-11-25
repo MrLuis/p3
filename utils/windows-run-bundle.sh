@@ -1,0 +1,49 @@
+#!/usr/bin/env bash
+# Runs the Windows programs of utils/windows-bundle.py on Windows (Git
+# Bash), each in a directory of its own, and compares each one's output
+# with what it must print:
+#
+#   utils/windows-run-bundle.sh <bundle dir>
+#
+# RUNNER runs a program somewhere else (RUNNER=wine, to try this script).
+set -u
+
+if [ $# -ne 1 ]; then
+  echo "usage: $0 <bundle dir>" >&2
+  exit 2
+fi
+bundle=$(cd "$1" && pwd)
+work=$(mktemp -d)
+trap 'rm -rf "$work"' EXIT
+runner=${RUNNER:-}
+# timeout(1) is part of Git for Windows; macOS has none.
+limit=
+if command -v timeout >/dev/null; then limit="timeout 120"; fi
+
+passed=0
+failed=()
+for exe in "$bundle"/*.exe; do
+  name=$(basename "$exe" .exe)
+  dir=$work/$name
+  mkdir "$dir"
+  (cd "$dir" && $limit $runner "$exe" </dev/null >out 2>err)
+  status=$?
+  tr -d '\r' <"$dir/out" >"$dir/out.lf"
+  if [ $status -ne 0 ]; then
+    echo "FAIL: $name: exit status $status"
+    sed 's/^/  stderr: /' "$dir/err" | head -20
+    failed+=("$name")
+  elif ! diff -u "$bundle/$name.expected" "$dir/out.lf" >"$dir/diff"; then
+    echo "FAIL: $name: output differs"
+    head -40 "$dir/diff"
+    failed+=("$name")
+  else
+    passed=$((passed + 1))
+  fi
+done
+
+echo "windows-run-bundle: $passed passed, ${#failed[@]} failed"
+if [ ${#failed[@]} -ne 0 ]; then
+  echo "failed: ${failed[*]}"
+  exit 1
+fi

@@ -123,6 +123,21 @@ jobs:
           ninja -C build
           ninja -C build p3-self
 
+      # The programs whose tests only compare their output, built by both
+      # compilers, for the windows job to run on Windows itself.
+      - name: Bundle Windows programs
+        run: |
+          utils/windows-bundle.py "build/bin/p3 -fdiagnostics-color=never --no-project" tests/run bundle/p3
+          utils/windows-bundle.py "build/bin/p3-self -fdiagnostics-color=never --no-project" tests/run bundle/p3-self
+
+      - name: Upload them
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-programs
+          path: bundle
+          if-no-files-found: error
+          retention-days: 3
+
       # lit skips these tests, and passes, when the Windows runtime or Wine
       # is missing: check both, and that tests did run.
       - name: Test Windows programs
@@ -135,6 +150,31 @@ jobs:
           grep -qE 'PASS: p3 :: windows/[^/]+\.pas ' windows.log
           grep -qE 'PASS: p3 :: windows/self/' windows.log
         shell: bash
+
+  # Wine is not Windows: the bundled programs on Windows itself. It runs
+  # even when the Wine tests fail, once the programs are uploaded.
+  windows:
+    needs: windows-wine
+    if: ${{ !cancelled() }}
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download the programs
+        uses: actions/download-artifact@v4
+        with:
+          name: windows-programs
+          path: bundle
+
+      - name: Run them (C++ p3)
+        run: utils/windows-run-bundle.sh bundle/p3
+
+      - name: Run them (self-hosted p3)
+        if: ${{ !cancelled() }}
+        run: utils/windows-run-bundle.sh bundle/p3-self
 
   release:
     strategy:
