@@ -31,7 +31,8 @@ for exe in "$bundle"/*.exe; do
   tr -d '\r' <"$dir/out" >"$dir/out.lf"
   if [ $status -ne 0 ]; then
     echo "FAIL: $name: exit status $status"
-    sed 's/^/  stderr: /' "$dir/err" | head -20
+    tail -20 "$dir/out.lf" | sed 's/^/  stdout: /'
+    head -20 "$dir/err" | sed 's/^/  stderr: /'
     failed+=("$name")
   elif ! diff -u "$bundle/$name.expected" "$dir/out.lf" >"$dir/diff"; then
     echo "FAIL: $name: output differs"

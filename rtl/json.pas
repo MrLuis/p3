@@ -418,7 +418,12 @@ const
     1e8, 1e9, 1e10, 1e11, 1e12, 1e13, 1e14, 1e15, 1e16, 1e17, 1e18, 1e19,
     1e20, 1e21, 1e22);
 
+{ Windows: MinGW-w64's own, correctly rounded; msvcrt.dll's strtod is not }
+{$IFDEF WINDOWS}
+function c_strtod(p: PChar; endp: Pointer): Double; cdecl; external 'c' name '__mingw_strtod';
+{$ELSE}
 function c_strtod(p: PChar; endp: Pointer): Double; cdecl; external 'c' name 'strtod';
+{$ENDIF}
 
 {$I json_pow5.inc}
 
@@ -1703,8 +1708,13 @@ end;
 
 { --- writing --- }
 
+{$IFDEF WINDOWS}
+function c_snprintf(buf: PChar; n: SizeInt; fmt: PChar): Integer; cdecl;
+  varargs; external 'c' name '__mingw_snprintf';
+{$ELSE}
 function c_snprintf(buf: PChar; n: SizeInt; fmt: PChar): Integer; cdecl;
   varargs; external 'c' name 'snprintf';
+{$ENDIF}
 
 { P significant digits of |D|, correctly rounded, by C's printf (%.*e): the
   digits and the decimal exponent of the first }

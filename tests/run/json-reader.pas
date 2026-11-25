@@ -94,7 +94,12 @@ begin
   R.Free;
 end;
 
+{ Windows: MinGW-w64's own, correctly rounded; msvcrt.dll's strtod is not }
+{$IFDEF WINDOWS}
+function c_strtod(p: PChar; endp: Pointer): Double; cdecl; external 'c' name '__mingw_strtod';
+{$ELSE}
 function c_strtod(p: PChar; endp: Pointer): Double; cdecl; external 'c' name 'strtod';
+{$ENDIF}
 
 { numbers with few digits and small exponents take the fast path: the same
   doubles as strtod }

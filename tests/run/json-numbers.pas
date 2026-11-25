@@ -11,7 +11,12 @@ program jsonnumbers;
 {$H+}
 uses sysutils, json;
 
+{ Windows: MinGW-w64's own, correctly rounded; msvcrt.dll's strtod is not }
+{$IFDEF WINDOWS}
+function c_strtod(p: PChar; endp: Pointer): Double; cdecl; external 'c' name '__mingw_strtod';
+{$ELSE}
 function c_strtod(p: PChar; endp: Pointer): Double; cdecl; external 'c' name 'strtod';
+{$ENDIF}
 
 var
   Seed: QWord = 88172645463325252;

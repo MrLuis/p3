@@ -11,9 +11,19 @@ program jsonfloat;
 {$H+}
 uses sysutils, json;
 
+{$IFDEF WINDOWS}
+function c_snprintf(buf: PChar; n: SizeInt; fmt: PChar): Integer; cdecl;
+  varargs; external 'c' name '__mingw_snprintf';
+{$ELSE}
 function c_snprintf(buf: PChar; n: SizeInt; fmt: PChar): Integer; cdecl;
   varargs; external 'c' name 'snprintf';
+{$ENDIF}
+{ Windows: MinGW-w64's own, correctly rounded; msvcrt.dll's strtod is not }
+{$IFDEF WINDOWS}
+function c_strtod(p: PChar; endp: Pointer): Double; cdecl; external 'c' name '__mingw_strtod';
+{$ELSE}
 function c_strtod(p: PChar; endp: Pointer): Double; cdecl; external 'c' name 'strtod';
+{$ENDIF}
 
 { the definition }
 function Reference(D: Double): string;
@@ -29,12 +39,6 @@ begin
       Break;
   end;
   S := PChar(@Buf[0]);
-  { Windows' C library writes at least three exponent digits; the definition
-    has at least two, like C99 }
-  P := Pos('e', S);
-  if P > 0 then
-    while (Length(S) - P > 3) and (S[P + 2] = '0') do
-      Delete(S, P + 2, 1);
   if (Pos('.', S) = 0) and (Pos('e', S) = 0) then
     S := S + '.0';
   Result := S;

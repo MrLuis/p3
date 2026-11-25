@@ -20,6 +20,11 @@
 #if defined(__APPLE__) && !defined(_XOPEN_SOURCE)
 #define _XOPEN_SOURCE 700 /* ucontext */
 #endif
+#if defined(_WIN32) && (!defined(_WIN32_WINNT) || _WIN32_WINNT < 0x0600)
+/* WSAPoll (Vista): older MinGW-w64 headers default to XP and hide it. */
+#undef _WIN32_WINNT
+#define _WIN32_WINNT 0x0600
+#endif
 #include "pascalrt.h"
 
 #include <errno.h>
