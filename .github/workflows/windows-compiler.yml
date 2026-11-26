@@ -55,12 +55,14 @@ jobs:
           clang --version | head -1
           clang -dumpmachine
 
-      # lit for the test suite (MSYS2 has FileCheck in its llvm, not lit).
+      # lit for the test suite (MSYS2 has FileCheck in its llvm, not lit),
+      # on Windows' own Python: MSYS2's writes paths with '/', which lit's
+      # long-path prefix (\\?\) does not allow.
       - name: lit
         run: |
-          python -m venv "$RUNNER_TEMP/litenv"
-          "$RUNNER_TEMP/litenv/bin/python" -m pip install -q lit
-          echo "LIT=$(cygpath -u "$RUNNER_TEMP")/litenv/bin/lit" >> "$GITHUB_ENV"
+          /c/Windows/py.exe -3 -m venv "$RUNNER_TEMP/litenv"
+          "$RUNNER_TEMP/litenv/Scripts/python.exe" -m pip install -q lit
+          echo "LIT=$(cygpath -u "$RUNNER_TEMP")/litenv/Scripts/lit.exe" >> "$GITHUB_ENV"
 
       # W2: LLVM linked in, and everything else static (-static: the C++
       # and GCC runtimes, winpthreads, zlib, zstd), so that p3.exe needs no

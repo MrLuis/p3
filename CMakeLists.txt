@@ -144,7 +144,10 @@ set(P3_SELFHOST_FLAGS "")
 set(P3_SELFHOST_PROBLEM "")
 find_package(Python3 COMPONENTS Interpreter)
 list(GET LLVM_INCLUDE_DIRS 0 P3_LLVM_INCLUDE_DIR)
-if(Python3_FOUND)
+if(WIN32)
+  # (it runs its tools through system() and a POSIX shell)
+  set(P3_SELFHOST_PROBLEM "the self-hosted compiler is not built on Windows")
+elseif(Python3_FOUND)
   execute_process(COMMAND ${Python3_EXECUTABLE}
                           ${PROJECT_SOURCE_DIR}/utils/gen-llvm-targets.py
                           ${P3_LLVM_INCLUDE_DIR} ${P3_SELFHOST_DIR}/llvmtargets.inc

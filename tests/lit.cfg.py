@@ -28,6 +28,9 @@ for d in (config.llvm_tools_dir, config.p3_tools_dir):
 # RUN lines say `FileCheck`; point that at whichever implementation CMake
 # found (LLVM's, or the Python port `filecheck`).
 config.substitutions.append((r"\bFileCheck\b", config.filecheck))
+# Windows programs end their lines with CR LF, the expected files with LF.
+if sys.platform == "win32":
+    config.substitutions.append((r"(?<![-\w./])diff ", "diff --strip-trailing-cr "))
 
 # %selfhost-flags: the options that build selfhost/p3.pas (its LLVM-C
 # backend's include file and libLLVM; before %p3, a prefix of it).
