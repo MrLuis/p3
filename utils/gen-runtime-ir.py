@@ -14,7 +14,13 @@ into one module by llvm-link. The output differs in that:
     goes to;
   - the target triple and data layout are gone (p3 sets its module's), and
     so are the module flags and the target-cpu/target-features attributes,
-    which would keep LLVM from inlining into p3's functions.
+    which would keep LLVM from inlining into p3's functions;
+  - module-level assembly is gone: what it defines (on Windows, sys.c's
+    __pas_setjmp and __pas_longjmp) is in the library, and a copy in the
+    program would be defined twice;
+  - so are the debug compile units clang writes for Windows targets even
+    with -g0 (emissionKind: NoDebug), which without their module flag make
+    LLVM warn about "debug info with an invalid version".
 
 A variable of the runtime that is not a constant must have external
 linkage: a static one would get a second copy in the program, apart from
@@ -31,9 +37,18 @@ def main():
         lines = f.read().split("\n")
     out = ["; The Pascal runtime as LLVM IR, made by utils/gen-runtime-ir.py."]
     bad = []
+    in_asm = False
     for line in lines:
+        # module asm: one line, or (LLVM 23) a header and indented strings
+        if line.startswith("module asm"):
+            in_asm = True
+            continue
+        if in_asm and line.startswith('    "'):
+            continue
+        in_asm = False
         if line.startswith(("target triple", "target datalayout", "source_filename",
-                            "; ModuleID", "!llvm.module.flags", "!llvm.ident")):
+                            "; ModuleID", "!llvm.module.flags", "!llvm.ident",
+                            "!llvm.dbg.cu")):
             continue
         if line.startswith("define "):
             m = re.match(r"define (internal |private |dso_local )*", line)
