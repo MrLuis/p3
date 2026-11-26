@@ -214,6 +214,35 @@ jobs:
             test "$(./units.exe | tr -d '\r')" = 'INSTALLED moved'
           done
 
+      # winget installs a portable p3 as a symbolic link to p3.exe in a
+      # directory on PATH; Scoop and users unpack it anywhere, a user name
+      # included: p3 must find its libraries from both.
+      - name: Through a link, and from a path with spaces and non-ASCII
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $pkg = (Get-Item unpacked/p3-*).FullName
+          $odd = Join-Path $env:RUNNER_TEMP "dir with spaces $([char]0xC4)$([char]0x3B1)"
+          New-Item -ItemType Directory $odd | Out-Null
+          Copy-Item -Recurse $pkg (Join-Path $odd 'p3 package')
+          $exe = Join-Path $odd 'p3 package\bin\p3.exe'
+          $links = Join-Path $env:RUNNER_TEMP 'links'
+          New-Item -ItemType Directory $links | Out-Null
+          New-Item -ItemType SymbolicLink -Path (Join-Path $links 'p3.exe') -Target $exe | Out-Null
+          $env:PATH = "$links;C:\Windows\System32;C:\Windows"
+          foreach ($p3 in @($exe, 'p3')) {
+            Write-Host "--- $p3"
+            & $p3 --no-project tests/driver/Inputs/hello.pas -o hello.exe
+            if ($LASTEXITCODE) { throw "hello: p3 failed" }
+            $out = (./hello.exe | Out-String).Trim()
+            if ($out -ne 'Hello, World!') { throw "hello: $out" }
+            & $p3 --no-project --mode=objfpc tests/driver/Inputs/install-units.pas -o units.exe
+            if ($LASTEXITCODE) { throw "units: p3 failed" }
+            $out = (./units.exe | Out-String).Trim()
+            if ($out -ne 'INSTALLED moved') { throw "units: $out" }
+            Remove-Item hello.exe, units.exe
+          }
+
       - name: Test programs
         env:
           NET_REPEAT: 3

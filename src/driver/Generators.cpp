@@ -480,7 +480,7 @@ bool Driver::runGenerators() {
 
   for (const std::string &N : Sema(*std::make_unique<ASTContext>(Strings), Diags, LangOpts).standardNames())
     PredeclaredNames.insert(N);
-  std::string Self = fs::getMainExecutable(nullptr, nullptr);
+  std::string Self = selfExecutable();
   // The directories units are looked for in (not the library: its units
   // have no generated code).
   std::vector<std::string> Dirs{std::string(InputDir)};

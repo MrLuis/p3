@@ -23,6 +23,11 @@ namespace p3 {
 
 class DiagnosticsEngine;
 
+/// The path of this p3 executable, with symbolic links resolved: what
+/// "<dir of p3>" below means. (On Windows, getMainExecutable gives a
+/// link's own path, and winget installs a portable p3 as a link to it.)
+std::string selfExecutable();
+
 /// The runtime library for Triple (empty: the host). For the host:
 /// $P3_RUNTIME_LIB, else <dir of p3>/../lib/libpascalrt.a; for another
 /// target, <dir of p3>/../lib/<runtimeTargetName>/libpascalrt.a (built when

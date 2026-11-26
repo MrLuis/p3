@@ -731,7 +731,7 @@ bool Evaluator::evaluate(FileInfo &F, TopDecl &X, RoutineDecl *Fn,
   std::string ExeS = hostExecutable(Exe), OutPath = std::string(Exe) + ".out",
               ErrPath = std::string(Exe) + ".err", StampPath = std::string(Exe) + ".stamp";
 
-  std::string Self = fs::getMainExecutable(nullptr, nullptr);
+  std::string Self = selfExecutable();
   // (without warnings about the variables copied only for diagnostics)
   std::vector<std::string> Args{Self, "--no-project", "-O0",
                                 "--Wno-unused-variable",

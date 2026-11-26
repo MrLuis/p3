@@ -31,13 +31,22 @@ std::string p3::runtimeTargetName(llvm::StringRef Triple) {
   return Triple.str();
 }
 
+std::string p3::selfExecutable() {
+  // getMainExecutable works without argv[0] on Linux and macOS, where it
+  // resolves links too; on Windows it is GetModuleFileNameW's path.
+  std::string Exe = llvm::sys::fs::getMainExecutable(nullptr, nullptr);
+  llvm::SmallString<256> Real;
+  if (!Exe.empty() && !llvm::sys::fs::real_path(Exe, Real))
+    return std::string(Real);
+  return Exe;
+}
+
 std::string p3::findRuntimeLibrary(llvm::StringRef Triple) {
   bool Host = isHostTriple(Triple);
   if (Host)
     if (auto Env = llvm::sys::Process::GetEnv("P3_RUNTIME_LIB"))
       return *Env;
-  // getMainExecutable works without argv[0] on Linux and macOS.
-  std::string Exe = llvm::sys::fs::getMainExecutable(nullptr, nullptr);
+  std::string Exe = selfExecutable();
   llvm::SmallString<256> Path(llvm::sys::path::parent_path(Exe));
   if (Host)
     llvm::sys::path::append(Path, "..", "lib", "libpascalrt.a");
@@ -127,7 +136,7 @@ std::string p3::findRuntimeIR() {
 std::string p3::findUnitLibrary() {
   if (auto Env = llvm::sys::Process::GetEnv("P3_UNIT_DIR"))
     return *Env;
-  std::string Exe = llvm::sys::fs::getMainExecutable(nullptr, nullptr);
+  std::string Exe = selfExecutable();
   llvm::SmallString<256> Path(llvm::sys::path::parent_path(Exe));
   llvm::sys::path::append(Path, "..", "lib", "pascal");
   llvm::sys::path::remove_dots(Path, /*remove_dot_dot=*/true);
@@ -247,7 +256,7 @@ static std::string findMinGWLibraries() {
   if (auto Env = llvm::sys::Process::GetEnv("P3_MINGW_SYSROOT")) {
     Dir = *Env;
   } else {
-    std::string Exe = llvm::sys::fs::getMainExecutable(nullptr, nullptr);
+    std::string Exe = selfExecutable();
     Dir = llvm::sys::path::parent_path(Exe);
     llvm::sys::path::append(Dir, "..", "lib", "mingw-w64");
     llvm::sys::path::remove_dots(Dir, /*remove_dot_dot=*/true);
