@@ -41,15 +41,31 @@ jobs:
           clang --version | head -1
           clang -dumpmachine
 
-      - name: Configure
+      # W2: LLVM linked in, and everything else static (-static: the C++
+      # and GCC runtimes, winpthreads, zlib, zstd), so that p3.exe needs no
+      # DLL of MSYS2's.
+      - name: Configure (static)
         run: |
           cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release \
             -DLLVM_DIR="$(llvm-config --cmakedir)" \
             -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++ \
+            -DP3_LINK_LLVM_DYLIB=OFF -DP3_LLVM_STATIC_DEPS=ON \
+            -DCMAKE_EXE_LINKER_FLAGS="-static" \
             -DP3_CROSS_TARGETS=OFF
 
       - name: Build
         run: ninja -C build p3 pascalrt rtl
+
+      - name: p3.exe needs only Windows' own DLLs
+        run: |
+          ls -la build/bin/p3.exe
+          dlls=$(objdump -p build/bin/p3.exe | sed -n 's/.*DLL Name: //p' | sort -u)
+          echo "$dlls"
+          bad=0
+          for d in $dlls; do
+            if [ -e "/ucrt64/bin/$d" ]; then echo "from MSYS2: $d"; bad=1; fi
+          done
+          exit $bad
 
       - name: Hello
         run: |
