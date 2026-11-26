@@ -150,46 +150,19 @@ jobs:
           sed -n '/^Failed Tests/,$p;/^Unresolved Tests/,$p' lit-windows.log | tail -20
           tail -8 lit-windows.log
 
-      # TEMPORARY: the netasync example refuses its clients on Windows (not
-      # under Wine): the server's own output, errors and exit status.
+      # TEMPORARY: the netasync example's server takes a connection and
+      # resets it on Windows (not under Wine), printing nothing. It listens
+      # on every address; the tests that pass listen on 127.0.0.1.
       - name: Diagnose the netasync example
         continue-on-error: true
         run: |
           set +e
-          build/bin/p3.exe --no-project --mode=objfpc examples/netasync/src/netasync_demo.pas -o na.exe
-          ./na.exe --requests 1 > na.out 2> na.err &
-          pid=$!
-          sleep 2
-          echo "--- stdout so far"; cat na.out
-          port=$(sed -n 's/^listening on port \([0-9]*\).*/\1/p' na.out | tr -d '\r')
-          python -c "import socket,sys; s=socket.create_connection(('127.0.0.1', int(sys.argv[1])), timeout=5); s.sendall(b'hi\n'); print('client got', s.recv(100))" "$port"
-          sleep 2
-          kill $pid 2>/dev/null; wait $pid; echo "server exit: $?"
-          echo "--- stdout"; cat na.out; echo "--- stderr"; cat na.err
-
-      # TEMPORARY: what the rtl tests whose output has line breaks print on
-      # Windows (CR LF read as LF), to make their .windows.expected files.
-      - name: Capture Windows outputs of the rtl tests
-        continue-on-error: true
-        run: |
-          set +e
-          mkdir -p winout
-          for t in rtl-trim rtl-classes rtl-longstrings rtl-stringlist-io rtl-textstr; do
-            mkdir -p winout/$t
-            build/bin/p3.exe --no-project --mode=objfpc tests/run/rtl/$t.pas -o winout/$t/a.exe
-            (cd winout/$t && ./a.exe > out.raw)
-            python -c "import sys; d=open(sys.argv[1],'rb').read().replace(b'\r\n', b'\n'); open(sys.argv[2],'wb').write(d)" winout/$t/out.raw winout/$t.windows.expected
+          sed 's/NetListen(0, 128, true)/NetListen(0, 128, false)/' examples/netasync/src/netasync_demo.pas > na_local.pas
+          for v in examples/netasync/src/netasync_demo.pas na_local.pas; do
+            echo "=== $v"
+            build/bin/p3.exe --no-project --mode=objfpc "$v" -o na.exe
+            python tests/driver/Inputs/netasync-check.py ./na.exe 2>&1 | tail -3
           done
-          ls -la winout
-
-      - name: Upload the captured outputs
-        if: ${{ !cancelled() }}
-        uses: actions/upload-artifact@v4
-        with:
-          name: rtl-windows-outputs
-          path: winout/*.windows.expected
-          if-no-files-found: ignore
-          retention-days: 7
 
       - name: Upload the lit log
         if: ${{ !cancelled() }}

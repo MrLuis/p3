@@ -1,0 +1,9 @@
+empty: 0 []
+empty plain: 0 []
+one: 5 [one$$]
+one plain: 5 [one$$]
+empties: 12 [one$$$$$$x$$]
+empties plain: 12 [one$$$$$$x$$]
+one empty: 2 [$$]
+one empty plain: 2 [$$]
+differences: 0

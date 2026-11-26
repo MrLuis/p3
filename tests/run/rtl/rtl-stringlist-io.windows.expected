@@ -1,0 +1,26 @@
+empty: 0 lines, check 0
+one line, no break: 1 lines, check 289 [abc|]
+one line, LF: 1 lines, check 289 [abc|]
+LF: 3 lines, check 6922833 [a|bb|ccc|]
+CR: 3 lines, check 6922833 [a|bb|ccc|]
+CRLF: 3 lines, check 6922833 [a|bb|ccc|]
+mixed: 6 lines, check 303196
+empty lines: 7 lines, check 6683003
+no final break: 2 lines, check 216669 [a|b|]
+only breaks: 3 lines, check 231 [|||]
+CR at the block end: 3 lines, check 2655190
+CRLF around the block end: 2 lines, check 6399467
+LF at the block end: 2 lines, check 6431180
+long line over blocks: 2 lines, check 2517549
+long line, no break: 1 lines, check 4650236
+lines over blocks: 3 lines, check 2125394
+plain: <a,b,c>
+spaces: <"a b",c," d">
+spaces strict: <a b,c, d>
+commas: <"a,b",c>
+quotes: <"say ""hi""",x,"""">
+empty items: <,,>
+one empty: <"">
+none: <>
+one: <solo>
+nul and control: <"ab","c	">
