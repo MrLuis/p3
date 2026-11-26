@@ -18,6 +18,8 @@ program async;
 uses SysUtils, threading;
 
 type
+  TSharedCount = specialize TAtomic<Integer>;
+
   TCounter = class
     Total: Integer;
     function Add(n: Integer): async Integer;
@@ -137,22 +139,26 @@ begin
   Result := total;
 end;
 
+{ spawned children run on the pool, in parallel: what they share is
+  atomic (a plain count := count + 1 could lose an update when both wake
+  at once, as on a busy CI machine) }
 function Shared: async Integer;
 var
-  count: Integer;
+  count: TSharedCount;
 begin
-  count := 0;
+  count := TSharedCount.Create(0);
   scope
     spawn begin
       Sleep(5);
-      count := count + 1;
+      count.Add(1);
     end;
     spawn begin
       Sleep(10);
-      count := count + 10;
+      count.Add(10);
     end;
   end;
-  Result := count;
+  Result := count.Load;
+  count.Free;
 end;
 
 { a failing child cancels its siblings; the scope raises its failure }
