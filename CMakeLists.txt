@@ -67,7 +67,7 @@ endif()
 # not have. Link zstd statically and leave Z3 out; a link error says if a
 # later LLVM needs it.
 option(P3_LLVM_STATIC_DEPS
-       "With P3_LINK_LLVM_DYLIB=OFF, link LLVM's zstd statically and leave out Z3" OFF)
+       "With P3_LINK_LLVM_DYLIB=OFF, link LLVM's zstd (and on Windows zlib) statically and leave out Z3" OFF)
 if(P3_LLVM_STATIC_DEPS)
   if(NOT P3_LLVM_LIBS STREQUAL "LLVM" AND TARGET LLVMSupport)
     get_target_property(_p3_deps LLVMSupport INTERFACE_LINK_LIBRARIES)
@@ -76,6 +76,12 @@ if(P3_LLVM_STATIC_DEPS)
       list(TRANSFORM _p3_deps REPLACE "^zstd::libzstd_shared$" "zstd::libzstd_static")
     elseif("zstd::libzstd_shared" IN_LIST _p3_deps)
       message(FATAL_ERROR "P3_LLVM_STATIC_DEPS: LLVM links a shared zstd, and no static one was found")
+    endif()
+    # Windows has no zlib of its own: ZLIB::ZLIB names MSYS2's import
+    # library (libz-1.dll), so link its static library instead.
+    if(WIN32 AND "ZLIB::ZLIB" IN_LIST _p3_deps)
+      find_library(P3_ZLIB_STATIC NAMES libz.a REQUIRED)
+      list(TRANSFORM _p3_deps REPLACE "^ZLIB::ZLIB$" "${P3_ZLIB_STATIC}")
     endif()
     set_target_properties(LLVMSupport PROPERTIES INTERFACE_LINK_LIBRARIES "${_p3_deps}")
   else()
@@ -104,7 +110,7 @@ if(P3_EMBED_LLD)
             NO_DEFAULT_PATH REQUIRED)
   include_directories(SYSTEM ${P3_LLD_INCLUDE_DIR})
   llvm_map_components_to_libnames(P3_LLD_LLVM_LIBS
-    binaryformat bitwriter codegen core debuginfocodeview debuginfodwarf
+    binaryformat bitwriter codegen core debuginfocodeview debuginfodwarf dtlto
     debuginfomsf debuginfopdb demangle libdriver lto mc object option passes
     support target targetparser windowsdriver windowsmanifest
     ${LLVM_TARGETS_TO_BUILD})
