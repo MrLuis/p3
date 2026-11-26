@@ -8,6 +8,15 @@ target_include_directories(pascalrt PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
 if(APPLE)
   target_compile_options(pascalrt PRIVATE -D_DARWIN_C_SOURCE)
 endif()
+# Windows as the host (MinGW-w64): the socket pollers (wepoll) and MinGW's
+# own printf and strtod, as in the Windows runtimes built for other hosts
+# below; the C library is the toolchain's.
+if(WIN32)
+  target_sources(pascalrt PRIVATE wepoll/wepoll.c)
+  target_compile_definitions(pascalrt PRIVATE __USE_MINGW_ANSI_STDIO=1)
+  install(FILES ${CMAKE_CURRENT_SOURCE_DIR}/wepoll/LICENSE
+          DESTINATION share/doc/p3 RENAME LICENSE.wepoll)
+endif()
 # DWARF 4 like p3's own output: GNU ld mis-merges mixed DWARF 4/5 objects.
 target_compile_options(pascalrt PRIVATE $<$<CONFIG:Debug>:-gdwarf-4>
   -ffunction-sections -fdata-sections)
@@ -48,6 +57,9 @@ set(P3_RT_IR_FLAGS -O2 -g0 -std=gnu11 -fPIC -fno-strict-aliasing
     -fno-stack-protector -fno-unwind-tables -fno-asynchronous-unwind-tables)
 if(P3_RUNTIME_CPU)
   list(APPEND P3_RT_IR_FLAGS -mcpu=${P3_RUNTIME_CPU})
+endif()
+if(WIN32)
+  list(APPEND P3_RT_IR_FLAGS -D__USE_MINGW_ANSI_STDIO=1)   # as the library
 endif()
 if(P3_RUNTIME_MATTR)
   list(APPEND P3_RT_IR_FLAGS -mattr=${P3_RUNTIME_MATTR})
