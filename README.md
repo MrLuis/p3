@@ -36,10 +36,28 @@ For quality control (and a bit of self insecurity), there are two compilers, kep
   ([the tap](https://github.com/MrLuis/homebrew-p3)).
 - **Release archives** for Linux x86-64 and ARM64 and macOS ARM64, with
   LLVM linked in: [Releases](https://github.com/MrLuis/p3/releases).
-- **Windows** (x86-64, Windows 10 and later): the release's
-  `p3-<version>-windows-x86_64.zip`. Unzip it anywhere and run
-  `bin\p3.exe`; it needs nothing else installed, because it links
-  programs itself (lld, with the MinGW-w64 libraries in the zip).
+- **Windows** (x86-64, Windows 10 and later): it needs nothing else
+  installed, because it links programs itself (lld, with the MinGW-w64
+  libraries it carries). Any of:
+  - **Scoop** ([the bucket](https://github.com/MrLuis/scoop-p3)):
+
+    ```powershell
+    scoop bucket add p3 https://github.com/MrLuis/scoop-p3
+    scoop install p3/p3
+    ```
+
+  - **winget** (`MrLuis.p3`; submitted to winget-pkgs, pending review):
+
+    ```powershell
+    winget install MrLuis.p3
+    ```
+
+  - **The zip**: the release's `p3-<version>-windows-x86_64.zip`. Unzip it
+    anywhere and run `bin\p3.exe` (or put that `bin` directory on `PATH`).
+
+  A Windows program built by p3 contains the MinGW-w64 runtime and
+  winpthreads: distribute it with their notices
+  ([THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md#programs-for-windows)).
 
 Homebrew's p3 and the Linux and macOS archives need a C compiler on the
 machine to link programs.

@@ -29,7 +29,7 @@ sha=$(echo "$sha" | tr a-f A-F)
 
 dir=$out/manifests/m/MrLuis/p3/$version
 mkdir -p "$dir"
-schema=1.10.0
+schema=1.28.0
 header() {
   echo "# yaml-language-server: \$schema=https://aka.ms/winget-manifest.$1.$schema.schema.json"
   echo
