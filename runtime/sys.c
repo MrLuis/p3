@@ -226,11 +226,11 @@ void __pas_sys_localtime(int32_t *fields) {
 int64_t __pas_sys_tick_ms(void) {
 #ifdef _WIN32
   /* Not GetTickCount64, which moves in steps of about 15.6 ms: the same
-   * clock as the runtime's deadlines (clock_gettime, from QPC). */
-  static LARGE_INTEGER freq;
-  LARGE_INTEGER c;
-  if (freq.QuadPart == 0)
-    QueryPerformanceFrequency(&freq);
+   * clock as the runtime's deadlines (clock_gettime, from QPC). The
+   * frequency is asked each time: it is cheap, and the runtime has no
+   * static variables (its IR is inlined into programs, gen-runtime-ir.py). */
+  LARGE_INTEGER freq, c;
+  QueryPerformanceFrequency(&freq);
   QueryPerformanceCounter(&c);
   return (int64_t)(c.QuadPart / freq.QuadPart * 1000 +
                    c.QuadPart % freq.QuadPart * 1000 / freq.QuadPart);
