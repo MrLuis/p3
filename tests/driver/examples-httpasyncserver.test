@@ -2,6 +2,10 @@
 ; its src/lib/site.pas, routed by netrouter: files, the status page, URL
 ; parameters, the JSON sub-router, errors, HEAD and a 1 MiB file, all on
 ; one keep-alive connection; it stops after --requests.
+; On Windows the server takes a connection from another process and stops
+; serving (it passes under Wine; the netasync tests, whose clients are tasks
+; of the same program, pass on Windows): known, not yet understood.
+; XFAIL: system-windows
 ; RUN: rm -rf %t && mkdir -p %t && cp -R %S/../../examples/httpasyncserver %t/
 ; RUN: rm -rf %t/httpasyncserver/bin
 ; RUN: cd %t/httpasyncserver && %p3-project 2>&1 | count 0

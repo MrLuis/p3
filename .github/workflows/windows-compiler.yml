@@ -141,31 +141,19 @@ jobs:
           "$py" utils/windows-bundle.py "build/bin/p3.exe -fdiagnostics-color=never --no-project" tests/run bundle
           bash utils/windows-run-bundle.sh bundle
 
-      # The lit suite on Windows: not required yet (W4), only reported.
-      - name: Test suite (lit, reported only)
-        continue-on-error: true
+      # The lit suite on Windows (what is not for Windows is UNSUPPORTED or
+      # XFAIL there); its log is kept either way.
+      - name: Test suite (lit)
         run: |
           ninja -C build p3-unittests
-          "$LIT" -v build/tests > lit-windows.log 2>&1 || true
-          sed -n '/^Failed Tests/,$p;/^Unresolved Tests/,$p' lit-windows.log | tail -20
+          status=0
+          "$LIT" -v build/tests > lit-windows.log 2>&1 || status=$?
+          sed -n '/^Failed Tests/,/^$/p;/^Unresolved Tests/,/^$/p' lit-windows.log
           tail -8 lit-windows.log
-
-      # TEMPORARY: the netasync example's server takes a connection and
-      # resets it on Windows (not under Wine), printing nothing. It listens
-      # on every address; the tests that pass listen on 127.0.0.1.
-      - name: Diagnose the netasync example
-        continue-on-error: true
-        run: |
-          set +e
-          sed 's/NetListen(0, 128, true)/NetListen(0, 128, false)/' examples/netasync/src/netasync_demo.pas > na_local.pas
-          for v in examples/netasync/src/netasync_demo.pas na_local.pas; do
-            echo "=== $v"
-            build/bin/p3.exe --no-project --mode=objfpc "$v" -o na.exe
-            python tests/driver/Inputs/netasync-check.py ./na.exe 2>&1 | tail -3
-          done
+          exit $status
 
       - name: Upload the lit log
-        if: ${{ !cancelled() }}
+        if: ${{ always() }}
         uses: actions/upload-artifact@v4
         with:
           name: lit-windows-log
