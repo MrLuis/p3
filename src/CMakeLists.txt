@@ -48,13 +48,15 @@ target_link_libraries(p3Driver PUBLIC p3Parse p3Sema p3CodeGen)
 if(P3_EMBED_LLD)
   target_link_libraries(p3Driver PRIVATE ${P3_LLD_LIBS})
   target_compile_definitions(p3Driver PRIVATE P3_EMBED_LLD=1)
+  # Compiled into each executable that links p3Driver (p3, p3-unittests),
+  # not into p3Driver: the archives after it (lld's) use it, and a linker
+  # reads each archive once, in order.
+  target_sources(p3Driver INTERFACE
+                 ${CMAKE_CURRENT_SOURCE_DIR}/driver/WindowsManifestStub.cpp)
 endif()
 
 add_executable(p3 driver/main.cpp)
 if(P3_EMBED_LLD)
-  # In the executable itself, not p3Driver: the archives after it (lld's)
-  # use it, and a linker reads each archive once, in order.
-  target_sources(p3 PRIVATE driver/WindowsManifestStub.cpp)
   target_compile_definitions(p3 PRIVATE P3_EMBED_LLD=1)
 endif()
 target_link_libraries(p3 PRIVATE p3Driver)

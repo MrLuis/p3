@@ -55,6 +55,13 @@ jobs:
           clang --version | head -1
           clang -dumpmachine
 
+      # lit for the test suite (MSYS2 has FileCheck in its llvm, not lit).
+      - name: lit
+        run: |
+          python -m venv "$RUNNER_TEMP/litenv"
+          "$RUNNER_TEMP/litenv/bin/python" -m pip install -q lit
+          echo "LIT=$(cygpath -u "$RUNNER_TEMP")/litenv/bin/lit" >> "$GITHUB_ENV"
+
       # W2: LLVM linked in, and everything else static (-static: the C++
       # and GCC runtimes, winpthreads, zlib, zstd), so that p3.exe needs no
       # DLL of MSYS2's. W3: lld inside it, which links Windows programs.
@@ -65,7 +72,7 @@ jobs:
             -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++ \
             -DP3_LINK_LLVM_DYLIB=OFF -DP3_LLVM_STATIC_DEPS=ON -DP3_EMBED_LLD=ON \
             -DCMAKE_EXE_LINKER_FLAGS="-static" \
-            -DP3_CROSS_TARGETS=OFF
+            -DP3_CROSS_TARGETS=OFF -DLIT_EXECUTABLE="$LIT"
 
       - name: Build
         run: ninja -C build p3 pascalrt rtl
@@ -131,6 +138,13 @@ jobs:
           export PATH=/usr/bin
           "$py" utils/windows-bundle.py "build/bin/p3.exe -fdiagnostics-color=never --no-project" tests/run bundle
           bash utils/windows-run-bundle.sh bundle
+
+      # The lit suite on Windows: not required yet (W4), only reported.
+      - name: Test suite (lit, reported only)
+        continue-on-error: true
+        run: |
+          ninja -C build p3-unittests
+          "$LIT" -q build/tests 2>&1 | tail -60
 
       - name: Package
         env:
