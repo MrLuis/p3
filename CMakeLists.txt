@@ -93,7 +93,9 @@ endif()
 # inside it, from MinGW-w64's libraries in <prefix>/lib/mingw-w64, and
 # needs no C toolchain. lld's static libraries are linked by file (an LLVM
 # distribution's lld targets may name the shared libLLVM, which would put a
-# second LLVM in p3), with the LLVM components they use.
+# second LLVM in p3), with the LLVM components they use, but not
+# WindowsManifest: it needs libxml2, and src/driver/WindowsManifestStub.cpp
+# stands in for it.
 option(P3_EMBED_LLD
        "Link Windows programs with lld inside p3 (MinGW hosts; LLVM linked statically)" OFF)
 set(P3_LLD_LIBS "")
@@ -112,7 +114,7 @@ if(P3_EMBED_LLD)
   llvm_map_components_to_libnames(P3_LLD_LLVM_LIBS
     binaryformat bitwriter codegen core debuginfocodeview debuginfodwarf dtlto
     debuginfomsf debuginfopdb demangle libdriver lto mc object option passes
-    support target targetparser windowsdriver windowsmanifest
+    support target targetparser windowsdriver
     ${LLVM_TARGETS_TO_BUILD})
   list(APPEND P3_LLD_LIBS ${P3_LLD_LLVM_LIBS})
   message(STATUS "p3 links Windows programs with lld inside it")

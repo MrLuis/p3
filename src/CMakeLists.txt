@@ -46,6 +46,7 @@ add_library(p3Driver STATIC
 )
 target_link_libraries(p3Driver PUBLIC p3Parse p3Sema p3CodeGen)
 if(P3_EMBED_LLD)
+  target_sources(p3Driver PRIVATE driver/WindowsManifestStub.cpp)
   target_link_libraries(p3Driver PRIVATE ${P3_LLD_LIBS})
   target_compile_definitions(p3Driver PRIVATE P3_EMBED_LLD=1)
 endif()
