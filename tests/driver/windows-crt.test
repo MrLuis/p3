@@ -1,0 +1,26 @@
+; A Windows program links with the runtime built for the C library of the
+; MinGW-w64 toolchain that links it (msvcrt or UCRT), as the toolchain's
+; headers say, or as P3_WINDOWS_CRT says. The toolchain here is a stand-in
+; that answers from $FAKE_CRT and records the link command.
+; REQUIRES: windows-runtime
+; RUN: rm -rf %t.dir && mkdir -p %t.dir
+; RUN: cp %S/Inputs/fake-mingw-cc.sh %t.dir/cc && chmod +x %t.dir/cc
+
+; RUN: env P3_CROSS_CC=%t.dir/cc FAKE_CRT=UCRT FAKE_LOG=%t.dir/ucrt.log %p3 --target=x86_64-w64-mingw32 %S/Inputs/hello.pas -o %t.dir/a.exe
+; RUN: FileCheck --check-prefix=UCRT %s < %t.dir/ucrt.log
+; UCRT: x86_64-w64-mingw32{{/|\\}}ucrt{{/|\\}}libpascalrt.a
+
+; RUN: env P3_CROSS_CC=%t.dir/cc FAKE_CRT=MSVCRT FAKE_LOG=%t.dir/msvcrt.log %p3 --target=x86_64-w64-mingw32 %S/Inputs/hello.pas -o %t.dir/b.exe
+; RUN: FileCheck --check-prefix=MSVCRT %s < %t.dir/msvcrt.log
+; MSVCRT: x86_64-w64-mingw32{{/|\\}}msvcrt{{/|\\}}libpascalrt.a
+
+; P3_WINDOWS_CRT wins over the toolchain.
+; RUN: env P3_CROSS_CC=%t.dir/cc FAKE_CRT=UCRT P3_WINDOWS_CRT=msvcrt FAKE_LOG=%t.dir/env.log %p3 --target=x86_64-w64-mingw32 %S/Inputs/hello.pas -o %t.dir/c.exe
+; RUN: FileCheck --check-prefix=MSVCRT %s < %t.dir/env.log
+
+; RUN: env P3_CROSS_CC=%t.dir/cc FAKE_CRT=UCRT P3_WINDOWS_CRT=bogus FAKE_LOG=%t.dir/bad.log not %p3 --target=x86_64-w64-mingw32 %S/Inputs/hello.pas -o %t.dir/d.exe 2>&1 | FileCheck --check-prefix=BADENV %s
+; BADENV: error: P3_WINDOWS_CRT is 'bogus': it must be msvcrt or ucrt
+
+; A toolchain that cannot tell.
+; RUN: env P3_CROSS_CC=%t.dir/cc FAKE_CRT=NONE FAKE_LOG=%t.dir/none.log not %p3 --target=x86_64-w64-mingw32 %S/Inputs/hello.pas -o %t.dir/e.exe 2>&1 | FileCheck --check-prefix=NONE %s
+; NONE: error: cannot tell whether '{{.*}}cc' links msvcrt or UCRT; set P3_WINDOWS_CRT to msvcrt or ucrt

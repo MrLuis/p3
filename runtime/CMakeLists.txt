@@ -143,35 +143,58 @@ endif()
 foreach(triple ${P3_CROSS_LIST})
   find_program(P3_CROSS_CC_${triple} ${triple}-gcc REQUIRED)
   find_program(P3_CROSS_AR_${triple} ${triple}-ar REQUIRED)
-  set(dir ${CMAKE_CURRENT_BINARY_DIR}/${triple})
-  file(MAKE_DIRECTORY ${dir} ${PROJECT_BINARY_DIR}/lib/${triple})
-  set(objs "")
   set(srcs io sys ansi format async)
+  # MinGW-w64: one runtime per C library, as the headers see it
+  # (__MSVCRT_VERSION__): lib/<triple>/msvcrt and lib/<triple>/ucrt. p3
+  # links the one that matches the user's toolchain (or P3_WINDOWS_CRT),
+  # whichever C library the toolchain that builds them defaults to.
   if(triple MATCHES "mingw|windows")
     list(APPEND srcs wepoll/wepoll)   # the socket pollers (async.c)
+    set(variants msvcrt ucrt)
+  else()
+    set(variants "")
   endif()
-  foreach(src ${srcs})
-    get_filename_component(obj ${src} NAME)
+  set(libs "")
+  foreach(crt IN LISTS variants)
+    if(crt STREQUAL "msvcrt")
+      set(crtflags -D__MSVCRT_VERSION__=0x700)
+    elseif(crt STREQUAL "ucrt")
+      set(crtflags -D__MSVCRT_VERSION__=0xE00)
+    else()
+      set(crtflags "")
+    endif()
+    set(dir ${CMAKE_CURRENT_BINARY_DIR}/${triple}/${crt})
+    set(libdir ${PROJECT_BINARY_DIR}/lib/${triple})
+    if(crt)
+      set(libdir ${libdir}/${crt})
+    endif()
+    file(MAKE_DIRECTORY ${dir} ${libdir})
+    set(objs "")
+    foreach(src ${srcs})
+      get_filename_component(obj ${src} NAME)
+      add_custom_command(
+        OUTPUT ${dir}/${obj}.o
+        COMMAND ${P3_CROSS_CC_${triple}} -std=gnu11 -O2 -ffunction-sections
+                -fdata-sections ${crtflags} -I ${CMAKE_CURRENT_SOURCE_DIR}/include
+                -c ${CMAKE_CURRENT_SOURCE_DIR}/${src}.c -o ${dir}/${obj}.o
+        DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/${src}.c
+                ${CMAKE_CURRENT_SOURCE_DIR}/include/pascalrt.h
+                ${CMAKE_CURRENT_SOURCE_DIR}/wepoll/wepoll.h
+        VERBATIM)
+      list(APPEND objs ${dir}/${obj}.o)
+    endforeach()
+    set(lib ${libdir}/libpascalrt.a)
     add_custom_command(
-      OUTPUT ${dir}/${obj}.o
-      COMMAND ${P3_CROSS_CC_${triple}} -std=gnu11 -O2 -ffunction-sections
-              -fdata-sections -I ${CMAKE_CURRENT_SOURCE_DIR}/include
-              -c ${CMAKE_CURRENT_SOURCE_DIR}/${src}.c -o ${dir}/${obj}.o
-      DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/${src}.c
-              ${CMAKE_CURRENT_SOURCE_DIR}/include/pascalrt.h
-              ${CMAKE_CURRENT_SOURCE_DIR}/wepoll/wepoll.h
+      OUTPUT ${lib}
+      COMMAND ${CMAKE_COMMAND} -E rm -f ${lib}
+      COMMAND ${P3_CROSS_AR_${triple}} rcs ${lib} ${objs}
+      DEPENDS ${objs}
       VERBATIM)
-    list(APPEND objs ${dir}/${obj}.o)
+    file(RELATIVE_PATH rel ${PROJECT_BINARY_DIR} ${libdir})
+    install(FILES ${lib} DESTINATION ${rel})
+    list(APPEND libs ${lib})
   endforeach()
-  set(lib ${PROJECT_BINARY_DIR}/lib/${triple}/libpascalrt.a)
-  add_custom_command(
-    OUTPUT ${lib}
-    COMMAND ${CMAKE_COMMAND} -E rm -f ${lib}
-    COMMAND ${P3_CROSS_AR_${triple}} rcs ${lib} ${objs}
-    DEPENDS ${objs}
-    VERBATIM)
-  add_custom_target(pascalrt-${triple} ALL DEPENDS ${lib})
-  install(FILES ${lib} DESTINATION lib/${triple})
+  add_custom_target(pascalrt-${triple} ALL DEPENDS ${libs})
   if(triple MATCHES "mingw|windows")
     # wepoll's license goes with the library that contains it.
     install(FILES ${CMAKE_CURRENT_SOURCE_DIR}/wepoll/LICENSE

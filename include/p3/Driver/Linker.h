@@ -29,6 +29,10 @@ class DiagnosticsEngine;
 /// p3 is configured with that target in P3_CROSS_TARGETS).
 std::string findRuntimeLibrary(llvm::StringRef Triple = "");
 
+/// Is there a runtime for Triple: findRuntimeLibrary's, or for MinGW its
+/// msvcrt or ucrt variant next to it?
+bool haveRuntimeLibrary(llvm::StringRef Triple);
+
 /// The name of Triple's runtime directory and C toolchain prefix: MinGW
 /// triples as MinGW-w64 spells them (x86_64-w64-mingw32), others as they are.
 std::string runtimeTargetName(llvm::StringRef Triple);

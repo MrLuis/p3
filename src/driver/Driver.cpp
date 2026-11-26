@@ -518,8 +518,7 @@ bool Driver::runPipeline(FileID FID) {
 
   // Linking for another target needs the runtime built for it.
   if (Opts.Act == Action::EmitExe && !isHostTriple(Opts.TargetTriple)) {
-    std::string Lib = findRuntimeLibrary(Opts.TargetTriple);
-    if (!llvm::sys::fs::exists(Lib)) {
+    if (!haveRuntimeLibrary(Opts.TargetTriple)) {
       Diags.error("no Pascal runtime for target '" +
                   llvm::Twine(Opts.TargetTriple) +
                   "' (configure p3 with -DP3_CROSS_TARGETS=" +

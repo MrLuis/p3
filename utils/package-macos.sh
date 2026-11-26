@@ -70,8 +70,10 @@ done
 
 # The runtime for Windows programs (cross-compiled with MinGW-w64), and the
 # license of wepoll, which it contains.
-[ -f "$root/lib/x86_64-w64-mingw32/libpascalrt.a" ] ||
-  fail "lib/x86_64-w64-mingw32/libpascalrt.a was not built (P3_CROSS_TARGETS)"
+for crt in msvcrt ucrt; do
+  [ -f "$root/lib/x86_64-w64-mingw32/$crt/libpascalrt.a" ] ||
+    fail "lib/x86_64-w64-mingw32/$crt/libpascalrt.a was not built (P3_CROSS_TARGETS)"
+done
 
 for f in LICENSE THIRD_PARTY_NOTICES.md LICENSE.wepoll; do
   [ -s "$root/share/doc/p3/$f" ] || fail "share/doc/p3/$f was not installed"

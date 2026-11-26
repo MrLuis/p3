@@ -476,15 +476,20 @@ and the unit library takes the target's branches (`MSWINDOWS`, `LINUX`,
 Windows executables (64-bit x86) come from any host. Install MinGW-w64
 (`brew install mingw-w64`, or the distribution's `mingw-w64` package):
 CMake finds `x86_64-w64-mingw32-gcc` and builds the runtime for Windows too,
-into `lib/x86_64-w64-mingw32/libpascalrt.a`. Then:
+once for each of Windows' C libraries: `lib/x86_64-w64-mingw32/msvcrt/` and
+`lib/x86_64-w64-mingw32/ucrt/libpascalrt.a`. Then:
 
 ```sh
 build/bin/p3 --mode=objfpc --target=x86_64-w64-mingw32 hello.pas   # hello.exe
 ```
 
 p3 links with the target's own toolchain (`x86_64-w64-mingw32-gcc`, or
-`P3_CROSS_CC`), statically: the program needs no DLL but Windows' own (the
-Universal C Runtime, Windows 10 and later). `-DP3_CROSS_TARGETS=<triples>`
+`P3_CROSS_CC`), statically: the program needs no DLL but Windows' own. Which
+C library that is depends on the toolchain: UCRT (Windows 10 and later; for
+example Homebrew's MinGW-w64) or msvcrt.dll (any Windows; for example
+Debian's and Ubuntu's). p3 asks the toolchain's headers which one it links
+and uses the runtime built for it; `P3_WINDOWS_CRT=ucrt` or `msvcrt` says
+so instead. `-DP3_CROSS_TARGETS=<triples>`
 picks the targets to build the runtime for (`OFF`: none). The whole unit
 library works there, tasks, iterators and the network units included:
 `netasync`, `netloop` and `nethttp` use Winsock, and wait on sockets with

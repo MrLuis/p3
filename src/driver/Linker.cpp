@@ -5,6 +5,7 @@
 #include "llvm/ADT/SmallString.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/Support/FileSystem.h"
+#include "llvm/Support/MemoryBuffer.h"
 #include "llvm/Support/Path.h"
 #include "llvm/Support/Process.h"
 #include "llvm/Support/Program.h"
@@ -40,6 +41,21 @@ std::string p3::findRuntimeLibrary(llvm::StringRef Triple) {
                             "libpascalrt.a");
   llvm::sys::path::remove_dots(Path, /*remove_dot_dot=*/true);
   return std::string(Path);
+}
+
+bool p3::haveRuntimeLibrary(llvm::StringRef Triple) {
+  std::string Flat = findRuntimeLibrary(Triple);
+  if (llvm::sys::fs::exists(Flat))
+    return true;
+  if (isHostTriple(Triple) || !llvm::Triple(Triple).isWindowsGNUEnvironment())
+    return false;
+  for (const char *CRT : {"msvcrt", "ucrt"}) {
+    llvm::SmallString<256> P(llvm::sys::path::parent_path(Flat));
+    llvm::sys::path::append(P, CRT, "libpascalrt.a");
+    if (llvm::sys::fs::exists(P))
+      return true;
+  }
+  return false;
 }
 
 std::string p3::findProfileRuntimeLibrary() {
@@ -144,22 +160,93 @@ static std::string findLinkerDriver(llvm::StringRef Triple,
   return "";
 }
 
+/// The C library MinGW-w64's compiler CC links by default, as its headers
+/// say (_UCRT): "ucrt" or "msvcrt"; "" if CC cannot tell.
+static std::string mingwCRT(llvm::StringRef CC) {
+  llvm::SmallString<128> In, Out;
+  if (llvm::sys::fs::createTemporaryFile("p3-crt", "c", In))
+    return "";
+  if (llvm::sys::fs::createTemporaryFile("p3-crt", "i", Out)) {
+    llvm::sys::fs::remove(In);
+    return "";
+  }
+  std::string Result;
+  {
+    std::error_code EC;
+    llvm::raw_fd_ostream F(In, EC);
+    F << "#include <_mingw.h>\n#ifdef _UCRT\nP3_CRT_UCRT\n#else\n"
+         "P3_CRT_MSVCRT\n#endif\n";
+  }
+  llvm::StringRef Args[] = {CC, "-E", "-P", In};
+  std::optional<llvm::StringRef> Redirects[] = {std::nullopt, llvm::StringRef(Out),
+                                                llvm::StringRef("")};
+  if (llvm::sys::ExecuteAndWait(CC, Args, std::nullopt, Redirects) == 0)
+    if (auto Buf = llvm::MemoryBuffer::getFile(Out)) {
+      llvm::StringRef Text = (*Buf)->getBuffer();
+      if (Text.contains("P3_CRT_UCRT"))
+        Result = "ucrt";
+      else if (Text.contains("P3_CRT_MSVCRT"))
+        Result = "msvcrt";
+    }
+  llvm::sys::fs::remove(In);
+  llvm::sys::fs::remove(Out);
+  return Result;
+}
+
+/// The runtime for a MinGW program: of the two in <Flat's dir>/msvcrt and
+/// /ucrt, the one for the C library CC links ($P3_WINDOWS_CRT names it);
+/// Flat itself when there are no such variants. "" (with an error) when the
+/// C library cannot be told.
+static std::string mingwRuntimeLibrary(llvm::StringRef Flat, llvm::StringRef CC,
+                                       DiagnosticsEngine &Diags) {
+  llvm::SmallString<256> Dir(llvm::sys::path::parent_path(Flat));
+  auto Variant = [&](llvm::StringRef CRT) {
+    llvm::SmallString<256> P(Dir);
+    llvm::sys::path::append(P, CRT, "libpascalrt.a");
+    return std::string(P);
+  };
+  if (!llvm::sys::fs::exists(Variant("msvcrt")) &&
+      !llvm::sys::fs::exists(Variant("ucrt")))
+    return Flat.str();
+  std::string CRT;
+  if (auto Env = llvm::sys::Process::GetEnv("P3_WINDOWS_CRT")) {
+    CRT = *Env;
+    if (CRT != "msvcrt" && CRT != "ucrt") {
+      Diags.error("P3_WINDOWS_CRT is '" + llvm::Twine(CRT) +
+                  "': it must be msvcrt or ucrt");
+      return "";
+    }
+  } else
+    CRT = mingwCRT(CC);
+  if (CRT.empty()) {
+    Diags.error("cannot tell whether '" + llvm::Twine(CC) +
+                "' links msvcrt or UCRT; set P3_WINDOWS_CRT to msvcrt or ucrt");
+    return "";
+  }
+  return Variant(CRT);
+}
+
 bool p3::linkExecutable(llvm::StringRef ObjectFile,
                          llvm::ArrayRef<std::string> UnitObjects,
                          llvm::StringRef OutputFile,
                          llvm::ArrayRef<std::string> LibraryDirs,
                          llvm::ArrayRef<std::string> Libraries,
                          llvm::StringRef Triple, DiagnosticsEngine &Diags) {
+  std::string CC = findLinkerDriver(Triple, Diags);
+  if (CC.empty())
+    return false;
+
   std::string RuntimeLib = findRuntimeLibrary(Triple);
+  if (!isHostTriple(Triple) && llvm::Triple(Triple).isWindowsGNUEnvironment()) {
+    RuntimeLib = mingwRuntimeLibrary(RuntimeLib, CC, Diags);
+    if (RuntimeLib.empty())
+      return false;
+  }
   if (!llvm::sys::fs::exists(RuntimeLib)) {
     Diags.error("cannot find the Pascal runtime library '" +
                 llvm::Twine(RuntimeLib) + "'; set P3_RUNTIME_LIB");
     return false;
   }
-
-  std::string CC = findLinkerDriver(Triple, Diags);
-  if (CC.empty())
-    return false;
 
   // -L directories, then -l libraries (each in command-line order). A
   // library named as a file (":name") is -l:name, a GNU ld extension; on

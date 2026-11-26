@@ -35,6 +35,9 @@ function findUnitLibrary: string;
 function isWindowsTriple(const triple: string): boolean;
 { Is triple the host's ('' or LLVM's default triple)? }
 function isHostTriple(const triple: string): boolean;
+{ Is there a runtime for triple: findRuntimeLibrary's, or for MinGW its
+  msvcrt or ucrt variant next to it? }
+function haveRuntimeLibrary(const triple: string): boolean;
 { -l and -L options, passed to the linker. }
 procedure addLinkerArg(const arg: string);
 { -fno-inline-runtime: from -O1 the runtime's small functions are inlined
@@ -259,6 +262,77 @@ begin
   findRuntimeLibrary := removeDots(pathJoin(pathDirName(exe), '../lib/libpascalrt.a'));
 end;
 
+function haveRuntimeLibrary(const triple: string): boolean;
+var
+  flat: string;
+begin
+  flat := findRuntimeLibrary(triple);
+  if sysFileExists(flat) then
+    exit(true);
+  if isHostTriple(triple) or not isMinGWTriple(triple) then
+    exit(false);
+  haveRuntimeLibrary :=
+    sysFileExists(pathJoin(pathDirName(flat), 'msvcrt/libpascalrt.a')) or
+    sysFileExists(pathJoin(pathDirName(flat), 'ucrt/libpascalrt.a'));
+end;
+
+{ The C library MinGW-w64's compiler cc links by default, as its headers
+  say (_UCRT): 'ucrt' or 'msvcrt'; '' if cc cannot tell. }
+function crtProbe(const cc, token: string): boolean;
+var
+  cmd: TBuf;
+begin
+  { a buffer, not a string: cc's path may be long }
+  bufInit(cmd);
+  bufAdd(cmd, 'printf ''%s\n'' ''#include <_mingw.h>'' ''#ifdef _UCRT'' P3_CRT_UCRT ');
+  bufAdd(cmd, '''#else'' P3_CRT_MSVCRT ''#endif'' | ');
+  addArg(cmd, cc);
+  bufAdd(cmd, ' -E -P -x c - 2>/dev/null | grep -q ' + token);
+  crtProbe := sysRunChars(cmd.data, cmd.len) = 0;
+  bufFree(cmd);
+end;
+
+function mingwCRT(const cc: string): string;
+begin
+  if crtProbe(cc, 'P3_CRT_UCRT') then
+    exit('ucrt');
+  if crtProbe(cc, 'P3_CRT_MSVCRT') then
+    exit('msvcrt');
+  mingwCRT := '';
+end;
+
+{ The runtime for a MinGW program: of the two in <flat's dir>/msvcrt and
+  /ucrt, the one for the C library cc links ($P3_WINDOWS_CRT names it);
+  flat itself when there are no such variants. '' (with an error) when the
+  C library cannot be told. }
+function mingwRuntimeLibrary(const flat, cc: string): string;
+var
+  dir, crt: string;
+begin
+  mingwRuntimeLibrary := '';
+  dir := pathDirName(flat);
+  if not sysFileExists(pathJoin(dir, 'msvcrt/libpascalrt.a')) and
+     not sysFileExists(pathJoin(dir, 'ucrt/libpascalrt.a')) then
+    exit(flat);
+  if sysGetEnv('P3_WINDOWS_CRT', crt) then
+  begin
+    if (crt <> 'msvcrt') and (crt <> 'ucrt') then
+    begin
+      diagError(noLoc, 'P3_WINDOWS_CRT is ''' + crt + ''': it must be msvcrt or ucrt');
+      exit;
+    end;
+  end
+  else
+    crt := mingwCRT(cc);
+  if crt = '' then
+  begin
+    diagError(noLoc, 'cannot tell whether ''' + cc +
+                     ''' links msvcrt or UCRT; set P3_WINDOWS_CRT to msvcrt or ucrt');
+    exit;
+  end;
+  mingwRuntimeLibrary := pathJoin(dir, crt + '/libpascalrt.a');
+end;
+
 { The runtime as LLVM IR, linked into optimized programs for inlining:
   $P3_RUNTIME_IR, else pascal/libpascalrt.ll next to the runtime library
   (lib/pascal: not lib, where Homebrew allows only libraries). It
@@ -417,16 +491,22 @@ var
   status, i: longint;
 begin
   linkExecutable := false;
+  cc := findLinkerDriver(triple);
+  if cc = '' then
+    exit;
   runtime := findRuntimeLibrary(triple);
+  if not isHostTriple(triple) and isMinGWTriple(triple) then
+  begin
+    runtime := mingwRuntimeLibrary(runtime, cc);
+    if runtime = '' then
+      exit;
+  end;
   if not sysFileExists(runtime) then
   begin
     diagError(noLoc, 'cannot find the Pascal runtime library ''' + runtime +
                      '''; set P3_RUNTIME_LIB');
     exit;
   end;
-  cc := findLinkerDriver(triple);
-  if cc = '' then
-    exit;
   bufInit(cmd);
   addArg(cmd, cc);
   addArg(cmd, obj);
@@ -562,7 +642,7 @@ begin
     exit(writeText(ir, path));
   { linking for another target needs the runtime built for it }
   if (kind = okExe) and not isHostTriple(triple) and
-     not sysFileExists(findRuntimeLibrary(triple)) then
+     not haveRuntimeLibrary(triple) then
   begin
     diagError(noLoc, 'no Pascal runtime for target ''' + triple +
                      ''' (configure p3 with -DP3_CROSS_TARGETS=' +

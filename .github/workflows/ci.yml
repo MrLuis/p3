@@ -124,11 +124,22 @@ jobs:
           ninja -C build p3-self
 
       # The programs whose tests only compare their output, built by both
-      # compilers, for the windows job to run on Windows itself.
+      # compilers, for the windows job to run on Windows itself. Ubuntu's
+      # MinGW-w64 links msvcrt; the p3-ucrt set is linked for UCRT
+      # (-mcrtdll=ucrt), so that p3 picks the other runtime.
       - name: Bundle Windows programs
         run: |
           utils/windows-bundle.py "build/bin/p3 -fdiagnostics-color=never --no-project" tests/run bundle/p3
           utils/windows-bundle.py "build/bin/p3-self -fdiagnostics-color=never --no-project" tests/run bundle/p3-self
+          printf '#!/bin/sh\nexec x86_64-w64-mingw32-gcc -mcrtdll=ucrt "$@"\n' > ucrt-cc
+          chmod +x ucrt-cc
+          P3_CROSS_CC=$PWD/ucrt-cc utils/windows-bundle.py "build/bin/p3 -fdiagnostics-color=never --no-project" tests/run bundle/p3-ucrt
+          # each set imports the C library it was linked for
+          x86_64-w64-mingw32-objdump -p bundle/p3/hello.exe | grep -qi 'DLL Name: msvcrt.dll'
+          x86_64-w64-mingw32-objdump -p bundle/p3-ucrt/hello.exe | grep -qi 'DLL Name: api-ms-win-crt'
+          if x86_64-w64-mingw32-objdump -p bundle/p3-ucrt/hello.exe | grep -qi 'DLL Name: msvcrt.dll'; then
+            echo "p3-ucrt/hello.exe imports msvcrt.dll too"; exit 1
+          fi
 
       - name: Upload them
         uses: actions/upload-artifact@v4
@@ -142,11 +153,13 @@ jobs:
       # is missing: check both, and that tests did run.
       - name: Test Windows programs
         run: |
-          test -f build/lib/x86_64-w64-mingw32/libpascalrt.a
+          test -f build/lib/x86_64-w64-mingw32/msvcrt/libpascalrt.a
+          test -f build/lib/x86_64-w64-mingw32/ucrt/libpascalrt.a
           test -x build/bin/p3-self
           command -v wine
-          lit -v build/tests/driver/windows-link.test build/tests/windows | tee windows.log
+          lit -v build/tests/driver/windows-link.test build/tests/driver/windows-crt.test build/tests/windows | tee windows.log
           grep -qE 'PASS: p3 :: driver/windows-link' windows.log
+          grep -qE 'PASS: p3 :: driver/windows-crt' windows.log
           grep -qE 'PASS: p3 :: windows/[^/]+\.pas ' windows.log
           grep -qE 'PASS: p3 :: windows/self/' windows.log
         shell: bash
@@ -177,6 +190,10 @@ jobs:
       - name: Run them (self-hosted p3)
         if: ${{ !cancelled() }}
         run: utils/windows-run-bundle.sh bundle/p3-self
+
+      - name: Run them (C++ p3, linked for UCRT)
+        if: ${{ !cancelled() }}
+        run: utils/windows-run-bundle.sh bundle/p3-ucrt
 
   release:
     strategy:

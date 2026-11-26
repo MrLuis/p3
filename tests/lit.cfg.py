@@ -94,7 +94,7 @@ config.environment.setdefault("P3_UNIT_DIR", os.path.join(config.p3_obj_root, "l
 # that p3 links Windows programs (REQUIRES: windows-runtime); Wine, which
 # runs them (tests/windows).
 if os.path.exists(os.path.join(config.p3_obj_root, "lib", "x86_64-w64-mingw32",
-                               "libpascalrt.a")):
+                               "msvcrt", "libpascalrt.a")):
     config.available_features.add("windows-runtime")
 import shutil
 config.wine = shutil.which("wine")
