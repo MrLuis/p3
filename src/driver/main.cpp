@@ -10,6 +10,10 @@
 #include "llvm/Support/InitLLVM.h"
 #include "llvm/Support/raw_ostream.h"
 #include "llvm/TargetParser/Host.h"
+#ifdef P3_EMBED_LLD
+#include "llvm/ADT/StringExtras.h"
+#include "llvm/CodeGen/CommandFlags.h"
+#endif
 
 using namespace p3;
 namespace cl = llvm::cl;
@@ -143,13 +147,21 @@ static cl::opt<bool> OptimizeSizeAggressive(
     "Oz", cl::desc("Optimize aggressively for size (like -Os)"),
     cl::cat(P3Category));
 
-static cl::opt<std::string> MCPU(
-    "mcpu", cl::desc("Target CPU (default: generic; 'native': the host CPU)"),
-    cl::value_desc("cpu"), cl::cat(P3Category));
+static const char *const MCPUDesc =
+    "Target CPU (default: generic; 'native': the host CPU)";
+static const char *const MAttrDesc = "Target features, e.g. +avx2,-sse4.2";
+#ifdef P3_EMBED_LLD
+// lld inside p3 registers LLVM's code generation options, -mcpu and -mattr
+// among them (two options of one name stop LLVM at startup): p3 uses those.
+static llvm::codegen::RegisterCodeGenFlags CodeGenFlags;
+#else
+static cl::opt<std::string> MCPU("mcpu", cl::desc(MCPUDesc),
+                                 cl::value_desc("cpu"), cl::cat(P3Category));
 
-static cl::opt<std::string> MAttr(
-    "mattr", cl::desc("Target features, e.g. +avx2,-sse4.2"),
-    cl::value_desc("features"), cl::cat(P3Category));
+static cl::opt<std::string> MAttr("mattr", cl::desc(MAttrDesc),
+                                  cl::value_desc("features"),
+                                  cl::cat(P3Category));
+#endif
 
 static cl::opt<bool> NoInlineRuntime(
     "fno-inline-runtime",
@@ -215,6 +227,14 @@ int main(int argc, char **argv) {
       "fprofile-instr-use", llvm::cl::cat(P3Category),
       llvm::cl::desc("Optimize with the profile at <file>"));
 
+#ifdef P3_EMBED_LLD
+  // LLVM's -mcpu and -mattr, shown as p3's
+  for (auto [Name, Desc] : {std::pair{"mcpu", MCPUDesc}, std::pair{"mattr", MAttrDesc}})
+    if (cl::Option *O = cl::getRegisteredOptions().lookup(Name)) {
+      O->addCategory(P3Category);
+      O->setDescription(Desc);
+    }
+#endif
   cl::HideUnrelatedOptions(P3Category);
   cl::SetVersionPrinter(printVersion);
   cl::ParseCommandLineOptions(argc, argv,
@@ -247,11 +267,19 @@ int main(int argc, char **argv) {
   }
   Opts.SeparateUnits = SeparateUnits;
   Opts.TargetTriple = TargetTriple;
+#ifdef P3_EMBED_LLD
+  if (cl::getRegisteredOptions().lookup("mcpu")->getNumOccurrences()) {
+    Opts.TargetCPU = llvm::codegen::getMCPU();
+    Opts.GivenCPU = true;
+  }
+  Opts.TargetFeatures = llvm::join(llvm::codegen::getMAttrs(), ",");
+#else
   if (MCPU.getNumOccurrences()) {
     Opts.TargetCPU = MCPU;
     Opts.GivenCPU = true;
   }
   Opts.TargetFeatures = MAttr;
+#endif
   Opts.Color = Color;
   Opts.ErrorLimit = ErrorLimit;
   Opts.WarningsAsErrors = Werror;
