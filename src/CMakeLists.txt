@@ -46,12 +46,16 @@ add_library(p3Driver STATIC
 )
 target_link_libraries(p3Driver PUBLIC p3Parse p3Sema p3CodeGen)
 if(P3_EMBED_LLD)
-  target_sources(p3Driver PRIVATE driver/WindowsManifestStub.cpp)
   target_link_libraries(p3Driver PRIVATE ${P3_LLD_LIBS})
   target_compile_definitions(p3Driver PRIVATE P3_EMBED_LLD=1)
 endif()
 
 add_executable(p3 driver/main.cpp)
+if(P3_EMBED_LLD)
+  # In the executable itself, not p3Driver: the archives after it (lld's)
+  # use it, and a linker reads each archive once, in order.
+  target_sources(p3 PRIVATE driver/WindowsManifestStub.cpp)
+endif()
 target_link_libraries(p3 PRIVATE p3Driver)
 set_target_properties(p3 PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${PROJECT_BINARY_DIR}/bin)
 
