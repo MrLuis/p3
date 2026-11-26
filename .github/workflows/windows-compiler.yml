@@ -1,0 +1,81 @@
+# p3 itself on Windows (docs/runtime-targets.md, step 7, W1): built with
+# MSYS2's UCRT64 toolchain and its LLVM, then used on Windows to compile and
+# run the test programs. A workflow of its own until the port is done.
+name: Windows compiler
+
+on:
+  push:
+    branches: [main, 'windows-native-*']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: msys2 {0}
+    steps:
+      # The .expected files are compared byte for byte.
+      - name: Check out without CRLF conversion
+        shell: pwsh
+        run: git config --global core.autocrlf false
+
+      - uses: actions/checkout@v4
+
+      - name: Set up MSYS2 (UCRT64, LLVM)
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: UCRT64
+          update: true
+          install: diffutils
+          pacboy: >-
+            llvm:p clang:p lld:p cmake:p ninja:p python:p
+
+      - name: Versions
+        run: |
+          llvm-config --version
+          clang --version | head -1
+          clang -dumpmachine
+
+      - name: Configure
+        run: |
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release \
+            -DLLVM_DIR="$(llvm-config --cmakedir)" \
+            -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++ \
+            -DP3_CROSS_TARGETS=OFF
+
+      - name: Build
+        run: ninja -C build p3 rtl
+
+      - name: Hello
+        run: |
+          build/bin/p3.exe --version
+          build/bin/p3.exe --no-project tests/driver/Inputs/hello.pas -o hello.exe
+          ./hello.exe
+
+      - name: Library units, tasks, network
+        run: |
+          set -e
+          for opts in -O0 -O2 '-O2 -fseparate-units'; do
+            build/bin/p3.exe --no-project --mode=objfpc $opts tests/driver/Inputs/install-units.pas -o units.exe
+            test "$(./units.exe | tr -d '\r')" = 'INSTALLED moved'
+          done
+          for t in async netasync-echo; do
+            build/bin/p3.exe --no-project --mode=objfpc -O2 tests/run/$t.pas -o $t.exe
+            exp=tests/run/$t.expected
+            [ -f tests/run/$t.windows.expected ] && exp=tests/run/$t.windows.expected
+            ./$t.exe | tr -d '\r' | diff - $exp
+          done
+
+      # The programs whose tests only compare their output, compiled by
+      # p3.exe on Windows and run there.
+      - name: Test programs
+        env:
+          NET_REPEAT: 3
+        run: |
+          python utils/windows-bundle.py "build/bin/p3.exe -fdiagnostics-color=never --no-project" tests/run bundle
+          bash utils/windows-run-bundle.sh bundle

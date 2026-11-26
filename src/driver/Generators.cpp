@@ -510,14 +510,14 @@ bool Driver::runGenerators() {
       G.Attr = PD->getGeneratorFor().Name.str();
       llvm::SmallString<256> Exe(BinDir);
       llvm::sys::path::append(Exe, G.Name);
-      G.Exe = std::string(Exe);
+      G.Exe = hostExecutable(Exe);
       Gens.push_back(G);
     }
     GeneratorInfo &G = Gens.back();
     if (G.Exe.empty()) {
       llvm::SmallString<256> Exe(BinDir);
       llvm::sys::path::append(Exe, llvm::sys::path::stem(Path));
-      G.Exe = std::string(Exe);
+      G.Exe = hostExecutable(Exe);
     }
     // The generator is built again when its source (or the -I directories)
     // changed; delete gen/.bin to force it.

@@ -40,6 +40,11 @@ std::string runtimeTargetName(llvm::StringRef Triple);
 /// Is Triple the host's?
 bool isHostTriple(llvm::StringRef Triple);
 
+/// The file name of a program built for the host and run at once (a
+/// generator, a compile-time computation): Path, with ".exe" on Windows,
+/// where the linker would add it and CreateProcess needs it.
+std::string hostExecutable(llvm::StringRef Path);
+
 /// The directory of p3's unit library, searched after -I directories:
 /// $P3_UNIT_DIR, else <dir of p3>/../lib/pascal
 std::string findUnitLibrary();

@@ -28,6 +28,7 @@
 #include "p3/AST/AST.h"
 #include "p3/Driver/Driver.h"
 #include "p3/Driver/Generators.h"
+#include "p3/Driver/Linker.h"
 
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/StringMap.h"
@@ -725,7 +726,7 @@ bool Evaluator::evaluate(FileInfo &F, TopDecl &X, RoutineDecl *Fn,
   llvm::SmallString<256> SrcPath(Dir), Exe(Dir);
   llvm::sys::path::append(SrcPath, Base + ".pas");
   llvm::sys::path::append(Exe, Base);
-  std::string ExeS(Exe), OutPath = ExeS + ".out", ErrPath = ExeS + ".err",
+  std::string ExeS = hostExecutable(Exe), OutPath = ExeS + ".out", ErrPath = ExeS + ".err",
                          StampPath = ExeS + ".stamp";
 
   std::string Self = fs::getMainExecutable(nullptr, nullptr);

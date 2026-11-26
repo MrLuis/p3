@@ -43,6 +43,14 @@ std::string p3::findRuntimeLibrary(llvm::StringRef Triple) {
   return std::string(Path);
 }
 
+std::string p3::hostExecutable(llvm::StringRef Path) {
+#ifdef _WIN32
+  if (!Path.ends_with_insensitive(".exe"))
+    return (Path + ".exe").str();
+#endif
+  return Path.str();
+}
+
 bool p3::haveRuntimeLibrary(llvm::StringRef Triple) {
   std::string Flat = findRuntimeLibrary(Triple);
   if (llvm::sys::fs::exists(Flat))

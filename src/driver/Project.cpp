@@ -14,6 +14,8 @@
 
 #include "llvm/Support/FileSystem.h"
 
+#include <cctype>
+
 #include <memory>
 #include <optional>
 #include <string>
@@ -27,17 +29,39 @@ namespace {
 // Paths (lexical, '/'-separated, as the self-hosted compiler does them)
 //===----------------------------------------------------------------------===//
 
+/// P with '/' separators: on Windows its backslashes become slashes.
+std::string slashes(std::string P) {
+#ifdef _WIN32
+  for (char &C : P)
+    if (C == '\\')
+      C = '/';
+#endif
+  return P;
+}
+
+/// The length of P's root: 1 for "/", on Windows 3 for a drive ("C:/");
+/// 0 for a relative path.
+size_t rootLength(const std::string &P) {
+#ifdef _WIN32
+  if (P.size() >= 3 && std::isalpha((unsigned char)P[0]) && P[1] == ':' &&
+      P[2] == '/')
+    return 3;
+#endif
+  return !P.empty() && P[0] == '/' ? 1 : 0;
+}
+
 /// Path made absolute (against the current directory) without "." and
 /// ".." components.
 std::string absolutePath(const std::string &P) {
-  std::string Full = P;
-  if (Full.empty() || Full[0] != '/') {
+  std::string Full = slashes(P);
+  if (rootLength(Full) == 0) {
     llvm::SmallString<256> Cwd;
     llvm::sys::fs::current_path(Cwd);
-    Full = std::string(Cwd) + "/" + P;
+    Full = slashes(std::string(Cwd)) + "/" + Full;
   }
+  size_t Root = rootLength(Full);
   std::vector<std::string> Parts;
-  size_t I = 0;
+  size_t I = Root;
   while (I <= Full.size()) {
     size_t J = Full.find('/', I);
     if (J == std::string::npos)
@@ -51,18 +75,20 @@ std::string absolutePath(const std::string &P) {
     }
     I = J + 1;
   }
-  std::string R;
-  for (const std::string &C : Parts)
-    R += "/" + C;
-  return R.empty() ? "/" : R;
+  std::string R = Full.substr(0, Root);
+  for (size_t K = 0; K < Parts.size(); ++K)
+    R += (K ? "/" : "") + Parts[K];
+  return R;
 }
 
-/// The directory of an absolute path ("/" for "/x"), or "" for "/".
+/// The directory of an absolute path ("/" for "/x", "C:/" for "C:/x"), or
+/// "" for a root.
 std::string parentDir(const std::string &P) {
-  if (P == "/")
+  size_t Root = rootLength(P);
+  if (P.size() <= Root)
     return "";
   size_t S = P.rfind('/');
-  return S == 0 ? "/" : P.substr(0, S);
+  return S == std::string::npos || S < Root ? P.substr(0, Root) : P.substr(0, S);
 }
 
 std::string joinPath(const std::string &Dir, const std::string &Name) {
@@ -552,7 +578,7 @@ public:
 /// A path written in the project file: relative to its directory (Base:
 /// "" or ending in '/').
 std::string projectPath(const std::string &Base, const std::string &P) {
-  return !P.empty() && P[0] == '/' ? P : Base + P;
+  return rootLength(slashes(P)) > 0 ? P : Base + P;
 }
 
 } // namespace
@@ -565,7 +591,7 @@ bool p3::applyProjectFile(CompilerOptions &Opts, SourceManager &SM,
   std::string Path, Base;
   if (!Opts.ProjectFile.empty()) {
     Path = Opts.ProjectFile;
-    size_t S = Path.rfind('/');
+    size_t S = slashes(Path).rfind('/');
     Base = S == std::string::npos ? "" : Path.substr(0, S + 1);
   } else {
     std::string Dir;
@@ -608,7 +634,7 @@ bool p3::applyProjectFile(CompilerOptions &Opts, SourceManager &SM,
   if (BuildsMain && S.Output && !Opts.GivenOutput &&
       Opts.Act == Action::EmitExe) {
     Opts.OutputFile = projectPath(Base, *S.Output);
-    size_t Slash = Opts.OutputFile.rfind('/');
+    size_t Slash = slashes(Opts.OutputFile).rfind('/');
     if (Slash != std::string::npos && Slash > 0)
       llvm::sys::fs::create_directories(Opts.OutputFile.substr(0, Slash));
   }
