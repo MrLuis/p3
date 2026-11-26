@@ -9,6 +9,7 @@
 #   %build-dir     the build directory
 #   FileCheck, not  from the LLVM tools directory
 import os
+import re
 import sys
 
 import lit.formats
@@ -28,9 +29,23 @@ for d in (config.llvm_tools_dir, config.p3_tools_dir):
 # RUN lines say `FileCheck`; point that at whichever implementation CMake
 # found (LLVM's, or the Python port `filecheck`).
 config.substitutions.append((r"\bFileCheck\b", config.filecheck))
-# Windows programs end their lines with CR LF, the expected files with LF.
+# Windows as the host: programs end their lines with CR LF and the expected
+# files with LF, so diff (the command, not names such as selfhost-diff.py) is
+# utils/lit-diff-crlf.py; and X.expected is X.windows.expected where a test
+# has one (what differs on Windows by design, as tests/windows does it).
 if sys.platform == "win32":
-    config.substitutions.append((r"(?<![-\w./])diff ", "diff --strip-trailing-cr "))
+    config.available_features.add("system-windows")
+    utils_dir = os.path.join(os.path.dirname(__file__), "..", "utils")
+    crlf_diff = os.path.abspath(os.path.join(utils_dir, "lit-diff-crlf.py"))
+    config.substitutions.append(
+        (r"(?<![-\w./])diff ",
+         '"%s" "%s" ' % (sys.executable.replace("\\", "/"), crlf_diff.replace("\\", "/"))))
+    for root, _, files in os.walk(os.path.dirname(__file__)):
+        for f in files:
+            if f.endswith(".windows.expected"):
+                base = f[: -len(".windows.expected")]
+                config.substitutions.append(
+                    (r"/%s\.expected\b" % re.escape(base), "/%s.windows.expected" % base))
 
 # %selfhost-flags: the options that build selfhost/p3.pas (its LLVM-C
 # backend's include file and libLLVM; before %p3, a prefix of it).

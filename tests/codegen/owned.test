@@ -10,7 +10,7 @@
 
 ; CHECK-LABEL: define internal ptr @pas.make(
 ; CHECK: %owned.exc = alloca { ptr, ptr, ptr }
-; CHECK: call i32 @_setjmp(
+; CHECK: call i32 @{{_setjmp|__pas_setjmp}}(
 ; CHECK: finally:
 ; CHECK: store { ptr, ptr, ptr } zeroinitializer, ptr %owned.exc
 ; CHECK: [[SECOND:%second[0-9]*]] = getelementptr

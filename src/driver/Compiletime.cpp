@@ -726,8 +726,10 @@ bool Evaluator::evaluate(FileInfo &F, TopDecl &X, RoutineDecl *Fn,
   llvm::SmallString<256> SrcPath(Dir), Exe(Dir);
   llvm::sys::path::append(SrcPath, Base + ".pas");
   llvm::sys::path::append(Exe, Base);
-  std::string ExeS = hostExecutable(Exe), OutPath = ExeS + ".out", ErrPath = ExeS + ".err",
-                         StampPath = ExeS + ".stamp";
+  // (the program is Base.exe on Windows; its output and stamp are named
+  // after Base, the same on every host)
+  std::string ExeS = hostExecutable(Exe), OutPath = std::string(Exe) + ".out",
+              ErrPath = std::string(Exe) + ".err", StampPath = std::string(Exe) + ".stamp";
 
   std::string Self = fs::getMainExecutable(nullptr, nullptr);
   // (without warnings about the variables copied only for diagnostics)

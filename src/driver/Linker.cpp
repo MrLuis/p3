@@ -293,7 +293,7 @@ static bool linkWithLLD(llvm::StringRef ObjectFile,
   lld::Result R = lld::lldMain(Argv, llvm::outs(), llvm::errs(),
                                {{lld::MinGW, &lld::mingw::link}});
   if (R.retCode != 0) {
-    Diags.error("linking with lld failed");
+    Diags.error("linker command failed with exit code " + llvm::Twine(R.retCode));
     return false;
   }
   return true;

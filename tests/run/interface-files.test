@@ -8,7 +8,7 @@
 ; RUN: %p3 --mode=objfpc -I %t/lib -fseparate-units --emit-llvm %t/main.pas -o - | FileCheck --check-prefix=IR %s
 ; A changed source invalidates the interface; the source is parsed again
 ; (and its deliberately broken implementation is reported).
-; RUN: python3 -c "p='%t/lib/ifaceu.pas'; s=open(p).read().replace('Twice := x * 2;', 'this is broken'); open(p,'w').write(s)"
+; RUN: python3 -c "p=r'%t/lib/ifaceu.pas'; s=open(p).read().replace('Twice := x * 2;', 'this is broken'); open(p,'w').write(s)"
 ; RUN: not %p3 --mode=objfpc -I %t/lib -fseparate-units --emit-llvm %t/main.pas -o /dev/null 2>&1 | FileCheck --check-prefix=STALE %s
 
 ; IFACE: unit ifaceu;

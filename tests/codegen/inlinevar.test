@@ -21,7 +21,7 @@
 ; CHECK: call void @__pas_astr_clear(
 ; CHECK: while.body:
 ; CHECK: call void @__pas_owned_set(ptr [[NODE:%node[0-9]*]], ptr %obj)
-; CHECK: call i32 @_setjmp(
+; CHECK: call i32 @{{_setjmp|__pas_setjmp}}(
 ; CHECK: finally:
 ; CHECK: call void @__pas_owned_free(ptr {{%node[0-9]*}}, ptr %owned.exc)
 ; CHECK: call void @__pas_owned_done(

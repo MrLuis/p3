@@ -150,6 +150,18 @@ jobs:
           sed -n '/^Failed Tests/,$p;/^Unresolved Tests/,$p' lit-windows.log | tail -20
           tail -8 lit-windows.log
 
+      # TEMPORARY: the netasync example resets its clients on Windows (not
+      # under Wine): -O0, -O2, and -O2 without the runtime's inlined IR.
+      - name: Diagnose the netasync example
+        continue-on-error: true
+        run: |
+          for v in "-O0" "-O2" "-O2 -fno-inline-runtime"; do
+            build/bin/p3.exe --no-project --mode=objfpc $v examples/netasync/src/netasync_demo.pas -o na.exe
+            echo "== $v"
+            python tests/driver/Inputs/netasync-check.py ./na.exe 2>&1 | tail -4
+            echo "exit ${PIPESTATUS[0]}"
+          done
+
       - name: Upload the lit log
         if: ${{ !cancelled() }}
         uses: actions/upload-artifact@v4

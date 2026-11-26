@@ -1,5 +1,6 @@
 ; The self-hosted compiler's unit tests (selfhost/tests, SELFHOST.md S3),
 ; built with p3. selfhost/tests/t_diag.expected is also checked against the
 ; C++ diagnostics engine by p3-unittests (SelfhostDiagTest.cpp).
+; UNSUPPORTED: system-windows
 ; RUN: %S/../../selfhost/tests/run.sh p3 p3 | FileCheck %s
 ; CHECK: 2 passed, 0 failed

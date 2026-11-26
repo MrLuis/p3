@@ -1,5 +1,5 @@
 ; RUN: %p3 --help | FileCheck %s
-; CHECK: USAGE: p3 [options] <input.pas>
+; CHECK: USAGE: p3{{(\.exe)?}} [options] <input.pas>
 ; CHECK-DAG: -o <file>
 ; CHECK-DAG: --emit-tokens
 ; CHECK-DAG: --emit-ast
