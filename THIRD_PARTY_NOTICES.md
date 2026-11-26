@@ -119,9 +119,23 @@ p3 carries LLVM's license with it
 
 ## zstd
 
-The macOS package has zstd (<https://github.com/facebook/zstd>), which LLVM
-uses, linked into p3, and carries its BSD license as
+The macOS and Windows packages have zstd (<https://github.com/facebook/zstd>),
+which LLVM uses, linked into p3, and carry its BSD license as
 `share/doc/p3/LICENSE.zstd`. The Linux packages use the system's zstd.
+
+## The Windows package
+
+Besides LLVM (with lld) and zstd, `p3.exe` has these linked in, from MSYS2's
+UCRT64 environment: zlib (zlib license), and the GCC C++ runtime and
+winpthreads, under the GCC Runtime Library Exception and winpthreads'
+license (`share/doc/p3/LICENSE.winpthreads.txt`). LLVM's WindowsManifest
+library, and with it libxml2, is left out (`src/driver/WindowsManifestStub.cpp`).
+
+`lib/mingw-w64` holds MinGW-w64's x86-64 libraries and compiler-rt's
+builtins, from llvm-mingw (<https://github.com/mstorsjo/llvm-mingw>), which
+p3 links Windows programs with: their licenses are
+`share/doc/p3/LICENSE.MinGW-w64.txt`, `LICENSE.MinGW-w64-runtime.txt`,
+`LICENSE.winpthreads.txt` and (compiler-rt) `LICENSE.llvm-project`.
 
 ## Programs for Windows
 

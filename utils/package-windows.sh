@@ -65,7 +65,8 @@ done
 cp "$builtins" "$root/lib/mingw-w64/"
 
 # Licenses: LLVM's (p3.exe, lld, compiler-rt), MinGW-w64's and winpthreads'
-# (the libraries programs are linked with).
+# (the libraries programs are linked with), and zstd's (linked into p3.exe;
+# BSD: its notice goes along).
 doc=$root/share/doc/p3
 [ -s "$doc/LICENSE" ] || fail "share/doc/p3/LICENSE was not installed"
 cp "$(dirname "$0")/../licenses/llvm/LICENSE.TXT" "$doc/LICENSE.llvm-project"
@@ -73,6 +74,9 @@ for f in COPYING.MinGW-w64.txt COPYING.MinGW-w64-runtime.txt COPYING.winpthreads
   [ -f "$lm/x86_64-w64-mingw32/share/mingw32/$f" ] || fail "no $f in llvm-mingw"
   cp "$lm/x86_64-w64-mingw32/share/mingw32/$f" "$doc/LICENSE.${f#COPYING.}"
 done
+zstd_license=${MINGW_PREFIX:-/ucrt64}/share/licenses/zstd/LICENSE
+[ -f "$zstd_license" ] || fail "no zstd license ($zstd_license)"
+cp "$zstd_license" "$doc/LICENSE.zstd"
 
 mkdir -p "$out"
 out=$(cd "$out" && pwd)

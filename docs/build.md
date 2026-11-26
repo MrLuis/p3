@@ -60,7 +60,30 @@ Programs are linked with the Command Line Tools' `cc`
 
 ## Windows
 
-p3 does not build natively on Windows yet. Build it in
+p3 builds on Windows with [MSYS2](https://www.msys2.org)'s UCRT64
+environment and its LLVM 23. In the "MSYS2 UCRT64" shell:
+
+```sh
+pacman -S --needed git mingw-w64-ucrt-x86_64-{llvm,clang,lld,cmake,ninja,python}
+
+cmake -G Ninja -S . -B build -DCMAKE_BUILD_TYPE=Release \
+  -DLLVM_DIR="$(llvm-config --cmakedir)" \
+  -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++ \
+  -DP3_CROSS_TARGETS=OFF
+ninja -C build p3 pascalrt rtl
+```
+
+That p3 links programs with MSYS2's `clang` (in PATH, or named by `P3_CC`).
+The release's Windows package is built differently (see
+`.github/workflows/windows-compiler.yml`): LLVM linked statically, with lld
+inside p3 (`-DP3_LINK_LLVM_DYLIB=OFF -DP3_LLVM_STATIC_DEPS=ON
+-DP3_EMBED_LLD=ON -DCMAKE_EXE_LINKER_FLAGS=-static`), so that it links
+programs itself from MinGW-w64's libraries in `lib/mingw-w64` (from
+[llvm-mingw](https://github.com/mstorsjo/llvm-mingw);
+`utils/package-windows.sh` puts them there). The self-hosted compiler and
+the lit tests do not run on Windows yet.
+
+Alternatively, build the Linux p3 in
 [WSL2](https://learn.microsoft.com/windows/wsl/install): in an administrator
 PowerShell, run
 

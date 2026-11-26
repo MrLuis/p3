@@ -24,8 +24,8 @@ For quality control (and a bit of self insecurity), there are two compilers, kep
 ## Building and installing
 
 - **From source:** CMake and LLVM 23; [docs/build.md](docs/build.md) has the
-  requirements, the steps for Ubuntu, macOS and Windows (WSL2), installing,
-  and running the tests. In short:
+  requirements, the steps for Ubuntu, macOS and Windows, installing, and
+  running the tests. In short:
 
   ```sh
   cmake -G Ninja -S . -B build
@@ -36,8 +36,13 @@ For quality control (and a bit of self insecurity), there are two compilers, kep
   ([the tap](https://github.com/MrLuis/homebrew-p3)).
 - **Release archives** for Linux x86-64 and ARM64 and macOS ARM64, with
   LLVM linked in: [Releases](https://github.com/MrLuis/p3/releases).
+- **Windows** (x86-64, Windows 10 and later): the release's
+  `p3-<version>-windows-x86_64.zip`. Unzip it anywhere and run
+  `bin\p3.exe`; it needs nothing else installed, because it links
+  programs itself (lld, with the MinGW-w64 libraries in the zip).
 
-Both need a C compiler on the machine to link programs.
+Homebrew's p3 and the Linux and macOS archives need a C compiler on the
+machine to link programs.
 
 ## Usage
 

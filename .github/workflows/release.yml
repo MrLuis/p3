@@ -1,5 +1,6 @@
 # Releases: a pushed tag v<version> builds, tests and packages every
-# platform from the tagged commit (package.yml), and publishes the archives
+# platform from the tagged commit (package.yml; windows-compiler.yml for
+# Windows), and publishes the archives
 # only once all of them have passed. A tag with a suffix (v0.2.0-rc.1) is a
 # pre-release; its number must be CMakeLists.txt's version, and so must a
 # plain tag's.
@@ -59,10 +60,16 @@ jobs:
     with:
       version: ${{ needs.version.outputs.version }}
 
+  windows:
+    needs: version
+    uses: ./.github/workflows/windows-compiler.yml
+    with:
+      version: ${{ needs.version.outputs.version }}
+
   # The only job that may write to the repository, and only after every
   # platform was built, tested and tried: a release is never partly uploaded.
   publish:
-    needs: [version, package]
+    needs: [version, package, windows]
     runs-on: ubuntu-24.04
     permissions:
       contents: write
@@ -80,8 +87,8 @@ jobs:
         run: |
           cd dist
           ls -l
-          for a in linux-x86_64 linux-arm64 macos-arm64; do
-            [ -f "p3-$VERSION-$a.tar.xz" ] || { echo "::error::no p3-$VERSION-$a.tar.xz"; exit 1; }
+          for a in linux-x86_64.tar.xz linux-arm64.tar.xz macos-arm64.tar.xz windows-x86_64.zip; do
+            [ -f "p3-$VERSION-$a" ] || { echo "::error::no p3-$VERSION-$a"; exit 1; }
           done
           sha256sum -c ./*.sha256
 

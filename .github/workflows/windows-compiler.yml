@@ -1,13 +1,20 @@
-# p3 itself on Windows (docs/runtime-targets.md, step 7, W1): built with
-# MSYS2's UCRT64 toolchain and its LLVM, then used on Windows to compile and
-# run the test programs. A workflow of its own until the port is done.
+# p3 itself on Windows: built with MSYS2's UCRT64 toolchain and its LLVM
+# (linked in, with lld), used on Windows to compile and run the test
+# programs, packaged as p3-<version>-windows-x86_64.zip, and the package
+# tried on a clean Windows. release.yml builds a release's zip with it.
 name: Windows compiler
 
 on:
   push:
-    branches: [main, 'windows-native-*']
+    branches: [main, 'windows-*']
   pull_request:
   workflow_dispatch:
+  workflow_call:
+    inputs:
+      version:
+        description: the release's version (0.2.0-rc.1); CMake's by default
+        type: string
+        default: ''
 
 permissions:
   contents: read
@@ -126,6 +133,8 @@ jobs:
           bash utils/windows-run-bundle.sh bundle
 
       - name: Package
+        env:
+          P3_VERSION: ${{ inputs.version }}
         run: utils/package-windows.sh build "$LM" dist
 
       - name: Upload the package
