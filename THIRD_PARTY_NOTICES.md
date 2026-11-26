@@ -115,7 +115,17 @@ DEALINGS IN THE SOFTWARE.
 
 p3 is built on LLVM (<https://llvm.org>). A package that has LLVM linked into
 p3 carries LLVM's license with it
-([licenses/llvm/LICENSE.TXT](licenses/llvm/LICENSE.TXT)).
+([licenses/llvm/LICENSE.TXT](licenses/llvm/LICENSE.TXT), installed as
+`share/doc/p3/LICENSE.llvm-project`), and the notices of the third-party code
+in LLVM's Support library: regular expressions (BSD and ISC licenses), xxHash
+(BSD 2-Clause) and Unicode conversions (Unicode license)
+([licenses/llvm/THIRD-PARTY.txt](licenses/llvm/THIRD-PARTY.txt), installed
+as `share/doc/p3/LICENSE.llvm-third-party`).
+
+LLVM's license does not reach programs p3 compiles: p3 generates their code
+with LLVM, but none of LLVM's own code goes into them, apart from
+compiler-rt's builtins on Windows (below), which are under the same license
+with the LLVM exception.
 
 ## zstd
 
@@ -123,22 +133,46 @@ The macOS and Windows packages have zstd (<https://github.com/facebook/zstd>),
 which LLVM uses, linked into p3, and carry its BSD license as
 `share/doc/p3/LICENSE.zstd`. The Linux packages use the system's zstd.
 
+The Linux packages link GCC's C++ runtime into p3 (`-static-libstdc++
+-static-libgcc`), under the GCC Runtime Library Exception, which asks for no
+notice.
+
 ## The Windows package
 
 Besides LLVM (with lld) and zstd, `p3.exe` has these linked in, from MSYS2's
-UCRT64 environment: zlib (zlib license), and the GCC C++ runtime and
-winpthreads, under the GCC Runtime Library Exception and winpthreads'
-license (`share/doc/p3/LICENSE.winpthreads.txt`). LLVM's WindowsManifest
-library, and with it libxml2, is left out (`src/driver/WindowsManifestStub.cpp`).
+UCRT64 environment: zlib (zlib license, which asks for no notice with
+binaries), the GCC C++ runtime (libstdc++ and libgcc, under the GCC Runtime
+Library Exception, which asks for none either), and the MinGW-w64 runtime and
+winpthreads, whose notices are `share/doc/p3/LICENSE.MinGW-w64-runtime.txt`
+and `LICENSE.winpthreads.txt`. LLVM's WindowsManifest library, and with it
+libxml2, is left out (`src/driver/WindowsManifestStub.cpp`).
 
 `lib/mingw-w64` holds MinGW-w64's x86-64 libraries and compiler-rt's
 builtins, from llvm-mingw (<https://github.com/mstorsjo/llvm-mingw>), which
 p3 links Windows programs with: their licenses are
 `share/doc/p3/LICENSE.MinGW-w64.txt`, `LICENSE.MinGW-w64-runtime.txt`,
-`LICENSE.winpthreads.txt` and (compiler-rt) `LICENSE.llvm-project`.
+`LICENSE.winpthreads.txt` and (compiler-rt) `LICENSE.llvm-project`. Its
+`libssp.a` and `libssp_nonshared.a` are llvm-mingw's empty stand-ins, not
+GCC's libssp.
 
 ## Programs for Windows
 
-p3 links Windows programs statically with the MinGW-w64 runtime and
-winpthreads of the toolchain that is installed. Their licenses apply to those
-programs; they have not been reviewed here.
+**A Windows program built by p3 must be distributed with notices**, unlike a
+Linux or macOS one. p3 links every Windows program statically with the
+MinGW-w64 runtime (`crt2.o`, `libmingw32`, `libmingwex`, `libmoldname`) and
+with winpthreads (the runtime's tasks use it), and their licenses ask for
+their notices with binary distributions. With the Windows package, those are:
+
+- `share/doc/p3/LICENSE.MinGW-w64-runtime.txt` (the MinGW-w64 runtime);
+- `share/doc/p3/LICENSE.winpthreads.txt` (winpthreads);
+- `share/doc/p3/LICENSE.wepoll`, if the program waits on sockets (see
+  wepoll above).
+
+Include them in the program's documentation or other materials, for example
+as a file next to the executable. compiler-rt's builtins and p3's runtime
+(Apache 2.0 with the LLVM exception) need no notice.
+
+When a Windows program is cross-compiled on Linux or macOS, p3 links it with
+the MinGW-w64 toolchain that is installed, and the same applies with that
+toolchain's copies of these licenses (for a GCC-based MinGW-w64, libgcc comes
+in too, under the GCC Runtime Library Exception, which needs no notice).

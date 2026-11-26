@@ -83,6 +83,9 @@ done
 llvm_license=$(dirname "$0")/../licenses/llvm/LICENSE.TXT
 [ -f "$llvm_license" ] || fail "no $llvm_license"
 cp "$llvm_license" "$root/share/doc/p3/LICENSE.llvm-project"
+llvm_third_party=$(dirname "$0")/../licenses/llvm/THIRD-PARTY.txt
+[ -f "$llvm_third_party" ] || fail "no $llvm_third_party"
+cp "$llvm_third_party" "$root/share/doc/p3/LICENSE.llvm-third-party"
 zstd_license=${ZSTD_LICENSE:-$(brew --prefix zstd 2>/dev/null)/LICENSE}
 [ -f "$zstd_license" ] || fail "no zstd license ($zstd_license)"
 cp "$zstd_license" "$root/share/doc/p3/LICENSE.zstd"
