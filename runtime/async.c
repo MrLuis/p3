@@ -1032,11 +1032,21 @@ static void *new_stack(void) {
        page inside the stack's bounds (see ctx_make), as on a Windows
        thread's own stack: an overflow is STATUS_STACK_OVERFLOW, which ends
        the program (a plain inaccessible page would fault again in the
-       exception's dispatch, on the same stack, endlessly). */
+       exception's dispatch, on the same stack, endlessly).
+       The guard page is committed as one, not made one by VirtualProtect
+       afterwards: Windows treats VirtualProtect adding PAGE_GUARD at the
+       running thread's StackBase as the thread placing its own guard page,
+       and moves the TEB's StackLimit to the page above it. A task running
+       on the stack just below (it carves this one when it starts a task)
+       is then left with a StackLimit above its StackBase; the next stack
+       probe on it (__chkstk, for any frame over a page: UCRT's _write has
+       one) walks down from there into this guard page, outside the
+       thread's stack bounds: STATUS_GUARD_PAGE_VIOLATION ends the program,
+       silently. (Wine does not do this.) */
     char *lo = (char *)s - stack_below(page, guard);
-    DWORD old;
-    if (!VirtualAlloc(lo, (size_t)((char *)s + size - lo), MEM_COMMIT, PAGE_READWRITE) ||
-        (guard && !VirtualProtect(lo, page, PAGE_READWRITE | PAGE_GUARD, &old))) {
+    if (!VirtualAlloc(s, size, MEM_COMMIT, PAGE_READWRITE) ||
+        !VirtualAlloc(lo, (size_t)((char *)s - lo), MEM_COMMIT,
+                      guard ? PAGE_READWRITE | PAGE_GUARD : PAGE_READWRITE)) {
       UNLOCK();
       __pas_runtime_error("out of memory for task stacks");
     }

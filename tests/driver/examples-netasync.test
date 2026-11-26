@@ -1,9 +1,6 @@
 { netasync driver: builds examples/netasync, runs its echo server with
  * --requests 4, drives four connections through it, verifies the echoes
  * and the clean stop.
- * On Windows the server takes a connection from another process and stops
- * serving (as examples-httpasyncserver.test): known, not yet understood.
- * XFAIL: system-windows
  * RUN: rm -rf %t && mkdir -p %t && cp -R %S/../../examples/netasync %t/
  * RUN: rm -rf %t/netasync/bin
  * RUN: cd %t/netasync && %p3-project 2>&1 | count 0
