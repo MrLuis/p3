@@ -155,11 +155,15 @@ foreach(triple ${P3_CROSS_LIST})
     set(variants "")
   endif()
   set(libs "")
+  # Both with MinGW-w64's own printf and strtod family
+  # (__USE_MINGW_ANSI_STDIO), which the headers choose for msvcrt anyway:
+  # UCRT's printf rounds an exact tie away from zero ("%.0f" of 0.5 is 1 on
+  # Windows), where p3 rounds to even, as MinGW's and other systems' do.
   foreach(crt IN LISTS variants)
     if(crt STREQUAL "msvcrt")
-      set(crtflags -D__MSVCRT_VERSION__=0x700)
+      set(crtflags -D__MSVCRT_VERSION__=0x700 -D__USE_MINGW_ANSI_STDIO=1)
     elseif(crt STREQUAL "ucrt")
-      set(crtflags -D__MSVCRT_VERSION__=0xE00)
+      set(crtflags -D__MSVCRT_VERSION__=0xE00 -D__USE_MINGW_ANSI_STDIO=1)
     else()
       set(crtflags "")
     endif()
