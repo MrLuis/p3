@@ -33,5 +33,5 @@ With `--requests N` the server stops itself after N served connections and
 prints a summary — that is how the driver test
 (`tests/driver/examples-netasync.test`) checks it.
 
-Requires Linux or macOS (Windows later). See `docs/todo.md` for the netasync
+Requires Linux or macOS (Windows later). See `localdocs/todo.md` (local notes, not in the repository) for the netasync
 design notes.

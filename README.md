@@ -21,81 +21,23 @@ For quality control (and a bit of self insecurity), there are two compilers, kep
 - **Self-hosted `p3`** (`selfhost/`): the same compiler written in Pascal,
   which can compile itself.
 
-## Building
+## Building and installing
 
-Requires CMake 3.20 or later, a C++20 compiler and LLVM 23 (CMake rejects
-other major versions). Ninja is used below. The self-hosted compiler and the
-inlining of runtime functions also need Python 3; the latter needs LLVM's
-`clang` and `llvm-link` too. If CMake does not find LLVM, pass
-`-DLLVM_DIR=<llvm>/lib/cmake/llvm`.
+- **From source:** CMake and LLVM 23; [docs/build.md](docs/build.md) has the
+  requirements, the steps for Ubuntu, macOS and Windows (WSL2), installing,
+  and running the tests. In short:
 
-```sh
-cmake -G Ninja -S . -B build
-ninja -C build
-```
+  ```sh
+  cmake -G Ninja -S . -B build
+  ninja -C build
+  ```
 
-The default configuration is `Release` (`-O2`/`-O3`); use
-`-DCMAKE_BUILD_TYPE=Debug` (or `RelWithDebInfo`) while working on the
-compiler. The C runtime is built at `-O2` in every configuration, and
-`ninja -C build p3-self` builds the distributed self-hosted compiler at
-`-O2`; `-DP3_SELFHOST_NO_CHECKS=ON` turns its range and overflow checks
-off once the compiler is trusted enough for that.
+- **Homebrew** (macOS ARM64, Linux x86-64): `brew install mrluis/p3/p3`
+  ([the tap](https://github.com/MrLuis/homebrew-p3)).
+- **Release archives** for Linux x86-64 and ARM64 and macOS ARM64, with
+  LLVM linked in: [Releases](https://github.com/MrLuis/p3/releases).
 
-### Ubuntu 24.04
-
-LLVM 23 comes from [apt.llvm.org](https://apt.llvm.org):
-
-```sh
-sudo apt-get update
-sudo apt-get install -y git cmake ninja-build build-essential python3 wget \
-  zlib1g-dev libzstd-dev libedit-dev libxml2-dev
-wget https://apt.llvm.org/llvm.sh
-sudo bash llvm.sh 23
-sudo apt-get install -y llvm-23-dev llvm-23-tools clang-23
-
-cmake -G Ninja -S . -B build \
-  -DLLVM_DIR=/usr/lib/llvm-23/lib/cmake/llvm \
-  -DCMAKE_C_COMPILER=clang-23 -DCMAKE_CXX_COMPILER=clang++-23
-ninja -C build
-```
-
-### Windows
-
-p3 does not build natively on Windows yet. Build it in
-[WSL2](https://learn.microsoft.com/windows/wsl/install): in an administrator
-PowerShell, run
-
-```powershell
-wsl --install -d Ubuntu-24.04
-```
-
-Then follow the Ubuntu 24.04 steps above inside Ubuntu, with the repository
-cloned into the Linux file system (under `~`, which is much faster than
-`/mnt/c`). The compiler is then a Linux program. For it to write Windows
-executables, install MinGW-w64 (`sudo apt-get install -y mingw-w64`) before
-running `cmake` (if `build/` is already configured, run `cmake` again). Either
-of MinGW's thread variants works.
-
-See **Cross-compiling** under [Compiler parameters](#compiler-parameters).
-
-### Installing
-
-After building:
-
-```sh
-cmake --install build --prefix <dir>
-```
-
-This writes the C++ compiler to `<dir>/bin/p3`, the runtime and unit library
-to `<dir>/lib` (with the Windows runtime, if it was built), and the licenses
-to `<dir>/share/doc/p3`. p3 finds its runtime and units relative to its own
-location, so the directory can be moved; keep its layout. The self-hosted
-compiler is not installed.
-
-The installed p3 still needs the shared LLVM library it was built against
-(unless configured with `-DP3_LINK_LLVM_DYLIB=OFF`, which is untested), and
-a C compiler to link programs. It is not a self-contained package for a
-machine without them.
+Both need a C compiler on the machine to link programs.
 
 ## Usage
 
@@ -325,22 +267,6 @@ end.
   [`bench/json`](bench/json/README.md), and an example is in
   [`examples/json`](examples/json/README.md).
 
-## Testing
-
-Tests are [lit](https://llvm.org/docs/CommandGuide/lit.html) files under
-`tests/`:
-
-```sh
-ninja -C build check
-```
-
-This needs `lit` and `FileCheck`. On Ubuntu, `FileCheck` is in
-`llvm-23-tools`; install `lit` with `pipx install lit` (package `pipx`, then
-`pipx ensurepath` and a new shell) and run `cmake` again.
-
-With MinGW-w64 and Wine installed, `tests/windows` also runs the programs
-of `tests/run` as Windows executables (see Cross-compiling).
-
 ## Repository layout
 
 | Path | Contents |
@@ -351,7 +277,7 @@ of `tests/run` as Windows executables (see Cross-compiling).
 | `tests/`, `bench/` | lit tests and benchmarks |
 | `examples/` | example projects built with the self-hosted compiler |
 | `utils/`, `tools/` | helper scripts |
-| `docs/` | documentation |
+| `docs/` | documentation: [building](docs/build.md) |
 
 ## License
 
@@ -474,10 +400,10 @@ and the unit library takes the target's branches (`MSWINDOWS`, `LINUX`,
 `DARWIN`).
 
 Windows executables (64-bit x86) come from any host. Install MinGW-w64
-(`brew install mingw-w64`, or the distribution's `mingw-w64` package):
-CMake finds `x86_64-w64-mingw32-gcc` and builds the runtime for Windows too,
-once for each of Windows' C libraries: `lib/x86_64-w64-mingw32/msvcrt/` and
-`lib/x86_64-w64-mingw32/ucrt/libpascalrt.a`. Then:
+(`brew install mingw-w64`, or the distribution's `mingw-w64` package); a
+build of p3 then includes the runtime for Windows programs
+([docs/build.md](docs/build.md#the-runtime-for-windows-programs)), as do the
+release archives. Then:
 
 ```sh
 build/bin/p3 --mode=objfpc --target=x86_64-w64-mingw32 hello.pas   # hello.exe
@@ -489,17 +415,14 @@ C library that is depends on the toolchain: UCRT (Windows 10 and later; for
 example Homebrew's MinGW-w64) or msvcrt.dll (any Windows; for example
 Debian's and Ubuntu's). p3 asks the toolchain's headers which one it links
 and uses the runtime built for it; `P3_WINDOWS_CRT=ucrt` or `msvcrt` says
-so instead. `-DP3_CROSS_TARGETS=<triples>`
-picks the targets to build the runtime for (`OFF`: none). The whole unit
+so instead. The whole unit
 library works there, tasks, iterators and the network units included:
 `netasync`, `netloop` and `nethttp` use Winsock, and wait on sockets with
 the bundled [wepoll](https://github.com/piscisaureus/wepoll) (epoll over
 the AFD driver's polling, BSD-2-Clause, in `runtime/wepoll`), as on Linux.
 Two things differ: `TNetListenOpts.ReusePort` raises `ENetError` (Windows
 has no `SO_REUSEPORT`; `netloop` shares one listener among its loops, as on
-macOS), and `TNetLoop.WatchFd` takes sockets only. With
-[Wine](https://www.winehq.org/) installed, the tests run every program of
-`tests/run` again as a Windows program (`tests/windows`).
+macOS), and `TNetLoop.WatchFd` takes sockets only.
 
 Without the runtime for a target, p3 says how to build it; the MSVC triple
 (`x86_64-pc-windows-msvc`) and other targets compile but do not link yet.

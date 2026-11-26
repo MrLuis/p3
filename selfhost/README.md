@@ -1,7 +1,7 @@
 # The self-hosted p3
 
 p3 written in Pascal (the dialect in [DIALECT.md](DIALECT.md)); the plan is
-[../docs/SELFHOST.md](../docs/SELFHOST.md). It links with libLLVM (its back end calls
+[../localdocs/SELFHOST.md](../localdocs/SELFHOST.md). It links with libLLVM (its back end calls
 the LLVM-C API), so it needs two things from the CMake build: the target
 initializers of that LLVM (`build/selfhost/llvmtargets.inc`, written by
 `utils/gen-llvm-targets.py`) and the link options, both in

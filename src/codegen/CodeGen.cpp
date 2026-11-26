@@ -2072,7 +2072,7 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
       setVarRange(V, {});
   }
 
-  //===--- LB-5 (docs/llvm-23.md): one length check per loop for the
+  //===--- LB-5 (localdocs/llvm-23.md): one length check per loop for the
   // counted types. A for loop whose body indexes a dynamic array, an
   // open array or an array of const with the bare control variable only,
   // and whose body provably cannot change the array, checks the length
@@ -9056,7 +9056,7 @@ public:
                    S->getFinal()->getBeginLoc(), "'for' loop bound out of range");
     Start = convertOrdinal(Start, S->getInit()->getType(), VarTy);
     Final = convertOrdinal(Final, S->getFinal()->getType(), VarTy);
-    // LB-5 (docs/llvm-23.md): the hoisted length checks of the counted
+    // LB-5 (localdocs/llvm-23.md): the hoisted length checks of the counted
     // bases, on the path where the loop is entered (Start ≤ Last). The
     // block for the loop's incoming phi is captured after (the checks
     // split the block).

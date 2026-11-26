@@ -12,8 +12,8 @@ compile_commands.json
 # codesight indexes
 .codesight/
 
-# the design docs are local-only
-docs/
+# the design docs and plans are local-only (docs/ is published)
+localdocs/
 /bench/json/data/
 /bench/json/rust/target/
 __pycache__/
