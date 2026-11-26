@@ -144,7 +144,18 @@ jobs:
         continue-on-error: true
         run: |
           ninja -C build p3-unittests
-          "$LIT" -q build/tests 2>&1 | tail -60
+          "$LIT" -v build/tests > lit-windows.log 2>&1 || true
+          sed -n '/^Failed Tests/,$p;/^Unresolved Tests/,$p' lit-windows.log | tail -20
+          tail -8 lit-windows.log
+
+      - name: Upload the lit log
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: lit-windows-log
+          path: lit-windows.log
+          if-no-files-found: ignore
+          retention-days: 7
 
       - name: Package
         env:
