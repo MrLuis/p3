@@ -12,6 +12,11 @@
 #include "llvm/TargetParser/Triple.h"
 #include "llvm/TargetParser/Host.h"
 
+#ifdef P3_EMBED_LLD
+#include "lld/Common/Driver.h"
+LLD_HAS_DRIVER(mingw)
+#endif
+
 using namespace p3;
 
 bool p3::isHostTriple(llvm::StringRef Triple) {
@@ -234,15 +239,87 @@ static std::string mingwRuntimeLibrary(llvm::StringRef Flat, llvm::StringRef CC,
   return Variant(CRT);
 }
 
+#ifdef P3_EMBED_LLD
+/// MinGW-w64's libraries, for the lld inside p3: $P3_MINGW_SYSROOT, else
+/// <dir of p3>/../lib/mingw-w64; "" when there are none (no crt2.o).
+static std::string findMinGWLibraries() {
+  llvm::SmallString<256> Dir;
+  if (auto Env = llvm::sys::Process::GetEnv("P3_MINGW_SYSROOT")) {
+    Dir = *Env;
+  } else {
+    std::string Exe = llvm::sys::fs::getMainExecutable(nullptr, nullptr);
+    Dir = llvm::sys::path::parent_path(Exe);
+    llvm::sys::path::append(Dir, "..", "lib", "mingw-w64");
+    llvm::sys::path::remove_dots(Dir, /*remove_dot_dot=*/true);
+  }
+  llvm::SmallString<256> Crt(Dir);
+  llvm::sys::path::append(Crt, "crt2.o");
+  return llvm::sys::fs::exists(Crt) ? std::string(Dir) : "";
+}
+
+/// Links a Windows program with lld, in this process, the way clang's
+/// MinGW driver does with compiler-rt (no GCC runtime): MinGW-w64's start
+/// files and libraries from Libs, statically.
+static bool linkWithLLD(llvm::StringRef ObjectFile,
+                        llvm::ArrayRef<std::string> UnitObjects,
+                        llvm::StringRef RuntimeLib,
+                        llvm::ArrayRef<std::string> Extra,
+                        llvm::StringRef OutputFile, llvm::StringRef Libs,
+                        DiagnosticsEngine &Diags) {
+  auto In = [&](const char *File) {
+    llvm::SmallString<256> P(Libs);
+    llvm::sys::path::append(P, File);
+    return std::string(P);
+  };
+  std::vector<std::string> A = {"ld.lld", "-m", "i386pep", "-Bstatic",
+                                "--gc-sections", "-o", OutputFile.str(),
+                                In("crt2.o"), In("crtbegin.o"),
+                                "-L" + Libs.str(), ObjectFile.str()};
+  A.insert(A.end(), UnitObjects.begin(), UnitObjects.end());
+  A.push_back(RuntimeLib.str());
+  A.insert(A.end(), Extra.begin(), Extra.end());
+  // Winsock (the runtime's socket waits), winpthreads (its tasks), then
+  // what every MinGW program links (lld finds symbols in any order).
+  for (const char *L : {"-lws2_32", "-lpthread", "-lmingw32"})
+    A.push_back(L);
+  A.push_back(In("libclang_rt.builtins-x86_64.a"));
+  for (const char *L : {"-lmoldname", "-lmingwex", "-lmsvcrt", "-ladvapi32",
+                        "-lshell32", "-luser32", "-lkernel32"})
+    A.push_back(L);
+  A.push_back(In("crtend.o"));
+  std::vector<const char *> Argv;
+  for (const std::string &S : A)
+    Argv.push_back(S.c_str());
+  lld::Result R = lld::lldMain(Argv, llvm::outs(), llvm::errs(),
+                               {{lld::MinGW, &lld::mingw::link}});
+  if (R.retCode != 0) {
+    Diags.error("linking with lld failed");
+    return false;
+  }
+  return true;
+}
+#endif
+
 bool p3::linkExecutable(llvm::StringRef ObjectFile,
                          llvm::ArrayRef<std::string> UnitObjects,
                          llvm::StringRef OutputFile,
                          llvm::ArrayRef<std::string> LibraryDirs,
                          llvm::ArrayRef<std::string> Libraries,
                          llvm::StringRef Triple, DiagnosticsEngine &Diags) {
-  std::string CC = findLinkerDriver(Triple, Diags);
-  if (CC.empty())
-    return false;
+  // A Windows host with lld inside p3 and MinGW-w64's libraries next to it
+  // needs no C toolchain (P3_CC still names one).
+  std::string LLDLibs;
+#ifdef P3_EMBED_LLD
+  if (isHostTriple(Triple) && llvm::Triple(Triple).isWindowsGNUEnvironment() &&
+      !llvm::sys::Process::GetEnv("P3_CC"))
+    LLDLibs = findMinGWLibraries();
+#endif
+  std::string CC;
+  if (LLDLibs.empty()) {
+    CC = findLinkerDriver(Triple, Diags);
+    if (CC.empty())
+      return false;
+  }
 
   std::string RuntimeLib = findRuntimeLibrary(Triple);
   if (!isHostTriple(Triple) && llvm::Triple(Triple).isWindowsGNUEnvironment()) {
@@ -300,6 +377,11 @@ bool p3::linkExecutable(llvm::StringRef ObjectFile,
       Extra.push_back("-l" + L);
     }
   }
+#ifdef P3_EMBED_LLD
+  if (!LLDLibs.empty())
+    return linkWithLLD(ObjectFile, UnitObjects, RuntimeLib, Extra, OutputFile,
+                       LLDLibs, Diags);
+#endif
   // On macOS the object records the deployment target from the target
   // triple; clang's default can be older, which makes ld warn that the
   // object was built for a newer macOS. Use the object's target.

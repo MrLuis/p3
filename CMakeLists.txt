@@ -83,6 +83,35 @@ if(P3_LLVM_STATIC_DEPS)
   endif()
 endif()
 
+# Windows packages (docs/build.md): p3 links Windows programs with lld
+# inside it, from MinGW-w64's libraries in <prefix>/lib/mingw-w64, and
+# needs no C toolchain. lld's static libraries are linked by file (an LLVM
+# distribution's lld targets may name the shared libLLVM, which would put a
+# second LLVM in p3), with the LLVM components they use.
+option(P3_EMBED_LLD
+       "Link Windows programs with lld inside p3 (MinGW hosts; LLVM linked statically)" OFF)
+set(P3_LLD_LIBS "")
+if(P3_EMBED_LLD)
+  if(P3_LLVM_LIBS STREQUAL "LLVM")
+    message(FATAL_ERROR "P3_EMBED_LLD needs P3_LINK_LLVM_DYLIB=OFF")
+  endif()
+  foreach(lib lldMinGW lldCOFF lldCommon)
+    find_library(P3_${lib}_LIBRARY NAMES lib${lib}.a HINTS ${LLVM_LIBRARY_DIR}
+                 NO_DEFAULT_PATH REQUIRED)
+    list(APPEND P3_LLD_LIBS ${P3_${lib}_LIBRARY})
+  endforeach()
+  find_path(P3_LLD_INCLUDE_DIR lld/Common/Driver.h HINTS ${LLVM_INCLUDE_DIRS}
+            NO_DEFAULT_PATH REQUIRED)
+  include_directories(SYSTEM ${P3_LLD_INCLUDE_DIR})
+  llvm_map_components_to_libnames(P3_LLD_LLVM_LIBS
+    binaryformat bitwriter codegen core debuginfocodeview debuginfodwarf
+    debuginfomsf debuginfopdb demangle libdriver lto mc object option passes
+    support target targetparser windowsdriver windowsmanifest
+    ${LLVM_TARGETS_TO_BUILD})
+  list(APPEND P3_LLD_LIBS ${P3_LLD_LLVM_LIBS})
+  message(STATUS "p3 links Windows programs with lld inside it")
+endif()
+
 add_compile_options(-Wall -Wextra -Wno-unused-parameter)
 
 include_directories(${CMAKE_CURRENT_SOURCE_DIR}/include)

@@ -12,6 +12,13 @@ on:
 permissions:
   contents: read
 
+env:
+  # MinGW-w64's libraries for the package (and the lld inside p3) come from
+  # this llvm-mingw release (UCRT, LLVM 23.1.6).
+  LLVM_MINGW: llvm-mingw-20261117-ucrt-x86_64
+  LLVM_MINGW_URL: https://github.com/mstorsjo/llvm-mingw/releases/download/20261117/llvm-mingw-20261117-ucrt-x86_64.zip
+  LLVM_MINGW_SHA256: 4d002e330a0f703625aa5ccbc37e96f8f824413e163bfc7336774aabd2c3a412
+
 jobs:
   build:
     runs-on: windows-latest
@@ -31,7 +38,7 @@ jobs:
         with:
           msystem: UCRT64
           update: true
-          install: diffutils
+          install: diffutils zip unzip
           pacboy: >-
             llvm:p clang:p lld:p cmake:p ninja:p python:p
 
@@ -43,13 +50,13 @@ jobs:
 
       # W2: LLVM linked in, and everything else static (-static: the C++
       # and GCC runtimes, winpthreads, zlib, zstd), so that p3.exe needs no
-      # DLL of MSYS2's.
-      - name: Configure (static)
+      # DLL of MSYS2's. W3: lld inside it, which links Windows programs.
+      - name: Configure (static, lld inside)
         run: |
           cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release \
             -DLLVM_DIR="$(llvm-config --cmakedir)" \
             -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++ \
-            -DP3_LINK_LLVM_DYLIB=OFF -DP3_LLVM_STATIC_DEPS=ON \
+            -DP3_LINK_LLVM_DYLIB=OFF -DP3_LLVM_STATIC_DEPS=ON -DP3_EMBED_LLD=ON \
             -DCMAKE_EXE_LINKER_FLAGS="-static" \
             -DP3_CROSS_TARGETS=OFF
 
@@ -67,8 +74,27 @@ jobs:
           done
           exit $bad
 
+      - name: Get llvm-mingw (MinGW-w64's libraries)
+        run: |
+          cd "$RUNNER_TEMP"
+          curl -sSfL -o llvm-mingw.zip "$LLVM_MINGW_URL"
+          echo "$LLVM_MINGW_SHA256  llvm-mingw.zip" | sha256sum -c
+          unzip -q llvm-mingw.zip
+          echo "LM=$(cygpath -u "$RUNNER_TEMP")/$LLVM_MINGW" >> "$GITHUB_ENV"
+
+      # p3 links from <bin>/../lib/mingw-w64: in the build tree as in the
+      # package, so that the tests below link with the lld inside p3.
+      - name: MinGW-w64's libraries in the build tree
+        run: |
+          mkdir -p build/lib/mingw-w64
+          cp -R "$LM"/x86_64-w64-mingw32/lib/* build/lib/mingw-w64/
+          cp "$LM"/lib/clang/*/lib/windows/libclang_rt.builtins-x86_64.a build/lib/mingw-w64/
+
+      # From here on no C compiler is in PATH: p3 must link by itself.
       - name: Hello
         run: |
+          export PATH=/usr/bin
+          if command -v clang || command -v gcc || command -v ld; then echo "a C toolchain is in PATH"; exit 1; fi
           build/bin/p3.exe --version
           build/bin/p3.exe --no-project tests/driver/Inputs/hello.pas -o hello.exe
           ./hello.exe
@@ -76,6 +102,7 @@ jobs:
       - name: Library units, tasks, network
         run: |
           set -e
+          export PATH=/usr/bin
           for opts in -O0 -O2 '-O2 -fseparate-units'; do
             build/bin/p3.exe --no-project --mode=objfpc $opts tests/driver/Inputs/install-units.pas -o units.exe
             test "$(./units.exe | tr -d '\r')" = 'INSTALLED moved'
@@ -93,5 +120,67 @@ jobs:
         env:
           NET_REPEAT: 3
         run: |
-          python utils/windows-bundle.py "build/bin/p3.exe -fdiagnostics-color=never --no-project" tests/run bundle
+          py=$(command -v python)
+          export PATH=/usr/bin
+          "$py" utils/windows-bundle.py "build/bin/p3.exe -fdiagnostics-color=never --no-project" tests/run bundle
+          bash utils/windows-run-bundle.sh bundle
+
+      - name: Package
+        run: utils/package-windows.sh build "$LM" dist
+
+      - name: Upload the package
+        uses: actions/upload-artifact@v4
+        with:
+          name: p3-windows-x86_64
+          path: dist/*
+          if-no-files-found: error
+
+  # The package on a Windows that never saw MSYS2 or the build: unzipped,
+  # with only Windows' and Git's own directories in PATH.
+  try:
+    needs: build
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Check out without CRLF conversion
+        shell: pwsh
+        run: git config --global core.autocrlf false
+
+      - uses: actions/checkout@v4   # the test programs and scripts
+
+      - name: Download the package
+        uses: actions/download-artifact@v4
+        with:
+          name: p3-windows-x86_64
+          path: dist
+
+      - name: Unpack
+        run: |
+          (cd dist && sha256sum -c ./*.sha256)
+          mkdir unpacked
+          unzip -q dist/*.zip -d unpacked
+          echo "P3=$(echo "$PWD"/unpacked/p3-*/bin/p3.exe)" >> "$GITHUB_ENV"
+
+      - name: Hello, units, tasks, network
+        run: |
+          set -e
+          export PATH=/usr/bin:/c/Windows/System32:/c/Windows
+          if command -v clang || command -v gcc || command -v ld; then echo "a C toolchain is in PATH"; exit 1; fi
+          "$P3" --version
+          "$P3" --no-project tests/driver/Inputs/hello.pas -o hello.exe
+          ./hello.exe
+          for opts in -O0 -O2 '-O2 -fseparate-units'; do
+            "$P3" --no-project --mode=objfpc $opts tests/driver/Inputs/install-units.pas -o units.exe
+            test "$(./units.exe | tr -d '\r')" = 'INSTALLED moved'
+          done
+
+      - name: Test programs
+        env:
+          NET_REPEAT: 3
+        run: |
+          py=$(command -v python)
+          export PATH=/usr/bin:/c/Windows/System32:/c/Windows
+          "$py" utils/windows-bundle.py "$P3 -fdiagnostics-color=never --no-project" tests/run bundle
           bash utils/windows-run-bundle.sh bundle

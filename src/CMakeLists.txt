@@ -45,6 +45,10 @@ add_library(p3Driver STATIC
   driver/Project.cpp
 )
 target_link_libraries(p3Driver PUBLIC p3Parse p3Sema p3CodeGen)
+if(P3_EMBED_LLD)
+  target_link_libraries(p3Driver PRIVATE ${P3_LLD_LIBS})
+  target_compile_definitions(p3Driver PRIVATE P3_EMBED_LLD=1)
+endif()
 
 add_executable(p3 driver/main.cpp)
 target_link_libraries(p3 PRIVATE p3Driver)
