@@ -125,21 +125,12 @@ jobs:
 
       # The programs whose tests only compare their output, built by both
       # compilers, for the windows job to run on Windows itself. Ubuntu's
-      # MinGW-w64 links msvcrt; the p3-ucrt set is linked for UCRT
-      # (-mcrtdll=ucrt), so that p3 picks the other runtime.
+      # MinGW-w64 links msvcrt (windows-ucrt builds a UCRT set).
       - name: Bundle Windows programs
         run: |
           utils/windows-bundle.py "build/bin/p3 -fdiagnostics-color=never --no-project" tests/run bundle/p3
           utils/windows-bundle.py "build/bin/p3-self -fdiagnostics-color=never --no-project" tests/run bundle/p3-self
-          printf '#!/bin/sh\nexec x86_64-w64-mingw32-gcc -mcrtdll=ucrt "$@"\n' > ucrt-cc
-          chmod +x ucrt-cc
-          P3_CROSS_CC=$PWD/ucrt-cc utils/windows-bundle.py "build/bin/p3 -fdiagnostics-color=never --no-project" tests/run bundle/p3-ucrt
-          # each set imports the C library it was linked for
           x86_64-w64-mingw32-objdump -p bundle/p3/hello.exe | grep -qi 'DLL Name: msvcrt.dll'
-          x86_64-w64-mingw32-objdump -p bundle/p3-ucrt/hello.exe | grep -qi 'DLL Name: api-ms-win-crt'
-          if x86_64-w64-mingw32-objdump -p bundle/p3-ucrt/hello.exe | grep -qi 'DLL Name: msvcrt.dll'; then
-            echo "p3-ucrt/hello.exe imports msvcrt.dll too"; exit 1
-          fi
 
       - name: Upload them
         uses: actions/upload-artifact@v4
@@ -166,8 +157,57 @@ jobs:
 
   # Wine is not Windows: the bundled programs on Windows itself. It runs
   # even when the Wine tests fail, once the programs are uploaded.
+  # The same programs linked by a MinGW-w64 that uses UCRT (Debian
+  # trixie's x86_64-w64-mingw32ucrt-gcc; Ubuntu has none), so that p3 picks
+  # the runtime built for UCRT; the windows job runs them too.
+  windows-ucrt:
+    runs-on: ubuntu-24.04
+    container: debian:trixie
+    env:
+      LLVM_VERSION: 23
+    steps:
+      - name: Install the tools, LLVM and both MinGW-w64 toolchains
+        run: |
+          apt-get update -qq
+          DEBIAN_FRONTEND=noninteractive apt-get install -y -qq git ca-certificates \
+            wget gnupg lsb-release cmake ninja-build python3 g++ \
+            zlib1g-dev libzstd-dev libedit-dev libxml2-dev \
+            gcc-mingw-w64-x86-64 gcc-mingw-w64-ucrt64 >/dev/null
+          wget -q https://apt.llvm.org/llvm.sh
+          bash llvm.sh "$LLVM_VERSION" >/dev/null
+          DEBIAN_FRONTEND=noninteractive apt-get install -y -qq "llvm-$LLVM_VERSION-dev" \
+            "llvm-$LLVM_VERSION-tools" "clang-$LLVM_VERSION" >/dev/null
+
+      - uses: actions/checkout@v4
+
+      - name: Build p3 and its runtimes
+        run: |
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release \
+            -DLLVM_DIR=/usr/lib/llvm-$LLVM_VERSION/lib/cmake/llvm \
+            -DCMAKE_C_COMPILER=clang-$LLVM_VERSION -DCMAKE_CXX_COMPILER=clang++-$LLVM_VERSION \
+            -DP3_CROSS_TARGETS=x86_64-w64-mingw32
+          ninja -C build p3 rtl pascalrt-x86_64-w64-mingw32
+
+      - name: Bundle Windows programs (UCRT)
+        env:
+          P3_CROSS_CC: x86_64-w64-mingw32ucrt-gcc
+        run: |
+          utils/windows-bundle.py "build/bin/p3 -fdiagnostics-color=never --no-project" tests/run bundle/p3-ucrt
+          x86_64-w64-mingw32ucrt-objdump -p bundle/p3-ucrt/hello.exe | grep -qi 'DLL Name: api-ms-win-crt'
+          if x86_64-w64-mingw32ucrt-objdump -p bundle/p3-ucrt/hello.exe | grep -qi 'DLL Name: msvcrt.dll'; then
+            echo "p3-ucrt/hello.exe imports msvcrt.dll too"; exit 1
+          fi
+
+      - name: Upload them
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-programs-ucrt
+          path: bundle
+          if-no-files-found: error
+          retention-days: 3
+
   windows:
-    needs: windows-wine
+    needs: [windows-wine, windows-ucrt]
     if: ${{ !cancelled() }}
     runs-on: windows-latest
     defaults:
@@ -184,6 +224,13 @@ jobs:
           name: windows-programs
           path: bundle
 
+      - name: Download the programs linked for UCRT
+        if: ${{ !cancelled() }}
+        uses: actions/download-artifact@v4
+        with:
+          name: windows-programs-ucrt
+          path: bundle
+
       - name: Run them (C++ p3)
         run: utils/windows-run-bundle.sh bundle/p3
 
@@ -191,7 +238,7 @@ jobs:
         if: ${{ !cancelled() }}
         run: utils/windows-run-bundle.sh bundle/p3-self
 
-      - name: Run them (C++ p3, linked for UCRT)
+      - name: Run them (C++ p3, linked for UCRT by Debian's MinGW-w64)
         if: ${{ !cancelled() }}
         run: utils/windows-run-bundle.sh bundle/p3-ucrt
 

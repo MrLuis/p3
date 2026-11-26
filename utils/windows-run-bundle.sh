@@ -10,11 +10,20 @@
 # failures can depend on timing (default 1).
 set -u
 
-if [ $# -ne 1 ]; then
+if [ $# -ne 1 ] || [ -z "$1" ]; then
   echo "usage: $0 <bundle dir>" >&2
   exit 2
 fi
-bundle=$(cd "$1" && pwd)
+# Stop unless $1 is a directory with programs in it: never run whatever
+# *.exe an empty or wrong path would name.
+if ! bundle=$(cd "$1" && pwd) || [ -z "$bundle" ]; then
+  echo "windows-run-bundle: no directory '$1'" >&2
+  exit 2
+fi
+if ! ls "$bundle"/*.exe >/dev/null 2>&1; then
+  echo "windows-run-bundle: no programs in $bundle" >&2
+  exit 2
+fi
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
 runner=${RUNNER:-}
