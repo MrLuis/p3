@@ -271,3 +271,102 @@ jobs:
 
       - name: Test (Release)
         run: ninja -C build check
+
+  sanitizers:
+    runs-on: ubuntu-24.04
+    env:
+      LLVM_VERSION: 23
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up LLVM ${{ env.LLVM_VERSION }}
+        uses: ./.github/actions/setup-llvm
+        with:
+          llvm-version: ${{ env.LLVM_VERSION }}
+
+      - name: Configure and build (ASan + UBSan)
+        run: |
+          cmake -S . -B build-asan -G Ninja \
+            -DCMAKE_BUILD_TYPE=Debug \
+            -DLLVM_DIR="$LLVM_PREFIX/lib/cmake/llvm" \
+            -DCMAKE_C_COMPILER="$HOST_CC" \
+            -DCMAKE_CXX_COMPILER="$HOST_CXX" \
+            -DCMAKE_C_FLAGS="-fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer" \
+            -DCMAKE_CXX_FLAGS="-fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer"
+          ninja -C build-asan p3 p3-unittests p3-deadline-test pascalrt rtl
+
+      - name: Test (ASan + UBSan)
+        env:
+          ASAN_OPTIONS: detect_leaks=0
+        run: |
+          printf '#!/bin/sh\nexec "%s" -fsanitize=address,undefined -fno-sanitize-recover=all "$@"\n' "$HOST_CC" > /tmp/p3-cc-asan
+          chmod +x /tmp/p3-cc-asan
+          P3_CC=/tmp/p3-cc-asan lit -sv \
+            build-asan/tests/unit \
+            build-asan/tests/lexer \
+            build-asan/tests/parser \
+            build-asan/tests/sema \
+            build-asan/tests/codegen \
+            build-asan/tests/run
+
+      - name: Configure and build (TSan runtime)
+        run: |
+          cmake -S . -B build-tsan -G Ninja \
+            -DCMAKE_BUILD_TYPE=Debug \
+            -DLLVM_DIR="$LLVM_PREFIX/lib/cmake/llvm" \
+            -DCMAKE_C_COMPILER="$HOST_CC" \
+            -DCMAKE_CXX_COMPILER="$HOST_CXX" \
+            -DCMAKE_C_FLAGS="-fsanitize=thread -fno-omit-frame-pointer"
+          ninja -C build-tsan p3 p3-deadline-test pascalrt rtl
+
+      - name: Test concurrency & runtime (TSan)
+        env:
+          TSAN_OPTIONS: halt_on_error=1
+        run: |
+          printf '#!/bin/sh\nexec "%s" -fsanitize=thread "$@"\n' "$HOST_CC" > /tmp/p3-cc-tsan
+          chmod +x /tmp/p3-cc-tsan
+          build-tsan/bin/p3-deadline-test
+          P3_CC=/tmp/p3-cc-tsan lit -sv \
+            build-tsan/tests/run/async.pas \
+            build-tsan/tests/run/io-threads.pas \
+            build-tsan/tests/run/rc-threads.pas \
+            build-tsan/tests/run/sys-strerror-threads.pas \
+            build-tsan/tests/run/netasync-echo.pas \
+            build-tsan/tests/run/netasync-shared.pas \
+            build-tsan/tests/run/netasync-bigread.pas
+
+  fuzz-smoke:
+    runs-on: ubuntu-24.04
+    env:
+      LLVM_VERSION: 23
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up LLVM ${{ env.LLVM_VERSION }}
+        uses: ./.github/actions/setup-llvm
+        with:
+          llvm-version: ${{ env.LLVM_VERSION }}
+
+      - name: Build p3-fuzz (ASan + UBSan)
+        run: |
+          cmake -S . -B build-fuzz -G Ninja \
+            -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+            -DP3_ENABLE_FUZZING=ON \
+            -DLLVM_DIR="$LLVM_PREFIX/lib/cmake/llvm" \
+            -DCMAKE_C_COMPILER="$HOST_CC" \
+            -DCMAKE_CXX_COMPILER="$HOST_CXX" \
+            -DCMAKE_C_FLAGS="-fsanitize=fuzzer-no-link,address,undefined -fno-omit-frame-pointer" \
+            -DCMAKE_CXX_FLAGS="-fsanitize=fuzzer-no-link,address,undefined -fno-omit-frame-pointer"
+          ninja -C build-fuzz p3-fuzz
+
+      - name: Smoke-fuzz corpus
+        env:
+          ASAN_OPTIONS: detect_leaks=0
+        run: |
+          mkdir -p fuzz-corpus fuzz-seed
+          python3 -c '
+          import glob, shutil
+          for i, p in enumerate(sorted(glob.glob("tests/**/*.pas", recursive=True))):
+            shutil.copyfile(p, f"fuzz-seed/{i}.pas")
+          '
+          build-fuzz/bin/p3-fuzz -max_total_time=30 fuzz-corpus fuzz-seed
