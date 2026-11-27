@@ -1,0 +1,27 @@
+; From -O1 the runtime functions linked from libpascalrt.ll become the
+; program's own internal copies, not available_externally ones, so the
+; optimizer may specialize them, change their convention (fastcc) or drop
+; them. The runtime's variables keep one copy, the library's.
+; -fno-internalize-runtime keeps them available_externally.
+; REQUIRES: runtime-ir
+; RUN: env P3_RUNTIME_IR=%p3-runtime-ir %p3 --mode=objfpc -O2 --emit-llvm %S/Inputs/exceptions.pas -o %t.ll
+; RUN: FileCheck %s < %t.ll
+; CHECK: @__pas_exc_top = external thread_local
+; CHECK: define internal {{.*}}@__pas_runtime_error(
+; Every runtime function defined is internal; none is available_externally.
+; RUN: grep '^define' %t.ll | grep '@__pas_' | not grep -v '^define internal '
+; RUN: not grep available_externally %t.ll
+; With -fno-internalize-runtime the runtime's functions are not defined at
+; all: the calls that remain go to the library.
+; RUN: env P3_RUNTIME_IR=%p3-runtime-ir %p3 --mode=objfpc -O2 -fno-internalize-runtime --emit-llvm %S/Inputs/exceptions.pas -o - | FileCheck --check-prefix=LIB %s
+; LIB-NOT: define {{.*}}@__pas_
+; At -O0 nothing is linked.
+; RUN: env P3_RUNTIME_IR=%p3-runtime-ir %p3 --mode=objfpc --emit-llvm %S/Inputs/exceptions.pas -o - | FileCheck --check-prefix=LIB %s
+; The program runs the same (the copies raise through the library's
+; frame variable), with and without the option.
+; RUN: env P3_RUNTIME_IR=%p3-runtime-ir %p3 --mode=objfpc -O2 %S/../run/exceptions.pas -o %t.exe
+; RUN: %t.exe > %t.run.out
+; RUN: diff %S/../run/exceptions.expected %t.run.out
+; RUN: env P3_RUNTIME_IR=%p3-runtime-ir %p3 --mode=objfpc -O2 -fno-internalize-runtime %S/../run/exceptions.pas -o %t.lib.exe
+; RUN: %t.lib.exe > %t.lib.out
+; RUN: diff %S/../run/exceptions.expected %t.lib.out

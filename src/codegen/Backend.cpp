@@ -68,9 +68,17 @@ p3::createTargetMachine(llvm::StringRef Triple, unsigned OptLevel,
   return TM;
 }
 
+void p3::internalizeFunctions(llvm::Module &M,
+                              llvm::ArrayRef<std::string> Names) {
+  for (const std::string &N : Names)
+    if (llvm::Function *F = M.getFunction(N);
+        F && F->hasAvailableExternallyLinkage())
+      F->setLinkage(llvm::GlobalValue::InternalLinkage);
+}
+
 void p3::linkRuntimeIR(llvm::Module &M, llvm::StringRef Path,
                         llvm::StringRef CPU, llvm::StringRef Features,
-                        DiagnosticsEngine &Diags) {
+                        DiagnosticsEngine &Diags, bool Internalize) {
   if (!llvm::sys::fs::exists(Path))
     return;
   llvm::SMDiagnostic Err;
@@ -85,16 +93,25 @@ void p3::linkRuntimeIR(llvm::Module &M, llvm::StringRef Path,
   RT->setDataLayout(M.getDataLayout());
   // The runtime IR is generic: give its functions the program's target so
   // that the parts that are inlined use the selected CPU and features.
+  // (Internalize: the names of the runtime's functions, which become the
+  // program's own internal copies once linked; -fno-internalize-runtime
+  // keeps them available_externally.)
+  std::vector<std::string> Names;
   for (llvm::Function &F : *RT)
     if (!F.isDeclaration()) {
       if (!CPU.empty())
         F.addFnAttr("target-cpu", CPU);
       if (!Features.empty())
         F.addFnAttr("target-features", Features);
+      if (Internalize && F.hasAvailableExternallyLinkage())
+        Names.push_back(F.getName().str());
     }
-  if (llvm::Linker::linkModules(M, std::move(RT)))
+  if (llvm::Linker::linkModules(M, std::move(RT))) {
     Diags.warning("cannot link the runtime's LLVM IR '" + Path +
                   "'; runtime functions are not inlined");
+    return;
+  }
+  internalizeFunctions(M, Names);
 }
 
 static void markAvailableExternally(llvm::Module &M) {
@@ -137,6 +154,41 @@ void p3::linkUnitIR(llvm::Module &M, llvm::ArrayRef<std::string> ObjectPaths,
       Diags.warning("cannot link the unit's LLVM IR '" + Path +
                     "'; its routines are not inlined");
   }
+}
+
+bool p3::linkUnitIRWhole(llvm::Module &M, llvm::ArrayRef<std::string> IRPaths,
+                         DiagnosticsEngine &Diags) {
+  for (const std::string &Path : IRPaths) {
+    llvm::SMDiagnostic Err;
+    std::unique_ptr<llvm::Module> U =
+        llvm::parseIRFile(Path, Err, M.getContext());
+    if (!U) {
+      Diags.error("cannot read the unit's LLVM IR '" + Path + "' (" +
+                  Err.getMessage() + ")");
+      return false;
+    }
+    U->setTargetTriple(M.getTargetTriple());
+    U->setDataLayout(M.getDataLayout());
+    // Full definitions: the objects leave the link, so each unit's state
+    // has one copy, the program's (no mutable-state exception here).
+    if (llvm::Linker::linkModules(M, std::move(U))) {
+      Diags.error("cannot link the unit's LLVM IR '" + Path + "'");
+      return false;
+    }
+  }
+  // The units' Pascal symbols (pas.<unit>..., see CodeGen's collectExports)
+  // are now the program's own; C names (cdecl thunks, `external name`)
+  // and main stay external.
+  auto Own = [](llvm::GlobalValue &G) {
+    if (!G.isDeclaration() && G.hasExternalLinkage() &&
+        G.getName().starts_with("pas."))
+      G.setLinkage(llvm::GlobalValue::InternalLinkage);
+  };
+  for (llvm::Function &F : M)
+    Own(F);
+  for (llvm::GlobalVariable &G : M.globals())
+    Own(G);
+  return true;
 }
 
 bool p3::writeModuleIR(llvm::Module &M, llvm::StringRef Path,

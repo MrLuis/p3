@@ -92,6 +92,12 @@ static cl::opt<bool> SeparateUnits(
              "<unit>.o next to its source)"),
     cl::cat(P3Category));
 
+static cl::opt<bool> WholeProgram(
+    "fwhole-program",
+    cl::desc("With -fseparate-units, from -O1: optimize the units' code as "
+             "part of the program instead of linking their objects"),
+    cl::cat(P3Category));
+
 static cl::opt<bool> DebugInfo("g", cl::desc("Generate debug information"),
                                cl::cat(P3Category));
 
@@ -167,6 +173,13 @@ static cl::opt<bool> NoInlineRuntime(
     "fno-inline-runtime",
     cl::desc("Do not inline the runtime's functions (from -O1 they are, "
              "when compiling for the host)"),
+    cl::cat(P3Category));
+
+static cl::opt<bool> NoInternalizeRuntime(
+    "fno-internalize-runtime",
+    cl::desc("Keep the inlined runtime's functions in the library (from -O1 "
+             "the program gets its own copies, which the optimizer may "
+             "specialize)"),
     cl::cat(P3Category));
 
 static cl::opt<bool> KeepUnused(
@@ -266,6 +279,7 @@ int main(int argc, char **argv) {
     Opts.ModelAttr = llvm::StringRef(EmitModelAttr).lower();
   }
   Opts.SeparateUnits = SeparateUnits;
+  Opts.WholeProgram = WholeProgram;
   Opts.TargetTriple = TargetTriple;
 #ifdef P3_EMBED_LLD
   if (cl::getRegisteredOptions().lookup("mcpu")->getNumOccurrences()) {
@@ -285,6 +299,7 @@ int main(int argc, char **argv) {
   Opts.WarningsAsErrors = Werror;
   Opts.RangeChecks = !NoRangeChecks;
   Opts.InlineRuntime = !NoInlineRuntime;
+  Opts.InternalizeRuntime = !NoInternalizeRuntime;
   Opts.KeepUnused = KeepUnused;
   if (ZeroInitOn || ZeroInitOff) // the last one given wins
     Opts.ZeroInit = !ZeroInitOff || (ZeroInitOn && ZeroInitOn.getPosition() >

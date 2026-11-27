@@ -1,0 +1,31 @@
+; -fwhole-program (with -fseparate-units, from -O1): the units' IR is linked
+; into the program as full definitions, their Pascal symbols become
+; internal, and their objects leave the link. A unit with mutable state
+; keeps one copy, the program's.
+; RUN: rm -rf %t && mkdir -p %t && cp -r %S/Inputs/wholeprogram/. %t/
+; RUN: %p3 --mode=objfpc -I %t/lib -O2 -c %t/lib/counter.pas -o %t/lib/counter.o
+; RUN: %p3 --mode=objfpc -I %t/lib -fseparate-units -fwhole-program -O2 --emit-llvm %t/main.pas -o %t/main.ll
+; RUN: FileCheck %s < %t/main.ll
+; The unit's variable is the program's; its routines are inlined or gone.
+; CHECK: @pas.n = internal
+; CHECK-NOT: pas.counter$unused
+; CHECK-NOT: declare {{.*}}@"pas.counter
+; Only main is defined with external linkage.
+; RUN: grep '^define' %t/main.ll | not grep -v -e '^define internal ' -e '@main('
+; RUN: env P3_RUNTIME_LIB=%p3-runtime-lib %p3 --mode=objfpc -I %t/lib -fseparate-units -fwhole-program -O2 %t/main.pas -o %t/main
+; RUN: %t/main | FileCheck --check-prefix=OUT %s
+; OUT: 5 5
+
+; A unit compiled at -O0 leaves no IR (and removes an earlier one): a
+; warning, and the units are linked as objects, as without the option.
+; RUN: %p3 --mode=objfpc -I %t/lib -O0 -c %t/lib/counter.pas -o %t/lib/counter.o
+; RUN: not test -f %t/lib/counter.ll
+; RUN: env P3_RUNTIME_LIB=%p3-runtime-lib %p3 --mode=objfpc -I %t/lib -fseparate-units -fwhole-program -O2 %t/main.pas -o %t/main0 2> %t/err
+; RUN: FileCheck --check-prefix=WARN %s < %t/err
+; WARN: warning: -fwhole-program: '{{.*}}counter.ll' is missing
+; RUN: %t/main0 | FileCheck --check-prefix=OUT %s
+
+; At -O0 the option changes nothing (no IR is linked at -O0).
+; RUN: %p3 --mode=objfpc -I %t/lib -O2 -c %t/lib/counter.pas -o %t/lib/counter.o
+; RUN: %p3 --mode=objfpc -I %t/lib -fseparate-units -fwhole-program --emit-llvm %t/main.pas -o - | FileCheck --check-prefix=O0 %s
+; O0: declare {{.*}}@"pas.counter$bump"

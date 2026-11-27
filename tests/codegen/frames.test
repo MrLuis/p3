@@ -64,7 +64,9 @@
 ; NOZERO: ret void
 ; NOZERO-O1-NOT: llvm.memset
 
-; At -O2 the frames disappear.
+; At -O2 the frames disappear (in main; the runtime's own copies that
+; follow it may have frames of their own).
 ; RUN: %p3 --emit-llvm -O2 %S/Inputs/nested.pas -o - | FileCheck --check-prefix=O2 %s
 ; O2: define {{.*}}i32 @main(
 ; O2-NOT: alloca
+; O2: {{^}}}

@@ -402,6 +402,13 @@ compiler).
   default: such code is pruned, also at `-O0`)
 - `--fseparate-units` — link separately compiled units (each compiled with
   `-c` to `<unit>.o` next to its source; off by default)
+- `--fwhole-program` — with `--fseparate-units`, from `-O1`: optimize the
+  units' code (the `<unit>.ll` each `-c` compile at `-O1`+ leaves next to its
+  object) as part of the program and link no unit objects, so unused unit
+  code is dropped and every unit routine can be inlined. A unit compiled at
+  `-O0` has no `.ll`; then p3 warns and links the objects. Off by default:
+  each program re-optimizes its units, which costs the compile time
+  separate units save
 - `-g` — generate debug information (off by default)
 - `--target=<triple>` — target triple (default: host), written as
   `x86_64-pc-linux-gnu`, `aarch64-apple-darwin`, ... The release packages
@@ -514,6 +521,7 @@ the project in value settings (`mode`, `output`, `optimize`, `target`, `cpu`,
 | `errorLimit` | stop after this many errors; 0 means no limit | 20 |
 | `debug` | generate debug information | false |
 | `separateUnits` | link separately compiled units (like `--fseparate-units`) | false |
+| `wholeProgram` | with `separateUnits`, optimize the units as part of the program (like `--fwhole-program`) | false |
 | `unitPaths` | array of directories added to the unit search path (like `-I`) | — |
 | `defines` | array of symbols defined for conditional compilation (like `-d`) | — |
 | `libraryPaths` | array of directories added to the linker's search path (like `-L`) | — |

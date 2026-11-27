@@ -8,9 +8,9 @@
 ; CHECK-NOT: call void @__pas_exc_push
 ; CHECK-NOT: call void @__pas_exc_pop
 ; CHECK:     @__pas_exc_top
-; The runtime's functions are not defined in the module: the program links
-; the library's.
-; CHECK-NOT: define {{.*}}@__pas_
+; The runtime's functions that remain are the program's own internal
+; copies (runtime-internalize.test); none is left external.
+; CHECK-NOT: define {{(available_externally |dso_local )?}}{{[a-z]+ }}@__pas_
 ; RUN: env P3_RUNTIME_IR=%p3-runtime-ir %p3 --mode=objfpc -O2 -fno-inline-runtime --emit-llvm %S/Inputs/exceptions.pas -o - | FileCheck --check-prefix=CALLS %s
 ; RUN: env P3_RUNTIME_IR=%t.missing.ll %p3 --mode=objfpc -O2 --emit-llvm %S/Inputs/exceptions.pas -o - | FileCheck --check-prefix=CALLS %s
 ; RUN: env P3_RUNTIME_IR=%p3-runtime-ir %p3 --mode=objfpc --emit-llvm %S/Inputs/exceptions.pas -o - | FileCheck --check-prefix=CALLS %s

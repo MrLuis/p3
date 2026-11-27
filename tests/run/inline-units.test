@@ -4,7 +4,9 @@
 ; RUN: rm -rf %t && mkdir -p %t && cp -r %S/Inputs/inlineunits/. %t/
 ; RUN: %p3 --mode=objfpc -I %t/lib -O2 -c %t/lib/mathx.pas -o %t/lib/mathx.o
 ; RUN: test -f %t/lib/mathx.ll
-; RUN: %p3 --mode=objfpc -I %t/lib -fseparate-units -O2 --emit-llvm %t/main.pas -o - | FileCheck %s
+; (-fno-internalize-runtime: __pas_write_int stays a call, whose argument
+; shows the inlined Twice folded to 42.)
+; RUN: %p3 --mode=objfpc -I %t/lib -fseparate-units -O2 -fno-internalize-runtime --emit-llvm %t/main.pas -o - | FileCheck %s
 ; RUN: env P3_RUNTIME_LIB=%p3-runtime-lib %p3 --mode=objfpc -I %t/lib -fseparate-units -O2 %t/main.pas -o %t/main
 ; RUN: %t/main | FileCheck --check-prefix=OUT %s
 

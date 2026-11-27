@@ -39,11 +39,18 @@ function llvmDataLayout(tm: pointer): string;
   runtimeIR: the runtime's LLVM IR (libpascalrt.ll) to link into the
   module before it is optimized, so that the runtime's functions can be
   inlined, or ''; if that file cannot be used, rtProblem says why (else
-  it is ''). }
+  it is ''). With internalize (the default; not with
+  -fno-internalize-runtime) the runtime's functions become the module's
+  own internal copies. With wholeUnits
+  (-fwhole-program) the units' IR is linked as full definitions and their
+  Pascal symbols made internal; if that fails, unitProblem says why and
+  the result is nil. }
 function llvmParseAndOptimize(const ir: TBuf; const name: string; tm: pointer; opt: longint;
                               sizeLevel: longint; const unitIRs: TPtrList;
                               const runtimeIR, cpu: string; features: PName;
-                              var rtProblem: string; var err: TBuf): pointer;
+                              internalize, wholeUnits: boolean;
+                              var rtProblem, unitProblem: string;
+                              var err: TBuf): pointer;
 { Writes the module as IR text, assembly or an object file. }
 function llvmPrintModule(m: pointer; const path: string; var err: TBuf): boolean;
 { Appends the assembly or object code for the module to ob. }
@@ -87,6 +94,10 @@ function LLVMIsGlobalConstant(v: pointer): longint; cdecl;
   external name 'LLVMIsGlobalConstant';
 procedure LLVMSetLinkage(v: pointer; linkage: longint); cdecl;
   external name 'LLVMSetLinkage';
+function LLVMGetValueName2(v: pointer; var len: int64): pchar; cdecl;
+  external name 'LLVMGetValueName2';
+function LLVMGetNamedFunction(m: pointer; name: pchar): pointer; cdecl;
+  external name 'LLVMGetNamedFunction';
 procedure LLVMDisposeMessage(msg: pchar); cdecl; external name 'LLVMDisposeMessage';
 function LLVMGetDefaultTargetTriple: pchar; cdecl; external name 'LLVMGetDefaultTargetTriple';
 function LLVMNormalizeTargetTriple(t: pchar): pchar; cdecl;
@@ -294,18 +305,38 @@ begin
   LLVMDisposeMessage(p);
 end;
 
+{ The available_externally functions of m named in names become internal
+  definitions (Backend.cpp's internalizeFunctions). }
+procedure internalizeFunctions(m: pointer; const names: TPtrList);
+var
+  i: longint;
+  f: pointer;
+  nb: string;
+begin
+  for i := 0 to names.count - 1 do
+  begin
+    f := LLVMGetNamedFunction(m, cstr(nameStr(PName(listGet(names, i))), nb));
+    if (f <> nil) and (LLVMGetLinkage(f) = 1) then
+      LLVMSetLinkage(f, 8);
+  end;
+end;
+
 { Links the runtime's LLVM IR at path into m (Backend.cpp's linkRuntimeIR):
   its functions stay available_externally, and calls that are not inlined
-  go to the library. Returns '' or why the file cannot be used. }
+  go to the library; with internalize they become m's own internal copies.
+  Returns '' or why the file cannot be used. }
 function linkRuntimeIR(ctx, m: pointer; const path, cpu: string;
-                       features: PName): string;
+                       features: PName; internalize: boolean): string;
 var
   buf, rt: pointer;
   msg: pchar;
   pb, a, b, c, d: string;
   f: pointer;
+  names: TPtrList;
+  len: int64;
 begin
   linkRuntimeIR := '';
+  listInit(names);
   buf := nil;
   msg := nil;
   if LLVMCreateMemoryBufferWithContentsOfFile(cstr(path, pb), buf, msg) <> 0 then
@@ -336,11 +367,16 @@ begin
       if features^.len > 0 then
         LLVMAddTargetDependentFunctionAttr(f, cstr('target-features', c),
                                            pchar(features^.chars));
+      if internalize and (LLVMGetLinkage(f) = 1) then
+        listAdd(names, intern(str(LLVMGetValueName2(f, len))));
     end;
     f := LLVMGetNextFunction(f);
   end;
   if LLVMLinkModules2(m, rt) <> 0 then
-    linkRuntimeIR := 'it cannot be linked';
+    linkRuntimeIR := 'it cannot be linked'
+  else
+    internalizeFunctions(m, names);
+  listFree(names);
 end;
 
 { A module's definitions with external linkage become available_externally:
@@ -422,10 +458,76 @@ begin
   end;
 end;
 
+{ -fwhole-program: links each unit's IR into m as full definitions
+  (Backend.cpp's linkUnitIRWhole), then makes the units' Pascal symbols
+  (named pas.<name>) internal; C names and main stay external. Returns ''
+  or why a unit's IR cannot be used. }
+function linkUnitIRsWhole(ctx, m: pointer; const paths: TPtrList): string;
+var
+  i, pass: longint;
+  u, buf, v: pointer;
+  msg: pchar;
+  pb, path: string;
+  len: int64;
+  p: pchar;
+begin
+  linkUnitIRsWhole := '';
+  for i := 0 to paths.count - 1 do
+  begin
+    path := nameStr(PName(listGet(paths, i)));
+    buf := nil;
+    msg := nil;
+    if LLVMCreateMemoryBufferWithContentsOfFile(cstr(path, pb), buf, msg) <> 0 then
+    begin
+      linkUnitIRsWhole := 'cannot read the unit''s LLVM IR ''' + path + ''' (' +
+                          str(msg) + ')';
+      LLVMDisposeMessage(msg);
+      exit;
+    end;
+    u := nil;
+    msg := nil;
+    if LLVMParseIRInContext(ctx, buf, u, msg) <> 0 then
+    begin
+      linkUnitIRsWhole := 'cannot read the unit''s LLVM IR ''' + path + ''' (' +
+                          str(msg) + ')';
+      LLVMDisposeMessage(msg);
+      exit;
+    end;
+    LLVMSetTarget(u, LLVMGetTarget(m));
+    LLVMSetDataLayout(u, LLVMGetDataLayoutStr(m));
+    if LLVMLinkModules2(m, u) <> 0 then
+      exit('cannot link the unit''s LLVM IR ''' + path + '''');
+  end;
+  { functions, then variables }
+  for pass := 0 to 1 do
+  begin
+    if pass = 0 then
+      v := LLVMGetFirstFunction(m)
+    else
+      v := LLVMGetFirstGlobal(m);
+    while v <> nil do
+    begin
+      if (LLVMIsDeclaration(v) = 0) and (LLVMGetLinkage(v) = 0) then
+      begin
+        p := LLVMGetValueName2(v, len);
+        if (len > 4) and (p[0] = 'p') and (p[1] = 'a') and (p[2] = 's') and
+           (p[3] = '.') then
+          LLVMSetLinkage(v, 8);
+      end;
+      if pass = 0 then
+        v := LLVMGetNextFunction(v)
+      else
+        v := LLVMGetNextGlobal(v);
+    end;
+  end;
+end;
+
 function llvmParseAndOptimize(const ir: TBuf; const name: string; tm: pointer; opt: longint;
                               sizeLevel: longint; const unitIRs: TPtrList;
                               const runtimeIR, cpu: string; features: PName;
-                              var rtProblem: string; var err: TBuf): pointer;
+                              internalize, wholeUnits: boolean;
+                              var rtProblem, unitProblem: string;
+                              var err: TBuf): pointer;
 var
   ctx, buf, m, e, opts: pointer;
   msg: pchar;
@@ -433,6 +535,7 @@ var
 begin
   llvmParseAndOptimize := nil;
   rtProblem := '';
+  unitProblem := '';
   ctx := LLVMContextCreate;
   { the buffer's name becomes the module identifier }
   buf := LLVMCreateMemoryBufferWithMemoryRangeCopy(ir.data, ir.len, cstr(name, nb));
@@ -453,10 +556,16 @@ begin
     LLVMDisposeMessage(msg);
   if opt > 0 then
   begin
-    if unitIRs.count > 0 then
+    if wholeUnits then
+    begin
+      unitProblem := linkUnitIRsWhole(ctx, m, unitIRs);
+      if unitProblem <> '' then
+        exit;
+    end
+    else if unitIRs.count > 0 then
       linkUnitIRs(ctx, m, unitIRs);
     if runtimeIR <> '' then
-      rtProblem := linkRuntimeIR(ctx, m, runtimeIR, cpu, features);
+      rtProblem := linkRuntimeIR(ctx, m, runtimeIR, cpu, features, internalize);
     { llvm::PipelineTuningOptions' defaults, as the C++ p3's PassBuilder
       has them }
     opts := LLVMCreatePassBuilderOptions;

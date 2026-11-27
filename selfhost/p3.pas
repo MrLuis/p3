@@ -157,10 +157,12 @@ begin
   helpLine('  -Oz                          - Optimize aggressively for size (like -Os)');
   helpLine('  -mattr <features>            - Target features, e.g. +avx2,-sse4.2');
   helpLine('  --fno-inline-runtime         - Do not inline the runtime''s functions (from -O1 they are, when compiling for the host)');
+  helpLine('  --fno-internalize-runtime    - Keep the inlined runtime''s functions in the library (from -O1 the program gets its own copies, which the optimizer may specialize)');
   helpLine('  --fno-overflow-checks        - Disable runtime integer overflow checks');
   helpLine('  --fno-range-checks           - Disable runtime range checks (subranges, array indices, ...)');
   helpLine('  --fno-zero-init              - Do not zero local arrays, records and strings (the default from -O1)');
   helpLine('  --fseparate-units            - Link separately compiled units (each compiled with -c to <unit>.o next to its source)');
+  helpLine('  --fwhole-program             - With -fseparate-units, from -O1: optimize the units'' code as part of the program instead of linking their objects');
   helpLine('  --fzero-init                 - Local arrays, records and strings start zeroed (the default at -O0)');
   helpLine('  -g                           - Generate debug information');
   helpLine('  --generated-dir=<dir>        - Where the generators'' code is written (default: gen next to the input)');
@@ -178,13 +180,14 @@ begin
 end;
 
 const
-  numFlags = 24;
-  flagNames: array[1..numFlags] of string[20] = (
+  numFlags = 26;
+  flagNames: array[1..numFlags] of string[24] = (
     'help', 'help-list', 'version', 'emit-tokens', 'emit-ast', 'emit-parse-tree',
     'emit-llvm', 'S', 'c', 'Werror', 'Wno-unused-variable', 'Wno-deprecated',
     'fno-overflow-checks',
     'fno-range-checks', 'fseparate-units', 'g', 'no-project', 'fzero-init',
-    'fno-zero-init', 'fno-inline-runtime', 'fkeep-unused', 'ffast-math', 'Os', 'Oz');
+    'fno-zero-init', 'fno-inline-runtime', 'fkeep-unused', 'ffast-math', 'Os', 'Oz',
+    'fno-internalize-runtime', 'fwhole-program');
   numValueOpts = 17;
   valueOptNames: array[1..numValueOpts] of string[20] = (
     'o', 'mode', 'fdiagnostics-color', 'ferror-limit', 'target', 'I', 'O', 'L', 'l',
@@ -336,6 +339,8 @@ begin
     errorLimit := s.errorLimit;
   debugInfo := debugInfo or s.debug;
   separateUnits := separateUnits or s.separateUnits;
+  if s.wholeProgram then
+    enableWholeProgram;
   werror := werror or s.warningsAsErrors;
   noUnusedVariable := noUnusedVariable or not s.warnUnusedVariables;
   noDeprecated := noDeprecated or not s.warnDeprecated;
@@ -511,6 +516,10 @@ begin
       fastMath := true
     else if name = 'fno-inline-runtime' then
       disableRuntimeInlining
+    else if name = 'fno-internalize-runtime' then
+      disableRuntimeInternalizing
+    else if name = 'fwhole-program' then
+      enableWholeProgram
     else if name = 'fkeep-unused' then
       keepUnused := true
     else if name = 'fzero-init' then
@@ -1443,9 +1452,15 @@ begin
     kind := okObj;
   end;
   listInit(noObjects);
+  { an IR file present is always the object's (Driver.cpp's compileUnit):
+    at -O0 an earlier one is removed }
   if (kind = okObj) and (optLevel > 0) and (outputFile <> '-') then
+  begin
     if not writeModuleText(outBuf, unitIRPath(outputFile)) then
       exit;
+  end
+  else if (kind = okObj) and (outputFile <> '-') then
+    sysRemoveFile(unitIRPath(outputFile));
   compileUnit := emitOutput(outBuf, smFileName(fid), kind, optLevel, sizeLevel,
                             targetTriple, targetCPU, targetFeatures, outputFile,
                             noObjects);

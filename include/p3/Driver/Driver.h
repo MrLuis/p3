@@ -96,6 +96,10 @@ class Driver {
   std::vector<std::string> ExternalLibraries;
   void collectExternalLibraries(Block *B);
 
+  /// -fwhole-program: each unit object's IR file, if all are present
+  /// (else a warning and false).
+  bool wholeProgramIRs(llvm::ArrayRef<std::string> UnitObjects,
+                       std::vector<std::string> &IRs);
   /// Verifies, optimizes and writes M (or links it with UnitObjects).
   bool finishModule(llvm::Module &M, llvm::TargetMachine &TM,
                     llvm::ArrayRef<std::string> UnitObjects);

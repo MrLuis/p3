@@ -406,7 +406,7 @@ struct Settings {
   std::optional<std::string> Main, Output, Target, CPU, GeneratedDir;
   std::optional<LangMode> Mode;
   std::optional<unsigned> OptLevel, ErrorLimit, GeneratorTimeout;
-  std::optional<bool> Debug, SeparateUnits, WarningsAsErrors,
+  std::optional<bool> Debug, SeparateUnits, WholeProgram, WarningsAsErrors,
       WarnUnusedVariables, WarnDeprecated, RangeChecks, OverflowChecks;
   std::vector<std::string> UnitPaths, Defines, LibraryPaths, Libraries,
       Generators;
@@ -527,6 +527,8 @@ public:
         S.Debug = boolean(V, N);
       } else if (N == "separateUnits") {
         S.SeparateUnits = boolean(V, N);
+      } else if (N == "wholeProgram") {
+        S.WholeProgram = boolean(V, N);
       } else if (N == "unitPaths") {
         strings(V, N, S.UnitPaths);
       } else if (N == "defines") {
@@ -650,6 +652,7 @@ bool p3::applyProjectFile(CompilerOptions &Opts, SourceManager &SM,
     Opts.ErrorLimit = *S.ErrorLimit;
   Opts.DebugInfo = Opts.DebugInfo || S.Debug.value_or(false);
   Opts.SeparateUnits = Opts.SeparateUnits || S.SeparateUnits.value_or(false);
+  Opts.WholeProgram = Opts.WholeProgram || S.WholeProgram.value_or(false);
   Opts.WarningsAsErrors =
       Opts.WarningsAsErrors || S.WarningsAsErrors.value_or(false);
   Opts.WarnUnusedVariables =

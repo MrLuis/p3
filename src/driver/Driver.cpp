@@ -687,14 +687,38 @@ bool Driver::compileUnit(Parser &P, FileID FID, ASTContext &Ctx,
                               SM.getFilename(FID));
   // At -O1+ leave the unit's IR next to its object: a program compiled with
   // -fseparate-units links it before optimizing, to inline inline routines
-  // (item 17).
-  if (Opts.Act == Action::EmitObj && Opts.OptLevel > 0 &&
-      Opts.OutputFile != "-") {
+  // (item 17), or with -fwhole-program in place of the object. Any other
+  // compile of the object removes an earlier IR file, which would no
+  // longer match it: an IR file present is always the object's.
+  if (Opts.Act == Action::EmitObj && Opts.OutputFile != "-") {
     llvm::SmallString<256> IRPath(Opts.OutputFile);
     llvm::sys::path::replace_extension(IRPath, "ll");
-    writeModuleIR(*M, IRPath, Diags);
+    if (Opts.OptLevel > 0)
+      writeModuleIR(*M, IRPath, Diags);
+    else
+      llvm::sys::fs::remove(IRPath);
   }
   return finishModule(*M, *TM, {});
+}
+
+/// -fwhole-program: the IR next to each unit's object (Path.o -> Path.ll),
+/// in IRs. Every unit needs one, since a unit left as an object would refer
+/// to symbols the others made internal: otherwise a warning, and false
+/// (the units link as objects).
+bool Driver::wholeProgramIRs(llvm::ArrayRef<std::string> UnitObjects,
+                             std::vector<std::string> &IRs) {
+  for (const std::string &Obj : UnitObjects) {
+    llvm::SmallString<256> IR(Obj);
+    llvm::sys::path::replace_extension(IR, "ll");
+    if (!llvm::sys::fs::exists(IR)) {
+      Diags.warning("-fwhole-program: '" + IR +
+                    "' is missing (compile the unit with -c at -O1 or "
+                    "higher); the units are linked as objects");
+      return false;
+    }
+    IRs.push_back(std::string(IR));
+  }
+  return true;
 }
 
 bool Driver::finishModule(llvm::Module &Mod, llvm::TargetMachine &TMRef,
@@ -707,15 +731,23 @@ bool Driver::finishModule(llvm::Module &Mod, llvm::TargetMachine &TMRef,
   // run target-registered passes (AArch64 adds a loop pass whose
   // LoopSimplify reshapes loops), making -O0 IR differ between targets
   // and from the self-hosted compiler's (SELFHOST.md S10).
+  // (-fwhole-program: the units' code is linked as IR, not as objects.)
+  llvm::ArrayRef<std::string> LinkObjects = UnitObjects;
   if (Opts.OptLevel > 0) {
-    if (!UnitObjects.empty())
+    std::vector<std::string> UnitIRs;
+    if (Opts.WholeProgram && !UnitObjects.empty() &&
+        wholeProgramIRs(UnitObjects, UnitIRs)) {
+      if (!linkUnitIRWhole(*M, UnitIRs, Diags))
+        return false;
+      LinkObjects = {};
+    } else if (!UnitObjects.empty())
       linkUnitIR(*M, UnitObjects, Diags);
     // The runtime's IR is built for the host.
     if (Opts.InlineRuntime &&
         llvm::Triple(Opts.TargetTriple) ==
             llvm::Triple(llvm::sys::getDefaultTargetTriple()))
       linkRuntimeIR(*M, findRuntimeIR(), Opts.TargetCPU, Opts.TargetFeatures,
-                    Diags);
+                    Diags, Opts.InternalizeRuntime);
     optimizeModule(*M, *TM, Opts.OptLevel, Opts.SizeLevel,
                    Opts.ProfileInstrGenerate, Opts.ProfileInstrUse);
   }
@@ -755,7 +787,7 @@ bool Driver::finishModule(llvm::Module &Mod, llvm::TargetMachine &TMRef,
   }
   Libraries.insert(Libraries.end(), ExternalLibraries.begin(),
                    ExternalLibraries.end());
-  return linkExecutable(ObjPath, UnitObjects, Opts.OutputFile, Opts.LibraryDirs,
+  return linkExecutable(ObjPath, LinkObjects, Opts.OutputFile, Opts.LibraryDirs,
                         Libraries, Opts.TargetTriple, Diags);
 }
 

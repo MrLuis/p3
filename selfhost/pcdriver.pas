@@ -44,6 +44,14 @@ procedure addLinkerArg(const arg: string);
   when compiling for the host (the runtime's LLVM IR, libpascalrt.ll, is
   linked into the module before it is optimized) unless this is called. }
 procedure disableRuntimeInlining;
+{ -fno-internalize-runtime: from -O1 the inlined runtime's functions
+  become the module's own internal copies (Backend.cpp's
+  internalizeFunctions) unless this is called. }
+procedure disableRuntimeInternalizing;
+{ -fwhole-program: with separately compiled units, from -O1, link their IR
+  as the program's own code instead of their objects (Driver.cpp's
+  wholeProgramIRs, Backend.cpp's linkUnitIRWhole). }
+procedure enableWholeProgram;
 { Writes the module's textual IR to path (the .ll next to a unit's object). }
 function writeModuleText(const ir: TBuf; const path: string): boolean;
 { The host CPU and its features (-mcpu=native). }
@@ -75,11 +83,21 @@ end;
 
 var
   libraryDirs, libraries: TPtrList; { of PName: -L, -l arguments }
-  noInlineRuntime: boolean;
+  noInlineRuntime, noInternalizeRuntime, wholeProgram: boolean;
 
 procedure disableRuntimeInlining;
 begin
   noInlineRuntime := true;
+end;
+
+procedure disableRuntimeInternalizing;
+begin
+  noInternalizeRuntime := true;
+end;
+
+procedure enableWholeProgram;
+begin
+  wholeProgram := true;
 end;
 
 procedure addLinkerArg(const arg: string);
@@ -630,10 +648,10 @@ function emitOutput(const ir: TBuf; const name: string; kind: TOutputKind; opt: 
 var
   target, tm, m: pointer;
   err: TBuf;
-  e, obj, runtimeIR, rtProblem: string;
-  ok: boolean;
+  e, obj, runtimeIR, rtProblem, unitProblem: string;
+  ok, whole: boolean;
   i: longint;
-  unitIRs: TPtrList;
+  unitIRs, noObjects: TPtrList;
   code: TBuf;
 begin
   emitOutput := false;
@@ -668,6 +686,21 @@ begin
     if sysFileExists(e) then
       listAdd(unitIRs, intern(e));
   end;
+  { -fwhole-program: every unit's IR in place of its object, or none (an
+    object left in the link would refer to symbols made internal) }
+  whole := (opt > 0) and wholeProgram and (unitObjects.count > 0);
+  if whole then
+    for i := 0 to unitObjects.count - 1 do
+    begin
+      e := objectIRPath(nameStr(PName(listGet(unitObjects, i))));
+      if not sysFileExists(e) then
+      begin
+        diagWarning(noLoc, '-fwhole-program: ''' + e + ''' is missing (compile the ' +
+                           'unit with -c at -O1 or higher); the units are linked as objects');
+        whole := false;
+        break;
+      end;
+    end;
   { the runtime's IR is built for the host }
   runtimeIR := '';
   if (opt > 0) and not noInlineRuntime and (triple = llvmDefaultTriple) then
@@ -677,11 +710,17 @@ begin
       runtimeIR := '';
   end;
   m := llvmParseAndOptimize(ir, name, tm, opt, sizeLevel, unitIRs, runtimeIR,
-                            cpu, features, rtProblem, err);
+                            cpu, features, not noInternalizeRuntime, whole, rtProblem,
+                            unitProblem, err);
   listFree(unitIRs);
   if rtProblem <> '' then
     diagWarning(noLoc, 'cannot read the runtime''s LLVM IR ''' + runtimeIR + ''' (' +
                        rtProblem + '); runtime functions are not inlined');
+  if unitProblem <> '' then
+  begin
+    diagError(noLoc, unitProblem);
+    exit;
+  end;
   if m = nil then
   begin
     reportLLVMError(sevFatal, 'internal compiler error: generated invalid LLVM IR:' + #10,
@@ -712,7 +751,11 @@ begin
       diagError(noLoc, 'cannot create temporary file');
       exit;
     end;
-    ok := writeText(code, obj) and linkExecutable(obj, unitObjects, path, triple);
+    listInit(noObjects);
+    if whole then
+      ok := writeText(code, obj) and linkExecutable(obj, noObjects, path, triple)
+    else
+      ok := writeText(code, obj) and linkExecutable(obj, unitObjects, path, triple);
     sysRemoveFile(obj);
     exit(ok);
   end;

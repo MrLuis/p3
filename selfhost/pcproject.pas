@@ -26,7 +26,7 @@ type
     mode: TLangMode;
     optLevel, errorLimit: longint;
     { flags, false when absent }
-    debug, separateUnits, warningsAsErrors: boolean;
+    debug, separateUnits, wholeProgram, warningsAsErrors: boolean;
     { switches, true when absent }
     warnUnusedVariables, warnDeprecated, rangeChecks, overflowChecks: boolean;
     unitPaths, defines, libraryPaths, libraries, generators: TPtrList; { of PName }
@@ -664,6 +664,8 @@ begin
       getBool(v, n, s.debug)
     else if n = 'separateUnits' then
       getBool(v, n, s.separateUnits)
+    else if n = 'wholeProgram' then
+      getBool(v, n, s.wholeProgram)
     else if n = 'unitPaths' then
       getStrings(v, n, s.unitPaths)
     else if n = 'defines' then
@@ -740,6 +742,7 @@ begin
   s.hasGeneratorTimeout := false;
   s.debug := false;
   s.separateUnits := false;
+  s.wholeProgram := false;
   s.warningsAsErrors := false;
   s.warnUnusedVariables := true;
   s.warnDeprecated := true;

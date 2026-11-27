@@ -59,6 +59,9 @@ struct CompilerOptions {
   /// -fseparate-units: the program's units were compiled separately (with
   /// -c, to <unit>.o next to their sources); link those objects.
   bool SeparateUnits = false;
+  /// -fwhole-program (with -fseparate-units, from -O1): link the units'
+  /// IR as the program's own internal code instead of their objects.
+  bool WholeProgram = false;
   ColorMode Color = ColorMode::Auto;
   unsigned ErrorLimit = 20; ///< 0 = unlimited
   bool WarningsAsErrors = false;
@@ -82,6 +85,12 @@ struct CompilerOptions {
   /// LLVM IR, libpascalrt.ll, is linked into the module before it is
   /// optimized); -fno-inline-runtime disables that.
   bool InlineRuntime = true;
+
+  /// From -O1 the linked runtime functions become the program's own
+  /// internal copies (not available_externally), so the optimizer may
+  /// specialize them or drop their unused arguments;
+  /// -fno-internalize-runtime keeps them available_externally.
+  bool InternalizeRuntime = true;
 
   /// -fprofile-instr-generate[=<file>]: build with the counters and link
   /// the profile runtime; the program writes <file> (or the default

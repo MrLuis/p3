@@ -29,13 +29,21 @@ createTargetMachine(llvm::StringRef Triple, unsigned OptLevel,
                     DiagnosticsEngine &Diags);
 
 /// Links the runtime's LLVM IR (libpascalrt.ll, at Path) into M, so that
-/// the optimizer can inline the runtime's functions; they stay
-/// available_externally, and calls that are not inlined go to the library.
-/// Without the file M stays as it is; a file that cannot be read is
-/// reported as a warning.
+/// the optimizer can inline the runtime's functions. With Internalize (the
+/// default; not with -fno-internalize-runtime) they become M's own
+/// internal copies, which the optimizer may specialize or delete;
+/// otherwise they stay available_externally and calls that are not
+/// inlined go to the library. The runtime's variables stay
+/// available_externally either way (one copy, the library's). Without the
+/// file M stays as it is; a file that cannot be read is reported as a
+/// warning.
 void linkRuntimeIR(llvm::Module &M, llvm::StringRef Path,
                    llvm::StringRef CPU, llvm::StringRef Features,
-                   DiagnosticsEngine &Diags);
+                   DiagnosticsEngine &Diags, bool Internalize = true);
+
+/// The available_externally functions of M named in Names become internal
+/// definitions: linked-in IR made the program's own.
+void internalizeFunctions(llvm::Module &M, llvm::ArrayRef<std::string> Names);
 
 /// Links the IR that each separately compiled unit left next to its object
 /// (Path.o -> Path.ll): its definitions stay available_externally, so the
@@ -43,6 +51,13 @@ void linkRuntimeIR(llvm::Module &M, llvm::StringRef Path,
 /// code. Missing files are ignored; a file that cannot be read is a warning.
 void linkUnitIR(llvm::Module &M, llvm::ArrayRef<std::string> ObjectPaths,
                 DiagnosticsEngine &Diags);
+
+/// -fwhole-program: links each unit's IR (IRPaths) into M as full
+/// definitions and makes the units' Pascal symbols (pas.*) internal, so
+/// the program no longer links the units' objects. Unreadable or
+/// unlinkable IR is an error (M is then partly linked): returns false.
+bool linkUnitIRWhole(llvm::Module &M, llvm::ArrayRef<std::string> IRPaths,
+                     DiagnosticsEngine &Diags);
 
 /// Writes M as textual IR to Path (for the .ll next to a unit's object).
 bool writeModuleIR(llvm::Module &M, llvm::StringRef Path,
