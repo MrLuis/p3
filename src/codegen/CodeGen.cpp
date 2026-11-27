@@ -7,121 +7,35 @@ using namespace p3;
 using namespace p3::detail;
 
 namespace {
-/// Does the runtime function Name only read the memory reachable from its
-/// pointer arguments, and always return? (Item 9: these are facts LLVM
-/// cannot infer across the library boundary.)
-static bool runtimeIsPureQuery(llvm::StringRef Name) {
-  return Name == "__pas_str_compare" || Name == "__pas_str_pos" ||
-         Name == "__pas_astr_compare" || Name == "__pas_astr_pos" ||
-         Name == "__pas_astr_length" || Name == "__pas_astr_bad_index" ||
-         Name == "__pas_dyn_length" || Name == "__pas_dyn_bad_index" ||
-         Name == "__pas_aoc_bad_index" || Name == "__pas_class_is" ||
-         Name == "__pas_class_inherits" || Name == "__pas_intf_lookup" ||
-         Name == "memcmp";
+struct RuntimeFuncAttr {
+  llvm::StringLiteral Name;
+  bool PureQuery;
+  bool ReturnsFresh;
+  bool ReturnsBool;
+  bool NeverFree;
+  uint8_t ReadMask;
+  uint8_t WriteMask;
+  uint8_t SlotMask;
+};
+
+constexpr RuntimeFuncAttr RuntimeFuncs[] = {
+#define RUNTIME_FUNC(Name, PureQuery, Fresh, BoolRet, NeverFree, ReadMask,     \
+                     WriteMask, SlotMask)                                      \
+  {Name, (PureQuery) != 0, (Fresh) != 0, (BoolRet) != 0, (NeverFree) != 0,     \
+   static_cast<uint8_t>(ReadMask), static_cast<uint8_t>(WriteMask),            \
+   static_cast<uint8_t>(SlotMask)},
+#include "p3/CodeGen/RuntimeFuncs.def"
+};
+
+const RuntimeFuncAttr *findRuntimeFunc(llvm::StringRef Name) {
+  for (const auto &Entry : RuntimeFuncs)
+    if (Entry.Name == Name)
+      return &Entry;
+  return nullptr;
 }
 
-/// Does the runtime function Name return a new allocation (or NULL), never
-/// a pointer into an existing object?
-static bool runtimeReturnsFresh(llvm::StringRef Name) {
-  return Name == "__pas_new" || Name == "__pas_astr_from_chars" ||
-         Name == "__pas_astr_from_pstr" || Name == "__pas_astr_from_char" ||
-         Name == "__pas_astr_from_cstr" || Name == "__pas_astr_join" ||
-         Name == "__pas_dyn_new" || Name == "__pas_dyn_copy" ||
-         Name == "__pas_format" || Name == "__pas_tmpl_add";
-}
-
-/// The pointer parameters of the runtime function Name that it only reads,
-/// and never captures.
-static bool runtimeReadsParam(llvm::StringRef Name, unsigned I) {
-  if (Name == "__pas_str_compare" || Name == "__pas_str_pos" ||
-      Name == "__pas_astr_compare" || Name == "__pas_astr_pos" ||
-      Name == "__pas_class_is" || Name == "__pas_class_inherits" ||
-      Name == "__pas_intf_lookup" || Name == "memcmp")
-    return I <= 1;
-  if (Name == "__pas_astr_length" || Name == "__pas_astr_bad_index" ||
-      Name == "__pas_dyn_length" || Name == "__pas_dyn_bad_index" ||
-      Name == "__pas_aoc_bad_index" || Name == "__pas_astr_from_chars" ||
-      Name == "__pas_astr_from_pstr" || Name == "__pas_astr_from_cstr" ||
-      Name == "__pas_astr_pchar" || Name == "__pas_dyn_copy" ||
-      Name == "__pas_dyn_new" || Name == "__pas_astr_copy")
-    return I == 0;
-  if (Name == "__pas_tmpl_add")
-    return I <= 1;
-  if (Name == "__pas_write_enum")
-    return I == 1; // the names table (not the file it writes to)
-  if (Name == "__pas_str_assign" || Name == "__pas_str_copy")
-    return I == 2 || I == 1;
-  if (Name == "__pas_str_concat")
-    return I == 1 || I == 2;
-  if (Name == "__pas_str_append")
-    return I == 2;
-  if (Name == "__pas_str_insert")
-    return I == 0;
-  if (Name == "__pas_write_str" || Name == "__pas_write_pstr" ||
-      Name == "__pas_write_cstr" || Name == "__pas_write_astr")
-    return I == 1;
-  if (Name == "__pas_astr_to_pstr")
-    return I == 2;
-  if (Name == "__pas_astr_join")
-    return I == 0 || I == 1 || I == 3;
-  if (Name == "__pas_format")
-    return I == 0 || I == 1;
-  if (Name == "__pas_format_pstr")
-    return I == 1 || I == 2;
-  if (Name == "__pas_intf_as" || Name == "__pas_class_as")
-    return I <= 2;
-  return false;
-}
-
-/// The runtime function Name returns 0 or 1: its result's `range` return
-/// attribute (the runtime's code keeps it; llvm-23.md LB-2).
-static bool runtimeReturnsBool(llvm::StringRef Name) {
-  return Name == "__pas_astr_bad_index" || Name == "__pas_dyn_bad_index" ||
-         Name == "__pas_aoc_bad_index" || Name == "__pas_token_cancelled";
-}
-
-/// The pointer parameter I of the runtime function Name is a counted
-/// string's or dynamic array's own variable slot: the pointer, whenever
-/// it is set, is a variable's address, and holds a value pointer at it
-/// (llvm-23.md LB-3).
-static bool runtimeSlotParam(llvm::StringRef Name, unsigned I) {
-  return (Name == "__pas_astr_setlength" || Name == "__pas_astr_clear" ||
-          Name == "__pas_astr_assign" || Name == "__pas_astr_take" ||
-          Name == "__pas_astr_append" || Name == "__pas_dyn_setlength" ||
-          Name == "__pas_dyn_clear" || Name == "__pas_dyn_assign") &&
-         I == 0;
-}
-
-/// The runtime function Name never frees its pointer arguments (it only
-/// reads them, or builds a new string of their bytes): `nofree`, from
-/// the functions' own code (llvm-23.md LB-3). The functions that may
-/// free (the releases, the clears, the reallocs) stay out.
-static bool runtimeNeverFree(llvm::StringRef Name) {
-  return runtimeIsPureQuery(Name) ||
-         Name == "__pas_astr_from_chars" || Name == "__pas_astr_from_pstr" ||
-         Name == "__pas_astr_from_cstr" || Name == "__pas_astr_from_char" ||
-         Name == "__pas_astr_join" || Name == "__pas_astr_copy" || Name == "__pas_astr_pchar" ||
-         Name == "__pas_astr_concat" || Name == "__pas_astr_addref" ||
-         Name == "__pas_astr_pos" || Name == "__pas_dyn_copy" ||
-         Name == "__pas_dyn_length" || Name == "__pas_dyn_new" ||
-         Name == "__pas_write_str" || Name == "__pas_write_pstr" ||
-         Name == "__pas_write_cstr" || Name == "__pas_write_astr" ||
-         Name == "__pas_write_char" || Name == "__pas_write_int" ||
-         Name == "__pas_write_bool" || Name == "__pas_write_real" ||
-         Name == "__pas_write_enum" || Name == "__pas_write_elem" ||
-         Name == "__pas_read_elem" || Name == "__pas_read_int" ||
-         Name == "__pas_read_int64" || Name == "__pas_read_char" ||
-         Name == "__pas_read_real" || Name == "__pas_read_str" ||
-         Name == "__pas_format" || Name == "__pas_format_pstr" ||
-         Name == "__pas_tmpl_add" || Name == "__pas_paramstr";
-}
-
-/// A runtime destination that it only writes, and that cannot alias a
-/// source of the call (item 4).
-static bool runtimeWritesParam(llvm::StringRef Name, unsigned I) {
-  return (Name == "__pas_read_elem" && I == 1) ||
-         (Name == "__pas_read_str" && I == 1) ||
-         (Name == "__pas_paramstr" && I == 0);
+bool hasParamBit(uint8_t Mask, unsigned I) {
+  return I < 8 && (Mask & (1u << I)) != 0;
 }
 
 /// Adds to the runtime function F the attributes that are true of it: its
@@ -131,7 +45,8 @@ static bool runtimeWritesParam(llvm::StringRef Name, unsigned I) {
 void p3::detail::addRuntimeAttrs(llvm::Function *F) {
   llvm::LLVMContext &C = F->getContext();
   llvm::StringRef Name = F->getName();
-  if (runtimeIsPureQuery(Name)) {
+  const RuntimeFuncAttr *RF = findRuntimeFunc(Name);
+  if (RF && RF->PureQuery) {
     F->addFnAttr(llvm::Attribute::getWithMemoryEffects(
         C, llvm::MemoryEffects::argMemOnly(llvm::ModRefInfo::Ref)));
     F->addFnAttr(llvm::Attribute::WillReturn);
@@ -140,9 +55,9 @@ void p3::detail::addRuntimeAttrs(llvm::Function *F) {
         C, llvm::MemoryEffects::none()));
     F->addFnAttr(llvm::Attribute::WillReturn);
   }
-  if (runtimeReturnsFresh(Name))
+  if (RF && RF->ReturnsFresh)
     F->addRetAttr(llvm::Attribute::NoAlias);
-  if (runtimeReturnsBool(Name)) { // 0 or 1: the range's return attribute
+  if (RF && RF->ReturnsBool) { // 0 or 1: the range's return attribute
     llvm::AttrBuilder B(C);
     B.addRangeAttr(llvm::ConstantRange(llvm::APInt(32, 0),
                                           llvm::APInt(32, 2)));
@@ -169,29 +84,31 @@ void p3::detail::addRuntimeAttrs(llvm::Function *F) {
     B.addAllocSizeAttr(1, std::nullopt);
     F->addFnAttrs(B);
   }
-  for (unsigned I = 0; I < F->arg_size(); ++I) {
-    if (!F->getArg(I)->getType()->isPointerTy())
-      continue;
-    llvm::AttrBuilder B(C);
-    bool Any = false;
-    if (runtimeReadsParam(Name, I)) {
-      B.addCapturesAttr(llvm::CaptureInfo::none());
-      B.addAttribute(llvm::Attribute::ReadOnly);
-      Any = true;
-    } else if (runtimeWritesParam(Name, I)) {
-      B.addCapturesAttr(llvm::CaptureInfo::none());
-      B.addAttribute(llvm::Attribute::WriteOnly);
-      Any = true;
+  if (RF) {
+    for (unsigned I = 0; I < F->arg_size(); ++I) {
+      if (!F->getArg(I)->getType()->isPointerTy())
+        continue;
+      llvm::AttrBuilder B(C);
+      bool Any = false;
+      if (hasParamBit(RF->ReadMask, I)) {
+        B.addCapturesAttr(llvm::CaptureInfo::none());
+        B.addAttribute(llvm::Attribute::ReadOnly);
+        Any = true;
+      } else if (hasParamBit(RF->WriteMask, I)) {
+        B.addCapturesAttr(llvm::CaptureInfo::none());
+        B.addAttribute(llvm::Attribute::WriteOnly);
+        Any = true;
+      }
+      if (hasParamBit(RF->SlotMask, I)) {
+        B.addDereferenceableOrNullAttr(8);
+        Any = true;
+      }
+      if (Any)
+        F->addParamAttrs(I, B);
     }
-    if (runtimeSlotParam(Name, I)) {
-      B.addDereferenceableOrNullAttr(8);
-      Any = true;
-    }
-    if (Any)
-      F->addParamAttrs(I, B);
+    if (RF->NeverFree)
+      F->addFnAttr(llvm::Attribute::NoFree);
   }
-  if (runtimeNeverFree(Name))
-    F->addFnAttr(llvm::Attribute::NoFree);
 }
 
 Runtime::Runtime(llvm::Module &M) {

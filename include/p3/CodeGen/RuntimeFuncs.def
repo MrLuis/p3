@@ -1,0 +1,112 @@
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
+//===- RuntimeFuncs.def - Runtime ABI attribute metadata ----------*- C++ -*-===//
+//
+// Facts about libpascalrt functions that LLVM cannot infer across the library
+// boundary, shared by C++ CodeGen (src/codegen/CodeGen.cpp) and the
+// self-hosted compiler (selfhost/runtime.inc via utils/gen-selfhost-tables.py).
+//
+// RUNTIME_FUNC(Name, PureQuery, Fresh, BoolRet, NeverFree, ReadMask, WriteMask, SlotMask)
+//   PureQuery : only reads argument memory, always returns (memory(argmem: read) willreturn)
+//   Fresh     : returns a newly allocated pointer or NULL (noalias return)
+//   BoolRet   : returns i32 0 or 1 (range(i32 0, 2) return)
+//   NeverFree : never frees pointer arguments (nofree)
+//   ReadMask  : bitmask of parameters only read and never captured
+//   WriteMask : bitmask of parameters only written and non-aliasing
+//   SlotMask  : bitmask of counted string / dynamic array variable slots (dereferenceable_or_null(8))
+//
+//===----------------------------------------------------------------------===//
+
+#ifndef RUNTIME_FUNC
+#define RUNTIME_FUNC(Name, PureQuery, Fresh, BoolRet, NeverFree, ReadMask,     \
+                     WriteMask, SlotMask)
+#endif
+
+#ifndef PNONE
+#define PNONE 0
+#define P0 (1u << 0)
+#define P1 (1u << 1)
+#define P2 (1u << 2)
+#define P3 (1u << 3)
+#define P_UNDEF_LOCAL_MASKS
+#endif
+
+RUNTIME_FUNC("__pas_str_compare",     1, 0, 0, 1, P0 | P1,      PNONE, PNONE)
+RUNTIME_FUNC("__pas_str_pos",         1, 0, 0, 1, P0 | P1,      PNONE, PNONE)
+RUNTIME_FUNC("__pas_str_assign",      0, 0, 0, 0, P1 | P2,      PNONE, PNONE)
+RUNTIME_FUNC("__pas_str_copy",        0, 0, 0, 0, P1 | P2,      PNONE, PNONE)
+RUNTIME_FUNC("__pas_str_concat",      0, 0, 0, 0, P1 | P2,      PNONE, PNONE)
+RUNTIME_FUNC("__pas_str_append",      0, 0, 0, 0, P2,           PNONE, PNONE)
+RUNTIME_FUNC("__pas_str_insert",      0, 0, 0, 0, P0,           PNONE, PNONE)
+
+RUNTIME_FUNC("__pas_astr_compare",    1, 0, 0, 1, P0 | P1,      PNONE, PNONE)
+RUNTIME_FUNC("__pas_astr_pos",        1, 0, 0, 1, P0 | P1,      PNONE, PNONE)
+RUNTIME_FUNC("__pas_astr_length",     1, 0, 0, 1, P0,           PNONE, PNONE)
+RUNTIME_FUNC("__pas_astr_bad_index",  1, 0, 1, 1, P0,           PNONE, PNONE)
+RUNTIME_FUNC("__pas_astr_from_chars", 0, 1, 0, 1, P0,           PNONE, PNONE)
+RUNTIME_FUNC("__pas_astr_from_pstr",  0, 1, 0, 1, P0,           PNONE, PNONE)
+RUNTIME_FUNC("__pas_astr_from_char",  0, 1, 0, 1, PNONE,        PNONE, PNONE)
+RUNTIME_FUNC("__pas_astr_from_cstr",  0, 1, 0, 1, P0,           PNONE, PNONE)
+RUNTIME_FUNC("__pas_astr_to_pstr",    0, 0, 0, 0, P2,           PNONE, PNONE)
+RUNTIME_FUNC("__pas_astr_pchar",      0, 0, 0, 1, P0,           PNONE, PNONE)
+RUNTIME_FUNC("__pas_astr_join",       0, 1, 0, 1, P0 | P1 | P3, PNONE, PNONE)
+RUNTIME_FUNC("__pas_astr_copy",       0, 0, 0, 1, P0,           PNONE, PNONE)
+RUNTIME_FUNC("__pas_astr_concat",     0, 0, 0, 1, PNONE,        PNONE, PNONE)
+RUNTIME_FUNC("__pas_astr_addref",     0, 0, 0, 1, PNONE,        PNONE, PNONE)
+RUNTIME_FUNC("__pas_astr_setlength",  0, 0, 0, 0, PNONE,        PNONE, P0)
+RUNTIME_FUNC("__pas_astr_clear",      0, 0, 0, 0, PNONE,        PNONE, P0)
+RUNTIME_FUNC("__pas_astr_assign",     0, 0, 0, 0, PNONE,        PNONE, P0)
+RUNTIME_FUNC("__pas_astr_take",       0, 0, 0, 0, PNONE,        PNONE, P0)
+RUNTIME_FUNC("__pas_astr_append",     0, 0, 0, 0, PNONE,        PNONE, P0)
+
+RUNTIME_FUNC("__pas_dyn_length",      1, 0, 0, 1, P0,           PNONE, PNONE)
+RUNTIME_FUNC("__pas_dyn_bad_index",   1, 0, 1, 1, P0,           PNONE, PNONE)
+RUNTIME_FUNC("__pas_dyn_new",         0, 1, 0, 1, P0,           PNONE, PNONE)
+RUNTIME_FUNC("__pas_dyn_copy",        0, 1, 0, 1, P0,           PNONE, PNONE)
+RUNTIME_FUNC("__pas_dyn_setlength",   0, 0, 0, 0, PNONE,        PNONE, P0)
+RUNTIME_FUNC("__pas_dyn_clear",       0, 0, 0, 0, PNONE,        PNONE, P0)
+RUNTIME_FUNC("__pas_dyn_assign",      0, 0, 0, 0, PNONE,        PNONE, P0)
+
+RUNTIME_FUNC("__pas_aoc_bad_index",   1, 0, 1, 1, P0,           PNONE, PNONE)
+RUNTIME_FUNC("__pas_token_cancelled", 0, 0, 1, 0, PNONE,        PNONE, PNONE)
+
+RUNTIME_FUNC("__pas_class_is",        1, 0, 0, 1, P0 | P1,      PNONE, PNONE)
+RUNTIME_FUNC("__pas_class_inherits",  1, 0, 0, 1, P0 | P1,      PNONE, PNONE)
+RUNTIME_FUNC("__pas_class_as",        0, 0, 0, 0, P0 | P1 | P2, PNONE, PNONE)
+RUNTIME_FUNC("__pas_intf_lookup",     1, 0, 0, 1, P0 | P1,      PNONE, PNONE)
+RUNTIME_FUNC("__pas_intf_as",         0, 0, 0, 0, P0 | P1 | P2, PNONE, PNONE)
+
+RUNTIME_FUNC("__pas_new",             0, 1, 0, 0, PNONE,        PNONE, PNONE)
+RUNTIME_FUNC("__pas_format",          0, 1, 0, 1, P0 | P1,      PNONE, PNONE)
+RUNTIME_FUNC("__pas_format_pstr",     0, 0, 0, 1, P1 | P2,      PNONE, PNONE)
+RUNTIME_FUNC("__pas_tmpl_add",        0, 1, 0, 1, P0 | P1,      PNONE, PNONE)
+
+RUNTIME_FUNC("__pas_write_str",       0, 0, 0, 1, P1,           PNONE, PNONE)
+RUNTIME_FUNC("__pas_write_pstr",      0, 0, 0, 1, P1,           PNONE, PNONE)
+RUNTIME_FUNC("__pas_write_cstr",      0, 0, 0, 1, P1,           PNONE, PNONE)
+RUNTIME_FUNC("__pas_write_astr",      0, 0, 0, 1, P1,           PNONE, PNONE)
+RUNTIME_FUNC("__pas_write_char",      0, 0, 0, 1, PNONE,        PNONE, PNONE)
+RUNTIME_FUNC("__pas_write_int",       0, 0, 0, 1, PNONE,        PNONE, PNONE)
+RUNTIME_FUNC("__pas_write_bool",      0, 0, 0, 1, PNONE,        PNONE, PNONE)
+RUNTIME_FUNC("__pas_write_real",      0, 0, 0, 1, PNONE,        PNONE, PNONE)
+RUNTIME_FUNC("__pas_write_enum",      0, 0, 0, 1, P1,           PNONE, PNONE)
+RUNTIME_FUNC("__pas_write_elem",      0, 0, 0, 1, PNONE,        PNONE, PNONE)
+
+RUNTIME_FUNC("__pas_read_elem",       0, 0, 0, 1, PNONE,        P1,    PNONE)
+RUNTIME_FUNC("__pas_read_int",        0, 0, 0, 1, PNONE,        PNONE, PNONE)
+RUNTIME_FUNC("__pas_read_int64",      0, 0, 0, 1, PNONE,        PNONE, PNONE)
+RUNTIME_FUNC("__pas_read_char",       0, 0, 0, 1, PNONE,        PNONE, PNONE)
+RUNTIME_FUNC("__pas_read_real",       0, 0, 0, 1, PNONE,        PNONE, PNONE)
+RUNTIME_FUNC("__pas_read_str",        0, 0, 0, 1, PNONE,        P1,    PNONE)
+RUNTIME_FUNC("__pas_paramstr",        0, 0, 0, 1, PNONE,        P0,    PNONE)
+
+RUNTIME_FUNC("memcmp",                1, 0, 0, 1, P0 | P1,      PNONE, PNONE)
+
+#ifdef P_UNDEF_LOCAL_MASKS
+#undef PNONE
+#undef P0
+#undef P1
+#undef P2
+#undef P3
+#undef P_UNDEF_LOCAL_MASKS
+#endif
+#undef RUNTIME_FUNC

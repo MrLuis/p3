@@ -300,132 +300,75 @@ begin
 end;
 
 { Item 9: facts about the runtime functions that LLVM cannot infer across
-  the library boundary (the same tables as addRuntimeAttrs in CodeGen.cpp). }
-function runtimeIsPureQuery(const name: string): boolean;
+  the library boundary (generated from include/p3/CodeGen/RuntimeFuncs.def). }
+{$I runtime.inc}
+
+function findRuntimeFunc(const name: string): longint;
+var
+  i: longint;
 begin
-  runtimeIsPureQuery :=
-    (name = '__pas_str_compare') or (name = '__pas_str_pos') or
-    (name = '__pas_astr_compare') or (name = '__pas_astr_pos') or
-    (name = '__pas_astr_length') or (name = '__pas_astr_bad_index') or
-    (name = '__pas_dyn_length') or (name = '__pas_dyn_bad_index') or
-    (name = '__pas_aoc_bad_index') or (name = '__pas_class_is') or
-    (name = '__pas_class_inherits') or (name = '__pas_intf_lookup') or
-    (name = 'memcmp');
+  for i := 1 to numRuntimeFuncs do
+    if runtimeFuncs[i].name = name then
+    begin
+      findRuntimeFunc := i;
+      exit;
+    end;
+  findRuntimeFunc := 0;
+end;
+
+function runtimeHasParamBit(mask: byte; i: longint): boolean;
+begin
+  runtimeHasParamBit := (i >= 0) and (i < 8) and ((mask and (1 shl i)) <> 0);
+end;
+
+function runtimeIsPureQuery(const name: string): boolean;
+var
+  k: longint;
+begin
+  k := findRuntimeFunc(name);
+  runtimeIsPureQuery := (k <> 0) and runtimeFuncs[k].pureQuery;
 end;
 
 function runtimeReturnsFresh(const name: string): boolean;
+var
+  k: longint;
 begin
-  runtimeReturnsFresh :=
-    (name = '__pas_new') or (name = '__pas_astr_from_chars') or
-    (name = '__pas_astr_from_pstr') or (name = '__pas_astr_from_char') or
-    (name = '__pas_astr_from_cstr') or (name = '__pas_astr_join') or
-    (name = '__pas_dyn_new') or (name = '__pas_dyn_copy') or
-    (name = '__pas_format') or (name = '__pas_tmpl_add');
+  k := findRuntimeFunc(name);
+  runtimeReturnsFresh := (k <> 0) and runtimeFuncs[k].returnsFresh;
 end;
 
 function runtimeReadsParam(const name: string; i: longint): boolean;
+var
+  k: longint;
 begin
-  runtimeReadsParam := false;
-  if (name = '__pas_str_compare') or (name = '__pas_str_pos') or
-     (name = '__pas_astr_compare') or (name = '__pas_astr_pos') or
-     (name = '__pas_class_is') or (name = '__pas_class_inherits') or
-     (name = '__pas_intf_lookup') or (name = 'memcmp') then
-    runtimeReadsParam := i <= 1
-  else if (name = '__pas_astr_length') or (name = '__pas_astr_bad_index') or
-          (name = '__pas_dyn_length') or (name = '__pas_dyn_bad_index') or
-          (name = '__pas_aoc_bad_index') or (name = '__pas_astr_from_chars') or
-          (name = '__pas_astr_from_pstr') or (name = '__pas_astr_from_cstr') or
-          (name = '__pas_astr_pchar') or (name = '__pas_dyn_copy') or
-          (name = '__pas_dyn_new') or (name = '__pas_astr_copy') then
-    runtimeReadsParam := i = 0
-  else if name = '__pas_tmpl_add' then
-    runtimeReadsParam := i <= 1
-  else if name = '__pas_write_enum' then
-    runtimeReadsParam := i = 1 { the names table, not the file it writes to }
-  else if (name = '__pas_str_assign') or (name = '__pas_str_copy') then
-    runtimeReadsParam := (i = 1) or (i = 2)
-  else if name = '__pas_str_concat' then
-    runtimeReadsParam := (i = 1) or (i = 2)
-  else if name = '__pas_str_append' then
-    runtimeReadsParam := i = 2
-  else if name = '__pas_str_insert' then
-    runtimeReadsParam := i = 0
-  else if (name = '__pas_write_str') or (name = '__pas_write_pstr') or
-          (name = '__pas_write_cstr') or (name = '__pas_write_astr') then
-    runtimeReadsParam := i = 1
-  else if name = '__pas_astr_to_pstr' then
-    runtimeReadsParam := i = 2
-  else if name = '__pas_astr_join' then
-    runtimeReadsParam := (i = 0) or (i = 1) or (i = 3)
-  else if name = '__pas_format' then
-    runtimeReadsParam := (i = 0) or (i = 1)
-  else if name = '__pas_format_pstr' then
-    runtimeReadsParam := (i = 1) or (i = 2)
-  else if (name = '__pas_intf_as') or (name = '__pas_class_as') then
-    runtimeReadsParam := i <= 2;
+  k := findRuntimeFunc(name);
+  runtimeReadsParam := (k <> 0) and runtimeHasParamBit(runtimeFuncs[k].readMask, i);
 end;
 
 { A runtime destination that it only writes, and that cannot alias a
   source of the call (item 4). }
 function runtimeWritesParam(const name: string; i: longint): boolean;
+var
+  k: longint;
 begin
-  runtimeWritesParam := ((name = '__pas_read_elem') and (i = 1)) or
-                        ((name = '__pas_read_str') and (i = 1)) or
-                        ((name = '__pas_paramstr') and (i = 0));
+  k := findRuntimeFunc(name);
+  runtimeWritesParam := (k <> 0) and runtimeHasParamBit(runtimeFuncs[k].writeMask, i);
 end;
 
 function runtimeSlotParam(const name: string; i: longint): boolean;
+var
+  k: longint;
 begin
-  runtimeSlotParam := ((name = '__pas_astr_setlength') or
-                       (name = '__pas_astr_clear') or
-                       (name = '__pas_astr_assign') or
-                       (name = '__pas_astr_take') or
-                       (name = '__pas_astr_append') or
-                       (name = '__pas_dyn_setlength') or
-                       (name = '__pas_dyn_clear') or
-                       (name = '__pas_dyn_assign')) and (i = 0);
+  k := findRuntimeFunc(name);
+  runtimeSlotParam := (k <> 0) and runtimeHasParamBit(runtimeFuncs[k].slotMask, i);
 end;
 
-{ The runtime function Name never frees its pointer arguments: `nofree`,
-  from the functions' own code (llvm-23.md LB-3). The functions that may
-  free (the releases, the clears, the appends' slot owners, the unique's
-  release, the reallocs and free) stay out. }
 function runtimeNeverFree(const name: string): boolean;
+var
+  k: longint;
 begin
-  runtimeNeverFree := runtimeIsPureQuery(name) or
-                      (name = '__pas_astr_from_chars') or
-                      (name = '__pas_astr_from_pstr') or
-                      (name = '__pas_astr_from_cstr') or
-                      (name = '__pas_astr_from_char') or
-                      (name = '__pas_astr_join') or
-                      (name = '__pas_astr_copy') or
-                      (name = '__pas_astr_pchar') or
-                      (name = '__pas_astr_concat') or
-                      (name = '__pas_astr_addref') or
-                      (name = '__pas_astr_pos') or
-                      (name = '__pas_dyn_copy') or
-                      (name = '__pas_dyn_length') or
-                      (name = '__pas_dyn_new') or
-                      (name = '__pas_write_str') or
-                      (name = '__pas_write_pstr') or
-                      (name = '__pas_write_cstr') or
-                      (name = '__pas_write_astr') or
-                      (name = '__pas_write_char') or
-                      (name = '__pas_write_int') or
-                      (name = '__pas_write_bool') or
-                      (name = '__pas_write_real') or
-                      (name = '__pas_write_enum') or
-                      (name = '__pas_write_elem') or
-                      (name = '__pas_read_elem') or
-                      (name = '__pas_read_int') or
-                      (name = '__pas_read_int64') or
-                      (name = '__pas_read_char') or
-                      (name = '__pas_read_real') or
-                      (name = '__pas_read_str') or
-                      (name = '__pas_format') or
-                      (name = '__pas_format_pstr') or
-                      (name = '__pas_tmpl_add') or
-                      (name = '__pas_paramstr');
+  k := findRuntimeFunc(name);
+  runtimeNeverFree := (k <> 0) and runtimeFuncs[k].neverFree;
 end;
 
 { The function attributes (the base is 'nounwind' for plain runtime
@@ -461,11 +404,11 @@ end;
 { The runtime function Name returns 0 or 1: its result's `range` return
   attribute, as the runtime's code keeps (llvm-23.md LB-2). }
 function runtimeReturnsBool(const name: string): boolean;
+var
+  k: longint;
 begin
-  runtimeReturnsBool := (name = '__pas_astr_bad_index') or
-                        (name = '__pas_dyn_bad_index') or
-                        (name = '__pas_aoc_bad_index') or
-                        (name = '__pas_token_cancelled');
+  k := findRuntimeFunc(name);
+  runtimeReturnsBool := (k <> 0) and runtimeFuncs[k].returnsBool;
 end;
 
 function runtimeRetAttr(const name: string): string;
