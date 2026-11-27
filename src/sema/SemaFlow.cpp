@@ -191,6 +191,12 @@ bool Checker::isNullRef(Type *T){
 }
 
 
+bool Checker::isNullTrackedType(Type *T) const {
+  return (NullSafeHere && isNullRef(T)) ||
+         (NilPointersHere && T && T->isPointer());
+}
+
+
 /// The type written for D (a variable, field, property or function's
 /// result), if any.
 TypeSpec *Checker::nullSpec(Decl *D){
@@ -215,7 +221,14 @@ bool Checker::declNullable(Decl *D){
 /// null-safe code; not a lambda's result, whose type is not written)?
 bool Checker::declNonNull(Decl *D){
   TypeSpec *TS = nullSpec(D);
-  return TS && TS->isNullSafe() && !TS->isNullable();
+  Type *T = nullTypeOf(D);
+  if (!TS || TS->isNullable())
+    return false;
+  if (isNullRef(T))
+    return TS->isNullSafe();
+  if (T && T->isPointer())
+    return TS->isNilPointers();
+  return false;
 }
 
 
@@ -247,6 +260,7 @@ void Checker::nullSet(unsigned I, bool MayNil, bool MayNonNil){
   uint64_t Bit = uint64_t(1) << I;
   Flow->S.Moved = MayNil ? Flow->S.Moved | Bit : Flow->S.Moved & ~Bit;
   Flow->S.Valid = MayNonNil ? Flow->S.Valid | Bit : Flow->S.Valid & ~Bit;
+  Flow->MoveLoc[I] = SourceLocation();
   ownedChanged(I);
 }
 
@@ -335,7 +349,9 @@ Checker::Nilness Checker::nilness(Expr *E) {
   Type *T = E->getType();
   if (T && T->isNil())
     return Nilness::IsNil;
-  if (!isNullRef(T))
+  if (llvm::isa<AddrOfExpr>(E))
+    return Nilness::NotNil;
+  if (!isNullTrackedType(T))
     return Nilness::NotNil;
   if (int I = nullIndexOf(E); I >= 0) {
     uint64_t Bit = uint64_t(1) << I;
@@ -353,9 +369,14 @@ Checker::Nilness Checker::nilness(Expr *E) {
   }
   if (auto *B = llvm::dyn_cast<BinaryExpr>(E); B && B->getOp() == BinaryOp::As)
     return nilness(B->getLHS());
+  if (auto *C = llvm::dyn_cast<CallExpr>(E)) {
+    if (C->getDecl() && llvm::isa<TypeDecl>(C->getDecl()) &&
+        C->getArgs().size() == 1)
+      return nilness(C->getArgs()[0]);
+    Decl *D = C->getDecl();
+    return D && declNullable(D) ? Nilness::MaybeNil : Nilness::NotNil;
+  }
   Decl *D = nullDeclOf(E);
-  if (auto *C = llvm::dyn_cast<CallExpr>(E))
-    D = C->getDecl();
   if (auto *IC = llvm::dyn_cast<IndirectCallExpr>(E))
     if (auto *F = llvm::dyn_cast<FieldExpr>(IC->getCallee()))
       D = F->getMember();
@@ -371,8 +392,12 @@ std::string Checker::nullDesc(Expr *E){
     return "'" + N->getName().Spelling.str() + "'";
   if (auto *F = llvm::dyn_cast<FieldExpr>(E))
     return "'" + F->getField().Spelling.str() + "'";
-  if (auto *C = llvm::dyn_cast<CallExpr>(E))
+  if (auto *C = llvm::dyn_cast<CallExpr>(E)) {
+    if (C->getDecl() && llvm::isa<TypeDecl>(C->getDecl()) &&
+        C->getArgs().size() == 1)
+      return nullDesc(C->getArgs()[0]);
     return "the result of '" + C->getCallee().Spelling.str() + "'";
+  }
   if (auto *IC = llvm::dyn_cast<IndirectCallExpr>(E))
     if (auto *F = llvm::dyn_cast<FieldExpr>(IC->getCallee()))
       return "the result of '" + F->getField().Spelling.str() + "'";
@@ -388,7 +413,7 @@ std::string Checker::nullDesc(Expr *E){
 /// way out, ", or ..."): an error if it may be.
 void Checker::requireNotNil(Expr *E, const std::string &Why,
                    const std::string &Alt){
-  if (!NullSafeHere || !E->getType() || E->getType()->isError())
+  if (!anyNullSafety() || !E->getType() || E->getType()->isError())
     return;
   Expr *X = E;
   while (auto *P = llvm::dyn_cast<ParenExpr>(X))
@@ -403,13 +428,14 @@ void Checker::requireNotNil(Expr *E, const std::string &Why,
                 {X->getRange()});
     return;
   }
-  if (!isNullRef(X->getType()))
+  if (!isNullTrackedType(X->getType()))
     return;
   std::string What = nullDesc(X);
   if (int I = nullIndexOf(X); I >= 0) {
     Decl *D = Flow->Vars[I];
     auto *V = llvm::dyn_cast<VarDecl>(D);
-    bool Unassigned = !declNullable(D) &&
+    bool Freed = Flow->MoveLoc[I].isValid();
+    bool Unassigned = !declNullable(D) && !Freed &&
                       !(V && V->isParam() && !V->getTypeSpec());
     bool IsNil = !(Flow->S.Valid & (uint64_t(1) << I));
     if (!nullUse(static_cast<unsigned>(I), X->getBeginLoc(), Unassigned))
@@ -433,6 +459,16 @@ void Checker::requireNotNil(Expr *E, const std::string &Why,
   Nilness N = nilness(X);
   if (N == Nilness::NotNil)
     return;
+  if (N == Nilness::IsNil) {
+    llvm::StringRef W(Why), A(Alt);
+    W.consume_front("but ");
+    A.consume_front(", or ");
+    Diags.error(X->getBeginLoc(),
+                "nil cannot be used here: " + W.str() +
+                    (A.empty() ? "" : " (" + A.str() + " if it may be nil)"),
+                {X->getRange()});
+    return;
+  }
   Diags.error(X->getBeginLoc(),
               What + " may be nil here, " + Why +
                   "; check it first in a local variable" + Alt,
@@ -444,13 +480,13 @@ void Checker::requireNotNil(Expr *E, const std::string &Why,
 /// be nil if Target is a non-null reference; a followed Target gets its
 /// nil-ness.
 void Checker::nullAssign(Expr *Target, Decl *TD, Expr *Value){
-  if (!NullSafeHere || !TD)
+  if (!anyNullSafety() || !TD)
     return;
   Type *T = Value->getType();
   if (!T || T->isError())
     return;
   Type *TT = nullTypeOf(TD);
-  if (!isNullRef(TT))
+  if (!isNullTrackedType(TT))
     return;
   if (declNonNull(TD))
     requireNotNil(Value,
@@ -538,7 +574,7 @@ void Checker::nullFacts(Expr *C, bool WhenTrue, llvm::SmallVectorImpl<Decl *> &O
 
 
 void Checker::nullNarrowBy(Expr *C, bool WhenTrue){
-  if (!NullSafeHere || !Flow)
+  if (!anyNullSafety() || !Flow)
     return;
   llvm::SmallVector<Decl *, 4> Facts;
   nullFacts(C, WhenTrue, Facts);
@@ -550,7 +586,7 @@ void Checker::nullNarrowBy(Expr *C, bool WhenTrue){
 /// Where the routine being checked ends (its end, or exit): its non-null
 /// result, and a constructor's non-null fields, must be set.
 void Checker::nullCheckEnd(SourceLocation Loc, bool AtExit){
-  if (!NullSafeHere || !Flow || !Flow->S.isLive() || !CurRoutine)
+  if (!anyNullSafety() || !Flow || !Flow->S.isLive() || !CurRoutine)
     return;
   for (unsigned I = 0; I < Flow->N; ++I) {
     if (!Flow->Null[I] || !(Flow->S.Moved & (uint64_t(1) << I)))
@@ -588,24 +624,27 @@ void Checker::nullCheckEnd(SourceLocation Loc, bool AtExit){
 void Checker::nullTrackBlock(Block &B){
   if (RoutineDecl *R = CurRoutine; R && R->getBody() == &B) {
     for (VarDecl *P : R->getParams())
-      if (isNullRef(P->getType()) && declNullable(P))
+      if (isNullTrackedType(P->getType()) && declNullable(P))
         nullTrack(P, true, true);
     if (VarDecl *Res = R->getResultVar();
-        Res && isNullRef(Res->getType()) && !R->isLambda() &&
+        Res && isNullTrackedType(Res->getType()) && !R->isLambda() &&
         (declNonNull(Res) || declNullable(Res)))
       nullTrack(Res, true, false); // (nil until assigned)
     if (R->isConstructor())
       if (ClassType *C = R->getClass())
         for (Decl *M : C->getMembers())
           if (auto *F = llvm::dyn_cast<FieldDecl>(M);
-              F && isNullRef(F->getType()) && declNonNull(F))
+              F && isNullTrackedType(F->getType()) && declNonNull(F))
             nullTrack(F, true, false);
   }
   for (Decl *D : B.getDecls())
     if (auto *V = llvm::dyn_cast<VarDecl>(D);
-        V && V->getVarKind() == VarDecl::Variable && isNullRef(V->getType()) &&
+        V && V->getVarKind() == VarDecl::Variable &&
+        isNullTrackedType(V->getType()) &&
         !V->isTypedConst() && !V->isClassVar() && !V->getAbsolute() &&
-        !V->isExternal() && V->getTypeSpec() && V->getTypeSpec()->isNullSafe())
+        !V->isExternal() && V->getTypeSpec() &&
+        (isNullRef(V->getType()) ? V->getTypeSpec()->isNullSafe()
+                                 : V->getTypeSpec()->isNilPointers()))
       nullTrack(V, true, false); // nil until assigned
 }
 
@@ -613,7 +652,7 @@ void Checker::nullTrackBlock(Block &B){
 /// x passed for var or out parameter P: the callee may rely on it not
 /// being nil (var P: T), and leaves it as P's type says.
 void Checker::nullVarArg(Expr *Arg, VarDecl *P){
-  if (!NullSafeHere || !isNullRef(P->getType()))
+  if (!anyNullSafety() || !isNullTrackedType(P->getType()))
     return;
   if (!P->isOutParam() && declNonNull(P))
     requireNotNil(Arg, "but parameter '" + P->getName().Spelling.str() +

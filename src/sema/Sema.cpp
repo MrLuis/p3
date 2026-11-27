@@ -413,8 +413,10 @@ void Checker::finishBlock(Block &B, bool WarnUnused){
     if (auto *V = llvm::dyn_cast<VarDecl>(D); V && V->isOwned())
       ownedDeclare(V);
   bool SavedNullSafe = NullSafeHere;
+  bool SavedNilPointers = NilPointersHere;
   NullSafeHere = B.isNullSafe() && LangOpts.ObjKeywords;
-  if (NullSafeHere)
+  NilPointersHere = B.isNilPointers() && LangOpts.Mode != LangMode::ISO;
+  if (anyNullSafety())
     nullTrackBlock(B);
   std::vector<Decl *> *SavedInline = InlineVars;
   std::vector<Decl *> BlockInline;
@@ -424,6 +426,7 @@ void Checker::finishBlock(Block &B, bool WarnUnused){
     nullCheckEnd(B.getBody()->getRange().getEnd().getLocWithOffset(-3),
                  /*AtExit=*/false);
   NullSafeHere = SavedNullSafe;
+  NilPointersHere = SavedNilPointers;
   InlineVars = SavedInline;
   Flow = SavedFlow;
   if (!BlockInline.empty()) { // they are the block's too, after the others

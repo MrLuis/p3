@@ -79,6 +79,7 @@ type
     typeHelpers: boolean; { $modeswitch typehelpers }
     raceChecks: boolean; { $modeswitch racechecks (p3's own) }
     nullSafe: boolean; { $nullsafe on (p3's own, objfpc) }
+    nilPointers: boolean; { $nilpointers on (p3's own, tp/objfpc) }
     longStrings: boolean; { H+: string is an ansistring }
     { macros ($macro on, $define NAME := value, as in Free Pascal): upper-
       case name id -> PMacro; a use of NAME lexes its value (macroStack:
@@ -178,7 +179,8 @@ type
 
   PSavedSwitches = ^TSavedSwitches;
   TSavedSwitches = record
-    longStrings, corbaInterfaces, inlineOn, scopedEnums, nullSafe: boolean;
+    longStrings, corbaInterfaces, inlineOn, scopedEnums, nullSafe,
+      nilPointers: boolean;
     packRecords: longint;
     range, overflow, typedAddress, pointerMath: longint; { as TDirective.state }
   end;
@@ -1636,6 +1638,29 @@ begin
     lx.nullSafe := (arg = 'on') or (arg = '+');
     exit;
   end;
+  { $nilpointers on / off / + / - (p3's own, tp/objfpc): in the routines that
+    start after it, a plain pointer type is never nil (^T? / P? may be) }
+  if word = 'nilpointers' then
+  begin
+    arg := '';
+    while (b < e) and (length(arg) < 20) do
+    begin
+      arg := arg + lowerChar(at(lx, b));
+      b := b + 1;
+    end;
+    if (arg <> 'on') and (arg <> '+') and (arg <> 'off') and (arg <> '-') then
+    begin
+      diagWarning(locOf(lx, start), 'expected {$nilpointers on} or {$nilpointers off}; ignored');
+      exit;
+    end;
+    if lx.mode = lmISO then
+    begin
+      diagWarning(locOf(lx, start), '{$nilpointers} needs --mode=tp or --mode=objfpc; ignored');
+      exit;
+    end;
+    lx.nilPointers := (arg = 'on') or (arg = '+');
+    exit;
+  end;
   { $push / $pop: save and restore the local switches (at most 21 levels,
     as in FPC) }
   if (word = 'push') and (e = b) then
@@ -1651,6 +1676,7 @@ begin
     saved^.inlineOn := lx.inlineOn;
     saved^.scopedEnums := lx.scopedEnums;
     saved^.nullSafe := lx.nullSafe;
+    saved^.nilPointers := lx.nilPointers;
     saved^.packRecords := lx.packRecords;
     saved^.range := directiveStateAt(swRange, locOf(lx, start));
     saved^.overflow := directiveStateAt(swOverflow, locOf(lx, start));
@@ -1672,6 +1698,7 @@ begin
     lx.inlineOn := saved^.inlineOn;
     lx.scopedEnums := saved^.scopedEnums;
     lx.nullSafe := saved^.nullSafe;
+    lx.nilPointers := saved^.nilPointers;
     lx.packRecords := saved^.packRecords;
     addDirectiveState(lx, locOf(lx, start), swRange, saved^.range);
     addDirectiveState(lx, locOf(lx, start), swOverflow, saved^.overflow);
@@ -2790,11 +2817,12 @@ begin
       '[': k := tkLSquare;
       ']': k := tkRSquare;
       '^': k := tkCaret;
-      '?': { T?, x?.m, a ?? b (objfpc) }
-        if lx.mode = lmObjFPC then
+      '?': { T?, a ?? b (objfpc, or tp with $nilpointers), x?.m (objfpc) }
+        if (lx.mode = lmObjFPC) or lx.nilPointers then
         begin
           k := tkQuestion;
-          if (at(lx, lx.cur) = '.') and (at(lx, lx.cur + 1) <> '.') then
+          if (lx.mode = lmObjFPC) and (at(lx, lx.cur) = '.') and
+             (at(lx, lx.cur + 1) <> '.') then
           begin
             lx.cur := lx.cur + 1;
             k := tkQuestionPeriod;

@@ -2512,13 +2512,28 @@ const
   nwParam = 2;
   nwMember = 3;
   nwWith = 4;
+  nwDeref = 5;
+  nwIndex = 6;
+  nwDispose = 7;
+  nwPtrArith = 8;
 
 var
-  nullSafeHere: boolean;
+  nullSafeHere, nilPointersHere: boolean;
 
 function isNullRef(t: PType): boolean;
 begin
   isNullRef := (t <> nil) and (t^.kind in [tyClass, tyInterface, tyClassRef]);
+end;
+
+function anyNullSafety: boolean;
+begin
+  anyNullSafety := nullSafeHere or nilPointersHere;
+end;
+
+function isNullTrackedType(t: PType): boolean;
+begin
+  isNullTrackedType := (nullSafeHere and isNullRef(t)) or
+                       (nilPointersHere and (t <> nil) and (t^.kind = tyPointer));
 end;
 
 { The type written for d (a variable, field, property or function's
@@ -2543,14 +2558,24 @@ begin
   declNullable := (ts <> nil) and ts^.tsNullable;
 end;
 
+function nullTypeOf(d: PDecl): PType; forward;
+
 { Is d a reference that must not be given nil (written without ? in
   null-safe code; not a lambda's result, whose type is not written)? }
 function declNonNull(d: PDecl): boolean;
 var
   ts: PTypeSpec;
+  t: PType;
 begin
   ts := nullSpec(d);
-  declNonNull := (ts <> nil) and ts^.tsNullSafe and not ts^.tsNullable;
+  t := nullTypeOf(d);
+  if (ts = nil) or ts^.tsNullable then
+    exit(false);
+  if isNullRef(t) then
+    exit(ts^.tsNullSafe);
+  if (t <> nil) and (t^.kind = tyPointer) then
+    exit(ts^.tsNilPointers);
+  declNonNull := false;
 end;
 
 function nullTypeOf(d: PDecl): PType;
@@ -2590,6 +2615,7 @@ begin
     flow^.s.valid := flow^.s.valid or bit
   else
     flow^.s.valid := flow^.s.valid and not bit;
+  flow^.moveLoc[i] := 0;
   ownedChanged(i);
 end;
 
@@ -2722,7 +2748,9 @@ begin
   t := e^.typ;
   if (t <> nil) and (t^.kind = tyNil) then
     exit(nnIsNil);
-  if not isNullRef(t) then
+  if e^.kind = nkAddrOf then
+    exit(nnNotNil);
+  if not isNullTrackedType(t) then
     exit(nnNotNil);
   i := nullIndexOf(e);
   if i >= 0 then
@@ -2748,11 +2776,18 @@ begin
   end;
   if (e^.kind = nkBinary) and (e^.bop = boAs) then
     exit(nilness(e^.lhs));
-  d := nullDeclOf(e);
   if e^.kind = nkCall then
+  begin
+    if (e^.callDecl <> nil) and (e^.callDecl^.kind = dkType) and (e^.args.count = 1) then
+      exit(nilness(PNode(listGet(e^.args, 0))));
     d := e^.callDecl;
-  if (e^.kind = nkIndirectCall) and (e^.calleeExpr^.kind = nkField) then
-    d := e^.calleeExpr^.fieldDecl;
+  end
+  else
+  begin
+    d := nullDeclOf(e);
+    if (e^.kind = nkIndirectCall) and (e^.calleeExpr^.kind = nkField) then
+      d := e^.calleeExpr^.fieldDecl;
+  end;
   if (d <> nil) and declNullable(d) then
     nilness := nnMaybeNil
   else
@@ -2777,6 +2812,11 @@ begin
   end
   else if e^.kind = nkCall then
   begin
+    if (e^.callDecl <> nil) and (e^.callDecl^.kind = dkType) and (e^.args.count = 1) then
+    begin
+      maNullDesc(PNode(listGet(e^.args, 0)));
+      exit;
+    end;
     ma('the result of ''');
     maN(e^.callee.spelling);
     ma('''');
@@ -2833,6 +2873,15 @@ begin
         ma(''' is used');
       end;
     nwWith: ma('its members are used in ''with''');
+    nwDeref: ma('it is dereferenced with ''^''');
+    nwIndex: ma('it is indexed');
+    nwDispose:
+      begin
+        ma('it is passed to ''');
+        maN(name);
+        ma('''');
+      end;
+    nwPtrArith: ma('pointer arithmetic is performed on it');
   end;
 end;
 
@@ -2872,7 +2921,7 @@ var
   d: PDecl;
   unassigned, isNil: boolean;
 begin
-  if not nullSafeHere or (e^.typ = nil) or isError(e^.typ) then
+  if not anyNullSafety or (e^.typ = nil) or isError(e^.typ) then
     exit;
   x := stripParens(e);
   if x^.typ^.kind = tyNil then
@@ -2888,13 +2937,13 @@ begin
     errR(x^.b, nodeRange(x));
     exit;
   end;
-  if not isNullRef(x^.typ) then
+  if not isNullTrackedType(x^.typ) then
     exit;
   i := nullIndexOf(x);
   if i >= 0 then
   begin
     d := flow^.vars[i];
-    unassigned := not declNullable(d) and
+    unassigned := not declNullable(d) and (flow^.moveLoc[i] = 0) and
                   not ((d^.kind = dkVar) and (d^.varKind in [vkValueParam, vkVarParam,
                        vkConstParam]) and (d^.varSpec = nil));
     isNil := (flow^.s.valid and (int64(1) shl i)) = 0;
@@ -2922,8 +2971,22 @@ begin
     errR(x^.b, nodeRange(x));
     exit;
   end;
-  if nilness(x) = nnNotNil then
+  i := nilness(x);
+  if i = nnNotNil then
     exit;
+  if i = nnIsNil then
+  begin
+    ms('nil cannot be used here: ');
+    maNullWhy(why, name, t, false);
+    if nullHasAlt(why) then
+    begin
+      ma(' (');
+      maNullAlt(why, name, t, false);
+      ma(' if it may be nil)');
+    end;
+    errR(x^.b, nodeRange(x));
+    exit;
+  end;
   ms('');
   maNullDesc(x);
   ma(' may be nil here, ');
@@ -2941,12 +3004,12 @@ var
   tt: PType;
   i, n: longint;
 begin
-  if not nullSafeHere or (td = nil) then
+  if not anyNullSafety or (td = nil) then
     exit;
   if (value^.typ = nil) or isError(value^.typ) then
     exit;
   tt := nullTypeOf(td);
-  if not isNullRef(tt) then
+  if not isNullTrackedType(tt) then
     exit;
   if declNonNull(td) then
     requireNotNil(value, nwAssign, td^.ident.spelling, tt);
@@ -3063,7 +3126,7 @@ procedure nullVarArg(arg: PNode; p: PDecl);
 var
   i: longint;
 begin
-  if not nullSafeHere or not isNullRef(p^.varType) then
+  if not anyNullSafety or not isNullTrackedType(p^.varType) then
     exit;
   if not p^.isOut and declNonNull(p) then
     requireNotNil(arg, nwParam, p^.ident.spelling, p^.varType);
@@ -3077,7 +3140,7 @@ var
   facts: TPtrList;
   i: longint;
 begin
-  if not nullSafeHere or (flow = nil) then
+  if not anyNullSafety or (flow = nil) then
     exit;
   listInit(facts);
   nullFacts(c, whenTrue, facts);
@@ -4353,9 +4416,13 @@ begin
   t := buildType(ts);
   if ts^.tsNullable and not isError(t) then { T? }
   begin
-    if not isNullRef(t) then
+    if not isNullRef(t) and
+       not ((t^.kind = tyPointer) and (ts^.tsNilPointers or nilPointersHere)) then
     begin
-      ms('''?'' makes a class, interface or class-reference type nullable; ');
+      if ts^.tsNilPointers or nilPointersHere then
+        ms('''?'' makes a class, interface, class-reference or pointer type nullable; ')
+      else
+        ms('''?'' makes a class, interface or class-reference type nullable; ');
       maT(t);
       ma(' is not one');
       errR(ts^.b, specRange(ts));
@@ -4364,7 +4431,14 @@ begin
     else if declName <> nil then
     begin
       ms('a nullable type cannot be given a name; write ''');
-      bufAddTypeName(msg, t);
+      if (ts^.kind = tsPointer) and (t^.kind = tyPointer) and
+         not t^.untyped and (t^.pointee = nil) then
+      begin
+        ma('^');
+        maN(ts^.tname.spelling);
+      end
+      else
+        bufAddTypeName(msg, t);
       ma('?'' where it is used');
       errR(ts^.b, specRange(ts));
       t := errorType;
@@ -10728,7 +10802,7 @@ var
   t: PType;
   isResult: boolean;
 begin
-  if not nullSafeHere or (flow = nil) or not ownedLive(flow^.s) or (curRoutine = nil) then
+  if not anyNullSafety or (flow = nil) or not ownedLive(flow^.s) or (curRoutine = nil) then
     exit;
   for i := 0 to flow^.n - 1 do
   begin
@@ -10787,11 +10861,11 @@ begin
     for i := 0 to r^.params.count - 1 do
     begin
       p := PDecl(listGet(r^.params, i));
-      if isNullRef(p^.varType) and declNullable(p) then
+      if isNullTrackedType(p^.varType) and declNullable(p) then
         nullTrack(p, true, true);
     end;
     res := r^.resultVar;
-    if (res <> nil) and isNullRef(res^.varType) and not r^.isLambda and
+    if (res <> nil) and isNullTrackedType(res^.varType) and not r^.isLambda and
        (declNonNull(res) or declNullable(res)) then
       nullTrack(res, true, false); { (nil until assigned) }
     if r^.methodKind = mtConstructor then
@@ -10801,7 +10875,7 @@ begin
         for i := 0 to c^.classMembers.count - 1 do
         begin
           m := PDecl(listGet(c^.classMembers, i));
-          if (m^.kind = dkField) and isNullRef(m^.fieldType) and declNonNull(m) then
+          if (m^.kind = dkField) and isNullTrackedType(m^.fieldType) and declNonNull(m) then
             nullTrack(m, true, false);
         end;
     end;
@@ -10809,10 +10883,11 @@ begin
   for i := 0 to b^.decls.count - 1 do
   begin
     v := PDecl(listGet(b^.decls, i));
-    if (v^.kind = dkVar) and (v^.varKind = vkVariable) and isNullRef(v^.varType) and
+    if (v^.kind = dkVar) and (v^.varKind = vkVariable) and isNullTrackedType(v^.varType) and
        not ((v^.init <> nil) and not v^.isInitVar) and not v^.isClassVar and
        (v^.absTarget = nil) and not v^.varExternal and (v^.varSpec <> nil) and
-       v^.varSpec^.tsNullSafe then
+       ((isNullRef(v^.varType) and v^.varSpec^.tsNullSafe) or
+        ((v^.varType^.kind = tyPointer) and v^.varSpec^.tsNilPointers)) then
       nullTrack(v, true, false); { nil until assigned }
   end;
 end;
@@ -10826,7 +10901,7 @@ var
   blockFlow: TOwnedFlow;
   savedInline: PPtrList;
   blockInline: TPtrList;
-  savedNullSafe: boolean;
+  savedNullSafe, savedNilPointers: boolean;
 begin
   { ISO 7185 6.1.4: every forward declaration needs a definition in the
     same block }
@@ -10866,8 +10941,10 @@ begin
       ownedDeclare(d);
   end;
   savedNullSafe := nullSafeHere;
+  savedNilPointers := nilPointersHere;
   nullSafeHere := b^.nullSafe and (mode = lmObjFPC);
-  if nullSafeHere then
+  nilPointersHere := b^.nilPointers and (mode <> lmISO);
+  if anyNullSafety then
     nullTrackBlock(b);
   savedInline := inlineVars;
   listInit(blockInline);
@@ -10876,6 +10953,7 @@ begin
   if (curRoutine <> nil) and (curRoutine^.body = b) then
     nullCheckEnd(b^.body^.e - 3, false);
   nullSafeHere := savedNullSafe;
+  nilPointersHere := savedNilPointers;
   inlineVars := savedInline;
   flow := savedFlow;
   { they are the block's too, after the others }
@@ -12488,7 +12566,7 @@ begin
          ((arg^.convOp = nil) or arg^.convSuspended) and
          isConstRefAddressable(arg) then
         arg^.constRefAddr := true; { its address (else a temporary's) }
-      if nullSafeHere and isNullRef(pt) and declNonNull(p) then
+      if isNullTrackedType(pt) and declNonNull(p) then
         requireNotNil(arg, nwParam, p^.ident.spelling, pt);
     end;
   end;
@@ -12630,6 +12708,7 @@ begin
   handlerDepth := 0;
   finallyLoopDepth := -1;
   nullSafeHere := false;
+  nilPointersHere := false;
   listInit(pendingInterfaces);
   mapInit(classRefs);
   addrOfTarget := nil;

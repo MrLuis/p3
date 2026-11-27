@@ -1269,8 +1269,9 @@ private:
   const TypeSpecKind Kind;
   SourceRange Range;
   Type *Resolved = nullptr; ///< set by Sema (shared by `a, b: T`)
-  bool Nullable = false;    ///< T? (objfpc): a reference that may be nil
+  bool Nullable = false;    ///< T? (objfpc / nilpointers): may be nil
   bool NullSafe = false;    ///< written where {$nullsafe on}
+  bool NilPointers = false; ///< written where {$nilpointers on}
 
 protected:
   TypeSpec(TypeSpecKind K, SourceRange R) : Kind(K), Range(R) {}
@@ -1284,6 +1285,8 @@ public:
   bool isNullable() const { return Nullable; }
   bool isNullSafe() const { return NullSafe; }
   void setNullSafe() { NullSafe = true; }
+  bool isNilPointers() const { return NilPointers; }
+  void setNilPointers() { NilPointers = true; }
   void setNullable(SourceLocation End) {
     Nullable = true;
     Range = SourceRange(Range.getBegin(), End);
@@ -2437,12 +2440,15 @@ class Block {
   llvm::ArrayRef<Decl *> Decls;
   CompoundStmt *Body;
   bool NullSafe = false; ///< {$nullsafe on} where its statements start
+  bool NilPointers = false; ///< {$nilpointers on} where its statements start
 
 public:
   Block(llvm::ArrayRef<Decl *> Decls, CompoundStmt *Body)
       : Decls(Decls), Body(Body) {}
   bool isNullSafe() const { return NullSafe; }
   void setNullSafe(bool B) { NullSafe = B; }
+  bool isNilPointers() const { return NilPointers; }
+  void setNilPointers(bool B) { NilPointers = B; }
   llvm::ArrayRef<Decl *> getDecls() const { return Decls; }
   /// Sema adds the specializations of generic routines a module uses.
   void setDecls(llvm::ArrayRef<Decl *> D) { Decls = D; }

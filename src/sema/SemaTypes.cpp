@@ -747,16 +747,28 @@ Type *Checker::resolveType(TypeSpec *TS, llvm::StringRef DeclName){
     return T;
   Type *T = buildType(TS);
   if (TS->isNullable() && !T->isError()) { // T?
-    if (!isNullRef(T)) {
+    bool PointerOK =
+        T->isPointer() && (TS->isNilPointers() || NilPointersHere);
+    if (!isNullRef(T) && !PointerOK) {
       Diags.error(TS->getBeginLoc(),
-                  "'?' makes a class, interface or class-reference type "
-                  "nullable; " + quoted(T) + " is not one",
+                  TS->isNilPointers() || NilPointersHere
+                      ? "'?' makes a class, interface, class-reference or "
+                        "pointer type nullable; " +
+                            quoted(T) + " is not one"
+                      : "'?' makes a class, interface or class-reference type "
+                        "nullable; " +
+                            quoted(T) + " is not one",
                   {TS->getRange()});
       T = errorType();
     } else if (!DeclName.empty()) {
+      std::string TypeName = T->getName();
+      if (auto *PS = llvm::dyn_cast<PointerTypeSpec>(TS))
+        if (auto *P = llvm::dyn_cast<PointerType>(T);
+            P && !P->isUntyped() && !P->getPointee())
+          TypeName = "^" + PS->getTarget().Spelling.str();
       Diags.error(TS->getBeginLoc(),
                   "a nullable type cannot be given a name; write " +
-                      ("'" + T->getName() + "?'") + " where it is used",
+                      ("'" + TypeName + "?'") + " where it is used",
                   {TS->getRange()});
       T = errorType();
     }

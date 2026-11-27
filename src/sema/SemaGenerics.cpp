@@ -2461,7 +2461,7 @@ void Checker::checkCallArgs(llvm::ArrayRef<VarDecl *> Params, Decl *CalleeDecl,
       if (P->isConstRefParam() && AT == PT && !Arg->getConversion() &&
           isConstRefAddressable(Arg))
         Arg->setConstRefAddress(); // its address (else a temporary's)
-      if (NullSafeHere && isNullRef(PT) && declNonNull(P))
+      if (isNullTrackedType(PT) && declNonNull(P))
         requireNotNil(Arg, "but parameter '" + PName.Spelling.str() +
                                "' is of the non-null type " + quoted(PT));
     }

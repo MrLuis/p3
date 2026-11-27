@@ -701,7 +701,9 @@ begin
     begin
       ms('pointer arithmetic is disabled under {$pointermath off}');
       errR(s^.callee.loc, nodeRange(s));
-    end;
+    end
+    else if (t^.kind = tyPointer) and nilPointersHere then
+      requireNotNil(a0, nwPtrArith, nil, nil);
   end;
   if s^.args.count = 2 then
   begin
@@ -752,7 +754,24 @@ begin
       errR(arg^.b, nodeRange(arg));
     end
     else if isNew then
-      checkModifiable(arg);
+    begin
+      if checkModifiable(arg) and nilPointersHere then
+      begin
+        i := nullIndexOf(arg);
+        if i >= 0 then
+          nullSet(i, false, true);
+      end;
+    end
+    else if nilPointersHere then
+    begin
+      requireNotNil(arg, nwDispose, s^.callee.spelling, nil);
+      i := nullIndexOf(arg);
+      if i >= 0 then
+      begin
+        nullSet(i, true, false);
+        flow^.moveLoc[i] := arg^.b;
+      end;
+    end;
   end;
   for i := 1 to s^.args.count - 1 do
     evaluateConstant(PNode(listGet(s^.args, i)), 'variant selector', c);
@@ -800,10 +819,11 @@ end;
 
 procedure checkMemoryProc(s: PNode; k: TBuiltinKind);
 var
-  want, i: longint;
+  want, i, idx: longint;
   t: array[0..2] of PType;
   a: array[0..2] of PNode;
   ht: PType;
+  c: TConstant;
 
   procedure expectArg(n: longint; ok: boolean; const what: string);
   begin
@@ -871,11 +891,43 @@ begin
         expectArg(0, (t[0]^.kind = tyPointer) and isVariableReference(a[0]),
                   'a pointer variable');
         expectArg(1, isIntegerLike(t[1]), 'an integer size');
-        if (t[0]^.kind = tyPointer) and isVariableReference(a[0]) then
-          checkModifiable(a[0]);
+        if (t[0]^.kind = tyPointer) and isVariableReference(a[0]) and
+           checkModifiable(a[0]) and nilPointersHere then
+        begin
+          idx := nullIndexOf(a[0]);
+          if idx >= 0 then
+          begin
+            if k = bkGetMem then
+              nullSet(idx, false, true)
+            else if fold(a[1], c) and (c.value.kind = ckOrdinal) then
+            begin
+              if c.value.intVal > 0 then
+                nullSet(idx, false, true)
+              else
+              begin
+                nullSet(idx, true, false);
+                flow^.moveLoc[idx] := a[0]^.b;
+              end;
+            end
+            else
+              nullSet(idx, true, true);
+          end;
+        end;
       end;
     bkFreeMem:
-      expectArg(0, t[0]^.kind = tyPointer, 'a pointer');
+      begin
+        expectArg(0, t[0]^.kind = tyPointer, 'a pointer');
+        if (t[0]^.kind = tyPointer) and nilPointersHere then
+        begin
+          requireNotNil(a[0], nwDispose, s^.callee.spelling, nil);
+          idx := nullIndexOf(a[0]);
+          if idx >= 0 then
+          begin
+            nullSet(idx, true, false);
+            flow^.moveLoc[idx] := a[0]^.b;
+          end;
+        end;
+      end;
     bkFillChar:
       begin
         expectArg(0, isVariableReference(a[0]) and not containsFile(t[0]), 'a variable');
@@ -3295,7 +3347,7 @@ begin
           if ownedVarOf(a0) <> nil then
             diagOwnedEscape(ownedVarOf(a0), a0, true);
           checkLambdaEscape(a0, false);
-          if nullSafeHere and not isError(t) and (curRoutine^.resultVar <> nil) then
+          if anyNullSafety and not isError(t) and (curRoutine^.resultVar <> nil) then
           begin
             nullAssign(nil, curRoutine^.resultVar, a0);
             nullCheckEnd(s^.callee.loc, true);
@@ -4138,7 +4190,7 @@ begin
     maT(valueTy);
     errRR(s^.assignLoc, nodeRange(target), nodeRange(s^.value));
   end
-  else if nullSafeHere then
+  else if anyNullSafety then
   begin
     d := nullDeclOf(target);
     if (d <> nil) and (d^.kind = dkRoutine) then { F := v }
@@ -4329,7 +4381,7 @@ begin
       listAdd(inlineVars^, v);
     if v^.isOwned then
       ownedDeclare(v);
-    if nullSafeHere and isNullRef(t) then { (nil until assigned) }
+    if isNullTrackedType(t) then { (nil until assigned) }
       nullTrack(v, true, false);
   end;
   if init = nil then
@@ -5833,7 +5885,7 @@ begin
   begin
     l := check(e^.lhs);
     { a and b: b is evaluated where a holds (a or b: where it does not) }
-    logic := (e^.bop in [boAnd, boOr]) and nullSafeHere and (l^.kind = tyBoolean);
+    logic := (e^.bop in [boAnd, boOr]) and anyNullSafety and (l^.kind = tyBoolean);
     if logic then
     begin
       ownedGet(beforeRHS);
@@ -5921,6 +5973,8 @@ begin
         errRR(e^.opLoc, nodeRange(e^.lhs), nodeRange(e^.rhs));
         exit(errorType);
       end;
+      if nilPointersHere then
+        requireNotNil(e^.lhs, nwPtrArith, nil, nil);
       exit(l);
     end;
     if (op = boAdd) and isIntegerLike(l) and (r^.kind = tyPointer) then
@@ -5931,6 +5985,8 @@ begin
         errRR(e^.opLoc, nodeRange(e^.lhs), nodeRange(e^.rhs));
         exit(errorType);
       end;
+      if nilPointersHere then
+        requireNotNil(e^.rhs, nwPtrArith, nil, nil);
       exit(r);
     end;
     if (l^.kind = tyPointer) and (r^.kind = tyPointer) and areCompatible(l, r) then
@@ -6432,6 +6488,8 @@ begin
       errR(e^.index^.b, nodeRange(e^.index));
       exit;
     end;
+    if nilPointersHere then
+      requireNotNil(e^.base, nwIndex, nil, nil);
     exit(bt^.pointee);
   end;
   if bt^.kind = tyVector then
@@ -6818,6 +6876,8 @@ begin
       errR(e^.inner^.b, nodeRange(e^.inner));
       exit;
     end;
+    if nilPointersHere then
+      requireNotNil(e^.inner, nwDeref, nil, nil);
     if t^.pointee <> nil then
       visitDeref := t^.pointee;
     exit;

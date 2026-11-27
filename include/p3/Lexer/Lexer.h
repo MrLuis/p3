@@ -51,6 +51,7 @@ class Lexer {
   bool TypeHelpers = false;     ///< {$modeswitch typehelpers}
   bool RaceChecks = false;      ///< {$modeswitch racechecks} (p3's own)
   bool NullSafe = false;        ///< {$nullsafe on} (p3's own, objfpc)
+  bool NilPointers = false;     ///< {$nilpointers on} (p3's own, tp/objfpc)
   bool ScopedEnums = false;     ///< {$scopedenums on}
   /// {$packrecords N} / {$align N} / {$aN}: the largest alignment of the
   /// fields of the records declared after it (1, 2, 4, 8, 16 or 32); 0: the
@@ -59,7 +60,8 @@ class Lexer {
   /// {$push}: the local switches saved, innermost last ({$pop} restores
   /// them), as in Free Pascal (mode switches and {$macro} are not local).
   struct SavedSwitches {
-    bool LongStrings, CorbaInterfaces, InlineOn, ScopedEnums, NullSafe;
+    bool LongStrings, CorbaInterfaces, InlineOn, ScopedEnums, NullSafe,
+         NilPointers;
     unsigned PackRecords;
     CheckDirectives::State Range, Overflow, TypedAddress, PointerMath;
   };
@@ -179,6 +181,8 @@ public:
   bool raceChecks() const { return RaceChecks; }
   /// Are the routines that start here null-safe ({$nullsafe on})?
   bool nullSafe() const { return NullSafe; }
+  /// Are pointers nil-checked here ({$nilpointers on})?
+  bool nilPointers() const { return NilPointers; }
   /// Are the values of enumerations declared here reached only through
   /// their type ({$scopedenums on})?
   bool scopedEnums() const { return ScopedEnums; }

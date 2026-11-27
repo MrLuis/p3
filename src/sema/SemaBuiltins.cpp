@@ -515,6 +515,8 @@ void Checker::checkIncDec(ProcCallStmt *S){
       Diags.error(Callee.Loc,
                   "pointer arithmetic is disabled under {$pointermath off}",
                   {S->getRange()});
+    else if (T->isPointer() && NilPointersHere)
+      requireNotNil(Args[0], "but pointer arithmetic is performed on it");
   }
   if (Args.size() == 2) {
     Type *N = check(Args[1]);
@@ -545,8 +547,17 @@ void Checker::checkNewDispose(ProcCallStmt *S, bool IsNew){
     else if (IsNew && !isVariableReference(Arg))
       Diags.error(Arg->getBeginLoc(), "argument to 'new' must be a variable",
                   {Arg->getRange()});
-    else if (IsNew)
-      checkModifiable(Arg);
+    else if (IsNew) {
+      if (checkModifiable(Arg) && NilPointersHere)
+        if (int I = nullIndexOf(Arg); I >= 0)
+          nullSet(static_cast<unsigned>(I), false, true);
+    } else if (NilPointersHere) {
+      requireNotNil(Arg, "but it is passed to '" + Callee.Spelling.str() + "'");
+      if (int I = nullIndexOf(Arg); I >= 0) {
+        nullSet(static_cast<unsigned>(I), true, false);
+        Flow->MoveLoc[I] = Arg->getBeginLoc();
+      }
+    }
   }
   for (Expr *Tag : S->getArgs().drop_front())
     evaluateConstant(Tag, "variant selector");
@@ -1141,11 +1152,34 @@ void Checker::checkMemoryProc(ProcCallStmt *S, BuiltinKind K){
     Expect(Args[0], T[0]->isPointer() && isVariableReference(Args[0]),
            "a pointer variable");
     Expect(Args[1], T[1]->isIntegerLike(), "an integer size");
-    if (T[0]->isPointer() && isVariableReference(Args[0]))
-      checkModifiable(Args[0]);
+    if (T[0]->isPointer() && isVariableReference(Args[0]) &&
+        checkModifiable(Args[0]) && NilPointersHere)
+      if (int I = nullIndexOf(Args[0]); I >= 0) {
+        if (K == BuiltinKind::GetMem) {
+          nullSet(static_cast<unsigned>(I), false, true);
+        } else if (auto C = fold(Args[1]);
+                   C && C->Value.K == ConstValue::Ordinal) {
+          if (C->Value.Int > 0)
+            nullSet(static_cast<unsigned>(I), false, true);
+          else {
+            nullSet(static_cast<unsigned>(I), true, false);
+            Flow->MoveLoc[I] = Args[0]->getBeginLoc();
+          }
+        } else {
+          nullSet(static_cast<unsigned>(I), true, true);
+        }
+      }
     return;
   case BuiltinKind::FreeMem:
     Expect(Args[0], T[0]->isPointer(), "a pointer");
+    if (T[0]->isPointer() && NilPointersHere) {
+      requireNotNil(Args[0],
+                    "but it is passed to '" + Callee.Spelling.str() + "'");
+      if (int I = nullIndexOf(Args[0]); I >= 0) {
+        nullSet(static_cast<unsigned>(I), true, false);
+        Flow->MoveLoc[I] = Args[0]->getBeginLoc();
+      }
+    }
     return;
   case BuiltinKind::FillChar:
     Expect(Args[0], isVariableReference(Args[0]) && !containsFile(T[0]),

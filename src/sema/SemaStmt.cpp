@@ -307,7 +307,7 @@ void Checker::visitVarDeclStmt(VarDeclStmt *S){
       InlineVars->push_back(V);
     if (V->isOwned())
       ownedDeclare(V);
-    if (NullSafeHere && isNullRef(T)) // (nil until assigned)
+    if (isNullTrackedType(T)) // (nil until assigned)
       nullTrack(V, true, false);
   }
   if (!Init)
@@ -576,7 +576,7 @@ void Checker::visitProcCallStmt(ProcCallStmt *S){
       if (VarDecl *OV = ownedVarOf(Args[0]))
         diagOwnedEscape(OV, Args[0], /*Returned=*/true);
       checkLambdaEscape(Args[0], /*Local=*/false);
-      if (NullSafeHere && !T->isError())
+      if (anyNullSafety() && !T->isError())
         if (VarDecl *Res = CurRoutine->getResultVar()) {
           nullAssign(nullptr, Res, Args[0]);
           nullCheckEnd(Callee.Loc, /*AtExit=*/true);
@@ -983,7 +983,7 @@ void Checker::finishAssign(AssignStmt *S, Type *TargetTy, Type *ValueTy){
                 "assigning to " + quoted(TargetTy) +
                     " from incompatible type " + quoted(ValueTy),
                 {Target->getRange(), S->getValue()->getRange()});
-  else if (NullSafeHere) {
+  else if (anyNullSafety()) {
     Decl *TD = nullDeclOf(Target);
     if (auto *R = llvm::dyn_cast_or_null<RoutineDecl>(TD)) // F := v
       TD = R->getResultVar();

@@ -280,7 +280,10 @@ class Checker : public StmtVisitor<Checker>,
   // variables' flow (OwnedFlow), with Valid "may be non-nil" and Moved "may
   // be nil".
   bool NullSafeHere = false;
+  bool NilPointersHere = false;
 
+  bool anyNullSafety() const { return NullSafeHere || NilPointersHere; }
+  bool isNullTrackedType(Type *T) const;
   static bool isNullRef(Type *T);
 
   /// The type written for D (a variable, field, property or function's

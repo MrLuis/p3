@@ -267,15 +267,38 @@ void Lexer::handleDirective(const char *Start, llvm::StringRef Text) {
     return;
   }
 
+  // {$nilpointers on|off|+|-} (p3's own, tp/objfpc): in the routines that
+  // start after it, a plain pointer type is never nil (^T? / P? may be).
+  if (Word.equals_insensitive("nilpointers")) {
+    llvm::StringRef A = Arg.trim();
+    bool On;
+    if (A.equals_insensitive("on") || A == "+")
+      On = true;
+    else if (A.equals_insensitive("off") || A == "-")
+      On = false;
+    else {
+      Diags.warning(locOf(Start),
+                    "expected {$nilpointers on} or {$nilpointers off}; ignored");
+      return;
+    }
+    if (LangOpts.Mode == LangMode::ISO) {
+      Diags.warning(locOf(Start),
+                    "{$nilpointers} needs --mode=tp or --mode=objfpc; ignored");
+      return;
+    }
+    NilPointers = On;
+    return;
+  }
+
   if (Word.equals_insensitive("push") && Arg.empty()) {
     if (SwitchStack.size() >= 21) {
       Diags.error(locOf(Start), "too many levels of {$push} (at most 21)");
       return;
     }
     SavedSwitches S{LongStrings, CorbaInterfaces, InlineOn, ScopedEnums,
-                    NullSafe, PackRecords, CheckDirectives::Default,
+                    NullSafe, NilPointers, PackRecords,
                     CheckDirectives::Default, CheckDirectives::Default,
-                    CheckDirectives::Default};
+                    CheckDirectives::Default, CheckDirectives::Default};
     if (Directives) {
       S.Range = Directives->stateAt(CheckDirectives::Range, locOf(Start));
       S.Overflow = Directives->stateAt(CheckDirectives::Overflow, locOf(Start));
@@ -298,6 +321,7 @@ void Lexer::handleDirective(const char *Start, llvm::StringRef Text) {
     InlineOn = S.InlineOn;
     ScopedEnums = S.ScopedEnums;
     NullSafe = S.NullSafe;
+    NilPointers = S.NilPointers;
     PackRecords = S.PackRecords;
     if (Directives) {
       Directives->addState(locOf(Start), BufBegin, BufEnd,
@@ -1492,11 +1516,11 @@ void Lexer::lex(Token &T) {
     case '[': K = tok::l_square; break;
     case ']': K = tok::r_square; break;
     case '^': K = tok::caret; break;
-    case '?': // T?, x?.m, a ?? b (objfpc)
-      if (!LangOpts.ObjKeywords)
+    case '?': // T?, a ?? b (objfpc, or tp with {$nilpointers}), x?.m (objfpc)
+      if (!LangOpts.ObjKeywords && !NilPointers)
         break;
       K = tok::question;
-      if (*Cur == '.' && Cur[1] != '.') { ++Cur; K = tok::question_period; }
+      if (LangOpts.ObjKeywords && *Cur == '.' && Cur[1] != '.') { ++Cur; K = tok::question_period; }
       else if (*Cur == '?') { ++Cur; K = tok::question_question; }
       break;
     case '@':

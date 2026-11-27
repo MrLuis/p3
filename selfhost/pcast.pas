@@ -421,8 +421,8 @@ type
     kind: TTypeSpecKind;
     b, e: TLoc;
     resolved: PType; { Sema }
-    { T? (objfpc): a reference that may be nil; written where $nullsafe on }
-    tsNullable, tsNullSafe: boolean;
+    { T? (objfpc / nilpointers): may be nil }
+    tsNullable, tsNullSafe, tsNilPointers: boolean;
     case TTypeSpecKind of
       { named: the type name; pointer: the pointee's name; class ref
         (objfpc): class of tname }
@@ -508,6 +508,7 @@ type
     decls: TPtrList; { of PDecl, in source order }
     body: PNode;     { nkCompound }
     nullSafe: boolean; { $nullsafe on where its statements start }
+    nilPointers: boolean; { $nilpointers on where its statements start }
   end;
 
   TDeclKind = (dkProgram, dkVar, dkConst, dkType, dkField, dkRoutine,

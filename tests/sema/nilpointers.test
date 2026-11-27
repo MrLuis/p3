@@ -1,0 +1,31 @@
+; Null-safe pointers ({$nilpointers on|off}): tp and objfpc flow checks,
+; ^T? nullable pointers, orthogonality with {$nullsafe}, and mode warnings.
+; RUN: not %p3 --mode=tp -c %S/Inputs/nilpointers/tpflow.pas -o %t.o 2>&1 | FileCheck %s --check-prefix=TP
+; TP: tpflow.pas:13:10: error: a nullable type cannot be given a name; write '^integer?' where it is used
+; TP: tpflow.pas:14:23: error: '?' makes a class, interface, class-reference or pointer type nullable; 'integer' is not one
+; TP: tpflow.pas:20:1: error: function 'BadReturn' may return nil: its result of the non-null type 'PInt' may not be assigned (assign it on every path, or declare it 'PInt?')
+; TP: tpflow.pas:30:8: error: nil cannot be used here: 'p' is of the non-null type '^integer' (declare 'p' as '^integer?' if it may be nil)
+; TP: tpflow.pas:31:9: error: nil cannot be used here: 'np' is of the non-null type 'PInt' (declare 'np' as 'PInt?' if it may be nil)
+; TP: tpflow.pas:34:11: error: 'q' may be nil here, but it is dereferenced with '^'; check it first (if q <> nil then ...)
+; TP: tpflow.pas:35:11: error: 'q' may be nil here, but it is indexed; check it first (if q <> nil then ...)
+; TP: tpflow.pas:40:8: error: 'q' may be nil here, but pointer arithmetic is performed on it; check it first (if q <> nil then ...)
+; TP: tpflow.pas:41:7: error: 'q2' may be nil here, but pointer arithmetic is performed on it; check it first (if q2 <> nil then ...)
+; TP: tpflow.pas:42:11: error: 'q3' may be nil here, but it is passed to 'dispose'; check it first (if q3 <> nil then ...)
+; TP: tpflow.pas:46:11: error: 'q' is nil here, but it is dereferenced with '^'
+; TP: tpflow.pas:49:11: error: 'up' is nil here, but it is passed to 'freemem'
+; TP: tpflow.pas:53:11: error: 'up' is nil here, but it is passed to 'freemem'
+; TP: tpflow.pas:60:11: error: 'np' may not have been assigned yet (a reference of a non-null type must be assigned before it is used)
+; TP: tpflow.pas:78:8: error: nil cannot be used here: 'p' is of the non-null type '^integer' (declare 'p' as '^integer?' if it may be nil)
+; RUN: not %p3 --mode=objfpc -c %S/Inputs/nilpointers/objfpcflow.pas -o %t.o 2>&1 | FileCheck %s --check-prefix=OBJ
+; OBJ: objfpcflow.pas:24:9: error: 'p' may be nil here, but 'np' is of the non-null type 'PInt'; check it first (if p <> nil then ...), or declare 'np' as 'PInt?'
+; OBJ: objfpcflow.pas:35:8: error: nil cannot be used here: 'b' is of the non-null type 'TBox' (declare 'b' as 'TBox?' if it may be nil)
+; OBJ: objfpcflow.pas:46:9: error: 'p' may be nil here, but 'np' is of the non-null type 'PInt'; check it first (if p <> nil then ...), or declare 'np' as 'PInt?'
+; OBJ: objfpcflow.pas:47:9: error: 'b' may be nil here, but 'nb' is of the non-null type 'TBox'; check it first (if b <> nil then ...), or declare 'nb' as 'TBox?'
+; RUN: %p3 --mode=objfpc -c %S/Inputs/nilpointers/switch.pas -o %t.o 2>&1 | FileCheck %s --check-prefix=SW
+; SW: switch.pas:2:1: warning: expected {$nilpointers on} or {$nilpointers off}; ignored
+; RUN: %p3 --mode=iso -c %S/Inputs/nilpointers/iso.pas -o %t.o 2>&1 | FileCheck %s --check-prefix=ISO
+; ISO: iso.pas:2:1: warning: {$nilpointers} needs --mode=tp or --mode=objfpc; ignored
+; RUN: %p3 --mode=tp %S/Inputs/nilpointers/good.pas -o %t.exe && %t.exe | FileCheck %s --check-prefix=GOOD
+; GOOD: 42 42
+; GOOD: 7
+; GOOD: ok

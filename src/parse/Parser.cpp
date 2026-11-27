@@ -65,6 +65,9 @@ bool Parser::raceChecks() const {
 bool Parser::nullSafe() const {
   return Replay ? Replay->NullSafe : Lex.nullSafe();
 }
+bool Parser::nilPointers() const {
+  return Replay ? Replay->NilPointers : Lex.nilPointers();
+}
 bool Parser::corbaInterfaces() const {
   return Replay ? Replay->CorbaInterfaces : Lex.corbaInterfaces();
 }
@@ -140,6 +143,7 @@ GenericTokens *Parser::captureSwitches() {
   Toks->TypeHelpers = typeHelpers();
   Toks->RaceChecks = raceChecks();
   Toks->NullSafe = nullSafe();
+  Toks->NilPointers = nilPointers();
   Toks->ScopedEnums = scopedEnums();
   Toks->PackRecords = packRecords();
   Toks->ResultSwitch = resultSwitch();
@@ -282,6 +286,7 @@ Expr *Parser::parseLambda() {
       Loc, Name, IsFunction, Ctx.copyArray<VarDecl *>(Params), HasParamList,
       ResultTS, Ctx.create<Block>(Ctx.copyArray<Decl *>(Decls), Body), false);
   R->getBody()->setNullSafe(nullSafe());
+  R->getBody()->setNilPointers(nilPointers());
   R->setLambda();
   if (StatementBody) // Result: the lambda's ({$modeswitch result})
     R->setResultName(resultSwitch());
@@ -312,6 +317,7 @@ Expr *Parser::parseLambda() {
       Loc, FName, /*IsFunction=*/true, Ctx.copyArray<VarDecl *>(FParams), true,
       nullptr, Ctx.create<Block>(Ctx.copyArray<Decl *>({R}), FBody), false);
   F->getBody()->setNullSafe(nullSafe());
+  F->getBody()->setNilPointers(nilPointers());
   F->setLambda();
   F->setCopyFactory();
   if (CopyAll)
@@ -755,6 +761,7 @@ UnitDecl *Parser::parseUnit() {
   llvm::SmallVector<Stmt *, 8> Init;
   SourceLocation InitLoc = Tok.getLocation();
   bool InitNullSafe = nullSafe();
+  bool InitNilPointers = nilPointers();
   if (Tok.isOneOf(tok::kw_begin, tok::kw_initialization)) {
     InitLoc = consumeToken();
     parseStatementSequence(Init, tok::kw_end, InitLoc, "begin");
@@ -771,6 +778,7 @@ UnitDecl *Parser::parseUnit() {
                                         Ctx.copyArray<Stmt *>(Init));
   auto *ImplBlock = Ctx.create<Block>(Ctx.copyArray<Decl *>(ImplDecls), Body);
   ImplBlock->setNullSafe(InitNullSafe);
+  ImplBlock->setNilPointers(InitNilPointers);
   auto *UD = Ctx.create<UnitDecl>(
       UnitLoc, Name, Ctx.copyArray<Identifier>(IfaceUses),
       Ctx.create<Block>(Ctx.copyArray<Decl *>(IfaceDecls), Empty),
@@ -801,6 +809,7 @@ Block *Parser::parseBlock() {
 
   CompoundStmt *Body = nullptr;
   bool NullSafe = nullSafe(); // (where its statements start)
+  bool NilPointers = nilPointers();
   if (Tok.is(tok::kw_begin)) {
     Body = parseCompoundStmt();
   } else {
@@ -817,6 +826,7 @@ Block *Parser::parseBlock() {
   HiddenTypeDecls.resize(HiddenMark);
   auto *B = Ctx.create<Block>(Ctx.copyArray<Decl *>(Decls), Body);
   B->setNullSafe(NullSafe);
+  B->setNilPointers(NilPointers);
   return B;
 }
 
@@ -2794,8 +2804,11 @@ TypeSpec *Parser::parseType() {
 TypeSpec *Parser::nullableSuffix(TypeSpec *TS) {
   if (TS && nullSafe())
     TS->setNullSafe();
+  if (TS && nilPointers())
+    TS->setNilPointers();
   if (TS && Tok.is(tok::question) &&
-      (llvm::isa<NamedTypeSpec>(TS) || llvm::isa<SpecializeTypeSpec>(TS))) {
+      (llvm::isa<NamedTypeSpec>(TS) || llvm::isa<SpecializeTypeSpec>(TS) ||
+       llvm::isa<PointerTypeSpec>(TS))) {
     consumeToken();
     TS->setNullable(PrevTokEnd);
   }
@@ -3881,6 +3894,7 @@ Expr *Parser::parseSpawnExpr() {
       Ctx.create<AsyncTypeSpec>(SourceRange(Start), nullptr),
       Ctx.create<Block>(Ctx.copyArray<Decl *>(Decls), Body), false);
   R->getBody()->setNullSafe(nullSafe());
+  R->getBody()->setNilPointers(nilPointers());
   R->setSpawnBlock();
   if (raceChecks())
     R->setRaceChecked();
@@ -4401,6 +4415,7 @@ Expr *Parser::reparseDesignator(llvm::ArrayRef<Token> Toks) {
   G.TypeHelpers = typeHelpers();
   G.RaceChecks = raceChecks();
   G.NullSafe = nullSafe();
+  G.NilPointers = nilPointers();
   G.ScopedEnums = scopedEnums();
   G.PackRecords = packRecords();
   G.ResultSwitch = resultSwitch();

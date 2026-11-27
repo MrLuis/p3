@@ -380,7 +380,7 @@ Type *Checker::visitBinaryExpr(BinaryExpr *E){
   Type *L = Equality ? checkComparand(E->getLHS()) : check(E->getLHS());
   // a and b: b is evaluated where a holds (a or b: where it does not)
   bool Logic = (E->getOp() == BinaryOp::And || E->getOp() == BinaryOp::Or) &&
-               NullSafeHere && L->isBoolean();
+               anyNullSafety() && L->isBoolean();
   OwnedState BeforeRHS;
   if (Logic) {
     BeforeRHS = ownedGet();
@@ -459,6 +459,8 @@ Type *Checker::visitBinaryExpr(BinaryExpr *E){
                     {E->getLHS()->getRange(), E->getRHS()->getRange()});
         return errorType();
       }
+      if (NilPointersHere)
+        requireNotNil(E->getLHS(), "but pointer arithmetic is performed on it");
       return L;
     }
     if (Op == BinaryOp::Add && L->isIntegerLike() && R->isPointer()) {
@@ -468,6 +470,8 @@ Type *Checker::visitBinaryExpr(BinaryExpr *E){
                     {E->getLHS()->getRange(), E->getRHS()->getRange()});
         return errorType();
       }
+      if (NilPointersHere)
+        requireNotNil(E->getRHS(), "but pointer arithmetic is performed on it");
       return R;
     }
     if (L->isPointer() && R->isPointer() && areCompatible(L, R)) {
@@ -902,6 +906,8 @@ Type *Checker::visitIndexExpr(IndexExpr *E){
                   {E->getIndex()->getRange()});
       return errorType();
     }
+    if (NilPointersHere)
+      requireNotNil(E->getBase(), "but it is indexed");
     return PT->getPointee();
   }
   if (auto *VT = llvm::dyn_cast<VectorType>(BT)) {
@@ -1531,6 +1537,8 @@ Type *Checker::visitDerefExpr(DerefExpr *E){
                   {E->getBase()->getRange()});
       return errorType();
     }
+    if (NilPointersHere)
+      requireNotNil(E->getBase(), "but it is dereferenced with '^'");
     return P->getPointee() ? P->getPointee() : errorType();
   }
   if (auto *F = llvm::dyn_cast<FileType>(T); F && !F->isUntyped())

@@ -54,7 +54,7 @@ type
   TGenericTokens = record
     toks: TPtrList; { of PToken }
     longStrings, advancedRecords, corbaInterfaces, inlineOn: boolean;
-    typeHelpers, scopedEnums, raceChecks, nullSafe: boolean;
+    typeHelpers, scopedEnums, raceChecks, nullSafe, nilPointers: boolean;
     packRecords: longint;
     resultSwitch, outSwitch, defaultParamsSwitch: boolean;
     { a generic type's: the next of its method implementations (a list
@@ -787,7 +787,7 @@ end;
          "end" "." . }
 function parseUnitHere: PDecl;
 var
-  initNullSafe: boolean;
+  initNullSafe, initNilPointers: boolean;
   unitLoc, initLoc, endLoc, implLoc, declsEndLoc: TLoc;
   name: TIdent;
   ifaceUses, implUses, ifaceDecls, implDecls, init, none: TPtrList;
@@ -828,6 +828,7 @@ begin
   listInit(init);
   initLoc := tok.loc;
   initNullSafe := lx.nullSafe;
+  initNilPointers := lx.nilPointers;
   if tok.kind in [tkKwBegin, tkKwInitialization] then
   begin
     initLoc := consumeToken;
@@ -853,6 +854,7 @@ begin
   u^.iface := newBlock(ifaceDecls, empty);
   u^.impl := newBlock(implDecls, body);
   u^.impl^.nullSafe := initNullSafe;
+  u^.impl^.nilPointers := initNilPointers;
   u^.implLoc := implLoc;
   u^.declsEndLoc := declsEndLoc;
   parseUnitHere := u;
@@ -973,7 +975,7 @@ var
   decls: TPtrList;
   body: PNode;
   hiddenMark, i: longint;
-  nullSafe: boolean;
+  nullSafe, nilPointers: boolean;
   blk: PBlock;
 begin
   listInit(decls);
@@ -981,6 +983,7 @@ begin
   parseDeclarations(decls, false);
   body := nil;
   nullSafe := lx.nullSafe; { (where its statements start) }
+  nilPointers := lx.nilPointers;
   if tok.kind = tkKwBegin then
     body := parseCompoundStmt
   else
@@ -998,6 +1001,7 @@ begin
   hiddenTypeDecls.count := hiddenMark;
   blk := newBlock(decls, body);
   blk^.nullSafe := nullSafe;
+  blk^.nilPointers := nilPointers;
   parseBlock := blk;
 end;
 
@@ -1106,6 +1110,7 @@ begin
   toks^.typeHelpers := lx.typeHelpers;
   toks^.raceChecks := lx.raceChecks;
   toks^.nullSafe := lx.nullSafe;
+  toks^.nilPointers := lx.nilPointers;
   toks^.scopedEnums := lx.scopedEnums;
   toks^.packRecords := lx.packRecords;
   toks^.resultSwitch := lx.resultSwitch;
@@ -1125,6 +1130,7 @@ begin
   lx.typeHelpers := toks^.typeHelpers;
   lx.raceChecks := toks^.raceChecks;
   lx.nullSafe := toks^.nullSafe;
+  lx.nilPointers := toks^.nilPointers;
   lx.scopedEnums := toks^.scopedEnums;
   lx.packRecords := toks^.packRecords;
   lx.resultSwitch := toks^.resultSwitch;
@@ -2471,6 +2477,7 @@ begin
   toks^.typeHelpers := lx.typeHelpers;
   toks^.raceChecks := lx.raceChecks;
   toks^.nullSafe := lx.nullSafe;
+  toks^.nilPointers := lx.nilPointers;
   toks^.scopedEnums := lx.scopedEnums;
   toks^.packRecords := lx.packRecords;
   toks^.resultSwitch := lx.resultSwitch;
@@ -2672,6 +2679,7 @@ begin
   lx.typeHelpers := toks^.typeHelpers;
   lx.raceChecks := toks^.raceChecks;
   lx.nullSafe := toks^.nullSafe;
+  lx.nilPointers := toks^.nilPointers;
   lx.scopedEnums := toks^.scopedEnums;
   lx.packRecords := toks^.packRecords;
   lx.resultSwitch := toks^.resultSwitch;
@@ -4131,8 +4139,10 @@ function nullableSuffix(ts: PTypeSpec): PTypeSpec;
 begin
   if (ts <> nil) and lx.nullSafe then
     ts^.tsNullSafe := true;
+  if (ts <> nil) and lx.nilPointers then
+    ts^.tsNilPointers := true;
   if (ts <> nil) and (tok.kind = tkQuestion) and
-     ((ts^.kind = tsNamed) or (ts^.kind = tsSpecialize)) then
+     (ts^.kind in [tsNamed, tsSpecialize, tsPointer]) then
   begin
     consumeToken;
     ts^.tsNullable := true;
@@ -5354,6 +5364,7 @@ begin
   r := newRoutine(start, name, true, noParams, false, rs, newBlock(decls, body), false);
   r^.isSpawnBlock := true;
   r^.body^.nullSafe := lx.nullSafe;
+  r^.body^.nilPointers := lx.nilPointers;
   r^.isRaceChecked := lx.raceChecks;
   listAdd(hiddenTypeDecls, r);
   listInit(noArgs);
@@ -7867,6 +7878,7 @@ begin
   r := newRoutine(loc, name, isFunction, params, hasParamList, resultSpec,
                   newBlock(decls, body), false);
   r^.body^.nullSafe := lx.nullSafe;
+  r^.body^.nilPointers := lx.nilPointers;
   r^.isLambda := true;
   if statementBody then { Result: the lambda's ($modeswitch result) }
     r^.resultName := lx.resultSwitch;
@@ -7906,6 +7918,7 @@ begin
   listAdd(fDecls, r);
   f := newRoutine(loc, fName, true, fParams, true, nil, newBlock(fDecls, fBody), false);
   f^.body^.nullSafe := lx.nullSafe;
+  f^.body^.nilPointers := lx.nilPointers;
   f^.isLambda := true;
   f^.isCopyFactory := true;
   f^.isCopyAll := copyAll;

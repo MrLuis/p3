@@ -104,8 +104,11 @@ examples are in the reference.
   `spawn`, cancellation tokens and channels.
 - **Compile-time data-race checks**: `shared` / `isolated` qualifiers, opt-in
   with `{$modeswitch racechecks}`.
-- **Null-safe references**: with `{$nullsafe on}`, `T?`, `?.` and `??`; the
-  compiler rejects dereferences that may be nil.
+- **Null-safe references & pointers**: with `{$nullsafe on}` (classes/interfaces in
+  `objfpc`), `T?`, `?.` and `??`, plus `{$nilpointers on}` (typed/untyped pointers
+  in `tp` and `objfpc`, scoped with `{$push}`/`{$pop}`, supporting `^T?`, `P?`, and
+  `??`), the compiler rejects dereferences, indexing, arithmetic, and `dispose`/`freemem`
+  uses that may be nil.
 - **Typed addresses**: with `{$T+}` or `{$typedaddress on}` (available in
   `tp` and `objfpc` modes, as in Turbo/Free Pascal, and scoped with
   `{$push}`/`{$pop}`), `@x` yields `^typeof(x)` rather than untyped
@@ -359,6 +362,7 @@ All handled in `selfhost/pclex.pas` (the C++ compiler recognizes the same set).
 - `$coperators on/off` (pclex.pas:1736)
 - `$macro on/off` (pclex.pas:1750)
 - `$nullsafe on/off` (p3's own, objfpc mode) (pclex.pas:1616)
+- `$nilpointers on/off` (p3's own, tp/objfpc modes) (pclex.pas:1639)
 - `$push` / `$pop` (pclex.pas:1639,1658)
 
 **Mode switches** — `$modeswitch NAME on/off` (pclex.pas:1454)
