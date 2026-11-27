@@ -1753,9 +1753,13 @@ begin
     exit(interfaceInheritsFrom(a, b) or interfaceInheritsFrom(b, a));
   if (a^.kind = tyClass) and (b^.kind = tyClass) then { related classes (objfpc) }
     exit(inheritsFrom(a, b) or inheritsFrom(b, a));
-  if (a^.kind = tyPointer) and (b^.kind = tyPointer) and
-     (a^.untyped or b^.untyped) then
-    exit(true); { Turbo/FPC untyped pointer }
+  if (a^.kind = tyPointer) and (b^.kind = tyPointer) then
+  begin
+    if a^.untyped or b^.untyped then
+      exit(true); { Turbo/FPC untyped pointer }
+    if (a^.typedAddr or b^.typedAddr) and (a^.pointee = b^.pointee) then
+      exit(true); { $T+: @x matches any pointer to the same pointee type }
+  end;
   if (a^.kind = tySet) and (b^.kind = tySet) then
     exit(isEmptySet(a) or isEmptySet(b) or
          haveSameOrdinalHost(a^.setElement, b^.setElement));

@@ -37,7 +37,7 @@ type
 
   { swWrap: no directive; unchecked blocks: integer values converted to a
     narrower integer type wrap instead of being range-checked }
-  TCheckSwitch = (swRange, swOverflow, swWrap);
+  TCheckSwitch = (swRange, swOverflow, swWrap, swTypedAddress);
 
   PIncludeFrame = ^TIncludeFrame;
   TIncludeFrame = record
@@ -179,7 +179,7 @@ type
   TSavedSwitches = record
     longStrings, corbaInterfaces, inlineOn, scopedEnums, nullSafe: boolean;
     packRecords: longint;
-    range, overflow: longint; { as TDirective.state }
+    range, overflow, typedAddress: longint; { as TDirective.state }
   end;
 
 var
@@ -1653,6 +1653,7 @@ begin
     saved^.packRecords := lx.packRecords;
     saved^.range := directiveStateAt(swRange, locOf(lx, start));
     saved^.overflow := directiveStateAt(swOverflow, locOf(lx, start));
+    saved^.typedAddress := directiveStateAt(swTypedAddress, locOf(lx, start));
     listAdd(lx.switchStack, saved);
     exit;
   end;
@@ -1672,6 +1673,7 @@ begin
     lx.packRecords := saved^.packRecords;
     addDirectiveState(lx, locOf(lx, start), swRange, saved^.range);
     addDirectiveState(lx, locOf(lx, start), swOverflow, saved^.overflow);
+    addDirectiveState(lx, locOf(lx, start), swTypedAddress, saved^.typedAddress);
     exit;
   end;
   { $packrecords N|C|DEFAULT|NORMAL, $align N|ON|OFF, $aN, $a+|-: how the
@@ -1759,6 +1761,19 @@ begin
       diagError(locOf(lx, start), 'expected {$macro on} or {$macro off}');
     exit;
   end;
+  { $typedaddress on / off: the long form of $T+ / $T- }
+  if word = 'typedaddress' then
+  begin
+    arg := lowerStr(copyChars(lx, b, e));
+    if (arg = 'on') or (arg = '+') then
+      addDirective(lx, locOf(lx, start), swTypedAddress, true)
+    else if (arg = 'off') or (arg = '-') then
+      addDirective(lx, locOf(lx, start), swTypedAddress, false)
+    else
+      diagError(locOf(lx, start),
+                'expected {$typedaddress on} or {$typedaddress off}');
+    exit;
+  end;
   { $longstrings on / off: the long form of H+ and H- }
   if word = 'longstrings' then
   begin
@@ -1803,7 +1818,9 @@ begin
       if upperChar(at(lx, b)) = 'R' then
         addDirective(lx, locOf(lx, start), swRange, c = '+')
       else if upperChar(at(lx, b)) = 'Q' then
-        addDirective(lx, locOf(lx, start), swOverflow, c = '+');
+        addDirective(lx, locOf(lx, start), swOverflow, c = '+')
+      else if upperChar(at(lx, b)) = 'T' then
+        addDirective(lx, locOf(lx, start), swTypedAddress, c = '+');
     end
     else if e > b then
     begin

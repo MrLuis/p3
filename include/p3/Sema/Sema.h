@@ -25,6 +25,7 @@
 namespace p3 {
 
 class ASTContext;
+class CheckDirectives;
 class DiagnosticsEngine;
 class ProgramDecl;
 class RoutineDecl;
@@ -51,12 +52,14 @@ private:
   const LangOptions &LangOpts;
   ReparseFn Reparse;
   ReparseTypeFn ReparseType;
+  const CheckDirectives *Directives;
 
 public:
   Sema(ASTContext &Ctx, DiagnosticsEngine &Diags, const LangOptions &LangOpts,
-       ReparseFn Reparse = nullptr, ReparseTypeFn ReparseType = nullptr)
+       ReparseFn Reparse = nullptr, ReparseTypeFn ReparseType = nullptr,
+       const CheckDirectives *Directives = nullptr)
       : Ctx(Ctx), Diags(Diags), LangOpts(LangOpts), Reparse(std::move(Reparse)),
-        ReparseType(std::move(ReparseType)) {}
+        ReparseType(std::move(ReparseType)), Directives(Directives) {}
 
   /// Returns true if the program is valid. Units must be in dependency
   /// order (a unit before the units and program that use it).

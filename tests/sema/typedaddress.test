@@ -1,0 +1,27 @@
+; Typed addresses: {$T+} / {$T-} and {$typedaddress on|off}, including {$push}/{$pop}.
+; RUN: not %p3 --mode=objfpc -ferror-limit=0 -c %S/Inputs/typedaddress_errors.pas -o %t.o 2>&1 | FileCheck %s
+
+; CHECK: typedaddress_errors.pas:17:6: error: assigning to 'PInt' from incompatible type '^byte'
+; CHECK: typedaddress_errors.pas:18:6: error: assigning to 'PByte' from incompatible type '^integer'
+; CHECK: typedaddress_errors.pas:19:6: error: assigning to 'PRec' from incompatible type '^byte'
+; CHECK: typedaddress_errors.pas:20:9: error: invalid operands to '=' ('PInt' and '^byte')
+; CHECK: typedaddress_errors.pas:25:6: error: assigning to 'PInt' from incompatible type '^byte'
+; CHECK: typedaddress_errors.pas:29:6: error: assigning to 'PByte' from incompatible type '^integer'
+; CHECK-NOT: error:
+
+; Invalid {$typedaddress} argument is diagnosed.
+; RUN: printf '{$typedaddress bad} program p; begin end.\n' | not %p3 --mode=objfpc -c - -o %t.bad.o 2>&1 | FileCheck --check-prefix=BADARG %s
+; BADARG: error: expected {$typedaddress on} or {$typedaddress off}
+
+; Valid typed address usage compiles and runs identically.
+; RUN: %p3 --mode=objfpc %S/Inputs/typedaddress.pas -o %t && %t | FileCheck --check-prefix=OUT %s
+; OUT: 10
+; OUT-NEXT: 42
+; OUT-NEXT: 42
+; OUT-NEXT: 42
+; OUT-NEXT: TRUE
+; OUT-NEXT: Z
+; OUT-NEXT: int:42
+; OUT-NEXT: byte:7
+; OUT-NEXT: untyped:42
+; OUT-NEXT: 42

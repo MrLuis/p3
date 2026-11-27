@@ -11,6 +11,7 @@
 #include "p3/AST/ASTContext.h"
 #include "p3/AST/ASTVisitor.h"
 #include "p3/Basic/Diagnostics.h"
+#include "p3/Basic/Directives.h"
 #include "p3/Basic/LangOptions.h"
 #include "p3/Sema/Scope.h"
 
@@ -45,6 +46,7 @@ class Checker : public StmtVisitor<Checker>,
   ASTContext &Ctx;
   DiagnosticsEngine &Diags;
   const LangOptions &LangOpts;
+  const CheckDirectives *Directives;
 
   Scope Standard;              ///< predeclared entities
   Scope *Cur = &Standard;
@@ -1594,7 +1596,8 @@ class Checker : public StmtVisitor<Checker>,
 public:
   Checker(ASTContext &Ctx, DiagnosticsEngine &Diags, const LangOptions &LO,
           Sema::ReparseFn Reparse = nullptr,
-          Sema::ReparseTypeFn ReparseType = nullptr);
+          Sema::ReparseTypeFn ReparseType = nullptr,
+          const CheckDirectives *Directives = nullptr);
 
   std::vector<std::string> standardNames() const;
 

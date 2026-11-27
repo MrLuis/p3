@@ -8,6 +8,7 @@
 //   Q  overflow checks  (integer + - * abs sqr, unary minus)
 //   Wrap (no directive; unchecked blocks) integer values converted to a
 //      narrower integer type wrap instead of being range-checked
+//   T  typed addresses  ({$T+}, {$typedaddress on}: @x yields ^typeof(x))
 //
 // The lexer records each switch with its location; code generation asks
 // whether a check is enabled at the location of the construct it emits.
@@ -27,7 +28,7 @@ namespace p3 {
 
 class CheckDirectives {
 public:
-  enum Switch { Range, Overflow, Wrap };
+  enum Switch { Range, Overflow, Wrap, TypedAddress };
 
 private:
 public:

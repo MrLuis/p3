@@ -523,7 +523,7 @@ bool Driver::runPipeline(FileID FID) {
     return Parser(Lex, Diags, Ctx).reparseGenericType(G, Methods);
   };
   bool SemaOK = SyntaxOK && !Diags.hasErrors() &&
-                Sema(Ctx, Diags, LangOpts, Reparse, ReparseType)
+                Sema(Ctx, Diags, LangOpts, Reparse, ReparseType, &Directives)
                     .check(*Program, Units, Opts.SeparateUnits);
 
   if (Opts.Act == Action::EmitAST) {
@@ -665,7 +665,8 @@ bool Driver::compileUnit(Parser &P, FileID FID, ASTContext &Ctx,
     return Parser(P.getLexer(), Diags, Ctx).reparseGenericType(G, Methods);
   };
   if (Diags.hasErrors() ||
-      !Sema(Ctx, Diags, LangOpts, Reparse, ReparseType).checkUnit(*Unit, Deps))
+      !Sema(Ctx, Diags, LangOpts, Reparse, ReparseType, &Directives)
+           .checkUnit(*Unit, Deps))
     return false;
   if (Opts.Act == Action::EmitObj && Opts.OutputFile != "-") {
     llvm::SmallVector<std::string, 4> Dirs{

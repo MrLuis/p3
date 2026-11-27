@@ -120,7 +120,7 @@ type
                  isBitPackedRecord: boolean; recordPackRecords: longint;
                  { a tuple type: (integer, string) }
                  isTupleRecord: boolean);
-      tyPointer: (pointee: PType; untyped: boolean);
+      tyPointer: (pointee: PType; untyped, typedAddr: boolean);
       tySet: (setElement: PType); { nil: the empty set [] }
       tyFile: (fileElement: PType; isText: boolean);
       { routineReference: reference to (objfpc), a closure: its value is

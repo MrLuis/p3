@@ -94,10 +94,15 @@ bool Checker::areCompatible(Type *A, Type *B){
   if (A->isClass() && B->isClass()) // related classes (objfpc)
     return llvm::cast<ClassType>(A)->inheritsFrom(llvm::cast<ClassType>(B)) ||
            llvm::cast<ClassType>(B)->inheritsFrom(llvm::cast<ClassType>(A));
-  if (A->isPointer() && B->isPointer() &&
-      (llvm::cast<PointerType>(A)->isUntyped() ||
-       llvm::cast<PointerType>(B)->isUntyped()))
-    return true; // Turbo/FPC untyped `pointer`
+  if (A->isPointer() && B->isPointer()) {
+    auto *PA = llvm::cast<PointerType>(A);
+    auto *PB = llvm::cast<PointerType>(B);
+    if (PA->isUntyped() || PB->isUntyped())
+      return true; // Turbo/FPC untyped `pointer`
+    if ((PA->isTypedAddr() || PB->isTypedAddr()) &&
+        PA->getPointee() == PB->getPointee())
+      return true; // {$T+} @x matches any pointer to the same pointee type
+  }
   if (A->isSet() && B->isSet()) {
     auto *SA = llvm::cast<SetType>(A), *SB = llvm::cast<SetType>(B);
     return SA->isEmptySet() || SB->isEmptySet() ||

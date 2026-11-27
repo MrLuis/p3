@@ -6757,7 +6757,10 @@ begin
     errR(op^.b, nodeRange(op));
     exit;
   end;
-  visitAddrOf := tyUntypedPointerT;
+  if (t^.kind <> tyUntyped) and checkEnabled(swTypedAddress, e^.b, false) then
+    visitAddrOf := newTypedAddrPointerType(t)
+  else
+    visitAddrOf := tyUntypedPointerT;
 end;
 
 function visitDeref(e: PNode): PType;

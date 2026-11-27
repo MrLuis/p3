@@ -300,12 +300,16 @@ bool bitPackedSigned(Type *T);
 /// filled in once known.
 class PointerType final : public Type {
   Type *Pointee;
-  bool Untyped = false; ///< Turbo/FPC `pointer`
+  bool Untyped = false;  ///< Turbo/FPC `pointer`
+  bool TypedAddr = false; ///< @x under {$T+}: compatible with any ^Pointee
 
 public:
-  explicit PointerType(Type *Pointee, bool Untyped = false)
-      : Type(TK_Pointer), Pointee(Pointee), Untyped(Untyped) {}
+  explicit PointerType(Type *Pointee, bool Untyped = false,
+                       bool TypedAddr = false)
+      : Type(TK_Pointer), Pointee(Pointee), Untyped(Untyped),
+        TypedAddr(TypedAddr) {}
   bool isUntyped() const { return Untyped; }
+  bool isTypedAddr() const { return TypedAddr; }
   Type *getPointee() const { return Pointee; }
   void setPointee(Type *T) { Pointee = T; }
   static bool classof(const Type *T) { return T->getKind() == TK_Pointer; }

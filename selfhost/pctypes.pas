@@ -36,6 +36,7 @@ function newSubrangeType(host: PType; lo, hi: int64): PType;
 function newArrayType(index, element: PType; packed_: boolean): PType;
 function newRecordType(fl: PFieldList; const all: TPtrList; packed_: boolean): PType;
 function newPointerType(pointee: PType): PType;
+function newTypedAddrPointerType(pointee: PType): PType;
 function newSetType(element: PType): PType;
 
 { vector[N] of T (p3's own, like async: not reserved) }
@@ -226,7 +227,17 @@ begin
   t := newType(tyPointer);
   t^.pointee := pointee;
   t^.untyped := false;
+  t^.typedAddr := false;
   newPointerType := t;
+end;
+
+function newTypedAddrPointerType(pointee: PType): PType;
+var
+  t: PType;
+begin
+  t := newPointerType(pointee);
+  t^.typedAddr := true;
+  newTypedAddrPointerType := t;
 end;
 
 function newSetType(element: PType): PType;

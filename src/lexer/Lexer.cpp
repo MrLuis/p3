@@ -274,10 +274,12 @@ void Lexer::handleDirective(const char *Start, llvm::StringRef Text) {
     }
     SavedSwitches S{LongStrings, CorbaInterfaces, InlineOn, ScopedEnums,
                     NullSafe, PackRecords, CheckDirectives::Default,
-                    CheckDirectives::Default};
+                    CheckDirectives::Default, CheckDirectives::Default};
     if (Directives) {
       S.Range = Directives->stateAt(CheckDirectives::Range, locOf(Start));
       S.Overflow = Directives->stateAt(CheckDirectives::Overflow, locOf(Start));
+      S.TypedAddress =
+          Directives->stateAt(CheckDirectives::TypedAddress, locOf(Start));
     }
     SwitchStack.push_back(S);
     return;
@@ -299,6 +301,8 @@ void Lexer::handleDirective(const char *Start, llvm::StringRef Text) {
                            CheckDirectives::Range, S.Range);
       Directives->addState(locOf(Start), BufBegin, BufEnd,
                            CheckDirectives::Overflow, S.Overflow);
+      Directives->addState(locOf(Start), BufBegin, BufEnd,
+                           CheckDirectives::TypedAddress, S.TypedAddress);
     }
     return;
   }
@@ -398,6 +402,24 @@ void Lexer::handleDirective(const char *Start, llvm::StringRef Text) {
     return;
   }
 
+  // {$typedaddress on|off}: the long form of {$T+|-}.
+  if (Word.equals_insensitive("typedaddress")) {
+    bool On;
+    if (Arg.equals_insensitive("on") || Arg == "+")
+      On = true;
+    else if (Arg.equals_insensitive("off") || Arg == "-")
+      On = false;
+    else {
+      Diags.error(locOf(Start),
+                  "expected {$typedaddress on} or {$typedaddress off}");
+      return;
+    }
+    if (Directives)
+      Directives->add(locOf(Start), BufBegin, BufEnd,
+                      CheckDirectives::TypedAddress, On);
+    return;
+  }
+
   // {$longstrings on|off}: the long form of {$H+|-}.
   if (Word.equals_insensitive("longstrings") &&
       (Arg.equals_insensitive("on") || Arg.equals_insensitive("off"))) {
@@ -417,10 +439,11 @@ void Lexer::handleDirective(const char *Start, llvm::StringRef Text) {
         LongStrings = On;
       if (Letter == 'A') // {$A+}: as {$A4} (FPC); {$A-}: no alignment
         PackRecords = On ? 4 : 1;
-      if (Directives && (Letter == 'R' || Letter == 'Q'))
+      if (Directives && (Letter == 'R' || Letter == 'Q' || Letter == 'T'))
         Directives->add(locOf(Start), BufBegin, BufEnd,
                         Letter == 'R' ? CheckDirectives::Range
-                                      : CheckDirectives::Overflow,
+                        : Letter == 'Q' ? CheckDirectives::Overflow
+                                        : CheckDirectives::TypedAddress,
                         On);
       continue; // other switches (listing, boolean evaluation, ...) ignored
     }

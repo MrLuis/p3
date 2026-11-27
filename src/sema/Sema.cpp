@@ -525,8 +525,10 @@ void Checker::checkProgramParamDecls(ProgramDecl &P){
 
 Checker::Checker(ASTContext &Ctx, DiagnosticsEngine &Diags, const LangOptions &LO,
         Sema::ReparseFn Reparse,
-        Sema::ReparseTypeFn ReparseType): Ctx(Ctx), Diags(Diags), LangOpts(LO), Reparse(std::move(Reparse)),
-      ReparseType(std::move(ReparseType)) {
+        Sema::ReparseTypeFn ReparseType,
+        const CheckDirectives *Directives)
+    : Ctx(Ctx), Diags(Diags), LangOpts(LO), Directives(Directives),
+      Reparse(std::move(Reparse)), ReparseType(std::move(ReparseType)) {
   declareStandardScope();
 }
 
@@ -633,7 +635,7 @@ void Checker::checkSeparateUnit(UnitDecl &U, llvm::ArrayRef<UnitDecl *> Deps){
 bool Sema::check(ProgramDecl &P, llvm::ArrayRef<UnitDecl *> Units,
                  bool SeparateUnits) {
   unsigned ErrorsBefore = Diags.getNumErrors();
-  Checker(Ctx, Diags, LangOpts, Reparse, ReparseType)
+  Checker(Ctx, Diags, LangOpts, Reparse, ReparseType, Directives)
       .checkProgram(P, Units, SeparateUnits);
   return Diags.getNumErrors() == ErrorsBefore;
 }
@@ -644,7 +646,7 @@ std::vector<std::string> Sema::standardNames() {
 
 bool Sema::checkUnit(UnitDecl &U, llvm::ArrayRef<UnitDecl *> Deps) {
   unsigned ErrorsBefore = Diags.getNumErrors();
-  Checker C(Ctx, Diags, LangOpts, Reparse, ReparseType);
+  Checker C(Ctx, Diags, LangOpts, Reparse, ReparseType, Directives);
   C.checkSeparateUnit(U, Deps);
   return Diags.getNumErrors() == ErrorsBefore;
 }
