@@ -59,7 +59,7 @@ begin
     getmem(p, 4 * sizeof(integer));
     Inc(p, 5);
   end
-  else if mode = 'diff' then
+  else if mode = 'ptrdiff' then
   begin
     getmem(p, 4 * sizeof(integer));
     getmem(q, 4 * sizeof(integer));

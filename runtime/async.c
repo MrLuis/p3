@@ -2216,9 +2216,11 @@ static void ctx_poller(PasContext *c) {
   ev.events = EPOLLIN;
   ev.data.ptr = PAS_WAKE_MARK;
   epoll_ctl(p, EPOLL_CTL_ADD, e, &ev);
+  pthread_mutex_lock(&c->qmu);
   c->wakefd = (int)(intptr_t)e;
   c->ep = p;
   c->pfd = 0;
+  pthread_mutex_unlock(&c->qmu);
   return;
 #elif defined(__linux__)
   int p = epoll_create1(EPOLL_CLOEXEC);
@@ -2230,7 +2232,6 @@ static void ctx_poller(PasContext *c) {
   ev.events = EPOLLIN;
   ev.data.ptr = PAS_WAKE_MARK;
   epoll_ctl(p, EPOLL_CTL_ADD, e, &ev);
-  c->wakefd = e;
 #else
   int p = kqueue();
   if (p < 0)
@@ -2240,7 +2241,12 @@ static void ctx_poller(PasContext *c) {
   kevent(p, &k, 1, NULL, 0, NULL);
 #endif
 #ifndef _WIN32
+  pthread_mutex_lock(&c->qmu);
+#ifdef __linux__
+  c->wakefd = e;
+#endif
   c->pfd = p;
+  pthread_mutex_unlock(&c->qmu);
 #endif
 }
 
@@ -2797,7 +2803,7 @@ int64_t __pas_net_waits_abandoned(void) {
 /* The poller backend in place: 0 kevent, 1 epoll, 2 io_uring. For benchmark
  * reports and logs. For unit netasync. */
 int32_t __pas_net_fd_backend(void) {
-  return fd_backend;
+  return __atomic_load_n(&fd_backend, __ATOMIC_ACQUIRE);
 }
 
 /* Marks a descriptor blocking (on 0) or non-blocking, through the C runtime
@@ -2849,9 +2855,9 @@ static void fd_poller_start(void) {
 #if defined(_WIN32)
   WSADATA wsa;
   WSAStartup(MAKEWORD(2, 2), &wsa);
-  fd_backend = FD_BACKEND_EPOLL;   /* wepoll: each thread makes its own */
+  __atomic_store_n(&fd_backend, FD_BACKEND_EPOLL, __ATOMIC_RELEASE);   /* wepoll: each thread makes its own */
 #elif defined(__linux__)
-  fd_backend = FD_BACKEND_EPOLL;
+  int backend = FD_BACKEND_EPOLL;
   /* Per-thread epoll is the default: readiness reaches the task on its own
    * thread, in batches. The shared io_uring ring (one poller thread hands
    * every completion to the pool) stays available with P3_NET_URING=1. */
@@ -2890,7 +2896,7 @@ static void fd_poller_start(void) {
           ur_sq_array[i] = i;
         *ur_sq_tail = 0;
         fd_poll_fd = fd;
-        fd_backend = FD_BACKEND_URING;
+        backend = FD_BACKEND_URING;
       } else {
         if (ur_sq_ring != MAP_FAILED)
           munmap(ur_sq_ring, sq_len);
@@ -2902,7 +2908,8 @@ static void fd_poller_start(void) {
       }
     }
   }
-  if (fd_backend != FD_BACKEND_URING) {
+  __atomic_store_n(&fd_backend, backend, __ATOMIC_RELEASE);
+  if (backend != FD_BACKEND_URING) {
     __atomic_store_n(&fd_poll_started, 1, __ATOMIC_RELEASE);
     return;   /* epoll: each thread makes its own poller (ctx_poller) */
   }
@@ -2913,7 +2920,7 @@ static void fd_poller_start(void) {
     __pas_runtime_error("the netasync poller thread could not start");
   pthread_attr_destroy(&a2);
 #else
-  fd_backend = FD_BACKEND_KQUEUE;   /* each thread makes its own kqueue */
+  __atomic_store_n(&fd_backend, FD_BACKEND_KQUEUE, __ATOMIC_RELEASE);   /* each thread makes its own kqueue */
 #endif
   __atomic_store_n(&fd_poll_started, 1, __ATOMIC_RELEASE);
 }
@@ -3085,6 +3092,7 @@ int64_t __pas_task_recv(int32_t fd, void *buf, int32_t len) {
     }
   }
 #ifdef __linux__
+  fd_poller_start_once();
   if (fd_backend == FD_BACKEND_URING) {
     /* native async recv: the completion is the recv result */
     return fd_uring_op(FD_OP_RECV, fd, buf, len);
@@ -3135,6 +3143,7 @@ int64_t __pas_task_send(int32_t fd, void *buf, int32_t len) {
     }
   }
 #ifdef __linux__
+  fd_poller_start_once();
   if (fd_backend == FD_BACKEND_URING) {
     /* native async send: the completion is the send result */
     return fd_uring_op(FD_OP_SEND, fd, buf, len);

@@ -23,5 +23,5 @@
 ; RUN: not %t.o0 oob-inc 2>&1 | FileCheck --check-prefix=ADD %s
 ; ADD: Runtime error: pointer arithmetic out of bounds
 
-; RUN: not %t.o0 diff 2>&1 | FileCheck --check-prefix=DIFF %s
+; RUN: not %t.o0 ptrdiff 2>&1 | FileCheck --check-prefix=DIFF %s
 ; DIFF: Runtime error: pointer difference requires pointers in the same live allocation
