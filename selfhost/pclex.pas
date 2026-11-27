@@ -107,6 +107,8 @@ type
     switchStack: TPtrList;
     macros: TIntMap;
     macroStack: TPtrList;
+    macroExpansions: longint;
+    macroLimitWarned: boolean;
     { declared(NAME) in $IF (Free Pascal): the names declared so far (name
       id -> non-nil), which the parser adds, innermost scope last (a
       routine's own); of PIntMap }
@@ -404,6 +406,8 @@ begin
   listInit(lx.switchStack);
   mapInit(lx.macros);
   listInit(lx.macroStack);
+  lx.macroExpansions := 0;
+  lx.macroLimitWarned := false;
   defineSymbol(lx, 'P3', true);
   if mode = lmISO then
     defineSymbol(lx, 'P3_ISO', true)
@@ -2703,6 +2707,17 @@ begin
                noRange, noRange);
     exit;
   end;
+  if lx.macroExpansions >= 4096 then
+  begin
+    if not lx.macroLimitWarned then
+    begin
+      lx.macroLimitWarned := true;
+      diagReport(sevWarning, locOf(lx, start), 'expanding macros exceeds 4096 expansions',
+                 noRange, noRange);
+    end;
+    exit;
+  end;
+  lx.macroExpansions := lx.macroExpansions + 1;
   f := PMacroFrame(arenaAlloc(sizeof(TMacroFrame)));
   f^.fid := lx.fid;
   f^.cur := lx.cur;

@@ -2126,10 +2126,10 @@ static void fd_park_link(PasFdWait *rec) {
   int *lk = fd_lock_of(rec->fd);
   spin_lock(lk);
   rec->fprev = NULL;
-  rec->fnext = *head;
+  rec->fnext = __atomic_load_n(head, __ATOMIC_RELAXED);
   if (rec->fnext)
     rec->fnext->fprev = rec;
-  *head = rec;
+  __atomic_store_n(head, rec, __ATOMIC_RELEASE);
   rec->parked = 1;
   spin_unlock(lk);
 }
@@ -2142,7 +2142,7 @@ static void fd_park_unlink(PasFdWait *rec) {
   if (rec->fprev)
     rec->fprev->fnext = rec->fnext;
   else
-    *fd_slot(rec->fd, 0) = rec->fnext;
+    __atomic_store_n(fd_slot(rec->fd, 0), rec->fnext, __ATOMIC_RELEASE);
   if (rec->fnext)
     rec->fnext->fprev = rec->fprev;
   rec->fprev = rec->fnext = NULL;
@@ -2163,7 +2163,8 @@ static void fd_fire(PasFdWait *rec, int64_t bits) {
     wake(&rec->w, WAKE_NORMAL);
   }
   if (bits != 8 && rec->parked) {
-    for (PasFdWait *o = *fd_slot(rec->fd, 0); o; o = o->fnext)
+    for (PasFdWait *o = __atomic_load_n(fd_slot(rec->fd, 0), __ATOMIC_RELAXED);
+         o; o = o->fnext)
       if (o != rec && o->write == rec->write && !o->w.signaled) {
         o->res = bits;
         wake(&o->w, WAKE_NORMAL);
@@ -2184,7 +2185,8 @@ void __pas_fd_wake_peers(int32_t fd, int32_t want_write) {
     return;
   int *lk = fd_lock_of(fd);
   spin_lock(lk);
-  for (PasFdWait *o = *head; o; o = o->fnext)
+  for (PasFdWait *o = __atomic_load_n(head, __ATOMIC_RELAXED); o;
+       o = o->fnext)
     if (o->write == (want_write ? 1 : 0) && !o->w.signaled) {
       o->res = want_write ? 2 : 1;
       wake(&o->w, WAKE_NORMAL);

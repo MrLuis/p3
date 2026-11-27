@@ -931,6 +931,14 @@ bool Lexer::expandMacro(const Token &T, const char *Start) {
     Diags.warning(locOf(Start), "expanding macros exceeds a depth of 16");
     return false;
   }
+  if (MacroExpansions >= 4096) {
+    if (!MacroLimitWarned) {
+      MacroLimitWarned = true;
+      Diags.warning(locOf(Start), "expanding macros exceeds 4096 expansions");
+    }
+    return false;
+  }
+  ++MacroExpansions;
   MacroStack.push_back({BufEnd, Cur});
   Cur = It->second.Begin;
   BufEnd = It->second.End;

@@ -90,6 +90,8 @@ class Lexer {
     const char *BufEnd, *Cur;
   };
   llvm::SmallVector<MacroFrame, 4> MacroStack;
+  unsigned MacroExpansions = 0;
+  bool MacroLimitWarned = false;
   bool expandMacro(const Token &T, const char *Start);
 
   // {$I file} (Turbo/FPC): the including buffers, innermost last.
