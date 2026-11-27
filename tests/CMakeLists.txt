@@ -1,12 +1,28 @@
-# Unit tests (C++), run through lit like everything else.
+# Unit tests (C++ and C runtime), run through lit like everything else.
+find_package(Threads REQUIRED)
 add_executable(p3-unittests unit/UnitTestMain.cpp unit/DiagnosticsTest.cpp
-  unit/SelfhostDiagTest.cpp)
+  unit/SelfhostDiagTest.cpp unit/RuntimeTest.cpp)
 # The selfhost diagnostics test reads selfhost/tests/ from the source tree.
 target_compile_definitions(p3-unittests PRIVATE
   P3_SOURCE_DIR="${PROJECT_SOURCE_DIR}")
-target_link_libraries(p3-unittests PRIVATE p3Driver)
+target_link_libraries(p3-unittests PRIVATE p3Driver pascalrt Threads::Threads)
+if(UNIX)
+  target_link_libraries(p3-unittests PRIVATE m)
+elseif(WIN32)
+  target_link_libraries(p3-unittests PRIVATE ws2_32 bcrypt)
+endif()
 set_target_properties(p3-unittests PROPERTIES
   RUNTIME_OUTPUT_DIRECTORY ${PROJECT_BINARY_DIR}/bin)
+
+set(P3_CHECK_DEPS p3 p3-unittests pascalrt rtl)
+if(NOT WIN32)
+  add_executable(p3-deadline-test ../runtime/async_deadline_test.c)
+  target_link_libraries(p3-deadline-test PRIVATE pascalrt Threads::Threads m)
+  set_target_properties(p3-deadline-test PROPERTIES
+    C_STANDARD 11
+    RUNTIME_OUTPUT_DIRECTORY ${PROJECT_BINARY_DIR}/bin)
+  list(APPEND P3_CHECK_DEPS p3-deadline-test)
+endif()
 
 # lit configuration
 find_program(LIT_EXECUTABLE NAMES lit llvm-lit lit.py
@@ -21,7 +37,7 @@ configure_file(lit.site.cfg.py.in ${CMAKE_CURRENT_BINARY_DIR}/lit.site.cfg.py @O
 if(LIT_EXECUTABLE AND FILECHECK_EXECUTABLE)
   add_custom_target(check
     COMMAND ${LIT_EXECUTABLE} -sv ${CMAKE_CURRENT_BINARY_DIR}
-    DEPENDS p3 p3-unittests pascalrt rtl
+    DEPENDS ${P3_CHECK_DEPS}
     COMMENT "Running p3 test suite"
     USES_TERMINAL)
   add_test(NAME lit COMMAND ${LIT_EXECUTABLE} -sv ${CMAKE_CURRENT_BINARY_DIR})

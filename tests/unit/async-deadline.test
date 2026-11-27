@@ -1,0 +1,6 @@
+; Deadline waits in async.c (POSIX pipe + timeout preemption).
+; UNSUPPORTED: system-windows
+; RUN: p3-deadline-test | FileCheck %s
+; CHECK: timeout: {{.*}} ok=PASS
+; CHECK: read-before-deadline: {{.*}} ok=PASS
+; CHECK: no-leak: ok=PASS

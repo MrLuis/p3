@@ -419,9 +419,21 @@ void __pas_owned_set(void **slot, void *obj);
 void __pas_owned_free(void **slot, PasOwnedExc *exc);
 void __pas_owned_done(PasOwnedExc *exc, int32_t raised);
 
-#ifdef __cplusplus
-}
-#endif
+/*===- Operating system (sys.c) ---------------------------------------------===*/
+const char *__pas_sys_strerror(void);
+int32_t __pas_sys_file_exists(const char *path);
+int32_t __pas_sys_dir_exists(const char *path);
+int32_t __pas_sys_mkdir(const char *path);
+int32_t __pas_sys_rmdir(const char *path);
+int32_t __pas_sys_chdir(const char *path);
+int32_t __pas_sys_unlink(const char *path);
+int32_t __pas_sys_getcwd(char *buf, int32_t size);
+void __pas_sys_format_double(char *buf, int32_t size, double value,
+                             int32_t precision);
+int32_t __pas_sys_parse_double(const char *s, double *value);
+void __pas_sys_localtime(int32_t *fields);
+int64_t __pas_sys_tick_ms(void);
+void __pas_sys_sleep(int32_t ms);
 
 
 /*===- Iterators (async.c) ---------------------------------------------------===*/
@@ -541,5 +553,9 @@ void __pas_waitq_broadcast(void *q);
 extern void *const __pas_eoperationcancelled_vmt[7];
 /* Raises a new exception of class vmt (Exception's layout) with text. */
 void __pas_raise_message(void *const *vmt, const char *text) __attribute__((noreturn));
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* PASCALRT_H */
