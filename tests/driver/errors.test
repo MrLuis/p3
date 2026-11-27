@@ -6,6 +6,9 @@
 ; RUN: not %p3 %t.does-not-exist.pas 2>&1 | FileCheck --check-prefix=MISSING %s
 ; MISSING: p3: error: cannot open input file '{{.*}}does-not-exist.pas': {{[Nn]}}o such file or directory
 
+; RUN: not %p3 %S/Inputs 2>&1 | FileCheck --check-prefix=ISDIR %s
+; ISDIR: p3: error: cannot open input file '{{.*}}Inputs': Is a directory
+
 ; RUN: not %p3 -O7 %S/Inputs/hello.pas 2>&1 | FileCheck --check-prefix=OPT %s
 ; OPT: p3: error: invalid optimization level '-O7' (expected 0-3)
 

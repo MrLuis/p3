@@ -34,7 +34,7 @@ function sysReadFile(const path: string; var data: PCharArray;
 function sysWriteFile(const path: string; p: PCharArray; count: int64): boolean;
 { Why path cannot be read, as strerror would say it (errno is not portable
   to reach): missing, or present but unreadable. }
-{ Is path a directory (stat's S_IFDIR)? }
+{ Is path a directory? }
 function sysIsDirectory(const path: string): boolean;
 function sysOpenError(const path: string): string;
 function sysFileExists(const path: string): boolean;
@@ -209,27 +209,23 @@ end;
 
 function c_access(path: pchar; mode: longint): longint; cdecl; external 'c' name 'access';
 
-{ stat's st_mode sits 4 bytes in (darwin arm64): st_dev (4 bytes), then
-  st_mode (2). The buffer is struct stat's whole 144 bytes: stat writes
-  all of it. }
-type
-  TCStat = packed record
-    dev: longint;
-    mode: word;
-    pad: array[0..137] of byte; { the rest of struct stat (144 bytes) }
-  end;
-
-function c_stat(path: pchar; st: pointer): longint; cdecl; external 'c' name 'stat';
+function c_opendir(path: pchar): pointer; cdecl; external 'c' name 'opendir';
+function c_closedir(d: pointer): longint; cdecl; external 'c' name 'closedir';
 
 function sysIsDirectory(const path: string): boolean;
 var
   cpath: string;
-  stats: TCStat;
+  d: pointer;
 begin
   toC(path, cpath);
-  if c_stat(@cpath[1], @stats) <> 0 then
-    exit(false);
-  sysIsDirectory := (stats.mode and $F000) = $4000;
+  d := c_opendir(@cpath[1]);
+  if d <> nil then
+  begin
+    c_closedir(d);
+    sysIsDirectory := true;
+  end
+  else
+    sysIsDirectory := false;
 end;
 
 function sysOpenError(const path: string): string;
@@ -257,9 +253,6 @@ begin
   sysFileExists := f <> nil;
 end;
 
-function c_opendir(path: pchar): pointer; cdecl; external 'c' name 'opendir';
-function c_closedir(d: pointer): longint; cdecl; external 'c' name 'closedir';
-
 procedure sysMakeDirs(const path: string);
 var
   i: longint;
@@ -274,17 +267,8 @@ begin
 end;
 
 function sysIsRegularFile(const path: string): boolean;
-var
-  cpath: string;
-  d: pointer;
 begin
-  if not sysFileExists(path) then
-    exit(false);
-  toC(path, cpath);
-  d := c_opendir(@cpath[1]);
-  if d <> nil then
-    c_closedir(d);
-  sysIsRegularFile := d = nil;
+  sysIsRegularFile := sysFileExists(path) and not sysIsDirectory(path);
 end;
 
 procedure sysRemoveFile(const path: string);
