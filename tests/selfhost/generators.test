@@ -21,7 +21,7 @@
 ; RUN: cp %S/../driver/Inputs/generators/jsongen.pas %S/../driver/Inputs/generators/customer.pas %S/../driver/Inputs/generators/main.pas %S/../driver/Inputs/generators-project/p3.json %t.proj
 ; RUN: cd %t.proj && env P3_RUNTIME_LIB=%p3-runtime-lib %t.p3
 ; RUN: %t.proj/out/main | FileCheck --check-prefix=CHECK %s
-; RUN: python3 -c "import glob; p = glob.glob('%t.proj/generated/customer-*.JsonGenerator.out')[0]; open(p, 'a').write('line\t{ cached }\n')"
+; RUN: python3 -c "import glob; p = glob.glob(r'%t.proj/generated/customer-*.JsonGenerator.out')[0]; open(p, 'a').write('line\t{ cached }\n')"
 ; RUN: cd %t.proj && env P3_RUNTIME_LIB=%p3-runtime-lib %t.p3
 ; RUN: cat %t.proj/generated/customer-*.impl.inc | FileCheck --check-prefix=CACHED %s
 ; RUN: sed -i.bak 's/Active: Boolean;/Active: Boolean; Age: Integer;/' %t.proj/customer.pas

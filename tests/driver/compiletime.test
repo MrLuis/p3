@@ -8,7 +8,7 @@
 ; RUN: cat %t.gen/.ct/main-*.I1.pas | FileCheck --check-prefix=PROG %s
 ; The output is reused while the program, the sources and the compiler are
 ; unchanged (Small, computed from F30, is computed again).
-; RUN: python3 -c "import glob; p = glob.glob('%t.gen/.ct/main-*.F30.out')[0]; s = open(p).read().replace('@p3ct@832040', '@p3ct@1234'); open(p, 'w').write(s)"
+; RUN: python3 -c "import glob; p = glob.glob(r'%t.gen/.ct/main-*.F30.out')[0]; s = open(p).read().replace('@p3ct@832040', '@p3ct@1234'); open(p, 'w').write(s)"
 ; RUN: %p3 --mode=objfpc --generated-dir=%t.gen %S/Inputs/compiletime/main.pas -o %t
 ; RUN: %t | FileCheck --check-prefix=CACHED %s
 ; Errors: a function outside the subset (diagnostics at the source's own

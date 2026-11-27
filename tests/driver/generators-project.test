@@ -7,7 +7,7 @@
 ; RUN: %t.proj/out/main | FileCheck --check-prefix=OUT %s
 ; RUN: cat %t.proj/generated/customer-*.intf.inc | FileCheck --check-prefix=INTF %s
 ; The output is kept: a line added to it is still there after another build.
-; RUN: python3 -c "import glob; p = glob.glob('%t.proj/generated/customer-*.JsonGenerator.out')[0]; open(p, 'a').write('line\t{ cached }\n')"
+; RUN: python3 -c "import glob; p = glob.glob(r'%t.proj/generated/customer-*.JsonGenerator.out')[0]; open(p, 'a').write('line\t{ cached }\n')"
 ; RUN: cd %t.proj && %p3-project
 ; RUN: cat %t.proj/generated/customer-*.impl.inc | FileCheck --check-prefix=CACHED %s
 ; A new field changes the model: the generator runs again.

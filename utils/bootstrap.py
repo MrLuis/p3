@@ -119,11 +119,11 @@ def pas_files():
 
 def module_ir(compiler, path, mode):
     """--emit-llvm output, diagnostics and exit status for one file."""
-    extra = []
+    extra = ["--generator-timeout=1"]
     # Units of the run tests live next to their programs.
     units = os.path.join(ROOT, "tests", "run", "Inputs", "units", "lib")
     if mode == "tp":
-        extra = ["-I", units]
+        extra.extend(["-I", units])
     r = subprocess.run([compiler, "--mode=" + mode, "--emit-llvm"] + extra +
                        [path, "-o", "-"], capture_output=True, timeout=60,
                        env=dict(os.environ, P3_UNIT_DIR=UNIT_DIR))

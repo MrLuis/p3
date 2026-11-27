@@ -24,7 +24,7 @@
 ; RUN: %p3 --mode=objfpc --generator=%S/Inputs/generators/jsongen.pas --generated-dir=%t.coll/gen %t.coll/b/main.pas -o %t.coll/b.exe
 ; RUN: %t.coll/a.exe | FileCheck --check-prefix=COLLA %s
 ; RUN: %t.coll/b.exe | FileCheck --check-prefix=COLLB %s
-; RUN: python3 -c "import glob, sys; sys.exit(0 if len(glob.glob('%t.coll/gen/customer-*.intf.inc')) == 2 else 1)"
+; RUN: python3 -c "import glob, sys; sys.exit(0 if len(glob.glob(r'%t.coll/gen/customer-*.intf.inc')) == 2 else 1)"
 ; COLLA: {"Id": 1, "Name": "", "Active": false}
 ; COLLB: {"Id": 2, "Name": "", "Active": false, "Tag": 9}
 ; OUT: {"Id": 7, "Name": "Ada", "Active": true}

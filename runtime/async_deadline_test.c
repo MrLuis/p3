@@ -13,6 +13,7 @@
  * deadline pre-empted by a byte at ~10 ms must report readable.
  */
 
+#include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -35,6 +36,7 @@ typedef struct {
 static int g_bits_timeout, g_bits_read;
 static long long g_dt_timeout, g_dt_read;
 static int g_abandoned;
+static atomic_int g_done;
 
 static void task_entry(PasTask *t) {
   Args *a = __pas_task_args(t);
@@ -48,6 +50,7 @@ static void task_entry(PasTask *t) {
   t0 = now_us();
   g_bits_read = __pas_task_wait_fd2(a->rfd_b, 0, 500);
   g_dt_read = now_us() - t0;
+  atomic_store_explicit(&g_done, 1, memory_order_release);
 }
 
 int main(void) {
@@ -74,7 +77,7 @@ int main(void) {
   struct timespec ts = {0, 10000000};   /* 10 ms */
   for (int i = 0; i < 50; i++) {
     nanosleep(&ts, NULL);
-    if (g_bits_read)      /* both scenarios ran */
+    if (atomic_load_explicit(&g_done, memory_order_acquire))
       break;
   }
 

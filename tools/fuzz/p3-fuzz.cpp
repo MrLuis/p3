@@ -42,7 +42,8 @@ static llvm::TargetMachine &targetMachine() {
     initializeAllLLVMTargets();
     SourceManager SM;
     DiagnosticsEngine Diags(SM, llvm::errs());
-    return createTargetMachine(llvm::sys::getDefaultTargetTriple(), 0, Diags);
+    return createTargetMachine(llvm::sys::getDefaultTargetTriple(), 0, "", "",
+                               Diags);
   }();
   return *TM;
 }

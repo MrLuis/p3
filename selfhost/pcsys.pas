@@ -105,6 +105,7 @@ function c_write(fd: longint; buf: pointer; count: int64): int64; cdecl; externa
 function c_fileno(f: pointer): longint; cdecl; external 'c' name 'fileno';
 function c_kill(pid, sig: longint): longint; cdecl; external 'c' name 'kill';
 function c_usleep(usec: cardinal): longint; cdecl; external 'c' name 'usleep';
+function c_time(t: pointer): int64; cdecl; external 'c' name 'time';
 function c_isatty(fd: longint): longint; cdecl; external 'c' name 'isatty';
 function c_strtod(s: pchar; endp: pointer): double; cdecl; external 'c' name 'strtod';
 function c_mkstemps(template: pchar; suffixLen: longint): longint; cdecl;
@@ -492,7 +493,7 @@ function sysExec(argv: PPCharArray; const inPath, outPath, errPath: string;
 var
   inF, outF, errF: pointer;
   inFd, outFd, errFd, pid, status, r: longint;
-  limitUs, elapsedUs: int64;
+  limitUs, elapsedUs, startSec: int64;
   stepUs: cardinal;
 begin
   timedOut := false;
@@ -568,6 +569,7 @@ begin
   begin
     limitUs := int64(timeoutSecs) * 1000000;
     elapsedUs := 0;
+    startSec := c_time(nil);
     stepUs := 100;
     repeat
       r := c_waitpid(pid, @status, 1);
@@ -575,7 +577,7 @@ begin
         break;
       if r < 0 then
         exit(-1);
-      if elapsedUs >= limitUs then
+      if (elapsedUs >= limitUs) or ((c_time(nil) - startSec) > timeoutSecs) then
       begin
         c_kill(pid, 9);
         c_waitpid(pid, @status, 0);

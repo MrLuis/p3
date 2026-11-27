@@ -44,7 +44,7 @@ if sys.platform == "win32":
     utils_dir = os.path.join(os.path.dirname(__file__), "..", "utils")
     crlf_diff = os.path.abspath(os.path.join(utils_dir, "lit-diff-crlf.py"))
     config.substitutions.append(
-        (r"(?<![-\w./])diff ",
+        (r"(?:(?<=^)|(?<=[|;&])|(?<=[|;&] ))diff ",
          '"%s" "%s" ' % (sys.executable.replace("\\", "/"), crlf_diff.replace("\\", "/"))))
     for root, _, files in os.walk(os.path.dirname(__file__)):
         for f in files:
