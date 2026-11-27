@@ -106,8 +106,8 @@ builds the runtime for Windows programs, once for each of Windows' C
 libraries: `lib/x86_64-w64-mingw32/msvcrt/` and
 `lib/x86_64-w64-mingw32/ucrt/libpascalrt.a`. `-DP3_CROSS_TARGETS=<triples>`
 picks the targets to build the runtime for (`OFF`: none). How p3 uses them
-is under **Cross-compiling** in the README's
-[Compiler parameters](../README.md#compiler-parameters).
+is under **Cross-compiling** in
+[Compiler parameters](compiler-params-and-directives.md#compiler-parameters).
 
 ## Installing
 
