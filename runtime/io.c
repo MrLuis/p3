@@ -18,6 +18,12 @@
  *
  *===------------------------------------------------------------------------===*/
 
+#if defined(_WIN32) && (!defined(_WIN32_WINNT) || _WIN32_WINNT < 0x0600)
+/* Vista APIs (InitOnceExecuteOnce): older MinGW-w64 headers default to XP. */
+#undef _WIN32_WINNT
+#define _WIN32_WINNT 0x0600
+#endif
+
 #include "pascalrt.h"
 
 #include <inttypes.h>
@@ -44,6 +50,10 @@ void __pas_longjmp(jmp_buf env, int value) __attribute__((noreturn));
 #include <unistd.h>
 #else
 #include <io.h>
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
 #endif
 
 /* Files are shared between threads: each operation on one (and on the list
@@ -67,10 +77,27 @@ static void io_unlock(int *unused) {
   (void)unused;
   pthread_mutex_unlock(&__pas_io_mutex);
 }
-#define IO_GUARD() int io_guard_ __attribute__((cleanup(io_unlock), unused)) = io_lock()
 #else
-#define IO_GUARD() (void)0
+CRITICAL_SECTION __pas_io_mutex; /* (external: see gen-runtime-ir.py) */
+INIT_ONCE __pas_io_once = INIT_ONCE_STATIC_INIT;
+static BOOL CALLBACK io_init(PINIT_ONCE once, PVOID param, PVOID *ctx) {
+  (void)once;
+  (void)param;
+  (void)ctx;
+  InitializeCriticalSection(&__pas_io_mutex);
+  return TRUE;
+}
+static int io_lock(void) {
+  InitOnceExecuteOnce(&__pas_io_once, io_init, NULL, NULL);
+  EnterCriticalSection(&__pas_io_mutex);
+  return 0;
+}
+static void io_unlock(int *unused) {
+  (void)unused;
+  LeaveCriticalSection(&__pas_io_mutex);
+}
 #endif
+#define IO_GUARD() int io_guard_ __attribute__((cleanup(io_unlock), unused)) = io_lock()
 
 enum { MODE_UNDEFINED, MODE_INSPECT, MODE_GENERATE };
 
@@ -173,6 +200,7 @@ struct PasExitFn {
 struct PasExitFn *__pas_exit_fns;
 
 void __pas_at_exit(void (*fn)(void *)) {
+  IO_GUARD();
   struct PasExitFn *e = malloc(sizeof *e);
   if (!e)
     __pas_runtime_error("out of memory");
@@ -689,23 +717,14 @@ static void writeText(PasFile *f, const char *p, size_t n) {
 static int writeStart(PasFile *f) {
   if (batchActive(f))
     return 0;
-#ifdef _WIN32
-  need_generate(f);
-  return 0;
-#else
   io_lock();
   need_generate(f);
   return 1;
-#endif
 }
 
 static void writeDone(int locked) {
-#ifndef _WIN32
   if (locked)
     io_unlock(NULL);
-#else
-  (void)locked;
-#endif
 }
 
 void __pas_write_begin(PasFile *f) {
@@ -722,17 +741,10 @@ void __pas_write_discard(PasFile *f) {
 void __pas_write_end(PasFile *f) {
   if (__pas_write_batch.file != f)
     return;
-#ifndef _WIN32
-  io_lock();
+  IO_GUARD();
   need_generate(f);
-  int locked = 1;
-#else
-  need_generate(f);
-  int locked = 0;
-#endif
   if (__pas_write_batch.len)
     fwrite(__pas_write_batch.data, 1, __pas_write_batch.len, f->fp);
-  writeDone(locked);
   __pas_write_batch.file = NULL;
   __pas_write_batch.len = 0;
 }
@@ -967,10 +979,12 @@ int32_t __pas_read_int(PasFile *f) {
 }
 
 int64_t __pas_read_int64(PasFile *f) {
+  IO_GUARD();
   return read_integer(f, INT64_MAX);
 }
 
 uint64_t __pas_read_uint64(PasFile *f) {
+  IO_GUARD();
   need_inspect(f);
   skip_blanks(f, "an integer");
   int c = peek(f);
