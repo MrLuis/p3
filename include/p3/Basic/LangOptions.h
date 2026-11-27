@@ -12,10 +12,18 @@ enum class LangMode {
   ObjFPC, ///< TP plus classes (Free Pascal's objfpc mode)
 };
 
+/// Memory safety level (--safe=).
+enum class SafeLevel {
+  Standard, ///< Standard ISO / TP / ObjFPC rules (default)
+  Checked,  ///< Runtime pointer and allocation checks
+  Verified, ///< Checked plus compile-time pointer rules ({$T+} forced)
+};
+
 /// Fine-grained feature switches derived from the dialect. Front-end stages
 /// test these flags rather than the mode itself.
 struct LangOptions {
   LangMode Mode = LangMode::ISO;
+  SafeLevel Safe = SafeLevel::Standard;
   /// Turbo/FPC reserved words (unit, string, shl, ...) and '@' as address-of.
   bool TPKeywords = false;
   /// Object Pascal reserved words (class, inherited, is, as, property).
@@ -26,9 +34,10 @@ struct LangOptions {
   /// unit was not computed (--emit-ast): X is left without a value, quietly.
   bool CompiletimeDeferred = false;
 
-  static LangOptions forMode(LangMode M) {
+  static LangOptions forMode(LangMode M, SafeLevel S = SafeLevel::Standard) {
     LangOptions LO;
     LO.Mode = M;
+    LO.Safe = S;
     bool TP = M != LangMode::ISO;
     LO.TPKeywords = TP;
     LO.ObjKeywords = M == LangMode::ObjFPC;

@@ -35,6 +35,7 @@ struct CompilerOptions {
   std::string OutputFile;   ///< empty = derive from input / action
   Action Act = Action::EmitExe;
   LangMode Mode = LangMode::ISO;
+  SafeLevel Safe = SafeLevel::Standard;
   unsigned OptLevel = 0;    ///< 0..3
   /// -Os (1) / -Oz (2): optimize for size rather than speed.
   unsigned SizeLevel = 0;
@@ -104,8 +105,8 @@ struct CompilerOptions {
   bool NoProject = false;
   /// Options with a value given on the command line, which override the
   /// project file's settings (flags only add to them).
-  bool GivenOutput = false, GivenMode = false, GivenOptLevel = false,
-       GivenTarget = false, GivenErrorLimit = false;
+  bool GivenOutput = false, GivenMode = false, GivenSafe = false,
+       GivenOptLevel = false, GivenTarget = false, GivenErrorLimit = false;
 };
 
 /// Default output path for an action, e.g. "dir/hello.pas" + EmitObj ->

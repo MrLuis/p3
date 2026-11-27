@@ -18,12 +18,13 @@ type
   TProjectSettings = record
     path: string;          { the file read ('': none) }
     base: string;          { its directory: '' or ending in '/' }
-    hasMain, hasOutput, hasTarget, hasCPU, hasMode, hasOptLevel,
+    hasMain, hasOutput, hasTarget, hasCPU, hasMode, hasSafe, hasOptLevel,
     hasErrorLimit, hasGeneratedDir, hasGeneratorTimeout: boolean;
     main, output, target, cpu: string; { main, output: relative to base }
     generatedDir: string;   { relative to base }
     generatorTimeout: longint;
     mode: TLangMode;
+    safe: TSafeLevel;
     optLevel, errorLimit: longint;
     { flags, false when absent }
     debug, separateUnits, wholeProgram, warningsAsErrors: boolean;
@@ -687,7 +688,7 @@ begin
         s.hasGeneratorTimeout := false;
       end;
     end
-    else if (n = 'warnings') or (n = 'checks') then
+    else if (n = 'warnings') or (n = 'checks') or (n = 'safety') then
     begin
       if v^.kind <> jObject then
       begin
@@ -711,6 +712,21 @@ begin
           getBool(sv, sn, s.rangeChecks)
         else if (n = 'checks') and (sub^.name = 'overflow') then
           getBool(sv, sn, s.overflowChecks)
+        else if (n = 'safety') and (sub^.name = 'safe') then
+        begin
+          s.hasSafe := true;
+          if (sv^.kind = jString) and (sv^.text = 'standard') then
+            s.safe := slStandard
+          else if (sv^.kind = jString) and (sv^.text = 'checked') then
+            s.safe := slChecked
+          else if (sv^.kind = jString) and (sv^.text = 'verified') then
+            s.safe := slVerified
+          else
+          begin
+            s.hasSafe := false;
+            bad(sv, sn, '"standard", "checked" or "verified"');
+          end;
+        end
         else
           unknown(sub, prefix);
       end;
@@ -735,6 +751,8 @@ begin
   s.hasTarget := false;
   s.hasCPU := false;
   s.hasMode := false;
+  s.hasSafe := false;
+  s.safe := slStandard;
   s.hasOptLevel := false;
   s.hasErrorLimit := false;
   s.hasGeneratedDir := false;

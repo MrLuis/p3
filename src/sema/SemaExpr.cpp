@@ -1482,9 +1482,11 @@ Type *Checker::visitAddrOfExpr(AddrOfExpr *E){
                 {E->getOperand()->getRange()});
     return errorType();
   }
-  if (!T->isUntyped() && Directives &&
-      Directives->isEnabled(CheckDirectives::TypedAddress, E->getBeginLoc(),
-                            false))
+  bool Typed = LangOpts.Safe == SafeLevel::Verified ||
+               (Directives &&
+                Directives->isEnabled(CheckDirectives::TypedAddress,
+                                      E->getBeginLoc(), false));
+  if (!T->isUntyped() && Typed)
     return Ctx.create<PointerType>(T, /*Untyped=*/false, /*TypedAddr=*/true);
   return Ctx.getUntypedPointerType();
 }

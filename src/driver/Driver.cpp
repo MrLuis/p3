@@ -305,7 +305,7 @@ bool writeInterfaceFile(UnitDecl &Unit, llvm::ArrayRef<UnitDecl *> Deps,
 //===----------------------------------------------------------------------===//
 
 Driver::Driver(CompilerOptions O, llvm::raw_ostream &DiagOS)
-    : Opts(std::move(O)), LangOpts(LangOptions::forMode(Opts.Mode)),
+    : Opts(std::move(O)), LangOpts(LangOptions::forMode(Opts.Mode, Opts.Safe)),
       Diags(SM, DiagOS) {
   switch (Opts.Color) {
   case ColorMode::Always: Diags.setShowColors(true); break;
@@ -316,7 +316,7 @@ Driver::Driver(CompilerOptions O, llvm::raw_ostream &DiagOS)
 }
 
 void Driver::configure() {
-  LangOpts = LangOptions::forMode(Opts.Mode);
+  LangOpts = LangOptions::forMode(Opts.Mode, Opts.Safe);
   Diags.setErrorLimit(Opts.ErrorLimit);
   Diags.setWarningsAsErrors(Opts.WarningsAsErrors);
   if (!Opts.WarnUnusedVariables)

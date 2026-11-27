@@ -391,6 +391,8 @@ compiler).
 **Language**
 
 - `--mode=<iso|tp|objfpc>` — language dialect (default: `iso`)
+- `--safe=<standard|checked|verified>` — memory safety level (default: `standard`;
+  `verified` forces `{$T+}` typed addresses on)
 
 **Source generators**
 
@@ -544,6 +546,7 @@ the project in value settings (`mode`, `output`, `optimize`, `target`, `cpu`,
 | `cpu` | the target CPU (like `-mcpu`) | generic |
 | `warnings` | object: `asErrors`, `unusedVariable`, `deprecated` | all `true` |
 | `checks` | object: `range`, `overflow` | all `true` |
+| `safety` | object: `safe` (`"standard"`, `"checked"`, or `"verified"`) | `"standard"` |
 
 A duplicate setting is an error; an unknown one is warned about and ignored.
 Example (`examples/httploopserver/p3.json`):

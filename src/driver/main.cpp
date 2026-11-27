@@ -114,6 +114,18 @@ static cl::opt<LangMode>
                                "Turbo/Free Pascal extensions and classes")),
          cl::cat(P3Category));
 
+static cl::opt<SafeLevel>
+    Safe("safe", cl::desc("Memory safety level:"),
+         cl::init(SafeLevel::Standard),
+         cl::values(clEnumValN(SafeLevel::Standard, "standard",
+                               "Standard language rules (default)"),
+                    clEnumValN(SafeLevel::Checked, "checked",
+                               "Runtime safety checks"),
+                    clEnumValN(SafeLevel::Verified, "verified",
+                               "Checked plus compile-time pointer checks "
+                               "(forces {$T+})")),
+         cl::cat(P3Category));
+
 static cl::opt<ColorMode>
     Color("fdiagnostics-color", cl::desc("Colorize diagnostics:"), cl::init(ColorMode::Auto),
           cl::values(clEnumValN(ColorMode::Auto, "auto", "If stderr is a tty"),
@@ -258,6 +270,7 @@ int main(int argc, char **argv) {
   Opts.OutputFile = OutputFile;
   Opts.Act = Act;
   Opts.Mode = Mode;
+  Opts.Safe = Safe;
   Opts.OptLevel = OptLevel;
   Opts.FastMath = FastMathFlag;
   if (OptimizeSize || OptimizeSizeAggressive) {
@@ -320,6 +333,7 @@ int main(int argc, char **argv) {
   Opts.NoProject = NoProject;
   Opts.GivenOutput = OutputFile.getNumOccurrences() > 0;
   Opts.GivenMode = Mode.getNumOccurrences() > 0;
+  Opts.GivenSafe = Safe.getNumOccurrences() > 0;
   Opts.GivenOptLevel = OptLevel.getNumOccurrences() > 0;
   Opts.GivenTarget = TargetTriple.getNumOccurrences() > 0;
   Opts.GivenErrorLimit = ErrorLimit.getNumOccurrences() > 0;

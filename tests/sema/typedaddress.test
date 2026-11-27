@@ -13,6 +13,28 @@
 ; RUN: printf '{$typedaddress bad} program p; begin end.\n' | not %p3 --mode=objfpc -c - -o %t.bad.o 2>&1 | FileCheck --check-prefix=BADARG %s
 ; BADARG: error: expected {$typedaddress on} or {$typedaddress off}
 
+; --safe=verified forces {$T+} ON even without {$T+} and ignores {$T-}/{$typedaddress off}.
+; RUN: printf 'program p; type PInt = ^integer; var b: byte; p: PInt; begin p := @b; {$T-} p := @b; {$typedaddress off} p := @b; end.\n' | not %p3 --mode=tp --safe=verified -ferror-limit=0 -c - -o %t.ver.o 2>&1 | FileCheck --check-prefix=VERIFIED %s
+; VERIFIED: <stdin>:1:64: error: assigning to 'PInt' from incompatible type '^byte'
+; VERIFIED: <stdin>:1:79: error: assigning to 'PInt' from incompatible type '^byte'
+; VERIFIED: <stdin>:1:108: error: assigning to 'PInt' from incompatible type '^byte'
+; VERIFIED-NOT: error:
+
+; --safe=checked keeps {$T} off by default (like standard).
+; RUN: printf 'program p; type PInt = ^integer; var b: byte; p: PInt; begin p := @b; end.\n' | %p3 --mode=tp --safe=checked -c - -o %t.chk.o 2>&1 | count 0
+
+; Invalid --safe value matches LLVM cl::opt / selfhost diagnostics.
+; RUN: not %p3 --safe=bogus 2>&1 | FileCheck --check-prefix=BADSAFE %s
+; BADSAFE: for the --safe option: Cannot find option named 'bogus'!
+
+; p3.json "safety": { "safe": "verified" } enables forced {$T+}, and CLI --safe=standard overrides it.
+; RUN: rm -rf %t.proj && mkdir -p %t.proj
+; RUN: printf '{\n  "mode": "tp",\n  "safety": { "safe": "verified" }\n}\n' > %t.proj/p3.json
+; RUN: printf 'program p; type PInt = ^integer; var b: byte; p: PInt; begin p := @b; end.\n' > %t.proj/main.pas
+; RUN: not %p3-project --project=%t.proj/p3.json -c %t.proj/main.pas -o %t.proj/main.o 2>&1 | FileCheck --check-prefix=PROJVER %s
+; PROJVER: main.pas:1:64: error: assigning to 'PInt' from incompatible type '^byte'
+; RUN: %p3-project --project=%t.proj/p3.json --safe=standard -c %t.proj/main.pas -o %t.proj/main.o 2>&1 | count 0
+
 ; Valid typed address usage compiles and runs identically.
 ; RUN: %p3 --mode=objfpc %S/Inputs/typedaddress.pas -o %t && %t | FileCheck --check-prefix=OUT %s
 ; OUT: 10

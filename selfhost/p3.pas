@@ -16,6 +16,7 @@ var
   inputFile, outputFile: string;
   action: TAction;
   mode: TLangMode;
+  safeLevel: TSafeLevel;
   errorLimit: longint;
   werror, noUnusedVariable, noDeprecated: boolean;
   rangeChecksOn, overflowChecksOn, debugInfo, separateUnits: boolean;
@@ -176,6 +177,10 @@ begin
   helpLine('  --no-project                 - Do not read a project file (p3.json)');
   helpLine('  -o <file>                    - Write output to <file>');
   helpLine('  --project=<file>             - Read project settings from <file> (default: the first p3.json in the input file''s directory or its parents)');
+  helpLine('  --safe=<value>               - Memory safety level:');
+  helpLine('    =standard                  -   Standard language rules (default)');
+  helpLine('    =checked                   -   Runtime safety checks');
+  helpLine('    =verified                  -   Checked plus compile-time pointer checks (forces {$T+})');
   helpLine('  --target=<triple>            - Target triple (default: host)');
 end;
 
@@ -188,10 +193,10 @@ const
     'fno-range-checks', 'fseparate-units', 'g', 'no-project', 'fzero-init',
     'fno-zero-init', 'fno-inline-runtime', 'fkeep-unused', 'ffast-math', 'Os', 'Oz',
     'fno-internalize-runtime', 'fwhole-program');
-  numValueOpts = 17;
+  numValueOpts = 18;
   valueOptNames: array[1..numValueOpts] of string = (
-    'o', 'mode', 'fdiagnostics-color', 'ferror-limit', 'target', 'I', 'O', 'L', 'l',
-    'd', 'project', 'mcpu', 'mattr', 'generator', 'generated-dir',
+    'o', 'mode', 'safe', 'fdiagnostics-color', 'ferror-limit', 'target', 'I', 'O',
+    'L', 'l', 'd', 'project', 'mcpu', 'mattr', 'generator', 'generated-dir',
     'generator-timeout', 'emit-model');
 
 function isFlag(const name: string): boolean;
@@ -297,7 +302,7 @@ var
     value given on the command line, which override its settings }
   projectFile: string;
   noProject: boolean;
-  givenOutput, givenMode, givenOptLevel, givenTarget, givenErrorLimit: boolean;
+  givenOutput, givenMode, givenSafe, givenOptLevel, givenTarget, givenErrorLimit: boolean;
 
 procedure parseArgs; forward;
 
@@ -329,6 +334,8 @@ begin
   end;
   if s.hasMode and not givenMode then
     mode := s.mode;
+  if s.hasSafe and not givenSafe then
+    safeLevel := s.safe;
   if s.hasOptLevel and not givenOptLevel then
     optLevel := s.optLevel;
   if s.hasTarget and not givenTarget then
@@ -417,6 +424,7 @@ begin
   targetTriple := '';
   action := actExe;
   mode := lmISO;
+  safeLevel := slStandard;
   errorLimit := 20;
   werror := false;
   noUnusedVariable := false;
@@ -437,6 +445,7 @@ begin
   noProject := false;
   givenOutput := false;
   givenMode := false;
+  givenSafe := false;
   givenOptLevel := false;
   givenTarget := false;
   givenErrorLimit := false;
@@ -549,6 +558,19 @@ begin
         mode := lmObjFPC
       else if value = 'iso' then
         mode := lmISO
+      else
+        clOptionError(name, 'Cannot find option named ''' + value + '''!');
+    end
+    else if name = 'safe' then
+    begin
+      givenSafe := true;
+      value := takeValue;
+      if value = 'standard' then
+        safeLevel := slStandard
+      else if value = 'checked' then
+        safeLevel := slChecked
+      else if value = 'verified' then
+        safeLevel := slVerified
       else
         clOptionError(name, 'Cannot find option named ''' + value + '''!');
     end
@@ -1441,7 +1463,7 @@ begin
     if units.count = 0 then
       loadUnits(uses_, true);
   end;
-  if diagHasErrors or not semaCheckUnit(u, units, mode) then
+  if diagHasErrors or not semaCheckUnit(u, units, mode, safeLevel) then
     exit;
   if (action = actObj) and (outputFile <> '-') then
   begin
@@ -1670,7 +1692,7 @@ begin
       end;
       semaOK := false;
       if not diagHasErrors then
-        semaOK := semaCheck(prog, units, mode, separateUnits);
+        semaOK := semaCheck(prog, units, mode, safeLevel, separateUnits);
       if action = actAST then
       begin
         { the dump is written even after errors; types appear if Sema ran }

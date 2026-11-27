@@ -6757,7 +6757,8 @@ begin
     errR(op^.b, nodeRange(op));
     exit;
   end;
-  if (t^.kind <> tyUntyped) and checkEnabled(swTypedAddress, e^.b, false) then
+  if (t^.kind <> tyUntyped) and
+     ((safeLevel = slVerified) or checkEnabled(swTypedAddress, e^.b, false)) then
     visitAddrOf := newTypedAddrPointerType(t)
   else
     visitAddrOf := tyUntypedPointerT;

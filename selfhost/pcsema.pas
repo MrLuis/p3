@@ -19,10 +19,11 @@ var
 { Checks the units (dependencies first) and the program. Returns true if
   they are valid. }
 function semaCheck(prog: PDecl; const units: TPtrList; m: TLangMode;
-                   separateUnits: boolean): boolean;
+                   safe: TSafeLevel; separateUnits: boolean): boolean;
 { Checks unit u, compiled on its own; deps (dependency order) are the
   units it uses, directly or not, of which only the interfaces matter. }
-function semaCheckUnit(u: PDecl; const deps: TPtrList; m: TLangMode): boolean;
+function semaCheckUnit(u: PDecl; const deps: TPtrList; m: TLangMode;
+                       safe: TSafeLevel): boolean;
 { The predeclared names (of PName, lower case) of mode m, which
   declared(NAME) in $IF sees. }
 function standardNames(m: TLangMode): TPtrList;
@@ -81,6 +82,7 @@ type
 
 var
   mode: TLangMode;
+  safeLevel: TSafeLevel;
   standard, cur: PScope;
   unitInterfaces: TIntMap;    { unit name id -> PScope }
   curUnitInterface: PScope;   { while checking a unit's implementation }
@@ -12589,9 +12591,10 @@ begin
   cur := standard;
 end;
 
-procedure semaInit(m: TLangMode);
+procedure semaInit(m: TLangMode; safe: TSafeLevel);
 begin
   mode := m;
+  safeLevel := safe;
   bufInit(msg);
   listInit(activeFors);
   listInit(pendingPointers);
@@ -12637,20 +12640,20 @@ function standardNames(m: TLangMode): TPtrList;
 var
   names: TPtrList;
 begin
-  semaInit(m);
+  semaInit(m, slStandard);
   listInit(names);
   scopeNames(standard, names);
   standardNames := names;
 end;
 
 function semaCheck(prog: PDecl; const units: TPtrList; m: TLangMode;
-                   separateUnits: boolean): boolean;
+                   safe: TSafeLevel; separateUnits: boolean): boolean;
 var
   errorsBefore, i: longint;
   programScope: PScope;
 begin
   errorsBefore := diagNumErrors;
-  semaInit(m);
+  semaInit(m, safe);
   for i := 0 to units.count - 1 do
     checkUnit(PDecl(listGet(units, i)), separateUnits);
   checkProgramParams(prog);
@@ -12666,12 +12669,13 @@ begin
   semaCheck := (diagNumErrors = errorsBefore) and not diagShouldStop;
 end;
 
-function semaCheckUnit(u: PDecl; const deps: TPtrList; m: TLangMode): boolean;
+function semaCheckUnit(u: PDecl; const deps: TPtrList; m: TLangMode;
+                       safe: TSafeLevel): boolean;
 var
   errorsBefore, i: longint;
 begin
   errorsBefore := diagNumErrors;
-  semaInit(m);
+  semaInit(m, safe);
   for i := 0 to deps.count - 1 do
     checkUnit(PDecl(listGet(deps, i)), true);
   checkUnit(u, false);

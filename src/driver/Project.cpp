@@ -405,6 +405,7 @@ public:
 struct Settings {
   std::optional<std::string> Main, Output, Target, CPU, GeneratedDir;
   std::optional<LangMode> Mode;
+  std::optional<SafeLevel> Safe;
   std::optional<unsigned> OptLevel, ErrorLimit, GeneratorTimeout;
   std::optional<bool> Debug, SeparateUnits, WholeProgram, WarningsAsErrors,
       WarnUnusedVariables, WarnDeprecated, RangeChecks, OverflowChecks;
@@ -547,7 +548,7 @@ public:
           bad(V, N, "an integer from 1 to 86400");
           S.GeneratorTimeout.reset();
         }
-      } else if (N == "warnings" || N == "checks") {
+      } else if (N == "warnings" || N == "checks" || N == "safety") {
         if (V.K != JValue::Object) {
           bad(V, N, "an object");
           continue;
@@ -567,7 +568,16 @@ public:
             S.RangeChecks = boolean(SV, SN);
           else if (N == "checks" && Sub.Name == "overflow")
             S.OverflowChecks = boolean(SV, SN);
-          else
+          else if (N == "safety" && Sub.Name == "safe") {
+            if (SV.K == JValue::String && SV.Text == "standard")
+              S.Safe = SafeLevel::Standard;
+            else if (SV.K == JValue::String && SV.Text == "checked")
+              S.Safe = SafeLevel::Checked;
+            else if (SV.K == JValue::String && SV.Text == "verified")
+              S.Safe = SafeLevel::Verified;
+            else
+              bad(SV, SN, "\"standard\", \"checked\" or \"verified\"");
+          } else
             unknown(Sub, Prefix);
         }
       } else {
@@ -642,6 +652,8 @@ bool p3::applyProjectFile(CompilerOptions &Opts, SourceManager &SM,
   }
   if (S.Mode && !Opts.GivenMode)
     Opts.Mode = *S.Mode;
+  if (S.Safe && !Opts.GivenSafe)
+    Opts.Safe = *S.Safe;
   if (S.OptLevel && !Opts.GivenOptLevel)
     Opts.OptLevel = *S.OptLevel;
   if (S.Target && !Opts.GivenTarget)

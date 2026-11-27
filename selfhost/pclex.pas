@@ -21,6 +21,7 @@ uses pcsys, pcutil, pcdiag;
 
 type
   TLangMode = (lmISO, lmTP, lmObjFPC);
+  TSafeLevel = (slStandard, slChecked, slVerified);
 
   TToken = record
     kind: TTokenKind;
