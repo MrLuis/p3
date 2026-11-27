@@ -14,6 +14,10 @@ void Checker::resolveSignature(RoutineDecl *R){
     P->setOwner(R);
     P->setType(resolveType(P->getTypeSpec()));
     checkParamDefault(P);
+    if (P->getType() && P->getType()->isUntyped())
+      warnUnsafe(P->getLocation(),
+                 "untyped parameter '" + P->getName().Spelling + "'",
+                 {P->getName().getRange()});
     if (!P->isVarParam() && containsFile(P->getType()))
       Diags.error(P->getLocation(),
                   "file parameter '" + P->getName().Spelling +
@@ -1791,6 +1795,9 @@ bool Checker::isCCallback(RoutineType *RT){
 /// parameters and result of types that have a C equivalent; the library
 /// and symbol names: string constants.
 void Checker::checkExternal(RoutineDecl *R){
+  warnUnsafe(R->getName().Loc,
+             "external routine '" + R->getName().Spelling + "'",
+             {R->getName().getRange()});
   if (CurRoutine)
     Diags.error(R->getName().Loc,
                 "external routine '" + R->getName().Spelling +
@@ -2333,6 +2340,10 @@ void Checker::checkCallArgs(llvm::ArrayRef<VarDecl *> Params, Decl *CalleeDecl,
         RT && RT->getResult() && isManaged(RT->getResult()))
       markUsesManaged();
   auto *RD = llvm::dyn_cast_or_null<RoutineDecl>(CalleeDecl);
+  if (RD && RD->isExternal())
+    warnUnsafe(Callee.Loc,
+               "call to external routine '" + Callee.Spelling + "' outside 'unsafe'",
+               {Callee.getRange()});
   bool VarArgs = RD && RD->isVarArgs();
   if (!acceptsArgCount(Params, Args.size()) &&
       !(VarArgs && Args.size() > Params.size())) {

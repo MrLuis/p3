@@ -384,6 +384,7 @@ class Checker : public StmtVisitor<Checker>,
 
   static std::string labelKey(llvm::StringRef Name) { return "#" + Name.str(); }
 
+  bool CheckingInterfaceOnly = false;
   Type *errorType() { return Ctx.getErrorType(); }
   bool isISO() const { return LangOpts.Mode == LangMode::ISO; }
   bool isPointerMathOff(SourceLocation L) const {
@@ -392,9 +393,20 @@ class Checker : public StmtVisitor<Checker>,
             Directives->stateAt(CheckDirectives::PointerMath, L) ==
                 CheckDirectives::Off);
   }
+  bool isPointerMathChecked(SourceLocation L) const {
+    return Directives &&
+           Directives->stateAt(CheckDirectives::PointerMath, L) ==
+               CheckDirectives::Checked;
+  }
   bool isUnsafe(SourceLocation L) const {
     return Directives &&
            Directives->isEnabled(CheckDirectives::Unsafe, L, false);
+  }
+  void warnUnsafe(SourceLocation L, const llvm::Twine &Msg,
+                  llvm::ArrayRef<SourceRange> Ranges = {}) const {
+    if (!CheckingInterfaceOnly && L.isValid() && !isUnsafe(L) &&
+        Diags.isWarningEnabled("unsafe") && !Diags.isLibraryLocation(L))
+      Diags.warning("unsafe", L, Msg, Ranges);
   }
 
   //===--------------------------------------------------------------------===//

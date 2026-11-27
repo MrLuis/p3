@@ -12,6 +12,16 @@ using namespace p3;
 DiagnosticsEngine::DiagnosticsEngine(SourceManager &SM, llvm::raw_ostream &OS)
     : SM(SM), OS(OS) {}
 
+bool DiagnosticsEngine::isLibraryLocation(SourceLocation L) const {
+  if (!L.isValid())
+    return false;
+  PresumedLoc P = SM.getPresumedLoc(L);
+  if (!P.isValid())
+    return false;
+  return P.Filename.contains("/lib/pascal/") ||
+         P.Filename.contains("\\lib\\pascal\\");
+}
+
 void DiagnosticsEngine::report(Severity S, SourceLocation Loc,
                                const llvm::Twine &Msg,
                                llvm::ArrayRef<SourceRange> Ranges) {

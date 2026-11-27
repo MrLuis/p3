@@ -68,6 +68,8 @@ struct CompilerOptions {
   bool WarningsAsErrors = false;
   bool WarnUnusedVariables = true; ///< -Wno-unused-variable disables
   bool WarnDeprecated = true;      ///< -Wno-deprecated disables
+  /// --Wunsafe / -Wno-unsafe (implied by --safe=checked if omitted).
+  std::optional<bool> WarnUnsafe;
   bool RangeChecks = true;    ///< -fno-range-checks disables
   bool OverflowChecks = true; ///< -fno-overflow-checks disables
   /// -ffast-math: set the fast-math flags on floating-point instructions

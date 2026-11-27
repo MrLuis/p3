@@ -75,6 +75,8 @@ procedure diagWarningR(loc: TLoc; const msg: string; r: TRange);
 { A warning in a named group, "... [-W<group>]", unless the group is off. }
 procedure diagWarningGroupR(const group: string; loc: TLoc; const msg: string;
                             r: TRange);
+procedure diagWarningGroupBufR(const group: string; loc: TLoc; var msg: TBuf;
+                               r: TRange);
 procedure diagNote(loc: TLoc; const msg: string);
 procedure diagNoteR(loc: TLoc; const msg: string; r: TRange);
 procedure diagFatal(loc: TLoc; const msg: string);
@@ -658,11 +660,18 @@ begin
     exit;
   bufInit(b);
   bufAdd(b, msg);
-  bufAdd(b, ' [-W');
-  bufAdd(b, group);
-  bufAdd(b, ']');
+  bufAdd(b, ' [-W' + group + ']');
   diagReportBuf(sevWarning, loc, b, r, noRange);
   bufFree(b);
+end;
+
+procedure diagWarningGroupBufR(const group: string; loc: TLoc; var msg: TBuf;
+                               r: TRange);
+begin
+  if not diagWarningEnabled(group) then
+    exit;
+  bufAdd(msg, ' [-W' + group + ']');
+  diagReportBuf(sevWarning, loc, msg, r, noRange);
 end;
 
 procedure diagNote(loc: TLoc; const msg: string);

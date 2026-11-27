@@ -515,8 +515,13 @@ void Checker::checkIncDec(ProcCallStmt *S){
       Diags.error(Callee.Loc,
                   "pointer arithmetic is disabled under {$pointermath off}",
                   {S->getRange()});
-    else if (T->isPointer() && NilPointersHere)
-      requireNotNil(Args[0], "but pointer arithmetic is performed on it");
+    else if (T->isPointer()) {
+      if (NilPointersHere)
+        requireNotNil(Args[0], "but pointer arithmetic is performed on it");
+      if (!isPointerMathChecked(S->getBeginLoc()))
+        warnUnsafe(Callee.Loc, "unchecked pointer arithmetic outside 'unsafe'",
+                   {S->getRange()});
+    }
   }
   if (Args.size() == 2) {
     Type *N = check(Args[1]);
@@ -814,6 +819,8 @@ Type *Checker::checkTypecast(CallExpr *E, TypeDecl *TD){
     return T;
   if (AT->isUntyped()) { // Turbo/FPC: the untyped parameter seen as a T
     E->setVarCast();
+    warnUnsafe(E->getBeginLoc(), "typecast of untyped parameter outside 'unsafe'",
+               {E->getRange()});
     return T;
   }
   if (T->isAnsiString() && (AT->isStringish() || AT->isPointer()))
@@ -841,8 +848,22 @@ Type *Checker::checkTypecast(CallExpr *E, TypeDecl *TD){
       (T->isInterface() &&
        (AT->isInterface() || AT->isNil() ||
         (AT->isClass() &&
-         llvm::cast<ClassType>(AT)->findInterface(llvm::cast<InterfaceType>(T))))))
+         llvm::cast<ClassType>(AT)->findInterface(llvm::cast<InterfaceType>(T)))))) {
+    if ((T->isPointer() &&
+         (AT->isClass() || AT->isDynArray() || AT->isArrayOfConst())) ||
+        ((T->isClass() || T->isDynArray()) && AT->isPointer()))
+      warnUnsafe(E->getBeginLoc(),
+                 "unsafe cast from " + quoted(AT) + " to " + quoted(T) +
+                     " outside 'unsafe'",
+                 {E->getRange()});
+    else if (T->isPointer() && AT->isPointer() && !T->isUntyped() &&
+             !areCompatible(T, AT))
+      warnUnsafe(E->getBeginLoc(),
+                 "unsafe pointer cast from " + quoted(AT) + " to " + quoted(T) +
+                     " outside 'unsafe'",
+                 {E->getRange()});
     return T;
+  }
   if (RoutineDecl *Op = findConversion(AT, T, /*Explicit=*/true)) {
     Args[0]->setConversion(Op, T); // a record's Explicit or := operator
     return T;
@@ -1146,6 +1167,8 @@ void Checker::checkMemoryProc(ProcCallStmt *S, BuiltinKind K){
   for (Type *X : T)
     if (X->isError())
       return;
+  warnUnsafe(Callee.Loc, "'" + Callee.Spelling + "' used outside 'unsafe'",
+             {S->getRange()});
   switch (K) {
   case BuiltinKind::GetMem:
   case BuiltinKind::ReallocMem:

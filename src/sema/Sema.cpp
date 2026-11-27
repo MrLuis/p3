@@ -557,6 +557,8 @@ void Checker::importUnits(Scope &S, llvm::ArrayRef<Identifier> Uses){
 /// only its interface is declared, for the units and program using it.
 void Checker::checkUnit(UnitDecl &U, bool InterfaceOnly){
   CurModule = &U;
+  bool SavedInterfaceOnly = CheckingInterfaceOnly;
+  CheckingInterfaceOnly = InterfaceOnly;
   auto Iface = std::make_unique<Scope>(&Standard);
   importUnits(*Iface, U.getInterfaceUses());
   Cur = Iface.get();
@@ -574,12 +576,14 @@ void Checker::checkUnit(UnitDecl &U, bool InterfaceOnly){
       if (auto *R = llvm::dyn_cast<RoutineDecl>(D); R && R->isGeneric())
         declareRoutine(R);
     CurUnitInterface = nullptr;
+    CheckingInterfaceOnly = SavedInterfaceOnly;
     UnitInterfaces[U.getName().Name] = Iface.get();
     UnitScopes.push_back(std::move(Iface));
     UnitScopes.push_back(std::move(Impl));
     Cur = &Standard;
     return;
   }
+  CheckingInterfaceOnly = SavedInterfaceOnly;
 
   auto Impl = std::make_unique<Scope>(Iface.get());
   importUnits(*Impl, U.getImplementationUses());

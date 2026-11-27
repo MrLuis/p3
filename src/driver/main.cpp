@@ -152,6 +152,16 @@ static cl::opt<bool>
                      cl::desc("Do not warn about unused variables"),
                      cl::cat(P3Category));
 
+static cl::opt<bool>
+    WUnsafe("Wunsafe",
+            cl::desc("Warn about unsafe constructs outside 'unsafe' regions"),
+            cl::cat(P3Category));
+
+static cl::opt<bool> NoWUnsafe(
+    "Wno-unsafe",
+    cl::desc("Do not warn about unsafe constructs outside 'unsafe' regions"),
+    cl::cat(P3Category));
+
 static cl::opt<bool> NoRangeChecks(
     "fno-range-checks",
     cl::desc("Disable runtime range checks (subranges, array indices, ...)"),
@@ -319,6 +329,9 @@ int main(int argc, char **argv) {
                                                        ZeroInitOff.getPosition());
   Opts.WarnUnusedVariables = !NoUnusedVariable;
   Opts.WarnDeprecated = !NoDeprecated;
+  if (WUnsafe || NoWUnsafe)
+    Opts.WarnUnsafe = !NoWUnsafe || (WUnsafe && WUnsafe.getPosition() >
+                                                    NoWUnsafe.getPosition());
   Opts.OverflowChecks = !NoOverflowChecks;
   Opts.FastMath = FastMathFlag;
   // A bare -fprofile-instr-generate takes the runtime's default profile

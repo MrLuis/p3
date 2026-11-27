@@ -19,6 +19,8 @@ var
   safeLevel: TSafeLevel;
   errorLimit: longint;
   werror, noUnusedVariable, noDeprecated: boolean;
+  { --Wunsafe / --Wno-unsafe (0: default, on for --safe=checked) }
+  warnUnsafeOpt: longint;
   rangeChecksOn, overflowChecksOn, debugInfo, separateUnits: boolean;
   { -ffast-math: set the fast-math flags on floating-point instructions }
   fastMath: boolean;
@@ -143,7 +145,9 @@ begin
   helpLine('      -c                         - Emit an object file (.o)');
   helpLine('  --Werror                     - Treat warnings as errors');
   helpLine('  --Wno-deprecated             - Do not warn about uses of deprecated (experimental, platform, library, unimplemented) declarations');
+  helpLine('  --Wno-unsafe                 - Do not warn about unsafe constructs outside ''unsafe'' regions');
   helpLine('  --Wno-unused-variable        - Do not warn about unused variables');
+  helpLine('  --Wunsafe                    - Warn about unsafe constructs outside ''unsafe'' regions');
   helpLine('  -d <name>                    - Define a symbol for conditional compilation ({$IFDEF})');
   helpLine('  --emit-model=<attr>          - Print the generator model of the types marked [attr] (for testing)');
   helpLine('  --fdiagnostics-color=<value> - Colorize diagnostics:');
@@ -185,11 +189,11 @@ begin
 end;
 
 const
-  numFlags = 26;
+  numFlags = 28;
   flagNames: array[1..numFlags] of string = (
     'help', 'help-list', 'version', 'emit-tokens', 'emit-ast', 'emit-parse-tree',
     'emit-llvm', 'S', 'c', 'Werror', 'Wno-unused-variable', 'Wno-deprecated',
-    'fno-overflow-checks',
+    'Wunsafe', 'Wno-unsafe', 'fno-overflow-checks',
     'fno-range-checks', 'fseparate-units', 'g', 'no-project', 'fzero-init',
     'fno-zero-init', 'fno-inline-runtime', 'fkeep-unused', 'ffast-math', 'Os', 'Oz',
     'fno-internalize-runtime', 'fwhole-program');
@@ -351,6 +355,13 @@ begin
   werror := werror or s.warningsAsErrors;
   noUnusedVariable := noUnusedVariable or not s.warnUnusedVariables;
   noDeprecated := noDeprecated or not s.warnDeprecated;
+  if (warnUnsafeOpt = 0) and s.hasWarnUnsafe then
+  begin
+    if s.warnUnsafe then
+      warnUnsafeOpt := 1
+    else
+      warnUnsafeOpt := -1;
+  end;
   rangeChecksOn := rangeChecksOn and s.rangeChecks;
   overflowChecksOn := overflowChecksOn and s.overflowChecks;
   for i := 0 to s.unitPaths.count - 1 do
@@ -517,6 +528,10 @@ begin
       noUnusedVariable := true
     else if name = 'Wno-deprecated' then
       noDeprecated := true
+    else if name = 'Wunsafe' then
+      warnUnsafeOpt := 1
+    else if name = 'Wno-unsafe' then
+      warnUnsafeOpt := -1
     else if name = 'fno-range-checks' then
       rangeChecksOn := false
     else if name = 'fno-overflow-checks' then
@@ -1574,6 +1589,9 @@ begin
   if noDeprecated then
     diagDisableWarning('deprecated');
   applyProject;
+  if not ((warnUnsafeOpt = 1) or
+          ((warnUnsafeOpt = 0) and (safeLevel = slChecked))) then
+    diagDisableWarning('unsafe');
   if targetCPU = 'native' then
   begin
     targetCPU := hostCPUName;

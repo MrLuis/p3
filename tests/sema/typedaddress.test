@@ -20,8 +20,8 @@
 ; VERIFIED: <stdin>:1:108: error: assigning to 'PInt' from incompatible type '^byte'
 ; VERIFIED-NOT: error:
 
-; --safe=checked keeps {$T} off by default (like standard).
-; RUN: printf 'program p; type PInt = ^integer; var b: byte; p: PInt; begin p := @b; end.\n' | %p3 --mode=tp --safe=checked -c - -o %t.chk.o 2>&1 | count 0
+; --safe=checked keeps {$T} off by default (like standard) and implies --Wunsafe (-Wno-unsafe suppresses it).
+; RUN: printf 'program p; type PInt = ^integer; var b: byte; p: PInt; begin p := @b; end.\n' | %p3 --mode=tp --safe=checked --Wno-unsafe -c - -o %t.chk.o 2>&1 | count 0
 
 ; Invalid --safe value matches LLVM cl::opt / selfhost diagnostics.
 ; RUN: not %p3 --safe=bogus 2>&1 | FileCheck --check-prefix=BADSAFE %s

@@ -1346,6 +1346,7 @@ bool Checker::resolveFieldList(FieldList *FL, llvm::SmallVectorImpl<FieldDecl *>
   VariantPart *VP = FL->Variant;
   if (!VP)
     return OK;
+  warnUnsafe(VP->CaseLoc, "variant record part outside 'unsafe'");
 
   Type *TagTy = resolveType(VP->TagTypeSpec);
   if (!TagTy->isError() && !TagTy->isOrdinal()) {
@@ -1489,6 +1490,8 @@ VarDecl *Checker::absoluteRootOf(Expr *E){
 /// `V: T absolute Target`, as in Free Pascal. Checked before V is
 /// declared, so that it cannot name itself.
 void Checker::checkAbsolute(VarDecl *V, Expr *Target){
+  warnUnsafe(V->getLocation(), "'absolute' variable overlay outside 'unsafe'",
+             {Target->getRange()});
   // The name of an enclosing function is its result.
   auto *N = llvm::dyn_cast<NameRefExpr>(Target);
   auto *R = N ? llvm::dyn_cast_or_null<RoutineDecl>(Cur->lookup(N->getName().Name))
@@ -1536,6 +1539,8 @@ void Checker::checkExternalVar(VarDecl *V){
                 {Id.getRange()});
     return;
   }
+  warnUnsafe(Id.Loc, "external variable '" + Id.Spelling + "'",
+             {Id.getRange()});
   if (CurRoutine)
     Diags.error(Id.Loc,
                 "external variable '" + Id.Spelling +

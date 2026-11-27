@@ -83,10 +83,12 @@ public:
       report(Severity::Warning, Loc, Msg + " [-W" + Group + "]", Ranges);
   }
   void disableWarning(llvm::StringRef Group) { DisabledWarnings.insert(Group); }
+  void enableWarning(llvm::StringRef Group) { DisabledWarnings.erase(Group); }
   void setSkipRepeatedWarnings(bool V) { SkipRepeatedWarnings = V; }
   bool isWarningEnabled(llvm::StringRef Group) const {
     return !DisabledWarnings.contains(Group);
   }
+  bool isLibraryLocation(SourceLocation L) const;
 
   void note(SourceLocation Loc, const llvm::Twine &Msg,
             llvm::ArrayRef<SourceRange> Ranges = {}) {

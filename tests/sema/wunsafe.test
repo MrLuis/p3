@@ -1,0 +1,59 @@
+; --Wunsafe warnings (-Wunsafe, --safe=checked, --Wno-unsafe, p3.json warnings.unsafe)
+; and suppression inside `unsafe ... end` and `unsafe(expr)`.
+; RUN: %p3 --mode=tp --Wunsafe -c %S/Inputs/wunsafe/tp.pas -o %t.o 2>&1 | FileCheck %s --check-prefix=WARN
+; RUN: %p3 --mode=tp --safe=checked -c %S/Inputs/wunsafe/tp.pas -o %t.chk.o 2>&1 | FileCheck %s --check-prefix=WARN
+; WARN: tp.pas:5:11: warning: external routine 'puts' [-Wunsafe]
+; WARN: tp.pas:6:5: warning: external variable 'errno_sim' [-Wunsafe]
+; WARN: tp.pas:12:5: warning: variant record part outside 'unsafe' [-Wunsafe]
+; WARN: tp.pas:19:3: warning: 'absolute' variable overlay outside 'unsafe' [-Wunsafe]
+; WARN: tp.pas:21:27: warning: untyped parameter 'x' [-Wunsafe]
+; WARN: tp.pas:25:8: warning: typecast of untyped parameter outside 'unsafe' [-Wunsafe]
+; WARN: tp.pas:43:8: warning: '@' yields an untyped 'pointer' outside 'unsafe' [-Wunsafe]
+; WARN: tp.pas:44:10: warning: unchecked pointer arithmetic outside 'unsafe' [-Wunsafe]
+; WARN: tp.pas:45:3: warning: unchecked pointer arithmetic outside 'unsafe' [-Wunsafe]
+; WARN: tp.pas:46:10: warning: unchecked pointer indexing outside 'unsafe' [-Wunsafe]
+; WARN: tp.pas:47:9: warning: unsafe pointer cast from 'PInt' to 'PByte' outside 'unsafe' [-Wunsafe]
+; WARN: tp.pas:49:3: warning: 'GetMem' used outside 'unsafe' [-Wunsafe]
+; WARN: tp.pas:50:3: warning: 'ReallocMem' used outside 'unsafe' [-Wunsafe]
+; WARN: tp.pas:51:3: warning: 'Move' used outside 'unsafe' [-Wunsafe]
+; WARN: tp.pas:52:3: warning: 'FillChar' used outside 'unsafe' [-Wunsafe]
+; WARN: tp.pas:53:3: warning: 'FreeMem' used outside 'unsafe' [-Wunsafe]
+; WARN: tp.pas:54:3: warning: call to external routine 'puts' outside 'unsafe' [-Wunsafe]
+; WARN-NOT: tp.pas:28:
+; WARN-NOT: tp.pas:48:
+; WARN-NOT: tp.pas:59:
+; WARN-NOT: tp.pas:60:
+; WARN-NOT: tp.pas:64:
+; WARN-NOT: tp.pas:65:
+; WARN-NOT: tp.pas:66:
+; WARN-NOT: tp.pas:67:
+; WARN-NOT: tp.pas:68:
+; WARN-NOT: tp.pas:69:
+; WARN-NOT: tp.pas:70:
+; WARN-NOT: tp.pas:71:
+; WARN-NOT: tp.pas:72:
+; WARN-NOT: tp.pas:73:
+; WARN-NOT: tp.pas:74:
+; WARN-NOT: tp.pas:77:
+; WARN-NOT: tp.pas:78:
+; WARN-NOT: tp.pas:79:
+;
+; Default standard mode and --safe=checked --Wno-unsafe stay silent.
+; RUN: %p3 --mode=tp -c %S/Inputs/wunsafe/tp.pas -o %t.std.o 2>&1 | count 0
+; RUN: %p3 --mode=tp --safe=checked --Wno-unsafe -c %S/Inputs/wunsafe/tp.pas -o %t.no.o 2>&1 | count 0
+;
+; Class/pointer casts in objfpc mode.
+; RUN: %p3 --mode=objfpc --Wunsafe -c %S/Inputs/wunsafe/objfpc.pas -o %t.obj.o 2>&1 | FileCheck %s --check-prefix=OBJ
+; OBJ: objfpc.pas:15:8: warning: unsafe cast from 'TBox' to 'pointer' outside 'unsafe' [-Wunsafe]
+; OBJ: objfpc.pas:16:8: warning: unsafe cast from 'pointer' to 'TBox' outside 'unsafe' [-Wunsafe]
+; OBJ-NOT: objfpc.pas:18:
+; OBJ-NOT: objfpc.pas:19:
+; OBJ-NOT: objfpc.pas:21:
+;
+; Project file "warnings": { "unsafe": true } and --Wno-unsafe override.
+; RUN: rm -rf %t.proj && mkdir -p %t.proj
+; RUN: printf '{\n  "mode": "tp",\n  "warnings": { "unsafe": true },\n  "main": "main.pas"\n}\n' > %t.proj/p3.json
+; RUN: printf 'program m; var x: integer; p: pointer; begin p := @x; end.\n' > %t.proj/main.pas
+; RUN: %p3-project --project=%t.proj/p3.json -c %t.proj/main.pas -o %t.proj/main.o 2>&1 | FileCheck %s --check-prefix=PROJ
+; PROJ: main.pas:1:51: warning: '@' yields an untyped 'pointer' outside 'unsafe' [-Wunsafe]
+; RUN: %p3-project --project=%t.proj/p3.json --Wno-unsafe -c %t.proj/main.pas -o %t.proj/main.o 2>&1 | count 0

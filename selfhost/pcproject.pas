@@ -19,7 +19,7 @@ type
     path: string;          { the file read ('': none) }
     base: string;          { its directory: '' or ending in '/' }
     hasMain, hasOutput, hasTarget, hasCPU, hasMode, hasSafe, hasOptLevel,
-    hasErrorLimit, hasGeneratedDir, hasGeneratorTimeout: boolean;
+    hasErrorLimit, hasGeneratedDir, hasGeneratorTimeout, hasWarnUnsafe: boolean;
     main, output, target, cpu: string; { main, output: relative to base }
     generatedDir: string;   { relative to base }
     generatorTimeout: longint;
@@ -27,7 +27,7 @@ type
     safe: TSafeLevel;
     optLevel, errorLimit: longint;
     { flags, false when absent }
-    debug, separateUnits, wholeProgram, warningsAsErrors: boolean;
+    debug, separateUnits, wholeProgram, warningsAsErrors, warnUnsafe: boolean;
     { switches, true when absent }
     warnUnusedVariables, warnDeprecated, rangeChecks, overflowChecks: boolean;
     unitPaths, defines, libraryPaths, libraries, generators: TPtrList; { of PName }
@@ -708,6 +708,11 @@ begin
           getBool(sv, sn, s.warnUnusedVariables)
         else if (n = 'warnings') and (sub^.name = 'deprecated') then
           getBool(sv, sn, s.warnDeprecated)
+        else if (n = 'warnings') and (sub^.name = 'unsafe') then
+        begin
+          s.hasWarnUnsafe := true;
+          getBool(sv, sn, s.warnUnsafe);
+        end
         else if (n = 'checks') and (sub^.name = 'range') then
           getBool(sv, sn, s.rangeChecks)
         else if (n = 'checks') and (sub^.name = 'overflow') then
@@ -748,6 +753,7 @@ begin
   s.base := '';
   s.hasMain := false;
   s.hasOutput := false;
+  s.hasWarnUnsafe := false;
   s.hasTarget := false;
   s.hasCPU := false;
   s.hasMode := false;

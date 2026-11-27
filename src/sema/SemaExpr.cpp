@@ -459,6 +459,10 @@ Type *Checker::visitBinaryExpr(BinaryExpr *E){
                     {E->getLHS()->getRange(), E->getRHS()->getRange()});
         return errorType();
       }
+      if (!isPointerMathChecked(E->getOpLoc()))
+        warnUnsafe(E->getOpLoc(),
+                   "unchecked pointer arithmetic outside 'unsafe'",
+                   {E->getRange()});
       if (NilPointersHere)
         requireNotNil(E->getLHS(), "but pointer arithmetic is performed on it");
       return L;
@@ -470,6 +474,10 @@ Type *Checker::visitBinaryExpr(BinaryExpr *E){
                     {E->getLHS()->getRange(), E->getRHS()->getRange()});
         return errorType();
       }
+      if (!isPointerMathChecked(E->getOpLoc()))
+        warnUnsafe(E->getOpLoc(),
+                   "unchecked pointer arithmetic outside 'unsafe'",
+                   {E->getRange()});
       if (NilPointersHere)
         requireNotNil(E->getRHS(), "but pointer arithmetic is performed on it");
       return R;
@@ -482,6 +490,10 @@ Type *Checker::visitBinaryExpr(BinaryExpr *E){
                       {E->getLHS()->getRange(), E->getRHS()->getRange()});
           return errorType();
         }
+        if (!isPointerMathChecked(E->getOpLoc()))
+          warnUnsafe(E->getOpLoc(),
+                     "unchecked pointer arithmetic outside 'unsafe'",
+                     {E->getRange()});
         return Ctx.getInt64Type();
       }
       if (Op == BinaryOp::Lt || Op == BinaryOp::Le || Op == BinaryOp::Gt ||
@@ -906,6 +918,10 @@ Type *Checker::visitIndexExpr(IndexExpr *E){
                   {E->getIndex()->getRange()});
       return errorType();
     }
+    if (!isPointerMathChecked(E->getIndex()->getBeginLoc()))
+      warnUnsafe(E->getIndex()->getBeginLoc(),
+                 "unchecked pointer indexing outside 'unsafe'",
+                 {E->getBase()->getRange()});
     if (NilPointersHere)
       requireNotNil(E->getBase(), "but it is indexed");
     return PT->getPointee();
@@ -1521,8 +1537,13 @@ Type *Checker::visitAddrOfExpr(AddrOfExpr *E){
                (Directives &&
                 Directives->isEnabled(CheckDirectives::TypedAddress,
                                       E->getBeginLoc(), false));
-  if (!T->isUntyped() && Typed)
-    return Ctx.create<PointerType>(T, /*Untyped=*/false, /*TypedAddr=*/true);
+  if (!T->isUntyped()) {
+    if (Typed)
+      return Ctx.create<PointerType>(T, /*Untyped=*/false, /*TypedAddr=*/true);
+    warnUnsafe(E->getBeginLoc(),
+               "'@' yields an untyped 'pointer' outside 'unsafe'",
+               {E->getRange()});
+  }
   return Ctx.getUntypedPointerType();
 }
 

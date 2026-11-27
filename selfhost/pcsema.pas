@@ -156,6 +156,7 @@ var
     there without its indexes; the pending ones (of PPendingIndex) }
   indexBase: PNode;
   pendingIndexes: TPtrList;
+  checkingInterfaceOnly: boolean;
 
 { --- Small helpers --- }
 
@@ -169,9 +170,39 @@ begin
   isPointerMathOff := isISO or (checkStateAt(swPointerMath, loc) = 0);
 end;
 
+function isPointerMathChecked(loc: TLoc): boolean;
+begin
+  isPointerMathChecked := checkStateAt(swPointerMath, loc) = 2;
+end;
+
 function isUnsafe(loc: TLoc): boolean;
 begin
   isUnsafe := checkEnabled(swUnsafe, loc, false);
+end;
+
+function isLibraryLoc(loc: TLoc): boolean;
+var
+  fn: string;
+begin
+  if loc = 0 then
+    exit(false);
+  fn := smFileName(smFileOf(loc));
+  isLibraryLoc := (pos('/lib/pascal/', fn) > 0) or
+                  (pos('\lib\pascal\', fn) > 0);
+end;
+
+procedure warnUnsafeR(loc: TLoc; r: TRange);
+begin
+  if not checkingInterfaceOnly and (loc <> 0) and not isUnsafe(loc) and
+     not isLibraryLoc(loc) then
+    diagWarningGroupBufR('unsafe', loc, msg, r);
+end;
+
+procedure warnUnsafe(loc: TLoc; const s: string; r: TRange);
+begin
+  if not checkingInterfaceOnly and (loc <> 0) and not isUnsafe(loc) and
+     diagWarningEnabled('unsafe') and not isLibraryLoc(loc) then
+    diagWarningGroupR('unsafe', loc, s, r);
 end;
 
 function isError(t: PType): boolean;
@@ -3828,6 +3859,7 @@ begin
   vp := fl^.variant;
   if vp = nil then
     exit(ok);
+  warnUnsafe(vp^.caseLoc, 'variant record part outside ''unsafe''', noRange);
   tagTy := resolveType(vp^.tagSpec, nil);
   if not isError(tagTy) and not isOrdinal(tagTy) then
   begin
@@ -7799,6 +7831,8 @@ procedure checkAbsolute(v: PDecl; target: PNode);
 var
   r, enc, x, root: PDecl;
 begin
+  warnUnsafe(v^.loc, '''absolute'' variable overlay outside ''unsafe''',
+             nodeRange(target));
   { the name of an enclosing function is its result }
   r := nil;
   if target^.kind = nkNameRef then
@@ -7862,6 +7896,10 @@ begin
     errR(v^.ident.loc, identRange(v^.ident));
     exit;
   end;
+  ms('external variable ''');
+  maN(v^.ident.spelling);
+  ma('''');
+  warnUnsafeR(v^.ident.loc, identRange(v^.ident));
   if curRoutine <> nil then
   begin
     ms('external variable ''');
@@ -8118,6 +8156,13 @@ begin
     p^.owner := r;
     p^.varType := resolveType(p^.varSpec, nil);
     checkParamDefault(p);
+    if (p^.varType <> nil) and (p^.varType^.kind = tyUntyped) then
+    begin
+      ms('untyped parameter ''');
+      maN(p^.ident.spelling);
+      ma('''');
+      warnUnsafeR(p^.loc, identRange(p^.ident));
+    end;
     if (p^.varKind <> vkVarParam) and containsFile(p^.varType) then
     begin
       ms('file parameter ''');
@@ -8324,6 +8369,10 @@ var
   p: PDecl;
   s: PName;
 begin
+  ms('external routine ''');
+  maN(r^.ident.spelling);
+  ma('''');
+  warnUnsafeR(r^.ident.loc, identRange(r^.ident));
   if curRoutine <> nil then
   begin
     ms('external routine ''');
@@ -12421,6 +12470,14 @@ begin
     markUsesManaged;
   isVarArgsCall := (calleeDecl <> nil) and (calleeDecl^.kind = dkRoutine) and
                    calleeDecl^.isVarArgs;
+  if (calleeDecl <> nil) and (calleeDecl^.kind = dkRoutine) and
+     calleeDecl^.isExternal then
+  begin
+    ms('call to external routine ''');
+    maN(callee.spelling);
+    ma(''' outside ''unsafe''');
+    warnUnsafeR(callee.loc, identRange(callee));
+  end;
   if not acceptsArgCount(params, args.count) and
      not (isVarArgsCall and (args.count > params.count)) then
   begin
@@ -12621,8 +12678,11 @@ var
   iface, impl: PScope;
   i: longint;
   r: PDecl;
+  savedInterfaceOnly: boolean;
 begin
   curModule := u;
+  savedInterfaceOnly := checkingInterfaceOnly;
+  checkingInterfaceOnly := interfaceOnly;
   iface := newScope(standard);
   importUnits(iface, u^.ifaceUses);
   cur := iface;
@@ -12647,10 +12707,12 @@ begin
         declareRoutine(r);
     end;
     curUnitInterface := nil;
+    checkingInterfaceOnly := savedInterfaceOnly;
     mapPut(unitInterfaces, u^.ident.name^.id, iface);
     cur := standard;
     exit;
   end;
+  checkingInterfaceOnly := savedInterfaceOnly;
 
   impl := newScope(iface);
   importUnits(impl, u^.implUses);
@@ -12719,6 +12781,7 @@ begin
   finallyLoopDepth := -1;
   nullSafeHere := false;
   nilPointersHere := false;
+  checkingInterfaceOnly := false;
   listInit(pendingInterfaces);
   mapInit(classRefs);
   addrOfTarget := nil;

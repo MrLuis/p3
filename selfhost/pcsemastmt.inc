@@ -702,8 +702,14 @@ begin
       ms('pointer arithmetic is disabled under {$pointermath off}');
       errR(s^.callee.loc, nodeRange(s));
     end
-    else if (t^.kind = tyPointer) and nilPointersHere then
-      requireNotNil(a0, nwPtrArith, nil, nil);
+    else if t^.kind = tyPointer then
+    begin
+      if nilPointersHere then
+        requireNotNil(a0, nwPtrArith, nil, nil);
+      if not isPointerMathChecked(s^.b) then
+        warnUnsafe(s^.callee.loc, 'unchecked pointer arithmetic outside ''unsafe''',
+                   nodeRange(s));
+    end;
   end;
   if s^.args.count = 2 then
   begin
@@ -885,6 +891,10 @@ begin
   for i := 0 to want - 1 do
     if isError(t[i]) then
       exit;
+  ms('''');
+  maN(s^.callee.spelling);
+  ma(''' used outside ''unsafe''');
+  warnUnsafeR(s^.callee.loc, nodeRange(s));
   case k of
     bkGetMem, bkReallocMem:
       begin
@@ -1283,6 +1293,8 @@ begin
   if at^.kind = tyUntyped then { Turbo/FPC: the untyped parameter seen as a t }
   begin
     e^.isVarCast := true;
+    warnUnsafe(e^.b, 'typecast of untyped parameter outside ''unsafe''',
+               nodeRange(e));
     exit(t);
   end;
   if (t^.kind = tyAnsiString) and (isStringish(at) or (at^.kind = tyPointer)) then
@@ -1307,7 +1319,30 @@ begin
      ((t^.kind = tyInterface) and
       ((at^.kind in [tyInterface, tyNil]) or
        ((at^.kind = tyClass) and (findInterface(at, t) <> nil)))) then
+  begin
+    if ((t^.kind = tyPointer) and
+        (at^.kind in [tyClass, tyDynArray, tyArrayOfConst])) or
+       ((t^.kind in [tyClass, tyDynArray]) and (at^.kind = tyPointer)) then
+    begin
+      ms('unsafe cast from ');
+      maT(at);
+      ma(' to ');
+      maT(t);
+      ma(' outside ''unsafe''');
+      warnUnsafeR(e^.b, nodeRange(e));
+    end
+    else if (t^.kind = tyPointer) and (at^.kind = tyPointer) and
+            not t^.untyped and not areCompatible(t, at) then
+    begin
+      ms('unsafe pointer cast from ');
+      maT(at);
+      ma(' to ');
+      maT(t);
+      ma(' outside ''unsafe''');
+      warnUnsafeR(e^.b, nodeRange(e));
+    end;
     exit(t);
+  end;
   op := findConversion(at, t, true);
   if op <> nil then
   begin
@@ -5973,6 +6008,9 @@ begin
         errRR(e^.opLoc, nodeRange(e^.lhs), nodeRange(e^.rhs));
         exit(errorType);
       end;
+      if not isPointerMathChecked(e^.opLoc) then
+        warnUnsafe(e^.opLoc, 'unchecked pointer arithmetic outside ''unsafe''',
+                   nodeRange(e));
       if nilPointersHere then
         requireNotNil(e^.lhs, nwPtrArith, nil, nil);
       exit(l);
@@ -5985,6 +6023,9 @@ begin
         errRR(e^.opLoc, nodeRange(e^.lhs), nodeRange(e^.rhs));
         exit(errorType);
       end;
+      if not isPointerMathChecked(e^.opLoc) then
+        warnUnsafe(e^.opLoc, 'unchecked pointer arithmetic outside ''unsafe''',
+                   nodeRange(e));
       if nilPointersHere then
         requireNotNil(e^.rhs, nwPtrArith, nil, nil);
       exit(r);
@@ -5999,6 +6040,9 @@ begin
           errRR(e^.opLoc, nodeRange(e^.lhs), nodeRange(e^.rhs));
           exit(errorType);
         end;
+        if not isPointerMathChecked(e^.opLoc) then
+          warnUnsafe(e^.opLoc, 'unchecked pointer arithmetic outside ''unsafe''',
+                     nodeRange(e));
         exit(tyInt64T);
       end;
       if op in [boLt, boLe, boGt, boGe] then
@@ -6488,6 +6532,9 @@ begin
       errR(e^.index^.b, nodeRange(e^.index));
       exit;
     end;
+    if not isPointerMathChecked(e^.index^.b) then
+      warnUnsafe(e^.index^.b, 'unchecked pointer indexing outside ''unsafe''',
+                 nodeRange(e^.base));
     if nilPointersHere then
       requireNotNil(e^.base, nwIndex, nil, nil);
     exit(bt^.pointee);
@@ -6853,10 +6900,18 @@ begin
     errR(op^.b, nodeRange(op));
     exit;
   end;
-  if (t^.kind <> tyUntyped) and
-     (((safeLevel = slVerified) and not isUnsafe(e^.b)) or
-      checkEnabled(swTypedAddress, e^.b, false)) then
-    visitAddrOf := newTypedAddrPointerType(t)
+  if t^.kind <> tyUntyped then
+  begin
+    if ((safeLevel = slVerified) and not isUnsafe(e^.b)) or
+       checkEnabled(swTypedAddress, e^.b, false) then
+      visitAddrOf := newTypedAddrPointerType(t)
+    else
+    begin
+      warnUnsafe(e^.b, '''@'' yields an untyped ''pointer'' outside ''unsafe''',
+                 nodeRange(e));
+      visitAddrOf := tyUntypedPointerT;
+    end;
+  end
   else
     visitAddrOf := tyUntypedPointerT;
 end;

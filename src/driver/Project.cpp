@@ -408,7 +408,8 @@ struct Settings {
   std::optional<SafeLevel> Safe;
   std::optional<unsigned> OptLevel, ErrorLimit, GeneratorTimeout;
   std::optional<bool> Debug, SeparateUnits, WholeProgram, WarningsAsErrors,
-      WarnUnusedVariables, WarnDeprecated, RangeChecks, OverflowChecks;
+      WarnUnusedVariables, WarnDeprecated, WarnUnsafe, RangeChecks,
+      OverflowChecks;
   std::vector<std::string> UnitPaths, Defines, LibraryPaths, Libraries,
       Generators;
 };
@@ -564,6 +565,8 @@ public:
             S.WarnUnusedVariables = boolean(SV, SN);
           else if (N == "warnings" && Sub.Name == "deprecated")
             S.WarnDeprecated = boolean(SV, SN);
+          else if (N == "warnings" && Sub.Name == "unsafe")
+            S.WarnUnsafe = boolean(SV, SN);
           else if (N == "checks" && Sub.Name == "range")
             S.RangeChecks = boolean(SV, SN);
           else if (N == "checks" && Sub.Name == "overflow")
@@ -670,6 +673,8 @@ bool p3::applyProjectFile(CompilerOptions &Opts, SourceManager &SM,
   Opts.WarnUnusedVariables =
       Opts.WarnUnusedVariables && S.WarnUnusedVariables.value_or(true);
   Opts.WarnDeprecated = Opts.WarnDeprecated && S.WarnDeprecated.value_or(true);
+  if (!Opts.WarnUnsafe.has_value() && S.WarnUnsafe.has_value())
+    Opts.WarnUnsafe = *S.WarnUnsafe;
   Opts.RangeChecks = Opts.RangeChecks && S.RangeChecks.value_or(true);
   Opts.OverflowChecks = Opts.OverflowChecks && S.OverflowChecks.value_or(true);
   for (const std::string &P : S.UnitPaths)

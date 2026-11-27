@@ -323,6 +323,12 @@ void Driver::configure() {
     Diags.disableWarning("unused-variable");
   if (!Opts.WarnDeprecated)
     Diags.disableWarning("deprecated");
+  bool EnableUnsafeWarn =
+      Opts.WarnUnsafe.value_or(Opts.Safe == SafeLevel::Checked);
+  if (EnableUnsafeWarn)
+    Diags.enableWarning("unsafe");
+  else
+    Diags.disableWarning("unsafe");
 }
 
 bool Driver::validateOptions() {

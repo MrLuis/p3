@@ -122,7 +122,9 @@ examples are in the reference.
 - **Unsafe regions**: `unsafe ... end` blocks and `unsafe(expr)` (contextual in
   `tp` and `objfpc` modes) locally relax pointer-safety rules (unchecked pointer
   arithmetic, untyped `@`, and pointer nil checks) while leaving range/overflow
-  and class null-safety checks untouched.
+  and class null-safety checks untouched. Passing `--Wunsafe` (implied by
+  `--safe=checked`, suppressible with `--Wno-unsafe`) warns on escape-hatch
+  constructs used outside `unsafe` regions.
 - **Iterators**: `function Fibonacci: iterator UInt64` with `yield`, usable in
   `for ... in`.
 - **Lazy sequences**: LINQ-style `map`/`filter`/... in the `sequences` unit.
