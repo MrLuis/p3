@@ -6,9 +6,9 @@
 ; RUN: %p3 --mode=objfpc --generator=%S/../driver/Inputs/generators/jsongen.pas --generated-dir=%t.cpp %S/../driver/Inputs/generators/main.pas -o %t.cpp.exe
 ; RUN: env P3_RUNTIME_LIB=%p3-runtime-lib %t.p3 --mode=objfpc --generator=%S/../driver/Inputs/generators/jsongen.pas --generated-dir=%t.self %S/../driver/Inputs/generators/main.pas -o %t.self.exe
 ; RUN: %t.self.exe | FileCheck %s
-; RUN: diff %t.cpp/customer.intf.inc %t.self/customer.intf.inc
-; RUN: diff %t.cpp/customer.impl.inc %t.self/customer.impl.inc
-; RUN: diff %t.cpp/customer.JsonGenerator.model %t.self/customer.JsonGenerator.model
+; RUN: diff %t.cpp/customer-*.intf.inc %t.self/customer-*.intf.inc
+; RUN: diff %t.cpp/customer-*.impl.inc %t.self/customer-*.impl.inc
+; RUN: diff %t.cpp/customer-*.JsonGenerator.model %t.self/customer-*.JsonGenerator.model
 ; RUN: %p3 --mode=objfpc --emit-model=serializable %S/../driver/Inputs/generators/model.pas > %t.model.cpp
 ; RUN: %t.p3 --mode=objfpc --emit-model=serializable %S/../driver/Inputs/generators/model.pas > %t.model.self
 ; RUN: diff %t.model.cpp %t.model.self
@@ -21,20 +21,20 @@
 ; RUN: cp %S/../driver/Inputs/generators/jsongen.pas %S/../driver/Inputs/generators/customer.pas %S/../driver/Inputs/generators/main.pas %S/../driver/Inputs/generators-project/p3.json %t.proj
 ; RUN: cd %t.proj && env P3_RUNTIME_LIB=%p3-runtime-lib %t.p3
 ; RUN: %t.proj/out/main | FileCheck --check-prefix=CHECK %s
-; RUN: printf 'line\t{ cached }\n' >> %t.proj/generated/customer.JsonGenerator.out
+; RUN: python3 -c "import glob; p = glob.glob('%t.proj/generated/customer-*.JsonGenerator.out')[0]; open(p, 'a').write('line\t{ cached }\n')"
 ; RUN: cd %t.proj && env P3_RUNTIME_LIB=%p3-runtime-lib %t.p3
-; RUN: FileCheck --check-prefix=CACHED %s < %t.proj/generated/customer.impl.inc
+; RUN: cat %t.proj/generated/customer-*.impl.inc | FileCheck --check-prefix=CACHED %s
 ; RUN: sed -i.bak 's/Active: Boolean;/Active: Boolean; Age: Integer;/' %t.proj/customer.pas
 ; RUN: cd %t.proj && env P3_RUNTIME_LIB=%p3-runtime-lib %t.p3
-; RUN: FileCheck --check-prefix=FRESH %s < %t.proj/generated/customer.impl.inc
+; RUN: cat %t.proj/generated/customer-*.impl.inc | FileCheck --check-prefix=FRESH %s
 ; RUN: cd %t.proj && not env P3_RUNTIME_LIB=%p3-runtime-lib %t.p3 --no-project --mode=objfpc --generator=%S/../driver/Inputs/generators/slowgen.pas --generator-timeout=1 --generated-dir=%t.slow main.pas -o %t.slow.exe 2>&1 | FileCheck --check-prefix=SLOW %s
 ; RUN: not env P3_RUNTIME_LIB=%p3-runtime-lib %t.p3 --project=%S/../driver/Inputs/generators-project/badtimeout.json 2>&1 | FileCheck --check-prefix=BAD %s
 ; The json generator of the library: the same code and output.
 ; RUN: rm -rf %t.jcpp %t.jself
 ; RUN: %p3 --mode=objfpc --generator=json --generated-dir=%t.jcpp %S/../driver/Inputs/jsongen/main.pas -o %t.jcpp.exe
 ; RUN: env P3_RUNTIME_LIB=%p3-runtime-lib %t.p3 --mode=objfpc --generator=json --generated-dir=%t.jself %S/../driver/Inputs/jsongen/main.pas -o %t.jself.exe
-; RUN: diff %t.jcpp/people.intf.inc %t.jself/people.intf.inc
-; RUN: diff %t.jcpp/people.impl.inc %t.jself/people.impl.inc
+; RUN: diff %t.jcpp/people-*.intf.inc %t.jself/people-*.intf.inc
+; RUN: diff %t.jcpp/people-*.impl.inc %t.jself/people-*.impl.inc
 ; RUN: %t.jcpp.exe > %t.jcpp.out
 ; RUN: %t.jself.exe > %t.jself.out
 ; RUN: diff %t.jcpp.out %t.jself.out

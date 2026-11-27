@@ -5,10 +5,10 @@
 ; RUN: rm -rf %t.gen
 ; RUN: %p3 --mode=objfpc --generated-dir=%t.gen %S/Inputs/compiletime/main.pas -o %t
 ; RUN: %t | FileCheck --check-prefix=OUT %s
-; RUN: FileCheck --check-prefix=PROG %s < %t.gen/.ct/main.I1.pas
+; RUN: cat %t.gen/.ct/main-*.I1.pas | FileCheck --check-prefix=PROG %s
 ; The output is reused while the program, the sources and the compiler are
 ; unchanged (Small, computed from F30, is computed again).
-; RUN: sed -i.bak 's/@p3ct@832040/@p3ct@1234/' %t.gen/.ct/main.F30.out
+; RUN: python3 -c "import glob; p = glob.glob('%t.gen/.ct/main-*.F30.out')[0]; s = open(p).read().replace('@p3ct@832040', '@p3ct@1234'); open(p, 'w').write(s)"
 ; RUN: %p3 --mode=objfpc --generated-dir=%t.gen %S/Inputs/compiletime/main.pas -o %t
 ; RUN: %t | FileCheck --check-prefix=CACHED %s
 ; Errors: a function outside the subset (diagnostics at the source's own
@@ -32,7 +32,7 @@
 ; CACHED: 1234 1 1
 ; BAD: bad.pas:6:3: error: compiletime function 'F' cannot call 'writeln'
 ; BAD: bad.pas:7:8: error: compiletime function 'F' cannot use variable 'g'
-; BAD: bad.pas:10:3: error: cannot compute constant 'X': the program that computes it ({{.*}}bad.X.pas) did not compile
+; BAD: bad.pas:10:3: error: cannot compute constant 'X': the program that computes it ({{.*}}bad-{{[0-9a-f]+}}.X.pas) did not compile
 ; FAIL: fail.pas:12:3: error: cannot compute constant 'X': 'F' failed (exit status 2): Runtime error: array index out of bounds at {{.*}}fail.pas:8:5
 ; SLOW: slow.pas:12:3: error: cannot compute constant 'X': 'Loop' ran longer than 1 seconds
 ; NESTED: nested.pas:8:7: error: the value of compiletime function 'Twice' is computed only for a constant declared at the level of a program or unit

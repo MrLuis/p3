@@ -5,7 +5,7 @@
 ; RUN: rm -rf %t.gen
 ; RUN: %p3 --mode=objfpc --generator=json --generated-dir=%t.gen %S/Inputs/jsongen/main.pas -o %t
 ; RUN: %t | FileCheck %s
-; RUN: FileCheck --check-prefix=INTF %s < %t.gen/people.intf.inc
+; RUN: cat %t.gen/people-*.intf.inc | FileCheck --check-prefix=INTF %s
 ; A field the generator cannot write: an error at the field.
 ; RUN: not %p3 --mode=objfpc --generator=json --generated-dir=%t.bad %S/Inputs/jsongen/bad.pas -o %t.x 2>&1 | FileCheck --check-prefix=BAD %s
 ; A library generator named in a project file.

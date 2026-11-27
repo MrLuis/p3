@@ -39,6 +39,10 @@ std::string generatorFile(llvm::StringRef Path);
 /// P made absolute, without . and .. (the key of Driver's splices).
 std::string absolutePath(llvm::StringRef P);
 
+/// Unique generated-file stem for source file P (<stem>-<hash8>), avoiding
+/// collisions across directories in a shared generated directory.
+std::string generatedFileBase(llvm::StringRef P);
+
 /// Escapes \, tab and newline in a model or output field.
 std::string escapeField(llvm::StringRef S);
 std::string unescapeField(llvm::StringRef S);

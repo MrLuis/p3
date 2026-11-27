@@ -720,7 +720,7 @@ bool Evaluator::evaluate(FileInfo &F, TopDecl &X, RoutineDecl *Fn,
   llvm::sys::path::append(Dir, ".ct");
   if (auto EC = fs::create_directories(Dir))
     return Fail("cannot create '" + Dir + "': " + EC.message());
-  std::string Base = (llvm::sys::path::stem(F.Path) + "." +
+  std::string Base = (generatedFileBase(F.Path) + "." +
                       C->getName().Spelling)
                          .str();
   llvm::SmallString<256> SrcPath(Dir), Exe(Dir);

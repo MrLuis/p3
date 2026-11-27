@@ -5,19 +5,19 @@
 ; RUN: cp %S/Inputs/generators/jsongen.pas %S/Inputs/generators/customer.pas %S/Inputs/generators/main.pas %S/Inputs/generators-project/p3.json %t.proj
 ; RUN: cd %t.proj && %p3-project
 ; RUN: %t.proj/out/main | FileCheck --check-prefix=OUT %s
-; RUN: FileCheck --check-prefix=INTF %s < %t.proj/generated/customer.intf.inc
+; RUN: cat %t.proj/generated/customer-*.intf.inc | FileCheck --check-prefix=INTF %s
 ; The output is kept: a line added to it is still there after another build.
-; RUN: printf 'line\t{ cached }\n' >> %t.proj/generated/customer.JsonGenerator.out
+; RUN: python3 -c "import glob; p = glob.glob('%t.proj/generated/customer-*.JsonGenerator.out')[0]; open(p, 'a').write('line\t{ cached }\n')"
 ; RUN: cd %t.proj && %p3-project
-; RUN: FileCheck --check-prefix=CACHED %s < %t.proj/generated/customer.impl.inc
+; RUN: cat %t.proj/generated/customer-*.impl.inc | FileCheck --check-prefix=CACHED %s
 ; A new field changes the model: the generator runs again.
 ; RUN: sed -i.bak 's/Active: Boolean;/Active: Boolean; Age: Integer;/' %t.proj/customer.pas
 ; RUN: cd %t.proj && %p3-project
-; RUN: FileCheck --check-prefix=FRESH %s < %t.proj/generated/customer.impl.inc
+; RUN: cat %t.proj/generated/customer-*.impl.inc | FileCheck --check-prefix=FRESH %s
 ; RUN: %t.proj/out/main | FileCheck --check-prefix=OUT2 %s
 ; The command line wins: a different directory for the code.
 ; RUN: cd %t.proj && %p3-project --generated-dir=%t.proj/elsewhere
-; RUN: FileCheck --check-prefix=INTF %s < %t.proj/elsewhere/customer.intf.inc
+; RUN: cat %t.proj/elsewhere/customer-*.intf.inc | FileCheck --check-prefix=INTF %s
 ; A generator that does not finish is stopped.
 ; RUN: cd %t.proj && not %p3 --no-project --mode=objfpc --generator=%S/Inputs/generators/slowgen.pas --generator-timeout=1 --generated-dir=%t.slow main.pas -o %t.slow.exe 2>&1 | FileCheck --check-prefix=SLOW %s
 ; A setting that is not valid.

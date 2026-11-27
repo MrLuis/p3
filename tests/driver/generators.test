@@ -6,14 +6,27 @@
 ; declarations.
 ; RUN: %p3 --mode=objfpc --generator=%S/Inputs/generators/jsongen.pas --generated-dir=%t.gen %S/Inputs/generators/main.pas -o %t
 ; RUN: %t | FileCheck --check-prefix=OUT %s
-; RUN: FileCheck --check-prefix=INTF %s < %t.gen/customer.intf.inc
-; RUN: FileCheck --check-prefix=IMPL %s < %t.gen/customer.impl.inc
+; RUN: cat %t.gen/customer-*.intf.inc | FileCheck --check-prefix=INTF %s
+; RUN: cat %t.gen/customer-*.impl.inc | FileCheck --check-prefix=IMPL %s
 ; RUN: not %p3 --mode=objfpc --generator=%S/Inputs/generators/jsongen.pas --generated-dir=%t.bad %S/Inputs/generators/mainbad.pas -o %t.bad.exe 2>&1 | FileCheck --check-prefix=ERR %s
 ; RUN: %p3 --mode=objfpc --emit-model=serializable %S/Inputs/generators/model.pas | FileCheck --check-prefix=DUMP %s
 ; RUN: %p3 --mode=objfpc --emit-model=none %S/Inputs/generators/model.pas | count 0
 ; RUN: not %p3 --mode=objfpc --generator=%S/Inputs/generators/main.pas %S/Inputs/generators/main.pas -o %t.x 2>&1 | FileCheck --check-prefix=NOTGEN %s
 ; RUN: not %p3 --mode=objfpc --generator=%S/Inputs/generators/nonexistent.pas %S/Inputs/generators/main.pas -o %t.x 2>&1 | FileCheck --check-prefix=MISSING %s
 ; RUN: %p3 --mode=objfpc --emit-ast %S/Inputs/generators/jsongen.pas | FileCheck --check-prefix=AST %s
+; Same stem in two directories sharing one --generated-dir: no collision.
+; RUN: rm -rf %t.coll && mkdir -p %t.coll/a %t.coll/b %t.coll/gen
+; RUN: cp %S/Inputs/generators/customer.pas %t.coll/a/customer.pas
+; RUN: sed 's/Active: Boolean;/Active: Boolean; Tag: Integer;/' %S/Inputs/generators/customer.pas > %t.coll/b/customer.pas
+; RUN: printf 'program a; uses customer; var c: TCustomer; begin c.Id := 1; writeln(c.ToJson); end.\n' > %t.coll/a/main.pas
+; RUN: printf 'program b; uses customer; var c: TCustomer; begin c.Id := 2; c.Tag := 9; writeln(c.ToJson); end.\n' > %t.coll/b/main.pas
+; RUN: %p3 --mode=objfpc --generator=%S/Inputs/generators/jsongen.pas --generated-dir=%t.coll/gen %t.coll/a/main.pas -o %t.coll/a.exe
+; RUN: %p3 --mode=objfpc --generator=%S/Inputs/generators/jsongen.pas --generated-dir=%t.coll/gen %t.coll/b/main.pas -o %t.coll/b.exe
+; RUN: %t.coll/a.exe | FileCheck --check-prefix=COLLA %s
+; RUN: %t.coll/b.exe | FileCheck --check-prefix=COLLB %s
+; RUN: python3 -c "import glob, sys; sys.exit(0 if len(glob.glob('%t.coll/gen/customer-*.intf.inc')) == 2 else 1)"
+; COLLA: {"Id": 1, "Name": "", "Active": false}
+; COLLB: {"Id": 2, "Name": "", "Active": false, "Tag": 9}
 ; OUT: {"Id": 7, "Name": "Ada", "Active": true}
 ; INTF: type
 ; INTF-NEXT: TCustomer = partial record

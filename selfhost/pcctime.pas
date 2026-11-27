@@ -1084,7 +1084,7 @@ begin
   genDir := absPath(genDir);
   ctDir := pathJoin(genDir, '.ct');
   sysMakeDirs(ctDir);
-  base := stem(f^.path) + '.' + nameStr(c^.ident.spelling);
+  base := generatedFileBase(f^.path) + '.' + nameStr(c^.ident.spelling);
   srcPath := pathJoin(ctDir, base + '.pas');
   exe := pathJoin(ctDir, base);
   outPath := exe + '.out';

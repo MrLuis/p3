@@ -7,9 +7,9 @@
 ; RUN: %p3 --mode=objfpc --generated-dir=%t.cpp %S/../driver/Inputs/compiletime/main.pas -o %t.cpp.exe
 ; RUN: env P3_RUNTIME_LIB=%p3-runtime-lib %t.p3 --mode=objfpc --generated-dir=%t.self %S/../driver/Inputs/compiletime/main.pas -o %t.self.exe
 ; RUN: %t.self.exe | FileCheck %s
-; RUN: diff %t.cpp/.ct/main.I1.pas %t.self/.ct/main.I1.pas
-; RUN: diff %t.cpp/.ct/main.CrcTable.out %t.self/.ct/main.CrcTable.out
-; RUN: diff %t.cpp/.ct/tables.Sq.pas %t.self/.ct/tables.Sq.pas
+; RUN: diff %t.cpp/.ct/main-*.I1.pas %t.self/.ct/main-*.I1.pas
+; RUN: diff %t.cpp/.ct/main-*.CrcTable.out %t.self/.ct/main-*.CrcTable.out
+; RUN: diff %t.cpp/.ct/tables-*.Sq.pas %t.self/.ct/tables-*.Sq.pas
 ; RUN: not %p3 --mode=objfpc --generated-dir=%t.cpp %S/../driver/Inputs/compiletime/bad.pas -o %t.x > %t.bad.cpp 2>&1
 ; RUN: not env P3_RUNTIME_LIB=%p3-runtime-lib %t.p3 --mode=objfpc --generated-dir=%t.cpp %S/../driver/Inputs/compiletime/bad.pas -o %t.x > %t.bad.self 2>&1
 ; RUN: diff %t.bad.cpp %t.bad.self
