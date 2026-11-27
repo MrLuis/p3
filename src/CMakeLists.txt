@@ -34,11 +34,24 @@ target_link_libraries(p3Parse PUBLIC p3Lexer p3AST)
 
 add_library(p3Sema STATIC
   sema/Sema.cpp
+  sema/SemaFlow.cpp
+  sema/SemaTypes.cpp
+  sema/SemaClasses.cpp
+  sema/SemaGenerics.cpp
+  sema/SemaBuiltins.cpp
+  sema/SemaStmt.cpp
+  sema/SemaExpr.cpp
 )
 target_link_libraries(p3Sema PUBLIC p3AST)
 
 add_library(p3CodeGen STATIC
   codegen/CodeGen.cpp
+  codegen/CodeGenAnalysis.cpp
+  codegen/CodeGenTypes.cpp
+  codegen/CodeGenClasses.cpp
+  codegen/CodeGenDebug.cpp
+  codegen/CodeGenBuiltins.cpp
+  codegen/CodeGenStmtExpr.cpp
   codegen/Backend.cpp
 )
 target_link_libraries(p3CodeGen PUBLIC p3AST)
