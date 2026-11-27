@@ -119,6 +119,10 @@ examples are in the reference.
   `Inc`/`Dec` on pointers at compile time while keeping ordering comparisons;
   `checked` enforces live heap allocation bounds at runtime across `p + n`,
   `p[i]`, `Inc`/`Dec`, and same-allocation `p - q`.
+- **Unsafe regions**: `unsafe ... end` blocks and `unsafe(expr)` (contextual in
+  `tp` and `objfpc` modes) locally relax pointer-safety rules (unchecked pointer
+  arithmetic, untyped `@`, and pointer nil checks) while leaving range/overflow
+  and class null-safety checks untouched.
 - **Iterators**: `function Fibonacci: iterator UInt64` with `yield`, usable in
   `for ... in`.
 - **Lazy sequences**: LINQ-style `map`/`filter`/... in the `sequences` unit.

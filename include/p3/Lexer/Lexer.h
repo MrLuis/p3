@@ -63,7 +63,7 @@ class Lexer {
     bool LongStrings, CorbaInterfaces, InlineOn, ScopedEnums, NullSafe,
          NilPointers;
     unsigned PackRecords;
-    CheckDirectives::State Range, Overflow, TypedAddress, PointerMath;
+    CheckDirectives::State Range, Overflow, TypedAddress, PointerMath, Unsafe;
   };
   llvm::SmallVector<SavedSwitches, 4> SwitchStack;
   bool LongStrings = false;     ///< {$H+}: `string` is an ansistring

@@ -392,6 +392,10 @@ class Checker : public StmtVisitor<Checker>,
             Directives->stateAt(CheckDirectives::PointerMath, L) ==
                 CheckDirectives::Off);
   }
+  bool isUnsafe(SourceLocation L) const {
+    return Directives &&
+           Directives->isEnabled(CheckDirectives::Unsafe, L, false);
+  }
 
   //===--------------------------------------------------------------------===//
   // Standard scope

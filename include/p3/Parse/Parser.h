@@ -279,6 +279,10 @@ class Parser {
   Stmt *parseCheckedBlock();
   bool startsCheckedExpr();
   Expr *parseCheckedExpr();
+  bool startsUnsafeBlock();
+  Stmt *parseUnsafeBlock();
+  bool startsUnsafeExpr();
+  Expr *parseUnsafeExpr();
   bool isAsyncWord(llvm::StringRef W);
   Stmt *parseAsyncStatement();
   bool startsAwaitExpr();
@@ -299,6 +303,14 @@ class Parser {
   void setCheckedSwitches(SourceLocation L, bool Checked,
                           CheckDirectives::State &Before,
                           CheckDirectives::State &WrapBefore);
+  void setUnsafeSwitches(SourceLocation L,
+                         CheckDirectives::State &UnsafeBefore,
+                         CheckDirectives::State &PtrMathBefore,
+                         CheckDirectives::State &TypedBefore);
+  void restoreUnsafeSwitches(SourceLocation L,
+                             CheckDirectives::State UnsafeBefore,
+                             CheckDirectives::State PtrMathBefore,
+                             CheckDirectives::State TypedBefore);
   Stmt *parseAssignmentOrCall();
   Stmt *finishDesignatorStmt(SourceLocation Start, Expr *Target);
   /// The statement starting with a designator being parsed: its tokens so

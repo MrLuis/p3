@@ -169,6 +169,11 @@ begin
   isPointerMathOff := isISO or (checkStateAt(swPointerMath, loc) = 0);
 end;
 
+function isUnsafe(loc: TLoc): boolean;
+begin
+  isUnsafe := checkEnabled(swUnsafe, loc, false);
+end;
+
 function isError(t: PType): boolean;
 begin
   isError := t^.kind = tyError;
@@ -2924,6 +2929,8 @@ begin
   if not anyNullSafety or (e^.typ = nil) or isError(e^.typ) then
     exit;
   x := stripParens(e);
+  if isUnsafe(x^.b) and (not nullSafeHere or (x^.typ^.kind = tyPointer)) then
+    exit;
   if x^.typ^.kind = tyNil then
   begin
     ms('nil cannot be used here: ');
@@ -3011,7 +3018,8 @@ begin
   tt := nullTypeOf(td);
   if not isNullTrackedType(tt) then
     exit;
-  if declNonNull(td) then
+  if declNonNull(td) and
+     not ((tt^.kind = tyPointer) and isUnsafe(value^.b)) then
     requireNotNil(value, nwAssign, td^.ident.spelling, tt);
   if target <> nil then
     i := nullIndexOf(target)
@@ -3128,7 +3136,8 @@ var
 begin
   if not anyNullSafety or not isNullTrackedType(p^.varType) then
     exit;
-  if not p^.isOut and declNonNull(p) then
+  if not p^.isOut and declNonNull(p) and
+     not ((p^.varType^.kind = tyPointer) and isUnsafe(arg^.b)) then
     requireNotNil(arg, nwParam, p^.ident.spelling, p^.varType);
   i := nullIndexOf(arg);
   if i >= 0 then
@@ -12566,7 +12575,8 @@ begin
          ((arg^.convOp = nil) or arg^.convSuspended) and
          isConstRefAddressable(arg) then
         arg^.constRefAddr := true; { its address (else a temporary's) }
-      if isNullTrackedType(pt) and declNonNull(p) then
+      if isNullTrackedType(pt) and declNonNull(p) and
+         not ((pt^.kind = tyPointer) and isUnsafe(arg^.b)) then
         requireNotNil(arg, nwParam, p^.ident.spelling, pt);
     end;
   end;

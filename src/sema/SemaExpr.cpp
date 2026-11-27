@@ -1516,7 +1516,8 @@ Type *Checker::visitAddrOfExpr(AddrOfExpr *E){
                 {E->getOperand()->getRange()});
     return errorType();
   }
-  bool Typed = LangOpts.Safe == SafeLevel::Verified ||
+  bool Typed = (LangOpts.Safe == SafeLevel::Verified &&
+                !isUnsafe(E->getBeginLoc())) ||
                (Directives &&
                 Directives->isEnabled(CheckDirectives::TypedAddress,
                                       E->getBeginLoc(), false));

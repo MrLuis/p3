@@ -6854,7 +6854,8 @@ begin
     exit;
   end;
   if (t^.kind <> tyUntyped) and
-     ((safeLevel = slVerified) or checkEnabled(swTypedAddress, e^.b, false)) then
+     (((safeLevel = slVerified) and not isUnsafe(e^.b)) or
+      checkEnabled(swTypedAddress, e^.b, false)) then
     visitAddrOf := newTypedAddrPointerType(t)
   else
     visitAddrOf := tyUntypedPointerT;

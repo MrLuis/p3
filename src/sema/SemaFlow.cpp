@@ -418,6 +418,9 @@ void Checker::requireNotNil(Expr *E, const std::string &Why,
   Expr *X = E;
   while (auto *P = llvm::dyn_cast<ParenExpr>(X))
     X = P->getInner();
+  if (isUnsafe(X->getBeginLoc()) &&
+      (!NullSafeHere || X->getType()->isPointer()))
+    return;
   if (X->getType()->isNil()) {
     llvm::StringRef W(Why), A(Alt);
     W.consume_front("but ");
@@ -488,7 +491,7 @@ void Checker::nullAssign(Expr *Target, Decl *TD, Expr *Value){
   Type *TT = nullTypeOf(TD);
   if (!isNullTrackedType(TT))
     return;
-  if (declNonNull(TD))
+  if (declNonNull(TD) && !(TT->isPointer() && isUnsafe(Value->getBeginLoc())))
     requireNotNil(Value,
                   "but '" + TD->getName().Spelling.str() +
                       "' is of the non-null type " + quoted(TT),
@@ -654,7 +657,8 @@ void Checker::nullTrackBlock(Block &B){
 void Checker::nullVarArg(Expr *Arg, VarDecl *P){
   if (!anyNullSafety() || !isNullTrackedType(P->getType()))
     return;
-  if (!P->isOutParam() && declNonNull(P))
+  if (!P->isOutParam() && declNonNull(P) &&
+      !(P->getType()->isPointer() && isUnsafe(Arg->getBeginLoc())))
     requireNotNil(Arg, "but parameter '" + P->getName().Spelling.str() +
                            "' is of the non-null type " +
                            quoted(P->getType()));

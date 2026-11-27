@@ -4169,6 +4169,73 @@ Stmt *Parser::parseCheckedBlock() {
                                   Ctx.copyArray<Stmt *>(Body));
 }
 
+// unsafe ... end / unsafe(expression) (tp/objfpc; `unsafe` is not reserved):
+// all pointer-safety rules relaxed within its extent.
+bool Parser::startsUnsafeBlock() {
+  if (LangOpts.Mode == LangMode::ISO || !isIdentifierNamed("unsafe"))
+    return false;
+  return peekToken().isOneOf(tok::identifier, tok::kw_begin, tok::kw_if,
+                             tok::kw_while, tok::kw_repeat, tok::kw_for,
+                             tok::kw_case, tok::kw_with, tok::kw_try,
+                             tok::kw_raise, tok::kw_var, tok::kw_const,
+                             tok::kw_goto, tok::kw_inherited, tok::kw_end);
+}
+
+void Parser::setUnsafeSwitches(SourceLocation L,
+                               CheckDirectives::State &UnsafeBefore,
+                               CheckDirectives::State &PtrMathBefore,
+                               CheckDirectives::State &TypedBefore) {
+  UnsafeBefore = Lex.checkStateAt(CheckDirectives::Unsafe, L);
+  PtrMathBefore = Lex.checkStateAt(CheckDirectives::PointerMath, L);
+  TypedBefore = Lex.checkStateAt(CheckDirectives::TypedAddress, L);
+  Lex.addCheckState(L, CheckDirectives::Unsafe, CheckDirectives::On);
+  Lex.addCheckState(L, CheckDirectives::PointerMath, CheckDirectives::On);
+  Lex.addCheckState(L, CheckDirectives::TypedAddress, CheckDirectives::Off);
+}
+
+void Parser::restoreUnsafeSwitches(SourceLocation L,
+                                   CheckDirectives::State UnsafeBefore,
+                                   CheckDirectives::State PtrMathBefore,
+                                   CheckDirectives::State TypedBefore) {
+  Lex.addCheckState(L, CheckDirectives::Unsafe, UnsafeBefore);
+  Lex.addCheckState(L, CheckDirectives::PointerMath, PtrMathBefore);
+  Lex.addCheckState(L, CheckDirectives::TypedAddress, TypedBefore);
+}
+
+bool Parser::startsUnsafeExpr() {
+  return LangOpts.Mode != LangMode::ISO && peekToken().is(tok::l_paren) &&
+         isIdentifierNamed("unsafe") && !Lex.isDeclared("unsafe");
+}
+
+Expr *Parser::parseUnsafeExpr() {
+  SourceLocation Loc = Tok.getLocation();
+  CheckDirectives::State UnsafeBefore, PtrMathBefore, TypedBefore;
+  setUnsafeSwitches(Loc, UnsafeBefore, PtrMathBefore, TypedBefore);
+  consumeToken();
+  consumeToken(); // '('
+  Expr *Inner = parseExpression();
+  restoreUnsafeSwitches(Tok.getLocation(), UnsafeBefore, PtrMathBefore,
+                        TypedBefore);
+  if (!Inner || !expect(tok::r_paren, "after the expression of 'unsafe'"))
+    return nullptr;
+  return Ctx.create<ParenExpr>(SourceRange(Loc, PrevTokEnd), Inner);
+}
+
+Stmt *Parser::parseUnsafeBlock() {
+  SourceLocation Loc = Tok.getLocation();
+  CheckDirectives::State UnsafeBefore, PtrMathBefore, TypedBefore;
+  setUnsafeSwitches(Loc, UnsafeBefore, PtrMathBefore, TypedBefore);
+  consumeToken();
+  llvm::SmallVector<Stmt *, 8> Body;
+  parseStatementSequence(Body, tok::kw_end, Loc, "unsafe");
+  restoreUnsafeSwitches(Tok.getLocation(), UnsafeBefore, PtrMathBefore,
+                        TypedBefore);
+  SourceLocation EndLoc = Tok.getEndLocation();
+  tryConsume(tok::kw_end);
+  return Ctx.create<CompoundStmt>(SourceRange(Loc, EndLoc),
+                                  Ctx.copyArray<Stmt *>(Body));
+}
+
 Stmt *Parser::parseStatementImpl() {
   switch (Tok.getKind()) {
   case tok::identifier:
@@ -4176,6 +4243,18 @@ Stmt *Parser::parseStatementImpl() {
       return S;
     if (startsCheckedBlock())
       return parseCheckedBlock();
+    if (startsUnsafeBlock())
+      return parseUnsafeBlock();
+    if (startsUnsafeExpr())
+      return recordingDesignator([&]() -> Stmt * {
+        SourceLocation Start = Tok.getLocation();
+        Expr *Target = parseSelectors(parseUnsafeExpr());
+        if (!Target) {
+          skipUntil({tok::semi, tok::kw_end});
+          return Ctx.create<EmptyStmt>(Start);
+        }
+        return finishDesignatorStmt(Start, Target);
+      });
     return recordingDesignator([&] { return parseAssignmentOrCall(); });
   case tok::kw_begin:
     return parseCompoundStmt();
@@ -5410,6 +5489,10 @@ Expr *Parser::parseFactor() {
   case tok::identifier: {
     if (startsCheckedExpr())
       return parseCheckedExpr();
+    if (startsUnsafeExpr()) {
+      Expr *E = parseUnsafeExpr();
+      return E ? parseSelectors(E) : nullptr;
+    }
     if (startsAwaitExpr())
       return parseAwaitExpr();
     if (startsSpawnExpr())

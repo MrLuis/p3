@@ -10,13 +10,12 @@
 //      narrower integer type wrap instead of being range-checked
 //   T  typed addresses  ({$T+}, {$typedaddress on}: @x yields ^typeof(x))
 //   PointerMath pointer arithmetic policy ({$pointermath off|unchecked|checked})
+//   Unsafe (no directive; unsafe blocks / unsafe(e)) pointer-safety rules relaxed
 //
 // The lexer records each switch with its location; code generation asks
 // whether a check is enabled at the location of the construct it emits.
 // {$pop} records the state its {$push} saved, which may be the default.
-// The parser records checked / unchecked blocks (objfpc) the same way: Q
-// on or off (and Wrap off or on) at the block's start, the states before
-// it at its `end`.
+// The parser records checked / unchecked and unsafe regions the same way.
 //
 //===----------------------------------------------------------------------===//
 #ifndef P3_BASIC_DIRECTIVES_H
@@ -29,7 +28,7 @@ namespace p3 {
 
 class CheckDirectives {
 public:
-  enum Switch { Range, Overflow, Wrap, TypedAddress, PointerMath };
+  enum Switch { Range, Overflow, Wrap, TypedAddress, PointerMath, Unsafe };
 
 private:
 public:

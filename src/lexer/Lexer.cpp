@@ -298,7 +298,8 @@ void Lexer::handleDirective(const char *Start, llvm::StringRef Text) {
     SavedSwitches S{LongStrings, CorbaInterfaces, InlineOn, ScopedEnums,
                     NullSafe, NilPointers, PackRecords,
                     CheckDirectives::Default, CheckDirectives::Default,
-                    CheckDirectives::Default, CheckDirectives::Default};
+                    CheckDirectives::Default, CheckDirectives::Default,
+                    CheckDirectives::Default};
     if (Directives) {
       S.Range = Directives->stateAt(CheckDirectives::Range, locOf(Start));
       S.Overflow = Directives->stateAt(CheckDirectives::Overflow, locOf(Start));
@@ -306,6 +307,7 @@ void Lexer::handleDirective(const char *Start, llvm::StringRef Text) {
           Directives->stateAt(CheckDirectives::TypedAddress, locOf(Start));
       S.PointerMath =
           Directives->stateAt(CheckDirectives::PointerMath, locOf(Start));
+      S.Unsafe = Directives->stateAt(CheckDirectives::Unsafe, locOf(Start));
     }
     SwitchStack.push_back(S);
     return;
@@ -332,6 +334,8 @@ void Lexer::handleDirective(const char *Start, llvm::StringRef Text) {
                            CheckDirectives::TypedAddress, S.TypedAddress);
       Directives->addState(locOf(Start), BufBegin, BufEnd,
                            CheckDirectives::PointerMath, S.PointerMath);
+      Directives->addState(locOf(Start), BufBegin, BufEnd,
+                           CheckDirectives::Unsafe, S.Unsafe);
     }
     return;
   }

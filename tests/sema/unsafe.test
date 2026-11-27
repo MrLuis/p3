@@ -1,0 +1,36 @@
+; Scoped unsafe regions (`unsafe ... end` and `unsafe(expr)`): relaxes pointer
+; arithmetic, typed `@`, and pointer nil checks within its extent while
+; leaving other switches orthogonal and `unsafe` unreserved.
+; RUN: not %p3 --mode=tp -ferror-limit=0 -c %S/Inputs/unsafe/tp.pas -o %t.o 2>&1 | FileCheck %s --check-prefix=TP
+; TP: tp.pas:37:10: error: pointer arithmetic is disabled under {$pointermath off}
+; TP: tp.pas:38:8: error: 'q' may be nil here, but it is dereferenced with '^'; check it first (if q <> nil then ...)
+; TP: tp.pas:39:6: error: assigning to 'PDouble' from incompatible type '^integer'
+; TP: tp.pas:46:10: error: pointer indexing is disabled under {$pointermath off}
+; TP-NOT: tp.pas:26:
+; TP-NOT: tp.pas:27:
+; TP-NOT: tp.pas:28:
+; TP-NOT: tp.pas:30:
+; TP-NOT: tp.pas:42:
+; TP-NOT: tp.pas:43:
+; TP-NOT: tp.pas:44:
+; TP-NOT: tp.pas:45:
+; RUN: not %p3 --mode=tp --safe=verified -ferror-limit=0 -c %S/Inputs/unsafe/verified.pas -o %t.o 2>&1 | FileCheck %s --check-prefix=VERIFIED
+; VERIFIED: verified.pas:12:6: error: assigning to 'PDouble' from incompatible type '^integer'
+; VERIFIED: verified.pas:17:6: error: assigning to 'PDouble' from incompatible type '^integer'
+; VERIFIED-NOT: verified.pas:14:
+; VERIFIED-NOT: verified.pas:16:
+; RUN: not %p3 --mode=objfpc -ferror-limit=0 -c %S/Inputs/unsafe/objfpc.pas -o %t.o 2>&1 | FileCheck %s --check-prefix=OBJ
+; OBJ: objfpc.pas:25:11: error: 'b' may be nil here, but 'nb' is of the non-null type 'TBox'; check it first (if b <> nil then ...), or declare 'nb' as 'TBox?'
+; OBJ: objfpc.pas:27:11: error: 'b' may be nil here, but its member 'V' is used; check it first (if b <> nil then ...), or use '?.V'
+; OBJ: objfpc.pas:28:13: error: pointer indexing is disabled under {$pointermath off}
+; RUN: %p3 --mode=tp --emit-llvm %S/Inputs/unsafe/checked.pas -o %t.ll && FileCheck %s --check-prefix=CHKIR < %t.ll
+; CHKIR-LABEL: define internal i32 @pas.readunsafe(
+; CHKIR-NOT: __pas_ptr_bad_add
+; CHKIR-LABEL: define internal i32 @pas.readchecked(
+; CHKIR: __pas_ptr_bad_add
+; RUN: not %p3 --mode=tp -c %S/Inputs/unsafe/syntax.pas -o %t.o 2>&1 | FileCheck %s --check-prefix=SYN
+; SYN: syntax.pas:5:20: error: expected ')' after the expression of 'unsafe'
+; RUN: %p3 --mode=tp %S/Inputs/unsafe/good.pas -o %t.exe && %t.exe | FileCheck %s --check-prefix=GOOD
+; GOOD: 30 30
+; GOOD: 77 30
+; GOOD: 12

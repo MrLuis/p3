@@ -38,7 +38,8 @@ type
 
   { swWrap: no directive; unchecked blocks: integer values converted to a
     narrower integer type wrap instead of being range-checked }
-  TCheckSwitch = (swRange, swOverflow, swWrap, swTypedAddress, swPointerMath);
+  TCheckSwitch = (swRange, swOverflow, swWrap, swTypedAddress, swPointerMath,
+                  swUnsafe);
 
   PIncludeFrame = ^TIncludeFrame;
   TIncludeFrame = record
@@ -182,7 +183,7 @@ type
     longStrings, corbaInterfaces, inlineOn, scopedEnums, nullSafe,
       nilPointers: boolean;
     packRecords: longint;
-    range, overflow, typedAddress, pointerMath: longint; { as TDirective.state }
+    range, overflow, typedAddress, pointerMath, unsafeState: longint; { as TDirective.state }
   end;
 
 var
@@ -1682,6 +1683,7 @@ begin
     saved^.overflow := directiveStateAt(swOverflow, locOf(lx, start));
     saved^.typedAddress := directiveStateAt(swTypedAddress, locOf(lx, start));
     saved^.pointerMath := directiveStateAt(swPointerMath, locOf(lx, start));
+    saved^.unsafeState := directiveStateAt(swUnsafe, locOf(lx, start));
     listAdd(lx.switchStack, saved);
     exit;
   end;
@@ -1704,6 +1706,7 @@ begin
     addDirectiveState(lx, locOf(lx, start), swOverflow, saved^.overflow);
     addDirectiveState(lx, locOf(lx, start), swTypedAddress, saved^.typedAddress);
     addDirectiveState(lx, locOf(lx, start), swPointerMath, saved^.pointerMath);
+    addDirectiveState(lx, locOf(lx, start), swUnsafe, saved^.unsafeState);
     exit;
   end;
   { $packrecords N|C|DEFAULT|NORMAL, $align N|ON|OFF, $aN, $a+|-: how the

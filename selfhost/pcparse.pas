@@ -5786,6 +5786,82 @@ begin
   parseCheckedBlock := n;
 end;
 
+{ unsafe ... end / unsafe(expression) (tp/objfpc; not reserved):
+  all pointer-safety rules relaxed within its extent. }
+function startsUnsafeBlock: boolean;
+begin
+  startsUnsafeBlock := false;
+  if (mode = lmISO) or not isIdentifierNamed('unsafe') then
+    exit;
+  startsUnsafeBlock := peekKind in [tkIdentifier, tkKwBegin, tkKwIf, tkKwWhile,
+                                    tkKwRepeat, tkKwFor, tkKwCase, tkKwWith,
+                                    tkKwTry, tkKwRaise, tkKwVar, tkKwConst,
+                                    tkKwGoto, tkKwInherited, tkKwEnd];
+end;
+
+function startsUnsafeExpr: boolean;
+begin
+  startsUnsafeExpr := (mode <> lmISO) and (peekKind = tkLParen) and
+                      isIdentifierNamed('unsafe') and
+                      not lexIsDeclared(lx, intern('unsafe'));
+end;
+
+function parseUnsafeExpr: PNode;
+var
+  loc: TLoc;
+  unsafeBefore, ptrMathBefore, typedBefore: longint;
+  inner, n: PNode;
+begin
+  parseUnsafeExpr := nil;
+  loc := tok.loc;
+  unsafeBefore := checkStateAt(swUnsafe, loc);
+  ptrMathBefore := checkStateAt(swPointerMath, loc);
+  typedBefore := checkStateAt(swTypedAddress, loc);
+  addCheckState(loc, swUnsafe, 1);
+  addCheckState(loc, swPointerMath, 1);
+  addCheckState(loc, swTypedAddress, 0);
+  consumeToken;
+  consumeToken; { '(' }
+  inner := parseExpression;
+  addCheckState(tok.loc, swUnsafe, unsafeBefore);
+  addCheckState(tok.loc, swPointerMath, ptrMathBefore);
+  addCheckState(tok.loc, swTypedAddress, typedBefore);
+  if inner = nil then
+    exit;
+  if not expect(tkRParen, 'after the expression of ''unsafe''') then
+    exit;
+  n := newNode(nkParen, loc, prevTokEnd);
+  n^.inner := inner;
+  parseUnsafeExpr := n;
+end;
+
+function parseUnsafeBlock: PNode;
+var
+  loc, endLoc: TLoc;
+  unsafeBefore, ptrMathBefore, typedBefore: longint;
+  body: TPtrList;
+  n: PNode;
+begin
+  loc := tok.loc;
+  unsafeBefore := checkStateAt(swUnsafe, loc);
+  ptrMathBefore := checkStateAt(swPointerMath, loc);
+  typedBefore := checkStateAt(swTypedAddress, loc);
+  addCheckState(loc, swUnsafe, 1);
+  addCheckState(loc, swPointerMath, 1);
+  addCheckState(loc, swTypedAddress, 0);
+  consumeToken;
+  listInit(body);
+  parseStatementSequence(body, tkKwEnd, loc, 'unsafe');
+  addCheckState(tok.loc, swUnsafe, unsafeBefore);
+  addCheckState(tok.loc, swPointerMath, ptrMathBefore);
+  addCheckState(tok.loc, swTypedAddress, typedBefore);
+  endLoc := tokenEnd(tok);
+  tryConsume(tkKwEnd);
+  n := newNode(nkCompound, loc, endLoc);
+  n^.stmts := body;
+  parseUnsafeBlock := n;
+end;
+
 function parseStatementImpl: PNode;
 var
   gotoLoc, start, l: TLoc;
@@ -5808,6 +5884,23 @@ begin
         begin
           if startsCheckedBlock then
             n := parseCheckedBlock
+          else if startsUnsafeBlock then
+            n := parseUnsafeBlock
+          else if startsUnsafeExpr then
+          begin
+            stmtTokens := @toks;
+            start := tok.loc;
+            n := parseUnsafeExpr;
+            if n <> nil then
+              n := parseSelectors(n);
+            if n = nil then
+            begin
+              skipUntil([tkSemi, tkKwEnd]);
+              n := emptyStmt(start);
+            end
+            else
+              n := finishDesignatorStmt(start, n);
+          end
           else
           begin
             stmtTokens := @toks;
@@ -7441,6 +7534,13 @@ begin
       begin
         if startsCheckedExpr then
           exit(parseCheckedExpr);
+        if startsUnsafeExpr then
+        begin
+          n := parseUnsafeExpr;
+          if n = nil then
+            exit;
+          exit(parseSelectors(n));
+        end;
         if startsAwaitExpr then
           exit(parseAwaitExpr);
         if startsSpawnExpr then
