@@ -106,6 +106,11 @@ examples are in the reference.
   with `{$modeswitch racechecks}`.
 - **Null-safe references**: with `{$nullsafe on}`, `T?`, `?.` and `??`; the
   compiler rejects dereferences that may be nil.
+- **Typed addresses**: with `{$T+}` or `{$typedaddress on}` (available in
+  `tp` and `objfpc` modes, as in Turbo/Free Pascal, and scoped with
+  `{$push}`/`{$pop}`), `@x` yields `^typeof(x)` rather than untyped
+  `pointer` (untyped `var`/`const` parameters remain `pointer`), rejecting
+  incompatible pointer assignments at compile time.
 - **Iterators**: `function Fibonacci: iterator UInt64` with `yield`, usable in
   `for ... in`.
 - **Lazy sequences**: LINQ-style `map`/`filter`/... in the `sequences` unit.
@@ -337,9 +342,10 @@ All handled in `selfhost/pclex.pas` (the C++ compiler recognizes the same set).
 
 **Switch-like directives**
 
-- `$H+`/`$H-` (long strings; long form `$longstrings on/off`, pclex.pas:1762)
-- `$R+`/`$R-` (range checks), `$Q+`/`$Q-` (overflow checks) (pclex.pas:1802-1805;
-  comma lists like `{$R-,Q+}` work)
+- `$H+`/`$H-` (long strings; long form `$longstrings on/off`, pclex.pas:1778)
+- `$R+`/`$R-` (range checks), `$Q+`/`$Q-` (overflow checks), `$T+`/`$T-` (typed
+  addresses; long form `$typedaddress on/off`, pclex.pas:1765,1818-1823; comma
+  lists like `{$R-,Q+,T+}` work)
 - `$A+|-`, `$A1|2|4|8|16|32`, `$align N|on|off` (pclex.pas:1692,1706,1795)
 - `$packrecords 1|2|4|8|16|32|C|DEFAULT|NORMAL` (pclex.pas:1679)
 - `$scopedenums on/off` (pclex.pas:1711)
