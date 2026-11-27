@@ -209,11 +209,12 @@ end;
 { path with '.' and '..' components removed (an absolute path) }
 function removeDots(const path: string): string;
 var
-  parts: array[0..63] of string[255];
-  n, i, start: longint;
+  parts: TPtrList;
+  i, start: longint;
   part, r: string;
+  dummy: pointer;
 begin
-  n := 0;
+  listInit(parts);
   start := 1;
   for i := 1 to length(path) + 1 do
     if (i > length(path)) or (path[i] = '/') then
@@ -224,19 +225,16 @@ begin
         continue;
       if part = '..' then
       begin
-        if n > 0 then
-          n := n - 1;
+        if parts.count > 0 then
+          dummy := listPop(parts);
         continue;
       end;
-      if n <= 63 then
-      begin
-        parts[n] := part;
-        n := n + 1;
-      end;
+      listAdd(parts, intern(part));
     end;
   r := '';
-  for i := 0 to n - 1 do
-    r := r + '/' + parts[i];
+  for i := 0 to parts.count - 1 do
+    r := r + '/' + nameStr(PName(listGet(parts, i)));
+  listFree(parts);
   if r = '' then
     r := '/';
   removeDots := r;
@@ -400,7 +398,8 @@ end;
 
 { -mmacosx-version-min for a Mach-O target: the object's target triple
   records the deployment target, while clang's default may be older (which
-  makes ld warn). Darwin N maps to macOS N-9 (25 -> 16). }
+  makes ld warn). Darwin >= 25 maps to macOS N+1 (25 -> 26),
+  Darwin 20..24 maps to macOS N-9 (24 -> 15). }
 function macDeploymentMin(const triple: string): string;
 var
   p, i, major: longint;
@@ -422,7 +421,9 @@ begin
     major := 0;
     for i := 1 to length(majorStr) do
       major := major * 10 + (ord(majorStr[i]) - ord('0'));
-    if major >= 20 then
+    if major >= 25 then
+      major := major + 1
+    else if major >= 20 then
       major := major - 9
     else
       major := 10;

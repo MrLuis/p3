@@ -49,13 +49,14 @@ implementation
 function absolutePath(const p: string): string;
 var
   full, c, r: string;
-  parts: array[0..127] of string;
-  n, i, j: longint;
+  parts: TPtrList;
+  i, j: longint;
+  dummy: pointer;
 begin
   full := p;
   if (full = '') or (full[1] <> '/') then
     full := sysGetCwd + '/' + p;
-  n := 0;
+  listInit(parts);
   i := 1;
   while i <= length(full) + 1 do
   begin
@@ -65,19 +66,17 @@ begin
     c := copy(full, i, j - i);
     if c = '..' then
     begin
-      if n > 0 then
-        n := n - 1;
+      if parts.count > 0 then
+        dummy := listPop(parts);
     end
-    else if (c <> '') and (c <> '.') and (n < 128) then
-    begin
-      parts[n] := c;
-      n := n + 1;
-    end;
+    else if (c <> '') and (c <> '.') then
+      listAdd(parts, intern(c));
     i := j + 1;
   end;
   r := '';
-  for i := 0 to n - 1 do
-    r := r + '/' + parts[i];
+  for i := 0 to parts.count - 1 do
+    r := r + '/' + nameStr(PName(listGet(parts, i)));
+  listFree(parts);
   if r = '' then
     r := '/';
   absolutePath := r;

@@ -226,7 +226,10 @@ such constant, p3 writes a small program to `gen/.ct/` (`--generated-dir`),
 builds and runs it with the time and memory limits of generators
 (`--generator-timeout`), and uses its value: a typed constant for an array
 or record (`CrcTable: TCrcTable = (0, 1996959894, ...)`), a plain constant
-otherwise. A runtime error or the time limit is reported at the constant.
+otherwise. Like source generators, a `compiletime` function builds and runs native
+code on the host (not sandboxed beyond subset checks and resource limits), so
+only compile untrusted sources if you have disabled project files and do not
+rely on `compiletime` isolation. A runtime error or the time limit is reported at the constant.
 The value is computed again only when the sources or the compiler change. A
 constant can use earlier ones and units' compiletime functions. The result
 can be an ordinal, real or string type, an enumeration, or an array or
@@ -505,7 +508,9 @@ diagnostics).
 
 It is looked for in the input file's directory (the current directory without
 an input file) and its parents; `--project=<file>` names one explicitly, and
-`--no-project` ignores project files altogether. The command line wins over
+`--no-project` ignores project files altogether (recommended when compiling
+untrusted files inside shared directories, since `p3.json` can configure
+`generators`, `libraries`, and paths). The command line wins over
 the project in value settings (`mode`, `output`, `optimize`, `target`, `cpu`,
 `errorLimit`); the boolean flags combine — the project can turn on
 `debug`/`separateUnits`/warnings-as-errors just as `-g`/`--fseparate-units`/

@@ -181,7 +181,7 @@ end;
 
 const
   numFlags = 26;
-  flagNames: array[1..numFlags] of string[24] = (
+  flagNames: array[1..numFlags] of string = (
     'help', 'help-list', 'version', 'emit-tokens', 'emit-ast', 'emit-parse-tree',
     'emit-llvm', 'S', 'c', 'Werror', 'Wno-unused-variable', 'Wno-deprecated',
     'fno-overflow-checks',
@@ -189,7 +189,7 @@ const
     'fno-zero-init', 'fno-inline-runtime', 'fkeep-unused', 'ffast-math', 'Os', 'Oz',
     'fno-internalize-runtime', 'fwhole-program');
   numValueOpts = 17;
-  valueOptNames: array[1..numValueOpts] of string[20] = (
+  valueOptNames: array[1..numValueOpts] of string = (
     'o', 'mode', 'fdiagnostics-color', 'ferror-limit', 'target', 'I', 'O', 'L', 'l',
     'd', 'project', 'mcpu', 'mattr', 'generator', 'generated-dir',
     'generator-timeout', 'emit-model');
