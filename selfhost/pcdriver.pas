@@ -108,28 +108,6 @@ begin
     listAdd(libraries, intern(arg));
 end;
 
-{ s quoted for the shell }
-function shellQuote(const s: string): string;
-var
-  r: string;
-  i: longint;
-begin
-  r := '''';
-  for i := 1 to length(s) do
-    if s[i] = '''' then
-      r := r + '''\'''''
-    else
-      r := r + s[i];
-  shellQuote := r + '''';
-end;
-
-procedure addArg(var cmd: TBuf; const s: string);
-begin
-  if cmd.len > 0 then
-    bufAddChar(cmd, ' ');
-  bufAdd(cmd, shellQuote(s));
-end;
-
 { The tool named by the environment variable env (a path, or a name to
   look up in $PATH), else the first of names (separated by spaces) found
   in $PATH; '' if none. }
@@ -296,26 +274,37 @@ end;
 
 { The C library MinGW-w64's compiler cc links by default, as its headers
   say (_UCRT): 'ucrt' or 'msvcrt'; '' if cc cannot tell. }
-function crtProbe(const cc, token: string): boolean;
-var
-  cmd: TBuf;
-begin
-  { a buffer, not a string: cc's path may be long }
-  bufInit(cmd);
-  bufAdd(cmd, 'printf ''%s\n'' ''#include <_mingw.h>'' ''#ifdef _UCRT'' P3_CRT_UCRT ');
-  bufAdd(cmd, '''#else'' P3_CRT_MSVCRT ''#endif'' | ');
-  addArg(cmd, cc);
-  bufAdd(cmd, ' -E -P -x c - 2>/dev/null | grep -q ' + token);
-  crtProbe := sysRunChars(cmd.data, cmd.len) = 0;
-  bufFree(cmd);
-end;
-
 function mingwCRT(const cc: string): string;
+var
+  args: TPtrList;
+  inputText: string;
+  capBuf: TBuf;
+  rc: longint;
 begin
-  if crtProbe(cc, 'P3_CRT_UCRT') then
+  listInit(args);
+  argAdd(args, cc);
+  argAdd(args, '-E');
+  argAdd(args, '-P');
+  argAdd(args, '-x');
+  argAdd(args, 'c');
+  argAdd(args, '-');
+  inputText := '#include <_mingw.h>' + #10 + '#ifdef _UCRT' + #10 +
+               'P3_CRT_UCRT' + #10 + '#else' + #10 + 'P3_CRT_MSVCRT' + #10 +
+               '#endif' + #10;
+  bufInit(capBuf);
+  rc := execCapture(args, inputText, capBuf);
+  listFree(args);
+  if (rc = 0) and bufContains(capBuf, 'P3_CRT_UCRT') then
+  begin
+    bufFree(capBuf);
     exit('ucrt');
-  if crtProbe(cc, 'P3_CRT_MSVCRT') then
+  end;
+  if (rc = 0) and bufContains(capBuf, 'P3_CRT_MSVCRT') then
+  begin
+    bufFree(capBuf);
     exit('msvcrt');
+  end;
+  bufFree(capBuf);
   mingwCRT := '';
 end;
 
@@ -505,7 +494,8 @@ function linkExecutable(const obj: string; const unitObjects: TPtrList;
                         const path, triple: string): boolean;
 var
   runtime, cc, e, l, f, found: string;
-  cmd: TBuf;
+  args: TPtrList;
+  timedOut: boolean;
   status, i: longint;
 begin
   linkExecutable := false;
@@ -525,17 +515,17 @@ begin
                      '''; set P3_RUNTIME_LIB');
     exit;
   end;
-  bufInit(cmd);
-  addArg(cmd, cc);
-  addArg(cmd, obj);
+  listInit(args);
+  argAdd(args, cc);
+  argAdd(args, obj);
   for i := 0 to unitObjects.count - 1 do
-    addArg(cmd, nameStr(PName(listGet(unitObjects, i))));
-  addArg(cmd, runtime);
+    argAdd(args, nameStr(PName(listGet(unitObjects, i))));
+  argAdd(args, runtime);
   { -L directories, then -l libraries (each in command-line order). A
     library named as a file ("-l:name") is a GNU ld extension; on Mach-O
     resolve the file in the -L directories and pass its path. }
   for i := 0 to libraryDirs.count - 1 do
-    addArg(cmd, nameStr(PName(listGet(libraryDirs, i))));
+    argAdd(args, nameStr(PName(listGet(libraryDirs, i))));
   for i := 0 to libraries.count - 1 do
   begin
     l := nameStr(PName(listGet(libraries, i)));
@@ -548,41 +538,42 @@ begin
       f := copy(l, 4, length(l));
       found := findLibraryFile(f, libraryDirs);
       if found <> '' then
-        addArg(cmd, found)
+        argAdd(args, found)
       else
-        addArg(cmd, f);
+        argAdd(args, f);
     end
     else
-      addArg(cmd, l);
+      argAdd(args, l);
   end;
   e := macDeploymentMin(triple);
   if e <> '' then
-    addArg(cmd, '-mmacosx-version-min=' + e);
+    argAdd(args, '-mmacosx-version-min=' + e);
   { dead-code stripping of the unused sections (item 18) }
   if (pos('darwin', triple) > 0) or (pos('macos', triple) > 0) or
      (pos('apple', triple) > 0) then
-    addArg(cmd, '-Wl,-dead_strip')
+    argAdd(args, '-Wl,-dead_strip')
   else if isWindowsTriple(triple) and not isMinGWTriple(triple) then
-    addArg(cmd, '-Wl,/OPT:REF')
+    argAdd(args, '-Wl,/OPT:REF')
   else
-    addArg(cmd, '-Wl,--gc-sections');
+    argAdd(args, '-Wl,--gc-sections');
   { MinGW: a self-contained executable, without MinGW's own DLLs. The
     runtime's tasks use winpthreads, which a toolchain of the posix thread
     model links by itself and one of the win32 model (Debian's and Ubuntu's
     default) does not. }
   if isMinGWTriple(triple) then
   begin
-    addArg(cmd, '-static');
-    addArg(cmd, '-lpthread');
+    argAdd(args, '-static');
+    argAdd(args, '-lpthread');
   end;
   { Windows: the runtime's socket waits (and unit netasync) use Winsock }
   if isWindowsTriple(triple) then
-    addArg(cmd, '-lws2_32');
-  addArg(cmd, '-lm');
-  addArg(cmd, '-o');
-  addArg(cmd, path);
-  status := sysRunChars(cmd.data, cmd.len);
-  bufFree(cmd);
+    argAdd(args, '-lws2_32');
+  argAdd(args, '-lm');
+  argAdd(args, '-o');
+  argAdd(args, path);
+  timedOut := false;
+  status := execArgs(args, '', '', '', 0, timedOut);
+  listFree(args);
   if status < 0 then
   begin
     diagError(noLoc, 'failed to run linker ''' + cc + '''');

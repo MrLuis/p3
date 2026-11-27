@@ -854,7 +854,9 @@ var
   fns: PPtrList;
   src, dataP: PCharArray;
   callB, callE, outLen, m, eol: int64;
-  o, locals, code, cmd, errText, outText: TBuf;
+  o, locals, code, helpers, errText, outText: TBuf;
+  args: TPtrList;
+  timedOut: boolean;
   curLine, curCol: longint;
   kw, err, genDir, ctDir, base, srcPath, exe, outPath, errPath, stampPath,
     self, fileDir, inputDir, stamp, a: string;
@@ -1063,10 +1065,10 @@ begin
     exit;
   end;
   appendStr(#10);
-  bufInit(cmd);
-  addPrinterHelpers(cmd);
-  appendBuf(cmd);
-  bufFree(cmd);
+  bufInit(helpers);
+  addPrinterHelpers(helpers);
+  appendBuf(helpers);
+  bufFree(helpers);
   appendStr('procedure p3ct_out(const p3ct_v: ' + specText(resultTS) + ');' + #10);
   appendBuf(locals);
   appendStr(#10 + 'begin' + #10 + '  ');
@@ -1094,49 +1096,38 @@ begin
   fileDir := absPath(pathDirName(f^.path));
   inputDir := absPath(pathDirName(optInput));
 
-  bufInit(cmd);
-  addQuoted(cmd, self);
+  listInit(args);
+  argAdd(args, self);
   { (without warnings about the variables copied only for diagnostics) }
-  bufAdd(cmd, ' --no-project -O0 --Wno-unused-variable ');
-  addQuoted(cmd, '--mode=' + modeName(optMode));
-  bufAdd(cmd, ' ');
-  addQuoted(cmd, '--generated-dir=' + genDir);
-  bufAdd(cmd, ' ');
-  addQuoted(cmd, '-I' + fileDir);
+  argAdd(args, '--no-project');
+  argAdd(args, '-O0');
+  argAdd(args, '--Wno-unused-variable');
+  argAdd(args, '--mode=' + modeName(optMode));
+  argAdd(args, '--generated-dir=' + genDir);
+  argAdd(args, '-I' + fileDir);
   if inputDir <> fileDir then
-  begin
-    bufAdd(cmd, ' ');
-    addQuoted(cmd, '-I' + inputDir);
-  end;
+    argAdd(args, '-I' + inputDir);
   for i := 0 to optIncludes.count - 1 do
-  begin
-    bufAdd(cmd, ' ');
-    addQuoted(cmd, '-I' + absPath(nameStr(PName(listGet(optIncludes, i)))));
-  end;
+    argAdd(args, '-I' + absPath(nameStr(PName(listGet(optIncludes, i)))));
   for i := 0 to optDefines.count - 1 do
-  begin
-    bufAdd(cmd, ' ');
-    addQuoted(cmd, '-d' + nameStr(PName(listGet(optDefines, i))));
-  end;
+    argAdd(args, '-d' + nameStr(PName(listGet(optDefines, i))));
   for i := 0 to optGenerators.count - 1 do
   begin
-    bufAdd(cmd, ' ');
     a := nameStr(PName(listGet(optGenerators, i)));
     if not isLibraryGenerator(a) then
       a := absPath(a);
-    addQuoted(cmd, '--generator=' + a);
+    argAdd(args, '--generator=' + a);
   end;
-  bufAdd(cmd, ' --generator-timeout=');
-  bufAddInt(cmd, optTimeout);
-  bufAdd(cmd, ' -o ');
-  addQuoted(cmd, exe);
-  bufAdd(cmd, ' ');
-  addQuoted(cmd, srcPath);
+  argAdd(args, '--generator-timeout=' + intToStr(optTimeout));
+  argAdd(args, '-o');
+  argAdd(args, exe);
+  argAdd(args, srcPath);
 
   { the key: the program, the command, the sources of the compilation's
     files and the compiler itself }
   key := fnvBytes(o.data, o.len, fnvSeed);
-  key := fnvBytes(cmd.data, cmd.len, key);
+  for i := 0 to args.count - 1 do
+    key := fnvString(nameStr(PName(listGet(args, i))), key);
   for i := 0 to files.count - 1 do
   begin
     j := PFileInfo(listGet(files, i))^.fid;
@@ -1150,13 +1141,13 @@ begin
   begin
     if not writeBuf(srcPath, o) then
     begin
+      listFree(args);
       fail('cannot write ''' + srcPath + '''');
       exit;
     end;
-    bufAdd(cmd, ' > ');
-    addQuoted(cmd, errPath);
-    bufAdd(cmd, ' 2>&1');
-    rc := runCommand(cmd);
+    timedOut := false;
+    rc := execArgs(args, '', errPath, errPath, 0, timedOut);
+    listFree(args);
     if rc <> 0 then
     begin
       { its diagnostics, with the source file's name (the lines are the
@@ -1175,20 +1166,12 @@ begin
       bufFree(errText);
       exit;
     end;
-    { (in a subshell whose own messages, such as the time limit's, are
-      not shown) }
-    bufClear(cmd);
-    bufAdd(cmd, '(ulimit -t ');
-    bufAddInt(cmd, optTimeout);
-    bufAdd(cmd, '; ulimit -v 2097152 2>/dev/null; ');
-    addQuoted(cmd, exe);
-    bufAdd(cmd, ' < /dev/null > ');
-    addQuoted(cmd, outPath);
-    bufAdd(cmd, ' 2> ');
-    addQuoted(cmd, errPath);
-    bufAdd(cmd, ') 2>/dev/null');
-    rc := runCommand(cmd);
-    if (rc = 152) or (rc = 137) then { SIGXCPU or SIGKILL: the time limit }
+    listInit(args);
+    argAdd(args, exe);
+    timedOut := false;
+    rc := execArgs(args, '/dev/null', outPath, errPath, optTimeout, timedOut);
+    listFree(args);
+    if timedOut then
     begin
       fail('''' + nameStr(fn^.ident.spelling) + ''' ran longer than ' +
            intToStr(optTimeout) + ' seconds');
@@ -1222,8 +1205,9 @@ begin
       exit;
     end;
     writeStamp(stampPath, stamp);
-  end;
-  bufFree(cmd);
+  end
+  else
+    listFree(args);
   { the value: after the last @p3ct@, to the end of its line }
   m := -1;
   for i := 0 to outLen - 6 do

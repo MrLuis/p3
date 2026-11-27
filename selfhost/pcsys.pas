@@ -9,6 +9,8 @@ interface
 type
   TCharArray = array[0..$7FFFFFF] of char;
   PCharArray = ^TCharArray;
+  TPCharArray = array[0..$FFFFFFF] of pchar;
+  PPCharArray = ^TPCharArray;
 
 var
   { C streams for standard output and standard error. }
@@ -47,10 +49,17 @@ procedure sysMakeDirs(const path: string);
 
 { The environment variable name, if set. }
 function sysGetEnv(const name: string; var value: string): boolean;
-{ Runs a shell command; returns its exit status (-1 if it did not run). }
-function sysRun(const cmd: string): longint;
-{ the same for a command of any length: count bytes at p }
-function sysRunChars(p: PCharArray; count: int64): longint;
+{ Runs argv[0] directly via fork/execvp/waitpid with optional stdin/stdout/stderr
+  redirects ('' = inherit parent fd; errPath = outPath shares stdout fd) and
+  optional timeout in seconds (0 = unlimited). Returns child exit code
+  (or 128 + signal), -2 on timeout (timedOut := true), or -1 on launch error. }
+function sysExec(argv: PPCharArray; const inPath, outPath, errPath: string;
+                 timeoutSecs: longint; var timedOut: boolean): longint;
+{ Runs argv[0] with inputText fed to stdin and stdout captured into a heap
+  buffer capData[0..capLen-1] (caller frees with freemem; stderr discarded).
+  Returns child exit code, or -1 on launch error. }
+function sysExecFeedCapture(argv: PPCharArray; const inputText: string;
+                            var capData: PCharArray; var capLen: int64): longint;
 { A new empty file in $TMPDIR (or /tmp) named p3-XXXXXX<suffix>; '' if
   it cannot be created. }
 function sysTempFile(const suffix: string): string;
@@ -84,7 +93,18 @@ function c_fclose(f: pointer): longint; cdecl; external 'c' name 'fclose';
 function c_fflush(f: pointer): longint; cdecl; external 'c' name 'fflush';
 function c_remove(path: pchar): longint; cdecl; external 'c' name 'remove';
 function c_getenv(name: pchar): pchar; cdecl; external 'c' name 'getenv';
-function c_system(cmd: pchar): longint; cdecl; external 'c' name 'system';
+function c_fork: longint; cdecl; external 'c' name 'fork';
+function c_execvp(file_: pchar; argv: pointer): longint; cdecl; external 'c' name 'execvp';
+function c_waitpid(pid: longint; status: pointer; options: longint): longint; cdecl;
+  external 'c' name 'waitpid';
+procedure c__exit(code: longint); cdecl; external 'c' name '_exit';
+function c_dup2(oldfd, newfd: longint): longint; cdecl; external 'c' name 'dup2';
+function c_pipe(fds: pointer): longint; cdecl; external 'c' name 'pipe';
+function c_read(fd: longint; buf: pointer; count: int64): int64; cdecl; external 'c' name 'read';
+function c_write(fd: longint; buf: pointer; count: int64): int64; cdecl; external 'c' name 'write';
+function c_fileno(f: pointer): longint; cdecl; external 'c' name 'fileno';
+function c_kill(pid, sig: longint): longint; cdecl; external 'c' name 'kill';
+function c_usleep(usec: cardinal): longint; cdecl; external 'c' name 'usleep';
 function c_isatty(fd: longint): longint; cdecl; external 'c' name 'isatty';
 function c_strtod(s: pchar; endp: pointer): double; cdecl; external 'c' name 'strtod';
 function c_mkstemps(template: pchar; suffixLen: longint): longint; cdecl;
@@ -301,37 +321,6 @@ begin
   sysGetEnv := true;
 end;
 
-function sysRun(const cmd: string): longint;
-var
-  ccmd: string;
-  status: longint;
-begin
-  sysFlush; { keep our output ahead of the command's }
-  toC(cmd, ccmd);
-  status := c_system(@ccmd[1]);
-  if status = -1 then
-    exit(-1);
-  sysRun := (status shr 8) and 255; { exit status of a normal exit }
-end;
-
-function sysRunChars(p: PCharArray; count: int64): longint;
-var
-  cmd: PCharArray;
-  status: longint;
-begin
-  sysFlush;
-  getmem(cmd, count + 1);
-  {$R-}
-  move(p^[0], cmd^[0], count);
-  cmd^[count] := #0;
-  {$R+}
-  status := c_system(pchar(cmd));
-  freemem(cmd);
-  if status = -1 then
-    exit(-1);
-  sysRunChars := (status shr 8) and 255;
-end;
-
 { The C string p (at most 255 characters). }
 function fromC(p: PCharArray): string;
 var
@@ -451,6 +440,237 @@ end;
 function sysIsTerminal(fd: longint): boolean;
 begin
   sysIsTerminal := c_isatty(fd) <> 0;
+end;
+
+function canExec(prog: pchar): boolean;
+var
+  p: PCharArray;
+  i: longint;
+  hasSlash: boolean;
+begin
+  if prog = nil then
+    exit(false);
+  p := PCharArray(prog);
+  hasSlash := false;
+  i := 0;
+  {$R-}
+  while p^[i] <> #0 do
+  begin
+    if p^[i] = '/' then
+    begin
+      hasSlash := true;
+      break;
+    end;
+    i := i + 1;
+  end;
+  {$R+}
+  if hasSlash then
+    canExec := c_access(prog, 1) = 0
+  else
+    canExec := sysFindProgram(fromC(p)) <> '';
+end;
+
+function openStream(const path, mode: string): pointer;
+var
+  cpath, cmode: string;
+begin
+  toC(path, cpath);
+  toC(mode, cmode);
+  openStream := c_fopen(@cpath[1], @cmode[1]);
+end;
+
+function decodeWaitStatus(status: longint): longint;
+begin
+  if (status and $7F) = 0 then
+    decodeWaitStatus := (status shr 8) and $FF
+  else
+    decodeWaitStatus := 128 + (status and $7F);
+end;
+
+function sysExec(argv: PPCharArray; const inPath, outPath, errPath: string;
+                 timeoutSecs: longint; var timedOut: boolean): longint;
+var
+  inF, outF, errF: pointer;
+  inFd, outFd, errFd, pid, status, r: longint;
+  limitUs, elapsedUs: int64;
+  stepUs: cardinal;
+begin
+  timedOut := false;
+  if (argv = nil) or not canExec(argv^[0]) then
+    exit(-1);
+  inF := nil; outF := nil; errF := nil;
+  inFd := -1; outFd := -1; errFd := -1;
+  if inPath <> '' then
+  begin
+    inF := openStream(inPath, 'rb');
+    if inF = nil then
+      exit(-1);
+    inFd := c_fileno(inF);
+  end;
+  if outPath <> '' then
+  begin
+    outF := openStream(outPath, 'wb');
+    if outF = nil then
+    begin
+      if inF <> nil then c_fclose(inF);
+      exit(-1);
+    end;
+    outFd := c_fileno(outF);
+  end;
+  if errPath <> '' then
+  begin
+    if errPath = outPath then
+      errFd := outFd
+    else
+    begin
+      errF := openStream(errPath, 'wb');
+      if errF = nil then
+      begin
+        if inF <> nil then c_fclose(inF);
+        if outF <> nil then c_fclose(outF);
+        exit(-1);
+      end;
+      errFd := c_fileno(errF);
+    end;
+  end;
+  sysFlush;
+  pid := c_fork;
+  if pid < 0 then
+  begin
+    if inF <> nil then c_fclose(inF);
+    if outF <> nil then c_fclose(outF);
+    if errF <> nil then c_fclose(errF);
+    exit(-1);
+  end;
+  if pid = 0 then
+  begin
+    if inFd >= 0 then c_dup2(inFd, 0);
+    if outFd >= 0 then c_dup2(outFd, 1);
+    if errFd >= 0 then c_dup2(errFd, 2);
+    if inFd > 2 then c_close(inFd);
+    if (outFd > 2) and (outFd <> inFd) then c_close(outFd);
+    if (errFd > 2) and (errFd <> outFd) and (errFd <> inFd) then c_close(errFd);
+    {$R-}
+    c_execvp(argv^[0], argv);
+    {$R+}
+    c__exit(127);
+  end;
+  if inF <> nil then c_fclose(inF);
+  if outF <> nil then c_fclose(outF);
+  if errF <> nil then c_fclose(errF);
+  status := 0;
+  if timeoutSecs <= 0 then
+  begin
+    if c_waitpid(pid, @status, 0) < 0 then
+      exit(-1);
+  end
+  else
+  begin
+    limitUs := int64(timeoutSecs) * 1000000;
+    elapsedUs := 0;
+    stepUs := 100;
+    repeat
+      r := c_waitpid(pid, @status, 1);
+      if r > 0 then
+        break;
+      if r < 0 then
+        exit(-1);
+      if elapsedUs >= limitUs then
+      begin
+        c_kill(pid, 9);
+        c_waitpid(pid, @status, 0);
+        timedOut := true;
+        exit(-2);
+      end;
+      c_usleep(stepUs);
+      elapsedUs := elapsedUs + stepUs;
+      if stepUs < 10000 then
+        stepUs := stepUs * 2;
+    until false;
+  end;
+  sysExec := decodeWaitStatus(status);
+end;
+
+function sysExecFeedCapture(argv: PPCharArray; const inputText: string;
+                            var capData: PCharArray; var capLen: int64): longint;
+var
+  inPipe, outPipe: array[0..1] of longint;
+  nulF: pointer;
+  nulFd, pid, status: longint;
+  off, n, got, cap: int64;
+begin
+  capData := nil;
+  capLen := 0;
+  if (argv = nil) or not canExec(argv^[0]) then
+    exit(-1);
+  if c_pipe(@inPipe[0]) <> 0 then
+    exit(-1);
+  if c_pipe(@outPipe[0]) <> 0 then
+  begin
+    c_close(inPipe[0]); c_close(inPipe[1]);
+    exit(-1);
+  end;
+  nulF := openStream('/dev/null', 'wb');
+  nulFd := -1;
+  if nulF <> nil then
+    nulFd := c_fileno(nulF);
+  sysFlush;
+  pid := c_fork;
+  if pid < 0 then
+  begin
+    c_close(inPipe[0]); c_close(inPipe[1]);
+    c_close(outPipe[0]); c_close(outPipe[1]);
+    if nulF <> nil then c_fclose(nulF);
+    exit(-1);
+  end;
+  if pid = 0 then
+  begin
+    c_dup2(inPipe[0], 0);
+    c_dup2(outPipe[1], 1);
+    if nulFd >= 0 then
+      c_dup2(nulFd, 2);
+    c_close(inPipe[0]); c_close(inPipe[1]);
+    c_close(outPipe[0]); c_close(outPipe[1]);
+    if nulFd > 2 then
+      c_close(nulFd);
+    {$R-}
+    c_execvp(argv^[0], argv);
+    {$R+}
+    c__exit(127);
+  end;
+  c_close(inPipe[0]);
+  c_close(outPipe[1]);
+  if nulF <> nil then
+    c_fclose(nulF);
+  off := 0;
+  while off < length(inputText) do
+  begin
+    n := c_write(inPipe[1], @inputText[off + 1], length(inputText) - off);
+    if n <= 0 then
+      break;
+    off := off + n;
+  end;
+  c_close(inPipe[1]);
+  cap := 4096;
+  getmem(capData, cap);
+  repeat
+    if capLen + 1024 > cap then
+    begin
+      cap := cap * 2;
+      reallocmem(capData, cap);
+    end;
+    {$R-}
+    got := c_read(outPipe[0], @capData^[capLen], cap - capLen);
+    {$R+}
+    if got <= 0 then
+      break;
+    capLen := capLen + got;
+  until false;
+  c_close(outPipe[0]);
+  status := 0;
+  if c_waitpid(pid, @status, 0) < 0 then
+    exit(-1);
+  sysExecFeedCapture := decodeWaitStatus(status);
 end;
 
 function sysInfinity: double;

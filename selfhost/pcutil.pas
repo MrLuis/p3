@@ -126,6 +126,14 @@ function realNaN: double;
 function pathDirName(const path: string): string;
 function pathJoin(const dir, name: string): string;
 
+{ Subprocess execution over TPtrList of PName arguments (no shell). }
+procedure argAdd(var args: TPtrList; const s: string);
+function execArgs(const args: TPtrList; const inPath, outPath, errPath: string;
+                  timeoutSecs: longint; var timedOut: boolean): longint;
+function execCapture(const args: TPtrList; const inputText: string;
+                     var capBuf: TBuf): longint;
+function bufContains(const b: TBuf; const needle: string): boolean;
+
 implementation
 
 const
@@ -1072,6 +1080,84 @@ begin
   for i := 1 to length(s) do
     r := r + lowerChar(s[i]);
   lowerStr := r;
+end;
+
+procedure argAdd(var args: TPtrList; const s: string);
+begin
+  listAdd(args, intern(s));
+end;
+
+function buildArgv(const args: TPtrList): PPCharArray;
+var
+  argv: PPCharArray;
+  i: longint;
+begin
+  getmem(argv, int64(args.count + 1) * sizeof(pointer));
+  {$R-}
+  for i := 0 to args.count - 1 do
+    argv^[i] := pchar(PName(listGet(args, i))^.chars);
+  argv^[args.count] := nil;
+  {$R+}
+  buildArgv := argv;
+end;
+
+function execArgs(const args: TPtrList; const inPath, outPath, errPath: string;
+                  timeoutSecs: longint; var timedOut: boolean): longint;
+var
+  argv: PPCharArray;
+begin
+  if args.count = 0 then
+    exit(-1);
+  argv := buildArgv(args);
+  execArgs := sysExec(argv, inPath, outPath, errPath, timeoutSecs, timedOut);
+  freemem(argv);
+end;
+
+function execCapture(const args: TPtrList; const inputText: string;
+                     var capBuf: TBuf): longint;
+var
+  argv: PPCharArray;
+  data: PCharArray;
+  len: int64;
+begin
+  if args.count = 0 then
+    exit(-1);
+  argv := buildArgv(args);
+  data := nil;
+  len := 0;
+  execCapture := sysExecFeedCapture(argv, inputText, data, len);
+  freemem(argv);
+  if data <> nil then
+  begin
+    if len > 0 then
+      bufAddChars(capBuf, data, 0, len);
+    freemem(data);
+  end;
+end;
+
+function bufContains(const b: TBuf; const needle: string): boolean;
+var
+  i, j, nlen: int64;
+  ok: boolean;
+begin
+  nlen := length(needle);
+  if nlen = 0 then
+    exit(true);
+  {$R-}
+  for i := 0 to b.len - nlen do
+  begin
+    ok := true;
+    for j := 0 to nlen - 1 do
+      if b.data^[i + j] <> needle[j + 1] then
+      begin
+        ok := false;
+        break;
+      end;
+    if ok then
+      exit(true);
+  end;
+  {$R+}
+  bufContains := false;
 end;
 
 end.

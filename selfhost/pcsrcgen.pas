@@ -49,8 +49,6 @@ procedure addSplice(const path: string; data: PCharArray; len: int64);
 const
   fnvSeed = -3750763034362895579; { 0xcbf29ce484222325 }
 function absPath(const path: string): string;
-procedure addQuoted(var b: TBuf; const s: string);
-function runCommand(var cmd: TBuf): longint;
 function readWhole(const path: string; var data: PCharArray; var len: int64): boolean;
 function writeBuf(const path: string; const b: TBuf): boolean;
 function fnvBytes(p: PCharArray; len: int64; seed: int64): int64;
@@ -450,25 +448,6 @@ begin
   absPath := r;
 end;
 
-{ path in single quotes for the shell }
-procedure addQuoted(var b: TBuf; const s: string);
-var
-  i: longint;
-begin
-  bufAddChar(b, '''');
-  for i := 1 to length(s) do
-    if s[i] = '''' then
-      bufAdd(b, '''\''''')
-    else
-      bufAddChar(b, s[i]);
-  bufAddChar(b, '''');
-end;
-
-function runCommand(var cmd: TBuf): longint;
-begin
-  runCommand := sysRunChars(cmd.data, cmd.len);
-end;
-
 function readWhole(const path: string; var data: PCharArray; var len: int64): boolean;
 begin
   readWhole := sysReadFile(path, data, len);
@@ -831,7 +810,8 @@ var
   files: TPtrList; { of PSource }
   i, j, k, g, u: longint;
   gi: PGenInfo;
-  cmd: TBuf;
+  args: TPtrList;
+  timedOut: boolean;
   fid: longint;
   isUnit, ok, found, halves: boolean;
   root: PDecl;
@@ -956,25 +936,22 @@ begin
     if haveHash and sysFileExists(gi^.exe) and
        stampIs(buildStamp, hex16(buildHash)) then
       continue;
-    bufInit(cmd);
-    addQuoted(cmd, self);
-    bufAdd(cmd, ' --no-project --mode=objfpc');
+    listInit(args);
+    argAdd(args, self);
+    argAdd(args, '--no-project');
+    argAdd(args, '--mode=objfpc');
     for j := 0 to includeDirs.count - 1 do
-    begin
-      bufAdd(cmd, ' ');
-      addQuoted(cmd, '-I' + nameStr(PName(listGet(includeDirs, j))));
-    end;
-    bufAdd(cmd, ' ');
+      argAdd(args, '-I' + nameStr(PName(listGet(includeDirs, j))));
     if pathDirName(p) = '' then
-      addQuoted(cmd, '-I.')
+      argAdd(args, '-I.')
     else
-      addQuoted(cmd, '-I' + pathDirName(p));
-    bufAdd(cmd, ' -o ');
-    addQuoted(cmd, gi^.exe);
-    bufAdd(cmd, ' ');
-    addQuoted(cmd, p);
-    rc := runCommand(cmd);
-    bufFree(cmd);
+      argAdd(args, '-I' + pathDirName(p));
+    argAdd(args, '-o');
+    argAdd(args, gi^.exe);
+    argAdd(args, p);
+    timedOut := false;
+    rc := execArgs(args, '', '', '', 0, timedOut);
+    listFree(args);
     if rc <> 0 then
     begin
       diagError(noLoc, 'generator ''' + p + ''' failed to build');
@@ -1092,18 +1069,12 @@ begin
       bufFree(model);
       if not (sysFileExists(outPath) and stampIs(stampPath, runStamp)) then
       begin
-        bufInit(cmd);
-        bufAdd(cmd, 'ulimit -t ');
-        bufAddInt(cmd, timeoutSecs);
-        bufAdd(cmd, '; ulimit -v 2097152 2>/dev/null; ');
-        addQuoted(cmd, gi^.exe);
-        bufAdd(cmd, ' < ');
-        addQuoted(cmd, modelPath);
-        bufAdd(cmd, ' > ');
-        addQuoted(cmd, outPath);
-        rc := runCommand(cmd);
-        bufFree(cmd);
-        if (rc = 152) or (rc = 137) then { SIGXCPU or SIGKILL: the time limit }
+        listInit(args);
+        argAdd(args, gi^.exe);
+        timedOut := false;
+        rc := execArgs(args, modelPath, outPath, '', timeoutSecs, timedOut);
+        listFree(args);
+        if timedOut then
         begin
           fail('generator ''' + gi^.name + ''' ran longer than ' +
                intToStr(timeoutSecs) + ' seconds');
