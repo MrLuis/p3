@@ -7,6 +7,7 @@
  */
 #include "pascalrt.h"
 
+#include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -18,8 +19,17 @@ typedef struct AnsiHeader {
 #define HEADER(s) ((AnsiHeader *)(void *)((s) - sizeof(AnsiHeader)))
 #define LEN(s) ((s) ? HEADER(s)->length : 0)
 
+static size_t str_alloc_size(int64_t len) {
+  /* Reject negative lengths, size_t wrap, and > 2 GiB strings that would
+   * silently truncate in i32-based APIs (__pas_astr_length, pos, copy). */
+  if (len < 0 || len > INT32_MAX ||
+      (uint64_t)len > (uint64_t)(SIZE_MAX - sizeof(AnsiHeader) - 1))
+    __pas_runtime_error("out of memory in a string");
+  return sizeof(AnsiHeader) + (size_t)len + 1;
+}
+
 static char *alloc_str(int64_t len) {
-  AnsiHeader *h = malloc(sizeof(AnsiHeader) + (size_t)len + 1);
+  AnsiHeader *h = malloc(str_alloc_size(len));
   if (!h)
     __pas_runtime_error("out of memory in a string");
   h->refs = 1;
@@ -107,17 +117,26 @@ char *__pas_astr_concat(char *a, char *b) {
     __pas_astr_addref(only);
     return only;
   }
-  char *s = alloc_str(LEN(a) + LEN(b));
-  memcpy(s, a, (size_t)LEN(a));
-  memcpy(s + LEN(a), b, (size_t)LEN(b));
+  int64_t la = LEN(a), lb = LEN(b);
+  if (la < 0 || lb < 0 || la > INT32_MAX - lb)
+    __pas_runtime_error("out of memory in a string");
+  char *s = alloc_str(la + lb);
+  memcpy(s, a, (size_t)la);
+  memcpy(s + la, b, (size_t)lb);
   return s;
 }
 
 char *__pas_astr_join(const char *a, const char *p, int64_t n, const char *b) {
   int64_t la = a ? LEN(a) : 0, lb = b ? LEN(b) : 0;
-  if (la + n + lb <= 0)
+  if (n < 0)
+    n = 0;
+  if (la < 0 || lb < 0 || n > INT32_MAX || la > INT32_MAX - n ||
+      lb > INT32_MAX - (la + n))
+    __pas_runtime_error("out of memory in a string");
+  int64_t total = la + n + lb;
+  if (total == 0)
     return NULL;
-  char *s = alloc_str(la + n + lb);
+  char *s = alloc_str(total);
   if (la > 0)
     memcpy(s, a, (size_t)la);
   if (n > 0)
@@ -239,6 +258,8 @@ void __pas_astr_insert(char *src, char **p, int32_t index) {
   int64_t n = LEN(*p), ls = LEN(src);
   if (ls == 0)
     return;
+  if (ls < 0 || n < 0 || ls > INT32_MAX - n)
+    __pas_runtime_error("out of memory in a string");
   if (index < 1)
     index = 1;
   if (index > n + 1)
@@ -262,6 +283,8 @@ void __pas_astr_append(char **p, char *x) {
   char *s = *p;
   if (s == x) { /* s + s: copy the characters before the old string goes */
     int64_t n = LEN(s);
+    if (n < 0 || n > INT32_MAX - m)
+      __pas_runtime_error("out of memory in a string");
     char *r = alloc_str(n + m);
     if (n > 0)
       memcpy(r, s, (size_t)n);
@@ -276,8 +299,9 @@ void __pas_astr_append(char **p, char *x) {
   }
   s = __pas_astr_unique(p);
   int64_t n = LEN(s);
-  AnsiHeader *h =
-      realloc(HEADER(s), sizeof(AnsiHeader) + (size_t)n + (size_t)m + 1);
+  if (n < 0 || n > INT32_MAX - m)
+    __pas_runtime_error("out of memory in a string");
+  AnsiHeader *h = realloc(HEADER(s), str_alloc_size(n + m));
   if (!h)
     __pas_runtime_error("out of memory in a string");
   h->length = n + m;
@@ -317,15 +341,26 @@ typedef struct DynHeader {
  * capacity's own quarter (plus one, so small capacities grow) is more,
  * which keeps the step ~1.25x, as TStringList's capacity does. */
 static int64_t dyn_capacity(const DynHeader *h, int64_t count) {
-  int64_t room = h->capacity + (h->capacity >> 2) + 1;
+  int64_t grow = h->capacity >> 2;
+  int64_t room =
+      h->capacity > INT64_MAX - grow - 1 ? INT64_MAX : h->capacity + grow + 1;
   return count > room ? count : room;
 }
 
 static size_t dyn_size(const PasDynInfo *info, int64_t count) {
-  return sizeof(DynHeader) + (size_t)count * (size_t)info->elem_size;
+  if (count < 0 || !info || info->elem_size < 0)
+    __pas_runtime_error("invalid length of a dynamic array");
+  size_t esz = (size_t)info->elem_size;
+  if (esz > 0 &&
+      ((uint64_t)count > (uint64_t)(SIZE_MAX - sizeof(DynHeader)) / esz ||
+       count > INT64_MAX / info->elem_size))
+    __pas_runtime_error("out of memory in a dynamic array");
+  return sizeof(DynHeader) + (size_t)count * esz;
 }
 
 void *__pas_dyn_new(const PasDynInfo *info, int64_t count) {
+  if (count < 0)
+    __pas_runtime_error("invalid length of a dynamic array");
   if (count == 0)
     return NULL;
   DynHeader *h = calloc(1, dyn_size(info, count));
@@ -437,7 +472,7 @@ void __pas_dyn_setlength(void **a, const PasDynInfo *info, int64_t count) {
 }
 
 void *__pas_dyn_copy(const void *a, int64_t start, int64_t count) {
-  if (!a)
+  if (!a || count <= 0)
     return NULL;
   const DynHeader *h = DYN_HEADER(a);
   if (start < 0) { /* as in Free Pascal: the count starts at the given index */

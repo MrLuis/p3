@@ -114,7 +114,24 @@ double roundeven(double x);
 double roundeven(double x) { return rint(x); }
 #endif
 
-const char *__pas_sys_strerror(void) { return strerror(errno); }
+_Thread_local char __pas_strerror_buf[256]; /* (external: see gen-runtime-ir.py) */
+
+const char *__pas_sys_strerror(void) {
+  int err = errno;
+#ifdef _WIN32
+  if (strerror_s(__pas_strerror_buf, sizeof __pas_strerror_buf, err) != 0)
+    snprintf(__pas_strerror_buf, sizeof __pas_strerror_buf,
+             "unknown error %d", err);
+  return __pas_strerror_buf;
+#elif defined(__GLIBC__) && defined(_GNU_SOURCE)
+  return strerror_r(err, __pas_strerror_buf, sizeof __pas_strerror_buf);
+#else
+  if (strerror_r(err, __pas_strerror_buf, sizeof __pas_strerror_buf) != 0)
+    snprintf(__pas_strerror_buf, sizeof __pas_strerror_buf,
+             "unknown error %d", err);
+  return __pas_strerror_buf;
+#endif
+}
 
 int32_t __pas_sys_file_exists(const char *path) {
   StatBuf st;
