@@ -1293,7 +1293,8 @@ static void *pool_main(void *arg) {
    (pascalrt.h). Set while this is the only thread, so a plain store does;
    pthread_create publishes it to the new thread. */
 void __pas_start_threads(void) {
-  __pas_threads_started = 1;
+  if (!__atomic_load_n(&__pas_threads_started, __ATOMIC_ACQUIRE))
+    __atomic_store_n(&__pas_threads_started, 1, __ATOMIC_RELEASE);
 }
 
 /* The pool, started when first needed; the next thread, round robin. */
