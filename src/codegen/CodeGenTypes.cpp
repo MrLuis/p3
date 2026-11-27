@@ -1135,9 +1135,11 @@ llvm::Value *CodeGenModule::emitAddress(Expr *E){
                                  B.CreateAdd(X, B.getInt64(1)));
     }
     if (auto *PT = llvm::dyn_cast<PointerType>(I->getBase()->getType())) {
-      // p[i]: (p + i)^, unchecked as in Free Pascal.
+      // p[i]: (p + i)^, unchecked as in Free Pascal unless {$pointermath checked}.
       llvm::Value *P = visitExpr(I->getBase());
       llvm::Value *X = toI64(visitExpr(I->getIndex()), I->getIndex()->getType());
+      if (pointerMathChecked(I->getIndex()->getBeginLoc()))
+        emitPointerIndexCheck(PT, P, X, I->getIndex()->getBeginLoc());
       return B.CreateGEP(pointeeMemType(PT), P, X);
     }
     if (I->getBase()->getType()->isDynArray()) {

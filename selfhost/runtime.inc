@@ -9,7 +9,7 @@ type
   end;
 
 const
-  numRuntimeFuncs = 62;
+  numRuntimeFuncs = 65;
   runtimeFuncs: array[1..numRuntimeFuncs] of TRuntimeFuncAttr = (
     (name: '__pas_str_compare'; pureQuery: true; returnsFresh: false; returnsBool: false; neverFree: true; readMask: 3; writeMask: 0; slotMask: 0),
     (name: '__pas_str_pos'; pureQuery: true; returnsFresh: false; returnsBool: false; neverFree: true; readMask: 3; writeMask: 0; slotMask: 0),
@@ -52,6 +52,9 @@ const
     (name: '__pas_intf_lookup'; pureQuery: true; returnsFresh: false; returnsBool: false; neverFree: true; readMask: 3; writeMask: 0; slotMask: 0),
     (name: '__pas_intf_as'; pureQuery: false; returnsFresh: false; returnsBool: false; neverFree: false; readMask: 7; writeMask: 0; slotMask: 0),
     (name: '__pas_new'; pureQuery: false; returnsFresh: true; returnsBool: false; neverFree: false; readMask: 0; writeMask: 0; slotMask: 0),
+    (name: '__pas_ptr_bad_add'; pureQuery: false; returnsFresh: false; returnsBool: true; neverFree: true; readMask: 1; writeMask: 0; slotMask: 0),
+    (name: '__pas_ptr_bad_index'; pureQuery: false; returnsFresh: false; returnsBool: true; neverFree: true; readMask: 1; writeMask: 0; slotMask: 0),
+    (name: '__pas_ptr_bad_diff'; pureQuery: false; returnsFresh: false; returnsBool: true; neverFree: true; readMask: 3; writeMask: 0; slotMask: 0),
     (name: '__pas_format'; pureQuery: false; returnsFresh: true; returnsBool: false; neverFree: true; readMask: 3; writeMask: 0; slotMask: 0),
     (name: '__pas_format_pstr'; pureQuery: false; returnsFresh: false; returnsBool: false; neverFree: true; readMask: 6; writeMask: 0; slotMask: 0),
     (name: '__pas_tmpl_add'; pureQuery: false; returnsFresh: true; returnsBool: false; neverFree: true; readMask: 3; writeMask: 0; slotMask: 0),

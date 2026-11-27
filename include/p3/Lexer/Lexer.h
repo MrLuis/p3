@@ -61,7 +61,7 @@ class Lexer {
   struct SavedSwitches {
     bool LongStrings, CorbaInterfaces, InlineOn, ScopedEnums, NullSafe;
     unsigned PackRecords;
-    CheckDirectives::State Range, Overflow, TypedAddress;
+    CheckDirectives::State Range, Overflow, TypedAddress, PointerMath;
   };
   llvm::SmallVector<SavedSwitches, 4> SwitchStack;
   bool LongStrings = false;     ///< {$H+}: `string` is an ansistring

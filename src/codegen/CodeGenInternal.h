@@ -48,7 +48,7 @@ struct Runtime {
       Memcmp, Atan, New, Dispose, FileNew, FileFree, ProgramParam, Reset,
       Rewrite, Get, Put, Page, Eof, Eoln, Buffer, ReadElem, WriteElem,
       SetJmp, LongJmp, StrAssign, StrConcat, StrCompare, StrCopy, StrPos,
-      StrDelete, StrInsert, WritePStr, ReadStr, Free, Realloc, Halt,
+      StrDelete, StrInsert, WritePStr, ReadStr, FreeMem, Realloc, Halt,
       ParamCount, ParamStr;
 
   explicit Runtime(llvm::Module &M);
@@ -438,6 +438,13 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
   /// {$R} says.
   bool checksConversions(SourceLocation L) const;
   bool overflowChecks(SourceLocation L) const;
+  bool pointerMathChecked(SourceLocation L) const;
+  void emitPointerAddCheck(PointerType *PT, llvm::Value *Base,
+                           llvm::Value *Delta, SourceLocation L);
+  void emitPointerIndexCheck(PointerType *PT, llvm::Value *Base,
+                             llvm::Value *Index, SourceLocation L);
+  void emitPointerDiffCheck(llvm::Value *LHS, llvm::Value *RHS,
+                            SourceLocation L);
 
   /// Ordinal values compare as signed if their host is a signed integer
   /// type, unsigned otherwise (byte, word, cardinal, char, boolean, enum).

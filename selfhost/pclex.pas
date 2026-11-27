@@ -38,7 +38,7 @@ type
 
   { swWrap: no directive; unchecked blocks: integer values converted to a
     narrower integer type wrap instead of being range-checked }
-  TCheckSwitch = (swRange, swOverflow, swWrap, swTypedAddress);
+  TCheckSwitch = (swRange, swOverflow, swWrap, swTypedAddress, swPointerMath);
 
   PIncludeFrame = ^TIncludeFrame;
   TIncludeFrame = record
@@ -180,7 +180,7 @@ type
   TSavedSwitches = record
     longStrings, corbaInterfaces, inlineOn, scopedEnums, nullSafe: boolean;
     packRecords: longint;
-    range, overflow, typedAddress: longint; { as TDirective.state }
+    range, overflow, typedAddress, pointerMath: longint; { as TDirective.state }
   end;
 
 var
@@ -1655,6 +1655,7 @@ begin
     saved^.range := directiveStateAt(swRange, locOf(lx, start));
     saved^.overflow := directiveStateAt(swOverflow, locOf(lx, start));
     saved^.typedAddress := directiveStateAt(swTypedAddress, locOf(lx, start));
+    saved^.pointerMath := directiveStateAt(swPointerMath, locOf(lx, start));
     listAdd(lx.switchStack, saved);
     exit;
   end;
@@ -1675,6 +1676,7 @@ begin
     addDirectiveState(lx, locOf(lx, start), swRange, saved^.range);
     addDirectiveState(lx, locOf(lx, start), swOverflow, saved^.overflow);
     addDirectiveState(lx, locOf(lx, start), swTypedAddress, saved^.typedAddress);
+    addDirectiveState(lx, locOf(lx, start), swPointerMath, saved^.pointerMath);
     exit;
   end;
   { $packrecords N|C|DEFAULT|NORMAL, $align N|ON|OFF, $aN, $a+|-: how the
@@ -1773,6 +1775,23 @@ begin
     else
       diagError(locOf(lx, start),
                 'expected {$typedaddress on} or {$typedaddress off}');
+    exit;
+  end;
+  { $pointermath unchecked | checked | off: controls pointer arithmetic and
+    indexing }
+  if word = 'pointermath' then
+  begin
+    arg := lowerStr(copyChars(lx, b, e));
+    if arg = 'unchecked' then
+      addDirectiveState(lx, locOf(lx, start), swPointerMath, 1)
+    else if arg = 'checked' then
+      addDirectiveState(lx, locOf(lx, start), swPointerMath, 2)
+    else if arg = 'off' then
+      addDirectiveState(lx, locOf(lx, start), swPointerMath, 0)
+    else
+      diagError(locOf(lx, start),
+                'expected {$pointermath unchecked}, {$pointermath checked} ' +
+                'or {$pointermath off}');
     exit;
   end;
   { $longstrings on / off: the long form of H+ and H- }

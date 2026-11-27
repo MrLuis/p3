@@ -925,6 +925,8 @@ begin
   begin
     if not isInc then
       step := irBin('sub', i64c(0), step, '');
+    if pointerMathChecked(loc) then
+      emitPointerAddCheck(t, old, step, loc);
     nv := irGEP1(pointeeMemType(t), old, step, false, '');
     irStore(nv, addr);
     exit;
@@ -1186,7 +1188,7 @@ begin
         irStore(mem, emitAddress(PNode(listGet(s^.args, 0))));
       end;
     bkFreeMem:
-      rtv1('free', visitExpr(PNode(listGet(s^.args, 0))));
+      rtv1('__pas_freemem', visitExpr(PNode(listGet(s^.args, 0))));
     bkReallocMem:
       begin
         a0 := emitAddress(PNode(listGet(s^.args, 0)));

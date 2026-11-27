@@ -509,8 +509,13 @@ void Checker::checkIncDec(ProcCallStmt *S){
     Diags.error(Args[0]->getBeginLoc(),
                 "'" + Callee.Spelling + "' expects an ordinal or pointer variable",
                 {Args[0]->getRange()});
-  else if (!T->isError() && checkModifiable(Args[0]))
+  else if (!T->isError() && checkModifiable(Args[0])) {
     checkNotForControlVar(Args[0]);
+    if (T->isPointer() && isPointerMathOff(S->getBeginLoc()))
+      Diags.error(Callee.Loc,
+                  "pointer arithmetic is disabled under {$pointermath off}",
+                  {S->getRange()});
+  }
   if (Args.size() == 2) {
     Type *N = check(Args[1]);
     if (!N->isError() && !N->isIntegerLike())

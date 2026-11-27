@@ -539,7 +539,7 @@ begin
   declareRT('__pas_new', 'ptr', 'i64', nu);
   declareRT('__pas_dispose', 'void', 'ptr', nu);
   declareRT('atan', 'double', 'double', nu);
-  declareRT('free', 'void', 'ptr', nu);
+  declareRT('__pas_freemem', 'void', 'ptr', nu);
   declareRT('__pas_realloc', 'ptr', 'ptr,i64', nu);
   declareRT('__pas_halt', 'void', 'i32', 'noreturn nounwind');
   declareRT('__pas_paramcount', 'i32', '', nu);
@@ -1412,6 +1412,11 @@ begin
   wraps := checkEnabled(swWrap, loc, false);
 end;
 
+function pointerMathChecked(loc: TLoc): boolean;
+begin
+  pointerMathChecked := checkStateAt(swPointerMath, loc) = 2;
+end;
+
 { Whether t is an untyped file type (file, with no element). }
 function isUntypedFileType(t: PType): boolean;
 begin
@@ -2175,6 +2180,45 @@ begin
 end;
 
 function classRuntime(const name, ret, params: string): PIRFunc; forward;
+
+procedure emitPointerAddCheck(pt: PType; const base, delta: TV; loc: TLoc);
+var
+  elemSz: int64;
+  bad: TV;
+begin
+  elemSz := pointeeMemType(pt)^.size;
+  if elemSz < 1 then
+    elemSz := 1;
+  bad := call3(classRuntime('__pas_ptr_bad_add', 'i32', 'ptr,i64,i64'),
+               base, delta, i64c(elemSz), '');
+  emitRuntimeCheck(irICmp('ne', bad, i32c(0), ''),
+                   'pointer arithmetic out of bounds', loc);
+end;
+
+procedure emitPointerIndexCheck(pt: PType; const base, index: TV; loc: TLoc);
+var
+  elemSz: int64;
+  bad: TV;
+begin
+  elemSz := pointeeMemType(pt)^.size;
+  if elemSz < 1 then
+    elemSz := 1;
+  bad := call3(classRuntime('__pas_ptr_bad_index', 'i32', 'ptr,i64,i64'),
+               base, index, i64c(elemSz), '');
+  emitRuntimeCheck(irICmp('ne', bad, i32c(0), ''),
+                   'pointer index out of bounds', loc);
+end;
+
+procedure emitPointerDiffCheck(const lhs, rhs: TV; loc: TLoc);
+var
+  bad: TV;
+begin
+  bad := call2(classRuntime('__pas_ptr_bad_diff', 'i32', 'ptr,ptr'),
+               lhs, rhs, '');
+  emitRuntimeCheck(irICmp('ne', bad, i32c(0), ''),
+                   'pointer difference requires pointers in the same live allocation',
+                   loc);
+end;
 
 function errnoAddress: TV;
 var
@@ -3600,9 +3644,11 @@ begin
         idxTy := e^.index^.typ;
         if bt^.kind = tyPointer then
         begin
-          { p[i]: (p + i)^, unchecked as in Free Pascal }
+          { p[i]: (p + i)^, unchecked as in Free Pascal unless $pointermath checked }
           base := visitExpr(e^.base);
           x := toI64(visitExpr(e^.index), idxTy);
+          if pointerMathChecked(e^.index^.b) then
+            emitPointerIndexCheck(bt, base, x, e^.index^.b);
           exit(irGEP1(pointeeMemType(bt), base, x, false, ''));
         end;
         if bt^.kind = tyDynArray then
@@ -6664,15 +6710,21 @@ begin
     if lt^.kind <> tyPointer then { n + p }
     begin
       tmp := toI64(l, lt);
+      if pointerMathChecked(e^.opLoc) then
+        emitPointerAddCheck(e^.typ, r, tmp, e^.opLoc);
       exit(irGEP1(pointeeMemType(e^.typ), r, tmp, false, 'ptr.add'));
     end;
     tmp := toI64(r, rt);
     if op = boSub then
       tmp := irBin('sub', i64c(0), tmp, '');
+    if pointerMathChecked(e^.opLoc) then
+      emitPointerAddCheck(e^.typ, l, tmp, e^.opLoc);
     exit(irGEP1(pointeeMemType(e^.typ), l, tmp, false, 'ptr.add'));
   end;
   if lt^.kind = tyPointer then { p - q }
   begin
+    if pointerMathChecked(e^.opLoc) then
+      emitPointerDiffCheck(l, r, e^.opLoc);
     l := irCast('ptrtoint', l, irI64, '');
     r := irCast('ptrtoint', r, irI64, '');
     v := irBin('sub', l, r, 'ptr.diff');

@@ -164,6 +164,11 @@ begin
   isISO := mode = lmISO;
 end;
 
+function isPointerMathOff(loc: TLoc): boolean;
+begin
+  isPointerMathOff := isISO or (checkStateAt(swPointerMath, loc) = 0);
+end;
+
 function isError(t: PType): boolean;
 begin
   isError := t^.kind = tyError;

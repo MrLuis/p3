@@ -111,6 +111,11 @@ examples are in the reference.
   `{$push}`/`{$pop}`), `@x` yields `^typeof(x)` rather than untyped
   `pointer` (untyped `var`/`const` parameters remain `pointer`), rejecting
   incompatible pointer assignments at compile time.
+- **Scoped pointer arithmetic policies**: `{$pointermath unchecked|checked|off}`
+  (saved/restored by `{$push}`/`{$pop}`): `off` rejects `+`/`-`, indexing, and
+  `Inc`/`Dec` on pointers at compile time while keeping ordering comparisons;
+  `checked` enforces live heap allocation bounds at runtime across `p + n`,
+  `p[i]`, `Inc`/`Dec`, and same-allocation `p - q`.
 - **Iterators**: `function Fibonacci: iterator UInt64` with `yield`, usable in
   `for ... in`.
 - **Lazy sequences**: LINQ-style `map`/`filter`/... in the `sequences` unit.
@@ -342,10 +347,11 @@ All handled in `selfhost/pclex.pas` (the C++ compiler recognizes the same set).
 
 **Switch-like directives**
 
-- `$H+`/`$H-` (long strings; long form `$longstrings on/off`, pclex.pas:1778)
+- `$H+`/`$H-` (long strings; long form `$longstrings on/off`, pclex.pas:1796)
 - `$R+`/`$R-` (range checks), `$Q+`/`$Q-` (overflow checks), `$T+`/`$T-` (typed
-  addresses; long form `$typedaddress on/off`, pclex.pas:1765,1818-1823; comma
+  addresses; long form `$typedaddress on/off`, pclex.pas:1765,1835-1840; comma
   lists like `{$R-,Q+,T+}` work)
+- `$pointermath unchecked|checked|off` (pclex.pas:1778)
 - `$A+|-`, `$A1|2|4|8|16|32`, `$align N|on|off` (pclex.pas:1692,1706,1795)
 - `$packrecords 1|2|4|8|16|32|C|DEFAULT|NORMAL` (pclex.pas:1679)
 - `$scopedenums on/off` (pclex.pas:1711)

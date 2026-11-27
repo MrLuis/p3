@@ -695,7 +695,14 @@ begin
     errR(a0^.b, nodeRange(a0));
   end
   else if not isError(t) and checkModifiable(a0) then
+  begin
     checkNotForControlVar(a0);
+    if (t^.kind = tyPointer) and isPointerMathOff(s^.b) then
+    begin
+      ms('pointer arithmetic is disabled under {$pointermath off}');
+      errR(s^.callee.loc, nodeRange(s));
+    end;
+  end;
   if s^.args.count = 2 then
   begin
     a1 := PNode(listGet(s^.args, 1));
@@ -5904,15 +5911,40 @@ begin
   begin
     { Turbo/FPC pointer arithmetic: p + n, n + p and p - n move p by n of
       what it points to (bytes, for an untyped pointer); p - q counts them;
-      pointers are ordered by address }
+      pointers are ordered by address. Under $pointermath off, arithmetic
+      is rejected while relational ordering stays allowed. }
     if (op in [boAdd, boSub]) and (l^.kind = tyPointer) and isIntegerLike(r) then
+    begin
+      if isPointerMathOff(e^.opLoc) then
+      begin
+        ms('pointer arithmetic is disabled under {$pointermath off}');
+        errRR(e^.opLoc, nodeRange(e^.lhs), nodeRange(e^.rhs));
+        exit(errorType);
+      end;
       exit(l);
+    end;
     if (op = boAdd) and isIntegerLike(l) and (r^.kind = tyPointer) then
+    begin
+      if isPointerMathOff(e^.opLoc) then
+      begin
+        ms('pointer arithmetic is disabled under {$pointermath off}');
+        errRR(e^.opLoc, nodeRange(e^.lhs), nodeRange(e^.rhs));
+        exit(errorType);
+      end;
       exit(r);
+    end;
     if (l^.kind = tyPointer) and (r^.kind = tyPointer) and areCompatible(l, r) then
     begin
       if op = boSub then
+      begin
+        if isPointerMathOff(e^.opLoc) then
+        begin
+          ms('pointer arithmetic is disabled under {$pointermath off}');
+          errRR(e^.opLoc, nodeRange(e^.lhs), nodeRange(e^.rhs));
+          exit(errorType);
+        end;
         exit(tyInt64T);
+      end;
       if op in [boLt, boLe, boGt, boGe] then
         exit(tyBooleanT);
     end;
@@ -6388,6 +6420,12 @@ begin
   if (bt^.kind = tyPointer) and not isISO and not bt^.untyped and (bt^.pointee <> nil) then
   begin
     { Turbo/FPC: p[i] is (p + i)^ }
+    if isPointerMathOff(e^.index^.b) then
+    begin
+      ms('pointer indexing is disabled under {$pointermath off}');
+      errR(e^.index^.b, nodeRange(e^.base));
+      exit(errorType);
+    end;
     if not isIntegerLike(it) then
     begin
       ms('pointer index must be an integer');

@@ -1492,6 +1492,8 @@ void CodeGenModule::visitProcCallStmt(ProcCallStmt *S){
     SourceLocation L = S->getBeginLoc();
     if (auto *PT = llvm::dyn_cast<PointerType>(T)) { // by n of its pointee
       llvm::Value *Delta = IsInc ? Step : B.CreateNeg(Step);
+      if (pointerMathChecked(L))
+        emitPointerAddCheck(PT, Old, Delta, L);
       B.CreateStore(B.CreateGEP(pointeeMemType(PT), Old, Delta), Addr);
       return;
     }
@@ -1531,7 +1533,7 @@ void CodeGenModule::visitProcCallStmt(ProcCallStmt *S){
     return;
   }
   case BuiltinKind::FreeMem:
-    B.CreateCall(RT.Free, {visitExpr(S->getArgs()[0])});
+    B.CreateCall(RT.FreeMem, {visitExpr(S->getArgs()[0])});
     return;
   case BuiltinKind::ReallocMem: {
     auto A = S->getArgs();
@@ -2754,16 +2756,24 @@ llvm::Value *CodeGenModule::visitBinaryExpr(BinaryExpr *E){
 
   // Turbo/FPC pointer arithmetic, in units of what is pointed to.
   if (auto *PT = llvm::dyn_cast<PointerType>(E->getType())) {
-    if (!LT->isPointer()) // n + p
-      return B.CreateGEP(pointeeMemType(PT), R, toI64(L, LT), "ptr.add");
+    if (!LT->isPointer()) { // n + p
+      llvm::Value *N = toI64(L, LT);
+      if (pointerMathChecked(E->getOpLoc()))
+        emitPointerAddCheck(PT, R, N, E->getOpLoc());
+      return B.CreateGEP(pointeeMemType(PT), R, N, "ptr.add");
+    }
     llvm::Value *N = toI64(R, RTy);
     if (Op == BinaryOp::Sub)
       N = B.CreateNeg(N);
+    if (pointerMathChecked(E->getOpLoc()))
+      emitPointerAddCheck(PT, L, N, E->getOpLoc());
     return B.CreateGEP(pointeeMemType(PT), L, N, "ptr.add");
   }
   if (auto *PT = llvm::dyn_cast<PointerType>(LT)) { // p - q
     // (instructions even for constant addresses: the self-hosted compiler
     // writes the same)
+    if (pointerMathChecked(E->getOpLoc()))
+      emitPointerDiffCheck(L, R, E->getOpLoc());
     llvm::Value *LI = B.Insert(llvm::CastInst::Create(
         llvm::Instruction::PtrToInt, L, B.getInt64Ty()));
     llvm::Value *RI = B.Insert(llvm::CastInst::Create(

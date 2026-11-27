@@ -9,6 +9,7 @@
 //   Wrap (no directive; unchecked blocks) integer values converted to a
 //      narrower integer type wrap instead of being range-checked
 //   T  typed addresses  ({$T+}, {$typedaddress on}: @x yields ^typeof(x))
+//   PointerMath pointer arithmetic policy ({$pointermath off|unchecked|checked})
 //
 // The lexer records each switch with its location; code generation asks
 // whether a check is enabled at the location of the construct it emits.
@@ -28,12 +29,12 @@ namespace p3 {
 
 class CheckDirectives {
 public:
-  enum Switch { Range, Overflow, Wrap, TypedAddress };
+  enum Switch { Range, Overflow, Wrap, TypedAddress, PointerMath };
 
 private:
 public:
-  /// A switch's state: off, on, or the default (the command line's).
-  enum State : signed char { Off = 0, On = 1, Default = -1 };
+  /// A switch's state: off, on, checked (for PointerMath), or default.
+  enum State : signed char { Off = 0, On = 1, Checked = 2, Default = -1 };
 
 private:
   struct Event {

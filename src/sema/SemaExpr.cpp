@@ -449,15 +449,37 @@ Type *Checker::visitBinaryExpr(BinaryExpr *E){
   if (!isISO() && (L->isPointer() || R->isPointer())) {
     // Turbo/FPC pointer arithmetic: p + n, n + p and p - n move p by n of
     // what it points to (bytes, for an untyped pointer); p - q counts
-    // them; pointers are ordered by address.
+    // them; pointers are ordered by address. Under {$pointermath off},
+    // arithmetic is rejected while relational ordering stays allowed.
     if ((Op == BinaryOp::Add || Op == BinaryOp::Sub) && L->isPointer() &&
-        R->isIntegerLike())
+        R->isIntegerLike()) {
+      if (isPointerMathOff(E->getOpLoc())) {
+        Diags.error(E->getOpLoc(),
+                    "pointer arithmetic is disabled under {$pointermath off}",
+                    {E->getLHS()->getRange(), E->getRHS()->getRange()});
+        return errorType();
+      }
       return L;
-    if (Op == BinaryOp::Add && L->isIntegerLike() && R->isPointer())
+    }
+    if (Op == BinaryOp::Add && L->isIntegerLike() && R->isPointer()) {
+      if (isPointerMathOff(E->getOpLoc())) {
+        Diags.error(E->getOpLoc(),
+                    "pointer arithmetic is disabled under {$pointermath off}",
+                    {E->getLHS()->getRange(), E->getRHS()->getRange()});
+        return errorType();
+      }
       return R;
+    }
     if (L->isPointer() && R->isPointer() && areCompatible(L, R)) {
-      if (Op == BinaryOp::Sub)
+      if (Op == BinaryOp::Sub) {
+        if (isPointerMathOff(E->getOpLoc())) {
+          Diags.error(E->getOpLoc(),
+                      "pointer arithmetic is disabled under {$pointermath off}",
+                      {E->getLHS()->getRange(), E->getRHS()->getRange()});
+          return errorType();
+        }
         return Ctx.getInt64Type();
+      }
       if (Op == BinaryOp::Lt || Op == BinaryOp::Le || Op == BinaryOp::Gt ||
           Op == BinaryOp::Ge)
         return Ctx.getBooleanType();
@@ -868,6 +890,12 @@ Type *Checker::visitIndexExpr(IndexExpr *E){
   if (auto *PT = llvm::dyn_cast<PointerType>(BT);
       PT && !isISO() && !PT->isUntyped() && PT->getPointee()) {
     // Turbo/FPC: p[i] is (p + i)^.
+    if (isPointerMathOff(E->getIndex()->getBeginLoc())) {
+      Diags.error(E->getIndex()->getBeginLoc(),
+                  "pointer indexing is disabled under {$pointermath off}",
+                  {E->getBase()->getRange()});
+      return errorType();
+    }
     if (!IT->isIntegerLike()) {
       Diags.error(E->getIndex()->getBeginLoc(),
                   "pointer index must be an integer",

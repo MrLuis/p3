@@ -383,6 +383,12 @@ class Checker : public StmtVisitor<Checker>,
 
   Type *errorType() { return Ctx.getErrorType(); }
   bool isISO() const { return LangOpts.Mode == LangMode::ISO; }
+  bool isPointerMathOff(SourceLocation L) const {
+    return isISO() ||
+           (Directives &&
+            Directives->stateAt(CheckDirectives::PointerMath, L) ==
+                CheckDirectives::Off);
+  }
 
   //===--------------------------------------------------------------------===//
   // Standard scope

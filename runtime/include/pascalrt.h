@@ -258,9 +258,15 @@ void __pas_raise_convert(char *msg, size_t n) __attribute__((noreturn));
 /* new / dispose. __pas_new returns zeroed memory; disposing nil is an error. */
 void *__pas_new(int64_t size);
 void __pas_dispose(void *p);
-/* reallocmem (Turbo/FPC): realloc; size <= 0 frees and returns NULL. getmem
- * uses __pas_new, freemem calls free(). */
+void __pas_freemem(void *p);
+/* reallocmem (Turbo/FPC): realloc; size <= 0 frees and returns NULL. */
 void *__pas_realloc(void *p, int64_t size);
+/* Checked pointer arithmetic / indexing / subtraction helpers: return 0 if ok,
+ * non-zero if p (or q) is nil, outside a live heap allocation, out of bounds,
+ * or in a different allocation. */
+int32_t __pas_ptr_bad_add(const void *p, int64_t delta, int64_t elem_size);
+int32_t __pas_ptr_bad_index(const void *p, int64_t index, int64_t elem_size);
+int32_t __pas_ptr_bad_diff(const void *p, const void *q);
 
 /*===- Program (Turbo/FPC) --------------------------------------------------===*/
 

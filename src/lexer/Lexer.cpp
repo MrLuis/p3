@@ -274,12 +274,15 @@ void Lexer::handleDirective(const char *Start, llvm::StringRef Text) {
     }
     SavedSwitches S{LongStrings, CorbaInterfaces, InlineOn, ScopedEnums,
                     NullSafe, PackRecords, CheckDirectives::Default,
-                    CheckDirectives::Default, CheckDirectives::Default};
+                    CheckDirectives::Default, CheckDirectives::Default,
+                    CheckDirectives::Default};
     if (Directives) {
       S.Range = Directives->stateAt(CheckDirectives::Range, locOf(Start));
       S.Overflow = Directives->stateAt(CheckDirectives::Overflow, locOf(Start));
       S.TypedAddress =
           Directives->stateAt(CheckDirectives::TypedAddress, locOf(Start));
+      S.PointerMath =
+          Directives->stateAt(CheckDirectives::PointerMath, locOf(Start));
     }
     SwitchStack.push_back(S);
     return;
@@ -303,6 +306,8 @@ void Lexer::handleDirective(const char *Start, llvm::StringRef Text) {
                            CheckDirectives::Overflow, S.Overflow);
       Directives->addState(locOf(Start), BufBegin, BufEnd,
                            CheckDirectives::TypedAddress, S.TypedAddress);
+      Directives->addState(locOf(Start), BufBegin, BufEnd,
+                           CheckDirectives::PointerMath, S.PointerMath);
     }
     return;
   }
@@ -417,6 +422,28 @@ void Lexer::handleDirective(const char *Start, llvm::StringRef Text) {
     if (Directives)
       Directives->add(locOf(Start), BufBegin, BufEnd,
                       CheckDirectives::TypedAddress, On);
+    return;
+  }
+
+  // {$pointermath unchecked|checked|off}: controls pointer arithmetic and
+  // indexing.
+  if (Word.equals_insensitive("pointermath")) {
+    CheckDirectives::State St;
+    if (Arg.equals_insensitive("unchecked"))
+      St = CheckDirectives::On;
+    else if (Arg.equals_insensitive("checked"))
+      St = CheckDirectives::Checked;
+    else if (Arg.equals_insensitive("off"))
+      St = CheckDirectives::Off;
+    else {
+      Diags.error(locOf(Start),
+                  "expected {$pointermath unchecked}, {$pointermath checked} "
+                  "or {$pointermath off}");
+      return;
+    }
+    if (Directives)
+      Directives->addState(locOf(Start), BufBegin, BufEnd,
+                           CheckDirectives::PointerMath, St);
     return;
   }
 

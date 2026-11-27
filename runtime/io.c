@@ -1077,28 +1077,279 @@ void __pas_readln(PasFile *f) {
 
 /*===- Heap -----------------------------------------------------------------===*/
 
+/* Live heap allocations tracked in an interval treap keyed by start address
+ * [start, end) with start < end. Kept out-of-line (never reading memory before
+ * arbitrary pointers) so checked pointer operations remain safe on nil, stack,
+ * global, freed, and foreign FFI addresses under sanitizers. External linkage
+ * avoids duplicate state when libpascalrt.ll is linked (gen-runtime-ir.py). */
+typedef struct PasAllocNode {
+  uintptr_t start;
+  uintptr_t end;
+  uint32_t prio;
+  struct PasAllocNode *left, *right;
+} PasAllocNode;
+
+PasAllocNode *__pas_alloc_root = NULL;
+uint32_t __pas_alloc_rng = 0x9e3779b9u;
+#ifndef _WIN32
+pthread_rwlock_t __pas_alloc_rwlock = PTHREAD_RWLOCK_INITIALIZER;
+#define ALLOC_RDLOCK() pthread_rwlock_rdlock(&__pas_alloc_rwlock)
+#define ALLOC_RDUNLOCK() pthread_rwlock_unlock(&__pas_alloc_rwlock)
+#define ALLOC_WRLOCK() pthread_rwlock_wrlock(&__pas_alloc_rwlock)
+#define ALLOC_WRUNLOCK() pthread_rwlock_unlock(&__pas_alloc_rwlock)
+#else
+SRWLOCK __pas_alloc_srw = SRWLOCK_INIT;
+#define ALLOC_RDLOCK() AcquireSRWLockShared(&__pas_alloc_srw)
+#define ALLOC_RDUNLOCK() ReleaseSRWLockShared(&__pas_alloc_srw)
+#define ALLOC_WRLOCK() AcquireSRWLockExclusive(&__pas_alloc_srw)
+#define ALLOC_WRUNLOCK() ReleaseSRWLockExclusive(&__pas_alloc_srw)
+#endif
+
+static uint32_t alloc_next_prio(void) {
+  uint32_t x = __pas_alloc_rng;
+  x ^= x << 13;
+  x ^= x >> 17;
+  x ^= x << 5;
+  __pas_alloc_rng = x;
+  return x;
+}
+
+static PasAllocNode *alloc_rot_left(PasAllocNode *x) {
+  PasAllocNode *y = x->right;
+  x->right = y->left;
+  y->left = x;
+  return y;
+}
+
+static PasAllocNode *alloc_rot_right(PasAllocNode *x) {
+  PasAllocNode *y = x->left;
+  x->left = y->right;
+  y->right = x;
+  return y;
+}
+
+static void alloc_track(void *p, size_t size) {
+  if (!p)
+    return;
+  if (size == 0)
+    size = 1;
+  PasAllocNode *node = (PasAllocNode *)malloc(sizeof(PasAllocNode));
+  if (!node)
+    __pas_runtime_error("out of memory in allocation tracker");
+  uintptr_t start = (uintptr_t)p;
+  node->start = start;
+  node->end = start + size;
+  node->left = NULL;
+  node->right = NULL;
+
+  ALLOC_WRLOCK();
+  node->prio = alloc_next_prio();
+  PasAllocNode **path[128];
+  int depth = 0;
+  PasAllocNode **link = &__pas_alloc_root;
+  while (*link) {
+    PasAllocNode *cur = *link;
+    if (start == cur->start) {
+      cur->end = node->end;
+      ALLOC_WRUNLOCK();
+      free(node);
+      return;
+    }
+    if (depth < 128)
+      path[depth++] = link;
+    link = start < cur->start ? &cur->left : &cur->right;
+  }
+  *link = node;
+  while (depth > 0) {
+    PasAllocNode **plink = path[--depth];
+    PasAllocNode *parent = *plink;
+    if (start < parent->start) {
+      if (parent->left->prio <= parent->prio)
+        break;
+      *plink = alloc_rot_right(parent);
+    } else {
+      if (parent->right->prio <= parent->prio)
+        break;
+      *plink = alloc_rot_left(parent);
+    }
+  }
+  ALLOC_WRUNLOCK();
+}
+
+static void alloc_untrack(const void *p) {
+  if (!p)
+    return;
+  uintptr_t start = (uintptr_t)p;
+  ALLOC_WRLOCK();
+  PasAllocNode **link = &__pas_alloc_root;
+  while (*link && (*link)->start != start)
+    link = start < (*link)->start ? &(*link)->left : &(*link)->right;
+  if (!*link) {
+    ALLOC_WRUNLOCK();
+    return;
+  }
+  while ((*link)->left && (*link)->right) {
+    if ((*link)->left->prio > (*link)->right->prio) {
+      *link = alloc_rot_right(*link);
+      link = &(*link)->right;
+    } else {
+      *link = alloc_rot_left(*link);
+      link = &(*link)->left;
+    }
+  }
+  PasAllocNode *victim = *link;
+  *link = victim->left ? victim->left : victim->right;
+  ALLOC_WRUNLOCK();
+  free(victim);
+}
+
+/* Finds the live allocation containing addr (either start <= addr < end, or
+ * one-past-the-end addr == end when prefer_prev is true or no block starts
+ * at addr). Caller holds ALLOC_RDLOCK(). */
+static int alloc_find_locked(uintptr_t addr, int prefer_prev,
+                             uintptr_t *out_start, uintptr_t *out_end) {
+  PasAllocNode *cur = __pas_alloc_root;
+  PasAllocNode *cand = NULL;
+  PasAllocNode *prev = NULL;
+  while (cur) {
+    if (addr < cur->start) {
+      cur = cur->left;
+    } else {
+      if (cur->start < addr)
+        prev = cur;
+      cand = cur;
+      if (addr == cur->start)
+        break;
+      cur = cur->right;
+    }
+  }
+  if (!cand)
+    return 0;
+  if (addr == cand->start && prefer_prev && prev && prev->end == addr)
+    cand = prev;
+  if (addr < cand->start || addr > cand->end)
+    return 0;
+  *out_start = cand->start;
+  *out_end = cand->end;
+  return 1;
+}
+
 void *__pas_new(int64_t size) {
-  void *p = calloc(1, size > 0 ? (size_t)size : 1);
+  size_t n = size > 0 ? (size_t)size : 1;
+  void *p = calloc(1, n);
   if (!p)
     __pas_runtime_error("out of memory in 'new'");
+  alloc_track(p, n);
   return p;
 }
 
 void __pas_dispose(void *p) {
   if (!p)
     __pas_runtime_error("'dispose' of a nil pointer");
+  alloc_untrack(p);
+  free(p);
+}
+
+void __pas_freemem(void *p) {
+  if (!p)
+    return;
+  alloc_untrack(p);
   free(p);
 }
 
 void *__pas_realloc(void *p, int64_t size) {
   if (size <= 0) {
+    alloc_untrack(p);
     free(p);
     return NULL;
   }
   void *q = realloc(p, (size_t)size);
   if (!q)
     __pas_runtime_error("out of memory in 'reallocmem'");
+  alloc_untrack(p);
+  alloc_track(q, (size_t)size);
   return q;
+}
+
+int32_t __pas_ptr_bad_add(const void *p, int64_t delta, int64_t elem_size) {
+  if (!p || elem_size <= 0)
+    return 1;
+  uintptr_t addr = (uintptr_t)p;
+  uintptr_t b_start = 0, b_end = 0;
+  ALLOC_RDLOCK();
+  int ok = alloc_find_locked(addr, delta < 0, &b_start, &b_end);
+  ALLOC_RDUNLOCK();
+  if (!ok)
+    return 1;
+  uint64_t abs_d = delta < 0 ? (uint64_t)(-(delta + 1)) + 1ULL : (uint64_t)delta;
+  uint64_t es = (uint64_t)elem_size;
+  if (abs_d > (uint64_t)UINTPTR_MAX / es)
+    return 1;
+  uintptr_t byte_off = (uintptr_t)(abs_d * es);
+  uintptr_t target;
+  if (delta >= 0) {
+    if (addr > UINTPTR_MAX - byte_off)
+      return 1;
+    target = addr + byte_off;
+  } else {
+    if (addr < byte_off)
+      return 1;
+    target = addr - byte_off;
+  }
+  return (target < b_start || target > b_end) ? 1 : 0;
+}
+
+int32_t __pas_ptr_bad_index(const void *p, int64_t index, int64_t elem_size) {
+  if (!p || elem_size <= 0)
+    return 1;
+  uintptr_t addr = (uintptr_t)p;
+  uintptr_t b_start = 0, b_end = 0;
+  ALLOC_RDLOCK();
+  int ok = alloc_find_locked(addr, index < 0, &b_start, &b_end);
+  ALLOC_RDUNLOCK();
+  if (!ok)
+    return 1;
+  uint64_t abs_i = index < 0 ? (uint64_t)(-(index + 1)) + 1ULL : (uint64_t)index;
+  uint64_t es = (uint64_t)elem_size;
+  if (es > (uint64_t)UINTPTR_MAX || abs_i > (uint64_t)UINTPTR_MAX / es)
+    return 1;
+  uintptr_t byte_off = (uintptr_t)(abs_i * es);
+  uintptr_t target;
+  if (index >= 0) {
+    if (addr > UINTPTR_MAX - byte_off)
+      return 1;
+    target = addr + byte_off;
+  } else {
+    if (addr < byte_off)
+      return 1;
+    target = addr - byte_off;
+  }
+  if (target < b_start || target > b_end)
+    return 1;
+  return ((uintptr_t)es > b_end - target) ? 1 : 0;
+}
+
+int32_t __pas_ptr_bad_diff(const void *p, const void *q) {
+  if (!p || !q)
+    return 1;
+  uintptr_t ap = (uintptr_t)p;
+  uintptr_t aq = (uintptr_t)q;
+  uintptr_t ps = 0, pe = 0, qs = 0, qe = 0;
+  ALLOC_RDLOCK();
+  int okp = alloc_find_locked(ap, 1, &ps, &pe);
+  int okq = okp ? alloc_find_locked(aq, 1, &qs, &qe) : 0;
+  /* If one pointer is at the boundary between two adjacent blocks, check the
+   * non-prev candidate too if needed. */
+  if (okp && okq && ps != qs) {
+    uintptr_t ps2 = 0, pe2 = 0, qs2 = 0, qe2 = 0;
+    if (alloc_find_locked(ap, 0, &ps2, &pe2) && ps2 == qs) {
+      ps = ps2;
+    } else if (alloc_find_locked(aq, 0, &qs2, &qe2) && ps == qs2) {
+      qs = qs2;
+    }
+  }
+  ALLOC_RDUNLOCK();
+  return (!okp || !okq || ps != qs) ? 1 : 0;
 }
 
 /*===- Classes (--mode=objfpc) ---------------------------------------------===*/
@@ -1274,6 +1525,7 @@ void __pas_free_instance(void *obj) {
     if (intfs && intfs[1])
       ((void (*)(void *))intfs[1])(obj);
   }
+  alloc_untrack(obj);
   free(obj);
 }
 

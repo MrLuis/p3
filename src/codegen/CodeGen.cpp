@@ -172,7 +172,7 @@ Runtime::Runtime(llvm::Module &M) {
   New = Decl("__pas_new", Ptr, {I64});
   Dispose = Decl("__pas_dispose", Void, {Ptr});
   Atan = Decl("atan", F64, {F64});
-  Free = Decl("free", Void, {Ptr});
+  FreeMem = Decl("__pas_freemem", Void, {Ptr});
   Realloc = Decl("__pas_realloc", Ptr, {Ptr, I64});
   Halt = Decl("__pas_halt", Void, {I32});
   llvm::cast<llvm::Function>(Halt.getCallee())->addFnAttr(llvm::Attribute::NoReturn);

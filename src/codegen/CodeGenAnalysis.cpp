@@ -827,6 +827,45 @@ bool CodeGenModule::overflowChecks(SourceLocation L) const{
                                             CGOpts.OverflowChecks);
 }
 
+bool CodeGenModule::pointerMathChecked(SourceLocation L) const{
+  return CGOpts.Directives &&
+         CGOpts.Directives->stateAt(CheckDirectives::PointerMath, L) ==
+             CheckDirectives::Checked;
+}
+
+void CodeGenModule::emitPointerAddCheck(PointerType *PT, llvm::Value *Base,
+                                        llvm::Value *Delta, SourceLocation L){
+  int64_t ElemSize = static_cast<int64_t>(DL.getTypeAllocSize(pointeeMemType(PT)));
+  if (ElemSize < 1)
+    ElemSize = 1;
+  llvm::Value *Bad = B.CreateICmpNE(
+      astrCall("__pas_ptr_bad_add", B.getInt32Ty(),
+               {Base, Delta, B.getInt64(ElemSize)}),
+      B.getInt32(0));
+  emitRuntimeCheck(Bad, "pointer arithmetic out of bounds", L);
+}
+
+void CodeGenModule::emitPointerIndexCheck(PointerType *PT, llvm::Value *Base,
+                                          llvm::Value *Index, SourceLocation L){
+  int64_t ElemSize = static_cast<int64_t>(DL.getTypeAllocSize(pointeeMemType(PT)));
+  if (ElemSize < 1)
+    ElemSize = 1;
+  llvm::Value *Bad = B.CreateICmpNE(
+      astrCall("__pas_ptr_bad_index", B.getInt32Ty(),
+               {Base, Index, B.getInt64(ElemSize)}),
+      B.getInt32(0));
+  emitRuntimeCheck(Bad, "pointer index out of bounds", L);
+}
+
+void CodeGenModule::emitPointerDiffCheck(llvm::Value *LHS, llvm::Value *RHS,
+                                         SourceLocation L){
+  llvm::Value *Bad = B.CreateICmpNE(
+      astrCall("__pas_ptr_bad_diff", B.getInt32Ty(), {LHS, RHS}),
+      B.getInt32(0));
+  emitRuntimeCheck(
+      Bad, "pointer difference requires pointers in the same live allocation", L);
+}
+
 
 /// Ordinal values compare as signed if their host is a signed integer
 /// type, unsigned otherwise (byte, word, cardinal, char, boolean, enum).

@@ -1,0 +1,21 @@
+; {$pointermath unchecked|checked|off}: off rejects arithmetic and indexing
+; (while keeping relational ordering in tp/objfpc); {$push}/{$pop} restores.
+; RUN: not %p3 --mode=objfpc -ferror-limit=0 -c %S/Inputs/pointermath_off.pas -o %t.o 2>&1 | FileCheck %s
+; RUN: not %p3 --mode=tp -ferror-limit=0 -c %S/Inputs/pointermath_off.pas -o %t.tp.o 2>&1 | FileCheck %s
+
+; CHECK: pointermath_off.pas:11:10: error: pointer arithmetic is disabled under {$pointermath off}
+; CHECK: pointermath_off.pas:12:10: error: pointer arithmetic is disabled under {$pointermath off}
+; CHECK: pointermath_off.pas:13:10: error: pointer arithmetic is disabled under {$pointermath off}
+; CHECK: pointermath_off.pas:14:10: error: pointer arithmetic is disabled under {$pointermath off}
+; CHECK: pointermath_off.pas:15:10: error: pointer indexing is disabled under {$pointermath off}
+; CHECK: pointermath_off.pas:16:3: error: pointer arithmetic is disabled under {$pointermath off}
+; CHECK: pointermath_off.pas:17:3: error: pointer arithmetic is disabled under {$pointermath off}
+; CHECK: pointermath_off.pas:18:10: error: pointer arithmetic is disabled under {$pointermath off}
+; CHECK: pointermath_off.pas:19:3: error: pointer arithmetic is disabled under {$pointermath off}
+; CHECK: pointermath_off.pas:27:10: error: pointer arithmetic is disabled under {$pointermath off}
+; CHECK: pointermath_off.pas:31:10: error: pointer arithmetic is disabled under {$pointermath off}
+; CHECK-NOT: error:
+
+; Invalid {$pointermath} argument is diagnosed.
+; RUN: printf '{$pointermath bogus} program p; begin end.\n' | not %p3 --mode=tp -c - -o %t.bad.o 2>&1 | FileCheck --check-prefix=BADARG %s
+; BADARG: error: expected {$pointermath unchecked}, {$pointermath checked} or {$pointermath off}
