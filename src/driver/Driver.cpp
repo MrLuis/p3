@@ -172,13 +172,37 @@ size_t implementationOffset(llvm::StringRef S) {
   return N;
 }
 
-/// Does S contain the word "generic" (a cheap, conservative test: such a
-/// unit's implementation has bodies a precompiled interface would lose)?
-bool containsGenerics(llvm::StringRef S) {
-  for (size_t I = 0; I + 7 <= S.size(); ++I)
-    if (S.substr(I, 7).equals_insensitive("generic"))
-      return true;
+/// Does Unit declare any generic types, routines, or methods whose
+/// implementation tokens a precompiled .p3i interface would lose?
+bool declsHaveGenerics(llvm::ArrayRef<Decl *> Decls) {
+  for (const Decl *D : Decls) {
+    if (const auto *TD = llvm::dyn_cast<TypeDecl>(D)) {
+      if (TD->isGeneric())
+        return true;
+      const TypeSpec *TS = TD->getTypeSpec();
+      if (const auto *RT = llvm::dyn_cast_or_null<RecordTypeSpec>(TS)) {
+        if (declsHaveGenerics(RT->getMembers()))
+          return true;
+      } else if (const auto *CT = llvm::dyn_cast_or_null<ClassTypeSpec>(TS)) {
+        if (declsHaveGenerics(CT->getMembers()))
+          return true;
+      } else if (const auto *HT = llvm::dyn_cast_or_null<HelperTypeSpec>(TS)) {
+        if (declsHaveGenerics(HT->getMembers()))
+          return true;
+      }
+    } else if (const auto *RD = llvm::dyn_cast<RoutineDecl>(D)) {
+      if (RD->isGeneric())
+        return true;
+    }
+  }
   return false;
+}
+
+bool unitHasGenerics(const UnitDecl &Unit) {
+  return (Unit.getInterface() &&
+          declsHaveGenerics(Unit.getInterface()->getDecls())) ||
+         (Unit.getImplementation() &&
+          declsHaveGenerics(Unit.getImplementation()->getDecls()));
 }
 
 /// Reads a .p3i header; false if it is malformed or its source or a
@@ -245,7 +269,7 @@ bool writeInterfaceFile(UnitDecl &Unit, llvm::ArrayRef<UnitDecl *> Deps,
     return false;
   std::string Text = Source.substr(0, Off).str();
   Text += "\n// p3 interface v1\n";
-  if (containsGenerics(Source))
+  if (unitHasGenerics(Unit))
     Text += "// generics\n";
   Text += "// source " + hashHex(interfaceHash(Source)) + "\n";
   for (const Identifier &Use : Unit.getInterfaceUses()) {

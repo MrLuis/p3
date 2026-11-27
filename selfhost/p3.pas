@@ -856,21 +856,44 @@ end;
 
 { Does the source contain the word generic? (Conservative: such a unit's
   implementation has bodies a precompiled interface would lose.) }
-function ifContainsGenerics(p: PCharArray; len: int64): boolean;
+{ Does u declare any generic types, routines, or methods whose
+  implementation tokens a precompiled .p3i interface would lose? }
+function ifDeclsHaveGenerics(const decls: TPtrList): boolean;
 var
-  i: int64;
-  w: string;
+  i: longint;
+  d: PDecl;
+  ts: PTypeSpec;
 begin
-  ifContainsGenerics := false;
-  for i := 0 to len - 7 do
+  ifDeclsHaveGenerics := true;
+  for i := 0 to decls.count - 1 do
   begin
-    w := '';
-    w := ifLower(p^[i]) + ifLower(p^[i + 1]) + ifLower(p^[i + 2]) +
-         ifLower(p^[i + 3]) + ifLower(p^[i + 4]) + ifLower(p^[i + 5]) +
-         ifLower(p^[i + 6]);
-    if w = 'generic' then
-      exit(true);
+    d := PDecl(listGet(decls, i));
+    if d^.kind = dkType then
+    begin
+      if d^.tgGeneric then
+        exit;
+      ts := d^.typeSpec;
+      if ts <> nil then
+      begin
+        if (ts^.kind = tsRecord) and ifDeclsHaveGenerics(ts^.recMembers) then
+          exit;
+        if (ts^.kind = tsClass) and ifDeclsHaveGenerics(ts^.memberList) then
+          exit;
+        if (ts^.kind = tsHelper) and ifDeclsHaveGenerics(ts^.helperMembers) then
+          exit;
+      end;
+    end
+    else if (d^.kind = dkRoutine) and d^.isGeneric then
+      exit;
   end;
+  ifDeclsHaveGenerics := false;
+end;
+
+function ifUnitHasGenerics(u: PDecl): boolean;
+begin
+  ifUnitHasGenerics :=
+    ((u^.iface <> nil) and ifDeclsHaveGenerics(u^.iface^.decls)) or
+    ((u^.impl <> nil) and ifDeclsHaveGenerics(u^.impl^.decls));
 end;
 
 { The offset of the implementation keyword, skipping comments and strings,
@@ -1052,7 +1075,7 @@ begin
   bufInit(text);
   bufAddChars(text, srcData, 0, off);
   bufAdd(text, #10 + '// p3 interface v1' + #10);
-  if ifContainsGenerics(srcData, srcLen) then
+  if ifUnitHasGenerics(u) then
     bufAdd(text, '// generics' + #10);
   bufAdd(text, '// source ' + ifHashHex(ifHash(srcData, srcLen)) + #10);
   for i := 0 to u^.ifaceUses.count - 1 do

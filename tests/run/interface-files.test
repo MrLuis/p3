@@ -18,3 +18,17 @@
 ; IFACE: implementation
 ; IR: define i32 @main
 ; STALE: error:
+
+; A comment or string mentioning "generic" must not disable .p3i caching,
+; whereas an actual generic declaration must emit "// generics".
+; RUN: rm -rf %t.g && mkdir -p %t.g/lib
+; RUN: printf "unit ng;\ninterface\n{ not a generic declaration }\nfunction F: string;\nimplementation\nfunction F: string; begin Result := 'generic'; end;\nend.\n" > %t.g/lib/ng.pas
+; RUN: %p3 --mode=objfpc -I %t.g/lib -c %t.g/lib/ng.pas -o %t.g/lib/ng.o
+; RUN: FileCheck --check-prefix=NONGEN %s < %t.g/lib/ng.p3i
+; NONGEN-NOT: // generics
+; NONGEN: // source {{[0-9a-f]+}}
+
+; RUN: printf "unit gen;\ninterface\ntype generic TBox<T> = record V: T; end;\nimplementation\nend.\n" > %t.g/lib/gen.pas
+; RUN: %p3 --mode=objfpc -I %t.g/lib -c %t.g/lib/gen.pas -o %t.g/lib/gen.o
+; RUN: FileCheck --check-prefix=ISGEN %s < %t.g/lib/gen.p3i
+; ISGEN: // generics
