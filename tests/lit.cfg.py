@@ -29,6 +29,12 @@ for d in (config.llvm_tools_dir, config.p3_tools_dir):
 # RUN lines say `FileCheck`; point that at whichever implementation CMake
 # found (LLVM's, or the Python port `filecheck`).
 config.substitutions.append((r"\bFileCheck\b", config.filecheck))
+# The LLVM targets p3 has (P3_LLVM_TARGETS): REQUIRES: llvm-target-riscv,
+# llvm-target-webassembly, ... for tests that generate code for another one.
+for t in getattr(config, "llvm_targets", "").split(";"):
+    if t:
+        config.available_features.add("llvm-target-" + t.lower())
+
 # Windows as the host: programs end their lines with CR LF and the expected
 # files with LF, so diff (the command, not names such as selfhost-diff.py) is
 # utils/lit-diff-crlf.py; and X.expected is X.windows.expected where a test

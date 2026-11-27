@@ -7,5 +7,6 @@ config.llvm_tools_dir = "@LLVM_TOOLS_BINARY_DIR@"
 config.filecheck = "@FILECHECK_EXECUTABLE@"
 config.selfhost_flags = "@P3_SELFHOST_FLAGS@"
 config.cmake = "@CMAKE_COMMAND@"
+config.llvm_targets = "@P3_LLVM_TARGETS_LINKED@"
 
 lit_config.load_config(config, "@CMAKE_CURRENT_SOURCE_DIR@/lit.cfg.py")

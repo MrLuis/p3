@@ -1,0 +1,9 @@
+; Cross compilation to a WebAssembly object (outputs.test has the other
+; main formats; the input uses setjmp-based non-local goto, files and
+; procedural parameters), where p3 has LLVM's WebAssembly target
+; (P3_LLVM_TARGETS: the packages do not).
+; REQUIRES: llvm-target-webassembly
+; RUN: rm -rf %t.dir && mkdir -p %t.dir
+; RUN: %p3 -c -O2 --target=wasm32-unknown-wasi %S/../run/gotoproc.pas -o %t.dir/wasm.o
+; RUN: llvm-readobj --file-headers %t.dir/wasm.o | FileCheck --check-prefix=WASM %s
+; WASM: Format: WASM

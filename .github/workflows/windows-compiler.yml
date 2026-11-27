@@ -73,6 +73,7 @@ jobs:
             -DLLVM_DIR="$(llvm-config --cmakedir)" \
             -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++ \
             -DP3_LINK_LLVM_DYLIB=OFF -DP3_LLVM_STATIC_DEPS=ON -DP3_EMBED_LLD=ON \
+            -DP3_LLVM_TARGETS="X86;AArch64" \
             -DCMAKE_EXE_LINKER_FLAGS="-static" \
             -DP3_CROSS_TARGETS=OFF -DLIT_EXECUTABLE="$LIT"
 

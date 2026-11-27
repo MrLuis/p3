@@ -21,10 +21,8 @@
 ; EXEC: Hello, World!
 ; IR: define i32 @main(
 
-; Cross compilation to objects works for any LLVM target...
-; RUN: %p3 -c --target=riscv64-unknown-linux-gnu %S/../driver/Inputs/hello.pas -o %t.dir/rv.o
-; RUN: llvm-readobj --file-headers %t.dir/rv.o | FileCheck --check-prefix=RV %s
-; RV: Machine: EM_RISCV
+; Cross compilation to objects works for any LLVM target p3 has (RISC-V and
+; WebAssembly: outputs-riscv.test, outputs-wasm.test).
 ; M11: object files for the main object formats (the input uses setjmp-based
 ; non-local goto, files and procedural parameters).
 ; RUN: %p3 -c -O2 --target=x86_64-unknown-linux-gnu %S/../run/gotoproc.pas -o %t.dir/x86.o
@@ -36,14 +34,6 @@
 ; RUN: %p3 -c -O2 --target=x86_64-pc-windows-msvc %S/../run/gotoproc.pas -o %t.dir/coff.o
 ; RUN: llvm-readobj --file-headers %t.dir/coff.o | FileCheck --check-prefix=COFF %s
 ; COFF: Format: COFF-x86-64
-; RUN: %p3 -c -O2 --target=wasm32-unknown-wasi %S/../run/gotoproc.pas -o %t.dir/wasm.o
-; RUN: llvm-readobj --file-headers %t.dir/wasm.o | FileCheck --check-prefix=WASM %s
-; WASM: Format: WASM
-
-; ...but linking an executable for another target needs the runtime built
-; for it (P3_CROSS_TARGETS; tests/driver/windows-link.test).
-; RUN: not %p3 --target=riscv64-unknown-linux-gnu %S/../driver/Inputs/hello.pas -o %t.dir/rv 2>&1 | FileCheck --check-prefix=XLINK %s
-; XLINK: error: no Pascal runtime for target 'riscv64-unknown-linux-gnu' (configure p3 with -DP3_CROSS_TARGETS=riscv64-unknown-linux-gnu); -c, -S and --emit-llvm work without it
 
 
 ; Missing runtime library is reported clearly.

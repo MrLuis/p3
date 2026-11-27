@@ -403,13 +403,16 @@ compiler).
 - `--fseparate-units` — link separately compiled units (each compiled with
   `-c` to `<unit>.o` next to its source; off by default)
 - `-g` — generate debug information (off by default)
-- `--target=<triple>` — target triple (default: host). Any triple of a target
-  LLVM 23 was built with: X86, AArch64, ARM, RISCV, Mips, PowerPC, WebAssembly,
-  AMDGPU, NVPTX, AVR, MSP430, BPF, Hexagon, Lanai, LoongArch, M68k, Sparc,
-  SystemZ, VE, XCore, Xtensa — written as `x86_64-pc-linux-gnu`,
-  `aarch64-apple-darwin`, ... For a non-host triple `-S`, `-c` and
-  `--emit-llvm` always work; linking an executable needs the runtime built
-  for that target (see Cross-compiling: Windows has it).
+- `--target=<triple>` — target triple (default: host), written as
+  `x86_64-pc-linux-gnu`, `aarch64-apple-darwin`, ... The release packages
+  (archives, Scoop, winget) have LLVM's X86 and AArch64 targets; a p3 built
+  from source, or Homebrew's, has every target LLVM 23 was built with (X86,
+  AArch64, ARM, RISCV, Mips, PowerPC, WebAssembly, AMDGPU, NVPTX, AVR,
+  MSP430, BPF, Hexagon, Lanai, LoongArch, M68k, Sparc, SystemZ, VE, XCore,
+  Xtensa), unless configured with `-DP3_LLVM_TARGETS` (docs/build.md). For a
+  non-host triple `-S`, `-c` and `--emit-llvm` always work; linking an
+  executable needs the runtime built for that target (see Cross-compiling:
+  Windows has it).
 - `-mcpu <cpu>` — target CPU (default: `generic`; `native` selects the host
   CPU and its feature set). Other names are the target's LLVM CPU names —
   e.g. for x86 `x86-64-v3`, `skylake`, `znver4`; for AArch64 `apple-m1`,

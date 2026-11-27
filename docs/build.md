@@ -127,7 +127,11 @@ The installed p3 still needs the shared LLVM library it was built against,
 and a C compiler to link programs. With `-DP3_LINK_LLVM_DYLIB=OFF` LLVM is
 linked in instead; the release archives are built that way
 (`.github/workflows/package.yml`, `utils/package-linux.sh`,
-`utils/package-macos.sh`).
+`utils/package-macos.sh`). LLVM's targets then make most of p3's size:
+`-DP3_LLVM_TARGETS="X86;AArch64"` links only those (the release archives
+do; the default is every target LLVM was built with, and the host's must be
+in the list). p3 cannot generate code for the others: `--target` says
+"unsupported target".
 
 ## Testing
 

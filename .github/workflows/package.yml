@@ -57,7 +57,7 @@ jobs:
             -DLLVM_DIR="$LLVM_PREFIX/lib/cmake/llvm" \
             -DCMAKE_C_COMPILER="$HOST_CC" \
             -DCMAKE_CXX_COMPILER="$HOST_CXX" \
-            -DP3_LINK_LLVM_DYLIB=OFF \
+            -DP3_LINK_LLVM_DYLIB=OFF -DP3_LLVM_TARGETS="X86;AArch64" \
             -DCMAKE_EXE_LINKER_FLAGS="-Wl,--as-needed -static-libstdc++ -static-libgcc" \
             -DP3_CROSS_TARGETS=x86_64-w64-mingw32
 
@@ -149,7 +149,7 @@ jobs:
             -DLLVM_DIR="$LLVM_PREFIX/lib/cmake/llvm" \
             -DCMAKE_C_COMPILER="$HOST_CC" \
             -DCMAKE_CXX_COMPILER="$HOST_CXX" \
-            -DP3_LINK_LLVM_DYLIB=OFF \
+            -DP3_LINK_LLVM_DYLIB=OFF -DP3_LLVM_TARGETS="X86;AArch64" \
             -DP3_LLVM_STATIC_DEPS=ON \
             -DCMAKE_OSX_DEPLOYMENT_TARGET="$macos_min" \
             -DCMAKE_EXE_LINKER_FLAGS="-Wl,-dead_strip_dylibs -Wl,-fatal_warnings" \

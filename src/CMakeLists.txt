@@ -7,6 +7,12 @@ add_library(p3Basic STATIC
 )
 target_include_directories(p3Basic PUBLIC ${PROJECT_BINARY_DIR}/include)
 target_link_libraries(p3Basic PUBLIC ${P3_LLVM_LIBS})
+if(P3_LLVM_TARGET_STUBS)
+  # The initializers of the LLVM targets left out (P3_LLVM_TARGETS),
+  # compiled into each executable that links LLVM, as WindowsManifestStub.cpp
+  # is below: lld's archives, last on the line, call them too.
+  target_sources(p3Basic INTERFACE ${P3_LLVM_TARGET_STUBS})
+endif()
 
 add_library(p3Lexer STATIC
   lexer/TokenKinds.cpp
