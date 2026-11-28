@@ -607,13 +607,12 @@ typedef struct DynHeader {
 
 #define DYN_HEADER(a) ((DynHeader *)(void *)((char *)(a) - sizeof(DynHeader)))
 
-/* The room a SetLength that has to grow asks for: the count, unless the
- * capacity's own quarter (plus one, so small capacities grow) is more,
- * which keeps the step ~1.25x, as TStringList's capacity does. */
+/* The room a SetLength that has to grow asks for: doubles capacity (with a
+ * small minimum of 8 for typical element sizes) to avoid quadratic copies. */
 static int64_t dyn_capacity(const DynHeader *h, int64_t count) {
-  int64_t grow = h->capacity >> 2;
-  int64_t room =
-      h->capacity > INT64_MAX - grow - 1 ? INT64_MAX : h->capacity + grow + 1;
+  int64_t room = h->capacity > INT64_MAX / 2 ? INT64_MAX : h->capacity * 2;
+  if (h->info->elem_size > 0 && h->info->elem_size <= 64 && room < 8)
+    room = 8;
   return count > room ? count : room;
 }
 
@@ -628,19 +627,72 @@ static size_t dyn_size(const PasDynInfo *info, int64_t count) {
   return sizeof(DynHeader) + (size_t)count * esz;
 }
 
+#define DYN_POOL_BUCKETS 5
+#define DYN_POOL_CAP 32
+static const size_t dyn_bucket_sizes[DYN_POOL_BUCKETS] = {64, 128, 256, 512, 1024};
+DynHeader *__pas_dyn_pool[DYN_POOL_BUCKETS][DYN_POOL_CAP] = {{0}};
+int32_t __pas_dyn_pool_n[DYN_POOL_BUCKETS] = {0};
+
+static inline void dyn_free_hdr(DynHeader *h) {
+  if (!__pas_threads_started && h->info && h->info->elem_size > 0) {
+    size_t bytes = (size_t)h->capacity * (size_t)h->info->elem_size;
+    int b = -1;
+    if (bytes == 64) b = 0;
+    else if (bytes == 128) b = 1;
+    else if (bytes == 256) b = 2;
+    else if (bytes == 512) b = 3;
+    else if (bytes == 1024) b = 4;
+    if (b >= 0 && __pas_dyn_pool_n[b] < DYN_POOL_CAP) {
+      __pas_dyn_pool[b][__pas_dyn_pool_n[b]++] = h;
+      return;
+    }
+  }
+  free(h);
+}
+
+static DynHeader *dyn_alloc_hdr(const PasDynInfo *info, int64_t count, int zero) {
+  size_t total = dyn_size(info, count);
+  size_t esz = (size_t)info->elem_size;
+  size_t payload = total - sizeof(DynHeader);
+  int64_t cap = count;
+  DynHeader *h = NULL;
+  if (!__pas_threads_started && esz > 0 && payload <= 1024) {
+    int b = -1;
+    if (payload <= 64) b = 0;
+    else if (payload <= 128) b = 1;
+    else if (payload <= 256) b = 2;
+    else if (payload <= 512) b = 3;
+    else b = 4;
+    size_t bbytes = dyn_bucket_sizes[b];
+    if (bbytes % esz == 0) {
+      cap = (int64_t)(bbytes / esz);
+      total = sizeof(DynHeader) + bbytes;
+      if (__pas_dyn_pool_n[b] > 0)
+        h = __pas_dyn_pool[b][--__pas_dyn_pool_n[b]];
+    }
+  }
+  if (!h) {
+    h = (zero && total > sizeof(DynHeader) + 1024) ? calloc(1, total) : malloc(total);
+    if (!h)
+      __pas_runtime_error("out of memory in a dynamic array");
+    if (zero && total <= sizeof(DynHeader) + 1024 && payload > 0)
+      memset(h + 1, 0, payload);
+  } else if (zero && payload > 0) {
+    memset(h + 1, 0, payload);
+  }
+  h->refs = 1;
+  h->length = count;
+  h->capacity = cap;
+  h->info = info;
+  return h;
+}
+
 void *__pas_dyn_new(const PasDynInfo *info, int64_t count) {
   if (count < 0)
     __pas_runtime_error("invalid length of a dynamic array");
   if (count == 0)
     return NULL;
-  DynHeader *h = calloc(1, dyn_size(info, count));
-  if (!h)
-    __pas_runtime_error("out of memory in a dynamic array");
-  h->refs = 1;
-  h->length = count;
-  h->capacity = count;
-  h->info = info;
-  return h + 1;
+  return dyn_alloc_hdr(info, count, 1) + 1;
 }
 
 int64_t __pas_dyn_length(const void *a) {
@@ -674,7 +726,7 @@ static inline void dyn_release_hdr(DynHeader *h, int pod) {
   }
   if (!pod)
     dyn_fini(h->info, (char *)(h + 1), 0, h->length);
-  free(h);
+  dyn_free_hdr(h);
 }
 
 static void dyn_release(void *a) {
@@ -736,10 +788,16 @@ void __pas_dyn_take_pod(void **dst, void *src) {
  * that many), each counted once more. */
 static void *dyn_duplicate(const void *a, int64_t from, int64_t count, int64_t size,
                            const PasDynInfo *info) {
-  char *copy = __pas_dyn_new(info, size);
+  if (size <= 0)
+    return NULL;
+  DynHeader *h = dyn_alloc_hdr(info, size, 0);
+  char *copy = (char *)(h + 1);
   if (count > 0)
     memcpy(copy, (const char *)a + from * info->elem_size,
            (size_t)count * (size_t)info->elem_size);
+  if (size > count)
+    memset(copy + (size_t)count * (size_t)info->elem_size, 0,
+           (size_t)(size - count) * (size_t)info->elem_size);
   if (info->addref)
     for (int64_t i = 0; i < count; ++i)
       info->addref(copy + i * info->elem_size);
