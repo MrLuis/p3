@@ -1931,12 +1931,17 @@ begin
 end;
 
 { for-in over elements lo..hi of type elemTy at base. }
-procedure forInIndexed(s: PNode; const lo, hi: TV; elemTy: PIRType; const base: TV);
+procedure forInIndexed(s: PNode; const lo, hi: TV; elemTy: PIRType; const base: TV;
+                       clampHeapAlign: boolean);
 var
   l: TForInLoop;
+  elemAddr: TV;
 begin
   forInLoopBegin(l, lo, hi);
-  forInIteration(s, irGEP1(elemTy, base, l.i, true, 'in.elem'));
+  elemAddr := irGEP1(elemTy, base, l.i, true, 'in.elem');
+  if clampHeapAlign and (alignOf(s^.inElemType) > 16) then
+    setAddrAlign(elemAddr, 16);
+  forInIteration(s, elemAddr);
   forInLoopEnd(l);
 end;
 
@@ -2078,7 +2083,7 @@ begin
         desc := openDescriptor(c);
         data := irLoad(irPtrT, desc, 'data');
         hi := irBin('sub', openCount(desc), i64c(1), 'in.hi');
-        forInIndexed(s, i64c(0), hi, memType(elem), data);
+        forInIndexed(s, i64c(0), hi, memType(elem), data, true);
       end;
     fikDynArray, fikAnsiString:
       begin
@@ -2099,18 +2104,18 @@ begin
           n := irCast('zext', call1(classRuntime('__pas_astr_length', 'i32', 'ptr'), v, ''),
                       irI64, '');
         end;
-        forInIndexed(s, i64c(0), irBin('sub', n, i64c(1), 'in.hi'), memType(elem), v);
+        forInIndexed(s, i64c(0), irBin('sub', n, i64c(1), 'in.hi'), memType(elem), v, dyn);
       end;
     fikShortString:
       begin
         base := emitPStr(c); { its characters are 1..length }
         n := irCast('zext', irLoad(irI8, base, 'length'), irI64, '');
-        forInIndexed(s, i64c(1), n, irI8, base);
+        forInIndexed(s, i64c(1), n, irI8, base, false);
       end;
     fikStringConst:
       begin
         base := emitAddress(c);
-        forInIndexed(s, i64c(0), i64c(getStringLength(c^.typ) - 1), irI8, base);
+        forInIndexed(s, i64c(0), i64c(getStringLength(c^.typ) - 1), irI8, base, false);
       end;
     fikSet:
       begin

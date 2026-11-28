@@ -1227,6 +1227,7 @@ llvm::Value *CodeGenModule::emitAddress(Expr *E){
     if (I->getProperty()) // a string or record value
       return emitArrayPropertyRead(I);
     if (auto *OA = llvm::dyn_cast<OpenArrayType>(I->getBase()->getType())) {
+      Type *Elem = OA->getElementType();
       const auto *H = checkedScopeOf(I->getBase());
       llvm::Value *Data = H ? H->second : emitAddress(I->getBase());
       llvm::Value *X = toI64(visitExpr(I->getIndex()), I->getIndex()->getType());
@@ -1234,7 +1235,11 @@ llvm::Value *CodeGenModule::emitAddress(Expr *E){
         emitRuntimeCheck(B.CreateICmpUGE(X, openCount(openDescriptor(I->getBase()))),
                          "array index out of bounds",
                          I->getIndex()->getBeginLoc());
-      return B.CreateGEP(memType(OA->getElementType()), Data, X, "", indexFlags(I->getIndex(), 0));
+      llvm::Value *Addr = B.CreateGEP(memType(Elem), Data, X, "",
+                                      indexFlags(I->getIndex(), 0));
+      if (alignOf(Elem) > 16)
+        AddrAligns[Addr] = 16;
+      return Addr;
     }
     if (auto *AC = llvm::dyn_cast<ArrayOfConstType>(I->getBase()->getType())) {
       llvm::Value *A = visitExpr(I->getBase());
@@ -1268,7 +1273,11 @@ llvm::Value *CodeGenModule::emitAddress(Expr *E){
                                         B.getInt32(0)),
                          "array index out of bounds",
                          I->getIndex()->getBeginLoc());
-      return B.CreateGEP(memType(Elem), Data, X, "", indexFlags(I->getIndex(), 0));
+      llvm::Value *Addr = B.CreateGEP(memType(Elem), Data, X, "",
+                                      indexFlags(I->getIndex(), 0));
+      if (alignOf(Elem) > 16)
+        AddrAligns[Addr] = 16;
+      return Addr;
     }
     if (I->getBase()->getType()->isAnsiString()) {
       // An address may be written through: the string must be unshared,

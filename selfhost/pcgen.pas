@@ -3880,8 +3880,11 @@ begin
           if checkedScopeOf(e^.base, base) then
           begin
             x := toI64(visitExpr(e^.index), idxTy);
-            exit(irGEP1(memType(bt^.dynElement), base, x, true, '',
-                        indexFlags(e^.index, 0)));
+            elemAddr := irGEP1(memType(bt^.dynElement), base, x, true, '',
+                               indexFlags(e^.index, 0));
+            if alignOf(bt^.dynElement) > 16 then
+              setAddrAlign(elemAddr, 16);
+            exit(elemAddr);
           end;
           base := visitExpr(e^.base);
           x := toI64(visitExpr(e^.index), idxTy);
@@ -3891,16 +3894,22 @@ begin
             bad := irICmp('ne', bad, i32c(0), '');
             emitRuntimeCheck(bad, 'array index out of bounds', e^.index^.b);
           end;
-          exit(irGEP1(memType(bt^.dynElement), base, x, true, '',
-                      indexFlags(e^.index, 0)));
+          elemAddr := irGEP1(memType(bt^.dynElement), base, x, true, '',
+                             indexFlags(e^.index, 0));
+          if alignOf(bt^.dynElement) > 16 then
+            setAddrAlign(elemAddr, 16);
+          exit(elemAddr);
         end;
         if bt^.kind = tyOpenArray then
         begin
           if checkedScopeOf(e^.base, base) then
           begin
             x := toI64(visitExpr(e^.index), idxTy);
-            exit(irGEP1(memType(bt^.openElement), base, x, true, '',
-                        indexFlags(e^.index, 0)));
+            elemAddr := irGEP1(memType(bt^.openElement), base, x, true, '',
+                               indexFlags(e^.index, 0));
+            if alignOf(bt^.openElement) > 16 then
+              setAddrAlign(elemAddr, 16);
+            exit(elemAddr);
           end;
           base := emitAddress(e^.base);
           x := toI64(visitExpr(e^.index), idxTy);
@@ -3909,8 +3918,11 @@ begin
             bad := irICmp('uge', x, openCount(openDescriptor(e^.base)), '');
             emitRuntimeCheck(bad, 'array index out of bounds', e^.index^.b);
           end;
-          exit(irGEP1(memType(bt^.openElement), base, x, true, '',
-                      indexFlags(e^.index, 0)));
+          elemAddr := irGEP1(memType(bt^.openElement), base, x, true, '',
+                             indexFlags(e^.index, 0));
+          if alignOf(bt^.openElement) > 16 then
+            setAddrAlign(elemAddr, 16);
+          exit(elemAddr);
         end;
         if bt^.kind = tyArrayOfConst then
         begin

@@ -2038,9 +2038,12 @@ void CodeGenModule::visitForInStmt(ForInStmt *S){
     visitStmt(S->getBody());
   };
   auto Indexed = [&](llvm::Value *Lo, llvm::Value *Hi, llvm::Type *ElemTy,
-                     llvm::Value *Base) {
+                     llvm::Value *Base, bool ClampHeapAlign = false) {
     emitForInLoop(Lo, Hi, [&](llvm::Value *I, llvm::BasicBlock *) {
-      Iteration(B.CreateInBoundsGEP(ElemTy, Base, I, "in.elem"));
+      llvm::Value *ElemAddr = B.CreateInBoundsGEP(ElemTy, Base, I, "in.elem");
+      if (ClampHeapAlign && alignOf(Elem) > 16)
+        AddrAligns[ElemAddr] = 16;
+      Iteration(ElemAddr);
     });
   };
   switch (S->getInKind()) {
@@ -2097,7 +2100,7 @@ void CodeGenModule::visitForInStmt(ForInStmt *S){
     llvm::Value *Desc = openDescriptor(C);
     llvm::Value *Data = B.CreateLoad(B.getPtrTy(), Desc, "data");
     llvm::Value *Hi = B.CreateSub(openCount(Desc), B.getInt64(1), "in.hi");
-    Indexed(B.getInt64(0), Hi, memType(Elem), Data);
+    Indexed(B.getInt64(0), Hi, memType(Elem), Data, true);
     return;
   }
   case ForInStmt::DynArray:
@@ -2113,7 +2116,7 @@ void CodeGenModule::visitForInStmt(ForInStmt *S){
             : B.CreateZExt(astrCall("__pas_astr_length", B.getInt32Ty(), {V}),
                            B.getInt64Ty());
     Indexed(B.getInt64(0), B.CreateSub(N, B.getInt64(1), "in.hi"),
-            memType(Elem), V);
+            memType(Elem), V, Dyn);
     return;
   }
   case ForInStmt::ShortString: {

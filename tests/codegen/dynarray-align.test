@@ -1,0 +1,9 @@
+; Dynamic arrays and open arrays containing over-aligned SIMD vectors (> 16 B)
+; clamp element load/store alignment to 16 bytes (heap header alignment).
+; RUN: %p3 --mode=objfpc --emit-llvm %S/Inputs/dynarray-align.pas -o - | FileCheck %s
+
+; CHECK-LABEL: define i32 @main(
+; CHECK:       store <4 x double> {{.*}}, ptr %{{.*}}, align 16
+; CHECK:       load <4 x double>, ptr %{{.*}}, align 16
+; CHECK-LABEL: define internal void @pas.sumopen(
+; CHECK:       load <4 x double>, ptr %{{.*}}, align 16
