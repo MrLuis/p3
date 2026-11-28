@@ -98,6 +98,24 @@ type
       clFinally  the protected statements of try..finally: pop frame, then
                  run the finally part with state = 2 + k, after which it
                  continues at exits[k] (state 0: normal end, 1: exception) }
+  PCheckedBase = ^TCheckedBase;
+  TCheckedBase = record
+    decl: PDecl;
+    data: TV;
+  end;
+
+  PHoistEntry = ^THoistEntry;
+  THoistEntry = record
+    v: PDecl;
+    base: PNode;
+    bare, conditional, badChecks: boolean;
+  end;
+
+  THoistWalk = record
+    bail, hasCall, wantChecks: boolean;
+    entries: TPtrList; { of PHoistEntry }
+  end;
+
   TCleanupKind = (clTryBody, clHandler, clFinally);
   PCleanup = ^TCleanup;
   TCleanup = record
@@ -139,8 +157,9 @@ var
   { optimization3 item 4: the current routine's local variables whose
     range is followed from store to store (cgRangeLocal), and the pin
     analysis leaving out the targets of plain x := e (paSkipPlain) }
-  rangeLocals: TPtrList;
-  paSkipPlain: boolean;
+  rangeLocals, checkedBases: TPtrList;
+  curForVar: PDecl;
+  paSkipPlain, paSkipIndex: boolean;
   { the value the last assignment to a scalar stored (see visitAssign) }
   assignStored: TV;
   assignStoredSet: boolean;
@@ -2143,6 +2162,8 @@ begin
                 (d^.cgRangeHi <= loNeeded + 1073741824);
 end;
 
+function checkedScopeOf(e: PNode; var outData: TV): boolean; forward;
+
 function emitAddress(e: PNode): TV; forward;
 function emitTuple(e: PNode): TV; forward;
 
@@ -3678,6 +3699,12 @@ begin
         end;
         if bt^.kind = tyDynArray then
         begin
+          if checkedScopeOf(e^.base, base) then
+          begin
+            x := toI64(visitExpr(e^.index), idxTy);
+            exit(irGEP1(memType(bt^.dynElement), base, x, true, '',
+                        indexFlags(e^.index, 0)));
+          end;
           base := visitExpr(e^.base);
           x := toI64(visitExpr(e^.index), idxTy);
           if rangeChecks(e^.index^.b) then
@@ -3691,6 +3718,12 @@ begin
         end;
         if bt^.kind = tyOpenArray then
         begin
+          if checkedScopeOf(e^.base, base) then
+          begin
+            x := toI64(visitExpr(e^.index), idxTy);
+            exit(irGEP1(memType(bt^.openElement), base, x, true, '',
+                        indexFlags(e^.index, 0)));
+          end;
           base := emitAddress(e^.base);
           x := toI64(visitExpr(e^.index), idxTy);
           if rangeChecks(e^.index^.b) then

@@ -1112,10 +1112,10 @@ llvm::Value *CodeGenModule::emitAddress(Expr *E){
     if (I->getProperty()) // a string or record value
       return emitArrayPropertyRead(I);
     if (auto *OA = llvm::dyn_cast<OpenArrayType>(I->getBase()->getType())) {
-      llvm::Value *Data = emitAddress(I->getBase());
+      const auto *H = checkedScopeOf(I->getBase());
+      llvm::Value *Data = H ? H->second : emitAddress(I->getBase());
       llvm::Value *X = toI64(visitExpr(I->getIndex()), I->getIndex()->getType());
-      if (rangeChecks(I->getIndex()->getBeginLoc()) &&
-          !checkedScopeOf(I->getBase()))
+      if (rangeChecks(I->getIndex()->getBeginLoc()) && !H)
         emitRuntimeCheck(B.CreateICmpUGE(X, openCount(openDescriptor(I->getBase()))),
                          "array index out of bounds",
                          I->getIndex()->getBeginLoc());
@@ -1144,12 +1144,10 @@ llvm::Value *CodeGenModule::emitAddress(Expr *E){
     }
     if (I->getBase()->getType()->isDynArray()) {
       Type *Elem = llvm::cast<DynArrayType>(I->getBase()->getType())->getElementType();
-      llvm::Value *Data = visitExpr(I->getBase());
-      if (auto *H = checkedScopeOf(I->getBase()))
-        Data = H->second; // the pointer loaded at the loop's entry
+      const auto *H = checkedScopeOf(I->getBase());
+      llvm::Value *Data = H ? H->second : visitExpr(I->getBase());
       llvm::Value *X = toI64(visitExpr(I->getIndex()), I->getIndex()->getType());
-      if (rangeChecks(I->getIndex()->getBeginLoc()) &&
-          !checkedScopeOf(I->getBase()))
+      if (rangeChecks(I->getIndex()->getBeginLoc()) && !H)
         emitRuntimeCheck(B.CreateICmpNE(astrCall("__pas_dyn_bad_index",
                                                  B.getInt32Ty(), {Data, X}),
                                         B.getInt32(0)),

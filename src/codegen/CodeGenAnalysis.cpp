@@ -39,7 +39,8 @@ void PinAnalysis::addTarget(Expr *E, VarSet &Out){
     return;
   }
   if (auto *I = llvm::dyn_cast<IndexExpr>(E)) {
-    addTarget(I->getBase(), Out);
+    if (!SkipIndexWrites)
+      addTarget(I->getBase(), Out);
     return;
   }
   if (auto *D = llvm::dyn_cast<DerefExpr>(E)) {
@@ -68,7 +69,7 @@ void PinAnalysis::addCallWrites(Decl *D, llvm::ArrayRef<Expr *> Args, VarSet &Ou
     case BuiltinKind::Continue:
       return;
     case BuiltinKind::Exit:
-      if (!Args.empty() && R->isFunction())
+      if (!Args.empty() && R && R->isFunction())
         Out.insert(R->getResultVar());
       return;
     case BuiltinKind::Inc:
@@ -877,8 +878,6 @@ bool CodeGenModule::isSignedOrdinal(Type *T){ return T->isSignedIntegerLike(); }
 /// The loop's hoist scope that covers the index's base: the array whose
 /// length this for checks (null: none). Innermost loop last.
 const std::pair<VarDecl *, llvm::Value *> *CodeGenModule::checkedScopeOf(const Expr *E) const{
-  if (!CurRoutine) // (the walk and its proof are per routine)
-    return nullptr;
   auto *V = countedBase(E);
   if (!V)
     return nullptr;
@@ -996,36 +995,29 @@ VarDecl *CodeGenModule::countedBase(const Expr *E) const{
   E = unwrapConst(const_cast<Expr *>(E));
   if (auto *P = llvm::dyn_cast<ParenExpr>(E))
     return countedBase(P->getInner());
-  if (auto *F = llvm::dyn_cast<FieldExpr>(E))
+  if (llvm::isa<FieldExpr>(E))
     return nullptr;
   const Expr *Base = E;
   if (auto *I = llvm::dyn_cast<IndexExpr>(E))
     Base = I->getBase();
   auto *N = plainVarRef(Base);
-  if (!N)
+  if (!N || N->getWith())
     return nullptr;
-  auto *D = N->getDecl();
-  if (!D)
+  auto *V = llvm::dyn_cast_or_null<VarDecl>(N->getDecl());
+  if (!V || V->isCaptured() || !V->getType() || V->getAbsoluteRoot())
     return nullptr;
-  auto *V = llvm::dyn_cast_or_null<VarDecl>(D);
-  if (!V || V->isCaptured() || !V->getType())
+  Type *T = V->getType();
+  if (!T->isDynArray() && !T->isOpenArray())
     return nullptr;
   if (V->getOwner() != CurRoutine) {
     // A global: only when the routine is flat — no nested routines in
     // its declarations (none of them — however deep — could otherwise
     // write the global's length with no var parameter to see).
-    if (!CurRoutine || !CurRoutine->getBody())
-      return nullptr;
-    for (Decl *ND : CurRoutine->getBody() ? CurRoutine->getBody()->getDecls() : llvm::ArrayRef<Decl *>())
-      if (llvm::isa<RoutineDecl>(ND))
-        return nullptr;
-    return V;
+    if (CurRoutine && CurRoutine->getBody())
+      for (Decl *ND : CurRoutine->getBody()->getDecls())
+        if (llvm::isa<RoutineDecl>(ND))
+          return nullptr;
   }
-  if (!V || false || !V->getType())
-    return nullptr;
-  Type *T = V->getType();
-  if (!T->isDynArray() && !T->isOpenArray() && !T->isArrayOfConst())
-    return nullptr;
   return V;
 }
 
@@ -1044,12 +1036,31 @@ void CodeGenModule::hoistWalk(const Stmt *S, HoistWalk &W, bool Unconditional) c
     return;
   }
   if (auto *P = llvm::dyn_cast<ProcCallStmt>(S)) {
-    if (!P->getDecl()) // a call whose callee's writes are unseen
+    if (!P->getDecl() || P->getCalleeValue()) {
       W.Bail = true;
+      return;
+    }
+    if (auto *B = llvm::dyn_cast<BuiltinDecl>(P->getDecl())) {
+      switch (B->getBuiltinKind()) {
+      case BuiltinKind::Break:
+      case BuiltinKind::Continue:
+      case BuiltinKind::Exit:
+      case BuiltinKind::Halt:
+      case BuiltinKind::GetMem:
+      case BuiltinKind::FreeMem:
+      case BuiltinKind::ReallocMem:
+        W.Bail = true;
+        return;
+      default:
+        break;
+      }
+    } else if (llvm::isa<RoutineDecl>(P->getDecl())) {
+      W.HasCall = true;
+    }
+    if (P->getWith())
+      hoistExpr(P->getWith()->Record, W, Unconditional);
     for (Expr *A : P->getArgs())
       hoistExpr(A, W, Unconditional);
-    if (P->getCalleeValue())
-      hoistExpr(P->getCalleeValue(), W, Unconditional);
     return;
   }
   if (llvm::isa<IndirectCallStmt>(S)) {
@@ -1079,8 +1090,11 @@ void CodeGenModule::hoistWalk(const Stmt *S, HoistWalk &W, bool Unconditional) c
   if (auto *F = llvm::dyn_cast<ForStmt>(S)) {
     hoistExpr(F->getInit(), W, Unconditional);
     hoistExpr(F->getFinal(), W, Unconditional);
-    // (an entered for runs at least once: the entry check is hoisted)
-    hoistWalk(F->getBody(), W, Unconditional);
+    bool AlwaysEnters = false;
+    int64_t Lo = 0, Hi = 0;
+    if (constInt(F->getInit(), Lo) && constInt(F->getFinal(), Hi))
+      AlwaysEnters = F->isDownto() ? (Lo >= Hi) : (Lo <= Hi);
+    hoistWalk(F->getBody(), W, Unconditional && AlwaysEnters);
     return;
   }
   if (auto *F = llvm::dyn_cast<ForInStmt>(S)) {
@@ -1089,7 +1103,7 @@ void CodeGenModule::hoistWalk(const Stmt *S, HoistWalk &W, bool Unconditional) c
     hoistWalk(F->getBody(), W, false);
     return;
   }
-  if (auto *T = llvm::dyn_cast<TryStmt>(S)) {
+  if (llvm::isa<TryStmt>(S)) {
     W.Bail = true;
     return;
   }
@@ -1116,18 +1130,14 @@ void CodeGenModule::hoistWalk(const Stmt *S, HoistWalk &W, bool Unconditional) c
     return;
   }
   if (auto *L = llvm::dyn_cast<LabeledStmt>(S)) {
+    (void)L;
     W.Bail = true; // a goto target inside
     return;
   }
-  if (auto *SC = llvm::dyn_cast<ScopeStmt>(S)) {
-    for (Stmt *X : SC->getBody())
-      hoistWalk(X, W, Unconditional);
-    return;
-  }
-  if (llvm::isa<ExprStmt>(S) || llvm::isa<VarDeclStmt>(S) ||
-      llvm::isa<DestructureStmt>(S) || llvm::isa<RaiseStmt>(S) ||
-      llvm::isa<GotoStmt>(S) || llvm::isa<YieldStmt>(S) ||
-      llvm::isa<DetachedStmt>(S))
+  if (llvm::isa<ScopeStmt>(S) || llvm::isa<ExprStmt>(S) ||
+      llvm::isa<VarDeclStmt>(S) || llvm::isa<DestructureStmt>(S) ||
+      llvm::isa<RaiseStmt>(S) || llvm::isa<GotoStmt>(S) ||
+      llvm::isa<YieldStmt>(S) || llvm::isa<DetachedStmt>(S))
     W.Bail = true;
 }
 
@@ -1140,8 +1150,15 @@ void CodeGenModule::hoistExpr(const Expr *E, HoistWalk &W, bool Unconditional) c
     return hoistExpr(P->getInner(), W, Unconditional);
   if (llvm::isa<SpawnExpr>(E) || llvm::isa<AwaitExpr>(E) ||
       llvm::isa<MoveExpr>(E) || llvm::isa<AddrOfExpr>(E) ||
-      llvm::isa<IndirectCallExpr>(E) || llvm::isa<DerefExpr>(E)) {
+      llvm::isa<IndirectCallExpr>(E) || llvm::isa<DerefExpr>(E) ||
+      llvm::isa<SafeNavExpr>(E)) {
     W.Bail = true;
+    return;
+  }
+  if (auto *I = llvm::dyn_cast<InheritedExpr>(E)) {
+    W.HasCall = true;
+    for (Expr *A : I->getImplicitArgs())
+      hoistExpr(A, W, Unconditional);
     return;
   }
   if (auto *C = llvm::dyn_cast<CallExpr>(E)) {
@@ -1149,7 +1166,7 @@ void CodeGenModule::hoistExpr(const Expr *E, HoistWalk &W, bool Unconditional) c
       W.Bail = true;
       return;
     }
-    if (auto *B = llvm::dyn_cast<BuiltinDecl>(C->getDecl()))
+    if (auto *B = llvm::dyn_cast<BuiltinDecl>(C->getDecl())) {
       switch (B->getBuiltinKind()) {
       case BuiltinKind::GetMem:
       case BuiltinKind::FreeMem:
@@ -1159,6 +1176,11 @@ void CodeGenModule::hoistExpr(const Expr *E, HoistWalk &W, bool Unconditional) c
       default:
         break;
       }
+    } else if (llvm::isa<RoutineDecl>(C->getDecl())) {
+      W.HasCall = true;
+    }
+    if (C->getWith())
+      hoistExpr(C->getWith()->Record, W, Unconditional);
     hoistExpr(C->getCalleeValue(), W, Unconditional);
     for (Expr *A : C->getArgs())
       hoistExpr(A, W, Unconditional);
@@ -1169,24 +1191,72 @@ void CodeGenModule::hoistExpr(const Expr *E, HoistWalk &W, bool Unconditional) c
     hoistExpr(I->getIndex(), W, Unconditional);
     // an element access of a counted type (whose base is a plain
     // variable), recorded: bare index, and whether unconditional
-    auto *V = countedBase(E);
-    if (V) {
+    if (auto *V = countedBase(E)) {
       bool Bare = false;
       if (auto *N = plainVarRef(I->getIndex()))
-        Bare = N->getDecl() == CurForVar;
-      W.touch(V, const_cast<Expr *>(I->getBase()), Bare, Unconditional);
+        Bare = !N->getWith() && N->getDecl() == CurForVar;
+      bool ChecksMatch =
+          rangeChecks(I->getIndex()->getBeginLoc()) == W.WantChecks;
+      W.touch(V, const_cast<Expr *>(I->getBase()), Bare, Unconditional,
+              ChecksMatch);
     }
     return;
   }
+  if (auto *F = llvm::dyn_cast<FieldExpr>(E))
+    return hoistExpr(F->getBase(), W, Unconditional);
   if (auto *U = llvm::dyn_cast<UnaryExpr>(E))
     return hoistExpr(U->getOperand(), W, Unconditional);
-  if (auto *B = llvm::dyn_cast<BinaryExpr>(E))
-    return hoistExpr(B->getLHS(), W, Unconditional),
-           hoistExpr(B->getRHS(), W, Unconditional);
-  if (auto *F = llvm::dyn_cast<FormattedExpr>(E))
-    return hoistExpr(F->getValue(), W, Unconditional);
-  if (auto *N = llvm::dyn_cast<NameRefExpr>(E))
-    (void)N; // plain reads
+  if (auto *B = llvm::dyn_cast<BinaryExpr>(E)) {
+    bool ShortCircuit =
+        (B->getOp() == BinaryOp::And || B->getOp() == BinaryOp::Or) &&
+        B->getLHS()->getType() && B->getLHS()->getType()->isBoolean();
+    hoistExpr(B->getLHS(), W, Unconditional);
+    hoistExpr(B->getRHS(), W, ShortCircuit ? false : Unconditional);
+    return;
+  }
+  if (auto *F = llvm::dyn_cast<FormattedExpr>(E)) {
+    hoistExpr(F->getValue(), W, Unconditional);
+    hoistExpr(F->getWidth(), W, Unconditional);
+    hoistExpr(F->getPrecision(), W, Unconditional);
+    return;
+  }
+  if (auto *C = llvm::dyn_cast<CondExpr>(E)) {
+    hoistExpr(C->getCond(), W, Unconditional);
+    hoistExpr(C->getThen(), W, false);
+    hoistExpr(C->getElse(), W, false);
+    return;
+  }
+  if (auto *C = llvm::dyn_cast<CoalesceExpr>(E)) {
+    hoistExpr(C->getLeft(), W, Unconditional);
+    hoistExpr(C->getRight(), W, false);
+    return;
+  }
+  if (auto *SC = llvm::dyn_cast<SetCtorExpr>(E)) {
+    for (const SetElement &El : SC->getElements()) {
+      hoistExpr(El.Lo, W, Unconditional);
+      hoistExpr(El.Hi, W, Unconditional);
+    }
+    return;
+  }
+  if (auto *AG = llvm::dyn_cast<AggregateExpr>(E)) {
+    for (AggregateElement *El : AG->getElements())
+      hoistExpr(El->Value, W, Unconditional);
+    return;
+  }
+  if (auto *TM = llvm::dyn_cast<TemplateExpr>(E)) {
+    for (Expr *P : TM->getParts())
+      hoistExpr(P, W, Unconditional);
+    return;
+  }
+  if (auto *TP = llvm::dyn_cast<TupleExpr>(E)) {
+    for (Expr *X : TP->getElements())
+      hoistExpr(X, W, Unconditional);
+    return;
+  }
+  if (auto *NA = llvm::dyn_cast<NamedArgExpr>(E)) {
+    hoistExpr(NA->getValue(), W, Unconditional);
+    return;
+  }
 }
 
 
@@ -1195,15 +1265,14 @@ void CodeGenModule::hoistExpr(const Expr *E, HoistWalk &W, bool Unconditional) c
 llvm::SmallVector<std::pair<VarDecl *, Expr *>, 2>
 CodeGenModule::hoistableBases(ForStmt *S){
   llvm::SmallVector<std::pair<VarDecl *, Expr *>, 2> Out;
-  // (Parked until the self-hosted compiler's walk mirrors this one:
-  // parity requires both or neither, and the mirror is the next step.)
-  return Out;
-  if (!CurRoutine) // (the program's own body: no frame to speak of)
+  auto *ForN = S->getVar() ? llvm::dyn_cast<NameRefExpr>(S->getVar()) : nullptr;
+  auto *Var = ForN ? llvm::dyn_cast_or_null<VarDecl>(ForN->getDecl()) : nullptr;
+  if (!Var)
     return Out;
-  VarDecl *Var = llvm::cast<VarDecl>(S->getVar()->getDecl());
   VarDecl *SavedForVar = CurForVar;
   CurForVar = Var;
   HoistWalk W;
+  W.WantChecks = rangeChecks(S->getInit()->getBeginLoc());
   hoistWalk(S->getBody(), W, true);
   hoistExpr(S->getInit(), W, true);
   hoistExpr(S->getFinal(), W, true);
@@ -1211,18 +1280,21 @@ CodeGenModule::hoistableBases(ForStmt *S){
   if (W.Bail)
     return Out;
   VarSet Written;
-  PinAnalysis(CurRoutine).writtenBy(S->getBody(), Written);
-  if (Written.count(Var))
-    return Out; // the control variable is written inside
-  for (auto &[V, T] : W.Bases) {
-    auto *BaseExpr = plainVarRef(std::get<3>(T));
-    auto *Base = llvm::dyn_cast_or_null<VarDecl>(BaseExpr ? BaseExpr->getDecl()
-                                                          : nullptr);
-    if (std::get<0>(T) && std::get<1>(T) && !std::get<2>(T) && Base &&
-        !Written.count(Base))
-      Out.push_back({V, std::get<3>(T)}); // (a SetLength or an
-                                          // assignment of the base was
-                                          // walked: it stays out)
+  PinAnalysis(CurRoutine).directWrites(S->getBody(), Written);
+  if (Written.count(Var) ||
+      (W.HasCall && (!CurRoutine || Var->getOwner() != CurRoutine)))
+    return Out; // the control variable may be written inside
+  for (const HoistEntry &E : W.Entries) {
+    auto *BaseExpr = plainVarRef(E.Base);
+    auto *Base =
+        BaseExpr ? llvm::dyn_cast_or_null<VarDecl>(BaseExpr->getDecl())
+                 : nullptr;
+    if (!E.Bare || E.Conditional || E.BadChecks || !Base ||
+        Written.count(Base))
+      continue;
+    if (W.HasCall && (!CurRoutine || E.V->getOwner() != CurRoutine))
+      continue;
+    Out.push_back({E.V, E.Base});
   }
   return Out;
 }

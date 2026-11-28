@@ -67,6 +67,9 @@ class PinAnalysis {
   VarSet Pins;
   /// Leave out the targets of plain `x := e` (otherWrites).
   bool SkipPlainAssigns = false;
+  /// Leave out indexed writes `a[i] := e` when checking whether array
+  /// lengths/bases themselves change (hoistableBases).
+  bool SkipIndexWrites = false;
 
 public:
   /// The variable of a plain `x := e`: a bare variable name, not reached
@@ -112,6 +115,14 @@ public:
 
   /// Adds the variables that S may write (optimization3 item 4).
   void writtenBy(Stmt *S, VarSet &Out) { addWrittenStmt(S, Out); }
+
+  /// Adds variables that S may write directly (excluding indexed element
+  /// writes like `a[i] := x`, which cannot change `a`'s base or length).
+  void directWrites(Stmt *S, VarSet &Out) {
+    SkipIndexWrites = true;
+    addWrittenStmt(S, Out);
+    SkipIndexWrites = false;
+  }
 
   /// The variables that S writes other than by a plain `x := e`: through
   /// a var argument, @x, a for loop, an overlay... (optimization3 item 4).
@@ -540,20 +551,31 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
   /// The hoist's state for one walked loop: bail = anything unseen was
   /// met; the bases' element accesses, with the bare control variable's
   /// bareness and the unconditional-ness of the access's statement.
+  struct HoistEntry {
+    VarDecl *V = nullptr;
+    Expr *Base = nullptr;
+    bool Bare = true;
+    bool Conditional = false;
+    bool BadChecks = false;
+  };
+
   struct HoistWalk {
     bool Bail = false; // a global unseen: no hoisting at all
-    // base: seen (first), all accesses' index is the bare variable, all
-    // accesses unconditional, and the base itself unwritten (checked by
-    // writtenBy outside).
-    llvm::DenseMap<VarDecl *, std::tuple<bool, bool, bool, Expr *>> Bases;
-    void touch(VarDecl *V, Expr *Base, bool Bare, bool Unconditional) {
-      auto &E = Bases[V];
-      bool Seen = std::get<0>(E);
-      std::get<0>(E) = true;
-      std::get<1>(E) = Seen ? (std::get<1>(E) && Bare) : Bare;
-      std::get<2>(E) = std::get<2>(E) || !Unconditional;
-      if (!std::get<3>(E))
-        std::get<3>(E) = Base;
+    bool HasCall = false;
+    bool WantChecks = false;
+    // Deterministic AST-order list of counted bases seen in the loop.
+    llvm::SmallVector<HoistEntry, 4> Entries;
+    void touch(VarDecl *V, Expr *Base, bool Bare, bool Unconditional,
+               bool ChecksMatch) {
+      for (HoistEntry &E : Entries) {
+        if (E.V == V) {
+          E.Bare = E.Bare && Bare;
+          E.Conditional = E.Conditional || !Unconditional;
+          E.BadChecks = E.BadChecks || !ChecksMatch;
+          return;
+        }
+      }
+      Entries.push_back({V, Base, Bare, !Unconditional, !ChecksMatch});
     }
   };
 

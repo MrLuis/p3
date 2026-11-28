@@ -1562,18 +1562,22 @@ type
     oldLo, oldHi: int64;
   end;
 
+procedure hoistableBases(s: PNode; var outHoists: TPtrList); forward;
+
 procedure visitFor(s: PNode);
 var
   v, a: PDecl;
   varTy: PType;
-  down: boolean;
-  start, final, start64, final64, enter, i, done, next: TV;
+  down, hoisted, wantChecks, qwordTy, startGe0, finalGe0: boolean;
+  start, final, start64, final64, enter, i, done, next, last64, start64v, hd, cnt: TV;
   checkB, loopB, latchB, incB, endB, preB: PIRBlock;
   phi: PIRInst;
   oldKnown: boolean;
   oldLo, oldHi: int64;
-  written, accs: TPtrList;
+  written, accs, hoists, hoistDatas: TPtrList;
   acc: PAccumulator;
+  he: PHoistEntry;
+  cb: PCheckedBase;
   k: longint;
   dLo, dHi, trips, tyLo, tyHi, x: int64;
   overflow, fits: boolean;
@@ -1642,6 +1646,64 @@ begin
                     '''for'' loop bound out of range');
   start := convertOrdinal(start, s^.forInit^.typ, varTy);
   final := convertOrdinal(final, s^.forFinal^.typ, varTy);
+  listInit(hoists);
+  hoistableBases(s, hoists);
+  hoisted := hoists.count > 0;
+  if hoisted then
+  begin
+    wantChecks := rangeChecks(s^.forInit^.b);
+    listInit(hoistDatas);
+    for k := 0 to hoists.count - 1 do
+    begin
+      he := PHoistEntry(listGet(hoists, k));
+      if he^.v^.varType^.kind = tyOpenArray then
+        listAdd(hoistDatas, irBox(emitAddress(he^.base)))
+      else
+        listAdd(hoistDatas, irBox(visitExpr(he^.base)));
+    end;
+    if wantChecks then
+    begin
+      last64 := toI64(final, varTy);
+      start64v := toI64(start, varTy);
+      qwordTy := isQWord(varTy);
+      startGe0 := qwordTy or (start.rKnown and (start.rLo >= 0));
+      finalGe0 := qwordTy or (final.rKnown and (final.rLo >= 0));
+      for k := 0 to hoists.count - 1 do
+      begin
+        he := PHoistEntry(listGet(hoists, k));
+        hd := PTVBox(listGet(hoistDatas, k))^;
+        if he^.v^.varType^.kind = tyOpenArray then
+          cnt := openCount(openDescriptor(he^.base))
+        else
+          cnt := call1(classRuntime('__pas_dyn_length', 'i64', 'ptr'), hd, '');
+        if down then
+        begin
+          if not finalGe0 then
+            emitRuntimeCheck(irICmp('slt', last64, i64c(0), ''),
+                             'array index out of bounds', s^.forInit^.b);
+          emitRuntimeCheck(irICmp('uge', start64v, cnt, ''),
+                           'array index out of bounds', s^.forFinal^.b);
+        end
+        else
+        begin
+          if not startGe0 then
+            emitRuntimeCheck(irICmp('slt', start64v, i64c(0), ''),
+                             'array index out of bounds', s^.forInit^.b);
+          emitRuntimeCheck(irICmp('uge', last64, cnt, ''),
+                           'array index out of bounds', s^.forFinal^.b);
+        end;
+      end;
+    end;
+    for k := 0 to hoists.count - 1 do
+    begin
+      he := PHoistEntry(listGet(hoists, k));
+      cb := PCheckedBase(arenaAlloc(sizeof(TCheckedBase)));
+      cb^.decl := he^.v;
+      cb^.data := PTVBox(listGet(hoistDatas, k))^;
+      listAdd(checkedBases, cb);
+    end;
+    listFree(hoistDatas);
+  end;
   preB := irInsertBlock;
   irBr(loopB);
 
@@ -1715,6 +1777,9 @@ begin
   pushLoop(latchB, endB);
   visitStmt(s^.forBody);
   popLoop;
+  if hoisted then
+    checkedBases.count := checkedBases.count - hoists.count;
+  listFree(hoists);
   v^.cgRangeKnown := oldKnown;
   v^.cgRangeLo := oldLo;
   v^.cgRangeHi := oldHi;
@@ -3422,7 +3487,8 @@ begin
     nkField:
       paAddTarget(e^.base, outSet);
     nkIndex:
-      paAddTarget(e^.base, outSet);
+      if not paSkipIndex then
+        paAddTarget(e^.base, outSet);
     nkDeref:
       { the pointee changes; keep the pointer in memory too }
       paAddTarget(e^.inner, outSet);
@@ -4040,6 +4106,7 @@ begin
   paSkipPlain := true;
   paStmt(r^.body^.body, used, other, false, true);
   paSkipPlain := false;
+  paSkipIndex := false;
   for i := 0 to r^.body^.decls.count - 1 do
   begin
     v := PDecl(listGet(r^.body^.decls, i));
@@ -4074,6 +4141,388 @@ begin
     v^.cgLoopKnown := false;
   end;
   listClear(rangeLocals);
+end;
+
+function plainVarRefNode(e: PNode): PNode;
+begin
+  e := unwrapConst(e);
+  if (e <> nil) and (e^.kind = nkNameRef) then
+    exit(e);
+  plainVarRefNode := nil;
+end;
+
+function countedBase(e: PNode): PDecl;
+var
+  base, n: PNode;
+  v, nd: PDecl;
+  t: PType;
+  i: longint;
+begin
+  countedBase := nil;
+  e := unwrapConst(e);
+  if e = nil then
+    exit;
+  if e^.kind = nkParen then
+    exit(countedBase(e^.inner));
+  if e^.kind = nkField then
+    exit;
+  base := e;
+  if e^.kind = nkIndex then
+    base := e^.base;
+  n := plainVarRefNode(base);
+  if (n = nil) or (n^.refWith <> nil) then
+    exit;
+  v := n^.refDecl;
+  if (v = nil) or (v^.kind <> dkVar) or v^.captured or (v^.varType = nil) or
+     (v^.absRoot <> nil) then
+    exit;
+  t := v^.varType;
+  if not (t^.kind in [tyDynArray, tyOpenArray]) then
+    exit;
+  if v^.owner <> curRoutine then
+  begin
+    if (curRoutine <> nil) and (curRoutine^.body <> nil) then
+      for i := 0 to curRoutine^.body^.decls.count - 1 do
+      begin
+        nd := PDecl(listGet(curRoutine^.body^.decls, i));
+        if nd^.kind = dkRoutine then
+          exit;
+      end;
+  end;
+  countedBase := v;
+end;
+
+function checkedScopeOf(e: PNode; var outData: TV): boolean;
+var
+  v: PDecl;
+  i: longint;
+  cb: PCheckedBase;
+begin
+  checkedScopeOf := false;
+  v := countedBase(e);
+  if v = nil then
+    exit;
+  for i := checkedBases.count - 1 downto 0 do
+  begin
+    cb := PCheckedBase(listGet(checkedBases, i));
+    if cb^.decl = v then
+    begin
+      outData := cb^.data;
+      exit(true);
+    end;
+  end;
+end;
+
+procedure hoistTouch(var w: THoistWalk; v: PDecl; base: PNode;
+                     bare, uncond, checksMatch: boolean);
+var
+  i: longint;
+  e: PHoistEntry;
+begin
+  for i := 0 to w.entries.count - 1 do
+  begin
+    e := PHoistEntry(listGet(w.entries, i));
+    if e^.v = v then
+    begin
+      e^.bare := e^.bare and bare;
+      e^.conditional := e^.conditional or (not uncond);
+      e^.badChecks := e^.badChecks or (not checksMatch);
+      exit;
+    end;
+  end;
+  e := PHoistEntry(arenaAlloc(sizeof(THoistEntry)));
+  e^.v := v;
+  e^.base := base;
+  e^.bare := bare;
+  e^.conditional := not uncond;
+  e^.badChecks := not checksMatch;
+  listAdd(w.entries, e);
+end;
+
+procedure hoistExpr(e: PNode; var w: THoistWalk; uncond: boolean);
+var
+  i: longint;
+  v: PDecl;
+  n: PNode;
+  bare, checksMatch, shortCircuit: boolean;
+  se: PSetElement;
+  el: PAggElement;
+begin
+  if e = nil then
+    exit;
+  e := unwrapConst(e);
+  case e^.kind of
+    nkParen:
+      hoistExpr(e^.inner, w, uncond);
+    nkSpawn, nkAwait, nkMove, nkAddrOf, nkIndirectCall, nkDeref, nkSafeNav:
+      w.bail := true;
+    nkInherited:
+      begin
+        w.hasCall := true;
+        for i := 0 to e^.inhArgs.count - 1 do
+          hoistExpr(PNode(listGet(e^.inhArgs, i)), w, uncond);
+      end;
+    nkCall:
+      begin
+        if e^.callDecl = nil then
+        begin
+          w.bail := true;
+          exit;
+        end;
+        if e^.callDecl^.kind = dkBuiltin then
+        begin
+          if e^.callDecl^.builtin in [bkGetMem, bkFreeMem, bkReallocMem] then
+          begin
+            w.bail := true;
+            exit;
+          end;
+        end
+        else if e^.callDecl^.kind = dkRoutine then
+          w.hasCall := true;
+        if e^.callWith <> nil then
+          hoistExpr(e^.callWith^.rec, w, uncond);
+        hoistExpr(e^.calleeExpr, w, uncond);
+        for i := 0 to e^.args.count - 1 do
+          hoistExpr(PNode(listGet(e^.args, i)), w, uncond);
+      end;
+    nkIndex:
+      begin
+        hoistExpr(e^.base, w, uncond);
+        hoistExpr(e^.index, w, uncond);
+        v := countedBase(e);
+        if v <> nil then
+        begin
+          bare := false;
+          n := plainVarRefNode(e^.index);
+          if n <> nil then
+            bare := (n^.refWith = nil) and (n^.refDecl = curForVar);
+          checksMatch := rangeChecks(e^.index^.b) = w.wantChecks;
+          hoistTouch(w, v, e^.base, bare, uncond, checksMatch);
+        end;
+      end;
+    nkField:
+      hoistExpr(e^.base, w, uncond);
+    nkUnary:
+      hoistExpr(e^.operand, w, uncond);
+    nkBinary:
+      begin
+        shortCircuit := (e^.bop in [boAnd, boOr]) and (e^.lhs^.typ <> nil) and
+                        (e^.lhs^.typ^.kind = tyBoolean);
+        hoistExpr(e^.lhs, w, uncond);
+        hoistExpr(e^.rhs, w, uncond and (not shortCircuit));
+      end;
+    nkFormatted:
+      begin
+        hoistExpr(e^.fmtValue, w, uncond);
+        hoistExpr(e^.fmtWidth, w, uncond);
+        hoistExpr(e^.fmtPrecision, w, uncond);
+      end;
+    nkCondExpr:
+      begin
+        hoistExpr(e^.ceCond, w, uncond);
+        hoistExpr(e^.ceThen, w, false);
+        hoistExpr(e^.ceElse, w, false);
+      end;
+    nkCoalesce:
+      begin
+        hoistExpr(e^.coLeft, w, uncond);
+        hoistExpr(e^.coRight, w, false);
+      end;
+    nkSetCtor:
+      for i := 0 to e^.setElems.count - 1 do
+      begin
+        se := PSetElement(listGet(e^.setElems, i));
+        hoistExpr(se^.lo, w, uncond);
+        hoistExpr(se^.hi, w, uncond);
+      end;
+    nkAggregate:
+      for i := 0 to e^.aggElems.count - 1 do
+      begin
+        el := PAggElement(listGet(e^.aggElems, i));
+        hoistExpr(el^.value, w, uncond);
+      end;
+    nkTemplate:
+      for i := 0 to e^.tmplParts.count - 1 do
+        hoistExpr(PNode(listGet(e^.tmplParts, i)), w, uncond);
+    nkTuple:
+      for i := 0 to e^.tupElems.count - 1 do
+        hoistExpr(PNode(listGet(e^.tupElems, i)), w, uncond);
+    nkNamedArg:
+      hoistExpr(e^.naValue, w, uncond);
+  end;
+end;
+
+procedure hoistWalk(s: PNode; var w: THoistWalk; uncond: boolean);
+var
+  i, j: longint;
+  arm: PCaseArm;
+  lbl: PCaseLabel;
+  wc: PWithContext;
+  lo, hi: int64;
+  alwaysEnters: boolean;
+begin
+  if s = nil then
+    exit;
+  case s^.kind of
+    nkCompound:
+      for i := 0 to s^.stmts.count - 1 do
+        hoistWalk(PNode(listGet(s^.stmts, i)), w, uncond);
+    nkAssign:
+      begin
+        hoistExpr(s^.target, w, uncond);
+        hoistExpr(s^.value, w, uncond);
+      end;
+    nkProcCall:
+      begin
+        if (s^.callDecl = nil) or (s^.calleeExpr <> nil) then
+        begin
+          w.bail := true;
+          exit;
+        end;
+        if s^.callDecl^.kind = dkBuiltin then
+        begin
+          if s^.callDecl^.builtin in [bkBreak, bkContinue, bkExit, bkHalt,
+                                      bkGetMem, bkFreeMem, bkReallocMem] then
+          begin
+            w.bail := true;
+            exit;
+          end;
+        end
+        else if s^.callDecl^.kind = dkRoutine then
+          w.hasCall := true;
+        if s^.callWith <> nil then
+          hoistExpr(s^.callWith^.rec, w, uncond);
+        for i := 0 to s^.args.count - 1 do
+          hoistExpr(PNode(listGet(s^.args, i)), w, uncond);
+      end;
+    nkIndirectCallStmt, nkTry, nkLabeled, nkScope, nkExprStmt, nkVarDecl,
+    nkDestructure, nkRaise, nkGoto, nkYield, nkDetached:
+      w.bail := true;
+    nkIf:
+      begin
+        hoistExpr(s^.cond, w, uncond);
+        hoistWalk(s^.thenStmt, w, false);
+        hoistWalk(s^.elseStmt, w, false);
+      end;
+    nkWhile:
+      begin
+        hoistExpr(s^.cond, w, uncond);
+        hoistWalk(s^.thenStmt, w, false);
+      end;
+    nkRepeat:
+      begin
+        for i := 0 to s^.stmts.count - 1 do
+          hoistWalk(PNode(listGet(s^.stmts, i)), w, uncond);
+        hoistExpr(s^.untilCond, w, uncond);
+      end;
+    nkFor:
+      begin
+        hoistExpr(s^.forInit, w, uncond);
+        hoistExpr(s^.forFinal, w, uncond);
+        alwaysEnters := false;
+        if constIntOf(s^.forInit, lo) and constIntOf(s^.forFinal, hi) then
+        begin
+          if s^.isDownto then
+            alwaysEnters := lo >= hi
+          else
+            alwaysEnters := lo <= hi;
+        end;
+        hoistWalk(s^.forBody, w, uncond and alwaysEnters);
+      end;
+    nkForIn:
+      begin
+        hoistExpr(s^.inColl, w, uncond);
+        hoistWalk(s^.inBody, w, false);
+      end;
+    nkCase:
+      begin
+        hoistExpr(s^.selector, w, uncond);
+        for i := 0 to s^.arms.count - 1 do
+        begin
+          arm := PCaseArm(listGet(s^.arms, i));
+          for j := 0 to arm^.labels.count - 1 do
+          begin
+            lbl := PCaseLabel(listGet(arm^.labels, j));
+            hoistExpr(lbl^.lo, w, uncond);
+            hoistExpr(lbl^.hi, w, uncond);
+          end;
+          hoistWalk(arm^.body, w, false);
+        end;
+        for i := 0 to s^.elseBody.count - 1 do
+          hoistWalk(PNode(listGet(s^.elseBody, i)), w, false);
+      end;
+    nkWith:
+      begin
+        for i := 0 to s^.withRecords.count - 1 do
+        begin
+          wc := PWithContext(listGet(s^.withRecords, i));
+          hoistExpr(wc^.rec, w, uncond);
+        end;
+        hoistWalk(s^.withBody, w, uncond);
+      end;
+  end;
+end;
+
+procedure hoistableBases(s: PNode; var outHoists: TPtrList);
+var
+  fv, savedForVar, baseD: PDecl;
+  w: THoistWalk;
+  written, dummy: TPtrList;
+  i: longint;
+  e: PHoistEntry;
+  bn: PNode;
+begin
+  listClear(outHoists);
+  if (s^.forVar = nil) or (s^.forVar^.kind <> nkNameRef) then
+    exit;
+  fv := s^.forVar^.refDecl;
+  if (fv = nil) or (fv^.kind <> dkVar) then
+    exit;
+  savedForVar := curForVar;
+  curForVar := fv;
+  w.bail := false;
+  w.hasCall := false;
+  w.wantChecks := rangeChecks(s^.forInit^.b);
+  listInit(w.entries);
+  hoistWalk(s^.forBody, w, true);
+  hoistExpr(s^.forInit, w, true);
+  hoistExpr(s^.forFinal, w, true);
+  curForVar := savedForVar;
+  if w.bail then
+  begin
+    listFree(w.entries);
+    exit;
+  end;
+  listInit(written);
+  listInit(dummy);
+  paSkipIndex := true;
+  paStmt(s^.forBody, dummy, written, false, true);
+  paSkipIndex := false;
+  listFree(dummy);
+  if listHasPtr(written, fv) or
+     (w.hasCall and ((curRoutine = nil) or (fv^.owner <> curRoutine))) then
+  begin
+    listFree(written);
+    listFree(w.entries);
+    exit;
+  end;
+  for i := 0 to w.entries.count - 1 do
+  begin
+    e := PHoistEntry(listGet(w.entries, i));
+    bn := plainVarRefNode(e^.base);
+    if bn <> nil then
+      baseD := bn^.refDecl
+    else
+      baseD := nil;
+    if (not e^.bare) or e^.conditional or e^.badChecks or (baseD = nil) or
+       (baseD^.kind <> dkVar) or listHasPtr(written, baseD) then
+      continue;
+    if w.hasCall and ((curRoutine = nil) or (e^.v^.owner <> curRoutine)) then
+      continue;
+    listAdd(outHoists, e);
+  end;
+  listFree(written);
+  listFree(w.entries);
 end;
 
 procedure paPinStmt(s: PNode; const after: TPtrList; var pins: TPtrList); forward;
@@ -5568,7 +6017,10 @@ begin
   mapInit(typeInfos);
   listInit(asyncsToEmit);
   listInit(rangeLocals);
+  listInit(checkedBases);
+  curForVar := nil;
   paSkipPlain := false;
+  paSkipIndex := false;
   nextStart := 0;
   listInit(dynOpElems);
   listInit(dynOpFns);

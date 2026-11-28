@@ -1875,62 +1875,40 @@ void CodeGenModule::visitForStmt(ForStmt *S){
   // split the block).
   llvm::SmallVector<std::pair<VarDecl *, Expr *>, 2> Hoists =
       hoistableBases(S);
-  bool Hoisted = rangeChecks(S->getInit()->getBeginLoc()) && !Hoists.empty();
+  bool Hoisted = !Hoists.empty();
   if (Hoisted) {
-    ValueRange StartRange = rangeOfValue(Start),
-               FinalRange = rangeOfValue(Final);
-    llvm::Value *Last64 = toI64(Final, VarTy),
-                *Start64v = toI64(Start, VarTy);
-    bool HaveStart = StartRange.Known && FinalRange.Known,
-         HaveLast = FinalRange.Known;
+    bool WantChecks = rangeChecks(S->getInit()->getBeginLoc());
     llvm::SmallVector<llvm::Value *, 2> Datas;
-    llvm::SmallVector<Expr *, 2> Nodes;
-    for (auto &[Base, BaseNode] : Hoists) {
-      (void)Base;
-      Datas.push_back(visitExpr(const_cast<Expr *>(BaseNode)));
-      Nodes.push_back(const_cast<Expr *>(BaseNode));
-    }
-    for (unsigned HI = 0; HI < Hoists.size(); ++HI) {
-      auto &[Base, BaseNode] = Hoists[HI];
-      llvm::Value *Data = Datas[HI];
-      Type *BT = Base->getType();
-      if (BT->isOpenArray()) {
-        if (Down) {
-          if (HaveStart)
-            emitRuntimeCheck(B.CreateICmpSLT(Start64v, B.getInt64(0)),
-                             "array index out of bounds",
-                             S->getInit()->getBeginLoc());
-          emitRuntimeCheck(
-              B.CreateICmpUGE(Start64v, openCount(openDescriptor(BaseNode))),
-              "array index out of bounds", S->getFinal()->getBeginLoc());
-        } else {
-          if (HaveLast)
-            emitRuntimeCheck(B.CreateICmpSLT(Last64, B.getInt64(0)),
-                             "array index out of bounds",
-                             S->getInit()->getBeginLoc());
-          emitRuntimeCheck(
-              B.CreateICmpUGE(Last64, openCount(openDescriptor(BaseNode))),
-              "array index out of bounds", S->getFinal()->getBeginLoc());
-        }
-      } else {
-        auto *DT = llvm::dyn_cast_or_null<DynArrayType>(BT);
-        if (!DT)
-          break; // (not a counted-typed base after all: keep checks)
-        Type *Elem = DT->getElementType();
-        llvm::Value *Data = visitExpr(const_cast<Expr *>(BaseNode));
+    for (auto &[Base, BaseNode] : Hoists)
+      Datas.push_back(Base->getType()->isOpenArray() ? emitAddress(BaseNode)
+                                                     : visitExpr(BaseNode));
+    if (WantChecks) {
+      ValueRange StartRange = rangeOfValue(Start),
+                 FinalRange = rangeOfValue(Final);
+      llvm::Value *Last64 = toI64(Final, VarTy);
+      llvm::Value *Start64v = toI64(Start, VarTy);
+      bool QWord = isQWord(VarTy);
+      bool StartGe0 = QWord || (StartRange.Known && StartRange.Lo >= 0);
+      bool FinalGe0 = QWord || (FinalRange.Known && FinalRange.Lo >= 0);
+      for (unsigned HI = 0; HI < Hoists.size(); ++HI) {
+        auto &[Base, BaseNode] = Hoists[HI];
+        llvm::Value *Data = Datas[HI];
+        Type *BT = Base->getType();
         llvm::Value *Count =
-            astrCall("__pas_dyn_length", B.getInt64Ty(), {Data});
+            BT->isOpenArray()
+                ? openCount(openDescriptor(BaseNode))
+                : astrCall("__pas_dyn_length", B.getInt64Ty(), {Data});
         if (Down) {
-          if (HaveStart)
-            emitRuntimeCheck(B.CreateICmpSLT(Start64v, B.getInt64(0)),
+          if (!FinalGe0)
+            emitRuntimeCheck(B.CreateICmpSLT(Last64, B.getInt64(0)),
                              "array index out of bounds",
                              S->getInit()->getBeginLoc());
-          emitRuntimeCheck(
-              B.CreateICmpUGE(Start64v, Count),
-              "array index out of bounds", S->getFinal()->getBeginLoc());
+          emitRuntimeCheck(B.CreateICmpUGE(Start64v, Count),
+                           "array index out of bounds",
+                           S->getFinal()->getBeginLoc());
         } else {
-          if (HaveLast)
-            emitRuntimeCheck(B.CreateICmpSLT(Last64, B.getInt64(0)),
+          if (!StartGe0)
+            emitRuntimeCheck(B.CreateICmpSLT(Start64v, B.getInt64(0)),
                              "array index out of bounds",
                              S->getInit()->getBeginLoc());
           emitRuntimeCheck(B.CreateICmpUGE(Last64, Count),
