@@ -743,7 +743,7 @@ begin
     exit;
   lv := n^.refDecl;
   if (lv = dV) or (lv^.varType^.kind <> tyAnsiString) or
-     lv^.captured or lv^.cgInFrame or (lv^.absTarget <> nil) or
+     lv^.captured or (lv^.absTarget <> nil) or
      ((lv^.init <> nil) and not lv^.isInitVar) or
      (lv^.varKind in [vkConstParam, vkVarParam]) or lv^.isOut or
      isByRef(lv) then
