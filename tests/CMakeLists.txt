@@ -6,7 +6,7 @@ add_executable(p3-unittests unit/UnitTestMain.cpp unit/DiagnosticsTest.cpp
 target_compile_definitions(p3-unittests PRIVATE
   P3_SOURCE_DIR="${PROJECT_SOURCE_DIR}")
 target_link_libraries(p3-unittests PRIVATE p3Driver pascalrt Threads::Threads)
-if(UNIX)
+if(UNIX AND NOT APPLE)
   target_link_libraries(p3-unittests PRIVATE m)
 elseif(WIN32)
   target_link_libraries(p3-unittests PRIVATE ws2_32 bcrypt)
