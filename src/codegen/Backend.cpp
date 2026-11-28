@@ -9,6 +9,7 @@
 #include "llvm/IR/Constants.h"
 #include "llvm/IR/IRBuilder.h"
 #include "llvm/IR/Instructions.h"
+#include "llvm/IR/Intrinsics.h"
 #include "llvm/IR/LegacyPassManager.h"
 #include "llvm/Transforms/Utils/LoopSimplify.h"
 #include "llvm/Transforms/Utils/ScalarEvolutionExpander.h"
@@ -510,6 +511,938 @@ static bool foldVectorRecurrences(llvm::Module &M, llvm::TargetMachine &TM) {
   return ChangedAny;
 }
 
+static bool isVectorizablePureType(llvm::Type *T) {
+  return T && (T->isIntegerTy(1) || T->isIntegerTy(8) || T->isIntegerTy(16) ||
+               T->isIntegerTy(32) || T->isIntegerTy(64) || T->isFloatTy() ||
+               T->isDoubleTy());
+}
+
+static bool isVectorizablePureInst(const llvm::Instruction &I) {
+  if (!isVectorizablePureType(I.getType()))
+    return false;
+  if (auto *BO = llvm::dyn_cast<llvm::BinaryOperator>(&I)) {
+    switch (BO->getOpcode()) {
+    case llvm::Instruction::Add:
+    case llvm::Instruction::Sub:
+    case llvm::Instruction::Mul:
+    case llvm::Instruction::Shl:
+    case llvm::Instruction::LShr:
+    case llvm::Instruction::AShr:
+    case llvm::Instruction::And:
+    case llvm::Instruction::Or:
+    case llvm::Instruction::Xor:
+    case llvm::Instruction::FAdd:
+    case llvm::Instruction::FSub:
+    case llvm::Instruction::FMul:
+    case llvm::Instruction::FDiv:
+      return isVectorizablePureType(BO->getOperand(0)->getType());
+    default:
+      return false;
+    }
+  }
+  if (auto *UO = llvm::dyn_cast<llvm::UnaryOperator>(&I))
+    return UO->getOpcode() == llvm::Instruction::FNeg;
+  if (auto *CI = llvm::dyn_cast<llvm::CastInst>(&I)) {
+    switch (CI->getOpcode()) {
+    case llvm::Instruction::UIToFP:
+    case llvm::Instruction::SIToFP:
+    case llvm::Instruction::FPExt:
+    case llvm::Instruction::FPTrunc:
+    case llvm::Instruction::SExt:
+    case llvm::Instruction::ZExt:
+    case llvm::Instruction::Trunc:
+      return isVectorizablePureType(CI->getSrcTy());
+    default:
+      return false;
+    }
+  }
+  if (auto *Cmp = llvm::dyn_cast<llvm::CmpInst>(&I))
+    return isVectorizablePureType(Cmp->getOperand(0)->getType());
+  if (auto *Sel = llvm::dyn_cast<llvm::SelectInst>(&I))
+    return isVectorizablePureType(Sel->getTrueValue()->getType());
+  return false;
+}
+
+/// Vectorizes counted `for` loops (step = 1) containing pure setup, a single
+/// side-effect-free `while` loop, and post-while scalar integer reductions across
+/// 4 lanes in lockstep (`<4 x T>` -> `2 x <2 x double>` NEON / AVX2), followed by
+/// reusing the scalar loop as a 0..3 remainder tail.
+static bool tryVectorizeLoopWithWhile(llvm::Loop *OuterL, llvm::LoopInfo &LI,
+                                      llvm::ScalarEvolution &SE) {
+  constexpr unsigned VF = 4;
+  llvm::BasicBlock *OuterPre = OuterL->getLoopPreheader();
+  llvm::BasicBlock *OuterHeader = OuterL->getHeader();
+  llvm::BasicBlock *OuterLatch = OuterL->getLoopLatch();
+  if (!OuterPre || !OuterHeader || !OuterLatch)
+    return false;
+  llvm::SmallVector<llvm::BasicBlock *, 4> OuterExits;
+  OuterL->getExitBlocks(OuterExits);
+  llvm::BasicBlock *OuterExit = nullptr;
+  for (llvm::BasicBlock *Ex : OuterExits) {
+    if (llvm::isa<llvm::UnreachableInst>(Ex->getTerminator()))
+      continue;
+    if (OuterExit && OuterExit != Ex)
+      return false;
+    OuterExit = Ex;
+  }
+  auto *LatchBr = llvm::dyn_cast<llvm::CondBrInst>(OuterLatch->getTerminator());
+  if (!OuterExit || !LatchBr || OuterExit->getSinglePredecessor() != OuterLatch)
+    return false;
+  if (!((LatchBr->getSuccessor(0) == OuterExit &&
+         LatchBr->getSuccessor(1) == OuterHeader) ||
+        (LatchBr->getSuccessor(1) == OuterExit &&
+         LatchBr->getSuccessor(0) == OuterHeader)))
+    return false;
+  if (OuterL->getSubLoops().size() != 1)
+    return false;
+  llvm::Loop *InnerL = OuterL->getSubLoops()[0];
+  if (!InnerL->getSubLoops().empty())
+    return false;
+
+  const llvm::SCEV *OuterBTC = SE.getExitCount(OuterL, OuterLatch);
+  if (llvm::isa<llvm::SCEVCouldNotCompute>(OuterBTC) ||
+      !OuterBTC->getType()->isIntegerTy())
+    return false;
+  unsigned BTCWidth = OuterBTC->getType()->getIntegerBitWidth();
+  if (BTCWidth > 64)
+    return false;
+  if (BTCWidth > 32) {
+    auto *SC = llvm::dyn_cast<llvm::SCEVConstant>(OuterBTC);
+    if (!SC || SC->getAPInt().isAllOnes())
+      return false;
+  }
+
+  // Partition OuterHeader PHIs into one +1 induction variable and integer
+  // accumulator reductions.
+  llvm::PHINode *IV = nullptr;
+  llvm::Value *IVInit = nullptr;
+  llvm::SmallVector<llvm::PHINode *, 4> RedPHIs;
+  llvm::SmallVector<llvm::Value *, 4> RedInits;
+  llvm::SmallVector<llvm::Value *, 4> RedNexts;
+  for (llvm::PHINode &PN : OuterHeader->phis()) {
+    if (PN.getNumIncomingValues() != 2 || !PN.getType()->isIntegerTy())
+      return false;
+    unsigned BitW = PN.getType()->getIntegerBitWidth();
+    if (BitW != 32 && BitW != 64)
+      return false;
+    llvm::Value *InitV = PN.getIncomingValueForBlock(OuterPre);
+    llvm::Value *BackV = PN.getIncomingValueForBlock(OuterLatch);
+    if (!InitV || !BackV)
+      return false;
+    bool MatchedIV = false;
+    if (!IV) {
+      if (const auto *AR = llvm::dyn_cast<llvm::SCEVAddRecExpr>(SE.getSCEV(&PN));
+          AR && AR->getLoop() == OuterL && AR->isAffine()) {
+        if (const auto *Step =
+                llvm::dyn_cast<llvm::SCEVConstant>(AR->getStepRecurrence(SE));
+            Step && Step->getAPInt().isOne()) {
+          bool OnlyInside = true;
+          for (llvm::User *U : PN.users()) {
+            auto *UI = llvm::dyn_cast<llvm::Instruction>(U);
+            if (!UI || !OuterL->contains(UI)) {
+              OnlyInside = false;
+              break;
+            }
+          }
+          if (OnlyInside) {
+            IV = &PN;
+            IVInit = InitV;
+            MatchedIV = true;
+          }
+        }
+      }
+    }
+    if (!MatchedIV) {
+      auto *BI = llvm::dyn_cast<llvm::Instruction>(BackV);
+      if (!BI || !OuterL->contains(BI))
+        return false;
+      RedPHIs.push_back(&PN);
+      RedInits.push_back(InitV);
+      RedNexts.push_back(BackV);
+    }
+  }
+  if (!IV || RedPHIs.empty())
+    return false;
+
+  // Walk linear pure setup chain from OuterHeader to InnerL's header.
+  llvm::BasicBlock *InnerHeader = InnerL->getHeader();
+  llvm::BasicBlock *InnerLatch = InnerL->getLoopLatch();
+  if (!InnerHeader || !InnerLatch)
+    return false;
+  llvm::SmallVector<llvm::BasicBlock *, 4> SetupBBs;
+  llvm::SmallPtrSet<llvm::BasicBlock *, 8> OuterHandled;
+  llvm::BasicBlock *Cur = OuterHeader;
+  while (Cur != InnerHeader) {
+    if (Cur == OuterLatch || InnerL->contains(Cur) ||
+        !OuterHandled.insert(Cur).second)
+      return false;
+    if (Cur != OuterHeader && !Cur->phis().empty())
+      return false;
+    for (llvm::Instruction &I : *Cur) {
+      if (llvm::isa<llvm::PHINode>(&I) || I.isTerminator())
+        continue;
+      if (!isVectorizablePureInst(I))
+        return false;
+      for (llvm::Value *Op : I.operands()) {
+        auto *OI = llvm::dyn_cast<llvm::Instruction>(Op);
+        if (OI && OuterL->contains(OI) &&
+            !llvm::is_contained(RedPHIs, llvm::dyn_cast<llvm::PHINode>(OI))) {
+          if (!OuterHandled.count(OI->getParent()))
+            return false;
+        } else if (llvm::is_contained(RedPHIs, llvm::dyn_cast<llvm::PHINode>(Op))) {
+          return false;
+        }
+      }
+    }
+    auto *UTerm = llvm::dyn_cast<llvm::UncondBrInst>(Cur->getTerminator());
+    if (!UTerm)
+      return false;
+    SetupBBs.push_back(Cur);
+    Cur = UTerm->getSuccessor();
+  }
+  if (SetupBBs.empty() || InnerL->getLoopPreheader() != SetupBBs.back())
+    return false;
+
+  // Walk linear inner `while` chain B_0 -> ... -> InnerLatch inside InnerL.
+  struct InnerStep {
+    llvm::BasicBlock *BB = nullptr;
+    llvm::Value *Cond = nullptr;
+    bool StayOnTrue = false;
+    llvm::BasicBlock *ExitBB = nullptr;
+  };
+  llvm::SmallVector<InnerStep, 8> InnerSteps;
+  llvm::SmallPtrSet<llvm::BasicBlock *, 8> InnerSeen;
+  Cur = InnerHeader;
+  while (true) {
+    if (!InnerL->contains(Cur) || !InnerSeen.insert(Cur).second ||
+        InnerSeen.size() > 8)
+      return false;
+    if (Cur == InnerHeader) {
+      for (llvm::PHINode &PN : Cur->phis()) {
+        if (PN.getNumIncomingValues() != 2 ||
+            !isVectorizablePureType(PN.getType()))
+          return false;
+        if (!PN.getIncomingValueForBlock(SetupBBs.back()) ||
+            !PN.getIncomingValueForBlock(InnerLatch))
+          return false;
+      }
+    } else if (!Cur->phis().empty()) {
+      return false;
+    }
+    for (llvm::Instruction &I : *Cur) {
+      if (llvm::isa<llvm::PHINode>(&I) || I.isTerminator())
+        continue;
+      if (!isVectorizablePureInst(I))
+        return false;
+      for (llvm::Value *Op : I.operands())
+        if (llvm::is_contained(RedPHIs, llvm::dyn_cast<llvm::PHINode>(Op)))
+          return false;
+    }
+    if (auto *UTerm = llvm::dyn_cast<llvm::UncondBrInst>(Cur->getTerminator())) {
+      llvm::BasicBlock *Succ = UTerm->getSuccessor();
+      InnerSteps.push_back({Cur, nullptr, false, nullptr});
+      if (Succ == InnerHeader) {
+        if (Cur != InnerLatch)
+          return false;
+        break;
+      }
+      Cur = Succ;
+      continue;
+    }
+    auto *CTerm = llvm::dyn_cast<llvm::CondBrInst>(Cur->getTerminator());
+    if (!CTerm)
+      return false;
+    llvm::BasicBlock *S0 = CTerm->getSuccessor(0), *S1 = CTerm->getSuccessor(1);
+    bool In0 = InnerL->contains(S0), In1 = InnerL->contains(S1);
+    if (In0 == In1)
+      return false;
+    llvm::BasicBlock *NextIn = In0 ? S0 : S1;
+    llvm::BasicBlock *ExBB = In0 ? S1 : S0;
+    if (!OuterL->contains(ExBB))
+      return false;
+    InnerSteps.push_back({Cur, CTerm->getCondition(), In0, ExBB});
+    if (NextIn == InnerHeader) {
+      if (Cur != InnerLatch)
+        return false;
+      break;
+    }
+    Cur = NextIn;
+  }
+  if (InnerSteps.size() != InnerL->getBlocks().size())
+    return false;
+
+  // Trace each inner exit edge through PostInner to OuterLatch first so we know
+  // every ExitPath's LatchPred.
+  struct ExitPath {
+    unsigned StepIdx = 0;
+    llvm::BasicBlock *LatchPred = nullptr;
+    llvm::CallInst *TrapCall = nullptr;
+  };
+  llvm::SmallVector<ExitPath, 4> ExitPaths;
+  llvm::SmallPtrSet<llvm::BasicBlock *, 16> PostInnerBBs;
+  for (unsigned SI = 0; SI < InnerSteps.size(); ++SI) {
+    llvm::BasicBlock *Ex = InnerSteps[SI].ExitBB;
+    if (!Ex)
+      continue;
+    llvm::BasicBlock *Prev = InnerSteps[SI].BB;
+    llvm::BasicBlock *Walk = Ex;
+    llvm::CallInst *FoundTrap = nullptr;
+    llvm::CallInst *OvCall = nullptr;
+    unsigned Hops = 0;
+    while (Walk != OuterLatch) {
+      if (++Hops > 8 || !OuterL->contains(Walk) || InnerL->contains(Walk) ||
+          Walk == OuterHeader)
+        return false;
+      if (!Walk->phis().empty())
+        return false;
+      PostInnerBBs.insert(Walk);
+      for (llvm::Instruction &I : *Walk) {
+        if (I.isTerminator())
+          continue;
+        if (auto *II = llvm::dyn_cast<llvm::IntrinsicInst>(&I)) {
+          if (II->getIntrinsicID() == llvm::Intrinsic::sadd_with_overflow ||
+              II->getIntrinsicID() == llvm::Intrinsic::ssub_with_overflow) {
+            if (OvCall)
+              return false;
+            OvCall = II;
+            continue;
+          }
+          return false;
+        }
+        if (auto *EV = llvm::dyn_cast<llvm::ExtractValueInst>(&I)) {
+          if (EV->getAggregateOperand() != OvCall || EV->getNumIndices() != 1 ||
+              EV->getIndices()[0] > 1)
+            return false;
+          continue;
+        }
+        if (!isVectorizablePureInst(I))
+          return false;
+      }
+      if (auto *UTerm = llvm::dyn_cast<llvm::UncondBrInst>(Walk->getTerminator())) {
+        Prev = Walk;
+        Walk = UTerm->getSuccessor();
+        continue;
+      }
+      auto *CTerm = llvm::dyn_cast<llvm::CondBrInst>(Walk->getTerminator());
+      if (!CTerm || !OvCall)
+        return false;
+      auto *EV = llvm::dyn_cast<llvm::ExtractValueInst>(CTerm->getCondition());
+      if (!EV || EV->getAggregateOperand() != OvCall ||
+          EV->getNumIndices() != 1 || EV->getIndices()[0] != 1)
+        return false;
+      llvm::BasicBlock *TrapBB = CTerm->getSuccessor(0);
+      llvm::BasicBlock *OkBB = CTerm->getSuccessor(1);
+      if (!llvm::isa<llvm::UnreachableInst>(TrapBB->getTerminator()))
+        return false;
+      if (TrapBB->size() > 3 || TrapBB->getSinglePredecessor() != Walk)
+        return false;
+      llvm::CallInst *TrapC = nullptr;
+      for (llvm::Instruction &TI : *TrapBB) {
+        if (TI.isTerminator())
+          continue;
+        auto *CI = llvm::dyn_cast<llvm::CallInst>(&TI);
+        if (!CI || TrapC)
+          return false;
+        for (llvm::Value *Arg : CI->args())
+          if (auto *AI = llvm::dyn_cast<llvm::Instruction>(Arg);
+              AI && OuterL->contains(AI))
+            return false;
+        TrapC = CI;
+      }
+      if (!TrapC || OkBB->getSinglePredecessor() != Walk)
+        return false;
+      if (FoundTrap)
+        return false;
+      FoundTrap = TrapC;
+      Prev = Walk;
+      Walk = OkBB;
+    }
+    ExitPaths.push_back({SI, Prev, FoundTrap});
+  }
+  if (ExitPaths.empty())
+    return false;
+
+  // Validate OuterLatch instructions and identify any non-reduction live-out
+  // PHIs (e.g. from LLVM merging exit edges in -fno-overflow-checks mode).
+  for (llvm::Instruction &I : *OuterLatch) {
+    if (llvm::isa<llvm::PHINode>(&I) || I.isTerminator())
+      continue;
+    if (!isVectorizablePureInst(I))
+      return false;
+  }
+
+  llvm::SmallVector<llvm::PHINode *, 4> LatchLiveOutPHIs;
+  llvm::SmallDenseMap<unsigned, unsigned, 8> StepToExitPath;
+  for (size_t EI = 0; EI < ExitPaths.size(); ++EI)
+    StepToExitPath[ExitPaths[EI].StepIdx] = EI;
+  for (llvm::PHINode &PN : OuterLatch->phis()) {
+    if (llvm::is_contained(RedNexts, static_cast<llvm::Value *>(&PN)))
+      continue;
+    if (!isVectorizablePureType(PN.getType()) ||
+        PN.getNumIncomingValues() != ExitPaths.size())
+      return false;
+    for (const ExitPath &EP : ExitPaths) {
+      llvm::Value *InV = PN.getIncomingValueForBlock(EP.LatchPred);
+      if (!InV)
+        return false;
+      if (auto *AI = llvm::dyn_cast<llvm::Instruction>(InV))
+        if (OuterL->contains(AI) && !OuterHandled.count(AI->getParent()) &&
+            !InnerL->contains(AI))
+          return false;
+    }
+    for (llvm::User *U : PN.users()) {
+      auto *UI = llvm::dyn_cast<llvm::Instruction>(U);
+      if (!UI || UI->getParent() != OuterLatch ||
+          llvm::isa<llvm::PHINode>(UI))
+        return false;
+    }
+    LatchLiveOutPHIs.push_back(&PN);
+  }
+
+  // Inner values may only be used inside InnerL or via LatchLiveOutPHIs.
+  for (const InnerStep &St : InnerSteps) {
+    for (llvm::Instruction &I : *St.BB) {
+      for (llvm::User *U : I.users()) {
+        auto *UI = llvm::dyn_cast<llvm::Instruction>(U);
+        if (!UI)
+          return false;
+        if (InnerL->contains(UI))
+          continue;
+        auto *PN = llvm::dyn_cast<llvm::PHINode>(UI);
+        if (!PN || !llvm::is_contained(LatchLiveOutPHIs, PN))
+          return false;
+      }
+    }
+  }
+
+  struct RedExitDelta {
+    bool IsIdentity = true;
+    int64_t Delta = 0; // signed constant delta added to Red
+    bool HasOv = false;
+    llvm::CallInst *TrapCall = nullptr;
+  };
+  struct RedSpec {
+    llvm::PHINode *PHI = nullptr;
+    llvm::Value *Init = nullptr;
+    llvm::Value *BackVal = nullptr;
+    llvm::Value *DirectLatchDelta = nullptr;
+    bool DirectIsSub = false;
+    llvm::SmallVector<RedExitDelta, 4> PerExit;
+    bool AnyOv = false;
+  };
+  auto isValidLatchDeltaExpr = [&](auto &Self, llvm::Value *V,
+                                   llvm::PHINode *SkipRed) -> bool {
+    if (OuterL->isLoopInvariant(V))
+      return true;
+    if (auto *PN = llvm::dyn_cast<llvm::PHINode>(V))
+      return llvm::is_contained(LatchLiveOutPHIs, PN) || PN == IV;
+    auto *I = llvm::dyn_cast<llvm::Instruction>(V);
+    if (!I || V == SkipRed)
+      return false;
+    if (OuterHandled.count(I->getParent()))
+      return true;
+    if (I->getParent() != OuterLatch || !isVectorizablePureInst(*I))
+      return false;
+    for (llvm::Value *Op : I->operands())
+      if (!Self(Self, Op, SkipRed))
+        return false;
+    return true;
+  };
+  llvm::SmallVector<RedSpec, 4> Specs;
+  for (size_t RI = 0; RI < RedPHIs.size(); ++RI) {
+    RedSpec Spec;
+    Spec.PHI = RedPHIs[RI];
+    Spec.Init = RedInits[RI];
+    Spec.BackVal = RedNexts[RI];
+    auto *BackPHI = llvm::dyn_cast<llvm::PHINode>(Spec.BackVal);
+    if (!BackPHI) {
+      auto *BO = llvm::dyn_cast<llvm::BinaryOperator>(Spec.BackVal);
+      if (!BO || BO->getParent() != OuterLatch)
+        return false;
+      bool IsSub = BO->getOpcode() == llvm::Instruction::Sub;
+      if (!IsSub && BO->getOpcode() != llvm::Instruction::Add)
+        return false;
+      llvm::Value *DeltaV = nullptr;
+      if (BO->getOperand(0) == Spec.PHI)
+        DeltaV = BO->getOperand(1);
+      else if (!IsSub && BO->getOperand(1) == Spec.PHI)
+        DeltaV = BO->getOperand(0);
+      else
+        return false;
+      if (!isValidLatchDeltaExpr(isValidLatchDeltaExpr, DeltaV, Spec.PHI))
+        return false;
+      Spec.DirectLatchDelta = DeltaV;
+      Spec.DirectIsSub = IsSub;
+      Specs.push_back(std::move(Spec));
+      continue;
+    }
+    if (BackPHI->getParent() != OuterLatch)
+      return false;
+    int Sign = 0; // +1 non-neg, -1 non-pos
+    for (const ExitPath &EP : ExitPaths) {
+      llvm::Value *V = BackPHI->getIncomingValueForBlock(EP.LatchPred);
+      RedExitDelta D;
+      if (V == Spec.PHI) {
+        D.IsIdentity = true;
+        D.Delta = 0;
+      } else {
+        bool IsSub = false;
+        bool HasOv = false;
+        llvm::Value *Other = nullptr;
+        if (auto *EV = llvm::dyn_cast<llvm::ExtractValueInst>(V)) {
+          auto *II = llvm::dyn_cast<llvm::IntrinsicInst>(EV->getAggregateOperand());
+          if (!II || EV->getNumIndices() != 1 || EV->getIndices()[0] != 0 ||
+              !EP.TrapCall)
+            return false;
+          if (II->getIntrinsicID() == llvm::Intrinsic::sadd_with_overflow)
+            IsSub = false;
+          else if (II->getIntrinsicID() == llvm::Intrinsic::ssub_with_overflow)
+            IsSub = true;
+          else
+            return false;
+          HasOv = true;
+          if (II->getArgOperand(0) == Spec.PHI)
+            Other = II->getArgOperand(1);
+          else if (!IsSub && II->getArgOperand(1) == Spec.PHI)
+            Other = II->getArgOperand(0);
+          else
+            return false;
+        } else if (auto *BO = llvm::dyn_cast<llvm::BinaryOperator>(V)) {
+          if (BO->getOpcode() == llvm::Instruction::Add)
+            IsSub = false;
+          else if (BO->getOpcode() == llvm::Instruction::Sub)
+            IsSub = true;
+          else
+            return false;
+          if (BO->getOperand(0) == Spec.PHI)
+            Other = BO->getOperand(1);
+          else if (!IsSub && BO->getOperand(1) == Spec.PHI)
+            Other = BO->getOperand(0);
+          else
+            return false;
+        } else {
+          return false;
+        }
+        auto *CI = llvm::dyn_cast<llvm::ConstantInt>(Other);
+        if (!CI || CI->getBitWidth() > 64)
+          return false;
+        int64_t CVal = CI->getSExtValue();
+        if (CVal == INT64_MIN)
+          return false;
+        int64_t SignedD = IsSub ? -CVal : CVal;
+        D.IsIdentity = SignedD == 0;
+        D.Delta = SignedD;
+        D.HasOv = HasOv;
+        D.TrapCall = EP.TrapCall;
+        if (HasOv)
+          Spec.AnyOv = true;
+        if (SignedD > 0) {
+          if (Sign < 0)
+            return false;
+          Sign = 1;
+        } else if (SignedD < 0) {
+          if (Sign > 0)
+            return false;
+          Sign = -1;
+        }
+      }
+      Spec.PerExit.push_back(D);
+    }
+    Specs.push_back(std::move(Spec));
+  }
+
+  // Only RedNexts may be used outside OuterL.
+  for (llvm::BasicBlock *BB : OuterL->getBlocks()) {
+    for (llvm::Instruction &I : *BB) {
+      if (llvm::is_contained(RedNexts, static_cast<llvm::Value *>(&I)))
+        continue;
+      for (llvm::User *U : I.users()) {
+        auto *UI = llvm::dyn_cast<llvm::Instruction>(U);
+        if (!UI || !OuterL->contains(UI))
+          return false;
+      }
+    }
+  }
+
+  // Build the 4-wide lockstep loop!
+  llvm::Function *F = OuterHeader->getParent();
+  llvm::LLVMContext &Ctx = F->getContext();
+  llvm::Type *I1 = llvm::Type::getInt1Ty(Ctx);
+  llvm::Type *I64 = llvm::Type::getInt64Ty(Ctx);
+  auto *VecI1Ty = llvm::FixedVectorType::get(I1, VF);
+  auto VecTy = [&](llvm::Type *T) {
+    return llvm::FixedVectorType::get(T, VF);
+  };
+
+  auto *GuardBB = llvm::BasicBlock::Create(Ctx, "wvec.guard", F, OuterHeader);
+  auto *VecHeaderBB = llvm::BasicBlock::Create(Ctx, "wvec.hdr", F, OuterHeader);
+  auto *VecInnerBB = llvm::BasicBlock::Create(Ctx, "wvec.inner", F, OuterHeader);
+  auto *VecPostBB = llvm::BasicBlock::Create(Ctx, "wvec.post", F, OuterHeader);
+  auto *VecLatchBB = llvm::BasicBlock::Create(Ctx, "wvec.latch", F, OuterHeader);
+  auto *TailCheckBB =
+      llvm::BasicBlock::Create(Ctx, "wvec.tailchk", F, OuterHeader);
+  auto *AfterLoopBB =
+      llvm::BasicBlock::Create(Ctx, "wvec.after", F, OuterExit);
+
+  // GuardBB: compute TC64, VecIters = TC64 / 4, VecDoneElems = TC64 & ~3.
+  OuterPre->getTerminator()->replaceSuccessorWith(OuterHeader, GuardBB);
+  llvm::IRBuilder<> B(GuardBB);
+  B.CreateBr(VecHeaderBB);
+  const llvm::SCEV *BTC64 = SE.getZeroExtendExpr(OuterBTC, I64);
+  const llvm::SCEV *TC64Scev = SE.getAddExpr(BTC64, SE.getOne(I64));
+  llvm::SCEVExpander Exp(SE, "wvec.tc");
+  llvm::Value *TCVal =
+      Exp.expandCodeFor(TC64Scev, I64, GuardBB->getTerminator());
+  GuardBB->getTerminator()->eraseFromParent();
+  B.SetInsertPoint(GuardBB);
+  llvm::Value *VecIters = B.CreateLShr(TCVal, 2, "wvec.iters");
+  llvm::Value *VecDoneElems = B.CreateAnd(
+      TCVal, llvm::ConstantInt::get(I64, ~uint64_t(3)), "wvec.doneelems");
+  llvm::Value *HasVec =
+      B.CreateICmpUGT(TCVal, llvm::ConstantInt::get(I64, 3), "wvec.hasvec");
+  B.CreateCondBr(HasVec, VecHeaderBB, TailCheckBB);
+
+  // VecHeaderBB: setup IV_vec, reduction PHIs, and cloned SetupBBs.
+  B.SetInsertPoint(VecHeaderBB);
+  llvm::PHINode *VecK = B.CreatePHI(I64, 2, "wvec.k");
+  VecK->addIncoming(llvm::ConstantInt::get(I64, 0), GuardBB);
+  llvm::SmallVector<llvm::PHINode *, 4> VecRedPHIs;
+  for (const RedSpec &Sp : Specs) {
+    llvm::PHINode *RP =
+        B.CreatePHI(Sp.PHI->getType(), 2, Sp.PHI->getName() + ".wvec");
+    RP->addIncoming(Sp.Init, GuardBB);
+    VecRedPHIs.push_back(RP);
+  }
+
+  llvm::DenseMap<llvm::Value *, llvm::Value *> VecMap;
+  llvm::DenseMap<llvm::Value *, llvm::Value *> SplatCache;
+  auto GetVec = [&](llvm::Value *Scalar) -> llvm::Value * {
+    if (auto *V = VecMap.lookup(Scalar))
+      return V;
+    if (auto *V = SplatCache.lookup(Scalar))
+      return V;
+    llvm::Value *Sp = B.CreateVectorSplat(VF, Scalar, "wvec.splat");
+    SplatCache[Scalar] = Sp;
+    return Sp;
+  };
+  auto EmitVecInst = [&](llvm::Instruction &I, bool StripPoison) -> llvm::Value * {
+    if (auto *BO = llvm::dyn_cast<llvm::BinaryOperator>(&I)) {
+      llvm::Value *V = B.CreateBinOp(BO->getOpcode(), GetVec(BO->getOperand(0)),
+                                     GetVec(BO->getOperand(1)), I.getName());
+      if (auto *VI = llvm::dyn_cast<llvm::Instruction>(V)) {
+        if (!StripPoison)
+          VI->copyIRFlags(BO);
+      }
+      return V;
+    }
+    if (auto *UO = llvm::dyn_cast<llvm::UnaryOperator>(&I)) {
+      llvm::Value *V = B.CreateUnOp(UO->getOpcode(), GetVec(UO->getOperand(0)),
+                                    I.getName());
+      if (auto *VI = llvm::dyn_cast<llvm::Instruction>(V); VI && !StripPoison)
+        VI->copyIRFlags(UO);
+      return V;
+    }
+    if (auto *CI = llvm::dyn_cast<llvm::CastInst>(&I)) {
+      llvm::Value *V = B.CreateCast(CI->getOpcode(), GetVec(CI->getOperand(0)),
+                                    VecTy(CI->getType()), I.getName());
+      if (auto *VI = llvm::dyn_cast<llvm::Instruction>(V); VI && !StripPoison)
+        VI->copyIRFlags(CI);
+      return V;
+    }
+    if (auto *FC = llvm::dyn_cast<llvm::FCmpInst>(&I))
+      return B.CreateFCmp(FC->getPredicate(), GetVec(FC->getOperand(0)),
+                          GetVec(FC->getOperand(1)), I.getName());
+    if (auto *IC = llvm::dyn_cast<llvm::ICmpInst>(&I))
+      return B.CreateICmp(IC->getPredicate(), GetVec(IC->getOperand(0)),
+                          GetVec(IC->getOperand(1)), I.getName());
+    if (auto *SI = llvm::dyn_cast<llvm::SelectInst>(&I))
+      return B.CreateSelect(GetVec(SI->getCondition()),
+                            GetVec(SI->getTrueValue()),
+                            GetVec(SI->getFalseValue()), I.getName());
+    llvm_unreachable("unexpected instruction");
+  };
+
+  llvm::Value *KShift = B.CreateShl(VecK, 2, "wvec.k4");
+  llvm::Value *KOff = B.CreateZExtOrTrunc(KShift, IV->getType(), "wvec.ivoff");
+  llvm::Value *BaseIV = B.CreateAdd(IVInit, KOff, "wvec.ivbase");
+  llvm::Value *SplatBaseIV = B.CreateVectorSplat(VF, BaseIV, "wvec.ivsplat");
+  llvm::SmallVector<llvm::Constant *, 4> LaneIdxs;
+  for (unsigned J = 0; J < VF; ++J)
+    LaneIdxs.push_back(llvm::ConstantInt::get(IV->getType(), J));
+  llvm::Value *VecIV = B.CreateAdd(
+      SplatBaseIV, llvm::ConstantVector::get(LaneIdxs), "wvec.iv");
+  VecMap[IV] = VecIV;
+
+  for (llvm::BasicBlock *SBB : SetupBBs)
+    for (llvm::Instruction &I : *SBB)
+      if (!llvm::isa<llvm::PHINode>(&I) && !I.isTerminator())
+        VecMap[&I] = EmitVecInst(I, /*StripPoison=*/false);
+  B.CreateBr(VecInnerBB);
+
+  // VecInnerBB: lockstep simulation across InnerSteps.
+  B.SetInsertPoint(VecInnerBB);
+  llvm::PHINode *ActivePHI = B.CreatePHI(VecI1Ty, 2, "wvec.act");
+  ActivePHI->addIncoming(llvm::ConstantVector::getAllOnesValue(VecI1Ty),
+                         VecHeaderBB);
+  llvm::SmallVector<llvm::PHINode *, 4> TookExitPHIs(InnerSteps.size(), nullptr);
+  for (unsigned SI = 0; SI < InnerSteps.size(); ++SI) {
+    if (!InnerSteps[SI].ExitBB)
+      continue;
+    TookExitPHIs[SI] = B.CreatePHI(VecI1Ty, 2, "wvec.took");
+    TookExitPHIs[SI]->addIncoming(llvm::Constant::getNullValue(VecI1Ty),
+                                  VecHeaderBB);
+  }
+  llvm::SmallVector<std::pair<llvm::PHINode *, llvm::PHINode *>, 4> InnerPHIMap;
+  for (llvm::PHINode &PN : InnerHeader->phis()) {
+    llvm::PHINode *VP =
+        B.CreatePHI(VecTy(PN.getType()), 2, PN.getName() + ".wvec");
+    llvm::Value *InitScalar = PN.getIncomingValueForBlock(SetupBBs.back());
+    llvm::Value *InitV = VecMap.lookup(InitScalar);
+    if (!InitV)
+      InitV = llvm::IRBuilder<>(VecHeaderBB->getTerminator())
+                  .CreateVectorSplat(VF, InitScalar, "wvec.pin");
+    VP->addIncoming(InitV, VecHeaderBB);
+    VecMap[&PN] = VP;
+    InnerPHIMap.push_back({&PN, VP});
+  }
+
+  llvm::SmallVector<llvm::PHINode *, 4> LiveOutCapPHIs;
+  llvm::SmallVector<llvm::Value *, 4> CurCaps;
+  for (llvm::PHINode *LO : LatchLiveOutPHIs) {
+    llvm::Type *VT = VecTy(LO->getType());
+    llvm::PHINode *CP = B.CreatePHI(VT, 2, LO->getName() + ".cap");
+    CP->addIncoming(llvm::Constant::getNullValue(VT), VecHeaderBB);
+    LiveOutCapPHIs.push_back(CP);
+    CurCaps.push_back(CP);
+  }
+
+  llvm::Value *CurActive = ActivePHI;
+  llvm::SmallVector<llvm::Value *, 4> TookExitNexts(InnerSteps.size(), nullptr);
+  SplatCache.clear();
+  for (unsigned SI = 0; SI < InnerSteps.size(); ++SI) {
+    const InnerStep &St = InnerSteps[SI];
+    for (llvm::Instruction &I : *St.BB)
+      if (!llvm::isa<llvm::PHINode>(&I) && !I.isTerminator())
+        VecMap[&I] = EmitVecInst(I, /*StripPoison=*/true);
+    if (St.ExitBB) {
+      llvm::Value *CondVec = GetVec(St.Cond);
+      llvm::Value *StayVec =
+          St.StayOnTrue ? CondVec : B.CreateNot(CondVec, "wvec.stay");
+      llvm::Value *LeaveVec =
+          St.StayOnTrue ? B.CreateNot(CondVec, "wvec.leave") : CondVec;
+      llvm::Value *ExitedHere = B.CreateAnd(CurActive, LeaveVec, "wvec.ex");
+      llvm::Value *TookNext =
+          B.CreateOr(TookExitPHIs[SI], ExitedHere, "wvec.tookn");
+      TookExitPHIs[SI]->addIncoming(TookNext, VecInnerBB);
+      TookExitNexts[SI] = TookNext;
+      if (!LatchLiveOutPHIs.empty()) {
+        unsigned EI = StepToExitPath[SI];
+        llvm::BasicBlock *LP = ExitPaths[EI].LatchPred;
+        for (size_t LI = 0; LI < LatchLiveOutPHIs.size(); ++LI) {
+          llvm::Value *InV = LatchLiveOutPHIs[LI]->getIncomingValueForBlock(LP);
+          CurCaps[LI] = B.CreateSelect(ExitedHere, GetVec(InV), CurCaps[LI],
+                                       "wvec.capn");
+        }
+      }
+      CurActive = B.CreateAnd(CurActive, StayVec, "wvec.actn");
+    }
+  }
+  ActivePHI->addIncoming(CurActive, VecInnerBB);
+  for (size_t LI = 0; LI < LatchLiveOutPHIs.size(); ++LI)
+    LiveOutCapPHIs[LI]->addIncoming(CurCaps[LI], VecInnerBB);
+  for (auto &[OrigP, VP] : InnerPHIMap) {
+    llvm::Value *BackScalar = OrigP->getIncomingValueForBlock(InnerLatch);
+    VP->addIncoming(GetVec(BackScalar), VecInnerBB);
+  }
+  llvm::Value *AnyActive = B.CreateOrReduce(CurActive);
+  B.CreateCondBr(AnyActive, VecInnerBB, VecPostBB);
+
+  // VecPostBB -> VecLatchBB: reduce exit deltas per outer accumulator.
+  B.SetInsertPoint(VecPostBB);
+  llvm::BasicBlock *CurPostBB = VecPostBB;
+  for (size_t LI = 0; LI < LatchLiveOutPHIs.size(); ++LI)
+    VecMap[LatchLiveOutPHIs[LI]] = CurCaps[LI];
+  auto BuildLatchVec = [&](auto &Self, llvm::Value *V) -> llvm::Value * {
+    if (auto *Existing = VecMap.lookup(V))
+      return Existing;
+    if (auto *I = llvm::dyn_cast<llvm::Instruction>(V);
+        I && I->getParent() == OuterLatch) {
+      for (llvm::Value *Op : I->operands())
+        Self(Self, Op);
+      llvm::Value *Res = EmitVecInst(*I, /*StripPoison=*/false);
+      VecMap[V] = Res;
+      return Res;
+    }
+    return GetVec(V);
+  };
+  llvm::SmallVector<llvm::Value *, 4> VecRedNexts;
+  llvm::SmallDenseMap<llvm::CallInst *, llvm::BasicBlock *, 2> TrapMap;
+
+  for (size_t RI = 0; RI < Specs.size(); ++RI) {
+    const RedSpec &Sp = Specs[RI];
+    llvm::Value *RedCur = VecRedPHIs[RI];
+    llvm::Value *RedNext = nullptr;
+    if (Sp.DirectLatchDelta) {
+      llvm::Value *VecD = BuildLatchVec(BuildLatchVec, Sp.DirectLatchDelta);
+      if (Sp.DirectIsSub)
+        VecD = B.CreateNeg(VecD, "wvec.negd");
+      llvm::Value *BatchDelta = B.CreateAddReduce(VecD);
+      RedNext = B.CreateAdd(RedCur, BatchDelta, "wvec.redn");
+      VecRedNexts.push_back(RedNext);
+      continue;
+    }
+    llvm::Type *RTy = Sp.PHI->getType();
+    llvm::Type *VecRTy = VecTy(RTy);
+    llvm::Value *LaneDelta = llvm::Constant::getNullValue(VecRTy);
+    llvm::CallInst *FirstOvTrap = nullptr;
+    for (size_t EI = 0; EI < ExitPaths.size(); ++EI) {
+      const RedExitDelta &D = Sp.PerExit[EI];
+      if (D.IsIdentity)
+        continue;
+      if (D.HasOv && !FirstOvTrap)
+        FirstOvTrap = D.TrapCall;
+      llvm::Value *Mask = TookExitNexts[ExitPaths[EI].StepIdx];
+      llvm::Value *DVec =
+          B.CreateVectorSplat(VF, llvm::ConstantInt::get(RTy, D.Delta, true));
+      LaneDelta = B.CreateSelect(Mask, DVec, LaneDelta, "wvec.ld");
+    }
+    llvm::Value *BatchDelta = B.CreateAddReduce(LaneDelta);
+    if (Sp.AnyOv && FirstOvTrap) {
+      llvm::BasicBlock *TrapBB = TrapMap.lookup(FirstOvTrap);
+      if (!TrapBB) {
+        TrapBB = llvm::BasicBlock::Create(Ctx, "wvec.trap", F, VecLatchBB);
+        llvm::IRBuilder<> TB(TrapBB);
+        TB.Insert(FirstOvTrap->clone());
+        TB.CreateUnreachable();
+        TrapMap[FirstOvTrap] = TrapBB;
+      }
+      llvm::BasicBlock *OkBB =
+          llvm::BasicBlock::Create(Ctx, "wvec.ok", F, VecLatchBB);
+      llvm::Value *Ov = B.CreateBinaryIntrinsic(
+          llvm::Intrinsic::sadd_with_overflow, RedCur, BatchDelta, nullptr,
+          "wvec.ov");
+      llvm::Value *OvFlag = B.CreateExtractValue(Ov, 1, "wvec.ovf");
+      RedNext = B.CreateExtractValue(Ov, 0, "wvec.redn");
+      B.CreateCondBr(OvFlag, TrapBB, OkBB);
+      CurPostBB = OkBB;
+      B.SetInsertPoint(CurPostBB);
+    } else {
+      RedNext = B.CreateAdd(RedCur, BatchDelta, "wvec.redn");
+    }
+    VecRedNexts.push_back(RedNext);
+  }
+  B.CreateBr(VecLatchBB);
+
+  B.SetInsertPoint(VecLatchBB);
+  llvm::Value *VecKNext =
+      B.CreateAdd(VecK, llvm::ConstantInt::get(I64, 1), "wvec.kn");
+  VecK->addIncoming(VecKNext, VecLatchBB);
+  for (size_t RI = 0; RI < Specs.size(); ++RI)
+    VecRedPHIs[RI]->addIncoming(VecRedNexts[RI], VecLatchBB);
+  llvm::Value *VecDone = B.CreateICmpEQ(VecKNext, VecIters, "wvec.done");
+  B.CreateCondBr(VecDone, TailCheckBB, VecHeaderBB);
+
+  // TailCheckBB -> OuterHeader (remainder 1..3) or AfterLoopBB (remainder 0).
+  B.SetInsertPoint(TailCheckBB);
+  llvm::Value *IVTailOff =
+      B.CreateZExtOrTrunc(VecDoneElems, IV->getType(), "wvec.tailoff");
+  llvm::Value *IVTailStart = B.CreateAdd(IVInit, IVTailOff, "wvec.tailiv");
+  llvm::SmallVector<llvm::PHINode *, 4> RedTailStarts;
+  for (size_t RI = 0; RI < Specs.size(); ++RI) {
+    llvm::PHINode *RTS = B.CreatePHI(Specs[RI].PHI->getType(), 2,
+                                     Specs[RI].PHI->getName() + ".tail");
+    RTS->addIncoming(Specs[RI].Init, GuardBB);
+    RTS->addIncoming(VecRedNexts[RI], VecLatchBB);
+    RedTailStarts.push_back(RTS);
+  }
+  llvm::Value *HasTail = B.CreateICmpNE(VecDoneElems, TCVal, "wvec.hastail");
+  B.CreateCondBr(HasTail, OuterHeader, AfterLoopBB);
+
+  // Rewire OuterHeader preheader incoming edge -> TailCheckBB.
+  IV->replaceIncomingBlockWith(OuterPre, TailCheckBB);
+  IV->setIncomingValueForBlock(TailCheckBB, IVTailStart);
+  for (size_t RI = 0; RI < Specs.size(); ++RI) {
+    Specs[RI].PHI->replaceIncomingBlockWith(OuterPre, TailCheckBB);
+    Specs[RI].PHI->setIncomingValueForBlock(TailCheckBB, RedTailStarts[RI]);
+  }
+
+  // Rewire OuterLatch -> AfterLoopBB -> OuterExit and merge FinalRed.
+  OuterLatch->getTerminator()->replaceSuccessorWith(OuterExit, AfterLoopBB);
+  B.SetInsertPoint(AfterLoopBB);
+  llvm::SmallVector<llvm::PHINode *, 4> FinalReds;
+  for (size_t RI = 0; RI < Specs.size(); ++RI) {
+    llvm::PHINode *FR = B.CreatePHI(Specs[RI].PHI->getType(), 2,
+                                    Specs[RI].PHI->getName() + ".final");
+    FR->addIncoming(RedTailStarts[RI], TailCheckBB);
+    FR->addIncoming(Specs[RI].BackVal, OuterLatch);
+    FinalReds.push_back(FR);
+  }
+  B.CreateBr(OuterExit);
+
+  for (llvm::PHINode &PN : OuterExit->phis())
+    PN.replaceIncomingBlockWith(OuterLatch, AfterLoopBB);
+
+  for (size_t RI = 0; RI < Specs.size(); ++RI) {
+    llvm::Value *OldExt = Specs[RI].BackVal;
+    llvm::PHINode *NewExt = FinalReds[RI];
+    llvm::SmallVector<llvm::Use *, 4> ExtUses;
+    for (llvm::Use &U : OldExt->uses()) {
+      auto *UI = llvm::dyn_cast<llvm::Instruction>(U.getUser());
+      if (UI && !OuterL->contains(UI) && UI != NewExt)
+        ExtUses.push_back(&U);
+    }
+    for (llvm::Use *U : ExtUses)
+      U->set(NewExt);
+  }
+  return true;
+}
+
+static bool vectorizeCountedLoopsWithWhile(llvm::Module &M,
+                                           llvm::TargetMachine &TM) {
+  bool ChangedAny = false;
+  for (llvm::Function &F : M) {
+    if (F.isDeclaration())
+      continue;
+    llvm::SmallPtrSet<llvm::BasicBlock *, 8> VectorizedHeaders;
+    bool ChangedFn;
+    do {
+      ChangedFn = false;
+      llvm::LoopAnalysisManager LAM;
+      llvm::FunctionAnalysisManager FAM;
+      llvm::CGSCCAnalysisManager CGAM;
+      llvm::ModuleAnalysisManager MAM;
+      llvm::PassBuilder PB(&TM);
+      PB.registerModuleAnalyses(MAM);
+      PB.registerCGSCCAnalyses(CGAM);
+      PB.registerFunctionAnalyses(FAM);
+      PB.registerLoopAnalyses(LAM);
+      PB.crossRegisterProxies(LAM, FAM, CGAM, MAM);
+      llvm::LoopSimplifyPass().run(F, FAM);
+      auto &LI = FAM.getResult<llvm::LoopAnalysis>(F);
+      auto &SE = FAM.getResult<llvm::ScalarEvolutionAnalysis>(F);
+
+      llvm::SmallVector<llvm::Loop *, 8> Worklist;
+      for (llvm::Loop *L : LI)
+        Worklist.push_back(L);
+      while (!Worklist.empty()) {
+        llvm::Loop *L = Worklist.pop_back_val();
+        for (llvm::Loop *Sub : *L)
+          Worklist.push_back(Sub);
+        llvm::BasicBlock *Hdr = L->getHeader();
+        if (VectorizedHeaders.count(Hdr))
+          continue;
+        if (tryVectorizeLoopWithWhile(L, LI, SE)) {
+          VectorizedHeaders.insert(Hdr);
+          ChangedFn = true;
+          ChangedAny = true;
+          break;
+        }
+      }
+    } while (ChangedFn);
+  }
+  return ChangedAny;
+}
+
 void p3::optimizeModule(llvm::Module &M, llvm::TargetMachine &TM,
                          unsigned OptLevel, unsigned SizeLevel,
                          const std::string &ProfileGen,
@@ -560,6 +1493,8 @@ void p3::optimizeModule(llvm::Module &M, llvm::TargetMachine &TM,
     if (promoteMainGlobals(M))
       RunPipeline(false);
     if (foldVectorRecurrences(M, TM))
+      RunPipeline(false);
+    if (vectorizeCountedLoopsWithWhile(M, TM))
       RunPipeline(false);
   }
 }
