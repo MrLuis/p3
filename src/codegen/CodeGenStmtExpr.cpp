@@ -1333,9 +1333,14 @@ void CodeGenModule::visitAssignStmt(AssignStmt *S){
   VarDecl *RangeVar = PinAnalysis::plainAssignTarget(Target);
   if (RangeVar && !RangeLocals.count(RangeVar))
     RangeVar = nullptr;
+  VarDecl *DynTarget = PinAnalysis::plainAssignTarget(Target);
+  if (DynTarget && !TrackableDynVars.count(DynTarget))
+    DynTarget = nullptr;
   auto ForgetRange = llvm::make_scope_exit([&] {
     if (RangeVar)
       setVarRange(RangeVar, {});
+    if (DynTarget)
+      invalidateDynBase(DynTarget);
   });
   if (PropertyDecl *P = assignedProperty(Target)) {
     emitPropertyWrite(P, Target, Value);
@@ -1449,6 +1454,20 @@ void CodeGenModule::visitAssignStmt(AssignStmt *S){
     if (auto *N = llvm::dyn_cast<NameRefExpr>(Target); N && !N->getWith())
       TV = llvm::dyn_cast_or_null<VarDecl>(N->getDecl());
     emitDynAssign(nullptr, Target, TV, Value, TailMove);
+    if (DynTarget) {
+      Expr *VE = skipParens(Value);
+      invalidateDynBase(DynTarget);
+      if (llvm::isa<NilExpr>(VE)) {
+        DynConstLen[DynTarget] = 0;
+      } else if (auto *SC = llvm::dyn_cast<SetCtorExpr>(VE)) {
+        DynConstLen[DynTarget] = static_cast<int64_t>(SC->getElements().size());
+      } else if (VarDecl *SrcD = PinAnalysis::plainAssignTarget(VE)) {
+        auto It = DynConstLen.find(SrcD);
+        if (It != DynConstLen.end())
+          DynConstLen[DynTarget] = It->second;
+      }
+      DynTarget = nullptr;
+    }
     return;
   }
   if (TT->isStructured()) {
@@ -1477,11 +1496,34 @@ void CodeGenModule::visitAssignStmt(AssignStmt *S){
     return;
   }
   VarDecl *NewLenBase = RangeVar ? matchLengthExpr(Value) : nullptr;
+  llvm::SmallVector<LengthBound, 4> InheritedBounds;
+  if (RangeVar && !NewLenBase) {
+    VarDecl *SrcV = nullptr;
+    int64_t Off = 0;
+    ValueRange StoredR = rangeOfValue(V);
+    ValueRange TyR;
+    if (StoredR.Known && RangeVar->getType() &&
+        RangeVar->getType()->isIntegerLike() &&
+        isSignedOrdinal(RangeVar->getType()) &&
+        signedRange(intBits(RangeVar->getType()), TyR) &&
+        StoredR.Lo >= TyR.Lo && StoredR.Hi <= TyR.Hi &&
+        matchVarPlusConst(Value, SrcV, Off) && SrcV != RangeVar) {
+      for (const LengthBound &B : ActiveLengthBounds) {
+        int64_t NewSlack = 0;
+        if (B.Idx == SrcV &&
+            !__builtin_sub_overflow(B.Slack, Off, &NewSlack) &&
+            NewSlack >= 0)
+          InheritedBounds.push_back({RangeVar, B.Base, B.BaseIdx, NewSlack});
+      }
+    }
+  }
   storeValue(emitAddress(Target), V, TT, !isAliasedExpr(Target));
   if (RangeVar) {
     setVarRange(RangeVar, rangeOfValue(V));
     if (NewLenBase)
       VarLengthOf[RangeVar] = NewLenBase;
+    for (const LengthBound &B : InheritedBounds)
+      ActiveLengthBounds.push_back(B);
     RangeVar = nullptr;
   }
 }
@@ -1769,6 +1811,18 @@ void CodeGenModule::visitProcCallStmt(ProcCallStmt *S){
       for (Expr *N : A.drop_front())
         Ns.push_back(toI64(visitExpr(N), N->getType()));
       emitDynSetLength(Addr, DA, Ns);
+      if (VarDecl *DynV = PinAnalysis::plainAssignTarget(A[0]);
+          DynV && TrackableDynVars.count(DynV)) {
+        invalidateDynBase(DynV);
+        int64_t C = 0;
+        if (A.size() == 2 && constInt(A[1], C) && C >= 0)
+          DynConstLen[DynV] = C;
+        for (const DynGrowRule &G : ActiveDynGrows)
+          if (G.ResizeStmt == S && G.DynVar == DynV) {
+            ActiveLengthBounds.push_back({G.ForVar, DynV, nullptr, 1});
+            break;
+          }
+      }
       return;
     }
     llvm::Value *N = emitI32(A[1]);
@@ -1986,6 +2040,19 @@ void CodeGenModule::visitIfStmt(IfStmt *S){
     if (TrackRanges)
       restoreRangeState(Saved);
   }
+  if (!TrackableDynVars.empty()) {
+    llvm::SmallVector<VarDecl *, 4> Mut;
+    for (VarDecl *D : TrackableDynVars)
+      if (dynKeyMutatedIn(S, D, nullptr))
+        Mut.push_back(D);
+    for (VarDecl *D : Mut)
+      invalidateDynBase(D);
+  }
+  if (!ActiveLengthBounds.empty()) {
+    llvm::erase_if(ActiveLengthBounds, [&](const LengthBound &B) {
+      return B.BaseIdx && dynKeyMutatedIn(S, B.Base, B.BaseIdx);
+    });
+  }
   B.SetInsertPoint(EndBB);
 }
 
@@ -1996,14 +2063,31 @@ void CodeGenModule::visitWhileStmt(WhileStmt *S){
     ValueRange Range;
     bool HadOld = false;
     ValueRange OldLoop;
+    bool PreserveBounds = false;
   };
   llvm::SmallVector<MonotonicVar, 2> Monotonic;
+  llvm::SmallVector<LengthBound, 4> PreservedBounds;
   VarSet Written;
   llvm::SmallVector<LengthBound, 4> AfterSetupBounds;
   llvm::DenseMap<VarDecl *, ValueRange> PreCondRanges;
+  if (!TrackableDynVars.empty()) {
+    llvm::SmallVector<VarDecl *, 4> Mut;
+    for (VarDecl *D : TrackableDynVars)
+      if (dynKeyMutatedIn(S, D, nullptr))
+        Mut.push_back(D);
+    for (VarDecl *D : Mut)
+      invalidateDynBase(D);
+  }
+  if (!ActiveLengthBounds.empty()) {
+    llvm::erase_if(ActiveLengthBounds, [&](const LengthBound &B) {
+      return B.BaseIdx && dynKeyMutatedIn(S, B.Base, B.BaseIdx);
+    });
+  }
   bool TrackRanges = !RangeLocals.empty();
   if (TrackRanges) {
     Written = rangeLocalsWrittenBy(S);
+    llvm::SmallVector<ConstBound, 4> CondCBs;
+    collectConstBounds(S->getCond(), CondCBs);
     for (VarDecl *A : Written) {
       auto It = VarRanges.find(A);
       ValueRange TR;
@@ -2013,16 +2097,40 @@ void CodeGenModule::visitWhileStmt(WhileStmt *S){
         continue;
       int64_t ModM = 0;
       ValueRange LoopR;
+      bool Preserve = false;
       if (monotonicNonNegSteps(S->getBody(), A))
         LoopR = {true, It->second.Lo, TR.Hi};
-      else if (It->second.Lo >= 0 &&
-               nonNegModLoop(S->getBody(), A, It->second.Hi, &Written, ModM))
+      else if (monotonicNonPosSteps(S->getBody(), A)) {
+        int64_t Drop = 0;
+        int64_t SafeLo = TR.Lo;
+        bool HasCondLo = false;
+        int64_t CondLo = INT64_MIN;
+        for (const ConstBound &CB : CondCBs)
+          if (CB.V == A && CB.HasLo && (!HasCondLo || CB.Lo > CondLo)) {
+            HasCondLo = true;
+            CondLo = CB.Lo;
+          }
+        int64_t Lower = 0;
+        if (HasCondLo && maxVarDrop(S->getBody(), A, Drop) &&
+            !__builtin_sub_overflow(CondLo, Drop, &Lower) &&
+            It->second.Lo >= Lower && Lower >= TR.Lo)
+          SafeLo = Lower;
+        LoopR = {true, SafeLo, It->second.Hi};
+        Preserve = true;
+      } else if (It->second.Lo >= 0 &&
+                 nonNegModLoop(S->getBody(), A, It->second.Hi, &Written, ModM))
         LoopR = {true, 0, ModM};
       else
         continue;
       MonotonicVar MV;
       MV.V = A;
       MV.Range = LoopR;
+      MV.PreserveBounds = Preserve;
+      if (Preserve) {
+        for (const LengthBound &B : ActiveLengthBounds)
+          if (B.Idx == A && !dynKeyMutatedIn(S, B.Base, B.BaseIdx))
+            PreservedBounds.push_back(B);
+      }
       auto LIt = LoopRanges.find(A);
       if (LIt != LoopRanges.end()) {
         MV.HadOld = true;
@@ -2035,6 +2143,8 @@ void CodeGenModule::visitWhileStmt(WhileStmt *S){
       LoopRanges[MV.V] = MV.Range;
       setVarRange(MV.V, MV.Range);
     }
+    for (const LengthBound &B : PreservedBounds)
+      ActiveLengthBounds.push_back(B);
     AfterSetupBounds = ActiveLengthBounds;
     PreCondRanges = VarRanges;
   }
@@ -2073,12 +2183,27 @@ void CodeGenModule::visitWhileStmt(WhileStmt *S){
     forgetRanges(Written);
     for (const MonotonicVar &MV : Monotonic)
       setVarRange(MV.V, MV.Range);
+    for (const LengthBound &B : PreservedBounds)
+      ActiveLengthBounds.push_back(B);
   }
   B.SetInsertPoint(EndBB);
 }
 
 
 void CodeGenModule::visitRepeatStmt(RepeatStmt *S){
+  if (!TrackableDynVars.empty()) {
+    llvm::SmallVector<VarDecl *, 4> Mut;
+    for (VarDecl *D : TrackableDynVars)
+      if (dynKeyMutatedIn(S, D, nullptr))
+        Mut.push_back(D);
+    for (VarDecl *D : Mut)
+      invalidateDynBase(D);
+  }
+  if (!ActiveLengthBounds.empty()) {
+    llvm::erase_if(ActiveLengthBounds, [&](const LengthBound &B) {
+      return B.BaseIdx && dynKeyMutatedIn(S, B.Base, B.BaseIdx);
+    });
+  }
   auto *BodyBB = newBlock("repeat.body");
   auto *CondBB = newBlock("repeat.cond");
   auto *EndBB = newBlock("repeat.end");
@@ -2225,11 +2350,27 @@ void CodeGenModule::visitForStmt(ForStmt *S){
   bool HadRange = OldRange != VarRanges.end();
   ValueRange Saved = HadRange ? OldRange->second : ValueRange{};
   ValueRange StartRange = rangeOfValue(Start), FinalRange = rangeOfValue(Final);
-  if (isSignedOrdinal(VarTy) && StartRange.Known && FinalRange.Known)
-    VarRanges[V] = {true, std::min(StartRange.Lo, FinalRange.Lo),
-                    std::max(StartRange.Hi, FinalRange.Hi)};
-  else
+  ValueRange ForTR;
+  if (isSignedOrdinal(VarTy) && signedRange(intBits(VarTy), ForTR) &&
+      (StartRange.Known || FinalRange.Known)) {
+    // Only entered when Start <= Final (to) or Start >= Final (downto), so
+    // inside the body the loop variable stays between the lower bound of the
+    // smaller endpoint and the upper bound of the larger endpoint.
+    int64_t Lo = Down ? (FinalRange.Known ? std::max(ForTR.Lo, FinalRange.Lo)
+                                          : ForTR.Lo)
+                      : (StartRange.Known ? std::max(ForTR.Lo, StartRange.Lo)
+                                          : ForTR.Lo);
+    int64_t Hi = Down ? (StartRange.Known ? std::min(ForTR.Hi, StartRange.Hi)
+                                          : ForTR.Hi)
+                      : (FinalRange.Known ? std::min(ForTR.Hi, FinalRange.Hi)
+                                          : ForTR.Hi);
+    if (Lo <= Hi)
+      VarRanges[V] = {true, Lo, Hi};
+    else
+      VarRanges.erase(V);
+  } else {
     VarRanges.erase(V);
+  }
   // At most Trips iterations: an accumulator stays within its start
   // range plus Trips times the most one iteration adds (or subtracts),
   // at every point of the loop and after it. Only a bound that fits its
@@ -2284,12 +2425,65 @@ void CodeGenModule::visitForStmt(ForStmt *S){
     LoopRanges[A] = R;
     VarRanges[A] = R;
   }
+  VarDecl *GrowArr = nullptr;
+  const Stmt *GrowStmt = nullptr;
+  bool HaveGrow = false;
+  if (Signed && !Down && StartRange.Known && StartRange.Lo == 0 &&
+      StartRange.Hi == 0) {
+    VarSet DirectW;
+    PinAnalysis(CurRoutine).directWrites(S->getBody(), DirectW);
+    if (!DirectW.count(V))
+      HaveGrow = findLoopAppendSetLength(S->getBody(), GrowArr, GrowStmt);
+  }
+  if (!TrackableDynVars.empty()) {
+    llvm::SmallVector<VarDecl *, 4> Mut;
+    for (VarDecl *D : TrackableDynVars)
+      if (D != GrowArr && dynKeyMutatedIn(S, D, nullptr))
+        Mut.push_back(D);
+    if (HaveGrow && GrowArr)
+      Mut.push_back(GrowArr);
+    for (VarDecl *D : Mut)
+      invalidateDynBase(D);
+  }
+  if (!ActiveLengthBounds.empty()) {
+    llvm::erase_if(ActiveLengthBounds, [&](const LengthBound &B) {
+      return B.BaseIdx && dynKeyMutatedIn(S, B.Base, B.BaseIdx);
+    });
+  }
+  bool PushedForBound = false;
+  LengthBound ForBound;
+  if (Signed && !Down && StartRange.Known && StartRange.Lo >= 0) {
+    VarSet DirectW;
+    PinAnalysis(CurRoutine).directWrites(S->getBody(), DirectW);
+    VarDecl *HBase = nullptr, *HBaseIdx = nullptr;
+    int64_t HExtra = 0;
+    if (!DirectW.count(V) &&
+        matchHighOrLenExpr(S->getFinal(), HBase, HBaseIdx, HExtra) &&
+        HExtra >= 1 && !dynKeyMutatedIn(S->getBody(), HBase, HBaseIdx)) {
+      ForBound = {V, HBase, HBaseIdx, HExtra};
+      ActiveLengthBounds.push_back(ForBound);
+      PushedForBound = true;
+    }
+  }
+  if (HaveGrow)
+    ActiveDynGrows.push_back({GrowStmt, V, GrowArr});
   Loops.push_back({LatchBB, EndBB, Cleanups.size()});
   visitStmt(S->getBody());
+  if (HaveGrow) {
+    ActiveDynGrows.pop_back();
+    invalidateDynBase(GrowArr);
+  }
+  if (PushedForBound) {
+    llvm::erase_if(ActiveLengthBounds, [&](const LengthBound &B) {
+      return B.Idx == ForBound.Idx && B.Base == ForBound.Base &&
+             B.BaseIdx == ForBound.BaseIdx && B.Slack == ForBound.Slack;
+    });
+  }
   if (Hoisted)
     for (unsigned K = 0; K < Hoists.size(); ++K)
       CheckedBases.pop_back(); // (the loop's own, innermost last)
   Loops.pop_back();
+  invalidateRangeLocalLength(V);
   if (HadRange)
     VarRanges[V] = Saved;
   else

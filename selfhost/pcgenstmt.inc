@@ -970,6 +970,9 @@ function emitResultInPlace(target, value: PNode; tt: PType): boolean; forward;
 { Ranges of local variables (optimization3 item 4); after the pin
   analysis. }
 function plainAssignTarget(e: PNode): PDecl; forward;
+function constIntOf(e: PNode; var value: int64): boolean; forward;
+procedure paStmt(s: PNode; var used, written: TPtrList;
+                 collectUsed, collectWritten: boolean); forward;
 procedure setVarRange(v: PDecl; known: boolean; lo, hi: int64); forward;
 procedure rangeLocalsWrittenBy(s: PNode; var outl: TPtrList); forward;
 procedure forgetRanges(const l: TPtrList); forward;
@@ -977,8 +980,18 @@ function accumulatorSteps(s: PNode; v: PDecl; var dLo, dHi: int64): boolean; for
 procedure initRangeLocals(r: PDecl); forward;
 procedure endRangeLocals; forward;
 function matchLengthExpr(e: PNode): PDecl; forward;
+function matchVarPlusConst(e: PNode; var v: PDecl; var off: int64): boolean; forward;
 procedure invalidateRangeLocalLength(v: PDecl); forward;
+procedure invalidateDynBase(base: PDecl); forward;
+function dynKeyMutatedIn(s: PNode; base, baseIdx: PDecl;
+                         skipStmt: PNode): boolean; forward;
+function matchHighOrLenExpr(e: PNode; var base, baseIdx: PDecl;
+                            var extraSlack: int64): boolean; forward;
 function monotonicNonNegSteps(s: PNode; v: PDecl): boolean; forward;
+function monotonicNonPosSteps(s: PNode; v: PDecl): boolean; forward;
+function maxVarDrop(s: PNode; v: PDecl; var drop: int64): boolean; forward;
+function findLoopAppendSetLength(body: PNode; var outArr: PDecl;
+                                 var resizeStmt: PNode): boolean; forward;
 function nonNegModLoop(s: PNode; v: PDecl; initHi: int64;
                        const written: TPtrList; var outM: int64): boolean; forward;
 
@@ -1178,20 +1191,71 @@ end;
   range from now on (optimization3 item 4), else none. }
 procedure visitAssign(s: PNode);
 var
-  rangeVar, newLenBase: PDecl;
+  rangeVar, dynTarget, newLenBase, srcV, srcD: PDecl;
   stored: boolean;
+  ve: PNode;
+  off, newSlack: int64;
+  inheritedBounds: TBoundArray;
+  inhCount, k: longint;
+  tyLo, tyHi: int64;
 begin
   rangeVar := plainAssignTarget(s^.target);
   if (rangeVar <> nil) and not rangeVar^.cgRangeLocal then
     rangeVar := nil;
+  dynTarget := plainAssignTarget(s^.target);
+  if (dynTarget <> nil) and not dynTarget^.cgDynTrack then
+    dynTarget := nil;
   if rangeVar <> nil then
     newLenBase := matchLengthExpr(s^.value)
   else
     newLenBase := nil;
+  inhCount := 0;
+  if (rangeVar <> nil) and (newLenBase = nil) and (rangeVar^.varType <> nil) and
+     isSignedOrdinal(rangeVar^.varType) and
+     signedTypeRange(regType(rangeVar^.varType)^.bits, tyLo, tyHi) then
+  begin
+    if matchVarPlusConst(s^.value, srcV, off) and (srcV <> rangeVar) then
+      for k := 0 to activeBoundCount - 1 do
+        if (activeBounds[k].idx = srcV) and
+           not subOverflows(activeBounds[k].slack, off, newSlack) and
+           (newSlack >= 0) and (inhCount < 64) then
+        begin
+          inheritedBounds[inhCount].idx := rangeVar;
+          inheritedBounds[inhCount].base := activeBounds[k].base;
+          inheritedBounds[inhCount].baseIdx := activeBounds[k].baseIdx;
+          inheritedBounds[inhCount].slack := newSlack;
+          inhCount := inhCount + 1;
+        end;
+  end;
   assignStoredSet := false;
   visitAssignInner(s);
   stored := assignStoredSet;
   assignStoredSet := false;
+  if dynTarget <> nil then
+  begin
+    invalidateDynBase(dynTarget);
+    ve := skipParensNode(s^.value);
+    if ve^.kind = nkNil then
+    begin
+      dynTarget^.cgDynLenKnown := true;
+      dynTarget^.cgDynLen := 0;
+    end
+    else if (ve^.kind = nkSetCtor) and (ve^.typ <> nil) and
+            (ve^.typ^.kind = tyDynArray) then
+    begin
+      dynTarget^.cgDynLenKnown := true;
+      dynTarget^.cgDynLen := ve^.setElems.count;
+    end
+    else
+    begin
+      srcD := plainAssignTarget(ve);
+      if (srcD <> nil) and srcD^.cgDynLenKnown then
+      begin
+        dynTarget^.cgDynLenKnown := true;
+        dynTarget^.cgDynLen := srcD^.cgDynLen;
+      end;
+    end;
+  end;
   if rangeVar <> nil then
   begin
     if stored then
@@ -1199,6 +1263,14 @@ begin
       setVarRange(rangeVar, assignStored.rKnown, assignStored.rLo, assignStored.rHi);
       if newLenBase <> nil then
         rangeVar^.cgLenVar := newLenBase;
+      if assignStored.rKnown and (inhCount > 0) and
+         (assignStored.rLo >= tyLo) and (assignStored.rHi <= tyHi) then
+        for k := 0 to inhCount - 1 do
+          if activeBoundCount < 64 then
+          begin
+            activeBounds[activeBoundCount] := inheritedBounds[k];
+            activeBoundCount := activeBoundCount + 1;
+          end;
     end
     else
       setVarRange(rangeVar, false, 0, 0);
@@ -1359,6 +1431,9 @@ var
   isFill: boolean;
   pointee: PType;
   dims: TPtrList; { of PTVBox: setlength's lengths }
+  dynV: PDecl;
+  cLen: int64;
+  gr: PDynGrowRule;
   i: longint;
 begin
   if s^.callValue <> nil then { a procedural field or property }
@@ -1497,6 +1572,31 @@ begin
                                       PNode(listGet(s^.args, i))^.typ)));
           emitDynSetLength(a0, arg^.typ, dims, 0);
           listFree(dims);
+          dynV := plainAssignTarget(arg);
+          if (dynV <> nil) and dynV^.cgDynTrack then
+          begin
+            invalidateDynBase(dynV);
+            if (s^.args.count = 2) and
+               constIntOf(PNode(listGet(s^.args, 1)), cLen) and (cLen >= 0) then
+            begin
+              dynV^.cgDynLenKnown := true;
+              dynV^.cgDynLen := cLen;
+            end;
+            for i := 0 to dynGrows.count - 1 do
+            begin
+              gr := PDynGrowRule(listGet(dynGrows, i));
+              if (gr^.resizeStmt = s) and (gr^.dynVar = dynV) and
+                 (activeBoundCount < 64) then
+              begin
+                activeBounds[activeBoundCount].idx := gr^.forVar;
+                activeBounds[activeBoundCount].base := dynV;
+                activeBounds[activeBoundCount].baseIdx := nil;
+                activeBounds[activeBoundCount].slack := 1;
+                activeBoundCount := activeBoundCount + 1;
+                break;
+              end;
+            end;
+          end;
           exit;
         end;
         a1 := emitI32(PNode(listGet(s^.args, 1)));
@@ -1636,7 +1736,8 @@ var
   saved: TRangeSnap;
   bounds: TBoundArray;
   cbounds: TConstBoundArray;
-  boundCount, cboundCount: longint;
+  boundCount, cboundCount, k, w: longint;
+  a: PDecl;
 begin
   tail := atRoutineTail;
   atRoutineTail := false;
@@ -1677,6 +1778,23 @@ begin
     if trackRanges then
       restoreRangeState(saved);
   end;
+  for k := 0 to dynTrackVars.count - 1 do
+  begin
+    a := PDecl(listGet(dynTrackVars, k));
+    if dynKeyMutatedIn(s, a, nil, nil) then
+      invalidateDynBase(a);
+  end;
+  w := 0;
+  for k := 0 to activeBoundCount - 1 do
+  begin
+    if (activeBounds[k].baseIdx = nil) or
+       not dynKeyMutatedIn(s, activeBounds[k].base, activeBounds[k].baseIdx, nil) then
+    begin
+      activeBounds[w] := activeBounds[k];
+      w := w + 1;
+    end;
+  end;
+  activeBoundCount := w;
   irSetInsertPoint(endB);
 end;
 
@@ -1685,41 +1803,85 @@ type
   TWhileMono = record
     v: PDecl;
     lo, hi: int64;
-    hadOld: boolean;
+    hadOld, preserveBounds: boolean;
     oldLo, oldHi: int64;
   end;
 
 procedure visitWhile(s: PNode);
 var
   condB, bodyB, endB: PIRBlock;
-  trackRanges: boolean;
+  trackRanges, preserve, hasCondLo: boolean;
   written, monos: TPtrList;
   preCondSnap: TRangeSnap;
-  k: longint;
+  k, j, w: longint;
   a: PDecl;
   m: PWhileMono;
-  tyLo, tyHi, modM: int64;
-  bounds: TBoundArray;
-  cbounds: TConstBoundArray;
-  boundCount, cboundCount: longint;
+  tyLo, tyHi, modM, drop, condLo, lower, safeLo: int64;
+  bounds, presBounds: TBoundArray;
+  cbounds, condCBs: TConstBoundArray;
+  boundCount, cboundCount, condCBCount, presCount: longint;
 begin
+  for k := 0 to dynTrackVars.count - 1 do
+  begin
+    a := PDecl(listGet(dynTrackVars, k));
+    if dynKeyMutatedIn(s, a, nil, nil) then
+      invalidateDynBase(a);
+  end;
+  w := 0;
+  for k := 0 to activeBoundCount - 1 do
+  begin
+    if (activeBounds[k].baseIdx = nil) or
+       not dynKeyMutatedIn(s, activeBounds[k].base, activeBounds[k].baseIdx, nil) then
+    begin
+      activeBounds[w] := activeBounds[k];
+      w := w + 1;
+    end;
+  end;
+  activeBoundCount := w;
   trackRanges := rangeLocals.count > 0;
+  presCount := 0;
   if trackRanges then
   begin
     rangeLocalsWrittenBy(s, written);
     listInit(monos);
+    condCBCount := 0;
+    collectConstBounds(s^.cond, condCBs, condCBCount);
     for k := 0 to written.count - 1 do
     begin
       a := PDecl(listGet(written, k));
       if not a^.cgRangeKnown or (a^.varType = nil) or
          not signedTypeRange(regType(a^.varType)^.bits, tyLo, tyHi) then
         continue;
+      preserve := false;
       if monotonicNonNegSteps(s^.thenStmt, a) then
       begin
         new(m);
         m^.v := a;
         m^.lo := a^.cgRangeLo;
         m^.hi := tyHi;
+      end
+      else if monotonicNonPosSteps(s^.thenStmt, a) then
+      begin
+        drop := 0;
+        safeLo := tyLo;
+        hasCondLo := false;
+        condLo := low(int64);
+        for j := 0 to condCBCount - 1 do
+          if (condCBs[j].v = a) and condCBs[j].hasLo and
+             ((not hasCondLo) or (condCBs[j].lo > condLo)) then
+          begin
+            hasCondLo := true;
+            condLo := condCBs[j].lo;
+          end;
+        if hasCondLo and maxVarDrop(s^.thenStmt, a, drop) and
+           not subOverflows(condLo, drop, lower) and
+           (a^.cgRangeLo >= lower) and (lower >= tyLo) then
+          safeLo := lower;
+        new(m);
+        m^.v := a;
+        m^.lo := safeLo;
+        m^.hi := a^.cgRangeHi;
+        preserve := true;
       end
       else if (a^.cgRangeLo >= 0) and
               nonNegModLoop(s^.thenStmt, a, a^.cgRangeHi, written, modM) then
@@ -1731,6 +1893,16 @@ begin
       end
       else
         continue;
+      m^.preserveBounds := preserve;
+      if preserve then
+        for j := 0 to activeBoundCount - 1 do
+          if (activeBounds[j].idx = a) and
+             not dynKeyMutatedIn(s, activeBounds[j].base, activeBounds[j].baseIdx, nil) and
+             (presCount < 64) then
+          begin
+            presBounds[presCount] := activeBounds[j];
+            presCount := presCount + 1;
+          end;
       m^.hadOld := a^.cgLoopKnown;
       m^.oldLo := a^.cgLoopLo;
       m^.oldHi := a^.cgLoopHi;
@@ -1746,6 +1918,12 @@ begin
       a^.cgLoopHi := m^.hi;
       setVarRange(a, true, m^.lo, m^.hi);
     end;
+    for k := 0 to presCount - 1 do
+      if activeBoundCount < 64 then
+      begin
+        activeBounds[activeBoundCount] := presBounds[k];
+        activeBoundCount := activeBoundCount + 1;
+      end;
     saveRangeState(preCondSnap);
   end;
   condB := irNewBlock('while.cond');
@@ -1786,6 +1964,12 @@ begin
       setVarRange(m^.v, true, m^.lo, m^.hi);
       dispose(m);
     end;
+    for k := 0 to presCount - 1 do
+      if activeBoundCount < 64 then
+      begin
+        activeBounds[activeBoundCount] := presBounds[k];
+        activeBoundCount := activeBoundCount + 1;
+      end;
     listFree(written);
     listFree(monos);
   end;
@@ -1797,7 +1981,26 @@ procedure visitStmtList(const l: TPtrList); forward;
 procedure visitRepeat(s: PNode);
 var
   bodyB, condB, endB: PIRBlock;
+  k, w: longint;
+  a: PDecl;
 begin
+  for k := 0 to dynTrackVars.count - 1 do
+  begin
+    a := PDecl(listGet(dynTrackVars, k));
+    if dynKeyMutatedIn(s, a, nil, nil) then
+      invalidateDynBase(a);
+  end;
+  w := 0;
+  for k := 0 to activeBoundCount - 1 do
+  begin
+    if (activeBounds[k].baseIdx = nil) or
+       not dynKeyMutatedIn(s, activeBounds[k].base, activeBounds[k].baseIdx, nil) then
+    begin
+      activeBounds[w] := activeBounds[k];
+      w := w + 1;
+    end;
+  end;
+  activeBoundCount := w;
   bodyB := irNewBlock('repeat.body');
   condB := irNewBlock('repeat.cond');
   endB := irNewBlock('repeat.end');
@@ -1836,21 +2039,25 @@ procedure hoistableBases(s: PNode; var outHoists: TPtrList); forward;
 
 procedure visitFor(s: PNode);
 var
-  v, a: PDecl;
+  v, a, growArr, hBase, hBaseIdx: PDecl;
   varTy: PType;
   down, hoisted, wantChecks, qwordTy, startGe0, finalGe0: boolean;
+  haveGrow, pushedForBound: boolean;
   start, final, start64, final64, enter, i, done, next, last64, start64v, hd, cnt: TV;
   checkB, loopB, latchB, incB, endB, preB: PIRBlock;
   phi: PIRInst;
   oldKnown: boolean;
-  oldLo, oldHi: int64;
-  written, accs, hoists, hoistDatas: TPtrList;
+  oldLo, oldHi, hExtra: int64;
+  written, accs, hoists, hoistDatas, directW, dummy: TPtrList;
   acc: PAccumulator;
   he: PHoistEntry;
   cb: PCheckedBase;
-  k, j: longint;
-  dLo, dHi, trips, tyLo, tyHi, x, modM: int64;
+  k, j, w: longint;
+  dLo, dHi, fLo, fHi, trips, tyLo, tyHi, x, modM: int64;
   overflow, fits, covered: boolean;
+  growStmt: PNode;
+  gr: PDynGrowRule;
+  forBound: TLengthBound;
 begin
   v := s^.forVar^.refDecl;
   varTy := v^.varType;
@@ -1986,17 +2193,38 @@ begin
   oldKnown := v^.cgRangeKnown;
   oldLo := v^.cgRangeLo;
   oldHi := v^.cgRangeHi;
-  if isSignedOrdinal(varTy) and start.rKnown and final.rKnown then
+  if isSignedOrdinal(varTy) and signedTypeRange(regType(varTy)^.bits, tyLo, tyHi) and
+     (start.rKnown or final.rKnown) then
   begin
-    v^.cgRangeKnown := true;
-    if start.rLo < final.rLo then
-      v^.cgRangeLo := start.rLo
+    { Only entered when start <= final (to) or start >= final (downto), so
+      inside the body the loop variable stays between the lower bound of the
+      smaller endpoint and the upper bound of the larger endpoint. }
+    if down then
+    begin
+      fLo := tyLo;
+      if final.rKnown and (final.rLo > fLo) then
+        fLo := final.rLo;
+      fHi := tyHi;
+      if start.rKnown and (start.rHi < fHi) then
+        fHi := start.rHi;
+    end
     else
-      v^.cgRangeLo := final.rLo;
-    if start.rHi > final.rHi then
-      v^.cgRangeHi := start.rHi
+    begin
+      fLo := tyLo;
+      if start.rKnown and (start.rLo > fLo) then
+        fLo := start.rLo;
+      fHi := tyHi;
+      if final.rKnown and (final.rHi < fHi) then
+        fHi := final.rHi;
+    end;
+    if fLo <= fHi then
+    begin
+      v^.cgRangeKnown := true;
+      v^.cgRangeLo := fLo;
+      v^.cgRangeHi := fHi;
+    end
     else
-      v^.cgRangeHi := final.rHi;
+      v^.cgRangeKnown := false;
   end
   else
     v^.cgRangeKnown := false;
@@ -2073,12 +2301,95 @@ begin
       setVarRange(a, true, acc^.lo, acc^.hi);
     end;
   end;
+  haveGrow := false;
+  growArr := nil;
+  growStmt := nil;
+  pushedForBound := false;
+  if isSignedOrdinal(varTy) and not down and start.rKnown then
+  begin
+    listInit(directW);
+    listInit(dummy);
+    paSkipIndex := true;
+    paStmt(s^.forBody, dummy, directW, false, true);
+    paSkipIndex := false;
+    listFree(dummy);
+    if not listHasPtr(directW, v) then
+    begin
+      if (start.rLo = 0) and (start.rHi = 0) then
+        haveGrow := findLoopAppendSetLength(s^.forBody, growArr, growStmt);
+      if (start.rLo >= 0) and
+         matchHighOrLenExpr(s^.forFinal, hBase, hBaseIdx, hExtra) and
+         (hExtra >= 1) and not dynKeyMutatedIn(s^.forBody, hBase, hBaseIdx, nil) and
+         (activeBoundCount < 64) then
+      begin
+        forBound.idx := v;
+        forBound.base := hBase;
+        forBound.baseIdx := hBaseIdx;
+        forBound.slack := hExtra;
+        activeBounds[activeBoundCount] := forBound;
+        activeBoundCount := activeBoundCount + 1;
+        pushedForBound := true;
+      end;
+    end;
+    listFree(directW);
+  end;
+  for k := 0 to dynTrackVars.count - 1 do
+  begin
+    a := PDecl(listGet(dynTrackVars, k));
+    if (a <> growArr) and dynKeyMutatedIn(s, a, nil, nil) then
+      invalidateDynBase(a);
+  end;
+  if haveGrow and (growArr <> nil) then
+    invalidateDynBase(growArr);
+  w := 0;
+  for k := 0 to activeBoundCount - 1 do
+  begin
+    if (activeBounds[k].baseIdx = nil) or
+       not dynKeyMutatedIn(s, activeBounds[k].base, activeBounds[k].baseIdx, nil) then
+    begin
+      activeBounds[w] := activeBounds[k];
+      w := w + 1;
+    end;
+  end;
+  activeBoundCount := w;
+  if haveGrow then
+  begin
+    new(gr);
+    gr^.resizeStmt := growStmt;
+    gr^.forVar := v;
+    gr^.dynVar := growArr;
+    listAdd(dynGrows, gr);
+  end;
   pushLoop(latchB, endB);
   visitStmt(s^.forBody);
   popLoop;
+  if haveGrow then
+  begin
+    gr := PDynGrowRule(listGet(dynGrows, dynGrows.count - 1));
+    dynGrows.count := dynGrows.count - 1;
+    dispose(gr);
+    invalidateDynBase(growArr);
+  end;
+  if pushedForBound then
+  begin
+    w := 0;
+    for k := 0 to activeBoundCount - 1 do
+    begin
+      if not ((activeBounds[k].idx = forBound.idx) and
+              (activeBounds[k].base = forBound.base) and
+              (activeBounds[k].baseIdx = forBound.baseIdx) and
+              (activeBounds[k].slack = forBound.slack)) then
+      begin
+        activeBounds[w] := activeBounds[k];
+        w := w + 1;
+      end;
+    end;
+    activeBoundCount := w;
+  end;
   if hoisted then
     checkedBases.count := checkedBases.count - hoists.count;
   listFree(hoists);
+  invalidateRangeLocalLength(v);
   v^.cgRangeKnown := oldKnown;
   v^.cgRangeLo := oldLo;
   v^.cgRangeHi := oldHi;
@@ -3814,8 +4125,6 @@ end;
 
 procedure paExpr(e: PNode; var used, written: TPtrList;
                  collectUsed, collectWritten: boolean); forward;
-procedure paStmt(s: PNode; var used, written: TPtrList;
-                 collectUsed, collectWritten: boolean); forward;
 
 { The variables an assignment target reads to compute its address: a[i]
   reads a and i, p^ reads p, r.f reads r, but x := e does not read x. }
@@ -4427,10 +4736,11 @@ begin
     bkBreak, bkContinue, bkExit, bkHalt]);
 end;
 
-function hasExternalAliasWritesExpr(e: PNode; var ansiWritten: TPtrList): boolean; forward;
-function hasExternalAliasWritesStmt(s: PNode; var ansiWritten: TPtrList): boolean; forward;
+function hasExternalAliasWritesExpr(e: PNode; var ansiWritten, dynAlias: TPtrList): boolean; forward;
+function hasExternalAliasWritesStmt(s: PNode; var ansiWritten, dynAlias: TPtrList): boolean; forward;
 
-function hasExternalAliasWritesTarget(e: PNode; var ansiWritten: TPtrList): boolean;
+function hasExternalAliasWritesTarget(e: PNode; var ansiWritten, dynAlias: TPtrList;
+                                      isAddr: boolean): boolean;
 begin
   while (e <> nil) and (e^.kind = nkParen) do
     e := e^.inner;
@@ -4440,20 +4750,24 @@ begin
   begin
     if (e^.refWith = nil) and (e^.refDecl <> nil) and
        (e^.refDecl^.kind = dkVar) then
+    begin
       listAddUnique(ansiWritten, e^.refDecl);
+      if isAddr then
+        listAddUnique(dynAlias, e^.refDecl);
+    end;
     exit(false);
   end;
   if e^.kind in [nkDeref, nkSafeNav] then
     exit(true);
   if e^.kind = nkIndex then
-    exit(hasExternalAliasWritesTarget(e^.base, ansiWritten) or
-         hasExternalAliasWritesExpr(e^.index, ansiWritten));
+    exit(hasExternalAliasWritesTarget(e^.base, ansiWritten, dynAlias, isAddr) or
+         hasExternalAliasWritesExpr(e^.index, ansiWritten, dynAlias));
   if e^.kind = nkField then
-    exit(hasExternalAliasWritesTarget(e^.base, ansiWritten));
-  hasExternalAliasWritesTarget := hasExternalAliasWritesExpr(e, ansiWritten);
+    exit(hasExternalAliasWritesTarget(e^.base, ansiWritten, dynAlias, isAddr));
+  hasExternalAliasWritesTarget := hasExternalAliasWritesExpr(e, ansiWritten, dynAlias);
 end;
 
-function hasExternalAliasWritesExpr(e: PNode; var ansiWritten: TPtrList): boolean;
+function hasExternalAliasWritesExpr(e: PNode; var ansiWritten, dynAlias: TPtrList): boolean;
 var
   k: longint;
   el: PSetElement;
@@ -4464,41 +4778,41 @@ begin
     exit(false);
   case e^.kind of
     nkParen:
-      hasExternalAliasWritesExpr := hasExternalAliasWritesExpr(e^.inner, ansiWritten);
+      hasExternalAliasWritesExpr := hasExternalAliasWritesExpr(e^.inner, ansiWritten, dynAlias);
     nkUnary:
       hasExternalAliasWritesExpr := (e^.uopDecl <> nil) or
-                                    hasExternalAliasWritesExpr(e^.operand, ansiWritten);
+                                    hasExternalAliasWritesExpr(e^.operand, ansiWritten, dynAlias);
     nkBinary:
       hasExternalAliasWritesExpr := (e^.opDecl <> nil) or
-                                    hasExternalAliasWritesExpr(e^.lhs, ansiWritten) or
-                                    hasExternalAliasWritesExpr(e^.rhs, ansiWritten);
+                                    hasExternalAliasWritesExpr(e^.lhs, ansiWritten, dynAlias) or
+                                    hasExternalAliasWritesExpr(e^.rhs, ansiWritten, dynAlias);
     nkIndex:
       hasExternalAliasWritesExpr := (e^.idxProp <> nil) or
-                                    hasExternalAliasWritesExpr(e^.base, ansiWritten) or
-                                    hasExternalAliasWritesExpr(e^.index, ansiWritten);
+                                    hasExternalAliasWritesExpr(e^.base, ansiWritten, dynAlias) or
+                                    hasExternalAliasWritesExpr(e^.index, ansiWritten, dynAlias);
     nkField:
       hasExternalAliasWritesExpr :=
         ((e^.constRef = nil) and
          ((e^.fieldDecl = nil) or (e^.fieldDecl^.kind <> dkField))) or
-        hasExternalAliasWritesExpr(e^.base, ansiWritten);
+        hasExternalAliasWritesExpr(e^.base, ansiWritten, dynAlias);
     nkCondExpr:
-      hasExternalAliasWritesExpr := hasExternalAliasWritesExpr(e^.ceCond, ansiWritten) or
-                                    hasExternalAliasWritesExpr(e^.ceThen, ansiWritten) or
-                                    hasExternalAliasWritesExpr(e^.ceElse, ansiWritten);
+      hasExternalAliasWritesExpr := hasExternalAliasWritesExpr(e^.ceCond, ansiWritten, dynAlias) or
+                                    hasExternalAliasWritesExpr(e^.ceThen, ansiWritten, dynAlias) or
+                                    hasExternalAliasWritesExpr(e^.ceElse, ansiWritten, dynAlias);
     nkSetCtor:
       begin
         for k := 0 to e^.setElems.count - 1 do
         begin
           el := PSetElement(listGet(e^.setElems, k));
-          if hasExternalAliasWritesExpr(el^.lo, ansiWritten) or
-             hasExternalAliasWritesExpr(el^.hi, ansiWritten) then
+          if hasExternalAliasWritesExpr(el^.lo, ansiWritten, dynAlias) or
+             hasExternalAliasWritesExpr(el^.hi, ansiWritten, dynAlias) then
             exit(true);
         end;
         hasExternalAliasWritesExpr := false;
       end;
     nkAddrOf:
       begin
-        hasExternalAliasWritesTarget(e^.inner, ansiWritten);
+        hasExternalAliasWritesTarget(e^.inner, ansiWritten, dynAlias, true);
         hasExternalAliasWritesExpr := false;
       end;
     nkIndirectCall, nkInherited, nkSpawn, nkAwait, nkMove,
@@ -4510,7 +4824,7 @@ begin
            (e^.callWith <> nil) or (e^.calleeExpr <> nil) then
           exit(true);
         for k := 0 to e^.args.count - 1 do
-          if hasExternalAliasWritesExpr(PNode(listGet(e^.args, k)), ansiWritten) then
+          if hasExternalAliasWritesExpr(PNode(listGet(e^.args, k)), ansiWritten, dynAlias) then
             exit(true);
         if e^.isVarCast then
           exit(false);
@@ -4518,7 +4832,7 @@ begin
         if (d <> nil) and (d^.kind = dkBuiltin) then
         begin
           if (d^.builtin in [bkSetLength, bkInc, bkDec]) and (e^.args.count > 0) then
-            hasExternalAliasWritesTarget(PNode(listGet(e^.args, 0)), ansiWritten);
+            hasExternalAliasWritesTarget(PNode(listGet(e^.args, 0)), ansiWritten, dynAlias, false);
           exit(aliasWriteUnsafeBuiltin(d^.builtin));
         end;
         if (d <> nil) and (d^.kind = dkRoutine) then
@@ -4530,7 +4844,7 @@ begin
               if (pm^.varKind = vkVarParam) or pm^.isOut then
               begin
                 arg := PNode(listGet(e^.args, k));
-                hasExternalAliasWritesTarget(arg, ansiWritten);
+                hasExternalAliasWritesTarget(arg, ansiWritten, dynAlias, false);
               end;
             end;
           exit(not routineWritesOnlyLocals(d));
@@ -4542,7 +4856,7 @@ begin
   end;
 end;
 
-function hasExternalAliasWritesStmt(s: PNode; var ansiWritten: TPtrList): boolean;
+function hasExternalAliasWritesStmt(s: PNode; var ansiWritten, dynAlias: TPtrList): boolean;
 var
   k: longint;
   arm: PCaseArm;
@@ -4556,46 +4870,46 @@ begin
     nkCompound:
       begin
         for k := 0 to s^.stmts.count - 1 do
-          if hasExternalAliasWritesStmt(PNode(listGet(s^.stmts, k)), ansiWritten) then
+          if hasExternalAliasWritesStmt(PNode(listGet(s^.stmts, k)), ansiWritten, dynAlias) then
             exit(true);
         hasExternalAliasWritesStmt := false;
       end;
     nkAssign:
-      hasExternalAliasWritesStmt := hasExternalAliasWritesTarget(s^.target, ansiWritten) or
-                                    hasExternalAliasWritesExpr(s^.value, ansiWritten);
+      hasExternalAliasWritesStmt := hasExternalAliasWritesTarget(s^.target, ansiWritten, dynAlias, false) or
+                                    hasExternalAliasWritesExpr(s^.value, ansiWritten, dynAlias);
     nkIf:
-      hasExternalAliasWritesStmt := hasExternalAliasWritesExpr(s^.cond, ansiWritten) or
-                                    hasExternalAliasWritesStmt(s^.thenStmt, ansiWritten) or
-                                    hasExternalAliasWritesStmt(s^.elseStmt, ansiWritten);
+      hasExternalAliasWritesStmt := hasExternalAliasWritesExpr(s^.cond, ansiWritten, dynAlias) or
+                                    hasExternalAliasWritesStmt(s^.thenStmt, ansiWritten, dynAlias) or
+                                    hasExternalAliasWritesStmt(s^.elseStmt, ansiWritten, dynAlias);
     nkWhile:
-      hasExternalAliasWritesStmt := hasExternalAliasWritesExpr(s^.cond, ansiWritten) or
-                                    hasExternalAliasWritesStmt(s^.thenStmt, ansiWritten);
+      hasExternalAliasWritesStmt := hasExternalAliasWritesExpr(s^.cond, ansiWritten, dynAlias) or
+                                    hasExternalAliasWritesStmt(s^.thenStmt, ansiWritten, dynAlias);
     nkRepeat:
       begin
         for k := 0 to s^.stmts.count - 1 do
-          if hasExternalAliasWritesStmt(PNode(listGet(s^.stmts, k)), ansiWritten) then
+          if hasExternalAliasWritesStmt(PNode(listGet(s^.stmts, k)), ansiWritten, dynAlias) then
             exit(true);
-        hasExternalAliasWritesStmt := hasExternalAliasWritesExpr(s^.untilCond, ansiWritten);
+        hasExternalAliasWritesStmt := hasExternalAliasWritesExpr(s^.untilCond, ansiWritten, dynAlias);
       end;
     nkFor:
       begin
-        hasExternalAliasWritesTarget(s^.forVar, ansiWritten);
-        hasExternalAliasWritesStmt := hasExternalAliasWritesExpr(s^.forInit, ansiWritten) or
-                                      hasExternalAliasWritesExpr(s^.forFinal, ansiWritten) or
-                                      hasExternalAliasWritesStmt(s^.forBody, ansiWritten);
+        hasExternalAliasWritesTarget(s^.forVar, ansiWritten, dynAlias, false);
+        hasExternalAliasWritesStmt := hasExternalAliasWritesExpr(s^.forInit, ansiWritten, dynAlias) or
+                                      hasExternalAliasWritesExpr(s^.forFinal, ansiWritten, dynAlias) or
+                                      hasExternalAliasWritesStmt(s^.forBody, ansiWritten, dynAlias);
       end;
     nkCase:
       begin
-        if hasExternalAliasWritesExpr(s^.selector, ansiWritten) then
+        if hasExternalAliasWritesExpr(s^.selector, ansiWritten, dynAlias) then
           exit(true);
         for k := 0 to s^.arms.count - 1 do
         begin
           arm := PCaseArm(listGet(s^.arms, k));
-          if hasExternalAliasWritesStmt(arm^.body, ansiWritten) then
+          if hasExternalAliasWritesStmt(arm^.body, ansiWritten, dynAlias) then
             exit(true);
         end;
         for k := 0 to s^.elseBody.count - 1 do
-          if hasExternalAliasWritesStmt(PNode(listGet(s^.elseBody, k)), ansiWritten) then
+          if hasExternalAliasWritesStmt(PNode(listGet(s^.elseBody, k)), ansiWritten, dynAlias) then
             exit(true);
         hasExternalAliasWritesStmt := false;
       end;
@@ -4605,13 +4919,13 @@ begin
            (s^.calleeExpr <> nil) then
           exit(true);
         for k := 0 to s^.args.count - 1 do
-          if hasExternalAliasWritesExpr(PNode(listGet(s^.args, k)), ansiWritten) then
+          if hasExternalAliasWritesExpr(PNode(listGet(s^.args, k)), ansiWritten, dynAlias) then
             exit(true);
         d := s^.callDecl;
         if (d <> nil) and (d^.kind = dkBuiltin) then
         begin
           if (d^.builtin in [bkSetLength, bkInc, bkDec]) and (s^.args.count > 0) then
-            hasExternalAliasWritesTarget(PNode(listGet(s^.args, 0)), ansiWritten);
+            hasExternalAliasWritesTarget(PNode(listGet(s^.args, 0)), ansiWritten, dynAlias, false);
           exit(aliasWriteUnsafeBuiltin(d^.builtin));
         end;
         if (d <> nil) and (d^.kind = dkRoutine) then
@@ -4621,23 +4935,23 @@ begin
             begin
               pm := PDecl(listGet(d^.params, k));
               if (pm^.varKind = vkVarParam) or pm^.isOut then
-                hasExternalAliasWritesTarget(PNode(listGet(s^.args, k)), ansiWritten);
+                hasExternalAliasWritesTarget(PNode(listGet(s^.args, k)), ansiWritten, dynAlias, false);
             end;
           exit(not routineWritesOnlyLocals(d));
         end;
         hasExternalAliasWritesStmt := true;
       end;
     nkVarDecl:
-      hasExternalAliasWritesStmt := hasExternalAliasWritesStmt(s^.vdAssign, ansiWritten) or
-                                    hasExternalAliasWritesExpr(s^.vdInit, ansiWritten);
+      hasExternalAliasWritesStmt := hasExternalAliasWritesStmt(s^.vdAssign, ansiWritten, dynAlias) or
+                                    hasExternalAliasWritesExpr(s^.vdInit, ansiWritten, dynAlias);
     nkExprStmt:
-      hasExternalAliasWritesStmt := hasExternalAliasWritesExpr(s^.exprStmtExpr, ansiWritten);
+      hasExternalAliasWritesStmt := hasExternalAliasWritesExpr(s^.exprStmtExpr, ansiWritten, dynAlias);
   else
     hasExternalAliasWritesStmt := true;
   end;
 end;
 
-function hasExternalAliasWrites(r: PDecl; var ansiWritten: TPtrList): boolean;
+function hasExternalAliasWrites(r: PDecl; var ansiWritten, dynAlias: TPtrList): boolean;
 var
   k: longint;
   p: PDecl;
@@ -4650,7 +4964,7 @@ begin
     if (p^.varKind = vkVarParam) or p^.isOut then
       exit(true);
   end;
-  hasExternalAliasWrites := hasExternalAliasWritesStmt(r^.body^.body, ansiWritten);
+  hasExternalAliasWrites := hasExternalAliasWritesStmt(r^.body^.body, ansiWritten, dynAlias);
 end;
 
 { Chooses rangeLocals for r, each starting at 0 (the value every scalar
@@ -4660,11 +4974,13 @@ procedure initRangeLocals(r: PDecl);
 var
   i: longint;
   v, p: PDecl;
-  used, other, ansiWritten: TPtrList;
+  used, other, ansiWritten, dynAlias: TPtrList;
   aliasWrites: boolean;
 begin
   listClear(rangeLocals);
   listClear(immAnsiVars);
+  listClear(dynTrackVars);
+  listClear(dynGrows);
   activeBoundCount := 0;
   for i := 0 to r^.body^.decls.count - 1 do
     if PDecl(listGet(r^.body^.decls, i))^.kind = dkLabel then
@@ -4676,22 +4992,31 @@ begin
   paSkipPlain := false;
   paSkipIndex := false;
   listInit(ansiWritten);
-  aliasWrites := hasExternalAliasWrites(r, ansiWritten);
+  listInit(dynAlias);
+  aliasWrites := hasExternalAliasWrites(r, ansiWritten, dynAlias);
   for i := 0 to r^.body^.decls.count - 1 do
   begin
     v := PDecl(listGet(r^.body^.decls, i));
-    if (v^.kind <> dkVar) or (v^.varKind <> vkVariable) or
+    if (v^.kind <> dkVar) or not (v^.varKind in [vkVariable, vkResult]) or
        ((v^.init <> nil) and not v^.isInitVar) or v^.isInitVar or
-       v^.isInlineVar or (v^.absTarget <> nil) or v^.captured or
-       v^.isOwned or (v^.varType = nil) then
+       v^.isInlineVar or (v^.absTarget <> nil) or (v^.absRoot <> nil) or
+       v^.captured or v^.isOwned or (v^.varType = nil) then
       continue;
     if not listHasPtr(ansiWritten, v) and not listHasPtr(other, v) and
-       (v^.varType^.kind = tyAnsiString) then
+       (v^.varKind = vkVariable) and (v^.varType^.kind = tyAnsiString) then
     begin
       v^.cgImmAnsi := true;
       listAdd(immAnsiVars, v);
     end;
-    if listHasPtr(other, v) then
+    if not aliasWrites and not listHasPtr(dynAlias, v) and
+       (v^.varType^.kind = tyDynArray) then
+    begin
+      v^.cgDynTrack := true;
+      v^.cgDynLenKnown := true;
+      v^.cgDynLen := 0;
+      listAdd(dynTrackVars, v);
+    end;
+    if (v^.varKind <> vkVariable) or listHasPtr(other, v) then
       continue;
     if not isOrdinal(v^.varType) or not isSignedOrdinal(v^.varType) then
       continue;
@@ -4704,19 +5029,40 @@ begin
   end;
   if not aliasWrites then
   begin
+    if r^.isFunction and (r^.resultVar <> nil) then
+    begin
+      v := r^.resultVar;
+      if (v^.absTarget = nil) and (v^.absRoot = nil) and not v^.captured and
+         not v^.isOwned and not listHasPtr(dynAlias, v) and
+         (v^.varType <> nil) and (v^.varType^.kind = tyDynArray) then
+      begin
+        v^.cgDynTrack := true;
+        v^.cgDynLenKnown := true;
+        v^.cgDynLen := 0;
+        listAdd(dynTrackVars, v);
+      end;
+    end;
     for i := 0 to r^.params.count - 1 do
     begin
       p := PDecl(listGet(r^.params, i));
-      if (p^.varKind <> vkVarParam) and not p^.isOut and not isByRef(p) and
-         (p^.absTarget = nil) and not p^.captured and
-         not listHasPtr(ansiWritten, p) and (p^.varType <> nil) and
-         (p^.varType^.kind = tyAnsiString) then
+      if (p^.varKind = vkVarParam) or p^.isOut or isByRef(p) or
+         (p^.absTarget <> nil) or (p^.absRoot <> nil) or p^.captured or
+         (p^.varType = nil) then
+        continue;
+      if not listHasPtr(ansiWritten, p) and (p^.varType^.kind = tyAnsiString) then
       begin
         p^.cgImmAnsi := true;
         listAdd(immAnsiVars, p);
       end;
+      if not listHasPtr(dynAlias, p) and (p^.varType^.kind = tyDynArray) then
+      begin
+        p^.cgDynTrack := true;
+        p^.cgDynLenKnown := false;
+        listAdd(dynTrackVars, p);
+      end;
     end;
   end;
+  listFree(dynAlias);
   listFree(ansiWritten);
   listFree(used);
   listFree(other);
@@ -4738,8 +5084,16 @@ begin
   end;
   for i := 0 to immAnsiVars.count - 1 do
     PDecl(listGet(immAnsiVars, i))^.cgImmAnsi := false;
+  for i := 0 to dynTrackVars.count - 1 do
+  begin
+    v := PDecl(listGet(dynTrackVars, i));
+    v^.cgDynTrack := false;
+    v^.cgDynLenKnown := false;
+  end;
   listClear(rangeLocals);
   listClear(immAnsiVars);
+  listClear(dynTrackVars);
+  listClear(dynGrows);
   activeBoundCount := 0;
 end;
 
@@ -4753,13 +5107,39 @@ begin
   w := 0;
   for i := 0 to activeBoundCount - 1 do
   begin
-    if activeBounds[i].idx <> v then
+    if (activeBounds[i].idx <> v) and (activeBounds[i].baseIdx <> v) then
     begin
       activeBounds[w] := activeBounds[i];
       w := w + 1;
     end;
   end;
   activeBoundCount := w;
+end;
+
+procedure invalidateDynBase(base: PDecl);
+var
+  i, w: longint;
+  rv: PDecl;
+begin
+  if base = nil then
+    exit;
+  base^.cgDynLenKnown := false;
+  w := 0;
+  for i := 0 to activeBoundCount - 1 do
+  begin
+    if (activeBounds[i].base <> base) and (activeBounds[i].baseIdx <> base) then
+    begin
+      activeBounds[w] := activeBounds[i];
+      w := w + 1;
+    end;
+  end;
+  activeBoundCount := w;
+  for i := 0 to rangeLocals.count - 1 do
+  begin
+    rv := PDecl(listGet(rangeLocals, i));
+    if rv^.cgLenVar = base then
+      rv^.cgLenVar := nil;
+  end;
 end;
 
 function plainAnsiVar(e: PNode): PDecl;
@@ -4785,11 +5165,239 @@ begin
     plainAnsiVar := d;
 end;
 
-function matchLengthExpr(e: PNode): PDecl;
+function matchDynKey(e: PNode; var base, baseIdx: PDecl): boolean;
 var
-  v, bd, baseV: PDecl;
+  b, x, v: PDecl;
 begin
-  matchLengthExpr := nil;
+  matchDynKey := false;
+  while e <> nil do
+  begin
+    e := unwrapConst(e);
+    if (e <> nil) and (e^.kind = nkParen) then
+    begin
+      e := e^.inner;
+      continue;
+    end;
+    break;
+  end;
+  if e = nil then
+    exit;
+  if (e^.kind = nkNameRef) and (e^.refWith = nil) and (e^.refDecl <> nil) and
+     (e^.refDecl^.kind = dkVar) then
+  begin
+    v := e^.refDecl;
+    if (v^.absTarget = nil) and (v^.absRoot = nil) and
+       (v^.cgImmAnsi or v^.cgDynTrack) then
+    begin
+      base := v;
+      baseIdx := nil;
+      exit(true);
+    end;
+    exit;
+  end;
+  if e^.kind = nkIndex then
+  begin
+    b := plainAssignTarget(e^.base);
+    x := plainAssignTarget(e^.index);
+    if (b <> nil) and (x <> nil) and b^.cgDynTrack and
+       (x^.cgRangeLocal or x^.cgRangeKnown) and
+       (b^.varType <> nil) and (b^.varType^.kind = tyDynArray) then
+    begin
+      base := b;
+      baseIdx := x;
+      exit(true);
+    end;
+  end;
+end;
+
+function dynKeyMutatedIn(s: PNode; base, baseIdx: PDecl;
+                         skipStmt: PNode): boolean;
+var
+  el: PSetElement;
+  arm: PCaseArm;
+  d, pm: PDecl;
+
+  function targetMutates(t: PNode): boolean;
+  var
+    v: PDecl;
+  begin
+    while (t <> nil) and (t^.kind = nkParen) do
+      t := t^.inner;
+    if t = nil then
+      exit(false);
+    v := plainAssignTarget(t);
+    if v <> nil then
+      exit((v = base) or ((baseIdx <> nil) and (v = baseIdx)));
+    if (baseIdx <> nil) and (t^.kind = nkIndex) then
+      if plainAssignTarget(t^.base) = base then
+        exit(true);
+    targetMutates := t^.kind in [nkDeref, nkSafeNav];
+  end;
+
+  function exprMutates(e: PNode): boolean;
+  var
+    i: longint;
+  begin
+    if e = nil then
+      exit(false);
+    case e^.kind of
+      nkParen: exprMutates := exprMutates(e^.inner);
+      nkUnary: exprMutates := (e^.uopDecl <> nil) or exprMutates(e^.operand);
+      nkBinary: exprMutates := (e^.opDecl <> nil) or exprMutates(e^.lhs) or exprMutates(e^.rhs);
+      nkIndex: exprMutates := (e^.idxProp <> nil) or exprMutates(e^.base) or exprMutates(e^.index);
+      nkField: exprMutates := exprMutates(e^.base);
+      nkCondExpr: exprMutates := exprMutates(e^.ceCond) or exprMutates(e^.ceThen) or exprMutates(e^.ceElse);
+      nkSetCtor:
+        begin
+          for i := 0 to e^.setElems.count - 1 do
+          begin
+            el := PSetElement(listGet(e^.setElems, i));
+            if exprMutates(el^.lo) or exprMutates(el^.hi) then
+              exit(true);
+          end;
+          exprMutates := false;
+        end;
+      nkAddrOf: exprMutates := targetMutates(e^.inner);
+      nkIndirectCall, nkInherited, nkSpawn, nkAwait, nkMove, nkSafeNav, nkCoalesce:
+        exprMutates := true;
+      nkCall:
+        begin
+          if (e^.methodCast <> 0) or (e^.callValue <> nil) or
+             (e^.callWith <> nil) or (e^.calleeExpr <> nil) then
+            exit(true);
+          for i := 0 to e^.args.count - 1 do
+            if exprMutates(PNode(listGet(e^.args, i))) then
+              exit(true);
+          if e^.isVarCast then
+            exit(false);
+          d := e^.callDecl;
+          if (d <> nil) and (d^.kind = dkBuiltin) then
+          begin
+            if (d^.builtin in [bkSetLength, bkInc, bkDec, bkDelete, bkInsert,
+                                bkFillChar, bkNew, bkDispose]) and
+               (e^.args.count > 0) and targetMutates(PNode(listGet(e^.args, 0))) then
+              exit(true);
+            if (d^.builtin = bkMove) and (e^.args.count > 1) and
+               targetMutates(PNode(listGet(e^.args, 1))) then
+              exit(true);
+            exit(aliasWriteUnsafeBuiltin(d^.builtin));
+          end;
+          if (d <> nil) and (d^.kind = dkRoutine) then
+          begin
+            for i := 0 to e^.args.count - 1 do
+              if i < d^.params.count then
+              begin
+                pm := PDecl(listGet(d^.params, i));
+                if ((pm^.varKind = vkVarParam) or pm^.isOut) and
+                   targetMutates(PNode(listGet(e^.args, i))) then
+                  exit(true);
+              end;
+            exit(not routineWritesOnlyLocals(d));
+          end;
+          exprMutates := true;
+        end;
+    else
+      exprMutates := false;
+    end;
+  end;
+
+  function stmtMutates(st: PNode): boolean;
+  var
+    i: longint;
+  begin
+    if (st = nil) or (st = skipStmt) then
+      exit(false);
+    case st^.kind of
+      nkEmpty, nkGoto: stmtMutates := false;
+      nkCompound:
+        begin
+          for i := 0 to st^.stmts.count - 1 do
+            if stmtMutates(PNode(listGet(st^.stmts, i))) then
+              exit(true);
+          stmtMutates := false;
+        end;
+      nkAssign: stmtMutates := targetMutates(st^.target) or exprMutates(st^.value);
+      nkIf: stmtMutates := exprMutates(st^.cond) or stmtMutates(st^.thenStmt) or stmtMutates(st^.elseStmt);
+      nkWhile: stmtMutates := exprMutates(st^.cond) or stmtMutates(st^.thenStmt);
+      nkRepeat:
+        begin
+          for i := 0 to st^.stmts.count - 1 do
+            if stmtMutates(PNode(listGet(st^.stmts, i))) then
+              exit(true);
+          stmtMutates := exprMutates(st^.untilCond);
+        end;
+      nkFor: stmtMutates := targetMutates(st^.forVar) or exprMutates(st^.forInit) or
+                            exprMutates(st^.forFinal) or stmtMutates(st^.forBody);
+      nkCase:
+        begin
+          if exprMutates(st^.selector) then
+            exit(true);
+          for i := 0 to st^.arms.count - 1 do
+          begin
+            arm := PCaseArm(listGet(st^.arms, i));
+            if stmtMutates(arm^.body) then
+              exit(true);
+          end;
+          for i := 0 to st^.elseBody.count - 1 do
+            if stmtMutates(PNode(listGet(st^.elseBody, i))) then
+              exit(true);
+          stmtMutates := false;
+        end;
+      nkProcCall:
+        begin
+          if (st^.callValue <> nil) or (st^.callWith <> nil) or (st^.calleeExpr <> nil) then
+            exit(true);
+          for i := 0 to st^.args.count - 1 do
+            if exprMutates(PNode(listGet(st^.args, i))) then
+              exit(true);
+          d := st^.callDecl;
+          if (d <> nil) and (d^.kind = dkBuiltin) then
+          begin
+            if (d^.builtin in [bkSetLength, bkInc, bkDec, bkDelete, bkInsert,
+                                bkFillChar, bkNew, bkDispose]) and
+               (st^.args.count > 0) and targetMutates(PNode(listGet(st^.args, 0))) then
+              exit(true);
+            if (d^.builtin = bkMove) and (st^.args.count > 1) and
+               targetMutates(PNode(listGet(st^.args, 1))) then
+              exit(true);
+            exit(aliasWriteUnsafeBuiltin(d^.builtin));
+          end;
+          if (d <> nil) and (d^.kind = dkRoutine) then
+          begin
+            for i := 0 to st^.args.count - 1 do
+              if i < d^.params.count then
+              begin
+                pm := PDecl(listGet(d^.params, i));
+                if ((pm^.varKind = vkVarParam) or pm^.isOut) and
+                   targetMutates(PNode(listGet(st^.args, i))) then
+                  exit(true);
+              end;
+            exit(not routineWritesOnlyLocals(d));
+          end;
+          stmtMutates := true;
+        end;
+      nkVarDecl: stmtMutates := stmtMutates(st^.vdAssign) or exprMutates(st^.vdInit);
+      nkExprStmt: stmtMutates := exprMutates(st^.exprStmtExpr);
+    else
+      stmtMutates := true;
+    end;
+  end;
+begin
+  if (s = nil) or (base = nil) then
+    exit(false);
+  if base^.cgImmAnsi and (baseIdx = nil) then
+    exit(false);
+  dynKeyMutatedIn := stmtMutates(s);
+end;
+
+function matchHighOrLenExpr(e: PNode; var base, baseIdx: PDecl;
+                            var extraSlack: int64): boolean;
+var
+  v, bd: PDecl;
+  c, subSlack: int64;
+  arg: PNode;
+begin
+  matchHighOrLenExpr := false;
   while (e <> nil) and (e^.kind = nkParen) do
     e := e^.inner;
   if e = nil then
@@ -4797,8 +5405,21 @@ begin
   v := plainAssignTarget(e);
   if v <> nil then
   begin
-    if (v^.cgLenVar <> nil) and v^.cgLenVar^.cgImmAnsi then
-      matchLengthExpr := v^.cgLenVar;
+    if (v^.cgLenVar <> nil) and (v^.cgLenVar^.cgImmAnsi or v^.cgLenVar^.cgDynTrack) then
+    begin
+      base := v^.cgLenVar;
+      baseIdx := nil;
+      extraSlack := 0;
+      exit(true);
+    end;
+    exit;
+  end;
+  if (e^.kind = nkBinary) and (e^.bop = boSub) and (e^.opDecl = nil) then
+  begin
+    if constIntOf(e^.rhs, c) and (c >= 0) and
+       matchHighOrLenExpr(e^.lhs, base, baseIdx, subSlack) and
+       not addOverflows(subSlack, c, extraSlack) then
+      exit(true);
     exit;
   end;
   if (e^.kind <> nkCall) or e^.isVarCast or (e^.methodCast <> 0) or
@@ -4806,11 +5427,38 @@ begin
      (e^.callWith <> nil) or (e^.args.count <> 1) then
     exit;
   bd := e^.callDecl;
-  if (bd = nil) or (bd^.kind <> dkBuiltin) or (bd^.builtin <> bkLength) then
+  if (bd = nil) or (bd^.kind <> dkBuiltin) then
     exit;
-  baseV := plainAnsiVar(PNode(listGet(e^.args, 0)));
-  if (baseV <> nil) and baseV^.cgImmAnsi then
-    matchLengthExpr := baseV;
+  arg := PNode(listGet(e^.args, 0));
+  if bd^.builtin = bkLength then
+  begin
+    if matchDynKey(arg, base, baseIdx) then
+    begin
+      extraSlack := 0;
+      exit(true);
+    end;
+    exit;
+  end;
+  if bd^.builtin = bkHigh then
+  begin
+    if (arg^.typ <> nil) and (arg^.typ^.kind in [tyDynArray, tyAnsiString]) and
+       matchDynKey(arg, base, baseIdx) then
+    begin
+      extraSlack := 1;
+      exit(true);
+    end;
+  end;
+end;
+
+function matchLengthExpr(e: PNode): PDecl;
+var
+  base, baseIdx: PDecl;
+  extra: int64;
+begin
+  matchLengthExpr := nil;
+  if matchHighOrLenExpr(e, base, baseIdx, extra) and (baseIdx = nil) and
+     (extra = 0) and base^.cgImmAnsi then
+    matchLengthExpr := base;
 end;
 
 function matchVarPlusConst(e: PNode; var v: PDecl; var off: int64): boolean;
@@ -4826,7 +5474,7 @@ begin
   pv := plainAssignTarget(e);
   if pv <> nil then
   begin
-    if not pv^.cgRangeLocal then
+    if not pv^.cgRangeLocal and not pv^.cgRangeKnown then
       exit;
     v := pv;
     off := 0;
@@ -4840,14 +5488,16 @@ begin
   if e^.bop = boAdd then
   begin
     lv := plainAssignTarget(e^.lhs);
-    if (lv <> nil) and lv^.cgRangeLocal and constIntOf(e^.rhs, c) then
+    if (lv <> nil) and (lv^.cgRangeLocal or lv^.cgRangeKnown) and
+       constIntOf(e^.rhs, c) then
     begin
       v := lv;
       off := c;
       exit(true);
     end;
     rv := plainAssignTarget(e^.rhs);
-    if (rv <> nil) and rv^.cgRangeLocal and constIntOf(e^.lhs, c) then
+    if (rv <> nil) and (rv^.cgRangeLocal or rv^.cgRangeKnown) and
+       constIntOf(e^.lhs, c) then
     begin
       v := rv;
       off := c;
@@ -4857,8 +5507,8 @@ begin
   else if e^.bop = boSub then
   begin
     lv := plainAssignTarget(e^.lhs);
-    if (lv <> nil) and lv^.cgRangeLocal and constIntOf(e^.rhs, c) and
-       (c <> low(int64)) then
+    if (lv <> nil) and (lv^.cgRangeLocal or lv^.cgRangeKnown) and
+       constIntOf(e^.rhs, c) and (c <> low(int64)) then
     begin
       v := lv;
       off := -c;
@@ -4872,8 +5522,8 @@ procedure collectLengthBounds(e: PNode; var outB: TBoundArray;
 var
   x, lenE: PNode;
   strict: boolean;
-  idx, base: PDecl;
-  slack: int64;
+  idx, base, baseIdx: PDecl;
+  slack, extraSlack: int64;
   i: longint;
 begin
   while (e <> nil) and (e^.kind = nkParen) do
@@ -4901,12 +5551,15 @@ begin
   while (x <> nil) and (x^.kind = nkParen) do
     x := x^.inner;
   idx := plainAssignTarget(x);
-  base := matchLengthExpr(lenE);
-  if (idx = nil) or not idx^.cgRangeLocal or (base = nil) then
+  if (idx = nil) or (not idx^.cgRangeLocal and not idx^.cgRangeKnown) or
+     not matchHighOrLenExpr(lenE, base, baseIdx, extraSlack) then
     exit;
   if strict then slack := 1 else slack := 0;
+  if addOverflows(extraSlack, slack, slack) then
+    exit;
   for i := 0 to count - 1 do
-    if (outB[i].idx = idx) and (outB[i].base = base) then
+    if (outB[i].idx = idx) and (outB[i].base = base) and
+       (outB[i].baseIdx = baseIdx) then
     begin
       if slack > outB[i].slack then
         outB[i].slack := slack;
@@ -4916,6 +5569,7 @@ begin
   begin
     outB[count].idx := idx;
     outB[count].base := base;
+    outB[count].baseIdx := baseIdx;
     outB[count].slack := slack;
     count := count + 1;
   end;
@@ -4925,14 +5579,15 @@ procedure applyLengthBounds(const bounds: TBoundArray; count: longint);
 var
   i, j: longint;
   merged: boolean;
-  maxV: int64;
+  maxV, adj: int64;
 begin
   for i := 0 to count - 1 do
   begin
     merged := false;
     for j := 0 to activeBoundCount - 1 do
       if (activeBounds[j].idx = bounds[i].idx) and
-         (activeBounds[j].base = bounds[i].base) then
+         (activeBounds[j].base = bounds[i].base) and
+         (activeBounds[j].baseIdx = bounds[i].baseIdx) then
       begin
         if bounds[i].slack > activeBounds[j].slack then
           activeBounds[j].slack := bounds[i].slack;
@@ -4944,12 +5599,20 @@ begin
       activeBounds[activeBoundCount] := bounds[i];
       activeBoundCount := activeBoundCount + 1;
     end;
-    if bounds[i].idx^.cgRangeKnown then
+    if (bounds[i].baseIdx = nil) and bounds[i].idx^.cgRangeKnown then
     begin
-      maxV := $7FFFFFFF - bounds[i].slack;
-      if (bounds[i].idx^.cgRangeLo <= maxV) and
-         (maxV < bounds[i].idx^.cgRangeHi) then
-        bounds[i].idx^.cgRangeHi := maxV;
+      if (bounds[i].base <> nil) and (bounds[i].base^.varType <> nil) and
+         (bounds[i].base^.varType^.kind = tyDynArray) then
+        adj := bounds[i].slack - 1
+      else
+        adj := bounds[i].slack;
+      if adj >= 0 then
+      begin
+        maxV := $7FFFFFFF - adj;
+        if (bounds[i].idx^.cgRangeLo <= maxV) and
+           (maxV < bounds[i].idx^.cgRangeHi) then
+          bounds[i].idx^.cgRangeHi := maxV;
+      end;
     end;
   end;
 end;
@@ -5082,7 +5745,19 @@ begin
     en^.lo := v^.cgRangeLo;
     en^.hi := v^.cgRangeHi;
     en^.lenVar := v^.cgLenVar;
+    en^.dynLenKnown := false;
+    en^.dynLen := 0;
     listAdd(st.entries, en);
+  end;
+  listInit(st.dynEntries);
+  for i := 0 to dynTrackVars.count - 1 do
+  begin
+    v := PDecl(listGet(dynTrackVars, i));
+    new(en);
+    en^.v := v;
+    en^.dynLenKnown := v^.cgDynLenKnown;
+    en^.dynLen := v^.cgDynLen;
+    listAdd(st.dynEntries, en);
   end;
   st.boundCount := activeBoundCount;
   for i := 0 to activeBoundCount - 1 do
@@ -5104,6 +5779,14 @@ begin
     dispose(en);
   end;
   listFree(st.entries);
+  for i := 0 to st.dynEntries.count - 1 do
+  begin
+    en := PRangeSnapEntry(listGet(st.dynEntries, i));
+    en^.v^.cgDynLenKnown := en^.dynLenKnown;
+    en^.v^.cgDynLen := en^.dynLen;
+    dispose(en);
+  end;
+  listFree(st.dynEntries);
   activeBoundCount := st.boundCount;
   for i := 0 to st.boundCount - 1 do
     activeBounds[i] := st.bounds[i];
@@ -5136,8 +5819,234 @@ begin
     exit;
   for i := 0 to activeBoundCount - 1 do
     if (activeBounds[i].idx = v) and (activeBounds[i].base = baseVar) and
-       (activeBounds[i].slack >= off) then
+       (activeBounds[i].baseIdx = nil) and (activeBounds[i].slack >= off) then
       exit(true);
+end;
+
+function canElideDynBoundsCheck(base, idx: PNode): boolean;
+var
+  baseVar, baseIdx, v: PDecl;
+  c, off, loVal, hiVal, tyLo, tyHi, needSlack: int64;
+  i: longint;
+begin
+  canElideDynBoundsCheck := false;
+  if (base = nil) or (base^.typ = nil) or (base^.typ^.kind <> tyDynArray) then
+    exit;
+  if not matchDynKey(base, baseVar, baseIdx) then
+    exit;
+  if (baseIdx = nil) and constIntOf(idx, c) and (c >= 0) then
+    if baseVar^.cgDynLenKnown and (c < baseVar^.cgDynLen) then
+      exit(true);
+  if not matchVarPlusConst(idx, v, off) then
+    exit;
+  if not v^.cgRangeKnown then
+    exit;
+  if addOverflows(v^.cgRangeLo, off, loVal) or (loVal < 0) then
+    exit;
+  if (idx^.typ = nil) or not isIntegerLike(idx^.typ) or
+     not isSignedOrdinal(idx^.typ) or
+     not signedTypeRange(regType(idx^.typ)^.bits, tyLo, tyHi) then
+    exit;
+  if addOverflows(v^.cgRangeHi, off, hiVal) or (hiVal > tyHi) or
+     (loVal < tyLo) then
+    exit;
+  if (baseIdx = nil) and baseVar^.cgDynLenKnown and (hiVal < baseVar^.cgDynLen) then
+    exit(true);
+  if addOverflows(off, 1, needSlack) then
+    exit;
+  for i := 0 to activeBoundCount - 1 do
+    if (activeBounds[i].idx = v) and (activeBounds[i].base = baseVar) and
+       (activeBounds[i].baseIdx = baseIdx) and
+       (activeBounds[i].slack >= needSlack) then
+      exit(true);
+end;
+
+function monotonicNonPosSteps(s: PNode; v: PDecl): boolean;
+var
+  i: longint;
+  step: int64;
+  be: PNode;
+  arm: PCaseArm;
+  used, w: TPtrList;
+begin
+  monotonicNonPosSteps := true;
+  if s = nil then
+    exit;
+  case s^.kind of
+    nkCompound:
+      for i := 0 to s^.stmts.count - 1 do
+        if not monotonicNonPosSteps(PNode(listGet(s^.stmts, i)), v) then
+          exit(false);
+    nkAssign:
+      begin
+        if plainAssignTarget(s^.target) <> v then
+          exit;
+        if not accumulatorStep(s, v, step) or (step > 0) then
+          exit(false);
+        if step < 0 then
+        begin
+          be := s^.value;
+          if (be = nil) or (be^.kind <> nkBinary) or
+             not overflowChecks(be^.opLoc) then
+            exit(false);
+        end;
+      end;
+    nkIf:
+      monotonicNonPosSteps := monotonicNonPosSteps(s^.thenStmt, v) and
+                              monotonicNonPosSteps(s^.elseStmt, v);
+    nkWhile:
+      monotonicNonPosSteps := monotonicNonPosSteps(s^.thenStmt, v);
+    nkRepeat:
+      for i := 0 to s^.stmts.count - 1 do
+        if not monotonicNonPosSteps(PNode(listGet(s^.stmts, i)), v) then
+          exit(false);
+    nkFor:
+      monotonicNonPosSteps := (plainAssignTarget(s^.forVar) <> v) and
+                              monotonicNonPosSteps(s^.forBody, v);
+    nkCase:
+      begin
+        for i := 0 to s^.arms.count - 1 do
+        begin
+          arm := PCaseArm(listGet(s^.arms, i));
+          if not monotonicNonPosSteps(arm^.body, v) then
+            exit(false);
+        end;
+        for i := 0 to s^.elseBody.count - 1 do
+          if not monotonicNonPosSteps(PNode(listGet(s^.elseBody, i)), v) then
+            exit(false);
+      end;
+  else
+    begin
+      listInit(used);
+      listInit(w);
+      paStmt(s, used, w, false, true);
+      monotonicNonPosSteps := not listHasPtr(w, v);
+      listFree(used);
+      listFree(w);
+    end;
+  end;
+end;
+
+function maxVarDrop(s: PNode; v: PDecl; var drop: int64): boolean;
+var
+  i: longint;
+  step, td, ed, maxD, d: int64;
+  arm: PCaseArm;
+  used, w: TPtrList;
+begin
+  maxVarDrop := true;
+  if s = nil then
+    exit;
+  case s^.kind of
+    nkCompound:
+      for i := 0 to s^.stmts.count - 1 do
+        if not maxVarDrop(PNode(listGet(s^.stmts, i)), v, drop) then
+          exit(false);
+    nkAssign:
+      begin
+        if plainAssignTarget(s^.target) <> v then
+          exit;
+        if not accumulatorStep(s, v, step) or (step > 0) or (step = low(int64)) then
+          exit(false);
+        if addOverflows(drop, -step, d) then
+          exit(false);
+        drop := d;
+      end;
+    nkIf:
+      begin
+        td := 0;
+        ed := 0;
+        if not maxVarDrop(s^.thenStmt, v, td) or not maxVarDrop(s^.elseStmt, v, ed) then
+          exit(false);
+        if ed > td then td := ed;
+        if addOverflows(drop, td, d) then
+          exit(false);
+        drop := d;
+      end;
+    nkCase:
+      begin
+        maxD := 0;
+        for i := 0 to s^.arms.count - 1 do
+        begin
+          arm := PCaseArm(listGet(s^.arms, i));
+          d := 0;
+          if not maxVarDrop(arm^.body, v, d) then
+            exit(false);
+          if d > maxD then maxD := d;
+        end;
+        ed := 0;
+        for i := 0 to s^.elseBody.count - 1 do
+          if not maxVarDrop(PNode(listGet(s^.elseBody, i)), v, ed) then
+            exit(false);
+        if ed > maxD then maxD := ed;
+        if addOverflows(drop, maxD, d) then
+          exit(false);
+        drop := d;
+      end;
+  else
+    begin
+      listInit(used);
+      listInit(w);
+      paStmt(s, used, w, false, true);
+      maxVarDrop := not listHasPtr(w, v);
+      listFree(used);
+      listFree(w);
+    end;
+  end;
+end;
+
+function findLoopAppendSetLength(body: PNode; var outArr: PDecl;
+                                 var resizeStmt: PNode): boolean;
+var
+  stmts: TPtrList;
+  i: longint;
+  s, addNode, lenC: PNode;
+  arr, bd: PDecl;
+  step: int64;
+begin
+  findLoopAppendSetLength := false;
+  listInit(stmts);
+  if (body <> nil) and (body^.kind = nkCompound) then
+  begin
+    for i := 0 to body^.stmts.count - 1 do
+      listAdd(stmts, listGet(body^.stmts, i));
+  end
+  else if body <> nil then
+    listAdd(stmts, body);
+  for i := 0 to stmts.count - 1 do
+  begin
+    s := PNode(listGet(stmts, i));
+    if s^.kind in [nkIf, nkWhile, nkFor, nkRepeat, nkCase] then
+      break;
+    if (s^.kind <> nkProcCall) or (s^.callValue <> nil) or (s^.callWith <> nil) or
+       (s^.calleeExpr <> nil) or (s^.callDecl = nil) or (s^.callDecl^.kind <> dkBuiltin) or
+       (s^.callDecl^.builtin <> bkSetLength) or (s^.args.count <> 2) then
+      continue;
+    arr := plainAssignTarget(PNode(listGet(s^.args, 0)));
+    if (arr = nil) or not arr^.cgDynTrack then
+      continue;
+    addNode := skipParensNode(PNode(listGet(s^.args, 1)));
+    if (addNode = nil) or (addNode^.kind <> nkBinary) or (addNode^.bop <> boAdd) or
+       (addNode^.opDecl <> nil) or not constIntOf(addNode^.rhs, step) or (step <> 1) then
+      continue;
+    lenC := skipParensNode(addNode^.lhs);
+    if (lenC = nil) or (lenC^.kind <> nkCall) or lenC^.isVarCast or
+       (lenC^.methodCast <> 0) or (lenC^.callValue <> nil) or (lenC^.callWith <> nil) or
+       (lenC^.calleeExpr <> nil) or (lenC^.args.count <> 1) then
+      continue;
+    bd := lenC^.callDecl;
+    if (bd = nil) or (bd^.kind <> dkBuiltin) or (bd^.builtin <> bkLength) or
+       (plainAssignTarget(PNode(listGet(lenC^.args, 0))) <> arr) then
+      continue;
+    if not dynKeyMutatedIn(body, arr, nil, s) then
+    begin
+      outArr := arr;
+      resizeStmt := s;
+      findLoopAppendSetLength := true;
+      break;
+    end;
+  end;
+  listFree(stmts);
 end;
 
 function monotonicNonNegSteps(s: PNode; v: PDecl): boolean;
@@ -8360,6 +9269,8 @@ begin
   listInit(asyncsToEmit);
   listInit(rangeLocals);
   listInit(immAnsiVars);
+  listInit(dynTrackVars);
+  listInit(dynGrows);
   listInit(checkedBases);
   activeBoundCount := 0;
   curForVar := nil;

@@ -576,6 +576,8 @@ type
       back to; item 3 ansistr: borrowed ansistring value parameter
       (cgBorrowedAnsi) }
     cgRangeLocal, cgLoopKnown, cgBorrowedAnsi, cgImmAnsi: boolean;
+    cgDynTrack, cgDynLenKnown: boolean;
+    cgDynLen: int64;
     cgLoopLo, cgLoopHi: int64;
     cgSliceLocal, cgSliceParam: boolean;
     cgSlicePtr, cgSliceLen: pointer;

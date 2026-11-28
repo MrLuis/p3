@@ -1342,61 +1342,71 @@ static bool aliasWriteUnsafeBuiltin(BuiltinKind BK) {
   }
 }
 
-static bool hasExternalAliasWritesExpr(Expr *E, VarSet *AnsiWritten = nullptr);
-static bool hasExternalAliasWritesStmt(Stmt *S, VarSet *AnsiWritten = nullptr);
+static bool hasExternalAliasWritesExpr(Expr *E, VarSet *AnsiWritten = nullptr,
+                                       VarSet *DynAlias = nullptr);
+static bool hasExternalAliasWritesStmt(Stmt *S, VarSet *AnsiWritten = nullptr,
+                                       VarSet *DynAlias = nullptr);
 
-static bool hasExternalAliasWritesTarget(Expr *E, VarSet *AnsiWritten = nullptr) {
+static bool hasExternalAliasWritesTarget(Expr *E, VarSet *AnsiWritten = nullptr,
+                                         VarSet *DynAlias = nullptr,
+                                         bool IsAddr = false) {
   if (!E)
     return false;
   while (auto *P = llvm::dyn_cast<ParenExpr>(E))
     E = P->getInner();
   if (auto *N = llvm::dyn_cast<NameRefExpr>(E)) {
-    if (!N->getWith() && AnsiWritten)
-      if (auto *V = llvm::dyn_cast_or_null<VarDecl>(N->getDecl()))
-        AnsiWritten->insert(V);
+    if (!N->getWith()) {
+      if (auto *V = llvm::dyn_cast_or_null<VarDecl>(N->getDecl())) {
+        if (AnsiWritten)
+          AnsiWritten->insert(V);
+        if (DynAlias && IsAddr)
+          DynAlias->insert(V);
+      }
+    }
     return false;
   }
   if (llvm::isa<DerefExpr>(E) || llvm::isa<SafeNavExpr>(E))
     return true;
   if (auto *I = llvm::dyn_cast<IndexExpr>(E))
-    return hasExternalAliasWritesTarget(I->getBase(), AnsiWritten) ||
-           hasExternalAliasWritesExpr(I->getIndex(), AnsiWritten);
+    return hasExternalAliasWritesTarget(I->getBase(), AnsiWritten, DynAlias, IsAddr) ||
+           hasExternalAliasWritesExpr(I->getIndex(), AnsiWritten, DynAlias);
   if (auto *F = llvm::dyn_cast<FieldExpr>(E))
-    return hasExternalAliasWritesTarget(F->getBase(), AnsiWritten);
-  return hasExternalAliasWritesExpr(E, AnsiWritten);
+    return hasExternalAliasWritesTarget(F->getBase(), AnsiWritten, DynAlias, IsAddr);
+  return hasExternalAliasWritesExpr(E, AnsiWritten, DynAlias);
 }
 
-static bool hasExternalAliasWritesExpr(Expr *E, VarSet *AnsiWritten) {
+static bool hasExternalAliasWritesExpr(Expr *E, VarSet *AnsiWritten,
+                                       VarSet *DynAlias) {
   if (!E)
     return false;
   E = const_cast<Expr *>(E);
   if (auto *P = llvm::dyn_cast<ParenExpr>(E))
-    return hasExternalAliasWritesExpr(P->getInner(), AnsiWritten);
+    return hasExternalAliasWritesExpr(P->getInner(), AnsiWritten, DynAlias);
   if (auto *U = llvm::dyn_cast<UnaryExpr>(E))
-    return U->getOperator() || hasExternalAliasWritesExpr(U->getOperand(), AnsiWritten);
+    return U->getOperator() || hasExternalAliasWritesExpr(U->getOperand(), AnsiWritten, DynAlias);
   if (auto *B = llvm::dyn_cast<BinaryExpr>(E))
-    return B->getOperator() || hasExternalAliasWritesExpr(B->getLHS(), AnsiWritten) ||
-           hasExternalAliasWritesExpr(B->getRHS(), AnsiWritten);
+    return B->getOperator() || hasExternalAliasWritesExpr(B->getLHS(), AnsiWritten, DynAlias) ||
+           hasExternalAliasWritesExpr(B->getRHS(), AnsiWritten, DynAlias);
   if (auto *I = llvm::dyn_cast<IndexExpr>(E))
-    return I->getProperty() || hasExternalAliasWritesExpr(I->getBase(), AnsiWritten) ||
-           hasExternalAliasWritesExpr(I->getIndex(), AnsiWritten);
+    return I->getProperty() || hasExternalAliasWritesExpr(I->getBase(), AnsiWritten, DynAlias) ||
+           hasExternalAliasWritesExpr(I->getIndex(), AnsiWritten, DynAlias);
   if (auto *F = llvm::dyn_cast<FieldExpr>(E))
     return (!F->getConstRef() &&
             !llvm::isa_and_nonnull<FieldDecl>(F->getMember())) ||
-           hasExternalAliasWritesExpr(F->getBase(), AnsiWritten);
+           hasExternalAliasWritesExpr(F->getBase(), AnsiWritten, DynAlias);
   if (auto *C = llvm::dyn_cast<CondExpr>(E))
-    return hasExternalAliasWritesExpr(C->getCond(), AnsiWritten) ||
-           hasExternalAliasWritesExpr(C->getThen(), AnsiWritten) ||
-           hasExternalAliasWritesExpr(C->getElse(), AnsiWritten);
+    return hasExternalAliasWritesExpr(C->getCond(), AnsiWritten, DynAlias) ||
+           hasExternalAliasWritesExpr(C->getThen(), AnsiWritten, DynAlias) ||
+           hasExternalAliasWritesExpr(C->getElse(), AnsiWritten, DynAlias);
   if (auto *SC = llvm::dyn_cast<SetCtorExpr>(E)) {
     for (const SetElement &El : SC->getElements())
-      if (hasExternalAliasWritesExpr(El.Lo, AnsiWritten) ||
-          hasExternalAliasWritesExpr(El.Hi, AnsiWritten))
+      if (hasExternalAliasWritesExpr(El.Lo, AnsiWritten, DynAlias) ||
+          hasExternalAliasWritesExpr(El.Hi, AnsiWritten, DynAlias))
         return true;
     return false;
   }
   if (auto *AO = llvm::dyn_cast<AddrOfExpr>(E)) {
-    hasExternalAliasWritesTarget(AO->getOperand(), AnsiWritten);
+    hasExternalAliasWritesTarget(AO->getOperand(), AnsiWritten, DynAlias, /*IsAddr=*/true);
     return false;
   }
   if (llvm::isa<IndirectCallExpr>(E) || llvm::isa<InheritedExpr>(E) ||
@@ -1408,7 +1418,7 @@ static bool hasExternalAliasWritesExpr(Expr *E, VarSet *AnsiWritten) {
     if (Call->isMethodCast() || Call->getCalleeValue() || Call->getWith())
       return true;
     for (Expr *Arg : Call->getArgs())
-      if (hasExternalAliasWritesExpr(Arg, AnsiWritten))
+      if (hasExternalAliasWritesExpr(Arg, AnsiWritten, DynAlias))
         return true;
     if (Call->isVarCast())
       return false;
@@ -1417,7 +1427,7 @@ static bool hasExternalAliasWritesExpr(Expr *E, VarSet *AnsiWritten) {
       if (BK == BuiltinKind::SetLength || BK == BuiltinKind::Inc ||
           BK == BuiltinKind::Dec) {
         if (!Call->getArgs().empty())
-          hasExternalAliasWritesTarget(Call->getArgs()[0], AnsiWritten);
+          hasExternalAliasWritesTarget(Call->getArgs()[0], AnsiWritten, DynAlias);
       }
       return aliasWriteUnsafeBuiltin(BK);
     }
@@ -1426,7 +1436,7 @@ static bool hasExternalAliasWritesExpr(Expr *E, VarSet *AnsiWritten) {
       auto Args = Call->getArgs();
       for (size_t I = 0; I < Args.size() && I < Params.size(); ++I)
         if (Params[I]->isVarParam() || Params[I]->isOutParam())
-          hasExternalAliasWritesTarget(Args[I], AnsiWritten);
+          hasExternalAliasWritesTarget(Args[I], AnsiWritten, DynAlias);
       return !CodeGenModule::routineWritesOnlyLocals(RD);
     }
     return true;
@@ -1434,45 +1444,46 @@ static bool hasExternalAliasWritesExpr(Expr *E, VarSet *AnsiWritten) {
   return false;
 }
 
-static bool hasExternalAliasWritesStmt(Stmt *S, VarSet *AnsiWritten) {
+static bool hasExternalAliasWritesStmt(Stmt *S, VarSet *AnsiWritten,
+                                       VarSet *DynAlias) {
   if (!S)
     return false;
   if (auto *C = llvm::dyn_cast<CompoundStmt>(S)) {
     for (Stmt *X : C->getBody())
-      if (hasExternalAliasWritesStmt(X, AnsiWritten))
+      if (hasExternalAliasWritesStmt(X, AnsiWritten, DynAlias))
         return true;
     return false;
   }
   if (auto *A = llvm::dyn_cast<AssignStmt>(S))
-    return hasExternalAliasWritesTarget(A->getTarget(), AnsiWritten) ||
-           hasExternalAliasWritesExpr(A->getValue(), AnsiWritten);
+    return hasExternalAliasWritesTarget(A->getTarget(), AnsiWritten, DynAlias) ||
+           hasExternalAliasWritesExpr(A->getValue(), AnsiWritten, DynAlias);
   if (auto *I = llvm::dyn_cast<IfStmt>(S))
-    return hasExternalAliasWritesExpr(I->getCond(), AnsiWritten) ||
-           hasExternalAliasWritesStmt(I->getThen(), AnsiWritten) ||
-           hasExternalAliasWritesStmt(I->getElse(), AnsiWritten);
+    return hasExternalAliasWritesExpr(I->getCond(), AnsiWritten, DynAlias) ||
+           hasExternalAliasWritesStmt(I->getThen(), AnsiWritten, DynAlias) ||
+           hasExternalAliasWritesStmt(I->getElse(), AnsiWritten, DynAlias);
   if (auto *W = llvm::dyn_cast<WhileStmt>(S))
-    return hasExternalAliasWritesExpr(W->getCond(), AnsiWritten) ||
-           hasExternalAliasWritesStmt(W->getBody(), AnsiWritten);
+    return hasExternalAliasWritesExpr(W->getCond(), AnsiWritten, DynAlias) ||
+           hasExternalAliasWritesStmt(W->getBody(), AnsiWritten, DynAlias);
   if (auto *Rp = llvm::dyn_cast<RepeatStmt>(S)) {
     for (Stmt *X : Rp->getBody())
-      if (hasExternalAliasWritesStmt(X, AnsiWritten))
+      if (hasExternalAliasWritesStmt(X, AnsiWritten, DynAlias))
         return true;
-    return hasExternalAliasWritesExpr(Rp->getCond(), AnsiWritten);
+    return hasExternalAliasWritesExpr(Rp->getCond(), AnsiWritten, DynAlias);
   }
   if (auto *F = llvm::dyn_cast<ForStmt>(S)) {
-    hasExternalAliasWritesTarget(F->getVar(), AnsiWritten);
-    return hasExternalAliasWritesExpr(F->getInit(), AnsiWritten) ||
-           hasExternalAliasWritesExpr(F->getFinal(), AnsiWritten) ||
-           hasExternalAliasWritesStmt(F->getBody(), AnsiWritten);
+    hasExternalAliasWritesTarget(F->getVar(), AnsiWritten, DynAlias);
+    return hasExternalAliasWritesExpr(F->getInit(), AnsiWritten, DynAlias) ||
+           hasExternalAliasWritesExpr(F->getFinal(), AnsiWritten, DynAlias) ||
+           hasExternalAliasWritesStmt(F->getBody(), AnsiWritten, DynAlias);
   }
   if (auto *Cs = llvm::dyn_cast<CaseStmt>(S)) {
-    if (hasExternalAliasWritesExpr(Cs->getSelector(), AnsiWritten))
+    if (hasExternalAliasWritesExpr(Cs->getSelector(), AnsiWritten, DynAlias))
       return true;
     for (CaseArm *A : Cs->getArms())
-      if (hasExternalAliasWritesStmt(A->getBody(), AnsiWritten))
+      if (hasExternalAliasWritesStmt(A->getBody(), AnsiWritten, DynAlias))
         return true;
     for (Stmt *X : Cs->getElseBody())
-      if (hasExternalAliasWritesStmt(X, AnsiWritten))
+      if (hasExternalAliasWritesStmt(X, AnsiWritten, DynAlias))
         return true;
     return false;
   }
@@ -1480,14 +1491,14 @@ static bool hasExternalAliasWritesStmt(Stmt *S, VarSet *AnsiWritten) {
     if (PC->getCalleeValue() || PC->getWith())
       return true;
     for (Expr *Arg : PC->getArgs())
-      if (hasExternalAliasWritesExpr(Arg, AnsiWritten))
+      if (hasExternalAliasWritesExpr(Arg, AnsiWritten, DynAlias))
         return true;
     if (auto *BD = llvm::dyn_cast_or_null<BuiltinDecl>(PC->getDecl())) {
       BuiltinKind BK = BD->getBuiltinKind();
       if (BK == BuiltinKind::SetLength || BK == BuiltinKind::Inc ||
           BK == BuiltinKind::Dec) {
         if (!PC->getArgs().empty())
-          hasExternalAliasWritesTarget(PC->getArgs()[0], AnsiWritten);
+          hasExternalAliasWritesTarget(PC->getArgs()[0], AnsiWritten, DynAlias);
       }
       return aliasWriteUnsafeBuiltin(BK);
     }
@@ -1496,28 +1507,30 @@ static bool hasExternalAliasWritesStmt(Stmt *S, VarSet *AnsiWritten) {
       auto Args = PC->getArgs();
       for (size_t I = 0; I < Args.size() && I < Params.size(); ++I)
         if (Params[I]->isVarParam() || Params[I]->isOutParam())
-          hasExternalAliasWritesTarget(Args[I], AnsiWritten);
+          hasExternalAliasWritesTarget(Args[I], AnsiWritten, DynAlias);
       return !CodeGenModule::routineWritesOnlyLocals(RD);
     }
     return true;
   }
   if (auto *VD = llvm::dyn_cast<VarDeclStmt>(S))
-    return hasExternalAliasWritesStmt(VD->getInitAssign(), AnsiWritten) ||
-           hasExternalAliasWritesExpr(VD->getInit(), AnsiWritten);
+    return hasExternalAliasWritesStmt(VD->getInitAssign(), AnsiWritten, DynAlias) ||
+           hasExternalAliasWritesExpr(VD->getInit(), AnsiWritten, DynAlias);
   if (auto *ES = llvm::dyn_cast<ExprStmt>(S))
-    return hasExternalAliasWritesExpr(ES->getExpr(), AnsiWritten);
+    return hasExternalAliasWritesExpr(ES->getExpr(), AnsiWritten, DynAlias);
   if (llvm::isa<EmptyStmt>(S) || llvm::isa<GotoStmt>(S))
     return false;
   return true;
 }
 
-static bool hasExternalAliasWrites(RoutineDecl *R, VarSet &AnsiWritten) {
+static bool hasExternalAliasWrites(RoutineDecl *R, VarSet &AnsiWritten,
+                                   VarSet *DynAlias = nullptr) {
   if (!R || !R->getBody() || !R->getBody()->getBody())
     return true;
   for (VarDecl *P : R->getParams())
     if (P->isVarParam() || P->isOutParam())
       return true;
-  return hasExternalAliasWritesStmt(R->getBody()->getBody(), &AnsiWritten);
+  return hasExternalAliasWritesStmt(R->getBody()->getBody(), &AnsiWritten,
+                                    DynAlias);
 }
 } // namespace
 
@@ -1528,6 +1541,9 @@ void CodeGenModule::initRangeLocals(RoutineDecl *R){
   RangeLocals.clear();
   LoopRanges.clear();
   ImmutableAnsiVars.clear();
+  TrackableDynVars.clear();
+  DynConstLen.clear();
+  ActiveDynGrows.clear();
   VarLengthOf.clear();
   ActiveLengthBounds.clear();
   // (a label: a goto may arrive with any value)
@@ -1535,29 +1551,52 @@ void CodeGenModule::initRangeLocals(RoutineDecl *R){
     if (llvm::isa<LabelDecl>(D))
       return;
   VarSet Other = PinAnalysis(R).otherWrites(R->getBody()->getBody());
-  VarSet AnsiWritten;
-  bool AliasWrites = hasExternalAliasWrites(R, AnsiWritten);
+  VarSet AnsiWritten, DynAlias;
+  bool AliasWrites = hasExternalAliasWrites(R, AnsiWritten, &DynAlias);
   for (Decl *D : R->getBody()->getDecls()) {
     auto *V = llvm::dyn_cast<VarDecl>(D);
-    if (!V || V->getVarKind() != VarDecl::Variable || V->isTypedConst() ||
-        V->isInitializedVar() || V->isInline() || V->getAbsolute() ||
-        V->isCaptured() || V->isOwned())
+    if (!V || (V->getVarKind() != VarDecl::Variable &&
+               V->getVarKind() != VarDecl::Result) ||
+        V->isTypedConst() || V->isInitializedVar() || V->isInline() ||
+        V->getAbsolute() || V->getAbsoluteRoot() || V->isCaptured() ||
+        V->isOwned())
       continue;
     if (!AnsiWritten.count(V) && !Other.count(V) &&
+        V->getVarKind() == VarDecl::Variable &&
         V->getType() && V->getType()->isAnsiString())
       ImmutableAnsiVars.insert(V);
-    if (Other.count(V) || !V->getType() ||
-        !V->getType()->isOrdinal() || !isSignedOrdinal(V->getType()))
+    if (!AliasWrites && !DynAlias.count(V) &&
+        V->getType() && V->getType()->isDynArray()) {
+      TrackableDynVars.insert(V);
+      DynConstLen[V] = 0;
+    }
+    if (V->getVarKind() != VarDecl::Variable || Other.count(V) ||
+        !V->getType() || !V->getType()->isOrdinal() ||
+        !isSignedOrdinal(V->getType()))
       continue;
     RangeLocals.insert(V);
     VarRanges[V] = {true, 0, 0};
   }
   if (!AliasWrites) {
-    for (VarDecl *P : R->getParams())
-      if (!P->isVarParam() && !P->isOutParam() && !isByRef(P) &&
-          !P->getAbsolute() && !P->isCaptured() && !AnsiWritten.count(P) &&
-          P->getType() && P->getType()->isAnsiString())
+    if (R->isFunction()) {
+      if (VarDecl *Res = R->getResultVar();
+          Res && !Res->getAbsolute() && !Res->getAbsoluteRoot() &&
+          !Res->isCaptured() && !Res->isOwned() && !DynAlias.count(Res) &&
+          Res->getType() && Res->getType()->isDynArray()) {
+        TrackableDynVars.insert(Res);
+        DynConstLen[Res] = 0;
+      }
+    }
+    for (VarDecl *P : R->getParams()) {
+      if (P->isVarParam() || P->isOutParam() || isByRef(P) ||
+          P->getAbsolute() || P->getAbsoluteRoot() || P->isCaptured() ||
+          !P->getType())
+        continue;
+      if (!AnsiWritten.count(P) && P->getType()->isAnsiString())
         ImmutableAnsiVars.insert(P);
+      if (!DynAlias.count(P) && P->getType()->isDynArray())
+        TrackableDynVars.insert(P);
+    }
   }
 }
 
@@ -1568,6 +1607,9 @@ void CodeGenModule::endRangeLocals(){
   RangeLocals.clear();
   LoopRanges.clear();
   ImmutableAnsiVars.clear();
+  TrackableDynVars.clear();
+  DynConstLen.clear();
+  ActiveDynGrows.clear();
   VarLengthOf.clear();
   ActiveLengthBounds.clear();
 }
@@ -1577,8 +1619,25 @@ void CodeGenModule::invalidateRangeLocalLength(VarDecl *V){
   if (!V)
     return;
   VarLengthOf.erase(V);
-  llvm::erase_if(ActiveLengthBounds,
-                 [&](const LengthBound &B) { return B.Idx == V; });
+  llvm::erase_if(ActiveLengthBounds, [&](const LengthBound &B) {
+    return B.Idx == V || B.BaseIdx == V;
+  });
+}
+
+
+void CodeGenModule::invalidateDynBase(VarDecl *Base){
+  if (!Base)
+    return;
+  DynConstLen.erase(Base);
+  llvm::erase_if(ActiveLengthBounds, [&](const LengthBound &B) {
+    return B.Base == Base || B.BaseIdx == Base;
+  });
+  llvm::SmallVector<VarDecl *, 4> Drop;
+  for (auto &[K, V] : VarLengthOf)
+    if (V == Base)
+      Drop.push_back(K);
+  for (VarDecl *K : Drop)
+    VarLengthOf.erase(K);
 }
 
 
@@ -1601,26 +1660,273 @@ VarDecl *CodeGenModule::plainAnsiVar(Expr *E){
 }
 
 
-VarDecl *CodeGenModule::matchLengthExpr(Expr *E) const {
+bool CodeGenModule::matchDynKey(Expr *E, VarDecl *&Base,
+                                VarDecl *&BaseIdx) const {
+  while (E) {
+    E = unwrapConst(E);
+    if (auto *P = llvm::dyn_cast<ParenExpr>(E)) {
+      E = P->getInner();
+      continue;
+    }
+    break;
+  }
+  if (!E)
+    return false;
+  if (auto *N = llvm::dyn_cast<NameRefExpr>(E); N && !N->getWith()) {
+    auto *V = llvm::dyn_cast_or_null<VarDecl>(N->getDecl());
+    if (V && !V->getAbsolute() && !V->getAbsoluteRoot() &&
+        (ImmutableAnsiVars.count(V) || TrackableDynVars.count(V))) {
+      Base = V;
+      BaseIdx = nullptr;
+      return true;
+    }
+    return false;
+  }
+  if (auto *I = llvm::dyn_cast<IndexExpr>(E)) {
+    Expr *B = I->getBase(), *X = I->getIndex();
+    while (auto *P = llvm::dyn_cast_or_null<ParenExpr>(B))
+      B = P->getInner();
+    while (auto *P = llvm::dyn_cast_or_null<ParenExpr>(X))
+      X = P->getInner();
+    auto *NB = llvm::dyn_cast_or_null<NameRefExpr>(B);
+    auto *NX = llvm::dyn_cast_or_null<NameRefExpr>(X);
+    if (!NB || NB->getWith() || !NX || NX->getWith())
+      return false;
+    auto *V = llvm::dyn_cast_or_null<VarDecl>(NB->getDecl());
+    auto *Idx = llvm::dyn_cast_or_null<VarDecl>(NX->getDecl());
+    if (V && Idx && TrackableDynVars.count(V) &&
+        (RangeLocals.count(Idx) || VarRanges.count(Idx)) &&
+        V->getType() && V->getType()->isDynArray()) {
+      Base = V;
+      BaseIdx = Idx;
+      return true;
+    }
+  }
+  return false;
+}
+
+
+bool CodeGenModule::dynKeyMutatedIn(const Stmt *S, VarDecl *Base,
+                                    VarDecl *BaseIdx, const Stmt *Skip) const {
+  if (!S || !Base)
+    return false;
+  if (ImmutableAnsiVars.count(Base) && !BaseIdx)
+    return false;
+  auto targetMutates = [&](const Expr *T) -> bool {
+    while (auto *P = llvm::dyn_cast_or_null<ParenExpr>(T))
+      T = P->getInner();
+    if (!T)
+      return false;
+    if (auto *V = PinAnalysis::plainAssignTarget(const_cast<Expr *>(T)))
+      return V == Base || (BaseIdx && V == BaseIdx);
+    if (BaseIdx) {
+      if (auto *I = llvm::dyn_cast<IndexExpr>(T))
+        if (PinAnalysis::plainAssignTarget(I->getBase()) == Base)
+          return true;
+    }
+    return llvm::isa<DerefExpr>(T) || llvm::isa<SafeNavExpr>(T);
+  };
+  std::function<bool(const Expr *)> exprMutates = [&](const Expr *E) -> bool {
+    if (!E)
+      return false;
+    if (auto *P = llvm::dyn_cast<ParenExpr>(E))
+      return exprMutates(P->getInner());
+    if (auto *U = llvm::dyn_cast<UnaryExpr>(E))
+      return U->getOperator() || exprMutates(U->getOperand());
+    if (auto *B = llvm::dyn_cast<BinaryExpr>(E))
+      return B->getOperator() || exprMutates(B->getLHS()) || exprMutates(B->getRHS());
+    if (auto *I = llvm::dyn_cast<IndexExpr>(E))
+      return I->getProperty() || exprMutates(I->getBase()) || exprMutates(I->getIndex());
+    if (auto *F = llvm::dyn_cast<FieldExpr>(E))
+      return exprMutates(F->getBase());
+    if (auto *C = llvm::dyn_cast<CondExpr>(E))
+      return exprMutates(C->getCond()) || exprMutates(C->getThen()) || exprMutates(C->getElse());
+    if (auto *SC = llvm::dyn_cast<SetCtorExpr>(E)) {
+      for (const SetElement &El : SC->getElements())
+        if (exprMutates(El.Lo) || exprMutates(El.Hi))
+          return true;
+      return false;
+    }
+    if (auto *AO = llvm::dyn_cast<AddrOfExpr>(E))
+      return targetMutates(AO->getOperand());
+    if (llvm::isa<IndirectCallExpr>(E) || llvm::isa<InheritedExpr>(E) ||
+        llvm::isa<SpawnExpr>(E) || llvm::isa<AwaitExpr>(E) ||
+        llvm::isa<MoveExpr>(E) || llvm::isa<SafeNavExpr>(E) ||
+        llvm::isa<CoalesceExpr>(E))
+      return true;
+    if (auto *Call = llvm::dyn_cast<CallExpr>(E)) {
+      if (Call->isMethodCast() || Call->getCalleeValue() || Call->getWith())
+        return true;
+      for (Expr *A : Call->getArgs())
+        if (exprMutates(A))
+          return true;
+      if (Call->isVarCast())
+        return false;
+      if (auto *BD = llvm::dyn_cast_or_null<BuiltinDecl>(Call->getDecl())) {
+        BuiltinKind BK = BD->getBuiltinKind();
+        if ((BK == BuiltinKind::SetLength || BK == BuiltinKind::Inc ||
+             BK == BuiltinKind::Dec || BK == BuiltinKind::Delete ||
+             BK == BuiltinKind::Insert || BK == BuiltinKind::FillChar ||
+             BK == BuiltinKind::New || BK == BuiltinKind::Dispose) &&
+            !Call->getArgs().empty() && targetMutates(Call->getArgs()[0]))
+          return true;
+        if (BK == BuiltinKind::Move && Call->getArgs().size() > 1 &&
+            targetMutates(Call->getArgs()[1]))
+          return true;
+        return aliasWriteUnsafeBuiltin(BK);
+      }
+      if (auto *RD = llvm::dyn_cast_or_null<RoutineDecl>(Call->getDecl())) {
+        auto Params = RD->getParams();
+        auto Args = Call->getArgs();
+        for (size_t I = 0; I < Args.size() && I < Params.size(); ++I)
+          if ((Params[I]->isVarParam() || Params[I]->isOutParam()) &&
+              targetMutates(Args[I]))
+            return true;
+        return !routineWritesOnlyLocals(RD);
+      }
+      return true;
+    }
+    return false;
+  };
+  std::function<bool(const Stmt *)> stmtMutates = [&](const Stmt *St) -> bool {
+    if (!St || St == Skip)
+      return false;
+    if (auto *C = llvm::dyn_cast<CompoundStmt>(St)) {
+      for (Stmt *X : C->getBody())
+        if (stmtMutates(X))
+          return true;
+      return false;
+    }
+    if (auto *A = llvm::dyn_cast<AssignStmt>(St))
+      return targetMutates(A->getTarget()) || exprMutates(A->getValue());
+    if (auto *I = llvm::dyn_cast<IfStmt>(St))
+      return exprMutates(I->getCond()) || stmtMutates(I->getThen()) ||
+             stmtMutates(I->getElse());
+    if (auto *W = llvm::dyn_cast<WhileStmt>(St))
+      return exprMutates(W->getCond()) || stmtMutates(W->getBody());
+    if (auto *Rp = llvm::dyn_cast<RepeatStmt>(St)) {
+      for (Stmt *X : Rp->getBody())
+        if (stmtMutates(X))
+          return true;
+      return exprMutates(Rp->getCond());
+    }
+    if (auto *F = llvm::dyn_cast<ForStmt>(St))
+      return targetMutates(F->getVar()) || exprMutates(F->getInit()) ||
+             exprMutates(F->getFinal()) || stmtMutates(F->getBody());
+    if (auto *Cs = llvm::dyn_cast<CaseStmt>(St)) {
+      if (exprMutates(Cs->getSelector()))
+        return true;
+      for (CaseArm *A : Cs->getArms())
+        if (stmtMutates(A->getBody()))
+          return true;
+      for (Stmt *X : Cs->getElseBody())
+        if (stmtMutates(X))
+          return true;
+      return false;
+    }
+    if (auto *PC = llvm::dyn_cast<ProcCallStmt>(St)) {
+      if (PC->getCalleeValue() || PC->getWith())
+        return true;
+      for (Expr *A : PC->getArgs())
+        if (exprMutates(A))
+          return true;
+      if (auto *BD = llvm::dyn_cast_or_null<BuiltinDecl>(PC->getDecl())) {
+        BuiltinKind BK = BD->getBuiltinKind();
+        if ((BK == BuiltinKind::SetLength || BK == BuiltinKind::Inc ||
+             BK == BuiltinKind::Dec || BK == BuiltinKind::Delete ||
+             BK == BuiltinKind::Insert || BK == BuiltinKind::FillChar ||
+             BK == BuiltinKind::New || BK == BuiltinKind::Dispose) &&
+            !PC->getArgs().empty() && targetMutates(PC->getArgs()[0]))
+          return true;
+        if (BK == BuiltinKind::Move && PC->getArgs().size() > 1 &&
+            targetMutates(PC->getArgs()[1]))
+          return true;
+        return aliasWriteUnsafeBuiltin(BK);
+      }
+      if (auto *RD = llvm::dyn_cast_or_null<RoutineDecl>(PC->getDecl())) {
+        auto Params = RD->getParams();
+        auto Args = PC->getArgs();
+        for (size_t I = 0; I < Args.size() && I < Params.size(); ++I)
+          if ((Params[I]->isVarParam() || Params[I]->isOutParam()) &&
+              targetMutates(Args[I]))
+            return true;
+        return !routineWritesOnlyLocals(RD);
+      }
+      return true;
+    }
+    if (auto *VD = llvm::dyn_cast<VarDeclStmt>(St))
+      return stmtMutates(VD->getInitAssign()) || exprMutates(VD->getInit());
+    if (auto *ES = llvm::dyn_cast<ExprStmt>(St))
+      return exprMutates(ES->getExpr());
+    if (llvm::isa<EmptyStmt>(St) || llvm::isa<GotoStmt>(St))
+      return false;
+    return true;
+  };
+  return stmtMutates(S);
+}
+
+
+bool CodeGenModule::matchHighOrLenExpr(Expr *E, VarDecl *&Base,
+                                       VarDecl *&BaseIdx,
+                                       int64_t &ExtraSlack) const {
   while (auto *P = llvm::dyn_cast_or_null<ParenExpr>(E))
     E = P->getInner();
   if (!E)
-    return nullptr;
+    return false;
   if (VarDecl *V = PinAnalysis::plainAssignTarget(E)) {
     auto It = VarLengthOf.find(V);
-    if (It != VarLengthOf.end() && ImmutableAnsiVars.count(It->second))
-      return It->second;
-    return nullptr;
+    if (It != VarLengthOf.end() &&
+        (ImmutableAnsiVars.count(It->second) || TrackableDynVars.count(It->second))) {
+      Base = It->second;
+      BaseIdx = nullptr;
+      ExtraSlack = 0;
+      return true;
+    }
+    return false;
+  }
+  if (auto *B = llvm::dyn_cast<BinaryExpr>(E);
+      B && B->getOp() == BinaryOp::Sub && !B->getOperator()) {
+    int64_t C = 0;
+    int64_t SubSlack = 0;
+    if (constInt(B->getRHS(), C) && C >= 0 &&
+        matchHighOrLenExpr(B->getLHS(), Base, BaseIdx, SubSlack) &&
+        !__builtin_add_overflow(SubSlack, C, &ExtraSlack))
+      return true;
+    return false;
   }
   auto *C = llvm::dyn_cast<CallExpr>(E);
   if (!C || C->isMethodCast() || C->isVarCast() || C->getCalleeValue() ||
       C->getWith() || C->getArgs().size() != 1)
-    return nullptr;
+    return false;
   auto *BD = llvm::dyn_cast_or_null<BuiltinDecl>(C->getDecl());
-  if (!BD || BD->getBuiltinKind() != BuiltinKind::Length)
-    return nullptr;
-  VarDecl *Base = plainAnsiVar(C->getArgs()[0]);
-  return Base && ImmutableAnsiVars.count(Base) ? Base : nullptr;
+  if (!BD)
+    return false;
+  if (BD->getBuiltinKind() == BuiltinKind::Length) {
+    if (matchDynKey(C->getArgs()[0], Base, BaseIdx)) {
+      ExtraSlack = 0;
+      return true;
+    }
+    return false;
+  }
+  if (BD->getBuiltinKind() == BuiltinKind::High) {
+    Type *AT = C->getArgs()[0]->getType();
+    if (AT && (AT->isDynArray() || AT->isAnsiString()) &&
+        matchDynKey(C->getArgs()[0], Base, BaseIdx)) {
+      ExtraSlack = 1;
+      return true;
+    }
+  }
+  return false;
+}
+
+
+VarDecl *CodeGenModule::matchLengthExpr(Expr *E) const {
+  VarDecl *Base = nullptr, *BaseIdx = nullptr;
+  int64_t Extra = 0;
+  if (matchHighOrLenExpr(E, Base, BaseIdx, Extra) && !BaseIdx && Extra == 0 &&
+      ImmutableAnsiVars.count(Base))
+    return Base;
+  return nullptr;
 }
 
 
@@ -1630,7 +1936,7 @@ bool CodeGenModule::matchVarPlusConst(Expr *E, VarDecl *&V, int64_t &Off) const 
   if (!E)
     return false;
   if (VarDecl *PV = PinAnalysis::plainAssignTarget(E)) {
-    if (!RangeLocals.count(PV))
+    if (!RangeLocals.count(PV) && !VarRanges.count(PV))
       return false;
     V = PV;
     Off = 0;
@@ -1644,21 +1950,23 @@ bool CodeGenModule::matchVarPlusConst(Expr *E, VarDecl *&V, int64_t &Off) const 
   int64_t C = 0;
   if (B->getOp() == BinaryOp::Add) {
     if (VarDecl *LV = PinAnalysis::plainAssignTarget(B->getLHS());
-        LV && RangeLocals.count(LV) && constInt(B->getRHS(), C)) {
+        LV && (RangeLocals.count(LV) || VarRanges.count(LV)) &&
+        constInt(B->getRHS(), C)) {
       V = LV;
       Off = C;
       return true;
     }
     if (VarDecl *RV = PinAnalysis::plainAssignTarget(B->getRHS());
-        RV && RangeLocals.count(RV) && constInt(B->getLHS(), C)) {
+        RV && (RangeLocals.count(RV) || VarRanges.count(RV)) &&
+        constInt(B->getLHS(), C)) {
       V = RV;
       Off = C;
       return true;
     }
   } else if (B->getOp() == BinaryOp::Sub) {
     if (VarDecl *LV = PinAnalysis::plainAssignTarget(B->getLHS());
-        LV && RangeLocals.count(LV) && constInt(B->getRHS(), C) &&
-        C != INT64_MIN) {
+        LV && (RangeLocals.count(LV) || VarRanges.count(LV)) &&
+        constInt(B->getRHS(), C) && C != INT64_MIN) {
       V = LV;
       Off = -C;
       return true;
@@ -1695,18 +2003,23 @@ void CodeGenModule::collectLengthBounds(
   while (auto *P = llvm::dyn_cast_or_null<ParenExpr>(X))
     X = P->getInner();
   VarDecl *Idx = PinAnalysis::plainAssignTarget(X);
-  VarDecl *Base = matchLengthExpr(Len);
-  if (!Idx || !RangeLocals.count(Idx) || !Base)
+  VarDecl *Base = nullptr, *BaseIdx = nullptr;
+  int64_t ExtraSlack = 0;
+  if (!Idx || (!RangeLocals.count(Idx) && !VarRanges.count(Idx)) ||
+      !matchHighOrLenExpr(Len, Base, BaseIdx, ExtraSlack))
     return;
-  int64_t Slack = Strict ? 1 : 0;
+  int64_t Slack = 0;
+  if (__builtin_add_overflow(ExtraSlack, int64_t(Strict ? 1 : 0), &Slack))
+    return;
   for (LengthBound &Existing : Out) {
-    if (Existing.Idx == Idx && Existing.Base == Base) {
+    if (Existing.Idx == Idx && Existing.Base == Base &&
+        Existing.BaseIdx == BaseIdx) {
       if (Slack > Existing.Slack)
         Existing.Slack = Slack;
       return;
     }
   }
-  Out.push_back({Idx, Base, Slack});
+  Out.push_back({Idx, Base, BaseIdx, Slack});
 }
 
 
@@ -1714,7 +2027,7 @@ void CodeGenModule::applyLengthBounds(llvm::ArrayRef<LengthBound> Bounds) {
   for (const LengthBound &B : Bounds) {
     bool Merged = false;
     for (LengthBound &Act : ActiveLengthBounds) {
-      if (Act.Idx == B.Idx && Act.Base == B.Base) {
+      if (Act.Idx == B.Idx && Act.Base == B.Base && Act.BaseIdx == B.BaseIdx) {
         if (B.Slack > Act.Slack)
           Act.Slack = B.Slack;
         Merged = true;
@@ -1723,11 +2036,19 @@ void CodeGenModule::applyLengthBounds(llvm::ArrayRef<LengthBound> Bounds) {
     }
     if (!Merged)
       ActiveLengthBounds.push_back(B);
-    auto It = VarRanges.find(B.Idx);
-    if (It != VarRanges.end()) {
-      int64_t MaxV = int64_t(INT32_MAX) - B.Slack;
-      if (It->second.Lo <= MaxV && MaxV < It->second.Hi)
-        It->second.Hi = MaxV;
+    if (!B.BaseIdx) {
+      auto It = VarRanges.find(B.Idx);
+      if (It != VarRanges.end()) {
+        int64_t Adj = (B.Base && B.Base->getType() &&
+                       B.Base->getType()->isDynArray())
+                          ? (B.Slack - 1)
+                          : B.Slack;
+        if (Adj >= 0) {
+          int64_t MaxV = int64_t(INT32_MAX) - Adj;
+          if (It->second.Lo <= MaxV && MaxV < It->second.Hi)
+            It->second.Hi = MaxV;
+        }
+      }
     }
   }
 }
@@ -1823,13 +2144,14 @@ void CodeGenModule::applyConstBounds(llvm::ArrayRef<ConstBound> Bounds) {
 
 
 CodeGenModule::RangeState CodeGenModule::saveRangeState() const {
-  return {VarRanges, VarLengthOf, ActiveLengthBounds};
+  return {VarRanges, VarLengthOf, DynConstLen, ActiveLengthBounds};
 }
 
 
 void CodeGenModule::restoreRangeState(const RangeState &S) {
   VarRanges = S.VarRanges;
   VarLengthOf = S.VarLengthOf;
+  DynConstLen = S.DynConstLen;
   ActiveLengthBounds = S.ActiveLengthBounds;
 }
 
@@ -1859,7 +2181,53 @@ bool CodeGenModule::canElideAnsiBoundsCheck(Expr *Base, Expr *Idx) const {
       HiVal > ExprTyRange.Hi || LoVal < ExprTyRange.Lo)
     return false;
   for (const LengthBound &B : ActiveLengthBounds)
-    if (B.Idx == V && B.Base == BaseVar && B.Slack >= Off)
+    if (B.Idx == V && B.Base == BaseVar && !B.BaseIdx && B.Slack >= Off)
+      return true;
+  return false;
+}
+
+
+bool CodeGenModule::canElideDynBoundsCheck(Expr *Base, Expr *Idx) const {
+  if (!Base || !Base->getType() || !Base->getType()->isDynArray())
+    return false;
+  VarDecl *BaseVar = nullptr, *BaseIdx = nullptr;
+  if (!matchDynKey(Base, BaseVar, BaseIdx))
+    return false;
+  int64_t C = 0;
+  if (!BaseIdx && constInt(Idx, C) && C >= 0) {
+    auto DIt = DynConstLen.find(BaseVar);
+    if (DIt != DynConstLen.end() && C < DIt->second)
+      return true;
+  }
+  VarDecl *V = nullptr;
+  int64_t Off = 0;
+  if (!matchVarPlusConst(Idx, V, Off))
+    return false;
+  auto It = VarRanges.find(V);
+  if (It == VarRanges.end() || !It->second.Known)
+    return false;
+  int64_t LoVal = 0, HiVal = 0;
+  if (__builtin_add_overflow(It->second.Lo, Off, &LoVal) || LoVal < 0)
+    return false;
+  ValueRange ExprTyRange;
+  if (!Idx->getType() || !Idx->getType()->isIntegerLike() ||
+      !isSignedOrdinal(Idx->getType()) ||
+      !signedRange(intBits(Idx->getType()), ExprTyRange))
+    return false;
+  if (__builtin_add_overflow(It->second.Hi, Off, &HiVal) ||
+      HiVal > ExprTyRange.Hi || LoVal < ExprTyRange.Lo)
+    return false;
+  if (!BaseIdx) {
+    auto DIt = DynConstLen.find(BaseVar);
+    if (DIt != DynConstLen.end() && HiVal < DIt->second)
+      return true;
+  }
+  int64_t NeedSlack = 0;
+  if (__builtin_add_overflow(Off, int64_t(1), &NeedSlack))
+    return false;
+  for (const LengthBound &B : ActiveLengthBounds)
+    if (B.Idx == V && B.Base == BaseVar && B.BaseIdx == BaseIdx &&
+        B.Slack >= NeedSlack)
       return true;
   return false;
 }
@@ -1923,6 +2291,148 @@ bool CodeGenModule::monotonicNonNegSteps(Stmt *S, VarDecl *V) const {
   VarSet W;
   PinAnalysis(CurRoutine).writtenBy(S, W);
   return !W.count(V);
+}
+
+
+bool CodeGenModule::monotonicNonPosSteps(Stmt *S, VarDecl *V) const {
+  if (!S)
+    return true;
+  if (auto *C = llvm::dyn_cast<CompoundStmt>(S)) {
+    for (Stmt *X : C->getBody())
+      if (!monotonicNonPosSteps(X, V))
+        return false;
+    return true;
+  }
+  if (auto *A = llvm::dyn_cast<AssignStmt>(S)) {
+    if (PinAnalysis::plainAssignTarget(A->getTarget()) != V)
+      return true;
+    int64_t Step = 0;
+    if (!accumulatorStep(A, V, Step) || Step > 0)
+      return false;
+    if (Step < 0) {
+      auto *BE = llvm::dyn_cast_or_null<BinaryExpr>(A->getValue());
+      if (!BE || !overflowChecks(BE->getOpLoc()))
+        return false;
+    }
+    return true;
+  }
+  if (auto *I = llvm::dyn_cast<IfStmt>(S))
+    return monotonicNonPosSteps(I->getThen(), V) &&
+           monotonicNonPosSteps(I->getElse(), V);
+  if (auto *W = llvm::dyn_cast<WhileStmt>(S))
+    return !exprWritesVar(W->getCond(), V) &&
+           monotonicNonPosSteps(W->getBody(), V);
+  if (auto *Rp = llvm::dyn_cast<RepeatStmt>(S)) {
+    for (Stmt *X : Rp->getBody())
+      if (!monotonicNonPosSteps(X, V))
+        return false;
+    return !exprWritesVar(Rp->getCond(), V);
+  }
+  if (auto *F = llvm::dyn_cast<ForStmt>(S))
+    return PinAnalysis::plainAssignTarget(F->getVar()) != V &&
+           monotonicNonPosSteps(F->getBody(), V);
+  if (auto *C = llvm::dyn_cast<CaseStmt>(S)) {
+    for (CaseArm *A : C->getArms())
+      if (!monotonicNonPosSteps(A->getBody(), V))
+        return false;
+    for (Stmt *X : C->getElseBody())
+      if (!monotonicNonPosSteps(X, V))
+        return false;
+    return true;
+  }
+  VarSet W;
+  PinAnalysis(CurRoutine).writtenBy(S, W);
+  return !W.count(V);
+}
+
+
+bool CodeGenModule::maxVarDrop(Stmt *S, VarDecl *V, int64_t &Drop) const {
+  if (!S)
+    return true;
+  if (auto *C = llvm::dyn_cast<CompoundStmt>(S)) {
+    for (Stmt *X : C->getBody())
+      if (!maxVarDrop(X, V, Drop))
+        return false;
+    return true;
+  }
+  if (auto *A = llvm::dyn_cast<AssignStmt>(S)) {
+    if (PinAnalysis::plainAssignTarget(A->getTarget()) != V)
+      return true;
+    int64_t Step = 0;
+    if (!accumulatorStep(A, V, Step) || Step > 0 || Step == INT64_MIN)
+      return false;
+    return !__builtin_add_overflow(Drop, -Step, &Drop);
+  }
+  if (auto *I = llvm::dyn_cast<IfStmt>(S)) {
+    int64_t TD = 0, ED = 0;
+    if (!maxVarDrop(I->getThen(), V, TD) || !maxVarDrop(I->getElse(), V, ED))
+      return false;
+    return !__builtin_add_overflow(Drop, std::max(TD, ED), &Drop);
+  }
+  if (auto *Cs = llvm::dyn_cast<CaseStmt>(S)) {
+    int64_t MaxD = 0;
+    for (CaseArm *A : Cs->getArms()) {
+      int64_t D = 0;
+      if (!maxVarDrop(A->getBody(), V, D))
+        return false;
+      MaxD = std::max(MaxD, D);
+    }
+    int64_t ED = 0;
+    for (Stmt *X : Cs->getElseBody())
+      if (!maxVarDrop(X, V, ED))
+        return false;
+    MaxD = std::max(MaxD, ED);
+    return !__builtin_add_overflow(Drop, MaxD, &Drop);
+  }
+  VarSet W;
+  PinAnalysis(CurRoutine).writtenBy(S, W);
+  return !W.count(V);
+}
+
+
+bool CodeGenModule::findLoopAppendSetLength(Stmt *Body, VarDecl *&OutArr,
+                                            const Stmt *&ResizeStmt) const {
+  llvm::SmallVector<Stmt *, 4> Stmts;
+  if (auto *C = llvm::dyn_cast_or_null<CompoundStmt>(Body))
+    Stmts.assign(C->getBody().begin(), C->getBody().end());
+  else if (Body)
+    Stmts.push_back(Body);
+  for (Stmt *S : Stmts) {
+    if (llvm::isa<IfStmt>(S) || llvm::isa<WhileStmt>(S) ||
+        llvm::isa<ForStmt>(S) || llvm::isa<RepeatStmt>(S) ||
+        llvm::isa<CaseStmt>(S))
+      return false;
+    auto *PC = llvm::dyn_cast<ProcCallStmt>(S);
+    if (!PC || PC->getCalleeValue() || PC->getWith())
+      continue;
+    auto *BD = llvm::dyn_cast_or_null<BuiltinDecl>(PC->getDecl());
+    if (!BD || BD->getBuiltinKind() != BuiltinKind::SetLength ||
+        PC->getArgs().size() != 2)
+      continue;
+    VarDecl *Arr = PinAnalysis::plainAssignTarget(PC->getArgs()[0]);
+    if (!Arr || !TrackableDynVars.count(Arr))
+      continue;
+    auto *Add = llvm::dyn_cast<BinaryExpr>(skipParens(PC->getArgs()[1]));
+    int64_t Step = 0;
+    if (!Add || Add->getOp() != BinaryOp::Add || Add->getOperator() ||
+        !constInt(Add->getRHS(), Step) || Step != 1)
+      continue;
+    auto *LenC = llvm::dyn_cast<CallExpr>(skipParens(Add->getLHS()));
+    if (!LenC || LenC->isMethodCast() || LenC->isVarCast() ||
+        LenC->getCalleeValue() || LenC->getWith() ||
+        LenC->getArgs().size() != 1)
+      continue;
+    auto *LenBD = llvm::dyn_cast_or_null<BuiltinDecl>(LenC->getDecl());
+    if (!LenBD || LenBD->getBuiltinKind() != BuiltinKind::Length ||
+        PinAnalysis::plainAssignTarget(LenC->getArgs()[0]) != Arr)
+      continue;
+    if (!dynKeyMutatedIn(Body, Arr, nullptr, S)) {
+      OutArr = Arr;
+      ResizeStmt = S;
+      return true;
+    }
+  }
+  return false;
 }
 
 

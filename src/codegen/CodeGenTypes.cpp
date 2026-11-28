@@ -1275,9 +1275,10 @@ llvm::Value *CodeGenModule::emitAddress(Expr *E){
     if (I->getBase()->getType()->isDynArray()) {
       Type *Elem = llvm::cast<DynArrayType>(I->getBase()->getType())->getElementType();
       const auto *H = checkedScopeOf(I->getBase());
+      bool SafeBounds = H || canElideDynBoundsCheck(I->getBase(), I->getIndex());
       llvm::Value *Data = H ? H->second : visitExpr(I->getBase());
       llvm::Value *X = toI64(visitExpr(I->getIndex()), I->getIndex()->getType());
-      if (rangeChecks(I->getIndex()->getBeginLoc()) && !H)
+      if (rangeChecks(I->getIndex()->getBeginLoc()) && !SafeBounds)
         emitRuntimeCheck(B.CreateICmpNE(astrCall("__pas_dyn_bad_index",
                                                  B.getInt32Ty(), {Data, X}),
                                         B.getInt32(0)),

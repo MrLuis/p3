@@ -268,7 +268,13 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
   struct LengthBound {
     VarDecl *Idx = nullptr;
     VarDecl *Base = nullptr;
+    VarDecl *BaseIdx = nullptr;
     int64_t Slack = 0;
+  };
+  struct DynGrowRule {
+    const Stmt *ResizeStmt = nullptr;
+    VarDecl *ForVar = nullptr;
+    VarDecl *DynVar = nullptr;
   };
   struct ConstBound {
     VarDecl *V = nullptr;
@@ -280,9 +286,13 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
   struct RangeState {
     llvm::DenseMap<VarDecl *, ValueRange> VarRanges;
     llvm::DenseMap<VarDecl *, VarDecl *> VarLengthOf;
+    llvm::DenseMap<VarDecl *, int64_t> DynConstLen;
     llvm::SmallVector<LengthBound, 4> ActiveLengthBounds;
   };
   VarSet ImmutableAnsiVars;
+  VarSet TrackableDynVars;
+  llvm::DenseMap<VarDecl *, int64_t> DynConstLen;
+  llvm::SmallVector<DynGrowRule, 2> ActiveDynGrows;
   llvm::DenseMap<VarDecl *, VarDecl *> VarLengthOf;
   llvm::SmallVector<LengthBound, 4> ActiveLengthBounds;
   /// The exact class of an object pointer when it is a direct constructor
@@ -655,7 +665,13 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
   void initRangeLocals(RoutineDecl *R);
   void endRangeLocals();
   void invalidateRangeLocalLength(VarDecl *V);
+  void invalidateDynBase(VarDecl *Base);
   static VarDecl *plainAnsiVar(Expr *E);
+  bool matchDynKey(Expr *E, VarDecl *&Base, VarDecl *&BaseIdx) const;
+  bool dynKeyMutatedIn(const Stmt *S, VarDecl *Base, VarDecl *BaseIdx,
+                       const Stmt *Skip = nullptr) const;
+  bool matchHighOrLenExpr(Expr *E, VarDecl *&Base, VarDecl *&BaseIdx,
+                          int64_t &ExtraSlack) const;
   VarDecl *matchLengthExpr(Expr *E) const;
   bool matchVarPlusConst(Expr *E, VarDecl *&V, int64_t &Off) const;
   void collectLengthBounds(Expr *E, llvm::SmallVectorImpl<LengthBound> &Out) const;
@@ -665,8 +681,13 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
   RangeState saveRangeState() const;
   void restoreRangeState(const RangeState &S);
   bool canElideAnsiBoundsCheck(Expr *Base, Expr *Idx) const;
+  bool canElideDynBoundsCheck(Expr *Base, Expr *Idx) const;
   static bool exprWritesVar(Expr *E, VarDecl *V);
   bool monotonicNonNegSteps(Stmt *S, VarDecl *V) const;
+  bool monotonicNonPosSteps(Stmt *S, VarDecl *V) const;
+  bool maxVarDrop(Stmt *S, VarDecl *V, int64_t &Drop) const;
+  bool findLoopAppendSetLength(Stmt *Body, VarDecl *&OutArr,
+                               const Stmt *&ResizeStmt) const;
   bool evalExprRange(Expr *E, VarDecl *V, ValueRange VR,
                      const VarSet *Written, ValueRange &Out) const;
   bool collectModUpperBound(Stmt *S, VarDecl *V, int64_t &OutM,

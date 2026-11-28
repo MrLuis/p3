@@ -170,8 +170,13 @@ var
   paSkipPlain, paSkipIndex: boolean;
   type
     TLengthBound = record
-      idx, base: PDecl;
+      idx, base, baseIdx: PDecl;
       slack: int64;
+    end;
+    PDynGrowRule = ^TDynGrowRule;
+    TDynGrowRule = record
+      resizeStmt: PNode;
+      forVar, dynVar: PDecl;
     end;
     TConstBound = record
       v: PDecl;
@@ -185,17 +190,19 @@ var
     PRangeSnapEntry = ^TRangeSnapEntry;
     TRangeSnapEntry = record
       v, lenVar: PDecl;
-      known: boolean;
-      lo, hi: int64;
+      known, dynLenKnown: boolean;
+      lo, hi, dynLen: int64;
     end;
     TRangeSnap = record
       entries: TPtrList;
+      dynEntries: TPtrList;
       bounds: TBoundArray;
       boundCount: longint;
     end;
   var
     activeBounds: TBoundArray;
     activeBoundCount: longint;
+    dynTrackVars, dynGrows: TPtrList;
   { the value the last assignment to a scalar stored (see visitAssign) }
   assignStored: TV;
   assignStoredSet: boolean;
@@ -2724,6 +2731,8 @@ function emitWhen(e: PNode; all: boolean): TV; forward;
 procedure emitWriteArg(const f: TV; arg: PNode); forward;
 function holdDynResult(const v: TV; t: PType): TV; forward;
 function takeOrHoldDyn(const v: TV; t: PType; noHold: boolean): TV; forward;
+function matchDynKey(e: PNode; var base, baseIdx: PDecl): boolean; forward;
+function canElideDynBoundsCheck(base, idx: PNode): boolean; forward;
 
 procedure astrV1(const name: string; const x: TV);
 var
@@ -3275,6 +3284,7 @@ function emitStringFunction(e: PNode; k: TBuiltinKind): TV;
 var
   a0: PNode;
   t: PType;
+  baseD, baseIdxD: PDecl;
   c, lo, hi, isLower, dec, s0, s1, tmp, n1, n2, n32, ignored, len: TV;
   i: longint;
   noHold: boolean;
@@ -3287,7 +3297,14 @@ begin
         if t^.kind = tyOpenArray then
           exit(irCast('trunc', openCount(openDescriptor(a0)), irI32, ''));
         if t^.kind = tyDynArray then
-          exit(irCast('trunc', dynLength(visitExpr(a0)), irI32, ''));
+        begin
+          len := irCast('trunc', dynLength(visitExpr(a0)), irI32, '');
+          if matchDynKey(a0, baseD, baseIdxD) and (baseIdxD = nil) and
+             baseD^.cgDynLenKnown and (baseD^.cgDynLen >= 0) and
+             (baseD^.cgDynLen <= $7FFFFFFF) then
+            noteRange(len, baseD^.cgDynLen, baseD^.cgDynLen);
+          exit(len);
+        end;
         if t^.kind = tyArrayOfConst then
           exit(irCast('trunc', irLoad(irI64, visitExpr(a0), ''), irI32, ''));
         if t^.kind = tyAnsiString then
@@ -3867,6 +3884,7 @@ var
   bt, idxTy: PType;
   bd: TOrdinalBounds;
   w: PWithContext;
+  safeBounds: boolean;
 begin
   if (e^.convOp <> nil) and not e^.convSuspended then
     exit(emitConversion(e)); { converted to a record: a temporary }
@@ -3959,9 +3977,10 @@ begin
               setAddrAlign(elemAddr, 16);
             exit(elemAddr);
           end;
+          safeBounds := canElideDynBoundsCheck(e^.base, e^.index);
           base := visitExpr(e^.base);
           x := toI64(visitExpr(e^.index), idxTy);
-          if rangeChecks(e^.index^.b) then
+          if rangeChecks(e^.index^.b) and not safeBounds then
           begin
             bad := call2(classRuntime('__pas_dyn_bad_index', 'i32', 'ptr,i64'), base, x, '');
             bad := irICmp('ne', bad, i32c(0), '');
@@ -6820,6 +6839,7 @@ var
   opName: string;
   pairFields: TPtrList;
   argE: PNode;
+  baseD, baseIdxD: PDecl;
   at, t: PType;
   arg, tmp, p, x, one, bad, addrV: TV;
   v: int64;
@@ -6932,8 +6952,14 @@ begin
         begin
           if k = bkLow then
             exit(i32c(0));
-          exit(irBin('sub', irCast('trunc', dynLength(visitExpr(PNode(listGet(e^.args, 0)))),
-                                   irI32, ''), i32c(1), ''));
+          x := irBin('sub', irCast('trunc', dynLength(visitExpr(PNode(listGet(e^.args, 0)))),
+                                   irI32, ''), i32c(1), '');
+          if matchDynKey(PNode(listGet(e^.args, 0)), baseD, baseIdxD) and
+             (baseIdxD = nil) and baseD^.cgDynLenKnown and
+             (baseD^.cgDynLen >= 0) and (baseD^.cgDynLen - 1 >= low(longint)) and
+             (baseD^.cgDynLen - 1 <= $7FFFFFFF) then
+            noteRange(x, baseD^.cgDynLen - 1, baseD^.cgDynLen - 1);
+          exit(x);
         end;
         if t^.kind = tyOpenArray then
         begin
