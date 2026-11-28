@@ -2,6 +2,7 @@
 //===- CodeGenBuiltins.cpp - AST -> LLVM IR ---------------------------------------===//
 
 #include "CodeGenInternal.h"
+#include <cmath>
 
 using namespace p3;
 using namespace p3::detail;
@@ -1555,8 +1556,13 @@ llvm::Value *CodeGenModule::emitBuiltinCall(CallExpr *E, BuiltinDecl *BD){
 
   switch (BD->getBuiltinKind()) {
   case BuiltinKind::Abs: {
-    if (AT->isReal())
-      return B.CreateUnaryIntrinsic(llvm::Intrinsic::fabs, Arg, nullptr, "abs");
+    if (AT->isReal()) {
+      FloatBound FA = floatBoundOfValue(Arg);
+      llvm::Value *Res =
+          B.CreateUnaryIntrinsic(llvm::Intrinsic::fabs, Arg, nullptr, "abs");
+      noteFloatBound(Res, {true, FA.NonZero, FA.MinPos});
+      return Res;
+    }
     Arg = convertOrdinal(Arg, AT, E->getType());
     if (!isSignedOrdinal(E->getType()))
       return Arg;
@@ -1569,8 +1575,13 @@ llvm::Value *CodeGenModule::emitBuiltinCall(CallExpr *E, BuiltinDecl *BD){
                                    nullptr, "abs");
   }
   case BuiltinKind::Sqr:
-    if (AT->isReal())
-      return B.CreateFMul(Arg, Arg, "sqr");
+    if (AT->isReal()) {
+      FloatBound FA = floatBoundOfValue(Arg);
+      llvm::Value *Res = B.CreateFMul(Arg, Arg, "sqr");
+      double P = FA.MinPos > 0.0 ? FA.MinPos * FA.MinPos : 0.0;
+      noteFloatBound(Res, {true, P > 0.0, P});
+      return Res;
+    }
     Arg = convertOrdinal(Arg, AT, E->getType());
     return emitCheckedArith(BinaryOp::Mul, isSignedOrdinal(E->getType()), Arg,
                             Arg, Loc, "sqr");
@@ -1615,11 +1626,15 @@ llvm::Value *CodeGenModule::emitBuiltinCall(CallExpr *E, BuiltinDecl *BD){
   }
   case BuiltinKind::Sqrt: {
     llvm::Value *X = toDouble(Arg, AT);
-    if (rangeChecks(Loc))
+    FloatBound FX = floatBoundOfValue(X);
+    if (rangeChecks(Loc) && !FX.NonNegOrNaN)
       emitRuntimeCheck(
-          B.CreateFCmpULT(X, llvm::ConstantFP::get(B.getDoubleTy(), 0.0)),
+          B.CreateFCmpOLT(X, llvm::ConstantFP::get(B.getDoubleTy(), 0.0)),
           "'sqrt' of a negative number", Loc);
-    return B.CreateUnaryIntrinsic(llvm::Intrinsic::sqrt, X);
+    llvm::Value *Res = B.CreateUnaryIntrinsic(llvm::Intrinsic::sqrt, X);
+    double MP = FX.MinPos > 0.0 ? std::sqrt(FX.MinPos) : 0.0;
+    noteFloatBound(Res, {true, MP > 0.0, MP});
+    return Res;
   }
   case BuiltinKind::Trunc:
   case BuiltinKind::Round: {

@@ -969,13 +969,15 @@ function emitResultInPlace(target, value: PNode; tt: PType): boolean; forward;
 
 { Ranges of local variables (optimization3 item 4); after the pin
   analysis. }
-function plainAssignTarget(e: PNode): PDecl; forward;
 function constIntOf(e: PNode; var value: int64): boolean; forward;
 procedure paStmt(s: PNode; var used, written: TPtrList;
                  collectUsed, collectWritten: boolean); forward;
 procedure setVarRange(v: PDecl; known: boolean; lo, hi: int64); forward;
 procedure rangeLocalsWrittenBy(s: PNode; var outl: TPtrList); forward;
 procedure forgetRanges(const l: TPtrList); forward;
+procedure realLocalsWrittenBy(s: PNode; var outl: TPtrList); forward;
+procedure forgetRealBounds(const l: TPtrList); forward;
+procedure setRealFloatBound(v: PDecl; nonNeg, nonZero: boolean; minPos: double); forward;
 function accumulatorSteps(s: PNode; v: PDecl; var dLo, dHi: int64): boolean; forward;
 procedure initRangeLocals(r: PDecl); forward;
 procedure endRangeLocals; forward;
@@ -1191,7 +1193,7 @@ end;
   range from now on (optimization3 item 4), else none. }
 procedure visitAssign(s: PNode);
 var
-  rangeVar, dynTarget, newLenBase, srcV, srcD: PDecl;
+  rangeVar, realVar, dynTarget, newLenBase, srcV, srcD: PDecl;
   stored: boolean;
   ve: PNode;
   off, newSlack: int64;
@@ -1200,8 +1202,11 @@ var
   tyLo, tyHi: int64;
 begin
   rangeVar := plainAssignTarget(s^.target);
+  realVar := rangeVar;
   if (rangeVar <> nil) and not rangeVar^.cgRangeLocal then
     rangeVar := nil;
+  if (realVar <> nil) and not realVar^.cgFpLocal then
+    realVar := nil;
   dynTarget := plainAssignTarget(s^.target);
   if (dynTarget <> nil) and not dynTarget^.cgDynTrack then
     dynTarget := nil;
@@ -1274,6 +1279,14 @@ begin
     end
     else
       setVarRange(rangeVar, false, 0, 0);
+  end;
+  if realVar <> nil then
+  begin
+    if stored then
+      setRealFloatBound(realVar, assignStored.fpNonNeg, assignStored.fpNonZero,
+                        assignStored.fpMinPos)
+    else
+      setRealFloatBound(realVar, false, false, 0.0);
   end;
 end;
 
@@ -1748,7 +1761,7 @@ begin
   if s^.elseStmt <> nil then
     elseB := irNewBlock('if.else');
   irCondBr(c, thenB, elseB, false);
-  trackRanges := rangeLocals.count > 0;
+  trackRanges := (rangeLocals.count > 0) or (realRangeLocals.count > 0);
   if trackRanges then
   begin
     saveRangeState(saved);
@@ -1810,8 +1823,8 @@ type
 procedure visitWhile(s: PNode);
 var
   condB, bodyB, endB: PIRBlock;
-  trackRanges, preserve, hasCondLo: boolean;
-  written, monos: TPtrList;
+  trackRanges, preserve, hasCondLo, hasPreCondSnap, trackReal: boolean;
+  written, writtenReal, monos: TPtrList;
   preCondSnap: TRangeSnap;
   k, j, w: longint;
   a: PDecl;
@@ -1838,7 +1851,9 @@ begin
     end;
   end;
   activeBoundCount := w;
-  trackRanges := rangeLocals.count > 0;
+  trackRanges := (rangeLocals.count > 0) or (realRangeLocals.count > 0);
+  trackReal := realRangeLocals.count > 0;
+  hasPreCondSnap := false;
   presCount := 0;
   if trackRanges then
   begin
@@ -1925,6 +1940,17 @@ begin
         activeBoundCount := activeBoundCount + 1;
       end;
     saveRangeState(preCondSnap);
+    hasPreCondSnap := true;
+  end;
+  if trackReal then
+  begin
+    realLocalsWrittenBy(s, writtenReal);
+    forgetRealBounds(writtenReal);
+    if not hasPreCondSnap then
+    begin
+      saveRangeState(preCondSnap);
+      hasPreCondSnap := true;
+    end;
   end;
   condB := irNewBlock('while.cond');
   bodyB := irNewBlock('while.body');
@@ -1946,32 +1972,41 @@ begin
   visitStmt(s^.thenStmt);
   popLoop;
   irBr(condB);
-  if trackRanges then
+  if trackRanges or trackReal then
   begin
-    restoreRangeState(preCondSnap);
-    for k := 0 to monos.count - 1 do
+    if hasPreCondSnap then
+      restoreRangeState(preCondSnap);
+    if trackRanges then
     begin
-      m := PWhileMono(listGet(monos, k));
-      a := m^.v;
-      a^.cgLoopKnown := m^.hadOld;
-      a^.cgLoopLo := m^.oldLo;
-      a^.cgLoopHi := m^.oldHi;
-    end;
-    forgetRanges(written);
-    for k := 0 to monos.count - 1 do
-    begin
-      m := PWhileMono(listGet(monos, k));
-      setVarRange(m^.v, true, m^.lo, m^.hi);
-      dispose(m);
-    end;
-    for k := 0 to presCount - 1 do
-      if activeBoundCount < 64 then
+      for k := 0 to monos.count - 1 do
       begin
-        activeBounds[activeBoundCount] := presBounds[k];
-        activeBoundCount := activeBoundCount + 1;
+        m := PWhileMono(listGet(monos, k));
+        a := m^.v;
+        a^.cgLoopKnown := m^.hadOld;
+        a^.cgLoopLo := m^.oldLo;
+        a^.cgLoopHi := m^.oldHi;
       end;
-    listFree(written);
-    listFree(monos);
+      forgetRanges(written);
+      for k := 0 to monos.count - 1 do
+      begin
+        m := PWhileMono(listGet(monos, k));
+        setVarRange(m^.v, true, m^.lo, m^.hi);
+        dispose(m);
+      end;
+      for k := 0 to presCount - 1 do
+        if activeBoundCount < 64 then
+        begin
+          activeBounds[activeBoundCount] := presBounds[k];
+          activeBoundCount := activeBoundCount + 1;
+        end;
+      listFree(written);
+      listFree(monos);
+    end;
+    if trackReal then
+    begin
+      forgetRealBounds(writtenReal);
+      listFree(writtenReal);
+    end;
   end;
   irSetInsertPoint(endB);
 end;
@@ -2039,16 +2074,17 @@ procedure hoistableBases(s: PNode; var outHoists: TPtrList); forward;
 
 procedure visitFor(s: PNode);
 var
-  v, a, growArr, hBase, hBaseIdx: PDecl;
+  v, a, growArr, hBase, hBaseIdx, boundVar, bv: PDecl;
   varTy: PType;
   down, hoisted, wantChecks, qwordTy, startGe0, finalGe0: boolean;
-  haveGrow, pushedForBound: boolean;
+  haveGrow, pushedForBound, trackReal, boundOldKnown, noWrap: boolean;
   start, final, start64, final64, enter, i, done, next, last64, start64v, hd, cnt: TV;
   checkB, loopB, latchB, incB, endB, preB: PIRBlock;
   phi: PIRInst;
   oldKnown: boolean;
-  oldLo, oldHi, hExtra: int64;
-  written, accs, hoists, hoistDatas, directW, dummy: TPtrList;
+  oldLo, oldHi, hExtra, boundOldLo, boundOldHi, bc, safeCheckLo, minVal, newLo, newHi: int64;
+  written, writtenReal, allW, usedW, accs, hoists, hoistDatas, directW, dummy: TPtrList;
+  finE: PNode;
   acc: PAccumulator;
   he: PHoistEntry;
   cb: PCheckedBase;
@@ -2363,6 +2399,67 @@ begin
     end;
   end;
   activeBoundCount := w;
+  trackReal := realRangeLocals.count > 0;
+  if trackReal then
+  begin
+    realLocalsWrittenBy(s, writtenReal);
+    forgetRealBounds(writtenReal);
+  end;
+  boundVar := nil;
+  boundOldKnown := false;
+  boundOldLo := 0;
+  boundOldHi := 0;
+  if isSignedOrdinal(varTy) and (not down) and start.rKnown then
+  begin
+    finE := skipParensNode(s^.forFinal);
+    if (finE <> nil) and (finE^.kind = nkBinary) and (finE^.bop = boSub) and
+       (finE^.opDecl = nil) then
+    begin
+      bv := plainAssignTarget(finE^.lhs);
+      if (bv <> nil) and (bv <> v) and (bv^.owner = curRoutine) and
+         (bv^.absTarget = nil) and (bv^.absRoot = nil) and
+         not bv^.captured and not bv^.isAliased and
+         (bv^.varKind <> vkVarParam) and not bv^.isOut and
+         (bv^.varType <> nil) and isSignedOrdinal(bv^.varType) and
+         signedTypeRange(regType(bv^.varType)^.bits, tyLo, tyHi) and
+         constIntOf(finE^.rhs, bc) and (bc >= 1) then
+      begin
+        listInit(usedW);
+        listInit(allW);
+        paStmt(s^.forBody, usedW, allW, false, true);
+        listFree(usedW);
+        noWrap := overflowChecks(finE^.b) or
+                  (not addOverflows(tyLo, bc, safeCheckLo) and
+                   bv^.cgRangeKnown and (bv^.cgRangeLo >= safeCheckLo));
+        if noWrap and not listHasPtr(allW, bv) and
+           not addOverflows(start.rLo, bc, minVal) then
+        begin
+          boundOldKnown := bv^.cgRangeKnown;
+          boundOldLo := bv^.cgRangeLo;
+          boundOldHi := bv^.cgRangeHi;
+          newLo := tyLo;
+          if minVal > newLo then
+            newLo := minVal;
+          newHi := tyHi;
+          if boundOldKnown then
+          begin
+            if boundOldLo > newLo then
+              newLo := boundOldLo;
+            if boundOldHi < newHi then
+              newHi := boundOldHi;
+          end;
+          if newLo <= newHi then
+          begin
+            bv^.cgRangeKnown := true;
+            bv^.cgRangeLo := newLo;
+            bv^.cgRangeHi := newHi;
+            boundVar := bv;
+          end;
+        end;
+        listFree(allW);
+      end;
+    end;
+  end;
   if haveGrow then
   begin
     new(gr);
@@ -2374,6 +2471,17 @@ begin
   pushLoop(latchB, endB);
   visitStmt(s^.forBody);
   popLoop;
+  if boundVar <> nil then
+  begin
+    boundVar^.cgRangeKnown := boundOldKnown;
+    boundVar^.cgRangeLo := boundOldLo;
+    boundVar^.cgRangeHi := boundOldHi;
+  end;
+  if trackReal then
+  begin
+    forgetRealBounds(writtenReal);
+    listFree(writtenReal);
+  end;
   if haveGrow then
   begin
     gr := PDynGrowRule(listGet(dynGrows, dynGrows.count - 1));
@@ -3246,8 +3354,8 @@ var
   mark, stringMark: longint;
   ignored: TV;
   b: PIRBlock;
-  written: TPtrList;
-  track: boolean;
+  written, writtenReal: TPtrList;
+  track, trackReal: boolean;
 begin
   { statements carry their source position into the debug information }
   setDebugLoc(s^.b);
@@ -3261,11 +3369,19 @@ begin
     for loop does its own (visitFor). }
   track := (rangeLocals.count > 0) and
            not (s^.kind in [nkAssign, nkCompound, nkProcCall, nkEmpty, nkFor, nkWhile]);
+  trackReal := (realRangeLocals.count > 0) and
+               not (s^.kind in [nkAssign, nkCompound, nkProcCall, nkEmpty, nkFor, nkWhile]);
   if track then
   begin
     rangeLocalsWrittenBy(s, written);
     if not (s^.kind in [nkIf, nkCase, nkWith]) then
       forgetRanges(written);
+  end;
+  if trackReal then
+  begin
+    realLocalsWrittenBy(s, writtenReal);
+    if not (s^.kind in [nkIf, nkCase, nkWith]) then
+      forgetRealBounds(writtenReal);
   end;
   if not (s^.kind in [nkCompound, nkIf, nkAssign]) then
     atRoutineTail := false;
@@ -3309,6 +3425,11 @@ begin
   begin
     forgetRanges(written);
     listFree(written);
+  end;
+  if trackReal then
+  begin
+    forgetRealBounds(writtenReal);
+    listFree(writtenReal);
   end;
   atRoutineTail := false;
   releaseTemps(mark); { the results held by its expressions }
@@ -4182,7 +4303,13 @@ begin
   if (d <> nil) and (d^.kind = dkBuiltin) then
   begin
     case d^.builtin of
-      bkWrite, bkWriteln, bkHalt, bkBreak, bkContinue:
+      bkWrite, bkWriteln, bkHalt, bkBreak, bkContinue,
+      bkSizeOf, bkLow, bkHigh, bkAssigned, bkParamCount, bkParamStr,
+      bkExceptAddr, bkLength, bkCopy, bkSlice, bkPos, bkConcat, bkUpCase,
+      bkEof, bkEoln, bkFilePos, bkFileSize, bkGetFileHandle,
+      bkAbs, bkSqr, bkOdd, bkOrd, bkChr, bkSucc, bkPred,
+      bkSin, bkCos, bkExp, bkLn, bkSqrt, bkArctan, bkTrunc, bkRound,
+      bkPopCnt, bkCountTrailingZeros, bkCountLeadingZeros:
         exit;
       bkExit:
         if (args.count > 0) and (paCurResult <> nil) then
@@ -4605,6 +4732,41 @@ begin
     setVarRange(PDecl(listGet(l, i)), false, 0, 0);
 end;
 
+procedure setRealFloatBound(v: PDecl; nonNeg, nonZero: boolean; minPos: double);
+begin
+  v^.cgFpNonNeg := nonNeg;
+  v^.cgFpNonZero := nonZero;
+  v^.cgFpMinPos := minPos;
+end;
+
+procedure realLocalsWrittenBy(s: PNode; var outl: TPtrList);
+var
+  used, all: TPtrList;
+  i: longint;
+  v: PDecl;
+begin
+  listInit(used);
+  listInit(all);
+  paStmt(s, used, all, false, true);
+  listInit(outl);
+  for i := 0 to all.count - 1 do
+  begin
+    v := PDecl(listGet(all, i));
+    if v^.cgFpLocal then
+      listAdd(outl, v);
+  end;
+  listFree(used);
+  listFree(all);
+end;
+
+procedure forgetRealBounds(const l: TPtrList);
+var
+  i: longint;
+begin
+  for i := 0 to l.count - 1 do
+    setRealFloatBound(PDecl(listGet(l, i)), false, false, 0.0);
+end;
+
 { An integer constant written as a literal, a named constant or one of
   those negated: its value. }
 function constIntOf(e: PNode; var value: int64): boolean;
@@ -4989,6 +5151,7 @@ var
   aliasWrites: boolean;
 begin
   listClear(rangeLocals);
+  listClear(realRangeLocals);
   listClear(immAnsiVars);
   listClear(dynTrackVars);
   listClear(dynGrows);
@@ -5029,6 +5192,15 @@ begin
     end;
     if (v^.varKind <> vkVariable) or listHasPtr(other, v) then
       continue;
+    if v^.varType^.kind = tyReal then
+    begin
+      v^.cgFpLocal := true;
+      v^.cgFpNonNeg := true;
+      v^.cgFpNonZero := false;
+      v^.cgFpMinPos := 0.0;
+      listAdd(realRangeLocals, v);
+      continue;
+    end;
     if not isOrdinal(v^.varType) or not isSignedOrdinal(v^.varType) then
       continue;
     v^.cgRangeLocal := true;
@@ -5093,6 +5265,14 @@ begin
     v^.cgLoopKnown := false;
     v^.cgLenVar := nil;
   end;
+  for i := 0 to realRangeLocals.count - 1 do
+  begin
+    v := PDecl(listGet(realRangeLocals, i));
+    v^.cgFpLocal := false;
+    v^.cgFpNonNeg := false;
+    v^.cgFpNonZero := false;
+    v^.cgFpMinPos := 0.0;
+  end;
   for i := 0 to immAnsiVars.count - 1 do
     PDecl(listGet(immAnsiVars, i))^.cgImmAnsi := false;
   for i := 0 to dynTrackVars.count - 1 do
@@ -5102,6 +5282,7 @@ begin
     v^.cgDynLenKnown := false;
   end;
   listClear(rangeLocals);
+  listClear(realRangeLocals);
   listClear(immAnsiVars);
   listClear(dynTrackVars);
   listClear(dynGrows);
@@ -5760,6 +5941,17 @@ begin
     en^.dynLen := 0;
     listAdd(st.entries, en);
   end;
+  listInit(st.realEntries);
+  for i := 0 to realRangeLocals.count - 1 do
+  begin
+    v := PDecl(listGet(realRangeLocals, i));
+    new(en);
+    en^.v := v;
+    en^.fpNonNeg := v^.cgFpNonNeg;
+    en^.fpNonZero := v^.cgFpNonZero;
+    en^.fpMinPos := v^.cgFpMinPos;
+    listAdd(st.realEntries, en);
+  end;
   listInit(st.dynEntries);
   for i := 0 to dynTrackVars.count - 1 do
   begin
@@ -5790,6 +5982,15 @@ begin
     dispose(en);
   end;
   listFree(st.entries);
+  for i := 0 to st.realEntries.count - 1 do
+  begin
+    en := PRangeSnapEntry(listGet(st.realEntries, i));
+    en^.v^.cgFpNonNeg := en^.fpNonNeg;
+    en^.v^.cgFpNonZero := en^.fpNonZero;
+    en^.v^.cgFpMinPos := en^.fpMinPos;
+    dispose(en);
+  end;
+  listFree(st.realEntries);
   for i := 0 to st.dynEntries.count - 1 do
   begin
     en := PRangeSnapEntry(listGet(st.dynEntries, i));
@@ -9279,6 +9480,7 @@ begin
   mapInit(typeInfos);
   listInit(asyncsToEmit);
   listInit(rangeLocals);
+  listInit(realRangeLocals);
   listInit(immAnsiVars);
   listInit(dynTrackVars);
   listInit(dynGrows);

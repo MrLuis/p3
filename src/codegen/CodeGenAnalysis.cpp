@@ -67,6 +67,42 @@ void PinAnalysis::addCallWrites(Decl *D, llvm::ArrayRef<Expr *> Args, VarSet &Ou
     case BuiltinKind::Halt:
     case BuiltinKind::Break:
     case BuiltinKind::Continue:
+    case BuiltinKind::SizeOf:
+    case BuiltinKind::Low:
+    case BuiltinKind::High:
+    case BuiltinKind::Assigned:
+    case BuiltinKind::ParamCount:
+    case BuiltinKind::ParamStr:
+    case BuiltinKind::ExceptAddr:
+    case BuiltinKind::Length:
+    case BuiltinKind::Copy:
+    case BuiltinKind::Slice:
+    case BuiltinKind::Pos:
+    case BuiltinKind::Concat:
+    case BuiltinKind::UpCase:
+    case BuiltinKind::Eof:
+    case BuiltinKind::Eoln:
+    case BuiltinKind::FilePos:
+    case BuiltinKind::FileSize:
+    case BuiltinKind::GetFileHandle:
+    case BuiltinKind::Abs:
+    case BuiltinKind::Sqr:
+    case BuiltinKind::Odd:
+    case BuiltinKind::Ord:
+    case BuiltinKind::Chr:
+    case BuiltinKind::Succ:
+    case BuiltinKind::Pred:
+    case BuiltinKind::Sin:
+    case BuiltinKind::Cos:
+    case BuiltinKind::Exp:
+    case BuiltinKind::Ln:
+    case BuiltinKind::Sqrt:
+    case BuiltinKind::Arctan:
+    case BuiltinKind::Trunc:
+    case BuiltinKind::Round:
+    case BuiltinKind::PopCnt:
+    case BuiltinKind::CountTrailingZeros:
+    case BuiltinKind::CountLeadingZeros:
       return;
     case BuiltinKind::Exit:
       if (!Args.empty() && R && R->isFunction())
@@ -989,6 +1025,55 @@ void CodeGenModule::forgetRanges(const VarSet &Vars){
 }
 
 
+CodeGenModule::FloatBound
+CodeGenModule::floatBoundOfValue(const llvm::Value *V) const {
+  auto It = FloatBounds.find(V);
+  if (It != FloatBounds.end())
+    return It->second;
+  if (auto *C = llvm::dyn_cast<llvm::ConstantFP>(V)) {
+    if (C->getType()->isDoubleTy()) {
+      const llvm::APFloat &F = C->getValueAPF();
+      if (!F.isNaN()) {
+        double Val = F.convertToDouble();
+        return {Val >= 0.0, Val != 0.0, Val > 0.0 ? Val : 0.0};
+      }
+    }
+  }
+  return {};
+}
+
+
+void CodeGenModule::noteFloatBound(const llvm::Value *V, FloatBound B){
+  if ((B.NonNegOrNaN || B.NonZero || B.MinPos > 0.0) &&
+      !llvm::isa<llvm::Constant>(V))
+    FloatBounds[V] = B;
+}
+
+
+void CodeGenModule::setRealFloatBound(VarDecl *V, FloatBound B){
+  if (B.NonNegOrNaN || B.NonZero || B.MinPos > 0.0)
+    VarFloatBounds[V] = B;
+  else
+    VarFloatBounds.erase(V);
+}
+
+
+VarSet CodeGenModule::realRangeLocalsWrittenBy(Stmt *S){
+  VarSet All, Out;
+  PinAnalysis(CurRoutine).writtenBy(S, All);
+  for (VarDecl *V : All)
+    if (RealRangeLocals.count(V))
+      Out.insert(V);
+  return Out;
+}
+
+
+void CodeGenModule::forgetRealBounds(const VarSet &Vars){
+  for (VarDecl *V : Vars)
+    VarFloatBounds.erase(V);
+}
+
+
 /// A bare variable reference, unwrapping parens and const wrappers.
 NameRefExpr *CodeGenModule::plainVarRef(const Expr *E){
   return llvm::dyn_cast_or_null<NameRefExpr>(unwrapConst(const_cast<Expr *>(E)));
@@ -1541,6 +1626,9 @@ void CodeGenModule::initRangeLocals(RoutineDecl *R){
   RangeLocals.clear();
   LoopRanges.clear();
   ImmutableAnsiVars.clear();
+  RealRangeLocals.clear();
+  VarFloatBounds.clear();
+  FloatBounds.clear();
   TrackableDynVars.clear();
   DynConstLen.clear();
   ActiveDynGrows.clear();
@@ -1569,6 +1657,11 @@ void CodeGenModule::initRangeLocals(RoutineDecl *R){
         V->getType() && V->getType()->isDynArray()) {
       TrackableDynVars.insert(V);
       DynConstLen[V] = 0;
+    }
+    if (V->getVarKind() == VarDecl::Variable && !Other.count(V) &&
+        V->getType() && V->getType()->isReal()) {
+      RealRangeLocals.insert(V);
+      VarFloatBounds[V] = {true, false, 0.0};
     }
     if (V->getVarKind() != VarDecl::Variable || Other.count(V) ||
         !V->getType() || !V->getType()->isOrdinal() ||
@@ -1607,6 +1700,9 @@ void CodeGenModule::endRangeLocals(){
   RangeLocals.clear();
   LoopRanges.clear();
   ImmutableAnsiVars.clear();
+  RealRangeLocals.clear();
+  VarFloatBounds.clear();
+  FloatBounds.clear();
   TrackableDynVars.clear();
   DynConstLen.clear();
   ActiveDynGrows.clear();
@@ -2144,12 +2240,14 @@ void CodeGenModule::applyConstBounds(llvm::ArrayRef<ConstBound> Bounds) {
 
 
 CodeGenModule::RangeState CodeGenModule::saveRangeState() const {
-  return {VarRanges, VarLengthOf, DynConstLen, ActiveLengthBounds};
+  return {VarRanges, VarFloatBounds, VarLengthOf, DynConstLen,
+          ActiveLengthBounds};
 }
 
 
 void CodeGenModule::restoreRangeState(const RangeState &S) {
   VarRanges = S.VarRanges;
+  VarFloatBounds = S.VarFloatBounds;
   VarLengthOf = S.VarLengthOf;
   DynConstLen = S.DynConstLen;
   ActiveLengthBounds = S.ActiveLengthBounds;

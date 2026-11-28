@@ -78,6 +78,9 @@ type
     { optimization2 item 1: a conservative integer range, when known }
     rKnown: boolean;
     rLo, rHi: int64;
+    { IEEE-sound floating-point domain bounds }
+    fpNonNeg, fpNonZero: boolean;
+    fpMinPos: double;
     { optimization2 item 10: the exact class of a new object pointer }
     knownClass: pointer;
   end;
@@ -1270,6 +1273,9 @@ begin
   r.rKnown := false;
   r.rLo := 0;
   r.rHi := 0;
+  r.fpNonNeg := false;
+  r.fpNonZero := false;
+  r.fpMinPos := 0.0;
   r.knownClass := nil;
   limbsOfInt(0, r.limbs);
   irV := r;
@@ -1336,6 +1342,13 @@ begin
   r := irV(irDoubleT, doubleText(x));
   r.kind := vkFP;
   r.fp := x;
+  if x = x then
+  begin
+    r.fpNonNeg := x >= 0.0;
+    r.fpNonZero := x <> 0.0;
+    if x > 0.0 then
+      r.fpMinPos := x;
+  end;
   irConstDouble := r;
 end;
 

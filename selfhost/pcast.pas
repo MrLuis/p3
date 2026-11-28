@@ -575,7 +575,9 @@ type
       keeps throughout it (an accumulator), which a forgotten range falls
       back to; item 3 ansistr: borrowed ansistring value parameter
       (cgBorrowedAnsi) }
-    cgRangeLocal, cgLoopKnown, cgBorrowedAnsi, cgImmAnsi: boolean;
+    cgRangeLocal, cgLoopKnown, cgBorrowedAnsi, cgImmAnsi, cgFpLocal,
+    cgFpNonNeg, cgFpNonZero: boolean;
+    cgFpMinPos: double;
     cgDynTrack, cgDynLenKnown: boolean;
     cgDynLen: int64;
     cgLoopLo, cgLoopHi: int64;

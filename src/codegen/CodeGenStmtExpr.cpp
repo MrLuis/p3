@@ -962,16 +962,26 @@ void CodeGenModule::visitStmt(Stmt *S){
   // depend on the path taken; and when it starts, if code in it may run
   // again or be reached from the middle of it (a loop, a try statement).
   // A for loop does its own (visitForStmt).
-  VarSet Written;
+  VarSet Written, WrittenReal;
   bool Track = !RangeLocals.empty() && !llvm::isa<AssignStmt>(S) &&
                !llvm::isa<CompoundStmt>(S) && !llvm::isa<ProcCallStmt>(S) &&
                !llvm::isa<EmptyStmt>(S) && !llvm::isa<ForStmt>(S) &&
                !llvm::isa<WhileStmt>(S);
+  bool TrackReal = !RealRangeLocals.empty() && !llvm::isa<AssignStmt>(S) &&
+                   !llvm::isa<CompoundStmt>(S) &&
+                   !llvm::isa<ProcCallStmt>(S) && !llvm::isa<EmptyStmt>(S) &&
+                   !llvm::isa<ForStmt>(S) && !llvm::isa<WhileStmt>(S);
   if (Track) {
     Written = rangeLocalsWrittenBy(S);
     if (!llvm::isa<IfStmt>(S) && !llvm::isa<CaseStmt>(S) &&
         !llvm::isa<WithStmt>(S))
       forgetRanges(Written);
+  }
+  if (TrackReal) {
+    WrittenReal = realRangeLocalsWrittenBy(S);
+    if (!llvm::isa<IfStmt>(S) && !llvm::isa<CaseStmt>(S) &&
+        !llvm::isa<WithStmt>(S))
+      forgetRealBounds(WrittenReal);
   }
   if (!llvm::isa<CompoundStmt>(S) && !llvm::isa<IfStmt>(S) &&
       !llvm::isa<AssignStmt>(S))
@@ -980,6 +990,8 @@ void CodeGenModule::visitStmt(Stmt *S){
   AtRoutineTail = false;
   if (Track)
     forgetRanges(Written);
+  if (TrackReal)
+    forgetRealBounds(WrittenReal);
   releaseTemps(Mark); // the results held by its expressions
   releaseStringTemps(StringMark);
 }
@@ -1330,15 +1342,18 @@ void CodeGenModule::visitAssignStmt(AssignStmt *S){
   Type *TT = Target->getType();
   // A variable of RangeLocals: the stored value's range from now on
   // (noted below), else none.
-  VarDecl *RangeVar = PinAnalysis::plainAssignTarget(Target);
-  if (RangeVar && !RangeLocals.count(RangeVar))
-    RangeVar = nullptr;
-  VarDecl *DynTarget = PinAnalysis::plainAssignTarget(Target);
-  if (DynTarget && !TrackableDynVars.count(DynTarget))
-    DynTarget = nullptr;
+  VarDecl *RawTarget = PinAnalysis::plainAssignTarget(Target);
+  VarDecl *RangeVar =
+      RawTarget && RangeLocals.count(RawTarget) ? RawTarget : nullptr;
+  VarDecl *RealVar =
+      RawTarget && RealRangeLocals.count(RawTarget) ? RawTarget : nullptr;
+  VarDecl *DynTarget =
+      RawTarget && TrackableDynVars.count(RawTarget) ? RawTarget : nullptr;
   auto ForgetRange = llvm::make_scope_exit([&] {
     if (RangeVar)
       setVarRange(RangeVar, {});
+    if (RealVar)
+      setRealFloatBound(RealVar, {});
     if (DynTarget)
       invalidateDynBase(DynTarget);
   });
@@ -1525,6 +1540,10 @@ void CodeGenModule::visitAssignStmt(AssignStmt *S){
     for (const LengthBound &B : InheritedBounds)
       ActiveLengthBounds.push_back(B);
     RangeVar = nullptr;
+  }
+  if (RealVar) {
+    setRealFloatBound(RealVar, floatBoundOfValue(V));
+    RealVar = nullptr;
   }
 }
 
@@ -2012,7 +2031,7 @@ void CodeGenModule::visitIfStmt(IfStmt *S){
   auto *ElseBB = S->getElse() ? newBlock("if.else") : EndBB;
   B.CreateCondBr(Cond, ThenBB, ElseBB);
 
-  bool TrackRanges = !RangeLocals.empty();
+  bool TrackRanges = !RangeLocals.empty() || !RealRangeLocals.empty();
   RangeState Saved;
   if (TrackRanges) {
     Saved = saveRangeState();
@@ -2067,9 +2086,10 @@ void CodeGenModule::visitWhileStmt(WhileStmt *S){
   };
   llvm::SmallVector<MonotonicVar, 2> Monotonic;
   llvm::SmallVector<LengthBound, 4> PreservedBounds;
-  VarSet Written;
+  VarSet Written, WrittenReal;
   llvm::SmallVector<LengthBound, 4> AfterSetupBounds;
-  llvm::DenseMap<VarDecl *, ValueRange> PreCondRanges;
+  RangeState PreCondSnap;
+  bool HasPreCondSnap = false;
   if (!TrackableDynVars.empty()) {
     llvm::SmallVector<VarDecl *, 4> Mut;
     for (VarDecl *D : TrackableDynVars)
@@ -2083,7 +2103,7 @@ void CodeGenModule::visitWhileStmt(WhileStmt *S){
       return B.BaseIdx && dynKeyMutatedIn(S, B.Base, B.BaseIdx);
     });
   }
-  bool TrackRanges = !RangeLocals.empty();
+  bool TrackRanges = !RangeLocals.empty() || !RealRangeLocals.empty();
   if (TrackRanges) {
     Written = rangeLocalsWrittenBy(S);
     llvm::SmallVector<ConstBound, 4> CondCBs;
@@ -2146,7 +2166,16 @@ void CodeGenModule::visitWhileStmt(WhileStmt *S){
     for (const LengthBound &B : PreservedBounds)
       ActiveLengthBounds.push_back(B);
     AfterSetupBounds = ActiveLengthBounds;
-    PreCondRanges = VarRanges;
+    PreCondSnap = saveRangeState();
+    HasPreCondSnap = true;
+  }
+  if (!RealRangeLocals.empty()) {
+    WrittenReal = realRangeLocalsWrittenBy(S);
+    forgetRealBounds(WrittenReal);
+    if (!HasPreCondSnap) {
+      PreCondSnap = saveRangeState();
+      HasPreCondSnap = true;
+    }
   }
 
   auto *CondBB = newBlock("while.cond");
@@ -2171,20 +2200,25 @@ void CodeGenModule::visitWhileStmt(WhileStmt *S){
   Loops.pop_back();
   B.CreateBr(CondBB);
 
-  if (TrackRanges) {
-    VarRanges = PreCondRanges;
-    for (const MonotonicVar &MV : Monotonic) {
-      if (MV.HadOld)
-        LoopRanges[MV.V] = MV.OldLoop;
-      else
-        LoopRanges.erase(MV.V);
+  if (TrackRanges || !RealRangeLocals.empty()) {
+    if (HasPreCondSnap)
+      restoreRangeState(PreCondSnap);
+    if (TrackRanges) {
+      for (const MonotonicVar &MV : Monotonic) {
+        if (MV.HadOld)
+          LoopRanges[MV.V] = MV.OldLoop;
+        else
+          LoopRanges.erase(MV.V);
+      }
+      ActiveLengthBounds = AfterSetupBounds;
+      forgetRanges(Written);
+      for (const MonotonicVar &MV : Monotonic)
+        setVarRange(MV.V, MV.Range);
+      for (const LengthBound &B : PreservedBounds)
+        ActiveLengthBounds.push_back(B);
     }
-    ActiveLengthBounds = AfterSetupBounds;
-    forgetRanges(Written);
-    for (const MonotonicVar &MV : Monotonic)
-      setVarRange(MV.V, MV.Range);
-    for (const LengthBound &B : PreservedBounds)
-      ActiveLengthBounds.push_back(B);
+    if (!WrittenReal.empty())
+      forgetRealBounds(WrittenReal);
   }
   B.SetInsertPoint(EndBB);
 }
@@ -2476,10 +2510,68 @@ void CodeGenModule::visitForStmt(ForStmt *S){
       PushedForBound = true;
     }
   }
+  VarSet WrittenReal;
+  if (!RealRangeLocals.empty()) {
+    WrittenReal = realRangeLocalsWrittenBy(S);
+    forgetRealBounds(WrittenReal);
+  }
+  VarDecl *BoundVar = nullptr;
+  bool HadBoundRange = false;
+  ValueRange SavedBoundRange;
+  if (Signed && !Down && StartRange.Known) {
+    if (auto *SubB = llvm::dyn_cast_or_null<BinaryExpr>(skipParens(S->getFinal()));
+        SubB && SubB->getOp() == BinaryOp::Sub && !SubB->getOperator()) {
+      VarDecl *BV = PinAnalysis::plainAssignTarget(SubB->getLHS());
+      int64_t BC = 0;
+      ValueRange BoundTR;
+      if (BV && BV != V && BV->getOwner() == CurRoutine &&
+          !BV->getAbsolute() && !BV->getAbsoluteRoot() && !BV->isCaptured() &&
+          !BV->isAliased() && !BV->isVarParam() && !BV->isOutParam() &&
+          BV->getType() && BV->getType()->isIntegerLike() &&
+          isSignedOrdinal(BV->getType()) &&
+          signedRange(intBits(BV->getType()), BoundTR) &&
+          constInt(SubB->getRHS(), BC) && BC >= 1) {
+        VarSet AllW;
+        PinAnalysis(CurRoutine).writtenBy(S->getBody(), AllW);
+        int64_t SafeCheckLo = 0;
+        bool NoWrap =
+            overflowChecks(S->getFinal()->getBeginLoc()) ||
+            (!__builtin_add_overflow(BoundTR.Lo, BC, &SafeCheckLo) &&
+             VarRanges.count(BV) && VarRanges[BV].Known &&
+             VarRanges[BV].Lo >= SafeCheckLo);
+        int64_t MinVal = 0;
+        if (NoWrap && !AllW.count(BV) &&
+            !__builtin_add_overflow(StartRange.Lo, BC, &MinVal)) {
+          auto BIt = VarRanges.find(BV);
+          HadBoundRange = BIt != VarRanges.end();
+          if (HadBoundRange)
+            SavedBoundRange = BIt->second;
+          int64_t NewLo = std::max(BoundTR.Lo, MinVal);
+          int64_t NewHi = BoundTR.Hi;
+          if (HadBoundRange && SavedBoundRange.Known) {
+            NewLo = std::max(NewLo, SavedBoundRange.Lo);
+            NewHi = std::min(NewHi, SavedBoundRange.Hi);
+          }
+          if (NewLo <= NewHi) {
+            VarRanges[BV] = {true, NewLo, NewHi};
+            BoundVar = BV;
+          }
+        }
+      }
+    }
+  }
   if (HaveGrow)
     ActiveDynGrows.push_back({GrowStmt, V, GrowArr});
   Loops.push_back({LatchBB, EndBB, Cleanups.size()});
   visitStmt(S->getBody());
+  if (BoundVar) {
+    if (HadBoundRange)
+      VarRanges[BoundVar] = SavedBoundRange;
+    else
+      VarRanges.erase(BoundVar);
+  }
+  if (!WrittenReal.empty())
+    forgetRealBounds(WrittenReal);
   if (HaveGrow) {
     ActiveDynGrows.pop_back();
     invalidateDynBase(GrowArr);
@@ -3191,6 +3283,9 @@ llvm::Value *CodeGenModule::visitNameRefExpr(NameRefExpr *E){
       auto It = VarRanges.find(VD);
       if (It != VarRanges.end())
         noteRange(V, It->second);
+      auto FIt = VarFloatBounds.find(VD);
+      if (FIt != VarFloatBounds.end())
+        noteFloatBound(V, FIt->second);
     }
     return V;
   }
@@ -3433,16 +3528,49 @@ llvm::Value *CodeGenModule::visitBinaryExpr(BinaryExpr *E){
   if (E->getType()->isReal()) {
     L = toDouble(L, LT);
     R = toDouble(R, RTy);
+    FloatBound FL = floatBoundOfValue(L), FR = floatBoundOfValue(R);
     switch (Op) {
-    case BinaryOp::Add: return B.CreateFAdd(L, R, "add");
+    case BinaryOp::Add: {
+      llvm::Value *Res = B.CreateFAdd(L, R, "add");
+      if (FL.NonNegOrNaN && FR.NonNegOrNaN) {
+        double MP = std::max(FL.MinPos, FR.MinPos);
+        noteFloatBound(Res, {true, MP > 0.0, MP});
+      }
+      return Res;
+    }
     case BinaryOp::Sub: return B.CreateFSub(L, R, "sub");
-    case BinaryOp::Mul: return B.CreateFMul(L, R, "mul");
-    case BinaryOp::RealDiv:
-      if (rangeChecks(E->getOpLoc()))
+    case BinaryOp::Mul: {
+      llvm::Value *Res = B.CreateFMul(L, R, "mul");
+      VarDecl *VA = PinAnalysis::plainAssignTarget(E->getLHS());
+      VarDecl *VB = PinAnalysis::plainAssignTarget(E->getRHS());
+      bool SameVar = VA && VA == VB && VA->getOwner() == CurRoutine &&
+                     !VA->isAliased() && !VA->isCaptured() &&
+                     !VA->getAbsolute() && !VA->getAbsoluteRoot() &&
+                     !VA->isVarParam() && !VA->isOutParam() &&
+                     VA->getType() && VA->getType()->isReal();
+      FloatBound Out;
+      Out.NonNegOrNaN = (L == R) || SameVar ||
+                        (FL.NonNegOrNaN && FR.NonNegOrNaN);
+      if (FL.MinPos > 0.0 && FR.MinPos > 0.0) {
+        double P = FL.MinPos * FR.MinPos;
+        if (P > 0.0) {
+          Out.MinPos = P;
+          Out.NonZero = true;
+        }
+      }
+      noteFloatBound(Res, Out);
+      return Res;
+    }
+    case BinaryOp::RealDiv: {
+      if (rangeChecks(E->getOpLoc()) && !(FR.NonZero || FR.MinPos > 0.0))
         emitRuntimeCheck(
             B.CreateFCmpOEQ(R, llvm::ConstantFP::get(B.getDoubleTy(), 0.0)),
             "division by zero", E->getOpLoc());
-      return B.CreateFDiv(L, R, "div");
+      llvm::Value *Res = B.CreateFDiv(L, R, "div");
+      if (FL.NonNegOrNaN && FR.NonNegOrNaN)
+        noteFloatBound(Res, {true, false, 0.0});
+      return Res;
+    }
     default: llvm_unreachable("not a real operator");
     }
   }

@@ -255,6 +255,14 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
     bool Known = false;
     int64_t Lo = 0, Hi = 0;
   };
+  /// IEEE-sound floating-point domain facts: NonNegOrNaN means the value is
+  /// never ordered < 0.0 (it is >= +0.0 or NaN); MinPos > 0 means it is
+  /// either NaN or >= MinPos > 0 (never 0.0); NonZero means never 0.0.
+  struct FloatBound {
+    bool NonNegOrNaN = false;
+    bool NonZero = false;
+    double MinPos = 0.0;
+  };
   llvm::DenseMap<VarDecl *, ValueRange> VarRanges;
   llvm::DenseMap<const llvm::Value *, ValueRange> ValueRanges;
   /// The current routine's local variables whose range is followed from
@@ -285,11 +293,15 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
   };
   struct RangeState {
     llvm::DenseMap<VarDecl *, ValueRange> VarRanges;
+    llvm::DenseMap<VarDecl *, FloatBound> VarFloatBounds;
     llvm::DenseMap<VarDecl *, VarDecl *> VarLengthOf;
     llvm::DenseMap<VarDecl *, int64_t> DynConstLen;
     llvm::SmallVector<LengthBound, 4> ActiveLengthBounds;
   };
   VarSet ImmutableAnsiVars;
+  VarSet RealRangeLocals;
+  llvm::DenseMap<VarDecl *, FloatBound> VarFloatBounds;
+  llvm::DenseMap<const llvm::Value *, FloatBound> FloatBounds;
   VarSet TrackableDynVars;
   llvm::DenseMap<VarDecl *, int64_t> DynConstLen;
   llvm::SmallVector<DynGrowRule, 2> ActiveDynGrows;
@@ -589,6 +601,11 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
   VarSet rangeLocalsWrittenBy(Stmt *S);
 
   void forgetRanges(const VarSet &Vars);
+  FloatBound floatBoundOfValue(const llvm::Value *V) const;
+  void noteFloatBound(const llvm::Value *V, FloatBound B);
+  void setRealFloatBound(VarDecl *V, FloatBound B);
+  VarSet realRangeLocalsWrittenBy(Stmt *S);
+  void forgetRealBounds(const VarSet &Vars);
 
   //===--- LB-5 (localdocs/llvm-23.md): one length check per loop for the
   // counted types. A for loop whose body indexes a dynamic array, an

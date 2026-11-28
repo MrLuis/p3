@@ -190,11 +190,13 @@ var
     PRangeSnapEntry = ^TRangeSnapEntry;
     TRangeSnapEntry = record
       v, lenVar: PDecl;
-      known, dynLenKnown: boolean;
+      known, dynLenKnown, fpNonNeg, fpNonZero: boolean;
       lo, hi, dynLen: int64;
+      fpMinPos: double;
     end;
     TRangeSnap = record
       entries: TPtrList;
+      realEntries: TPtrList;
       dynEntries: TPtrList;
       bounds: TBoundArray;
       boundCount: longint;
@@ -202,7 +204,7 @@ var
   var
     activeBounds: TBoundArray;
     activeBoundCount: longint;
-    dynTrackVars, dynGrows: TPtrList;
+    realRangeLocals, dynTrackVars, dynGrows: TPtrList;
   { the value the last assignment to a scalar stored (see visitAssign) }
   assignStored: TV;
   assignStoredSet: boolean;
@@ -1749,13 +1751,34 @@ begin
 end;
 
 function toDouble(const v: TV; t: PType): TV;
+var
+  r: TV;
+  signed: boolean;
 begin
   if t^.kind = tyReal then
     exit(v);
-  if isSignedOrdinal(t) then
-    toDouble := irCast('sitofp', v, irDoubleT, 'toreal')
+  signed := isSignedOrdinal(t);
+  if signed then
+    r := irCast('sitofp', v, irDoubleT, 'toreal')
   else
-    toDouble := irCast('uitofp', v, irDoubleT, 'toreal');
+    r := irCast('uitofp', v, irDoubleT, 'toreal');
+  if not signed then
+  begin
+    r.fpNonNeg := true;
+    if v.rKnown and (v.rLo > 0) then
+    begin
+      r.fpNonZero := true;
+      r.fpMinPos := v.rLo;
+    end;
+  end
+  else if v.rKnown then
+  begin
+    r.fpNonNeg := v.rLo >= 0;
+    r.fpNonZero := (v.rLo > 0) or (v.rHi < 0);
+    if v.rLo > 0 then
+      r.fpMinPos := v.rLo;
+  end;
+  toDouble := r;
 end;
 
 { x < lo or x > hi, for an i64 x }
@@ -6866,7 +6889,7 @@ var
   argE: PNode;
   baseD, baseIdxD: PDecl;
   at, t: PType;
-  arg, tmp, p, x, one, bad, addrV: TV;
+  arg, tmp, p, x, r2, one, bad, addrV: TV;
   v: int64;
   bd: TOrdinalBounds;
   loc: TLoc;
@@ -7070,7 +7093,13 @@ begin
     bkAbs:
       begin
         if at^.kind = tyReal then
-          exit(unaryIntrinsic('fabs', arg, 'abs'));
+        begin
+          x := unaryIntrinsic('fabs', arg, 'abs');
+          x.fpNonNeg := true;
+          x.fpNonZero := arg.fpNonZero;
+          x.fpMinPos := arg.fpMinPos;
+          exit(x);
+        end;
         arg := convertOrdinal(arg, at, e^.typ);
         if not isSignedOrdinal(e^.typ) then
           exit(arg);
@@ -7085,7 +7114,16 @@ begin
     bkSqr:
       begin
         if at^.kind = tyReal then
-          exit(irBin('fmul', arg, arg, 'sqr'));
+        begin
+          x := irBin('fmul', arg, arg, 'sqr');
+          x.fpNonNeg := true;
+          if arg.fpMinPos > 0.0 then
+          begin
+            x.fpMinPos := arg.fpMinPos * arg.fpMinPos;
+            x.fpNonZero := x.fpMinPos > 0.0;
+          end;
+          exit(x);
+        end;
         arg := convertOrdinal(arg, at, e^.typ);
         exit(emitCheckedArith('mul', isSignedOrdinal(e^.typ), arg, arg, loc, 'sqr'));
       end;
@@ -7139,10 +7177,17 @@ begin
     bkSqrt:
       begin
         x := toDouble(arg, at);
-        if rangeChecks(loc) then
-          emitRuntimeCheck(irFCmp('ult', x, irConstDouble(0.0), ''),
+        if rangeChecks(loc) and not x.fpNonNeg then
+          emitRuntimeCheck(irFCmp('olt', x, irConstDouble(0.0), ''),
                            '''sqrt'' of a negative number', loc);
-        exit(unaryIntrinsic('sqrt', x, ''));
+        r2 := unaryIntrinsic('sqrt', x, '');
+        r2.fpNonNeg := true;
+        if x.fpMinPos > 0.0 then
+        begin
+          r2.fpMinPos := sqrt(x.fpMinPos);
+          r2.fpNonZero := r2.fpMinPos > 0.0;
+        end;
+        exit(r2);
       end;
     bkTrunc, bkRound:
       exit(emitRoundTrunc(e, arg, at, k = bkRound));
@@ -7197,6 +7242,12 @@ begin
       v.rKnown := true;
       v.rLo := d^.cgRangeLo;
       v.rHi := d^.cgRangeHi;
+    end;
+    if d^.cgFpLocal then
+    begin
+      v.fpNonNeg := d^.cgFpNonNeg;
+      v.fpNonZero := d^.cgFpNonZero;
+      v.fpMinPos := d^.cgFpMinPos;
     end;
     visitNameRef := v;
     exit;
@@ -7401,11 +7452,16 @@ begin
   end;
 end;
 
+function plainAssignTarget(e: PNode): PDecl; forward;
+
 function visitBinary(e: PNode): TV;
 var
   op: TBinaryOp;
   lt, rt, opTy: PType;
   lhs: PNode;
+  va, vb: PDecl;
+  sameVar: boolean;
+  mp: double;
   l, r, m, n32, w, tmp, notR, masked: TV;
   signed, noHold: boolean;
   loc: TLoc;
@@ -7552,15 +7608,52 @@ begin
     l := toDouble(l, lt);
     r := toDouble(r, rt);
     case op of
-      boAdd: exit(irBin('fadd', l, r, 'add'));
+      boAdd:
+        begin
+          res := irBin('fadd', l, r, 'add');
+          if l.fpNonNeg and r.fpNonNeg then
+          begin
+            res.fpNonNeg := true;
+            if l.fpMinPos > r.fpMinPos then
+              res.fpMinPos := l.fpMinPos
+            else
+              res.fpMinPos := r.fpMinPos;
+            res.fpNonZero := res.fpMinPos > 0.0;
+          end;
+          exit(res);
+        end;
       boSub: exit(irBin('fsub', l, r, 'sub'));
-      boMul: exit(irBin('fmul', l, r, 'mul'));
+      boMul:
+        begin
+          res := irBin('fmul', l, r, 'mul');
+          va := plainAssignTarget(e^.lhs);
+          vb := plainAssignTarget(e^.rhs);
+          sameVar := (va <> nil) and (va = vb) and (va^.owner = curRoutine) and
+                     not va^.isAliased and not va^.captured and
+                     (va^.absTarget = nil) and (va^.absRoot = nil) and
+                     (va^.varKind <> vkVarParam) and not va^.isOut and
+                     (va^.varType <> nil) and (va^.varType^.kind = tyReal);
+          res.fpNonNeg := ((l.kind = r.kind) and (l.v = r.v)) or sameVar or
+                          (l.fpNonNeg and r.fpNonNeg);
+          if (l.fpMinPos > 0.0) and (r.fpMinPos > 0.0) then
+          begin
+            mp := l.fpMinPos * r.fpMinPos;
+            if mp > 0.0 then
+            begin
+              res.fpMinPos := mp;
+              res.fpNonZero := true;
+            end;
+          end;
+          exit(res);
+        end;
     else
       begin
-        if rangeChecks(e^.opLoc) then
+        if rangeChecks(e^.opLoc) and not (r.fpNonZero or (r.fpMinPos > 0.0)) then
           emitRuntimeCheck(irFCmp('oeq', r, irConstDouble(0.0), ''),
                            'division by zero', e^.opLoc);
-        exit(irBin('fdiv', l, r, 'div'));
+        res := irBin('fdiv', l, r, 'div');
+        res.fpNonNeg := l.fpNonNeg and r.fpNonNeg;
+        exit(res);
       end;
     end;
   end;

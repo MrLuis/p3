@@ -599,8 +599,25 @@ llvm::Value *CodeGenModule::emitCharPiece(Expr *E){
 llvm::Value *CodeGenModule::toDouble(llvm::Value *V, Type *T){
   if (T->isReal())
     return V;
-  return isSignedOrdinal(T) ? B.CreateSIToFP(V, B.getDoubleTy(), "toreal")
-                            : B.CreateUIToFP(V, B.getDoubleTy(), "toreal");
+  bool Signed = isSignedOrdinal(T);
+  llvm::Value *R = Signed ? B.CreateSIToFP(V, B.getDoubleTy(), "toreal")
+                          : B.CreateUIToFP(V, B.getDoubleTy(), "toreal");
+  ValueRange VR = rangeOfValue(V);
+  FloatBound FB;
+  if (!Signed) {
+    FB.NonNegOrNaN = true;
+    if (VR.Known && VR.Lo > 0) {
+      FB.NonZero = true;
+      FB.MinPos = static_cast<double>(VR.Lo);
+    }
+  } else if (VR.Known) {
+    FB.NonNegOrNaN = VR.Lo >= 0;
+    FB.NonZero = VR.Lo > 0 || VR.Hi < 0;
+    if (VR.Lo > 0)
+      FB.MinPos = static_cast<double>(VR.Lo);
+  }
+  noteFloatBound(R, FB);
+  return R;
 }
 
 
