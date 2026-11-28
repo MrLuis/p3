@@ -6393,10 +6393,11 @@ function emitCompare(e: PNode): TV;
 var
   op: TBinaryOp;
   lt, rt: PType;
-  l, r, cmp, notX, masked: TV;
+  l, r, cmp, eq, notX, masked: TV;
   wide: PType;
   setTy: PIRType;
   p: string;
+  clen: longint;
 begin
   op := e^.bop;
   lt := e^.lhs^.typ;
@@ -6439,8 +6440,20 @@ begin
   begin
     if isSliceExpr(e^.lhs) or isSliceExpr(e^.rhs) then
       exit(emitSliceCompare(op, e^.lhs, e^.rhs));
+    clen := 0;
+    if (op in [boEq, boNe]) and
+       (tryAnsiConstLength(e^.lhs, clen) or
+        tryAnsiConstLength(e^.rhs, clen)) then
+      exit(emitSliceCompare(op, e^.lhs, e^.rhs));
     l := emitAnsi(e^.lhs);
     r := emitAnsi(e^.rhs);
+    if op in [boEq, boNe] then
+    begin
+      eq := call2(classRuntime('__pas_astr_eq', 'i32', 'ptr,ptr'), l, r, '');
+      if op = boEq then
+        exit(irICmp('ne', eq, i32c(0), 'cmp'));
+      exit(irICmp('eq', eq, i32c(0), 'cmp'));
+    end;
     cmp := call2(classRuntime('__pas_astr_compare', 'i32', 'ptr,ptr'), l, r, '');
     exit(compareInts(op, cmp, i32c(0), true));
   end;

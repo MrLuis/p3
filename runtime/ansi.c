@@ -240,6 +240,15 @@ int32_t __pas_astr_compare(const char *a, const char *b) {
   return la < lb ? -1 : la > lb;
 }
 
+int32_t __pas_astr_eq(const char *a, const char *b) {
+  if (a == b)
+    return 1;
+  int64_t la = LEN(a), lb = LEN(b);
+  if (la != lb)
+    return 0;
+  return la == 0 || memcmp(a, b, (size_t)la) == 0;
+}
+
 int32_t __pas_astr_slice_compare(const char *a, int32_t la, const char *b,
                                  int32_t lb) {
   int32_t n = la < lb ? la : lb;

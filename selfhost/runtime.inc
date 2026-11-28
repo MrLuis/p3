@@ -9,7 +9,7 @@ type
   end;
 
 const
-  numRuntimeFuncs = 74;
+  numRuntimeFuncs = 75;
   runtimeFuncs: array[1..numRuntimeFuncs] of TRuntimeFuncAttr = (
     (name: '__pas_str_compare'; pureQuery: true; returnsFresh: false; returnsBool: false; neverFree: true; readMask: 3; writeMask: 0; slotMask: 0),
     (name: '__pas_str_pos'; pureQuery: true; returnsFresh: false; returnsBool: false; neverFree: true; readMask: 3; writeMask: 0; slotMask: 0),
@@ -19,6 +19,7 @@ const
     (name: '__pas_str_append'; pureQuery: false; returnsFresh: false; returnsBool: false; neverFree: false; readMask: 4; writeMask: 0; slotMask: 0),
     (name: '__pas_str_insert'; pureQuery: false; returnsFresh: false; returnsBool: false; neverFree: false; readMask: 1; writeMask: 0; slotMask: 0),
     (name: '__pas_astr_compare'; pureQuery: true; returnsFresh: false; returnsBool: false; neverFree: true; readMask: 3; writeMask: 0; slotMask: 0),
+    (name: '__pas_astr_eq'; pureQuery: true; returnsFresh: false; returnsBool: true; neverFree: true; readMask: 3; writeMask: 0; slotMask: 0),
     (name: '__pas_astr_slice_compare'; pureQuery: true; returnsFresh: false; returnsBool: false; neverFree: true; readMask: 5; writeMask: 0; slotMask: 0),
     (name: '__pas_astr_pos'; pureQuery: true; returnsFresh: false; returnsBool: false; neverFree: true; readMask: 3; writeMask: 0; slotMask: 0),
     (name: '__pas_astr_length'; pureQuery: true; returnsFresh: false; returnsBool: false; neverFree: true; readMask: 1; writeMask: 0; slotMask: 0),

@@ -210,6 +210,7 @@ char *__pas_astr_concat(char *a, char *b);
 /* A new string: a, the n characters at p, then b (a and b may be null). */
 char *__pas_astr_join(const char *a, const char *p, int64_t n, const char *b);
 int32_t __pas_astr_compare(const char *a, const char *b);
+int32_t __pas_astr_eq(const char *a, const char *b);
 int32_t __pas_astr_slice_compare(const char *a, int32_t la, const char *b,
                                  int32_t lb);
 int32_t __pas_astr_pos(const char *sub, const char *s);

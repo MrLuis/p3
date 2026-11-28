@@ -787,6 +787,8 @@ llvm::Value *CodeGenModule::compareInts(BinaryOp Op, llvm::Value *L, llvm::Value
 }
 
 
+static bool tryAnsiConstLength(Expr *E, uint32_t &Len);
+
 llvm::Value *CodeGenModule::emitCompare(BinaryExpr *E){
   BinaryOp Op = E->getOp();
   Type *LT = E->getLHS()->getType(), *RTy = E->getRHS()->getType();
@@ -813,8 +815,19 @@ llvm::Value *CodeGenModule::emitCompare(BinaryExpr *E){
       (LT->isAnsiString() || RTy->isAnsiString())) {
     if (isSliceExpr(E->getLHS()) || isSliceExpr(E->getRHS()))
       return emitSliceCompare(Op, E->getLHS(), E->getRHS());
+    uint32_t CL = 0, CR = 0;
+    if ((Op == BinaryOp::Eq || Op == BinaryOp::Ne) &&
+        (tryAnsiConstLength(E->getLHS(), CL) ||
+         tryAnsiConstLength(E->getRHS(), CR)))
+      return emitSliceCompare(Op, E->getLHS(), E->getRHS());
     llvm::Value *L = emitAnsi(E->getLHS());
     llvm::Value *R = emitAnsi(E->getRHS());
+    if (Op == BinaryOp::Eq || Op == BinaryOp::Ne) {
+      llvm::Value *Eq = astrCall("__pas_astr_eq", B.getInt32Ty(), {L, R});
+      return B.CreateICmp(Op == BinaryOp::Eq ? llvm::CmpInst::ICMP_NE
+                                             : llvm::CmpInst::ICMP_EQ,
+                          Eq, B.getInt32(0), "cmp");
+    }
     return compareInts(Op, astrCall("__pas_astr_compare", B.getInt32Ty(), {L, R}),
                        B.getInt32(0), /*Signed=*/true);
   }
