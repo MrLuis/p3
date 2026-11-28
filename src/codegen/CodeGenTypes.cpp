@@ -961,7 +961,11 @@ void CodeGenModule::emitDynOps(){
 void CodeGenModule::emitDynSetLength(llvm::Value *Addr, DynArrayType *T,
                       llvm::ArrayRef<llvm::Value *> Ns){
   llvm::Constant *Info = dynInfoOf(T);
-  astrCall("__pas_dyn_setlength", B.getVoidTy(), {Addr, Info, Ns[0]});
+  llvm::Value *Call =
+      astrCall("__pas_dyn_setlength", B.getVoidTy(), {Addr, Info, Ns[0]});
+  if (!dynMayRaise(T->getElementType()))
+    if (auto *CB = llvm::dyn_cast<llvm::CallBase>(Call))
+      NoRaiseCalls.insert(CB);
   if (Ns.size() == 1)
     return;
   auto *Elem = llvm::cast<DynArrayType>(T->getElementType());

@@ -187,7 +187,9 @@ void *__pas_dyn_new(const PasDynInfo *info, int64_t count);
 int64_t __pas_dyn_length(const void *a);
 void __pas_dyn_addref(void *a);
 void __pas_dyn_clear(void **a);
+void __pas_dyn_clear_pod(void **a);
 void __pas_dyn_assign(void **dst, void *src);
+void __pas_dyn_assign_pod(void **dst, void *src);
 void __pas_dyn_setlength(void **a, const PasDynInfo *info, int64_t count);
 /* A new array of up to count elements from index start (clamped). */
 void *__pas_dyn_copy(const void *a, int64_t start, int64_t count);

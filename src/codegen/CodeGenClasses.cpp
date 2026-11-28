@@ -255,6 +255,29 @@ bool CodeGenModule::runtimeMayRaise(llvm::StringRef Name){
 }
 
 
+bool CodeGenModule::dynMayRaise(Type *T){
+  if (!T)
+    return false;
+  if (auto *I = llvm::dyn_cast<InterfaceType>(T))
+    return I->isCOM();
+  if (T->isClosureType() || T->isTask() || T->isToken() || T->isIterator())
+    return true;
+  if (auto *DA = llvm::dyn_cast<DynArrayType>(T))
+    return dynMayRaise(DA->getElementType());
+  if (auto *A = llvm::dyn_cast<ArrayType>(T))
+    return dynMayRaise(A->getElementType());
+  if (auto *OA = llvm::dyn_cast<OpenArrayType>(T))
+    return dynMayRaise(OA->getElementType());
+  if (auto *R = llvm::dyn_cast<RecordType>(T)) {
+    for (FieldDecl *F : R->getAllFields())
+      if (F && dynMayRaise(F->getType()))
+        return true;
+    return false;
+  }
+  return false;
+}
+
+
 /// Does the code emitted for the current function so far have a call
 /// that may raise an exception? Any call does, except of an LLVM
 /// intrinsic, of a runtime function that cannot (runtimeMayRaise), of
@@ -267,6 +290,8 @@ bool CodeGenModule::mayRaise() const{
     for (const llvm::Instruction &I : BB) {
       auto *Call = llvm::dyn_cast<llvm::CallBase>(&I);
       if (!Call)
+        continue;
+      if (NoRaiseCalls.count(Call))
         continue;
       const llvm::Function *Callee = Call->getCalledFunction();
       if (!Callee)

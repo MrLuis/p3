@@ -149,6 +149,7 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
   /// The runtime's functions (declared here), and the functions that
   /// cannot raise an exception: see mayRaise.
   llvm::DenseSet<const llvm::Function *> RuntimeFns, NoRaiseFns;
+  llvm::DenseSet<const llvm::CallBase *> NoRaiseCalls;
   /// Are temporaries holding managed values pinned when they are made
   /// (see pinInMemory)? In a routine without try statements they are
   /// pinned later, if its body turns out to need protection.
@@ -1123,6 +1124,7 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
   /// that raise one, and those that may run a destructor (which is Pascal
   /// code): releasing an object or an interface reference.
   static bool runtimeMayRaise(llvm::StringRef Name);
+  static bool dynMayRaise(Type *T);
 
   /// Does the code emitted for the current function so far have a call
   /// that may raise an exception? Any call does, except of an LLVM

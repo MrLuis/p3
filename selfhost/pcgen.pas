@@ -4222,6 +4222,35 @@ begin
   ignored := call1(intfRuntime(name), x, '');
 end;
 
+function dynMayRaise(t: PType): boolean;
+var
+  k: longint;
+  f: PDecl;
+begin
+  if t = nil then
+    exit(false);
+  case t^.kind of
+    tyInterface: dynMayRaise := t^.intfCOM;
+    tyTask, tyToken, tyIterator: dynMayRaise := true;
+    tyRoutine: dynMayRaise := t^.routineReference;
+    tyDynArray: dynMayRaise := dynMayRaise(t^.dynElement);
+    tyArray: dynMayRaise := dynMayRaise(t^.elementType);
+    tyOpenArray: dynMayRaise := dynMayRaise(t^.openElement);
+    tyRecord:
+      begin
+        for k := 0 to t^.allFields.count - 1 do
+        begin
+          f := PDecl(listGet(t^.allFields, k));
+          if (f <> nil) and dynMayRaise(f^.fieldType) then
+            exit(true);
+        end;
+        dynMayRaise := false;
+      end;
+  else
+    dynMayRaise := false;
+  end;
+end;
+
 { Releases the COM interfaces in the object of managed type t at addr and
   sets them to nil (addRef false), or takes one more reference to each (a
   copy was made). }
@@ -4275,7 +4304,14 @@ begin
         astrV1('__pas_dyn_addref', obj);
       end
       else
-        astrV1('__pas_dyn_clear', addr);
+      begin
+        if not dynMayRaise(t^.dynElement) then
+          irSetNextCallNoRaise;
+        if isManaged(t^.dynElement) then
+          astrV1('__pas_dyn_clear', addr)
+        else
+          astrV1('__pas_dyn_clear_pod', addr);
+      end;
     tyInterface:
       if addRef then
       begin
@@ -4407,7 +4443,14 @@ begin
       astrV2('__pas_astr_assign', 'ptr,ptr', addr, v);
   end
   else if t^.kind = tyDynArray then
-    astrV2('__pas_dyn_assign', 'ptr,ptr', addr, v)
+  begin
+    if not dynMayRaise(t^.dynElement) then
+      irSetNextCallNoRaise;
+    if not isManaged(t^.dynElement) and (v.kind <> vkNull) then
+      astrV2('__pas_dyn_assign_pod', 'ptr,ptr', addr, v)
+    else
+      astrV2('__pas_dyn_assign', 'ptr,ptr', addr, v);
+  end
   else if isClosureType(t) then
   begin
     fn := irExtract(v, 0, irPtrT, 'fn');

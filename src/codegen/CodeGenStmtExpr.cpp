@@ -392,8 +392,14 @@ void CodeGenModule::finalizeValue(llvm::Value *Addr, Type *T){
     astrCall("__pas_astr_clear", B.getVoidTy(), {Addr});
     return;
   }
-  if (T->isDynArray()) {
-    astrCall("__pas_dyn_clear", B.getVoidTy(), {Addr});
+  if (auto *DA = llvm::dyn_cast<DynArrayType>(T)) {
+    Type *Elem = DA->getElementType();
+    llvm::Value *Call = astrCall(
+        isManaged(Elem) ? "__pas_dyn_clear" : "__pas_dyn_clear_pod",
+        B.getVoidTy(), {Addr});
+    if (!dynMayRaise(Elem))
+      if (auto *CB = llvm::dyn_cast<llvm::CallBase>(Call))
+        NoRaiseCalls.insert(CB);
     return;
   }
   if (T->isInterface()) {
@@ -512,8 +518,16 @@ void CodeGenModule::storeValue(llvm::Value *Addr, llvm::Value *V, Type *T,
     astrCall(llvm::isa<llvm::Constant>(V) ? "__pas_astr_take"
                                           : "__pas_astr_assign",
              B.getVoidTy(), {Addr, V});
-  else if (T->isDynArray())
-    astrCall("__pas_dyn_assign", B.getVoidTy(), {Addr, V});
+  else if (auto *DA = llvm::dyn_cast<DynArrayType>(T)) {
+    Type *Elem = DA->getElementType();
+    bool UsePod = !isManaged(Elem) && !llvm::isa<llvm::ConstantPointerNull>(V);
+    llvm::Value *Call = astrCall(
+        UsePod ? "__pas_dyn_assign_pod" : "__pas_dyn_assign",
+        B.getVoidTy(), {Addr, V});
+    if (!dynMayRaise(Elem))
+      if (auto *CB = llvm::dyn_cast<llvm::CallBase>(Call))
+        NoRaiseCalls.insert(CB);
+  }
   else if (T->isClosureType())
     B.CreateCall(classRuntime("__pas_closure_assign", B.getVoidTy(),
                               {B.getPtrTy(), B.getPtrTy(), B.getPtrTy()}),

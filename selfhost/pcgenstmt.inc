@@ -1200,6 +1200,8 @@ var
 begin
   info := dynInfoOf(t);
   n := PTVBox(listGet(ns, idx))^;
+  if not dynMayRaise(t^.dynElement) then
+    irSetNextCallNoRaise;
   astrV3('__pas_dyn_setlength', 'ptr,ptr,i64', addr, info, n);
   if idx = ns.count - 1 then
     exit;

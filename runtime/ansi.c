@@ -648,8 +648,14 @@ int64_t __pas_dyn_length(const void *a) {
 }
 
 void __pas_dyn_addref(void *a) {
-  if (a)
-    PAS_RC_INC(&DYN_HEADER(a)->refs);
+  if (!a)
+    return;
+  DynHeader *h = DYN_HEADER(a);
+  if (!__pas_threads_started) {
+    h->refs += 1;
+    return;
+  }
+  PAS_RC_INC(&h->refs);
 }
 
 static void dyn_fini(const PasDynInfo *info, char *elems, int64_t from, int64_t to) {
@@ -658,27 +664,58 @@ static void dyn_fini(const PasDynInfo *info, char *elems, int64_t from, int64_t 
       info->fini(elems + i * info->elem_size);
 }
 
-static void dyn_release(void *a) {
-  if (!a)
-    return;
-  DynHeader *h = DYN_HEADER(a);
-  if (PAS_RC_DEC(&h->refs) != 0)
-    return;
-  dyn_fini(h->info, a, 0, h->length);
+static inline void dyn_release_hdr(DynHeader *h, int pod) {
+  if (!__pas_threads_started) {
+    if (--h->refs != 0)
+      return;
+  } else {
+    if (PAS_RC_DEC(&h->refs) != 0)
+      return;
+  }
+  if (!pod)
+    dyn_fini(h->info, (char *)(h + 1), 0, h->length);
   free(h);
+}
+
+static void dyn_release(void *a) {
+  if (a)
+    dyn_release_hdr(DYN_HEADER(a), 0);
 }
 
 void __pas_dyn_clear(void **a) {
   void *old = *a;
+  if (!old)
+    return;
   *a = NULL;
-  dyn_release(old);
+  dyn_release_hdr(DYN_HEADER(old), 0);
+}
+
+void __pas_dyn_clear_pod(void **a) {
+  void *old = *a;
+  if (!old)
+    return;
+  *a = NULL;
+  dyn_release_hdr(DYN_HEADER(old), 1);
 }
 
 void __pas_dyn_assign(void **dst, void *src) {
-  __pas_dyn_addref(src);
   void *old = *dst;
+  if (old == src)
+    return;
+  __pas_dyn_addref(src);
   *dst = src;
-  dyn_release(old);
+  if (old)
+    dyn_release_hdr(DYN_HEADER(old), 0);
+}
+
+void __pas_dyn_assign_pod(void **dst, void *src) {
+  void *old = *dst;
+  if (old == src)
+    return;
+  __pas_dyn_addref(src);
+  *dst = src;
+  if (old)
+    dyn_release_hdr(DYN_HEADER(old), 1);
 }
 
 /* A new array with the first count elements of a (which has at least
@@ -708,7 +745,8 @@ void __pas_dyn_setlength(void **a, const PasDynInfo *info, int64_t count) {
     return;
   }
   DynHeader *h = DYN_HEADER(old);
-  if (PAS_RC_LOAD_ACQUIRE(&h->refs) > 1) {
+  int64_t refs = !__pas_threads_started ? h->refs : PAS_RC_LOAD_ACQUIRE(&h->refs);
+  if (refs > 1) {
     /* shared: this variable gets its own */
     *a = dyn_duplicate(old, 0, count < h->length ? count : h->length, count, info);
     dyn_release(old);

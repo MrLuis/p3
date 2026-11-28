@@ -230,6 +230,7 @@ procedure irSetSizeLevel(n: longint);
   whose code was found not to. }
 procedure irSetNoRaise(f: PIRFunc);
 function irNoRaise(f: PIRFunc): boolean;
+procedure irSetNextCallNoRaise;
 { Does the code of the current function so far have a call that may raise
   an exception? Any call does, except of an LLVM intrinsic, of a function
   that cannot (irSetNoRaise) and of the function itself. }
@@ -395,6 +396,7 @@ var
 
   cur: PIRFunc;
   curBlock: PIRBlock;
+  nextCallNoRaise: boolean;
 
 { ===================================================================== }
 { Data layout                                                           }
@@ -1946,11 +1948,21 @@ begin
   irMayRaise := cur^.raises;
 end;
 
+procedure irSetNextCallNoRaise;
+begin
+  nextCallNoRaise := true;
+end;
+
 { a call of callee is being added to the current function }
 procedure noteCall(const callee: TV);
 var
   f: PIRFunc;
 begin
+  if nextCallNoRaise then
+  begin
+    nextCallNoRaise := false;
+    exit;
+  end;
   f := PIRFunc(callee.fn);
   if f = nil then
     cur^.raises := true { through a pointer }
@@ -1966,6 +1978,7 @@ procedure irBeginBody(f: PIRFunc);
 begin
   cur := f;
   curBlock := nil;
+  nextCallNoRaise := false;
 end;
 
 function irNewBlock(const name: string): PIRBlock;

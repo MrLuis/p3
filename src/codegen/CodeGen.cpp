@@ -870,6 +870,7 @@ void CodeGenModule::emitRoutineBody(RoutineDecl *R, uint32_t SliceMask,
                                                            : nullptr;
   llvm::Function *F = SpecFn ? SpecFn : Functions[R];
   CurFn = F;
+  NoRaiseCalls.clear();
   AddrAligns.clear();
   CurRoutine = R;
   CurSP = DIB && !SpecFn ? Subprograms[R] : nullptr;
