@@ -866,6 +866,8 @@ procedure endRangeLocals; forward;
 function matchLengthExpr(e: PNode): PDecl; forward;
 procedure invalidateRangeLocalLength(v: PDecl); forward;
 function monotonicNonNegSteps(s: PNode; v: PDecl): boolean; forward;
+function nonNegModLoop(s: PNode; v: PDecl; initHi: int64;
+                       const written: TPtrList; var outM: int64): boolean; forward;
 
 procedure visitAssignInner(s: PNode);
 var
@@ -1502,7 +1504,8 @@ var
   tail, trackRanges: boolean;
   saved: TRangeSnap;
   bounds: TBoundArray;
-  boundCount: longint;
+  cbounds: TConstBoundArray;
+  boundCount, cboundCount: longint;
 begin
   tail := atRoutineTail;
   atRoutineTail := false;
@@ -1518,8 +1521,11 @@ begin
   begin
     saveRangeState(saved);
     boundCount := 0;
+    cboundCount := 0;
     collectLengthBounds(s^.cond, bounds, boundCount);
+    collectConstBounds(s^.cond, cbounds, cboundCount);
     applyLengthBounds(bounds, boundCount);
+    applyConstBounds(cbounds, cboundCount);
   end;
   irSetInsertPoint(thenB);
   atRoutineTail := tail;
@@ -1557,16 +1563,16 @@ var
   condB, bodyB, endB: PIRBlock;
   trackRanges: boolean;
   written, monos: TPtrList;
-  afterBounds: TBoundArray;
-  afterBoundCount, k: longint;
+  preCondSnap: TRangeSnap;
+  k: longint;
   a: PDecl;
   m: PWhileMono;
-  tyLo, tyHi: int64;
+  tyLo, tyHi, modM: int64;
   bounds: TBoundArray;
-  boundCount: longint;
+  cbounds: TConstBoundArray;
+  boundCount, cboundCount: longint;
 begin
   trackRanges := rangeLocals.count > 0;
-  afterBoundCount := 0;
   if trackRanges then
   begin
     rangeLocalsWrittenBy(s, written);
@@ -1575,13 +1581,25 @@ begin
     begin
       a := PDecl(listGet(written, k));
       if not a^.cgRangeKnown or (a^.varType = nil) or
-         not signedTypeRange(regType(a^.varType)^.bits, tyLo, tyHi) or
-         not monotonicNonNegSteps(s^.thenStmt, a) then
+         not signedTypeRange(regType(a^.varType)^.bits, tyLo, tyHi) then
         continue;
-      new(m);
-      m^.v := a;
-      m^.lo := a^.cgRangeLo;
-      m^.hi := tyHi;
+      if monotonicNonNegSteps(s^.thenStmt, a) then
+      begin
+        new(m);
+        m^.v := a;
+        m^.lo := a^.cgRangeLo;
+        m^.hi := tyHi;
+      end
+      else if (a^.cgRangeLo >= 0) and
+              nonNegModLoop(s^.thenStmt, a, a^.cgRangeHi, written, modM) then
+      begin
+        new(m);
+        m^.v := a;
+        m^.lo := 0;
+        m^.hi := modM;
+      end
+      else
+        continue;
       m^.hadOld := a^.cgLoopKnown;
       m^.oldLo := a^.cgLoopLo;
       m^.oldHi := a^.cgLoopHi;
@@ -1597,9 +1615,7 @@ begin
       a^.cgLoopHi := m^.hi;
       setVarRange(a, true, m^.lo, m^.hi);
     end;
-    afterBoundCount := activeBoundCount;
-    for k := 0 to activeBoundCount - 1 do
-      afterBounds[k] := activeBounds[k];
+    saveRangeState(preCondSnap);
   end;
   condB := irNewBlock('while.cond');
   bodyB := irNewBlock('while.body');
@@ -1610,8 +1626,11 @@ begin
   if trackRanges then
   begin
     boundCount := 0;
+    cboundCount := 0;
     collectLengthBounds(s^.cond, bounds, boundCount);
+    collectConstBounds(s^.cond, cbounds, cboundCount);
     applyLengthBounds(bounds, boundCount);
+    applyConstBounds(cbounds, cboundCount);
   end;
   irSetInsertPoint(bodyB);
   pushLoop(condB, endB);
@@ -1620,6 +1639,7 @@ begin
   irBr(condB);
   if trackRanges then
   begin
+    restoreRangeState(preCondSnap);
     for k := 0 to monos.count - 1 do
     begin
       m := PWhileMono(listGet(monos, k));
@@ -1628,9 +1648,6 @@ begin
       a^.cgLoopLo := m^.oldLo;
       a^.cgLoopHi := m^.oldHi;
     end;
-    activeBoundCount := afterBoundCount;
-    for k := 0 to afterBoundCount - 1 do
-      activeBounds[k] := afterBounds[k];
     forgetRanges(written);
     for k := 0 to monos.count - 1 do
     begin
@@ -1700,9 +1717,9 @@ var
   acc: PAccumulator;
   he: PHoistEntry;
   cb: PCheckedBase;
-  k: longint;
-  dLo, dHi, trips, tyLo, tyHi, x: int64;
-  overflow, fits: boolean;
+  k, j: longint;
+  dLo, dHi, trips, tyLo, tyHi, x, modM: int64;
+  overflow, fits, covered: boolean;
 begin
   v := s^.forVar^.refDecl;
   varTy := v^.varType;
@@ -1880,6 +1897,33 @@ begin
         fits := not mulOverflows(trips, acc^.dHi, x) and
                 not addOverflows(acc^.startHi, x, acc^.hi);
       acc^.bounded := fits and (acc^.lo >= tyLo) and (acc^.hi <= tyHi);
+    end;
+  end;
+  if rangeLocals.count > 0 then
+  begin
+    for k := 0 to written.count - 1 do
+    begin
+      a := PDecl(listGet(written, k));
+      if a^.cgRangeKnown and (a^.cgRangeLo >= 0) and
+         nonNegModLoop(s^.forBody, a, a^.cgRangeHi, written, modM) then
+      begin
+        covered := false;
+        for j := 0 to accs.count - 1 do
+          if PAccumulator(listGet(accs, j))^.v = a then
+          begin
+            covered := true;
+            break;
+          end;
+        if not covered then
+        begin
+          acc := PAccumulator(arenaAlloc(sizeof(TAccumulator)));
+          acc^.v := a;
+          acc^.bounded := true;
+          acc^.lo := 0;
+          acc^.hi := modM;
+          listAdd(accs, acc);
+        end;
+      end;
     end;
   end;
   forgetRanges(written);
@@ -4779,6 +4823,118 @@ begin
   end;
 end;
 
+procedure collectConstBounds(e: PNode; var outB: TConstBoundArray;
+                             var count: longint);
+  function extract(ve, ce: PNode; isLo, strict: boolean): boolean;
+  var
+    v: PDecl;
+    c: int64;
+  begin
+    extract := false;
+    while (ve <> nil) and (ve^.kind = nkParen) do
+      ve := ve^.inner;
+    v := plainAssignTarget(ve);
+    if (v = nil) or not v^.cgRangeLocal or not constIntOf(ce, c) then
+      exit;
+    if isLo then
+    begin
+      if strict then
+      begin
+        if c = high(int64) then
+          exit(true);
+        c := c + 1;
+      end;
+      if count < 64 then
+      begin
+        outB[count].v := v;
+        outB[count].hasLo := true;
+        outB[count].lo := c;
+        outB[count].hasHi := false;
+        outB[count].hi := 0;
+        count := count + 1;
+      end;
+    end
+    else
+    begin
+      if strict then
+      begin
+        if c = low(int64) then
+          exit(true);
+        c := c - 1;
+      end;
+      if count < 64 then
+      begin
+        outB[count].v := v;
+        outB[count].hasLo := false;
+        outB[count].lo := 0;
+        outB[count].hasHi := true;
+        outB[count].hi := c;
+        count := count + 1;
+      end;
+    end;
+    extract := true;
+  end;
+begin
+  while (e <> nil) and (e^.kind = nkParen) do
+    e := e^.inner;
+  if (e = nil) or (e^.kind <> nkBinary) then
+    exit;
+  if (e^.bop = boAnd) and (e^.opDecl = nil) then
+  begin
+    collectConstBounds(e^.lhs, outB, count);
+    collectConstBounds(e^.rhs, outB, count);
+    exit;
+  end;
+  if (e^.opDecl <> nil) or (e^.operandType = nil) or
+     not isSignedOrdinal(e^.operandType) then
+    exit;
+  case e^.bop of
+    boGe: if not extract(e^.lhs, e^.rhs, true, false) then
+            extract(e^.rhs, e^.lhs, false, false);
+    boGt: if not extract(e^.lhs, e^.rhs, true, true) then
+            extract(e^.rhs, e^.lhs, false, true);
+    boLe: if not extract(e^.lhs, e^.rhs, false, false) then
+            extract(e^.rhs, e^.lhs, true, false);
+    boLt: if not extract(e^.lhs, e^.rhs, false, true) then
+            extract(e^.rhs, e^.lhs, true, true);
+  end;
+end;
+
+procedure applyConstBounds(const bounds: TConstBoundArray; count: longint);
+var
+  i: longint;
+  v: PDecl;
+  lo, hi: int64;
+begin
+  for i := 0 to count - 1 do
+  begin
+    if not bounds[i].hasLo and not bounds[i].hasHi then
+      continue;
+    v := bounds[i].v;
+    if v^.cgRangeKnown then
+    begin
+      lo := v^.cgRangeLo;
+      hi := v^.cgRangeHi;
+    end
+    else
+    begin
+      if (v^.varType = nil) or
+         not signedTypeRange(regType(v^.varType)^.bits, lo, hi) then
+        continue;
+    end;
+    if bounds[i].hasLo and (bounds[i].lo > lo) then
+      lo := bounds[i].lo;
+    if bounds[i].hasHi and (bounds[i].hi < hi) then
+      hi := bounds[i].hi;
+    if lo <= hi then
+    begin
+      v^.cgRangeKnown := true;
+      v^.cgRangeLo := lo;
+      v^.cgRangeHi := hi;
+    end;
+  end;
+end;
+
 procedure saveRangeState(var st: TRangeSnap);
 var
   i: longint;
@@ -4917,6 +5073,305 @@ begin
       listFree(w);
     end;
   end;
+end;
+
+function evalExprRange(e: PNode; v: PDecl; vrLo, vrHi: int64;
+                       const written: TPtrList;
+                       var outLo, outHi: int64): boolean;
+var
+  c, lrLo, lrHi, rrLo, rrHi, opLo, opHi, tyLo, tyHi: int64;
+  pv, bd: PDecl;
+  fb: TOrdinalBounds;
+  arg0: PNode;
+  at: PType;
+  opStr: string;
+  ok: boolean;
+begin
+  evalExprRange := false;
+  if e = nil then
+    exit;
+  while (e <> nil) and (e^.kind = nkParen) do
+    e := e^.inner;
+  if e = nil then
+    exit;
+  if constIntOf(e, c) then
+  begin
+    outLo := c;
+    outHi := c;
+    exit(true);
+  end;
+  pv := plainAssignTarget(e);
+  if pv <> nil then
+  begin
+    if pv = v then
+    begin
+      outLo := vrLo;
+      outHi := vrHi;
+      exit(true);
+    end;
+    if not listHasPtr(written, pv) then
+    begin
+      if pv^.cgRangeKnown then
+      begin
+        outLo := pv^.cgRangeLo;
+        outHi := pv^.cgRangeHi;
+        exit(true);
+      end;
+      if (pv^.varType <> nil) and isOrdinal(pv^.varType) and
+         not isQWord(getBase(pv^.varType)) then
+      begin
+        fb := getOrdinalBounds(pv^.varType);
+        if fb.lo <= fb.hi then
+        begin
+          outLo := fb.lo;
+          outHi := fb.hi;
+          exit(true);
+        end;
+      end;
+    end;
+    exit;
+  end;
+  if e^.kind = nkCall then
+  begin
+    if e^.isVarCast or (e^.methodCast <> 0) or (e^.calleeExpr <> nil) or
+       (e^.callValue <> nil) or (e^.callWith <> nil) or
+       (e^.args.count <> 1) then
+      exit;
+    bd := e^.callDecl;
+    if (bd = nil) or (bd^.kind <> dkBuiltin) then
+      exit;
+    arg0 := PNode(listGet(e^.args, 0));
+    if bd^.builtin = bkOrd then
+    begin
+      at := arg0^.typ;
+      if (at <> nil) and isOrdinal(at) and not isQWord(getBase(at)) then
+      begin
+        fb := getOrdinalBounds(at);
+        if fb.lo <= fb.hi then
+        begin
+          outLo := fb.lo;
+          outHi := fb.hi;
+          exit(true);
+        end;
+      end;
+      exit;
+    end;
+    if (bd^.builtin = bkLength) and (arg0^.typ <> nil) and
+       (arg0^.typ^.kind = tyAnsiString) then
+    begin
+      outLo := 0;
+      outHi := $7FFFFFFF;
+      exit(true);
+    end;
+    exit;
+  end;
+  if (e^.kind <> nkBinary) or (e^.opDecl <> nil) or (e^.typ = nil) or
+     not isIntegerLike(e^.typ) or not isSignedOrdinal(e^.typ) or
+     (e^.operandType = nil) or not isSignedOrdinal(e^.operandType) then
+    exit;
+  if not signedTypeRange(regType(e^.operandType)^.bits, opLo, opHi) or
+     not signedTypeRange(regType(e^.typ)^.bits, tyLo, tyHi) then
+    exit;
+  if not evalExprRange(e^.lhs, v, vrLo, vrHi, written, lrLo, lrHi) or
+     not evalExprRange(e^.rhs, v, vrLo, vrHi, written, rrLo, rrHi) then
+    exit;
+  case e^.bop of
+    boAdd, boSub, boMul:
+      begin
+        if e^.bop = boAdd then opStr := 'add'
+        else if e^.bop = boSub then opStr := 'sub'
+        else opStr := 'mul';
+        ok := combineRange(opStr, true, lrLo, lrHi, true, rrLo, rrHi, outLo, outHi);
+        if not ok then
+          exit;
+        evalExprRange := (outLo >= opLo) and (outHi <= opHi) and
+                         (outLo >= tyLo) and (outHi <= tyHi);
+      end;
+    boMod:
+      begin
+        if constIntOf(e^.rhs, c) and (c > 0) then
+        begin
+          if mode = lmISO then
+          begin
+            outLo := 0;
+            outHi := c - 1;
+            exit(true);
+          end;
+          if lrLo >= 0 then
+          begin
+            outLo := 0;
+            if c - 1 < lrHi then outHi := c - 1 else outHi := lrHi;
+            exit(true);
+          end;
+        end;
+      end;
+    boAnd:
+      begin
+        if (lrLo >= 0) and (rrLo >= 0) then
+        begin
+          outLo := 0;
+          if lrHi < rrHi then outHi := lrHi else outHi := rrHi;
+          exit(true);
+        end
+        else if lrLo >= 0 then
+        begin
+          outLo := 0;
+          outHi := lrHi;
+          exit(true);
+        end
+        else if rrLo >= 0 then
+        begin
+          outLo := 0;
+          outHi := rrHi;
+          exit(true);
+        end;
+      end;
+  end;
+end;
+
+function collectModUpperBound(s: PNode; v: PDecl; var outM: int64;
+                              var hasWrite: boolean): boolean;
+var
+  k: longint;
+  val: PNode;
+  c: int64;
+  arm: PCaseArm;
+  used, w: TPtrList;
+begin
+  collectModUpperBound := true;
+  if s = nil then
+    exit;
+  case s^.kind of
+    nkCompound:
+      for k := 0 to s^.stmts.count - 1 do
+        if not collectModUpperBound(PNode(listGet(s^.stmts, k)), v, outM, hasWrite) then
+          exit(false);
+    nkAssign:
+      begin
+        if plainAssignTarget(s^.target) <> v then
+          exit;
+        val := s^.value;
+        while (val <> nil) and (val^.kind = nkParen) do
+          val := val^.inner;
+        if (val = nil) or (val^.kind <> nkBinary) or (val^.bop <> boMod) or
+           (val^.opDecl <> nil) or (val^.operandType = nil) or
+           not isSignedOrdinal(val^.operandType) or
+           not constIntOf(val^.rhs, c) or (c <= 0) then
+          exit(false);
+        if c - 1 > outM then
+          outM := c - 1;
+        hasWrite := true;
+      end;
+    nkIf:
+      collectModUpperBound := collectModUpperBound(s^.thenStmt, v, outM, hasWrite) and
+                              collectModUpperBound(s^.elseStmt, v, outM, hasWrite);
+    nkWhile:
+      collectModUpperBound := collectModUpperBound(s^.thenStmt, v, outM, hasWrite);
+    nkRepeat:
+      for k := 0 to s^.stmts.count - 1 do
+        if not collectModUpperBound(PNode(listGet(s^.stmts, k)), v, outM, hasWrite) then
+          exit(false);
+    nkFor:
+      collectModUpperBound := (plainAssignTarget(s^.forVar) <> v) and
+                              collectModUpperBound(s^.forBody, v, outM, hasWrite);
+    nkCase:
+      begin
+        for k := 0 to s^.arms.count - 1 do
+        begin
+          arm := PCaseArm(listGet(s^.arms, k));
+          if not collectModUpperBound(arm^.body, v, outM, hasWrite) then
+            exit(false);
+        end;
+        for k := 0 to s^.elseBody.count - 1 do
+          if not collectModUpperBound(PNode(listGet(s^.elseBody, k)), v, outM, hasWrite) then
+            exit(false);
+      end;
+  else
+    begin
+      listInit(used);
+      listInit(w);
+      paStmt(s, used, w, false, true);
+      collectModUpperBound := not listHasPtr(w, v);
+      listFree(used);
+      listFree(w);
+    end;
+  end;
+end;
+
+function nonNegModStep(s: PNode; v: PDecl; m: int64; const written: TPtrList;
+                       var hasWrite: boolean): boolean;
+var
+  k: longint;
+  val: PNode;
+  lLo, lHi: int64;
+  arm: PCaseArm;
+begin
+  nonNegModStep := true;
+  if s = nil then
+    exit;
+  case s^.kind of
+    nkCompound:
+      for k := 0 to s^.stmts.count - 1 do
+        if not nonNegModStep(PNode(listGet(s^.stmts, k)), v, m, written, hasWrite) then
+          exit(false);
+    nkAssign:
+      begin
+        if plainAssignTarget(s^.target) <> v then
+          exit;
+        val := s^.value;
+        while (val <> nil) and (val^.kind = nkParen) do
+          val := val^.inner;
+        if (val = nil) or (val^.kind <> nkBinary) or (val^.bop <> boMod) then
+          exit(false);
+        if not evalExprRange(val^.lhs, v, 0, m, written, lLo, lHi) or (lLo < 0) then
+          exit(false);
+        hasWrite := true;
+      end;
+    nkIf:
+      nonNegModStep := nonNegModStep(s^.thenStmt, v, m, written, hasWrite) and
+                       nonNegModStep(s^.elseStmt, v, m, written, hasWrite);
+    nkWhile:
+      nonNegModStep := nonNegModStep(s^.thenStmt, v, m, written, hasWrite);
+    nkRepeat:
+      for k := 0 to s^.stmts.count - 1 do
+        if not nonNegModStep(PNode(listGet(s^.stmts, k)), v, m, written, hasWrite) then
+          exit(false);
+    nkFor:
+      nonNegModStep := nonNegModStep(s^.forBody, v, m, written, hasWrite);
+    nkCase:
+      begin
+        for k := 0 to s^.arms.count - 1 do
+        begin
+          arm := PCaseArm(listGet(s^.arms, k));
+          if not nonNegModStep(arm^.body, v, m, written, hasWrite) then
+            exit(false);
+        end;
+        for k := 0 to s^.elseBody.count - 1 do
+          if not nonNegModStep(PNode(listGet(s^.elseBody, k)), v, m, written, hasWrite) then
+            exit(false);
+      end;
+  end;
+end;
+
+function nonNegModLoop(s: PNode; v: PDecl; initHi: int64;
+                       const written: TPtrList; var outM: int64): boolean;
+var
+  tyLo, tyHi, m: int64;
+  hasW, verified: boolean;
+begin
+  nonNegModLoop := false;
+  if (v = nil) or (v^.varType = nil) or
+     not signedTypeRange(regType(v^.varType)^.bits, tyLo, tyHi) then
+    exit;
+  m := initHi;
+  hasW := false;
+  if not collectModUpperBound(s, v, m, hasW) or not hasW or (m < 0) or (m > tyHi) then
+    exit;
+  verified := false;
+  if not nonNegModStep(s, v, m, written, verified) or not verified then
+    exit;
+  outM := m;
+  nonNegModLoop := true;
 end;
 
 function plainVarRefNode(e: PNode): PNode;

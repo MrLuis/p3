@@ -269,6 +269,13 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
     VarDecl *Base = nullptr;
     int64_t Slack = 0;
   };
+  struct ConstBound {
+    VarDecl *V = nullptr;
+    bool HasLo = false;
+    int64_t Lo = 0;
+    bool HasHi = false;
+    int64_t Hi = 0;
+  };
   struct RangeState {
     llvm::DenseMap<VarDecl *, ValueRange> VarRanges;
     llvm::DenseMap<VarDecl *, VarDecl *> VarLengthOf;
@@ -650,11 +657,21 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
   bool matchVarPlusConst(Expr *E, VarDecl *&V, int64_t &Off) const;
   void collectLengthBounds(Expr *E, llvm::SmallVectorImpl<LengthBound> &Out) const;
   void applyLengthBounds(llvm::ArrayRef<LengthBound> Bounds);
+  void collectConstBounds(Expr *E, llvm::SmallVectorImpl<ConstBound> &Out) const;
+  void applyConstBounds(llvm::ArrayRef<ConstBound> Bounds);
   RangeState saveRangeState() const;
   void restoreRangeState(const RangeState &S);
   bool canElideAnsiBoundsCheck(Expr *Base, Expr *Idx) const;
   static bool exprWritesVar(Expr *E, VarDecl *V);
   bool monotonicNonNegSteps(Stmt *S, VarDecl *V) const;
+  bool evalExprRange(Expr *E, VarDecl *V, ValueRange VR,
+                     const VarSet *Written, ValueRange &Out) const;
+  bool collectModUpperBound(Stmt *S, VarDecl *V, int64_t &OutM,
+                            bool &HasWrite) const;
+  bool nonNegModStep(Stmt *S, VarDecl *V, int64_t M,
+                     const VarSet *Written, bool &HasWrite) const;
+  bool nonNegModLoop(Stmt *S, VarDecl *V, int64_t InitHi,
+                     const VarSet *Written, int64_t &OutM) const;
 
   /// An integer constant written as a literal, a named constant or one of
   /// those negated: its value.

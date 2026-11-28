@@ -1733,6 +1733,95 @@ void CodeGenModule::applyLengthBounds(llvm::ArrayRef<LengthBound> Bounds) {
 }
 
 
+void CodeGenModule::collectConstBounds(
+    Expr *E, llvm::SmallVectorImpl<ConstBound> &Out) const {
+  while (auto *P = llvm::dyn_cast_or_null<ParenExpr>(E))
+    E = P->getInner();
+  auto *B = llvm::dyn_cast_or_null<BinaryExpr>(E);
+  if (!B)
+    return;
+  if (B->getOp() == BinaryOp::And && !B->getOperator()) {
+    collectConstBounds(B->getLHS(), Out);
+    collectConstBounds(B->getRHS(), Out);
+    return;
+  }
+  if (B->getOperator() || !B->getOperandType() ||
+      !isSignedOrdinal(B->getOperandType()))
+    return;
+  auto Extract = [&](Expr *VE, Expr *CE, bool IsLo, bool Strict) {
+    while (auto *P = llvm::dyn_cast_or_null<ParenExpr>(VE))
+      VE = P->getInner();
+    VarDecl *V = PinAnalysis::plainAssignTarget(VE);
+    int64_t C = 0;
+    if (!V || !RangeLocals.count(V) || !constInt(CE, C))
+      return false;
+    ConstBound CB;
+    CB.V = V;
+    if (IsLo) {
+      if (Strict) {
+        if (C == INT64_MAX)
+          return true;
+        C += 1;
+      }
+      CB.HasLo = true;
+      CB.Lo = C;
+    } else {
+      if (Strict) {
+        if (C == INT64_MIN)
+          return true;
+        C -= 1;
+      }
+      CB.HasHi = true;
+      CB.Hi = C;
+    }
+    Out.push_back(CB);
+    return true;
+  };
+  switch (B->getOp()) {
+  case BinaryOp::Ge:
+    if (!Extract(B->getLHS(), B->getRHS(), true, false))
+      Extract(B->getRHS(), B->getLHS(), false, false);
+    break;
+  case BinaryOp::Gt:
+    if (!Extract(B->getLHS(), B->getRHS(), true, true))
+      Extract(B->getRHS(), B->getLHS(), false, true);
+    break;
+  case BinaryOp::Le:
+    if (!Extract(B->getLHS(), B->getRHS(), false, false))
+      Extract(B->getRHS(), B->getLHS(), true, false);
+    break;
+  case BinaryOp::Lt:
+    if (!Extract(B->getLHS(), B->getRHS(), false, true))
+      Extract(B->getRHS(), B->getLHS(), true, true);
+    break;
+  default:
+    break;
+  }
+}
+
+
+void CodeGenModule::applyConstBounds(llvm::ArrayRef<ConstBound> Bounds) {
+  for (const ConstBound &B : Bounds) {
+    if (!B.HasLo && !B.HasHi)
+      continue;
+    ValueRange R;
+    auto It = VarRanges.find(B.V);
+    if (It != VarRanges.end() && It->second.Known) {
+      R = It->second;
+    } else {
+      if (!B.V->getType() || !signedRange(intBits(B.V->getType()), R))
+        continue;
+    }
+    if (B.HasLo && B.Lo > R.Lo)
+      R.Lo = B.Lo;
+    if (B.HasHi && B.Hi < R.Hi)
+      R.Hi = B.Hi;
+    if (R.Lo <= R.Hi)
+      VarRanges[B.V] = R;
+  }
+}
+
+
 CodeGenModule::RangeState CodeGenModule::saveRangeState() const {
   return {VarRanges, VarLengthOf, ActiveLengthBounds};
 }
@@ -1834,6 +1923,236 @@ bool CodeGenModule::monotonicNonNegSteps(Stmt *S, VarDecl *V) const {
   VarSet W;
   PinAnalysis(CurRoutine).writtenBy(S, W);
   return !W.count(V);
+}
+
+
+bool CodeGenModule::evalExprRange(Expr *E, VarDecl *V, ValueRange VR,
+                                  const VarSet *Written,
+                                  ValueRange &Out) const {
+  if (!E)
+    return false;
+  while (auto *P = llvm::dyn_cast<ParenExpr>(E))
+    E = P->getInner();
+  int64_t C = 0;
+  if (constInt(E, C)) {
+    Out = {true, C, C};
+    return true;
+  }
+  if (VarDecl *PV = PinAnalysis::plainAssignTarget(E)) {
+    if (PV == V) {
+      Out = VR;
+      return true;
+    }
+    if (!Written || !Written->count(PV)) {
+      auto It = VarRanges.find(PV);
+      if (It != VarRanges.end() && It->second.Known) {
+        Out = It->second;
+        return true;
+      }
+      if (PV->getType() && PV->getType()->isOrdinal() &&
+          !isQWord(PV->getType()->getBase())) {
+        OrdinalBounds FB = getOrdinalBounds(PV->getType());
+        if (FB.Lo <= FB.Hi) {
+          Out = {true, FB.Lo, FB.Hi};
+          return true;
+        }
+      }
+    }
+    return false;
+  }
+  if (auto *Call = llvm::dyn_cast<CallExpr>(E)) {
+    if (Call->isMethodCast() || Call->isVarCast() || Call->getCalleeValue() ||
+        Call->getWith() || Call->getArgs().size() != 1)
+      return false;
+    auto *BD = llvm::dyn_cast_or_null<BuiltinDecl>(Call->getDecl());
+    if (!BD)
+      return false;
+    Expr *Arg0 = Call->getArgs()[0];
+    if (BD->getBuiltinKind() == BuiltinKind::Ord) {
+      Type *AT = Arg0->getType();
+      if (AT && AT->isOrdinal() && !isQWord(AT->getBase())) {
+        OrdinalBounds FB = getOrdinalBounds(AT);
+        if (FB.Lo <= FB.Hi) {
+          Out = {true, FB.Lo, FB.Hi};
+          return true;
+        }
+      }
+      return false;
+    }
+    if (BD->getBuiltinKind() == BuiltinKind::Length && Arg0->getType() &&
+        Arg0->getType()->isAnsiString()) {
+      Out = {true, 0, INT32_MAX};
+      return true;
+    }
+    return false;
+  }
+  auto *B = llvm::dyn_cast<BinaryExpr>(E);
+  if (!B || B->getOperator() || !B->getType() || !B->getType()->isIntegerLike() ||
+      !isSignedOrdinal(B->getType()) || !B->getOperandType() ||
+      !isSignedOrdinal(B->getOperandType()))
+    return false;
+  ValueRange LR, RR, OpTR, TyR;
+  if (!signedRange(intBits(B->getOperandType()), OpTR) ||
+      !signedRange(intBits(B->getType()), TyR))
+    return false;
+  if (!evalExprRange(B->getLHS(), V, VR, Written, LR) ||
+      !evalExprRange(B->getRHS(), V, VR, Written, RR))
+    return false;
+  switch (B->getOp()) {
+  case BinaryOp::Add:
+  case BinaryOp::Sub:
+  case BinaryOp::Mul:
+    if (!combineRange(B->getOp(), LR, RR, Out))
+      return false;
+    return Out.Lo >= OpTR.Lo && Out.Hi <= OpTR.Hi &&
+           Out.Lo >= TyR.Lo && Out.Hi <= TyR.Hi;
+  case BinaryOp::Mod:
+    if (constInt(B->getRHS(), C) && C > 0) {
+      if (LangOpts.Mode == LangMode::ISO) {
+        Out = {true, 0, C - 1};
+        return true;
+      }
+      if (LR.Known && LR.Lo >= 0) {
+        Out = {true, 0, std::min(C - 1, LR.Hi)};
+        return true;
+      }
+    }
+    return false;
+  case BinaryOp::And:
+    Out = andRange(LR, RR);
+    return Out.Known;
+  default:
+    return false;
+  }
+}
+
+
+bool CodeGenModule::collectModUpperBound(Stmt *S, VarDecl *V, int64_t &OutM,
+                                         bool &HasWrite) const {
+  if (!S)
+    return true;
+  if (auto *C = llvm::dyn_cast<CompoundStmt>(S)) {
+    for (Stmt *X : C->getBody())
+      if (!collectModUpperBound(X, V, OutM, HasWrite))
+        return false;
+    return true;
+  }
+  if (auto *A = llvm::dyn_cast<AssignStmt>(S)) {
+    if (PinAnalysis::plainAssignTarget(A->getTarget()) != V)
+      return true;
+    Expr *Val = A->getValue();
+    while (auto *P = llvm::dyn_cast_or_null<ParenExpr>(Val))
+      Val = P->getInner();
+    auto *B = llvm::dyn_cast_or_null<BinaryExpr>(Val);
+    int64_t C = 0;
+    if (!B || B->getOp() != BinaryOp::Mod || B->getOperator() ||
+        !B->getOperandType() || !isSignedOrdinal(B->getOperandType()) ||
+        !constInt(B->getRHS(), C) || C <= 0)
+      return false;
+    if (C - 1 > OutM)
+      OutM = C - 1;
+    HasWrite = true;
+    return true;
+  }
+  if (auto *I = llvm::dyn_cast<IfStmt>(S))
+    return collectModUpperBound(I->getThen(), V, OutM, HasWrite) &&
+           collectModUpperBound(I->getElse(), V, OutM, HasWrite);
+  if (auto *W = llvm::dyn_cast<WhileStmt>(S))
+    return !exprWritesVar(W->getCond(), V) &&
+           collectModUpperBound(W->getBody(), V, OutM, HasWrite);
+  if (auto *Rp = llvm::dyn_cast<RepeatStmt>(S)) {
+    for (Stmt *X : Rp->getBody())
+      if (!collectModUpperBound(X, V, OutM, HasWrite))
+        return false;
+    return !exprWritesVar(Rp->getCond(), V);
+  }
+  if (auto *F = llvm::dyn_cast<ForStmt>(S))
+    return PinAnalysis::plainAssignTarget(F->getVar()) != V &&
+           collectModUpperBound(F->getBody(), V, OutM, HasWrite);
+  if (auto *Cs = llvm::dyn_cast<CaseStmt>(S)) {
+    for (CaseArm *A : Cs->getArms())
+      if (!collectModUpperBound(A->getBody(), V, OutM, HasWrite))
+        return false;
+    for (Stmt *X : Cs->getElseBody())
+      if (!collectModUpperBound(X, V, OutM, HasWrite))
+        return false;
+    return true;
+  }
+  VarSet W;
+  PinAnalysis(CurRoutine).writtenBy(S, W);
+  return !W.count(V);
+}
+
+
+bool CodeGenModule::nonNegModStep(Stmt *S, VarDecl *V, int64_t M,
+                                  const VarSet *Written,
+                                  bool &HasWrite) const {
+  if (!S)
+    return true;
+  if (auto *C = llvm::dyn_cast<CompoundStmt>(S)) {
+    for (Stmt *X : C->getBody())
+      if (!nonNegModStep(X, V, M, Written, HasWrite))
+        return false;
+    return true;
+  }
+  if (auto *A = llvm::dyn_cast<AssignStmt>(S)) {
+    if (PinAnalysis::plainAssignTarget(A->getTarget()) != V)
+      return true;
+    Expr *Val = A->getValue();
+    while (auto *P = llvm::dyn_cast_or_null<ParenExpr>(Val))
+      Val = P->getInner();
+    auto *B = llvm::dyn_cast_or_null<BinaryExpr>(Val);
+    if (!B || B->getOp() != BinaryOp::Mod)
+      return false;
+    ValueRange LHS;
+    if (!evalExprRange(B->getLHS(), V, {true, 0, M}, Written, LHS) ||
+        !LHS.Known || LHS.Lo < 0)
+      return false;
+    HasWrite = true;
+    return true;
+  }
+  if (auto *I = llvm::dyn_cast<IfStmt>(S))
+    return nonNegModStep(I->getThen(), V, M, Written, HasWrite) &&
+           nonNegModStep(I->getElse(), V, M, Written, HasWrite);
+  if (auto *W = llvm::dyn_cast<WhileStmt>(S))
+    return nonNegModStep(W->getBody(), V, M, Written, HasWrite);
+  if (auto *Rp = llvm::dyn_cast<RepeatStmt>(S)) {
+    for (Stmt *X : Rp->getBody())
+      if (!nonNegModStep(X, V, M, Written, HasWrite))
+        return false;
+    return true;
+  }
+  if (auto *F = llvm::dyn_cast<ForStmt>(S))
+    return nonNegModStep(F->getBody(), V, M, Written, HasWrite);
+  if (auto *Cs = llvm::dyn_cast<CaseStmt>(S)) {
+    for (CaseArm *A : Cs->getArms())
+      if (!nonNegModStep(A->getBody(), V, M, Written, HasWrite))
+        return false;
+    for (Stmt *X : Cs->getElseBody())
+      if (!nonNegModStep(X, V, M, Written, HasWrite))
+        return false;
+    return true;
+  }
+  return true;
+}
+
+
+bool CodeGenModule::nonNegModLoop(Stmt *S, VarDecl *V, int64_t InitHi,
+                                  const VarSet *Written,
+                                  int64_t &OutM) const {
+  ValueRange TR;
+  if (!V || !V->getType() || !signedRange(intBits(V->getType()), TR))
+    return false;
+  int64_t M = InitHi;
+  bool HasWrite = false;
+  if (!collectModUpperBound(S, V, M, HasWrite) || !HasWrite ||
+      M < 0 || M > TR.Hi)
+    return false;
+  bool Verified = false;
+  if (!nonNegModStep(S, V, M, Written, Verified) || !Verified)
+    return false;
+  OutM = M;
+  return true;
 }
 
 

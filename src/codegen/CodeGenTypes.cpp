@@ -550,10 +550,16 @@ llvm::Value *CodeGenModule::convertOrdinal(llvm::Value *V, Type *From, Type *To)
     return B.CreateICmpNE(V, llvm::ConstantInt::get(V->getType(), 0));
   llvm::Value *R = isSignedOrdinal(From) ? B.CreateSExtOrTrunc(V, Dst)
                                          : B.CreateZExtOrTrunc(V, Dst);
-  // A known range survives a conversion that keeps the value: a sign
-  // extension, or a truncation to a signed type that holds the range.
+  // A known range (or the value range of a non-qword ordinal) survives a
+  // conversion that keeps the value in a signed target type.
   ValueRange VR = rangeOfValue(V), DstRange;
-  if (VR.Known && isSignedOrdinal(From) && isSignedOrdinal(To) &&
+  if (!VR.Known && From->isOrdinal() && !isQWord(From->getBase())) {
+    OrdinalBounds FB = getOrdinalBounds(From);
+    if (FB.Lo <= FB.Hi)
+      VR = {true, FB.Lo, FB.Hi};
+  }
+  if (VR.Known && (isSignedOrdinal(From) || !isQWord(From->getBase())) &&
+      isSignedOrdinal(To) &&
       signedRange(Dst->getIntegerBitWidth(), DstRange) &&
       VR.Lo >= DstRange.Lo && VR.Hi <= DstRange.Hi)
     noteRange(R, VR);

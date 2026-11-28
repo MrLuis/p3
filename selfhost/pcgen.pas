@@ -173,7 +173,15 @@ var
       idx, base: PDecl;
       slack: int64;
     end;
+    TConstBound = record
+      v: PDecl;
+      hasLo: boolean;
+      lo: int64;
+      hasHi: boolean;
+      hi: int64;
+    end;
     TBoundArray = array[0..63] of TLengthBound;
+    TConstBoundArray = array[0..63] of TConstBound;
     PRangeSnapEntry = ^TRangeSnapEntry;
     TRangeSnapEntry = record
       v, lenVar: PDecl;
@@ -1679,7 +1687,9 @@ function convertOrdinal(const v: TV; src, dst: PType): TV;
 var
   d: PIRType;
   r: TV;
-  tyLo, tyHi: int64;
+  tyLo, tyHi, vrLo, vrHi: int64;
+  vrKnown: boolean;
+  fb: TOrdinalBounds;
 begin
   d := regType(dst);
   if irSameType(v.t, d) then
@@ -1694,16 +1704,29 @@ begin
     r := irCast('sext', v, d, '')
   else
     r := irCast('zext', v, d, '');
-  { a known range survives a conversion that keeps the value: a sign
-    extension, or a truncation to a signed type that holds the range
-    (optimization3 item 4) }
-  if v.rKnown and isSignedOrdinal(src) and isSignedOrdinal(dst) and
-     not irIsConst(r) and signedTypeRange(d^.bits, tyLo, tyHi) and
-     (v.rLo >= tyLo) and (v.rHi <= tyHi) then
+  { a known range (or the value range of a non-qword ordinal) survives a
+    conversion that keeps the value in a signed target type }
+  vrKnown := v.rKnown;
+  vrLo := v.rLo;
+  vrHi := v.rHi;
+  if not vrKnown and isOrdinal(src) and not isQWord(getBase(src)) then
+  begin
+    fb := getOrdinalBounds(src);
+    if fb.lo <= fb.hi then
+    begin
+      vrKnown := true;
+      vrLo := fb.lo;
+      vrHi := fb.hi;
+    end;
+  end;
+  if vrKnown and (isSignedOrdinal(src) or not isQWord(getBase(src))) and
+     isSignedOrdinal(dst) and not irIsConst(r) and
+     signedTypeRange(d^.bits, tyLo, tyHi) and
+     (vrLo >= tyLo) and (vrHi <= tyHi) then
   begin
     r.rKnown := true;
-    r.rLo := v.rLo;
-    r.rHi := v.rHi;
+    r.rLo := vrLo;
+    r.rHi := vrHi;
   end;
   convertOrdinal := r;
 end;
@@ -6227,6 +6250,10 @@ procedure collectLengthBounds(e: PNode; var outB: TBoundArray;
                               var count: longint); forward;
 procedure applyLengthBounds(const bounds: TBoundArray;
                             count: longint); forward;
+procedure collectConstBounds(e: PNode; var outB: TConstBoundArray;
+                             var count: longint); forward;
+procedure applyConstBounds(const bounds: TConstBoundArray;
+                           count: longint); forward;
 procedure saveRangeState(var st: TRangeSnap); forward;
 procedure restoreRangeState(var st: TRangeSnap); forward;
 function canElideAnsiBoundsCheck(base, idx: PNode): boolean; forward;
@@ -6238,7 +6265,8 @@ var
   lhsEnd, rhsEnd, rhsB, endB: PIRBlock;
   phi: PIRInst;
   bounds: TBoundArray;
-  boundCount: longint;
+  cbounds: TConstBoundArray;
+  boundCount, cboundCount: longint;
   saved: TRangeSnap;
 begin
   isAnd := e^.bop = boAnd;
@@ -6258,14 +6286,17 @@ begin
   end;
   haveState := false;
   boundCount := 0;
+  cboundCount := 0;
   if isAnd and (rangeLocals.count > 0) then
   begin
     collectLengthBounds(e^.lhs, bounds, boundCount);
-    if boundCount > 0 then
+    collectConstBounds(e^.lhs, cbounds, cboundCount);
+    if (boundCount > 0) or (cboundCount > 0) then
     begin
       saveRangeState(saved);
       haveState := true;
       applyLengthBounds(bounds, boundCount);
+      applyConstBounds(cbounds, cboundCount);
     end;
   end;
   irSetInsertPoint(rhsB);
@@ -6374,11 +6405,18 @@ end;
 
 function emitDiv(const l, r: TV; signed: boolean; loc: TLoc): TV;
 var
-  c: int64;
-  isConst: boolean;
+  c, lc: int64;
+  isConst, posL, posR: boolean;
   a, b: TV;
 begin
   isConst := irIsConstInt(r, c);
+  if signed then
+  begin
+    posL := (l.rKnown and (l.rLo >= 0)) or (irIsConstInt(l, lc) and (lc >= 0));
+    posR := (isConst and (c > 0)) or (r.rKnown and (r.rLo > 0));
+    if posL and posR then
+      exit(irBin('udiv', l, r, 'div'));
+  end;
   if not isConst or (c = 0) then
     emitDivZeroCheck(irICmp('eq', r, irConstInt(r.t, 0), ''), loc);
   if not signed then
@@ -6395,11 +6433,18 @@ end;
 
 function emitMod(const l, r: TV; signed: boolean; loc: TLoc): TV;
 var
-  c: int64;
-  isConst: boolean;
+  c, lc: int64;
+  isConst, posL, posR: boolean;
   rem, fixed, neg, isMinus, safeR: TV;
 begin
   isConst := irIsConstInt(r, c);
+  if signed then
+  begin
+    posL := (l.rKnown and (l.rLo >= 0)) or (irIsConstInt(l, lc) and (lc >= 0));
+    posR := (isConst and (c > 0)) or (r.rKnown and (r.rLo > 0));
+    if posL and posR then
+      exit(irBin('urem', l, r, 'mod'));
+  end;
   if mode = lmISO then
   begin
     { ISO 7185 6.7.2.2: an error if j <= 0; the result is i - k*j with

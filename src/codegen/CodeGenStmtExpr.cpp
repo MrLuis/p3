@@ -696,14 +696,17 @@ llvm::Value *CodeGenModule::emitShortCircuit(BinaryExpr *E){
     B.CreateCondBr(L, EndBB, RHSBB);
 
   llvm::SmallVector<LengthBound, 4> Bounds;
+  llvm::SmallVector<ConstBound, 4> CBounds;
   bool HaveState = false;
   RangeState Saved;
   if (IsAnd && !RangeLocals.empty()) {
     collectLengthBounds(E->getLHS(), Bounds);
-    if (!Bounds.empty()) {
+    collectConstBounds(E->getLHS(), CBounds);
+    if (!Bounds.empty() || !CBounds.empty()) {
       Saved = saveRangeState();
       HaveState = true;
       applyLengthBounds(Bounds);
+      applyConstBounds(CBounds);
     }
   }
   B.SetInsertPoint(RHSBB);
@@ -740,6 +743,11 @@ llvm::Constant *CodeGenModule::intConst(llvm::Value *Like, int64_t V){
 
 llvm::Value *CodeGenModule::emitDiv(llvm::Value *L, llvm::Value *R, bool Signed,
                      SourceLocation Loc){
+  if (Signed) {
+    ValueRange XL = rangeOfValue(L), XR = rangeOfValue(R);
+    if (XL.Known && XL.Lo >= 0 && XR.Known && XR.Lo > 0)
+      return B.CreateUDiv(L, R, "div");
+  }
   if (!isConstNonZero(R))
     emitDivZeroCheck(B.CreateICmpEQ(R, intConst(R, 0)), Loc);
   if (!Signed)
@@ -760,6 +768,11 @@ llvm::Value *CodeGenModule::emitDiv(llvm::Value *L, llvm::Value *R, bool Signed,
 
 llvm::Value *CodeGenModule::emitMod(llvm::Value *L, llvm::Value *R, bool Signed,
                      SourceLocation Loc){
+  if (Signed) {
+    ValueRange XL = rangeOfValue(L), XR = rangeOfValue(R);
+    if (XL.Known && XL.Lo >= 0 && XR.Known && XR.Lo > 0)
+      return B.CreateURem(L, R, "mod");
+  }
   if (LangOpts.Mode == LangMode::ISO) {
     // ISO 7185 6.7.2.2: error if j <= 0; result is i - k*j with
     // 0 <= result < j.
@@ -1818,8 +1831,11 @@ void CodeGenModule::visitIfStmt(IfStmt *S){
   if (TrackRanges) {
     Saved = saveRangeState();
     llvm::SmallVector<LengthBound, 4> Bounds;
+    llvm::SmallVector<ConstBound, 4> CBounds;
     collectLengthBounds(S->getCond(), Bounds);
+    collectConstBounds(S->getCond(), CBounds);
     applyLengthBounds(Bounds);
+    applyConstBounds(CBounds);
   }
   B.SetInsertPoint(ThenBB);
   AtRoutineTail = Tail;
@@ -1852,6 +1868,7 @@ void CodeGenModule::visitWhileStmt(WhileStmt *S){
   llvm::SmallVector<MonotonicVar, 2> Monotonic;
   VarSet Written;
   llvm::SmallVector<LengthBound, 4> AfterSetupBounds;
+  llvm::DenseMap<VarDecl *, ValueRange> PreCondRanges;
   bool TrackRanges = !RangeLocals.empty();
   if (TrackRanges) {
     Written = rangeLocalsWrittenBy(S);
@@ -1860,12 +1877,20 @@ void CodeGenModule::visitWhileStmt(WhileStmt *S){
       ValueRange TR;
       if (It == VarRanges.end() || !It->second.Known || !A->getType() ||
           !signedRange(intBits(A->getType()), TR) ||
-          exprWritesVar(S->getCond(), A) ||
-          !monotonicNonNegSteps(S->getBody(), A))
+          exprWritesVar(S->getCond(), A))
+        continue;
+      int64_t ModM = 0;
+      ValueRange LoopR;
+      if (monotonicNonNegSteps(S->getBody(), A))
+        LoopR = {true, It->second.Lo, TR.Hi};
+      else if (It->second.Lo >= 0 &&
+               nonNegModLoop(S->getBody(), A, It->second.Hi, &Written, ModM))
+        LoopR = {true, 0, ModM};
+      else
         continue;
       MonotonicVar MV;
       MV.V = A;
-      MV.Range = {true, It->second.Lo, TR.Hi};
+      MV.Range = LoopR;
       auto LIt = LoopRanges.find(A);
       if (LIt != LoopRanges.end()) {
         MV.HadOld = true;
@@ -1879,6 +1904,7 @@ void CodeGenModule::visitWhileStmt(WhileStmt *S){
       setVarRange(MV.V, MV.Range);
     }
     AfterSetupBounds = ActiveLengthBounds;
+    PreCondRanges = VarRanges;
   }
 
   auto *CondBB = newBlock("while.cond");
@@ -1891,8 +1917,11 @@ void CodeGenModule::visitWhileStmt(WhileStmt *S){
 
   if (TrackRanges) {
     llvm::SmallVector<LengthBound, 4> Bounds;
+    llvm::SmallVector<ConstBound, 4> CBounds;
     collectLengthBounds(S->getCond(), Bounds);
+    collectConstBounds(S->getCond(), CBounds);
     applyLengthBounds(Bounds);
+    applyConstBounds(CBounds);
   }
   B.SetInsertPoint(BodyBB);
   Loops.push_back({CondBB, EndBB, Cleanups.size()});
@@ -1901,6 +1930,7 @@ void CodeGenModule::visitWhileStmt(WhileStmt *S){
   B.CreateBr(CondBB);
 
   if (TrackRanges) {
+    VarRanges = PreCondRanges;
     for (const MonotonicVar &MV : Monotonic) {
       if (MV.HadOld)
         LoopRanges[MV.V] = MV.OldLoop;
@@ -2096,6 +2126,21 @@ void CodeGenModule::visitForStmt(ForStmt *S){
           Lo < TypeRange.Lo || Hi > TypeRange.Hi)
         continue;
       Bounds.push_back({A.V, {true, Lo, Hi}});
+    }
+  }
+  for (VarDecl *A : Written) {
+    auto It = VarRanges.find(A);
+    int64_t ModM = 0;
+    if (It != VarRanges.end() && It->second.Known && It->second.Lo >= 0 &&
+        nonNegModLoop(S->getBody(), A, It->second.Hi, &Written, ModM)) {
+      bool Covered = false;
+      for (auto &[BVar, BR] : Bounds)
+        if (BVar == A) {
+          Covered = true;
+          break;
+        }
+      if (!Covered)
+        Bounds.push_back({A, {true, 0, ModM}});
     }
   }
   forgetRanges(Written);
