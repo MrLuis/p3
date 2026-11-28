@@ -249,7 +249,7 @@ bool CodeGenModule::runtimeMayRaise(llvm::StringRef Name){
          Name == "__pas_gen_assign" || Name == "__pas_gen_clear" ||
          Name == "__pas_closure_clear" ||
          Name == "__pas_dyn_clear" || Name == "__pas_dyn_assign" ||
-         Name == "__pas_dyn_setlength" ||
+         Name == "__pas_dyn_take" || Name == "__pas_dyn_setlength" ||
          Name == "__pas_format_pstr" ||
          Name == "__pas_owned_set" || Name == "__pas_owned_done";
 }

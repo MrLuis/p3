@@ -718,6 +718,20 @@ void __pas_dyn_assign_pod(void **dst, void *src) {
     dyn_release_hdr(DYN_HEADER(old), 1);
 }
 
+void __pas_dyn_take(void **dst, void *src) {
+  void *old = *dst;
+  *dst = src;
+  if (old)
+    dyn_release_hdr(DYN_HEADER(old), 0);
+}
+
+void __pas_dyn_take_pod(void **dst, void *src) {
+  void *old = *dst;
+  *dst = src;
+  if (old)
+    dyn_release_hdr(DYN_HEADER(old), 1);
+}
+
 /* A new array with the first count elements of a (which has at least
  * that many), each counted once more. */
 static void *dyn_duplicate(const void *a, int64_t from, int64_t count, int64_t size,

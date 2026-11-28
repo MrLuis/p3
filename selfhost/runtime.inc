@@ -9,7 +9,7 @@ type
   end;
 
 const
-  numRuntimeFuncs = 77;
+  numRuntimeFuncs = 79;
   runtimeFuncs: array[1..numRuntimeFuncs] of TRuntimeFuncAttr = (
     (name: '__pas_str_compare'; pureQuery: true; returnsFresh: false; returnsBool: false; neverFree: true; readMask: 3; writeMask: 0; slotMask: 0),
     (name: '__pas_str_pos'; pureQuery: true; returnsFresh: false; returnsBool: false; neverFree: true; readMask: 3; writeMask: 0; slotMask: 0),
@@ -56,6 +56,8 @@ const
     (name: '__pas_dyn_clear_pod'; pureQuery: false; returnsFresh: false; returnsBool: false; neverFree: false; readMask: 0; writeMask: 0; slotMask: 1),
     (name: '__pas_dyn_assign'; pureQuery: false; returnsFresh: false; returnsBool: false; neverFree: false; readMask: 0; writeMask: 0; slotMask: 1),
     (name: '__pas_dyn_assign_pod'; pureQuery: false; returnsFresh: false; returnsBool: false; neverFree: false; readMask: 0; writeMask: 0; slotMask: 1),
+    (name: '__pas_dyn_take'; pureQuery: false; returnsFresh: false; returnsBool: false; neverFree: false; readMask: 0; writeMask: 0; slotMask: 1),
+    (name: '__pas_dyn_take_pod'; pureQuery: false; returnsFresh: false; returnsBool: false; neverFree: false; readMask: 0; writeMask: 0; slotMask: 1),
     (name: '__pas_aoc_bad_index'; pureQuery: true; returnsFresh: false; returnsBool: true; neverFree: true; readMask: 1; writeMask: 0; slotMask: 0),
     (name: '__pas_token_cancelled'; pureQuery: false; returnsFresh: false; returnsBool: true; neverFree: false; readMask: 0; writeMask: 0; slotMask: 0),
     (name: '__pas_class_is'; pureQuery: true; returnsFresh: false; returnsBool: false; neverFree: true; readMask: 3; writeMask: 0; slotMask: 0),

@@ -852,6 +852,119 @@ begin
   storeValue(dst, v, tt);
 end;
 
+function isFreshDynCall(value: PNode): boolean;
+begin
+  isFreshDynCall := false;
+  value := skipParensNode(value);
+  if (value^.typ = nil) or (value^.typ^.kind <> tyDynArray) then
+    exit;
+  if value^.kind in [nkInherited, nkIndirectCall, nkMove] then
+    exit(true);
+  if (value^.kind <> nkCall) or value^.isVarCast or (value^.methodCast <> 0) then
+    exit;
+  if value^.callValue <> nil then
+    exit(true);
+  if value^.callDecl <> nil then
+  begin
+    if value^.callDecl^.kind = dkBuiltin then
+      exit(value^.callDecl^.builtin = bkCopy);
+    if value^.callDecl^.kind in [dkRoutine, dkVar] then
+      exit(true);
+  end;
+end;
+
+function canMoveDynLocalToResult(tv, value: PNode; dV: PDecl;
+                                  tailMove: boolean): boolean;
+var
+  n: PNode;
+  lv, p: PDecl;
+  i: longint;
+begin
+  canMoveDynLocalToResult := false;
+  if not tailMove or (dV = nil) or (curRoutine = nil) or not curRoutine^.isFunction or
+     (curRoutine^.asyncType <> nil) or (curRoutine^.iterType <> nil) or
+     (cleanups.count > 0) or (dV <> curRoutine^.resultVar) then
+    exit;
+  n := skipParensNode(value);
+  if (n^.kind <> nkNameRef) or (n^.refWith <> nil) or (n^.refDecl = nil) or
+     (n^.refDecl^.kind <> dkVar) then
+    exit;
+  lv := n^.refDecl;
+  if (lv = dV) or (lv^.varType^.kind <> tyDynArray) or
+     lv^.captured or lv^.cgBorrowedAnsi or (lv^.absTarget <> nil) or
+     ((lv^.init <> nil) and not lv^.isInitVar) or
+     (lv^.varKind in [vkConstParam, vkVarParam]) or lv^.isOut or
+     isByRef(lv) then
+    exit;
+  for i := 0 to curRoutine^.params.count - 1 do
+    if PDecl(listGet(curRoutine^.params, i)) = lv then
+      exit(true);
+  for i := 0 to curRoutine^.body^.decls.count - 1 do
+  begin
+    p := PDecl(listGet(curRoutine^.body^.decls, i));
+    if p = lv then
+      exit(true);
+  end;
+end;
+
+procedure emitDynAssign(hasDst: boolean; const inDst: TV; target: PNode;
+                        dV: PDecl; value: PNode; tailMove: boolean);
+var
+  dst, srcAddr, v: TV;
+  take: boolean;
+  lv: PDecl;
+  tt, elem: PType;
+begin
+  if dV <> nil then
+    tt := dV^.varType
+  else
+    tt := target^.typ;
+  elem := tt^.dynElement;
+  if canMoveDynLocalToResult(target, value, dV, tailMove) then
+  begin
+    lv := skipParensNode(value)^.refDecl;
+    srcAddr := varAddress(lv);
+    v := irLoad(irPtrT, srcAddr, 'dyn.move');
+    irStore(irZero(irPtrT), srcAddr);
+    dst := inDst;
+    if not hasDst then
+      dst := emitAddress(target);
+    if not dynMayRaise(elem) then
+      irSetNextCallNoRaise;
+    if not isManaged(elem) and (v.kind <> vkNull) then
+      astrV2('__pas_dyn_take_pod', 'ptr,ptr', dst, v)
+    else
+      astrV2('__pas_dyn_take', 'ptr,ptr', dst, v);
+    exit;
+  end;
+  take := isFreshDynCall(value) and ((target = nil) or (target^.kind = nkNameRef));
+  if take then
+  begin
+    noHoldDynResult := true;
+    tookDynResult := false;
+  end;
+  v := convertForAssign(visitExpr(value), value^.typ, tt, value^.b);
+  if take then
+  begin
+    noHoldDynResult := false;
+    take := tookDynResult;
+  end;
+  dst := inDst;
+  if not hasDst then
+    dst := emitAddress(target);
+  if take then
+  begin
+    if not dynMayRaise(elem) then
+      irSetNextCallNoRaise;
+    if not isManaged(elem) and (v.kind <> vkNull) then
+      astrV2('__pas_dyn_take_pod', 'ptr,ptr', dst, v)
+    else
+      astrV2('__pas_dyn_take', 'ptr,ptr', dst, v);
+    exit;
+  end;
+  storeValue(dst, v, tt);
+end;
+
 function emitResultInPlace(target, value: PNode; tt: PType): boolean; forward;
 
 { Ranges of local variables (optimization3 item 4); after the pin
@@ -1017,6 +1130,15 @@ begin
     emitAnsiAssign(false, irZero(irPtrT), target, dV, value, tailMove);
     exit;
   end;
+  if tt^.kind = tyDynArray then
+  begin
+    dV := nil;
+    if (target^.kind = nkNameRef) and (target^.refWith = nil) and
+       (target^.refDecl <> nil) and (target^.refDecl^.kind = dkVar) then
+      dV := target^.refDecl;
+    emitDynAssign(false, irZero(irPtrT), target, dV, value, tailMove);
+    exit;
+  end;
   if isStructured(tt) then
   begin
     if emitResultInPlace(target, value, tt) then
@@ -1102,6 +1224,13 @@ begin
                 (curRoutine^.asyncType = nil) and (curRoutine^.iterType = nil) and
                 (cleanups.count = 0) and not hasNonLocalLabels(curRoutine^.body);
     emitAnsiAssign(true, addr, nil, res, value, tailMove);
+  end
+  else if rt^.kind = tyDynArray then
+  begin
+    tailMove := (curRoutine <> nil) and curRoutine^.isFunction and
+                (curRoutine^.asyncType = nil) and (curRoutine^.iterType = nil) and
+                (cleanups.count = 0) and not hasNonLocalLabels(curRoutine^.body);
+    emitDynAssign(true, addr, nil, res, value, tailMove);
   end
   else if isMethodPointer(rt) or isClosureType(rt) then
     storeValue(addr, emitRoutinePair(value, rt), rt)

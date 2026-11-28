@@ -67,11 +67,14 @@ llvm::Value *CodeGenModule::emitCallTo(llvm::FunctionCallee Callee, llvm::Value 
   if (Self) // methods: after the result pointer
     Values.push_back(Self);
   // The arguments' results are held as usual; only a direct call's own
-  // ansistring result may move into its assignment target.
+  // ansistring / dynarray result may move into its assignment target.
   bool NoHold = NoHoldAnsiResult;
   NoHoldAnsiResult = false;
+  bool NoHoldDyn = NoHoldDynResult;
+  NoHoldDynResult = false;
   emitArgValues(Params, Args, Values, ToC, SliceMask);
   NoHoldAnsiResult = NoHold;
+  NoHoldDynResult = NoHoldDyn;
   auto *Call = B.CreateCall(Callee, Values);
   if (ByPointer)
     addResultCallAttrs(Call, ResultArgNo, ResultTy);
@@ -92,6 +95,8 @@ llvm::Value *CodeGenModule::emitCallTo(llvm::FunctionCallee Callee, llvm::Value 
   if (ResultTy && isManaged(ResultTy)) {
     if (ResultTy->isAnsiString())
       return takeOrHoldAnsi(Result, NoHold);
+    if (ResultTy->isDynArray())
+      return takeOrHoldDyn(Result, ResultTy, NoHoldDyn);
     return holdResult(Result, ResultTy);
   }
   return Result;
@@ -570,6 +575,15 @@ llvm::Value *CodeGenModule::takeOrHoldAnsi(llvm::Value *V, bool NoHold){
     return V;
   }
   return holdResult(V);
+}
+
+
+llvm::Value *CodeGenModule::takeOrHoldDyn(llvm::Value *V, Type *T, bool NoHold){
+  if (NoHold) {
+    TookDynResult = true;
+    return V;
+  }
+  return holdResult(V, T);
 }
 
 
@@ -1175,6 +1189,97 @@ void CodeGenModule::emitAnsiAssign(llvm::Value *Dst, Expr *Target, VarDecl *TV,
 }
 
 
+bool CodeGenModule::isFreshDynCall(Expr *Value){
+  Value = skipParens(Value);
+  if (!Value->getType()->isDynArray())
+    return false;
+  if (llvm::isa<InheritedExpr>(Value) ||
+      llvm::isa<IndirectCallExpr>(Value) ||
+      llvm::isa<MoveExpr>(Value))
+    return true;
+  auto *C = llvm::dyn_cast<CallExpr>(Value);
+  if (!C || C->isVarCast() || C->isMethodCast())
+    return false;
+  if (C->getCalleeValue())
+    return true;
+  if (auto *BD = llvm::dyn_cast_or_null<BuiltinDecl>(C->getDecl()))
+    return BD->getBuiltinKind() == BuiltinKind::Copy;
+  return llvm::isa_and_nonnull<RoutineDecl>(C->getDecl()) ||
+         llvm::isa_and_nonnull<VarDecl>(C->getDecl());
+}
+
+
+bool CodeGenModule::canMoveDynLocalToResult(VarDecl *TV, Expr *Value,
+                                            bool TailMove){
+  if (!TailMove || !TV || !CurRoutine || !CurRoutine->isFunction() ||
+      CurRoutine->isAsync() || CurRoutine->isIterator() || !Cleanups.empty() ||
+      TV != CurRoutine->getResultVar())
+    return false;
+  auto *N = llvm::dyn_cast<NameRefExpr>(skipParens(Value));
+  if (!N || N->getWith())
+    return false;
+  auto *LV = llvm::dyn_cast_or_null<VarDecl>(N->getDecl());
+  if (!LV || LV == TV || !LV->getType()->isDynArray() ||
+      LV->isCaptured() || BorrowedAnsiParams.count(LV) ||
+      LV->isTypedConst() || LV->getAbsolute() || LV->isConstParam() ||
+      LV->isVarParam() || LV->isOutParam() || isByRef(LV))
+    return false;
+  for (VarDecl *P : CurRoutine->getParams())
+    if (P == LV)
+      return true;
+  for (Decl *D : CurRoutine->getBody()->getDecls())
+    if (D == LV)
+      return true;
+  return false;
+}
+
+
+void CodeGenModule::emitDynAssign(llvm::Value *Dst, Expr *Target, VarDecl *TV,
+                                  Expr *Value, bool TailMove){
+  Type *TT = TV ? TV->getType() : Target->getType();
+  Type *Elem = llvm::cast<DynArrayType>(TT)->getElementType();
+  auto emitTake = [&](llvm::Value *D, llvm::Value *V) {
+    bool UsePod = !isManaged(Elem) && !llvm::isa<llvm::ConstantPointerNull>(V);
+    llvm::Value *Call = astrCall(
+        UsePod ? "__pas_dyn_take_pod" : "__pas_dyn_take",
+        B.getVoidTy(), {D, V});
+    if (!dynMayRaise(Elem))
+      if (auto *CB = llvm::dyn_cast<llvm::CallBase>(Call))
+        NoRaiseCalls.insert(CB);
+  };
+  if (canMoveDynLocalToResult(TV, Value, TailMove)) {
+    auto *LV = llvm::cast<VarDecl>(
+        llvm::cast<NameRefExpr>(skipParens(Value))->getDecl());
+    llvm::Value *SrcAddr = varAddress(LV);
+    llvm::Value *V = B.CreateLoad(B.getPtrTy(), SrcAddr, "dyn.move");
+    B.CreateStore(llvm::ConstantPointerNull::get(B.getPtrTy()), SrcAddr);
+    if (!Dst)
+      Dst = emitAddress(Target);
+    emitTake(Dst, V);
+    return;
+  }
+  bool Take = isFreshDynCall(Value) &&
+              (!Target || llvm::isa<NameRefExpr>(Target));
+  if (Take) {
+    NoHoldDynResult = true;
+    TookDynResult = false;
+  }
+  llvm::Value *V = convertForAssign(visitExpr(Value), Value->getType(), TT,
+                                    Value->getBeginLoc());
+  if (Take) {
+    NoHoldDynResult = false;
+    Take = TookDynResult;
+  }
+  if (!Dst)
+    Dst = emitAddress(Target);
+  if (Take) {
+    emitTake(Dst, V);
+    return;
+  }
+  storeValue(Dst, V, TT);
+}
+
+
 /// optimization3 item 1: `Result := F(...)` where F returns a record by
 /// pointer: this function's own result pointer is passed on to F, instead
 /// of a temporary that is then copied. The pointer is `noalias` (the
@@ -1337,6 +1442,13 @@ void CodeGenModule::visitAssignStmt(AssignStmt *S){
       return;
     }
     emitAnsiAssign(nullptr, Target, TV, Value, TailMove);
+    return;
+  }
+  if (TT->isDynArray()) {
+    VarDecl *TV = nullptr;
+    if (auto *N = llvm::dyn_cast<NameRefExpr>(Target); N && !N->getWith())
+      TV = llvm::dyn_cast_or_null<VarDecl>(N->getDecl());
+    emitDynAssign(nullptr, Target, TV, Value, TailMove);
     return;
   }
   if (TT->isStructured()) {
@@ -1624,6 +1736,12 @@ void CodeGenModule::visitProcCallStmt(ProcCallStmt *S){
                         Cleanups.empty() &&
                         !hasNonLocalLabels(*CurRoutine->getBody());
         emitAnsiAssign(Addr, nullptr, Result, Value, TailMove);
+      } else if (RT->isDynArray()) {
+        bool TailMove = CurRoutine && CurRoutine->isFunction() &&
+                        !CurRoutine->isAsync() && !CurRoutine->isIterator() &&
+                        Cleanups.empty() &&
+                        !hasNonLocalLabels(*CurRoutine->getBody());
+        emitDynAssign(Addr, nullptr, Result, Value, TailMove);
       } else if (isMethodPointerType(RT) || RT->isClosureType())
         storeValue(Addr, emitRoutinePair(Value, RT), RT);
       else if (RT->isStructured())
@@ -2894,11 +3012,13 @@ llvm::Value *CodeGenModule::visitNameRefExpr(NameRefExpr *E){
 
 /// move p: p's object; p is nil afterwards.
 llvm::Value *CodeGenModule::visitMoveExpr(MoveExpr *E){
+  bool NoHold = NoHoldDynResult;
+  NoHoldDynResult = false;
   llvm::Value *Slot = emitAddress(E->getOperand());
   llvm::Value *Obj = B.CreateLoad(B.getPtrTy(), Slot, "moved");
   B.CreateStore(llvm::ConstantPointerNull::get(B.getPtrTy()), Slot);
   if (E->getType()->isDynArray()) // (its reference, held to the statement's end)
-    return holdResult(Obj, E->getType());
+    return takeOrHoldDyn(Obj, E->getType(), NoHold);
   return Obj;
 }
 

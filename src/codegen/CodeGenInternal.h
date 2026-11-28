@@ -293,6 +293,8 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
   /// returned it took that path (TookAnsiResult).
   bool NoHoldAnsiResult = false;
   bool TookAnsiResult = false;
+  bool NoHoldDynResult = false;
+  bool TookDynResult = false;
   /// True while emitting the tail statement of a function body with no
   /// cleanups or non-local labels (allows moving local ansistrings to Result).
   bool AtRoutineTail = false;
@@ -1356,7 +1358,11 @@ public:
   /// Returns V directly when NoHold is true (marking TookAnsiResult), else holds it.
   llvm::Value *takeOrHoldAnsi(llvm::Value *V, bool NoHold);
 
+  /// Returns V directly when NoHold is true (marking TookDynResult), else holds it.
+  llvm::Value *takeOrHoldDyn(llvm::Value *V, Type *T, bool NoHold);
+
   bool canMoveAnsiLocalToResult(VarDecl *TV, Expr *Value, bool TailMove);
+  bool canMoveDynLocalToResult(VarDecl *TV, Expr *Value, bool TailMove);
 
   static bool canBorrowAnsiParams(RoutineDecl *R);
   static bool routineWritesOnlyLocals(RoutineDecl *R);
@@ -1371,6 +1377,9 @@ public:
 
   void emitAnsiAssign(llvm::Value *Dst, Expr *Target, VarDecl *TV, Expr *Value,
                       bool TailMove);
+  void emitDynAssign(llvm::Value *Dst, Expr *Target, VarDecl *TV, Expr *Value,
+                     bool TailMove);
+  static bool isFreshDynCall(Expr *Value);
 
   /// holdResult's temporary: its address.
   llvm::Value *heldTemp(llvm::Value *V, Type *T = nullptr);

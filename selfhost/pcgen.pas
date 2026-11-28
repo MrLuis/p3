@@ -210,6 +210,7 @@ var
     target: no temporary holds it (noHoldAnsiResult), and the call that
     returned it took that path (tookAnsiResult). }
   noHoldAnsiResult, tookAnsiResult: boolean;
+  noHoldDynResult, tookDynResult: boolean;
   { True while emitting the tail statement of a function body with no cleanups
     or non-local labels (allows moving local ansistrings to Result). }
   atRoutineTail: boolean;
@@ -548,7 +549,7 @@ begin
      (name <> '__pas_gen_assign') and (name <> '__pas_gen_clear') and
      (name <> '__pas_closure_clear') and
      (name <> '__pas_dyn_clear') and (name <> '__pas_dyn_assign') and
-     (name <> '__pas_dyn_setlength') and
+     (name <> '__pas_dyn_take') and (name <> '__pas_dyn_setlength') and
      (name <> '__pas_format_pstr') and
      (name <> '__pas_owned_set') and (name <> '__pas_owned_done') then
     irSetNoRaise(ignored);
@@ -2722,6 +2723,7 @@ function emitAwait(const t: TV; tt: PType): TV; forward;
 function emitWhen(e: PNode; all: boolean): TV; forward;
 procedure emitWriteArg(const f: TV; arg: PNode); forward;
 function holdDynResult(const v: TV; t: PType): TV; forward;
+function takeOrHoldDyn(const v: TV; t: PType; noHold: boolean): TV; forward;
 
 procedure astrV1(const name: string; const x: TV);
 var
@@ -3339,6 +3341,8 @@ begin
       begin
         if a0^.typ^.kind = tyDynArray then
         begin
+          noHold := noHoldDynResult;
+          noHoldDynResult := false;
           s0 := visitExpr(a0);
           if e^.args.count > 1 then
             s1 := toI64(visitExpr(PNode(listGet(e^.args, 1))), PNode(listGet(e^.args, 1))^.typ)
@@ -3348,8 +3352,8 @@ begin
             tmp := toI64(visitExpr(PNode(listGet(e^.args, 2))), PNode(listGet(e^.args, 2))^.typ)
           else
             tmp := i64c($7FFFFFFFFFFFFFFF);
-          exit(holdDynResult(call3(classRuntime('__pas_dyn_copy', 'ptr', 'ptr,i64,i64'),
-                                   s0, s1, tmp, ''), a0^.typ));
+          exit(takeOrHoldDyn(call3(classRuntime('__pas_dyn_copy', 'ptr', 'ptr,i64,i64'),
+                                   s0, s1, tmp, ''), a0^.typ, noHold));
         end;
         if a0^.typ^.kind = tyAnsiString then
         begin
@@ -4540,6 +4544,16 @@ begin
   holdDynResult := v;
 end;
 
+function takeOrHoldDyn(const v: TV; t: PType; noHold: boolean): TV;
+begin
+  if noHold then
+  begin
+    tookDynResult := true;
+    exit(v);
+  end;
+  takeOrHoldDyn := holdDynResult(v, t);
+end;
+
 { holdDynResult's temporary: its address. }
 function heldDynTemp(const v: TV; t: PType): TV;
 var
@@ -5026,7 +5040,7 @@ function emitCallToSelfMask(ret: PIRType; const callee: TV; const link: TV;
 var
   buf: TBuf;
   tmp, res: TV;
-  holdAnsi: boolean;
+  holdAnsi, holdDyn: boolean;
 begin
   bufInit(buf);
   if hasLink then { external (C) routines have none }
@@ -5043,11 +5057,14 @@ begin
   if hasSelf then { methods: after the result pointer }
     irArgsAdd(buf, self_);
   { The arguments' results are held as usual; only a direct call's own
-    ansistring result may move into its assignment target. }
+    ansistring / dynarray result may move into its assignment target. }
   holdAnsi := noHoldAnsiResult;
   noHoldAnsiResult := false;
+  holdDyn := noHoldDynResult;
+  noHoldDynResult := false;
   emitArgValuesMask(params, args, buf, false, sliceMask);
   noHoldAnsiResult := holdAnsi;
+  noHoldDynResult := holdDyn;
   res := irCallPtr(ret, callee, buf, '');
   bufFree(buf);
   if returnsByPointer(resTy) then { expressions use a string's address }
@@ -5063,7 +5080,9 @@ begin
     exit(tmp);
   end;
   { (released by finalizeValue: also a closure's) }
-  if (resTy <> nil) and ((resTy^.kind in [tyDynArray, tyTask, tyToken, tyIterator]) or
+  if (resTy <> nil) and (resTy^.kind = tyDynArray) then
+    exit(takeOrHoldDyn(res, resTy, holdDyn));
+  if (resTy <> nil) and ((resTy^.kind in [tyTask, tyToken, tyIterator]) or
                          isClosureType(resTy)) then
     exit(holdDynResult(res, resTy));
   if (resTy <> nil) and (resTy^.kind = tyAnsiString) and holdAnsi then
@@ -7735,12 +7754,15 @@ end;
 function emitMove(e: PNode): TV;
 var
   slot, obj: TV;
+  noHold: boolean;
 begin
+  noHold := noHoldDynResult;
+  noHoldDynResult := false;
   slot := emitAddress(e^.inner);
   obj := irLoad(irPtrT, slot, 'moved');
   irStore(irNull, slot);
   if e^.typ^.kind = tyDynArray then { (its reference, held to the statement's end) }
-    exit(holdDynResult(obj, e^.typ));
+    exit(takeOrHoldDyn(obj, e^.typ, noHold));
   emitMove := obj;
 end;
 

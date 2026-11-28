@@ -392,6 +392,8 @@ llvm::Value *CodeGenModule::emitStringFunction(CallExpr *E, BuiltinKind K){
     return B.CreateCall(RT.StrPos, {emitPStr(Args[0]), emitPStr(Args[1])});
   case BuiltinKind::Copy: {
     if (Args[0]->getType()->isDynArray()) {
+      bool NoHold = NoHoldDynResult;
+      NoHoldDynResult = false;
       llvm::Value *A = visitExpr(Args[0]);
       llvm::Value *Start = Args.size() > 1
                                ? toI64(visitExpr(Args[1]), Args[1]->getType())
@@ -399,8 +401,9 @@ llvm::Value *CodeGenModule::emitStringFunction(CallExpr *E, BuiltinKind K){
       llvm::Value *Count = Args.size() > 2
                                ? toI64(visitExpr(Args[2]), Args[2]->getType())
                                : B.getInt64(INT64_MAX);
-      return holdResult(astrCall("__pas_dyn_copy", B.getPtrTy(), {A, Start, Count}),
-                        Args[0]->getType());
+      return takeOrHoldDyn(
+          astrCall("__pas_dyn_copy", B.getPtrTy(), {A, Start, Count}),
+          Args[0]->getType(), NoHold);
     }
     if (Args[0]->getType()->isAnsiString()) {
       bool NoHold = NoHoldAnsiResult;
