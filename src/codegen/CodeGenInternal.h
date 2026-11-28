@@ -253,6 +253,9 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
   /// True while emitting the tail statement of a function body with no
   /// cleanups or non-local labels (allows moving local ansistrings to Result).
   bool AtRoutineTail = false;
+  /// Unmutated ansistring value parameters of the current routine whose
+  /// caller references remain live (no prologue addref / epilogue clear).
+  VarSet BorrowedAnsiParams;
   /// Classes whose cleanup functions (releasing their own fields' COM
   /// interfaces) are to be emitted.
   std::vector<std::pair<ClassType *, llvm::Function *>> CleanupsToEmit;
@@ -1244,6 +1247,8 @@ public:
   llvm::Value *takeOrHoldAnsi(llvm::Value *V, bool NoHold);
 
   bool canMoveAnsiLocalToResult(VarDecl *TV, Expr *Value, bool TailMove);
+
+  static bool canBorrowAnsiParams(RoutineDecl *R);
 
   void emitAnsiAssign(llvm::Value *Dst, Expr *Target, VarDecl *TV, Expr *Value,
                       bool TailMove);

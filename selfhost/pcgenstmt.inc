@@ -743,7 +743,7 @@ begin
     exit;
   lv := n^.refDecl;
   if (lv = dV) or (lv^.varType^.kind <> tyAnsiString) or
-     lv^.captured or (lv^.absTarget <> nil) or
+     lv^.captured or lv^.cgBorrowedAnsi or (lv^.absTarget <> nil) or
      ((lv^.init <> nil) and not lv^.isInitVar) or
      (lv^.varKind in [vkConstParam, vkVarParam]) or lv^.isOut or
      isByRef(lv) then
@@ -4736,6 +4736,228 @@ begin
   listClear(asyncsToEmit);
 end;
 
+function isBorrowSafeLocal(r, d: PDecl): boolean;
+var
+  i: longint;
+  v: PDecl;
+begin
+  isBorrowSafeLocal := false;
+  if (d = nil) or (d^.kind <> dkVar) then
+    exit;
+  if r^.isFunction and (d = r^.resultVar) then
+    exit(true);
+  for i := 0 to r^.body^.decls.count - 1 do
+  begin
+    v := PDecl(listGet(r^.body^.decls, i));
+    if (v = d) and ((v^.init = nil) or v^.isInitVar) and
+       (v^.absTarget = nil) and not v^.isOwned and not v^.captured then
+      exit(true);
+  end;
+end;
+
+function borrowSafeTarget(r: PDecl; e: PNode): boolean;
+begin
+  if e = nil then
+    exit(false);
+  e := skipParensNode(e);
+  borrowSafeTarget := (e^.kind = nkNameRef) and (e^.refWith = nil) and
+                      isBorrowSafeLocal(r, e^.refDecl);
+end;
+
+function borrowSafeExpr(e: PNode): boolean;
+var
+  i: longint;
+  d: PDecl;
+begin
+  if e = nil then
+    exit(true);
+  if e^.convOp <> nil then
+    exit(false);
+  case e^.kind of
+    nkIntegerLit, nkRealLit, nkStringLit, nkNil:
+      borrowSafeExpr := true;
+    nkParen:
+      borrowSafeExpr := borrowSafeExpr(e^.inner);
+    nkNameRef:
+      begin
+        if e^.refWith <> nil then
+          exit(false);
+        d := e^.refDecl;
+        borrowSafeExpr := (d <> nil) and not (d^.kind in [dkRoutine, dkProperty]);
+      end;
+    nkUnary:
+      borrowSafeExpr := (e^.uopDecl = nil) and borrowSafeExpr(e^.operand);
+    nkBinary:
+      borrowSafeExpr := (e^.opDecl = nil) and borrowSafeExpr(e^.lhs) and
+                        borrowSafeExpr(e^.rhs);
+    nkIndex:
+      borrowSafeExpr := (e^.idxProp = nil) and borrowSafeExpr(e^.base) and
+                        borrowSafeExpr(e^.index);
+    nkField:
+      begin
+        if (e^.constRef = nil) and
+           ((e^.fieldDecl = nil) or (e^.fieldDecl^.kind <> dkField)) then
+          exit(false);
+        borrowSafeExpr := borrowSafeExpr(e^.base);
+      end;
+    nkCondExpr:
+      borrowSafeExpr := borrowSafeExpr(e^.ceCond) and borrowSafeExpr(e^.ceThen) and
+                        borrowSafeExpr(e^.ceElse);
+    nkCall:
+      begin
+        if e^.isVarCast or (e^.methodCast <> 0) or (e^.calleeExpr <> nil) or
+           (e^.callValue <> nil) or (e^.callWith <> nil) then
+          exit(false);
+        d := e^.callDecl;
+        if (d = nil) or (d^.kind <> dkBuiltin) then
+          exit(false);
+        if not (d^.builtin in [bkLength, bkCopy, bkPos, bkConcat, bkOrd, bkChr,
+                               bkHigh, bkLow, bkSizeOf, bkAssigned, bkSucc,
+                               bkPred, bkAbs, bkSqr, bkOdd]) then
+          exit(false);
+        for i := 0 to e^.args.count - 1 do
+          if not borrowSafeExpr(PNode(listGet(e^.args, i))) then
+            exit(false);
+        borrowSafeExpr := true;
+      end;
+  else
+    borrowSafeExpr := false;
+  end;
+end;
+
+function borrowSafeStmt(r: PDecl; s: PNode): boolean;
+var
+  i, j: longint;
+  d: PDecl;
+  arm: PCaseArm;
+  lbl: PCaseLabel;
+begin
+  if (s = nil) or (s^.kind = nkEmpty) then
+    exit(true);
+  case s^.kind of
+    nkCompound:
+      begin
+        for i := 0 to s^.stmts.count - 1 do
+          if not borrowSafeStmt(r, PNode(listGet(s^.stmts, i))) then
+            exit(false);
+        borrowSafeStmt := true;
+      end;
+    nkAssign:
+      borrowSafeStmt := not s^.assignCompound and
+                        borrowSafeTarget(r, s^.target) and
+                        borrowSafeExpr(s^.value);
+    nkIf:
+      borrowSafeStmt := borrowSafeExpr(s^.cond) and
+                        borrowSafeStmt(r, s^.thenStmt) and
+                        borrowSafeStmt(r, s^.elseStmt);
+    nkWhile:
+      borrowSafeStmt := borrowSafeExpr(s^.cond) and
+                        borrowSafeStmt(r, s^.thenStmt);
+    nkRepeat:
+      begin
+        if not borrowSafeExpr(s^.untilCond) then
+          exit(false);
+        for i := 0 to s^.stmts.count - 1 do
+          if not borrowSafeStmt(r, PNode(listGet(s^.stmts, i))) then
+            exit(false);
+        borrowSafeStmt := true;
+      end;
+    nkFor:
+      borrowSafeStmt := borrowSafeTarget(r, s^.forVar) and
+                        borrowSafeExpr(s^.forInit) and
+                        borrowSafeExpr(s^.forFinal) and
+                        borrowSafeStmt(r, s^.forBody);
+    nkCase:
+      begin
+        if not borrowSafeExpr(s^.selector) then
+          exit(false);
+        for i := 0 to s^.arms.count - 1 do
+        begin
+          arm := PCaseArm(listGet(s^.arms, i));
+          for j := 0 to arm^.labels.count - 1 do
+          begin
+            lbl := PCaseLabel(listGet(arm^.labels, j));
+            if not borrowSafeExpr(lbl^.lo) or not borrowSafeExpr(lbl^.hi) then
+              exit(false);
+          end;
+          if not borrowSafeStmt(r, arm^.body) then
+            exit(false);
+        end;
+        for i := 0 to s^.elseBody.count - 1 do
+          if not borrowSafeStmt(r, PNode(listGet(s^.elseBody, i))) then
+            exit(false);
+        borrowSafeStmt := true;
+      end;
+    nkVarDecl:
+      begin
+        for i := 0 to s^.vdVars.count - 1 do
+          if PDecl(listGet(s^.vdVars, i))^.isOwned then
+            exit(false);
+        if s^.vdAssign <> nil then
+          exit(borrowSafeStmt(r, s^.vdAssign));
+        borrowSafeStmt := borrowSafeExpr(s^.vdInit);
+      end;
+    nkProcCall:
+      begin
+        if (s^.callWith <> nil) or (s^.calleeExpr <> nil) or
+           (s^.callValue <> nil) then
+          exit(false);
+        d := s^.callDecl;
+        if (d = nil) or (d^.kind <> dkBuiltin) then
+          exit(false);
+        if d^.builtin in [bkBreak, bkContinue] then
+          exit(true);
+        if d^.builtin = bkExit then
+          exit((s^.args.count = 0) or borrowSafeExpr(PNode(listGet(s^.args, 0))));
+        if d^.builtin in [bkInc, bkDec] then
+        begin
+          if s^.args.count = 0 then
+            exit(false);
+          if not borrowSafeTarget(r, PNode(listGet(s^.args, 0))) or
+             not isOrdinal(PNode(listGet(s^.args, 0))^.typ) then
+            exit(false);
+          borrowSafeStmt := (s^.args.count < 2) or
+                            borrowSafeExpr(PNode(listGet(s^.args, 1)));
+          exit;
+        end;
+        borrowSafeStmt := false;
+      end;
+  else
+    borrowSafeStmt := false;
+  end;
+end;
+
+function canBorrowAnsiParams(r: PDecl): boolean;
+var
+  i: longint;
+  hasAnsiVal: boolean;
+  d: PDecl;
+begin
+  canBorrowAnsiParams := false;
+  if (r = nil) or (r^.body = nil) or r^.isExternal or (r^.asyncType <> nil) or
+     (r^.iterType <> nil) or r^.hasTry or hasNonLocalLabels(r^.body) then
+    exit;
+  hasAnsiVal := false;
+  for i := 0 to r^.params.count - 1 do
+  begin
+    d := PDecl(listGet(r^.params, i));
+    if not (d^.varKind in [vkConstParam, vkVarParam]) and not d^.isOut and
+       not d^.captured and (d^.varType^.kind = tyAnsiString) then
+      hasAnsiVal := true;
+  end;
+  if not hasAnsiVal then
+    exit;
+  for i := 0 to r^.body^.decls.count - 1 do
+  begin
+    d := PDecl(listGet(r^.body^.decls, i));
+    if (d^.kind = dkRoutine) and not d^.isExternal then
+      exit;
+    if (d^.kind = dkVar) and d^.isOwned then
+      exit;
+  end;
+  canBorrowAnsiParams := borrowSafeStmt(r, r^.body^.body);
+end;
+
 procedure emitRoutineBody(r: PDecl);
 var
   frameT: PIRType;
@@ -4870,6 +5092,16 @@ begin
     argNo := argNo + 1;
   end;
   for i := 0 to r^.params.count - 1 do
+    PDecl(listGet(r^.params, i))^.cgBorrowedAnsi := false;
+  if canBorrowAnsiParams(r) then
+    for i := 0 to r^.params.count - 1 do
+    begin
+      p := PDecl(listGet(r^.params, i));
+      if not isByRef(p) and not (p^.varKind in [vkConstParam, vkVarParam]) and
+         not p^.isOut and not p^.captured and (p^.varType^.kind = tyAnsiString) then
+        p^.cgBorrowedAnsi := true;
+    end;
+  for i := 0 to r^.params.count - 1 do
   begin
     p := PDecl(listGet(r^.params, i));
     arg := irArg(f, i + argNo);
@@ -4887,7 +5119,8 @@ begin
       copyOpenArray(slot, p^.varType);
     { the variables holding COM interfaces: value parameters (one more
       reference each), then local variables (nil at first) }
-    if not isByRef(p) and not (p^.varKind in [vkConstParam, vkVarParam]) and
+    if not p^.cgBorrowedAnsi and not isByRef(p) and
+       not (p^.varKind in [vkConstParam, vkVarParam]) and
        isManaged(p^.varType) then
     begin
       addRefValue(slot, p^.varType);
@@ -5028,6 +5261,8 @@ begin
   end;
   if not irMayRaise then
     irSetNoRaise(f);
+  for i := 0 to r^.params.count - 1 do
+    PDecl(listGet(r^.params, i))^.cgBorrowedAnsi := false;
   pinTemps := true;
 end;
 

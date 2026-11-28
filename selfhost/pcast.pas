@@ -572,8 +572,9 @@ type
     { optimization3 item 4: a local variable whose range is followed from
       store to store (cgRangeLocal), and inside a for loop the range it
       keeps throughout it (an accumulator), which a forgotten range falls
-      back to }
-    cgRangeLocal, cgLoopKnown: boolean;
+      back to; item 3 ansistr: borrowed ansistring value parameter
+      (cgBorrowedAnsi) }
+    cgRangeLocal, cgLoopKnown, cgBorrowedAnsi: boolean;
     cgLoopLo, cgLoopHi: int64;
     { a routine's variable: in its frame record (slot cgSlot), else in
       an alloca (cgLocal, a boxed value); a routine whose frame record

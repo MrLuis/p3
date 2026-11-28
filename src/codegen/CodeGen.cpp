@@ -864,6 +864,12 @@ void CodeGenModule::emitRoutineBody(RoutineDecl *R){
     B.CreateStore(F->getArg(ArgNo++), varSlot(R->getSelfVar()));
   // The variables holding COM interfaces: value parameters (one more
   // reference each), then local variables (nil at first).
+  BorrowedAnsiParams.clear();
+  if (canBorrowAnsiParams(R))
+    for (VarDecl *P : R->getParams())
+      if (!isByRef(P) && !P->isConstParam() && !P->isVarParam() &&
+          !P->isOutParam() && P->getType()->isAnsiString() && !P->isCaptured())
+        BorrowedAnsiParams.insert(P);
   llvm::SmallVector<std::pair<llvm::Value *, Type *>, 4> Managed;
   for (VarDecl *P : R->getParams()) {
     llvm::Value *Arg = F->getArg(ArgNo++);
@@ -880,8 +886,8 @@ void CodeGenModule::emitRoutineBody(RoutineDecl *R){
     if (auto *OA = llvm::dyn_cast<OpenArrayType>(P->getType());
         OA && !P->isVarParam() && !P->isConstParam())
       copyOpenArray(Slot, OA);
-    if (!isByRef(P) && !P->isConstParam() && !P->isVarParam() &&
-        isManaged(P->getType())) {
+    if (!BorrowedAnsiParams.count(P) && !isByRef(P) && !P->isConstParam() &&
+        !P->isVarParam() && isManaged(P->getType())) {
       addRefValue(Slot, P->getType());
       Managed.push_back({Slot, P->getType()});
     }
@@ -1007,6 +1013,7 @@ void CodeGenModule::emitRoutineBody(RoutineDecl *R){
   }
   if (!mayRaise())
     NoRaiseFns.insert(F);
+  BorrowedAnsiParams.clear();
 }
 
 CodeGenModule::CodeGenModule(llvm::Module &M, const SourceManager &SM,

@@ -1053,9 +1053,9 @@ bool CodeGenModule::canMoveAnsiLocalToResult(VarDecl *TV, Expr *Value,
     return false;
   auto *LV = llvm::dyn_cast_or_null<VarDecl>(N->getDecl());
   if (!LV || LV == TV || !LV->getType()->isAnsiString() ||
-      LV->isCaptured() || LV->isTypedConst() || LV->getAbsolute() ||
-      LV->isConstParam() || LV->isVarParam() || LV->isOutParam() ||
-      isByRef(LV))
+      LV->isCaptured() || BorrowedAnsiParams.count(LV) ||
+      LV->isTypedConst() || LV->getAbsolute() || LV->isConstParam() ||
+      LV->isVarParam() || LV->isOutParam() || isByRef(LV))
     return false;
   for (VarDecl *P : CurRoutine->getParams())
     if (P == LV)

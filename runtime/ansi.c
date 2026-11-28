@@ -78,16 +78,37 @@ static char *from_chars(const char *p, int64_t len) {
 int32_t __pas_threads_started = 0;
 
 /* Counts change atomically once threads have started: values are then
-   shared between threads (tasks); plainly before (PAS_RC_INC...,
-   pascalrt.h). */
+   shared between threads (tasks); plainly before. On the single-thread
+   fast path, check __pas_threads_started once instead of performing atomic
+   loads or writing refs = 0 right before free(). */
 void __pas_astr_addref(char *s) {
-  if (s && __atomic_load_n(REFS_PTR(s), __ATOMIC_RELAXED) > 0)
-    PAS_RC_INC(REFS_PTR(s));
+  if (!s)
+    return;
+  int64_t *rp = REFS_PTR(s);
+  if (!__pas_threads_started) {
+    int64_t r = *rp;
+    if (r > 0)
+      *rp = r + 1;
+    return;
+  }
+  if (__atomic_load_n(rp, __ATOMIC_RELAXED) > 0)
+    __atomic_fetch_add(rp, 1, __ATOMIC_RELAXED);
 }
 
 static void release(char *s) {
-  if (s && __atomic_load_n(REFS_PTR(s), __ATOMIC_RELAXED) > 0 &&
-      PAS_RC_DEC(REFS_PTR(s)) == 0)
+  if (!s)
+    return;
+  int64_t *rp = REFS_PTR(s);
+  if (!__pas_threads_started) {
+    int64_t r = *rp;
+    if (r == 1)
+      free(HEADER(s));
+    else if (r > 1)
+      *rp = r - 1;
+    return;
+  }
+  if (__atomic_load_n(rp, __ATOMIC_RELAXED) > 0 &&
+      __atomic_sub_fetch(rp, 1, __ATOMIC_ACQ_REL) == 0)
     free(HEADER(s));
 }
 
