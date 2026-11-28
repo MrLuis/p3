@@ -569,12 +569,13 @@ type
       its body is emitted }
     cgRangeKnown: boolean;
     cgRangeLo, cgRangeHi: int64;
+    cgLenVar: PDecl;
     { optimization3 item 4: a local variable whose range is followed from
       store to store (cgRangeLocal), and inside a for loop the range it
       keeps throughout it (an accumulator), which a forgotten range falls
       back to; item 3 ansistr: borrowed ansistring value parameter
       (cgBorrowedAnsi) }
-    cgRangeLocal, cgLoopKnown, cgBorrowedAnsi: boolean;
+    cgRangeLocal, cgLoopKnown, cgBorrowedAnsi, cgImmAnsi: boolean;
     cgLoopLo, cgLoopHi: int64;
     cgSliceLocal, cgSliceParam: boolean;
     cgSlicePtr, cgSliceLen: pointer;

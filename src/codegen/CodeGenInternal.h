@@ -264,6 +264,19 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
   /// Inside a for loop: the range such a variable keeps throughout it (an
   /// accumulator, `x := x + c`), which a forgotten range falls back to.
   llvm::DenseMap<VarDecl *, ValueRange> LoopRanges;
+  struct LengthBound {
+    VarDecl *Idx = nullptr;
+    VarDecl *Base = nullptr;
+    int64_t Slack = 0;
+  };
+  struct RangeState {
+    llvm::DenseMap<VarDecl *, ValueRange> VarRanges;
+    llvm::DenseMap<VarDecl *, VarDecl *> VarLengthOf;
+    llvm::SmallVector<LengthBound, 4> ActiveLengthBounds;
+  };
+  VarSet ImmutableAnsiVars;
+  llvm::DenseMap<VarDecl *, VarDecl *> VarLengthOf;
+  llvm::SmallVector<LengthBound, 4> ActiveLengthBounds;
   /// The exact class of an object pointer when it is a direct constructor
   /// result (optimization2 item 10).
   llvm::DenseMap<const llvm::Value *, ClassType *> KnownClass;
@@ -630,6 +643,18 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
   /// Chooses RangeLocals for R, each starting at 0 (the value every scalar
   /// local starts with, see emitZeroInit).
   void initRangeLocals(RoutineDecl *R);
+  void endRangeLocals();
+  void invalidateRangeLocalLength(VarDecl *V);
+  static VarDecl *plainAnsiVar(Expr *E);
+  VarDecl *matchLengthExpr(Expr *E) const;
+  bool matchVarPlusConst(Expr *E, VarDecl *&V, int64_t &Off) const;
+  void collectLengthBounds(Expr *E, llvm::SmallVectorImpl<LengthBound> &Out) const;
+  void applyLengthBounds(llvm::ArrayRef<LengthBound> Bounds);
+  RangeState saveRangeState() const;
+  void restoreRangeState(const RangeState &S);
+  bool canElideAnsiBoundsCheck(Expr *Base, Expr *Idx) const;
+  static bool exprWritesVar(Expr *E, VarDecl *V);
+  bool monotonicNonNegSteps(Stmt *S, VarDecl *V) const;
 
   /// An integer constant written as a literal, a named constant or one of
   /// those negated: its value.

@@ -695,8 +695,21 @@ llvm::Value *CodeGenModule::emitShortCircuit(BinaryExpr *E){
   else
     B.CreateCondBr(L, EndBB, RHSBB);
 
+  llvm::SmallVector<LengthBound, 4> Bounds;
+  bool HaveState = false;
+  RangeState Saved;
+  if (IsAnd && !RangeLocals.empty()) {
+    collectLengthBounds(E->getLHS(), Bounds);
+    if (!Bounds.empty()) {
+      Saved = saveRangeState();
+      HaveState = true;
+      applyLengthBounds(Bounds);
+    }
+  }
   B.SetInsertPoint(RHSBB);
   llvm::Value *R = visitExpr(E->getRHS());
+  if (HaveState)
+    restoreRangeState(Saved);
   llvm::BasicBlock *RHSEnd = B.GetInsertBlock();
   B.CreateBr(EndBB);
 
@@ -911,7 +924,8 @@ void CodeGenModule::visitStmt(Stmt *S){
   VarSet Written;
   bool Track = !RangeLocals.empty() && !llvm::isa<AssignStmt>(S) &&
                !llvm::isa<CompoundStmt>(S) && !llvm::isa<ProcCallStmt>(S) &&
-               !llvm::isa<EmptyStmt>(S) && !llvm::isa<ForStmt>(S);
+               !llvm::isa<EmptyStmt>(S) && !llvm::isa<ForStmt>(S) &&
+               !llvm::isa<WhileStmt>(S);
   if (Track) {
     Written = rangeLocalsWrittenBy(S);
     if (!llvm::isa<IfStmt>(S) && !llvm::isa<CaseStmt>(S) &&
@@ -1323,9 +1337,12 @@ void CodeGenModule::visitAssignStmt(AssignStmt *S){
     bitStore(Target, V);
     return;
   }
+  VarDecl *NewLenBase = RangeVar ? matchLengthExpr(Value) : nullptr;
   storeValue(emitAddress(Target), V, TT, !isAliasedExpr(Target));
   if (RangeVar) {
     setVarRange(RangeVar, rangeOfValue(V));
+    if (NewLenBase)
+      VarLengthOf[RangeVar] = NewLenBase;
     RangeVar = nullptr;
   }
 }
@@ -1796,11 +1813,21 @@ void CodeGenModule::visitIfStmt(IfStmt *S){
   auto *ElseBB = S->getElse() ? newBlock("if.else") : EndBB;
   B.CreateCondBr(Cond, ThenBB, ElseBB);
 
+  bool TrackRanges = !RangeLocals.empty();
+  RangeState Saved;
+  if (TrackRanges) {
+    Saved = saveRangeState();
+    llvm::SmallVector<LengthBound, 4> Bounds;
+    collectLengthBounds(S->getCond(), Bounds);
+    applyLengthBounds(Bounds);
+  }
   B.SetInsertPoint(ThenBB);
   AtRoutineTail = Tail;
   visitStmt(S->getThen());
   AtRoutineTail = false;
   B.CreateBr(EndBB);
+  if (TrackRanges)
+    restoreRangeState(Saved);
 
   if (S->getElse()) {
     B.SetInsertPoint(ElseBB);
@@ -1808,12 +1835,52 @@ void CodeGenModule::visitIfStmt(IfStmt *S){
     visitStmt(S->getElse());
     AtRoutineTail = false;
     B.CreateBr(EndBB);
+    if (TrackRanges)
+      restoreRangeState(Saved);
   }
   B.SetInsertPoint(EndBB);
 }
 
 
 void CodeGenModule::visitWhileStmt(WhileStmt *S){
+  struct MonotonicVar {
+    VarDecl *V;
+    ValueRange Range;
+    bool HadOld = false;
+    ValueRange OldLoop;
+  };
+  llvm::SmallVector<MonotonicVar, 2> Monotonic;
+  VarSet Written;
+  llvm::SmallVector<LengthBound, 4> AfterSetupBounds;
+  bool TrackRanges = !RangeLocals.empty();
+  if (TrackRanges) {
+    Written = rangeLocalsWrittenBy(S);
+    for (VarDecl *A : Written) {
+      auto It = VarRanges.find(A);
+      ValueRange TR;
+      if (It == VarRanges.end() || !It->second.Known || !A->getType() ||
+          !signedRange(intBits(A->getType()), TR) ||
+          exprWritesVar(S->getCond(), A) ||
+          !monotonicNonNegSteps(S->getBody(), A))
+        continue;
+      MonotonicVar MV;
+      MV.V = A;
+      MV.Range = {true, It->second.Lo, TR.Hi};
+      auto LIt = LoopRanges.find(A);
+      if (LIt != LoopRanges.end()) {
+        MV.HadOld = true;
+        MV.OldLoop = LIt->second;
+      }
+      Monotonic.push_back(MV);
+    }
+    forgetRanges(Written);
+    for (const MonotonicVar &MV : Monotonic) {
+      LoopRanges[MV.V] = MV.Range;
+      setVarRange(MV.V, MV.Range);
+    }
+    AfterSetupBounds = ActiveLengthBounds;
+  }
+
   auto *CondBB = newBlock("while.cond");
   auto *BodyBB = newBlock("while.body");
   auto *EndBB = newBlock("while.end");
@@ -1822,12 +1889,29 @@ void CodeGenModule::visitWhileStmt(WhileStmt *S){
   B.SetInsertPoint(CondBB);
   B.CreateCondBr(visitExpr(S->getCond()), BodyBB, EndBB);
 
+  if (TrackRanges) {
+    llvm::SmallVector<LengthBound, 4> Bounds;
+    collectLengthBounds(S->getCond(), Bounds);
+    applyLengthBounds(Bounds);
+  }
   B.SetInsertPoint(BodyBB);
   Loops.push_back({CondBB, EndBB, Cleanups.size()});
   visitStmt(S->getBody());
   Loops.pop_back();
   B.CreateBr(CondBB);
 
+  if (TrackRanges) {
+    for (const MonotonicVar &MV : Monotonic) {
+      if (MV.HadOld)
+        LoopRanges[MV.V] = MV.OldLoop;
+      else
+        LoopRanges.erase(MV.V);
+    }
+    ActiveLengthBounds = AfterSetupBounds;
+    forgetRanges(Written);
+    for (const MonotonicVar &MV : Monotonic)
+      setVarRange(MV.V, MV.Range);
+  }
   B.SetInsertPoint(EndBB);
 }
 
@@ -3281,9 +3365,11 @@ llvm::Value *CodeGenModule::visitIndexExpr(IndexExpr *E){
   if (E->getBase()->getType()->isAnsiString()) { // reading: no copy
     if (isSliceExpr(E->getBase()))
       return emitSliceIndex(E);
+    bool SafeBounds = canElideAnsiBoundsCheck(E->getBase(), E->getIndex());
     llvm::Value *S = visitExpr(E->getBase());
     llvm::Value *X = toI64(visitExpr(E->getIndex()), E->getIndex()->getType());
-    emitAnsiIndexCheck(S, X, E->getIndex()->getBeginLoc());
+    if (!SafeBounds)
+      emitAnsiIndexCheck(S, X, E->getIndex()->getBeginLoc());
     return loadScalar(B.CreateGEP(B.getInt8Ty(), S,
                                   B.CreateSub(X, B.getInt64(1)), "",
                                   indexFlags(E->getIndex(), 1)),

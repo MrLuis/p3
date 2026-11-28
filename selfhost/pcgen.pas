@@ -165,9 +165,29 @@ var
   { optimization3 item 4: the current routine's local variables whose
     range is followed from store to store (cgRangeLocal), and the pin
     analysis leaving out the targets of plain x := e (paSkipPlain) }
-  rangeLocals, checkedBases: TPtrList;
+  rangeLocals, checkedBases, immAnsiVars: TPtrList;
   curForVar: PDecl;
   paSkipPlain, paSkipIndex: boolean;
+  type
+    TLengthBound = record
+      idx, base: PDecl;
+      slack: int64;
+    end;
+    TBoundArray = array[0..63] of TLengthBound;
+    PRangeSnapEntry = ^TRangeSnapEntry;
+    TRangeSnapEntry = record
+      v, lenVar: PDecl;
+      known: boolean;
+      lo, hi: int64;
+    end;
+    TRangeSnap = record
+      entries: TPtrList;
+      bounds: TBoundArray;
+      boundCount: longint;
+    end;
+  var
+    activeBounds: TBoundArray;
+    activeBoundCount: longint;
   { the value the last assignment to a scalar stored (see visitAssign) }
   assignStored: TV;
   assignStoredSet: boolean;
@@ -246,6 +266,7 @@ function routineWritesOnlyLocals(r: PDecl): boolean; forward;
 function isSliceSafeParam(r, p: PDecl): boolean; forward;
 function getOrCreateSliceSpec(r: PDecl; mask: longint): PIRFunc; forward;
 function compareInts(op: TBinaryOp; const l, r: TV; signed: boolean): TV; forward;
+procedure noteRange(var v: TV; lo, hi: int64); forward;
 
 { --- Small helpers --- }
 
@@ -3249,10 +3270,13 @@ begin
           if isSliceExpr(a0) then
           begin
             emitSliceExpr(a0, s0, s1);
+            noteRange(s1, 0, $7FFFFFFF);
             exit(s1);
           end;
           s0 := visitExpr(a0);
-          exit(call1(classRuntime('__pas_astr_length', 'i32', 'ptr'), s0, ''));
+          len := call1(classRuntime('__pas_astr_length', 'i32', 'ptr'), s0, '');
+          noteRange(len, 0, $7FFFFFFF);
+          exit(len);
         end;
         if t^.kind = tyShortString then
         begin
@@ -6199,12 +6223,23 @@ end;
 
 { --- Operators --- }
 
+procedure collectLengthBounds(e: PNode; var outB: TBoundArray;
+                              var count: longint); forward;
+procedure applyLengthBounds(const bounds: TBoundArray;
+                            count: longint); forward;
+procedure saveRangeState(var st: TRangeSnap); forward;
+procedure restoreRangeState(var st: TRangeSnap); forward;
+function canElideAnsiBoundsCheck(base, idx: PNode): boolean; forward;
+
 function emitShortCircuit(e: PNode): TV;
 var
-  isAnd: boolean;
+  isAnd, haveState: boolean;
   l, r, res: TV;
   lhsEnd, rhsEnd, rhsB, endB: PIRBlock;
   phi: PIRInst;
+  bounds: TBoundArray;
+  boundCount: longint;
+  saved: TRangeSnap;
 begin
   isAnd := e^.bop = boAnd;
   l := visitExpr(e^.lhs);
@@ -6221,8 +6256,22 @@ begin
     endB := irNewBlock('or.end');
     irCondBr(l, endB, rhsB, false);
   end;
+  haveState := false;
+  boundCount := 0;
+  if isAnd and (rangeLocals.count > 0) then
+  begin
+    collectLengthBounds(e^.lhs, bounds, boundCount);
+    if boundCount > 0 then
+    begin
+      saveRangeState(saved);
+      haveState := true;
+      applyLengthBounds(bounds, boundCount);
+    end;
+  end;
   irSetInsertPoint(rhsB);
   r := visitExpr(e^.rhs);
+  if haveState then
+    restoreRangeState(saved);
   rhsEnd := irInsertBlock;
   irBr(endB);
   irSetInsertPoint(endB);
@@ -7471,6 +7520,7 @@ end;
 function emitAnsiIndexRead(e: PNode): TV;
 var
   s, sLen, x, offset, lt1, gtLen: TV;
+  safeBounds: boolean;
 begin
   if isSliceExpr(e^.base) then
   begin
@@ -7487,9 +7537,11 @@ begin
     exit(loadScalar(irGEP1(irI8, s, offset, true, '', indexFlags(e^.index, 1)),
                     e^.typ, ''));
   end;
+  safeBounds := canElideAnsiBoundsCheck(e^.base, e^.index);
   s := visitExpr(e^.base);
   x := toI64(visitExpr(e^.index), e^.index^.typ);
-  emitAnsiIndexCheck(s, x, e^.index^.b);
+  if not safeBounds then
+    emitAnsiIndexCheck(s, x, e^.index^.b);
   offset := irBin('sub', x, i64c(1), '');
   emitAnsiIndexRead := loadScalar(irGEP1(irI8, s, offset, true, '',
                             indexFlags(e^.index, 1)), e^.typ, '');

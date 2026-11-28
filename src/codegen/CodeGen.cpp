@@ -1037,10 +1037,7 @@ void CodeGenModule::emitRoutineBody(RoutineDecl *R, uint32_t SliceMask,
                    [&](llvm::Value *State) { emitFreeOwned(Owned, State); });
   }
   AtRoutineTail = SavedTail;
-  for (VarDecl *V : RangeLocals)
-    VarRanges.erase(V);
-  RangeLocals.clear();
-  LoopRanges.clear();
+  endRangeLocals();
   B.CreateBr(ExitBlock);
   if (BeforeBody) {
     llvm::DebugLoc Loc = B.getCurrentDebugLocation();
