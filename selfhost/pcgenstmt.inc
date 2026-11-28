@@ -6218,7 +6218,8 @@ var
     isBorrowedVal := borrowAnsi and isParam and
                      not isByRef(x) and
                      not (x^.varKind in [vkConstParam, vkVarParam]) and
-                     not x^.isOut and (x^.varType^.kind = tyAnsiString) and
+                     not x^.isOut and
+                     (x^.varType^.kind in [tyAnsiString, tyDynArray]) and
                      not x^.captured;
     if ((sliceVarsP <> nil) and listHasPtr(sliceVarsP^, x)) or isBorrowedVal then
       x^.cgInFrame := false
@@ -6737,21 +6738,21 @@ end;
 function canBorrowAnsiParams(r: PDecl): boolean;
 var
   i: longint;
-  hasAnsiVal: boolean;
+  hasBorrowedVal: boolean;
   d: PDecl;
 begin
   canBorrowAnsiParams := false;
   if r = nil then
     exit;
-  hasAnsiVal := false;
+  hasBorrowedVal := false;
   for i := 0 to r^.params.count - 1 do
   begin
     d := PDecl(listGet(r^.params, i));
     if not (d^.varKind in [vkConstParam, vkVarParam]) and not d^.isOut and
-       not d^.captured and (d^.varType^.kind = tyAnsiString) then
-      hasAnsiVal := true;
+       not d^.captured and (d^.varType^.kind in [tyAnsiString, tyDynArray]) then
+      hasBorrowedVal := true;
   end;
-  if not hasAnsiVal then
+  if not hasBorrowedVal then
     exit;
   canBorrowAnsiParams := routineWritesOnlyLocals(r);
 end;
@@ -7808,7 +7809,8 @@ begin
       p := PDecl(listGet(r^.params, i));
       if ((i >= 32) or ((sliceMask and (1 shl i)) = 0)) and
          not isByRef(p) and not (p^.varKind in [vkConstParam, vkVarParam]) and
-         not p^.isOut and not p^.captured and (p^.varType^.kind = tyAnsiString) then
+         not p^.isOut and not p^.captured and
+         (p^.varType^.kind in [tyAnsiString, tyDynArray]) then
         p^.cgBorrowedAnsi := true;
     end;
   for i := 0 to r^.params.count - 1 do

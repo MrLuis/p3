@@ -665,7 +665,9 @@ void CodeGenModule::declareRoutine(RoutineDecl *R){
   auto AddSlot = [&](VarDecl *V) {
     bool IsBorrowedVal = BorrowAnsi && V->isParam() && !isByRef(V) &&
                          !V->isConstParam() && !V->isVarParam() &&
-                         !V->isOutParam() && V->getType()->isAnsiString() &&
+                         !V->isOutParam() &&
+                         (V->getType()->isAnsiString() ||
+                          V->getType()->isDynArray()) &&
                          !V->isCaptured();
     if (llvm::is_contained(SliceVars, V) || IsBorrowedVal ||
         !inFrame(V, PinAll, PinVars))
@@ -957,7 +959,8 @@ void CodeGenModule::emitRoutineBody(RoutineDecl *R, uint32_t SliceMask,
       VarDecl *P = R->getParams()[I];
       if ((I >= 32 || !(SliceMask & (1u << I))) && !isByRef(P) &&
           !P->isConstParam() && !P->isVarParam() && !P->isOutParam() &&
-          P->getType()->isAnsiString() && !P->isCaptured())
+          (P->getType()->isAnsiString() || P->getType()->isDynArray()) &&
+          !P->isCaptured())
         BorrowedAnsiParams.insert(P);
     }
   llvm::SmallVector<std::pair<llvm::Value *, Type *>, 4> Managed;

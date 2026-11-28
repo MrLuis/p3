@@ -3341,12 +3341,13 @@ bool CodeGenModule::routineWritesOnlyLocals(RoutineDecl *R) {
 bool CodeGenModule::canBorrowAnsiParams(RoutineDecl *R) {
   if (!R)
     return false;
-  bool HasAnsiVal = false;
+  bool HasBorrowedVal = false;
   for (VarDecl *P : R->getParams())
     if (!P->isConstParam() && !P->isVarParam() && !P->isOutParam() &&
-        !P->isCaptured() && P->getType()->isAnsiString())
-      HasAnsiVal = true;
-  return HasAnsiVal && routineWritesOnlyLocals(R);
+        !P->isCaptured() &&
+        (P->getType()->isAnsiString() || P->getType()->isDynArray()))
+      HasBorrowedVal = true;
+  return HasBorrowedVal && routineWritesOnlyLocals(R);
 }
 
 bool CodeGenModule::isSliceSafeParam(RoutineDecl *R, VarDecl *P) {
