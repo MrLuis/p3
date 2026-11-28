@@ -1882,23 +1882,614 @@ public:
     return false;
   }
 };
+
+static Expr *unwrapParens(Expr *E) {
+  while (auto *P = llvm::dyn_cast_or_null<ParenExpr>(E))
+    E = P->getInner();
+  return E;
+}
+
+static bool isCompareBinaryOp(BinaryOp Op) {
+  return Op == BinaryOp::Eq || Op == BinaryOp::Ne || Op == BinaryOp::Lt ||
+         Op == BinaryOp::Le || Op == BinaryOp::Gt || Op == BinaryOp::Ge;
+}
+
+static bool isAnsiSliceCompareExpr(const BinaryExpr *B) {
+  if (!B || B->getOperator() || !isCompareBinaryOp(B->getOp()))
+    return false;
+  Type *LT = B->getLHS()->getType(), *RT = B->getRHS()->getType();
+  return (LT->isAnsiString() || RT->isAnsiString()) &&
+         (LT->isStringType() || LT->isStringLiteral() || LT->isCharLike() ||
+          LT->isAnsiString()) &&
+         (RT->isStringType() || RT->isStringLiteral() || RT->isCharLike() ||
+          RT->isAnsiString());
+}
+
+class SliceParamCheck {
+  VarDecl *Param;
+
+public:
+  explicit SliceParamCheck(VarDecl *Param) : Param(Param) {}
+
+  bool checkExprNoRef(Expr *E) const {
+    if (!E)
+      return true;
+    if (E->getConversion())
+      return false;
+    if (llvm::isa<IntegerLiteralExpr>(E) || llvm::isa<RealLiteralExpr>(E) ||
+        llvm::isa<StringLiteralExpr>(E) || llvm::isa<NilExpr>(E))
+      return true;
+    if (auto *P = llvm::dyn_cast<ParenExpr>(E))
+      return checkExprNoRef(P->getInner());
+    if (auto *N = llvm::dyn_cast<NameRefExpr>(E))
+      return !N->getWith() && N->getDecl() != Param;
+    if (auto *U = llvm::dyn_cast<UnaryExpr>(E))
+      return !U->getOperator() && checkExprNoRef(U->getOperand());
+    if (auto *B = llvm::dyn_cast<BinaryExpr>(E)) {
+      if (isAnsiSliceCompareExpr(B)) {
+        auto *L = llvm::dyn_cast_or_null<NameRefExpr>(unwrapParens(B->getLHS()));
+        auto *R = llvm::dyn_cast_or_null<NameRefExpr>(unwrapParens(B->getRHS()));
+        bool LHSIsParam = L && !L->getWith() && L->getDecl() == Param;
+        bool RHSIsParam = R && !R->getWith() && R->getDecl() == Param;
+        return (LHSIsParam || checkExprNoRef(B->getLHS())) &&
+               (RHSIsParam || checkExprNoRef(B->getRHS()));
+      }
+      return !B->getOperator() && checkExprNoRef(B->getLHS()) &&
+             checkExprNoRef(B->getRHS());
+    }
+    if (auto *I = llvm::dyn_cast<IndexExpr>(E)) {
+      if (I->getProperty())
+        return false;
+      auto *Base = llvm::dyn_cast_or_null<NameRefExpr>(unwrapParens(I->getBase()));
+      bool BaseIsParam = Base && !Base->getWith() && Base->getDecl() == Param;
+      return (BaseIsParam || checkExprNoRef(I->getBase())) &&
+             checkExprNoRef(I->getIndex());
+    }
+    if (auto *F = llvm::dyn_cast<FieldExpr>(E)) {
+      Decl *M = F->getMember();
+      if (!F->getConstRef() && !llvm::isa_and_nonnull<FieldDecl>(M))
+        return false;
+      return checkExprNoRef(F->getBase());
+    }
+    if (auto *S = llvm::dyn_cast<SetCtorExpr>(E)) {
+      for (const SetElement &El : S->getElements())
+        if (!checkExprNoRef(El.Lo) || !checkExprNoRef(El.Hi))
+          return false;
+      return true;
+    }
+    if (auto *C = llvm::dyn_cast<CondExpr>(E))
+      return checkExprNoRef(C->getCond()) && checkExprNoRef(C->getThen()) &&
+             checkExprNoRef(C->getElse());
+    if (auto *C = llvm::dyn_cast<CallExpr>(E)) {
+      if (C->isVarCast() || C->isMethodCast() || C->getCalleeValue() ||
+          C->getWith())
+        return false;
+      if (auto *BD = llvm::dyn_cast_or_null<BuiltinDecl>(C->getDecl());
+          BD && BD->getBuiltinKind() == BuiltinKind::Length &&
+          C->getArgs().size() == 1) {
+        auto *Arg = llvm::dyn_cast_or_null<NameRefExpr>(unwrapParens(C->getArgs()[0]));
+        if (Arg && !Arg->getWith() && Arg->getDecl() == Param)
+          return true;
+      }
+      for (Expr *A : C->getArgs())
+        if (!checkExprNoRef(A))
+          return false;
+      return true;
+    }
+    return false;
+  }
+
+  bool checkStmt(Stmt *S) const {
+    if (!S || llvm::isa<EmptyStmt>(S))
+      return true;
+    if (auto *C = llvm::dyn_cast<CompoundStmt>(S)) {
+      for (Stmt *X : C->getBody())
+        if (!checkStmt(X))
+          return false;
+      return true;
+    }
+    if (auto *A = llvm::dyn_cast<AssignStmt>(S))
+      return checkExprNoRef(A->getTarget()) && checkExprNoRef(A->getValue());
+    if (auto *I = llvm::dyn_cast<IfStmt>(S))
+      return checkExprNoRef(I->getCond()) && checkStmt(I->getThen()) &&
+             checkStmt(I->getElse());
+    if (auto *W = llvm::dyn_cast<WhileStmt>(S))
+      return checkExprNoRef(W->getCond()) && checkStmt(W->getBody());
+    if (auto *Rp = llvm::dyn_cast<RepeatStmt>(S)) {
+      if (!checkExprNoRef(Rp->getCond()))
+        return false;
+      for (Stmt *X : Rp->getBody())
+        if (!checkStmt(X))
+          return false;
+      return true;
+    }
+    if (auto *F = llvm::dyn_cast<ForStmt>(S))
+      return checkExprNoRef(F->getVar()) && checkExprNoRef(F->getInit()) &&
+             checkExprNoRef(F->getFinal()) && checkStmt(F->getBody());
+    if (auto *C = llvm::dyn_cast<CaseStmt>(S)) {
+      if (!checkExprNoRef(C->getSelector()))
+        return false;
+      for (CaseArm *A : C->getArms()) {
+        for (CaseLabel *L : A->getLabels())
+          if (!checkExprNoRef(L->Lo) || !checkExprNoRef(L->Hi))
+            return false;
+        if (!checkStmt(A->getBody()))
+          return false;
+      }
+      for (Stmt *X : C->getElseBody())
+        if (!checkStmt(X))
+          return false;
+      return true;
+    }
+    if (auto *V = llvm::dyn_cast<VarDeclStmt>(S)) {
+      if (V->getInitAssign())
+        return checkStmt(V->getInitAssign());
+      return checkExprNoRef(V->getInit());
+    }
+    if (auto *P = llvm::dyn_cast<ProcCallStmt>(S)) {
+      if (P->getCalleeValue())
+        return false;
+      if (P->getWith() && !checkExprNoRef(P->getWith()->Record))
+        return false;
+      for (Expr *A : P->getArgs())
+        if (!checkExprNoRef(A))
+          return false;
+      return true;
+    }
+    if (auto *E = llvm::dyn_cast<ExprStmt>(S))
+      return checkExprNoRef(E->getExpr());
+    return false;
+  }
+};
+
+class SliceLocalCheck {
+  CodeGenModule &CGM;
+  const VarSet &Written;
+  VarSet OwnDecls;
+
+public:
+  VarSet Candidates;
+  VarSet Bad;
+  VarSet NeedsPureCaller;
+  bool HasImpureCall = false;
+
+  SliceLocalCheck(CodeGenModule &CGM, RoutineDecl *R, const VarSet &Written,
+                  llvm::ArrayRef<VarDecl *> Cands)
+      : CGM(CGM), Written(Written) {
+    for (VarDecl *P : R->getParams())
+      OwnDecls.insert(P);
+    for (Decl *D : R->getBody()->getDecls())
+      if (auto *V = llvm::dyn_cast<VarDecl>(D))
+        OwnDecls.insert(V);
+    for (VarDecl *C : Cands)
+      Candidates.insert(C);
+  }
+
+  bool isReadOnlyQueryBuiltin(BuiltinKind K) const {
+    switch (K) {
+    case BuiltinKind::Length:
+    case BuiltinKind::Copy:
+    case BuiltinKind::Pos:
+    case BuiltinKind::Concat:
+    case BuiltinKind::Ord:
+    case BuiltinKind::Chr:
+    case BuiltinKind::High:
+    case BuiltinKind::Low:
+    case BuiltinKind::SizeOf:
+    case BuiltinKind::Assigned:
+    case BuiltinKind::Succ:
+    case BuiltinKind::Pred:
+    case BuiltinKind::Abs:
+    case BuiltinKind::Sqr:
+    case BuiltinKind::Odd:
+    case BuiltinKind::UpCase:
+      return true;
+    default:
+      return false;
+    }
+  }
+
+  void collectWrittenVars(Expr *E, VarSet &Out) const {
+    if (!E)
+      return;
+    if (auto *P = llvm::dyn_cast<ParenExpr>(E)) {
+      collectWrittenVars(P->getInner(), Out);
+      return;
+    }
+    if (auto *U = llvm::dyn_cast<UnaryExpr>(E)) {
+      collectWrittenVars(U->getOperand(), Out);
+      return;
+    }
+    if (auto *B = llvm::dyn_cast<BinaryExpr>(E)) {
+      collectWrittenVars(B->getLHS(), Out);
+      collectWrittenVars(B->getRHS(), Out);
+      return;
+    }
+    if (auto *I = llvm::dyn_cast<IndexExpr>(E)) {
+      collectWrittenVars(I->getBase(), Out);
+      collectWrittenVars(I->getIndex(), Out);
+      return;
+    }
+    if (auto *F = llvm::dyn_cast<FieldExpr>(E)) {
+      collectWrittenVars(F->getBase(), Out);
+      return;
+    }
+    if (auto *C = llvm::dyn_cast<CondExpr>(E)) {
+      collectWrittenVars(C->getCond(), Out);
+      collectWrittenVars(C->getThen(), Out);
+      collectWrittenVars(C->getElse(), Out);
+      return;
+    }
+    if (auto *S = llvm::dyn_cast<SetCtorExpr>(E)) {
+      for (const SetElement &El : S->getElements()) {
+        collectWrittenVars(El.Lo, Out);
+        collectWrittenVars(El.Hi, Out);
+      }
+      return;
+    }
+    if (auto *A = llvm::dyn_cast<AddrOfExpr>(E)) {
+      PinAnalysis::usedBy(A->getOperand(), Out);
+      return;
+    }
+    if (auto *C = llvm::dyn_cast<CallExpr>(E)) {
+      if (C->getWith())
+        collectWrittenVars(C->getWith()->Record, Out);
+      if (C->getCalleeValue())
+        collectWrittenVars(C->getCalleeValue(), Out);
+      auto *BD = llvm::dyn_cast_or_null<BuiltinDecl>(C->getDecl());
+      auto *RD = llvm::dyn_cast_or_null<RoutineDecl>(C->getDecl());
+      bool SafeBuiltin = !C->isVarCast() && !C->isMethodCast() &&
+                         !C->getCalleeValue() && !C->getWith() && BD &&
+                         isReadOnlyQueryBuiltin(BD->getBuiltinKind());
+      for (size_t I = 0; I < C->getArgs().size(); ++I) {
+        Expr *Arg = C->getArgs()[I];
+        collectWrittenVars(Arg, Out);
+        if (SafeBuiltin)
+          continue;
+        if (RD && !C->isVarCast() && !C->isMethodCast() && !C->getCalleeValue() &&
+            !C->getWith()) {
+          if (I < RD->getParams().size() &&
+              (RD->getParams()[I]->isVarParam() || RD->getParams()[I]->isOutParam()))
+            PinAnalysis::usedBy(Arg, Out);
+          continue;
+        }
+        PinAnalysis::usedBy(Arg, Out);
+      }
+    }
+  }
+
+  void collectWrittenVarsStmt(Stmt *S, VarSet &Out) const {
+    if (!S || llvm::isa<EmptyStmt>(S))
+      return;
+    if (auto *C = llvm::dyn_cast<CompoundStmt>(S)) {
+      for (Stmt *X : C->getBody())
+        collectWrittenVarsStmt(X, Out);
+      return;
+    }
+    if (auto *A = llvm::dyn_cast<AssignStmt>(S)) {
+      PinAnalysis::usedBy(A->getTarget(), Out);
+      collectWrittenVars(A->getValue(), Out);
+      return;
+    }
+    if (auto *I = llvm::dyn_cast<IfStmt>(S)) {
+      collectWrittenVars(I->getCond(), Out);
+      collectWrittenVarsStmt(I->getThen(), Out);
+      collectWrittenVarsStmt(I->getElse(), Out);
+      return;
+    }
+    if (auto *W = llvm::dyn_cast<WhileStmt>(S)) {
+      collectWrittenVars(W->getCond(), Out);
+      collectWrittenVarsStmt(W->getBody(), Out);
+      return;
+    }
+    if (auto *Rp = llvm::dyn_cast<RepeatStmt>(S)) {
+      for (Stmt *X : Rp->getBody())
+        collectWrittenVarsStmt(X, Out);
+      collectWrittenVars(Rp->getCond(), Out);
+      return;
+    }
+    if (auto *F = llvm::dyn_cast<ForStmt>(S)) {
+      PinAnalysis::usedBy(F->getVar(), Out);
+      collectWrittenVars(F->getInit(), Out);
+      collectWrittenVars(F->getFinal(), Out);
+      collectWrittenVarsStmt(F->getBody(), Out);
+      return;
+    }
+    if (auto *C = llvm::dyn_cast<CaseStmt>(S)) {
+      collectWrittenVars(C->getSelector(), Out);
+      for (CaseArm *A : C->getArms()) {
+        for (CaseLabel *L : A->getLabels()) {
+          collectWrittenVars(L->Lo, Out);
+          collectWrittenVars(L->Hi, Out);
+        }
+        collectWrittenVarsStmt(A->getBody(), Out);
+      }
+      for (Stmt *X : C->getElseBody())
+        collectWrittenVarsStmt(X, Out);
+      return;
+    }
+    if (auto *V = llvm::dyn_cast<VarDeclStmt>(S)) {
+      if (V->getInitAssign())
+        collectWrittenVarsStmt(V->getInitAssign(), Out);
+      else
+        collectWrittenVars(V->getInit(), Out);
+      return;
+    }
+    if (auto *P = llvm::dyn_cast<ProcCallStmt>(S)) {
+      if (P->getWith())
+        collectWrittenVars(P->getWith()->Record, Out);
+      if (P->getCalleeValue())
+        collectWrittenVars(P->getCalleeValue(), Out);
+      auto *BD = llvm::dyn_cast_or_null<BuiltinDecl>(P->getDecl());
+      auto *RD = llvm::dyn_cast_or_null<RoutineDecl>(P->getDecl());
+      for (size_t I = 0; I < P->getArgs().size(); ++I) {
+        Expr *Arg = P->getArgs()[I];
+        collectWrittenVars(Arg, Out);
+        if (BD && isReadOnlyQueryBuiltin(BD->getBuiltinKind()))
+          continue;
+        if (RD && !P->getCalleeValue() && !P->getWith()) {
+          if (I < RD->getParams().size() &&
+              (RD->getParams()[I]->isVarParam() || RD->getParams()[I]->isOutParam()))
+            PinAnalysis::usedBy(Arg, Out);
+          continue;
+        }
+        PinAnalysis::usedBy(Arg, Out);
+      }
+      return;
+    }
+    if (auto *E = llvm::dyn_cast<ExprStmt>(S)) {
+      collectWrittenVars(E->getExpr(), Out);
+      return;
+    }
+    Out.insert(OwnDecls.begin(), OwnDecls.end());
+  }
+
+  bool isImmutableCopySource(Expr *E, VarDecl *Target,
+                             bool &UsedConstParam) const {
+    auto *N = llvm::dyn_cast_or_null<NameRefExpr>(unwrapParens(E));
+    if (!N || N->getWith())
+      return false;
+    auto *Src = llvm::dyn_cast_or_null<VarDecl>(N->getDecl());
+    if (!Src || Src == Target || !OwnDecls.count(Src) || Written.count(Src) ||
+        Src->isCaptured() || Src->isAliased() || Src->isTypedConst() ||
+        Src->getAbsolute() || Src->isVarParam() || Src->isOutParam() ||
+        !Src->getType()->isAnsiString())
+      return false;
+    UsedConstParam = Src->isConstParam();
+    return true;
+  }
+
+  void markExprBad(Expr *E) {
+    VarSet U;
+    PinAnalysis::usedBy(E, U);
+    for (VarDecl *V : U)
+      if (Candidates.count(V))
+        Bad.insert(V);
+  }
+
+  bool walkExpr(Expr *E) {
+    if (!E)
+      return true;
+    if (E->getConversion()) {
+      markExprBad(E);
+      return true;
+    }
+    if (llvm::isa<IntegerLiteralExpr>(E) || llvm::isa<RealLiteralExpr>(E) ||
+        llvm::isa<StringLiteralExpr>(E) || llvm::isa<NilExpr>(E))
+      return true;
+    if (auto *P = llvm::dyn_cast<ParenExpr>(E))
+      return walkExpr(P->getInner());
+    if (auto *N = llvm::dyn_cast<NameRefExpr>(E)) {
+      if (auto *V = llvm::dyn_cast_or_null<VarDecl>(N->getDecl());
+          V && Candidates.count(V))
+        Bad.insert(V); // bare read outside an allowed slice consumer
+      return true;
+    }
+    if (auto *U = llvm::dyn_cast<UnaryExpr>(E)) {
+      if (U->getOperator())
+        HasImpureCall = true;
+      return walkExpr(U->getOperand());
+    }
+    if (auto *B = llvm::dyn_cast<BinaryExpr>(E)) {
+      if (B->getOperator()) {
+        HasImpureCall = true;
+        markExprBad(E);
+        return true;
+      }
+      if (isAnsiSliceCompareExpr(B)) {
+        auto *L = llvm::dyn_cast_or_null<NameRefExpr>(unwrapParens(B->getLHS()));
+        auto *Rhs = llvm::dyn_cast_or_null<NameRefExpr>(unwrapParens(B->getRHS()));
+        bool LIsCand = L && !L->getWith() &&
+                       llvm::isa_and_nonnull<VarDecl>(L->getDecl()) &&
+                       Candidates.count(llvm::cast<VarDecl>(L->getDecl()));
+        bool RIsCand = Rhs && !Rhs->getWith() &&
+                       llvm::isa_and_nonnull<VarDecl>(Rhs->getDecl()) &&
+                       Candidates.count(llvm::cast<VarDecl>(Rhs->getDecl()));
+        return (LIsCand || walkExpr(B->getLHS())) &&
+               (RIsCand || walkExpr(B->getRHS()));
+      }
+      return walkExpr(B->getLHS()) && walkExpr(B->getRHS());
+    }
+    if (auto *I = llvm::dyn_cast<IndexExpr>(E)) {
+      if (I->getProperty()) {
+        HasImpureCall = true;
+        markExprBad(E);
+        return true;
+      }
+      auto *Base = llvm::dyn_cast_or_null<NameRefExpr>(unwrapParens(I->getBase()));
+      bool BaseIsCand = Base && !Base->getWith() &&
+                          llvm::isa_and_nonnull<VarDecl>(Base->getDecl()) &&
+                          Candidates.count(llvm::cast<VarDecl>(Base->getDecl()));
+      return (BaseIsCand || walkExpr(I->getBase())) && walkExpr(I->getIndex());
+    }
+    if (auto *F = llvm::dyn_cast<FieldExpr>(E)) {
+      return walkExpr(F->getBase());
+    }
+    if (auto *S = llvm::dyn_cast<SetCtorExpr>(E)) {
+      for (const SetElement &El : S->getElements())
+        if (!walkExpr(El.Lo) || !walkExpr(El.Hi))
+          return false;
+      return true;
+    }
+    if (auto *C = llvm::dyn_cast<CondExpr>(E))
+      return walkExpr(C->getCond()) && walkExpr(C->getThen()) &&
+             walkExpr(C->getElse());
+    if (auto *A = llvm::dyn_cast<AddrOfExpr>(E)) {
+      markExprBad(A);
+      return true;
+    }
+    if (auto *C = llvm::dyn_cast<CallExpr>(E))
+      return walkCallArgs(C->getDecl(), C->getArgs(), C->getWith(),
+                          C->getCalleeValue(),
+                          C->isVarCast() || C->isMethodCast());
+    return false;
+  }
+
+  bool walkCallArgs(Decl *D, llvm::ArrayRef<Expr *> Args, WithContext *With,
+                    Expr *CalleeVal, bool IsCast) {
+    if (With)
+      HasImpureCall = true;
+    if (CalleeVal)
+      HasImpureCall = true;
+    if (With && !walkExpr(With->Record))
+      return false;
+    if (CalleeVal && !walkExpr(CalleeVal))
+      return false;
+    if (IsCast) {
+      for (Expr *A : Args)
+        if (!walkExpr(A))
+          return false;
+      return true;
+    }
+    if (auto *BD = llvm::dyn_cast_or_null<BuiltinDecl>(D)) {
+      if (BD->getBuiltinKind() == BuiltinKind::Length && Args.size() == 1) {
+        auto *Arg = llvm::dyn_cast_or_null<NameRefExpr>(unwrapParens(Args[0]));
+        if (Arg && !Arg->getWith() &&
+            llvm::isa_and_nonnull<VarDecl>(Arg->getDecl()) &&
+            Candidates.count(llvm::cast<VarDecl>(Arg->getDecl())))
+          return true;
+      }
+      for (Expr *A : Args)
+        if (!walkExpr(A))
+          return false;
+      return true;
+    }
+    auto *Callee = llvm::dyn_cast_or_null<RoutineDecl>(D);
+    bool PureCallee = Callee && !With && !CalleeVal &&
+                      CodeGenModule::routineWritesOnlyLocals(Callee);
+    if (!PureCallee)
+      HasImpureCall = true;
+    for (size_t I = 0; I < Args.size(); ++I) {
+      Expr *A = Args[I];
+      auto *ArgRef = llvm::dyn_cast_or_null<NameRefExpr>(unwrapParens(A));
+      if (ArgRef && !ArgRef->getWith() &&
+          llvm::isa_and_nonnull<VarDecl>(ArgRef->getDecl())) {
+        auto *V = llvm::cast<VarDecl>(ArgRef->getDecl());
+        if (Candidates.count(V)) {
+          if (PureCallee && Callee && !Callee->isMethod() &&
+              !Callee->isStatic() && !Callee->isExternal() &&
+              I < Callee->getParams().size() &&
+              CGM.isSliceSafeParam(Callee, Callee->getParams()[I]))
+            continue;
+          Bad.insert(V);
+          continue;
+        }
+      }
+      if (!walkExpr(A))
+        return false;
+    }
+    return true;
+  }
+
+  bool walkStmt(Stmt *S) {
+    if (!S || llvm::isa<EmptyStmt>(S))
+      return true;
+    if (auto *C = llvm::dyn_cast<CompoundStmt>(S)) {
+      for (Stmt *X : C->getBody())
+        if (!walkStmt(X))
+          return false;
+      return true;
+    }
+    if (auto *A = llvm::dyn_cast<AssignStmt>(S)) {
+      auto *TN = llvm::dyn_cast_or_null<NameRefExpr>(unwrapParens(A->getTarget()));
+      auto *TV = (TN && !TN->getWith()) ? llvm::dyn_cast_or_null<VarDecl>(TN->getDecl())
+                                        : nullptr;
+      if (TV && Candidates.count(TV)) {
+        auto *CopyCall = llvm::dyn_cast_or_null<CallExpr>(unwrapParens(A->getValue()));
+        auto *BD = CopyCall
+                       ? llvm::dyn_cast_or_null<BuiltinDecl>(CopyCall->getDecl())
+                       : nullptr;
+        bool ConstSrc = false;
+        if (!A->isCompound() && CopyCall && !CopyCall->isVarCast() &&
+            !CopyCall->isMethodCast() && !CopyCall->getCalleeValue() &&
+            !CopyCall->getWith() && BD &&
+            BD->getBuiltinKind() == BuiltinKind::Copy &&
+            CopyCall->getArgs().size() == 3 &&
+            CopyCall->getArgs()[0]->getType()->isAnsiString() &&
+            isImmutableCopySource(CopyCall->getArgs()[0], TV, ConstSrc)) {
+          if (ConstSrc)
+            NeedsPureCaller.insert(TV);
+          return walkExpr(CopyCall->getArgs()[1]) &&
+                 walkExpr(CopyCall->getArgs()[2]);
+        }
+        Bad.insert(TV);
+        return walkExpr(A->getValue());
+      }
+      markExprBad(A->getTarget());
+      return walkExpr(A->getValue());
+    }
+    if (auto *I = llvm::dyn_cast<IfStmt>(S))
+      return walkExpr(I->getCond()) && walkStmt(I->getThen()) &&
+             walkStmt(I->getElse());
+    if (auto *W = llvm::dyn_cast<WhileStmt>(S))
+      return walkExpr(W->getCond()) && walkStmt(W->getBody());
+    if (auto *Rp = llvm::dyn_cast<RepeatStmt>(S)) {
+      if (!walkExpr(Rp->getCond()))
+        return false;
+      for (Stmt *X : Rp->getBody())
+        if (!walkStmt(X))
+          return false;
+      return true;
+    }
+    if (auto *F = llvm::dyn_cast<ForStmt>(S)) {
+      markExprBad(F->getVar());
+      return walkExpr(F->getInit()) && walkExpr(F->getFinal()) &&
+             walkStmt(F->getBody());
+    }
+    if (auto *C = llvm::dyn_cast<CaseStmt>(S)) {
+      if (!walkExpr(C->getSelector()))
+        return false;
+      for (CaseArm *A : C->getArms()) {
+        for (CaseLabel *L : A->getLabels())
+          if (!walkExpr(L->Lo) || !walkExpr(L->Hi))
+            return false;
+        if (!walkStmt(A->getBody()))
+          return false;
+      }
+      for (Stmt *X : C->getElseBody())
+        if (!walkStmt(X))
+          return false;
+      return true;
+    }
+    if (auto *V = llvm::dyn_cast<VarDeclStmt>(S)) {
+      if (V->getInitAssign())
+        return walkStmt(V->getInitAssign());
+      return walkExpr(V->getInit());
+    }
+    if (auto *P = llvm::dyn_cast<ProcCallStmt>(S))
+      return walkCallArgs(P->getDecl(), P->getArgs(), P->getWith(),
+                          P->getCalleeValue(), false);
+    if (auto *E = llvm::dyn_cast<ExprStmt>(S))
+      return walkExpr(E->getExpr());
+    return false;
+  }
+};
 } // namespace
 
-/// True if R has at least one plain ansistring value parameter and its body
-/// only reads its parameters and writes R's own local variables / Result
-/// without user calls or external mutations (so caller references stay alive
-/// and prologue addref + epilogue release on those value parameters can be
-/// skipped).
-bool CodeGenModule::canBorrowAnsiParams(RoutineDecl *R) {
-  if (!R || !R->getBody() || R->isExternal() || R->isAsync() ||
-      R->isIterator() || R->hasTry() || hasNonLocalLabels(*R->getBody()))
-    return false;
-  bool HasAnsiVal = false;
-  for (VarDecl *P : R->getParams())
-    if (!P->isConstParam() && !P->isVarParam() && !P->isOutParam() &&
-        !P->isCaptured() && P->getType()->isAnsiString())
-      HasAnsiVal = true;
-  if (!HasAnsiVal)
+bool CodeGenModule::routineWritesOnlyLocals(RoutineDecl *R) {
+  if (!R || !R->getBody() || !R->getBody()->getBody() || R->isExternal() ||
+      R->isAsync() || R->isIterator() || R->hasTry() ||
+      hasNonLocalLabels(*R->getBody()))
     return false;
   for (Decl *D : R->getBody()->getDecls()) {
     if (auto *N = llvm::dyn_cast<RoutineDecl>(D); N && !N->isExternal())
@@ -1907,5 +2498,65 @@ bool CodeGenModule::canBorrowAnsiParams(RoutineDecl *R) {
       return false;
   }
   return BorrowCheck(R).safeStmt(R->getBody()->getBody());
+}
+
+/// True if R has at least one plain ansistring value parameter and its body
+/// only reads its parameters and writes R's own local variables / Result
+/// without user calls or external mutations (so caller references stay alive
+/// and prologue addref + epilogue release on those value parameters can be
+/// skipped).
+bool CodeGenModule::canBorrowAnsiParams(RoutineDecl *R) {
+  if (!R)
+    return false;
+  bool HasAnsiVal = false;
+  for (VarDecl *P : R->getParams())
+    if (!P->isConstParam() && !P->isVarParam() && !P->isOutParam() &&
+        !P->isCaptured() && P->getType()->isAnsiString())
+      HasAnsiVal = true;
+  return HasAnsiVal && routineWritesOnlyLocals(R);
+}
+
+bool CodeGenModule::isSliceSafeParam(RoutineDecl *R, VarDecl *P) {
+  if (!R || !P || R->isExternal() || !R->getBody() || !R->getBody()->getBody() ||
+      R->isAsync() || R->isIterator() || R->hasTry() ||
+      hasNonLocalLabels(*R->getBody()) || R->isMethod() || R->hasStaticLink() ||
+      R->hasHeapFrame() || R->getParams().size() > 32)
+    return false;
+  if (!P->isConstParam() || isByRef(P) || !P->getType()->isAnsiString() ||
+      P->isCaptured() || P->isAliased() || P->getDefault())
+    return false;
+  SliceParamCheck Check(P);
+  for (VarDecl *Param : R->getParams())
+    if (!Check.checkExprNoRef(Param->getDefault()))
+      return false;
+  return Check.checkStmt(R->getBody()->getBody());
+}
+
+llvm::SmallVector<VarDecl *, 4> CodeGenModule::findSliceLocals(RoutineDecl *R) {
+  llvm::SmallVector<VarDecl *, 4> Result;
+  if (!R || R->isExternal() || !R->getBody() || !R->getBody()->getBody() ||
+      R->isAsync() || R->isIterator() || R->hasTry() ||
+      hasNonLocalLabels(*R->getBody()) || R->hasHeapFrame())
+    return Result;
+  llvm::SmallVector<VarDecl *, 4> Cands;
+  VarDecl *ResVar = R->isFunction() ? R->getResultVar() : nullptr;
+  for (Decl *D : R->getBody()->getDecls())
+    if (auto *V = llvm::dyn_cast<VarDecl>(D);
+        V && V != ResVar && !V->isTypedConst() && !V->getAbsolute() &&
+        !V->isInitializedVar() && !V->isInline() && !V->isCaptured() &&
+        !V->isAliased() && !V->isOwned() && V->getType()->isAnsiString())
+      Cands.push_back(V);
+  if (Cands.empty())
+    return Result;
+  VarSet Written;
+  SliceLocalCheck Check(*this, R, Written, Cands);
+  Check.collectWrittenVarsStmt(R->getBody()->getBody(), Written);
+  if (!Check.walkStmt(R->getBody()->getBody()))
+    return Result;
+  for (VarDecl *C : Cands)
+    if (!Check.Bad.count(C) &&
+        (!Check.HasImpureCall || !Check.NeedsPureCaller.count(C)))
+      Result.push_back(C);
+  return Result;
 }
 

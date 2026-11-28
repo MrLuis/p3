@@ -357,8 +357,11 @@ llvm::Value *CodeGenModule::emitStringFunction(CallExpr *E, BuiltinKind K){
     if (T->isArrayOfConst())
       return B.CreateTrunc(B.CreateLoad(B.getInt64Ty(), visitExpr(Args[0])),
                            B.getInt32Ty());
-    if (T->isAnsiString())
+    if (T->isAnsiString()) {
+      if (isSliceExpr(Args[0]))
+        return emitSliceExpr(Args[0]).Len;
       return astrCall("__pas_astr_length", B.getInt32Ty(), {visitExpr(Args[0])});
+    }
     if (T->isShortString())
       return B.CreateZExt(B.CreateLoad(B.getInt8Ty(), emitPStr(Args[0])),
                           B.getInt32Ty(), "length");

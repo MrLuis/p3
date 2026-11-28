@@ -909,6 +909,13 @@ begin
     if (target^.kind = nkNameRef) and (target^.refWith = nil) and
        (target^.refDecl <> nil) and (target^.refDecl^.kind = dkVar) then
       dV := target^.refDecl;
+    if (dV <> nil) and dV^.cgSliceLocal then
+    begin
+      emitSliceExpr(value, v0, v1);
+      irStore(v0, PTVBox(dV^.cgSlicePtr)^);
+      irStore(v1, PTVBox(dV^.cgSliceLen)^);
+      exit;
+    end;
     listInit(parts);
     if (dV <> nil) and ansiAppends(value, dV, parts) then
     begin
@@ -3242,7 +3249,7 @@ end;
 
 { The parameter types of routine r's function: static link, [Self], the
   parameters. }
-procedure routineParamTypes(r: PDecl; var params: TPtrList);
+procedure routineParamTypesMask(r: PDecl; var params: TPtrList; sliceMask: longint);
 var
   j: longint;
 begin
@@ -3253,7 +3260,20 @@ begin
   if r^.isFunction and returnsByPointer(r^.resultType) then
     listAdd(params, irPtrT); { where the result goes }
   for j := 0 to r^.params.count - 1 do
-    listAdd(params, paramIRType(PDecl(listGet(r^.params, j))));
+  begin
+    if (j < 32) and ((sliceMask and (1 shl j)) <> 0) then
+    begin
+      listAdd(params, irPtrT);
+      listAdd(params, irI32);
+    end
+    else
+      listAdd(params, paramIRType(PDecl(listGet(r^.params, j))));
+  end;
+end;
+
+procedure routineParamTypes(r: PDecl; var params: TPtrList);
+begin
+  routineParamTypesMask(r, params, 0);
 end;
 
 function routineRetType(r: PDecl): PIRType;
@@ -4766,6 +4786,7 @@ begin
 end;
 
 procedure declareRoutine(r: PDecl); forward;
+procedure findSliceLocals(r: PDecl; var outVars: TPtrList); forward;
 
 { Lays out the frames of the routines declared in blk (recursively),
   creates their functions and queues their bodies, and declares the
@@ -4979,6 +5000,7 @@ var
   j, argNo: longint;
   v, p: PDecl;
   slots, params, pinVars: TPtrList;
+  sliceVarsP: PPtrList;
   name, dbgName: string;
   f: PIRFunc;
   ret: PIRType;
@@ -4988,7 +5010,10 @@ var
   procedure addSlot(x: PDecl);
   begin
     x^.cgLocal := nil;
-    x^.cgInFrame := inFrame(x, pinAll, pinVars);
+    if (sliceVarsP <> nil) and listHasPtr(sliceVarsP^, x) then
+      x^.cgInFrame := false
+    else
+      x^.cgInFrame := inFrame(x, pinAll, pinVars);
     if not x^.cgInFrame then
       exit;
     x^.cgSlot := slots.count;
@@ -5000,6 +5025,18 @@ var
 
 begin
   begin
+    new(sliceVarsP);
+    listInit(sliceVarsP^);
+    findSliceLocals(r, sliceVarsP^);
+    if sliceVarsP^.count > 0 then
+      r^.cgSliceVars := sliceVarsP
+    else
+    begin
+      listFree(sliceVarsP^);
+      dispose(sliceVarsP);
+      sliceVarsP := nil;
+      r^.cgSliceVars := nil;
+    end;
     { frame record: [static link], then those of [Self], params, locals
       and [result] that have to be in it (see inFrame); the link is there
       for the routines nested in r, which follow it to r's parents }
@@ -5465,6 +5502,27 @@ begin
   end;
 end;
 
+function routineWritesOnlyLocals(r: PDecl): boolean;
+var
+  i: longint;
+  d: PDecl;
+begin
+  routineWritesOnlyLocals := false;
+  if (r = nil) or (r^.body = nil) or (r^.body^.body = nil) or r^.isExternal or
+     (r^.asyncType <> nil) or (r^.iterType <> nil) or r^.hasTry or
+     hasNonLocalLabels(r^.body) then
+    exit;
+  for i := 0 to r^.body^.decls.count - 1 do
+  begin
+    d := PDecl(listGet(r^.body^.decls, i));
+    if (d^.kind = dkRoutine) and not d^.isExternal then
+      exit;
+    if (d^.kind = dkVar) and d^.isOwned then
+      exit;
+  end;
+  routineWritesOnlyLocals := borrowSafeStmt(r, r^.body^.body);
+end;
+
 function canBorrowAnsiParams(r: PDecl): boolean;
 var
   i: longint;
@@ -5472,8 +5530,7 @@ var
   d: PDecl;
 begin
   canBorrowAnsiParams := false;
-  if (r = nil) or (r^.body = nil) or r^.isExternal or (r^.asyncType <> nil) or
-     (r^.iterType <> nil) or r^.hasTry or hasNonLocalLabels(r^.body) then
+  if r = nil then
     exit;
   hasAnsiVal := false;
   for i := 0 to r^.params.count - 1 do
@@ -5485,30 +5542,896 @@ begin
   end;
   if not hasAnsiVal then
     exit;
+  canBorrowAnsiParams := routineWritesOnlyLocals(r);
+end;
+
+function isCompareBinOp(op: TBinaryOp): boolean;
+begin
+  isCompareBinOp := op in [boEq, boNe, boLt, boLe, boGt, boGe];
+end;
+
+function isAnsiSliceCompareNode(b: PNode): boolean;
+var
+  lt, rt: PType;
+begin
+  if (b = nil) or (b^.opDecl <> nil) or not isCompareBinOp(b^.bop) then
+    exit(false);
+  lt := b^.lhs^.typ;
+  rt := b^.rhs^.typ;
+  isAnsiSliceCompareNode :=
+    ((lt^.kind = tyAnsiString) or (rt^.kind = tyAnsiString)) and
+    ((lt^.kind in [tyShortString, tyAnsiString, tyStringLit]) or isCharLike(lt)) and
+    ((rt^.kind in [tyShortString, tyAnsiString, tyStringLit]) or isCharLike(rt));
+end;
+
+function sliceParamExprNoRef(param: PDecl; e: PNode): boolean;
+var
+  i: longint;
+  d: PDecl;
+  arg, lhsU, rhsU, baseU: PNode;
+  lIsP, rIsP, bIsP: boolean;
+begin
+  if e = nil then
+    exit(true);
+  if e^.convOp <> nil then
+    exit(false);
+  case e^.kind of
+    nkIntegerLit, nkRealLit, nkStringLit, nkNil:
+      sliceParamExprNoRef := true;
+    nkParen:
+      sliceParamExprNoRef := sliceParamExprNoRef(param, e^.inner);
+    nkNameRef:
+      sliceParamExprNoRef := (e^.refWith = nil) and (e^.refDecl <> param);
+    nkUnary:
+      sliceParamExprNoRef := (e^.uopDecl = nil) and
+                             sliceParamExprNoRef(param, e^.operand);
+    nkBinary:
+      begin
+        if isAnsiSliceCompareNode(e) then
+        begin
+          lhsU := skipParensNode(e^.lhs);
+          rhsU := skipParensNode(e^.rhs);
+          lIsP := (lhsU <> nil) and (lhsU^.kind = nkNameRef) and
+                  (lhsU^.refWith = nil) and (lhsU^.refDecl = param);
+          rIsP := (rhsU <> nil) and (rhsU^.kind = nkNameRef) and
+                  (rhsU^.refWith = nil) and (rhsU^.refDecl = param);
+          exit((lIsP or sliceParamExprNoRef(param, e^.lhs)) and
+               (rIsP or sliceParamExprNoRef(param, e^.rhs)));
+        end;
+        sliceParamExprNoRef := (e^.opDecl = nil) and
+                               sliceParamExprNoRef(param, e^.lhs) and
+                               sliceParamExprNoRef(param, e^.rhs);
+      end;
+    nkIndex:
+      begin
+        if e^.idxProp <> nil then
+          exit(false);
+        baseU := skipParensNode(e^.base);
+        bIsP := (baseU <> nil) and (baseU^.kind = nkNameRef) and
+                (baseU^.refWith = nil) and (baseU^.refDecl = param);
+        sliceParamExprNoRef := (bIsP or sliceParamExprNoRef(param, e^.base)) and
+                               sliceParamExprNoRef(param, e^.index);
+      end;
+    nkField:
+      begin
+        if (e^.constRef = nil) and
+           ((e^.fieldDecl = nil) or (e^.fieldDecl^.kind <> dkField)) then
+          exit(false);
+        sliceParamExprNoRef := sliceParamExprNoRef(param, e^.base);
+      end;
+    nkSetCtor:
+      begin
+        for i := 0 to e^.setElems.count - 1 do
+          if not sliceParamExprNoRef(param, PSetElement(listGet(e^.setElems, i))^.lo) or
+             not sliceParamExprNoRef(param, PSetElement(listGet(e^.setElems, i))^.hi) then
+            exit(false);
+        sliceParamExprNoRef := true;
+      end;
+    nkCondExpr:
+      sliceParamExprNoRef := sliceParamExprNoRef(param, e^.ceCond) and
+                             sliceParamExprNoRef(param, e^.ceThen) and
+                             sliceParamExprNoRef(param, e^.ceElse);
+    nkCall:
+      begin
+        if e^.isVarCast or (e^.methodCast <> 0) or (e^.calleeExpr <> nil) or
+           (e^.callValue <> nil) or (e^.callWith <> nil) then
+          exit(false);
+        d := e^.callDecl;
+        if (d <> nil) and (d^.kind = dkBuiltin) and (d^.builtin = bkLength) and
+           (e^.args.count = 1) then
+        begin
+          arg := skipParensNode(PNode(listGet(e^.args, 0)));
+          if (arg <> nil) and (arg^.kind = nkNameRef) and
+             (arg^.refWith = nil) and (arg^.refDecl = param) then
+            exit(true);
+        end;
+        for i := 0 to e^.args.count - 1 do
+          if not sliceParamExprNoRef(param, PNode(listGet(e^.args, i))) then
+            exit(false);
+        sliceParamExprNoRef := true;
+      end;
+  else
+    sliceParamExprNoRef := false;
+  end;
+end;
+
+function sliceParamStmtNoRef(param: PDecl; s: PNode): boolean;
+var
+  i, j: longint;
+  arm: PCaseArm;
+  lbl: PCaseLabel;
+begin
+  if (s = nil) or (s^.kind = nkEmpty) then
+    exit(true);
+  case s^.kind of
+    nkCompound:
+      begin
+        for i := 0 to s^.stmts.count - 1 do
+          if not sliceParamStmtNoRef(param, PNode(listGet(s^.stmts, i))) then
+            exit(false);
+        sliceParamStmtNoRef := true;
+      end;
+    nkAssign:
+      sliceParamStmtNoRef := sliceParamExprNoRef(param, s^.target) and
+                             sliceParamExprNoRef(param, s^.value);
+    nkIf:
+      sliceParamStmtNoRef := sliceParamExprNoRef(param, s^.cond) and
+                             sliceParamStmtNoRef(param, s^.thenStmt) and
+                             sliceParamStmtNoRef(param, s^.elseStmt);
+    nkWhile:
+      sliceParamStmtNoRef := sliceParamExprNoRef(param, s^.cond) and
+                             sliceParamStmtNoRef(param, s^.thenStmt);
+    nkRepeat:
+      begin
+        if not sliceParamExprNoRef(param, s^.untilCond) then
+          exit(false);
+        for i := 0 to s^.stmts.count - 1 do
+          if not sliceParamStmtNoRef(param, PNode(listGet(s^.stmts, i))) then
+            exit(false);
+        sliceParamStmtNoRef := true;
+      end;
+    nkFor:
+      sliceParamStmtNoRef := sliceParamExprNoRef(param, s^.forVar) and
+                             sliceParamExprNoRef(param, s^.forInit) and
+                             sliceParamExprNoRef(param, s^.forFinal) and
+                             sliceParamStmtNoRef(param, s^.forBody);
+    nkCase:
+      begin
+        if not sliceParamExprNoRef(param, s^.selector) then
+          exit(false);
+        for i := 0 to s^.arms.count - 1 do
+        begin
+          arm := PCaseArm(listGet(s^.arms, i));
+          for j := 0 to arm^.labels.count - 1 do
+          begin
+            lbl := PCaseLabel(listGet(arm^.labels, j));
+            if not sliceParamExprNoRef(param, lbl^.lo) or
+               not sliceParamExprNoRef(param, lbl^.hi) then
+              exit(false);
+          end;
+          if not sliceParamStmtNoRef(param, arm^.body) then
+            exit(false);
+        end;
+        for i := 0 to s^.elseBody.count - 1 do
+          if not sliceParamStmtNoRef(param, PNode(listGet(s^.elseBody, i))) then
+            exit(false);
+        sliceParamStmtNoRef := true;
+      end;
+    nkVarDecl:
+      if s^.vdAssign <> nil then
+        sliceParamStmtNoRef := sliceParamStmtNoRef(param, s^.vdAssign)
+      else
+        sliceParamStmtNoRef := sliceParamExprNoRef(param, s^.vdInit);
+    nkProcCall:
+      begin
+        if (s^.callValue <> nil) or (s^.calleeExpr <> nil) then
+          exit(false);
+        if (s^.callWith <> nil) and not sliceParamExprNoRef(param, s^.callWith^.rec) then
+          exit(false);
+        for i := 0 to s^.args.count - 1 do
+          if not sliceParamExprNoRef(param, PNode(listGet(s^.args, i))) then
+            exit(false);
+        sliceParamStmtNoRef := true;
+      end;
+    nkExprStmt:
+      sliceParamStmtNoRef := sliceParamExprNoRef(param, s^.exprStmtExpr);
+  else
+    sliceParamStmtNoRef := false;
+  end;
+end;
+
+function isSliceSafeParam(r, p: PDecl): boolean;
+var
+  i: longint;
+  pm: PDecl;
+begin
+  isSliceSafeParam := false;
+  if (r = nil) or (p = nil) or r^.isExternal or (r^.body = nil) or
+     (r^.body^.body = nil) or (r^.asyncType <> nil) or (r^.iterType <> nil) or
+     r^.hasTry or hasNonLocalLabels(r^.body) or (r^.methodKind <> mtNone) or
+     (r^.parent <> nil) or r^.heapFrame or (r^.params.count > 32) then
+    exit;
+  if (p^.varKind <> vkConstParam) or isByRef(p) or
+     (p^.varType^.kind <> tyAnsiString) or p^.captured or p^.isAliased or
+     (p^.paramDefault <> nil) then
+    exit;
+  for i := 0 to r^.params.count - 1 do
+  begin
+    pm := PDecl(listGet(r^.params, i));
+    if not sliceParamExprNoRef(p, pm^.paramDefault) then
+      exit;
+  end;
+  isSliceSafeParam := sliceParamStmtNoRef(p, r^.body^.body);
+end;
+
+procedure findSliceLocals(r: PDecl; var outVars: TPtrList);
+var
+  cands, ownDecls, written, bad, needsPure: TPtrList;
+  hasImpure: boolean;
+  i: longint;
+  d, resVar: PDecl;
+
+  function isReadOnlyQueryBuiltin(bk: TBuiltinKind): boolean;
+  begin
+    isReadOnlyQueryBuiltin := bk in [bkLength, bkCopy, bkPos, bkConcat, bkOrd,
+      bkChr, bkHigh, bkLow, bkSizeOf, bkAssigned, bkSucc, bkPred, bkAbs, bkSqr,
+      bkOdd, bkUpCase];
+  end;
+
+  procedure collectWrittenExpr(e: PNode);
+  var
+    k: longint;
+    el: PSetElement;
+    bd, rd: PDecl;
+    arg: PNode;
+    safeB: boolean;
+  begin
+    if e = nil then
+      exit;
+    case e^.kind of
+      nkParen: collectWrittenExpr(e^.inner);
+      nkUnary: collectWrittenExpr(e^.operand);
+      nkBinary:
+        begin
+          collectWrittenExpr(e^.lhs);
+          collectWrittenExpr(e^.rhs);
+        end;
+      nkIndex:
+        begin
+          collectWrittenExpr(e^.base);
+          collectWrittenExpr(e^.index);
+        end;
+      nkField: collectWrittenExpr(e^.base);
+      nkCondExpr:
+        begin
+          collectWrittenExpr(e^.ceCond);
+          collectWrittenExpr(e^.ceThen);
+          collectWrittenExpr(e^.ceElse);
+        end;
+      nkSetCtor:
+        for k := 0 to e^.setElems.count - 1 do
+        begin
+          el := PSetElement(listGet(e^.setElems, k));
+          collectWrittenExpr(el^.lo);
+          collectWrittenExpr(el^.hi);
+        end;
+      nkAddrOf:
+        paExpr(e^.inner, written, paDummy, true, false);
+      nkCall:
+        begin
+          if e^.callWith <> nil then
+            collectWrittenExpr(e^.callWith^.rec);
+          if e^.calleeExpr <> nil then
+            collectWrittenExpr(e^.calleeExpr);
+          bd := nil;
+          rd := nil;
+          if e^.callDecl <> nil then
+          begin
+            if e^.callDecl^.kind = dkBuiltin then
+              bd := e^.callDecl
+            else if e^.callDecl^.kind = dkRoutine then
+              rd := e^.callDecl;
+          end;
+          safeB := not e^.isVarCast and (e^.methodCast = 0) and
+                   (e^.calleeExpr = nil) and (e^.callValue = nil) and
+                   (e^.callWith = nil) and (bd <> nil) and
+                   isReadOnlyQueryBuiltin(bd^.builtin);
+          for k := 0 to e^.args.count - 1 do
+          begin
+            arg := PNode(listGet(e^.args, k));
+            collectWrittenExpr(arg);
+            if safeB then
+              continue;
+            if (rd <> nil) and not e^.isVarCast and (e^.methodCast = 0) and
+               (e^.calleeExpr = nil) and (e^.callWith = nil) then
+            begin
+              if (k < rd^.params.count) and
+                 ((PDecl(listGet(rd^.params, k))^.varKind = vkVarParam) or
+                  PDecl(listGet(rd^.params, k))^.isOut) then
+                paExpr(arg, written, paDummy, true, false);
+              continue;
+            end;
+            paExpr(arg, written, paDummy, true, false);
+          end;
+        end;
+    end;
+  end;
+
+  procedure collectWrittenStmt(s: PNode);
+  var
+    k, j: longint;
+    arm: PCaseArm;
+    lbl: PCaseLabel;
+    bd, rd: PDecl;
+    arg: PNode;
+  begin
+    if (s = nil) or (s^.kind = nkEmpty) then
+      exit;
+    case s^.kind of
+      nkCompound:
+        for k := 0 to s^.stmts.count - 1 do
+          collectWrittenStmt(PNode(listGet(s^.stmts, k)));
+      nkAssign:
+        begin
+          paExpr(s^.target, written, paDummy, true, false);
+          collectWrittenExpr(s^.value);
+        end;
+      nkIf:
+        begin
+          collectWrittenExpr(s^.cond);
+          collectWrittenStmt(s^.thenStmt);
+          collectWrittenStmt(s^.elseStmt);
+        end;
+      nkWhile:
+        begin
+          collectWrittenExpr(s^.cond);
+          collectWrittenStmt(s^.thenStmt);
+        end;
+      nkRepeat:
+        begin
+          for k := 0 to s^.stmts.count - 1 do
+            collectWrittenStmt(PNode(listGet(s^.stmts, k)));
+          collectWrittenExpr(s^.untilCond);
+        end;
+      nkFor:
+        begin
+          paExpr(s^.forVar, written, paDummy, true, false);
+          collectWrittenExpr(s^.forInit);
+          collectWrittenExpr(s^.forFinal);
+          collectWrittenStmt(s^.forBody);
+        end;
+      nkCase:
+        begin
+          collectWrittenExpr(s^.selector);
+          for k := 0 to s^.arms.count - 1 do
+          begin
+            arm := PCaseArm(listGet(s^.arms, k));
+            for j := 0 to arm^.labels.count - 1 do
+            begin
+              lbl := PCaseLabel(listGet(arm^.labels, j));
+              collectWrittenExpr(lbl^.lo);
+              collectWrittenExpr(lbl^.hi);
+            end;
+            collectWrittenStmt(arm^.body);
+          end;
+          for k := 0 to s^.elseBody.count - 1 do
+            collectWrittenStmt(PNode(listGet(s^.elseBody, k)));
+        end;
+      nkVarDecl:
+        if s^.vdAssign <> nil then
+          collectWrittenStmt(s^.vdAssign)
+        else
+          collectWrittenExpr(s^.vdInit);
+      nkProcCall:
+        begin
+          if s^.callWith <> nil then
+            collectWrittenExpr(s^.callWith^.rec);
+          if s^.callValue <> nil then
+            collectWrittenExpr(s^.callValue);
+          if s^.calleeExpr <> nil then
+            collectWrittenExpr(s^.calleeExpr);
+          bd := nil;
+          rd := nil;
+          if s^.callDecl <> nil then
+          begin
+            if s^.callDecl^.kind = dkBuiltin then
+              bd := s^.callDecl
+            else if s^.callDecl^.kind = dkRoutine then
+              rd := s^.callDecl;
+          end;
+          for k := 0 to s^.args.count - 1 do
+          begin
+            arg := PNode(listGet(s^.args, k));
+            collectWrittenExpr(arg);
+            if (bd <> nil) and isReadOnlyQueryBuiltin(bd^.builtin) then
+              continue;
+            if (rd <> nil) and (s^.callValue = nil) and (s^.calleeExpr = nil) and
+               (s^.callWith = nil) then
+            begin
+              if (k < rd^.params.count) and
+                 ((PDecl(listGet(rd^.params, k))^.varKind = vkVarParam) or
+                  PDecl(listGet(rd^.params, k))^.isOut) then
+                paExpr(arg, written, paDummy, true, false);
+              continue;
+            end;
+            paExpr(arg, written, paDummy, true, false);
+          end;
+        end;
+      nkExprStmt:
+        collectWrittenExpr(s^.exprStmtExpr);
+    else
+      listAppendUnique(written, ownDecls);
+    end;
+  end;
+
+  procedure markExprBad(e: PNode);
+  var
+    u: TPtrList;
+    k: longint;
+    vd: PDecl;
+  begin
+    listInit(u);
+    paExpr(e, u, paDummy, true, false);
+    for k := 0 to u.count - 1 do
+    begin
+      vd := PDecl(listGet(u, k));
+      if listHasPtr(cands, vd) then
+        listAddUnique(bad, vd);
+    end;
+    listFree(u);
+  end;
+
+  function isImmutSrc(e: PNode; tgt: PDecl; var usedConst: boolean): boolean;
+  var
+    n: PNode;
+    src: PDecl;
+  begin
+    isImmutSrc := false;
+    n := skipParensNode(e);
+    if (n = nil) or (n^.kind <> nkNameRef) or (n^.refWith <> nil) then
+      exit;
+    src := n^.refDecl;
+    if (src = nil) or (src^.kind <> dkVar) or (src = tgt) or
+       not listHasPtr(ownDecls, src) or listHasPtr(written, src) or
+       src^.captured or src^.isAliased or (src^.absTarget <> nil) or
+       ((src^.init <> nil) and not src^.isInitVar) or
+       (src^.varKind = vkVarParam) or src^.isOut or
+       (src^.varType^.kind <> tyAnsiString) then
+      exit;
+    usedConst := src^.varKind = vkConstParam;
+    isImmutSrc := true;
+  end;
+
+  function walkExpr(e: PNode): boolean; forward;
+
+  function walkCall(decl: PDecl; const args: TPtrList; wctx: PWithContext;
+                    calleeV: PNode; isCast: boolean): boolean;
+  var
+    k: longint;
+    callee, vd: PDecl;
+    arg, aRef: PNode;
+    pureCallee: boolean;
+  begin
+    if (wctx <> nil) or (calleeV <> nil) then
+      hasImpure := true;
+    if (wctx <> nil) and not walkExpr(wctx^.rec) then
+      exit(false);
+    if (calleeV <> nil) and not walkExpr(calleeV) then
+      exit(false);
+    if isCast then
+    begin
+      for k := 0 to args.count - 1 do
+        if not walkExpr(PNode(listGet(args, k))) then
+          exit(false);
+      exit(true);
+    end;
+    if (decl <> nil) and (decl^.kind = dkBuiltin) then
+    begin
+      if (decl^.builtin = bkLength) and (args.count = 1) then
+      begin
+        aRef := skipParensNode(PNode(listGet(args, 0)));
+        if (aRef <> nil) and (aRef^.kind = nkNameRef) and
+           (aRef^.refWith = nil) and (aRef^.refDecl <> nil) and
+           (aRef^.refDecl^.kind = dkVar) and
+           listHasPtr(cands, aRef^.refDecl) then
+          exit(true);
+      end;
+      for k := 0 to args.count - 1 do
+        if not walkExpr(PNode(listGet(args, k))) then
+          exit(false);
+      exit(true);
+    end;
+    callee := nil;
+    if (decl <> nil) and (decl^.kind = dkRoutine) then
+      callee := decl;
+    pureCallee := (callee <> nil) and (wctx = nil) and (calleeV = nil) and
+                  routineWritesOnlyLocals(callee);
+    if not pureCallee then
+      hasImpure := true;
+    for k := 0 to args.count - 1 do
+    begin
+      arg := PNode(listGet(args, k));
+      aRef := skipParensNode(arg);
+      if (aRef <> nil) and (aRef^.kind = nkNameRef) and
+         (aRef^.refWith = nil) and (aRef^.refDecl <> nil) and
+         (aRef^.refDecl^.kind = dkVar) then
+      begin
+        vd := aRef^.refDecl;
+        if listHasPtr(cands, vd) then
+        begin
+          if pureCallee and (callee^.methodKind = mtNone) and
+             (callee^.parent = nil) and not callee^.isExternal and
+             (k < callee^.params.count) and
+             isSliceSafeParam(callee, PDecl(listGet(callee^.params, k))) then
+            continue;
+          listAddUnique(bad, vd);
+          continue;
+        end;
+      end;
+      if not walkExpr(arg) then
+        exit(false);
+    end;
+    walkCall := true;
+  end;
+
+  function walkExpr(e: PNode): boolean;
+  var
+    k: longint;
+    lhsU, rhsU, baseU: PNode;
+    lIsC, rIsC, bIsC: boolean;
+  begin
+    if e = nil then
+      exit(true);
+    if e^.convOp <> nil then
+    begin
+      markExprBad(e);
+      exit(true);
+    end;
+    case e^.kind of
+      nkIntegerLit, nkRealLit, nkStringLit, nkNil:
+        walkExpr := true;
+      nkParen:
+        walkExpr := walkExpr(e^.inner);
+      nkNameRef:
+        begin
+          if (e^.refDecl <> nil) and (e^.refDecl^.kind = dkVar) and
+             listHasPtr(cands, e^.refDecl) then
+            listAddUnique(bad, e^.refDecl);
+          walkExpr := true;
+        end;
+      nkUnary:
+        begin
+          if e^.uopDecl <> nil then
+            hasImpure := true;
+          walkExpr := walkExpr(e^.operand);
+        end;
+      nkBinary:
+        begin
+          if e^.opDecl <> nil then
+          begin
+            hasImpure := true;
+            markExprBad(e);
+            exit(true);
+          end;
+          if isAnsiSliceCompareNode(e) then
+          begin
+            lhsU := skipParensNode(e^.lhs);
+            rhsU := skipParensNode(e^.rhs);
+            lIsC := (lhsU <> nil) and (lhsU^.kind = nkNameRef) and
+                    (lhsU^.refWith = nil) and (lhsU^.refDecl <> nil) and
+                    (lhsU^.refDecl^.kind = dkVar) and
+                    listHasPtr(cands, lhsU^.refDecl);
+            rIsC := (rhsU <> nil) and (rhsU^.kind = nkNameRef) and
+                    (rhsU^.refWith = nil) and (rhsU^.refDecl <> nil) and
+                    (rhsU^.refDecl^.kind = dkVar) and
+                    listHasPtr(cands, rhsU^.refDecl);
+            exit((lIsC or walkExpr(e^.lhs)) and (rIsC or walkExpr(e^.rhs)));
+          end;
+          walkExpr := walkExpr(e^.lhs) and walkExpr(e^.rhs);
+        end;
+      nkIndex:
+        begin
+          if e^.idxProp <> nil then
+          begin
+            hasImpure := true;
+            markExprBad(e);
+            exit(true);
+          end;
+          baseU := skipParensNode(e^.base);
+          bIsC := (baseU <> nil) and (baseU^.kind = nkNameRef) and
+                  (baseU^.refWith = nil) and (baseU^.refDecl <> nil) and
+                  (baseU^.refDecl^.kind = dkVar) and
+                  listHasPtr(cands, baseU^.refDecl);
+          walkExpr := (bIsC or walkExpr(e^.base)) and walkExpr(e^.index);
+        end;
+      nkField:
+        walkExpr := walkExpr(e^.base);
+      nkSetCtor:
+        begin
+          for k := 0 to e^.setElems.count - 1 do
+            if not walkExpr(PSetElement(listGet(e^.setElems, k))^.lo) or
+               not walkExpr(PSetElement(listGet(e^.setElems, k))^.hi) then
+              exit(false);
+          walkExpr := true;
+        end;
+      nkCondExpr:
+        walkExpr := walkExpr(e^.ceCond) and walkExpr(e^.ceThen) and
+                    walkExpr(e^.ceElse);
+      nkAddrOf:
+        begin
+          markExprBad(e);
+          walkExpr := true;
+        end;
+      nkCall:
+        walkExpr := walkCall(e^.callDecl, e^.args, e^.callWith, e^.callValue,
+                             e^.isVarCast or (e^.methodCast <> 0));
+    else
+      walkExpr := false;
+    end;
+  end;
+
+  function walkStmt(s: PNode): boolean;
+  var
+    k, j: longint;
+    tn, copyC: PNode;
+    tv, bd: PDecl;
+    constSrc: boolean;
+    arm: PCaseArm;
+    lbl: PCaseLabel;
+  begin
+    if (s = nil) or (s^.kind = nkEmpty) then
+      exit(true);
+    case s^.kind of
+      nkCompound:
+        begin
+          for k := 0 to s^.stmts.count - 1 do
+            if not walkStmt(PNode(listGet(s^.stmts, k))) then
+              exit(false);
+          walkStmt := true;
+        end;
+      nkAssign:
+        begin
+          tn := skipParensNode(s^.target);
+          tv := nil;
+          if (tn <> nil) and (tn^.kind = nkNameRef) and (tn^.refWith = nil) and
+             (tn^.refDecl <> nil) and (tn^.refDecl^.kind = dkVar) then
+            tv := tn^.refDecl;
+          if (tv <> nil) and listHasPtr(cands, tv) then
+          begin
+            copyC := skipParensNode(s^.value);
+            bd := nil;
+            if (copyC <> nil) and (copyC^.kind = nkCall) and
+               (copyC^.callDecl <> nil) and (copyC^.callDecl^.kind = dkBuiltin) then
+              bd := copyC^.callDecl;
+            constSrc := false;
+            if not s^.assignCompound and (copyC <> nil) and not copyC^.isVarCast and
+               (copyC^.methodCast = 0) and (copyC^.calleeExpr = nil) and
+               (copyC^.callValue = nil) and (copyC^.callWith = nil) and
+               (bd <> nil) and (bd^.builtin = bkCopy) and (copyC^.args.count = 3) and
+               (PNode(listGet(copyC^.args, 0))^.typ^.kind = tyAnsiString) and
+               isImmutSrc(PNode(listGet(copyC^.args, 0)), tv, constSrc) then
+            begin
+              if constSrc then
+                listAddUnique(needsPure, tv);
+              exit(walkExpr(PNode(listGet(copyC^.args, 1))) and
+                   walkExpr(PNode(listGet(copyC^.args, 2))));
+            end;
+            listAddUnique(bad, tv);
+            exit(walkExpr(s^.value));
+          end;
+          markExprBad(s^.target);
+          walkStmt := walkExpr(s^.value);
+        end;
+      nkIf:
+        walkStmt := walkExpr(s^.cond) and walkStmt(s^.thenStmt) and
+                    walkStmt(s^.elseStmt);
+      nkWhile:
+        walkStmt := walkExpr(s^.cond) and walkStmt(s^.thenStmt);
+      nkRepeat:
+        begin
+          if not walkExpr(s^.untilCond) then
+            exit(false);
+          for k := 0 to s^.stmts.count - 1 do
+            if not walkStmt(PNode(listGet(s^.stmts, k))) then
+              exit(false);
+          walkStmt := true;
+        end;
+      nkFor:
+        begin
+          markExprBad(s^.forVar);
+          walkStmt := walkExpr(s^.forInit) and walkExpr(s^.forFinal) and
+                      walkStmt(s^.forBody);
+        end;
+      nkCase:
+        begin
+          if not walkExpr(s^.selector) then
+            exit(false);
+          for k := 0 to s^.arms.count - 1 do
+          begin
+            arm := PCaseArm(listGet(s^.arms, k));
+            for j := 0 to arm^.labels.count - 1 do
+            begin
+              lbl := PCaseLabel(listGet(arm^.labels, j));
+              if not walkExpr(lbl^.lo) or not walkExpr(lbl^.hi) then
+                exit(false);
+            end;
+            if not walkStmt(arm^.body) then
+              exit(false);
+          end;
+          for k := 0 to s^.elseBody.count - 1 do
+            if not walkStmt(PNode(listGet(s^.elseBody, k))) then
+              exit(false);
+          walkStmt := true;
+        end;
+      nkVarDecl:
+        if s^.vdAssign <> nil then
+          walkStmt := walkStmt(s^.vdAssign)
+        else
+          walkStmt := walkExpr(s^.vdInit);
+      nkProcCall:
+        walkStmt := walkCall(s^.callDecl, s^.args, s^.callWith,
+                             s^.callValue, s^.calleeExpr <> nil);
+      nkExprStmt:
+        walkStmt := walkExpr(s^.exprStmtExpr);
+    else
+      walkStmt := false;
+    end;
+  end;
+
+begin
+  if (r = nil) or r^.isExternal or (r^.body = nil) or (r^.body^.body = nil) or
+     (r^.asyncType <> nil) or (r^.iterType <> nil) or r^.hasTry or
+     hasNonLocalLabels(r^.body) or r^.heapFrame then
+    exit;
+  listInit(cands);
+  resVar := nil;
+  if r^.isFunction then
+    resVar := r^.resultVar;
   for i := 0 to r^.body^.decls.count - 1 do
   begin
     d := PDecl(listGet(r^.body^.decls, i));
-    if (d^.kind = dkRoutine) and not d^.isExternal then
-      exit;
-    if (d^.kind = dkVar) and d^.isOwned then
-      exit;
+    if (d^.kind = dkVar) and (d <> resVar) and ((d^.init = nil) or false) and
+       (d^.absTarget = nil) and not d^.isInitVar and not d^.isInline and
+       not d^.captured and not d^.isAliased and not d^.isOwned and
+       (d^.varType^.kind = tyAnsiString) then
+      listAdd(cands, d);
   end;
-  canBorrowAnsiParams := borrowSafeStmt(r, r^.body^.body);
+  if cands.count = 0 then
+  begin
+    listFree(cands);
+    exit;
+  end;
+  listInit(ownDecls);
+  for i := 0 to r^.params.count - 1 do
+    listAdd(ownDecls, listGet(r^.params, i));
+  for i := 0 to r^.body^.decls.count - 1 do
+  begin
+    d := PDecl(listGet(r^.body^.decls, i));
+    if d^.kind = dkVar then
+      listAdd(ownDecls, d);
+  end;
+  listInit(written);
+  listInit(bad);
+  listInit(needsPure);
+  hasImpure := false;
+  collectWrittenStmt(r^.body^.body);
+  if walkStmt(r^.body^.body) then
+    for i := 0 to cands.count - 1 do
+    begin
+      d := PDecl(listGet(cands, i));
+      if not listHasPtr(bad, d) and
+         ((not hasImpure) or not listHasPtr(needsPure, d)) then
+        listAdd(outVars, d);
+    end;
+  listFree(needsPure);
+  listFree(bad);
+  listFree(written);
+  listFree(ownDecls);
+  listFree(cands);
 end;
 
-procedure emitRoutineBody(r: PDecl);
+function getOrCreateSliceSpec(r: PDecl; mask: longint): PIRFunc;
+var
+  i, argNo: longint;
+  sp: PSliceSpec;
+  params: TPtrList;
+  f, origF: PIRFunc;
+  p: PDecl;
+begin
+  for i := 0 to sliceSpecs.count - 1 do
+  begin
+    sp := PSliceSpec(listGet(sliceSpecs, i));
+    if (sp^.r = r) and (sp^.mask = mask) then
+      exit(sp^.f);
+  end;
+  listInit(params);
+  routineParamTypesMask(r, params, mask);
+  f := irCreateFunction(mangle(r) + '$slice$' + intToStr(mask), 'internal',
+                        routineRetType(r), params);
+  listFree(params);
+  argNo := 0;
+  if needsLink(r) then
+  begin
+    irSetArgName(f, 0, 'link');
+    argNo := 1;
+  end;
+  if r^.isFunction and returnsByPointer(r^.resultType) then
+  begin
+    irSetArgName(f, argNo, 'result.ptr');
+    irSetArgAttrs(f, argNo, resultParamAttr(r^.resultType));
+    argNo := argNo + 1;
+  end;
+  if hasSelf(r) then
+  begin
+    irSetArgName(f, argNo, 'self');
+    if (r^.ownerClass <> nil) and
+       ((r^.ownerClass^.classRecord <> nil) or
+        (r^.ownerClass^.classHelperFor <> nil)) then
+      irSetArgAttrs(f, argNo, byRefParamAttr(r^.selfVar^.varType));
+    argNo := argNo + 1;
+  end;
+  for i := 0 to r^.params.count - 1 do
+  begin
+    p := PDecl(listGet(r^.params, i));
+    if (i < 32) and ((mask and (1 shl i)) <> 0) then
+    begin
+      irSetArgName(f, argNo, nm(p^.ident.name) + '.ptr');
+      irSetArgName(f, argNo + 1, nm(p^.ident.name) + '.len');
+      argNo := argNo + 2;
+      continue;
+    end;
+    irSetArgName(f, argNo, nm(p^.ident.name));
+    if isByRef(p) then
+      irSetArgAttrs(f, argNo, byRefParamAttr(p^.varType));
+    argNo := argNo + 1;
+  end;
+  if r^.isInline then
+    f^.attrs := 'inlinehint nounwind';
+  if r^.cgFunc <> nil then
+  begin
+    origF := PIRFunc(r^.cgFunc);
+    if irNoRaise(origF) then
+      irSetNoRaise(f);
+  end;
+  new(sp);
+  sp^.r := r;
+  sp^.mask := mask;
+  sp^.f := f;
+  listAdd(sliceSpecs, sp);
+  getOrCreateSliceSpec := f;
+end;
+
+procedure emitRoutineBodyMask(r: PDecl; sliceMask: longint; specFn: PIRFunc); forward;
+
+procedure emitSliceSpecs;
+var
+  i: longint;
+  sp: PSliceSpec;
+begin
+  i := 0;
+  while i < sliceSpecs.count do
+  begin
+    sp := PSliceSpec(listGet(sliceSpecs, i));
+    emitRoutineBodyMask(sp^.r, sp^.mask, sp^.f);
+    i := i + 1;
+  end;
+  listClear(sliceSpecs);
+end;
+
+procedure emitRoutineBodyMask(r: PDecl; sliceMask: longint; specFn: PIRFunc);
 var
   frameT: PIRType;
   frameFini: PIRFunc;
   i, argNo: longint;
   p, v, res: PDecl;
-  arg, slot, ret, excFrame, ignoredV: TV;
+  arg, slot, ret, excFrame, ignoredV, ptrSlot, lenSlot: TV;
   f: PIRFunc;
   entry, raised, retB, beforeBody, bodyB: PIRBlock;
   savedLoc: PMeta;
   managedAddrs, managedTypes: TPtrList; { of PTVBox / PType }
   managedResult, resultByPointer: boolean;
   locals: TPtrList; { of PDecl: the local variables and the result }
+  sliceVarsP: PPtrList;
   owned: TPtrList;  { of PDecl: the owned variables }
   ownedTry: TTryFinally;
 
@@ -5553,19 +6476,25 @@ var
   end;
 
 begin
-  if (r^.asyncType <> nil) or (r^.iterType <> nil) then { (its task's parts, after it) }
+  if (specFn = nil) and ((r^.asyncType <> nil) or (r^.iterType <> nil)) then { (its task's parts, after it) }
     listAdd(asyncsToEmit, r);
   { a frame on the heap: the function that finalizes it, first }
   frameFini := nil;
-  if (frameType(r) <> nil) and r^.heapFrame then
+  if (specFn = nil) and (frameType(r) <> nil) and r^.heapFrame then
     frameFini := emitFrameFini(r);
   listInit(managedAddrs);
   listInit(managedTypes);
-  f := fnOf(r);
+  if specFn <> nil then
+    f := specFn
+  else
+    f := fnOf(r);
   curFn := f;
   resetAddrAligns;
   curRoutine := r;
-  curSP := PSPInfo(r^.cgDbg);
+  if specFn <> nil then
+    curSP := nil
+  else
+    curSP := PSPInfo(r^.cgDbg);
   irBeginBody(f);
   irSetDebugLoc(nil);
   entry := irNewBlock('entry');
@@ -5586,22 +6515,47 @@ begin
   pinTemps := r^.hasTry or hasNonLocalLabels(r^.body);
   if (frameT <> nil) and pinTemps then
     pinInMemory(curFrame);
+  sliceVarsP := nil;
+  if specFn = nil then
+    sliceVarsP := PPtrList(r^.cgSliceVars);
   listInit(locals); { start from zero }
   for i := 0 to r^.body^.decls.count - 1 do
   begin
     v := PDecl(listGet(r^.body^.decls, i));
+    v^.cgSliceLocal := false;
+    v^.cgSlicePtr := nil;
+    v^.cgSliceLen := nil;
     if (v^.kind = dkVar) and ((v^.init = nil) or v^.isInitVar) and (v^.absTarget = nil) then
-      listAdd(locals, v);
+    begin
+      if (sliceVarsP <> nil) and listHasPtr(sliceVarsP^, v) then
+        v^.cgSliceLocal := true
+      else
+        listAdd(locals, v);
+    end;
   end;
   if r^.isFunction then
     listAdd(locals, r^.resultVar);
   if hasSelf(r) then
     addLocal(r^.selfVar, true);
   for i := 0 to r^.params.count - 1 do
-    addLocal(PDecl(listGet(r^.params, i)), true);
+    if (i >= 32) or ((sliceMask and (1 shl i)) = 0) then
+      addLocal(PDecl(listGet(r^.params, i)), true);
   for i := 0 to locals.count - 1 do
     addLocal(PDecl(listGet(locals, i)), false);
-  if dbgOn then
+  for i := 0 to r^.body^.decls.count - 1 do
+  begin
+    v := PDecl(listGet(r^.body^.decls, i));
+    if v^.cgSliceLocal then
+    begin
+      ptrSlot := irAlloca(irPtrT, nm(v^.ident.name) + '.ptr');
+      lenSlot := irAlloca(irI32, nm(v^.ident.name) + '.len');
+      irStore(irNull, ptrSlot);
+      irStore(i32c(0), lenSlot);
+      v^.cgSlicePtr := irBox(ptrSlot);
+      v^.cgSliceLen := irBox(lenSlot);
+    end;
+  end;
+  if dbgOn and (curSP <> nil) then
     declareFrameVariables(r);
   resultByPointer := r^.isFunction and isByRef(r^.resultVar);
   for i := 0 to locals.count - 1 do
@@ -5630,19 +6584,35 @@ begin
     argNo := argNo + 1;
   end;
   for i := 0 to r^.params.count - 1 do
-    PDecl(listGet(r^.params, i))^.cgBorrowedAnsi := false;
+  begin
+    p := PDecl(listGet(r^.params, i));
+    p^.cgBorrowedAnsi := false;
+    p^.cgSliceParam := false;
+    p^.cgSlicePtr := nil;
+    p^.cgSliceLen := nil;
+  end;
   if canBorrowAnsiParams(r) then
     for i := 0 to r^.params.count - 1 do
     begin
       p := PDecl(listGet(r^.params, i));
-      if not isByRef(p) and not (p^.varKind in [vkConstParam, vkVarParam]) and
+      if ((i >= 32) or ((sliceMask and (1 shl i)) = 0)) and
+         not isByRef(p) and not (p^.varKind in [vkConstParam, vkVarParam]) and
          not p^.isOut and not p^.captured and (p^.varType^.kind = tyAnsiString) then
         p^.cgBorrowedAnsi := true;
     end;
   for i := 0 to r^.params.count - 1 do
   begin
     p := PDecl(listGet(r^.params, i));
-    arg := irArg(f, i + argNo);
+    if (i < 32) and ((sliceMask and (1 shl i)) <> 0) then
+    begin
+      p^.cgSliceParam := true;
+      p^.cgSlicePtr := irBox(irArg(f, argNo));
+      p^.cgSliceLen := irBox(irArg(f, argNo + 1));
+      argNo := argNo + 2;
+      continue;
+    end;
+    arg := irArg(f, argNo);
+    argNo := argNo + 1;
     slot := varSlot(p);
     if isByRef(p) then
       irStore(arg, slot)
@@ -5678,7 +6648,7 @@ begin
   begin
     v := PDecl(listGet(r^.body^.decls, i));
     if (v^.kind = dkVar) and ((v^.init = nil) or v^.isInitVar) and
-       (v^.absTarget = nil) and isManaged(v^.varType) then
+       (v^.absTarget = nil) and not v^.cgSliceLocal and isManaged(v^.varType) then
     begin
       listAdd(managedAddrs, irBox(varAddress(v)));
       listAdd(managedTypes, v^.varType);
@@ -5768,7 +6738,7 @@ begin
   for i := 0 to r^.body^.decls.count - 1 do
   begin
     v := PDecl(listGet(r^.body^.decls, i));
-    if (v^.kind = dkVar) and (v^.absTarget = nil) then
+    if (v^.kind = dkVar) and (v^.absTarget = nil) and not v^.cgSliceLocal then
       emitFileLifetime(varAddress(v), v^.varType, false, irNull);
   end;
   if raised <> nil then
@@ -5800,8 +6770,26 @@ begin
   if not irMayRaise then
     irSetNoRaise(f);
   for i := 0 to r^.params.count - 1 do
-    PDecl(listGet(r^.params, i))^.cgBorrowedAnsi := false;
+  begin
+    p := PDecl(listGet(r^.params, i));
+    p^.cgBorrowedAnsi := false;
+    p^.cgSliceParam := false;
+    p^.cgSlicePtr := nil;
+    p^.cgSliceLen := nil;
+  end;
+  for i := 0 to r^.body^.decls.count - 1 do
+  begin
+    v := PDecl(listGet(r^.body^.decls, i));
+    v^.cgSliceLocal := false;
+    v^.cgSlicePtr := nil;
+    v^.cgSliceLen := nil;
+  end;
   pinTemps := true;
+end;
+
+procedure emitRoutineBody(r: PDecl);
+begin
+  emitRoutineBodyMask(r, 0, nil);
 end;
 
 { --- Separate units (S11) --- }
@@ -6058,6 +7046,7 @@ begin
   listInit(cleanupClasses);
   listInit(cleanupFns);
   listInit(routinesToEmit);
+  listInit(sliceSpecs);
   listInit(thunksToEmit);
   listInit(loopBlocks);
   hasMainJmpBuf := false;
@@ -6137,6 +7126,7 @@ begin
   defineVMTs;
   for i := 0 to routinesToEmit.count - 1 do
     emitRoutineBody(PDecl(listGet(routinesToEmit, i)));
+  emitSliceSpecs;
   emitAsyncs;
   emitCleanups;
 
@@ -6228,6 +7218,7 @@ begin
   defineVMTs;
   for i := 0 to routinesToEmit.count - 1 do
     emitRoutineBody(PDecl(listGet(routinesToEmit, i)));
+  emitSliceSpecs;
   emitAsyncs;
   emitCleanups;
   emitMainBody(prog, units, mainFn);

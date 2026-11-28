@@ -51,7 +51,8 @@ llvm::Value *CodeGenModule::emitCallTo(llvm::FunctionCallee Callee, llvm::Value 
                         llvm::ArrayRef<Expr *> Args,
                         llvm::Value *Self,
                         Type *ResultTy, bool ToC,
-                        llvm::Value *ResultDst){
+                        llvm::Value *ResultDst,
+                        uint32_t SliceMask){
   llvm::SmallVector<llvm::Value *, 8> Values;
   if (Link) // external (C) routines have none
     Values.push_back(Link);
@@ -69,7 +70,7 @@ llvm::Value *CodeGenModule::emitCallTo(llvm::FunctionCallee Callee, llvm::Value 
   // ansistring result may move into its assignment target.
   bool NoHold = NoHoldAnsiResult;
   NoHoldAnsiResult = false;
-  emitArgValues(Params, Args, Values, ToC);
+  emitArgValues(Params, Args, Values, ToC, SliceMask);
   NoHoldAnsiResult = NoHold;
   auto *Call = B.CreateCall(Callee, Values);
   if (ByPointer)
@@ -108,7 +109,7 @@ Type *CodeGenModule::resultOf(RoutineDecl *R){
 void CodeGenModule::emitArgValues(llvm::ArrayRef<VarDecl *> Params,
                    llvm::ArrayRef<Expr *> Args,
                    llvm::SmallVectorImpl<llvm::Value *> &Values,
-                   bool ToC){
+                   bool ToC, uint32_t SliceMask){
   // `out` arguments holding managed values are released first, before
   // any other argument is evaluated (another may be the same variable).
   llvm::SmallDenseMap<size_t, llvm::Value *, 2> Released;
@@ -142,6 +143,12 @@ void CodeGenModule::emitArgValues(llvm::ArrayRef<VarDecl *> Params,
       continue;
     }
     VarDecl *P = Params[I];
+    if (I < 32 && (SliceMask & (1u << I))) {
+      AnsiSliceVal Sl = emitSliceExpr(Arg);
+      Values.push_back(Sl.Ptr);
+      Values.push_back(Sl.Len);
+      continue;
+    }
     if (isConstRefPtr(P) && Arg->isConstRefAddress()) { // the variable
       Values.push_back(emitAddress(Arg));
       continue;
@@ -235,6 +242,18 @@ llvm::Value *CodeGenModule::emitCall(RoutineDecl *R, llvm::ArrayRef<Expr *> Args
   if (R->isExternal())
     return emitCallTo(ExternalFns[R], nullptr, R->getParams(), Args, nullptr,
                       nullptr, /*ToC=*/true);
+  if (!ResultDst && !R->isMethod() && !R->hasStaticLink() &&
+      !R->hasHeapFrame() && Args.size() <= R->getParams().size() &&
+      Args.size() <= 32) {
+    uint32_t Mask = 0;
+    for (size_t I = 0; I < Args.size(); ++I)
+      if (isSliceExpr(Args[I]) && isSliceSafeParam(R, R->getParams()[I]))
+        Mask |= (1u << I);
+    if (Mask != 0 && routineWritesOnlyLocals(R))
+      return emitCallTo(getOrCreateSliceSpec(R, Mask), callLink(R),
+                        R->getParams(), Args, nullptr, resultOf(R),
+                        /*ToC=*/false, nullptr, Mask);
+  }
   return emitCallTo(Functions[R], callLink(R), R->getParams(), Args, nullptr,
                     resultOf(R), /*ToC=*/false, ResultDst);
 }
@@ -792,6 +811,8 @@ llvm::Value *CodeGenModule::emitCompare(BinaryExpr *E){
   }
   if (needsStringCompare(LT, RTy) &&
       (LT->isAnsiString() || RTy->isAnsiString())) {
+    if (isSliceExpr(E->getLHS()) || isSliceExpr(E->getRHS()))
+      return emitSliceCompare(Op, E->getLHS(), E->getRHS());
     llvm::Value *L = emitAnsi(E->getLHS());
     llvm::Value *R = emitAnsi(E->getRHS());
     return compareInts(Op, astrCall("__pas_astr_compare", B.getInt32Ty(), {L, R}),
@@ -1178,6 +1199,13 @@ void CodeGenModule::visitAssignStmt(AssignStmt *S){
     VarDecl *TV = nullptr;
     if (auto *N = llvm::dyn_cast<NameRefExpr>(Target); N && !N->getWith())
       TV = llvm::dyn_cast_or_null<VarDecl>(N->getDecl());
+    if (TV && SliceLocals.count(TV)) {
+      AnsiSliceVal Sl = emitSliceExpr(Value);
+      SliceLocalSlots &Slots = SliceLocals[TV];
+      B.CreateStore(Sl.Ptr, Slots.Ptr);
+      B.CreateStore(Sl.Len, Slots.Len);
+      return;
+    }
     llvm::SmallVector<Expr *, 4> Parts;
     if (TV && ansiAppends(Value, TV, Parts)) {
       if (Parts.size() == 1) {
@@ -3238,6 +3266,8 @@ llvm::Value *CodeGenModule::visitIndexExpr(IndexExpr *E){
   if (E->getType()->isShortString())
     return emitAddress(E);
   if (E->getBase()->getType()->isAnsiString()) { // reading: no copy
+    if (isSliceExpr(E->getBase()))
+      return emitSliceIndex(E);
     llvm::Value *S = visitExpr(E->getBase());
     llvm::Value *X = toI64(visitExpr(E->getIndex()), E->getIndex()->getType());
     emitAnsiIndexCheck(S, X, E->getIndex()->getBeginLoc());
@@ -3269,5 +3299,184 @@ llvm::Value *CodeGenModule::visitFieldExpr(FieldExpr *E){
     return emitAddress(E);
   return loadScalar(emitAddress(E), E->getType(), E->getField().Name,
                     !isAliasedExpr(E));
+}
+
+static bool tryAnsiConstLength(Expr *E, uint32_t &Len) {
+  E = CodeGenModule::unwrapConst(E);
+  if (auto *SL = llvm::dyn_cast_or_null<StringLiteralExpr>(E)) {
+    Len = static_cast<uint32_t>(SL->getValue().size());
+    return true;
+  }
+  if (auto *N = llvm::dyn_cast_or_null<NameRefExpr>(E); N && !N->getWith()) {
+    if (auto *C = llvm::dyn_cast_or_null<ConstDecl>(N->getDecl());
+        C && C->getValue().K == ConstValue::String) {
+      Len = static_cast<uint32_t>(C->getValue().Str.size());
+      return true;
+    }
+  }
+  return false;
+}
+
+bool CodeGenModule::isSliceExpr(Expr *E) const {
+  E = skipParens(E);
+  if (auto *N = llvm::dyn_cast_or_null<NameRefExpr>(E); N && !N->getWith())
+    if (auto *V = llvm::dyn_cast_or_null<VarDecl>(N->getDecl()))
+      return SliceLocals.count(V) || SliceParams.count(V);
+  if (auto *C = llvm::dyn_cast_or_null<CallExpr>(E);
+      C && !C->isVarCast() && !C->isMethodCast() && !C->getCalleeValue() &&
+      !C->getWith() && C->getArgs().size() == 3 &&
+      C->getArgs()[0]->getType()->isAnsiString()) {
+    if (auto *BD = llvm::dyn_cast_or_null<BuiltinDecl>(C->getDecl());
+        BD && BD->getBuiltinKind() == BuiltinKind::Copy) {
+      Expr *Src = skipParens(C->getArgs()[0]);
+      if (auto *SN = llvm::dyn_cast_or_null<NameRefExpr>(Src);
+          SN && !SN->getWith())
+        if (auto *SV = llvm::dyn_cast_or_null<VarDecl>(SN->getDecl()))
+          return !SV->isCaptured() && !SV->isAliased() && !SV->isVarParam() &&
+                 !SV->isOutParam() && (SV->isConstParam() || SliceLocals.count(SV) || SliceParams.count(SV));
+    }
+  }
+  return false;
+}
+
+CodeGenModule::AnsiSliceVal CodeGenModule::emitSliceCopy(Expr *SrcExpr,
+                                                         Expr *IdxExpr,
+                                                         Expr *CntExpr) {
+  AnsiSliceVal Src = emitSliceExpr(SrcExpr);
+  llvm::Value *Idx = emitI32(IdxExpr);
+  llvm::Value *Cnt = emitI32(CntExpr);
+  llvm::Value *N = B.CreateSExt(Src.Len, B.getInt64Ty());
+  llvm::Value *I = B.CreateSExt(Idx, B.getInt64Ty());
+  llvm::Value *C = B.CreateSExt(Cnt, B.getInt64Ty());
+  llvm::Value *ILt1 = B.CreateICmpSLT(I, B.getInt64(1));
+  llvm::Value *Start = B.CreateSelect(ILt1, B.getInt64(1), I, "slice.start");
+  llvm::Value *ValidC = B.CreateICmpSGT(C, B.getInt64(0));
+  llvm::Value *ValidS = B.CreateICmpSLE(Start, N);
+  llvm::Value *Valid = B.CreateAnd(ValidC, ValidS, "slice.ok");
+  llvm::Value *Avail =
+      B.CreateAdd(B.CreateSub(N, Start), B.getInt64(1), "slice.avail");
+  llvm::Value *MinLen = B.CreateSelect(B.CreateICmpSGT(C, Avail), Avail, C);
+  llvm::Value *ClipLen = B.CreateTrunc(MinLen, B.getInt32Ty());
+  llvm::Value *Len = B.CreateSelect(Valid, ClipLen, B.getInt32(0), "slice.len");
+  llvm::Value *Off = B.CreateSub(Start, B.getInt64(1), "slice.off");
+  llvm::Value *RawPtr = B.CreateGEP(B.getInt8Ty(), Src.Ptr, Off, "slice.raw");
+  llvm::Value *Ptr = B.CreateSelect(
+      Valid, RawPtr, llvm::ConstantPointerNull::get(B.getPtrTy()), "slice.ptr");
+  return {Ptr, Len};
+}
+
+CodeGenModule::AnsiSliceVal CodeGenModule::emitSliceExpr(Expr *E) {
+  E = skipParens(E);
+  if (auto *N = llvm::dyn_cast_or_null<NameRefExpr>(E); N && !N->getWith()) {
+    if (auto *V = llvm::dyn_cast_or_null<VarDecl>(N->getDecl())) {
+      if (auto It = SliceLocals.find(V); It != SliceLocals.end()) {
+        llvm::Value *Ptr =
+            B.CreateLoad(B.getPtrTy(), It->second.Ptr, V->getName().Name + ".ptr");
+        llvm::Value *Len =
+            B.CreateLoad(B.getInt32Ty(), It->second.Len, V->getName().Name + ".len");
+        return {Ptr, Len};
+      }
+      if (auto It = SliceParams.find(V); It != SliceParams.end())
+        return It->second;
+    }
+  }
+  if (auto *C = llvm::dyn_cast_or_null<CallExpr>(E);
+      C && !C->isVarCast() && !C->isMethodCast() && !C->getCalleeValue() &&
+      !C->getWith() && C->getArgs().size() == 3 &&
+      C->getArgs()[0]->getType()->isAnsiString()) {
+    if (auto *BD = llvm::dyn_cast_or_null<BuiltinDecl>(C->getDecl());
+        BD && BD->getBuiltinKind() == BuiltinKind::Copy)
+      return emitSliceCopy(C->getArgs()[0], C->getArgs()[1], C->getArgs()[2]);
+  }
+  llvm::Value *Ptr = emitAnsi(E);
+  uint32_t ConstLen = 0;
+  if (tryAnsiConstLength(E, ConstLen))
+    return {Ptr, B.getInt32(ConstLen)};
+  return {Ptr, astrCall("__pas_astr_length", B.getInt32Ty(), {Ptr})};
+}
+
+llvm::Value *CodeGenModule::emitSliceIndex(IndexExpr *E) {
+  AnsiSliceVal S = emitSliceExpr(E->getBase());
+  llvm::Value *X = toI64(visitExpr(E->getIndex()), E->getIndex()->getType());
+  if (rangeChecks(E->getIndex()->getBeginLoc())) {
+    llvm::Value *Lt1 = B.CreateICmpSLT(X, B.getInt64(1));
+    llvm::Value *GtLen =
+        B.CreateICmpSGT(X, B.CreateSExt(S.Len, B.getInt64Ty()));
+    emitRuntimeCheck(B.CreateOr(Lt1, GtLen), "string index out of bounds",
+                     E->getIndex()->getBeginLoc());
+  }
+  return loadScalar(B.CreateGEP(B.getInt8Ty(), S.Ptr,
+                                B.CreateSub(X, B.getInt64(1)), "",
+                                indexFlags(E->getIndex(), 1)),
+                    E->getType());
+}
+
+llvm::Value *CodeGenModule::emitAnsiEqSlices(BinaryOp Op, AnsiSliceVal L,
+                                             AnsiSliceVal R) {
+  auto *CL = llvm::dyn_cast<llvm::ConstantInt>(L.Len);
+  auto *CR = llvm::dyn_cast<llvm::ConstantInt>(R.Len);
+  if (CL || CR) {
+    bool LeftConst = CL != nullptr;
+    uint32_t K = LeftConst ? CL->getZExtValue() : CR->getZExtValue();
+    AnsiSliceVal Var = LeftConst ? R : L;
+    AnsiSliceVal Con = LeftConst ? L : R;
+    if (K == 0)
+      return B.CreateICmp(Op == BinaryOp::Eq ? llvm::CmpInst::ICMP_EQ
+                                             : llvm::CmpInst::ICMP_NE,
+                          Var.Len, B.getInt32(0), "str.empty");
+    llvm::BasicBlock *EntryBB = B.GetInsertBlock();
+    llvm::BasicBlock *CmpBB = newBlock("str.cmp");
+    llvm::BasicBlock *DoneBB = newBlock("str.eq.done");
+    llvm::Value *LenEq =
+        B.CreateICmpEQ(Var.Len, B.getInt32(K), "str.leneq");
+    B.CreateCondBr(LenEq, CmpBB, DoneBB);
+
+    B.SetInsertPoint(CmpBB);
+    llvm::Value *Cmp = B.CreateCall(RT.Memcmp, {Var.Ptr, Con.Ptr, B.getInt64(K)});
+    llvm::Value *MemEq = B.CreateICmpEQ(Cmp, B.getInt32(0), "str.memeq");
+    llvm::BasicBlock *CmpEndBB = B.GetInsertBlock();
+    B.CreateBr(DoneBB);
+
+    B.SetInsertPoint(DoneBB);
+    llvm::PHINode *Eq = B.CreatePHI(B.getInt1Ty(), 2, "str.eq");
+    Eq->addIncoming(B.getInt1(false), EntryBB);
+    Eq->addIncoming(MemEq, CmpEndBB);
+    return Op == BinaryOp::Ne ? B.CreateNot(Eq, "str.ne") : Eq;
+  }
+
+  llvm::BasicBlock *EntryBB = B.GetInsertBlock();
+  llvm::BasicBlock *EmptyBB = newBlock("str.empty.chk");
+  llvm::BasicBlock *CmpBB = newBlock("str.cmp");
+  llvm::BasicBlock *DoneBB = newBlock("str.eq.done");
+  llvm::Value *LenEq = B.CreateICmpEQ(L.Len, R.Len, "str.leneq");
+  B.CreateCondBr(LenEq, EmptyBB, DoneBB);
+
+  B.SetInsertPoint(EmptyBB);
+  llvm::Value *IsEmpty = B.CreateICmpEQ(L.Len, B.getInt32(0), "str.empty");
+  B.CreateCondBr(IsEmpty, DoneBB, CmpBB);
+
+  B.SetInsertPoint(CmpBB);
+  llvm::Value *Cmp = B.CreateCall(
+      RT.Memcmp, {L.Ptr, R.Ptr, B.CreateSExt(L.Len, B.getInt64Ty())});
+  llvm::Value *MemEq = B.CreateICmpEQ(Cmp, B.getInt32(0), "str.memeq");
+  llvm::BasicBlock *CmpEndBB = B.GetInsertBlock();
+  B.CreateBr(DoneBB);
+
+  B.SetInsertPoint(DoneBB);
+  llvm::PHINode *Eq = B.CreatePHI(B.getInt1Ty(), 3, "str.eq");
+  Eq->addIncoming(B.getInt1(false), EntryBB);
+  Eq->addIncoming(B.getInt1(true), EmptyBB);
+  Eq->addIncoming(MemEq, CmpEndBB);
+  return Op == BinaryOp::Ne ? B.CreateNot(Eq, "str.ne") : Eq;
+}
+
+llvm::Value *CodeGenModule::emitSliceCompare(BinaryOp Op, Expr *LHS, Expr *RHS) {
+  AnsiSliceVal L = emitSliceExpr(LHS);
+  AnsiSliceVal R = emitSliceExpr(RHS);
+  if (Op == BinaryOp::Eq || Op == BinaryOp::Ne)
+    return emitAnsiEqSlices(Op, L, R);
+  llvm::Value *Cmp = astrCall("__pas_astr_slice_compare", B.getInt32Ty(),
+                              {L.Ptr, L.Len, R.Ptr, R.Len});
+  return compareInts(Op, Cmp, B.getInt32(0), /*Signed=*/true);
 }
 

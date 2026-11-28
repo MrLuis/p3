@@ -404,7 +404,7 @@ void CodeGenModule::emitGlobals(Block &Blk){
 /// procedural parameters can call any routine the same way.
 llvm::FunctionType *CodeGenModule::routineFnType(llvm::ArrayRef<VarDecl *> Params,
                                   Type *Result, bool HasSelf,
-                                  bool HasLink){
+                                  bool HasLink, uint32_t SliceMask){
   llvm::SmallVector<llvm::Type *, 8> ParamTys;
   if (HasLink)
     ParamTys.push_back(B.getPtrTy());
@@ -416,11 +416,18 @@ llvm::FunctionType *CodeGenModule::routineFnType(llvm::ArrayRef<VarDecl *> Param
   }
   if (HasSelf)
     ParamTys.push_back(B.getPtrTy());
-  for (VarDecl *P : Params)
+  for (size_t I = 0; I < Params.size(); ++I) {
+    if (I < 32 && (SliceMask & (1u << I))) {
+      ParamTys.push_back(B.getPtrTy());
+      ParamTys.push_back(B.getInt32Ty());
+      continue;
+    }
+    VarDecl *P = Params[I];
     ParamTys.push_back(P->isVarParam() || P->getType()->isStructured() ||
                                P->getType()->isUntyped() || isConstRefPtr(P)
                            ? B.getPtrTy()
                            : regType(P->getType()));
+  }
   llvm::Type *RetTy = Result ? regType(Result) : B.getVoidTy();
   return llvm::FunctionType::get(RetTy, ParamTys, false);
 }
@@ -651,8 +658,11 @@ void CodeGenModule::declareRoutine(RoutineDecl *R){
   VarSet PinVars;
   if (!PinAll && R->hasTry())
     PinVars = PinAnalysis(R).run();
+  auto SliceVars = findSliceLocals(R);
+  if (!SliceVars.empty())
+    RoutineSliceLocals[R] = SliceVars;
   auto AddSlot = [&](VarDecl *V) {
-    if (!inFrame(V, PinAll, PinVars))
+    if (llvm::is_contained(SliceVars, V) || !inFrame(V, PinAll, PinVars))
       return;
     FrameSlots[V] = Slots.size();
     Slots.push_back(isByRef(V) ? B.getPtrTy() : memType(V->getType()));
@@ -794,17 +804,69 @@ llvm::FunctionCallee CodeGenModule::frameRuntime(llvm::StringRef Name){
 }
 
 
-void CodeGenModule::emitRoutineBody(RoutineDecl *R){
-  if (R->isAsync() || R->isIterator()) // (its task's parts, after it)
+llvm::Function *CodeGenModule::getOrCreateSliceSpec(RoutineDecl *R,
+                                                    uint32_t SliceMask){
+  llvm::Function *&Slot = SliceSpecFns[{R, SliceMask}];
+  if (Slot)
+    return Slot;
+  std::string SpecName = mangle(R) + "$slice$" + std::to_string(SliceMask);
+  Slot = llvm::Function::Create(
+      routineFnType(R->getParams(),
+                    R->isFunction() ? R->getResultType() : nullptr,
+                    R->hasSelf(), needsLink(R), SliceMask),
+      llvm::Function::InternalLinkage, SpecName, M);
+  unsigned ArgNo = needsLink(R) ? 1 : 0;
+  if (R->isFunction() && returnsByPointer(R->getResultType()))
+    addResultParamAttrs(Slot->getArg(ArgNo++), R->getResultType());
+  if (R->hasSelf()) {
+    llvm::Argument *Self = Slot->getArg(ArgNo++);
+    Self->setName("self");
+    if (R->getClass() && R->getClass()->hasSelfByReference())
+      addByRefParamAttrs(Self, R->getSelfVar()->getType());
+  }
+  for (size_t I = 0; I < R->getParams().size(); ++I) {
+    VarDecl *P = R->getParams()[I];
+    if (I < 32 && (SliceMask & (1u << I))) {
+      Slot->getArg(ArgNo++)->setName(P->getName().Name + ".ptr");
+      Slot->getArg(ArgNo++)->setName(P->getName().Name + ".len");
+      continue;
+    }
+    llvm::Argument *A = Slot->getArg(ArgNo++);
+    A->setName(P->getName().Name);
+    if (isByRef(P))
+      addByRefParamAttrs(A, P->getType());
+  }
+  if (R->isInline())
+    Slot->addFnAttr(llvm::Attribute::InlineHint);
+  if (auto *Orig = Functions.lookup(R); Orig && NoRaiseFns.count(Orig))
+    NoRaiseFns.insert(Slot);
+  SliceSpecsToEmit.push_back({R, SliceMask, Slot});
+  return Slot;
+}
+
+
+void CodeGenModule::emitSliceSpecs(){
+  for (size_t I = 0; I < SliceSpecsToEmit.size(); ++I) {
+    SliceSpec S = SliceSpecsToEmit[I];
+    emitRoutineBody(S.R, S.Mask, S.F);
+  }
+  SliceSpecsToEmit.clear();
+}
+
+
+void CodeGenModule::emitRoutineBody(RoutineDecl *R, uint32_t SliceMask,
+                                    llvm::Function *SpecFn){
+  if (!SpecFn && (R->isAsync() || R->isIterator())) // (its task's parts, after it)
     AsyncsToEmit.push_back(R);
   // A frame on the heap: the function that finalizes it, first.
   llvm::Function *FrameFini =
-      FrameTypes.lookup(R) && R->hasHeapFrame() ? emitFrameFini(R) : nullptr;
-  llvm::Function *F = Functions[R];
+      !SpecFn && FrameTypes.lookup(R) && R->hasHeapFrame() ? emitFrameFini(R)
+                                                           : nullptr;
+  llvm::Function *F = SpecFn ? SpecFn : Functions[R];
   CurFn = F;
   AddrAligns.clear();
   CurRoutine = R;
-  CurSP = DIB ? Subprograms[R] : nullptr;
+  CurSP = DIB && !SpecFn ? Subprograms[R] : nullptr;
   B.SetCurrentDebugLocation(llvm::DebugLoc());
   B.SetInsertPoint(llvm::BasicBlock::Create(M.getContext(), "entry", F));
   setDebugLoc(R->getBodyLocation());
@@ -825,12 +887,19 @@ void CodeGenModule::emitRoutineBody(RoutineDecl *R){
   if (CurFrame && PinTemps)
     pinInMemory(CurFrame);
   LocalAddrs.clear();
+  SliceLocals.clear();
+  SliceParams.clear();
+  llvm::SmallVector<VarDecl *, 4> SliceVars;
+  if (!SpecFn)
+    SliceVars = RoutineSliceLocals.lookup(R);
   VarDecl *ResultVar = R->isFunction() ? R->getResultVar() : nullptr;
   llvm::SmallVector<VarDecl *, 8> Locals; // start from zero
   for (Decl *D : R->getBody()->getDecls())
     if (auto *V = llvm::dyn_cast<VarDecl>(D);
-        V && !V->isTypedConst() && !V->getAbsolute())
-      Locals.push_back(V);
+        V && !V->isTypedConst() && !V->getAbsolute()) {
+      if (!llvm::is_contained(SliceVars, V))
+        Locals.push_back(V);
+    }
   if (ResultVar)
     Locals.push_back(ResultVar);
   auto AddLocal = [&](VarDecl *V, bool Param) {
@@ -841,11 +910,21 @@ void CodeGenModule::emitRoutineBody(RoutineDecl *R){
   };
   if (R->hasSelf())
     AddLocal(R->getSelfVar(), true);
-  for (VarDecl *P : R->getParams())
-    AddLocal(P, true);
+  for (size_t I = 0; I < R->getParams().size(); ++I)
+    if (I >= 32 || !(SliceMask & (1u << I)))
+      AddLocal(R->getParams()[I], true);
   for (VarDecl *V : Locals)
     AddLocal(V, false);
-  if (DIB)
+  for (VarDecl *V : SliceVars) {
+    llvm::Value *PtrSlot = B.CreateAlloca(B.getPtrTy(), nullptr,
+                                          V->getName().Name + ".ptr");
+    llvm::Value *LenSlot = B.CreateAlloca(B.getInt32Ty(), nullptr,
+                                          V->getName().Name + ".len");
+    B.CreateStore(llvm::ConstantPointerNull::get(B.getPtrTy()), PtrSlot);
+    B.CreateStore(B.getInt32(0), LenSlot);
+    SliceLocals[V] = {PtrSlot, LenSlot};
+  }
+  if (DIB && CurSP)
     declareFrameVariables(R);
   bool ResultByPointer = ResultVar && isByRef(ResultVar);
   for (VarDecl *V : Locals)
@@ -867,12 +946,22 @@ void CodeGenModule::emitRoutineBody(RoutineDecl *R){
   // reference each), then local variables (nil at first).
   BorrowedAnsiParams.clear();
   if (canBorrowAnsiParams(R))
-    for (VarDecl *P : R->getParams())
-      if (!isByRef(P) && !P->isConstParam() && !P->isVarParam() &&
-          !P->isOutParam() && P->getType()->isAnsiString() && !P->isCaptured())
+    for (size_t I = 0; I < R->getParams().size(); ++I) {
+      VarDecl *P = R->getParams()[I];
+      if ((I >= 32 || !(SliceMask & (1u << I))) && !isByRef(P) &&
+          !P->isConstParam() && !P->isVarParam() && !P->isOutParam() &&
+          P->getType()->isAnsiString() && !P->isCaptured())
         BorrowedAnsiParams.insert(P);
+    }
   llvm::SmallVector<std::pair<llvm::Value *, Type *>, 4> Managed;
-  for (VarDecl *P : R->getParams()) {
+  for (size_t I = 0; I < R->getParams().size(); ++I) {
+    VarDecl *P = R->getParams()[I];
+    if (I < 32 && (SliceMask & (1u << I))) {
+      llvm::Value *PtrArg = F->getArg(ArgNo++);
+      llvm::Value *LenArg = F->getArg(ArgNo++);
+      SliceParams[P] = {PtrArg, LenArg};
+      continue;
+    }
     llvm::Value *Arg = F->getArg(ArgNo++);
     llvm::Value *Slot = varSlot(P);
     if (isByRef(P))
@@ -900,7 +989,7 @@ void CodeGenModule::emitRoutineBody(RoutineDecl *R){
   for (Decl *D : R->getBody()->getDecls())
     if (auto *V = llvm::dyn_cast<VarDecl>(D);
         V && !V->isTypedConst() && !V->getAbsolute() &&
-        isManaged(V->getType()))
+        !SliceLocals.count(V) && isManaged(V->getType()))
       Managed.push_back({varAddress(V), V->getType()});
   bool ManagedResult = ResultVar && isManaged(ResultVar->getType());
 
@@ -987,7 +1076,8 @@ void CodeGenModule::emitRoutineBody(RoutineDecl *R){
     B.CreateCall(excRuntime("__pas_exc_pop"), {ExcFrame});
   Finalize();
   for (Decl *D : R->getBody()->getDecls())
-    if (auto *V = llvm::dyn_cast<VarDecl>(D); V && !V->getAbsolute())
+    if (auto *V = llvm::dyn_cast<VarDecl>(D);
+        V && !V->getAbsolute() && !SliceLocals.count(V))
       emitFileLifetime(varAddress(V), V->getType(), /*Init=*/false);
 
   if (Raised) {
@@ -1015,6 +1105,8 @@ void CodeGenModule::emitRoutineBody(RoutineDecl *R){
   if (!mayRaise())
     NoRaiseFns.insert(F);
   BorrowedAnsiParams.clear();
+  SliceLocals.clear();
+  SliceParams.clear();
 }
 
 CodeGenModule::CodeGenModule(llvm::Module &M, const SourceManager &SM,
@@ -1069,6 +1161,7 @@ void CodeGenModule::emitProgram(ProgramDecl &P, llvm::ArrayRef<UnitDecl *> Units
   defineVMTs();
   for (RoutineDecl *R : RoutinesToEmit)
     emitRoutineBody(R);
+  emitSliceSpecs();
   for (RoutineDecl *R : AsyncsToEmit)
     emitAsyncParts(R);
   AsyncsToEmit.clear();
@@ -1291,6 +1384,7 @@ void CodeGenModule::emitUnit(UnitDecl &U, llvm::ArrayRef<UnitDecl *> Deps){
   defineVMTs();
   for (RoutineDecl *R : RoutinesToEmit)
     emitRoutineBody(R);
+  emitSliceSpecs();
   for (RoutineDecl *R : AsyncsToEmit)
     emitAsyncParts(R);
   AsyncsToEmit.clear();

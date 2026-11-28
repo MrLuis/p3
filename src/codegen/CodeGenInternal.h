@@ -278,6 +278,26 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
   /// Unmutated ansistring value parameters of the current routine whose
   /// caller references remain live (no prologue addref / epilogue clear).
   VarSet BorrowedAnsiParams;
+  struct AnsiSliceVal {
+    llvm::Value *Ptr = nullptr;
+    llvm::Value *Len = nullptr;
+  };
+  struct SliceLocalSlots {
+    llvm::Value *Ptr = nullptr;
+    llvm::Value *Len = nullptr;
+  };
+  struct SliceSpec {
+    RoutineDecl *R = nullptr;
+    uint32_t Mask = 0;
+    llvm::Function *F = nullptr;
+  };
+  llvm::DenseMap<RoutineDecl *, llvm::SmallVector<VarDecl *, 4>>
+      RoutineSliceLocals;
+  llvm::DenseMap<VarDecl *, SliceLocalSlots> SliceLocals;
+  llvm::DenseMap<VarDecl *, AnsiSliceVal> SliceParams;
+  llvm::DenseMap<std::pair<RoutineDecl *, uint32_t>, llvm::Function *>
+      SliceSpecFns;
+  std::vector<SliceSpec> SliceSpecsToEmit;
   /// Classes whose cleanup functions (releasing their own fields' COM
   /// interfaces) are to be emitted.
   std::vector<std::pair<ClassType *, llvm::Function *>> CleanupsToEmit;
@@ -1009,7 +1029,8 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
   /// procedural parameters can call any routine the same way.
   llvm::FunctionType *routineFnType(llvm::ArrayRef<VarDecl *> Params,
                                     Type *Result, bool HasSelf = false,
-                                    bool HasLink = true);
+                                    bool HasLink = true,
+                                    uint32_t SliceMask = 0);
 
   /// Does R take the hidden static-link first parameter? Only a nested
   /// routine needs it; methods keep it for method pointers, as do async and
@@ -1186,7 +1207,10 @@ public:
   /// WhenAll(tasks) / WhenAny(tasks): the tasks' data and count.
   llvm::Value *emitWhen(CallExpr *E, bool All);
 
-  void emitRoutineBody(RoutineDecl *R);
+  void emitRoutineBody(RoutineDecl *R, uint32_t SliceMask = 0,
+                       llvm::Function *SpecFn = nullptr);
+  llvm::Function *getOrCreateSliceSpec(RoutineDecl *R, uint32_t SliceMask);
+  void emitSliceSpecs();
 
   //===--------------------------------------------------------------------===//
   // Calls
@@ -1206,7 +1230,8 @@ public:
                           llvm::ArrayRef<Expr *> Args,
                           llvm::Value *Self = nullptr,
                           Type *ResultTy = nullptr, bool ToC = false,
-                          llvm::Value *ResultDst = nullptr);
+                          llvm::Value *ResultDst = nullptr,
+                          uint32_t SliceMask = 0);
 
   static Type *resultOf(RoutineDecl *R);
 
@@ -1216,7 +1241,7 @@ public:
   void emitArgValues(llvm::ArrayRef<VarDecl *> Params,
                      llvm::ArrayRef<Expr *> Args,
                      llvm::SmallVectorImpl<llvm::Value *> &Values,
-                     bool ToC = false);
+                     bool ToC = false, uint32_t SliceMask = 0);
 
   /// A variadic argument of an external routine, with C's promotions:
   /// ordinals to at least int, reals to double, string constants as C
@@ -1290,6 +1315,15 @@ public:
   bool canMoveAnsiLocalToResult(VarDecl *TV, Expr *Value, bool TailMove);
 
   static bool canBorrowAnsiParams(RoutineDecl *R);
+  static bool routineWritesOnlyLocals(RoutineDecl *R);
+  bool isSliceSafeParam(RoutineDecl *R, VarDecl *P);
+  llvm::SmallVector<VarDecl *, 4> findSliceLocals(RoutineDecl *R);
+  bool isSliceExpr(Expr *E) const;
+  AnsiSliceVal emitSliceExpr(Expr *E);
+  AnsiSliceVal emitSliceCopy(Expr *SrcExpr, Expr *IdxExpr, Expr *CntExpr);
+  llvm::Value *emitSliceIndex(IndexExpr *E);
+  llvm::Value *emitAnsiEqSlices(BinaryOp Op, AnsiSliceVal L, AnsiSliceVal R);
+  llvm::Value *emitSliceCompare(BinaryOp Op, Expr *LHS, Expr *RHS);
 
   void emitAnsiAssign(llvm::Value *Dst, Expr *Target, VarDecl *TV, Expr *Value,
                       bool TailMove);

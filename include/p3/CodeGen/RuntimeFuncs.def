@@ -39,6 +39,7 @@ RUNTIME_FUNC("__pas_str_append",      0, 0, 0, 0, P2,           PNONE, PNONE)
 RUNTIME_FUNC("__pas_str_insert",      0, 0, 0, 0, P0,           PNONE, PNONE)
 
 RUNTIME_FUNC("__pas_astr_compare",    1, 0, 0, 1, P0 | P1,      PNONE, PNONE)
+RUNTIME_FUNC("__pas_astr_slice_compare", 1, 0, 0, 1, P0 | P2,   PNONE, PNONE)
 RUNTIME_FUNC("__pas_astr_pos",        1, 0, 0, 1, P0 | P1,      PNONE, PNONE)
 RUNTIME_FUNC("__pas_astr_length",     1, 0, 0, 1, P0,           PNONE, PNONE)
 RUNTIME_FUNC("__pas_astr_bad_index",  1, 0, 1, 1, P0,           PNONE, PNONE)

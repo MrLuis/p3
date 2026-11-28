@@ -268,7 +268,7 @@ void CodeGenModule::declareFrameVariables(RoutineDecl *R){
     Declare(P, ArgNo++);
   for (Decl *D : R->getBody()->getDecls())
     if (auto *V = llvm::dyn_cast<VarDecl>(D);
-        V && !V->isTypedConst() && !V->getAbsolute())
+        V && !V->isTypedConst() && !V->getAbsolute() && !SliceLocals.count(V))
       Declare(V, 0);
   if (R->isFunction())
     Declare(R->getResultVar(), 0);

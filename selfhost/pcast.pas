@@ -576,6 +576,9 @@ type
       (cgBorrowedAnsi) }
     cgRangeLocal, cgLoopKnown, cgBorrowedAnsi: boolean;
     cgLoopLo, cgLoopHi: int64;
+    cgSliceLocal, cgSliceParam: boolean;
+    cgSlicePtr, cgSliceLen: pointer;
+    cgSliceVars: pointer; { PPtrList of slice local PDecls on a routine }
     { a routine's variable: in its frame record (slot cgSlot), else in
       an alloca (cgLocal, a boxed value); a routine whose frame record
       starts with its static link }

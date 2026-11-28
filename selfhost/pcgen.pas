@@ -116,6 +116,14 @@ type
     entries: TPtrList; { of PHoistEntry }
   end;
 
+  PPtrList = ^TPtrList;
+  PSliceSpec = ^TSliceSpec;
+  TSliceSpec = record
+    r: PDecl;
+    mask: longint;
+    f: PIRFunc;
+  end;
+
   TCleanupKind = (clTryBody, clHandler, clFinally);
   PCleanup = ^TCleanup;
   TCleanup = record
@@ -184,6 +192,7 @@ var
   stringConsts: TIntMap;     { name id of the bytes -> PTVBox of the global }
   enumNameTables: TIntMap;   { type id -> PTVBox: an enumeration's names }
   routinesToEmit: TPtrList;  { of PDecl }
+  sliceSpecs: TPtrList;      { of PSliceSpec }
   thunksToEmit: TPtrList;    { of PDecl: cdecl routines with a cthunk }
   { continue and break targets and the innermost cleanup around the loop
     (a PCleanup, or nil), in triples }
@@ -230,6 +239,13 @@ var
   { TBAA metadata nodes & access tags ("Simple Pascal TBAA") }
   tbaaRoot, tbaaCharNode, tbaaTagChar, tbaaTagBool, tbaaTagI16,
   tbaaTagI32, tbaaTagI64, tbaaTagF64, tbaaTagSet, tbaaTagPtr: PMeta;
+
+function isSliceExpr(e: PNode): boolean; forward;
+procedure emitSliceExpr(e: PNode; var outPtr, outLen: TV); forward;
+function routineWritesOnlyLocals(r: PDecl): boolean; forward;
+function isSliceSafeParam(r, p: PDecl): boolean; forward;
+function getOrCreateSliceSpec(r: PDecl; mask: longint): PIRFunc; forward;
+function compareInts(op: TBinaryOp; const l, r: TV; signed: boolean): TV; forward;
 
 { --- Small helpers --- }
 
@@ -3229,6 +3245,11 @@ begin
           exit(irCast('trunc', irLoad(irI64, visitExpr(a0), ''), irI32, ''));
         if t^.kind = tyAnsiString then
         begin
+          if isSliceExpr(a0) then
+          begin
+            emitSliceExpr(a0, s0, s1);
+            exit(s1);
+          end;
           s0 := visitExpr(a0);
           exit(call1(classRuntime('__pas_astr_length', 'i32', 'ptr'), s0, ''));
         end;
@@ -4529,15 +4550,258 @@ begin
   emitVarArg := v;
 end;
 
+function tryAnsiConstLength(e: PNode; var outLen: longint): boolean;
+var
+  d: PDecl;
+begin
+  e := unwrapConst(e);
+  if (e <> nil) and (e^.kind = nkStringLit) then
+  begin
+    outLen := e^.strValue^.len;
+    exit(true);
+  end;
+  if (e <> nil) and (e^.kind = nkNameRef) and (e^.refWith = nil) then
+  begin
+    d := e^.refDecl;
+    if (d <> nil) and (d^.kind = dkConst) and (d^.constValue.kind = ckString) then
+    begin
+      outLen := d^.constValue.strVal^.len;
+      exit(true);
+    end;
+  end;
+  tryAnsiConstLength := false;
+end;
+
+function isSliceExpr(e: PNode): boolean;
+var
+  d, sv: PDecl;
+  src: PNode;
+begin
+  while (e <> nil) and (e^.kind = nkParen) do
+    e := e^.inner;
+  if (e <> nil) and (e^.kind = nkNameRef) and (e^.refWith = nil) then
+  begin
+    d := e^.refDecl;
+    if (d <> nil) and (d^.kind = dkVar) then
+      exit(d^.cgSliceLocal or d^.cgSliceParam);
+  end;
+  if (e <> nil) and (e^.kind = nkCall) and not e^.isVarCast and
+     (e^.methodCast = 0) and (e^.calleeExpr = nil) and
+     (e^.callValue = nil) and (e^.callWith = nil) and (e^.args.count = 3) and
+     (PNode(listGet(e^.args, 0))^.typ^.kind = tyAnsiString) then
+  begin
+    d := e^.callDecl;
+    if (d <> nil) and (d^.kind = dkBuiltin) and (d^.builtin = bkCopy) then
+    begin
+      src := PNode(listGet(e^.args, 0));
+      while (src <> nil) and (src^.kind = nkParen) do
+        src := src^.inner;
+      if (src <> nil) and (src^.kind = nkNameRef) and (src^.refWith = nil) then
+      begin
+        sv := src^.refDecl;
+        if (sv <> nil) and (sv^.kind = dkVar) and not sv^.captured and
+           not sv^.isAliased and (sv^.varKind <> vkVarParam) and not sv^.isOut and
+           ((sv^.varKind = vkConstParam) or sv^.cgSliceLocal or sv^.cgSliceParam) then
+          exit(true);
+      end;
+    end;
+  end;
+  isSliceExpr := false;
+end;
+
+procedure emitSliceCopy(srcExpr, idxExpr, cntExpr: PNode; var outPtr, outLen: TV);
+var
+  srcPtr, srcLen, idx, cnt, n64, i64v, c64, iLt1, start, validC, validS, valid: TV;
+  avail, minLen, clipLen, off, rawPtr: TV;
+begin
+  emitSliceExpr(srcExpr, srcPtr, srcLen);
+  idx := emitI32(idxExpr);
+  cnt := emitI32(cntExpr);
+  n64 := irCast('sext', srcLen, irI64, '');
+  i64v := irCast('sext', idx, irI64, '');
+  c64 := irCast('sext', cnt, irI64, '');
+  iLt1 := irICmp('slt', i64v, i64c(1), '');
+  start := irSelect(iLt1, i64c(1), i64v, 'slice.start');
+  validC := irICmp('sgt', c64, i64c(0), '');
+  validS := irICmp('sle', start, n64, '');
+  valid := irBin('and', validC, validS, 'slice.ok');
+  avail := irBin('add', irBin('sub', n64, start, ''), i64c(1), 'slice.avail');
+  minLen := irSelect(irICmp('sgt', c64, avail, ''), avail, c64, '');
+  clipLen := irCast('trunc', minLen, irI32, '');
+  outLen := irSelect(valid, clipLen, i32c(0), 'slice.len');
+  off := irBin('sub', start, i64c(1), 'slice.off');
+  rawPtr := irGEP1(irI8, srcPtr, off, false, 'slice.raw');
+  outPtr := irSelect(valid, rawPtr, irNull, 'slice.ptr');
+end;
+
+procedure emitSliceExpr(e: PNode; var outPtr, outLen: TV);
+var
+  d: PDecl;
+  clen: longint;
+begin
+  while (e <> nil) and (e^.kind = nkParen) do
+    e := e^.inner;
+  if (e <> nil) and (e^.kind = nkNameRef) and (e^.refWith = nil) then
+  begin
+    d := e^.refDecl;
+    if (d <> nil) and (d^.kind = dkVar) then
+    begin
+      if d^.cgSliceLocal then
+      begin
+        outPtr := irLoad(irPtrT, PTVBox(d^.cgSlicePtr)^, nm(d^.ident.name) + '.ptr');
+        outLen := irLoad(irI32, PTVBox(d^.cgSliceLen)^, nm(d^.ident.name) + '.len');
+        exit;
+      end;
+      if d^.cgSliceParam then
+      begin
+        outPtr := PTVBox(d^.cgSlicePtr)^;
+        outLen := PTVBox(d^.cgSliceLen)^;
+        exit;
+      end;
+    end;
+  end;
+  if (e <> nil) and (e^.kind = nkCall) and not e^.isVarCast and
+     (e^.methodCast = 0) and (e^.calleeExpr = nil) and
+     (e^.callValue = nil) and (e^.callWith = nil) and (e^.args.count = 3) and
+     (PNode(listGet(e^.args, 0))^.typ^.kind = tyAnsiString) then
+  begin
+    d := e^.callDecl;
+    if (d <> nil) and (d^.kind = dkBuiltin) and (d^.builtin = bkCopy) then
+    begin
+      emitSliceCopy(PNode(listGet(e^.args, 0)), PNode(listGet(e^.args, 1)),
+                    PNode(listGet(e^.args, 2)), outPtr, outLen);
+      exit;
+    end;
+  end;
+  outPtr := emitAnsi(e);
+  if tryAnsiConstLength(e, clen) then
+    outLen := i32c(clen)
+  else
+    outLen := call1(classRuntime('__pas_astr_length', 'i32', 'ptr'), outPtr, '');
+end;
+
+function tryParseNonNegConst(const v: TV; var k: int64): boolean;
+var
+  i: longint;
+  s: string;
+begin
+  if not irIsConst(v) then
+    exit(false);
+  s := v.v;
+  if length(s) = 0 then
+    exit(false);
+  k := 0;
+  for i := 1 to length(s) do
+  begin
+    if (s[i] < '0') or (s[i] > '9') then
+      exit(false);
+    k := k * 10 + (ord(s[i]) - ord('0'));
+  end;
+  tryParseNonNegConst := true;
+end;
+
+function emitAnsiEqSlices(op: TBinaryOp; const lPtr, lLen, rPtr, rLen: TV): TV;
+var
+  lConst, rConst: boolean;
+  k: int64;
+  varPtr, varLen, conPtr, lenEq, isEmpty, cmp, memEq, eq: TV;
+  entryBB, emptyBB, cmpBB, cmpEndBB, doneBB: PIRBlock;
+  phi: PIRInst;
+begin
+  k := 0;
+  lConst := tryParseNonNegConst(lLen, k);
+  rConst := (not lConst) and tryParseNonNegConst(rLen, k);
+  if lConst or rConst then
+  begin
+    if lConst then
+    begin
+      varPtr := rPtr;
+      varLen := rLen;
+      conPtr := lPtr;
+    end
+    else
+    begin
+      varPtr := lPtr;
+      varLen := lLen;
+      conPtr := rPtr;
+    end;
+    if k = 0 then
+    begin
+      if op = boEq then
+        exit(irICmp('eq', varLen, i32c(0), 'str.empty'));
+      exit(irICmp('ne', varLen, i32c(0), 'str.empty'));
+    end;
+    entryBB := irInsertBlock;
+    cmpBB := irNewBlock('str.cmp');
+    doneBB := irNewBlock('str.eq.done');
+    lenEq := irICmp('eq', varLen, i32c(k), 'str.leneq');
+    irCondBr(lenEq, cmpBB, doneBB, false);
+
+    irSetInsertPoint(cmpBB);
+    cmp := call3(rtFn('memcmp'), varPtr, conPtr, i64c(k), '');
+    memEq := irICmp('eq', cmp, i32c(0), 'str.memeq');
+    cmpEndBB := irInsertBlock;
+    irBr(doneBB);
+
+    irSetInsertPoint(doneBB);
+    eq := irPhi(irI1, 'str.eq', phi);
+    irAddIncoming(phi, irConstBool(false), entryBB);
+    irAddIncoming(phi, memEq, cmpEndBB);
+    if op = boNe then
+      exit(irBin('xor', eq, irConstBool(true), 'str.ne'));
+    exit(eq);
+  end;
+
+  entryBB := irInsertBlock;
+  emptyBB := irNewBlock('str.empty.chk');
+  cmpBB := irNewBlock('str.cmp');
+  doneBB := irNewBlock('str.eq.done');
+  lenEq := irICmp('eq', lLen, rLen, 'str.leneq');
+  irCondBr(lenEq, emptyBB, doneBB, false);
+
+  irSetInsertPoint(emptyBB);
+  isEmpty := irICmp('eq', lLen, i32c(0), 'str.empty');
+  irCondBr(isEmpty, doneBB, cmpBB, false);
+
+  irSetInsertPoint(cmpBB);
+  cmp := call3(rtFn('memcmp'), lPtr, rPtr, irCast('sext', lLen, irI64, ''), '');
+  memEq := irICmp('eq', cmp, i32c(0), 'str.memeq');
+  cmpEndBB := irInsertBlock;
+  irBr(doneBB);
+
+  irSetInsertPoint(doneBB);
+  eq := irPhi(irI1, 'str.eq', phi);
+  irAddIncoming(phi, irConstBool(false), entryBB);
+  irAddIncoming(phi, irConstBool(true), emptyBB);
+  irAddIncoming(phi, memEq, cmpEndBB);
+  if op = boNe then
+    exit(irBin('xor', eq, irConstBool(true), 'str.ne'));
+  emitAnsiEqSlices := eq;
+end;
+
+function emitSliceCompare(op: TBinaryOp; lhs, rhs: PNode): TV;
+var
+  lPtr, lLen, rPtr, rLen, cmp: TV;
+begin
+  emitSliceExpr(lhs, lPtr, lLen);
+  emitSliceExpr(rhs, rPtr, rLen);
+  if op in [boEq, boNe] then
+    exit(emitAnsiEqSlices(op, lPtr, lLen, rPtr, rLen));
+  cmp := call4(classRuntime('__pas_astr_slice_compare', 'i32', 'ptr,i32,ptr,i32'),
+               lPtr, lLen, rPtr, rLen, '');
+  emitSliceCompare := compareInts(op, cmp, i32c(0), true);
+end;
+
 { Appends the values passed for args (parameters params) to buf. toC: to
   an external (C) routine, which takes callbacks as function pointers, and
   maybe variadic arguments after params. }
-procedure emitArgValues(const params, args: TPtrList; var buf: TBuf; toC: boolean);
+procedure emitArgValuesMask(const params, args: TPtrList; var buf: TBuf;
+                            toC: boolean; sliceMask: longint);
 var
   i: longint;
   p: PDecl;
   arg: PNode;
-  v: TV;
+  v, sPtr, sLen: TV;
   pt: PType;
   released: TPtrList; { of PTVBox, by argument: its address if released }
   slot, tmp: TV;
@@ -4592,6 +4856,13 @@ begin
       continue;
     end;
     p := PDecl(listGet(params, i));
+    if (i < 32) and ((sliceMask and (1 shl i)) <> 0) then
+    begin
+      emitSliceExpr(arg, sPtr, sLen);
+      irArgsAdd(buf, sPtr);
+      irArgsAdd(buf, sLen);
+      continue;
+    end;
     pt := p^.varType;
     if isConstRefPtr(p) then
     begin
@@ -4652,9 +4923,15 @@ begin
   end;
 end;
 
-function emitCallToSelf(ret: PIRType; const callee: TV; const link: TV;
-                        hasLink: boolean; const self_: TV; hasSelf: boolean;
-                        const params, args: TPtrList; resTy: PType): TV;
+procedure emitArgValues(const params, args: TPtrList; var buf: TBuf; toC: boolean);
+begin
+  emitArgValuesMask(params, args, buf, toC, 0);
+end;
+
+function emitCallToSelfMask(ret: PIRType; const callee: TV; const link: TV;
+                            hasLink: boolean; const self_: TV; hasSelf: boolean;
+                            const params, args: TPtrList; resTy: PType;
+                            sliceMask: longint): TV;
 var
   buf: TBuf;
   tmp, res: TV;
@@ -4678,7 +4955,7 @@ begin
     ansistring result may move into its assignment target. }
   holdAnsi := noHoldAnsiResult;
   noHoldAnsiResult := false;
-  emitArgValues(params, args, buf, false);
+  emitArgValuesMask(params, args, buf, false, sliceMask);
   noHoldAnsiResult := holdAnsi;
   res := irCallPtr(ret, callee, buf, '');
   bufFree(buf);
@@ -4705,7 +4982,15 @@ begin
   end;
   if (resTy <> nil) and isManaged(resTy) then
     exit(holdResult(res));
-  emitCallToSelf := res;
+  emitCallToSelfMask := res;
+end;
+
+function emitCallToSelf(ret: PIRType; const callee: TV; const link: TV;
+                        hasLink: boolean; const self_: TV; hasSelf: boolean;
+                        const params, args: TPtrList; resTy: PType): TV;
+begin
+  emitCallToSelf := emitCallToSelfMask(ret, callee, link, hasLink, self_,
+                                       hasSelf, params, args, resTy, 0);
 end;
 
 function emitCallTo(ret: PIRType; const callee: TV; const link: TV; hasLink: boolean;
@@ -4736,6 +5021,7 @@ var
   f: PIRFunc;
   buf: TBuf;
   res: TV;
+  i, mask: longint;
 begin
   r := canon(r);
   if r^.asyncType <> nil then
@@ -4757,6 +5043,24 @@ begin
       res := irCallPtr(retTypeOf(resultOf(r)), irFuncRef(f), buf, '');
     bufFree(buf);
     exit(res);
+  end;
+  if not hasResultDst and (r^.methodKind = mtNone) and (r^.parent = nil) and
+     not r^.heapFrame and (args.count <= r^.params.count) and (args.count <= 32) then
+  begin
+    mask := 0;
+    for i := 0 to args.count - 1 do
+      if isSliceExpr(PNode(listGet(args, i))) and
+         isSliceSafeParam(r, PDecl(listGet(r^.params, i))) then
+        mask := mask or (1 shl i);
+    if (mask <> 0) and routineWritesOnlyLocals(r) then
+    begin
+      f := getOrCreateSliceSpec(r, mask);
+      if needsLink(r) then
+        exit(emitCallToSelfMask(f^.ret, irFuncRef(f), staticLinkFor(r), true,
+                                irNull, false, r^.params, args, resultOf(r), mask));
+      exit(emitCallToSelfMask(f^.ret, irFuncRef(f), irNull, false,
+                              irNull, false, r^.params, args, resultOf(r), mask));
+    end;
   end;
   if needsLink(r) then
     emitCall := emitCallTo(f^.ret, irFuncRef(f), staticLinkFor(r), true, r^.params,
@@ -6133,6 +6437,8 @@ begin
   if needsStringCompare(lt, rt) and
      ((lt^.kind = tyAnsiString) or (rt^.kind = tyAnsiString)) then
   begin
+    if isSliceExpr(e^.lhs) or isSliceExpr(e^.rhs) then
+      exit(emitSliceCompare(op, e^.lhs, e^.rhs));
     l := emitAnsi(e^.lhs);
     r := emitAnsi(e^.rhs);
     cmp := call2(classRuntime('__pas_astr_compare', 'i32', 'ptr,ptr'), l, r, '');
@@ -7150,8 +7456,23 @@ end;
 { s[i] of an ansistring, read: no copy }
 function emitAnsiIndexRead(e: PNode): TV;
 var
-  s, x, offset: TV;
+  s, sLen, x, offset, lt1, gtLen: TV;
 begin
+  if isSliceExpr(e^.base) then
+  begin
+    emitSliceExpr(e^.base, s, sLen);
+    x := toI64(visitExpr(e^.index), e^.index^.typ);
+    if rangeChecks(e^.index^.b) then
+    begin
+      lt1 := irICmp('slt', x, i64c(1), '');
+      gtLen := irICmp('sgt', x, irCast('sext', sLen, irI64, ''), '');
+      emitRuntimeCheck(irBin('or', lt1, gtLen, ''), 'string index out of bounds',
+                       e^.index^.b);
+    end;
+    offset := irBin('sub', x, i64c(1), '');
+    exit(loadScalar(irGEP1(irI8, s, offset, true, '', indexFlags(e^.index, 1)),
+                    e^.typ, ''));
+  end;
   s := visitExpr(e^.base);
   x := toI64(visitExpr(e^.index), e^.index^.typ);
   emitAnsiIndexCheck(s, x, e^.index^.b);
