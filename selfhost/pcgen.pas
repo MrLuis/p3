@@ -472,11 +472,20 @@ begin
     if PIRType(listGet(list, i))^.kind = ikPtr then
     begin
       if runtimeReadsParam(name, i) then
-        irSetArgAttrs(ignored, i, 'readonly captures(none)')
+        part := 'readonly captures(none)'
       else if runtimeWritesParam(name, i) then
-        irSetArgAttrs(ignored, i, 'writeonly captures(none)');
+        part := 'writeonly captures(none)'
+      else
+        part := '';
       if runtimeSlotParam(name, i) then
-        irSetArgAttrs(ignored, i, 'dereferenceable_or_null(8)');
+      begin
+        if part = '' then
+          part := 'captures(none) dereferenceable_or_null(8)'
+        else
+          part := part + ' dereferenceable_or_null(8)';
+      end;
+      if part <> '' then
+        irSetArgAttrs(ignored, i, part);
     end;
   listFree(list);
   { Can a call of it raise an exception? Those that raise one, and those

@@ -3,6 +3,8 @@
 #include "p3/Basic/Diagnostics.h"
 
 #include "llvm/ADT/SmallString.h"
+#include "llvm/IR/Constants.h"
+#include "llvm/IR/Instructions.h"
 #include "llvm/IR/LegacyPassManager.h"
 #include "llvm/IR/Module.h"
 #include "llvm/IR/Verifier.h"
@@ -203,51 +205,204 @@ bool p3::writeModuleIR(llvm::Module &M, llvm::StringRef Path,
   return true;
 }
 
+static bool promoteMainGlobals(llvm::Module &M) {
+  llvm::Function *Main = M.getFunction("main");
+  if (!Main || Main->isDeclaration())
+    return false;
+
+  const llvm::DataLayout &DL = M.getDataLayout();
+  llvm::SmallVector<llvm::GlobalVariable *, 16> Candidates;
+  for (llvm::GlobalVariable &GV : M.globals()) {
+    if (!GV.hasLocalLinkage() || GV.isDeclaration() || GV.isConstant() ||
+        !GV.hasInitializer() || GV.isThreadLocal() ||
+        GV.isExternallyInitialized() || GV.hasSection())
+      continue;
+    if (!GV.getName().starts_with("pas."))
+      continue;
+    if (DL.getTypeAllocSize(GV.getValueType()) > 4096)
+      continue;
+    GV.removeDeadConstantUsers();
+    if (GV.use_empty())
+      continue;
+
+    bool Safe = true;
+    llvm::SmallVector<llvm::User *, 16> Work;
+    llvm::SmallPtrSet<const llvm::User *, 32> Seen;
+    for (llvm::User *U : GV.users())
+      if (Seen.insert(U).second)
+        Work.push_back(U);
+
+    while (!Work.empty() && Safe) {
+      llvm::User *U = Work.pop_back_val();
+      if (auto *CE = llvm::dyn_cast<llvm::ConstantExpr>(U)) {
+        unsigned Op = CE->getOpcode();
+        if (Op != llvm::Instruction::GetElementPtr &&
+            Op != llvm::Instruction::BitCast &&
+            Op != llvm::Instruction::AddrSpaceCast) {
+          Safe = false;
+          break;
+        }
+        for (llvm::User *CU : CE->users()) {
+          if (!llvm::isa<llvm::Instruction>(CU)) {
+            Safe = false;
+            break;
+          }
+          if (Seen.insert(CU).second)
+            Work.push_back(CU);
+        }
+        continue;
+      }
+      auto *I = llvm::dyn_cast<llvm::Instruction>(U);
+      if (!I || I->getFunction() != Main) {
+        Safe = false;
+        break;
+      }
+      if (llvm::isa<llvm::LoadInst>(I))
+        continue;
+      if (auto *SI = llvm::dyn_cast<llvm::StoreInst>(I)) {
+        llvm::Value *Val = SI->getValueOperand();
+        if (Val == &GV ||
+            (llvm::isa<llvm::User>(Val) &&
+             Seen.count(llvm::cast<llvm::User>(Val))))
+          Safe = false;
+        continue;
+      }
+      if (llvm::isa<llvm::GetElementPtrInst>(I) ||
+          llvm::isa<llvm::BitCastInst>(I) ||
+          llvm::isa<llvm::AddrSpaceCastInst>(I)) {
+        for (llvm::User *IU : I->users())
+          if (Seen.insert(IU).second)
+            Work.push_back(IU);
+        continue;
+      }
+      if (auto *CB = llvm::dyn_cast<llvm::CallBase>(I)) {
+        if (CB->getCalledOperand() == &GV) {
+          Safe = false;
+          break;
+        }
+        for (unsigned ArgNo = 0; ArgNo < CB->arg_size(); ++ArgNo) {
+          llvm::Value *Arg = CB->getArgOperand(ArgNo);
+          if (Arg == &GV ||
+              (llvm::isa<llvm::User>(Arg) &&
+               Seen.count(llvm::cast<llvm::User>(Arg)))) {
+            if (!CB->doesNotCapture(ArgNo)) {
+              Safe = false;
+              break;
+            }
+          }
+        }
+        continue;
+      }
+      Safe = false;
+    }
+    if (Safe)
+      Candidates.push_back(&GV);
+  }
+
+  if (Candidates.empty())
+    return false;
+
+  llvm::BasicBlock &Entry = Main->getEntryBlock();
+  auto AllocaIt = Entry.begin();
+  while (AllocaIt != Entry.end() && llvm::isa<llvm::AllocaInst>(*AllocaIt))
+    ++AllocaIt;
+  llvm::Instruction *InsertAnchor =
+      AllocaIt != Entry.end() ? &*AllocaIt : Entry.getTerminator();
+
+  for (llvm::GlobalVariable *GV : Candidates) {
+    // Expand any ConstantExpr users in Main into instructions before replacing GV.
+    llvm::SmallVector<llvm::ConstantExpr *, 8> CEs;
+    for (llvm::User *U : GV->users())
+      if (auto *CE = llvm::dyn_cast<llvm::ConstantExpr>(U))
+        CEs.push_back(CE);
+    while (!CEs.empty()) {
+      llvm::ConstantExpr *CE = CEs.pop_back_val();
+      llvm::SmallVector<llvm::Use *, 8> Uses;
+      for (llvm::Use &U : CE->uses())
+        Uses.push_back(&U);
+      for (llvm::Use *U : Uses) {
+        if (auto *I = llvm::dyn_cast<llvm::Instruction>(U->getUser())) {
+          llvm::Instruction *Mat = CE->getAsInstruction();
+          if (auto *PN = llvm::dyn_cast<llvm::PHINode>(I))
+            Mat->insertBefore(
+                PN->getIncomingBlock(*U)->getTerminator()->getIterator());
+          else
+            Mat->insertBefore(I->getIterator());
+          U->set(Mat);
+        }
+      }
+      if (CE->use_empty())
+        CE->destroyConstant();
+    }
+    GV->removeDeadConstantUsers();
+
+    llvm::Align Align = GV->getAlign().value_or(
+        DL.getPrefTypeAlign(GV->getValueType()));
+    auto *AI = new llvm::AllocaInst(GV->getValueType(), 0, nullptr, Align,
+                                    GV->getName(), Entry.begin());
+    auto *InitStore =
+        new llvm::StoreInst(GV->getInitializer(), AI, InsertAnchor->getIterator());
+    InitStore->setAlignment(AI->getAlign());
+    GV->replaceAllUsesWith(AI);
+    GV->clearMetadata();
+    GV->eraseFromParent();
+  }
+  for (llvm::BasicBlock &BB : *Main)
+    for (llvm::Instruction &I : BB)
+      if (auto *CI = llvm::dyn_cast<llvm::CallInst>(&I))
+        if (CI->getTailCallKind() == llvm::CallInst::TCK_Tail)
+          CI->setTailCallKind(llvm::CallInst::TCK_None);
+  return true;
+}
+
 void p3::optimizeModule(llvm::Module &M, llvm::TargetMachine &TM,
                          unsigned OptLevel, unsigned SizeLevel,
                          const std::string &ProfileGen,
                          const std::string &ProfileUse) {
-  llvm::LoopAnalysisManager LAM;
-  llvm::FunctionAnalysisManager FAM;
-  llvm::CGSCCAnalysisManager CGAM;
-  llvm::ModuleAnalysisManager MAM;
+  auto RunPipeline = [&](bool WithPGO) {
+    llvm::LoopAnalysisManager LAM;
+    llvm::FunctionAnalysisManager FAM;
+    llvm::CGSCCAnalysisManager CGAM;
+    llvm::ModuleAnalysisManager MAM;
 
-  llvm::PipelineTuningOptions PTO;
-  PTO.SLPVectorization = SizeLevel > 0 || OptLevel >= 2;
-  // PGO (item LB-4): -fprofile-instr-generate gives IRInstr (the builder
-  // puts the instrumentation at its own, pre-inlining stage), and
-  // -fprofile-instr-use gives IRUse (the profile drives the pipeline).
-  std::optional<llvm::PGOOptions> PGOOpt;
-  if (!ProfileUse.empty())
-    PGOOpt.emplace(ProfileUse, "", "", "", llvm::PGOOptions::IRUse);
-  else if (!ProfileGen.empty())
-    PGOOpt = llvm::PGOOptions("", "", "", "", llvm::PGOOptions::IRInstr);
-  llvm::PassBuilder PB(&TM, PTO, PGOOpt, /*PIC=*/nullptr);
-  PB.registerModuleAnalyses(MAM);
-  PB.registerCGSCCAnalyses(CGAM);
-  PB.registerFunctionAnalyses(FAM);
-  PB.registerLoopAnalyses(LAM);
-  PB.crossRegisterProxies(LAM, FAM, CGAM, MAM);
-
-  // (LLVM 23 folded OptimizationLevel's size levels out: Os and Oz map
-  // by their own help text, -Os "like -O2, SLP vectorization on" and
-  // -Oz "like -Os".)
-  llvm::OptimizationLevel Level;
-  if (SizeLevel == 1)
-    Level = llvm::OptimizationLevel::O2;
-  else if (SizeLevel == 2)
-    Level = llvm::OptimizationLevel::O1;
-  else
-    switch (OptLevel) {
-    case 0:  Level = llvm::OptimizationLevel::O0; break;
-    case 1:  Level = llvm::OptimizationLevel::O1; break;
-    case 2:  Level = llvm::OptimizationLevel::O2; break;
-    default: Level = llvm::OptimizationLevel::O3; break;
+    llvm::PipelineTuningOptions PTO;
+    PTO.SLPVectorization = SizeLevel > 0 || OptLevel >= 2;
+    std::optional<llvm::PGOOptions> PGOOpt;
+    if (WithPGO) {
+      if (!ProfileUse.empty())
+        PGOOpt.emplace(ProfileUse, "", "", "", llvm::PGOOptions::IRUse);
+      else if (!ProfileGen.empty())
+        PGOOpt = llvm::PGOOptions("", "", "", "", llvm::PGOOptions::IRInstr);
     }
-  llvm::ModulePassManager MPM =
-      OptLevel == 0 && SizeLevel == 0 ? PB.buildO0DefaultPipeline(Level)
-                                      : PB.buildPerModuleDefaultPipeline(Level);
-  MPM.run(M, MAM);
+    llvm::PassBuilder PB(&TM, PTO, PGOOpt, /*PIC=*/nullptr);
+    PB.registerModuleAnalyses(MAM);
+    PB.registerCGSCCAnalyses(CGAM);
+    PB.registerFunctionAnalyses(FAM);
+    PB.registerLoopAnalyses(LAM);
+    PB.crossRegisterProxies(LAM, FAM, CGAM, MAM);
+
+    llvm::OptimizationLevel Level;
+    if (SizeLevel == 1)
+      Level = llvm::OptimizationLevel::O2;
+    else if (SizeLevel == 2)
+      Level = llvm::OptimizationLevel::O1;
+    else
+      switch (OptLevel) {
+      case 0:  Level = llvm::OptimizationLevel::O0; break;
+      case 1:  Level = llvm::OptimizationLevel::O1; break;
+      case 2:  Level = llvm::OptimizationLevel::O2; break;
+      default: Level = llvm::OptimizationLevel::O3; break;
+      }
+    llvm::ModulePassManager MPM =
+        OptLevel == 0 && SizeLevel == 0 ? PB.buildO0DefaultPipeline(Level)
+                                        : PB.buildPerModuleDefaultPipeline(Level);
+    MPM.run(M, MAM);
+  };
+
+  RunPipeline(true);
+  if (OptLevel >= 2 && SizeLevel == 0 && ProfileGen.empty() &&
+      ProfileUse.empty() && promoteMainGlobals(M))
+    RunPipeline(false);
 }
 
 bool p3::verifyModule(llvm::Module &M, DiagnosticsEngine &Diags) {

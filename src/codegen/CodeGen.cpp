@@ -100,6 +100,7 @@ void p3::detail::addRuntimeAttrs(llvm::Function *F) {
         Any = true;
       }
       if (hasParamBit(RF->SlotMask, I)) {
+        B.addCapturesAttr(llvm::CaptureInfo::none());
         B.addDereferenceableOrNullAttr(8);
         Any = true;
       }

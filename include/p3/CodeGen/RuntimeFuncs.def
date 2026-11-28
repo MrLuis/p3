@@ -66,6 +66,7 @@ RUNTIME_FUNC("__pas_astr_prepend",    0, 0, 0, 0, PNONE,        PNONE, P0)
 RUNTIME_FUNC("__pas_astr_prepend_char", 0, 0, 0, 0, PNONE,      PNONE, P0)
 
 RUNTIME_FUNC("__pas_dyn_length",      1, 0, 0, 1, P0,           PNONE, PNONE)
+RUNTIME_FUNC("__pas_dyn_addref",      0, 0, 0, 1, PNONE,        PNONE, PNONE)
 RUNTIME_FUNC("__pas_dyn_bad_index",   1, 0, 1, 1, P0,           PNONE, PNONE)
 RUNTIME_FUNC("__pas_dyn_new",         0, 1, 0, 1, P0,           PNONE, PNONE)
 RUNTIME_FUNC("__pas_dyn_copy",        0, 1, 0, 1, P0,           PNONE, PNONE)
