@@ -12,12 +12,19 @@
 #include <string.h>
 
 typedef struct AnsiHeader {
+  /* Placed first so refs (-16) and length (-8) keep their exact offsets for
+   * static string literals, which only emit { refs = -1, length } and never
+   * have capacity accessed (capacity is touched only when refs == 1). */
+  int64_t capacity;
   int64_t refs;
   int64_t length;
 } AnsiHeader;
 
+_Static_assert(sizeof(AnsiHeader) == 24, "AnsiHeader layout");
+
 #define HEADER(s) ((AnsiHeader *)(void *)((s) - sizeof(AnsiHeader)))
-#define LEN(s) ((s) ? HEADER(s)->length : 0)
+#define REFS_PTR(s) ((int64_t *)(void *)((s) - 16))
+#define LEN(s) ((s) ? *(const int64_t *)(void *)((s) - 8) : 0)
 
 static size_t str_alloc_size(int64_t len) {
   /* Reject negative lengths, size_t wrap, and > 2 GiB strings that would
@@ -28,10 +35,23 @@ static size_t str_alloc_size(int64_t len) {
   return sizeof(AnsiHeader) + (size_t)len + 1;
 }
 
-static char *alloc_str(int64_t len) {
-  AnsiHeader *h = malloc(str_alloc_size(len));
+static int64_t str_capacity(int64_t current, int64_t needed) {
+  if (current < 0)
+    current = 0;
+  int64_t doubled = current >= INT32_MAX / 2 ? INT32_MAX : current * 2;
+  int64_t cap = doubled > 15 ? doubled : 15;
+  if (needed > cap)
+    cap = needed;
+  return cap > INT32_MAX ? INT32_MAX : cap;
+}
+
+static char *alloc_str_cap(int64_t len, int64_t cap) {
+  if (cap < len)
+    cap = len;
+  AnsiHeader *h = malloc(str_alloc_size(cap));
   if (!h)
     __pas_runtime_error("out of memory in a string");
+  h->capacity = cap;
   h->refs = 1;
   h->length = len;
   char *s = (char *)(h + 1);
@@ -39,12 +59,20 @@ static char *alloc_str(int64_t len) {
   return s;
 }
 
-static char *from_chars(const char *p, int64_t len) {
+static char *alloc_str(int64_t len) {
+  return alloc_str_cap(len, len);
+}
+
+static char *from_chars_cap(const char *p, int64_t len, int64_t cap) {
   if (len <= 0)
     return NULL;
-  char *s = alloc_str(len);
+  char *s = alloc_str_cap(len, cap);
   memcpy(s, p, (size_t)len);
   return s;
+}
+
+static char *from_chars(const char *p, int64_t len) {
+  return from_chars_cap(p, len, len);
 }
 
 int32_t __pas_threads_started = 0;
@@ -53,13 +81,13 @@ int32_t __pas_threads_started = 0;
    shared between threads (tasks); plainly before (PAS_RC_INC...,
    pascalrt.h). */
 void __pas_astr_addref(char *s) {
-  if (s && __atomic_load_n(&HEADER(s)->refs, __ATOMIC_RELAXED) > 0)
-    PAS_RC_INC(&HEADER(s)->refs);
+  if (s && __atomic_load_n(REFS_PTR(s), __ATOMIC_RELAXED) > 0)
+    PAS_RC_INC(REFS_PTR(s));
 }
 
 static void release(char *s) {
-  if (s && __atomic_load_n(&HEADER(s)->refs, __ATOMIC_RELAXED) > 0 &&
-      PAS_RC_DEC(&HEADER(s)->refs) == 0)
+  if (s && __atomic_load_n(REFS_PTR(s), __ATOMIC_RELAXED) > 0 &&
+      PAS_RC_DEC(REFS_PTR(s)) == 0)
     free(HEADER(s));
 }
 
@@ -183,7 +211,7 @@ char *__pas_astr_copy(char *s, int32_t index, int32_t count) {
 /* Makes *p the only reference to its characters; returns them. */
 char *__pas_astr_unique(char **p) {
   char *s = *p;
-  if (s && PAS_RC_LOAD_ACQUIRE(&HEADER(s)->refs) != 1) {
+  if (s && PAS_RC_LOAD_ACQUIRE(REFS_PTR(s)) != 1) {
     char *copy = from_chars(s, LEN(s));
     release(s);
     *p = s = copy;
@@ -195,7 +223,7 @@ int32_t __pas_astr_bad_index(const char *s, int64_t index) {
   return index < 1 || index > LEN(s);
 }
 
-void __pas_astr_setlength(char **p, int32_t len) {
+static void astr_setlength(char **p, int32_t len, int zero_fill) {
   char *s = *p;
   int64_t old = LEN(s);
   if (len <= 0) {
@@ -206,36 +234,47 @@ void __pas_astr_setlength(char **p, int32_t len) {
     __pas_astr_unique(p);
     return;
   }
+  if (s && PAS_RC_LOAD_ACQUIRE(REFS_PTR(s)) == 1) {
+    AnsiHeader *h = HEADER(s);
+    if (len <= h->capacity && (len > old || len >= (h->capacity >> 1))) {
+      if (zero_fill && len > old)
+        memset(s + old, 0, (size_t)(len - old));
+      s[len] = '\0';
+      h->length = len;
+      return;
+    }
+    int64_t cap = len > h->capacity ? str_capacity(h->capacity, len) : len;
+    AnsiHeader *nh = realloc(h, str_alloc_size(cap));
+    if (!nh)
+      __pas_runtime_error("out of memory in a string");
+    nh->capacity = cap;
+    nh->length = len;
+    char *n = (char *)(nh + 1);
+    if (zero_fill && len > old)
+      memset(n + old, 0, (size_t)(len - old));
+    n[len] = '\0';
+    *p = n;
+    return;
+  }
   char *n = alloc_str(len);
   int64_t keep = old < len ? old : len;
   if (keep > 0)
     memcpy(n, s, (size_t)keep);
-  if (len > keep)
+  if (zero_fill && len > keep)
     memset(n + keep, 0, (size_t)(len - keep));
   release(s);
   *p = n;
+}
+
+void __pas_astr_setlength(char **p, int32_t len) {
+  astr_setlength(p, len, 1);
 }
 
 /* SetLength for a string the caller is about to fill whole: what grows past
  * the old contents is not zeroed (setlength above zeroes it, and a builder
  * that writes every byte pays for writing it twice). */
 void __pas_astr_setlength_raw(char **p, int32_t len) {
-  char *s = *p;
-  int64_t old = LEN(s);
-  if (len <= 0) {
-    __pas_astr_clear(p);
-    return;
-  }
-  if (len == old) {
-    __pas_astr_unique(p);
-    return;
-  }
-  char *n = alloc_str(len);
-  int64_t keep = old < len ? old : len;
-  if (keep > 0)
-    memcpy(n, s, (size_t)keep);
-  release(s);
-  *p = n;
+  astr_setlength(p, len, 0);
 }
 
 void __pas_astr_delete(char **p, int32_t index, int32_t count) {
@@ -274,41 +313,101 @@ void __pas_astr_insert(char *src, char **p, int32_t index) {
   *p = r;
 }
 
-/* s := s + x: appends to s in place when s is the only reference to its
- * characters, and as a copy otherwise. x may be s (or share its data). */
-void __pas_astr_append(char **p, char *x) {
-  int64_t m = LEN(x);
+static inline void astr_append_bytes(char **p, const char *x, int64_t m) {
   if (m <= 0)
     return;
   char *s = *p;
-  if (s == x) { /* s + s: copy the characters before the old string goes */
-    int64_t n = LEN(s);
-    if (n < 0 || n > INT32_MAX - m)
-      __pas_runtime_error("out of memory in a string");
-    char *r = alloc_str(n + m);
-    if (n > 0)
-      memcpy(r, s, (size_t)n);
-    memcpy(r + n, x, (size_t)m);
-    release(s);
-    *p = r;
-    return;
-  }
   if (!s) {
-    *p = from_chars(x, m);
+    *p = from_chars_cap(x, m, str_capacity(0, m));
     return;
   }
-  s = __pas_astr_unique(p);
   int64_t n = LEN(s);
   if (n < 0 || n > INT32_MAX - m)
     __pas_runtime_error("out of memory in a string");
-  AnsiHeader *h = realloc(HEADER(s), str_alloc_size(n + m));
-  if (!h)
-    __pas_runtime_error("out of memory in a string");
-  h->length = n + m;
-  char *r = (char *)(h + 1);
+  int64_t total = n + m;
+  if (s != x && PAS_RC_LOAD_ACQUIRE(REFS_PTR(s)) == 1) {
+    AnsiHeader *h = HEADER(s);
+    if (total <= h->capacity) {
+      memcpy(s + n, x, (size_t)m);
+      s[total] = '\0';
+      h->length = total;
+      return;
+    }
+    int64_t cap = str_capacity(h->capacity, total);
+    AnsiHeader *nh = realloc(h, str_alloc_size(cap));
+    if (!nh)
+      __pas_runtime_error("out of memory in a string");
+    nh->capacity = cap;
+    nh->length = total;
+    char *r = (char *)(nh + 1);
+    memcpy(r + n, x, (size_t)m);
+    r[total] = '\0';
+    *p = r;
+    return;
+  }
+  char *r = alloc_str_cap(total, str_capacity(n, total));
+  if (n > 0)
+    memcpy(r, s, (size_t)n);
   memcpy(r + n, x, (size_t)m);
-  r[n + m] = '\0';
+  release(s);
   *p = r;
+}
+
+/* s := s + x: appends to s in place when s is the only reference to its
+ * characters, and as a copy otherwise. x may be s (or share its data). */
+void __pas_astr_append(char **p, char *x) {
+  astr_append_bytes(p, x, LEN(x));
+}
+
+void __pas_astr_append_char(char **p, char c) {
+  astr_append_bytes(p, &c, 1);
+}
+
+static inline void astr_prepend_bytes(char **p, const char *x, int64_t m) {
+  if (m <= 0)
+    return;
+  char *s = *p;
+  if (!s) {
+    *p = from_chars_cap(x, m, str_capacity(0, m));
+    return;
+  }
+  int64_t n = LEN(s);
+  if (n < 0 || n > INT32_MAX - m)
+    __pas_runtime_error("out of memory in a string");
+  int64_t total = n + m;
+  if (s != x && PAS_RC_LOAD_ACQUIRE(REFS_PTR(s)) == 1) {
+    AnsiHeader *h = HEADER(s);
+    if (total <= h->capacity) {
+      memmove(s + m, s, (size_t)n + 1);
+      memcpy(s, x, (size_t)m);
+      h->length = total;
+      return;
+    }
+    int64_t cap = str_capacity(h->capacity, total);
+    char *r = alloc_str_cap(total, cap);
+    memcpy(r, x, (size_t)m);
+    if (n > 0)
+      memcpy(r + m, s, (size_t)n);
+    free(h);
+    *p = r;
+    return;
+  }
+  char *r = alloc_str_cap(total, str_capacity(n, total));
+  memcpy(r, x, (size_t)m);
+  if (n > 0)
+    memcpy(r + m, s, (size_t)n);
+  release(s);
+  *p = r;
+}
+
+/* s := x + s: prepends to s in place when s is the only reference to its
+ * characters and has spare capacity, and as a copy otherwise. */
+void __pas_astr_prepend(char **p, char *x) {
+  astr_prepend_bytes(p, x, LEN(x));
+}
+
+void __pas_astr_prepend_char(char **p, char c) {
+  astr_prepend_bytes(p, &c, 1);
 }
 
 /* setlength of a short string. */

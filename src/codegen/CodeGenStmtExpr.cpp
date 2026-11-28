@@ -1094,8 +1094,12 @@ void CodeGenModule::visitAssignStmt(AssignStmt *S){
       if (Parts.size() == 1) {
         // s := s + x: x goes to the end of s, in place when s is unique.
         llvm::Value *Dst = emitAddress(Target);
-        llvm::Value *Src = emitAnsi(Parts[0]);
-        astrCall("__pas_astr_append", B.getVoidTy(), {Dst, Src});
+        if (Parts[0]->getType()->isCharLike())
+          astrCall("__pas_astr_append_char", B.getVoidTy(),
+                   {Dst, emitCharValue(Parts[0])});
+        else
+          astrCall("__pas_astr_append", B.getVoidTy(),
+                   {Dst, emitAnsi(Parts[0])});
         return;
       }
       // s + a + b ...: evaluate every part before changing s, then append
@@ -1111,11 +1115,28 @@ void CodeGenModule::visitAssignStmt(AssignStmt *S){
         llvm::Value *Dst = emitAddress(Target);
         llvm::SmallVector<llvm::Value *, 4> Values;
         for (Expr *P : Parts)
-          Values.push_back(emitAnsi(P));
-        for (llvm::Value *V : Values)
-          astrCall("__pas_astr_append", B.getVoidTy(), {Dst, V});
+          Values.push_back(P->getType()->isCharLike() ? emitCharValue(P)
+                                                      : emitAnsi(P));
+        for (size_t I = 0; I < Parts.size(); ++I)
+          astrCall(Parts[I]->getType()->isCharLike() ? "__pas_astr_append_char"
+                                                     : "__pas_astr_append",
+                   B.getVoidTy(), {Dst, Values[I]});
         return;
       }
+    }
+    if (auto *Sum = llvm::dyn_cast<BinaryExpr>(Value);
+        TV && Sum && Sum->getOp() == BinaryOp::Add && !Sum->getOperator() &&
+        isTargetName(Sum->getRHS(), TV)) {
+      // s := x + s: x goes to the front of s, in place when s is unique and
+      // has spare capacity.
+      llvm::Value *Dst = emitAddress(Target);
+      Expr *Prefix = Sum->getLHS();
+      if (Prefix->getType()->isCharLike())
+        astrCall("__pas_astr_prepend_char", B.getVoidTy(),
+                 {Dst, emitCharValue(Prefix)});
+      else
+        astrCall("__pas_astr_prepend", B.getVoidTy(), {Dst, emitAnsi(Prefix)});
+      return;
     }
     bool Take = isFreshAnsiCall(Value) && llvm::isa<NameRefExpr>(Target);
     if (Take) {

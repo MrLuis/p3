@@ -47,6 +47,35 @@ TEST(RuntimeAnsi, StringOperations) {
   __pas_astr_delete(&shared, 6, 1);
   EXPECT_EQ(std::string(shared), "hellohello");
 
+  /* Append & prepend in-place growth, CoW, and self-prepend */
+  char *built = nullptr;
+  __pas_astr_append_char(&built, 'b');
+  __pas_astr_prepend_char(&built, 'a');
+  for (int i = 0; i < 20; ++i)
+    __pas_astr_prepend_char(&built, static_cast<char>('0' + (i % 10)));
+  EXPECT_EQ(__pas_astr_length(built), 22);
+  EXPECT_EQ(std::string(built), "98765432109876543210ab");
+  __pas_astr_prepend(&built, a);
+  EXPECT_EQ(std::string(built), "hello98765432109876543210ab");
+
+  char *builtAlias = nullptr;
+  __pas_astr_assign(&builtAlias, built);
+  __pas_astr_prepend_char(&built, '^');
+  EXPECT_EQ(std::string(built), "^hello98765432109876543210ab");
+  EXPECT_EQ(std::string(builtAlias), "hello98765432109876543210ab");
+  __pas_astr_prepend(&built, built);
+  EXPECT_EQ(std::string(built),
+            "^hello98765432109876543210ab^hello98765432109876543210ab");
+
+  /* SetLength grow and shrink */
+  __pas_astr_setlength(&built, 60);
+  EXPECT_EQ(__pas_astr_length(built), 60);
+  EXPECT_EQ(built[56], '\0');
+  __pas_astr_setlength(&built, 4);
+  EXPECT_EQ(std::string(built), "^hel");
+
+  __pas_astr_clear(&built);
+  __pas_astr_clear(&builtAlias);
   __pas_astr_clear(&a);
   __pas_astr_clear(&b);
   __pas_astr_clear(&joinedNeg);

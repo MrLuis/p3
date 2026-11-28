@@ -219,6 +219,10 @@ void __pas_astr_delete(char **p, int32_t index, int32_t count);
 void __pas_astr_insert(char *src, char **p, int32_t index);
 /* s := s + x, in place when s is the only reference to its characters. */
 void __pas_astr_append(char **p, char *x);
+void __pas_astr_append_char(char **p, char c);
+/* s := x + s, in place when s is the only reference to its characters. */
+void __pas_astr_prepend(char **p, char *x);
+void __pas_astr_prepend_char(char **p, char c);
 void __pas_str_setlength(unsigned char *s, int32_t maxlen, int32_t len);
 void __pas_write_astr(PasFile *f, const char *s, int32_t width);
 /* write(f, p) of a pchar: the C string p points to (nothing for nil, not

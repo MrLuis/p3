@@ -766,8 +766,11 @@ begin
       begin
         { s := s + x: x goes to the end of s, in place when s is unique }
         dst := emitAddress(target);
-        src := emitAnsi(PNode(listGet(parts, 0)));
-        astrV2('__pas_astr_append', 'ptr,ptr', dst, src);
+        more := PNode(listGet(parts, 0));
+        if isCharLike(more^.typ) then
+          astrV2('__pas_astr_append_char', 'ptr,i8', dst, emitCharValue(more))
+        else
+          astrV2('__pas_astr_append', 'ptr,ptr', dst, emitAnsi(more));
         listFree(parts);
         exit;
       end;
@@ -783,16 +786,42 @@ begin
         dst := emitAddress(target);
         listInit(vals);
         for k := 0 to parts.count - 1 do
-          listAdd(vals, irBox(emitAnsi(PNode(listGet(parts, k)))));
+        begin
+          more := PNode(listGet(parts, k));
+          if isCharLike(more^.typ) then
+            listAdd(vals, irBox(emitCharValue(more)))
+          else
+            listAdd(vals, irBox(emitAnsi(more)));
+        end;
         for k := 0 to vals.count - 1 do
-          astrV2('__pas_astr_append', 'ptr,ptr', dst,
-                 PTVBox(listGet(vals, k))^);
+        begin
+          more := PNode(listGet(parts, k));
+          if isCharLike(more^.typ) then
+            astrV2('__pas_astr_append_char', 'ptr,i8', dst,
+                   PTVBox(listGet(vals, k))^)
+          else
+            astrV2('__pas_astr_append', 'ptr,ptr', dst,
+                   PTVBox(listGet(vals, k))^);
+        end;
         listFree(vals);
         listFree(parts);
         exit;
       end;
     end;
     listFree(parts);
+    if (dV <> nil) and (value^.kind = nkBinary) and (value^.bop = boAdd) and
+       (value^.opDecl = nil) and isTargetNameNode(value^.rhs, dV) then
+    begin
+      { s := x + s: x goes to the front of s, in place when s is unique and
+        has spare capacity }
+      dst := emitAddress(target);
+      more := value^.lhs;
+      if isCharLike(more^.typ) then
+        astrV2('__pas_astr_prepend_char', 'ptr,i8', dst, emitCharValue(more))
+      else
+        astrV2('__pas_astr_prepend', 'ptr,ptr', dst, emitAnsi(more));
+      exit;
+    end;
     take := isFreshAnsiCall(value) and (target^.kind = nkNameRef);
     if take then
     begin
