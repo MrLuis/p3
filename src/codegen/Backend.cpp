@@ -3,9 +3,15 @@
 #include "p3/Basic/Diagnostics.h"
 
 #include "llvm/ADT/SmallString.h"
+#include "llvm/Analysis/LoopInfo.h"
+#include "llvm/Analysis/ScalarEvolution.h"
+#include "llvm/Analysis/ScalarEvolutionExpressions.h"
 #include "llvm/IR/Constants.h"
+#include "llvm/IR/IRBuilder.h"
 #include "llvm/IR/Instructions.h"
 #include "llvm/IR/LegacyPassManager.h"
+#include "llvm/Transforms/Utils/LoopSimplify.h"
+#include "llvm/Transforms/Utils/ScalarEvolutionExpander.h"
 #include "llvm/IR/Module.h"
 #include "llvm/IR/Verifier.h"
 #include "llvm/IRReader/IRReader.h"
@@ -355,6 +361,155 @@ static bool promoteMainGlobals(llvm::Module &M) {
   return true;
 }
 
+static bool foldVectorRecurrences(llvm::Module &M, llvm::TargetMachine &TM) {
+  llvm::LoopAnalysisManager LAM;
+  llvm::FunctionAnalysisManager FAM;
+  llvm::CGSCCAnalysisManager CGAM;
+  llvm::ModuleAnalysisManager MAM;
+  llvm::PassBuilder PB(&TM);
+  PB.registerModuleAnalyses(MAM);
+  PB.registerCGSCCAnalyses(CGAM);
+  PB.registerFunctionAnalyses(FAM);
+  PB.registerLoopAnalyses(LAM);
+  PB.crossRegisterProxies(LAM, FAM, CGAM, MAM);
+
+  bool ChangedAny = false;
+  llvm::Type *I64 = llvm::Type::getInt64Ty(M.getContext());
+
+  for (llvm::Function &F : M) {
+    if (F.isDeclaration())
+      continue;
+    llvm::LoopSimplifyPass().run(F, FAM);
+    auto &LI = FAM.getResult<llvm::LoopAnalysis>(F);
+    auto &SE = FAM.getResult<llvm::ScalarEvolutionAnalysis>(F);
+    llvm::SmallVector<llvm::Loop *, 8> Worklist;
+    for (llvm::Loop *L : LI)
+      Worklist.push_back(L);
+    while (!Worklist.empty()) {
+      llvm::Loop *L = Worklist.pop_back_val();
+      for (llvm::Loop *Sub : *L)
+        Worklist.push_back(Sub);
+
+      llvm::BasicBlock *Header = L->getHeader();
+      llvm::BasicBlock *Latch = L->getLoopLatch();
+      llvm::BasicBlock *Preheader = L->getLoopPreheader();
+      if (!Header || !Latch || !Preheader || Header != Latch ||
+          L->getBlocks().size() != 1 || L->getExitingBlock() != Latch ||
+          !L->getUniqueExitBlock())
+        continue;
+
+      const llvm::SCEV *BTC = SE.getBackedgeTakenCount(L);
+      if (llvm::isa<llvm::SCEVCouldNotCompute>(BTC) ||
+          !BTC->getType()->isIntegerTy())
+        continue;
+      unsigned Width = BTC->getType()->getIntegerBitWidth();
+      if (Width > 64)
+        continue;
+      if (Width > 32) {
+        auto *SC = llvm::dyn_cast<llvm::SCEVConstant>(BTC);
+        if (!SC || SC->getAPInt().isAllOnes())
+          continue;
+      }
+
+      struct Candidate {
+        llvm::PHINode *PN;
+        llvm::BinaryOperator *BO;
+        llvm::Value *Init;
+        llvm::Value *Step;
+        bool IsAdd;
+      };
+      llvm::SmallVector<Candidate, 4> Recs;
+
+      for (llvm::PHINode &PN : Header->phis()) {
+        auto *VTy = llvm::dyn_cast<llvm::FixedVectorType>(PN.getType());
+        if (!VTy || !VTy->getElementType()->isIntegerTy())
+          continue;
+        if (PN.getNumIncomingValues() != 2)
+          continue;
+        llvm::Value *Init = PN.getIncomingValueForBlock(Preheader);
+        llvm::Value *Back = PN.getIncomingValueForBlock(Latch);
+        auto *BO = llvm::dyn_cast<llvm::BinaryOperator>(Back);
+        if (!BO || BO->getParent() != Header)
+          continue;
+        bool IsAdd = BO->getOpcode() == llvm::Instruction::Add;
+        bool IsSub = BO->getOpcode() == llvm::Instruction::Sub;
+        if (!IsAdd && !IsSub)
+          continue;
+        llvm::Value *Step = nullptr;
+        if (BO->getOperand(0) == &PN)
+          Step = BO->getOperand(1);
+        else if (IsAdd && BO->getOperand(1) == &PN)
+          Step = BO->getOperand(0);
+        if (!Step || !L->isLoopInvariant(Step))
+          continue;
+
+        bool Pure = true;
+        for (llvm::User *U : PN.users()) {
+          if (U != BO) {
+            auto *UI = llvm::dyn_cast<llvm::Instruction>(U);
+            if (!UI || L->contains(UI)) {
+              Pure = false;
+              break;
+            }
+          }
+        }
+        for (llvm::User *U : BO->users()) {
+          if (U != &PN) {
+            auto *UI = llvm::dyn_cast<llvm::Instruction>(U);
+            if (!UI || L->contains(UI)) {
+              Pure = false;
+              break;
+            }
+          }
+        }
+        if (!Pure)
+          continue;
+        Recs.push_back({&PN, BO, Init, Step, IsAdd});
+      }
+
+      if (Recs.empty())
+        continue;
+
+      const llvm::SCEV *BTC64 = SE.getZeroExtendExpr(BTC, I64);
+      const llvm::SCEV *TC64 = SE.getAddExpr(BTC64, SE.getOne(I64));
+      llvm::SCEVExpander Exp(SE, "vec.tc");
+      llvm::Value *TCVal =
+          Exp.expandCodeFor(TC64, I64, Preheader->getTerminator());
+      llvm::IRBuilder<> B(Preheader->getTerminator());
+
+      for (const Candidate &C : Recs) {
+        auto *VTy = llvm::cast<llvm::FixedVectorType>(C.PN->getType());
+        llvm::Value *TCElem = B.CreateZExtOrTrunc(TCVal, VTy->getElementType());
+        llvm::Value *TCSplat =
+            B.CreateVectorSplat(VTy->getElementCount(), TCElem, "vec.tc");
+        llvm::Value *Delta = B.CreateMul(C.Step, TCSplat, "vec.delta");
+        llvm::Value *FinalVal =
+            C.IsAdd ? B.CreateAdd(C.Init, Delta, "vec.fold")
+                    : B.CreateSub(C.Init, Delta, "vec.fold");
+        llvm::Value *PenultVal = nullptr;
+
+        llvm::SmallVector<llvm::Use *, 4> OutBO, OutPN;
+        for (llvm::Use &U : C.BO->uses())
+          if (U.getUser() != C.PN)
+            OutBO.push_back(&U);
+        for (llvm::Use &U : C.PN->uses())
+          if (U.getUser() != C.BO)
+            OutPN.push_back(&U);
+        for (llvm::Use *U : OutBO)
+          U->set(FinalVal);
+        if (!OutPN.empty()) {
+          PenultVal = C.IsAdd ? B.CreateSub(FinalVal, C.Step, "vec.penult")
+                              : B.CreateAdd(FinalVal, C.Step, "vec.penult");
+          for (llvm::Use *U : OutPN)
+            U->set(PenultVal);
+        }
+        ChangedAny = true;
+      }
+    }
+  }
+  return ChangedAny;
+}
+
 void p3::optimizeModule(llvm::Module &M, llvm::TargetMachine &TM,
                          unsigned OptLevel, unsigned SizeLevel,
                          const std::string &ProfileGen,
@@ -401,8 +556,12 @@ void p3::optimizeModule(llvm::Module &M, llvm::TargetMachine &TM,
 
   RunPipeline(true);
   if (OptLevel >= 2 && SizeLevel == 0 && ProfileGen.empty() &&
-      ProfileUse.empty() && promoteMainGlobals(M))
-    RunPipeline(false);
+      ProfileUse.empty()) {
+    if (promoteMainGlobals(M))
+      RunPipeline(false);
+    if (foldVectorRecurrences(M, TM))
+      RunPipeline(false);
+  }
 }
 
 bool p3::verifyModule(llvm::Module &M, DiagnosticsEngine &Diags) {
