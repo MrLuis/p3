@@ -155,6 +155,9 @@ var
     target: no temporary holds it (noHoldAnsiResult), and the call that
     returned it took that path (tookAnsiResult). }
   noHoldAnsiResult, tookAnsiResult: boolean;
+  { True while emitting the tail statement of a function body with no cleanups
+    or non-local labels (allows moving local ansistrings to Result). }
+  atRoutineTail: boolean;
   lowered: TIntMap;          { type id -> PIRType }
   ansiConsts: TIntMap;       { name id of the characters -> PTVBox of the .astr }
   { item 13: the checks' shared error messages, file strings and locations }
@@ -2732,6 +2735,8 @@ begin
   emitPStr := tmp;
 end;
 
+function takeOrHoldAnsi(const v: TV; noHold: boolean): TV; forward;
+
 { Any string-like expression, or a pchar, as an ansistring (borrowed: a
   new one is held until the statement ends). }
 function emitAnsi(e: PNode): TV;
@@ -2739,6 +2744,7 @@ var
   t: PType;
   d: PDecl;
   s: TV;
+  noHold: boolean;
 begin
   t := e^.typ;
   if t^.kind = tyAnsiString then
@@ -2751,18 +2757,23 @@ begin
     if (d^.kind = dkConst) and (d^.constValue.kind = ckString) then
       exit(getAnsiConstant(d^.constValue.strVal^.chars, 0, d^.constValue.strVal^.len));
   end;
+  noHold := noHoldAnsiResult;
+  noHoldAnsiResult := false;
   if isCharLike(t) then
   begin
     s := emitCharValue(e);
-    exit(holdResult(call1(classRuntime('__pas_astr_from_char', 'ptr', 'i8'), s, '')));
+    exit(takeOrHoldAnsi(call1(classRuntime('__pas_astr_from_char', 'ptr', 'i8'), s, ''),
+                        noHold));
   end;
   if t^.kind = tyPointer then
   begin
     s := visitExpr(e);
-    exit(holdResult(call1(classRuntime('__pas_astr_from_cstr', 'ptr', 'ptr'), s, '')));
+    exit(takeOrHoldAnsi(call1(classRuntime('__pas_astr_from_cstr', 'ptr', 'ptr'), s, ''),
+                        noHold));
   end;
   s := emitPStr(e);
-  emitAnsi := holdResult(call1(classRuntime('__pas_astr_from_pstr', 'ptr', 'ptr'), s, ''));
+  emitAnsi := takeOrHoldAnsi(call1(classRuntime('__pas_astr_from_pstr', 'ptr', 'ptr'), s, ''),
+                             noHold);
 end;
 
 { An element's value as stored in its TVarRec (kind: its VType). }
@@ -2997,6 +3008,7 @@ var
   t: PType;
   c, lo, hi, isLower, dec, s0, s1, tmp, n1, n2, n32, ignored, len: TV;
   i: longint;
+  noHold: boolean;
 begin
   a0 := PNode(listGet(e^.args, 0));
   case k of
@@ -3066,11 +3078,13 @@ begin
         end;
         if a0^.typ^.kind = tyAnsiString then
         begin
+          noHold := noHoldAnsiResult;
+          noHoldAnsiResult := false;
           s0 := visitExpr(a0);
           n1 := emitI32(PNode(listGet(e^.args, 1)));
           n2 := emitI32(PNode(listGet(e^.args, 2)));
-          exit(holdResult(call3(classRuntime('__pas_astr_copy', 'ptr', 'ptr,i32,i32'),
-                                s0, n1, n2, '')));
+          exit(takeOrHoldAnsi(call3(classRuntime('__pas_astr_copy', 'ptr', 'ptr,i32,i32'),
+                                    s0, n1, n2, ''), noHold));
         end;
         tmp := newStringTemp(255);
         s0 := emitPStr(a0);
@@ -3085,6 +3099,8 @@ begin
         piece may be a character: an own byte, instead of a fresh string. }
       if e^.typ^.kind = tyAnsiString then
       begin
+        noHold := noHoldAnsiResult;
+        noHoldAnsiResult := false;
         if (e^.args.count >= 3) and
            (PNode(listGet(e^.args, 0))^.typ^.kind = tyAnsiString) and
            ((PNode(listGet(e^.args, 1))^.typ^.kind = tyAnsiString) or
@@ -3104,9 +3120,10 @@ begin
             n1 := i64c(1);
           end;
           s0 := emitAnsi(PNode(listGet(e^.args, 2)));
-          tmp := holdResult(call4(classRuntime('__pas_astr_join', 'ptr',
-                                                'ptr,ptr,i64,ptr'),
-                                  tmp, s1, n1, s0, ''));
+          tmp := takeOrHoldAnsi(call4(classRuntime('__pas_astr_join', 'ptr',
+                                                   'ptr,ptr,i64,ptr'),
+                                      tmp, s1, n1, s0, ''),
+                                noHold and (e^.args.count = 3));
           i := 3;
         end
         else
@@ -3117,8 +3134,9 @@ begin
         while i < e^.args.count do
         begin
           s1 := emitAnsi(PNode(listGet(e^.args, i)));
-          tmp := holdResult(call2(classRuntime('__pas_astr_concat', 'ptr', 'ptr,ptr'),
-                                  tmp, s1, ''));
+          tmp := takeOrHoldAnsi(call2(classRuntime('__pas_astr_concat', 'ptr', 'ptr,ptr'),
+                                      tmp, s1, ''),
+                                noHold and (i + 1 = e^.args.count));
           i := i + 1;
         end;
         exit(tmp);
@@ -4132,6 +4150,16 @@ var
 begin
   ignored := heldTemp(v);
   holdResult := v;
+end;
+
+function takeOrHoldAnsi(const v: TV; noHold: boolean): TV;
+begin
+  if noHold then
+  begin
+    tookAnsiResult := true;
+    exit(v);
+  end;
+  takeOrHoldAnsi := holdResult(v);
 end;
 
 { holdResult's temporary: its address. }
@@ -6612,7 +6640,7 @@ var
   lt, rt, opTy: PType;
   lhs: PNode;
   l, r, m, n32, w, tmp, notR, masked: TV;
-  signed: boolean;
+  signed, noHold: boolean;
   loc: TLoc;
   args: TPtrList;
   v, res: TV;
@@ -6640,6 +6668,8 @@ begin
       before the fresh buffer is written, so no piece can be it. The
       middle piece may be a character: an own byte, instead of a fresh
       string. }
+    noHold := noHoldAnsiResult;
+    noHoldAnsiResult := false;
     lhs := e^.lhs;
     if (lhs^.kind = nkBinary) and (lhs^.bop = boAdd) and
        ((lhs^.typ^.kind = tyAnsiString) and
@@ -6658,9 +6688,9 @@ begin
         w := i64c(1);
       end;
       r := emitAnsi(e^.rhs);
-      exit(holdResult(call4(classRuntime('__pas_astr_join', 'ptr',
-                                          'ptr,ptr,i64,ptr'),
-                            l, m, w, r, '')));
+      exit(takeOrHoldAnsi(call4(classRuntime('__pas_astr_join', 'ptr',
+                                             'ptr,ptr,i64,ptr'),
+                                l, m, w, r, ''), noHold));
     end;
     { c + s and s + c, with the character on its own byte and the string's
       or the empty end's characters as the nil side of the join (item 7) }
@@ -6668,21 +6698,22 @@ begin
     begin
       l := emitCharPiece(e^.lhs);
       r := emitAnsi(e^.rhs);
-      exit(holdResult(call4(classRuntime('__pas_astr_join', 'ptr',
-                                          'ptr,ptr,i64,ptr'),
-                            irZero(irPtrT), l, i64c(1), r, '')));
+      exit(takeOrHoldAnsi(call4(classRuntime('__pas_astr_join', 'ptr',
+                                             'ptr,ptr,i64,ptr'),
+                                irZero(irPtrT), l, i64c(1), r, ''), noHold));
     end;
     if (e^.lhs^.typ^.kind = tyAnsiString) and isCharLike(e^.rhs^.typ) then
     begin
       l := emitAnsi(e^.lhs);
       r := emitCharPiece(e^.rhs);
-      exit(holdResult(call4(classRuntime('__pas_astr_join', 'ptr',
-                                          'ptr,ptr,i64,ptr'),
-                            l, r, i64c(1), irZero(irPtrT), '')));
+      exit(takeOrHoldAnsi(call4(classRuntime('__pas_astr_join', 'ptr',
+                                             'ptr,ptr,i64,ptr'),
+                                l, r, i64c(1), irZero(irPtrT), ''), noHold));
     end;
     l := emitAnsi(e^.lhs);
     r := emitAnsi(e^.rhs);
-    exit(holdResult(call2(classRuntime('__pas_astr_concat', 'ptr', 'ptr,ptr'), l, r, '')));
+    exit(takeOrHoldAnsi(call2(classRuntime('__pas_astr_concat', 'ptr', 'ptr,ptr'),
+                              l, r, ''), noHold));
   end;
   if e^.typ^.kind = tyShortString then
   begin

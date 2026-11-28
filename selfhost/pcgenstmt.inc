@@ -686,14 +686,28 @@ begin
   ansiAppends := true;
 end;
 
-{ A direct call of a function (or through a procedural value) whose result
-  is an ansistring: the reference it returns is new, so an assignment can
-  move it instead of counting it and releasing it later. }
+{ A fresh ansistring result (call, +, Copy/Concat, or char/pchar/shortstring
+  conversion): its reference can move directly into an assignment target via
+  __pas_astr_take instead of holding a temporary and recounting 1 -> 2 -> 1. }
 function isFreshAnsiCall(value: PNode): boolean;
 begin
   isFreshAnsiCall := false;
-  if (value^.typ = nil) or (value^.typ^.kind <> tyAnsiString) then
+  value := skipParensNode(value);
+  if value^.typ = nil then
     exit;
+  if value^.typ^.kind <> tyAnsiString then
+  begin
+    if (value^.kind = nkStringLit) then
+      exit(false);
+    if unwrapConst(value)^.kind = nkNameRef then
+      if (unwrapConst(value)^.refDecl <> nil) and
+         (unwrapConst(value)^.refDecl^.kind = dkConst) and
+         (unwrapConst(value)^.refDecl^.constValue.kind = ckString) then
+        exit(false);
+    exit(true);
+  end;
+  if value^.kind = nkBinary then
+    exit((value^.bop = boAdd) and (value^.opDecl = nil));
   if value^.kind = nkInherited then
     exit(true);
   if not (value^.kind in [nkCall, nkIndirectCall]) or value^.isVarCast or
@@ -702,8 +716,94 @@ begin
   if (value^.calleeExpr <> nil) or (value^.callValue <> nil) then
     exit(true);
   if value^.callDecl <> nil then
+  begin
+    if value^.callDecl^.kind = dkBuiltin then
+      exit((value^.callDecl^.builtin = bkCopy) or
+           ((value^.callDecl^.builtin = bkConcat) and (value^.args.count >= 2)));
     if value^.callDecl^.kind in [dkRoutine, dkVar] then
       exit(true);
+  end;
+end;
+
+function canMoveAnsiLocalToResult(tv, value: PNode; dV: PDecl;
+                                  tailMove: boolean): boolean;
+var
+  n: PNode;
+  lv, p: PDecl;
+  i: longint;
+begin
+  canMoveAnsiLocalToResult := false;
+  if not tailMove or (dV = nil) or (curRoutine = nil) or not curRoutine^.isFunction or
+     (curRoutine^.asyncType <> nil) or (curRoutine^.iterType <> nil) or
+     (cleanups.count > 0) or (dV <> curRoutine^.resultVar) then
+    exit;
+  n := skipParensNode(value);
+  if (n^.kind <> nkNameRef) or (n^.refWith <> nil) or (n^.refDecl = nil) or
+     (n^.refDecl^.kind <> dkVar) then
+    exit;
+  lv := n^.refDecl;
+  if (lv = dV) or (lv^.varType^.kind <> tyAnsiString) or
+     lv^.captured or lv^.cgInFrame or (lv^.absTarget <> nil) or
+     ((lv^.init <> nil) and not lv^.isInitVar) or
+     (lv^.varKind in [vkConstParam, vkVarParam]) or lv^.isOut or
+     isByRef(lv) then
+    exit;
+  for i := 0 to curRoutine^.params.count - 1 do
+    if PDecl(listGet(curRoutine^.params, i)) = lv then
+      exit(true);
+  for i := 0 to curRoutine^.body^.decls.count - 1 do
+  begin
+    p := PDecl(listGet(curRoutine^.body^.decls, i));
+    if p = lv then
+      exit(true);
+  end;
+end;
+
+procedure emitAnsiAssign(hasDst: boolean; const inDst: TV; target: PNode;
+                         dV: PDecl; value: PNode; tailMove: boolean);
+var
+  dst, srcAddr, v: TV;
+  take: boolean;
+  lv: PDecl;
+  tt: PType;
+begin
+  if canMoveAnsiLocalToResult(target, value, dV, tailMove) then
+  begin
+    lv := skipParensNode(value)^.refDecl;
+    srcAddr := varAddress(lv);
+    v := irLoad(irPtrT, srcAddr, 'ansi.move');
+    irStore(irZero(irPtrT), srcAddr);
+    dst := inDst;
+    if not hasDst then
+      dst := emitAddress(target);
+    astrV2('__pas_astr_take', 'ptr,ptr', dst, v);
+    exit;
+  end;
+  take := isFreshAnsiCall(value) and ((target = nil) or (target^.kind = nkNameRef));
+  if take then
+  begin
+    noHoldAnsiResult := true;
+    tookAnsiResult := false;
+  end;
+  v := emitAnsi(value);
+  if take then
+  begin
+    noHoldAnsiResult := false;
+    take := tookAnsiResult;
+  end;
+  dst := inDst;
+  if not hasDst then
+    dst := emitAddress(target);
+  if take then
+  begin
+    astrV2('__pas_astr_take', 'ptr,ptr', dst, v);
+    exit;
+  end;
+  if dV <> nil then
+    tt := dV^.varType
+  else
+    tt := target^.typ;
+  storeValue(dst, v, tt);
 end;
 
 function emitResultInPlace(target, value: PNode; tt: PType): boolean; forward;
@@ -725,11 +825,13 @@ var
   tt: PType;
   dst, src, pair, v: TV;
   p: PDecl;
-  take, safe: boolean;
+  tailMove, safe: boolean;
   dV: PDecl;
   parts, vals: TPtrList;
   k: longint;
 begin
+  tailMove := atRoutineTail;
+  atRoutineTail := false;
   target := s^.target;
   value := s^.value;
   tt := target^.typ;
@@ -822,25 +924,7 @@ begin
         astrV2('__pas_astr_prepend', 'ptr,ptr', dst, emitAnsi(more));
       exit;
     end;
-    take := isFreshAnsiCall(value) and (target^.kind = nkNameRef);
-    if take then
-    begin
-      noHoldAnsiResult := true;
-      tookAnsiResult := false;
-    end;
-    v := emitAnsi(value);
-    if take then
-    begin
-      noHoldAnsiResult := false;
-      take := tookAnsiResult;
-    end;
-    dst := emitAddress(target);
-    if take then
-    begin
-      astrV2('__pas_astr_take', 'ptr,ptr', dst, v);
-      exit;
-    end;
-    storeValue(dst, v, tt);
+    emitAnsiAssign(false, irZero(irPtrT), target, dV, value, tailMove);
     exit;
   end;
   if isStructured(tt) then
@@ -907,6 +991,7 @@ var
   res: PDecl;
   rt: PType;
   addr, src, v: TV;
+  tailMove: boolean;
 begin
   res := curRoutine^.resultVar;
   rt := res^.varType;
@@ -914,7 +999,12 @@ begin
   if rt^.kind = tyShortString then
     emitStringAssign(addr, rt, value)
   else if rt^.kind = tyAnsiString then
-    storeValue(addr, emitAnsi(value), rt)
+  begin
+    tailMove := (curRoutine <> nil) and curRoutine^.isFunction and
+                (curRoutine^.asyncType = nil) and (curRoutine^.iterType = nil) and
+                (cleanups.count = 0) and not hasNonLocalLabels(curRoutine^.body);
+    emitAnsiAssign(true, addr, nil, res, value, tailMove);
+  end
   else if isMethodPointer(rt) or isClosureType(rt) then
     storeValue(addr, emitRoutinePair(value, rt), rt)
   else if isStructured(rt) then
@@ -1309,7 +1399,10 @@ procedure visitIf(s: PNode);
 var
   c: TV;
   thenB, endB, elseB: PIRBlock;
+  tail: boolean;
 begin
+  tail := atRoutineTail;
+  atRoutineTail := false;
   c := visitExpr(s^.cond);
   thenB := irNewBlock('if.then');
   endB := irNewBlock('if.end');
@@ -1318,12 +1411,16 @@ begin
     elseB := irNewBlock('if.else');
   irCondBr(c, thenB, elseB, false);
   irSetInsertPoint(thenB);
+  atRoutineTail := tail;
   visitStmt(s^.thenStmt);
+  atRoutineTail := false;
   irBr(endB);
   if s^.elseStmt <> nil then
   begin
     irSetInsertPoint(elseB);
+    atRoutineTail := tail;
     visitStmt(s^.elseStmt);
+    atRoutineTail := false;
     irBr(endB);
   end;
   irSetInsertPoint(endB);
@@ -2162,11 +2259,16 @@ var
   v: PDecl;
   owned: TPtrList;
   t: TTryFinally;
+  tail: boolean;
 begin
+  tail := atRoutineTail;
+  atRoutineTail := false;
   for i := from to l.count - 1 do
   begin
     d := PNode(listGet(l, i));
+    atRoutineTail := tail and (i + 1 = l.count);
     visitStmt(d);
+    atRoutineTail := false;
     if d^.kind <> nkVarDecl then
       continue;
     listInit(owned);
@@ -2396,6 +2498,8 @@ begin
     if not (s^.kind in [nkIf, nkCase, nkWith]) then
       forgetRanges(written);
   end;
+  if not (s^.kind in [nkCompound, nkIf, nkAssign]) then
+    atRoutineTail := false;
   case s^.kind of
     nkEmpty: ;
     nkCompound: visitStmtList(s^.stmts);
@@ -2437,6 +2541,7 @@ begin
     forgetRanges(written);
     listFree(written);
   end;
+  atRoutineTail := false;
   releaseTemps(mark); { the results held by its expressions }
   releaseStringTemps(stringMark);
 end;
@@ -4842,7 +4947,13 @@ begin
   if (r^.asyncType = nil) and (r^.iterType = nil) then
     initRangeLocals(r);
   if owned.count = 0 then
-    visitStmt(r^.body^.body)
+  begin
+    atRoutineTail := r^.isFunction and (r^.asyncType = nil) and
+                     (r^.iterType = nil) and (cleanups.count = 0) and
+                     not hasNonLocalLabels(r^.body);
+    visitStmt(r^.body^.body);
+    atRoutineTail := false;
+  end
   else
   begin
     tryFinallyBegin(ownedTry);

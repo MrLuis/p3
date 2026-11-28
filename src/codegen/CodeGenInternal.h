@@ -250,6 +250,9 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
   /// returned it took that path (TookAnsiResult).
   bool NoHoldAnsiResult = false;
   bool TookAnsiResult = false;
+  /// True while emitting the tail statement of a function body with no
+  /// cleanups or non-local labels (allows moving local ansistrings to Result).
+  bool AtRoutineTail = false;
   /// Classes whose cleanup functions (releasing their own fields' COM
   /// interfaces) are to be emitted.
   std::vector<std::pair<ClassType *, llvm::Function *>> CleanupsToEmit;
@@ -1236,6 +1239,14 @@ public:
   /// holds): kept in a temporary until the statement ends. T: its type, if
   /// that may be a dynamic array.
   llvm::Value *holdResult(llvm::Value *V, Type *T = nullptr);
+
+  /// Returns V directly when NoHold is true (marking TookAnsiResult), else holds it.
+  llvm::Value *takeOrHoldAnsi(llvm::Value *V, bool NoHold);
+
+  bool canMoveAnsiLocalToResult(VarDecl *TV, Expr *Value, bool TailMove);
+
+  void emitAnsiAssign(llvm::Value *Dst, Expr *Target, VarDecl *TV, Expr *Value,
+                      bool TailMove);
 
   /// holdResult's temporary: its address.
   llvm::Value *heldTemp(llvm::Value *V, Type *T = nullptr);

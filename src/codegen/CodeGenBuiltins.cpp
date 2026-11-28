@@ -65,12 +65,17 @@ llvm::Value *CodeGenModule::emitAnsi(Expr *E){
     if (auto *C = llvm::dyn_cast<ConstDecl>(N->getDecl());
         C && C->getValue().K == ConstValue::String)
       return getAnsiConstant(C->getValue().Str);
+  bool NoHold = NoHoldAnsiResult;
+  NoHoldAnsiResult = false;
   llvm::Type *Ptr = B.getPtrTy();
   if (T->isCharLike())
-    return holdResult(astrCall("__pas_astr_from_char", Ptr, {emitCharValue(E)}));
+    return takeOrHoldAnsi(
+        astrCall("__pas_astr_from_char", Ptr, {emitCharValue(E)}), NoHold);
   if (T->isPointer())
-    return holdResult(astrCall("__pas_astr_from_cstr", Ptr, {visitExpr(E)}));
-  return holdResult(astrCall("__pas_astr_from_pstr", Ptr, {emitPStr(E)}));
+    return takeOrHoldAnsi(
+        astrCall("__pas_astr_from_cstr", Ptr, {visitExpr(E)}), NoHold);
+  return takeOrHoldAnsi(astrCall("__pas_astr_from_pstr", Ptr, {emitPStr(E)}),
+                        NoHold);
 }
 
 
@@ -391,10 +396,13 @@ llvm::Value *CodeGenModule::emitStringFunction(CallExpr *E, BuiltinKind K){
                         Args[0]->getType());
     }
     if (Args[0]->getType()->isAnsiString()) {
+      bool NoHold = NoHoldAnsiResult;
+      NoHoldAnsiResult = false;
       llvm::Value *S = visitExpr(Args[0]);
       llvm::Value *Index = emitI32(Args[1]);
       llvm::Value *Count = emitI32(Args[2]);
-      return holdResult(astrCall("__pas_astr_copy", B.getPtrTy(), {S, Index, Count}));
+      return takeOrHoldAnsi(
+          astrCall("__pas_astr_copy", B.getPtrTy(), {S, Index, Count}), NoHold);
     }
     llvm::Value *Tmp = newStringTemp();
     B.CreateCall(RT.StrCopy, {Tmp, emitPStr(Args[0]), emitI32(Args[1]),
@@ -404,6 +412,8 @@ llvm::Value *CodeGenModule::emitStringFunction(CallExpr *E, BuiltinKind K){
   default: { // Concat
     if (E->getType()->isAnsiString()) {
       // Concat(a, b, c): three joined in one allocation, then pairwise.
+      bool NoHold = NoHoldAnsiResult;
+      NoHoldAnsiResult = false;
       llvm::Value *R = nullptr;
       size_t From = 1;
       if (Args.size() >= 3 && Args[0]->getType()->isAnsiString() &&
@@ -422,14 +432,16 @@ llvm::Value *CodeGenModule::emitStringFunction(CallExpr *E, BuiltinKind K){
           N = B.getInt64(1);
         }
         llvm::Value *C = emitAnsi(Args[2]);
-        R = holdResult(
-            astrCall("__pas_astr_join", B.getPtrTy(), {A, M, N, C}));
+        R = takeOrHoldAnsi(
+            astrCall("__pas_astr_join", B.getPtrTy(), {A, M, N, C}),
+            NoHold && Args.size() == 3);
         From = 3;
       } else
         R = emitAnsi(Args[0]);
       for (size_t I = From; I < Args.size(); ++I) {
         llvm::Value *S = emitAnsi(Args[I]);
-        R = holdResult(astrCall("__pas_astr_concat", B.getPtrTy(), {R, S}));
+        R = takeOrHoldAnsi(astrCall("__pas_astr_concat", B.getPtrTy(), {R, S}),
+                           NoHold && I + 1 == Args.size());
       }
       return R;
     }

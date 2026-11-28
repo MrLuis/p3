@@ -923,11 +923,18 @@ void CodeGenModule::emitRoutineBody(RoutineDecl *R){
       Owned.push_back(V);
   if (!R->isAsync() && !R->isIterator())
     initRangeLocals(R);
-  if (Owned.empty())
+  bool SavedTail = AtRoutineTail;
+  AtRoutineTail = false;
+  if (Owned.empty()) {
+    AtRoutineTail = R->isFunction() && !R->isAsync() && !R->isIterator() &&
+                    Cleanups.empty() && !hasNonLocalLabels(*R->getBody());
     visitStmt(R->getBody()->getBody());
-  else
+    AtRoutineTail = false;
+  } else {
     emitTryFinally([&] { visitStmt(R->getBody()->getBody()); },
                    [&](llvm::Value *State) { emitFreeOwned(Owned, State); });
+  }
+  AtRoutineTail = SavedTail;
   for (VarDecl *V : RangeLocals)
     VarRanges.erase(V);
   RangeLocals.clear();

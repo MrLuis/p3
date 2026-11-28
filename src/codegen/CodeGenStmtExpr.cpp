@@ -89,10 +89,8 @@ llvm::Value *CodeGenModule::emitCallTo(llvm::FunctionCallee Callee, llvm::Value 
     return Tmp;
   }
   if (ResultTy && isManaged(ResultTy)) {
-    if (NoHold && ResultTy->isAnsiString()) {
-      TookAnsiResult = true;
-      return Result;
-    }
+    if (ResultTy->isAnsiString())
+      return takeOrHoldAnsi(Result, NoHold);
     return holdResult(Result, ResultTy);
   }
   return Result;
@@ -532,6 +530,15 @@ llvm::Value *CodeGenModule::holdResult(llvm::Value *V, Type *T){
 }
 
 
+llvm::Value *CodeGenModule::takeOrHoldAnsi(llvm::Value *V, bool NoHold){
+  if (NoHold) {
+    TookAnsiResult = true;
+    return V;
+  }
+  return holdResult(V);
+}
+
+
 /// holdResult's temporary: its address.
 llvm::Value *CodeGenModule::heldTemp(llvm::Value *V, Type *T){
   // (released by finalizeValue: also a closure's)
@@ -876,7 +883,11 @@ void CodeGenModule::visitStmt(Stmt *S){
         !llvm::isa<WithStmt>(S))
       forgetRanges(Written);
   }
+  if (!llvm::isa<CompoundStmt>(S) && !llvm::isa<IfStmt>(S) &&
+      !llvm::isa<AssignStmt>(S))
+    AtRoutineTail = false;
   StmtVisitor<CodeGenModule>::visitStmt(S);
+  AtRoutineTail = false;
   if (Track)
     forgetRanges(Written);
   releaseTemps(Mark); // the results held by its expressions
@@ -895,8 +906,12 @@ void CodeGenModule::visitEmptyStmt(EmptyStmt *){}
 /// variables, the rest is the protected part of a try-finally that frees
 /// them: their scope ends with the sequence, however it is left.
 void CodeGenModule::emitSequence(llvm::ArrayRef<Stmt *> Body){
+  bool Tail = AtRoutineTail;
+  AtRoutineTail = false;
   for (size_t I = 0; I < Body.size(); ++I) {
+    AtRoutineTail = Tail && (I + 1 == Body.size());
     visitStmt(Body[I]);
+    AtRoutineTail = false;
     auto *D = llvm::dyn_cast<VarDeclStmt>(Body[I]);
     if (!D)
       continue;
@@ -994,12 +1009,22 @@ bool CodeGenModule::ansiAppends(Expr *Value, VarDecl *V,
 }
 
 
-/// A direct call of a function (or through a procedural value) whose
-/// result is an ansistring: the reference it returns is new, so an
-/// assignment can move it instead of counting it and releasing it later.
+/// A fresh ansistring result (call, +, Copy/Concat, or char/pchar/shortstring
+/// conversion): its reference can move directly into an assignment target via
+/// __pas_astr_take instead of holding a temporary and recounting 1 -> 2 -> 1.
 bool CodeGenModule::isFreshAnsiCall(Expr *Value){
-  if (!Value->getType()->isAnsiString())
-    return false;
+  Value = skipParens(Value);
+  if (!Value->getType()->isAnsiString()) {
+    if (llvm::isa<StringLiteralExpr>(Value))
+      return false;
+    if (auto *N = llvm::dyn_cast<NameRefExpr>(unwrapConst(Value)))
+      if (auto *C = llvm::dyn_cast<ConstDecl>(N->getDecl());
+          C && C->getValue().K == ConstValue::String)
+        return false;
+    return true;
+  }
+  if (auto *Sum = llvm::dyn_cast<BinaryExpr>(Value))
+    return Sum->getOp() == BinaryOp::Add && !Sum->getOperator();
   if (llvm::isa<InheritedExpr>(Value) ||
       llvm::isa<IndirectCallExpr>(Value))
     return true;
@@ -1008,8 +1033,69 @@ bool CodeGenModule::isFreshAnsiCall(Expr *Value){
     return false;
   if (C->getCalleeValue())
     return true;
+  if (auto *BD = llvm::dyn_cast_or_null<BuiltinDecl>(C->getDecl()))
+    return BD->getBuiltinKind() == BuiltinKind::Copy ||
+           (BD->getBuiltinKind() == BuiltinKind::Concat &&
+            C->getArgs().size() >= 2);
   return llvm::isa_and_nonnull<RoutineDecl>(C->getDecl()) ||
          llvm::isa_and_nonnull<VarDecl>(C->getDecl());
+}
+
+
+bool CodeGenModule::canMoveAnsiLocalToResult(VarDecl *TV, Expr *Value,
+                                             bool TailMove){
+  if (!TailMove || !TV || !CurRoutine || !CurRoutine->isFunction() ||
+      CurRoutine->isAsync() || CurRoutine->isIterator() || !Cleanups.empty() ||
+      TV != CurRoutine->getResultVar())
+    return false;
+  auto *N = llvm::dyn_cast<NameRefExpr>(skipParens(Value));
+  if (!N || N->getWith())
+    return false;
+  auto *LV = llvm::dyn_cast_or_null<VarDecl>(N->getDecl());
+  if (!LV || LV == TV || !LV->getType()->isAnsiString() ||
+      LV->isCaptured() || FrameSlots.count(LV) || LV->isTypedConst() ||
+      LV->getAbsolute() || LV->isConstParam() || LV->isVarParam() ||
+      LV->isOutParam() || isByRef(LV))
+    return false;
+  for (VarDecl *P : CurRoutine->getParams())
+    if (P == LV)
+      return true;
+  for (Decl *D : CurRoutine->getBody()->getDecls())
+    if (D == LV)
+      return true;
+  return false;
+}
+
+
+void CodeGenModule::emitAnsiAssign(llvm::Value *Dst, Expr *Target, VarDecl *TV,
+                                   Expr *Value, bool TailMove){
+  if (canMoveAnsiLocalToResult(TV, Value, TailMove)) {
+    auto *LV = llvm::cast<VarDecl>(
+        llvm::cast<NameRefExpr>(skipParens(Value))->getDecl());
+    llvm::Value *SrcAddr = varAddress(LV);
+    llvm::Value *V = B.CreateLoad(B.getPtrTy(), SrcAddr, "ansi.move");
+    B.CreateStore(llvm::ConstantPointerNull::get(B.getPtrTy()), SrcAddr);
+    astrCall("__pas_astr_take", B.getVoidTy(), {Dst, V});
+    return;
+  }
+  bool Take = isFreshAnsiCall(Value) &&
+              (!Target || llvm::isa<NameRefExpr>(Target));
+  if (Take) {
+    NoHoldAnsiResult = true;
+    TookAnsiResult = false;
+  }
+  llvm::Value *V = emitAnsi(Value);
+  if (Take) {
+    NoHoldAnsiResult = false;
+    Take = TookAnsiResult;
+  }
+  if (!Dst)
+    Dst = emitAddress(Target);
+  if (Take) {
+    astrCall("__pas_astr_take", B.getVoidTy(), {Dst, V});
+    return;
+  }
+  storeValue(Dst, V, TV ? TV->getType() : Target->getType());
 }
 
 
@@ -1057,6 +1143,8 @@ bool CodeGenModule::emitResultInPlace(Expr *Target, Expr *Value, Type *TT){
 
 
 void CodeGenModule::visitAssignStmt(AssignStmt *S){
+  bool TailMove = AtRoutineTail;
+  AtRoutineTail = false;
   Expr *Target = S->getTarget(), *Value = S->getValue();
   Type *TT = Target->getType();
   // A variable of RangeLocals: the stored value's range from now on
@@ -1138,22 +1226,7 @@ void CodeGenModule::visitAssignStmt(AssignStmt *S){
         astrCall("__pas_astr_prepend", B.getVoidTy(), {Dst, emitAnsi(Prefix)});
       return;
     }
-    bool Take = isFreshAnsiCall(Value) && llvm::isa<NameRefExpr>(Target);
-    if (Take) {
-      NoHoldAnsiResult = true;
-      TookAnsiResult = false;
-    }
-    llvm::Value *V = emitAnsi(Value);
-    if (Take) {
-      NoHoldAnsiResult = false;
-      Take = TookAnsiResult;
-    }
-    llvm::Value *Dst = emitAddress(Target);
-    if (Take) {
-      astrCall("__pas_astr_take", B.getVoidTy(), {Dst, V});
-      return;
-    }
-    storeValue(Dst, V, TT);
+    emitAnsiAssign(nullptr, Target, TV, Value, TailMove);
     return;
   }
   if (TT->isStructured()) {
@@ -1432,9 +1505,13 @@ void CodeGenModule::visitProcCallStmt(ProcCallStmt *S){
       llvm::Value *Addr = varAddress(Result);
       if (auto *SS = llvm::dyn_cast<ShortStringType>(RT))
         emitStringAssign(Addr, SS, Value);
-      else if (RT->isAnsiString())
-        storeValue(Addr, emitAnsi(Value), RT);
-      else if (isMethodPointerType(RT) || RT->isClosureType())
+      else if (RT->isAnsiString()) {
+        bool TailMove = CurRoutine && CurRoutine->isFunction() &&
+                        !CurRoutine->isAsync() && !CurRoutine->isIterator() &&
+                        Cleanups.empty() &&
+                        !hasNonLocalLabels(*CurRoutine->getBody());
+        emitAnsiAssign(Addr, nullptr, Result, Value, TailMove);
+      } else if (isMethodPointerType(RT) || RT->isClosureType())
         storeValue(Addr, emitRoutinePair(Value, RT), RT);
       else if (RT->isStructured())
         copyValue(Addr, emitAddress(Value), RT);
@@ -1637,6 +1714,8 @@ void CodeGenModule::visitIndirectCallStmt(IndirectCallStmt *S){
 
 
 void CodeGenModule::visitIfStmt(IfStmt *S){
+  bool Tail = AtRoutineTail;
+  AtRoutineTail = false;
   llvm::Value *Cond = visitExpr(S->getCond());
   auto *ThenBB = newBlock("if.then");
   auto *EndBB = newBlock("if.end");
@@ -1644,12 +1723,16 @@ void CodeGenModule::visitIfStmt(IfStmt *S){
   B.CreateCondBr(Cond, ThenBB, ElseBB);
 
   B.SetInsertPoint(ThenBB);
+  AtRoutineTail = Tail;
   visitStmt(S->getThen());
+  AtRoutineTail = false;
   B.CreateBr(EndBB);
 
   if (S->getElse()) {
     B.SetInsertPoint(ElseBB);
+    AtRoutineTail = Tail;
     visitStmt(S->getElse());
+    AtRoutineTail = false;
     B.CreateBr(EndBB);
   }
   B.SetInsertPoint(EndBB);
@@ -2714,6 +2797,8 @@ llvm::Value *CodeGenModule::visitBinaryExpr(BinaryExpr *E){
     // (optimization3.md item 7): __pas_astr_join reads its pieces before
     // the fresh buffer is written, so no piece can be it. The middle
     // piece may be a character: an own byte, instead of a fresh string.
+    bool NoHold = NoHoldAnsiResult;
+    NoHoldAnsiResult = false;
     if (auto *BLHS = llvm::dyn_cast<BinaryExpr>(E->getLHS());
         BLHS && BLHS->getOp() == BinaryOp::Add &&
         BLHS->getType()->isAnsiString() &&
@@ -2730,8 +2815,8 @@ llvm::Value *CodeGenModule::visitBinaryExpr(BinaryExpr *E){
         N = B.getInt64(1);
       }
       llvm::Value *C = emitAnsi(E->getRHS());
-      return holdResult(
-          astrCall("__pas_astr_join", B.getPtrTy(), {A, M, N, C}));
+      return takeOrHoldAnsi(
+          astrCall("__pas_astr_join", B.getPtrTy(), {A, M, N, C}), NoHold);
     }
     // c + s and s + c, with the character on its own byte and the
     // string's or the empty end's characters as the nil side of the
@@ -2741,22 +2826,26 @@ llvm::Value *CodeGenModule::visitBinaryExpr(BinaryExpr *E){
         E->getRHS()->getType()->isAnsiString()) {
       llvm::Value *M = emitCharPiece(E->getLHS());
       llvm::Value *C = emitAnsi(E->getRHS());
-      return holdResult(astrCall(
-          "__pas_astr_join", B.getPtrTy(),
-          {llvm::ConstantPointerNull::get(B.getPtrTy()), M, B.getInt64(1),
-           C}));
+      return takeOrHoldAnsi(
+          astrCall("__pas_astr_join", B.getPtrTy(),
+                   {llvm::ConstantPointerNull::get(B.getPtrTy()), M,
+                    B.getInt64(1), C}),
+          NoHold);
     }
     if (E->getLHS()->getType()->isAnsiString() &&
         E->getRHS()->getType()->isCharLike()) {
       llvm::Value *L = emitAnsi(E->getLHS());
       llvm::Value *M = emitCharPiece(E->getRHS());
-      return holdResult(astrCall(
-          "__pas_astr_join", B.getPtrTy(),
-          {L, M, B.getInt64(1), llvm::ConstantPointerNull::get(B.getPtrTy())}));
+      return takeOrHoldAnsi(
+          astrCall("__pas_astr_join", B.getPtrTy(),
+                   {L, M, B.getInt64(1),
+                    llvm::ConstantPointerNull::get(B.getPtrTy())}),
+          NoHold);
     }
     llvm::Value *L = emitAnsi(E->getLHS());
     llvm::Value *R = emitAnsi(E->getRHS());
-    return holdResult(astrCall("__pas_astr_concat", B.getPtrTy(), {L, R}));
+    return takeOrHoldAnsi(astrCall("__pas_astr_concat", B.getPtrTy(), {L, R}),
+                          NoHold);
   }
   if (E->getType()->isShortString()) { // Turbo/FPC concatenation
     llvm::Value *Tmp = newStringTemp();
