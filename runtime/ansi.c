@@ -334,25 +334,36 @@ void __pas_astr_insert(char *src, char **p, int32_t index) {
   *p = r;
 }
 
-static inline void astr_append_bytes(char **p, const char *x, int64_t m) {
-  if (m <= 0)
-    return;
+/* Ensures *p is a writable buffer of length (*out_n + m) with terminating NUL,
+ * reusing/growing *p in place when it has a single reference and does not alias
+ * any input. When a fresh buffer is allocated instead, the previous *p is
+ * returned in *out_old so the caller can read inputs before releasing it. */
+static inline char *astr_prepare_append(char **p, int64_t m, const char *g1,
+                                        const char *g2, int extra_alias,
+                                        int64_t *out_n, char **out_old) {
+  if (m < 0 || m > INT32_MAX)
+    __pas_runtime_error("out of memory in a string");
   char *s = *p;
   if (!s) {
-    *p = from_chars_cap(x, m, str_capacity(0, m));
-    return;
+    char *r = alloc_str_cap(m, str_capacity(0, m));
+    *p = r;
+    *out_n = 0;
+    *out_old = NULL;
+    return r;
   }
   int64_t n = LEN(s);
   if (n < 0 || n > INT32_MAX - m)
     __pas_runtime_error("out of memory in a string");
   int64_t total = n + m;
-  if (s != x && PAS_RC_LOAD_ACQUIRE(REFS_PTR(s)) == 1) {
+  if (!extra_alias && s != g1 && s != g2 &&
+      PAS_RC_LOAD_ACQUIRE(REFS_PTR(s)) == 1) {
     AnsiHeader *h = HEADER(s);
     if (total <= h->capacity) {
-      memcpy(s + n, x, (size_t)m);
       s[total] = '\0';
       h->length = total;
-      return;
+      *out_n = n;
+      *out_old = NULL;
+      return s;
     }
     int64_t cap = str_capacity(h->capacity, total);
     AnsiHeader *nh = realloc(h, str_alloc_size(cap));
@@ -361,17 +372,29 @@ static inline void astr_append_bytes(char **p, const char *x, int64_t m) {
     nh->capacity = cap;
     nh->length = total;
     char *r = (char *)(nh + 1);
-    memcpy(r + n, x, (size_t)m);
     r[total] = '\0';
     *p = r;
-    return;
+    *out_n = n;
+    *out_old = NULL;
+    return r;
   }
   char *r = alloc_str_cap(total, str_capacity(n, total));
   if (n > 0)
     memcpy(r, s, (size_t)n);
-  memcpy(r + n, x, (size_t)m);
-  release(s);
   *p = r;
+  *out_n = n;
+  *out_old = s;
+  return r;
+}
+
+static inline void astr_append_bytes(char **p, const char *x, int64_t m) {
+  if (m <= 0)
+    return;
+  int64_t n = 0;
+  char *old = NULL;
+  char *r = astr_prepare_append(p, m, x, NULL, 0, &n, &old);
+  memcpy(r + n, x, (size_t)m);
+  release(old);
 }
 
 /* s := s + x: appends to s in place when s is the only reference to its
@@ -382,6 +405,78 @@ void __pas_astr_append(char **p, char *x) {
 
 void __pas_astr_append_char(char **p, char c) {
   astr_append_bytes(p, &c, 1);
+}
+
+void __pas_astr_append2(char **p, char *a, char *b) {
+  int64_t la = LEN(a), lb = LEN(b);
+  if (la < 0 || lb < 0 || la > INT32_MAX - lb)
+    __pas_runtime_error("out of memory in a string");
+  int64_t m = la + lb;
+  if (m == 0)
+    return;
+  int64_t n = 0;
+  char *old = NULL;
+  char *r = astr_prepare_append(p, m, a, b, 0, &n, &old);
+  if (la > 0)
+    memcpy(r + n, a, (size_t)la);
+  if (lb > 0)
+    memcpy(r + n + la, b, (size_t)lb);
+  release(old);
+}
+
+void __pas_astr_append_sc(char **p, char *x, char c) {
+  int64_t lx = LEN(x);
+  if (lx < 0 || lx > INT32_MAX - 1)
+    __pas_runtime_error("out of memory in a string");
+  int64_t n = 0;
+  char *old = NULL;
+  char *r = astr_prepare_append(p, lx + 1, x, NULL, 0, &n, &old);
+  if (lx > 0)
+    memcpy(r + n, x, (size_t)lx);
+  r[n + lx] = c;
+  release(old);
+}
+
+void __pas_astr_append_cs(char **p, char c, char *x) {
+  int64_t lx = LEN(x);
+  if (lx < 0 || lx > INT32_MAX - 1)
+    __pas_runtime_error("out of memory in a string");
+  int64_t n = 0;
+  char *old = NULL;
+  char *r = astr_prepare_append(p, 1 + lx, x, NULL, 0, &n, &old);
+  r[n] = c;
+  if (lx > 0)
+    memcpy(r + n + 1, x, (size_t)lx);
+  release(old);
+}
+
+void __pas_astr_append_n(char **p, const char *const *ptrs, const int64_t *lens,
+                         int64_t count) {
+  int64_t m = 0;
+  char *s = *p;
+  int aliased = 0;
+  for (int64_t i = 0; i < count; ++i) {
+    int64_t l = lens[i] < 0 ? LEN(ptrs[i]) : lens[i];
+    if (l < 0 || m > INT32_MAX - l)
+      __pas_runtime_error("out of memory in a string");
+    m += l;
+    if (s && ptrs[i] == s)
+      aliased = 1;
+  }
+  if (m == 0)
+    return;
+  int64_t n = 0;
+  char *old = NULL;
+  char *r = astr_prepare_append(p, m, NULL, NULL, aliased, &n, &old);
+  int64_t off = n;
+  for (int64_t i = 0; i < count; ++i) {
+    int64_t l = lens[i] < 0 ? LEN(ptrs[i]) : lens[i];
+    if (l > 0) {
+      memcpy(r + off, ptrs[i], (size_t)l);
+      off += l;
+    }
+  }
+  release(old);
 }
 
 static inline void astr_prepend_bytes(char **p, const char *x, int64_t m) {

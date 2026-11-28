@@ -220,6 +220,11 @@ void __pas_astr_insert(char *src, char **p, int32_t index);
 /* s := s + x, in place when s is the only reference to its characters. */
 void __pas_astr_append(char **p, char *x);
 void __pas_astr_append_char(char **p, char c);
+void __pas_astr_append2(char **p, char *a, char *b);
+void __pas_astr_append_sc(char **p, char *x, char c);
+void __pas_astr_append_cs(char **p, char c, char *x);
+void __pas_astr_append_n(char **p, const char *const *ptrs, const int64_t *lens,
+                         int64_t count);
 /* s := x + s, in place when s is the only reference to its characters. */
 void __pas_astr_prepend(char **p, char *x);
 void __pas_astr_prepend_char(char **p, char c);

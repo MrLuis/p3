@@ -1201,14 +1201,41 @@ void CodeGenModule::visitAssignStmt(AssignStmt *S){
         }
       if (Safe) {
         llvm::Value *Dst = emitAddress(Target);
+        if (Parts.size() == 2 && (!Parts[0]->getType()->isCharLike() ||
+                                  !Parts[1]->getType()->isCharLike())) {
+          bool C0 = Parts[0]->getType()->isCharLike();
+          bool C1 = Parts[1]->getType()->isCharLike();
+          llvm::Value *V0 = C0 ? emitCharValue(Parts[0]) : emitAnsi(Parts[0]);
+          llvm::Value *V1 = C1 ? emitCharValue(Parts[1]) : emitAnsi(Parts[1]);
+          if (!C0 && C1)
+            astrCall("__pas_astr_append_sc", B.getVoidTy(), {Dst, V0, V1});
+          else if (C0 && !C1)
+            astrCall("__pas_astr_append_cs", B.getVoidTy(), {Dst, V0, V1});
+          else
+            astrCall("__pas_astr_append2", B.getVoidTy(), {Dst, V0, V1});
+          return;
+        }
         llvm::SmallVector<llvm::Value *, 4> Values;
         for (Expr *P : Parts)
-          Values.push_back(P->getType()->isCharLike() ? emitCharValue(P)
+          Values.push_back(P->getType()->isCharLike() ? emitCharPiece(P)
                                                       : emitAnsi(P));
-        for (size_t I = 0; I < Parts.size(); ++I)
-          astrCall(Parts[I]->getType()->isCharLike() ? "__pas_astr_append_char"
-                                                     : "__pas_astr_append",
-                   B.getVoidTy(), {Dst, Values[I]});
+        llvm::Type *PtrArrTy = llvm::ArrayType::get(B.getPtrTy(), Parts.size());
+        llvm::Type *LenArrTy =
+            llvm::ArrayType::get(B.getInt64Ty(), Parts.size());
+        llvm::Value *Ptrs = createTemp(PtrArrTy, "append.ptrs");
+        llvm::Value *Lens = createTemp(LenArrTy, "append.lens");
+        for (size_t I = 0; I < Parts.size(); ++I) {
+          B.CreateStore(
+              Values[I],
+              B.CreateInBoundsGEP(PtrArrTy, Ptrs,
+                                  {B.getInt64(0), B.getInt64(I)}));
+          B.CreateStore(
+              B.getInt64(Parts[I]->getType()->isCharLike() ? 1 : -1),
+              B.CreateInBoundsGEP(LenArrTy, Lens,
+                                  {B.getInt64(0), B.getInt64(I)}));
+        }
+        astrCall("__pas_astr_append_n", B.getVoidTy(),
+                 {Dst, Ptrs, Lens, B.getInt64(Parts.size())});
         return;
       }
     }

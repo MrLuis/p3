@@ -825,10 +825,12 @@ var
   tt: PType;
   dst, src, pair, v: TV;
   p: PDecl;
-  tailMove, safe: boolean;
+  tailMove, safe, c0, c1: boolean;
   dV: PDecl;
   parts, vals: TPtrList;
   k: longint;
+  v0, v1, ptrs, lens, slot: TV;
+  ptrArrT, lenArrT: PIRType;
 begin
   tailMove := atRoutineTail;
   atRoutineTail := false;
@@ -886,25 +888,55 @@ begin
       if safe then
       begin
         dst := emitAddress(target);
+        if (parts.count = 2) and
+           ((not isCharLike(PNode(listGet(parts, 0))^.typ)) or
+            (not isCharLike(PNode(listGet(parts, 1))^.typ))) then
+        begin
+          c0 := isCharLike(PNode(listGet(parts, 0))^.typ);
+          c1 := isCharLike(PNode(listGet(parts, 1))^.typ);
+          if c0 then
+            v0 := emitCharValue(PNode(listGet(parts, 0)))
+          else
+            v0 := emitAnsi(PNode(listGet(parts, 0)));
+          if c1 then
+            v1 := emitCharValue(PNode(listGet(parts, 1)))
+          else
+            v1 := emitAnsi(PNode(listGet(parts, 1)));
+          if (not c0) and c1 then
+            astrV3('__pas_astr_append_sc', 'ptr,ptr,i8', dst, v0, v1)
+          else if c0 and (not c1) then
+            astrV3('__pas_astr_append_cs', 'ptr,i8,ptr', dst, v0, v1)
+          else
+            astrV3('__pas_astr_append2', 'ptr,ptr,ptr', dst, v0, v1);
+          listFree(parts);
+          exit;
+        end;
         listInit(vals);
         for k := 0 to parts.count - 1 do
         begin
           more := PNode(listGet(parts, k));
           if isCharLike(more^.typ) then
-            listAdd(vals, irBox(emitCharValue(more)))
+            listAdd(vals, irBox(emitCharPiece(more)))
           else
             listAdd(vals, irBox(emitAnsi(more)));
         end;
+        ptrArrT := irArray(parts.count, irPtrT);
+        lenArrT := irArray(parts.count, irI64);
+        ptrs := irCreateTemp(ptrArrT, 'append.ptrs');
+        lens := irCreateTemp(lenArrT, 'append.lens');
         for k := 0 to vals.count - 1 do
         begin
           more := PNode(listGet(parts, k));
+          slot := irGEP2(ptrArrT, ptrs, i64c(0), i64c(k), '');
+          irStore(PTVBox(listGet(vals, k))^, slot);
+          slot := irGEP2(lenArrT, lens, i64c(0), i64c(k), '');
           if isCharLike(more^.typ) then
-            astrV2('__pas_astr_append_char', 'ptr,i8', dst,
-                   PTVBox(listGet(vals, k))^)
+            irStore(i64c(1), slot)
           else
-            astrV2('__pas_astr_append', 'ptr,ptr', dst,
-                   PTVBox(listGet(vals, k))^);
+            irStore(i64c(-1), slot);
         end;
+        astrV4('__pas_astr_append_n', 'ptr,ptr,ptr,i64', dst, ptrs, lens,
+               i64c(parts.count));
         listFree(vals);
         listFree(parts);
         exit;

@@ -2484,6 +2484,13 @@ begin
   ignored := call3(classRuntime(name, 'void', params), x, y, z, '');
 end;
 
+procedure astrV4(const name, params: string; const x, y, z, w: TV);
+var
+  ignored: TV;
+begin
+  ignored := call4(classRuntime(name, 'void', params), x, y, z, w, '');
+end;
+
 { --- Dynamic arrays --- }
 
 function dynLength(const a: TV): TV;

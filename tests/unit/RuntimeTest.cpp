@@ -74,6 +74,30 @@ TEST(RuntimeAnsi, StringOperations) {
   __pas_astr_setlength(&built, 4);
   EXPECT_EQ(std::string(built), "^hel");
 
+  /* Coalesced multi-part append helpers (2-part, N-part, CoW, self-alias) */
+  char *multi = nullptr;
+  __pas_astr_append_sc(&multi, a, ' ');
+  __pas_astr_append_cs(&multi, '[', b);
+  __pas_astr_append2(&multi, a, b);
+  EXPECT_EQ(std::string(multi), "hello [worldhelloworld");
+
+  char *multiAlias = nullptr;
+  __pas_astr_assign(&multiAlias, multi);
+  const char *pPtrs[3] = {"!", multi, "?"};
+  int64_t pLens[3] = {1, -1, 1};
+  __pas_astr_append_n(&multi, pPtrs, pLens, 3);
+  EXPECT_EQ(std::string(multiAlias), "hello [worldhelloworld");
+  EXPECT_EQ(std::string(multi),
+            "hello [worldhelloworld!hello [worldhelloworld?");
+
+  /* Self-alias with refs == 1 */
+  __pas_astr_clear(&multiAlias);
+  __pas_astr_append_sc(&multi, multi, '!');
+  EXPECT_EQ(std::string(multi),
+            "hello [worldhelloworld!hello [worldhelloworld?"
+            "hello [worldhelloworld!hello [worldhelloworld?!");
+
+  __pas_astr_clear(&multi);
   __pas_astr_clear(&built);
   __pas_astr_clear(&builtAlias);
   __pas_astr_clear(&a);
