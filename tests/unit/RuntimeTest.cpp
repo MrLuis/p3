@@ -98,6 +98,23 @@ TEST(RuntimeAnsi, StringOperations) {
             "hello [worldhelloworld!hello [worldhelloworld?!");
 
   __pas_astr_clear(&multi);
+  /* Small-string pool reuse, eviction past cap, realloc growth, and shrink */
+  std::vector<char *> poolKeep;
+  for (int i = 0; i < 48; ++i)
+    poolKeep.push_back(__pas_astr_from_cstr("tiny"));
+  for (char *&p : poolKeep)
+    __pas_astr_clear(&p);
+  char *reused = __pas_astr_from_cstr("short");
+  char *tail = __pas_astr_from_cstr("012345678901234567890123456789");
+  __pas_astr_append(&reused, tail);
+  EXPECT_EQ(__pas_astr_length(reused), 35);
+  __pas_astr_setlength(&reused, 3);
+  EXPECT_EQ(std::string(reused), "sho");
+  __pas_astr_clear(&tail);
+  __pas_astr_clear(&reused);
+  char *mid = __pas_astr_from_cstr("twenty_chars_long_12");
+  __pas_astr_clear(&mid);
+
   __pas_astr_clear(&built);
   __pas_astr_clear(&builtAlias);
   __pas_astr_clear(&a);

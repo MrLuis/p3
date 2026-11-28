@@ -45,13 +45,50 @@ static int64_t str_capacity(int64_t current, int64_t needed) {
   return cap > INT32_MAX ? INT32_MAX : cap;
 }
 
+#define ASTR_POOL_CAP 32
+/* External linkage so libpascalrt.ll (available_externally) and libpascalrt.a
+ * share a single pool instance instead of duplicating static globals. */
+AnsiHeader *__pas_astr_pool15[ASTR_POOL_CAP] = {0};
+int32_t __pas_astr_pool15_n = 0;
+AnsiHeader *__pas_astr_pool39[ASTR_POOL_CAP] = {0};
+int32_t __pas_astr_pool39_n = 0;
+
+static inline void free_str_header(AnsiHeader *h) {
+  if (!__pas_threads_started) {
+    int64_t cap = h->capacity;
+    if (cap == 15 && __pas_astr_pool15_n < ASTR_POOL_CAP) {
+      __pas_astr_pool15[__pas_astr_pool15_n++] = h;
+      return;
+    }
+    if (cap == 39 && __pas_astr_pool39_n < ASTR_POOL_CAP) {
+      __pas_astr_pool39[__pas_astr_pool39_n++] = h;
+      return;
+    }
+  }
+  free(h);
+}
+
 static char *alloc_str_cap(int64_t len, int64_t cap) {
   if (cap < len)
     cap = len;
-  AnsiHeader *h = malloc(str_alloc_size(cap));
-  if (!h)
-    __pas_runtime_error("out of memory in a string");
-  h->capacity = cap;
+  AnsiHeader *h = NULL;
+  if (!__pas_threads_started) {
+    if (cap <= 15) {
+      cap = 15;
+      if (__pas_astr_pool15_n > 0)
+        h = __pas_astr_pool15[--__pas_astr_pool15_n];
+    } else if (cap <= 39) {
+      cap = 39;
+      if (__pas_astr_pool39_n > 0)
+        h = __pas_astr_pool39[--__pas_astr_pool39_n];
+    }
+  }
+  if (!h) {
+    h = malloc(str_alloc_size(cap));
+    if (!h)
+      __pas_runtime_error("out of memory in a string");
+    h->capacity = cap;
+  }
   h->refs = 1;
   h->length = len;
   char *s = (char *)(h + 1);
@@ -102,7 +139,7 @@ static void release(char *s) {
   if (!__pas_threads_started) {
     int64_t r = *rp;
     if (r == 1)
-      free(HEADER(s));
+      free_str_header(HEADER(s));
     else if (r > 1)
       *rp = r - 1;
     return;
@@ -504,7 +541,7 @@ static inline void astr_prepend_bytes(char **p, const char *x, int64_t m) {
     memcpy(r, x, (size_t)m);
     if (n > 0)
       memcpy(r + m, s, (size_t)n);
-    free(h);
+    free_str_header(h);
     *p = r;
     return;
   }
