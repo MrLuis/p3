@@ -2264,6 +2264,151 @@ void CodeGenModule::visitRepeatStmt(RepeatStmt *S){
 //   if i == final goto end                 (test before stepping: no
 // inc:                                      overflow at maxint)
 //   next = i + 1 (- 1); goto loop
+static Expr *unwrapParensExpr(Expr *E) {
+  while (auto *P = llvm::dyn_cast_or_null<ParenExpr>(E))
+    E = P->getInner();
+  return E;
+}
+
+static bool hasOuterLoopJump(Stmt *S, unsigned LoopDepth) {
+  if (!S)
+    return false;
+  if (auto *C = llvm::dyn_cast<CompoundStmt>(S)) {
+    for (Stmt *Sub : C->getBody())
+      if (hasOuterLoopJump(Sub, LoopDepth))
+        return true;
+    return false;
+  }
+  if (auto *I = llvm::dyn_cast<IfStmt>(S))
+    return hasOuterLoopJump(I->getThen(), LoopDepth) ||
+           hasOuterLoopJump(I->getElse(), LoopDepth);
+  if (auto *C = llvm::dyn_cast<CaseStmt>(S)) {
+    for (CaseArm *A : C->getArms())
+      if (hasOuterLoopJump(A->getBody(), LoopDepth))
+        return true;
+    for (Stmt *E : C->getElseBody())
+      if (hasOuterLoopJump(E, LoopDepth))
+        return true;
+    return false;
+  }
+  if (auto *W = llvm::dyn_cast<WithStmt>(S))
+    return hasOuterLoopJump(W->getBody(), LoopDepth);
+  if (auto *W = llvm::dyn_cast<WhileStmt>(S))
+    return hasOuterLoopJump(W->getBody(), LoopDepth + 1);
+  if (auto *R = llvm::dyn_cast<RepeatStmt>(S)) {
+    for (Stmt *Sub : R->getBody())
+      if (hasOuterLoopJump(Sub, LoopDepth + 1))
+        return true;
+    return false;
+  }
+  if (auto *F = llvm::dyn_cast<ForStmt>(S))
+    return hasOuterLoopJump(F->getBody(), LoopDepth + 1);
+  if (auto *F = llvm::dyn_cast<ForInStmt>(S))
+    return hasOuterLoopJump(F->getStep(), LoopDepth + 1) ||
+           hasOuterLoopJump(F->getBody(), LoopDepth + 1);
+  if (auto *P = llvm::dyn_cast<ProcCallStmt>(S)) {
+    if (auto *BD = llvm::dyn_cast_or_null<BuiltinDecl>(P->getDecl())) {
+      BuiltinKind K = BD->getBuiltinKind();
+      if (K == BuiltinKind::Break || K == BuiltinKind::Continue)
+        return LoopDepth == 0;
+      if (K == BuiltinKind::Exit || K == BuiltinKind::Halt)
+        return true;
+    }
+    return false;
+  }
+  if (llvm::isa<LabeledStmt>(S) || llvm::isa<GotoStmt>(S) ||
+      llvm::isa<TryStmt>(S) || llvm::isa<ScopeStmt>(S) ||
+      llvm::isa<RaiseStmt>(S) || llvm::isa<YieldStmt>(S) ||
+      llvm::isa<DetachedStmt>(S))
+    return true;
+  return false;
+}
+
+static bool isPureInvariantForK(Expr *E, RoutineDecl *CurRoutine, VarDecl *ForV,
+                                const VarSet &WrittenInBody) {
+  E = unwrapParensExpr(E);
+  if (!E)
+    return false;
+  if (llvm::isa<IntegerLiteralExpr>(E))
+    return true;
+  if (auto *N = llvm::dyn_cast<NameRefExpr>(E)) {
+    if (N->getWith())
+      return false;
+    Decl *D = N->getDecl();
+    if (llvm::isa_and_nonnull<ConstDecl>(D))
+      return true;
+    auto *KV = llvm::dyn_cast_or_null<VarDecl>(D);
+    if (!KV || KV == ForV || WrittenInBody.count(KV) ||
+        KV->getAbsolute() || KV->getAbsoluteRoot() ||
+        KV->getOwner() != CurRoutine || KV->isCaptured() ||
+        KV->isAliased() || KV->isVarParam() || KV->isOutParam())
+      return false;
+    return true;
+  }
+  if (auto *U = llvm::dyn_cast<UnaryExpr>(E))
+    return !U->getOperator() &&
+           (U->getOp() == UnaryOp::Plus || U->getOp() == UnaryOp::Minus ||
+            U->getOp() == UnaryOp::Not) &&
+           isPureInvariantForK(U->getOperand(), CurRoutine, ForV, WrittenInBody);
+  if (auto *B = llvm::dyn_cast<BinaryExpr>(E)) {
+    if (B->getOperator())
+      return false;
+    switch (B->getOp()) {
+    case BinaryOp::Add:
+    case BinaryOp::Sub:
+    case BinaryOp::Mul:
+    case BinaryOp::Shl:
+    case BinaryOp::Shr:
+    case BinaryOp::And:
+    case BinaryOp::Or:
+    case BinaryOp::Xor:
+      return isPureInvariantForK(B->getLHS(), CurRoutine, ForV, WrittenInBody) &&
+             isPureInvariantForK(B->getRHS(), CurRoutine, ForV, WrittenInBody);
+    default:
+      return false;
+    }
+  }
+  return false;
+}
+
+static bool matchExclusionForBody(ForStmt *S, RoutineDecl *CurRoutine,
+                                  VarDecl *V, Expr *&KExpr, Stmt *&ThenStmt) {
+  if (V->isCaptured() || V->isAliased() ||
+      V->getAbsolute() || V->getAbsoluteRoot())
+    return false;
+  Stmt *Single = S->getBody();
+  while (auto *C = llvm::dyn_cast_or_null<CompoundStmt>(Single)) {
+    if (C->getBody().size() != 1)
+      return false;
+    Single = C->getBody()[0];
+  }
+  auto *If = llvm::dyn_cast_or_null<IfStmt>(Single);
+  if (!If || If->getElse() || !If->getThen())
+    return false;
+  auto *Cond = llvm::dyn_cast_or_null<BinaryExpr>(unwrapParensExpr(If->getCond()));
+  if (!Cond || Cond->getOp() != BinaryOp::Ne || Cond->getOperator())
+    return false;
+  Expr *LHS = unwrapParensExpr(Cond->getLHS());
+  Expr *RHS = unwrapParensExpr(Cond->getRHS());
+  if (PinAnalysis::plainAssignTarget(LHS) == V)
+    KExpr = Cond->getRHS();
+  else if (PinAnalysis::plainAssignTarget(RHS) == V)
+    KExpr = Cond->getLHS();
+  else
+    return false;
+  if (!KExpr)
+    return false;
+  ThenStmt = If->getThen();
+  if (hasOuterLoopJump(ThenStmt, 0))
+    return false;
+  VarSet WrittenInThen;
+  PinAnalysis(CurRoutine).writtenBy(ThenStmt, WrittenInThen);
+  if (WrittenInThen.count(V))
+    return false;
+  return isPureInvariantForK(KExpr, CurRoutine, V, WrittenInThen);
+}
+
+
 void CodeGenModule::visitForStmt(ForStmt *S){
   auto *V = llvm::cast<VarDecl>(S->getVar()->getDecl());
   Type *VarTy = V->getType();
@@ -2305,10 +2450,20 @@ void CodeGenModule::visitForStmt(ForStmt *S){
           : (Down ? B.CreateICmpSGE(Start64, Final64)
                   : B.CreateICmpSLE(Start64, Final64));
   (void)Signed;
+  Expr *ExclKExpr = nullptr;
+  Stmt *ExclThenStmt = nullptr;
+  bool SplitExcl =
+      VarTy && VarTy->isIntegerLike() && Signed && !isQWord(VarTy) &&
+      matchExclusionForBody(S, CurRoutine, V, ExclKExpr, ExclThenStmt) &&
+      ExclKExpr->getType() && ExclKExpr->getType()->isIntegerLike() &&
+      isSignedOrdinal(ExclKExpr->getType()) && !isQWord(ExclKExpr->getType());
   auto *CheckBB = newBlock("for.check");
-  auto *LoopBB = newBlock("for.body");
-  auto *LatchBB = newBlock("for.latch");
-  auto *IncBB = newBlock("for.inc");
+  llvm::BasicBlock *LoopBB = nullptr, *LatchBB = nullptr, *IncBB = nullptr;
+  if (!SplitExcl) {
+    LoopBB = newBlock("for.body");
+    LatchBB = newBlock("for.latch");
+    IncBB = newBlock("for.inc");
+  }
   auto *EndBB = newBlock("for.end");
   B.CreateCondBr(Enter, CheckBB, EndBB);
 
@@ -2383,19 +2538,17 @@ void CodeGenModule::visitForStmt(ForStmt *S){
     for (unsigned HI = 0; HI < Hoists.size(); ++HI)
       CheckedBases.push_back({Hoists[HI].first, Datas[HI]});
   }
-  B.CreateBr(LoopBB);
+  llvm::Value *ExclK64 = nullptr;
+  if (SplitExcl) {
+    llvm::Value *KVal = visitExpr(ExclKExpr);
+    ExclK64 = toI64(KVal, ExclKExpr->getType());
+  }
 
-  B.SetInsertPoint(LoopBB);
-  llvm::PHINode *I = B.CreatePHI(Start->getType(), 2, V->getName().Name);
-  I->addIncoming(Start, B.GetInsertBlock()->getSinglePredecessor());
-  storeScalar(varAddress(V), I, VarTy,
-              !(V->isAliased() || V->getAbsolute() != nullptr ||
-                (V->getAbsoluteRoot() && V->getAbsoluteRoot()->isAliased())));
   auto OldRange = VarRanges.find(V);
   bool HadRange = OldRange != VarRanges.end();
   ValueRange Saved = HadRange ? OldRange->second : ValueRange{};
   ValueRange StartRange = rangeOfValue(Start), FinalRange = rangeOfValue(Final);
-  ValueRange ForTR;
+  ValueRange ForTR, ForVR;
   if (isSignedOrdinal(VarTy) && signedRange(intBits(VarTy), ForTR) &&
       (StartRange.Known || FinalRange.Known)) {
     // Only entered when Start <= Final (to) or Start >= Final (downto), so
@@ -2410,11 +2563,7 @@ void CodeGenModule::visitForStmt(ForStmt *S){
                       : (FinalRange.Known ? std::min(ForTR.Hi, FinalRange.Hi)
                                           : ForTR.Hi);
     if (Lo <= Hi)
-      VarRanges[V] = {true, Lo, Hi};
-    else
-      VarRanges.erase(V);
-  } else {
-    VarRanges.erase(V);
+      ForVR = {true, Lo, Hi};
   }
   // At most Trips iterations: an accumulator stays within its start
   // range plus Trips times the most one iteration adds (or subtracts),
@@ -2461,14 +2610,12 @@ void CodeGenModule::visitForStmt(ForStmt *S){
         Bounds.push_back({A, {true, 0, ModM}});
     }
   }
-  forgetRanges(Written);
   for (auto &[A, R] : Bounds) {
     auto It = LoopRanges.find(A);
     OldLoop.push_back({A, It != LoopRanges.end()
                               ? std::optional<ValueRange>(It->second)
                               : std::nullopt});
     LoopRanges[A] = R;
-    VarRanges[A] = R;
   }
   VarDecl *GrowArr = nullptr;
   const Stmt *GrowStmt = nullptr;
@@ -2511,10 +2658,8 @@ void CodeGenModule::visitForStmt(ForStmt *S){
     }
   }
   VarSet WrittenReal;
-  if (!RealRangeLocals.empty()) {
+  if (!RealRangeLocals.empty())
     WrittenReal = realRangeLocalsWrittenBy(S);
-    forgetRealBounds(WrittenReal);
-  }
   VarDecl *BoundVar = nullptr;
   bool HadBoundRange = false;
   ValueRange SavedBoundRange;
@@ -2562,8 +2707,97 @@ void CodeGenModule::visitForStmt(ForStmt *S){
   }
   if (HaveGrow)
     ActiveDynGrows.push_back({GrowStmt, V, GrowArr});
-  Loops.push_back({LatchBB, EndBB, Cleanups.size()});
-  visitStmt(S->getBody());
+
+  auto EmitForRange = [&](llvm::Value *SubStart, llvm::Value *SubFinal,
+                          llvm::BasicBlock *SubLoopBB,
+                          llvm::BasicBlock *SubLatchBB,
+                          llvm::BasicBlock *SubIncBB,
+                          llvm::BasicBlock *SubEndBB, Stmt *SubBody) {
+    llvm::BasicBlock *PreBB = B.GetInsertBlock();
+    B.CreateBr(SubLoopBB);
+
+    B.SetInsertPoint(SubLoopBB);
+    llvm::PHINode *I = B.CreatePHI(SubStart->getType(), 2, V->getName().Name);
+    I->addIncoming(SubStart, PreBB);
+    storeScalar(varAddress(V), I, VarTy,
+                !(V->isAliased() || V->getAbsolute() != nullptr ||
+                  (V->getAbsoluteRoot() && V->getAbsoluteRoot()->isAliased())));
+    if (ForVR.Known)
+      VarRanges[V] = ForVR;
+    else
+      VarRanges.erase(V);
+    forgetRanges(Written);
+    for (auto &[A, R] : Bounds)
+      VarRanges[A] = R;
+    if (!WrittenReal.empty())
+      forgetRealBounds(WrittenReal);
+    Loops.push_back({SubLatchBB, SubEndBB, Cleanups.size()});
+    visitStmt(SubBody);
+    Loops.pop_back();
+    B.CreateBr(SubLatchBB);
+
+    B.SetInsertPoint(SubLatchBB);
+    B.CreateCondBr(B.CreateICmpEQ(I, SubFinal, "for.done"), SubEndBB, SubIncBB);
+
+    B.SetInsertPoint(SubIncBB);
+    llvm::Value *One = llvm::ConstantInt::get(I->getType(), 1);
+    llvm::Value *Next = Down ? B.CreateSub(I, One, "for.next")
+                             : B.CreateAdd(I, One, "for.next");
+    I->addIncoming(Next, SubIncBB);
+    B.CreateBr(SubLoopBB);
+  };
+
+  if (!SplitExcl) {
+    EmitForRange(Start, Final, LoopBB, LatchBB, IncBB, EndBB, S->getBody());
+  } else {
+    auto TruncToVar = [&](llvm::Value *Val64) -> llvm::Value * {
+      return Val64->getType() == Start->getType()
+                 ? Val64
+                 : B.CreateTrunc(Val64, Start->getType());
+    };
+    llvm::Value *Enter1 = Down ? B.CreateICmpSGT(Start64, ExclK64)
+                               : B.CreateICmpSLT(Start64, ExclK64);
+    auto *Sub1BB = newBlock("for.sub1");
+    auto *Join1BB = newBlock("for.split");
+    auto *Sub1LoopBB = newBlock("for.body");
+    auto *Sub1LatchBB = newBlock("for.latch");
+    auto *Sub1IncBB = newBlock("for.inc");
+    B.CreateCondBr(Enter1, Sub1BB, Join1BB);
+
+    B.SetInsertPoint(Sub1BB);
+    llvm::Value *SubF64;
+    if (Down) {
+      llvm::Value *Kp1 = B.CreateAdd(ExclK64, B.getInt64(1));
+      SubF64 = B.CreateSelect(B.CreateICmpSGT(Kp1, Final64), Kp1, Final64);
+    } else {
+      llvm::Value *Km1 = B.CreateSub(ExclK64, B.getInt64(1));
+      SubF64 = B.CreateSelect(B.CreateICmpSLT(Km1, Final64), Km1, Final64);
+    }
+    EmitForRange(Start, TruncToVar(SubF64), Sub1LoopBB, Sub1LatchBB, Sub1IncBB,
+                 Join1BB, ExclThenStmt);
+
+    B.SetInsertPoint(Join1BB);
+    llvm::Value *Enter2 = Down ? B.CreateICmpSGT(ExclK64, Final64)
+                               : B.CreateICmpSLT(ExclK64, Final64);
+    auto *Sub2BB = newBlock("for.sub2");
+    auto *Sub2LoopBB = newBlock("for.body");
+    auto *Sub2LatchBB = newBlock("for.latch");
+    auto *Sub2IncBB = newBlock("for.inc");
+    B.CreateCondBr(Enter2, Sub2BB, EndBB);
+
+    B.SetInsertPoint(Sub2BB);
+    llvm::Value *SubS64;
+    if (Down) {
+      llvm::Value *Km1 = B.CreateSub(ExclK64, B.getInt64(1));
+      SubS64 = B.CreateSelect(B.CreateICmpSLT(Km1, Start64), Km1, Start64);
+    } else {
+      llvm::Value *Kp1 = B.CreateAdd(ExclK64, B.getInt64(1));
+      SubS64 = B.CreateSelect(B.CreateICmpSGT(Kp1, Start64), Kp1, Start64);
+    }
+    EmitForRange(TruncToVar(SubS64), Final, Sub2LoopBB, Sub2LatchBB, Sub2IncBB,
+                 EndBB, ExclThenStmt);
+  }
+
   if (BoundVar) {
     if (HadBoundRange)
       VarRanges[BoundVar] = SavedBoundRange;
@@ -2585,7 +2819,6 @@ void CodeGenModule::visitForStmt(ForStmt *S){
   if (Hoisted)
     for (unsigned K = 0; K < Hoists.size(); ++K)
       CheckedBases.pop_back(); // (the loop's own, innermost last)
-  Loops.pop_back();
   invalidateRangeLocalLength(V);
   if (HadRange)
     VarRanges[V] = Saved;
@@ -2600,16 +2833,6 @@ void CodeGenModule::visitForStmt(ForStmt *S){
   forgetRanges(Written);
   for (auto &[A, R] : Bounds)
     VarRanges[A] = R;
-  B.CreateBr(LatchBB);
-  B.SetInsertPoint(LatchBB);
-  B.CreateCondBr(B.CreateICmpEQ(I, Final, "for.done"), EndBB, IncBB);
-
-  B.SetInsertPoint(IncBB);
-  llvm::Value *One = llvm::ConstantInt::get(I->getType(), 1);
-  llvm::Value *Next = Down ? B.CreateSub(I, One, "for.next")
-                           : B.CreateAdd(I, One, "for.next");
-  I->addIncoming(Next, IncBB);
-  B.CreateBr(LoopBB);
 
   B.SetInsertPoint(EndBB);
 }

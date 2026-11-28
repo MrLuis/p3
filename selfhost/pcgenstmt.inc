@@ -2072,14 +2072,183 @@ type
 
 procedure hoistableBases(s: PNode; var outHoists: TPtrList); forward;
 
+function hasOuterLoopJump(s: PNode; loopDepth: longint): boolean;
+var
+  k, m: longint;
+  arm: PCaseArm;
+begin
+  if s = nil then
+    exit(false);
+  case s^.kind of
+    nkCompound:
+      begin
+        for k := 0 to s^.stmts.count - 1 do
+          if hasOuterLoopJump(PNode(listGet(s^.stmts, k)), loopDepth) then
+            exit(true);
+        exit(false);
+      end;
+    nkIf:
+      exit(hasOuterLoopJump(s^.thenStmt, loopDepth) or
+           hasOuterLoopJump(s^.elseStmt, loopDepth));
+    nkCase:
+      begin
+        for k := 0 to s^.arms.count - 1 do
+        begin
+          arm := PCaseArm(listGet(s^.arms, k));
+          if hasOuterLoopJump(arm^.body, loopDepth) then
+            exit(true);
+        end;
+        for m := 0 to s^.elseBody.count - 1 do
+          if hasOuterLoopJump(PNode(listGet(s^.elseBody, m)), loopDepth) then
+            exit(true);
+        exit(false);
+      end;
+    nkWith:
+      exit(hasOuterLoopJump(s^.withBody, loopDepth));
+    nkWhile:
+      exit(hasOuterLoopJump(s^.thenStmt, loopDepth + 1));
+    nkRepeat:
+      begin
+        for k := 0 to s^.stmts.count - 1 do
+          if hasOuterLoopJump(PNode(listGet(s^.stmts, k)), loopDepth + 1) then
+            exit(true);
+        exit(false);
+      end;
+    nkFor:
+      exit(hasOuterLoopJump(s^.forBody, loopDepth + 1));
+    nkForIn:
+      exit(hasOuterLoopJump(s^.inStep, loopDepth + 1) or
+           hasOuterLoopJump(s^.inBody, loopDepth + 1));
+    nkProcCall:
+      begin
+        if (s^.callDecl <> nil) and (s^.callDecl^.kind = dkBuiltin) then
+        begin
+          if (s^.callDecl^.builtin = bkBreak) or
+             (s^.callDecl^.builtin = bkContinue) then
+            exit(loopDepth = 0);
+          if (s^.callDecl^.builtin = bkExit) or
+             (s^.callDecl^.builtin = bkHalt) then
+            exit(true);
+        end;
+        exit(false);
+      end;
+    nkLabeled, nkGoto, nkTry, nkScope, nkRaise, nkYield, nkDetached:
+      exit(true);
+  else
+    exit(false);
+  end;
+end;
+
+function isPureInvariantForK(e: PNode; forV: PDecl; const writtenInBody: TPtrList): boolean;
+var
+  d: PDecl;
+begin
+  e := skipParensNode(e);
+  if e = nil then
+    exit(false);
+  case e^.kind of
+    nkIntegerLit:
+      exit(true);
+    nkNameRef:
+      begin
+        if e^.refWith <> nil then
+          exit(false);
+        d := e^.refDecl;
+        if (d <> nil) and (d^.kind = dkConst) then
+          exit(true);
+        if (d = nil) or (d^.kind <> dkVar) or (d = forV) or
+           listHasPtr(writtenInBody, d) or
+           (d^.absTarget <> nil) or (d^.absRoot <> nil) or
+           (d^.owner <> curRoutine) or d^.captured or d^.isAliased or
+           (d^.varKind = vkVarParam) or d^.isOut then
+          exit(false);
+        exit(true);
+      end;
+    nkUnary:
+      exit((e^.uopDecl = nil) and
+           (e^.uop in [uoPlus, uoMinus, uoNot]) and
+           isPureInvariantForK(e^.operand, forV, writtenInBody));
+    nkBinary:
+      begin
+        if e^.opDecl <> nil then
+          exit(false);
+        if e^.bop in [boAdd, boSub, boMul, boShl, boShr, boAnd, boOr, boXor] then
+          exit(isPureInvariantForK(e^.lhs, forV, writtenInBody) and
+               isPureInvariantForK(e^.rhs, forV, writtenInBody));
+        exit(false);
+      end;
+  else
+    exit(false);
+  end;
+end;
+
+function matchExclusionForBody(s: PNode; v: PDecl; var kExpr, thenStmt: PNode): boolean;
+var
+  varTy, kt: PType;
+  single, cond, lhs, rhs: PNode;
+  writtenInThen, dummy: TPtrList;
+  ok: boolean;
+begin
+  varTy := v^.varType;
+  if (varTy = nil) or not isIntegerLike(varTy) or
+     not isSignedOrdinal(varTy) or isQWord(varTy) or
+     v^.captured or v^.isAliased or
+     (v^.absTarget <> nil) or (v^.absRoot <> nil) then
+    exit(false);
+  single := s^.forBody;
+  while (single <> nil) and (single^.kind = nkCompound) do
+  begin
+    if single^.stmts.count <> 1 then
+      exit(false);
+    single := PNode(listGet(single^.stmts, 0));
+  end;
+  if (single = nil) or (single^.kind <> nkIf) or
+     (single^.elseStmt <> nil) or (single^.thenStmt = nil) then
+    exit(false);
+  cond := skipParensNode(single^.cond);
+  if (cond = nil) or (cond^.kind <> nkBinary) or
+     (cond^.bop <> boNe) or (cond^.opDecl <> nil) then
+    exit(false);
+  lhs := skipParensNode(cond^.lhs);
+  rhs := skipParensNode(cond^.rhs);
+  if plainAssignTarget(lhs) = v then
+    kExpr := cond^.rhs
+  else if plainAssignTarget(rhs) = v then
+    kExpr := cond^.lhs
+  else
+    exit(false);
+  if kExpr = nil then
+    exit(false);
+  kt := kExpr^.typ;
+  if (kt = nil) or not isIntegerLike(kt) or
+     not isSignedOrdinal(kt) or isQWord(kt) then
+    exit(false);
+  thenStmt := single^.thenStmt;
+  if hasOuterLoopJump(thenStmt, 0) then
+    exit(false);
+  listInit(writtenInThen);
+  listInit(dummy);
+  paSkipPlain := false;
+  paSkipIndex := false;
+  paStmt(thenStmt, dummy, writtenInThen, false, true);
+  listFree(dummy);
+  ok := (not listHasPtr(writtenInThen, v)) and
+        isPureInvariantForK(kExpr, v, writtenInThen);
+  listFree(writtenInThen);
+  matchExclusionForBody := ok;
+end;
+
 procedure visitFor(s: PNode);
 var
   v, a, growArr, hBase, hBaseIdx, boundVar, bv: PDecl;
   varTy: PType;
   down, hoisted, wantChecks, qwordTy, startGe0, finalGe0: boolean;
-  haveGrow, pushedForBound, trackReal, boundOldKnown, noWrap: boolean;
+  haveGrow, pushedForBound, trackReal, boundOldKnown, noWrap, splitExcl, forVRKnown: boolean;
   start, final, start64, final64, enter, i, done, next, last64, start64v, hd, cnt: TV;
+  exclKVal, exclK64, enter1, enter2, cmpV, kAdj, subF64, subS64: TV;
   checkB, loopB, latchB, incB, endB, preB: PIRBlock;
+  sub1B, join1B, sub1LoopB, sub1LatchB, sub1IncB, sub2B, sub2LoopB, sub2LatchB, sub2IncB: PIRBlock;
+  exclKExpr, exclThenStmt: PNode;
   phi: PIRInst;
   oldKnown: boolean;
   oldLo, oldHi, hExtra, boundOldLo, boundOldHi, bc, safeCheckLo, minVal, newLo, newHi: int64;
@@ -2094,6 +2263,54 @@ var
   growStmt: PNode;
   gr: PDynGrowRule;
   forBound: TLengthBound;
+
+  procedure emitForRange(const subStart, subFinal: TV;
+                         subLoopB, subLatchB, subIncB, subEndB: PIRBlock;
+                         subBody: PNode);
+  begin
+    preB := irInsertBlock;
+    irBr(subLoopB);
+
+    irSetInsertPoint(subLoopB);
+    i := irPhi(subStart.t, nm(v^.ident.name), phi);
+    irAddIncoming(phi, subStart, preB);
+    storeScalarEx(varAddress(v), i, varTy,
+                  not (v^.isAliased or (v^.absTarget <> nil) or
+                       ((v^.absRoot <> nil) and v^.absRoot^.isAliased)));
+    if forVRKnown then
+    begin
+      v^.cgRangeKnown := true;
+      v^.cgRangeLo := fLo;
+      v^.cgRangeHi := fHi;
+    end
+    else
+      v^.cgRangeKnown := false;
+    forgetRanges(written);
+    for k := 0 to accs.count - 1 do
+    begin
+      acc := PAccumulator(listGet(accs, k));
+      if acc^.bounded then
+        setVarRange(acc^.v, true, acc^.lo, acc^.hi);
+    end;
+    if trackReal then
+      forgetRealBounds(writtenReal);
+    pushLoop(subLatchB, subEndB);
+    visitStmt(subBody);
+    popLoop;
+    irBr(subLatchB);
+
+    irSetInsertPoint(subLatchB);
+    done := irICmp('eq', i, subFinal, 'for.done');
+    irCondBr(done, subEndB, subIncB, false);
+
+    irSetInsertPoint(subIncB);
+    if down then
+      next := irBin('sub', i, irConstInt(i.t, 1), 'for.next')
+    else
+      next := irBin('add', i, irConstInt(i.t, 1), 'for.next');
+    irAddIncoming(phi, next, subIncB);
+    irBr(subLoopB);
+  end;
 begin
   v := s^.forVar^.refDecl;
   varTy := v^.varType;
@@ -2143,10 +2360,19 @@ begin
     enter := irICmp('sge', start64, final64, '')
   else
     enter := irICmp('sle', start64, final64, '');
+  exclKExpr := nil;
+  exclThenStmt := nil;
+  splitExcl := matchExclusionForBody(s, v, exclKExpr, exclThenStmt);
   checkB := irNewBlock('for.check');
-  loopB := irNewBlock('for.body');
-  latchB := irNewBlock('for.latch');
-  incB := irNewBlock('for.inc');
+  loopB := nil;
+  latchB := nil;
+  incB := nil;
+  if not splitExcl then
+  begin
+    loopB := irNewBlock('for.body');
+    latchB := irNewBlock('for.latch');
+    incB := irNewBlock('for.inc');
+  end;
   endB := irNewBlock('for.end');
   irCondBr(enter, checkB, endB, false);
 
@@ -2228,18 +2454,15 @@ begin
     end;
     listFree(hoistDatas);
   end;
-  preB := irInsertBlock;
-  irBr(loopB);
-
-  irSetInsertPoint(loopB);
-  i := irPhi(start.t, nm(v^.ident.name), phi);
-  irAddIncoming(phi, start, preB);
-  storeScalarEx(varAddress(v), i, varTy,
-                not (v^.isAliased or (v^.absTarget <> nil) or
-                     ((v^.absRoot <> nil) and v^.absRoot^.isAliased)));
+  if splitExcl then
+  begin
+    exclKVal := visitExpr(exclKExpr);
+    exclK64 := toI64(exclKVal, exclKExpr^.typ);
+  end;
   oldKnown := v^.cgRangeKnown;
   oldLo := v^.cgRangeLo;
   oldHi := v^.cgRangeHi;
+  forVRKnown := false;
   if isSignedOrdinal(varTy) and signedTypeRange(regType(varTy)^.bits, tyLo, tyHi) and
      (start.rKnown or final.rKnown) then
   begin
@@ -2265,16 +2488,8 @@ begin
         fHi := final.rHi;
     end;
     if fLo <= fHi then
-    begin
-      v^.cgRangeKnown := true;
-      v^.cgRangeLo := fLo;
-      v^.cgRangeHi := fHi;
-    end
-    else
-      v^.cgRangeKnown := false;
-  end
-  else
-    v^.cgRangeKnown := false;
+      forVRKnown := true;
+  end;
   { At most trips iterations: an accumulator stays within its start range
     plus trips times the most one iteration adds (or subtracts), at every
     point of the loop and after it. Only a bound that fits its type counts
@@ -2332,7 +2547,6 @@ begin
       end;
     end;
   end;
-  forgetRanges(written);
   for k := 0 to accs.count - 1 do
   begin
     acc := PAccumulator(listGet(accs, k));
@@ -2345,7 +2559,6 @@ begin
       a^.cgLoopKnown := true;
       a^.cgLoopLo := acc^.lo;
       a^.cgLoopHi := acc^.hi;
-      setVarRange(a, true, acc^.lo, acc^.hi);
     end;
   end;
   haveGrow := false;
@@ -2401,10 +2614,7 @@ begin
   activeBoundCount := w;
   trackReal := realRangeLocals.count > 0;
   if trackReal then
-  begin
     realLocalsWrittenBy(s, writtenReal);
-    forgetRealBounds(writtenReal);
-  end;
   boundVar := nil;
   boundOldKnown := false;
   boundOldLo := 0;
@@ -2468,9 +2678,64 @@ begin
     gr^.dynVar := growArr;
     listAdd(dynGrows, gr);
   end;
-  pushLoop(latchB, endB);
-  visitStmt(s^.forBody);
-  popLoop;
+  if not splitExcl then
+    emitForRange(start, final, loopB, latchB, incB, endB, s^.forBody)
+  else
+  begin
+    if down then
+      enter1 := irICmp('sgt', start64, exclK64, '')
+    else
+      enter1 := irICmp('slt', start64, exclK64, '');
+    sub1B := irNewBlock('for.sub1');
+    join1B := irNewBlock('for.split');
+    sub1LoopB := irNewBlock('for.body');
+    sub1LatchB := irNewBlock('for.latch');
+    sub1IncB := irNewBlock('for.inc');
+    irCondBr(enter1, sub1B, join1B, false);
+
+    irSetInsertPoint(sub1B);
+    if down then
+    begin
+      kAdj := irBin('add', exclK64, i64c(1), '');
+      cmpV := irICmp('sgt', kAdj, final64, '');
+      subF64 := irSelect(cmpV, kAdj, final64, '');
+    end
+    else
+    begin
+      kAdj := irBin('sub', exclK64, i64c(1), '');
+      cmpV := irICmp('slt', kAdj, final64, '');
+      subF64 := irSelect(cmpV, kAdj, final64, '');
+    end;
+    emitForRange(start, irCast('trunc', subF64, start.t, ''),
+                 sub1LoopB, sub1LatchB, sub1IncB, join1B, exclThenStmt);
+
+    irSetInsertPoint(join1B);
+    if down then
+      enter2 := irICmp('sgt', exclK64, final64, '')
+    else
+      enter2 := irICmp('slt', exclK64, final64, '');
+    sub2B := irNewBlock('for.sub2');
+    sub2LoopB := irNewBlock('for.body');
+    sub2LatchB := irNewBlock('for.latch');
+    sub2IncB := irNewBlock('for.inc');
+    irCondBr(enter2, sub2B, endB, false);
+
+    irSetInsertPoint(sub2B);
+    if down then
+    begin
+      kAdj := irBin('sub', exclK64, i64c(1), '');
+      cmpV := irICmp('slt', kAdj, start64, '');
+      subS64 := irSelect(cmpV, kAdj, start64, '');
+    end
+    else
+    begin
+      kAdj := irBin('add', exclK64, i64c(1), '');
+      cmpV := irICmp('sgt', kAdj, start64, '');
+      subS64 := irSelect(cmpV, kAdj, start64, '');
+    end;
+    emitForRange(irCast('trunc', subS64, start.t, ''), final,
+                 sub2LoopB, sub2LatchB, sub2IncB, endB, exclThenStmt);
+  end;
   if boundVar <> nil then
   begin
     boundVar^.cgRangeKnown := boundOldKnown;
@@ -2532,18 +2797,6 @@ begin
   end;
   listFree(written);
   listFree(accs);
-  irBr(latchB);
-  irSetInsertPoint(latchB);
-  done := irICmp('eq', i, final, 'for.done');
-  irCondBr(done, endB, incB, false);
-
-  irSetInsertPoint(incB);
-  if down then
-    next := irBin('sub', i, irConstInt(i.t, 1), 'for.next')
-  else
-    next := irBin('add', i, irConstInt(i.t, 1), 'for.next');
-  irAddIncoming(phi, next, incB);
-  irBr(loopB);
   irSetInsertPoint(endB);
 end;
 
