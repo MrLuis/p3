@@ -2073,12 +2073,12 @@ var
   pairT: PIRType;
   f: PIRFunc;
   res, ovf, rv: TV;
-  lo, hi, tyLo, tyHi: int64;
-  safe: boolean;
+  lo, hi, pLo, pHi, tyLo, tyHi: int64;
+  combOk, safe: boolean;
 begin
-  safe := signed and combineRange(op, l.rKnown, l.rLo, l.rHi, r.rKnown,
-                                  r.rLo, r.rHi, lo, hi) and
-          signedTypeRange(l.t^.bits, tyLo, tyHi) and
+  combOk := signed and combineRange(op, l.rKnown, l.rLo, l.rHi, r.rKnown,
+                                    r.rLo, r.rHi, lo, hi);
+  safe := combOk and signedTypeRange(l.t^.bits, tyLo, tyHi) and
           (lo >= tyLo) and (hi <= tyHi);
   if (not overflowChecks(loc)) or safe then
   begin
@@ -2113,8 +2113,34 @@ begin
   if signed and signedTypeRange(l.t^.bits, tyLo, tyHi) then
   begin
     rv.rKnown := true;
-    rv.rLo := tyLo;
-    rv.rHi := tyHi;
+    if combOk then
+    begin
+      pLo := tyLo;
+      if lo > pLo then pLo := lo;
+      pHi := tyHi;
+      if hi < pHi then pHi := hi;
+      if pLo <= pHi then
+      begin
+        rv.rLo := pLo;
+        rv.rHi := pHi;
+      end
+      else
+      begin
+        rv.rLo := tyLo;
+        rv.rHi := tyHi;
+      end;
+    end
+    else if ((op = 'add') or (op = 'mul')) and
+            l.rKnown and (l.rLo >= 0) and r.rKnown and (r.rLo >= 0) then
+    begin
+      rv.rLo := 0;
+      rv.rHi := tyHi;
+    end
+    else
+    begin
+      rv.rLo := tyLo;
+      rv.rHi := tyHi;
+    end;
   end;
   emitCheckedArith := rv;
 end;
@@ -3298,12 +3324,11 @@ begin
           exit(irCast('trunc', openCount(openDescriptor(a0)), irI32, ''));
         if t^.kind = tyDynArray then
         begin
-          len := irCast('trunc', dynLength(visitExpr(a0)), irI32, '');
           if matchDynKey(a0, baseD, baseIdxD) and (baseIdxD = nil) and
              baseD^.cgDynLenKnown and (baseD^.cgDynLen >= 0) and
              (baseD^.cgDynLen <= $7FFFFFFF) then
-            noteRange(len, baseD^.cgDynLen, baseD^.cgDynLen);
-          exit(len);
+            exit(i32c(baseD^.cgDynLen));
+          exit(irCast('trunc', dynLength(visitExpr(a0)), irI32, ''));
         end;
         if t^.kind = tyArrayOfConst then
           exit(irCast('trunc', irLoad(irI64, visitExpr(a0), ''), irI32, ''));
@@ -6952,14 +6977,13 @@ begin
         begin
           if k = bkLow then
             exit(i32c(0));
-          x := irBin('sub', irCast('trunc', dynLength(visitExpr(PNode(listGet(e^.args, 0)))),
-                                   irI32, ''), i32c(1), '');
           if matchDynKey(PNode(listGet(e^.args, 0)), baseD, baseIdxD) and
              (baseIdxD = nil) and baseD^.cgDynLenKnown and
              (baseD^.cgDynLen >= 0) and (baseD^.cgDynLen - 1 >= low(longint)) and
              (baseD^.cgDynLen - 1 <= $7FFFFFFF) then
-            noteRange(x, baseD^.cgDynLen - 1, baseD^.cgDynLen - 1);
-          exit(x);
+            exit(i32c(baseD^.cgDynLen - 1));
+          exit(irBin('sub', irCast('trunc', dynLength(visitExpr(PNode(listGet(e^.args, 0)))),
+                                   irI32, ''), i32c(1), ''));
         end;
         if t^.kind = tyOpenArray then
         begin

@@ -2149,6 +2149,17 @@ begin
       begin
         he := PHoistEntry(listGet(hoists, k));
         hd := PTVBox(listGet(hoistDatas, k))^;
+        if (he^.v^.varType^.kind <> tyOpenArray) and
+           he^.v^.cgDynLenKnown and (he^.v^.cgDynLen >= 0) then
+        begin
+          if down then
+          begin
+            if finalGe0 and start.rKnown and (start.rHi < he^.v^.cgDynLen) then
+              continue;
+          end
+          else if startGe0 and final.rKnown and (final.rHi < he^.v^.cgDynLen) then
+            continue;
+        end;
         if he^.v^.varType^.kind = tyOpenArray then
           cnt := openCount(openDescriptor(he^.base))
         else

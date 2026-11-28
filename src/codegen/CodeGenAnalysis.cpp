@@ -2951,9 +2951,10 @@ llvm::Value *CodeGenModule::emitCheckedArith(llvm::Intrinsic::ID ID, llvm::Value
   bool Signed = ID == llvm::Intrinsic::sadd_with_overflow ||
                 ID == llvm::Intrinsic::ssub_with_overflow ||
                 ID == llvm::Intrinsic::smul_with_overflow;
+  ValueRange LRange = rangeOfValue(L), RRange = rangeOfValue(R);
   ValueRange ResultRange;
-  bool Safe = Signed &&
-              combineRange(Op, rangeOfValue(L), rangeOfValue(R), ResultRange);
+  bool CombOk = Signed && combineRange(Op, LRange, RRange, ResultRange);
+  bool Safe = CombOk;
   if (Safe) {
     auto *T = llvm::cast<llvm::IntegerType>(L->getType());
     ValueRange TypeRange;
@@ -2978,8 +2979,22 @@ llvm::Value *CodeGenModule::emitCheckedArith(llvm::Intrinsic::ID ID, llvm::Value
   if (Signed) {
     auto *T = llvm::cast<llvm::IntegerType>(L->getType());
     ValueRange TypeRange;
-    if (signedRange(T->getBitWidth(), TypeRange))
-      noteRange(Result, TypeRange);
+    if (signedRange(T->getBitWidth(), TypeRange)) {
+      if (CombOk) {
+        int64_t Lo = std::max(TypeRange.Lo, ResultRange.Lo);
+        int64_t Hi = std::min(TypeRange.Hi, ResultRange.Hi);
+        if (Lo <= Hi)
+          noteRange(Result, {true, Lo, Hi});
+        else
+          noteRange(Result, TypeRange);
+      } else if ((Op == BinaryOp::Add || Op == BinaryOp::Mul) &&
+                 LRange.Known && LRange.Lo >= 0 && RRange.Known &&
+                 RRange.Lo >= 0) {
+        noteRange(Result, {true, 0, TypeRange.Hi});
+      } else {
+        noteRange(Result, TypeRange);
+      }
+    }
   }
   return Result;
 }

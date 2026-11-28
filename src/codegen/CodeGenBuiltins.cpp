@@ -353,16 +353,14 @@ llvm::Value *CodeGenModule::emitStringFunction(CallExpr *E, BuiltinKind K){
     if (T->isOpenArray())
       return B.CreateTrunc(openCount(openDescriptor(Args[0])), B.getInt32Ty());
     if (T->isDynArray()) {
-      llvm::Value *Len =
-          B.CreateTrunc(dynLength(visitExpr(Args[0])), B.getInt32Ty());
       VarDecl *Base = nullptr, *BaseIdx = nullptr;
       if (matchDynKey(Args[0], Base, BaseIdx) && !BaseIdx) {
         auto It = DynConstLen.find(Base);
         if (It != DynConstLen.end() && It->second >= 0 &&
             It->second <= INT32_MAX)
-          noteRange(Len, {true, It->second, It->second});
+          return B.getInt32(It->second);
       }
-      return Len;
+      return B.CreateTrunc(dynLength(visitExpr(Args[0])), B.getInt32Ty());
     }
     if (T->isArrayOfConst())
       return B.CreateTrunc(B.CreateLoad(B.getInt64Ty(), visitExpr(Args[0])),
@@ -1488,16 +1486,15 @@ llvm::Value *CodeGenModule::emitBuiltinCall(CallExpr *E, BuiltinDecl *BD){
     if (AT->isDynArray()) {
       if (!IsHigh)
         return B.getInt32(0);
-      llvm::Value *N = dynLength(visitExpr(E->getArgs()[0]));
-      llvm::Value *Res = B.CreateSub(B.CreateTrunc(N, B.getInt32Ty()), B.getInt32(1));
       VarDecl *Base = nullptr, *BaseIdx = nullptr;
       if (matchDynKey(E->getArgs()[0], Base, BaseIdx) && !BaseIdx) {
         auto It = DynConstLen.find(Base);
         if (It != DynConstLen.end() && It->second >= 0 &&
             It->second - 1 >= INT32_MIN && It->second - 1 <= INT32_MAX)
-          noteRange(Res, {true, It->second - 1, It->second - 1});
+          return B.getInt32(It->second - 1);
       }
-      return Res;
+      llvm::Value *N = dynLength(visitExpr(E->getArgs()[0]));
+      return B.CreateSub(B.CreateTrunc(N, B.getInt32Ty()), B.getInt32(1));
     }
     if (AT->isArrayOfConst()) {
       if (!IsHigh)

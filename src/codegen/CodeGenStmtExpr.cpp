@@ -2312,6 +2312,17 @@ void CodeGenModule::visitForStmt(ForStmt *S){
         auto &[Base, BaseNode] = Hoists[HI];
         llvm::Value *Data = Datas[HI];
         Type *BT = Base->getType();
+        if (!BT->isOpenArray()) {
+          auto DIt = DynConstLen.find(Base);
+          if (DIt != DynConstLen.end() && DIt->second >= 0) {
+            bool SafeDyn = Down ? (FinalGe0 && StartRange.Known &&
+                                   StartRange.Hi < DIt->second)
+                                : (StartGe0 && FinalRange.Known &&
+                                   FinalRange.Hi < DIt->second);
+            if (SafeDyn)
+              continue;
+          }
+        }
         llvm::Value *Count =
             BT->isOpenArray()
                 ? openCount(openDescriptor(BaseNode))
