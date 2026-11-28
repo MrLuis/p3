@@ -661,8 +661,14 @@ void CodeGenModule::declareRoutine(RoutineDecl *R){
   auto SliceVars = findSliceLocals(R);
   if (!SliceVars.empty())
     RoutineSliceLocals[R] = SliceVars;
+  bool BorrowAnsi = canBorrowAnsiParams(R);
   auto AddSlot = [&](VarDecl *V) {
-    if (llvm::is_contained(SliceVars, V) || !inFrame(V, PinAll, PinVars))
+    bool IsBorrowedVal = BorrowAnsi && V->isParam() && !isByRef(V) &&
+                         !V->isConstParam() && !V->isVarParam() &&
+                         !V->isOutParam() && V->getType()->isAnsiString() &&
+                         !V->isCaptured();
+    if (llvm::is_contained(SliceVars, V) || IsBorrowedVal ||
+        !inFrame(V, PinAll, PinVars))
       return;
     FrameSlots[V] = Slots.size();
     Slots.push_back(isByRef(V) ? B.getPtrTy() : memType(V->getType()));

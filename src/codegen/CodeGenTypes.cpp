@@ -1013,7 +1013,7 @@ llvm::Value *CodeGenModule::emitDynArrayCtor(SetCtorExpr *S, DynArrayType *T){
 /// get an alloca each, which the optimizer turns into registers.
 bool CodeGenModule::inFrame(VarDecl *V, bool PinAll, const VarSet &PinVars){
   return PinAll || PinVars.count(V) || V->isCaptured() ||
-         (!isByRef(V) && isManaged(V->getType()));
+         (!isByRef(V) && !V->isConstParam() && isManaged(V->getType()));
 }
 
 

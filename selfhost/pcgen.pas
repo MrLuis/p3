@@ -2293,7 +2293,8 @@ end;
 function inFrame(v: PDecl; pinAll: boolean; const pins: TPtrList): boolean;
 begin
   inFrame := pinAll or listHasPtr(pins, v) or v^.captured or
-             (not isByRef(v) and isManaged(v^.varType));
+             (not isByRef(v) and (v^.varKind <> vkConstParam) and
+              isManaged(v^.varType));
 end;
 
 { The start value of a local variable or function result at addr: zero.

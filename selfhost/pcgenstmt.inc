@@ -4787,6 +4787,7 @@ end;
 
 procedure declareRoutine(r: PDecl); forward;
 procedure findSliceLocals(r: PDecl; var outVars: TPtrList); forward;
+function canBorrowAnsiParams(r: PDecl): boolean; forward;
 
 { Lays out the frames of the routines declared in blk (recursively),
   creates their functions and queues their bodies, and declares the
@@ -5005,12 +5006,19 @@ var
   f: PIRFunc;
   ret: PIRType;
   loc: TLoc;
-  hasNested, pinAll: boolean;
+  hasNested, pinAll, borrowAnsi: boolean;
 
-  procedure addSlot(x: PDecl);
+  procedure addSlot(x: PDecl; isParam: boolean);
+  var
+    isBorrowedVal: boolean;
   begin
     x^.cgLocal := nil;
-    if (sliceVarsP <> nil) and listHasPtr(sliceVarsP^, x) then
+    isBorrowedVal := borrowAnsi and isParam and
+                     not isByRef(x) and
+                     not (x^.varKind in [vkConstParam, vkVarParam]) and
+                     not x^.isOut and (x^.varType^.kind = tyAnsiString) and
+                     not x^.captured;
+    if ((sliceVarsP <> nil) and listHasPtr(sliceVarsP^, x)) or isBorrowedVal then
       x^.cgInFrame := false
     else
       x^.cgInFrame := inFrame(x, pinAll, pinVars);
@@ -5052,13 +5060,14 @@ begin
     if r^.cgLinkInFrame then
       listAdd(slots, irPtrT);
     pinAll := hasNonLocalLabels(r^.body);
+    borrowAnsi := canBorrowAnsiParams(r);
     listInit(pinVars);
     if not pinAll and r^.hasTry then
       computePinVars(r, pinVars);
     if hasSelf(r) then
-      addSlot(r^.selfVar);
+      addSlot(r^.selfVar, false);
     for j := 0 to r^.params.count - 1 do
-      addSlot(PDecl(listGet(r^.params, j)));
+      addSlot(PDecl(listGet(r^.params, j)), true);
     for j := 0 to r^.body^.decls.count - 1 do
     begin
       v := PDecl(listGet(r^.body^.decls, j));
@@ -5067,10 +5076,10 @@ begin
       if (v^.init <> nil) and not v^.isInitVar then
         emitStaticVar(v) { static storage, local scope }
       else
-        addSlot(v);
+        addSlot(v, false);
     end;
     if r^.isFunction then
-      addSlot(r^.resultVar);
+      addSlot(r^.resultVar, false);
     listFree(pinVars);
     name := mangle(r);
     r^.cgFrame := nil;
