@@ -81,75 +81,375 @@ own. They need `--mode=objfpc` unless noted; each works in both compilers
 (most come from the "Modernizing Pascal" proposals). The details and
 examples are in the reference.
 
-- **Variables among the statements**: `var x := e;` anywhere in a block, and
-  `for var i := 1 to n do`.
-- **Type inference**: `var x := e`, `const x := e`, generic calls, array
-  literals and lambda parameter types are worked out by the compiler.
-- **Owned variables and `move`**: `x: TFoo owned` frees its object when the
-  scope ends (also on exceptions); `move x` hands it to someone else, checked
-  at compile time.
-- **Template strings**: `` `Hello ${Name}, ${Total:0:2}` `` spans lines and
-  takes values; routines can tag a template.
-- **Tuples and destructuring**: several values as one, returned from a
-  routine and unpacked on assignment. `function test(const inData:string) : (val1: string; val2: integer);`
-- **Named arguments and defaults anywhere**: `Open(Path, Mode := fmRead)`.
-- **Lambdas and closures**: `function(x) => x * 2`, block bodies, capture by
-  copy (`function[k](x) => ...`), closures that outlive their routine.
-- **Conditional expressions**: `if c then a else b` as an expression.
-- **Generics**: types, routines, methods, type helpers, inheritance, and
-  inference through specializations.
-- **Checked arithmetic**: `checked ... end` and `unchecked ... end`
-  blocks (overflow raises `EIntOverflow`; unchecked wraps), plus
-  `checked(e)` / `unchecked(e)` expressions and checked conversions.
-- **async/await and structured concurrency**: real threads, `scope` /
-  `spawn`, cancellation tokens and channels.
-- **Compile-time data-race checks**: `shared` / `isolated` qualifiers, opt-in
-  with `{$modeswitch racechecks}`.
-- **Null-safe references & pointers**: with `{$nullsafe on}` (classes/interfaces in
-  `objfpc`), `T?`, `?.` and `??`, plus `{$nilpointers on}` (typed/untyped pointers
-  in `tp` and `objfpc`, scoped with `{$push}`/`{$pop}`, supporting `^T?`, `P?`, and
-  `??`), the compiler rejects dereferences, indexing, arithmetic, and `dispose`/`freemem`
-  uses that may be nil.
-- **Typed addresses**: with `{$T+}` or `{$typedaddress on}` (available in
-  `tp` and `objfpc` modes, as in Turbo/Free Pascal, and scoped with
-  `{$push}`/`{$pop}`), `@x` yields `^typeof(x)` rather than untyped
-  `pointer` (untyped `var`/`const` parameters remain `pointer`), rejecting
-  incompatible pointer assignments at compile time.
-- **Scoped pointer arithmetic policies**: `{$pointermath unchecked|checked|off}`
-  (saved/restored by `{$push}`/`{$pop}`): `off` rejects `+`/`-`, indexing, and
-  `Inc`/`Dec` on pointers at compile time while keeping ordering comparisons;
-  `checked` enforces live heap allocation bounds at runtime across `p + n`,
-  `p[i]`, `Inc`/`Dec`, and same-allocation `p - q`.
-- **Unsafe regions**: `unsafe ... end` blocks and `unsafe(expr)` (contextual in
-  `tp` and `objfpc` modes) locally relax pointer-safety rules (unchecked pointer
-  arithmetic, untyped `@`, and pointer nil checks) while leaving range/overflow
-  and class null-safety checks untouched. Passing `--Wunsafe` (implied by
-  `--safe=checked`, suppressible with `--Wno-unsafe`) warns on escape-hatch
-  constructs used outside `unsafe` regions.
-- **Iterators**: `function Fibonacci: iterator UInt64` with `yield`, usable in
-  `for ... in`.
-- **Lazy sequences**: LINQ-style `map`/`filter`/... in the `sequences` unit.
-- **SIMD vectors**: `vector[N] of T` with elementwise `+ - *`, lane
-  comparisons giving a vector of booleans (`V = Ord('"')`), lane `and`,
-  `or`, `xor`, `not`, `VectorLoad`/`VectorStore` at any address and
-  `VectorMask` (a bit per lane); with `PopCnt`, `CountTrailingZeros` and
-  `CountLeadingZeros` a byte scan is a load, a compare, a mask and a count
-  (SSE2, NEON); `T(v)` converts vectors lane by lane. The unit library
-  scans long strings 16 bytes at a time with them: substring search
-  (`PosEx`, `StringReplace`), `CompareStr`, `CompareText`, `UpperCase`,
-  `LowerCase`, `TStrings.Text`, nethttp's request parsing, and unit json
-  (see [`bench/strings`](bench/strings/README.md)).
-- **Reachability pruning**: code nothing refers to is left out of the
-  executable, also at `-O0`.
+### Variables among the statements
+
+`var x := e;` anywhere in a block, and `for var i := 1 to n do`:
+
+```pascal
+var Total := 0;
+for var i := 1 to 10 do
+begin
+  var Sq := i * i;
+  Total := Total + Sq;
+end;
+```
+
+### Type inference
+
+`var x := e`, `const x := e`, generic calls, array literals and lambda
+parameter types are worked out by the compiler:
+
+```pascal
+generic function Largest<T>(a, b: T): T;
+begin
+  Result := if a > b then a else b;
+end;
+
+var N := Largest(3, 7);   // Integer
+const Tag := 'p3';        // string
+var Nums := [1, 2, 3];    // array of Integer
+```
+
+### Owned variables and `move`
+
+`x: TFoo owned` frees its object when the scope ends (also on exceptions);
+`move x` hands it to someone else, checked at compile time:
+
+```pascal
+procedure UseLog(const Path: string);
+var
+  Log: TLogger owned;
+  Backup: TLogger owned;
+begin
+  Log := TLogger.Create(Path);
+  Backup := move Log;  // Log is now nil; ownership moves to Backup
+end;                   // Backup is freed here (even on exception)
+```
+
+### Template strings
+
+`` `Hello ${Name}, ${Total:0:2}` `` (available in `--mode=tp` and `objfpc`)
+spans lines and takes values; `` r`...` `` is raw, and routines can tag a
+template:
+
+```pascal
+var Name := 'Ada';
+var Total := 12.5;
+WriteLn(`Hello ${Name}, total: ${Total:0:2}`);
+
+var Query := `
+  SELECT id, name
+  FROM users
+  WHERE name = :name
+`;
+```
+
+### Tuples and destructuring
+
+Several values as one, returned from a routine and unpacked on assignment:
+
+```pascal
+function DivMod(a, b: Integer): (Quot: Integer, Rem: Integer);
+begin
+  Result := (a div b, a mod b);
+end;
+
+var (q, r) := DivMod(17, 5);  // q = 3, r = 2
+```
+
+### Named arguments and defaults anywhere
+
+Pass arguments by name (`Name := value`) and skip parameters that have default
+values anywhere in the parameter list:
+
+```pascal
+procedure OpenFile(const Path: string; Mode: Integer = 0; CreateNew: Boolean = False);
+begin
+  ...
+end;
+
+OpenFile('data.txt', CreateNew := True);
+OpenFile('data.txt', Mode := 2);
+```
+
+### Lambdas and closures
+
+`function(x) => x * 2`, block bodies, capture by copy (`function[k](x) => ...`),
+and `reference to` closures that outlive their routine:
+
+```pascal
+type
+  TIntFn = reference to function(x: Integer): Integer;
+
+function MakeAdder(k: Integer): TIntFn;
+begin
+  Result := function[k](x) => x + k;  // captures k by copy; outlives MakeAdder
+end;
+
+var Add5 := MakeAdder(5);
+WriteLn(Add5(10));  // 15
+```
+
+### Conditional expressions
+
+`if c then a else b` as an expression:
+
+```pascal
+var LabelText := if Count = 1 then 'one item' else `${Count} items`;
+```
+
+### Generics
+
+Types, routines, methods, type helpers, inheritance, and inference through
+specializations:
+
+```pascal
+generic function SwapAndFirst<T>(var a, b: T): T;
+begin
+  var tmp := a;
+  a := b;
+  b := tmp;
+  Result := a;
+end;
+
+var X := 1;
+var Y := 2;
+WriteLn(SwapAndFirst(X, Y));  // inferred <Integer>, or: specialize SwapAndFirst<Integer>(X, Y)
+```
+
+### Checked arithmetic
+
+`checked ... end` and `unchecked ... end` blocks (overflow raises
+`EIntOverflow`; unchecked wraps), plus `checked(e)` / `unchecked(e)`
+expressions and checked conversions:
+
+```pascal
+{$Q-}
+checked
+  Total := A + B;                // raises EIntOverflow on overflow regardless of {$Q-}
+end;
+
+var Wrapped := unchecked(A + B); // wraps in two's complement
+```
+
+### async/await and structured concurrency
+
+Real threads, `scope` / `spawn`, cancellation tokens and channels:
+
+```pascal
+uses threading;
+
+type
+  TJobs = specialize TChannel<Integer>;
+
+function Pipeline(Token: TCancelToken): async Integer;
+begin
+  var Jobs := TJobs.Create(4);
+  var Sum := 0;
+  scope Token
+    spawn begin
+      for var i := 1 to 10 do await Jobs.Send(i);
+      Jobs.Close;
+    end;
+    spawn begin
+      for await var j in Jobs do Sum := Sum + j;
+    end;
+  end;
+  Result := Sum;
+  Jobs.Free;
+end;
+```
+
+### Compile-time data-race checks
+
+`shared` / `isolated` qualifiers, opt-in with `{$modeswitch racechecks}`:
+
+```pascal
+{$modeswitch racechecks}
+uses threading;
+
+type
+  TCounter = specialize TAtomic<Integer>;
+  TBytes = array of Byte;
+
+function RunWork: async Integer;
+var
+  Hits: shared TCounter;
+  Buf: isolated TBytes;
+begin
+  Hits := TCounter.Create(0);
+  scope
+    for var i := 1 to 4 do
+      spawn begin Hits.Increment; end;
+  end;
+  SetLength(Buf, 3);
+  var Task := SumBytes(move Buf);  // ownership moves to Task; Buf is now empty
+  Result := Hits.Load + await Task;
+  Hits.Free;
+end;
+```
+
+### Null-safe references & pointers
+
+With `{$nullsafe on}` (classes/interfaces in `objfpc`), `T?`, `?.` and `??`,
+plus `{$nilpointers on}` (typed/untyped pointers in `tp` and `objfpc`, scoped
+with `{$push}`/`{$pop}`, supporting `^T?`, `P?`, and `??`), the compiler rejects
+dereferences, indexing, arithmetic, and `dispose`/`freemem` uses that may be nil:
+
+```pascal
+{$nullsafe on}
+{$nilpointers on}
+type
+  PInt = ^Integer;
+
+function FirstOrZero(Node: TNode?; P: PInt?): Integer;
+begin
+  var Val := Node?.Value ?? 0;  // class null-safety (?., ??)
+  if P <> nil then              // P narrowed to non-nil ^Integer
+    Exit(Val + P^);
+  Result := Val;
+end;
+```
+
+### Typed addresses
+
+With `{$T+}` or `{$typedaddress on}` (available in `tp` and `objfpc` modes, as
+in Turbo/Free Pascal, and scoped with `{$push}`/`{$pop}`), `@x` yields
+`^typeof(x)` rather than untyped `pointer` (untyped `var`/`const` parameters
+remain `pointer`), rejecting incompatible pointer assignments at compile time:
+
+```pascal
+{$push}
+{$T+}  // or {$typedaddress on}
+var
+  X: Integer;
+  B: Byte;
+  P: ^Integer;
+begin
+  P := @X;     // ok: @X has type ^Integer
+  // P := @B;  // compile-time error: incompatible type '^Byte'
+{$pop}
+```
+
+### Scoped pointer arithmetic policies
+
+`{$pointermath unchecked|checked|off}` (saved/restored by `{$push}`/`{$pop}`):
+`off` rejects `+`/`-`, indexing, and `Inc`/`Dec` on pointers at compile time
+while keeping ordering comparisons; `checked` enforces live heap allocation
+bounds at runtime across `p + n`, `p[i]`, `Inc`/`Dec`, and same-allocation
+`p - q`:
+
+```pascal
+{$push}
+{$pointermath checked}
+GetMem(P, 4 * SizeOf(Integer));
+Q := P + 2;    // ok (within live allocation)
+// Q := P + 5; // runtime error: pointer arithmetic out of bounds
+{$pointermath off}
+// P := P + 1; // compile-time error under {$pointermath off}
+{$pop}
+```
+
+### Unsafe regions
+
+`unsafe ... end` blocks and `unsafe(expr)` (contextual in `tp` and `objfpc`
+modes) locally relax pointer-safety rules (unchecked pointer arithmetic,
+untyped `@`, and pointer nil checks) while leaving range/overflow and class
+null-safety checks untouched. Passing `--Wunsafe` (implied by
+`--safe=checked`, suppressible with `--Wno-unsafe`) warns on escape-hatch
+constructs used outside `unsafe` regions:
+
+```pascal
+{$T+}{$pointermath off}{$nilpointers on}
+unsafe
+  P := P + 1;       // allowed locally inside unsafe ... end
+  U := @X;
+end;
+var V := unsafe(Q)^; // expression form
+```
+
+### Iterators
+
+`function Fibonacci: iterator UInt64` with `yield`, usable in `for ... in`:
+
+```pascal
+function Fibonacci: iterator UInt64;
+begin
+  var a: UInt64 := 0;
+  var b: UInt64 := 1;
+  while True do
+  begin
+    yield a;
+    (a, b) := (b, a + b);
+  end;
+end;
+
+for var F in Fibonacci do
+begin
+  if F > 100 then Break;
+  WriteLn(F);
+end;
+```
+
+### Lazy sequences
+
+LINQ-style `map`/`filter`/... in the `sequences` unit:
+
+```pascal
+uses sequences;
+
+var Names := Customers
+  .Filter(function(c) => c.Active and (c.Balance > 0))
+  .OrderBy(function(c) => c.Name)
+  .Map(function(c) => c.Name)
+  .ToArray;
+
+var OddsSum := Range(1, 10)
+  .Filter(function(x) => Odd(x))
+  .Fold(0, function(acc, x) => acc + x);
+```
+
+### SIMD vectors
+
+`vector[N] of T` with elementwise `+ - *`, lane comparisons giving a vector of
+booleans (`V = Ord('"')`), lane `and`, `or`, `xor`, `not`,
+`VectorLoad`/`VectorStore` at any address and `VectorMask` (a bit per lane);
+with `PopCnt`, `CountTrailingZeros` and `CountLeadingZeros` a byte scan is a
+load, a compare, a mask and a count (SSE2, NEON); `T(v)` converts vectors lane
+by lane. The unit library scans long strings 16 bytes at a time with them:
+substring search (`PosEx`, `StringReplace`), `CompareStr`, `CompareText`,
+`UpperCase`, `LowerCase`, `TStrings.Text`, nethttp's request parsing, and unit
+json (see [`bench/strings`](bench/strings/README.md)):
+
+```pascal
+type
+  TB16 = vector[16] of Byte;
+
+var V := VectorLoad(TB16, @S[I]);
+var M := VectorMask(V = Ord('"'));
+while M <> 0 do
+begin
+  Write(I + CountTrailingZeros(M), ' ');
+  M := M and (M - 1);
+end;
+```
+
+### Reachability pruning
+
+Code nothing refers to is left out of the executable, also at `-O0`.
+
+### Attributes, partial types, compiletime functions, and JSON
+
 - **Attributes, partial types and source generators**: `[Serializable]`
   before a type, field or method; `T = partial record|class` declared in
   pieces; and generators, programs that read a description of the types
-  marked with an attribute and write Pascal for them (see below).
+  marked with an attribute and write Pascal for them (see
+  [Source generators](#source-generators)).
 - **Compiletime functions**: `const Table = BuildTable;` computed while
-  compiling (see below).
-- **JSON**: unit `json` a pull reader, documents,
-  lookup of one value without parsing the rest, and typed reading and
-  writing generated at build time (see below).
+  compiling (see [Compiletime functions](#compiletime-functions)).
+- **JSON**: unit `json`, a pull reader, documents, lookup of one value without
+  parsing the rest, and typed reading and writing generated at build time (see
+  [JSON](#json)).
 
 ## Source generators
 
@@ -325,22 +625,6 @@ end.
 | `utils/`, `tools/` | helper scripts |
 | `docs/` | documentation: [building](docs/build.md), [compiler parameters and directives](docs/compiler-params-and-directives.md) |
 
-## License
-
-Copyright 2026 Luis Ortega.
-
-p3 (both compilers, the runtime and the unit library) is licensed under the
-[Apache License 2.0 with LLVM Exceptions](LICENSE), LLVM's own license
-(SPDX: `Apache-2.0 WITH LLVM-exception`). The exception means that programs
-you compile with p3 may be distributed under terms of your choice without
-p3's license notices, although they contain parts of its runtime and unit
-library.
-
-Some material has other terms, listed in
-[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md). **Windows programs that
-wait on sockets contain wepoll and must carry its notice.** Versions of p3
-published before this change were under the GNU GPL version 2.
-
 ## Compiler parameters and directives
 
 The full list of [compiler directives](docs/compiler-params-and-directives.md#compiler-directives)
@@ -405,3 +689,17 @@ Example (`examples/httploopserver/p3.json`):
   "optimize": 2
 }
 ```
+
+## License
+
+p3 (both compilers, the runtime and the unit library) is licensed under the
+[Apache License 2.0 with LLVM Exceptions](LICENSE), LLVM's own license
+(SPDX: `Apache-2.0 WITH LLVM-exception`). The exception means that programs
+you compile with p3 may be distributed under terms of your choice without
+p3's license notices, although they contain parts of its runtime and unit
+library.
+
+Some material has other terms, listed in
+[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md). **Windows programs that
+wait on sockets contain wepoll and must carry its notice.** Versions of p3
+published before this change were under the GNU GPL version 2.
