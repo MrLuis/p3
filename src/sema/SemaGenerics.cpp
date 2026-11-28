@@ -2419,6 +2419,7 @@ void Checker::checkCallArgs(llvm::ArrayRef<VarDecl *> Params, Decl *CalleeDecl,
                     {Arg->getRange()});
       else if (P->isVarParam())
         checkModifiable(Arg);
+      markAliasedBase(Arg);
       continue;
     }
     Type *PT = P->getType();

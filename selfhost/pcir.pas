@@ -116,6 +116,7 @@ type
     phiCount: longint;
     block: PIRBlock;     { the block it is in }
     dbgLoc: PMeta;       { !dbg, or nil }
+    tbaa: PMeta;         { !tbaa, or nil }
     unlikely: boolean;   { !prof branch weights }
     invariantLoad: boolean; { !invariant.load }
     records: TPtrList;   { of PDbgRecord, printed before the instruction }
@@ -255,6 +256,8 @@ function irSelect(const c, a, b: TV; const name: string): TV;
 function irLoad(t: PIRType; const p: TV; const name: string): TV;
 { a load with !invariant.load (the loaded memory never changes) }
 function irLoadInv(t: PIRType; const p: TV; const name: string): TV;
+{ attaches a !tbaa tag node to the last emitted instruction }
+procedure irSetTBAA(m: PMeta);
 procedure irStore(const v, p: TV);
 { load / store with the given alignment (not the type's) }
 function irLoadAlign(t: PIRType; const p: TV; align: longint; const name: string): TV;
@@ -1997,6 +2000,7 @@ begin
   bufInit(i^.text);
   i^.defId := 0;
   i^.dbgLoc := curLoc;
+  i^.tbaa := nil;
   i^.unlikely := false;
   i^.invariantLoad := false;
   listInit(i^.records);
@@ -2511,6 +2515,12 @@ begin
   if invariantLoadMeta = nil then
     invariantLoadMeta := irMetaText('!{}');
   PIRInst(listGet(curBlock^.insts, curBlock^.insts.count - 1))^.invariantLoad := true;
+end;
+
+procedure irSetTBAA(m: PMeta);
+begin
+  if (m <> nil) and (curBlock <> nil) and (curBlock^.insts.count > 0) then
+    PIRInst(listGet(curBlock^.insts, curBlock^.insts.count - 1))^.tbaa := m;
 end;
 
 procedure irStore(const v, p: TV);
@@ -3227,6 +3237,8 @@ begin
     emitStr(ob, #10 + '  ]');
   if i^.dbgLoc <> nil then
     emitStr(ob, ', !dbg ' + irMetaRef(i^.dbgLoc));
+  if i^.tbaa <> nil then
+    emitStr(ob, ', !tbaa ' + irMetaRef(i^.tbaa));
   if i^.unlikely then
     emitStr(ob, ', !prof ' + irMetaRef(branchWeights));
   if i^.invariantLoad then
@@ -3262,6 +3274,7 @@ begin
     numberMeta(r^.loc);
   end;
   numberMeta(i^.dbgLoc);
+  numberMeta(i^.tbaa);
   if i^.invariantLoad then
     numberMeta(invariantLoadMeta);
   if i^.unlikely then

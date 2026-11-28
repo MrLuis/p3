@@ -486,7 +486,8 @@ void CodeGenModule::storeInterface(llvm::Value *Addr, llvm::Value *V){
 
 
 /// Stores V (scalar, of type T) at Addr: counted for COM interfaces.
-void CodeGenModule::storeValue(llvm::Value *Addr, llvm::Value *V, Type *T){
+void CodeGenModule::storeValue(llvm::Value *Addr, llvm::Value *V, Type *T,
+                               bool AllowTBAA){
   if (T->isAnsiString())
     // A static string constant has refs < 0: storing it needs no count.
     astrCall(llvm::isa<llvm::Constant>(V) ? "__pas_astr_take"
@@ -508,7 +509,7 @@ void CodeGenModule::storeValue(llvm::Value *Addr, llvm::Value *V, Type *T){
   else if (isManaged(T))
     storeInterface(Addr, V);
   else
-    storeScalar(Addr, V, T);
+    storeScalar(Addr, V, T, AllowTBAA);
 }
 
 
@@ -1281,7 +1282,7 @@ void CodeGenModule::visitAssignStmt(AssignStmt *S){
     bitStore(Target, V);
     return;
   }
-  storeValue(emitAddress(Target), V, TT);
+  storeValue(emitAddress(Target), V, TT, !isAliasedExpr(Target));
   if (RangeVar) {
     setVarRange(RangeVar, rangeOfValue(V));
     RangeVar = nullptr;
@@ -1491,7 +1492,7 @@ void CodeGenModule::visitProcCallStmt(ProcCallStmt *S){
     if (Args.size() == 4) // the records done
       storeScalar(emitAddress(Args[3]),
                   B.CreateSExtOrTrunc(Done, regType(Args[3]->getType())),
-                  Args[3]->getType());
+                  Args[3]->getType(), !isAliasedExpr(Args[3]));
     return;
   }
   case BuiltinKind::Seek: {
@@ -1607,8 +1608,9 @@ void CodeGenModule::visitProcCallStmt(ProcCallStmt *S){
   case BuiltinKind::Dec: {
     Expr *Var = S->getArgs()[0];
     Type *T = Var->getType();
+    bool AllowTBAA = !isAliasedExpr(Var);
     llvm::Value *Addr = emitAddress(Var);
-    llvm::Value *Old = loadScalar(Addr, T);
+    llvm::Value *Old = loadScalar(Addr, T, "", AllowTBAA);
     llvm::Value *Step =
         S->getArgs().size() == 2
             ? toI64(visitExpr(S->getArgs()[1]), S->getArgs()[1]->getType())
@@ -1619,7 +1621,11 @@ void CodeGenModule::visitProcCallStmt(ProcCallStmt *S){
       llvm::Value *Delta = IsInc ? Step : B.CreateNeg(Step);
       if (pointerMathChecked(L))
         emitPointerAddCheck(PT, Old, Delta, L);
-      B.CreateStore(B.CreateGEP(pointeeMemType(PT), Old, Delta), Addr);
+      llvm::StoreInst *PS =
+          B.CreateStore(B.CreateGEP(pointeeMemType(PT), Old, Delta), Addr);
+      if (AllowTBAA)
+        if (llvm::MDNode *Tag = tbaaTagFor(T))
+          PS->setMetadata(llvm::LLVMContext::MD_tbaa, Tag);
       return;
     }
     if (T->isIntegerLike() && intBits(T) == 64) { // no wider type to check in
@@ -1628,7 +1634,7 @@ void CodeGenModule::visitProcCallStmt(ProcCallStmt *S){
                                           isSignedOrdinal(T), Old, Step, L,
                                           S->getCallee().Name);
       emitRangeCheck(New, T->getBase(), T, L);
-      storeScalar(Addr, New, T);
+      storeScalar(Addr, New, T, AllowTBAA);
       return;
     }
     // Compute in i64 so the range check sees the true result.
@@ -1647,7 +1653,7 @@ void CodeGenModule::visitProcCallStmt(ProcCallStmt *S){
       else
         emitRuntimeCheck(outsideRange(Wide, Bd.Lo, Bd.Hi), "value out of range", L);
     }
-    storeScalar(Addr, B.CreateTrunc(Wide, regType(T)), T);
+    storeScalar(Addr, B.CreateTrunc(Wide, regType(T)), T, AllowTBAA);
     return;
   }
   case BuiltinKind::GetMem: {
@@ -1925,7 +1931,9 @@ void CodeGenModule::visitForStmt(ForStmt *S){
   B.SetInsertPoint(LoopBB);
   llvm::PHINode *I = B.CreatePHI(Start->getType(), 2, V->getName().Name);
   I->addIncoming(Start, B.GetInsertBlock()->getSinglePredecessor());
-  storeScalar(varAddress(V), I, VarTy);
+  storeScalar(varAddress(V), I, VarTy,
+              !(V->isAliased() || V->getAbsolute() != nullptr ||
+                (V->getAbsoluteRoot() && V->getAbsoluteRoot()->isAliased())));
   auto OldRange = VarRanges.find(V);
   bool HadRange = OldRange != VarRanges.end();
   ValueRange Saved = HadRange ? OldRange->second : ValueRange{};
@@ -2667,7 +2675,8 @@ llvm::Value *CodeGenModule::visitNameRefExpr(NameRefExpr *E){
   if (isBitPackedComponent(E))
     return bitLoad(E);
   if (llvm::isa<VarDecl>(D) || llvm::isa<FieldDecl>(D)) {
-    llvm::Value *V = loadScalar(emitAddress(E), E->getType(), E->getName().Name);
+    llvm::Value *V = loadScalar(emitAddress(E), E->getType(), E->getName().Name,
+                                !isAliasedExpr(E));
     if (auto *VD = llvm::dyn_cast<VarDecl>(D)) {
       auto It = VarRanges.find(VD);
       if (It != VarRanges.end())
@@ -3013,7 +3022,7 @@ llvm::Value *CodeGenModule::visitCallExpr(CallExpr *E){
   if (E->isVarCast()) { // T(x) of an untyped parameter x
     if (E->getType()->isShortString())
       return emitAddress(E);
-    return loadScalar(emitAddress(E), E->getType());
+    return loadScalar(emitAddress(E), E->getType(), "", /*AllowTBAA=*/false);
   }
   if (llvm::isa<TypeDecl>(E->getDecl()))
     return emitTypecast(E);
@@ -3207,7 +3216,7 @@ llvm::Value *CodeGenModule::visitNilExpr(NilExpr *){
 llvm::Value *CodeGenModule::visitDerefExpr(DerefExpr *E){
   if (E->getType()->isShortString())
     return emitAddress(E);
-  return loadScalar(emitAddress(E), E->getType());
+  return loadScalar(emitAddress(E), E->getType(), "", /*AllowTBAA=*/false);
 }
 
 
@@ -3234,7 +3243,7 @@ llvm::Value *CodeGenModule::visitIndexExpr(IndexExpr *E){
                                   indexFlags(E->getIndex(), 1)),
                       E->getType());
   }
-  return loadScalar(emitAddress(E), E->getType());
+  return loadScalar(emitAddress(E), E->getType(), "", !isAliasedExpr(E));
 }
 
 
@@ -3255,6 +3264,7 @@ llvm::Value *CodeGenModule::visitFieldExpr(FieldExpr *E){
     return emitMemberValue(E); // objfpc: a member of an object
   if (E->getType()->isShortString())
     return emitAddress(E);
-  return loadScalar(emitAddress(E), E->getType(), E->getField().Name);
+  return loadScalar(emitAddress(E), E->getType(), E->getField().Name,
+                    !isAliasedExpr(E));
 }
 

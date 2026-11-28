@@ -185,6 +185,17 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
   /// strings the checks share.
   llvm::StringMap<llvm::Constant *> ErrorMessages, FileStrings;
   llvm::StringMap<llvm::GlobalVariable *> LocationRecords;
+  /// TBAA metadata nodes & access tags ("Simple Pascal TBAA").
+  llvm::MDNode *TBAARoot = nullptr;
+  llvm::MDNode *TBAACharNode = nullptr;
+  llvm::MDNode *TBAA_Char = nullptr;
+  llvm::MDNode *TBAA_Bool = nullptr;
+  llvm::MDNode *TBAA_I16 = nullptr;
+  llvm::MDNode *TBAA_I32 = nullptr;
+  llvm::MDNode *TBAA_I64 = nullptr;
+  llvm::MDNode *TBAA_F64 = nullptr;
+  llvm::MDNode *TBAA_Set = nullptr;
+  llvm::MDNode *TBAA_Ptr = nullptr;
   /// The names of an enumeration's values (for write), by type.
   llvm::DenseMap<EnumType *, llvm::GlobalVariable *> EnumNameTables;
   llvm::StringMap<llvm::GlobalVariable *> AnsiConstants;
@@ -410,9 +421,15 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
   void noteComponentAlign(llvm::Value *Addr, uint64_t BaseAlign,
                           uint64_t Offset, Type *T);
 
-  llvm::Value *loadScalar(llvm::Value *Ptr, Type *T, const llvm::Twine &Name = "");
+  llvm::MDNode *tbaaCharScalarNode();
+  llvm::MDNode *tbaaTagFor(Type *T);
+  static bool isAliasedExpr(const Expr *E, bool DirectDeref = true);
 
-  void storeScalar(llvm::Value *Ptr, llvm::Value *Val, Type *T);
+  llvm::Value *loadScalar(llvm::Value *Ptr, Type *T,
+                          const llvm::Twine &Name = "", bool AllowTBAA = true);
+
+  void storeScalar(llvm::Value *Ptr, llvm::Value *Val, Type *T,
+                   bool AllowTBAA = true);
 
   /// Copies the array, record or string T: both are aligned as T is (or as
   /// AddrAligns says).
@@ -1256,7 +1273,8 @@ public:
   void storeInterface(llvm::Value *Addr, llvm::Value *V);
 
   /// Stores V (scalar, of type T) at Addr: counted for COM interfaces.
-  void storeValue(llvm::Value *Addr, llvm::Value *V, Type *T);
+  void storeValue(llvm::Value *Addr, llvm::Value *V, Type *T,
+                  bool AllowTBAA = true);
 
   /// Copies the record or array T at Src to Dst: counted if managed.
   void copyValue(llvm::Value *Dst, llvm::Value *Src, Type *T);

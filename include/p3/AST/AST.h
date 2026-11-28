@@ -1799,6 +1799,7 @@ private:
   Expr *Default = nullptr;      ///< objfpc: the parameter's default value
   bool Out = false;             ///< objfpc: an `out` parameter
   bool ConstRef = false;        ///< Turbo/FPC: a `constref` parameter
+  bool Aliased = false;         ///< has `absolute` overlay, `@x`, or untyped arg
   VarDecl *AbsoluteRoot = nullptr; ///< set by Sema: the variable y is in
   /// Turbo/FPC `x: T; [cvar;] external ['lib'] [name 'sym'];`: a C variable
   /// (the library and symbol: string constants, evaluated by Sema; the
@@ -1829,6 +1830,8 @@ public:
   /// always passed by reference: the caller's variable, or a temporary.
   bool isConstRefParam() const { return ConstRef; }
   void setConstRefParam() { ConstRef = true; }
+  bool isAliased() const { return Aliased; }
+  void setAliased() { Aliased = true; }
   RoutineDecl *getOwner() const { return Owner; }
   void setOwner(RoutineDecl *R) { Owner = R; }
   /// A routine's variable that a routine nested in it may use: it lives in

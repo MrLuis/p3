@@ -952,8 +952,12 @@ llvm::Value *CodeGenModule::emitPropertyRead(PropertyDecl *P, llvm::Value *Obj, 
   Type *T = P->getType();
   if (P->isClassProperty()) { // a class variable or a static method
     if (auto *V = llvm::dyn_cast<VarDecl>(P->getRead()))
-      return T->isStructured() ? Globals[V]
-                               : loadScalar(Globals[V], T, P->getName().Name);
+      return T->isStructured()
+                 ? Globals[V]
+                 : loadScalar(Globals[V], T, P->getName().Name,
+                              !(V->isAliased() || V->getAbsolute() != nullptr ||
+                                (V->getAbsoluteRoot() &&
+                                 V->getAbsoluteRoot()->isAliased())));
     return emitCall(llvm::cast<RoutineDecl>(P->getRead()),
                     accessorArgs(P, Indexes, nullptr));
   }
@@ -1032,7 +1036,10 @@ llvm::Value *CodeGenModule::emitMemberValue(FieldExpr *F){
   if (auto *V = llvm::dyn_cast<VarDecl>(D)) { // a class variable
     if (V->getType()->isShortString())
       return Globals[V];
-    return loadScalar(Globals[V], V->getType(), V->getName().Name);
+    return loadScalar(Globals[V], V->getType(), V->getName().Name,
+                      !(V->isAliased() || V->getAbsolute() != nullptr ||
+                        (V->getAbsoluteRoot() &&
+                         V->getAbsoluteRoot()->isAliased())));
   }
   Type *C = F->getBase()->getType();
   if (auto *P = llvm::dyn_cast<PropertyDecl>(D); P && P->isClassProperty())
@@ -1049,7 +1056,8 @@ llvm::Value *CodeGenModule::emitMemberValue(FieldExpr *F){
   llvm::Value *Addr = fieldAddress(Obj, C, F->getFieldDecl());
   if (F->getType()->isShortString())
     return Addr;
-  return loadScalar(Addr, F->getType(), F->getField().Name);
+  return loadScalar(Addr, F->getType(), F->getField().Name,
+                    !isAliasedExpr(F));
 }
 
 

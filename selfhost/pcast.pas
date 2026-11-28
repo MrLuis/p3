@@ -632,6 +632,7 @@ type
                 always passed by reference: the caller's variable, or a
                 temporary }
               isConstRef: boolean;
+              isAliased: boolean;
               { Turbo/FPC  x: T; [cvar;] external ['lib'] [name 'sym'];  a C
                 variable (the library and symbol: string constants,
                 evaluated by Sema; the symbol: the name as written unless

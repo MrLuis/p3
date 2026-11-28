@@ -6900,6 +6900,7 @@ begin
     errR(op^.b, nodeRange(op));
     exit;
   end;
+  markAliasedBase(op);
   if t^.kind <> tyUntyped then
   begin
     if ((safeLevel = slVerified) and not isUnsafe(e^.b)) or

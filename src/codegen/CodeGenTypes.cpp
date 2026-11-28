@@ -298,20 +298,135 @@ void CodeGenModule::noteComponentAlign(llvm::Value *Addr, uint64_t BaseAlign,
 }
 
 
-llvm::Value *CodeGenModule::loadScalar(llvm::Value *Ptr, Type *T, const llvm::Twine &Name){
+llvm::MDNode *CodeGenModule::tbaaCharScalarNode(){
+  if (!TBAACharNode) {
+    llvm::MDBuilder MDB(M.getContext());
+    if (!TBAARoot)
+      TBAARoot = MDB.createTBAARoot("Simple Pascal TBAA");
+    TBAACharNode = MDB.createTBAAScalarTypeNode("omnipotent char", TBAARoot);
+  }
+  return TBAACharNode;
+}
+
+
+llvm::MDNode *CodeGenModule::tbaaTagFor(Type *T){
+  if (!T)
+    return nullptr;
+  Type *Base = T->getBase();
+  auto makeTag = [&](llvm::MDNode *&Slot, const char *Name) -> llvm::MDNode * {
+    if (!Slot) {
+      llvm::MDNode *Char = tbaaCharScalarNode();
+      llvm::MDBuilder MDB(M.getContext());
+      llvm::MDNode *Node =
+          Name ? MDB.createTBAAScalarTypeNode(Name, Char) : Char;
+      Slot = MDB.createTBAAStructTagNode(Node, Node, 0);
+    }
+    return Slot;
+  };
+  switch (Base->getKind()) {
+  case Type::TK_Char:
+    return makeTag(TBAA_Char, nullptr);
+  case Type::TK_Boolean:
+    return makeTag(TBAA_Bool, "bool");
+  case Type::TK_WideChar:
+    return makeTag(TBAA_I16, "i16");
+  case Type::TK_Integer: {
+    unsigned Bits = llvm::cast<IntegerType>(Base)->getBits();
+    if (Bits <= 8)
+      return makeTag(TBAA_Char, nullptr);
+    if (Bits <= 16)
+      return makeTag(TBAA_I16, "i16");
+    if (Bits <= 32)
+      return makeTag(TBAA_I32, "i32");
+    return makeTag(TBAA_I64, "i64");
+  }
+  case Type::TK_Enum:
+    return makeTag(TBAA_I32, "i32");
+  case Type::TK_Real:
+    return makeTag(TBAA_F64, "f64");
+  case Type::TK_Set:
+    return makeTag(TBAA_Set, "set");
+  case Type::TK_Vector:
+    return tbaaTagFor(llvm::cast<VectorType>(Base)->getElementType());
+  case Type::TK_Pointer:
+  case Type::TK_Nil:
+  case Type::TK_File:
+  case Type::TK_DynArray:
+  case Type::TK_OpenArray:
+  case Type::TK_ArrayOfConst:
+  case Type::TK_AnsiString:
+  case Type::TK_ClassRef:
+  case Type::TK_Class:
+  case Type::TK_Task:
+  case Type::TK_Token:
+  case Type::TK_Iterator:
+    return makeTag(TBAA_Ptr, "any pointer");
+  default:
+    return nullptr;
+  }
+}
+
+
+bool CodeGenModule::isAliasedExpr(const Expr *E, bool DirectDeref){
+  if (!E)
+    return false;
+  while (auto *P = llvm::dyn_cast<ParenExpr>(E))
+    E = P->getInner();
+  if (auto *D = llvm::dyn_cast<DerefExpr>(E)) {
+    if (DirectDeref)
+      return true;
+    const Expr *Inner = D->getBase();
+    while (auto *P = llvm::dyn_cast<ParenExpr>(Inner))
+      Inner = P->getInner();
+    if (auto *C = llvm::dyn_cast<CallExpr>(Inner))
+      if (C->isVarCast() || llvm::isa_and_nonnull<TypeDecl>(C->getDecl()))
+        return true;
+    return isAliasedExpr(Inner, /*DirectDeref=*/false);
+  }
+  if (auto *C = llvm::dyn_cast<CallExpr>(E))
+    return C->isVarCast() || llvm::isa_and_nonnull<TypeDecl>(C->getDecl());
+  if (auto *N = llvm::dyn_cast<NameRefExpr>(E)) {
+    if (auto *V = llvm::dyn_cast_or_null<VarDecl>(N->getDecl()))
+      return V->isAliased() || V->getAbsolute() != nullptr ||
+             (V->getAbsoluteRoot() && V->getAbsoluteRoot()->isAliased());
+    if (N->getWith())
+      return isAliasedExpr(N->getWith()->Record, /*DirectDeref=*/false);
+    return false;
+  }
+  if (auto *F = llvm::dyn_cast<FieldExpr>(E)) {
+    if (auto *RT = llvm::dyn_cast<RecordType>(F->getBase()->getType()))
+      if (RT->getFieldList() && RT->getFieldList()->Variant)
+        return true;
+    return isAliasedExpr(F->getBase(), /*DirectDeref=*/false);
+  }
+  if (auto *I = llvm::dyn_cast<IndexExpr>(E))
+    return isAliasedExpr(I->getBase(), /*DirectDeref=*/false);
+  return false;
+}
+
+
+llvm::Value *CodeGenModule::loadScalar(llvm::Value *Ptr, Type *T,
+                                       const llvm::Twine &Name, bool AllowTBAA){
   llvm::LoadInst *Raw = B.CreateLoad(memType(T), Ptr, Name);
   if (auto It = AddrAligns.find(Ptr); It != AddrAligns.end())
     Raw->setAlignment(llvm::Align(It->second));
+  if (AllowTBAA)
+    if (llvm::MDNode *Tag = tbaaTagFor(T))
+      Raw->setMetadata(llvm::LLVMContext::MD_tbaa, Tag);
   return T->getBase()->isBoolean() ? B.CreateTrunc(Raw, B.getInt1Ty()) : Raw;
 }
 
 
-void CodeGenModule::storeScalar(llvm::Value *Ptr, llvm::Value *Val, Type *T){
+void CodeGenModule::storeScalar(llvm::Value *Ptr, llvm::Value *Val, Type *T,
+                                bool AllowTBAA){
   if (T->getBase()->isBoolean())
     Val = B.CreateZExt(Val, B.getInt8Ty());
   llvm::StoreInst *S = B.CreateStore(Val, Ptr);
   if (auto It = AddrAligns.find(Ptr); It != AddrAligns.end())
     S->setAlignment(llvm::Align(It->second));
+  if (AllowTBAA)
+    if (llvm::MDNode *Tag = tbaaTagFor(T))
+      S->setMetadata(llvm::LLVMContext::MD_tbaa, Tag);
 }
 
 

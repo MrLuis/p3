@@ -927,6 +927,9 @@ class Checker : public StmtVisitor<Checker>,
   /// index of an array in one. Null for anything else.
   VarDecl *absoluteRootOf(Expr *E);
 
+  /// Marks any underlying variable of E as potentially type-punned/aliased.
+  void markAliasedBase(Expr *E);
+
   /// `V: T absolute Target`, as in Free Pascal. Checked before V is
   /// declared, so that it cannot name itself.
   void checkAbsolute(VarDecl *V, Expr *Target);

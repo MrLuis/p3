@@ -227,6 +227,9 @@ var
     the routines are declared (finishStaticInits) }
   deferredInits: TPtrList;
   cleanupClasses, cleanupFns: TPtrList;
+  { TBAA metadata nodes & access tags ("Simple Pascal TBAA") }
+  tbaaRoot, tbaaCharNode, tbaaTagChar, tbaaTagBool, tbaaTagI16,
+  tbaaTagI32, tbaaTagI64, tbaaTagF64, tbaaTagSet, tbaaTagPtr: PMeta;
 
 { --- Small helpers --- }
 
@@ -1198,7 +1201,159 @@ begin
     setAddrAlign(addr, a);
 end;
 
-function loadScalar(const p: TV; t: PType; const name: string): TV;
+procedure resetTBAA;
+begin
+  tbaaRoot := nil;
+  tbaaCharNode := nil;
+  tbaaTagChar := nil;
+  tbaaTagBool := nil;
+  tbaaTagI16 := nil;
+  tbaaTagI32 := nil;
+  tbaaTagI64 := nil;
+  tbaaTagF64 := nil;
+  tbaaTagSet := nil;
+  tbaaTagPtr := nil;
+end;
+
+function makeTBAAScalar(const name: string; parent: PMeta): PMeta;
+var
+  b: TBuf;
+  ops: TPtrList;
+begin
+  bufInit(b);
+  listInit(ops);
+  bufAdd(b, '!{!"' + name + '"');
+  if parent <> nil then
+  begin
+    bufAdd(b, ', ' + irMetaRef(parent) + ', i64 0');
+    listAdd(ops, parent);
+  end;
+  bufAddChar(b, '}');
+  makeTBAAScalar := irMeta(false, b, ops);
+  listFree(ops);
+  bufFree(b);
+end;
+
+function makeTBAATag(node: PMeta): PMeta;
+var
+  b: TBuf;
+  ops: TPtrList;
+begin
+  bufInit(b);
+  listInit(ops);
+  bufAdd(b, '!{' + irMetaRef(node) + ', ' + irMetaRef(node) + ', i64 0}');
+  listAdd(ops, node);
+  listAdd(ops, node);
+  makeTBAATag := irMeta(false, b, ops);
+  listFree(ops);
+  bufFree(b);
+end;
+
+function tbaaCharScalarNode: PMeta;
+begin
+  if tbaaCharNode = nil then
+  begin
+    if tbaaRoot = nil then
+      tbaaRoot := makeTBAAScalar('Simple Pascal TBAA', nil);
+    tbaaCharNode := makeTBAAScalar('omnipotent char', tbaaRoot);
+  end;
+  tbaaCharScalarNode := tbaaCharNode;
+end;
+
+function makeCachedTBAATag(var slot: PMeta; const name: string): PMeta;
+var
+  ch, node: PMeta;
+begin
+  if slot = nil then
+  begin
+    ch := tbaaCharScalarNode;
+    if name = '' then
+      node := ch
+    else
+      node := makeTBAAScalar(name, ch);
+    slot := makeTBAATag(node);
+  end;
+  makeCachedTBAATag := slot;
+end;
+
+function tbaaTagFor(t: PType): PMeta;
+var
+  b: PType;
+begin
+  if t = nil then
+    exit(nil);
+  b := getBase(t);
+  case b^.kind of
+    tyChar: exit(makeCachedTBAATag(tbaaTagChar, ''));
+    tyBoolean: exit(makeCachedTBAATag(tbaaTagBool, 'bool'));
+    tyWideChar: exit(makeCachedTBAATag(tbaaTagI16, 'i16'));
+    tyInteger:
+      begin
+        if b^.bits <= 8 then
+          exit(makeCachedTBAATag(tbaaTagChar, ''));
+        if b^.bits <= 16 then
+          exit(makeCachedTBAATag(tbaaTagI16, 'i16'));
+        if b^.bits <= 32 then
+          exit(makeCachedTBAATag(tbaaTagI32, 'i32'));
+        exit(makeCachedTBAATag(tbaaTagI64, 'i64'));
+      end;
+    tyEnum: exit(makeCachedTBAATag(tbaaTagI32, 'i32'));
+    tyReal: exit(makeCachedTBAATag(tbaaTagF64, 'f64'));
+    tySet: exit(makeCachedTBAATag(tbaaTagSet, 'set'));
+    tyVector: exit(tbaaTagFor(b^.vecElement));
+    tyPointer, tyNil, tyFile, tyDynArray, tyOpenArray, tyArrayOfConst,
+    tyAnsiString, tyClassRef, tyClass, tyTask, tyToken, tyIterator:
+      exit(makeCachedTBAATag(tbaaTagPtr, 'any pointer'));
+  else
+    tbaaTagFor := nil;
+  end;
+end;
+
+function isAliasedExpr(e: PNode; directDeref: boolean): boolean;
+var
+  inner: PNode;
+begin
+  if e = nil then
+    exit(false);
+  while e^.kind = nkParen do
+    e := e^.inner;
+  if e^.kind = nkDeref then
+  begin
+    if directDeref then
+      exit(true);
+    inner := e^.inner;
+    while (inner <> nil) and (inner^.kind = nkParen) do
+      inner := inner^.inner;
+    if (inner <> nil) and (inner^.kind = nkCall) and
+       (inner^.isVarCast or ((inner^.callDecl <> nil) and (inner^.callDecl^.kind = dkType))) then
+      exit(true);
+    exit(isAliasedExpr(inner, false));
+  end;
+  if e^.kind = nkCall then
+    exit(e^.isVarCast or ((e^.callDecl <> nil) and (e^.callDecl^.kind = dkType)));
+  if e^.kind = nkNameRef then
+  begin
+    if (e^.refDecl <> nil) and (e^.refDecl^.kind = dkVar) then
+      exit(e^.refDecl^.isAliased or (e^.refDecl^.absTarget <> nil) or
+           ((e^.refDecl^.absRoot <> nil) and e^.refDecl^.absRoot^.isAliased));
+    if e^.refWith <> nil then
+      exit(isAliasedExpr(e^.refWith^.rec, false));
+    exit(false);
+  end;
+  if e^.kind = nkField then
+  begin
+    if (e^.base^.typ^.kind = tyRecord) and (e^.base^.typ^.fieldList <> nil) and
+       (e^.base^.typ^.fieldList^.variant <> nil) then
+      exit(true);
+    exit(isAliasedExpr(e^.base, false));
+  end;
+  if e^.kind = nkIndex then
+    exit(isAliasedExpr(e^.base, false));
+  isAliasedExpr := false;
+end;
+
+function loadScalarEx(const p: TV; t: PType; const name: string;
+                      allowTBAA: boolean): TV;
 var
   raw: TV;
   a: int64;
@@ -1207,13 +1362,20 @@ begin
     raw := irLoadAlign(memType(t), p, longint(a), name)
   else
     raw := irLoad(memType(t), p, name);
+  if allowTBAA then
+    irSetTBAA(tbaaTagFor(t));
   if isBoolBase(t) then
-    loadScalar := irCast('trunc', raw, irI1, '')
+    loadScalarEx := irCast('trunc', raw, irI1, '')
   else
-    loadScalar := raw;
+    loadScalarEx := raw;
 end;
 
-procedure storeScalar(const p, v: TV; t: PType);
+function loadScalar(const p: TV; t: PType; const name: string): TV;
+begin
+  loadScalar := loadScalarEx(p, t, name, true);
+end;
+
+procedure storeScalarEx(const p, v: TV; t: PType; allowTBAA: boolean);
 var
   x: TV;
   a: int64;
@@ -1225,6 +1387,13 @@ begin
     irStoreAlign(x, p, longint(a))
   else
     irStore(x, p);
+  if allowTBAA then
+    irSetTBAA(tbaaTagFor(t));
+end;
+
+procedure storeScalar(const p, v: TV; t: PType);
+begin
+  storeScalarEx(p, v, t, true);
 end;
 
 { Copies the array, record or string t: both are aligned as t is. }
@@ -4135,7 +4304,7 @@ begin
 end;
 
 { Stores v (scalar, of type t) at addr: counted for COM interfaces. }
-procedure storeValue(const addr, v: TV; t: PType);
+procedure storeValueEx(const addr, v: TV; t: PType; allowTBAA: boolean);
 var
   fn, frame, ignored: TV;
 begin
@@ -4165,7 +4334,12 @@ begin
   else if isManaged(t) then
     storeInterface(addr, v)
   else
-    storeScalar(addr, v, t);
+    storeScalarEx(addr, v, t, allowTBAA);
+end;
+
+procedure storeValue(const addr, v: TV; t: PType);
+begin
+  storeValueEx(addr, v, t, true);
 end;
 
 { Releases the ansistring or COM interface held in the temporary slot
@@ -5563,7 +5737,9 @@ begin
       addr := PTVBox(p^.readDecl^.cgValue)^;
       if isStructured(t) then
         exit(addr);
-      exit(loadScalar(addr, t, nm(p^.ident.name)));
+      exit(loadScalarEx(addr, t, nm(p^.ident.name),
+                        not (p^.readDecl^.isAliased or (p^.readDecl^.absTarget <> nil) or
+                             ((p^.readDecl^.absRoot <> nil) and p^.readDecl^.absRoot^.isAliased))));
     end;
     accessorArgs(p, indexes, nil, args);
     exit(emitCall(p^.readDecl, args));
@@ -5640,7 +5816,9 @@ begin
   begin
     if d^.varType^.kind = tyShortString then
       exit(PTVBox(d^.cgValue)^);
-    exit(loadScalar(PTVBox(d^.cgValue)^, d^.varType, nm(d^.ident.name)));
+    exit(loadScalarEx(PTVBox(d^.cgValue)^, d^.varType, nm(d^.ident.name),
+                      not (d^.isAliased or (d^.absTarget <> nil) or
+                           ((d^.absRoot <> nil) and d^.absRoot^.isAliased))));
   end;
   c := e^.base^.typ;
   if (d^.kind = dkProperty) and d^.propIsClass then
@@ -5658,7 +5836,8 @@ begin
   addr := fieldAddress(obj, c, d);
   if e^.typ^.kind = tyShortString then
     exit(addr);
-  emitMemberValue := loadScalar(addr, e^.typ, nm(e^.fieldName.name));
+  emitMemberValue := loadScalarEx(addr, e^.typ, nm(e^.fieldName.name),
+                                  not isAliasedExpr(e, true));
 end;
 
 { obj is TFoo / obj as TFoo: the runtime walks obj's chain of VMTs. }
@@ -6464,7 +6643,8 @@ begin
     exit(bitLoad(e));
   if d^.kind in [dkVar, dkField] then
   begin
-    v := loadScalar(emitAddress(e), e^.typ, nm(e^.ref.name));
+    v := loadScalarEx(emitAddress(e), e^.typ, nm(e^.ref.name),
+                      not isAliasedExpr(e, true));
     if d^.cgRangeKnown then
     begin
       v.rKnown := true;
@@ -6909,7 +7089,7 @@ begin
   begin
     if e^.typ^.kind = tyShortString then
       exit(emitAddress(e));
-    exit(loadScalar(emitAddress(e), e^.typ, ''));
+    exit(loadScalarEx(emitAddress(e), e^.typ, '', false));
   end;
   d := e^.callDecl;
   case d^.kind of
@@ -7668,8 +7848,11 @@ begin
         visitExprKind := emitAddress(e)
       else if (e^.kind = nkIndex) and (e^.base^.typ^.kind = tyAnsiString) then
         visitExprKind := emitAnsiIndexRead(e)
+      else if e^.kind = nkDeref then
+        visitExprKind := loadScalarEx(emitAddress(e), e^.typ, '', false)
       else
-        visitExprKind := loadScalar(emitAddress(e), e^.typ, '');
+        visitExprKind := loadScalarEx(emitAddress(e), e^.typ, '',
+                                      not isAliasedExpr(e, true));
     nkField:
       if e^.constRef <> nil then { TFoo.C }
         visitExprKind := visitExpr(e^.constRef)
@@ -7680,7 +7863,8 @@ begin
       else if e^.typ^.kind = tyShortString then
         visitExprKind := emitAddress(e)
       else
-        visitExprKind := loadScalar(emitAddress(e), e^.typ, nm(e^.fieldName.name));
+        visitExprKind := loadScalarEx(emitAddress(e), e^.typ, nm(e^.fieldName.name),
+                                      not isAliasedExpr(e, true));
     nkInherited:
       begin
         listInit(noArgs);

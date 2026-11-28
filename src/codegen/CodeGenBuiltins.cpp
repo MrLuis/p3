@@ -1135,7 +1135,7 @@ void CodeGenModule::emitRead(ProcCallStmt *S, bool IsReadln){
       B.CreateCall(RT.ReadElem, {File, Tmp});
       llvm::Value *V = convertForAssign(loadScalar(Tmp, Elem), Elem,
                                         Arg->getType(), Arg->getBeginLoc());
-      storeScalar(emitAddress(Arg), V, Arg->getType());
+      storeScalar(emitAddress(Arg), V, Arg->getType(), !isAliasedExpr(Arg));
     }
     return;
   }

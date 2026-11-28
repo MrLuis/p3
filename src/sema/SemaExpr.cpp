@@ -1532,6 +1532,7 @@ Type *Checker::visitAddrOfExpr(AddrOfExpr *E){
                 {E->getOperand()->getRange()});
     return errorType();
   }
+  markAliasedBase(E->getOperand());
   bool Typed = (LangOpts.Safe == SafeLevel::Verified &&
                 !isUnsafe(E->getBeginLoc())) ||
                (Directives &&

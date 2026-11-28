@@ -7853,6 +7853,8 @@ begin
           target^.typ := x^.resultType;
           x^.resultAssigned := true;
           v^.absRoot := x^.resultVar;
+          v^.isAliased := true;
+          x^.resultVar^.isAliased := true;
           exit;
         end;
         x := x^.nextOverload;
@@ -7876,8 +7878,39 @@ begin
     exit;
   end;
   v^.absRoot := root;
+  v^.isAliased := true;
+  root^.isAliased := true;
   if root^.varKind = vkResult then { objfpc Result }
     root^.owner^.resultAssigned := true;
+end;
+
+procedure markAliasedBase(e: PNode);
+begin
+  while e <> nil do
+  begin
+    case e^.kind of
+      nkParen, nkDeref: e := e^.inner;
+      nkField, nkIndex: e := e^.base;
+      nkNameRef:
+        begin
+          if (e^.refDecl <> nil) and (e^.refDecl^.kind = dkVar) then
+          begin
+            e^.refDecl^.isAliased := true;
+            if e^.refDecl^.absRoot <> nil then
+              e^.refDecl^.absRoot^.isAliased := true;
+            exit;
+          end;
+          if e^.refWith <> nil then
+          begin
+            e := e^.refWith^.rec;
+            continue;
+          end;
+          exit;
+        end;
+    else
+      exit;
+    end;
+  end;
 end;
 
 function externalString(e: PNode; const what, ofWhat: string; var s: PName): boolean; forward;
@@ -12569,6 +12602,7 @@ begin
       end
       else if p^.varKind = vkVarParam then
         checkModifiable(arg);
+      markAliasedBase(arg);
       continue;
     end;
     pt := p^.varType;

@@ -1506,6 +1506,8 @@ void Checker::checkAbsolute(VarDecl *V, Expr *Target){
           N->setType(X->getResultType());
           ResultAssigned.insert(X);
           V->setAbsoluteRoot(X->getResultVar());
+          V->setAliased();
+          X->getResultVar()->setAliased();
           return;
         }
   if (checkAllowingUntyped(Target)->isError())
@@ -1522,8 +1524,43 @@ void Checker::checkAbsolute(VarDecl *V, Expr *Target){
     return;
   }
   V->setAbsoluteRoot(Root);
+  V->setAliased();
+  Root->setAliased();
   if (Root->getVarKind() == VarDecl::Result) // objfpc `Result`
     ResultAssigned.insert(Root->getOwner());
+}
+
+
+void Checker::markAliasedBase(Expr *E){
+  while (E) {
+    if (auto *P = llvm::dyn_cast<ParenExpr>(E)) {
+      E = P->getInner();
+      continue;
+    }
+    if (auto *F = llvm::dyn_cast<FieldExpr>(E)) {
+      E = F->getBase();
+      continue;
+    }
+    if (auto *I = llvm::dyn_cast<IndexExpr>(E)) {
+      E = I->getBase();
+      continue;
+    }
+    if (auto *D = llvm::dyn_cast<DerefExpr>(E)) {
+      E = D->getBase();
+      continue;
+    }
+    if (auto *N = llvm::dyn_cast<NameRefExpr>(E)) {
+      if (auto *V = llvm::dyn_cast_or_null<VarDecl>(N->getDecl())) {
+        V->setAliased();
+        if (V->getAbsoluteRoot())
+          V->getAbsoluteRoot()->setAliased();
+      } else if (N->getWith()) {
+        E = N->getWith()->Record;
+        continue;
+      }
+    }
+    break;
+  }
 }
 
 

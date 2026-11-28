@@ -385,7 +385,7 @@ begin
       rtv2('__pas_read_elem', f, tmp);
       v := convertForAssign(loadScalar(tmp, elem, ''), elem, arg^.typ, arg^.b);
       addr := emitAddress(arg);
-      storeScalar(addr, v, arg^.typ);
+      storeScalarEx(addr, v, arg^.typ, not isAliasedExpr(arg, true));
     end;
     exit;
   end;
@@ -1035,7 +1035,7 @@ begin
     bitStore(target, v);
     exit;
   end;
-  storeValue(emitAddress(target), v, tt);
+  storeValueEx(emitAddress(target), v, tt, not isAliasedExpr(target, true));
   assignStored := v;
   assignStoredSet := true;
 end;
@@ -1104,12 +1104,13 @@ var
   addr, old, step, nv, wide, old64, neg, bad: TV;
   loc: TLoc;
   bd: TOrdinalBounds;
-  check: boolean;
+  check, allowTBAA: boolean;
 begin
   varE := PNode(listGet(s^.args, 0));
   t := varE^.typ;
+  allowTBAA := not isAliasedExpr(varE, true);
   addr := emitAddress(varE);
-  old := loadScalar(addr, t, '');
+  old := loadScalarEx(addr, t, '', allowTBAA);
   if s^.args.count = 2 then
   begin
     stepE := PNode(listGet(s^.args, 1));
@@ -1126,6 +1127,8 @@ begin
       emitPointerAddCheck(t, old, step, loc);
     nv := irGEP1(pointeeMemType(t), old, step, false, '');
     irStore(nv, addr);
+    if allowTBAA then
+      irSetTBAA(tbaaTagFor(t));
     exit;
   end;
   if isIntegerLike(t) and (intBits(t) = 64) then
@@ -1138,7 +1141,7 @@ begin
       nv := emitCheckedArith('sub', isSignedOrdinal(t), old, step, loc,
                              nm(s^.callee.name));
     emitRangeCheck(nv, getBase(t), t, loc);
-    storeScalar(addr, nv, t);
+    storeScalarEx(addr, nv, t, allowTBAA);
     exit;
   end;
   { computed in i64 so the range check sees the true result }
@@ -1164,7 +1167,7 @@ begin
     else
       emitRuntimeCheck(bad, 'value out of range', loc);
   end;
-  storeScalar(addr, irCast('trunc', wide, regType(t), ''), t);
+  storeScalarEx(addr, irCast('trunc', wide, regType(t), ''), t, allowTBAA);
 end;
 
 { setlength of the array variable at addr, of type t: ns[idx] elements,
@@ -1305,7 +1308,8 @@ begin
           arg := PNode(listGet(s^.args, 3));
           if not irSameType(done.t, regType(arg^.typ)) then
             done := irCast('trunc', done, regType(arg^.typ), '');
-          storeScalar(emitAddress(arg), done, arg^.typ);
+          storeScalarEx(emitAddress(arg), done, arg^.typ,
+                        not isAliasedExpr(arg, true));
         end;
       end;
     bkSeek:
@@ -1710,7 +1714,9 @@ begin
   irSetInsertPoint(loopB);
   i := irPhi(start.t, nm(v^.ident.name), phi);
   irAddIncoming(phi, start, preB);
-  storeScalar(varAddress(v), i, varTy);
+  storeScalarEx(varAddress(v), i, varTy,
+                not (v^.isAliased or (v^.absTarget <> nil) or
+                     ((v^.absRoot <> nil) and v^.absRoot^.isAliased)));
   oldKnown := v^.cgRangeKnown;
   oldLo := v^.cgRangeLo;
   oldHi := v^.cgRangeHi;
@@ -6007,6 +6013,7 @@ begin
   irSetFastMath(optFastMath);
   irSetTarget(optCPU, optFeatures);
   irSetSizeLevel(optSizeLevel);
+  resetTBAA;
   mode := m;
   optRange := rangeChecksOn;
   optOverflow := overflowChecksOn;
