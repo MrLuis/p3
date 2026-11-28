@@ -320,6 +320,7 @@ class CodeGenModule : public StmtVisitor<CodeGenModule>,
   static ClassType *definedClass(Decl *D);
 
   static bool hasNonLocalLabels(Block &Blk);
+  static bool stmtHasTry(Stmt *S);
 
   //===--------------------------------------------------------------------===//
   // Types

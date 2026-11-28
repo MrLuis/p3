@@ -1079,7 +1079,13 @@ void CodeGenModule::emitProgram(ProgramDecl &P, llvm::ArrayRef<UnitDecl *> Units
   CurRoutine = nullptr;
   CurFrame = nullptr;
   CurPin = nullptr;
-  PinTemps = true;
+  bool NeedsPin = hasNonLocalLabels(Blk) || stmtHasTry(Blk.getBody());
+  if (!Separate)
+    for (UnitDecl *U : Units)
+      if (hasNonLocalLabels(*U->getImplementation()) ||
+          stmtHasTry(U->getImplementation()->getBody()))
+        NeedsPin = true;
+  PinTemps = NeedsPin;
   CurSP = DIB ? createSubprogram(Main, "main", DIUnitFile,
                                  lineOf(P.getLocation()), nullptr, {})
               : nullptr;
@@ -1295,7 +1301,8 @@ void CodeGenModule::emitUnit(UnitDecl &U, llvm::ArrayRef<UnitDecl *> Deps){
   CurRoutine = nullptr;
   CurFrame = nullptr;
   CurPin = nullptr;
-  PinTemps = true;
+  PinTemps = hasNonLocalLabels(*U.getImplementation()) ||
+             stmtHasTry(U.getImplementation()->getBody());
   CurSP = DIB ? createSubprogram(Init, U.getName().Spelling, DIUnitFile,
                                  lineOf(U.getLocation()), nullptr, {})
               : nullptr;

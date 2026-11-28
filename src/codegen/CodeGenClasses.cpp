@@ -78,6 +78,54 @@ bool CodeGenModule::hasNonLocalLabels(Block &Blk){
 }
 
 
+bool CodeGenModule::stmtHasTry(Stmt *S){
+  if (!S)
+    return false;
+  if (llvm::isa<TryStmt>(S) || llvm::isa<ScopeStmt>(S))
+    return true;
+  if (auto *V = llvm::dyn_cast<VarDeclStmt>(S)) {
+    for (VarDecl *VD : V->getVars())
+      if (VD->isOwned())
+        return true;
+    return false;
+  }
+  if (auto *C = llvm::dyn_cast<CompoundStmt>(S)) {
+    for (Stmt *X : C->getBody())
+      if (stmtHasTry(X))
+        return true;
+    return false;
+  }
+  if (auto *I = llvm::dyn_cast<IfStmt>(S))
+    return stmtHasTry(I->getThen()) || stmtHasTry(I->getElse());
+  if (auto *W = llvm::dyn_cast<WhileStmt>(S))
+    return stmtHasTry(W->getBody());
+  if (auto *R = llvm::dyn_cast<RepeatStmt>(S)) {
+    for (Stmt *X : R->getBody())
+      if (stmtHasTry(X))
+        return true;
+    return false;
+  }
+  if (auto *F = llvm::dyn_cast<ForStmt>(S))
+    return stmtHasTry(F->getBody());
+  if (auto *FI = llvm::dyn_cast<ForInStmt>(S))
+    return stmtHasTry(FI->getBody());
+  if (auto *C = llvm::dyn_cast<CaseStmt>(S)) {
+    for (CaseArm *A : C->getArms())
+      if (stmtHasTry(A->getBody()))
+        return true;
+    for (Stmt *X : C->getElseBody())
+      if (stmtHasTry(X))
+        return true;
+    return false;
+  }
+  if (auto *W = llvm::dyn_cast<WithStmt>(S))
+    return stmtHasTry(W->getBody());
+  if (auto *L = llvm::dyn_cast<LabeledStmt>(S))
+    return stmtHasTry(L->getBody());
+  return false;
+}
+
+
 void CodeGenModule::declareInterface(Decl *D, InterfaceType *I){
   auto Export = ExportNames.find(D);
   std::string Text = std::string(1, static_cast<char>(I->getDeclName().size())) +

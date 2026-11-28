@@ -465,6 +465,52 @@ begin
   end;
 end;
 
+function stmtHasTry(s: PNode): boolean;
+var
+  i: longint;
+  arm: PCaseArm;
+begin
+  stmtHasTry := false;
+  if s = nil then
+    exit;
+  case s^.kind of
+    nkTry, nkScope:
+      exit(true);
+    nkVarDecl:
+      for i := 0 to s^.vdVars.count - 1 do
+        if PDecl(listGet(s^.vdVars, i))^.isOwned then
+          exit(true);
+    nkCompound, nkRepeat:
+      for i := 0 to s^.stmts.count - 1 do
+        if stmtHasTry(PNode(listGet(s^.stmts, i))) then
+          exit(true);
+    nkIf:
+      exit(stmtHasTry(s^.thenStmt) or stmtHasTry(s^.elseStmt));
+    nkWhile:
+      exit(stmtHasTry(s^.thenStmt));
+    nkFor:
+      exit(stmtHasTry(s^.forBody));
+    nkForIn:
+      exit(stmtHasTry(s^.inBody));
+    nkCase:
+      begin
+        for i := 0 to s^.arms.count - 1 do
+        begin
+          arm := PCaseArm(listGet(s^.arms, i));
+          if stmtHasTry(arm^.body) then
+            exit(true);
+        end;
+        for i := 0 to s^.elseBody.count - 1 do
+          if stmtHasTry(PNode(listGet(s^.elseBody, i))) then
+            exit(true);
+      end;
+    nkWith:
+      exit(stmtHasTry(s^.withBody));
+    nkLabeled:
+      exit(stmtHasTry(s^.lblBody));
+  end;
+end;
+
 { At the entry of a block targeted by non-local gotos:
   switch (_setjmp(buf)) case k: goto label_k }
 procedure emitSetJmpDispatch(blk: PBlock; const buf: TV);
@@ -5425,12 +5471,22 @@ var
   entry: PIRBlock;
   noParams, noDecls: TPtrList;
   initFn: PIRFunc;
+  needsPin: boolean;
 begin
   blk := prog^.progBlock;
   curFn := mainFn;
   resetAddrAligns;
   curRoutine := nil;
   curFrame := irNull;
+  needsPin := hasNonLocalLabels(blk) or stmtHasTry(blk^.body);
+  if not separate then
+    for i := 0 to units.count - 1 do
+    begin
+      u := PDecl(listGet(units, i));
+      if hasNonLocalLabels(u^.impl) or stmtHasTry(u^.impl^.body) then
+        needsPin := true;
+    end;
+  pinTemps := needsPin;
   curSP := nil;
   if dbgOn then
   begin
@@ -5625,6 +5681,7 @@ begin
   resetAddrAligns;
   curRoutine := nil;
   curFrame := irNull;
+  pinTemps := hasNonLocalLabels(u^.impl) or stmtHasTry(u^.impl^.body);
   curSP := nil;
   if dbgOn then
     curSP := createSubprogram(initFn, nm(u^.ident.spelling), unitFile, lineOf(u^.loc), nil,
